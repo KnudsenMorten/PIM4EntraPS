@@ -402,7 +402,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <tr><td>9</td><td>Monitor the engine and Manager managed identities with Entra workload identity alerts; treat them as tier 0</td><td>They hold tier-0-equivalent rights</td></tr>
 <tr><td>10</td><td>Set AuditRetentionMonths to your policy and Log Analytics retention to match</td><td>Defaults keep the audit forever and logs 30 days</td></tr>
 <tr><td>11</td><td>Decide on telemetry: keep anonymous, use identified for Pro support, or switch telemetry.uplink off</td><td>Data leaving the tenant</td></tr>
-<tr><td>12</td><td>Before running any setup script: save it, compare Get-FileHash with SHA256SUMS.txt, read it, then run it</td><td>Scripts are not yet signed</td></tr>
+<tr><td>12</td><td>Before running any setup script (optional, for whoever verifies): compare Get-FileHash with SHA256SUMS.txt and read it; the command PIM Manager shows stays two lines, download then run</td><td>Scripts are not yet signed</td></tr>
 <tr><td>13</td><td>Use PIM_UPDATE_HOLD for change windows; review release notes before lifting it</td><td>You control when code changes</td></tr>
 </tbody></table></div>
 </section>
@@ -453,14 +453,14 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 </section>
 <section id="scripts">
 <h2>11. Scripts</h2>
-<p>Scripts are run by highly privileged people, so they are listed here one by one with the rights needed, the changes made and their state <strong>today</strong>. The target state for every product&#39;s scripts (framework requirements 12.7 and 12.10) is: Authenticode-signed and listed in SHA256SUMS.txt; documented save, verify, read, run (never pipe-to-execute); no second-stage downloads; -WhatIf preview; a transcript; browser sign-in, no secrets in or out. <strong>That target is not reached in this version</strong> -- the table states what is true now (SP-GAP-3, SP-GAP-4).</p>
-<h3>How to run a script today (recommended)</h3>
+<p>Scripts are run by highly privileged people, so they are listed here one by one with the rights needed, the changes made and their state <strong>today</strong>. The target state for every product&#39;s scripts (framework requirements 12.7 and 12.10) is: Authenticode-signed and listed in SHA256SUMS.txt; a shown command of two lines, download then run, with SHA256SUMS.txt and the signature published for whoever verifies (never pipe-to-execute); no second-stage downloads; -WhatIf preview; a transcript; browser sign-in, no secrets in or out. <strong>That target is not reached in this version</strong> -- the table states what is true now (SP-GAP-3, SP-GAP-4).</p>
+<h3>How to run a script today</h3>
+<p>PIM Manager shows every script command as two lines -- line 1 downloads the file from Invardia, line 2 runs it (more run lines only when a flow needs them); the documentation page is the link next to the command:</p>
 <ol>
 <li>Download it: <code>Invoke-WebRequest https://invardia.com/support/pim/&lt;Script&gt;.ps1 -OutFile &lt;Script&gt;.ps1</code></li>
-<li>Verify it: compare <code>Get-FileHash .\&lt;Script&gt;.ps1 -Algorithm SHA256</code> with the line in <code>SHA256SUMS.txt</code> published next to it.</li>
-<li>Read it -- each script is one self-contained file; the source is also in the public repository.</li>
-<li>Run it, with <code>-WhatIf</code> (or <code>-PlanOnly</code> where the table says so) first.</li>
+<li>Run it, with <code>-WhatIf</code> (or <code>-PlanOnly</code> where the table says so) first: <code>.\&lt;Script&gt;.ps1 -WhatIf</code></li>
 </ol>
+<p>Optional, for whoever verifies before running (never part of the shown command): compare <code>Get-FileHash .\&lt;Script&gt;.ps1 -Algorithm SHA256</code> with the line in <code>SHA256SUMS.txt</code> published next to it, and Read it -- each script is one self-contained file; the source is also in the public repository.</p>
 <h3>Facts that hold for every published script</h3>
 <ul>
 <li><strong>Not Authenticode-signed today.</strong> A SHA256SUMS.txt is published with the scripts.</li>

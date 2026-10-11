@@ -348,12 +348,45 @@ function Get-PimInteractiveClientId {
   return '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
 }
 
+# REQ 100.76 (2026-10-11, a new customer's hosting step: "Login failed for user '<token-identified principal>'"): a signed-in
+# build hands its step processes the person's REFRESH token(s) for the target tenant in $env:PIM_HANDOFF_REFRESH
+# ({ "<tenant>|<public client id>": "<refresh token>" }, that process's environment only), instead of a pre-minted Azure SQL
+# ACCESS token. The step creates the SQL server, sets its Entra admin and adds the person to the SQL admin group AFTER the
+# build minted, so only a token minted at connect time carries that right. Entries for another tenant are never taken.
+function Import-PimHandoffRefresh {
+  param([string]$TenantId, [string]$Json = "$env:PIM_HANDOFF_REFRESH")
+  if (-not "$Json".Trim()) { return 0 }
+  if (-not ($global:PimInteractiveRefresh -is [hashtable])) { $global:PimInteractiveRefresh = @{} }
+  $want = "$TenantId".Trim().ToLowerInvariant(); $n = 0
+  try { $o = "$Json" | ConvertFrom-Json } catch { Write-Verbose "PIM_HANDOFF_REFRESH unreadable: $($_.Exception.Message)"; return 0 }
+  foreach ($p in @($o.PSObject.Properties)) {
+    $k = "$($p.Name)".Trim().ToLowerInvariant(); $v = "$($p.Value)".Trim()
+    if (-not $v -or $k -notmatch '^[^|]+\|[^|]+$') { continue }
+    if ($want -and $k.Split('|')[0] -ne $want) { continue }
+    if (-not $global:PimInteractiveRefresh.ContainsKey($k)) { $global:PimInteractiveRefresh[$k] = $v; $n++ }
+  }
+  return $n
+}
+
+# REQ 100.76: the refresh tokens a signed-in build hands a step for -TenantId, as the JSON for $env:PIM_HANDOFF_REFRESH
+# ('' when there are none). Pure over -Map (default: this process's in-memory refresh map).
+function Get-PimHandoffRefreshJson {
+  param([Parameter(Mandatory)][string]$TenantId, [object]$Map = $global:PimInteractiveRefresh)
+  if (-not ($Map -is [hashtable]) -or -not $Map.Count) { return '' }
+  $want = "$TenantId".Trim().ToLowerInvariant(); $out = [ordered]@{}
+  foreach ($k in @($Map.Keys)) { $kl = "$k".ToLowerInvariant(); if ($kl.Split('|')[0] -eq $want -and "$($Map[$k])".Trim()) { $out[$kl] = "$($Map[$k])" } }
+  if (-not $out.Count) { return '' }
+  return ($out | ConvertTo-Json -Compress)
+}
+
 function Get-PimInteractiveToken {
   param([Parameter(Mandatory)][string]$Audience,[string]$TenantId,[string]$ClientId,
         # section 9 account sign-in clarity: force a brand-new credential prompt (prompt=login)
         # instead of reusing a cached account. -ExpectedAccount, if the cached account
         # differs, also forces a fresh prompt so a stale account is never used silently.
-        [switch]$ForceFreshAccount,[string]$ExpectedAccount)
+        [switch]$ForceFreshAccount,[string]$ExpectedAccount,
+        # REQ 100.76: only the silent refresh-token exchange -- $null instead of a browser window when there is none.
+        [switch]$RefreshOnly)
   $tenant = if ($TenantId) { $TenantId } elseif (Get-PimTenantId) { Get-PimTenantId } else { 'organizations' }
   # Default public client PER AUDIENCE (2026-10-10, a customer's managed install failed with AADSTS650057 "Invalid
   # resource" for ARM): the Microsoft Graph CLI client (14d82eec-...) is pre-authorised for GRAPH only. Azure Resource
@@ -365,6 +398,7 @@ function Get-PimInteractiveToken {
   # no second window. Falls through to the browser only when there is none or the exchange is refused.
   if (-not $global:PimInteractiveRefresh) { $global:PimInteractiveRefresh = @{} }
   $rtKey = "$tenant|$cid".ToLowerInvariant()
+  if (-not $global:PimInteractiveRefresh.ContainsKey($rtKey)) { [void](Import-PimHandoffRefresh -TenantId $tenant) }
   if ($global:PimInteractiveRefresh.ContainsKey($rtKey) -and -not $ForceFreshAccount) {
     try {
       $rr = Invoke-RestMethod -Method POST -Uri "https://login.microsoftonline.com/$tenant/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Body @{
@@ -374,6 +408,7 @@ function Get-PimInteractiveToken {
       if ($rr.access_token) { return [pscustomobject]@{ token = $rr.access_token; expiresUtc = (Get-Date).ToUniversalTime().AddSeconds([int]$rr.expires_in - 60) } }
     } catch { Write-Verbose "refresh-token exchange for $Audience refused: $($_.Exception.Message) -- browser sign-in" }
   }
+  if ($RefreshOnly) { return $null }
 
   $bytes = New-Object byte[] 32
   [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
@@ -751,6 +786,8 @@ function Get-PimRestToken {
       $ho = "$env:PIM_HANDOFF_TOKENS" | ConvertFrom-Json
       foreach ($pp in $ho.PSObject.Properties) {
         if ("$($pp.Name)".TrimEnd('/').ToLowerInvariant() -eq "$aud".TrimEnd('/').ToLowerInvariant()) {
+          # REQ 100.76: with a handed-over refresh token, Azure SQL is never answered from a pre-minted access token.
+          if ("$aud" -match '(?i)database\.windows\.net' -and "$env:PIM_HANDOFF_REFRESH".Trim()) { continue }
           $hv = if ($pp.Value -is [string]) { "$($pp.Value)" } elseif ($pp.Value -and $pp.Value.PSObject.Properties['access_token']) { "$($pp.Value.access_token)" } else { '' }
           if (-not "$hv".Trim()) { continue }
           $hvTid = Get-PimTokenTenantId -Token $hv
@@ -759,6 +796,11 @@ function Get-PimRestToken {
         }
       }
     } catch { Write-Verbose "PIM_HANDOFF_TOKENS unreadable: $($_.Exception.Message)" }
+  }
+  # REQ 100.76: a step's child process with no token source of its own mints from the handed-over refresh token -- silently,
+  # at the moment it is asked (never a browser window from here).
+  if (-not $res -and "$env:PIM_HANDOFF_REFRESH".Trim() -and -not $explicitIdentity -and -not ($global:PIM_TokenProvider -is [scriptblock])) {
+    try { $res = Get-PimInteractiveToken -Audience $aud -TenantId $tenant -RefreshOnly } catch { Write-Verbose "PIM_HANDOFF_REFRESH exchange for ${Resource} failed: $($_.Exception.Message)" }
   }
   if (-not $res -and ($global:PIM_TokenProvider -is [scriptblock])) {
     $pt = $null

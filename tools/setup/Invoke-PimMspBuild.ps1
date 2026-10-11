@@ -551,6 +551,17 @@ try {
                         -not (Get-Command Get-InvardiaSupportToken -ErrorAction SilentlyContinue)) { continue }
                     try { $tk = "$(Get-PimRestToken -Resource $aud -TenantId "$($config.tenantId)")".Trim(); if ($tk) { $handoff[$aud] = $tk } } catch { Write-Verbose "no handed-over token for ${aud}: $($_.Exception.Message)" }
                 }
+                # REQ 100.76 (owner 2026-10-11 "pass refresh token"): the hosting step creates the SQL server, sets its Entra
+                # admin and adds the person to the SQL admin group AFTER this point, so a SQL ACCESS token minted here carries
+                # none of that ("Login failed for user '<token-identified principal>'"). When this build holds the person's
+                # refresh token for the SQL sign-in client, the step gets THAT (its environment only, cleared below) and
+                # mints the SQL token when it connects. A Support-app session has no refresh token and keeps the old shape.
+                $rtJson = Get-PimHandoffRefreshJson -TenantId "$($config.tenantId)"
+                $sqlCid = if ($global:PIM_InteractiveClientId) { "$($global:PIM_InteractiveClientId)" } else { Get-PimInteractiveClientId -Audience 'https://database.windows.net' }
+                if ($rtJson -and ($global:PimInteractiveRefresh -is [hashtable]) -and $global:PimInteractiveRefresh.ContainsKey(("$($config.tenantId)|$sqlCid").Trim().ToLowerInvariant())) {
+                    $handoff.Remove('https://database.windows.net')
+                    $env:PIM_HANDOFF_REFRESH = $rtJson
+                }
                 $env:PIM_HANDOFF_TOKENS = ($handoff | ConvertTo-Json -Compress)
             }
             # 2026-10-10: the step's console stays visible AND its last lines are kept, so a failed step's event carries the
@@ -561,7 +572,7 @@ try {
             $prevSubStepEnv = $env:PIM_SUBSTEP_EVENTS
             $env:PIM_SUBSTEP_EVENTS = '1'
             try { & $exe @childArgs 2>&1 | ForEach-Object { $l = "$_"; if (Receive-PimMspSubStepLine -Line $l -Step $s) { return }; $stepLines.Add($l); if ($stepLines.Count -gt 60) { $stepLines.RemoveAt(0) }; $_ } | Out-Host }
-            finally { $env:PIM_HANDOFF_TOKENS = $null; $env:PIM_SUBSTEP_EVENTS = $prevSubStepEnv }
+            finally { $env:PIM_HANDOFF_TOKENS = $null; $env:PIM_HANDOFF_REFRESH = $null; $env:PIM_SUBSTEP_EVENTS = $prevSubStepEnv }
             $stepExit = [int]$LASTEXITCODE
             $ok = ($stepExit -eq 0)
             if (-not $ok -and $stepExit -ne 10) {

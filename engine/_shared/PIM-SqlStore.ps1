@@ -79,6 +79,10 @@ function Test-PimManagedIdentityAvailable {
     return $ok
 }
 
+# REQ 100.76: forget the cached SQL token, so the next connection mints one (a setup run that has just made the signed-in
+# person the server's admin must not present the token it held from before).
+function Reset-PimSqlTokenCache { $script:PimSqlTokenCache = $null }
+
 function New-PimSqlConnection {
     # Single place connections are created, so MANAGED IDENTITY (the chosen auth for
     # Azure SQL) works passwordless: an MI access token for https://database.windows.net/

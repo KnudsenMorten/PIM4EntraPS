@@ -53,7 +53,7 @@
         code-signing certificate from Cert:\CurrentUser\My or Cert:\LocalMachine\My (never a file, never in the repo)
         BEFORE it is hashed. Without one the build says NOT SIGNED -- in its output, in each manifest ("signed": false)
         and in README.txt. A configured thumbprint that cannot be used fails the build (never a silent unsigned file).
-      * README.txt: one line per script -- name, documentation page, SHA256 -- and the save / verify / run form.
+      * README.txt: one line per script -- name, documentation page, SHA256 -- and the two-line download + run form (verification described apart).
 
 .EXAMPLE
     .\tools\setup\Build-PimSupportScripts.ps1 -OutDir C:\ProgramData\Invardia\handover\support-scripts\pim-manager\2.4.522
@@ -356,11 +356,12 @@ PIM Manager $version -- standalone support scripts for https://invardia.com/supp
 Each file is self-contained (no other files needed). Documentation index: $($script:PimScriptDocBaseUrl)
 $signLine
 
-Save, verify, read, run -- never pipe to Invoke-Expression:
+Run a script -- two lines, download then run (owner 2026-10-11; never pipe to Invoke-Expression):
   Invoke-WebRequest https://invardia.com/support/pim/$first -OutFile $first
-  Get-FileHash .\$first -Algorithm SHA256        # must equal its line in SHA256SUMS.txt
-  Get-AuthenticodeSignature .\$first             # Windows: Status Valid when signed
-  .\$first -WhatIf                               # preview: every change, none made
+  .\$first -WhatIf
+
+Optional, for whoever verifies a download (never part of the shown command): its SHA256 is its line in SHA256SUMS.txt
+(Get-FileHash .\<file> -Algorithm SHA256), and on Windows Get-AuthenticodeSignature .\<file> reports Valid when signed.
 
 Scripts (name, documentation page, SHA256):
 $($lines -join "`r`n")

@@ -5045,21 +5045,25 @@
   function permFixNeeded(d, miss) {
     return !!(d && d.objectId && ((miss || []).length || d.azureOk === false || permRootReaderMissing(d) || permRootUaaNeededMissing(d)));
   }
+  // The words around the fix block (owner 2026-10-11: they are no longer comment lines inside the copied command).
+  function permFixHint(d) {
+    const who = String((d && d.identity) || '').replace(/[\r\n]/g, ' ').trim();
+    return 'This gives the engine identity' + (who ? ' (' + who + ')' : '') + ' its missing permissions; already-held permissions are left alone. ' +
+      'No PowerShell modules needed: you sign in in the browser. A new grant reaches the engine\'s token within ~30 minutes -- then press Verify permissions.';
+  }
   function permFixScript(d, miss) {
     const guid = (s) => String(s || '').replace(/[^0-9A-Za-z-]/g, '');
     const roles = (miss || []).map(m => String((m && m.role) || '').replace(/[^A-Za-z0-9._-]/g, '')).filter(Boolean);
     const tid = guid(d.tenantId), oid = guid(d.objectId);
-    const who = String(d.identity || '').replace(/[\r\n]/g, ' ').trim();
     let cmd = '.\\Grant-PimEnginePermissions.ps1' + (tid ? " -TenantId '" + tid + "'" : '') + " -EngineObjectId '" + oid + "'";
     if (roles.length) cmd += ' -GraphPermissions ' + roles.map(r => "'" + r + "'").join(',');
     const az = [];
     if (permRootReaderMissing(d) && tid) az.push("'Reader@/providers/Microsoft.Management/managementGroups/" + tid + "'");
     if ((d.azureOk === false || permRootUaaNeededMissing(d)) && tid) az.push("'User Access Administrator@/providers/Microsoft.Management/managementGroups/" + tid + "'");
     if (az.length) cmd += ' -AzureRoleAssignments ' + az.join(',');
-    return '# Give the engine identity' + (who ? ' (' + who + ')' : '') + ' its missing permissions. Run once in PowerShell as a Global Administrator.\n' +
-      '# No PowerShell modules needed: you sign in in the browser. Already-held permissions are left alone.\n' +
-      pimSupportCmd('Grant-PimEnginePermissions', [cmd]) + '\n' +
-      "# A new grant reaches the engine's token within ~30 minutes. Then press Verify permissions.";
+    // Owner 2026-10-11: the copied block is ONLY download + run; who runs it and the ~30 minute wait are said in the
+    // text around the block (permFixHint), never as comment lines inside it.
+    return pimSupportCmd('Grant-PimEnginePermissions', [cmd]);
   }
   async function loadPermissionHealth(userAsked) {
     const el = document.getElementById('homePermBanner');
@@ -5108,7 +5112,8 @@
         '<div style="margin:6px 0 4px 0;font-size:11.5px;color:#57606a;">The portal cannot grant these itself (it is read-only on purpose: an identity that ' +
         'can grant permissions could give itself anything). Download the script from Invardia and run it once in PowerShell as a Global Administrator:</div>' +
         '<pre id="permFixScript" style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:8px;font-size:11px;white-space:pre-wrap;max-width:900px;">' +
-        escapeHtml(script) + '</pre><button id="permFixCopy" style="font-size:12px;">Copy script</button> ' + pimScriptDocLink('Grant-PimEnginePermissions') + '</details>';
+        escapeHtml(script) + '</pre><button id="permFixCopy" style="font-size:12px;">Copy script</button> ' + pimScriptDocLink('Grant-PimEnginePermissions') +
+        '<div style="margin:4px 0 0 0;font-size:11.5px;color:#57606a;">' + escapeHtml(permFixHint(d)) + '</div></details>';
     }
     const offConn = (d.unavailableConnectors || []).filter(c => c != null && String(c).trim());
     if (offConn.length) {
@@ -15845,7 +15850,7 @@
         }
         if (d.objectId && d.azureOk === false) h += '<div class="gs-facts">Azure resource roles cannot be assigned yet: the engine identity needs <b>User Access Administrator</b> at the tenant root management group.</div>';
         if (d.objectId) h += permRootLines(d);   // §97: both tenant-root lines, always shown
-        if (permFixNeeded(d, miss)) h += '<div class="gs-hint">This page cannot grant permissions itself (on purpose: an identity that can grant permissions could give itself anything). A Global Administrator downloads the script from Invardia and runs it once (no PowerShell modules needed, sign-in in the browser):</div>' + gsCode('gsPermScript', permFixScript(d, miss));
+        if (permFixNeeded(d, miss)) h += '<div class="gs-hint">This page cannot grant permissions itself (on purpose: an identity that can grant permissions could give itself anything). A Global Administrator downloads the script from Invardia and runs it once (no PowerShell modules needed, sign-in in the browser):</div>' + gsCode('gsPermScript', permFixScript(d, miss)) + '<div class="gs-hint">' + escapeHtml(permFixHint(d)) + '</div>';
         return h + '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="recheck">Check again</button> <span class="gsActMsg"></span></div>';
       },
       actions: {
@@ -16411,7 +16416,7 @@
     const who = !ch ? '' : t
       ? '<div class="act-deploys ok">Deploys to: <b>' + escapeHtml(t.displayName || t.groupId) + '</b> <span class="act-dim">(' + escapeHtml(t.groupId) + ')</span></div>'
       : '<div class="act-deploys warn">Deploys to: <b>nobody yet</b> -- nobody gets ' + escapeHtml(what || 'it') + ' until you assign a group (choose it above and the command carries it).</div>';
-    // SCRIPT-DOC-1: save -> verify -> read -> run (pimSupportCmd) and the "What does this script do?" link next to Copy.
+    // SCRIPT-DOC-1: download + run (pimSupportCmd, owner 2026-10-11) and the "What does this script do?" link next to Copy.
     return '<div class="act-cmd">' + actCode(id, pimSupportCmd(file, [cmd])) + pimScriptDocLinksFor(file) + who + '</div>';
   }
   async function actGroupSource(q) {
@@ -20397,8 +20402,9 @@
 
   // ===================================================================
   // SCRIPT-DOC-1 (framework 12.7 + 12.10 item 11): every script command this page shows carries a "What does this
-  // script do?" link to its documentation page at Invardia, and is shown in the save -> verify -> read -> run form
-  // (never pipe-to-execute). The constants come from tools/setup/_PimScriptDoc.ps1 via window.PIM_SCRIPT_DOCS (boot);
+  // script do?" link to its documentation page at Invardia NEXT to it, and is shown as line 1 download, line 2 (and more
+  // if a flow needs them) the cmdlet(s) -- owner 2026-10-11; never pipe-to-execute, never a checksum / signature /
+  // comment line in the copied block (SHA256SUMS.txt stays published for whoever verifies). The constants come from tools/setup/_PimScriptDoc.ps1 via window.PIM_SCRIPT_DOCS (boot);
   // the literals below are only the fallback for a page served without that slot (tests/Test-PimScriptDocs.ps1 G1/G2
   // fail when they drift from the PowerShell constants). Functions, not top-level consts: a renderer that runs before
   // this point of the script must not hit a temporal-dead-zone error (function declarations are hoisted).
@@ -20436,7 +20442,7 @@
     if (!found.length) return '';
     return '<div class="script-doc-links" style="margin:2px 0 6px;font-size:12px;">' + found.map(n => pimScriptDocLink(n, found.length > 1)).join(' &middot; ') + '</div>';
   }
-  // The save / verify / read / run lines (mirrors Get-PimSupportScriptCommand in tools/setup/_PimScriptDoc.ps1): the run
+  // The download + run lines (mirrors Get-PimSupportScriptCommand in tools/setup/_PimScriptDoc.ps1): the run
   // line(s) LAST, so a caller that appends parameters extends the run line. Returns the text (newline-joined).
   function pimSupportCmd(script, runLines) {
     const n = pimScriptDocName(script), f = n + '.ps1';

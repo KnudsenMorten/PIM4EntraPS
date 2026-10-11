@@ -43,7 +43,7 @@
 
 Set-StrictMode -Off
 # SCRIPT-DOC-1 (framework 12.7 + 12.10 item 11): every command this file builds for a person to run comes from the ONE
-# command form in tools\setup\_PimScriptDoc.ps1 -- save, verify the checksum, read the documentation page, run.
+# command form in tools\setup\_PimScriptDoc.ps1 -- line 1 download, line 2 run (owner 2026-10-11; doc page linked next to it).
 . (Join-Path $PSScriptRoot '..\..\tools\setup\_PimScriptDoc.ps1')
 
 # --- Learn links (cited, 2026-09-19) -----------------------------------------------------------------------------
@@ -642,7 +642,7 @@ function Get-PimWorkloadPrereqSupportScriptUrl {
 }
 
 function Get-PimWorkloadPrereqDownload {
-    # The save / verify / read / run lines (tools\setup\_PimScriptDoc.ps1) ending in '.\<file>', so a caller appends the
+    # The download + run lines (tools\setup\_PimScriptDoc.ps1, owner 2026-10-11) ending in '.\<file>', so a caller appends the
     # parameters to the run line. Lines are joined with a newline: a person pastes the block into PowerShell.
     param([Parameter(Mandatory)][string]$Script)
     return ((Get-PimSupportScriptCommand -Script $Script) -join "`n")
@@ -764,7 +764,7 @@ function Get-PimWorkloadPrereqFixCommand {
     $g = Get-PimWorkloadPrereqGrantCommand -TenantId "$($e['tenantId'])" -EngineObjectId "$($e['engineObjectId'])" -GraphPermissions @($roles) -AzureScopes @($scopes)
     if ($g) { $cmds.Add($g) }
     if ($needScript -or ($unknownFailure -and -not $cmds.Count)) { $cmds.Add((Get-PimWorkloadPrereqCommand -Workload $Workload -Env $e)) }
-    return (@($cmds) -join "`n")   # each command is the multi-line save / verify / read / run block
+    return (@($cmds) -join "`n")   # each command is the two-line download + run block
 }
 
 function Get-PimWorkloadPrereqNextStep {
