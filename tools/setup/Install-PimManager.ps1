@@ -245,7 +245,13 @@ $done = New-Object System.Collections.Generic.List[string]
 if ($Resume -and $state.installId -eq $installId) { foreach ($c in $state.completed) { $done.Add("$c") | Out-Null } }
 # -WhatIf: the state file lives outside the temp folder (clouddrive / home), so a preview never writes it.
 function Mark([string]$Id) { if (-not $done.Contains($Id)) { $done.Add($Id) | Out-Null }; if (-not $WhatIfPreference) { Save-PimInstallState -StatePath $StatePath -InstallId $installId -Completed @($done) } }
-$resumeCmd = if ($enrolling -and -not "$LicencePath".Trim()) { "Install-PimManager -ConfigPath '$ConfigPath' -StatePath '$StatePath' -Resume" } else { "Install-PimManager -ConfigPath '$ConfigPath' -LicencePath '$LicencePath' -StatePath '$StatePath' -Resume" }
+# 2026-10-11 (HOGYM): the printed resume command must work in a FRESH window. Under Invardia's bootstrap the customer resumes
+# through it (it re-downloads the release and re-signs in); otherwise the installer is called by its full path, so a new
+# PowerShell window does not need the function defined.
+$resumeCmd = if (Get-Command Install-Invardia -ErrorAction SilentlyContinue) {
+    ". ./bootstrap.ps1; Install-Invardia -Resume -InstallId $installId"
+} elseif ($enrolling -and -not "$LicencePath".Trim()) { "& '$PSCommandPath' -ConfigPath '$ConfigPath' -StatePath '$StatePath' -Resume" }
+  else { "& '$PSCommandPath' -ConfigPath '$ConfigPath' -LicencePath '$LicencePath' -StatePath '$StatePath' -Resume" }
 
 # the licence: a Pro licence for THIS tenant, verifiable offline. Anything else is a bad bundle (exit 3).
 function Get-InstallLicenceProblem([string]$Text, [string]$What) {
@@ -465,7 +471,7 @@ if ($enrolling -and -not $managedInstall) {
             $alreadyInstalled = $true
             Emit 'enroll' 'warning' "$($sc.reason)"
         } elseif (-not $sc.ok) {
-            Emit 'enroll' 'failed' "$($sc.reason)" $(if ($sc.refused) { 'Nothing was installed. Check the key, or install with the licence file:' } else { 'Nothing was installed yet. Resume when Invardia answers:' }) $(if ($sc.refused) { "Install-PimManager -ConfigPath '$ConfigPath' -LicencePath <licence file>" } else { $resumeCmd })
+            Emit 'enroll' 'failed' "$($sc.reason)" $(if ($sc.refused) { 'Nothing was installed. Check the key, or install with the licence file:' } else { 'Nothing was installed yet. Resume when Invardia answers:' }) $(if ($sc.refused) { "& '$PSCommandPath' -ConfigPath '$ConfigPath' -LicencePath <licence file>" } else { $resumeCmd })
             Finish $(if ($sc.refused) { 3 } else { 1 })
         }
         if (-not $alreadyInstalled) {
