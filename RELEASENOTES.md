@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.586 -- 2026-10-11
+
+- Setup retries a dropped connection (HTTP 0 / transport error) on Azure reads and writes up to 3 times instead of stopping the install (HOGYM).
+
 ## 2.4.585 -- 2026-10-11
 
 - Installer: the printed resume command works in a fresh window (under Invardia's bootstrap: Install-Invardia -Resume -InstallId; otherwise the installer's full path).
