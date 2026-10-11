@@ -332,6 +332,23 @@ function ConvertTo-PimInstallStepEvent {
     }
 }
 
+function Test-PimInstallScopeAtOrAbove {
+    <#
+      PURE. Does a role assignment at -AssignmentScope apply AT -Scope (equal or above it)? A management group ('/providers/
+      Microsoft.Management/managementGroups/<id>') or the root ('/') is above every subscription -- ARM's assignedTo() list at
+      a subscription only returns the ones in its own hierarchy. 2026-10-11 (invardiademo): the old test was a string prefix
+      ("/subscriptions/x".StartsWith(<mg scope>)), so Contributor inherited from the tenant root management group was DROPPED
+      and the installer said "you need Owner" to an app that had Contributor + User Access Administrator. Below (a resource
+      group of -Scope) does not count; '/subscriptions/ab' is not above '/subscriptions/abc'.
+    #>
+    param([Parameter(Mandatory)][string]$Scope, [string]$AssignmentScope)
+    $s = "$Scope".Trim().TrimEnd('/').ToLowerInvariant(); $a = "$AssignmentScope".Trim().TrimEnd('/').ToLowerInvariant()
+    if (-not $a) { return $true }                                                            # '/' = the root scope
+    if ($a -eq $s) { return $true }
+    if ($a -match '^/providers/microsoft\.management/managementgroups/[^/]+$') { return $true }
+    return $s.StartsWith("$a/")
+}
+
 function Get-PimInstallRightsVerdict {
     <#
       PURE. Azure role names the signed-in user holds on the subscription (or above) + Entra directory role template ids.

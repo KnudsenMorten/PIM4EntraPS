@@ -146,7 +146,7 @@ function Invoke-PimInstallRestRead {
             $scope = (& $o @('--scope')).TrimEnd('/'); $oid = & $o @('--assignee')
             $f = [uri]::EscapeDataString("assignedTo('$oid')")
             @(Invoke-PimSetupArm -Path "$scope/providers/Microsoft.Authorization/roleAssignments?`$filter=$f" -ApiVersion (Get-PimSetupApiVersion authorization) -All |
-                Where-Object { $_ -and $scope.StartsWith("$($_.properties.scope)".TrimEnd('/'), [StringComparison]::OrdinalIgnoreCase) } |
+                Where-Object { $_ -and (Test-PimInstallScopeAtOrAbove -Scope $scope -AssignmentScope "$($_.properties.scope)") } |
                 ForEach-Object { [pscustomobject]@{ roleDefinitionName = (Get-PimArmRoleName -RoleDefinitionId "$($_.properties.roleDefinitionId)") } })
         }
         'provider show' { [pscustomobject]@{ registrationState = (Get-PimArmProviderState -SubscriptionId $sub -Namespace $name) } }
