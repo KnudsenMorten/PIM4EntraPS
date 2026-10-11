@@ -13,6 +13,12 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.587 -- 2026-10-11
+
+- Install fixes from a live managed install: a resumed install is not refused by its own ring gate; a failed side step no longer rolls a healthy app back; under Invardia's installer a failure prints one sentence, the fix and one resume line; no az commands in fix texts.
+
+- Installer: a failed step in a guided / Invardia-bootstrap install is told in three parts only -- what failed and why, the fix when known, and the one resume command; no internal resume line and no list of manual steps on a failure (those print after a successful install).
+- Setup: a failed side step (updater, access, alerting, ...) no longer rolls a healthy Manager and engine job back to the previous version; a rollback happens only when the rolled app itself fails its health check.
 ## 2.4.586 -- 2026-10-11
 
 - Setup retries a dropped connection (HTTP 0 / transport error) on Azure reads and writes up to 3 times instead of stopping the install (HOGYM).

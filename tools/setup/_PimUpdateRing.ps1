@@ -505,9 +505,19 @@ function Test-PimRollRingGate {
         return (& $r $true $false $ring '' "ring $ring$how gets every build by design -- a host-side roll is allowed (Invoke-PimUpdate advances ring$ring in channel.json after it verifies the roll).")
     }
     $srcKind = if ($haveEnv -and $UpdaterEnv.Contains('PIM_UPDATE_SOURCE')) { "$($UpdaterEnv['PIM_UPDATE_SOURCE'])" } else { '' }
+    # 2026-10-11 (HOGYM, live): a RESUMED install. The first run already created the Invardia updater (so a ring exists),
+    # then a later sub-step failed; the resume re-runs the install and was refused here as if it were an update. When THIS
+    # run installs the same Invardia updater for the same ring ($PendingRing), it is still the install: it takes the version
+    # these setup scripts carry (the version Invardia distributed for that ring), exactly like the first-install branch above.
+    # ONLY inside a guided install run (Install-PimManager sets PIM_GUIDED_INSTALL_RUN=1 around its deploy; step processes
+    # inherit it) -- a later redeploy of an installed environment stays gated (INV-3).
+    if ("$env:PIM_GUIDED_INSTALL_RUN" -eq '1' -and $PendingRing -ge 0 -and $ring -eq $PendingRing -and (Test-PimInvardiaUpdateSource -SourceUrl "$PendingSourceUrl") -and
+        (Test-PimInvardiaUpdateSource -Source $srcKind -SourceUrl $src)) {
+        return (& $r $true $false $ring '' "the (resumed) install of a Pro environment updated through Invardia (ring $ring, re-installed by this run): it takes the version these setup scripts carry; from then on Invardia's signed manifest for ring $ring decides.")
+    }
     if (Test-PimInvardiaUpdateSource -Source $srcKind -SourceUrl $src) {
         return (& $r $false $true $ring '' ("ring $ring$how is updated through Invardia: its approved version is a signed manifest the in-cloud updater reads with this install's key, not something a host-side roll can prove -- REFUSING. " +
-                "Let the environment update itself: az containerapp job start -n ca-pim-update -g <resource group> --subscription <subscription> (or pass -OverrideRingGate -Reason '<why>' with an explicit version)."))
+                "Let the environment update itself: in the Azure portal open the Container Apps job 'ca-pim-update' in this resource group and choose 'Run now' (or pass -OverrideRingGate -Reason '<why>' with an explicit version)."))
     }
     if (-not $src) { return (& $r $false $true $ring '' "ring $ring$how is configured but the updater has NO PIM_UPDATE_SOURCE_URL, so what ring $ring approves cannot be read -- REFUSING to roll.") }
     $rep =Get-PimUpdateRingChannelReport -SourceUrlTemplate $src -Ring $ring -CurrentVersion '' -Fetch $Fetch

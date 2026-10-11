@@ -1495,6 +1495,37 @@ function Get-PimMspOperatorSteps {
     return @($out.ToArray())
 }
 
+function Get-PimMspGuidedFailure {
+    <#
+      100.73 (HOGYM managed install 2026-10-11, owner: "make this professional and user friendly"). PURE. Under Invardia's
+      bootstrap (or the guided install, which hands its resume command over) a failed build step is told in THREE parts and
+      nothing else: (a) one sentence -- the step title and the cause line, (b) the fix when one is known, (c) the ONE resume
+      line (the bootstrap's / the installer's, never the internal "Invoke-PimMspBuild.ps1 ... -From <step>"). The operator
+      steps are NOT printed on a failure here -- they belong at the end of a successful install.
+      Returns { sentence; fix; resume; lines = @(the console lines, in order) }.
+    #>
+    param([string]$StepId = '', [string]$Title = '', [string]$Cause = '', [Parameter(Mandatory)][string]$ResumeCommand)
+    $what = if ("$Title".Trim()) { "$Title".Trim() } elseif ("$StepId".Trim()) { "$StepId".Trim() } else { 'a step' }
+    $c = "$Cause".Trim()
+    # the build's cause text starts with "<step id>: " -- the title already names the step
+    if ("$StepId".Trim() -and $c.StartsWith("$($StepId.Trim()): ")) { $c = $c.Substring($StepId.Trim().Length + 2).Trim() }
+    $c = ($c -replace '\s+', ' ').TrimEnd('.', ' ')
+    $sentence = if ($c) { "The installation stopped at '$what': $c." } else { "The installation stopped at '$what'." }
+    $fix = ''
+    if ($c -match '(?i)HTTP 0\b|transport error|connection (was )?(closed|reset|aborted|dropped)|timed? ?out|No such host is known|temporarily unavailable|HTTP 50[234]\b') {
+        $fix = 'The connection to Azure dropped for a moment -- nothing needs to change. Run the resume command below.'
+    } elseif ($c -match "(?i)Client with IP address '?[0-9.]+'? is not allowed|is not allowed to access the server") {
+        $fix = 'The SQL server refused this machine''s address. Resume from the same machine -- the installer opens its build window again.'
+    } elseif ($c -match '(?i)AuthorizationFailed|does not have authorization|Insufficient privileges|HTTP 403\b|forbidden') {
+        $fix = 'The signed-in account is missing a right named in the cause. Grant it (or sign in with an account that has it), then resume.'
+    }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add($sentence) | Out-Null
+    if ($fix) { $lines.Add("Fix: $fix") | Out-Null }
+    $lines.Add("To resume: $("$ResumeCommand".Trim())") | Out-Null
+    return [pscustomobject]@{ sentence = $sentence; fix = $fix; resume = "$ResumeCommand".Trim(); lines = @($lines.ToArray()) }
+}
+
 function Get-PimMspBuildAzExtensionDir {
     <#
       PURE. Rehearsal blocker #3 (2026-09-17): the certificate login points AZURE_CONFIG_DIR at an empty per-run directory,

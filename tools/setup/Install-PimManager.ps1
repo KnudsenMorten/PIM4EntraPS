@@ -212,6 +212,7 @@ $script:enrolDir = ''
 function Finish([int]$Code) {
     # framework 8.6: the per-run directory with the claimed licence + install key never outlives the run.
     if ($script:enrolDir) { Remove-PimEnrollmentRunDirectory -Path $script:enrolDir; $script:enrolDir = '' }
+    Remove-Item Env:\PIM_GUIDED_INSTALL_RUN -ErrorAction SilentlyContinue
     $global:LASTEXITCODE = $Code; exit $Code
 }
 
@@ -372,7 +373,7 @@ Pre 'preflight-rights' {
     $tpl = @(@($dir.value) | ForEach-Object { "$($_.roleTemplateId)" })
     $v = Get-PimInstallRightsVerdict -AzureRoles $roles -DirectoryRoleTemplateIds $tpl -AppRoles $appRoles
     $script:rights = $v
-    if (-not $v.azureOk) { return @{ state = 'failed'; message = $v.message; actionText = 'Ask a subscription Owner to grant you Owner (or Contributor + User Access Administrator):'; actionCommand = "az role assignment create --assignee $($who.userName) --role Owner --scope /subscriptions/$($cfg.subscriptionId)" } }
+    if (-not $v.azureOk) { return @{ state = 'failed'; message = $v.message; actionText = 'Ask a subscription Owner to grant you Owner (or Contributor + User Access Administrator) on this subscription -- Azure portal > Subscriptions > the subscription > Access control (IAM) > Add role assignment:'; actionCommand = "$($who.userName) -> Owner on /subscriptions/$($cfg.subscriptionId)" } }
     if (-not $v.entraOk) { return @{ state = 'warning'; message = $v.message } }
     @{ state = 'ok'; message = 'Owner-level rights on the subscription and an active directory admin role' }
 }
@@ -382,7 +383,7 @@ Pre 'preflight-providers' {
     $missing = @($need | Where-Object { (Az-Text @('provider', 'show', '-n', $_, '--subscription', $cfg.subscriptionId, '--query', 'registrationState', '-o', 'tsv')) -ne 'Registered' })
     if (-not $missing.Count) { return @{ state = 'ok'; message = 'all required resource providers are registered' } }
     if ($script:rights -and $script:rights.azureOk) { return @{ state = 'ok'; message = "will be registered by the installation: $($missing -join ', ')" } }
-    @{ state = 'failed'; message = "not registered: $($missing -join ', ')"; actionText = 'Ask a subscription Owner to register them:'; actionCommand = (($missing | ForEach-Object { "az provider register -n $_ --subscription $($cfg.subscriptionId)" }) -join '; ') }
+    @{ state = 'failed'; message = "not registered: $($missing -join ', ')"; actionText = 'Ask a subscription Owner to register them -- Azure portal > Subscriptions > the subscription > Resource providers > select each > Register:'; actionCommand = ($missing -join ', ') }
 }
 
 Pre 'preflight-names' {
@@ -490,6 +491,9 @@ if ($enrolling -and -not $managedInstall) {
 # licence + install key -> link to the managing tenant from the claim's managing block -> pull subnet reported -> pull job.
 # Nothing is re-implemented here; every step of that build reaches -Reporter with its own id and title.
 $mspCode = $null
+# 2026-10-11 (HOGYM): this run IS the install (or its resume) -- the ring gate lets the install deploy the release it fetched
+# even when a previous attempt already created the Invardia updater. Step processes inherit it; Finish removes it.
+if (-not $WhatIfPreference -and -not $PreflightOnly) { $env:PIM_GUIDED_INSTALL_RUN = '1' }
 if ($managedInstall) {
     $script:enrolDir = New-PimEnrollmentRunDirectory
     $bootLic = ''; $bootKey = ''
@@ -502,7 +506,9 @@ if ($managedInstall) {
     $mspCfg = ConvertTo-PimInstallMspSlaveConfig -Config $cfg -SignedInUpn $who.userName -LicencePath $bootLic -InstallKeyPath $bootKey
     $mspCfgPath = Join-Path $script:enrolDir 'managed-tenant.json'   # ids, names and file PATHS only -- never a key
     [IO.File]::WriteAllText($mspCfgPath, ($mspCfg | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
-    $mspArgs = @{ Role = 'Slave'; ConfigPath = $mspCfgPath; Apply = $true; InvardiaInstallToken = ''; EnrollmentTimeoutSeconds = $EnrollmentTimeoutSeconds }
+    # 100.73: -ResumeCommand -- a failed build step is told in three parts (what + cause, the fix, THIS install's one resume
+    # line); no internal "-From <step>" line and no operator-steps block on a failure.
+    $mspArgs = @{ Role = 'Slave'; ConfigPath = $mspCfgPath; Apply = $true; InvardiaInstallToken = ''; EnrollmentTimeoutSeconds = $EnrollmentTimeoutSeconds; ResumeCommand = $resumeCmd }
     if ($enrolling) { $mspArgs['EnrollmentKey'] = $enrolKey }
     if ("$InvardiaBaseUrl".Trim()) { $mspArgs['InvardiaBaseUrl'] = "$InvardiaBaseUrl".Trim() }
     if ($EnrollmentHttp) { $mspArgs['EnrollmentHttp'] = $EnrollmentHttp }
@@ -511,11 +517,15 @@ if ($managedInstall) {
     $mspOnStep = { param($ev)
         $st = "$($ev.state)"; if ($st -notin 'started', 'ok', 'warning', 'failed', 'skipped', 'waiting') { return }
         $a = @{ StepId = "$($ev.key)"; State = $st; Message = "$($ev.detail)"; Title = "$($ev.name)"; InstallId = $installId }
-        if ($st -eq 'failed') { $a['ActionText'] = 'Fix the cause above, then resume the installation:'; $a['ActionCommand'] = $resumeCmd }
+        # 100.73: the ONE resume line goes on the failed STEP only -- a failed sub-step ('hosting.updater') is its cause, not a second resume
+        if ($st -eq 'failed' -and "$($ev.key)" -notmatch '\.') { $a['ActionText'] = 'Fix the cause above, then resume the installation:'; $a['ActionCommand'] = $resumeCmd }
         Send-Event (New-PimInstallEvent @a)
     }
     if (-not $MspBuild) { $MspBuild = { param([hashtable]$A, [scriptblock]$OnStep) $global:LASTEXITCODE = 0; & (Join-Path $here 'Invoke-PimMspBuild.ps1') @A -OnStep $OnStep | Out-Host; [int]$LASTEXITCODE } }
-    try { $mspCode = @(& $MspBuild $mspArgs $mspOnStep) | Select-Object -Last 1 } catch { Emit 'verify' 'failed' "the managed-tenant build stopped: $($_.Exception.Message)" 'Fix the cause above, then resume the installation:' $resumeCmd; Finish 1 }
+    try { $mspCode = @(& $MspBuild $mspArgs $mspOnStep) | Select-Object -Last 1 } catch {
+        # 100.73: a step that already reported its failure (with the resume line) is not reported a second time
+        if (-not @($events | Where-Object { $_.state -eq 'failed' -and "$($_.step.id)" -notmatch '\.' }).Count) { Emit 'verify' 'failed' "the managed-tenant build stopped: $($_.Exception.Message)" 'Fix the cause above, then resume the installation:' $resumeCmd }
+        Finish 1 }
     $mspArgs = $null
     if ([int]$mspCode -notin 0, 2) {
         if (-not @($events | Where-Object { $_.state -eq 'failed' }).Count) { Emit 'verify' 'failed' "the managed-tenant build did not complete (exit $mspCode)" 'Fix the cause above, then resume the installation:' $resumeCmd }
