@@ -207,6 +207,7 @@ function Remove-PimAdminAccountApproved {
     if (-not $st) { return (& $refuse 'no circuit-breaker decision was made for this pass (fail closed)') }
     if (@($st.breakGlass) -contains $key) { return (& $refuse 'BREAK-GLASS account -- never deleted') }
     if ($st.unauthorized -is [hashtable] -and $st.unauthorized.ContainsKey($key)) { return (& $refuse "MSP status change NOT authorised: $($st.unauthorized[$key])") }
+    if ($st.PSObject.Properties['lastGlobalAdmin'] -and $st.lastGlobalAdmin -is [hashtable] -and $st.lastGlobalAdmin.ContainsKey($key)) { return (& $refuse "last Global Administrator guard: $($st.lastGlobalAdmin[$key])") }
     if ((Test-PimAdminValueTrue $l.accountEnabled) -and (-not $st.decision -or -not $st.decision.allowed)) {
         $tr = if ($st.decision) { "$($st.decision.tripped)" } else { 'no-decision' }
         return (& $refuse "account-disable circuit breaker [$tr]")
@@ -468,11 +469,19 @@ function Update-PimAdminsDisableDecision {
             Write-Host ("    [admins] {0} account(s) to DISABLE as their row says: {1}" -f $cand.Count, (@($cand.Keys) -join ', ')) -ForegroundColor Yellow
         }
     }
+    # PIM 100.72 (7): a disable (or delete) that would take away the LAST Global Administrator is HELD (BLOCK + release on
+    # Operations > Guards) -- only those accounts; every other disable goes ahead. Fail closed when the holders cannot be read.
+    $lastGa = @{}
+    if ($cand.Count -gt 0 -and $decision -and $decision.allowed -and (Get-Command Invoke-PimLastGlobalAdminGuard -ErrorAction SilentlyContinue)) {
+        $__du = @(@($cand.Keys) | ForEach-Object { $lu = $liveByKey["$_"]; if ($lu -and "$($lu.id)".Trim()) { [pscustomobject]@{ key = "$_"; userId = "$($lu.id)".Trim() } } })
+        $__lg = Invoke-PimLastGlobalAdminGuard -Scope 'Admins' -DisableUsers $__du -RunKind 'admins-disable' -WhatIf:([bool]$Context['__pimWhatIf']) -CanRelease ([bool](Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue))
+        if ($__lg.blocked) { foreach ($__k in @($__lg.heldKeys)) { $lastGa["$__k"] = "$($__lg.reason)" } }
+    }
     # §96.6: nothing left to disable = nothing held any more (a stale hold must not be offered for release)
     if ($cand.Count -eq 0 -and -not $Context['__pimWhatIf'] -and (Get-Command Clear-PimGuardHold -ErrorAction SilentlyContinue)) { [void](Clear-PimGuardHold -GuardId 'engine.disable-guard' -Scope 'Admins') }
     if ($bgHit.Count) { Write-Host ("    [admins] BREAK-GLASS never disabled, whatever its row says: {0}" -f ($bgHit -join ', ')) -ForegroundColor Yellow }
     if ($leftOff.Count) { Write-Host ("    [admins] {0} account(s) are DISABLED in the tenant and their AccountStatus is not explicitly 'Enabled' -- left disabled (set AccountStatus=Enabled to re-enable): {1}" -f $leftOff.Count, ($leftOff -join ', ')) -ForegroundColor DarkYellow }
-    $Context['adminsDisable'] = [pscustomobject]@{ candidates = $cand; decision = $decision; unauthorized = $unauth; breakGlass = $bgHit.ToArray() }
+    $Context['adminsDisable'] = [pscustomobject]@{ candidates = $cand; decision = $decision; unauthorized = $unauth; breakGlass = $bgHit.ToArray(); lastGlobalAdmin = $lastGa }
     return $Context['adminsDisable']
 }
 
@@ -825,6 +834,7 @@ function New-PimAdminsProvider {
                 if (-not $st) { $blocked = 'no circuit-breaker decision was made for this pass -- refusing to disable (fail closed)' }
                 elseif (@($st.breakGlass) -contains $key) { $blocked = 'BREAK-GLASS account -- never disabled' }
                 elseif ($st.unauthorized -is [hashtable] -and $st.unauthorized.ContainsKey($key)) { $blocked = "MSP status change NOT authorised: $($st.unauthorized[$key])" }
+                elseif ($st.PSObject.Properties['lastGlobalAdmin'] -and $st.lastGlobalAdmin -is [hashtable] -and $st.lastGlobalAdmin.ContainsKey($key)) { $blocked = "last Global Administrator guard: $($st.lastGlobalAdmin[$key])" }
                 elseif (-not $st.decision -or -not $st.decision.allowed) {
                     $tr = if ($st.decision) { "$($st.decision.tripped)" } else { 'no-decision' }
                     $rs = if ($st.decision) { "$($st.decision.reason)" } else { 'the account was not a disable candidate when the pass was decided' }
@@ -5423,7 +5433,8 @@ $script:PimAzResPolicyStandardRuleIds = @(
 # EntraIDRoles_Standard while a store does not hold AzureRoles_Standard yet.
 $script:PimAzResPolicyDefaultTemplate = 'AzureRoles_Standard'
 # Breaker defaults (pim.Settings 'AzResPolicyBreaker' overrides each key). The percentage only applies
-# once at least this many policies were checked, so a tiny estate is not blocked by a ratio.
+# once at least this many policies were checked, so a tiny estate is not warned about by a ratio.
+# PIM 100.72 (1): MaxChanges / MaxPercent WARN (daily data-quality mail); only MaxWeakening holds (+ approval).
 $script:PimAzResPolicyBreakerDefaults = @{ MaxChanges = 25; MaxPercent = 25; MaxWeakening = 3 }
 $script:PimAzResPolicyBreakerMinCheckedForPercent = 8
 $script:PimAzResPolicyApprovalValidHours = 24
@@ -6140,9 +6151,11 @@ function Test-PimAzResPolicyBreaker {
 function Test-PimPolicyBreaker {
     <#
       PURE. The mass-change circuit breaker -- same decision shape as Test-PimDisablePassAllowed:
-        { allowed; abort (= hold); tripped; reason; ... }
-      Trips when N > MaxChanges, OR (T >= 8 and N/T > MaxPercent %), OR W > MaxWeakening. A trip is a
-      HOLD (write nothing) unless an UNEXPIRED approval carries EXACTLY this plan's hash.
+        { allowed; abort (= hold); tripped; reason; warnings; ... }
+      PIM 100.72 (1) (owner 2026-10-11, framework 12.21): ONLY W > MaxWeakening trips (a HOLD: write nothing) unless an
+      UNEXPIRED approval covers it. N > MaxChanges and (T >= 8 and N/T > MaxPercent %) fire on pure template alignment and
+      heal by themselves -- they are WARNINGS (warnings = @('max-changes' / 'max-percent'), warningReason), never a hold;
+      the caller hands them to the daily "Data quality alert".
       -Provider only selects the default thresholds when -Thresholds is not given.
     #>
     [CmdletBinding()]
@@ -6155,13 +6168,17 @@ function Test-PimPolicyBreaker {
     $n = [Math]::Max(0, [int]$Plan.changes - $first); $t = [Math]::Max(0, [int]$Plan.checked - $first); $w = [int]$Plan.weakening
     $tripped = New-Object System.Collections.Generic.List[string]
     $reasons = New-Object System.Collections.Generic.List[string]
-    if ($n -gt [int]$Thresholds.MaxChanges) { $tripped.Add('max-changes'); $reasons.Add("would change $n policies (> cap $($Thresholds.MaxChanges))") }
+    # PIM 100.72 (1): the count and percent triggers WARN (anomaly), they never hold.
+    $warns = New-Object System.Collections.Generic.List[string]
+    $wreasons = New-Object System.Collections.Generic.List[string]
+    if ($n -gt [int]$Thresholds.MaxChanges) { $warns.Add('max-changes'); $wreasons.Add("would change $n policies (> $($Thresholds.MaxChanges))") }
     if ($t -ge [int]$Thresholds.MinCheckedForPercent -and $t -gt 0) {
         $pct = 100.0 * $n / $t
-        if ($pct -gt [double]$Thresholds.MaxPercent) { $tripped.Add('max-percent'); $reasons.Add(("would change {0} of {1} checked policies ({2:N1}% > cap {3}%)" -f $n, $t, $pct, $Thresholds.MaxPercent)) }
+        if ($pct -gt [double]$Thresholds.MaxPercent) { $warns.Add('max-percent'); $wreasons.Add(("would change {0} of {1} checked policies ({2:N1}% > {3}%)" -f $n, $t, $pct, $Thresholds.MaxPercent)) }
     }
     if ($w -gt [int]$Thresholds.MaxWeakening) { $tripped.Add('max-weakening'); $reasons.Add("$w weakening change(s) (> cap $($Thresholds.MaxWeakening))") }
-    $base = @{ changes = $n; checked = $t; weakening = $w; planHash = "$($Plan.planHash)"; thresholds = $Thresholds; tripped = $tripped.ToArray() }
+    $base = @{ changes = $n; checked = $t; weakening = $w; planHash = "$($Plan.planHash)"; thresholds = $Thresholds; tripped = $tripped.ToArray()
+               warnings = $warns.ToArray(); warningReason = $(if ($wreasons.Count) { 'many policy changes in one run (a warning, not a hold): ' + ($wreasons -join '; ') } else { '' }) }
     if (-not $tripped.Count) {
         return [pscustomobject](@{ allowed = $true; abort = $false; hold = $false; approved = $false; approvedBy = ''; reason = 'within the mass-change thresholds'; approvalNote = '' } + $base)
     }
@@ -6456,6 +6473,27 @@ function Set-PimGraphPolicyBreakerPlan {
         Write-Host ("    [breaker] {0}: {1} rule change(s) are the FIRST template application to never-modified default policies (new groups/roles) -- counted in N, not in W: {2}" -f $spec.Provider, @($plan.defaultPolicyAligned).Count, ((@($plan.defaultPolicyAligned) | ForEach-Object { $_.name } | Select-Object -Unique) -join ', ')) -ForegroundColor DarkCyan
     }
     if ($dec.hold -or ($Context["__pimWhatIf"] -and [int]$plan.changes -gt 0)) { Write-PimPolicyImpactLog -Provider $spec.Provider -Plan $plan }
+    Submit-PimPolicyBreakerWarning -Provider $spec.Provider -Decision $dec -WhatIf:([bool]$Context["__pimWhatIf"])   # PIM 100.72 (1)
+}
+
+function Submit-PimPolicyBreakerWarning {
+    <#
+      PIM 100.72 (1): the policy breaker's count / percent triggers are a WARNING, never a hold. A run that applies many
+      policy changes at once (template alignment) logs it and hands ONE note to the daily "Data quality alert" (kind
+      'policy-mass-change', per provider -- a repeat counts up). A plan (WhatIf) only logs. NEVER throws.
+    #>
+    param([Parameter(Mandatory)][string]$Provider, [AllowNull()][object]$Decision, [switch]$WhatIf)
+    try {
+        if ($null -eq $Decision -or -not $Decision.PSObject.Properties['warnings'] -or -not @($Decision.warnings).Count) { return $false }
+        Write-Host ("    [breaker] {0}: WARNING [{1}] -- {2} (applied; weakening changes are what holds)" -f $Provider, (@($Decision.warnings) -join ', '), "$($Decision.warningReason)") -ForegroundColor Yellow
+        if ($WhatIf -or -not (Get-Command Add-PimDataQualityNote -ErrorAction SilentlyContinue)) { return $false }
+        return [bool](Add-PimDataQualityNote -Kind 'policy-mass-change' -Area $Provider `
+            -Title ("{0}: {1} policy change(s) in one run ({2} checked)" -f $Provider, [int]$Decision.changes, [int]$Decision.checked) `
+            -Detail ("{0}. Nothing was held: none of these changes weakens a policy beyond the limit ({1} weakening)." -f "$($Decision.warningReason)", [int]$Decision.weakening) `
+            -Cause 'Usually a policy template was changed or newly applied (Get Started > Activation policies / Policy templates), or many groups / roles were added at once.' `
+            -Fix 'If the template change was intended, nothing is needed. If not, put the previous template back -- the next run restores the old rules.' `
+            -Measured @{ changes = [int]$Decision.changes; checked = [int]$Decision.checked; weakening = [int]$Decision.weakening })
+    } catch { return $false }
 }
 
 function Invoke-PimGraphPolicyGuardedApply {
@@ -6771,6 +6809,7 @@ function New-PimAzResPoliciesProvider {
                     @($plan.adminPathAligned).Count, ((@($plan.adminPathAligned | Select-Object -First 5 | ForEach-Object { "$($_.role) @ $($_.scope) $($_.ruleId) $($_.change)" })) -join '; ')) -ForegroundColor DarkCyan
             }
             if ($dec.hold -or ($ctx["__pimWhatIf"] -and [int]$plan.changes -gt 0)) { Write-PimPolicyImpactLog -Provider 'AzResPolicies' -Plan $plan }
+            Submit-PimPolicyBreakerWarning -Provider 'AzResPolicies' -Decision $dec -WhatIf:([bool]$ctx["__pimWhatIf"])   # PIM 100.72 (1)
             $live.ToArray()
         }
         KeyOf = { param($r) Get-PimAzResPolicyKey -Row $r }

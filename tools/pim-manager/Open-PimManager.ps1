@@ -480,9 +480,12 @@ if (Test-Path -LiteralPath $_updStateLib) { . $_updStateLib }
 # only (honest "configure to enable" state), never a fake send.
 $_notifyLib = Join-Path $solutionRoot 'engine\_shared\PIM-Notify.ps1'
 if (Test-Path -LiteralPath $_notifyLib) { . $_notifyLib }
-# GUARD-1: the Manager's own guards (commit delta guard, uplink-readonly, replication gate) record their trips the same way
+# GUARD-1: the Manager's own guard (the last SuperAdmin, PIM 100.72 (7)) records its trips the same way. PIM 100.72 (2)(3): the
+# commit delta guard is a same-person confirm and uplink-readonly / the replication gate are form validation -- not guards.
 $_guardLib = Join-Path $solutionRoot 'engine\_shared\PIM-Guard.ps1'
 if (Test-Path -LiteralPath $_guardLib) { . $_guardLib }
+$_lastPrivLib = Join-Path $solutionRoot 'engine\_shared\PIM-LastPrivileged.ps1'
+if (Test-Path -LiteralPath $_lastPrivLib) { . $_lastPrivLib }
 # §96.6 / GUARD-1.6: releasing a guard (Operations > Guards; /api/guards/<id>/release)
 $_guardRelLib = Join-Path $solutionRoot 'engine\_shared\PIM-GuardRelease.ps1'
 if (Test-Path -LiteralPath $_guardRelLib) { . $_guardRelLib }
@@ -3722,6 +3725,8 @@ $script:PimAlertEventCatalog += 'coverage'
 $script:PimAlertEventCatalog += 'target-missing'
 # §79.2: staged changes / queued actions nobody committed (the scheduler's 'pending-check' job, PIM-PendingCheck.ps1).
 $script:PimAlertEventCatalog += 'pending-uncommitted'
+# PIM 100.72 (6): the ONE daily "Data quality alert" (the scheduler's 'data-quality' job, PIM-DataQuality.ps1).
+$script:PimAlertEventCatalog += 'data-quality'
 # 97.1 / WIZARD-1: the Get Started steps that are done by a CONFIRMATION (their work happens outside the product).
 # 2026-10-08 (owner): 'naming' = "these names are right" (step 1), 'policies' = the activation policies verified and
 # approved, 'breakglass-later' = the break-glass step skipped for now (a deferral: the step stays not-done and every
@@ -6398,12 +6403,8 @@ function Invoke-PimManagerCsvPut {
     if (Get-Command Test-PimCommitDeltaGuard -ErrorAction SilentlyContinue) {
         $deltaGuard = Test-PimCommitDeltaGuard -BeforeCount (@($current.rows).Count) -AfterCount (@($rowsOrdered).Count) -RemoveCount (@($diff.removes).Count) -Confirm:$confirmDestructive
         if (-not $deltaGuard.allowed) {
-            if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
-                [void](Invoke-PimGuardTrip -GuardId 'manager.commit.delta-guard' -Outcome warning -Area $base -Job 'manager-commit' `
-                    -Title "a commit that would remove $([int]$deltaGuard.removeCount) row(s) of $base was held for confirmation" -Detail "$($deltaGuard.reason)" `
-                    -ActionText 'Check the change on Pending changes; confirm it only if the removals are intended.' `
-                    -Measured @{ removeCount = [int]$deltaGuard.removeCount; beforeCount = @($current.rows).Count; afterCount = @($rowsOrdered).Count } -HeldCount ([int]$deltaGuard.removeCount))
-            }
+            # PIM 100.72 (2) (owner 2026-10-11): a SAME-PERSON CONFIRM ("are you sure?"), not a guard -- no GUARD-1 trip, not on
+            # the Guards page; the person who committed confirms (confirm=true) and the commit goes through.
             Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
                 ok = $false; base = $base; gate = "$($deltaGuard.rule)"; error = "$($deltaGuard.reason)"
                 confirmRequired = $true; removeCount = [int]$deltaGuard.removeCount; beforeCount = (@($current.rows).Count); afterCount = (@($rowsOrdered).Count)
@@ -6472,11 +6473,8 @@ function Invoke-PimManagerCsvPut {
     $upGate = Test-PimManagerUplinkRowGate -Diff $diff -Base $base -MspDefinitionRows @(Get-PimManagerMspDefinitionRows -Base $base)
     if (-not $upGate.allowed) {
         Write-PimManagerAuditEvent -Action 'commit.uplink-readonly' -Target $base -Result 'denied' -After ([ordered]@{ refused = @($upGate.refused) })
-        if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
-            [void](Invoke-PimGuardTrip -GuardId 'manager.commit.uplink-readonly' -Outcome warning -Area $base -Job 'manager-commit' `
-                -Title "a commit tried to change $(@($upGate.refused).Count) row(s) the managing tenant sent" -Detail "$($upGate.reason)" `
-                -ActionText 'Change these on the managing tenant; local rows (also for a central admin) can be changed here.' -HeldCount @($upGate.refused).Count)
-        }
+        # PIM 100.72 (3) (owner 2026-10-11: "a fix of a field should not block things"): plain FORM VALIDATION -- the 409 names
+        # the rows; no GUARD-1 trip, not on the Guards page.
         Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
             ok = $false; base = $base; gate = 'uplink-readonly'; error = "$($upGate.reason)"; refused = @($upGate.refused)
         })
@@ -6502,11 +6500,7 @@ function Invoke-PimManagerCsvPut {
         $repGate = Test-PimReplicationWriteAllowed -Entity $base -Rows @($rowsOrdered) -CurrentRows @($current.rows) `
                      -IsMaster (Test-PimManagerIsMspMaster) -KnownTags @($repTags.tags) -TagsKnown:([bool]$repTags.known)
         if (-not $repGate.allowed) {
-            if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
-                [void](Invoke-PimGuardTrip -GuardId 'manager.commit.replication-gate' -Outcome warning -Area $base -Job 'manager-commit' `
-                    -Title "a commit to $base was refused by the replication gate" -Detail "$($repGate.reason)" `
-                    -ActionText 'Fix the Replicate / Ring / Target values the message names, then commit again.' -HeldCount @($repGate.refused).Count)
-            }
+            # PIM 100.72 (3): plain FORM VALIDATION (fix the Replicate / Ring / Target values the message names) -- no GUARD-1 trip.
             Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
                 ok = $false; base = $base; gate = 'replication'; error = "$($repGate.reason)"; refused = @($repGate.refused)
             })
@@ -12975,6 +12969,9 @@ function Handle-Request {
                 $gs = Get-PimManagerSetting -Name 'GuardTrips'
                 if ($gs -is [string]) { $gs = $gs | ConvertFrom-Json }
                 if ($gs) { $gl = @($gs.PSObject.Properties | ForEach-Object { $_.Value } | Sort-Object { "$($_.lastSeenUtc)" } -Descending) }
+                # PIM 100.72: what is NOT a guard (a confirm, form validation, telemetry) is never listed -- not even a trip an
+                # older version recorded.
+                if (Get-Command Select-PimGuardTripsShown -ErrorAction SilentlyContinue) { $gl = @(Select-PimGuardTripsShown -Trips $gl) }
             } catch { $gl = @() }
             # §96.6 / GUARD-1.6: the Guards page -- every guard, its state, what it holds now (plan hash + items), its releases.
             $gHolds = @(); $gRels = @(); $gCat = @(); $gSecond = $false; $gReadErr = ''
@@ -17253,8 +17250,23 @@ function Handle-Request {
             # Lock-out guard: never let the map end with zero SuperAdmins (that would orphan the
             # instance -- nobody could edit it back). An EMPTY map is refused too: it is almost
             # always a failed read upstream, and it would silently strip every SQL grant.
-            if (-not $sawSuper) {
-                Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'At least one SuperAdmin is required -- saving this map would lock everyone out.' }
+            # PIM 100.72 (7): this IS a guard ('manager.last-superadmin', BLOCK, never releasable) -- decided by the shared pure
+            # Test-PimLastSuperAdminRemoval, recorded (GUARD-1 trip + audit) and listed on the Guards page.
+            $lsa = $null
+            if (Get-Command Test-PimLastSuperAdminRemoval -ErrorAction SilentlyContinue) {
+                $lsaPrev = $null; try { $lsaPrev = Get-PimManagerSetting -Name 'ManagerAccess' } catch { $lsaPrev = $null }
+                $lsa = Test-PimLastSuperAdminRemoval -Before $lsaPrev -After ([pscustomobject]@{ managerAccess = @($clean.ToArray()) })
+            }
+            if (-not $sawSuper -or ($lsa -and $lsa.block)) {
+                $lsaMsg = if ($lsa -and "$($lsa.reason)") { "$($lsa.reason)" } else { 'At least one SuperAdmin is required -- saving this map would lock everyone out.' }
+                try { Write-PimManagerAuditEvent -Action 'access.map.last-superadmin' -Target "entries:$($clean.Count)" -Result 'denied' -After @{ before = $(if ($lsa) { $lsa.before } else { $null }); removed = @($(if ($lsa) { $lsa.removed })) } } catch { }
+                if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
+                    # outcome 'warning': an interactive refusal damaged nothing -- recorded and mailed once a day, no P1 ticket
+                    [void](Invoke-PimGuardTrip -GuardId 'manager.last-superadmin' -Outcome warning -Area 'manager-access' -Job 'manager-access' `
+                        -Title 'a change to Manager access that would remove the last SuperAdmin was refused' -Detail $lsaMsg `
+                        -ActionText 'Add another SuperAdmin first, then change or remove this one.' -Measured @{ superAdminsBefore = $(if ($lsa) { [int]$lsa.before } else { 0 }); superAdminsAfter = 0 })
+                }
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ error = $lsaMsg; gate = 'last-superadmin' }
                 return 400
             }
             # REQ-Y: delegated administration (a SCOPED Manager user) is Pro (hard). Only a NEW or CHANGED 'Delegated'

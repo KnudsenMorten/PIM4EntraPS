@@ -118,6 +118,8 @@ trap { if (Get-Command Complete-PimStartupLog -ErrorAction SilentlyContinue) { t
 . "$shared\PIM-EngineCore.ps1"        # NEW REST+SQL engine (diff + providers)
 . "$shared\PIM-DisableGuard.ps1"      # account-disable circuit breaker (incident 2026-06-15)
 . "$shared\PIM-Guard.ps1"             # GUARD-1: a guard trip -> state + audit + mail + telemetry
+. "$shared\PIM-DataQuality.ps1"       # PIM 100.72 (6): key numbers per run, anomalies vs the median of 3, the ONE daily data quality alert
+. "$shared\PIM-LastPrivileged.ps1"    # PIM 100.72 (7): never remove the last Global Administrator (BLOCK + release)
 if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAd.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAd.ps1" }   # §84 Pro: loaded only when present          # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
 if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1" }   # §84 Pro: loaded only when present    # §80.2 PIM-for-AD replacement: AD group mirror + JIT membership (hybrid worker only)
 . "$shared\PIM-EngineProviders.ps1"
@@ -357,10 +359,15 @@ Register-PimJobHandler -Type 'uplink' -Handler {
     param($job, $now, $whatIf)
     Invoke-PimUplinkJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
-# GUARD-1: the REAL 'licence-check' handler (msp.licence guard). A refused licence is a guard trip, not a failed run.
+# The REAL 'licence-check' handler. PIM 100.72 (4): a refused / grace licence is TELEMETRY -- a 'warning' run, not a guard trip.
 Register-PimJobHandler -Type 'licence-check' -Handler {
     param($job, $now, $whatIf)
     Invoke-PimLicenceCheckJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
+# PIM 100.72 (6): the REAL 'data-quality' handler -- the ONE daily "Data quality alert" (warnings only; never fails for a finding).
+Register-PimJobHandler -Type 'data-quality' -Handler {
+    param($job, $now, $whatIf)
+    Invoke-PimDataQualityJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
 # AUDIT-1.3: the REAL 'audit-retention' handler. Keep-forever (the default) does nothing; a failed delete FAILS the run.
 Register-PimJobHandler -Type 'audit-retention' -Handler {
@@ -464,6 +471,13 @@ $engineHandler = {
     $res = if ($__rrMode) { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf -ReconcileRemoval $__rrMode }
            elseif ($__sel.Count) { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf -Changes $__sel }
            else { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf }
+    # PIM 100.72 (6): the run's key numbers, judged against the median of the last 3 runs of each scope -- an anomaly becomes a
+    # note for the ONE daily "Data quality alert" (with its likely cause). Never a plan, never a selection run (partial numbers).
+    # Warnings only: it never changes this run's outcome, and it never throws.
+    if (-not $whatIf -and -not $__sel.Count -and (Get-Command Save-PimRunMetrics -ErrorAction SilentlyContinue)) { try { [void](Save-PimRunMetrics -Results @($res) -Mode $mode -NowUtc $now) } catch { } }
+    # PIM 100.72 (4): an unreadable managed-key ledger is TELEMETRY (not a guard): the prune removed nothing (fail closed) and
+    # the run is a WARNING -- amber on the Jobs page, a Kind 'run' warning to Invardia.
+    $__ledgerWarn = @(@($res) | Where-Object { $_ -and $_.PSObject.Properties['ledgerUnreadable'] -and $_.ledgerUnreadable } | ForEach-Object { "$($_.scope)" })
     # 🔴 BUG-134 -- A SCOPE NO PROVIDER SERVES IS A NO-OP THAT REPORTS SUCCESS, FOR EVER.
     # Invoke-PimEngineScope answers an unknown scope with { ok=$false; detail="no provider for
     # scope '<x>'" } and NO create/update/remove. This handler ignored `ok` and formatted the
@@ -563,7 +577,9 @@ $engineHandler = {
         foreach ($__x in @($res)) { if ($__x -and $__x.PSObject.Properties['reconcileRemoval'] -and $__x.reconcileRemoval) { $__rrW += [int]$__x.reconcileRemoval.wouldRemove; $__rrC += [int]$__x.reconcileRemoval.candidates }; if ($__x -and $__x.PSObject.Properties['reconcileRemoved']) { $__rrR += [int]$__x.reconcileRemoved } }
         $tail += $(if ($__rrMode -eq 'enforce') { " | reconcile removal (enforce): $__rrR removed of $__rrW qualifying; $($__rrC - $__rrW) left alone" } else { " | reconcile removal (report only): would remove $__rrW; $($__rrC - $__rrW) held by a rule" })
     }
-    [pscustomobject]@{ ran=$true; detail=("engine $mode [$scope] " + ($sum -join ' ') + $tail); warnings=@($warns); notChecked=@($notChk); whatIf=[bool]$whatIf }
+    if ($__ledgerWarn.Count) { $tail += " | the managed-key ledger could not be read in [$($__ledgerWarn -join ', ')] -- nothing was pruned there (telemetry, not a guard)" }
+    [pscustomobject]@{ ran=$true; detail=("engine $mode [$scope] " + ($sum -join ' ') + $tail); warnings=@($warns); notChecked=@($notChk); whatIf=[bool]$whatIf
+                       warning=[bool]($__ledgerWarn.Count -gt 0) }
 }
 Register-PimJobHandler -Type 'engine-delta' -Handler $engineHandler
 Register-PimJobHandler -Type 'engine-full'  -Handler $engineHandler
@@ -677,10 +693,20 @@ Register-PimJobHandler -Type 'verify-convergence' -Handler {
     if (-not $verdict.ok) {
         $top = @($verdict.items | Where-Object { [int]$_.ageMinutes -ge 60 } | Select-Object -First 10 |
                  ForEach-Object { "$($_.key) (unapplied $($_.ageMinutes)m)" })
-        throw ("[scheduler] CONVERGENCE FAILURE -- $($verdict.persistent) delegation/assignment(s) exist in the " +
-               "Manager but NOT in the tenant, and have stayed that way past the grace window. " +
-               "The desired state is NOT deployed: " + ($top -join '; ') +
-               ". Run tools/setup/Repair-PimJobBindingBacklog.ps1 to quantify and clear the backlog.")
+        # PIM 100.72 (5) (owner 2026-10-11, framework 12.21): a convergence finding is an ANOMALY WARNING in the daily "Data
+        # quality alert", not a failure alert. The run is a 'warning' (amber on the Jobs page, never an engine-failure mail);
+        # the verdict, its ages and the Tier report's 'not-deployed' marks are unchanged.
+        $convMsg = ("CONVERGENCE WARNING -- $($verdict.persistent) delegation/assignment(s) exist in PIM Manager but NOT in the " +
+                    "tenant, past the grace window: " + ($top -join '; '))
+        if (-not $whatIf -and (Get-Command Add-PimDataQualityNote -ErrorAction SilentlyContinue)) {
+            [void](Add-PimDataQualityNote -Kind 'convergence' -Area 'verify-convergence' `
+                -Title ("{0} definition(s) not in the tenant past the grace window" -f [int]$verdict.persistent) `
+                -Detail (($top | Select-Object -First 5) -join '; ') `
+                -Cause 'Usually an engine run that keeps failing for these items (see Jobs > Engine logs & errors), a permission the engine lacks, or a target that no longer exists.' `
+                -Fix 'Open the Jobs page and the failing engine job: fix what it names, then Run now. tools/setup/Repair-PimJobBindingBacklog.ps1 quantifies and clears a backlog.' `
+                -Measured @{ persistent = [int]$verdict.persistent; total = [int]$verdict.total } -NowUtc $now)
+        }
+        return [pscustomobject]@{ ran=$true; warning=$true; detail=("$detail | $convMsg"); unconverged=$verdict.total; persistent=[int]$verdict.persistent; whatIf=[bool]$whatIf }
     }
     [pscustomobject]@{ ran=$true; detail=$detail; unconverged=$verdict.total; whatIf=[bool]$whatIf }
 }

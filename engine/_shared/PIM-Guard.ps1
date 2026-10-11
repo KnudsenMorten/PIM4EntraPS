@@ -21,6 +21,25 @@
 $script:PimGuardSetting = 'GuardTrips'
 $script:PimGuardOutcomes = @('halted', 'refused', 'held', 'skipped', 'warning')
 
+# PIM 100.72 (owner 2026-10-11, framework 12.21): these were recorded as guards and are NOT guards. They never trip GUARD-1
+# again, and a trip an older version recorded is not shown on the Guards / Jobs page (Select-PimGuardTripsShown):
+#   manager.commit.delta-guard        (2) a same-person confirm on a large commit (the 409 asks "are you sure")
+#   manager.commit.uplink-readonly    (3) field validation -- a plain form error
+#   manager.commit.replication-gate   (3) field validation -- a plain form error
+#   engine.ledger-unreadable          (4) a platform failure -> telemetry (the run is 'warning'); still fail-closed
+#   msp.licence                       (4) a licence state -> telemetry (licence-check run 'warning'); MSP still refuses
+function Get-PimNotAGuardIds {
+    <# PURE. A literal list -- a catalog edit cannot widen it. #>
+    @('manager.commit.delta-guard', 'manager.commit.uplink-readonly', 'manager.commit.replication-gate', 'engine.ledger-unreadable', 'msp.licence')
+}
+
+function Select-PimGuardTripsShown {
+    <# PURE. The trips the Guards / Jobs page lists: every entry whose guard id is not in Get-PimNotAGuardIds. #>
+    param([AllowNull()][AllowEmptyCollection()][object[]]$Trips = @())
+    $not = @(Get-PimNotAGuardIds)
+    return @(@($Trips) | Where-Object { $_ -and ("$($_.guardId)".Trim().ToLowerInvariant() -notin $not) })
+}
+
 function Get-PimGuardSeverity {
     param([string]$Outcome)
     if ("$Outcome".Trim().ToLowerInvariant() -in @('halted', 'refused')) { 'critical' } else { 'warning' }
@@ -290,10 +309,10 @@ function Invoke-PimEmptyDesiredGuard {
     }
 }
 
-# GUARD-1 'msp.licence' (2026-10-05). The MSP publish / pull jobs REFUSE without a Pro licence (Invoke-PimMspLicenseGate) --
-# but they run as least-privilege identities that cannot keep guard state or send mail, so a refusal there was a log line
-# only. The tick's 'licence-check' job asks the same question for THIS environment's MSP role every hour and trips the
-# guard: not covered = refused (critical -- the managed tenants stop receiving changes); grace = warning (nothing held yet).
+# 'licence-check' (2026-10-05; PIM 100.72 (4): telemetry, no longer the GUARD-1 'msp.licence'). The MSP publish / pull jobs
+# REFUSE without a Pro licence (Invoke-PimMspLicenseGate) -- but they run as least-privilege identities that cannot keep state
+# or send mail, so a refusal there was a log line only. The tick's 'licence-check' job asks the same question for THIS
+# environment's MSP role every hour: not covered / grace = a WARNING run (Jobs page + the run telemetry to Invardia).
 # A single tenant (no MSP role) needs no MSP licence and is not checked.
 function Invoke-PimLicenceCheckJob {
     param([object]$Job = $null, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf,
@@ -325,14 +344,12 @@ function Invoke-PimLicenceCheckJob {
     if ($r.ok -and -not $r.grace) { return [pscustomobject]@{ ran = $true; whatIf = [bool]$WhatIf; detail = "licence-check: $word -- the Pro licence covers MSP" } }
     $isGrace = [bool]($r.ok -and $r.grace)
     $why = if ("$($r.message)".Trim()) { "$($r.message)".Trim() } else { "$($r.reason)".Trim() }
-    if (-not $WhatIf) {
-        # Area is an id (uplink contract: letters/digits/._- only) -- "managed tenant" with its space made Invardia answer 422
-        # (2026-10-07, RIDE); the readable words stay in the title.
-        & $Trip @{ GuardId = 'msp.licence'; Outcome = $(if ($isGrace) { 'warning' } else { 'refused' }); Area = $(if ($role -eq 'Slave') { 'msp-managed' } else { 'msp-managing' }); Job = 'licence-check'
-            Title = $(if ($isGrace) { "MSP licence in its grace period ($word)" } else { "MSP refused: no valid Pro licence ($word)" })
-            Detail = $why
-            ActionText = $(if ($isGrace) { 'Renew the Pro licence before the grace period ends; after that the MSP publish / pull stops.' } else { 'Register a valid Pro licence that covers this tenant (Settings > Licence). Until then the MSP publish / pull refuses and the managed tenants receive no changes.' }) }
-    }
-    [pscustomobject]@{ ran = $true; whatIf = [bool]$WhatIf; tripped = $(if ($isGrace) { 'warning' } else { 'refused' })
-        detail = ("licence-check: {0} -- {1}: {2}" -f $word, $(if ($isGrace) { 'grace' } else { 'REFUSED' }), $why) }
+    # PIM 100.72 (4) (owner 2026-10-11: "database and license can never be a guard, that is telemetry alerts"): NO guard trip
+    # any more (-Trip is kept for callers and ignored). The MSP publish / pull still REFUSE without the licence (fail closed,
+    # Invoke-PimMspLicenseGate -- unchanged). This run is a WARNING: amber on the Jobs page, a Kind 'run' warning to Invardia
+    # (the telemetry alert), with the reason and the fix in its detail.
+    [void]$Trip
+    $fix = if ($isGrace) { 'Renew the Pro licence before the grace period ends; after that the MSP publish / pull stops.' } else { 'Register a valid Pro licence that covers this tenant (Settings > Licence). Until then the MSP publish / pull refuses and the managed tenants receive no changes.' }
+    [pscustomobject]@{ ran = $true; whatIf = [bool]$WhatIf; warning = $true; telemetry = 'licence'; tripped = $(if ($isGrace) { 'warning' } else { 'refused' })
+        detail = ("licence-check: {0} -- {1}: {2}. {3}" -f $word, $(if ($isGrace) { 'grace' } else { 'REFUSED' }), $why, $fix) }
 }

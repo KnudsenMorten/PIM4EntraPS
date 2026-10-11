@@ -17,13 +17,13 @@
   What a release can do (the ceilings are literals here, never $script: values -- see BUG-79-6b):
     engine.remove-budget      G4: the removal budget is RAISED for that run to the plan's count, at most 50 (the release
                               ceiling; the configured budget itself still defaults to 5 and can only be lowered).
-    engine.disable-guard      G2 (account-disable blast radius): raised for that run to the plan's count, at most 50
-                              accounts and 25 % of the scanned population (the breaker's own ceilings). G1 (desired set
-                              resolved) and G3 (opt-in) are NOT releasable.
+    engine.disable-guard      G2 (row-driven account disables, absolute cap 5): raised for that run to the plan's count, at
+                              most 50 accounts. G1 (desired set resolved) and G3 (opt-in) are NOT releasable.
     engine.empty-desired      the prune of a scope whose definitions are gone runs for that run (the live items are still
                               filtered by the managed-key ledger, and G4 still caps them).
-    engine.ledger-unreadable  the prune of a scope whose managed-key ledger could not be read runs for that run (G4 still
-                              caps it).
+    engine.last-global-admin  PIM 100.72 (7): the held changes that would remove the last Global Administrator apply for
+                              that run (PIM-LastPrivileged.ps1).
+  PIM 100.72 (4): 'engine.ledger-unreadable' is no longer a guard (telemetry; the prune stays fail-closed, nothing to release).
 
   NEVER releasable (hard-coded, refused at creation AND at use, tested): the break-glass exclusion, an admin account
   deletion by a prune, shared workload assignments (SEC-83), groups PIM does not own (SEC-85), items that fail the s96.5
@@ -42,13 +42,17 @@ function Get-PimGuardReleaseCatalog {
         [pscustomobject]@{ guardId = 'engine.remove-budget'; title = 'Removal budget (G4)'; release = 'release'; ceiling = 50; ceilingPercent = $null
             what = 'At most 5 removals per scope per run. A release raises it for ONE run to exactly the held plan, at most 50.' }
         [pscustomobject]@{ guardId = 'engine.disable-guard'; title = 'Account-disable circuit breaker (G2)'; release = 'release'; ceiling = 50; ceilingPercent = 25
-            what = 'At most 5 accounts / 10 % disabled per run. A release raises it for ONE run to the held plan, at most 50 accounts and 25 %.' }
+            what = 'At most 5 accounts disabled per run. A release raises it for ONE run to the held plan, at most 50 accounts.' }
         [pscustomobject]@{ guardId = 'engine.empty-desired'; title = 'Empty definitions'; release = 'release'; ceiling = $null; ceilingPercent = $null
             what = 'A scope whose definitions are gone is never pruned. A release lets ONE run prune it (managed items only, the removal budget still applies).' }
-        [pscustomobject]@{ guardId = 'engine.ledger-unreadable'; title = 'Managed-key ledger unreadable'; release = 'release'; ceiling = $null; ceilingPercent = $null
-            what = 'Without the ledger a prune removes nothing. A release lets ONE run prune the held plan (the removal budget still applies).' }
+        # PIM 100.72 (7): removing the LAST Global Administrator does not heal -- held; released only for exactly that plan, one run.
+        [pscustomobject]@{ guardId = 'engine.last-global-admin'; title = 'Last Global Administrator'; release = 'release'; ceiling = $null; ceilingPercent = $null
+            what = 'A change that would leave the tenant with no Global Administrator is held (the rest of the run goes ahead). Give another person Global Administrator first; a release lets ONE run apply exactly the held plan.' }
+        # PIM 100.72 (4): 'engine.ledger-unreadable' is telemetry, not a guard (Get-PimNotAGuardIds) -- the prune still removes
+        # nothing while the ledger cannot be read, and heals on the next run that reads it.
+        # PIM 100.72 (1): only WEAKENING holds; many non-weakening changes are a warning in the daily data-quality mail.
         [pscustomobject]@{ guardId = 'engine.policy-mass-change'; title = 'Policy mass-change breaker'; release = 'approval'; ceiling = $null; ceilingPercent = $null
-            what = 'Approved by its plan hash on the Approvals / Jobs page (valid 24 h).' }
+            what = 'Holds a policy change set that weakens more than 3 policy settings; approved by its plan hash on the Approvals / Jobs page (valid 24 h). Many changes that weaken nothing are a warning in the daily data quality alert, never a hold.' }
         [pscustomobject]@{ guardId = 'engine.offboarding-approval'; title = 'Offboarding approval'; release = 'approval'; ceiling = $null; ceilingPercent = $null
             what = 'A disable or offboarding waits for its approval on the Approvals page.' }
         [pscustomobject]@{ guardId = 'engine.reconcile-paused'; title = 'Daily reconcile paused'; release = 'info'; ceiling = $null; ceilingPercent = $null
@@ -63,16 +67,20 @@ function Get-PimGuardReleaseCatalog {
             what = 'Memberships in groups PIM does not manage are never removed.' }
         [pscustomobject]@{ guardId = 'engine.reconcile-unproven'; title = 'Removal rules of the reconcile (96.5)'; release = 'never'; ceiling = $null; ceilingPercent = $null
             what = 'An item PIM did not define, did not make live, or did not remove is never removed.' }
+        # PIM 100.72 (7): with no SuperAdmin left nobody could release, approve or undo it -- never releasable.
+        [pscustomobject]@{ guardId = 'manager.last-superadmin'; title = 'Last PIM Manager SuperAdmin'; release = 'never'; ceiling = $null; ceilingPercent = $null
+            what = 'The Manager access map never ends without a SuperAdmin. Add another SuperAdmin first.' }
     )
 }
 
 function Get-PimGuardNeverReleasable {
     <# PURE. The guard ids no release can ever cover -- a literal list, not derived, so a catalog edit cannot widen it. #>
-    @('engine.break-glass', 'engine.prune-admin-delete', 'engine.shared-workload-assignment', 'engine.unowned-group', 'engine.reconcile-unproven')
+    @('engine.break-glass', 'engine.prune-admin-delete', 'engine.shared-workload-assignment', 'engine.unowned-group', 'engine.reconcile-unproven', 'manager.last-superadmin')
 }
 
 function Test-PimGuardReleasable {
-    <# PURE. @{ ok; reason } -- only the four engine guards with release = 'release' may be released. #>
+    <# PURE. @{ ok; reason } -- only the engine guards with release = 'release' may be released (remove-budget, disable-guard,
+       empty-desired, last-global-admin). #>
     param([string]$GuardId)
     $id = "$GuardId".Trim().ToLowerInvariant()
     if (-not $id) { return [pscustomobject]@{ ok = $false; reason = 'no guard named' } }

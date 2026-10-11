@@ -483,6 +483,16 @@ deployment is a supported choice) and no credentials lying around.
   creates and updates. Removing live access that isn't in your configuration is a separate,
   explicit opt-in, and the engine will refuse to "prune" an area whose desired set is empty —
   so a partial or half-loaded configuration can never wipe out real administrators.
+- **Blocks only what cannot heal; warns about the rest.** 🟡 Built, not released yet. A safety guard
+  now stops a run only where the damage would not fix itself — for example a change that would remove
+  the tenant's **last Global Administrator** (held until a SuperAdmin releases exactly that change), or
+  the **last PIM Manager SuperAdmin** (refused: add another one first), or policy changes that weaken
+  more than three settings at once. Everything else is a warning: many policy changes that weaken
+  nothing apply straight away, and anything that looks different from the last runs (each area's key
+  numbers compared with the median of its last three runs) is collected into **one daily "Data quality
+  alert" mail** that names the likely cause from the settings change log and the fix. Form mistakes are
+  plain form errors, and platform problems (database, licence) are reported to support as telemetry —
+  none of these appear on the Guards page.
 
 ## 7. Engine — Providers / Connectors
 - **Map one PIM group to many workloads.** Connectors translate your PIM groups into the

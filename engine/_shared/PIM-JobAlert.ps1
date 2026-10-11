@@ -305,7 +305,7 @@ function Get-PimJobAlertingConfig {
 
     # 'coverage' (REQ-I + REQ-U): NEW gaps / orphans / unmanaged privileged groups found by the 'coverage' job.
     # §79.1: 'target-missing' -- delegation targets (Azure scopes / roles, Entra roles) that no longer exist ('target-check' job).
-    $catalog = @('engine-failure','drift','expiring-access','break-glass','coverage','target-missing','pending-uncommitted')   # 'pending-uncommitted': §79.2
+    $catalog = @('engine-failure','drift','expiring-access','break-glass','coverage','target-missing','pending-uncommitted','data-quality')   # 'pending-uncommitted': §79.2; 'data-quality': PIM 100.72 (6)
     $events = @{}
     foreach ($e in $catalog) { $events[$e] = $true }
     $out = [ordered]@{ recipients = @(); events = $events }

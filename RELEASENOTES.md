@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.594 -- 2026-10-11
+
+- Guards: only changes that cannot heal are held for approval (weakening policy changes, mass removals and disables, the last Global Administrator, the last SuperAdmin); large policy alignments and convergence gaps are warnings in one daily Data quality alert mail; setup: a refused tenant-root grant shows only the published script
+
 ## 2.4.593 -- 2026-10-11
 
 - Fix texts: the script's 'What does this script do' link is a line under the command (outside the copy block) in plain text, and its own docUrl field in install events; the Licence page and Set-PimLicense never mention az
