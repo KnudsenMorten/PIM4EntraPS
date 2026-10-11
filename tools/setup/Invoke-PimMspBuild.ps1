@@ -97,6 +97,12 @@
     TEST seams: param($method, $url, $body, $headers) -> @{ status; body } in place of the real HTTPS call; param($seconds) in
     place of Start-Sleep while the licence is signed; the polling bound (default 900 s).
 
+.PARAMETER ResumeCommand
+    The one resume line a person is given when a step fails (the guided install hands its own over; under Invardia's
+    bootstrap ". ./bootstrap.ps1; Install-Invardia -Resume -InstallId <id>"). When set, or when Install-Invardia is loaded,
+    a failure is told in three parts only -- what failed and why, the fix when known, this line -- with no internal -From
+    line and no operator-steps block. Run directly without it, the detailed output is unchanged.
+
 .PARAMETER WhatIf
     The plan and the operator steps only, exactly as without -Apply -- and it wins over -Apply: nothing is claimed at
     Invardia, signed in, created or granted. Each step's script can be previewed on its own with its own -WhatIf.
@@ -143,7 +149,12 @@ param(
     # framework 8.6 (owner 2026-10-08): the guided install (Install-PimManager, mspRole 'managed' + an enrollment key) runs
     # THIS build and reports every step through its -Reporter: called with @{ key; name; state; detail } for each step
     # event (the same events the install tracking posts). A failing callback never fails the build.
-    [scriptblock]$OnStep
+    [scriptblock]$OnStep,
+    # 100.73 (HOGYM 2026-10-11): the ONE resume line the person is given when a step fails -- the guided install hands its
+    # own over (under Invardia's bootstrap: ". ./bootstrap.ps1; Install-Invardia -Resume -InstallId <id>"). Set (or
+    # Install-Invardia present in the session), a failure prints three parts only -- what failed + cause, the fix when
+    # known, this line -- with no internal -From line and no operator-steps block (those print at the end of a success).
+    [string]$ResumeCommand = ''
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -186,6 +197,10 @@ if (-not $chk.ok) {
     Write-Host 'REFUSED: fix the config; nothing was touched.' -ForegroundColor Red
     exit 1
 }
+# 100.73: the guided (bootstrap) failure output -- see -ResumeCommand.
+$guidedResume = "$ResumeCommand".Trim()
+if (-not $guidedResume -and (Get-Command Install-Invardia -ErrorAction SilentlyContinue)) { $guidedResume = '. ./bootstrap.ps1; Install-Invardia -Resume' }
+$guided = [bool]$guidedResume
 $planBase = if ("$InvardiaBaseUrl".Trim()) { $invBase } else { '' }
 $plan = @(Get-PimMspBuildPlan -Role $Role -Config $config -Enrollment:$enrolling -InvardiaBaseUrl $planBase)
 $ops = @(Get-PimMspOperatorSteps -Role $Role -Config $config -Enrollment:$enrolling)
@@ -360,7 +375,7 @@ try {
         $plan = @(Get-PimMspBuildPlan -Role $Role -Config $config -Enrollment:$enrolling -InvardiaBaseUrl $planBase)
     }
     # the fix of a repairable verify line: re-run the verify (it repairs), with the build's own command
-    $Resolved['{{resume}}'] = "Invoke-PimMspBuild.ps1 -Role $Role -ConfigPath '$ConfigPath' -Apply -From verify-install"
+    $Resolved['{{resume}}'] = if ($guided) { $guidedResume } else { "Invoke-PimMspBuild.ps1 -Role $Role -ConfigPath '$ConfigPath' -Apply -From verify-install" }
 
     # 71.36: a -From resume INSIDE a private store's build window re-opens the window first (the step that failed may be a
     # store step, and a previous run may have closed it). Get-PimMspBuildRunOrder is pure and offline-tested.
@@ -491,7 +506,7 @@ try {
             }
             # 100.59: a STOP POINT step prints the exact command that resumes THIS build at a step ({{resume-from:<id>}}).
             foreach ($m in [regex]::Matches((@($val) -join ' '), '\{\{resume-from:([a-z0-9\-]+)\}\}')) {
-                $Resolved[$m.Value] = "Invoke-PimMspBuild.ps1 -Role $Role -ConfigPath '$ConfigPath' -Apply -From $($m.Groups[1].Value)"
+                $Resolved[$m.Value] = if ($guided) { $guidedResume } else { "Invoke-PimMspBuild.ps1 -Role $Role -ConfigPath '$ConfigPath' -Apply -From $($m.Groups[1].Value)" }
             }
             $r = Resolve-PimMspBuildArgument -Value $val -Resolved $Resolved
             if (-not $r.ok) { throw "step '$($s.id)': unresolved $($r.missing -join ', ') for -$k (an earlier step did not produce it)" }
@@ -503,6 +518,7 @@ try {
             # test seam: the step's console lines (res.lines) take the same path as a real step process's output
             foreach ($tl in @($res.lines | Where-Object { $null -ne $_ })) { [void](Receive-PimMspSubStepLine -Line "$tl" -Step $s) }
             $ok = [bool]$res.ok; $output = "$($res.output)"
+            if (-not $ok -and "$($res.detail)".Trim()) { $script:PimMspFailMessage = "$($s.id): $("$($res.detail)".Trim())" }   # the seam's cause line
             $stepExit = if ($res -is [hashtable] -and $res.ContainsKey('exitCode')) { [int]$res.exitCode } elseif ($ok) { 0 } else { 1 }
         } else {
             if (-not (Test-Path -LiteralPath $scriptPath)) { throw "step '$($s.id)': script not found: $scriptPath" }
@@ -566,14 +582,15 @@ try {
         if ($stepExit -eq 10) {
             # 100.59 STOP POINT: not a failure -- the OTHER tenant's administrator acts now (the step printed exactly what,
             # with the command), then this build resumes here. Nothing after it runs; the SQL window was closed before it.
-            Write-Host "`nSTOP POINT at $($s.id): waiting for the other tenant's administrator (see above). Then resume: Invoke-PimMspBuild.ps1 -Role $Role -ConfigPath '$ConfigPath' -Apply -From $($s.id)" -ForegroundColor Yellow
+            Write-Host "`nSTOP POINT at $($s.id): waiting for the other tenant's administrator (see above). Then resume: $(if ($guided) { $guidedResume } else { "Invoke-PimMspBuild.ps1 -Role $Role -ConfigPath '$ConfigPath' -Apply -From $($s.id)" })" -ForegroundColor Yellow
             [void](Send-PimMspStepEvent -Tracker $tracker -StepId $s.id -Title $s.title -State waiting -Message "waiting for the other tenant's administrator; then resume with -From $($s.id)")
             $curStep = $null
             $exitCode = 10
             break
         }
         if (-not $ok) {
-            Write-Host "`nSTEP FAILED: $($s.id). Fix the cause above, then resume: Invoke-PimMspBuild.ps1 -Role $Role -ConfigPath '$ConfigPath' -Apply -From $($s.id)" -ForegroundColor Red
+            # 100.73: under the bootstrap the three-part failure is printed after the loop (no internal -From line).
+            if (-not $guided) { Write-Host "`nSTEP FAILED: $($s.id). Fix the cause above, then resume: Invoke-PimMspBuild.ps1 -Role $Role -ConfigPath '$ConfigPath' -Apply -From $($s.id)" -ForegroundColor Red }
             $exitCode = 1
             break
         }
@@ -598,8 +615,17 @@ try {
     }
     if ($extDir -and -not $prevExtDirSet -and -not $StepRunner) { Remove-Item Env:\AZURE_EXTENSION_DIR -ErrorAction SilentlyContinue }
 }
-& $printOps
+# 100.73: under the bootstrap a FAILED build prints no operator-steps block (they print at the end of a successful install).
+if (-not ($guided -and $exitCode -and $exitCode -ne 10)) { & $printOps }
 if ($exitCode) {
+    if ($guided -and $exitCode -ne 10) {
+        $gf = Get-PimMspGuidedFailure -StepId "$($curStep.id)" -Title "$($curStep.title)" -Cause "$($script:PimMspFailMessage)" -ResumeCommand $guidedResume
+        # With -OnStep the guided install prints the failed event (the sentence + fix) and its ONE resume line itself; printing
+        # them here as well would show the resume line twice. Without it (the build run under the bootstrap directly) print them.
+        if (-not $OnStep) { Write-Host ''; foreach ($gl in $gf.lines) { Write-Host $gl -ForegroundColor $(if ($gl -like 'To resume:*') { 'Yellow' } else { 'Red' }) } }
+        if ($curStep) { [void](Send-PimMspStepEvent -Tracker $tracker -StepId $curStep.id -Title $curStep.title -State failed -Message ("$($gf.sentence)" + $(if ($gf.fix) { " Fix: $($gf.fix)" } else { '' }))) }
+        exit $exitCode
+    }
     if ($curStep) { [void](Send-PimMspStepEvent -Tracker $tracker -StepId $curStep.id -Title $curStep.title -State failed -Message $(if ($script:PimMspFailMessage) { $script:PimMspFailMessage } else { "the step failed -- fix the cause and resume with -From $($curStep.id)" })) }
     exit $exitCode
 }

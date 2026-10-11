@@ -50,7 +50,8 @@
     { "name": "ImageTag", "required": false, "default": "the config's imageTag, else the running image on a resume", "help": "The image tag the build uses." },
     { "name": "InvardiaInstallToken", "required": false, "default": "$env:INVARDIA_INSTALL_TOKEN", "help": "Tracked install: every step is reported to Invardia." },
     { "name": "InvardiaInstallEventsUrl", "required": false, "default": "https://invardia.com/api/install/events", "help": "Where tracked steps are reported." },
-    { "name": "OnStep", "required": false, "default": null, "help": "Callback per step event (the guided install's reporter)." }
+    { "name": "OnStep", "required": false, "default": null, "help": "Callback per step event (the guided install's reporter)." },
+    { "name": "ResumeCommand", "required": false, "default": null, "help": "The one resume line shown when a step fails (the guided install / Invardia's bootstrap): the failure is then told in three parts, without the operator steps." }
   ],
   "readsOnly": [
     "The config (validated: no key or value may look like a credential), the plan (engine/msp/PIM-MspBuild.ps1), the signed-in identity (az account show, a token's tenant and user-ness), the managed identities' object ids when a step needs them, the running Manager image on a resume.",

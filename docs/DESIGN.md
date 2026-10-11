@@ -4056,7 +4056,13 @@ step's runner.
   **skipped checks** (exit `2`, v2.4.370) are *UNVERIFIED, not a fail* and roll nothing back; a
   verify in which neither the smoke nor the validation ran is also unverified, never `success`;
   reuses `Get-PimVerifyVerdict` for the rollback math.
-- `Get-PimDeployRollbackPlan` — on a failed verify (or a failed step that halts the run),
+- `Test-PimDeployRollbackNeeded` (v2.4.587) — decides *whether* to roll back at all: **only**
+  when the rolled app itself failed — the `code` step (the roll and its own post-roll smoke)
+  failed, or the verify verdict is `failed`. A later or unrelated step that fails on its own
+  (`updater`, `access`, `alerting`, `features`, `verify-install`, …) halts the run and is
+  re-run by the resume; the healthy app stays on the new revision (it used to be rolled back
+  by any halt after `code`).
+- `Get-PimDeployRollbackPlan` — when a rollback is needed,
   rolls back **only the code step**, in reverse run order, to the captured pre-deploy ACA
   revision. Schema upgrades are idempotent + non-destructive and are **never** auto-reverted;
   app-reg/infra stand-up is additive and left in place.
@@ -4828,6 +4834,14 @@ by certificate into the per-run directory. A step that cannot run under the chos
 re-publish on a person's sign-in — is shown as not run and the build ends "incomplete" rather than "complete". The build
 stops at the first failure with the resume command, and ends by printing the steps that need a person. The first policy
 mass-change approval is one of them, and is deliberately not automated.
+
+**Failure output in a guided install** (v2.4.587). When the build runs inside the guided install or Invardia's bootstrap
+(the installer hands over its own resume command; the bootstrap is also recognised on its own), a failed step is told in
+three parts only: one sentence naming the step and its cause, the fix when one is known (a dropped connection, a SQL
+firewall refusal, a missing right), and the one resume command of that install. The build's internal resume-at-a-step
+line and the list of steps that need a person are not shown on a failure — that list belongs at the end of a successful
+install. A failed sub-step is reported as the cause, never with a second resume command. Run directly by an operator, the
+build's detailed output is unchanged.
 
 **Manager (managing tenant only).** Every MSP sync surface follows the tenant mode the header shows (Single, Managing tenant,
 Managed tenant): on the managing tenant it is shown and editable; on a managed tenant only a read-only "received from the managing tenant"

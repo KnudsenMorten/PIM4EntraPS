@@ -382,6 +382,28 @@ function Get-PimDeployRollbackPlan {
     return [pscustomobject]@{ actions = $actions.ToArray() }
 }
 
+# ---- may this run roll the code back? (pure) ------------------------------
+function Test-PimDeployRollbackNeeded {
+    <#
+      100.73 (HOGYM managed install 2026-10-11) -- a rollback happens ONLY when the ROLLED APP ITSELF failed its
+      health: the 'code' step (the roll, with its own post-roll smoke gate) failed, or the verify step's smoke /
+      validation verdict is 'failed'. A LATER or unrelated step that failed (updater, access, alerting, features,
+      verify-install, ...) halts the run on its own and the resume re-runs it -- the healthy app stays on the new
+      revision. Before this, `$halted` alone rolled back: a transport drop in 'updater' put ca-pim-manager and
+      ca-pim-tick back on the previous image ("status=rolledback healthy=True").
+        -HaltedStepKey : the key of the step that halted the run ('' when nothing halted).
+        -Verdict       : Get-PimDeployVerifyVerdict result (or $null).
+        -CodeRan       : did the 'code' step run this session? (no roll => nothing to roll back)
+      Returns { rollback = bool; reason = string }.
+    #>
+    param([string]$HaltedStepKey = '', [object]$Verdict = $null, [bool]$CodeRan = $false)
+    if (-not $CodeRan) { return [pscustomobject]@{ rollback = $false; reason = 'the code step did not run -- nothing was rolled, nothing to roll back' } }
+    if ("$HaltedStepKey" -eq 'code') { return [pscustomobject]@{ rollback = $true; reason = "the roll itself (step 'code') failed" } }
+    if ($Verdict -and "$($Verdict.State)" -eq 'failed') { return [pscustomobject]@{ rollback = $true; reason = 'the rolled app failed its health check (verify smoke / validation)' } }
+    if ("$HaltedStepKey".Trim()) { return [pscustomobject]@{ rollback = $false; reason = "step '$HaltedStepKey' failed on its own -- the rolled app is not implicated, it stays on the new revision; resume re-runs the step" } }
+    return [pscustomobject]@{ rollback = $false; reason = 'nothing failed that implicates the rolled app' }
+}
+
 # ---- end-of-run summary (pure) --------------------------------------------
 function Get-PimDeploySummary {
     <#

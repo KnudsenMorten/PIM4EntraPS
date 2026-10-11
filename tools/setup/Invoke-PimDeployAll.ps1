@@ -3155,6 +3155,7 @@ $outcomes = New-Object System.Collections.Generic.List[object]
 $ranKeys  = New-Object System.Collections.Generic.List[string]
 $verifyResult = $null
 $halted = $false
+$haltedKey = ''
 
 function Test-PimDeploySubStepMarkers { return ("$env:PIM_SUBSTEP_EVENTS".Trim() -eq '1') }
 # §95.2 guided install: one event per step state. A reporter that throws is logged and ignored -- reporting must
@@ -3244,6 +3245,7 @@ foreach ($s in $plan.steps) {
     if (-not $ok -and $s.key -notin 'verify', 'verify-install') {
         Warn "step '$($s.key)' FAILED -- halting the deploy."
         $halted = $true
+        $haltedKey = "$($s.key)"
         break
     }
 }
@@ -3261,7 +3263,11 @@ if ($verifyResult -or $halted) {
 $rolledBack = $false
 # BUG-216: only a verdict that FAILED rolls back. UNVERIFIED (the smoke exited 2 -- it skipped checks) is
 # not healthy and is reported as such, but nothing proved the deploy broken, so nothing is rolled back.
-$needRollback = $halted -or ($verdict -and "$($verdict.State)" -eq 'failed')
+# 100.73 (HOGYM 2026-10-11): a halted run rolls back ONLY when the halting step is the roll itself ('code'). A later
+# step (updater, access, alerting, ...) failing on its own -- a transport drop -- must never take a healthy app back.
+$rbDecision = Test-PimDeployRollbackNeeded -HaltedStepKey $(if ($halted) { "$haltedKey" } else { '' }) -Verdict $verdict -CodeRan $codeRan
+$needRollback = [bool]$rbDecision.rollback
+if ($halted -and $codeRan -and -not $needRollback) { Info "  no rollback: $($rbDecision.reason)" }
 if ($needRollback -and $codeRan) {
     $rbPlan = Get-PimDeployRollbackPlan -RanStepKeys @($ranKeys.ToArray()) -PreviousRevision $prevRev -Hosted $hosted
     foreach ($a in $rbPlan.actions) {
