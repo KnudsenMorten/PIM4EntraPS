@@ -9020,7 +9020,15 @@ file found by scanning `config/`, which the container image excludes, so a hoste
 never see one. The operator imports it with `tools/setup/Set-PimLicense.ps1` (`-LicensePath` or
 `-LicenseJson`; `-WhatIf` supported): the document's signature is verified **before** the store is
 contacted, a tampered or foreign document is refused and never stored, and only its content is
-kept, not the file. **The public docs must not imply a technical gate that does not
+kept, not the file. The script is also **published as one self-contained file**
+(`https://invardia.com/support/pim/Set-PimLicense.ps1`): the build inlines the token client, the store
+access, the licence verifier and the sign-in helper, leaves out the optional loads those libraries end with
+(a script opts in with the line `# BUILD-NO-OPTIONAL-LOADS`; any load left fails the build), and the result
+loads nothing, uses no command-line tool and no PowerShell module, signs the person in through the browser
+and runs in Windows PowerShell 5.1 and PowerShell 7. Every place that shows the command therefore shows the
+same two lines – the download, then the run with `-UseSignedInAccount` – from one function
+(`Get-PimLicenseRegisterCommand`); in plain text (a job's refusal line, an API refusal) one more line under
+them names the script's documentation page. **The public docs must not imply a technical gate that does not
 exist** — README's "Editions" section and `FEATURES.md` §29 both state the enforcement status in
 the same paragraph as the split, deliberately. The call to action for the licensed edition is a
 single public contact, Invardia's (`info@invardia.com`, with its trial, order and support pages), and nothing else: no

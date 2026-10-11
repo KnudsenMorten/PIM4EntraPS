@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.596 -- 2026-10-11
+
+- Held policy change sets show the same on every page and a SuperAdmin approves them; audit rows say what changed in plain words; the Reports page shows the true last sent and next run; warnings and open setup steps are amber; the PIM Activator app needs no user assignment; the as-built document fits the page; the licence command is two lines; a failed deployment check sends its alert at once again
+
 ## 2.4.595 -- 2026-10-11
 
 - Many policy changes in one run wait for approval again, and a SuperAdmin of the tenant approves them; warnings are shown amber, not red; the Guards page no longer shows a run counter; the Demo mode card appears only in a demo environment; a licensed install is no longer told it updates like the Community edition

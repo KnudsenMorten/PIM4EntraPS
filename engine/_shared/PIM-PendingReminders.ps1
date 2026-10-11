@@ -162,7 +162,7 @@ function Get-PimPendingReminderItems {
     }
     if ($null -eq $Sources) { return @($out.ToArray()) }
 
-    # (b) policy change sets held by the circuit breaker (an Admin approves them on Approvals)
+    # (b) policy change sets held by the circuit breaker (a SuperAdmin approves them on Approvals -- PIM 100.82)
     foreach ($h in @(& $f $Sources 'policyHolds')) {
         if ($null -eq $h) { continue }
         $prov = "$(& $f $h 'provider')"; $code = "$(& $f $h 'code')"
@@ -172,7 +172,7 @@ function Get-PimPendingReminderItems {
         $n = "$(& $f $h 'changes')"; $w = "$(& $f $h 'weakening')"
         $plan = "$(& $f $h 'planHash')"; $short = if ($plan.Length -gt 12) { $plan.Substring(0, 12) } else { $plan }
         & $add "policy:$code`:$short" 'approval' 'Policy change sets' ("Policy change set held: {0}" -f $noun) `
-            ("{0} change(s){1} -- nothing is written until an Admin approves it" -f $(if ($n) { $n } else { '?' }), $(if ($w -and $w -ne '0') { ", $w weaken a setting" } else { '' })) `
+            ("{0} change(s){1} -- nothing is written until a SuperAdmin approves it" -f $(if ($n) { $n } else { '?' }), $(if ($w -and $w -ne '0') { ", $w weaken a setting" } else { '' })) `
             'approvals' "hold=$code" 'Review the change set' (& $f $h 'heldUtc')
     }
     # maker/checker approval requests (a different Admin decides them)
@@ -571,6 +571,110 @@ function Get-PimPendingReminderSources {
     return [pscustomobject]$src
 }
 
+function Get-PimPendingReminderRowStatus {
+    <#
+      PURE (PIM 100.88). What Settings > Reports shows for the two reminder rows. Returns
+        [ordered]@{ 'get-started' = <row>; 'pending-approvals' = <row> }, each row
+        [ordered]@{ state = off | idle | waiting; waiting; ripe; lastSentUtc; nextRunUtc; nextRunNote }
+      -Plan          Get-PimPendingReminderPlan for NOW over the stored state ($null when the reminder is off)
+      -State         the stored PendingRemindersState     -Config   the PendingReminders setting
+      -MailLastSent  the stored MailReportLastSent ({ <type>: { at; sent; recipients } }) -- the per-part "really sent" stamp
+      LAST SENT = the part's own stamp; before that stamp existed, the cycle stamp when that cycle really SENT (lastResult
+      sent>0) and listed an item of this part. A cycle that was only held by a mail mute is not "sent".
+      NEXT RUN = when the next reminder that lists this part goes out: the cycle time (now when due, else the plan's dueBy),
+      or earlier when an item of this part gets its own first reminder (never sooner than the floor after the last mail).
+      Nothing of this part waits -> no time, the note says so. Never throws on odd input.
+    #>
+    param([AllowNull()][object]$Plan, [AllowNull()][object]$State, [AllowNull()][object]$Config, [AllowNull()][object]$MailLastSent, [datetime]$NowUtc = [datetime]::UtcNow)
+    $cfg = if ($Config -is [System.Collections.IDictionary] -and $Config.Contains('repeatHours')) { $Config } else { ConvertTo-PimPendingReminderConfig $Config }
+    $st = ConvertTo-PimPendingReminderState $State
+    $now = $NowUtc.ToUniversalTime()
+    $mail = ConvertFrom-PimPendingReminderJson $MailLastSent
+    $items = @(); if ($Plan) { $items = @(@(Get-PimPendingReminderField $Plan 'items') | Where-Object { $_ }) }
+    $planSend = [bool]($Plan -and (Get-PimPendingReminderField $Plan 'send'))
+    $cycle = $null
+    if ($planSend) { $cycle = $now } elseif ($Plan) { $cycle = ConvertTo-PimPendingReminderUtc (Get-PimPendingReminderField $Plan 'dueBy') }
+    $last = ConvertTo-PimPendingReminderUtc $st.lastSentUtc
+    $floor = [Math]::Min([Math]::Min([int]$cfg.approvalsAfterHours, [int]$cfg.getStartedAfterHours), [int]$cfg.repeatHours)
+    # the cycle stamp answers only while NO part has its own stamp yet (a cycle sent by a build before 100.88)
+    $reallySent = [bool]("$($st.lastResult)" -match '(?i)\bsent=([1-9]\d*)') -and -not (Get-PimPendingReminderField $mail 'get-started') -and -not (Get-PimPendingReminderField $mail 'pending-approvals')
+    $out = [ordered]@{}
+    foreach ($type in @('get-started', 'pending-approvals')) {
+        $isGs = ($type -eq 'get-started')
+        $mine = @($items | Where-Object { ("$($_.kind)" -eq 'get-started') -eq $isGs })
+        $ripe = @($mine | Where-Object { $_.ripe })
+        $ls = ''
+        $rec = Get-PimPendingReminderField $mail $type
+        $t = ConvertTo-PimPendingReminderUtc (Get-PimPendingReminderField $rec 'at'); if ($t) { $ls = $t.ToString('o') }
+        if (-not $ls -and $last -and $reallySent -and @($st.lastKeys | Where-Object { ("$_" -like 'gs:*') -eq $isGs }).Count) { $ls = $last.ToString('o') }
+        $row = [ordered]@{ state = 'idle'; waiting = $mine.Count; ripe = $ripe.Count; lastSentUtc = $ls; nextRunUtc = ''; nextRunNote = '' }
+        if (-not $cfg.enabled) { $row.state = 'off'; $row.waiting = 0; $row.ripe = 0; $row.nextRunNote = 'switched off -- no mail' }
+        elseif (-not $mine.Count) { $row.nextRunNote = 'nothing is waiting -- no mail due' }
+        else {
+            $row.state = 'waiting'
+            $cand = $cycle
+            $early = $null
+            if (-not $ripe.Count) {
+                $early = @($mine | ForEach-Object { ConvertTo-PimPendingReminderUtc $_.firstReminderUtc } | Where-Object { $_ } | Sort-Object | Select-Object -First 1)[0]
+            } elseif ($last -and @($ripe | Where-Object { @($st.lastKeys) -notcontains "$($_.key)" }).Count) { $early = $last }
+            if ($early) {
+                if ($last -and $early -lt $last.AddHours($floor)) { $early = $last.AddHours($floor) }
+                if (-not $cand -or $early -lt $cand) { $cand = $early }
+            }
+            $n = $mine.Count
+            if (-not $cand -or $cand -le $now) { $row.nextRunNote = ("due now -- goes out at the next scheduler run ({0} waiting)" -f $n) }
+            else { $row.nextRunUtc = $cand.ToString('o'); $row.nextRunNote = ("{0} waiting" -f $n) }
+        }
+        $out[$type] = $row
+    }
+    return $out
+}
+
+function Get-PimPendingReminderOverview {
+    <#
+      PIM 100.88 -- the two reminder rows of Settings > Reports, read from the SAME records the tick's reminder uses (the
+      PendingReminders setting, PendingRemindersState, GetStartedStatus, the approval sources, MailReportLastSent). Plans
+      for NOW and writes NOTHING. Returns Get-PimPendingReminderRowStatus's value plus 'error' ('' when everything was
+      read). NEVER throws: a store that cannot be read answers $null rows and the reason.
+    #>
+    param([datetime]$NowUtc = [datetime]::UtcNow)
+    try {
+        $cfg = ConvertTo-PimPendingReminderConfig (Get-PimPendingReminderStoreText -Name 'PendingReminders')
+        $stateRaw = Get-PimPendingReminderStoreText -Name 'PendingRemindersState'
+        $mailRaw = Get-PimPendingReminderStoreText -Name 'MailReportLastSent'
+        $plan = $null; $errs = @()
+        if ($cfg.enabled) {
+            $gsRaw = Get-PimPendingReminderStoreText -Name 'GetStartedStatus'
+            $src = Get-PimPendingReminderSources -NowUtc $NowUtc
+            $errs = @($src.errors)
+            $items = @(Get-PimPendingReminderItems -GetStartedStatus $gsRaw -Sources $src -PortalBase '')
+            $plan = Get-PimPendingReminderPlan -Items $items -State $stateRaw -Config $cfg -NowUtc $NowUtc
+        }
+        $rows = Get-PimPendingReminderRowStatus -Plan $plan -State $stateRaw -Config $cfg -MailLastSent $mailRaw -NowUtc $NowUtc
+        $rows['error'] = $(if ($errs.Count) { 'not read: ' + ($errs -join '; ') } else { '' })
+        return $rows
+    } catch {
+        return [ordered]@{ 'get-started' = $null; 'pending-approvals' = $null; error = "the reminder state could not be read: $($_.Exception.Message)" }
+    }
+}
+
+function Save-PimPendingReminderLastSent {
+    # PIM 100.88: record that a PART of the reminder really went out, under the key Settings > Reports reads
+    # (pim.Settings 'MailReportLastSent' = { <type>: { at; sent; recipients } }; the other reports' stamps are kept).
+    # Best-effort: a failure is a warning, never a failed tick. -Parts = @{ 'get-started' = <mails sent>; 'pending-approvals' = <n> }.
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Parts, [datetime]$NowUtc = [datetime]::UtcNow)
+    try {
+        $todo = @($Parts.Keys | Where-Object { [int]$Parts[$_] -gt 0 })
+        if (-not $todo.Count) { return }
+        $cur = ConvertFrom-PimPendingReminderJson (Get-PimPendingReminderStoreText -Name 'MailReportLastSent')
+        $m = [ordered]@{}
+        if ($cur -is [System.Collections.IDictionary]) { foreach ($k in @($cur.Keys)) { $m["$k"] = $cur[$k] } }
+        elseif ($cur -and -not ($cur -is [string]) -and -not ($cur -is [array])) { foreach ($p in $cur.PSObject.Properties) { $m["$($p.Name)"] = $p.Value } }
+        foreach ($k in $todo) { $m["$k"] = [ordered]@{ at = $NowUtc.ToUniversalTime().ToString('o'); sent = [int]$Parts[$k]; recipients = [int]$Parts[$k] } }
+        [void](Set-PimPendingReminderStoreText -Name 'MailReportLastSent' -Json (ConvertTo-Json -InputObject $m -Depth 6 -Compress))
+    } catch { Write-Warning "  [Mail] the last-sent time of the pending-actions reminder could not be recorded: $($_.Exception.Message)" }
+}
+
 function Get-PimPendingReminderSuperAdmins {
     # The SuperAdmins' mail addresses: pim.Settings['ManagerAccess'] (role SuperAdmin; its 'mail' when recorded, else the
     # sign-in name) + env PIM_SuperAdmins. NEVER throws.
@@ -633,12 +737,17 @@ function Invoke-PimPendingReminder {
         if ($claim -ne 1) { return [pscustomobject]@{ sent = 0; planned = $true; held = 0; failed = 0; detail = 'not sent -- another scheduler run already took this reminder cycle'; plan = $plan } }
         $envI = if (Get-Command Get-PimMailEnvironmentInfo -ErrorAction SilentlyContinue) { Get-PimMailEnvironmentInfo -PortalBase $base } else { @{} }
         $sent = 0; $held = New-Object System.Collections.Generic.List[string]; $fail = New-Object System.Collections.Generic.List[string]
+        $sentParts = [ordered]@{ 'get-started' = 0; 'pending-approvals' = 0 }   # PIM 100.88: which part really went out, to how many
         foreach ($r in $to) {
             $tokens = @{ ReportHtml = (ConvertTo-PimPendingReminderHtml -Items @($r.items) -PortalBase $base -Environment $envI -Config $cfg); ItemCount = "$(@($r.items).Count)"
                          ItemList = ((@($r.items | Select-Object -First 6 | ForEach-Object { $_.title })) -join '; '); PortalTab = $(if (@($r.items | Where-Object { $_.kind -ne 'get-started' }).Count) { 'approvals' } else { 'getstarted' }) }
             $res = $null
             try { $res = Send-PimNotifyMail -Type 'pending-actions-reminder' -Tokens $tokens -Recipient $r.address } catch { $res = @{ sent = $false; reason = "$($_.Exception.Message)" } }
-            if ("$($res.sent)" -match '(?i)^true$') { $sent++ }
+            if ("$($res.sent)" -match '(?i)^true$') {
+                $sent++
+                if (@($r.items | Where-Object { "$($_.kind)" -eq 'get-started' }).Count) { $sentParts['get-started']++ }
+                if (@($r.items | Where-Object { "$($_.kind)" -ne 'get-started' }).Count) { $sentParts['pending-approvals']++ }
+            }
             elseif ((Get-Command Test-PimMailHoldReason -ErrorAction SilentlyContinue) -and (Test-PimMailHoldReason -Reason "$($res.reason)")) { $held.Add("$($r.address): $($res.reason)") }
             elseif ("$($res.reason)" -in @('email kill switch on', 'email feature disabled', 'recipient not on allowlist', 'no sender')) { $held.Add("$($r.address): $($res.reason)") }
             else { $fail.Add("$($r.address): $($res.reason)") }
@@ -652,6 +761,8 @@ function Invoke-PimPendingReminder {
             $final.retryAfterUtc = $NowUtc.ToUniversalTime().AddHours(1).ToString('o')
         }
         try { [void](Set-PimPendingReminderStoreText -Name $script:PimPendingReminderStateName -Json (ConvertTo-Json -InputObject $final -Depth 6 -Compress) -Expected $claimed -Cas) } catch { Write-Warning "  [Mail] the pending-reminder outcome was not recorded: $($_.Exception.Message)" }
+        # PIM 100.88: Settings > Reports reads "last sent" per part from MailReportLastSent -- written only for a part that really went out
+        if ($sent -gt 0) { Save-PimPendingReminderLastSent -Parts $sentParts -NowUtc $NowUtc }
         $d = ("sent={0}/{1} ({2})" -f $sent, $to.Count, $plan.reason) +
              $(if ($held.Count) { ' held (mail is muted -- recorded, sent at the next cycle once mail is enabled): ' + ($held.ToArray() -join '; ') } else { '' }) +
              $(if ($fail.Count) { ' FAILED: ' + ($fail.ToArray() -join '; ') } else { '' }) + $errTxt

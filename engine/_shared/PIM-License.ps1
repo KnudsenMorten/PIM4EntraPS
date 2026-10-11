@@ -299,7 +299,7 @@ Function Get-PimLicense {
 
     $result = [pscustomobject]@{
         Status     = 'Missing'      # Missing | Invalid | NotYetValid | Expired | Grace | Valid
-        Reason     = 'no licence is stored (pim.Settings[''License'']) -- import the issued licence with tools/setup/Set-PimLicense.ps1'
+        Reason     = 'no licence is stored (pim.Settings[''License'']) -- register the issued licence in Settings > Licence (it shows the two lines that download and run Set-PimLicense.ps1)'
         Customer   = ''
         Sku        = 'Core'
         Features   = @()
@@ -696,13 +696,31 @@ Function Get-PimLicenseContact { "$script:PimLicenseContact" }
 
 Function Get-PimLicenseRegisterCommand {
     <#
-      PURE. The supported way to register an issued licence file (tools/setup/Set-PimLicense.ps1), with this environment's
+      PURE. The supported way to register an issued licence file (Set-PimLicense.ps1, downloaded from Invardia), with this environment's
       store server and tenant filled in when known; placeholders otherwise. Never carries a secret -- and never a certificate (97.1, owner 2026-10-08: "we dont support certificates"): -UseSignedInAccount signs the person in through the browser (a member of the store's SQL admin group), or uses the Invardia Support app session open in that window -- no command-line tool, no module (REQUIREMENTS 100.77: no customer-facing text names one).
     #>
     param([string]$SqlServer, [string]$TenantId)
     $srv = "$SqlServer".Trim(); if (-not $srv) { $srv = '<server>.database.windows.net' }
     $tid = "$TenantId".Trim();  if (-not $tid) { $tid = '<tenant>' }
-    return ("pwsh -File tools\setup\Set-PimLicense.ps1 -LicensePath <file> -SqlServer {0} -TenantId {1} -UseSignedInAccount" -f $srv, $tid)
+    # REQUIREMENTS 100.81 (owner 2026-10-11, "Yes, publish"): Set-PimLicense.ps1 is a published standalone script, so the
+    # command is the TWO lines every published script shows -- line 1 downloads it from Invardia, line 2 runs it -- and
+    # nothing else. The central builder (tools\setup\_PimScriptDoc.ps1) when it is loaded; the same two lines when not.
+    $run = ".\Set-PimLicense.ps1 -LicensePath <file> -SqlServer {0} -TenantId {1} -UseSignedInAccount" -f $srv, $tid
+    if (Get-Command Get-PimSupportScriptCommand -ErrorAction SilentlyContinue) { return ((Get-PimSupportScriptCommand -Script 'Set-PimLicense' -Run @($run)) -join "`n") }
+    return ("Invoke-WebRequest https://invardia.com/support/pim/Set-PimLicense.ps1 -OutFile Set-PimLicense.ps1`n$run")
+}
+
+Function Get-PimLicenseRegisterText {
+    <#
+      PURE. REQUIREMENTS 100.81 + 100.77: the register command for PLAIN TEXT (a job's log line, an API refusal, a mail) --
+      the two command lines on their own lines, then ONE plain line under them, outside the block:
+      "What does this script do: <the script's documentation page>". The block itself is Get-PimLicenseRegisterCommand's.
+    #>
+    param([string]$SqlServer, [string]$TenantId, [string]$Command)
+    $cmd = if ("$Command".Trim()) { "$Command" } else { Get-PimLicenseRegisterCommand -SqlServer $SqlServer -TenantId $TenantId }
+    if (Get-Command Add-PimSupportScriptDocLines -ErrorAction SilentlyContinue) { return (Add-PimSupportScriptDocLines -Text $cmd) }
+    if ($cmd -match '(?m)^What does this script do: ') { return $cmd }
+    return ($cmd + "`nWhat does this script do: https://invardia.com/docs/pim/scripts/Set-PimLicense/")
 }
 
 Function ConvertFrom-PimLicenseSettingRaw {
@@ -838,7 +856,8 @@ Function Test-PimProLicence {
     }
     if (-not $out.basis) { $out.basis = 'licence'; $out.basisText = "$($out.reason)" }
     if (-not $out.ok) {
-        $out.message = ("{0} requires a PIM Manager Pro licence -- {1}. Contact {2} for a licence; register it with: {3}" -f $Label, $out.reason, $out.contact, $out.command)
+        # 100.81: the command is two lines (download, run) on their OWN lines, the doc line under them (100.77) -- never joined into the sentence
+        $out.message = ("{0} requires a PIM Manager Pro licence -- {1}. Contact {2} for a licence; register it with:`n{3}" -f $Label, $out.reason, $out.contact, (Get-PimLicenseRegisterText -Command $out.command))
     } elseif ($out.grace) {
         $out.message = ("{0}: licence expired {1}, grace until {2} -- contact {3} to renew" -f $Label, $out.validTo, $out.graceUntil, $out.contact)
     } else {
@@ -898,7 +917,7 @@ Function Invoke-PimMspLicenseGate {
         $cmd = Get-PimLicenseRegisterCommand -SqlServer $SqlServer -TenantId $TenantId
         $r = [pscustomobject]@{ ok = $false; status = 'Invalid'; grace = $false; customer = ''; sku = ''; validTo = ''; graceUntil = ''; tenantIds = @(); tenantId = "$TenantId"; role = $roleWord
             reason = "the licence check failed ($($_.Exception.Message))"; contact = "$script:PimLicenseContact"; command = $cmd
-            message = ("{0} requires a PIM Manager Pro licence -- the licence check failed ({1}). Contact {2} for a licence; register it with: {3}" -f $(if ($Role -eq 'Slave') { 'Managed tenant (MSP)' } else { 'Managing tenant (MSP)' }), $_.Exception.Message, $script:PimLicenseContact, $cmd) }
+            message = ("{0} requires a PIM Manager Pro licence -- the licence check failed ({1}). Contact {2} for a licence; register it with:`n{3}" -f $(if ($Role -eq 'Slave') { 'Managed tenant (MSP)' } else { 'Managing tenant (MSP)' }), $_.Exception.Message, $script:PimLicenseContact, (Get-PimLicenseRegisterText -Command $cmd)) }
     }
     $lvl = if (-not $r.ok) { 'ERROR' } elseif ($r.grace) { 'WARN' } else { 'INFO' }
     if ($Log) { & $Log $r.message $lvl }

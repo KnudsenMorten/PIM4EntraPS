@@ -1156,7 +1156,6 @@
   .act-head { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:10px; flex-wrap:wrap; }
   .act-title { font-size:16px; font-weight:600; margin-bottom:2px; }
   .act-sub, .act-dim { color:#57606a; font-size:12px; }
-  .act-who { font-size:11.5px; color:#57606a; background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:5px 9px; max-width:380px; }
   .act-prog { display:flex; justify-content:space-between; font-size:12px; color:#57606a; }
   .act-bar { height:8px; background:#eaeef2; border-radius:4px; margin:4px 0 10px; }
   .act-bar > div { height:8px; background:#0969da; border-radius:4px; }
@@ -1312,7 +1311,7 @@
     <div class="tab" data-tab="grid" title="The full editable grid of every desired-state row — for power users who want direct, spreadsheet-style editing across all entities.">Advanced View (grid) <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="authoring" title="Bulk authoring — move an admin, clone a definition or Azure-RBAC delegation to many targets, bulk-attach, and import admins, each with a preview before commit.">Authoring</div>
     <div class="tab" data-tab="activator" title="Client onboarding: give your admins the PIM Activator browser extension -- with Intune, or on PCs and servers without Intune (a script).">Client onboarding</div>
-    <div class="tab" data-tab="getstarted" title="Get started: the steps that make this environment work, each marked done or still open.">Get Started <span id="getStartedBadge" class="badge" style="display:none;background:#cf222e">!</span></div>
+    <div class="tab" data-tab="getstarted" title="Get started: the steps that make this environment work, each marked done or still open.">Get Started <span id="getStartedBadge" class="badge" style="display:none;background:#bf8700;color:#fff">!</span></div>
     <div class="tab" data-tab="onboarding" title="Onboard a new admin — derive the name and metadata, place them in the right groups, and (for sensitive grants) route through second-person approval.">Onboarding</div>
     <div class="tab" data-tab="departments" title="Departments and their owners -- who approves and who is mailed for every delegation a department sponsors. Import them from Entra, or assign owners in bulk by uploading a CSV file.">Departments &amp; owners</div>
     <div class="tab" data-tab="adminimport" title="Import many administrators at once from a file or a paste: the UPN is the key; skip or overwrite existing ones. SuperAdmin only.">Import administrators</div>
@@ -4947,6 +4946,18 @@
     });
   }
 
+  // PIM 100.85 (owner 2026-10-11: "dont show as alerts, when it is warnings"): ONE colour rule for every count badge, dot,
+  // pill and tile. red = an error / failure / alarm that needs action now; amber = warnings, open setup choices, things
+  // waiting; info (grey) = a fact. pimSev(errors, waiting) names the level, pimSevColour(level, part) gives its colour:
+  // 'bg' a solid badge / dot, 'fg' text on a light surface, 'soft' the light fill, 'line' its border.
+  function pimSev(errors, waiting) { return (Number(errors) || 0) > 0 ? 'red' : ((Number(waiting) || 0) > 0 ? 'amber' : 'info'); }
+  function pimSevColour(sev, part) {
+    const P = { red:   { bg: '#cf222e', fg: '#cf222e', soft: '#ffebe9', line: '#ff8182' },
+                amber: { bg: '#bf8700', fg: '#9a6700', soft: '#fff8c5', line: '#d4a72c' },
+                info:  { bg: '#57606a', fg: '#57606a', soft: '#f6f8fa', line: '#d0d7de' } };
+    return (P[sev] || P.info)[part || 'bg'];
+  }
+
   function homeTile(opts) {
     // opts: { title, value, sub, tone('green'|'amber'|'red'|'neutral'), tab, lines[] }
     const esc = escapeHtml;
@@ -4987,7 +4998,7 @@
         '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + dot + ';margin-right:8px;vertical-align:middle;"></span>' +
         '<span style="font-size:12.5px;color:#24292f;">' + i.text + '</span>' + arrow + '</li>';
     }).join('');
-    const headTone = reds > 0 ? '#cf222e' : '#bf8700';
+    const headTone = pimSevColour(pimSev(reds, sorted.filter(i => i.sev === 'amber').length));   // PIM 100.85: facts only = grey, never amber or red
     return '<div style="border:1px solid #d0d7de;border-left:4px solid ' + headTone + ';border-radius:8px;padding:10px 14px;background:#fff;margin-bottom:14px;">' +
       '<div style="font-size:13px;font-weight:700;color:' + headTone + ';margin-bottom:4px;">What needs your attention (' + sorted.length + ')</div>' +
       '<ul style="margin:0;padding:0;">' + rows + '</ul></div>';
@@ -5178,7 +5189,7 @@
     function homeAddAttn(sev, text, tab) { attnItems.push({ sev: sev, text: text, tab: tab }); }
     // PIM 100.85 (owner 2026-10-11, 2nd report: "dont show as alerts, when it is warnings"): the Overview badge is RED only
     // when at least one item is an error / alarm; a count made of warnings only is amber.
-    function homeAttnColour(items) { return (items || []).some(i => i && i.sev === 'red') ? '#cf222e' : '#bf8700'; }
+    function homeAttnColour(items) { return pimSevColour((items || []).some(i => i && i.sev === 'red') ? 'red' : 'amber'); }
     // §100.3 (2026-10-09): the server's settings health lines -- demo group unreadable (ACC-1), MSP downlink switched off
     // (GATE-1), a blank naming pattern (NAME-1). The text is escaped here; the server sends plain text.
     try {
@@ -5218,7 +5229,9 @@
       // reported separately and NEVER as red -- it is a deployment decision, not a fault.
       if (j.failedCount > 0) { attn += j.failedCount; homeAddAttn('red', j.failedCount + ' job(s) FAILED: ' + esc((j.failedJobs || []).map(f => f.name).slice(0, 3).join(', ')), 'jobs'); }
       // 71.13: a standing policy HOLD is AMBER attention (needs an approval) -- never red, never hidden.
-      if (j.heldCount > 0) { attn += j.heldCount; homeAddAttn('amber', j.heldCount + ' job(s) NEED APPROVAL (a safety breaker held a change set): ' + esc((j.heldJobs || []).map(f => f.name).slice(0, 3).join(', ')), 'jobs'); }
+      // PIM 100.84: never while the hold records say that nothing waits (policyHoldCount 0) -- and it opens Approvals, where
+      // the change set is shown and a SuperAdmin approves it, not the Jobs page.
+      if (j.heldCount > 0 && j.policyHoldCount !== 0) { attn += j.heldCount; homeAddAttn('amber', j.heldCount + ' job(s) NEED APPROVAL (a safety breaker held a change set): ' + esc((j.heldJobs || []).map(f => f.name).slice(0, 3).join(', ')) + ' -- a SuperAdmin approves it on Approvals', 'approvals'); }
       if (j.skippedCount > 0) { homeAddAttn('info', j.skippedCount + ' job(s) not scheduled on this deployment (by design): ' + esc((j.skippedJobs || []).map(f => f.name).slice(0, 3).join(', ')), 'jobs'); }
       const lines = [];
       if (j.lastRun) lines.push('Last: <b>' + esc(j.lastRun.name) + '</b> ' + (j.lastRun.ok ? '<span style="color:#1f883d">ok</span>' : (j.lastRun.status === 'throttled' && !j.lastRun.throttleStuck) ? '<span style="color:#9a6700" title="Microsoft throttled this run; it retries automatically">throttled -- retrying</span>' : '<span style="color:#cf222e">failed</span>') + ' ' + esc(homeFmtWhen(j.lastRun.whenUtc)));
@@ -5255,11 +5268,13 @@
       if (v.errors > 0) { attn += v.errors; homeAddAttn('red', v.errors + ' validation error(s) must be fixed before commit', 'validate'); }
       h += homeTile({
         title: 'Validation findings',
-        value: (v.errors || 0) + ' / ' + (v.warnings || 0),
-        sub: 'errors / warnings',
+        // PIM 100.85 (owner 2026-10-11: "168 errors is wrong, it is 168 warnings" -> "168 warnings, 0 errors"): ONE number in
+        // words -- the errors when there are any (red), else the warnings (amber); the other count is a line underneath.
+        value: String(v.errors > 0 ? v.errors : (v.warnings || 0)),
+        sub: v.errors > 0 ? (v.errors === 1 ? 'error' : 'errors') : ((v.warnings || 0) === 1 ? 'warning' : 'warnings'),
         tone: v.errors > 0 ? 'red' : (v.warnings > 0 ? 'amber' : 'green'),
         tab: 'validate',
-        lines: [esc(v.errors ? 'must fix before commit' : (v.warnings ? 'review recommended' : 'clean')), v.ranAtUtc ? ('checked ' + esc(homeFmtWhen(v.ranAtUtc))) : '']
+        lines: [v.errors > 0 ? ((v.warnings || 0) + ((v.warnings || 0) === 1 ? ' warning' : ' warnings')) : '0 errors', esc(v.errors ? 'must fix before commit' : (v.warnings ? 'review recommended' : 'clean')), v.ranAtUtc ? ('checked ' + esc(homeFmtWhen(v.ranAtUtc))) : '']
       });
     }
 
@@ -7368,9 +7383,12 @@
         '<div style="margin-top:6px;"><button class="btn" id="licRegister">Register licence</button> <span id="licImportMsg" style="font-size:12px;"></span></div>' +
         '</div>';
     }
-    h += '<div style="margin-top:10px;font-size:12px;color:#57606a;">Or register it from PowerShell (a member of the store&rsquo;s SQL admin group signs in in the browser, or the Invardia Support app session open in that window is used):</div>' +
+    // REQUIREMENTS 100.81 (owner 2026-10-11): Set-PimLicense.ps1 is a published script, so d.command is the two lines every
+    // published script shows -- line 1 downloads it from Invardia, line 2 runs it (white-space:pre-wrap keeps them on
+    // their own lines; Copy takes exactly those two). The doc link sits under the block, outside it (100.77).
+    h += '<div style="margin-top:10px;font-size:12px;color:#57606a;">Or register it from PowerShell (a member of the store&rsquo;s SQL admin group signs in in the browser, or the Invardia Support app session open in that window is used) &mdash; line 1 downloads the script from Invardia, line 2 runs it:</div>' +
       '<div class="lic-cmd-row" style="display:flex;gap:6px;align-items:flex-start;margin-top:4px;min-width:0;">' +
-      '<code class="lic-cmd" style="flex:1 1 auto;min-width:0;overflow-wrap:anywhere;font-size:11px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:4px 8px;">' + esc(d.command || '') + '</code>' +
+      '<code class="lic-cmd" style="flex:1 1 auto;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:4px 8px;">' + esc(d.command || '') + '</code>' +
       '<button type="button" class="btn-sec lic-copy" style="font-size:11px;padding:2px 8px;">Copy</button></div>' + pimScriptDocLinksFor('Set-PimLicense.ps1') +
       '<div style="font-size:11px;color:#57606a;margin-top:3px;"><code>-UseSignedInAccount</code> signs <b>you</b> in through the browser (no command-line tool, no PowerShell module) &mdash; no certificate, no secret. You do not need it at all if you register above.</div>';
     // Operator 2026-10-01: Pro is bought at invardia.com; paid licences get support at portal.invardia.com.
@@ -8162,7 +8180,19 @@
     catch (e) { host.innerHTML = '<div style="color:#cf222e;font-size:12px;">Failed to load the reports: ' + esc(e.message) + '</div>'; return; }
     const list = Array.isArray(d && d.reports) ? d.reports : [];
     const can = !!(d && d.canEdit), canCad = !!(d && d.canEditCadence);
-    const when = (iso) => { if (!iso) return '<span style="color:#57606a;">never</span>'; try { return esc(fmtTime(new Date(iso), { zone: true })); } catch (_) { return esc(iso); } };
+    const when = (iso) => { try { return esc(fmtTime(new Date(iso), { zone: true })); } catch (_) { return esc(iso); } };
+    const grey = (t) => '<span style="color:#57606a;">' + esc(t) + '</span>';
+    // PIM 100.88: an empty time is never printed as "never". Last sent: "not sent yet". Next run: the time; else what is
+    // true for that row -- switched off, the reminder's own answer (nothing is waiting / due now), "when it happens" for a
+    // mail an event raises, "not scheduled" for a job without a next run.
+    const lastCell = (r) => r.lastSentUtc ? when(r.lastSentUtc) : grey('not sent yet');
+    const nextCell = (r) => {
+      if (!r.enabled) return grey('switched off');
+      if (r.nextRunUtc) return when(r.nextRunUtc) + (r.nextRunNote ? '<div style="color:#57606a;font-size:11px;">' + esc(r.nextRunNote) + '</div>' : '');
+      if (r.nextRunNote) return grey(r.nextRunNote);
+      return grey(r.job ? 'not scheduled' : 'when it happens');
+    };
+    const notMailed = (r) => (r.notMailed || []).length ? '<div class="rptNotMailed" style="color:#9a6700;font-size:11px;">never mailed this reminder (an Invardia address): ' + esc(r.notMailed.join(', ')) + '</div>' : '';
     const kindLbl = { report: 'Report', alert: 'Alert', transactional: 'To the people concerned' };
     let h = '<table class="set-table" id="reportsTable" style="font-size:12px;"><tr><th>Report / alert</th><th>Kind</th><th>Cadence</th><th>On</th><th>Recipients</th><th>Delivery</th><th>Last sent</th><th>Next run</th>' + (can ? '<th></th>' : '') + '</tr>';
     list.forEach((r, i) => {
@@ -8175,7 +8205,7 @@
       const cad = r.intervalMinutes && canCad && r.job ? '<input class="rptCad" type="number" min="5" max="43200" value="' + Number(r.intervalMinutes) + '" style="width:70px;font-size:11.5px;"> min <div style="color:#57606a;font-size:11px;">' + esc(r.cadence || '') + '</div>' : esc(r.cadence || '');
       const del = (r.kind === 'report' && r.type !== 'get-started' && r.type !== 'pending-approvals') ?(can ? '<select class="rptAttach" style="font-size:11.5px;"><option value="link"' + (r.attach !== 'pdf' ? ' selected' : '') + '>link only</option><option value="pdf"' + (r.attach === 'pdf' ? ' selected' : '') + '>PDF attached</option></select>' : esc(r.attach === 'pdf' ? 'PDF attached' : 'link only')) : '<span style="color:#57606a;">mail</span>';
       h += '<tr class="rptRow" data-i="' + i + '"><td><b>' + esc(r.label) + '</b><div style="color:#57606a;font-size:11px;max-width:260px;">' + esc(r.plain || '') + '</div></td><td>' + esc(kindLbl[r.kind] || r.kind) + (r.severity ? ' <span style="color:#57606a;">(' + esc(r.severity) + ')</span>' : '') + '</td>' +
-        '<td>' + cad + '</td><td>' + (r.enabled ? 'on' : '<span style="color:#9a6700;">off</span>') + '</td><td>' + recip + '</td><td>' + del + '</td><td>' + when(r.lastSentUtc) + '</td><td>' + when(r.nextRunUtc) + '</td>' +
+        '<td>' + cad + '</td><td>' + (r.enabled ? 'on' : '<span style="color:#9a6700;">off</span>') + '</td><td>' + recip + notMailed(r) + '</td><td>' + del + '</td><td class="rptLast">' + lastCell(r) + '</td><td class="rptNext">' + nextCell(r) + '</td>' +
         (can ? '<td>' + (r.kind !== 'transactional' && r.recipientList !== 'superAdmins' ? '<button class="btn-sec rptSave">Save</button>' : '') + '</td>' : '') + '</tr>';
     });
     h += '</table><div id="rptMsg" style="margin-top:6px;font-size:12px;"></div>';
@@ -10434,9 +10464,11 @@
         '<b>' + pol + ' polic' + (pol === 1 ? 'y' : 'ies') + '</b> in ' + held.length + ' change set' + (held.length === 1 ? '' : 's') + ': ' + escapeHtml(nouns) +
         (weak ? ' &middot; <b style="color:#cf222e;">' + weak + ' weaken a setting</b>' : ' &middot; none weakens a setting someone set') +
         '. Each change set is shown below with what changes (current &rarr; new).' +
-        (roleAtLeast('Admin')
+        // PIM 100.82 / 100.84: only a SuperAdmin of the tenant approves (the server answers 403 to anyone else) -- everyone
+        // else sees the change sets and who approves them, never a button that cannot work.
+        (roleAtLeast('SuperAdmin')
           ? '<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><button class="btn-pri" id="apprAllBtn">Approve all</button><span id="apprAllMsg" style="font-size:12px;"></span></div>'
-          : '<div style="margin-top:6px;color:#57606a;">An Admin must approve these change sets.</div>') +
+          : '<div id="apprAllNeedsSuper" style="margin-top:6px;color:#57606a;">' + held.length + ' policy change set' + (held.length === 1 ? ' waits' : 's wait') + ' for a SuperAdmin. A SuperAdmin approves ' + (held.length === 1 ? 'this change set' : 'these change sets') + '.</div>') +
       '</div>');
     for (const x of held) {
       const box = document.createElement('div');
@@ -12784,7 +12816,7 @@
     'tier-report':                 'Mails the tier-0 / tier-1 privileged access report.',
     'servicenow-intake':           'Reads requests from the ServiceNow drop store (only when the IntakeEnabled setting is on).',
     'tenant-cache':                'Refreshes the lists of roles, administrative units, groups and Azure scopes the pickers and validation use.',
-    'verify-convergence':          'Re-reads the tenant and proves that what was committed is actually deployed. Items still missing after the grace window are a warning in the daily data quality alert.',
+    'verify-convergence':          'Re-reads the tenant and proves that what was committed is actually deployed. Items still missing after the grace window fail this job and raise the failure alert at once; the daily data quality alert lists them too.',
     'data-quality':                'Sends ONE daily "Data quality alert" when something looks different from the last runs (each scope\'s key numbers against the median of its last 3 runs, with the likely cause from the settings change log) or another warning was raised. Warnings only: it never blocks anything.',
     'hybrid-ad-apply':             'Applies on-premises Active Directory changes for hybrid admin accounts.',
     'hybrid-ad-servers':           'Lists the Windows servers in Active Directory for Discovery, and puts each server\'s PIM group into that server\'s local Administrators (adds only; runs on the hybrid worker).',
@@ -13894,6 +13926,20 @@
   // auditState.months: '3' (default) | '12' | 'all' -- the window selector ([H6]:
   // the old hard 3-month cap is gone; 'all' reads the whole history server-side).
   let auditState = { category: 'all', q: '', page: 1, pageSize: 50, months: '3', from: '', to: '' };
+  // PIM 100.83 (owner 2026-10-11: "hard to see the actual change"): a policy change row shows the change in words (the
+  // server's `change`: which policy, each setting before -> after, tightens / loosens); the raw record the engine wrote
+  // stays one click away, folded -- never as cut-off JSON in the column.
+  function auditRawHtml(e) {
+    if (!e || !/^engine\.(groupspolicies|entrarolepolicies|azrespolicies)\./i.test(String(e.action || ''))) return '';
+    const obj = v => { if (typeof v === 'string' && /^\s*[{[]/.test(v)) { try { return JSON.parse(v); } catch (_) { return v; } } return v == null ? null : v; };
+    const b = obj(e.before), a = obj(e.after);
+    if (b == null && a == null) return '';
+    let raw = '';
+    try { raw = JSON.stringify(b == null ? a : { before: b, after: a }, null, 1); } catch (_) { raw = ''; }
+    if (!raw) return '';
+    return '<details class="auditRaw" style="margin-top:3px;"><summary style="cursor:pointer;color:#57606a;font-size:11px;">details (the raw record)</summary>' +
+      '<pre style="white-space:pre-wrap;word-break:break-all;font-size:10.5px;margin:2px 0 0;max-height:240px;overflow:auto;">' + escapeHtml(raw) + '</pre></details>';
+  }
   async function renderAudit() {
     const body = document.getElementById('auditBody');
     if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- the audit trail needs the server.</div>'; return; }
@@ -13965,7 +14011,7 @@
           `<td>${esc(e.target || '')}</td>` +
           `<td style="color:${resColor};">${esc(res)}</td>` +
           // One change per line (a commit lists "Added: group X -> member of group Y (Eligible, 90 days)" ...).
-          `<td style="color:#24292f;max-width:560px;white-space:pre-line;">${esc(e.change || '')}</td>` +
+          `<td class="auditChange" style="color:#24292f;max-width:560px;white-space:pre-line;">${esc(e.change || '')}${auditRawHtml(e)}</td>` +
         `</tr>`);
       }
     }
@@ -14976,8 +15022,8 @@
     // APPROVES the policies (a confirmation). Done = approved AND nothing held -- never "nothing waiting" alone.
     { id: 'policies', title: 'Policies', required: true,
       what: 'The activation policies PIM applies (how long an activation lasts, MFA, justification, approval) for each kind of policy. Verify them, change what does not fit, and approve them.',
-      check: c => { const h = Number((c.jobs && c.jobs.heldCount) || 0); const k = c.confirm && c.confirm.policies;
-        return { done: h === 0 && !!k, note: h ? h + ' change set(s) waiting for your approval' : (k ? ('approved by ' + (k.by || 'an admin')) : 'not verified and approved yet') }; } },
+      check: c => { const h = gsPolicyHoldCount(c); const k = c.confirm && c.confirm.policies;
+        return { done: h === 0 && !!k, note: h ? h + ' change set(s) wait for a SuperAdmin' : (k ? ('approved by ' + (k.by || 'an admin')) : 'not verified and approved yet') }; } },
     { id: 'alerts', title: 'Alert recipients', required: true, need: 'Admin',
       what: 'Who receives the alerts when a guard holds something or a job fails.',
       check: c => { const n = ((c.alerting && c.alerting.recipients) || []).filter(Boolean).length; return { done: n > 0, note: n + ' recipient(s)' }; } },
@@ -15018,10 +15064,19 @@
     }
     return c;
   }
+  // PIM 100.84 (owner 2026-10-11: "there is inconsistence among things"): how many policy change sets wait for a SuperAdmin
+  // NOW -- the hold RECORDS' count (tiles.jobs.policyHoldCount, the same records the Approvals page lists), never the number
+  // of jobs whose last run was held. Only a server that does not send it yet falls back to the jobs' count.
+  function gsPolicyHoldCount(c) {
+    const j = (c && c.jobs) || {};
+    if (typeof j.policyHoldCount === 'number') return j.policyHoldCount;
+    return Number(j.heldCount || 0);
+  }
   function gsPaintBadge(steps) {
     const openRequired = (steps || []).filter(s => s.required && !s.done && !s.deferred).length;
     const badge = document.getElementById('getStartedBadge');
-    if (badge) { badge.textContent = '!'; badge.style.display = openRequired ? '' : 'none'; }
+    // PIM 100.85: an open required step is a setup choice, not an error -- the badge (and its menu dot) is amber, never red
+    if (badge) { badge.textContent = '!'; badge.style.display = openRequired ? '' : 'none'; badge.style.background = pimSevColour('amber'); badge.style.color = '#fff'; }
     try { const act = document.querySelector('#tabs .tab.active'); syncNavGroups(act ? act.dataset.tab : null); } catch (_) { }
   }
   // Break-glass reminder (owner 2026-10-08): while no break-glass account is protected -- skipped for now or never set --
@@ -16087,10 +16142,12 @@
       load: async () => ({ view: ptNormalizeView(await api('GET', '/api/policy-templates')) }),
       body: (c, st) => {
         const v = st && st.view;
-        const held = Number((c.jobs && c.jobs.heldCount) || 0);
+        const held = gsPolicyHoldCount(c);
         const k = c.confirm && c.confirm.policies;
         const canEdit = !!(v && v.canEdit) && roleAtLeast('SuperAdmin');
-        let h = held ? '<div class="gs-facts" style="color:#9a6700;">' + held + ' policy change set(s) wait for your approval -- shown above, each with what changes (current &rarr; new). Approve them there.</div>' : '';
+        // PIM 100.84: the count is the hold records' (the panel above renders the same records), so the two never disagree.
+        let h = held ? '<div class="gs-facts gsPolicyHeld" style="color:#9a6700;">' + held + ' policy change set(s) wait for a SuperAdmin -- shown above, each with what changes (current &rarr; new). ' +
+          (roleAtLeast('SuperAdmin') ? 'Approve them there.' : 'A SuperAdmin approves them there.') + '</div>' : '';
         if (!v || v.readable === false) return h + '<div class="gsProblem" style="display:block;">The policy templates could not be read' + (v && v.reason ? ': ' + escapeHtml(String(v.reason)) : '') + ' -- nothing can be verified yet.</div>';
         h += '<div class="gs-facts">The policies PIM applies when someone activates. Verify each kind' + (canEdit ? ', change what does not fit' : '') + ', then approve.</div>';
         h += GS_POLICY_KINDS.map(kd => gsPolicyKindHtml(kd[0], v, null, canEdit)).join('');
@@ -16315,7 +16372,7 @@
     const openReq = steps.filter(s => s.required && !s.done && !s.deferred);
     // a step skipped for now (break-glass) is grey like an optional one: not open, not done
     const pill = (s, i) => '<button type="button" class="gsPill" data-step="' + escapeHtml(s.id) + '" data-gs-kind="' + (s.done ? 'done' : s.deferred ? 'deferred' : s.required ? 'open' : 'optional') + '" style="border-radius:16px;padding:4px 12px;margin:0 6px 6px 0;font-size:12.5px;cursor:pointer;border:1px solid ' +
-      (i === idx ? '#0969da;background:#0969da;color:#fff;' : s.done ? '#4ac26b;background:#dafbe1;color:#1a7f37;' : (s.required && !s.deferred) ? '#ff8182;background:#ffebe9;color:#cf222e;' : '#d0d7de;background:#f6f8fa;color:#57606a;') + '">' +
+      (i === idx ? '#0969da;background:#0969da;color:#fff;' : s.done ? '#4ac26b;background:#dafbe1;color:#1a7f37;' : (s.required && !s.deferred) ? (pimSevColour('amber', 'line') + ';background:' + pimSevColour('amber', 'soft') + ';color:' + pimSevColour('amber', 'fg') + ';') : '#d0d7de;background:#f6f8fa;color:#57606a;') + '">' +
       (s.done ? '&#10003; ' : (s.required && !s.deferred) ? '<b>!</b> ' : '') + escapeHtml(s.title) + (s.deferred ? ' <span style="font-size:11px;opacity:.8;">(skipped for now)</span>' : s.required ? '' : ' <span style="font-size:11px;opacity:.8;">(optional)</span>') + '</button>';
     let fields = '';
     if (blocked) fields = '<div class="gs-hint gsNeeds">Only ' + (cur.need === 'SuperAdmin' ? 'a SuperAdmin' : 'an Admin') + ' can do this step -- ask one of them. Save &amp; next moves on.</div>';
@@ -16326,7 +16383,7 @@
       '<div style="display:flex;justify-content:space-between;font-size:12px;color:#57606a;"><span class="gsCount">' + done + ' of ' + total + ' steps done</span><span>' + pct + '%</span></div>' +
       '<div style="height:8px;background:#eaeef2;border-radius:4px;margin:4px 0 12px;"><div class="gsBar" style="height:8px;width:' + pct + '%;background:#0969da;border-radius:4px;"></div></div>' +
       '<div class="gsPills">' + steps.map(pill).join('') + '</div>' + pimSecurityPackLinkHtml() +
-      (openReq.length ? '<div class="gsSetupNote" style="font-size:12px;color:#57606a;margin:0 0 8px;">The installation is complete. A red step is a setup choice only you can make for your organisation (who, which roles, where mail goes) -- not an installation failure.</div>' : '') +
+      (openReq.length ? '<div class="gsSetupNote" style="font-size:12px;color:#57606a;margin:0 0 8px;">The installation is complete. An amber step is a setup choice only you can make for your organisation (who, which roles, where mail goes) -- not an installation failure.</div>' : '') +
       (staged ? '<div class="gsStaged">' + staged + ' change(s) are saved on this page but not committed yet -- nothing reaches the tenant until they are committed. <button type="button" class="gsCommitNow primary">Commit now</button></div>' : '') +
       '<div class="gsStep" data-gs-step="' + escapeHtml(cur.id) + '" style="border:1px solid #d0d7de;border-radius:8px;padding:16px 18px;margin-top:6px;background:#fff;">' +
         ((opts && opts.finished) ? (openReq.length
@@ -16335,7 +16392,7 @@
         '<div style="font-size:11px;letter-spacing:.6px;color:#0969da;font-weight:600;">STEP ' + (idx + 1) + ' OF ' + total + (cur.required ? '' : ' &middot; OPTIONAL') + '</div>' +
         '<h3 class="gsTitle" style="margin:4px 0 6px;">' + escapeHtml(cur.title) + '</h3>' +
         '<div class="gsWhat" style="font-size:13px;color:#24292f;margin-bottom:8px;">' + escapeHtml(cur.what) + '</div>' +
-        '<div class="gsState" data-gs-state="' + (cur.done ? 'done' : cur.deferred ? 'deferred' : cur.required ? 'open' : 'optional') + '" style="font-size:12.5px;margin-bottom:12px;color:' + (cur.done ? '#1a7f37' : (cur.required && !cur.deferred) ? '#cf222e' : '#57606a') + ';">' +
+        '<div class="gsState" data-gs-state="' + (cur.done ? 'done' : cur.deferred ? 'deferred' : cur.required ? 'open' : 'optional') + '" style="font-size:12.5px;margin-bottom:12px;color:' + (cur.done ? '#1a7f37' : (cur.required && !cur.deferred) ? pimSevColour('amber', 'fg') : '#57606a') + ';">' +
           (cur.done ? '&#10003; Done' : cur.deferred ? 'Skipped for now' : cur.required ? '! Not done yet' : 'Optional -- not done yet') + (cur.note ? ' -- ' + escapeHtml(cur.note) : '') + '</div>' +
         '<div class="gsExtra"></div>' +
         '<form class="gsForm" novalidate autocomplete="off">' +
@@ -16407,10 +16464,16 @@
   // say to whom it deploys when running cmdlets ... expand the cmdlets so it is shown by default": the page writes NOTHING
   // to the tenant (no Create / Upload buttons, no in-page Microsoft sign-in). Every step shows its status (read-only), the
   // published script with this environment's values filled in -- download from Invardia, then run -- Copy and Check again.
-  // WHO: a group per channel, picked from the directory (GET /api/directory/groups), saved as PIM's own setting
-  // ActivatorTargets (PUT /api/settings/activator-targets) and filled into every command as -AssignToGroupId; with no
-  // group the command assigns nobody, and says so. Never all users / all devices. Each command is SELF-CONTAINED (owner
-  // 2026-10-08: "this guide is wrong as it refers to 3 files"): one download, one command.
+  // DEPLOYMENT GROUP: a group per channel, picked from the directory (GET /api/directory/groups), saved as PIM's own
+  // setting ActivatorTargets (PUT /api/settings/activator-targets) and filled into the Intune Remediation command as
+  // -AssignToGroupId (and named in the Edge for Business guide); with no group that command assigns nobody, and says so.
+  // Never all users / all devices. Each command is SELF-CONTAINED (owner 2026-10-08: "this guide is wrong as it refers
+  // to 3 files"): one download, one command.
+  // 100.90 (owner 2026-10-11, step 1: "this is not true and should be removed we dont use it to assign or login. it is
+  // used in pim activator so srip out the user assignement part"): the Entra apps step has NO sign-in assignment -- no
+  // assignment status per app, no group pickers there, no deploy line under the app commands, no group in them.
+  // The app is how the extension signs in; what a person can activate is decided by their PIM eligibility. The group
+  // lives only in the Intune and Edge steps, worded as deployment (which devices / users get the extension).
   // ===================================================================================================================
   const ACT_GUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
   const ACT = { d: null, step: '', built: null, edge: null, form: null, sched: null, host: null, edgeExt: null, groups: {} };
@@ -16428,14 +16491,15 @@
   function actPrettyJson(t) { try { return JSON.stringify(JSON.parse(t), null, 2); } catch (_) { return String(t || ''); } }
   function actTarget(ch) { const t = (ACT.d && ACT.d.targets) || {}; return t[ch] && t[ch].groupId ? t[ch] : null; }
   function actLabel(ch) { return ch === 'Test' ? 'TEST' : 'PROD'; }
-  // "PROD -- <group>" or "PROD -- no group chosen yet" -- never "everyone".
+  // The deployment group of a channel: "PROD -- <group>" or "PROD -- no group chosen yet" -- never "everyone".
   function actWhoText(ch) { const t = actTarget(ch); return actLabel(ch) + ' -- ' + (t ? (t.displayName || t.groupId) : 'no group chosen yet'); }
-  // "Download it from Invardia, then run it" + to whom it deploys. Shown open: the command IS the step.
-  function actScript(id, file, cmd, ch, what) {
-    const t = ch ? actTarget(ch) : null;
-    const who = !ch ? '' : t
-      ? '<div class="act-deploys ok">Deploys to: <b>' + escapeHtml(t.displayName || t.groupId) + '</b> <span class="act-dim">(' + escapeHtml(t.groupId) + ')</span></div>'
-      : '<div class="act-deploys warn">Deploys to: <b>nobody yet</b> -- nobody gets ' + escapeHtml(what || 'it') + ' until you assign a group (choose it above and the command carries it).</div>';
+  // "Download it from Invardia, then run it". Shown open: the command IS the step. intuneCh (the Intune Remediation
+  // command only) adds the group Intune assigns it to -- deployment, never who may sign in (100.90).
+  function actScript(id, file, cmd, intuneCh) {
+    const t = intuneCh ? actTarget(intuneCh) : null;
+    const who = !intuneCh ? '' : t
+      ? '<div class="act-deploys ok">Intune assigns it to: <b>' + escapeHtml(t.displayName || t.groupId) + '</b> <span class="act-dim">(' + escapeHtml(t.groupId) + ')</span></div>'
+      : '<div class="act-deploys warn">Intune assigns it to: <b>no group yet</b> -- the Remediation is uploaded but reaches no device until you choose the deployment group above (the command then carries it).</div>';
     // SCRIPT-DOC-1: download + run (pimSupportCmd, owner 2026-10-11) and the "What does this script do?" link next to Copy.
     return '<div class="act-cmd">' + actCode(id, pimSupportCmd(file, [cmd])) + pimScriptDocLinksFor(file) + who + '</div>';
   }
@@ -16449,7 +16513,8 @@
     return { items: gs.map(g => ({ value: g.id, label: g.displayName || g.id, sub: (g.kind || 'group') + ' group', type: 'group' })),
       note: (r && r.truncated) ? 'more groups match -- keep typing to narrow' : ((r && r.matchMode === 'startswith') ? 'prefix match only' : '') };
   }
-  // The target-group picker for one channel: search by name, pick, saved at once (PIM's own setting, audited).
+  // The deployment-group picker for one channel (Intune + Edge steps): search by name, pick, saved at once (PIM's own
+  // setting, audited). Deployment only -- it never decides who may sign in.
   function actPicker(ch) {
     const t = actTarget(ch), can = !!(ACT.d && ACT.d.canSetTargets);
     return '<div class="act-pick"><span class="act-pick-l">' + escapeHtml(actWhoText(ch)) + '</span>' +
@@ -16487,10 +16552,10 @@
   // ---- the steps -----------------------------------------------------------------------------------------------------
   function actSteps() {
     const a = (ACT.d && ACT.d.apps) || {}, p = a.Released || {}, t = a.Test || {};
-    const assigned = x => !!(x.assignmentRequired === true && (x.assigned || []).length);
-    const appsDone = !!(p.found && p.redirectOk && assigned(p));
+    // 100.90: done = the PROD app exists with its sign-in addresses. Who is assigned to the app is not part of it.
+    const appsDone = !!(p.found && p.redirectOk);
     const appsNote = !p.found ? (p.readError ? 'could not read the apps' : 'PROD app missing')
-      : !p.redirectOk ? 'sign-in addresses missing' : p.assignmentRequired === false ? 'PROD app is open to EVERY user' : !assigned(p) ? 'nobody assigned yet' : ('PROD ready' + (t.found ? (assigned(t) || t.sharedWith ? ', TEST ready' : ', TEST: nobody assigned') : ', no TEST app'));
+      : !p.redirectOk ? 'sign-in addresses missing' : ('PROD ready' + (t.found ? (t.redirectOk ? ', TEST ready' : ', TEST: sign-in addresses missing') : ', no TEST app'));
     return [
       { id: 'apps', title: 'Entra apps', required: true, done: appsDone, note: appsNote },
       { id: 'catalog', title: 'Settings', required: true, done: !!(p.appId || (ACT.built && ACT.built.ok)), note: ACT.built ? 'built for ' + actLabel(ACT.built.channel) : 'defaults from this environment' },
@@ -16520,8 +16585,7 @@
     host.innerHTML =
       '<div class="act-head"><div><div class="act-title">Client onboarding &middot; PIM Activator</div>' +
         '<div class="act-sub">The browser extension your admins activate PIM with, in tenant <code>' + escapeHtml(d.tenantId || '') + '</code>. Edge is installed by <b>Edge for Business</b>, the <b>Intune remediation</b> gives it its settings (Edge and Chrome). ' +
-        'This page writes nothing to your tenant: each step gives you the command to run, filled in for this environment, and to whom it deploys.</div></div>' +
-        '<div class="act-who" id="actWho">Who gets it: <b>' + escapeHtml(actWhoText('Released')) + '</b><br><b>' + escapeHtml(actWhoText('Test')) + '</b></div></div>' +
+        'This page writes nothing to your tenant: each step gives you the command to run, filled in for this environment.</div></div></div>' +
       '<div class="act-prog"><span>' + done + ' of ' + total + ' steps done</span><span>' + pct + '%</span></div>' +
       '<div class="act-bar"><div style="width:' + pct + '%;"></div></div>' +
       '<div class="act-pills">' + steps.map(pill).join('') + '</div>' +
@@ -16547,22 +16611,17 @@
 
   function actStepApps(body, d) {
     const a = d.apps || {}, prod = a.Released || {}, test = a.Test || {}, c = d.commands || {};
-    const who = x => x.assignmentReadError ? '<span class="warn">could not read who may sign in: ' + escapeHtml(x.assignmentReadError) + '</span>'
-      : x.assignmentRequired === false ? '<span class="bad">! open to EVERY user (assignment not required)</span>'
-      : x.assignmentRequired === true ? ((x.assigned || []).length ? '<span class="ok">&#10003; only: ' + escapeHtml(x.assigned.map(p => p.displayName + (p.type && p.type !== 'Group' ? ' (' + p.type + ')' : '')).join(', ')) + '</span>' : '<span class="bad">! nobody assigned -- nobody can sign in</span>')
-      : '';
-    const row = (ch, x) => '<tr><td><b>' + escapeHtml(x.name || '') + '</b><div class="act-dim">' + escapeHtml(actWhoText(ch)) + '</div></td>' +
+    // 100.90: the app, and its sign-in addresses -- nothing about who is assigned to it.
+    const row = x => '<tr><td><b>' + escapeHtml(x.name || '') + '</b></td>' +
       '<td>' + (x.found && x.sharedWith ? '<span class="ok">&#10003; uses the ' + escapeHtml(x.sharedWith) + ' app</span>' : x.found ? '<span class="ok">&#10003; exists</span>' : x.readError ? '<span class="warn">could not read: ' + escapeHtml(x.readError) + '</span>' : '<span class="bad">! not created</span>') +
         (x.appId ? '<div class="act-dim"><code>' + escapeHtml(x.appId) + '</code></div>' : '') + '</td>' +
-      '<td>' + (x.found ? (x.redirectOk ? '<span class="ok">&#10003; sign-in addresses</span>' : '<span class="bad">! sign-in addresses missing</span>') : '') + '</td>' +
-      '<td>' + (x.found ? who(x) : '') + '</td></tr>';
+      '<td>' + (x.found ? (x.redirectOk ? '<span class="ok">&#10003; sign-in addresses</span>' : '<span class="bad">! sign-in addresses missing</span>') : '') + '</td></tr>';
     body.innerHTML =
-      '<div class="act-p">The extension signs in through these app registrations. The script creates or repairs the app, sets it to <b>Assignment required</b> (only the people you assign can sign in) and assigns the group you choose here -- direct, permanent members (Entra does not pass app access through nested groups, and a PIM-eligible membership would lock someone out of the tool that activates it). Run it as an Application Administrator (Privileged Role Administrator for the tenant-wide consent).</div>' +
-      '<table class="act-tbl">' + row('Released', prod) + row('Test', test) + '</table>' +
-      '<div class="act-h2">Who may sign in</div>' + actPicker('Released') + actPicker('Test') +
-      '<div class="act-h2">PROD app</div>' + actScript('actAppProdCmd', 'Deploy-PimActivatorBackend.ps1', c.appProd || '', 'Released', 'the PIM Activator (nobody can sign in)') +
-      '<div class="act-h2">TEST app</div>' + actScript('actAppTestCmd', 'Deploy-PimActivatorBackend.ps1', c.appTest || '', 'Test', 'the TEST build (nobody can sign in)') +
-      '<div class="act-dim">The script needs nothing else: it signs you in in the browser (no PowerShell modules), reads everything back and prints to whom it deploys.</div>';
+      '<div class="act-p">The extension signs in through these app registrations. The script creates or repairs the app: its sign-in addresses, the permissions the extension needs, and the tenant-wide consent for them. The app gives nobody any access -- what a person can activate is decided by their PIM eligibility. Run it as an Application Administrator (Privileged Role Administrator for the tenant-wide consent).</div>' +
+      '<table class="act-tbl">' + row(prod) + row(test) + '</table>' +
+      '<div class="act-h2">PROD app</div>' + actScript('actAppProdCmd', 'Deploy-PimActivatorBackend.ps1', c.appProd || '') +
+      '<div class="act-h2">TEST app</div>' + actScript('actAppTestCmd', 'Deploy-PimActivatorBackend.ps1', c.appTest || '') +
+      '<div class="act-dim">The script needs nothing else: it signs you in in the browser (no PowerShell modules) and reads everything back.</div>';
   }
 
   function actCatalogBody() {
@@ -16635,7 +16694,9 @@
     const s = ACT.sched || { dailyTime: '09:00', everyHours: '' };
     body.innerHTML =
       '<div class="act-p">The Remediation writes the settings from step 2 to the devices of the group, every day (Edge and Chrome). <b>One download, one command</b>: the script builds <i>Detect-PimActivator.ps1</i> and <i>Remediate-PimActivator.ps1</i> for this environment itself (next to it), uploads them as <i>PIM Activator settings (' + actLabel(ch) + ')</i>, reads them back and assigns them to the group below -- or to nobody, when no group is chosen.</div>' +
-      '<div class="act-h2">Who gets it</div>' + actPicker(ch) +
+      // 100.90: deployment targeting (which devices / users Intune sends it to) -- worded so it is not read as sign-in.
+      '<div class="act-h2">Deployment group (Intune)</div>' +
+      '<div class="act-dim">The group Intune sends the Remediation to. It only decides where the settings are deployed -- not who may sign in to the PIM Activator.</div>' + actPicker(ch) +
       '<div class="act-form"><label>When</label><span class="act-row">daily at <input id="actTime" value="' + escapeHtml(s.dailyTime || '09:00') + '" style="width:70px;"> or every <input id="actEvery" type="number" min="1" max="23" value="' + escapeHtml(s.everyHours || '') + '" placeholder="-" class="act-num"> hour(s)</span></div>' +
       '<div class="act-h2">The command</div><div id="actPubCmd" class="act-dim">Building&hellip;</div>' +
       '<div class="act-dim">What it needs: this one file, Windows PowerShell 5.1 or PowerShell 7, and an Intune Administrator sign-in in the browser (no PowerShell modules). Change the channel or the settings in step 2.</div>' +
@@ -16650,7 +16711,7 @@
       try {
         const r = await actBuild(), cmd = (r.commands || {}).remediation || '';
         out.className = '';
-        out.innerHTML = cmd ? actScript('actPubCmdText', 'Publish-PimActivatorRemediation.ps1', cmd, ch, 'the settings')
+        out.innerHTML = cmd ? actScript('actPubCmdText', 'Publish-PimActivatorRemediation.ps1', cmd, ch)
           : '<span class="bad">Create the ' + actLabel(ch) + ' app first (step 1) -- the command needs its client id (or type it in step 2).</span>';
         actWireCopy(out);
         if (dl) {
@@ -16700,7 +16761,9 @@
     };
     body.innerHTML =
       '<div class="act-p">Edge for Business (the Edge management service) force-installs the extension. Microsoft offers <b>no API</b> for it, so this is a guide: the fields below are exactly what the Microsoft 365 admin center asks, and the two settings at the bottom can be pasted instead. Put <b>both</b> extensions in <b>one</b> policy when test users need both -- the service does not merge extension lists across policies.</div>' +
-      '<div class="act-h2">Who gets it</div>' + actPicker('Released') + actPicker('Test') +
+      // 100.90: deployment targeting (who the Edge policy is assigned to) -- worded so it is not read as sign-in.
+      '<div class="act-h2">Deployment group (Edge for Business)</div>' +
+      '<div class="act-dim">The group you assign the Edge policy to in the admin center (step 5 of the guide). It only decides who gets the extension installed -- not who may sign in to the PIM Activator.</div>' + actPicker('Released') + actPicker('Test') +
       '<div class="act-exts">' + ACT.edgeExt.map(card).join('') + '</div>' +
       '<div class="act-h2">The guide</div>' +
       '<ol class="act-guide">' +
@@ -16745,7 +16808,7 @@
 
   function actStepServers(body, d) {
     body.innerHTML =
-      '<div class="act-p"><b>No Intune yet?</b> Onboard each admin PC (or server) with this script instead of the Intune remediation -- run it as administrator on the machine. It writes the install and the settings policies for Edge and Chrome, the same as Edge for Business + the Remediation do, for everyone who uses that machine. Who may sign in stays the group assigned to the app in step 1.</div>' +
+      '<div class="act-p"><b>No Intune yet?</b> Onboard each admin PC (or server) with this script instead of the Intune remediation -- run it as administrator on the machine. It writes the install and the settings policies for Edge and Chrome, the same as Edge for Business + the Remediation do, for everyone who uses that machine.</div>' +
       '<div id="actServerOut" class="act-dim">Building&hellip;</div>' +
       '<div class="act-dim">What it needs: this one file, an elevated PowerShell. With the tenant and app filled in it signs in to nothing. Domain-joined estates without Intune: <code>Deploy-PimActivatorHybrid.ps1 -Target DomainGpo</code> writes the same through a GPO (' + pimScriptDocLink('Deploy-PimActivatorHybrid') + ').</div>';
     (async () => {
@@ -16754,7 +16817,7 @@
       if (!cmd) { try { cmd = ((await actBuild()).commands || {}).server || ''; } catch (_) { cmd = (d.commands || {}).server || ''; } }
       if (!out) return;
       out.className = '';
-      out.innerHTML = actScript('actServerCmd', 'Deploy-PimActivatorClient.ps1', cmd || (d.commands || {}).server || '', '', '');
+      out.innerHTML = actScript('actServerCmd', 'Deploy-PimActivatorClient.ps1', cmd || (d.commands || {}).server || '');
       actWireCopy(out);
     })();
   }
@@ -17603,6 +17666,7 @@
     else if (j.status === 'unimplemented') { bg = '#fff1d6'; fg = '#9a6700'; label = 'not implemented'; }
     // 71.13: a safety breaker HELD a change set -- amber "needs approval". Never green (the approval would be hidden),
     // never red "failed" (nothing broke).
+    else if (j.status === 'held' && j.heldResolved) { bg = '#eaeef2'; fg = '#57606a'; label = 'held earlier -- nothing waits now'; }   // PIM 100.84: no provider holds that change set any more
     else if (j.status === 'held' && j.approvedPending) { bg = '#dafbe1'; fg = '#1a7f37'; label = 'approved -- applies next run'; }   // 2026-09-21: an approved hold is not a blocker
     else if (j.status === 'held') { bg = '#fff1d6'; fg = '#9a6700'; label = 'needs approval'; }
     // §95.2o: an update restart / a platform stop cut the last run short -- not a failure, the next run decides. Twice in a
@@ -17705,7 +17769,8 @@
     b.title = (d.pending || 0) + ' awaiting commit, ' + (d.failed || 0) + ' failed, ' +
       inFlight + ' committed and waiting for the engine';
     // A failure needs a person, not patience -- so it does not wear the same colour as work in flight.
-    b.style.background = (d.failed || 0) > 0 ? '#8250df' : (needsYou > 0 ? '#cf222e' : '#0969da');
+    // PIM 100.85: red only when an entry FAILED; changes that only wait for a commit are amber (waiting, not an error).
+    b.style.background = (d.failed || 0) > 0 ? pimSevColour('red') : (needsYou > 0 ? pimSevColour('amber') : '#0969da');
     try { const a = document.querySelector('#tabs .tab.active'); syncNavGroups(a ? a.dataset.tab : null); } catch (_) {}
   }
 
@@ -18259,7 +18324,9 @@
     // acknowledge). A guard that still holds trips again on every run (jobs run every 5-30 min), so only trips seen in the
     // last 2 hours are current; older ones fold into "earlier (n)".
     const STANDING_MS = 2 * 60 * 60 * 1000;
-    const isCurrent = g => { const t = Date.parse(String(g.lastSeenUtc || '')); return !isNaN(t) && (Date.now() - t) <= STANDING_MS; };
+    // PIM 100.84: a trip the engine CLEARED afterwards (clearedUtc: a later run did not hold) is not current, however recent.
+    const isCleared = g => { const c = Date.parse(String(g.clearedUtc || '')), t = Date.parse(String(g.lastSeenUtc || '')); return !isNaN(c) && !isNaN(t) && c >= t; };
+    const isCurrent = g => { const t = Date.parse(String(g.lastSeenUtc || '')); return !isNaN(t) && (Date.now() - t) <= STANDING_MS && !isCleared(g); };
     const list = all.filter(isCurrent);
     const earlier = all.filter(g => !isCurrent(g));
     if (!all.length || !body) return;
@@ -18309,7 +18376,7 @@
     const rels = Array.isArray(d.releases) ? d.releases : [];
     pimExportSet('guards', 'Guards', () => [   // 100.67
       pimExportRows('Guards', [['Guard', g => g.title || g.guardId], ['Id', 'guardId'],
-        ['State', g => g.never ? 'never releasable' : (g.release === 'approval' ? 'approved elsewhere' : (g.state === 'holding' ? 'holding' : 'clear'))],
+        ['State', g => g.never ? 'never releasable' : ((g.guardId === 'engine.policy-mass-change' && g.policyHoldsKnown === true) ? (asList(g.policyHolds).some(x => x && !x.approved) ? 'holding' : 'clear') : (g.release === 'approval' ? 'approved elsewhere' : (g.state === 'holding' ? 'holding' : 'clear')))],
         ['Last trip', 'lastTripUtc'], ['Trips', 'tripCount'], ['What it does', 'what'],
         ['Holds now', g => asList(g.holds).map(h => (h.scope || '') + ' ' + (h.count != null ? h.count : asList(h.items).length) + ' item(s)' + (h.percent != null ? ' (' + h.percent + '%)' : '')).join('; ')]], cat),
       pimExportRows('Releases', [['Guard', 'guardId'], ['Scope', 'scope'], ['How long', r => r.mode === 'until' ? 'until ' + fmtTime(r.expiresUtc) : 'one run'], ['State', r => r.state || r.status],
@@ -18318,7 +18385,26 @@
     const me = String(d.me || '').toLowerCase();
     const short = h => String(h || '').slice(0, 12);
     const badge = (txt, bg, fg) => '<span class="gp-badge" style="display:inline-block;padding:0 7px;border-radius:9px;font-size:11px;font-weight:600;background:' + bg + ';color:' + fg + ';">' + escapeHtml(txt) + '</span>';
+    // PIM 100.84 (owner 2026-10-11): the policy breaker's row says what it holds NOW -- the hold records the server read
+    // (the same ones the Approvals page lists), never only "approved elsewhere".
+    const polKnown = g => g.guardId === 'engine.policy-mass-change' && g.policyHoldsKnown === true;
+    const polWaiting = g => asList(g.policyHolds).filter(x => x && !x.approved);
+    const polNowHtml = g => {
+      if (g.guardId !== 'engine.policy-mass-change') return '';
+      if (!polKnown(g)) return '<div class="gp-pol-unknown" style="color:#9a6700;font-size:11.5px;">What it holds right now could not be read -- <a href="#" class="gp-pol-open" data-provider="">open Approvals</a>.</div>';
+      const all = asList(g.policyHolds).filter(Boolean);
+      if (!all.length) return '<div class="gp-pol-none" style="color:#8c959f;font-size:11.5px;">Holds nothing right now.</div>';
+      return all.map(x => {
+        const n = Number(x.changes) || 0, what = (POLICY_HOLD_PROVIDERS[x.code] || {}).noun || 'policy';
+        const prov = String(x.provider || '').toLowerCase();
+        return x.approved
+          ? '<div class="gp-pol-approved" data-provider="' + escapeHtml(prov) + '" style="font-size:11.5px;color:#1a7f37;">' + n + ' ' + escapeHtml(what) + ' change' + (n === 1 ? '' : 's') + ' approved' + (x.approvedBy ? ' by ' + escapeHtml(x.approvedBy) : '') + ' -- made on the next run.</div>'
+          : '<div class="gp-pol-hold" data-provider="' + escapeHtml(prov) + '" style="font-size:11.5px;border-top:1px dashed #d0d7de;padding:4px 0;"><b>Holds ' + n + ' ' + escapeHtml(what) + ' change' + (n === 1 ? '' : 's') + '</b>' +
+            (Number(x.weakening) ? ' (' + Number(x.weakening) + ' weaken a setting)' : '') + ' -- waits for a SuperAdmin &middot; <a href="#" class="gp-pol-open" data-provider="' + escapeHtml(prov) + '">open</a></div>';
+      }).join('');
+    };
     const stateOf = g => g.never ? badge('never releasable', '#eaeef2', '#57606a')
+      : polKnown(g) ? (polWaiting(g).length ? badge('holding', '#ffebe9', '#cf222e') : badge('clear', '#dafbe1', '#1a7f37'))
       : g.release === 'approval' ? badge('approved elsewhere', '#ddf4ff', '#0969da')
       : g.state === 'holding' ? badge('holding', '#ffebe9', '#cf222e') : badge('clear', '#dafbe1', '#1a7f37');
     const localNowPlus = hours => { const t = new Date(Date.now() + hours * 3600000 - new Date().getTimezoneOffset() * 60000); return t.toISOString().slice(0, 16); };
@@ -18346,7 +18432,7 @@
         '<td style="padding:6px 8px;vertical-align:top;white-space:nowrap;">' + stateOf(g) +
           (g.lastTripUtc ? '<div style="color:#8c959f;font-size:11px;">last trip ' + escapeHtml(fmtTime(g.lastTripUtc)) + '</div>' : '') + '</td>' +
         '<td style="padding:6px 8px;vertical-align:top;font-size:12px;"><div style="color:#57606a;">' + escapeHtml(g.what || '') + '</div>' +
-          (holds || (g.never || g.release !== 'release' ? '' : '<div style="color:#8c959f;font-size:11.5px;">Holds nothing right now.</div>')) + '</td></tr>';
+          (holds || (g.never || g.release !== 'release' ? '' : '<div style="color:#8c959f;font-size:11.5px;">Holds nothing right now.</div>')) + polNowHtml(g) + '</td></tr>';
     }).join('');
     const relRows = rels.slice().sort((a, b) => String(b.createdUtc || '').localeCompare(String(a.createdUtc || ''))).map(r => {
       const st = r.state || r.status || '';
@@ -18387,6 +18473,8 @@
       focusDeepLinkTarget(row);
     }
     const say = (msg, bad) => { const n = document.createElement('div'); n.className = 'gp-msg'; n.style.cssText = 'font-size:12px;margin:6px 0;color:' + (bad ? '#cf222e' : '#1a7f37'); n.textContent = msg; body.insertBefore(n, body.firstChild); };
+    // PIM 100.84: "open" on the policy breaker's row goes to Approvals, on THAT change set (where a SuperAdmin approves it).
+    body.querySelectorAll('.gp-pol-open').forEach(a => a.addEventListener('click', ev => { ev.preventDefault(); APPR_FOCUS_CHANGESET = String(a.dataset.provider || ''); switchTab('approvals'); }));
     body.querySelectorAll('.gp-release-form').forEach(f => {
       const mode = f.querySelector('.gp-mode'), until = f.querySelector('.gp-until');
       mode.addEventListener('change', () => { until.style.display = mode.value === 'until' ? '' : 'none'; });
@@ -18725,7 +18813,7 @@
       rows: jobs.map(j => [
         j.name || '', j.type || '', j.scope || '', j.cadence || '',
         (j.enabled ? 'yes' : 'no'),
-        (j.inProgress ? 'running' : (j.neverRun ? 'never run' : (j.status === 'held' ? (j.approvedPending ? 'approved -- applies next run' : 'needs approval') : (j.status === 'interrupted' ? 'interrupted' : j.status === 'throttled' ? (j.throttleStuck ? 'throttled -- stuck' : 'throttled -- retrying') : j.status === 'warning' ? 'warning' : (j.lastOk === false ? 'failed' : (j.lastOk === true ? 'ok' : 'unknown')))))),
+        (j.inProgress ? 'running' : (j.neverRun ? 'never run' : (j.status === 'held' ? (j.heldResolved ? 'held earlier -- nothing waits now' : (j.approvedPending ? 'approved -- applies next run' : 'needs approval')) : (j.status === 'interrupted' ? 'interrupted' : j.status === 'throttled' ? (j.throttleStuck ? 'throttled -- stuck' : 'throttled -- retrying') : j.status === 'warning' ? 'warning' : (j.lastOk === false ? 'failed' : (j.lastOk === true ? 'ok' : 'unknown')))))),
         (j.neverRun ? '' : (j.lastRunUtc || '')),
         (j.lastResult || ''),
         (j.lastOk === true ? 'true' : (j.lastOk === false ? 'false' : '')),
@@ -18964,7 +19052,7 @@
            'style="padding:3px 8px;font-size:12px;border:1px solid #d0d7de;border-radius:6px;width:240px;">' +
          '<label style="font-size:12px;"><input type="checkbox" id="engLogFailOnly"' + (engineLogsState.failuresOnly ? ' checked' : '') + '> failures only</label>' +
          '<button class="btn-sec" id="engLogRefresh">Refresh</button>' +
-         '<span style="color:#57606a;font-size:12px;">' + all.length + ' recent runs &middot; <b style="color:#cf222e;">' + failed.length + ' failed</b>' +
+         '<span style="color:#57606a;font-size:12px;">' + all.length + ' recent runs &middot; <b class="engLogFailedCount" style="color:' + pimSevColour(pimSev(failed.length, 0), 'fg') + ';">' + failed.length + ' failed</b>' +
            (unacked ? ' &middot; <b style="color:#cf222e;">' + unacked + ' failing now</b>' : '') + '</span></div>';
     h += '<div style="color:#57606a;font-size:11.5px;margin-bottom:10px;">Every run the engine finished, across all jobs, newest first. ' +
          'Open a run to read its full log &mdash; the per-item <code>[x]</code> lines say what failed and why. Schedules and <b>Run now</b> are under <b>Jobs &rarr; Jobs &amp; status</b>.</div>';
@@ -19131,9 +19219,10 @@
       '<div class="azresHoldTripped" style="margin-top:2px;">Tripped: <b>' + asList(hold.tripped).map(esc).join(', ') + '</b>' + (hold.reason ? ' &mdash; ' + esc(hold.reason) : '') + '</div>' +
       '<div style="color:#57606a;margin-top:2px;">Thresholds: at most ' + esc(String(th.MaxChanges)) + ' changes, ' + esc(String(th.MaxPercent)) + '% of checked policies, ' + esc(String(th.MaxWeakening)) + ' weakening</div>' +
       '<div class="azresApproveBar" style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">' +
-      (roleAtLeast('Admin')
+      // PIM 100.82 / 100.84: the approve button only for a SuperAdmin (the approve routes answer 403 to an Admin).
+      (roleAtLeast('SuperAdmin')
         ? '<button class="btn-sec azresApproveBtn" data-plan-hash="' + esc(hold.planHash) + '" style="font-size:12px;">Approve this change set</button>'
-        : '<span class="azresApproveNeedsAdmin" style="color:#57606a;">An Admin must approve this change set.</span>') +
+        : '<span class="azresApproveNeedsAdmin" style="color:#57606a;">A SuperAdmin approves this change set.</span>') +
       '<span class="azresApproveMsg" style="font-size:12px;"></span>' +
       // §79.14 (operator 2026-09-25): the complete change list as an Excel file for the customer's change board (CAB).
       '<button class="btn-sec holdXlsxBtn" data-provider="' + esc(spec.provider) + '" style="font-size:12px;" title="Every policy and setting, current and new value, in an Excel file your change board can review and sign off">Download for change board (.xlsx)</button>' +

@@ -52,7 +52,7 @@ $script:PimScriptDocScripts = @(
     @{ Path = 'setup/Set-PimBreakGlassAccounts.ps1';               Standalone = $false }
     @{ Path = 'setup/Set-PimEmergencyPassphrase.ps1';              Standalone = $false }
     @{ Path = 'setup/Find-PimStrayTestObjects.ps1';                Standalone = $false }
-    @{ Path = 'setup/Set-PimLicense.ps1';                          Standalone = $false }
+    @{ Path = 'setup/Set-PimLicense.ps1';                          Standalone = $true }
     @{ Path = 'pim-activator/Deploy-PimActivatorHybrid.ps1';       Standalone = $false }
     @{ Path = 'setup/Update-PimCommunity.ps1';                     Standalone = $false }
     @{ Path = 'setup/Grant-PimSupportAccess.ps1';                  Standalone = $false }

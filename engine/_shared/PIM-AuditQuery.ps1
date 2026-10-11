@@ -19,6 +19,60 @@
 # matches the Manager's Get-PimAuditCategory (kept in sync; this provides a fallback when
 # the function isn't loaded so the lib is standalone-testable).
 
+# PIM 100.83: a policy change row is worded by the policy impact report's own functions (Get-PimPolicyRuleImpact) -- ONE
+# wording source, no second translation table. That file is pure too; it is loaded here only when nothing loaded it yet.
+if ($PSScriptRoot -and -not (Get-Command Get-PimPolicyRuleImpact -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-PolicyImpact.ps1'))) {
+    . (Join-Path $PSScriptRoot 'PIM-PolicyImpact.ps1')
+}
+
+function Get-PimAuditPolicyChangeLines {
+    <#
+      PIM 100.83 (owner 2026-10-11, on the audit list: "hard to see the actual change"). PURE. The after-image of ONE engine
+      policy update (engine.groupspolicies.update / engine.entrarolepolicies.update / engine.azrespolicies.update: detail =
+      { policy; rules = @( { ruleId; before; after } ) }, before / after in the compact form "exp|dur=P365D|req=False")
+      -> the lines of the Change column:
+          PIM for Groups policy of <group> (member | owner)      (or: Entra role policy of <role> / Azure role policy of <role @ scope>)
+          <setting>: <before> -> <after> [tightens | loosens]    one line per changed setting
+      $null when the after-image is not such a record, or the wording functions are not loaded -- the caller then shows it
+      the way it shows any other event.
+    #>
+    param([AllowNull()][object]$After)
+    if ($null -eq $After -or $After -is [string]) { return $null }
+    if (-not (Get-Command Get-PimPolicyRuleImpact -ErrorAction SilentlyContinue)) { return $null }
+    $gv = { param($o, $n) if ($null -eq $o) { $null } elseif ($o -is [System.Collections.IDictionary]) { if ($o.Contains($n)) { $o[$n] } else { $null } } else { $p = $o.PSObject.Properties[$n]; if ($p) { $p.Value } else { $null } } }
+    $det = & $gv $After 'detail'
+    if ($det -is [string] -and "$det".TrimStart().StartsWith('{')) { try { $det = $det | ConvertFrom-Json } catch { } }
+    if ($null -eq $det -or $det -is [string]) { return $null }
+    $policy = "$(& $gv $det 'policy')".Trim()
+    $rules = @(@(& $gv $det 'rules') | Where-Object { $null -ne $_ })
+    if (-not $policy -or -not $rules.Count) { return $null }
+    $scope = "$(& $gv $After 'scope')".Trim().ToLowerInvariant()
+    $head = switch ($scope) {
+        'groupspolicies'    { 'PIM for Groups policy of ' + $(if ($policy -match '\((owner|member)\)$') { $policy } else { "$policy (member)" }) }
+        'entrarolepolicies' { "Entra role policy of $policy" }
+        'azrespolicies'     { 'Azure role policy of ' + $(if (Get-Command Format-PimPolicyHoldName -ErrorAction SilentlyContinue) { Format-PimPolicyHoldName $policy } else { $policy }) }
+        default             { "Policy of $policy" }
+    }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("$head")
+    foreach ($r in $rules) {
+        $rid = "$(& $gv $r 'ruleId')".Trim()
+        if (-not $rid) { continue }
+        foreach ($c in @(Get-PimPolicyRuleImpact -RuleId $rid -Live "$(& $gv $r 'before')" -Target "$(& $gv $r 'after')")) {
+            if ($null -eq $c) { continue }
+            $tag = if ("$($c.direction)" -in @('tightens', 'loosens')) { " [$($c.direction)]" } else { '' }
+            if (-not "$($c.before)" -and -not "$($c.after)") { $lines.Add("$($c.setting)$tag") }
+            else { $lines.Add(("{0}: {1} -> {2}{3}" -f $c.setting, $(if ("$($c.before)") { $c.before } else { '-' }), $(if ("$($c.after)") { $c.after } else { '-' }), $tag)) }
+        }
+    }
+    if ($lines.Count -lt 2) { return $null }
+    $ap = & $gv $det 'approvedPlan'
+    if ($ap -is [bool] -and $ap -or "$ap" -match '^(?i)true$') { $lines.Add('Part of an approved change set.') }
+    $err = "$(& $gv $After 'error')".Trim()
+    if ($err) { $lines.Add("Not applied: $err") }
+    return , $lines.ToArray()
+}
+
 function Get-PimAuditCategoryFallback {
     # Standalone mirror of Open-PimManager.ps1 Get-PimAuditCategory so this lib can
     # be dot-sourced and tested without the Manager. The Manager's own function (if
@@ -217,6 +271,10 @@ function Get-PimAuditChangeSummary {
         if ($omit -gt 0) { $out.Add("... and $omit more change(s) not listed") }
         return ($out -join "`n")
     }
+    # PIM 100.83: an engine policy update says WHICH policy and each changed setting in words (before -> after, tightens /
+    # loosens) -- never the raw rule JSON. The raw record stays on the event (before / after) for the page's "details".
+    $polLines = Get-PimAuditPolicyChangeLines -After $afterObj
+    if ($polLines) { return (@($polLines) -join "`n") }
     # A commit recorded before 2.4.348 has counts only -- say so plainly instead of a field dump.
     if ($null -ne $afterObj -and -not ($afterObj -is [string])) {
         $gv = { param($n) if ($afterObj -is [System.Collections.IDictionary]) { if ($afterObj.Contains($n)) { "$($afterObj[$n])" } else { '' } } else { $p = $afterObj.PSObject.Properties[$n]; if ($p) { "$($p.Value)" } else { '' } } }

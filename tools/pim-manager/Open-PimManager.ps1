@@ -4077,6 +4077,10 @@ function Get-PimManagerReportsOverview {
     # PendingReminders setting, its recipients the SuperAdmins, its last send the PendingRemindersState stamp.
     $pr = $null; $prLast = ''; $superAdmins = @()
     try { if (Get-Command ConvertTo-PimPendingReminderConfig -ErrorAction SilentlyContinue) { $pr = ConvertTo-PimPendingReminderConfig (Get-PimManagerSettingObject -Name 'PendingReminders'); $prLast = "$((ConvertTo-PimPendingReminderState (Get-PimManagerSettingObject -Name 'PendingRemindersState')).lastSentUtc)" } } catch { $pr = $null }
+    # PIM 100.88: these two rows have no job, so "next run" was always empty (shown as "never") and "last sent" was the
+    # cycle stamp only. The reminder's own planner answers both, from the records the tick reads (nothing is written).
+    $prRows = $null
+    try { if ($pr -and (Get-Command Get-PimPendingReminderOverview -ErrorAction SilentlyContinue)) { $prRows = Get-PimPendingReminderOverview } } catch { $prRows = $null }
     try {
         $ma = Get-PimManagerSettingObject -Name 'ManagerAccess'
         if ($ma -and -not ($ma -is [array]) -and $ma.PSObject.Properties['managerAccess']) { $ma = $ma.managerAccess }
@@ -4090,10 +4094,15 @@ function Get-PimManagerReportsOverview {
         $enabled = if ($c.kind -eq 'alert') { [bool]($cfg.events.ContainsKey($c.type) -and $cfg.events[$c.type]) } elseif ($j) { [bool]$j.enabled } else { $true }
         $ls = if ($last.ContainsKey($c.type)) { "$(Get-PimMailPrefField $last[$c.type] 'at')" } elseif ($feedLast.ContainsKey($c.type)) { "$($feedLast[$c.type])" } else { '' }
         $cad = if ($j) { "$($j.cadence)" } elseif ($c.kind -eq 'alert') { 'when it happens' } else { '' }
+        $nextUtc = $(if ($j) { "$($j.nextRunUtc)" } else { '' }); $nextNote = ''; $waitingN = $null; $notMailed = @()
         if ($pr -and $c.type -in @('get-started', 'pending-approvals')) {
             $enabled = [bool]$pr.enabled
             $cad = ("first after {0} h, then every {1} h while it waits" -f $(if ($c.type -eq 'get-started') { $pr.getStartedAfterHours } else { $pr.approvalsAfterHours }), $pr.repeatHours)
-            if ($prLast) { $ls = $prLast }
+            $prRow = if ($prRows) { $prRows[$c.type] } else { $null }
+            if ($prRow) { $ls = "$($prRow.lastSentUtc)"; $nextUtc = "$($prRow.nextRunUtc)"; $nextNote = "$($prRow.nextRunNote)"; $waitingN = [int]$prRow.waiting }
+            else { if ($prLast) { $ls = $prLast }; $nextNote = $(if ($prRows -and "$($prRows['error'])".Trim()) { "$($prRows['error'])" } else { 'the reminder state could not be read' }) }
+            # the reminder never mails an Invardia address (customer recipients only) -- say so instead of listing it as a recipient
+            if (Get-Command Test-PimCustomerRecipient -ErrorAction SilentlyContinue) { $notMailed = @(@($list) | Where-Object { "$_".Trim() -and -not (Test-PimCustomerRecipient "$_") }) }
         }
         [ordered]@{
             type = $c.type; kind = $c.kind; label = $c.label; plain = $c.plain; severity = $c.severity
@@ -4102,7 +4111,7 @@ function Get-PimManagerReportsOverview {
             recipientList = "$($c.recipientList)"; ownRecipients = @($ownList); usesFallback = [bool]($c.recipientList -in @('digestRecipients', 'tierReportRecipients') -and -not $ownList.Count)
             recipients = $(if ($sel) { @($sel.keep) } else { @() }); switchedOff = $(if ($sel) { @($sel.skipped | ForEach-Object { $_.address }) } else { @() })
             attach = $(if ($c.kind -eq 'report') { "$($prefs.reports[$c.type].attach)" } else { '' })
-            lastSentUtc = $ls; nextRunUtc = $(if ($j) { "$($j.nextRunUtc)" } else { '' })
+            lastSentUtc = $ls; nextRunUtc = $nextUtc; nextRunNote = $nextNote; waiting = $waitingN; notMailed = @($notMailed)
         }
     }
     [ordered]@{ reports = @($rows); canEdit = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin'); canEditCadence = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') }
@@ -7804,6 +7813,59 @@ function Get-PimManagerWorkloadPrereqState {
     if ($storeErr) { foreach ($v in $view) { $v.state = 'unreadable'; $v.chip = 'amber'; $v.command = ''; $v.next = (Get-PimWorkloadPrereqNextStep -State 'unreadable') } }
     return @{ view = $view; storeErr = $storeErr }
 }
+function Get-PimManagerPolicyHoldState {
+    <#
+      PIM 100.84 (owner 2026-10-11: "there is inconsistence among things") -- ONE TRUTH for held policy change sets. The
+      current hold RECORD of each provider (the same read as GET /api/engine/policy-hold: the engine lib in an ISOLATED child
+      scope, BUG-261) and its approval record, read once and cached 15 s (any write request clears it). Every surface that
+      says a policy change set waits -- Get Started > Policies, the Overview, the Jobs page, Guards -- takes it from here:
+        known     the records were read (false = unknown; nothing is then called "no longer held")
+        holds     @( { provider; code; planHash; changes; weakening; checked; heldUtc; approved; approvedBy } )
+        waiting   the holds no approval covers (they wait for a SuperAdmin)   policies = the policies in those
+        held / approved   plain plan-hash lists for the Jobs read model (Get-PimJobsStatus -PolicyHoldState)
+    #>
+    param([switch]$Fresh)
+    $now = [datetime]::UtcNow
+    $c = $script:PimPolicyHoldStateCache
+    if (-not $Fresh -and $c -and ($now - [datetime]$c.atUtc).TotalSeconds -lt 15) { return $c.state }
+    $st = [ordered]@{ known = $false; holds = @(); held = @(); approved = @(); waiting = 0; policies = 0; error = '' }
+    $toInt = { param($v) $n = 0; [void][int]::TryParse("$v", [ref]$n); $n }
+    try {
+        $engLib = Join-Path $solutionRoot 'engine\_shared\PIM-EngineProviders.ps1'
+        if (-not (Test-Path -LiteralPath $engLib)) { throw 'the engine library is not part of this installation' }
+        $rows = @(& {
+                param($lib)
+                . $lib
+                foreach ($p in @('GroupsPolicies', 'EntraRolePolicies', 'AzResPolicies')) {
+                    [pscustomobject]@{ provider = $p; code = "$((Get-PimPolicyBreakerSpec -Provider $p).Code)"; hold = (Get-PimPolicyMassHold -Provider $p); approval = (Get-PimPolicyMassChangeApproval -Provider $p) }
+                }
+            } $engLib | Where-Object { $_ })
+        $holds = New-Object System.Collections.Generic.List[object]
+        $heldH = New-Object System.Collections.Generic.List[string]; $apprH = New-Object System.Collections.Generic.List[string]
+        foreach ($r in $rows) {
+            $a = $r.approval; $h = $r.hold
+            $aHash = if ($a) { "$($a.planHash)".Trim().ToLowerInvariant() } else { '' }
+            if ($aHash) { $apprH.Add($aHash) }
+            if (-not ($h -and "$($h.planHash)".Trim())) { continue }
+            $hHash = "$($h.planHash)".Trim().ToLowerInvariant()
+            $heldH.Add($hHash)
+            # Approved already (this exact plan, approval not expired): it waits for the next engine run, not for a person.
+            $isAppr = $false
+            if ($aHash -and $aHash -eq $hHash) {
+                $exp = [datetime]::MinValue
+                $isAppr = (-not "$($a.expiresUtc)".Trim()) -or ([datetime]::TryParse("$($a.expiresUtc)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal', [ref]$exp) -and $exp -gt $now)
+            }
+            $holds.Add([pscustomobject][ordered]@{ provider = "$($r.provider)"; code = "$($r.code)"; planHash = $hHash; changes = (& $toInt $h.changes); weakening = (& $toInt $h.weakening)
+                checked = (& $toInt $h.checked); heldUtc = "$($h.heldUtc)"; approved = [bool]$isAppr; approvedBy = $(if ($isAppr) { "$($a.approvedBy)" } else { '' }) })
+        }
+        $st.known = $true; $st.holds = @($holds.ToArray()); $st.held = @($heldH.ToArray()); $st.approved = @($apprH.ToArray())
+        $wait = @($st.holds | Where-Object { -not $_.approved })
+        $st.waiting = $wait.Count; $pol = 0; foreach ($w in $wait) { $pol += [int]$w.changes }; $st.policies = $pol
+    } catch { $st.error = "$($_.Exception.Message)" }
+    $state = [pscustomobject]$st
+    $script:PimPolicyHoldStateCache = @{ atUtc = $now; state = $state }
+    return $state
+}
 function Get-PimManagerAttentionSources {
     $src = [ordered]@{ policyHolds = @(); approvals = @(); offboardApproved = @(); rfa = @(); guardHolds = @(); guardReleases = @(); secondApprover = $null; workloadHolds = @(); errors = @() }
     $errs = New-Object System.Collections.Generic.List[string]
@@ -7944,7 +8006,7 @@ function Get-PimManagerAttention {
         $names = @{ GroupsPolicies = 'PIM for Groups'; EntraRolePolicies = 'Entra role'; AzResPolicies = 'Azure role' }
         $items.Add([ordered]@{ id = 'policy-holds'; tab = 'approvals'; count = $ph.Count
             text = ("{0} held by the circuit breaker ({1}; {2}) -- nothing is written until it is approved" -f (& $plural $ph.Count 'policy change set' 'policy change sets'), (& $plural $pol 'policy' 'policies'), ((@($ph | ForEach-Object { $names["$($_.provider)"] }) -join ', ')))
-            canAct = $isAdmin; who = 'an Admin or SuperAdmin approves it (Reviews & controls > Approvals)' })
+            canAct = $isSuper; who = 'a SuperAdmin approves it (Reviews & controls > Approvals)' })   # PIM 100.82: the approve routes are SuperAdmin-only
     }
     $ap = @($s.approvals)
     if ($ap.Count) {
@@ -8186,7 +8248,8 @@ function Get-PimHomeOverview {
     try {
         if (Get-Command Get-PimJobsStatus -ErrorAction SilentlyContinue) {
             $eff = @(Get-PimManagerEffectiveSchedule)
-            $vm  = if ($eff.Count -gt 0) { Get-PimJobsStatus -Jobs $eff } else { Get-PimJobsStatus }
+            $phs = $null; try { $phs = Get-PimManagerPolicyHoldState } catch { $phs = $null }   # PIM 100.84: ONE truth for held policy change sets
+            $vm  = if ($eff.Count -gt 0) { Get-PimJobsStatus -Jobs $eff -PolicyHoldState $phs } else { Get-PimJobsStatus -PolicyHoldState $phs }
             $jobs = @($vm.jobs)
             $histCount = 0
             if ($vm.PSObject.Properties['historyCount']) { $histCount = [int]$vm.historyCount }   # BUG-264: no second history read
@@ -8248,6 +8311,10 @@ function Get-PimHomeOverview {
                 # 71.13: a standing policy HOLD needs an approval -- amber attention, never counted as failed.
                 heldCount     = @($jobs | Where-Object { $_.needsApproval }).Count
                 heldJobs      = @($jobs | Where-Object { $_.needsApproval } | ForEach-Object { [ordered]@{ name = "$($_.name)"; type = "$($_.type)"; scope = "$($_.scope)"; detail = "$($_.heldDetail)"; runId = "$($_.lastRunId)" } } | Select-Object -First 12)
+                # PIM 100.84: the policy change sets that wait for a SuperAdmin NOW -- from the hold RECORDS (the same read as
+                # the Approvals page), not from the run history. $null = the records could not be read (unknown, never 0).
+                policyHoldCount    = $(if ($phs -and $phs.known) { [int]$phs.waiting } else { $null })
+                policyHoldPolicies = $(if ($phs -and $phs.known) { [int]$phs.policies } else { $null })
                 historyCount  = [int]$histCount
                 failedJobs    = @($failed  | ForEach-Object { [ordered]@{ name = "$($_.name)"; type = "$($_.type)"; scope = "$($_.scope)"; lastRunUtc = "$($_.lastRunUtc)"; detail = "$($_.lastResult)"; runId = "$($_.lastRunId)" } } | Select-Object -First 12)
                 runningJobs   = @($running | ForEach-Object { [ordered]@{ name = "$($_.name)"; type = "$($_.type)"; scope = "$($_.scope)"; runId = "$($_.runningRunId)" } } | Select-Object -First 12)
@@ -10710,7 +10777,7 @@ function Handle-Request {
     $path = $req.Url.AbsolutePath
     $method = $req.HttpMethod
     # PIM §97.3: any write may decide something that waits for a person -- the next GET /api/attention reads fresh.
-    if ($method -ne 'GET' -and $path -like '/api/*') { $script:PimAttentionCache = $null }
+    if ($method -ne 'GET' -and $path -like '/api/*') { $script:PimAttentionCache = $null; $script:PimPolicyHoldStateCache = $null }
 
     # GET / -- serve the SPA. The token is embedded in a <meta> tag so the
     # JS can read it without exposing it on the URL after the first hop.
@@ -12985,6 +13052,14 @@ function Handle-Request {
                 try { $gCat = @(Get-PimGuardsView -Trips $gl -Holds $gHolds -Releases $gRels) } catch { $gReadErr = "$($_.Exception.Message)" }
                 $gSecond = [bool](Test-PimGuardReleaseSecondPersonOn)
             }
+            # PIM 100.84: what the policy breaker holds NOW, on its own row -- the hold RECORDS (the same read as the Approvals
+            # page and Get Started), never the trip history. policyHoldsKnown = false: the records could not be read.
+            $gPol = $null; try { $gPol = Get-PimManagerPolicyHoldState } catch { $gPol = $null }
+            foreach ($gc in @($gCat)) {
+                if ("$($gc.guardId)" -ne 'engine.policy-mass-change') { continue }
+                $gc | Add-Member -NotePropertyName policyHoldsKnown -NotePropertyValue ([bool]($gPol -and $gPol.known)) -Force
+                $gc | Add-Member -NotePropertyName policyHolds -NotePropertyValue @($(if ($gPol -and $gPol.known) { @($gPol.holds) } else { @() })) -Force
+            }
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ guards = @($gl); total = @($gl).Count
                 catalog = @($gCat); holds = @($gHolds); releases = @($gRels); secondPerson = $gSecond
                 canRelease = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin'); me = "$((Get-PimManagerRole).identity)"
@@ -13172,7 +13247,8 @@ function Handle-Request {
                 # show up here immediately, in this Manager instance, without waiting for
                 # the scheduler to rewrite its state file.
                 $effective = @(Get-PimManagerEffectiveSchedule)
-                $vm = if ($effective.Count -gt 0) { Get-PimJobsStatus -Jobs $effective } else { Get-PimJobsStatus }
+                $phs = $null; try { $phs = Get-PimManagerPolicyHoldState } catch { $phs = $null }   # PIM 100.84
+                $vm = if ($effective.Count -gt 0) { Get-PimJobsStatus -Jobs $effective -PolicyHoldState $phs } else { Get-PimJobsStatus -PolicyHoldState $phs }
                 # Has the scheduler ever recorded a run we can join to? When the history
                 # ring is empty (fresh deployment, or the scheduler has not ticked / is
                 # not co-located), every row is "never run" -- the GUI shows an explicit
@@ -13777,10 +13853,13 @@ function Handle-Request {
         # reviews tiles (the GUI lazy-loads those after the fast tiles render). Every
         # tile is real-data-or-honest-empty; one bad source never blanks the page.
         # 97.2 (operator 2026-10-07: "make a new menu item, PIM Activator, under Operation"): what this environment has
-        # (tenant, the PROD / TEST apps, their redirect URIs, who may sign in) + the self-contained commands. READ-ONLY:
+        # (tenant, the PROD / TEST apps, their redirect URIs) + the self-contained commands. READ-ONLY:
         # owner 2026-10-08 "remove these buttons and leave only the cmdlets to run ... customer must define who (group) to
         # deploy to - not everyone" -- the page writes nothing to the tenant; an admin runs the commands. The only thing the
         # page saves is PIM's own setting ActivatorTargets (PUT /api/settings/activator-targets).
+        # 100.90 (owner 2026-10-11: "we dont use it to assign or login ... strip out the user assignement part"): the apps'
+        # 'Assignment required' flag and their assigned users / groups are NOT read or reported any more -- the app does not
+        # decide who gets anything. ActivatorTargets is the DEPLOYMENT group (Intune Remediation, Edge for Business) only.
         if ($path -eq '/api/activator' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             if (-not (Get-Command Get-PimActivatorChannel -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'the PIM Activator builder (tools/pim-activator/_PimActivatorBuild.ps1) is not loaded in this Manager' }; return 503 }
@@ -13792,8 +13871,7 @@ function Handle-Request {
             $apps = [ordered]@{}
             foreach ($c in 'Released', 'Test') {
                 $ch = Get-PimActivatorChannel -Channel $c
-                $a = [ordered]@{ channel = $c; label = $ch.label; name = $ch.appName; extensionId = $ch.id; found = $false; appId = ''; redirectOk = $false; readError = ''; sharedWith = ''; uris = @()
-                                 assignmentRequired = $null; assigned = @(); assignmentReadError = '' }
+                $a = [ordered]@{ channel = $c; label = $ch.label; name = $ch.appName; extensionId = $ch.id; found = $false; appId = ''; redirectOk = $false; readError = ''; sharedWith = ''; uris = @() }
                 try {
                     $esc = $ch.appName -replace "'", "''"
                     $r = @((Invoke-PimGraph -Path "/applications?`$filter=displayName eq '$esc'&`$select=appId,displayName,spa").value)
@@ -13812,23 +13890,7 @@ function Handle-Request {
             if (-not $tst.found -and $prd.found -and @($prd.uris | Where-Object { "$_" -like "*$($tst.extensionId)*" }).Count) {
                 $tst.found = $true; $tst.appId = $prd.appId; $tst.redirectOk = $true; $tst.sharedWith = $prd.name
             }
-            # WHO may sign in: "Assignment required" + the assigned users / groups of each enterprise app (read-only).
-            $spRead = @{}
-            foreach ($k in @($apps.Keys)) {
-                $a = $apps[$k]; $a.Remove('uris')
-                if (-not $a.appId) { continue }
-                if (-not $spRead.ContainsKey($a.appId)) {
-                    $v = @{ required = $null; assigned = @(); err = '' }
-                    try {
-                        $sp = Invoke-PimGraph -Path "/servicePrincipals(appId='$($a.appId)')?`$select=id,appRoleAssignmentRequired"
-                        $v.required = [bool]$sp.appRoleAssignmentRequired
-                        $v.assigned = @(@((Invoke-PimGraph -Path "/servicePrincipals/$($sp.id)/appRoleAssignedTo?`$select=principalId,principalDisplayName,principalType&`$top=100").value) |
-                            ForEach-Object { [ordered]@{ id = "$($_.principalId)".ToLowerInvariant(); displayName = "$($_.principalDisplayName)"; type = "$($_.principalType)" } })
-                    } catch { $v.err = "$($_.Exception.Message)" }
-                    $spRead[$a.appId] = $v
-                }
-                $a.assignmentRequired = $spRead[$a.appId].required; $a.assigned = @($spRead[$a.appId].assigned); $a.assignmentReadError = $spRead[$a.appId].err
-            }
+            foreach ($k in @($apps.Keys)) { $apps[$k].Remove('uris') }   # the redirect list was only for the checks above
             # What each channel publishes right now (its update manifest) -- the page's default "minimum version required".
             # Cached 30 min; a failed read just leaves it empty (the page then shows the builder's floor).
             $published = [ordered]@{ Released = ''; Test = '' }
@@ -13863,7 +13925,8 @@ function Handle-Request {
             return 200
         }
         # 97.2 (owner 2026-10-08: "customer must define who (group) to deploy to - not everyone"; "give option to dropdown
-        # group"): the group per channel (PROD = Released, TEST = Test) that every command on the page assigns to. PIM's own
+        # group"): the DEPLOYMENT group per channel (PROD = Released, TEST = Test) -- who Intune sends the Remediation to and
+        # who the Edge for Business policy is assigned to. NOT who may sign in to the app (100.90, 2026-10-11). PIM's own
         # setting pim.Settings['ActivatorTargets'] = { Released: { groupId, displayName } | null, Test: ... } -- nothing is
         # written to the tenant here. Admin+, the group is confirmed in the directory, audited with before / after. A body key
         # that is present replaces that channel (null / empty groupId clears it); a missing key leaves it as it is.
@@ -13883,7 +13946,7 @@ function Handle-Request {
                 if ($gid -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "The $c group must be a group object id (pick it from the list)." }; return 400 }
                 $dn = ("$($t.displayName)" -replace '[\x00-\x1F\x7F]', ' ').Trim()
                 # Confirm it is a GROUP in this tenant and take its real name. A lookup that cannot run is an error, never
-                # "accepted unchecked" -- a wrong id here would go into every command.
+                # "accepted unchecked" -- a wrong id here would go into the Remediation command.
                 if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no Graph client in this runtime -- the group could not be confirmed, so nothing was saved' }; return 503 }
                 try {
                     $g = Invoke-PimGraph -Path "/groups/$gid`?`$select=id,displayName"
@@ -16646,8 +16709,8 @@ function Handle-Request {
             }
             return 200
         }
-        # 97.2 (owner 2026-10-08: "give option to dropdown group"): the group lookup behind the PIM Activator target-group
-        # pickers. Same contract as /api/directory/people: Admin, a 2+ character query, $search first then startswith, and
+        # 97.2 (owner 2026-10-08: "give option to dropdown group"): the group lookup behind the PIM Activator deployment-group
+        # pickers (Intune / Edge for Business steps; 100.90: no app sign-in assignment any more). Same contract as /api/directory/people: Admin, a 2+ character query, $search first then startswith, and
         # "the lookup did not run" (503 / 502) is never shown as "no groups".
         if ($path -eq '/api/directory/groups' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date

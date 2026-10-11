@@ -694,14 +694,123 @@ function Import-PimAsBuiltPdfLibrary {
     $script:PimAsBuiltPdfReady = $true
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# 100.89 (owner 2026-10-11: "why add this to pim manager documentation ... table also looks weird"): what the PDF prints is
+# decided HERE, in a pure plan the offline suite can read -- the renderer below only draws it.
+#   * The questions this installation cannot answer are NOT printed (about sixty internal field keys meant nothing to a
+#     customer). They stay in the model (omitted, GET /api/asbuilt) and as a count in the job log and the audit record.
+#   * A section table has no "Question id" column: the customer reads the question; the id (an internal key such as
+#     configBackupRetentionDays, one unbreakable word) ran over the next column. The id stays in the model's rows.
+#   * Every table is exactly as wide as the A4 text area, and a word too long for its column (an address, a key) is
+#     broken onto the next line at a natural point -- the PDF library only wraps at spaces.
+# ---------------------------------------------------------------------------------------------------------------------
+$script:PimAsBuiltPdfTextWidthCm = 17.8      # A4 portrait (21.0 cm) minus the 1.6 cm side margins
+$script:PimAsBuiltPdfTableFontPt = 8
+$script:PimAsBuiltPdfTables = [ordered]@{
+    facts     = @{ widthsCm = @(5.0, 12.8);      headers = @('Fact', 'Value') }
+    endpoints = @{ widthsCm = @(3.0, 4.0, 10.8); headers = @('Kind', 'Label', 'Address') }
+    section   = @{ widthsCm = @(6.0, 5.0, 6.8);  headers = @('Question', 'As built', 'Source') }
+}
+
+function Get-PimAsBuiltPdfCellMaxChars {
+    <#
+      PURE. How many characters of ONE unbroken word are safe on a line of a column this wide. Deliberately on the low
+      side (0.68 em per character -- DejaVu Sans is a wide face -- and 0.3 cm off for the cell padding and border), so a
+      word that passes always fits; ordinary text wraps at its spaces and is not affected.
+    #>
+    param([Parameter(Mandatory)][double]$WidthCm, [double]$FontPt = 8)
+    $pt = ($WidthCm - 0.3) * 28.3465
+    return [Math]::Max(6, [int][Math]::Floor($pt / ($FontPt * 0.68)))
+}
+
+function Split-PimAsBuiltPdfCellText {
+    <#
+      PURE. -Text with a line feed put into every word longer than -MaxChars, so it cannot run over the next column. The
+      break goes after the last / . - _ : ? & = or before the last capital of a camelCase word inside the limit, else at
+      the limit. Nothing is added or removed besides the line feeds; text whose words all fit comes back unchanged.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][int]$MaxChars)
+    if ($MaxChars -lt 2) { $MaxChars = 2 }
+    $t = "$Text"
+    if ($t.Length -le $MaxChars) { return $t }
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($part in [regex]::Split($t, '(\s+)')) {
+        $w = "$part"
+        while ($w.Length -gt $MaxChars -and $w -notmatch '^\s') {
+            $cut = 0
+            for ($i = $MaxChars; $i -ge [Math]::Max(2, [int][Math]::Floor($MaxChars / 2)); $i--) {
+                $prev = $w[$i - 1]
+                if ('/.-_:?&='.IndexOf($prev) -ge 0) { $cut = $i; break }
+                if ([char]::IsUpper($w[$i]) -and [char]::IsLower($prev)) { $cut = $i; break }
+            }
+            if ($cut -le 0) { $cut = $MaxChars }
+            [void]$sb.Append($w.Substring(0, $cut)).Append("`n")
+            $w = $w.Substring($cut)
+        }
+        [void]$sb.Append($w)
+    }
+    return $sb.ToString()
+}
+
+function Get-PimAsBuiltPdfPlan {
+    <#
+      PURE. The model (New-PimAsBuiltModel) -> what the customer document prints, in order:
+        { title; intro; textWidthCm; blocks = @( @{ heading; kind; headers; widthsCm; rows = @( , @(cell, cell, ...) ) } ) }
+      Environment (Fact | Value), Endpoints (Kind | Label | Address) when there are any, then one table per configurator
+      section (Question | As built | Source). Cells are already broken for their column (Split-PimAsBuiltPdfCellText).
+      The model's omitted list and the question ids are not in the plan.
+    #>
+    param([Parameter(Mandatory)][object]$Model)
+    $blocks = New-Object System.Collections.Generic.List[object]
+    $add = {
+        param([string]$heading, [string]$kind, [object[]]$rows)
+        $def = $script:PimAsBuiltPdfTables[$kind]
+        $w = @($def.widthsCm)
+        $out = New-Object System.Collections.Generic.List[object]
+        foreach ($r in @($rows)) {
+            $cells = @($r)
+            $line = New-Object System.Collections.Generic.List[string]
+            for ($i = 0; $i -lt $w.Count; $i++) {
+                $max = Get-PimAsBuiltPdfCellMaxChars -WidthCm ([double]$w[$i]) -FontPt $script:PimAsBuiltPdfTableFontPt
+                [void]$line.Add((Split-PimAsBuiltPdfCellText -Text "$($cells[$i])" -MaxChars $max))
+            }
+            [void]$out.Add($line.ToArray())
+        }
+        [void]$blocks.Add([ordered]@{ heading = $heading; kind = $kind; headers = @($def.headers); widthsCm = $w; rows = $out.ToArray() })
+    }
+    $factRows = New-Object System.Collections.Generic.List[object]
+    foreach ($fa in @($Model.facts)) { if ($fa) { [void]$factRows.Add(@("$($fa.name)", "$($fa.value)")) } }
+    & $add 'Environment' 'facts' $factRows.ToArray()
+    $epRows = New-Object System.Collections.Generic.List[object]
+    foreach ($e in @($Model.endpoints)) { if ($e) { [void]$epRows.Add(@("$($e.kind)", "$($e.label)", "$($e.url)")) } }
+    if ($epRows.Count) { & $add 'Endpoints' 'endpoints' $epRows.ToArray() }
+    foreach ($s in @($Model.sections)) {
+        if (-not $s) { continue }
+        $secRows = New-Object System.Collections.Generic.List[object]
+        foreach ($r in @($s.rows)) {
+            if (-not $r) { continue }
+            $shown = if ("$($r.display)".Trim()) { "$($r.display)" } elseif ($r.isDefault) { "$($r.value) (default)" } else { "$($r.value)" }
+            [void]$secRows.Add(@("$($r.label)", $shown, "$($r.source)"))
+        }
+        & $add "$($s.title)" 'section' $secRows.ToArray()
+    }
+    return [pscustomobject][ordered]@{
+        title       = 'PIM Manager - as-built configuration'
+        intro       = "Generated $($Model.generatedUtc) inside this installation. Every value below is read from the installation; a question it cannot answer is left out, never guessed. A value marked (default) is what PIM Manager does when nothing is set -- nobody chose it. No secrets, people, user names or object ids are included."
+        textWidthCm = $script:PimAsBuiltPdfTextWidthCm
+        blocks      = $blocks.ToArray()
+    }
+}
+
 function ConvertTo-PimAsBuiltPdf {
     <#
-      The model (New-PimAsBuiltModel) -> PDF bytes: A4 portrait, a title block, the environment facts, the endpoints, one
-      table per configurator section (question id | question | as built | source), and the ids left out. Page numbers in the
-      footer. Needs Import-PimAsBuiltPdfLibrary (called here).
+      The model (New-PimAsBuiltModel) -> PDF bytes: A4 portrait, a title block, then the blocks of Get-PimAsBuiltPdfPlan
+      (the environment facts, the endpoints, one table per configurator section: question | as built | source). Page
+      numbers in the footer. Needs Import-PimAsBuiltPdfLibrary (called here).
     #>
     param([Parameter(Mandatory)][object]$Model, [string]$DllDir = "$env:PIM_PDF_DLL_DIR", [string]$FontDir = "$env:PIM_PDF_FONT_DIR")
     Import-PimAsBuiltPdfLibrary -DllDir $DllDir -FontDir $FontDir
+    $plan = Get-PimAsBuiltPdfPlan -Model $Model
     $U = [MigraDoc.DocumentObjectModel.Unit]
     $doc = New-Object MigraDoc.DocumentObjectModel.Document
     $doc.Info.Title = 'PIM Manager as-built'
@@ -723,56 +832,36 @@ function ConvertTo-PimAsBuiltPdf {
     [void]$foot.AddText("PIM Manager as-built - generated $($Model.generatedUtc) - page ")
     [void]$foot.AddPageField(); [void]$foot.AddText(' of '); [void]$foot.AddNumPagesField()
 
-    $h = $sec.AddParagraph('PIM Manager - as-built configuration')
+    $h = $sec.AddParagraph("$($plan.title)")
     $h.Format.Font.Size = 16; $h.Format.Font.Bold = $true; $h.Format.SpaceAfter = $U::FromPoint(4)
-    $sub = $sec.AddParagraph("Generated $($Model.generatedUtc) inside this installation. Every value below is read from the installation; a question it cannot answer is left out (listed at the end), never guessed. A value marked (default) is what PIM Manager does when nothing is set -- nobody chose it. No secrets, people, user names or object ids are included.")
+    $sub = $sec.AddParagraph("$($plan.intro)")
     $sub.Format.Font.Size = 8; $sub.Format.SpaceAfter = $U::FromPoint(10)
 
-    $addHeading = {
-        param($text)
-        $p = $sec.AddParagraph("$text"); $p.Format.Font.Size = 11; $p.Format.Font.Bold = $true
+    foreach ($b in @($plan.blocks)) {
+        $p = $sec.AddParagraph("$($b.heading)"); $p.Format.Font.Size = 11; $p.Format.Font.Bold = $true
         $p.Format.SpaceBefore = $U::FromPoint(10); $p.Format.SpaceAfter = $U::FromPoint(4); $p.Format.KeepWithNext = $true
-    }
-    $newTable = {
-        param([double[]]$widthsCm, [string[]]$headers)
         $t = $sec.AddTable()
         $t.Borders.Width = 0.4
         $t.Borders.Color = [MigraDoc.DocumentObjectModel.Colors]::Gray
-        $t.Format.Font.Size = 8
-        foreach ($w in $widthsCm) { [void]$t.AddColumn($U::FromCentimeter($w)) }
-        $r = $t.AddRow(); $r.HeadingFormat = $true; $r.Format.Font.Bold = $true
-        $r.Shading.Color = [MigraDoc.DocumentObjectModel.Colors]::LightGray
-        for ($i = 0; $i -lt $headers.Count; $i++) { [void]$r.Cells[$i].AddParagraph($headers[$i]) }
-        return $t
-    }
-    $addRow = {
-        param($t, [string[]]$cells)
-        $r = $t.AddRow()
-        for ($i = 0; $i -lt $cells.Count; $i++) { [void]$r.Cells[$i].AddParagraph("$($cells[$i])") }
-    }
-
-    & $addHeading 'Environment'
-    $t = & $newTable @(5.0, 12.8) @('Fact', 'Value')
-    foreach ($fa in @($Model.facts)) { & $addRow $t @("$($fa.name)", "$($fa.value)") }
-
-    if (@($Model.endpoints).Count) {
-        & $addHeading 'Endpoints'
-        $t = & $newTable @(3.0, 4.0, 10.8) @('Kind', 'Label', 'Address')
-        foreach ($e in @($Model.endpoints)) { & $addRow $t @("$($e.kind)", "$($e.label)", "$($e.url)") }
-    }
-
-    foreach ($s in @($Model.sections)) {
-        & $addHeading "$($s.title)"
-        $t = & $newTable @(3.8, 4.6, 3.6, 5.8) @('Question id', 'Question', 'As built', 'Source')
-        foreach ($r in @($s.rows)) {
-            $shown = if ("$($r.display)".Trim()) { "$($r.display)" } elseif ($r.isDefault) { "$($r.value) (default)" } else { "$($r.value)" }
-            & $addRow $t @("$($r.id)", "$($r.label)", $shown, "$($r.source)")
+        $t.Format.Font.Size = $script:PimAsBuiltPdfTableFontPt
+        foreach ($w in @($b.widthsCm)) { [void]$t.AddColumn($U::FromCentimeter([double]$w)) }
+        $hr = $t.AddRow(); $hr.HeadingFormat = $true; $hr.Format.Font.Bold = $true
+        $hr.Shading.Color = [MigraDoc.DocumentObjectModel.Colors]::LightGray
+        $hd = @($b.headers)
+        for ($i = 0; $i -lt $hd.Count; $i++) { [void]$hr.Cells[$i].AddParagraph("$($hd[$i])") }
+        foreach ($cells in @($b.rows)) {
+            $r = $t.AddRow()
+            $cs = @($cells)
+            for ($i = 0; $i -lt $cs.Count; $i++) {
+                # a line feed in the cell text is a forced break (a word too long for the column)
+                $cp = $r.Cells[$i].AddParagraph()
+                $lines = @("$($cs[$i])" -split "`n")
+                for ($k = 0; $k -lt $lines.Count; $k++) {
+                    if ($k -gt 0) { [void]$cp.AddLineBreak() }
+                    if ($lines[$k].Length) { [void]$cp.AddText($lines[$k]) }
+                }
+            }
         }
-    }
-
-    if (@($Model.omitted).Count) {
-        & $addHeading 'Not readable from this installation (left out)'
-        $p = $sec.AddParagraph((@($Model.omitted) -join ', ')); $p.Format.Font.Size = 7.5
     }
 
     $renderer = New-Object MigraDoc.Rendering.PdfDocumentRenderer

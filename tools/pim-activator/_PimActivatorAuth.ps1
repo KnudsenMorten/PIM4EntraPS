@@ -56,7 +56,7 @@ This host cannot complete the sign-in. Known causes + fixes, in order of likelih
   1. The system default browser is legacy Internet Explorer, which mangles the auth redirect. This script launches Microsoft Edge explicitly (-UseEdge, the default); if you passed -UseEdge:`$false, drop it. To fix the host itself: Settings > Default apps > set Microsoft Edge as default for HTTP/HTTPS.
   2. Stale pending sign-in tabs answering the listener with an old state: close ALL browser windows, retry once.
   3. Something on this host blocks the localhost listener the browser answers to (a local firewall or proxy rule for 127.0.0.1): allow it, or run this script from another machine where sign-in works (it only talks to Microsoft Graph -- nothing tenant-side requires this host).
-  4. Bring a token: sign in somewhere that works, mint a Microsoft Graph access token with Application.ReadWrite.All, AppRoleAssignment.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All, and pass it with -AccessToken <token> (valid ~1 hour).
+  4. Bring a token: sign in somewhere that works, mint a Microsoft Graph access token with Application.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All, and pass it with -AccessToken <token> (valid ~1 hour).
 "@
 }
 

@@ -11,9 +11,9 @@
     * the Edge management service ExtensionSettings JSON ("Import JSON" on the Managed extensions tab) for the chosen
       channels, and the ExtensionInstallSources value;
     * the tenant catalog defaults from this environment (tenant id, the Activator app id, defaults);
-    * the exact, self-contained commands: the apps (PROD + TEST), the Remediation build + upload, each for the group the
-      customer chose (or nobody yet -- never all users / all devices; 2026-10-08), the
-      server / no-Intune install.
+    * the exact, self-contained commands: the apps (PROD + TEST; no group -- the app does not decide who gets anything,
+      100.90, 2026-10-11), the Remediation build + upload for the DEPLOYMENT group the customer chose (or nobody yet --
+      never all users / all devices; 2026-10-08), the server / no-Intune install.
 #>
 
 $script:PimActivatorChannels = [ordered]@{
@@ -223,9 +223,12 @@ function Set-PimActivatorRemediationSettings {
 # 97.2 (owner 2026-10-08: "remove these buttons and leave only the cmdlets to run ... customer must define who (group) to
 # deploy to - not everyone"; then "give option to dropdown group ... the cmdlets doesn't add an assignment by default"; and
 # "this guide is wrong as it refers to 3 files, but the cmdlets show is missing 2 of them"). The page shows ONLY commands.
-# Each command is SELF-CONTAINED (one download from invardia.com/support/pim, nothing else to fetch) and names WHO it
-# deploys to: the customer's chosen group (-AssignToGroupId), or nobody yet when no group is chosen. Never all users / all
-# devices.
+# Each command is SELF-CONTAINED (one download from invardia.com/support/pim, nothing else to fetch). The Remediation
+# command names WHO Intune deploys it to: the customer's chosen group (-AssignToGroupId), or nobody yet when no group is
+# chosen. Never all users / all devices.
+# 100.90 (owner 2026-10-11: "we dont use it to assign or login ... strip out the user assignement part"): the group is
+# DEPLOYMENT targeting only (Intune, Edge for Business). The app commands carry no group: the app is how the extension
+# signs in, every user of the tenant can, and what a person can activate is decided by their PIM eligibility.
 # ---------------------------------------------------------------------------------------------------------------------
 
 # The shipped Detect / Remediate scripts. In the repository they are read from intune-remediation\ next to this file; the
@@ -276,6 +279,7 @@ function New-PimActivatorRemediationPair {
 function ConvertTo-PimActivatorTargets {
     <#
       PURE. pim.Settings['ActivatorTargets'] normalised: @{ Released = @{ groupId; displayName } | $null; Test = ... }.
+      The DEPLOYMENT group per channel (Intune Remediation assignment, Edge for Business policy) -- not who may sign in.
       A value without a GUID group id is no target (never "everyone").
     #>
     param($Value)
@@ -299,7 +303,7 @@ function ConvertTo-PimActivatorPsLiteral {
 }
 
 function Get-PimActivatorWho {
-    # PURE. What a command deploys to, in words: the group, or nobody yet.
+    # PURE. What the Remediation / the Edge policy is deployed to, in words: the group, or nobody yet.
     param($Target, [string]$Channel = 'Released')
     $label = if ($Channel -eq 'Test') { 'TEST' } else { 'PROD' }
     if ($Target -and "$($Target.groupId)") {
@@ -312,11 +316,13 @@ function Get-PimActivatorWho {
 function Get-PimActivatorCommands {
     <#
       PURE. The exact, self-contained command lines for this environment. Each needs only its own script from
-      invardia.com/support/pim -- no other file. -Targets = the ActivatorTargets setting; a channel without a group gets
-      its command WITHOUT -AssignToGroupId (the scripts then assign nobody and say so). -Settings = the Settings step
+      invardia.com/support/pim -- no other file. -Targets = the ActivatorTargets setting (the DEPLOYMENT group per
+      channel): it goes into the Remediation command only; a channel without a group gets that command WITHOUT
+      -AssignToGroupId (the script then assigns it to nobody and says so). The app commands never carry a group
+      (100.90). -Settings = the Settings step
       (name, defaultJustification, defaultDurationHours, prefix, entraPrefix, azurePrefix, autoActivateMaxGroups,
       bulkActivateConfirmThreshold, browsers) for the Remediation + server commands. -TestSharesProdApp: there is no
-      TEST app because the PROD app carries the TEST redirects -> the TEST group is added to the PROD app.
+      TEST app because the PROD app carries the TEST redirects -> the TEST command updates the PROD app (-Channel Both).
       Returns @{ appProd; appTest; remediationProd; remediationTest; remediation (= -Channel); server (= -Channel);
                  whoProd; whoTest; who (= -Channel) }. A Remediation command is '' while its channel has no app id.
     #>
@@ -327,9 +333,9 @@ function Get-PimActivatorCommands {
     $tg = ConvertTo-PimActivatorTargets $Targets
     $get = { param($o, $n) if ($o -is [System.Collections.IDictionary]) { if ($o.Contains($n)) { $o[$n] } } elseif ($null -ne $o -and $o.PSObject.Properties[$n]) { $o.$n } }
     $asg = { param($c) if ($tg[$c]) { " -AssignToGroupId $($tg[$c].groupId)" } else { '' } }
-    $appProd = ".\Deploy-PimActivatorBackend.ps1 -TenantId $TenantId -Channel Released -DisplayName 'PIM Activator'" + (& $asg 'Released')
-    $appTest = if ($TestSharesProdApp) { ".\Deploy-PimActivatorBackend.ps1 -TenantId $TenantId -Channel Both -DisplayName 'PIM Activator'" + (& $asg 'Test') }
-               else { ".\Deploy-PimActivatorBackend.ps1 -TenantId $TenantId -Channel Test -ExtensionId $($script:PimActivatorChannels.Test.id) -DisplayName 'PIM Activator (TEST)'" + (& $asg 'Test') }
+    $appProd = ".\Deploy-PimActivatorBackend.ps1 -TenantId $TenantId -Channel Released -DisplayName 'PIM Activator'"
+    $appTest = if ($TestSharesProdApp) { ".\Deploy-PimActivatorBackend.ps1 -TenantId $TenantId -Channel Both -DisplayName 'PIM Activator'" }
+               else { ".\Deploy-PimActivatorBackend.ps1 -TenantId $TenantId -Channel Test -ExtensionId $($script:PimActivatorChannels.Test.id) -DisplayName 'PIM Activator (TEST)'" }
     # the settings shared by the Remediation + the server install (step 2)
     $name = "$(& $get $Settings 'name')".Trim(); if (-not $name) { $name = 'PIM' }
     $just = "$(& $get $Settings 'defaultJustification')".Trim(); if (-not $just) { $just = 'Change in infrastructure' }

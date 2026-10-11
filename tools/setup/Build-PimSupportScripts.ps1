@@ -40,6 +40,12 @@
       New-PimHubPrepareScript.ps1      -- private install: write the script the HUB network owner runs (the hub side of the
                                           peering with the name setup looks for, optional rights for the deploy identity).
                                           Writes a file only; nothing in Azure is touched.
+      Set-PimLicense.ps1               -- 100.81: register an issued licence file in the environment's store (verified
+                                          first, read back); browser sign-in, no modules. The command Settings > Licence
+                                          shows. Built with NO dot-source left: the script carries the line
+                                          "# BUILD-NO-OPTIONAL-LOADS", so the optional loads the inlined engine libraries
+                                          end with (a variable assigned from Join-Path, then dot-sourced when the file
+                                          exists) are replaced by a comment, and any dot-source left fails the build.
 
     SCRIPT-DOC-1 (framework 12.7) + framework 12.10 item 11 ("scripts are big concern"), 2026-10-09:
       * every script in $script:PimScriptDocScripts (tools\setup\_PimScriptDoc.ps1) must have its manifest
@@ -63,7 +69,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$OutDir,
-    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1', 'Set-PimSqlTier.ps1', 'New-PimHubPrepareScript.ps1', 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1', 'pim-hybrid-worker/Install-PimHybridWorker.ps1'),
+    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1', 'Set-PimSqlTier.ps1', 'New-PimHubPrepareScript.ps1', 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1', 'pim-hybrid-worker/Install-PimHybridWorker.ps1', 'Set-PimLicense.ps1'),
     # 12.10 item 11: the code-signing certificate (thumbprint of a certificate WITH its private key in CurrentUser\My or
     # LocalMachine\My). Empty = not signed, said loudly.
     [string]$SigningCertThumbprint = "$env:PIM_CODESIGN_THUMBPRINT",
@@ -199,6 +205,42 @@ function Expand-PimSupportScript {
     })
 }
 
+function Test-PimSupportScriptNoOptionalLoads {
+    # PURE. REQUIREMENTS 100.81: a script opts in with a line "# BUILD-NO-OPTIONAL-LOADS" (its OWN text, not a helper's).
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+    return [regex]::IsMatch("$Text", '(?m)^[ \t]*#[ \t]*BUILD-NO-OPTIONAL-LOADS\b')
+}
+
+function Remove-PimSupportScriptOptionalLoads {
+    <#
+      PURE. REQUIREMENTS 100.81 (Set-PimLicense.ps1 as one file). The engine libraries a script inlines end with OPTIONAL
+      loads of files that sit next to them in the repository:
+          $__x = Join-Path $PSScriptRoot 'PIM-Other.ps1'
+          if (Test-Path -LiteralPath $__x) { . $__x }
+      In a downloaded file those can only ever load a same-named file somebody put next to the download. For a script that
+      opted in (Test-PimSupportScriptNoOptionalLoads) every dot-source of a VARIABLE that the text assigns from Join-Path
+      is replaced by a comment, so the published file loads nothing at all. Anything else that dot-sources (a literal path,
+      a variable that is not such a path, a script block) is left alone -- the build then FAILS on it by name, never guesses.
+      Found by the parser (CommandAst with the dot operator), never by text search.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $perr = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$null, [ref]$perr)
+    if (@($perr).Count) { throw "the text does not parse: $($perr[0].Message)" }
+    $dots = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot }, $true))
+    $sb = New-Object System.Text.StringBuilder $Text
+    foreach ($d in @($dots | Sort-Object { $_.Extent.StartOffset } -Descending)) {
+        $els = @($d.CommandElements)
+        if ($els.Count -ne 1 -or $els[0] -isnot [System.Management.Automation.Language.VariableExpressionAst]) { continue }
+        $var = "$($els[0].VariablePath.UserPath)"
+        if ($var -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { continue }
+        if (-not [regex]::IsMatch($Text, '(?m)\$' + [regex]::Escape($var) + '[ \t]*=[ \t]*Join-Path\b')) { continue }
+        [void]$sb.Remove($d.Extent.StartOffset, $d.Extent.EndOffset - $d.Extent.StartOffset)
+        [void]$sb.Insert($d.Extent.StartOffset, "<# optional load of `$$var left out: this file is self-contained #>")
+    }
+    return $sb.ToString()
+}
+
 function Get-PimPublicScriptForbiddenNames {
     # MAIL-NAMING 100.14 item 3 (owner 2026-10-09): a published script never names a customer, a test environment or an
     # internal tool. Regexes (case as written; (?i) where any case counts). tests/Test-PimMailNaming.ps1 keeps its OWN copy
@@ -269,8 +311,12 @@ foreach ($s in $Scripts) {
     $name = Split-Path $src -Leaf
     $seen = New-Object 'System.Collections.Generic.HashSet[string]'
     $seenPaths = New-Object 'System.Collections.Generic.HashSet[string]'
-    $body = Expand-PimSupportScript -Text ([IO.File]::ReadAllText($src)) -BaseDir (Split-Path $src -Parent) -Seen $seen -SeenPaths $seenPaths
+    $srcText = [IO.File]::ReadAllText($src)
+    $body = Expand-PimSupportScript -Text $srcText -BaseDir (Split-Path $src -Parent) -Seen $seen -SeenPaths $seenPaths
     if ($body -match '\.\s*\(Join-Path\s+\$PSScriptRoot') { throw "$name still loads a file next to it after inlining" }
+    # 100.81: a script that says "# BUILD-NO-OPTIONAL-LOADS" is published with NO dot-source at all (checked below).
+    $noLoads = Test-PimSupportScriptNoOptionalLoads -Text $srcText
+    if ($noLoads) { $body = Remove-PimSupportScriptOptionalLoads -Text $body }
     # the blank line after the header matters: a line comment directly above the help block makes PowerShell treat them
     # as one comment group, and the help is lost (Get-Help shows only the syntax).
     $hdr = "# PIM Manager $version -- $name, standalone (built by tools/setup/Build-PimSupportScripts.ps1; helpers inlined: $(@($seen) -join ', '))`r`n`r`n"
@@ -299,7 +345,8 @@ foreach ($s in $Scripts) {
     # Scripts from outside tools\setup (e.g. pim-activator/Deploy-PimActivatorBackend.ps1) must not dot-source ANYTHING
     # (a standalone file has nothing next to it). tools\setup scripts keep the previous rule only: their helpers may
     # carry a guarded, optional dot-source (_PimSqlAdminGroup.ps1's PIM-Rest fallback) that must not fail the build.
-    if ($rel -match '\\') {
+    # 100.81: a tools\setup script that opted in with "# BUILD-NO-OPTIONAL-LOADS" is held to the strict rule too.
+    if ($rel -match '\\' -or $noLoads) {
         $dots = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot }, $true))
         if ($dots.Count) { throw "$name still dot-sources after inlining (line $($dots[0].Extent.StartLineNumber): $($dots[0].Extent.Text))" }
     }

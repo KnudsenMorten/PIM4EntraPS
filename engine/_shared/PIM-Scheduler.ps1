@@ -2594,7 +2594,10 @@ function Get-PimJobsStatus {
     # from the run history + the persisted scheduler state (last/next run). In-progress
     # jobs (a 'running' record with no finishedUtc) sort to the TOP, then the rest by
     # most-recent activity. Pure read -- never runs a job. -NowUtc lets tests inject time.
-    param([object[]]$Jobs, [datetime]$NowUtc = [datetime]::UtcNow)
+    # -PolicyHoldState (PIM 100.84): the CURRENT policy hold records, read by the caller -- @{ known; held = @(plan hashes);
+    # approved = @(plan hashes) }. The Manager passes it (it does not load the engine's hold functions), so a job whose held
+    # change set is no longer held by any provider stops saying "needs approval" there too -- the same rule the tick applies.
+    param([object[]]$Jobs, [datetime]$NowUtc = [datetime]::UtcNow, [AllowNull()][object]$PolicyHoldState = $null)
     $now = $NowUtc.ToUniversalTime()
     $state = Get-PimSchedulerState
     if (-not $Jobs) {
@@ -2810,8 +2813,8 @@ function Get-PimJobsStatus {
         # change set(s) someone has ALREADY APPROVED is waiting for its next run, not for a person. Every plan hash the
         # latest held run names must carry a recorded approval (Get-PimPolicyMassChangeApproval) -- then it is
         # "approved, applies on the next run" and is not counted as needing approval.
-        $approvedPending = $false
-        if ($standingHeld.Count -and (Get-Command Get-PimPolicyMassChangeApproval -ErrorAction SilentlyContinue)) {
+        $approvedPending = $false; $heldResolved = $false
+        if ($standingHeld.Count -and ($null -ne $PolicyHoldState -or (Get-Command Get-PimPolicyMassChangeApproval -ErrorAction SilentlyContinue))) {
             $latestHeld = $standingHeld | Select-Object -First 1
             $hashes = @([regex]::Matches("$($latestHeld.detail)", '(?i)PlanHash\s+([0-9a-f]{64})') | ForEach-Object { $_.Groups[1].Value.ToLowerInvariant() } | Select-Object -Unique)
             if ($hashes.Count) {
@@ -2820,12 +2823,21 @@ function Get-PimJobsStatus {
                 # the pull job and delta-policies both named the same RIDE hold; one applied it and cleared the approval, the
                 # other still showed "needs approval" until its own next run).
                 $approved = @{}; $stillHeld = @{}; $holdKnown = $true
-                foreach ($prov in 'GroupsPolicies', 'EntraRolePolicies', 'AzResPolicies') {
+                if ($null -ne $PolicyHoldState) {
+                    # PIM 100.84: the caller read the hold records (ONE read for the whole view) -- judge by those.
+                    $holdKnown = [bool]$PolicyHoldState.known
+                    foreach ($x in @($PolicyHoldState.approved)) { if ("$x".Trim()) { $approved["$x".Trim().ToLowerInvariant()] = $true } }
+                    foreach ($x in @($PolicyHoldState.held)) { if ("$x".Trim()) { $stillHeld["$x".Trim().ToLowerInvariant()] = $true } }
+                }
+                else { foreach ($prov in 'GroupsPolicies', 'EntraRolePolicies', 'AzResPolicies') {
                     try { $ap = Get-PimPolicyMassChangeApproval -Provider $prov; if ($ap -and "$($ap.planHash)".Trim()) { $approved["$($ap.planHash)".Trim().ToLowerInvariant()] = $true } } catch { }
                     if (Get-Command Get-PimPolicyMassHold -ErrorAction SilentlyContinue) {
                         try { $ch = Get-PimPolicyMassHold -Provider $prov; if ($ch -and "$($ch.planHash)".Trim()) { $stillHeld["$($ch.planHash)".Trim().ToLowerInvariant()] = $true } } catch { $holdKnown = $false }
                     } else { $holdKnown = $false }
-                }
+                } }
+                # PIM 100.84: every change set the held run named is no longer held by any provider (applied, or no longer
+                # planned) -- nothing waits for a person OR for a next run; the row says so instead of "approved".
+                $heldResolved = [bool]($holdKnown -and -not @($hashes | Where-Object { $stillHeld.ContainsKey($_) }).Count)
                 $approvedPending = -not @($hashes | Where-Object { -not $approved.ContainsKey($_) -and -not ($holdKnown -and -not $stillHeld.ContainsKey($_)) }).Count
             }
         }
@@ -2906,6 +2918,7 @@ function Get-PimJobsStatus {
             heldCount          = $heldRuns.Count
             needsApproval      = [bool]($standingHeld.Count -gt 0)
             approvedPending    = [bool]$approvedPending   # held, but every change set it named is approved -- applies on the next run
+            heldResolved       = [bool]$heldResolved      # PIM 100.84: held earlier, and no provider holds that change set any more
             heldDetail         = $(if ($standingHeld.Count) { "$(@($standingHeld)[0].detail)" } else { '' })
             # §95.2o lanes: the Jobs page section, what the job writes, and what a queued / due run waits for
             group              = (Get-PimJobGroup -Type "$($j.type)")

@@ -60,20 +60,10 @@ Write-Host "==> demo dataset: $action ($(if ($Apply) { 'APPLY' } else { 'plan on
 
 $elig = $null
 if ($action -eq 'Enable') {
-    $ring = ''; $ringRec = $false; $ringErr = ''
-    try {
-        $rec = Read-PimUpdateState -ConnectionString $cs
-        $v = Get-PimUpdateStateVerdict -Record $rec
-        $ringRec = [bool]$v.recorded; $ring = "$($v.ring)"
-    } catch { $ringErr = "$($_.Exception.Message)" }
-    $licStatus = ''; $licCustomer = ''; $licErr = ''
-    try {
-        $raw = Get-PimSqlSettingRaw -ConnectionString $cs -Name 'License'
-        if ("$raw".TrimStart().StartsWith('"')) { $raw = "$raw" | ConvertFrom-Json }   # stored as a JSON string of the document
-        if ("$raw".Trim()) { $lic = Get-PimLicense -LicenseText "$raw"; $licStatus = "$($lic.Status)"; $licCustomer = "$($lic.Customer)" } else { $licStatus = 'Missing' }
-    } catch { $licErr = "$($_.Exception.Message)" }
-    $elig = Get-PimDemoModeEligibility -Ring $ring -RingRecorded $ringRec -RingError $ringErr -LicenceStatus $licStatus -LicenceCustomer $licCustomer -LicenceError $licErr
-    Write-Host ("    ring: {0}   licence: {1} {2}" -f $(if ($ringRec) { $ring } else { 'not recorded' }), $licStatus, $(if ($licCustomer) { "($licCustomer)" } else { '' })) -ForegroundColor DarkGray
+    # The ONE demo-environment proof (ring from Read-PimUpdateState, licence verified offline by Get-PimLicense -LicenseText,
+    # judged by Get-PimDemoModeEligibility) -- shared with Set-PimDemoSamples.ps1, so neither carries a weaker copy.
+    $elig = Get-PimDemoEnvironmentProof -ConnectionString $cs
+    Write-Host ("    ring: {0}   licence: {1} {2}" -f $(if ($elig.ringRecorded) { $elig.ringText } else { 'not recorded' }), $elig.licenceStatus, $(if ($elig.customer) { "($($elig.customer))" } else { '' })) -ForegroundColor DarkGray
     if (-not $elig.allowed) {
         foreach ($r in $elig.reasons) { Write-Host "    REFUSED: $r" -ForegroundColor Red }
         throw "REFUSED: demo data is allowed only on the internal demo environment. Nothing was written."
