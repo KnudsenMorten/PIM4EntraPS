@@ -295,6 +295,21 @@ if (Test-Path -LiteralPath $_setupLib) { . $_setupLib }
 . (Join-Path $solutionRoot 'engine\_shared\PIM-DemoMode.ps1')
 # §88 COMMIT WATCHER: every commit records the keys it changed; GET /api/commits says per key saved / applied / live.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-CommitWatch.ps1')
+# 100.67 EXPORT: every view to Excel (.xlsx, .NET packaging) or PDF (the bundled MigraDoc of 100.61) -- POST /api/export.
+. (Join-Path $solutionRoot 'engine\_shared\PIM-TableExport.ps1')
+# 100.68 SHOWCASE: the impact counters (GET /api/impact) and the demo dataset of the flagged demo environment (pimdemo schema;
+# never loaded by the engine or the scheduler -- the engine cannot read demo data, PIM-SqlStore refuses it outside this module).
+. (Join-Path $solutionRoot 'engine\_shared\PIM-ImpactCounters.ps1')
+. (Join-Path $solutionRoot 'engine\_shared\PIM-DemoData.ps1')
+function Test-PimManagerDemoDataOn {
+    # 100.68 (b): the SQL flag pimdemo.Meta DemoEnvironment (written only by tools/setup/Set-PimDemoMode.ps1, which refuses
+    # anything but the internal demo environment) AND PIM_DEMO_MODE not off. Cached 60 s; no store = off. Never throws.
+    if ($script:PimDemoDataCache -and ((Get-Date) - $script:PimDemoDataCache.at).TotalSeconds -lt 60) { return [bool]$script:PimDemoDataCache.on }
+    $on = $false
+    try { $dcs = Get-PimManagerStoreCs; if ("$dcs".Trim()) { $on = [bool](Test-PimDemoDataActive -Flag (Read-PimDemoFlag -ConnectionString $dcs)) } } catch { $on = $false }
+    $script:PimDemoDataCache = @{ at = (Get-Date); on = $on }
+    return $on
+}
 # §82 RFA + consultant lifecycle (Pro): loaded only when present -- the Community payload has neither folder.
 if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\rfa\PIM-Rfa.ps1')) { . (Join-Path $solutionRoot 'engine\rfa\PIM-Rfa.ps1') }
 if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\rfa\PIM-RfaBroker.ps1')) { . (Join-Path $solutionRoot 'engine\rfa\PIM-RfaBroker.ps1') }   # §90 API keys
@@ -9209,6 +9224,23 @@ function Write-HtmlResponse {
     }
 }
 
+function Write-PimManagerFileResponse {
+    # 100.67: a file download (export). Same client-abort tolerance as Write-JsonResponse.
+    param([Parameter(Mandatory)][object]$Response, [Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][string]$FileName, [Parameter(Mandatory)][string]$ContentType)
+    $safe = ($FileName -replace '[^A-Za-z0-9._-]', '_')
+    try {
+        $Response.StatusCode = 200
+        $Response.ContentType = $ContentType
+        $Response.AddHeader('Content-Disposition', "attachment; filename=`"$safe`"")
+        $Response.AddHeader('Cache-Control', 'no-store')
+        $Response.ContentLength64 = $Bytes.LongLength
+        $Response.OutputStream.Write($Bytes, 0, $Bytes.Length)
+        $Response.OutputStream.Close()
+    } catch {
+        Write-Host ("  [net] client gone before the export was written ({0} bytes): {1}" -f $Bytes.Length, $_.Exception.Message) -ForegroundColor DarkGray
+    }
+}
+
 function Read-RequestJson {
     param([Parameter(Mandatory)][System.Net.HttpListenerRequest]$Request)
     if (-not $Request.HasEntityBody) { return $null }
@@ -11258,6 +11290,82 @@ function Handle-Request {
             Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; value = $want }
             return 200
         }
+        # 100.67 (b) (owner 2026-10-10: "in the dashboard and counter over, make option to hide company and env name. on by
+        # def"): HideCompanyAndEnvironmentName, ON by default (never set = hidden). Every role reads it; SuperAdmin changes it
+        # (Settings > Naming & accounts, or the toggle on the Dashboard). It also decides the environment label in every export.
+        if ($path -eq '/api/settings/hide-names' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $raw = $null; try { $raw = Get-PimSetting -Name 'HideCompanyAndEnvironmentName' } catch { $raw = $null }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ value = [bool](Test-PimHideNamesValue -Value $raw); default = $true; canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin'); placeholder = (Get-PimTableExportPlaceholder) }
+            return 200
+        }
+        if ($path -eq '/api/settings/hide-names' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change whether the company and environment name are shown.' }; return 403 }
+            $hb = Read-RequestJson -Request $req
+            if (-not $hb -or -not $hb.PSObject.Properties['value'] -or -not ($hb.value -is [bool])) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'send { value: true|false } (true = hide the names)' }; return 400 }
+            $before = $true; try { $before = [bool](Test-PimHideNamesValue -Value (Get-PimSetting -Name 'HideCompanyAndEnvironmentName')) } catch { }
+            Set-PimManagerSettingObject -Name 'HideCompanyAndEnvironmentName' -Value $(if ($hb.value) { 'true' } else { 'false' })
+            Write-PimManagerAuditEvent -Action 'settings.hide-names.save' -Target 'HideCompanyAndEnvironmentName' -Result 'ok' -Before @{ hidden = $before } -After @{ hidden = [bool]$hb.value }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; value = [bool]$hb.value }
+            return 200
+        }
+
+        # 100.67 (a) EXPORT -- what a view shows, as Excel (.xlsx) or PDF. GET /api/export/capabilities tells the page whether
+        # this image can make PDFs (the PDF item is disabled with the reason when not -- never a 500).
+        if ($path -eq '/api/export/capabilities' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $pc = Test-PimTableExportPdfAvailable
+            $lim = Get-PimTableExportLimits
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ xlsx = $true; pdf = [bool]$pc.available; pdfReason = "$($pc.reason)"; maxRows = $lim.maxRows; views = @(Get-PimTableExportViews) })
+            return 200
+        }
+        # POST /api/export { view, title, format: 'pdf'|'xlsx', sections: [{ heading, columns, rows }] }. The rows come from
+        # the page's own data model; the server re-checks the caller's role against the VIEW (the payload is the browser's),
+        # caps the size (said in the file), names the environment by the hide-names setting, audits who / view / format /
+        # row count (never the content) and returns the file.
+        if ($path -eq '/api/export' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            $xb = $null
+            try { $xb = Read-RequestJson -Request $req } catch { $xb = $null }
+            if (-not $xb) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "send { view, title, format: 'pdf'|'xlsx', sections: [{ heading, columns, rows }] }" }; return 400 }
+            $xView = "$(if ($xb.PSObject.Properties['view']) { $xb.view })".Trim().ToLowerInvariant()
+            $xMin = Get-PimTableExportViewRole -View $xView
+            if (-not $xMin) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "'$xView' is not a page that can be exported" }; return 400 }
+            if (-not (Test-PimManagerRoleAtLeast -Minimum $xMin)) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "$xMin role required to export this page -- the same role the page itself needs." }; return 403 }
+            # the audit trail as a file is Pro evidence, exactly as GET /api/audit/export
+            if ($xView -eq 'audit' -and -not (Test-PimManagerProFeature -Key 'reports.evidence' -Response $resp)) { return 403 }
+            $xFmt = "$(if ($xb.PSObject.Properties['format']) { $xb.format })".Trim().ToLowerInvariant()
+            if ($xFmt -eq 'pdf') {
+                $pc = Test-PimTableExportPdfAvailable
+                if (-not $pc.available) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; pdfUnavailable = $true; error = "$($pc.reason)" }; return 409 }
+            }
+            $xHide = $true; try { $xHide = [bool](Test-PimHideNamesValue -Value (Get-PimSetting -Name 'HideCompanyAndEnvironmentName')) } catch { $xHide = $true }
+            $xEnv = ''; $xTen = ''
+            if (-not $xHide) {
+                try { $xEnv = "$(Get-PimSetting -Name 'EnvironmentName')".Trim() } catch { }
+                try { $xTen = "$((Get-PimManagerTenantContext).tenantName)".Trim() } catch { }
+            }
+            $xDemo = $false; try { if (Get-Command Test-PimManagerDemoDataOn -ErrorAction SilentlyContinue) { $xDemo = [bool](Test-PimManagerDemoDataOn) } } catch { $xDemo = $false }
+            try {
+                $model = ConvertTo-PimTableExportModel -Payload $xb -EnvironmentLabel (Get-PimTableExportEnvironmentLabel -Hide $xHide -EnvironmentName $xEnv -TenantName $xTen) -Version "$(Get-PimSolutionVersion)" -DemoData:$xDemo
+            } catch {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "$($_.Exception.Message)" }; return 400
+            }
+            try {
+                $bytes = if ($xFmt -eq 'pdf') { ConvertTo-PimTableExportPdf -Model $model } else { ConvertTo-PimXlsxBytes -Model $model }
+            } catch {
+                $why = "$($_.Exception.Message)"
+                try { Write-PimManagerAuditEvent -Action "export.$xFmt" -Target $xView -Result 'failed' -After ([ordered]@{ view = $xView; format = $xFmt; rows = $model.rowCount; error = $why }) } catch { }
+                Write-JsonResponse -Response $resp -Status 422 -Body @{ ok = $false; error = "The $xFmt file could not be made: $why" }; return 422
+            }
+            try {
+                Write-PimManagerAuditEvent -Action "export.$xFmt" -Target $xView -After ([ordered]@{ view = $xView; format = $xFmt; title = $model.title; sections = @($model.sections).Count; rows = $model.rowCount; truncated = [bool]$model.truncated; namesHidden = $xHide })
+            } catch { Write-Host ("  [audit] could not record the export: {0}" -f $_.Exception.Message) -ForegroundColor Yellow }
+            Write-PimManagerFileResponse -Response $resp -Bytes $bytes -FileName (Get-PimTableExportFileName -Model $model) -ContentType $(if ($xFmt -eq 'pdf') { 'application/pdf' } else { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+            return 200
+        }
+
         # Operator 2026-10-05: the RFA portal shows WHERE people sign in (CompanyName, "like environment name") and HOW to get
         # help (SupportEmail, "add an option to send email for support, add it into the settings"). pim.Settings, plain
         # strings; the broker reads them. Read: Admin. Change: SuperAdmin, validated, audited with before / after.
@@ -13873,6 +13981,14 @@ function Handle-Request {
             $script:lastHeartbeat = Get-Date
             $heavy = $false
             try { if ("$($req.Url.Query)".IndexOf('include=heavy') -ge 0) { $heavy = $true } } catch {}
+            # 100.68 (b): on the flagged demo environment the fast tiles come from the demo dataset (all green), marked demoData.
+            if (-not $heavy -and (Test-PimManagerDemoDataOn)) {
+                try {
+                    $dsum = Get-PimDemoHomeSummary -ConnectionString (Get-PimManagerStoreCs)
+                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ generatedUtc = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'); includeHeavy = $false; demoData = $true; tiles = (Get-PimDemoHomeTiles -Summary $dsum) })
+                    return 200
+                } catch { Write-Host ("  [demo] demo tiles could not be read, showing the real ones: {0}" -f $_.Exception.Message) -ForegroundColor Yellow }
+            }
             try {
                 Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimHomeOverview -IncludeHeavy:$heavy)
                 return 200
@@ -13880,6 +13996,36 @@ function Handle-Request {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }
                 return 500
             }
+        }
+        # 100.68 (a): the impact counters (Dashboard + Counters overview), cumulative, from data PIM already stores; each with
+        # its More info (how it is counted). An unreadable source is n/a, never 0. On the flagged demo environment: the demo
+        # dataset's counters, marked demoData. Every signed-in role reads them (counts only, no names).
+        if ($path -eq '/api/impact' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try {
+                $isMaster = $false; try { $isMaster = [bool](Test-PimManagerIsMspMaster) } catch { $isMaster = $false }
+                $ics = Get-PimManagerStoreCs
+                if (Test-PimManagerDemoDataOn) {
+                    $dq = { param($name, $sql, $cs) Invoke-PimDemoSql -Kind scalar -ConnectionString $cs -Sql $sql }
+                    $body = Get-PimImpactCounters -ConnectionString $ics -Queries (Get-PimDemoImpactQueries) -Query $dq -MspMaster -DemoData
+                } elseif (-not "$ics".Trim()) {
+                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $false; error = 'This Manager has no SQL store, so the impact counters cannot be read.'; counters = @(Get-PimImpactCounterCatalog | ForEach-Object { [ordered]@{ key = $_.key; title = $_.title; info = $_.info; ok = $false; value = $null; text = 'n/a'; tone = 'na' } }) })
+                    return 200
+                } else {
+                    $body = Get-PimImpactCounters -ConnectionString $ics -MspMaster:$isMaster
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body $body
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
+        # 100.68 (b): is the demo dataset shown here? (the page's footer marker; every export says so too)
+        if ($path -eq '/api/demo-data/status' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ on = [bool](Test-PimManagerDemoDataOn); marker = 'Demo data' }
+            return 200
         }
 
         # =====================================================================

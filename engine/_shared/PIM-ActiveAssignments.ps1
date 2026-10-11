@@ -947,6 +947,13 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
     # (which built a second, dictionary-shaped copy of every row before it wrote a character). The rows are released
     # before the SQL write, so the write holds the string and nothing else.
     $json = ConvertTo-PimActiveAssignmentsSnapshotJson -Entry $entry
+    # 100.68: the Dashboard's "Activations handled" ledger -- every time-bound active assignment seen, recorded once
+    # (insert-only, engine/_shared/PIM-ImpactCounters.ps1). Never fails the snapshot: a ledger error is said in the detail.
+    $ledTxt = ''
+    if (Get-Command Update-PimImpactActivationLedger -ErrorAction SilentlyContinue) {
+        $led = Update-PimImpactActivationLedger -ConnectionString (Get-PimTenantCacheStoreCs) -Rows $snap.rows
+        $ledTxt = if ($led.ok) { "; activation ledger +$($led.added)" } else { "; activation ledger NOT updated ($($led.error))" }
+    }
     $entry['rows'] = $null; $snap['rows'] = $null
     $where = Set-PimTenantCacheEntry -Kind $kind -ValueJson $json
     $json = $null
@@ -957,7 +964,7 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
     }
     $partialTxt = if ($errs.Count) { " PARTIAL -- could not read: " + (@($errs | ForEach-Object { "$($_.surface)" }) -join ', ') } else { '' }
     return [pscustomobject]@{ ran = $true; whatIf = $false; total = [int]$c.total; partial = [bool]$snap.partial
-        detail = "$type`: $sum$partialTxt" }
+        detail = "$type`: $sum$partialTxt$ledTxt" }
 }
 
 function Register-PimActiveAssignmentsSnapshotHandler {

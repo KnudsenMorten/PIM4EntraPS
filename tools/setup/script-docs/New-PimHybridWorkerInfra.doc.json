@@ -13,6 +13,8 @@
   ],
   "changes": [
     { "target": "Azure (Azure VM worker)", "action": "create", "object": "resource group, VNet + subnet (Microsoft.Sql and Microsoft.Storage service endpoints, DNS = your DCs), NSG with deny-all inbound, NAT gateway + its public IP (Set-PimHybridWorkerEgress.ps1), peerings in both directions, the VM (Windows Server 2022 Azure Edition Core, Trusted Launch, system-assigned identity, NO public IP), a SQL VNet rule", "why": "the worker's own isolated network and machine; the local admin password is generated, used once and discarded", "undo": "delete the resource group, the remote peerings and the SQL VNet rule 'pimhybridwrk'" },
+    { "target": "privatelink.database.windows.net (-PrivateSqlDnsZoneId / -PrivateDnsZoneResourceGroup)", "action": "create", "object": "a virtual network link 'link-pimhybridwrk-<vnet>' (tagged pim-hybrid-worker) to the worker VNet and each -PrivateDnsLinkVnetId; the standard zone itself only with -CreatePrivateDnsZone when missing; a DNS zone group on the SQL private endpoint only when its A record is missing and the endpoint has none", "why": "a private-only PIM database must resolve to its private address; the DCs' conditional forwarder is printed, never written", "undo": "Remove-PimHybridWorker.ps1 (the worker VNet's link); delete other links yourself" },
+    { "target": "VNet peerings (-UseRemoteGateways / -AllowForwardedTraffic)", "action": "update", "object": "useRemoteGateways / allowForwardedTraffic on the worker-side peering; allowGatewayTransit on the hub side only when PIM created that peering (otherwise printed for the hub owner)", "why": "DCs reached through a hub VPN / ExpressRoute gateway", "undo": "Set-PimHybridWorkerPeering.ps1 cannot turn them off; set them in the portal, or remove the worker" },
     { "target": "PIM SQL server (Arc, -SqlAllowedPublicIp)", "action": "create", "object": "one firewall rule per on-premises egress address (pimhybridwrk-arc-<server>-<n>)", "why": "an on-premises worker reaching a public SQL endpoint; not needed with a private endpoint", "undo": "delete those firewall rules" }
   ],
   "parameters": [
@@ -32,11 +34,20 @@
     { "name": "DnsServers", "required": false, "default": null, "help": "Azure VM (required there): the domain controllers' addresses." },
     { "name": "SqlServerId", "required": false, "default": null, "help": "The PIM SQL server's resource id (VNet rule / firewall rules)." },
     { "name": "Egress", "required": false, "default": "NatGateway", "help": "Azure VM: NatGateway, or None when your network routes outbound. Never a public IP on the VM." },
-    { "name": "Image", "required": false, "default": "MicrosoftWindowsServer:WindowsServer:2022-datacenter-azure-edition-core-smalldisk:latest", "help": "Azure VM: the image (Publisher:Offer:Sku:Version)." }
+    { "name": "Image", "required": false, "default": "MicrosoftWindowsServer:WindowsServer:2022-datacenter-azure-edition-core-smalldisk:latest", "help": "Azure VM: the image (Publisher:Offer:Sku:Version)." },
+    { "name": "PrivateSqlDnsZoneId", "required": false, "default": null, "help": "Private-only PIM database: the EXISTING privatelink.database.windows.net zone (no other zone name is accepted). It is linked to the worker VNet (Azure VM) and to every -PrivateDnsLinkVnetId." },
+    { "name": "PrivateDnsLinkVnetId", "required": false, "default": null, "help": "More VNets to link the zone to: the DCs' VNet when the DCs are Azure VMs (Azure DNS answers from the zones linked to the ASKING DNS server's VNet), or the DNS Private Resolver's VNet (Arc / on-premises DCs)." },
+    { "name": "CreatePrivateDnsZone", "required": false, "default": "false", "help": "Create the standard zone privatelink.database.windows.net ONLY when it is missing (with -PrivateDnsZoneResourceGroup or -PrivateSqlDnsZoneId); attaches it to the SQL private endpoint when that endpoint has no DNS zone group yet." },
+    { "name": "PrivateDnsZoneResourceGroup", "required": false, "default": null, "help": "Where the standard zone lives (in -SubscriptionId), instead of -PrivateSqlDnsZoneId." },
+    { "name": "PrivateSql", "required": false, "default": "false", "help": "Print the conditional forwarder the DNS administrator adds (implied by the zone options). PIM never writes AD / on-premises DNS." },
+    { "name": "DnsForwarderIp", "required": false, "default": "168.63.129.16 (Azure VM) / the Private Resolver inbound endpoint (Arc)", "help": "The address the printed forwarder points at: 168.63.129.16 for DCs that are Azure VMs, an Azure DNS Private Resolver inbound endpoint for DCs on-premises." },
+    { "name": "UseRemoteGateways", "required": false, "default": "false", "help": "Azure VM: DCs reached through the hub's VPN / ExpressRoute gateway -- the worker-side peering to -GatewayVnetId uses it (Set-PimHybridWorkerPeering.ps1; the hub must have a gateway and allow gateway transit)." },
+    { "name": "GatewayVnetId", "required": false, "default": null, "help": "Azure VM: the hub VNet with the gateway (one of -PeerVnetId)." },
+    { "name": "AllowForwardedTraffic", "required": false, "default": "false", "help": "Azure VM: the worker-side peering(s) accept traffic the hub forwards (an NVA / firewall in the hub)." }
   ],
   "readsOnly": [ "the subscription's tenant", "what already exists (read-before-write): resource group, NSG, VNet, peerings, VM, SQL rules", "the Arc machine (status, OS, identity)" ],
   "network": [ "management.azure.com (ARM REST) and login.microsoftonline.com -- browser sign-in or an Invardia support session; no Azure CLI, no PowerShell module" ],
   "whatIf": "Prints every resource it would create (or, for Arc, the checks and the firewall rules) and changes nothing.",
-  "undo": "Azure VM: delete the worker's resource group, the remote peerings '<remote>-to-pimhybridwrk' and the SQL VNet rule 'pimhybridwrk'. Arc: delete the pimhybridwrk-arc-* SQL firewall rules.",
+  "undo": "Remove-PimHybridWorker.ps1 deletes everything this script created (it carries the tag pim-hybrid-worker). By hand: Azure VM: delete the worker's resource group, the remote peerings '<remote>-to-pimhybridwrk', the SQL VNet rule 'pimhybridwrk' and the zone link. Arc: delete the pimhybridwrk-arc-* SQL firewall rules.",
   "docUrl": "https://invardia.com/docs/pim/scripts/New-PimHybridWorkerInfra/"
 }

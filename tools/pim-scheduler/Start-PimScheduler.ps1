@@ -168,6 +168,7 @@ if (Test-Path -LiteralPath "$shared\..\discovery\PIM-Discovery.ps1") { . "$share
 # the Manager's single request loop for 140-170 s. Job 'active-assignments-snapshot' runs it here and stores it in
 # pim.TenantCache; the Manager only reads that row. Needs _tenantSync.ps1 (below) for the store + connection helpers.
 . "$shared\PIM-ActiveAssignments.ps1"
+. "$shared\PIM-ImpactCounters.ps1"    # 100.68: the activation ledger the snapshot job fills (Dashboard impact counters)
 # Drift page (2026-09-14): the live-vs-desired plan that used to run inside the Manager's GET /api/drift. Job
 # 'drift-snapshot' runs it here and stores pim.TenantCache kind 'drift'; the Manager only reads that row.
 . "$shared\PIM-DriftSnapshot.ps1"

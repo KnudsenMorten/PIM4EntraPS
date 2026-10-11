@@ -276,7 +276,10 @@ function Test-PimBaselinePrivateEndpointState {
         $l.Add(("{0,-28} {1,-30} {2}" -f $name, "$got", $(if ($ok) { 'OK' } else { "FAIL (want $want)" })))
         if (-not $ok) { $r.Add("$name is '$got', want $want") }
     }
-    & $chk 'publicNetworkAccess' ("$($State.publicNetworkAccess)" -eq 'Disabled') $State.publicNetworkAccess 'Disabled'
+    # 100.59: -KeepPublicAccess (cross-tenant private endpoint mode) gives the PUBLISHER its private path while the readers
+    # still on the public-but-signed path keep theirs -- the closing step (Close-PimBaselinePublicAccess) disables it later.
+    $wantPna = if ("$($State.wantPublicNetworkAccess)".Trim()) { "$($State.wantPublicNetworkAccess)".Trim() } else { 'Disabled' }
+    & $chk 'publicNetworkAccess' ("$($State.publicNetworkAccess)" -eq $wantPna) $State.publicNetworkAccess $wantPna
     & $chk 'allowBlobPublicAccess' ([bool]$State.allowBlobPublicAccess) $State.allowBlobPublicAccess 'True (anonymous blob read; no cross-tenant identity exists for the pull)'
     & $chk 'container publicAccess' ("$($State.containerPublicAccess)" -ieq 'Blob') $State.containerPublicAccess 'Blob (no listing)'
     $ip = "$($State.endpointIp)".Trim()
@@ -286,6 +289,278 @@ function Test-PimBaselinePrivateEndpointState {
     & $chk 'zone link resolution' ("$($State.linkResolutionPolicy)" -eq 'NxDomainRedirect') $State.linkResolutionPolicy 'NxDomainRedirect'
     & $chk 'zone link VNet' ("$($State.linkVnetId)".Trim() -and "$($State.linkVnetId)" -ieq "$($State.expectedVnetId)") (($("$($State.linkVnetId)" -split '/')[-1])) ($("$($State.expectedVnetId)" -split '/')[-1])
     return @{ ok = ($r.Count -eq 0); reasons = @($r.ToArray()); lines = @($l.ToArray()) }
+}
+
+# ======================================================================================================================
+# 100.59 -- THE CROSS-TENANT PRIVATE ENDPOINT BY APPROVAL ('crossTenantPrivateEndpoint'). Pure cores; the scripts are
+#   managed tenant  tools/setup/Request-PimBaselinePrivateEndpoint.ps1 (endpoint in ITS VNet + its own privatelink A record)
+#                   tools/setup/Test-PimBaselinePrivatePull.ps1        (the pull proven over that endpoint)
+#   managing tenant tools/setup/Approve-PimBaselinePrivateEndpoint.ps1 (approves listed managed tenants only)
+#                   tools/setup/Close-PimBaselinePublicAccess.ps1      (removes proven readers' public rule; public access
+#                                                                       Disabled once EVERY reader is private)
+# No SAS, no key, no secret, no peering. Trust stays the bundle signature (DESIGN 13.7).
+# ======================================================================================================================
+
+$script:PimPeRequestPrefix = 'PIM Manager managed-tenant pull: tenant '
+
+function Get-PimArmIdSubscription {
+    # PURE. The subscription id of an ARM resource id ('' when it carries none).
+    param([string]$ResourceId)
+    if ("$ResourceId" -match '(?i)^/subscriptions/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(/|$)') { return $Matches[1].ToLowerInvariant() }
+    return ''
+}
+
+function Get-PimBaselineStoreResourceId {
+    # PURE. The managing tenant's bundle store as an ARM id (what a managed tenant's endpoint targets).
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$StorageAccount)
+    return ('/subscriptions/{0}/resourceGroups/{1}/providers/Microsoft.Storage/storageAccounts/{2}' -f "$SubscriptionId".Trim().ToLowerInvariant(), "$ResourceGroup".Trim(), "$StorageAccount".Trim().ToLowerInvariant())
+}
+
+function Get-PimCrossTenantPeName {
+    # PURE. The managed tenant's endpoint name ('-xt' = cross-tenant; never the managing tenant's own 'pe-<store>-blob').
+    param([Parameter(Mandatory)][string]$StorageAccount)
+    return "pe-$("$StorageAccount".Trim().ToLowerInvariant())-blob-xt"
+}
+
+function Get-PimCrossTenantPeRequestMessage {
+    # PURE. The request message a managed tenant's endpoint carries. A HINT for the approver, never the proof: the approval
+    # matches the endpoint's SUBSCRIPTION (asserted by ARM) and refuses a message that names a different tenant.
+    param([Parameter(Mandatory)][string]$TenantId)
+    return "$script:PimPeRequestPrefix$("$TenantId".Trim().ToLowerInvariant())"
+}
+
+function Get-PimTenantIdFromPeRequestMessage {
+    # PURE. The tenant id a request message names ('' when it names none).
+    param([string]$Message)
+    if ("$Message" -match '(?i)tenant\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})') { return $Matches[1].ToLowerInvariant() }
+    return ''
+}
+
+function ConvertTo-PimMspSlaveSpec {
+    # PURE. One managed tenant as ONE string argument for the managing tenant's private-endpoint steps (a step argument
+    # crosses a process boundary as JSON; a flat string survives it exactly):  tenantId|subscriptionId|access|proven|subnetId|displayName
+    param([string]$TenantId, [string]$SubscriptionId, [string]$Access = 'publicSigned', [bool]$Proven = $false, [string]$SubnetId = '', [string]$DisplayName = '')
+    return (@("$TenantId".Trim().ToLowerInvariant(), "$SubscriptionId".Trim().ToLowerInvariant(), $(if ("$Access".Trim()) { "$Access".Trim() } else { 'publicSigned' }),
+              $(if ($Proven) { 'proven' } else { '' }), "$SubnetId".Trim(), ("$DisplayName".Trim() -replace '\|', '/')) -join '|')
+}
+
+function ConvertFrom-PimMspSlaveSpec {
+    # PURE. The inverse. Returns @{ ok; reason; tenantId; subscriptionId; access; proven; subnetId; displayName }.
+    param([string]$Spec)
+    $p = @("$Spec" -split '\|', 6)
+    $o = @{ ok = $false; reason = ''; tenantId = ''; subscriptionId = ''; access = 'publicSigned'; proven = $false; subnetId = ''; displayName = '' }
+    if ($p.Count -lt 6) { $o.reason = "'$Spec' is not tenantId|subscriptionId|access|proven|subnetId|displayName"; return $o }
+    $o.tenantId = "$($p[0])".Trim().ToLowerInvariant(); $o.subscriptionId = "$($p[1])".Trim().ToLowerInvariant()
+    $o.access = if ("$($p[2])".Trim()) { "$($p[2])".Trim() } else { 'publicSigned' }
+    $o.proven = ("$($p[3])".Trim() -eq 'proven'); $o.subnetId = "$($p[4])".Trim(); $o.displayName = "$($p[5])".Trim()
+    if ($o.tenantId -notmatch $script:PimMspGuid) { $o.reason = "tenant id '$($o.tenantId)' is not a GUID"; return $o }
+    if ($o.access -notin @('publicSigned', 'privateEndpoint')) { $o.reason = "access '$($o.access)' must be publicSigned or privateEndpoint"; return $o }
+    if ($o.access -eq 'privateEndpoint' -and $o.subscriptionId -notmatch $script:PimMspGuid) { $o.reason = "managed tenant $($o.tenantId): access privateEndpoint needs its subscription id (what the approval matches)"; return $o }
+    if (-not $o.displayName) { $o.displayName = $o.tenantId }
+    $o.ok = $true
+    return $o
+}
+
+function Get-PimMspSlavePeSubscription {
+    # PURE. The subscription a managed tenant's endpoint lives in: slaves[i].subscriptionId, else the one in its subnet id.
+    param([object]$Slave)
+    $s = "$(Get-PimMspBuildValue -Object $Slave -Path 'subscriptionId')".Trim()
+    if ($s) { return $s.ToLowerInvariant() }
+    return (Get-PimArmIdSubscription -ResourceId "$(Get-PimMspBuildValue -Object $Slave -Path 'subnetResourceId')")
+}
+
+function ConvertTo-PimPeConnectionView {
+    # PURE. A storage account's privateEndpointConnections entry (ARM shape) -> @{ name; endpointId; subscriptionId; status; message }.
+    param([object]$Connection)
+    $props = $Connection.properties
+    $ep = "$($props.privateEndpoint.id)".Trim()
+    $st = $props.privateLinkServiceConnectionState
+    return @{ name = "$($Connection.name)".Trim(); endpointId = $ep; subscriptionId = (Get-PimArmIdSubscription -ResourceId $ep)
+              status = "$($st.status)".Trim(); message = "$($st.description)".Trim() }
+}
+
+function Get-PimBaselinePeApprovalPlan {
+    <#
+      PURE. 100.59 (2) -- which pending private endpoint connections on the managing tenant's bundle store to APPROVE.
+      -Connections: the store's privateEndpointConnections (ARM shape). -Allowed: managed tenants (ConvertFrom-PimMspSlaveSpec)
+      with access privateEndpoint. -OwnSubscriptionId: the managing tenant's own (its publisher endpoint; never touched).
+      -RejectTenantId: revoke that tenant (its connections -> Rejected).
+      A connection is approved ONLY when its endpoint lives in a listed tenant's subscription AND its request message names
+      no OTHER tenant. Never "approve all": an empty list is REFUSED; an unknown pending request stays pending and is reported.
+      Returns @{ ok; reason; approve; reject; approved; waiting; unknown; mismatch; lines }.
+    #>
+    param([object[]]$Connections = @(), [object[]]$Allowed = @(), [string]$OwnSubscriptionId = '', [string]$RejectTenantId = '')
+    $out = @{ ok = $false; reason = ''; approve = @(); reject = @(); approved = @(); waiting = @(); unknown = @(); mismatch = @(); lines = @() }
+    $rej = "$RejectTenantId".Trim().ToLowerInvariant()
+    if ($rej -and $rej -notmatch $script:PimMspGuid) { $out.reason = "REFUSED: -RejectTenantId '$RejectTenantId' is not a GUID"; return $out }
+    $allow = @($Allowed | Where-Object { $null -ne $_ })
+    if (-not $allow.Count -and -not $rej) { $out.reason = 'REFUSED: no managed tenant is listed for a private endpoint (slaves[i].access = privateEndpoint) -- the managing tenant never approves a connection it cannot attribute ("approve all" does not exist)'; return $out }
+    $bySub = @{}
+    foreach ($a in $allow) {
+        if (-not $a.ok) { $out.reason = "REFUSED: $($a.reason)"; return $out }
+        if ($a.subscriptionId -notmatch $script:PimMspGuid) { $out.reason = "REFUSED: managed tenant $($a.displayName) has no subscription id to match"; return $out }
+        if ($bySub.ContainsKey($a.subscriptionId) -and $bySub[$a.subscriptionId].tenantId -ne $a.tenantId) { $out.reason = "REFUSED: subscription $($a.subscriptionId) is listed for two managed tenants ($($bySub[$a.subscriptionId].displayName), $($a.displayName)) -- ambiguous, nothing approved"; return $out }
+        $bySub[$a.subscriptionId] = $a
+    }
+    $own = "$OwnSubscriptionId".Trim().ToLowerInvariant()
+    $approve = New-Object System.Collections.Generic.List[object]; $reject = New-Object System.Collections.Generic.List[object]
+    $approved = New-Object System.Collections.Generic.List[object]; $unknown = New-Object System.Collections.Generic.List[object]
+    $mismatch = New-Object System.Collections.Generic.List[object]; $lines = New-Object System.Collections.Generic.List[string]
+    $served = @{}
+    foreach ($c in @($Connections | Where-Object { $null -ne $_ } | ForEach-Object { ConvertTo-PimPeConnectionView -Connection $_ })) {
+        if ($own -and $c.subscriptionId -eq $own) { $lines.Add("own   $($c.name): $($c.status) (this tenant's publisher endpoint; not touched)"); continue }
+        $a = if ($bySub.ContainsKey($c.subscriptionId)) { $bySub[$c.subscriptionId] } else { $null }
+        if ($rej -and $a -and $a.tenantId -eq $rej) {
+            if ($c.status -ne 'Rejected') { $reject.Add(@{ name = $c.name; tenantId = $a.tenantId; displayName = $a.displayName }); $lines.Add("REJECT $($c.name): $($a.displayName) (revoked)") }
+            continue
+        }
+        if (-not $a) {
+            if ($c.status -eq 'Pending') { $unknown.Add(@{ name = $c.name; subscriptionId = $c.subscriptionId }); $lines.Add("LEFT PENDING $($c.name): subscription $($c.subscriptionId) is not a listed managed tenant -- never approved by the build") }
+            else { $lines.Add("other $($c.name): $($c.status) (subscription $($c.subscriptionId), not listed -- reported, not changed)") }
+            continue
+        }
+        $named = Get-PimTenantIdFromPeRequestMessage -Message $c.message
+        if ($named -and $named -ne $a.tenantId) {
+            $mismatch.Add(@{ name = $c.name; tenantId = $a.tenantId; named = $named }); $lines.Add("LEFT PENDING $($c.name): the request names tenant $named, but subscription $($c.subscriptionId) is listed for $($a.displayName) ($($a.tenantId))")
+            continue
+        }
+        switch ($c.status) {
+            'Pending'  { $approve.Add(@{ name = $c.name; tenantId = $a.tenantId; displayName = $a.displayName }); $served[$a.tenantId] = $true; $lines.Add("APPROVE $($c.name): $($a.displayName)") }
+            'Approved' { $approved.Add(@{ name = $c.name; tenantId = $a.tenantId; displayName = $a.displayName }); $served[$a.tenantId] = $true; $lines.Add("ok    $($c.name): $($a.displayName) already Approved") }
+            default    { $lines.Add("$($c.status.ToUpperInvariant()) $($c.name): $($a.displayName) -- the managed tenant deletes and re-creates its endpoint (Request-PimBaselinePrivateEndpoint.ps1 -Revoke, then -From pullendpoint)") }
+        }
+    }
+    $waiting = @($allow | Where-Object { -not $served.ContainsKey($_.tenantId) -and $_.tenantId -ne $rej } | ForEach-Object { @{ tenantId = $_.tenantId; displayName = $_.displayName; subscriptionId = $_.subscriptionId } })
+    foreach ($w in $waiting) { $lines.Add("WAITING $($w.displayName): no usable connection request from subscription $($w.subscriptionId) yet") }
+    $out.ok = $true; $out.approve = @($approve.ToArray()); $out.reject = @($reject.ToArray()); $out.approved = @($approved.ToArray())
+    $out.waiting = @($waiting); $out.unknown = @($unknown.ToArray()); $out.mismatch = @($mismatch.ToArray()); $out.lines = @($lines.ToArray())
+    return $out
+}
+
+function Get-PimCrossTenantPeVerdict {
+    <#
+      PURE. 100.59 (1) -- the managed tenant's endpoint as READ BACK: -PrivateEndpoint (ARM shape), -ExpectedTargetId (the store).
+      Returns @{ action = 'continue' (Approved) | 'stop' (Pending: the managing tenant approves) | 'fail'; status; reason }.
+    #>
+    param([object]$PrivateEndpoint, [Parameter(Mandatory)][string]$ExpectedTargetId)
+    if ($null -eq $PrivateEndpoint) { return @{ action = 'fail'; status = ''; reason = 'the private endpoint does not exist' } }
+    $conns = @(@($PrivateEndpoint.properties.manualPrivateLinkServiceConnections) + @($PrivateEndpoint.properties.privateLinkServiceConnections) | Where-Object { $null -ne $_ })
+    if (-not $conns.Count) { return @{ action = 'fail'; status = ''; reason = 'the private endpoint carries no connection' } }
+    $c = $conns[0]
+    $target = "$($c.properties.privateLinkServiceId)".Trim()
+    if ($target -ine "$ExpectedTargetId".Trim()) { return @{ action = 'fail'; status = ''; reason = "the endpoint targets '$target', not the managing tenant's store '$ExpectedTargetId' -- delete it (-Revoke) and run again" } }
+    if (@($c.properties.groupIds) -notcontains 'blob') { return @{ action = 'fail'; status = ''; reason = "the endpoint's sub-resource is '$(@($c.properties.groupIds) -join ',')', not blob" } }
+    $st = "$($c.properties.privateLinkServiceConnectionState.status)".Trim()
+    switch ($st) {
+        'Approved' { return @{ action = 'continue'; status = $st; reason = 'approved by the managing tenant' } }
+        'Pending'  { return @{ action = 'stop'; status = $st; reason = "waiting for the managing tenant's approval" } }
+        default    { return @{ action = 'fail'; status = $st; reason = "the managing tenant answered '$st' -- ask it why; to request again: -Revoke, then run this step again" } }
+    }
+}
+
+function Get-PimBaselinePublicClosePlan {
+    <#
+      PURE. 100.59 (2)+(3) -- the managing tenant's store, after the approvals: which public-but-signed rules to REMOVE and
+      whether public network access may be DISABLED.
+        -Slaves              every managed tenant (ConvertFrom-PimMspSlaveSpec)
+        -Connections         the store's privateEndpointConnections (ARM shape)
+        -OwnSubscriptionId   the managing tenant's (its publisher endpoint)
+        -CurrentSubnetRules  the store's virtual network rule ids     -PublicNetworkAccess  Enabled | Disabled
+      A reader's rule is removed only when it is PROVEN (slaves[i].privateEndpointProven, set after its pull was proven over
+      the endpoint) AND its connection reads Approved. Public access is Disabled only when EVERY reader is such a reader and
+      the publisher has its own approved endpoint. A reader still on the public path keeps it and is reported.
+      Returns @{ ok; reasons; actions (@{ op = 'remove-subnet'|'disable-public'; value }); waitingProof; stillPublic; private; lines; closed }.
+    #>
+    param([object[]]$Slaves = @(), [object[]]$Connections = @(), [string]$OwnSubscriptionId = '', [string[]]$CurrentSubnetRules = @(), [string]$PublicNetworkAccess = 'Enabled')
+    $reasons = New-Object System.Collections.Generic.List[string]; $lines = New-Object System.Collections.Generic.List[string]
+    $actions = New-Object System.Collections.Generic.List[object]
+    $waitingProof = New-Object System.Collections.Generic.List[object]; $stillPublic = New-Object System.Collections.Generic.List[object]; $private = New-Object System.Collections.Generic.List[object]
+    $own = "$OwnSubscriptionId".Trim().ToLowerInvariant()
+    $views = @($Connections | Where-Object { $null -ne $_ } | ForEach-Object { ConvertTo-PimPeConnectionView -Connection $_ })
+    $publisherOnPe = [bool]@($views | Where-Object { $own -and $_.subscriptionId -eq $own -and $_.status -eq 'Approved' }).Count
+    $rules = @{}; foreach ($r in @($CurrentSubnetRules | Where-Object { "$_".Trim() })) { $rules["$r".Trim().ToLowerInvariant()] = "$r".Trim() }
+    $sl = @($Slaves | Where-Object { $null -ne $_ })
+    foreach ($s in $sl) { if (-not $s.ok) { $reasons.Add("REFUSED: $($s.reason)") } }
+    if ($reasons.Count) { return @{ ok = $false; reasons = @($reasons.ToArray()); actions = @(); waitingProof = @(); stillPublic = @(); private = @(); lines = @(); closed = $false; publisherOnPe = $publisherOnPe } }
+    foreach ($s in $sl) {
+        if ($s.access -ne 'privateEndpoint') { $stillPublic.Add($s); $lines.Add("public  $($s.displayName): public-but-signed (its rule stays; public access stays Enabled while it reads that way)"); continue }
+        $appr = [bool]@($views | Where-Object { $_.subscriptionId -eq $s.subscriptionId -and $_.status -eq 'Approved' }).Count
+        if (-not $appr) {
+            if ($s.proven) { $reasons.Add("REFUSED: $($s.displayName) is marked privateEndpointProven but has NO approved connection on the store -- its public rule is kept (run -From peapprove, re-prove, then mark it)") }
+            else { $waitingProof.Add($s); $lines.Add("waiting $($s.displayName): no approved connection yet (peapprove) -- its public rule stays") }
+            continue
+        }
+        if (-not $s.proven) { $waitingProof.Add($s); $lines.Add("waiting $($s.displayName): connection Approved, pull NOT yet proven over it (managed tenant -From pullproof) -- its public rule stays"); continue }
+        $private.Add($s)
+        $k = "$($s.subnetId)".Trim().ToLowerInvariant()
+        if ($k -and $rules.ContainsKey($k)) { $actions.Add(@{ op = 'remove-subnet'; value = $rules[$k] }); $lines.Add("private $($s.displayName): proven over its endpoint -- REMOVE its public rule") }
+        else { $lines.Add("private $($s.displayName): proven over its endpoint (no public rule left)") }
+    }
+    $allPrivate = ($sl.Count -gt 0 -and $private.Count -eq $sl.Count)
+    $closed = ("$PublicNetworkAccess" -eq 'Disabled')
+    # (no if/else whose branches end in different statement kinds here: Windows PowerShell's compiler fails such a body with
+    # "Argument types do not match" once it compiles the function -- measured on the test VM. One message, one Add.)
+    # (names collected one by one: Windows PowerShell 5.1 failed '@($listA) + @($listB) | ...' over these generic lists with
+    # "Argument types do not match" -- measured on the test VM)
+    $nameList = New-Object System.Collections.Generic.List[string]
+    foreach ($x in $stillPublic) { [void]$nameList.Add("$($x.displayName)") }
+    foreach ($x in $waitingProof) { [void]$nameList.Add("$($x.displayName)") }
+    $stillNames = $nameList.ToArray() -join ', '
+    if ($closed -and -not $allPrivate) { [void]$reasons.Add("public network access is ALREADY Disabled while $stillNames still read(s) over the public path -- they are cut off: run Close-PimBaselinePublicAccess.ps1 -Rollback") }
+    $mayDisable = ($allPrivate -and -not $closed -and $publisherOnPe)
+    $noPublisher = ($allPrivate -and -not $closed -and -not $publisherOnPe)
+    if ($noPublisher) { [void]$reasons.Add('REFUSED: every reader is private, but the publish job has no approved private endpoint of its own on the store -- run -From privateendpoint first (disabling public access now would stop the daily publish)') }
+    if ($mayDisable) { [void]$actions.Add(@{ op = 'disable-public'; value = 'Disabled' }) }
+    if ($mayDisable) { [void]$lines.Add('every reader is private and the publisher has its endpoint -- public network access DISABLED (last)') }
+    if ($mayDisable) { $closed = $true }
+    return @{ ok = ($reasons.Count -eq 0); reasons = @($reasons.ToArray()); actions = @($actions.ToArray()); waitingProof = @($waitingProof.ToArray()); stillPublic = @($stillPublic.ToArray())
+              private = @($private.ToArray()); lines = @($lines.ToArray()); closed = [bool]($closed -and $reasons.Count -eq 0); publisherOnPe = $publisherOnPe }
+}
+
+function Test-PimCrossTenantPullProof {
+    <#
+      PURE. 100.59 (3) -- is the managed tenant's pull PROVEN over its endpoint? -State @{ connectionStatus; endpointIp;
+      dnsRecordIps[]; linkVnetId; expectedVnetId; linkResolutionPolicy; executionStatus; logText; cadenceSkipped }.
+      The network half is read back from ARM (approved, a private address, the zone record holds exactly it, the zone is
+      linked to the pull job's VNet); the pull half is ONE execution started for the proof: Succeeded, and its log shows the
+      bundle loaded (the pull refuses a bundle whose signature does not verify, so 'loaded' is the signature verdict).
+      Returns @{ ok; stop (a real pull is still needed -- not a failure); reasons; lines }.
+    #>
+    param([Parameter(Mandatory)][hashtable]$State)
+    $r = New-Object System.Collections.Generic.List[string]; $l = New-Object System.Collections.Generic.List[string]
+    $chk = { param($n, $ok, $got, $want) $l.Add(("{0,-24} {1,-34} {2}" -f $n, "$got", $(if ($ok) { 'OK' } else { "FAIL (want $want)" }))); if (-not $ok) { $r.Add("$n is '$got', want $want") } }
+    & $chk 'connection' ("$($State.connectionStatus)" -eq 'Approved') $State.connectionStatus 'Approved'
+    $ip = "$($State.endpointIp)".Trim()
+    & $chk 'endpoint address' (Test-PimPrivateIPv4 -Value $ip) $ip 'a private IPv4'
+    $recs = @($State.dnsRecordIps | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    & $chk 'zone A record' ($recs.Count -eq 1 -and $recs[0] -eq $ip) ($recs -join ',') "exactly $ip"
+    & $chk 'zone link VNet' ("$($State.linkVnetId)".Trim() -and "$($State.linkVnetId)" -ieq "$($State.expectedVnetId)") (("$($State.linkVnetId)" -split '/')[-1]) (("$($State.expectedVnetId)" -split '/')[-1])
+    & $chk 'zone link resolution' ("$($State.linkResolutionPolicy)" -eq 'NxDomainRedirect') $State.linkResolutionPolicy 'NxDomainRedirect'
+    $netOk = ($r.Count -eq 0)
+    $stop = $false
+    $log = "$($State.logText)"
+    $st = "$($State.executionStatus)".Trim()
+    # (flat ifs, no if/elseif/else with mixed branch endings -- see Get-PimBaselinePublicClosePlan)
+    $skipped = ($netOk -and [bool]$State.cadenceSkipped)
+    $running = ($netOk -and -not $skipped -and (-not $st -or $st -match '(?i)^(Running|Processing|Pending)$'))
+    $judge = ($netOk -and -not $skipped -and -not $running)
+    $noLog = ($judge -and -not "$log".Trim() -and $st -eq 'Succeeded')
+    if ($skipped) { [void]$l.Add('pull                     skipped by the cadence gate        NOT PROVEN (no pull ran)') }
+    if ($running) { [void]$l.Add(("pull                     {0,-34} NOT PROVEN (not finished)" -f $(if ($st) { $st } else { 'no execution' }))) }
+    if ($noLog)   { [void]$l.Add('pull log                 not in Log Analytics yet          NOT PROVEN (run this step again in a few minutes)') }
+    if ($judge -and -not $noLog) {
+        # 'downlink JOB UNCHANGED' = the bundle WAS fetched (over this path) and is byte for byte the one last verified and
+        # applied (BUG-281 compare-first); SUCCEEDED / HELD = verified and applied now.
+        $loaded = ($log -match '(?i)baseline:\s*(loaded|pulled)' -or $log -match '(?i)DOWNLINK\s+(PLANNED|APPLIED)' -or $log -match '(?i)downlink JOB (UNCHANGED|SUCCEEDED|HELD)')
+        $sigBad = ($log -match '(?i)signature\s+(did not verify|invalid|mismatch)|not pinned|REFUSED.*signature')
+        $loadTxt = 'no load line in the log'
+        if ($loaded) { $loadTxt = 'loaded' }
+        if ($sigBad) { $loadTxt = 'signature refused' }
+        & $chk 'pull execution' ($st -eq 'Succeeded') $st 'Succeeded'
+        & $chk 'bundle loaded (signed)' ($loaded -and -not $sigBad) $loadTxt 'loaded, signature verified'
+    }
+    $stop = ($skipped -or $running -or $noLog)
+    return @{ ok = ($r.Count -eq 0 -and -not $stop); stop = [bool]($stop -and $r.Count -eq 0); reasons = @($r.ToArray()); lines = @($l.ToArray()) }
 }
 
 function Get-PimManagedTenantRegistration {
@@ -463,7 +738,7 @@ function Test-PimMspBuildConfig {
                 $chk = Test-PimBaselineNetworkSource -Value "$x"
                 if (-not $chk.ok) { $errors.Add("slaves[$i]: $($chk.reason)") }
             }
-            if ((Get-PimBaselineAccessMode -Role Master -Config $Config) -eq 'publicSigned' -and -not "$(Get-PimMspBuildValue $s 'subnetResourceId')".Trim() -and -not "$(Get-PimMspBuildValue $s 'egressIp')".Trim()) {
+            if ((Get-PimBaselineAccessMode -Role Master -Config $Config) -in @('publicSigned', 'crossTenantPrivateEndpoint') -and "$(Get-PimMspBuildValue $s 'access')".Trim() -ne 'privateEndpoint' -and -not "$(Get-PimMspBuildValue $s 'subnetResourceId')".Trim() -and -not "$(Get-PimMspBuildValue $s 'egressIp')".Trim()) {
                 $warnings.Add("slaves[$i] ($(Get-PimMspBuildValue $s 'displayName')): no subnetResourceId / egressIp yet -- its network rule on the bundle store is planned as NOT RUNNABLE until the managed tenant's build prints its subnet id; add it here and re-run -From network-$i")
             }
             $i++
@@ -486,10 +761,25 @@ function Test-PimMspBuildConfig {
         $bvd = "$(& $V 'baseline.validDays')".Trim()
         if ($bvd -and ($bvd -notmatch '^\d+$' -or [int]$bvd -lt 2)) { $errors.Add("'baseline.validDays' must be a whole number of at least 2 (the daily publish needs overlap)") }
         $bacc = Get-PimBaselineAccessMode -Role Master -Config $Config
-        if ($bacc -notin @('publicSigned', 'privateEndpoint')) { $errors.Add("'baseline.access' must be publicSigned (default) or privateEndpoint") }
-        if ($bacc -eq 'privateEndpoint' -and -not "$(& $V 'network.privateEndpointSubnetAddressPrefix')".Trim()) {
-            $warnings.Add("baseline.access privateEndpoint: 'network.privateEndpointSubnetAddressPrefix' not set -- the privateendpoint step REFUSES if the private-endpoint subnet does not already exist")
+        if ($bacc -notin @('publicSigned', 'privateEndpoint', 'crossTenantPrivateEndpoint')) { $errors.Add("'baseline.access' must be publicSigned (default), privateEndpoint or crossTenantPrivateEndpoint") }
+        if ($bacc -in @('privateEndpoint', 'crossTenantPrivateEndpoint') -and -not "$(& $V 'network.privateEndpointSubnetAddressPrefix')".Trim()) {
+            $warnings.Add("baseline.access ${bacc}: 'network.privateEndpointSubnetAddressPrefix' not set -- the privateendpoint step REFUSES if the private-endpoint subnet does not already exist")
         }
+        # 100.59 -- per managed tenant: slaves[i].access privateEndpoint (it requests an endpoint from its own VNet; approved by
+        # subscription), slaves[i].privateEndpointProven (set once its pull was proven over that endpoint: its public rule goes).
+        $peSlaves = 0; $j = 0
+        foreach ($s in @($slaves | Where-Object { $null -ne $_ })) {
+            $sa = "$(Get-PimMspBuildValue $s 'access')".Trim()
+            $pv = Get-PimMspBuildValue $s 'privateEndpointProven'
+            if ($sa -and $sa -notin @('publicSigned', 'privateEndpoint')) { $errors.Add("slaves[$j].access must be publicSigned (default) or privateEndpoint") }
+            if ($sa -eq 'privateEndpoint') {
+                $peSlaves++
+                if ($bacc -ne 'crossTenantPrivateEndpoint') { $errors.Add("slaves[$j].access privateEndpoint needs baseline.access crossTenantPrivateEndpoint (the managing tenant then approves that tenant's endpoint)") }
+                if ((Get-PimMspSlavePeSubscription -Slave $s) -notmatch $script:PimMspGuid) { $errors.Add("slaves[$j] ($(Get-PimMspBuildValue $s 'displayName')): access privateEndpoint needs 'subscriptionId' (the managed tenant's subscription -- the approval matches the endpoint by it, never 'approve all')") }
+            } elseif ($null -ne $pv -and "$pv" -match '^(?i)(true|1|yes)$') { $errors.Add("slaves[$j].privateEndpointProven is set but its access is not privateEndpoint") }
+            $j++
+        }
+        if ($bacc -eq 'crossTenantPrivateEndpoint' -and -not $peSlaves) { $warnings.Add("baseline.access crossTenantPrivateEndpoint with no slaves[i].access = privateEndpoint: nothing to approve yet -- the publisher gets its endpoint, every reader stays public-but-signed") }
         $cron = "$(& $V 'baseline.publishCron')".Trim()
         if ($cron -and @($cron -split '\s+').Count -ne 5) { $errors.Add("'baseline.publishCron' '$cron' is not a 5-field cron expression") }
     } else {
@@ -513,7 +803,17 @@ function Test-PimMspBuildConfig {
         if (-not $pins.Count -and -not $enrolPending) { $errors.Add("'master.signingKeyIds' is required: the key id(s) the managing tenant's build printed at its 'signingkey' step. The pull REFUSES a bundle signed by a key this tenant does not pin (71.35).") }
         foreach ($pin in $pins) { if ($pin -cnotmatch '^[A-Za-z0-9_-]{43}$') { $errors.Add("'master.signingKeyIds' entry '$pin' is not a signing key id (43 characters of base64url, as printed by the managing tenant's signingkey step)") } }
         $sacc = Get-PimBaselineAccessMode -Role Slave -Config $Config
-        if ($sacc -notin @('publicSigned', 'privateEndpoint')) { $errors.Add("'master.access' must be publicSigned (default) or privateEndpoint") }
+        if ($sacc -notin @('publicSigned', 'privateEndpoint', 'crossTenantPrivateEndpoint')) { $errors.Add("'master.access' must be publicSigned (default), privateEndpoint or crossTenantPrivateEndpoint") }
+        if ($sacc -eq 'crossTenantPrivateEndpoint') {
+            # 100.59: this tenant requests an endpoint in ITS OWN VNet to the managing tenant's store -- it needs the store's
+            # full id (subscription + resource group), nothing else from the managing tenant. No peering, no IP to copy.
+            if ("$(& $V 'master.subscriptionId')".Trim() -notmatch $script:PimMspGuid) { $errors.Add("'master.subscriptionId' must be a GUID in crossTenantPrivateEndpoint mode (the managing tenant store's subscription -- the endpoint targets the store by its full id)") }
+            if (-not "$(& $V 'master.resourceGroup')".Trim()) { $errors.Add("'master.resourceGroup' is required in crossTenantPrivateEndpoint mode (the managing tenant store's resource group)") }
+            if ("$(& $V 'master.privateEndpointIp')".Trim()) { $errors.Add("'master.privateEndpointIp' belongs to the peering design (privateEndpoint); in crossTenantPrivateEndpoint mode this tenant's OWN endpoint address is used -- remove it") }
+            if ($enrolPending) { $errors.Add("crossTenantPrivateEndpoint is not available with an enrollment key yet: the managing tenant approves only tenants its build lists (slaves[i].subscriptionId). Build without the key, or use publicSigned.") }
+            if ("$(& $V 'baselineServiceEndpoint')".Trim()) { $warnings.Add("'baselineServiceEndpoint' is ignored in crossTenantPrivateEndpoint mode -- no storage service endpoint is added (the store is reached over this tenant's own private endpoint)") }
+            if (-not "$(& $V 'network.privateEndpointSubnetAddressPrefix')".Trim()) { $warnings.Add("crossTenantPrivateEndpoint: 'network.privateEndpointSubnetAddressPrefix' not set -- the pullendpoint step REFUSES if the private-endpoint subnet '$(if ("$(& $V 'network.privateEndpointSubnetName')".Trim()) { "$(& $V 'network.privateEndpointSubnetName')".Trim() } else { 'pim-endpoints' })' does not already exist") }
+        }
         if ($sacc -eq 'privateEndpoint') {
             $pip = "$(& $V 'master.privateEndpointIp')".Trim()
             if (-not (Test-PimPrivateIPv4 -Value $pip)) { $errors.Add("'master.privateEndpointIp' must be the private IPv4 address of the managing tenant store's private endpoint (printed by the managing tenant's 'privateendpoint' step as master.privateEndpointIp = <ip>); got '$pip'") }
@@ -853,7 +1153,10 @@ function Get-PimMspBuildPlan {
         $publishJob = if ("$(& $V 'baseline.publishJobName')".Trim()) { "$(& $V 'baseline.publishJobName')".Trim() } else { 'ca-pim-publish' }
         $pubEndpoint = if ("$(& $V 'baseline.serviceEndpoint')".Trim()) { "$(& $V 'baseline.serviceEndpoint')".Trim() } else { 'Microsoft.Storage' }
         $masterAccess = Get-PimBaselineAccessMode -Role Master -Config $Config
-        if ($masterAccess -eq 'publicSigned') {
+        # 100.59: crossTenantPrivateEndpoint KEEPS the public-but-signed store (readers not yet on an endpoint read through it)
+        # and adds the publisher's own endpoint; the approvals and the public close run at the END of the plan.
+        $publicPath = ($masterAccess -in @('publicSigned', 'crossTenantPrivateEndpoint'))
+        if ($publicPath) {
         $steps.Add((New-PimMspBuildStep -Id 'publishnetwork' -Title "service endpoint $pubEndpoint on this environment's subnet -- the publish job's network" `
             -Script 'tools\setup\Initialize-PimBaselinePullNetwork.ps1' `
             -Arguments @{ SubscriptionId = $sub; ResourceGroup = $rg; EnvName = $env; ServiceEndpoint = $pubEndpoint; MasterStorageAccount = $store; MasterContainer = $container } -Switches @('ForPublisher') `
@@ -868,10 +1171,18 @@ function Get-PimMspBuildPlan {
         $pubIps     = @(& $V 'baseline.publisherIps' | Where-Object { $null -ne $_ -and "$_".Trim() } | ForEach-Object { "$_".Trim() })
         if ($pubSubnets.Count) { $storageArgs['PublisherSubnetResourceIds'] = $pubSubnets }
         if ($pubIps.Count)     { $storageArgs['PublisherIpAddresses'] = $pubIps }
-        if ($masterAccess -eq 'publicSigned') {
+        $peVnet = if ("$(& $V 'network.vnetName')".Trim()) { "$(& $V 'network.vnetName')".Trim() } else { "vnet-pim-$token" }
+        if ($publicPath) {
         $steps.Add((New-PimMspBuildStep -Id 'storage' -Title "signed-baseline store $store/$($container) -- public-but-signed (anonymous blob read; this environment's subnet allowed, THEN firewall Deny)" `
             -Script 'tools\setup\New-PimBaselineStorage.ps1' -Arguments $storageArgs -Switches @('PublicSignedRead', 'NoHostPublisher') `
             -Why 'the build host is not a publisher any more: no data role for it and no probe from its (denied) network'))
+            if ($masterAccess -eq 'crossTenantPrivateEndpoint') {
+                $xpeArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; StorageAccount = $store; Container = $container; PrivateEndpointSubnetName = $peSubnetName; VnetName = $peVnet }
+                if ("$(& $V 'network.privateEndpointSubnetAddressPrefix')".Trim()) { $xpeArgs['PrivateEndpointSubnetAddressPrefix'] = "$(& $V 'network.privateEndpointSubnetAddressPrefix')".Trim() }
+                $steps.Add((New-PimMspBuildStep -Id 'privateendpoint' -Title "the PUBLISHER's own private endpoint for $store (blob) + privatelink zone on this VNet; public access KEPT (readers not yet on an endpoint still read public-but-signed)" `
+                    -Script 'tools\setup\Set-PimBaselinePrivateEndpoint.ps1' -Arguments $xpeArgs -Switches @('KeepPublicAccess') `
+                    -Why 'the publish job needs a private path before public network access can ever be closed (peclose refuses without it)'))
+            }
         } else {
             # 71.36 PRIVATE ENDPOINT: account + container only (no firewall posture), then the private endpoint, the zone,
             # anonymous blob read and public network access Disabled -- in that order -- in the next step.
@@ -894,8 +1205,15 @@ function Get-PimMspBuildPlan {
             # the managed tenant's OWN slaveRing (its job argument, set in the managed tenant's build) -- nothing reconciles the two, so say so.
             $steps.Add((New-PimMspBuildStep -Id "register-$i" -Title "register managed tenant $($reg.DisplayName) (managing tenant's copy of its ring: $($reg.Ring) -- the managed tenant's own slaveRing decides; tags '$($reg.Tags)')" `
                 -Script 'tools\setup\Register-PimManagedTenant.ps1' -HostExe 'powershell' -Arguments $reg -Switches $storeSwitches -Why 'replaces the documented hand SQL on platform.Tenants'))
-            if ($masterAccess -ne 'publicSigned') { $i++; continue }   # 71.36: over a private endpoint the peering is the access -- no per-tenant storage rule
+            if ($masterAccess -eq 'privateEndpoint') { $i++; continue }   # 71.36: over a private endpoint the peering is the access -- no per-tenant storage rule
             $slSubnet = "$(Get-PimMspBuildValue $s 'subnetResourceId')".Trim(); $slIp = "$(Get-PimMspBuildValue $s 'egressIp')".Trim()
+            if ($masterAccess -eq 'crossTenantPrivateEndpoint' -and "$(Get-PimMspBuildValue $s 'access')".Trim() -eq 'privateEndpoint') {
+                # 100.59: a reader on its own endpoint. Its public rule stays ONLY until its pull is proven over the endpoint
+                # (then peclose removes it -- re-adding it here on every re-run would undo that), and it needs none at all
+                # when it never had a subnet / IP (a greenfield tenant on an endpoint from the start).
+                $proven = ("$(Get-PimMspBuildValue $s 'privateEndpointProven')" -match '^(?i)(true|1|yes)$')
+                if ($proven -or (-not $slSubnet -and -not $slIp)) { $i++; continue }
+            }
             $net = @{ SubscriptionId = $sub; ResourceGroup = $rg; StorageAccount = $store; Container = $container; ManagedTenantId = $reg.ManagedTenantId
                       SqlServerFqdn = $sqlFqdn; SqlDatabase = $db } + $storeArgs
             if ($slSubnet) { $net['SubnetResourceId'] = @($slSubnet) }
@@ -937,7 +1255,10 @@ function Get-PimMspBuildPlan {
         # one yet; the daily 'enrolled-tenants' job repeats it), and grants the tick's managed identity a role on THIS ONE
         # storage account (read + write of the account = its network rules) so that job can allow enrolled tenants' subnets.
         $enArgs = @{ Role = 'Master'; SqlServerFqdn = $sqlFqdn; SqlDatabase = $db; SubscriptionId = $sub; ResourceGroup = $rg; StorageAccount = $store; Container = $container
-                     ManagerApp = $mgr; TickPrincipalId = "{{mi-job:$tick}}"; Access = $masterAccess } + $storeArgs
+                     ManagerApp = $mgr; TickPrincipalId = "{{mi-job:$tick}}"
+                     # 100.59: in crossTenantPrivateEndpoint mode the store KEEPS its public-but-signed path, and that is what an
+                     # enrolled tenant uses (its subnet allowed by the enrolled-tenants job); endpoints are for listed tenants.
+                     Access = $(if ($masterAccess -eq 'crossTenantPrivateEndpoint') { 'publicSigned' } else { $masterAccess }) } + $storeArgs
         if ("$InvardiaBaseUrl".Trim()) { $enArgs['InvardiaBaseUrl'] = "$InvardiaBaseUrl".Trim() }
         # The managing tenant's Manager pins NO key (only managed tenants pin the master's key) -- pass the id(s) from the master
         # config (`signingKeyIds`, what the signingkey step printed), else the step falls back to the Manager's pin (live 2026-10-08).
@@ -957,7 +1278,12 @@ function Get-PimMspBuildPlan {
         $mContainer = if ("$(& $V 'master.container')".Trim()) { "$(& $V 'master.container')".Trim() } else { 'baselines' }
         $job = if ("$(& $V 'downlinkJobName')".Trim()) { "$(& $V 'downlinkJobName')".Trim() } else { 'ca-pim-downlink-s6' }
         $endpoint = if ("$(& $V 'baselineServiceEndpoint')".Trim()) { "$(& $V 'baselineServiceEndpoint')".Trim() } else { 'Microsoft.Storage.Global' }
-        if ((Get-PimBaselineAccessMode -Role Slave -Config $Config) -eq 'privateEndpoint') {
+        $slaveAccess = Get-PimBaselineAccessMode -Role Slave -Config $Config
+        if ($slaveAccess -eq 'crossTenantPrivateEndpoint') {
+            # 100.59: nothing here before the pull job -- the endpoint, its approval and its DNS run at the END of the plan
+            # (pullendpoint, pullproof), after the build's SQL window is closed, because the approval is a STOP POINT where the
+            # managing tenant's administrator acts. No service endpoint is added (the store is reached over this tenant's endpoint).
+        } elseif ($slaveAccess -eq 'privateEndpoint') {
             # 71.36: no service endpoint and nothing for the managing tenant -- the managing tenant store's name resolves to its private
             # endpoint through THIS tenant's own zone, and the traffic crosses the operator's VNet peering.
             $steps.Add((New-PimMspBuildStep -Id 'privatedns' -Title "privatelink.blob.core.windows.net on this VNet: $mStore -> $("$(& $V 'master.privateEndpointIp')".Trim()) (the managing tenant's private endpoint, over the peering)" `
@@ -1017,6 +1343,7 @@ function Get-PimMspBuildPlan {
         if ($enrolMasterStore -and $enrolMasterStore -notmatch '^\{\{') { $vArgs['MasterStorageAccount'] = $enrolMasterStore }
         if ("$(& $V 'master.subscriptionId')".Trim()) { $vArgs['MasterSubscriptionId'] = "$(& $V 'master.subscriptionId')".Trim() }
         $vArgs['ManagingTenantStep'] = $(if ($enrol) { "with the enrollment key the managing tenant's enrolled-tenants job registers this tenant and allows its subnet by itself (daily, or its Manager's Run now)" }
+                                         elseif ((Get-PimBaselineAccessMode -Role Slave -Config $Config) -eq 'crossTenantPrivateEndpoint') { "on the managing tenant: add this tenant to slaves[] with access privateEndpoint and subscriptionId $sub, run Invoke-PimMspBuild -Role Master -Apply -From register-<n>; it approves this tenant's endpoint at its peapprove step" }
                                          else { "on the managing tenant: add this tenant to slaves[] (its subnetResourceId from this build's pullnetwork step) and run Invoke-PimMspBuild -Role Master -Apply -From register-<n>" })
     }
     $vSwitches = @('LicenceExpected')   # MSP is Pro, hard-enforced
@@ -1036,6 +1363,39 @@ function Get-PimMspBuildPlan {
         $steps.Add((New-PimMspBuildStep -Id 'sqlhostclose' -Title "close this build host's SQL window on $sqlName (remove 'AllowSetupHost' only; read back)" `
             -Script 'tools\setup\Close-PimSqlSetupHostRule.ps1' -HostExe 'powershell' -Arguments $sqlWindowArgs `
             -Why "the hosting step kept this host's firewall rule so the store steps after it could connect; a finished build leaves no standing hole for the machine that built it"))
+    }
+
+    # 100.59 -- THE CROSS-TENANT PRIVATE ENDPOINT BY APPROVAL. LAST in both plans, after the SQL window is closed: each side
+    # has a STOP POINT (exit 10, the exact next command printed) where the OTHER tenant's administrator acts, and a stop
+    # must never leave the build host's SQL window open or the pull job undeployed.
+    if ($Role -eq 'Master' -and (Get-PimBaselineAccessMode -Role Master -Config $Config) -eq 'crossTenantPrivateEndpoint') {
+        $specs = New-Object System.Collections.Generic.List[string]; $allowSpecs = New-Object System.Collections.Generic.List[string]
+        foreach ($s in @(& $V 'slaves' | Where-Object { $null -ne $_ })) {
+            $acc = if ("$(Get-PimMspBuildValue $s 'access')".Trim()) { "$(Get-PimMspBuildValue $s 'access')".Trim() } else { 'publicSigned' }
+            $spec = ConvertTo-PimMspSlaveSpec -TenantId "$(Get-PimMspBuildValue $s 'tenantId')" -SubscriptionId (Get-PimMspSlavePeSubscription -Slave $s) -Access $acc `
+                        -Proven ("$(Get-PimMspBuildValue $s 'privateEndpointProven')" -match '^(?i)(true|1|yes)$') -SubnetId "$(Get-PimMspBuildValue $s 'subnetResourceId')" -DisplayName "$(Get-PimMspBuildValue $s 'displayName')"
+            $specs.Add($spec); if ($acc -eq 'privateEndpoint') { $allowSpecs.Add($spec) }
+        }
+        $mStoreX = "$(& $V 'baseline.storageAccount')".Trim()
+        $steps.Add((New-PimMspBuildStep -Id 'peapprove' -Title "APPROVE the pending private endpoint connections on $mStoreX from the listed managed tenants ONLY (matched by subscription; STOPS, exit 10, while a listed tenant has not requested yet)" `
+            -Script 'tools\setup\Approve-PimBaselinePrivateEndpoint.ps1' -Arguments @{ SubscriptionId = $sub; ResourceGroup = $rg; StorageAccount = $mStoreX; AllowedTenant = @($allowSpecs.ToArray()); ResumeCommand = '{{resume-from:peapprove}}' } `
+            -Why 'a cross-tenant private endpoint waits for the store owner''s approval; never "approve all" -- an unknown request stays pending and is reported'))
+        $steps.Add((New-PimMspBuildStep -Id 'peclose' -Title "remove the public rule of every reader PROVEN over its endpoint; public network access DISABLED only when every reader is private and the publisher has its endpoint (STOPS, exit 10, while a reader is not yet proven)" `
+            -Script 'tools\setup\Close-PimBaselinePublicAccess.ps1' -Arguments @{ SubscriptionId = $sub; ResourceGroup = $rg; StorageAccount = $mStoreX; Slave = @($specs.ToArray()); ResumeCommand = '{{resume-from:peclose}}' } `
+            -Why 'the public path is removed only after the pull is proven over the private one; a reader still on the public path keeps it (reported). Rollback = -Rollback (the rules back, public access Enabled)'))
+    }
+    if ($Role -eq 'Slave' -and (Get-PimBaselineAccessMode -Role Slave -Config $Config) -eq 'crossTenantPrivateEndpoint') {
+        $mSub = "$(& $V 'master.subscriptionId')".Trim(); $mRg = "$(& $V 'master.resourceGroup')".Trim()
+        $reqArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; TenantId = $tid; EnvName = $env; MasterSubscriptionId = $mSub; MasterResourceGroup = $mRg; MasterStorageAccount = $mStore
+                      PrivateEndpointSubnetName = $peSubnetName; ResumeCommand = '{{resume-from:pullendpoint}}' }
+        if ("$(& $V 'network.vnetName')".Trim()) { $reqArgs['VnetName'] = "$(& $V 'network.vnetName')".Trim() }
+        if ("$(& $V 'network.privateEndpointSubnetAddressPrefix')".Trim()) { $reqArgs['PrivateEndpointSubnetAddressPrefix'] = "$(& $V 'network.privateEndpointSubnetAddressPrefix')".Trim() }
+        $steps.Add((New-PimMspBuildStep -Id 'pullendpoint' -Title "private endpoint in THIS VNet to $mStore (blob; connection request to the managing tenant) + privatelink.blob A record in this tenant's zone (STOPS, exit 10, until the managing tenant approves)" `
+            -Script 'tools\setup\Request-PimBaselinePrivateEndpoint.ps1' -Arguments $reqArgs `
+            -Why 'no peering and no address to copy: this tenant owns its endpoint and its DNS; the managing tenant only approves the request'))
+        $steps.Add((New-PimMspBuildStep -Id 'pullproof' -Title "PROVE the pull over the endpoint: approved, private address, zone record + link read back, then one pull execution of $job that loads the signed bundle" `
+            -Script 'tools\setup\Test-PimBaselinePrivatePull.ps1' -Arguments @{ SubscriptionId = $sub; ResourceGroup = $rg; EnvName = $env; MasterStorageAccount = $mStore; JobName = $job; TenantId = $tid; ResumeCommand = '{{resume-from:pullproof}}' } `
+            -Why 'the managing tenant removes this tenant''s public rule only after this step printed PROVEN'))
     }
     return @($steps.ToArray())
 }
@@ -1075,6 +1435,12 @@ function Get-PimMspOperatorSteps {
         if ((Get-PimBaselineAccessMode -Role Slave -Config $Config) -eq 'privateEndpoint') {
             $out.Add([pscustomobject]@{ id = 'peering'; title = "global VNet peering between this tenant's VNet and the managing tenant's VNet (OPERATOR -- the per-tenant deploy identities cannot authorise it)"; when = 'before the first pull succeeds'
                 command = "Both directions, allowVirtualNetworkAccess on, no gateway transit: see the runbook's peering section (an identity with Network Contributor on BOTH VNets, e.g. an admin guest in the other tenant, az login to both tenants, then az network vnet peering create --remote-vnet <full id> in each). Until it is Connected on both sides the pull job's executions fail with a connect timeout to $("$(& $V 'master.privateEndpointIp')".Trim()):443." })
+        } elseif ((Get-PimBaselineAccessMode -Role Slave -Config $Config) -eq 'crossTenantPrivateEndpoint') {
+            # 100.59: the only thing the managing tenant does for this tenant is APPROVE its endpoint (by subscription).
+            $out.Add([pscustomobject]@{ id = 'master-approval'; title = "the managing tenant APPROVES this tenant's private endpoint (its administrator; the pullendpoint step stops until then)"; when = 'after the pullendpoint step requested it'
+                command = ("On the managing tenant: in its build config set slaves[<n>] = { tenantId: '$("$(& $V 'tenantId')".Trim())', access: 'privateEndpoint', subscriptionId: '$("$(& $V 'subscriptionId')".Trim())' } and run Invoke-PimMspBuild.ps1 -Role Master -ConfigPath <its config> -Apply -From register-<n> " +
+                           "(it approves at its peapprove step). Then here: Invoke-PimMspBuild.ps1 -Role Slave -ConfigPath <this config> -Apply -From pullendpoint. After pullproof printed PROVEN the managing tenant sets slaves[<n>].privateEndpointProven = true and runs -From peclose (its public rule for this tenant goes). " +
+                           "Revoke: either side -- here Request-PimBaselinePrivateEndpoint.ps1 ... -Revoke, or there Approve-PimBaselinePrivateEndpoint.ps1 ... -RejectTenantId <this tenant>.") })
         } elseif ($enrol) {
             # UPLINK-ENROL: nothing to hand over -- the subnet id went to Invardia (enrollreport), the managing tenant's job allows it.
             $out.Add([pscustomobject]@{ id = 'enrolled-network'; title = "the managing tenant allows this tenant's subnet by itself (enrollment)"; when = 'after the build; before the first pull succeeds'
@@ -1098,6 +1464,12 @@ function Get-PimMspOperatorSteps {
         if ((Get-PimBaselineAccessMode -Role Master -Config $Config) -eq 'privateEndpoint') {
             $out.Add([pscustomobject]@{ id = 'slave-network'; title = 'each managed tenant: the privateEndpointIp + a global VNet peering (OPERATOR)'; when = 'after the privateendpoint step; before each managed tenant''s first pull'
                 command = 'Give each managed tenant the value the privateendpoint step printed (master.privateEndpointIp = <ip>) for its build config, and create the VNet peering between this VNet and that tenant''s VNet (both directions; the runbook''s peering section). Removing a tenant''s access: delete the peering (and Register-PimManagedTenant.ps1 -Disable). Nothing expires.' })
+        } elseif ((Get-PimBaselineAccessMode -Role Master -Config $Config) -eq 'crossTenantPrivateEndpoint') {
+            $bs = "$(& $V 'baseline.storageAccount')".Trim()
+            $out.Add([pscustomobject]@{ id = 'slave-network'; title = 'each managed tenant on a private endpoint: listed, approved, proven, then its public rule removed'; when = 'per managed tenant, after its pullendpoint step'
+                command = ("Give the managed tenant this store's id (master.subscriptionId = $sub, master.resourceGroup = $rg, master.storageAccount = $bs) and list it here as slaves[<n>].access = 'privateEndpoint' + slaves[<n>].subscriptionId. " +
+                           "After its pullendpoint step: -From peapprove. After its pullproof step printed PROVEN: slaves[<n>].privateEndpointProven = true, then -From peclose. Tenants still public-but-signed keep their rule (public access stays Enabled until none is left). " +
+                           "Revoke: Approve-PimBaselinePrivateEndpoint.ps1 -SubscriptionId $sub -ResourceGroup $rg -StorageAccount $bs -RejectTenantId <tenant>. Rollback: Close-PimBaselinePublicAccess.ps1 -SubscriptionId $sub -ResourceGroup $rg -StorageAccount $bs -Slave <the same specs> -Rollback (rules back, public access Enabled).") })
         } else {
         $out.Add([pscustomobject]@{ id = 'slave-network'; title = 'each managed tenant''s subnet is allowed on the bundle store'; when = 'after each managed tenant''s build'
             command = 'Add managed tenants[<n>].subnetResourceId (printed by that tenant''s pullnetwork step) and re-run -From network-<n>. Removing a tenant''s access: Set-PimBaselineNetworkAccess.ps1 ... -SubnetResourceId <id> -Remove (and Register-PimManagedTenant.ps1 -Disable). No renewal exists or is needed.' })

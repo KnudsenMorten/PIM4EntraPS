@@ -72,6 +72,8 @@ function ArmPut([string]$Id, $Body, [string]$Api = $net) {
 $lower = $VmName.ToLowerInvariant()
 if (-not $NatGatewayName) { $NatGatewayName = "natgw-$lower" }
 if (-not $PublicIpName) { $PublicIpName = "pip-$lower" }
+# §100.63(e) what this script creates carries the worker tag, so Remove-PimHybridWorker.ps1 deletes only that
+$pimTags = @{ 'pim-hybrid-worker' = $VmName; 'created-by' = 'PIM Manager hybrid worker scripts' }
 
 $acct = Get-PimArmSubscription -SubscriptionId $SubscriptionId
 if ("$($acct.tenantId)" -ne $TenantId) { throw "subscription $SubscriptionId reads tenant '$($acct.tenantId)', not '$TenantId' -- refusing" }
@@ -90,7 +92,7 @@ $natId = NetId 'natGateways' $NatGatewayName
 $nat = ArmTry $natId
 if (-not $nat -and $PSCmdlet.ShouldProcess($NatGatewayName, 'create NAT gateway (Standard, outbound only)')) {
     # az network nat gateway create --idle-timeout 4
-    $nat = ArmPut $natId @{ location = $Location; sku = @{ name = 'Standard' }; properties = @{ idleTimeoutInMinutes = 4 } }
+    $nat = ArmPut $natId @{ location = $Location; tags = $pimTags; sku = @{ name = 'Standard' }; properties = @{ idleTimeoutInMinutes = 4 } }
 }
 Info "NAT gateway $NatGatewayName"
 
@@ -133,7 +135,7 @@ if (-not $pipId) {
     if ($pip -and $pip.properties.ipConfiguration -and "$($pip.properties.ipConfiguration.id)" -notmatch '/natGateways/') { throw "public IP $PublicIpName is attached to '$($pip.properties.ipConfiguration.id)' -- refusing to move it" }
     if (-not $pip -and $PSCmdlet.ShouldProcess($PublicIpName, 'create Standard static public IP (the NAT gateway''s outbound address)')) {
         # az network public-ip create --sku Standard --allocation-method Static
-        $pip = ArmPut $pId @{ location = $Location; sku = @{ name = 'Standard' }; properties = @{ publicIPAllocationMethod = 'Static'; publicIPAddressVersion = 'IPv4' } }
+        $pip = ArmPut $pId @{ location = $Location; tags = $pimTags; sku = @{ name = 'Standard' }; properties = @{ publicIPAllocationMethod = 'Static'; publicIPAddressVersion = 'IPv4' } }
     }
     $pipId = if ($pip) { "$($pip.id)" } else { '<whatif>' }
 }
@@ -141,8 +143,10 @@ $natIps = if ($nat) { @(@($nat.properties.publicIpAddresses) | Where-Object { $_
 if (($natIps -notcontains $pipId) -and $PSCmdlet.ShouldProcess($NatGatewayName, "outbound address $(($pipId -split '/')[-1])")) {
     # az network nat gateway update --public-ip-addresses ID (the list becomes exactly that address, as the flag did)
     $natCur = Invoke-PimSetupArm -Path $natId -ApiVersion $net
-    [void](ArmPut $natId @{ location = "$($natCur.location)"; sku = @{ name = 'Standard' }
-                            properties = @{ idleTimeoutInMinutes = [int]$(if ($natCur.properties.idleTimeoutInMinutes) { $natCur.properties.idleTimeoutInMinutes } else { 4 }); publicIpAddresses = @(@{ id = $pipId }) } })
+    $natBody = @{ location = "$($natCur.location)"; sku = @{ name = 'Standard' }
+                  properties = @{ idleTimeoutInMinutes = [int]$(if ($natCur.properties.idleTimeoutInMinutes) { $natCur.properties.idleTimeoutInMinutes } else { 4 }); publicIpAddresses = @(@{ id = $pipId }) } }
+    if ($natCur.tags) { $natBody.tags = $natCur.tags }   # a PUT without tags would drop them (the worker tag included)
+    [void](ArmPut $natId $natBody)
 }
 Info "outbound address $(($pipId -split '/')[-1])"
 

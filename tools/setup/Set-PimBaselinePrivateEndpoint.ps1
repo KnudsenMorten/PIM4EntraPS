@@ -45,6 +45,10 @@ param(
     [string]$PrivateEndpointSubnetName = 'pim-endpoints',
     [string]$PrivateEndpointSubnetAddressPrefix,
     [string]$PrivateDnsResourceGroup,
+    # 100.59 (crossTenantPrivateEndpoint): steps 1-4 only -- the PUBLISHER gets its private path, public network access is
+    # left as it is (readers not yet on their own endpoint still read public-but-signed). Close-PimBaselinePublicAccess.ps1
+    # disables it once every reader is private.
+    [switch]$KeepPublicAccess,
     [switch]$Rollback
 )
 $ErrorActionPreference = 'Stop'
@@ -117,8 +121,9 @@ if (-not [bool]$sa.properties.allowBlobPublicAccess) { [void](Update-PimArmStora
 $ca = "$((Get-PimArmBlobContainer -SubscriptionId $S -ResourceGroup $ResourceGroup -Account $StorageAccount -Name $Container -ErrorAsNull).properties.publicAccess)".Trim()
 if ($ca -ne 'Blob') { [void](Set-PimArmBlobContainer -SubscriptionId $S -ResourceGroup $ResourceGroup -Account $StorageAccount -Name $Container -PublicAccess Blob) }
 
-Step '5. public network access DISABLED (last: the private path exists now)'
-if ("$($sa.properties.publicNetworkAccess)" -ne 'Disabled' -and $PSCmdlet.ShouldProcess($StorageAccount, 'disable public network access')) {
+if ($KeepPublicAccess) { Step '5. public network access KEPT (-KeepPublicAccess: the readers still on the public-but-signed path keep it; peclose closes it later)' }
+else { Step '5. public network access DISABLED (last: the private path exists now)' }
+if (-not $KeepPublicAccess -and "$($sa.properties.publicNetworkAccess)" -ne 'Disabled' -and $PSCmdlet.ShouldProcess($StorageAccount, 'disable public network access')) {
     [void](Update-PimArmStorageAccount -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $StorageAccount -Properties @{ publicNetworkAccess = 'Disabled' })
 }
 
@@ -134,9 +139,15 @@ $recs = Get-PimArmPrivateDnsARecord -SubscriptionId $S -ResourceGroup $dnsRg -Zo
 $recIps = @($recs.properties.aRecords | Where-Object { $_ } | ForEach-Object { "$($_.ipv4Address)" })
 $lk2 = Get-PimArmPrivateDnsLink -SubscriptionId $S -ResourceGroup $dnsRg -ZoneName $zone -Name $linkName -ErrorAsNull
 $v = Test-PimBaselinePrivateEndpointState -State @{ publicNetworkAccess = "$($sa2.properties.publicNetworkAccess)"; allowBlobPublicAccess = [bool]$sa2.properties.allowBlobPublicAccess; containerPublicAccess = $ca2
-        endpointIp = $nicIp; dnsRecordIps = $recIps; linkResolutionPolicy = "$($lk2.properties.resolutionPolicy)"; linkVnetId = "$($lk2.properties.virtualNetwork.id)"; expectedVnetId = $vnetId }
+        endpointIp = $nicIp; dnsRecordIps = $recIps; linkResolutionPolicy = "$($lk2.properties.resolutionPolicy)"; linkVnetId = "$($lk2.properties.virtualNetwork.id)"; expectedVnetId = $vnetId
+        wantPublicNetworkAccess = $(if ($KeepPublicAccess) { "$($sa.properties.publicNetworkAccess)" } else { 'Disabled' }) }
 foreach ($line in $v.lines) { Note $line }
 if (-not $v.ok) { throw "private-endpoint posture NOT effective: $($v.reasons -join '; ')" }
+if ($KeepPublicAccess) {
+    Write-Host "    PASS: the publisher's private endpoint for $StorageAccount is in place ($zone $StorageAccount -> $nicIp); public network access left '$($sa2.properties.publicNetworkAccess)' for the readers still on the public-but-signed path." -ForegroundColor Green
+    $nicIp
+    return
+}
 Write-Host "    PASS: $StorageAccount is private-endpoint only (public network access Disabled), $zone $StorageAccount -> $nicIp" -ForegroundColor Green
 Write-Host "    master.privateEndpointIp = $nicIp   (every managed tenant's build config; its 'privatedns' step writes it into its own zone)" -ForegroundColor Yellow
 $nicIp

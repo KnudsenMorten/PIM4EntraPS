@@ -36,6 +36,15 @@
     { "name": "PeerVnetId", "required": false, "default": null, "help": "-Target Azure (required there): the VNet resource ids to peer with -- the network with the domain controllers, optionally the PIM environment's." },
     { "name": "DnsServers", "required": false, "default": null, "help": "-Target Azure (required there): the domain controllers' addresses (the VNet DNS)." },
     { "name": "Egress", "required": false, "default": "NatGateway", "help": "-Target Azure: NatGateway, or None when your network already routes outbound. Never a public IP on the VM." },
+    { "name": "UseRemoteGateways", "required": false, "default": "false", "help": "-Target Azure: the DCs are reached through the hub's VPN / ExpressRoute gateway (with -GatewayVnetId). Passed to the infra step." },
+    { "name": "GatewayVnetId", "required": false, "default": null, "help": "-Target Azure: the hub VNet with the gateway (one of -PeerVnetId)." },
+    { "name": "AllowForwardedTraffic", "required": false, "default": "false", "help": "-Target Azure: the worker-side peering(s) accept traffic the hub forwards." },
+    { "name": "PrivateSqlDnsZoneId", "required": false, "default": null, "help": "A private-only PIM database: the existing privatelink.database.windows.net zone, linked to the worker VNet; the DCs' DNS forwarder is printed." },
+    { "name": "PrivateDnsLinkVnetId", "required": false, "default": null, "help": "More VNets to link the zone to (the DCs' VNet when they are Azure VMs; the DNS Private Resolver's VNet)." },
+    { "name": "CreatePrivateDnsZone", "required": false, "default": "false", "help": "Create the standard privatelink.database.windows.net zone only when it is missing." },
+    { "name": "PrivateDnsZoneResourceGroup", "required": false, "default": null, "help": "Where the standard zone lives, instead of -PrivateSqlDnsZoneId." },
+    { "name": "PrivateSql", "required": false, "default": "false", "help": "Print the conditional forwarder for a private-only database (implied by the zone options)." },
+    { "name": "DnsForwarderIp", "required": false, "default": null, "help": "The address the printed forwarder points at (168.63.129.16 for DCs in Azure; a Private Resolver inbound endpoint for DCs on-premises)." },
     { "name": "ArcMachineResourceId", "required": false, "default": null, "help": "-Target Arc (required there): /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.HybridCompute/machines/<server>." },
     { "name": "SqlAllowedPublicIp", "required": false, "default": null, "help": "-Target Arc with a public SQL endpoint: your on-premises egress address(es); one firewall rule each. Leave empty with a private endpoint." },
     { "name": "SqlServerId", "required": true, "default": null, "help": "The PIM SQL server's resource id." },
@@ -77,6 +86,6 @@
     "nothing to the worker machine directly: the install reaches it through Azure run-command (outbound from the machine's agent)"
   ],
   "whatIf": "Prints the plan: every step in order with what it would create or grant and the exact Active Directory command, plus the state file it would use. Nothing is changed, nothing is called, no state file is written. -Apply runs it.",
-  "undo": "-Target Azure: delete the worker's resource group and the peerings on the remote networks. Both targets: remove the worker identity's Graph app roles, its Storage Blob Data Reader assignment and its database user (DROP USER); on the server delete the 'PIM Hybrid *' scheduled tasks and C:\\PIM; in AD delete the gMSAs and their groups (Initialize-PimHybridWorkerAd.ps1 created them) and the servers GPO.",
+  "undo": "Remove-PimHybridWorker.ps1 removes it all (plan first, -Apply). By hand: -Target Azure: delete the worker's resource group and the peerings on the remote networks. Both targets: remove the worker identity's Graph app roles, its Storage Blob Data Reader assignment and its database user (DROP USER); on the server delete the 'PIM Hybrid *' scheduled tasks and C:\\PIM; in AD delete the gMSAs and their groups (Initialize-PimHybridWorkerAd.ps1 created them) and the servers GPO.",
   "docUrl": "https://invardia.com/docs/pim/scripts/Deploy-PimHybridWorker/"
 }

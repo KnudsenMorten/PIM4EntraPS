@@ -846,6 +846,26 @@
       }
     },
     {
+      "key": "HideCompanyAndEnvironmentName",
+      "label": "Hide company and environment name",
+      "where": "Settings > Naming & accounts > Hide company and environment name (also the toggle on the Dashboard and the Counters overview)",
+      "route": "/api/settings/hide-names",
+      "type": "boolean",
+      "default": "On (names hidden)",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "Keeps the company (tenant) name and the environment name off the Dashboard, the Counters overview and every exported PDF and Excel file, so screenshots and shared files can be shown to anyone.",
+        "enabled": "On (the default): the Dashboard and the Counters overview show PIM Manager in place of the tenant name and the environment name, the tenant id and the instance switcher are hidden there, the browser tab says PIM Manager, and every export names the environment as PIM Manager. Other pages show the names as before.",
+        "disabled": "Off: the Dashboard, the Counters overview and the browser tab show the tenant name, the environment name and the tenant id like every other page, and exports name the environment (environment name and tenant name).",
+        "risk": "Cosmetic: nothing is changed in your tenant and no data is hidden from the counters or tables. Turning it off puts your company and environment name into screenshots and exported files you may share. Reversible at any time.",
+        "requires": "SuperAdmin role to change; every signed-in role can read it. Free (Community) and Pro.",
+        "recommended": "Leave it on, and turn it off only while you need the names on the Dashboard -- for example to tell several environments apart.",
+        "docUrl": "https://invardia.com/docs/pim/settings/HideCompanyAndEnvironmentName/"
+      }
+    },
+    {
       "key": "AdminAccountUpnSuffix",
       "label": "Admin account domain",
       "where": "Settings > Naming & accounts > Admin account domain",
