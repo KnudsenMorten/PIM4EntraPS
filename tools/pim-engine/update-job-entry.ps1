@@ -71,6 +71,9 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-AsBuilt.ps1')          # 100.61 the as-built job + store + view an EXISTING install converges to
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
+# 100.61: the image the as-built converge (2e) left caj-pim-asbuilt on THIS run ('' = it did not converge the job) -- the job
+# roll (2b) skips that job when this equals the target image, instead of PATCHing it a second time (409 OperationInProgress).
+$script:PimAsBuiltJobImageThisRun = ''
 
 # ---- 100.40 / framework 12.16 CONVERGE-DEFAULTS -- one step, two call sites -----------------------------------------
 # 🔴 A changed install default reaches only NEW installs unless the updater brings the existing ones there (owner
@@ -163,8 +166,12 @@ function Invoke-PimUpdaterConvergeStep {
                 } finally { $c.Close() }
             }
         }
-        $abAppId = { param($oid) "$((Invoke-PimGraph -Path ("/servicePrincipals/$oid" + '?$select=appId')).appId)" }
-        $ab = Invoke-PimAsBuiltConverge -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -Arm $armSeam -Sql $abSql -AppIdOf $abAppId
+        # Live 2026-10-11: no Graph here any more -- the job runs as the user-assigned identity id-pim-asbuilt, whose clientId
+        # (= the database user's SID) this identity reads over ARM; the Graph app-id lookup was refused on every run.
+        $ab = Invoke-PimAsBuiltConverge -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -Arm $armSeam -Sql $abSql
+        # The image the converge left caj-pim-asbuilt on THIS run: the job roll (2b) does not PATCH it again (a second write
+        # seconds after the converge's was refused "HTTP 409 ContainerAppsJobOperationInProgress" -- NOT FULLY UPDATED).
+        $script:PimAsBuiltJobImageThisRun = "$($ab.jobImage)".Trim()
         foreach ($l in @($ab.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
     } catch { Say "  as-built converge skipped: $($_.Exception.Message)" 'Yellow' }
 }
@@ -988,7 +995,7 @@ $selfImageBefore = ''; $selfStamped = $false
 if ($tickJob) {
     try {
         Say "rolling the tick job $tickJob"
-        [void](Set-PimAcaJobImage -SubscriptionId $sub -ResourceGroup $rg -Name $tickJob -Image $targetImg -ContainerName $container)
+        [void](Invoke-PimArmBusyRetry -Write { Set-PimAcaJobImage -SubscriptionId $sub -ResourceGroup $rg -Name $tickJob -Image $targetImg -ContainerName $container })
     } catch { $jobFailed += $tickJob; Say "  tick job not rolled: $($_.Exception.Message)" 'Yellow' }
 }
 
@@ -1013,9 +1020,19 @@ try {
     $plan = Get-PimAcaJobRollPlan -Jobs $all -TargetImage $targetImg -Exclude @($tickJob, $selfJob)
     foreach ($s in @($plan.skip)) { Say "  skipping $($s.name): $($s.reason)" 'DarkGray' }
     foreach ($r in @($plan.roll)) {
+        # 100.61 (live 2026-10-11): the as-built converge (2e, above) already moved caj-pim-asbuilt to the target image THIS run;
+        # PATCHing it again seconds later was refused 409 ContainerAppsJobOperationInProgress and reported the job as still on
+        # the previous build. It is on the target -- counted, not written twice.
+        if (Test-PimAsBuiltRollSkip -JobName "$($r.name)" -ConvergedImage "$script:PimAsBuiltJobImageThisRun" -TargetImage "$targetImg") {
+            Say "  $($r.name): already moved to $targetImg by the as-built converge this run -- not written again" 'DarkGray'
+            $discovered++
+            continue
+        }
         try {
             Say "rolling $($r.name) (same image as the Manager)"
-            [void](Set-PimAcaJobImage -SubscriptionId $sub -ResourceGroup $rg -Name $r.name -Image $targetImg)
+            # A job still provisioning a write from earlier in this run answers 409 OperationInProgress: wait it out (bounded,
+            # Invoke-PimArmBusyRetry -- the GET inside Set-PimAcaJobImage is repeated on each attempt), never a failed update.
+            [void](Invoke-PimArmBusyRetry -Write { Set-PimAcaJobImage -SubscriptionId $sub -ResourceGroup $rg -Name $r.name -Image $targetImg })
             $discovered++
         } catch { $jobFailed += $r.name; Say "  $($r.name) NOT rolled: $($_.Exception.Message)" 'Yellow' }
     }

@@ -9953,6 +9953,13 @@ document. Lists of people (SuperAdmins, break-glass accounts, alert recipients) 
 the webhook URL, the install key, salts and the licence document never reach it; every value passes a final filter that
 drops anything shaped like an e-mail address, a GUID, a token, a key or a URL with credentials or a query string.
 
+**The job's identity.** The job runs as a user-assigned managed identity, `id-pim-asbuilt`, in the PIM resource group.
+Its client id (which is also its application id) and its object id are properties of the Azure resource, so the setup and
+the in-cloud updater can create the job's database user and check its storage right with Azure Resource Manager alone --
+no directory (Graph) permission is needed. The job names that identity when it asks for tokens, so its database and
+storage access are that identity's. A job created before this identity existed is switched to it on the next update; its
+image pull keeps the registry identity it already used.
+
 **How the job reads the store.** The job's managed identity has a contained database user with SELECT on one view,
 `pim.vw_AsBuiltSettings`, and nothing else. The view lists exactly the settings the document needs and reduces the rows
 that hold people or secrets in SQL (to a count, a kind or a yes/no), so they never leave the database. The Manager reduces
@@ -9982,8 +9989,11 @@ resource group), the view, the job's database user and a small record of the ins
 internal or external network, resource group). REST / ARM only.
 
 **Existing environments.** The in-cloud updater brings an installation that predates the as-built job to the same setup
-on its next run: the storage account, the container and its lifecycle rule, the job (always on the Manager's current
-image), and -- over its own database connection, so a private database works too -- the view, the job's database user and
-the install facts. The updater cannot assign Azure roles; the job's right to write its container and the support custom
+on its next run: the storage account, the container and its lifecycle rule, the job's identity, the job (always on the
+Manager's current image, so the updater's generic job roll does not write it a second time in the same run), and -- over
+its own database connection, so a private database works too -- the view, the job's database user and the install facts.
+A write that reaches a job while its previous change is still being applied is retried after a short wait instead of
+being reported as a failed update. If the job cannot sign in to the database, its log says so and names the fix: the next
+update creates the user, or `Deploy-PimAsBuiltJob.ps1` run once. The updater cannot assign Azure roles; the job's right to write its container and the support custom
 role are reported in the update log and given by `Initialize-PimHostingAccess.ps1`, run once by an Owner of the resource
 group. The guided install can grant Invardia support the `asbuilt` level on its own.
