@@ -2020,9 +2020,10 @@ with an agreed response time. A managing or managed tenant **requires** a Pro li
 and downlink jobs refuse to run, and the portal shows a red banner on its MSP pages.
 
 **Settings › Licence** shows the licence status, the customer, the valid-until date and the tenant it is bound to,
-which Pro capabilities are on, and the command that registers a licence file:
-`tools\setup\Set-PimLicense.ps1 -LicensePath <file> ...` (verified first, stored in the environment's database, read
-back).
+which Pro capabilities are on, and how to register a licence file: in the portal itself, or with the two lines it
+shows – one downloads the `Set-PimLicense.ps1` script from Invardia, one runs it with a browser sign-in (verified
+first, stored in the environment's database, read back). 🟡 The two-line download form is built, not released yet;
+until it is, the page shows the same script run from the installation's own files.
 
 **For a Pro licence:** try it free for 60 days at [invardia.com/trial](https://invardia.com/trial/), buy it at [invardia.com/order](https://invardia.com/order/), or mail [info@invardia.com](mailto:info@invardia.com). Invardia – a brand of 2LINKIT, founded and owned by Morten Knudsen.
 

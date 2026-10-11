@@ -693,20 +693,22 @@ Register-PimJobHandler -Type 'verify-convergence' -Handler {
     if (-not $verdict.ok) {
         $top = @($verdict.items | Where-Object { [int]$_.ageMinutes -ge 60 } | Select-Object -First 10 |
                  ForEach-Object { "$($_.key) (unapplied $($_.ageMinutes)m)" })
-        # PIM 100.72 (5) (owner 2026-10-11, framework 12.21): a convergence finding is an ANOMALY WARNING in the daily "Data
-        # quality alert", not a failure alert. The run is a 'warning' (amber on the Jobs page, never an engine-failure mail);
-        # the verdict, its ages and the Tier report's 'not-deployed' marks are unchanged.
-        $convMsg = ("CONVERGENCE WARNING -- $($verdict.persistent) delegation/assignment(s) exist in PIM Manager but NOT in the " +
-                    "tenant, past the grace window: " + ($top -join '; '))
+        # Owner decision 2026-10-11 ~22:00 ("committed but still not in the tenant" = "Immediate failure alert"): PIM 100.72 (5)
+        # is REVERSED -- past the grace window the run FAILS again with CONVERGENCE FAILURE, exactly as before 2.4.594, which
+        # raises the engine-failure alert mail at once. The line in the daily "Data quality alert" stays as well (best effort:
+        # it never stands in the way of the failure below).
         if (-not $whatIf -and (Get-Command Add-PimDataQualityNote -ErrorAction SilentlyContinue)) {
-            [void](Add-PimDataQualityNote -Kind 'convergence' -Area 'verify-convergence' `
+            try { [void](Add-PimDataQualityNote -Kind 'convergence' -Area 'verify-convergence' `
                 -Title ("{0} definition(s) not in the tenant past the grace window" -f [int]$verdict.persistent) `
                 -Detail (($top | Select-Object -First 5) -join '; ') `
                 -Cause 'Usually an engine run that keeps failing for these items (see Jobs > Engine logs & errors), a permission the engine lacks, or a target that no longer exists.' `
                 -Fix 'Open the Jobs page and the failing engine job: fix what it names, then Run now. tools/setup/Repair-PimJobBindingBacklog.ps1 quantifies and clears a backlog.' `
-                -Measured @{ persistent = [int]$verdict.persistent; total = [int]$verdict.total } -NowUtc $now)
+                -Measured @{ persistent = [int]$verdict.persistent; total = [int]$verdict.total } -NowUtc $now) } catch { }
         }
-        return [pscustomobject]@{ ran=$true; warning=$true; detail=("$detail | $convMsg"); unconverged=$verdict.total; persistent=[int]$verdict.persistent; whatIf=[bool]$whatIf }
+        throw ("[scheduler] CONVERGENCE FAILURE -- $($verdict.persistent) delegation/assignment(s) exist in the " +
+               "Manager but NOT in the tenant, and have stayed that way past the grace window. " +
+               "The desired state is NOT deployed: " + ($top -join '; ') +
+               ". Run tools/setup/Repair-PimJobBindingBacklog.ps1 to quantify and clear the backlog.")
     }
     [pscustomobject]@{ ran=$true; detail=$detail; unconverged=$verdict.total; whatIf=[bool]$whatIf }
 }

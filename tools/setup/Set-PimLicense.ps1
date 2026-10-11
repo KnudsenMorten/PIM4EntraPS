@@ -7,7 +7,7 @@
   or queues its claim.
 
 .DESCRIPTION
-  IMP-42 -- import an issued PIM4EntraPS licence into the store (pim.Settings['License']).
+  IMP-42 -- import an issued PIM Manager licence into the store (pim.Settings['License']).
 
   PIM v2 keeps the licence in SQL, not in a file. It used to be FOUND by scanning config/ for
   *.pimlicense / *.aitlicense -- a directory the container image excludes, so every hosted
@@ -40,14 +40,15 @@
   -WhatIf verifies the document, reads what the store holds now, prints the licence, what it replaces and every write it
   would make (the License setting, the install key or its claim), and writes nothing.
 
+  Published as ONE self-contained file at https://invardia.com/support/pim/Set-PimLicense.ps1 (REQUIREMENTS 100.81): it
+  runs in Windows PowerShell 5.1 and PowerShell 7 with nothing next to it.
+
 .EXAMPLE
-  pwsh -File Set-PimLicense.ps1 -LicensePath .\Contoso.pimlicense -SqlServer sql-x.database.windows.net -TenantId <t> -UseSignedInAccount -WhatIf
+  .\Set-PimLicense.ps1 -LicensePath .\licence.pimlicense -SqlServer <server>.database.windows.net -TenantId <tenant id> -UseSignedInAccount -WhatIf
+  Signs you in through the browser, verifies the licence and prints what it would store ("What if: ...") -- nothing is written.
 .EXAMPLE
-  pwsh -File Set-PimLicense.ps1 -LicensePath .\Contoso.pimlicense -SqlServer sql-x.database.windows.net -TenantId <t> -UseSignedInAccount
-.EXAMPLE
-  # automation: the admin application's certificate instead of the signed-in user
-  pwsh -File Set-PimLicense.ps1 -LicensePath .\Contoso.pimlicense -SqlServer sql-x.database.windows.net `
-       -TenantId <t> -AdminAppId <appid> -AdminCertThumbprint <thumb>
+  .\Set-PimLicense.ps1 -LicensePath .\licence.pimlicense -SqlServer <server>.database.windows.net -TenantId <tenant id> -UseSignedInAccount
+  Verifies the licence, stores it, reads it back and verifies it again.
 
 .LINK
   https://invardia.com/docs/pim/scripts/Set-PimLicense/
@@ -91,12 +92,16 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$here = Split-Path -Parent $PSCommandPath
-$sol  = Split-Path -Parent (Split-Path -Parent $here)
-. (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
-. (Join-Path $sol 'engine\_shared\PIM-SqlStore.ps1')
-. (Join-Path $sol 'engine\_shared\PIM-License.ps1')
+# REQUIREMENTS 100.81: published as ONE standalone file (https://invardia.com/support/pim/Set-PimLicense.ps1). Every helper
+# is dot-sourced by a literal path relative to this script's folder, so Build-PimSupportScripts.ps1 can inline it -- the
+# built file loads nothing and needs no repository next to it. The next line tells the build to leave out the OPTIONAL
+# loads the engine libraries end with (files that sit next to them in the repository) and to fail on any load left.
+# BUILD-NO-OPTIONAL-LOADS
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Rest.ps1')
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-SqlStore.ps1')
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-License.ps1')
+. (Join-Path $PSScriptRoot '_PimSignedIn.ps1')                # -UseSignedInAccount: the Support session, else the browser
 
 # Set-PimLicense / Get-PimLicenseFromStore speak to the store through Get-PimSetting / Set-PimSetting (the
 # Manager and the scheduler bind those to their own store). Bind them here to the store this script targets.
@@ -211,7 +216,6 @@ if ("$ConnectionString".Trim()) {
             Note 'store identity: the supplied SQL access token' 'DarkGray'
         } elseif ($UseSignedInAccount) {
             if ("$AdminAppId".Trim() -or "$AdminCertThumbprint".Trim() -or "$AdminSecret".Trim()) { Fail '-UseSignedInAccount cannot be combined with -AdminAppId/-AdminCertThumbprint/-AdminSecret' }
-            . (Join-Path $here '_PimSignedIn.ps1')
             try { $who = Connect-PimSignedInSql -TenantId $TenantId; Note "store identity: signed-in user $($who.userName)" 'DarkGray' } catch { Fail "$($_.Exception.Message)" }
         } else {
             if (-not "$AdminAppId".Trim()) { Fail 'supply -AdminAppId with -AdminCertThumbprint or -AdminSecret, or -UseSignedInAccount' }

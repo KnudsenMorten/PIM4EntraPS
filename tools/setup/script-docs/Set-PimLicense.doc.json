@@ -3,11 +3,11 @@
   "product": "pim",
   "title": "Register the PIM Manager licence",
   "purpose": "Registers an issued PIM Manager licence in the environment's store: it verifies the signed licence document first, stores it as the License setting, reads it back and verifies it again; optionally stores the Invardia install key or queues its claim.",
-  "whenToRun": "When a licence file has been issued (a new Pro licence, a renewal or a replacement) and it cannot be registered in PIM Manager itself (Settings > Licence, SuperAdmin). The licence page shows this command with the environment's server and tenant filled in. The installer runs it for you.",
-  "standalone": false,
+  "whenToRun": "When a licence file has been issued (a new Pro licence, a renewal or a replacement) and it cannot be registered in PIM Manager itself (Settings > Licence, SuperAdmin). The licence page shows the two lines -- download this script from Invardia, then run it -- with the environment's server and tenant filled in. The installer runs it for you.",
+  "standalone": true,
   "sourcePath": "tools/setup/Set-PimLicense.ps1",
   "runAs": [
-    { "kind": "other", "name": "Member of the environment's SQL admin group (grp-pim-sql-admins), signed in through the browser or the Invardia Support app session (no command-line tool, no PowerShell module)", "scope": "the environment's SQL database", "why": "The licence is kept in pim.Settings; only the SQL admin group may write it. With -UseSignedInAccount the person signs in through the browser (the recommended way). Alternatively an Azure SQL access token (-SqlAccessToken), the admin application (-AdminAppId with -AdminCertThumbprint), or a ready -ConnectionString to a local SQL Server." }
+    { "kind": "other", "name": "Member of the environment's SQL admin group (grp-pim-sql-admins), signed in through the browser or the Invardia Support app session (no command-line tool, no PowerShell module)", "scope": "the environment's SQL database", "why": "The licence is kept in pim.Settings; only the SQL admin group may write it. With -UseSignedInAccount the person signs in through the browser (the recommended way). Alternatively, for automation, an Azure SQL access token (-SqlAccessToken), the admin application (-AdminAppId with -AdminCertThumbprint), or a ready -ConnectionString to a local SQL Server." }
   ],
   "changes": [
     { "target": "Environment SQL database", "action": "update", "object": "pim.Settings row 'License' (the signed licence document exactly as issued)", "scope": "this environment's PIM Manager and engine", "why": "Switches on the features the licence covers. The document is verified BEFORE the store is written (a tampered or foreign-signed document, a non-Pro licence or one not bound to this tenant is refused), then read back and verified again.", "undo": "Register the previous licence file again (the replaced licence id is printed as 'replaces:'), or remove the License setting to return to Community." },

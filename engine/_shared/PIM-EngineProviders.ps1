@@ -6446,6 +6446,41 @@ function Test-PimPolicyApprovalClearDue {
     return ($Visited -ge $Planned)
 }
 
+function Clear-PimPolicyMassHoldRecord {
+    <#
+      PIM 100.84 (owner 2026-10-11: "there is inconsistence among things"). ONE provider's run that does NOT hold -- it
+      found nothing to change, is within the thresholds, or its change set is approved -- leaves no hold behind: the stored
+      record (pim.Settings '<prefix>MassHold') is emptied and the guard's trip entry says it holds nothing now
+      (Clear-PimGuardTripHeld), so every page that reads the record agrees that nothing waits.
+      NEVER clears a hold that may still be valid: a run that HOLDS, a plan (WhatIf), and a run whose live read failed or
+      was incomplete leave the record exactly as it is. NEVER throws. Returns @{ cleared; planHash; reason }.
+    #>
+    param([Parameter(Mandatory)][string]$Provider, [AllowNull()][object]$Decision, [hashtable]$Context)
+    $res = [ordered]@{ cleared = $false; planHash = ''; reason = '' }
+    try {
+        $spec = Get-PimPolicyBreakerSpec -Provider $Provider
+        if ($null -eq $Decision) { $res.reason = 'no breaker decision'; return [pscustomobject]$res }
+        if ($Decision.hold) { $res.reason = 'this run holds'; return [pscustomobject]$res }
+        if ($Context -and $Context['__pimWhatIf']) { $res.reason = 'a plan (WhatIf) applies nothing'; return [pscustomobject]$res }
+        if ($Context -and ("$($Context['__pimLiveReadError'])".Trim() -or "$($Context['__pimLiveIncomplete'])".Trim())) { $res.reason = 'the live read was not complete'; return [pscustomobject]$res }
+        if (-not (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) -or -not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { $res.reason = 'no settings store'; return [pscustomobject]$res }
+        $name = "$($spec.Prefix)MassHold"
+        $old = $null
+        try { $old = ConvertFrom-PimAzResSettingValue (Get-PimSetting -Name $name) } catch { $res.reason = 'the hold record could not be read'; return [pscustomobject]$res }
+        if (-not $old -or -not "$($old.planHash)".Trim()) { $res.reason = 'no hold record'; return [pscustomobject]$res }
+        Set-PimSetting -Name $name -Value ''
+        $res.cleared = $true; $res.planHash = "$($old.planHash)"; $res.reason = "$($Decision.reason)"
+        Write-Host ("    [engine] {0}: this run does not hold ({1}) -- the hold record of plan {2} is cleared" -f $spec.Provider, "$($Decision.reason)", "$($old.planHash)") -ForegroundColor Green
+        if (Get-Command Clear-PimGuardTripHeld -ErrorAction SilentlyContinue) { [void](Clear-PimGuardTripHeld -GuardId ("engine.policy-mass-change." + "$($spec.Provider)".ToLowerInvariant())) }
+        try {
+            if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+                Write-PimAuditEvent -Action "$($spec.Audit).cleared" -Target $spec.Provider -After @{ planHash = "$($old.planHash)"; changes = $old.changes; reason = "$($Decision.reason)" } | Out-Null
+            }
+        } catch { Write-Warning "  [engine] $($spec.Provider): clearing the hold record was NOT written to the audit trail: $($_.Exception.Message)" }
+    } catch { Write-Warning "  [engine] ${Provider}: the hold record could NOT be cleared (the pages read it as not current anyway): $($_.Exception.Message)" }
+    [pscustomobject]$res
+}
+
 function Set-PimGraphPolicyBreakerPlan {
     <#
       Called at the end of a Graph policy provider's GetLive: PLAN FIRST -- the whole change set and the
@@ -6472,6 +6507,8 @@ function Set-PimGraphPolicyBreakerPlan {
         Write-Host ("    [breaker] {0}: {1} rule change(s) are the FIRST template application to never-modified default policies (new groups/roles) -- counted in N, not in W: {2}" -f $spec.Provider, @($plan.defaultPolicyAligned).Count, ((@($plan.defaultPolicyAligned) | ForEach-Object { $_.name } | Select-Object -Unique) -join ', ')) -ForegroundColor DarkCyan
     }
     if ($dec.hold -or ($Context["__pimWhatIf"] -and [int]$plan.changes -gt 0)) { Write-PimPolicyImpactLog -Provider $spec.Provider -Plan $plan }
+    # PIM 100.84: a run that does not hold (nothing to change, within the thresholds, or approved) leaves no hold record behind.
+    [void](Clear-PimPolicyMassHoldRecord -Provider $spec.Provider -Decision $dec -Context $Context)
 }
 
 function Invoke-PimGraphPolicyGuardedApply {
@@ -6644,6 +6681,18 @@ function Invoke-PimAzResPolicyUpdate {
         return [pscustomobject]@{ pimApplied = $false; note = "held by the mass-change circuit breaker (planHash $($plan.planHash))" }
     }
 
+    # PIM 100.83: the audit row of this policy change says WHICH settings changed, from what to what -- the same detail
+    # the Graph policy providers attach (Invoke-PimGraphPolicyGuardedApply), so the audit list reads it the same way.
+    if ($pp) {
+        try {
+            $Item | Add-Member -NotePropertyName pimAuditDetail -Force -NotePropertyValue ([ordered]@{
+                policy = $label; policyId = "$($pp.policyId)"; template = "$($pp.template)"; planHash = "$($plan.planHash)"
+                approvedPlan = [bool]$dec.approved
+                rules = @($pp.rules | ForEach-Object { [ordered]@{ ruleId = "$($_.ruleId)"; before = "$($_.live)"; after = "$($_.target)"; weakening = @($_.weakening) } })
+            })
+        } catch { }
+    }
+
     try {
         if ($pp -and [int]$st.failStreak -ge 3) {
             Write-Host ("    [engine] AzResPolicies: {0} consecutive policies failed every rule PATCH -- stopping writes for this run; {1} deferred" -f $st.failStreak, $label) -ForegroundColor Yellow
@@ -6787,6 +6836,7 @@ function New-PimAzResPoliciesProvider {
                     @($plan.adminPathAligned).Count, ((@($plan.adminPathAligned | Select-Object -First 5 | ForEach-Object { "$($_.role) @ $($_.scope) $($_.ruleId) $($_.change)" })) -join '; ')) -ForegroundColor DarkCyan
             }
             if ($dec.hold -or ($ctx["__pimWhatIf"] -and [int]$plan.changes -gt 0)) { Write-PimPolicyImpactLog -Provider 'AzResPolicies' -Plan $plan }
+            [void](Clear-PimPolicyMassHoldRecord -Provider 'AzResPolicies' -Decision $dec -Context $ctx)   # PIM 100.84
             $live.ToArray()
         }
         KeyOf = { param($r) Get-PimAzResPolicyKey -Row $r }

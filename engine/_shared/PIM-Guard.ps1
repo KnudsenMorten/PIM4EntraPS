@@ -254,6 +254,42 @@ function Invoke-PimGuardTrip {
     return [pscustomobject]$res
 }
 
+function Clear-PimGuardTripHeld {
+    <#
+      PIM 100.84. The guard no longer holds anything: its 'GuardTrips' entry keeps its history (first / last trip, count) but
+      says heldCount 0 and when it was cleared (clearedUtc), so no page reads a past trip as "holding now". A later trip
+      writes a fresh entry (no clearedUtc). Does nothing when there is no entry or it holds nothing. NEVER throws.
+      Returns $true when the entry was changed. Seams (tests): -GetSetting { param($Name) } / -SetSetting { param($Name, $Value) }.
+    #>
+    param([Parameter(Mandatory)][string]$GuardId, [datetime]$NowUtc = [datetime]::UtcNow,
+          [scriptblock]$GetSetting = $null, [scriptblock]$SetSetting = $null)
+    try {
+        if (-not $GetSetting) { $GetSetting = { param($n) if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { Get-PimSetting -Name $n } elseif (Get-Command Get-PimManagerSetting -ErrorAction SilentlyContinue) { Get-PimManagerSetting -Name $n } } }
+        if (-not $SetSetting) { $SetSetting = { param($n, $v) if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { [void](Set-PimSetting -Name $n -Value $v) } elseif (Get-Command Set-PimManagerSetting -ErrorAction SilentlyContinue) { [void](Set-PimManagerSetting -Name $n -Value $v) } } }
+        $raw = & $GetSetting $script:PimGuardSetting
+        if (-not $raw) { return $false }
+        $src = if ($raw -is [string]) { try { $raw | ConvertFrom-Json } catch { $null } } else { $raw }
+        if (-not $src) { return $false }
+        $st = [ordered]@{}
+        if ($src -is [System.Collections.IDictionary]) { foreach ($k in $src.Keys) { $st["$k"] = $src[$k] } }
+        else { foreach ($p in $src.PSObject.Properties) { $st[$p.Name] = $p.Value } }
+        $id = "$GuardId".Trim().ToLowerInvariant()
+        if (-not $st.Contains($id)) { return $false }
+        $old = $st[$id]
+        $g = { param($o, $n) if ($null -eq $o) { $null } elseif ($o -is [System.Collections.IDictionary]) { $o[$n] } elseif ($o.PSObject.Properties[$n]) { $o.$n } }
+        $h = 0; [void][int]::TryParse("$(& $g $old 'heldCount')", [ref]$h)
+        if ($h -le 0 -and "$(& $g $old 'clearedUtc')".Trim()) { return $false }
+        $new = [ordered]@{}
+        if ($old -is [System.Collections.IDictionary]) { foreach ($k in $old.Keys) { $new["$k"] = $old[$k] } }
+        else { foreach ($p in $old.PSObject.Properties) { $new[$p.Name] = $p.Value } }
+        $new['heldCount'] = 0
+        $new['clearedUtc'] = $NowUtc.ToUniversalTime().ToString('o')
+        $st[$id] = $new
+        & $SetSetting $script:PimGuardSetting ([pscustomobject]$st)
+        return $true
+    } catch { return $false }
+}
+
 # GUARD-1 'engine.empty-desired' (2026-10-05). The engine never prunes a scope whose desired set is EMPTY (PIM-EngineCore
 # gate 2) -- and for a scope nobody defines that is the normal, silent case (an empty definition touches nothing). It is a
 # GUARD TRIP only on the TRANSITION: the scope had definitions at its last full run, now it has none, and live items are

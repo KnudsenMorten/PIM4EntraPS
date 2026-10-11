@@ -2,12 +2,20 @@
 
 <#
 .SYNOPSIS
-    Creates or updates the PIM Activator app registration in your tenant (the sign-in app of the PIM Activator browser extension): its SPA redirect URIs, its delegated Microsoft Graph and Azure permissions, tenant-wide admin consent for them, and "Assignment required" so only the group you name can sign in.
+    Creates or updates the PIM Activator app registration in your tenant (the sign-in app of the PIM Activator browser extension): its SPA redirect URIs, its delegated Microsoft Graph and Azure permissions, and tenant-wide admin consent for them. Every user of the tenant can sign in to the app ("Assignment required" is off); what a person can activate is decided by their PIM eligibility, not by this app.
 
 .DESCRIPTION
     Documentation (purpose, who may run it, every change and permission, -WhatIf, undo):
     https://invardia.com/docs/pim/scripts/Deploy-PimActivatorBackend/
     -WhatIf signs in, reads the tenant and prints every change it would make; it changes nothing.
+
+    Who can sign in: every user of your tenant. The app is only how the extension
+    signs in -- it gives nobody any access. What a person sees and can activate
+    is decided by their PIM eligibility. On every run the script makes sure
+    "Assignment required" is OFF on the enterprise application (a tenant where
+    an earlier version of this script switched it on comes back to that), and
+    says so. Users and groups already assigned to the enterprise application are
+    left as they are: with assignment not required they change nothing.
 
     The PIM Activator extension uses chrome.identity.launchWebAuthFlow + PKCE
     (vanilla JS, no MSAL.js) to:
@@ -59,8 +67,7 @@
     you already have) or app-only -AppId + -CertificateThumbprint + -TenantId.
 
     Caller (you) must have:
-      - Graph scopes: Application.ReadWrite.All, AppRoleAssignment.ReadWrite.All,
-                      DelegatedPermissionGrant.ReadWrite.All
+      - Graph scopes: Application.ReadWrite.All, DelegatedPermissionGrant.ReadWrite.All
       - Entra roles, ACTIVE in the session (PIM-eligible does NOT count until
         activated -- activate in PIM FIRST, then run this script; a sign-in
         made before the activation does not carry the role, and the script
@@ -79,13 +86,10 @@
     SPA redirect URI: https://<ExtensionId>.chromiumapp.org/
 
 .PARAMETER AssignToGroupId
-    The object id of the group whose members may use the PIM Activator. The app is
-    always set to "Assignment required", so only assigned people can sign in; this
-    group is assigned to it and read back. Direct, permanent members only (Entra does
-    not pass app access through nested groups; a PIM-eligible membership would lock
-    the person out of the tool that activates it). Not given: nobody can sign in until
-    a group is assigned. An existing app that is open to everyone today is not closed
-    without a group (that would lock every current user out).
+    No longer used. Earlier versions assigned this group to the app and set
+    "Assignment required". The parameter is still accepted, so a command copied
+    from an earlier PIM Manager page keeps working: the script says in one line
+    that it is ignored, assigns nobody and continues.
 
 .PARAMETER DisplayName
     Display name of the app registration. Default: "PIM Activator".
@@ -115,11 +119,11 @@
     key, in Cert:\CurrentUser\My or Cert:\LocalMachine\My.
 
 .EXAMPLE
-    # The command the PIM Manager page shows: this tenant, PROD, for the group of admins who use it:
-    .\Deploy-PimActivatorBackend.ps1 -TenantId <tenant-id> -Channel Released -DisplayName 'PIM Activator' -AssignToGroupId <group-id>
+    # The command the PIM Manager page shows: this tenant, PROD:
+    .\Deploy-PimActivatorBackend.ps1 -TenantId <tenant-id> -Channel Released -DisplayName 'PIM Activator'
 
 .EXAMPLE
-    # Zero-arg -- opens Edge for the sign-in, with the right scopes (nobody assigned yet):
+    # Zero-arg -- opens Edge for the sign-in, with the right scopes:
     .\Deploy-PimActivatorBackend.ps1
 
 .EXAMPLE
@@ -136,7 +140,7 @@
 
 .EXAMPLE
     # Preview: signs in, reads, prints every change it would make -- changes nothing:
-    .\Deploy-PimActivatorBackend.ps1 -TenantId <tenant-id> -AssignToGroupId <group-id> -WhatIf
+    .\Deploy-PimActivatorBackend.ps1 -TenantId <tenant-id> -WhatIf
 
 .NOTES
     Re-runnable: if an app with the same DisplayName already exists in the
@@ -199,12 +203,12 @@ param(
     # browser sign-in; not renewed (valid ~1 hour from when it was minted).
     [string]$AccessToken,
 
-    # 97.2 (owner 2026-10-08: "customer must define who (group) to deploy to - not
-    # everyone"): the app is ALWAYS set to "Assignment required" (appRoleAssignmentRequired),
-    # so only people you assign can sign in to the PIM Activator. -AssignToGroupId assigns
-    # that group (direct members; read back). Not given = nobody can sign in until you
-    # assign a group (Enterprise applications > the app > Users and groups, or re-run with it).
-    [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    # 100.90 (owner 2026-10-11: "we dont use it to assign or login ... strip out the user
+    # assignement part"): NOT USED any more. The 97.2 pages (2026-10-08 to 2.4.595) filled
+    # "-AssignToGroupId <group id>" into the command they showed, so a command someone
+    # already copied still carries it: it is accepted, said to be ignored in one line,
+    # and nothing is assigned. Hidden from tab completion (DontShow).
+    [Parameter(DontShow)]
     [string]$AssignToGroupId
 )
 
@@ -231,11 +235,15 @@ Show-PimActivatorBanner -ScriptName "Deploy-PimActivatorBackend (REST, no module
 # Sign in to Microsoft Graph
 # ---------------------------------------------------------------------------
 
+# 100.90: the app-role-assignment scope is no longer asked for -- it was only for assigning the group to the app.
+# 'Assignment required' is a property of the service principal, which Application.ReadWrite.All covers.
 $_requiredScopes = @(
     'Application.ReadWrite.All'
-    'AppRoleAssignment.ReadWrite.All'
     'DelegatedPermissionGrant.ReadWrite.All'
 )
+if ($PSBoundParameters.ContainsKey('AssignToGroupId')) {
+    Write-Host "Note: -AssignToGroupId is no longer used and is ignored -- nobody is assigned to the app; every user of this tenant can sign in to the PIM Activator, and what they can activate is decided by their PIM eligibility." -ForegroundColor Yellow
+}
 
 if ($script:PimActivatorAppOnly -and -not $TenantId) { throw "App-only sign-in requires -TenantId." }
 $ctx = Connect-PimActivatorGraph -RequiredScopes $_requiredScopes -TenantId $TenantId -UseEdge:([bool]$UseEdge) -AppId $AppId -CertificateThumbprint $CertificateThumbprint -AccessToken $AccessToken
@@ -537,49 +545,26 @@ if (-not $sp -and -not $PSCmdlet.ShouldProcess("service principal (enterprise ap
 $spId = Get-PaProp $sp 'id'
 
 # ---------------------------------------------------------------------------
-# WHO may sign in (97.2, owner 2026-10-08): "Assignment required" + the group
+# Sign-in: every user of this tenant (100.90, owner 2026-10-11)
 # ---------------------------------------------------------------------------
-# Without appRoleAssignmentRequired every user in the tenant can sign in to the
-# app (and, with the tenant-wide consent below, get its tokens). With it, only
-# the people assigned to the enterprise app can. A group assignment covers the
-# group's DIRECT members (Entra does not pass app access through nested groups),
-# and the membership must be permanent: a PIM-eligible membership would lock the
-# person out of the very tool that activates it.
-$_assignedNow = @(); $_spNow = $null
-if ($spId) {
-    $_assignedNow = @(Invoke-PaGraph -Method GET -Path "/servicePrincipals/$spId/appRoleAssignedTo?`$select=id,principalId,principalDisplayName,principalType" -All)
-    $_spNow = Invoke-PaGraph -Method GET -Path "/servicePrincipals/$spId`?`$select=id,appRoleAssignmentRequired"
-}
-if (-not [bool](Get-PaProp $_spNow 'appRoleAssignmentRequired')) {
-    if ($spId -and $existing.Count -eq 1 -and -not $AssignToGroupId -and -not $_assignedNow.Count) {
-        # An app that is in use and open to everyone: switching it to "assignment required" with nobody assigned would
-        # lock every current user out at once. Refuse, and say what to run.
-        throw ("'$DisplayName' (appId $appId) is open to EVERY user today and nobody is assigned to it. Setting 'Assignment required' now would lock " +
-               "every current user out. Re-run with -AssignToGroupId <group object id> (the admins who use the PIM Activator) -- the group is " +
-               "assigned first, then the app is closed to everyone else.")
-    }
-}
-if ($AssignToGroupId) {
-    $_hit = @($_assignedNow | Where-Object { "$(Get-PaProp $_ 'principalId')" -ieq $AssignToGroupId })
-    if ($_hit.Count) {
-        Write-Host "Group $AssignToGroupId ($(Get-PaProp $_hit[0] 'principalDisplayName')) is already assigned to the app." -ForegroundColor DarkGray
-    } elseif ($PSCmdlet.ShouldProcess("group $AssignToGroupId", "Assign to the enterprise application '$DisplayName' (app role assignment, default access; POST appRoleAssignedTo) -- its direct members may sign in to the PIM Activator")) {
-        Write-Host "Assigning group $AssignToGroupId to '$DisplayName' (default access)..." -ForegroundColor Cyan
-        $_new = Invoke-PaGraph -Method POST -Path "/servicePrincipals/$spId/appRoleAssignedTo" -Body @{
-            principalId = $AssignToGroupId; resourceId = $spId; appRoleId = '00000000-0000-0000-0000-000000000000' }
-        if ("$(Get-PaProp $_new 'principalType')" -and "$(Get-PaProp $_new 'principalType')" -ne 'Group') {
-            # Not a group (a user or a service principal id was passed): take back what was just added.
-            try { Invoke-PaGraph -Method DELETE -Path "/servicePrincipals/$spId/appRoleAssignedTo/$(Get-PaProp $_new 'id')" | Out-Null } catch { }
-            throw "$AssignToGroupId is a $(Get-PaProp $_new 'principalType'), not a group -- the assignment was removed again. Pass the object id of a GROUP."
-        }
-    }
-}
-if (-not [bool](Get-PaProp $_spNow 'appRoleAssignmentRequired')) {
-    if ($PSCmdlet.ShouldProcess("enterprise application '$DisplayName'", "Set 'Assignment required' (appRoleAssignmentRequired = true; PATCH /servicePrincipals) -- only assigned users and groups can sign in")) {
-        Invoke-PaGraph -Method PATCH -Path "/servicePrincipals/$spId" -Body @{ appRoleAssignmentRequired = $true } | Out-Null
+# The app is only how the extension signs in. It gives nobody any access: what a
+# person sees and can activate is decided by their PIM eligibility. So
+# "Assignment required" (appRoleAssignmentRequired) is OFF -- the default of a
+# new enterprise application -- and it is made sure of on EVERY run, so a tenant
+# where an earlier version of this script switched it on comes back to it.
+# Nobody is assigned here, and what is already assigned to the enterprise
+# application is never removed: with assignment not required it changes nothing.
+$_spNow = $null
+if ($spId) { $_spNow = Invoke-PaGraph -Method GET -Path "/servicePrincipals/$spId`?`$select=id,appRoleAssignmentRequired" }
+$_wasRequired = [bool](Get-PaProp $_spNow 'appRoleAssignmentRequired')
+if ($_wasRequired) {
+    if ($PSCmdlet.ShouldProcess("enterprise application '$DisplayName'", "Set 'Assignment required' to No (appRoleAssignmentRequired = false; PATCH /servicePrincipals) -- every user of this tenant can sign in to the PIM Activator again; users and groups already assigned are left as they are")) {
+        Write-Host "'Assignment required' is on for '$DisplayName' (an earlier run set it) -- switching it off..." -ForegroundColor Cyan
+        Invoke-PaGraph -Method PATCH -Path "/servicePrincipals/$spId" -Body @{ appRoleAssignmentRequired = $false } | Out-Null
     }
 }
 if ($_preview) {
+    if (-not $_wasRequired) { Write-Host "Sign-in: every user of this tenant -- assignment not required (nothing to change)." -ForegroundColor DarkGray }
     # nothing was written, so there is nothing to read back
     if ($GrantConsent) {
         $scopeString = New-PaConsentScopeString -Scopes $needed
@@ -590,22 +575,18 @@ if ($_preview) {
     Write-Host 'PREVIEW (-WhatIf) complete: nothing was changed. Run the same command without -WhatIf to apply.' -ForegroundColor Yellow
     return
 }
-# read back: assignment required, and the group is there
-$_spBack =Invoke-PaGraph -Method GET -Path "/servicePrincipals/$spId`?`$select=id,appRoleAssignmentRequired"
-if (-not [bool](Get-PaProp $_spBack 'appRoleAssignmentRequired')) { throw "'$DisplayName': 'Assignment required' did not read back as set -- check Enterprise applications > $DisplayName > Properties." }
-$_assignedBack = @(Invoke-PaGraph -Method GET -Path "/servicePrincipals/$spId/appRoleAssignedTo?`$select=id,principalId,principalDisplayName,principalType" -All)
-$_groupName = ''
-if ($AssignToGroupId) {
-    $_g = @($_assignedBack | Where-Object { "$(Get-PaProp $_ 'principalId')" -ieq $AssignToGroupId -and "$(Get-PaProp $_ 'principalType')" -eq 'Group' })
-    if (-not $_g.Count) { throw "'$DisplayName': group $AssignToGroupId did not read back as assigned -- check Enterprise applications > $DisplayName > Users and groups." }
-    $_groupName = "$(Get-PaProp $_g[0] 'principalDisplayName')"
+# read back: assignment is not required. After a switch-off the directory can answer with the old value for a few
+# seconds, so that case is read up to five times before it is called a failure.
+$_stillRequired = $true
+for ($_try = 1; $_try -le $(if ($_wasRequired) { 5 } else { 1 }); $_try++) {
+    $_spBack = Invoke-PaGraph -Method GET -Path "/servicePrincipals/$spId`?`$select=id,appRoleAssignmentRequired"
+    $_stillRequired = [bool](Get-PaProp $_spBack 'appRoleAssignmentRequired')
+    if (-not $_stillRequired) { break }
+    if ($_try -lt 5 -and $_wasRequired) { Start-Sleep -Seconds 3 }
 }
-Write-Host "Assignment required: ON (read back) -- only assigned users and groups can sign in." -ForegroundColor Green
-if ($_assignedBack.Count) {
-    Write-Host ("Deploys to: " + (@($_assignedBack | ForEach-Object { "$(Get-PaProp $_ 'principalDisplayName') ($(Get-PaProp $_ 'principalType'))" }) -join ', ')) -ForegroundColor Green
-} else {
-    Write-Host "Deploys to: NOBODY yet -- nobody can sign in until you assign a group: re-run with -AssignToGroupId <group object id>, or Enterprise applications > $DisplayName > Users and groups > Add." -ForegroundColor Yellow
-}
+if ($_stillRequired) { throw "'$DisplayName': 'Assignment required' still reads Yes after it was switched off -- set it to No under Enterprise applications > $DisplayName > Properties, or run this script again." }
+Write-Host "Sign-in: every user of this tenant -- assignment not required (read back)$(if ($_wasRequired) { '; an earlier run had switched it on, it is off again' })." -ForegroundColor Green
+Write-Host "Users and groups already assigned to the enterprise application are left as they are -- with assignment not required they change nothing. What a person can activate is decided by their PIM eligibility." -ForegroundColor DarkGray
 
 # ---------------------------------------------------------------------------
 # Optional: tenant-wide admin consent for the delegated scopes
@@ -661,10 +642,7 @@ Write-Host ""
     ClientId    = $appId
     AppObjectId = $appObjId
     SpObjectId  = $spId
-    AssignmentRequired = $true
-    AssignedGroupId    = $(if ($AssignToGroupId) { $AssignToGroupId.ToLowerInvariant() } else { '' })
-    AssignedGroupName  = $_groupName
-    AssignedTo         = @($_assignedBack | ForEach-Object { "$(Get-PaProp $_ 'principalDisplayName')" })
+    AssignmentRequired = $false
     RedirectUri = $redirectUri
     Scopes      = $needed
 }

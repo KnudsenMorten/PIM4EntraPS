@@ -1186,14 +1186,17 @@ file, or paste its contents, and save. It is checked against the signing certifi
 stored, so a file that does not verify is refused, nothing is written and the page says so. Registering needs
 the senior-administrator role and is recorded in the audit trail.
 
-**Or from a shell**, if you hold the environment's own database credentials (the application id and certificate
-below are **your** deployment's, not the vendor's). It is stored in the environment's database, verified first
-and read back:
+**Or from PowerShell**, as a member of the environment's SQL admin group: line 1 downloads the script from
+Invardia, line 2 runs it. You sign in through the browser – no command-line tool, no PowerShell module, no
+certificate and no secret. The licence is verified first, stored in the environment's database and read back
+(add `-WhatIf` to see what it would do without writing anything):
 
 ```powershell
-pwsh -File tools\setup\Set-PimLicense.ps1 -LicensePath <file> -SqlServer <server>.database.windows.net `
-     -TenantId <tenant> -AdminAppId <app id> -AdminCertThumbprint <thumbprint>
+Invoke-WebRequest https://invardia.com/support/pim/Set-PimLicense.ps1 -OutFile Set-PimLicense.ps1
+.\Set-PimLicense.ps1 -LicensePath <file> -SqlServer <server>.database.windows.net -TenantId <tenant> -UseSignedInAccount
 ```
+
+[What does this script do?](https://invardia.com/docs/pim/scripts/Set-PimLicense/)
 
 The running portal and jobs pick it up on their next start.
 

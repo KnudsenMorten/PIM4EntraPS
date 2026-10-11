@@ -164,6 +164,38 @@ function Get-PimDemoModeEligibility {
     return [pscustomobject]@{ allowed = ($why.Count -eq 0); reasons = @($why.ToArray()); ring = $rn; customer = "$LicenceCustomer".Trim() }
 }
 
+function Get-PimDemoEnvironmentProof {
+    <#
+      THE ONE PROOF that an environment is the internal demo one, read from its store: the recorded update ring
+      (pim.Settings UpdateState) and the stored licence (pim.Settings License, verified offline), judged by
+      Get-PimDemoModeEligibility. Shared by every setup script that may only run on a demo environment
+      (Set-PimDemoMode -Enable, Set-PimDemoSamples) -- so none of them carries a weaker copy. Never throws: a ring or a
+      licence that cannot be read is recorded as its error, which the eligibility refuses (unsure = refused).
+      Needs Read-PimUpdateState / Get-PimUpdateStateVerdict (PIM-UpdateState.ps1), Get-PimSqlSettingRaw (PIM-SqlStore.ps1)
+      and Get-PimLicense (PIM-License.ps1) loaded by the caller. -ReadRing / -ReadLicence: test seams (each returns what
+      the real reader returns, or throws).
+      Returns the eligibility (@{ allowed; reasons[]; ring; customer }) plus ringText / ringRecorded / licenceStatus.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [scriptblock]$ReadRing = $null, [scriptblock]$ReadLicence = $null)
+    $ring = ''; $ringRec = $false; $ringErr = ''
+    try {
+        $rec = if ($ReadRing) { & $ReadRing $ConnectionString } else { Read-PimUpdateState -ConnectionString $ConnectionString }
+        $v = Get-PimUpdateStateVerdict -Record $rec
+        $ringRec = [bool]$v.recorded; $ring = "$($v.ring)"
+    } catch { $ringErr = "$($_.Exception.Message)" }
+    $licStatus = ''; $licCustomer = ''; $licErr = ''
+    try {
+        $raw = if ($ReadLicence) { & $ReadLicence $ConnectionString } else { Get-PimSqlSettingRaw -ConnectionString $ConnectionString -Name 'License' }
+        if ("$raw".TrimStart().StartsWith('"')) { $raw = "$raw" | ConvertFrom-Json }   # stored as a JSON string of the document
+        if ("$raw".Trim()) { $lic = Get-PimLicense -LicenseText "$raw"; $licStatus = "$($lic.Status)"; $licCustomer = "$($lic.Customer)" } else { $licStatus = 'Missing' }
+    } catch { $licErr = "$($_.Exception.Message)" }
+    $elig = Get-PimDemoModeEligibility -Ring $ring -RingRecorded $ringRec -RingError $ringErr -LicenceStatus $licStatus -LicenceCustomer $licCustomer -LicenceError $licErr
+    $elig | Add-Member -NotePropertyName ringText -NotePropertyValue $ring -Force
+    $elig | Add-Member -NotePropertyName ringRecorded -NotePropertyValue $ringRec -Force
+    $elig | Add-Member -NotePropertyName licenceStatus -NotePropertyValue $licStatus -Force
+    return $elig
+}
+
 function Test-PimDemoDataActive {
     <# PURE. Is the demo dataset SHOWN? Only with the SQL flag; PIM_DEMO_MODE=off/false/0/no turns it off; PIM_DEMO_MODE=on alone does nothing. #>
     param([AllowNull()][object]$Flag, [AllowNull()][AllowEmptyString()][string]$EnvValue = "$env:PIM_DEMO_MODE")
