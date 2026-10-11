@@ -335,7 +335,9 @@
   #mapToolbar .map-hint, #dgvToolbar .map-hint { flex:1 1 100%; order:99; }
   #mapSearch { min-width:280px; padding:5px 9px; border:1px solid #d0d7de; border-radius:6px; font-size:12.5px; background:#ffffff; color:#1a1a1a; }
   .map-hint { color:#57606a; font-size:11px; }
-  #mapBoard, #dgvBoard { flex:1 1 auto; min-height:320px; display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; padding:12px 14px; position:relative; background:#f6f8fa; overflow:hidden; }
+  /* REQ 100.80 (owner 2026-10-11, screenshot: the detail bar covered the board and nothing scrolled -- unreadable): the
+     board keeps a REAL floor (58% of the screen) and never shrinks under the detail bar; the page scrolls instead. */
+  #mapBoard, #dgvBoard { flex:1 0 auto; min-height:max(420px, 58vh); display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; padding:12px 14px; position:relative; background:#f6f8fa; overflow:hidden; }
   /* 🔴 REGRESSION I SHIPPED IN v2.4.254, AND ITS CORRECTION.
      BUG-86 was "the board is impossible to read -- wires stroked over every label they
      cross". I fixed it by putting the wires BEHIND the columns (z-index:0 under a new
@@ -540,7 +542,7 @@
      you are on the board. It scrolls with the page only once it reaches its place in the flow. */
   #mapDetail, #dgvDetail { flex:0 0 auto; position:sticky; bottom:0; z-index:12; padding:9px 14px;
                border-top:2px solid #0969da; background:#f6f8fa; box-shadow:0 -4px 12px rgba(27,31,36,.10);
-               font-size:12px; color:#1a1a1a; min-height:38px; max-height:52vh; overflow:auto; }
+               font-size:12px; color:#1a1a1a; min-height:38px; max-height:34vh; overflow:auto; }
   #mapDetail.has-sel, #dgvDetail.has-sel { background:#ffffff; }
   /* While a Give/Remove session is open the bar is unmistakable: blue for giving, red for removing. */
   #mapDetail.picking { border-top-color:#1a7f37; background:#f2fbf5; }
@@ -863,14 +865,18 @@
   #revResults .rev-loading .rev-load-age { font-weight:400; color:#57606a; }
   #revResults .rev-loading.warn { color:#9a6700; }
   #revResults .rev-loading-sub { color:#57606a; font-size:11.5px; padding:0 2px 12px 22px; }
-  #revGraph { flex:1 1 auto; min-height:460px; display:flex; flex-direction:column; overflow:hidden; }
+  #revGraph { flex:1 1 auto; min-height:460px; display:flex; flex-direction:column; overflow:visible; }
+  /* REQ 100.80 (owner: "back to overview ... must be easier to see (it is the most important button)"): a primary button. */
+  #mapClear, #dgvClear { background:#0969da; color:#ffffff; border:1px solid #0969da; border-radius:6px; font-weight:700;
+                         font-size:13.5px; padding:6px 16px; box-shadow:0 1px 3px rgba(9,105,218,.35); cursor:pointer; }
+  #mapClear:hover, #dgvClear:hover { background:#0550ae; border-color:#0550ae; }
   #dgvWires path[data-click] { pointer-events:stroke; cursor:pointer; }
   #dgvBoard .map-item .dgv-badge { flex:0 0 auto; font-size:9.5px; font-weight:700; letter-spacing:.3px; color:#fff; border-radius:9px; padding:0 5px; }
   #dgvBoard .map-item .dgv-queued { flex:0 0 auto; font-size:9.5px; font-weight:600; letter-spacing:.3px; text-transform:uppercase; color:#82071e;
                                     background:#ffcecb; border:1px solid #cf222e; border-radius:9px; padding:0 5px; }
   #dgvDetail .dgv-head { font-weight:600; margin-bottom:4px; }
   #dgvDetail .dgv-sub { color:#57606a; font-weight:400; }
-  #dgvDetail .dgv-list { border:1px solid #d0d7de; border-radius:6px; background:#ffffff; max-height:30vh; overflow:auto; margin:4px 0 6px 0; }
+  #dgvDetail .dgv-list { border:1px solid #d0d7de; border-radius:6px; background:#ffffff; max-height:20vh; overflow:auto; margin:4px 0 6px 0; }
   #dgvDetail .dgv-sec { padding:4px 8px 2px 8px; font-size:10px; text-transform:uppercase; letter-spacing:.4px; color:#57606a; font-weight:600; background:#f6f8fa; }
   #dgvDetail .dgv-row { display:flex; gap:8px; align-items:baseline; padding:3px 8px; border-bottom:1px solid #f2f4f7; cursor:pointer; }
   #dgvDetail .dgv-row:hover { background:#fff5f5; }
@@ -1387,7 +1393,7 @@
         <input type="text" id="mapSearch" data-filter="1" placeholder="Find a person, group, role or scope..." autocomplete="off">
         <div id="mapSearchResults" style="display:none;"></div>
       </div>
-      <button id="mapClear" style="display:none">Back to overview</button>
+      <button id="mapClear" style="display:none" title="Show the whole map again">&larr; Back to overview</button>
       <!-- STATE toggle, not an action button: the label is constant and the
            pressed styling + box glyph say whether the mode is on. It used to
            flip its label between the two ACTIONS ("Show all (dimmed)" /
@@ -2045,7 +2051,7 @@
          path), fed from the LIVE active assignments. Revoke only: no Give / Add, no drag, no Ctrl+click linking. -->
     <div id="revGraph" style="display:none;">
       <div id="dgvToolbar">
-        <button id="dgvClear" style="display:none">Back to overview</button>
+        <button id="dgvClear" style="display:none" title="Show the whole board again">&larr; Back to overview</button>
         <button id="dgvFocusToggle" style="display:none" aria-pressed="true"></button>
         <span class="map-hint" id="dgvHint"><b>See:</b> click a person (left) or a role (right) &mdash; the board collapses to what connects them. People hold the second column <b>directly</b>; everything further right is <b>inherited</b> through group nesting. <b style="color:#cf222e;">Revoke:</b> select a box or a line, tick the live assignments to take away, then <b>Revoke</b> &mdash; queued under Pending changes, the same as the list. This view only takes access away; to give access use the <b>Access map</b>.</span>
       </div>
