@@ -19,7 +19,8 @@
       Source  Storage Blob Data Reader on the ONE container that holds pim-src-<version>.tar.gz + channel.json, so the
               worker updates itself with its identity -- no SAS, no PAT on the machine.
 
-    Run in Windows PowerShell 5.1 (the SQL login with an access token is reliable there). -WhatIf prints the plan.
+    Runs in Windows PowerShell 5.1 or PowerShell 7 (on a PS 7 transport failure the SQL step re-runs in a 5.1 child).
+    -WhatIf prints the plan.
 
     §100.63(b) ON-PREMISES (Azure Arc): -ArcMachineResourceId instead of -PrincipalId reads the Arc machine's
     system-assigned identity from ARM (Microsoft.HybridCompute/machines, identity.principalId) and grants it the SAME
@@ -113,26 +114,21 @@ if ($SourceContainerId) {
 }
 
 # ---- SQL contained user
+# §100.63: through the hybrid worker's ONE SQL helper (_PimHybridWorkerSql.ps1): the driver setup already uses (PIM-SqlStore
+# Resolve-PimSqlClientType: Microsoft.Data.SqlClient when present, else System.Data.SqlClient -- in-box on 5.1, shipped with
+# PowerShell 7), the token on the connection, and -- PowerShell 7 only, on a transport failure -- the same statements once
+# more in a Windows PowerShell 5.1 child (token on stdin). Works on PS 5.1 and 7; no module. The T-SQL converges the user
+# (CREATE USER ... WITH SID = <appId>, TYPE = E; a same-name user with another SID is replaced) and its two roles.
 if ($SqlServer) {
-    if ($SqlUserName -notmatch '^[A-Za-z0-9_-]{1,64}$') { throw "invalid SQL user name '$SqlUserName'" }
-    $sid = '0x' + ((([guid]$sp.appId).ToByteArray() | ForEach-Object { $_.ToString('X2') }) -join '')
-    $tok = "$(Get-PimRestToken -Resource 'https://database.windows.net' -TenantId $TenantId)"
-    $cn = New-Object System.Data.SqlClient.SqlConnection("Server=tcp:$SqlServer,1433;Database=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=60")
-    $cn.AccessToken = $tok
-    $cn.Open()
-    try {
-        $q = { param($t) $c = $cn.CreateCommand(); $c.CommandText = $t; $c.ExecuteScalar() }
-        Info "SQL connected as $(& $q 'SELECT USER_NAME()')"
-        $exists = & $q "SELECT COUNT(*) FROM sys.database_principals WHERE name = N'$SqlUserName'"
-        if (-not $exists -and $PSCmdlet.ShouldProcess("$SqlServer/$SqlDatabase", "CREATE USER [$SqlUserName] WITH SID (type E)")) {
-            [void](& $q "CREATE USER [$SqlUserName] WITH SID = $sid, TYPE = E")
-        }
-        foreach ($r in 'db_datareader', 'db_datawriter') {
-            $in = & $q "SELECT COUNT(*) FROM sys.database_role_members m JOIN sys.database_principals r ON r.principal_id = m.role_principal_id JOIN sys.database_principals u ON u.principal_id = m.member_principal_id WHERE r.name = N'$r' AND u.name = N'$SqlUserName'"
-            if (-not $in -and $PSCmdlet.ShouldProcess($SqlUserName, "ALTER ROLE $r ADD MEMBER")) { [void](& $q "ALTER ROLE [$r] ADD MEMBER [$SqlUserName]") }
-        }
-        Info "SQL user ${SqlUserName}: db_datareader + db_datawriter (never db_ddladmin)"
-    } finally { $cn.Close() }
+    . (Join-Path $PSScriptRoot '_PimHybridWorkerSql.ps1')
+    Assert-PimHwSqlUserName -UserName $SqlUserName
+    $userSql = Get-PimHwSqlUserSql -UserName $SqlUserName -AppId $sp.appId -Roles @('db_datareader', 'db_datawriter')
+    if ($PSCmdlet.ShouldProcess("$SqlServer/$SqlDatabase", "CREATE USER [$SqlUserName] WITH SID (type E) when missing; db_datareader + db_datawriter")) {
+        $tok = "$(Get-PimRestToken -Resource 'https://database.windows.net' -TenantId $TenantId)"
+        $r = @(Invoke-PimHybridWorkerSql -Server $SqlServer -Database $SqlDatabase -AccessToken $tok -Batches @($userSql))
+        $tok = $null
+        Info "SQL connected as $($r[-1]); user ${SqlUserName}: db_datareader + db_datawriter (never db_ddladmin)"
+    }
 }
 Step 'done'
 

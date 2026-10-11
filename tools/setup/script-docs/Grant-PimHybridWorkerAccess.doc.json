@@ -3,7 +3,7 @@
   "product": "pim",
   "title": "PIM for Active Directory: grant the hybrid worker's identity its cloud access",
   "purpose": "Grants the hybrid worker's managed identity (Azure VM or Azure Arc server) exactly what it needs outside Active Directory: a database user in the PIM store, read-only Microsoft Graph roles and read access to the PIM source store.",
-  "whenToRun": "Once per worker, after the infrastructure step and before Install-PimHybridWorker.ps1 -Phase Configure (the install fetches the code with the identity). -PrincipalId for the Azure VM's identity, -ArcMachineResourceId for an Azure Arc server. Run it in Windows PowerShell 5.1.",
+  "whenToRun": "Once per worker, after the infrastructure step and before Install-PimHybridWorker.ps1 -Phase Configure (the install fetches the code with the identity). -PrincipalId for the Azure VM's identity, -ArcMachineResourceId for an Azure Arc server. Runs in Windows PowerShell 5.1 or PowerShell 7 (on a PowerShell 7 transport failure the SQL step re-runs once in a Windows PowerShell 5.1 child; the token travels on its standard input).",
   "standalone": false,
   "sourcePath": "tools/pim-hybrid-worker/Grant-PimHybridWorkerAccess.ps1",
   "runAs": [

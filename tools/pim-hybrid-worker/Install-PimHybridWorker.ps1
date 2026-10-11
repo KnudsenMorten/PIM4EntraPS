@@ -30,6 +30,10 @@
     -Phase Update     Read channel.json, fetch the version the ring approves when it differs, switch C:\PIM\app\current,
                       apply the NEW version's -Phase Layout. Never moves without a ring answer; never moves backwards.
     -Phase Layout     The run wrapper (C:\PIM\bin\Run-PimHybridWorker.ps1) + the scheduled tasks of THIS version.
+    -Phase Remove     (§100.63, Remove-PimHybridWorker.ps1 -Target Arc runs it through run-command) Unregister the six
+                      tasks, take the gMSA(s) out of 'Hybrid agent extension applications' and 'log on as a batch job',
+                      delete <Root>\app + <Root>\bin (the logs stay). The machine, its Arc agent, PowerShell 7 and the
+                      domain membership are NOT touched.
 
     The scheduled tasks (each runs Start-PimScheduler -UseManagedIdentity as the account named):
        'PIM Hybrid Worker'           every 5 min AS THE gMSA, instance hybrid: hybrid-ad-apply + hybrid-ad-groups (the
@@ -60,7 +64,7 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [Parameter(Mandatory)][ValidateSet('Join', 'Configure', 'Update', 'Layout')][string]$Phase,
+    [Parameter(Mandatory)][ValidateSet('Join', 'Configure', 'Update', 'Layout', 'Remove')][string]$Phase,
     [string]$OdjBlob,
     [string]$GmsaName,
     # 2.4.467 tier split (operator 2026-09-30): server onboarding runs as its OWN gMSA (DOMAIN\gMSA-PIM-L2-T1), in its own
@@ -95,6 +99,8 @@ $cfgPath = Join-Path $Root 'bin\worker.json'
 $selfText = $MyInvocation.MyCommand.ScriptBlock.ToString()
 # The local group the Arc agent lets read its token key files (besides local Administrators). Created by the agent install.
 $ArcKeyReaderGroup = 'Hybrid agent extension applications'
+# Every scheduled task this installer registers (-Phase Remove unregisters exactly these, nothing else)
+$script:PimWorkerTaskNames = @('PIM Hybrid Worker', 'PIM Hybrid AD Sync', 'PIM Hybrid AD Sync Servers', 'PIM Hybrid AD Changes', 'PIM Hybrid Servers', 'PIM Hybrid Worker Update')
 
 # ------------------------------------------------------------------ domain-join state
 function Get-PimJoinState {
@@ -132,6 +138,7 @@ if ($WhatIfPreference) {
         }
         'Update'    { Step 'would read channel.json for the ring and move C:\PIM\app\current to the approved version (never backwards), then apply its layout' }
         'Layout'    { Step 'would write the run wrapper and re-register the scheduled tasks of this version' }
+        'Remove'    { Step "would unregister the worker's scheduled tasks ($($script:PimWorkerTaskNames -join ', ')), take the gMSA(s) out of '$ArcKeyReaderGroup' and 'log on as a batch job', delete $Root\app + $Root\bin (logs kept); the machine itself stays" }
     }
     Step 'preview only (-WhatIf) -- nothing was changed'
     return
@@ -157,6 +164,47 @@ if ($Phase -eq 'Join') {
     } finally { if (Test-Path $f) { Remove-Item -LiteralPath $f -Force } }
     Step 'offline domain join staged -- rebooting to complete it'
     if (-not $NoReboot) { & shutdown.exe /r /t 15 /c 'PIM hybrid worker: completing the domain join' | Out-Null }
+    return
+}
+
+# ------------------------------------------------------------------ Remove (§100.63: Remove-PimHybridWorker.ps1 -Target Arc)
+if ($Phase -eq 'Remove') {
+    # Only what this installer put on the machine. The machine, its Arc agent, PowerShell 7, the domain membership and the
+    # logs stay; the gMSAs themselves are deleted in AD by the AD administrator (Remove-PimHybridWorker.ps1 prints how).
+    $rcfg = if (Test-Path -LiteralPath $cfgPath) { Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json } else { $null }
+    foreach ($n in $script:PimWorkerTaskNames) {
+        $t = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue
+        if (-not $t) { continue }
+        Stop-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $n -Confirm:$false
+        Step "task '$n' removed"
+    }
+    $gm = @(@($rcfg.gmsa, $rcfg.serverGmsa) | Where-Object { "$_".Trim() })
+    if (-not $gm.Count) { Step "no $cfgPath -- the gMSA clean-up is skipped (tasks removed)" }
+    $sids = @()
+    foreach ($g in $gm) { try { $sids += (New-Object System.Security.Principal.NTAccount("$g`$")).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { Step "  $g`$ does not resolve any more (deleted in AD?) -- skipped" } }
+    if ($gm.Count -and "$($rcfg.hostType)" -eq 'Arc') {
+        foreach ($g in $gm) {
+            $o = & net.exe localgroup "$ArcKeyReaderGroup" "$g`$" /delete 2>&1
+            if ($LASTEXITCODE -eq 0) { Step "  $g`$ removed from '$ArcKeyReaderGroup'" } else { Step "  $g`$ not in '$ArcKeyReaderGroup' ($(($o -join ' ').Trim()))" }
+        }
+    }
+    if ($sids.Count) {
+        $inf = Join-Path $env:TEMP 'pim-secpol.inf'; $db = Join-Path $env:TEMP 'pim-secpol.sdb'
+        & secedit.exe /export /cfg $inf /areas USER_RIGHTS | Out-Null
+        $lines = @(Get-Content $inf)
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -notmatch '^SeBatchLogonRight\s*=\s*(.*)$') { continue }
+            $keep = @($Matches[1] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($sids -notcontains $_.TrimStart('*')) })
+            $lines[$i] = 'SeBatchLogonRight = ' + ($keep -join ',')
+        }
+        Set-Content -LiteralPath $inf -Value $lines -Encoding Unicode
+        & secedit.exe /configure /db $db /cfg $inf /areas USER_RIGHTS | Out-Null
+        Remove-Item $inf, $db -Force -ErrorAction SilentlyContinue
+        Step "'log on as a batch job' taken back from the worker gMSA(s)"
+    }
+    foreach ($d in 'app', 'bin') { $p = Join-Path $Root $d; if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force; Step "$p deleted" } }
+    Step "removed: the worker's tasks and rights on this machine ($Root\logs kept; the machine itself is untouched)"
     return
 }
 

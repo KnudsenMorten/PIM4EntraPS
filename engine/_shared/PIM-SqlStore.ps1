@@ -391,8 +391,22 @@ function Assert-PimSqlIdentifier {
     return $Name
 }
 
+function Assert-PimSqlDemoScope {
+    <#
+      100.68 (b): the DEMO dataset lives in its own schema (pimdemo) and NOTHING but the demo module may touch it -- the
+      engine reads pim.Rows only, so demo data can never reach a tenant. Any statement naming pimdemo outside the demo
+      module's scope ($global:PIM_DemoSqlScope, set only by Invoke-PimDemoSql in engine/_shared/PIM-DemoData.ps1, which no
+      engine entry loads) is REFUSED before it is sent.
+    #>
+    param([AllowEmptyString()][string]$Sql)
+    if ("$Sql" -match '(?i)\[?\bpimdemo\b\]?\s*\.' -and -not $global:PIM_DemoSqlScope) {
+        throw 'REFUSED: this statement names the demo schema (pimdemo) outside the demo-data module -- demo data is never read or applied by the engine.'
+    }
+}
+
 function Invoke-PimSqlQuery {
     param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Sql, [hashtable]$Parameters = @{})
+    Assert-PimSqlDemoScope -Sql $Sql
     $c = New-PimSqlConnection -ConnectionString $ConnectionString
     try {
         $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $Sql
@@ -406,6 +420,7 @@ function Invoke-PimSqlQuery {
 function Invoke-PimSqlNonQuery {
     # -CommandTimeoutSec: 0 = the provider default (30 s). Large single-row writes (the tenant cache) pass more.
     param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Sql, [hashtable]$Parameters = @{}, [int]$CommandTimeoutSec = 0)
+    Assert-PimSqlDemoScope -Sql $Sql
     $c = New-PimSqlConnection -ConnectionString $ConnectionString
     try {
         $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $Sql
@@ -417,6 +432,7 @@ function Invoke-PimSqlNonQuery {
 
 function Invoke-PimSqlScalar {
     param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Sql, [hashtable]$Parameters = @{})
+    Assert-PimSqlDemoScope -Sql $Sql
     $c = New-PimSqlConnection -ConnectionString $ConnectionString
     try {
         $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $Sql

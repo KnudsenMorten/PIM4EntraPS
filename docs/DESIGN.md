@@ -1557,6 +1557,39 @@ requirement for that one step; the MSI's Microsoft signature is checked before i
 `Set-PimHybridWorkerEgress.ps1` migrates such a worker: it detaches the IP from the NIC, makes the same address the NAT
 gateway's outbound address, so an allow-list naming it keeps working, and verifies that no public IP is left.
 
+**A private-only PIM database (§100.63).** The SQL VNet rule only admits the worker on the server's public endpoint. When
+the database is reachable only through its private endpoint, the worker must resolve the server to its private address —
+and the worker VNet's DNS servers are the domain controllers. `New-PimHybridWorkerInfra.ps1 -PrivateSqlDnsZoneId` links
+the EXISTING standard zone `privatelink.database.windows.net` to the worker VNet and to any `-PrivateDnsLinkVnetId` (no
+other zone name is accepted — never a zone named after the customer's domain; `-CreatePrivateDnsZone` creates the
+standard zone only when it is missing and asked for, and attaches it to the SQL private endpoint only when that endpoint
+has no DNS zone group yet). The conditional forwarder the DNS administrator adds on the domain controllers is PRINTED,
+never written: for domain controllers that are Azure VMs it points at Azure's platform DNS resolver, and the zone must
+also be linked to the domain controllers' VNet (Azure answers from the zones linked to the VNet of the DNS server that
+asks); for domain controllers on-premises it points at an Azure DNS Private Resolver inbound endpoint in a VNet linked
+to the zone. The Arc variant prints the same for the on-premises DNS servers.
+
+**Domain controllers behind a hub gateway (§100.63).** The peerings are created with VNet access only. With
+`-UseRemoteGateways -GatewayVnetId <hub>` (and `-AllowForwardedTraffic`), `Set-PimHybridWorkerPeering.ps1` — the one
+implementation, also called by the infrastructure build — first checks that the hub has a VPN / ExpressRoute gateway,
+then needs gateway transit on the hub side: PIM sets it only on a hub-side peering PIM created itself; otherwise it
+prints what the hub owner sets and leaves "use remote gateways" off (Azure refuses it without the hub side).
+
+**Removal (§100.63).** Every Azure resource the worker scripts create carries the tag `pim-hybrid-worker = <worker>`.
+`Remove-PimHybridWorker.ps1 -Target Azure|Arc` (plan first, `-Apply`) deletes only what they made: the identity's Graph
+read roles, its blob-reader assignment and its SQL contained user (dropped only when it carries the identity's SID), the
+worker's SQL VNet / firewall rules, the private DNS zone's link to the worker VNet, the PIM-created peerings on both sides,
+then the VM with its NIC and disk, the VNet, the NAT gateway and its IP, the NSG, and the resource group when PIM created
+it and it is empty — each delete waited on. A worker built before the tags is handled with `-IncludeUntagged` (exact
+script names only). On an Arc server it removes the grants and, through run-command, the worker's tasks and rights
+(`Install-PimHybridWorker.ps1 -Phase Remove`); the Arc machine itself is never touched. Active Directory is never changed
+by it: it prints the AD administrator's clean-up (rights taken back, the servers GPO, the gMSAs and their groups, the
+worker VM's computer account; the KDS root key stays).
+
+**The SQL step on Windows PowerShell 5.1 and PowerShell 7.** The grant and removal scripts run T-SQL through one helper
+with the same driver resolution setup uses, the access token on the connection; on PowerShell 7 a transport failure is
+retried once in a Windows PowerShell 5.1 child process, the token passed on its standard input.
+
 **Identities — one per privilege tier.** Each identity is three objects: the gMSA (`gMSA-<code>-L<level>-T<tier>`), its
 `-PermissionGroup` (the gMSA is its only member; **every right is granted to this group**, never to the account) and its
 `-PrincipalsAllowedAccess` group (the computers allowed to fetch the password).
@@ -5005,9 +5038,10 @@ only removes public surface.
 
 Steps: (1) the customer creates the PE in *their* VNet with
 `PrivateLinkServiceId=<MSP storage resourceId>`, `GroupId=blob` — cross-tenant →
-status **Pending**; (2) the **MSP approves** (`Approve-AzPrivateEndpointConnection`)
-and grants the customer SPN `Storage Blob Data Reader` — the approval *is* the
-trust handshake; (3) the customer's `privatelink.blob.core.windows.net` resolves to
+status **Pending**; (2) the **MSP approves** the pending connection (as built: an ARM
+REST call, no data role — the bundle is read anonymously and trusted by its signature;
+see the 2026-10-10 implementation note below) — the approval *is* the network
+handshake; (3) the customer's `privatelink.blob.core.windows.net` resolves to
 the PE in their own VNet and traffic rides the backbone. Revoke: customer deletes
 the PE, or MSP rejects / pulls RBAC. Content is signed regardless.
 
@@ -5177,6 +5211,43 @@ verifier with the trusted key identifiers read from the same configuration value
 Key Vault key verifies only when that key is trusted there, a certificate-signed bundle verifies against the embedded
 certificate as before, and an expired bundle is not verified. The verdict carries the signer, the key identifier and the
 reason for a refusal, so "not verified" distinguishes an untrusted key from a tampered or expired bundle.
+
+#### Implementation note (2026-10-10) — transport 1 without peering: the cross-tenant private endpoint, set up by the build (built, not yet proven live)
+
+The one-shot build can now move a pair from transport 2 to **transport 1 by approval** with no VNet peering and nothing
+copied between administrators but the store's resource id. Both sides select it in their configuration file
+(`crossTenantPrivateEndpoint`); the default stays public-but-signed and the peering design stays as it was. Every call is
+Azure Resource Manager REST through the product's one token client (the signed-in administrator, a certificate identity or
+the Invardia Support app's session) — no Azure CLI, no PowerShell module, and no shared-access signature, account key or
+secret anywhere: trust remains the bundle's signature and the pinned signing key.
+
+- **Managed tenant (`pullendpoint`).** The build creates one private endpoint in the tenant's **own** VNet (an undelegated
+  private-endpoint subnet, found or created) with a **manual** connection request to the managing tenant's store, blob
+  subresource, and a request message naming the tenant. While the request is pending the step **stops** (exit code 10)
+  and prints the exact command the managing tenant's administrator runs, then the command that resumes this build. Once
+  approved, it publishes the store name in the tenant's own `privatelink.blob` zone (linked to the environment's VNet with
+  NxDomainRedirect) as an address record for the endpoint's address, read back. No storage service endpoint is added.
+- **Managing tenant (`privateendpoint`, `peapprove`).** The store keeps its public-but-signed posture so readers that have
+  not moved keep working, and gets its **own** private endpoint for the publish job (public access left as it is). The
+  approval step approves a pending connection only when the endpoint lives in the **subscription** the managing tenant
+  listed for that managed tenant (the subscription is asserted by Azure; the request message must not name another
+  tenant). There is no "approve all": an unknown request stays pending and is reported; a listed tenant that has not
+  requested yet is a stop point with that tenant's command.
+- **Proof before removal (`pullproof`).** The managed tenant's build reads back the approved connection, the private
+  address, the zone record and its link to the pull job's VNet, then starts one pull and accepts only a run that loaded the
+  signed bundle (or found it unchanged since the last verified one). A run skipped by the cadence gate, or whose log has
+  not arrived yet, is a stop point, never a pass.
+- **Closing the public path (`peclose`).** After a reader's pull is proven, the managing tenant marks it proven in its
+  configuration; the step then removes that reader's public network rule (only when its connection reads approved), and
+  disables public network access only when **every** reader is private **and** the publish job has its own approved
+  endpoint. A reader still on the public path keeps its rule and is reported. Rollback puts the rules back and enables
+  public access again.
+- **Revoke** from either side: the managed tenant deletes its endpoint and record, or the managing tenant rejects its
+  connection.
+
+The approvals and the proof run at the **end** of each side's build, after the build machine's database window is closed,
+so a stop point never leaves that window open or the pull job undeployed. An enrolled (self-service) managed tenant cannot
+use this mode yet: the managing tenant approves only tenants its own build lists.
 
 ### 13.8 Flow C — status rollup (local → MSP)
 
@@ -8712,6 +8783,57 @@ rows reach it) and `managed_tenant_reach` (what one managed tenant receives, gro
 Both are shaped from the same answers as the Managed tenants and Replication overview pages, never write, and never
 reach into a managed tenant. A managed tenant's own drift and conformance are not reported back to the managing tenant,
 and both tools say so rather than leave it unsaid.
+
+### 18.12 Export every view, hidden names on the Dashboard, impact counters, demo dataset
+
+**Export (PDF / Excel).** The header carries one Export menu (PDF, Excel (.xlsx)) that acts on the page in view. Each page
+registers what it SHOWS with `pimExportSet(tab, title, () => sections)` -- built from the page's own data model (the
+arrays it renders, after its filters, sort and search), never read back from the table cells; a page wired with the
+shared export bar (`wireExportBar`) registers its rows automatically. A page with no table leaves the menu disabled.
+The page POSTs `{ view, title, format, sections: [{ heading, columns, rows }] }` to `/api/export`. The server re-checks
+the caller's role against the VIEW (a fixed list: most pages Reader; the audit trail Admin plus the Pro evidence licence,
+like the audit CSV export; backups and the environment report Admin; the role mapping SuperAdmin; an unknown view is
+refused), caps the export at 50,000 rows (the file says when it was cut), names the environment by the hide-names
+setting below, records `export.<format>` in the audit trail (view, format, row count, whether it was cut -- never the
+content) and returns the file. Excel is written with .NET packaging only: a zip with the content types, the workbook,
+styles and one worksheet per section (inline strings, a bold header row that is frozen and filtered, numbers as numbers,
+XML-escaped text, worksheet names made legal and unique). PDF uses the PDF library and font bundled in the image for the
+as-built document, through the as-built loader (one font resolver per process): A4, landscape when a table is wide, the
+header row repeated on every page, title, environment, time and version on the page and in the footer. An image without
+the library answers 409 with the reason, and the page disables the PDF item with that reason as its tooltip.
+
+**Hidden company and environment name.** Setting `HideCompanyAndEnvironmentName`, ON by default (only an explicit off
+shows the names; a missing or unreadable value hides them). While on, the Dashboard and the Counters overview show
+"PIM Manager" in place of the tenant name and the environment name, hide the tenant id and the instance switcher, and
+the browser tab reads "PIM Manager"; other pages are unchanged. Every export names the environment as "PIM Manager"
+while it is on, else "<environment name> (<tenant name>)". SuperAdmin changes it in Settings > Naming & accounts or
+with the toggle on the Dashboard / Counters overview (one environment-wide setting, audited); other roles see the
+toggle read-only.
+
+**Impact counters.** `GET /api/impact` (every signed-in role; counts only) computes, from data PIM already stores:
+activations handled (a ledger `pim.ImpactActivations` the active-assignments snapshot job fills -- every time-bound
+active assignment it sees, recorded once, insert-only); eligible instead of standing (managed eligible keys now);
+standing-access hours removed (hours since PIM confirmed each managed eligible assignment minus the recorded activation
+windows); changes applied by the engine, approvals and review decisions (the audit trail -- with audit retention set,
+older events are no longer counted); guard holds caught (the sum of every guard's trip count); tenants managed (the
+enabled registry on a managing tenant, else 1). Each query runs on its own: an unreadable source is "n/a" with the
+reason, never 0, and hides no other counter. The Dashboard shows them as tiles (green above 0) with More info (how it
+is counted) and a link to the Counters overview page, which shows the same counters with the explanation in full. Both
+pages and their exports carry the counters.
+
+**Demo dataset (internal demo environment only).** A seeded synthetic dataset -- thousands of generic users
+(first name + a fictional company surname, `contoso.example`), groups and roles, months of activations, changes,
+approvals, reviews and guard holds -- lives in its own schema `pimdemo`, never in a table the engine reads.
+`tools/setup/Set-PimDemoMode.ps1 -Enable` (plan by default, `-Apply`) refuses unless the environment is proven to be the
+internal demo one: a recorded update ring 0 or 1 AND a valid licence naming an internal / demo licensee; ring 2 / 3, no
+or an unreadable ring, no / an invalid / a customer's / an unreadable licence are all refused before anything is
+written. It seeds the schema and sets the flag `pimdemo.Meta DemoEnvironment`; `-Disable` drops every demo table and
+the schema. The Manager shows the dataset only with the flag, unless `PIM_DEMO_MODE=off` (the variable alone never
+turns it on): the Dashboard's fast tiles are all green from the demo principals, the impact counters come from the demo
+tables, a discreet "Demo data" marker sits in the page footer and on the counters, and every export says "Demo data".
+Every demo statement runs through the demo module's own scope; the SQL store refuses any statement naming `pimdemo`
+outside it, and no engine entry or scheduler loads the demo module -- the engine cannot read, let alone apply, demo data.
+(Not the demo guest role of Settings > Demo mode, which decides who may save; the two are independent.)
 
 ---
 

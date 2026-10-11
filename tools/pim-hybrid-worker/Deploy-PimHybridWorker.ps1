@@ -29,6 +29,11 @@
     waiting for a script the server administrator runs locally (run-command was not available), 12 waiting for the KDS root
     key, 1 failed.
 
+    Network options (§100.63), passed to the infra step only when given: -UseRemoteGateways -GatewayVnetId <hub>
+    -AllowForwardedTraffic (DCs behind a hub VPN / ExpressRoute gateway), -PrivateSqlDnsZoneId / -PrivateDnsLinkVnetId /
+    -CreatePrivateDnsZone -PrivateDnsZoneResourceGroup / -PrivateSql / -DnsForwarderIp (a private-only PIM database: the
+    standard privatelink zone is linked, the DNS forwarder for your DCs is printed). Remove-PimHybridWorker.ps1 undoes it all.
+
     One REST session, pinned to -TenantId (the Invardia Support app's session, or the person signed in in the browser),
     shared by every step. No az, no PowerShell module.
 
@@ -61,6 +66,17 @@ param(
     [string[]]$PeerVnetId = @(),
     [string[]]$DnsServers = @(),
     [ValidateSet('NatGateway', 'None')][string]$Egress = 'NatGateway',
+    # §100.63 DCs behind a hub VPN / ExpressRoute gateway (Set-PimHybridWorkerPeering.ps1 sets the flags)
+    [switch]$UseRemoteGateways,
+    [string]$GatewayVnetId = '',
+    [switch]$AllowForwardedTraffic,
+    # §100.63 a private-only PIM SQL: link the standard privatelink.database.windows.net zone + print the DNS forwarder
+    [string]$PrivateSqlDnsZoneId = '',
+    [string[]]$PrivateDnsLinkVnetId = @(),
+    [switch]$CreatePrivateDnsZone,
+    [string]$PrivateDnsZoneResourceGroup = '',
+    [switch]$PrivateSql,
+    [string]$DnsForwarderIp = '',
     # Arc
     [string]$ArcMachineResourceId = '',
     [string[]]$SqlAllowedPublicIp = @(),
@@ -116,7 +132,9 @@ $stateDir = Join-Path $(if ("$env:LOCALAPPDATA".Trim()) { $env:LOCALAPPDATA } el
 $remember = @('Target', 'SubscriptionId', 'TenantId', 'ResourceGroup', 'Location', 'VmName', 'VmSize', 'VnetName', 'AddressPrefix', 'SubnetPrefix',
               'PeerVnetId', 'DnsServers', 'Egress', 'ArcMachineResourceId', 'SqlAllowedPublicIp', 'SqlServerId', 'SqlDatabase', 'SqlUserName',
               'SourceContainerId', 'Ring', 'Version', 'GrantMailSend', 'PlanOnly', 'AdDomain', 'WorkerComputerName', 'ComputerOu', 'GmsaName',
-              'GmsaOu', 'GroupsOu', 'AdminAccountsOu', 'ServerGmsaName', 'ServerOu', 'GrantProtectedGroupMembership', 'CreateKdsRootKey', 'AdServer')
+              'GmsaOu', 'GroupsOu', 'AdminAccountsOu', 'ServerGmsaName', 'ServerOu', 'GrantProtectedGroupMembership', 'CreateKdsRootKey', 'AdServer',
+              'UseRemoteGateways', 'GatewayVnetId', 'AllowForwardedTraffic', 'PrivateSqlDnsZoneId', 'PrivateDnsLinkVnetId', 'CreatePrivateDnsZone',
+              'PrivateDnsZoneResourceGroup', 'PrivateSql', 'DnsForwarderIp')
 $state = $null
 if ($Resume) {
     $sp = "$StatePath".Trim()
@@ -199,8 +217,29 @@ function Get-InstallArgs([string]$Phase) {
     }
     return $a
 }
+function Get-InfraOptions {
+    # §100.63 the optional network settings, passed ONLY when given (so the infra step's plain call stays as it was)
+    $o = @{}
+    if ($Target -eq 'Azure') {
+        if ($UseRemoteGateways) { $o.UseRemoteGateways = $true }
+        if ($AllowForwardedTraffic) { $o.AllowForwardedTraffic = $true }
+        if ("$GatewayVnetId".Trim()) { $o.GatewayVnetId = "$GatewayVnetId".Trim() }
+    }
+    if ("$PrivateSqlDnsZoneId".Trim()) { $o.PrivateSqlDnsZoneId = "$PrivateSqlDnsZoneId".Trim() }
+    if (@($PrivateDnsLinkVnetId | Where-Object { "$_".Trim() }).Count) { $o.PrivateDnsLinkVnetId = @($PrivateDnsLinkVnetId | Where-Object { "$_".Trim() }) }
+    if ($CreatePrivateDnsZone) { $o.CreatePrivateDnsZone = $true }
+    if ("$PrivateDnsZoneResourceGroup".Trim()) { $o.PrivateDnsZoneResourceGroup = "$PrivateDnsZoneResourceGroup".Trim() }
+    if ($PrivateSql) { $o.PrivateSql = $true }
+    if ("$DnsForwarderIp".Trim()) { $o.DnsForwarderIp = "$DnsForwarderIp".Trim() }
+    return $o
+}
+if ($Target -eq 'Arc' -and ($UseRemoteGateways -or $AllowForwardedTraffic -or "$GatewayVnetId".Trim())) { throw '-UseRemoteGateways / -AllowForwardedTraffic / -GatewayVnetId are for -Target Azure (an Arc server''s network is yours)' }
+$netNote = @(
+    $(if ($UseRemoteGateways) { "hub gateway via $(("$GatewayVnetId" -split '/')[-1])" }),
+    $(if ($AllowForwardedTraffic) { 'forwarded traffic accepted' }),
+    $(if ("$PrivateSqlDnsZoneId".Trim() -or "$PrivateDnsZoneResourceGroup".Trim()) { 'private SQL DNS zone linked' } elseif ($PrivateSql) { 'private SQL (DNS forwarder printed)' })) | Where-Object { $_ }
 $describe = @{
-    infra     = $(if ($Target -eq 'Azure') { "New-PimHybridWorkerInfra.ps1: resource group $ResourceGroup, VNet $VnetName ($AddressPrefix), deny-all NSG, egress $Egress, VM $VmName ($VmSize), peered to $(@($PeerVnetId).Count) network(s)" } else { "New-PimHybridWorkerInfra.ps1 -ArcMachineResourceId: check the Arc machine $machineName (connected, Windows, system-assigned identity); build nothing in Azure" })
+    infra     = $(if ($Target -eq 'Azure') { "New-PimHybridWorkerInfra.ps1: resource group $ResourceGroup, VNet $VnetName ($AddressPrefix), deny-all NSG, egress $Egress, VM $VmName ($VmSize), peered to $(@($PeerVnetId).Count) network(s)$(if (@($netNote).Count) { "; " + (@($netNote) -join ", ") })" } else { "New-PimHybridWorkerInfra.ps1 -ArcMachineResourceId: check the Arc machine $machineName (connected, Windows, system-assigned identity); build nothing in Azure" })
     peering   = "Set-PimHybridWorkerPeering.ps1 -State Show: the peerings of $VnetName are connected"
     egress    = "Set-PimHybridWorkerEgress.ps1: no public IP on $VmName, outbound through the NAT gateway"
     ad        = "the AD administrator runs on a domain controller: $(Get-AdCommand)"
@@ -239,11 +278,12 @@ foreach ($s in $steps) {
     Step "$s -- $($describe[$s])"
     switch ($s) {
         'infra' {
+            $opt = Get-InfraOptions
             $r = if ($Target -eq 'Azure') {
                 & (Child 'New-PimHybridWorkerInfra.ps1') @common -ResourceGroup $ResourceGroup -Location $Location -VmName $VmName -VmSize $VmSize -VnetName $VnetName `
-                    -AddressPrefix $AddressPrefix -SubnetPrefix $SubnetPrefix -PeerVnetId $PeerVnetId -DnsServers $DnsServers -SqlServerId $SqlServerId -Egress $Egress
+                    -AddressPrefix $AddressPrefix -SubnetPrefix $SubnetPrefix -PeerVnetId $PeerVnetId -DnsServers $DnsServers -SqlServerId $SqlServerId -Egress $Egress @opt
             } else {
-                & (Child 'New-PimHybridWorkerInfra.ps1') @common -ArcMachineResourceId $ArcMachineResourceId -SqlServerId $SqlServerId -SqlAllowedPublicIp $SqlAllowedPublicIp
+                & (Child 'New-PimHybridWorkerInfra.ps1') @common -ArcMachineResourceId $ArcMachineResourceId -SqlServerId $SqlServerId -SqlAllowedPublicIp $SqlAllowedPublicIp @opt
             }
             $o = @($r | Where-Object { $_ -and $_.PSObject.Properties['principalId'] })[-1]
             if (-not $o -or -not "$($o.principalId)".Trim()) { throw 'the infra step returned no managed identity' }

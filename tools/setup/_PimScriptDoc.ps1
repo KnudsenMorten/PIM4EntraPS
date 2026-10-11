@@ -70,6 +70,7 @@ $script:PimScriptDocScripts = @(
     @{ Path = 'pim-hybrid-worker/Set-PimHybridWorkerEgress.ps1';   Standalone = $false }
     @{ Path = 'pim-hybrid-worker/Grant-PimHybridWorkerAccess.ps1'; Standalone = $false }
     @{ Path = 'pim-hybrid-worker/Invoke-PimHybridWorkerRunCommand.ps1'; Standalone = $false }
+    @{ Path = 'pim-hybrid-worker/Remove-PimHybridWorker.ps1';      Standalone = $false }
     # self-contained on the machine they run on (a domain controller; the worker itself): published as one file each
     @{ Path = 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1'; Standalone = $true }
     @{ Path = 'pim-hybrid-worker/Install-PimHybridWorker.ps1';     Standalone = $true }

@@ -58,6 +58,13 @@
      reads as a run-on string. margin-left:auto absorbs the gap left of it. */
   #brandRight { margin-left:auto; display:flex; align-items:center; gap:18px; }
   .brand-group { display:flex; flex-direction:column; gap:1px; line-height:1.2; }
+  /* 100.67: the header Export menu, and the tenant id / instance hidden while names are hidden on the Dashboard. */
+  .pim-name-masked { display:none !important; }
+  #pimExportMenu { position:absolute; top:100%; right:0; z-index:9600; margin-top:4px; background:#fff; border:1px solid #d0d7de; border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,.12); min-width:160px; padding:4px; }
+  #pimExportMenu button { display:block; width:100%; text-align:left; font-size:12px; padding:5px 8px; border:0; background:none; cursor:pointer; }
+  #pimExportMenu button:disabled { color:#8c959f; cursor:not-allowed; }
+  #pimExportMenu button:not(:disabled):hover { background:#f6f8fa; }
+  .pim-demo-mark { font-size:11px; color:#6e7781; }
   /* Small uppercase caption ("Tenant" / "Instance") sitting above its value. */
   .brand-cap { font-size:9.5px; text-transform:uppercase; letter-spacing:.6px; opacity:0.8; color:#ffffff; }
   .brand-val { font-size:12px; color:#ffffff; white-space:nowrap; }
@@ -1236,6 +1243,16 @@
         <input type="search" id="globalSearch" placeholder="people, groups, roles, scopes, tags…" autocomplete="off" style="width:230px;padding:3px 8px;font-size:12px;border:1px solid #d0d7de;border-radius:6px;">
         <div id="globalSearchResults" style="display:none;position:absolute;top:100%;right:0;z-index:9500;margin-top:4px;width:340px;max-height:60vh;overflow:auto;background:#fff;border:1px solid #d0d7de;border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.22);"></div>
       </div>
+      <!-- 100.67: Export what the current page shows -- PDF or Excel (.xlsx), made in this environment (POST /api/export).
+           Disabled on a page with no table; PDF disabled (with the reason) when this image has no PDF library. -->
+      <div id="pimExportGroup" class="brand-group" title="Export the current page" style="position:relative;display:none">
+        <span class="brand-cap">Export</span>
+        <button type="button" id="pimExportBtn" aria-haspopup="menu" style="font-size:12px;padding:2px 8px;" disabled>Export &#x25BE;</button>
+        <div id="pimExportMenu" role="menu" style="display:none">
+          <button type="button" role="menuitem" id="pimExportPdf" data-fmt="pdf" disabled>PDF</button>
+          <button type="button" role="menuitem" id="pimExportXlsx" data-fmt="xlsx">Excel (.xlsx)</button>
+        </div>
+      </div>
       <!-- Connected tenant: "Tenant" caption above NAME (GUID). Filled by JS from
            PIM_DATA; falls back to the GUID alone when the name is unknown, and is
            hidden entirely when there is no tenant context (static/local mode). -->
@@ -1274,6 +1291,7 @@
        DOM as the canonical tab/badge/switchTab surface. -->
   <div id="tabs">
     <div class="tab active" data-tab="home" title="Your privileged-estate health at a glance — per-tier counts, gaps, orphans, engine/job status, and a &quot;what needs my attention&quot; call-out.">Home <span id="homeAttnBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
+    <div class="tab" data-tab="impact" title="Counters overview: what PIM Manager has done in this environment, cumulative -- each counter with how it is counted.">Counters overview</div>
     <div class="tab" data-tab="new" title="Create a new admin or delegation with the target-first wizard — pick what to grant and the name, level, tier and plane are derived for you.">Create</div>
     <div class="tab" data-tab="map" title="Visualise who can reach what — the live delegation graph (admins → {{DIMS}} → nested groups → targets), with a risk overlay and per-grant removal.">Delegation Map</div>
     <div class="tab" data-tab="validate" title="Check the desired store for problems (orphans, naming, ownership, stale roles) before you deploy — each finding has a suggested fix.">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
@@ -1350,6 +1368,8 @@
        every tile links to the tab that owns its detail. -->
   <div id="getstartedTab" class="tab-panel"><div id="getStartedScrollBody"><div id="getStartedBody" style="max-width:1100px;margin:0 auto;"></div></div></div>
   <div id="activatorTab" class="tab-panel"><div id="activatorScrollBody"><div id="activatorBody"></div></div></div>
+  <!-- 100.68: Counters overview (Overview menu) -- the impact counters, each with how it is counted. -->
+  <div id="impactTab" class="tab-panel"><div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="impactBody"></div></div>
   <div id="homeTab" class="tab-panel active">
     <!-- REQ-Y: the MSP licence notice (renderMspLicenceBanners) -- empty and hidden unless MSP mode lacks a licence. -->
     <div class="msp-lic-banner" data-page="home" style="display:none; flex:0 0 auto; margin:10px 18px 0;"></div>
@@ -2699,7 +2719,8 @@
   const NAV_GROUPS = [
     { id: 'overview', label: 'Overview',
       title: 'Privileged-estate health at a glance',
-      items: ['home'] },
+      // 100.68 (owner 2026-10-10): the Counters overview -- the impact counters with how each is counted.
+      items: ['home', { tab: 'impact', label: 'Counters overview', desc: 'What PIM Manager has done here, cumulative: activations, eligible instead of standing, standing hours removed, engine changes, approvals, reviews, guard holds, tenants -- each with how it is counted' }] },
     // 97.1 (operator 2026-10-07: "I want to have an Get Started in the menu, similar to how i have made it in ELDK ...
     // it should show the incompleted steps"): the guided steps, each done / open from the data; a red ! while one is open.
     { id: 'getstarted', label: 'Get Started',
@@ -3344,7 +3365,9 @@
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === name + 'Tab'));
     injectTabGuidance(name);
     syncNavGroups(name);
+    try { pimExportRefresh(); pimApplyNameMask(name); } catch (_) { }   // 100.67: the Export menu + hidden names follow the page
     if (name === 'home') renderHome();
+    if (name === 'impact') renderImpactPage();   // 100.68
     if (name === 'getstarted') renderGetStarted();
     try { refreshAttention(false); } catch (_) { }   // §97.3: a page change re-reads the blocking counts (at most every 5 s)
     if (name === 'activator') renderActivator();
@@ -3548,6 +3571,7 @@
     const chips = acctChips();
     const anyChip = acctChipsActive(chips);
     const rows = (f || anyChip) ? active.filter(a => acctPasses(a, f, chips, null)) : active;
+    PIM_ACCT_EXPORT.grid = rows; pimRegisterAccountsExport();   // 100.67: the rows shown (filter + chips applied)
 
     let h = '';
     h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">' +
@@ -4221,6 +4245,22 @@
   //   * a row still using the OLD column name, so it gets renamed;
   //   * a row carrying BOTH names with different dates -- which the engine refuses outright, and
   //     which would otherwise look exactly like a normal scheduled date.
+  // 100.67: Admin accounts & TAP export -- the accounts table (as filtered) and the Temporary Access Pass table.
+  const PIM_ACCT_EXPORT = { grid: null, tap: null };
+  function pimRegisterAccountsExport() {
+    pimExportSet('accounts', 'Admin accounts & TAP', () => {
+      const out = [];
+      if (Array.isArray(PIM_ACCT_EXPORT.grid)) out.push(pimExportRows('Admin accounts', [
+        ['Admin', a => a.displayName || a.userName || a.userPrincipalName || ''], ['UPN', 'userPrincipalName'], ['Type', 'adminType'], ['Environment', 'environment'],
+        ['Department (internal)', 'department'], ['Status', a => (a.accountStatus || 'Enabled') + (a.alreadyFlagged ? ' (marked for manual removal)' : '')],
+        ['Auto-disable', a => a.autoDisableDate || a.offboardDate || ''], ['TAP', a => a.createTAP ? 'enforced' : 'n/a (AD only)'],
+        ['Mail forward', a => a.forwardMailsToContact ? (a.mailForwardAddress || 'on -- no address') : 'off']], PIM_ACCT_EXPORT.grid));
+      if (Array.isArray(PIM_ACCT_EXPORT.tap)) out.push(pimExportRows('Temporary Access Pass', [
+        ['Admin', a => a.displayName || a.userPrincipalName || ''], ['UPN', 'userPrincipalName'], ['TAP status', 'status'], ['Detail', 'detail'],
+        ['Created', a => a.createdDateTime ? fmtTime(a.createdDateTime) : ''], ['Sends to', 'managerEmail'], ['Lifetime (h)', 'tapLifetimeHours']], PIM_ACCT_EXPORT.tap));
+      return out;
+    });
+  }
   function acctAutoDisableCell(a) {
     const esc = escapeHtml;
     if (a.autoDisableConflict) {
@@ -4623,6 +4663,7 @@
     const body = document.getElementById('accountsTapBody');
     if (!body) return;
     const rows = accountsState.rows.map(tapRowView);
+    PIM_ACCT_EXPORT.tap = rows; pimRegisterAccountsExport();   // 100.67
 
     // The badge counts only what has actually been CHECKED. An unchecked row is not known to be
     // fine, and must not be counted as expired either.
@@ -5130,7 +5171,7 @@
     let h = '<div style="display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px;">' +
       '<div><h2 style="margin:0;font-size:18px;">Overview &mdash; what needs your attention</h2>' +
       '<div style="color:#57606a;font-size:12px;margin-top:2px;">Live summary of your privileged-access estate. Each tile links to its tab. Generated ' + esc(homeFmtWhen(d.generatedUtc)) + '.</div></div>' +
-      '<button id="homeRefresh" style="font-size:12px;">Refresh</button></div>';
+      '<div style="display:flex;gap:12px;align-items:center;">' + pimShowNamesToggleHtml() + '<button id="homeRefresh" style="font-size:12px;">Refresh</button></div></div>';
 
     // 🔴 PERMISSION HEALTH -- first thing on the page, because a missing permission is the one
     // failure that reports SUCCESS everywhere else. Measured on a live tenant 2026-09-12: 218
@@ -5322,10 +5363,22 @@
 
     h += '</div>';   // tile grid
 
+    // 100.68 (a): the impact counters -- what PIM Manager has done here, cumulative (filled from GET /api/impact).
+    h += '<div id="homeImpact" style="margin-top:16px;"></div>';
+
     // tier / plane legend (trustworthy-when-sparse) below the tiles.
     h += homeLegendHtml();
 
     body.innerHTML = h;
+    // 100.67 (b): the show-names toggle + the name mask; 100.68: the impact counters; the page's export (impact + attention).
+    try { pimWireShowNamesToggle(); pimApplyNameMask('home'); } catch (_) { }
+    try { pimDemoMarkSet(!!d.demoData); } catch (_) { }
+    loadImpactInto(document.getElementById('homeImpact'), { compact: true });
+    pimExportSet('home', 'Dashboard', () => {
+      const txt = (s) => { const el = document.createElement('div'); el.innerHTML = String(s || ''); return (el.textContent || '').trim(); };
+      return [pimImpactExportSection(),
+              pimExportRows('What needs your attention', [['Severity', 'sev'], ['What', i => txt(i.text)], ['Page', i => i.tab ? pimExportTabTitle(i.tab) : '']], attnItems)].filter(Boolean);
+    });
     // §97.3: the blocking line -- from the last attention read at once, then a fresh read (page load = computed again).
     try { renderHomeBlockingLine(); refreshAttention(true); } catch (_) { }
 
@@ -5823,6 +5876,16 @@
     }
     const rels = (data && Array.isArray(data.relationships)) ? data.relationships : [];
     const canWrite = !!(data && data.canWrite);
+    pimExportSet('downlink', 'MSP downlink', () => {   // 100.67: per relationship, what reaches the managed tenant and what was held back
+      const out = [];
+      rels.forEach(r => {
+        const nm = r.name || r.tenantId || 'relationship';
+        out.push(pimExportRows(nm + ' -- reaches', [['Admin', 'UserName'], ['Group', 'GroupTag'], ['Type', 'AssignmentType']], asList(r.projected)));
+        const held = asList(r.excluded).map(e => Object.assign({ kind: 'held back' }, e)).concat(asList(r.unresolved).map(e => Object.assign({ kind: 'unresolved' }, e)));
+        if (held.length) out.push(pimExportRows(nm + ' -- held back', [['Admin', 'UserName'], ['Group', 'GroupTag'], ['Why', e => e.kind + (e.reason ? ': ' + e.reason : '')]], held));
+      });
+      return out;
+    });
 
     let h = '<h2 style="margin:0 0 4px;font-size:16px;">MSP Downlink</h2>' +
       '<div style="color:#57606a;font-size:12px;margin-bottom:14px;">' +
@@ -6199,6 +6262,9 @@
     h += '<div id="mspRingsCard" style="margin:0 0 14px;padding:10px 12px;border:1px solid #d0d7de;border-radius:8px;background:#f6f8fa;font-size:12.5px;"><span style="color:#57606a;">Loading deployment rings&hellip;</span></div>';
     const rows = d.tenants || [];
     const can = !!d.canWrite;
+    pimExportSet('msptenants', 'Managed tenant registry', () => [pimExportRows('Managed tenants', [   // 100.67
+      ['Name', 'name'], ['Tenant id', 'tenantId'], ['Ring', t => t.ringKnown ? 'ring ' + t.ring : 'no readable ring'], ['Tags', t => (t.tags || []).join('; ') || 'untagged'],
+      ['Enabled', t => t.enabled ? 'yes' : 'disabled'], ['Last publish', t => (t.publish || {}).text || ''], ['Notes', 'notes']], rows)]);
     h += '<table id="mspRegTbl" class="grid" style="width:100%;border-collapse:collapse;font-size:12.5px;">' +
       '<thead><tr><th style="text-align:left;">Name</th><th style="text-align:left;">Tenant id</th><th style="text-align:left;" id="mspRegRingHdr">' + esc(ringLabel) + '</th>' +
       '<th style="text-align:left;">Tags</th><th style="text-align:left;">Enabled</th><th style="text-align:left;">Last publish</th>' + (can ? '<th></th>' : '') + '</tr></thead><tbody>';
@@ -6310,6 +6376,10 @@
     const esc = escapeHtml;
     const tenants = d.tenants || [];
     const groups = d.groups || [];
+    pimExportSet('replication', 'Replication overview', () => groups.filter(g => !replOvState.kind || g.key === replOvState.kind).map(g => pimExportRows(g.label || g.key, [   // 100.67
+      ['Row', r => (r.title || r.id) + (r.source === 'registry' ? ' (central registry)' : '')], ['Replicate', r => r.replicate && r.replicate.text], ['Ring', r => r.ring && r.ring.text],
+      ['Target', r => r.target && r.target.text], ['Reaches', r => asList(r.reaches).length ? (r.count + ' of ' + r.tenantCount + ': ' + asList(r.reaches).join(', ')) : (r.reachesNone ? 'reaches no tenant' : '0 of ' + r.tenantCount)]],
+      replOvFilterRows(g.rows, replOvState))));
     let h = '<h3 style="margin:0 0 6px;">Replication overview</h3>' + mspCrossLinksHtml('replication');
     h += '<div id="replOvRingNote" style="margin-bottom:10px;padding:10px 12px;background:#fff8c5;border:1px solid #d4a72c;border-radius:8px;font-size:12.5px;color:#4d2d00;">' +
       '<b>Uses the managing tenant&rsquo;s copy of each tenant&rsquo;s ring.</b> ' + esc(d.ringNote || '') +
@@ -6471,6 +6541,8 @@
     // Gap, OutOfRing, DriftExtra, CatalogAhead, Entry key -- exist only on this page. The STATUS KEY
     // stays (the server sends it, tests assert it); only what the operator reads changes.
     const stWord = { UpToDate:'In place', Gap:'Missing', Exempt:'Exempted', DriftExtra:'Extra', OutOfRing:'Not due yet' };
+    { const keys = confLastKeys.slice(); const sts = c.statuses || {}; const rings = (typeof confRings !== 'undefined' && confRings) || {};   // 100.67
+      pimExportSet('conformance', 'Tenant Baseline', () => [pimExportRows('This tenant against the baseline', [['Required permission', k => k], ['Status', k => { const s = sts[k] || 'OutOfRing'; return stWord[s] || s; }], ['Wave', k => (rings[k] != null ? rings[k] : 2)]], keys)]); }
     const tip = {
       UpToDate:'In place — this tenant already has it. Nothing to do.',
       Gap:'Missing — this tenant is supposed to have it and does not. This is what Deploy fixes.',
@@ -7405,9 +7477,11 @@
     let v = (known !== undefined) ? known : null;
     if (v === null) { try { const d = await api('GET', '/api/settings/environment-name'); v = (d && d.value) || ''; } catch (_) { v = ''; } }
     v = String(v || '').trim();
+    b.dataset.maskOn = ''; delete b.dataset.realText;   // 100.67: a new name is the real one; the mask re-applies below
     b.textContent = v;
     g.style.display = v ? '' : 'none';
     document.title = v ? ('PIM Manager (' + v + ')') : PIM_DEFAULT_TITLE;
+    try { pimApplyNameMask(); } catch (_) { }
   }
 
   async function renderTenantModeBadge() {
@@ -8372,7 +8446,7 @@
   // id); this only MOVES each rendered section into its category and shows one category at a time, chosen from a bar.
   // A section no rule claims lands in "Other", so nothing can disappear. The last category is remembered per browser.
   const SETTINGS_CATEGORIES = [
-    { key: 'naming',    label: 'Naming & accounts',      match: ['setEnvNameHost', 'setAdminDomainHost', 'setGroupNamingCard', /admin name prefixes/i, /naming conventions/i, /naming words/i, /^filters/i] },
+    { key: 'naming',    label: 'Naming & accounts',      match: ['setEnvNameHost', 'setAdminDomainHost', 'setHideNamesHost','setGroupNamingCard', /admin name prefixes/i, /naming conventions/i, /naming words/i, /^filters/i] },
     { key: 'features',  label: 'Features & edition',     match: ['setFeaturesCard', 'setDemoModeHost', 'setGovPreviewCard', 'setLicenceCard', 'setEditionCard', 'setScenarioCard', 'setFeatureGatesCard'] },
     { key: 'approvals', label: 'Approvals & policy',     match: ['setSelfApproveHost', 'setOpPolicyCard'] },
     { key: 'automation', label: 'Automation',            match: ['setAutomationHost'] },   // §100.49: auto-extend policy
@@ -8468,6 +8542,8 @@
     // REQ-T: this tenant's Admin account domain (a dropdown of its verified domains), first, beside the naming it belongs to.
     // Operator 2026-10-04: this environment's own name ("Test (EU)"), shown in the header left of Mode and in the browser tab.
     h += `<div id="setEnvNameHost"><div style="color:#57606a;font-size:12px;">Loading environment name…</div></div>`;
+    // 100.67 (b): hide the company + environment name on the Dashboard, the Counters overview and in exports (on by default).
+    h += `<div id="setHideNamesHost"><div style="color:#57606a;font-size:12px;">Loading…</div></div>`;
     h += `<div id="setAdminDomainHost"><div style="color:#57606a;font-size:12px;">Loading admin account domain…</div></div>`;
     // s98 demo mode: a live demo environment where visitors in the demo guest group can look and stage, never save.
     h += `<div id="setDemoModeHost"><div style="color:#57606a;font-size:12px;">Loading demo mode…</div></div>`;
@@ -8836,6 +8912,7 @@
     renderSettingsCopySection(document.getElementById('setCopyHost'));
     renderConfigBackupRetentionCard(document.getElementById('setConfigBackupHost'));
     renderEnvironmentNameSection(document.getElementById('setEnvNameHost'));
+    renderHideNamesSection(document.getElementById('setHideNamesHost'));
     renderDemoModeSection(document.getElementById('setDemoModeHost'));
     renderAdminDomainSection(document.getElementById('setAdminDomainHost'));
     renderHybridAdSection(document.getElementById('setHybridAdHost'));
@@ -9466,6 +9543,20 @@
       '<iframe id="envReportFrame" title="Environment report" style="width:100%;height:calc(100vh - 290px);min-height:480px;border:1px solid #d0d7de;border-radius:6px;background:#eaeef2;"></iframe>';
     const fr = document.getElementById('envReportFrame');
     fr.srcdoc = envReportDocHtml(d);
+    pimExportSet('envreport', 'Environment report', () => {   // 100.67: the report's tables from its own data
+      const L = (x) => (Array.isArray(x) ? x : (x && Array.isArray(x.items) ? x.items : asList(x)));
+      return [
+        pimExportRows('Health', [['Area', 'area'], ['Status', 'status'], ['Detail', 'detail']], L(((d.summary || {}).health || {}).items)),
+        pimExportRows('Resources', [['Kind', 'kind'], ['Name', 'name'], ['Location', 'location'], ['Network exposure', r => r.exposure || (r.reason ? 'not readable: ' + r.reason : '')], ['Details', 'details']], L((d.architecture || {}).resources)),
+        pimExportRows('Identities', [['Kind', 'kind'], ['Name', 'name'], ['Object id', 'id'], ['App id', 'appId'], ['Purpose', 'purpose']], L(d.identities)),
+        pimExportRows('Permissions', [['Identity', 'identity'], ['Area', 'area'], ['Permission', 'permission'], ['Scope', p => [p.scope, p.scopeDetail].filter(Boolean).join(' ')], ['Status', 'status'], ['Why / note', p => [p.why, p.reason].filter(Boolean).join(' ')]], L(d.permissions)),
+        pimExportRows('Features', [['Feature', f => f.label || f.key], ['Group', 'group'], ['State', 'enabled'], ['Security-relevant', 'securityRelevant']], L(d.features)),
+        pimExportRows('Security settings', [['Setting', 'name'], ['Value', 'value'], ['What it changes', 'why']], L(d.securitySettings)),
+        pimExportRows('Data flows', [['From', 'from'], ['To', 'to'], ['Direction', 'direction'], ['Protocol', 'protocol'], ['Authentication', 'auth'], ['Data', 'data'], ['In use', 'enabled']], L(d.dataFlows)),
+        pimExportRows('Change history', [['When', 'whenUtc'], ['Kind', 'kind'], ['Who', 'who'], ['What', 'summary'], ['Approved by', 'approvedBy']], L((d.changeHistory || {}).entries).slice(0, 120)),
+        pimExportRows('Findings', [['Severity', 'severity'], ['Finding', f => [f.title, f.area ? '(' + f.area + ')' : ''].filter(Boolean).join(' ')], ['Detail', 'detail'], ['Fix', 'fix']], L(d.findings))
+      ];
+    });
     document.getElementById('erPdf').onclick = envReportExportPdf;
     document.getElementById('erJson').onclick = envReportExportJson;
     document.getElementById('erRefresh').onclick = () => renderEnvReportPage(true);
@@ -9484,6 +9575,10 @@
     catch (e) { body.innerHTML = '<div id="chErr" style="color:#cf222e;">The commit history could not be read: ' + esc((e && e.message) || 'error') + '</div>'; return; }
     const list = asList(res && res.commits);
     const own = res && res.scope === 'own';
+    pimExportSet('commithistory', 'Commit history', () => [pimExportRows('Commits', [   // 100.67
+      ['When', c => chFmtWhen(c.CommittedUtc)], ['By', 'InitiatedBy'], ['Approved by', 'ApprovedBy'], ['Source', 'Source'],
+      ['What', c => entityLabel(c.Entity) + (asList(c.Entities).length > 1 ? ' +' + (asList(c.Entities).length - 1) + ' more' : '')], ['Rows', c => Number(c.Rows || 0)],
+      ['Undo', c => c.UndoOf ? 'undoes ' + String(c.UndoOf).slice(0, 8) : (c.UndoneBy ? 'undone by ' + String(c.UndoneBy).slice(0, 8) : '')], ['Commit id', 'CommitId']], list)]);
     let h = '<div style="margin-bottom:10px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Operations &middot; Commit history</span></div>' +
       '<div id="chScope" style="font-size:12.5px;color:#57606a;margin-bottom:10px;">' +
       (own ? 'You see the commits <b>you</b> made (an Admin undoes only their own changes; a SuperAdmin sees every commit).' : 'You see <b>every</b> commit (SuperAdmin).') +
@@ -9718,6 +9813,9 @@
     let r;
     try { r = await api('GET', '/api/config-backups'); } catch (e) { body.innerHTML = stateError('Failed to load the backups', e.message); return; }
     CB_STATE.backups = (r && Array.isArray(r.backups)) ? r.backups : [];
+    pimExportSet('configbackups', 'Backups & restore', () => [pimExportRows('Configuration backups', [   // 100.67
+      ['Taken', 'takenUtc'], ['Note', 'note'], ['By', 'takenBy'], ['How', b => b.trigger === 'scheduled' ? 'daily job' : b.trigger], ['Version', 'version'],
+      ['Content', b => b.noChange ? 'no change since ' + (b.sameAs || '') : (b.entities + ' entities, ' + b.items + ' items')], ['Pinned', b => b.pinned ? ('yes' + (b.pinnedBy ? ' (' + b.pinnedBy + ')' : '')) : '']], CB_STATE.backups)]);
     CB_STATE.access = (r && r.access) || {};
     CB_STATE.retentionDays = Number(r && r.retentionDays) || 90;
     const acc = CB_STATE.access;
@@ -9904,6 +10002,9 @@
     const ext = (pendingChanges[base].rows || []).map((r, i) => ({ r, i })).filter(x => !/^internal$/i.test(String(x.r.Type || '').trim()));
     const people = (name) => (adm.rows || []).filter(a => String(a.Company || '').trim().toLowerCase() === String(name || '').trim().toLowerCase());
     const cad = [[30, 'every month'], [90, 'every 3 months'], [180, 'every 6 months'], [365, 'every year']];
+    pimExportSet('companies', 'External companies (consultants)', () => [pimExportRows('External companies', [   // 100.67
+      ['Company', x => x.r.Company], ['Contacts', x => String(x.r.Contacts || '').split(/[|;,\s]+/).filter(Boolean).join('; ')], ['Sponsor department', x => x.r.SponsorDepartment],
+      ['Review every (days)', x => parseInt(x.r.ReviewCadenceDays, 10) || 90], ['Consultants', x => people(x.r.Company).map(a => a.DisplayName || a.UserPrincipalName || a.UserName).join('; ')], ['Notes', x => x.r.Notes]], ext)]);
     const ro = canEdit ? '' : ' disabled';
     let h = '<div style="margin-bottom:10px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Reviews &amp; controls · External companies (consultants)</span>' +
       (canEdit ? '' : ' <span style="margin-left:8px;font-size:11px;color:#57606a;">(read-only — Admin required to edit)</span>') + '</div>';
@@ -10092,6 +10193,7 @@
     if (_deptOwnerLastResult) { h += `<div id="deptOwnerResult">${_deptOwnerLastResult}</div>`; _deptOwnerLastResult = ''; }
     else h += `<div id="deptOwnerResult"></div>`;
     h += `<table class="set-table" id="setDeptsTbl"><tr><th>Department</th><th>Owners / approvers (UPNs)</th><th>Contact</th><th>Notes</th>${canEdit ? '<th></th>' : ''}</tr>`;
+    { const deps = (s.departments || []); pimExportSet('departments', 'Departments & owners', () => [pimExportRows('Departments', [['Department', 'name'], ['Owners / approvers', d => Array.isArray(d.owners) ? d.owners.join('; ') : (d.owners || '')], ['Contact', 'contact'], ['Notes', 'notes']], deps)]); }   // 100.67
     (s.departments || []).forEach(d => {
       const owners = Array.isArray(d.owners) ? d.owners.join('; ') : (d.owners || '');
       h += `<tr class="deptRow">` +
@@ -10380,6 +10482,10 @@
     const statusFilter = (document.getElementById('apprStatusFilter') ? document.getElementById('apprStatusFilter').value : (PIM_DEEP_FOCUS_APPR_ALL ? 'all' : 'Pending')) || 'Pending';
     let rows = reqs;
     if (statusFilter && statusFilter !== 'all') rows = rows.filter(r => r.status === statusFilter);
+    { const shown = rows; pimExportSet('approvals', 'Approvals', () => [pimExportRows('Approval requests (' + statusFilter + ')', [   // 100.67
+      ['Action', 'action'], ['Target', 'target'], ['Status', r => r.status + (r.expired ? ' (expired)' : '')], ['Requested by', 'requestor'], ['Requested', 'requestedUtc'],
+      ['Ticket', 'ticket'], ['Justification', 'justification'], ['Items', r => asList(r.items).map(x => (x && typeof x === 'object') ? (x.label || x.principal || x.id || JSON.stringify(x)) : x)],
+      ['Approver', 'approver'], ['Decided', 'decidedUtc'], ['Note', 'decisionNote']], shown)]); }
 
     const statusPill = (s) => {
       let bg = '#eaeef2', fg = '#57606a';
@@ -10805,6 +10911,11 @@
            '<button id="rfaCopyPortal" class="ghost" style="font-size:12px;padding:3px 10px;">Copy link</button></div></div>';
     }
     const rows = (d.requests || []);
+    pimExportSet('accessrequests', 'Access requests', () => [pimExportRows('Requests', [   // 100.67
+      ['Requested', 'requestedUtc'], ['Person', 'upn'], ['Reason', 'reason'], ['Department (internal)', 'department'], ['Company', 'company'],
+      ['What', r => (r.kind === 'group' ? 'ad-hoc member of ' + (r.groupName || '') : 'account enabled') + (r.hours ? ' for ' + r.hours + ' h' : '')],
+      ['Source', r => r.source === 'api' ? 'API (' + (r.externalRef || '') + ')' : (r.source === 'override' ? 'IT override (' + (r.requestedBy || '') + ')' : 'portal')],
+      ['Status', r => [r.state, r.statusText].filter(Boolean).join(' -- ')], ['Decided by', 'decidedBy']], rows)]);
     h += '<div ' + card + '><h3 style="margin:0 0 4px;font-size:14px;">Requests</h3>' +
          '<div style="color:#57606a;font-size:12.5px;margin-bottom:10px;">From the portal, the API and IT overrides, newest first.</div>' +
          '<table class="set-table" style="width:100%;"><thead><tr><th>Requested</th><th>Person</th><th>Department (internal)</th><th>Company</th><th>What</th><th>Source</th><th>Status</th><th></th></tr></thead><tbody>';
@@ -11009,6 +11120,9 @@
     const d = ownerState.data || {};
     const focus = (new URLSearchParams(location.search).get('person') || '').toLowerCase();
     const people = d.people || [];
+    pimExportSet('owner', 'My people', () => [pimExportRows('People in my departments', [   // 100.67
+      ['Person', p => p.displayName || p.userName], ['UPN', p => p.upn || p.userName], ['Department', 'department'], ['Access ends', 'autoDisableDate'], ['Days left', 'daysLeft'],
+      ['Last reviewed', 'lastReviewedUtc'], ['Review due', 'reviewDue']], people)]);
     const h = [];
     h.push('<h2 style="margin:0 0 4px; font-size:18px;">My people</h2>');
     h.push('<div style="color:#57606a; font-size:13px; margin-bottom:10px;">The people in the departments you own, and the day their privileged access ends. ' +
@@ -12536,6 +12650,9 @@
     const ign = PIM_DISC_VIEW === 'ignored';
     const shown = items.filter(x => ign ? x.state === 'ignored' : (x.state === 'new' || x.state === 'staged'));
     const kinds = d.kinds || {};
+    pimExportSet('discovery', 'Newly discovered resources', () => [pimExportRows(ign ? 'Ignored' : 'New', [   // 100.67
+      ['Kind', x => kinds[x.kind] || x.kind], ['Name', x => x.name || x.id], ['Path / id', x => x.path || x.id], ['State', 'state'],
+      [ign ? 'Ignored by' : 'Create adds', x => ign ? ((x.decidedBy || '') + ' ' + (x.decidedUtc ? fmtTime(x.decidedUtc) : '')).trim() : (/-role$/.test(x.kind) ? 'accept into the role catalog' : 'permission group ' + (x.groupName || '') + (x.level != null ? ' (L' + x.level + ')' : ''))]], shown)]);
     const h = [];
     h.push('<div id="discInbox">');
     h.push('<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">' +
@@ -12726,6 +12843,9 @@
       // Mail-relevant jobs first (the ask), then the rest. The self-gated MSP job (the managed tenant's pull / the
       // master's publish) goes FIRST: it is the one row here that is its own job, with its own status.
       const ordered = schedJobs.slice().sort((a,b) => ((b.selfGated?2:0) + (b.isMail?1:0)) - ((a.selfGated?2:0) + (a.isMail?1:0)));
+      { const shownJobs = ordered.filter(j => !(j.type === 'servicenow-intake' && !j.enabled) && !(j.type === 'msp-pull' && !j.selfGated));   // 100.67: the rows the table shows
+        pimExportSet('jobschedule', 'Job schedule', () => [pimExportRows('Job schedule', [['Job', j => j.label || j.name], ['Type', 'type'], ['What it does', j => JOB_SCHEDULE_PLAIN[j.name] || JOB_SCHEDULE_PLAIN[j.type] || ''],
+          ['Area', j => j.selfGated ? 'this tenant' : jobSchedulePlainScope(j.scope)], ['Enabled', j => j.enabled ? 'on' : 'off'], ['Every (min) after it finishes', 'intervalMinutes']], shownJobs)]); }
       h.push('<table class="grid" style="font-size:12px;"><thead><tr><th>Job</th><th>Area</th><th>Enabled</th><th title="The next run starts this long after the previous run FINISHED">Every (min) after it finishes</th></tr></thead><tbody>');
       for (const j of ordered) {
         // 🔴 AN INTEGRATION NOBODY HAS TURNED ON IS NOT A SCHEDULE ROW (operator, 2026-09-22:
@@ -12899,6 +13019,7 @@
       ph.push('<table class="grid" id="govAccTbl" style="font-size:12px;"><thead><tr><th>Identity</th><th>Role</th><th></th></tr></thead><tbody>');
       const rowHtml = (id, role) => `<tr><td><input class="govAccId" value="${esc(id||'')}" style="width:280px;"></td><td><select class="govAccRole">${roles.map(r=>`<option${r===(role||'Reader')?' selected':''}>${esc(r)}</option>`).join('')}</select></td><td><button class="govAccDel" title="remove">&times;</button></td></tr>`;
       for (const e of (am.entries||[])) ph.push(rowHtml(e.identity, e.role));
+      { const ents = (am.entries || []); pimExportSet('manageraccess', 'Manager access & roles', () => [pimExportRows('Role mapping', [['Identity', 'identity'], ['Role', 'role']], ents)]); }   // 100.67
       if (!(am.entries||[]).length) ph.push(rowHtml((am.you&&am.you.identity)||'', 'SuperAdmin'));
       ph.push('</tbody></table>');
       ph.push('<div style="margin-top:6px;"><button id="govAccAdd">+ Add entry</button> <button id="govAccSave">Save mapping</button> <span id="govAccMsg" style="color:#57606a;font-size:11.5px;"></span></div>');
@@ -12951,6 +13072,7 @@
     // A SuperAdmin may raise a request only while none is open (the server refuses a second one with 409 anyway).
     const canEdit = isSuper && !pending && !(d && d.requestError) && !loadErr;
     const draft = cur.slice();
+    pimExportSet('emergency', 'Emergency access', () => [pimExportRows('Break-glass accounts (saved)', [['Account (UPN)', a => a]], cur.slice())]);   // 100.67
     const h = [];
     h.push('<div class="set-card" id="setBreakGlassCard"><h3 style="margin:0 0 4px;font-size:14px;">Break-glass accounts' + settingInfoBtn('BreakGlassAccounts') + '</h3>');
     h.push('<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">The emergency accounts PIM must never lock out. ' +
@@ -13280,6 +13402,9 @@
       '<b>Rows</b> = how many rows the pack holds; <b>New to import</b> = rows not yet in your data (a pack that grows shows its new rows here); ' +
       '<b>State</b> = whether the pack is offered on the Create access wizards. Importing happens from the <b>Create</b> access page; disabling a pack hides it there without deleting anything.</div>');
     const tplList = (tpls && tpls.templates) || [];
+    pimExportSet('workloadtemplates', 'Workload templates', () => [pimExportRows('Template packs', [   // 100.67
+      ['Pack', t => t.name || t.id], ['Version', 'version'], ['Description', 'description'], ['Rows', t => Number(t.totalRows || 0)], ['New to import', t => Number(t.missingCount || 0)],
+      ['State', t => t.error ? 'error: ' + t.error : (t.disabled ? 'disabled' : 'active')]], tplList)]);
     if (!tplList.length) {
       h.push('<div style="color:#57606a;font-size:12px;">No templates shipped in <code>templates/*.template.json</code>.</div>');
     } else {
@@ -13348,6 +13473,33 @@
         const r = await api('PUT', '/api/settings/environment-name', { value: v });
         await renderEnvironmentName((r && r.value) || '');
         if (msg) { msg.style.color = '#1a7f37'; msg.textContent = (r && r.value) ? 'Saved -- shown at the top as "' + r.value + '".' : 'Saved -- no environment name is shown.'; }
+      } catch (e) { if (msg) { msg.style.color = '#cf222e'; msg.textContent = String((e && e.message) || e); } }
+      btn.disabled = false;
+    };
+  }
+
+  // 100.67 (b) HIDE COMPANY AND ENVIRONMENT NAME (Settings > Naming & accounts): on by default; SuperAdmin to change. The
+  // same setting the Dashboard toggle changes.
+  async function renderHideNamesSection(host) {
+    if (!host) return;
+    const esc = escapeHtml;
+    let d = null, err = '';
+    try { d = await api('GET', '/api/settings/hide-names'); } catch (e) { err = String((e && e.message) || e); }
+    let h = '<div class="set-card" id="setHideNames"><h3 style="margin:0 0 4px;font-size:14px;">Hide company and environment name</h3>' +
+            '<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">On the Dashboard and the Counters overview, show <b>PIM Manager</b> in place of the tenant name and the environment name (and hide the tenant id), and name no company or environment in exported PDF and Excel files &mdash; so screenshots and shared files carry no names. On by default.</div>';
+    if (err || !d) { host.innerHTML = h + '<div style="color:#cf222e;font-size:12px;">Could not read the setting: ' + esc(err || 'no answer') + '</div></div>'; return; }
+    PIM_HIDE_NAMES = { value: d.value !== false, canWrite: !!d.canWrite, loaded: true };
+    h += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><label style="display:flex;gap:6px;align-items:center;font-size:12px;"><input type="checkbox" id="setHideNamesOn" data-setting-key="HideCompanyAndEnvironmentName"' + (d.value !== false ? ' checked' : '') + (d.canWrite ? '' : ' disabled') + '> Hide company and environment name</label>' + settingInfoBtn('HideCompanyAndEnvironmentName') +
+         (d.canWrite ? '<button id="setHideNamesSave">Save</button>' : '<span style="font-size:11px;color:#57606a;">(SuperAdmin required to change)</span>') +
+         '<span id="setHideNamesMsg" style="font-size:12px;"></span></div>';
+    host.innerHTML = h + '</div>';
+    const btn = document.getElementById('setHideNamesSave');
+    if (btn) btn.onclick = async () => {
+      const msg = document.getElementById('setHideNamesMsg');
+      btn.disabled = true;
+      try {
+        const r = await pimSaveHideNames(!!document.getElementById('setHideNamesOn').checked);
+        if (msg) { msg.style.color = '#1a7f37'; msg.textContent = (r && r.value) ? 'Saved -- names are hidden on the Dashboard, the Counters overview and in exports.' : 'Saved -- names are shown.'; }
       } catch (e) { if (msg) { msg.style.color = '#cf222e'; msg.textContent = String((e && e.message) || e); } }
       btn.disabled = false;
     };
@@ -13628,6 +13780,7 @@
       '<b>Reset</b> restores the shipped default.</div>');
     h.push('<table class="grid" style="margin-top:6px;font-size:12px;"><thead><tr><th>Type</th><th>Subject</th><th>Source</th><th></th></tr></thead><tbody>');
     const canMailEdit = roleAtLeast('Admin');
+    { const tl = (mail.templates || []); pimExportSet('mailtemplates', 'Mail templates', () => [pimExportRows('Mail templates', [['Type', 'type'], ['Subject', 'subject'], ['Source', t => t.source === 'store' ? 'customized' : 'shipped default']], tl)]); }   // 100.67
     for (const t of (mail.templates || [])) {
       const srcLabel = t.source === 'store'
         ? '<b style="color:#0969da;">customized</b> (saved here)'
@@ -17673,6 +17826,10 @@
         const d = (ra === undefined ? 9 : ra) - (rb === undefined ? 9 : rb);
         return d !== 0 ? d : String(b.enqueuedUtc || '').localeCompare(String(a.enqueuedUtc || ''));
       });
+    { const qPanel = body && body.closest ? body.closest('.tab-panel') : null; const qTab = qPanel ? qPanel.id.replace(/Tab$/, '') : 'save';   // 100.67
+      pimExportSet(qTab, 'Pending changes', () => [pimExportRows('Change queue', [['State', 'status'], ['Kind', e => [e.kind, e.origin].filter(Boolean).join(' / ')],
+        ['What', e => e.display || ((e.op || '') + ' · ' + (e.entity || ''))], ['Key', 'key'], ['Justification', 'justification'], ['Requested by', 'by'], ['When', 'enqueuedUtc'],
+        ['Committed by', 'committedBy'], ['Result', e => e.lastError || (e.appliedUtc ? 'applied ' + e.appliedUtc : (e.attempts ? 'attempt ' + e.attempts : ''))]], shownEntries)]); }
     const h = [];
     // 🔴 §70.23 (operator 2026-09-18, same screenshot): the heading read "CHANGE QUEUE 10 applied · 11 discarded"
     // while the list underneath was showing two CONFIGURATION commits. The counter came from the server's queue
@@ -18121,6 +18278,13 @@
     d = d || {};
     const cat = Array.isArray(d.catalog) ? d.catalog : [];
     const rels = Array.isArray(d.releases) ? d.releases : [];
+    pimExportSet('guards', 'Guards', () => [   // 100.67
+      pimExportRows('Guards', [['Guard', g => g.title || g.guardId], ['Id', 'guardId'],
+        ['State', g => g.never ? 'never releasable' : (g.release === 'approval' ? 'approved elsewhere' : (g.state === 'holding' ? 'holding' : 'clear'))],
+        ['Last trip', 'lastTripUtc'], ['Trips', 'tripCount'], ['What it does', 'what'],
+        ['Holds now', g => asList(g.holds).map(h => (h.scope || '') + ' ' + (h.count != null ? h.count : asList(h.items).length) + ' item(s)' + (h.percent != null ? ' (' + h.percent + '%)' : '')).join('; ')]], cat),
+      pimExportRows('Releases', [['Guard', 'guardId'], ['Scope', 'scope'], ['How long', r => r.mode === 'until' ? 'until ' + fmtTime(r.expiresUtc) : 'one run'], ['State', r => r.state || r.status],
+        ['By', 'createdBy'], ['Approved by', 'approvedBy'], ['Reason', 'reason']], rels.slice().sort((a, b) => String(b.createdUtc || '').localeCompare(String(a.createdUtc || ''))))]);
     const can = !!d.canRelease && roleAtLeast('SuperAdmin');
     const me = String(d.me || '').toLowerCase();
     const short = h => String(h || '').slice(0, 12);
@@ -18757,6 +18921,9 @@
     const runs = all.filter(r => (!engineLogsState.failuresOnly || !r.ok) &&
       (!f || String(r.name || '').toLowerCase().indexOf(f) >= 0 || String(r.detail || '').toLowerCase().indexOf(f) >= 0))
       .map((r, i) => ({ r, i })).sort((a, b) => (band(a.r) - band(b.r)) || (a.i - b.i)).map(x => x.r);
+    pimExportSet('enginelogs', 'Engine logs & errors', () => [pimExportRows('Engine runs', [   // 100.67: the runs shown (failures-only + text filter applied)
+      ['Result', r => r.ok ? 'PASS' : ('FAIL' + (openIds.has(r.runId) ? '' : ' (healed)'))], ['Job', 'name'], ['Started', r => r.startedUtc || r.finishedUtc || ''],
+      ['Duration (s)', r => r.durationMs != null ? Math.round(Number(r.durationMs) / 100) / 10 : ''], ['What happened', 'detail'], ['Run id', 'runId']], runs)]);
     const failed = all.filter(r => !r.ok && !(r.status === 'throttled' && !r.throttleStuck));   // §100.45: throttled is not failed
     const unacked = failed.filter(r => openIds.has(r.runId)).length;   // failing NOW (latest run of its job failed)
     let h = '';
@@ -20246,7 +20413,7 @@
             'Rebuild-PimEnvInternal', 'Rebuild-PimEnvExternal', 'Remove-PimContainerStack', 'New-PimHostingPrerequisites',
             'Convert-PimToPrivate', 'Set-PimSqlPublicAccess',
             'Deploy-PimHybridWorker', 'New-PimHybridWorkerInfra', 'Set-PimHybridWorkerPeering', 'Set-PimHybridWorkerEgress',
-            'Grant-PimHybridWorkerAccess', 'Invoke-PimHybridWorkerRunCommand', 'Initialize-PimHybridWorkerAd', 'Install-PimHybridWorker'];
+            'Grant-PimHybridWorkerAccess', 'Invoke-PimHybridWorkerRunCommand', 'Remove-PimHybridWorker', 'Initialize-PimHybridWorkerAd', 'Install-PimHybridWorker'];
   }
   function pimScriptDocName(script) { return String(script || '').replace(/^.*[\\/]/, '').replace(/\.ps1$/i, ''); }
   function pimScriptDocUrl(script) { return pimScriptDocBase() + pimScriptDocName(script) + '/'; }
@@ -20467,6 +20634,264 @@
       const d = getData();
       if (d && d.rows && d.rows.length) { printReportPdf(d); }
       else { alert(nothing); }
+    };
+    // 100.67: every export bar also feeds the header Export menu (PDF / Excel) of the page it sits on -- same getData.
+    try { pimExportRegisterBar(idPrefix, getData); } catch (_) { }
+  }
+
+  // ===================================================================
+  // 100.67 (owner 2026-10-10: "make options to pdf export and excel export in all view"): the header Export menu.
+  // Each view registers what it SHOWS -- built from its own data model (the arrays it renders, after its filters / sort /
+  // search), never scraped from the page -- with pimExportSet(tab, title, () => [sections]). An export bar wired with
+  // wireExportBar registers its getData automatically. POST /api/export builds the file in this environment (Excel with
+  // .NET packaging, PDF with the bundled PDF library), checks the role against the view and records it in the audit trail.
+  // The environment label in the file comes from the server: the placeholder while "Hide company and environment name" is on.
+  // ===================================================================
+  // A function, not a const: a view may register before this line has run (hoisting), and must never hit the TDZ.
+  function pimExportReg() { return (window.__PIM_EXPORT_REG = window.__PIM_EXPORT_REG || {}); }
+  var PIM_EXPORT_CAPS = { xlsx: true, pdf: false, pdfReason: 'checking whether this environment can make PDF files...' };
+  function pimExportCol(v) {
+    if (v == null) return '';
+    if (typeof v === 'number' || typeof v === 'boolean') return v;
+    if (Array.isArray(v)) return v.map(x => (x == null ? '' : String(x))).join('; ');
+    if (typeof v === 'object') { try { return JSON.stringify(v); } catch (_) { return String(v); } }
+    return String(v);
+  }
+  // A section from a list of objects: cols = [[label, key | (item) => value], ...]. The view's own items, in its order.
+  function pimExportRows(heading, cols, items) {
+    const list = Array.isArray(items) ? items : [];
+    return { heading: String(heading || ''), columns: cols.map(c => String(c[0])),
+             rows: list.map(it => cols.map(c => pimExportCol(typeof c[1] === 'function' ? c[1](it) : (it == null ? '' : it[c[1]])))) };
+  }
+  function pimExportSet(tab, title, fn) {
+    if (!tab || typeof fn !== 'function') return;
+    pimExportReg()[tab] = { title: title || '', fn: fn, explicit: true };
+    try { pimExportRefresh(); } catch (_) { }
+  }
+  function pimExportRegisterBar(idPrefix, getData) {
+    const el = document.getElementById(idPrefix + 'Csv') || document.getElementById(idPrefix + 'Print') || document.getElementById(idPrefix + 'Pdf');
+    const panel = el && el.closest ? el.closest('.tab-panel') : null;
+    if (!panel || !/Tab$/.test(panel.id)) return;
+    const tab = panel.id.replace(/Tab$/, '');
+    // the LAST thing a page drew wins (a page that switches between views registers the one it shows)
+    pimExportReg()[tab] = { title: '', explicit: false, fn: () => {
+      const d = getData();
+      return (d && Array.isArray(d.headers)) ? [{ heading: d.title || '', columns: d.headers, rows: d.rows || [] }] : [];
+    } };
+    try { pimExportRefresh(); } catch (_) { }
+  }
+  function pimExportActiveTab() { const a = document.querySelector('#tabs .tab.active'); return a ? a.dataset.tab : 'home'; }
+  function pimExportTabTitle(tab) {
+    const t = document.querySelector('#tabs .tab[data-tab="' + String(tab).replace(/[^a-z0-9-]/gi, '') + '"]');
+    if (!t) return 'PIM Manager';
+    const c = t.cloneNode(true); c.querySelectorAll('.badge').forEach(b => b.remove());
+    return (c.textContent || '').replace(/\s+/g, ' ').trim() || 'PIM Manager';
+  }
+  // The payload POST /api/export takes: { view, title, format, sections: [{ heading, columns, rows }] }.
+  function pimExportPayload(tab, format) {
+    const reg = pimExportReg()[tab];
+    if (!reg) return null;
+    let secs = [];
+    try { secs = reg.fn() || []; } catch (e) { secs = []; }
+    secs = (Array.isArray(secs) ? secs : [secs]).filter(s => s && Array.isArray(s.columns) && s.columns.length)
+      .map(s => ({ heading: String(s.heading || ''), columns: s.columns.map(c => String(c)), rows: (Array.isArray(s.rows) ? s.rows : []).map(r => (Array.isArray(r) ? r : [r]).map(pimExportCol)) }));
+    if (!secs.length) return null;
+    return { view: tab, title: reg.title || pimExportTabTitle(tab), format: format, sections: secs };
+  }
+  function pimExportRefresh() {
+    const btn = document.getElementById('pimExportBtn');
+    if (!btn) return;
+    const tab = pimExportActiveTab();
+    const has = !!pimExportReg()[tab];
+    btn.disabled = !has;
+    btn.title = has ? ('Export what "' + pimExportTabTitle(tab) + '" shows (its current filters) as PDF or Excel') : 'This page shows no table or list to export';
+    const pdf = document.getElementById('pimExportPdf');
+    if (pdf) { pdf.disabled = !PIM_EXPORT_CAPS.pdf; pdf.title = PIM_EXPORT_CAPS.pdf ? 'A PDF of this view, made in this environment' : (PIM_EXPORT_CAPS.pdfReason || 'PDF export is not available in this environment'); }
+    const xl = document.getElementById('pimExportXlsx');
+    if (xl) { xl.disabled = !PIM_EXPORT_CAPS.xlsx; xl.title = 'An Excel workbook (.xlsx) of this view: a sheet per table, bold header, filters on'; }
+  }
+  async function pimExportLoadCaps() {
+    try {
+      const c = await api('GET', '/api/export/capabilities');
+      PIM_EXPORT_CAPS = { xlsx: c.xlsx !== false, pdf: !!c.pdf, pdfReason: String(c.pdfReason || ''), maxRows: c.maxRows };
+    } catch (e) { PIM_EXPORT_CAPS = { xlsx: true, pdf: false, pdfReason: 'PDF export is not available: ' + ((e && e.message) || 'no answer') }; }
+    pimExportRefresh();
+  }
+  async function pimExportDownload(format) {
+    const tab = pimExportActiveTab();
+    const payload = pimExportPayload(tab, format);
+    if (!payload) { alert('This page has nothing to export yet.'); return; }
+    const btn = document.getElementById('pimExportBtn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Exporting...'; }
+    try {
+      const resp = await fetch('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + PIM_TOKEN }, body: JSON.stringify(payload) });
+      if (!resp.ok) {
+        let b = null; try { b = await resp.json(); } catch (_) { b = null; }
+        throw new Error(resp.status === 401 ? http401Message(b) : ((b && b.error) || ('HTTP ' + resp.status)));
+      }
+      const blob = await resp.blob();
+      const cd = resp.headers.get('Content-Disposition') || '';
+      const m = /filename="([^"]+)"/.exec(cd);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = m ? m[1] : ('pim-manager-' + tab + '.' + format);
+      document.body.appendChild(a); a.click();
+      setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
+    } catch (e) { alert('Could not export: ' + ((e && e.message) || e)); }
+    finally { if (btn) { btn.textContent = 'Export ▾'; } pimExportRefresh(); }
+  }
+  function initExportMenu() {
+    const grp = document.getElementById('pimExportGroup');
+    if (!grp) return;
+    if (!isServer) { grp.style.display = 'none'; return; }
+    grp.style.display = '';
+    const btn = document.getElementById('pimExportBtn'), menu = document.getElementById('pimExportMenu');
+    if (btn && menu && !btn.dataset.wired) {
+      btn.dataset.wired = '1';
+      btn.onclick = (ev) => { ev.stopPropagation(); menu.style.display = menu.style.display === 'none' ? '' : 'none'; };
+      document.addEventListener('click', (ev) => { if (!grp.contains(ev.target)) menu.style.display = 'none'; });
+      menu.querySelectorAll('button[data-fmt]').forEach(b => { b.onclick = () => { menu.style.display = 'none'; pimExportDownload(b.dataset.fmt); }; });
+    }
+    pimExportRefresh();
+    pimExportLoadCaps();
+  }
+
+  // ===================================================================
+  // 100.67 (b) (owner 2026-10-10: "in the dashboard and counter over, make option to hide company and env name. on by
+  // def"): setting HideCompanyAndEnvironmentName, ON by default (= hidden). While on, the Dashboard (Home) and the
+  // Counters overview show "PIM Manager" in place of the tenant name and the environment name, and hide the tenant id and
+  // the instance switcher -- so a screenshot carries no names. Every export file uses the placeholder too (server side).
+  // ===================================================================
+  const PIM_NAME_PLACEHOLDER = 'PIM Manager';
+  const PIM_NAME_MASK_TABS = ['home', 'impact'];
+  let PIM_HIDE_NAMES = { value: true, canWrite: false, loaded: false };
+  function pimNamesMasked(tab) { return !!PIM_HIDE_NAMES.value && PIM_NAME_MASK_TABS.indexOf(tab || pimExportActiveTab()) >= 0; }
+  function pimApplyNameMask(tab) {
+    const on = pimNamesMasked(tab);
+    document.body.classList.toggle('pim-names-hidden', on);
+    [['envNameBadge', 'envNameGroup'], ['tenantName', 'tenantGroup']].forEach(p => {
+      const el = document.getElementById(p[0]);
+      if (!el) return;
+      if (on) {
+        if (el.dataset.maskOn !== '1') { el.dataset.realText = el.textContent; el.dataset.maskOn = '1'; }
+        if (el.dataset.realText) el.textContent = PIM_NAME_PLACEHOLDER;
+      } else if (el.dataset.maskOn === '1') {
+        el.textContent = el.dataset.realText || ''; el.dataset.maskOn = ''; delete el.dataset.realText;
+      }
+    });
+    ['tenantIdGroup', 'instanceGroup'].forEach(id => { const g = document.getElementById(id); if (g) g.classList.toggle('pim-name-masked', on); });
+    if (on) { document.title = PIM_NAME_PLACEHOLDER; }
+    else { const v = ((document.getElementById('envNameBadge') || {}).textContent || '').trim(); document.title = v ? ('PIM Manager (' + v + ')') : PIM_DEFAULT_TITLE; }
+    // the toggle follows the setting (it may have been drawn before the setting was read)
+    document.querySelectorAll('#homeShowNames').forEach(t => { t.checked = !PIM_HIDE_NAMES.value; t.disabled = !PIM_HIDE_NAMES.canWrite; });
+    document.querySelectorAll('#homeShowNamesWrap').forEach(w => { w.title = PIM_HIDE_NAMES.canWrite
+      ? 'Show the company (tenant) name and the environment name on the Dashboard, the Counters overview and in exports. Off by default, so screenshots and shared files carry no names.'
+      : 'A SuperAdmin can change this (Settings > Naming & accounts > Hide company and environment name).'; });
+  }
+  async function pimLoadHideNames() {
+    if (!isServer) return;
+    try { const d = await api('GET', '/api/settings/hide-names'); PIM_HIDE_NAMES = { value: d.value !== false, canWrite: !!d.canWrite, loaded: true }; }
+    catch (_) { PIM_HIDE_NAMES = { value: true, canWrite: false, loaded: true }; }   // unreadable = hidden (the default)
+    pimApplyNameMask();
+  }
+  async function pimSaveHideNames(hide) {
+    const r = await api('PUT', '/api/settings/hide-names', { value: !!hide });
+    PIM_HIDE_NAMES.value = !!(r && r.value);
+    pimApplyNameMask();
+    return r;
+  }
+  // The visible toggle on the Dashboard (and the Counters overview): SuperAdmin changes the setting; others see it read-only.
+  function pimShowNamesToggleHtml() {
+    const can = !!PIM_HIDE_NAMES.canWrite;
+    return '<label id="homeShowNamesWrap" style="font-size:12px;display:inline-flex;gap:5px;align-items:center;" title="' +
+      (can ? 'Show the company (tenant) name and the environment name on the Dashboard, the Counters overview and in exports. Off by default, so screenshots and shared files carry no names.'
+           : 'A SuperAdmin can change this (Settings > Naming & accounts > Hide company and environment name).') + '">' +
+      '<input type="checkbox" id="homeShowNames"' + (PIM_HIDE_NAMES.value ? '' : ' checked') + (can ? '' : ' disabled') + '> Show company and environment name</label>';
+  }
+  // ===================================================================
+  // 100.68 (owner 2026-10-10: "i need green lights and lots of high numbers to showoff products to new customers"):
+  // (a) the IMPACT COUNTERS -- what PIM Manager has done here, cumulative, from data it already stores (GET /api/impact).
+  //     Honest numbers: each tile's More info says how it is counted; an unreadable source shows n/a, never 0.
+  // (b) the DEMO DATA marker -- a discreet "Demo data" in the footer while the flagged demo environment shows its
+  //     synthetic dataset (GET /api/demo-data/status); every export says so too (server side).
+  // ===================================================================
+  let PIM_IMPACT = null;
+  function pimImpactExportSection() {
+    if (!PIM_IMPACT || !Array.isArray(PIM_IMPACT.counters)) return null;
+    return pimExportRows('Impact since ' + (PIM_IMPACT.sinceUtc ? String(PIM_IMPACT.sinceUtc).slice(0, 10) : 'install') + (PIM_IMPACT.demoData ? ' (demo data)' : ''),
+      [['Counter', 'title'], ['Value', c => (c.ok ? c.value : 'n/a')], ['Unit', 'unit'], ['How it is counted', c => String(c.info || '') + (c.note ? ' (' + c.note + ')' : '')]], PIM_IMPACT.counters);
+  }
+  function impactTileHtml(c, showInfo) {
+    const esc = escapeHtml;
+    const col = c.tone === 'green' ? '#1a7f37' : (c.tone === 'na' ? '#8c959f' : '#57606a');
+    const val = c.ok ? (fmtNum(Number(c.value || 0)) + (c.unit ? '<span style="font-size:16px;font-weight:600;margin-left:3px;">' + esc(c.unit) + '</span>' : '')) : 'n/a';
+    const dot = c.tone === 'green' ? '<span title="healthy" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#2da44e;margin-right:6px;vertical-align:middle;"></span>' : '';
+    return '<div class="impact-tile" data-key="' + esc(c.key) + '" style="border:1px solid #d0d7de;border-top:4px solid ' + (c.tone === 'green' ? '#2da44e' : '#d0d7de') + ';border-radius:8px;padding:12px 14px;background:#fff;min-width:200px;flex:1 1 200px;">' +
+      '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#57606a;font-weight:600;">' + dot + esc(c.title) + '</div>' +
+      '<div class="impact-val" style="font-size:32px;font-weight:700;line-height:1.15;margin-top:4px;color:' + col + ';">' + val + '</div>' +
+      (c.ok ? '' : '<div style="font-size:11.5px;color:#9a6700;">could not be read' + (c.error ? ': ' + esc(c.error) : '') + '</div>') +
+      (c.note ? '<div style="font-size:11.5px;color:#9a6700;">' + esc(c.note) + '</div>' : '') +
+      (showInfo ? '<div class="impact-info" style="font-size:11.5px;color:#57606a;margin-top:6px;">' + esc(c.info || '') + '</div>'
+                : '<details style="margin-top:6px;"><summary style="font-size:11.5px;color:#0969da;cursor:pointer;">More info</summary><div class="impact-info" style="font-size:11.5px;color:#57606a;margin-top:4px;">' + esc(c.info || '') + '</div></details>') +
+      '</div>';
+  }
+  async function loadImpactInto(host, opts) {
+    if (!host) return;
+    const esc = escapeHtml; const o = opts || {};
+    host.innerHTML = '<div style="color:#57606a;font-size:12px;">Loading impact counters&hellip;</div>';
+    let d;
+    try { d = await api('GET', '/api/impact'); }
+    catch (e) { host.innerHTML = '<div style="color:#cf222e;font-size:12px;">Impact counters could not be read: ' + esc((e && e.message) || e) + '</div>'; return; }
+    PIM_IMPACT = d;
+    if (d && d.demoData) { try { pimDemoMarkSet(true); } catch (_) { } }
+    const since = d && d.sinceUtc ? String(d.sinceUtc).slice(0, 10) : '';
+    host.innerHTML = '<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px;">' +
+      '<h3 style="margin:0;font-size:15px;">Impact' + (since ? ' since ' + esc(since) : ' since install') + '</h3>' +
+      '<span style="font-size:12px;color:#57606a;">What PIM Manager has done in this environment, counted from what it stores' + (o.compact ? ' &mdash; <a href="#" id="homeImpactMore">Counters overview</a>' : '') + '.</span>' +
+      (d && d.demoData ? '<span class="pim-demo-mark">Demo data</span>' : '') + '</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:12px;">' + ((d && d.counters) || []).map(c => impactTileHtml(c, !o.compact)).join('') + '</div>';
+    const more = document.getElementById('homeImpactMore');
+    if (more) more.onclick = (ev) => { ev.preventDefault(); switchTab('impact'); };
+    try { pimExportRefresh(); } catch (_) { }
+  }
+  // The Counters overview page (Overview > Counters overview): every counter with how it is counted, the names toggle.
+  async function renderImpactPage() {
+    const body = document.getElementById('impactBody');
+    if (!body) return;
+    if (!isServer) { body.innerHTML = '<div style="color:#57606a;font-size:13px;">Static (read-only) mode &mdash; the counters need the live Manager server.</div>'; return; }
+    body.innerHTML = '<div style="display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px;">' +
+      '<div><h2 style="margin:0;font-size:18px;">Counters overview</h2><div style="color:#57606a;font-size:12px;margin-top:2px;">Cumulative counts of what PIM Manager has done here. Each one says how it is counted; a source that cannot be read shows n/a.</div></div>' +
+      '<div style="display:flex;gap:12px;align-items:center;">' + pimShowNamesToggleHtml() + '<button id="impactRefresh" style="font-size:12px;">Refresh</button></div></div>' +
+      '<div id="impactHost"></div>';
+    pimWireShowNamesToggle(); pimApplyNameMask('impact');
+    const rb = document.getElementById('impactRefresh'); if (rb) rb.onclick = () => renderImpactPage();
+    pimExportSet('impact', 'Counters overview', () => [pimImpactExportSection()].filter(Boolean));
+    await loadImpactInto(document.getElementById('impactHost'), { compact: false });
+  }
+  function pimDemoMarkSet(on) {
+    let m = document.getElementById('pimDemoDataMark');
+    if (!on) { if (m) m.remove(); return; }
+    if (!m) {
+      m = document.createElement('div'); m.id = 'pimDemoDataMark'; m.className = 'pim-demo-mark';
+      m.setAttribute('title', 'This environment shows a synthetic demonstration dataset, not real data.');
+      m.style.cssText = 'position:fixed;right:10px;bottom:6px;z-index:9000;background:rgba(255,255,255,.85);padding:1px 6px;border-radius:4px;';
+      m.textContent = 'Demo data';
+      document.body.appendChild(m);
+    }
+  }
+  async function pimLoadDemoMark() {
+    if (!isServer) return;
+    try { const s = await api('GET', '/api/demo-data/status'); pimDemoMarkSet(!!(s && s.on)); } catch (_) { }
+  }
+  function pimWireShowNamesToggle() {
+    const t = document.getElementById('homeShowNames');
+    if (!t || t.dataset.wired) return;
+    t.dataset.wired = '1';
+    t.onchange = async () => {
+      t.disabled = true;
+      try { await pimSaveHideNames(!t.checked); }
+      catch (e) { t.checked = !PIM_HIDE_NAMES.value; alert('Could not change it: ' + ((e && e.message) || e)); }
+      t.disabled = !PIM_HIDE_NAMES.canWrite;
     };
   }
 
@@ -21947,6 +22372,9 @@
       ? p.rows.filter((r, i) => !p.deletes.has(i) && String((r && (r.Owner || r.owner)) || '').trim().toLowerCase() === 'msp').length
       : 0;
     const __gridOrder = gridViewOrder(base, p, visHeader);
+    // 100.67: the rows in view order (filter box, problem filter, sort), the visible columns; rows marked for deletion left out.
+    pimExportSet('grid', 'Advanced View -- ' + entityLabel(base), () => [{ heading: entityLabel(base), columns: visHeader.map(c => gridColLabel(base, c)),
+      rows: __gridOrder.filter(i => !p.deletes.has(i)).map(i => visHeader.map(c => (p.rows[i] || {})[c] || '')) }]);
 
     // Compute which columns are dropdown-backed + which tenant-list keys feed them.
     const colSpecs = {};
@@ -27422,6 +27850,10 @@
     body.innerHTML = stateLoading('Loading custom workloads…', 'Reading the definitions and which delegations use them.');
     let v = null, err = '';
     try { v = await api('GET', '/api/custom-workloads'); } catch (e) { err = String((e && e.message) || e); }
+    { const cw = (v && v.workloads) || []; const am = (v && v.accessModels) || {};   // 100.67
+      pimExportSet('customworkloads', 'Custom workloads', () => [pimExportRows('Custom workloads', [['Workload', 'name'], ['Id', 'id'], ['Description', 'description'],
+        ['Access', w => am[w.accessModel] || w.accessModel], ['Roles', w => (w.roles || []).map(r => r.name + ' (T' + r.tier + ')')], ['Scope levels', w => (w.scopeLevels || []).join(', ')],
+        ['Used by', w => (w.usage && w.usage.count != null) ? w.usage.count : 'not checked']], cw)]); }
     pimCwData = v;
     if (err) { body.innerHTML = stateError('The custom workloads could not be read', err + ' -- this is not "none defined".'); return; }
     const canEdit = !!(v && v.canEdit);
@@ -27744,6 +28176,10 @@
     // Edit controls only for a SuperAdmin the server also says may edit (it re-checks every write).
     const canEdit = !!(v && v.canEdit) && PIM_ROLE === 'SuperAdmin';
     const ptKindName = { group: 'PIM for Groups', directoryRole: 'Entra ID roles', azureRole: 'Azure resource roles' };
+    { const dx = x => x && x.text ? x.text + (x.required === false ? ' (may be permanent)' : '') : 'not set';   // 100.67
+      pimExportSet('policytemplates', 'Policy templates', () => [pimExportRows('Policy templates', [['Template', 'id'], ['Name', 'name'], ['Written for', t => ptKindName[t.kind] || 'PIM for Groups'],
+        ['Activation up to', t => dx(t.activation)], ['To activate', t => t.activationChecks || 'nothing extra'], ['Approval', t => (t.approval && t.approval.required) ? 'REQUIRED (' + t.approval.mode + ')' : 'no'],
+        ['Eligible up to', t => dx(t.eligible)], ['Active up to', t => dx(t.active)], ['Used by', t => ptUsedText(t.usage || {})]], tpls)]); }
     // 2026-09-21 (operator: "a lot of text"): one line here; the rest is folded away under "How templates work".
     h.push('<div style="color:#57606a;font-size:12px;margin-bottom:8px;">The settings each template sets, and which delegations use it. ' +
       (canEdit ? 'Press <b>Edit</b> on a template to change it.' : 'Open a template to see its settings.') + '</div>');
@@ -32015,6 +32451,7 @@
       };
       const ec = document.getElementById('revExpCsv'); if (ec) ec.onclick = () => { const d = expData(); downloadCsv(d.filename, d.headers, d.rows); };
       const ep = document.getElementById('revExpPrint'); if (ep) ep.onclick = () => { const d = expData(); printTable(d.title, d.subtitle, d.headers, d.rows); };
+      pimExportSet('revoke', 'Delegation overview (all privileged permissions)', () => { const d = expData(); return [{ heading: d.title, columns: d.headers, rows: d.rows }]; });   // 100.67
     }
 
     // Wire row checkboxes.
@@ -35641,7 +36078,8 @@
     if (want === 'settings' && params.get('section') === 'licence') { try { navScrollToAnchor('setLicenceCard'); } catch (_) { } }
     if (deepSel) pimDeepFocus(deepSel);
   } catch (e) { }
-  if (isServer) { try { renderEnvironmentName(); } catch (e) { } }   // operator 2026-10-04: the environment name, left of Mode
+  if (isServer) { try { renderEnvironmentName(); } catch (e) { } }
+  try { initExportMenu(); if (isServer) pimApplyNameMask(); pimLoadHideNames(); pimLoadDemoMark(); } catch (e) { }   // 100.67: header Export menu + hidden names (default on)   // operator 2026-10-04: the environment name, left of Mode
   if (isServer) { try { renderTenantModeBadge(); } catch (e) { } }   // 68.6 row 36: tenant mode in the header
   if (isServer) { try { renderMspLicenceBanners(); } catch (e) { } }  // REQ-Y: MSP without a Pro licence -> Home notice
   if (isServer) { try { renderUpdateRingBadge(); } catch (e) { } }   // §71.43: the UPDATE RING this environment is on

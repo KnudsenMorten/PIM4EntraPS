@@ -52,7 +52,9 @@
     SECRETS: none, in either mode. The config is refused if any key or value looks like a credential; no token is ever
     printed or written by the build.
     Exit codes: 0 complete; 1 refused or a step failed (the resume command is printed); 2 INCOMPLETE -- every runnable step
-    succeeded, but a step that cannot run under this identity (or is waiting for a managed tenant's subnet id) did not.
+    succeeded, but a step that cannot run under this identity (or is waiting for a managed tenant's subnet id) did not;
+    10 STOP POINT (100.59, crossTenantPrivateEndpoint only) -- the OTHER tenant's administrator must act (approve the
+    private endpoint, request it, prove the pull); the step printed the exact command, and this build resumes with -From <step>.
 
 .PARAMETER Role / ConfigPath
     Master | Slave, and the JSON config (see internal/FRIDAY-MSP-GO-LIVE.md for both shapes).
@@ -487,6 +489,10 @@ try {
                     if ("$oid".Trim()) { $Resolved[$m.Value] = "$oid".Trim() }
                 }
             }
+            # 100.59: a STOP POINT step prints the exact command that resumes THIS build at a step ({{resume-from:<id>}}).
+            foreach ($m in [regex]::Matches((@($val) -join ' '), '\{\{resume-from:([a-z0-9\-]+)\}\}')) {
+                $Resolved[$m.Value] = "Invoke-PimMspBuild.ps1 -Role $Role -ConfigPath '$ConfigPath' -Apply -From $($m.Groups[1].Value)"
+            }
             $r = Resolve-PimMspBuildArgument -Value $val -Resolved $Resolved
             if (-not $r.ok) { throw "step '$($s.id)': unresolved $($r.missing -join ', ') for -$k (an earlier step did not produce it)" }
             $argsOut[$k] = $r.value
@@ -497,6 +503,7 @@ try {
             # test seam: the step's console lines (res.lines) take the same path as a real step process's output
             foreach ($tl in @($res.lines | Where-Object { $null -ne $_ })) { [void](Receive-PimMspSubStepLine -Line "$tl" -Step $s) }
             $ok = [bool]$res.ok; $output = "$($res.output)"
+            $stepExit = if ($res -is [hashtable] -and $res.ContainsKey('exitCode')) { [int]$res.exitCode } elseif ($ok) { 0 } else { 1 }
         } else {
             if (-not (Test-Path -LiteralPath $scriptPath)) { throw "step '$($s.id)': script not found: $scriptPath" }
             $argsFile = Join-Path $runDir "$($s.id).args.json"; $outFile = Join-Path $runDir "$($s.id).out"
@@ -539,8 +546,9 @@ try {
             $env:PIM_SUBSTEP_EVENTS = '1'
             try { & $exe @childArgs 2>&1 | ForEach-Object { $l = "$_"; if (Receive-PimMspSubStepLine -Line $l -Step $s) { return }; $stepLines.Add($l); if ($stepLines.Count -gt 60) { $stepLines.RemoveAt(0) }; $_ } | Out-Host }
             finally { $env:PIM_HANDOFF_TOKENS = $null; $env:PIM_SUBSTEP_EVENTS = $prevSubStepEnv }
-            $ok = ($LASTEXITCODE -eq 0)
-            if (-not $ok) {
+            $stepExit = [int]$LASTEXITCODE
+            $ok = ($stepExit -eq 0)
+            if (-not $ok -and $stepExit -ne 10) {
                 # the CAUSE first (the real error text), the summary lines ("step 'x' FAILED", "DONE. status=failed") only as a
                 # fallback -- 2026-10-10 the event said "step 'schema' FAILED" while the cause was "Client with IP ... not allowed".
                 $isSummary = { param($l) "$l" -match "(?i)^\s*(step '[^']+' FAILED|==> DONE\.|failed steps:|subject: PIM update|-> ok=False|STEP FAILED:)" }
@@ -554,6 +562,15 @@ try {
             Remove-Item -LiteralPath $argsFile -Force -ErrorAction SilentlyContinue   # it may carry a resolved read link
             $output = if ($s.capturesOutput -and (Test-Path -LiteralPath $outFile)) { (Get-Content -LiteralPath $outFile -Raw).Trim() } else { '' }
             Remove-Item -LiteralPath $outFile -Force -ErrorAction SilentlyContinue
+        }
+        if ($stepExit -eq 10) {
+            # 100.59 STOP POINT: not a failure -- the OTHER tenant's administrator acts now (the step printed exactly what,
+            # with the command), then this build resumes here. Nothing after it runs; the SQL window was closed before it.
+            Write-Host "`nSTOP POINT at $($s.id): waiting for the other tenant's administrator (see above). Then resume: Invoke-PimMspBuild.ps1 -Role $Role -ConfigPath '$ConfigPath' -Apply -From $($s.id)" -ForegroundColor Yellow
+            [void](Send-PimMspStepEvent -Tracker $tracker -StepId $s.id -Title $s.title -State waiting -Message "waiting for the other tenant's administrator; then resume with -From $($s.id)")
+            $curStep = $null
+            $exitCode = 10
+            break
         }
         if (-not $ok) {
             Write-Host "`nSTEP FAILED: $($s.id). Fix the cause above, then resume: Invoke-PimMspBuild.ps1 -Role $Role -ConfigPath '$ConfigPath' -Apply -From $($s.id)" -ForegroundColor Red
