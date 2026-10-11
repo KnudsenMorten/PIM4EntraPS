@@ -1342,11 +1342,15 @@ function Get-PimMspBuildPlan {
         $vArgs['DownlinkJobName'] = $job
         if ($enrolMasterStore -and $enrolMasterStore -notmatch '^\{\{') { $vArgs['MasterStorageAccount'] = $enrolMasterStore }
         if ("$(& $V 'master.subscriptionId')".Trim()) { $vArgs['MasterSubscriptionId'] = "$(& $V 'master.subscriptionId')".Trim() }
-        $vArgs['ManagingTenantStep'] = $(if ($enrol) { "with the enrollment key the managing tenant's enrolled-tenants job registers this tenant and allows its subnet by itself (daily, or its Manager's Run now)" }
+        $vArgs['ManagingTenantStep'] = $(if ($enrol) { "with the enrollment key the managing tenant registers this tenant and allows its subnet by itself (usually within 5 minutes; its daily enrolled-tenants job reconciles)" }
                                          elseif ((Get-PimBaselineAccessMode -Role Slave -Config $Config) -eq 'crossTenantPrivateEndpoint') { "on the managing tenant: add this tenant to slaves[] with access privateEndpoint and subscriptionId $sub, run Invoke-PimMspBuild -Role Master -Apply -From register-<n>; it approves this tenant's endpoint at its peapprove step" }
                                          else { "on the managing tenant: add this tenant to slaves[] (its subnetResourceId from this build's pullnetwork step) and run Invoke-PimMspBuild -Role Master -Apply -From register-<n>" })
     }
     $vSwitches = @('LicenceExpected')   # MSP is Pro, hard-enforced
+    # PIM 100.74 (framework 8.15 ENROLL-SIGNAL): an ENROLLED managed tenant on the public-but-signed path does not fail its
+    # install while the managing tenant has not allowed its subnet yet -- the verify reports 'waiting' (the managing tenant's
+    # tick allows it within minutes; the pull job retries on its own 5-minute trigger).
+    if ($Role -eq 'Slave' -and $enrol -and (Get-PimBaselineAccessMode -Role Slave -Config $Config) -notin @('privateEndpoint', 'crossTenantPrivateEndpoint')) { $vSwitches += 'EnrollmentWait' }
     if ($rootUaa) { $vSwitches += 'EngineAzureRootUserAccessAdmin' }
     if ($signedIn) { $vSwitches += 'UseSignedInAccount' } else { $vArgs['ClientId'] = $cid; $vArgs['CertThumbprint'] = $thumb }
     $steps.Add((New-PimMspBuildStep -Id 'verify-install' -Title 'END-OF-INSTALL VERIFY: SuperAdmins, updater + ring, licence, mail sender + every sending identity in scope, alert recipients, engine Graph + root Reader, sign-in, SQL window (repairs what it can; one table)' `
@@ -1444,7 +1448,7 @@ function Get-PimMspOperatorSteps {
         } elseif ($enrol) {
             # UPLINK-ENROL: nothing to hand over -- the subnet id went to Invardia (enrollreport), the managing tenant's job allows it.
             $out.Add([pscustomobject]@{ id = 'enrolled-network'; title = "the managing tenant allows this tenant's subnet by itself (enrollment)"; when = 'after the build; before the first pull succeeds'
-                command = "Nothing to do here. The managing tenant's 'enrolled-tenants' job (daily; Jobs > Run now on the managing tenant for at once) reads this tenant's subnet id from Invardia and allows it on its bundle store. Until then the pull job's executions fail with 403 (AuthorizationFailure) -- the bundle is refused by the network, never accepted unsigned." })
+                command = "Nothing to do here. The managing tenant learns of this tenant from Invardia on its next engine run (every 5 minutes) and allows this tenant's subnet on its bundle store -- usually within 5 minutes of the install; its daily 'enrolled-tenants' job reconciles (Jobs > Run now on the managing tenant for at once). Until then the pull job's executions are refused with 403 (AuthorizationFailure) and it retries on its own 5-minute trigger -- the bundle is refused by the network, never accepted unsigned." })
         } else {
         # 71.34: the ONLY thing the managing tenant needs from a managed tenant for the pull to work is an address.
         $out.Add([pscustomobject]@{ id = 'master-network'; title = "the managing tenant lets this tenant's subnet read the bundle (one-time; nothing expires)"; when = 'after the pullnetwork step; before the first pull succeeds'

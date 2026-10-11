@@ -59,7 +59,8 @@ $script:PimTickOnlyJobTypes += 'pending-check'
 $script:PimJobTypes += 'licence-request'
 $script:PimTickOnlyJobTypes += 'licence-request'
 # §95.3 (2026-10-04): 'uplink' sends PIM's status telemetry (a heartbeat every 4 h + one run report per job) to the Invardia-hosted
-# uplink through the framework client (PIM-Uplink.ps1). Inert unless the feature 'telemetry.uplink' is ON (it ships OFF).
+# uplink through the framework client (PIM-Uplink.ps1). Gated by the feature 'telemetry.uplink' -- ON by default (PIM-FeatureCatalog.ps1).
+# PIM 100.75: a failed send / an anonymous licensed install returns warning=$true -> run status 'warning' (amber, never failed).
 $script:PimJobTypes += 'uplink'
 $script:PimTickOnlyJobTypes += 'uplink'
 # §95.4 (2026-10-04): 'install-key' claims this Pro install's Invardia install key with its licence + real tenant
@@ -472,6 +473,44 @@ function Test-PimSchedulerManagingTenant {
     }
     catch { $sc = $null }
     return [bool]($sc -and "$($sc.role)" -eq 'msp-master')
+}
+
+function Invoke-PimEnrollSignalTickStep {
+    <#
+      framework 8.15 ENROLL-SIGNAL (PIM 100.74, owner 2026-10-11): the managing tenant's per-tick managed-changes check.
+      Gate: a MANAGING tenant (Test-PimSchedulerManagingTenant, the same gate as 'enrolled-tenants'), the enrollment module
+      loaded, and the 'enrolled-tenants' job not switched off in the schedule (an operator who turned the job off manages the
+      bundle store's network by hand -- the signal respects that).
+      Returns a tick result ONLY when it allowed something (one line, a real event); $null otherwise. Unchanged / 404 = no
+      line at all (the module logs "managed-changes check active" at most once a day through Write-PimLogOnce); an error =
+      ONE warning line (Write-PimLogOnce -Level Warning: again only when it changes or once a day), never a throw.
+      Seams (tests): -Check { } -> the Signal result; -IsManaging { } -> bool; -Warn { param($m) }.
+    #>
+    param([object[]]$Jobs = @(), [datetime]$NowUtc = [datetime]::UtcNow, [scriptblock]$Check, [scriptblock]$IsManaging, [scriptblock]$Warn)
+    try {
+        $mgr = if ($IsManaging) { [bool](& $IsManaging) } else { Test-PimSchedulerManagingTenant }
+        if (-not $mgr) { return $null }
+        $ej = @(@($Jobs) | Where-Object { $_ -and "$($_.type)" -eq 'enrolled-tenants' })
+        if ($ej.Count -and @($ej | Where-Object { $_.enabled -ne $false }).Count -eq 0) { return $null }
+        if (-not $Check) {
+            if (-not (Get-Command Invoke-PimEnrolledTenantsJob -ErrorAction SilentlyContinue)) { return $null }
+            $lo = { param($k, $m) if (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) { Write-PimLogOnce -Key $k -Message "[scheduler] $m" -ForegroundColor DarkGray } }
+            $Check = { Invoke-PimEnrolledTenantsJob -Mode Signal -NowUtc $NowUtc -LogOnce $lo }
+        }
+        $r = & $Check
+    } catch { $r = [pscustomobject]@{ changed = $false; added = @(); detail = ''; warning = "managed-changes check failed: $((("$($_.Exception.Message)") -split "`n")[0])" } }
+    if (-not $r) { return $null }
+    if ("$($r.warning)".Trim()) {
+        $wm = "[scheduler] enroll-signal: $("$($r.warning)".Trim())"
+        if ($Warn) { & $Warn $wm }
+        elseif (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) { Write-PimLogOnce -Key 'sched.enroll-signal.warning' -Message $wm -Level Warning }
+        else { Write-Warning $wm }
+        return $null
+    }
+    if ([bool]$r.changed -and @($r.added).Count) {
+        return [pscustomobject]@{ name = 'enroll-signal'; type = 'enroll-signal'; ok = $true; ran = $true; detail = "$($r.detail)" }
+    }
+    return $null
 }
 
 function Merge-PimJobSchedule {
@@ -2991,6 +3030,9 @@ function Write-PimJobRunRecord {
     $unimplemented = $false; if ($inner -and $inner.PSObject.Properties['unimplemented']) { $unimplemented = [bool]$inner.unimplemented }
     # 71.13: the handler declares a HOLD about itself (policy mass-change breaker awaiting approval) -- a FIFTH outcome.
     $held = $false; if ($Result.ok -and $inner -and $inner.PSObject.Properties['held']) { $held = [bool]$inner.held }
+    # PIM 100.75: the handler declares a WARNING about itself (the uplink: telemetry not delivered) -- a SIXTH outcome: the run
+    # did its work, something needs a look; amber, never 'failed' (framework 12.18 / 12.21), one alert mail a day at most.
+    $warnR = $false; if ($Result.ok -and -not $held -and $inner -and $inner.PSObject.Properties['warning']) { $warnR = [bool]$inner.warning }
     $rec = [pscustomobject]@{
         # §70.15 LOG-04: the run's id IS the correlation id the engine stamped on every change it audited.
         # -RunId (the tick's id, also on its 'running' record) wins, so an early return without a correlation id
@@ -3011,9 +3053,12 @@ function Write-PimJobRunRecord {
         # this deployment does not run has nothing to answer for either way (BUG-112).
         # 71.13: 'held' is a FIFTH outcome -- the run did its work and a safety breaker HELD a change set for an
         # operator's approval. Never 'completed' (that would hide the approval), never 'failed' (nothing broke).
-        status      = $(if (($Result.PSObject.Properties['outOfScope'] -and $Result.outOfScope) -or ($Result.ok -and $inner -and $inner.PSObject.Properties['outOfScope'] -and $inner.outOfScope)) { 'skipped' } elseif ($unimplemented) { 'unimplemented' } elseif ($held) { 'held' } elseif ($Result.ok) { 'completed' } else { 'failed' })
+        status      = $(if (($Result.PSObject.Properties['outOfScope'] -and $Result.outOfScope) -or ($Result.ok -and $inner -and $inner.PSObject.Properties['outOfScope'] -and $inner.outOfScope)) { 'skipped' } elseif ($unimplemented) { 'unimplemented' } elseif ($held) { 'held' } elseif ($warnR) { 'warning' } elseif ($Result.ok) { 'completed' } else { 'failed' })
         held        = [bool]$held
         heldCount   = $(if ($held -and $inner.PSObject.Properties['heldCount']) { [int]$inner.heldCount } else { 0 })
+        warning     = [bool]$warnR
+        warningKind = $(if ($warnR -and $inner.PSObject.Properties['warningKind']) { "$($inner.warningKind)" } else { '' })
+        warningSummary = $(if ($warnR -and $inner.PSObject.Properties['warningSummary']) { "$($inner.warningSummary)" } else { '' })
         detail      = "$($Result.detail)"
         trigger     = [bool]$Trigger
         reason      = "$Reason"
@@ -3214,6 +3259,7 @@ function Invoke-PimJobForceStart {
     # placeholder handler said "completed" -- measured on internal 2026-09-13, green for a run that did nothing.
     $unimpl = $false; if ($inner -and $inner.PSObject.Properties['unimplemented']) { $unimpl = [bool]$inner.unimplemented }
     $heldF = $false; if ($res.ok -and $inner -and $inner.PSObject.Properties['held']) { $heldF = [bool]$inner.held }   # 71.13
+    $warnF = $false; if ($res.ok -and -not $heldF -and $inner -and $inner.PSObject.Properties['warning']) { $warnF = [bool]$inner.warning }   # 100.75
     $rec = [pscustomobject]@{
         runId       = $runId
         name        = "$($Job.name)"
@@ -3221,9 +3267,12 @@ function Invoke-PimJobForceStart {
         scope       = $(if ($Job.PSObject.Properties['scope']) { "$($Job.scope)" } else { '' })
         ok          = [bool]$res.ok
         ran         = $ran
-        status      = $(if (($res.PSObject.Properties['outOfScope'] -and $res.outOfScope) -or ($res.ok -and $inner -and $inner.PSObject.Properties['outOfScope'] -and $inner.outOfScope)) { 'skipped' } elseif ($unimpl) { 'unimplemented' } elseif ($heldF) { 'held' } elseif ($res.ok) { 'completed' } else { 'failed' })   # BUG-92 / BUG-114 / 71.13
+        status      = $(if (($res.PSObject.Properties['outOfScope'] -and $res.outOfScope) -or ($res.ok -and $inner -and $inner.PSObject.Properties['outOfScope'] -and $inner.outOfScope)) { 'skipped' } elseif ($unimpl) { 'unimplemented' } elseif ($heldF) { 'held' } elseif ($warnF) { 'warning' } elseif ($res.ok) { 'completed' } else { 'failed' })   # BUG-92 / BUG-114 / 71.13 / 100.75
         held        = [bool]$heldF
         heldCount   = $(if ($heldF -and $inner.PSObject.Properties['heldCount']) { [int]$inner.heldCount } else { 0 })
+        warning     = [bool]$warnF
+        warningKind = $(if ($warnF -and $inner.PSObject.Properties['warningKind']) { "$($inner.warningKind)" } else { '' })
+        warningSummary = $(if ($warnF -and $inner.PSObject.Properties['warningSummary']) { "$($inner.warningSummary)" } else { '' })
         detail      = "$($res.detail)"
         trigger     = $true
         reason      = 'force-start'
@@ -3246,7 +3295,8 @@ function Invoke-PimJobForceStart {
     # Guarded + never throws: the run record is already persisted above, and an
     # alerting fault must not take the tick down or lose run history.
     if (Get-Command Invoke-PimJobRunAlert -ErrorAction SilentlyContinue) { [void](Invoke-PimJobRunAlert -Run $rec) }
-    return [pscustomobject]@{ ok = [bool]$res.ok; runId = $runId; name = "$($Job.name)"; type = "$($Job.type)"; status = $rec.status; detail = "$($res.detail)" }
+    return [pscustomobject]@{ ok = [bool]$res.ok; runId = $runId; name = "$($Job.name)"; type = "$($Job.type)"; status = $rec.status; detail = "$($res.detail)"
+                              warning = [bool]$rec.warning; warningKind = "$($rec.warningKind)" }   # PIM 100.75
     } finally {
         if ($fsLocked) { [void](Remove-PimAreaLocks -Owner $fsOwner -RunId $runId) }
     }
@@ -4235,6 +4285,13 @@ function Invoke-PimSchedulerTick {
                 if (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) { Write-PimLogOnce -Key 'sched.pending-reminder' -Message $__pm -ForegroundColor DarkGray } else { Write-Verbose $__pm }
             }
         }
+    }
+    # (e) framework 8.15 ENROLL-SIGNAL (PIM 100.74): on a MANAGING tenant every tick of the MAIN instance asks Invardia
+    # whether a managed tenant enrolled with its keys changed, and allows a new pull subnet within minutes. Silent when
+    # unchanged (no write, no line); one warning line on an error; never breaks the tick. The daily job stays the reconcile.
+    if (-not $secondary -and -not $WhatIf) {
+        $esr = Invoke-PimEnrollSignalTickStep -Jobs @($Jobs) -NowUtc $now
+        if ($esr) { $results.Add($esr) }
     }
     # §95.2o: the stamps are MERGED, never a whole-state overwrite -- another execution's newer stamps are kept.
     [void](Save-PimSchedulerJobStamps -Jobs @($Jobs) -RanNames @($ranNames.ToArray()) -LastWatermark $lastWm -NowUtc $now)

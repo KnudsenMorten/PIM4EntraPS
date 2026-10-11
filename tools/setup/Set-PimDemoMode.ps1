@@ -55,7 +55,7 @@ if ("$ConnectionString".Trim()) {
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateState.ps1')
 . (Join-Path $solRoot 'engine\_shared\PIM-License.ps1')
 
-$action = if ($Disable) { 'Disable' } else { 'Enable' }
+$action = if ($Disable) { 'Disable' } elseif ($Enable) { 'Enable' } else { throw 'Set-PimDemoMode: pass -Enable or -Disable' }
 Write-Host "==> demo dataset: $action ($(if ($Apply) { 'APPLY' } else { 'plan only -- add -Apply to change' }))" -ForegroundColor Cyan
 
 $elig = $null

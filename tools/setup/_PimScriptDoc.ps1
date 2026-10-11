@@ -112,10 +112,9 @@ function Get-PimSupportScriptCommand {
     $name = Get-PimScriptDocName -Script $Script
     $file = "$name.ps1"
     $lines = New-Object System.Collections.Generic.List[string]
+    # Owner 2026-10-11: TWO lines only -- line 1 downloads the file, line 2 runs it (the doc page is linked next to the
+    # command on every surface; SHA256SUMS.txt stays published for whoever wants to verify).
     $lines.Add("Invoke-WebRequest $(Get-PimSupportScriptUrl -Script $name) -OutFile $file")
-    $lines.Add("`$sum = @(((Invoke-RestMethod $($script:PimSupportScriptSumsUrl)) -split '\r?\n') -match '\s$([regex]::Escape($file))$')[0] -replace '\s.*$', ''; if (-not `$sum -or (Get-FileHash .\$file -Algorithm SHA256).Hash -ne `$sum) { throw 'Checksum mismatch -- do not run $file' }")
-    $lines.Add("if (`$IsWindows -ne `$false) { (Get-AuthenticodeSignature .\$file).Status }")
-    $lines.Add("# What does this script do? $(Get-PimScriptDocUrl -Script $name)   (add -WhatIf to preview every change)")
     $runs = @(@($Run) | Where-Object { "$_".Trim() })
     if (-not $runs.Count) { $runs = @(".\$file") }
     foreach ($r in $runs) { $lines.Add("$r") }

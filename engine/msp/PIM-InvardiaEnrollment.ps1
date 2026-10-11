@@ -669,16 +669,43 @@ function Invoke-PimEnrolledTenantsCycle {
         $res.detail = "enrolled-tenants: $(@($list.tenants).Count) enrolled tenant(s); the bundle store is reached over a private endpoint and VNet peering -- no network rule to allow (peering is an operator step)"
         return $res
     }
-    # 3. ALLOW their subnets on the store -- adds, and only this job's own stale rules removed.
+    # 3. ALLOW their subnets on the store -- adds, and only this job's own stale rules removed (Invoke-PimEnrolledTenantsAllow:
+    #    the ONE implementation, shared with the tick's managed-changes signal, framework 8.15 ENROLL-SIGNAL).
+    $al = Invoke-PimEnrolledTenantsAllow -Facts $facts -Tenants @($list.tenants) -GetSetting $GetSetting -SetSetting $SetSetting `
+              -ReadStore $ReadStore -WriteStore $WriteStore -Audit $Audit -NowUtc $NowUtc -WhatIf:$WhatIf
+    $parts = New-Object System.Collections.Generic.List[string]
+    $parts.Add("$(@($list.tenants).Count) enrolled tenant(s)")
+    foreach ($p in @($al.parts)) { $parts.Add("$p") }
+    $res.added = @($al.added); $res.removed = @($al.removed)
+    $res.detail = "enrolled-tenants: $(@($parts.ToArray()) -join '; ')$(if ($WhatIf) { ' (what-if: nothing written)' })"
+    return $res
+}
+
+function Invoke-PimEnrolledTenantsAllow {
+    <#
+      THE allow logic, ONE implementation: the 'enrolled-tenants' job's full reconcile AND the tick's managed-changes signal
+      (framework 8.15 ENROLL-SIGNAL, PIM 100.74) both call it. Seams as Invoke-PimEnrolledTenantsCycle.
+        -Facts       the managing tenant's MspBundleFacts (storageAccount / container)
+        -Tenants     enrolled tenants (each with pullSubnetIds[])
+        -AddOnly     the signal: a PARTIAL list (only what changed) -- it ADDS and never removes a rule (only the full
+                     reconcile, which sees every enrolled tenant, may remove this job's own stale rules)
+        -AuditAction 'msp.tenant.network' (the daily job) | 'msp.enrollment.allow' (the signal); -By names the caller
+      Returns @{ plan; added[]; removed[]; parts[] (detail fragments) }. THROWS on an unreadable store or a write that does not
+      read back (the job is then red; the signal turns it into one warning and retries on the next tick).
+    #>
+    param([Parameter(Mandatory)][object]$Facts, [object[]]$Tenants = @(), [Parameter(Mandatory)][scriptblock]$GetSetting, [Parameter(Mandatory)][scriptblock]$SetSetting,
+          [Parameter(Mandatory)][scriptblock]$ReadStore, [Parameter(Mandatory)][scriptblock]$WriteStore, [scriptblock]$Audit = { param($a, $t, $b, $f) },
+          [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf, [switch]$AddOnly, [string]$AuditAction = 'msp.tenant.network', [string]$By = 'enrolled-tenants')
+    $facts = $Facts
     $state = $null; try { $state = & $GetSetting $script:PimEnrollmentSettingState } catch { $state = $null }
     if ($state -is [string]) { try { $state = $state | ConvertFrom-Json } catch { $state = $null } }
     $own = @(); if ($state -and $state.PSObject.Properties['addedSubnetIds']) { $own = @(@($state.addedSubnetIds) | Where-Object { "$_".Trim() } | ForEach-Object { "$_" }) }
     $before = & $ReadStore
     if (-not $before) { throw '[enrolled-tenants] the bundle store''s network rules could not be read (the job identity needs the bundle store network role -- re-run the managing tenant build from the enrollment step)' }
     $curIds = @(@($before.subnetIds) | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
-    $plan = Get-PimEnrolledTenantsNetworkPlan -CurrentSubnetIds $curIds -Tenants @($list.tenants) -AddedByJob $own
+    $plan = Get-PimEnrolledTenantsNetworkPlan -CurrentSubnetIds $curIds -Tenants @($Tenants) -AddedByJob $own
+    if ($AddOnly) { $plan.remove = @(); $plan.held = $false }
     $parts = New-Object System.Collections.Generic.List[string]
-    $parts.Add("$(@($list.tenants).Count) enrolled tenant(s)")
     if (@($plan.add).Count -or @($plan.remove).Count) {
         $removeKeys = @{}; foreach ($x in @($plan.remove)) { $removeKeys["$($x.subnetId)".ToLowerInvariant()] = $true }
         $newList = New-Object System.Collections.Generic.List[string]
@@ -694,8 +721,8 @@ function Invoke-PimEnrolledTenantsCycle {
             $ownNew = New-Object System.Collections.Generic.List[string]
             foreach ($o in $own) { if (-not $removeKeys.ContainsKey("$o".ToLowerInvariant())) { $ownNew.Add("$o") } }
             foreach ($a in @($plan.add)) { $ownNew.Add("$($a.subnetId)") }
-            foreach ($a in @($plan.add)) { try { & $Audit 'msp.tenant.network' "$($a.tenantId)" @{ subnets = $curIds } @{ store = "$($facts.storageAccount)/$($facts.container)"; allowed = "$($a.subnetId)"; environment = "$($a.handle)"; by = 'enrolled-tenants' } } catch { } }
-            foreach ($x in @($plan.remove)) { try { & $Audit 'msp.tenant.network' "$($facts.storageAccount)/$($facts.container)" @{ subnets = $curIds } @{ removed = "$($x.subnetId)"; reason = 'no longer enrolled at Invardia'; by = 'enrolled-tenants' } } catch { } }
+            foreach ($a in @($plan.add)) { try { & $Audit $AuditAction "$($a.tenantId)" @{ subnets = $curIds } @{ store = "$($facts.storageAccount)/$($facts.container)"; allowed = "$($a.subnetId)"; tenantId = "$($a.tenantId)"; environment = "$($a.handle)"; by = $By } } catch { } }
+            foreach ($x in @($plan.remove)) { try { & $Audit $AuditAction "$($facts.storageAccount)/$($facts.container)" @{ subnets = $curIds } @{ removed = "$($x.subnetId)"; reason = 'no longer enrolled at Invardia'; by = $By } } catch { } }
             & $SetSetting $script:PimEnrollmentSettingState ([pscustomobject][ordered]@{ addedSubnetIds = @($ownNew.ToArray()); lastRunUtc = $NowUtc.ToUniversalTime().ToString('o'); lastAllowed = @(@($plan.add) | ForEach-Object { "$($_.handle) ($($_.tenantId))" }) })
         }
         if (@($plan.add).Count) { $parts.Add("allowed $(@($plan.add).Count) new subnet(s): $(@(@($plan.add) | ForEach-Object { "$($_.handle) ($($_.tenantId))" }) -join ', ')") }
@@ -705,9 +732,120 @@ function Invoke-PimEnrolledTenantsCycle {
     if (@($plan.waiting).Count) { $parts.Add("$(@($plan.waiting).Count) waiting for their pull subnet id") }
     if (@($plan.invalid).Count) { $parts.Add("$(@($plan.invalid).Count) with a subnet id that is not valid (skipped)") }
     if ($plan.held) { $parts.Add('Invardia listed no tenant, so no rule was removed') }
-    $res.added = @($plan.add); $res.removed = @($plan.remove)
-    $res.detail = "enrolled-tenants: $(@($parts.ToArray()) -join '; ')$(if ($WhatIf) { ' (what-if: nothing written)' })"
-    return $res
+    return @{ plan = $plan; added = @($plan.add); removed = @($plan.remove); parts = @($parts.ToArray()) }
+}
+
+function ConvertFrom-PimEnrolledTenantList {
+    # PURE. Invardia's tenants[] (from /tenants or /managed-changes) -> @(@{ tenantId; environmentHandle; subscriptionId; pullSubnetIds[] }).
+    param([AllowNull()][object]$Raw)
+    if ($Raw -and -not ($Raw -is [array]) -and $Raw.PSObject.Properties['tenants']) { $Raw = $Raw.tenants }
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($t in @($Raw)) {
+        if ($null -eq $t) { continue }
+        $sn = @(@($t.pullSubnetIds) | Where-Object { $null -ne $_ -and "$_".Trim() } | ForEach-Object { "$_".Trim() })
+        $h = "$($t.environmentHandle)".Trim(); if (-not $h) { $h = "$($t.tenantId)".Trim().ToLowerInvariant() }
+        $list.Add(@{ tenantId = "$($t.tenantId)".Trim().ToLowerInvariant(); environmentHandle = $h; subscriptionId = "$($t.subscriptionId)".Trim(); pullSubnetIds = @($sn); enrolledAt = "$($t.enrolledAt)".Trim() })
+    }
+    return @($list.ToArray())
+}
+
+# ============================================================================ framework 8.15 ENROLL-SIGNAL (PIM 100.74)
+# The managing tenant's tick asks Invardia, on EVERY run, whether a managed tenant enrolled with its keys changed since the
+# last answer it stored -- so a new tenant's pull subnet is allowed within minutes instead of at the next daily reconcile.
+#   GET {base}/api/enrollments/managed-changes?since=<etag|at>   header X-Invardia-Install-Key (+ If-None-Match: <etag>)
+#   -> 304 | { changed: false }                                   nothing: no write, no log line
+#   -> { changed: true, etag | at, tenants: [ { tenantId, pullSubnetIds[], enrolledAt } ] }   allow each new subnet
+#   -> 404                                                         the route is not live yet: silent
+# The daily 'enrolled-tenants' job stays the full reconcile (removals, facts report). The signal only ADDS.
+$script:PimEnrollmentSettingSignal = 'EnrollmentSignalState'
+
+function Get-PimEnrollmentManagedChanges {
+    # Seams injected. @{ ok; available; status; changed; etag; at; tenants[]; reason }. Never throws.
+    param([Parameter(Mandatory)][scriptblock]$Http, [string]$BaseUrl = '', [Parameter(Mandatory)][string]$InstallKey, [string]$Since = '', [string]$Etag = '')
+    $base = Resolve-PimEnrollmentBaseUrl -BaseUrl $BaseUrl
+    $url = "$base/api/enrollments/managed-changes"
+    if ("$Since".Trim()) { $url += '?since=' + [uri]::EscapeDataString("$Since".Trim()) }
+    $h = @{ 'X-Invardia-Install-Key' = "$InstallKey" }
+    if ("$Etag".Trim()) { $h['If-None-Match'] = "$Etag".Trim() }
+    $r = $null
+    try { $r = & $Http 'GET' $url $null $h } catch { $r = @{ status = 0 } }
+    $st = 0; try { $st = [int]$r.status } catch { }
+    $out = @{ ok = $true; available = $true; status = $st; changed = $false; etag = ''; at = ''; tenants = @(); reason = '' }
+    if ($st -eq 404) { $out.available = $false; $out.reason = 'Invardia managed-changes not available yet'; return $out }
+    if ($st -eq 304) { return $out }
+    if ($st -ne 200) {
+        $out.ok = $false
+        $out.reason = switch ($st) { 401 { 'Invardia did not accept this environment''s install key' } 403 { 'Invardia refused the managed-changes check' } 429 { 'Invardia is rate-limiting' } 0 { 'Invardia could not be reached' } default { "Invardia answered HTTP $st" } }
+        return $out
+    }
+    $b = $r.body
+    if (-not $b -or -not $b.PSObject.Properties['changed']) { $out.ok = $false; $out.reason = 'Invardia''s managed-changes answer has no ''changed'' field'; return $out }
+    if (-not ($b.changed -eq $true -or "$($b.changed)" -match '^(?i)true$')) { return $out }
+    $out.changed = $true
+    if ($b.PSObject.Properties['etag']) { $out.etag = "$($b.etag)".Trim() }
+    if ($b.PSObject.Properties['at']) { $out.at = "$($b.at)".Trim() }
+    $out.tenants = @(ConvertFrom-PimEnrolledTenantList -Raw $b)
+    return $out
+}
+
+function Invoke-PimManagedChangesCycle {
+    <#
+      The per-tick ENROLL-SIGNAL check on a MANAGING tenant, every seam injected (as Invoke-PimEnrolledTenantsCycle) + -LogOnce
+      { param($Key, $Message) }. NEVER THROWS. Returns @{ checked; available; changed; added[]; detail; warning }:
+        not configured (no bundle facts / no install key) -> checked = $false, nothing sent (the daily job reports that)
+        404 / 304 / changed:false                         -> no write, no log line (LogOnce 'managed-changes check active'
+                                                             at most once a day, when the route answered)
+        changed:true                                      -> Invoke-PimEnrolledTenantsAllow -AddOnly per new subnet, audit
+                                                             'msp.enrollment.allow', the new etag/at stored
+        anything else                                     -> warning (one line by the caller); etag NOT stored (retried)
+    #>
+    param([Parameter(Mandatory)][scriptblock]$GetSetting, [Parameter(Mandatory)][scriptblock]$SetSetting, [Parameter(Mandatory)][scriptblock]$Http,
+          [Parameter(Mandatory)][scriptblock]$ReadStore, [Parameter(Mandatory)][scriptblock]$WriteStore, [scriptblock]$Audit = { param($a, $t, $b, $f) },
+          [scriptblock]$LogOnce = { param($k, $m) }, [string]$InstallKey = '', [string]$BaseUrl = '', [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf)
+    $res = @{ checked = $false; available = $true; changed = $false; added = @(); detail = ''; warning = '' }
+    try {
+        $facts = $null; try { $facts = & $GetSetting $script:PimEnrollmentSettingFacts } catch { $facts = $null }
+        if ($facts -is [string]) { try { $facts = $facts | ConvertFrom-Json } catch { $facts = $null } }
+        if (-not $facts -or -not "$($facts.storageAccount)".Trim()) { $res.detail = 'managed-changes: the bundle store is not recorded yet'; return $res }
+        if (-not "$InstallKey".Trim()) { $res.detail = 'managed-changes: no Invardia install key yet'; return $res }
+        $state = $null; try { $state = & $GetSetting $script:PimEnrollmentSettingSignal } catch { $state = $null }
+        if ($state -is [string]) { try { $state = $state | ConvertFrom-Json } catch { $state = $null } }
+        $etag = ''; $at = ''
+        if ($state) { if ($state.PSObject.Properties['etag']) { $etag = "$($state.etag)".Trim() }; if ($state.PSObject.Properties['at']) { $at = "$($state.at)".Trim() } }
+        $since = if ($etag) { $etag } else { $at }
+        $res.checked = $true
+        $mc = Get-PimEnrollmentManagedChanges -Http $Http -BaseUrl $BaseUrl -InstallKey $InstallKey -Since $since -Etag $etag
+        if (-not $mc.available) { $res.available = $false; $res.detail = 'managed-changes: not available yet'; return $res }
+        if (-not $mc.ok) { $res.warning = "managed-changes check failed: $($mc.reason) -- the daily enrolled-tenants job still reconciles"; return $res }
+        if (-not $mc.changed) {
+            try { & $LogOnce 'enroll.managed-changes' 'managed-changes check active (a new managed tenant is allowed within minutes)' } catch { }
+            $res.detail = 'managed-changes: unchanged'; return $res
+        }
+        $res.changed = $true
+        $newAt = $mc.at
+        if (-not $mc.etag -and -not $newAt) {
+            # no cursor in the answer: the newest enrolledAt, else now -- never an empty cursor (it would re-read every tick)
+            $ts = @(@($mc.tenants) | ForEach-Object { "$($_.enrolledAt)" } | Where-Object { $_ } | Sort-Object)
+            $newAt = if ($ts.Count) { $ts[-1] } else { $NowUtc.ToUniversalTime().ToString('o') }
+        }
+        $parts = @()
+        if ("$($facts.access)".Trim() -eq 'privateEndpoint') {
+            $parts = @('the bundle store is reached over a private endpoint -- no network rule to allow')
+        } elseif (@($mc.tenants).Count) {
+            $al = Invoke-PimEnrolledTenantsAllow -Facts $facts -Tenants @($mc.tenants) -GetSetting $GetSetting -SetSetting $SetSetting -ReadStore $ReadStore `
+                      -WriteStore $WriteStore -Audit $Audit -NowUtc $NowUtc -WhatIf:$WhatIf -AddOnly -AuditAction 'msp.enrollment.allow' -By 'managed-changes'
+            $res.added = @($al.added); $parts = @($al.parts)
+        }
+        if (-not $WhatIf) {
+            & $SetSetting $script:PimEnrollmentSettingSignal ([pscustomobject][ordered]@{ etag = "$($mc.etag)"; at = "$newAt"; lastChangeUtc = $NowUtc.ToUniversalTime().ToString('o')
+                                                                                            lastAllowed = @(@($res.added) | ForEach-Object { "$($_.handle) ($($_.tenantId))" }) })
+        }
+        $res.detail = "managed-changes: $(@($mc.tenants).Count) changed tenant(s)$(if ($parts.Count) { '; ' + ($parts -join '; ') })$(if ($WhatIf) { ' (what-if: nothing written)' })"
+        return $res
+    } catch {
+        $res.warning = "managed-changes check failed: $((("$($_.Exception.Message)") -split "`n")[0]) -- the daily enrolled-tenants job still reconciles"
+        return $res
+    }
 }
 
 function Get-PimEnrollmentMspRole {
@@ -728,12 +866,16 @@ function Invoke-PimEnrolledTenantsJob {
       Job 'enrolled-tenants' (managing tenant only; daily + on demand). The tick's managed identity reads its install key from
       pim.Settings, Invardia's list over HTTPS, and the bundle store's network rules over ARM (the build's 'enrollment' step
       grants it a role on that ONE storage account: read + write of the account, which is where the network rules live).
+      -Mode Signal (framework 8.15 ENROLL-SIGNAL): the tick's per-run managed-changes check with the SAME seams (store, ARM,
+      HTTP, audit) -> Invoke-PimManagedChangesCycle; returns its result (checked / changed / added / detail / warning), never
+      throws for a store or Invardia problem (a warning instead).
     #>
-    param([object]$Job, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf)
+    param([object]$Job, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf, [ValidateSet('Full', 'Signal')][string]$Mode = 'Full', [scriptblock]$LogOnce = { param($k, $m) })
     $role = Get-PimEnrollmentMspRole
-    if ($role -ne 'Master') { return [pscustomobject]@{ ran = $false; whatIf = [bool]$WhatIf; detail = 'enrolled-tenants: not a managing tenant -- nothing to do' } }
+    if ($role -ne 'Master') { return [pscustomobject]@{ ran = $false; checked = $false; changed = $false; added = @(); warning = ''; whatIf = [bool]$WhatIf; detail = 'enrolled-tenants: not a managing tenant -- nothing to do' } }
     $cs = $null
     if (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) { try { $cs = Get-PimSqlSettingsConnectionString } catch { $cs = $null } }
+    if (-not $cs -and $Mode -eq 'Signal') { return [pscustomobject]@{ ran = $false; checked = $false; changed = $false; added = @(); whatIf = [bool]$WhatIf; detail = ''; warning = 'managed-changes check skipped: no SQL store -- the install key and the bundle facts cannot be read' } }
     if (-not $cs) { throw '[enrolled-tenants] no SQL store -- the install key and the bundle facts cannot be read' }
     # PLAIN scriptblocks, never .GetNewClosure() (Test-PimHybridWorker L19): they read $cs / $acctPath through dynamic scope.
     $get = { param($n) Get-PimSqlSetting -ConnectionString $cs -Name $n }
@@ -760,6 +902,12 @@ function Invoke-PimEnrolledTenantsJob {
     $http = { param($m, $u, $b, $h) Invoke-PimEnrollmentHttp -Method $m -Url $u -Body $b -Headers $h }
     $key = ''; if (Get-Command Resolve-PimInvardiaInstallKey -ErrorAction SilentlyContinue) { $key = Resolve-PimInvardiaInstallKey -GetSetting $get } else { $key = "$env:PIM_UPLINK_KEY".Trim() }
     $base = ''; try { $base = "$(& $get 'LicenceRequestBaseUrl')".Trim() } catch { $base = '' }
+    if ($Mode -eq 'Signal') {
+        $audit = { param($a, $t, $b, $f) if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) { Write-PimAuditEvent -Action $a -Target $t -Before $b -After $f -Actor 'tick:managed-changes' } }
+        $s = Invoke-PimManagedChangesCycle -GetSetting $get -SetSetting $set -Http $http -ReadStore $read -WriteStore $write -Audit $audit -LogOnce $LogOnce `
+                -InstallKey $key -BaseUrl $base -NowUtc $NowUtc -WhatIf:$WhatIf
+        return [pscustomobject]@{ ran = [bool]$s.changed; checked = [bool]$s.checked; changed = [bool]$s.changed; added = @($s.added); whatIf = [bool]$WhatIf; detail = "$($s.detail)"; warning = "$($s.warning)" }
+    }
     $r = Invoke-PimEnrolledTenantsCycle -GetSetting $get -SetSetting $set -Http $http -ReadStore $read -WriteStore $write -Audit $audit `
             -InstallKey $key -BaseUrl $base -NowUtc $NowUtc -WhatIf:$WhatIf
     [pscustomobject]@{ ran = [bool]$r.ran; whatIf = [bool]$WhatIf; detail = "$($r.detail)" }

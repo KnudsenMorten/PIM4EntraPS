@@ -76,6 +76,18 @@ function Get-PimJobFailureAlert {
         $out.detail = ($bits.ToArray() -join ' ')
         return $out
     }
+    # PIM 100.75: a WARNING run (the uplink: telemetry not delivered / anonymous on a licensed install) is NOT a failure
+    # (framework 12.18 / 12.21) -- but someone must learn of it, ONCE A DAY at most. The alert's title and detail are the
+    # run's STABLE summary (no counts, no times), so the identical-alert debounce (Invoke-PimJobRunAlert, 1440 min) holds
+    # every repeat for a day; the changing specifics (Invardia's field list, the transport error) go in the mail's headline.
+    if ($status -eq 'warning') {
+        $sum = "$(Get-PimJobAlertField -Item $Run -Name 'warningSummary')".Trim()
+        if (-not $name -or -not $sum) { $out.reason = 'warning without a summary -- shown on the Jobs page, not mailed'; return $out }
+        $out.fire  = $true
+        $out.title = "Job '$name' WARNING"
+        $out.detail = "$sum$(if ($type) { " type=$type" })"
+        return $out
+    }
     # ONLY a real failure -- or a HOLD (71.13): a safety breaker stopped a change set and it needs an
     # operator's approval, so someone must be told. 'skipped' (out of scope for this deployment) and
     # 'unimplemented' (a placeholder handler) are neither -- see the header.
@@ -121,6 +133,12 @@ function Get-PimJobAlertMailParts {
     if ($status -eq 'throttled') {
         $out.headline = "The job '$name' is stuck: Microsoft keeps throttling it, so it has not completed for a long time."
         $out.actionHtml = 'Nothing is broken in your setup and PIM keeps retrying. If it does not recover, spread the job cadence (Jobs &rsaquo; Job schedule) or check the Microsoft service health. Open the PIM Manager, <b>Jobs &rsaquo; Engine logs &amp; errors</b>, for the runs.'
+        return [pscustomobject]$out
+    }
+    if ($status -eq 'warning') {
+        # PIM 100.75: the specifics (they change from run to run) are in the headline -- not part of the debounce key.
+        $out.headline = "The job '$name' ran, but needs a look: $(& $enc "$(Get-PimJobAlertField -Item $Run -Name 'detail')")"
+        $out.actionHtml = 'Open the PIM Manager, <b>Jobs</b>: the job is shown amber with the reason. This mail is sent at most once a day while it lasts and stops by itself when the job runs clean.'
         return [pscustomobject]$out
     }
     if ($status -ne 'held') {
@@ -241,7 +259,8 @@ function Invoke-PimJobRunAlert {
         if (-not $d.fire) { return 'none' }
         # SETTLING: a failure during a commit's rollout is held, not mailed (a HOLD is never delayed).
         # §100.45: nor is a THROTTLED streak's one "stuck" mail (it is decided on the crossing run only; held = lost).
-        if ("$(Get-PimJobAlertField -Item $Run -Name 'status')".Trim().ToLowerInvariant() -notin @('held', 'throttled')) {
+        # PIM 100.75: nor a WARNING (telemetry not delivered has nothing to do with a commit's rollout; its debounce is a day).
+        if ("$(Get-PimJobAlertField -Item $Run -Name 'status')".Trim().ToLowerInvariant() -notin @('held', 'throttled', 'warning')) {
             $lastChange = Get-PimLastDesiredChangeUtc
             if (Test-PimAlertSettling -LastChangeUtc $lastChange) {
                 Write-Host ("[alert] '{0}' failed while the commit of {1:u} is still rolling out -- not mailed now; mailed if it still fails after {2} minutes" -f (Get-PimJobAlertField -Item $Run -Name 'name'), $lastChange, $script:PimAlertSettleMinutes) -ForegroundColor DarkYellow

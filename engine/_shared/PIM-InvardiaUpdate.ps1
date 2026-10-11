@@ -233,6 +233,66 @@ function Resolve-PimInvardiaAppliedSequence {
     return $res
 }
 
+# ---- 100.69 -- AN UPDATE RUN BEFORE THE INSTALL KEY IS CLAIMED IS WAITING, NOT FAILED ----------------------------------
+# MEASURED (trial ig798, 2026-10-11): an updater run started ~5 minutes after install, before the tick's install-key job
+# claimed the key, exited 1 with "this install has no install key" -> execution Failed, UpdateState 'failed', failure
+# telemetry. Nothing was wrong: the key is claimed by the engine within ~5 minutes of install, and the next run updated.
+# So: no key YET = 'waiting' (exit 0, no failure telemetry). No key a day after install, or a claim Invardia REFUSED, is a
+# real problem -- reported as 'attention' (a warning naming Settings > Licence), still never a failed run.
+$script:PimInvardiaNoKeyGraceHours = 24
+
+function Get-PimInvardiaNoKeyOutcome {
+    <#
+      PURE. What an Invardia update run with NO install key records. Returns @{ outcome = waiting|attention; reason;
+      waitingSinceUtc; ageHours }.
+        -InstalledUtc     when this environment was installed (the Manager app's systemData.createdAt); may be '' / unreadable
+        -PreviousState    the UpdateState record this run replaces: its waitingSinceUtc (an earlier waiting run) and a
+                          deployment record's recordedUtc count as "installed no later than"
+        -ClaimState       pim.Settings 'InstallKeyClaimState' (Invoke-PimInstallKeyClaimCycle): a 'refused' claim is
+                          never "not yet" -- it is a warning at once
+      The EARLIEST readable time wins; none readable = now (a first run cannot prove it has waited a day).
+    #>
+    param([AllowNull()][object]$InstalledUtc, [AllowNull()][object]$PreviousState, [AllowNull()][object]$ClaimState,
+          [datetime]$NowUtc = [datetime]::UtcNow, [double]$GraceHours = $script:PimInvardiaNoKeyGraceHours)
+    $now = $NowUtc.ToUniversalTime()
+    $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+    $field = { param($o, $k)
+        if ($null -eq $o) { return '' }
+        if ($o -is [string]) { try { $o = $o | ConvertFrom-Json -ErrorAction Stop } catch { return '' } }
+        if ($o -is [System.Collections.IDictionary]) { if ($o.Contains($k)) { return "$($o[$k])".Trim() }; return '' }
+        $p = $o.PSObject.Properties[$k]; if ($p) { return "$($p.Value)".Trim() }; return '' }
+    $cands = New-Object System.Collections.Generic.List[datetime]
+    $add = { param($v)
+        if ($null -eq $v) { return }
+        if ($v -is [datetime]) { $cands.Add(([datetime]$v).ToUniversalTime()); return }
+        $d = [datetime]::MinValue
+        if ("$v".Trim() -and [datetime]::TryParse("$v".Trim(), [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$d)) { $cands.Add($d) } }
+    & $add $InstalledUtc
+    & $add (& $field $PreviousState 'waitingSinceUtc')
+    if ((& $field $PreviousState 'kind') -ieq 'deploy') { & $add (& $field $PreviousState 'recordedUtc') }
+    $since = $now
+    foreach ($c in $cands) { if ($c -lt $since) { $since = $c } }
+    $age = [math]::Round([math]::Max(0, ($now - $since).TotalHours), 1)
+    $res = @{ outcome = 'waiting'; reason = ''; waitingSinceUtc = $since.ToString('o'); ageHours = $age }
+    $claimAction = & $field $ClaimState 'action'
+    $claimMsg    = & $field $ClaimState 'message'
+    if ($claimAction -eq 'refused') {
+        $res.outcome = 'attention'
+        $res.reason  = "no install key: Invardia refused the claim ($claimMsg). Nothing moved, PIM keeps running its current version. " +
+                       'What to do: open Settings > Licence -- the install key status there says why and offers "Claim again" once it is fixed.'
+        return $res
+    }
+    if ($age -ge $GraceHours) {
+        $claimTxt = if ($claimAction) { " The last claim attempt: $claimAction -- $claimMsg." } else { ' No claim attempt is recorded yet (the install-key job needs the Pro licence for this tenant and the updates.invardia feature).' }
+        $res.outcome = 'attention'
+        $res.reason  = ("this install still has no install key $([int][math]::Floor($age)) h after it was installed (the engine normally claims it within about 5 minutes). " +
+                        "Nothing moved, PIM keeps running its current version.$claimTxt What to do: open Settings > Licence and check the install key status and that the Pro licence for this tenant is installed.")
+        return $res
+    }
+    $res.reason = 'waiting for the install key (the engine claims it within about 5 minutes of install) -- the next scheduled update run proceeds once it is claimed'
+    return $res
+}
+
 function Get-PimInvardiaUpdateTarget {
     <#
       The update job's whole Invardia step, seams injected: pull, verify, and (when a build is needed) download + re-pack.
@@ -242,6 +302,7 @@ function Get-PimInvardiaUpdateTarget {
         ok=$true + version           the approved version; contextPath set when -NeedBuild (the tar.gz to build)
         ok=$false                    refused or failed                          -> the job reports 'failed', nothing moves
         ok=$false + attention        the replay watermark's ring is unknown     -> the job reports 'attention', nothing moves
+        ok=$false + noKey            no install key (yet)                       -> Get-PimInvardiaNoKeyOutcome: 'waiting' / 'attention', exit 0
         ok=$true + ahead             the ring approves an OLDER version         -> the job reports 'ahead', exit 0, nothing fetched
     #>
     param([Parameter(Mandatory)][scriptblock]$Http, [AllowEmptyString()][string]$InstallKey = '', [AllowEmptyString()][string]$LicenceText = '',
@@ -256,8 +317,10 @@ function Get-PimInvardiaUpdateTarget {
           # A manifest naming an OLDER version that is not a signed rollback is AHEAD: nothing is downloaded.
           [string]$HighestKnownVersion = '',
           [switch]$AllowDowngrade)
-    $res = @{ ok = $false; version = ''; sequence = 0; hold = $false; reason = ''; contextPath = ''; ahead = $false; attention = $false }
-    if (-not "$InstallKey".Trim()) { $res.reason = 'this install has no install key (PIM_UPLINK_KEY, or claimed by the install-key job)'; return $res }
+    $res = @{ ok = $false; version = ''; sequence = 0; hold = $false; reason = ''; contextPath = ''; ahead = $false; attention = $false; noKey = $false }
+    # 100.69: noKey tells the job this is the "not claimed YET" case (Get-PimInvardiaNoKeyOutcome decides waiting / warning),
+    # never a failed run. Nothing is sent to Invardia without a key.
+    if (-not "$InstallKey".Trim()) { $res.noKey = $true; $res.reason = 'this install has no install key (PIM_UPLINK_KEY, or claimed by the install-key job)'; return $res }
     if (-not "$LicenceText".Trim()) { $res.reason = 'no licence is installed -- Pro updates need the Invardia-issued Pro licence'; return $res }
     $ringN = -1
     if (-not [int]::TryParse("$Ring".Trim(), [ref]$ringN) -or $ringN -lt 0 -or $ringN -gt 3) {

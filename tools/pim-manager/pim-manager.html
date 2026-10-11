@@ -7539,6 +7539,8 @@
     current: { fg: '#1a7f37', bg: '#dafbe1', bd: '#1a7f37', word: 'up to date' },
     // 2026-10-09: rolled ahead of its ring on purpose -- running the approved version or newer is healthy (green).
     ahead:   { fg: '#1a7f37', bg: '#dafbe1', bd: '#1a7f37', word: 'up to date -- newer than its ring approves' },
+    // 100.69: a fresh install whose update ran before the engine claimed the install key -- nothing is wrong (neutral).
+    waiting: { fg: '#0969da', bg: '#ddf4ff', bd: '#54aeff', word: 'waiting for the install key' },
     // 2026-10-08: a fresh install -- the deployment recorded the ring it set on the update job, which
     // has not run yet. A fact about the ring, nothing about versions or outcomes: neutral, not green.
     installed: { fg: '#0969da', bg: '#ddf4ff', bd: '#54aeff', word: 'installed -- no update run yet' },
@@ -7557,7 +7559,7 @@
   // approved nothing new) and reading it as a bare "none" beside "outcome ok" looks like a fault.
   // 2026-10-09 (owner): the outcome in calm words -- "failed" read to customers as "PIM is broken" while it ran fine.
   const PIM_RING_OUTCOME_WORD = {
-    ok: 'ok', failed: 'did not complete', ahead: 'ok (newer than the ring approves)', attention: 'needs a look', skipped: 'skipped'
+    ok: 'ok', failed: 'did not complete', ahead: 'ok (newer than the ring approves)', attention: 'needs a look', waiting: 'waiting for the install key', skipped: 'skipped'
   };
   const PIM_RING_ACTION_WORD = {
     none: 'nothing to do', built: 'built the image', rolled: 'rolled the containers',
@@ -7685,7 +7687,7 @@
       h += row('Last version built here', val(v.lastBuiltVersion));
       h += row('Last update run', (v.lastRunUtc ? '<b>' + pimUtcHtml(v.lastRunUtc) + '</b>' : '<span style="color:#8c959f;">not recorded</span>') +
                ' <span style="color:#8c959f;font-size:11px;">' + esc(ringRecordedAgo(v)) + '</span>' +
-               (v.lastOutcome ? ' &middot; outcome <b style="color:' + ((v.failing || v.attention) ? PIM_RING_STATE_STYLE.failing.fg : '#1a7f37') + ';">' + esc(PIM_RING_OUTCOME_WORD[v.lastOutcome] || v.lastOutcome) + '</b>' : '') +
+               (v.lastOutcome ? ' &middot; outcome <b style="color:' + ((v.failing || v.attention) ? PIM_RING_STATE_STYLE.failing.fg : (v.waiting ? PIM_RING_STATE_STYLE.waiting.fg : '#1a7f37')) + ';">' + esc(PIM_RING_OUTCOME_WORD[v.lastOutcome] || v.lastOutcome) + '</b>' : '') +
                (v.lastAction ? ' <span style="color:#57606a;">(' + esc(PIM_RING_ACTION_WORD[v.lastAction] || v.lastAction) + ')</span>' : ''), 'updRingLastRun');
       h += row('Last SUCCESSFUL update', (v.lastSuccessUtc ? '<b>' + pimUtcHtml(v.lastSuccessUtc) + '</b>' : '<span style="color:#8c959f;">none recorded</span>') +
                (v.lastSuccessVersion ? ' &rarr; <b>' + esc(v.lastSuccessVersion) + '</b>' : ''), 'updRingLastSuccess');
@@ -7695,9 +7697,9 @@
       h += row('Behind its ring', v.behind
                ? '<b class="updRingBehind" style="color:' + PIM_RING_STATE_STYLE.behind.fg + ';">yes &mdash; the ring approves a newer version than this environment runs</b>'
                : '<span style="color:#57606a;">' + (v.approvedVersion ? 'no' : 'cannot be compared &mdash; no approved version was recorded') + '</span>');
-      if ((v.failing || v.attention) && v.lastError) {
+      if ((v.failing || v.attention || v.waiting) && v.lastError) {
         // 2026-10-09 (owner): calm -- "Details", not "Last failure"; amber, not red. PIM keeps running.
-        h += row('Details', '<span class="updRingError" style="color:' + PIM_RING_STATE_STYLE.failing.fg + ';">' + esc(v.lastError) + '</span>');
+        h += row('Details', '<span class="updRingError" style="color:' + (v.waiting ? PIM_RING_STATE_STYLE.waiting.fg : PIM_RING_STATE_STYLE.failing.fg) + ';">' + esc(v.lastError) + '</span>');
       }
       h += '</table>';
       if (v.stale) {
@@ -17586,6 +17588,8 @@
     // the throttled streak is STUCK (PIM is not handling it; that is also when the one alert mail goes out).
     else if (j.status === 'throttled' && !j.throttleStuck) { bg = '#fff1d6'; fg = '#9a6700'; label = 'throttled -- retrying'; }
     else if (j.status === 'throttled') { bg = '#ffebe9'; fg = '#cf222e'; label = 'throttled -- stuck'; }
+    // PIM 100.75: the run did its work but declared a WARNING (the uplink: telemetry not delivered) -- amber, never red.
+    else if (j.status === 'warning') { bg = '#fff1d6'; fg = '#9a6700'; label = 'warning'; }
     else if (j.status === 'failed') { bg = '#ffebe9'; fg = '#cf222e'; label = 'failed'; }
     // 2026-10-07 (operator: "what is no-op ... people dont understand ... why not just ok ... state is green"): a run that
     // completed with nothing to do IS ok -- green "ok", the same as a run that changed something. The result text says which.
@@ -18696,7 +18700,7 @@
       rows: jobs.map(j => [
         j.name || '', j.type || '', j.scope || '', j.cadence || '',
         (j.enabled ? 'yes' : 'no'),
-        (j.inProgress ? 'running' : (j.neverRun ? 'never run' : (j.status === 'held' ? (j.approvedPending ? 'approved -- applies next run' : 'needs approval') : (j.status === 'interrupted' ? 'interrupted' : j.status === 'throttled' ? (j.throttleStuck ? 'throttled -- stuck' : 'throttled -- retrying') : (j.lastOk === false ? 'failed' : (j.lastOk === true ? 'ok' : 'unknown')))))),
+        (j.inProgress ? 'running' : (j.neverRun ? 'never run' : (j.status === 'held' ? (j.approvedPending ? 'approved -- applies next run' : 'needs approval') : (j.status === 'interrupted' ? 'interrupted' : j.status === 'throttled' ? (j.throttleStuck ? 'throttled -- stuck' : 'throttled -- retrying') : j.status === 'warning' ? 'warning' : (j.lastOk === false ? 'failed' : (j.lastOk === true ? 'ok' : 'unknown')))))),
         (j.neverRun ? '' : (j.lastRunUtc || '')),
         (j.lastResult || ''),
         (j.lastOk === true ? 'true' : (j.lastOk === false ? 'false' : '')),
@@ -18835,6 +18839,8 @@
         ? ('<span class="histInterrupted" style="color:#57606a;font-weight:600;" title="An update restart or a platform stop cut this run short -- not a failure; the next run decides.">INTERRUPTED</span>' + (histOpen.has(r.runId) ? ' <span style="color:#cf222e;">(again -- counts as failing)</span>' : ''))
         : (r.status === 'throttled')
         ? ('<span class="histThrottled" style="color:#9a6700;font-weight:600;" title="Microsoft throttled this run; it retries automatically. Not a failure.">THROTTLED &mdash; retrying</span>' + (r.throttleStuck ? ' <span style="color:#cf222e;">(stuck -- not completed for a long time)</span>' : ''))
+        : (r.status === 'warning')
+        ? '<span class="histWarning" style="color:#9a6700;font-weight:600;" title="The run did its work but needs a look -- the reason is in the result. Not a failure.">WARNING</span>'
         : ok
         ? '<span style="color:#1a7f37;font-weight:600;">PASS</span>'
         : ('<span style="color:#cf222e;font-weight:600;">FAIL</span>' + (histOpen.has(r.runId) ? '' : ' <span style="color:#8c959f;" title="a later run succeeded -- nothing to do">(healed)</span>'));
@@ -20435,12 +20441,9 @@
   function pimSupportCmd(script, runLines) {
     const n = pimScriptDocName(script), f = n + '.ps1';
     const runs = (Array.isArray(runLines) ? runLines : (runLines ? [runLines] : [])).filter(x => String(x || '').trim());
-    const lines = [
-      'Invoke-WebRequest ' + pimSupportScriptBase() + f + ' -OutFile ' + f,
-      "$sum = @(((Invoke-RestMethod " + pimSupportScriptSums() + ") -split '\\r?\\n') -match '\\s" + f.replace(/\./g, '\\.') + "$')[0] -replace '\\s.*$', ''; if (-not $sum -or (Get-FileHash .\\" + f + " -Algorithm SHA256).Hash -ne $sum) { throw 'Checksum mismatch -- do not run " + f + "' }",
-      'if ($IsWindows -ne $false) { (Get-AuthenticodeSignature .\\' + f + ').Status }',
-      '# What does this script do? ' + pimScriptDocUrl(n) + '   (add -WhatIf to preview every change)'
-    ];
+    // Owner 2026-10-11: TWO lines only -- line 1 downloads the file, line 2 runs it. "What does this script do?" is the
+    // link shown under every command (pimScriptDocLinks); the checksum list stays published for whoever wants to verify.
+    const lines = ['Invoke-WebRequest ' + pimSupportScriptBase() + f + ' -OutFile ' + f];
     return lines.concat(runs.length ? runs : ['.\\' + f]).join('\n');
   }
 
