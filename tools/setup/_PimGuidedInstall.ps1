@@ -64,6 +64,24 @@ function Get-PimInstallStepTitle([string]$Id) {
     return $Id
 }
 
+function Split-PimInstallDocLines {
+    <#
+      PURE. REQ 100.77 (b): a fix text from the install check (Confirm-PimInstall adds "What does this script do: <url>" under
+      each command block for the CONSOLE) -> @{ text = the same text WITHOUT those lines; docUrl = the first of their urls
+      that is an https://invardia.com/docs/ page, else '' }. Invardia accepts only that origin, so anything else is dropped.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+    $t = "$Text"; $url = ''
+    if (-not $t) { return @{ text = $t; docUrl = '' } }
+    $nl = if ($t.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $keep = foreach ($l in ($t -split "\r?\n")) {
+        $m = [regex]::Match($l, '^\s*What does this script do:\s*(?<u>\S+)\s*$')
+        if ($m.Success) { if (-not $url -and $m.Groups['u'].Value -match '^https://invardia\.com/docs/') { $url = $m.Groups['u'].Value }; continue }
+        $l
+    }
+    return @{ text = (@($keep) -join $nl); docUrl = $url }
+}
+
 function New-PimInstallEvent {
     <# PURE. One reporter event in the contract shape. Never carries a secret (callers pass customer-language text). #>
     param([Parameter(Mandatory)][string]$StepId, [Parameter(Mandatory)][ValidateSet('started', 'ok', 'warning', 'failed', 'skipped', 'waiting', 'completed')][string]$State,
@@ -71,7 +89,14 @@ function New-PimInstallEvent {
           # a managed-tenant install reports the managed-tenant build's own steps, with that build's titles
           [string]$Title = '')
     $e = [ordered]@{ installId = $InstallId; step = [ordered]@{ id = $StepId; title = $(if ("$Title".Trim()) { "$Title".Trim() } else { (Get-PimInstallStepTitle $StepId) }) }; state = $State; message = $Message }
-    if ("$ActionText".Trim() -or "$ActionCommand".Trim()) { $e['action'] = [ordered]@{ text = $ActionText; command = $ActionCommand } }
+    if ("$ActionText".Trim() -or "$ActionCommand".Trim()) {
+        # REQ 100.77 (b), agreed with Invardia 2026-10-11: action.command = the command lines ONLY; the script's doc page is
+        # its own optional field action.docUrl (Invardia renders it as a link under the copy box and refuses a doc line
+        # inside a shown block).
+        $sp = Split-PimInstallDocLines -Text $ActionCommand
+        $e['action'] = [ordered]@{ text = $ActionText; command = $sp.text }
+        if ($sp.docUrl) { $e['action']['docUrl'] = $sp.docUrl }
+    }
     if ($Detail) { $e['detail'] = $Detail }
     if ($Outputs) { $e['outputs'] = $Outputs }
     return $e

@@ -33,8 +33,9 @@
   A ready connection string to the store (e.g. a local SQL Server with Integrated security).
 .PARAMETER SqlServer
   The store's server instead of -ConnectionString. An Azure SQL FQDN connects with a token -- as the
-  admin app (-TenantId -AdminAppId with -AdminCertThumbprint or -AdminSecret) or as the signed-in az user
-  (-UseSignedInAccount, a member of the SQL admin group) -- exactly like Set-PimManagerAccess.ps1.
+  admin app (-TenantId -AdminAppId with -AdminCertThumbprint or -AdminSecret) or as the signed-in person
+  (-UseSignedInAccount: a browser sign-in, or the Invardia Support app session open in this window; a member of the SQL
+  admin group) -- exactly like Set-PimManagerAccess.ps1. No command-line tool and no PowerShell module is needed.
 
   -WhatIf verifies the document, reads what the store holds now, prints the licence, what it replaces and every write it
   would make (the License setting, the install key or its claim), and writes nothing.
@@ -64,10 +65,10 @@ param(
     # Operator 2026-09-23: customer environments have no certificate for the admin app on the setup host --
     # a client secret is accepted instead (same parameter name as Initialize-PimMailSender / Initialize-PimTenantStore).
     [string]$AdminSecret,
-    # 71.33: reach the store as the SIGNED-IN az user (a member of the SQL admin group) instead of -AdminAppId.
+    # 71.33 / 100.41: reach the store as the SIGNED-IN person (browser sign-in, a member of the SQL admin group) instead of -AdminAppId.
     [switch]$UseSignedInAccount,
-    # An Azure SQL access token the caller already holds (e.g. `az account get-access-token --resource
-    # https://database.windows.net/` from the environment's own operator profile). The process's managed identity is
+    # An Azure SQL access token the caller already holds (minted for the resource https://database.windows.net/, e.g. by
+    # the environment's own operator profile). The process's managed identity is
     # switched off for this run, so the store is reached as the token's principal -- never as the machine's MI.
     [string]$SqlAccessToken,
     # 2026-10-06 (with Invardia + SI): the install key Invardia issued with this installation (its bootstrap writes

@@ -9789,8 +9789,8 @@ function Get-PimManagerPermissionHealthBody {
         $hOk = $false
         if ($hSev -ne 'error') { $hSev = 'warning' }
         if ($hSev -eq 'warning') { $hHead = 'Discovery: Azure not visible -- the engine cannot list management groups or subscriptions (grant Reader at the tenant root)' }
-        $hDetail = "Discovery: Azure not visible. The engine identity was refused the Azure management-group / subscription list ($($azNotVisible.Count) item(s)); no Azure resource delegation is defined, so nothing waits on it. Grant Reader (read-only) at the tenant root management group -- run: " +
-                   ($rootFix -replace "`n", ' ; ') + "  $hDetail"
+        $hDetail = "Discovery: Azure not visible. The engine identity was refused the Azure management-group / subscription list ($($azNotVisible.Count) item(s)); no Azure resource delegation is defined, so nothing waits on it. Grant Reader (read-only) at the tenant root management group -- run:`n" +
+                   (Add-PimSupportScriptDocLines -Text $rootFix) + "`n$hDetail"   # REQUIREMENTS 100.77: two lines + the doc line under them, never a ' ; ' one-liner
     }
     if ($engineDenied.Count) {
         $hOk = $false; $hSev = 'error'

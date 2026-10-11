@@ -531,6 +531,11 @@ $fix['engine-root-reader'] = (Get-PimRootAzureFixCommand -TenantId $TenantId -En
 if ($eoid) { $fix['engine-graph'] = $fix['engine-graph'].Replace('<engine job object id>', $eoid) }
 $moid = "$(Get-PimFactValue $facts['manager-rg-reader'] 'objectId')"
 if ($moid) { $fix['manager-rg-reader'] = $fix['manager-rg-reader'].Replace('<Manager managed identity object id>', $moid) }
+# REQUIREMENTS 100.77 (owner 2026-10-11): these fix texts leave as PLAIN TEXT -- this window, the install's progress events
+# (Invardia's install mails, tickets and "Send to customer"), the managed build's step messages -- where no link can sit
+# next to the command. Each published-script block gets ONE line "What does this script do: <doc page>" UNDER its two
+# lines, outside the block (the block itself is unchanged).
+foreach ($fk in @($fix.Keys)) { $fix[$fk] = Add-PimSupportScriptDocLines -Text $fix[$fk] }
 
 # Repair pass: a line that FAILS and has a repair is repaired once, then read again.
 $rows0 = Get-PimInstallVerifyRows -Role $Role -Facts $facts -Fix $fix -LicenceExpected ([bool]$LicenceExpected)

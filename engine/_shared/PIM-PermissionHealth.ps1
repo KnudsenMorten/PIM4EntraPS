@@ -396,11 +396,14 @@ function Get-PimPermissionHealth {
     }
 
     if ($rootReaderMissing) {
-        $detail += "  Discovery cannot see Azure: $IdentityName has no Reader at the tenant root management group ($($azureRoot.scope)), so management groups and subscriptions are not listed. Grant Reader at the tenant root (read-only; the install does this by default) -- run: " + ($azureRoot.readerFix -replace "`n", ' ; ')
+        $detail += "  Discovery cannot see Azure: $IdentityName has no Reader at the tenant root management group ($($azureRoot.scope)), so management groups and subscriptions are not listed. Grant Reader at the tenant root (read-only; the install does this by default) -- run:`n" + (Add-PimSupportScriptDocLines -Text $azureRoot.readerFix) + "`n"
     }
+    # REQUIREMENTS 100.77 + framework 12.10 item 11: the command stays its own two lines (never joined into a ' ; '
+    # one-liner) and its doc page is ONE plain line under them -- this detail also leaves the page as plain text (the
+    # environment report, a copied banner).
     if ($rootUaaMissing) {
         $detail += $(if ($azureNotNeeded) { "  User Access Administrator at the tenant root: not granted -- needed only to assign Azure resource roles (none are defined, so nothing is blocked)." }
-                     else { "  User Access Administrator at the tenant root: not granted -- needed to assign the Azure resource roles you have defined. Grant it with: " + ($azureRoot.userAccessAdminFix -replace "`n", ' ; ') })
+                     else { "  User Access Administrator at the tenant root: not granted -- needed to assign the Azure resource roles you have defined. Grant it with:`n" + (Add-PimSupportScriptDocLines -Text $azureRoot.userAccessAdminFix) + "`n" })
     }
 
     $shape = { param($x) [pscustomobject]@{ role = $x.role; capability = $x.capability; tier = "$($x.tier)"; connector = "$($x.connector)" } }

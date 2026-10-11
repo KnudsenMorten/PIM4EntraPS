@@ -599,12 +599,18 @@ if ($mailEv) { $vArgs['MailDeferredReason'] = "$($mailEv.message)" }
 if (-not $VerifyInstall) { $VerifyInstall = { param([hashtable]$A) @(& (Join-Path $here 'Confirm-PimInstall.ps1') @A) | Where-Object { $_ -and $_.PSObject.Properties['done'] } | Select-Object -Last 1 } }
 $vr = $null
 try { $vr = & $VerifyInstall $vArgs } catch { $vr = $null; Write-Verbose "verify-install threw: $($_.Exception.Message)" }
-$vRows = @(@($vr.rows) | Where-Object { $_ } | ForEach-Object { [ordered]@{ id = "$($_.id)"; title = "$($_.title)"; state = "$($_.state)"; detail = "$($_.detail)"; fix = "$($_.fix)" } })
+# REQ 100.77 (b): each line's fix = its command lines only; the script's doc page rides in its own docUrl (the event's action
+# takes the same split in New-PimInstallEvent).
+$vRows = @(@($vr.rows) | Where-Object { $_ } | ForEach-Object {
+    $sp = Split-PimInstallDocLines -Text "$($_.fix)"
+    $row = [ordered]@{ id = "$($_.id)"; title = "$($_.title)"; state = "$($_.state)"; detail = "$($_.detail)"; fix = "$($sp.text)" }
+    if ($sp.docUrl) { $row['docUrl'] = $sp.docUrl }
+    $row })
 if (-not $vr) { Emit 'verify-install' 'failed' 'the end-of-install check could not run' 'Fix the cause above, then resume the installation:' $resumeCmd; Finish 1 }
 if (-not [bool]$vr.done) {
     $bad = @($vRows | Where-Object { $_.state -eq 'failed' })
     $first = @($bad | Select-Object -First 1)
-    Emit 'verify-install' 'failed' "$($vr.sentence)" "Fix: $(if ($first) { "$($first[0].title) -- " })the command below, then resume the installation:" $(if ($first -and "$($first[0].fix)".Trim()) { "$($first[0].fix)" } else { $resumeCmd }) -Detail ([ordered]@{ lines = $vRows })
+    Emit 'verify-install' 'failed' "$($vr.sentence)" "Fix: $(if ($first) { "$($first[0].title) -- " })the command below, then resume the installation:" $(if ($first -and "$($first[0].fix)".Trim()) { "$($first[0].fix)" + $(if ($first[0].Contains('docUrl')) { "`nWhat does this script do: $($first[0]['docUrl'])" } else { '' }) } else { $resumeCmd }) -Detail ([ordered]@{ lines = $vRows })
     Finish 1
 }
 if (@($vr.warnings).Count) { Emit 'verify-install' 'warning' "$($vr.sentence)" -Detail ([ordered]@{ lines = $vRows }) }

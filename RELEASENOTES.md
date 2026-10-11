@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.593 -- 2026-10-11
+
+- Fix texts: the script's 'What does this script do' link is a line under the command (outside the copy block) in plain text, and its own docUrl field in install events; the Licence page and Set-PimLicense never mention az
+
 ## 2.4.592 -- 2026-10-11
 
 - Graph view + Access map: the board keeps most of the screen and the page scrolls (the detail bar no longer covers it); 'Back to overview' is a prominent button
