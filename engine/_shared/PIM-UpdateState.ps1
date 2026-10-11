@@ -106,8 +106,13 @@ function New-PimUpdateStateRecord {
         # 2026-10-09: 'ahead' = the environment runs a NEWER version than its ring approves (rolled ahead on purpose) --
         # a healthy run that changed nothing. 'attention' = the run stopped on something an operator must decide (e.g. the
         # Invardia replay watermark belongs to another ring) -- not a product failure, and PIM keeps running.
-        [ValidateSet('ok','failed','skipped','ahead','attention')][string]$Outcome = 'ok',
+        # 100.69: 'waiting' = an Invardia update run before the engine claimed the install key (within ~5 min of install):
+        # nothing is wrong, nothing moved, the next run proceeds. Not a success (lastSuccess* carry forward), not a failure.
+        [ValidateSet('ok','failed','skipped','ahead','attention','waiting')][string]$Outcome = 'ok',
         [AllowEmptyString()][AllowNull()][string]$ErrorText,
+        # 100.69: since when this environment has been waiting for its install key (Get-PimInvardiaNoKeyOutcome), so the
+        # next run can tell "a few minutes after install" from "a day and still no key". '' on every other run.
+        [AllowEmptyString()][AllowNull()][string]$WaitingSinceUtc,
         [AllowEmptyString()][AllowNull()][string]$RunId,
         [int]$DurationSeconds = 0,
         [object]$Previous,
@@ -155,7 +160,8 @@ function New-PimUpdateStateRecord {
         # Only ever populated on a failure. An 'ok' record carrying error text is a contradiction the
         # GUI would have to guess about. Redacted through the SAME scrubber the blob record uses when
         # it is available -- error text from a failed source fetch routinely contains a SAS.
-        error              = $(if ($Outcome -in @('failed', 'attention')) {
+        waitingSinceUtc    = "$WaitingSinceUtc".Trim()
+        error              = $(if ($Outcome -in @('failed', 'attention', 'waiting')) {
                                   if (Get-Command Remove-PimTelemetrySecret -ErrorAction SilentlyContinue) {
                                       Remove-PimTelemetrySecret -Text $ErrorText
                                   } else {
@@ -361,7 +367,7 @@ function Get-PimUpdateStateVerdict {
         recorded / malformed / ring / ringLabel / hold / held / behind / failing / stale
         runningVersion / approvedVersion / lastBuiltVersion / targetVersion
         lastRunUtc / lastOutcome / lastAction / lastError / lastSuccessUtc / lastSuccessVersion
-        state ('unknown'|'installed'|'current'|'ahead'|'behind'|'held'|'attention'|'failing') / headline / message / recordedAgeHours
+        state ('unknown'|'installed'|'current'|'ahead'|'behind'|'held'|'waiting'|'attention'|'failing') / headline / message / recordedAgeHours
         attention / ahead (2026-10-09)
         ringSource ('update run'|'deployment'|'') / noRunYet / ringPending / lastRunRing / configuredRing /
         configuredUtc / source / installedVersion
@@ -384,7 +390,8 @@ function Get-PimUpdateStateVerdict {
         failing            = $false
         attention          = $false   # 2026-10-09: the last run stopped on an operator decision (not a failure)
         ahead              = $false   # 2026-10-09: runs a NEWER version than its ring approves (healthy, green)
-        stale              = $false
+        waiting            = $false   # 100.69: the last run waited for the install key (fresh install; not a failure)
+        stale             = $false
         runningVersion     = "$RunningVersion".Trim()
         approvedVersion    = ''
         approvedReason     = ''
@@ -546,6 +553,7 @@ function Get-PimUpdateStateVerdict {
 
     $out.failing   = ($out.lastOutcome -eq 'failed')
     $out.attention = ($out.lastOutcome -eq 'attention')
+    $out.waiting   = ($out.lastOutcome -eq 'waiting')
 
     # ---- behind. Only ever asserted when BOTH versions parse. "I cannot compare these" is not "behind",
     # and an environment wrongly painted amber teaches an operator to ignore the colour.
@@ -566,6 +574,7 @@ function Get-PimUpdateStateVerdict {
     # 2026-10-09: attention after failing (an operator decision, not a fault); ahead is a GREEN state after behind.
     if     ($out.failing)   { $out.state = 'failing' }
     elseif ($out.attention) { $out.state = 'attention' }
+    elseif ($out.waiting)   { $out.state = 'waiting' }   # 100.69: neutral -- a fresh install whose key is not claimed yet
     elseif ($out.held)      { $out.state = 'held' }
     elseif ($out.behind)    { $out.state = 'behind' }
     elseif ($out.ahead)     { $out.state = 'ahead' }
@@ -602,6 +611,8 @@ function Get-PimUpdateStateVerdict {
         $bits.Add("Last update check did not complete (at the '$($out.lastAction)' step) -- $keeps; nothing to do.")
     } elseif ($out.attention) {
         $bits.Add("Last update check needs a look -- $keeps. The details below name the one setting to change.")
+    } elseif ($out.waiting) {
+        $bits.Add("Waiting for the install key -- the engine claims it within about 5 minutes of install, and the next update run proceeds; $keeps.")
     }
     if ($out.stale) {
         $bits.Add('The values below are what was last RECORDED, not a live reading -- the update job has not reported recently.')

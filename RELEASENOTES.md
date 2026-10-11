@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.589 -- 2026-10-11
+
+- Telemetry that is not delivered shows as a warning (Jobs page + one daily alert) instead of green; the install check verifies the scheduler and telemetry; a managing tenant allows a new managed tenant's network within minutes (silent check every tick); an update before the install key is claimed waits instead of failing; script commands are two lines.
+
+- Updates: an update run that starts before the engine has claimed the install key (the first minutes after an install) now shows "waiting for the install key" and ends successfully, with no failure reported; the next run carries on. No key a day after install, or a refused claim, shows as a warning pointing to Settings > Licence.
+
+- MSP: a newly enrolled managed tenant is allowed on the managing tenant's bundle store within minutes -- every engine run on the managing tenant asks Invardia whether a managed tenant changed and allows its new network at once (silent when nothing changed; the daily enrolled-tenants job stays the full reconcile). On the managed tenant, an install whose network is not allowed yet completes with a "waiting for the managing tenant to allow this network (usually within 5 minutes)" follow-up instead of failing, and the pull job retries on its own.
+- Telemetry that does not reach Invardia is no longer shown green: the `uplink` job run is a WARNING (amber) with the reason -- Invardia's refused field list, the transport error, or "no install key stored -- telemetry is anonymous" on a licensed install -- and raises the job alert at most once a day. The end-of-install check now reads back that scheduled jobs are on, the tick has run, and telemetry was delivered (a warning, never a failed install). The scheduler's setup report names the tenant's managing / managed role again.
 ## 2.4.588 -- 2026-10-11
 
 - Managed-tenant install: the downlink job no longer refuses because the as-built job has its own identity (it never picks id-pim-asbuilt or id-pim-sql-*) (HOGYM).

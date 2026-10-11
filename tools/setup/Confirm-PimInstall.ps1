@@ -22,10 +22,18 @@
       manager-rg-reader   the Manager holds Reader on the PIM resource group only (the Environment report)   REPAIRS (one grant attempt; a WARNING, never a stop)
       engine-size         the engine job is at least the size its tenant count needs (framework 12.15; WARNING with the az
                           command for that tier -- 2.0 CPU / 4Gi / 7200 s from 5,000 objects, 4.0 / 8Gi / 14400 s from 15,000)
+      scheduler           'scheduler.jobs' is ON and the tick has run since the install (SchedulerState / the tick's last
+                          execution) -- a WARNING otherwise, never a stop (PIM 100.75)
+      telemetry           'telemetry.uplink' is ON and the uplink job reported (UplinkState): identified with a clean last
+                          result = ok; not run yet = WARNING "first report due within 60 min"; failing / anonymous on a
+                          licensed install = WARNING with the reason; never a stop (PIM 100.75)
       easyauth            Easy Auth is on and every SuperAdmin may sign in
       sql-host-rule       no 'AllowSetupHost' SQL firewall rule is left                                      REPAIRS when this run owns it
       managed tenant only: registered on the managing tenant, its pull subnet allowed, the first pull OK
                           (WARNING with the exact step when the managing tenant cannot be read from here)
+                          -EnrollmentWait (an ENROLLED managed tenant, PIM 100.74): a subnet not allowed yet and a first pull
+                          that has not succeeded are WAITING ("waiting for the managing tenant to allow this network (usually
+                          within 5 minutes)") -- a follow-up, never a failure; the pull job retries every 5 minutes
     A failed line carries its fix: the published scripts (browser sign-in), the PIM Manager page, or the resume command of
     the install that ran -- never a certificate.
 
@@ -75,6 +83,8 @@ param(
     [string]$MasterSubscriptionId,
     [string]$MasterStorageAccount,
     [string]$ManagingTenantStep,
+    # PIM 100.74: an ENROLLED managed tenant -- its managing tenant allows this network by itself within minutes (framework 8.15)
+    [switch]$EnrollmentWait,
     # the command that re-runs this install's verify (and with it every repair): shown as the fix of a repairable line
     [string]$ResumeCommand,
     [string]$ClientId,
@@ -119,6 +129,9 @@ $here = $PSScriptRoot
 # has it loaded, so nothing was loaded here, and the caller's Get-PimLicense ran in THIS script, where its $script: trusted
 # signing certificates do not exist -- every licence read "Invalid", and a production install refused "done" while its licence
 # step had just stored and read back a Valid licence. Loaded here, the certificates live in this script's own scope.
+# PIM 100.75: the feature catalog (Resolve-PimFeatureGate -- 'scheduler.jobs' / 'telemetry.uplink' with the catalog defaults),
+# file scope, BEFORE the licence line below (it loads PIM-License.ps1 itself; the explicit load stays the last word).
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-FeatureCatalog.ps1')
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-License.ps1')
 $null = Start-PimScriptRun -Script 'Confirm-PimInstall'
 $script:cvRc = 0
@@ -312,6 +325,37 @@ function Get-CvFact([string]$Id) {
                 $last = @($ex | Sort-Object { "$($_.properties.startTime)" } -Descending) | Select-Object -First 1
                 return @{ readable = $true; status = "$($last.properties.status)"; at = "$($last.properties.startTime)" }
             }
+            'scheduler' {
+                # PIM 100.75: the switch (catalog default when nothing is stored), the newest job stamp the tick wrote
+                # (SchedulerState jobs[].lastRunUtc / lastFinishedUtc), and the tick job's latest execution (ARM, best-effort).
+                $gates = (Resolve-PimFeatureGate -Raw (Get-CvSetting 'FeatureGates')).gates
+                $ss = Get-CvSetting 'SchedulerState'; if ($ss -is [string]) { try { $ss = $ss | ConvertFrom-Json } catch { $ss = $null } }
+                $newest = $null
+                foreach ($sj in @(Get-PimFactValue $ss 'jobs')) {
+                    foreach ($p in 'lastRunUtc', 'lastFinishedUtc') {
+                        $t = $null; try { if ("$(Get-PimFactValue $sj $p)".Trim()) { $t = ([datetime](Get-PimFactValue $sj $p)).ToUniversalTime() } } catch { $t = $null }
+                        if ($t -and (-not $newest -or $t -gt $newest)) { $newest = $t }
+                    }
+                }
+                $st = ''; $at = ''
+                if (-not $StoreRead) {
+                    try {
+                        $ex = @(Get-CvArm (Get-CvResId 'Microsoft.App/jobs' $TickJobName 'executions') -All | Where-Object { $_ })
+                        $lx = @($ex | Sort-Object { "$($_.properties.startTime)" } -Descending) | Select-Object -First 1
+                        $st = "$($lx.properties.status)"; $at = "$($lx.properties.startTime)"
+                    } catch { $st = '' }
+                }
+                return @{ readable = $true; schedulerOn = [bool]$gates['scheduler.jobs']; lastTickUtc = $(if ($newest) { $newest.ToString('o') } else { '' }); tickStatus = $st; tickAt = $at }
+            }
+            'telemetry' {
+                # PIM 100.75: what the uplink job recorded (UplinkState) + the switches + whether a usable install key is stored.
+                $gates = (Resolve-PimFeatureGate -Raw (Get-CvSetting 'FeatureGates')).gates
+                $us = Get-CvSetting 'UplinkState'; if ($us -is [string]) { try { $us = $us | ConvertFrom-Json } catch { $us = $null } }
+                $raw = "$(Get-CvSetting 'InvardiaInstallKey')".Trim().Trim('"')
+                return @{ readable = $true; uplinkOn = [bool]$gates['telemetry.uplink']; schedulerOn = [bool]$gates['scheduler.jobs']
+                          mode = "$(Get-PimFactValue $us 'mode')"; lastResult = "$(Get-PimFactValue $us 'lastResult')"; lastCycleUtc = "$(Get-PimFactValue $us 'lastCycleUtc')"
+                          lastFailed = (Get-PimFactValue $us 'lastFailed'); keyStored = [bool]$raw; keyValid = [bool]($raw -match '^inv-[A-Za-z0-9_-]{20,100}$') }
+            }
             'engine-size' {
                 # 100.31 / framework 12.15: the job's size vs the tier for the tenant count RECORDED on it at install (its
                 # pim-sizing-* tags); no recorded count -> counted now (Graph $count as the installer). Never a stop.
@@ -472,6 +516,9 @@ $fix['msp-subnet'] = "on the managing tenant: add this tenant's pull subnet id a
 $fix['msp-first-pull'] = "az containerapp job start -n $DownlinkJobName -g $ResourceGroup --subscription $SubscriptionId   (after the managing tenant allows the subnet)"
 $fix['engine-size'] = (Get-PimJobSizeCommand -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -JobName $TickJobName -Cpu '2.0' -Memory '4.0Gi' -ReplicaTimeout 7200) + '   (4.0 CPU / 8Gi / 14400 from 15,000 objects)'
 $fix['engine-first-run'] = 'PIM Manager > Home (the engine status and its last run), or Settings > Job schedule > Run now'
+# PIM 100.75
+$fix['scheduler'] = 'PIM Manager > Settings > Features & edition: Scheduled jobs ON; then Home shows the tick (it runs every 5 minutes)'
+$fix['telemetry'] = 'PIM Manager > Jobs > uplink (its result names the reason; Run now sends at once) -- Settings > Features & edition: Send status telemetry to Invardia ON; Settings > Licence shows the install key'
 
 # ============================================================================ run
 Write-Host "`n==> END-OF-INSTALL VERIFY ($Role) -- $ResourceGroup / $SqlServerFqdn" -ForegroundColor Cyan
@@ -503,11 +550,21 @@ foreach ($r in @($rows0 | Where-Object { ($_.state -eq 'failed' -and $_.id -in '
         if ($f0 -is [System.Collections.IDictionary]) { $f0['refused'] = $true } elseif ($f0) { $f0 | Add-Member -NotePropertyName refused -NotePropertyValue $true -Force }
     }
 }
-$rows = Get-PimInstallVerifyRows -Role $Role -Facts $facts -Fix $fix -LicenceExpected ([bool]$LicenceExpected)
+$rows = Get-PimInstallVerifyRows -Role $Role -Facts $facts -Fix $fix -LicenceExpected ([bool]$LicenceExpected) -EnrollmentWait ([bool]$EnrollmentWait)
 $verdict = Get-PimInstallVerifyVerdict -Rows $rows
+# PIM 100.74: a WAITING line is reported to the install's progress feed as state 'waiting' (the MSP build relays the marker
+# as 'verify-install.<line>' when it asked for markers) -- the install completes with this follow-up instead of failing.
+if ("$env:PIM_SUBSTEP_EVENTS".Trim() -eq '1' -and @($rows | Where-Object { $_.state -eq 'waiting' }).Count) {
+    try {
+        # ALWAYS loaded here (never "if not already defined"): the marker prefix is a $script: value of that file, and a copy
+        # of the function inherited from a caller resolves it in the caller's scope (measured: the prefix came out empty).
+        . (Join-Path $here '_PimInstallTracking.ps1')
+        foreach ($wr in @($rows | Where-Object { $_.state -eq 'waiting' })) { Write-Host (Format-PimSubStepEventLine -Key "$($wr.id)" -Name "$($wr.title)" -State 'waiting' -Detail "$($wr.detail)") }
+    } catch { Write-Verbose "waiting marker not written: $($_.Exception.Message)" }
+}
 Write-Host ''
 foreach ($l in (Format-PimInstallVerifyTable -Rows $rows)) {
-    $c = if ($l -match '^\s+FAILED') { 'Red' } elseif ($l -match '^\s+WARNING') { 'Yellow' } elseif ($l -match '^\s+(OK|REPAIRED)') { 'Green' } elseif ($l -match '^\s+fix:|^\s{14}') { 'Yellow' } else { 'Gray' }
+    $c = if ($l -match '^\s+FAILED') { 'Red' } elseif ($l -match '^\s+(WARNING|WAITING)') { 'Yellow' } elseif ($l -match '^\s+(OK|REPAIRED)') { 'Green' } elseif ($l -match '^\s+fix:|^\s{14}') { 'Yellow' } else { 'Gray' }
     Write-Host $l -ForegroundColor $c
 }
 Write-Host ''

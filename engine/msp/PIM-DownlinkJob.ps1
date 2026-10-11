@@ -799,6 +799,21 @@ function Get-PimDownlinkPullFingerprint {
     } finally { $h.Dispose() }
 }
 
+function Get-PimDownlinkNetworkRefusal {
+    <#
+      PURE. PIM 100.74 (framework 8.15 ENROLL-SIGNAL): did the managing tenant's bundle store REFUSE this network (HTTP 403 /
+      AuthorizationFailure) when the bundle was read? A newly installed (enrolled) managed tenant sees exactly this until its
+      managing tenant's tick allows the pull subnet -- usually within 5 minutes. @{ refused; detail }: refused -> the run ends
+      'failed' with that detail (so the cadence's retry-after-failure runs it again on the next 5-minute triggers) WITHOUT
+      starting the scenario runner. Nothing was pulled or applied; the bundle is never accepted unsigned.
+    #>
+    param([int]$StatusCode = 0, [string]$Message = '')
+    $refused = ($StatusCode -eq 403) -or ("$Message" -match '(?i)\bAuthorizationFailure\b') -or ("$Message" -match '(?i)\b403\b.*not authorized|not authorized.*\b403\b')
+    if (-not $refused) { return @{ refused = $false; detail = '' } }
+    return @{ refused = $true
+              detail = 'the managing tenant''s bundle store refused this network (HTTP 403) -- waiting for the managing tenant to allow this network (usually within 5 minutes); this job retries on its next 5-minute triggers. Nothing was pulled or applied.' }
+}
+
 function Get-PimDownlinkUnchangedDecision {
     # PURE. Skip this pull? @{ skip; reason }. -Applied = the stored DownlinkApplied record (fingerprint, appliedUtc, version).
     param([string]$GateCode, [string]$Fingerprint, [AllowNull()][object]$Applied, [datetime]$NowUtc = [datetime]::UtcNow, [int]$FullEveryHours = 24)

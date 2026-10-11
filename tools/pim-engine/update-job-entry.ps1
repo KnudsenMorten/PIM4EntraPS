@@ -219,14 +219,20 @@ function Send-PimUpdateOutcome {
         # 2026-10-09: 'ahead' (runs a newer version than its ring approves -- healthy, nothing changed) and 'attention'
         # (stopped on an operator decision, e.g. the replay watermark's ring is unknown) are recorded as such in the
         # environment's own state, so the Manager never paints them as a failed update.
-        [ValidateSet('ok','failed','skipped','ahead','attention')][string]$Outcome = 'ok',
-        [string]$ToVersion, [string]$ErrorText
+        # 100.69: 'waiting' = an Invardia run before the engine claimed the install key (exit 0, not a failure).
+        [ValidateSet('ok','failed','skipped','ahead','attention','waiting')][string]$Outcome = 'ok',
+        [string]$ToVersion, [string]$ErrorText,
+        # 100.69: the vendor-telemetry outcome when it must differ from the default mapping (the no-key warning is
+        # 'attention' in the Manager but never a FAILED record at Invardia: it is not a product failure).
+        [ValidateSet('','ok','failed','skipped')][string]$TelemetryOutcome = '',
+        [AllowEmptyString()][string]$WaitingSinceUtc = ''
     )
     if ($script:PimTelemetrySent) { return }        # one record per run, never two
     $script:PimTelemetrySent = $true
     # The vendor telemetry keeps its closed vocabulary: ahead = a good run with nothing to do ('ok'); attention is still
     # something an operator has to act on, so Invardia sees it ('failed', with the actionable text).
-    $telOutcome = switch ($Outcome) { 'ahead' { 'ok' } 'attention' { 'failed' } default { $Outcome } }
+    $telOutcome = switch ($Outcome) { 'ahead' { 'ok' } 'attention' { 'failed' } 'waiting' { 'skipped' } default { $Outcome } }
+    if ($TelemetryOutcome) { $telOutcome = $TelemetryOutcome }
     try {
         if (-not (Get-Command New-PimUpdateTelemetryRecord -ErrorAction SilentlyContinue)) { return }
         $rec = New-PimUpdateTelemetryRecord -Environment $rg -Ring "$($env:PIM_UPDATE_RING)" `
@@ -276,7 +282,7 @@ function Send-PimUpdateOutcome {
                         -RunningVersion $script:PimRunningVersion `
                         -LastBuiltVersion "$($env:PIM_UPDATE_LAST_BUILT)" -TargetVersion $ToVersion `
                         -Action $Action -Outcome $Outcome -ErrorText $ErrorText -Previous $prev `
-                        -Source "$($env:PIM_UPDATE_SOURCE)" `
+                        -Source "$($env:PIM_UPDATE_SOURCE)" -WaitingSinceUtc $WaitingSinceUtc `
                         -DurationSeconds ([int]([datetime]::UtcNow - $script:PimUpdateStartedUtc).TotalSeconds)
         $saved = Save-PimUpdateState -ConnectionString $csState -Record $stateRec
         if ($saved.ok) { Say "update state: recorded ring '$($stateRec.ring)' / $Outcome in pim.Settings" 'DarkGray' }
@@ -431,9 +437,24 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
             -RunningVersion "$($script:PimRunningVersion)" -LastBuiltVersion $lastBuilt -Ring $ring `
             -UnprovenLegacySequence ([int]$seqRes.unprovenLegacy) -HighestKnownVersion $highestKnown `
             -AllowDowngrade:("$($env:PIM_UPDATE_ALLOW_DOWNGRADE)".Trim() -eq '1')   # UPDATE-1.7: this environment's own ring
-    Say "Invardia: $($t.reason)" $(if ($t.ok) { 'DarkGray' } elseif ($t.attention) { 'Yellow' } else { 'Red' })
+    Say "Invardia: $($t.reason)" $(if ($t.ok) { 'DarkGray' } elseif ($t.attention -or $t.noKey) { 'Yellow' } else { 'Red' })
     $script:PimRingApproved = "$($t.version)"; $script:PimRingApprovedReason = "Invardia: $($t.reason)"
     $script:PimInvardiaAhead = [bool]$t.ahead
+    if ($t.noKey) {
+        # 🔒 100.69 -- NO INSTALL KEY YET IS WAITING, NOT FAILED (trial ig798, 2026-10-11: a run ~5 min after install, before
+        # the tick's install-key job claimed the key, exited 1 -> execution Failed + failure telemetry, and nothing was wrong).
+        # Exit 0, no failure telemetry ('skipped'); the next scheduled run proceeds. A day after install with still no key,
+        # or a claim Invardia refused, IS a problem: 'attention' (a warning naming Settings > Licence) -- still exit 0, still
+        # never a failed record at Invardia (it is not a product failure, and a Failed execution would feed the watchdog).
+        $prevState = $null; try { $prevState = Read-PimUpdateState -ConnectionString $csInv } catch { $prevState = $null }
+        $claimState = $null; try { $claimState = Get-PimSqlSetting -ConnectionString $csInv -Name 'InstallKeyClaimState' } catch { $claimState = $null }
+        $installedUtc = ''; try { if ($app -and $app.systemData) { $installedUtc = "$($app.systemData.createdAt)" } } catch { $installedUtc = '' }
+        $nk = Get-PimInvardiaNoKeyOutcome -InstalledUtc $installedUtc -PreviousState $prevState -ClaimState $claimState
+        Say "Invardia: $($nk.reason)" $(if ($nk.outcome -eq 'waiting') { 'DarkGray' } else { 'Yellow' })
+        $script:PimRingApprovedReason = "Invardia: $($nk.reason)"
+        Send-PimUpdateOutcome -Action 'none' -Outcome $nk.outcome -ErrorText "Invardia: $($nk.reason)" -TelemetryOutcome 'skipped' -WaitingSinceUtc "$($nk.waitingSinceUtc)"
+        exit 0
+    }
     if ($t.attention) {
         # 🔒 NEEDS ATTENTION, not a failure: nothing moved, PIM keeps running, and the reason names the one setting to
         # change. Exit 0 -- an operator decision is not a broken updater (a Failed execution would also count toward the

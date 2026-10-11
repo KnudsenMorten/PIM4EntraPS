@@ -189,6 +189,12 @@ if (Test-Path -LiteralPath "$shared\..\coverage\PIM-Coverage.ps1") { . "$shared\
 . "$shared\PIM-UplinkSetup.ps1"
 # §95.4: job 'install-key' -- claim the Invardia install key (OFF unless 'updates.invardia'); the uplink + Pro updates use it.
 . "$shared\PIM-InvardiaUpdate.ps1"
+# PIM 100.75: the scenario profile (Get-PimActiveScenario -- the MSP role) at FILE scope. It was loaded only INSIDE a few
+# functions (Test-PimSchedulerManagingTenant, the licence-check guard, the enrolment job), and a dot-source inside a function
+# is gone when it returns -- so the uplink's setup report found no Get-PimActiveScenario and sent MspRole '' on EVERY install
+# (HOGYM managed tenant 2026-10-11). Its tail also loads the downlink core (engine\msp, when present); no function name of
+# those files is defined by any library above (checked by AST scan), and nothing in the tick runs a pull because it exists.
+. "$shared\PIM-ScenarioProfile.ps1"
 # UPLINK-ENROL (PIM 99): job 'enrolled-tenants' -- the managing tenant allows its enrolled managed tenants' subnets by itself.
 # §97.1: job 'workload-prereqs' -- the engine checks the workload prerequisites itself (read-only) and records them. The runner
 # (the same checks a person's Initialize-PimWorkloadPrereqs.ps1 makes, read-only in self-check mode) is loaded HERE, at file scope.

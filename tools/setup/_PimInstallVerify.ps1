@@ -15,8 +15,10 @@
 
   This file decides; Confirm-PimInstall.ps1 gathers (az / Graph / SQL / Exchange) and repairs. Nothing here touches Azure.
 
-  A line is @{ id; title; required; state = ok | repaired | warning | failed | info; detail; fix }.
-  The install is 'done' only when no REQUIRED line is 'failed'. 'warning' never blocks (it carries the exact next step).
+  A line is @{ id; title; required; state = ok | repaired | warning | waiting | failed | info; detail; fix }.
+  The install is 'done' only when no REQUIRED line is 'failed'. 'warning' never blocks (it carries the exact next step);
+  'waiting' never blocks either -- something OUTSIDE this install finishes it by itself (PIM 100.74: an ENROLLED managed
+  tenant waits for its managing tenant to allow its network; the pull job retries every 5 minutes) -- it is a follow-up.
 #>
 
 # The stable line ids (support tickets and Invardia's status page refer to them), in table order, with the title shown.
@@ -30,6 +32,8 @@ $script:PimInstallVerifyLines = [ordered]@{
     'engine-root-reader' = 'Engine Reader at the tenant root'
     'manager-rg-reader'  = 'Manager Reader on the PIM resource group'
     'engine-first-run'   = 'Engine first run'
+    'scheduler'          = 'Scheduled jobs on + the tick has run'
+    'telemetry'          = 'Telemetry to Invardia delivered'
     'engine-size'        = 'Engine job sized for the tenant'
     'easyauth'           = 'Sign-in (Easy Auth) + SuperAdmins allowed'
     'sql-host-rule'      = 'SQL setup host rule closed'
@@ -38,10 +42,16 @@ $script:PimInstallVerifyLines = [ordered]@{
     'msp-first-pull'     = 'First pull from the managing tenant'
 }
 
+function Get-PimInstallVerifyNetworkWaitText {
+    # PURE. PIM 100.74: the ONE sentence an enrolled managed tenant shows while its managing tenant has not allowed its network.
+    return 'waiting for the managing tenant to allow this network (usually within 5 minutes)'
+}
+
 function Get-PimInstallVerifyLineIds {
-    <# PURE. The line ids a role checks, in order. Single + Master: the common lines. Slave (managed tenant): + the three MSP lines. #>
+    <# PURE. The line ids a role checks, in order. Single + Master: the common lines. Slave (managed tenant): + the three MSP lines.
+       PIM 100.75 (HOGYM 2026-10-11): + 'scheduler' and 'telemetry' for EVERY role -- never required (a warning at most). #>
     param([ValidateSet('Single', 'Master', 'Slave')][string]$Role = 'Single')
-    $ids = @('superadmins', 'updater', 'licence', 'mailsender', 'alerting', 'engine-graph', 'engine-root-reader', 'manager-rg-reader', 'engine-first-run', 'engine-size', 'easyauth', 'sql-host-rule')
+    $ids = @('superadmins', 'updater', 'licence', 'mailsender', 'alerting', 'engine-graph', 'engine-root-reader', 'manager-rg-reader', 'engine-first-run', 'scheduler', 'telemetry', 'engine-size', 'easyauth', 'sql-host-rule')
     if ($Role -eq 'Slave') { $ids += @('msp-registered', 'msp-subnet', 'msp-first-pull') }
     return $ids
 }
@@ -162,8 +172,13 @@ function Get-PimInstallVerifyRows {
       PURE. One row per line of -Role, from the gathered -Facts (keyed by line id; a missing fact = could not be read).
       -Fix: a hashtable of line id -> the exact fix command (built by the gatherer with this environment's values).
       -LicenceExpected: Pro / trial / MSP (the licence line is REQUIRED); otherwise it is 'info' (free edition).
+      -EnrollmentWait: an ENROLLED managed tenant (PIM 100.74, framework 8.15 ENROLL-SIGNAL). Its managing tenant allows the
+       pull subnet BY ITSELF within minutes of the install, so a subnet not allowed yet and a first pull refused (403) are
+       'waiting' (a follow-up, never a failure). The pull job retries on its own 5-minute trigger.
     #>
-    param([ValidateSet('Single', 'Master', 'Slave')][string]$Role = 'Single', [hashtable]$Facts = @{}, [hashtable]$Fix = @{}, [bool]$LicenceExpected = $false)
+    param([ValidateSet('Single', 'Master', 'Slave')][string]$Role = 'Single', [hashtable]$Facts = @{}, [hashtable]$Fix = @{}, [bool]$LicenceExpected = $false,
+          [bool]$EnrollmentWait = $false)
+    $waitText = Get-PimInstallVerifyNetworkWaitText
     $rows = New-Object System.Collections.Generic.List[object]
     $fx = { param($id) if ($Fix.ContainsKey($id)) { "$($Fix[$id])" } else { '' } }
     foreach ($id in (Get-PimInstallVerifyLineIds -Role $Role)) {
@@ -274,6 +289,42 @@ function Get-PimInstallVerifyRows {
                 elseif (-not $st) { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'the engine job has not run yet -- it starts within 5 minutes; check the PIM Manager Home page' (& $fx $id) $false)) }
                 else { $rows.Add((New-PimInstallVerifyRow $id 'warning' "the engine job's latest run: $st -- open the PIM Manager Home page for the reason" (& $fx $id) $false)) }
             }
+            'scheduler' {
+                # PIM 100.75 (HOGYM managed install 2026-10-11): the scheduler is what runs EVERY job (engine, telemetry, licence
+                # request, install key) -- an install that ends with 'scheduler.jobs' off, or a tick that never ran, looks "done"
+                # and does nothing. Never a stop: a WARNING with the next step (right after an install the tick may not have run).
+                # Fact: { readable; schedulerOn; lastTickUtc; tickStatus; tickAt }.
+                if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'warning' $unread (& $fx $id) $false)); break }
+                if ((Get-PimFactValue $f 'schedulerOn') -eq $false) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "the feature 'scheduler.jobs' is OFF -- no job runs here (no engine run, no telemetry, no licence request)" (& $fx $id) $false)); break }
+                $lt = "$(Get-PimFactValue $f 'lastTickUtc')".Trim(); $ts = "$(Get-PimFactValue $f 'tickStatus')".Trim(); $ta = "$(Get-PimFactValue $f 'tickAt')".Trim()
+                if ($lt) { $rows.Add((New-PimInstallVerifyRow $id 'ok' "scheduled jobs on; the tick last ran a job at $lt" '' $false)); break }
+                if ($ts -eq 'Succeeded') { $rows.Add((New-PimInstallVerifyRow $id 'ok' "scheduled jobs on; the tick's latest execution succeeded$(if ($ta) { " ($ta)" })" '' $false)); break }
+                if ($ts) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "scheduled jobs on, but the tick's latest execution: $ts$(if ($ta) { " ($ta)" }) -- open the PIM Manager Home page for the reason" (& $fx $id) $false)); break }
+                $rows.Add((New-PimInstallVerifyRow $id 'warning' 'scheduled jobs on; the tick has not run since the install yet -- it starts within 5 minutes' (& $fx $id) $false))
+            }
+            'telemetry' {
+                # PIM 100.75: the HOGYM install sent NO telemetry and nobody could see why. Read back what the uplink job recorded
+                # (pim.Settings 'UplinkState': mode, lastResult, lastFailed) and the switch. NEVER a failed install (framework
+                # 12.18 / 12.21): every problem is a WARNING with its reason; "not run yet" is a warning naming when it is due.
+                # Fact: { readable; uplinkOn; schedulerOn; mode; lastResult; lastCycleUtc; lastFailed; keyStored; keyValid }.
+                if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'warning' $unread (& $fx $id) $false)); break }
+                if ((Get-PimFactValue $f 'uplinkOn') -eq $false) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "telemetry is switched OFF (feature 'telemetry.uplink') -- Invardia support cannot see this environment" (& $fx $id) $false)); break }
+                if ((Get-PimFactValue $f 'schedulerOn') -eq $false) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "telemetry cannot run: the feature 'scheduler.jobs' is off" (& $fx $id) $false)); break }
+                $mode = "$(Get-PimFactValue $f 'mode')".Trim().ToLowerInvariant(); $last = "$(Get-PimFactValue $f 'lastResult')".Trim(); $at = "$(Get-PimFactValue $f 'lastCycleUtc')".Trim()
+                if (-not $at -or -not $mode) { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'telemetry not confirmed yet (first report due within 60 min)' (& $fx $id) $false)); break }
+                $lf = Get-PimFactValue $f 'lastFailed'; $nf = 0
+                if ($null -ne $lf -and "$lf" -ne '') { [void][int]::TryParse("$lf", [ref]$nf) } elseif ($last -match ',\s*(\d+)\s+failed\b') { $nf = [int]$Matches[1] }
+                if ($mode -eq 'disabled') { $rows.Add((New-PimInstallVerifyRow $id 'warning' "telemetry is switched OFF ($last)" (& $fx $id) $false)); break }
+                if ($nf -gt 0) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "telemetry not delivered: $last (last report $at)" (& $fx $id) $false)); break }
+                $kStored = [bool](Get-PimFactValue $f 'keyStored'); $kValid = [bool](Get-PimFactValue $f 'keyValid')
+                if ($mode -ne 'identified') {
+                    if ($kStored -and -not $kValid) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "an install key is stored but it is not a valid Invardia install key -- telemetry is anonymous (last report $at)" (& $fx $id) $false)); break }
+                    if ($kValid) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "an install key is stored, but the last report ($at) went anonymous -- the next hourly report is identified; if it stays anonymous the key is not read" (& $fx $id) $false)); break }
+                    if ($LicenceExpected) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "no install key stored -- telemetry is anonymous; the engine claims one every 6 h (last report $at)" (& $fx $id) $false)); break }
+                    $rows.Add((New-PimInstallVerifyRow $id 'ok' "anonymous (no licence -- the community report); last report $at" '' $false)); break
+                }
+                $rows.Add((New-PimInstallVerifyRow $id 'ok' "identified; last report $at$(if ($last) { ": $last" })" '' $false))
+            }
             'engine-size' {
                 # 100.31 / framework 12.15: a WARNING (never a stop) when the engine job is below the size its RECORDED tenant
                 # count needs, with the az command for THAT tier. Fact: { readable; undersized; reason; command } from
@@ -299,13 +350,15 @@ function Get-PimInstallVerifyRows {
             }
             { $_ -in 'msp-registered', 'msp-subnet' } {
                 $v = Get-PimFactValue $f 'value'
+                if ($EnrollmentWait -and $id -eq 'msp-subnet' -and $v -ne $true) { $rows.Add((New-PimInstallVerifyRow $id 'waiting' $waitText '' $false)); break }
                 if (-not $readable -or $null -eq $v) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "the managing tenant cannot be read from this tenant -- $(Get-PimFactValue $f 'step')" (& $fx $id))); break }
                 if ($v -eq $true) { $rows.Add((New-PimInstallVerifyRow $id 'ok' "$(Get-PimFactValue $f 'detail')")) }
                 else { $rows.Add((New-PimInstallVerifyRow $id 'failed' "$(Get-PimFactValue $f 'detail')" (& $fx $id))) }
             }
             'msp-first-pull' {
-                if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'warning' $unread (& $fx $id))); break }
                 $st = "$(Get-PimFactValue $f 'status')".Trim()
+                if ($EnrollmentWait -and $st -ne 'Succeeded') { $rows.Add((New-PimInstallVerifyRow $id 'waiting' "$waitText -- the pull job retries every 5 minutes$(if ($st) { " (latest run: $st)" })" '' $false)); break }
+                if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'warning' $unread (& $fx $id))); break }
                 if ($st -eq 'Succeeded') { $rows.Add((New-PimInstallVerifyRow $id 'ok' "the pull job's latest run succeeded$(if ("$(Get-PimFactValue $f 'at')".Trim()) { " ($(Get-PimFactValue $f 'at'))" })")) }
                 elseif (-not $st) { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'the pull job has not run yet -- it pulls once the managing tenant allows this subnet' (& $fx $id))) }
                 else { $rows.Add((New-PimInstallVerifyRow $id 'warning' "the pull job's latest run: $st -- usually the managing tenant has not allowed this subnet yet" (& $fx $id))) }
@@ -319,7 +372,7 @@ function Get-PimInstallVerifyVerdict {
     <# PURE. @{ done; failed[]; warnings[]; sentence }. done = no REQUIRED line failed. #>
     param([object[]]$Rows = @())
     $failed = @(@($Rows) | Where-Object { $_.required -and $_.state -eq 'failed' } | ForEach-Object { $_.id })
-    $warn = @(@($Rows) | Where-Object { $_.state -eq 'warning' } | ForEach-Object { $_.id })
+    $warn = @(@($Rows) | Where-Object { $_.state -in 'warning', 'waiting' } | ForEach-Object { $_.id })
     $sentence = if ($failed.Count) { "The installation is NOT done: $($failed.Count) required check(s) failed ($($failed -join ', ')). Run the fix shown for each, then run the verify again." }
                 elseif ($warn.Count) { "The installation is done, with $($warn.Count) follow-up(s): $($warn -join ', ')." }
                 else { 'The installation is done: every check passed.' }

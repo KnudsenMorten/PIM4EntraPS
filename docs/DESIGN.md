@@ -9772,6 +9772,21 @@ The record format and the sending rules are the framework's uplink client (one s
 ships a byte-identical copy of it, checked by a test. A report that fails to send is sent again on the next cycle, and a
 failure to send never affects any other job. An endpoint other than Invardia's can be configured, but it must be https.
 
+**Telemetry that is not delivered is visible (2026-10-11).** The `uplink` run is a *warning* -- its own run status, amber
+on the Jobs page, never *failed* (a telemetry problem is not an engine failure) and never a green *ok* -- when telemetry is
+on and:
+- a report was refused or could not be sent: the run's result says "telemetry not delivered:" with Invardia's answer (the
+  refused field list) or the transport error;
+- an install key is stored but cannot be used, so the reports went anonymous;
+- a Pro, trial or MSP licence is registered but no install key is stored: "no install key stored -- telemetry is anonymous;
+  the engine claims one every 6 h", with the last answer of the key claim.
+
+The warning raises the job alert at most once a day while it lasts: the alert text is a fixed sentence per kind of problem,
+so the identical-alert pause of one day holds every repeat; the specifics are in the mail's headline. A clean run ends it by
+itself. The telemetry state keeps the last result and the number of reports that failed, which the end-of-install check
+reads (30.1). The scheduler loads the deployment-scenario profile when it starts, so the setup report names the tenant's
+role (managing / managed) instead of an empty one.
+
 **Opt-out and opt-in (2.4.491).**
 - **Switched off after it was on:** PIM sends ONE *optout* report with the same credential, then nothing more. If that
   report is not delivered, it is tried again on the next cycle.
@@ -9830,6 +9845,12 @@ with the pull. PIM also keeps HOW: build in its own registry, schema, roll, heal
   again until the licence changes, so a copied licence cannot keep retrying.
 - **The pull.** The nightly update job sends the licence text and the install key and receives the manifest for its
   ring. If nothing is released, nothing moves.
+- **Before the install key exists.** An update run that starts before the engine has claimed the key (the first few
+  minutes after an install) is **waiting**, not failed. It records "waiting for the install key", sends nothing to
+  Invardia, ends successfully and reports no failure. The next scheduled run carries on as normal. Two cases are a real
+  problem and are shown as a warning ("update check needs a look"), still not as a failure: no key a day after the
+  install, or a claim Invardia refused. The warning says what to do: check the install key status in Settings > Licence.
+  A key that is present but refused, a signature that does not verify, or a network failure still fails the run as before.
 - **What is checked before anything moves:**
   - the signature (RS256 over the manifest bytes), by a key built into PIM — never a key fetched at run time;
   - the product, the kind and the version;
@@ -9864,6 +9885,8 @@ table and does not call the install done while a required line fails.
 | Engine Microsoft Graph permissions | yes | no (the published permissions script) |
 | Engine Reader at the tenant root | no -- a warning with the exact command for a Global Administrator | one grant attempt |
 | Engine first run | no (a follow-up) | no |
+| Scheduled jobs on + the tick has run (the scheduler feature switch, the tick's recorded job stamps or its last execution) | no -- a warning with the next step | no |
+| Telemetry to Invardia delivered (the telemetry switch, then what the `uplink` job recorded: identified and clean = ok; no report yet = "telemetry not confirmed yet (first report due within 60 min)"; failing, or anonymous although an install key is stored or expected = a warning with the reason) | no -- telemetry never fails an install | no |
 | Sign-in: Easy Auth on, every SuperAdmin allowed | yes | no |
 | SQL setup-host firewall rule removed | yes | yes, when this run opened it |
 | Managed tenant: registered, pull subnet allowed, first pull | a warning with the exact step when the managing tenant cannot be read from the managed tenant | no |

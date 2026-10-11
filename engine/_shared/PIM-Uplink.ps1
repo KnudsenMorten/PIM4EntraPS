@@ -28,11 +28,13 @@
     * setup (PIM 100.10, framework 8.7): identified only, feature 'telemetry.setup', daily + on every change -- the control
       list, permission counts (+ Get Started steps / findings with PIM_UPLINK_SETUP_EXTENDED=1). PIM-UplinkSetup.ps1.
     * every record carries Ring: PIM_UPDATE_RING, else the ring recorded in pim.Settings['UpdateState'] (Resolve-PimUplinkRing).
-  🔒 OFF until the feature 'telemetry.uplink' is switched on. The owner decided "ON by default" for Community
-     (2026-10-03, relayed in Invardia's design doc); PIM ships it OFF until the operator confirms it in the PIM session,
-     exactly like 'licence.autoRequest' -- a decision relayed by another session is not that confirmation.
-  🔒 A failed send never fails anything else: the job reports it in its detail, keeps its watermark (the runs are sent
-     on the next cycle), and the next heartbeat is not skipped.
+  🔒 Gated by the feature 'telemetry.uplink', which is ON by default (defaultEnabled=$true in PIM-FeatureCatalog.ps1;
+     owner decision 2026-10-04, framework UPDATE-1.4) and depends on 'scheduler.jobs'. Switching it off sends ONE opt-out.
+  🔒 A failed send never fails anything else: the job keeps its watermark (the runs are sent on the next cycle) and the
+     next heartbeat is not skipped. PIM 100.75 (HOGYM 2026-10-11: a managed install sent NOTHING and the Jobs page was
+     green): a send that failed, or an install that should be identified but sends anonymously (no / a malformed install
+     key on a licensed install), is a WARNING run (amber on the Jobs page, one alert mail a day at most) -- never a failed
+     run (framework 12.18 / 12.21: a telemetry problem is not an engine failure). Get-PimUplinkDeliveryWarning decides.
 #>
 
 $script:PimUplinkProduct = 'pim-manager'
@@ -65,6 +67,7 @@ function Get-PimUplinkRunOutcome {
     if ($st -eq 'failed' -or ($Run.PSObject.Properties['ok'] -and -not [bool]$Run.ok)) { return 'failed' }
     if ($Run.PSObject.Properties['held'] -and [bool]$Run.held) { return 'warning' }
     if ($st -eq 'held') { return 'warning' }
+    if ($st -eq 'warning') { return 'warning' }   # PIM 100.75: a run that declared a warning about itself
     return 'ok'
 }
 
@@ -450,9 +453,9 @@ function Invoke-PimUplinkCycle {
         $msg = if ($ok) { "telemetry is off -- the opt-out was reported to Invardia; nothing else is sent" } else { "telemetry is off -- the opt-out report was NOT delivered ($why); it is retried next cycle, nothing else is sent" }
         $ns = [ordered]@{}; if ($st0) { foreach ($pp in $st0.PSObject.Properties) { $ns[$pp.Name] = $pp.Value } }
         if ($ok) { $ns['consent'] = 'off'; $ns['consentUtc'] = $NowUtc.ToString('o') }
-        $ns['lastCycleUtc'] = $NowUtc.ToString('o'); $ns['lastResult'] = $msg
+        $ns['lastCycleUtc'] = $NowUtc.ToString('o'); $ns['lastResult'] = $msg; $ns['lastFailed'] = $(if ($ok) { 0 } else { 1 })
         & $SetSetting 'UplinkState' ([pscustomobject]$ns)
-        return @{ ran = $true; mode = 'disabled'; sent = $(if ($ok -and $rec) { 1 } else { 0 }); failed = $(if ($ok) { 0 } else { 1 }); heartbeat = $false; consent = $(if ($ok) { 'optout' } else { '' }); message = $msg }
+        return @{ ran = $true; mode = 'disabled'; sent = $(if ($ok -and $rec) { 1 } else { 0 }); failed = $(if ($ok) { 0 } else { 1 }); heartbeat = $false; consent = $(if ($ok) { 'optout' } else { '' }); message = $msg; reasons = @($(if (-not $ok) { "optout: $why" })) }
     }
     $iid = "$(& $GetSetting 'TelemetryInstallId')".Trim()
     if ($iid -notmatch '^[0-9a-fA-F-]{36}$') { $iid = [guid]::NewGuid().ToString(); & $SetSetting 'TelemetryInstallId' $iid }
@@ -576,8 +579,78 @@ function Invoke-PimUplinkCycle {
     }
     $msg = "$($sender.Mode): $sent sent$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($setupSent) { ' (setup report)' })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })$supNote"
     & $SetSetting 'UplinkState' ([pscustomobject][ordered]@{ mode = $sender.Mode; lastHeartbeatUtc = $lastHb; runWatermarkUtc = $floor; jobMarks = [pscustomobject]$marks
-                                                             consent = $consent; lastCycleUtc = $NowUtc.ToString('o'); lastResult = $msg })
-    return @{ ran = $true; mode = $sender.Mode; sent = $sent; failed = $failed; left = $left; heartbeat = $hbSent; setup = $setupSent; message = $msg }
+                                                             consent = $consent; lastCycleUtc = $NowUtc.ToString('o'); lastResult = $msg
+                                                             # PIM 100.75: read by the end-of-install verify (Confirm-PimInstall 'telemetry')
+                                                             lastFailed = $failed })
+    return @{ ran = $true; mode = $sender.Mode; sent = $sent; failed = $failed; left = $left; heartbeat = $hbSent; setup = $setupSent; message = $msg; reasons = @($why) }
+}
+
+function Get-PimUplinkDeliveryWarning {
+    <#
+      PURE. PIM 100.75 (HOGYM managed install 2026-10-11: NO telemetry arrived at Invardia and nobody could see why -- the
+      uplink job never threw, so every run was recorded green). Is this uplink run a WARNING, and what does it say?
+        -Enabled         the feature 'telemetry.uplink'                 (off -> never a warning; the opt-out is its own report)
+        -Cycle           Invoke-PimUplinkCycle's result                 (mode, failed, reasons)
+        -StoredKeyRaw    pim.Settings 'InvardiaInstallKey' as stored    ('' = none stored)
+        -ResolvedKey     Resolve-PimInvardiaInstallKey                  ('' = none usable: missing or malformed)
+        -LicenceRegistered  a Pro / trial / MSP licence is registered for this tenant
+        -ClaimState      pim.Settings 'InstallKeyClaimState'            (the install-key job's last answer, named in the text)
+      Returns @{ warning; kind; reason; note; summary }:
+        kind     send-failed | key-malformed | key-missing | not-identified (joined with '+' when several hold)
+        reason   "telemetry not delivered: <Invardia's 422 field list / the transport error>" and / or the key sentence
+        note     the key sentence alone (shown in the run detail even when nothing else is wrong)
+        summary  a STABLE sentence per kind (no counts, no times) -- the alert's text, so the alert path's identical-alert
+                 debounce (1440 min) sends it at most once a day while it lasts
+      A telemetry problem is never a failed run (framework 12.18 / 12.21). Never throws.
+    #>
+    param([bool]$Enabled, [AllowNull()][object]$Cycle, [string]$StoredKeyRaw = '', [string]$ResolvedKey = '',
+          [bool]$LicenceRegistered = $false, [AllowNull()][object]$ClaimState = $null)
+    $out = [ordered]@{ warning = $false; kind = ''; reason = ''; note = ''; summary = '' }
+    try {
+        if (-not $Enabled -or $null -eq $Cycle) { return [pscustomobject]$out }
+        $mode = "$(Get-PimUplinkField $Cycle 'mode')".Trim()
+        if ($mode -eq 'disabled') { return [pscustomobject]$out }
+        $failed = 0; try { $failed = [int](Get-PimUplinkField $Cycle 'failed') } catch { $failed = 0 }
+        $reasons = @(@(Get-PimUplinkField $Cycle 'reasons') | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
+        $raw = "$StoredKeyRaw".Trim().Trim('"'); $key = "$ResolvedKey".Trim()
+        $kinds = New-Object System.Collections.Generic.List[string]
+        $texts = New-Object System.Collections.Generic.List[string]
+        $sums  = New-Object System.Collections.Generic.List[string]
+        if ($failed -gt 0) {
+            $kinds.Add('send-failed')
+            $why = if ($reasons.Count) { @($reasons | Select-Object -First 3) -join '; ' } else { "$failed report(s) were refused or could not be sent" }
+            $texts.Add("telemetry not delivered: $why")
+            $sums.Add('Telemetry to Invardia is not being delivered: the uplink refused the reports or could not be reached.')
+        }
+        $claim = ''
+        if ($ClaimState) {
+            $ca = "$(Get-PimUplinkField $ClaimState 'action')".Trim(); $cm = "$(Get-PimUplinkField $ClaimState 'message')".Trim()
+            if ($ca -and $ca -ne 'claimed') { $claim = " (the last claim: $ca$(if ($cm) { " -- $cm" }))" }
+        }
+        if (-not $key) {
+            if ($raw) {
+                $kinds.Add('key-malformed')
+                $out.note = "an install key is stored but it is not a valid Invardia install key -- telemetry is anonymous; the engine claims one every 6 h$claim"
+                $sums.Add('Telemetry to Invardia is anonymous: the stored install key is not valid.')
+            } elseif ($LicenceRegistered) {
+                $kinds.Add('key-missing')
+                $out.note = "no install key stored -- telemetry is anonymous; the engine claims one every 6 h$claim"
+                $sums.Add('Telemetry to Invardia is anonymous: no install key is stored for this licensed install.')
+            }
+        } elseif ($mode -and $mode -ne 'identified') {
+            $kinds.Add('not-identified')
+            $out.note = "an install key is stored but telemetry ran '$mode' -- Invardia cannot tell which environment sent it"
+            $sums.Add('Telemetry to Invardia is not identified although an install key is stored.')
+        }
+        if ($out.note) { $texts.Add($out.note) }
+        if ($kinds.Count) {
+            $out.warning = $true
+            $out.kind = ($kinds.ToArray() -join '+')
+            $out.reason = ($texts.ToArray() -join ' | ')
+            $out.summary = ($sums.ToArray() -join ' ')
+        }
+    } catch { }
+    return [pscustomobject]$out
 }
 
 function Invoke-PimUplinkJob {
@@ -641,5 +714,14 @@ function Invoke-PimUplinkJob {
     $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
             -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $(if ($WhatIf) { 0 } else { 2500 }) `
             -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints
-    [pscustomobject]@{ ran = [bool]$r.ran; whatIf = [bool]$WhatIf; detail = "uplink: $($r.message)" }
+    # PIM 100.75: a failed send / an install that should be identified but is anonymous = a WARNING run (never a failure).
+    $rawKey = ''; try { $rawKey = "$(& $get 'InvardiaInstallKey')".Trim() } catch { $rawKey = '' }
+    $claimSt = $null; try { $claimSt = & $get 'InstallKeyClaimState'; if ($claimSt -is [string]) { $claimSt = $claimSt | ConvertFrom-Json } } catch { $claimSt = $null }
+    $licReg = [bool]$proHere
+    if (-not $licReg -and $lic) { try { $licReg = [bool]("$($lic.Status)" -in @('Valid', 'Grace')) } catch { } }
+    $w = Get-PimUplinkDeliveryWarning -Enabled $on -Cycle $r -StoredKeyRaw $rawKey -ResolvedKey "$key" -LicenceRegistered $licReg -ClaimState $claimSt
+    $detail = "uplink: $($r.message)"
+    if ($w.warning) { $detail += " -- WARNING: $($w.reason)" }
+    [pscustomobject]@{ ran = [bool]$r.ran; whatIf = [bool]$WhatIf; detail = $detail
+                       warning = [bool]$w.warning; warningKind = "$($w.kind)"; warningSummary = "$($w.summary)" }
 }

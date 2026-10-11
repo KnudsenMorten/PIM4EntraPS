@@ -257,7 +257,7 @@ function Get-PimXlsxColumnName {
     return $s
 }
 
-function New-PimXlsxSheetXml {
+function New-PimTableExportSheetXml {
     <# PURE. One worksheet: title row, meta rows, a blank row, the bold header (frozen, autofilter), the rows. Returns @{ xml; filterRef }. #>
     param([Parameter(Mandatory)][object]$Section, [Parameter(Mandatory)][string[]]$MetaLines, [Parameter(Mandatory)][string]$Title)
     $cols = @($Section.columns); $nc = $cols.Count
@@ -318,7 +318,7 @@ function ConvertTo-PimXlsxBytes {
     foreach ($s in @($Model.sections)) {
         $i++
         $name = Get-PimXlsxSheetName -Name "$($s.heading)" -Used $used
-        $x = New-PimXlsxSheetXml -Section $s -MetaLines $meta -Title "$($Model.title)"
+        $x = New-PimTableExportSheetXml -Section $s -MetaLines $meta -Title "$($Model.title)"
         $sheets.Add([pscustomobject]@{ index = $i; name = $name; xml = $x.xml; filterRef = $x.filterRef })
     }
     $ct = New-Object System.Text.StringBuilder

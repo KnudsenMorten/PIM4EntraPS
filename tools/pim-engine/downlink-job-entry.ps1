@@ -338,6 +338,15 @@ if (-not $cadenceErr) {
         JobLog ("COMPARE: {0}" -f $same.reason)
     } catch {
         $pullFp = ''
+        # PIM 100.74: a NETWORK refusal by the managing tenant's bundle store (403) -- a new enrolled tenant waits for its managing
+        # tenant to allow this subnet (usually within 5 minutes). One WARN line, the run ends 'failed' so the cadence retries it
+        # on the next triggers, and the scenario runner is not started only to fail the same way with a page of errors.
+        $__sc = 0; try { if ($_.Exception.Response) { $__sc = [int]$_.Exception.Response.StatusCode } } catch { $__sc = 0 }
+        $__nr = Get-PimDownlinkNetworkRefusal -StatusCode $__sc -Message ("$($_.Exception.Message) $($_.ErrorDetails.Message)")
+        if ($__nr.refused) {
+            JobLog ("NETWORK: {0}" -f $__nr.detail) 'WARN'
+            Stop-DownlinkJob -Code 1 -State failed -Detail $__nr.detail
+        }
         JobLog ("COMPARE: could not fingerprint this pull ({0}) -- the full pull runs" -f $_.Exception.Message) 'WARN'
     }
 }
