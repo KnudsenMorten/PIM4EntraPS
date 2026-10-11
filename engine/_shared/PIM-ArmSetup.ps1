@@ -226,10 +226,26 @@ function Invoke-PimSetupRest {
     $global:PimSetupRestLastError = ''
     $result = $null
     $failure = $null
-    try {
-        if ($global:PIM_SetupRestStub) { $result = & $global:PIM_SetupRestStub $Method $Url $Body $Resource ([bool]$All) }
-        else { $result = Invoke-PimRest -Method $Method -Url $Url -Body $Body -Resource $Resource -All:$All -Headers $Headers }
-    } catch { $failure = $_ }
+    # 2026-10-11 (HOGYM managed install, live): ONE dropped connection on an ARM GET ("HTTP 0 : Unable to read data from the
+    # transport connection: An existing connection was forcibly closed") stopped the whole deploy. A transport failure is
+    # retried up to 3 times with a growing wait. Only idempotent verbs (GET / PUT / PATCH / DELETE / HEAD) -- a POST is an
+    # action (start a job, list keys) and is not repeated. HTTP errors (4xx / 5xx answers) are NOT retried here.
+    $pimWaits = @(3, 8, 15)
+    $pimAttempt = 0
+    $pimRetryable = ("$Method".ToUpperInvariant() -in @('GET', 'PUT', 'PATCH', 'DELETE', 'HEAD'))
+    while ($true) {
+        $failure = $null
+        try {
+            if ($global:PIM_SetupRestStub) { $result = & $global:PIM_SetupRestStub $Method $Url $Body $Resource ([bool]$All) }
+            else { $result = Invoke-PimRest -Method $Method -Url $Url -Body $Body -Resource $Resource -All:$All -Headers $Headers }
+        } catch { $failure = $_ }
+        if ($null -eq $failure) { break }
+        $pimTm = "$($failure.Exception.Message)"
+        $pimTransport = ($pimTm -match '(?i)HTTP 0\b|transport connection|forcibly closed|connection was closed|connection reset|timed out|timeout|SSL connection could not|No such host is known|actively refused|name or service not known')
+        if (-not ($pimRetryable -and $pimTransport -and $pimAttempt -lt $pimWaits.Count)) { break }
+        Write-Host ("    transport error on {0} (attempt {1}): {2} -- retrying in {3} s" -f $Method, ($pimAttempt + 1), ($pimTm -split "`n")[0], $pimWaits[$pimAttempt]) -ForegroundColor DarkYellow
+        Start-Sleep -Seconds $pimWaits[$pimAttempt]; $pimAttempt++
+    }
     if ($null -eq $failure) { return $result }
     $msg = "$($failure.Exception.Message)"
     $global:PimSetupRestLastError = $msg
