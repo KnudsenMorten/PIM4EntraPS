@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.588 -- 2026-10-11
+
+- Managed-tenant install: the downlink job no longer refuses because the as-built job has its own identity (it never picks id-pim-asbuilt or id-pim-sql-*) (HOGYM).
+
 ## 2.4.587 -- 2026-10-11
 
 - Install fixes from a live managed install: a resumed install is not refused by its own ring gate; a failed side step no longer rolls a healthy app back; under Invardia's installer a failure prints one sentence, the fix and one resume line; no az commands in fix texts.

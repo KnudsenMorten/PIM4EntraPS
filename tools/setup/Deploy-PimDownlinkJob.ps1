@@ -354,7 +354,9 @@ if ($Scenario -eq 'S6' -and -not $WhatIfPreference) {
 # it is REMOVED.
 if (-not "$IdentityResourceId".Trim() -and -not $WhatIfPreference) {
     $uamis = @(Get-PimArmIdentities -SubscriptionId $script:sub -ResourceGroup $ResourceGroup | ForEach-Object { [pscustomobject]@{ id = "$($_.id)"; name = "$($_.name)" } })
-    $pick = @($uamis | Where-Object { "$($_.name)" -like 'id-pim*' })
+    # 2026-10-11 (HOGYM, live): the as-built job's own identity (id-pim-asbuilt, §100.61) and the SQL identity are never the
+    # runtime identity -- picking among them refused "2 user-assigned identities" on every managed install with the as-built job.
+    $pick = @($uamis | Where-Object { "$($_.name)" -like 'id-pim*' -and "$($_.name)" -notmatch '^id-pim-(asbuilt|sql-)' })
     if (-not $pick.Count) { $pick = @($uamis) }
     if ($pick.Count -eq 1) {
         $IdentityResourceId = "$($pick[0].id)"
