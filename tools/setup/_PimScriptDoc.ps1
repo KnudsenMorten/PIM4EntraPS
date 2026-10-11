@@ -2,7 +2,8 @@
 <#
 .SYNOPSIS
     Framework 12.7 SCRIPT-DOC-1 + 12.10 item 11 -- the ONE place that knows where a PIM script's documentation page,
-    download and checksum list live, the command form every surface shows (save, verify, preview, run), and the run
+    download and checksum list live, the command form every surface shows (line 1 download, line 2+ run -- owner
+    2026-10-11), and the run
     frame every script a person runs uses (the first line "<Script> version <x.y.z> - documentation: <page>",
     REQUIREMENTS 100.52, and a local transcript).
 
@@ -97,13 +98,11 @@ function Get-PimSupportScriptUrl {
 
 function Get-PimSupportScriptCommand {
     <#
-      PURE. The lines every surface shows for a published script (12.10 item 11: save, verify, read, run -- never
-      pipe-to-execute), in this order:
-        Invoke-WebRequest <url> -OutFile <Script>.ps1                                        (save)
-        <checksum check against the published SHA256SUMS.txt -- throws when it does not match> (verify)
-        <the signature status, on Windows>                                                     (verify)
-        # What does this script do? <doc page>   (add -WhatIf to preview every change)        (read)
-        <-Run lines>                                                                           (run)
+      PURE. The lines every surface shows for a published script (owner 2026-10-11, framework 12.10 item 11):
+        Invoke-WebRequest <url> -OutFile <Script>.ps1        line 1: download the file from Invardia
+        <-Run lines>                                          line 2 (and more if a flow needs them): the cmdlet(s)
+      Never a checksum / signature / comment line in the shown block, never pipe-to-execute: the documentation page is
+      the link shown NEXT to the command; SHA256SUMS.txt and the signatures stay published for whoever verifies.
       The run line is LAST on purpose: callers that append parameters to the returned text extend the run line.
       -Run: the command line(s) that run the saved file, e.g. ".\Grant-PimEnginePermissions.ps1 -TenantId '...'";
       none = ".\<Script>.ps1". Returns string[] (join with a newline to show / send).

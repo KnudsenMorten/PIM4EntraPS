@@ -177,7 +177,19 @@ function Grant-PimMiSql {
     $sid = ConvertTo-PimSqlSidFromAppId -AppId $MiAppId
     $cs  = "Server=tcp:$SqlServerFqdn,1433;Database=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30"
     $c = New-PimSqlConnection -ConnectionString $cs
-    $c.Open()
+    # REQ 100.76: signed in, a refused login right after this run made the person (or its group) the server's admin is
+    # usually Entra replication -- mint a new token and try again for about two minutes before giving up.
+    $tries = if ($UseSignedInAccount) { 6 } else { 1 }
+    for ($i = 1; $i -le $tries; $i++) {
+        try { $c.Open(); break }
+        catch {
+            if ($i -ge $tries -or "$($_.Exception.Message)" -notmatch '(?i)Login failed|18456') { throw }
+            Write-Host "    SQL refused the sign-in (attempt $i of $tries) -- a new admin right takes a moment to reach SQL; new token in 20 s" -ForegroundColor Yellow
+            Start-Sleep -Seconds 20
+            [void](Connect-PimSignedInSql -TenantId $TenantId)
+            $c = New-PimSqlConnection -ConnectionString $cs
+        }
+    }
     try {
         # BUG-47 -- this used to be an unconditional DROP USER + CREATE USER, which is NOT
         # idempotent and fails on the FIRST re-run of a working environment:

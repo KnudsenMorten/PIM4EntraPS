@@ -27,7 +27,7 @@
 
 Set-StrictMode -Off
 # SCRIPT-DOC-1 (framework 12.7 + 12.10 item 11): every command this file builds for a person to run comes from the ONE
-# command form in tools\setup\_PimScriptDoc.ps1 -- save, verify the checksum, read the documentation page, run.
+# command form in tools\setup\_PimScriptDoc.ps1 -- line 1 download, line 2 run (owner 2026-10-11; doc page linked next to it).
 . (Join-Path $PSScriptRoot '..\..\tools\setup\_PimScriptDoc.ps1')
 
 # The Graph application permissions the engine's own code paths require, each mapped to the

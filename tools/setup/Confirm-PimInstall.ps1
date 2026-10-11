@@ -505,16 +505,16 @@ $fix['licence'] = (@('PIM Manager > Settings > Licence: upload the .pimlicense f
 $mailCmd = New-PimMailSenderCommand -TenantId $TenantId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -TickJobName $TickJobName -ManagerAppName $ManagerApp -SqlServerFqdn $SqlServerFqdn
 $fix['mailsender'] = (@('PIM Manager > Get Started > Mail sender (shared mailbox: an Exchange or Global Administrator runs this in a browser sign-in; it also gives BOTH identities the scoped send right):') + @($mailCmd)) -join "`n"
 $fix['alerting'] = (@('PIM Manager > Settings > Alerting > Recipients', (& $viaResume 'this')) | Where-Object { $_ }) -join "`n"
-$fix['engine-graph'] = (Get-PimSupportScriptCommand -Script 'Grant-PimEnginePermissions' -Run @(".\Grant-PimEnginePermissions.ps1 -TenantId '$TenantId' -EngineObjectId '<engine job object id>' -GraphPermissions <the missing ones above>   (a Privileged Role Administrator, browser sign-in)")) -join "`n"
+$fix['engine-graph'] = (@('A Privileged Role Administrator runs this (browser sign-in):') + @(Get-PimSupportScriptCommand -Script 'Grant-PimEnginePermissions' -Run @(".\Grant-PimEnginePermissions.ps1 -TenantId '$TenantId' -EngineObjectId '<engine job object id>' -GraphPermissions <the missing ones above>"))) -join "`n"
 $fix['engine-root-reader'] = ''
 # PIM 100.22 (b): the Manager's Reader on the resource group -- the exact command (the object id is filled in below once read)
-$fix['manager-rg-reader'] = "az role assignment create --subscription $SubscriptionId --assignee-object-id <Manager managed identity object id> --assignee-principal-type ServicePrincipal --role Reader --scope /subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup`n(an Owner or User Access Administrator of the resource group; or Azure portal > the resource group > Access control (IAM) > Add role assignment > Reader > the managed identity $ManagerApp)"
+$fix['manager-rg-reader'] = "Azure portal > resource group $ResourceGroup > Access control (IAM) > Add role assignment > Reader > Managed identity > Container App $ManagerApp (object id <Manager managed identity object id>)`n(an Owner or User Access Administrator of the resource group)"
 $fix['easyauth'] = (@("Microsoft Entra admin center > Enterprise applications > the PIM Manager's sign-in application > Users and groups: assign the SuperAdmins (or a group that holds them)", (& $viaResume 'the check')) | Where-Object { $_ }) -join "`n"
-$fix['sql-host-rule'] = "az sql server firewall-rule delete --subscription $SubscriptionId -g $sqlRg -s $sqlServer -n AllowSetupHost   (or Azure portal > SQL server > Networking: remove 'AllowSetupHost')"
+$fix['sql-host-rule'] = "Azure portal > SQL server $sqlServer (resource group $sqlRg) > Networking > Firewall rules: delete 'AllowSetupHost'"
 $fix['msp-registered'] = 'on the managing tenant: Invoke-PimMspBuild.ps1 -Role Master -ConfigPath <its config> -Apply -From register-<n> (with an enrollment key this happens by itself)'
 $fix['msp-subnet'] = "on the managing tenant: add this tenant's pull subnet id as slaves[<n>].subnetResourceId, then Invoke-PimMspBuild.ps1 -Role Master -ConfigPath <its config> -Apply -From network-<n> (with an enrollment key this happens by itself)"
-$fix['msp-first-pull'] = "az containerapp job start -n $DownlinkJobName -g $ResourceGroup --subscription $SubscriptionId   (after the managing tenant allows the subnet)"
-$fix['engine-size'] = (Get-PimJobSizeCommand -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -JobName $TickJobName -Cpu '2.0' -Memory '4.0Gi' -ReplicaTimeout 7200) + '   (4.0 CPU / 8Gi / 14400 from 15,000 objects)'
+$fix['msp-first-pull'] = "Azure portal > Container Apps job $DownlinkJobName > Run now (after the managing tenant allows the subnet; it also retries every 5 minutes by itself)"
+$fix['engine-size'] = "Azure portal > Container Apps job $TickJobName > Containers > Edit: CPU 2.0, memory 4Gi; Settings > Configuration: replica timeout 7200   (4.0 CPU / 8Gi / 14400 from 15,000 objects)"
 $fix['engine-first-run'] = 'PIM Manager > Home (the engine status and its last run), or Settings > Job schedule > Run now'
 # PIM 100.75
 $fix['scheduler'] = 'PIM Manager > Settings > Features & edition: Scheduled jobs ON; then Home shows the tick (it runs every 5 minutes)'

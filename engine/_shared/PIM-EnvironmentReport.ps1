@@ -887,9 +887,11 @@ function Get-PimEnvironmentReport {
     # ---------------- findings -----------------------------------------------------------------------------------
     $fnd = New-Object System.Collections.Generic.List[object]
     $addF = { param($sev, $area, $title, $detail, $fix) $fnd.Add([pscustomobject][ordered]@{ severity = $sev; area = $area; title = $title; detail = "$detail"; fix = "$fix" }) }
+    # Owner 2026-10-11: two lines -- download, run. The central builder (tools\setup\_PimScriptDoc.ps1) when it is loaded.
     $grantCmd = { param($oid, $perms)
-        "Invoke-WebRequest https://invardia.com/support/pim/Grant-PimEnginePermissions.ps1 -OutFile Grant-PimEnginePermissions.ps1`n" +
-        ".\Grant-PimEnginePermissions.ps1 -TenantId '$(if ($tid) { $tid } else { '<tenant id>' })' -EngineObjectId '$oid' -GraphPermissions $(@($perms | ForEach-Object { "'$_'" }) -join ',')" }
+        $run = ".\Grant-PimEnginePermissions.ps1 -TenantId '$(if ($tid) { $tid } else { '<tenant id>' })' -EngineObjectId '$oid' -GraphPermissions $(@($perms | ForEach-Object { "'$_'" }) -join ',')"
+        if (Get-Command Get-PimSupportScriptCommand -ErrorAction SilentlyContinue) { (Get-PimSupportScriptCommand -Script 'Grant-PimEnginePermissions' -Run @($run)) -join "`n" }
+        else { "Invoke-WebRequest https://invardia.com/support/pim/Grant-PimEnginePermissions.ps1 -OutFile Grant-PimEnginePermissions.ps1`n$run" } }
     foreach ($grp in @($perm | Where-Object { $_.status -eq 'missing' -and $_.required } | Group-Object identityId, area)) {
         $f0 = $grp.Group[0]; $names = @($grp.Group | ForEach-Object { $_.permission })
         $fix = switch ($f0.area) {

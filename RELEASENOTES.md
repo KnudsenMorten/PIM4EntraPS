@@ -13,6 +13,13 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.590 -- 2026-10-11
+
+- Installer: a new tenant's hosting step no longer fails with 'Login failed' at SQL -- the SQL sign-in is made after the new SQL server's admin is set (each step gets a refresh token, not a pre-minted SQL token), and a refused login is retried for about two minutes
+
+- Script commands: every command PIM Manager shows to run a published script is now two lines -- download the file, run it. No checksum, signature or comment lines in the copied block; the "What does this script do?" link sits next to it, and SHA256SUMS.txt plus the signatures stay published for anyone who verifies.
+- Install check: every fix it suggests is an Azure portal step or a published script -- no Azure CLI commands.
+
 ## 2.4.589 -- 2026-10-11
 
 - Telemetry that is not delivered shows as a warning (Jobs page + one daily alert) instead of green; the install check verifies the scheduler and telemetry; a managing tenant allows a new managed tenant's network within minutes (silent check every tick); an update before the install key is claimed waits instead of failing; script commands are two lines.

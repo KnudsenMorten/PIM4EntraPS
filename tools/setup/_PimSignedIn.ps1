@@ -282,7 +282,10 @@ function Connect-PimSignedInSql {
         try { if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) { $interactive = $false } } catch { }
         if (-not $global:PIM_InteractiveFallback) { $global:PIM_InteractiveFallback = $interactive }
     }
-    $tok = Get-PimRestToken -Resource 'https://database.windows.net' -TenantId $TenantId
+    # REQ 100.76: -Force -- a token minted NOW, after this run made the person (or its group) the server's Entra admin; a
+    # cached one predates that and SQL refuses it ("Login failed for user '<token-identified principal>'").
+    $tok = Get-PimRestToken -Resource 'https://database.windows.net' -TenantId $TenantId -Force
+    if (Get-Command Reset-PimSqlTokenCache -ErrorAction SilentlyContinue) { Reset-PimSqlTokenCache }
     if (-not $allowApp) {
         # an older connect script's support session (environment variables): accept exactly the app its token names
         $sess = Get-PimSupportAppSession
