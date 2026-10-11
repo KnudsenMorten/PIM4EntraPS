@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     PIM4EntraPS offline license verification (Core + Pro split).
@@ -241,9 +241,13 @@ Function Get-PimEditionUpgradeState {
     if (-not $m -or "$($m.toEdition)" -ne 'pro') { return [pscustomobject]@{ pending = $false; since = ''; reason = ''; command = $cmd } }
     $since = "$($m.licensedUtc)"
     $u = $UpdateState; if ($u -is [string]) { try { $u = $u | ConvertFrom-Json } catch { $u = $null } }
-    $last = ''; foreach ($n in 'lastRunUtc', 'finishedUtc', 'startedUtc', 'updatedUtc', 'utc') { if ($u -and $u.PSObject.Properties[$n] -and "$($u.$n)") { $last = "$($u.$n)"; break } }
+    # PIM 100.87 (owner 2026-10-11, a paid install showed "still updates like the Community edition"): the updater's record names its
+    # run time tsUtc / lastSuccessUtc (PIM-UpdateState.ps1) -- neither was in this list, so the box never went away.
+    $last = ''; foreach ($n in 'tsUtc', 'lastSuccessUtc', 'lastRunUtc', 'finishedUtc', 'startedUtc', 'updatedUtc', 'utc') { if ($u -and $u.PSObject.Properties[$n] -and "$($u.$n)") { $last = "$($u.$n)"; break } }
     $pending = $true
-    if ($last -and $since) {
+    # An install whose updater pulls from Invardia IS on the paid update feed -- never pending, whatever the dates say.
+    if ($u -and $u.PSObject.Properties['source'] -and "$($u.source)".Trim() -ieq 'invardia' -and $last) { $pending = $false }
+    elseif ($last -and $since) {
         try {
             $ls = [datetime]::Parse($last, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal')
             $ss = [datetime]::Parse($since, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal')
@@ -251,7 +255,7 @@ Function Get-PimEditionUpgradeState {
         } catch { }
     }
     return [pscustomobject]@{ pending = $pending; since = $since
-        reason = $(if ($pending) { 'the Pro licence is registered; this install still updates like the Community edition until the Pro updater is installed' } else { 'the Pro updater runs (it has reported since the licence was registered)' })
+        reason = $(if ($pending) { 'the Pro licence is registered; this install does not receive Pro releases automatically until the Pro updater is installed' } else { 'the Pro updater runs (it has reported since the licence was registered)' })
         command = $cmd }
 }
 

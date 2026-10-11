@@ -146,6 +146,7 @@
     display:none; width:7px; height:7px; border-radius:50%; background:#cf222e;
   }
   .nav-group.has-attn > .nav-group-btn .nav-attn { display:inline-block; }
+  .nav-group.has-attn.attn-warn > .nav-group-btn .nav-attn:not(.nav-attn-count) { background:#bf8700; }
   /* the dot becomes a counter when it is carrying the queue count. PIM §97.3 / framework §12.5: the queue count is
      INFORMATIONAL (it has its own indicator), so it is blue -- red counts are reserved for what BLOCKS work. */
   .nav-group > .nav-group-btn .nav-attn.nav-attn-count {
@@ -3227,7 +3228,7 @@
   function syncNavGroups(activeTab) {
     if (!document.body.classList.contains('js-nav-grouped')) return;
     document.querySelectorAll('#navGroups .nav-group').forEach(grp => {
-      let groupActive = false, groupAttn = false;
+      let groupActive = false, groupAttn = false, groupRed = false;
       grp.querySelectorAll('.nav-group-item').forEach(item => {
         const tabKey = item.dataset.tab;
         const isActive = tabKey === activeTab;
@@ -3250,9 +3251,11 @@
         item.classList.toggle('has-badge', visible);
         if (itemBadge) { itemBadge.textContent = shown; itemBadge.style.background = shownBg; }   // §97.3: the source's own colour (an alarm stays red), else the CSS blue
         if (visible) groupAttn = true;
+        if (visible && /207,\s*34,\s*46|#cf222e/i.test(shownBg)) groupRed = true;   // PIM 100.85
       });
       grp.classList.toggle('active', groupActive);
       grp.classList.toggle('has-attn', groupAttn);
+      grp.classList.toggle('attn-warn', groupAttn && !groupRed);   // PIM 100.85: warnings only = an amber dot, never red
       // The group button carries the QUEUE count itself, not just a dot -- the operator must see
       // that unprocessed changes exist without opening the menu.
       const attn = grp.querySelector('.nav-group-btn .nav-attn');
@@ -5173,6 +5176,9 @@
     // never disagree with the tiles. { sev:'red'|'amber', text, tab }.
     const attnItems = [];
     function homeAddAttn(sev, text, tab) { attnItems.push({ sev: sev, text: text, tab: tab }); }
+    // PIM 100.85 (owner 2026-10-11, 2nd report: "dont show as alerts, when it is warnings"): the Overview badge is RED only
+    // when at least one item is an error / alarm; a count made of warnings only is amber.
+    function homeAttnColour(items) { return (items || []).some(i => i && i.sev === 'red') ? '#cf222e' : '#bf8700'; }
     // §100.3 (2026-10-09): the server's settings health lines -- demo group unreadable (ACC-1), MSP downlink switched off
     // (GATE-1), a blank naming pattern (NAME-1). The text is escaped here; the server sends plain text.
     try {
@@ -5400,7 +5406,7 @@
 
     // attention badge on the Home tab
     const ab = document.getElementById('homeAttnBadge');
-    if (ab) { ab.textContent = attn; ab.style.display = attn > 0 ? '' : 'none'; }
+    if (ab) { ab.textContent = attn; ab.style.display = attn > 0 ? '' : 'none'; ab.style.background = homeAttnColour(attnItems); }
 
     // wire tile + call-out rows -> tab navigation
     function homeWireLinks() {
@@ -5482,7 +5488,7 @@
       homeWireLinks();
       let attn2 = attn + (ex.expiring || 0) + (ar.pending || 0);
       const ab2 = document.getElementById('homeAttnBadge');
-      if (ab2) { ab2.textContent = attn2; ab2.style.display = attn2 > 0 ? '' : 'none'; }
+      if (ab2) { ab2.textContent = attn2; ab2.style.display = attn2 > 0 ? '' : 'none'; ab2.style.background = homeAttnColour(attnItems); }
     };
     const heavyBtn = document.getElementById('homeLoadHeavy');
     if (heavyBtn) heavyBtn.onclick = (ev) => { ev.stopPropagation(); homeLoadHeavy(); };
@@ -7315,7 +7321,7 @@
     // BUG-277: a Community install that registered its Pro licence -- the Pro features are on, and one step gives it the Pro updater.
     if (d.upgrade && d.upgrade.pending) {
       h += '<div id="licUpgrade" style="margin-top:8px;font-size:12px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:6px 10px;">' +
-        '<b>Upgrade to Pro updates.</b> The Pro features are on. This installation still updates like the Community edition (from GitHub). ' +
+        '<b>Switch on automatic Pro updates.</b> The Pro features are on. This installation does not receive Pro releases automatically yet. ' +
         'To receive Pro releases automatically, run this once on the machine you deploy from, with the Pro update feed you received with your licence:' +
         '<div><code class="lic-cmd" style="font-size:11px;overflow-wrap:anywhere;">' + esc(d.upgrade.command || '') + '</code></div></div>';
     }
@@ -13533,7 +13539,9 @@
     try { d = await api('GET', '/api/settings/demo-mode'); } catch (e) { err = String((e && e.message) || e); }
     let h = '<div class="set-card" id="setDemoMode"><h3 style="margin:0 0 4px;font-size:14px;">Demo mode</h3>' +
             '<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">For a live demo environment. While demo mode is on, members of the <b>demo guest group</b> can open every page and stage changes, but nothing they do is saved: every commit, approval, job run, revoke and settings change is refused. Everyone else keeps their own role. Off by default.</div>';
-    if (err || !d) { host.innerHTML = h + '<div style="color:#cf222e;font-size:12px;">Could not read demo mode: ' + esc(err || 'no answer') + '</div></div>'; return; }
+    // PIM 100.86 (owner 2026-10-11: "this can NOT be seen inside a prod system"): the card exists only where the web app
+    // itself is marked as a demo environment (PIM_DEMO_MODE=on on the Manager app). Everywhere else: nothing, not even an error.
+    if (!d || !d.available) { host.innerHTML = ''; return; }
     if (d.viewer) { host.innerHTML = h + '<div style="font-size:12px;">Demo mode is <b>on</b> -- you are viewing the live demo.</div></div>'; return; }
     const ro = d.canWrite ? '' : ' disabled';
     h += '<div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">' +
@@ -18336,7 +18344,7 @@
       return '<tr class="gp-guard" data-guard="' + escapeHtml(g.guardId) + '" data-state="' + escapeHtml(g.state || '') + '">' +
         '<td style="padding:6px 8px;vertical-align:top;"><b>' + escapeHtml(g.title || g.guardId) + '</b><div style="color:#8c959f;font-size:11px;">' + escapeHtml(g.guardId) + '</div></td>' +
         '<td style="padding:6px 8px;vertical-align:top;white-space:nowrap;">' + stateOf(g) +
-          (g.lastTripUtc ? '<div style="color:#8c959f;font-size:11px;">last trip ' + escapeHtml(fmtTime(g.lastTripUtc)) + (g.tripCount ? ' (' + escapeHtml(String(g.tripCount)) + 'x)' : '') + '</div>' : '') + '</td>' +
+          (g.lastTripUtc ? '<div style="color:#8c959f;font-size:11px;">last trip ' + escapeHtml(fmtTime(g.lastTripUtc)) + '</div>' : '') + '</td>' +
         '<td style="padding:6px 8px;vertical-align:top;font-size:12px;"><div style="color:#57606a;">' + escapeHtml(g.what || '') + '</div>' +
           (holds || (g.never || g.release !== 'release' ? '' : '<div style="color:#8c959f;font-size:11.5px;">Holds nothing right now.</div>')) + '</td></tr>';
     }).join('');

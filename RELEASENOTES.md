@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.595 -- 2026-10-11
+
+- Many policy changes in one run wait for approval again, and a SuperAdmin of the tenant approves them; warnings are shown amber, not red; the Guards page no longer shows a run counter; the Demo mode card appears only in a demo environment; a licensed install is no longer told it updates like the Community edition
+
 ## 2.4.594 -- 2026-10-11
 
 - Guards: only changes that cannot heal are held for approval (weakening policy changes, mass removals and disables, the last Global Administrator, the last SuperAdmin); large policy alignments and convergence gaps are warnings in one daily Data quality alert mail; setup: a refused tenant-root grant shows only the published script
