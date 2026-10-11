@@ -581,10 +581,11 @@ function Resolve-PimDeployMailSignedIn {
                             [string[]]$PersonRoleTemplateIds = @(), [bool]$PersonExoToken = $false)
     $cmd = New-PimMailSenderCommand -TenantId $TenantId -ManagedIdentityObjectId $ManagedIdentityObjectId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup `
                -TickJobName $TickJobName -ManagerAppName $ManagerAppName -SqlServerFqdn $SqlServerFqdn
+    # REQUIREMENTS 100.77: plain text (this window / the install log) -- the doc page is ONE line UNDER the two command lines.
     $after = @(
         '  DO IT AFTERWARDS (no certificate): PIM Manager > Get Started > Mail sender -- choose Shared mailbox (it prints this',
         '  command with the values filled in: an Exchange or Global Administrator runs it and signs in in the browser) or SMTP relay:') +
-        @(@($cmd) | ForEach-Object { "    $_" })
+        @(@($cmd) | ForEach-Object { "    $_" }) + @("    $(Get-PimSupportScriptDocLine -Script 'Initialize-PimMailSender')")
     $type = "$($Account.user.type)".Trim()
     $name = "$($Account.user.name)".Trim()
     $tid  = "$($Account.tenantId)".Trim()

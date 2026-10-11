@@ -5094,7 +5094,8 @@
     let inner = '<div style="display:flex;align-items:flex-start;gap:10px;">' +
       '<div style="flex:1 1 auto;">' +
         '<div style="font-weight:600;color:' + tone.fg + ';">' + escapeHtml(d.headline || '') + '</div>' +
-        '<div style="color:#57606a;margin-top:3px;">' + escapeHtml(d.detail || '') + '</div>';
+        // 100.77: the detail carries a command as its own lines (+ its doc line) -- shown as lines, never run together
+        '<div style="color:#57606a;margin-top:3px;white-space:pre-line;overflow-wrap:anywhere;">' + escapeHtml(d.detail || '') + '</div>';
     // BUG-250: never trust a list entry to be an object -- a [null] entry used to throw here and leave the banner on
     // "Checking permissions..." for good.
     const miss = (d.missingRequired || []).filter(m => m && typeof m === 'object');
@@ -7361,11 +7362,11 @@
         '<div style="margin-top:6px;"><button class="btn" id="licRegister">Register licence</button> <span id="licImportMsg" style="font-size:12px;"></span></div>' +
         '</div>';
     }
-    h += '<div style="margin-top:10px;font-size:12px;color:#57606a;">Or register it from a shell, signed in to <code>az</code> in that window (a member of the store&rsquo;s SQL admin group, or the Invardia Support app session):</div>' +
+    h += '<div style="margin-top:10px;font-size:12px;color:#57606a;">Or register it from PowerShell (a member of the store&rsquo;s SQL admin group signs in in the browser, or the Invardia Support app session open in that window is used):</div>' +
       '<div class="lic-cmd-row" style="display:flex;gap:6px;align-items:flex-start;margin-top:4px;min-width:0;">' +
       '<code class="lic-cmd" style="flex:1 1 auto;min-width:0;overflow-wrap:anywhere;font-size:11px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:4px 8px;">' + esc(d.command || '') + '</code>' +
       '<button type="button" class="btn-sec lic-copy" style="font-size:11px;padding:2px 8px;">Copy</button></div>' + pimScriptDocLinksFor('Set-PimLicense.ps1') +
-      '<div style="font-size:11px;color:#57606a;margin-top:3px;"><code>-UseSignedInAccount</code> signs in as <b>the account signed in to az</b> in that window &mdash; no certificate, no secret. You do not need it at all if you register above.</div>';
+      '<div style="font-size:11px;color:#57606a;margin-top:3px;"><code>-UseSignedInAccount</code> signs <b>you</b> in through the browser (no command-line tool, no PowerShell module) &mdash; no certificate, no secret. You do not need it at all if you register above.</div>';
     // Operator 2026-10-01: Pro is bought at invardia.com; paid licences get support at portal.invardia.com.
     const buyUrl = (d && /^https:\/\//i.test(String(d.buyUrl || ''))) ? String(d.buyUrl) : 'https://invardia.com';
     const supUrl = (d && /^https:\/\//i.test(String(d.supportUrl || ''))) ? String(d.supportUrl) : 'https://portal.invardia.com';
@@ -9255,6 +9256,9 @@
   let ER_DATA = null;
   let ER_MARK = 'erArrA';
   function erEsc(s) { return escapeHtml(s == null ? '' : String(s)); }
+  // REQUIREMENTS 100.77: the report is a document people send on (PDF) -- a fix's command block gets ONE plain line
+  // "What does this script do: <doc page>" UNDER it, outside the <pre> (pimScriptDocLinesOf, the script-docs helpers).
+  function erFixDocLines(fix) { return pimScriptDocLinesOf(fix).map(l => '<div class="muted small fixdoc">' + erEsc(l) + '</div>').join(''); }
   // BRAND-2.10: the viewer's local time with the zone named (fmtTime), like every other time the page shows.
   function erTime(s) {
     if (!s) return '';
@@ -9458,7 +9462,7 @@
       erTable(['When', 'Kind', 'Who', 'What', 'Approved by'], erList(CH.entries).slice(0, 120).map(e => [erEsc(erTime(e.whenUtc) || e.whenUtc), erEsc(e.kind), erEsc(e.who), erEsc(e.summary), erEsc(e.approvedBy || '')])) + '</section>';
     // ---- 8 findings
     const F = erList(d.findings);
-    b += '<section>' + h1('findings') + (F.length ? erTable(['Severity', 'Finding', 'Detail', 'Fix'], F.map(f => [erSevHtml(f.severity), '<b>' + erEsc(f.title) + '</b><div class="muted small">' + erEsc(f.area) + '</div>', erEsc(f.detail), f.fix ? '<pre class="fix">' + erEsc(f.fix) + '</pre>' : ''])) : '<p><span class="st st-ok">No findings.</span></p>') + '</section>';
+    b += '<section>' + h1('findings') + (F.length ? erTable(['Severity', 'Finding', 'Detail', 'Fix'], F.map(f => [erSevHtml(f.severity), '<b>' + erEsc(f.title) + '</b><div class="muted small">' + erEsc(f.area) + '</div>', erEsc(f.detail), f.fix ? '<pre class="fix">' + erEsc(f.fix) + '</pre>' + erFixDocLines(f.fix) : ''])) : '<p><span class="st st-ok">No findings.</span></p>') + '</section>';
     // ---- appendix
     b += '<section>' + h1('sources') + '<p>Every source the report read, and whether it could be read. Secret-looking text redacted: ' + erEsc(String(d.redactions || 0)) + '.</p>' +
       erTable(['Section', 'Source', 'Readable', 'Reason'], erList(d.sources).map(s => [erEsc(s.section), erEsc(s.source), s.readable ? '<span class="st st-ok">yes</span>' : '<span class="st st-nr">no</span>', erEsc(s.reason || '')])) + '</section>';
@@ -20457,6 +20461,20 @@
     // link shown under every command (pimScriptDocLinks); the checksum list stays published for whoever wants to verify.
     const lines = ['Invoke-WebRequest ' + pimSupportScriptBase() + f + ' -OutFile ' + f];
     return lines.concat(runs.length ? runs : ['.\\' + f]).join('\n');
+  }
+  // REQUIREMENTS 100.77 (owner 2026-10-11, "Yes, outside block"): where a command block leaves the page as PLAIN TEXT or a
+  // document (the environment report / its PDF), no link can sit next to it -- ONE plain line goes UNDER the block, outside
+  // it: "What does this script do: <doc page>". Mirrors Get-PimSupportScriptDocLine / Add-PimSupportScriptDocLines in
+  // tools/setup/_PimScriptDoc.ps1. The block itself is never changed (download line + run line(s)); the caller renders
+  // these lines after the block's closing tag.
+  function pimScriptDocLine(script) { return 'What does this script do: ' + pimScriptDocUrl(script); }
+  // The doc lines for every published-script block in a text, in order (one per block; [] when it carries none).
+  function pimScriptDocLinesOf(text) {
+    const base = pimSupportScriptBase().replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
+    const rx = new RegExp('^\\s*Invoke-WebRequest\\s+' + base + '([A-Za-z0-9-]+)\\.ps1\\s+-OutFile\\s+\\1\\.ps1\\s*$');
+    const out = [];
+    String(text || '').split(/\r?\n/).forEach(l => { const m = rx.exec(l); if (m) out.push(pimScriptDocLine(m[1])); });
+    return out;
   }
 
   // A stored UTC timestamp as a person reads it: "2026-09-24 06:06" in the viewer's local zone (BRAND-2.10), the exact value in the tooltip.

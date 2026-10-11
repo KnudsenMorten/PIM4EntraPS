@@ -120,6 +120,46 @@ function Get-PimSupportScriptCommand {
     return $lines.ToArray()
 }
 
+function Get-PimSupportScriptDocLine {
+    # PURE. REQUIREMENTS 100.77 (owner 2026-10-11, "Yes, outside block"): the ONE plain line that goes UNDER a command block
+    # in PLAIN TEXT (an install event / install mail, "Send to customer", a console fix, a report), where no link can sit
+    # next to the block the way the Manager page shows it: "What does this script do: <the script's doc page>".
+    param([Parameter(Mandatory)][string]$Script)
+    return ('What does this script do: ' + (Get-PimScriptDocUrl -Script $Script))
+}
+
+function Add-PimSupportScriptDocLines {
+    <#
+      PURE. REQUIREMENTS 100.77. Plain text that carries one or more published-script command blocks (the lines
+      Get-PimSupportScriptCommand returns: "Invoke-WebRequest <support base><Script>.ps1 -OutFile <Script>.ps1", then the
+      ".\<Script>.ps1 ..." run line(s)) -> the same text with Get-PimSupportScriptDocLine inserted directly UNDER each
+      block's last run line, at the block's indentation. The block itself is never changed (it stays exactly its download
+      line + run line(s), framework 12.10 item 11): the doc line is a separate line outside it. Idempotent (a block already
+      followed by its doc line is left alone); text without a block comes back unchanged; the newline style is kept.
+      Use it ONLY where text leaves the page as plain text -- the Manager page shows the link next to the block instead.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+    $t = "$Text"
+    if (-not $t) { return $t }
+    $nl = if ($t.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $lines = @($t -split "\r?\n")
+    $base = [regex]::Escape($script:PimSupportScriptBaseUrl)
+    $out = New-Object System.Collections.Generic.List[string]
+    $i = 0
+    while ($i -lt $lines.Count) {
+        $l = $lines[$i]; $out.Add($l); $i++
+        $m = [regex]::Match($l, "^(?<ind>\s*)Invoke-WebRequest\s+$base(?<n>[A-Za-z0-9-]+)\.ps1\s+-OutFile\s+\k<n>\.ps1\s*$")
+        if (-not $m.Success) { continue }
+        $n = $m.Groups['n'].Value
+        $runRx = '^\s*\.\\' + [regex]::Escape($n) + '\.ps1(\s|$)'
+        while ($i -lt $lines.Count -and $lines[$i] -match $runRx) { $out.Add($lines[$i]); $i++ }
+        $doc = Get-PimSupportScriptDocLine -Script $n
+        if ($i -lt $lines.Count -and $lines[$i].Trim() -eq $doc) { continue }
+        $out.Add($m.Groups['ind'].Value + $doc)
+    }
+    return ($out.ToArray() -join $nl)
+}
+
 function Get-PimScriptVersion {
     # The PIM version this script is: the build stamp in a standalone file, else the solution's VERSION file (resolved
     # from this helper's folder), else 'unknown' (a copied helper with nothing around it -- never a failure).

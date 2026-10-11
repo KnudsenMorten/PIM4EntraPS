@@ -1353,7 +1353,8 @@ function Grant-PimEngineRootAzureAccess {
                        "Discovery cannot see Azure until Reader is there (the Manager's Get Started > Engine permissions step stays open and shows this command). " +
                        "The installing identity needs Owner or User Access Administrator at the tenant root (a Global Administrator first turns on 'Access management for Azure resources' in Microsoft Entra ID > Properties). " +
                        "The install continues. Fix -- as a Global Administrator, browser sign-in, no modules:")
-        Write-Host ("      " + ($fix -replace "`n", "`n      ")) -ForegroundColor Yellow
+        # REQUIREMENTS 100.77: plain text -- the doc page as ONE line UNDER the two command lines, outside the block
+        Write-Host ("      " + ((Add-PimSupportScriptDocLines -Text $fix) -replace "`n", "`n      ")) -ForegroundColor Yellow
         Write-Host  "      or with az:" -ForegroundColor Yellow
         Write-Host ("      " + $azCmd) -ForegroundColor Yellow
     } else {
