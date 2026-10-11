@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.592 -- 2026-10-11
+
+- Graph view + Access map: the board keeps most of the screen and the page scrolls (the detail bar no longer covers it); 'Back to overview' is a prominent button
+
 ## 2.4.591 -- 2026-10-11
 
 - Installer: Azure rights inherited from a management group (e.g. Contributor + User Access Administrator at the tenant root) are counted -- the preflight no longer asks for Owner when they are there
