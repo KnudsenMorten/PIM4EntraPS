@@ -16083,9 +16083,11 @@
     return list.map(e => String(e.text || '') + ' (' + e.count + ')' + (e.examples.length ? ': ' + e.examples.join(', ') + (e.count > e.examples.length ? ', ...' : '') : '')).join('\n');
   }
   // What ONE of the three buttons of a setting shows: its value, the hover text, and whether (and why) it cannot be chosen.
+  // (owner 2026-10-12: "we know pim recommendation. those are the template values" -- the recommendation NEVER waits for a
+  //  tenant read: the server sends it from the policy templates. Only Keep current shows values the read brings, and it
+  //  can be chosen before they are there: keeping needs no knowledge of the value.)
   function pcButton(t, f, c) {
     const read = !!String(t.liveReadUtc || '').trim();
-    const none = !read ? 'Not read yet' : (t.policies === 0 ? 'No policies yet' : '');
     if (c === 'microsoft') {
       const m = f.microsoft;
       if (!m) return { text: 'Not known', title: '', disabled: true, reason: 'PIM Manager has no Microsoft default for this setting.' };
@@ -16096,13 +16098,55 @@
     }
     if (c === 'recommendation') {
       const r = f.recommendation;
-      if (r.length) return { text: pcSpreadText(r, t.id), title: r.map(e => String(e.text || '') + ' (' + e.count + ')' + (e.templates.length ? ' -- policy template ' + e.templates.join(', ') : '')).join('\n'), disabled: false, reason: '' };
-      if (none) return { text: none, title: '', disabled: false, reason: '' };
-      return { text: 'No recommendation', title: '', disabled: true, reason: 'The policy template gives no recommendation for this setting.' };
+      if (r.length) {
+        // counted = the spread over the policies read ("Yes on 140 roles, No on 5"); not counted = what the templates say
+        const counted = r.some(e => e.count > 0);
+        const fromTpl = String(f.recommendationText || '').trim() || r.map(e => String(e.text || '')).join(', ');
+        return { text: counted ? pcSpreadText(r, t.id) : fromTpl,
+                 title: r.map(e => String(e.text || '') + (counted ? ' (' + e.count + ')' : '') + (e.templates.length ? ' -- policy template ' + e.templates.join(', ') + (e.isDefaultTemplate ? ' (the default)' : '') : '')).join('\n'), disabled: false, reason: '' };
+      }
+      return { text: 'No recommendation', title: '', disabled: true, reason: String(f.recommendationReason || '').trim() || 'The policy template gives no recommendation for this setting.' };
     }
     const cur = f.current;
     if (cur.length) return { text: pcSpreadText(cur, t.id), title: pcSpreadTitle(cur), disabled: false, reason: '' };
-    return { text: none || 'Could not be read', title: '', disabled: false, reason: '' };
+    if (!read) return { text: 'Keep what the tenant has', sub: 'current values are being read', title: 'The current values are read by the next policy run. You can choose Keep current already: it leaves the setting as it is.', disabled: false, reason: '' };
+    return { text: t.policies === 0 ? 'No policies yet' : 'Could not be read', title: '', disabled: false, reason: '' };
+  }
+  // The current values of a type arrive with a policy run: while one is still unread the table asks again every ~20 s and
+  // fills them in. What the person selected on the page (S.pending) is kept -- pcAdopt only adds to it.
+  const PC_POLL_MS = 20000;
+  function pcReadSig(view) { return ((view && view.types) || []).map(t => String(t.liveReadUtc || '').trim() + '/' + t.policies).join('|'); }
+  function pcUnread(view) { return ((view && view.types) || []).some(t => !String(t.liveReadUtc || '').trim()); }
+  function pcPollAlive(root) {
+    if (!root || !root.__pcS || !root.isConnected) return false;                 // the step / page was rebuilt or left
+    const panel = root.closest ? root.closest('.tab-panel') : null;
+    return !(panel && !panel.classList.contains('active'));
+  }
+  async function pcPollOnce(root) {
+    const st = root && root.__pcS;
+    if (!st || !st.view || st.busy || document.getElementById('pcQuickDialog')) return false;
+    const ae = document.activeElement;
+    if (ae && root.contains(ae) && ae.tagName === 'SELECT') return false;        // an exception is being picked: do not repaint under it
+    let v = null;
+    try { v = pcNormalizeView(await api('GET', '/api/policy-choices')); } catch (_) { return false; }
+    if (!v || root.__pcS !== st || st.busy || document.getElementById('pcQuickDialog')) return false;
+    if (pcReadSig(v) === pcReadSig(st.view)) return false;                        // nothing new was read
+    const saved = st.saved, err = st.err;
+    pcAdopt(st, v); st.saved = saved; st.err = err;
+    pcPaint(root);
+    return true;
+  }
+  function pcPollArm(root) {
+    if (!root) return;
+    if (root.__pcPoll) { clearTimeout(root.__pcPoll); root.__pcPoll = null; }
+    const S = root.__pcS;
+    if (!isServer || !S || !S.view || !pcUnread(S.view)) return;
+    root.__pcPoll = setTimeout(async () => {
+      root.__pcPoll = null;
+      if (!pcPollAlive(root)) return;
+      try { await pcPollOnce(root); } catch (_) { }
+      pcPollArm(root);
+    }, PC_POLL_MS);
   }
   function pcPick(S, t, f, c) {
     const k = pcKey(t.id, f.id, '');
@@ -16223,7 +16267,7 @@
       const u = PC_UNIT[t.id] || ['policy', 'policies'];
       h += '<div class="pcType" data-pc-type="' + esc(t.id) + '"><div class="pcTypeHead"><span class="pcTypeName">' + esc(String(t.label || t.id)) + '</span> ' +
         (read ? '<span class="pcTypeRead" data-pc-read="yes">Current values read ' + esc(homeFmtWhen(read)) + ' -- ' + esc(pcPlural(t.policies, u[0], u[1])) + '</span>'
-              : '<span class="pcTypeRead" data-pc-read="no" style="color:' + pimSevColour('amber', 'fg') + ';">The current values have not been read yet. The next policy run reads them (within 30 minutes); until then the current values and what a choice would change are not known.</span>') +
+              : '<span class="pcTypeRead" data-pc-read="no" style="color:' + pimSevColour('amber', 'fg') + ';">Your tenant&rsquo;s current values are read by the next policy run (within 30 minutes). You can already choose.</span>') +
         '</div>';
       t.fields.forEach(f => {
         const sel = (pcKey(t.id, f.id, '') in S.pending) ? S.pending[pcKey(t.id, f.id, '')] : pcSaved(f);
@@ -16234,7 +16278,7 @@
             const ten = (c === 'microsoft' && f.microsoft && f.microsoft.tenant && f.microsoft.tenant.matchesShipped === false && f.microsoft.tenant.note) ? String(f.microsoft.tenant.note) : '';
             return '<div class="pcCell"><button type="button" class="pcBtn' + (on ? ' pcOn' : '') + '" data-pc-type="' + esc(t.id) + '" data-pc-field="' + esc(f.id) + '" data-pc-choice="' + c + '" aria-pressed="' + (on ? 'true' : 'false') + '"' +
               (b.title ? ' title="' + esc(b.title) + '"' : '') + ((b.disabled || !S.canWrite) ? ' disabled' : '') + '>' +
-              '<span class="pcBtnL">' + (on ? '&#10003; ' : '') + esc(PC_LABEL[c]) + '</span><span class="pcBtnV">' + esc(b.text) + '</span></button>' +
+              '<span class="pcBtnL">' + (on ? '&#10003; ' : '') + esc(PC_LABEL[c]) + '</span><span class="pcBtnV">' + esc(b.text) + '</span>' + (b.sub ? '<span class="pcBtnS" style="display:block;font-size:11px;font-weight:400;opacity:.75;">' + esc(b.sub) + '</span>' : '') + '</button>' +
               (b.disabled && b.reason ? '<div class="pcWhy">' + esc(b.reason) + '</div>' : '') +
               (ten ? '<div class="pcNote">&#9432; ' + esc(ten) + '</div>' : '') + '</div>';
           }).join('') + '</div>' + pcOverridesHtml(S, t, f) + '</div>';
@@ -16405,6 +16449,7 @@
       });
     }
     pcPaint(root);
+    pcPollArm(root);
   }
   async function renderPolicySettingsPage() {
     const body = document.getElementById('policysettingsBody');
@@ -16849,7 +16894,7 @@
       body: (c, st) => {
         const S = st && st.S;
         if (!S || !S.view) return '<div class="gsProblem" style="display:block;">The policy settings could not be read -- nothing can be chosen yet.</div>';
-        return '<div class="gs-facts gsPolIntro">PIM Manager never changes a policy on its own. Every setting below starts on <b>Keep current</b> -- your tenant&rsquo;s own values, as the last policy run read them. ' +
+        return '<div class="gs-facts gsPolIntro">PIM Manager never changes a policy on its own. Every setting below starts on <b>Keep current</b> -- your tenant keeps the values it has. ' +
             'Change single settings to <b>Microsoft default</b> or <b>PIM Manager recommendation</b> where you want that, or use a quick selection' + (S.canWrite ? ', then press Save &amp; next.' : '.') + '</div>' +
           '<div class="pcHost pcGs"></div>' +
           '<div class="gs-hint gsPolApprovalNote">Saving changes nothing in your tenant. A change that comes from a choice is planned by the next policy run and <b>waits for a SuperAdmin&rsquo;s approval</b> on ' +

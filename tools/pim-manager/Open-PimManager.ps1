@@ -7889,7 +7889,19 @@ function Get-PimManagerPolicyChoiceState {
     $table = Get-PimMicrosoftPolicyDefaultsTable -Path (Join-Path $solutionRoot 'templates\policy\microsoft-defaults.json')
     $snaps = @{}
     foreach ($p in @('GroupsPolicies', 'EntraRolePolicies', 'AzResPolicies')) { $snaps[$p] = & $read (Get-PimPolicyLiveValuesSettingName -Provider $p) }
+    # The PIM Manager recommendation is what the STORED policy templates say -- known without any tenant read (owner
+    # 2026-10-12: "we know pim recommendation. those are the template values"). Read the way the engine applies them:
+    # 'extends' merged, the Settings > Operational policy floors applied, the per-kind default template named.
+    $tpls = @()
+    if (Get-Command Get-PimPolicyRecommendationTemplates -ErrorAction SilentlyContinue) {
+        try {
+            $opPol = $null
+            if (Get-Command ConvertTo-PimNormalizedOperationalPolicy -ErrorAction SilentlyContinue) { try { $opPol = (Get-PimOperationalPolicy).value } catch { $opPol = $null } }
+            $tpls = @(Get-PimPolicyRecommendationTemplates -Stored (& $read 'PolicyTemplates') -DefaultsSetting (& $read 'PolicyTemplateDefaults') -OperationalPolicy $opPol)
+        } catch { Write-Warning "  [manager] the policy templates could not be read for the policy settings page: $($_.Exception.Message)"; $tpls = @() }
+    }
     @{
+        templates  = $tpls
         choices    = ConvertTo-PimPolicyChoicesStore -Value (& $read (Get-PimPolicyChoicesSettingName))
         advisories = & $read (Get-PimPolicyAdvisoriesSettingName)
         defaults   = $table
@@ -14902,7 +14914,7 @@ function Handle-Request {
                     }
                     $pcState = Get-PimManagerPolicyChoiceState
                 }
-                $pcView = Get-PimPolicyChoicesView -Choices $pcState.choices -Advisories $pcState.advisories -Defaults $pcState.defaults -Snapshots $pcState.snapshots -TenantRead $pcState.tenantRead
+                $pcView = Get-PimPolicyChoicesView -Choices $pcState.choices -Advisories $pcState.advisories -Defaults $pcState.defaults -Snapshots $pcState.snapshots -TenantRead $pcState.tenantRead -Templates $pcState.templates
                 $pcView['ok'] = $true; $pcView['canWrite'] = $pcWrite
                 # ONE truth for what waits for approval (PIM 100.84): the same hold state every other page reads.
                 $pcHold = $null; try { $pcHold = Get-PimManagerPolicyHoldState -Fresh } catch { $pcHold = $null }

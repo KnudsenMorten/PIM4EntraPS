@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.599 -- 2026-10-12
+
+- The Policy settings page and the Get Started Policies step always show the PIM Manager recommendation (the template value); Keep current can be chosen before the tenant values are read and fills in by itself
+
 ## 2.4.598 -- 2026-10-12
 
 - You decide every policy setting: PIM Manager changes no policy on its own -- per setting you choose Microsoft default, PIM Manager recommendation or Keep current on the new Policy settings page and in Get Started, with a quick selection for all settings behind a typed confirmation; every change that follows waits for a SuperAdmin to approve it; in an MSP setup the managing tenant's choices are the default and a managed tenant can choose differently; a held removal plan that is no longer wanted clears by itself on the next run
