@@ -9522,24 +9522,166 @@ function Get-PimActiveAssignmentsCached {
     if (-not (Get-Command ConvertTo-PimActiveAssignmentsSnapshotView -ErrorAction SilentlyContinue)) {
         throw 'engine/_shared/PIM-ActiveAssignments.ps1 is not loaded -- the active-assignments snapshot cannot be read.'
     }
-    $entry = $null
+    $entry = $null; $readErr = ''; $stamp = ''
     if (Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue) {
         $entry = Get-PimTenantCacheEntry -Kind 'active-assignments'
+        if ($null -eq $entry -and (Get-Command Get-PimTenantCacheReadError -ErrorAction SilentlyContinue)) { $readErr = "$(Get-PimTenantCacheReadError -Kind 'active-assignments')".Trim() }
     }
+    # REQ 100.112 (A): A FAILED READ IS NOT A MISSING SNAPSHOT. At a large customer the stored row (one 22 MB document)
+    # could not be read (OutOfMemoryException); $null was taken for "nothing stored", the page said "no snapshot yet" and a
+    # NEW 30-minute read of the whole tenant was queued. The store is asked -- without the document -- whether the row
+    # exists: only "no row" is missing (and queues); a row that exists but could not be read queues NOTHING by itself and
+    # is reported as snapshotReadError. When the store cannot say, a failed read stays a failed read.
+    $st = $null
+    if (Get-Command Get-PimTenantCacheStamps -ErrorAction SilentlyContinue) { try { $st = Get-PimTenantCacheStamps -Kinds @('active-assignments') } catch { $st = $null } }
+    if ($null -ne $st -and [bool]$st.ok) {
+        if ($st.stamps.ContainsKey('active-assignments')) { $stamp = "$($st.stamps['active-assignments'])" }
+        elseif ($readErr) { $readErr = '' }   # no row at all: it IS missing, whatever the read said
+    }
+    if ($readErr -and (Get-Command ConvertTo-PimActiveAssignmentsReadErrorText -ErrorAction SilentlyContinue)) { $readErr = "$(ConvertTo-PimActiveAssignmentsReadErrorText -Message $readErr)" }
+    $missing = ($null -eq $entry -and -not $readErr)
     $queued = $false; $qErr = ''
     # §100.47 (a) (owner 2026-10-10): a read already queued or RUNNING is never asked for again -- Refresh (and the
     # missing-snapshot auto-queue) is idempotent, and the page shows "Loading current delegations..." from this state.
     $rs = $null
     if (Get-Command Read-PimActiveAssignmentsRefreshState -ErrorAction SilentlyContinue) { try { $rs = Read-PimActiveAssignmentsRefreshState -NowUtc $NowUtc } catch { $rs = $null } }
     $already = ($null -ne $rs -and [bool]$rs.pending)
-    if (($QueueRefresh -or $null -eq $entry) -and -not $already) {
-        $why = if ($null -eq $entry -and -not $QueueRefresh) { "$Reason`:snapshot-missing" } else { $Reason }
+    if (($QueueRefresh -or $missing) -and -not $already) {
+        $why = if ($missing -and -not $QueueRefresh) { "$Reason`:snapshot-missing" } else { $Reason }
         $q = Request-PimActiveAssignmentsSnapshotRefresh -Reason $why
         $queued = [bool]$q.queued; $qErr = "$($q.error)"
     }
     return (ConvertTo-PimActiveAssignmentsSnapshotView -Entry $entry -NowUtc $NowUtc `
                 -CadenceMinutes (Get-PimActiveAssignmentsSnapshotCadenceMinutes) -RefreshQueued $queued -QueueError $qErr `
-                -RefreshState $rs -RefreshAlreadyQueued ([bool]($QueueRefresh -and $already)))
+                -RefreshState $rs -RefreshAlreadyQueued ([bool]($QueueRefresh -and $already)) -ReadError $readErr -SnapshotStamp $stamp)
+}
+
+function Get-PimActiveAssignmentsState {
+    # REQ 100.112 (B) -- GET /api/active-assignments?state=1. ONLY the small facts, for the page's poll: is a snapshot
+    # stored and when was it written (Kind + RefreshedUtc from the store, NEVER the document), is a read queued / running
+    # and since when, the cadence. No rows, no parse, no per-row work: it answers in milliseconds where the full answer of
+    # a large tenant holds the Manager's one request loop for tens of seconds.
+    param([datetime]$NowUtc = [datetime]::UtcNow)
+    $stamp = ''; $exists = $false; $err = ''
+    if (Get-Command Get-PimTenantCacheStamps -ErrorAction SilentlyContinue) {
+        try {
+            $st = Get-PimTenantCacheStamps -Kinds @('active-assignments')
+            if ([bool]$st.ok) { if ($st.stamps.ContainsKey('active-assignments')) { $exists = $true; $stamp = "$($st.stamps['active-assignments'])" } }
+            else { $err = "$($st.error)" }
+        } catch { $err = "$($_.Exception.Message)" }
+    } else { $err = 'the tenant cache is not loaded in this process' }
+    $rs = $null
+    if (Get-Command Read-PimActiveAssignmentsRefreshState -ErrorAction SilentlyContinue) { try { $rs = Read-PimActiveAssignmentsRefreshState -NowUtc $NowUtc } catch { $rs = $null } }
+    $pending = ($null -ne $rs -and [bool]$rs.pending)
+    $cad = 0
+    try { $cad = [int](Get-PimActiveAssignmentsSnapshotCadenceMinutes) } catch { $cad = 0 }
+    if ($cad -le 0) { $cad = 120 }
+    $out = [ordered]@{
+        ok              = (-not $err)
+        state           = $true
+        refreshedUtc    = $(if ($stamp) { $stamp } else { $null })
+        snapshotStamp   = $stamp
+        snapshotMissing = (-not $exists -and -not $err)
+        refreshPending  = [bool]$pending
+        refreshState    = $(if ($pending) { "$($rs.state)" } else { '' })
+        refreshSinceUtc = $(if ($pending) { "$($rs.sinceUtc)" } else { '' })
+        cadenceMinutes  = $cad
+    }
+    if ($err) { $out['error'] = "The snapshot's state could not be read ($err)." }
+    return $out
+}
+
+# ---------------------------------------------------------------------------
+# REQ 100.112 (D) -- repeat loads of GET /api/active-assignments are served from memory.
+# The full answer of a large tenant is read (one 22 MB row), parsed, marked row by row and serialised again: 25-60 s on
+# the Manager's ONE request loop, every time. The FINAL bytes of the UNFILTERED answer are kept here, keyed by everything
+# that answer is built from (Get-PimActiveAssignmentsResponseCacheKey), for at most 10 minutes. Never for a delegated
+# caller (their rows are filtered per request), never for ?refresh=1. The refresh-state fields inside a kept answer may
+# be old: the page takes "queued / running" from ?state=1.
+# (This is not the old 5-minute cache of the LIVE read -- that read left the Manager with 70.1b option 2.)
+# ---------------------------------------------------------------------------
+function Clear-PimActiveAssignmentsResponseCache { $script:PimAaResponseCache = $null }
+
+function Test-PimActiveAssignmentsResponseCacheClearingRequest {
+    # PURE. Which write requests change what the page's answer is built from, beyond what the key already carries:
+    # a revoke (the queue), and any change of the break-glass list (the ownKind marks).
+    param([string]$Method, [string]$Path)
+    if ("$Method" -eq 'GET') { return $false }
+    if ("$Path" -eq '/api/revoke') { return $true }
+    if ("$Path" -like '/api/settings/breakglass-accounts*') { return $true }
+    return $false
+}
+
+function Get-PimActiveAssignmentsResponseCacheKey {
+    # Everything the unfiltered answer is built from, read CHEAPLY (no document): the store, when the snapshot and the
+    # engine's 'managed-live' list were written, the cadence, the break-glass list. '' = do not use the cache (no
+    # snapshot stored, or the store could not say).
+    if (-not (Get-Command Get-PimTenantCacheStamps -ErrorAction SilentlyContinue)) { return '' }
+    $st = $null
+    try { $st = Get-PimTenantCacheStamps -Kinds @('active-assignments', 'managed-live') } catch { $st = $null }
+    if ($null -eq $st -or -not [bool]$st.ok -or -not $st.stamps.ContainsKey('active-assignments')) { return '' }
+    $ml = if ($st.stamps.ContainsKey('managed-live')) { "$($st.stamps['managed-live'])" } else { '(none)' }
+    $cad = 0
+    try { $cad = [int](Get-PimActiveAssignmentsSnapshotCadenceMinutes) } catch { $cad = 0 }
+    $bg = '(not read)'
+    try {
+        if (Get-Command Get-PimBreakGlassAccountStatus -ErrorAction SilentlyContinue) {
+            $b = Get-PimBreakGlassAccountStatus -ConnectionString "$($script:PimSqlCs)"
+            $bg = "$([bool]$b.storeConfigured)/$([bool]$b.storeOk)/" + (@(@($b.accounts) | ForEach-Object { "$_".ToLowerInvariant() } | Sort-Object) -join ',')
+        }
+    } catch { return '' }
+    $store = ''
+    if (Get-Command Get-PimTenantCacheStoreCs -ErrorAction SilentlyContinue) { $store = "$(Get-PimTenantCacheStoreCs)" }
+    return (@($store, "$($st.stamps['active-assignments'])", $ml, "$cad", $bg) -join '|')
+}
+
+function Get-PimActiveAssignmentsResponseCacheLookup {
+    # Returns { key; bytes }: bytes = the kept answer to write as is, or $null (build it). key = '' when this request
+    # must not use the cache at all: ?refresh=1, a delegated caller (portal profile), or no usable key.
+    param([switch]$QueueRefresh, [AllowNull()][object]$Scope, [datetime]$NowUtc = [datetime]::UtcNow, [int]$MaxAgeMinutes = 10)
+    $none = [pscustomobject]@{ key = ''; bytes = $null }
+    if ($QueueRefresh) { return $none }
+    if ($null -eq $Scope) { return $none }
+    if (-not [bool]$Scope.isSuperAdmin -and $null -ne $Scope.profile) { return $none }
+    $key = "$(Get-PimActiveAssignmentsResponseCacheKey)"
+    if (-not $key) { return $none }
+    $c = $script:PimAaResponseCache
+    if ($null -ne $c -and "$($c.key)" -ceq $key -and $null -ne $c.bytes) {
+        $age = ($NowUtc.ToUniversalTime() - ([datetime]$c.atUtc).ToUniversalTime()).TotalMinutes
+        if ($age -ge 0 -and $age -lt $MaxAgeMinutes) { return [pscustomobject]@{ key = $key; bytes = $c.bytes } }
+    }
+    if ($null -ne $c) { $script:PimAaResponseCache = $null }   # another snapshot / too old: let the memory go before the rebuild
+    return [pscustomobject]@{ key = $key; bytes = $null }
+}
+
+function Save-PimActiveAssignmentsResponse {
+    # Serialise the answer ONCE and return its bytes for the response; keep them when -Key says this request may (see the
+    # lookup) and the answer is a complete one: a stored snapshot that was read, and marks that did not fail. An answer
+    # over 64 MB is never kept.
+    param([string]$Key = '', [Parameter(Mandatory)][AllowNull()][object]$Body, [datetime]$NowUtc = [datetime]::UtcNow, [int64]$MaxBytes = 67108864)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-PimJson -Body $Body))
+    $keep = [bool]("$Key".Trim()) -and $bytes.LongLength -le $MaxBytes
+    if ($keep) {
+        try {
+            if ([bool]$Body['snapshotMissing'] -or "$($Body['snapshotReadError'])".Trim() -or "$($Body['managedError'])".Trim() -or @($Body['ownErrors']).Count -gt 0) { $keep = $false }
+        } catch { $keep = $false }
+    }
+    if ($keep) { $script:PimAaResponseCache = @{ key = "$Key"; atUtc = $NowUtc.ToUniversalTime(); bytes = $bytes } }
+    return ,$bytes
+}
+
+function Write-PimJsonBytesResponse {
+    # Write-JsonResponse for an answer that is already serialised (same status / content type / length / abort tolerance).
+    param([Parameter(Mandatory)][object]$Response, [Parameter(Mandatory)][int]$Status, [Parameter(Mandatory)][byte[]]$Bytes)
+    try {
+        $Response.StatusCode = $Status
+        $Response.ContentType = 'application/json; charset=utf-8'
+        $Response.ContentLength64 = $Bytes.LongLength
+        $Response.OutputStream.Write($Bytes, 0, $Bytes.Length)
+        $Response.OutputStream.Close()
+    } catch {
+        Write-Host ("  [net] client gone before response could be written ({0} bytes, status {1}): {2}" -f $Bytes.Length, $Status, $_.Exception.Message) -ForegroundColor DarkGray
+    }
 }
 
 function Get-PimDriftSnapshotCadenceMinutes {
@@ -10916,6 +11058,8 @@ function Handle-Request {
     $method = $req.HttpMethod
     # PIM §97.3: any write may decide something that waits for a person -- the next GET /api/attention reads fresh.
     if ($method -ne 'GET' -and $path -like '/api/*') { $script:PimAttentionCache = $null; $script:PimPolicyHoldStateCache = $null }
+    # REQ 100.112 (D): a revoke or a change of the break-glass list drops the kept active-assignments answer.
+    if (Test-PimActiveAssignmentsResponseCacheClearingRequest -Method $method -Path $path) { Clear-PimActiveAssignmentsResponseCache }
 
     # GET / -- serve the SPA. The token is embedded in a <meta> tag so the
     # JS can read it without exposing it on the URL after the first hop.
@@ -20174,19 +20318,26 @@ function Handle-Request {
             }
             $script:lastHeartbeat = Get-Date
             # 🔒 §70.1b opt 2: serve the stored snapshot, never read the tenant; ?refresh=1 only queues a scheduler trigger.
-            $queueRefresh = $false
+            $queueRefresh = $false; $stateOnly = $false
             try {
                 $qs = $req.Url.Query
                 if ($qs -and $qs.IndexOf('refresh=1') -ge 0) { $queueRefresh = $true }
+                if ($qs -and $qs.IndexOf('state=1') -ge 0) { $stateOnly = $true }
             } catch { }
             try {
+                # REQ 100.112 (B): ?state=1 = the small facts only (never the stored document) -- what the page polls.
+                if ($stateOnly) { Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimActiveAssignmentsState); return 200 }
+                # REQ 100.112 (D): a repeat load of the unfiltered answer is served from memory (not ?refresh=1, not a delegated caller).
+                $aaScope = Get-PimManagerCallerScope
+                $aaKept = Get-PimActiveAssignmentsResponseCacheLookup -QueueRefresh:$queueRefresh -Scope $aaScope
+                if ($null -ne $aaKept.bytes) { Write-PimJsonBytesResponse -Response $resp -Status 200 -Bytes $aaKept.bytes; return 200 }
                 $body = Get-PimActiveAssignmentsCached -QueueRefresh:$queueRefresh -Reason $(if ($queueRefresh) { 'revoke-tab-refresh' } else { 'revoke-tab' })
                 # Per-caller scope filter: a delegated (non-super) caller with a portal
                 # profile sees only the rows whose (derivable) facets are in scope.
                 # Principal-centric rows whose facets aren't derivable are KEPT (the
                 # write-side revoke gate still re-checks); placeable-but-out-of-scope
                 # rows are dropped here so a delegated caller never even enumerates them.
-                $aaScope = Get-PimManagerCallerScope
+                $aaDelegated = $false
                 if (-not $aaScope.isSuperAdmin -and $aaScope.profile -and (Get-Command Test-PimPortalRowsInScope -ErrorAction SilentlyContinue)) {
                     $allRows = @($body.rows)
                     $kept = New-Object System.Collections.ArrayList
@@ -20197,6 +20348,7 @@ function Handle-Request {
                     }
                     $body.rows = @($kept.ToArray())
                     $body['portalFiltered'] = $true
+                    $aaDelegated = $true
                 }
                 # 2026-10-07 (operator: "by default hide anything managed by pim manager ... this module is all about cleanup"):
                 # mark each row MANAGED when the engine's last drift read matched it to a definition (pim.TenantCache
@@ -20245,7 +20397,9 @@ function Handle-Request {
                 $body['productPrincipalIds'] = @($ownProduct)
                 $body['supportPrincipalIds'] = @($ownSupport)
                 $body['ownErrors'] = @($ownErr)
-                Write-JsonResponse -Response $resp -Status 200 -Body $body
+                # REQ 100.112 (D): serialised once; kept for the next load only when the lookup gave a key (a filtered answer never is).
+                $aaBytes = Save-PimActiveAssignmentsResponse -Key $(if ($aaDelegated) { '' } else { "$($aaKept.key)" }) -Body $body
+                Write-PimJsonBytesResponse -Response $resp -Status 200 -Bytes $aaBytes
                 return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }

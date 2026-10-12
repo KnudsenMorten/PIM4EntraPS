@@ -26346,6 +26346,8 @@
     try {
       const d = await api('GET', '/api/active-assignments');
       const rows = (d && Array.isArray(d.rows)) ? d.rows : [];
+      // REQ 100.112: a stored snapshot that could not be loaded is "not checked", never "no live assignments".
+      if (d && d.snapshotReadError) return { checked: false, count: 0, reason: 'the live assignment snapshot could not be loaded (' + String(d.snapshotReadError) + ')' };
       if (!rows.length && d && d.refreshQueued) return { checked: false, count: 0, reason: 'the live assignment snapshot is still being refreshed' };
       const hit = rows.filter(r => String(r && r.type || '') === 'pim-for-groups' &&
         names.indexOf(String(r.scope || '').trim().toLowerCase()) >= 0);
@@ -32892,6 +32894,14 @@
     refreshSinceUtc: '',
     pollTimer: null,
     pollMs: 15000,
+    // REQ 100.112: the FULL answer is fetched once per stored snapshot; while a read is queued / running the page polls only
+    // the light GET /api/active-assignments?state=1 and fetches the full answer once when that says the snapshot changed.
+    snapshotReadError: '',  // a snapshot IS stored but could not be loaded (never shown as "no snapshot yet")
+    snapStamp: '',          // when the snapshot on screen was written (server: snapshotStamp)
+    fullForStamp: null,     // the stamp the last state-driven full fetch was made for (one fetch per stamp, never a loop)
+    loadedOnce: false,      // a full answer has arrived at least once in this page
+    lastLoadFailed: false,  // the last full fetch failed -- Refresh then retries the load, it does not ask for a new read
+    stateInFlight: false,
     // §100.47 (c): 'graph' (default) | 'list' -- remembered per browser (localStorage 'pim.revoke.view').
     view: 'graph',
     lastRender: 'message'   // what #revResults holds: 'table' (rows to draw) | 'message' (loading / empty / error)
@@ -32976,10 +32986,14 @@
     // First-open: kick a load (a fast read of the stored snapshot). Subsequent opens reuse the rows
     // unless there was no snapshot yet -- then look again, the scheduler may have built it meanwhile.
     // §100.47 (a): ...and also when a read was still running when the page was last shown (it may have landed).
-    if ((REV.rows.length === 0 || REV.snapshotMissing || REV.refreshPending) && !REV.inFlight) {
+    // REQ 100.112 (C): opening the page = ONE full fetch. A later open shows what is here and asks only the light state
+    // (which fetches the full answer once, and only when the stored snapshot changed). It used to fetch everything again
+    // on every open while a read was running -- 25 s of the Manager's one request loop each time at a large tenant.
+    if (!REV.loadedOnce && !REV.inFlight) {
       await loadActiveAssignments(false, { quiet: REV.rows.length > 0 });
     } else {
       renderRevokeTable();
+      if (REV.loadedOnce && !REV.inFlight) revCheckState();
     }
   }
 
@@ -33005,10 +33019,13 @@
     return isNaN(t) ? 0 : Math.max(0, (Date.now() - t) / 60000);
   }
   // The Refresh button + its note: disabled while a read is queued/running or this page is loading.
+  // REQ 100.112: after a load that failed, or a stored read that could not be loaded, Refresh RETRIES THE LOAD -- it never
+  // asks for a new read of the tenant because of that, and it stays usable while a read is under way.
+  function revRetryOnly() { return !!(REV.snapshotReadError || REV.lastLoadFailed); }
   function revSyncRefreshButton() {
     const b = document.getElementById('revBtnRefresh');
     const n = document.getElementById('revRefreshNote');
-    const busy = !!(REV.inFlight || REV.refreshPending);
+    const busy = !!(REV.inFlight || (REV.refreshPending && !revRetryOnly()));
     if (b) {
       b.disabled = busy;
       b.title = REV.refreshPending
@@ -33024,7 +33041,8 @@
     }
   }
   function revStopPoll() { if (REV.pollTimer) { clearTimeout(REV.pollTimer); REV.pollTimer = null; } }
-  // While a read is under way, look at the stored snapshot again every pollMs (only while this page is open).
+  // While a read is under way, ask the light state again every pollMs (only while this page is open).
+  // REQ 100.112 (C): the poll NEVER fetches the full answer by itself -- revCheckState does, once per new snapshot.
   function revSchedulePoll() {
     revStopPoll();
     if (!REV.refreshPending || !isServer) return;
@@ -33033,8 +33051,34 @@
       const tab = document.getElementById('revokeTab');
       if (!tab || !tab.classList.contains('active')) return;   // reopening the page looks again (openRevokeTab)
       if (REV.inFlight) { revSchedulePoll(); return; }
-      try { await loadActiveAssignments(false, { quiet: true, poll: true }); } catch (_) { }
+      try { await revCheckState(); } catch (_) { }
     }, REV.pollMs);
+  }
+  // REQ 100.112 (B + C): GET /api/active-assignments?state=1 -- is a read queued / running, since when, and when was the
+  // stored snapshot written. Small and fast (the server reads no rows for it). The "a new read is running (started ...)"
+  // line, the loading block and the Refresh button follow it; the full answer is fetched ONCE when the snapshot's stamp is
+  // not the one on screen, and never twice for the same stamp.
+  async function revCheckState() {
+    if (!isServer || REV.stateInFlight || REV.inFlight) return;
+    REV.stateInFlight = true;
+    let s = null;
+    try { s = await api('GET', '/api/active-assignments?state=1'); } catch (_) { s = null; }
+    finally { REV.stateInFlight = false; }
+    if (!s || s.state !== true) { revSchedulePoll(); return; }   // could not ask: keep what is shown, look again later
+    REV.refreshPending = !!s.refreshPending;
+    REV.refreshState = s.refreshState || (REV.refreshPending ? 'queued' : '');
+    REV.refreshSinceUtc = s.refreshSinceUtc || '';
+    if (!REV.refreshPending) REV.refreshQueued = false;
+    if (s.cadenceMinutes) REV.cadenceMinutes = s.cadenceMinutes;
+    const stamp = String(s.snapshotStamp || s.refreshedUtc || '');
+    if (stamp && stamp !== REV.snapStamp && stamp !== REV.fullForStamp && !REV.inFlight) {
+      REV.fullForStamp = stamp;
+      await loadActiveAssignments(false, { quiet: true, poll: true, fromState: true });
+      return;
+    }
+    if (REV.snapshotMissing || REV.snapshotReadError) renderRevokeTable();   // the loading / missing / could-not-load block
+    else { renderRevSnapshotInfo(); revSyncRefreshButton(); }
+    revSchedulePoll();
   }
   // The loading block shown INSTEAD of rows while there is no snapshot yet and a read is under way.
   function revLoadingHtml() {
@@ -33139,7 +33183,7 @@
     const b = document.getElementById('revBusy');
     if (b) b.style.display = on ? '' : 'none';
     const r = document.getElementById('revBtnRefresh');
-    if (r) r.disabled = !!on || !!REV.refreshPending;
+    if (r) r.disabled = !!on || (!!REV.refreshPending && !revRetryOnly());
     const s = document.getElementById('revSearch');
     if (s) s.disabled = !!on;
     revSyncRefreshButton();
@@ -33153,6 +33197,10 @@
     const poll = !!(opts && opts.poll);   // a poll while "Loading..." is on screen: no flash, the status line is kept
     // §100.47 (a): never ask for a second read while one is queued / running -- a plain read of the stored snapshot instead.
     if (force && REV.refreshPending) force = false;
+    // REQ 100.112 (A): a load that failed / a stored read that could not be loaded is retried as a plain load.
+    if (force && revRetryOnly()) force = false;
+    const fromState = !!(opts && opts.fromState);
+    let loaded = false;
     REV.inFlight = true;
     revStopPoll();
     const results = document.getElementById('revResults');
@@ -33171,6 +33219,11 @@
     try {
       const url = '/api/active-assignments' + (force ? '?refresh=1' : '');
       const data = await api('GET', url);
+      loaded = true; REV.loadedOnce = true; REV.lastLoadFailed = false;
+      // REQ 100.112: a stored snapshot that could not be loaded is its own state (never "no snapshot yet"); the stamp says
+      // which stored snapshot this answer is, for the state poll.
+      REV.snapshotReadError = String((data && data.snapshotReadError) || '');
+      REV.snapStamp = String((data && data.snapshotStamp) || '');
       REV.rows = Array.isArray(data && data.rows) ? data.rows : [];
       REV.managedKnown = !!(data && data.managedKnown);
       REV.managedComputedUtc = (data && data.managedComputedUtc) || '';
@@ -33189,10 +33242,14 @@
       REV.stale = !!(data && data.stale);
       REV.snapshotHint = (data && data.hint) || '';
       // §100.47 (a): a read already queued / running. An older server (no refreshPending) only says refreshQueued.
+      // REQ 100.112: a load the state poll asked for keeps the state's (newer) answer -- this one may come from memory.
+      if (fromState) { REV.refreshQueued = !!REV.refreshPending; }
+      else {
       const hasPend = !!(data && Object.prototype.hasOwnProperty.call(data, 'refreshPending'));
       REV.refreshPending = hasPend ? !!data.refreshPending : REV.refreshQueued;
       REV.refreshState = (data && data.refreshState) || (REV.refreshPending ? 'queued' : '');
       REV.refreshSinceUtc = (data && data.refreshSinceUtc) || (REV.refreshPending ? (REV.refreshSinceUtc || new Date().toISOString()) : '');
+      }
       // A revoke marked "queued" stays marked while the snapshot still carries the row; once a newer snapshot
       // no longer has it, the revoke has landed and the marker is dropped.
       const present = new Set(REV.rows.map(r => r.id));
@@ -33202,18 +33259,22 @@
       updateRevokeBadge();
       renderRevokeTable();
     } catch (e) {
+      REV.lastLoadFailed = true;
       if (quiet) {   // a poll that failed keeps what is on screen, and says so
-        setRevStatus('Could not look for the new read: ' + String(e.message || e) + ' -- the rows shown are the previous read.', 'warn');
+        setRevStatus('Could not load the new read: ' + String(e.message || e) + ' -- the rows shown are the previous read. Press Refresh to try again.', 'warn');
         return;
       }
-      results.innerHTML = '<div class="rev-error">Failed to load active assignments: ' + escapeHtml(String(e.message || e)) + '</div>';
+      results.innerHTML = '<div class="rev-error">Failed to load active assignments: ' + escapeHtml(String(e.message || e)) + ' Press <b>Refresh</b> to try again.</div>';
       REV.lastRender = 'message'; applyRevView();
       // A failed load leaves the counts UNKNOWN, not zero -- same rule as the in-flight state.
       setRevChips(null);
     } finally {
       REV.inFlight = false;
       setRevBusy(false);
-      revSchedulePoll();
+      // REQ 100.112 (C): the answer may have been served from the Manager's memory, so its queued / running fields can be
+      // old -- the light state is asked once after a full load (never after the load the state itself asked for, and never
+      // after a load that failed), and only the state is polled from then on.
+      if (loaded && !fromState) revCheckState(); else revSchedulePoll();
     }
   }
 
@@ -33359,6 +33420,15 @@
     revSyncRefreshButton();
     // §100.47 (c): what #revResults holds decides which view is on screen (applyRevView).
     const shown = (kind) => { REV.lastRender = kind; applyRevView(); };
+
+    // REQ 100.112 (A): a snapshot IS stored but could not be loaded -- say that, and why. Never "no snapshot yet".
+    if (REV.snapshotReadError) {
+      results.innerHTML = '<div class="rev-error" id="revReadError">The stored read could not be loaded (' + escapeHtml(REV.snapshotReadError) +
+        '). Press <b>Refresh</b> to try again.</div>';
+      shown('message');
+      updateActionBar();
+      return;
+    }
 
     if (REV.snapshotMissing) {
       // §100.47 (a): a read under way = "Loading current delegations..." with when it started (the page polls); only
@@ -34010,7 +34080,8 @@
     const note = document.getElementById('revSnapshotNote');
     const every = 'refreshes every ' + revCadenceText(REV.cadenceMinutes) + '; Refresh queues a new read';
     if (at) {
-      if (REV.snapshotMissing) at.textContent = 'no snapshot yet (' + every + ')';
+      if (REV.snapshotReadError) at.textContent = 'the stored read could not be loaded';   // REQ 100.112: not "no snapshot yet"
+      else if (REV.snapshotMissing) at.textContent = 'no snapshot yet (' + every + ')';
       else if (REV.loadedUtc) {
         // BRAND-2.10: the snapshot time in the viewer's LOCAL zone; the day only when it is not today (local).
         const loc = fmtTime(REV.loadedUtc);
@@ -34023,7 +34094,7 @@
     if (!note) return;
     const bits = [];
     // §100.47 (a): the stored read is shown at once with its age; a read under way says so, and the page polls for it.
-    if ((REV.refreshPending || REV.refreshQueued) && !REV.snapshotMissing) bits.push('<span class="rev-spin" style="display:inline-block;vertical-align:-2px;margin-right:5px;"></span>A new read is <b>' + (REV.refreshState === 'running' ? 'running' : 'queued') + '</b>' +
+    if ((REV.refreshPending || REV.refreshQueued) && !REV.snapshotMissing && !REV.snapshotReadError) bits.push('<span class="rev-spin" style="display:inline-block;vertical-align:-2px;margin-right:5px;"></span>A new read is <b>' + (REV.refreshState === 'running' ? 'running' : 'queued') + '</b>' +
       (REV.refreshSinceUtc ? ' (' + escapeHtml(revSinceText(REV.refreshSinceUtc)) + ')' : '') + '. What you see is the read shown above; the page updates by itself when the new one is ready.');
     if (REV.stale) bits.push('This snapshot is <b>stale</b> (older than two cadences). Check the <b>active-assignments-snapshot</b> job on the Jobs page.');
     if (REV.revokeQueued.size > 0) bits.push(REV.revokeQueued.size + ' row(s) marked <b>revoke queued</b> stay listed until the engine applies the revoke and the next snapshot is read.');
@@ -34048,7 +34119,7 @@
     const btnR = document.getElementById('revBtnRefresh');
     // §100.47 (a): Refresh never asks for a second read while one is queued / running (the button is disabled then too).
     if (btnR) btnR.onclick = () => {
-      if (REV.refreshPending || REV.inFlight) {
+      if ((REV.refreshPending && !revRetryOnly()) || REV.inFlight) {
         revSyncRefreshButton();
         setRevStatus('A read of the tenant is already ' + (REV.refreshState === 'running' ? 'running' : 'queued') + ' -- not asked for again. The page updates by itself when it is ready.', 'warn');
         return;

@@ -1076,9 +1076,15 @@ function ConvertTo-PimActiveAssignmentsSnapshotView {
         # §100.47 (a): a read already queued / running (Get-PimActiveAssignmentsRefreshState) -- the page shows "Loading..."
         # and keeps Refresh disabled; -RefreshAlreadyQueued = this request asked for one and was NOT queued again.
         [AllowNull()][object]$RefreshState = $null,
-        [bool]$RefreshAlreadyQueued = $false
+        [bool]$RefreshAlreadyQueued = $false,
+        # REQ 100.112: -ReadError = a snapshot IS stored but could not be read (plain reason). That is never "no snapshot
+        # yet": snapshotMissing stays $false and snapshotReadError says why. -SnapshotStamp = when the stored row was
+        # written (the store's own stamp, read without the document); the page compares it with ?state=1.
+        [string]$ReadError = '',
+        [string]$SnapshotStamp = ''
     )
     if ($CadenceMinutes -le 0) { $CadenceMinutes = $script:PimActiveAssignmentsSnapshotDefaultCadenceMinutes }
+    if ($CadenceMinutes -le 0) { $CadenceMinutes = 120 }
     $now = $NowUtc.ToUniversalTime()
     $rsPending = [bool]$RefreshQueued; $rsState = if ($RefreshQueued) { 'queued' } else { '' }; $rsSince = ''
     if ($null -ne $RefreshState -and [bool]$RefreshState.pending) { $rsPending = $true; $rsState = "$($RefreshState.state)"; $rsSince = "$($RefreshState.sinceUtc)" }
@@ -1086,6 +1092,34 @@ function ConvertTo-PimActiveAssignmentsSnapshotView {
     $rsWord = if ($rsState -eq 'running') { 'is running' } else { 'is queued' }
     $refreshedIso = if ($null -ne $Entry) { ConvertTo-PimActiveAssignmentsIsoStamp -Value $Entry.refreshedUtc } else { $null }
     $hasEntry = ($null -ne $Entry) -and ("$refreshedIso".Trim() -ne '')
+    if (-not $hasEntry -and "$ReadError".Trim()) {
+        $msg = "The stored read could not be loaded ($("$ReadError".Trim()))."
+        return [ordered]@{
+            ok              = $false
+            error           = $msg
+            rows            = @()
+            counts          = [ordered]@{ total = 0; 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0 }
+            surfaceErrors   = @()
+            partial         = $false
+            loadedUtc       = $null
+            refreshedUtc    = $null
+            ageSeconds      = $null
+            cacheHit        = $false
+            snapshot        = $true
+            snapshotMissing = $false
+            snapshotReadError = "$ReadError".Trim()
+            snapshotStamp   = "$SnapshotStamp"
+            refreshQueued   = [bool]$RefreshQueued
+            refreshPending  = [bool]$rsPending
+            refreshState    = $rsState
+            refreshSinceUtc = $rsSince
+            refreshAlreadyQueued = [bool]$RefreshAlreadyQueued
+            cadenceMinutes  = $CadenceMinutes
+            stale           = $false
+            hint            = "$msg A snapshot is stored; no new read of the tenant was asked for because of this."
+            source          = 'scheduler-snapshot'
+        }
+    }
     if (-not $hasEntry) {
         $hint = if ($rsPending -and -not $RefreshQueued) { "No snapshot yet -- a read $rsWord (since $rsSince); not queued again. This page does not wait for it." }
                 elseif ($RefreshQueued) { 'No snapshot yet -- queued. The scheduler builds it within ~5 min; this page does not wait for it.' }
@@ -1102,6 +1136,8 @@ function ConvertTo-PimActiveAssignmentsSnapshotView {
             cacheHit        = $false
             snapshot        = $true
             snapshotMissing = $true
+            snapshotReadError = ''
+            snapshotStamp   = "$SnapshotStamp"
             refreshQueued   = [bool]$RefreshQueued
             refreshPending  = [bool]$rsPending
             refreshState    = $rsState
@@ -1151,6 +1187,8 @@ function ConvertTo-PimActiveAssignmentsSnapshotView {
         cacheHit        = $true
         snapshot        = $true
         snapshotMissing = $false
+        snapshotReadError = ''
+        snapshotStamp   = "$SnapshotStamp"
         refreshQueued   = [bool]$RefreshQueued
         refreshPending  = [bool]$rsPending
         refreshState    = $rsState
@@ -1164,6 +1202,18 @@ function ConvertTo-PimActiveAssignmentsSnapshotView {
     }
     if ("$($Entry.error)".Trim()) { $view['error'] = "$($Entry.error)" }
     return $view
+}
+
+function ConvertTo-PimActiveAssignmentsReadErrorText {
+    # PURE. REQ 100.112: the plain reason a stored snapshot could not be read, for the page ("The stored read could not be
+    # loaded (<reason>)"). The raw exception text stays in the Manager's log (the tenant-cache warning).
+    param([AllowNull()][string]$Message)
+    $m = ("$Message" -replace '\s+', ' ').Trim()
+    if (-not $m) { return '' }
+    if ($m -match '(?i)OutOfMemory|insufficient memory') { return 'PIM Manager did not have enough memory to load it' }
+    if ($m -match '(?i)timeout|timed out') { return 'the database did not answer in time' }
+    if ($m.Length -gt 200) { $m = $m.Substring(0, 200) + '...' }
+    return $m
 }
 
 # 2026-10-07: the MANAGED identity shared by the engine's drift read and Review current delegations (both load this file).

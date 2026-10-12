@@ -5,9 +5,9 @@
   </picture>
 </p>
 
-# PIM4EntraPS — design
+# PIM Manager — design
 
-This is the **single design document** for PIM4EntraPS: the architecture and how
+This is the **single design document** for PIM Manager: the architecture and how
 the **built** system works (the model, the engine, providers, identity/auth,
 delegation, scale, hosting/runtime, containers, the MSP edition, the SQL/data
 model, workload connectors, lifecycle/governance, the Manager GUI + UX,
@@ -52,7 +52,7 @@ the alternative was found to fail in practice.
 20. [Launcher flavors](#20-launcher-flavors)
 21. [Companion tools & projects](#21-companion-tools--projects); [PIM for AD](#211-pim-for-ad-companion-pim4activedirectoryps)
 22. [Activation use-cases](#22-activation-use-cases)
-23. [What PIM4EntraPS is not](#23-what-pim4entraps-is-not)
+23. [What PIM Manager is not](#23-what-pim-manager-is-not)
 24. [Trade-offs / known gaps](#24-trade-offs--known-gaps)
 25. [Testing strategy](#25-testing-strategy)
 26. [Where to read next](#26-where-to-read-next)
@@ -130,7 +130,7 @@ Doing this through the Entra portal **fails at scale**:
 | Audit can't answer "who can do X?" | Requires per-scope enumeration. |
 | Offboarding leaks privilege | One missed assignment = lingering access. |
 
-PIM4EntraPS reframes the model as **declarative configuration** (CSVs, or SQL —
+PIM Manager reframes the model as **declarative configuration** (CSVs, or SQL —
 see §14) + **imperative engine** (PowerShell) — the same pattern that turned
 manual server config into Terraform.
 
@@ -226,7 +226,7 @@ constraint or duplicating groups.
 **Indirect**: principal is a member of a group; the group has the assignment;
 member inherits via transitive membership.
 
-PIM4EntraPS is **indirect-by-design** with one exception:
+PIM Manager is **indirect-by-design** with one exception:
 
 | Use case | Delegation type | Why |
 |---|---|---|
@@ -579,6 +579,18 @@ container, or from the scheduler with no `Connect-*` step.
   recipients, and reads each send result. It reports `sent`, `partial`, `failed`, `no-recipient`,
   `no-mailer` or `debounced`, and records the alert in the shared alert feed. The console says
   "emailed" only when a mail was sent.
+- **A guard holds only what cannot heal (2.4.594).** A hold stops work and needs a person, so it is
+  kept for changes whose damage would not fix itself on the next run: a policy change (every change
+  set waits for a SuperAdmin of the tenant, §17.7), many removals or account disables in one run (the
+  two guards above), the tenant's last Global Administrator (held until a SuperAdmin releases exactly
+  that change), and the last PIM Manager SuperAdmin (refused).
+  Everything else is a **warning**: access that is not yet in line with the definitions, and key
+  numbers that differ from the last runs, go into one daily "Data quality alert" mail and onto their
+  pages. A warning never holds a run.
+- **A hold that is no longer needed clears itself (2.4.596, 2.4.598).** A guard's hold is removed by
+  the same guard: when a later writing run of that scope finds nothing left to hold — the removals
+  were taken back, or the plan is back inside the limit — it clears the hold. There is no acknowledge
+  step. A release (Operations › Guards, SuperAdmin) lets exactly the held plan through.
 - **Delta** — create/update everything that differs (no prune).
 - **Delta + `-FromQueue` / `-Changes`** — apply **only** the pending commit-queue
   `(entity,key)` pairs. A Manager commit enqueues changes; the engine applies just
@@ -717,8 +729,11 @@ top of the engine delta — it does NOT reimplement reconciliation.**
   (Before v2.4.370 the handler ran the engine inside the web process.) Detected drift also raises
   the `drift` Manager alert.
 
-**Coverage & gaps — what PIM does not delegate yet (`PIM-Coverage.ps1`).** Drift compares what PIM
-manages; coverage compares what EXISTS with what PIM delegates, for every workload.
+**Discovery and gaps — what PIM does not delegate yet (`PIM-Coverage.ps1`).** Drift compares what PIM
+manages; coverage compares what EXISTS with what PIM delegates, for every workload. Until 2.4.604 the
+page was called *Coverage & gaps* and sat under Reviews & controls, next to a separate Discovery page
+under Access. Since 2.4.604 there is **one page, Discovery and gaps, under Access** (§17.13 describes
+what the old Discovery page did and where each part went).
 
 - **The report is computed in the scheduler.** Job `coverage` (default every **720 min**) reads the
   tenant caches (Entra role catalog, `workload-roles:intune` / `workload-roles:defender` from the
@@ -738,11 +753,39 @@ manages; coverage compares what EXISTS with what PIM delegates, for every worklo
   Defender mirror their pack v2 (group + workload binding; managers/admins L3, operators L4,
   readers L5, Defender readers L4); an Azure scope gets Reader (L4, Active) and Contributor (L3,
   Eligible) groups at that scope. A group that is already defined gets the binding only.
-- **The page reads the stored report** (`GET /api/coverage`, any role; **Reviews & controls ›
-  Coverage & gaps**). **Check now** (`POST /api/coverage/check`, Admin+, audited) queues a
-  `coverage` trigger and starts the tick. Every gap unit is pre-selected; staging puts each selected
-  unit whole into Pending changes (a unit whose second row fails is taken back), and the normal
-  review and commit follow. Orphans and unmanaged groups are review-only.
+- **The page reads the stored report** (`GET /api/coverage`, any role; **Access › Discovery and
+  gaps**, shown as *Discovery & gaps* in the menu). **Check now** (`POST /api/coverage/check`, Admin+,
+  audited) queues a `coverage` trigger and starts the tick. Every gap unit is pre-selected; staging
+  puts each selected unit whole into Pending changes (a unit whose second row fails is taken back), and
+  the normal review and commit follow. Orphans and unmanaged groups are review-only.
+- **The page opens on the gaps** (2.4.609). The Status filter starts on **Gap**. The two buttons count
+  the same unit: **Stage N selected gaps into Pending changes** and **Ignore N selected gaps**. One
+  line under them says how many of the gaps shown are selected, how many groups and roles that
+  creates, and how many gaps have no ready proposal. Before 2.4.609 one button counted proposals and
+  the other counted gaps, which read as a disagreement.
+- **Two more kinds are listed since the pages were joined** (2.4.604): **Administrative Units** (the
+  tenant's units compared with the unit definitions; the proposal is the unit's definition row) and,
+  where a hybrid worker exists, **Windows servers** (the proposal is the per-server group definition).
+  An environment without a hybrid worker leaves the Windows servers out; it does not show them as
+  "not read".
+- **Ignore and Bring back** (2.4.604). Each gap row has **Ignore**, and the bar has **Ignore N
+  selected gaps** (it asks first). An ignored gap comes back from the server with status **Ignored**:
+  it is off the default list, out of the gap count, and is never pre-selected or staged. Status =
+  Ignored lists it with who ignored it and when, with **Bring back** and **Bring back all shown**. The
+  decisions are kept in the settings store under the same keys the old Discovery page used, so what was
+  ignored there stays ignored. `POST /api/coverage/ignore` (Admin, the page's licence, audited) accepts
+  only a current gap or an ignored item. The gap count is counted on the server without the ignored
+  items. When the list of ignored items cannot be read, nothing is hidden. Only a gap can be ignored,
+  not an orphan or an unmanaged group.
+- **A workload that was not read says so** (2.4.604). Above the list there is one plain block per
+  workload that could not be read: "<Workload> was not read", what is missing and the steps to fix
+  it — taken from that workload's own prerequisite check (§15.4a), not from a second copy in the
+  page — and **Check again**, which runs the prerequisite check and a new read. The count row says
+  "not read" and the row status reads **Not read**; such a workload is never counted as covered.
+- **The top of the page is short.** The explanation sits under "What this is & how to use it". The
+  workloads whose prerequisites are ready fold into one green line ("5 of 5 workloads ready"); only
+  those that need action are shown open.
+- **Gaps never put a number in the menu.** A gap is a warning (§18.1d).
 - **New findings are mailed.** New gaps, orphans, unmanaged bindings, wrong permissions or unmanaged
   privileged groups since the previous report raise the `coverage` alert. The first report is the
   baseline and mails nothing.
@@ -2089,7 +2132,7 @@ columns, and the delegations table edits `PolicyTemplate` with a picker whose bl
 reports it (PIM-POL-001), as it does an approval template on an Entra role with no approvers
 (PIM-APR-001). An Azure permission group's **Owners** are staged on its `PIM-Definitions-Services`
 definition row, where the group-owners scope, the group's approval and the Azure role policy's approver
-fallback read them. The wizards, the target-first delegation and the Coverage & gaps proposals stage
+fallback read them. The wizards, the target-first delegation and the Discovery and gaps proposals stage
 that definition and its `PIM-Assignments-Azure-Resources` binding(s) as one unit (a tag that is already
 defined gets the binding only); a binding alone names a group nothing defines, which the validator
 reports (PIM-FK-001) and the engine never creates. The engine also still honours owners named on a
@@ -2116,6 +2159,78 @@ delegation path the product exists to run. A justification rule is no better as 
 control: a grant that omits one is still accepted on the app-only path. On an
 approval scope a human is in the loop by definition, so the rule is enforced and
 earns its place.
+
+### Policy settings — the customer chooses per setting (2.4.598)
+
+Until 2.4.597 a template was applied on its own: the engine compared every managed rule with the
+template and wrote the difference, and only a large or weakening change set was held. Since 2.4.598
+**the engine writes no policy setting the customer has not chosen.** The templates above are still
+the store of recommended values; they no longer decide by themselves.
+
+**The choice model.**
+
+- **Settings, per policy type.** The policy types are Entra roles, PIM for Groups member, PIM for
+  Groups owner and Azure roles. Each type has the same list of settings: the longest activation;
+  whether activation needs multifactor authentication, a reason, a ticket; whether approval is needed
+  (the approvers stay on the delegation row); whether an eligible and an active assignment must expire
+  and after how long; the checks on an administrator's own assignment; and the notification mails, one
+  setting per audience.
+- **Three values per setting.** **Microsoft default**, **PIM Manager recommendation** (what the bound
+  template says) and **Keep current** (the value the tenant has now; where policies differ, the page
+  shows the spread, for example "8 h on 41 roles, 1 h on 3").
+- **No choice means not touched.** A setting without a choice is not compared, not planned and not
+  written. It is reported as "waiting for your choice", which is neither an error nor a hold. Where one
+  directory rule carries several settings, the undecided ones keep their live value when the rule is
+  written.
+- **One choice per setting per type, with exceptions.** A single role, group or Azure role can carry
+  its own choice. There is no tenant-wide mode and no default that decides for the customer.
+- **Where the recommendation comes from.** From the stored templates, resolved exactly as the engine
+  applies them. It needs no read of the tenant, so it is shown from the first minute (2.4.599).
+- **Where "Keep current" comes from.** From the values the last policy run read. Before the first
+  read the button can still be chosen; the page says the values are being read and fills them in.
+- **Where the Microsoft default comes from.** From a table shipped with the product, the same in every
+  installation. Microsoft's documentation does not state the defaults, so each value was captured from
+  policies nobody had ever changed, and is marked with its source and date. Some Entra roles have a
+  default of their own (for example multifactor authentication on activation); the table carries those
+  as exceptions per role. **A value that is not verified is not selectable and is never written**: this
+  is why Microsoft default can be chosen for Entra roles and for PIM for Groups (2.4.604), and is
+  switched off, with the reason, for Azure roles. A daily job reads the tenant's own untouched policies
+  as a cross-check only; a difference is shown next to the value and never changes what is written.
+- **Advice numbers.** Every setting carries a number that goes up when a release changes its
+  recommended value or its Microsoft default. A choice made on an older number is **asked again**.
+  Until it is answered, that setting is not written.
+
+**Where the customer chooses.** **Templates › Policy settings**: one block per policy type and three
+buttons per setting, each showing its own value. Choices stay on the page until **Save choices**
+(SuperAdmin; an Admin reads). The page also shows the change sets that are held and where to approve
+them. The **quick selection** sets every setting at once — all to the recommendation, all to the
+Microsoft default, or all to keep current. A dialog first says what it sets per type and what it cannot
+set and why; then the person types the word **confirm**. It leaves the settings it cannot set
+untouched. The **Policies** step of Get Started is the same table; every waiting setting starts on
+Keep current there, and the step is done when no setting waits. An installation that existed before
+this step gets no reminder mail for it (2.4.606); the step simply stays open on the page.
+
+**A choice is approved before it changes anything.** Saving a choice writes nothing to the tenant.
+The next policy run turns the choices into a plan and passes it through the hold described in §17.7:
+since 2.4.598 **every non-empty change set is held**, whatever its size, until a **SuperAdmin of that
+tenant** approves it under Approvals. The approval covers exactly that plan. The same person who chose
+may approve; it is a second, deliberate step. No count, no percentage and no "this policy was never
+changed before" exemption lets a policy write through without that approval.
+
+**MSP.** In a managing tenant, its own choices are published inside the signed set a managed tenant
+already pulls — there is no second transport and no secret. What travels: each choice per type, its
+advice number, whether the managing tenant still stands on it, and an exception for a role (always) or
+for a group (only when that group is sent to the tenant). What never travels: who chose, a policy
+value, a hold, an approval, an exception for an Azure scope. In the managed tenant the pulled choices
+are the **default**; that tenant's own choice for a setting wins and is never overwritten by the next
+pull. A pulled choice counts as current only when the managing tenant still stands on it and both
+tenants run the same shipped values; otherwise it is stored as asked again. The managed tenant's own
+run plans the change and holds it until a SuperAdmin of **that** tenant approves it. A customer can
+block this class of content in its own manifest, like the other classes a managing tenant sends.
+
+**Known limits.** The break-glass override (§17.9) still switches approval off on the groups its
+template protects, and its restore puts approval back; this is not driven by a choice. A change set
+that was approved and only partly applied leaves a smaller set, which needs a new approval.
 
 ### Switching approval off, and policies that stop accepting changes (2026-08-11)
 
@@ -2148,7 +2263,8 @@ PIM for Groups policies (`GroupsPolicies`, member **and** owner), the directory-
 values equal v1's rule for rule (a standing test parses v1's definitions and compares every rule),
 and stored templates receive new settings automatically without overwriting customised values. All
 three providers plan their policy changes first and pass the plan through the **mass-change safety
-brake** before writing anything; see §17.7.
+brake** before writing anything; see §17.7. Since 2.4.598 a provider plans only the settings the
+customer chose a value for, and the brake holds every change set (see "Policy settings" above).
 
 See §17.7 for the full template/approval mechanics.
 
@@ -3250,7 +3366,7 @@ customer values are baked into the scripts — every environment value is a para
 
 ### 11.5 Install & implementation guide (community + subscription)
 
-PIM4EntraPS deploys in one of **two modes**. They share one engine (REST-only,
+PIM Manager deploys in one of **two modes**. They share one engine (REST-only,
 no PowerShell modules), one SQL data model, and one identity model: **managed identity**
 where the engine is hosted in Azure, an **engine application authenticating with a
 certificate** elsewhere (§7, §27) — never device-code; a client secret only where a platform
@@ -3678,6 +3794,13 @@ is decided by its **release ring**, never by "newest available":
 | **1** | the maintainer's own release-testing environments | every build that has been built, rolled and verified |
 | **2** | customer environments (design partners) | only when a version is explicitly approved for ring 2 |
 
+> **This table is the ring model of the source-archive feed, as first built.** Installations that take their updates
+> from Invardia (§29.3) use four rings: **ring 0** the vendor's own environment,
+> **ring 1** test environments, **ring 2 and ring 3** customers. A version reaches a customer ring only on the release
+> owner's decision, and each installation's own updater pulls its ring's version at the nightly update. §29.3 has the
+> table and the rules. The mechanics described in the rest of this section — the environment asks, forward only, no
+> approved version means no move, build in the environment's own registry, verify, roll back — are the same for both.
+
 - **One channel document per feed.** `channel.json` sits beside the published source archives and names the
   approved version per ring (`ring1`, `ring2`, …). Releasing to a ring is editing that one entry; nothing is
   pushed to environments.
@@ -4078,7 +4201,7 @@ is necessary but not sufficient.
 
 ### 11.8 Deployment scenarios — the six supported topologies (S1–S6)
 
-PIM4EntraPS supports a fixed, named set of **deployment topologies**: the
+PIM Manager supports a fixed, named set of **deployment topologies**: the
 combination of *who runs it* (a single tenant, a managing tenant, or an MSP-managed
 customer tenant), *which distribution edition* it is (Internal/AutomateIT vs the
 public Community edition), *where the update comes from*, *where the GUI + SQL
@@ -5511,12 +5634,12 @@ the **operator** decides *when* (which version + which capabilities are approved
 central, one-line promotion); the **customer** decides *whether* (which solutions, and which
 **optional** capabilities). A capability runs only when **all three agree**. Rollout timing and
 product choice are different questions with different owners, so they are two independent gates and
-neither substitutes for the other. PIM declares ten capabilities — `code` and `schema` **required**,
+neither substitutes for the other. PIM declares eleven capabilities — `code` and `schema` **required**,
 and `prereq` / `image` / `infra` / `appreg` / `msp-downlink` / `msp-admins` / `msp-roles` /
-`msp-groups` optional. A customer blocking a *required* one is **refused and reported**, never
-obeyed, because honouring it would leave a broken install.
+`msp-groups` / `msp-policies` (since 2.4.598) optional. A customer blocking a *required* one is
+**refused and reported**, never obeyed, because honouring it would leave a broken install.
 
-**The three `msp-*` class capabilities are the CUSTOMER's half of the MSP accept gate.** Blocking
+**The `msp-*` class capabilities are the CUSTOMER's half of the MSP accept gate.** Blocking
 `msp-downlink` declines the managed downlink outright; the class capabilities are finer, so a
 customer can decline one *kind* of arriving change and still take the rest — `msp-roles` in
 particular is the veto over a projection that could carry Global Administrator into their tenant
@@ -5525,9 +5648,11 @@ and the same `blockCapabilities` key the platform sync already honours: their fi
 deliberately **not** a PIM-private consent store, which would be a second place to say the same thing
 and would drift. A blocked class is reported `Held` on the plan with the capability named, never
 silently absent — *"the customer declined roles"* and *"the managing tenant published none"* must not produce
-the same report. `msp-policies` is intentionally **not declared**: the downlink does not carry policy
-artifacts, and declaring a capability that gates nothing would advertise a control that does not
-exist.
+the same report. `msp-policies` is **declared since 2.4.598**. Until then the downlink carried no
+policy content, and a capability that gates nothing would have advertised a control that did not
+exist. It was added in the same change that made the signed set carry the managing tenant's policy
+choices (§6, "Policy settings"), so a customer who blocks it receives no managing-tenant defaults for
+policy settings and keeps choosing for itself.
 
 **Axis 2 uses the same mechanism as axis 1, deliberately as a separate instance.** A PIM customer
 acting as a managing tenant runs its **own** downstream fleet; its rollout waves are its business, not
@@ -5581,7 +5706,10 @@ README and `FEATURES.md` describe **two** of the three axes, deliberately:
 
 - **the software ring** (axis 1) — which product version an environment runs, in §11.6.0's terms:
   approval per ring, the environment *asks* rather than being pushed to, forward-only as of
-  2.4.368, no approved version ⇒ no move, a held environment does not move.
+  2.4.368, no approved version ⇒ no move, a held environment does not move. Since 2026-10-12 the
+  public docs name the four rings as they are used (§29.3): ring 0 the vendor's own environment, ring 1
+  test environments, ring 2 and 3 customers, and a customer ring moves only on the release owner's
+  decision.
 - **the replication ring** (axis 3) — which managed tenants a definition row reaches. Stated as the
   full predicate, never as ring alone: `Replicate != No` **AND** `tenant.Ring <= row.Ring` (v2.4.388) **AND**
   `Target` matches (`Test-PimReplicationReach`, `engine/msp/PIM-Downlink.ps1`) — *ring AND
@@ -5897,7 +6025,7 @@ group or setting only an administrator may create, or a portal-only step.
   the result itself. The same script still accepts the signed-in az account (the Invardia Support app) and, from the
   repository, a certificate identity for existing automation — PIM never prints either.
 - **In the GUI.** `GET /api/workload-prereqs` returns the judged record per workload; a chip per workload sits on the
-  permission-template cards, in the workload wizards and on the Coverage & gaps page: **green** *prerequisites OK — checked
+  permission-template cards, in the workload wizards and on the Discovery and gaps page: **green** *prerequisites OK — checked
   &lt;when&gt; by PIM itself*, **amber** *not checked yet* / *re-check* (older than 30 days) / *incomplete*, **red**
   *prerequisites missing: &lt;checks&gt;* — with the next step in words, the checks still open (each with its portal step,
   its Learn link and Confirm where allowed), the fix command when there is one, and Check again.
@@ -5919,7 +6047,7 @@ held note:
   is not a hold — Azure assignments have always run without the script);
 - removals, updates and re-creates of a type change are **never** held.
 
-Staging is never blocked: the Templates cards, the wizards and the Coverage & gaps proposals show the held note instead.
+Staging is never blocked: the Templates cards, the wizards and the Discovery and gaps proposals show the held note instead.
 
 ### 15.4c Permission templates imported by script (v2.4.380)
 
@@ -6056,13 +6184,13 @@ department/approver Owners.
 
 Catalog of Microsoft-native workloads and common third-party apps that consume
 **Entra security groups** for access/RBAC, classified by the *mechanism* — because
-that determines whether PIM4EntraPS reaches them via a **workload connector**
+that determines whether PIM Manager reaches them via a **workload connector**
 (queryable role API) or via **standard Entra** (enterprise-app app-role assignment,
 SCIM provisioning, group claims, or group-based licensing).
 
 **Integration mechanisms (legend):**
 - **RBAC-API** — the app exposes a role API where a group is assigned to a role →
-  a **PIM4EntraPS workload connector** applies (build a `*.connector.json`).
+  a **PIM Manager workload connector** applies (build a `*.connector.json`).
 - **AppRole** — assign the group to an enterprise-app *app role* (Graph
   `appRoleAssignedTo`) → generic; one connector pattern fits all.
 - **SCIM** — Entra provisions the group + members into the app (SCIM 2.0) →
@@ -6120,7 +6248,7 @@ Splunk, Grafana, New Relic, 1Password, CyberArk, SailPoint, Saviynt, HashiCorp
 Vault / Terraform Cloud, Snyk, ServiceTitan, NetSuite, HubSpot, Marketo, Qualtrics,
 Airtable, ClickUp, Calendly — each tagged SCIM / AppRole / Claim per app.
 
-### 16.4 What PIM4EntraPS does per mechanism
+### 16.4 What PIM Manager does per mechanism
 
 - **RBAC-API (✅/◑)** — a workload connector lists the app's roles and assigns the
   PIM group idempotently (`New-PimWorkloadConnectorsProvider`). Built: Intune, Defender
@@ -6386,6 +6514,17 @@ approval — an approval never covers a different change set. Applying a templat
 group's **untouched Microsoft default** policy is not counted as weakening, so creating delegations
 does not trip the brake; ordinary drift below the thresholds is corrected straight away. On the
 batched group-policy read path the plan is built and held exactly like the per-item path.
+**What changed in 2.4.594 – 2.4.598.** The paragraph above is the brake as it was built. 2.4.594 made
+the count and percent triggers a warning; 2.4.595 reversed that, and since then the approval is given
+by a **SuperAdmin of the tenant** in PIM Manager. Since 2.4.598 the thresholds no longer decide whether
+a change set is held: **every non-empty change set is held** — one policy or a thousand, also the
+first application to a policy nobody ever changed — and the thresholds only add their reason to the
+text. An approval covers exactly the change set whose hash it names; the earlier rule that an approval
+also covered a later plan with no new weakening is gone. A provider plans only the settings the customer chose
+(§6, "Policy settings"). The plan hash, the approval that covers exactly one plan, and the `held` job
+outcome below are unchanged. A hold whose plan no longer exists is cleared by the next run that applies
+the plan or finds nothing to change, and every page that shows a hold (Approvals, Guards, Get Started,
+Overview) reads the same record (2.4.596).
 **Where a hold is approved (2.4.423).** Held change sets are listed on **Approvals** ("Policy changes waiting for your
 approval"). Each set shows what changes (current → new) and has its own **Approve this change set** button, beside an
 **Approve all**.
@@ -6761,7 +6900,7 @@ exportable read-only viewer (Reader role may view; §18.11).
 
 Where these live in the Manager: the audit viewer under **Audit & Settings → Audit trail**; mail
 templates, the emergency override and the access list as **Settings** sections; discovered
-resources on **Audit & Settings → Newly discovered resources** (§18.1d). The former Governance tab
+resources on **Access → Discovery and gaps** (§17.13, since 2.4.604). The former Governance tab
 is gone. Visibility is role-gated. (The finer-grained `Delegated` / portal-admin model layers on
 top — §9.2.)
 
@@ -6787,10 +6926,30 @@ later is closed to demo viewers until it is deliberately opened. A banner on eve
 
 ### 17.13 Resource auto-discovery
 
-**The Discovery page is one list** (2.4.446). It shows what is in the tenant and not yet in PIM, grouped by kind: Azure
-management groups and subscriptions, Power BI workspaces, and new Entra ID, Defender XDR and Intune roles. Each row has
-**Create** and **Ignore**; tick-boxes with "select all" per kind handle many similar items in one click; the **Ignored** view
-has **Re-add**.
+**The separate Discovery page is gone (2.4.604): there is one page, Discovery and gaps, under Access.** The two pages
+overlapped. The Discovery list showed only some kinds (Azure scopes and administrative units, and only roles added since
+a baseline), while the gaps page on the same tenant listed every role nothing delegates, each with a ready proposal. The
+gaps page was kept, moved to the Access menu and renamed; §5.2 describes it as built. What the old page could do, and
+where it went:
+
+| The old Discovery page | Discovery and gaps |
+|---|---|
+| Azure management group / subscription: Create staged one permission group with no role | Stages two groups, each with its role (Reader and Contributor at that scope). The single group without a role is still available in Create access |
+| Administrative unit: Create staged its definition | Listed as its own kind; the proposal is the same definition row |
+| Windows server (hybrid worker): Create staged the per-server group | Listed as its own kind where a hybrid worker exists |
+| Power BI workspace: one group without a role | A Contributor and a Viewer group with their bindings |
+| Entra / Intune / Defender role: only roles added since a baseline, "accepted" into the catalog | Every role nothing delegates, with a proposal |
+| Ignore / Re-add | **Ignore** / **Bring back**, with the same stored decisions |
+| Accept (it created nothing) | Not carried over; Ignore replaces it |
+
+A link or bookmark to the old page opens Discovery and gaps (its Ignored list where the link asked for that). The two
+routes named under **API** below are still served for scripts and are no longer called by the page.
+
+**The Discovery page as it was built** (2.4.446 – 2.4.603; kept as the record of the model the gaps page took over).
+It showed what is in the tenant and not yet in PIM, grouped by kind: Azure
+management groups and subscriptions, Power BI workspaces, and new Entra ID, Defender XDR and Intune roles. Each row had
+**Create** and **Ignore**; tick-boxes with "select all" per kind handled many similar items in one click; the **Ignored** view
+had **Re-add**.
 
 - **Sources.** The tenant cache the Manager already keeps: Azure scopes (with their management-group parents), Entra roles,
   the Defender XDR and Intune role catalogs, and the Power BI workspace list the daily Power BI discovery job stores.
@@ -7642,15 +7801,25 @@ what the screen does, and an entry may deep-link to a *section* of a tab via `an
 | Menu | Entries |
 |---|---|
 | **Overview** | Home |
-| **Access** | Access map · Look up a role · Create access · Change existing access · Admin accounts & TAP · Invite a guest or consultant · **Departments & owners** (its own page since 2026-09-19, §18.9) · **Delegations — all rows** (§71.26: the records table scoped to the assignment entities) · All records (the raw view) |
+| **Access** | Access map · Look up a role · Create access · **Discovery and gaps** (§5.2, since 2.4.604) · Change existing access · Admin accounts & TAP · Invite a guest or consultant · **Departments & owners** (its own page since 2026-09-19, §18.9) · **Delegations — all rows** (§71.26: the records table scoped to the assignment entities) · All records (the raw view) |
 | **Pending changes** | Check for problems · Review & commit queue (§18.1f) |
 | **Jobs** | Jobs & status · Engine logs & errors · Job schedule (§11.3a) |
-| **Reviews & controls** | Delegation overview · Approvals · Drift: live vs desired (§5.2) · **Coverage & gaps** · Access reviews · Tenant conformance · Reports · Managed tenants · **Managed tenant registry** and **Replication overview** (managing tenant only) |
-| **Audit & Settings** | Audit trail · Settings · Newly discovered resources · **Manager access & roles** · **Emergency access (break-glass)** (the break-glass accounts and the emergency override, one page) · **Mail templates** · **Policy templates** (read-only) · Support. Each is its own page since 2026-09-19 — a menu item never deep-links into Settings, so each page can be permissioned on its own. |
+| **Reviews & controls** | Delegation overview · Approvals · Drift: live vs desired (§5.2) · Access reviews · Tenant conformance · Reports · Managed tenants · **Managed tenant registry** and **Replication overview** (managing tenant only) |
+| **Audit & Settings** | Audit trail · Settings · **Manager access & roles** · **Emergency access (break-glass)** (the break-glass accounts and the emergency override, one page) · **Mail templates** · **Policy templates** (read-only) · Support. Each is its own page since 2026-09-19 — a menu item never deep-links into Settings, so each page can be permissioned on its own. |
+
+**What moved since this table was written (as of 2.4.609).** The table shows the six menus as they
+were designed. Three things in it changed with 2.4.604: the page that was *Coverage & gaps* under
+Reviews & controls is now **Discovery and gaps under Access**, right after Create access; the separate
+Discovery entry and the *Newly discovered resources* page are gone (§17.13). The menu bar has also
+grown beyond six: it now reads **Overview · Get Started · Admin accounts · Access · Pending changes ·
+Jobs · Reviews & controls · Templates · Operations · Settings**. The pages named in this document sit
+there as follows: **Policy settings** (§6), Policy templates and Mail templates under **Templates**;
+the Audit trail, **Guards** and **Support** under **Operations**; Admin accounts & TAP and the guest
+invitation under **Admin accounts**; External companies and Departments & owners under **Reviews &
+controls**.
 
 The former *Daily operations* menu is folded into Reviews & controls, and the former *Governance*
-("Access & drift") tab is gone: drift became its own page, discovered resources moved to **Newly
-discovered resources** (the discovery baseline, new items and the auto-create policy), the job
+("Access & drift") tab is gone: drift became its own page, the job
 schedule moved to Jobs, and the access list, emergency override, permission template packs and mail
 templates became Settings sections, visible by default with a plain-language explainer of every
 column. Deep links and alert links that pointed at the old tab resolve to the drift page. The page
@@ -7702,6 +7871,30 @@ item is decided — there is no acknowledge. Informational counts (the pending-c
 mirrored page counts) keep their own indicator and never use the blocking red. An item that
 is already approved for its exact plan (or released) waits for the engine, not a person, and
 is not counted.
+
+**One rule for every number in the menu (2.4.600, tightened in 2.4.605).** A number or a dot in the
+menu means one of two things only: **an error** (something failed) or **an approval that blocks**
+(an approval request or a held change set that the attention read above lists as blocking). Every
+number shown is red. One function in the page decides this for all tab badges, and the grouped menu
+mirrors only a badge that function painted, so a count set any other way cannot reach a menu entry or
+a group's dot.
+
+- **A warning never shows a number or a dot in the menu.** Gaps, orphans, validation warnings,
+  corrected drift, policy settings waiting for a choice and other facts are listed on their own page.
+- **Something that waits without blocking shows no number either** (2.4.605): an open required Get
+  Started step, an expired Temporary Access Pass, changes waiting to be committed. The pages keep their
+  own counts.
+- **Per entry.** Home = its error lines plus what the attention read lists as blocking. Check for
+  problems = errors. Jobs and Engine logs = jobs that failed (a running job is not counted). Pending
+  changes = failed entries. Approvals = requests waiting. Access reviews = overdue ones. Emergency
+  access = a red mark while the override is active.
+- **The number counts lines to act on**, never the findings inside a line: "1 line with 168 gaps" used
+  to add 168 to the Home number and is now 0, because a gap is a warning.
+- **On the pages**, a warning is amber and an error is red (2.4.595). Each attention item the server
+  returns says whether it is an action or a warning, and every badge has a plain tooltip.
+
+This replaces the earlier wording in this section where it says a group shows a dot "when any child
+carries a visible badge" and that the pending-changes queue keeps "its own indicator" in the menu.
 
 **No dead/orphan menu (integrity).** `buildNavGroups()` records any `NAV_GROUPS`
 entry whose `data-tab` does not exist in `window.PIM_NAV_DROPPED`, so a typo can never
@@ -7883,6 +8076,18 @@ toggle (default Graph, remembered per browser in `localStorage` `pim.revoke.view
 the deleted / managed / own-identity / support-app / break-glass ticks and the text filter -- applies to both, because
 both are drawn from the same filtered rows (`applyRevokeFilter`).
 
+- **Layout: the board scrolls, the panel does not cover it (2.4.603; the same on the Access map).** Everything above
+  the detail panel — the page's bars, the list, the graph toolbar and the board — is one scroll area. The detail panel
+  is the row under that area, in the normal page flow: the scroll area ends where the panel starts, so no box can be
+  behind it. The board takes the height of its content, and the wires are positioned inside the board and move with
+  their boxes. The panel is a head line that never scrolls (name, the number of live assignments, Select all, Clear,
+  Revoke, Collapse) and, under it, the list, which is the only part of the panel that scrolls. **Collapse** reduces the
+  panel to its head line; the choice is kept for the browser session and across a new selection. A click on a box, and
+  Collapse or Expand, scroll the selected box into view. The Access map has the same structure without a Collapse
+  button, because its bar is where Give and Remove are worked. Why it was rebuilt: the earlier fix (2.4.592) let the
+  board grow under a panel that was pinned to the bottom of an area that could not scroll, so in a short window most of
+  the board was hidden and the mouse wheel did nothing. The layout is now measured in a real browser at three window
+  sizes, not read from the style rules.
 - **Graph view (§100.47).** The Access map board, reused: the same four columns and headers, `.map-item` boxes with
   dots and counts, per-column filters, collapse-to-path on select, and the same wire drawing (`mapDrawWires` /
   `mapHiliteWires`, given the graph's board, svg and first column) and path walk (`mapBfs`). The model is built from
@@ -8155,6 +8360,13 @@ other inputs, live-previewed).
 > never failing the admin apply, skipped silently for an account with no mailbox, and **gated OFF by
 > default** (`PIM_AdminMailboxForwarding`) because it needs an Exchange application permission.
 > The shared-mailbox sending model below is unchanged. The history that follows is kept for context.
+>
+> **The New admin account wizard asks for it (2.4.602).** Until then only Admin accounts › Edit had the two
+> fields; the wizard set them only when it was opened pre-filled for a department owner. An admin created
+> any other way had no address, so the mail with the Temporary Access Pass had nowhere to go and the pass
+> had to be issued again after an Edit. The wizard now asks both, with the same texts and checks as Edit:
+> forwarding is **on by default** and the office address is **required while it is on**. The wizard is the
+> same for internal and external admins.
 >
 > **🔒 (history) `ForwardMailsToContact` / `MailForwardAddress` were retired for a period (2026-08-12).**
 > They made the engine call EXO `Set-Mailbox -ForwardingSmtpAddress` on the newly-created admin,
@@ -8884,7 +9096,7 @@ any stored setting or deploy baseline; *switches itself on* means it is on while
 | Teams / webhook alerting (`alerting.webhook`) | Free | single | off | — |
 | Scheduled jobs (`scheduler.jobs`) | Free | single | off (the hosted deploy turns it on) | — |
 | Intune + Defender XDR connectors (`connectors.workload`) | Free | single | off | yes — `PIM-Assignments-Workloads` / `-Defender` / `-Intune` rows |
-| Coverage & gaps (`coverage.gaps`) | **Pro** | single | on (core) — **needs the licence** | — |
+| Discovery and gaps (`coverage.gaps`; called Coverage & gaps until 2.4.604) | **Pro** | single | on (core) — **needs the licence** | — |
 | Revoke current delegations (`revoke.current`) | **Pro** | single | on (core) — **needs the licence** | — |
 | Access review campaigns (`reviews.campaigns`) | **Pro** | single | on (core) — **needs the licence** | — |
 | Delegated administration ceilings (`access.delegated`) | **Pro** | single | on (core) — **needs the licence** | — |
@@ -9306,7 +9518,7 @@ is taken from `docs/img/brand`, the one in-repo logo set, and a test keeps each 
   Windows Server 2016+ PAM feature. See §21.1.
 - **EntraPolicySuite** — CLI management of Entra Conditional Access policies, named
   locations, and authentication strengths; 120+ curated CA policies. The natural
-  pair for PIM4EntraPS because CA is what gates PIM activation.
+  pair for PIM Manager because CA is what gates PIM activation.
 - **PIM-Role-Advisor** — given a task the admin wants to perform, recommends the
   smallest PIM role / permission group that grants it. Closes the "which group do I
   activate?" gap that the Manager diagnoses structurally.
@@ -9356,7 +9568,7 @@ feature'"`; enable once per forest (irreversible) with `Enable-ADOptionalFeature
 
 **Why a separate project**: different runtime profile (a long-running service on a
 DC / domain-joined host with cached AD creds, vs the stateless cloud engine);
-different customer scope (many PIM4EntraPS customers are cloud-only / retiring AD);
+different customer scope (many PIM Manager customers are cloud-only / retiring AD);
 different failure modes (PIM-for-AD failure can leave a person without TTL'd
 membership at 3am — closer to a service than a batch job). Repository:
 <https://github.com/KnudsenMorten/PIM4ActiveDirectoryPS>.
@@ -9398,12 +9610,12 @@ end to end.
 
 ---
 
-## 23. What PIM4EntraPS is not
+## 23. What PIM Manager is not
 
 - **Not a replacement for Conditional Access.** PIM activation is gated by CA at the
-  tenant level; PIM4EntraPS doesn't configure CA (EntraPolicySuite does).
+  tenant level; PIM Manager doesn't configure CA (EntraPolicySuite does).
 - **Not a replacement for Privileged Access Workstations.** The model assumes
-  admins use PAWs; PIM4EntraPS doesn't deploy them.
+  admins use PAWs; PIM Manager doesn't deploy them.
 - **Not a SIEM / detection tool.** It builds and maintains the *intended* PIM
   model. Detecting misuse is downstream (Sentinel, Defender for Identity).
 - **Not a self-service portal at the core.** The Activator is for admins who
@@ -9443,7 +9655,7 @@ group confusion — the `-S_AD` suffix).
 
 ## 25. Testing strategy
 
-PIM4EntraPS ships rerunnable offline test suites (validator semantics,
+PIM Manager ships rerunnable offline test suites (validator semantics,
 PIM-DUP/TAP/SCHED rules, scheduler due-calc, REST-no-modules checks) and a live
 delegation lab (provision → assert delegation/REST → cleanup). The engine, the MSP
 courier (producer sign → private-endpoint blob → consumer pull/verify/tamper-
@@ -9745,7 +9957,9 @@ before anyone approves it.
 PIM makes exactly two kinds of call to Invardia, the vendor site. **Both are scheduled jobs, and both are on by default in a new
 installation** (feature defaults `defaultEnabled` in the catalog); an administrator switches either off under Settings > Features. Neither ever receives an instruction from Invardia: one fetches a
 signed file that PIM checks itself, the other sends -- and reads only one note back, that the installed licence was
-re-issued, which makes the first one ask for the new file (29.1).
+re-issued, which makes the first one ask for the new file (29.1). Two more calls exist beside these two jobs, each
+described below: a Pro installation's nightly update pull (29.3), and a support ticket that is sent only when a person
+presses **Get support** (29.4).
 
 ### 29.1 The licence request (job `licence-request`, feature `licence.autoRequest`)
 Every 30 minutes, when no Pro licence is valid for this tenant or the installed one ends within 30 days, PIM asks Invardia
@@ -9832,6 +10046,29 @@ Every guard report from an installation with a key carries `Link`, the deep link
 When the Manager address is not known, there is no Link, never a guessed one. The page checks each parameter against what
 it knows before it acts on it.
 
+**What the status report says about guards (2.4.605).** Until 2.4.604 an installation only ever said that a guard
+*tripped*. It never said that the guard was clear again, so support could still see "stopped" hours after the customer had
+released it. The report now carries the state itself, in two parts:
+
+- **What is held right now, on the heartbeat.** With an install key, each heartbeat carries a list of the guards that
+  hold something at that moment: per guard its id, its outcome (halted, refused, held, skipped or warning), its severity
+  (critical or warning) and, where known, since when. A policy change set that waits for approval is one entry per policy
+  type. The list is built read-only from the installation's own stored holds. It is at most 50 entries, one per guard.
+  **The list is the state:** an empty list means nothing is held, and Invardia closes every other open guard of that
+  environment.
+- **A "cleared" record.** A guard that was reported and holds nothing now gets one record saying it is cleared, with the
+  time. Where the stored state proves it, the record also says how: *released* (a release of that guard was used) or
+  *passed* (the same guard ran again and allowed the plan). Anything that cannot be proven is left out. A record that
+  could not be sent is kept for the next cycle; a delivered one is never sent again.
+
+What the list and the cleared record do **not** carry: which accounts, groups, roles or policies a guard holds; any value
+of a policy; who released or approved. When the stored holds cannot be read, the list is **left out** — "I do not know" is never sent as "nothing is
+held" — and no guard is reported cleared in that cycle. An anonymous heartbeat (no install key) carries no list. A guard
+that refuses at one moment without ever holding a plan (for example the last SuperAdmin) is open at Invardia only until the
+next heartbeat. The hosted engine sends the list; an installation that still runs its engine on Windows PowerShell 5.1
+sends the cleared records but not the list, and says so once in its log. None of this changes what a guard does, or when
+a hold is recorded or cleared.
+
 ### 29.3 Pro updates from Invardia (job `install-key`, feature `updates.invardia`, `PIM_UPDATE_SOURCE=invardia`)
 A Pro installation can take its updates from Invardia's update platform instead of the source archives. PIM owns the
 release: PIM decides which version goes to which ring, and Invardia signs and serves what PIM published (one signed
@@ -9871,6 +10108,50 @@ with the pull. PIM also keeps HOW: build in its own registry, schema, roll, heal
 - **Rollback.** Invardia rolls back by releasing a higher sequence that names an older version. Such a signed rollback
   may move an environment down. A first pull, with no applied sequence yet, may not.
 - **Applied sequence.** After a good roll the job records the applied sequence on itself.
+
+**The rings as they are used now (2026-10-12).** Four rings, in the order a version travels:
+
+| Ring | Who is on it | A version reaches it |
+|---|---|---|
+| **0** | the vendor's own environment | first, with every release |
+| **1** | test environments | with a normal release, after ring 0; a fix meant only for the vendor's own environment stops at ring 0 |
+| **2** | customers (the default for a design partner) | only when the release owner decides to release that version to ring 2 |
+| **3** | customers (the default for a new installation) | only when the release owner decides to release that version to ring 3 |
+
+- **Releasing is a decision, not a build.** Building, testing or committing a version never moves it to a customer ring.
+  The release owner names the version and the ring. A release to one ring does not release to another.
+- **Nothing is pushed.** Releasing publishes one signed manifest per ring. Each installation's own updater asks for its
+  ring's manifest at the nightly update, checks it as listed above, and then builds and rolls in its own environment. An
+  installation whose ring has nothing new does not move.
+- **Ring and sequence change together.** Each ring has its own release sequence, and an installation remembers the last
+  sequence it applied. Moving an installation to another ring therefore also means starting from that ring's sequence;
+  an installation that kept the sequence of the ring it left would refuse the next release as a replay, or refuse to
+  step back to the version its new ring carries.
+
+### 29.4 Get support: a ticket opened from PIM Manager (2.4.597)
+
+A **Get support** button opens a support ticket at Invardia. It is the third kind of call an installation can make, and
+unlike the two jobs above it happens only when a person presses a button.
+
+- **Where the button is.** On the Support page (always), on the log of a failed job, in the Overview attention list and
+  on a Get Started step that is not done.
+- **The person sees what is sent.** The button first builds a draft: a title, a text, a category (install, update,
+  sign-in, data, performance or other), a priority, the person's name and mail address, the product version, the update
+  ring, a reference to where the button was pressed (the job and run, the setup checks or the Get Started step) and,
+  where there is one, a piece of the log. The person can change all of it before pressing Send.
+- **Secrets are removed twice.** Title, text and log go through the same redaction as the diagnostics bundle when the
+  draft is built — so the person sees the cleaned text — and again when it is sent, so an edit cannot put a secret back.
+  If the redaction is not available, the text is not sent.
+- **The call is made by the Manager's server, not by the browser.** The installation's install key authenticates the
+  call. It goes into one request header and never reaches the page; every answer is checked for it once more before it
+  is returned. The address is fixed in the product: no setting can point the key at another address, and a redirect is
+  not followed.
+- **What comes back.** The ticket number, a link to the ticket in the customer portal and a link for uploading files.
+  The page can also list this environment's tickets. Pressing the button twice for the same failed run returns the same
+  ticket.
+- **Who may use it.** Admin and SuperAdmin. An installation without an install key has no ticket path: the page shows
+  the public support page and the contact address instead.
+- **Failures are plain.** No network, a time-out or an error answer is shown as a sentence on the page.
 
 ## 30. Finishing an install: the end-of-install check, alert recipients and install tracking
 *(Built 2026-10-08, not yet released.)* An install is finished only when what it should leave behind is really there. Each

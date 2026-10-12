@@ -5,13 +5,14 @@
   </picture>
 </p>
 
-# PIM4EntraPS — delivered feature catalog
+# PIM Manager — delivered feature catalog
 
-This is the delivered feature set of **PIM4EntraPS**, written in plain language for IT
+This is the delivered feature set of **PIM Manager**, written in plain language for IT
 admins and customers. Everything listed here is built and verified. It is grouped by
-area and is safe to share publicly. (Last reviewed 2026-09-14; individual entries carry their own ✅ date.)
+area and is safe to share publicly. (Last reviewed 2026-10-12 for the releases 2.4.594 to 2.4.609; individual
+entries carry their own date.)
 
-PIM4EntraPS is a privileged-access governance solution for Microsoft Entra. It models
+PIM Manager is a privileged-access governance solution for Microsoft Entra. It models
 your privileged delegation as nested groups, applies the right PIM policies, and keeps
 everything in sync from a single source of truth — with no unauthenticated endpoint
 (every visit to the Manager passes Microsoft Entra sign-in, and a private-only
@@ -195,6 +196,17 @@ deployment is a supported choice) and no credentials lying around.
   your PIM Manager administrator. The managing / managed tenant build also registers the licence and gives support its
   access, and refuses a licence that cannot run it. Rehearsed end to end on fresh tenants: a single tenant, a Community
   installation, and a managing + managed tenant pair. *(2.4.519)*
+- **Four update rings, and a version reaches you only when the release owner decides.** ✅ 2026-10-12 — Every
+  installation is on one update ring. **Ring 0** is the vendor's own environment. **Ring 1** is the test environments.
+  **Ring 2 and ring 3** are customers. A new version goes to ring 0 first and is checked there. It reaches a customer
+  ring only when the release owner decides to release it to that ring. Nothing is pushed into your environment: at the
+  nightly update, your installation's own updater asks which version its ring has, pulls that version, checks it and
+  rolls it. If nothing was released to your ring, nothing moves.
+- **Support sees what the guards hold right now.** ✅ 2026-10-12 — With an install key, the regular status report to
+  Invardia lists the guards that hold something at that moment, and reports a guard as cleared once it holds nothing.
+  So the status support sees follows your installation, also after you released or approved something. The list
+  names the guard, its outcome, its severity and since when. It does not name the accounts, groups or policies that
+  are held, and an installation without an install key does not send the list. *(2.4.605)*
 - **The access request broker deploys completely in one run.** ✅ 2026-10-04 — Deploying the access request broker
   now also registers its API, gives the broker its send right on your notification mailbox only, and tells PIM where
   the broker is. All three are read back and reported. If a step lacks what it needs, it prints the exact command
@@ -483,17 +495,20 @@ deployment is a supported choice) and no credentials lying around.
   creates and updates. Removing live access that isn't in your configuration is a separate,
   explicit opt-in, and the engine will refuse to "prune" an area whose desired set is empty —
   so a partial or half-loaded configuration can never wipe out real administrators.
-- **Blocks only what cannot heal; warns about the rest.** 🟡 Built, not released yet. A safety guard
-  now stops a run only where the damage would not fix itself — for example a change that would remove
-  the tenant's **last Global Administrator** (held until a SuperAdmin releases exactly that change), or
-  the **last PIM Manager SuperAdmin** (refused: add another one first), or **many policy changes in
-  one run** (more than 25 policies, more than a quarter of them, or more than three weakened settings:
-  held until a SuperAdmin of the tenant approves the change set). Everything else is a warning:
-  anything that looks different from the last runs (each area's key
-  numbers compared with the median of its last three runs) is collected into **one daily "Data quality
-  alert" mail** that names the likely cause from the settings change log and the fix. Form mistakes are
-  plain form errors, and platform problems (database, licence) are reported to support as telemetry —
-  none of these appear on the Guards page.
+- **Guards hold only what cannot heal; the rest is a warning.** ✅ 2026-10-11 — A guard stops a change only where
+  the damage would not fix itself: a **policy change** (it waits for a SuperAdmin of the tenant — see chapter 7),
+  **many removals or account disables in one run**, a change that would remove the tenant's **last Global
+  Administrator** (held until a SuperAdmin releases exactly that change), and the **last PIM Manager SuperAdmin**
+  (refused: add another one first). Everything else is a warning. Anything that looks different from the last runs
+  (each area's key numbers compared with the median of its last three runs), and access that is not yet in line with
+  your definitions, is collected into **one daily "Data quality alert" mail** that names the likely cause and the
+  fix. Form mistakes are plain form errors, and platform problems (database, licence) are reported to support as
+  telemetry — none of these appear on the Guards page. *(2.4.594, 2.4.595)*
+- **A hold that is no longer needed clears itself.** ✅ 2026-10-12 — When the plan a guard held is no longer wanted
+  (for example the removals were taken back, or the change was applied), the next run finds nothing to hold and
+  clears the hold by itself. Nobody has to acknowledge it. A held policy change set reads the same on every page that
+  shows it — Approvals, Guards, Get Started and Overview — and the Guards page says what a guard holds right now.
+  *(2.4.596, 2.4.598)*
 
 ## 7. Engine — Providers / Connectors
 - **Map one PIM group to many workloads.** Connectors translate your PIM groups into the
@@ -516,7 +531,36 @@ deployment is a supported choice) and no credentials lying around.
   other connector it matches what already exists (re-running never creates a duplicate),
   reads-only at collection time, and removes an app-role grant only when you explicitly prune.
   If you name an app role the app doesn't expose, it fails clearly instead of guessing.
-- **A group's activation policy is fully managed and self-correcting.** ✅ 2026-06-16 — the
+- **You decide every policy setting — PIM Manager changes no policy on its own.** ✅ 2026-10-12 — On the
+  **Policy settings** page (Templates menu) and in the **Policies** step of Get Started, every policy setting has
+  three buttons: **Microsoft default**, **PIM Manager recommendation** and **Keep current**. Each button shows the
+  value it stands for, so you see what you choose. This covers Entra role policies, PIM for Groups policies (member
+  and owner) and Azure role policies: how long an activation lasts, multifactor authentication, a reason, a ticket,
+  approval, how long an assignment may last, and who is notified. *(2.4.598)*
+  - **Nothing changes until you choose.** A setting without a choice is left exactly as it is in your tenant. It is
+    listed as waiting for your choice — a note, not an error.
+  - **A choice is not yet a change.** After you press **Save choices**, the next policy run plans the change and
+    holds it. It is applied only when a **SuperAdmin of your tenant approves** that change set under Approvals. One
+    policy or a thousand: every change set waits.
+  - **A quick selection for all settings.** Three buttons set every setting at once (all to the recommendation, all
+    to the Microsoft default, or all to keep current). The page first says what that sets, then asks you to type the
+    word **confirm**. The result still waits for a SuperAdmin's approval like any other choice.
+  - **The recommendation is always shown.** The PIM Manager recommendation is the value of your policy template, so
+    it is there from the first minute. **Keep current** can be chosen before your tenant's values are read, and
+    fills in by itself. *(2.4.599)*
+  - **Microsoft default** can be chosen for Entra role policies and for PIM for Groups policies. For Azure role
+    policies the button is shown switched off, with the reason. A single role or group can have its own choice.
+    *(2.4.604)*
+  - **New advice asks again.** When a release changes a recommended value, that setting is asked again. Until you
+    answer, your earlier choice stands and nothing changes.
+  - **In an MSP setup (Pro), the managing tenant's choices are the default.** They travel to each managed tenant
+    inside the signed set it already pulls. A managed tenant can choose differently per setting, and the change is
+    approved by a SuperAdmin of *that* tenant.
+  - **An existing installation gets no reminder mail for this step.** The Policies step stays open on the Get Started
+    page until every setting has a choice; a new installation gets the normal reminder. *(2.4.606)*
+- **A group's activation policy is fully managed and self-correcting.** ✅ 2026-06-16 — *(Changed 2026-10-12: this
+  applies to the settings you chose a value for, and each correction waits for a SuperAdmin's approval — see the
+  entry above.)* The
   engine doesn't just set a PIM group's activation policy once; it keeps the whole policy in
   line with the template you chose — how long an activation lasts, whether multi-factor and a
   justification are required, whether activation needs approval (and who approves), and who is
@@ -550,7 +594,9 @@ deployment is a supported choice) and no credentials lying around.
   before that they could disappear from the page after Access reviews had been opened.)* The brake covers Entra role,
   Azure resource and PIM for Groups policies in every case. Ordinary drift is still corrected
   straight away, and applying a template to a brand-new group's untouched default policy is not
-  treated as weakening, so creating new delegations does not trip it.
+  treated as weakening, so creating new delegations does not trip it. *(Changed 2026-10-12: the brake no longer waits
+  for "many" or "weakening". Every policy change set waits, whatever its size, and a **SuperAdmin of the tenant**
+  approves it — see "You decide every policy setting" above.)*
 - **Only the rules that differ are updated.** ✅ 2026-09-13 A PIM for Groups policy that differs
   on one rule is updated with one change instead of rewriting every rule (Azure resource policies
   are likewise repaired rule by rule), which makes large policy alignments many times faster and
@@ -595,15 +641,25 @@ deployment is a supported choice) and no credentials lying around.
   change pipeline (the same one your reviewed commits use), so nothing is granted without going through
   your usual review and approval. A preview ("what would this find") mode reports without changing
   anything.
-- **The Discovery inbox — one list, Create or Ignore.** ✅ 2026-09-27 The Discovery page is one simple list of what
-  is in your tenant and not yet in PIM, grouped by kind: Azure management groups and subscriptions, Power BI
-  workspaces, Administrative Units, and new Entra ID, Defender XDR and Intune roles. Each row has **Create** and
-  **Ignore**; tick several similar items, or a whole kind, and act on them in one click. **Create** turns an Azure scope
-  or Power BI workspace into a permission group named by your naming convention at the right level, turns an
-  Administrative Unit into its definition, or accepts a new role into the role catalog — always through Review &
-  commit, and nothing is granted to anyone. **Ignore** hides an item with one click (no reason needed); the **Ignored**
-  view shows who ignored what and when, and **Re-add** brings it back. An item PIM already defines is never listed as
-  new.
+- **Discovery and gaps — one page for what is in your tenant and not delegated yet (Pro).** ✅ 2026-10-12 — The
+  separate Discovery page and the page for what is and is not delegated are now **one page, Discovery and gaps,
+  under the Access menu**. It replaces the Discovery inbox of 2026-09-27. *(2.4.604, 2.4.609)*
+  - **What it lists.** Entra ID, Intune and Defender XDR roles, Power BI workspaces, Azure subscriptions and
+    management groups, Administrative Units, PIM for Groups and, with a hybrid worker, Windows servers. Each item
+    is covered or a **gap**. The page also shows groups that hold nothing and privileged groups PIM Manager does not
+    manage.
+  - **It opens on the gaps.** The list starts on Status = Gap. Each gap comes with a ready proposal, named by your
+    own naming convention.
+  - **Stage what you want.** Tick the gaps and press **Stage selected gaps into Pending changes**. They are reviewed
+    and committed like every other change, and nothing is granted to anyone by the page itself.
+  - **Ignore, and bring back.** **Ignore** takes a gap off the list and out of the gap count. Status = Ignored shows
+    who ignored what and when, with **Bring back**. Ignoring changes nothing in your tenant. What you had ignored on
+    the old Discovery page stays ignored.
+  - **Both buttons count gaps.** Stage and Ignore each say how many gaps are selected. One line says how many of the
+    gaps shown are selected, how many groups and roles that creates, and how many gaps have no ready proposal.
+  - **A workload that was not read says so.** A plain block per workload says that it was not read, what is missing
+    and the steps to fix it, with **Check again**. A workload that was not read is never shown as covered.
+  - **No number in the menu.** A gap is a warning, so it puts no number and no dot in the menu.
 
 - **Import your departments straight from Entra.** ✅ 2026-06-15 — point the solution at a group
   naming convention (for example `ORG-*`) and one click pulls every matching Entra group in as a
@@ -822,18 +878,20 @@ deployment is a supported choice) and no credentials lying around.
   Manager's screens sit under **six top-level menus** so a security leader or a first-time admin can
   find anything in seconds:
   - **Overview** — the Home dashboard.
-  - **Access** — the Access map, role look-up, create access, change existing access, admin accounts
+  - **Access** — the Access map, role look-up, create access, **Discovery and gaps** (since 2026-10-12),
+    change existing access, admin accounts
     and Temporary Access Passes, guest/consultant invitations, departments & owners, and all records.
   - **Pending changes** — check for problems, and the one review-and-commit queue.
   - **Jobs** — jobs & status, **Engine logs & errors**, and the **Job schedule**.
   - **Reviews & controls** — review standing access, approvals, **Drift: live vs desired**, access
     reviews, tenant conformance, reports and managed tenants.
-  - **Audit & Settings** — the audit trail, Settings, **Newly discovered resources**, and direct links
+  - **Audit & Settings** — the audit trail, Settings, and direct links
     to the Settings sections for Manager access & roles, the emergency override (break-glass) and mail
-    templates, plus Support.
+    templates, plus Support. *(The separate page for newly discovered resources is gone since 2026-10-12: see
+    Discovery and gaps under Access.)*
 
-  Every entry says in one line what the screen does, and each menu carries an attention dot and
-  per-item count, so what needs action is visible without opening every screen. The former Daily
+  Every entry says in one line what the screen does. A menu shows a red number only for an error or for an approval
+  that blocks work (see "The menu shows a number only for an error or a blocking approval" below). The former Daily
   operations menu is folded into Reviews & controls; permission template packs are a section in Settings, and
   access & roles, emergency access and mail templates are pages of their own.
 
@@ -870,8 +928,23 @@ deployment is a supported choice) and no credentials lying around.
     are still read live, load only when an admin asks for them — so opening Home never slows the
     Manager down for anyone else.
   Every tile is backed by real engine/job/validation/audit data with an honest empty state — there
-  are no decorative or dead tiles. A red badge on the Home tab shows the total number of items
-  needing attention.
+  are no decorative or dead tiles. A red number on the Home entry counts only errors and approvals that
+  block work; warnings are listed on the page and put no number in the menu (since 2026-10-12).
+- **The menu shows a number only for an error or a blocking approval.** ✅ 2026-10-12 — A number in the menu now
+  always means "act on this". It appears, in red, for something that **failed** (a failed job, a failed entry in
+  Pending changes, a validation error) or for an **approval that holds work back** (an approval request, a held
+  change set). Warnings — gaps, validation warnings, corrected drift, policy settings waiting for a choice — are
+  listed on their own page and put **no number and no dot** in the menu. Things that wait without blocking (an open
+  Get Started step, changes waiting to be committed) show no number either; their page keeps its own count. On the
+  pages themselves a warning is amber, never red. *(2.4.595, 2.4.600, 2.4.605)*
+- **Get support from inside PIM Manager.** ✅ 2026-10-12 — A **Get support** button opens a support ticket at
+  Invardia without leaving the product. It is on the Support page, on the log of a failed job, in the Overview
+  attention list and on a Get Started step that is not done. The ticket is pre-filled with what you were looking
+  at (the page, the job or step, the version, the update ring and a piece of the log with secrets removed). **You
+  see everything and can change it before it is sent.** Afterwards you get the ticket number, a link to the customer
+  portal and a link for uploading files, and the page lists this environment's tickets. Admins and SuperAdmins can
+  use it. It needs the install key that comes with a Pro or trial licence; without one the page shows the support
+  page and the contact address instead. *(2.4.597)*
 - **A missing engine permission is impossible to miss.** ✅ 2026-09-13 When the scheduled engine is
   refused a permission, the permission banner on Home turns **red** and names what was refused — it
   checks the engine's identity, not only the Manager's own.
@@ -1025,8 +1098,9 @@ deployment is a supported choice) and no credentials lying around.
     put back after a page reload or a Manager restart (for example during an update), applied on top of
     the current data so a colleague's commit in the meantime is kept. The page asks before you leave it
     with uncommitted changes, and nothing is ever committed for you.
-  - **The badge counts only what needs you.** The red count on the menu shows pending and failed
-    entries; entries already committed and waiting for the engine show in blue. Pending entries are
+  - **The badge counts only what failed.** Since 2026-10-12 the red count on the menu shows failed
+    entries only; changes that wait for a commit are counted on the page, not in the menu. Entries already
+    committed and waiting for the engine show in blue. Pending entries are
     listed first, entries show real names (not object ids), and changes queued by other administrators
     appear within a minute.
   - **See what was committed recently.** A Show filter switches between the open queue and recent
@@ -1153,6 +1227,12 @@ deployment is a supported choice) and no credentials lying around.
 
   ![Delegation overview, List view — the same live assignments as a table](img/manager-delegation-list.png)
   *Delegation overview, List view: the same assignments as a table, read from the scheduler's snapshot, with queued revokes marked. (Synthetic demo data.)*
+- **Delegation overview and Access map scroll, and nothing hides behind the detail panel.** ✅ 2026-10-12 — On both
+  pages the board scrolls on its own above the detail panel, so a long board is readable to its last row and no box
+  sits behind the panel. The list inside the panel scrolls inside the panel, and its buttons (Select all, Clear,
+  Revoke) stay visible. On Delegation overview the panel can be **collapsed to one line** and expanded again; the
+  page remembers it while the browser stays open. **Back to overview** is a clear button on both pages.
+  *(2.4.592, 2.4.603)*
 - **Onboarding panel.** ✅ 2026-06-15 — a dedicated **Onboarding** tab to **invite an external
   consultant as a guest** straight into the delegation model (it prepares the invitation and the
   account + group placement for you to review and commit) and to **enable or disable a managed
@@ -1368,8 +1448,8 @@ deployment is a supported choice) and no credentials lying around.
   it is empty it says **why**, names the permission to grant, and offers **Re-read**.
 - **Every menu item opens its own page.** ✅ 2026-09-19 *Manager access & roles*, *Emergency access
   (break-glass)* — the break-glass accounts and the emergency override together — and *Mail templates*
-  are pages of their own under Audit & Settings rather than sections inside Settings. Menu badges
-  count only work that needs a person: the Pending changes count clears when you commit.
+  are pages of their own under Audit & Settings rather than sections inside Settings. Menu numbers
+  show only an error or a blocking approval (since 2026-10-12; see the entry on menu numbers above).
 - **Job schedule on its own page.** ✅ 2026-09-14 **Jobs › Job schedule** shows which job runs when, which
   area it covers, and the mail jobs, visible by default with a plain-language explanation of every column.
 - **Logs that show what the run actually did.** ✅ 2026-09-14 Each run's **Logs** button shows the run's own
@@ -1447,11 +1527,12 @@ deployment is a supported choice) and no credentials lying around.
   older tag, is **adopted** rather than defined a second time. A second command prepares many environments from one
   configuration file: the workload prerequisites with the options you choose, then the packs, with one summary per
   environment. Proven on three environments (Intune and Defender XDR packs).
-- **Coverage & gaps across every workload.** ✅ 2026-09-19 One page shows, for Entra ID roles, Intune, Defender
-  XDR, Power BI, Azure subscriptions and PIM for Groups, what is delegated through PIM and what is not: gaps,
+- **Discovery and gaps across every workload (Pro).** ✅ 2026-09-19 One page shows, for Entra ID roles, Intune,
+  Defender XDR, Power BI, Azure subscriptions and PIM for Groups, what is delegated through PIM and what is not: gaps,
   groups without their role, roles held outside PIM, and privileged groups nobody defined. Each gap comes with a
   ready proposal named by your own convention, and you pick which to stage. A scheduled check keeps it current
-  and mails new gaps.
+  and mails new gaps. Since 2026-10-12 this page is called **Discovery and gaps**, sits under the **Access** menu and
+  also does what the separate Discovery page did — see chapter 8.
 - **Defender XDR custom roles, managed end to end.** ✅ 2026-09-19 PIM creates each Defender custom role with
   the permissions and data sources you specify, keeps it that way, and flags a role whose live permissions
   drifted. The Defender template covers Security operations, Security posture, Authorization & settings and
@@ -1569,10 +1650,10 @@ deployment is a supported choice) and no credentials lying around.
 
   ![Drift: live vs desired — one row per area, expanded to named differences](img/manager-drift.png)
   *Drift: live vs desired, one row per area with desired, live and in-sync counts, expanded to the named items that differ. (Synthetic demo data.)*
-- **Newly discovered resources have their own page.** ✅ 2026-09-14 **Audit & Settings › Newly discovered
-  resources** lists the new subscriptions, management groups, resource groups, Power BI workspaces and
-  Entra roles found by discovery, together with the settings that decide what the engine does with them.
-  Since 2026-09-27 this page is the **Discovery inbox** (see §8): one list with Create, Ignore and Re-add.
+- **What discovery finds is on Discovery and gaps.** ✅ 2026-09-14, changed 2026-10-12 — The new subscriptions,
+  management groups, Power BI workspaces, Administrative Units and roles that discovery finds had a page of their own
+  under Audit & Settings. That page is gone. They are now listed on **Access › Discovery and gaps** (see chapter 8),
+  each as a gap with a ready proposal, with Stage, Ignore and Bring back.
 - **Access Reviews you can actually complete — attest, assign, and chase from the portal.** ✅ 2026-06-17 —
   the **Access Review** tab is no longer read-only. For each review you can open **Review items** and record a
   per-person decision — **Approve** (keep access), **Deny** (remove access), or **Recertify / Don't-know** —
@@ -1743,6 +1824,12 @@ deployment is a supported choice) and no credentials lying around.
   person and a review cadence. On that cadence the company's contact receives the list of *their* consultants and confirms
   who still works for them. A consultant the company reports as having left is **switched off at once**, and removing
   their access waits for an internal approver, so nothing is deleted on an outside party's word alone.
+  *(Changed 2026-10-12: on the External companies page the button of an open company row is **Save**, and it saves
+  at once. After a save the list shows the saved values without reloading the page. 2.4.601)*
+- **A new admin's first mail reaches someone.** ✅ 2026-10-12 — The New admin account wizard asks where the admin's
+  mail goes. Forwarding to the owner's everyday office address is **on by default**, and the address is required
+  while it is on. So the Temporary Access Pass reaches the admin the first time, and does not have to be issued
+  again. The wizard is the same for internal and external admins. *(2.4.602)*
 ## 14. Scale / Performance
 - **Built for large tenants.** The solution never bulk-lists hundreds of thousands of users
   or groups. It looks users up on demand and queries only the PIM-managed groups by name
@@ -1912,7 +1999,7 @@ deployment is a supported choice) and no credentials lying around.
 - **Editions: Core is free; Pro covers the advanced integrations and is enforced.** ✅ 2026-06-17,
   updated ✅ 2026-09-20 — choose the active edition per tenant. **Core** includes every essential PIM
   capability at no cost and is **never** gated. **Pro** covers the advanced integrations (workload
-  connectors, Power BI, coverage & gaps, revoking current delegations, access reviews, the second approver,
+  connectors, Power BI, Discovery and gaps, revoking current delegations, access reviews, the second approver,
   delegated administration, the tier-impact report, the evidence export and PIM for on-premises Active
   Directory -- listed as Pro ✅ 2026-10-03; the access request portal, temporary group access and the consultant
   company review -- ✅ 2026-10-05) and the multi-tenant half
@@ -2005,7 +2092,7 @@ a RequireApproval template per kind, renameable, with a default per kind); drift
 and the current delegations list; administrator accounts and first-time access passes; permission templates imported by script and tenant
 preparation from one configuration file; self-updating from the public release; and community support.
 
-**Pro — licensed capabilities for a single tenant.** Coverage & gaps and discovery across every workload; the
+**Pro — licensed capabilities for a single tenant.** Discovery and gaps across every workload; the
 Power BI, enterprise-app role, Azure DevOps, Dataverse, Business Central and Power Platform
 connectors; revoking current delegations (the list itself is free); access reviews (campaigns with decisions recorded and
 enforced); a second approver for sensitive changes;

@@ -81,6 +81,7 @@
 #    nothing to offer whenever the live Graph read was unavailable. ADD THE KIND IN THE SAME EDIT AS THE CACHE CALL.
 $script:PimTenantCacheKinds = @('entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity','tenant-org','active-assignments','drift','coverage-report','target-check','workload-roles:defender','workload-roles:intune','workload-actions:defender','tenant-domains','powerbi-workspaces','ad-servers','managed-live')   # managed-live: the live assignments the engine matched to a definition (drift read; Review current delegations, 2026-10-07); powerbi-workspaces: REQ-DISC-2 (the discovery-powerbi job); ad-servers: §80.2 server onboarding (written by the hybrid worker)
 $script:PimTenantCacheMem   = @{}
+$script:PimTenantCacheReadErrors = @{}   # REQ 100.112: kind -> why its last read failed (Get-PimTenantCacheReadError)
 
 function Get-PimTenantCacheStoreCs {
     # The store connection string, or $null when this process has no store.
@@ -120,15 +121,59 @@ function Set-PimTenantCacheEntry {
 function Get-PimTenantCacheEntry {
     # One cache kind, parsed; $null when absent. Never throws (a cache is a convenience, not a gate).
     param([Parameter(Mandatory)][ValidateScript({ $script:PimTenantCacheKinds -contains $_ })][string]$Kind)
+    # REQ 100.112: $null means "absent" OR "could not be read" -- the reason of a FAILED read is kept per kind
+    # (Get-PimTenantCacheReadError), so a caller can tell the two apart instead of treating a failure as "nothing stored".
+    if ($null -eq $script:PimTenantCacheReadErrors) { $script:PimTenantCacheReadErrors = @{} }
+    $script:PimTenantCacheReadErrors.Remove($Kind)
     $cs = Get-PimTenantCacheStoreCs
     if ($cs -and (Get-Command Get-PimSqlTenantCache -ErrorAction SilentlyContinue)) {
         try { return (Get-PimSqlTenantCache -ConnectionString $cs -Kind $Kind) }
-        catch { Write-Warning ("  [tenant-cache] SQL read of '{0}' failed: {1}" -f $Kind, $_.Exception.Message); return $null }
+        catch {
+            $script:PimTenantCacheReadErrors[$Kind] = "$($_.Exception.Message)"
+            Write-Warning ("  [tenant-cache] SQL read of '{0}' failed: {1}" -f $Kind, $_.Exception.Message); return $null
+        }
     }
     if ($script:PimTenantCacheMem.ContainsKey($Kind)) {
-        try { return ($script:PimTenantCacheMem[$Kind] | ConvertFrom-Json) } catch { return $null }
+        try { return ($script:PimTenantCacheMem[$Kind] | ConvertFrom-Json) } catch { $script:PimTenantCacheReadErrors[$Kind] = "$($_.Exception.Message)"; return $null }
     }
     return $null
+}
+
+function Get-PimTenantCacheReadError {
+    # REQ 100.112: why the LAST Get-PimTenantCacheEntry of this kind returned $null; '' when it did not fail (the kind was
+    # read, or nothing is stored). Never throws.
+    param([Parameter(Mandatory)][string]$Kind)
+    if ($null -eq $script:PimTenantCacheReadErrors) { return '' }
+    if ($script:PimTenantCacheReadErrors.ContainsKey($Kind)) { return "$($script:PimTenantCacheReadErrors[$Kind])" }
+    return ''
+}
+
+function Get-PimTenantCacheStamps {
+    # REQ 100.112: is a kind stored, and when was it written -- WITHOUT reading its document. Never throws.
+    # Returns { ok; error; stamps = @{ kind = UTC text } }; a kind that is not stored is ABSENT from stamps. ok=$false =
+    # the store could not be asked (then "absent" proves nothing).
+    param([Parameter(Mandatory)][string[]]$Kinds)
+    $out = @{}
+    $cs = Get-PimTenantCacheStoreCs
+    if ($cs -and (Get-Command Get-PimSqlTenantCache -ErrorAction SilentlyContinue)) {
+        if (-not (Get-Command Get-PimSqlTenantCacheStamps -ErrorAction SilentlyContinue)) {
+            return [pscustomobject]@{ ok = $false; error = 'the store reader for cache stamps is not loaded in this process'; stamps = $out }
+        }
+        try {
+            $got = Get-PimSqlTenantCacheStamps -ConnectionString $cs -Kinds $Kinds
+            if ($got -is [System.Collections.IDictionary]) { foreach ($k in @($got.Keys)) { $out["$k"] = "$($got[$k])" } }
+            return [pscustomobject]@{ ok = $true; error = ''; stamps = $out }
+        } catch {
+            return [pscustomobject]@{ ok = $false; error = "$($_.Exception.Message)"; stamps = $out }
+        }
+    }
+    foreach ($k in @($Kinds)) {
+        if ($script:PimTenantCacheMem.ContainsKey("$k")) {
+            $m = [regex]::Match("$($script:PimTenantCacheMem["$k"])", '"refreshedUtc"\s*:\s*"([^"]*)"')
+            $out["$k"] = $(if ($m.Success) { $m.Groups[1].Value } else { '' })
+        }
+    }
+    return [pscustomobject]@{ ok = $true; error = ''; stamps = $out }
 }
 
 function Write-PimTenantCache {
