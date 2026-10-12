@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.600 -- 2026-10-12
+
+- The menu shows a number only for an error or for something that waits for a person; warnings such as gaps, validation warnings and policy settings waiting for a choice are listed on their page and put no number or dot in the menu
+
 ## 2.4.599 -- 2026-10-12
 
 - The Policy settings page and the Get Started Policies step always show the PIM Manager recommendation (the template value); Keep current can be chosen before the tenant values are read and fills in by itself

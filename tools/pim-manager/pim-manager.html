@@ -141,12 +141,13 @@
   .nav-group > .nav-group-btn:focus-visible { color:#0969da; outline:none; }
   .nav-group.active > .nav-group-btn { color:#0969da; border-bottom-color:#0969da; font-weight:600; }
   .nav-group > .nav-group-btn .nav-caret { font-size:9px; color:#8c959f; }
-  /* attention dot: a child item carries a visible badge */
+  /* attention dot: a child item carries a visible badge. PIM 100.94: a badge exists only for an ERROR (red dot) or an
+     ACTION that waits for a person (amber dot, .attn-action) -- a warning never puts a dot here. */
   .nav-group > .nav-group-btn .nav-attn {
     display:none; width:7px; height:7px; border-radius:50%; background:#cf222e;
   }
   .nav-group.has-attn > .nav-group-btn .nav-attn { display:inline-block; }
-  .nav-group.has-attn.attn-warn > .nav-group-btn .nav-attn:not(.nav-attn-count) { background:#bf8700; }
+  .nav-group.has-attn.attn-action > .nav-group-btn .nav-attn:not(.nav-attn-count) { background:#bf8700; }
   /* the dot becomes a counter when it is carrying the queue count. PIM §97.3 / framework §12.5: the queue count is
      INFORMATIONAL (it has its own indicator), so it is blue -- red counts are reserved for what BLOCKS work. */
   .nav-group > .nav-group-btn .nav-attn.nav-attn-count {
@@ -1341,22 +1342,22 @@
        hidden when the grouped nav builds (body.js-nav-grouped) but stays in the
        DOM as the canonical tab/badge/switchTab surface. -->
   <div id="tabs">
-    <div class="tab active" data-tab="home" title="Your privileged-estate health at a glance — per-tier counts, gaps, orphans, engine/job status, and a &quot;what needs my attention&quot; call-out.">Home <span id="homeAttnBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
+    <div class="tab active" data-tab="home" title="Your privileged-estate health at a glance — per-tier counts, gaps, orphans, engine/job status, and a &quot;what needs my attention&quot; call-out.">Home <span id="homeAttnBadge" class="badge" style="display:none;background:#cf222e"></span></div>
     <div class="tab" data-tab="impact" title="Counters overview: what PIM Manager has done in this environment, cumulative -- each counter with how it is counted.">Counters overview</div>
     <div class="tab" data-tab="new" title="Create a new admin or delegation with the target-first wizard — pick what to grant and the name, level, tier and plane are derived for you.">Create</div>
     <div class="tab" data-tab="map" title="Visualise who can reach what — the live delegation graph (admins → {{DIMS}} → nested groups → targets), with a risk overlay and per-grant removal.">Delegation Map</div>
-    <div class="tab" data-tab="validate" title="Check the desired store for problems (orphans, naming, ownership, stale roles) before you deploy — each finding has a suggested fix.">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
-    <div class="tab" data-tab="save" title="Review every staged change with a keyed diff, then commit — each save is backed up first, all-or-nothing, and reversible.">Pending changes <span id="saveDirtyBadge" class="badge" style="display:none">0</span></div>
-    <div class="tab" data-tab="revoke" title="Every privileged permission held right now -- as a graph or a list -- and revoke what is not needed. Destructive: break-glass accounts are protected and large batches require maker/checker approval.">Delegation overview (All privileged permissions) <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
-    <div class="tab" data-tab="accounts" title="Admin accounts and their Temporary Access Pass. Re-issue a TAP whose lifetime has expired -- the admin gets a new one by mail.">Accounts &amp; TAP <span id="tapExpiredBadge" class="badge" style="display:none;background:#bc4c00">0</span></div>
-    <div class="tab" data-tab="approvals" title="The maker/checker approval queue — raise an offboard/revoke/sensitive change, approve or deny one (a different admin must approve), and execute an approved request.">Approvals <span id="apprPendBadge" class="badge" style="display:none;background:#bc4c00">0</span></div>
-    <div class="tab" data-tab="accessreview" title="Run access reviews end-to-end — attest (approve / deny / recertify) with justification, assign reviewers, send reminders, and export the evidence.">Access Review <span id="arOpenBadge" class="badge" style="display:none">0</span></div>
+    <div class="tab" data-tab="validate" title="Check the desired store for problems (orphans, naming, ownership, stale roles) before you deploy — each finding has a suggested fix.">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#cf222e"></span></div>
+    <div class="tab" data-tab="save" title="Review every staged change with a keyed diff, then commit — each save is backed up first, all-or-nothing, and reversible.">Pending changes <span id="saveDirtyBadge" class="badge" style="display:none"></span></div>
+    <div class="tab" data-tab="revoke" title="Every privileged permission held right now -- as a graph or a list -- and revoke what is not needed. Destructive: break-glass accounts are protected and large batches require maker/checker approval.">Delegation overview (All privileged permissions) <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e"></span></div>
+    <div class="tab" data-tab="accounts" title="Admin accounts and their Temporary Access Pass. Re-issue a TAP whose lifetime has expired -- the admin gets a new one by mail.">Accounts &amp; TAP <span id="tapExpiredBadge" class="badge" style="display:none;background:#bc4c00"></span></div>
+    <div class="tab" data-tab="approvals" title="The maker/checker approval queue — raise an offboard/revoke/sensitive change, approve or deny one (a different admin must approve), and execute an approved request.">Approvals <span id="apprPendBadge" class="badge" style="display:none;background:#bc4c00"></span></div>
+    <div class="tab" data-tab="accessreview" title="Run access reviews end-to-end — attest (approve / deny / recertify) with justification, assign reviewers, send reminders, and export the evidence.">Access Review <span id="arOpenBadge" class="badge" style="display:none"></span></div>
     <div class="tab" data-tab="owner" title="People in the departments you own -- see when each person's access ends, and extend it if they still need it.">My people</div>
     <div class="tab" data-tab="accessrequests" title="Requests to have a disabled admin account enabled for a while (request for authorization), the company reviews of external consultants, and an IT override for a longer window.">Access requests</div>
-    <div class="tab" data-tab="grid" title="The full editable grid of every desired-state row — for power users who want direct, spreadsheet-style editing across all entities.">Advanced View (grid) <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
+    <div class="tab" data-tab="grid" title="The full editable grid of every desired-state row — for power users who want direct, spreadsheet-style editing across all entities.">Advanced View (grid) <span id="gridDirtyBadge" class="badge" style="display:none"></span></div>
     <div class="tab" data-tab="authoring" title="Bulk authoring — move an admin, clone a definition or Azure-RBAC delegation to many targets, bulk-attach, and import admins, each with a preview before commit.">Authoring</div>
     <div class="tab" data-tab="activator" title="Client onboarding: give your admins the PIM Activator browser extension -- with Intune, or on PCs and servers without Intune (a script).">Client onboarding</div>
-    <div class="tab" data-tab="getstarted" title="Get started: the steps that make this environment work, each marked done or still open.">Get Started <span id="getStartedBadge" class="badge" style="display:none;background:#bf8700;color:#fff">!</span></div>
+    <div class="tab" data-tab="getstarted" title="Get started: the steps that make this environment work, each marked done or still open.">Get Started <span id="getStartedBadge" class="badge" style="display:none;background:#bf8700;color:#fff"></span></div>
     <div class="tab" data-tab="onboarding" title="Onboard a new admin — derive the name and metadata, place them in the right groups, and (for sensitive grants) route through second-person approval.">Onboarding</div>
     <div class="tab" data-tab="departments" title="Departments and their owners -- who approves and who is mailed for every delegation a department sponsors. Import them from Entra, or assign owners in bulk by uploading a CSV file.">Departments &amp; owners</div>
     <div class="tab" data-tab="adminimport" title="Import many administrators at once from a file or a paste: the UPN is the key; skip or overwrite existing ones. SuperAdmin only.">Import administrators</div>
@@ -1386,13 +1387,13 @@
     <div class="tab" data-tab="configbackups" title="The daily configuration backup: back up now, pin a backup, and restore what you pick from one (SuperAdmin) -- staged as pending changes, never written straight into the store.">Backups &amp; restore</div>
     <div class="tab" data-tab="reports" title="&quot;Who can do what&quot; (and the reverse) — pick a person to see everything they can reach, or pick a role to see who can activate it. Printable + exportable.">Reports</div>
     <div class="tab" data-tab="conformance" title="Keep tenants current with the approved delegation templates — see how far behind each tenant is and roll the updates forward.">Tenant Baseline</div>
-    <div class="tab" data-tab="downlink" title="MSP downlink — which of your central admins and roles reach each managed customer, what was held back and why, and the per-relationship projection policy.">MSP Downlink <span id="downlinkUnresBadge" class="badge" style="display:none;background:#bc4c00">0</span></div>
+    <div class="tab" data-tab="downlink" title="MSP downlink — which of your central admins and roles reach each managed customer, what was held back and why, and the per-relationship projection policy.">MSP Downlink <span id="downlinkUnresBadge" class="badge" style="display:none;background:#bc4c00"></span></div>
     <!-- REQ-N / REQ-O (operator 2026-09-19): the managing tenant's managed-tenant registry and replication overview. MANAGING TENANT
          ONLY -- hidden until the tenant mode says msp-master (applyMspMasterOnlyTabs), and the server refuses elsewhere. -->
     <div class="tab" data-tab="msptenants" title="The managed tenants this managing tenant replicates to — name, tenant id, the managing tenant's copy of each tenant's ring, the tags replication targets, and whether it is enabled.">Managed tenant registry</div>
     <div class="tab" data-tab="replication" title="Every replicable admin, membership, group, nesting and binding on this managing tenant, and which managed tenants it reaches — computed by the same plan every tenant runs.">Replication overview</div>
-    <div class="tab" data-tab="jobs" title="The scheduler — see each job's cadence, last result and next run, spot overdue or failing runs, re-run on demand, and export the run history.">Jobs <span id="jobsRunBadge" class="badge" style="display:none;background:#1f883d">0</span></div>
-    <div class="tab" data-tab="enginelogs" title="Every recent engine run across all jobs, newest first — what failed and why, with each run's full log.">Engine logs &amp; errors <span id="engLogErrBadge" class="badge" style="display:none;background:#cf222e;color:#fff" title="failed runs nobody has acknowledged yet">0</span></div>
+    <div class="tab" data-tab="jobs" title="The scheduler — see each job's cadence, last result and next run, spot overdue or failing runs, re-run on demand, and export the run history.">Jobs <span id="jobsRunBadge" class="badge" style="display:none;background:#cf222e;color:#fff" title="jobs that failed"></span></div>
+    <div class="tab" data-tab="enginelogs" title="Every recent engine run across all jobs, newest first — what failed and why, with each run's full log.">Engine logs &amp; errors <span id="engLogErrBadge" class="badge" style="display:none;background:#cf222e;color:#fff" title="failed runs nobody has acknowledged yet"></span></div>
     <div class="tab" data-tab="jobschedule" title="When each scheduled job runs, in plain words — which area it covers, whether it is on, and how often. Mail jobs included.">Job schedule</div>
     <div class="tab" data-tab="discovery" title="New subscriptions, management groups, resource groups, Power BI workspaces and Entra roles found by discovery, and what the engine does with them.">Newly discovered resources</div>
     <div class="tab" data-tab="settings" title="Configure the Manager — naming conventions, feature customization, operational policy, alerting, permission template packs, email controls, and instances.">Settings</div>
@@ -3196,8 +3197,10 @@
   // BLOCKING items only: what the red menu counts and the "blocking work" line show. PIM 100.93: an item the server marks
   // blocking: false (policy settings that wait for a choice / are asked again) holds nothing -- it is an amber line under
   // Overview's "What needs your attention" (attentionNotices), never a red count.
-  function attentionItems() { return (PIM_ATTENTION && Array.isArray(PIM_ATTENTION.items)) ? PIM_ATTENTION.items.filter(i => i && i.tab && i.blocking !== false && (Number(i.count) || 0) > 0) : []; }
-  function attentionNotices() { return (PIM_ATTENTION && Array.isArray(PIM_ATTENTION.items)) ? PIM_ATTENTION.items.filter(i => i && i.tab && i.blocking === false && (Number(i.count) || 0) > 0) : []; }
+  // PIM 100.94: the server names each item's kind ('action' | 'warning'); a warning is never a menu count, whatever else it says.
+  function attentionIsWarning(i) { return !!i && (i.blocking === false || i.kind === 'warning'); }
+  function attentionItems() { return (PIM_ATTENTION && Array.isArray(PIM_ATTENTION.items)) ? PIM_ATTENTION.items.filter(i => i && i.tab && !attentionIsWarning(i) && (Number(i.count) || 0) > 0) : []; }
+  function attentionNotices() { return (PIM_ATTENTION && Array.isArray(PIM_ATTENTION.items)) ? PIM_ATTENTION.items.filter(i => i && i.tab && attentionIsWarning(i) && (Number(i.count) || 0) > 0) : []; }
   // "Reviews & controls > Approvals" -- where the item is, in the words of the menu.
   function attentionPageName(tab) {
     for (const g of NAV_GROUPS) {
@@ -3220,7 +3223,8 @@
       let n = 0;
       grp.querySelectorAll('.nav-group-item').forEach(item => {
         const tab = item.dataset.tab;
-        const c = byTab[tab] || 0;
+        const rule = pimMenuCount({ actions: byTab[tab] || 0, blocking: true });   // PIM 100.94: blocking items are ACTIONS -- the one menu rule
+        const c = rule ? rule.n : 0;
         let b = item.querySelector('.nav-block-badge');
         if (!b) { const main = item.querySelector('.nav-item-main') || item; b = document.createElement('span'); b.className = 'nav-block-badge'; main.appendChild(b); }
         b.textContent = c ? String(c) : '';
@@ -3301,22 +3305,28 @@
         // it was never mirrored and the grouped menu showed nothing while work sat in the queue.
         // Reported live 2026-09-12: "i queue one, but i dont get a new box with unprocessed changes".
         // 🔑 Any visible, non-zero badge counts; the item shows the largest of them.
-        let shown = '', shownBg = '';
-        document.querySelectorAll('#tabs .tab[data-tab="' + tabKey + '"] .badge').forEach(srcBadge => {
+        // 🔒 PIM 100.94: ONLY a badge painted by pimMenuBadge (it carries data-menu-sev = an error or an action) is
+        // mirrored. A warning count has no way into pimMenuBadge, so it can not reach a submenu entry or a group dot.
+        let shown = '', shownBg = '', shownTip = '', itemRed = false;
+        document.querySelectorAll('#tabs .tab[data-tab="' + tabKey + '"] .badge[data-menu-sev]').forEach(srcBadge => {
           const t = (srcBadge.textContent || '').trim();
           if (srcBadge.style.display === 'none' || t === '' || t === '0') return;
-          if (!shown || (Number(t) || 0) > (Number(shown) || 0)) { shown = t; shownBg = srcBadge.style.backgroundColor || ''; }
+          if (srcBadge.getAttribute('data-menu-sev') === 'red') itemRed = true;
+          if (!shown || (Number(t) || 0) > (Number(shown) || 0)) { shown = t; shownBg = srcBadge.style.backgroundColor || ''; shownTip = srcBadge.title || ''; }
         });
         const itemBadge = item.querySelector('.nav-item-badge');
         const visible = !!shown;
         item.classList.toggle('has-badge', visible);
-        if (itemBadge) { itemBadge.textContent = shown; itemBadge.style.background = shownBg; }   // §97.3: the source's own colour (an alarm stays red), else the CSS blue
+        if (itemBadge) {
+          itemBadge.textContent = shown; itemBadge.style.background = shownBg;   // §97.3: the source's own colour (an alarm stays red), else the CSS blue
+          if (shownTip) itemBadge.title = shownTip; else itemBadge.removeAttribute('title');
+        }
         if (visible) groupAttn = true;
-        if (visible && /207,\s*34,\s*46|#cf222e/i.test(shownBg)) groupRed = true;   // PIM 100.85
+        if (visible && itemRed) groupRed = true;
       });
       grp.classList.toggle('active', groupActive);
       grp.classList.toggle('has-attn', groupAttn);
-      grp.classList.toggle('attn-warn', groupAttn && !groupRed);   // PIM 100.85: warnings only = an amber dot, never red
+      grp.classList.toggle('attn-action', groupAttn && !groupRed);   // PIM 100.94: the dot is red for an error, amber when only an action waits -- never for a warning
       // The group button carries the QUEUE count itself, not just a dot -- the operator must see
       // that unprocessed changes exist without opening the menu.
       const attn = grp.querySelector('.nav-group-btn .nav-attn');
@@ -4741,8 +4751,9 @@
     // The badge counts only what has actually been CHECKED. An unchecked row is not known to be
     // fine, and must not be counted as expired either.
     const expired = rows.filter(a => a.status === 'expired').length;
-    const badge = document.getElementById('tapExpiredBadge');
-    if (badge) { badge.textContent = String(expired); badge.style.display = expired ? '' : 'none'; }
+    // PIM 100.94: an expired TAP is an ACTION (re-issue it) -- this page's own to-do; unchecked rows are not counted.
+    pimMenuBadge('tapExpiredBadge', { actions: expired, title: r => pimMenuWords(r.n, 'Temporary Access Pass has expired', 'Temporary Access Passes have expired') + ' -- re-issue ' + (r.n === 1 ? 'it' : 'them') });
+    pimMenuSync();
 
     let h = '';
     h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">' +
@@ -5022,6 +5033,65 @@
                 info:  { bg: '#57606a', fg: '#57606a', soft: '#f6f8fa', line: '#d0d7de' } };
     return (P[sev] || P.info)[part || 'bg'];
   }
+  // PIM 100.94 (owner 2026-10-12, third report: "we dont show warnings numbers, only errors or actions in the menu"): ONE
+  // rule for every number and dot in the top menu, a submenu entry and a tab. A number shows only for
+  //   errors  -- something FAILED (a failed job, a validation error, a failed commit entry, an alarm), and
+  //   actions -- something waits for a PERSON (an approval, a held change set, changes to commit, a required setup step).
+  // Warnings (gaps, orphans, validation warnings, drift corrected, policy settings waiting for a choice, facts, running
+  // jobs) have NO parameter here on purpose: they can not reach a menu. They stay on their own page.
+  // pimMenuCount({ errors, actions, blocking }) -> null (show nothing) or { n, errors, actions, sev }: n = the ITEMS to act
+  // on; sev 'red' for an error or an action that blocks work, 'amber' for an action that only waits.
+  function pimMenuCount(src) {
+    const s = src || {};
+    const e = Math.max(0, Math.floor(Number(s.errors) || 0)), a = Math.max(0, Math.floor(Number(s.actions) || 0));
+    if (e + a <= 0) return null;
+    return { n: e + a, errors: e, actions: a, sev: (e > 0 || (a > 0 && s.blocking)) ? 'red' : 'amber' };
+  }
+  // Paint ONE menu badge by that rule. el: the element or its id. src: { errors, actions, blocking } plus
+  //   title  -- (r) => plain words for what the number counts ("2 approvals wait for a decision"); required when shown
+  //   label  -- text to show in place of the number (the emergency override's "!")
+  //   colour -- false keeps the element's own neutral style (the staged-changes pills)
+  // Nothing to show = hidden and emptied (no "0", no grey pill). Only a badge painted here carries data-menu-sev, and the
+  // grouped menu mirrors only badges that carry it (syncNavGroups) -- a count set any other way never reaches the menu.
+  function pimMenuBadge(el, src) {
+    const b = (typeof el === 'string') ? document.getElementById(el) : el;
+    const r = pimMenuCount(src);
+    if (!b) return r;
+    if (!r) {
+      b.style.display = 'none'; b.textContent = ''; b.removeAttribute('title'); b.removeAttribute('aria-label'); b.removeAttribute('data-menu-sev');
+      return null;
+    }
+    const s = src || {};
+    b.textContent = s.label ? String(s.label) : String(r.n);
+    b.setAttribute('data-menu-sev', r.sev);
+    if (s.colour !== false) { b.style.background = pimSevColour(r.sev); b.style.color = '#fff'; }
+    const tip = (typeof s.title === 'function') ? s.title(r) : (s.title || '');
+    if (tip) { b.title = tip; b.setAttribute('aria-label', tip); } else { b.removeAttribute('title'); b.removeAttribute('aria-label'); }
+    if (s.display !== false) b.style.display = s.display || '';
+    return r;
+  }
+  // "1 job failed" / "2 jobs failed" -- the words of a badge tooltip.
+  function pimMenuWords(n, one, many) { return n + ' ' + (Number(n) === 1 ? one : many); }
+  // Approvals: requests that wait for a checker -- an ACTION that blocks the change it gates (red).
+  function pimApprovalsBadge(pending) {
+    pimMenuBadge('apprPendBadge', { actions: pending, blocking: true, title: r => pimMenuWords(r.n, 'approval request waits', 'approval requests wait') + ' for a decision' });
+    pimMenuSync();
+  }
+  // Access reviews: only OVERDUE reviews (the deadline passed without the decisions). Open reviews inside their period are a fact.
+  function pimAccessReviewBadge(overdue) {
+    pimMenuBadge('arOpenBadge', { errors: overdue, title: r => pimMenuWords(r.n, 'access review is overdue', 'access reviews are overdue') + ' -- the decisions are missing' });
+    pimMenuSync();
+  }
+  // Emergency access: the emergency override (break-glass) is ACTIVE -- an alarm (the approval gate is bypassed), shown as
+  // a red "!" like before. Painted from the Emergency page and from Overview.
+  function pimEmergencyBadge(active) {
+    pimMenuBadge(document.getElementById('govEmergencyBadge'), { errors: active ? 1 : 0, label: '!', title: () => 'Emergency override (break-glass) is ACTIVE -- the approval gate is bypassed' });
+    pimMenuSync();
+  }
+  // After a badge changed: the grouped menu mirrors it now, not on the next page switch.
+  function pimMenuSync() {
+    try { if (typeof syncNavGroups === 'function') { const a = document.querySelector('#tabs .tab.active'); syncNavGroups(a ? a.dataset.tab : null); } } catch (_) { }
+  }
 
   function homeTile(opts) {
     // opts: { title, value, sub, tone('green'|'amber'|'red'|'neutral'), tab, lines[] }
@@ -5256,19 +5326,17 @@
     try { d = await api('GET', '/api/home'); }
     catch (e) { body.innerHTML = stateError('Failed to load overview', e.message); return; }
     const t = (d && d.tiles) || {};
-    let attn = 0;   // count of things needing attention -> Home badge
     // "What needs my attention" call-out (REQUIREMENTS §26a). Each entry is sourced
     // from the SAME tile data below (no separate/duplicate source) so the call-out can
     // never disagree with the tiles. { sev:'red'|'amber', text, tab }.
     const attnItems = [];
     function homeAddAttn(sev, text, tab, id) { attnItems.push({ sev: sev, text: text, tab: tab, id: id || '' }); }   // id: a setup-health line's own id (100.91)
-    // PIM 100.85 (owner 2026-10-11, 2nd report: "dont show as alerts, when it is warnings"): the Overview badge is RED only
-    // when at least one item is an error / alarm; a count made of warnings only is amber.
-    function homeAttnColour(items) { return pimSevColour((items || []).some(i => i && i.sev === 'red') ? 'red' : 'amber'); }
+    // PIM 100.94: the lines collected here are the LIST on this page. Only the red ones (errors) reach the menu badge --
+    // see homePaintAttn below.
     // §100.3 (2026-10-09): the server's settings health lines -- demo group unreadable (ACC-1), MSP downlink switched off
     // (GATE-1), a blank naming pattern (NAME-1). The text is escaped here; the server sends plain text.
     try {
-      ((t.health && t.health.notices) || []).forEach(n => { if (n && n.text) { attn += 1; homeAddAttn(n.sev === 'red' ? 'red' : 'amber', esc(n.text), n.tab || 'settings', n.id); } });
+      ((t.health && t.health.notices) || []).forEach(n => { if (n && n.text) { homeAddAttn(n.sev === 'red' ? 'red' : 'amber', esc(n.text), n.tab || 'settings', n.id); } });
     } catch (_) { }
 
     // --- header ---
@@ -5302,11 +5370,11 @@
       const tone = j.status === 'red' ? 'red' : (j.status === 'green' ? 'green' : 'neutral');
       // BUG-92: only real failures raise attention. A job this worker is not scoped to run is
       // reported separately and NEVER as red -- it is a deployment decision, not a fault.
-      if (j.failedCount > 0) { attn += j.failedCount; homeAddAttn('red', j.failedCount + ' job(s) FAILED: ' + esc((j.failedJobs || []).map(f => f.name).slice(0, 3).join(', ')), 'jobs'); }
+      if (j.failedCount > 0) { homeAddAttn('red', j.failedCount + ' job(s) FAILED: ' + esc((j.failedJobs || []).map(f => f.name).slice(0, 3).join(', ')), 'jobs'); }
       // 71.13: a standing policy HOLD is AMBER attention (needs an approval) -- never red, never hidden.
       // PIM 100.84: never while the hold records say that nothing waits (policyHoldCount 0) -- and it opens Approvals, where
       // the change set is shown and a SuperAdmin approves it, not the Jobs page.
-      if (j.heldCount > 0 && j.policyHoldCount !== 0) { attn += j.heldCount; homeAddAttn('amber', j.heldCount + ' job(s) NEED APPROVAL (a safety breaker held a change set): ' + esc((j.heldJobs || []).map(f => f.name).slice(0, 3).join(', ')) + ' -- a SuperAdmin approves it on Approvals', 'approvals'); }
+      if (j.heldCount > 0 && j.policyHoldCount !== 0) { homeAddAttn('amber', j.heldCount + ' job(s) NEED APPROVAL (a safety breaker held a change set): ' + esc((j.heldJobs || []).map(f => f.name).slice(0, 3).join(', ')) + ' -- a SuperAdmin approves it on Approvals', 'approvals'); }
       if (j.skippedCount > 0) { homeAddAttn('info', j.skippedCount + ' job(s) not scheduled on this deployment (by design): ' + esc((j.skippedJobs || []).map(f => f.name).slice(0, 3).join(', ')), 'jobs'); }
       const lines = [];
       if (j.lastRun) lines.push('Last: <b>' + esc(j.lastRun.name) + '</b> ' + (j.lastRun.ok ? '<span style="color:#1f883d">ok</span>' : (j.lastRun.status === 'throttled' && !j.lastRun.throttleStuck) ? '<span style="color:#9a6700" title="Microsoft throttled this run; it retries automatically">throttled -- retrying</span>' : '<span style="color:#cf222e">failed</span>') + ' ' + esc(homeFmtWhen(j.lastRun.whenUtc)));
@@ -5340,7 +5408,7 @@
     if (v.ok === false) {
       h += homeTile({ title: 'Validation', value: 'n/a', tone: 'neutral', tab: 'validate', sub: esc(v.note || v.error || 'unavailable') });
     } else {
-      if (v.errors > 0) { attn += v.errors; homeAddAttn('red', v.errors + ' validation error(s) must be fixed before commit', 'validate'); }
+      if (v.errors > 0) { homeAddAttn('red', v.errors + ' validation error(s) must be fixed before commit', 'validate'); }
       h += homeTile({
         title: 'Validation findings',
         // PIM 100.85 (owner 2026-10-11: "168 errors is wrong, it is 168 warnings" -> "168 warnings, 0 errors"): ONE number in
@@ -5357,14 +5425,13 @@
     const bg = t.breakGlass || {};
     // Break-glass lives on Settings now (2026-09-14); the Settings tab carries the emergency badge, set here too so the
     // nav shows it from the landing page without Settings having been opened.
-    if (bg.active) { attn += 1; homeAddAttn('red', 'Break-glass (emergency override) is ACTIVE &mdash; the approval gate is bypassed', 'emergency'); }
-    { const egb = document.getElementById('govEmergencyBadge'); if (egb) { egb.style.display = bg.active ? '' : 'none'; if (typeof syncNavGroups === 'function') { try { const at = document.querySelector('#tabs .tab.active'); syncNavGroups(at ? at.dataset.tab : 'home'); } catch (_) { } } } }
+    if (bg.active) { homeAddAttn('red', 'Break-glass (emergency override) is ACTIVE &mdash; the approval gate is bypassed', 'emergency'); }
+    pimEmergencyBadge(!!bg.active);
     // Break-glass ACCOUNT list: a change awaiting a SECOND SuperAdmin (maker/checker, always on -- shown whatever the
     // approvalsPreview flag says, because the Approvals tab may be hidden and this request still needs a checker).
     const bgc = t.breakGlassChange || {};
     const bgLines = bg.active ? ['expires ' + esc(homeFmtWhen(bg.expiresAtUtc)), bg.reason ? esc(bg.reason) : ''] : [];
     if (bgc.open) {
-      attn += 1;
       homeAddAttn('amber', 'Break-glass account change awaiting approval by another SuperAdmin (raised by ' + esc(bgc.maker || 'unknown') + ', +' + (bgc.added || 0) + ' / &minus;' + (bgc.removed || 0) +
         ', expires ' + esc(homeFmtWhen(bgc.expiresUtc)) + ')' + (bgc.canApprove ? ' &mdash; you can approve it' : ''), 'emergency');
       bgLines.push('<span class="homeBgChange" style="color:#9a6700">account change awaiting a 2nd SuperAdmin</span>');
@@ -5384,9 +5451,8 @@
       h += homeTile({ title: 'Pending approvals', value: 'n/a', tone: 'neutral', tab: 'approvals', sub: esc(ap.error || 'unavailable') });
     } else {
       const n = ap.pending || 0;
-      if (n > 0) { attn += n; homeAddAttn('amber', n + ' approval request(s) awaiting a checker', 'approvals'); }
-      const apprBadge = document.getElementById('apprPendBadge');
-      if (apprBadge) { apprBadge.textContent = n; apprBadge.style.display = n > 0 ? '' : 'none'; }
+      if (n > 0) { homeAddAttn('amber', n + ' approval request(s) awaiting a checker', 'approvals'); }
+      pimApprovalsBadge(n);
       h += homeTile({
         title: 'Pending approvals',
         value: n,
@@ -5420,7 +5486,7 @@
       h += homeTile({ title: 'Gaps & orphans', value: 'n/a', tone: 'neutral', tab: 'map', sub: esc(gp.error || 'unavailable') });
     } else {
       const totalGaps = (gp.orphanGroups || 0) + (gp.gapAdmins || 0) + (gp.unmanagedTargets || 0);
-      if (totalGaps > 0) { attn += totalGaps; homeAddAttn('amber', totalGaps + ' gap(s): ' + (gp.orphanGroups || 0) + ' orphan group(s), ' + (gp.gapAdmins || 0) + ' admin(s) reach nothing, ' + (gp.unmanagedTargets || 0) + ' unmanaged target(s)', 'map'); }
+      if (totalGaps > 0) { homeAddAttn('amber', totalGaps + ' gap(s): ' + (gp.orphanGroups || 0) + ' orphan group(s), ' + (gp.gapAdmins || 0) + ' admin(s) reach nothing, ' + (gp.unmanagedTargets || 0) + ' unmanaged target(s)', 'map'); }
       h += homeTile({
         title: 'Gaps, orphans & unmanaged',
         value: totalGaps,
@@ -5445,7 +5511,7 @@
       h += homeTile({ title: 'Unmanaged admin accounts', value: '&mdash;', tone: 'neutral', sub: esc(ua.message || 'not reported yet') });
     } else {
       const n = ua.count || 0;
-      if (n > 0) { attn += n; homeAddAttn('amber', n + ' privileged account(s) exist in the directory with no desired-state row (no TAP healing, no review) -- add them to the definitions', 'accounts'); }
+      if (n > 0) { homeAddAttn('amber', n + ' privileged account(s) exist in the directory with no desired-state row (no TAP healing, no review) -- add them to the definitions', 'accounts'); }
       const shown = (ua.accounts || []).slice(0, 8).map(esc);
       if ((ua.accounts || []).length > 8) { shown.push('&hellip; and ' + ((ua.accounts || []).length - 8) + ' more'); }
       h += homeTile({
@@ -5494,15 +5560,21 @@
     // PIM 100.93: the server's NON-BLOCKING attention lines (policy settings that wait for a choice / are asked again) are
     // amber lines here, each with its link, counted once each on the badge. They arrive with GET /api/attention, so the
     // call-out is painted now and again when that read answers (refreshAttention -> renderHome.__paintAttn).
-    let attnShown = attn;   // the count the Home badge shows (the heavy tiles add to it later)
+    // 🔒 PIM 100.94 (owner 2026-10-12, third report -- an amber "169" beside "What needs your attention (3)"): the Home
+    // menu badge counts ONLY the lines that are ERRORS (sev red: a failed job, validation errors, an active emergency
+    // override, a red health line -- one per line, never the findings inside it) plus what the server lists as waiting
+    // for a person and blocking work (attentionItems(): approvals, held change sets, guard holds, ...). The amber lines
+    // (gaps, drift corrected, unmanaged accounts, expiring access, policy settings waiting) stay in the list below and
+    // put NOTHING on the menu.
     const homePaintAttn = () => {
       const notices = attentionNotices().map(i => ({ sev: 'amber', text: esc(String(i.text || '')), tab: i.tab, id: i.id || '' }));
       const all = attnItems.concat(notices);
       const co = document.getElementById('homeAttnCallout');
       if (co) co.innerHTML = homeCalloutHtml(all);
-      const n = attnShown + notices.length;
-      const ab = document.getElementById('homeAttnBadge');
-      if (ab) { ab.textContent = n; ab.style.display = n > 0 ? '' : 'none'; ab.style.background = homeAttnColour(all); }
+      const waiting = attentionItems().reduce((a, i) => a + (Number(i.count) || 0), 0);
+      pimMenuBadge('homeAttnBadge', { errors: attnItems.filter(i => i && i.sev === 'red').length, actions: waiting, blocking: true,
+        title: r => [r.errors ? pimMenuWords(r.errors, 'error', 'errors') : '', r.actions ? pimMenuWords(r.actions, 'item waits', 'items wait') + ' for a decision' : ''].filter(Boolean).join(', ') + ' -- listed on Overview' });
+      pimMenuSync();
       homeWireLinks();
     };
     renderHome.__paintAttn = () => { if (document.getElementById('homeAttnCallout')) homePaintAttn(); };
@@ -5581,8 +5653,7 @@
       // fold the heavy/live signals into the "what needs my attention" call-out too.
       if ((ex.expiring || 0) > 0) homeAddAttn('amber', (ex.expiring) + ' active assignment(s) expiring within ' + (ex.windowDays || 14) + ' days &mdash; renew or revoke', 'revoke');
       if ((ar.pending || 0) > 0) homeAddAttn('amber', (ar.pending) + ' access review(s) awaiting a decision', 'accessreview');
-      // repaint the call-out, re-wire the freshly-replaced tiles + call-out rows, refresh the badge with heavy counts
-      attnShown = attn + (ex.expiring || 0) + (ar.pending || 0);
+      // repaint the call-out and re-wire the freshly-replaced tiles + call-out rows (both lines are amber: the list only)
       homePaintAttn();
     };
     const heavyBtn = document.getElementById('homeLoadHeavy');
@@ -6342,8 +6413,9 @@
 
     body.innerHTML = h;
 
-    const badge = document.getElementById('downlinkUnresBadge');
-    if (badge) { badge.textContent = totalUnres; badge.style.display = totalUnres ? '' : 'none'; }
+    // PIM 100.94: unresolved roles are FINDINGS of the projection preview (a warning: nothing failed and no decision
+    // waits) -- they are listed per tenant above and never put a number in the menu.
+    pimMenuBadge('downlinkUnresBadge', { errors: 0, actions: 0 });
 
     // MSP-4 -- fill the reach panel. Loaded AFTER the main table paints so a slow or failing
     // reach query can never blank the view the operator came for: this is an additional lens,
@@ -10789,7 +10861,7 @@
     // the preview banner and load NOTHING (the /api/approvals* endpoints also short-
     // circuit while disabled). Hides the pending badge so it can't imply live state.
     if (isGovernancePreviewDisabled('approvals')) {
-      const badge = document.getElementById('apprPendBadge'); if (badge) badge.style.display = 'none';
+      pimMenuBadge('apprPendBadge', { actions: 0 });
       body.innerHTML = governancePreviewBanner('Approval-gated offboarding & revoke: the maker/checker queue where a destructive identity action is requested, approved by a different admin, then executed once.');
       return;
     }
@@ -10803,8 +10875,7 @@
 
     // Pending badge on the tab.
     const pend = reqs.filter(r => r.status === 'Pending').length;
-    const badge = document.getElementById('apprPendBadge');
-    if (badge) { badge.textContent = pend; badge.style.display = pend ? '' : 'none'; }
+    pimApprovalsBadge(pend);
 
     drawApprovals();
   }
@@ -11563,15 +11634,9 @@
     try { _arOverdue = await api('GET', '/api/access-reviews/overdue'); }
     catch (e) { _arOverdue = { rows: [], overdueCount: 0, dueSoonCount: 0, source: 'unavailable', note: String(e.message || e) }; }
 
-    // Open badge = reviews with an in-progress / not-started instance, plus overdue.
-    const openCount = _arRows.filter(r => /inprogress|notstarted/i.test(r.Status || '')).length;
-    const badge = document.getElementById('arOpenBadge');
-    if (badge) {
-      const od = (_arOverdue && _arOverdue.overdueCount) || 0;
-      badge.textContent = openCount;
-      badge.style.background = od > 0 ? '#cf222e' : '';
-      badge.style.display = openCount ? '' : 'none';
-    }
+    // PIM 100.94: a review that is merely open (running inside its period) is a fact -- no number in the menu. Only an
+    // OVERDUE review counts: its deadline passed without the decisions (an error to act on). The open count stays on the page.
+    pimAccessReviewBadge((_arOverdue && _arOverdue.overdueCount) || 0);
 
     drawAccessReviews();
     try { await renderAccessReviewRules(); } catch (_) { }
@@ -13548,8 +13613,7 @@
     let emergency = { active: false };
     try { emergency = await api('GET', '/api/emergency-status'); } catch (_) {}
     const emNoteHtml = _emLastNote ? '<div class="govEmNote" style="margin-top:6px;padding:6px 10px;border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;font-size:12px;">' + esc(_emLastNote) + '</div>' : '';
-    const egb = document.getElementById('govEmergencyBadge');
-    if (egb) { egb.style.display = emergency.active ? '' : 'none'; try { const at = document.querySelector('#tabs .tab.active'); syncNavGroups(at ? at.dataset.tab : 'settings'); } catch (_) { } }
+    pimEmergencyBadge(!!emergency.active);
     const h = [];
     h.push('<div class="set-card" style="border-color:' + (emergency.active ? '#cf222e' : '#d0d7de') + ';"><h3 style="margin:0 0 4px;font-size:14px;color:#cf222e;">Emergency override (break-glass)</h3>');
     // REQ-F (2026-09-19, operator: "explain the actual functionality what will happen here"). Each sentence is what the
@@ -15366,10 +15430,10 @@
   }
   function gsPaintBadge(steps) {
     const openRequired = (steps || []).filter(s => s.required && !s.done && !s.deferred).length;
-    const badge = document.getElementById('getStartedBadge');
-    // PIM 100.85: an open required step is a setup choice, not an error -- the badge (and its menu dot) is amber, never red
-    if (badge) { badge.textContent = '!'; badge.style.display = openRequired ? '' : 'none'; badge.style.background = pimSevColour('amber'); badge.style.color = '#fff'; }
-    try { const act = document.querySelector('#tabs .tab.active'); syncNavGroups(act ? act.dataset.tab : null); } catch (_) { }
+    // PIM 100.94: an open REQUIRED step is an ACTION (a person must do it) -- the badge shows HOW MANY are open, amber
+    // (waiting, not an error: 100.85). An optional step, or one skipped for now, never counts.
+    pimMenuBadge('getStartedBadge', { actions: openRequired, title: r => pimMenuWords(r.n, 'required setup step is still open', 'required setup steps are still open') });
+    pimMenuSync();
   }
   // Break-glass reminder (owner 2026-10-08): while no break-glass account is protected -- skipped for now or never set --
   // every SuperAdmin sees ONE dismissible banner per browser session. It is computed from the data on each evaluation, so
@@ -18422,13 +18486,13 @@
     // entry only waits for the engine; it stays listed on Pending changes (state 'committed') but no longer lights the
     // menu. A failed one still counts, so the "worst possible zero" above cannot happen.
     const dd = by || null;
-    const count = dd ? ((Number(dd.pending) || 0) + (Number(dd.failed) || 0)) : (Number(n) || 0);
+    // PIM 100.94: the one menu rule -- failed entries are ERRORS, entries awaiting a commit are ACTIONS; committed /
+    // applying entries only wait for the engine (a fact) and never count.
+    const qSrc = { errors: dd ? (Number(dd.failed) || 0) : 0, actions: dd ? (Number(dd.pending) || 0) : (Number(n) || 0) };
+    const qRule = pimMenuCount(qSrc);
+    const count = qRule ? qRule.n : 0;
     window.PIM_QUEUE_OPEN = count;
-    // The Queue menu item has its own badge (#queuePendBadge) that nothing ever set -- so the
-    // one entry named "Queue" never showed a count. Keep it in step with the Review & Save one.
-    const qb = document.getElementById('queuePendBadge');
-    if (qb) { qb.textContent = String(count); qb.style.display = count ? '' : 'none'; }
-    try { const a = document.querySelector('#tabs .tab.active'); syncNavGroups(a ? a.dataset.tab : null); } catch (_) {}
+    pimMenuSync();
     const tab = document.querySelector('#tabs .tab[data-tab="save"]');
     if (!tab) return;
     let b = tab.querySelector('.queue-badge');
@@ -18440,8 +18504,8 @@
     if (!b) {
       b = document.createElement('span');
       b.className = 'badge queue-badge';
-      // §97.3 / framework §12.5: the queue count is INFORMATIONAL -- blue; red counts mean "blocked, waiting for a decision".
-      b.style.cssText = 'background:#0969da;color:#fff;border-radius:999px;min-width:18px;height:18px;' +
+      // the colour is set by pimMenuBadge below (red = an entry failed, amber = changes await a commit)
+      b.style.cssText = 'color:#fff;border-radius:999px;min-width:18px;height:18px;' +
         'display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;' +
         'line-height:1;padding:0 5px;margin-left:6px;box-shadow:0 0 0 2px #fff;vertical-align:top;' +
         'position:relative;top:-6px;cursor:pointer;';
@@ -18461,15 +18525,12 @@
     // 🔴 §70.22 (operator 2026-09-14: "i did a commit all, but gui still shows 2 pending"): the red number counted
     // COMMITTED entries too, so right after Commit all the tab still said "2" as if nothing had been committed. Red =
     // needs YOU (awaiting commit, or failed); committed / applying entries only wait for the engine and show in blue.
-    const needsYou = (d.pending || 0) + (d.failed || 0);
     const inFlight = (d.committed || 0) + (d.applying || 0);
-    b.textContent = needsYou;
-    b.title = (d.pending || 0) + ' awaiting commit, ' + (d.failed || 0) + ' failed, ' +
-      inFlight + ' committed and waiting for the engine';
     // A failure needs a person, not patience -- so it does not wear the same colour as work in flight.
-    // PIM 100.85: red only when an entry FAILED; changes that only wait for a commit are amber (waiting, not an error).
-    b.style.background = (d.failed || 0) > 0 ? pimSevColour('red') : (needsYou > 0 ? pimSevColour('amber') : '#0969da');
-    try { const a = document.querySelector('#tabs .tab.active'); syncNavGroups(a ? a.dataset.tab : null); } catch (_) {}
+    // PIM 100.85 / 100.94: red only when an entry FAILED; changes that only wait for a commit are amber (an action).
+    pimMenuBadge(b, Object.assign({ display: false, title: r => pimMenuWords(r.actions, 'change awaits', 'changes await') + ' a commit, ' + r.errors + ' failed' +
+      (inFlight ? ' (' + inFlight + ' committed and waiting for the engine -- not counted)' : '') }, qSrc));
+    pimMenuSync();
   }
 
   async function refreshQueueBadge() {
@@ -18582,10 +18643,7 @@
     }
     const entries = (data && data.entries) || [];
     const counts = (data && data.counts) || {};
-    const pend = counts.pending || 0;
 
-    const badge = document.getElementById('queuePendBadge');
-    if (badge) { if (pend > 0) { badge.textContent = pend; badge.style.display = ''; } else { badge.style.display = 'none'; } }
 
     // 🔴 REQ-REV-DOWN-1 / REQ-REN-1 -- PENDING AUTHORISATIONS FOR THE MANAGED TENANTS.
     // A recorded withdrawal or rename is real, unapproved-by-anyone-else work that leaves this
@@ -19258,9 +19316,8 @@
     const canRun = !!data.canRun;            // Admin+ -> per-row controls are live
     const histCount = (data.historyCount != null) ? data.historyCount : null;
     window._jobsCanRun = canRun;
-    // header badge
-    const badge = document.getElementById('jobsRunBadge');
-    if (badge) { if (running > 0) { badge.textContent = running; badge.style.display = ''; } else { badge.style.display = 'none'; } }
+    // menu badges (PIM 100.94): the number of RUNNING jobs is a fact -- it stays on this page and is no longer a number in
+    // the menu. Jobs and Engine logs both carry the count of jobs that FAILED (an error), set in one place.
     setEngineErrBadge(jobs.filter(j => (Number(j.unackedFailureCount) || 0) > 0).length);
 
     const h = [];
@@ -19708,11 +19765,12 @@
     return open;
   }
   function setEngineErrBadge(n) {
-    const b = document.getElementById('engLogErrBadge');
-    if (!b) return;
-    n = Number(n) || 0;
-    b.textContent = String(n); b.style.display = n > 0 ? '' : 'none';
-    try { const a = document.querySelector('#tabs .tab.active'); syncNavGroups(a ? a.dataset.tab : null); } catch (_) {}
+    // PIM 100.94: n = the jobs whose failed runs are still open (an ERROR). The same number on Jobs (where the job is
+    // re-run) and on Engine logs & errors (where its log is) -- hidden when no job is failing.
+    const src = { errors: Number(n) || 0, title: r => pimMenuWords(r.n, 'job failed', 'jobs failed') + ' -- the newest run of each has not succeeded yet' };
+    pimMenuBadge('engLogErrBadge', src);
+    pimMenuBadge('jobsRunBadge', src);
+    pimMenuSync();
   }
   async function refreshEngineErrBadge() {
     if (typeof isServer !== 'undefined' && !isServer) return;
@@ -22085,15 +22143,10 @@
       const st = pendingRowStates(base);
       rowCount += st.added + st.removed + st.modified;
     }
-    const gb = document.getElementById('gridDirtyBadge');
-    const sb = document.getElementById('saveDirtyBadge');
-    const show = (el, n, title) => {
-      if (!el) return;
-      if (n > 0) { el.style.display = 'inline-block'; el.textContent = n; if (title) el.title = title; }
-      else { el.style.display = 'none'; el.textContent = ''; }
-    };
-    show(gb, dirtyBases, dirtyBases + ' record type(s) with unsaved edits');
-    show(sb, rowCount, rowCount + ' change(s) queued across ' + dirtyBases + ' record type(s), not yet committed');
+    // PIM 100.94: staged changes wait for a person to commit them -- an ACTION. They keep their own neutral pill
+    // (colour: false), as before.
+    pimMenuBadge('gridDirtyBadge', { actions: dirtyBases, colour: false, display: 'inline-block', title: r => pimMenuWords(r.n, 'record type has', 'record types have') + ' edits that are not committed yet' });
+    pimMenuBadge('saveDirtyBadge', { actions: rowCount, colour: false, display: 'inline-block', title: r => pimMenuWords(r.n, 'change is', 'changes are') + ' staged across ' + pimMenuWords(dirtyBases, 'record type', 'record types') + ' and wait' + (r.n === 1 ? 's' : '') + ' for a commit' });
     // §70.12 -- every badge refresh follows a pendingChanges change, so this is where the draft is kept.
     if (typeof persistPendingDraft === 'function') persistPendingDraft();
     // §79.13: and to the SHARED store, so every administrator sees it (debounced; no-op without a SQL store).
@@ -25203,14 +25256,10 @@
 
   // Top-of-page badge on the Validate tab + Save-tab banner glue.
   function reflectValidationGlobals() {
-    const errBadge = document.getElementById('validateErrBadge');
+    // PIM 100.94: validation ERRORS only (they must be fixed before a commit). Warnings stay on the Validate page.
     const errs = (VAL_STATE.report && VAL_STATE.report.summary) ? VAL_STATE.report.summary.errors : 0;
-    if (errs > 0) {
-      errBadge.style.display = 'inline-block';
-      errBadge.textContent = errs;
-    } else {
-      errBadge.style.display = 'none';
-    }
+    pimMenuBadge('validateErrBadge', { errors: errs, title: r => pimMenuWords(r.n, 'validation error', 'validation errors') + ' to fix before a commit' });
+    pimMenuSync();
   }
 
   function openValidateTab() {
@@ -33021,14 +33070,11 @@
   }
 
   function updateRevokeBadge() {
-    const badge = document.getElementById('revokeCountBadge');
-    if (!badge) return;
     // 🔴 REQ-R (operator 2026-09-19: "after i went in here, it now shows a number in the menu even after i go out, why,
     // i dont see need for that"): the row count is a size, not a to-do -- and the menu mirrors every visible tab badge,
     // so the page's own row count lit "Delegation overview (All privileged permissions)" for the rest of the session. The counts stay on the
-    // page (the chips); the menu badge is kept hidden.
-    badge.style.display = 'none';
-    badge.textContent = '';
+    // page (the chips); the menu badge is kept hidden. PIM 100.94: a size is a fact -- neither an error nor an action.
+    pimMenuBadge('revokeCountBadge', { errors: 0, actions: 0 });
   }
 
   // 🔎 SEARCH BY TAG AS WELL AS BY NAME (operator, 2026-09-22: "i think the search under revoke doesnt
