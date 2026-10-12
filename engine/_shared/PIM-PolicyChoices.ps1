@@ -576,6 +576,100 @@ function Resolve-PimPolicyChoice {
 # ---------------------------------------------------------------------------------------------------------------------
 # ADVISORY NUMBERS -- derived, so nobody has to remember to raise one
 # ---------------------------------------------------------------------------------------------------------------------
+function Get-PimPolicyTemplateKindName {
+    # PURE. The kind of policy a template is written for, from its appliesTo: DirectoryRole -> 'directoryRole';
+    # AzureRole / AzureResourceRole -> 'azureRole'; anything else -> 'group'.
+    param([string]$AppliesTo)
+    $ap = "$AppliesTo".Trim()
+    if ($ap -ieq 'DirectoryRole') { return 'directoryRole' }
+    if ($ap -ieq 'AzureRole' -or $ap -ieq 'AzureResourceRole') { return 'azureRole' }
+    return 'group'
+}
+function Get-PimPolicyTemplateTypeRows {
+    <# PURE. ONE template's merged rules as the rows Get-PimPolicyRowFieldValue reads, per policy type: a group template
+       gives groupMember (its rules) and groupOwner (its Owner block, when it has one); a directoryRole / azureRole
+       template gives that one type. Shared by the advisory numbers (the SHIPPED files) and the value view (the STORED
+       templates), so both read a template the same way. #>
+    param([AllowNull()][object]$Rules, [Parameter(Mandatory)][string]$Kind)
+    $mk = { param($src, $manageApproval) @{ Expiration = (Get-PimPcProp $src 'Expiration'); Enablement = (Get-PimPcProp $src 'Enablement')
+                EnablementLegacy = (Get-PimPcProp $src 'Member_Enablement_EndUser_Assignment_enabledRules'); Notification = @(Get-PimPcProp $src 'Notification')
+                Approval = (Get-PimPcProp $src 'Approval'); ManageApproval = $manageApproval } }
+    $rows = @{}
+    if ("$Kind" -eq 'group') {
+        $rows['groupMember'] = & $mk $Rules $true
+        $own = Get-PimPcProp $Rules 'Owner'
+        if ($null -ne $own) { $rows['groupOwner'] = & $mk $own $false }
+    } else { $rows["$Kind"] = & $mk $Rules $true }
+    $rows
+}
+function Get-PimPolicyTemplateShortLabel {
+    <# PURE. What a template is called next to a value on a button: its display name without the policy-type lead-in the
+       shipped names carry ('PIM for Groups -- standard' -> 'Standard'); a template without a name -> its id without the
+       type prefix ('Groups_RequireApproval' -> 'Require approval'). #>
+    param([string]$Id, [string]$Name)
+    $n = "$Name".Trim()
+    if ($n) {
+        $i = $n.IndexOf(' -- ')
+        if ($i -ge 0 -and $n.Length -gt ($i + 4)) { $n = $n.Substring($i + 4).Trim() }
+    } else {
+        $n = "$Id".Trim()
+        $u = $n.IndexOf('_'); if ($u -ge 0 -and $n.Length -gt ($u + 1)) { $n = $n.Substring($u + 1) }
+        $n = ($n -creplace '([a-z0-9])([A-Z])', '$1 $2').Replace('_', ' ').Trim()
+        if ($n.Length -gt 1) { $n = $n.Substring(0, 1) + $n.Substring(1).ToLowerInvariant() }
+    }
+    if (-not $n) { return "$Id" }
+    return ($n.Substring(0, 1).ToUpperInvariant() + $n.Substring(1))
+}
+function Get-PimPolicyRecommendationTemplates {
+    <#
+      PURE. What the PIM Manager RECOMMENDATION is read from when no policy run has read the tenant yet: the STORED policy
+      templates (pim.Settings['PolicyTemplates'], a customer's own edits included), as the ENGINE applies them
+      (Get-PimEnginePolicyTemplates): single-level 'extends' merged per top-level key, then the operational floors
+      (-OperationalPolicy: the normalised Settings > Operational policy; $null = no floors applied).
+        -DefaultsSetting  pim.Settings['PolicyTemplateDefaults'] (which template a blank PolicyTemplate means, per kind)
+      Returns @( @{ id; name; label; kind ('group' | 'directoryRole' | 'azureRole'); isDefault; rows = @{ <type> = row } } ),
+      per kind the default template first, then by id. Needs PIM-PolicyTemplateStore.ps1 (and PIM-OperationalPolicy.ps1
+      for the floors) loaded -- without the template store library there is nothing to read and the list is empty.
+    #>
+    param([AllowNull()][object]$Stored, [AllowNull()][object]$DefaultsSetting, [AllowNull()][object]$OperationalPolicy)
+    if (-not (Get-Command ConvertTo-PimPolicyTemplateMap -ErrorAction SilentlyContinue)) { return @() }
+    # (a pim.Settings value may arrive as JSON text, or as JSON text stored as a JSON string)
+    if ($Stored -is [string]) { $Stored = ConvertFrom-PimPcSetting $Stored }
+    if ($DefaultsSetting -is [string]) { $DefaultsSetting = ConvertFrom-PimPcSetting $DefaultsSetting }
+    $map = ConvertTo-PimPolicyTemplateMap -Value $Stored
+    if (-not $map.Count) { return @() }
+    $haveResolver = [bool](Get-Command Resolve-PimPolicyTemplateKey -ErrorAction SilentlyContinue)
+    $defaults = @{ group = 'Groups_Standard'; directoryRole = 'EntraIDRoles_Standard'; azureRole = 'AzureRoles_Standard' }
+    if (Get-Command Resolve-PimPolicyTemplateTypeDefaults -ErrorAction SilentlyContinue) {
+        $rd = (Resolve-PimPolicyTemplateTypeDefaults -Setting $DefaultsSetting -Map $map).defaults
+        foreach ($k in @('group', 'directoryRole', 'azureRole')) { if ("$($rd[$k])".Trim()) { $defaults[$k] = "$($rd[$k])" } }
+    }
+    $floor = ($null -ne $OperationalPolicy) -and [bool](Get-Command ConvertTo-PimOperationalFloorRules -ErrorAction SilentlyContinue)
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($id in @($map.Keys | ForEach-Object { "$_" } | Sort-Object)) {
+        $tpl = $map[$id]
+        # 'extends' resolves the way the engine resolves it: the id, the current name, a former id
+        $ext = "$(Get-PimPcProp $tpl 'extends')".Trim(); $baseKey = ''
+        if ($ext) {
+            if ($haveResolver) { $baseKey = "$(Resolve-PimPolicyTemplateKey -Map $map -Id $ext)" }
+            else { foreach ($k in @($map.Keys)) { if ("$k" -ieq $ext) { $baseKey = "$k"; break } } }
+        }
+        $base = if ($baseKey) { $map[$baseKey] } else { $null }
+        $rules = @{}
+        foreach ($src in @($base, $tpl)) {
+            if ($null -eq $src) { continue }
+            $r = Get-PimPcProp $src 'rules'
+            foreach ($n in @(Get-PimPcNames $r)) { $rules[$n] = Get-PimPcProp $r $n }
+        }
+        if ($floor) { try { $rules = (ConvertTo-PimOperationalFloorRules -Rules $rules -Policy $OperationalPolicy).rules } catch { } }
+        $ap = "$(Get-PimPcProp $tpl 'appliesTo')".Trim(); if (-not $ap -and $base) { $ap = "$(Get-PimPcProp $base 'appliesTo')".Trim() }
+        $kind = Get-PimPolicyTemplateKindName -AppliesTo $ap
+        $name = "$(Get-PimPcProp $tpl 'name')".Trim()
+        $list.Add(@{ id = $id; name = $name; label = (Get-PimPolicyTemplateShortLabel -Id $id -Name $name); kind = $kind
+                     isDefault = [bool]("$($defaults[$kind])" -ieq $id); rows = (Get-PimPolicyTemplateTypeRows -Rules $rules -Kind $kind) })
+    }
+    @($list.ToArray() | Sort-Object @{ e = { "$($_.kind)" } }, @{ e = { if ($_.isDefault) { 0 } else { 1 } } }, @{ e = { "$($_.id)" } })
+}
 function Get-PimPolicyShippedFieldKeys {
     <#
       PURE. From the SHIPPED templates (Read-PimShippedPolicyTemplates: id -> parsed file): template id -> policy type ->
@@ -597,15 +691,8 @@ function Get-PimPolicyShippedFieldKeys {
             foreach ($n in @(Get-PimPcNames $r)) { if ("$n".StartsWith('_')) { continue }; $rules[$n] = Get-PimPcProp $r $n }
         }
         $ap = "$(Get-PimPcProp $tpl 'appliesTo')".Trim(); if (-not $ap -and $base) { $ap = "$(Get-PimPcProp $base 'appliesTo')".Trim() }
-        $kind = if ($ap -ieq 'DirectoryRole') { 'directoryRole' } elseif ($ap -ieq 'AzureRole' -or $ap -ieq 'AzureResourceRole') { 'azureRole' } else { 'group' }
-        $rows = @{}
-        $mk = { param($src, $manageApproval) @{ Expiration = (Get-PimPcProp $src 'Expiration'); Enablement = (Get-PimPcProp $src 'Enablement')
-                    EnablementLegacy = (Get-PimPcProp $src 'Member_Enablement_EndUser_Assignment_enabledRules'); Notification = @(Get-PimPcProp $src 'Notification')
-                    Approval = (Get-PimPcProp $src 'Approval'); ManageApproval = $manageApproval } }
-        if ($kind -eq 'group') {
-            $rows['groupMember'] = & $mk $rules $true
-            if ($rules.ContainsKey('Owner') -and $null -ne $rules['Owner']) { $rows['groupOwner'] = & $mk $rules['Owner'] $false }
-        } else { $rows[$kind] = & $mk $rules $true }
+        $kind = Get-PimPolicyTemplateKindName -AppliesTo $ap
+        $rows = Get-PimPolicyTemplateTypeRows -Rules $rules -Kind $kind
         $out["$id"] = @{}
         foreach ($t in @($rows.Keys)) {
             $out["$id"][$t] = @{}
@@ -1297,9 +1384,16 @@ function Get-PimPolicyChoicesView {
         -Choices / -Advisories   the stores      -Defaults   the shipped table (ConvertTo-PimMicrosoftPolicyDefaultsTable)
         -TenantRead              pim.Settings['MicrosoftPolicyDefaults'] (the cross-check; may be empty = unknown)
         -Snapshots               provider -> the last policy run's live read (New-PimPolicyLiveValuesSnapshot)
+        -Templates               the stored policy templates as the engine applies them (Get-PimPolicyRecommendationTemplates)
       Live values are AS FRESH AS THAT RUN (liveReadUtc per type; '' = no policy run has read this type yet).
+      THE RECOMMENDATION NEVER WAITS FOR A TENANT READ: it is what the policy templates say. A type with policies read shows
+      it as the spread over the bound templates (with counts); a type nothing was read for yet shows one entry per template
+      of the type that says something about the setting ({ value; text; count 0; examples (); templates; isDefaultTemplate }),
+      the type's default template first, equal values merged. `recommendationText` is the plain line for the button
+      ('8 hours', or '8 hours (Standard), 4 hours (Require approval)' when the templates differ); `recommendationReason`
+      says why there is none. Only `current` and `wouldChange` need the read.
     #>
-    param([AllowNull()][hashtable]$Choices, [AllowNull()][object]$Advisories, [AllowNull()][object]$Defaults, [AllowNull()][hashtable]$Snapshots, [AllowNull()][object]$TenantRead, [int]$Examples = 5)
+    param([AllowNull()][hashtable]$Choices, [AllowNull()][object]$Advisories, [AllowNull()][object]$Defaults, [AllowNull()][hashtable]$Snapshots, [AllowNull()][object]$TenantRead, [int]$Examples = 5, [AllowNull()][object[]]$Templates)
     if ($null -eq $Choices) { $Choices = New-PimPolicyChoicesStore }
     $tenant = ConvertTo-PimMicrosoftPolicyTenantRead -Value $TenantRead
     $typeOut = New-Object System.Collections.Generic.List[object]
@@ -1323,6 +1417,10 @@ function Get-PimPolicyChoicesView {
             })
         }
         $hasEx = Test-PimMicrosoftPolicyDefaultHasExceptions -Defaults $Defaults -Type $t
+        # the templates of this policy type (the default one first) -- what the recommendation is when nothing was read yet
+        $tplKind = if ($t -eq 'groupMember' -or $t -eq 'groupOwner') { 'group' } else { $t }
+        $tplOfType = @(@($Templates) | Where-Object { $null -ne $_ -and "$(Get-PimPcProp $_ 'kind')" -eq $tplKind -and $null -ne (Get-PimPcProp (Get-PimPcProp $_ 'rows') $t) })
+        $tplLabel = @{}; foreach ($tp in @($Templates)) { if ($null -ne $tp) { $tplLabel["$(Get-PimPcProp $tp 'id')".ToLowerInvariant()] = "$(Get-PimPcProp $tp 'label')" } }
         $fieldOut = New-Object System.Collections.Generic.List[object]
         foreach ($fd in @(Get-PimPolicyFieldsForType -Type $t)) {
             $res = Resolve-PimPolicyChoice -Store $Choices -Type $t -FieldId $fd.id -Advisories $Advisories
@@ -1378,6 +1476,36 @@ function Get-PimPolicyChoicesView {
             $would = [ordered]@{}
             foreach ($c in $script:PimPolicyChoiceValues) { $would[$c] = Get-PimPolicyChoiceWouldChange -Field $fd -Type $t -Choice $c -TypeSnapshot $ts -Store $Choices -Defaults $Defaults -Max $Examples }
             if (-not $res.choice) { $totWaiting++ } elseif ($res.needsReview) { $totReview++ }
+            # THE RECOMMENDATION: policies read -> the spread over the bound templates; nothing read -> the templates themselves
+            $recOut = @(& $spread @(Get-PimPcProp $fsnap 'recommendation') $fd)
+            if (-not $pols.Count -and $tplOfType.Count) {
+                $g = [ordered]@{}
+                foreach ($tp in $tplOfType) {
+                    $tv = Get-PimPolicyRowFieldValue -Field $fd -Row (Get-PimPcProp (Get-PimPcProp $tp 'rows') $t)
+                    if ($null -eq $tv) { continue }
+                    $tk = Get-PimPolicyFieldValueKey -Field $fd -Value $tv
+                    if (-not $g.Contains($tk)) { $g[$tk] = @{ value = $tv; templates = (New-Object System.Collections.Generic.List[string]); isDefault = $false } }
+                    $g[$tk].templates.Add("$(Get-PimPcProp $tp 'id')")
+                    if ([bool](Get-PimPcProp $tp 'isDefault')) { $g[$tk].isDefault = $true }
+                }
+                $recOut = @(foreach ($tk in @($g.Keys)) {
+                    [ordered]@{ value = $g[$tk].value; text = (Format-PimPolicyRuleSetText (Format-PimPolicyFieldValue -Field $fd -Value $g[$tk].value)); count = 0
+                                examples = @(); templates = $g[$tk].templates.ToArray(); isDefaultTemplate = [bool]$g[$tk].isDefault }
+                })
+            }
+            $recText = ''
+            if ($recOut.Count -eq 1) { $recText = "$($recOut[0].text)" }
+            elseif ($recOut.Count -gt 1) {
+                $recText = (@(foreach ($re in $recOut) {
+                    $labs = @(@($re.templates) | Where-Object { "$_".Trim() } | ForEach-Object { $lk = "$_".ToLowerInvariant(); if ($tplLabel.ContainsKey($lk) -and $tplLabel[$lk]) { $tplLabel[$lk] } else { Get-PimPolicyTemplateShortLabel -Id "$_" -Name '' } })
+                    if ($labs.Count) { "{0} ({1})" -f $re.text, ($labs -join ', ') } else { "$($re.text)" }
+                }) -join ', ')
+            }
+            $recReason = ''
+            if (-not $recOut.Count) {
+                if ($pols.Count) { $recReason = 'The policy template gives no recommendation for this setting.' }
+                elseif ($tplOfType.Count) { $recReason = 'The policy templates say nothing about this setting, so there is no recommendation for it.' }
+            }
             $fieldOut.Add([ordered]@{
                 id = "$($fd.id)"; label = "$($fd.label)"; help = "$($fd.help)"; kind = "$($fd.kind)"; ruleIds = @($fd.ruleIds)
                 choice = $(if ($res.choice) { [ordered]@{ choice = $res.choice; label = (Get-PimPolicyChoiceLabel $res.choice); by = $res.by; utc = $res.utc; advisory = [int]$res.advisory; source = $res.source; origin = $res.origin } } else { $null })
@@ -1386,8 +1514,9 @@ function Get-PimPolicyChoicesView {
                 microsoft = $(if ($null -ne $msVal) { [ordered]@{ value = $msVal; text = (Format-PimPolicyRuleSetText (Format-PimPolicyFieldValue -Field $fd -Value $msVal))
                                 source = "$(Get-PimPcProp $me 'source')"; capturedDate = "$(Get-PimPcProp $me 'capturedDate')"; verified = [bool](Get-PimPcProp $me 'verified')
                                 selectable = [bool](-not $msBlock); blockedReason = "$msBlock"; differsPerObject = [bool](@($msSpread).Count -gt 1); spread = @($msSpread); tenant = $tenantOut } } else { $null })
-                recommendation = @(& $spread @(Get-PimPcProp $fsnap 'recommendation') $fd)
-                current = @(& $spread @(Get-PimPcProp $fsnap 'live') $fd)
+                recommendation = @($recOut)
+                recommendationText = "$recText"; recommendationReason = "$recReason"
+                current =@(& $spread @(Get-PimPcProp $fsnap 'live') $fd)
                 wouldChange = $would
                 overrides = @($ovr.ToArray())
             })
@@ -1405,7 +1534,7 @@ function Get-PimPolicyChoicesView {
         waiting = $totWaiting; needsReview = $totReview
         managingTenant = [ordered]@{ present = [bool]($mtSettings -gt 0); receivedUtc = "$(if ($mtRoot.ContainsKey('receivedUtc')) { $mtRoot['receivedUtc'] })"; settings = $mtSettings; followed = $mtFollowed; needsReview = $mtReview }
         microsoftDefaultsCheckedUtc = "$($tenant.refreshedUtc)"; microsoftDefaultMismatches = $totMismatch
-        liveSource = 'The current values are what the last policy run read from the tenant (jobs delta-policies and delta-pim-azure-policies, every 30 minutes).'
+        liveSource = 'The PIM Manager recommendation is what your policy templates say. The current values are what the last policy run read from the tenant (jobs delta-policies and delta-pim-azure-policies, every 30 minutes).'
         types = @($typeOut.ToArray())
     }
 }
