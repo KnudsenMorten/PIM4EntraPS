@@ -61,7 +61,11 @@ param(
     # the database is 300 and has been reached" -- measured at a live customer 2026-09-09. S0 is
     # 600 sessions and 10 DTU for practically the same money. Overridable for a lab that wants the
     # cheapest possible database.
-    [string]$SqlServiceObjective = 'S0',
+    # PIM 100.114 (owner 2026-10-12: "S3 at every ring 1+2 install"): left EMPTY, the database is created at the product
+    # tier -- Get-PimSqlDefaultTier (engine/_shared/PIM-TenantSizing.ps1; S3, Standard, 250 GB max size), the one place
+    # that defines it. A Standard tier named here that is BELOW it (S0, S1, S2) is your own choice: the database is created
+    # at that tier and tagged pim-sql-tier-pin, so no update raises it. Basic is never created.
+    [string]$SqlServiceObjective = '',
     # 🔑 AZURE SQL'S CONNECTION POLICY, AND WHY A FIREWALLED DEPLOYMENT NEEDS 'Proxy'.
     # From inside Azure the default is 'Redirect': the client connects to the gateway on 1433, is
     # handed the node's address, and reconnects on a port in 11000-11999. Behind a firewall that
@@ -148,6 +152,10 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_PimSqlAdminGroup.ps1')     # the SQL admin group (plan + converge + read-back)
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-TenantSizing.ps1')   # Get-PimSqlTierPlan
+# PIM 100.114: the database tier this run creates. No -SqlServiceObjective = the product tier (Get-PimSqlDefaultTier).
+$sqlTierDefault = Get-PimSqlDefaultTier
+$sqlTierChosen = "$SqlServiceObjective".Trim()     # '' = nobody chose: the product tier
+if (-not $sqlTierChosen) { $SqlServiceObjective = $sqlTierDefault }
 # 100.41 NO-AZ (framework 12.17): every Azure call below is ARM / Graph REST through PIM-Rest's ONE token client.
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-ArmSetup.ps1')
@@ -707,8 +715,17 @@ if ($SkipSql) {
     }   # end of the private-SQL branch
     # 100.37 (owner 2026-10-09): a Standard database is CREATED with a 250 GB max size (a tier raise later does not grow it
     # by itself -- an S2 with Basic's 2 GB limit filled up and every write failed "has reached its size quota").
-    # Never Basic (owner 2026-10-09: S0 is the minimum): a -SqlServiceObjective Basic is created as S0, and said.
-    if ("$SqlServiceObjective" -match '^(?i)basic$') { Write-Warning "    -SqlServiceObjective Basic is below PIM's minimum -- the database is created as S0 (100.37)"; $SqlServiceObjective = 'S0' }
+    # Never Basic (owner 2026-10-09; the product tier is S3 since 2026-10-12): a -SqlServiceObjective Basic is created at the
+    # product tier, and said.
+    if ("$SqlServiceObjective" -match '^(?i)basic$') { Write-Warning "    -SqlServiceObjective Basic is below PIM's minimum -- the database is created as $sqlTierDefault (100.37 / 100.114)"; $SqlServiceObjective = $sqlTierDefault; $sqlTierChosen = '' }
+    # A Standard tier BELOW the product tier that the installer NAMED is a customer decision: created at that tier and
+    # pinned (pim-sql-tier-pin), so the plan below and every update leave it there. Nothing else in the product writes a pin.
+    $createTags = @{ purpose = 'automateit'; estate = "$Token" }
+    $sqlRank = { param($s) if ("$s" -match '^(?i)S(\d+)$') { return [int]$Matches[1] }; return -1 }
+    if ($sqlTierChosen -and (& $sqlRank $sqlTierChosen) -ge 0 -and (& $sqlRank $sqlTierChosen) -lt (& $sqlRank $sqlTierDefault)) {
+        $createTags['pim-sql-tier-pin'] = $sqlTierChosen.ToUpperInvariant()
+        Write-Host "    SQL database ${sqlDb}: -SqlServiceObjective $($sqlTierChosen.ToUpperInvariant()) is below the product tier $sqlTierDefault -- a NEW database is created at $($sqlTierChosen.ToUpperInvariant()) and pinned (tag pim-sql-tier-pin), so updates keep it there"
+    }
     # The DTU sku of an objective as ARM takes it (S0..S12 Standard, P1.. Premium, Basic); any other objective by name only.
     $dbSku = { param([string]$So) $t = if ($So -match '^(?i)S\d+$') { 'Standard' } elseif ($So -match '^(?i)P\d+$') { 'Premium' } elseif ($So -match '^(?i)Basic$') { 'Basic' } else { '' }
                if ($t) { @{ name = $So; tier = $t } } else { @{ name = $So } } }
@@ -718,16 +735,17 @@ if ($SkipSql) {
         if (-not $d) { return $null }
         [pscustomobject]@{ so = (Resolve-PimSqlServiceObjective -Database $d); pool = $(if ("$($d.properties.elasticPoolId)".Trim()) { ("$($d.properties.elasticPoolId)" -split '/')[-1] } else { '' })
                            max = $d.properties.maxSizeBytes; tags = $d.tags; status = "$($d.properties.status)" } }
-    $createMax = @{}; if ("$SqlServiceObjective" -match '^(?i)S\d+$') { $createMax = @{ maxSizeBytes = [int64]268435456000 } }   # 250 GB
+    $createMax = @{}; if ("$SqlServiceObjective" -match '^(?i)S\d+$') { $createMax = @{ maxSizeBytes = (Get-PimSqlDefaultMaxSizeBytes) } }   # 250 GB
     # Created ONLY when absent: an existing database keeps its tier and size here -- the plan below is the one place that
     # changes them (raise only, never on a pinned database, never lowered).
     if (-not (& $readDb)) {
-        try { [void](Set-PimArmSqlDb -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv -Name $sqlDb -Create -Sku (& $dbSku $SqlServiceObjective) -Properties $createMax -Tags @{ purpose = 'automateit'; estate = "$Token" }) }
+        try { [void](Set-PimArmSqlDb -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv -Name $sqlDb -Create -Sku (& $dbSku $SqlServiceObjective) -Properties $createMax -Tags $createTags) }
         catch { Write-PrereqRestNote $_.Exception.Message }
     }
     # 100.31 / 100.37 -- an EXISTING database's tier, max size and tier pin are read
-    # back: Basic -> S0 (never on a 'pim-sql-tier-pin' database), every Standard database gets the 250 GB max size
-    # (Get-PimSqlTierPlan; never lowered; owner 2026-10-09: PIM's database is S0, Pro too -- no S2 rule).
+    # back: below the product tier -> S3 (never on a 'pim-sql-tier-pin' database -- a pin below it is SAID, not changed),
+    # every Standard database gets the 250 GB max size (Get-PimSqlTierPlan; never lowered; owner 2026-10-12: PIM's
+    # database is S3 at every install, every edition).
     $dbCur = & $readDb
     $dbPin = $null; if ($dbCur -and $dbCur.tags -and $dbCur.tags.PSObject.Properties['pim-sql-tier-pin']) { $dbPin = "$($dbCur.tags.'pim-sql-tier-pin')" }
     $tier = Get-PimSqlTierPlan -Current "$($dbCur.so)" -ElasticPool "$($dbCur.pool)" -CurrentMaxSizeBytes $dbCur.max -Pin $dbPin

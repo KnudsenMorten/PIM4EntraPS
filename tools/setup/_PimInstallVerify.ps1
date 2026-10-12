@@ -329,11 +329,29 @@ function Get-PimInstallVerifyRows {
                 # 100.31 / framework 12.15: a WARNING (never a stop) when the engine job is below the size its RECORDED tenant
                 # count needs, with the az command for THAT tier. Fact: { readable; undersized; reason; command } from
                 # Test-PimJobUndersized (engine/_shared/PIM-TenantSizing.ps1). The updater raises it too, on its next run.
+                # PIM 100.114 (owner 2026-10-12): the SAME line also shows and checks the Manager web app against the product
+                # size (4 CPU / 8 GiB) and the database against the product tier (S3) -- optional sub-facts 'manager'
+                # { readable; undersized; reason; fix } and 'database' { readable; below; reason; fix } (Test-PimManagerAppUndersized /
+                # Test-PimSqlTierBelowDefault). Below either = the same WARNING (never a stop); absent sub-facts change nothing.
                 if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'warning' $unread '' $false)); break }
                 $cmd = "$(Get-PimFactValue $f 'command')".Trim()
+                $mgrF = Get-PimFactValue $f 'manager'; $dbF = Get-PimFactValue $f 'database'
+                $more = @(); $low = @(); $fixes = @()
+                if ($null -ne $mgrF) {
+                    $more += "$(Get-PimFactValue $mgrF 'reason')"
+                    if ([bool](Get-PimFactValue $mgrF 'undersized')) { $low += "$(Get-PimFactValue $mgrF 'reason')"; if ("$(Get-PimFactValue $mgrF 'fix')".Trim()) { $fixes += "$(Get-PimFactValue $mgrF 'fix')" } }
+                }
+                if ($null -ne $dbF) {
+                    $more += "$(Get-PimFactValue $dbF 'reason')"
+                    if ([bool](Get-PimFactValue $dbF 'below')) { $low += "$(Get-PimFactValue $dbF 'reason')"; if ("$(Get-PimFactValue $dbF 'fix')".Trim()) { $fixes += "$(Get-PimFactValue $dbF 'fix')" } }
+                }
+                $tail = $(if ($more.Count) { '; ' + ($more -join '; ') } else { '' })
                 if ([bool](Get-PimFactValue $f 'undersized')) {
-                    $rows.Add((New-PimInstallVerifyRow $id 'warning' "UNDERSIZED: $(Get-PimFactValue $f 'reason') -- it can run out of memory (the next update raises it by itself)" $(if ($cmd) { $cmd } else { & $fx $id }) $false))
-                } else { $rows.Add((New-PimInstallVerifyRow $id 'ok' "$(Get-PimFactValue $f 'reason')" '' $false)) }
+                    $jobFix = $(if ($cmd) { $cmd } else { & $fx $id })
+                    $rows.Add((New-PimInstallVerifyRow $id 'warning' "UNDERSIZED: $(Get-PimFactValue $f 'reason') -- it can run out of memory (the next update raises it by itself)$tail" ((@($jobFix) + $fixes | Where-Object { "$_".Trim() }) -join "`n") $false))
+                } elseif ($low.Count) {
+                    $rows.Add((New-PimInstallVerifyRow $id 'warning' "BELOW THE PRODUCT SIZE: $($low -join '; ') (the next update raises what is not pinned) -- engine job: $(Get-PimFactValue $f 'reason')" ($fixes -join "`n") $false))
+                } else { $rows.Add((New-PimInstallVerifyRow $id 'ok' "$(Get-PimFactValue $f 'reason')$tail" '' $false)) }
             }
             'easyauth' {
                 if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'failed' $unread (& $fx $id))); break }

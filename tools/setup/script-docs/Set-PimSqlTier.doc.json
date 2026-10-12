@@ -3,7 +3,7 @@
   "product": "pim",
   "title": "Set the PIM Manager SQL database tier and its 250 GB maximum size",
   "purpose": "Set the PIM Manager SQL database to the right Standard tier with a 250 GB maximum size, and optionally pin its tier so updates never change it.",
-  "whenToRun": "When the end-of-install check, the environment report or support says the database is Basic or below the 250 GB maximum size (for example after \"has reached its size quota\"), when you want the database on a specific Standard tier, or to pin its tier. Installs and updates apply the same rule by themselves; this script does it now.",
+  "whenToRun": "When the end-of-install check, the environment report or support says the database is below the product tier (S3) or below the 250 GB maximum size (for example after \"has reached its size quota\"), when an update reports \"database is pinned at <tier>, the new default is S3 - not changed\", when you want the database on a specific Standard tier, or to pin its tier. Installs and updates apply the same rule by themselves; this script does it now.",
   "standalone": true,
   "sourcePath": "tools/setup/Set-PimSqlTier.ps1",
   "runAs": [
@@ -24,10 +24,10 @@
     {
       "target": "Azure Resource Manager",
       "action": "update",
-      "object": "the SQL database -Database (default PimPlatform) on -Server: its tier (sku: Basic -> S0, or the Standard tier -Tier; never Basic, never lowered by the plan)",
+      "object": "the SQL database -Database (default PimPlatform) on -Server: its tier (sku: Basic, S0, S1 or S2 -> S3, or the Standard tier -Tier; never Basic, never lowered by the plan, a pinned database is not changed without -Tier and -Pin)",
       "permission": "",
       "scope": "the database only",
-      "why": "PIM's database is S0 (Standard) at minimum; Basic is too small for PIM's store.",
+      "why": "PIM's database is S3 (Standard) by default, so the PIM Manager stays fast on a large tenant; Basic is too small for PIM's store.",
       "undo": "Azure portal > the database > Compute + storage: set the previous tier back (a lower tier must fit the data)."
     },
     {
@@ -54,7 +54,7 @@
     { "name": "ResourceGroup", "required": true, "default": null, "help": "The resource group of the PIM SQL server." },
     { "name": "Server", "required": true, "default": null, "help": "The SQL server name or its FQDN (sql-x or sql-x.database.windows.net)." },
     { "name": "Database", "required": false, "default": "PimPlatform", "help": "The PIM database." },
-    { "name": "Tier", "required": false, "default": "the plan: Basic -> S0, any other tier kept", "help": "A Standard tier (S0, S1, S2, S3, S4, S6, S7, S9, S12) to set; never Basic. Changing the tier of a pinned database needs -Pin." },
+    { "name": "Tier", "required": false, "default": "the plan: below S3 -> S3, S3 and above kept, a pinned database kept", "help": "A Standard tier (S0, S1, S2, S3, S4, S6, S7, S9, S12) to set; never Basic. A tier below S3 needs -Pin to stay (the next update raises an unpinned database to S3). Changing the tier of a pinned database needs -Pin." },
     { "name": "Pin", "required": false, "default": "off", "help": "Tag the database pim-sql-tier-pin = its tier, so updates never change its tier." },
     { "name": "TenantId", "required": false, "default": null, "help": "Your tenant id, for the browser sign-in or with -AdminAppId + -AdminSecret. Not needed in an Invardia Support-app session." },
     { "name": "AdminAppId", "required": false, "default": null, "help": "Invardia support only: the Invardia Support app's application id (with -AdminSecret and -TenantId) instead of the browser sign-in." },

@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.612 -- 2026-10-12
+
+- The installer and the updater set the Manager web app to 4 CPU / 8 GiB and the database to S3 themselves, and an update keeps a size that was set; the tests of a release stop at 10 minutes and name a hung suite
+
 ## 2.4.611 -- 2026-10-12
 
 - Active assignments on a large tenant: a stored read that cannot be loaded says so instead of no snapshot yet and starts no new read of the tenant, the page asks only for the state while a read runs, and repeat loads are served from memory; alert mails are one short table: customer, environment, solution, who acts, status, problem, what to do, the findings one per line, when, and where to get support

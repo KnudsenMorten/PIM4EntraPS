@@ -1093,13 +1093,19 @@ function Get-PimContainerIdentityAndRegistry {
 function Set-PimContainerAppImageHere {
     # `az containerapp update --image` (+ --set-env-vars): read-modify-write of the app's container -- the one named
     # like the app, or the only one -- then one PATCH of the whole template (PIM-ArmSetup: Set-PimArmAcaAppEnvVars).
-    param([Parameter(Mandatory)][string]$App, [string]$Image, [hashtable]$Env = @{})
+    # -Resize (PIM 100.114): the size the SAME write carries (the Manager: Get-PimManagerAppResize); none = the size stays.
+    param([Parameter(Mandatory)][string]$App, [string]$Image, [hashtable]$Env = @{}, [scriptblock]$Resize)
     $cur = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App
     if (-not $cur) { throw "container app '$App' not found in $ResourceGroup." }
     $cs = @($cur.properties.template.containers)
     $cn = if ($cs.Count -gt 1) { $App } else { '' }
-    [void](Set-PimArmAcaAppEnvVars -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Env $Env -ContainerName $cn -Image $Image)
+    [void](Set-PimArmAcaAppEnvVars -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Env $Env -ContainerName $cn -Image $Image -Resize $Resize)
 }
+# PIM 100.114 (owner 2026-10-12: "4 CPU / 8 GB at all ring 1+2 installs") -- the Manager web app's size. The value and the
+# decision live in engine/_shared/PIM-TenantSizing.ps1 (Get-PimManagerAppResources: the product size, raise only, the
+# customer's PIM_Bootstrap_Cpu_Manager / PIM_Bootstrap_Memory_Manager in this process's environment wins); this script
+# only asks. $script:PimManagerSizeEnv is this process's environment, read once.
+$script:PimManagerSizeEnv = @{}; foreach ($ev in [Environment]::GetEnvironmentVariables().GetEnumerator()) { $script:PimManagerSizeEnv["$($ev.Key)"] = "$($ev.Value)" }
 
 $script:PimManagerCreatedClosed = $false
 function Close-PimNewManagerUntilEasyAuth {
@@ -1158,7 +1164,17 @@ foreach ($w in $Workers) {
         $wConfig = @{ activeRevisionsMode = 'Single'; registries = $ir.registries }
         if (@($wSecrets).Count) { $wConfig.secrets = @($wSecrets) }
         $wContainer = @{ name = $w.name; image = $image; env = @($wEnv); resources = @{ cpu = 0.5; memory = '1Gi' } }
+        $wTags = $null
         if ($w.entry -eq 'manager') {
+            # PIM 100.114: the Manager web app is CREATED at the product size (4.0 CPU / 8.0Gi, Consumption) -- or at the
+            # size the customer set (PIM_Bootstrap_Cpu_Manager / PIM_Bootstrap_Memory_Manager), which is recorded on the
+            # app (pim-sizing-* tags) so an update keeps it. Min / max replicas and everything else are as before.
+            $mgrSize = Get-PimManagerAppResources -Current $null -Settings (Get-PimJobSizingSettings -Environment $script:PimManagerSizeEnv)
+            $wContainer.resources = @{ cpu = [double]::Parse("$($mgrSize.Cpu)", [Globalization.CultureInfo]::InvariantCulture); memory = "$($mgrSize.Memory)" }
+            $mgrSizeTags = Get-PimManagerSizingTags -Size $mgrSize
+            $wTags = @{}; foreach ($tk in @($mgrSizeTags.Keys)) { if ("$($mgrSizeTags[$tk])".Trim()) { $wTags["$tk"] = "$($mgrSizeTags[$tk])" } }
+            Note ("Manager web app size: {0} CPU / {1} ({2})" -f $mgrSize.Cpu, $mgrSize.Memory, $mgrSize.Source)
+            foreach ($mn in @($mgrSize.Notes)) { Note "  $mn" }
             # The system-assigned identity is kept in BOTH paths: the app still needs its own identity for
             # SQL + Graph. The user-assigned one is attached purely so the registry pull has a
             # principal that already holds AcrPull at create time.
@@ -1195,6 +1211,7 @@ foreach ($w in $Workers) {
                 template             = @{ containers = @($wContainer); scale = $wScale }
             }
         }
+        if ($wTags -and $wTags.Count) { $wResource.tags = $wTags }
         try { [void](Set-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $w.name -Resource $wResource -Create) }
         catch { throw "container app create failed for '$($w.name)': $($_.Exception.Message)" }
         if ($w.entry -eq 'manager') { Close-PimNewManagerUntilEasyAuth -App $w.name }
@@ -1203,12 +1220,25 @@ foreach ($w in $Workers) {
         # The env vars MERGE (read-modify-write; never a replace of the list), in the same write as the image.
         $mbeEnv = @{}
         if ($w.entry -eq 'manager' -and $managerBaselineEnv.Count) { foreach ($pair in $managerBaselineEnv) { $kv = "$pair" -split '=', 2; $mbeEnv[$kv[0]] = "$($kv[1])" } }
-        try { Set-PimContainerAppImageHere -App $w.name -Image $image -Env $mbeEnv }
+        # PIM 100.114: an EXISTING Manager below the product size is raised in the SAME write as the image (raise only; a
+        # bigger app and a customer-set size are kept) -- never a second write. The other apps keep the size they have.
+        $mgrResize = $null
+        if ($w.entry -eq 'manager') { $mgrResize = { param($rzContainer, $rzApp) $rzAns = Get-PimManagerAppResize -Container $rzContainer -App $rzApp -Environment $script:PimManagerSizeEnv; $script:PimManagerResizeSaid = "$($rzAns.detail)"; $rzAns } }
+        $script:PimManagerResizeSaid = ''
+        try { Set-PimContainerAppImageHere -App $w.name -Image $image -Env $mbeEnv -Resize $mgrResize }
         catch {
             if ($mbeEnv.Count) { throw "could not set the baseline pin/URL on $($w.name) ($(@($mbeEnv.Keys) -join ', ')): $($_.Exception.Message)" }
             throw "container app update failed for '$($w.name)': $($_.Exception.Message)"
         }
         Note 'updated existing'
+        if ($w.entry -eq 'manager') {
+            # read back: the size the Manager declares now, against the decision
+            $mgrApp = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $w.name -ErrorAsNull
+            $mgrNow = @($mgrApp.properties.template.containers)[0].resources
+            $mgrChk = Test-PimManagerAppUndersized -Cpu "$($mgrNow.cpu)" -Memory "$($mgrNow.memory)" -Tags $mgrApp.tags -AppName $w.name
+            if ($script:PimManagerResizeSaid) { Note "Manager web app size: $($script:PimManagerResizeSaid)" }
+            if ($mgrChk.undersized) { Warn "Manager web app size (read back): $($mgrChk.reason) -- the next update raises it" } else { Note "Manager web app size (read back): $($mgrChk.reason)" }
+        }
         if ($mbeEnv.Count) {
             $mbeNames = @($mbeEnv.Keys)
             $got = @(@(@((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $w.name -ErrorAsNull).properties.template.containers)[0].env) | ForEach-Object { "$($_.name)" })

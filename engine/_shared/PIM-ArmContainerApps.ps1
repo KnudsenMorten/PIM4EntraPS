@@ -83,7 +83,16 @@ function Set-PimAcaAppImage {
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$Image,
         [string]$ContainerName,
-        [hashtable]$ExtraEnv                      # env vars to set/replace on that container
+        [hashtable]$ExtraEnv,                     # env vars to set/replace on that container
+        # PIM 100.114 (framework 12.16): the size this SAME write must carry. { param($Container, $App) } is asked with the
+        # container and the app AS JUST READ and answers @{ change; Cpu; Memory; Tags } (the updater passes
+        # Get-PimManagerAppResize, PIM-TenantSizing.ps1). change = $false, $null, or no -Resize at all -> the resources
+        # go back EXACTLY as they were read: a roll never lowers (or changes) an app's size by itself.
+        # ONE WRITE. A resize as its own PATCH right after the image PATCH is refused "HTTP 409 ...OperationInProgress"
+        # (the 100.50 lesson, Invoke-PimArmBusyRetry below) and would restart the app twice.
+        [scriptblock]$Resize,
+        # filled with what the write carried for the size: ['applied'] = @{ app; from; cpu; memory; detail } (absent = none)
+        [hashtable]$ResizeOut
     )
     $app = Get-PimAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name
     if (-not $app) { throw "Set-PimAcaAppImage: container app '$Name' not found in $ResourceGroup." }
@@ -109,6 +118,25 @@ function Set-PimAcaAppImage {
 
     # PATCH with the FULL template we just read back, not a fragment.
     $body = @{ properties = @{ template = $app.properties.template } }
+    if ($Resize) {
+        # A sizing answer that cannot be computed must never stop (or change) the roll: the size simply stays as read.
+        $rz = $null
+        try { $rz = & $Resize $target $app } catch { $rz = $null }
+        $rzCpu = 0.0; $rzMem = ''
+        if ($rz -and [bool]$rz.change) {
+            $rzMem = "$($rz.Memory)".Trim()
+            if (-not [double]::TryParse(("$($rz.Cpu)".Trim()), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$rzCpu)) { $rzCpu = 0.0 }
+        }
+        if ($rzCpu -gt 0 -and $rzMem -match '^\d+(\.\d+)?Gi$') {
+            $was = ''; if ($target.resources) { $was = "$($target.resources.cpu) CPU / $($target.resources.memory)" }
+            if ($null -eq $target.resources) { $target | Add-Member -NotePropertyName resources -NotePropertyValue ([pscustomobject]@{}) -Force }
+            $target.resources | Add-Member -NotePropertyName cpu -NotePropertyValue $rzCpu -Force
+            $target.resources | Add-Member -NotePropertyName memory -NotePropertyValue $rzMem -Force
+            # the app's OWN tags plus the sizing record, in the same write (never a second PATCH)
+            if ($rz.Tags -and $rz.Tags.Count) { $body['tags'] = $rz.Tags }
+            if ($null -ne $ResizeOut) { $ResizeOut['applied'] = [pscustomobject]@{ app = $Name; from = $was; cpu = $rzCpu; memory = $rzMem; detail = "$($rz.detail)" } }
+        }
+    }
     Invoke-PimArm -Method PATCH -Path (Get-PimAcaAppId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name) `
                   -Body $body -ApiVersion $script:PimAcaApi
 }
@@ -175,10 +203,14 @@ function Invoke-PimAcaRoll {
         [Parameter(Mandatory)][string]$Image,
         [string]$ContainerName,
         [scriptblock]$HealthCheck,
-        [int]$TimeoutSeconds = 600
+        [int]$TimeoutSeconds = 600,
+        # PIM 100.114: the app's size, carried by the roll's OWN write (Set-PimAcaAppImage -Resize) and read back after it.
+        # Without -Resize, and on the rollback, the template goes back with the resources it was read with -- unchanged.
+        [scriptblock]$Resize
     )
     $result = @{ app = $Name; from = ''; to = $Image; rolled = $false; healthy = $null
-                 rolledBack = $false; state = ''; reason = '' }
+                 rolledBack = $false; state = ''; reason = ''
+                 resized = $false; sizeFrom = ''; size = ''; sizeConfirmed = $null; sizeDetail = '' }
 
     $app = Get-PimAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name
     if (-not $app) { $result.reason = "container app '$Name' not found"; return $result }
@@ -190,13 +222,30 @@ function Invoke-PimAcaRoll {
         return $result
     }
 
+    $rollResizeOut = @{}
     [void](Set-PimAcaAppImage -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name `
-                              -Image $Image -ContainerName $ContainerName)
+                              -Image $Image -ContainerName $ContainerName -Resize $Resize -ResizeOut $rollResizeOut)
+    $rollResize = $null; if ($rollResizeOut.ContainsKey('applied')) { $rollResize = $rollResizeOut['applied'] }
     $result.state = Wait-PimAcaProvisioned -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -TimeoutSeconds $TimeoutSeconds
     if ($result.state -notmatch '(?i)^Succeeded$') {
         $result.reason = "provisioning ended '$($result.state)'"
     } else {
         $result.rolled = $true
+    }
+    if ($rollResize) {
+        # The size went out in the SAME write as the image: read it back from the app, never assume it.
+        $result.resized = $true; $result.sizeFrom = "$($rollResize.from)"; $result.sizeDetail = "$($rollResize.detail)"
+        $result.size = ('{0} CPU / {1}' -f $rollResize.cpu.ToString('0.0#', [Globalization.CultureInfo]::InvariantCulture), $rollResize.memory)
+        try {
+            $back = Get-PimAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name
+            $bcs = @($back.properties.template.containers)
+            $bt = if ("$ContainerName".Trim()) { @($bcs | Where-Object { "$($_.name)" -eq "$ContainerName".Trim() }) | Select-Object -First 1 } elseif ($bcs.Count -eq 1) { $bcs[0] } else { $null }
+            $bCpu = 0.0; $bMem = 0.0; $wMem = 0.0
+            $okC = ($bt -and $bt.resources -and [double]::TryParse("$($bt.resources.cpu)", [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$bCpu))
+            $okM = ($bt -and $bt.resources -and [double]::TryParse(("$($bt.resources.memory)" -replace '(?i)\s*gi$', ''), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$bMem))
+            [void][double]::TryParse(("$($rollResize.memory)" -replace '(?i)\s*gi$', ''), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$wMem)
+            $result.sizeConfirmed = [bool]($okC -and $okM -and $bCpu -eq [double]$rollResize.cpu -and $bMem -eq $wMem)
+        } catch { $result.sizeConfirmed = $false }
     }
 
     if ($result.rolled -and $HealthCheck) {

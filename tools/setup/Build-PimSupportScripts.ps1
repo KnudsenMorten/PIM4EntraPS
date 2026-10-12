@@ -33,7 +33,7 @@
                                           modules (97.1: the command the prerequisite chips show; PIM records the result itself).
       Initialize-PimMailSender.ps1     -- MAIL-1 shared mailbox: create the sender mailbox + its send right scoped to that
                                           one mailbox (browser sign-in or the Support app's secret; Get Started > Mail sender).
-      Set-PimSqlTier.ps1               -- 100.37: the SQL database to S0 minimum (never Basic) with a 250 GB max size, optional
+      Set-PimSqlTier.ps1               -- 100.37 / 100.114: the SQL database to the product tier S3 (never Basic, never lowered) with a 250 GB max size, optional
                                           tier pin (pim-sql-tier-pin); the same plan as the installer and the updater.
       Set-PimSmtpRelayPassword.ps1     -- MAIL-1 SMTP relay: the relay password into the environment's Key Vault + read
                                           access on that one secret for the sending identities.

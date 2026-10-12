@@ -1113,9 +1113,12 @@ function Set-PimArmAcaAppEnvVars {
     <#
       az containerapp update --set-env-vars K=V ... : read-modify-write of the container's env (the other variables,
       secret refs, probes and resources stay), one PATCH of the whole template. -ContainerName as Set-PimAcaAppImage.
+      -Resize (PIM 100.114): { param($Container, $App) } answers @{ change; Cpu; Memory; Tags } for the container AS READ
+      (the installer passes Get-PimManagerAppResize for the Manager) -- the size then goes out in THIS write, never a second
+      one. No -Resize, $null or change = $false: the resources go back exactly as read.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name,
-          [Parameter(Mandatory)][hashtable]$Env, [string]$ContainerName, [string]$Image)
+          [Parameter(Mandatory)][hashtable]$Env, [string]$ContainerName, [string]$Image, [scriptblock]$Resize)
     $app = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name
     if (-not $app) { throw "container app '$Name' not found in $ResourceGroup." }
     $cs = @($app.properties.template.containers)
@@ -1126,7 +1129,23 @@ function Set-PimArmAcaAppEnvVars {
     foreach ($k in $Env.Keys) { $list.Add([pscustomobject]@{ name = "$k"; value = "$($Env[$k])" }) }
     $t | Add-Member -NotePropertyName env -NotePropertyValue @($list.ToArray()) -Force
     if ("$Image".Trim()) { $t.image = "$Image".Trim() }
-    Set-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -Resource @{ properties = @{ template = $app.properties.template } }
+    $resource = @{ properties = @{ template = $app.properties.template } }
+    if ($Resize) {
+        $rz = $null
+        try { $rz = & $Resize $t $app } catch { $rz = $null }
+        $rzCpu = 0.0; $rzMem = ''
+        if ($rz -and [bool]$rz.change) {
+            $rzMem = "$($rz.Memory)".Trim()
+            if (-not [double]::TryParse(("$($rz.Cpu)".Trim()), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$rzCpu)) { $rzCpu = 0.0 }
+        }
+        if ($rzCpu -gt 0 -and $rzMem -match '^\d+(\.\d+)?Gi$') {
+            if ($null -eq $t.resources) { $t | Add-Member -NotePropertyName resources -NotePropertyValue ([pscustomobject]@{}) -Force }
+            $t.resources | Add-Member -NotePropertyName cpu -NotePropertyValue $rzCpu -Force
+            $t.resources | Add-Member -NotePropertyName memory -NotePropertyValue $rzMem -Force
+            if ($rz.Tags -and $rz.Tags.Count) { $resource['tags'] = $rz.Tags }
+        }
+    }
+    Set-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -Resource $resource
 }
 
 function Set-PimArmAcaAppConfiguration {

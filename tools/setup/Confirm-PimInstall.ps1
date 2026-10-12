@@ -21,7 +21,9 @@
       engine-root-reader  the engine job holds Reader at the tenant root management group                    REPAIRS (one grant attempt)
       manager-rg-reader   the Manager holds Reader on the PIM resource group only (the Environment report)   REPAIRS (one grant attempt; a WARNING, never a stop)
       engine-size         the engine job is at least the size its tenant count needs (framework 12.15; WARNING with the az
-                          command for that tier -- 2.0 CPU / 4Gi / 7200 s from 5,000 objects, 4.0 / 8Gi / 14400 s from 15,000)
+                          command for that tier -- 2.0 CPU / 4Gi / 7200 s from 5,000 objects, 4.0 / 8Gi / 14400 s from 15,000);
+                          the same line shows + checks the Manager web app against the product size (4 CPU / 8 GiB) and
+                          the database against the product tier (S3; a pinned database is said, never changed) -- PIM 100.114
       scheduler           'scheduler.jobs' is ON and the tick has run since the install (SchedulerState / the tick's last
                           execution) -- a WARNING otherwise, never a stop (PIM 100.75)
       telemetry           'telemetry.uplink' is ON and the uplink job reported (UplinkState): identified with a clean last
@@ -373,7 +375,24 @@ function Get-CvFact([string]$Id) {
                 }
                 $u = Test-PimJobUndersized -Counts $counts -Cpu "$($res.cpu)" -Memory "$($res.memory)" -ReplicaTimeout ([int]"0$($jo.properties.configuration.replicaTimeout)") `
                         -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -JobName $TickJobName
-                return @{ readable = $true; undersized = [bool]$u.undersized; reason = "$($u.reason) ($from)"; command = "$($u.command)" }
+                $sizeFact = @{ readable = $true; undersized = [bool]$u.undersized; reason = "$($u.reason) ($from)"; command = "$($u.command)" }
+                # PIM 100.114 (owner 2026-10-12): the Manager web app against the product size (4 CPU / 8 GiB, or the size the
+                # customer set) and the database against the product tier (S3; a pin below it is said, never changed). Each
+                # is its own read: one that fails is "not read", never a failed check and never a hidden one.
+                try {
+                    $ma = Get-CvArm (Get-CvResId 'Microsoft.App/containerApps' $ManagerApp)
+                    $mres = @($ma.properties.template.containers)[0].resources
+                    $mu = Test-PimManagerAppUndersized -Cpu "$($mres.cpu)" -Memory "$($mres.memory)" -Tags $ma.tags -AppName $ManagerApp
+                    $sizeFact['manager'] = @{ readable = [bool]$mu.readable; undersized = [bool]$mu.undersized; reason = "$($mu.reason)"; fix = "$($mu.fix)" }
+                } catch { $sizeFact['manager'] = @{ readable = $false; undersized = $false; reason = "the Manager web app's size was not read: $((("$($_.Exception.Message)") -split "`n")[0])"; fix = '' } }
+                try {
+                    if (-not "$sqlServer".Trim()) { throw 'no SQL server name' }
+                    $dbo = Get-CvArm (Get-CvResId 'Microsoft.Sql/servers' $sqlServer "databases/$SqlDatabase" $sqlRg) 'sql'
+                    $dbPin = ''; if ($dbo -and $dbo.tags -and $dbo.tags.PSObject.Properties['pim-sql-tier-pin']) { $dbPin = "$($dbo.tags.'pim-sql-tier-pin')" }
+                    $du = Test-PimSqlTierBelowDefault -Current (Resolve-PimSqlServiceObjective -Database $dbo) -Pin $dbPin -ElasticPool "$($dbo.properties.elasticPoolId)" -CurrentMaxSizeBytes $dbo.properties.maxSizeBytes -Database $SqlDatabase
+                    $sizeFact['database'] = @{ readable = [bool]$du.readable; below = [bool]$du.below; reason = "$($du.reason)"; fix = "$($du.fix)" }
+                } catch { $sizeFact['database'] = @{ readable = $false; below = $false; reason = "the database tier was not read: $((("$($_.Exception.Message)") -split "`n")[0])"; fix = '' } }
+                return $sizeFact
             }
             'easyauth' {
                 # ARM's authConfigs/current carries platform / identityProviders under .properties (az flattened them)

@@ -9,17 +9,20 @@
   Set the PIM Manager SQL database to the right Standard tier with a 250 GB maximum size, and optionally pin its tier so
   updates never change it.
 
-  Owner 2026-10-09 ("pim sql is not req lot" / "fix setup scripts"; PIM REQUIREMENTS 100.37, framework 12.15): PIM's
-  database is never Basic -- S0 (Standard) is the minimum, for every edition -- and every Standard database has a 250 GB
+  Owner 2026-10-12 ("S3 at every ring 1+2 install"; PIM REQUIREMENTS 100.37 / 100.114, framework 12.15): PIM's database
+  is never Basic -- the product tier is S3 (Standard), for every edition -- and every Standard database has a 250 GB
   maximum size (268435456000 bytes). Raising a tier does NOT raise the maximum size, so a database moved up from Basic kept
   Basic's 2 GB limit and stopped accepting writes ("has reached its size quota"). The installer and every update apply the
   same plan (Get-PimSqlTierPlan, engine/_shared/PIM-TenantSizing.ps1, embedded in the published file); this script applies
   it on demand:
 
-    * without -Tier: THE PLAN -- Basic -> S0 (never on a database tagged pim-sql-tier-pin), any Standard database below
-      250 GB -> 250 GB. A tier or a limit is never lowered; Premium, vCore and elastic-pool databases are not touched.
-    * -Tier S0|S1|S2|...: the Standard tier you choose (never Basic), with the 250 GB maximum size. Changing the tier of a
-      pinned database needs -Pin (which re-pins it to the new tier).
+    * without -Tier: THE PLAN -- Basic, S0, S1 or S2 -> S3 (never on a database tagged pim-sql-tier-pin: a pinned
+      database below S3 is reported "database is pinned at <tier>, the new default is S3 - not changed"), any Standard
+      database below 250 GB -> 250 GB. The plan NEVER LOWERS a tier or a limit (S3 and above are kept); Premium, vCore and
+      elastic-pool databases are not touched.
+    * -Tier S0|S1|S2|S3|...: the Standard tier you choose (never Basic), with the 250 GB maximum size. A tier below S3
+      is your own decision -- add -Pin, or the next update raises it back to S3. Changing the tier of a pinned database
+      needs -Pin (which re-pins it to the new tier).
     * -Pin: tags the database pim-sql-tier-pin = <its tier>, so the updater never changes its tier (the 250 GB rule still
       applies). The database's other tags are kept.
 
@@ -38,8 +41,8 @@
   Preview the plan; then the same command without -WhatIf.
 
 .EXAMPLE
-  .\Set-PimSqlTier.ps1 -SubscriptionId <subscription id> -ResourceGroup <resource group> -Server <sql server> -TenantId <tenant id> -Tier S0 -Pin
-  S0 with 250 GB, pinned so updates keep it on S0.
+  .\Set-PimSqlTier.ps1 -SubscriptionId <subscription id> -ResourceGroup <resource group> -Server <sql server> -TenantId <tenant id> -Tier S3 -Pin
+  S3 with 250 GB, pinned so updates keep it on S3 (also how a database pinned at a lower tier is moved to S3).
 
 .LINK
   https://invardia.com/docs/pim/scripts/Set-PimSqlTier/
@@ -68,7 +71,8 @@ $null = Start-PimScriptRun -Script 'Set-PimSqlTier'
 try {
 
 $api = '2021-11-01'
-$maxWant = [int64]268435456000
+$maxWant = [int64]268435456000   # 250 GB (= Get-PimSqlDefaultMaxSizeBytes, the plan's own value)
+$defaultTier = Get-PimSqlDefaultTier   # S3 -- the product tier (PIM 100.114); the plan raises to it and never lowers
 $srvName = ("$Server".Trim() -replace '^tcp:', '' -replace ',\d+$', '').Split('.')[0].ToLowerInvariant()
 if ($srvName -notmatch '^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$') { throw "Set-PimSqlTier: not a SQL server name: $Server" }
 if ($Database -notmatch '^[^<>*%&:\\/?]{1,128}$') { throw "Set-PimSqlTier: not a database name: $Database" }
@@ -148,8 +152,11 @@ if ("$Tier".Trim()) {
     if ($cur -notmatch '^(?i)(Basic|S\d+)$') { throw "Set-PimSqlTier: the database is '$cur' (not Basic / Standard) -- this script sets Standard tiers only; not changed." }
     if ($pinNow -and $pinNow -ine $Tier.ToUpperInvariant() -and -not $Pin) { throw "Set-PimSqlTier: the database is pinned to '$pinNow' (pim-sql-tier-pin). Add -Pin to change its tier to $($Tier.ToUpperInvariant()) and re-pin it." }
     $targetTier = $Tier.ToUpperInvariant(); $tierChange = ($targetTier -ine $cur)
-    $mp = Get-PimSqlTierPlan -Current $targetTier -CurrentMaxSizeBytes $(if ($cur -match '^(?i)basic$' -and $null -eq $curMax) { 1 } else { $curMax })
+    $mp = Get-PimSqlTierPlan -Current $targetTier -Target $targetTier -CurrentMaxSizeBytes $(if ($cur -match '^(?i)basic$' -and $null -eq $curMax) { 1 } else { $curMax })
     $why = "-Tier $targetTier (your choice)"
+    # A tier below the product tier that is not pinned is raised back by the next update: say so before the change.
+    $belowDefault = ([int]($targetTier -replace '^(?i)S', '') -lt [int]($defaultTier -replace '^(?i)S', ''))
+    if ($belowDefault -and -not $Pin) { Write-Host "  note:   $targetTier is below the product tier $defaultTier and the database is not pinned -- the next update raises it to $defaultTier. Add -Pin to keep $targetTier." -ForegroundColor Yellow }
 } else {
     $mp = Get-PimSqlTierPlan -Current $cur -ElasticPool $pool -CurrentMaxSizeBytes $curMax -Pin $pinNow
     if ($mp.action -eq 'raise') { $targetTier = $mp.target; $tierChange = $true }
@@ -160,6 +167,7 @@ $pinTag = $(if ($Pin) { $targetTier } else { $null })
 $pinChange = ($Pin -and "$pinNow" -cne "$pinTag")
 if ($Pin -and $targetTier -notmatch '^(?i)S\d+$') { throw "Set-PimSqlTier: -Pin pins a Standard tier; the database is '$targetTier'." }
 Write-Host "  plan:   $why" -ForegroundColor DarkGray
+if (-not "$Tier".Trim() -and $mp.pinnedBelowDefault) { Write-Host "  note:   $($mp.pinNote). To move it: -Tier $defaultTier -Pin." -ForegroundColor Yellow }
 
 if (-not $tierChange -and -not $maxSet -and -not $pinChange) { Write-Host "`nRESULT: nothing to change -- $targetTier, max size kept$(if ($pinNow) { ", pinned to $pinNow" })." -ForegroundColor Green; exit 0 }
 
