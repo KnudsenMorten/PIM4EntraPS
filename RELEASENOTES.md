@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.602 -- 2026-10-12
+
+- New admin account: the wizard asks where the admin mail goes -- forwarding to the owner office address is on by default and the address is required, so the Temporary Access Pass reaches the admin the first time
+
 ## 2.4.601 -- 2026-10-12
 
 - External companies: the button of an open company row is Save and it saves at once; after a save the list shows the saved values without reloading the page

@@ -30797,6 +30797,36 @@
               sub:'Account-Definitions-Admins.ProvisionDate',
               onInput:(v)=>{ s.provisionDate=v; }
             });
+            // --- (1b) Where this admin's mail goes (100.101, owner 2026-10-12: "i am missing the mail forward option,
+            // which should be default on + option to set the office acct where mail goes to ... admins dont get there
+            // taps during the create when it is not defined"). The same two settings as Admin accounts > Edit, asked
+            // HERE so the TAP mail has somewhere to go the first time. ON by default; the address is required while on.
+            const mfHdr = document.createElement('div');
+            mfHdr.style.cssText = 'font-weight:600; font-size:12px; color:#24292f; border-top:1px solid #d0d7de; padding-top:10px; margin:14px 0 6px;';
+            mfHdr.textContent = 'Where this admin’s mail goes';
+            f.appendChild(mfHdr);
+            if (s.mailForward !== 'FALSE') s.mailForward = 'TRUE';
+            f.appendChild(wuxField({ id:'wf-mailfwd', label:'Forward mail to the owner’s office user?', type:'select', value:s.mailForward,
+              options:[ { value:'TRUE', label:'Yes (recommended)' }, { value:'FALSE', label:'No -- nobody receives the mail for this admin' } ],
+              hint:'An admin account has no mailbox of its own. With Yes, every mail PIM Manager sends about this admin -- <b>including the Temporary Access Pass</b> -- goes to the owner’s normal office mailbox.',
+              sub:'Account-Definitions-Admins.ForwardMailsToContact',
+              onInput:(v)=>{ s.mailForward = (v === 'FALSE' ? 'FALSE' : 'TRUE'); rerender(); }
+            }));
+            if (s.mailForward === 'TRUE') {
+              f.appendChild(wuxField({ id:'wf-mailfwd-addr', label:'Office user email address', type:'email', value:s.mailForwardAddress || '', required:true,
+                placeholder:'firstname.lastname@company.com',
+                example:'all mail for this admin, incl. the TAP',
+                hint:'The owner’s normal office address (not a private one). Without it the Temporary Access Pass cannot be sent and has to be issued again later.',
+                sub:'Account-Definitions-Admins.MailForwardAddress',
+                onInput:(v)=>{ s.mailForwardAddress = v; }
+              }));
+            } else {
+              const mfNo = document.createElement('div');
+              mfNo.id = 'wf-mailfwd-off';
+              mfNo.style.cssText = 'font-size:12px; color:#9a6700; margin:0 0 8px;';
+              mfNo.textContent = 'No mail is sent for this admin: the Temporary Access Pass will not reach anybody by mail -- you hand it over yourself from Admin accounts.';
+              f.appendChild(mfNo);
+            }
             // --- (2) Temporary Access Pass schedule ---
             const tapHdr = document.createElement('div');
             tapHdr.style.cssText = 'font-weight:600; font-size:12px; color:#24292f; border-top:1px solid #d0d7de; padding-top:10px; margin:14px 0 6px;';
@@ -30832,6 +30862,12 @@
             return f;
           },
           validate: (s) => {
+            // 100.101: forwarding is on unless switched off, and then the office address must be there and be an address
+            if (s.mailForward !== 'FALSE') {
+              const mfa = String(s.mailForwardAddress || '').trim();
+              if (!mfa) return 'Enter the office user email address -- the Temporary Access Pass and every other mail for this admin goes there. (Or set "Forward mail" to No.)';
+              if (!ACCT_MAIL_RX.test(mfa)) return 'Office user email address is not a valid email address.';
+            }
             if (s.createTap === 'TRUE' && s.tapLifetimeHours !== '' && s.tapLifetimeHours != null) {
               const h = parseInt(s.tapLifetimeHours, 10);
               if (!isNaN(h) && (h < 1 || h > 720)) return 'TAP lifetime must be between 1 and 720 hours.';
@@ -31021,7 +31057,9 @@
         // PIM 100.24: an admin account created for a department owner carries their department and their normal account
         // (PIM's mail about the admin goes there -- the same columns Admin accounts > Edit sets).
         s.department ? { Department: String(s.department).trim() } : {},
-        s.mailForwardAddress ? { ForwardMailsToContact: 'TRUE', MailForwardAddress: String(s.mailForwardAddress).trim() } : {},
+        // 100.101: what the wizard asked -- ON with the address, or an explicit FALSE (never a silent blank)
+        (s.mailForward !== 'FALSE' && String(s.mailForwardAddress || '').trim()) ? { ForwardMailsToContact: 'TRUE', MailForwardAddress: String(s.mailForwardAddress).trim() }
+          : { ForwardMailsToContact: 'FALSE', MailForwardAddress: '' },
         wuxReplicationFields(s, 'admin')));   // §71: Replicate/Ring/Target from the Replication section (master only)
         for (const tag of s.roleGroupSel) {
           await wuxStage('PIM-Assignments-Admins', {
