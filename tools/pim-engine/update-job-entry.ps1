@@ -104,6 +104,8 @@ function Invoke-PimUpdaterConvergeStep {
     # The pim.Settings database: Basic -> S0 (raise only; owner 2026-10-09: S0 for every install, Pro too; never on a database
     # tagged pim-sql-tier-pin) and EVERY Standard database gets its 250 GB max size (100.37: a tier raise does not grow it;
     # an existing DB at 2 GB is fixed HERE, on its next update).
+    # 100.114 (owner 2026-10-12): the database default is S3 now -- below S3 -> S3, raise only -- and the Manager web app is
+    # 4 CPU / 8 GiB; both defaults are defined once, in engine/_shared/PIM-TenantSizing.ps1.
     try {
         $runs = @()
         if ($csSize) {
@@ -117,10 +119,21 @@ function Invoke-PimUpdaterConvergeStep {
         $sz = Invoke-PimJobSizingUpdate -SubscriptionId $sub -ResourceGroup $rg -JobName $tickJob -Arm $armSeam -Graph $graphSeam -Runs $runs -Environment $envMap -StoredCounts $stored
         foreach ($l in @($sz.log)) { Say "  sizing: $l" 'DarkGray' }
         Say ("sizing: $($sz.detail)") $(if (-not $sz.ok) { 'Yellow' } elseif ($sz.changed) { 'Cyan' } else { 'DarkGray' })
-        $sqlSrv = $(if ("$($env:PIM_SqlServer)".Trim()) { "$($env:PIM_SqlServer)".Trim() } else { "$($global:PIM_SqlServer)".Trim() })
+        # PIM 100.114 (owner 2026-10-12: "4 CPU / 8 GB at all ring 1+2 installs") -- THE MANAGER WEB APP'S SIZE, ON EVERY UPDATE.
+        # Raise only; PIM_Bootstrap_Cpu_Manager / PIM_Bootstrap_Memory_Manager on this job wins. A run that rolled the Manager
+        # carried the size in the roll's own write (step 1), so this finds nothing to change and reads the result back; a run
+        # that rolled nothing (ahead of its ring, already on the image) does the one write here. Never fails the update.
+        try {
+            $mgrSz = Invoke-PimManagerAppSizeUpdate -SubscriptionId $sub -ResourceGroup $rg -AppName $managerApp -ContainerName $container -Arm $armSeam -Environment $envMap
+            foreach ($l in @($mgrSz.log)) { Say "  sizing: $l" 'DarkGray' }
+            Say ("sizing: $($mgrSz.detail)") $(if (-not $mgrSz.ok) { 'Yellow' } elseif ($mgrSz.changed) { 'Cyan' } else { 'DarkGray' })
+        } catch { Say "  sizing: the Manager web app's size was not checked: $($_.Exception.Message)" 'Yellow' }
+        $sqlSrv =$(if ("$($env:PIM_SqlServer)".Trim()) { "$($env:PIM_SqlServer)".Trim() } else { "$($global:PIM_SqlServer)".Trim() })
         $sqlDb = $(if ("$($env:PIM_SqlDatabase)".Trim()) { "$($env:PIM_SqlDatabase)".Trim() } elseif ("$($global:PIM_SqlDatabase)".Trim()) { "$($global:PIM_SqlDatabase)".Trim() } else { 'PimPlatform' })
         $sqlSz = Invoke-PimSqlTierUpdate -SubscriptionId $sub -Server $sqlSrv -Database $sqlDb -Arm $armSeam
-        Say ("sizing: $($sqlSz.detail)") $(if (-not $sqlSz.ok) { 'Yellow' } elseif ($sqlSz.changed) { 'Cyan' } else { 'DarkGray' })
+        # A database pinned below the product tier is NOT changed (the pin tag cannot say who pinned it) -- it is said in
+        # yellow, every update, so support can act: "database is pinned at <tier>, the new default is S3 - not changed".
+        Say ("sizing: $($sqlSz.detail)") $(if (-not $sqlSz.ok -or $sqlSz.pinnedBelowDefault) { 'Yellow' } elseif ($sqlSz.changed) { 'Cyan' } else { 'DarkGray' })
     } catch { Say "  sizing skipped: $($_.Exception.Message)" 'Yellow' }
     # ---- 2d. 100.40 -- THE OTHER INSTALL DEFAULTS (alert recipients, immediate engine start, the install's role checks) ----
     try {
@@ -921,8 +934,13 @@ try {
 
 # ---- 1. the Manager ---------------------------------------------------------------------------
 Say "rolling $managerApp -> $targetImg"
+# PIM 100.114 (framework 12.16 CONVERGE-DEFAULTS): the roll is a read-modify-write of the WHOLE template -- whatever size
+# the Manager runs goes back unchanged -- and when it is below the product size (4 CPU / 8 GiB, raise only; the customer's
+# PIM_Bootstrap_Cpu_Manager / PIM_Bootstrap_Memory_Manager on this job wins) the SAME write raises it: one write, one
+# restart, never an image PATCH followed by a size PATCH (the second is refused 409 OperationInProgress).
+$mgrSizeEnv = @{}; foreach ($ev in [Environment]::GetEnvironmentVariables().GetEnumerator()) { $mgrSizeEnv["$($ev.Key)"] = "$($ev.Value)" }
 $roll = Invoke-PimAcaRoll -SubscriptionId $sub -ResourceGroup $rg -Name $managerApp -Image $targetImg `
-                          -ContainerName $container -HealthCheck {
+                          -ContainerName $container -Resize { param($rzContainer, $rzApp) Get-PimManagerAppResize -Container $rzContainer -App $rzApp -Environment $mgrSizeEnv } -HealthCheck {
     # Healthy = the app provisioned AND has an active revision the platform reports as running.
     $rev = Get-PimAcaActiveRevision -SubscriptionId $sub -ResourceGroup $rg -Name $managerApp
     if (-not $rev) { return $false }
@@ -934,6 +952,9 @@ $roll = Invoke-PimAcaRoll -SubscriptionId $sub -ResourceGroup $rg -Name $manager
 }
 
 if ($roll.reason) { Say "  $($roll.reason)" 'DarkGray' }
+if ($roll.resized) {
+    Say ("  sizing: $($roll.sizeDetail) -- in the same write as the image" + $(if ($roll.sizeConfirmed) { '; read back' } else { '; the size did NOT read back -- checked again below' })) $(if ($roll.sizeConfirmed) { 'Cyan' } else { 'Yellow' })
+}
 if ($roll.rolled -and $roll.healthy -eq $false) {
     Say "  UNHEALTHY after the roll -- rolled back: $($roll.rolledBack)" 'Red'
     Send-PimUpdateOutcome -Action 'rolled' -Outcome 'failed' -ToVersion "$($plan.version)" -ErrorText "unhealthy after the roll; rolledBack=$($roll.rolledBack)"

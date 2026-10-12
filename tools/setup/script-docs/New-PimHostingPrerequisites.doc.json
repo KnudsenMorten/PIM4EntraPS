@@ -28,7 +28,7 @@
     { "name": "AdminSecret", "required": false, "default": null, "help": "Legacy automation only: a client secret for -AdminAppId. Not for customer use." },
     { "name": "AdminCertPem", "required": false, "default": null, "help": "Automation: PEM file (key + certificate) of -AdminAppId." },
     { "name": "Location", "required": false, "default": "swedencentral", "help": "The Azure region." },
-    { "name": "SqlServiceObjective", "required": false, "default": "S0", "help": "The database tier (S0 minimum)." },
+    { "name": "SqlServiceObjective", "required": false, "default": "the product tier (S3)", "help": "The database tier. Leave it out for the product tier (S3, 250 GB maximum size). A Standard tier below it (S0, S1, S2) is created as named and pinned, so updates keep it; Basic is never created." },
     { "name": "SqlConnectionPolicy", "required": false, "default": "Default", "help": "Default, Proxy or Redirect. Proxy when your firewall allows only port 1433 to SQL." },
     { "name": "AcrSku", "required": false, "default": "Basic", "help": "Basic, Standard or Premium. Only Premium has network controls (private endpoint, public access off)." },
     { "name": "AcrPublicAccess", "required": false, "default": "Default", "help": "Default, true or false. false needs Premium, a private-endpoint subnet and a build pool. On an existing registry the private endpoint is added and public access is turned off later (the conversion's -LockRegistry)." },

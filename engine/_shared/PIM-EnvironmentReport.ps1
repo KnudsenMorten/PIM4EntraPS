@@ -446,6 +446,17 @@ function Get-PimEnvironmentReport {
                         $e.details['ipRestrictions'] = @($ipr | ForEach-Object { "$(Get-PimEnvReportField $_ 'action') $(Get-PimEnvReportField $_ 'ipAddressRange') ($(Get-PimEnvReportField $_ 'name'))" })
                         $e.details['image'] = "$(@(Get-PimEnvReportField (Get-PimEnvReportField $p 'template') 'containers')[0].image)"
                         $e.details['environment'] = (("$(Get-PimEnvReportField $p 'managedEnvironmentId')" -split '/')[-1])
+                        # PIM 100.114 / framework 12.15: each app's size; the MANAGER web app against the product size
+                        # (4 CPU / 8 GiB, or the size the customer set -- Test-PimManagerAppUndersized, PIM-TenantSizing.ps1)
+                        $ares = Get-PimEnvReportField (@(Get-PimEnvReportField (Get-PimEnvReportField $p 'template') 'containers')[0]) 'resources'
+                        $e.details['cpu'] = "$(Get-PimEnvReportField $ares 'cpu')"
+                        $e.details['memory'] = "$(Get-PimEnvReportField $ares 'memory')"
+                        $mgrName = "$(Get-PimEnvReportField $c 'containerAppName')".Trim(); if (-not $mgrName) { $mgrName = 'ca-pim-manager' }
+                        if ("$($cd.name)" -ieq $mgrName -and "$($e.details['cpu'])".Trim() -and "$($e.details['memory'])".Trim()) {
+                            $mgU = Test-PimManagerAppUndersized -Cpu $e.details['cpu'] -Memory $e.details['memory'] -Tags (Get-PimEnvReportField $d 'tags') -AppName $cd.name
+                            $e.details['sizing'] = "$($mgU.reason)"
+                            if ($mgU.undersized) { $e.details['sizingFix'] = "$($mgU.fix)" }
+                        }
                         $e.exposure = if (-not $ing) { 'no ingress' } elseif (-not $e.details['ingressExternal']) { 'internal (environment only)' } elseif ($ipr.Count) { 'public, IP-restricted' } else { 'public (internet)' }
                     }
                     'microsoft.app/jobs' {
@@ -490,6 +501,23 @@ function Get-PimEnvironmentReport {
                         try {
                             $dbs = @(Get-PimEnvReportField (& $a ("{0}/databases?api-version=2021-11-01" -f $cd.id)) 'value' | Where-Object { "$($_.name)" -ne 'master' })
                             $e.details['databases'] = @($dbs | ForEach-Object { "$($_.name) ($(Get-PimEnvReportField $_.sku 'name'))" })
+                            # PIM 100.114: the PIM database's real tier (never sku.name, which is "Standard" for a DTU
+                            # database), its max size and its pin, against the product tier (Test-PimSqlTierBelowDefault)
+                            $pimDbName = "$(Get-PimEnvReportField $c 'sqlDatabase')".Trim(); if (-not $pimDbName) { $pimDbName = 'PimPlatform' }
+                            $pimDb = @($dbs | Where-Object { "$($_.name)" -ieq $pimDbName }) | Select-Object -First 1
+                            if ($pimDb) {
+                                $dbTags = Get-PimEnvReportField $pimDb 'tags'; $dbPinV = ''
+                                if ($dbTags) { $dbPinV = "$(Get-PimEnvReportField $dbTags 'pim-sql-tier-pin')".Trim() }
+                                $dbProps = Get-PimEnvReportField $pimDb 'properties'
+                                $dbU = Test-PimSqlTierBelowDefault -Current (Resolve-PimSqlServiceObjective -Database $pimDb) -Pin $dbPinV -ElasticPool "$(Get-PimEnvReportField $dbProps 'elasticPoolId')" -CurrentMaxSizeBytes (Get-PimEnvReportField $dbProps 'maxSizeBytes') -Database $pimDbName
+                                if ($dbU.readable) {
+                                    $e.details['databaseTier'] = "$($dbU.current)"
+                                    $e.details['databaseTierDefault'] = "$($dbU.want)"
+                                    if ($dbPinV) { $e.details['databaseTierPin'] = $dbPinV }
+                                    $e.details['databaseSizing'] = "$($dbU.reason)"
+                                    if ($dbU.below) { $e.details['databaseSizingFix'] = "$($dbU.fix)" }
+                                }
+                            }
                         } catch { $e.details['databases'] = (& $nr (ConvertTo-PimEnvReportReason $_)) }
                         $pub = "$($e.details['publicNetworkAccess'])"
                         $e.exposure = if ($pub -ieq 'Disabled') { 'private endpoint only' } elseif (@($e.details['firewallRules']).Count -and $e.details['firewallRules'] -isnot [string]) { 'public, firewall rules' } else { 'public endpoint, no firewall rule (deny)' }
@@ -930,9 +958,11 @@ function Get-PimEnvironmentReport {
         $d = $r.details
         switch ("$($r.type)".ToLowerInvariant()) {
             'microsoft.app/jobs' { if ("$($d['sizingFix'])".Trim()) { & $addF 'medium' 'capacity' "$($r.name) is smaller than this tenant needs" "$($d['sizing']). An undersized engine job runs out of memory (the next update raises it by itself)." "$($d['sizingFix'])" } }
-            'microsoft.app/containerapps' { if ($d['ingressExternal'] -and -not @($d['ipRestrictions']).Count) { & $addF 'medium' 'network' "$($r.name) is reachable from the internet" 'External ingress with no IP restriction; every request still needs a Microsoft Entra sign-in and a PIM Manager role.' 'Container app > Ingress > IP restrictions: allow only your admin networks (or put the app behind a private environment)' }
+            'microsoft.app/containerapps' { if ("$($d['sizingFix'])".Trim()) { & $addF 'medium' 'capacity' "$($r.name) is smaller than the product size" "$($d['sizing']). An undersized PIM Manager is slow and can run out of memory on a large tenant (the next update raises it by itself)." "$($d['sizingFix'])" }
+                                            if ($d['ingressExternal'] -and -not @($d['ipRestrictions']).Count) { & $addF 'medium' 'network' "$($r.name) is reachable from the internet" 'External ingress with no IP restriction; every request still needs a Microsoft Entra sign-in and a PIM Manager role.' 'Container app > Ingress > IP restrictions: allow only your admin networks (or put the app behind a private environment)' }
                                             if ($d['allowInsecure']) { & $addF 'high' 'network' "$($r.name) accepts plain HTTP" 'allowInsecure is on' 'Container app > Ingress: switch off "Allow insecure connections"' } }
-            'microsoft.sql/servers' { if ("$($d['publicNetworkAccess'])" -ine 'Disabled' -and $d['firewallRules'] -isnot [string] -and @($d['firewallRules']).Count) {
+            'microsoft.sql/servers' { if ("$($d['databaseSizingFix'])".Trim()) { & $addF 'medium' 'capacity' "The PIM database on $($r.name) is below the product tier" "$($d['databaseSizing'])." "$($d['databaseSizingFix'])" }
+                                      if ("$($d['publicNetworkAccess'])" -ine 'Disabled' -and $d['firewallRules'] -isnot [string] -and @($d['firewallRules']).Count) {
                                             $allAzure = @($d['firewallRules'] | Where-Object { "$_" -match '0\.0\.0\.0 - 0\.0\.0\.0' }).Count
                                             & $addF $(if ($allAzure) { 'medium' } else { 'low' }) 'network' "SQL server $($r.name) has a public endpoint with $(@($d['firewallRules']).Count) firewall rule(s)" ($(if ($allAzure) { '"Allow Azure services" (0.0.0.0) lets any Azure tenant''s resources try to connect; ' } else { '' }) + 'Microsoft Entra-only authentication: ' + "$($d['entraOnlyAuthentication'])") 'SQL server > Networking: remove the rules you do not need, or disable public access and use the private endpoint' }
                                       if ($d.Contains('entraOnlyAuthentication') -and -not $d['entraOnlyAuthentication']) { & $addF 'medium' 'identity' "SQL server $($r.name) accepts SQL logins" 'Microsoft Entra-only authentication is off' 'SQL server > Microsoft Entra ID: tick "Support only Microsoft Entra authentication"' } }

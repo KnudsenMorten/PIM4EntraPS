@@ -24,8 +24,19 @@
       * SELF-CORRECT: a job whose execution ran out of memory or hit its time limit since it was last sized is raised ONE
         band (and its replicaTimeout one step, at most 21600 s = 6 h) by the next update.
 
-    The SQL main database is S0 (Standard; owner 2026-10-09 "pim sql is not req lot" -- Pro too): Basic -> S0, raise only,
-    never on a database tagged pim-sql-tier-pin; every Standard database has a 250 GB max size (100.37; never lowered).
+    THE MANAGER WEB APP AND THE DATABASE (owner 2026-10-12, framework 12.15 "CHANGED FOR PIM", PIM REQUIREMENTS 100.114):
+    the rule above sized JOBS only -- the product's web app was sized by nothing. Two product defaults, defined HERE and
+    read by every creator (the installer) and by the updater (framework 12.16 CONVERGE-DEFAULTS):
+        the Manager web app (ca-pim-manager)  4.0 CPU / 8.0Gi   ($script:PimManagerAppSizeDefault)
+        the main database                     S3, 250 GB max    ($script:PimSqlTierDefault / $script:PimSqlMaxSizeBytesDefault)
+      * RAISE ONLY: a Manager below 4 / 8 is raised, one at or above it is untouched; a database below S3 is raised to S3,
+        one at or above it is untouched. Automation never lowers either.
+      * A size the customer set wins: PIM_Bootstrap_Cpu_Manager / PIM_Bootstrap_Memory_Manager (the installer's or the
+        update job's environment; recorded on the app as its pim-sizing-override tag so a later update keeps it).
+      * A database tagged pim-sql-tier-pin keeps its tier. The tag holds only a tier name -- it cannot tell "the customer
+        pinned it" from "it was pinned at the product's earlier default" -- so a pin is NEVER overridden; a pin below the
+        default is REPORTED ("database is pinned at <tier>, the new default is S3 - not changed") for support to act on.
+      * Every Standard database has a 250 GB max size (100.37; never lowered).
 
     Everything here is PURE except Get-PimTenantObjectCounts, whose Graph read is a scriptblock seam. PS 5.1 + 7, no modules.
 #>
@@ -35,6 +46,15 @@ Set-StrictMode -Off
 $script:PimJobSizeDefaults = @{
     Tick = @{ Cpu = '0.5'; Memory = '1.0Gi'; ReplicaTimeout = 3600 }
 }
+# THE MANAGER WEB APP'S DEFAULT SIZE. Owner 2026-10-12: "4 CPU / 8 GB at all ring 1+2 installs" -- "lets give everyone a
+# good experience for now" -- "we can always lower it". Why: at 0.5 CPU / 1 GiB the Manager ran out of memory reading a
+# large tenant's stored snapshot (100.112). A person lowers it (PIM_Bootstrap_Cpu_Manager / _Memory_Manager); automation never.
+$script:PimManagerAppSizeDefault = @{ Cpu = '4.0'; Memory = '8.0Gi' }
+$script:PimManagerSizeSuffix = 'Manager'     # the <Job> part of PIM_Bootstrap_Cpu_<Job> / PIM_Bootstrap_Memory_<Job> for the web app
+# THE DATABASE'S DEFAULT TIER. Owner 2026-10-12: "S3 at every ring 1+2 install" (same decision, same words as above).
+# Standard, with the 250 GB max size of every Standard database (100.37). Raise only; a pinned database keeps its tier.
+$script:PimSqlTierDefault = 'S3'
+$script:PimSqlMaxSizeBytesDefault = [int64]268435456000     # 250 GB
 # The bands, in order. Band 0 = the job's default.
 $script:PimJobSizeBands = @(
     [pscustomobject]@{ Band = 1; MinObjects = 5000;  Cpu = '2.0'; Memory = '4.0Gi'; ReplicaTimeout = 7200 }
@@ -120,6 +140,187 @@ function Get-PimJobDefaultSize {
     $d = if ($script:PimJobSizeDefaults.ContainsKey($sfx)) { $script:PimJobSizeDefaults[$sfx] } else { $script:PimJobSizeDefaults['Tick'] }
     $t = if ($DefaultReplicaTimeout -gt 0) { $DefaultReplicaTimeout } else { [int]$d.ReplicaTimeout }
     return [pscustomobject]@{ Cpu = "$($d.Cpu)"; Memory = "$($d.Memory)"; ReplicaTimeout = $t }
+}
+
+# =====================================================================================================================
+# THE MANAGER WEB APP + THE DATABASE DEFAULT (owner 2026-10-12; framework 12.15 "CHANGED FOR PIM"; PIM 100.114).
+# The values live in $script:PimManagerAppSizeDefault / $script:PimSqlTierDefault at the top of this file. The getters
+# carry a literal floor ONLY because a $script: variable reads $null when this file was loaded in another scope than the
+# caller's (BUG-79-6b) -- a null default must never become "0 CPU" or "no tier".
+# =====================================================================================================================
+function Get-PimManagerAppDefaultSize {
+    <# PURE. The Manager web app's product size: @{ Cpu = '4.0'; Memory = '8.0Gi' } (owner 2026-10-12). #>
+    $d = $script:PimManagerAppSizeDefault
+    $c = '4.0'; $m = '8.0Gi'
+    if ($d -and "$($d.Cpu)".Trim() -and "$($d.Memory)".Trim()) { $c = "$($d.Cpu)".Trim(); $m = "$($d.Memory)".Trim() }
+    return [pscustomobject]@{ Cpu = $c; Memory = $m }
+}
+
+function Get-PimSqlDefaultTier {
+    <# PURE. The main database's product tier: 'S3' (owner 2026-10-12). #>
+    $t = "$($script:PimSqlTierDefault)".Trim()
+    if ($t -notmatch '^(?i)S\d+$') { $t = 'S3' }
+    return $t.ToUpperInvariant()
+}
+
+function Get-PimSqlDefaultMaxSizeBytes {
+    <# PURE. The max size of every Standard database: 250 GB (100.37). #>
+    $b = [int64]0
+    if ($null -ne $script:PimSqlMaxSizeBytesDefault) { [void][int64]::TryParse("$($script:PimSqlMaxSizeBytesDefault)", [ref]$b) }
+    if ($b -le 0) { $b = [int64]268435456000 }
+    return $b
+}
+
+function Get-PimManagerAppResources {
+    <#
+      PURE. THE ONE DECISION for the Manager web app's CPU and memory (creators and the updater both ask here):
+        1. the product size (Get-PimManagerAppDefaultSize: 4.0 CPU / 8.0Gi)
+        2. -Current (@{ Cpu; Memory }: what the app runs now) -- RAISE ONLY: below the product size in CPU or memory ->
+           raised to it; at or above it -> untouched (a bigger app is never lowered)
+        3. the customer's PIM_Bootstrap_Cpu_Manager / PIM_Bootstrap_Memory_Manager (-Settings: name -> value) WINS, as for
+           the jobs (also below the product size). One of the two alone sets the other to its Consumption pair
+           (memory = 2 x CPU). An invalid value is ignored with a note.
+      Returns @{ Cpu; Memory; Source ('default'|'raised'|'kept'|'customer'); Changed; Have; Notes; Override }.
+      Changed is $true only when -Current was READ and differs from the result: an unread size is never written over.
+    #>
+    param([AllowNull()]$Current, [hashtable]$Settings = @{})
+    $notes = New-Object System.Collections.Generic.List[string]
+    $d = Get-PimManagerAppDefaultSize
+    $dc = [double](ConvertTo-PimJobCpu $d.Cpu); $dm = [double](ConvertTo-PimJobMemoryGi $d.Memory)
+    $cpu = $dc; $mem = $dm; $source = 'default'
+    $cc = $null; $cm = $null
+    if ($null -ne $Current) {
+        $gc = { param($n) if ($Current -is [System.Collections.IDictionary]) { if ($Current.Contains($n)) { $Current[$n] } } elseif ($Current.PSObject.Properties[$n]) { $Current.$n } }
+        $rc = & $gc 'Cpu'; $rm = & $gc 'Memory'
+        if ("$rc".Trim()) { $cc = ConvertTo-PimJobCpu $rc }
+        if ("$rm".Trim()) { $cm = ConvertTo-PimJobMemoryGi $rm }
+    }
+    $haveCur = ($null -ne $cc -and $null -ne $cm -and $cc -gt 0 -and $cm -gt 0)
+    $have = ''
+    if ($haveCur) {
+        $have = ('{0} CPU / {1}' -f (Format-PimJobCpu $cc), (Format-PimJobMemory $cm))
+        if ($cc -ge $dc -and $cm -ge $dm) {
+            $cpu = $cc; $mem = $cm
+            if ($cc -gt $dc -or $cm -gt $dm) { $source = 'kept'; $notes.Add(("the Manager web app already runs {0} -- kept (never lowered)" -f $have)) }
+        } else {
+            $cpu = [Math]::Max($dc, $cc); $mem = [Math]::Max($dm, $cm); $source = 'raised'
+            $notes.Add(("the Manager web app runs {0}, below the product size {1} CPU / {2} -- raised (never lowered)" -f $have, $d.Cpu, $d.Memory))
+        }
+    }
+    # 3. the customer's own size wins
+    $sfx = "$($script:PimManagerSizeSuffix)".Trim(); if (-not $sfx) { $sfx = 'Manager' }
+    $gv = { param($n) if ($Settings -and $Settings.ContainsKey($n) -and -not [string]::IsNullOrWhiteSpace([string]$Settings[$n])) { "$($Settings[$n])".Trim() } else { $null } }
+    $override = [ordered]@{}
+    $oc = $null; $om = $null
+    $n = 'PIM_Bootstrap_Cpu_{0}' -f $sfx; $v = & $gv $n
+    if ($null -ne $v) {
+        $c = ConvertTo-PimJobCpu $v
+        if ($null -ne $c -and $c -ge 0.25 -and $c -le 4 -and (($c * 4) % 1) -eq 0) { $oc = $c }
+        else { $notes.Add(("{0} = '{1}' is not a CPU size (0.25 to 4, in steps of 0.25) -- ignored" -f $n, $v)) }
+    }
+    $n = 'PIM_Bootstrap_Memory_{0}' -f $sfx; $v = & $gv $n
+    if ($null -ne $v) {
+        $m = ConvertTo-PimJobMemoryGi $v
+        if ($null -ne $m -and $m -ge 0.5 -and $m -le 8 -and (($m * 2) % 1) -eq 0) { $om = $m }
+        else { $notes.Add(("{0} = '{1}' is not a memory size (0.5Gi to 8Gi, in steps of 0.5Gi) -- ignored" -f $n, $v)) }
+    }
+    if ($null -ne $oc -or $null -ne $om) {
+        if ($null -eq $om) { $om = $oc * 2; $notes.Add(("PIM_Bootstrap_Memory_{0} is not set -- memory follows the CPU: {1}" -f $sfx, (Format-PimJobMemory $om))) }
+        if ($null -eq $oc) { $oc = $om / 2; $notes.Add(("PIM_Bootstrap_Cpu_{0} is not set -- CPU follows the memory: {1}" -f $sfx, (Format-PimJobCpu $oc))) }
+        $cpu = $oc; $mem = $om; $source = 'customer'
+        $override['Cpu'] = (Format-PimJobCpu $oc); $override['Memory'] = (Format-PimJobMemory $om)
+        $notes.Add(("the customer's size wins: PIM_Bootstrap_Cpu_{0}={1}, PIM_Bootstrap_Memory_{0}={2}" -f $sfx, $override['Cpu'], $override['Memory']))
+    }
+    $changed = ($haveCur -and ($cc -ne $cpu -or $cm -ne $mem))
+    return [pscustomobject]@{ Cpu = (Format-PimJobCpu $cpu); Memory = (Format-PimJobMemory $mem); Source = $source; Changed = [bool]$changed
+                              Have = $have; Notes = @($notes.ToArray()); Override = $override }
+}
+
+function Get-PimManagerSizingTags {
+    <# PURE. The tags that RECORD the Manager web app's sizing on the app (the override so a later update keeps the customer's choice). #>
+    param([Parameter(Mandatory)][object]$Size, [datetime]$NowUtc = [datetime]::UtcNow)
+    $p = $script:PimTenantSizingTagPrefix; if (-not $p) { $p = 'pim-sizing-' }
+    $t = [ordered]@{}
+    $t["${p}size"] = ('{0}/{1}' -f $Size.Cpu, $Size.Memory)
+    $t["${p}source"] = "$($Size.Source)"
+    $ov = $Size.Override
+    # 'Cpu:2.0+Memory:4.0Gi' -- the same shape the jobs use (ConvertFrom-PimTenantSizingTags reads it back)
+    $t["${p}override"] = $(if ($ov -and $ov.Count) { (@($ov.Keys | ForEach-Object { "$($_):$($ov[$_])" }) -join '+') } else { '' })
+    $t["${p}utc"] = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    return $t
+}
+
+function Get-PimManagerAppResize {
+    <#
+      PURE. What ONE write of the Manager web app must carry for its size -- the -Resize answer of Set-PimAcaAppImage /
+      Invoke-PimAcaRoll (engine/_shared/PIM-ArmContainerApps.ps1) and of Invoke-PimManagerAppSizeUpdate below.
+      -Container: the app's container as ARM returned it (resources.cpu / resources.memory). -App: the app (its tags carry a
+      recorded customer override). -Environment: name -> value (PIM_Bootstrap_Cpu_Manager / PIM_Bootstrap_Memory_Manager).
+      Returns @{ change; Cpu; Memory; Tags; detail; notes; size }. change = $false -> the write must leave the resources
+      exactly as they are. Tags (only when change) = the app's OWN tags plus the pim-sizing-* record, for the SAME write.
+    #>
+    param([AllowNull()][object]$Container, [AllowNull()][object]$App, [hashtable]$Environment = @{}, [datetime]$NowUtc = [datetime]::UtcNow)
+    $cur = $null
+    $res = $null; if ($Container) { $res = $Container.resources }
+    if ($res -and "$($res.cpu)".Trim() -and "$($res.memory)".Trim()) { $cur = @{ Cpu = "$($res.cpu)"; Memory = "$($res.memory)" } }
+    $appTags = $null; if ($App) { $appTags = $App.tags }
+    $rec = ConvertFrom-PimTenantSizingTags -Tags $appTags -Job 'Manager'
+    $settings = Get-PimJobSizingSettings -Environment $Environment -Recorded $rec.settings
+    $size = Get-PimManagerAppResources -Current $cur -Settings $settings
+    $tags = $null
+    if ($size.Changed) {
+        $tags = @{}
+        if ($appTags) {
+            if ($appTags -is [System.Collections.IDictionary]) { foreach ($k in @($appTags.Keys)) { $tags["$k"] = "$($appTags[$k])" } }
+            else { foreach ($tp in @($appTags.PSObject.Properties)) { $tags["$($tp.Name)"] = "$($tp.Value)" } }
+        }
+        $mine = Get-PimManagerSizingTags -Size $size -NowUtc $NowUtc
+        foreach ($k in @($mine.Keys)) { if ("$($mine[$k])".Trim()) { $tags["$k"] = "$($mine[$k])" } elseif ($tags.ContainsKey("$k")) { $tags.Remove("$k") } }
+    }
+    $detail = ''
+    if ($null -eq $cur) { $detail = 'the Manager web app''s size could not be read -- not changed' }
+    elseif ($size.Changed) { $detail = ('the Manager web app: {0} -> {1} CPU / {2} ({3})' -f $size.Have, $size.Cpu, $size.Memory, $size.Source) }
+    else { $detail = ('the Manager web app: {0} -- unchanged ({1})' -f $size.Have, $size.Source) }
+    return [pscustomobject]@{ change = [bool]$size.Changed; Cpu = $size.Cpu; Memory = $size.Memory; Tags = $tags; detail = $detail; notes = @($size.Notes); size = $size }
+}
+
+function Test-PimManagerAppUndersized {
+    <#
+      PURE. Is the Manager web app below its size? @{ readable; undersized; have; want; source; reason; fix }.
+      want = Get-PimManagerAppResources for what it runs (-Cpu / -Memory) and the override recorded on it (-Tags), so a
+      customer's own smaller size is NOT flagged. An unread size is not judged.
+    #>
+    param([AllowNull()][object]$Cpu, [AllowNull()][object]$Memory, [AllowNull()]$Tags, [string]$AppName = 'ca-pim-manager')
+    $d = Get-PimManagerAppDefaultSize
+    $rec = ConvertFrom-PimTenantSizingTags -Tags $Tags -Job 'Manager'
+    $cur = $null; if ("$Cpu".Trim() -and "$Memory".Trim()) { $cur = @{ Cpu = "$Cpu"; Memory = "$Memory" } }
+    $size = Get-PimManagerAppResources -Current $cur -Settings $rec.settings
+    $want = ('{0} CPU / {1}' -f $size.Cpu, $size.Memory)
+    if (-not "$($size.Have)".Trim()) { return [pscustomobject]@{ readable = $false; undersized = $false; have = ''; want = $want; source = $size.Source; fix = ''; reason = 'the Manager web app''s size could not be read' } }
+    $hc = [double](ConvertTo-PimJobCpu $Cpu); $hm = [double](ConvertTo-PimJobMemoryGi $Memory)
+    $low = ($hc -lt [double](ConvertTo-PimJobCpu $size.Cpu) -or $hm -lt [double](ConvertTo-PimJobMemoryGi $size.Memory))
+    $what = $(if ($size.Source -eq 'customer') { 'the size the customer set' } else { 'the product size' })
+    $reason = $(if ($low) { ('the Manager web app runs {0}; {1} is {2}' -f $size.Have, $what, $want) } else { ('the Manager web app runs {0} ({1} {2} CPU / {3})' -f $size.Have, $(if ($size.Source -eq 'customer') { 'the customer''s size; the product size is' } else { 'the product size is' }), $d.Cpu, $d.Memory) })
+    $fix = $(if ($low) { ("Azure portal > Container app $AppName > Containers > Edit and deploy: CPU {0}, memory {1} (the next update raises it by itself)" -f $size.Cpu, $size.Memory) } else { '' })
+    return [pscustomobject]@{ readable = $true; undersized = [bool]$low; have = $size.Have; want = $want; source = $size.Source; fix = $fix; reason = $reason }
+}
+
+function Test-PimSqlTierBelowDefault {
+    <#
+      PURE. Is the main database below the product tier? @{ readable; below; pinned; current; want; reason; fix }, from THE plan
+      (Get-PimSqlTierPlan): below = the plan would raise it, OR it is pinned below the default (reported, never changed).
+      Premium / vCore / an elastic pool / an unread tier are not judged.
+    #>
+    param([AllowNull()][string]$Current, [AllowNull()][string]$Pin, [AllowNull()][string]$ElasticPool, [AllowNull()][object]$CurrentMaxSizeBytes = $null, [string]$Database = 'PimPlatform')
+    $plan = Get-PimSqlTierPlan -Current $Current -Pin $Pin -ElasticPool $ElasticPool -CurrentMaxSizeBytes $CurrentMaxSizeBytes
+    $c = "$Current".Trim()
+    if (-not $c) { return [pscustomobject]@{ readable = $false; below = $false; pinned = [bool]$plan.pinned; current = ''; want = $plan.defaultTier; fix = ''; reason = 'the database tier could not be read' } }
+    $below = ($plan.action -eq 'raise' -or [bool]$plan.pinnedBelowDefault -or $plan.maxSizeAction -eq 'set')
+    $reason = $(if ($plan.pinnedBelowDefault) { "$($plan.pinNote)" } else { "database $Database`: $($plan.reason)" })
+    $fix = ''
+    if ($plan.pinnedBelowDefault) { $fix = "Set-PimSqlTier.ps1 -Tier $($plan.defaultTier) -Pin moves a pinned database (https://invardia.com/support/pim/Set-PimSqlTier.ps1); leave it when the pin is the customer's choice" }
+    elseif ($below) { $fix = 'Set-PimSqlTier.ps1 applies it now (https://invardia.com/support/pim/Set-PimSqlTier.ps1); the next update does it by itself' }
+    return [pscustomobject]@{ readable = $true; below = [bool]$below; pinned = [bool]$plan.pinned; current = $c; want = $plan.defaultTier; fix = $fix; reason = $reason }
 }
 
 function Test-PimJobRunOutOfResources {
@@ -378,23 +579,32 @@ function Resolve-PimSqlServiceObjective {
 
 function Get-PimSqlTierPlan {
     <#
-      PURE. The SQL main database's tier + max size (PIM REQUIREMENTS 100.31 / 100.37; owner 2026-10-09: "pim sql is not req
-      lot" -- PIM's database is S0 (Standard) with a 250 GB max size, for Pro too; the earlier "Pro = S2" rule is dropped).
-      TIER, raise only:  Basic -> S0.  S0 and every other Standard tier -> kept (never lowered, never raised).
+      PURE. The SQL main database's tier + max size (PIM REQUIREMENTS 100.31 / 100.37 / 100.114; owner 2026-10-12: "S3 at
+      every ring 1+2 install" -- PIM's database is S3 (Standard) with a 250 GB max size, for every edition; the earlier
+      S0 default and the "Pro = S2" rule before it are gone).
+      TIER, raise only:  Basic, S0, S1, S2 -> S3 (-Target; default = the product default).  S3 and every higher Standard
+        tier -> kept (never lowered, never raised).
         Premium (P*), vCore (GP_*, BC_*, HS_*), serverless, an elastic pool, or unknown -> none (not ours to change)
-        PINNED (-Pin = the database's 'pim-sql-tier-pin' tag, e.g. S0): the tier is NEVER changed (not even Basic -> S0).
+        PINNED (-Pin = the database's 'pim-sql-tier-pin' tag, e.g. S0): the tier is NEVER changed (not even Basic -> S3).
+        The tag holds a tier name only: nothing in it tells a customer's pin from one written at the product's earlier
+        default, so a pin BELOW the default is not overridden -- it is reported: pinnedBelowDefault = $true and pinNote =
+        "database is pinned at <tier>, the new default is S3 - not changed" (support moves it: Set-PimSqlTier -Tier S3 -Pin).
       MAX SIZE: every Standard S-tier database (incl. the one this plan raises, and a pinned one) below 250 GB
       (268435456000 bytes) -> maxSizeAction 'set'. A tier raise does NOT grow the max size by itself (measured: an S2 with
       Basic's 2 GB limit filled up -> "has reached its size quota" on every write), so a raise FROM Basic always includes it.
       Never lowered; never on Basic staying Basic, Premium, vCore or a pool; an unread max size (not raised from Basic) ->
       not changed. -Pro is accepted and ignored (kept for callers; there is no Pro tier rule any more).
-      Returns @{ action ('raise'|'none'); target; current; pinned; reason; maxSizeAction ('set'|'none'); maxSizeBytes; currentMaxSizeBytes }.
+      Returns @{ action ('raise'|'none'); target; current; pinned; reason; maxSizeAction ('set'|'none'); maxSizeBytes;
+                 currentMaxSizeBytes; defaultTier; pinnedBelowDefault; pinNote }.
     #>
-    param([AllowNull()][string]$Current, [bool]$Pro, [string]$Target = 'S0', [AllowNull()][string]$ElasticPool,
+    param([AllowNull()][string]$Current, [bool]$Pro, [string]$Target = '', [AllowNull()][string]$ElasticPool,
           [AllowNull()][object]$CurrentMaxSizeBytes = $null, [AllowNull()][string]$Pin = $null)
     $c = "$Current".Trim()
     $pinV = "$Pin".Trim()
-    $maxWant = [int64]268435456000
+    if (-not "$Target".Trim()) { $Target = Get-PimSqlDefaultTier }
+    $Target = "$Target".Trim().ToUpperInvariant()
+    $maxWant = Get-PimSqlDefaultMaxSizeBytes
+    $pinLow = $false; $pinNote = ''
     $curMax = $null; $tmp = 0L; if ($null -ne $CurrentMaxSizeBytes -and [int64]::TryParse("$CurrentMaxSizeBytes", [ref]$tmp) -and $tmp -gt 0) { $curMax = $tmp }
     $out = { param($act, $tgt, $why)
         # the max size for the tier the database ends on
@@ -408,15 +618,24 @@ function Get-PimSqlTierPlan {
             else { $mwhy = 'max size not read -- not changed' }
         }
         $r = $why; if ($mwhy) { $r = "$why; $mwhy" }
-        [pscustomobject]@{ action = $act; target = $tgt; current = $c; pinned = [bool]$pinV; reason = $r; maxSizeAction = $ms; maxSizeBytes = $(if ($ms -eq 'set') { $maxWant } else { $curMax }); currentMaxSizeBytes = $curMax }
+        [pscustomobject]@{ action = $act; target = $tgt; current = $c; pinned = [bool]$pinV; reason = $r; maxSizeAction = $ms; maxSizeBytes = $(if ($ms -eq 'set') { $maxWant } else { $curMax }); currentMaxSizeBytes = $curMax
+                           defaultTier = $Target; pinnedBelowDefault = [bool]$pinLow; pinNote = "$pinNote" }
     }
     if ("$ElasticPool".Trim()) { return (& $out 'none' $c "in the elastic pool '$ElasticPool' -- not changed") }
-    if ($pinV) { return (& $out 'none' $c "tier pinned to '$pinV' (pim-sql-tier-pin) -- the tier is never changed") }
     $rank = { param($s) if ($s -match '^(?i)basic$') { return 0 }; if ($s -match '^(?i)S(\d+)$') { return (1 + [int]$Matches[1]) }; return -1 }
     $have = & $rank $c; $want = & $rank $Target
+    if ($pinV) {
+        # A pin is never overridden (the tag cannot say WHO pinned it). Below the default it is reported, in these words.
+        if ($have -ge 0 -and $have -lt $want) {
+            $pinLow = $true
+            $pinNote = "database is pinned at $c, the new default is $Target - not changed"
+            return (& $out 'none' $c "pinned at $c (pim-sql-tier-pin = '$pinV'), the new default is $Target - not changed (a pinned tier is never changed; to move it: Set-PimSqlTier.ps1 -Tier $Target -Pin)")
+        }
+        return (& $out 'none' $c "tier pinned to '$pinV' (pim-sql-tier-pin) -- the tier is never changed")
+    }
     if ($have -lt 0) { return (& $out 'none' $c $(if ($c) { "'$c' is not a Basic/Standard objective -- not changed (never lowered)" } else { 'the current size could not be read -- not changed' })) }
     if ($have -ge $want) { return (& $out 'none' $c "$c is already at or above $Target -- kept (never lowered)") }
-    return (& $out 'raise' $Target "$c -> $Target (never Basic; raise only)")
+    return (& $out 'raise' $Target "$c -> $Target (the product default; never Basic; raise only)")
 }
 
 # =====================================================================================================================
@@ -515,13 +734,83 @@ function Invoke-PimJobSizingUpdate {
     }
 }
 
+function Invoke-PimManagerAppSizeUpdate {
+    <#
+      The update's half of the Manager web app's size (framework 12.16 CONVERGE-DEFAULTS; PIM 100.114), for a run that did
+      NOT roll the Manager (an environment ahead of its ring, or already on the target image). A run that DOES roll it
+      carries the size in the roll's own write (Invoke-PimAcaRoll -Resize) -- this function then finds nothing to change.
+      GET the app -> Get-PimManagerAppResize (raise only; the customer's PIM_Bootstrap_*_Manager wins) -> when the size
+      changes: ONE PATCH of the whole template that came back (read-modify-write; every env var, probe and scale rule
+      stays) with the app's tags + the sizing record, a busy app waited out (Invoke-PimArmBusyRetry; the app is read AGAIN
+      after a wait), then the app READ BACK. A raise makes a new revision: the Manager restarts once.
+      Never throws. Returns @{ ok; changed; detail; log[]; size }.
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [string]$AppName = 'ca-pim-manager',
+          [string]$ContainerName, [Parameter(Mandatory)][scriptblock]$Arm, [hashtable]$Environment = @{}, [datetime]$NowUtc = [datetime]::UtcNow,
+          [int[]]$BusyWaits = @(20, 20, 20, 20, 20, 20), [scriptblock]$Sleep, [int]$ReadBackAttempts = 6, [int]$ReadBackDelaySec = 10)
+    $log = New-Object System.Collections.Generic.List[string]
+    $path = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps/$AppName"
+    $api = $script:PimTenantSizingAcaApi; if (-not $api) { $api = '2024-03-01' }
+    $pick = {
+        param($a)
+        $cs = @($a.properties.template.containers)
+        if ("$ContainerName".Trim()) { return (@($cs | Where-Object { "$($_.name)" -eq "$ContainerName".Trim() }) | Select-Object -First 1) }
+        if ($cs.Count -eq 1) { return $cs[0] }
+        return $null
+    }
+    try {
+        $app = & $Arm 'GET' "$path`?api-version=$api" $null
+        if (-not $app) { return [pscustomobject]@{ ok = $false; changed = $false; size = $null; detail = "the Manager web app '$AppName' was not found -- its size was not checked"; log = @() } }
+        $target = & $pick $app
+        if (-not $target) { return [pscustomobject]@{ ok = $false; changed = $false; size = $null; detail = "the Manager web app '$AppName' has $(@($app.properties.template.containers).Count) containers and none was named -- its size was not changed"; log = @() } }
+        $rz = Get-PimManagerAppResize -Container $target -App $app -Environment $Environment -NowUtc $NowUtc
+        foreach ($n in @($rz.notes)) { $log.Add($n) }
+        if (-not $rz.change) { return [pscustomobject]@{ ok = $true; changed = $false; size = $rz.size; detail = "$($rz.detail)"; log = @($log.ToArray()) } }
+        $mgrTry = @{ n = 0 }
+        [void](Invoke-PimArmBusyRetry -Waits $BusyWaits -Sleep $Sleep -Write {
+            $mgrTry.n++
+            $aw = $app
+            if ($mgrTry.n -gt 1) { $fresh = & $Arm 'GET' "$path`?api-version=$api" $null; if ($fresh) { $aw = $fresh } }
+            $tw = & $pick $aw
+            $rw = Get-PimManagerAppResize -Container $tw -App $aw -Environment $Environment -NowUtc $NowUtc
+            if (-not $rw.change) { return $null }     # someone else sized it while this run waited
+            if ($null -eq $tw.resources) { $tw | Add-Member -NotePropertyName resources -NotePropertyValue ([pscustomobject]@{}) -Force }
+            $tw.resources | Add-Member -NotePropertyName cpu -NotePropertyValue ([double](ConvertTo-PimJobCpu $rw.Cpu)) -Force
+            $tw.resources | Add-Member -NotePropertyName memory -NotePropertyValue "$($rw.Memory)" -Force
+            $body = @{ properties = @{ template = $aw.properties.template } }
+            if ($rw.Tags) { $body['tags'] = $rw.Tags }
+            & $Arm 'PATCH' "$path`?api-version=$api" $body })
+        # read back: the size the app declares now (a GET right after the PATCH answers the new template at once)
+        $backCpu = $null; $backMem = $null
+        for ($ra = 1; $ra -le [Math]::Max(1, $ReadBackAttempts); $ra++) {
+            try {
+                $b = & $Arm 'GET' "$path`?api-version=$api" $null
+                $bt = & $pick $b
+                if ($bt -and $bt.resources) { $backCpu = ConvertTo-PimJobCpu $bt.resources.cpu; $backMem = ConvertTo-PimJobMemoryGi $bt.resources.memory }
+                if ($null -ne $backCpu -and $null -ne $backMem) { break }
+            } catch { }
+            if ($ra -lt $ReadBackAttempts -and $ReadBackDelaySec -gt 0) { Start-Sleep -Seconds $ReadBackDelaySec }
+        }
+        $okBack = ($null -ne $backCpu -and $null -ne $backMem -and $backCpu -eq (ConvertTo-PimJobCpu $rz.Cpu) -and $backMem -eq (ConvertTo-PimJobMemoryGi $rz.Memory))
+        return [pscustomobject]@{ ok = [bool]$okBack; changed = $true; size = $rz.size; log = @($log.ToArray())
+            detail = ("{0} -- one write; it restarts once{1}" -f $rz.detail, $(if ($okBack) { '; read back' } else { ' -- the size did NOT read back; the next update tries again' })) }
+    } catch {
+        if ("$($_.Exception.Message)" -match '(?i)OperationInProgress|active provisioning operation') {
+            return [pscustomobject]@{ ok = $false; changed = $false; busy = $true; size = $null; detail = 'the Manager web app was busy; its size is set by the next update'; log = @($log.ToArray()) }
+        }
+        return [pscustomobject]@{ ok = $false; changed = $false; size = $null; detail = "the Manager web app's size was not checked: $((("$($_.Exception.Message)") -split "`n")[0])"; log = @($log.ToArray()) }
+    }
+}
+
 function Invoke-PimSqlTierUpdate {
     <#
       The update's half of the database rules, on EVERY update: read the main database over ARM and apply Get-PimSqlTierPlan
-      -- Basic -> S0 (raise only; never on a database tagged 'pim-sql-tier-pin') and the 250 GB max size of every Standard
-      database (100.37): ONE PATCH carrying the sku and/or properties.maxSizeBytes, then the database read back and the max
-      size before/after logged. -Server is the FQDN or name (searched in the subscription). -Pro is ignored. Never throws.
-      Returns @{ ok; changed; detail; maxSizeBefore; maxSizeAfter }.
+      -- below S3 -> S3 (raise only; owner 2026-10-12; never on a database tagged 'pim-sql-tier-pin') and the 250 GB max size
+      of every Standard database (100.37): ONE PATCH carrying the sku and/or properties.maxSizeBytes, then the database read
+      back and the max size before/after logged. A database PINNED below the default is not changed and is REPORTED:
+      pinnedBelowDefault = $true and the detail starts "database is pinned at <tier>, the new default is S3 - not changed".
+      -Server is the FQDN or name (searched in the subscription). -Pro is ignored. Never throws.
+      Returns @{ ok; changed; detail; maxSizeBefore; maxSizeAfter; pinnedBelowDefault; tierBefore; tierAfter }.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][AllowEmptyString()][string]$Server, [string]$Database = 'PimPlatform',
           [bool]$Pro, [Parameter(Mandatory)][scriptblock]$Arm, [int]$ReadBackAttempts = 6, [int]$ReadBackDelaySec = 10)
@@ -538,7 +827,10 @@ function Invoke-PimSqlTierUpdate {
         if ($db.tags) { if ($db.tags -is [System.Collections.IDictionary]) { if ($db.tags.Contains('pim-sql-tier-pin')) { $pin = "$($db.tags['pim-sql-tier-pin'])" } } elseif ($db.tags.PSObject.Properties['pim-sql-tier-pin']) { $pin = "$($db.tags.'pim-sql-tier-pin')" } }
         $plan = Get-PimSqlTierPlan -Current $curSo -ElasticPool "$($db.properties.elasticPoolId)" -CurrentMaxSizeBytes $db.properties.maxSizeBytes -Pin $pin
         $before = $plan.currentMaxSizeBytes
-        if ($plan.action -ne 'raise' -and $plan.maxSizeAction -ne 'set') { return [pscustomobject]@{ ok = $true; changed = $false; detail = "database $Database`: $($plan.reason)"; maxSizeBefore = $before; maxSizeAfter = $before } }
+        # A pin below the default: never overridden, said in the owner's words so support can act (the tag cannot say who pinned it).
+        $pinLow = [bool]$plan.pinnedBelowDefault
+        $what = $(if ($pinLow) { "$($plan.pinNote) (database $Database, tag pim-sql-tier-pin = '$pin'; to move it: Set-PimSqlTier.ps1 -Tier $($plan.defaultTier) -Pin)" } else { "database $Database`: $($plan.reason)" })
+        if ($plan.action -ne 'raise' -and $plan.maxSizeAction -ne 'set') { return [pscustomobject]@{ ok = $true; changed = $false; detail = $what; maxSizeBefore = $before; maxSizeAfter = $before; pinnedBelowDefault = $pinLow; tierBefore = $curSo; tierAfter = $curSo } }
         $body = @{}
         if ($plan.action -eq 'raise') { $body['sku'] = @{ name = $plan.target; tier = 'Standard' } }
         if ($plan.maxSizeAction -eq 'set') { $body['properties'] = @{ maxSizeBytes = [int64]$plan.maxSizeBytes } }
@@ -546,11 +838,12 @@ function Invoke-PimSqlTierUpdate {
         # read back: the max size before -> after (a tier change is online and can take minutes; the max size is immediate).
         # A GET right after a tier PATCH can answer 404 ResourceNotFound for a few seconds while the scale runs (measured
         # live 2026-10-09) -- transient: retried -ReadBackAttempts times, -ReadBackDelaySec apart.
-        $after = $null
+        $after = $null; $tierAfter = ''
         for ($ra = 1; $ra -le [Math]::Max(1, $ReadBackAttempts); $ra++) {
             try {
                 $db2 = & $Arm 'GET' "$dbPath`?api-version=$($script:PimTenantSizingSqlApi)" $null
                 $t2 = 0L; if ($db2 -and [int64]::TryParse("$($db2.properties.maxSizeBytes)", [ref]$t2)) { $after = $t2 }
+                if ($db2) { $tierAfter = Resolve-PimSqlServiceObjective -Database $db2 }
                 break
             } catch {
                 if ("$($_.Exception.Message)" -notmatch '(?i)\b404\b|ResourceNotFound|NotFound') { break }
@@ -560,8 +853,8 @@ function Invoke-PimSqlTierUpdate {
         $fmt = { param($b) if ($null -eq $b) { 'unknown' } else { '{0:N0} GB' -f ($b / 1GB) } }
         $ms = " (max size {0} -> {1}, read back)" -f (& $fmt $before), (& $fmt $after)
         $okMax = ($plan.maxSizeAction -ne 'set' -or ($null -ne $after -and $after -ge [int64]$plan.maxSizeBytes))
-        return [pscustomobject]@{ ok = $okMax; changed = $true; maxSizeBefore = $before; maxSizeAfter = $after
-            detail = "database $Database`: $($plan.reason)$ms$(if ($plan.action -eq 'raise') { ' (tier change online; takes effect in minutes)' })$(if (-not $okMax) { ' -- the max size did NOT read back as 250 GB; the next update tries again' })" }
+        return [pscustomobject]@{ ok = $okMax; changed = $true; maxSizeBefore = $before; maxSizeAfter = $after; pinnedBelowDefault = $pinLow; tierBefore = $curSo; tierAfter = $tierAfter
+            detail = "$what$ms$(if ($plan.action -eq 'raise') { " (tier change online; takes effect in minutes$(if ($tierAfter) { "; the database reads $tierAfter now" }))" })$(if (-not $okMax) { ' -- the max size did NOT read back as 250 GB; the next update tries again' })" }
     } catch {
         return [pscustomobject]@{ ok = $false; changed = $false; detail = "database size not checked: $((("$($_.Exception.Message)") -split "`n")[0])" }
     }
