@@ -1195,7 +1195,7 @@ Everything an organisation needs to govern its own tenant:
 
 On top of the free edition, a Pro licence adds:
 
-- **Coverage & gaps and discovery** — what is and is not delegated through PIM across every workload, and the
+- **Discovery and gaps** — what is and is not delegated through PIM across every workload, and the
   scheduled jobs that find new roles, groups and resources;
 - the **other workload connectors** — Power BI, enterprise-app roles, Azure DevOps, Dataverse,
   Business Central and Power Platform;

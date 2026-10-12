@@ -2724,6 +2724,311 @@ function Test-PimManagerNewTagDuplicateGate {
     $txt = (@($out | Select-Object -First 5 | ForEach-Object { "'$($_.key)' (GroupTag '$($_.tag)'): $($_.why)" }) -join '; ')
     return @{ allowed = $false; refused = @($out.ToArray()); reason = "Not committed -- a new duplicate group tag: $txt. Nothing was saved." }
 }
+# PIM 100.98 (owner 2026-10-12: "Refuse at commit") -- AN ASSIGNMENT TO A RETIRED GROUP IS REFUSED AT COMMIT.
+# Measured at a customer: an Entra role was assigned to a group whose definition was Lifecycle = Retire; the commit took
+# it, and the engine failed that one item on every run ("unresolved group/role") until a person removed the row.
+# Three functions: the two lists of entities, the reader (SQL + the shared pending changes) and the PURE gate.
+function Get-PimManagerGroupGateEntities {
+    # PURE. The entities the 100.98 gate reads. definitions: every entity that can define a GroupTag (the validator's
+    # PIM-FK-001 list, PIM-Definitions-Resources included -- a tag it defines is "defined"). assignments: entity -> the
+    # column(s) that name a group.
+    [ordered]@{
+        definitions = @('PIM-Definitions-Roles', 'PIM-Definitions-Services', 'PIM-Definitions-Organization', 'PIM-Definitions-Tasks',
+                        'PIM-Definitions-Departments', 'PIM-Definitions-Processes', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg',
+                        'PIM-Definitions-Resources')
+        assignments = [ordered]@{
+            'PIM-Assignments-Admins'          = @('GroupTag')
+            'PIM-Assignments-Groups'          = @('TargetGroupTag', 'SourceGroupTag')
+            'PIM-Assignments-Roles-Groups'    = @('GroupTag')
+            'PIM-Assignments-Roles-AUs'       = @('GroupTag')
+            'PIM-Assignments-Azure-Resources' = @('GroupTag')
+            'PIM-Assignments-Workloads'       = @('GroupTag')
+        }
+    }
+}
+function Get-PimManagerEntityRowsBulk {
+    # The stored rows of several entities in ONE query: @{ <entity> = @(rows) } (every asked entity is a key). Throws when
+    # the store cannot be read. JSON is parsed 200 rows per call, as Get-PimSqlRows does.
+    param([Parameter(Mandatory)][string[]]$Entities, [string]$ConnectionString = $script:PimSqlCs)
+    $out = @{}; $json = @{}; $p = @{}; $names = New-Object System.Collections.Generic.List[string]
+    $i = 0
+    foreach ($e in @($Entities)) { $out["$e"] = @(); $json["$e"] = New-Object System.Collections.Generic.List[string]; $p["e$i"] = "$e"; $names.Add("@e$i"); $i++ }
+    if (-not $names.Count) { return $out }
+    $raw = Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql ("SELECT Entity, DataJson FROM pim.Rows WHERE Entity IN (" + ($names -join ', ') + ") ORDER BY Entity, [Key]") -Parameters $p
+    foreach ($x in @($raw)) {
+        if ($null -eq $x) { continue }
+        $j = "$($x.DataJson)".Trim(); $e = "$($x.Entity)"
+        if ($j -and $json.ContainsKey($e)) { $json[$e].Add($j) }
+    }
+    foreach ($e in @($json.Keys)) {
+        $js = $json[$e]; if (-not $js.Count) { continue }
+        $rows = New-Object System.Collections.Generic.List[object]
+        for ($at = 0; $at -lt $js.Count; $at += 200) {
+            $chunk = @($js.GetRange($at, [Math]::Min(200, $js.Count - $at)))
+            $parsed = ConvertFrom-Json -InputObject ('[' + ($chunk -join ',') + ']')   # assigned first: PS 5.1 emits the array as ONE object
+            foreach ($o in @($parsed)) { $rows.Add($o) }
+        }
+        $out[$e] = @($rows.ToArray())
+    }
+    return $out
+}
+function Get-PimManagerRetiredGroupGateInput {
+    <#
+      PIM 100.98 -- what Test-PimManagerRetiredGroupGate needs, read ONLY when this commit can be refused by it:
+        * a commit to an ASSIGNMENT entity that adds or changes a row (not a removal) -> every group definition
+          (definitions = @{ Entity; GroupTag; GroupName; Lifecycle });
+        * a commit to a group-DEFINITION entity that removes a row, re-tags one or sets Lifecycle = Retire -> the
+          definitions AND every assignment row, stored or staged (assignments = @{ Entity; Row; Staged; StagedRemoval }).
+          "Removed in the same commit" is read from the shared pending changes (-PendingDoc; default the SQL store): the
+          page shares everything staged before it commits and writes definitions first, so an assignment that is staged
+          for removal is the one this commit takes away next.
+      Every other commit reads nothing (needed = $false). -ReadRows: optional param($entity) -> rows (tests); default the
+      SQL store. An entity that cannot be read REFUSES the commit (throws): "no assignment left" / "the group is defined"
+      must never be concluded from a read that failed. Unreadable pending changes are read as none staged.
+    #>
+    param([Parameter(Mandatory)][object]$Diff, [string]$Base = '', [scriptblock]$ReadRows, [object]$PendingDoc = $null)
+    $ents = Get-PimManagerGroupGateEntities
+    $isAsg = $ents.assignments.Contains("$Base")
+    $isDef = (@($ents.definitions) -contains "$Base")
+    $none = @{ needed = $false; definitions = @(); assignments = @(); stagedDefinitions = @() }
+    if (-not $isAsg -and -not $isDef) { return $none }
+    $fv = { param($r, $n) if ($null -eq $r) { '' } elseif ($r -is [System.Collections.IDictionary]) { "$($r[$n])".Trim() } elseif ($r.PSObject.Properties[$n]) { "$($r.PSObject.Properties[$n].Value)".Trim() } else { '' } }
+    $side = { param($m, $n) if ($null -eq $m) { $null } elseif ($m -is [System.Collections.IDictionary]) { $m[$n] } else { $m.$n } }
+    $need = $false
+    if ($isAsg) {
+        foreach ($r in @($Diff.adds)) { if ($null -ne $r -and (& $fv $r 'Action') -ine 'Remove') { $need = $true; break } }
+        if (-not $need) { foreach ($m in @($Diff.modifies)) { if ($null -ne $m -and (& $fv (& $side $m 'after') 'Action') -ine 'Remove') { $need = $true; break } } }
+    } else {
+        foreach ($r in @($Diff.removes)) { if ($null -ne $r -and (& $fv $r 'GroupTag')) { $need = $true; break } }
+        if (-not $need) {
+            foreach ($m in @($Diff.modifies)) {
+                if ($null -eq $m) { continue }
+                $b = & $side $m 'before'; $a = & $side $m 'after'
+                if (-not (& $fv $b 'GroupTag')) { continue }
+                if ((& $fv $b 'GroupTag') -ine (& $fv $a 'GroupTag')) { $need = $true; break }
+                if ((& $fv $a 'Lifecycle') -match '(?i)^retire' -and (& $fv $b 'Lifecycle') -notmatch '(?i)^retire') { $need = $true; break }
+            }
+        }
+    }
+    if (-not $need) { return $none }
+    $usePendingStore = $false
+    if (-not $ReadRows) {
+        if (-not $script:PimSqlCs -or -not (Get-Command Invoke-PimSqlQuery -ErrorAction SilentlyContinue)) { return $none }
+        # ONE query for every entity the gate needs (a commit's SQL connections stay a small constant, 97.1).
+        $wantEnts = @($ents.definitions); if ($isDef) { $wantEnts = @($wantEnts) + @($ents.assignments.Keys) }
+        $bulk = $null
+        try { $bulk = Get-PimManagerEntityRowsBulk -Entities $wantEnts }
+        catch { throw "the group definitions and assignments could not be read to check that every assignment names a group that is kept ($($_.Exception.Message)) -- nothing was saved; try again." }
+        $ReadRows = { param($e) @($bulk["$e"]) }
+        $usePendingStore = $true
+    }
+    $defs = New-Object System.Collections.Generic.List[object]
+    foreach ($e in @($ents.definitions)) {
+        $rows = $null
+        try { $rows = @(& $ReadRows $e) } catch { throw "the group definitions in $e could not be read to check that every assignment names a group that is kept ($($_.Exception.Message)) -- nothing was saved; try again." }
+        foreach ($r in $rows) {
+            if ($null -eq $r) { continue }
+            $t = & $fv $r 'GroupTag'; if (-not $t) { continue }
+            $defs.Add([pscustomobject]@{ Entity = $e; GroupTag = $t; GroupName = (& $fv $r 'GroupName'); Lifecycle = (& $fv $r 'Lifecycle') })
+        }
+    }
+    $asg = New-Object System.Collections.Generic.List[object]
+    $stagedDefs = New-Object System.Collections.Generic.List[object]
+    if ($isDef) {
+        if ($null -eq $PendingDoc -and $usePendingStore -and (Get-Command Read-PimSharedPendingStore -ErrorAction SilentlyContinue)) {
+            try { $PendingDoc = (Read-PimSharedPendingStore -ConnectionString $script:PimSqlCs).doc } catch { Write-Warning "  [retired-group] the staged changes could not be read -- none is counted as staged: $($_.Exception.Message)"; $PendingDoc = $null }
+        }
+        # A definition staged in ANOTHER definition entity (a group moved between entities in one commit) keeps its tag defined.
+        if ($PendingDoc -and $PendingDoc.bases) {
+            foreach ($e in @($ents.definitions)) {
+                if ($e -eq "$Base" -or -not $PendingDoc.bases.ContainsKey($e)) { continue }
+                foreach ($c in @($PendingDoc.bases[$e].changes)) {
+                    if ($null -eq $c -or "$($c.op)" -eq 'remove' -or $null -eq $c.row) { continue }
+                    $t = & $fv $c.row 'GroupTag'; if (-not $t) { continue }
+                    $stagedDefs.Add([pscustomobject]@{ Entity = $e; GroupTag = $t; GroupName = (& $fv $c.row 'GroupName'); Lifecycle = (& $fv $c.row 'Lifecycle') })
+                }
+            }
+        }
+        $haveKey = [bool](Get-Command Get-PimSharedPendingRowKey -ErrorAction SilentlyContinue)
+        foreach ($e in @($ents.assignments.Keys)) {
+            $rows = $null
+            try { $rows = @(& $ReadRows $e) } catch { throw "the assignments in $e could not be read to check that the group has none left ($($_.Exception.Message)) -- nothing was saved; try again." }
+            $staged = @{}
+            if ($haveKey -and $PendingDoc -and $PendingDoc.bases -and $PendingDoc.bases.ContainsKey($e)) {
+                foreach ($c in @($PendingDoc.bases[$e].changes)) { if ($null -ne $c -and "$($c.key)".Trim()) { $staged["$($c.key)".Trim().ToLowerInvariant()] = $c } }
+            }
+            $seen = @{}
+            foreach ($r in $rows) {
+                if ($null -eq $r) { continue }
+                $k = ''; if ($haveKey) { $k = "$(Get-PimSharedPendingRowKey -Base $e -Row $r)" }
+                $c = $null; if ($k -and $staged.ContainsKey($k)) { $c = $staged[$k]; $seen[$k] = $true }
+                if ($c -and "$($c.op)" -eq 'remove') { $asg.Add([pscustomobject]@{ Entity = $e; Row = $r; Staged = $true; StagedRemoval = $true }) }
+                elseif ($c -and $null -ne $c.row) { $asg.Add([pscustomobject]@{ Entity = $e; Row = $c.row; Staged = $true; StagedRemoval = $false }) }
+                else { $asg.Add([pscustomobject]@{ Entity = $e; Row = $r; Staged = $false; StagedRemoval = $false }) }
+            }
+            foreach ($k in @($staged.Keys)) {
+                if ($seen.ContainsKey($k)) { continue }
+                $c = $staged[$k]
+                if ("$($c.op)" -ne 'remove' -and $null -ne $c.row) { $asg.Add([pscustomobject]@{ Entity = $e; Row = $c.row; Staged = $true; StagedRemoval = $false }) }
+            }
+        }
+    }
+    return @{ needed = $true; definitions = @($defs.ToArray()); assignments = @($asg.ToArray()); stagedDefinitions = @($stagedDefs.ToArray()) }
+}
+function Test-PimManagerRetiredGroupGate {
+    <#
+      PURE. PIM 100.98 (owner 2026-10-12: "Refuse at commit"). Two refusals, both whole (nothing of the entity is saved):
+        A. a commit to an ASSIGNMENT entity (group membership, nesting, Entra role, role in an administrative unit, Azure
+           role, workload binding) that ADDS or CHANGES a row naming a group that is retired (every definition of its
+           GroupTag is Lifecycle = Retire) or that no definition defines. A row with Action = Remove is a removal, never an
+           assignment, and passes. A row this commit does not change is NOT checked: a bad row that is already stored
+           never blocks an unrelated commit (the engine keeps reporting it).
+        B. a commit to a group-DEFINITION entity that retires a group (Lifecycle -> Retire), removes its definition or
+           changes its GroupTag while an assignment still names it -- stored, or staged by anybody -- unless that
+           assignment is a removal already (Action = Remove) or is staged for removal (-AssignmentRows StagedRemoval).
+      -Diff: Compare-PimRowSets output. -AfterRows: the entity's rows as this commit stores them (B only).
+      -DefinitionRows / -AssignmentRows: Get-PimManagerRetiredGroupGateInput.
+      Returns @{ allowed; refused = @(@{ op; key; tag; group; why; rows }); reason }.
+    #>
+    param([Parameter(Mandatory)][object]$Diff, [string]$Base = '', [object[]]$AfterRows = @(), [object[]]$DefinitionRows = @(), [object[]]$AssignmentRows = @(),
+          # B only: definitions staged in OTHER definition entities (a group moved between entities in one commit stays defined).
+          [object[]]$StagedDefinitionRows = @())
+    $ents = Get-PimManagerGroupGateEntities
+    $isAsg = $ents.assignments.Contains("$Base")
+    $isDef = (@($ents.definitions) -contains "$Base")
+    if (-not $isAsg -and -not $isDef) { return @{ allowed = $true; refused = @(); reason = '' } }
+    $fv = { param($r, $n) if ($null -eq $r) { '' } elseif ($r -is [System.Collections.IDictionary]) { "$($r[$n])".Trim() } elseif ($r.PSObject.Properties[$n]) { "$($r.PSObject.Properties[$n].Value)".Trim() } else { '' } }
+    $side = { param($m, $n) if ($null -eq $m) { $null } elseif ($m -is [System.Collections.IDictionary]) { $m[$n] } else { $m.$n } }
+    # tag (lower) -> @{ active; name; tag }: active while at least ONE definition of the tag is not Lifecycle = Retire.
+    $stateOf = {
+        param($rows)
+        $h = @{}
+        foreach ($d in @($rows)) {
+            if ($null -eq $d) { continue }
+            $t = & $fv $d 'GroupTag'; if (-not $t) { continue }
+            $lt = $t.ToLowerInvariant()
+            $live = ((& $fv $d 'Lifecycle') -notmatch '(?i)^retire')
+            $nm = & $fv $d 'GroupName'
+            if (-not $h.ContainsKey($lt)) { $h[$lt] = @{ active = $live; name = $nm; tag = $t } }
+            elseif ($live -and -not $h[$lt].active) { $h[$lt].active = $true; if ($nm) { $h[$lt].name = $nm } }
+            elseif (-not $h[$lt].name -and $nm) { $h[$lt].name = $nm }
+        }
+        $h
+    }
+    # the assignment, in the words of the page (pimDependentLabel)
+    $label = {
+        param($e, $r)
+        switch ("$e") {
+            'PIM-Assignments-Admins'          { "$(& $fv $r 'Username') is in $(& $fv $r 'GroupTag')"; break }
+            'PIM-Assignments-Groups'          { "$(& $fv $r 'TargetGroupTag') gets the permissions of $(& $fv $r 'SourceGroupTag')"; break }
+            'PIM-Assignments-Roles-Groups'    { $at = & $fv $r 'AssignmentType'; "$(& $fv $r 'GroupTag') holds the Entra role '$(& $fv $r 'RoleDefinitionName')'$(if ($at) { " ($at)" })"; break }
+            'PIM-Assignments-Roles-AUs'       { "$(& $fv $r 'GroupTag') holds the Entra role '$(& $fv $r 'RoleDefinitionName')' over the administrative unit $(& $fv $r 'AdministrativeUnitTag')"; break }
+            'PIM-Assignments-Azure-Resources' { "$(& $fv $r 'GroupTag') holds the Azure role '$(& $fv $r 'AzScopePermission')' on $(& $fv $r 'AzScope')"; break }
+            'PIM-Assignments-Workloads'       { "$(& $fv $r 'GroupTag') holds the $(& $fv $r 'Workload') role '$(& $fv $r 'RoleName')'"; break }
+            default                           { "$(& $fv $r 'GroupTag')" }
+        }
+    }
+    $kind = @{ 'PIM-Assignments-Admins' = 'group membership'; 'PIM-Assignments-Groups' = 'group nesting'; 'PIM-Assignments-Roles-Groups' = 'Entra role'
+               'PIM-Assignments-Roles-AUs' = 'Entra role in an administrative unit'; 'PIM-Assignments-Azure-Resources' = 'Azure role'; 'PIM-Assignments-Workloads' = 'workload role' }
+    $out = New-Object System.Collections.Generic.List[object]
+    if ($isAsg) {
+        $state = & $stateOf $DefinitionRows
+        $cols = @($ents.assignments["$Base"])
+        # A row the server only re-keyed (an admin's bare name written as the UPN) is the SAME stored assignment, not a new one.
+        $old = @{}
+        if ("$Base" -eq 'PIM-Assignments-Admins') {
+            $olds = New-Object System.Collections.Generic.List[object]
+            foreach ($r in @($Diff.removes)) { if ($null -ne $r) { $olds.Add($r) } }
+            foreach ($m in @($Diff.modifies)) { if ($null -ne $m) { $b0 = & $side $m 'before'; if ($null -ne $b0 -and (& $fv $b0 'Action') -ine 'Remove') { $olds.Add($b0) } } }
+            foreach ($r in $olds) { $u = ((& $fv $r 'Username') -split '@')[0]; $old["$u|$(& $fv $r 'GroupTag')".ToLowerInvariant()] = $true }
+        }
+        $cand = New-Object System.Collections.Generic.List[object]
+        foreach ($r in @($Diff.adds)) {
+            if ($null -eq $r) { continue }
+            if ($old.Count) { $u = ((& $fv $r 'Username') -split '@')[0]; if ($old.ContainsKey("$u|$(& $fv $r 'GroupTag')".ToLowerInvariant())) { continue } }
+            $cand.Add(@{ op = 'add'; row = $r })
+        }
+        foreach ($m in @($Diff.modifies)) {
+            if ($null -eq $m) { continue }
+            $b = & $side $m 'before'; $a = & $side $m 'after'
+            if ($null -eq $a) { continue }
+            # whitespace-only differences are not a change (the same rule as the managing-tenant gate)
+            $real = @(@(& $side $m 'diffCols') | Where-Object { $_ } | Where-Object { (& $fv $b "$_") -cne (& $fv $a "$_") })
+            if (-not $real.Count) { continue }
+            $cand.Add(@{ op = 'modify'; row = $a })
+        }
+        foreach ($c in $cand) {
+            $r = $c.row
+            if ((& $fv $r 'Action') -ieq 'Remove') { continue }   # a removal, not an assignment
+            foreach ($col in $cols) {
+                $t = & $fv $r $col; if (-not $t) { continue }
+                $st = $state[$t.ToLowerInvariant()]
+                if ($st -and $st.active) { continue }
+                $what = "$($kind["$Base"]): $(& $label $Base $r)"
+                if ($st) {
+                    $gn = if ($st.name) { "'$($st.name)' (GroupTag '$($st.tag)')" } else { "with GroupTag '$($st.tag)'" }
+                    $out.Add([ordered]@{ op = $c.op; key = $what; tag = $t; group = "$($st.name)"; state = 'retired'; rows = @()
+                        why = "the group $gn is retired (Lifecycle = Retire), so this assignment can never be made. Remove this assignment, or keep the group (clear Retire on its definition)." })
+                } else {
+                    $out.Add([ordered]@{ op = $c.op; key = $what; tag = $t; group = ''; state = 'undefined'; rows = @()
+                        why = "no group is defined with GroupTag '$t' (it was removed, or never defined), so this assignment can never be made. Remove this assignment, or keep the group (define it)." })
+                }
+                break   # one refusal per row
+            }
+        }
+        if (-not $out.Count) { return @{ allowed = $true; refused = @(); reason = '' } }
+        $txt = (@($out | Select-Object -First 5 | ForEach-Object { "$($_.key) -- $($_.why)" }) -join ' ')
+        $more = if ($out.Count -gt 5) { " (+$($out.Count - 5) more)" } else { '' }
+        return @{ allowed = $false; refused = @($out.ToArray())
+                  reason = "Not committed -- $($out.Count) assignment(s) name a group that is retired or not defined: $txt$more Nothing was saved." }
+    }
+    # B. a definition entity: which groups does this commit take away?
+    $before = & $stateOf $DefinitionRows
+    $afterDefs = New-Object System.Collections.Generic.List[object]
+    foreach ($d in @($DefinitionRows)) { if ($null -ne $d -and (& $fv $d 'Entity') -ne "$Base") { $afterDefs.Add($d) } }
+    foreach ($r in @($AfterRows)) { if ($null -ne $r) { $afterDefs.Add($r) } }
+    foreach ($d in @($StagedDefinitionRows)) { if ($null -ne $d -and (& $fv $d 'Entity') -ne "$Base") { $afterDefs.Add($d) } }
+    $after = & $stateOf @($afterDefs.ToArray())
+    $touched = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @($Diff.removes)) { $t = & $fv $r 'GroupTag'; if ($t) { $touched.Add($t.ToLowerInvariant()) } }
+    foreach ($m in @($Diff.modifies)) { $t = & $fv (& $side $m 'before') 'GroupTag'; if ($t) { $touched.Add($t.ToLowerInvariant()) } }
+    foreach ($lt in @($touched | Select-Object -Unique)) {
+        $b = $before[$lt]
+        if (-not $b -or -not $b.active) { continue }          # it was not a kept group before this commit: nothing new
+        $a = $after[$lt]
+        if ($a -and $a.active) { continue }                    # still defined and kept
+        $left = New-Object System.Collections.Generic.List[string]
+        foreach ($x in @($AssignmentRows)) {
+            if ($null -eq $x -or $x.StagedRemoval) { continue }
+            $r = $x.Row; if ($null -eq $r) { continue }
+            if ((& $fv $r 'Action') -ieq 'Remove') { continue }
+            $names = $false
+            foreach ($col in @($ents.assignments["$($x.Entity)"])) { if ((& $fv $r $col) -ieq $b.tag) { $names = $true; break } }
+            if (-not $names) { continue }
+            $left.Add("$($kind["$($x.Entity)"]): $(& $label "$($x.Entity)" $r)$(if ($x.Staged) { ' (staged, not committed yet)' })")
+        }
+        if (-not $left.Count) { continue }
+        $op = if ($a) { 'retire' } else { 'remove' }
+        $verb = if ($a) { 'retired (Lifecycle = Retire)' } else { 'removed' }
+        $gn = if ($b.name) { $b.name } else { $b.tag }
+        $shown = (@($left | Select-Object -First 5) -join '; ')
+        $more = if ($left.Count -gt 5) { " (+$($left.Count - 5) more)" } else { '' }
+        $out.Add([ordered]@{ op = $op; key = $gn; tag = $b.tag; group = "$($b.name)"; state = $op; rows = @($left.ToArray())
+            why = "the group cannot be $verb while $($left.Count) assignment(s) still name it: $shown$more. Remove these assignments in the same commit (the bin on the group's row removes them together with the group), or keep the group." })
+    }
+    if (-not $out.Count) { return @{ allowed = $true; refused = @(); reason = '' } }
+    $txt = (@($out | Select-Object -First 5 | ForEach-Object { "'$($_.key)' (GroupTag '$($_.tag)'): $($_.why)" }) -join ' ')
+    return @{ allowed = $false; refused = @($out.ToArray()); reason = "Not committed -- $($out.Count) group(s) still have assignments: $txt Nothing was saved." }
+}
+function Invoke-PimManagerRetiredGroupGate {
+    # PIM 100.98: reader + gate in one call, for the two commit paths. A read that failed refuses (never "nothing to refuse").
+    param([Parameter(Mandatory)][object]$Diff, [string]$Base = '', [object[]]$AfterRows = @())
+    try {
+        $in = Get-PimManagerRetiredGroupGateInput -Diff $Diff -Base $Base
+        if (-not $in.needed) { return @{ allowed = $true; refused = @(); reason = '' } }
+        return (Test-PimManagerRetiredGroupGate -Diff $Diff -Base $Base -AfterRows @($AfterRows) -DefinitionRows @($in.definitions) -AssignmentRows @($in.assignments) -StagedDefinitionRows @($in.stagedDefinitions))
+    } catch { return @{ allowed = $false; refused = @(); reason = "Not committed -- $($_.Exception.Message)" } }
+}
 function Compare-PimRowSets {
     # Per-row diff between two row arrays for the Review & Save preview.
     # Returns @{ adds = [...]; removes = [...]; modifies = [{ before, after, diffCols }]; unchanged = N }.
@@ -3381,7 +3686,9 @@ function Invoke-PimManagerSafeCommit {
         [string]$Approver = '',
         [string]$Source = 'gui',
         # CONFIG-1.2 (§96.2): the commit this one undoes ('' = not an undo). Journaled as UndoOf on every row.
-        [string]$UndoOf = ''
+        [string]$UndoOf = '',
+        # PIM 100.98: set ONLY by the grid commit, which has just run the retired-group gate on these rows itself.
+        [switch]$RetiredGroupGateDone
     )
     # §91.23 BACKSTOP: every commit path (grid, departments, workloads, conformance) lands here -- a row the managing tenant
     # sent (Owner=MSP) is never changed or removed by a managed tenant's Manager, whichever page asked.
@@ -3391,7 +3698,14 @@ function Invoke-PimManagerSafeCommit {
     # PIM 100.22 (f): the same backstop for a NEW duplicate group tag, whichever page committed (an unreadable entity refuses).
     $__td = Test-PimManagerNewTagDuplicateGate -Diff $__diff -Base $Base -OtherDefinitionRows @(Get-PimManagerOtherDefinitionTagRows -Base $Base)
     if (-not $__td.allowed) { throw $__td.reason }
-    $commitId = if ("$CommitId".Trim()) { "$CommitId".Trim() } else { [guid]::NewGuid().ToString('N') }
+    # PIM 100.98: the same backstop for an assignment to a retired / undefined group and for a group retired or removed
+    # while assignments still name it, whichever page committed.
+    # -RetiredGroupGateDone: the grid commit ran this very gate on the same rows a moment ago (and answered 400 itself).
+    if (-not $RetiredGroupGateDone) {
+        $__rg = Invoke-PimManagerRetiredGroupGate -Diff $__diff -Base $Base -AfterRows @($NewRows)
+        if (-not $__rg.allowed) { throw $__rg.reason }
+    }
+    $commitId = if("$CommitId".Trim()) { "$CommitId".Trim() } else { [guid]::NewGuid().ToString('N') }
     # SEC-16(b) -- the snapshot's `By` is evidence ("who committed this change"), so it must be the
     # signed-in principal, not the container's process user. Same defect as the audit writer.
     $who = try { $r = Get-PimManagerRole; if ("$($r.identity)".Trim()) { "$($r.identity)" } else { throw } }
@@ -6517,6 +6831,18 @@ function Invoke-PimManagerCsvPut {
         return 400
     }
 
+    # PIM 100.98 (owner 2026-10-12: "Refuse at commit"): an added or changed assignment that names a retired or undefined
+    # group, and a group retired / removed while assignments still name it, are refused whole. Plain form validation (the
+    # 400 names the rows and the two ways out) -- no guard trip. A bad row already stored is not checked here.
+    $retGate = Invoke-PimManagerRetiredGroupGate -Diff $diff -Base $base -AfterRows @($rowsOrdered)
+    if (-not $retGate.allowed) {
+        Write-PimManagerAuditEvent -Action 'commit.retired-group' -Target $base -Result 'denied' -After ([ordered]@{ refused = @($retGate.refused); reason = "$($retGate.reason)" })
+        Write-JsonResponse -Response $resp -Status 400 -Body ([ordered]@{
+            ok = $false; base = $base; gate = 'retired-group'; error = "$($retGate.reason)"; refused = @($retGate.refused)
+        })
+        return 400
+    }
+
     if (Get-Command Test-PimReplicationWriteAllowed -ErrorAction SilentlyContinue) {
         $repTags = @{ known = $false; tags = @() }
         try { $repTags = Get-PimManagerKnownTenantTags } catch { }
@@ -6536,7 +6862,7 @@ function Invoke-PimManagerCsvPut {
     & $__lap 'uplink+replication'
     $mcApprover = if ($mc -and "$($mc.gate)" -eq 'approved' -and $mc.approval) { "$($mc.approval.approver)" } else { '' }
     try {
-        $commitRes = Invoke-PimManagerSafeCommit -Base $base -NewRows $rowsOrdered -Current $current -SqlMode:$sqlMode -Classification $spClass -Approver $mcApprover -Source $(if ($undoOf) { 'undo' } else { $commitSource }) -UndoOf $undoOf -CommitId $__ccid
+        $commitRes = Invoke-PimManagerSafeCommit -Base $base -NewRows $rowsOrdered -Current $current -SqlMode:$sqlMode -Classification $spClass -Approver $mcApprover -Source $(if ($undoOf) { 'undo' } else { $commitSource }) -UndoOf $undoOf -CommitId $__ccid -RetiredGroupGateDone
     } catch {
         # The store was left exactly as before (snapshot restored). Surface
         # the clear error so the operator sees the commit was reversed.

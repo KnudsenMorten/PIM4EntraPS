@@ -7564,7 +7564,7 @@
     "permission templates imported by script (Import-PimPermissionTemplate.ps1) and tenant preparation from one configuration file (Invoke-PimTenantPrep.ps1)",
     "updated with one command from the public release",
     "community support (GitHub issues on the public repository)"];
-  var PIM_EDITION_PRO_SINGLE = ["Coverage & gaps and discovery — what is and is not delegated through PIM across every workload, and the scheduled jobs that find new roles, groups and resources",
+  var PIM_EDITION_PRO_SINGLE = ["Discovery and gaps — what is and is not delegated through PIM across every workload, and the scheduled jobs that find new roles, groups and resources",
     "the other workload connectors — Power BI, enterprise-app roles, Azure DevOps, Dataverse, Business Central and Power Platform",
     "revoking current delegations from the portal (the list itself is free)",
     "access reviews — campaigns with decisions recorded and enforced",
@@ -12898,7 +12898,8 @@
       '<th>Workload</th><th>Item</th><th>Status</th><th>Delegated by</th><th>Why</th>' + (canIgnore ? '<th style="width:92px;"></th>' : '') + '</tr></thead><tbody id="covTbody"></tbody></table>');
     body.innerHTML = h.join('');
     covRenderNotRead(document.getElementById('covNotRead'), d);          // 100.100
-    renderWorkloadPrereqChips(document.getElementById('covPrereqs'));   // REQ-U (prereqs)
+    // REQ-U (prereqs). PIM 100.108 (e): a workload this report could NOT read is never counted as ready in that line.
+    renderWorkloadPrereqChips(document.getElementById('covPrereqs'), null, { notRead: covNotReadSources(d).map(s => ({ workload: COV_PREREQ_OF[s.workload] || '', source: s.workload, reason: s.reason || '' })).filter(x => x.workload) });
     covRenderRows(body, d, canStage);
 
     const wf = document.getElementById('covFilterWorkload'); if (wf) wf.onchange = () => { COV_FILTER.workload = wf.value; covRenderRows(body, d, canStage); };
@@ -13099,7 +13100,8 @@
               (c.detail ? ' <span style="color:#57606a;">(' + esc(c.detail) + ')</span>' : '') +
               (c.manualStep ? '<div><i>Steps:</i> ' + esc(c.manualStep) + (c.learn ? ' <a href="' + esc(c.learn) + '" target="_blank" rel="noopener">Learn</a>' : '') + '</div>' : '') + '</li>').join('') + '</ol>';
         } else if (w && String(w.state) === 'ok') {
-          what = '<div style="margin-top:3px;">Its prerequisites are ready -- see what PIM Manager got below.</div>';
+          // PIM 100.108 (e): never "ready" beside "was not read" -- the prerequisites are on record, the read still failed.
+          what = '<div style="margin-top:3px;">Its prerequisites are recorded as done, but PIM Manager\'s own read failed -- so it is not counted as ready. See what PIM Manager got below.</div>';
         } else if (w && w.next) {
           what = '<div style="margin-top:3px;">' + esc(w.next) + '</div>';
         }
@@ -24922,6 +24924,20 @@
         (wrote.length ? ' Already committed in this run: ' + wrote.map(w => escapeHtml(w.base)).join(', ') + '.' : '') + '</div>';
       return true;
     }
+    // PIM 100.98 (owner 2026-10-12: "Refuse at commit"): an assignment that names a retired or undefined group, or a group
+    // retired / removed while assignments still name it. The server's own sentences are shown: the row, why, the two ways out.
+    if (e && e.status === 400 && e.body && e.body.gate === 'retired-group') {
+      const rf = asList(e.body.refused);
+      const isGroup = rf.some(r => r && (r.state === 'retire' || r.state === 'remove'));
+      status.innerHTML = '<b class="commitRetiredGroup">Not committed: ' + escapeHtml(entityLabel(base)) +
+        (isGroup ? ' would retire or remove a group that still has assignments.' : ' has an assignment to a group that is retired or not defined.') + '</b>' +
+        (rf.length
+          ? '<ul style="margin:4px 0 4px 18px;">' + rf.map(r => '<li><b>' + escapeHtml(String((r && r.key) || '')) + '</b>: ' + escapeHtml(String((r && r.why) || '')) + '</li>').join('') + '</ul>'
+          : '<div style="margin:4px 0;">' + escapeHtml(String(e.body.error || '')) + '</div>') +
+        '<div style="color:#57606a">Nothing was saved for ' + escapeHtml(entityLabel(base)) + '; your changes stay staged.' +
+        (wrote.length ? ' Already committed in this run: ' + wrote.map(w => escapeHtml(w.base)).join(', ') + '.' : '') + '</div>';
+      return true;
+    }
     if (!(e && e.status === 409 && e.body)) return false;
     if (e.body.conflict) { showCommitConflict(status, base, e.body, wrote); return true; }
     if (e.body.approvalRequired && e.body.target) { showCommitApprovalGate(status, base, e.body, wrote); return true; }
@@ -34689,11 +34705,22 @@
       (open.length ? open.length + ' check' + (open.length === 1 ? '' : 's') + ' to look at' : 'confirmed by a person') + '</summary>' +
       '<ul style="margin:2px 0 0 16px;padding:0;color:#24292f;">' + items + '</ul></details>';
   }
-  function pimWorkloadPrereqChipHtml(w, data, canAct) {
+  // PIM 100.108 (e) (owner 2026-10-12: "5 of 5 workloads ready" stood green under "Power BI was not read (HTTP 401)"): a
+  // workload is READY when the server says so (ready -- its state is ok AND, where the workload has a confirmation call,
+  // PIM's own call got through), and never while this page's own read of that workload failed (notRead, from Discovery
+  // and gaps). A person's Confirm makes the state ok; it does not make the workload ready by itself.
+  function pimWorkloadPrereqIsReady(w) {
+    if (!w) return false;
+    if (w.ready === false) return false;
+    return String(w.state) === 'ok';
+  }
+  function pimWorkloadPrereqChipHtml(w, data, canAct, notRead) {
     const esc = escapeHtml;
     const pal = { green: ['#dafbe1', '#1a7f37', '#1a7f37'], amber: ['#fff8c5', '#d4a72c', '#9a6700'], red: ['#ffebe9', '#cf222e', '#cf222e'] };
     let chip = String(w.chip || 'amber'); if (!pal[chip]) chip = 'amber';
     const state = String(w.state || 'notRun');
+    const notConfirmed = state === 'ok' && w.ready === false;
+    if ((notConfirmed || notRead) && chip === 'green') chip = 'amber';   // never green while it is not counted as ready
     const when = w.ranUtc ? fmtTime(w.ranUtc) : '';
     const ago = (w.ageDays != null && w.ageDays !== '') ? ' (' + w.ageDays + ' day' + (Number(w.ageDays) === 1 ? '' : 's') + ' ago)' : '';
     const title = w.title || w.workload;
@@ -34701,6 +34728,8 @@
     let text;
     if (data.loadError) text = 'prerequisite status could not be read: ' + data.loadError;
     else if (state === 'unreadable') text = 'prerequisite status could not be read from the store: ' + (data.storeError || '');
+    else if (notConfirmed) text = 'not ready -- ' + String(w.notReady || 'PIM has not confirmed it with its own call yet');
+    else if (state === 'ok' && notRead) text = 'not counted as ready -- the prerequisites are recorded as done (checked ' + when + ago + (who ? ' by ' + who : '') + '), but PIM Manager could not read ' + String(notRead.source || 'this workload');
     else if (state === 'ok') text = 'prerequisites OK -- checked ' + when + ago + (who ? ' by ' + who : '');
     else if (state === 'failed') text = 'prerequisites missing: ' + ((w.failed || []).join('; ') || 'see the last check');
     else if (state === 'stale') text = 're-check -- prerequisites last checked ' + when + ago + ', older than ' + (data.staleDays || 30) + ' days';
@@ -34711,19 +34740,25 @@
     const next = (state !== 'ok' && !data.loadError) ? String(w.next || '') : '';
     const recheck = (canAct && !data.loadError && state !== 'unreadable') ?
       '<button class="prereq-recheck" type="button" data-workload="' + esc(w.workload) + '" title="PIM checks the prerequisites itself (job ' + esc(data.selfCheckJob || 'workload-prereqs') + '). This queues a check now; the result appears here within a few minutes." style="font-size:10.5px;padding:1px 6px;">Check again</button>' : '';
-    return '<div class="prereq-chip" data-workload="' + esc(w.workload) + '" data-state="' + esc(state) + '" data-chip="' + chip + '" ' +
+    const readyNow = pimWorkloadPrereqIsReady(w) && !notRead && !data.loadError;
+    return '<div class="prereq-chip" data-workload="' + esc(w.workload) + '" data-state="' + esc(state) + '" data-chip="' + chip + '" data-ready="' + (readyNow ? '1' : '0') + '" ' +
       'style="background:' + pal[chip][0] + ';border:1px solid ' + pal[chip][1] + ';color:' + pal[chip][2] + ';border-radius:6px;padding:4px 8px;margin:4px 0;font-size:11.5px;min-width:0;">' +
       '<div style="display:flex;gap:6px;align-items:flex-start;min-width:0;"><span style="flex:1;min-width:0;overflow-wrap:anywhere;">' + icon + ' <b>' + esc(title) + '</b>: ' + esc(text) + '</span>' + recheck + '</div>' +
       (next ? '<div class="prereq-next" style="color:#57606a;margin-top:2px;overflow-wrap:anywhere;">' + esc(next) + '</div>' : '') +
-      (state !== 'ok' ? pimWorkloadPrereqChecksHtml(w, canAct) : '') +
+      (notRead ? '<div class="prereq-notread" style="color:#57606a;margin-top:2px;overflow-wrap:anywhere;">What PIM Manager got: ' + esc(String(notRead.reason || 'the read failed')) + '</div>' : '') +
+      ((state !== 'ok' || notConfirmed) ? pimWorkloadPrereqChecksHtml(w, canAct) : '') +
       (cmd ? '<div style="margin-top:3px;color:#57606a;">To fix, run once as an administrator (browser sign-in, no PowerShell modules):</div>' +
         '<div style="display:flex;gap:6px;align-items:center;margin-top:2px;min-width:0;"><code class="prereq-cmd" style="flex:1;min-width:0;overflow-x:auto;white-space:pre;display:block;font-size:10.5px;color:#24292f;background:#ffffffa0;padding:1px 4px;border-radius:4px;">' + esc(cmd) + '</code>' +
         '<button class="prereq-copy" type="button" style="font-size:10.5px;padding:1px 6px;">Copy</button></div>' + pimScriptDocLinksFor(cmd) : '') +
       '<div class="prereq-msg" style="color:#57606a;font-size:11px;"></div>' +
       '</div>';
   }
-  async function renderWorkloadPrereqChips(hostEl, workload) {
+  // opts.notRead (PIM 100.108 e): [{ workload: <prerequisite workload>, source: <the name on Discovery and gaps>, reason }] --
+  // the workloads the page's own read FAILED for. They are never counted as ready and never shown green.
+  async function renderWorkloadPrereqChips(hostEl, workload, opts) {
     if (!hostEl) return;
+    const notReadOf = {};
+    asList(opts && opts.notRead).forEach(x => { if (x && x.workload && !notReadOf[x.workload]) notReadOf[x.workload] = x; });
     if (!isServer) { hostEl.innerHTML = ''; return; }
     const data = (await pimWorkloadPrereqsLoad()) || { workloads: [] };
     const names = pimWorkloadPrereqNames(data, workload);
@@ -34731,12 +34766,12 @@
     if (!names.length) { hostEl.innerHTML = ''; return; }
     const canAct = (typeof roleAtLeast === 'function') ? roleAtLeast('Admin') : false;
     const byName = {}; (data.workloads || []).forEach(w => { byName[w.workload] = w; });
-    const chipOf = (n) => pimWorkloadPrereqChipHtml(byName[n] || { workload: n, state: 'notRun', chip: 'amber', command: '' }, data, canAct);
+    const chipOf = (n) => pimWorkloadPrereqChipHtml(byName[n] || { workload: n, state: 'notRun', chip: 'amber', command: '' }, data, canAct, notReadOf[n] || null);
     let h = '';
     if (all) {
       // PIM 100.100 (owner 2026-10-12: "it looks crappy" -- five bars above the list): the workloads that are READY fold
       // into ONE line, "5 of 5 workloads ready" (open it to see them); only the ones that need a person show open.
-      const ready = data.loadError ? [] : names.filter(n => byName[n] && String(byName[n].state) === 'ok');
+      const ready = data.loadError ? [] : names.filter(n => pimWorkloadPrereqIsReady(byName[n]) && !notReadOf[n]);
       const todo = names.filter(n => ready.indexOf(n) < 0);
       const okAll = !todo.length;
       h = '<details class="prereq-ready" data-ready="' + ready.length + '" data-total="' + names.length + '" style="margin:6px 0 4px;' + (okAll ? 'background:#dafbe1;border:1px solid #1a7f37;border-radius:6px;padding:4px 8px;' : '') + '">' +
@@ -34776,7 +34811,7 @@
         const r = await api('POST', '/api/workload-prereqs/confirm', { workload: b.getAttribute('data-workload'), checkId: b.getAttribute('data-check'), action: b.getAttribute('data-action') });
         if (r && Array.isArray(r.workloads)) _pimPrereqCache = { at: Date.now(), promise: Promise.resolve(Object.assign({}, data, { workloads: r.workloads })) };
         else _pimPrereqCache = null;
-        await renderWorkloadPrereqChips(hostEl, workload);
+        await renderWorkloadPrereqChips(hostEl, workload, opts);
       } catch (e) {
         if (m) m.textContent = 'Not recorded: ' + ((e && e.body && e.body.error) || (e && e.message) || e);
         b.disabled = false;

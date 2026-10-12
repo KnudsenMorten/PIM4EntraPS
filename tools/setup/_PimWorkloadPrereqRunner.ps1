@@ -16,6 +16,8 @@
       Graph beta  roleManagement/defender/roleDefinitions                  -- the engine's own Defender surface (beta only)
       Graph v1.0  deviceManagement/roleDefinitions                         -- the engine's Intune surface
       Graph v1.0  groups (GET/POST), groups/{id}/members/$ref (POST)       -- learn.microsoft.com/graph/api/group-post-groups
+      Graph v1.0  servicePrincipals/{id}/memberOf                          -- the membership, read from the IDENTITY's side (PIM 100.108:
+                                                                              groups/{id}/members leaves managed identities out for an app-only caller)
       Graph v1.0  subscribedSkus                                           -- learn.microsoft.com/graph/api/subscribedsku-list
       ARM         Microsoft.SecurityInsights/onboardingStates/default      -- learn.microsoft.com/rest/api/securityinsights/sentinel-onboarding-states/get
       ARM         Microsoft.ResourceGraph/resources (workspaces)            -- the same ARG call PIM-Rest.ps1 already makes
@@ -76,22 +78,28 @@ function Resolve-PimPrereqEngineIdentity {
         (ARM GET Microsoft.App/jobs/{TickJobName} -> identity.principalId).
       Returns @{ objectId; appId; displayName; kind } or throws -- a prerequisite run against no identity is worthless.
     #>
+    # PIM 100.108 (d): the hosted tick job can carry TWO identities (system-assigned + user-assigned). The engine signs in
+    # as ONE of them for every call, Power BI included (Select-PimPrereqTickJobIdentity: the one PIM_ManagedIdentityClientId
+    # names, else the system-assigned). That one is returned -- identityKind says which, notUsed lists the other(s).
     param([string]$EngineObjectId, [string]$EngineAppId, [string]$SubscriptionId, [string]$ResourceGroup, [string]$TickJobName = 'ca-pim-tick')
-    $sp = $null
+    $sp = $null; $pick = $null
+    $sel = 'id,appId,displayName,servicePrincipalType,alternativeNames'
     if ("$EngineObjectId".Trim()) {
-        $sp = Invoke-PimGraph -Path "/servicePrincipals/$("$EngineObjectId".Trim())?`$select=id,appId,displayName,servicePrincipalType"
+        $sp = Invoke-PimGraph -Path "/servicePrincipals/$("$EngineObjectId".Trim())?`$select=$sel"
     } elseif ("$EngineAppId".Trim()) {
-        $sp = @(Invoke-PimGraph -All -Path "/servicePrincipals?`$filter=appId eq '$("$EngineAppId".Trim())'&`$select=id,appId,displayName,servicePrincipalType") | Select-Object -First 1
+        $sp = @(Invoke-PimGraph -All -Path "/servicePrincipals?`$filter=appId eq '$("$EngineAppId".Trim())'&`$select=$sel") | Select-Object -First 1
     } else {
         if (-not "$SubscriptionId".Trim() -or -not "$ResourceGroup".Trim()) { throw 'no engine identity: give -EngineObjectId, -EngineAppId, or -SubscriptionId + -ResourceGroup (+ -TickJobName) of the hosted tick job.' }
         $job = Invoke-PimArm -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$TickJobName" -ApiVersion '2024-03-01'
-        $oid = "$($job.identity.principalId)".Trim()
-        if (-not $oid) { throw "the tick job '$TickJobName' in $ResourceGroup has no system-assigned identity -- run the hosting step first." }
-        $sp = Invoke-PimGraph -Path "/servicePrincipals/$oid`?`$select=id,appId,displayName,servicePrincipalType"
+        $pick = Select-PimPrereqTickJobIdentity -Job $job -JobName $TickJobName
+        $sp = Invoke-PimGraph -Path "/servicePrincipals/$($pick.objectId)`?`$select=$sel"
     }
     if (-not $sp -or -not "$($sp.id)".Trim()) { throw 'the engine identity was not found in this tenant.' }
     $kind = if ("$($sp.servicePrincipalType)" -ieq 'ManagedIdentity') { 'managedIdentity' } else { 'application' }
-    return @{ objectId = "$($sp.id)"; appId = "$($sp.appId)"; displayName = "$($sp.displayName)"; kind = $kind }
+    $ik = Get-PimPrereqIdentityKind -ServicePrincipal $sp -Fallback $(if ($pick) { "$($pick.identityKind)" } else { '' })
+    $out = @{ objectId = "$($sp.id)"; appId = "$($sp.appId)"; displayName = "$($sp.displayName)"; kind = $kind; identityKind = $ik; why = ''; notUsed = @() }
+    if ($pick) { $out.why = "$($pick.why)"; $out.notUsed = @($pick.notUsed) }
+    return $out
 }
 
 function Get-PimPrereqGraphSp {
@@ -368,14 +376,20 @@ function Invoke-PimPrereqPowerBI {
     $out = New-Object System.Collections.Generic.List[object]
     $gname = "$($Ctx.powerBiGroupName)".Trim()
     $gid = ''
+    # PIM 100.108: every text NAMES the group and the ONE identity that must be in it (the identity the engine signs in
+    # as for the Power BI call -- Resolve-PimPrereqEngineIdentity / the engine's own token in the self-check).
+    $who = Get-PimPowerBiPrereqIdentityText -Identity $Ctx.engine
+    $member = @{ displayName = "$($Ctx.engine.displayName)"; objectId = "$($Ctx.engine.objectId)"; identityKind = "$($Ctx.engine.identityKind)" }
+    $delay = if ("$env:PIM_PREREQ_READBACK_SECONDS".Trim()) { [int]$env:PIM_PREREQ_READBACK_SECONDS } else { 5 }
     # 1. The security group.
     $g = Invoke-PimPrereqProbe { @(Invoke-PimGraph -All -Path "/groups?`$filter=displayName eq '$($gname.Replace("'", "''"))'&`$select=id,displayName,securityEnabled,mailEnabled") }
-    if (-not $g.ok) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'notChecked' -Detail "could not look the group up: $($g.error)")) }
-    elseif (@($g.value).Count -gt 1) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'failed' -Detail "$(@($g.value).Count) groups are named '$gname' -- ambiguous; rename one or pass -PowerBiSecurityGroupName")) }
+    $st0 = Get-PimPowerBiPrereqSteps -GroupName $gname -Identity $Ctx.engine
+    if (-not $g.ok) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'notChecked' -Detail "could not look the group '$gname' up: $($g.error)" -Data @{ groupName = $gname; members = @($member) } -ManualStep $st0.group)) }
+    elseif (@($g.value).Count -gt 1) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'failed' -Detail "$(@($g.value).Count) groups are named '$gname' -- ambiguous; rename one or pass -PowerBiSecurityGroupName" -Data @{ groupName = $gname; members = @($member) } -ManualStep $st0.group)) }
     elseif (@($g.value).Count -eq 1) {
         $gid = "$(@($g.value)[0].id)"
-        if (-not [bool]@($g.value)[0].securityEnabled) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'failed' -Detail "'$gname' exists but is not a security group")); $gid = '' }
-        else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'ok' -Detail "'$gname' ($gid)" -Data @{ groupName = $gname })) }
+        if (-not [bool]@($g.value)[0].securityEnabled) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'failed' -Detail "'$gname' ($gid) exists but is not a security group" -Data @{ groupName = $gname; members = @($member) } -ManualStep $st0.group)); $gid = '' }
+        else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'ok' -Detail "'$gname' ($gid)" -Data @{ groupName = $gname; groupId = $gid })) }
     } else {
         if (Test-PimPrereqShould -Ctx $Ctx -Target $gname -Action 'create security group') {
             $nick = ($gname -replace '[^A-Za-z0-9]', '')
@@ -388,7 +402,6 @@ function Invoke-PimPrereqPowerBI {
             $back = $null
             if ($c.ok) {
                 $newId = "$(@($c.value)[0].id)"
-                $delay = if ("$env:PIM_PREREQ_READBACK_SECONDS".Trim()) { [int]$env:PIM_PREREQ_READBACK_SECONDS } else { 5 }
                 for ($try = 1; $try -le 6; $try++) {
                     $back = if ($newId) { Invoke-PimPrereqProbe { Invoke-PimGraph -Path "/groups/$newId`?`$select=id,securityEnabled" } }
                             else { $byName = Invoke-PimPrereqProbe { @(Invoke-PimGraph -All -Path "/groups?`$filter=displayName eq '$($gname.Replace("'", "''"))'&`$select=id,securityEnabled") }
@@ -397,26 +410,49 @@ function Invoke-PimPrereqPowerBI {
                     if ($try -lt 6 -and $delay -gt 0) { Start-Sleep -Seconds $delay }
                 }
             }
-            if ($back -and $back.ok -and [bool]$back.value.securityEnabled) { $gid = "$($back.value.id)"; $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'fixed' -Detail "created '$gname' ($gid) and read it back")) }
-            else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'failed' -Detail "could not create '$gname': $(if ($c.ok) { 'read-back failed' } else { $c.error })")) }
-        } else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'failed' -Detail "'$gname' does not exist ($(Get-PimPrereqNotDoneReason -Ctx $Ctx -Verb 'created'))" -Data @{ groupName = $gname })) }
+            if ($back -and $back.ok -and [bool]$back.value.securityEnabled) { $gid = "$($back.value.id)"; $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'fixed' -Detail "created '$gname' ($gid) and read it back" -Data @{ groupName = $gname; groupId = $gid })) }
+            elseif (-not $c.ok -and [int]$c.code -eq 403) {
+                # PIM 100.108 (d): a refusal is never left without the step -- say exactly what to create and who goes in it.
+                $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'failed' -Data @{ groupName = $gname; members = @($member); refused = 403 } -ManualStep $st0.group `
+                    -Detail "the security group '$gname' does not exist, and Graph refused to create it (HTTP 403: the identity signed in here may not create groups -- it needs Group.Create or Group.ReadWrite.All). Create it yourself: a security group named '$gname', with this member: $who."))
+            }
+            else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'failed' -Detail "could not create '$gname': $(if ($c.ok) { 'read-back failed' } else { $c.error }). Create it yourself: a security group named '$gname', with this member: $who." -Data @{ groupName = $gname; members = @($member) } -ManualStep $st0.group)) }
+        } else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'failed' -Detail "the security group '$gname' does not exist ($(Get-PimPrereqNotDoneReason -Ctx $Ctx -Verb 'created'))" -Data @{ groupName = $gname; members = @($member) } -ManualStep $st0.group)) }
     }
-    # 2. The engine identity is a member.
-    if (-not $gid) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'notChecked' -Detail "no usable group yet$(Get-PimPrereqNotPreviewable -Ctx $Ctx -Steps "adding $($Ctx.engine.displayName) to '$gname'")")) }
+    # 2. The engine identity is a member -- read from the IDENTITY's side (its memberOf).
+    #    PIM 100.108 (b): GET /groups/{id}/members does not list a managed identity for an app-only caller (measured on the
+    #    vendor's own environment 2026-10-12: an empty list while servicePrincipals/{id}/memberOf showed the group), so
+    #    "is it a member" is asked of the identity, never of the group.
+    $steps = Get-PimPowerBiPrereqSteps -GroupName $gname -GroupId $gid -Identity $Ctx.engine
+    $mdata = @{ groupName = $gname; groupId = $gid; members = @($member) }
+    if (-not $gid) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'notChecked' -Detail "no usable group yet, so the membership of $who cannot be checked$(Get-PimPrereqNotPreviewable -Ctx $Ctx -Steps "adding $($Ctx.engine.displayName) to '$gname'")" -Data $mdata -ManualStep $steps.groupMember)) }
     else {
-        # The TYPED cast: measured 2026-09-19 on internal, the plain /members list returned [] while the managed identity
-        # was a member (audit "Add member to group: success"; /members/microsoft.graph.servicePrincipal and the MI's
-        # memberOf both listed it). Reading the untyped list made every run report "read-back did not show it".
-        $readMembers = { @(Invoke-PimGraph -All -Path "/groups/$gid/members/microsoft.graph.servicePrincipal?`$select=id") | ForEach-Object { "$($_.id)" } }
-        $m = Invoke-PimPrereqProbe $readMembers
-        if (-not $m.ok) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'notChecked' -Detail "could not read the members: $($m.error)")) }
-        elseif (@($m.value) -contains $Ctx.engine.objectId) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'ok' -Detail "$($Ctx.engine.displayName) is a member")) }
+        $readMemberOf = { @(Invoke-PimGraph -All -Path "/servicePrincipals/$($Ctx.engine.objectId)/memberOf?`$select=id") | ForEach-Object { "$($_.id)" } }
+        $m = Invoke-PimPrereqProbe $readMemberOf
+        if (-not $m.ok) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'notChecked' -Detail "could not read which groups $who is a member of: $($m.error)" -Data $mdata -ManualStep $steps.groupMember)) }
+        elseif (@($m.value) -contains $gid) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'ok' -Detail "$who is a member of '$gname'" -Data $mdata)) }
         elseif (Test-PimPrereqShould -Ctx $Ctx -Target $gname -Action "add member $($Ctx.engine.displayName)") {
             $a = Invoke-PimPrereqProbe { Invoke-PimGraph -Method POST -Path "/groups/$gid/members/`$ref" -Body @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$($Ctx.engine.objectId)" } }
-            $m2 = Invoke-PimPrereqProbe $readMembers
-            if ($m2.ok -and @($m2.value) -contains $Ctx.engine.objectId) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'fixed' -Detail "added $($Ctx.engine.displayName) and read it back")) }
-            else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'failed' -Detail "could not add the engine identity: $(if ($a.ok) { 'read-back did not show it' } else { $a.error })")) }
-        } else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'failed' -Detail "the engine identity is not a member ($(Get-PimPrereqNotDoneReason -Ctx $Ctx -Verb 'added'))" -Data @{ groupName = $gname })) }
+            # "already a member" (400, references already exist) is the wanted state -- the read-back decides.
+            $sent = ($a.ok -or "$($a.error)" -match '(?i)already exist')
+            $seen = $false
+            if ($sent) {
+                # A new membership is not in memberOf at once (Entra replication): the read-back RETRIES, like the group's.
+                for ($try = 1; $try -le 6 -and -not $seen; $try++) {
+                    $m2 = Invoke-PimPrereqProbe $readMemberOf
+                    if ($m2.ok -and @($m2.value) -contains $gid) { $seen = $true; break }
+                    if ($try -lt 6 -and $delay -gt 0) { Start-Sleep -Seconds $delay }
+                }
+            }
+            if ($seen) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'fixed' -Detail "added $who to '$gname' and read it back from the identity's own group list" -Data $mdata)) }
+            elseif ($sent) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'notChecked' -Detail "added $who to '$gname', but the identity's own group list does not show it yet (Entra can take a few minutes) -- press Check again in PIM Manager" -Data $mdata -ManualStep $steps.groupMember)) }
+            elseif ([int]$a.code -eq 403) {
+                $d403 = @{ groupName = $gname; groupId = $gid; members = @($member); refused = 403 }
+                $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'failed' -Data $d403 -ManualStep $steps.groupMember `
+                    -Detail "the group '$gname' exists but the engine identity is not a member, and Graph refused to add it (HTTP 403: the identity signed in here may not change group members -- it needs GroupMember.ReadWrite.All). $($steps.addYourself)"))
+            }
+            else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'failed' -Detail "the group '$gname' exists but the engine identity is not a member, and adding it failed: $($a.error). $($steps.addYourself)" -Data $mdata -ManualStep $steps.groupMember)) }
+        } else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'failed' -Detail "the group '$gname' exists but the engine identity is not a member: $who is not in it ($(Get-PimPrereqNotDoneReason -Ctx $Ctx -Verb 'added'))" -Data $mdata -ManualStep $steps.groupMember)) }
     }
     # 3. No admin-consent Power BI application permission on the engine identity.
     $ids = Get-PimWorkloadPrereqGraphRoleIds
@@ -431,28 +467,29 @@ function Invoke-PimPrereqPowerBI {
     # 4. The Fabric tenant setting.
     $ts = Invoke-PimPrereqProbe { Get-PimPrereqFabricTenantSettings }
     if (-not $ts.ok) {
-        $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -Status 'notChecked' -Detail "the caller may not read Fabric tenant settings (HTTP $($ts.code)) -- it must be a Fabric administrator or a service principal an admin-API setting allows. Do the portal step, then re-run. $($ts.error)".Trim()))
+        $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -ManualStep $steps.tenantSetting -Status 'notChecked' -Detail "the caller may not read Fabric tenant settings (HTTP $($ts.code)) -- it must be a Fabric administrator or a service principal an admin-API setting allows. Do the portal step, then re-run. $($ts.error)".Trim()))
     } elseif (-not $gid) {
-        $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -Status 'notChecked' -Detail "no usable group yet, so the setting cannot be scoped to it$(Get-PimPrereqNotPreviewable -Ctx $Ctx -Steps "enabling 'Service principals can access read-only admin APIs' for '$gname'")"))
+        $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -ManualStep $steps.tenantSetting -Status 'notChecked' -Detail "no usable group yet, so the setting cannot be scoped to it$(Get-PimPrereqNotPreviewable -Ctx $Ctx -Steps "enabling 'Service principals can access read-only admin APIs' for '$gname'")"))
     } else {
         $v = Test-PimFabricReadOnlyAdminSetting -Settings @($ts.value) -GroupId $gid
-        if ($v.ok) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -Status 'ok' -Detail $v.detail)) }
-        elseif (-not $v.found) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -Status 'failed' -Detail $v.detail)) }
+        if ($v.ok) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -ManualStep $steps.tenantSetting -Status 'ok' -Detail $v.detail)) }
+        elseif (-not $v.found) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -ManualStep $steps.tenantSetting -Status 'failed' -Detail $v.detail)) }
         elseif (Test-PimPrereqShould -Ctx $Ctx -Target 'Fabric tenant setting AllowServicePrincipalsUseReadAdminAPIs' -Action "enable for '$gname'") {
             $cur = Find-PimFabricReadOnlyAdminSetting -Settings @($ts.value)
             $body = New-PimFabricReadOnlyAdminSettingUpdate -Current $cur -GroupId $gid -GroupName $gname
             $u = Invoke-PimPrereqProbe { Invoke-PimRest -Method POST -Url "https://api.fabric.microsoft.com/v1/admin/tenantsettings/$($cur.settingName)/update" -Resource 'https://api.fabric.microsoft.com' -Body $body }
             $back = Invoke-PimPrereqProbe { Get-PimPrereqFabricTenantSettings }
             $bv = if ($back.ok) { Test-PimFabricReadOnlyAdminSetting -Settings @($back.value) -GroupId $gid } else { @{ ok = $false; detail = $back.error } }
-            if ($bv.ok) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -Status 'fixed' -Detail "enabled for '$gname' (existing groups kept) and read back")) }
-            else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -Status 'failed' -Detail "could not enable it: $(if ($u.ok) { $bv.detail } else { $u.error })")) }
-        } else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -Status 'failed' -Detail "$($v.detail) ($(Get-PimPrereqNotDoneReason -Ctx $Ctx -Verb 'changed'))")) }
+            if ($bv.ok) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -ManualStep $steps.tenantSetting -Status 'fixed' -Detail "enabled for '$gname' (existing groups kept) and read back")) }
+            else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -ManualStep $steps.tenantSetting -Status 'failed' -Detail "could not enable it: $(if ($u.ok) { $bv.detail } else { $u.error })")) }
+        } else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -ManualStep $steps.tenantSetting -Status 'failed' -Detail "$($v.detail) ($(Get-PimPrereqNotDoneReason -Ctx $Ctx -Verb 'changed'))")) }
     }
-    # 5. Confirmation: the admin API as the engine (optional).
+    # 5. Confirmation: the admin API as the engine. It does not decide the stored state (optional), but PIM 100.108 (e): the
+    #    Manager counts Power BI as READY only when this answered 200 (Get-PimWorkloadPrereqView).
     $e = Invoke-PimPrereqAsEngine -Ctx $Ctx -Url 'https://api.powerbi.com/v1.0/myorg/admin/groups?$top=1' -Resource 'powerbi'
-    if ($e.ok) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.adminApi' -Status 'ok' -Detail 'GET admin/groups answered 200 as the engine')) }
+    if ($e.ok) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.adminApi' -Status 'ok' -Detail "GET admin/groups answered 200 as the engine ($who)")) }
     elseif ($e.skipped) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.adminApi' -Status 'notChecked' -Detail $e.error)) }
-    else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.adminApi' -Status 'failed' -Detail "GET admin/groups as the engine: $($e.error)")) }
+    else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.adminApi' -Status 'failed' -Detail "GET admin/groups as the engine ($who): $($e.error)")) }
     return $out.ToArray()
 }
 
