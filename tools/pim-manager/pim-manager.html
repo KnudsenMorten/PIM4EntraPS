@@ -338,8 +338,19 @@
   #mapSearch { min-width:280px; padding:5px 9px; border:1px solid #d0d7de; border-radius:6px; font-size:12.5px; background:#ffffff; color:#1a1a1a; }
   .map-hint { color:#57606a; font-size:11px; }
   /* REQ 100.80 (owner 2026-10-11, screenshot: the detail bar covered the board and nothing scrolled -- unreadable): the
-     board keeps a REAL floor (58% of the screen) and never shrinks under the detail bar; the page scrolls instead. */
-  #mapBoard, #dgvBoard { flex:1 0 auto; min-height:max(420px, 58vh); display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; padding:12px 14px; position:relative; background:#f6f8fa; overflow:hidden; }
+     board keeps a floor and never shrinks under the detail bar; the page scrolls instead.
+     REQ 100.96 (owner 2026-10-12, same complaint again): 100.80 did NOT make anything scroll. Measured in a real browser
+     (tests/playwright/delegation-graph-layout.spec.ts, "cause"): the board was a flex item that may not shrink
+     (flex:1 0 auto, floor 58vh) inside .tab-panel, which is as high as the window allows and has overflow:hidden -- a box
+     that clips and has NO scrollbar. So the board ran out under the bottom of the panel, and the detail bar
+     (position:sticky; bottom:0 -- its scroll container is that same clipping .tab-panel) was painted over the board's
+     lower part. "#revGraph { overflow:visible }" only passed the overflow up to the box that clips it.
+     Now: the toolbar + board live in a REAL scroll area (#mapScroll; on the Delegation overview #revScroll, which also
+     holds the page's bars), and the detail bar is that area's sibling underneath -- in the flow, not sticky. The board
+     takes its content's height (floor 260px) and the scroll area scrolls; the wires are positioned inside the board, so
+     they move with their boxes. */
+  #mapScroll, #revScroll { flex:1 1 0; min-height:0; display:flex; flex-direction:column; overflow-x:hidden; overflow-y:auto; }
+  #mapBoard, #dgvBoard { flex:1 0 auto; min-height:260px; display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; padding:12px 14px; position:relative; background:#f6f8fa; overflow:hidden; }
   /* 🔴 REGRESSION I SHIPPED IN v2.4.254, AND ITS CORRECTION.
      BUG-86 was "the board is impossible to read -- wires stroked over every label they
      cross". I fixed it by putting the wires BEHIND the columns (z-index:0 under a new
@@ -539,10 +550,12 @@
   #mapDetail .assign-banner { color:#0969da; font-weight:600; }
   /* 🔴 THE SELECTION BAR IS STICKY (operator, 2026-09-22: "this view is very hard to spot").
      It is the bar that says what is selected and carries Give / Remove and the picker -- and it sat
-     at the very bottom of a full-height board, off-screen, in plain white. It now sticks to the
-     bottom of the viewport with its own tint and a lifted edge, so the actions are visible wherever
-     you are on the board. It scrolls with the page only once it reaches its place in the flow. */
-  #mapDetail, #dgvDetail { flex:0 0 auto; position:sticky; bottom:0; z-index:12; padding:9px 14px;
+     at the very bottom of a full-height board, off-screen, in plain white. It has its own tint and a
+     lifted edge, and is always on screen.
+     REQ 100.96: it is no longer position:sticky. It was sticky inside a box that does not scroll, so it was painted
+     OVER the board. It is now the row UNDER the board's scroll area (in the flow), and its own content scrolls inside
+     it (at most 34% of the window). */
+  #mapDetail, #dgvDetail { flex:0 0 auto; position:relative; z-index:12; padding:9px 14px;
                border-top:2px solid #0969da; background:#f6f8fa; box-shadow:0 -4px 12px rgba(27,31,36,.10);
                font-size:12px; color:#1a1a1a; min-height:38px; max-height:34vh; overflow:auto; }
   #mapDetail.has-sel, #dgvDetail.has-sel { background:#ffffff; }
@@ -867,7 +880,8 @@
   #revResults .rev-loading .rev-load-age { font-weight:400; color:#57606a; }
   #revResults .rev-loading.warn { color:#9a6700; }
   #revResults .rev-loading-sub { color:#57606a; font-size:11.5px; padding:0 2px 12px 22px; }
-  #revGraph { flex:1 1 auto; min-height:460px; display:flex; flex-direction:column; overflow:visible; }
+  /* REQ 100.96: the graph takes its content's height inside #revScroll (which scrolls); it is never squeezed or clipped. */
+  #revGraph { flex:1 0 auto; display:flex; flex-direction:column; overflow:visible; }
   /* REQ 100.80 (owner: "back to overview ... must be easier to see (it is the most important button)"): a primary button. */
   #mapClear, #dgvClear { background:#0969da; color:#ffffff; border:1px solid #0969da; border-radius:6px; font-weight:700;
                          font-size:13.5px; padding:6px 16px; box-shadow:0 1px 3px rgba(9,105,218,.35); cursor:pointer; }
@@ -876,15 +890,27 @@
   #dgvBoard .map-item .dgv-badge { flex:0 0 auto; font-size:9.5px; font-weight:700; letter-spacing:.3px; color:#fff; border-radius:9px; padding:0 5px; }
   #dgvBoard .map-item .dgv-queued { flex:0 0 auto; font-size:9.5px; font-weight:600; letter-spacing:.3px; text-transform:uppercase; color:#82071e;
                                     background:#ffcecb; border:1px solid #cf222e; border-radius:9px; padding:0 5px; }
-  #dgvDetail .dgv-head { font-weight:600; margin-bottom:4px; }
+  /* REQ 100.96: the panel is a column -- one head line (name, how many live assignments, Select all / Clear / Revoke,
+     Collapse) that is ALWAYS visible, and under it the list, which is the only part that scrolls. Collapsed = the head
+     line only (name + count + Expand), so the board gets the room. */
+  #dgvDetail { display:flex; flex-direction:column; overflow:hidden; box-sizing:border-box; }   /* border-box: the 34vh cap is the WHOLE panel (measured: padding + border made it 20px higher) */
+  #dgvDetail .dgv-head { flex:0 0 auto; display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; font-weight:600; margin-bottom:4px; }
+  #dgvDetail .dgv-title { flex:1 1 320px; min-width:0; overflow-wrap:anywhere; }
   #dgvDetail .dgv-sub { color:#57606a; font-weight:400; }
-  #dgvDetail .dgv-list { border:1px solid #d0d7de; border-radius:6px; background:#ffffff; max-height:20vh; overflow:auto; margin:4px 0 6px 0; }
+  #dgvDetail .dgv-toggle { flex:0 0 auto; padding:3px 10px; font-size:11.5px; white-space:nowrap; background:#f6f8fa; color:#24292f; border:1px solid #d0d7de; border-radius:6px; cursor:pointer; }
+  #dgvDetail .dgv-toggle:hover { border-color:#0969da; color:#0969da; }
+  #dgvDetail .dgv-list { flex:1 1 auto; min-height:0; border:1px solid #d0d7de; border-radius:6px; background:#ffffff; overflow:auto; margin:2px 0 0 0; }
+  #dgvDetail .dgv-list .dgv-note { padding:6px 8px; }
+  #dgvDetail.collapsed { padding-top:5px; padding-bottom:5px; min-height:0; }
+  #dgvDetail.collapsed .dgv-list, #dgvDetail.collapsed .dgv-act, #dgvDetail.collapsed > .dgv-note { display:none; }
+  #dgvDetail.collapsed .dgv-head { flex-wrap:nowrap; margin-bottom:0; }
+  #dgvDetail.collapsed .dgv-title { flex:1 1 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   #dgvDetail .dgv-sec { padding:4px 8px 2px 8px; font-size:10px; text-transform:uppercase; letter-spacing:.4px; color:#57606a; font-weight:600; background:#f6f8fa; }
   #dgvDetail .dgv-row { display:flex; gap:8px; align-items:baseline; padding:3px 8px; border-bottom:1px solid #f2f4f7; cursor:pointer; }
   #dgvDetail .dgv-row:hover { background:#fff5f5; }
   #dgvDetail .dgv-row.dis { color:#8c959f; cursor:default; }
   #dgvDetail .dgv-row .dgv-what { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; }
-  #dgvDetail .dgv-act { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:4px 0 2px 0; }
+  #dgvDetail .dgv-act { flex:0 0 auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:0; }
   #dgvDetail .dgv-act button { padding:3px 10px; font-size:11.5px; }
   #dgvDetail .dgv-act button.rev-danger { color:#fff; background:#cf222e; border-color:#cf222e; }
   #dgvDetail .dgv-act button.rev-danger:disabled { background:#eaeef2; border-color:#d0d7de; color:#57606a; cursor:not-allowed; }
@@ -1435,6 +1461,9 @@
 
   <!-- =========== Access Map tab =========== -->
   <div id="mapTab" class="tab-panel">
+    <!-- REQ 100.96: the toolbar and the board scroll together in #mapScroll; the detail bar (#mapDetail) sits UNDER that
+         scroll area, in the flow, so no part of the board is ever behind it. -->
+    <div id="mapScroll">
     <div id="mapToolbar">
       <div id="mapSearchWrap" style="position:relative;">
         <input type="text" id="mapSearch" data-filter="1" placeholder="Find a person, group, role or scope..." autocomplete="off">
@@ -1497,6 +1526,7 @@
         <div class="map-col-body" id="mapCol3"></div>
       </div>
     </div>
+    </div><!-- /#mapScroll -->
     <div id="mapDetail"><span class="empty">Nothing selected.</span></div>
   </div>
 
@@ -2022,6 +2052,11 @@
 
   <!-- =========== Maintenance tab =========== -->
   <div id="revokeTab" class="tab-panel">
+    <!-- REQ 100.96 (owner 2026-10-12, third report: "the view doesnt scroll and it blocks"): everything above the graph's
+         detail panel (the bars, the list, the graph's toolbar and board) is ONE scroll area (#revScroll). The panel
+         (#dgvDetail) is its sibling underneath, in the flow: the scroll area ends where the panel starts, so nothing of
+         the board is ever behind the panel, and the board is reached by scrolling whatever the window height. -->
+    <div id="revScroll">
     <div class="pro-lic-banner" data-feature="revoke.current" style="display:none; flex:0 0 auto; margin:8px 12px 0;"></div>
     <!-- Workload delegation: bind PIM groups to workload RBAC roles
          (Defender XDR, Intune, ...) -- stages rows into
@@ -2130,8 +2165,9 @@
           <div class="map-col-body" id="dgvCol3"></div>
         </div>
       </div>
-      <div id="dgvDetail"><span class="empty">Nothing selected &mdash; click a person, group or role above to see its live assignments.</span></div>
     </div>
+    </div><!-- /#revScroll -->
+    <div id="dgvDetail" style="display:none;"><span class="empty">Nothing selected &mdash; click a person, group or role above to see its live assignments.</span></div>
     <div id="revResultsPane" style="display:none"></div>
   </div>
 
@@ -32974,6 +33010,9 @@
     const showGraph = g && REV.lastRender === 'table';
     if (res) res.style.display = showGraph ? 'none' : '';
     if (gr) gr.style.display = showGraph ? 'flex' : 'none';
+    // REQ 100.96: the graph's detail panel is a sibling UNDER the scroll area (not inside #revGraph) -- shown with the graph.
+    const det = document.getElementById('dgvDetail');
+    if (det) det.style.display = showGraph ? '' : 'none';
   }
 
   // BUG-97. Owns the four count chips so that "not known yet" can never be rendered as 0.
@@ -34024,7 +34063,9 @@
   // staging of delegation ROWS (MAP_LINK_ACTIONS, pendingChanges), which this view must not have; the box, path and wire
   // primitives and every style are shared.
   // ===================================================================
-  const DGV = { sel: null, selEdge: null, model: null, focusMode: true, colFilter: null, lastEdges: null, hoverId: null, wired: false };
+  const DGV = { sel: null, selEdge: null, model: null, focusMode: true, colFilter: null, lastEdges: null, hoverId: null, wired: false, detailCollapsed: false };
+  // REQ 100.96: the detail panel's expand / collapse choice is kept for the browser session (a new selection keeps it).
+  try { DGV.detailCollapsed = (sessionStorage.getItem('pim.revoke.graph.detailCollapsed') === '1'); } catch (_) { }
   const DGV_PERSON_DOT = { user: '#0969da', servicePrincipal: '#bc4c00', deleted: '#cf222e' };
   const DGV_COLF = [
     [['all', 'All'], ['user', 'People'], ['servicePrincipal', 'Apps'], ['deleted', 'Deleted']],
@@ -34278,6 +34319,8 @@
     const down = mapBfs(id, m.fwd, 'target'), up = mapBfs(id, m.back, 'source');
     dgvShowPath(new Set([...down.nodes, ...up.nodes]), [...down.edges, ...up.edges], id, rerendered);
     dgvRenderDetail({ node: id });
+    // REQ 100.96: the panel has just changed height, so the scroll area above it did too -- keep the clicked box in view.
+    if (!rerendered) { const s = document.querySelector('#dgvBoard .map-item.sel'); if (s && s.scrollIntoView) s.scrollIntoView({ block: 'nearest' }); }
   }
   function dgvSelectEdge(key, rerendered) {
     const m = DGV.model; const e = m && m.edgeByKey[key]; if (!e) return;
@@ -34296,7 +34339,7 @@
     const cl = document.getElementById('dgvClear'); if (cl) cl.style.display = 'none';
     const ft = document.getElementById('dgvFocusToggle'); if (ft) ft.style.display = 'none';
     const d = document.getElementById('dgvDetail');
-    if (d) { d.classList.remove('has-sel'); d.innerHTML = '<span class="empty">Nothing selected &mdash; click a person, group or role above (or a line) to see its live assignments and revoke what is not needed.</span>'; }
+    if (d) { d.classList.remove('has-sel', 'collapsed'); d.innerHTML = '<span class="empty">Nothing selected &mdash; click a person, group or role above (or a line) to see its live assignments and revoke what is not needed.</span>'; }
   }
   function dgvRowLine(r) {
     const queued = REV.revokeQueued.has(r.id);
@@ -34335,22 +34378,30 @@
     }
     sections = sections.filter(s => s.rows.length);
     const can = dgvCanRevoke();
-    let h = '<div class="dgv-head">' + head + '</div>';
+    // REQ 100.96: ONE head line that never scrolls -- the name, how many live assignments, the buttons and Collapse /
+    // Expand. The list under it is the only part that scrolls; collapsed, the head line is all that is left.
+    const nLive = sections.reduce((a, s) => a + s.rows.length, 0);
+    let h = '<div class="dgv-head"><span class="dgv-title">' + head +
+      ' <span class="dgv-sub dgv-count">&middot; ' + nLive + ' live assignment' + (nLive === 1 ? '' : 's') + '</span></span>';
+    if (sections.length) h += '<span class="dgv-act">' + (can
+        ? '<button type="button" id="dgvSelAll">Select all</button><button type="button" id="dgvSelNone">Clear</button>' +
+          '<button type="button" id="dgvRevoke" class="rev-danger" title="Revoke the ticked live assignments -- queued under Pending changes, exactly like Revoke selected in the list">Revoke</button>'
+        : '<span class="dgv-note">Read-only: revoking needs the Admin role in PIM Manager.</span>') + '</span>';
+    h += '<button type="button" id="dgvCollapse" class="dgv-toggle"></button></div>';
     if (!sections.length) h += '<div class="dgv-note">No live assignment of its own in this filter.</div>';
     else {
       h += '<div class="dgv-list">';
       for (const s of sections) h += '<div class="dgv-sec">' + escapeHtml(s.h) + ' (' + s.rows.length + ')</div>' + s.rows.map(dgvRowLine).join('');
-      h += '</div>';
-      h += '<div class="dgv-act">' + (can
-        ? '<button type="button" id="dgvSelAll">Select all</button><button type="button" id="dgvSelNone">Clear</button>' +
-          '<button type="button" id="dgvRevoke" class="rev-danger" title="Revoke the ticked live assignments -- queued under Pending changes, exactly like Revoke selected in the list">Revoke</button>'
-        : '<span class="dgv-note">Read-only: revoking needs the Admin role in PIM Manager.</span>') + '</div>';
       h += '<div class="dgv-note">Revoking is <b>queued</b>: it lands in the Change queue, is committed under Pending changes and the engine removes it on its next run. ' +
         'Break-glass accounts are always skipped, and a large batch needs a second administrator&rsquo;s approval. ' +
         '<b>Revoking does NOT change the delegation that granted the access</b> &mdash; if that row still says Assign, the engine creates the access again; remove the delegation on the Access map or in All records to make it stay away.</div>';
+      h += '</div>';
     }
     d.innerHTML = h;
     d.classList.add('has-sel');
+    const tg = document.getElementById('dgvCollapse');
+    if (tg) tg.onclick = () => dgvSetDetailCollapsed(!DGV.detailCollapsed);
+    dgvApplyDetailCollapsed();
     const sync = () => {
       const b = document.getElementById('dgvRevoke');
       const n = d.querySelectorAll('input.dgv-check:checked').length;
@@ -34369,6 +34420,29 @@
     const rv = document.getElementById('dgvRevoke');
     if (rv) rv.onclick = () => dgvRevoke();
     sync();
+  }
+  // REQ 100.96 (owner: "maybe also expand/collase button"): collapsed = the head line only, so the board gets the room.
+  // The choice is kept for the session and survives a new selection (dgvRenderDetail applies it to every render).
+  function dgvApplyDetailCollapsed() {
+    const d = document.getElementById('dgvDetail'), b = document.getElementById('dgvCollapse');
+    if (!d) return;
+    const on = !!DGV.detailCollapsed && !!b;   // nothing selected = one line already, no button, never collapsed
+    d.classList.toggle('collapsed', on);
+    if (b) {
+      b.textContent = on ? '▴ Expand' : '▾ Collapse';
+      b.setAttribute('aria-expanded', on ? 'false' : 'true');
+      b.title = on ? 'Show the live assignments of the selected item again' : 'Fold this panel to one line, so the board gets the room';
+    }
+  }
+  function dgvSetDetailCollapsed(on) {
+    DGV.detailCollapsed = !!on;
+    try { sessionStorage.setItem('pim.revoke.graph.detailCollapsed', on ? '1' : '0'); } catch (_) { }
+    dgvApplyDetailCollapsed();
+    // Expanding takes room from the board's scroll area: keep the selected box in view (measured at 2000x650: after
+    // Expand the selected box was below the area's edge and no box was on screen).
+    { const s = document.querySelector('#dgvBoard .map-item.sel'); if (s && s.scrollIntoView) s.scrollIntoView({ block: 'nearest' }); }
+    // the board's room changed: draw the wires again on the new layout (the ResizeObserver in dgvWire does it too)
+    if (DGV.lastEdges && typeof requestAnimationFrame === 'function') requestAnimationFrame(() => { if (DGV.lastEdges) dgvDraw(); });
   }
   // The graph's Revoke = the list's Revoke selected, on exactly the ticked rows: REV.selected -> submitRevoke().
   async function dgvRevoke() {
@@ -34413,6 +34487,14 @@
     });
     board.querySelectorAll('.map-col-body').forEach(b => b.addEventListener('scroll', () => { if (DGV.lastEdges) dgvDraw(); }, { passive: true }));
     window.addEventListener('resize', () => { if (DGV.lastEdges && REV.view === 'graph') dgvDraw(); });
+    // REQ 100.96: the wires are the board's geometry -- whatever changes its size (the panel folding, a scrollbar
+    // appearing in the scroll area, the toolbar wrapping) draws them again, as the Access map does.
+    try {
+      if (typeof ResizeObserver === 'function') {
+        const ro = new ResizeObserver(() => { if (DGV.lastEdges && REV.view === 'graph') dgvDraw(); });
+        ro.observe(board);
+      }
+    } catch (_) { }
   }
   wireRevokeTab();
 
