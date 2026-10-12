@@ -349,8 +349,12 @@ function Invoke-PimAccessReviewCycleJob {
         if (-not $WhatIf -and (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue)) {
             $enc = { param($x) [System.Net.WebUtility]::HtmlEncode("$x") }
             $detail = "These departments have no owner, so nobody reviews, approves or answers for their access:<br><br>" + (@($noOwner | ForEach-Object { '&bull; <b>' + (& $enc $_) + '</b>' }) -join '<br>')
+            # PIM 100.105: the alert table's rows (the product works; the customer names the owners), one row per department
+            $am = @{}; if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) { $am = Get-PimAlertMailArgs -Command 'Send-PimJobAlertViaNotify' -Who 'Customer' -Status "Needs customer's action" `
+                -Problem ("{0} department(s) have no owner, so nobody reviews or approves their access" -f $noOwner.Count) -Todo 'Open the Departments page and name an owner for each department listed' `
+                -Findings @($noOwner | ForEach-Object { @{ kind = 'Department without owner'; name = "$_" } }) }
             try { [void](Send-PimJobAlertViaNotify -Event 'coverage' -Title ("{0} department(s) have no owner" -f $noOwner.Count) -Detail $detail -LinkTab 'departments' -DebounceMinutes 1380 `
-                            -Headline 'A department needs at least one owner.' -Action 'Open Departments and name an owner for each department listed.') }
+                            -Headline 'A department needs at least one owner.' -Action 'Open Departments and name an owner for each department listed.' @am) }
             catch { Write-Warning "[access-review-cycle] the no-owner alert could not be sent: $($_.Exception.Message)" }
         }
     }
@@ -378,7 +382,9 @@ function Invoke-PimAccessReviewCycleJob {
     $mail = { param($reviewer, $title, $body) foreach ($to in @(& $mailTargets $reviewer)) { & $mailOne $to $title $body } }
     $mailOne = { param($to, $title, $body)
         if ($WhatIf -or -not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) { return }
-        $tok = @{ AlertTitle = $title; AlertEvent = 'owner-review'; AlertDetail = $body; PortalTab = 'owner'; TenantName = "$($global:PIM_TenantName)"; Instance = 'scheduler'; WhenUtc = $NowUtc.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC' }
+        $tok = @{ AlertTitle = $title; AlertEvent = 'owner-review'; AlertDetail = $body; PortalTab = 'owner'; TenantName = "$($global:PIM_TenantName)"; Instance = 'scheduler'; WhenUtc = $NowUtc.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
+                  # PIM 100.105: the alert table's rows -- a review reminder: the product works, the reviewer must decide
+                  AlertWho = 'Customer'; AlertStatus = "Needs customer's action"; AlertProblem = "$title"; AlertTodo = 'Open My people and choose Keep or Remove for each person' }
         try { [void](Send-PimNotifyMail -Type 'alert-notice' -Tokens $tok -Recipient $to) } catch { $errors.Add("mail to $to failed: $($_.Exception.Message)") } }
     $enc = { param($x) [System.Net.WebUtility]::HtmlEncode("$x") }
     # 1. OPEN campaigns: close / remind / escalate
@@ -413,8 +419,13 @@ function Invoke-PimAccessReviewCycleJob {
             if (-not $WhatIf -and (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue)) {
                 $lines = @($pendingItems | ForEach-Object { '&bull; <b>' + (& $enc $_.user) + '</b> -- waiting for ' + (& $enc (@((Get-PimReviewItemState -Campaign $c -Item $_).awaiting) -join ', ')) })
                 $what = if ($undecidedRemove) { 'This review''s rule REMOVES undecided people: an offboard approval request was raised for each of them -- a PIM administrator approves or denies it on the Approvals tab.' } else { 'Undecided people KEEP their access; a SuperAdmin can still decide on the Access reviews page.' }
+                # PIM 100.105: the alert table's rows, one row per undecided person
+                $am = @{}; if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) { $am = Get-PimAlertMailArgs -Command 'Send-PimJobAlertViaNotify' -Who 'Customer' -Status "Needs customer's action" `
+                    -Problem ("The access review of {0} was not answered: {1} person(s) are undecided" -f $c.department, $pendingItems.Count) `
+                    -Todo $(if ($undecidedRemove) { 'Open the Approvals page and approve or deny the removal of each undecided person' } else { 'Open the Access reviews page and decide the open people, or follow up with the reviewers (they keep their access meanwhile)' }) `
+                    -Findings @($pendingItems | ForEach-Object { @{ kind = 'Undecided'; name = ("{0}, waiting for {1}" -f $_.user, (@((Get-PimReviewItemState -Campaign $c -Item $_).awaiting) -join ', ')) } }) }
                 try { [void](Send-PimJobAlertViaNotify -Event 'coverage' -Title ("Access review of {0} not answered ({1} person(s))" -f $c.department, $pendingItems.Count) -Detail ("The reviewers did not answer after $($c.reminders) reminder(s). $what<br><br>" + ($lines -join '<br>')) -LinkTab $(if ($undecidedRemove) { 'approvals' } else { 'accessreview' }) -DebounceMinutes 0 `
-                                -Headline 'An access review was not answered.' -Action $(if ($undecidedRemove) { 'Open Approvals: approve or deny the removal of each undecided person.' } else { 'Open Access reviews: decide the open people yourself, or follow up with the reviewers.' })) } catch { $errors.Add("$($c.department): the escalation could not be sent: $($_.Exception.Message)") }
+                                -Headline 'An access review was not answered.' -Action $(if ($undecidedRemove) { 'Open Approvals: approve or deny the removal of each undecided person.' } else { 'Open Access reviews: decide the open people yourself, or follow up with the reviewers.' }) @am) } catch { $errors.Add("$($c.department): the escalation could not be sent: $($_.Exception.Message)") }
             }
             if (-not $WhatIf) { $c.escalatedUtc = $NowUtc.ToUniversalTime().ToString('o'); $step = 'close'; $c.closeReason = $(if ($undecidedRemove) { 'escalated: removal requested for the undecided people' } else { 'escalated: undecided people keep their access' }) }
             $log.Add("$($c.department): escalated to the alert mail ($($pendingItems.Count) undecided -> $(if ($undecidedRemove) { 'removal requested' } else { 'keep' }))")

@@ -452,6 +452,8 @@ function Invoke-PimAutoExtendReportJob {
     }
     $enc = { param($t) [System.Net.WebUtility]::HtmlEncode("$t") }
     $line = { param($i) '&bull; <b>' + (& $enc $i.principal) + '</b> -- ' + (& $enc $i.target) + $(if ($i.type) { ' (' + (& $enc $i.type) + ')' } else { '' }) + ' -- ends ' + $i.endDate + ', extended on ' + $i.extendOnUtc + $(if ($i.decision -eq 'approve') { ' -- approved' } else { '' }) }
+    # PIM 100.105: one finding row per permission -- who, what, when it ends (plain text; the mail encodes it)
+    $findingName = { param($i) "$($i.principal), $($i.target)" + $(if ($i.type) { " ($($i.type))" } else { '' }) + ", ends $($i.endDate)" + $(if ($i.decision -eq 'approve') { ', approved' } else { '' }) }
     $send = { param($to, $tok)
         $ok = $false; $why = ''
         try { $m = Send-PimNotifyMail -Type 'alert-notice' -Tokens $tok -Recipient $to -WhatIf:$WhatIf; if ($m -is [hashtable]) { $ok = [bool]$m['sent']; $why = "$($m['reason'])" } elseif ($m) { $ok = [bool]$m.sent; $why = "$($m.reason)" } } catch { $why = "$($_.Exception.Message)" }
@@ -471,6 +473,12 @@ function Invoke-PimAutoExtendReportJob {
             AlertDetail = ("You are an owner of <b>{0}</b>. These permissions end soon and PIM will extend them automatically, {1} days before they end. <b>If they should be extended, do nothing.</b> If one should not, open the link and choose <b>Deny</b> -- that permission then ends on its date.<br><br>{2}" -f (& $enc $dept), $ctx.leadDays, ((@($g.Group | Select-Object -First 40 | ForEach-Object { & $line $_ })) -join '<br>'))
             PortalTab   = 'owner'
             TenantName  = "$($global:PIM_TenantName)"; Instance = 'scheduler'; WhenUtc = $stamp
+            # PIM 100.105: the alert table's rows -- nothing is wrong and nothing has to be done (the owner acts only to STOP
+            # an extension), so the status is the plain "Warning", not "Needs customer's action"
+            AlertWho = 'Customer'; AlertStatus = 'Warning'
+            AlertProblem = ("{0} permission(s) in {1} end soon and will be extended automatically" -f $g.Count, $(if ($dept) { $dept } else { 'your department' }))
+            AlertTodo = 'Nothing to do if they should be extended; to let one end, open the link and choose Deny'
+            AlertFindings = @($g.Group | Select-Object -First 40 | ForEach-Object { @{ kind = 'Will be extended'; name = (& $findingName $_) } })
         }
         foreach ($o in $to) { & $tally (& $send $o $tok) "$dept -> $o" }
     }
@@ -485,7 +493,12 @@ function Invoke-PimAutoExtendReportJob {
         }
         # Alerting event 'expiring-access' (its on/off and recipients are on the Alerting page), linking the owner page.
         if (-not $WhatIf -and (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue)) {
-            try { if (Send-PimJobAlertViaNotify -Event 'expiring-access' -Title $tokA.AlertTitle -Detail $tokA.AlertDetail -LinkTab 'owner' -DebounceMinutes 1380) { $script:__aeSent++ } else { $script:__aeHeld++ } }
+            # PIM 100.105: the alert table's rows, one row per permission (grouped by department)
+            $am = @{}; if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) { $am = Get-PimAlertMailArgs -Command 'Send-PimJobAlertViaNotify' -Who 'Customer' -Status 'Warning' `
+                -Problem ("{0} permission(s) end in the coming month and will be extended automatically" -f @($items).Count) `
+                -Todo 'Nothing to do if they should be extended; to let one end, choose Deny on the upcoming-extension page' `
+                -Findings @($items | Select-Object -First 80 | ForEach-Object { @{ kind = $(if ($_.department) { "$($_.department)" } else { 'No department' }); name = (& $findingName $_) } }) }
+            try { if (Send-PimJobAlertViaNotify -Event 'expiring-access' -Title $tokA.AlertTitle -Detail $tokA.AlertDetail -LinkTab 'owner' -DebounceMinutes 1380 @am) { $script:__aeSent++ } else { $script:__aeHeld++ } }
             catch { $script:__aeFailed++; Write-Warning "[autoextend-report] administrators not mailed: $($_.Exception.Message)" }
         }
     }

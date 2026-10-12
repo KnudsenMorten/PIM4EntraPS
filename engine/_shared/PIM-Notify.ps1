@@ -177,7 +177,7 @@ function ConvertTo-PimNotifyRendering {
     # PURE: template text + tokens -> @{ Subject; BodyHtml; BodyText }. Subject from a
     # leading <!-- subject: ... --> comment. Unknown {{tokens}} render empty (warned).
     param([Parameter(Mandatory)][string]$TemplateText, [Parameter(Mandatory)][hashtable]$Tokens)
-    $subject = 'PIM4EntraPS notification'
+    $subject = 'PIM Manager notification'
     if ($TemplateText -match '<!--\s*subject:\s*(.+?)\s*-->') { $subject = $Matches[1] }
     $render = {
         param([string]$text)
@@ -372,6 +372,8 @@ function Invoke-PimMailEngineTest {
                 AlertTitle = 'PIM Manager engine test mail'; AlertEvent = 'mail-test'; AlertTab = 'getstarted'
                 AlertDetail = 'This test mail was sent by the PIM engine job as its own identity, because Send test mail was pressed in Get Started / Settings > Mail & alerting. It proves that the engine can send TAP codes, reminders and alerts.'
                 AlertHeadline = 'Mail from the PIM engine works.'; AlertAction = 'Nothing to do -- this was a test.'
+                # PIM 100.105: who acts / status / problem / what to do (a test: the product works, nobody has to act)
+                AlertWho = 'Customer'; AlertStatus = 'Warning'; AlertProblem = 'This is a test mail: the PIM Manager engine can send mail'; AlertTodo = 'Nothing to do, this was a test'
                 WhenUtc = $NowUtc.ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + ' UTC' }
         } catch { $r = @{ sent = $false; reason = "$($_.Exception.Message)" } }
         finally { $global:PIM_MailProofRole = $prevRole }
@@ -443,7 +445,26 @@ function Send-PimNotifyMail {
         # a dead link in every reminder. An empty one now points at the same page.
         foreach ($k in 'ReviewUrl', 'ApprovalUrl') { if (-not "$($Tokens[$k])".Trim()) { $Tokens[$k] = $portal.url } }
     }
+    # PIM 100.105: the ALERT mail is ONE table (Customer, Environment, Solution, Who acts, Status, Problem, What to do,
+    # the findings, When, Support). It is built HERE, at the one chokepoint, from the caller's tokens and what the product
+    # knows of this environment -- so every sender gets the same shape, and a sender that passes none of the new tokens
+    # still gets a whole table (Who acts "Not known", Status "Warning").
+    $alertModel = $null
+    if ("$Type" -eq 'alert-notice' -and (Get-Command Add-PimAlertMailTokens -ErrorAction SilentlyContinue)) {
+        try {
+            $am = Add-PimAlertMailTokens -Tokens $Tokens -Environment (Get-PimMailEnvironmentInfo)
+            $Tokens = $am.tokens; $alertModel = $am.model
+        } catch {
+            Write-Warning "  [Mail] the alert table could not be built ($($_.Exception.Message)) -- the alert is sent with its title and detail only."
+            $Tokens = @{} + $Tokens; [void]$Tokens.Remove('AlertFindings')
+            $Tokens['AlertTable'] = '<p><b>' + [System.Net.WebUtility]::HtmlEncode("$($Tokens['AlertTitle'])") + '</b></p><p>' + "$($Tokens['AlertDetail'])" + '</p>'
+        }
+    }
     $r = ConvertTo-PimNotifyRendering -TemplateText $tpl.text -Tokens $Tokens
+    # the plain-text part carries the same rows, one per line (not table cells run together)
+    if ($alertModel -and "$($tpl.text)" -match '\{\{AlertTable\}\}' -and (Get-Command ConvertTo-PimAlertMailText -ErrorAction SilentlyContinue)) {
+        try { $r.BodyText = ConvertTo-PimAlertMailText -Model $alertModel } catch { }
+    }
     # §100.5 MAIL-2 leftover (b), 2.4.555: an alert / transactional template (not built with New-PimMailDocument) is put in
     # the ONE designed layout here -- logo + environment header, its own content unchanged, the blue button AFTER it and the
     # designed footer (environment, tenant, version, Open PIM Manager, Change what you receive). A template that opts out
@@ -457,7 +478,8 @@ function Send-PimNotifyMail {
         }
         try {
             $framed = ConvertTo-PimMailLayoutFrame -BodyHtml $r.BodyHtml -Subject "$($r.Subject)" -Button $(if ($portal.url) { @{ url = $portal.url; label = 'Open in PIM Manager' } } else { $null }) `
-                        -HomeUrl $homeF -NotificationsUrl $notifF -Environment @{ name = $envF.name; tenantName = $envF.tenantName; tenantId = $envF.tenantId; version = $envF.version }
+                        -HomeUrl $homeF -NotificationsUrl $notifF -Environment @{ name = $envF.name; tenantName = $envF.tenantName; tenantId = $envF.tenantId; version = $envF.version } `
+                        -HomeLinkAsWords:([bool]$alertModel)   # PIM 100.105: no raw hosting address under the alert's button
             if ("$framed".Trim()) { $r.BodyHtml = $framed }
         } catch { Write-Verbose "  [Mail] the designed layout could not be applied ($($_.Exception.Message)) -- the template is sent as it is" }
         if ($portal.url -and "$($r.BodyText)" -notmatch [regex]::Escape($portal.url)) { $r.BodyText = "$($r.BodyText)`r`n`r`nOpen in PIM Manager: $($portal.url)" }

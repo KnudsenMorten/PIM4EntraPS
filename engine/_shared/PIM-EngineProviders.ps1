@@ -6142,12 +6142,25 @@ function Write-PimPolicyMassHoldAlert {
                     } catch { $attNote = ''; Write-Warning "  [engine] $($spec.Provider): the CAB workbook could not be built: $($_.Exception.Message)" }
                 }
                 $actionHtml = "$($mail.actionHtml)" + $(if ($att.Count) { ' <b>Attached:</b> the complete change list for your change board (every policy and setting, current &rarr; new).' } else { $attNote })
-                [void](Send-PimSafetyAlert -Title "$($mail.subject)" -Headline "$($mail.headline)" -Detail "$($mail.detailHtml)" -Action $actionHtml -SwallowScope 'policy-mass-hold-alert-mail' -Tab 'jobs' -Attachments $att)
+                # PIM 100.105: the alert table's rows -- a HOLD is "Held back", the customer's SuperAdmin acts (labels only)
+                $holdWords = @{}
+                if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) {
+                    $holdWords = Get-PimAlertMailArgs -Command 'Send-PimSafetyAlert' -Who 'Customer' -Status 'Held back' `
+                        -Problem ('Held for approval, nothing was changed: ' + ("$($mail.subject)" -replace '\s+held\s+--\s+needs approval\s*$', '')) `
+                        -Todo 'Open Approvals: approve the change set held now, or change the setting if it is not intended'
+                }
+                [void](Send-PimSafetyAlert -Title "$($mail.subject)" -Headline "$($mail.headline)" -Detail "$($mail.detailHtml)" -Action $actionHtml -SwallowScope 'policy-mass-hold-alert-mail' -Tab 'jobs' @holdWords -Attachments $att)
                 # The job that ran this will raise its own "held" alert; it skips a plan mailed here (one mail per hold).
                 if (-not ($global:PimPolicyHoldAlerted -is [hashtable])) { $global:PimPolicyHoldAlerted = @{} }
                 $global:PimPolicyHoldAlerted["$($Hold.planHash)".ToLowerInvariant()] = [datetime]::UtcNow
             } else {
-                [void](Send-PimSafetyAlert -Title "$($spec.MailSubject)" -Detail ([System.Net.WebUtility]::HtmlEncode($Message)) -SwallowScope 'policy-mass-hold-alert-mail' -Tab 'jobs')
+                $holdWords = @{}
+                if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) {
+                    $holdWords = Get-PimAlertMailArgs -Command 'Send-PimSafetyAlert' -Who 'Customer' -Status 'Held back' `
+                        -Problem 'A set of policy changes is held for approval: nothing was changed' `
+                        -Todo 'Open Approvals: approve the change set held now, or change the setting if it is not intended'
+                }
+                [void](Send-PimSafetyAlert -Title "$($spec.MailSubject)" -Detail ([System.Net.WebUtility]::HtmlEncode($Message)) -SwallowScope 'policy-mass-hold-alert-mail' -Tab 'jobs' @holdWords)
             }
         } else {
             Write-Warning "  [engine] $($spec.Provider): the mass-change hold alert was NOT emailed -- the safety-alert sender (PIM-DisableGuard.ps1) is not loaded in this runtime."

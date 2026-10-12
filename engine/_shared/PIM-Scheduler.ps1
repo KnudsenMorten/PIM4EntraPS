@@ -1156,7 +1156,12 @@ function Initialize-PimDefaultJobHandlers {
         if ($whatIf) { $alert = 'whatif' }
         elseif (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue) {
             $sent = $false
-            try { $sent = [bool](Send-PimJobAlertViaNotify -Event 'expiring-access' -Title ("{0} access lifecycle date(s) due within {1} days" -f ($upcoming.Count + $overdue.Count), $horizon) -Detail ($lines -join '; ') -DebounceMinutes 1440 -LinkTab 'accounts') } catch { $sent = $false }
+            # PIM 100.105: the alert table's rows -- the product works; the customer extends what is still needed. One row per date.
+            $am = @{}; if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) { $am = Get-PimAlertMailArgs -Command 'Send-PimJobAlertViaNotify' -Who 'Customer' -Status "Needs customer's action" `
+                -Problem ("{0} access date(s) end within {1} days or have passed" -f ($upcoming.Count + $overdue.Count), $horizon) `
+                -Todo 'Open the Accounts page and extend the dates that are still needed; the rest ends on its date' `
+                -Findings @(@($upcoming + $overdue) | Sort-Object { [int]$_.daysLeft } | Select-Object -First 12 | ForEach-Object { @{ kind = $(if ([int]$_.daysLeft -lt 0) { 'Date has passed' } else { 'Ends soon' }); name = ("{0} {1}: {2} ({3} day(s))" -f "$($_.item.Kind)", "$($_.item.UserName)", ([datetime]$_.expiryUtc).ToUniversalTime().ToString('yyyy-MM-dd'), [int]$_.daysLeft) } }) }
+            try { $sent = [bool](Send-PimJobAlertViaNotify -Event 'expiring-access' -Title ("{0} access lifecycle date(s) due within {1} days" -f ($upcoming.Count + $overdue.Count), $horizon) -Detail ($lines -join '; ') -DebounceMinutes 1440 -LinkTab 'accounts' @am) } catch { $sent = $false }
             $alert = if ($sent) { 'raised' } else { 'not-raised (event off, no recipients, or debounced)' }
         }
         return [pscustomobject]@{ ran=$true; whatIf=[bool]$whatIf; calendar=$cal; upcoming=$upcoming.Count; overdue=$overdue.Count

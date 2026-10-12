@@ -1042,6 +1042,54 @@ function Get-PimCoverageInputs {
 }
 
 # ===========================================================================
+# PIM 100.105 -- THE COVERAGE ALERT IN A CUSTOMER'S WORDS
+# ===========================================================================
+function Get-PimCoverageAlertWords {
+    <#
+      PURE. The alert mail's rows for the NEW findings of a coverage run: @{ who; status; problem; todo; findings }.
+        problem  -- per kind, how many and what it IS, in plain words ("1 privileged group is not managed by PIM Manager")
+        todo     -- what to do per kind of finding, with the words the Discovery and gaps page uses. A gap has a ready
+                    proposal (Stage / Ignore). Orphan groups, unmanaged bindings and unmanaged privileged groups are
+                    REVIEW-ONLY on that page (never staged, never taken over), so their line says what the customer
+                    decides, not a button that does not exist.
+        findings -- one @{ kind; name } per finding (the mail renders one row each, grouped by kind)
+      New findings are a Warning for the customer: nothing was changed and nothing stopped working.
+    #>
+    param([AllowNull()][object[]]$New = @())
+    $list = @(@($New) | Where-Object { $null -ne $_ })
+    $kinds = [ordered]@{
+        'Gap'                        = @{ one = 'item is not delegated yet'; many = 'items are not delegated yet'; todo = 'stage the ready proposal or press Ignore' }
+        'Orphan group'               = @{ one = 'group is left over or holds no role (orphan group)'; many = 'groups are left over or hold no role (orphan groups)'; todo = 'give the group a role to hold, or remove the group' }
+        'Unmanaged binding'          = @{ one = 'role is given to a group PIM Manager does not define'; many = 'roles are given to groups PIM Manager does not define'; todo = 'define the group in PIM Manager, or remove the role from it' }
+        'Wrong permissions'          = @{ one = 'role has other permissions than stated'; many = 'roles have other permissions than stated'; todo = 'correct the role or the stated permissions' }
+        'Unmanaged privileged group' = @{ one = 'privileged group is not managed by PIM Manager'; many = 'privileged groups are not managed by PIM Manager'; todo = 'define the group in PIM Manager, or take it out of PIM for Groups' }
+    }
+    $count = [ordered]@{}; $findings = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $list) {
+        $st = "$(Get-PimCoverageField $r 'status')".Trim(); if (-not $st) { $st = 'Finding' }
+        if (-not $count.Contains($st)) { $count[$st] = 0 }
+        $count[$st] = [int]$count[$st] + 1
+        $findings.Add(@{ kind = $st; name = "$(Get-PimCoverageField $r 'item')".Trim() })
+    }
+    $prob = New-Object System.Collections.Generic.List[string]; $todo = New-Object System.Collections.Generic.List[object]
+    foreach ($st in @($count.Keys)) {
+        $n = [int]$count[$st]
+        if ($kinds.Contains($st)) {
+            $prob.Add(("{0} {1}" -f $n, $(if ($n -eq 1) { $kinds[$st].one } else { $kinds[$st].many })))
+            $todo.Add(@{ kind = $st; text = $kinds[$st].todo })
+        } else {
+            $prob.Add(("{0} new finding(s): {1}" -f $n, $st.ToLowerInvariant()))
+            $todo.Add(@{ kind = $st; text = 'review it' })
+        }
+    }
+    $page = 'the Discovery and gaps page'
+    $todoLine = ''
+    if ($todo.Count -eq 1) { $t = "$($todo[0].text)"; $todoLine = $t.Substring(0, 1).ToUpperInvariant() + $t.Substring(1) + ' (' + $page + ')' }
+    elseif ($todo.Count -gt 1) { $todoLine = 'On ' + $page + ': ' + (@($todo | ForEach-Object { "$($_.kind): $($_.text)" }) -join '. ') }
+    return @{ who = 'Customer'; status = 'Warning'; problem = ($prob.ToArray() -join ', '); todo = $todoLine; findings = @($findings.ToArray()) }
+}
+
+# ===========================================================================
 # THE SCHEDULER JOB -- 'coverage'
 # ===========================================================================
 function Invoke-PimCoverageJob {
@@ -1090,11 +1138,16 @@ function Invoke-PimCoverageJob {
         $byS = @($new | Group-Object { "$($_.status)" } | ForEach-Object { "{0} {1}" -f $_.Count, $_.Name.ToLowerInvariant() }) -join ', '
         $title = "Coverage: $($new.Count) new finding(s) -- $byS"
         $detail = (@($new | Select-Object -First 10 | ForEach-Object { "[{0}] {1}: {2}" -f $_.status, $_.workload, $_.item }) -join '; ') + $(if ($new.Count -gt 10) { "; +$($new.Count - 10) more on the Discovery & gaps page" } else { '' })
+        # PIM 100.105: the mail's own rows -- the problem and what to do in plain words, and ONE row per finding (kind, name).
+        # $title / $detail above stay as they were (the debounce key and the alert feed are built from them).
+        $words = Get-PimCoverageAlertWords -New $new
         try {
             if (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue) {
-                [void](Send-PimManagerAlert -Event $script:PimCoverageAlertEvent -Title $title -Detail $detail -LinkTab 'coverage')
+                $am = @{}; if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) { $am = Get-PimAlertMailArgs -Command 'Send-PimManagerAlert' -Who $words.who -Status $words.status -Problem $words.problem -Todo $words.todo -Findings $words.findings }
+                [void](Send-PimManagerAlert -Event $script:PimCoverageAlertEvent -Title $title -Detail $detail -LinkTab 'coverage' @am)
             } elseif (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue) {
-                [void](Send-PimJobAlertViaNotify -Event $script:PimCoverageAlertEvent -Title $title -Detail $detail -LinkTab 'coverage')
+                $am = @{}; if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) { $am = Get-PimAlertMailArgs -Command 'Send-PimJobAlertViaNotify' -Who $words.who -Status $words.status -Problem $words.problem -Todo $words.todo -Findings $words.findings }
+                [void](Send-PimJobAlertViaNotify -Event $script:PimCoverageAlertEvent -Title $title -Detail $detail -LinkTab 'coverage' @am)
             }
         } catch { Write-Warning "[$type] the coverage alert could not be raised: $($_.Exception.Message)" }
     }
