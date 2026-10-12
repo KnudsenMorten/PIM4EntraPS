@@ -144,7 +144,8 @@ function Get-PimPendingReminderItems {
                          (Get-PimPendingReminderSources builds it from the store; tests pass it directly)
       -PortalBase        the Manager address (the links are '' without it)
     #>
-    param([AllowNull()][object]$GetStartedStatus, [AllowNull()][object]$Sources, [string]$PortalBase = '')
+    param([AllowNull()][object]$GetStartedStatus, [AllowNull()][object]$Sources, [string]$PortalBase = '', [string[]]$QuietSteps = @())
+    $quiet = @($QuietSteps | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })   # steps that stay open on the page but are never mailed (100.93 (4))
     $out = New-Object System.Collections.Generic.List[object]
     $f = { param($o, $n) Get-PimPendingReminderField $o $n }
     $add = { param($key, $kind, $group, $title, $detail, $tab, $query, $label, $since)
@@ -155,7 +156,7 @@ function Get-PimPendingReminderItems {
     # (a) Get Started: the required steps still open (ConvertTo-PimGetStartedStatus is the one reader of that record).
     if ($null -ne $GetStartedStatus) {
         $gs = ConvertTo-PimGetStartedStatus $GetStartedStatus
-        foreach ($s in @($gs.steps | Where-Object { $_.required -and -not $_.done -and -not $_.deferred })) {
+        foreach ($s in @($gs.steps | Where-Object { $_.required -and -not $_.done -and -not $_.deferred -and ($quiet -notcontains $_.id) })) {
             $t = if ($s.title) { $s.title } else { $s.id }
             & $add "gs:$($s.id)" 'get-started' 'Get Started' $t $(if ($s.what) { $s.what } else { $s.note }) 'getstarted' "step=$($s.id)" "Open $t" ''
         }
@@ -225,6 +226,53 @@ function Get-PimPendingReminderItems {
             'A second administrator must commit them (second approver)' 'save' '' 'Review and commit' (& $f $s 'oldestUtc')
     }
     return @($out.ToArray())
+}
+
+$script:PimPendingReminderPolicyStepName = 'PendingRemindersPolicyStep'
+
+function Get-PimPendingReminderPolicyStepDecision {
+    <#
+      PURE. PIM 100.93 (4) (owner 2026-10-12: "Step open, no reminder mails"): the Get Started "Policies" step arrived with
+      the policy redesign. An install that existed BEFORE it keeps the step open on the page but is never mailed about it;
+      a new install gets the normal reminder. Decided ONCE per install and stored (-Stored = the PendingRemindersPolicyStep
+      setting, '{"remind":true|false,"decidedUtc":"...","why":"..."}'), so the answer never flips later.
+      Existed before = at the first decision the install already shows a past: the recorded Get Started status has no
+      'policies' step (an older Manager wrote it), or every OTHER required step is done or skipped (setup was finished), or
+      the reminder state already has a history (a sent mail, or a first sighting of anything but that step).
+      No recorded status and no history = nothing to decide on yet: undecided, and the step is quiet until decided.
+      Returns @{ remind; decided; changed; json; why }.
+    #>
+    param([AllowNull()][object]$GetStartedStatus, [AllowNull()][object]$State, [AllowNull()][string]$Stored, [datetime]$NowUtc = [datetime]::UtcNow)
+    $old = ConvertFrom-PimPendingReminderJson $Stored
+    $r = Get-PimPendingReminderField $old 'remind'
+    if ($null -ne $r -and "$r".Trim()) {
+        return [pscustomobject]@{ remind = ("$r".Trim().ToLowerInvariant() -in @('true', '1', 'yes')); decided = $true; changed = $false; json = "$Stored"; why = "$(Get-PimPendingReminderField $old 'why')" }
+    }
+    $st = ConvertTo-PimPendingReminderState $State
+    $history = [bool]("$($st.lastSentUtc)".Trim() -or @($st.firstSeen.Keys | Where-Object { "$_" -ne 'gs:policies' }).Count)
+    $steps = @()
+    if ($null -ne $GetStartedStatus) { $steps = @((ConvertTo-PimGetStartedStatus $GetStartedStatus).steps) }
+    $why = ''; $remind = $true
+    if (-not $steps.Count -and -not $history) { return [pscustomobject]@{ remind = $false; decided = $false; changed = $false; json = ''; why = 'no Get Started status recorded yet' } }
+    $others = @($steps | Where-Object { $_.id -ne 'policies' -and $_.required })
+    if ($history) { $remind = $false; $why = 'the install had pending-action history before the Policies step' }
+    elseif (-not @($steps | Where-Object { $_.id -eq 'policies' }).Count) { $remind = $false; $why = 'the recorded Get Started status predates the Policies step' }
+    elseif ($others.Count -and -not @($others | Where-Object { -not $_.done -and -not $_.deferred }).Count) { $remind = $false; $why = 'every other required Get Started step was already done' }
+    else { $why = 'a new install: other Get Started steps are still open' }
+    $json = ConvertTo-Json -InputObject ([ordered]@{ remind = $remind; decidedUtc = $NowUtc.ToUniversalTime().ToString('o'); why = $why }) -Compress
+    return [pscustomobject]@{ remind = $remind; decided = $true; changed = $true; json = $json; why = $why }
+}
+
+function Get-PimPendingReminderQuietSteps {
+    # The Get Started steps that are not mailed here (reads the stored decision; -Record writes a first decision). NEVER throws.
+    param([AllowNull()][object]$GetStartedStatus, [AllowNull()][object]$State, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$Record)
+    try {
+        $stored = Get-PimPendingReminderStoreText -Name $script:PimPendingReminderPolicyStepName
+        $d = Get-PimPendingReminderPolicyStepDecision -GetStartedStatus $GetStartedStatus -State $State -Stored $stored -NowUtc $NowUtc
+        if ($Record -and $d.changed) { try { [void](Set-PimPendingReminderStoreText -Name $script:PimPendingReminderPolicyStepName -Json $d.json -Expected $stored) } catch { Write-Warning "  [Mail] the Policies-step reminder decision could not be recorded: $($_.Exception.Message)" } }
+        if ($d.remind) { return @() }
+        return @('policies')
+    } catch { return @('policies') }
 }
 
 function Get-PimPendingReminderPlan {
@@ -647,7 +695,7 @@ function Get-PimPendingReminderOverview {
             $gsRaw = Get-PimPendingReminderStoreText -Name 'GetStartedStatus'
             $src = Get-PimPendingReminderSources -NowUtc $NowUtc
             $errs = @($src.errors)
-            $items = @(Get-PimPendingReminderItems -GetStartedStatus $gsRaw -Sources $src -PortalBase '')
+            $items = @(Get-PimPendingReminderItems -GetStartedStatus $gsRaw -Sources $src -PortalBase '' -QuietSteps @(Get-PimPendingReminderQuietSteps -GetStartedStatus $gsRaw -State $stateRaw -NowUtc $NowUtc))
             $plan = Get-PimPendingReminderPlan -Items $items -State $stateRaw -Config $cfg -NowUtc $NowUtc
         }
         $rows = Get-PimPendingReminderRowStatus -Plan $plan -State $stateRaw -Config $cfg -MailLastSent $mailRaw -NowUtc $NowUtc
@@ -707,7 +755,8 @@ function Invoke-PimPendingReminder {
         $gsRaw = Get-PimPendingReminderStoreText -Name 'GetStartedStatus'
         $src = Get-PimPendingReminderSources -NowUtc $NowUtc
         $base = if (Get-Command Get-PimPortalBaseUrl -ErrorAction SilentlyContinue) { Get-PimPortalBaseUrl } else { '' }
-        $items = @(Get-PimPendingReminderItems -GetStartedStatus $gsRaw -Sources $src -PortalBase $base)
+        $quietSteps = @(Get-PimPendingReminderQuietSteps -GetStartedStatus $gsRaw -State $stateRaw -NowUtc $NowUtc -Record:(-not $WhatIf))
+        $items = @(Get-PimPendingReminderItems -GetStartedStatus $gsRaw -Sources $src -PortalBase $base -QuietSteps $quietSteps)
         $plan = Get-PimPendingReminderPlan -Items $items -State $stateRaw -Config $cfg -NowUtc $NowUtc
         $errTxt = if (@($src.errors).Count) { ' (not read: ' + (@($src.errors) -join '; ') + ')' } else { '' }
         if (-not $plan.send) {

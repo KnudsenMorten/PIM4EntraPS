@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.606 -- 2026-10-12
+
+- An installation that existed before the Policies step in Get Started gets no reminder mail for that step -- the step stays open on the page; a new installation gets the normal reminder
+
 ## 2.4.605 -- 2026-10-12
 
 - The heartbeat says which guards hold something right now and a cleared guard is reported, so the status at Invardia follows the installation; with everything since 2.4.600: the policy page shows the recommendation, External companies saves from the row, the New admin wizard asks where the mail goes, Delegation overview and Access map scroll, Discovery and gaps is one page under Access, and the menu shows a number only for an error or a blocking approval
