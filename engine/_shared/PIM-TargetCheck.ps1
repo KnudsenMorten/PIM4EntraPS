@@ -16,7 +16,7 @@
   gaps page lists the rows; they remove them like any other row).
 
   Stores pim.TenantCache kind 'target-check'; mails NEW missing targets (event 'target-missing', on/off under Alerting)
-  with a link to the Coverage & gaps page. Runs on pwsh 7 and Windows PowerShell 5.1.
+  with a link to the Discovery & gaps page. Runs on pwsh 7 and Windows PowerShell 5.1.
 #>
 
 Set-StrictMode -Off
@@ -208,9 +208,9 @@ function Invoke-PimTargetCheckJob {
     if ($new.Count -and -not $WhatIf -and (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue)) {
         $enc = { param($t) [System.Net.WebUtility]::HtmlEncode("$t") }
         $lines = @($new | Select-Object -First 20 | ForEach-Object { '&bull; <b>' + (& $enc $_.target) + '</b> (' + (& $enc $_.kind) + $(if ($_.kind -ne 'entra-role') { ' @ ' + (& $enc $_.scope) } else { '' }) + ') &mdash; ' + (& $enc $_.detail) + '<br>&nbsp;&nbsp;&nbsp;delegations: ' + (& $enc (@($_.rows) -join ', ')) })
-        $detail = ("{0} delegation target(s) no longer exist. PIM changed NOTHING -- decide whether to remove the delegation rows.<br><br>" -f $new.Count) + ($lines -join '<br>') + $(if ($new.Count -gt 20) { "<br>... and $($new.Count - 20) more on the Coverage & gaps page." } else { '' })
+        $detail = ("{0} delegation target(s) no longer exist. PIM changed NOTHING -- decide whether to remove the delegation rows.<br><br>" -f $new.Count) + ($lines -join '<br>') + $(if ($new.Count -gt 20) { "<br>... and $($new.Count - 20) more on the Discovery & gaps page." } else { '' })
         try { [void](Send-PimJobAlertViaNotify -Event $script:PimTargetCheckAlertEvent -Title ("{0} delegation target(s) no longer exist" -f $new.Count) -Detail $detail -LinkTab 'coverage' -DebounceMinutes 1440 `
-                        -Headline 'Some delegations point at Azure resources or roles that no longer exist.' -Action 'Open Coverage &amp; gaps, review the delegations listed and remove the ones that are no longer needed. PIM never removes them by itself.') } catch { Write-Warning "[target-check] the alert could not be sent: $($_.Exception.Message)" }
+                        -Headline 'Some delegations point at Azure resources or roles that no longer exist.' -Action 'Open Discovery &amp; gaps, review the delegations listed and remove the ones that are no longer needed. PIM never removes them by itself.') } catch { Write-Warning "[target-check] the alert could not be sent: $($_.Exception.Message)" }
     }
     [pscustomobject]@{ ran = $true; whatIf = [bool]$WhatIf
         detail = ("target-check: {0} Azure row(s), {1} Entra role row(s) checked -- {2} target(s) no longer exist ({3} new), {4} could not be verified" -f $az.Count, $en.Count, $missing.Count, $new.Count, $unver.Count) }

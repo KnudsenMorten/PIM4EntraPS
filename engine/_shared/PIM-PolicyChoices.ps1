@@ -567,7 +567,7 @@ function Resolve-PimPolicyChoice {
         if (-not $s.use -or $null -eq $s.map -or -not $s.map.ContainsKey($s.key)) { continue }
         $e = $s.map[$s.key][$fd.id]
         if ($null -eq $e -or $script:PimPolicyChoiceValues -notcontains "$($e.choice)") { continue }
-        return @{ choice = "$($e.choice)"; origin = $s.origin; source = "$($e.source)"; by = "$($e.by)"; utc = "$($e.utc)"; advisory = [int]$e.advisory
+        return @{ choice = "$($e.choice)"; origin = $s.origin; source = "$($e.source)"; by = "$($e.by)"; utc = (ConvertTo-PimPcUtcText $e.utc); advisory = [int]$e.advisory
                   currentAdvisory = $cur; needsReview = ([int]$e.advisory -lt [int]$cur) }
     }
     $none
@@ -1430,7 +1430,7 @@ function Get-PimPolicyChoicesView {
             $sideOut = {
                 param($e)
                 if ($null -eq $e -or $script:PimPolicyChoiceValues -notcontains "$($e.choice)") { return $null }
-                [ordered]@{ choice = "$($e.choice)"; label = (Get-PimPolicyChoiceLabel $e.choice); by = "$($e.by)"; utc = "$($e.utc)"; advisory = [int]$e.advisory; needsReview = ([int]$e.advisory -lt [int]$res.currentAdvisory) }
+                [ordered]@{ choice = "$($e.choice)"; label = (Get-PimPolicyChoiceLabel $e.choice); by = "$($e.by)"; utc = (ConvertTo-PimPcUtcText $e.utc); advisory = [int]$e.advisory; needsReview = ([int]$e.advisory -lt [int]$res.currentAdvisory) }
             }
             if ("$($res.source)" -eq 'managing-tenant') { $mtFollowed++; if ($res.needsReview) { $mtReview++ } }
             $me = Get-PimMicrosoftPolicyDefaultEntry -Defaults $Defaults -Type $t -FieldId $fd.id
@@ -1456,7 +1456,7 @@ function Get-PimPolicyChoicesView {
             if ($te) {
                 $tText = Format-PimPolicyRuleSetText (Format-PimPolicyFieldValue -Field $fd -Value $te.value)
                 $tenantOut.known = $true; $tenantOut.matchesShipped = $te.matchesShipped; $tenantOut.value = $te.value; $tenantOut.text = $tText
-                $tenantOut.source = "$($te.source)"; $tenantOut.readUtc = "$($te.readUtc)"; $tenantOut.policies = [int]$te.policies
+                $tenantOut.source = "$($te.source)"; $tenantOut.readUtc = (ConvertTo-PimPcUtcText $te.readUtc); $tenantOut.policies = [int]$te.policies
                 if ($te.matchesShipped -is [bool] -and -not $te.matchesShipped) {
                     $totMismatch++
                     $tenantOut.note = ("This tenant's untouched policy says '{0}'; the Microsoft default PIM Manager ships says '{1}'. Nothing is changed because of this -- 'Microsoft default' writes the shipped value." -f $tText, (Format-PimPolicyRuleSetText (Format-PimPolicyFieldValue -Field $fd -Value $msVal)))
@@ -1469,7 +1469,7 @@ function Get-PimPolicyChoicesView {
                     if (-not "$k".StartsWith("$t|") -or -not $blk.m[$k].ContainsKey($fd.id)) { continue }
                     $e = $blk.m[$k][$fd.id]; $obj = "$k".Substring($t.Length + 1)
                     $nm = @($pols | Where-Object { "$(Get-PimPcProp $_ 'key')" -eq $obj } | ForEach-Object { "$(Get-PimPcProp $_ 'name')" } | Select-Object -First 1)
-                    $ovr.Add([ordered]@{ objectKey = $obj; name = $(if ($nm.Count) { $nm[0] } else { $obj }); choice = "$($e.choice)"; choiceLabel = (Get-PimPolicyChoiceLabel $e.choice); by = "$($e.by)"; utc = "$($e.utc)"
+                    $ovr.Add([ordered]@{ objectKey = $obj; name = $(if ($nm.Count) { $nm[0] } else { $obj }); choice = "$($e.choice)"; choiceLabel = (Get-PimPolicyChoiceLabel $e.choice); by = "$($e.by)"; utc = (ConvertTo-PimPcUtcText $e.utc)
                                          advisory = [int]$e.advisory; needsReview = ([int]$e.advisory -lt [int]$res.currentAdvisory); source = $blk.s })
                 }
             }
@@ -1521,7 +1521,7 @@ function Get-PimPolicyChoicesView {
                 overrides = @($ovr.ToArray())
             })
         }
-        $typeOut.Add([ordered]@{ id = $t; label = (Get-PimPolicyChoiceTypeLabel $t); provider = $prov; liveReadUtc = "$(Get-PimPcProp $snap 'readUtc')"
+        $typeOut.Add([ordered]@{ id = $t; label = (Get-PimPolicyChoiceTypeLabel $t); provider = $prov; liveReadUtc = (ConvertTo-PimPcUtcText (Get-PimPcProp $snap 'readUtc'))   # PowerShell 7 reads the stored ISO text as a [datetime]: always ISO to the page (first seen in the fast gate, 2026-10-12)
                                  policies = $pols.Count; policiesRead = @($pols | Where-Object { [bool](Get-PimPcProp $_ 'read') }).Count
                                  # objects (lane policy-page): every policy of the type in the order `wouldChange.indexes` counts in --
                                  # the key an override is saved under and the name a person picks it by

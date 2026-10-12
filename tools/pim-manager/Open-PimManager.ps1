@@ -9678,7 +9678,34 @@ function Get-PimCoverageCached {
         $q = Request-PimCoverageRefresh -Reason $Reason
         $queued = [bool]$q.queued; $qErr = "$($q.error)"
     }
-    return (ConvertTo-PimCoverageView -Entry $entry -NowUtc $NowUtc -CadenceMinutes (Get-PimCoverageCadenceMinutes) -RefreshQueued $queued -QueueError $qErr)
+    $view = ConvertTo-PimCoverageView -Entry $entry -NowUtc $NowUtc -CadenceMinutes (Get-PimCoverageCadenceMinutes) -RefreshQueued $queued -QueueError $qErr
+    # PIM 100.100 (Discovery & gaps): the gaps a person IGNORED are taken out of the gap count HERE, on the server, so every
+    # page that shows these numbers agrees. The list is pim.Settings 'DiscoveryDecisions' -- where the old Discovery page
+    # kept it, same keys, so what was ignored there stays ignored. A list that cannot be read hides nothing (ignoreError).
+    if (Get-Command Add-PimCoverageIgnoreState -ErrorAction SilentlyContinue) {
+        $dec = $null; $decErr = ''
+        try { $dec = Get-PimCoverageIgnoreDecisions } catch { $decErr = "$($_.Exception.Message)" }
+        $view = Add-PimCoverageIgnoreState -View $view -Decisions $dec
+        $view['ignoreError'] = $decErr
+    }
+    return $view
+}
+
+function Get-PimCoverageIgnoreDecisions {
+    # The stored Ignore list (pim.Settings 'DiscoveryDecisions'), or $null when nothing was ever decided. Throws when the
+    # store cannot be read -- the caller says so; it never reads as "nothing is ignored".
+    if (-not (Get-Command Get-PimManagerSettingObject -ErrorAction SilentlyContinue)) { return $null }
+    return (Get-PimManagerSettingObject -Name 'DiscoveryDecisions')
+}
+
+function Get-PimCoverageIgnoreAuditText {
+    # PIM 100.100: the audit line in plain words -- "X ignored 'AI Reader' (Entra role) on Discovery & gaps".
+    param([string]$Who, [Parameter(Mandatory)][ValidateSet('ignore', 'bringback')][string]$Action, [object[]]$Items = @())
+    $names = @(@($Items) | ForEach-Object { "'{0}' ({1})" -f "$($_.name)", "$($_.kind)" })
+    $shown = (@($names | Select-Object -First 5) -join ', ') + $(if ($names.Count -gt 5) { " and $($names.Count - 5) more" } else { '' })
+    $w = if ("$Who".Trim()) { "$Who".Trim() } else { 'Someone' }
+    if ($Action -eq 'ignore') { return ("{0} ignored {1} on Discovery & gaps -- it is no longer listed as a gap; nothing changed in the tenant" -f $w, $shown) }
+    return ("{0} brought back {1} on Discovery & gaps -- it is listed as a gap again; nothing changed in the tenant" -f $w, $shown)
 }
 
 # ---------------------------------------------------------------------------
@@ -20628,6 +20655,62 @@ function Handle-Request {
             } catch {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; queued = $false; error = "the coverage check could not be queued: $($_.Exception.Message)" }
                 return 500
+            }
+        }
+
+        # PIM 100.100 (owner 2026-10-12: "Add Ignore to the new page") -- POST /api/coverage/ignore
+        #   { action: ignore | bringback, keys: [ '<ignoreKey of a row>', ... ] }   Admin+, Pro (the page's own feature), audited.
+        # Ignoring is a decision about PIM's OWN list: nothing is read from or written to the tenant. Only a row the stored
+        # report lists as a GAP can be ignored, and only an ignored one brought back -- a key the report does not know is
+        # refused, so the list never fills with names nobody can see. Stored in pim.Settings 'DiscoveryDecisions' (the old
+        # Discovery page's store and keys, so its ignored items carry over), read back, and answered with the new counts.
+        if ($path -eq '/api/coverage/ignore' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to ignore a gap or bring it back. Roles are stored in SQL -- ask a SuperAdmin to grant you access.' }
+                return 403
+            }
+            if (-not (Test-PimManagerProFeature -Key 'coverage.gaps' -Response $resp)) { return 403 }
+            if (-not (Get-Command Set-PimCoverageIgnoreDecision -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; error = 'the coverage report reader (engine/coverage/PIM-Coverage.ps1) is not loaded in this Manager.' }
+                return 503
+            }
+            $ignBody = Read-RequestJson -Request $req
+            $ignAction = "$($ignBody.action)".Trim().ToLowerInvariant()
+            $ignKeys = @(@($ignBody.keys) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ } | Select-Object -Unique)
+            if ($ignAction -notin @('ignore', 'bringback') -or -not $ignKeys.Count) {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'body must be { action: ignore | bringback, keys: [...] }' }
+                return 400
+            }
+            try {
+                $ignView = Get-PimCoverageCached
+                if ("$($ignView['ignoreError'])".Trim()) { throw "the stored list of ignored items could not be read: $($ignView['ignoreError'])" }
+                $ignByKey = @{}
+                foreach ($ignRow in @($ignView['rows'])) { $ik = "$($ignRow['ignoreKey'])"; if ($ik -and -not $ignByKey.ContainsKey($ik)) { $ignByKey[$ik] = $ignRow } }
+                $ignWant = if ($ignAction -eq 'ignore') { 'Gap' } else { 'Ignored' }
+                $ignBad = @($ignKeys | Where-Object { -not $ignByKey.ContainsKey($_) -or "$($ignByKey[$_]['status'])" -ne $ignWant })
+                if ($ignBad.Count) {
+                    $ignWhy = if ($ignAction -eq 'ignore') { 'only a gap in the current list can be ignored' } else { 'only an ignored item can be brought back' }
+                    Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "${ignWhy}: $(@($ignBad | Select-Object -First 5) -join ', ')" }
+                    return 400
+                }
+                $ignItems = @($ignKeys | ForEach-Object { [ordered]@{ key = $_; name = "$($ignByKey[$_]['item'])"; kind = "$($ignByKey[$_]['ignoreKind'])"; workload = "$($ignByKey[$_]['workload'])" } })
+                $ignWho = ''; try { $ignWho = "$((Get-PimManagerRole).identity)" } catch { $ignWho = '' }
+                $ignBefore = Get-PimCoverageIgnoreDecisions
+                $ignAfter = Set-PimCoverageIgnoreDecision -Decisions $ignBefore -Action $ignAction -Items $ignItems -By $ignWho
+                Set-PimManagerSettingObject -Name 'DiscoveryDecisions' -Value $ignAfter
+                $ignNow = Get-PimCoverageCached   # read back: the counts the page shows next come from what was stored
+                $ignText = Get-PimCoverageIgnoreAuditText -Who $ignWho -Action $ignAction -Items $ignItems
+                try {
+                    Write-PimManagerAuditEvent -Action "coverage.$ignAction" -Target $(if ($ignItems.Count -eq 1) { "'$($ignItems[0].name)' ($($ignItems[0].kind))" } else { "$($ignItems.Count) items on Discovery & gaps" }) `
+                        -After @{ summary = $ignText; items = @($ignItems); gaps = [int]$ignNow['gaps']; ignored = [int]$ignNow['ignored'] } -Result 'ok'
+                } catch { Write-Warning "coverage ignore: the audit event could not be written: $($_.Exception.Message)" }
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; action = $ignAction; count = $ignItems.Count; summary = $ignText
+                    counts = $ignNow['counts']; countsByWorkload = $ignNow['countsByWorkload']; gaps = [int]$ignNow['gaps']; ignored = [int]$ignNow['ignored'] }
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; error = "the decision was NOT saved: $($_.Exception.Message)" }
+                return 503
             }
         }
 

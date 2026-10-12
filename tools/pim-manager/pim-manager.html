@@ -141,17 +141,17 @@
   .nav-group > .nav-group-btn:focus-visible { color:#0969da; outline:none; }
   .nav-group.active > .nav-group-btn { color:#0969da; border-bottom-color:#0969da; font-weight:600; }
   .nav-group > .nav-group-btn .nav-caret { font-size:9px; color:#8c959f; }
-  /* attention dot: a child item carries a visible badge. PIM 100.94: a badge exists only for an ERROR (red dot) or an
-     ACTION that waits for a person (amber dot, .attn-action) -- a warning never puts a dot here. */
+  /* attention dot: a child item carries a visible badge. PIM 100.94 ("only red numbers"): a badge exists only for an
+     ERROR or a BLOCKING action, so the dot is always red -- a warning or an action that only waits never puts a dot here. */
   .nav-group > .nav-group-btn .nav-attn {
     display:none; width:7px; height:7px; border-radius:50%; background:#cf222e;
   }
   .nav-group.has-attn > .nav-group-btn .nav-attn { display:inline-block; }
-  .nav-group.has-attn.attn-action > .nav-group-btn .nav-attn:not(.nav-attn-count) { background:#bf8700; }
-  /* the dot becomes a counter when it is carrying the queue count. PIM §97.3 / framework §12.5: the queue count is
-     INFORMATIONAL (it has its own indicator), so it is blue -- red counts are reserved for what BLOCKS work. */
+  /* the dot becomes a counter when it is carrying the queue count. PIM 100.94 "only red numbers" (owner 2026-10-12): it
+     counts FAILED queue entries only (an error), so it is red like every other menu number -- it was blue while it also
+     counted changes that merely waited for a commit. */
   .nav-group > .nav-group-btn .nav-attn.nav-attn-count {
-    width:auto; height:16px; min-width:16px; padding:0 5px; border-radius:999px; color:#fff; background:#0969da;
+    width:auto; height:16px; min-width:16px; padding:0 5px; border-radius:999px; color:#fff; background:#cf222e;
     font-size:10.5px; font-weight:700; line-height:16px; text-align:center; margin-right:5px;
   }
   /* PIM §97.3 / framework §12.5 PENDING-1: the BLOCKING count -- something waits for a person's decision (an approval, a
@@ -241,7 +241,7 @@
   .tab-panel.active:has(> .tab-guide + [id$="Body"]:last-child) > .tab-guide { flex:0 0 auto; }
   .tab-panel.active:has(> .tab-guide + [id$="Body"]:last-child) > [id$="Body"] { min-height:0; }
   /* REQ-Y: pages that carry a licence banner above their scrolling body stack them vertically. */
-  #homeTab.active, #jobscheduleTab.active, #downlinkTab.active, #msptenantsTab.active, #replicationTab.active, #coverageTab.active, #discoveryTab.active, #accessreviewTab.active, #manageraccessTab.active, #approvalsTab.active, #reportsTab.active, #auditTab.active { flex-direction:column; }
+  #homeTab.active, #jobscheduleTab.active, #downlinkTab.active, #msptenantsTab.active, #replicationTab.active, #coverageTab.active, #accessreviewTab.active, #manageraccessTab.active, #approvalsTab.active, #reportsTab.active, #auditTab.active { flex-direction:column; }
 
   /* Graph tab (same layout as v0.1) */
   #graphTab { display:none; }
@@ -1375,15 +1375,15 @@
     <div class="tab" data-tab="validate" title="Check the desired store for problems (orphans, naming, ownership, stale roles) before you deploy — each finding has a suggested fix.">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#cf222e"></span></div>
     <div class="tab" data-tab="save" title="Review every staged change with a keyed diff, then commit — each save is backed up first, all-or-nothing, and reversible.">Pending changes <span id="saveDirtyBadge" class="badge" style="display:none"></span></div>
     <div class="tab" data-tab="revoke" title="Every privileged permission held right now -- as a graph or a list -- and revoke what is not needed. Destructive: break-glass accounts are protected and large batches require maker/checker approval.">Delegation overview (All privileged permissions) <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e"></span></div>
-    <div class="tab" data-tab="accounts" title="Admin accounts and their Temporary Access Pass. Re-issue a TAP whose lifetime has expired -- the admin gets a new one by mail.">Accounts &amp; TAP <span id="tapExpiredBadge" class="badge" style="display:none;background:#bc4c00"></span></div>
-    <div class="tab" data-tab="approvals" title="The maker/checker approval queue — raise an offboard/revoke/sensitive change, approve or deny one (a different admin must approve), and execute an approved request.">Approvals <span id="apprPendBadge" class="badge" style="display:none;background:#bc4c00"></span></div>
+    <div class="tab" data-tab="accounts" title="Admin accounts and their Temporary Access Pass. Re-issue a TAP whose lifetime has expired -- the admin gets a new one by mail.">Accounts &amp; TAP <span id="tapExpiredBadge" class="badge" style="display:none;background:#cf222e"></span></div>
+    <div class="tab" data-tab="approvals" title="The maker/checker approval queue — raise an offboard/revoke/sensitive change, approve or deny one (a different admin must approve), and execute an approved request.">Approvals <span id="apprPendBadge" class="badge" style="display:none;background:#cf222e"></span></div>
     <div class="tab" data-tab="accessreview" title="Run access reviews end-to-end — attest (approve / deny / recertify) with justification, assign reviewers, send reminders, and export the evidence.">Access Review <span id="arOpenBadge" class="badge" style="display:none"></span></div>
     <div class="tab" data-tab="owner" title="People in the departments you own -- see when each person's access ends, and extend it if they still need it.">My people</div>
     <div class="tab" data-tab="accessrequests" title="Requests to have a disabled admin account enabled for a while (request for authorization), the company reviews of external consultants, and an IT override for a longer window.">Access requests</div>
     <div class="tab" data-tab="grid" title="The full editable grid of every desired-state row — for power users who want direct, spreadsheet-style editing across all entities.">Advanced View (grid) <span id="gridDirtyBadge" class="badge" style="display:none"></span></div>
     <div class="tab" data-tab="authoring" title="Bulk authoring — move an admin, clone a definition or Azure-RBAC delegation to many targets, bulk-attach, and import admins, each with a preview before commit.">Authoring</div>
     <div class="tab" data-tab="activator" title="Client onboarding: give your admins the PIM Activator browser extension -- with Intune, or on PCs and servers without Intune (a script).">Client onboarding</div>
-    <div class="tab" data-tab="getstarted" title="Get started: the steps that make this environment work, each marked done or still open.">Get Started <span id="getStartedBadge" class="badge" style="display:none;background:#bf8700;color:#fff"></span></div>
+    <div class="tab" data-tab="getstarted" title="Get started: the steps that make this environment work, each marked done or still open.">Get Started <span id="getStartedBadge" class="badge" style="display:none;background:#cf222e;color:#fff"></span></div>
     <div class="tab" data-tab="onboarding" title="Onboard a new admin — derive the name and metadata, place them in the right groups, and (for sensitive grants) route through second-person approval.">Onboarding</div>
     <div class="tab" data-tab="departments" title="Departments and their owners -- who approves and who is mailed for every delegation a department sponsors. Import them from Entra, or assign owners in bulk by uploading a CSV file.">Departments &amp; owners</div>
     <div class="tab" data-tab="adminimport" title="Import many administrators at once from a file or a paste: the UPN is the key; skip or overwrite existing ones. SuperAdmin only.">Import administrators</div>
@@ -1403,8 +1403,9 @@
          (below), discovered resources -> its own page, job schedule -> its own page under Jobs, and access & roles,
          break-glass, permission template packs and mail templates -> Settings. switchTab('governance') redirects. -->
     <div class="tab" data-tab="drift" title="Is the tenant what PIM says it should be? Per area: desired vs live, missing / changed / extra, each area expandable, with gated remediation. Checked by the scheduler (every 4 hours by default).">Drift: live vs desired</div>
-    <!-- REQ-I + REQ-U: Coverage & gaps -- its own page (menu rule), read from the scheduler's stored coverage report. -->
-    <div class="tab" data-tab="coverage" title="What PIM delegates and what it does not: every Entra role, Intune and Defender role, Power BI workspace and Azure scope with no delegation (a ready-made proposal for each, all pre-selected), orphan groups, and PIM for Groups groups PIM does not manage. Checked by the scheduler (every 12 hours by default).">Coverage &amp; gaps</div>
+    <!-- REQ-I + REQ-U: its own page (menu rule), read from the scheduler's stored coverage report. PIM 100.100 (owner
+         2026-10-12): named "Discovery & gaps" and listed under Access; the tab id stays 'coverage' (deep links, tests, server). -->
+    <div class="tab" data-tab="coverage" title="What is in your tenant and what PIM Manager delegates: every Entra role, Intune and Defender role, Power BI workspace, Azure subscription and management group and administrative unit that nothing delegates yet -- each with a ready proposal to stage, or Ignore -- plus orphan groups and PIM for Groups groups PIM Manager does not manage. Read by PIM Manager itself (every 12 hours by default).">Discovery &amp; gaps</div>
     <div class="tab" data-tab="audit" title="The audit trail you can defend — filter and search every change by entity, actor or date range, see before → after, and export the whole trail.">Audit</div>
     <!-- CONFIG-1.2 / §96.2: every commit from the change journal, and undo one (SuperAdmin: every commit; Admin: their own). -->
     <div class="tab" data-tab="commithistory" title="Every commit from the change journal: who, when, approved by, what changed -- open one and undo the rows you pick (staged in Pending changes, committed with the normal approvals).">Commit history</div>
@@ -1413,7 +1414,7 @@
     <div class="tab" data-tab="configbackups" title="The daily configuration backup: back up now, pin a backup, and restore what you pick from one (SuperAdmin) -- staged as pending changes, never written straight into the store.">Backups &amp; restore</div>
     <div class="tab" data-tab="reports" title="&quot;Who can do what&quot; (and the reverse) — pick a person to see everything they can reach, or pick a role to see who can activate it. Printable + exportable.">Reports</div>
     <div class="tab" data-tab="conformance" title="Keep tenants current with the approved delegation templates — see how far behind each tenant is and roll the updates forward.">Tenant Baseline</div>
-    <div class="tab" data-tab="downlink" title="MSP downlink — which of your central admins and roles reach each managed customer, what was held back and why, and the per-relationship projection policy.">MSP Downlink <span id="downlinkUnresBadge" class="badge" style="display:none;background:#bc4c00"></span></div>
+    <div class="tab" data-tab="downlink" title="MSP downlink — which of your central admins and roles reach each managed customer, what was held back and why, and the per-relationship projection policy.">MSP Downlink <span id="downlinkUnresBadge" class="badge" style="display:none;background:#cf222e"></span></div>
     <!-- REQ-N / REQ-O (operator 2026-09-19): the managing tenant's managed-tenant registry and replication overview. MANAGING TENANT
          ONLY -- hidden until the tenant mode says msp-master (applyMspMasterOnlyTabs), and the server refuses elsewhere. -->
     <div class="tab" data-tab="msptenants" title="The managed tenants this managing tenant replicates to — name, tenant id, the managing tenant's copy of each tenant's ring, the tags replication targets, and whether it is enabled.">Managed tenant registry</div>
@@ -1421,7 +1422,6 @@
     <div class="tab" data-tab="jobs" title="The scheduler — see each job's cadence, last result and next run, spot overdue or failing runs, re-run on demand, and export the run history.">Jobs <span id="jobsRunBadge" class="badge" style="display:none;background:#cf222e;color:#fff" title="jobs that failed"></span></div>
     <div class="tab" data-tab="enginelogs" title="Every recent engine run across all jobs, newest first — what failed and why, with each run's full log.">Engine logs &amp; errors <span id="engLogErrBadge" class="badge" style="display:none;background:#cf222e;color:#fff" title="failed runs nobody has acknowledged yet"></span></div>
     <div class="tab" data-tab="jobschedule" title="When each scheduled job runs, in plain words — which area it covers, whether it is on, and how often. Mail jobs included.">Job schedule</div>
-    <div class="tab" data-tab="discovery" title="New subscriptions, management groups, resource groups, Power BI workspaces and Entra roles found by discovery, and what the engine does with them.">Newly discovered resources</div>
     <div class="tab" data-tab="settings" title="Configure the Manager — naming conventions, feature customization, operational policy, alerting, permission template packs, email controls, and instances.">Settings</div>
     <!-- §12.8 ENV-REPORT-1: the architecture & security report of this environment (Admin / SuperAdmin), exportable to PDF. -->
     <div class="tab" data-tab="envreport" title="The architecture and security report of this environment: identities, permissions (expected / missing / extra), Azure resources and network exposure, features, data flows, change history and findings -- read live, exportable to PDF and JSON (Admin / SuperAdmin).">Environment report</div>
@@ -1699,7 +1699,7 @@
     </div>
   </div>
 
-  <!-- =========== Coverage & gaps (REQ-I + REQ-U, its own page) =========== -->
+  <!-- =========== Discovery & gaps (tab id 'coverage'; REQ-I + REQ-U, its own page; PIM 100.100: under Access) =========== -->
   <!-- Reads the scheduler's stored coverage report (GET /api/coverage) the moment it opens. Gap proposals are pre-selected
        and staged into Pending changes (the normal review / commit); orphans and unmanaged groups are shown, never staged. -->
   <!-- Free edition (operator 2026-09-26): the page a Pro menu item opens on a free install -- Free vs Pro, and how to buy. -->
@@ -1710,18 +1710,12 @@
     <!-- REQ-Y: the Pro-feature notice (renderMspLicenceBanners) -- hidden unless this Pro feature is unlicensed / in grace. -->
     <div class="pro-lic-banner" data-feature="coverage.gaps" style="display:none; flex:0 0 auto; margin:10px 18px 0;"></div>
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="coverageBody">
-      <div style="color:#57606a; font-size:12px;">Loading the latest coverage report&hellip;</div>
+      <div style="color:#57606a; font-size:12px;">Loading Discovery &amp; gaps&hellip;</div>
     </div>
   </div>
-
-  <!-- =========== Newly discovered resources (moved out of Governance, 2026-09-14) =========== -->
-  <div id="discoveryTab" class="tab-panel">
-    <!-- REQ-Y: the Pro-feature notice (renderMspLicenceBanners) -- hidden unless this Pro feature is unlicensed / in grace. -->
-    <div class="pro-lic-banner" data-feature="discovery.sweep" style="display:none; flex:0 0 auto; margin:10px 18px 0;"></div>
-    <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="discoveryBody">
-      <div style="color:#57606a; font-size:12px;">Loading discovered resources&hellip;</div>
-    </div>
-  </div>
+  <!-- PIM 100.100 (owner 2026-10-12: "these 2 views overlaps ... i like the coverage & gaps better and put it under
+       access and rename it"): the separate Discovery page ('discovery' tab: New / Ignored, Create / Ignore) is GONE.
+       Discovery & gaps above is the one view; an old link to the 'discovery' tab lands on it (switchTab). -->
 
   <!-- =========== Job schedule (moved out of Governance, 2026-09-14) =========== -->
   <div id="jobscheduleTab" class="tab-panel">
@@ -2859,12 +2853,14 @@
         // grants, creates or hands over access now lives under Access, and every label names the
         // screen it actually opens.
         { tab: 'new',        label: 'Create access',         desc: 'Guided wizards: create an administrator (with a future creation date and TAP start), build a direct group, or delegate a permission' },
-        // §80.3 (operator 2026-09-29: "I need in the menu under Access to have a Create Discovered Resources"): the ONE
-        // Discovery page, opened on its New view. Operator 2026-10-01 (screenshot): right under Create access -- it is
-        // creation, not a table. 2.4.500 ("one Discovery"): the entry under Audit & Settings is gone, so this is Discovery's
-        // only menu home -- a plain item, not a marked cross-link (anchor) to a page listed nowhere else.
-        { tab: 'discovery', discView: 'new', label: 'Discovery: create what is new',
-          desc: 'What is new in the tenant -- Azure subscriptions and management groups, Power BI workspaces, administrative units, Entra, Defender XDR and Intune roles: tick and Create (staged in Pending changes), or ignore it' },        // 🔴 REQ-GRID (operator 2026-09-20: "this name and page is also misleading"). This entry read
+        // PIM 100.100 (owner 2026-10-12: "these 2 views overlaps. i like the coverage & gaps better and put it under access
+        // and rename it"): ONE view. The page that was called Coverage and gaps under Reviews & controls sits HERE, where
+        // the old Discovery entry was (right under Create access -- operator 2026-10-01), named "Discovery & gaps";
+        // the separate Discovery list is gone. The tab id stays 'coverage'. 🔒 MENU RULE (100.94): gaps are warnings -- this
+        // entry never carries a number or a dot.
+        { tab: 'coverage', label: 'Discovery & gaps',
+          desc: 'What is in the tenant and not delegated yet -- Entra, Intune and Defender XDR roles, Power BI workspaces, Azure subscriptions and management groups, administrative units: tick and stage the ready proposal (Pending changes), or ignore it. Also orphan groups and groups PIM Manager does not manage' },
+        // 🔴 REQ-GRID (operator 2026-09-20: "this name and page is also misleading"). This entry read
         // "Change existing access ... Nothing new is created here" while the page it opens is headed
         // "Create & change access" and two of its four cards CREATE: Duplicate an existing group makes
         // groups, Import administrators makes admin rows. The menu and the page contradicted each
@@ -2942,9 +2938,7 @@
         // comparison to expand"): drift is its own page, loads by itself from the scheduler's stored check. The old
         // 'Access & drift' (governance) entry is gone -- every section it held moved to a real home.
         { tab: 'drift',        label: 'Drift: live vs desired', desc: 'Is the tenant what PIM says it should be? Per area, expandable' },
-        // REQ-I + REQ-U (operator 2026-09-19: "show gaps/missing roles ... prestage all so i can multiselect"; "same for azure
-        // subscriptions not delegated"; "pim for groups not mentioned ... we gotta point those out"): its own page.
-        { tab: 'coverage',     label: 'Coverage & gaps', desc: 'Roles, workspaces and Azure scopes with no delegation, orphan groups, and groups PIM does not manage' },
+        // (PIM 100.100, owner 2026-10-12: the 'coverage' page moved to the Access menu as "Discovery & gaps".)
         { tab: 'accessreview', label: 'Access reviews',   desc: 'Recertification campaigns and their results' },
         // §79.8 / §79.7 decision: the PIM owner page -- a department owner's own people, and their access end dates.
         { tab: 'owner',        label: 'My people',        desc: 'People in the departments you own — see when their access ends and extend it' },
@@ -3022,7 +3016,7 @@
       ? { tab: it, label: null, desc: '', anchor: null }
       // 71.26: gridScope opens the records table narrowed to one family of entities (the
       // delegation grid entry). It is carried like nchor -- a deliberate, marked deep-link.
-      : { tab: it.tab, label: it.label || null, desc: it.desc || '', anchor: it.anchor || null, gridScope: it.gridScope || null, discView: it.discView || null };
+      : { tab: it.tab, label: it.label || null, desc: it.desc || '', anchor: it.anchor || null, gridScope: it.gridScope || null };
   }
 
   // Scroll a tab's section into view after the tab has rendered. Tabs render asynchronously, so
@@ -3117,7 +3111,7 @@
             '<span class="nav-block-badge"></span>' +
           '</span>' +
           (spec.desc ? '<span class="nav-item-desc">' + escapeHtml(spec.desc) + '</span>' : '');
-        item.addEventListener('click', () => { if (spec.gridScope !== undefined) setGridScope(spec.gridScope); if (spec.discView) PIM_DISC_VIEW = spec.discView; switchTab(tabKey); closeAllNavGroups(); navScrollToAnchor(spec.anchor); });
+        item.addEventListener('click', () => { if (spec.gridScope !== undefined) setGridScope(spec.gridScope); switchTab(tabKey); closeAllNavGroups(); navScrollToAnchor(spec.anchor); });
         menu.appendChild(item);
         wired++;
         groupItems++;
@@ -3329,7 +3323,7 @@
   function syncNavGroups(activeTab) {
     if (!document.body.classList.contains('js-nav-grouped')) return;
     document.querySelectorAll('#navGroups .nav-group').forEach(grp => {
-      let groupActive = false, groupAttn = false, groupRed = false;
+      let groupActive = false, groupAttn = false;
       grp.querySelectorAll('.nav-group-item').forEach(item => {
         const tabKey = item.dataset.tab;
         const isActive = tabKey === activeTab;
@@ -3343,11 +3337,10 @@
         // 🔑 Any visible, non-zero badge counts; the item shows the largest of them.
         // 🔒 PIM 100.94: ONLY a badge painted by pimMenuBadge (it carries data-menu-sev = an error or an action) is
         // mirrored. A warning count has no way into pimMenuBadge, so it can not reach a submenu entry or a group dot.
-        let shown = '', shownBg = '', shownTip = '', itemRed = false;
+        let shown = '', shownBg = '', shownTip = '';
         document.querySelectorAll('#tabs .tab[data-tab="' + tabKey + '"] .badge[data-menu-sev]').forEach(srcBadge => {
           const t = (srcBadge.textContent || '').trim();
           if (srcBadge.style.display === 'none' || t === '' || t === '0') return;
-          if (srcBadge.getAttribute('data-menu-sev') === 'red') itemRed = true;
           if (!shown || (Number(t) || 0) > (Number(shown) || 0)) { shown = t; shownBg = srcBadge.style.backgroundColor || ''; shownTip = srcBadge.title || ''; }
         });
         const itemBadge = item.querySelector('.nav-item-badge');
@@ -3358,13 +3351,11 @@
           if (shownTip) itemBadge.title = shownTip; else itemBadge.removeAttribute('title');
         }
         if (visible) groupAttn = true;
-        if (visible && itemRed) groupRed = true;
       });
       grp.classList.toggle('active', groupActive);
-      grp.classList.toggle('has-attn', groupAttn);
-      grp.classList.toggle('attn-action', groupAttn && !groupRed);   // PIM 100.94: the dot is red for an error, amber when only an action waits -- never for a warning
-      // The group button carries the QUEUE count itself, not just a dot -- the operator must see
-      // that unprocessed changes exist without opening the menu.
+      grp.classList.toggle('has-attn', groupAttn);   // PIM 100.94 "only red numbers": every badge is an error or a blocking action, so the dot is always red
+      // The group button carries the count of FAILED queue entries itself (PIM_QUEUE_OPEN), not just a dot. PIM 100.94
+      // "only red numbers": changes that merely wait for a commit are not counted here any more.
       const attn = grp.querySelector('.nav-group-btn .nav-attn');
       if (attn) {
         const hasQueueItem = !!grp.querySelector('.nav-group-item[data-tab="queue"], .nav-group-item[data-tab="save"]');
@@ -3405,7 +3396,13 @@
     onboarding:  { title: 'What this is & how to use it', what: 'Onboarding &mdash; invite a guest into the delegation model or toggle self-service consultant enable.', how: ['Both produce staged change records; the engine applies them on commit.'] },
     roleperms:   { title: 'What this is & how to use it', what: 'Role Lookup &mdash; read-only drill-down of what a role can do, who can activate it, and role compare.', how: ['Type a role name (typos are tolerated &mdash; pick a "did you mean" candidate); switch sub-mode for reverse / compare.'], legend: true },
     drift:       { title: 'What this is & how to use it', what: 'Drift &mdash; whether the tenant holds what PIM says it should, per area (engine scope): desired vs live, and what is missing, changed or extra.', how: ['The scheduler job <b>drift-snapshot</b> checks on its own interval (every 4 hours by default &mdash; see Job schedule) and this page shows its latest result the moment it opens; <b>Check now</b> (Admin) queues a new check.', 'Click an area to see its items; select items and <b>Apply now</b> to correct them (removing an extra needs the explicit opt-in).'] },
-    discovery:   { title: 'What this is & how to use it', what: 'Newly discovered resources &mdash; subscriptions, management groups, resource groups, Power BI workspaces and Entra roles that appeared after the discovery baseline.', how: ['Onboard what you need through the Create wizards, then acknowledge to reset the baseline.', 'The auto-create policy decides, per resource type, whether the engine only flags, stages a draft, or creates through the normal flow (SuperAdmin).'] },
+    // PIM 100.100 (owner 2026-10-12: "it looks crappy"): the explanation that stood as a grey paragraph above the list.
+    coverage:    { title: 'What this is & how to use it', what: 'Discovery &amp; gaps &mdash; for every workload PIM Manager can delegate, this compares what is in your tenant (Entra roles, Intune and Defender XDR roles, Power BI workspaces, Azure subscriptions and management groups, administrative units) with what PIM Manager delegates. PIM Manager reads this itself, every 12 hours by default; <b>Check now</b> (Admin) starts a new read.', how: [
+      '<b>Gap</b> = nothing delegates it yet. A ready proposal &mdash; a correctly named group plus its role, from your naming pattern &mdash; is already ticked: press <b>Stage selected into Pending changes</b>, then review and commit as usual. Nothing changes in the tenant before you commit.',
+      'Staging is never blocked. Where the prerequisites of a workload are not ready, its group is still created and only its role assignment waits (an amber note says so).',
+      '<b>Ignore</b> takes a gap you do not want off the list and out of the gap count. It is a decision about this list only &mdash; nothing changes in the tenant. Choose <b>Ignored</b> under Status to see the ignored ones and <b>Bring back</b>.',
+      '<b>Orphan group</b> = a group PIM Manager defines that holds nothing; <b>Unmanaged binding</b> = a role bound to a group PIM Manager does not define; <b>Unmanaged privileged group</b> = a group in PIM for Groups that PIM Manager does not manage (it can gate any application). These are for review only &mdash; never staged, never taken over.',
+      '<b>Not read</b> = a workload PIM Manager could not read. The page says which one, what is missing and the steps &mdash; it is never counted as covered.'] },
     jobschedule: { title: 'What this is & how to use it', what: 'The job schedule &mdash; every scheduled job, the area it covers, whether it is on and how often it runs.', how: ['Change on/off or the interval and Save (SuperAdmin); it applies from the next scheduler tick.', 'Run history, failures and Run now are on the Jobs page.'] },
     audit:       { title: 'What this is & how to use it', what: 'The append-only audit trail &mdash; every login, delegation, account, approval, engine and break-glass event.', how: ['Filter by category or free-text search; the window defaults to the last 3 months &mdash; widen it to 12 months or the full history. Newest first.'] },
     reports:     { title: 'What this is & how to use it', what: '"Who can do what" (and the reverse) &mdash; pick a person to see everything they reach, or a role to see who can activate it.', how: ['Choose forward or reverse, run the report, then print or export.'], legend: true },
@@ -3472,6 +3469,9 @@
     // 2026-09-14: the 'governance' tab is gone (its sections moved to Drift, Newly discovered resources, Job schedule
     // and Settings). An old deep link or alert that still names it lands on Settings, where break-glass now lives.
     if (name === 'governance') name = 'settings';
+    // PIM 100.100 (owner 2026-10-12): the separate Discovery page is gone -- Discovery & gaps (tab 'coverage') is the one
+    // view. An old link, bookmark or mail that still names the 'discovery' tab lands there.
+    if (name === 'discovery') name = 'coverage';
     // FLAGS-1 (owner-approved 2026-10-09): a page switched OFF in Settings > Features is turned off on EVERY way in -- the
     // menu, a ?tab= link from a mail, a link on another page. It used to lose only its menu entry. Its own API routes are
     // refused by the server too (Invoke-PimManagerFeatureFlagGate).
@@ -3518,7 +3518,6 @@
     if (name === 'roleperms') renderRolePerms();
     if (name === 'drift') renderDrift();
     if (name === 'coverage') renderCoverage();
-    if (name === 'discovery') renderDiscovery();
     if (name === 'audit') renderAudit();
     if (name === 'configbackups') renderConfigBackupsPage();   // CONFIG-1.3 / 1.4
     if (name === 'reports') renderReports();
@@ -4787,8 +4786,9 @@
     // The badge counts only what has actually been CHECKED. An unchecked row is not known to be
     // fine, and must not be counted as expired either.
     const expired = rows.filter(a => a.status === 'expired').length;
-    // PIM 100.94: an expired TAP is an ACTION (re-issue it) -- this page's own to-do; unchecked rows are not counted.
-    pimMenuBadge('tapExpiredBadge', { actions: expired, title: r => pimMenuWords(r.n, 'Temporary Access Pass has expired', 'Temporary Access Passes have expired') + ' -- re-issue ' + (r.n === 1 ? 'it' : 'them') });
+    // PIM 100.94 "only red numbers" (owner 2026-10-12): an expired TAP is an action that waits and blocks nothing -- NO
+    // number in the menu; the list below marks each EXPIRED row. (data-menu-waiting keeps the count on the hidden badge.)
+    pimMenuBadge('tapExpiredBadge', { actions: expired });
     pimMenuSync();
 
     let h = '';
@@ -5072,27 +5072,39 @@
   // PIM 100.94 (owner 2026-10-12, third report: "we dont show warnings numbers, only errors or actions in the menu"): ONE
   // rule for every number and dot in the top menu, a submenu entry and a tab. A number shows only for
   //   errors  -- something FAILED (a failed job, a validation error, a failed commit entry, an alarm), and
-  //   actions -- something waits for a PERSON (an approval, a held change set, changes to commit, a required setup step).
+  //   BLOCKING actions -- something waits for a PERSON and holds work back (an approval, a held change set).
   // Warnings (gaps, orphans, validation warnings, drift corrected, policy settings waiting for a choice, facts, running
   // jobs) have NO parameter here on purpose: they can not reach a menu. They stay on their own page.
-  // pimMenuCount({ errors, actions, blocking }) -> null (show nothing) or { n, errors, actions, sev }: n = the ITEMS to act
-  // on; sev 'red' for an error or an action that blocks work, 'amber' for an action that only waits.
+  // 🔒 "ONLY RED NUMBERS" (owner 2026-10-12, his answer on the amber action counts): an action that WAITS but does not
+  // block -- an open required Get Started step, an expired TAP, changes waiting for a commit -- shows NO number and NO
+  // dot in the menu either. Only an error, or an action the caller marks blocking (an approval, a held change set),
+  // counts -- and everything shown is red. The pages keep their own counts and their amber.
+  // pimMenuCount({ errors, actions, blocking }) -> null (show nothing) or { n, errors, actions, sev: 'red' }: n = the ITEMS
+  // to act on; `actions` = the BLOCKING actions counted (0 when the caller did not mark them blocking).
   function pimMenuCount(src) {
     const s = src || {};
-    const e = Math.max(0, Math.floor(Number(s.errors) || 0)), a = Math.max(0, Math.floor(Number(s.actions) || 0));
+    const e = Math.max(0, Math.floor(Number(s.errors) || 0));
+    const a = s.blocking ? Math.max(0, Math.floor(Number(s.actions) || 0)) : 0;
     if (e + a <= 0) return null;
-    return { n: e + a, errors: e, actions: a, sev: (e > 0 || (a > 0 && s.blocking)) ? 'red' : 'amber' };
+    return { n: e + a, errors: e, actions: a, sev: 'red' };
+  }
+  // The actions that wait WITHOUT blocking: never a menu number. Kept on the hidden badge as data-menu-waiting so the
+  // page's own code (and a test) can still read how many there are.
+  function pimMenuWaiting(src) {
+    const s = src || {};
+    return s.blocking ? 0 : Math.max(0, Math.floor(Number(s.actions) || 0));
   }
   // Paint ONE menu badge by that rule. el: the element or its id. src: { errors, actions, blocking } plus
   //   title  -- (r) => plain words for what the number counts ("2 approvals wait for a decision"); required when shown
   //   label  -- text to show in place of the number (the emergency override's "!")
-  //   colour -- false keeps the element's own neutral style (the staged-changes pills)
   // Nothing to show = hidden and emptied (no "0", no grey pill). Only a badge painted here carries data-menu-sev, and the
   // grouped menu mirrors only badges that carry it (syncNavGroups) -- a count set any other way never reaches the menu.
   function pimMenuBadge(el, src) {
     const b = (typeof el === 'string') ? document.getElementById(el) : el;
     const r = pimMenuCount(src);
     if (!b) return r;
+    const waitingN = pimMenuWaiting(src);
+    if (waitingN > 0) b.setAttribute('data-menu-waiting', String(waitingN)); else b.removeAttribute('data-menu-waiting');
     if (!r) {
       b.style.display = 'none'; b.textContent = ''; b.removeAttribute('title'); b.removeAttribute('aria-label'); b.removeAttribute('data-menu-sev');
       return null;
@@ -5100,7 +5112,7 @@
     const s = src || {};
     b.textContent = s.label ? String(s.label) : String(r.n);
     b.setAttribute('data-menu-sev', r.sev);
-    if (s.colour !== false) { b.style.background = pimSevColour(r.sev); b.style.color = '#fff'; }
+    b.style.background = pimSevColour(r.sev); b.style.color = '#fff';
     const tip = (typeof s.title === 'function') ? s.title(r) : (s.title || '');
     if (tip) { b.title = tip; b.setAttribute('aria-label', tip); } else { b.removeAttribute('title'); b.removeAttribute('aria-label'); }
     if (s.display !== false) b.style.display = s.display || '';
@@ -7536,7 +7548,7 @@
   // ===================================================================
   // Operator 2026-09-26 (wizard): Access reviews = the WHOLE page is Pro; Delegation overview (All privileged permissions) = a free page whose
   // Revoke action is Pro (its in-page notice), so it is NOT listed here.
-  var PIM_PRO_PAGES = { coverage: 'coverage.gaps', discovery: 'discovery.sweep', accessreview: 'reviews.campaigns',
+  var PIM_PRO_PAGES = { coverage: 'coverage.gaps', accessreview: 'reviews.campaigns',
                         downlink: 'msp', msptenants: 'msp', replication: 'msp' };
   // The Free vs Pro page MIRRORS README.md 'Editions -- what is free and what is paid' word for word (operator 2026-09-26:
   // "free vs pro is already documented ... what goes where"). tests/Test-PimEditionPage.ps1 fails when they drift apart.
@@ -8462,7 +8474,7 @@
     'drift': 'Configuration drift detected',
     'expiring-access': 'Active access expiring soon',
     'break-glass': 'Break-glass (emergency override) used',
-    'coverage': 'New gaps, orphan groups or unmanaged privileged groups (Coverage & gaps)',
+    'coverage': 'New gaps, orphan groups or unmanaged privileged groups (Discovery & gaps)',
     'target-missing': 'Delegations whose Azure resource or role no longer exists (daily target check)',
     'pending-uncommitted': 'Changes staged or queued more than a day ago and never committed (daily pending check)',
     'data-quality': 'Data quality alert: something looks different from the last runs (one mail a day at most, warnings only)'
@@ -12141,7 +12153,7 @@
   // IMP-20 "adopt the live node into Settings" workaround is no longer needed -- nothing is rendered in one place and
   // shown in another):
   //   Drift (live vs desired)            -> tab 'drift'        renderDrift()
-  //   Discovered resources + auto-create -> tab 'discovery'    renderDiscovery()
+  //   Discovered resources -> Discovery & gaps (tab 'coverage')   renderCoverage()   (PIM 100.100: the separate 'discovery' tab is gone)
   //   Scheduled mails & jobs             -> tab 'jobschedule'  renderJobSchedule()
   //   Your access / role mapping         -> Settings           renderSettingsAccessSection(host)
   //   Emergency override (break-glass)   -> Settings           renderSettingsEmergencySection(host)
@@ -12697,7 +12709,18 @@
     }, 30000);
   }
 
-  // ----- Coverage & gaps (tab 'coverage') -- REQ-I + REQ-U --------------------------------------------------------------
+  // ----- Discovery & gaps (tab 'coverage') -- REQ-I + REQ-U, PIM 100.100 ------------------------------------------------
+  // PIM 100.100 (owner 2026-10-12: "these 2 views overlaps. i like the coverage & gaps better and put it under access and
+  // rename it" / "Add Ignore to the new page" / Power BI: "say it clearly" / "it looks crappy"): this page IS Discovery now.
+  //   * Named "Discovery & gaps", under Access. The separate Discovery list (New / Ignored, Create / Ignore) is gone.
+  //   * IGNORE: a gap can be ignored (row button, or "Ignore selected") and brought back (Status: Ignored). The SERVER
+  //     keeps the list and counts (POST /api/coverage/ignore; pim.Settings 'DiscoveryDecisions', the old page's store and
+  //     keys) -- an ignored gap comes back from GET /api/coverage with status 'Ignored', so it is not a gap: not counted,
+  //     not pre-selected, never staged. Nothing changes in the tenant.
+  //   * NOT READ: a workload that could not be read gets ONE plain block above the list -- what is missing and the steps,
+  //     taken from the prerequisite check's own result (covRenderNotRead) -- and "<workload>: not read" in the count row.
+  //   * The explanation is under "What this is & how to use it" (TAB_GUIDANCE.coverage); the prerequisites that are ready
+  //     fold into one line (renderWorkloadPrereqChips, compact section).
   // Operator, 2026-09-19: "see the difference between existing permission groups fx. against entra roles and then any new
   // roles that exist which has NOT been created ... show gaps/missing roles ... create fast ... prestage all so i can
   // multiselect". The scheduler job 'coverage' (engine/coverage/PIM-Coverage.ps1) compares every workload's live catalog
@@ -12715,20 +12738,26 @@
   const COV_FILTER = { workload: '', status: '', text: '' };
   const COV_STATUS_STYLE = {
     'Covered': '#1a7f37', 'Gap': '#0969da', 'Orphan group': '#bc4c00', 'Unmanaged binding': '#bc4c00',
-    'Wrong permissions': '#cf222e', 'Unmanaged privileged group': '#8250df', 'Not checked': '#9a6700'
+    'Wrong permissions': '#cf222e', 'Unmanaged privileged group': '#8250df', 'Not checked': '#9a6700', 'Ignored': '#57606a'
   };
+  // The report's status 'Not checked' is said as "Not read" (plain words); the value itself stays (server, filters, tests).
+  function covStatusLabel(s) { return s === 'Not checked' ? 'Not read' : String(s || ''); }
+  function covCanIgnore(d) { return roleAtLeast('Admin'); }   // the server gates it too (POST /api/coverage/ignore: Admin + the page's licence)
+  function covNotReadSources(d) { return asList(d && d.sources).filter(s => s && !s.read && s.workload); }
+  // The prerequisite workload (GET /api/workload-prereqs) whose checks say what a workload of this page needs.
+  const COV_PREREQ_OF = { 'Entra ID': 'EntraRoles', 'PIM for Groups': 'EntraRoles', 'Administrative units': 'EntraRoles', 'Intune': 'Intune', 'Defender XDR': 'DefenderXdr', 'Power BI': 'PowerBI', 'Azure': 'AzureRbac' };
 
   async function renderCoverage(opts) {
     const body = document.getElementById('coverageBody');
     if (!body) return;
     const o = opts || {};
-    if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode &mdash; the coverage report needs the server and the scheduler.</div>'; return; }
+    if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode &mdash; Discovery &amp; gaps needs the server and the scheduler.</div>'; return; }
     if (COV_POLL && !o.keepPoll) { clearTimeout(COV_POLL); COV_POLL = null; }
-    body.innerHTML = stateLoading('Loading the latest coverage report…', 'Reading the stored result of the scheduler\'s check. This does not read the tenant.');
+    body.innerHTML = stateLoading('Loading Discovery & gaps…', 'Reading the result PIM Manager stored at its last read. This does not read the tenant.');
     let d;
     try { d = await api('GET', '/api/coverage'); }
-    catch (e) { body.innerHTML = stateError('Coverage report unavailable', (e && e.body && e.body.error) || e.message || 'the stored coverage report could not be read'); return; }
-    if (!d || d.supported === false) { body.innerHTML = stateEmpty('The coverage report is not available here', (d && d.error) || 'It needs the hosted Manager and the scheduler.'); return; }
+    catch (e) { body.innerHTML = stateError('Discovery & gaps is unavailable', (e && e.body && e.body.error) || e.message || 'the stored result could not be read'); return; }
+    if (!d || d.supported === false) { body.innerHTML = stateEmpty('Discovery & gaps is not available here', (d && d.error) || 'It needs the hosted Manager and the scheduler.'); return; }
     covRenderPage(body, d, o.note || '');
     covRenderTargetCheck(body, d.targetCheck);
   }
@@ -12761,7 +12790,7 @@
   // The unit's identity in pending rows: its binding row (the last row of the unit).
   function covUnitBinding(u) { const rs = asList(u && u.rows); return rs.length ? rs[rs.length - 1] : null; }
   function covRowMatches(a, b) {
-    const f = ['GroupTag', 'RoleDefinitionName', 'RoleName', 'AzScope', 'AzScopePermission', 'Scope', 'Workload'];
+    const f = ['GroupTag', 'RoleDefinitionName', 'RoleName', 'AzScope', 'AzScopePermission', 'Scope', 'Workload', 'AUDisplayName'];   // AUDisplayName: an administrative unit's definition is the whole unit (100.100)
     return f.every(k => !(k in b) || String(a[k] == null ? '' : a[k]).trim().toLowerCase() === String(b[k] == null ? '' : b[k]).trim().toLowerCase());
   }
   // Already staged (this session) or already present in the pending rows of its binding entity.
@@ -12775,9 +12804,10 @@
   }
   function covVisibleRows(d) {
     const t = String(COV_FILTER.text || '').trim().toLowerCase();
+    // 100.100: an ignored gap is off the default list -- it shows only under Status = Ignored.
     return asList(d && d.rows).filter(r => r &&
       (!COV_FILTER.workload || r.workload === COV_FILTER.workload) &&
-      (!COV_FILTER.status || r.status === COV_FILTER.status) &&
+      (COV_FILTER.status ? r.status === COV_FILTER.status : r.status !== 'Ignored') &&
       (!t || (String(r.item || '') + ' ' + String(r.reason || '') + ' ' + asList(r.coveredBy).join(' ')).toLowerCase().indexOf(t) >= 0));
   }
   function covUnitsOf(r) { return (r && r.status === 'Gap' && r.proposal) ? asList(r.proposal.units).filter(u => u && u.id) : []; }
@@ -12794,66 +12824,79 @@
     const esc = escapeHtml;
     const canCheck = roleAtLeast('Admin');
     const canStage = roleAtLeast('Admin');
+    const canIgnore = canStage && covCanIgnore(d);
     const rowsAll = asList(d.rows);
     const statuses = asList(d.statuses).length ? asList(d.statuses) : Object.keys(COV_STATUS_STYLE);
     const counts = d.counts || {};
+    const every = (Number(d.cadenceMinutes || 720) % 60 === 0) ? (Number(d.cadenceMinutes || 720) / 60) + ' hours' : Number(d.cadenceMinutes || 720) + ' minutes';
     // REQ-I: "prestage all so i can multiselect" -- every gap unit starts selected (once; a deselection sticks).
     rowsAll.forEach(r => covUnitsOf(r).forEach(u => { if (!COV_SEEN.has(u.id)) { COV_SEEN.add(u.id); if (!covUnitStaged(u)) COV_SEL.add(u.id); } }));
     const h = [];
     h.push('<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">' +
-      '<span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Coverage &amp; gaps</span>' +
+      '<span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Discovery &amp; gaps</span>' +
       '<span id="covAsOf" style="color:#57606a;font-size:12px;">' +
-        (d.snapshotMissing ? 'not checked yet' : ('as of ' + esc(driftFmtUtc(d.computedUtc)) + ' (checked every ' + esc(String(d.cadenceMinutes || 720)) + ' min)')) + '</span>' +
+        (d.snapshotMissing ? 'not read yet' : ('as of ' + esc(driftFmtUtc(d.computedUtc)) + ' (read every ' + esc(every) + ')')) + '</span>' +
       (d.stale ? '<span style="color:#9a6700;font-size:11.5px;">stale &mdash; check the coverage job on the Jobs page</span>' : '') +
       '<span style="flex:1 1 auto;"></span>' +
       (rowsAll.length ? (exportBarHtml('cov') + ' ') : '') +
-      (canCheck ? '<button id="covCheckNow" title="Queues a new coverage check for the scheduler. The result appears here in a few minutes.">Check now</button>' : '') +
+      (canCheck ? '<button id="covCheckNow" title="Starts a new read of the tenant. The result appears here in a few minutes.">Check now</button>' : '') +
       '<span id="covCheckMsg" style="color:#57606a;font-size:11.5px;">' + esc(note || '') + '</span></div>');
-    h.push('<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">For every workload PIM can delegate, this compares what exists in the tenant (Entra roles, Intune and Defender roles, Power BI workspaces, Azure subscriptions and management groups) with what PIM delegates. ' +
-      '<b>Gap</b> = nothing delegates it yet &mdash; a ready-made proposal (a correctly named group plus its binding, from your naming pattern) is pre-selected; stage the ones you want into <b>Pending changes</b> and commit as usual. Staging is never blocked: where a workload&rsquo;s prerequisites are not green, its group is still created and only its role assignment waits (an amber note says so). ' +
-      '<b>Orphan group</b> = a group PIM defines that holds nothing; <b>Unmanaged binding</b> = a binding to a group PIM does not define; <b>Unmanaged privileged group</b> = a group onboarded to PIM for Groups that PIM does not manage (it can gate any application) &mdash; these are for review and are never staged or adopted. ' +
-      '<b>Not checked</b> = the source could not be read, with the reason &mdash; never counted as covered.</div>');
-    // REQ-U (prereqs): the compact "Workload prerequisites" section (one chip per workload + the command), filled below.
+    // 100.100: the explanation is under "What this is & how to use it" (TAB_GUIDANCE.coverage), not a paragraph here.
+    // One plain block per workload that was NOT READ (what is missing + the steps), filled below.
+    h.push('<div id="covNotRead"></div>');
+    // REQ-U (prereqs): the compact "Workload prerequisites" section -- the ready ones folded into one line -- filled below.
     h.push('<div id="covPrereqs" style="margin-bottom:10px;"></div>');
     if (d.snapshotMissing) {
-      h.push(stateEmpty('No coverage check has run yet', d.hint || 'The scheduler job coverage runs it on its interval (every 12 hours by default -- see Job schedule).'));
+      // A fresh install: nothing was read yet. Said plainly -- not an error, and never "no gaps".
+      const why = d.refreshQueued ? 'PIM Manager has not read this tenant yet. A first read is queued -- the result appears here in a few minutes.'
+        : (d.refreshError ? 'PIM Manager has not read this tenant yet, and a read could not be started (' + d.refreshError + '). It reads by itself every ' + every + '.'
+        : 'PIM Manager has not read this tenant yet, so there is nothing to list -- that is not the same as "no gaps". It reads by itself every ' + every + (canCheck ? '; Check now starts a read.' : '.'));
+      h.push('<div id="covEmpty">' + stateEmpty('Not read yet', why) + '</div>');
       body.innerHTML = h.join('');
       renderWorkloadPrereqChips(document.getElementById('covPrereqs'));
       covWireCheckNow(d);
       return;
     }
-    // Counts per status (click = filter).
+    // Counts per status (click = filter). A workload that was not read is NAMED here ("Power BI: not read") -- never left out.
+    const notRead = covNotReadSources(d);
     h.push('<div id="covCounts" style="display:flex;gap:14px;flex-wrap:wrap;align-items:baseline;margin-bottom:8px;font-size:13px;">' +
-      statuses.map(s => '<span class="covCount" data-status="' + esc(s) + '" style="cursor:pointer;' + (COV_FILTER.status === s ? 'text-decoration:underline;' : '') + '" title="show only ' + esc(s) + '">' +
-        '<b style="color:' + (COV_STATUS_STYLE[s] || '#57606a') + ';font-size:16px;">' + esc(String(counts[s] || 0)) + '</b> ' + esc(s.toLowerCase()) + '</span>').join('') + '</div>');
+      statuses.filter(s => s !== 'Not checked').map(s => '<span class="covCount" data-status="' + esc(s) + '" style="cursor:pointer;' + (COV_FILTER.status === s ? 'text-decoration:underline;' : '') + '" title="show only ' + esc(covStatusLabel(s)) + '">' +
+        '<b style="color:' + (COV_STATUS_STYLE[s] || '#57606a') + ';font-size:16px;">' + esc(String(counts[s] || 0)) + '</b> ' + esc(covStatusLabel(s).toLowerCase()) + '</span>').join('') +
+      notRead.map(s => '<span class="covNotReadCount" data-workload="' + esc(s.workload) + '" style="color:#9a6700;font-weight:600;" title="' + esc(s.workload) + ' could not be read -- see the block above the list. It is not counted as covered.">' + esc(s.workload) + ': not read</span>').join('') + '</div>');
     // Sources: what was read, and what was NOT.
     const srcs = asList(d.sources);
     if (srcs.length) {
       h.push('<div id="covSources" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;font-size:11.5px;">' + srcs.map(s =>
-        '<span class="covSource" data-read="' + (s.read ? '1' : '0') + '" style="padding:3px 8px;border:1px solid ' + (s.read ? '#d0d7de' : '#d4a72c') + ';border-radius:12px;background:' + (s.read ? '#f6f8fa' : '#fff8c5') + ';" title="' + esc((s.source || '') + (s.readUtc ? ' -- read ' + fmtTime(s.readUtc) : '') + (s.note ? ' -- ' + s.note : '')) + '">' +
-        '<b>' + esc(s.workload || '') + '</b> ' + (s.read ? ('&#10003; ' + esc(String(s.items || 0)) + ' read') : ('<span style="color:#9a6700;font-weight:600;">not checked</span> &mdash; ' + esc(s.reason || 'could not be read'))) + '</span>').join('') + '</div>');
+        '<span class="covSource" data-read="' + (s.read ? '1' : '0') + '" style="padding:3px 8px;border:1px solid ' + (s.read ? '#d0d7de' : '#d4a72c') + ';border-radius:12px;background:' + (s.read ? '#f6f8fa' : '#fff8c5') + ';" title="' + esc((s.source || '') + (s.readUtc ? ' -- read ' + fmtTime(s.readUtc) : '') + (s.note ? ' -- ' + s.note : '') + (s.read ? '' : ' -- ' + (s.reason || 'could not be read'))) + '">' +
+        '<b>' + esc(s.workload || '') + '</b> ' + (s.read ? ('&#10003; ' + esc(String(s.items || 0)) + ' read') : '<span style="color:#9a6700;font-weight:600;">not read</span>') + '</span>').join('') + '</div>');
     }
     // Filters.
     const workloads = Array.from(new Set(rowsAll.map(r => r.workload).filter(Boolean)));
     h.push('<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;font-size:12px;">' +
       '<label>Workload <select id="covFilterWorkload"><option value="">All</option>' + workloads.map(w => '<option value="' + esc(w) + '"' + (COV_FILTER.workload === w ? ' selected' : '') + '>' + esc(w) + '</option>').join('') + '</select></label>' +
-      '<label>Status <select id="covFilterStatus"><option value="">All</option>' + statuses.map(s => '<option value="' + esc(s) + '"' + (COV_FILTER.status === s ? ' selected' : '') + '>' + esc(s) + ' (' + esc(String(counts[s] || 0)) + ')</option>').join('') + '</select></label>' +
+      '<label>Status <select id="covFilterStatus"><option value="">All</option>' + statuses.map(s => '<option value="' + esc(s) + '"' + (COV_FILTER.status === s ? ' selected' : '') + '>' + esc(covStatusLabel(s)) + ' (' + esc(String(counts[s] || 0)) + ')</option>').join('') + '</select></label>' +
       '<input id="covFilterText" type="search" placeholder="filter by name or reason" value="' + esc(COV_FILTER.text || '') + '" style="min-width:220px;">' +
       '<span id="covShown" style="color:#57606a;"></span></div>');
-    // Stage bar (Admin+): selected units among the rows shown.
+    // Stage bar (Admin+): selected units among the rows shown. 100.100: + Ignore selected / Bring back all shown.
     if (canStage) {
       h.push('<div id="covStageBar" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">' +
         '<button id="covSelAll" title="select every proposal in the rows shown">Select all shown</button>' +
         '<button id="covSelNone" title="clear the selection in the rows shown">Select none</button>' +
         '<button id="covStage" class="primary">Stage selected into Pending changes</button>' +
-        '<span id="covStageMsg" style="color:#57606a;font-size:11.5px;"></span></div>');
+        (canIgnore ? (COV_FILTER.status === 'Ignored'
+          ? '<button id="covBringBackAll" title="Every ignored item shown is listed as a gap again. Nothing changes in the tenant.">Bring back all shown</button>'
+          : '<button id="covIgnoreSel" title="Take the selected gaps off this list and out of the gap count. Nothing changes in the tenant; Status = Ignored shows them, with Bring back.">Ignore selected</button>') : '') +
+        '<span id="covStageMsg" style="color:#57606a;font-size:11.5px;"></span>' +
+        '<span id="covIgnoreMsg" style="color:#57606a;font-size:11.5px;"></span></div>');
     } else {
-      h.push('<div style="color:#8c959f;font-size:11.5px;margin-bottom:8px;">Admin role required to stage proposals into Pending changes.</div>');
+      h.push('<div style="color:#8c959f;font-size:11.5px;margin-bottom:8px;">Admin role required to stage proposals into Pending changes, and to ignore a gap.</div>');
     }
+    if (d.ignoreError) h.push('<div id="covIgnoreError" style="color:#9a6700;font-size:11.5px;margin-bottom:8px;">The list of ignored items could not be read (' + esc(d.ignoreError) + ') -- every gap is shown, including ones that were ignored.</div>');
     h.push('<table class="grid" id="covTbl" style="font-size:12px;"><thead><tr>' +
       '<th style="width:18px;"></th>' + (canStage ? '<th style="width:24px;" title="stage this gap&rsquo;s proposal"></th>' : '') +
-      '<th>Workload</th><th>Item</th><th>Status</th><th>Delegated by</th><th>Why</th></tr></thead><tbody id="covTbody"></tbody></table>');
+      '<th>Workload</th><th>Item</th><th>Status</th><th>Delegated by</th><th>Why</th>' + (canIgnore ? '<th style="width:92px;"></th>' : '') + '</tr></thead><tbody id="covTbody"></tbody></table>');
     body.innerHTML = h.join('');
+    covRenderNotRead(document.getElementById('covNotRead'), d);          // 100.100
     renderWorkloadPrereqChips(document.getElementById('covPrereqs'));   // REQ-U (prereqs)
     covRenderRows(body, d, canStage);
 
@@ -12861,16 +12904,23 @@
     const sf = document.getElementById('covFilterStatus'); if (sf) sf.onchange = () => { COV_FILTER.status = sf.value; covRenderPage(body, d, ''); };
     const tf = document.getElementById('covFilterText'); if (tf) tf.oninput = () => { COV_FILTER.text = tf.value; covRenderRows(body, d, canStage); };
     body.querySelectorAll('.covCount').forEach(c => c.onclick = () => { const s = c.getAttribute('data-status'); COV_FILTER.status = (COV_FILTER.status === s) ? '' : s; covRenderPage(body, d, ''); });
+    const ig = document.getElementById('covIgnoreSel'); if (ig) ig.onclick = () => {
+      const keys = covSelectedGapKeys(d);
+      if (!keys.length) { const m = document.getElementById('covIgnoreMsg'); if (m) m.textContent = 'Nothing is selected in the rows shown.'; return; }
+      if (!confirm('Ignore ' + keys.length + ' selected gap(s)?\n\nThey leave this list and the gap count. Nothing changes in the tenant, and Status = Ignored brings them back.')) return;
+      covIgnore('ignore', keys);
+    };
+    const bb = document.getElementById('covBringBackAll'); if (bb) bb.onclick = () => covIgnore('bringback', covVisibleRows(d).filter(r => r.status === 'Ignored' && r.ignoreKey).map(r => r.ignoreKey));
     const sa = document.getElementById('covSelAll'); if (sa) sa.onclick = () => { covVisibleRows(d).forEach(r => covUnitsOf(r).forEach(u => { if (!covUnitStaged(u)) COV_SEL.add(u.id); })); covRenderRows(body, d, canStage); };
     const sn = document.getElementById('covSelNone'); if (sn) sn.onclick = () => { covVisibleRows(d).forEach(r => covUnitsOf(r).forEach(u => COV_SEL.delete(u.id))); covRenderRows(body, d, canStage); };
     const st = document.getElementById('covStage'); if (st) st.onclick = () => covStageSelected(body, d);
     if (rowsAll.length) {
       wireExportBar('cov', () => ({
         filename: 'pim-coverage-' + new Date().toISOString().replace(/[:.]/g, '-') + '.csv',
-        title: 'PIM Manager — coverage & gaps',
-        subtitle: statuses.map(s => (counts[s] || 0) + ' ' + s.toLowerCase()).join(' · ') + (d.computedUtc ? ' · as of ' + driftFmtUtc(d.computedUtc) : ''),
+        title: 'PIM Manager — Discovery & gaps',
+        subtitle: statuses.map(s => (counts[s] || 0) + ' ' + covStatusLabel(s).toLowerCase()).join(' · ') + (d.computedUtc ? ' · as of ' + driftFmtUtc(d.computedUtc) : ''),
         headers: ['Workload', 'Item', 'Status', 'Delegated by', 'Why'],
-        rows: covVisibleRows(d).map(r => [r.workload || '', r.item || '', r.status || '', asList(r.coveredBy).join('; '), r.reason || ''])
+        rows: covVisibleRows(d).map(r => [r.workload || '', r.item || '', covStatusLabel(r.status), asList(r.coveredBy).join('; '), r.reason || ''])
       }));
     }
     covWireCheckNow(d);
@@ -12882,15 +12932,27 @@
     if (!tb) return;
     const vis = covVisibleRows(d);
     const shown = document.getElementById('covShown');
-    if (shown) shown.textContent = fmtNum(vis.length) + ' of ' + fmtNum(asList(d.rows).length) + ' shown';
+    // 100.100: the ignored gaps are their own list (Status = Ignored) -- "N of M" counts the list that is shown.
+    const ignView = COV_FILTER.status === 'Ignored';
+    const pool = asList(d.rows).filter(r => r && (ignView ? r.status === 'Ignored' : r.status !== 'Ignored'));
+    const ignN = asList(d.rows).filter(r => r && r.status === 'Ignored').length;
+    if (shown) shown.textContent = fmtNum(vis.length) + ' of ' + fmtNum(pool.length) + ' shown' + (!ignView && ignN ? ' · ' + fmtNum(ignN) + ' ignored (Status: Ignored shows them)' : '');
+    const canIgnore = canStage && covCanIgnore(d);
     const h = [];
-    const cols = canStage ? 7 : 6;
+    const cols = 6 + (canStage ? 1 : 0) + (canIgnore ? 1 : 0);
     vis.forEach(r => {
       const units = covUnitsOf(r);
       const open = COV_OPEN.has(r.key);
       const pend = units.filter(u => !covUnitStaged(u));
       const selN = pend.filter(u => COV_SEL.has(u.id)).length;
       const color = COV_STATUS_STYLE[r.status] || '#57606a';
+      // Ignore (a gap) / Bring back (an ignored gap): a decision about this list only -- nothing changes in the tenant.
+      let act = '';
+      if (canIgnore && r.ignoreKey) {
+        if (r.status === 'Gap') act = '<button class="covIgnore" type="button" data-ikey="' + esc(r.ignoreKey) + '" title="Take this gap off the list and out of the gap count. Nothing changes in the tenant; Status = Ignored shows it, with Bring back." style="font-size:11px;padding:1px 8px;">Ignore</button>';
+        else if (r.status === 'Ignored') act = '<button class="covBringBack" type="button" data-ikey="' + esc(r.ignoreKey) + '" title="List it as a gap again." style="font-size:11px;padding:1px 8px;">Bring back</button>';
+      }
+      const ignNote = r.status === 'Ignored' ? ('ignored' + (r.ignoredBy ? ' by ' + r.ignoredBy : '') + (r.ignoredUtc ? ' ' + fmtTime(r.ignoredUtc) : '') + ' -- ') : '';
       let tick = '';
       if (canStage) {
         if (units.length && !pend.length) tick = '<span title="already in Pending changes" style="color:#1a7f37;">&#10003;</span>';
@@ -12901,13 +12963,14 @@
         (canStage ? '<td class="covTick">' + tick + '</td>' : '') +
         '<td>' + esc(r.workload || '') + '</td>' +
         '<td><b>' + esc(r.item || '') + '</b></td>' +
-        '<td><span class="covStatus" style="color:' + color + ';font-weight:600;">' + esc(r.status || '') + '</span>' + (units.length ? ' <span style="color:#57606a;font-size:11px;">' + (pend.length ? (selN + '/' + pend.length + ' selected') : 'staged') + '</span>' : '') +
+        '<td><span class="covStatus" style="color:' + color + ';font-weight:600;">' + esc(covStatusLabel(r.status)) + '</span>' + (units.length ? ' <span style="color:#57606a;font-size:11px;">' + (pend.length ? (selN + '/' + pend.length + ' selected') : 'staged') + '</span>' : '') +
           // REQ-W: an amber one-liner when the proposal's workload role assignment would be held (filled below).
           (units.length ? ' <span class="cov-held-row" data-spec="' + esc(JSON.stringify(Array.from(new Set([].concat.apply([], units.map(covUnitPrereqSpecs)))))) + '"></span>' : '') + '</td>' +
         '<td>' + esc(asList(r.coveredBy).slice(0, 2).join(', ')) + (asList(r.coveredBy).length > 2 ? ' <span style="color:#57606a;">+' + (asList(r.coveredBy).length - 2) + '</span>' : '') + '</td>' +
-        '<td style="color:#57606a;">' + esc(String(r.reason || '').length > 110 ? String(r.reason).substring(0, 110) + '…' : String(r.reason || '')) + '</td></tr>');
+        '<td style="color:#57606a;">' + esc(ignNote) + esc(String(r.reason || '').length > 110 ? String(r.reason).substring(0, 110) + '…' : String(r.reason || '')) + '</td>' +
+        (canIgnore ? '<td class="covAct" style="white-space:nowrap;">' + act + '</td>' : '') + '</tr>');
       const det = [];
-      det.push('<div style="font-size:12px;padding:4px 0;"><b>' + esc(r.status || '') + '</b> &mdash; ' + esc(r.reason || '') + '</div>');
+      det.push('<div style="font-size:12px;padding:4px 0;"><b>' + esc(covStatusLabel(r.status)) + '</b> &mdash; ' + esc(ignNote) + esc(r.reason || '') + '</div>');
       if (asList(r.coveredBy).length) det.push('<div style="font-size:11.5px;color:#57606a;">Delegated by: ' + asList(r.coveredBy).map(x => esc(x)).join(', ') + '</div>');
       if (r.itemId) det.push('<div style="font-size:10.5px;color:#8c959f;font-family:Consolas,monospace;">' + esc(r.itemId) + '</div>');
       if (units.length) {
@@ -12940,8 +13003,10 @@
       }
       h.push('<tr class="covDetail" data-key="' + esc(r.key) + '"' + (open ? '' : ' style="display:none;"') + '><td></td><td colspan="' + (cols - 1) + '" style="background:#fbfcfd;">' + det.join('') + '</td></tr>');
     });
-    if (!vis.length) h.push('<tr><td colspan="' + cols + '" style="color:#57606a;">No rows match the filter.</td></tr>');
+    if (!vis.length) h.push('<tr><td colspan="' + cols + '" style="color:#57606a;">' + (ignView && !ignN ? 'Nothing is ignored.' : 'No rows match the filter.') + '</td></tr>');
     tb.innerHTML = h.join('');
+    tb.querySelectorAll('.covIgnore').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); covIgnore('ignore', [b.getAttribute('data-ikey')]); });
+    tb.querySelectorAll('.covBringBack').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); covIgnore('bringback', [b.getAttribute('data-ikey')]); });
     // REQ-W: the held notes (unit detail) and one-liners (row), from the cached /api/workload-prereqs read.
     tb.querySelectorAll('.cov-held').forEach(el => { let sp = []; try { sp = JSON.parse(el.getAttribute('data-spec') || '[]'); } catch (_) { sp = []; } if (sp.length) renderWorkloadHeldNote(el, sp); });
     tb.querySelectorAll('.cov-held-row').forEach(el => { let sp = []; try { sp = JSON.parse(el.getAttribute('data-spec') || '[]'); } catch (_) { sp = []; } if (sp.length) renderWorkloadHeldNote(el, sp, undefined, { compact: true }); });
@@ -12969,10 +13034,88 @@
     });
     const stBtn = document.getElementById('covStage');
     if (stBtn) { const n = covSelectedVisibleUnits(d).length; stBtn.textContent = 'Stage ' + n + ' selected into Pending changes'; stBtn.disabled = n === 0; }
+    const igBtn = document.getElementById('covIgnoreSel');
+    if (igBtn) { const n = covSelectedGapKeys(d).length; igBtn.textContent = 'Ignore ' + n + ' selected'; igBtn.disabled = n === 0; }
+    const bbBtn = document.getElementById('covBringBackAll');
+    if (bbBtn) bbBtn.disabled = !vis.some(r => r.status === 'Ignored' && r.ignoreKey);
+  }
+
+  // 100.100: the gaps "Ignore selected" acts on -- the rows shown whose proposal is (partly) ticked and not yet staged.
+  function covSelectedGapKeys(d) {
+    return covVisibleRows(d).filter(r => r.status === 'Gap' && r.ignoreKey && covUnitsOf(r).some(u => COV_SEL.has(u.id) && !covUnitStaged(u))).map(r => r.ignoreKey);
+  }
+  // Ignore / Bring back (Admin; POST /api/coverage/ignore). The server stores the decision, audits it and recounts; the page
+  // then re-reads the report, so the list and the counts are the server's. A refusal is shown in the server's words.
+  async function covIgnore(action, keys) {
+    switch (action) { case 'ignore': case 'bringback': break; default: return; }
+    const list = Array.from(new Set(asList(keys).map(k => String(k || '')).filter(Boolean)));
+    const say = (text, color) => { const m = document.getElementById('covIgnoreMsg'); if (m) { m.textContent = text; m.style.color = color || '#57606a'; } };
+    if (!list.length) { say('Nothing to ' + (action === 'ignore' ? 'ignore' : 'bring back') + ' in the rows shown.'); return; }
+    let r = null;
+    try { r = await api('POST', '/api/coverage/ignore', { action: action, keys: list }); }
+    catch (e) { say('Not done: ' + ((e && e.body && e.body.error) || (e && e.message) || e), '#cf222e'); return; }
+    const n = (r && r.count) || list.length;
+    let d = null;
+    try { d = await api('GET', '/api/coverage'); } catch (_) { d = null; }
+    const body = document.getElementById('coverageBody');
+    if (d && body) { covRenderPage(body, d, ''); covRenderTargetCheck(body, d.targetCheck); }
+    say(action === 'ignore'
+      ? 'Ignored ' + n + ' gap(s) -- nothing changed in the tenant. Status: Ignored shows them, with Bring back.'
+      : 'Brought back ' + n + ' item(s) -- listed as gaps again.', '#1a7f37');
+  }
+
+  // 100.100 (owner 2026-10-12, Power BI: "say it clearly"): ONE plain block per workload that was NOT READ, above the list --
+  // "<Workload> was not read", what is missing and the steps, then Check again. What is missing and the steps are the
+  // prerequisite check's OWN result (GET /api/workload-prereqs: each open check's name, detail and manualStep) -- the same
+  // texts as under "Workload prerequisites", never a second copy written here.
+  async function covRenderNotRead(host, d) {
+    if (!host) return;
+    const srcs = covNotReadSources(d);
+    if (!srcs.length) { host.innerHTML = ''; return; }
+    const esc = escapeHtml;
+    const canAct = roleAtLeast('Admin');
+    const draw = (data) => {
+      const byName = {}; asList(data && data.workloads).forEach(w => { if (w) byName[w.workload] = w; });
+      host.innerHTML = srcs.map(s => {
+        const w = byName[COV_PREREQ_OF[s.workload] || ''] || null;
+        const failing = asList(w && w.checks).filter(c => c && !c.ok);
+        const need = failing.filter(c => c.required !== false);
+        const open = need.length ? need : failing;
+        let what = '';
+        if (open.length) {
+          what = '<div style="margin-top:3px;">' + (open.length === 1 ? 'One thing is missing:' : open.length + ' things are missing:') + '</div>' +
+            '<ol class="covNotReadSteps" style="margin:2px 0 0 20px;padding:0;">' + open.map(c => '<li data-check="' + esc(c.id || '') + '" style="margin:3px 0;"><b>' + esc(c.name || c.id || '') + '</b>' +
+              (c.detail ? ' <span style="color:#57606a;">(' + esc(c.detail) + ')</span>' : '') +
+              (c.manualStep ? '<div><i>Steps:</i> ' + esc(c.manualStep) + (c.learn ? ' <a href="' + esc(c.learn) + '" target="_blank" rel="noopener">Learn</a>' : '') + '</div>' : '') + '</li>').join('') + '</ol>';
+        } else if (w && String(w.state) === 'ok') {
+          what = '<div style="margin-top:3px;">Its prerequisites are ready -- see what PIM Manager got below.</div>';
+        } else if (w && w.next) {
+          what = '<div style="margin-top:3px;">' + esc(w.next) + '</div>';
+        }
+        return '<div class="covNotReadBlock" data-workload="' + esc(s.workload) + '" style="background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:8px 10px;margin:0 0 8px 0;font-size:12px;color:#24292f;min-width:0;overflow-wrap:anywhere;">' +
+          '<div><b>' + esc(s.workload) + ' was not read.</b> Nothing is listed for it below, and it is not counted as covered.</div>' + what +
+          '<div class="covNotReadGot" style="color:#57606a;margin-top:3px;">What PIM Manager got: ' + esc(s.reason || 'the read failed') + '</div>' +
+          '<div style="margin-top:4px;">' + (canAct ? 'Then press <button class="covNotReadCheck" type="button" style="font-size:11px;padding:1px 8px;">Check again</button>' : 'Then an Admin presses Check again.') +
+          ' <span class="covNotReadMsg" style="color:#57606a;"></span></div></div>';
+      }).join('');
+      host.querySelectorAll('.covNotReadCheck').forEach(b => b.onclick = async () => {
+        const blk = b.closest('.covNotReadBlock'); const m = blk ? blk.querySelector('.covNotReadMsg') : null;
+        b.disabled = true;
+        // The prerequisites are checked again (PIM's own daily check, started now), then the tenant is read again.
+        try { await api('POST', '/api/jobs/run', { name: (data && data.selfCheckJob) || 'workload-prereqs' }); _pimPrereqCache = null; }
+        catch (e) { if (m) m.textContent = 'The prerequisite check could not be started (' + ((e && e.body && e.body.error) || (e && e.message) || e) + '). '; }
+        if (m) m.textContent += 'A new read is started -- this page refreshes itself when the result is in (a few minutes).';
+        covQueueCheck(d.computedUtc || null);
+      });
+    };
+    draw(null);   // at once: the plain statement and the reason, before the prerequisite read answers
+    let data = null;
+    try { data = await pimWorkloadPrereqsLoad(); } catch (_) { data = null; }
+    if (data && !data.loadError && host.isConnected !== false) draw(data);
   }
 
   function covRowSummary(row) {
-    const keys = ['GroupName', 'GroupTag', 'RoleDefinitionName', 'RoleName', 'AzScopePermission', 'AzScope', 'Scope', 'AssignmentType', 'Level'];
+    const keys = ['GroupName', 'GroupTag', 'RoleDefinitionName', 'RoleName', 'AzScopePermission', 'AzScope', 'Scope', 'AssignmentType', 'Level', 'AUDisplayName', 'AdministrativeUnitTag'];
     return keys.filter(k => row[k] != null && String(row[k]).trim()).map(k => k + '=' + String(row[k])).join(' · ');
   }
 
@@ -12983,13 +13126,15 @@
       for (const x of asList(u.rows)) {
         if (!x || !x.entity || !x.row) continue;
         // A definition whose group is already in the rows (another unit staged it, or it exists) is not staged twice.
-        if (/^PIM-Definitions-/.test(x.entity) && x.row.GroupTag) {
+        // 100.100: an administrative unit's definition has no GroupTag -- it is known by its AdministrativeUnitTag
+        // (discStagePlan, the rule the old Discovery page staged by: one row per NEW tag).
+        if (/^PIM-Definitions-/.test(x.entity) && (x.row.GroupTag || x.row.AdministrativeUnitTag)) {
           let data = null;
           try { data = await loadCsv(x.entity); } catch (_) { data = null; }
           ensurePending(x.entity, (data && Array.isArray(data.header) && data.header.length) ? data.header : Object.keys(x.row), (data && Array.isArray(data.rows)) ? data.rows : []);
           const have = pendingFinalRows(x.entity) || [];
-          const tag = String(x.row.GroupTag).trim().toLowerCase();
-          if (have.some(r => String((r && r.GroupTag) || '').trim().toLowerCase() === tag)) continue;
+          const tags = {}; tags[x.entity] = new Set(have.map(r => covDefinitionTag(x.entity, r)).filter(Boolean));
+          if (!discStagePlan([{ base: x.entity, row: x.row }], null, tags).length) continue;
         }
         const full = await wuxStage(x.entity, x.row);
         done.push({ base: x.entity, full });
@@ -13070,91 +13215,14 @@
     }, 30000);
   }
 
-  // ----- Discovery (tab 'discovery') ------------------------------------------------------------------------------------
-  // REQ-DISC-2 (operator 2026-09-26: "i need a way to see them, and either ignore them or approve them (create)", "list
-  // with create and ignore", "must be fast and easy", "it must be possible to see ignored and re-add them"). ONE list of
-  // what is new, grouped by kind: every row has Create and Ignore, tick-boxes + "select all" per kind do many similar ones
-  // at once, and the Ignored view has Re-add. Create STAGES a permission-group definition (Azure scope / Power BI
-  // workspace -- review it under Review & commit) or ACCEPTS a new role into the catalog. Nothing is granted here.
-  let PIM_DISC_VIEW = 'new';
-  // The ONE reader of each of these routes (the Discovery page, the template cards and the Get Started wizard use them).
-  async function pimGetDiscoveryInbox() {
-    return api('GET', '/api/discovery-inbox');
-  }
   async function pimGetTemplates() {
     return api('GET', '/api/templates');
   }
-  async function renderDiscovery() {
-    const body = document.getElementById('discoveryBody');
-    if (!body) return;
-    if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- discovery needs the server.</div>'; return; }
-    const esc = escapeHtml;
-    let d = null, err = '';
-    try { d = await pimGetDiscoveryInbox(); } catch (e) { err = String((e && e.body && e.body.error) || (e && e.message) || e); }
-    if (err || !d) { body.innerHTML = '<div class="discReadError" style="font-size:12.5px;color:#cf222e;">Discovery could not be read: ' + esc(err || 'no answer') + '</div>'; return; }
-    const items = asList(d.items);
-    const counts = d.counts || {};
-    const can = !!d.canDecide;
-    const ign = PIM_DISC_VIEW === 'ignored';
-    const shown = items.filter(x => ign ? x.state === 'ignored' : (x.state === 'new' || x.state === 'staged'));
-    const kinds = d.kinds || {};
-    pimExportSet('discovery', 'Newly discovered resources', () => [pimExportRows(ign ? 'Ignored' : 'New', [   // 100.67
-      ['Kind', x => kinds[x.kind] || x.kind], ['Name', x => x.name || x.id], ['Path / id', x => x.path || x.id], ['State', 'state'],
-      [ign ? 'Ignored by' : 'Create adds', x => ign ? ((x.decidedBy || '') + ' ' + (x.decidedUtc ? fmtTime(x.decidedUtc) : '')).trim() : (/-role$/.test(x.kind) ? 'accept into the role catalog' : 'permission group ' + (x.groupName || '') + (x.level != null ? ' (L' + x.level + ')' : ''))]], shown)]);
-    const h = [];
-    h.push('<div id="discInbox">');
-    h.push('<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">' +
-      '<span style="font-size:13px;font-weight:600;">Discovery</span>' +
-      '<button id="discViewNew" class="discView' + (ign ? '' : ' primary') + '" data-view="new">New (' + (Number(counts.new || 0) + Number(counts.staged || 0)) + ')</button>' +
-      '<button id="discViewIgnored" class="discView' + (ign ? ' primary' : '') + '" data-view="ignored">Ignored (' + Number(counts.ignored || 0) + ')</button>' +
-      '<span style="color:#57606a;font-size:11.5px;">What is in the tenant and not yet in PIM. <b>Create</b> adds it (you commit it under Review &amp; commit); <b>Ignore</b> hides it until you re-add it.</span></div>');
-    const miss = asList(d.cacheMissing).filter(Boolean);
-    if (miss.length) h.push('<div class="discCacheMissing" style="margin:4px 0 8px;padding:6px 10px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;font-size:12px;">Not read yet: ' + miss.map(esc).join(', ') + ' -- refresh the tenant lists to see those kinds.</div>');
-    if (!shown.length) {
-      h.push('<div class="discEmpty" style="font-size:12.5px;color:#1a7f37;margin-top:6px;">' + (ign ? 'Nothing is ignored.' : 'Nothing new -- everything discovered is already in PIM, ignored or accepted.') + '</div>');
-    } else {
-      if (can) h.push('<div class="discBulk" style="display:flex;gap:6px;align-items:center;margin:4px 0 8px;"><label style="font-size:12px;"><input type="checkbox" id="discAll"> Select all</label>' +
-        (ign ? '<button class="discBulkAct" data-act="readd">Re-add selected</button>'
-             : '<button class="discBulkAct primary" data-act="create">Create selected</button><button class="discBulkAct" data-act="ignore">Ignore selected</button>') +
-        '<span id="discSel" style="color:#57606a;font-size:11.5px;"></span></div>');
-      const order = Object.keys(kinds).length ? Object.keys(kinds) : Array.from(new Set(shown.map(x => x.kind)));
-      for (const k of order) {
-        const g = shown.filter(x => x.kind === k);
-        if (!g.length) continue;
-        const role = /-role$/.test(k);
-        h.push('<table class="grid discGroup" data-kind="' + esc(k) + '" style="font-size:12px;margin-bottom:10px;width:100%;"><thead><tr>' +
-          (can ? '<th style="width:22px;"><input type="checkbox" class="discKindAll" data-kind="' + esc(k) + '"></th>' : '') +
-          '<th>' + esc(kinds[k] || k) + ' (' + g.length + ')</th><th>' + (ign ? 'Ignored' : (role ? 'Create means' : 'Create adds')) + '</th>' + (can ? '<th style="width:170px;"></th>' : '') + '</tr></thead><tbody>');
-        for (const x of g) {
-          const what = ign ? esc(((x.decidedBy || '') + ' ' + fmtTime(x.decidedUtc)).trim())
-            : (role ? 'accept into the role catalog' : ('permission group <b>' + esc(x.groupName || '') + '</b>' + (x.level != null ? ' (L' + esc(String(x.level)) + ')' : '')));
-          const staged = x.state === 'staged' ? ' <span style="color:#9a6700;font-size:11px;">staged -- in Review &amp; commit</span>' : '';
-          h.push('<tr data-key="' + esc(x.key) + '">' +
-            (can ? '<td><input type="checkbox" class="discPick" data-key="' + esc(x.key) + '" data-kind="' + esc(k) + '"></td>' : '') +
-            '<td><b>' + esc(x.name || x.id) + '</b>' + staged + '<div style="color:#57606a;font-size:11px;font-family:Consolas,monospace;">' + esc(x.path || x.id) + '</div></td>' +
-            '<td>' + what + '</td>' +
-            (can ? '<td style="white-space:nowrap;">' + (ign ? '<button class="discAct" data-act="readd" data-key="' + esc(x.key) + '">Re-add</button>'
-                 : '<button class="discAct primary" data-act="create" data-key="' + esc(x.key) + '">Create</button> <button class="discAct" data-act="ignore" data-key="' + esc(x.key) + '">Ignore</button>') + '</td>' : '') +
-            '</tr>');
-        }
-        h.push('</tbody></table>');
-      }
-      if (!can) h.push('<div style="color:#57606a;font-size:11.5px;">Create / Ignore need the Admin role.</div>');
-    }
-    h.push('</div>');
-    body.innerHTML = h.join('');
-    body.querySelectorAll('.discView').forEach(bt => bt.onclick = () => { PIM_DISC_VIEW = bt.getAttribute('data-view'); renderDiscovery(); });
-    const picks = () => Array.from(body.querySelectorAll('.discPick:checked')).map(c => c.getAttribute('data-key'));
-    const sel = () => { const s = document.getElementById('discSel'); if (s) { const n = picks().length; s.textContent = n ? (n + ' selected') : ''; } };
-    body.querySelectorAll('.discPick').forEach(c => c.onchange = sel);
-    body.querySelectorAll('.discKindAll').forEach(c => c.onchange = () => { body.querySelectorAll('.discPick[data-kind="' + c.getAttribute('data-kind') + '"]').forEach(x => { x.checked = c.checked; }); sel(); });
-    const all = document.getElementById('discAll');
-    if (all) all.onchange = () => { body.querySelectorAll('.discPick, .discKindAll').forEach(x => { x.checked = all.checked; }); sel(); };
-    body.querySelectorAll('.discAct').forEach(bt => bt.onclick = () => discDecide(bt.getAttribute('data-act'), [bt.getAttribute('data-key')]));
-    body.querySelectorAll('.discBulkAct').forEach(bt => bt.onclick = () => { const k = picks(); if (!k.length) { alert('Select one or more rows first.'); return; } discDecide(bt.getAttribute('data-act'), k); });
-  }
+  // PIM 100.100: the separate Discovery page (renderDiscovery / discDecide: New / Ignored, Create / Ignore) is GONE --
+  // Discovery & gaps above is the one view. What stays is its staging rule, used by covStageUnit:
   // PURE (exported for the harness): the rows a Create stages, one per proposal, shaped by the entity's own header; a tag
   // already pending in that entity is not staged twice.
+  function covDefinitionTag(base, r) { return String((r && (r.GroupTag || r.AdministrativeUnitTag)) || '').toLowerCase(); }
   function discStagePlan(stage, headers, pendingTags) {
     const out = [];
     for (const s of (stage || [])) {
@@ -13168,30 +13236,6 @@
       out.push({ base: s.base, row });
     }
     return out;
-  }
-  async function discDecide(action, keys) {
-    switch (action) { case 'create': case 'ignore': case 'readd': break; default: return; }   // the three data-act buttons; anything else is refused here
-    let r = null;
-    try { r = await api('POST', '/api/discovery-decisions', { action, keys }); }
-    catch (e) { alert('Not done: ' + ((e && e.body && e.body.error) || (e && e.message) || e)); renderDiscovery(); return; }
-    const stage = asList(r && r.stage);
-    if (action === 'create' && stage.length) {
-      const headers = {}, pendingTags = {};
-      for (const base of Array.from(new Set(stage.map(s => s.base)))) {
-        const data = await loadCsv(base);
-        ensurePending(base, data.header, data.rows);
-        headers[base] = pendingChanges[base].header;
-        pendingTags[base] = new Set(pendingChanges[base].rows.map(x => String((x && (x.GroupTag || x.AdministrativeUnitTag)) || '').toLowerCase()).filter(Boolean));
-      }
-      const plan = discStagePlan(stage, headers, pendingTags);
-      for (const s of plan) pendingChanges[s.base].rows.push(s.row);
-      markBadges();   // persists the draft and shares it (Review & commit)
-      try { valRevalidateAfterFix(); } catch (_) { }
-      sharedToast('Staged ' + plan.length + ' permission group(s) -- review and commit them under Review & commit');
-    } else {
-      sharedToast((action === 'ignore' ? 'Ignored ' : action === 'readd' ? 'Re-added ' : 'Accepted ') + keys.length + ' item(s)');
-    }
-    renderDiscovery();
   }
   // ----- Job schedule (tab 'jobschedule') -------------------------------------------------------------------------------
   // Operator (2026-09-14) on the old "Scheduled mails & jobs" table: "i am not sure what does". So: plain words per job.
@@ -13219,12 +13263,12 @@
     'hybrid-ad-changes':           'Change detection: the moment an AD admin or an AD-marked group definition changes, creates or updates the AD account or AD group at once (the timed Apply changes and Group definitions runs stay as a safety net).',
     'active-assignments-snapshot': 'Reads who holds active privileged access right now, for Delegation overview (All privileged permissions) and Home.',
     'drift-snapshot':              'Checks whether the tenant still matches what PIM says it should (the Drift page).',
-    'coverage':                    'Lists every role, workspace and Azure scope PIM does not delegate yet, orphan groups and groups PIM does not manage (the Coverage & gaps page).',
+    'coverage':                    'Lists every role, workspace and Azure scope PIM does not delegate yet, orphan groups and groups PIM does not manage (the Discovery & gaps page).',
     'owner-review':                'Asks each department\'s owners, by mail, to confirm who still needs privileged access: on My people they Keep, Extend or Remove each person (a removal is approved by a PIM administrator). Off until you turn it on; its interval is the review cycle.',
     'pending-check':               'Reports staged changes and queued actions that were started more than a day ago and never committed (Pending changes). Changes committed but not yet applied are checked every 30 minutes by verify-convergence.',
     'access-review-cycle':         'Starts the access review of each department whose review rule makes it due (Access reviews > Review rules): one review per group of the department, for the reviewers of the rule. Does nothing until a rule is switched on.',
-    'workload-prereqs':            'Checks the workload prerequisites (Defender XDR, Intune, Power BI, Azure RBAC, Entra roles) as PIM\'s own identity and shows the result on the templates and Coverage & gaps; a held role assignment is made once they are green. Read-only: it never grants or creates anything.',
-    'target-check':                'Checks that the Azure resources, Azure roles and Entra roles your delegations point at still exist, and reports the ones that are gone (Coverage & gaps). It never removes anything -- you decide.',
+    'workload-prereqs':            'Checks the workload prerequisites (Defender XDR, Intune, Power BI, Azure RBAC, Entra roles) as PIM\'s own identity and shows the result on the templates and Discovery & gaps; a held role assignment is made once they are green. Read-only: it never grants or creates anything.',
+    'target-check':                'Checks that the Azure resources, Azure roles and Entra roles your delegations point at still exist, and reports the ones that are gone (Discovery & gaps). It never removes anything -- you decide.',
     'config-backup':               'Backs up the configuration (departments, companies, admins, group definitions, delegations, settings without secrets, break-glass list, job schedule, MSP registry) once a day; an unchanged configuration is recorded as "no change". Old backups are removed after the retention (default 90 days); pinned ones are kept (Operations > Backups & restore).',
     // REQ-U wave 2: per-NAME entries (looked up before the type) -- two discovery jobs read the workload role catalogs.
     'discovery-defender':          'Reads the Defender XDR roles and their permissions, and reports roles and permission groups no template knows yet.',
@@ -15478,9 +15522,10 @@
   }
   function gsPaintBadge(steps) {
     const openRequired = (steps || []).filter(s => s.required && !s.done && !s.deferred).length;
-    // PIM 100.94: an open REQUIRED step is an ACTION (a person must do it) -- the badge shows HOW MANY are open, amber
-    // (waiting, not an error: 100.85). An optional step, or one skipped for now, never counts.
-    pimMenuBadge('getStartedBadge', { actions: openRequired, title: r => pimMenuWords(r.n, 'required setup step is still open', 'required setup steps are still open') });
+    // PIM 100.94 "only red numbers" (owner 2026-10-12): an open REQUIRED step is an action that waits and blocks nothing
+    // -- NO number and no dot in the menu (it was an amber "!", then an amber count). The Get Started page shows the open
+    // steps (the chips, "x of y steps done"); data-menu-waiting keeps the count on the hidden badge.
+    pimMenuBadge('getStartedBadge', { actions: openRequired });
     pimMenuSync();
   }
   // Break-glass reminder (owner 2026-10-08): while no break-glass account is protected -- skipped for now or never set --
@@ -18534,12 +18579,14 @@
     // entry only waits for the engine; it stays listed on Pending changes (state 'committed') but no longer lights the
     // menu. A failed one still counts, so the "worst possible zero" above cannot happen.
     const dd = by || null;
-    // PIM 100.94: the one menu rule -- failed entries are ERRORS, entries awaiting a commit are ACTIONS; committed /
-    // applying entries only wait for the engine (a fact) and never count.
+    // PIM 100.94: the one menu rule -- failed entries are ERRORS; entries awaiting a commit are ACTIONS that do not block
+    // ("only red numbers", owner 2026-10-12: no number for them); committed / applying entries only wait for the engine.
+    // So the menu number = the FAILED entries. PIM_QUEUE_WAITING keeps the awaiting-commit count for the page.
     const qSrc = { errors: dd ? (Number(dd.failed) || 0) : 0, actions: dd ? (Number(dd.pending) || 0) : (Number(n) || 0) };
     const qRule = pimMenuCount(qSrc);
     const count = qRule ? qRule.n : 0;
     window.PIM_QUEUE_OPEN = count;
+    window.PIM_QUEUE_WAITING = pimMenuWaiting(qSrc);
     pimMenuSync();
     const tab = document.querySelector('#tabs .tab[data-tab="save"]');
     if (!tab) return;
@@ -18548,11 +18595,11 @@
     // when pending unprocessed changes exist"). A permanent 0 is decoration; a badge that only
     // shows up when something needs doing is a signal. And it is CLICKABLE -- it takes you
     // straight to the queue section rather than making you hunt for it.
-    if (!count) { if (b) b.remove(); return; }
+    if (!count) { if (b) { b.remove(); pimMenuSync(); } return; }   // sync AFTER the removal: the menu entry must drop the number at once
     if (!b) {
       b = document.createElement('span');
       b.className = 'badge queue-badge';
-      // the colour is set by pimMenuBadge below (red = an entry failed, amber = changes await a commit)
+      // the colour is set by pimMenuBadge below (red: it only exists while an entry FAILED)
       b.style.cssText = 'color:#fff;border-radius:999px;min-width:18px;height:18px;' +
         'display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;' +
         'line-height:1;padding:0 5px;margin-left:6px;box-shadow:0 0 0 2px #fff;vertical-align:top;' +
@@ -18575,9 +18622,9 @@
     // needs YOU (awaiting commit, or failed); committed / applying entries only wait for the engine and show in blue.
     const inFlight = (d.committed || 0) + (d.applying || 0);
     // A failure needs a person, not patience -- so it does not wear the same colour as work in flight.
-    // PIM 100.85 / 100.94: red only when an entry FAILED; changes that only wait for a commit are amber (an action).
-    pimMenuBadge(b, Object.assign({ display: false, title: r => pimMenuWords(r.actions, 'change awaits', 'changes await') + ' a commit, ' + r.errors + ' failed' +
-      (inFlight ? ' (' + inFlight + ' committed and waiting for the engine -- not counted)' : '') }, qSrc));
+    // PIM 100.94 "only red numbers": the number is the FAILED entries; what waits for a commit or the engine is not counted.
+    const notCounted = [window.PIM_QUEUE_WAITING ? window.PIM_QUEUE_WAITING + ' awaiting a commit' : '', inFlight ? inFlight + ' committed and waiting for the engine' : ''].filter(Boolean).join(', ');
+    pimMenuBadge(b, Object.assign({ display: false, title: r => pimMenuWords(r.errors, 'change failed', 'changes failed') + (notCounted ? ' (not counted: ' + notCounted + ')' : '') }, qSrc));
     pimMenuSync();
   }
 
@@ -22191,10 +22238,11 @@
       const st = pendingRowStates(base);
       rowCount += st.added + st.removed + st.modified;
     }
-    // PIM 100.94: staged changes wait for a person to commit them -- an ACTION. They keep their own neutral pill
-    // (colour: false), as before.
-    pimMenuBadge('gridDirtyBadge', { actions: dirtyBases, colour: false, display: 'inline-block', title: r => pimMenuWords(r.n, 'record type has', 'record types have') + ' edits that are not committed yet' });
-    pimMenuBadge('saveDirtyBadge', { actions: rowCount, colour: false, display: 'inline-block', title: r => pimMenuWords(r.n, 'change is', 'changes are') + ' staged across ' + pimMenuWords(dirtyBases, 'record type', 'record types') + ' and wait' + (r.n === 1 ? 's' : '') + ' for a commit' });
+    // PIM 100.94 "only red numbers" (owner 2026-10-12): staged changes WAIT for a commit and block nothing -- an action
+    // that is not blocking, so NO number in the menu. The Pending changes page and the All-records rail show the counts;
+    // the hidden badge keeps the number as data-menu-waiting.
+    pimMenuBadge('gridDirtyBadge', { actions: dirtyBases });
+    pimMenuBadge('saveDirtyBadge', { actions: rowCount });
     // §70.12 -- every badge refresh follows a pendingChanges change, so this is where the draft is kept.
     if (typeof persistPendingDraft === 'function') persistPendingDraft();
     // §79.13: and to the SHARED store, so every administrator sees it (debounced; no-op without a SQL store).
@@ -34601,9 +34649,23 @@
     if (!names.length) { hostEl.innerHTML = ''; return; }
     const canAct = (typeof roleAtLeast === 'function') ? roleAtLeast('Admin') : false;
     const byName = {}; (data.workloads || []).forEach(w => { byName[w.workload] = w; });
-    let h = all ? '<div class="prereq-head" style="font-size:13px;font-weight:600;margin:6px 0 2px;">Workload prerequisites</div>' +
-      '<div style="font-size:11px;color:#57606a;margin-bottom:4px;">PIM checks these itself every day, as its own identity, and records the result here. Where it needs you, a chip says what: a command to run once (browser sign-in, no modules), or a portal step to confirm.</div>' : '';
-    for (const n of names) h += pimWorkloadPrereqChipHtml(byName[n] || { workload: n, state: 'notRun', chip: 'amber', command: '' }, data, canAct);
+    const chipOf = (n) => pimWorkloadPrereqChipHtml(byName[n] || { workload: n, state: 'notRun', chip: 'amber', command: '' }, data, canAct);
+    let h = '';
+    if (all) {
+      // PIM 100.100 (owner 2026-10-12: "it looks crappy" -- five bars above the list): the workloads that are READY fold
+      // into ONE line, "5 of 5 workloads ready" (open it to see them); only the ones that need a person show open.
+      const ready = data.loadError ? [] : names.filter(n => byName[n] && String(byName[n].state) === 'ok');
+      const todo = names.filter(n => ready.indexOf(n) < 0);
+      const okAll = !todo.length;
+      h = '<details class="prereq-ready" data-ready="' + ready.length + '" data-total="' + names.length + '" style="margin:6px 0 4px;' + (okAll ? 'background:#dafbe1;border:1px solid #1a7f37;border-radius:6px;padding:4px 8px;' : '') + '">' +
+        '<summary class="prereq-head" style="cursor:pointer;font-size:12.5px;font-weight:600;color:' + (okAll ? '#1a7f37' : '#24292f') + ';">' + (okAll ? '&#x2713; ' : '') +
+          'Workload prerequisites: <span class="prereq-ready-count">' + ready.length + ' of ' + names.length + ' workloads ready</span>' +
+          (todo.length ? ' <span style="font-weight:400;color:#9a6700;">&mdash; ' + todo.length + (todo.length === 1 ? ' needs' : ' need') + ' a look (below)</span>' : '') + '</summary>' +
+        '<div style="font-size:11px;color:#57606a;margin:4px 0;">PIM checks these itself every day, as its own identity, and records the result here. Where it needs you, a chip says what: a command to run once (browser sign-in, no modules), or a portal step to confirm.</div>' +
+        ready.map(chipOf).join('') + '</details>' + todo.map(chipOf).join('');
+    } else {
+      for (const n of names) h += chipOf(n);
+    }
     hostEl.innerHTML = h;
     hostEl.querySelectorAll('.prereq-copy').forEach(b => b.onclick = () => {
       const code = b.parentNode && b.parentNode.querySelector('.prereq-cmd');
@@ -37096,7 +37158,13 @@
     if (want === 'guards') { const gd = params.get('guard'); if (gd && /^[a-z0-9][a-z0-9.-]{0,99}$/.test(gd)) GUARDS_FOCUS = gd; }
     // §100.57: the pending-actions reminder links the exact Approvals / Guards / Access requests entry
     const deepSel = pimDeepFocusSelector(want, params);
-    if (want && /^[a-z0-9-]+$/.test(want) && document.getElementById(want + 'Tab')) switchTab(want);
+    // PIM 100.100: Discovery & gaps takes ?tab=coverage&status=ignored (the Ignored list). An old link to the Discovery
+    // page (?tab=discovery, its Ignored view as &view=ignored) lands on the same page with the same filter.
+    if (want === 'coverage' || want === 'discovery') {
+      if (params.get('status') === 'ignored' || params.get('view') === 'ignored') COV_FILTER.status = 'Ignored';
+    }
+    if (want === 'discovery') switchTab('coverage');
+    else if (want && /^[a-z0-9-]+$/.test(want) && document.getElementById(want + 'Tab')) switchTab(want);
     if (want === 'settings' && params.get('section') === 'licence') { try { navScrollToAnchor('setLicenceCard'); } catch (_) { } }
     if (deepSel) pimDeepFocus(deepSel);
   } catch (e) { }

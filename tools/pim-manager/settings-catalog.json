@@ -598,7 +598,7 @@
       "info": {
         "what": "Shows or hides the Drift page (Reviews & controls > Drift: live vs desired), which compares your tenant with what PIM says it should be, per area. The old Governance page it is named after no longer exists, so today this switch controls only the Drift page.",
         "enabled": "Reviews & controls > Drift: live vs desired is listed in the menu after the next page reload.",
-        "disabled": "After the next page reload the Drift page is hidden from the menu and tab strip. The scheduled drift check keeps running and its results are still stored -- only the page is hidden. Coverage & gaps, Newly discovered resources and Job schedule are not affected.",
+        "disabled": "After the next page reload the Drift page is hidden from the menu and tab strip. The scheduled drift check keeps running and its results are still stored -- only the page is hidden. Discovery & gaps and Job schedule are not affected.",
         "risk": "Medium: drift between your tenant and the desired state becomes harder to see. A direct link (/?tab=drift) shows \"this page is turned off\" instead. Reversible: switch it on and reload.",
         "requires": "SuperAdmin role to change. Free (Community) and Pro.",
         "recommended": "On -- drift is how you find changes made outside PIM.",

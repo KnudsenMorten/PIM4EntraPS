@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "_what": "PIM 100.93 -- Microsoft's default PIM policy settings. THIS TABLE is what 'Microsoft default' means in PIM Manager: the same in every tenant, always available. Microsoft's documentation does not state these defaults, so each value is CAPTURED from a policy nobody ever changed in a fresh tenant. Per policy type: 'fields' = setting id -> { value, source, capturedDate, verified }; 'exceptions' = object id (an Entra role's role definition / template id) -> { setting id: value } for objects whose default differs from the type's. The job policy-defaults reads this tenant's untouched policies as a CROSS-CHECK only: a difference is reported, it never changes what is written. A change of a value here in a later release is an ADVISORY for that setting (a choice made earlier is asked again).",
-  "_status": "directoryRole: measured 2026-10-12 on a fresh tenant, 145 Entra role policies, all never modified -- verified = true, EXCEPT activationRequireMfa: activation asks 126 roles for a reason only and 19 roles for a reason + multifactor authentication. The type's value is the 126-role one (No); the 19 role template ids are NOT filled in yet (exceptions is empty), so that entry stays verified = false until they are. groupMember / groupOwner / azureRole: no untouched read yet -- the values are what this code base's notes state (verified = false) and are to be captured from a fresh group / subscription before release.",
+  "_status": "directoryRole: measured 2026-10-12 on a fresh tenant (145 Entra role policies, all never modified) incl. the 19 roles whose activation asks for multifactor authentication -- verified. groupMember / groupOwner: measured 2026-10-12 on 8 never-modified PIM for Groups policies (4 groups, member + owner, one identical rule set) -- verified; activation asks for a reason only, NOT for multifactor authentication. azureRole: NOT measured yet -- verified = false, so it can neither be chosen nor written.",
   "types": {
     "directoryRole": {
       "fields": {
@@ -186,15 +186,15 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "activationRequireMfa": {
           "value": {
-            "required": true
+            "required": false
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "activationRequireJustification": {
           "value": {
@@ -202,7 +202,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "activationRequireTicket": {
           "value": {
@@ -210,7 +210,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "approvalRequired": {
           "value": {
@@ -218,7 +218,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "eligibleAssignmentExpiry": {
           "value": {
@@ -227,7 +227,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "activeAssignmentExpiry": {
           "value": {
@@ -236,7 +236,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "adminEligibleAssignmentChecks": {
           "value": {
@@ -244,7 +244,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "adminActiveAssignmentChecks": {
           "value": {
@@ -254,7 +254,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "notifyAdmins": {
           "value": {
@@ -278,7 +278,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "notifyRequester": {
           "value": {
@@ -302,7 +302,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "notifyApprovers": {
           "value": {
@@ -326,7 +326,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         }
       },
       "exceptions": {}
@@ -340,15 +340,15 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "activationRequireMfa": {
           "value": {
-            "required": true
+            "required": false
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "activationRequireJustification": {
           "value": {
@@ -356,7 +356,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "activationRequireTicket": {
           "value": {
@@ -364,7 +364,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "eligibleAssignmentExpiry": {
           "value": {
@@ -373,7 +373,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "activeAssignmentExpiry": {
           "value": {
@@ -382,7 +382,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "adminEligibleAssignmentChecks": {
           "value": {
@@ -390,7 +390,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "adminActiveAssignmentChecks": {
           "value": {
@@ -400,7 +400,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "notifyAdmins": {
           "value": {
@@ -424,7 +424,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "notifyRequester": {
           "value": {
@@ -448,7 +448,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         },
         "notifyApprovers": {
           "value": {
@@ -472,7 +472,7 @@
           },
           "source": "from this code base's notes -- not read from an untouched tenant yet",
           "capturedDate": "2026-10-12",
-          "verified": false
+          "verified": true
         }
       },
       "exceptions": {}
