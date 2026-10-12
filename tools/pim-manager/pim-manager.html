@@ -10435,7 +10435,7 @@
         '<td>' + roTxt(esc((cadOpts.find(c => c[0] === cd) || [cd, 'every ' + cd + ' days'])[1])) + '<select class="coCad co-in"' + ro + '>' + cadOpts.map(c => '<option value="' + c[0] + '"' + (c[0] === cd ? ' selected' : '') + '>' + c[1] + '</option>').join('') + '</select></td>' +
         '<td style="font-size:12px;">' + (ppl.length ? '<b>' + ppl.length + '</b>: ' + ppl.slice(0, 6).map(a => esc(a.DisplayName || a.UserPrincipalName || a.UserName || '')).join(', ') + (ppl.length > 6 ? ', &hellip;' : '') : '<span style="color:#57606a;">none linked yet</span>') + '</td>' +
         '<td>' + roTxt(esc(r.Notes || ''), true) + '<input class="coNotes co-in" value="' + esc(r.Notes || '') + '" style="width:160px;"' + ro + '></td>' +
-        '<td style="white-space:nowrap;">' + (canEdit ? '<button class="btn-sec coEdit" title="Edit this company: name, contacts, sponsor department, review cadence, notes.">' + (editing ? 'Done' : '&#9998; Edit') + '</button> ' +
+        '<td style="white-space:nowrap;">' + (canEdit ? '<button class="btn-sec coEdit" title="Edit this company: name, contacts, sponsor department, review cadence, notes.">' + (editing ? 'Save' : '&#9998; Edit') + '</button> ' +
           '<button class="btn-sec coDel" title="Remove this company (its consultants are not changed; unlink or offboard them on Admin accounts).">&#x2715;</button>' : '') + '</td></tr>';
     };
     h += ext.map(x => rowHtml(x.r, x.i)).join('');
@@ -10447,14 +10447,19 @@
     const msg = (t, bad) => { const m = document.getElementById('coMsg'); if (m) { m.textContent = t; m.style.color = bad ? '#cf222e' : '#1a7f37'; } };
     const tbody = body.querySelector('#coTbl tbody');
     const add = document.getElementById('coAdd');
-    if (add) add.onclick = () => { const tmp = document.createElement('tbody'); tmp.innerHTML = rowHtml({ Company: '', Contacts: '', SponsorDepartment: '', ReviewCadenceDays: '90', Notes: '' }, -1, true); tbody.appendChild(tmp.firstChild); wireDel(); const n = tbody.lastElementChild && tbody.lastElementChild.querySelector('.coName'); if (n) n.focus(); msg('New company: fill it in, then Save companies.'); };
+    if (add) add.onclick = () => { const tmp = document.createElement('tbody'); tmp.innerHTML = rowHtml({ Company: '', Contacts: '', SponsorDepartment: '', ReviewCadenceDays: '90', Notes: '' }, -1, true); tbody.appendChild(tmp.firstChild); wireDel(); const n = tbody.lastElementChild && tbody.lastElementChild.querySelector('.coName'); if (n) n.focus(); msg('New company: fill it in, then press Save on its row.'); };
     const wireDel = () => {
       body.querySelectorAll('.coDel').forEach(b => { b.onclick = () => { const tr = b.closest('tr'); if (tr) { tr.remove(); msg('Removed from the list -- Save companies to keep it.'); } }; });
-      body.querySelectorAll('.coEdit').forEach(b => { b.onclick = () => { const tr = b.closest('tr'); if (!tr) return; const on = tr.classList.toggle('co-editing'); b.innerHTML = on ? 'Done' : '&#9998; Edit'; if (on) { const n = tr.querySelector('.coName'); if (n) n.focus(); } else msg('Changed -- Save companies to keep it.'); }; });
+      // Owner 2026-10-12 ("i clicked done. but it didnt look like it saved ... confusing"): the row button of an open row is
+      // SAVE and it saves -- there is no "Done" that only closes the fields and leaves the old text on screen. A refused
+      // save (a missing name, a wrong address) keeps the row open with the reason next to Save companies.
+      body.querySelectorAll('.coEdit').forEach(b => { b.onclick = () => { const tr = b.closest('tr'); if (!tr) return;
+        if (tr.classList.contains('co-editing')) { saveCompanies(); return; }
+        tr.classList.add('co-editing'); b.innerHTML = 'Save'; b.title = 'Save this company (and every other change on this page).'; const n = tr.querySelector('.coName'); if (n) n.focus(); }; });
     };
     wireDel();
     const save = document.getElementById('coSave');
-    if (save) save.onclick = async () => {
+    const saveCompanies = async () => {
       const mailRx = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
       const out = [], seen = {};
       for (const tr of Array.from(tbody.querySelectorAll('tr'))) {
@@ -10474,16 +10479,23 @@
       }
       // the INTERNAL companies are not shown here; they are kept exactly as they are
       const internal = (pendingChanges[base].rows || []).filter(r => /^internal$/i.test(String(r.Type || '').trim()));
-      save.disabled = true; msg('Saving…');
+      if (save) save.disabled = true; msg('Saving…');
       try {
         await commitPutOnce(base, internal.concat(out));   // §97.1: a timeout is asked about, never assumed lost
         try { delete pendingChanges[base]; } catch (_) { }
         try { if (typeof _coCache !== 'undefined') { _coCache = null; _coLoaded = false; } } catch (_) { }
-        msg('Saved ' + out.length + ' compan' + (out.length === 1 ? 'y' : 'ies') + '.');
-        setTimeout(renderCompaniesPage, 600);
+        // Owner 2026-10-12: the list showed the OLD values after a save until the whole page was reloaded -- the re-render
+        // read the page's cached copy of the store. The cached copy is dropped, the list is read again from the store at
+        // once, and the "Saved" line is written on the fresh list.
+        try { delete csvCache[base]; } catch (_) { }
+        const saved = 'Saved ' + out.length + ' compan' + (out.length === 1 ? 'y' : 'ies') + '.';
+        await renderCompaniesPage();
+        const m2 = document.getElementById('coMsg'); if (m2) { m2.textContent = saved; m2.style.color = '#1a7f37'; }
+        return;
       } catch (e) { msg('Not saved: ' + String((e && e.message) || e), true); }
-      save.disabled = false;
+      if (save) save.disabled = false;
     };
+    if (save) save.onclick = saveCompanies;
   }
 
   // ===================================================================
