@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.613 -- 2026-10-12
+
+- Status reports say who has to act and how to solve it: every report carries an outcome (ok, warning, held, failed) and who acts, a configuration problem carries its solution in plain steps, the status report goes every hour with the setup checks and the role of the installation, and every update run is reported
+
 ## 2.4.612 -- 2026-10-12
 
 - The installer and the updater set the Manager web app to 4 CPU / 8 GiB and the database to S3 themselves, and an update keeps a size that was set; the tests of a release stop at 10 minutes and name a hung suite

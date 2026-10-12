@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  §95.3 -- PIM's status telemetry (job 'uplink'): a HEARTBEAT every 4 h and one RUN report per job that ran, sent to the
+  §95.3 -- PIM's status telemetry (job 'uplink'): a HEARTBEAT every hour and one RUN report per job that ran, sent to the
   Invardia-hosted uplink through the FRAMEWORK client (sync/_AitUplink.ps1 Schema 2; a byte-identical copy ships as
   engine/_shared/AitUplink.framework.ps1 because sync/ is never in the container -- Test-PimUplink pins the copy).
   Contract: Invardia docs/design/TELEMETRY-UPLINK.md (owner decisions 2026-10-03); framework DOCS/REQUIREMENTS.md §8.
@@ -15,7 +15,9 @@
                           secret (secretref) -> environment variable. The key proves the environment; the tenant in the
                           body is only compared for mismatch. Error text shortened + redacted before it leaves.
   WHEN
-    * heartbeat: every 4 h (owner 2026-10-10; was 24 h). Identified only (PIM 100.36): Counts { sqlUsedMb, sqlMaxMb } -- the store's allocated data
+    * heartbeat: every hour (owner 2026-10-12, PIM 100.103; was 4 h, 24 h before). Identified only: InstallRole
+      single | managing | managed (+ ManagingTenantId) and the setup Controls, each with checkedUtc and, for unknown, a
+      reason (lane repfix, additive -- see Test-PimUplinkAdditiveEnabled). Identified only (PIM 100.36): Counts { sqlUsedMb, sqlMaxMb } -- the store's allocated data
       pages and max size, MB (Get-PimUplinkSqlSpace); a failed / empty read leaves both out, never a 0.
       Identified only (PIM 100.56, framework 8.9): Endpoints [ { kind; url; label? } ] -- the Manager, the RFA portal, the
       access request API, the MCP server, each only where it exists (Get-PimUplinkEndpoints); a guard record's Link is a deep
@@ -102,7 +104,14 @@ function Get-PimUplinkRunPlan {
         $e = $byJob[$job]; $e.count++
         if ($fin -gt $e.latestFin) { $e.latest = $r; $e.latestFin = $fin }
         if ($out -eq 'failed' -and (-not $e.failed -or $fin -gt ([datetime]"$($e.failed.finishedUtc)").ToUniversalTime())) { $e.failed = $r }
-        if ($out -eq 'warning') { $e.held = $true }
+        if ($out -eq 'warning') {
+            $e.held = $true
+            # PIM 100.99: WHICH kind of warning (for Outcome / ActionBy) -- the one that needs a person wins, then the newest.
+            $stx = "$($r.status)".Trim().ToLowerInvariant()
+            $wk = 'held'; $rank = 4
+            if ($stx -eq 'warning') { $wk = 'warning'; $rank = 3 } elseif ($stx -eq 'throttled') { $wk = 'throttled'; $rank = 2 } elseif ($stx -eq 'interrupted') { $wk = 'interrupted'; $rank = 1 }
+            if (-not $e.ContainsKey('kindRank') -or $rank -gt [int]$e.kindRank -or ($rank -eq [int]$e.kindRank -and $fin -gt $e.kindFin)) { $e.kind = $wk; $e.kindRank = $rank; $e.kindRun = $r; $e.kindFin = $fin }
+        }
         if ("$($r.status)".Trim().ToLowerInvariant() -eq 'throttled' -and (-not $e.throttled -or $fin -gt ([datetime]"$($e.throttled.finishedUtc)").ToUniversalTime())) { $e.throttled = $r }
     }
     $reports = New-Object System.Collections.Generic.List[object]
@@ -118,21 +127,38 @@ function Get-PimUplinkRunPlan {
         # §100.45: a warning because Microsoft throttled the job carries ErrorClass THROTTLED (and the throttled run's text).
         $cls = ''
         if ($outcome -eq 'warning' -and $e.throttled) { $cls = 'THROTTLED'; $txt = "$($e.throttled.detail)" }
-        [void]$reports.Add(@{ job = $e.job; outcome = $outcome; durationMs = $dur; errorText = $txt; errorClass = $cls; finishedUtc = $e.latestFin.ToString('o'); runCount = $e.count })
+        # PIM 100.99 (additive; the keys above are unchanged): kind = failed | held | warning | throttled | interrupted | '',
+        # noteText = what that run said (a held run's detail, a declared warning's summary), warningKind, updateAction.
+        $kind = ''; $note = ''; $wkind = ''
+        if ($outcome -eq 'failed') { $kind = 'failed'; $note = $txt }
+        elseif ($outcome -eq 'warning' -and $e.ContainsKey('kind')) {
+            $kind = "$($e.kind)"; $kr = $e.kindRun
+            if ($kind -eq 'warning') {
+                if ($kr.PSObject.Properties['warningKind']) { $wkind = "$($kr.warningKind)" }
+                if ($kr.PSObject.Properties['warningSummary'] -and "$($kr.warningSummary)".Trim()) { $note = "$($kr.warningSummary)" } else { $note = "$($kr.detail)" }
+            } elseif ($kind -in @('held', 'throttled')) { $note = "$($kr.detail)" }
+        }
+        $ua = ''; if ($src.PSObject.Properties['updateAction']) { $ua = "$($src.updateAction)" }
+        [void]$reports.Add(@{ job = $e.job; outcome = $outcome; durationMs = $dur; errorText = $txt; errorClass = $cls; finishedUtc = $e.latestFin.ToString('o'); runCount = $e.count
+                              kind = $kind; noteText = $note; warningKind = $wkind; updateAction = $ua })
     }
     $wm = $null; if ($newest) { $wm = ([datetime]$newest).ToString('o') }
     $arr = $reports.ToArray()
     return @{ reports = $arr; watermarkUtc = $wm }
 }
 
-# Owner 2026-10-10: "pim heartbeat should be more often ... otherwise we dont know if it runs" + "make it every 4 hr" -- every 4 h (was 24 h). Invardia
-# allows 30 POSTs a minute per IP; one heartbeat per 4 h is far inside that and still a liveness signal.
-$script:PimUplinkHeartbeatHours = 4
+# Owner 2026-10-12, relayed by Invardia (PIM 100.103: "telemetry must include this more frequent"; his choice in Invardia's
+# wizard: heartbeat "Hourly") -- every HOUR (was every 4 h since 2026-10-10, 24 h before). Invardia allows 30 POSTs a minute
+# per IP; one heartbeat an hour is far inside that. The job 'uplink' itself runs every 60 minutes from a 5-minute tick, so
+# two runs are 60 minutes apart give or take a tick: the heartbeat is due from 50 minutes after the last one (a strict
+# 60 would skip every other run and make it two-hourly).
+$script:PimUplinkHeartbeatHours = 1
+function Get-PimUplinkHeartbeatHours { <# PURE. The heartbeat interval in hours -- a literal (child-scope safe). #> return 1 }
 function Get-PimUplinkHeartbeatDue {
-    <# PURE. True when no heartbeat was sent in the last $script:PimUplinkHeartbeatHours (4 h) -- or ever. #>
-    param([AllowNull()][object]$LastHeartbeatUtc, [datetime]$NowUtc = [datetime]::UtcNow, [double]$Hours = $script:PimUplinkHeartbeatHours)
-    if (-not $Hours -or $Hours -le 0) { $Hours = 4 }
-    try { if ("$LastHeartbeatUtc") { return ($NowUtc.ToUniversalTime() -ge ([datetime]"$LastHeartbeatUtc").ToUniversalTime().AddHours($Hours)) } } catch { }
+    <# PURE. True when no heartbeat was sent in the last hour (less 10 minutes for the tick) -- or ever. #>
+    param([AllowNull()][object]$LastHeartbeatUtc, [datetime]$NowUtc = [datetime]::UtcNow, [double]$Hours = (Get-PimUplinkHeartbeatHours))
+    if (-not $Hours -or $Hours -le 0) { $Hours = 1 }
+    try { if ("$LastHeartbeatUtc") { return ($NowUtc.ToUniversalTime() -ge ([datetime]"$LastHeartbeatUtc").ToUniversalTime().AddMinutes(($Hours * 60) - 10)) } } catch { }
     return $true
 }
 
@@ -196,6 +222,258 @@ function Test-PimUplinkFixKindEnabled {
     #>
     param([AllowNull()][string]$Value = $env:PIM_UPLINK_FIXKIND)
     return -not [bool]("$Value".Trim() -match '^(?i)(0|false|off|no)$')
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# LANE repfix (owner's night order 2026-10-12): the ADDITIVE fields. PIM 100.99 / 100.111 Outcome + ActionBy, 100.115
+# Solution, 100.103 Controls on the heartbeat, InstallRole / ManagingTenantId (agreed with Invardia 2026-10-12), and the
+# updater's own run report. One switch for all of them: PIM_UPLINK_ADDITIVE = 0 / false / off / no sends the records exactly
+# as before this lane. Invardia refuses a WHOLE report on one field it does not know, so a record that is refused as
+# invalid is sent ONCE more in its old form, and the additive fields then stay off for 24 hours
+# (UplinkState.additiveRefusedUtc) -- telemetry never goes silent because the platform is one release behind.
+# ---------------------------------------------------------------------------------------------------------------------
+function Test-PimUplinkAdditiveEnabled {
+    <# PURE. ON by default; PIM_UPLINK_ADDITIVE = 0 / false / off / no switches every additive field off. #>
+    param([AllowNull()][string]$Value = $env:PIM_UPLINK_ADDITIVE)
+    return -not [bool]("$Value".Trim() -match '^(?i)(0|false|off|no)$')
+}
+
+function Test-PimUplinkAdditiveHeld {
+    <# PURE. True while the additive fields are held back: Invardia refused them less than 24 hours ago. #>
+    param([AllowNull()][object]$RefusedUtc, [datetime]$NowUtc = [datetime]::UtcNow)
+    $t = ConvertTo-PimUplinkUtc $RefusedUtc
+    if (-not $t) { return $false }
+    return (($NowUtc.ToUniversalTime() - $t).TotalHours -lt 24)   # literal: one retry a day
+}
+
+function Test-PimUplinkValidationRefusal {
+    <# PURE. Did Invardia refuse the record's CONTENT (HTTP 400 / 422, "invalid", a field list)? A 401 / 403 / 429 / 5xx / no network is not that. #>
+    param([AllowNull()][string]$Reason)
+    $r = "$Reason"
+    if (-not $r.Trim()) { return $false }
+    if ($r -match '(?i)\b(401|403|429|5\d\d)\b|Too ?Many ?Requests|Unauthori[sz]ed|Forbidden') { return $false }
+    return [bool]($r -match '(?i)\b(400|422)\b|Unprocessable|Bad ?Request|\binvalid\b|fields:')
+}
+
+function Get-PimUplinkFailureCodes {
+    <#
+      PURE. The catalog classes a failed run's text names AS FAILURES, largest group first (the order of the text):
+      the bracketed codes of the "N item(s) failed: ..." part. The "WAITING" and "NEEDS APPROVAL" parts are cut off first
+      (those items are not failures), a bracketed word that is not a catalog class is ignored, UNCLASSIFIED is kept.
+    #>
+    param([string]$Text)
+    $t = "$Text"
+    if (-not $t.Trim()) { return @() }
+    foreach ($cut in @('\d+ item\(s\) WAITING', '(ALSO )?NEEDS APPROVAL')) {
+        $m = [regex]::Match($t, $cut)
+        if ($m.Success) { $t = $t.Substring(0, $m.Index) }
+    }
+    $known = @{}
+    if (Get-Command Get-PimFailureCatalogCodes -ErrorAction SilentlyContinue) { try { foreach ($c in @(Get-PimFailureCatalogCodes)) { $known["$c"] = $true } } catch { } }
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($m in [regex]::Matches($t, '\[([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)\]')) {
+        $code = $m.Groups[1].Value
+        if ($known.ContainsKey($code) -and -not $out.Contains($code)) { $out.Add($code) }
+    }
+    return $out.ToArray()
+}
+
+function Get-PimUplinkOutcomeAction {
+    <#
+      PURE. PIM 100.99 / 100.111 -- the owner's closed list at Invardia (Error / Needs customer's action / Warning / Held
+      back / OK / Not checked) as two fields on every run report:
+        Outcome   ok | warning | held | failed          ActionBy   customer | product-team | none | unknown
+      THE RULES (from what the run already says about itself; nothing is read):
+        ok                                                   -> ok      / none
+        Microsoft throttled it, or the run was interrupted   -> warning / none          (retried by itself)
+        a safety check held a change set (held run)          -> held    / customer      (an approver of the tenant decides)
+        the run declared a warning about itself              -> warning / customer when its kind starts with 'customer', else unknown
+        FAILED, and its text names failure classes:
+          every class is a hold (REMOVE-BUDGET-HELD, *-MASS-HOLD)             -> held    / customer
+          every class is customer-config, and one of those items is a REMOVAL
+          that did not happen (-NotRemoved: the access is still there)         -> failed  / customer   (stays red)
+          every class is customer-config AND the text is an item summary
+          ("N item(s) failed: ...") or a customer-configuration convergence   -> warning / customer   (the job did its work)
+          every class is customer-config, the job itself stopped on it        -> failed  / customer
+          any class is a product fault                                         -> failed  / product-team
+          else (UNCLASSIFIED among them)                                       -> failed  / unknown
+        FAILED without a named class: the class of the raw text decides -- customer-config -> failed / customer,
+          UNCLASSIFIED / none -> failed / unknown, anything else -> failed / product-team.
+      failed = the job could not do its work. held is never a failure. Returns @{ outcome; actionBy; codes }.
+      NOT decided by the owner, so NOT built: "more than a share of a scope's items = failed" and the repeat after N days.
+    #>
+    param([string]$LegacyOutcome = 'ok', [string]$Kind = '', [string]$Text = '', [string]$ErrorClass = '', [string]$WarningKind = '',
+          # how many currently-failing items of the run's classes are REMOVALS (op Remove in 'EngineItemFailures')
+          [int]$NotRemoved = 0)
+    $lo = "$LegacyOutcome".Trim().ToLowerInvariant(); $k = "$Kind".Trim().ToLowerInvariant()
+    $r = [ordered]@{ outcome = 'ok'; actionBy = 'none'; codes = @() }
+    if ($lo -eq 'ok' -or -not $lo) { return [pscustomobject]$r }
+    if ($lo -eq 'warning') {
+        $r.outcome = 'warning'
+        if ($k -eq 'held') { $r.outcome = 'held'; $r.actionBy = 'customer' }
+        elseif ($k -eq 'warning') { $r.actionBy = $(if ("$WarningKind".Trim() -match '^(?i)customer') { 'customer' } else { 'unknown' }) }
+        elseif ($k -in @('throttled', 'interrupted')) { $r.actionBy = 'none' }
+        else { $r.actionBy = 'unknown' }
+        return [pscustomobject]$r
+    }
+    $r.outcome = 'failed'; $r.actionBy = 'unknown'
+    $codes = @(Get-PimUplinkFailureCodes -Text $Text)
+    $r.codes = $codes
+    if ($codes.Count) {
+        $kinds = @($codes | ForEach-Object { if ("$_" -eq 'UNCLASSIFIED') { 'unknown' } else { Get-PimUplinkFixKind -ErrorClass "$_" } })
+        $allCustomer = (@($kinds | Where-Object { $_ -ne 'customer-config' }).Count -eq 0)
+        if ($allCustomer) {
+            $r.actionBy = 'customer'
+            $allHold = (@($codes | Where-Object { "$_" -ne 'REMOVE-BUDGET-HELD' -and "$_" -notmatch '-MASS-HOLD$' }).Count -eq 0)
+            if ($allHold) { $r.outcome = 'held' }
+            # the owner's condition (100.99): a REMOVAL that did not happen -- the access is still there -- stays failed
+            elseif ($NotRemoved -gt 0) { $r.outcome = 'failed' }
+            elseif ("$Text" -match '\d+ item\(s\) failed:' -or "$Text" -match '(?i)CONVERGENCE FAILURE \(customer configuration\)') { $r.outcome = 'warning' }
+        }
+        elseif (@($kinds | Where-Object { $_ -eq 'product-defect' }).Count) { $r.actionBy = 'product-team' }
+        return [pscustomobject]$r
+    }
+    $cls = "$ErrorClass".Trim().ToUpperInvariant()
+    if (-not $cls -or $cls -eq 'UNCLASSIFIED') { return [pscustomobject]$r }
+    $r.actionBy = $(if ((Get-PimUplinkFixKind -ErrorClass $cls) -eq 'customer-config') { 'customer' } else { 'product-team' })
+    return [pscustomobject]$r
+}
+
+function Get-PimUplinkGuardOutcomeAction {
+    <#
+      PURE. PIM 100.99 / 100.111 for a GUARD record, from its own GuardOutcome and Action text (nothing else is known):
+        cleared                              -> ok      / none
+        halted | refused | held | skipped    -> held    / customer   (a safety check paused a change on purpose; a person in
+                                                                     the tenant reviews, approves or releases it)
+        warning                              -> warning / unknown
+      An Action text that starts with "Nothing to do" makes ActionBy 'none' (PIM 100.104: the text starts with who acts).
+      A guard is never 'failed'. Returns @{ outcome; actionBy }.
+    #>
+    param([string]$GuardOutcome = '', [string]$ActionText = '')
+    $g = "$GuardOutcome".Trim().ToLowerInvariant()
+    if ($g -eq 'cleared') { return [pscustomobject]@{ outcome = 'ok'; actionBy = 'none' } }
+    $o = 'warning'; $a = 'unknown'
+    if ($g -in @('halted', 'refused', 'held', 'skipped')) { $o = 'held'; $a = 'customer' }
+    if ("$ActionText".Trim() -match '^(?i)nothing to do\b') { $a = 'none' }
+    return [pscustomobject]@{ outcome = $o; actionBy = $a }
+}
+
+function Get-PimUplinkInstallRole {
+    <#
+      PURE. The heartbeat's InstallRole (agreed with Invardia 2026-10-12): single | managing | managed, from the product's
+      OWN scenario role (PIM-ScenarioProfile.ps1: 'single', 'msp-master', 'msp-managed'). Any other / no role = '' -- the
+      field is then LEFT OUT (never guessed). ManagingTenantId only for a managed installation, only when it is a GUID and
+      not this tenant's own id. Returns @{ role; managingTenantId }.
+    #>
+    param([AllowNull()][string]$ScenarioRole, [AllowNull()][string]$ManagingTenantId = '', [AllowNull()][string]$TenantId = '')
+    $role = ''
+    switch ("$ScenarioRole".Trim().ToLowerInvariant()) {
+        'single'      { $role = 'single' }
+        'msp-master'  { $role = 'managing' }
+        'msp-managed' { $role = 'managed' }
+    }
+    $mt = ''
+    if ($role -eq 'managed') {
+        $c = "$ManagingTenantId".Trim().Trim('"').ToLowerInvariant()
+        if ($c -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -and $c -ne "$TenantId".Trim().ToLowerInvariant()) { $mt = $c }
+    }
+    return [pscustomobject]@{ role = $role; managingTenantId = $mt }
+}
+
+function Resolve-PimUplinkScenarioRole {
+    <#
+      The product's own role for InstallRole: the STORED scenario (pim.Settings 'Scenario', read through -GetSetting: an id,
+      or { scenario: <id> }) resolved by the product's scenario table (Get-PimScenario -> role 'single' | 'msp-master' |
+      'msp-managed'). '' when nothing is stored, the id is not a supported scenario, the table is not loaded or the read
+      threw -- Get-PimActiveScenario's "safest default: single tenant" is a default to RUN with, not a fact to REPORT.
+      -Lookup { param($Id) } is the test seam (default: Get-PimScenario). Never throws.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$GetSetting, [scriptblock]$Lookup = $null)
+    try {
+        $raw = & $GetSetting 'Scenario'
+        $id = ''
+        if ($raw -is [string]) {
+            $t = $raw.Trim().Trim('"')
+            if ($t.StartsWith('{')) { try { $id = "$(Get-PimUplinkField ($t | ConvertFrom-Json) 'scenario')" } catch { $id = '' } } else { $id = $t }
+        } elseif ($null -ne $raw) { $id = "$(Get-PimUplinkField $raw 'scenario')" }
+        $id = "$id".Trim()
+        if (-not $id) { return '' }
+        $sc = $null
+        if ($Lookup) { $sc = & $Lookup $id }
+        elseif (Get-Command Get-PimScenario -ErrorAction SilentlyContinue) { $sc = Get-PimScenario -Id $id }
+        if ($null -eq $sc) { return '' }
+        return "$(Get-PimUplinkField $sc 'role')".Trim().ToLowerInvariant()
+    } catch { return '' }
+}
+
+function ConvertTo-PimUplinkHeartbeatControls {
+    <#
+      PURE. PIM 100.103 (owner 2026-10-12: "an unknown status which is yellow is bad" / "telemetry must include this more
+      frequent"). The setup controls for the IDENTIFIED heartbeat: EVERY declared control (the same list and the same
+      evaluation as the Kind=setup report -- Get-PimSetupControlCatalog / Get-PimSetupControlStates), each
+        { id; state ok|missing|wrong|unknown; value? (enum controls only); checkedUtc; reason? (unknown only:
+          not-due-yet | no-recent-check | not-readable | not-applicable) }.
+      A control the evaluation did not return is 'unknown' / 'not-readable' (never left out). Empty when the setup library
+      is not loaded or the facts are missing -- the heartbeat then carries no Controls.
+    #>
+    param([AllowNull()][object]$Facts, [switch]$Extended, [datetime]$NowUtc = [datetime]::UtcNow)
+    $out = New-Object System.Collections.Generic.List[object]
+    if ($null -eq $Facts -or -not (Get-Command Get-PimSetupControlStates -ErrorAction SilentlyContinue)) { return $out.ToArray() }
+    try {
+        $nowText = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
+        $got = @{}; foreach ($c in @(Get-PimSetupControlStates -Facts $Facts -Extended:$Extended)) { if ($c) { $got["$($c.id)"] = $c } }
+        foreach ($c in @(Get-PimSetupControlCatalog -Extended:$Extended)) {
+            $e = $got["$($c.id)"]
+            $state = 'unknown'; if ($e -and "$($e.state)" -in @('ok', 'missing', 'wrong', 'unknown')) { $state = "$($e.state)" }
+            $o = [ordered]@{ id = "$($c.id)"; state = $state }
+            if ($e -and $c.Contains('enum') -and (@($c.enum) -contains "$(Get-PimUplinkField $e 'value')")) { $o['value'] = "$(Get-PimUplinkField $e 'value')" }
+            $ck = "$(Get-PimUplinkField $e 'checkedUtc')".Trim()
+            $o['checkedUtc'] = $(if ($ck -match '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$') { $ck } else { $nowText })
+            if ($state -eq 'unknown') {
+                $rs = "$(Get-PimUplinkField $e 'reason')".Trim().ToLowerInvariant()
+                if ($rs -notin @('not-due-yet', 'no-recent-check', 'not-readable', 'not-applicable')) { $rs = 'not-readable' }
+                $o['reason'] = $rs
+            }
+            $out.Add([pscustomobject]$o)
+        }
+    } catch { return @() }
+    # Unrolled on purpose (like Select-PimUplinkEndpoints): every caller wraps the call in @().
+    return $out.ToArray()
+}
+
+function ConvertTo-PimUplinkUpdateRun {
+    <#
+      PURE. PIM 100.103 (b): the updater records EVERY run -- also "nothing to do" -- in pim.Settings 'UpdateState'
+      (update-job-entry.ps1 Send-PimUpdateOutcome, kind 'run'). This turns that record into a run the plan reports as job
+      'pim-update' (ONE report per updater run: the plan's per-job watermark is the record's own time):
+        outcome ok / ahead                      -> completed          failed -> failed (with its error text)
+        attention / waiting / skipped           -> a warning the run declared about itself (kind 'customer': the text says
+                                                   what the operator of the environment decides)
+      updateAction = none | built | rolled | schema | failed ('none' = nothing to do). $null when there is no run record
+      (a deploy record only), no time, or an outcome outside the list.
+    #>
+    param([AllowNull()][object]$UpdateState)
+    try {
+        if ($null -eq $UpdateState) { return $null }
+        if ("$(Get-PimUplinkField $UpdateState 'kind')".Trim().ToLowerInvariant() -ne 'run') { return $null }
+        $ts = ConvertTo-PimUplinkUtc (Get-PimUplinkField $UpdateState 'tsUtc')
+        if (-not $ts) { return $null }
+        $oc = "$(Get-PimUplinkField $UpdateState 'outcome')".Trim().ToLowerInvariant()
+        $act = "$(Get-PimUplinkField $UpdateState 'action')".Trim().ToLowerInvariant()
+        if ($act -notin @('none', 'built', 'rolled', 'schema', 'failed')) { $act = '' }
+        $err = "$(Get-PimUplinkField $UpdateState 'error')".Trim()
+        $dur = 0; [void][int]::TryParse("$(Get-PimUplinkField $UpdateState 'durationSec')", [ref]$dur)
+        $status = ''; $ok = $true; $warn = $false
+        if ($oc -in @('ok', 'ahead')) { $status = 'completed' }
+        elseif ($oc -eq 'failed') { $status = 'failed'; $ok = $false }
+        elseif ($oc -in @('attention', 'waiting', 'skipped')) { $status = 'warning'; $warn = $true }
+        else { return $null }
+        $detail = $err
+        if (-not $detail -and $status -eq 'completed') { $detail = $(if ($act -eq 'none' -or -not $act) { 'update: nothing to do' } else { "update: $act" }) }
+        return [pscustomobject]@{ name = 'update'; type = 'update'; status = $status; ok = $ok; held = $false; warning = $warn
+            warningKind = $(if ($warn) { 'customer-update' } else { '' }); warningSummary = $(if ($warn) { $err } else { '' })
+            detail = $detail; durationMs = ([int64]$dur * 1000); finishedUtc = $ts.ToString('o'); updateAction = $act }
+    } catch { return $null }
 }
 
 function Get-PimUplinkConsentAction {
@@ -737,7 +1015,20 @@ function Invoke-PimUplinkCycle {
           # Endpoints, checked entry by entry (Select-PimUplinkEndpoints); the manager url is also the base of every guard's Link.
           [AllowNull()][object[]]$Endpoints = @(),
           # PIM 100.34: send FixKind unless PIM_UPLINK_FIXKIND is 0/false/off/no (ON by default -- Invardia live 6f2dce4).
-          [bool]$FixKind = (Test-PimUplinkFixKindEnabled))
+          [bool]$FixKind = (Test-PimUplinkFixKindEnabled),
+          # Lane repfix (2026-10-12) -- the ADDITIVE fields, ON unless PIM_UPLINK_ADDITIVE is 0/false/off/no, and held back for
+          # 24 h after Invardia refused them (UplinkState.additiveRefusedUtc): Outcome ok|warning|held|failed + ActionBy on
+          # every run and guard record (100.99 / 100.111), Solution (100.115), InstallRole / ManagingTenantId and Controls
+          # on the identified heartbeat (100.103), the updater's own run report (job 'pim-update').
+          [bool]$Additive = (Test-PimUplinkAdditiveEnabled),
+          # the product's own scenario role ('single' | 'msp-master' | 'msp-managed'; anything else = InstallRole left out)
+          [string]$ScenarioRole = '', [string]$ManagingTenantId = '',
+          # the currently-failing items (pim.Settings 'EngineItemFailures'): their own names fill the Solution text
+          [AllowNull()][object[]]$EngineFailures = @(),
+          # the updater's last run as a run (ConvertTo-PimUplinkUpdateRun), or $null
+          [AllowNull()][object]$UpdateRun = $null,
+          # the heartbeat interval (a product constant: one hour). A parameter only so a test can keep an older timeline.
+          [double]$HeartbeatHours = (Get-PimUplinkHeartbeatHours))
     $NowUtc = $NowUtc.ToUniversalTime()
     $endpoint = "$(& $GetSetting 'UplinkEndpoint')".Trim()
     $sender = Resolve-AitUplinkSender -Enabled $Enabled -InstallKey $InstallKey -Endpoint $endpoint
@@ -802,6 +1093,28 @@ function Invoke-PimUplinkCycle {
     $common = @{ Mode = $sender.Mode; Product = $script:PimUplinkProduct; Version = $Version; Ring = $Ring; InstallId = $iid; TenantId = $TenantId; Now = $NowUtc }
     $sent = 0; $failed = 0; $why = @(); $supNote = ''; $hbSent = $false; $stopped = $false; $budget = [Math]::Max(1, $MaxPerCycle)
     $post = { param($rec) if ($sent -gt 0 -and $PauseMs -gt 0) { Start-Sleep -Milliseconds $PauseMs }; & $Send $rec $sender.Endpoint $sender.AccessCode }
+    # Lane repfix: the additive fields. $postAdd sends a record that carries some (-names); when Invardia refuses its CONTENT
+    # (400 / 422) the same record goes ONCE more in its old form (-legacy: the old value of a field that existed before; a
+    # field that did not exist is removed) and, when that lands, the additive fields are off for the rest of this cycle and
+    # for 24 hours. A refusal for any other reason (429, 5xx, no network) is returned as it is.
+    $addPrev = $null; if ($state -and $state.PSObject.Properties['additiveRefusedUtc']) { $addPrev = $state.additiveRefusedUtc }
+    $addHeld = Test-PimUplinkAdditiveHeld -RefusedUtc $addPrev -NowUtc $NowUtc
+    $addState = @{ on = ([bool]$Additive -and -not $addHeld); refusedNow = $false; reason = '' }
+    $postAdd = {
+        param($rec, $names, $legacy)
+        $r1 = & $post $rec
+        $nm = @(@($names) | Where-Object { "$_".Trim() })
+        if ("$($r1.Status)" -eq 'ok' -or $null -eq $rec -or -not $nm.Count -or -not (Test-PimUplinkValidationRefusal "$($r1.Reason)")) { return $r1 }
+        foreach ($n in $nm) {
+            if ($legacy -and $legacy.ContainsKey("$n")) { $rec | Add-Member -NotePropertyName "$n" -NotePropertyValue $legacy["$n"] -Force }
+            else { $rec.PSObject.Properties.Remove("$n") }
+        }
+        $r2 = & $post $rec
+        if ("$($r2.Status)" -eq 'ok') { $addState.on = $false; $addState.refusedNow = $true; $addState.reason = "$($r1.Reason)" }
+        return $r2
+    }
+    $isId = ($sender.Mode -eq 'identified')
+    $redact = { param($t, $max) $x = "$t".Trim(); if (Get-Command ConvertTo-AitUplinkRedacted -ErrorAction SilentlyContinue) { $x = ConvertTo-AitUplinkRedacted -Text $x }; if ($x.Length -gt $max) { $x = $x.Substring(0, $max - 3) + '...' }; $x }
     # §11 opt-in: switched back ON after an opt-out -> ONE 'optin' report FIRST. Until it lands nothing else is sent (Invardia
     # still has this environment as opted out), and nothing from the opted-out period is ever sent: the floor restarts NOW.
     $consent = 'on'
@@ -811,7 +1124,7 @@ function Invoke-PimUplinkCycle {
         if ("$($r.Status)" -eq 'ok') { $sent++; $floor = $NowUtc.ToString('o'); $marks = @{}; $lastHb = $null }
         else { $failed++; $stopped = $true; $consent = 'off'; $why += "optin: $($r.Reason)" }
     }
-    if (-not $stopped -and (Get-PimUplinkHeartbeatDue -LastHeartbeatUtc $lastHb -NowUtc $NowUtc)) {
+    if (-not $stopped -and (Get-PimUplinkHeartbeatDue -LastHeartbeatUtc $lastHb -NowUtc $NowUtc -Hours $HeartbeatHours)) {
         # PIM 100.36: the SQL space, identified heartbeat only, both numbers or neither (never a 0 / a guess).
         $hbCounts = $null
         if ($sender.Mode -eq 'identified' -and $SqlSpace -and $SqlSpace.ContainsKey('sqlUsedMb') -and $SqlSpace.ContainsKey('sqlMaxMb') -and
@@ -862,7 +1175,31 @@ function Invoke-PimUplinkCycle {
                 }
             }
         }
-        $r = & $post $hb
+        # Lane repfix (additive, IDENTIFIED heartbeat only): InstallRole single | managing | managed (+ ManagingTenantId for a
+        # managed installation, when known) and the setup Controls with EVERY heartbeat (PIM 100.103), each with checkedUtc and,
+        # for unknown, its reason. Controls ride the setup report's own switch (-SetupEnabled) and its id list (-SetupExtended).
+        $hbAdd = @()
+        if ($hb -and $isId -and $addState.on) {
+            try {
+                $ir = Get-PimUplinkInstallRole -ScenarioRole $ScenarioRole -ManagingTenantId $ManagingTenantId -TenantId $TenantId
+                if ("$($ir.role)") {
+                    $hb | Add-Member -NotePropertyName 'InstallRole' -NotePropertyValue "$($ir.role)" -Force; $hbAdd += 'InstallRole'
+                    if ("$($ir.managingTenantId)") { $hb | Add-Member -NotePropertyName 'ManagingTenantId' -NotePropertyValue "$($ir.managingTenantId)" -Force; $hbAdd += 'ManagingTenantId' }
+                }
+            } catch { }
+            if ($SetupEnabled -and $null -ne $SetupFacts) {
+                $ctl = @(); try { $ctl = @(ConvertTo-PimUplinkHeartbeatControls -Facts $SetupFacts -Extended:$SetupExtended -NowUtc $NowUtc) } catch { $ctl = @() }
+                if ($ctl.Count) {
+                    # the same form as Endpoints (a JSON array under Windows PowerShell 5.1 too, Test-PimUplink AG18b); the
+                    # text is PROVEN before it leaves -- not an array = the field is left out, never a bad list
+                    $hb | Add-Member -NotePropertyName 'Controls' -NotePropertyValue ([object[]]$ctl) -Force
+                    $ctlText = ''; try { $ctlText = "$($hb | ConvertTo-Json -Depth 6 -Compress)" } catch { $ctlText = '' }
+                    if ($ctlText.Contains('"Controls":[{')) { $hbAdd += 'Controls' }
+                    else { $hb.PSObject.Properties.Remove('Controls'); Write-Warning '[uplink] Controls could not be written as a JSON array -- the heartbeat goes without it.' }
+                }
+            }
+        }
+        $r = & $postAdd $hb $hbAdd @{}
         if ("$($r.Status)" -eq 'ok') { $sent++; $hbSent = $true; $lastHb = $NowUtc.ToString('o') } else { $failed++; $stopped = $true; $why += "heartbeat: $($r.Reason)" }
         if ("$($r.Status)" -eq 'ok' -and $agOnHb) {
             foreach ($a in $activeNow) { if (-not $reported.ContainsKey("$($a.id)")) { $reported["$($a.id)"] = @{ sinceUtc = $NowUtc.ToString('o'); hold = $false } } }
@@ -898,7 +1235,10 @@ function Invoke-PimUplinkCycle {
             } else { $failed++; $stopped = $true; $why += "setup: $($r.Reason)" }
         }
     }
-    $plan = Get-PimUplinkRunPlan -Runs $Runs -SinceUtc $floor -SinceByJob $marks
+    # PIM 100.103 (b): the updater's own run ("nothing to do" included) is one more run -- job 'pim-update', additive.
+    $planRuns = @($Runs)
+    if ($addState.on -and $null -ne $UpdateRun) { $planRuns = @($planRuns) + @($UpdateRun) }
+    $plan = Get-PimUplinkRunPlan -Runs $planRuns -SinceUtc $floor -SinceByJob $marks
     $left = 0
     foreach ($p in @($plan.reports)) {
         # STOP at the first failure (a 429 says "wait") and at the per-cycle budget: the rest keep their watermark.
@@ -910,7 +1250,46 @@ function Invoke-PimUplinkCycle {
         # byte-identical), and only behind PIM_UPLINK_FIXKIND until Invardia's schema has the field.
         # §100.45: only a FAILED report carries FixKind -- a throttled warning is not a defect to fix, so it never opens one.
         if ($rec -and $cls -and $FixKind -and $p.outcome -eq 'failed') { $rec | Add-Member -NotePropertyName 'FixKind' -NotePropertyValue (Get-PimUplinkFixKind -ErrorClass $cls) -Force }
-        $r = & $post $rec
+        # Lane repfix (additive): Outcome ok | warning | held | failed + ActionBy by Get-PimUplinkOutcomeAction (100.99 /
+        # 100.111), what a held / warning run said (ErrorText, identified), UpdateAction on the updater's run, and the
+        # customer-ready Solution of the class (100.115, identified: it names the item). -legacy = the record as it was.
+        $addNames = @(); $addLegacy = @{}
+        if ($rec -and $addState.on) {
+            try {
+                # a removal that did not happen keeps the run failed: the currently-failing REMOVE items of the run's classes
+                $notRemoved = 0
+                if ("$($p.outcome)" -eq 'failed') {
+                    $runCodes = @(Get-PimUplinkFailureCodes -Text "$($p.errorText)")
+                    $notRemoved = @(@($EngineFailures) | Where-Object { $null -ne $_ -and "$($_.op)".Trim() -match '^(?i)remove' -and ($runCodes -contains "$($_.code)".Trim().ToUpperInvariant()) }).Count
+                }
+                $oa = Get-PimUplinkOutcomeAction -LegacyOutcome "$($p.outcome)" -Kind "$($p.kind)" -Text "$($p.errorText)" -ErrorClass $cls -WarningKind "$($p.warningKind)" -NotRemoved $notRemoved
+                if ("$($oa.outcome)" -ne "$($rec.Outcome)") {
+                    $addLegacy['Outcome'] = "$($rec.Outcome)"
+                    $rec | Add-Member -NotePropertyName 'Outcome' -NotePropertyValue "$($oa.outcome)" -Force; $addNames += 'Outcome'
+                }
+                $rec | Add-Member -NotePropertyName 'ActionBy' -NotePropertyValue "$($oa.actionBy)" -Force; $addNames += 'ActionBy'
+                if ("$($p.updateAction)" -in @('none', 'built', 'rolled', 'schema', 'failed')) { $rec | Add-Member -NotePropertyName 'UpdateAction' -NotePropertyValue "$($p.updateAction)" -Force; $addNames += 'UpdateAction' }
+                $solCode = "$cls".Trim().ToUpperInvariant()
+                if (-not $solCode -and "$($p.kind)" -eq 'held') {
+                    # a policy change set held for approval names its provider, not a class: the class of that hold
+                    if ("$($p.noteText)" -match 'GroupsPolicies') { $solCode = 'GROUP-POLICY-MASS-HOLD' } elseif ("$($p.noteText)" -match 'EntraRolePolicies') { $solCode = 'ENTRA-POLICY-MASS-HOLD' } elseif ("$($p.noteText)" -match 'AzResPolicies') { $solCode = 'AZ-POLICY-MASS-HOLD' }
+                    if ($solCode) { $rec | Add-Member -NotePropertyName 'ErrorClass' -NotePropertyValue $solCode.ToLowerInvariant() -Force; $addNames += 'ErrorClass' }
+                }
+                if ($isId) {
+                    if (-not $rec.PSObject.Properties['ErrorText'] -and "$($p.noteText)".Trim()) {
+                        $nt = & $redact "$($p.noteText)" 8000
+                        if ($nt) { $rec | Add-Member -NotePropertyName 'ErrorText' -NotePropertyValue $nt -Force; $addNames += 'ErrorText' }
+                    }
+                    if ($solCode -and (Get-Command Get-PimFailureSolution -ErrorAction SilentlyContinue)) {
+                        $labels = @(@($EngineFailures) | Where-Object { $null -ne $_ -and "$($_.code)".Trim().ToUpperInvariant() -eq $solCode } |
+                                    ForEach-Object { if ("$($_.label)".Trim()) { "$($_.label)".Trim() } else { "$($_.key)".Trim() } } | Where-Object { $_ })
+                        $sol = Get-PimFailureSolution -Code $solCode -Items $labels
+                        if ($sol) { $st0 = & $redact "$($sol.text)" 2000; if ($st0) { $rec | Add-Member -NotePropertyName 'Solution' -NotePropertyValue $st0 -Force; $addNames += 'Solution' } }
+                    }
+                }
+            } catch { Write-Warning "[uplink] the additive fields of $($p.job) could not be built: $($_.Exception.Message)" }
+        }
+        $r = & $postAdd $rec $addNames $addLegacy
         if ("$($r.Status)" -eq 'ok') { $sent++; $marks[$p.job] = $p.finishedUtc }
         else { $failed++; $stopped = $true; $left++; $why += "$($p.job): $($r.Reason)" }
     }
@@ -928,7 +1307,16 @@ function Invoke-PimUplinkCycle {
                 if ($stopped -or $sent -ge $budget) { $left++; continue }
                 $rec = New-PimGuardUplinkRecord -Entry $e -Mode $sender.Mode -Product $script:PimUplinkProduct -Version $Version -Ring $Ring -InstallId $iid -TenantId $TenantId -ManagerUrl $mgrBase
                 if (-not $rec) { continue }
-                $r = & $post $rec
+                # Lane repfix (additive): Outcome + ActionBy on the guard record (Get-PimUplinkGuardOutcomeAction); the
+                # existing GuardOutcome / Severity are unchanged beside them.
+                $gNames = @()
+                if ($addState.on) {
+                    $ga = Get-PimUplinkGuardOutcomeAction -GuardOutcome "$($rec.GuardOutcome)" -ActionText "$(Get-PimUplinkField $e 'actionText')"
+                    $rec | Add-Member -NotePropertyName 'Outcome' -NotePropertyValue "$($ga.outcome)" -Force
+                    $rec | Add-Member -NotePropertyName 'ActionBy' -NotePropertyValue "$($ga.actionBy)" -Force
+                    $gNames = @('Outcome', 'ActionBy')
+                }
+                $r = & $postAdd $rec $gNames @{}
                 if ("$($r.Status)" -eq 'ok') {
                     $sent++; $guardsSent++; $e | Add-Member -NotePropertyName lastSentUtc -NotePropertyValue $NowUtc.ToString('o') -Force
                     # reported as tripped: it gets its 'cleared' record on a later cycle, once it is no longer held
@@ -955,12 +1343,19 @@ function Invoke-PimUplinkCycle {
             $rec = New-PimUplinkGuardClearedRecord -GuardId "$cid" -Mode $sender.Mode -Product $script:PimUplinkProduct -Version $Version -Ring $Ring -InstallId $iid -TenantId $TenantId `
                      -ClearedBy $by -Job "$(Get-PimUplinkField $trip 'job')" -NowUtc $NowUtc
             if (-not $rec) { $reported.Remove("$cid"); continue }
-            $r = & $post $rec
+            $cNames = @()
+            if ($addState.on) {   # lane repfix: a guard that is clear again = ok, nobody has to act
+                $rec | Add-Member -NotePropertyName 'Outcome' -NotePropertyValue 'ok' -Force
+                $rec | Add-Member -NotePropertyName 'ActionBy' -NotePropertyValue 'none' -Force
+                $cNames = @('Outcome', 'ActionBy')
+            }
+            $r = & $postAdd $rec $cNames @{}
             if ("$($r.Status)" -eq 'ok') { $sent++; $clearedSent++; $reported.Remove("$cid") }
             else { $failed++; $stopped = $true; $left++; $why += "guard $cid cleared: $($r.Reason)" }
         }
     }
     $msg = "$($sender.Mode): $sent sent$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($clearedSent) { " ($clearedSent guard(s) reported clear)" })$(if ($setupSent) { ' (setup report)' })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })$supNote"
+    if ($addState.refusedNow) { $msg += '; Invardia refused the new report fields -- sent in the old form, tried again in 24 h' }
     $newState = [ordered]@{ mode = $sender.Mode; lastHeartbeatUtc = $lastHb; runWatermarkUtc = $floor; jobMarks = [pscustomobject]$marks
                             consent = $consent; lastCycleUtc = $NowUtc.ToString('o'); lastResult = $msg
                             # PIM 100.75: read by the end-of-install verify (Confirm-PimInstall 'telemetry')
@@ -972,8 +1367,12 @@ function Invoke-PimUplinkCycle {
         foreach ($rid0 in @($reported.Keys | Sort-Object)) { $repOut["$rid0"] = [pscustomobject][ordered]@{ sinceUtc = "$($reported["$rid0"].sinceUtc)"; hold = [bool]$reported["$rid0"].hold } }
         $newState['guardsReported'] = [pscustomobject]$repOut
     }
+    # Lane repfix: when Invardia refused the additive fields (kept for 24 h, then they are tried again).
+    if ($addState.refusedNow) { $newState['additiveRefusedUtc'] = $NowUtc.ToString('o') }
+    elseif ($addHeld) { $apu = ConvertTo-PimUplinkUtc $addPrev; if ($apu) { $newState['additiveRefusedUtc'] = $apu.ToString('o') } }
     & $SetSetting 'UplinkState' ([pscustomobject]$newState)
     return @{ ran = $true; mode = $sender.Mode; sent = $sent; failed = $failed; left = $left; heartbeat = $hbSent; setup = $setupSent; message = $msg; reasons = @($why)
+              additive = [bool]$addState.on; additiveRefused = [bool]$addState.refusedNow
               guardsCleared = $clearedSent; activeGuards = $(if ($guardsKnown) { $activeNow.Count } else { -1 }) }
 }
 
@@ -1103,9 +1502,22 @@ function Invoke-PimUplinkJob {
     # PIM 100.56 / framework 8.9: the endpoints from what the environment already records (identified only; no ARM read).
     $endpoints = @()
     if ($on -and "$key".Trim()) { try { $endpoints = @(Get-PimUplinkEndpoints -GetSetting $get) } catch { $endpoints = @() } }
+    # Lane repfix (additive, identified): the product's own role (the STORED scenario; unknown = left out), the managing
+    # tenant of a managed installation (pim.Settings 'MspManagingTenantId' -- left out while nothing has recorded it), the
+    # currently-failing items (their names fill the Solution text) and the updater's last run as a run of its own.
+    $scRole = ''; $mgTid = ''; $engFails = @(); $updRun = $null
+    if ($on -and "$key".Trim()) {
+        $scRole = Resolve-PimUplinkScenarioRole -GetSetting $get
+        if ($scRole -eq 'msp-managed') { try { $mgTid = "$(& $get 'MspManagingTenantId')".Trim() } catch { $mgTid = '' } }
+    }
+    if ($on) {
+        try { $ef = & $get 'EngineItemFailures'; if ($ef -is [string] -and "$ef".Trim()) { $ef = $ef | ConvertFrom-Json }; $engFails = @(@($ef) | Where-Object { $null -ne $_ }) } catch { $engFails = @() }
+        $updRun = ConvertTo-PimUplinkUpdateRun -UpdateState $us
+    }
     $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
             -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $(if ($WhatIf) { 0 } else { 2500 }) `
-            -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints
+            -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints `
+            -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun
     # PIM 100.75: a failed send / an install that should be identified but is anonymous = a WARNING run (never a failure).
     $rawKey = ''; try { $rawKey = "$(& $get 'InvardiaInstallKey')".Trim() } catch { $rawKey = '' }
     $claimSt = $null; try { $claimSt = & $get 'InstallKeyClaimState'; if ($claimSt -is [string]) { $claimSt = $claimSt | ConvertFrom-Json } } catch { $claimSt = $null }

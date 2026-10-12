@@ -235,28 +235,46 @@ function Get-PimSetupControlStates {
     param([Parameter(Mandatory)][object]$Facts, [switch]$Extended)
     $now = if ($Facts.NowUtc) { ([datetime]$Facts.NowUtc).ToUniversalTime() } else { [datetime]::UtcNow }
     $out = New-Object System.Collections.Generic.List[object]
-    $add = { param($id, $state, $value) $o = [ordered]@{ id = $id; state = $state }; if ($null -ne $value -and "$value" -ne '') { $o['value'] = "$value" }; [void]$out.Add($o) }
+    # PIM 100.103: every evaluation also says WHEN the fact was read (checkedUtc) and, for 'unknown', WHY (reason:
+    # not-due-yet | no-recent-check | not-readable | not-applicable). New-PimSetupReport copies id / state / value only, so the
+    # Kind=setup record is unchanged; the heartbeat's Controls carry them (ConvertTo-PimUplinkHeartbeatControls).
+    $nowText = $now.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
+    $add = {
+        param($id, $state, $value, $reason, $checked)
+        $o = [ordered]@{ id = $id; state = $state }
+        if ($null -ne $value -and "$value" -ne '') { $o['value'] = "$value" }
+        $o['checkedUtc'] = $nowText
+        $ct = ConvertTo-PimSetupUtc $checked
+        if ($ct) { $o['checkedUtc'] = $ct.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture) }
+        if ("$state" -eq 'unknown') {
+            $rs = "$reason".Trim().ToLowerInvariant()
+            if ($rs -notin @('not-due-yet', 'no-recent-check', 'not-readable', 'not-applicable')) { $rs = 'not-readable' }
+            $o['reason'] = $rs
+        }
+        [void]$out.Add($o)
+    }
     $us = $Facts.UpdateState; $storeOk = [bool]$Facts.StoreReadable
     $runs = Get-PimSetupRunGroups -Runs @($Facts.Runs)
 
     # updater-deployed: the deployment records itself in UpdateState (kind 'deploy'), every update run replaces it (kind 'run').
-    if ($us) { & $add 'updater-deployed' 'ok' $null } elseif ($storeOk) { & $add 'updater-deployed' 'missing' $null } else { & $add 'updater-deployed' 'unknown' $null }
+    if ($us) { & $add 'updater-deployed' 'ok' $null } elseif ($storeOk) { & $add 'updater-deployed' 'missing' $null } else { & $add 'updater-deployed' 'unknown' $null 'not-readable' }
 
     # updater-schedule: the nightly run reported within 48 h = enabled; a record older than that = disabled (wrong).
-    if (-not $us) { if ($storeOk) { & $add 'updater-schedule' 'missing' $null } else { & $add 'updater-schedule' 'unknown' $null } }
+    if (-not $us) { if ($storeOk) { & $add 'updater-schedule' 'missing' $null } else { & $add 'updater-schedule' 'unknown' $null 'not-readable' } }
     else {
         $last = ConvertTo-PimSetupUtc (Get-PimSetupField $us 'tsUtc')
         $deployed = ConvertTo-PimSetupUtc (Get-PimSetupField $us 'configuredUtc'); if (-not $deployed) { $deployed = ConvertTo-PimSetupUtc (Get-PimSetupField $us 'recordedUtc') }
-        if ($last -and ($now - $last).TotalHours -le 48) { & $add 'updater-schedule' 'ok' 'enabled' }
-        elseif ($last) { & $add 'updater-schedule' 'wrong' 'disabled' }
-        elseif ($deployed -and ($now - $deployed).TotalHours -le 48) { & $add 'updater-schedule' 'unknown' $null }   # installed, first nightly run not due yet
+        # 100.103: the updater records EVERY run (also "nothing to do") in UpdateState.tsUtc -- checkedUtc = that run.
+        if ($last -and ($now - $last).TotalHours -le 48) { & $add 'updater-schedule' 'ok' 'enabled' $null $last }
+        elseif ($last) { & $add 'updater-schedule' 'wrong' 'disabled' $null $last }
+        elseif ($deployed -and ($now - $deployed).TotalHours -le 48) { & $add 'updater-schedule' 'unknown' $null 'not-due-yet' }   # installed, first nightly run not due yet
         else { & $add 'updater-schedule' 'wrong' 'disabled' }
     }
 
     # update-ring (+ value 1|2|3; ring 0 = dev, reported ok without a value -- '0' is not in Invardia's list)
     $ring = Resolve-PimUplinkRing -EnvRing "$($Facts.EnvRing)" -UpdateState $us
     if ($null -ne $ring) { & $add 'update-ring' 'ok' $(if ($ring -ge 1) { "$ring" } else { $null }) }
-    elseif ($us -or $storeOk) { & $add 'update-ring' 'missing' $null } else { & $add 'update-ring' 'unknown' $null }
+    elseif ($us -or $storeOk) { & $add 'update-ring' 'missing' $null } else { & $add 'update-ring' 'unknown' $null 'not-readable' }
 
     # uplink-key
     if ([bool]$Facts.KeyPresent) { & $add 'uplink-key' 'ok' $null } else { & $add 'uplink-key' 'missing' $null }
@@ -271,27 +289,29 @@ function Get-PimSetupControlStates {
 
     # mail-sender: the Get Started verdict (Get-PimMailSetupState) -- done = ok, a failed test mail = wrong, none = missing.
     $ms = $Facts.Mail
-    if ($null -eq $ms) { & $add 'mail-sender' 'unknown' $null }
+    if ($null -eq $ms) { & $add 'mail-sender' 'unknown' $null 'not-readable' }
     elseif ((Get-PimSetupField $ms 'proven') -eq $false) { & $add 'mail-sender' 'wrong' $null }
     elseif ([bool](Get-PimSetupField $ms 'done')) { & $add 'mail-sender' 'ok' $null }
     else { & $add 'mail-sender' 'missing' $null }
 
     # alert-recipients
-    if ($null -eq $Facts.AlertRecipients) { & $add 'alert-recipients' 'unknown' $null }
+    if ($null -eq $Facts.AlertRecipients) { & $add 'alert-recipients' 'unknown' $null 'not-readable' }
     elseif (@($Facts.AlertRecipients | Where-Object { "$_".Trim() }).Count) { & $add 'alert-recipients' 'ok' $null }
     else { & $add 'alert-recipients' 'missing' $null }
 
     # identity-permissions: the Manager's last real check (<= 7 days old), else unknown.
     $ps = $Facts.Permissions; $psAt = ConvertTo-PimSetupUtc (Get-PimSetupField $ps 'checkedUtc')
     $psFresh = ($ps -and $psAt -and ($now - $psAt).TotalDays -le 7 -and [bool](Get-PimSetupField $ps 'readable'))
-    if (-not $psFresh) { & $add 'identity-permissions' 'unknown' $null }
-    elseif ([int](Get-PimSetupField $ps 'missing') -gt 0) { & $add 'identity-permissions' 'missing' $null }
-    else { & $add 'identity-permissions' 'ok' $null }
+    # 100.103: unknown says why -- no check on record, or one older than 7 days = no-recent-check (checkedUtc = that old
+    # check when there is one); a recent check that could not read the grants = not-readable.
+    if (-not $psFresh) { & $add 'identity-permissions' 'unknown' $null $(if ($ps -and $psAt -and ($now - $psAt).TotalDays -le 7) { 'not-readable' } else { 'no-recent-check' }) $psAt }
+    elseif ([int](Get-PimSetupField $ps 'missing') -gt 0) { & $add 'identity-permissions' 'missing' $null $null $psAt }
+    else { & $add 'identity-permissions' 'ok' $null $null $psAt }
 
     # last-run-24h: the engine jobs (engine-* / queue-apply); without any of them in the history, any job.
     $eng = @($runs.Keys | Where-Object { $_ -match '^engine' -or $_ -eq 'queue-apply' })
     if (-not $eng.Count) { $eng = @($runs.Keys) }
-    if (-not $eng.Count) { & $add 'last-run-24h' $(if ($storeOk) { 'missing' } else { 'unknown' }) $null }
+    if (-not $eng.Count) { & $add 'last-run-24h' $(if ($storeOk) { 'missing' } else { 'unknown' }) $null 'not-readable' }
     else {
         # the newest SUCCESSFUL run of those jobs, from every run (the per-type newest may have failed)
         $okRuns = @($Facts.Runs | Where-Object { $_ -and (Test-PimSetupRunOk $_) } | Where-Object {
@@ -301,7 +321,7 @@ function Get-PimSetupControlStates {
     }
 
     # backup-configured: the daily config-backup job ran OK within 48 h.
-    if (-not $runs.ContainsKey('config-backup')) { & $add 'backup-configured' $(if ($storeOk) { 'missing' } else { 'unknown' }) $null }
+    if (-not $runs.ContainsKey('config-backup')) { & $add 'backup-configured' $(if ($storeOk) { 'missing' } else { 'unknown' }) $null 'not-readable' }
     else {
         $b = $runs['config-backup']
         if ((Test-PimSetupRunOk $b.run) -and ($now - $b.fin).TotalHours -le 48) { & $add 'backup-configured' 'ok' $null } else { & $add 'backup-configured' 'wrong' $null }
@@ -309,19 +329,19 @@ function Get-PimSetupControlStates {
 
     # update-pinned (+ value no|yes): PIM_UPDATE_HOLD=1 on the updater, recorded in UpdateState.hold.
     $hold = ("$($Facts.EnvHold)".Trim() -eq '1') -or [bool](Get-PimSetupField $us 'hold')
-    if ($hold) { & $add 'update-pinned' 'ok' 'yes' } elseif ($us) { & $add 'update-pinned' 'ok' 'no' } else { & $add 'update-pinned' 'unknown' $null }
+    if ($hold) { & $add 'update-pinned' 'ok' 'yes' } elseif ($us) { & $add 'update-pinned' 'ok' 'no' } else { & $add 'update-pinned' 'unknown' $null $(if ($storeOk) { 'not-applicable' } else { 'not-readable' }) }   # no updater on record = nothing to pin
 
     if ($Extended) {
         $rr = Get-PimSetupField $ps 'rootReader'
-        if (-not $psFresh -or -not ($rr -is [bool])) { & $add 'tenant-root-reader' 'unknown' $null } elseif ($rr) { & $add 'tenant-root-reader' 'ok' $null } else { & $add 'tenant-root-reader' 'missing' $null }
+        if (-not $psFresh -or -not ($rr -is [bool])) { & $add 'tenant-root-reader' 'unknown' $null 'no-recent-check' $psAt } elseif ($rr) { & $add 'tenant-root-reader' 'ok' $null } else { & $add 'tenant-root-reader' 'missing' $null }
         $gs = @(Get-PimSetupField $Facts.GetStarted 'steps')
         $stepOf = { param($id) @($gs | Where-Object { $_ -and "$($_.id)" -eq $id }) | Select-Object -First 1 }
         $bg = & $stepOf 'breakglass'
-        if (-not $bg) { & $add 'breakglass-protected' 'unknown' $null } elseif ([bool]$bg.done) { & $add 'breakglass-protected' 'ok' $null } else { & $add 'breakglass-protected' 'missing' $null }
+        if (-not $bg) { & $add 'breakglass-protected' 'unknown' $null 'no-recent-check' } elseif ([bool]$bg.done) { & $add 'breakglass-protected' 'ok' $null } else { & $add 'breakglass-protected' 'missing' $null }
         $ac = & $stepOf 'activator'
-        if (-not $ac) { & $add 'activator-apps' 'unknown' $null } elseif ([bool]$ac.done) { & $add 'activator-apps' 'ok' $null } else { & $add 'activator-apps' 'missing' $null }
+        if (-not $ac) { & $add 'activator-apps' 'unknown' $null 'no-recent-check' } elseif ([bool]$ac.done) { & $add 'activator-apps' 'ok' $null } else { & $add 'activator-apps' 'missing' $null }
         if ("$($Facts.MspRole)" -ne 'Slave') { & $add 'managing-link' 'ok' $null }
-        elseif ($null -eq $Facts.DownlinkOn) { & $add 'managing-link' 'unknown' $null }
+        elseif ($null -eq $Facts.DownlinkOn) { & $add 'managing-link' 'unknown' $null 'not-readable' }
         elseif ([bool]$Facts.DownlinkOn) { & $add 'managing-link' 'ok' $null } else { & $add 'managing-link' 'missing' $null }
     }
     return @($out.ToArray())

@@ -232,7 +232,7 @@ See chapter 10. Your SQL database (and so all stored data) remains until you del
 | Record | Fields | Mode |
 |---|---|---|
 | Every record | Schema, Kind, Product (pim-manager), Version, Ring, LastSeenUtc | Both |
-| Heartbeat (every 4 hours) | Edition (community / pro / trial), Hosting (container), RuntimeIdentity (managed identity / certificate), LicenceState | Both |
+| Heartbeat (every hour) | Edition (community / pro / trial), Hosting (container), RuntimeIdentity (managed identity / certificate), LicenceState | Both |
 | Run report (per job, per cycle) | Job name, Outcome, DurationMs, ErrorClass, run count | Both |
 | Guard record | GuardId, GuardOutcome, Severity, Area, Job, measured and threshold numbers, HeldCount, TripCount, FirstSeenUtc | Both |
 | Anonymous mode adds | InstallId (random, stored in settings); counts bucketed | Anonymous |

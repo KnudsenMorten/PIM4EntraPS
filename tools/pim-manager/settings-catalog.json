@@ -276,8 +276,8 @@
       "confirmOn": true,
       "confirmOff": false,
       "info": {
-        "what": "Runs the uplink job every hour. It reports to Invardia which jobs ran and whether they succeeded (one report per job, never one per run), and every 4 hours a heartbeat with version, edition and licence state. Without an install key it is anonymous: no tenant, no server name, no error text, only an error class and rounded counts. With a Pro install key, reports carry the error text with secrets removed.",
-        "enabled": "From the next hourly run, the job reports at most 20 job results per cycle and the heartbeat every 4 hours. A failed send never fails anything else and is retried on the next cycle.",
+        "what": "Runs the uplink job every hour. It reports to Invardia which jobs ran and whether they succeeded (one report per job, never one per run), and every hour a heartbeat with version, edition and licence state. Without an install key it is anonymous: no tenant, no server name, no error text, only an error class and rounded counts. With a Pro install key, reports carry the error text with secrets removed.",
+        "enabled": "From the next hourly run, the job reports at most 20 job results per cycle and the heartbeat every hour. A failed send never fails anything else and is retried on the next cycle.",
         "disabled": "Nothing is sent. If it was on before, one opt-out notice is sent once, then nothing more.",
         "risk": "When on, it sends status data out of your environment to invardia.com. With a Pro install key that includes shortened, redacted error messages. Reversible: switch it off and the next run sends only the one-time opt-out notice.",
         "requires": "Free (Community) and Pro. SuperAdmin to change it. 'Scheduled jobs' must be on. Outbound HTTPS to Invardia's uplink.",
