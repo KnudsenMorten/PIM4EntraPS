@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.605 -- 2026-10-12
+
+- The heartbeat says which guards hold something right now and a cleared guard is reported, so the status at Invardia follows the installation; with everything since 2.4.600: the policy page shows the recommendation, External companies saves from the row, the New admin wizard asks where the mail goes, Delegation overview and Access map scroll, Discovery and gaps is one page under Access, and the menu shows a number only for an error or a blocking approval
+
 ## 2.4.604 -- 2026-10-12
 
 - Discovery and Coverage are one page, Discovery and gaps, under Access, with Ignore and Bring back for each gap and a plain block for a workload that was not read; the menu shows a number only for an error or a blocking approval; the Microsoft default can be chosen for group policies as well as Entra roles

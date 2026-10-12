@@ -27,6 +27,10 @@
     * skipped / unimplemented / running runs are not reported (nothing ran), and the uplink job never reports itself.
     * setup (PIM 100.10, framework 8.7): identified only, feature 'telemetry.setup', daily + on every change -- the control
       list, permission counts (+ Get Started steps / findings with PIM_UPLINK_SETUP_EXTENDED=1). PIM-UplinkSetup.ps1.
+    * guards (PIM 100.102): the IDENTIFIED heartbeat carries ActiveGuards -- what the guards hold right now ([] = nothing;
+      left out when the state could not be read) -- and a guard that was reported and is no longer held gets ONE Kind
+      'guard' record with GuardOutcome 'cleared' (ClearedUtc, ClearedBy only where the stored state proves it).
+      The set of reported guards is UplinkState.guardsReported.
     * every record carries Ring: PIM_UPDATE_RING, else the ring recorded in pim.Settings['UpdateState'] (Resolve-PimUplinkRing).
   🔒 Gated by the feature 'telemetry.uplink', which is ON by default (defaultEnabled=$true in PIM-FeatureCatalog.ps1;
      owner decision 2026-10-04, framework UPDATE-1.4) and depends on 'scheduler.jobs'. Switching it off sends ONE opt-out.
@@ -367,6 +371,301 @@ function Get-PimUplinkEndpoints {
     return @(New-PimUplinkEndpoints -ManagerUrl $mgr -RfaPortalUrl $portal -ApiEnabled $api -McpEnabled $mcp)
 }
 
+# PIM 100.102 GUARD TELEMETRY: CLEARED + ACTIVE NOW (owner 2026-10-12, looking at Invardia's health view of a customer hours
+# after the guard was cleared: "status in invardia is not updated correctly ... i cannot trust the data ... it must be
+# telemetry based"). PIM only ever said that a guard TRIPPED. Invardia's contract (same endpoint, Schema 2, both optional):
+#   1. the IDENTIFIED heartbeat carries ActiveGuards [ { id; outcome; severity; sinceUtc? } ] -- what is held RIGHT NOW. The
+#      list IS the state at Invardia ([] = nothing is held; the field left out = nothing changes). A malformed list (an
+#      unknown outcome / severity, a duplicate id, more than 50 items) makes Invardia refuse the WHOLE heartbeat with 422, so
+#      New-PimUplinkActiveGuards makes that impossible: unique ids, values from the closed lists only, at most 50.
+#   2. a guard that was reported and is no longer held gets ONE Kind 'guard' record with GuardOutcome 'cleared'
+#      (New-PimUplinkGuardClearedRecord), ClearedUtc = now and ClearedBy only where the stored state proves it.
+# READ-ONLY: nothing here changes what a guard does, or when a hold is recorded or cleared.
+# The state is the install's own: pim.Settings 'GuardHolds' { holds: [...] } (PIM-GuardRelease.ps1) and the policy change sets
+# held for approval, pim.Settings '<prefix>MassHold' (PIM-EngineProviders.ps1). The setting names are literals here (this file
+# stands alone; Test-PimUplink pins them to the engine's own specs).
+$script:PimUplinkMaxActiveGuards = 50
+
+function Get-PimUplinkGuardId {
+    <# PURE. A guard id as sent: lower-case, ^[a-z0-9][a-z0-9.-]{0,99}$ -- or '' (never sent). #>
+    param([AllowNull()][object]$Value)
+    $id = "$Value".Trim().ToLowerInvariant()
+    if ($id -cnotmatch '^[a-z0-9][a-z0-9.-]{0,99}$') { return '' }
+    return $id
+}
+
+function ConvertTo-PimUplinkUtc {
+    <# PURE. A stored time (ISO text, or the DateTime PowerShell 7's ConvertFrom-Json makes of it) as a UTC [datetime], or $null. #>
+    param([AllowNull()][object]$Value)
+    try {
+        if ($null -eq $Value) { return $null }
+        if ($Value -is [datetime]) { if ($Value.Kind -eq [DateTimeKind]::Unspecified) { return [datetime]::SpecifyKind($Value, [DateTimeKind]::Utc) }; return $Value.ToUniversalTime() }
+        if ($Value -is [datetimeoffset]) { return $Value.UtcDateTime }
+        $s = "$Value".Trim(); if (-not $s) { return $null }
+        return [datetimeoffset]::Parse($s, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime
+    } catch { return $null }
+}
+
+function ConvertTo-PimUplinkGuardOutcome {
+    <#
+      PURE. Invardia's closed list: halted | refused | held | skipped | warning. A value from the list is kept; anything else
+      is mapped to the nearest one (a word that starts like one of them), else -Default (a hold = 'held'). Never sent raw.
+    #>
+    param([AllowNull()][object]$Value, [string]$Default = 'held')
+    $v = "$Value".Trim().ToLowerInvariant()
+    if ($v -in @('halted', 'refused', 'held', 'skipped', 'warning')) { return $v }
+    if ($v -match '^(halt|stop|abort|block)') { return 'halted' }
+    if ($v -match '^(refus|den|reject)') { return 'refused' }
+    if ($v -match '^(hold|pend|wait)') { return 'held' }
+    if ($v -match '^skip') { return 'skipped' }
+    if ($v -match '^warn') { return 'warning' }
+    $d = "$Default".Trim().ToLowerInvariant()
+    if ($d -in @('halted', 'refused', 'held', 'skipped', 'warning')) { return $d }
+    return 'held'
+}
+
+function ConvertTo-PimUplinkGuardSeverity {
+    <#
+      PURE. Invardia's closed list: critical | warning. A value from the list is kept; a word that means one of them is
+      mapped; anything else follows the outcome exactly like a trip record does (halted / refused = critical, else warning).
+    #>
+    param([AllowNull()][object]$Value, [string]$Outcome = 'held')
+    $v = "$Value".Trim().ToLowerInvariant()
+    if ($v -in @('critical', 'warning')) { return $v }
+    if ($v -match '^(crit|fatal|error|high)') { return 'critical' }
+    if ($v -match '^(warn|info|low|medium|notice)') { return 'warning' }
+    if ("$Outcome".Trim().ToLowerInvariant() -in @('halted', 'refused')) { return 'critical' }
+    return 'warning'
+}
+
+function ConvertTo-PimUplinkGuardTripMap {
+    <# PURE. pim.Settings 'GuardTrips' (an object, a dictionary or JSON text) as a hashtable guard id -> its trip entry. #>
+    param([AllowNull()][object]$Trips)
+    $m = @{}
+    if ($null -eq $Trips) { return $m }
+    $src = $Trips
+    if ($src -is [string]) { try { $src = $src | ConvertFrom-Json } catch { return $m } }
+    if ($null -eq $src) { return $m }
+    $items = if ($src -is [System.Collections.IDictionary]) { @($src.Values) } else { @($src.PSObject.Properties | ForEach-Object { $_.Value }) }
+    foreach ($e in $items) {
+        if ($null -eq $e) { continue }
+        $id = Get-PimUplinkGuardId (Get-PimUplinkField $e 'guardId')
+        if ($id) { $m[$id] = $e }
+    }
+    return $m
+}
+
+function New-PimUplinkActiveGuards {
+    <#
+      PURE. PIM 100.102. The heartbeat's ActiveGuards from the install's own state:
+        -Holds      the entries of pim.Settings 'GuardHolds' (guardId, scope, firstSeenUtc, ...). ONE item per GUARD ID: a guard
+                    holding in several scopes is one item, its sinceUtc the EARLIEST first-seen of its holds.
+        -MassHolds  the policy change sets held for approval: @{ provider; heldUtc } per '<prefix>MassHold' record that is set.
+                    id = 'engine.policy-mass-change.<provider>' -- the catalog's guard id (Get-PimGuardReleaseCatalog) plus the
+                    provider, which is exactly the GuardId of that hold's trip record, so Invardia sees ONE guard, not two.
+        -Trips      pim.Settings 'GuardTrips': the guard's own trip gives outcome + severity; without one a hold is
+                    'held' / 'warning'. Every value goes through the closed lists (ConvertTo-PimUplinkGuardOutcome / -Severity).
+      An id that does not fit ^[a-z0-9][a-z0-9.-]{0,99}$ and the ids that are no longer guards (PIM 100.72) are left out.
+      Unique by id, at most -Max (50): if ever more, the 50 with the earliest sinceUtc and ONE warning.
+      Returns an array of [pscustomobject] { id; outcome; severity; sinceUtc? } (empty = nothing is held). An internal error
+      THROWS (after one warning): the cycle then treats the state as unknown and sends NO ActiveGuards -- never a wrong list.
+    #>
+    param([AllowNull()][object[]]$Holds = @(), [AllowNull()][object[]]$MassHolds = @(), [AllowNull()][object]$Trips = $null, [int]$Max = 50)
+    $out = New-Object System.Collections.Generic.List[object]
+    if ($Max -le 0 -or $Max -gt 50) { $Max = 50 }   # literal ceiling: Invardia refuses the whole heartbeat above 50
+    try {
+        $notGuards = @('manager.commit.delta-guard', 'manager.commit.uplink-readonly', 'manager.commit.replication-gate', 'engine.ledger-unreadable', 'msp.licence')
+        $tripBy = ConvertTo-PimUplinkGuardTripMap $Trips
+        $by = @{}   # id -> ticks of the earliest first-seen (-1 = unknown)
+        $add = {
+            param($id, $when)
+            if (-not $id -or $id -in $notGuards) { return }
+            $t = [long]-1; if ($null -ne $when) { $t = [long]$when.Ticks }
+            if (-not $by.ContainsKey($id)) { $by[$id] = $t; return }
+            $cur = [long]$by[$id]
+            if ($t -ge 0 -and ($cur -lt 0 -or $t -lt $cur)) { $by[$id] = $t }
+        }
+        foreach ($h in @($Holds)) {
+            if ($null -eq $h) { continue }
+            & $add (Get-PimUplinkGuardId (Get-PimUplinkField $h 'guardId')) (ConvertTo-PimUplinkUtc (Get-PimUplinkField $h 'firstSeenUtc'))
+        }
+        foreach ($m in @($MassHolds)) {
+            if ($null -eq $m) { continue }
+            $prov = ("$(Get-PimUplinkField $m 'provider')".Trim().ToLowerInvariant() -replace '[^a-z0-9-]', '')
+            if (-not $prov) { continue }
+            & $add (Get-PimUplinkGuardId "engine.policy-mass-change.$prov") (ConvertTo-PimUplinkUtc (Get-PimUplinkField $m 'heldUtc'))
+        }
+        $rows = New-Object System.Collections.Generic.List[object]
+        foreach ($id in @($by.Keys)) {
+            $t = [long]$by[$id]
+            $rows.Add([pscustomobject]@{ id = "$id"; ticks = $t; sort = $(if ($t -ge 0) { $t } else { [long]::MaxValue }) })
+        }
+        $sorted = @($rows.ToArray() | Sort-Object @{ Expression = { $_.sort } }, @{ Expression = { $_.id } })
+        if ($sorted.Count -gt $Max) {
+            Write-Warning ("[uplink] {0} guards hold right now -- the heartbeat lists the {1} held longest (Invardia accepts at most {1})." -f $sorted.Count, $Max)
+        }
+        $seen = @{}
+        foreach ($r in $sorted) {
+            if ($out.Count -ge $Max) { break }
+            if ($seen.ContainsKey($r.id)) { continue }
+            $seen[$r.id] = $true
+            $trip = $null; if ($tripBy.ContainsKey($r.id)) { $trip = $tripBy[$r.id] }
+            $oc = ConvertTo-PimUplinkGuardOutcome -Value (Get-PimUplinkField $trip 'outcome') -Default 'held'
+            $sv = ConvertTo-PimUplinkGuardSeverity -Value (Get-PimUplinkField $trip 'severity') -Outcome $oc
+            $o = [ordered]@{ id = $r.id; outcome = $oc; severity = $sv }
+            if ($r.ticks -ge 0) { $o['sinceUtc'] = ([datetime]::new([long]$r.ticks, [DateTimeKind]::Utc)).ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture) }
+            $out.Add([pscustomobject]$o)
+        }
+    } catch { Write-Warning "[uplink] the active guards could not be listed: $($_.Exception.Message)"; throw }
+    # Unrolled on purpose (like Select-PimUplinkEndpoints): every caller wraps the call in @().
+    return $out.ToArray()
+}
+
+function Read-PimUplinkSettingObject {
+    <#
+      PURE. A pim.Settings value as an object: @{ ok; value }. A value comes back parsed, as JSON text, or as JSON text
+      inside a JSON string (a record written with Set-PimSetting -Value <json text>); '' / $null = nothing stored (ok, $null).
+      ok = $false when it is text that does not parse -- the caller then does NOT know the state.
+    #>
+    param([AllowNull()][object]$Value)
+    $v = $Value
+    for ($i = 0; $i -lt 2; $i++) {
+        if ($v -isnot [string]) { break }
+        $s = $v.Trim()
+        if (-not $s) { return @{ ok = $true; value = $null } }
+        try { $v = $s | ConvertFrom-Json -ErrorAction Stop } catch { return @{ ok = $false; value = $null } }
+    }
+    if ($v -is [string]) { if (-not $v.Trim()) { return @{ ok = $true; value = $null } }; return @{ ok = $false; value = $null } }
+    return @{ ok = $true; value = $v }
+}
+
+function Get-PimUplinkGuardState {
+    <#
+      PIM 100.102. What the guards hold right now, read through -GetSetting { param($Name) } (pim.Settings). READ-ONLY.
+      Returns @{ known; holds; massHolds; trips; releases; error }:
+        known      $false when 'GuardHolds', a '<prefix>MassHold' record or 'GuardTrips' could not be read (the store threw) or
+                   a hold record is text that does not parse. The heartbeat then carries NO ActiveGuards and no guard is
+                   reported cleared: "I do not know" must never be sent as "nothing is held".
+        holds      the 'GuardHolds' entries      massHolds  @{ provider; heldUtc } per policy hold record that is set
+        trips      'GuardTrips' as stored        releases   the 'GuardReleases' entries, or $null when they could not be read
+      Never throws.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$GetSetting)
+    $st = @{ known = $false; holds = @(); massHolds = @(); trips = $null; releases = $null; error = '' }
+    try {
+        $h = Read-PimUplinkSettingObject (& $GetSetting 'GuardHolds')
+        if (-not $h.ok) { $st.error = "pim.Settings 'GuardHolds' is not readable"; return $st }
+        $holds = New-Object System.Collections.Generic.List[object]
+        foreach ($x in @(Get-PimUplinkField $h.value 'holds')) { if ($null -ne $x) { $holds.Add($x) } }
+        $mass = New-Object System.Collections.Generic.List[object]
+        # LITERALS (child-scope safe): the three policy breaker providers and their hold record (PIM-EngineProviders.ps1).
+        $records = [ordered]@{ 'groupspolicies' = 'GroupsPolicyMassHold'; 'entrarolepolicies' = 'EntraRolePolicyMassHold'; 'azrespolicies' = 'AzResPolicyMassHold' }
+        foreach ($prov in @($records.Keys)) {
+            $m = Read-PimUplinkSettingObject (& $GetSetting $records[$prov])
+            if (-not $m.ok) { $st.error = "pim.Settings '$($records[$prov])' is not readable"; return $st }
+            if ($null -ne $m.value -and "$(Get-PimUplinkField $m.value 'planHash')".Trim()) {
+                $mass.Add([pscustomobject]@{ provider = "$prov"; heldUtc = (Get-PimUplinkField $m.value 'heldUtc') })
+            }
+        }
+        $st.trips = & $GetSetting 'GuardTrips'
+        $st.holds = $holds.ToArray(); $st.massHolds = $mass.ToArray(); $st.known = $true
+    } catch { $st.known = $false; $st.error = "the guard state could not be read: $($_.Exception.Message)"; return $st }
+    try {
+        $r = Read-PimUplinkSettingObject (& $GetSetting 'GuardReleases')
+        if ($r.ok) {
+            $rl = New-Object System.Collections.Generic.List[object]
+            foreach ($x in @(Get-PimUplinkField $r.value 'releases')) { if ($null -ne $x) { $rl.Add($x) } }
+            $st.releases = $rl.ToArray()
+        }
+    } catch { $st.releases = $null }
+    return $st
+}
+
+function ConvertTo-PimUplinkGuardReported {
+    <#
+      PURE. UplinkState.guardsReported (an object or a dictionary: guard id -> { sinceUtc; hold }) as a hashtable
+      id -> @{ sinceUtc (ISO text or ''); hold (bool) }. The set of guards last reported to Invardia as tripped / active.
+    #>
+    param([AllowNull()][object]$Value)
+    $m = @{}
+    if ($null -eq $Value) { return $m }
+    $names = if ($Value -is [System.Collections.IDictionary]) { @($Value.Keys) } else { @($Value.PSObject.Properties | ForEach-Object { $_.Name }) }
+    foreach ($n in $names) {
+        $id = Get-PimUplinkGuardId $n
+        if (-not $id) { continue }
+        $v = Get-PimUplinkField $Value "$n"
+        $u = ConvertTo-PimUplinkUtc (Get-PimUplinkField $v 'sinceUtc')
+        $hold = $false; try { $hold = [bool](Get-PimUplinkField $v 'hold') } catch { $hold = $false }
+        $m[$id] = @{ sinceUtc = $(if ($u) { $u.ToString('o') } else { '' }); hold = $hold }
+    }
+    return $m
+}
+
+function Get-PimUplinkGuardClearedBy {
+    <#
+      PURE. PIM 100.102. How a reported guard got clear -- ONLY what the stored state proves; '' = not provable (the record
+      then carries no ClearedBy, which Invardia allows):
+        'released'  a guard release of THIS guard was CONSUMED (pim.Settings 'GuardReleases', status consumed) at or after
+                    -SinceUtc (the guard's last trip, else when it was first reported).
+        'passed'    -WasHold (this install saw the guard in 'GuardHolds') and no release of it was used: the engine removes a
+                    hold in exactly two ways -- a release, or the same guard running on a writing run and allowing it.
+        ''          the releases could not be read; an "until" release of the guard was used (it has no consumed time);
+                    a consumed release that cannot be placed in time; the trip is older than 6 days (ended releases are kept
+                    7 days, so "no release" is no longer provable); a guard that never had a 'GuardHolds' entry (a policy
+                    change set held for approval, a refusal at one moment).
+      'undone' is NEVER sent: a plan that was withdrawn and a plan that shrank inside the limit leave the same state.
+    #>
+    param([string]$GuardId = '', [bool]$WasHold = $false, [AllowNull()][object[]]$Releases = $null, [bool]$ReleasesKnown = $false,
+          [AllowNull()][object]$SinceUtc = $null, [datetime]$NowUtc = [datetime]::UtcNow)
+    try {
+        $id = Get-PimUplinkGuardId $GuardId
+        if (-not $id -or -not $ReleasesKnown) { return '' }
+        $since = ConvertTo-PimUplinkUtc $SinceUtc
+        $mine = @(@($Releases) | Where-Object { $null -ne $_ -and (Get-PimUplinkGuardId (Get-PimUplinkField $_ 'guardId')) -eq $id })
+        $ambiguous = $false
+        foreach ($r in $mine) {
+            $status = "$(Get-PimUplinkField $r 'status')".Trim().ToLowerInvariant()
+            if ($status -eq 'consumed') {
+                $c = ConvertTo-PimUplinkUtc (Get-PimUplinkField $r 'consumedUtc')
+                if ($null -ne $since -and $null -ne $c -and $c -ge $since) { return 'released' }
+                if ($null -eq $since -or $null -eq $c) { $ambiguous = $true }
+                continue
+            }
+            $used = 0; [void][int]::TryParse("$(Get-PimUplinkField $r 'usedCount')", [ref]$used)
+            if ($used -gt 0) { $ambiguous = $true }
+        }
+        if ($ambiguous -or -not $WasHold) { return '' }
+        if ($null -eq $since -or ($NowUtc.ToUniversalTime() - $since).TotalDays -gt 6) { return '' }
+        return 'passed'
+    } catch { return '' }
+}
+
+function New-PimUplinkGuardClearedRecord {
+    <#
+      PURE. PIM 100.102. The record that says a guard is CLEAR again: Schema 2, Kind 'guard', Product, GuardId,
+      GuardOutcome 'cleared', ClearedUtc (this install's own time), ClearedBy only when it is released | undone | passed
+      (anything else is left out -- Invardia would drop it), Job as on the trip record, and the identity exactly like a trip
+      record (the claimed tenant when identified, else the install id). No Severity. $null for an id that cannot be sent.
+    #>
+    param([Parameter(Mandatory)][string]$GuardId, [ValidateSet('anonymous', 'identified')][string]$Mode = 'anonymous',
+          [string]$Product = 'pim-manager', [string]$Version = '', [AllowNull()][object]$Ring, [string]$InstallId = '', [string]$TenantId = '',
+          [string]$ClearedBy = '', [string]$Job = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    $gid = Get-PimUplinkGuardId $GuardId
+    if (-not $gid) { return $null }
+    $o = [ordered]@{ Schema = 2; Kind = 'guard'; Product = $Product }
+    $ver = "$Version".Trim(); if ($ver -match '^[0-9A-Za-z.+-]{1,50}$') { $o['Version'] = $ver }
+    $rp = 0; if ($null -ne $Ring -and "$Ring" -ne '' -and [int]::TryParse("$Ring", [ref]$rp) -and $rp -ge 0 -and $rp -le 10) { $o['Ring'] = $rp }
+    $o['GuardId'] = $gid; $o['GuardOutcome'] = 'cleared'
+    $cb = "$ClearedBy".Trim().ToLowerInvariant()
+    if ($cb -in @('released', 'undone', 'passed')) { $o['ClearedBy'] = $cb }
+    $ts = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
+    $o['ClearedUtc'] = $ts
+    $j = ("$Job".Trim().ToLowerInvariant() -replace '[^a-z0-9.-]', '-') -replace '^[^a-z0-9]+', ''; if ($j.Length -gt 60) { $j = $j.Substring(0, 60) }; if ($j) { $o['Job'] = $j }
+    if ($Mode -eq 'identified') { if ("$TenantId".Trim()) { $o['ClaimedTenantId'] = "$TenantId".Trim() } } else { $o['InstallId'] = "$InstallId" }
+    $o['LastSeenUtc'] = $ts
+    return [pscustomobject]$o
+}
+
 function Send-PimUplinkRecord {
     <#
       §100.39 (framework §12.6b): the framework's Send-AitUplink, WITH the response body. Send-AitUplink throws the body away
@@ -475,6 +774,31 @@ function Invoke-PimUplinkCycle {
         try { $eps = @(Select-PimUplinkEndpoints -Endpoints @($Endpoints)) } catch { $eps = @() }
         $mgrBase = "$(@($eps | Where-Object { $_.kind -eq 'manager' } | Select-Object -First 1).url)"
     }
+    # PIM 100.102: what the guards hold RIGHT NOW (read-only). $guardsKnown = $false (the store threw / a hold record does not
+    # parse) = "I do not know": no ActiveGuards on the heartbeat and no guard is reported cleared this cycle.
+    $gState = Get-PimUplinkGuardState -GetSetting $GetSetting
+    $guardsKnown = [bool]$gState.known
+    $activeNow = @(); $activeIds = @{}; $holdIds = @{}; $tripBy = @{}
+    if ($guardsKnown) {
+        try {
+            $activeNow = @(New-PimUplinkActiveGuards -Holds $gState.holds -MassHolds $gState.massHolds -Trips $gState.trips)
+            foreach ($a in $activeNow) { $activeIds["$($a.id)"] = $true }
+            foreach ($h in @($gState.holds)) { $hid = Get-PimUplinkGuardId (Get-PimUplinkField $h 'guardId'); if ($hid) { $holdIds[$hid] = $true } }
+            $tripBy = ConvertTo-PimUplinkGuardTripMap $gState.trips
+        } catch { $guardsKnown = $false; $activeNow = @(); $activeIds = @{}; $holdIds = @{}; $tripBy = @{} }
+    }
+    # The guards last reported to Invardia as tripped / active: UplinkState.guardsReported { <guard id>: { sinceUtc; hold } }.
+    # A state written before 100.102 has none: it starts from every guard whose trip record was sent (GuardTrips lastSentUtc),
+    # so a guard that is long clear here and still open at Invardia gets its 'cleared' record on the first cycle.
+    $hadReported = [bool]($state -and $state.PSObject.Properties['guardsReported'])
+    $reported = @{}
+    if ($hadReported) { $reported = ConvertTo-PimUplinkGuardReported $state.guardsReported }
+    elseif ($guardsKnown) {
+        foreach ($tid0 in @($tripBy.Keys)) {
+            $ls = ConvertTo-PimUplinkUtc (Get-PimUplinkField $tripBy[$tid0] 'lastSentUtc')
+            if ($ls) { $reported["$tid0"] = @{ sinceUtc = $ls.ToString('o'); hold = $false } }
+        }
+    }
     $common = @{ Mode = $sender.Mode; Product = $script:PimUplinkProduct; Version = $Version; Ring = $Ring; InstallId = $iid; TenantId = $TenantId; Now = $NowUtc }
     $sent = 0; $failed = 0; $why = @(); $supNote = ''; $hbSent = $false; $stopped = $false; $budget = [Math]::Max(1, $MaxPerCycle)
     $post = { param($rec) if ($sent -gt 0 -and $PauseMs -gt 0) { Start-Sleep -Milliseconds $PauseMs }; & $Send $rec $sender.Endpoint $sender.AccessCode }
@@ -512,8 +836,37 @@ function Invoke-PimUplinkCycle {
             $hb | Add-Member -NotePropertyName 'LicenceId' -NotePropertyValue $lid -Force
         }
         if ($hb -and $sender.Mode -eq 'identified' -and $eps.Count) { $hb | Add-Member -NotePropertyName 'Endpoints' -NotePropertyValue ([object[]]$eps) -Force }
+        # PIM 100.102: ActiveGuards -- the IDENTIFIED heartbeat (sent with the install key) ALWAYS carries it once the state was
+        # read ([] = nothing is held), and NEVER when it was not read -- under PowerShell 7 (Test-PimUplink reads the JSON text).
+        # DECISION (owner side, 2026-10-12): under Windows PowerShell 5.1 the field is NOT sent. WHY: 5.1's ConvertTo-Json writes
+        # the list as {"value":[..],"Count":n} through the framework sender -- four forms tried on the test VM that day (a
+        # New-Object array + Add-Member, a .NET array + Add-Member, a .NET array as a note property, an ArrayList as a note
+        # property) -- and Invardia refuses the WHOLE heartbeat on a malformed list. WHAT HAPPENS: the heartbeat goes without
+        # the field (the contract: left out = nothing changes) with ONE warning; the 'cleared' records go on both hosts.
+        # Every hosted engine runs PowerShell 7 (containers); 5.1 is the test host and old layouts only.
+        $agOnHb = $false
+        if ($hb -and $sender.Mode -eq 'identified' -and $guardsKnown) {
+            if ($PSVersionTable.PSVersion.Major -lt 6) {
+                Write-Warning '[uplink] ActiveGuards is not sent from this host (Windows PowerShell 5.1 cannot write it as a JSON array) -- the heartbeat goes without it.'
+            } else {
+                $agItems = New-Object System.Collections.ArrayList
+                foreach ($agOne in $activeNow) { [void]$agItems.Add($agOne) }
+                $hb.PSObject.Properties.Add([System.Management.Automation.PSNoteProperty]::new('ActiveGuards', $agItems))
+                # PROVE the text before it leaves (the same serialisation as the send): a JSON array, else the field is left
+                # out (= nothing changes at Invardia; never a bad list).
+                $agText = { param($rec) $t = ''; try { $t = "$($rec | ConvertTo-Json -Depth 6 -Compress)" } catch { $t = '' }; [bool]($t.Contains('"ActiveGuards":[')) }
+                $agOnHb = [bool](& $agText $hb)
+                if (-not $agOnHb) {
+                    $hb.PSObject.Properties.Remove('ActiveGuards')
+                    Write-Warning '[uplink] ActiveGuards could not be written as a JSON array -- the heartbeat goes without it.'
+                }
+            }
+        }
         $r = & $post $hb
         if ("$($r.Status)" -eq 'ok') { $sent++; $hbSent = $true; $lastHb = $NowUtc.ToString('o') } else { $failed++; $stopped = $true; $why += "heartbeat: $($r.Reason)" }
+        if ("$($r.Status)" -eq 'ok' -and $agOnHb) {
+            foreach ($a in $activeNow) { if (-not $reported.ContainsKey("$($a.id)")) { $reported["$($a.id)"] = @{ sinceUtc = $NowUtc.ToString('o'); hold = $false } } }
+        }
         # §100.39: Invardia re-issued the installed licence -> keep its successor's id for the licence-request job. Only a
         # well-formed id is kept; a missing / malformed answer changes nothing; nothing here can fail the cycle.
         if ("$($r.Status)" -eq 'ok') {
@@ -564,25 +917,64 @@ function Invoke-PimUplinkCycle {
     # GUARD-1 (framework, 2026-10-04): every guard whose last trip is newer than its last send goes as a Kind 'guard' record
     # (PIM-Guard.ps1). Invardia opens / updates the support ticket from it. Same budget and stop-at-first-failure as the runs.
     $guardsSent = 0
-    if (-not $stopped -and (Get-Command Select-PimGuardTelemetryDue -ErrorAction SilentlyContinue)) {
+    $dueIds = @{}   # PIM 100.102: guards whose newest trip is not sent yet -- never reported 'cleared' in the same cycle
+    if (Get-Command Select-PimGuardTelemetryDue -ErrorAction SilentlyContinue) {
         $gs = $null; try { $gs = & $GetSetting 'GuardTrips' } catch { $gs = $null }
         if ($gs -is [string]) { try { $gs = $gs | ConvertFrom-Json } catch { $gs = $null } }
-        foreach ($e in @(Select-PimGuardTelemetryDue -State $gs)) {
-            if ($stopped -or $sent -ge $budget) { $left++; continue }
-            $rec = New-PimGuardUplinkRecord -Entry $e -Mode $sender.Mode -Product $script:PimUplinkProduct -Version $Version -Ring $Ring -InstallId $iid -TenantId $TenantId -ManagerUrl $mgrBase
-            if (-not $rec) { continue }
-            $r = & $post $rec
-            if ("$($r.Status)" -eq 'ok') { $sent++; $guardsSent++; $e | Add-Member -NotePropertyName lastSentUtc -NotePropertyValue $NowUtc.ToString('o') -Force }
-            else { $failed++; $stopped = $true; $left++; $why += "guard $($e.guardId): $($r.Reason)" }
+        $dueList = @(); try { $dueList = @(Select-PimGuardTelemetryDue -State $gs) } catch { $dueList = @() }
+        foreach ($e in $dueList) { $did = Get-PimUplinkGuardId (Get-PimUplinkField $e 'guardId'); if ($did) { $dueIds[$did] = $true } }
+        if (-not $stopped) {
+            foreach ($e in $dueList) {
+                if ($stopped -or $sent -ge $budget) { $left++; continue }
+                $rec = New-PimGuardUplinkRecord -Entry $e -Mode $sender.Mode -Product $script:PimUplinkProduct -Version $Version -Ring $Ring -InstallId $iid -TenantId $TenantId -ManagerUrl $mgrBase
+                if (-not $rec) { continue }
+                $r = & $post $rec
+                if ("$($r.Status)" -eq 'ok') {
+                    $sent++; $guardsSent++; $e | Add-Member -NotePropertyName lastSentUtc -NotePropertyValue $NowUtc.ToString('o') -Force
+                    # reported as tripped: it gets its 'cleared' record on a later cycle, once it is no longer held
+                    if (-not $reported.ContainsKey("$($rec.GuardId)")) { $reported["$($rec.GuardId)"] = @{ sinceUtc = $NowUtc.ToString('o'); hold = $false } }
+                }
+                else { $failed++; $stopped = $true; $left++; $why += "guard $($e.guardId): $($r.Reason)" }
+            }
+            if ($guardsSent) { try { & $SetSetting 'GuardTrips' $gs } catch { $why += "guard send marks not saved: $($_.Exception.Message)" } }
         }
-        if ($guardsSent) { try { & $SetSetting 'GuardTrips' $gs } catch { $why += "guard send marks not saved: $($_.Exception.Message)" } }
     }
-    $msg = "$($sender.Mode): $sent sent$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($setupSent) { ' (setup report)' })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })$supNote"
-    & $SetSetting 'UplinkState' ([pscustomobject][ordered]@{ mode = $sender.Mode; lastHeartbeatUtc = $lastHb; runWatermarkUtc = $floor; jobMarks = [pscustomobject]$marks
-                                                             consent = $consent; lastCycleUtc = $NowUtc.ToString('o'); lastResult = $msg
-                                                             # PIM 100.75: read by the end-of-install verify (Confirm-PimInstall 'telemetry')
-                                                             lastFailed = $failed })
-    return @{ ran = $true; mode = $sender.Mode; sent = $sent; failed = $failed; left = $left; heartbeat = $hbSent; setup = $setupSent; message = $msg; reasons = @($why) }
+    # PIM 100.102: ONE 'cleared' record per guard that was reported (tripped / active) and is not held any more. Only when
+    # the state was read. Same budget and stop-at-first-failure as above; a record that did not land keeps its id for the
+    # next cycle (never lost), a record that landed drops it (never sent twice).
+    $clearedSent = 0
+    if ($guardsKnown) {
+        foreach ($hid in @($holdIds.Keys)) { if ($reported.ContainsKey("$hid")) { $reported["$hid"].hold = $true } }
+        foreach ($cid in @($reported.Keys | Sort-Object)) {
+            if ($activeIds.ContainsKey("$cid") -or $dueIds.ContainsKey("$cid")) { continue }
+            if ($stopped -or $sent -ge $budget) { $left++; continue }
+            $trip = $null; if ($tripBy.ContainsKey("$cid")) { $trip = $tripBy["$cid"] }
+            $since = Get-PimUplinkField $trip 'lastSeenUtc'
+            if (-not (ConvertTo-PimUplinkUtc $since)) { $since = $reported["$cid"].sinceUtc }
+            $by = Get-PimUplinkGuardClearedBy -GuardId "$cid" -WasHold ([bool]$reported["$cid"].hold) -Releases $gState.releases -ReleasesKnown ($null -ne $gState.releases) -SinceUtc $since -NowUtc $NowUtc
+            $rec = New-PimUplinkGuardClearedRecord -GuardId "$cid" -Mode $sender.Mode -Product $script:PimUplinkProduct -Version $Version -Ring $Ring -InstallId $iid -TenantId $TenantId `
+                     -ClearedBy $by -Job "$(Get-PimUplinkField $trip 'job')" -NowUtc $NowUtc
+            if (-not $rec) { $reported.Remove("$cid"); continue }
+            $r = & $post $rec
+            if ("$($r.Status)" -eq 'ok') { $sent++; $clearedSent++; $reported.Remove("$cid") }
+            else { $failed++; $stopped = $true; $left++; $why += "guard $cid cleared: $($r.Reason)" }
+        }
+    }
+    $msg = "$($sender.Mode): $sent sent$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($clearedSent) { " ($clearedSent guard(s) reported clear)" })$(if ($setupSent) { ' (setup report)' })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })$supNote"
+    $newState = [ordered]@{ mode = $sender.Mode; lastHeartbeatUtc = $lastHb; runWatermarkUtc = $floor; jobMarks = [pscustomobject]$marks
+                            consent = $consent; lastCycleUtc = $NowUtc.ToString('o'); lastResult = $msg
+                            # PIM 100.75: read by the end-of-install verify (Confirm-PimInstall 'telemetry')
+                            lastFailed = $failed }
+    # PIM 100.102: the reported set. Left out while it was never started AND the state could not be read (so the first
+    # readable cycle still starts it from the sent trip records).
+    if ($hadReported -or $guardsKnown) {
+        $repOut = [ordered]@{}
+        foreach ($rid0 in @($reported.Keys | Sort-Object)) { $repOut["$rid0"] = [pscustomobject][ordered]@{ sinceUtc = "$($reported["$rid0"].sinceUtc)"; hold = [bool]$reported["$rid0"].hold } }
+        $newState['guardsReported'] = [pscustomobject]$repOut
+    }
+    & $SetSetting 'UplinkState' ([pscustomobject]$newState)
+    return @{ ran = $true; mode = $sender.Mode; sent = $sent; failed = $failed; left = $left; heartbeat = $hbSent; setup = $setupSent; message = $msg; reasons = @($why)
+              guardsCleared = $clearedSent; activeGuards = $(if ($guardsKnown) { $activeNow.Count } else { -1 }) }
 }
 
 function Get-PimUplinkDeliveryWarning {
