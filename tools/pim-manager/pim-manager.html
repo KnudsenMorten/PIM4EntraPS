@@ -12735,7 +12735,7 @@
   const COV_SEL = new Set();             // selected unit ids
   const COV_SEEN = new Set();            // unit ids already pre-selected once (a deselection sticks across re-renders)
   const COV_STAGED = new Set();          // unit ids staged in this page session
-  const COV_FILTER = { workload: '', status: '', text: '' };
+  const COV_FILTER = { workload: '', status: 'Gap', text: '' };   // 100.109 (owner 2026-10-12): the page opens on Status = Gap; All is one click away
   const COV_STATUS_STYLE = {
     'Covered': '#1a7f37', 'Gap': '#0969da', 'Orphan group': '#bc4c00', 'Unmanaged binding': '#bc4c00',
     'Wrong permissions': '#cf222e', 'Unmanaged privileged group': '#8250df', 'Not checked': '#9a6700', 'Ignored': '#57606a'
@@ -12886,6 +12886,7 @@
         (canIgnore ? (COV_FILTER.status === 'Ignored'
           ? '<button id="covBringBackAll" title="Every ignored item shown is listed as a gap again. Nothing changes in the tenant.">Bring back all shown</button>'
           : '<button id="covIgnoreSel" title="Take the selected gaps off this list and out of the gap count. Nothing changes in the tenant; Status = Ignored shows them, with Bring back.">Ignore selected</button>') : '') +
+        '<span id="covSelNote" style="color:#57606a;font-size:11.5px;"></span>' +
         '<span id="covStageMsg" style="color:#57606a;font-size:11.5px;"></span>' +
         '<span id="covIgnoreMsg" style="color:#57606a;font-size:11.5px;"></span></div>');
     } else {
@@ -13033,14 +13034,24 @@
       covRenderRows(body, d, canStage);
     });
     const stBtn = document.getElementById('covStage');
-    if (stBtn) { const n = covSelectedVisibleUnits(d).length; stBtn.textContent = 'Stage ' + n + ' selected into Pending changes'; stBtn.disabled = n === 0; }
+    if (stBtn) {
+      // 100.109: both buttons count GAPS (rows). A gap's proposal can hold more than one group + role, so the number of things
+      // created is said next to the buttons, never as the button's number (owner: "why is there a difference").
+      const n = covSelectedVisibleUnits(d).length, g = covSelectedGapRows(d).length;
+      stBtn.textContent = 'Stage ' + g + ' selected gap' + (g === 1 ? '' : 's') + ' into Pending changes'; stBtn.disabled = n === 0;
+      stBtn.title = n + ' group and role proposal' + (n === 1 ? '' : 's') + ' in ' + g + ' gap' + (g === 1 ? '' : 's');
+      const sn = document.getElementById('covSelNote');
+      if (sn) { const gaps = covVisibleRows(d).filter(r => r.status === 'Gap'), noProp = gaps.filter(r => !covUnitsOf(r).length).length;
+        sn.textContent = gaps.length ? (g + ' of ' + gaps.length + ' gap' + (gaps.length === 1 ? '' : 's') + ' shown selected' + (n !== g ? ' (' + n + ' groups and roles to create)' : '') + (noProp ? '; ' + noProp + ' ha' + (noProp === 1 ? 's' : 've') + ' no ready proposal' : '')) : ''; }
+    }
     const igBtn = document.getElementById('covIgnoreSel');
-    if (igBtn) { const n = covSelectedGapKeys(d).length; igBtn.textContent = 'Ignore ' + n + ' selected'; igBtn.disabled = n === 0; }
+    if (igBtn) { const n = covSelectedGapKeys(d).length; igBtn.textContent = 'Ignore ' + n + ' selected gap' + (n === 1 ? '' : 's'); igBtn.disabled = n === 0; }
     const bbBtn = document.getElementById('covBringBackAll');
     if (bbBtn) bbBtn.disabled = !vis.some(r => r.status === 'Ignored' && r.ignoreKey);
   }
 
   // 100.100: the gaps "Ignore selected" acts on -- the rows shown whose proposal is (partly) ticked and not yet staged.
+  function covSelectedGapRows(d) { return covVisibleRows(d).filter(r => r.status === 'Gap' && covUnitsOf(r).some(u => COV_SEL.has(u.id) && !covUnitStaged(u))); }
   function covSelectedGapKeys(d) {
     return covVisibleRows(d).filter(r => r.status === 'Gap' && r.ignoreKey && covUnitsOf(r).some(u => COV_SEL.has(u.id) && !covUnitStaged(u))).map(r => r.ignoreKey);
   }
