@@ -510,7 +510,8 @@ $fix['engine-root-reader'] = ''
 # PIM 100.22 (b): the Manager's Reader on the resource group -- the exact command (the object id is filled in below once read)
 $fix['manager-rg-reader'] = "Azure portal > resource group $ResourceGroup > Access control (IAM) > Add role assignment > Reader > Managed identity > Container App $ManagerApp (object id <Manager managed identity object id>)`n(an Owner or User Access Administrator of the resource group)"
 $fix['easyauth'] = (@("Microsoft Entra admin center > Enterprise applications > the PIM Manager's sign-in application > Users and groups: assign the SuperAdmins (or a group that holds them)", (& $viaResume 'the check')) | Where-Object { $_ }) -join "`n"
-$fix['sql-host-rule'] = "Azure portal > SQL server $sqlServer (resource group $sqlRg) > Networking > Firewall rules: delete 'AllowSetupHost'"
+# REQ 98.4 (b): when the rule is THIS install's own (-CloseSetupHostRule) the resume closes it -- the portal is the second way, not the only one
+$fix['sql-host-rule'] = (@($(if ($SetupHostRuleOwner -eq 'this' -and $CloseSetupHostRule) { & $viaResume 'this' }), "Azure portal > SQL server $sqlServer (resource group $sqlRg) > Networking > Firewall rules: delete 'AllowSetupHost'") | Where-Object { $_ }) -join "`n"
 $fix['msp-registered'] = 'on the managing tenant: Invoke-PimMspBuild.ps1 -Role Master -ConfigPath <its config> -Apply -From register-<n> (with an enrollment key this happens by itself)'
 $fix['msp-subnet'] = "on the managing tenant: add this tenant's pull subnet id as slaves[<n>].subnetResourceId, then Invoke-PimMspBuild.ps1 -Role Master -ConfigPath <its config> -Apply -From network-<n> (with an enrollment key this happens by itself)"
 $fix['msp-first-pull'] = "Azure portal > Container Apps job $DownlinkJobName > Run now (after the managing tenant allows the subnet; it also retries every 5 minutes by itself)"

@@ -297,6 +297,9 @@ if (Test-Path -LiteralPath $_setupLib) { . $_setupLib }
 . (Join-Path $solutionRoot 'engine\_shared\PIM-CommitWatch.ps1')
 # 100.67 EXPORT: every view to Excel (.xlsx, .NET packaging) or PDF (the bundled MigraDoc of 100.61) -- POST /api/export.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-TableExport.ps1')
+# 100.91 GET SUPPORT: a support ticket at Invardia, opened by the SERVER with the install key (never handed to the page) --
+# GET /api/support/ticket, POST /api/support/ticket/draft, POST /api/support/ticket, GET /api/support/tickets.
+. (Join-Path $solutionRoot 'engine\_shared\PIM-SupportTicket.ps1')
 # 100.68 SHOWCASE: the impact counters (GET /api/impact) and the demo dataset of the flagged demo environment (pimdemo schema;
 # never loaded by the engine or the scheduler -- the engine cannot read demo data, PIM-SqlStore refuses it outside this module).
 . (Join-Path $solutionRoot 'engine\_shared\PIM-ImpactCounters.ps1')
@@ -19771,6 +19774,41 @@ function Handle-Request {
                 return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the environment report could not be built: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+
+        # -------------------------------------------------------------------
+        # 100.91 GET SUPPORT -- a support ticket at Invardia (engine/_shared/PIM-SupportTicket.ps1, Invoke-PimSupportApi).
+        #   GET  /api/support/ticket        -> is there a ticket path here (an install key), and may this role use it
+        #   POST /api/support/ticket/draft  -> the pre-filled, already redacted draft for where the person is stuck
+        #   POST /api/support/ticket        -> send what the person edited; answers the ticket number and the links
+        #   GET  /api/support/tickets       -> this environment's tickets
+        # ADMIN / SUPERADMIN ONLY for everything but the first. The call to Invardia is made HERE with the install key;
+        # the key is in no answer of these routes. No install key = the public support page instead.
+        # -------------------------------------------------------------------
+        if (($path -eq '/api/support/ticket' -and $method -eq 'GET') -or ($path -eq '/api/support/ticket' -and $method -eq 'POST') -or ($path -eq '/api/support/ticket/draft' -and $method -eq 'POST') -or ($path -eq '/api/support/tickets' -and $method -eq 'GET')) {
+            $script:lastHeartbeat = Get-Date
+            try {
+                $stAction = if ($path -eq '/api/support/ticket/draft') { 'draft' } elseif ($path -eq '/api/support/tickets') { 'list' } elseif ($method -eq 'POST') { 'create' } else { 'status' }
+                $stBody = $null; if ($method -eq 'POST') { $stBody = Read-RequestJson -Request $req }
+                $stRing = $null
+                if (Get-Command Resolve-PimUplinkRing -ErrorAction SilentlyContinue) {
+                    $stUpd = $null; try { $stUpd = Get-PimManagerSetting -Name 'UpdateState' } catch { $stUpd = $null }
+                    $stRing = Resolve-PimUplinkRing -EnvRing "$env:PIM_UPDATE_RING" -UpdateState $stUpd
+                }
+                $stWho = ''; try { $stWho = "$((Get-PimManagerRole).identity)" } catch { $stWho = '' }
+                $st = Invoke-PimSupportApi -Action $stAction -IsAdmin ([bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')) -Body $stBody `
+                        -GetSetting { param($n) Get-PimManagerSetting -Name $n } `
+                        -Http { param($u, $h, $j) Invoke-PimSupportHttp -Url $u -Headers $h -BodyJson $j } `
+                        -GetRunLog { param($id) if (Get-Command Get-PimJobRunLog -ErrorAction SilentlyContinue) { Get-PimJobRunLog -RunId $id } } `
+                        -Version "$(Get-PimSolutionVersion)" -Ring $stRing -UserName $stWho
+                if ($st.audit) { try { Write-PimManagerAuditEvent -Action 'support.ticket.create' -Target "$($st.audit.ticketNumber)" -Result 'ok' -After $st.audit } catch { Write-Verbose "audit: $($_.Exception.Message)" } }
+                Write-JsonResponse -Response $resp -Status ([int]$st.status) -Body $st.body
+                return ([int]$st.status)
+            } catch {
+                # a plain message, never the page broken -- and never a detail that could carry a header
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = 'The support request could not be handled. Try again, or use the support page.' }
                 return 500
             }
         }

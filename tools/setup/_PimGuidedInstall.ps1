@@ -35,6 +35,7 @@ function Get-PimInstallStepCatalog { return [ordered]@{
     'preflight-providers'  = 'Azure resource providers'
     'preflight-names'      = 'Resource names'
     'preflight-sql-region' = 'Azure services in the chosen region'
+    'preflight-admins'     = 'PIM Manager administrators'
     'enroll'               = 'Link to your Invardia account'
     'prereq'             = 'Network, registry, identity and database'
     'image'                = 'Container image'
@@ -405,18 +406,109 @@ function Get-PimInstallRightsVerdict {
 }
 
 function Read-PimInstallState {
-    <# The state file (state.json in -StatePath): @{ installId; completed[]; updatedUtc }. Missing or unreadable = empty. #>
+    <#
+      The state file (state.json in -StatePath): @{ installId; completed[]; updatedUtc; licencePath; setupHostRule }.
+      Missing or unreadable = empty. REQ 98.4 (a) + (b): licencePath (the PATH of the licence file the install was given --
+      never its content) and setupHostRule (@{ name; server; resourceGroup; subscriptionId; openedUtc }: the SQL firewall
+      rule THIS install opened) are optional -- a state file written before them reads as '' / $null and still resumes.
+    #>
     param([Parameter(Mandatory)][string]$StatePath)
     $f = Join-Path $StatePath 'state.json'
-    if (Test-Path -LiteralPath $f) { try { $s = Get-Content -Raw -LiteralPath $f | ConvertFrom-Json; return [pscustomobject]@{ installId = "$($s.installId)"; completed = @($s.completed | Where-Object { $_ }); updatedUtc = "$($s.updatedUtc)" } } catch { } }
-    return [pscustomobject]@{ installId = ''; completed = @(); updatedUtc = '' }
+    if (Test-Path -LiteralPath $f) {
+        try {
+            $s = Get-Content -Raw -LiteralPath $f | ConvertFrom-Json
+            $hr = $null
+            if ($s.PSObject.Properties['setupHostRule'] -and $s.setupHostRule) {
+                # PowerShell 7 reads an ISO time as a DateTime: written back as the same round-trip text
+                $at = $s.setupHostRule.openedUtc; $at = if ($at -is [datetime]) { $at.ToUniversalTime().ToString('o') } else { "$at" }
+                $hr = [ordered]@{ name = "$($s.setupHostRule.name)"; server = "$($s.setupHostRule.server)"; resourceGroup = "$($s.setupHostRule.resourceGroup)"
+                                  subscriptionId = "$($s.setupHostRule.subscriptionId)"; openedUtc = $at }
+            }
+            return [pscustomobject]@{ installId = "$($s.installId)"; completed = @($s.completed | Where-Object { $_ }); updatedUtc = "$($s.updatedUtc)"
+                                      licencePath = "$($s.licencePath)".Trim(); setupHostRule = $hr }
+        } catch { }
+    }
+    return [pscustomobject]@{ installId = ''; completed = @(); updatedUtc = ''; licencePath = ''; setupHostRule = $null }
 }
 
 function Save-PimInstallState {
-    param([Parameter(Mandatory)][string]$StatePath, [Parameter(Mandatory)][string]$InstallId, [string[]]$Completed = @())
+    # -LicencePath: a PATH only. Never the licence text, a key or a token -- nothing secret is written to this file.
+    param([Parameter(Mandatory)][string]$StatePath, [Parameter(Mandatory)][string]$InstallId, [string[]]$Completed = @(),
+          [string]$LicencePath = '', [System.Collections.IDictionary]$SetupHostRule)
     if (-not (Test-Path -LiteralPath $StatePath)) { New-Item -ItemType Directory -Force -Path $StatePath | Out-Null }
     $doc = [ordered]@{ schema = 1; installId = $InstallId; completed = @($Completed | Select-Object -Unique); updatedUtc = [datetime]::UtcNow.ToString('o') }
+    if ("$LicencePath".Trim()) { $doc['licencePath'] = "$LicencePath".Trim() }
+    if ($SetupHostRule) {
+        $doc['setupHostRule'] = [ordered]@{ name = "$($SetupHostRule['name'])"; server = "$($SetupHostRule['server'])"; resourceGroup = "$($SetupHostRule['resourceGroup'])"
+                                            subscriptionId = "$($SetupHostRule['subscriptionId'])"; openedUtc = "$($SetupHostRule['openedUtc'])" }
+    }
     Set-Content -LiteralPath (Join-Path $StatePath 'state.json') -Value ($doc | ConvertTo-Json -Depth 4) -Encoding utf8
+}
+
+function Test-PimInstallSetupHostRuleRecord {
+    <#
+      PURE. REQ 98.4 (b): is -Record (the state file's setupHostRule) the record of THIS install's own rule? Only when it names
+      exactly 'AllowSetupHost' on this install's SQL server, resource group and subscription (-Target). Anything else -- a
+      missing record, another rule name, another server -- is NOT this install's, so nothing is ever removed on its word.
+    #>
+    param([AllowNull()][object]$Record, [Parameter(Mandatory)][System.Collections.IDictionary]$Target)
+    if (-not $Record) { return $false }
+    $get = { param($o, $k) if ($o -is [System.Collections.IDictionary]) { "$($o[$k])".Trim() } else { "$($o.$k)".Trim() } }
+    if ((& $get $Record 'name') -cne 'AllowSetupHost' -or (& $get $Target 'name') -cne 'AllowSetupHost') { return $false }
+    foreach ($k in 'server', 'resourceGroup', 'subscriptionId') {
+        $v = & $get $Record $k
+        if (-not $v -or $v -ine (& $get $Target $k)) { return $false }
+    }
+    return $true
+}
+
+function Get-PimInstallSetupHostRulePlan {
+    <#
+      PURE. REQ 98.4 (b): whose is 'AllowSetupHost', decided BEFORE the deploy starts. Returns @{ owned; record; reason }.
+        -Recorded  the state file's setupHostRule (an earlier run of this install opened it)   -> owned
+        -RuleIp    the rule on the server now: '' = not there (or no server yet); $null = could not be read
+          not there      -> owned + record: whatever opens it from here on is this install (written to the state file
+                            BEFORE anything is created, so a run that dies still leaves the record)
+          there, no record -> NOT owned: it was there before this install -- left exactly as found, never removed
+          unreadable     -> NOT owned (nothing is removed on a guess)
+    #>
+    param([AllowNull()][object]$Recorded, [Parameter(Mandatory)][System.Collections.IDictionary]$Target, [AllowNull()][object]$RuleIp)
+    if (Test-PimInstallSetupHostRuleRecord -Record $Recorded -Target $Target) { return @{ owned = $true; record = $false; reason = 'an earlier run of this installation opened it -- this run closes it when it ends' } }
+    if ($null -eq $RuleIp) { return @{ owned = $false; record = $false; reason = 'it could not be read -- left as it is' } }
+    if (-not "$RuleIp".Trim()) { return @{ owned = $true; record = $true; reason = 'not on the database server yet -- this installation opens it and closes it when it ends' } }
+    return @{ owned = $false; record = $false; reason = 'it was on the database server before this installation started -- it is not this installation''s, so it is left as found' }
+}
+
+function Get-PimInstallAdminVerdict {
+    <#
+      PURE. REQ 98.4 (c) + (d): the preflight verdict on the PIM Manager administrators, before anything is created.
+      -Admins: @{ upn; found = $true | $false | $null (could not be checked); mail } per administrator (the answers'
+      superAdmins, else the person installing). Returns @{ state; message; actionText; actionCommand }.
+        a name that is NOT in the tenant                      -> failed, naming every such address (it used to stop the
+                                                                 sign-in step, about an hour into the install)
+        every name found, none has a mailbox, no recipients   -> failed (the end-of-install check used to fail on
+                                                                 "no alert reaches anyone", after everything was built)
+        a name that could not be checked                      -> warning (never a stop on a read that failed)
+    #>
+    param([object[]]$Admins = @(), [string[]]$AlertRecipients = @())
+    $list = @($Admins | Where-Object { $_ -and "$($_.upn)".Trim() })
+    $rec = @($AlertRecipients | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $missing = @($list | Where-Object { $_.found -eq $false } | ForEach-Object { "$($_.upn)".Trim() })
+    if ($missing.Count) {
+        return @{ state = 'failed'; message = "$(if ($missing.Count -eq 1) { 'this sign-in name does' } else { 'these sign-in names do' }) not exist in the tenant: $($missing -join ', ') -- a PIM Manager administrator must be an account of this tenant; nothing was created"
+                  actionText = 'Correct the administrator''s sign-in name in the answers (superAdmins in config.json), then run the installation again:'; actionCommand = '"superAdmins": ["admin@contoso.com"]' }
+    }
+    $unknown = @($list | Where-Object { $null -eq $_.found } | ForEach-Object { "$($_.upn)".Trim() })
+    if ($unknown.Count) { return @{ state = 'warning'; message = "could not be checked in the tenant: $($unknown -join ', ') -- the sign-in step will tell" } }
+    if (-not $list.Count) { return @{ state = 'ok'; message = 'no administrator to check' } }
+    $withMail = @($list | Where-Object { "$($_.mail)".Trim() } | ForEach-Object { "$($_.mail)".Trim() })
+    if (-not $rec.Count -and -not $withMail.Count) {
+        # kind 'no-mailbox': the caller makes this a reminder (not a stop) for an installation that completed before -- its
+        # recipients may have been set in the PIM Manager since, which a preflight cannot read
+        return @{ state = 'failed'; kind = 'no-mailbox'; message = "no PIM Manager administrator has a mailbox ($(@($list | ForEach-Object { "$($_.upn)".Trim() }) -join ', ')) and no alert recipients were given -- the alerts would reach nobody; nothing was created"
+                  actionText = 'Add the address that receives the alerts to the answers (alertRecipients in config.json), then run the installation again:'; actionCommand = '"alertRecipients": ["alerts@contoso.com"]' }
+    }
+    return @{ state = 'ok'; message = "found in the tenant: $(@($list | ForEach-Object { "$($_.upn)".Trim() }) -join ', '); the alerts go to $(if ($rec.Count) { $rec -join ', ' } else { $withMail -join ', ' })" }
 }
 
 # ---- the guided install's sign-in check (moved here from _PimSignedIn.ps1, 2026-10-10) -----------------------------------

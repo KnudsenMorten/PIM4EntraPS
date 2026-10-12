@@ -1808,6 +1808,9 @@
         <b id="jobLogTitle" style="flex:1 1 auto; font-size:14px;">Run log</b>
         <!-- Operator 2026-09-20: copy the WHOLE log in one click -- selecting a long scrolling <pre>
              by hand is exactly what you do not want to be doing while chasing a failed run. -->
+        <!-- 100.91 GET SUPPORT: shown on a FAILED run, for an Admin / SuperAdmin (loadJobLog decides). It hands the run
+             over as the ticket's context; the server takes the last log lines and masks secrets. -->
+        <button id="jobLogSupport" class="ghost" style="display:none; font-size:12px;" title="Open a support ticket at Invardia for this failed run. You see and can change everything before it is sent.">Get support</button>
         <button id="jobLogCopy" class="ghost" style="font-size:12px;" title="Copy the whole log to the clipboard">Copy</button>
         <button id="jobLogRefresh" class="ghost" style="font-size:12px;">Refresh</button>
         <!-- "live tail" = keep re-reading this run's log every 2s and stay pinned to the newest line
@@ -5001,7 +5004,17 @@
     const headTone = pimSevColour(pimSev(reds, sorted.filter(i => i.sev === 'amber').length));   // PIM 100.85: facts only = grey, never amber or red
     return '<div style="border:1px solid #d0d7de;border-left:4px solid ' + headTone + ';border-radius:8px;padding:10px 14px;background:#fff;margin-bottom:14px;">' +
       '<div style="font-size:13px;font-weight:700;color:' + headTone + ';margin-bottom:4px;">What needs your attention (' + sorted.length + ')</div>' +
-      '<ul style="margin:0;padding:0;">' + rows + '</ul></div>';
+      '<ul style="margin:0;padding:0;">' + rows + '</ul>' + homeGetSupportHtml(sorted) + '</div>';
+  }
+  // 100.91 GET SUPPORT on the Overview: one line under the attention list (Admin / SuperAdmin, never for facts only). It
+  // hands over the lines as plain text and the ids of the setup-health lines -- those ids are the ticket's reference.
+  function homeGetSupportHtml(items) {
+    const real = (items || []).filter(i => i && i.sev !== 'info');
+    if (!real.length || !getSupportMay()) return '';
+    const plain = h => { const t = document.createElement('div'); t.innerHTML = String(h || ''); return (t.textContent || '').trim(); };
+    const ctx = { kind: 'setup', page: 'home', ids: real.map(i => i.id).filter(Boolean).slice(0, 5),
+                  message: real.slice(0, 10).map(i => '- ' + plain(i.text)).join('\n').slice(0, 3000) };
+    return '<div class="homeGetSupport" style="margin-top:8px;padding-top:6px;border-top:1px solid #eaeef2;font-size:12px;color:#57606a;">Stuck on one of these? ' + getSupportBtnHtml(ctx) + '</div>';
   }
 
   // Tier / plane legend (REQUIREMENTS §26d / trustworthy-when-sparse). Plain-language
@@ -5186,14 +5199,14 @@
     // from the SAME tile data below (no separate/duplicate source) so the call-out can
     // never disagree with the tiles. { sev:'red'|'amber', text, tab }.
     const attnItems = [];
-    function homeAddAttn(sev, text, tab) { attnItems.push({ sev: sev, text: text, tab: tab }); }
+    function homeAddAttn(sev, text, tab, id) { attnItems.push({ sev: sev, text: text, tab: tab, id: id || '' }); }   // id: a setup-health line's own id (100.91)
     // PIM 100.85 (owner 2026-10-11, 2nd report: "dont show as alerts, when it is warnings"): the Overview badge is RED only
     // when at least one item is an error / alarm; a count made of warnings only is amber.
     function homeAttnColour(items) { return pimSevColour((items || []).some(i => i && i.sev === 'red') ? 'red' : 'amber'); }
     // §100.3 (2026-10-09): the server's settings health lines -- demo group unreadable (ACC-1), MSP downlink switched off
     // (GATE-1), a blank naming pattern (NAME-1). The text is escaped here; the server sends plain text.
     try {
-      ((t.health && t.health.notices) || []).forEach(n => { if (n && n.text) { attn += 1; homeAddAttn(n.sev === 'red' ? 'red' : 'amber', esc(n.text), n.tab || 'settings'); } });
+      ((t.health && t.health.notices) || []).forEach(n => { if (n && n.text) { attn += 1; homeAddAttn(n.sev === 'red' ? 'red' : 'amber', esc(n.text), n.tab || 'settings', n.id); } });
     } catch (_) { }
 
     // --- header ---
@@ -5582,6 +5595,19 @@
           '<b>GitHub issues are public</b> &mdash; nothing that identifies your tenant, your account or your role is included.' +
         '</div>' +
 
+        // 100.91 GET SUPPORT: a support ticket at Invardia, opened by the server. Always here; the button only when this
+        // installation has an install key and the role is Admin / SuperAdmin -- otherwise the public support page.
+        '<div id="supportTicketCard" style="border:1px solid #d0d7de; border-radius:8px; padding:16px; margin-bottom:18px; background:#fff;">' +
+          '<div style="font-size:13px; font-weight:600; margin-bottom:4px;">Get support from Invardia</div>' +
+          '<div style="color:#57606a; font-size:11.5px; margin-bottom:10px;">' +
+            'Open a support ticket straight from PIM Manager. You see and can change everything before it is sent; ' +
+            'passwords, keys and tokens are masked.' +
+          '</div>' +
+          '<div id="supportTicketHost" style="font-size:12.5px;">' +
+            (isServer ? '<span style="color:#57606a;">Checking&hellip;</span>' : getSupportLinkHtml(null, 'A support ticket needs the running PIM Manager.')) +
+          '</div>' +
+        '</div>' +
+
         '<div style="border:1px solid #d0d7de; border-radius:8px; padding:16px; margin-bottom:18px; background:#f6f8fa;">' +
           '<div style="font-size:13px; font-weight:600; margin-bottom:10px;">Report an issue</div>' +
           '<a href="' + esc(issueUrl) + '" target="_blank" rel="noopener" ' +
@@ -5696,8 +5722,194 @@
           if (out) out.innerHTML = '<span style="color:#cf222e;">Bundle failed: ' + esc(e.message) + '</span>';
         } finally { dlBtn.disabled = false; dlBtn.textContent = prev; }
       };
+      getSupportFillCard(document.getElementById('supportTicketHost'));
     }
   }
+
+  // ===================================================================
+  // 100.91 GET SUPPORT (owner 2026-10-11: "make an ask button where relavant ... or call it support"; the name is the same
+  // in every product: "Get support"). A support ticket at Invardia.
+  //   * The SERVER makes the call (GET /api/support/ticket, POST /api/support/ticket/draft, POST /api/support/ticket,
+  //     GET /api/support/tickets -- engine/_shared/PIM-SupportTicket.ps1). The install key never reaches this page.
+  //   * The person SEES and can CHANGE everything that is sent; nothing is sent before they press Send.
+  //   * Admin / SuperAdmin only, and only when the installation has an install key -- otherwise the public support page.
+  //   * Where: the Support page (always); the run log of a failed job; Overview "what needs your attention"; a Get
+  //     Started step that is not done. A failing place hands over its context ({ kind, page, jobName, runId, stepId,
+  //     ids, message }); the server turns it into the draft and into the ticket's stable reference.
+  // Any element with class pimGetSupport + data-support-ctx opens the dialog (one delegated listener).
+  // tests/Test-PimSupportTicket.ps1 + tests/gui-headless/get-support.js hold this.
+  // ===================================================================
+  var PIM_SUPPORT_PAGE_URL = 'https://portal.invardia.com';   // var, not const: renderSupport (defined earlier) reads it (no TDZ)
+  function getSupportMay() {
+    try { return isServer && roleAtLeast('Admin'); } catch (_) { return false; }
+  }
+  function getSupportBtnHtml(ctx, label, style) {
+    return '<button type="button" class="pimGetSupport btn-sec" data-support-ctx="' + escapeHtml(JSON.stringify(ctx || {})) + '"' +
+      ' title="Open a support ticket at Invardia. You see and can change everything before it is sent."' +
+      ' style="font-size:12px;' + (style || '') + '">' + escapeHtml(label || 'Get support') + '</button>';
+  }
+  // The public support page + the contact address: shown when no ticket can be opened from here, and next to an error.
+  function getSupportLinkHtml(d, why) {
+    const url = (d && /^https:\/\/([a-z0-9-]+\.)*invardia\.com(\/|$)/i.test(String(d.supportUrl || ''))) ? String(d.supportUrl) : PIM_SUPPORT_PAGE_URL;
+    return '<div class="getSupportLink" style="font-size:12.5px;color:#24292f;">' + (why ? escapeHtml(why) + ' ' : '') +
+      'Open the <a href="' + escapeHtml(url) + '" target="_blank" rel="noopener" style="color:#0969da;">Invardia support page</a>' +
+      ' or write to <a href="mailto:info@invardia.com" style="color:#0969da;">info@invardia.com</a>.</div>';
+  }
+  // A plain sentence for whatever went wrong: the server's own words when it sent some, never a route or a status code.
+  function getSupportErrText(e) {
+    if (e && e.body && typeof e.body.error === 'string' && e.body.error) return e.body.error;
+    if (e && (e.demo || e.staleSession) && e.message) return e.message;
+    return 'The request did not go through. Try again in a moment.';
+  }
+  function getSupportErrHtml(e) {
+    return '<div class="getSupportErr" role="alert" style="border:1px solid #ff8182;background:#ffebe9;color:#82071e;border-radius:6px;padding:8px 10px;margin-bottom:8px;">' +
+      escapeHtml(getSupportErrText(e)) + '</div>' + ((e && (e.demo || e.staleSession)) ? '' : getSupportLinkHtml(e && e.body, ''));
+  }
+  async function getSupportFillCard(host) {
+    if (!host) return;
+    let st;
+    try { st = await api('GET', '/api/support/ticket'); }
+    catch (e) { host.innerHTML = getSupportErrHtml(e); return; }
+    if (!st || !st.available || !st.canCreate) { host.innerHTML = getSupportLinkHtml(st, (st && st.reason) || ''); return; }
+    host.innerHTML = getSupportBtnHtml({ kind: 'help', page: 'support' }, 'Get support', 'font-size:13px;font-weight:600;padding:7px 14px;') +
+      '<button type="button" id="supportTicketListBtn" class="btn-sec" style="margin-left:10px;font-size:12px;">Show this environment&rsquo;s tickets</button>' +
+      '<div id="supportTicketList" style="margin-top:10px;"></div>';
+    const lb = document.getElementById('supportTicketListBtn');
+    if (lb) lb.onclick = () => getSupportLoadList(document.getElementById('supportTicketList'));
+  }
+  async function getSupportLoadList(host) {
+    if (!host) return;
+    const esc = escapeHtml;
+    host.innerHTML = '<span style="color:#57606a;">Reading the tickets&hellip;</span>';
+    let r;
+    try { r = await api('GET', '/api/support/tickets'); }
+    catch (e) { host.innerHTML = getSupportErrHtml(e); return; }
+    const rows = (r && r.tickets) || [];
+    if (!rows.length) { host.innerHTML = '<span style="color:#57606a;">No tickets from this environment yet.</span>'; return; }
+    host.innerHTML = '<table class="getSupportTickets" style="border-collapse:collapse;font-size:12px;width:100%;">' +
+      '<tr style="text-align:left;color:#57606a;"><th style="padding:3px 10px 3px 0;">Ticket</th><th style="padding:3px 10px 3px 0;">Title</th><th style="padding:3px 10px 3px 0;">Status</th><th style="padding:3px 0;">Updated</th></tr>' +
+      rows.map(t => '<tr><td style="padding:3px 10px 3px 0;white-space:nowrap;">' +
+          (t.portalUrl ? '<a href="' + esc(t.portalUrl) + '" target="_blank" rel="noopener" style="color:#0969da;">' + esc(t.ticketNumber) + '</a>' : esc(t.ticketNumber)) + '</td>' +
+        '<td style="padding:3px 10px 3px 0;">' + esc(t.title || '') + '</td>' +
+        '<td style="padding:3px 10px 3px 0;white-space:nowrap;">' + esc([t.status, t.priority].filter(Boolean).join(' · ')) + '</td>' +
+        '<td style="padding:3px 0;white-space:nowrap;">' + esc(t.updated ? fmtTime(t.updated) : '') + '</td></tr>').join('') + '</table>';
+  }
+  async function openGetSupport(ctx) {
+    ctx = (ctx && typeof ctx === 'object') ? ctx : {};
+    if (!ctx.kind) ctx.kind = 'help';
+    const old = document.getElementById('getSupportOverlay'); if (old) old.remove();
+    const ov = pimModalOverlay(); ov.id = 'getSupportOverlay';
+    ov.innerHTML = '<div id="getSupportBox" role="dialog" aria-modal="true" aria-labelledby="getSupportTitle" style="background:#fff;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,.35);width:min(760px,96vw);padding:16px 20px 18px;">' +
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;"><h3 id="getSupportTitle" style="margin:0;flex:1 1 auto;font-size:16px;">Get support</h3>' +
+      '<button type="button" id="getSupportClose" class="ghost" style="font-size:12px;">Close</button></div>' +
+      '<div id="getSupportBody" style="font-size:12.5px;color:#24292f;"><span style="color:#57606a;">Preparing&hellip;</span></div></div>';
+    document.body.appendChild(ov);
+    // Escape and Close leave the dialog; a click beside it does NOT (a half-written ticket is not thrown away by a slip).
+    const onKey = e => { if (e.key === 'Escape') close(); };
+    const close = () => { ov.remove(); document.removeEventListener('keydown', onKey); };
+    document.addEventListener('keydown', onKey);
+    ov.querySelector('#getSupportClose').onclick = close;
+    const body = ov.querySelector('#getSupportBody');
+    if (!isServer) { body.innerHTML = getSupportLinkHtml(null, 'A support ticket needs the running PIM Manager.'); return; }
+    let st, d;
+    try { st = await api('GET', '/api/support/ticket'); }
+    catch (e) { body.innerHTML = getSupportErrHtml(e); return; }
+    if (!st || !st.available || !st.canCreate) { body.innerHTML = getSupportLinkHtml(st, (st && st.reason) || ''); return; }
+    try { d = (await api('POST', '/api/support/ticket/draft', { context: ctx })).draft; }
+    catch (e) { body.innerHTML = getSupportErrHtml(e); return; }
+    getSupportRenderForm(body, st, d || {}, ctx, close);
+  }
+  function getSupportRenderForm(body, st, d, ctx, close) {
+    const esc = escapeHtml;
+    const inp = 'width:100%;box-sizing:border-box;font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid #d0d7de;border-radius:6px;';
+    const lab = (f, t) => '<label for="gsup_' + f + '" style="display:block;font-weight:600;margin:10px 0 3px;">' + t + '</label>';
+    const ferr = f => '<div class="getSupportFieldErr" data-for="' + f + '" style="display:none;color:#cf222e;font-size:11.5px;margin-top:2px;"></div>';
+    const opt = (list, cur, text) => (list || []).map(v => '<option value="' + esc(v) + '"' + (v === cur ? ' selected' : '') + '>' + esc(text ? text(v) : v) + '</option>').join('');
+    const prioText = v => v === 'P1' ? 'P1 (highest)' : v === 'P3' ? 'P3 (normal)' : v;
+    const logMax = Number(st.logMax) || 20000;
+    const also = [['Your sign-in name', d.userName], ['PIM Manager version', d.productVersion], ['Update ring', (d.ring === null || d.ring === undefined || d.ring === '') ? '' : String(d.ring)], ['Reference', d.sourceRef]]
+      .filter(r => r[1] !== undefined && r[1] !== null && String(r[1]) !== '');
+    body.innerHTML =
+      '<div style="color:#57606a;margin-bottom:4px;">This opens a support ticket at Invardia. <b>Everything below is what is sent</b> &mdash; read it, change what you want, then press Send. ' +
+        'Nothing is sent before that. Passwords, keys and tokens are masked.</div>' +
+      '<form id="getSupportForm" novalidate autocomplete="off">' +
+        lab('title', 'Title') + '<input id="gsup_title" type="text" maxlength="200" style="' + inp + '" value="' + esc(d.title || '') + '" placeholder="One line: what is wrong">' + ferr('title') +
+        lab('text', 'What happened') + '<textarea id="gsup_text" rows="8" maxlength="20000" style="' + inp + 'resize:vertical;">' + esc(d.text || '') + '</textarea>' + ferr('text') +
+        '<div style="display:flex;gap:12px;flex-wrap:wrap;">' +
+          '<div style="flex:1 1 150px;">' + lab('category', 'Category') + '<select id="gsup_category" style="' + inp + '">' + opt(st.categories, d.category || 'other') + '</select>' + ferr('category') + '</div>' +
+          '<div style="flex:1 1 130px;">' + lab('priority', 'Priority') + '<select id="gsup_priority" style="' + inp + '">' + opt(st.priorities, d.priority || 'P3', prioText) + '</select>' + ferr('priority') + '</div>' +
+          '<div style="flex:2 1 240px;">' + lab('userEmail', 'Your e-mail') + '<input id="gsup_userEmail" type="email" maxlength="254" style="' + inp + '" value="' + esc(d.userEmail || '') + '" placeholder="name@example.com">' + ferr('userEmail') +
+            '<div style="color:#57606a;font-size:11px;margin-top:2px;">The answer is sent here. Use a mailbox you read &mdash; an admin account often has none.</div></div>' +
+        '</div>' +
+        lab('logExcerpt', 'Log excerpt <span style="font-weight:400;color:#57606a;">(optional &mdash; clear it to send none)</span>') +
+        '<textarea id="gsup_logExcerpt" rows="8" maxlength="' + logMax + '" spellcheck="false" style="' + inp + 'resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;white-space:pre;">' + esc(d.logExcerpt || '') + '</textarea>' + ferr('logExcerpt') +
+        (also.length ? '<div id="getSupportAlso" style="margin-top:10px;color:#57606a;font-size:11.5px;">Also sent, as it is: ' +
+          also.map(r => esc(r[0]) + ' <b style="color:#24292f;word-break:break-all;">' + esc(String(r[1])) + '</b>').join(' &middot; ') + '.</div>' : '') +
+        '<div id="getSupportMsg" style="margin-top:10px;"></div>' +
+        '<div style="display:flex;gap:10px;margin-top:12px;align-items:center;">' +
+          '<button type="submit" id="getSupportSend" class="primary" style="font-size:13px;font-weight:600;padding:7px 14px;">Send to Invardia</button>' +
+          '<button type="button" id="getSupportCancel" class="btn-sec" style="font-size:12px;">Cancel</button>' +
+          '<span style="flex:1 1 auto;"></span>' +
+          '<button type="button" id="getSupportListBtn" class="btn-sec" style="font-size:12px;">Show this environment&rsquo;s tickets</button>' +
+        '</div>' +
+      '</form><div id="getSupportList" style="margin-top:10px;"></div>';
+    const form = body.querySelector('#getSupportForm');
+    const msg = body.querySelector('#getSupportMsg');
+    const send = body.querySelector('#getSupportSend');
+    const val = f => String((body.querySelector('#gsup_' + f) || {}).value || '');
+    body.querySelector('#getSupportCancel').onclick = close;
+    body.querySelector('#getSupportListBtn').onclick = () => getSupportLoadList(body.querySelector('#getSupportList'));
+    form.onsubmit = async ev => {
+      ev.preventDefault();
+      body.querySelectorAll('.getSupportFieldErr').forEach(el => { el.textContent = ''; el.style.display = 'none'; });
+      msg.innerHTML = '';
+      send.disabled = true; send.textContent = 'Sending…';
+      try {
+        const r = await api('POST', '/api/support/ticket', { title: val('title'), text: val('text'), category: val('category'), priority: val('priority'),
+          userEmail: val('userEmail'), logExcerpt: val('logExcerpt'), context: ctx }, { timeoutMs: 60000 });
+        getSupportRenderDone(body, r || {});
+      } catch (e) {
+        // field messages go under their field; anything else Invardia said about a field joins the message
+        const loose = [];
+        const f = e && e.body && e.body.fields;
+        if (f && typeof f === 'object') {
+          const list = Array.isArray(f);
+          Object.keys(f).forEach(k => {
+            const t = (f[k] && typeof f[k] === 'object') ? JSON.stringify(f[k]) : String(f[k]);
+            const el = list ? null : body.querySelector('.getSupportFieldErr[data-for="' + String(k).replace(/[^A-Za-z]/g, '') + '"]');
+            if (el) { el.textContent = t; el.style.display = 'block'; } else loose.push((list ? '' : k + ': ') + t);
+          });
+        }
+        msg.innerHTML = getSupportErrHtml(e) + (loose.length ? '<div style="color:#82071e;font-size:11.5px;margin-top:4px;">' + esc(loose.join(' ')) + '</div>' : '');
+        send.disabled = false; send.textContent = 'Send to Invardia';
+      }
+    };
+  }
+  function getSupportRenderDone(body, r) {
+    const esc = escapeHtml;
+    const sent = r.sent || {};
+    body.innerHTML = '<div id="getSupportDone" style="border:1px solid #4ac26b;background:#dafbe1;border-radius:6px;padding:12px 14px;line-height:1.7;">' +
+      '<div style="font-size:14px;"><b>Ticket <span id="getSupportNumber">' + esc(r.ticketNumber || '') + '</span> is with Invardia.</b></div>' +
+      (sent.userEmail ? '<div>The answer comes to <b>' + esc(sent.userEmail) + '</b>.</div>' : '') +
+      (sent.sourceRef ? '<div style="color:#57606a;font-size:11.5px;">If a ticket was already open for this, this is that ticket &mdash; no second one was made.</div>' : '') +
+      (r.portalUrl ? '<div><a id="getSupportPortal" href="' + esc(r.portalUrl) + '" target="_blank" rel="noopener" style="color:#0969da;">Follow the ticket on the Invardia portal</a></div>' : '') +
+      (r.uploadUrl ? '<div><a id="getSupportUpload" href="' + esc(r.uploadUrl) + '" target="_blank" rel="noopener" style="color:#0969da;">Add files to the ticket</a>' +
+        ' <span style="color:#57606a;">&mdash; screenshots or exports, on Invardia&rsquo;s upload page (up to 10 files, 25 MB each).</span></div>' : '') +
+      '</div>';
+  }
+  document.addEventListener('click', e => {
+    const b = (e.target && e.target.closest) ? e.target.closest('.pimGetSupport') : null;
+    if (!b) return;
+    e.preventDefault();
+    let ctx = {};
+    try { ctx = JSON.parse(b.getAttribute('data-support-ctx') || '{}') || {}; } catch (_) { ctx = {}; }
+    // a Get Started step hands over what the step says is wrong right now
+    if (ctx.kind === 'get-started' && !ctx.message) {
+      const card = b.closest('.gsStep');
+      if (card) ctx.message = Array.from(card.querySelectorAll('.gsProblem, .gsErr')).map(el => (el.textContent || '').trim()).filter(Boolean).join(' ').slice(0, 2000);
+    }
+    openGetSupport(ctx);
+  });
 
   // ===================================================================
   // Manager RBAC rank helper (mirrors the server's Test-PimManagerRoleAtLeast).
@@ -16407,6 +16619,8 @@
             '<button type="button" class="gsSaveNext primary">' + (last ? 'Save &amp; finish' : 'Save &amp; next &rarr;') + '</button>' +
           '</div>' +
         '</form>' +
+        // 100.91 GET SUPPORT: on a step that is not done (Admin / SuperAdmin). The click hands over the step and what it says is wrong.
+        ((!cur.done && getSupportMay()) ? '<div class="gsSupportLine" style="margin-top:10px;font-size:12px;color:#57606a;">Stuck on this step? ' + getSupportBtnHtml({ kind: 'get-started', page: 'getstarted', stepId: cur.id }) + '</div>' : '') +
       '</div>';
     const card = host.querySelector('.gsStep');
     const form = card.querySelector('.gsForm');
@@ -18935,6 +19149,7 @@
     const tail = document.getElementById('jobLogTail'); if (tail) { tail.checked = false; }
     setJobLogTail(false);
     window._jobLogRunId = null;
+    const sup = document.getElementById('jobLogSupport'); if (sup) sup.style.display = 'none';   // a list of runs is not one failed run
     const pre = document.getElementById('jobLogBody');
     pre.textContent = 'Loading history…';
     let d;
@@ -19447,6 +19662,13 @@
       pre.textContent = (d.log && d.log.length) ? d.log : '(no log captured for this run)';
       const tailOn = !!(document.getElementById('jobLogTail') || {}).checked;
       if (tailOn && atBottom) pre.scrollTop = pre.scrollHeight;
+      // 100.91: a run that FAILED offers "Get support" (Admin / SuperAdmin), carrying the job and the run id.
+      const sup = document.getElementById('jobLogSupport');
+      if (sup) {
+        const failed = !!d && d.ok === false && String(d.status || '') !== 'running';
+        sup.style.display = (failed && getSupportMay()) ? '' : 'none';
+        sup.dataset.runId = String(runId || ''); sup.dataset.job = String((d && d.name) || '');
+      }
       return d;
     } catch (e) { pre.textContent = 'Failed to load log: ' + e.message; return null; }
   }
@@ -19457,6 +19679,7 @@
     document.getElementById('jobLogOverlay').style.display = 'block';
     document.getElementById('jobLogBody').textContent = '…';
     const cp = document.getElementById('jobLogCopy'); if (cp) cp.textContent = 'Copy';   // never open showing the last run's "Copied N lines"
+    const sup = document.getElementById('jobLogSupport'); if (sup) sup.style.display = 'none';   // loadJobLog shows it for a failed run
     const tail = document.getElementById('jobLogTail');
     tail.checked = !!isRunning;
     setJobLogTailAvailable(!!isRunning);
@@ -19535,6 +19758,7 @@
   (function wireJobLogModal() {
     const close = document.getElementById('jobLogClose'); if (close) close.onclick = closeJobLog;
     const cp = document.getElementById('jobLogCopy'); if (cp) cp.onclick = copyJobLog;
+    const sup = document.getElementById('jobLogSupport'); if (sup) sup.onclick = () => openGetSupport({ kind: 'job', page: 'jobs', jobName: sup.dataset.job || '', runId: sup.dataset.runId || '' });
     const rf = document.getElementById('jobLogRefresh'); if (rf) rf.onclick = () => { if (window._jobLogRunId) loadJobLog(window._jobLogRunId); };
     const tail = document.getElementById('jobLogTail'); if (tail) tail.onchange = () => setJobLogTail(tail.checked);
     const ov = document.getElementById('jobLogOverlay'); if (ov) ov.onclick = (e) => { if (e.target === ov) closeJobLog(); };
