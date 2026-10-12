@@ -352,6 +352,11 @@ function Send-PimLifecycleEscalations {
             TenantName  = "$($global:PIM_TenantName)"
             Instance    = 'scheduler'
             WhenUtc     = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
+            # PIM 100.105: the alert table's rows -- the product works; the customer extends what is still needed
+            AlertWho    = 'Customer'
+            AlertStatus = "Needs customer's action"
+            AlertProblem = ("{0} for {1} {2} on {3}" -f $kind, "$($e.key)", $(if ([int]$e.daysLeft -lt 0) { 'ended' } else { 'ends' }), $when)
+            AlertTodo   = 'Open PIM Manager with the button and extend the date if the access is still needed; if not, nothing has to be done'
         }
         # §79.8: an auto-disable links the OWNER page at that person, where the department owner extends the date.
         if ($kind -eq 'admin-offboard' -and [int]$e.daysLeft -ge 0) {
@@ -360,6 +365,8 @@ function Send-PimLifecycleEscalations {
             $tokens['PortalQuery'] = "person=$who"
             $tokens['AlertTitle']  = ("{0} will be disabled in {1} day(s)" -f $who, [int]$e.daysLeft)
             $tokens['AlertDetail'] = ("{0}'s access ends on {1}. If they still need it, open the link below and extend the date -- nothing else is needed. If they do not, no action is required." -f $who, $when)
+            $tokens['AlertProblem'] = ("The access of {0} ends on {1}: the account is then disabled" -f $who, $when)
+            $tokens['AlertTodo']    = 'Open PIM Manager with the button and extend the date if they still need the access; if not, nothing has to be done'
         }
         $anySent = $false; $seenRcpt = @{}
         foreach ($sym in @($e.recipients)) {

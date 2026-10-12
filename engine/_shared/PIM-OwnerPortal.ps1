@@ -227,6 +227,14 @@ function Invoke-PimOwnerReviewJob {
             AlertDetail = ("You are an owner of <b>{0}</b>. These people have privileged access through PIM. Open the link and, for each person: <b>Keep</b> if they still need it, <b>Extend</b> if their access should last longer, or <b>Remove</b> if they no longer need it (a PIM administrator then approves the removal).<br><br>{1}" -f (& $enc $d.department), ($lines -join '<br>'))
             PortalTab   = 'owner'
             TenantName  = "$($global:PIM_TenantName)"; Instance = 'scheduler'; WhenUtc = $NowUtc.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
+            # PIM 100.105: the alert table's rows -- the product works; the owner confirms their people. One row per person.
+            AlertWho = 'Customer'; AlertStatus = "Needs customer's action"
+            AlertProblem = ("{0} person(s) in {1} with privileged access wait for your confirmation" -f $d.due, $d.department)
+            AlertTodo = 'Open My people and choose Keep, Extend or Remove for each person'
+            AlertFindings = @($d.people | Select-Object -First 25 | ForEach-Object {
+                @{ kind = $(if ($_.reviewDue) { 'To confirm' } else { 'Confirmed' })
+                   name = "$(if ($_.displayName) { $_.displayName } else { $_.userName })" + $(if ($_.autoDisableDate) { ", access ends $($_.autoDisableDate)" } else { '' }) +
+                          $(if ($_.reviewDue) { $(if ($_.lastReviewedUtc) { ", last confirmed $($_.lastReviewedUtc)" } else { ', not yet confirmed' }) } else { ", confirmed $($_.lastReviewedUtc)" }) } })
         }
         foreach ($o in @($d.owners)) {
             $ok = $false; $why = ''

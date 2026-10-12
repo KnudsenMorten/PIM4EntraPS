@@ -225,9 +225,15 @@ function Invoke-PimGuardTrip {
         if (-not $GetSetting) { $GetSetting = { param($n) if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { Get-PimSetting -Name $n } elseif (Get-Command Get-PimManagerSetting -ErrorAction SilentlyContinue) { Get-PimManagerSetting -Name $n } } }
         if (-not $SetSetting) { $SetSetting = { param($n, $v) if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { [void](Set-PimSetting -Name $n -Value $v) } elseif (Get-Command Set-PimManagerSetting -ErrorAction SilentlyContinue) { [void](Set-PimManagerSetting -Name $n -Value $v) } } }
         if (-not $SendMail) {
-            $SendMail = { param($t, $h, $d, $a)
-                if (Get-Command Send-PimSafetyAlert -ErrorAction SilentlyContinue) { $r = Send-PimSafetyAlert -Title $t -Headline $h -Detail $d -Action $a -SwallowScope 'guard-trip-mail' -DebounceMinutes 0; return ("$($r.status)" -in @('sent', 'partial')) }
-                if (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue) { $r = Send-PimManagerAlert -Event 'engine-failure' -Title $t -Detail $d -Headline $h -Action $a -DebounceMinutes 0; return ([int]$r.sent -gt 0) }
+            # PIM 100.105: $w = the alert table's rows for this trip (@{ who; status; problem; todo }), passed as a 5th value
+            $SendMail = { param($t, $h, $d, $a, $w)
+                $hasArgs = [bool](Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue)
+                if (Get-Command Send-PimSafetyAlert -ErrorAction SilentlyContinue) {
+                    $am = @{}; if ($hasArgs -and $w) { $am = Get-PimAlertMailArgs -Command 'Send-PimSafetyAlert' -Who $w.who -Status $w.status -Problem $w.problem -Todo $w.todo }
+                    $r = Send-PimSafetyAlert -Title $t -Headline $h -Detail $d -Action $a -SwallowScope 'guard-trip-mail' -DebounceMinutes 0 @am; return ("$($r.status)" -in @('sent', 'partial')) }
+                if (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue) {
+                    $am = @{}; if ($hasArgs -and $w) { $am = Get-PimAlertMailArgs -Command 'Send-PimManagerAlert' -Who $w.who -Status $w.status -Problem $w.problem -Todo $w.todo }
+                    $r = Send-PimManagerAlert -Event 'engine-failure' -Title $t -Detail $d -Headline $h -Action $a -DebounceMinutes 0 @am; return ([int]$r.sent -gt 0) }
                 return $false }
         }
         if (-not $Audit) {
@@ -246,7 +252,15 @@ function Invoke-PimGuardTrip {
             $subject = "$sev -- $(if ($Title) { $Title } else { "guard $($u.entry.guardId) tripped" })$still"
             $headline = "PIM Manager protected your data: nothing was lost. $Title"
             $body = [System.Net.WebUtility]::HtmlEncode("$Detail")
-            try { $res.mailed = [bool](& $SendMail $subject $headline $body ([System.Net.WebUtility]::HtmlEncode("$ActionText"))) } catch { $res.mailed = $false }
+            # PIM 100.105: the alert table's rows. "Held back" = the guard stopped or held a change on purpose (every outcome
+            # but 'warning'); a label in the mail only -- the outcome itself is not touched.
+            $rowWords = @{
+                who     = $(if ($Outcome -eq 'warning') { 'Not known' } else { 'Customer' })
+                status  = $(if ($Outcome -eq 'warning') { 'Warning' } else { 'Held back' })
+                problem = $(if ("$Title".Trim()) { "$Title" } else { "The safety check $($u.entry.guardId) stopped a change" })
+                todo    = "$ActionText"
+            }
+            try { $res.mailed = [bool](& $SendMail $subject $headline $body ([System.Net.WebUtility]::HtmlEncode("$ActionText")) $rowWords) } catch { $res.mailed = $false }
             if ($res.mailed) { $u.entry.lastMailUtc = $NowUtc.ToUniversalTime().ToString('o'); $u.entry.tripsSinceMail = 0 }
         }
         try { & $SetSetting $script:PimGuardSetting ([pscustomobject]$u.state) } catch { $res.detail = "guard state NOT saved: $($_.Exception.Message)" }

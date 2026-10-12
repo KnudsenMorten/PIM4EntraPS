@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.610 -- 2026-10-12
+
+- Alert mails are one short table: customer, environment, solution, who acts, status, problem, what to do, the findings one per line, when, and where to get support
+
 ## 2.4.609 -- 2026-10-12
 
 - Discovery and gaps opens on Status = Gap; Stage and Ignore both count gaps, and one line says how many of the gaps shown are selected and how many groups and roles that creates

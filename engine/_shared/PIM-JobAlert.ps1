@@ -129,23 +129,38 @@ function Get-PimJobAlertMailParts {
     $enc = { param($t) [System.Net.WebUtility]::HtmlEncode("$t") }
     $status = "$(Get-PimJobAlertField -Item $Run -Name 'status')".Trim().ToLowerInvariant()
     $name   = "$(Get-PimJobAlertField -Item $Run -Name 'name')".Trim()
-    $out = [ordered]@{ title = "$($Alert.title)"; headline = ''; detailHtml = (& $enc "$($Alert.detail)"); actionHtml = ''; skip = $false }
+    # PIM 100.105: who / status / problem / todo are the alert table's own rows (plain text, one line each). "Held back" only
+    # for a change a safety check paused on purpose, "Error" only for a job that could not do its work.
+    $out = [ordered]@{ title = "$($Alert.title)"; headline = ''; detailHtml = (& $enc "$($Alert.detail)"); actionHtml = ''; skip = $false
+                       who = 'Not known'; status = 'Warning'; problem = ''; todo = '' }
     if ($status -eq 'throttled') {
+        $out.who = 'Customer'; $out.status = 'Warning'
+        $out.problem = "The job '$name' has not completed for a long time: Microsoft keeps throttling it"
+        $out.todo = 'Nothing now, PIM Manager keeps retrying. If it lasts, spread the job schedule on the Jobs page'
         $out.headline = "The job '$name' is stuck: Microsoft keeps throttling it, so it has not completed for a long time."
         $out.actionHtml = 'Nothing is broken in your setup and PIM keeps retrying. If it does not recover, spread the job cadence (Jobs &rsaquo; Job schedule) or check the Microsoft service health. Open the PIM Manager, <b>Jobs &rsaquo; Engine logs &amp; errors</b>, for the runs.'
         return [pscustomobject]$out
     }
     if ($status -eq 'warning') {
+        $out.who = 'Not known'; $out.status = 'Warning'
+        $out.problem = "The job '$name' ran, but with a warning"
+        $out.todo = 'Open the Jobs page: the job is shown amber with the reason'
         # PIM 100.75: the specifics (they change from run to run) are in the headline -- not part of the debounce key.
         $out.headline = "The job '$name' ran, but needs a look: $(& $enc "$(Get-PimJobAlertField -Item $Run -Name 'detail')")"
         $out.actionHtml = 'Open the PIM Manager, <b>Jobs</b>: the job is shown amber with the reason. This mail is sent at most once a day while it lasts and stops by itself when the job runs clean.'
         return [pscustomobject]$out
     }
     if ($status -ne 'held') {
+        $out.who = 'Not known'; $out.status = 'Error'
+        $out.problem = "The job '$name' failed"
+        $out.todo = 'Open Jobs > Engine logs & errors: every failing item is listed with its cause and, where there is one, a fix'
         $out.headline = "The job '$name' failed."
         $out.actionHtml = 'Open the PIM Manager, <b>Jobs &rsaquo; Engine logs &amp; errors</b>: every failing item is listed there with its cause and, where there is one, a fix.'
         return [pscustomobject]$out
     }
+    $out.who = 'Customer'; $out.status = 'Held back'
+    $out.problem = "The job '$name' held back a change set: it waits for approval, nothing was changed"
+    $out.todo = 'Open Jobs > Engine logs & errors: approve the held change there, or correct what asked for it'
     try {
         $held = @([regex]::Matches("$($Alert.detail)", '-Provider\s+(\w+)\s+-PlanHash\s+([0-9a-fA-F]{64})') | ForEach-Object { [pscustomobject]@{ provider = $_.Groups[1].Value; hash = $_.Groups[2].Value.ToLowerInvariant() } })
         if ($held.Count) {
@@ -164,6 +179,8 @@ function Get-PimJobAlertMailParts {
                     $out.detailHtml = (@($parts | ForEach-Object { $_.detailHtml }) -join '<br><hr>')
                     $out.actionHtml = (@($parts | ForEach-Object { $_.actionHtml }) -join '<br>')
                     $out.title      = "Job '$name': " + (@($parts | ForEach-Object { $_.subject }) -join '; ')
+                    $out.problem    = 'Held for approval, nothing was changed: ' + (@($parts | ForEach-Object { "$($_.subject)" -replace '\s+held\s+--\s+needs approval\s*$', '' }) -join ', ')
+                    $out.todo       = 'Open Approvals: approve the change set held now, or change the setting if it is not intended'
                     return [pscustomobject]$out
                 }
             }
@@ -276,11 +293,14 @@ function Invoke-PimJobRunAlert {
         if ($mail.skip) { return 'none' }
 
         if (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue) {
-            [void](Send-PimManagerAlert -Event $d.event -Title $mail.title -Detail $mail.detailHtml -Headline $mail.headline -Action $mail.actionHtml -LinkTab 'jobs' -DebounceMinutes $DebounceMinutes)
+            # PIM 100.105: the alert table's rows -- only the ones this sender declares (Get-PimAlertMailArgs)
+            $am = @{}; if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) { $am = Get-PimAlertMailArgs -Command 'Send-PimManagerAlert' -Who $mail.who -Status $mail.status -Problem $mail.problem -Todo $mail.todo }
+            [void](Send-PimManagerAlert -Event $d.event -Title $mail.title -Detail $mail.detailHtml -Headline $mail.headline -Action $mail.actionHtml -LinkTab 'jobs' -DebounceMinutes $DebounceMinutes @am)
             return 'manager'
         }
         if (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue) {
-            $r = Send-PimJobAlertViaNotify -Event $d.event -Title $mail.title -Detail $mail.detailHtml -Headline $mail.headline -Action $mail.actionHtml -DebounceMinutes $DebounceMinutes
+            $am = @{}; if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) { $am = Get-PimAlertMailArgs -Command 'Send-PimJobAlertViaNotify' -Who $mail.who -Status $mail.status -Problem $mail.problem -Todo $mail.todo }
+            $r = Send-PimJobAlertViaNotify -Event $d.event -Title $mail.title -Detail $mail.detailHtml -Headline $mail.headline -Action $mail.actionHtml -DebounceMinutes $DebounceMinutes @am
             if ($r) { return 'notify' }
             return 'none'
         }
@@ -355,7 +375,11 @@ function Send-PimJobAlertViaNotify {
         [string]$Headline = '',
         [string]$Action = '',
         # §79.3: the Manager page the mail links to (drift, coverage, admins ...). 'jobs' keeps every earlier caller as it was.
-        [ValidatePattern('^[a-z0-9-]+$')][string]$LinkTab = 'jobs'
+        [ValidatePattern('^[a-z0-9-]+$')][string]$LinkTab = 'jobs',
+        # PIM 100.105: the alert mail's own rows -- who acts (Customer / PIM Manager team / Not known), the status (Error /
+        # Warning / Held back / Needs customer's action), the problem and what to do in ONE plain line each, and the
+        # findings as @(@{ kind; name }). Wording only: none of them is part of the debounce key or changes who is mailed.
+        [string]$Who = '', [string]$Status = '', [string]$Problem = '', [string]$Todo = '', [object[]]$Findings = @()
     )
     if (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) { return $false }
 
@@ -387,9 +411,11 @@ function Send-PimJobAlertViaNotify {
         AlertTab    = $LinkTab
         TenantName  = "$($global:PIM_TenantName)"
         Instance    = 'scheduler'
-        AlertHeadline = $(if ("$Headline".Trim()) { "$Headline" } else { 'A PIM4EntraPS alert was raised for your privileged-access estate.' })
+        AlertHeadline = $(if ("$Headline".Trim()) { "$Headline" } else { 'PIM Manager raised an alert.' })
         AlertAction   = $(if ("$Action".Trim()) { "$Action" } else { "Open the PIM Manager and review the $LinkTab view." })
         WhenUtc     = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
+        # PIM 100.105: the four words of the alert table (empty = the mail's safe default) and its findings
+        AlertWho = "$Who"; AlertStatus = "$Status"; AlertProblem = "$Problem"; AlertTodo = "$Todo"; AlertFindings = @($Findings)
     }
     $sent = 0; $lastReason = ''
     # MAIL-2 item 2: each recipient's Notifications -- this alert on/off and their severity floor, read at send time.

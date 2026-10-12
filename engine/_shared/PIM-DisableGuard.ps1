@@ -779,7 +779,11 @@ function Send-PimSafetyAlert {
         [string]$Headline = '',
         [string]$Action = '',
         # §79.14: files for every recipient -- @{ name; contentType; bytes } (the CAB workbook of a policy hold).
-        [object[]]$Attachments = @()
+        [object[]]$Attachments = @(),
+        # PIM 100.105: the alert table's own rows (plain text): who acts, the status ("Held back" only when the caller says a
+        # safety check paused a change on purpose), the problem and what to do. Empty = the mail's safe default. Labels in
+        # the mail only -- what the guard blocks or holds is decided elsewhere.
+        [string]$Who = '', [string]$Status = '', [string]$Problem = '', [string]$Todo = '', [object[]]$Findings = @()
     )
     $res = [ordered]@{ status = ''; sent = 0; recipients = @(); failures = @(); detail = '' }
     try {
@@ -826,8 +830,10 @@ function Send-PimSafetyAlert {
             WhenUtc     = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
             # The verdict and the next step, kept OUT of the detail so the reader gets them first.
             # Defaulted here so every existing caller keeps working without passing them.
-            AlertHeadline = $(if ("$Headline".Trim()) { "$Headline" } else { 'A PIM4EntraPS alert was raised for your privileged-access estate.' })
+            AlertHeadline = $(if ("$Headline".Trim()) { "$Headline" } else { 'PIM Manager raised an alert.' })
             AlertAction   = $(if ("$Action".Trim()) { "$Action" } else { "Open the PIM Manager and review the $Tab view." })
+            # PIM 100.105: the four words of the alert table and its findings
+            AlertWho = "$Who"; AlertStatus = "$Status"; AlertProblem = "$Problem"; AlertTodo = "$Todo"; AlertFindings = @($Findings)
         }
         $fails = New-Object System.Collections.Generic.List[string]
         foreach ($r in $to) {
@@ -911,7 +917,7 @@ function Write-PimRemoveBudgetAlert {
     if ($Decision.PSObject.Properties['typeChanges'] -and [int]$Decision.typeChanges -gt 0) { $kinds += ("{0} assignment type change(s) (Eligible/Active swap, which deletes the old type first)" -f [int]$Decision.typeChanges) }
     if ($Decision.PSObject.Properties['removeRows'] -and [int]$Decision.removeRows -gt 0)   { $kinds += ("{0} row(s) marked Action=Remove" -f [int]$Decision.removeRows) }
     $what = if ($kinds.Count) { ($kinds -join ' and ') } else { ("{0} item(s)" -f $Decision.toRemove) }
-    $headline = ("Nothing was changed. PIM4EntraPS stopped itself before deleting {0} in '{1}'." -f $Decision.toRemove, $Decision.scope)
+    $headline = ("Nothing was changed. PIM Manager stopped itself before deleting {0} in '{1}'." -f $Decision.toRemove, $Decision.scope)
     $detail = ("A single engine run is allowed to delete at most {0} item(s) in one area -- a safety ceiling that exists so a bad " +
                "read or a bulk edit can never clear out access in one pass. This run wanted to delete {1}, which is over that ceiling, " +
                "so it applied NONE of them and left '{2}' exactly as it was. {3}") -f `
@@ -932,7 +938,10 @@ function Write-PimRemoveBudgetAlert {
     }
     $r = Send-PimSafetyAlert -SwallowScope 'remove-budget-alert-mail' `
             -Title ("{0} deletion(s) in '{1}' were blocked -- nothing was changed" -f $Decision.toRemove, $Decision.scope) `
-            -Headline $headline -Detail $detail -Action $action
+            -Headline $headline -Detail $detail -Action $action `
+            -Who 'Customer' -Status 'Held back' `
+            -Problem ("{0} deletion(s) in '{1}' were held back by a safety limit of {2} per run: nothing was changed" -f $Decision.toRemove, $Decision.scope, $Decision.budget) `
+            -Todo ("Read the held items on Jobs > Engine logs & errors, then apply them in batches of at most {0} or let a SuperAdmin release this plan on Operations > Guards" -f $Decision.budget)
     # GUARD-1: state + audit 'guard.trip' + telemetry (the mail above IS this guard's mail)
     if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
         [void](Invoke-PimGuardTrip -GuardId 'engine.remove-budget' -Outcome halted -Area "$($Decision.scope)" -Job 'engine' -CallerMailed `
@@ -970,7 +979,10 @@ function Write-PimDisableAbortAlert {
     # VAR). BUG-184: through Send-PimSafetyAlert, so the send actually uses a template that exists and
     # a failed send is reported under 'disable-abort-alert-mail' ("nobody is being paged").
     $r = Send-PimSafetyAlert -SwallowScope 'disable-abort-alert-mail' `
-            -Title ("account-disable circuit breaker tripped -- {0} [{1}]" -f $Scope, $Decision.tripped) -Detail $msg
+            -Title ("account-disable circuit breaker tripped -- {0} [{1}]" -f $Scope, $Decision.tripped) -Detail $msg `
+            -Who 'Customer' -Status 'Held back' `
+            -Problem ("Disabling accounts in '{0}' was held back by a safety check: no account was disabled" -f $Scope) `
+            -Todo 'Open Jobs > Engine logs & errors and check why so many accounts would be disabled before the next run'
     # GUARD-1: state + audit 'guard.trip' + telemetry (the mail above IS this guard's mail)
     if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
         $dm = @{}; foreach ($k in 'toDisable', 'scanned') { if ($Decision.PSObject.Properties[$k]) { $dm[$k] = $Decision.$k } }

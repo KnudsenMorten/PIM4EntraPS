@@ -60,8 +60,13 @@ function Invoke-PimPendingCheckJob {
             ' by ' + (& $enc (@($_.by) -join ', ')) + ' -- the oldest ' + [math]::Floor([double]$_.ageHours) + ' h old' })
         $n = ($f | Measure-Object -Property count -Sum).Sum
         $detail = "$n change(s) were started and never committed (older than $MinAgeHours h). Nothing reaches the tenant until someone commits them.<br><br>" + ($lines -join '<br>')
+        # PIM 100.105: the alert table's rows -- the product works; someone has to commit or discard. One row per table.
+        $am = @{}; if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) { $am = Get-PimAlertMailArgs -Command 'Send-PimJobAlertViaNotify' -Who 'Customer' -Status "Needs customer's action" `
+            -Problem ("{0} change(s) were started more than {1} hours ago and never committed: they have not reached the tenant" -f $n, $MinAgeHours) `
+            -Todo 'Open Pending changes and commit what should go through, discard what should not' `
+            -Findings @($f | ForEach-Object { @{ kind = $(if ($_.source -eq 'staged') { 'Staged, not committed' } else { 'Queued, not committed' }); name = ("{0}: {1} change(s) by {2}, the oldest {3} h old" -f $_.entity, $_.count, (@($_.by) -join ', '), [math]::Floor([double]$_.ageHours)) } }) }
         try { [void](Send-PimJobAlertViaNotify -Event $script:PimPendingCheckAlertEvent -Title ("{0} change(s) waiting to be committed" -f $n) -Detail $detail -LinkTab 'save' -DebounceMinutes 1380 `
-                        -Headline 'Changes were staged or queued but never committed.' -Action 'Open Pending changes: commit what should go through, discard what should not.') } catch { Write-Warning "[pending-check] the alert could not be sent: $($_.Exception.Message)" }
+                        -Headline 'Changes were staged or queued but never committed.' -Action 'Open Pending changes: commit what should go through, discard what should not.' @am) } catch { Write-Warning "[pending-check] the alert could not be sent: $($_.Exception.Message)" }
     }
     $staged = @($f | Where-Object { $_.source -eq 'staged' } | Measure-Object -Property count -Sum).Sum
     $queued = @($f | Where-Object { $_.source -eq 'queued' } | Measure-Object -Property count -Sum).Sum

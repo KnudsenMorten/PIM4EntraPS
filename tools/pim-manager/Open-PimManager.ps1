@@ -5004,7 +5004,11 @@ function Send-PimManagerAlert {
         [string]$Action = '',
         [switch]$WhatIf,
         # MAIL-2: the Settings "Send test alert" proves delivery to EVERY recipient, whatever their Notifications say
-        [switch]$IgnoreNotifications
+        [switch]$IgnoreNotifications,
+        # PIM 100.105: the alert mail's own rows -- who acts (Customer / PIM Manager team / Not known), the status (Error /
+        # Warning / Held back / Needs customer's action), the problem and what to do in ONE plain line each, and the
+        # findings as @(@{ kind; name }). Wording only: not part of the debounce key, the webhook or who is mailed.
+        [string]$Who = '', [string]$Status = '', [string]$Problem = '', [string]$Todo = '', [object[]]$Findings = @()
     )
     $cfg = Get-PimAlertingConfig
     $webhookOn = [bool]$cfg.webhookEnabled
@@ -5036,9 +5040,11 @@ function Send-PimManagerAlert {
         AlertTab    = "$LinkTab"
         TenantName  = "$($tenantCtx.tenantName)"
         Instance    = "$($script:PimInstanceName)"
-        AlertHeadline = $(if ("$Headline".Trim()) { "$Headline" } else { 'A PIM4EntraPS alert was raised for your privileged-access estate.' })
+        AlertHeadline = $(if ("$Headline".Trim()) { "$Headline" } else { 'PIM Manager raised an alert.' })
         AlertAction   = $(if ("$Action".Trim()) { "$Action" } else { "Open the PIM Manager and review the $LinkTab view." })
         WhenUtc     = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
+        # PIM 100.105: the four words of the alert table (empty = the mail's safe default) and its findings
+        AlertWho = "$Who"; AlertStatus = "$Status"; AlertProblem = "$Problem"; AlertTodo = "$Todo"; AlertFindings = @($Findings)
     }
     $sent = 0; $lastReason = ''
     # MAIL-2 item 2: each recipient's Notifications -- this alert on/off and their severity floor, read at send time. The
@@ -8593,7 +8599,8 @@ function Get-PimHomeOverview {
                         $ea = Get-PimExpiringAccessAlert -Rows $rows -NowUtc $now -WindowDays 14
                         if ($ea.fire) {
                             # debounce daily so the same expiring set does not re-alert on every Home load
-                            Send-PimManagerAlert -Event 'expiring-access' -Title 'Active access expiring soon' -Detail "$($ea.detail)" -LinkTab 'home' -DebounceMinutes 1440 | Out-Null
+                            Send-PimManagerAlert -Event 'expiring-access' -Title 'Active access expiring soon' -Detail "$($ea.detail)" -LinkTab 'home' -DebounceMinutes 1440 `
+                                -Who 'Customer' -Status "Needs customer's action" -Problem 'Active access ends within 14 days' -Todo 'Open the Home page and extend the access that is still needed; the rest ends on its date' | Out-Null
                         }
                     } catch {}
                 }
@@ -14613,6 +14620,8 @@ function Handle-Request {
                     AlertTitle = 'PIM Manager test mail'; AlertEvent = 'mail-test'; AlertTab = 'settings'; TenantName = "$($tenantCtx.tenantName)"; Instance = "$($script:PimInstanceName)"
                     AlertDetail = 'This test mail was sent from Get Started / Settings > Mail & alerting to prove that this environment can send mail.'
                     AlertHeadline = 'Mail from PIM Manager works.'; AlertAction = 'Nothing to do -- this was a test.'
+                    # PIM 100.105: who acts / status / problem / what to do (a test: the product works, nobody has to act)
+                    AlertWho = 'Customer'; AlertStatus = 'Warning'; AlertProblem = 'This is a test mail: PIM Manager can send mail'; AlertTodo = 'Nothing to do, this was a test'
                     WhenUtc = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC' }
                 $ok = [bool]$r.sent
                 Save-PimManagerMailLastTest -Ok $ok -Reason "$($r.reason)" -To $to
@@ -14636,7 +14645,8 @@ function Handle-Request {
             try {
                 # The test alert intentionally bypasses debounce so an operator always
                 # sees a fresh result (and a fresh recorded-send-proof feed entry).
-                $r = Send-PimManagerAlert -Event 'engine-failure' -Title 'PIM Manager test alert' -Detail 'This is a test alert sent from the Home/Settings alerting panel to confirm delivery.' -LinkTab 'home' -DebounceMinutes 0 -IgnoreNotifications
+                $r = Send-PimManagerAlert -Event 'engine-failure' -Title 'PIM Manager test alert' -Detail 'This is a test alert sent from the Home/Settings alerting panel to confirm delivery.' -LinkTab 'home' -DebounceMinutes 0 -IgnoreNotifications `
+                    -Who 'Customer' -Status 'Warning' -Problem 'This is a test alert: PIM Manager can reach the alert recipients' -Todo 'Nothing to do, this was a test'
                 $ok = ($r.sent -gt 0)
                 # MAIL-1: a test alert that reached the mail path is also proof (or disproof) of the current mail mode
                 if ($r.fired -and @($r.recipients).Count) { Save-PimManagerMailLastTest -Ok $ok -Reason "$($r.reason)" -To (@($r.recipients) -join ';') }
@@ -17032,7 +17042,8 @@ function Handle-Request {
                 Add-PimSqlQueueChange -ConnectionString $cs -Change $change
 
                 Write-PimManagerAuditEvent -Action 'sessions.revoke.queued' -Target $upn -After @{ userId = "$uid"; queueId = "$($change.id)"; requestedBy = $who }
-                try { Send-PimManagerAlert -Event 'sessions-revoked' -Title 'Sign-in session revoke QUEUED' -Detail ("$upn -- queued; refresh tokens are invalidated when the engine applies it") -LinkTab 'accounts' | Out-Null } catch {}
+                try { Send-PimManagerAlert -Event 'sessions-revoked' -Title 'Sign-in session revoke QUEUED' -Detail ("$upn -- queued; refresh tokens are invalidated when the engine applies it") -LinkTab 'accounts' `
+                        -Who 'Customer' -Status 'Warning' -Problem "The sign-in sessions of $upn will be revoked at the next engine run" -Todo 'Nothing to do if this was intended; if not, open the Accounts page' | Out-Null } catch {}
 
                 Write-JsonResponse -Response $resp -Status 202 -Body @{
                     ok                = $true
@@ -17130,7 +17141,8 @@ function Handle-Request {
             Write-PimManagerAuditEvent -Action 'emergency.activate' -Target (@($ov.scopeGroupTags) -join ',') -After @{ hours = $hours; reason = "$($body.reason)"; expiresAtUtc = $ov.expiresAtUtc; store = $ovWhere }
             # Alerting (REQUIREMENTS §27 H2): break-glass use is a high-signal event ->
             # fire the break-glass alert through the existing notify path.
-            try { Send-PimManagerAlert -Event 'break-glass' -Title 'Break-glass (emergency override) ACTIVATED' -Detail ("Activated by $who; scope=$((@($ov.scopeGroupTags) -join ', ')); expires $($ov.expiresAtUtc); reason: $($body.reason)") -LinkTab 'settings' | Out-Null } catch {}
+            try { Send-PimManagerAlert -Event 'break-glass' -Title 'Break-glass (emergency override) ACTIVATED' -Detail ("Activated by $who; scope=$((@($ov.scopeGroupTags) -join ', ')); expires $($ov.expiresAtUtc); reason: $($body.reason)") -LinkTab 'settings' `
+                -Who 'Customer' -Status "Needs customer's action" -Problem "The break-glass emergency override was switched on by $who" -Todo 'Check that this was intended, and switch the override off in Settings when the emergency is over' | Out-Null } catch {}
             # 🔴 BUG-185: say what is TRUE. The Manager only RECORDS the override (§65: it never writes the
             # directory); the ENGINE applies it -- approval off on the scoped groups -- and restores normal
             # policy at expiry (DESIGN §17.9). Nothing is in effect until that run, so the reply says QUEUED

@@ -333,7 +333,10 @@ function Invoke-PimDataQualityJob {
     if (-not $Send) {
         $Send = { param($m)
             if (-not (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue)) { return $false }
-            [bool](Send-PimJobAlertViaNotify -Event $script:PimDqAlertEvent -Title $m.subject -Detail $m.detailHtml -Headline $m.headline -Action $m.action -LinkTab 'jobs' -DebounceMinutes 0) }
+            # PIM 100.105: the alert table's rows -- warnings to check, nothing was blocked
+            $am = @{}; if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) { $am = Get-PimAlertMailArgs -Command 'Send-PimJobAlertViaNotify' -Who 'Customer' -Status 'Warning' `
+                -Problem "$($m.headline)" -Todo 'Open the Jobs page and check each item; if a change was not intended, undo it and run the scope again' }
+            [bool](Send-PimJobAlertViaNotify -Event $script:PimDqAlertEvent -Title $m.subject -Detail $m.detailHtml -Headline $m.headline -Action $m.action -LinkTab 'jobs' -DebounceMinutes 0 @am) }
     }
     $notes = $null; $state = $null
     try { $notes = & $GetSetting $script:PimDqNotesSetting; $state = & $GetSetting $script:PimDqStateSetting }

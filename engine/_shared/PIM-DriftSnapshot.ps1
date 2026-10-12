@@ -562,10 +562,18 @@ function Invoke-PimDriftSnapshotJob {
         $__due = Test-PimDriftAlertDue -Cadence $__cad -LastMailUtc $__last -NowUtc $NowUtc
         if (-not $__settling -and -not $__due) { Write-Host ("[$type] drift found; the $__cad drift mail was last sent {0} -- the next one waits for the cadence" -f $__last) -ForegroundColor DarkGray }
         if (-not $__settling -and $__due) { try {
+            # PIM 100.105: the alert table's rows -- the tenant differs from what PIM Manager defines; one row per item
+            # (kind = missing / changed / extra / warning, name = area and item). $title / $detail stay as they were.
+            $__words = @{ Who = 'Customer'; Status = 'Warning'
+                Problem = ("{0} item(s) in the tenant differ from what PIM Manager defines (configuration drift)" -f [int]$doc.total)
+                Todo = 'Open the Drift page: tick what should follow the definitions and press Apply now, or press Ignore for what is intended'
+                Findings = @($all | Select-Object -First 15 | ForEach-Object { @{ kind = $(switch ("$($_.type)") { 'missing' { 'Missing in the tenant'; break } 'changed' { 'Changed in the tenant'; break } 'extra' { 'Extra in the tenant'; break } default { 'Warning' } }); name = ("{0}: {1}" -f $_.scope, $_.label) + $(if ($_.detail) { " ($($_.detail))" } else { '' }) } }) }
             if (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue) {
-                [void](Send-PimManagerAlert -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift' -DebounceMinutes 0)
+                $am = @{}; if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) { $am = Get-PimAlertMailArgs -Command 'Send-PimManagerAlert' @__words }
+                [void](Send-PimManagerAlert -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift' -DebounceMinutes 0 @am)
             } elseif (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue) {
-                [void](Send-PimJobAlertViaNotify -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift' -DebounceMinutes 0)
+                $am = @{}; if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) { $am = Get-PimAlertMailArgs -Command 'Send-PimJobAlertViaNotify' @__words }
+                [void](Send-PimJobAlertViaNotify -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift' -DebounceMinutes 0 @am)
             }
             if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { Set-PimSetting -Name 'DriftAlertState' -Value ([pscustomobject]@{ lastMailUtc = $NowUtc.ToUniversalTime().ToString('o'); cadence = $__cad; total = [int]$doc.total }) }
         } catch { Write-Warning "[$type] the drift alert could not be raised: $($_.Exception.Message)" } }
