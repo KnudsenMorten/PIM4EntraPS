@@ -15,6 +15,8 @@
                (24) with "still tripping (N times)"; switchable with the setting GuardAlertMail ('off' = no mail).
     4. TELEMETRY  the next uplink cycle (job 'uplink', hourly) sends every guard whose last trip is newer than its last
                send as a Schema 2 Kind 'guard' record (New-PimGuardUplinkRecord) -- following the telemetry switch.
+               PIM 100.102: the same cycle also says when a guard is CLEAR again (a 'cleared' record) and lists what is held
+               right now on the heartbeat (ActiveGuards) -- PIM-Uplink.ps1, read-only over 'GuardHolds' / '<prefix>MassHold'.
   Severity follows the outcome: halted / refused = critical, held / skipped / warning = warning (GUARD-1.3).
 #>
 
