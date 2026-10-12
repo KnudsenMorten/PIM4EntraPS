@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.601 -- 2026-10-12
+
+- External companies: the button of an open company row is Save and it saves at once; after a save the list shows the saved values without reloading the page
+
 ## 2.4.600 -- 2026-10-12
 
 - The menu shows a number only for an error or for something that waits for a person; warnings such as gaps, validation warnings and policy settings waiting for a choice are listed on their page and put no number or dot in the menu
