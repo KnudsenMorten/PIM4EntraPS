@@ -274,7 +274,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <p>See chapter 10. Your SQL database (and so all stored data) remains until you delete the resource group or the database.</p>
 <div class="tablewrap"><table><caption>Telemetry uplink -- exact fields</caption><thead><tr><th>Record</th><th>Fields</th><th>Mode</th></tr></thead><tbody>
 <tr><td>Every record</td><td>Schema, Kind, Product (pim-manager), Version, Ring, LastSeenUtc</td><td>Both</td></tr>
-<tr><td>Heartbeat (every 4 hours)</td><td>Edition (community / pro / trial), Hosting (container), RuntimeIdentity (managed identity / certificate), LicenceState</td><td>Both</td></tr>
+<tr><td>Heartbeat (every hour)</td><td>Edition (community / pro / trial), Hosting (container), RuntimeIdentity (managed identity / certificate), LicenceState</td><td>Both</td></tr>
 <tr><td>Run report (per job, per cycle)</td><td>Job name, Outcome, DurationMs, ErrorClass, run count</td><td>Both</td></tr>
 <tr><td>Guard record</td><td>GuardId, GuardOutcome, Severity, Area, Job, measured and threshold numbers, HeldCount, TripCount, FirstSeenUtc</td><td>Both</td></tr>
 <tr><td>Anonymous mode adds</td><td>InstallId (random, stored in settings); counts bucketed</td><td>Anonymous</td></tr>

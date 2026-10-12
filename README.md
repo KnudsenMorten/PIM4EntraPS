@@ -1340,7 +1340,7 @@ Two jobs talk to Invardia. Both are **on by default** in a new installation, and
 - **Request the licence automatically** -- asks Invardia for this installation's licence when none is valid or yours ends
   within 30 days, then installs the signed file only after checking it here. It sends the tenant, the version and an
   installation id.
-- **Send status telemetry** -- every hour, which jobs ran and whether they succeeded, and every 4 hours the version, edition
+- **Send status telemetry** -- every hour, which jobs ran and whether they succeeded, and every hour the version, edition
   and licence state. Without a Pro install key it is **anonymous**: no tenant, no server name, no error text -- only a
   failure class and rounded counts, under a random id of its own. With a Pro install key the reports also carry the error
   text, with secrets removed, so support can see a failure before you call. Switch it off at any time.

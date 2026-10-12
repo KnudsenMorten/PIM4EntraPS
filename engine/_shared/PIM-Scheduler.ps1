@@ -58,7 +58,7 @@ $script:PimTickOnlyJobTypes += 'pending-check'
 # Inert unless the feature 'licence.autoRequest' is ON (ON by default since the owner's decision 2026-10-05; switchable).
 $script:PimJobTypes += 'licence-request'
 $script:PimTickOnlyJobTypes += 'licence-request'
-# §95.3 (2026-10-04): 'uplink' sends PIM's status telemetry (a heartbeat every 4 h + one run report per job) to the Invardia-hosted
+# §95.3 (2026-10-04): 'uplink' sends PIM's status telemetry (a heartbeat every hour + one run report per job) to the Invardia-hosted
 # uplink through the framework client (PIM-Uplink.ps1). Gated by the feature 'telemetry.uplink' -- ON by default (PIM-FeatureCatalog.ps1).
 # PIM 100.75: a failed send / an anonymous licensed install returns warning=$true -> run status 'warning' (amber, never failed).
 $script:PimJobTypes += 'uplink'
@@ -4341,6 +4341,21 @@ function Invoke-PimSchedulerTick {
     if (-not $secondary -and -not $WhatIf) {
         $esr = Invoke-PimEnrollSignalTickStep -Jobs @($Jobs) -NowUtc $now
         if ($esr) { $results.Add($esr) }
+    }
+    # (f) THE 15-MINUTE EXPEDITE CHECK (framework 12.1 Phase C; PIM-UpdateExpedite.ps1): every tick of the MAIN instance looks
+    # at its own 15-minute stamp (one setting read when not due) and, when due, asks Invardia whether the head of this
+    # environment's ring is marked "expedite: now" -- then it starts the update job ONCE for that version. Inert while
+    # Invardia has no such route (404 = silent). Listed in the results only when an update was started; never breaks the tick.
+    if (-not $secondary -and -not $WhatIf) {
+        $uxr = $null
+        try {
+            if (-not (Get-Command Invoke-PimUpdateExpediteTickStep -ErrorAction SilentlyContinue)) {
+                $uxf = Join-Path $PSScriptRoot 'PIM-UpdateExpedite.ps1'
+                if (Test-Path -LiteralPath $uxf) { . $uxf }
+            }
+            if (Get-Command Invoke-PimUpdateExpediteTickStep -ErrorAction SilentlyContinue) { $uxr = Invoke-PimUpdateExpediteTickStep -NowUtc $now }
+        } catch { $uxr = $null }
+        if ($uxr) { $results.Add($uxr) }
     }
     # §95.2o: the stamps are MERGED, never a whole-state overwrite -- another execution's newer stamps are kept.
     [void](Save-PimSchedulerJobStamps -Jobs @($Jobs) -RanNames @($ranNames.ToArray()) -LastWatermark $lastWm -NowUtc $now)

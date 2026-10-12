@@ -9968,7 +9968,7 @@ A delivered licence is installed only after PIM has checked it here: the file's 
 signers, that it is Pro, and that it names this tenant, the tenant the managed identity's own token is issued in. A
 rejection is shown in Settings > Licence and never asked again automatically.
 
-**A re-issued licence (2.4.539).** When Invardia re-issues a licence, the answer to the heartbeat (every 4 hours, 29.2) names the
+**A re-issued licence (2.4.539).** When Invardia re-issues a licence, the answer to the heartbeat (every hour, 29.2) names the
 licence that replaces the installed one (`supersededBy`). PIM keeps that id in its settings (`LicenceSupersededBy`) and the
 next licence request run -- within 30 minutes -- asks for the new licence, sending the installed licence's id, even though
 the installed licence is still valid. Invardia approves the successor of a re-issued licence by itself; the delivery goes
@@ -9977,7 +9977,7 @@ note is removed once the new licence is installed. A missing or malformed answer
 stops further requests until the administrator asks again.
 
 ### 29.2 Status telemetry (job `uplink`, feature `telemetry.uplink`)
-Every hour PIM sends one report per job that ran since the last send, and every 4 hours a heartbeat. A job that ran many times
+Every hour PIM sends one report per job that ran since the last send, and every hour a heartbeat. A job that ran many times
 sends one report: *failed* if any of its runs failed (with that run's failure), *warning* if one was held for approval,
 otherwise *ok*. Skipped and unimplemented runs are not reported, because nothing ran. The heartbeat carries the version, the
 edition, the hosting type, the runtime identity and the licence state.

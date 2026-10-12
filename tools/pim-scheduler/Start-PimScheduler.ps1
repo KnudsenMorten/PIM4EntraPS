@@ -192,6 +192,8 @@ if (Test-Path -LiteralPath "$shared\..\coverage\PIM-Coverage.ps1") { . "$shared\
 . "$shared\PIM-Uplink.ps1"
 # PIM 100.10 (framework 8.7 UPLINK-SETUP): the setup report + the control list (one source with Home) + the ring resolver.
 . "$shared\PIM-UplinkSetup.ps1"
+# Framework 12.1 Phase C: the 15-minute expedite check the tick calls (inert while Invardia has no such route).
+. "$shared\PIM-UpdateExpedite.ps1"
 # §95.4: job 'install-key' -- claim the Invardia install key (OFF unless 'updates.invardia'); the uplink + Pro updates use it.
 . "$shared\PIM-InvardiaUpdate.ps1"
 # PIM 100.75: the scenario profile (Get-PimActiveScenario -- the MSP role) at FILE scope. It was loaded only INSIDE a few
@@ -720,6 +722,25 @@ Register-PimJobHandler -Type 'verify-convergence' -Handler {
                 -Cause 'Usually an engine run that keeps failing for these items (see Jobs > Engine logs & errors), a permission the engine lacks, or a target that no longer exists.' `
                 -Fix 'Open the Jobs page and the failing engine job: fix what it names, then Run now. tools/setup/Repair-PimJobBindingBacklog.ps1 quantifies and clears a backlog.' `
                 -Measured @{ persistent = [int]$verdict.persistent; total = [int]$verdict.total } -NowUtc $now) } catch { }
+        }
+        # PIM 100.113 (owner 2026-10-12: "why is this still an error"): when EVERY item past the grace window is an item the
+        # engine's own apply fails on for a customer-configuration cause (the currently-failing set, pim.Settings
+        # 'EngineItemFailures' -- same scope + key, no new tenant read), the run says THAT: the cause's class in brackets
+        # and a plain sentence naming the item. The uplink then reports the class with FixKind customer-config, Outcome
+        # warning, ActionBy customer (Get-PimUplinkOutcomeAction). The run itself still FAILS here (the owner's decision of
+        # 2026-10-11, "Immediate failure alert", is not changed by this). Mixed or unknown causes: the text below, as before.
+        $convCause = $null
+        try {
+            if ((Get-Command Get-PimConvergenceCause -ErrorAction SilentlyContinue) -and (Get-Command Get-PimEngineItemFailures -ErrorAction SilentlyContinue)) {
+                $pastGrace = @($verdict.items | Select-Object -First ([int]$verdict.persistent) | ForEach-Object { "$($_.key)" })
+                $convCause = Get-PimConvergenceCause -Unconverged $pastGrace -Failures @(Get-PimEngineItemFailures)
+            }
+        } catch { $convCause = $null }
+        if ($convCause -and [bool]$convCause.customerConfig) {
+            throw ("[scheduler] CONVERGENCE FAILURE (customer configuration) -- " + "$($convCause.sentence)" + ". " +
+                   "Item(s): " + ((@($convCause.items) | Select-Object -First 5) -join '; ') + ". " +
+                   "The engine works: these items cannot be applied as they are defined, and nothing else is affected. " +
+                   "Open Jobs > Engine logs & errors for each item and how to solve it.")
         }
         throw ("[scheduler] CONVERGENCE FAILURE -- $($verdict.persistent) delegation/assignment(s) exist in the " +
                "Manager but NOT in the tenant, and have stayed that way past the grace window. " +

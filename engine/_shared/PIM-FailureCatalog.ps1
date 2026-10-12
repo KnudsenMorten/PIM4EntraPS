@@ -445,6 +445,292 @@ function Get-PimFailureFixKind {
     return 'product-defect'
 }
 
+# ---------------------------------------------------------------------------------------------
+# PIM 100.115 (owner 2026-10-12: "ask invardia to send email to [the customer's admin] and explain the solution. learn
+# from this so future of this are solved from this lessons learned"). EVERY class whose FixKind is customer-config
+# carries a CUSTOMER-READY solution: what is wrong (one sentence, {item} = the item's own names, filled in by the
+# reporter), is anything affected, the one or two ways to solve it as steps with the page names of the product, and
+# what happens afterwards. It travels with the run report (PIM-Uplink.ps1, field Solution), so a ticket or a mail to the
+# customer is written from the report without anybody reading a log first.
+# !! The class ids are KEYS at Invardia (solved cases are stored per class): never rename or split one here. A class
+#    solved by hand gets its solution HERE in the same release (the lessons-learned loop).
+# A FUNCTION returning literals, not a $script: table (the BUG-79-6b trap: a $script: default read from a child script).
+# Test-PimEngineFailures pins: every customer-config class has one, every page named below is a page of the Manager.
+# ---------------------------------------------------------------------------------------------
+function Get-PimFailureSolutionPages {
+    <# PURE. The Manager page names the solutions use -- exactly as the pages are called in pim-manager.html. #>
+    return @('Engine logs & errors', 'Pending changes', 'Advanced View (grid)', 'Accounts & TAP', 'Departments & owners',
+             'Policy templates', 'Policy settings', 'Guards', 'Get Started', 'Workload templates', 'Custom workloads', 'Role Lookup', 'Jobs')
+}
+
+function Get-PimFailureSolutionCatalog {
+    <#
+      PURE. code -> @{ short; what; affected; steps; after }.
+        short     the cause in a few plain words (the convergence sentence: "1 assignment cannot be made: <short>")
+        what      what is wrong, one sentence; {item} = the item's own names
+        affected  is anything affected
+        steps     one or two ways to solve it, each a step with the page name
+        after     what happens afterwards
+    #>
+    $next = 'It turns OK by itself on the next run. Nothing has to be acknowledged.'
+    $hold = 'Nothing was changed. The policies stay as they are until the change set is approved or withdrawn.'
+    $holdSteps = @('If the change is intended: open Jobs > Engine logs & errors, review the held change set and approve it (a SuperAdmin of your tenant approves; the approval is valid for 24 hours).',
+                   'If it is not intended: correct the policy template (Policy templates) or the choice in Policy settings, and commit in Pending changes.')
+    $eligible = 'Open Jobs > Engine logs & errors, press "Make it Eligible" on the item and commit in Pending changes.'
+    $stop = 'Or press "Stop managing this binding (delete the row)" on the item in Jobs > Engine logs & errors and commit in Pending changes.'
+    $removeRow = 'Or press "Remove this row" on the item in Jobs > Engine logs & errors and commit in Pending changes.'
+    return @{
+        'AZ-POLICY-MASS-HOLD' = @{ short = 'a change to many Azure role policies at once waits for approval'
+            what = 'A change to many Azure role policies at once is held for approval: {item}.'; affected = $hold; steps = $holdSteps; after = 'After the approval the next run makes exactly those changes and the status turns OK by itself.' }
+        'GROUP-POLICY-MASS-HOLD' = @{ short = 'a change to many PIM for Groups policies at once waits for approval'
+            what = 'A change to many PIM for Groups policies at once is held for approval: {item}.'; affected = $hold; steps = $holdSteps; after = 'After the approval the next run makes exactly those changes and the status turns OK by itself.' }
+        'ENTRA-POLICY-MASS-HOLD' = @{ short = 'a change to many Entra role policies at once waits for approval'
+            what = 'A change to many Entra role policies at once is held for approval: {item}.'; affected = $hold; steps = $holdSteps; after = 'After the approval the next run makes exactly those changes and the status turns OK by itself.' }
+        'ENGINE-OUT-OF-MEMORY' = @{ short = 'the engine job ran out of memory'
+            what = 'The engine job ran out of memory, so its work is not done: {item}.'
+            affected = 'Committed changes are not applied until the job has more memory. Nothing was changed wrongly.'
+            steps = @('Nothing to do when updates are on: the next update gives the job more memory by itself.',
+                      'To do it now: your Azure administrator raises the job ca-pim-tick to 2 CPU / 4 GiB in the resource group of PIM Manager (Invardia support can do it with you).')
+            after = $next }
+        'AZ-POLICY-RULE-FAILED' = @{ short = 'Azure refused one or more settings of a PIM policy'
+            what = 'Azure refused one or more settings of a PIM policy: {item}.'
+            affected = 'The other settings of that policy were applied. The refused ones keep the value they had.'
+            steps = @('Open Jobs > Engine logs & errors and read Azure''s answer per setting on the item.',
+                      'When the answer is about a permission: open Get Started > Engine permissions and run the shown command, so the engine identity may write role management policies at that scope.')
+            after = $next }
+        'AZ-SUB-PLACEHOLDER' = @{ short = 'the assignment still points at the example subscription of the template'
+            what = 'An assignment still points at the example subscription of the template: {item}.'
+            affected = 'Nothing is assigned by this row. Everything else is applied.'
+            steps = @('Open Jobs > Engine logs & errors, press "Remove this row" on the item and commit in Pending changes.',
+                      'Or open Advanced View (grid), put the real subscription id in AzScope on that row and commit.')
+            after = $next }
+        'AZ-SUB-NOT-FOUND' = @{ short = 'the Azure subscription it names does not exist in this tenant'
+            what = 'An assignment names an Azure subscription that does not exist in this tenant (any more): {item}.'
+            affected = 'Nothing is assigned by this row. Everything else is applied.'
+            steps = @('Open Advanced View (grid), correct the subscription id in AzScope on that row and commit.', $removeRow)
+            after = $next }
+        'AZ-POLICY-NO-APPROVER' = @{ short = 'the policy requires approval and nobody could be found to approve'
+            what = 'The policy template of an Azure role requires approval, and nobody could be found to approve: {item}.'
+            affected = 'Nothing was written to that policy. The assignment itself is not affected.'
+            steps = @('Open Departments & owners, set the owners of the department of the assigned group (they become the approvers) and commit.',
+                      'Or link the assignment to a policy template without approval in Policy templates and commit.')
+            after = $next }
+        'AZ-POLICY-MAX-DURATION' = @{ short = 'Azure refuses the length of the active assignment'
+            what = 'Azure refuses the length of an active assignment: {item}.'
+            affected = 'Only this assignment: it is not made. Everything else is applied.'
+            steps = @($eligible, 'Or shorten the assignment in Advanced View (grid), or allow a longer active assignment in the policy of that role (Policy templates), and commit.')
+            after = $next }
+        'AZ-POLICY-MFA' = @{ short = 'the policy requires multifactor authentication for an active assignment, which the engine cannot do'
+            what = 'The PIM policy of an Azure role requires multifactor authentication for an active assignment, which the engine can never do: {item}.'
+            affected = 'Only this assignment: it is not made. Everything else is applied.'
+            steps = @($eligible, 'Or take the multifactor requirement for active assignment out of the policy of that role (Policy templates) and commit.')
+            after = $next }
+        'ARM-ROLE-NOT-FOUND' = @{ short = 'the Azure role it names does not exist at that scope'
+            what = 'An assignment names an Azure role that does not exist at that scope: {item}.'
+            affected = 'Only this assignment: it is not made. Everything else is applied.'
+            steps = @('Open Advanced View (grid), correct the role name in AzScopePermission on that row (Role Lookup shows the real names) and commit.', $removeRow)
+            after = $next }
+        'ENTRA-ROLE-NOT-IN-TENANT' = @{ short = 'the Entra role it names does not exist under that name in this tenant'
+            what = 'An assignment names an Entra role this tenant does not have under that name: {item}.'
+            affected = 'Only this assignment: nobody gets the role through it. Everything else is applied.'
+            steps = @('Open Advanced View (grid), change RoleDefinitionName on that row to the name your tenant uses (the item in Jobs > Engine logs & errors shows the closest real role) and commit.', $removeRow)
+            after = $next }
+        'ENTRA-GROUP-NOT-ROLE-ASSIGNABLE' = @{ short = 'the group was not created as role-assignable, so Entra refuses the role'
+            what = 'An Entra role is given to a group that was not created as role-assignable, which Entra refuses: {item}.'
+            affected = 'Only this assignment: nobody gets the role through it. Everything else is applied.'
+            steps = @('Open Advanced View (grid), set IsRoleAssignable to TRUE on the definition of that group and commit; the daily run creates the group again as role-assignable.',
+                      'Or give the role to another group that is role-assignable, and commit.')
+            after = 'The role is applied on the run after the group exists as role-assignable, and the status turns OK by itself.' }
+        'ENTRA-ROLE-UNRESOLVED' = @{ short = 'the role is assigned to a group that no longer exists (or it names a role or an administrative unit the tenant does not have)'
+            what = 'An Entra role assignment cannot be made, because the group it is given to no longer exists or is being retired (or the role or the administrative unit it names is not in the tenant): {item}.'
+            affected = 'Only this assignment: nobody gets the role through it. Nothing was changed in the tenant, and everything else is applied.'
+            steps = @('If the assignment is no longer wanted: open Advanced View (grid), set Action to Remove on that role assignment (or delete the row) and commit in Pending changes.',
+                      'If it is wanted: open Advanced View (grid), take the definition of that group out of Lifecycle "Retire" (or correct the group, role or administrative unit name on the row) and commit; the group is created again and the role is applied on the run after.')
+            after = $next }
+        'ENTRA-NESTING-ROLE-ASSIGNABLE' = @{ short = 'a group cannot be an active member of a role-assignable group'
+            what = 'A group is made an active member of a role-assignable group, which Entra does not support: {item}.'
+            affected = 'Only this membership: it is not made. Everything else is applied.'
+            steps = @($eligible, $removeRow)
+            after = $next }
+        'WORKLOAD-REMOVE-NEEDS-DATA' = @{ short = 'removing the workload access needs information the row no longer has'
+            what = 'Removing a workload access needs information the row no longer has: {item}.'
+            affected = 'The access is still there in the workload until it is removed.'
+            steps = @('Open Advanced View (grid), fill in what the item names (the resource, the role, the group or the connector) with the value the access was applied with, and commit.',
+                      'Or remove the access in the workload yourself, then press "Stop managing this binding (delete the row)" on the item in Jobs > Engine logs & errors and commit.')
+            after = $next }
+        'WORKLOAD-CONNECTOR-UNKNOWN' = @{ short = 'the row names a workload PIM Manager does not know'
+            what = 'A workload access names a workload PIM Manager does not know: {item}.'
+            affected = 'Nothing is applied by this row. Everything else is applied.'
+            steps = @('Open Advanced View (grid), correct the Workload column on that row (Workload templates lists the workloads) and commit.', $stop)
+            after = $next }
+        'WORKLOAD-ROLE-NOT-FOUND' = @{ short = 'the workload has no role with that name'
+            what = 'A workload access names a role the workload does not have: {item}.'
+            affected = 'Only this access: it is not given. Everything else is applied.'
+            steps = @('Open Advanced View (grid), correct RoleName on that row (the item in Jobs > Engine logs & errors lists the roles the workload has), or create the role in the workload, and commit.', $stop)
+            after = $next }
+        'WORKLOAD-GROUP-UNRESOLVED' = @{ short = 'the group the workload access names does not exist'
+            what = 'A workload access names a group that does not exist: {item}.'
+            affected = 'Only this access: it is not given. Everything else is applied.'
+            steps = @('Open Advanced View (grid) and check that GroupTag on that row is the tag of a defined group; correct it and commit.',
+                      'If the group was defined moments ago there is nothing to do: it is created on the next run.')
+            after = $next }
+        'WORKLOAD-RESOURCE-MISSING' = @{ short = 'the workload access does not say which resource it is for'
+            what = 'A workload access does not say which resource it is for: {item}.'
+            affected = 'Nothing is applied by this row. Everything else is applied.'
+            steps = @('Open Advanced View (grid), fill in the Resource column on that row (Workload templates shows what the workload expects) and commit.', $stop)
+            after = $next }
+        'WORKLOAD-CONTAINER-MISSING' = @{ short = 'the group is not set up inside the workload yet'
+            what = 'The group is not set up inside the workload yet, so the role cannot be attached: {item}.'
+            affected = 'Only this access: it is not given. Everything else is applied.'
+            steps = @('Set the group up in the workload once (Workload templates shows the prerequisites of each workload).')
+            after = 'The next run attaches the role and the status turns OK by itself.' }
+        'WORKLOAD-ACTION-UNKNOWN' = @{ short = 'the workload access cannot be applied as it is written'
+            what = 'A workload access cannot be applied as it is written: {item}.'
+            affected = 'Nothing is applied by this row. Everything else is applied.'
+            steps = @('Open Advanced View (grid), set Action on that row to Assign or Remove and commit.',
+                      'If the item names the sign-in of a custom workload: correct the definition of that workload in Custom workloads.')
+            after = $next }
+        'TAP-TENANT-POLICY' = @{ short = 'the Temporary Access Pass policy of the tenant refused the pass'
+            what = 'The Temporary Access Pass policy of your tenant refused the pass that was requested: {item}.'
+            affected = 'The admin has no Temporary Access Pass yet. The account itself is not affected.'
+            steps = @('In the Microsoft Entra admin center open Authentication methods > Temporary Access Pass and allow one-time use and a lifetime that includes the hours set on the admin.',
+                      'Or open Get Started > Engine permissions and give the engine identity Policy.Read.All, so it reads the policy first and asks for a pass that fits.')
+            after = 'The next run issues the pass and the status turns OK by itself.' }
+        'TAP-NO-RECIPIENT' = @{ short = 'there is nobody to send the Temporary Access Pass to'
+            what = 'There is nobody to send the Temporary Access Pass of an admin to: {item}.'
+            affected = 'Nothing was created: the pass is not issued until it can be delivered.'
+            steps = @('Open Departments & owners, set an owner on the department of that admin (the owners receive the pass) and commit.',
+                      'Or open Accounts & TAP, press Edit on the admin, set the office user email address and commit.')
+            after = 'The next run issues the pass and the status turns OK by itself.' }
+        'AU-SCOPE-REFUSED' = @{ short = 'a role limited to an administrative unit was put among the tenant-wide roles'
+            what = 'A role limited to an administrative unit was put among the tenant-wide roles, so it was refused: {item}.'
+            affected = 'Nothing was changed. The role was NOT given over the whole tenant.'
+            steps = @('Open Advanced View (grid): add the same group and role to PIM-Assignments-Roles-AUs with the administrative unit, delete the row in PIM-Assignments-Roles-Groups, and commit in Pending changes.')
+            after = $next }
+        'DEFENDER-PERMISSION-PREREQUISITE' = @{ short = 'Defender XDR refused a permission because what it depends on is not in place'
+            what = 'Defender XDR refused a permission of a custom role, because what it depends on is not in place: {item}.'
+            affected = 'Nothing was created for this row. Everything else is applied.'
+            steps = @('Onboard a Microsoft Sentinel workspace to Defender XDR (the Data Operations permissions need it).',
+                      'Or take that permission out of the role in Workload templates and commit.')
+            after = 'The next run creates the role and its assignment, and the status turns OK by itself.' }
+        'DEFENDER-ROLE-AMBIGUOUS' = @{ short = 'two Defender XDR roles have the same name'
+            what = 'Two Defender XDR roles have the same name, so PIM Manager does not choose one: {item}.'
+            affected = 'Nothing was assigned for this row. Everything else is applied.'
+            steps = @('In the Defender portal open Settings > Permissions > Roles and rename or delete the extra role.')
+            after = 'The next run uses the role that is left, and the status turns OK by itself.' }
+        'DEFENDER-ASSIGNMENT-SHARED' = @{ short = 'the Defender XDR assignment is shared with others, so it was not changed'
+            what = 'A Defender XDR role assignment is shared with other people or groups, so it was not changed: {item}.'
+            affected = 'Nothing was changed, so nobody lost access. The group keeps the data sources it had.'
+            steps = @('In the Defender portal give the group its own assignment (or split the shared one).')
+            after = 'The next run sets the data sources of that assignment, and the status turns OK by itself.' }
+        'REMOVE-BUDGET-HELD' = @{ short = 'more removals than the safety limit allows in one run were held back'
+            what = 'More removals than the safety limit allows in one run were held back: {item}.'
+            affected = 'Nothing was removed in that area. The access is still there.'
+            steps = @('If the removals are intended: open Guards and release the held run (a SuperAdmin), or commit the removals in smaller batches.',
+                      'If they are not intended: undo the Remove rows in Advanced View (grid) and commit in Pending changes.')
+            after = 'After the release the next run removes them and the status turns OK by itself.' }
+        'AZURE-NOT-VISIBLE' = @{ short = 'PIM Manager cannot see the Azure management groups and subscriptions'
+            what = 'PIM Manager cannot see your Azure management groups and subscriptions: {item}.'
+            affected = 'Discovery shows nothing for Azure. Access that is already defined keeps working.'
+            steps = @('Open Get Started > Engine permissions and run the shown command as a Global Administrator: it gives the engine identity Reader (read-only) at the tenant root management group.')
+            after = 'Azure is read on the next discovery run and the status turns OK by itself.' }
+        'PERMISSION-DENIED' = @{ short = 'the engine identity lacks a permission'
+            what = 'Microsoft refused a change because the engine identity lacks a permission: {item}.'
+            affected = 'That change is not made. Everything the identity is allowed to do is applied.'
+            steps = @('Open Get Started > Engine permissions, see which permission is missing and run the shown command as a Global Administrator.',
+                      'A new permission can take about 30 minutes before Microsoft honours it; nothing more is needed after that.')
+            after = $next }
+    }
+}
+
+function Get-PimFailureSolution {
+    <#
+      PURE. PIM 100.115. The customer-ready solution of a class, the item's own names filled in:
+        @{ code; short; what; affected; steps; after; text } -- or $null for a class without one (every customer-config
+        class has one; a product-defect / transient class has none: nothing for the customer to do).
+      -Items  the failing items' own names (Get-PimFailureItemLabel, else their key): the first three are named, then
+              "and N more". None known = "the item is named in Jobs > Engine logs & errors".
+      text = the four parts in one paragraph, at most -MaxLength characters (the run report's Solution, 2000).
+    #>
+    param([string]$Code, [string[]]$Items = @(), [int]$MaxLength = 2000)
+    $c = "$Code".Trim().ToUpperInvariant()
+    if (-not $c) { return $null }
+    $cat = Get-PimFailureSolutionCatalog
+    if (-not $cat.ContainsKey($c)) { return $null }
+    $s = $cat[$c]
+    $names = @(@($Items) | ForEach-Object { ("$_" -replace '\s+', ' ').Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    $item = 'the item is named in Jobs > Engine logs & errors'
+    if ($names.Count) {
+        $show = @($names | Select-Object -First 3 | ForEach-Object { if ($_.Length -gt 160) { $_.Substring(0, 157) + '...' } else { $_ } })
+        $item = ($show -join '; ')
+        if ($names.Count -gt 3) { $item += " and $($names.Count - 3) more" }
+    }
+    $what = "$($s.what)".Replace('{item}', $item)
+    $steps = @(@($s.steps) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $n = 0
+    $stepText = (@($steps | ForEach-Object { $n++; "($n) $_" }) -join ' ')
+    $text = "WHAT IS WRONG: $what IS ANYTHING AFFECTED: $($s.affected) HOW TO SOLVE IT: $stepText AFTERWARDS: $($s.after)"
+    if ($MaxLength -le 0 -or $MaxLength -gt 2000) { $MaxLength = 2000 }   # literal ceiling (the report's limit)
+    if ($text.Length -gt $MaxLength) { $text = $text.Substring(0, $MaxLength - 3) + '...' }
+    return [pscustomobject]@{ code = $c; short = "$($s.short)"; what = $what; affected = "$($s.affected)"; steps = $steps; after = "$($s.after)"; text = $text }
+}
+
+function Get-PimConvergenceCause {
+    <#
+      PURE. PIM 100.113 (owner 2026-10-12, on a status row "CONVERGENCE" owned by the product team: "why is this still an
+      error"). The convergence check finds "exists in the Manager but NOT in the tenant" by a plan-only read; it does not
+      know WHY. The engine does: every item whose apply fails is in the currently-failing set (pim.Settings
+      'EngineItemFailures', Update-PimEngineItemFailures) with its class -- and a convergence key is '<scope>|<item key>',
+      the same scope and key the failing item carries. So NO new tenant read is needed.
+        -Unconverged  the keys the check would fail on ('<scope>|<item key>')
+        -Failures     the currently-failing items (Get-PimEngineItemFailures)
+      Returns @{ customerConfig; code; fixKind; count; sentence; items; codes; unmatched }:
+        customerConfig  $true ONLY when there is at least one key and EVERY key is a failing item (same scope + key) whose
+                        class is customer-config (Get-PimFailureFixKind). One key with no failing item, a product-defect
+                        class, a transient class or UNCLASSIFIED = $false (mixed or unknown causes stay as they were).
+        code            the class of the largest group (ties: alphabetical)      fixKind  'customer-config' | ''
+        sentence        "1 assignment cannot be made: the role is assigned to a group that no longer exists ..." -- per class,
+                        largest first, joined with '; '
+        items           the items' own names (label, else the key)
+    #>
+    param([string[]]$Unconverged = @(), [AllowNull()][object[]]$Failures = @())
+    $out = [ordered]@{ customerConfig = $false; code = ''; fixKind = ''; count = 0; sentence = ''; items = @(); codes = @(); unmatched = 0 }
+    $keys = @(@($Unconverged) | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    $out.count = $keys.Count
+    if (-not $keys.Count) { return [pscustomobject]$out }
+    $by = @{}
+    foreach ($f in @(@($Failures) | Where-Object { $null -ne $_ })) {
+        $fs = "$($f.scope)".Trim(); $fk = "$($f.key)".Trim()
+        if ($fs -and $fk) { $by["$fs|$fk".ToLowerInvariant()] = $f }
+    }
+    $groups = @{}; $names = New-Object System.Collections.Generic.List[string]; $unmatched = 0; $other = 0
+    foreach ($k in $keys) {
+        $f = $by[$k.ToLowerInvariant()]
+        if ($null -eq $f) { $unmatched++; continue }
+        $code = "$($f.code)".Trim().ToUpperInvariant()
+        if (-not $code -or $code -eq 'UNCLASSIFIED' -or (Get-PimFailureFixKind -Code $code) -ne 'customer-config') { $other++; continue }
+        if (-not $groups.ContainsKey($code)) { $groups[$code] = 0 }
+        $groups[$code] = [int]$groups[$code] + 1
+        $lab = "$($f.label)".Trim(); if (-not $lab) { $lab = "$($f.key)".Trim() }
+        $names.Add($lab)
+    }
+    $out.unmatched = $unmatched
+    $order = @($groups.Keys | Sort-Object @{ Expression = { -[int]$groups[$_] } }, @{ Expression = { "$_" } })
+    $out.codes = @($order)
+    if ($unmatched -gt 0 -or $other -gt 0 -or -not $order.Count) { return [pscustomobject]$out }
+    $parts = foreach ($c in $order) {
+        $n = [int]$groups[$c]
+        $sol = Get-PimFailureSolution -Code $c
+        $short = if ($sol -and "$($sol.short)".Trim()) { "$($sol.short)" } else { "$c" }
+        "{0} assignment{1} cannot be made: {2} [{3}]" -f $n, $(if ($n -eq 1) { '' } else { 's' }), $short, $c
+    }
+    $out.customerConfig = $true
+    $out.code = "$($order[0])"; $out.fixKind = 'customer-config'
+    $out.sentence = (@($parts) -join '; ')
+    $out.items = @($names.ToArray())
+    return [pscustomobject]$out
+}
+
 function Get-PimTransientWaitWindowMinutes {
     <# PURE. How long a transient item may wait before it counts as a real failure again (Test-PimEngineFailuresAreAllTransient),
        and -- the same window -- how young a group must be for its unreadable policy to count as "not ready yet" (§97.3). #>
