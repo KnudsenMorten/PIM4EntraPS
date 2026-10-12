@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.603 -- 2026-10-12
+
+- Delegation overview and Access map: the board scrolls on its own above the detail panel and nothing is hidden behind it; the panel list scrolls inside the panel with its buttons always visible; the Delegation overview panel can be collapsed to one line
+
 ## 2.4.602 -- 2026-10-12
 
 - New admin account: the wizard asks where the admin mail goes -- forwarding to the owner office address is on by default and the address is required, so the Temporary Access Pass reaches the admin the first time
