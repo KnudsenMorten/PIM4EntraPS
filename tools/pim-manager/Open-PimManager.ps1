@@ -8060,7 +8060,7 @@ function Get-PimManagerAttentionSources {
 
 function Get-PimManagerAttention {
     <#
-      The GET /api/attention body for THIS caller: { generatedUtc; total; items = @( { id; tab; count; text; canAct; who } ); errors }.
+      The GET /api/attention body for THIS caller: { generatedUtc; total; actions; warnings; items = @( { id; tab; count; text; canAct; who; kind } ); errors }.
       Every role sees every item (read-only for one who cannot act, with who can). Sources: Get-PimManagerAttentionSources
       (cached 15 s; a write request clears it) + the break-glass request (one SQL row, per caller: canApprove).
     #>
@@ -8163,8 +8163,16 @@ function Get-PimManagerAttention {
                 canAct = $isSuper; who = 'a SuperAdmin chooses (Templates > Policy settings)' })
         }
     }
-    $total = 0; foreach ($i in $items) { if ($i.Contains('blocking') -and -not $i.blocking) { continue }; $total += [int]$i.count }
-    return [ordered]@{ generatedUtc = $now.ToString('o'); total = $total; items = @($items.ToArray()); errors = @($errs.ToArray()) }
+    # PIM 100.94 (owner 2026-10-12: "we dont show warnings numbers, only errors or actions in the menu"): every item says
+    # what it IS -- kind 'action' (waits for a person and blocks work: the only kind a menu number counts) or 'warning'
+    # (listed on Overview only). `actions` = `total` = the items to act on; `warnings` = the warning LINES, never a sum of
+    # the findings inside them (46 waiting settings are one line).
+    $total = 0; $warnLines = 0
+    foreach ($i in $items) {
+        if ($i.Contains('blocking') -and -not $i.blocking) { $i['kind'] = 'warning'; $warnLines++; continue }
+        $i['kind'] = 'action'; $total += [int]$i.count
+    }
+    return [ordered]@{ generatedUtc = $now.ToString('o'); total = $total; actions = $total; warnings = $warnLines; items = @($items.ToArray()); errors = @($errs.ToArray()) }
 }
 
 function Get-PimHomeGraphData {
