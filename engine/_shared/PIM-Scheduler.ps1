@@ -1842,7 +1842,7 @@ function Register-PimDiscoveryHandler {
             #   * §8's ask is "know when a new built-in role appears". The sweep already delivers
             #     that -- a `resource.discovered` audit event and one opt-in discovery-notice mail.
             #   * The Entra role CATALOGUE is already cached (pim.TenantCache 'entra-roles', written
-            #     by the tenant-cache job) and already surfaced: Coverage & gaps lists every role as
+            #     by the tenant-cache job) and already surfaced: Discovery & gaps lists every role as
             #     Covered (naming the group that grants it) or Gap ("no permission group grants this
             #     built-in role"), with a proposal. That IS the governance answer.
             #   * PIM-Catalog-ServiceRoles has NO reader anywhere in the product. Defender/Intune
@@ -1866,7 +1866,7 @@ function Register-PimDiscoveryHandler {
             # Say where the answer is. "0 queued" must never read as "nothing found", and a run that
             # reports without queueing has to point at the page that shows the result.
             return [pscustomobject]@{ ran=$true; reportOnly=$true; result=$rr; whatIf=[bool]$whatIf
-                detail="$($rr.detail) reported only (audit + notice mail); new and undelegated roles are listed on Coverage & gaps -- nothing is queued" }
+                detail="$($rr.detail) reported only (audit + notice mail); new and undelegated roles are listed on Discovery & gaps -- nothing is queued" }
         }
 
         if ($scope -ne 'Azure' -and $scope -ne 'PowerBI') {

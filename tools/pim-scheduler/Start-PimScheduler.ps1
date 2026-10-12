@@ -176,6 +176,9 @@ if (Test-Path -LiteralPath "$shared\..\discovery\PIM-Discovery.ps1") { . "$share
 . "$shared\PIM-DriftSnapshot.ps1"
 # REQ-I + REQ-U (Coverage & gaps page): job 'coverage' compares the tenant caches with pim.Rows here and stores
 # pim.TenantCache kind 'coverage-report'; the Manager only reads that row.
+# PIM 100.100: the report also lists administrative units and Windows servers with the old Discovery page's own proposal
+# (Get-PimDiscoveryProposal) -- loaded once here, so the report does not load it per item.
+if (Test-Path -LiteralPath "$shared\..\discovery\PIM-DiscoveryInbox.ps1") { . "$shared\..\discovery\PIM-DiscoveryInbox.ps1" }   # §84 Pro: loaded only when present
 if (Test-Path -LiteralPath "$shared\..\coverage\PIM-Coverage.ps1") { . "$shared\..\coverage\PIM-Coverage.ps1" }   # §84 Pro: loaded only when present
 # §79.1: job 'target-check' -- do the Azure scopes and roles the delegation rows point at still exist? Reports only.
 . "$shared\PIM-TargetCheck.ps1"
@@ -346,7 +349,7 @@ Register-PimJobHandler -Type 'coverage' -Handler {
     param($job, $now, $whatIf)
     Invoke-PimCoverageJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
-Write-PimStartupLine -Message "[scheduler] coverage report wired (pim.TenantCache/coverage-report; the Manager's Coverage & gaps page reads it)" -ForegroundColor Cyan
+Write-PimStartupLine -Message "[scheduler] coverage report wired (pim.TenantCache/coverage-report; the Manager's Discovery & gaps page reads it)" -ForegroundColor Cyan
 # §79.1: the REAL 'target-check' handler -- registered ONLY here, after the defaults (which declare it unimplemented).
 Register-PimJobHandler -Type 'target-check' -Handler {
     param($job, $now, $whatIf)

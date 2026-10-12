@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.604 -- 2026-10-12
+
+- Discovery and Coverage are one page, Discovery and gaps, under Access, with Ignore and Bring back for each gap and a plain block for a workload that was not read; the menu shows a number only for an error or a blocking approval; the Microsoft default can be chosen for group policies as well as Entra roles
+
 ## 2.4.603 -- 2026-10-12
 
 - Delegation overview and Access map: the board scrolls on its own above the detail panel and nothing is hidden behind it; the panel list scrolls inside the panel with its buttons always visible; the Delegation overview panel can be collapsed to one line

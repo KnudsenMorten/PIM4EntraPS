@@ -60,6 +60,24 @@ $script:PimCoverageDefinitionEntities = @('PIM-Definitions-Roles', 'PIM-Definiti
 $script:PimCoveragePermissionEntities = @('PIM-Definitions-Services', 'PIM-Definitions-Tasks', 'PIM-Definitions-Processes')
 $script:PimCoverageBindingEntities = @('PIM-Assignments-Roles-Groups', 'PIM-Assignments-Roles-AUs', 'PIM-Assignments-Roles-Direct',
     'PIM-Assignments-Workloads', 'PIM-Assignments-Intune', 'PIM-Assignments-Defender', 'PIM-Assignments-Azure-Resources')
+# PIM 100.100 (owner 2026-10-12: ONE view, "Discovery & gaps"): what the old Discovery page listed and this report did
+# not -- administrative units (their PIM-Definitions-AU row) and the Windows servers the hybrid worker lists.
+$script:PimCoverageScopeEntities = @('PIM-Definitions-AU')
+# PIM 100.100 -- IGNORE. A gap a person ignored on the page is a decision about PIM's own list (nothing changes in the
+# tenant). It lives where the old Discovery page kept it: pim.Settings 'DiscoveryDecisions' { '<kind>:<id>' = { state =
+# 'ignored'; by; atUtc } } -- the SAME keys, so what was ignored there stays ignored here. The kinds, in words:
+$script:PimCoverageIgnoredStatus = 'Ignored'
+$script:PimCoverageIgnoreKinds = [ordered]@{
+    'entra-role'    = 'Entra role'
+    'intune-role'   = 'Intune role'
+    'defender-role' = 'Defender XDR role'
+    'powerbi-ws'    = 'Power BI workspace'
+    'azure-sub'     = 'Azure subscription'
+    'azure-mg'      = 'Azure management group'
+    'entra-au'      = 'administrative unit'
+    'ad-server'     = 'Windows server'
+    'cov'           = 'item'
+}
 
 # ===========================================================================
 # small PURE helpers
@@ -739,6 +757,90 @@ function Get-PimCoveragePimForGroupsRows {
     return [pscustomobject]@{ source = $src; rows = @($out.ToArray()) }
 }
 
+# ---------------------------------------------------------------------------
+# PIM 100.100 -- the two kinds only the old Discovery page listed. Their proposal is the old page's own
+# (Get-PimDiscoveryProposal, engine/discovery/PIM-DiscoveryInbox.ps1), so nothing it could create is lost.
+# ---------------------------------------------------------------------------
+function New-PimCoverageDiscoveryProposal {
+    # One unit from the old Discovery page's proposal for -Kind 'entra-au' | 'ad-server' ($null when it has none).
+    # -Label: a format string, {0} = the name the proposal creates.
+    param([Parameter(Mandatory)][string]$Kind, [string]$Id, [string]$Name, [string]$Path = '', [string]$Label = '')
+    Initialize-PimCoverageNaming
+    if (-not (Get-Command Get-PimDiscoveryProposal -ErrorAction SilentlyContinue)) {
+        $d = Join-Path $PSScriptRoot '..\discovery\PIM-DiscoveryInbox.ps1'; if (Test-Path -LiteralPath $d) { . $d }
+    }
+    if (-not (Get-Command Get-PimDiscoveryProposal -ErrorAction SilentlyContinue)) { return $null }
+    $pr = $null
+    try { $pr = Get-PimDiscoveryProposal -Item ([pscustomobject]@{ key = ("{0}:{1}" -f $Kind, "$Id".ToLowerInvariant()); kind = $Kind; id = $Id; name = $Name; path = $Path }) } catch { $pr = $null }
+    if ($null -eq $pr) { return $null }
+    $row = [ordered]@{}; foreach ($k in @($pr.row.Keys)) { $row[$k] = $pr.row[$k] }
+    $lvl = if ($null -ne $pr.level) { "L$($pr.level)" } else { '' }
+    $lbl = if ($Label) { $Label -f "$($pr.groupName)" } else { "$($pr.groupName)" }
+    return [pscustomobject]@{ groupName = "$($pr.groupName)"; groupTag = "$($pr.groupTag)"
+        proposal = [ordered]@{ units = @(New-PimCoverageUnit -Id ("{0}|{1}" -f $Kind, "$Id".ToLowerInvariant()) -Label $lbl -GroupName "$($pr.groupName)" -GroupTag "$($pr.groupTag)" -Level $lvl `
+            -Rows @([ordered]@{ entity = "$($pr.base)"; row = $row })) } }
+}
+
+function Get-PimCoverageAdminUnitRows {
+    # Administrative units (pim.TenantCache 'aus') vs PIM-Definitions-AU. PIM matches an AU by its DISPLAY NAME.
+    param([AllowNull()][object]$Catalog, [object]$Model)
+    $W = 'Administrative units'
+    $out = New-Object System.Collections.Generic.List[object]
+    $chk = Test-PimCoverageSourceReadable -Source $Catalog -MissingReason "the tenant cache holds no administrative unit list yet (the 'tenant-cache' job writes it)"
+    $items = @(if ($chk.ok) { @(Get-PimCoverageField $Catalog 'items') | Where-Object { $null -ne $_ -and "$(Get-PimCoverageField $_ 'displayName')".Trim() } })
+    $src = New-PimCoverageSource -Workload $W -Source 'tenant cache: aus' -Read $chk.ok -Reason $chk.reason -ReadUtc (Get-PimCoverageField $Catalog 'refreshedUtc') -Items $items.Count
+    if (-not $chk.ok) {
+        $out.Add((New-PimCoverageRow -Workload $W -Item '(administrative units)' -Status 'Not checked' -Reason $chk.reason))
+        return [pscustomobject]@{ source = $src; rows = @($out.ToArray()) }
+    }
+    $byName = @{}; $byTag = @{}
+    foreach ($r in (Get-PimCoverageEntityRows -Model $Model -Entity 'PIM-Definitions-AU')) {
+        $n = Get-PimCoverageText $r @('AUDisplayName'); $t = Get-PimCoverageText $r @('AdministrativeUnitTag')
+        if ($n) { $byName[$n.ToLowerInvariant()] = $true }
+        if ($t) { $byTag[$t.ToLowerInvariant()] = $true }
+    }
+    foreach ($it in @($items | Sort-Object { "$(Get-PimCoverageField $_ 'displayName')" })) {
+        $name = "$(Get-PimCoverageField $it 'displayName')".Trim(); $id = "$(Get-PimCoverageField $it 'id')".Trim()
+        $tag = (($name -replace '[^A-Za-z0-9._-]+', '-') -replace '-{2,}', '-').Trim('-')
+        if ($byName.ContainsKey($name.ToLowerInvariant()) -or ($tag -and $byTag.ContainsKey($tag.ToLowerInvariant()))) {
+            $out.Add((New-PimCoverageRow -Workload $W -Item $name -ItemId $id -CoveredBy @("administrative unit definition $name") -Status 'Covered' -Reason 'PIM defines this administrative unit'))
+            continue
+        }
+        $pr = New-PimCoverageDiscoveryProposal -Kind 'entra-au' -Id $id -Name $name -Path "$(Get-PimCoverageField $it 'description')".Trim() -Label "Add the administrative unit '{0}' to PIM (its definition; PIM matches it by its display name)"
+        $out.Add((New-PimCoverageRow -Workload $W -Item $name -ItemId $id -Status 'Gap' -Reason 'this administrative unit is in the tenant and PIM does not define it' `
+            -Proposal $(if ($pr) { $pr.proposal } else { $null })))
+    }
+    return [pscustomobject]@{ source = $src; rows = @($out.ToArray()) }
+}
+
+function Get-PimCoverageAdServerRows {
+    # Windows servers the hybrid worker lists (pim.TenantCache 'ad-servers') vs their per-server PIM group definition.
+    # -Catalog $null = no hybrid worker in this deployment: the caller leaves the workload out (it is not "not read").
+    param([AllowNull()][object]$Catalog, [object]$Model)
+    $W = 'Windows servers'
+    $out = New-Object System.Collections.Generic.List[object]
+    $chk = Test-PimCoverageSourceReadable -Source $Catalog -MissingReason 'the hybrid worker has not listed the Windows servers yet'
+    $items = @(if ($chk.ok) { @(Get-PimCoverageField $Catalog 'items') | Where-Object { $null -ne $_ -and "$(Get-PimCoverageField $_ 'name')".Trim() } })
+    $readUtc = Get-PimCoverageField $Catalog 'refreshedUtc'; if (-not "$readUtc".Trim()) { $readUtc = Get-PimCoverageField $Catalog 'readUtc' }
+    $src = New-PimCoverageSource -Workload $W -Source 'tenant cache: ad-servers' -Read $chk.ok -Reason $chk.reason -ReadUtc $readUtc -Items $items.Count
+    if (-not $chk.ok) {
+        $out.Add((New-PimCoverageRow -Workload $W -Item '(Windows servers in Active Directory)' -Status 'Not checked' -Reason $chk.reason))
+        return [pscustomobject]@{ source = $src; rows = @($out.ToArray()) }
+    }
+    foreach ($it in @($items | Sort-Object { "$(Get-PimCoverageField $_ 'name')" })) {
+        $name = "$(Get-PimCoverageField $it 'name')".Trim()
+        $pr = New-PimCoverageDiscoveryProposal -Kind 'ad-server' -Id $name -Name $name -Path "$(Get-PimCoverageField $it 'dnsHostName')".Trim() -Label 'New group {0}: local Administrators on this server (L2)'
+        if ($pr -and ((Test-PimCoverageTagDefined -Model $Model -Tag $pr.groupTag) -or $Model.definedNames.ContainsKey($pr.groupName.ToLowerInvariant()))) {
+            $out.Add((New-PimCoverageRow -Workload $W -Item $name -ItemId $name -CoveredBy @($pr.groupName) -Status 'Covered' -Reason 'this server has its PIM group'))
+            continue
+        }
+        $why = 'no PIM group gives local Administrators on this server'
+        if ("$(Get-PimCoverageField $it 'groupInAd')" -eq 'True') { $why += (" -- the group {0} already exists in Active Directory; staging the proposal adopts it" -f "$(Get-PimCoverageField $it 'groupName')") }
+        $out.Add((New-PimCoverageRow -Workload $W -Item $name -ItemId $name -Status 'Gap' -Reason $why -Proposal $(if ($pr) { $pr.proposal } else { $null })))
+    }
+    return [pscustomobject]@{ source = $src; rows = @($out.ToArray()) }
+}
+
 # ===========================================================================
 # THE REPORT (PURE)
 # ===========================================================================
@@ -746,7 +848,8 @@ function Get-PimCoverageReport {
     <#
       PURE over -Inputs (gathered by Get-PimCoverageInputs in the scheduler, stubbed in tests):
         @{ rows = @{ '<entity>' = @(rows) }; rowsErrors = @{ '<entity>' = 'why' };
-           entraRoles; workloadRoles = @{ intune; defender }; azureScopes; powerBi; pimForGroups; grants = @{ gid -> {...} } }
+           entraRoles; workloadRoles = @{ intune; defender }; azureScopes; powerBi; pimForGroups; grants = @{ gid -> {...} };
+           adminUnits (cache 'aus'); adServers (cache 'ad-servers'; $null = no hybrid worker, the workload is left out) }
       Returns { computedUtc; ok; counts; countsByWorkload; sources[]; rows[]; statuses[]; pattern }.
       A source whose inputs cannot be read is ONE 'Not checked' row with the reason (never an empty list).
     #>
@@ -772,10 +875,14 @@ function Get-PimCoverageReport {
         @{ workload = 'Power BI';       needs = @('PIM-Assignments-Workloads');                             run = { Get-PimCoveragePowerBiRows -Source $Inputs['powerBi'] -Model $model } }
         @{ workload = 'Azure';          needs = @('PIM-Assignments-Azure-Resources');                       run = { Get-PimCoverageAzureRows -Scopes $Inputs['azureScopes'] -Model $model } }
         @{ workload = 'PIM for Groups'; needs = @($script:PimCoverageBindingEntities);                      run = { Get-PimCoveragePimForGroupsRows -Snapshot $Inputs['pimForGroups'] -Grants $grants -Model $model } }
+        # PIM 100.100: the two kinds the old Discovery page listed. Windows servers exist only with a hybrid worker.
+        @{ workload = 'Administrative units'; needs = @($script:PimCoverageScopeEntities);                  run = { Get-PimCoverageAdminUnitRows -Catalog $Inputs['adminUnits'] -Model $model } }
+        @{ workload = 'Windows servers'; needs = @(); optional = 'adServers';                               run = { Get-PimCoverageAdServerRows -Catalog $Inputs['adServers'] -Model $model } }
     )
     $sources = New-Object System.Collections.Generic.List[object]
     $all = New-Object System.Collections.Generic.List[object]
     foreach ($p in $plan) {
+        if ($p.ContainsKey('optional') -and $null -eq $Inputs["$($p.optional)"]) { continue }
         $why = & $blocked $p.needs
         if ($why) {
             $sources.Add((New-PimCoverageSource -Workload $p.workload -Source 'pim.Rows' -Read $false -Reason $why))
@@ -846,7 +953,7 @@ function Get-PimCoverageCacheEntry {
 function Get-PimCoverageRowsFromStore {
     # Every entity the report needs -> @{ rows; rowsErrors }. A failed read is recorded, never an empty list.
     $rows = @{}; $errs = @{}
-    foreach ($e in @($script:PimCoverageDefinitionEntities + $script:PimCoverageBindingEntities)) {
+    foreach ($e in @($script:PimCoverageDefinitionEntities + $script:PimCoverageBindingEntities + $script:PimCoverageScopeEntities)) {
         try {
             if (Get-Command Get-PimTenantSyncRows -ErrorAction SilentlyContinue) { $rows[$e] = @(Get-PimTenantSyncRows -Entity $e) }
             elseif (Get-Command Get-PimDesiredRows -ErrorAction SilentlyContinue) { $rows[$e] = @(Get-PimDesiredRows -Entity $e) }
@@ -914,6 +1021,8 @@ function Get-PimCoverageInputs {
         azureScopes  = (Get-PimCoverageCacheEntry -Kind 'azure-scopes')
         pimForGroups = (Get-PimCoverageCacheEntry -Kind 'active-assignments')
         workloadRoles = @{ intune = (Get-PimCoverageCacheEntry -Kind 'workload-roles:intune'); defender = (Get-PimCoverageCacheEntry -Kind 'workload-roles:defender') }
+        adminUnits   = (Get-PimCoverageCacheEntry -Kind 'aus')
+        adServers    = (Get-PimCoverageCacheEntry -Kind 'ad-servers')   # $null without a hybrid worker
         powerBi = $null; grants = @{}
     }
     if ($SkipLive) {
@@ -980,7 +1089,7 @@ function Invoke-PimCoverageJob {
     if ($new.Count) {
         $byS = @($new | Group-Object { "$($_.status)" } | ForEach-Object { "{0} {1}" -f $_.Count, $_.Name.ToLowerInvariant() }) -join ', '
         $title = "Coverage: $($new.Count) new finding(s) -- $byS"
-        $detail = (@($new | Select-Object -First 10 | ForEach-Object { "[{0}] {1}: {2}" -f $_.status, $_.workload, $_.item }) -join '; ') + $(if ($new.Count -gt 10) { "; +$($new.Count - 10) more on the Coverage & gaps page" } else { '' })
+        $detail = (@($new | Select-Object -First 10 | ForEach-Object { "[{0}] {1}: {2}" -f $_.status, $_.workload, $_.item }) -join '; ') + $(if ($new.Count -gt 10) { "; +$($new.Count - 10) more on the Discovery & gaps page" } else { '' })
         try {
             if (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue) {
                 [void](Send-PimManagerAlert -Event $script:PimCoverageAlertEvent -Title $title -Detail $detail -LinkTab 'coverage')
@@ -991,7 +1100,7 @@ function Invoke-PimCoverageJob {
     }
     $defFail = @($script:PimCoverageDefinitionEntities | Where-Object { $Inputs['rowsErrors'] -is [hashtable] -and $Inputs['rowsErrors'].ContainsKey($_) })
     if ($defFail.Count) {
-        throw ("[$type] the definitions could not be read, so nothing could be checked; the report was stored so the Coverage & gaps page shows why. " + "$($defFail[0]): $($Inputs['rowsErrors'][$defFail[0]])")
+        throw ("[$type] the definitions could not be read, so nothing could be checked; the report was stored so the Discovery & gaps page shows why. " + "$($defFail[0]): $($Inputs['rowsErrors'][$defFail[0]])")
     }
     $nc = @($doc.sources | Where-Object { -not $_.read })
     $tail = if ($nc.Count) { " | NOT CHECKED: " + (@($nc | ForEach-Object { "$($_.workload) ($($_.reason))" }) -join '; ') } else { '' }
@@ -1017,6 +1126,115 @@ function Request-PimCoverageRefresh {
     } catch {
         return [pscustomobject]@{ queued = $false; error = "$($_.Exception.Message)" }
     }
+}
+
+function Get-PimCoverageIgnoreKey {
+    <#
+      PURE. A report row -> @{ key; kind; label } -- the name an Ignore is stored under. The key is the old Discovery
+      page's own ('<kind>:<id, lower case>': azure-sub / azure-mg by scope path, powerbi-ws by workspace id, entra-au by
+      id, entra-role / intune-role / defender-role by role id, ad-server by name), so an item ignored there is ignored
+      here. A row with no id of its own is named by its report key ('cov:<workload|status|item>').
+    #>
+    param([AllowNull()][object]$Row)
+    $w = "$(Get-PimCoverageField $Row 'workload')".Trim()
+    $id = "$(Get-PimCoverageField $Row 'itemId')".Trim()
+    $kind = ''
+    if ($id) {
+        if ($w -eq 'Entra ID') { $kind = 'entra-role' }
+        elseif ($w -eq 'Intune') { $kind = 'intune-role' }
+        elseif ($w -eq 'Defender XDR') { $kind = 'defender-role' }
+        elseif ($w -eq 'Power BI') { $kind = 'powerbi-ws' }
+        elseif ($w -eq 'Administrative units') { $kind = 'entra-au' }
+        elseif ($w -eq 'Windows servers') { $kind = 'ad-server' }
+        elseif ($w -eq 'Azure') { $kind = $(if ($id -match '^(?i)/subscriptions/') { 'azure-sub' } else { 'azure-mg' }) }
+    }
+    if (-not $kind) {
+        $k = "$(Get-PimCoverageField $Row 'key')".Trim().ToLowerInvariant()
+        if (-not $k) { return @{ key = ''; kind = ''; label = '' } }
+        return @{ key = "cov:$k"; kind = 'cov'; label = "$($script:PimCoverageIgnoreKinds['cov'])" }
+    }
+    return @{ key = ("{0}:{1}" -f $kind, $id.ToLowerInvariant()); kind = $kind; label = "$($script:PimCoverageIgnoreKinds[$kind])" }
+}
+
+function ConvertTo-PimCoverageDecisionMap {
+    # The stored 'DiscoveryDecisions' document (a hashtable, the object JSON gives back, or $null) -> @{ lower key -> entry }.
+    param([AllowNull()][object]$Decisions)
+    $m = @{}
+    if ($null -eq $Decisions) { return $m }
+    if ($Decisions -is [System.Collections.IDictionary]) { foreach ($k in @($Decisions.Keys)) { if ("$k".Trim()) { $m["$k".Trim().ToLowerInvariant()] = $Decisions[$k] } } }
+    else { foreach ($p in @($Decisions.PSObject.Properties)) { if ("$($p.Name)".Trim()) { $m["$($p.Name)".Trim().ToLowerInvariant()] = $p.Value } } }
+    return $m
+}
+
+function Add-PimCoverageIgnoreState {
+    <#
+      PURE. PIM 100.100 -- the view of a report (ConvertTo-PimCoverageView) + the stored decisions -> the SAME view with:
+        * every row carrying ignoreKey / ignoreKind (what an Ignore of it is stored under) and ignored = true | false;
+        * a GAP whose key is stored as 'ignored' shown with status 'Ignored' (+ ignoredBy / ignoredUtc) -- so it is not a
+          gap any more: not counted as one, never pre-selected, never staged;
+        * counts / countsByWorkload RECOUNTED from the rows (Gap excludes the ignored ones; a new count 'Ignored'), the
+          status list ending in 'Ignored', gaps / ignored as plain numbers, and notRead = the workloads not read.
+      Only a Gap can be ignored: an orphan, an unmanaged group or a workload that was not read is never hidden this way.
+      The server is the one place that counts, so every page that shows these numbers agrees.
+    #>
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$View, [AllowNull()][object]$Decisions)
+    $dec = ConvertTo-PimCoverageDecisionMap -Decisions $Decisions
+    $ign = $script:PimCoverageIgnoredStatus
+    $all = @($script:PimCoverageStatuses) + @($ign)
+    $counts = [ordered]@{}; foreach ($s in $all) { $counts[$s] = 0 }
+    $byW = [ordered]@{}
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($View['rows'])) {
+        if ($null -eq $r) { continue }
+        $o = [ordered]@{}
+        if ($r -is [System.Collections.IDictionary]) { foreach ($k in @($r.Keys)) { $o["$k"] = $r[$k] } }
+        else { foreach ($p in @($r.PSObject.Properties)) { $o[$p.Name] = $p.Value } }
+        $ik = Get-PimCoverageIgnoreKey -Row $r
+        $status = "$($o['status'])"
+        $o['ignoreKey'] = "$($ik.key)"; $o['ignoreKind'] = "$($ik.label)"; $o['ignored'] = $false
+        if ($status -eq 'Gap' -and $ik.key -and $dec.ContainsKey($ik.key) -and "$(Get-PimCoverageField $dec[$ik.key] 'state')" -eq 'ignored') {
+            $status = $ign
+            $o['status'] = $ign; $o['ignored'] = $true
+            $o['ignoredBy'] = "$(Get-PimCoverageField $dec[$ik.key] 'by')"; $o['ignoredUtc'] = "$(ConvertTo-PimCoverageIsoStamp -Value (Get-PimCoverageField $dec[$ik.key] 'atUtc'))"   # JSON hands a stored stamp back as a [datetime] on PowerShell 7
+        }
+        if (-not $counts.Contains($status)) { $counts[$status] = 0 }
+        $counts[$status] = [int]$counts[$status] + 1
+        $w = "$($o['workload'])"
+        if (-not $byW.Contains($w)) { $byW[$w] = [ordered]@{}; foreach ($s in $all) { $byW[$w][$s] = 0 } }
+        if (-not $byW[$w].Contains($status)) { $byW[$w][$status] = 0 }
+        $byW[$w][$status] = [int]$byW[$w][$status] + 1
+        $rows.Add($o)
+    }
+    $View['rows'] = $rows.ToArray()
+    $View['counts'] = $counts
+    $View['countsByWorkload'] = $byW
+    $View['statuses'] = @($all)
+    $View['gaps'] = [int]$counts['Gap']
+    $View['ignored'] = [int]$counts[$ign]
+    $View['notRead'] = @(@($View['sources']) | Where-Object { $null -ne $_ -and -not [bool](Get-PimCoverageField $_ 'read') } | ForEach-Object { "$(Get-PimCoverageField $_ 'workload')" } | Where-Object { $_ } | Select-Object -Unique)
+    return $View
+}
+
+function Set-PimCoverageIgnoreDecision {
+    <#
+      PURE. Apply Ignore / Bring back to the decisions map and return the new map. -Items: @( @{ key; name; kind } ).
+      'bringback' removes the entry (the item is a gap again). An entry keeps the name and the kind in words, so the
+      stored list can be read without the report.
+    #>
+    param([AllowNull()][object]$Decisions, [Parameter(Mandatory)][ValidateSet('ignore', 'bringback')][string]$Action, [object[]]$Items = @(), [string]$By = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    $d = @{}
+    if ($null -ne $Decisions) {
+        if ($Decisions -is [System.Collections.IDictionary]) { foreach ($k in @($Decisions.Keys)) { $d["$k"] = $Decisions[$k] } }
+        else { foreach ($p in @($Decisions.PSObject.Properties)) { $d[$p.Name] = $p.Value } }
+    }
+    foreach ($it in @($Items)) {
+        $key = "$(Get-PimCoverageField $it 'key')".Trim().ToLowerInvariant(); if (-not $key) { continue }
+        foreach ($k in @($d.Keys)) { if ("$k".Trim().ToLowerInvariant() -eq $key) { $d.Remove($k) } }   # one spelling per key
+        if ($Action -eq 'ignore') {
+            $d[$key] = [ordered]@{ state = 'ignored'; by = $By; atUtc = $NowUtc.ToUniversalTime().ToString('o'); name = "$(Get-PimCoverageField $it 'name')"; kind = "$(Get-PimCoverageField $it 'kind')" }
+        }
+    }
+    return $d
 }
 
 function ConvertTo-PimCoverageIsoStamp {
