@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.611 -- 2026-10-12
+
+- Active assignments on a large tenant: a stored read that cannot be loaded says so instead of no snapshot yet and starts no new read of the tenant, the page asks only for the state while a read runs, and repeat loads are served from memory; alert mails are one short table: customer, environment, solution, who acts, status, problem, what to do, the findings one per line, when, and where to get support
+
 ## 2.4.610 -- 2026-10-12
 
 - Alert mails are one short table: customer, environment, solution, who acts, status, problem, what to do, the findings one per line, when, and where to get support

@@ -3,7 +3,7 @@
   "product": "pim",
   "title": "Check and fix a workload's prerequisites for PIM Manager",
   "purpose": "Check, and fix, the prerequisites of ONE workload PIM Manager delegates into (Defender XDR, Intune, Power BI, Azure roles, Entra roles) that PIM cannot fix itself.",
-  "whenToRun": "When a prerequisite chip in PIM Manager (template cards, the workload wizards, Coverage & gaps) shows this command for a workload, with your environment's values filled in. PIM checks every prerequisite an API can answer itself every day; this script is for what needs a person with more rights than the engine has. Safe to run again: what is already in place is reported and left alone.",
+  "whenToRun": "When a prerequisite chip in PIM Manager (template cards, the workload wizards, Discovery and gaps) shows this command for a workload, with your environment's values filled in. PIM checks every prerequisite an API can answer itself every day; this script is for what needs a person with more rights than the engine has. Safe to run again: what is already in place is reported and left alone.",
   "standalone": true,
   "sourcePath": "tools/setup/Initialize-PimWorkloadPrereqs.ps1",
   "runAs": [
@@ -147,7 +147,7 @@
       "object": "pim.Settings 'WorkloadPrereqs': this workload's result merged in (a confirmation made in PIM Manager is kept), read back and audited -- only with -SqlServerFqdn and access to the store",
       "permission": "",
       "scope": "the environment's store",
-      "why": "PIM Manager shows the result on the template cards and Coverage & gaps.",
+      "why": "PIM Manager shows the result on the template cards and Discovery and gaps.",
       "undo": "Press Check again in PIM Manager: PIM records its own result."
     }
   ],

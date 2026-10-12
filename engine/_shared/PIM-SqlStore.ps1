@@ -753,6 +753,27 @@ function Get-PimSqlTenantCache {
     return ($j | ConvertFrom-Json)
 }
 
+function Get-PimSqlTenantCacheStamps {
+    # REQ 100.112: WHEN each kind was last written -- Kind + RefreshedUtc only, NEVER the document (one kind's document can
+    # be tens of MB, and reading it is what made a "is there a snapshot?" question cost 25 s). Returns a hashtable
+    # kind -> round-trip UTC text ('' when the column is NULL); a kind with no row is ABSENT from it. Throws on a failed read.
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string[]]$Kinds)
+    $out = @{}
+    $ks = @($Kinds | Where-Object { "$_".Trim() })
+    if ($ks.Count -eq 0) { return $out }
+    $p = @{}; $names = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $ks.Count; $i++) { $p["k$i"] = "$($ks[$i])"; $names.Add("@k$i") }
+    $rows = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql ("SELECT Kind, RefreshedUtc FROM pim.TenantCache WHERE Kind IN (" + ($names -join ', ') + ")") -Parameters $p)
+    foreach ($r in $rows) {
+        if ($null -eq $r) { continue }
+        $v = $r.RefreshedUtc; $txt = ''
+        if ($v -is [datetime]) { $txt = [datetime]::SpecifyKind($v, [DateTimeKind]::Utc).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ', [System.Globalization.CultureInfo]::InvariantCulture) }
+        elseif ($null -ne $v) { $txt = "$v" }
+        $out["$($r.Kind)"] = $txt
+    }
+    return $out
+}
+
 # --- row CRUD -------------------------------------------------------------------
 function Get-PimSqlRows {
     param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Entity)
