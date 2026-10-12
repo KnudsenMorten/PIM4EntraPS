@@ -402,6 +402,13 @@ Register-PimJobHandler -Type 'workload-prereqs' -Handler {
     param($job, $now, $whatIf)
     Invoke-PimWorkloadPrereqSelfCheckJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
+# PIM 100.93: the REAL 'policy-defaults' handler -- the tenant cross-check of the shipped Microsoft-default table (read-only) into
+# pim.Settings 'MicrosoftPolicyDefaults'. The library comes with the engine providers (PIM-EngineProviders.ps1 loads it).
+Register-PimJobHandler -Type 'policy-defaults' -Handler {
+    param($job, $now, $whatIf)
+    if (-not (Get-Command Invoke-PimPolicyDefaultsJob -ErrorAction SilentlyContinue)) { throw '[policy-defaults] the policy choices library (engine\_shared\PIM-PolicyChoices.ps1) is not in this image -- nothing was read' }
+    Invoke-PimPolicyDefaultsJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
 # §79.2: the REAL 'pending-check' handler -- registered ONLY here, after the defaults (which declare it unimplemented).
 Register-PimJobHandler -Type 'pending-check' -Handler {
     param($job, $now, $whatIf)
@@ -569,6 +576,12 @@ $engineHandler = {
     $warns = @(@($res) | ForEach-Object { $sc = "$($_.scope)"; if ($_.PSObject.Properties['warnings']) { @($_.warnings) | Where-Object { "$_".Trim() } | ForEach-Object { "${sc}: $_" } } })
     $notChk = @(@($res) | Where-Object { $_.PSObject.Properties['notChecked'] -and $_.notChecked } | ForEach-Object { "$($_.scope) NOT CHECKED ($($_.skippedReason)$($_.error))" })
     $tail = ''
+    # PIM 100.93: a policy scope says in plain words what it found -- "12 settings wait for your choice; 0 changes". Information,
+    # never a warning: a setting nobody chose yet is not a fault.
+    if (Get-Command Format-PimPolicyChoiceRunSummary -ErrorAction SilentlyContinue) {
+        $pcNotes = @(@($res) | Where-Object { $_ -and $_.PSObject.Properties['policyChoices'] -and $null -ne $_.policyChoices } | ForEach-Object { "$($_.scope): $(Format-PimPolicyChoiceRunSummary -Summary $_.policyChoices)" })
+        if ($pcNotes.Count) { $tail += ' | ' + ($pcNotes -join '; ') }
+    }
     if ($notChk.Count) { $tail += ' | ' + ($notChk -join '; ') }
     if ($warns.Count) { $tail += " | $($warns.Count) warning(s): " + (@($warns | Select-Object -First 5) -join '; ') + $(if ($warns.Count -gt 5) { "; +$($warns.Count - 5) more (see the run's log)" } else { '' }) }
     if ($__rrMode) {

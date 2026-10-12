@@ -52,7 +52,8 @@ function Get-PimGuardReleaseCatalog {
         # nothing while the ledger cannot be read, and heals on the next run that reads it.
         # PIM 100.82 (owner 2026-10-11): many policy changes in one run HOLD again (2.4.594 only warned), weakening or not; a SuperAdmin approves.
         [pscustomobject]@{ guardId = 'engine.policy-mass-change'; title = 'Policy mass-change breaker'; release = 'approval'; ceiling = $null; ceilingPercent = $null
-            what = 'Holds a run that would change more than 25 policies, more than 25 % of the checked policies, or weaken more than 3 policy settings. A SuperAdmin approves the change set on the Approvals / Jobs page (valid 24 h).' }
+            # PIM 100.93 (owner 2026-10-12: "it must still be approved as guard"): EVERY change set, whatever its size.
+            what = 'Holds EVERY policy change set, whatever its size: a policy changes only from a choice made on Templates > Policy settings, and nothing is written until a SuperAdmin approves that exact change set on the Approvals page (valid 24 h). The same person may approve, as a second step.' }
         [pscustomobject]@{ guardId = 'engine.offboarding-approval'; title = 'Offboarding approval'; release = 'approval'; ceiling = $null; ceilingPercent = $null
             what = 'A disable or offboarding waits for its approval on the Approvals page.' }
         [pscustomobject]@{ guardId = 'engine.reconcile-paused'; title = 'Daily reconcile paused'; release = 'info'; ceiling = $null; ceilingPercent = $null

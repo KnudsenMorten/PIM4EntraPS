@@ -271,10 +271,44 @@ function Get-PimBaselineBundlePayload {
             foreach ($s in (Get-PimDownlinkIntentSummary -Intents $liveIntents)) { Write-Host "  $s" }
         }
     }
+    # PIM 100.93 -- THE MANAGING TENANT'S POLICY CHOICES (owner: "MSP default, tenant may override"). They travel in the
+    # SIGNED payload as 'policyChoices' and are the DEFAULT in a managed tenant; that tenant's own choices always win and
+    # every change still waits for that tenant's own SuperAdmin. Read through the job's control view like the deployment
+    # rings (this job has no right on the settings table itself). What travels and what does not: PIM-PolicyChoicesMsp.ps1.
+    #   * a stored 'PolicyChoices' row -> the set is carried, also when it holds no choice (an EMPTY set = "no default
+    #     from the managing tenant", which a managed tenant takes as such);
+    #   * NO row (nobody ever chose here, or a control view from before this row was added) -> the key is NOT added, so
+    #     the bundle is byte-identical to one published before this existed and a managed tenant keeps what it holds;
+    #   * a read that FAILS -> not added either, and said. Leaving it out never widens anything: a managed tenant then
+    #     simply keeps the defaults it already has.
+    $policyChoiceCount = 0
+    if (Get-Command New-PimPolicyChoicesBundleSet -ErrorAction SilentlyContinue) {
+        try {
+            $pcRows = @(& $RunQuery "SELECT Name, ValueJson FROM pim.vw_PublishJobControl WHERE Name IN ('PolicyChoices', 'PolicyAdvisories')")
+            $pcRaw = ''; $pcAdv = ''
+            foreach ($pr in $pcRows) {
+                if ($null -eq $pr) { continue }
+                if ("$($pr.Name)" -eq 'PolicyChoices') { $pcRaw = "$($pr.ValueJson)" } elseif ("$($pr.Name)" -eq 'PolicyAdvisories') { $pcAdv = "$($pr.ValueJson)" }
+            }
+            if ($pcRaw.Trim()) {
+                $pcBuilt = New-PimPolicyChoicesBundleSet -Choices $pcRaw -Advisories $(if ($pcAdv.Trim()) { $pcAdv } else { $null }) `
+                               -GroupNames @($defArr | ForEach-Object { "$($_.GroupName)" } | Where-Object { "$_".Trim() })
+                $payload[(Get-PimPolicyChoicesArtifactName)] = $pcBuilt.set
+                $policyChoiceCount = [int]$pcBuilt.settings
+                Write-Host ("baseline policy choices (the default in every managed tenant; each tenant's own choices win): {0} setting(s)$(if (-not $pcAdv.Trim()) { ' -- NO advisory record could be read, so every managed tenant will ask again' })" -f $policyChoiceCount)
+                foreach ($np in @($pcBuilt.notPublished)) { Write-Host "  NOT PUBLISHED (policy choice for one object) $($np.key): $($np.reason)" -ForegroundColor Yellow }
+            } else {
+                Write-Host "baseline policy choices: none stored on this managing tenant -- not carried (a managed tenant keeps what it holds)" -ForegroundColor DarkGray
+            }
+        } catch {
+            [void]$payload.Remove((Get-PimPolicyChoicesArtifactName))
+            Write-Host "  [warn] the policy choices could not be read ($($_.Exception.Message)) -- NOT carried in this bundle; managed tenants keep the defaults they already hold" -ForegroundColor Yellow
+        }
+    }
     $payloadJson  = ($payload | ConvertTo-Json -Depth 8 -Compress)
     $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payloadJson)
     return @{ payload = $payload; payloadJson = $payloadJson; payloadBytes = $payloadBytes; version = $version
-              rowCount = $rowObjs.Count; assignmentCount = $assignArr.Count }
+              rowCount = $rowObjs.Count; assignmentCount = $assignArr.Count; policyChoiceCount = $policyChoiceCount }
 }
 
 function ConvertTo-PimBaselineDocJson {

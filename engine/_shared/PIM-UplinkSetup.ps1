@@ -89,7 +89,7 @@ $script:PimSetupSteps = @(
     [ordered]@{ id = 'departments'; title = 'Departments & owners'; required = $true; why = 'Departments sponsor access; their owners approve and receive the mail.' }
     [ordered]@{ id = 'roles'; title = 'Roles & templates'; required = $true; why = 'The roles people activate.' }
     [ordered]@{ id = 'admins'; title = 'Admin accounts'; required = $false; why = 'The separate admin accounts PIM manages.' }
-    [ordered]@{ id = 'policies'; title = 'Policies'; required = $true; why = 'The activation policies (duration, MFA, justification, approval) PIM applies.' }
+    [ordered]@{ id = 'policies'; title = 'Policies'; required = $true; why = 'Every policy setting (activation length, multifactor authentication, approval, expiry, mails) has a choice: Microsoft default, PIM Manager recommendation or Keep current. PIM Manager changes no policy on its own.' }
     [ordered]@{ id = 'alerts'; title = 'Alert recipients'; required = $true; why = 'Who receives the alerts when a guard holds something or a job fails.' }
     [ordered]@{ id = 'breakglass'; title = 'Break-glass accounts'; required = $true; why = 'The emergency accounts PIM must never touch.' }
     [ordered]@{ id = 'firstrun'; title = 'First run'; required = $true; why = 'The engine applies the configuration for the first time.' }

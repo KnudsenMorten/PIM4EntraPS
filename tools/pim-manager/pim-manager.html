@@ -1140,6 +1140,51 @@
   .gs-sub { font-size:12.5px; font-weight:600; margin:14px 0 2px; color:#24292f; }
   .gs-hint { color:#57606a; font-size:12px; margin:6px 0; }
   .gs-facts { font-size:12.5px; margin:0 0 8px; }
+  /* PIM 100.93 -- Policy settings (Templates > Policy settings and the Get Started step "Policies") */
+  .pcIntro { color:#57606a; font-size:12px; margin-bottom:10px; max-width:980px; }
+  .pcHolds { border:1px solid #d4a72c; border-left:4px solid #bf8700; background:#fff8c5; border-radius:6px; padding:8px 10px; font-size:12.5px; margin:0 0 10px; }
+  .pcReadOnly { border:1px solid #d0d7de; background:#f6f8fa; border-radius:6px; padding:6px 10px; font-size:12.5px; color:#57606a; margin:0 0 10px; }
+  .pcQuick { margin:0 0 12px; font-size:12.5px; }
+  .pcQuick .pcQuickL { font-weight:600; margin-right:4px; }
+  .pcType { border:1px solid #d0d7de; border-radius:8px; background:#fff; margin:0 0 14px; }
+  .pcTypeHead { padding:8px 12px; background:#f6f8fa; border-bottom:1px solid #d0d7de; border-radius:8px 8px 0 0; font-size:12px; color:#57606a; }
+  .pcTypeName { font-size:13.5px; font-weight:600; color:#24292f; margin-right:8px; }
+  .pcRow { display:grid; grid-template-columns:minmax(220px, 1fr) minmax(0, 2.4fr); gap:6px 14px; padding:10px 12px; border-top:1px solid #eaeef2; }
+  .pcType .pcRow:first-of-type { border-top:0; }
+  .pcLabel { font-size:12.5px; font-weight:600; color:#24292f; }
+  .pcHelp { font-size:11.5px; color:#57606a; margin-top:1px; }
+  .pcState { font-size:11.5px; margin-top:4px; }
+  .pcStatus[data-pc-status="pending"], .pcStatus[data-pc-status="start"] { color:#0969da; font-weight:600; }
+  .pcStatus[data-pc-status="chosen"] { color:#1a7f37; font-weight:600; }
+  .pcStatusSub { color:#57606a; font-size:11.5px; font-weight:400; }
+  .pcBtns { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:8px; align-items:start; }
+  .pcBtn { display:block; width:100%; text-align:left; padding:6px 9px; border:1px solid #d0d7de; border-radius:6px; background:#f6f8fa; color:#24292f; cursor:pointer; font:inherit; }
+  .pcBtn:hover:not(:disabled) { border-color:#0969da; }
+  .pcBtn .pcBtnL { display:block; font-size:11px; color:#57606a; }
+  .pcBtn .pcBtnV { display:block; font-size:12.5px; font-weight:600; margin-top:1px; overflow-wrap:anywhere; }
+  .pcBtn.pcOn { border:2px solid #0969da; background:#ddf4ff; padding:5px 8px; }
+  .pcBtn.pcOn .pcBtnL { color:#0969da; font-weight:600; }
+  .pcBtn:disabled { cursor:default; opacity:.75; }
+  .pcBtn.pcOn:disabled { opacity:1; }
+  .pcWhy { font-size:11px; color:#57606a; margin-top:3px; }
+  .pcNote { font-size:11px; color:#57606a; margin-top:3px; }
+  .pcOvr { grid-column:1 / -1; font-size:11.5px; }
+  .pcOvr > summary { cursor:pointer; color:#0969da; }
+  .pcOvrBody { border:1px solid #d0d7de; border-radius:6px; background:#f6f8fa; padding:6px 10px; margin-top:4px; }
+  .pcOvrRow, .pcOvrAddRow { margin:3px 0; }
+  .pcOvrAddRow select { max-width:320px; font-size:12px; }
+  .pcBar { position:sticky; bottom:0; border:1px solid #d0d7de; border-radius:8px; background:#fff; padding:10px 12px; margin-top:4px; font-size:12.5px; box-shadow:0 -2px 8px rgba(27,31,36,.06); }
+  .pcBarBtns { margin-top:8px; }
+  .pcImpactList { font-size:11.5px; color:#57606a; margin-top:4px; }
+  .pcImpactList > summary { cursor:pointer; color:#0969da; }
+  .pcErr { margin-top:8px; color:#82071e; border:1px solid #ff8182; background:#ffebe9; border-radius:6px; padding:6px 10px; }
+  .pcSaved { margin-top:8px; color:#24292f; border:1px solid #4ac26b; background:#dafbe1; border-radius:6px; padding:6px 10px; }
+  .pcQuickTypes { margin:6px 0 6px 18px; padding:0; }
+  .pcQuickCannot { margin:6px 0; }
+  .pcQuickCannot ul { margin:4px 0 4px 18px; padding:0; max-height:160px; overflow:auto; }
+  .pcQuickHeld { margin-top:8px; border:1px solid #d4a72c; background:#fff8c5; border-radius:6px; padding:6px 10px; }
+  .pcGs .pcBar { position:static; box-shadow:none; }
+  @media (max-width: 900px) { .pcRow { grid-template-columns:1fr; } .pcBtns { grid-template-columns:1fr; } }
   .gs-list { margin:2px 0 8px 18px; padding:0; font-size:12.5px; }
   .gs-check { display:block; font-size:12.5px; margin:6px 0; }
   .gs-row { display:flex; gap:12px; flex-wrap:wrap; }
@@ -1320,6 +1365,7 @@
     <div class="tab" data-tab="emergency" title="The break-glass accounts PIM never revokes, disables or offboards, and the time-boxed emergency override.">Emergency access <span id="govEmergencyBadge" class="badge" style="display:none;background:#cf222e" title="Emergency override (break-glass) is ACTIVE">!</span></div>
     <div class="tab" data-tab="mailtemplates" title="The wording of every notification mail.">Mail templates</div>
     <!-- REQ-L: read-only list of the activation policy templates, what each sets, and which delegations use it. -->
+    <div class="tab" data-tab="policysettings" title="Every policy setting of your tenant: choose Microsoft default, PIM Manager recommendation or Keep current, per setting. Nothing changes until you choose, and a change waits for a SuperAdmin's approval.">Policy settings</div>
     <div class="tab" data-tab="policytemplates" title="Every activation policy template in this tenant, what it sets in plain words, and which delegations use it (read-only).">Policy templates</div>
     <div class="tab" data-tab="guards" title="Every protective guard: clear or holding, what it holds right now, and its release (SuperAdmin: this plan, one run or until a time, at most 24 h).">Guards</div>
     <div class="tab" data-tab="workloadtemplates" title="The workload permission templates (Defender XDR, Intune, ...): which roles each grants, its version and approval, switch a pack on or off, and import it.">Workload templates</div>
@@ -1934,6 +1980,12 @@
   <div id="customworkloadsTab" class="tab-panel">
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="customworkloadsBody">
       <div style="color:#57606a;font-size:12px;">Loading custom workloads&hellip;</div>
+    </div>
+  </div>
+  <!-- PIM 100.93: the customer decides every policy setting (Templates > Policy settings) -->
+  <div id="policysettingsTab" class="tab-panel">
+    <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="policysettingsBody">
+      <div style="color:#57606a;font-size:12px;">Loading the policy settings&hellip;</div>
     </div>
   </div>
   <div id="policytemplatesTab" class="tab-panel">
@@ -2881,6 +2933,8 @@
       title: 'The templates PIM applies: mail, policy and workload templates, and the tenant baseline',
       items: [
         { tab: 'mailtemplates', label: 'Mail templates', desc: 'The wording of every notification mail — edit in place, reset to the shipped default' },
+        // PIM 100.93 (owner 2026-10-12: "customer must choose per setting"): where the customer chooses, per policy setting.
+        { tab: 'policysettings', label: 'Policy settings', desc: 'Choose per policy setting: Microsoft default, PIM Manager recommendation or Keep current -- nothing changes until you choose, and a change waits for a SuperAdmin\'s approval' },
         // REQ-L (operator 2026-09-19: "i dont see the different policies anymore"): its own read-only page.
         { tab: 'policytemplates', label: 'Policy templates', desc: 'Every activation policy template: what it sets in plain words (duration, MFA, approval, expiry, notifications) and which delegations use it' },
         { tab: 'workloadtemplates', label: 'Workload templates', desc: 'The workload permission templates (Defender XDR, Intune, ...): the roles each grants, its version and approval, on or off' },
@@ -3134,11 +3188,16 @@
       if (d && Array.isArray(d.items)) { PIM_ATTENTION = d; PIM_ATTENTION_AT = Date.now(); }
       try { applyAttentionBadges(); } catch (_) { }
       try { renderHomeBlockingLine(); } catch (_) { }
+      try { if (typeof renderHome === 'function' && renderHome.__paintAttn) renderHome.__paintAttn(); } catch (_) { }   // PIM 100.93: the amber notices
       return PIM_ATTENTION;
     }).catch(() => PIM_ATTENTION).finally(() => { PIM_ATTENTION_BUSY = null; });
     return PIM_ATTENTION_BUSY;
   }
-  function attentionItems() { return (PIM_ATTENTION && Array.isArray(PIM_ATTENTION.items)) ? PIM_ATTENTION.items.filter(i => i && i.tab && (Number(i.count) || 0) > 0) : []; }
+  // BLOCKING items only: what the red menu counts and the "blocking work" line show. PIM 100.93: an item the server marks
+  // blocking: false (policy settings that wait for a choice / are asked again) holds nothing -- it is an amber line under
+  // Overview's "What needs your attention" (attentionNotices), never a red count.
+  function attentionItems() { return (PIM_ATTENTION && Array.isArray(PIM_ATTENTION.items)) ? PIM_ATTENTION.items.filter(i => i && i.tab && i.blocking !== false && (Number(i.count) || 0) > 0) : []; }
+  function attentionNotices() { return (PIM_ATTENTION && Array.isArray(PIM_ATTENTION.items)) ? PIM_ATTENTION.items.filter(i => i && i.tab && i.blocking === false && (Number(i.count) || 0) > 0) : []; }
   // "Reviews & controls > Approvals" -- where the item is, in the words of the menu.
   function attentionPageName(tab) {
     for (const g of NAV_GROUPS) {
@@ -3311,7 +3370,9 @@
     jobs:        { title: 'What this is & how to use it', what: 'The scheduler job registry and recent runs.', how: ['In-progress jobs sort to the top; open Logs on any row.', '<b>Run now</b> (Admin) starts a job on demand: an engine job is queued for the scheduler and its tick job is started, so it runs in about a minute &mdash; the Manager never runs the engine itself.'] },
     settings:    { title: 'What this is & how to use it', what: 'Admin settings &mdash; naming conventions, imports, AD OU placement and platform options.', how: ['Edit a card and Save; imports pull from Entra or a CSV. Changes persist to the store the engine reads.'] },
     envreport:   { title: 'What this is & how to use it', what: 'Environment report &mdash; the architecture and security report of THIS environment, read live: every identity by name and id, its permissions marked expected / missing / extra against what PIM Manager declares, the Azure resources and their network exposure, features, data flows, change history and findings with the fix.', how: ['Export PDF prints the report (choose Save as PDF, A4, background graphics on); Export JSON downloads the same data for an audit or a diff.', 'Whatever this Manager may not read is marked not readable, with the reason -- grant it read access and press Read again.', 'Confidential: names and ids only, never a secret value. Admin and SuperAdmin only.'] },
-    support:     { title: 'What this is & how to use it', what: 'Support &mdash; version and tenant context, plus a pre-filled issue template.', how: ['No tenant connection needed; use it to file an issue with the context already filled in.'] }
+    support:     { title: 'What this is & how to use it', what: 'Support &mdash; version and tenant context, plus a pre-filled issue template.', how: ['No tenant connection needed; use it to file an issue with the context already filled in.'] },
+    // PIM 100.93
+    policysettings: { title: 'What this is & how to use it', what: 'Policy settings &mdash; every policy setting of your tenant, per policy type. PIM Manager never changes a policy on its own: you choose per setting between Microsoft default, PIM Manager recommendation and Keep current.', how: ['Each button shows its own value. Choose, then press <b>Save choices</b> (SuperAdmin) &mdash; nothing is sent before that.', 'Saving changes nothing in your tenant yet: the next policy run plans the change and holds it until a SuperAdmin approves it on Approvals. The same person may approve, as a second step.', 'The quick-selection buttons set every setting at once, after you type the word <b>confirm</b>.'] }
   };
   function tabGuidanceHtml(name) {
     var g = TAB_GUIDANCE[name];
@@ -3404,6 +3465,7 @@
     if (name === 'emergency') { renderSettingsBreakGlassSection(document.getElementById('setBreakGlassHost')); renderSettingsEmergencySection(document.getElementById('setEmergencyHost')); }
     if (name === 'mailtemplates') renderMailTemplatesSection(document.getElementById('setMailTemplatesHost'));
     if (name === 'policytemplates') renderPolicyTemplatesPage();   // REQ-L
+    if (name === 'policysettings') renderPolicySettingsPage();     // PIM 100.93
     if (name === 'customworkloads') renderCustomWorkloadsPage();   // 100.17 CUSTOM-WORKLOAD
     if (name === 'guards') renderGuardsPage();   // §96.6 / GUARD-1.6
     if (name === 'workloadtemplates') { renderTemplatePacksSection(document.getElementById('setTemplatePacksHost')); renderTemplates(); }   // operator 2026-10-05: its own page, with the permission templates (moved from Create access)
@@ -5428,13 +5490,23 @@
     // §97.3: the blocking line -- from the last attention read at once, then a fresh read (page load = computed again).
     try { renderHomeBlockingLine(); refreshAttention(true); } catch (_) { }
 
-    // fill the "what needs my attention" call-out from the items the tiles collected.
-    const co = document.getElementById('homeAttnCallout');
-    if (co) co.innerHTML = homeCalloutHtml(attnItems);
-
-    // attention badge on the Home tab
-    const ab = document.getElementById('homeAttnBadge');
-    if (ab) { ab.textContent = attn; ab.style.display = attn > 0 ? '' : 'none'; ab.style.background = homeAttnColour(attnItems); }
+    // fill the "what needs my attention" call-out from the items the tiles collected + the attention badge on the Home tab.
+    // PIM 100.93: the server's NON-BLOCKING attention lines (policy settings that wait for a choice / are asked again) are
+    // amber lines here, each with its link, counted once each on the badge. They arrive with GET /api/attention, so the
+    // call-out is painted now and again when that read answers (refreshAttention -> renderHome.__paintAttn).
+    let attnShown = attn;   // the count the Home badge shows (the heavy tiles add to it later)
+    const homePaintAttn = () => {
+      const notices = attentionNotices().map(i => ({ sev: 'amber', text: esc(String(i.text || '')), tab: i.tab, id: i.id || '' }));
+      const all = attnItems.concat(notices);
+      const co = document.getElementById('homeAttnCallout');
+      if (co) co.innerHTML = homeCalloutHtml(all);
+      const n = attnShown + notices.length;
+      const ab = document.getElementById('homeAttnBadge');
+      if (ab) { ab.textContent = n; ab.style.display = n > 0 ? '' : 'none'; ab.style.background = homeAttnColour(all); }
+      homeWireLinks();
+    };
+    renderHome.__paintAttn = () => { if (document.getElementById('homeAttnCallout')) homePaintAttn(); };
+    homePaintAttn();
 
     // wire tile + call-out rows -> tab navigation
     function homeWireLinks() {
@@ -5446,7 +5518,6 @@
         el.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } };
       });
     }
-    homeWireLinks();
     const rb = document.getElementById('homeRefresh');
     if (rb) rb.onclick = () => renderHome();
     loadPermissionHealth(false);
@@ -5510,13 +5581,9 @@
       // fold the heavy/live signals into the "what needs my attention" call-out too.
       if ((ex.expiring || 0) > 0) homeAddAttn('amber', (ex.expiring) + ' active assignment(s) expiring within ' + (ex.windowDays || 14) + ' days &mdash; renew or revoke', 'revoke');
       if ((ar.pending || 0) > 0) homeAddAttn('amber', (ar.pending) + ' access review(s) awaiting a decision', 'accessreview');
-      const co2 = document.getElementById('homeAttnCallout');
-      if (co2) co2.innerHTML = homeCalloutHtml(attnItems);
-      // re-wire the freshly-replaced tiles + call-out rows + refresh the badge with heavy counts
-      homeWireLinks();
-      let attn2 = attn + (ex.expiring || 0) + (ar.pending || 0);
-      const ab2 = document.getElementById('homeAttnBadge');
-      if (ab2) { ab2.textContent = attn2; ab2.style.display = attn2 > 0 ? '' : 'none'; ab2.style.background = homeAttnColour(attnItems); }
+      // repaint the call-out, re-wire the freshly-replaced tiles + call-out rows, refresh the badge with heavy counts
+      attnShown = attn + (ex.expiring || 0) + (ar.pending || 0);
+      homePaintAttn();
     };
     const heavyBtn = document.getElementById('homeLoadHeavy');
     if (heavyBtn) heavyBtn.onclick = (ev) => { ev.stopPropagation(); homeLoadHeavy(); };
@@ -7094,7 +7161,7 @@
     const optList = (arr, sel) => (arr||[]).map(o => `<option value="${esc(o)}"${o===sel?' selected':''}>${esc(o)}</option>`).join('');
     let h = '';
     // OPPOL-1 (2026-10-09): these are FLOORS the engine applies to every policy template it writes (only ever tightening).
-    h += `<div style="font-size:11.5px;color:#57606a;margin-bottom:6px;">The engine applies these on top of every policy template, on the groups and roles PIM Manager manages: it adds MFA to the activation checks and shortens an activation or eligibility that is longer than the maximum. It never loosens a template.</div>`;
+    h += `<div style="font-size:11.5px;color:#57606a;margin-bottom:6px;">The engine applies these on top of every policy template, on the groups and roles PIM Manager manages: it adds MFA to the activation checks and shortens an activation or eligibility that is longer than the maximum. It never loosens a template. These are part of the PIM Manager recommendation: a policy changes only where that recommendation is chosen on Templates &rsaquo; Policy settings, and the change waits for a SuperAdmin&rsquo;s approval.</div>`;
     h += `<table style="border-collapse:collapse;font-size:12.5px;"><tbody>`;
     h += `<tr><td style="padding:4px 12px 4px 0;color:#57606a;">Max activation duration${settingInfoBtn('OperationalPolicy.maxActivationDuration')}</td>` +
          `<td><select id="opMaxAct"${ro}>${optList(cats.activationDuration, exp.maxActivationDuration)}</select></td></tr>`;
@@ -13029,6 +13096,7 @@
     'servicenow-intake':           'Reads requests from the ServiceNow drop store (only when the IntakeEnabled setting is on).',
     'tenant-cache':                'Refreshes the lists of roles, administrative units, groups and Azure scopes the pickers and validation use.',
     'verify-convergence':          'Re-reads the tenant and proves that what was committed is actually deployed. Items still missing after the grace window fail this job and raise the failure alert at once; the daily data quality alert lists them too.',
+    'policy-defaults':             'Checks the Microsoft default policy values PIM Manager ships against this tenant: it reads policies nobody has changed and notes any difference on the policy settings. It only reads; it changes nothing.',
     'data-quality':                'Sends ONE daily "Data quality alert" when something looks different from the last runs (each scope\'s key numbers against the median of its last 3 runs, with the likely cause from the settings change log) or another warning was raised. Warnings only: it never blocks anything.',
     'hybrid-ad-apply':             'Applies on-premises Active Directory changes for hybrid admin accounts.',
     'hybrid-ad-servers':           'Lists the Windows servers in Active Directory for Discovery, and puts each server\'s PIM group into that server\'s local Administrators (adds only; runs on the hybrid worker).',
@@ -15228,14 +15296,25 @@
       check: c => ({ done: c.rows['Account-Definitions-Admins'] > 0, note: c.rows['Account-Definitions-Admins'] + ' admin account(s)' }) },
     // (The "Access mapping" step is gone -- owner 2026-10-08: "this option should be removed from the get started - we will
     // do that later (mapping)". The Access map page and its code stay.)
-    // Policies (owner 2026-10-08: "seems incomplete - nothing to choose from" / "verify / approve policies in the get started"):
-    // the activation policies PIM will apply, per kind of policy, as real fields saved through the Policy templates page's
-    // routes; a held policy change set is approved inline (the Approvals route, its maker/checker rules); the admin then
-    // APPROVES the policies (a confirmation). Done = approved AND nothing held -- never "nothing waiting" alone.
-    { id: 'policies', title: 'Policies', required: true,
-      what: 'The activation policies PIM applies (how long an activation lasts, MFA, justification, approval) for each kind of policy. Verify them, change what does not fit, and approve them.',
-      check: c => { const h = gsPolicyHoldCount(c); const k = c.confirm && c.confirm.policies;
-        return { done: h === 0 && !!k, note: h ? h + ' change set(s) wait for a SuperAdmin' : (k ? ('approved by ' + (k.by || 'an admin')) : 'not verified and approved yet') }; } },
+    // Policies -- PIM 100.93 (owner 2026-10-12: "we will newer force a policy chg on a customer ... customer must choose per
+    // setting and select use ms default, use recommendation, keep current. get started sets current values, but it must
+    // still be approved as guard"): the SAME table as Templates > Policy settings. Every setting that has no choice yet
+    // STARTS on Keep current (not saved); the customer changes single settings or uses a quick selection; Save & next
+    // saves the choices, the keeps included. Done = NO setting waits for a choice (the server's count, the resolver's
+    // rule) -- it does not depend on the approval: a change that comes from a choice waits for a SuperAdmin on Approvals.
+    { id: 'policies', title: 'Policies', required: true, need: 'Admin',
+      what: 'The policy settings of your tenant: how long an activation lasts, multifactor authentication, approval, expiry, notification mails. Every setting starts on Keep current -- PIM Manager changes nothing unless you choose otherwise. A change you choose waits for a SuperAdmin\'s approval.',
+      check: c => {
+        const p = c.policyChoices, h = gsPolicyHoldCount(c);
+        const held = h ? ' -- ' + h + ' change set(s) wait for a SuperAdmin\'s approval' : '';
+        if (p && p.known === true && typeof p.waiting === 'number') {
+          return { done: p.waiting === 0, note: p.waiting ? (p.waiting + ' setting(s) wait for your choice') : ('every setting has a choice' + (p.needsReview ? ' -- ' + p.needsReview + ' asked again after new advice' : '') + held) };
+        }
+        if (p && p.known === false) return { done: false, note: 'the policy choices could not be read' };
+        // a server that does not send the count yet (during an update): the earlier rule, so the step never flips by itself
+        const k = c.confirm && c.confirm.policies;
+        return { done: h === 0 && !!k, note: h ? h + ' change set(s) wait for a SuperAdmin' : (k ? ('approved by ' + (k.by || 'an admin')) : 'not chosen yet') };
+      } },
     { id: 'alerts', title: 'Alert recipients', required: true, need: 'Admin',
       what: 'Who receives the alerts when a guard holds something or a job fails.',
       check: c => { const n = ((c.alerting && c.alerting.recipients) || []).filter(Boolean).length; return { done: n > 0, note: n + ' recipient(s)' }; } },
@@ -15268,7 +15347,8 @@
     c.envName = await safe(() => api('GET', '/api/settings/environment-name'));
     c.licence = lic; c.perm = perm; c.mail = mail; c.jobs = home && home.tiles && home.tiles.jobs; c.alerting = alerting; c.breakglass = bg;
     c.confirm = (gs && gs.confirmations) || {};
-    c.jobList = Array.isArray(jobs && jobs.jobs) ? jobs.jobs : [];
+    c.policyChoices = (gs && gs.policyChoices && typeof gs.policyChoices === 'object') ? gs.policyChoices : null;   // PIM 100.93: { known, waiting, needsReview }
+    c.jobList =Array.isArray(jobs && jobs.jobs) ? jobs.jobs : [];
     c.discoveryJob = c.jobList.find(j => j && (j.type === 'discovery' || j.name === 'discovery')) || null;
     c.fullJob = c.jobList.find(j => j && j.type === 'engine-full') || c.jobList.find(j => j && j.name === 'full-reconcile') || null;
     for (const b of ['PIM-Definitions-Departments', 'PIM-Definitions-Roles', 'Account-Definitions-Admins', 'PIM-Assignments-Admins']) {
@@ -15912,39 +15992,448 @@
     }
     return '<div class="gsNamingField" data-nm-key="' + escapeHtml(it.key) + '">' + one(null, it.label || it.key) + '</div>';
   }
-  // Activation policies step: one block per kind of policy -- the default template (what a blank PolicyTemplate means;
-  // picking a RequireApproval template is how approval is required) and that template's activation settings.
-  const GS_POLICY_KINDS = [['group', 'PIM for Groups (activating a ' + dimNoun() + ')'], ['directoryRole', 'Entra ID roles'], ['azureRole', 'Azure resource roles']];
-  function gsPolicyKindHtml(kind, v, tplId, canEdit) {
-    const tpls = ((v && v.templates) || []).filter(t => t.kind === kind);
-    const code = (v && v.codeDefaults) || {}, dsrc = (v && v.defaultsSource) || {}, defs = (v && v.defaults) || {};
-    const cur = dsrc[kind] === 'setting' ? String(defs[kind] || '') : '';
-    const effId = tplId != null ? (tplId || String(code[kind] || defs[kind] || '')) : String(defs[kind] || code[kind] || '');
-    const t = tpls.find(x => x.id === effId) || null;
-    const dis = canEdit ? '' : ' disabled';
-    const selVal = tplId != null ? tplId : cur;
-    let h = '<div class="gsPolKind" data-kind="' + kind + '" style="border:1px solid #d0d7de;border-radius:6px;padding:8px 10px;margin:6px 0;">' +
-      '<div style="font-weight:600;font-size:12.5px;">' + escapeHtml((GS_POLICY_KINDS.find(k => k[0] === kind) || [kind, kind])[1]) + '</div>' +
-      '<label class="gs-l" for="gsPolDef-' + kind + '">Policy template used where a delegation names none' + settingInfoBtn('PolicyTemplateDefaults.' + kind) + '</label>' +
-      '<select id="gsPolDef-' + kind + '" name="polDef-' + kind + '" class="gsPolDef" data-kind="' + kind + '"' + dis + '>' +
-        '<option value=""' + (selVal === '' ? ' selected' : '') + '>built-in default (' + escapeHtml(String(code[kind] || '')) + ')</option>' +
-        tpls.map(x => '<option value="' + escapeHtml(x.id) + '"' + (selVal === x.id ? ' selected' : '') + '>' + escapeHtml(x.name && x.name !== x.id ? x.name : x.id) + (x.approval && x.approval.required ? ' -- approval required' : '') + '</option>').join('') +
-      '</select>' + gsErr('polDef-' + kind);
-    if (!t) return h + '<div class="gs-hint">This template is not in the tenant&rsquo;s template store -- its settings cannot be shown.</div></div>';
-    const e = (t.edit && t.edit.member) || null;
-    const ap = t.approval || {};
-    h += '<div class="gs-facts gsPolApproval">Approval to activate: <b>' + (ap.required ? 'required' + (ap.approversText ? ' -- approvers: ' + escapeHtml(String(ap.approversText)) : '') : 'not required') + '</b>' +
-      (ap.required ? '' : ' (to require it, pick a template marked &ldquo;approval required&rdquo; above)') + '</div>';
-    const ex = (e && e.expiration && e.expiration.EndUser_Assignment) || null;
-    if (e && ex) {
-      h += '<label class="gs-l" for="gsPolDur-' + kind + '">An activation lasts at most</label>' +
-        ptSelect('gsPolDur', 'id="gsPolDur-' + kind + '" name="polDur-' + kind + '" data-kind="' + kind + '" data-tpl="' + escapeHtml(t.id) + '"' + dis, PT_ACTIVATION_OPTS, ex.maximumDuration) + gsErr('polDur-' + kind);
-      const checks = (e.activationChecks || []).map(String);
-      h += '<div class="gs-l">To activate, require</div>' + PT_CHECKS.map(cc => '<label class="gs-check" style="display:inline-block;margin-right:14px;"><input type="checkbox" class="gsPolChk" name="polChk-' + kind + '-' + cc[0] + '" data-kind="' + kind + '" data-tpl="' + escapeHtml(t.id) + '" data-check="' + cc[0] + '"' + (checks.indexOf(cc[0]) >= 0 ? ' checked' : '') + dis + '> ' + escapeHtml(cc[1]) + '</label>').join('') + gsErr('polChk-' + kind);
-    } else {
-      h += '<div class="gs-facts">An activation lasts at most <b>' + escapeHtml(String((t.activation && t.activation.text) || 'not set')) + '</b>; to activate: <b>' + escapeHtml(String(t.activationChecks || 'nothing extra')) + '</b>.</div>';
+  // ===================================================================================================================
+  // PIM 100.93 POLICY SETTINGS -- THE CUSTOMER DECIDES EVERY POLICY SETTING (owner 2026-10-12: "we will newer force a
+  // policy chg on a customer. for policies we must let customer decide. options must give customer buttons per field,
+  // like ms default, recommandation (pim manager/mvp), customer current valu. customer must choose per setting." /
+  // "get started sets current values, but it must still be approved as guard" / "make a button for quck selection that
+  // decides for all setting, ask operatorm to confirm 2nd time and write confirm").
+  // ONE table, used by Templates > Policy settings and by the Get Started step "Policies" (GS_FORMS.policies):
+  //   * built on GET /api/policy-choices (Admin+): one block per policy type, one row per setting, THREE buttons that each
+  //     show THEIR value -- Microsoft default | PIM Manager recommendation | Keep current. There is NO tenant-wide mode.
+  //   * a click does NOT save: it is collected as pending on this page; the bar says how many settings changed and how
+  //     many policies that would change (from the view's wouldChange -- "not known yet" while nothing was read, never 0);
+  //     ONE "Save choices" sends ONE PUT /api/policy-choices { choices: [ { type, field, choice, objectKey? } ] }.
+  //   * the answer's approval.text is shown with the link to Approvals: a change that comes from a choice is HELD until a
+  //     SuperAdmin approves it there (the same person may -- a second step). Saving writes nothing to the tenant.
+  //   * QUICK SELECTION: three buttons set every setting at once. The dialog says what it does, per type how many settings
+  //     and policies, and what it cannot set and why; then asks a second time -- the word "confirm" must be TYPED before
+  //     the final button works. One PUT; held for approval like every other choice.
+  //   * Get Started (mode 'gs'): every setting that still WAITS starts on Keep current (pending, not saved); Save & next
+  //     saves the choices, the keeps included.
+  //   * Admin sees everything read-only; only a SuperAdmin has working buttons (the server enforces it; the page mirrors).
+  // ===================================================================================================================
+  const PC_CHOICES = ['microsoft', 'recommendation', 'keep'];
+  const PC_LABEL = { microsoft: 'Microsoft default', recommendation: 'PIM Manager recommendation', keep: 'Keep current' };
+  const PC_QUICK = [['recommendation', 'Use PIM Manager recommendation for all'], ['microsoft', 'Use Microsoft default for all'], ['keep', 'Keep current for all']];
+  const PC_UNIT = { directoryRole: ['role', 'roles'], groupMember: ['group', 'groups'], groupOwner: ['group', 'groups'], azureRole: ['Azure role', 'Azure roles'] };
+  let PC_PAGE = null;   // the page's state: the pending choices survive leaving and re-opening the page
+
+  function pcList(x) { return Array.isArray(x) ? x : ((x == null || x === '') ? [] : [x]); }
+  function pcPlural(n, one, many) { return fmtNum(n) + ' ' + (Number(n) === 1 ? one : many); }
+  // A PowerShell JSON writer may hand a one-item list over as a bare value: every list the table walks is made a list here.
+  function pcNormalizeView(v) {
+    if (!v || typeof v !== 'object' || !('types' in v)) return null;
+    const spread = (a) => pcList(a).filter(Boolean).map(e => Object.assign({}, e, { examples: pcList(e.examples).map(String), templates: pcList(e.templates).map(String), count: Number(e.count) || 0 }));
+    const o = Object.assign({}, v);
+    o.types = pcList(v.types).filter(Boolean).map(t => {
+      const tt = Object.assign({}, t);
+      tt.objects = pcList(t.objects).filter(Boolean);
+      tt.policies = Number(t.policies) || 0;
+      tt.fields = pcList(t.fields).filter(Boolean).map(f => {
+        const ff = Object.assign({}, f);
+        ff.recommendation = spread(f.recommendation);
+        ff.current = spread(f.current);
+        ff.overrides = pcList(f.overrides).filter(Boolean);
+        ff.microsoft = f.microsoft ? Object.assign({}, f.microsoft, { spread: spread(f.microsoft.spread), tenant: f.microsoft.tenant || {} }) : null;
+        const wc = f.wouldChange || {};
+        ff.wouldChange = {};
+        PC_CHOICES.forEach(c => {
+          const w = wc[c] || {};
+          const n = Number(w.count) || 0;
+          // indexes: every policy that would change, by its place in the type's `objects`. A server that does not send
+          // them (null here) can only be summed, never counted as distinct policies.
+          const ix = Array.isArray(w.indexes) ? w.indexes.map(Number) : (typeof w.indexes === 'number' ? [w.indexes] : (n === 0 ? [] : null));
+          ff.wouldChange[c] = { known: w.known === true, count: n, more: Number(w.more) || 0, policies: pcList(w.policies).map(String), indexes: ix };
+        });
+        return ff;
+      });
+      return tt;
+    });
+    const h = v.holds || {};
+    o.holds = { known: h.known === true, waiting: Number(h.waiting) || 0, policies: Number(h.policies) || 0, holds: pcList(h.holds) };
+    return o;
+  }
+  function pcKey(type, field, obj) { return type + '|' + field + '|' + (obj || ''); }
+  function pcParseKey(k) { const a = k.indexOf('|'), b = k.indexOf('|', a + 1); return { type: k.slice(0, a), field: k.slice(a + 1, b), obj: k.slice(b + 1) }; }   // an Azure object key holds a '|' itself
+  function pcEach(view, fn) { ((view && view.types) || []).forEach(t => (t.fields || []).forEach(f => fn(t, f))); }
+  function pcFind(view, type, field) { const t = ((view && view.types) || []).find(x => x.id === type); const f = t ? t.fields.find(x => x.id === field) : null; return { t: t || null, f: f || null }; }
+  function pcSaved(f) { return (f && f.choice && f.choice.choice) ? String(f.choice.choice) : ''; }
+  // (Re)read what the server says. In Get Started every setting that still WAITS starts on Keep current -- pending, not saved.
+  function pcAdopt(S, view) {
+    S.view = view;
+    S.canWrite = !!(view && view.canWrite) && roleAtLeast('SuperAdmin');
+    S.start = {};
+    if (S.mode === 'gs' && view && S.canWrite) {
+      pcEach(view, (t, f) => { if (f.waiting || !pcSaved(f)) { const k = pcKey(t.id, f.id, ''); S.start[k] = true; if (!(k in S.pending)) S.pending[k] = 'keep'; } });
     }
+  }
+  function pcNewState(mode, view) {
+    const S = { mode: mode, view: null, pending: {}, start: {}, open: {}, canWrite: false, saved: null, err: '', busy: false };
+    pcAdopt(S, view);
+    return S;
+  }
+  function pcSpreadText(list, type) {
+    const u = PC_UNIT[type] || ['policy', 'policies'];
+    if (!list.length) return '';
+    if (list.length === 1) return String(list[0].text || '');
+    return list.map((e, i) => String(e.text || '') + ' on ' + fmtNum(e.count) + (i === 0 ? ' ' + (e.count === 1 ? u[0] : u[1]) : '')).join(', ');
+  }
+  function pcSpreadTitle(list) {
+    return list.map(e => String(e.text || '') + ' (' + e.count + ')' + (e.examples.length ? ': ' + e.examples.join(', ') + (e.count > e.examples.length ? ', ...' : '') : '')).join('\n');
+  }
+  // What ONE of the three buttons of a setting shows: its value, the hover text, and whether (and why) it cannot be chosen.
+  function pcButton(t, f, c) {
+    const read = !!String(t.liveReadUtc || '').trim();
+    const none = !read ? 'Not read yet' : (t.policies === 0 ? 'No policies yet' : '');
+    if (c === 'microsoft') {
+      const m = f.microsoft;
+      if (!m) return { text: 'Not known', title: '', disabled: true, reason: 'PIM Manager has no Microsoft default for this setting.' };
+      const differs = !!m.differsPerObject && m.spread.length > 1;
+      const src = [m.source ? 'Source: ' + m.source : '', m.capturedDate ? 'captured ' + String(m.capturedDate).slice(0, 10) : ''].filter(Boolean).join(', ');
+      return { text: differs ? pcSpreadText(m.spread, t.id) : String(m.text || ''), title: [differs ? pcSpreadTitle(m.spread) : '', src].filter(Boolean).join('\n'),
+               disabled: m.selectable === false, reason: m.selectable === false ? String(m.blockedReason || 'This value cannot be chosen.') : '' };
+    }
+    if (c === 'recommendation') {
+      const r = f.recommendation;
+      if (r.length) return { text: pcSpreadText(r, t.id), title: r.map(e => String(e.text || '') + ' (' + e.count + ')' + (e.templates.length ? ' -- policy template ' + e.templates.join(', ') : '')).join('\n'), disabled: false, reason: '' };
+      if (none) return { text: none, title: '', disabled: false, reason: '' };
+      return { text: 'No recommendation', title: '', disabled: true, reason: 'The policy template gives no recommendation for this setting.' };
+    }
+    const cur = f.current;
+    if (cur.length) return { text: pcSpreadText(cur, t.id), title: pcSpreadTitle(cur), disabled: false, reason: '' };
+    return { text: none || 'Could not be read', title: '', disabled: false, reason: '' };
+  }
+  function pcPick(S, t, f, c) {
+    const k = pcKey(t.id, f.id, '');
+    // the saved choice again = nothing to save -- unless the setting is asked again (new advice): then the same choice IS the answer
+    if (c === pcSaved(f) && !f.needsReview) delete S.pending[k]; else S.pending[k] = c;
+    S.saved = null; S.err = '';
+  }
+  function pcPendingItems(S) {
+    return Object.keys(S.pending).map(k => { const p = pcParseKey(k); const it = { type: p.type, field: p.field, choice: S.pending[k] }; if (p.obj) it.objectKey = p.obj; return it; });
+  }
+  // What a set of choices would change, per policy type: the DISTINCT policies (several settings may change the same one).
+  // unknown = the current values of the type were not read yet -- then no number is given at all.
+  function pcImpact(S, items) {
+    const per = {};
+    const slot = (t) => per[t.id] || (per[t.id] = { id: t.id, label: String(t.label || t.id), settings: 0, set: {}, loose: 0, unknown: false, maybe: 0, total: t.policies, objects: t.objects });
+    (items || []).forEach(it => {
+      const x = pcFind(S.view, it.type, it.field); if (!x.t || !x.f) return;
+      const p = slot(x.t); p.settings++;
+      if (it.objectKey) {
+        if (it.choice === 'keep') return;
+        const w = it.choice === 'none' ? null : x.f.wouldChange[it.choice];
+        const had = x.f.overrides.some(o => String(o.objectKey) === String(it.objectKey) && o.source !== 'managing-tenant');
+        const idx = x.t.objects.findIndex(o => String(o.key) === String(it.objectKey));
+        if (!w || had || idx < 0 || !w.indexes) { p.maybe++; return; }       // the view does not preview this single policy
+        if (!w.known) { p.unknown = true; return; }
+        if (w.indexes.indexOf(idx) >= 0) p.set[idx] = true;
+        return;
+      }
+      if (it.choice === 'keep') return;
+      const w = x.f.wouldChange[it.choice]; if (!w) return;
+      if (!w.known) { p.unknown = true; return; }
+      if (w.indexes) w.indexes.forEach(i => { p.set[i] = true; }); else p.loose += w.count;
+    });
+    const types = Object.keys(per).map(k => {
+      const p = per[k], idx = Object.keys(p.set).map(Number);
+      return { id: p.id, label: p.label, settings: p.settings, unknown: p.unknown, maybe: p.maybe, total: p.total, exact: p.loose === 0, policies: idx.length + p.loose,
+               names: idx.map(i => String((p.objects[i] && p.objects[i].name) || '')).filter(Boolean) };
+    });
+    return { types: types, settings: types.reduce((a, t) => a + t.settings, 0), policies: types.filter(t => !t.unknown).reduce((a, t) => a + t.policies, 0),
+             unknown: types.filter(t => t.unknown).map(t => t.label), maybe: types.reduce((a, t) => a + t.maybe, 0), exact: types.every(t => t.exact) };
+  }
+  // "this would change 12 policies" -- and never a number for a type whose current values were not read.
+  function pcImpactText(im) {
+    const bits = [];
+    if (im.unknown.length && im.policies === 0) bits.push('how many policies this would change is not known yet: the current values of ' + im.unknown.join(', ') + ' have not been read');
+    else if (im.unknown.length) bits.push('this would change at least ' + pcPlural(im.policies, 'policy', 'policies') + '; not known yet for ' + im.unknown.join(', ') + ' (the current values have not been read)');
+    else if (im.policies === 0) bits.push('this would change no policy');
+    else bits.push('this would change ' + (im.exact ? '' : 'up to ') + pcPlural(im.policies, 'policy', 'policies'));
+    if (im.maybe) bits.push(pcPlural(im.maybe, 'exception for a single policy', 'exceptions for single policies') + ' may change that policy');
+    return bits.join('; ');
+  }
+  function pcImpactListHtml(im) {
+    const rows = im.types.filter(t => t.names.length).map(t => '<div><b>' + escapeHtml(t.label) + ':</b> ' + escapeHtml(t.names.slice(0, 30).join(', ')) + (t.names.length > 30 ? ' and ' + fmtNum(t.names.length - 30) + ' more' : '') + '</div>');
+    return rows.length ? '<details class="pcImpactList"><summary>Show the policies</summary>' + rows.join('') + '</details>' : '';
+  }
+  function pcApprovalsLink() { return '<a href="#" class="pcGoApprovals">' + escapeHtml(attentionPageName('approvals')) + '</a>'; }
+  function pcStatusHtml(S, t, f) {
+    const esc = escapeHtml, amber = pimSevColour('amber', 'fg');
+    const k = pcKey(t.id, f.id, '');
+    if (k in S.pending) {
+      if (S.start[k] && S.pending[k] === 'keep') return '<span class="pcStatus" data-pc-status="start">Starts on Keep current -- not saved yet</span>';
+      return '<span class="pcStatus" data-pc-status="pending">' + esc(PC_LABEL[S.pending[k]] || '') + ' -- not saved yet</span>';
+    }
+    const ch = f.choice || null;
+    // amber, never red: a setting that waits is not an error -- PIM Manager simply leaves it alone
+    if (f.waiting || !ch || !pcSaved(f)) return '<span class="pcStatus" data-pc-status="waiting" style="color:' + amber + ';font-weight:600;">Waiting for your choice</span>';
+    const when = ch.utc ? homeFmtWhen(ch.utc) : '';
+    if (f.needsReview) {
+      const nums = (Number(ch.advisory) > 0 && Number(f.advisory) > 0) ? ' Your choice was made on advice number ' + Number(ch.advisory) + '; the advice is now number ' + Number(f.advisory) + '.' : '';
+      return '<span class="pcStatus" data-pc-status="review" style="color:' + amber + ';font-weight:600;">New advice -- please choose again</span>' +
+        '<span class="pcStatusSub"> The Microsoft default or the PIM Manager recommendation for this setting changed after you chose ' + esc(PC_LABEL[pcSaved(f)] || '') + (when ? ' (' + esc(when) + ')' : '') + '.' + esc(nums) + ' Nothing is changed for this setting until you choose again.</span>';
+    }
+    return '<span class="pcStatus" data-pc-status="chosen">Chosen: ' + esc(PC_LABEL[pcSaved(f)] || String(ch.label || '')) + '</span>' +
+      '<span class="pcStatusSub">' + (ch.by ? ' by ' + esc(String(ch.by)) : '') + (when ? ', ' + esc(when) : '') + (ch.source === 'managing-tenant' ? ' -- from the managing tenant' : '') + '</span>';
+  }
+  // Exceptions for a single role / group / Azure role (the store's "overrides"): the ones that exist, take one back, add one.
+  function pcOverridesHtml(S, t, f) {
+    const esc = escapeHtml, amber = pimSevColour('amber', 'fg');
+    const unit = (PC_UNIT[t.id] || ['policy'])[0];
+    const base = t.id + '|' + f.id + '|';
+    const pend = Object.keys(S.pending).filter(k => k.indexOf(base) === 0 && k.length > base.length);
+    const canAdd = S.canWrite && t.objects.length > 0;
+    if (!f.overrides.length && !pend.length && !canAdd) return '';
+    const nameOf = (obj) => { const o = t.objects.find(x => String(x.key) === String(obj)); const e = f.overrides.find(x => String(x.objectKey) === String(obj)); return String((o && o.name) || (e && e.name) || obj); };
+    let rows = '';
+    f.overrides.forEach(o => {
+      const k = pcKey(t.id, f.id, String(o.objectKey)), local = o.source !== 'managing-tenant';
+      const p = (k in S.pending) ? S.pending[k] : null;
+      rows += '<div class="pcOvrRow" data-pc-obj="' + esc(String(o.objectKey)) + '"><b>' + esc(String(o.name || o.objectKey)) + '</b>: ' + esc(String(o.choiceLabel || PC_LABEL[o.choice] || o.choice)) +
+        (o.needsReview ? ' <span style="color:' + amber + ';font-weight:600;">New advice -- please choose again</span>' : '') +
+        '<span class="pcStatusSub">' + (o.by ? ' by ' + esc(String(o.by)) : '') + (local ? '' : ' -- from the managing tenant') + '</span>' +
+        (p === 'none' ? ' <span class="pcStatus" data-pc-status="pending">will be taken back -- not saved yet</span> <button type="button" class="btn-sec pcOvrUndo" data-pc-key="' + esc(k) + '">Undo</button>'
+          : p ? ' <span class="pcStatus" data-pc-status="pending">changes to ' + esc(PC_LABEL[p] || p) + ' -- not saved yet</span> <button type="button" class="btn-sec pcOvrUndo" data-pc-key="' + esc(k) + '">Undo</button>'
+          : (S.canWrite && local ? ' <button type="button" class="btn-sec pcOvrTake" data-pc-key="' + esc(k) + '">Take back</button>' : '')) + '</div>';
+    });
+    pend.filter(k => !f.overrides.some(o => pcKey(t.id, f.id, String(o.objectKey)) === k)).forEach(k => {
+      const obj = pcParseKey(k).obj;
+      rows += '<div class="pcOvrRow" data-pc-obj="' + esc(obj) + '"><b>' + esc(nameOf(obj)) + '</b>: ' + esc(PC_LABEL[S.pending[k]] || S.pending[k]) +
+        ' <span class="pcStatus" data-pc-status="pending">not saved yet</span> <button type="button" class="btn-sec pcOvrUndo" data-pc-key="' + esc(k) + '">Undo</button></div>';
+    });
+    let add = '';
+    if (canAdd) {
+      add = '<div class="pcOvrAddRow"><select class="pcOvrObj" aria-label="The ' + esc(unit) + '"><option value="">Choose a single ' + esc(unit) + '&hellip;</option>' +
+        t.objects.map(o => '<option value="' + esc(String(o.key)) + '">' + esc(String(o.name || o.key)) + '</option>').join('') + '</select> ' +
+        '<select class="pcOvrChoice" aria-label="The choice for it">' + PC_CHOICES.map(c => { const b = pcButton(t, f, c); return '<option value="' + c + '"' + (b.disabled ? ' disabled' : '') + (c === 'keep' ? ' selected' : '') + '>' + esc(PC_LABEL[c]) + '</option>'; }).join('') + '</select> ' +
+        '<button type="button" class="btn-sec pcOvrAdd" data-pc-type="' + esc(t.id) + '" data-pc-field="' + esc(f.id) + '">Add exception</button> <span class="pcOvrMsg"></span></div>';
+    }
+    const n = f.overrides.length + pend.filter(k => !f.overrides.some(o => pcKey(t.id, f.id, String(o.objectKey)) === k)).length;
+    const okey = t.id + '|' + f.id;
+    return '<details class="pcOvr" data-pc-ovr="' + esc(okey) + '"' + ((S.open[okey] || pend.length) ? ' open' : '') + '><summary>Exceptions for a single ' + esc(unit) + ' (' + n + ')</summary>' +
+      '<div class="pcOvrBody">' + (rows || '<div class="pcStatusSub">None. Every ' + esc(unit) + ' follows the choice above.</div>') + add + '</div></details>';
+  }
+  function pcTableHtml(S) {
+    const esc = escapeHtml, v = S.view;
+    let h = '';
+    v.types.forEach(t => {
+      const read = String(t.liveReadUtc || '').trim();
+      const u = PC_UNIT[t.id] || ['policy', 'policies'];
+      h += '<div class="pcType" data-pc-type="' + esc(t.id) + '"><div class="pcTypeHead"><span class="pcTypeName">' + esc(String(t.label || t.id)) + '</span> ' +
+        (read ? '<span class="pcTypeRead" data-pc-read="yes">Current values read ' + esc(homeFmtWhen(read)) + ' -- ' + esc(pcPlural(t.policies, u[0], u[1])) + '</span>'
+              : '<span class="pcTypeRead" data-pc-read="no" style="color:' + pimSevColour('amber', 'fg') + ';">The current values have not been read yet. The next policy run reads them (within 30 minutes); until then the current values and what a choice would change are not known.</span>') +
+        '</div>';
+      t.fields.forEach(f => {
+        const sel = (pcKey(t.id, f.id, '') in S.pending) ? S.pending[pcKey(t.id, f.id, '')] : pcSaved(f);
+        h += '<div class="pcRow" data-pc-type="' + esc(t.id) + '" data-pc-field="' + esc(f.id) + '">' +
+          '<div class="pcWhat"><div class="pcLabel">' + esc(String(f.label || f.id)) + '</div><div class="pcHelp">' + esc(String(f.help || '')) + '</div><div class="pcState">' + pcStatusHtml(S, t, f) + '</div></div>' +
+          '<div class="pcBtns">' + PC_CHOICES.map(c => {
+            const b = pcButton(t, f, c), on = sel === c;
+            const ten = (c === 'microsoft' && f.microsoft && f.microsoft.tenant && f.microsoft.tenant.matchesShipped === false && f.microsoft.tenant.note) ? String(f.microsoft.tenant.note) : '';
+            return '<div class="pcCell"><button type="button" class="pcBtn' + (on ? ' pcOn' : '') + '" data-pc-type="' + esc(t.id) + '" data-pc-field="' + esc(f.id) + '" data-pc-choice="' + c + '" aria-pressed="' + (on ? 'true' : 'false') + '"' +
+              (b.title ? ' title="' + esc(b.title) + '"' : '') + ((b.disabled || !S.canWrite) ? ' disabled' : '') + '>' +
+              '<span class="pcBtnL">' + (on ? '&#10003; ' : '') + esc(PC_LABEL[c]) + '</span><span class="pcBtnV">' + esc(b.text) + '</span></button>' +
+              (b.disabled && b.reason ? '<div class="pcWhy">' + esc(b.reason) + '</div>' : '') +
+              (ten ? '<div class="pcNote">&#9432; ' + esc(ten) + '</div>' : '') + '</div>';
+          }).join('') + '</div>' + pcOverridesHtml(S, t, f) + '</div>';
+      });
+      h += '</div>';
+    });
+    return h;
+  }
+  function pcHoldsHtml(S) {
+    const h = S.view.holds;
+    if (!h.known || !h.waiting) return '';
+    return '<div class="pcHolds">' + (h.waiting === 1 ? 'A change set waits for approval' : fmtNum(h.waiting) + ' change sets wait for approval') + ': ' + escapeHtml(pcPlural(h.policies, 'policy', 'policies')) + ' -- ' +
+      (roleAtLeast('SuperAdmin') ? 'Approve on ' : 'A SuperAdmin approves on ') + pcApprovalsLink() + '. Nothing is written to your tenant until then.</div>';
+  }
+  function pcBarHtml(S) {
+    const esc = escapeHtml, items = pcPendingItems(S), n = items.length;
+    const im = pcImpact(S, items);
+    const head = S.mode === 'gs' ? pcPlural(n, 'setting will be saved', 'settings will be saved') + ' with Save &amp; next' : pcPlural(n, 'setting changed', 'settings changed');
+    let h = '<div class="pcBar" data-pc-pending="' + n + '">';
+    h += '<div class="pcBarText">' + (n ? head + ' -- ' + esc(pcImpactText(im)) + '.' : (S.mode === 'gs' ? 'Nothing to save on this step.' : 'No setting changed on this page.')) +
+      (n ? ' <span class="pcStatusSub">Nothing is sent until you save, and saving changes nothing in your tenant: the change waits for a SuperAdmin&rsquo;s approval.</span>' : '') + '</div>' + (n ? pcImpactListHtml(im) : '');
+    if (S.mode !== 'gs') {
+      h += '<div class="pcBarBtns"><button type="button" class="primary pcSave"' + ((n && S.canWrite && !S.busy) ? '' : ' disabled') + '>Save choices</button> ' +
+        '<button type="button" class="btn-sec pcDiscard"' + ((n && !S.busy) ? '' : ' disabled') + '>Discard</button></div>';
+    }
+    if (S.err) h += '<div class="pcErr" role="alert">' + esc(S.err) + '</div>';
+    if (S.saved) h += '<div class="pcSaved" role="status">' + esc(S.saved.text) + ' <span>Approve on ' + pcApprovalsLink() + '.</span></div>';
     return h + '</div>';
+  }
+  function pcHostHtml(S) {
+    const esc = escapeHtml, v = S.view;
+    let h = pcHoldsHtml(S);
+    if (!S.canWrite) h += '<div class="pcReadOnly">You see every setting read-only. Only a SuperAdmin can choose.</div>';
+    h += '<div class="pcQuick"><span class="pcQuickL">Quick selection:</span> ' + PC_QUICK.map(q => '<button type="button" class="btn-sec pcQuickBtn" data-pc-choice="' + q[0] + '"' + (S.canWrite ? '' : ' disabled') + '>' + esc(q[1]) + '</button>').join(' ') +
+      '<div class="pcStatusSub">Sets every setting at once. You confirm a second time by typing the word confirm; the result still waits for a SuperAdmin&rsquo;s approval.</div></div>';
+    h += pcTableHtml(S);
+    if (v.liveSource) h += '<div class="pcStatusSub pcLiveSource">' + esc(String(v.liveSource)) + '</div>';
+    return h + pcBarHtml(S);
+  }
+  function pcPaint(root) { const S = root.__pcS; if (!S || !S.view) return; root.innerHTML = pcHostHtml(S); }
+  async function pcSend(S, items) {
+    const r = await api('PUT', '/api/policy-choices', { choices: items });
+    S.saved = { text: String((r && r.approval && r.approval.text) || 'Saved. A change that comes from these choices waits for a SuperAdmin to approve it.'), needed: !!(r && r.approval && r.approval.needed) };
+    GET_STARTED_LAST = null;                       // the Get Started step counts the settings that wait
+    try { refreshAttention(true); } catch (_) { }  // ...and so does Overview
+    return pcNormalizeView(r);
+  }
+  // QUICK SELECTION: every setting the choice can be given to, and the ones it cannot -- with the reason the button shows.
+  function pcQuickPlan(S, choice) {
+    const set = [], cannot = [];
+    pcEach(S.view, (t, f) => {
+      const b = pcButton(t, f, choice);
+      if (b.disabled) cannot.push({ type: String(t.label || t.id), field: String(f.label || f.id), reason: b.reason });
+      else set.push({ type: t.id, field: f.id, choice: choice });
+    });
+    return { choice: choice, set: set, cannot: cannot, impact: pcImpact(S, set) };
+  }
+  // The dialog: (1) what it does, in numbers, and what it cannot set; (2) a second question -- the word "confirm" must be
+  // typed before the final button works. Resolves with the new view after ONE PUT, or null when the person stops.
+  function pcQuickDialog(S, choice) {
+    const esc = escapeHtml;
+    const plan = pcQuickPlan(S, choice), label = PC_LABEL[choice], title = (PC_QUICK.find(q => q[0] === choice) || ['', label])[1];
+    const n = plan.set.length;
+    const perType = S.view.types.map(t => {
+      const k = plan.set.filter(i => i.type === t.id).length;
+      const im = plan.impact.types.find(x => x.id === t.id);
+      const what = !k ? 'no setting can be set' : choice === 'keep' ? 'changes no policy' : (!im || im.unknown) ? 'how many policies it would change is not known yet (the current values have not been read)'
+        : im.policies === 0 ? 'would change no policy' : 'would change ' + (im.exact ? '' : 'up to ') + pcPlural(im.policies, 'policy', 'policies') + (im.total ? ' of ' + fmtNum(im.total) : '');
+      return '<li data-pc-type="' + esc(t.id) + '"><b>' + esc(String(t.label || t.id)) + ':</b> ' + esc(pcPlural(k, 'setting', 'settings')) + ' -- ' + esc(what) + '</li>';
+    }).join('');
+    const cannot = plan.cannot.length ? '<div class="pcQuickCannot"><b>It cannot set ' + esc(pcPlural(plan.cannot.length, 'setting', 'settings')) + '. ' + (plan.cannot.length === 1 ? 'It stays' : 'They stay') + ' as ' + (plan.cannot.length === 1 ? 'it is' : 'they are') + ' now:</b><ul>' +
+      plan.cannot.map(c => '<li>' + esc(c.type) + ' -- ' + esc(c.field) + ': ' + esc(c.reason) + '</li>').join('') + '</ul></div>' : '';
+    return new Promise(resolve => {
+      const ov = pimModalOverlay();
+      ov.id = 'pcQuickOverlay';
+      ov.innerHTML =
+        '<div id="pcQuickDialog" role="dialog" aria-modal="true" aria-labelledby="pcQuickTitle" style="background:#fff;border-radius:10px;max-width:640px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.25);padding:16px 18px;box-sizing:border-box;font-size:12.5px;line-height:1.5;">' +
+          '<div id="pcQuickTitle" style="font-size:14px;font-weight:600;">' + esc(title) + '</div>' +
+          '<div id="pcQuickFacts" style="margin-top:8px;">' +
+            (n ? '<div>This sets <b>' + esc(pcPlural(n, 'policy setting', 'policy settings')) + '</b> to <b>' + esc(label) + '</b> in one step' + (choice === 'keep' ? ': PIM Manager then leaves each of them as it is in your tenant.' : '.') + '</div>'
+               : '<div>No setting can be set to <b>' + esc(label) + '</b> right now.</div>') +
+            '<ul class="pcQuickTypes">' + perType + '</ul>' + cannot +
+            '<div class="pcQuickHeld">Nothing changes in your tenant when you save. The next policy run plans the change, and it is <b>held until a SuperAdmin approves it</b> on ' + esc(attentionPageName('approvals')) + ' -- like every other choice. The same person may approve, as a second step.</div>' +
+          '</div>' +
+          '<div id="pcQuickStep2" style="display:none;margin-top:12px;padding-top:10px;border-top:1px solid #d0d7de;">' +
+            '<div><b>Are you sure?</b> This decides ' + esc(pcPlural(n, 'setting', 'settings')) + ' at once. To go on, type the word <b>confirm</b>:</div>' +
+            '<input id="pcQuickWord" type="text" autocomplete="off" spellcheck="false" aria-label="Type the word confirm" placeholder="confirm" style="margin-top:6px;width:200px;padding:6px 8px;font-size:12.5px;box-sizing:border-box;">' +
+          '</div>' +
+          '<div id="pcQuickMsg" role="alert" style="display:none;margin-top:8px;color:#cf222e;"></div>' +
+          '<div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end;">' +
+            '<button type="button" id="pcQuickCancel">Cancel</button>' +
+            (n ? '<button type="button" id="pcQuickContinue" class="primary">Continue</button>' : '') +
+            '<button type="button" id="pcQuickGo" class="primary" style="display:none;" disabled>' + esc('Set ' + pcPlural(n, 'setting', 'settings')) + '</button>' +
+          '</div>' +
+        '</div>';
+      document.body.appendChild(ov);
+      const q = (id) => ov.querySelector('#' + id);
+      let busy = false;
+      function done(v) { try { document.removeEventListener('keydown', onKey); document.body.removeChild(ov); } catch (_) { } resolve(v); }
+      function onKey(e) { if (e.key === 'Escape' && !busy) done(null); }
+      const typed = () => String(q('pcQuickWord').value || '').trim().toLowerCase() === 'confirm';
+      document.addEventListener('keydown', onKey);
+      q('pcQuickCancel').onclick = () => { if (!busy) done(null); };
+      ov.onclick = (e) => { if (e.target === ov && !busy) done(null); };
+      if (q('pcQuickContinue')) q('pcQuickContinue').onclick = () => {
+        q('pcQuickStep2').style.display = ''; q('pcQuickContinue').style.display = 'none'; q('pcQuickGo').style.display = '';
+        try { q('pcQuickWord').focus(); } catch (_) { }
+      };
+      q('pcQuickWord').addEventListener('input', () => { if (!busy) q('pcQuickGo').disabled = !typed(); });
+      q('pcQuickWord').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (typed() && !busy) q('pcQuickGo').click(); } });
+      q('pcQuickGo').onclick = async () => {
+        if (busy || !n || !typed()) return;                 // the typed word is checked again at the click itself
+        busy = true; q('pcQuickGo').disabled = true; q('pcQuickCancel').disabled = true; q('pcQuickMsg').style.display = 'none';
+        try {
+          const v = await pcSend(S, plan.set);
+          plan.set.forEach(i => { delete S.pending[pcKey(i.type, i.field, '')]; });   // decided now: no longer pending on the page
+          done({ view: v });
+        } catch (e) {
+          busy = false; q('pcQuickCancel').disabled = false; q('pcQuickGo').disabled = !typed();
+          q('pcQuickMsg').textContent = 'Nothing was saved: ' + gsErrText(e); q('pcQuickMsg').style.display = '';
+        }
+      };
+      try { (q('pcQuickContinue') || q('pcQuickCancel')).focus(); } catch (_) { }
+    });
+  }
+  // Wire ONE host element (the page body, or the Get Started step's host). Clicks are delegated, so a repaint needs no rewiring.
+  function pcMount(root, S) {
+    root.__pcS = S;
+    if (!root.__pcWired) {
+      root.__pcWired = true;
+      root.addEventListener('toggle', (ev) => { const d = ev.target; const st = root.__pcS; if (st && d && d.classList && d.classList.contains('pcOvr')) st.open[d.dataset.pcOvr] = !!d.open; }, true);
+      root.addEventListener('click', async (ev) => {
+        const st = root.__pcS;
+        const el = (ev.target && ev.target.closest) ? ev.target.closest('button, a') : null;
+        if (!st || !el || !root.contains(el)) return;
+        if (el.classList.contains('pcGoApprovals')) { ev.preventDefault(); try { switchTab('approvals'); } catch (_) { } return; }
+        if (el.disabled || st.busy) return;
+        if (el.classList.contains('pcBtn')) {
+          if (!st.canWrite) return;
+          const x = pcFind(st.view, el.dataset.pcType, el.dataset.pcField); if (!x.f) return;
+          if (pcButton(x.t, x.f, el.dataset.pcChoice).disabled) return;
+          pcPick(st, x.t, x.f, el.dataset.pcChoice); pcPaint(root); return;
+        }
+        if (el.classList.contains('pcOvrAdd')) {
+          if (!st.canWrite) return;
+          const row = el.closest('.pcOvrAddRow'), obj = String(row.querySelector('.pcOvrObj').value || ''), ch = String(row.querySelector('.pcOvrChoice').value || '');
+          const msg = row.querySelector('.pcOvrMsg');
+          if (!obj) { if (msg) { msg.textContent = 'Choose which one first.'; msg.style.color = pimSevColour('amber', 'fg'); } return; }
+          if (PC_CHOICES.indexOf(ch) < 0) return;
+          st.pending[pcKey(el.dataset.pcType, el.dataset.pcField, obj)] = ch; st.saved = null; st.err = ''; pcPaint(root); return;
+        }
+        if (el.classList.contains('pcOvrTake')) { if (!st.canWrite) return; st.pending[el.dataset.pcKey] = 'none'; st.saved = null; st.err = ''; pcPaint(root); return; }
+        if (el.classList.contains('pcOvrUndo')) { delete st.pending[el.dataset.pcKey]; pcPaint(root); return; }
+        if (el.classList.contains('pcDiscard')) { st.pending = {}; st.err = ''; pcAdopt(st, st.view); pcPaint(root); return; }
+        if (el.classList.contains('pcSave')) {
+          const items = pcPendingItems(st);
+          if (!st.canWrite || !items.length) return;
+          st.busy = true; st.err = ''; pcPaint(root);
+          try { const v = await pcSend(st, items); st.pending = {}; if (v) pcAdopt(st, v); }
+          catch (e) { st.err = 'Nothing was saved: ' + gsErrText(e); }
+          st.busy = false; pcPaint(root); return;
+        }
+        if (el.classList.contains('pcQuickBtn')) {
+          if (!st.canWrite) return;
+          const r = await pcQuickDialog(st, el.dataset.pcChoice);
+          if (r) { if (r.view) pcAdopt(st, r.view); st.err = ''; pcPaint(root); }
+        }
+      });
+    }
+    pcPaint(root);
+  }
+  async function renderPolicySettingsPage() {
+    const body = document.getElementById('policysettingsBody');
+    if (!body) return;
+    if (!isServer) { body.innerHTML = stateEmpty('Static mode', 'The policy settings are read from the tenant’s store, which needs the server.'); return; }
+    if (!roleAtLeast('Admin')) { body.innerHTML = stateEmpty('For an Admin or a SuperAdmin', 'An Admin sees the policy settings read-only; a SuperAdmin chooses them.'); return; }
+    if (!body.querySelector('.pcHost')) body.innerHTML = stateLoading('Loading the policy settings…', 'Reading the choices, the Microsoft defaults, the PIM Manager recommendation and the current values of the last policy run.');
+    let v = null, err = '';
+    try { v = pcNormalizeView(await api('GET', '/api/policy-choices')); } catch (e) { err = gsErrText(e); }
+    if (!v) { body.innerHTML = stateError('The policy settings could not be read', err || 'no answer from the server'); return; }
+    if (!PC_PAGE) PC_PAGE = pcNewState('page', v); else pcAdopt(PC_PAGE, v);
+    body.innerHTML =
+      '<div style="max-width:1180px;">' +
+        '<div style="font-size:16px;font-weight:600;margin-bottom:2px;">Policy settings</div>' +
+        '<div class="pcIntro">PIM Manager never changes a policy on its own. For every setting you choose between <b>Microsoft default</b>, <b>PIM Manager recommendation</b> (what the bound <a href="#" class="pcGoTemplates">policy template</a> says) and <b>Keep current</b>. ' +
+          'A setting without a choice is left exactly as it is. A change that comes from a choice is held until a SuperAdmin approves it on <a href="#" class="pcGoApprovalsTop">' + escapeHtml(attentionPageName('approvals')) + '</a>.</div>' +
+        '<div class="pcHost"></div>' +
+      '</div>';
+    const go = (cls, tab) => { const a = body.querySelector('.' + cls); if (a) a.onclick = (ev) => { ev.preventDefault(); switchTab(tab); }; };
+    go('pcGoTemplates', 'policytemplates'); go('pcGoApprovalsTop', 'approvals');
+    pcMount(body.querySelector('.pcHost'), PC_PAGE);
+    try {
+      pimExportSet('policysettings', 'Policy settings', () => {
+        const rows = [];
+        pcEach(PC_PAGE.view, (t, f) => rows.push({ type: String(t.label || t.id), setting: String(f.label || f.id), chosen: f.needsReview ? 'New advice -- please choose again' : (pcSaved(f) ? PC_LABEL[pcSaved(f)] : 'Waiting for your choice'),
+          microsoft: pcButton(t, f, 'microsoft').text, recommendation: pcButton(t, f, 'recommendation').text, current: pcButton(t, f, 'keep').text }));
+        return [pimExportRows('Policy settings', [['Policy type', 'type'], ['Setting', 'setting'], ['Chosen', 'chosen'], ['Microsoft default', 'microsoft'], ['PIM Manager recommendation', 'recommendation'], ['Current', 'current']], rows)];
+      });
+    } catch (_) { }
   }
   const GS_FORMS = {
     naming: {
@@ -16350,91 +16839,41 @@
         catch (e) { const m = gsErrText(e); return { errors: /already used/i.test(m) ? { adminInitials: m.replace('Go back to the Person step and use', 'Use') } : { _: 'Nothing was staged: ' + m } }; }
       }
     },
+    // PIM 100.93 (owner 2026-10-12: "get started sets current values, but it must still be approved as guard"): the SAME
+    // table as Templates > Policy settings (pcMount). Every setting that still waits STARTS on Keep current (pending, not
+    // saved); the customer changes single settings or uses a quick selection; Save & next sends ONE PUT /api/policy-choices
+    // with every choice, the keeps included -- an explicit keep is a choice, so the setting no longer waits. Nothing is
+    // written to the tenant here, and the step being done never waits for the approval.
     policies: {
-      load: async () => ({ view: ptNormalizeView(await api('GET', '/api/policy-templates')) }),
+      load: async () => ({ S: pcNewState('gs', pcNormalizeView(await api('GET', '/api/policy-choices'))) }),
       body: (c, st) => {
-        const v = st && st.view;
-        const held = gsPolicyHoldCount(c);
-        const k = c.confirm && c.confirm.policies;
-        const canEdit = !!(v && v.canEdit) && roleAtLeast('SuperAdmin');
-        // PIM 100.84: the count is the hold records' (the panel above renders the same records), so the two never disagree.
-        let h = held ? '<div class="gs-facts gsPolicyHeld" style="color:#9a6700;">' + held + ' policy change set(s) wait for a SuperAdmin -- shown above, each with what changes (current &rarr; new). ' +
-          (roleAtLeast('SuperAdmin') ? 'Approve them there.' : 'A SuperAdmin approves them there.') + '</div>' : '';
-        if (!v || v.readable === false) return h + '<div class="gsProblem" style="display:block;">The policy templates could not be read' + (v && v.reason ? ': ' + escapeHtml(String(v.reason)) : '') + ' -- nothing can be verified yet.</div>';
-        h += '<div class="gs-facts">The policies PIM applies when someone activates. Verify each kind' + (canEdit ? ', change what does not fit' : '') + ', then approve.</div>';
-        h += GS_POLICY_KINDS.map(kd => gsPolicyKindHtml(kd[0], v, null, canEdit)).join('');
-        if (!canEdit) h += '<div class="gs-hint">Only a SuperAdmin can change these policies; you can verify and approve them.</div>';
-        h += '<label class="gs-check"><input type="checkbox" name="polApproved"' + (k ? ' checked' : '') + '> I have verified these activation policies and approve them.</label>' + gsErr('polApproved') +
-          (k ? '<div class="gs-hint">Approved by ' + escapeHtml(String(k.by || '')) + (k.utc ? ' ' + escapeHtml(homeFmtWhen(k.utc)) : '') + '.</div>' : '') +
-          '<div class="gs-hint">A change here changes the TEMPLATE: the engine plans it on its next run, and a change to many policies is held with its WhatIf until someone approves it. Notifications and the owner policy are set on the Policy templates page.</div>';
-        return h;
+        const S = st && st.S;
+        if (!S || !S.view) return '<div class="gsProblem" style="display:block;">The policy settings could not be read -- nothing can be chosen yet.</div>';
+        return '<div class="gs-facts gsPolIntro">PIM Manager never changes a policy on its own. Every setting below starts on <b>Keep current</b> -- your tenant&rsquo;s own values, as the last policy run read them. ' +
+            'Change single settings to <b>Microsoft default</b> or <b>PIM Manager recommendation</b> where you want that, or use a quick selection' + (S.canWrite ? ', then press Save &amp; next.' : '.') + '</div>' +
+          '<div class="pcHost pcGs"></div>' +
+          '<div class="gs-hint gsPolApprovalNote">Saving changes nothing in your tenant. A change that comes from a choice is planned by the next policy run and <b>waits for a SuperAdmin&rsquo;s approval</b> on ' +
+            '<a href="#" class="gsPolGoApprovals">' + escapeHtml(attentionPageName('approvals')) + '</a> (the same person may approve -- a second step); a held change set is also shown above. ' +
+            'This step is done when every setting has a choice -- it does not wait for the approval. You change a choice later on Templates &rsaquo; Policy settings.</div>';
       },
       wire: (card, c, st) => {
-        const v = st && st.view; if (!v) return;
-        const canEdit = !!v.canEdit && roleAtLeast('SuperAdmin');
-        // picking another template for a kind shows THAT template's settings (what will apply), not the old one's
-        card.addEventListener('change', (ev) => {
-          const sel = ev.target;
-          if (!sel || !sel.classList || !sel.classList.contains('gsPolDef')) return;
-          const box = sel.closest('.gsPolKind'); if (!box) return;
-          const tmp = document.createElement('div'); tmp.innerHTML = gsPolicyKindHtml(sel.dataset.kind, v, sel.value, canEdit);
-          box.replaceWith(tmp.firstElementChild);
-        });
+        const S = st && st.S;
+        const root = card.querySelector('.pcHost');
+        if (S && S.view && root) pcMount(root, S);
+        const a = card.querySelector('.gsPolGoApprovals');
+        if (a) a.onclick = (ev) => { ev.preventDefault(); try { switchTab('approvals'); } catch (_) { } };
       },
       save: async (form, c, st) => {
-        const v = st && st.view;
-        const cb = form.querySelector('[name="polApproved"]');
-        const on = !!(cb && cb.checked), was = !!(c.confirm && c.confirm.policies);
-        const canEdit = !!(v && v.canEdit) && roleAtLeast('SuperAdmin');
-        // 1. the per-kind defaults -- PUT /api/settings/policy-template-defaults (the Policy templates page's route)
-        let defBody = null, rules = [];
-        if (v && canEdit) {
-          const dsrc = v.defaultsSource || {}, defs = v.defaults || {};
-          const now = {}, want = {};
-          GS_POLICY_KINDS.forEach(kd => { const kk = kd[0]; now[kk] = dsrc[kk] === 'setting' ? String(defs[kk] || '') : ''; const s = form.querySelector('[name="polDef-' + kk + '"]'); want[kk] = s ? s.value : now[kk]; });
-          if (GS_POLICY_KINDS.some(kd => want[kd[0]] !== now[kd[0]])) defBody = want;
-          // 2. each shown template's activation settings -- PUT /api/policy-templates/rules, ONLY what changed (ptEditorChanges' shape)
-          const byTpl = {};
-          ((v.templates) || []).forEach(t => { byTpl[t.id] = t; });
-          GS_POLICY_KINDS.forEach(kd => {
-            const kk = kd[0];
-            const durSel = form.querySelector('[name="polDur-' + kk + '"]');
-            const tid = durSel ? durSel.dataset.tpl : '';
-            const t = tid ? byTpl[tid] : null;
-            const e = t && t.edit && t.edit.member; if (!e) return;
-            const body = { id: t.id, part: 'member' };
-            const ex = (e.expiration || {}).EndUser_Assignment;
-            if (ex && durSel.value !== String(ex.maximumDuration)) body.expiration = { EndUser_Assignment: { maximumDuration: durSel.value } };
-            const cur = (e.activationChecks || []).map(String);
-            const wantC = Array.from(form.querySelectorAll('.gsPolChk[data-kind="' + kk + '"]')).filter(x => x.checked).map(x => x.dataset.check);
-            // checks the wizard does not show (another enabled rule) are kept as they are
-            const keep = cur.filter(x => !PT_CHECKS.some(p => p[0] === x));
-            const next = keep.concat(wantC);
-            if (cur.slice().sort().join(',') !== next.slice().sort().join(',')) body.activationChecks = next;
-            if (body.expiration || body.activationChecks) rules.push({ kind: kk, body: body });
-          });
-        }
-        if (!defBody && !rules.length && on === was) return { wrote: false };
-        const done = [];
-        if (defBody) {
-          // §12.9: a different default template changes the activation rules of every group / role that names none.
-          const dsrc0 = (v && v.defaultsSource) || {}, defs0 = (v && v.defaults) || {};
-          for (const kd of GS_POLICY_KINDS) {
-            const kk = kd[0], was0 = dsrc0[kk] === 'setting' ? String(defs0[kk] || '') : '';
-            if (defBody[kk] !== was0 && !(await pimSettingInfoConfirm('PolicyTemplateDefaults.' + kk, true))) return { errors: { ['polDef-' + kk]: 'Not saved -- nothing changed.' } };
-          }
-          try { await api('PUT', '/api/settings/policy-template-defaults', defBody); done.push('the default templates'); pimPolicyTplCache = null; }
-          catch (e) { return { errors: { ['polDef-' + GS_POLICY_KINDS[0][0]]: 'Not saved: ' + gsErrText(e) } }; }
-        }
-        for (const r of rules) {
-          try { await api('PUT', '/api/policy-templates/rules', r.body); done.push(r.body.id); pimPolicyTplCache = null; }
-          catch (e) { return { errors: { ['polDur-' + r.kind]: 'Not saved: ' + gsErrText(e) + (done.length ? ' (saved before this: ' + done.join(', ') + ')' : '') } }; }
-        }
-        if (on !== was) {
-          try { await api('PUT', '/api/get-started/confirm', { step: 'policies', confirmed: on }); }
-          catch (e) { return { errors: { polApproved: (done.length ? 'Saved ' + done.join(', ') + ', but the approval was not recorded: ' : 'Not saved: ') + gsErrText(e) } }; }
-        }
-        return { wrote: true, note: (done.length ? 'Saved: ' + done.join(', ') + '. The engine plans it on its next run.' : '') + (on && !was ? (done.length ? ' ' : '') + 'Recorded: the activation policies are verified and approved.' : (!on && was ? ' The approval was removed.' : '')) };
+        const S = st && st.S;
+        if (!S || !S.view || !S.canWrite) return { wrote: false };   // an Admin sees the step read-only and moves on
+        const items = pcPendingItems(S);
+        if (!items.length) return { wrote: false };
+        try {
+          const v = await pcSend(S, items);
+          S.pending = {};
+          if (v) pcAdopt(S, v);
+          return { wrote: true, note: S.saved ? S.saved.text : '' };
+        } catch (e) { return { errors: { _: 'Nothing was saved: ' + gsErrText(e) } }; }
       },
       mount: async (extra) => { try { await renderApprovalsPolicyHolds(extra); } catch (_) { } }
     },
@@ -28295,6 +28734,7 @@
     try { v = await api('GET', '/api/policy-templates'); } catch (e) { err = String((e && e.message) || e); }
     body.innerHTML = policyTemplatesPageHtml(v, err);
     body.querySelectorAll('.pt-jump').forEach(a => { a.onclick = (e) => { e.preventDefault(); const d = body.querySelector('.pt-card[data-id="' + a.dataset.id + '"]'); if (d) { d.open = true; try { d.scrollIntoView({ block: 'start' }); } catch (_) { } } }; });
+    body.querySelectorAll('.pt-to-settings').forEach(a => { a.onclick = (e) => { e.preventDefault(); switchTab('policysettings'); }; });   // PIM 100.93
     // 2026-09-19 -- the two SuperAdmin writes on this page (rendered only when the server says canEdit AND this session
     // is SuperAdmin; the server re-checks). Neither touches the tenant: a RENAME changes a template's display name only
     // (every delegation points at its id), and the DEFAULTS say what a blank PolicyTemplate means per kind of policy.
@@ -28314,7 +28754,7 @@
         await api('PUT', '/api/settings/policy-template-defaults', val);
         pimPolicyTplCache = null;                         // the wizards' "Use default (<id>)" follows the new defaults
         await renderPolicyTemplatesPage();
-        msg('ptDefMsg', true, 'Saved. A blank PolicyTemplate now means the templates above; the engine applies them on its next run.');
+        msg('ptDefMsg', true, 'Saved. A blank PolicyTemplate now means the templates above. They are the PIM Manager recommendation: nothing is applied to a policy until it is chosen on Policy settings.');
       } catch (e) { saveDef.disabled = false; msg('ptDefMsg', false, 'Not saved: ' + String((e && e.message) || e)); }
     };
     // 2026-09-21 (operator: "i need a edit button ... so i can finetune the templates"): the settings view's Edit /
@@ -28348,7 +28788,7 @@
           pimPolicyTplCache = null;
           await renderPolicyTemplatesPage();
           const c2 = cardOf(id); if (c2) c2.open = true;
-          msg('pt-ed-msg-' + id, true, 'Saved (' + done.length + ' setting(s)). The engine plans it on its next run; a change to many policies waits on the Approvals page with its WhatIf.');
+          msg('pt-ed-msg-' + id, true, 'Saved (' + done.length + ' setting(s)). This changes the PIM Manager recommendation. A policy changes only where that recommendation is chosen on Policy settings, and the change then waits for a SuperAdmin on the Approvals page.');
         } catch (e) { b.disabled = false; msg('pt-ed-msg-' + id, false, 'Not saved: ' + String((e && e.message) || e) + (done.length ? ' (saved before the error: ' + done.join(', ') + ')' : '')); }
       };
     });
@@ -28493,7 +28933,7 @@
       '<span class="pt-ed-msg" id="pt-ed-msg-' + esc(t.id) + '" style="font-size:11px;"></span></div>' +
       ptEditorPartHtml(t, 'member', e.member, t, editable) +
       (t.owner || e.owner ? ptEditorPartHtml(t, 'owner', e.owner, t.owner || {}, editable) : '') +
-      (editable ? '<div class="pt-ed-warn" style="display:none;color:#7a5c00;font-size:11px;margin-top:6px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:6px 8px;">⚠ Saving changes the TEMPLATE, not the policies. The engine plans the change on its next run; a change to many policies is held with a WhatIf (current → new, per setting) until someone approves it on the Approvals page.</div>' : '') +
+      (editable ? '<div class="pt-ed-warn" style="display:none;color:#7a5c00;font-size:11px;margin-top:6px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:6px 8px;">⚠ Saving changes the TEMPLATE, not the policies: the template is the PIM Manager recommendation. A policy changes only for the settings where that recommendation is chosen on Policy settings; the change is then held with a WhatIf (current → new, per setting) until a SuperAdmin approves it on the Approvals page.</div>' : '') +
       '</div>';
   }
   // Collect ONLY the fields the operator changed, per part -> the PUT /api/policy-templates/rules bodies.
@@ -28539,6 +28979,9 @@
     // 2026-09-21 (operator: "a lot of text"): one line here; the rest is folded away under "How templates work".
     h.push('<div style="color:#57606a;font-size:12px;margin-bottom:8px;">The settings each template sets, and which delegations use it. ' +
       (canEdit ? 'Press <b>Edit</b> on a template to change it.' : 'Open a template to see its settings.') + '</div>');
+    // PIM 100.93 (owner 2026-10-12: "we will newer force a policy chg on a customer"): a template is the RECOMMENDATION.
+    h.push('<div id="ptRecommendationNote" style="border:1px solid #d0d7de;border-left:4px solid #0969da;border-radius:6px;background:#f6f8fa;padding:6px 10px;font-size:12px;margin-bottom:8px;">' +
+      'A policy template is the <b>PIM Manager recommendation</b>. Nothing is applied to a policy until it is chosen, per setting, on <a href="#" class="pt-to-settings">Policy settings</a>.</div>');
     if (err || !v) {
       h.push('<div id="ptError">' + stateError('NOT CHECKED — the policy templates could not be read', err || 'no answer from the server') + '</div></div>');
       return h.join('');

@@ -515,7 +515,11 @@ function Get-PimPublishJobControlViewSql {
     $d = (Get-PimJobCadenceDefinition -Job 'publish')
     # GATE-1 (2026-10-09): + 'FeatureGates' -- the msp.downlink switch the publish job now obeys (the on/off map of the optional
     # features; no secret, no identity).
-    $v1 = "CREATE OR ALTER VIEW pim.vw_PublishJobControl AS SELECT Name, ValueJson, UpdatedUtc FROM pim.Settings WHERE Name IN (N''$($d.scheduleKey)'', N''$($d.runNowKey)'', N''$($d.lastRunKey)'', N''License'', N''DeploymentRings'', N''DownlinkIntents'', N''FeatureGates'')"
+    # PIM 100.93 (2026-10-12): + 'PolicyChoices' and 'PolicyAdvisories' -- the managing tenant's policy choices (which of
+    # Microsoft default / PIM Manager recommendation / keep current per setting) and the advisory record they were made on,
+    # which the producer signs into the bundle as the DEFAULT for managed tenants. Configuration; no secret. (The stored
+    # choices name who chose; the producer does not publish that.)
+    $v1 = "CREATE OR ALTER VIEW pim.vw_PublishJobControl AS SELECT Name, ValueJson, UpdatedUtc FROM pim.Settings WHERE Name IN (N''$($d.scheduleKey)'', N''$($d.runNowKey)'', N''$($d.lastRunKey)'', N''License'', N''DeploymentRings'', N''DownlinkIntents'', N''FeatureGates'', N''PolicyChoices'', N''PolicyAdvisories'')"
     $v2 = "CREATE OR ALTER VIEW pim.vw_PublishJobLastRun AS SELECT Name, ValueJson, UpdatedUtc FROM pim.Settings WHERE Name = N''$($d.lastRunKey)'' WITH CHECK OPTION"
     return ("IF OBJECT_ID(N'pim.Settings') IS NULL THROW 50001, 'pim.Settings does not exist in this store -- the Manager has not initialised it', 1;`n" +
             "EXEC (N'$v1');`nEXEC (N'$v2');")

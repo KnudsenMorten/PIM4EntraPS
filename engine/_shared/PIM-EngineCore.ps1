@@ -1012,6 +1012,13 @@ function Invoke-PimEngineScope {
             if (-not $script:__disableAborted) { $script:__disableAborted = 'remove-budget' }
         }
     }
+    # Customer case 2026-10-12 (SUP-2026-00045): a held plan whose removals are GONE (the operator undid the commit) stayed
+    # "holding" on the Guards page, because the hold was only cleared inside the block above -- which needs something to
+    # remove. A run that WRITES and has nothing to remove in this scope clears the scope's hold (same kind of run); a plan
+    # (-WhatIf) and the drift read never do.
+    if ($__rmTotal -eq 0 -and -not $WhatIf -and -not $__driftRead -and $__canRelease -and (Get-Command Clear-PimGuardHold -ErrorAction SilentlyContinue)) {
+        [void](Clear-PimGuardHold -GuardId 'engine.remove-budget' -Scope $Scope -RunKind $__runKind)
+    }
 
     # --- PIM 100.72 (7): THE LAST GLOBAL ADMINISTRATOR (BLOCK + release) --------------------------------------------------
     # A removal that would leave the tenant with NO Global Administrator is damage that does not heal (nobody could repair
@@ -1367,6 +1374,7 @@ function Invoke-PimEngineScope {
         appliedOutcomes=$script:__outcomes.Count  # 96.1: rows recorded in pim.CommitApplied by this pass
         noDefinitions=[bool]$__emptyDesiredRead   # REQ-AU-DRIFT-1: extras listed from a scope with no rows (drift read only)
         overRemoveBudget=$__overBudget            # BUG-269: drift read only -- { toRemove; budget } when an apply would hold
+        policyChoices=$Context["$Scope.choiceSummary"]   # PIM 100.93: a policy scope's { waiting; review; decided; keep; changes; held }; $null for other scopes
         warnings=@($Context['__pimScopeWarnings'])
         # .ToArray(), never @(): pwsh 7 throws "Argument types do not match" on @() over a List[object] from a hashtable.
         findings=$(if ($Context['__pimLiveFindings'] -is [System.Collections.Generic.List[object]]) { $Context['__pimLiveFindings'].ToArray() } else { @() })

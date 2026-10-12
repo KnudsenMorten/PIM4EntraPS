@@ -4204,6 +4204,13 @@ if ($PSScriptRoot -and -not (Get-Command Resolve-PimPolicyTemplateKey -ErrorActi
 if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-PolicyImpact.ps1'))) {
     . (Join-Path $PSScriptRoot 'PIM-PolicyImpact.ps1')
 }
+# PIM 100.93 (owner 2026-10-12: "we will newer force a policy chg on a customer"): the customer's policy CHOICES. Every policy
+# provider below acts ONLY on the fields a choice decided (ConvertTo-PimPolicyChoiceDesired); a field without a choice, on
+# Keep current or asked again is taken off the desired row, so it is not compared, not planned and not written. Loaded
+# UNCONDITIONALLY with the providers (a provider without this library must not run: it would have nothing to decide with).
+if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-PolicyChoices.ps1'))) {
+    . (Join-Path $PSScriptRoot 'PIM-PolicyChoices.ps1')
+}
 # §79.14: the CAB workbook (.xlsx, no module) the policy-hold mail carries. Loaded unconditionally, like the impact report.
 if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-Xlsx.ps1'))) {
     . (Join-Path $PSScriptRoot 'PIM-Xlsx.ps1')
@@ -4728,8 +4735,15 @@ function Invoke-PimEmergencyOverrideStep {
         }
     }
     if (-not $RestorePolicy) {
-        # Re-apply the LINKED template in full (approval included) -- the same write the provider makes.
-        $RestorePolicy = { param($row) Invoke-PimGroupsPolicyApply -item ([pscustomobject]@{ key = (Get-PimGroupsPolicyKey -Row $row); desired = $row; live = $null }) -ctx @{} }
+        # Put APPROVAL back the way the linked template says -- the one thing the override switched off.
+        # PIM 100.93: only the approval rule. Until 100.93 this re-applied the WHOLE template (every enablement,
+        # expiration and notification rule), which would now be a policy change nobody chose.
+        $RestorePolicy = {
+            param($row)
+            $r = $row.PSObject.Copy()
+            foreach ($n in 'Enablement', 'EnablementLegacy', 'Expiration', 'Notification') { $r | Add-Member -NotePropertyName $n -NotePropertyValue $null -Force }
+            Invoke-PimGroupsPolicyApply -item ([pscustomobject]@{ key = (Get-PimGroupsPolicyKey -Row $r); desired = $r; live = $null }) -ctx @{}
+        }
     }
     if (-not $Notify) {
         $Notify = {
@@ -4815,6 +4829,7 @@ function New-PimGroupsPoliciesProvider {
         # template's Owner block. #5: plus every managed-prefix group no row names (baseline, default ON).
         GetDesired = {
             param($ctx)
+            Reset-PimPolicyChoiceCache      # PIM 100.93: this run decides with the choices as they are stored NOW
             $d = @(Get-PimGroupsPolicyDesiredSet)
             if ($null -ne $ctx) { $ctx['groupsPolDesired'] = $d }
             $d
@@ -4864,6 +4879,7 @@ function New-PimGroupsPoliciesProvider {
                 # found no plan and applied every item directly. Measured on internal, 48 h of tick logs:
                 # `[breaker] EntraRolePolicies` 7x, `[breaker] AzResPolicies` 30x, `[breaker] GroupsPolicies` 0x --
                 # while GroupsPolicies applied 78 policy changes unguarded. PLAN FIRST on BOTH read paths.
+                Add-PimPolicyChoiceUndecidedLive -Provider 'GroupsPolicies' -Desired $desired -Live $live -KeyOf { param($r) Get-PimGroupsPolicyKey -Row $r }
                 Set-PimGraphPolicyBreakerPlan -Provider 'GroupsPolicies' -Context $ctx -Desired $desired -Live $live.ToArray() `
                     -KeyOf { param($r) Get-PimGroupsPolicyKey -Row $r } -Label { param($r) if ("$($r.PolicyRole)" -eq 'owner') { "$($r.GroupName) (owner)" } else { "$($r.GroupName)" } }
                 return $live.ToArray()
@@ -4892,6 +4908,7 @@ function New-PimGroupsPoliciesProvider {
             Save-PimGroupPolicyIdMap
             # PLAN FIRST (mass-change circuit breaker, operator 2026-09-13): the whole change set and the
             # breaker decision exist before any ApplyUpdate runs.
+            Add-PimPolicyChoiceUndecidedLive -Provider 'GroupsPolicies' -Desired $desired -Live $live -KeyOf { param($r) Get-PimGroupsPolicyKey -Row $r }
             Set-PimGraphPolicyBreakerPlan -Provider 'GroupsPolicies' -Context $ctx -Desired $desired -Live $live.ToArray() `
                 -KeyOf { param($r) Get-PimGroupsPolicyKey -Row $r } -Label { param($r) if ("$($r.PolicyRole)" -eq 'owner') { "$($r.GroupName) (owner)" } else { "$($r.GroupName)" } }
             $live.ToArray()
@@ -4904,7 +4921,11 @@ function New-PimGroupsPoliciesProvider {
         # idempotent string compare per rule via the pure facet builders).
         Equal = {
             param($d,$l)
-            $want = Get-PimGroupPolicyDesiredFacets -Desired $d
+            # PIM 100.93: only the fields a choice decided are compared. No decided field (waiting for a choice, Keep
+            # current, asked again) = nothing to compare = in sync: an undecided setting is never drift.
+            $e = ConvertTo-PimPolicyChoiceDesired -Provider 'GroupsPolicies' -Desired $d -LiveRules @($l.Rules)
+            if (-not [int]$e.PolicyChoice.active -and -not $e.PolicyChoice.emergencyOverride) { return $true }
+            $want = Get-PimGroupPolicyDesiredFacets -Desired $e
             $have = Get-PimGroupPolicyLiveFacets -Rules $l.Rules
             Test-PimGroupPolicyInSync -Desired $want -Live $have
         }
@@ -4993,7 +5014,11 @@ function Invoke-PimGroupsPolicyApply {
                 # with no Approval block means approval must be OFF, not "leave whatever is
                 # there". Only written when the live policy actually HAS approval on, so the
                 # common default-linked group still takes the cheap path and sends nothing.
+                # PIM 100.93: ONLY when approval is the engine's to set on this row (ManageApproval -- a choice decided
+                # it). No choice / Keep current = ManageApproval false = a live approval is left exactly as it is.
+                $approvalManaged = -not ($d.PSObject.Properties['ManageApproval'] -and -not $d.ManageApproval)
                 $liveApprovalOn = $false
+                if (-not $approvalManaged) { Assert-PimGroupPolicyPatchesApplied -GroupName $gn -Failures $ruleFailures; return }
                 foreach ($r in @($item.live.Rules)) {
                     if ("$($r.id)" -ne 'Approval_EndUser_Assignment') { continue }
                     if ($r.setting -and [bool]$r.setting.isApprovalRequired) { $liveApprovalOn = $true }
@@ -5196,6 +5221,7 @@ function New-PimEntraRolePoliciesProvider {
         scope = 'EntraRolePolicies'; entity = 'PIM-Assignments-Roles-Groups'; order = 75; refreshBefore = $true
         GetDesired = {
             param($ctx)
+            Reset-PimPolicyChoiceCache      # PIM 100.93
             $set = Get-PimEntraRolePolicyDesiredSet
             if ($null -ne $ctx) { $ctx['rolePolDesired'] = @($set.items); if ($set.roleIds) { $ctx['rolePolRoleIds'] = $set.roleIds } }
             @($set.items)
@@ -5228,6 +5254,7 @@ function New-PimEntraRolePoliciesProvider {
             }
             # PLAN FIRST (mass-change circuit breaker, operator 2026-09-13).
             $planDesired = if ($ctx.ContainsKey('rolePolDesired')) { @($ctx['rolePolDesired']) } else { @((Get-PimEntraRolePolicyDesiredSet).items) }
+            Add-PimPolicyChoiceUndecidedLive -Provider 'EntraRolePolicies' -Desired $planDesired -Live $live -KeyOf { param($r) (Get-PimRowProp -Row $r -Names @('GroupName','RoleDefinitionName')).ToLowerInvariant() }
             Set-PimGraphPolicyBreakerPlan -Provider 'EntraRolePolicies' -Context $ctx -Desired $planDesired -Live $live.ToArray() `
                 -KeyOf { param($r) (Get-PimRowProp -Row $r -Names @('GroupName','RoleDefinitionName')).ToLowerInvariant() } -Label { param($r) "$($r.RoleDefinitionName)" }
             $live.ToArray()
@@ -5237,7 +5264,10 @@ function New-PimEntraRolePoliciesProvider {
         # which is identical for group and directory-role policies.
         Equal = {
             param($d,$l)
-            $want = Get-PimGroupPolicyDesiredFacets -Desired $d
+            # PIM 100.93: only decided fields are compared; an undecided / Keep current / asked-again field is never drift.
+            $e = ConvertTo-PimPolicyChoiceDesired -Provider 'EntraRolePolicies' -Desired $d -LiveRules @($l.Rules)
+            if (-not [int]$e.PolicyChoice.active) { return $true }
+            $want = Get-PimGroupPolicyDesiredFacets -Desired $e
             $have = Get-PimGroupPolicyLiveFacets -Rules $l.Rules
             Test-PimGroupPolicyInSync -Desired $want -Live $have
         }
@@ -6169,6 +6199,12 @@ function Test-PimPolicyBreaker {
     $n = [Math]::Max(0, [int]$Plan.changes - $first); $t = [Math]::Max(0, [int]$Plan.checked - $first); $w = [int]$Plan.weakening
     $tripped = New-Object System.Collections.Generic.List[string]
     $reasons = New-Object System.Collections.Generic.List[string]
+    # 🔴 PIM 100.93 (owner 2026-10-12: "customer must choose per setting ... it must still be approved as guard"): EVERY
+    # change set holds until a SuperAdmin of the tenant approves it -- one policy or a thousand. No count, no percentage and
+    # no "never modified" exemption lets a policy write through unapproved; the thresholds below only ADD their reasons.
+    # NEVER turn this into a warning.
+    $raw = [Math]::Max(0, [int]$Plan.changes)
+    if ($raw -ge 1) { $tripped.Add('needs-approval'); $reasons.Add(("{0} policy change{1} from your policy choices wait{2} for a SuperAdmin's approval" -f $raw, $(if ($raw -eq 1) { '' } else { 's' }), $(if ($raw -eq 1) { 's' } else { '' }))) }
     # PIM 100.82 (owner 2026-10-11): the count and percent triggers HOLD again -- 2.4.594 (100.72 (1)) only warned.
     if ($n -gt [int]$Thresholds.MaxChanges) { $tripped.Add('max-changes'); $reasons.Add("would change $n policies (> cap $($Thresholds.MaxChanges))") }
     if ($t -ge [int]$Thresholds.MinCheckedForPercent -and $t -gt 0) {
@@ -6179,31 +6215,22 @@ function Test-PimPolicyBreaker {
     $base = @{ changes = $n; checked = $t; weakening = $w; planHash = "$($Plan.planHash)"; thresholds = $Thresholds; tripped = $tripped.ToArray()
                warnings = @(); warningReason = '' }   # kept for the decision's shape; always empty since 100.82
     if (-not $tripped.Count) {
-        return [pscustomobject](@{ allowed = $true; abort = $false; hold = $false; approved = $false; approvedBy = ''; reason = 'within the mass-change thresholds'; approvalNote = '' } + $base)
+        return [pscustomobject](@{ allowed = $true; abort = $false; hold = $false; approved = $false; approvedBy = ''; reason = 'nothing to change'; approvalNote = '' } + $base)
     }
-    $why = "circuit breaker: " + ($reasons -join '; ')
+    $why = "held for approval: " + ($reasons -join '; ')
     $note = 'no approval recorded'
     if ($Approval) {
         $exp = ConvertTo-PimAzResUtc $Approval.expiresUtc
         $sameHash = ("$($Approval.planHash)".Trim().ToLowerInvariant() -eq "$($Plan.planHash)".ToLowerInvariant())
-        # 2026-09-21 (operator: "why is it that you cannot show me all changes and i can approve all in one go"): an approval
-        # STICKS. It used to cover only the exact plan hash, so one new group between the click and the next run made it
-        # void and the change was held again -- all day. Now it also covers a DIFFERENT plan as long as that plan adds no
-        # WEAKENING the approver did not see: every weakening in it must be one the approval recorded (policy + rule +
-        # change). Template alignment of further policies (a new group getting its template) is what the approver already
-        # accepted. A weakening nobody approved -- a policy someone set by hand being loosened -- still holds.
-        $newWeak = @()
-        if (-not $sameHash) {
-            $okKeys = @{}
-            foreach ($k in @($(if ($Approval.PSObject.Properties['weakeningKeys']) { $Approval.weakeningKeys } else { @() }))) { $okKeys["$k".ToLowerInvariant()] = $true }
-            $newWeak = @(@($Plan.weakenings) | Where-Object { $null -ne $_ } | Where-Object { -not $okKeys.ContainsKey((Get-PimPolicyWeakeningKey -Entry $_)) })
-        }
+        # 🔴 PIM 100.93: an approval covers EXACTLY the change set its plan hash names -- nothing else. Until 100.93 an
+        # approval also covered a DIFFERENT plan as long as that plan added no new weakening (2026-09-21, "an approval
+        # sticks": a new group between the click and the next run no longer voided it). That carry-over let policy changes
+        # nobody had seen be written, which the owner's rule forbids ("it must still be approved as guard"): a change set
+        # that differs in any way is a new change set, and it waits for its own approval.
         if (-not $exp -or $exp -le $NowUtc.ToUniversalTime()) { $note = "the approval EXPIRED ($($Approval.expiresUtc))" }
-        elseif (-not $sameHash -and -not ($Approval.PSObject.Properties['weakeningKeys'])) { $note = "the recorded approval is for a DIFFERENT plan ($($Approval.planHash)) and predates approvals that carry over -- approve again" }
-        elseif ($newWeak.Count) { $note = "the approval does not cover $($newWeak.Count) NEW weakening change(s) that appeared since it was given -- approve again after reviewing them" }
+        elseif (-not $sameHash) { $note = "the recorded approval is for a DIFFERENT change set ($($Approval.planHash)) -- this one waits for its own approval" }
         else {
-            $how = if ($sameHash) { 'this exact change set' } else { 'an earlier change set; this run adds no weakening it did not approve' }
-            return [pscustomobject](@{ allowed = $true; abort = $false; hold = $false; approved = $true; approvedBy = "$($Approval.approvedBy)"; reason = "$why -- APPROVED by $($Approval.approvedBy) ($how) until $($Approval.expiresUtc)"; approvalNote = 'approved' } + $base)
+            return [pscustomobject](@{ allowed = $true; abort = $false; hold = $false; approved = $true; approvedBy = "$($Approval.approvedBy)"; reason = "$why -- APPROVED by $($Approval.approvedBy) (this exact change set) until $($Approval.expiresUtc)"; approvalNote = 'approved' } + $base)
         }
     }
     [pscustomobject](@{ allowed = $false; abort = $true; hold = $true; approved = $false; approvedBy = ''; reason = $why; approvalNote = $note } + $base)
@@ -6489,7 +6516,21 @@ function Set-PimGraphPolicyBreakerPlan {
     param([Parameter(Mandatory)][string]$Provider, [hashtable]$Context, [object[]]$Desired, [object[]]$Live, [Parameter(Mandatory)][scriptblock]$KeyOf, [scriptblock]$Label)
     if ($null -eq $Context) { return }
     $spec = Get-PimPolicyBreakerSpec -Provider $Provider
-    $plan = Get-PimGraphPolicyChangePlan -Desired $Desired -Live $Live -KeyOf $KeyOf -Label $Label
+    # PIM 100.93: the plan is built from what the customer's CHOICES decided, never from the template as a whole. A row
+    # whose policy was not read (a placeholder, or a failed read) carries nothing, so it can never be in a change set.
+    $realLive = @(@($Live) | Where-Object { $null -ne $_ -and -not ($_.PSObject.Properties['PolicyChoiceNoRead'] -and $_.PolicyChoiceNoRead) })
+    $liveForChoice = @{}; foreach ($x in $realLive) { $liveForChoice["$(& $KeyOf $x)".ToLowerInvariant()] = $x }
+    $effective = @(foreach ($d in @($Desired)) {
+        if ($null -eq $d) { continue }
+        $lx = $liveForChoice["$(& $KeyOf $d)".ToLowerInvariant()]
+        ConvertTo-PimPolicyChoiceDesired -Provider $spec.Provider -Desired $d -LiveRules $(if ($lx) { @($lx.Rules) } else { $null })
+    })
+    $Context["$($spec.Provider).effective"] = $effective
+    # The rows the plan is built from are PINNED for this run: the apply uses exactly these (a choice saved while the run is
+    # under way is planned -- and held -- by the NEXT run, never slipped into a change set that was approved without it).
+    $effByKey = @{}; foreach ($e in $effective) { $effByKey["$(& $KeyOf $e)".ToLowerInvariant()] = $e }
+    $Context["$($spec.Provider).effectiveByKey"] = $effByKey
+    $plan = Get-PimGraphPolicyChangePlan -Desired $effective -Live $realLive -KeyOf $KeyOf -Label $Label
     $appr = Get-PimPolicyMassChangeApproval -Provider $spec.Provider
     $dec = Test-PimPolicyBreaker -Plan $plan -Approval $appr -Provider $spec.Provider
     $Context["$($spec.Provider).plan"] = $plan; $Context["$($spec.Provider).breaker"] = $dec
@@ -6507,8 +6548,90 @@ function Set-PimGraphPolicyBreakerPlan {
         Write-Host ("    [breaker] {0}: {1} rule change(s) are the FIRST template application to never-modified default policies (new groups/roles) -- counted in N, not in W: {2}" -f $spec.Provider, @($plan.defaultPolicyAligned).Count, ((@($plan.defaultPolicyAligned) | ForEach-Object { $_.name } | Select-Object -Unique) -join ', ')) -ForegroundColor DarkCyan
     }
     if ($dec.hold -or ($Context["__pimWhatIf"] -and [int]$plan.changes -gt 0)) { Write-PimPolicyImpactLog -Provider $spec.Provider -Plan $plan }
-    # PIM 100.84: a run that does not hold (nothing to change, within the thresholds, or approved) leaves no hold record behind.
+    # PIM 100.84: a run that does not hold (nothing to change, or approved) leaves no hold record behind.
     [void](Clear-PimPolicyMassHoldRecord -Provider $spec.Provider -Decision $dec -Context $Context)
+    Publish-PimPolicyChoiceRunState -Provider $spec.Provider -Desired $Desired -Effective $effective -Live $realLive -KeyOf $KeyOf -Plan $plan -Decision $dec -Context $Context
+}
+
+function Select-PimPolicyPlannedRules {
+    <#
+      PURE. PIM 100.93. A copy of an effective desired row (ConvertTo-PimPolicyChoiceDesired) that carries ONLY the rules
+      named in -RuleIds -- the rules of this policy in the planned (held, approved) change set. A rule that started to
+      differ after the plan was made is not in it, so it is not written by this run: it is planned, and held, by the next.
+    #>
+    param([Parameter(Mandatory)][object]$Row, [string[]]$RuleIds = @())
+    $ids = @{}; foreach ($x in @($RuleIds)) { if ("$x") { $ids["$x"] = $true } }
+    $c = $Row.PSObject.Copy()
+    $set = { param($n, $v) $c | Add-Member -NotePropertyName $n -NotePropertyValue $v -Force }
+    foreach ($fam in 'Expiration', 'Enablement') {
+        $src = $Row.$fam
+        if ($src -is [System.Collections.IDictionary]) {
+            $keep = @{}; foreach ($k in @($src.Keys)) { if ($ids.ContainsKey("${fam}_$k")) { $keep["$k"] = $src[$k] } }
+            & $set $fam $(if ($keep.Count) { $keep } else { $null })
+        }
+    }
+    if ($Row.Notification) {
+        $n2 = @(@($Row.Notification) | Where-Object { $_ } | Where-Object { $b = ConvertTo-PimNotificationRuleBody -Entry $_; $b -and $ids.ContainsKey("$($b.id)") })
+        & $set 'Notification' $(if ($n2.Count) { $n2 } else { $null })
+    }
+    if (-not $ids.ContainsKey('Approval_EndUser_Assignment')) { & $set 'Approval' $null; & $set 'ManageApproval' $false }
+    $c
+}
+
+function Add-PimPolicyChoiceUndecidedLive {
+    <#
+      PIM 100.93. A desired policy that has NO live row (the policy could not be found or read) and on which NO choice
+      would write anything gets a placeholder live row, so the engine's diff calls it "no change" instead of a create:
+      a setting nobody decided is never an error, a failure or drift -- there is nothing to write, so there is nothing to
+      report. A policy a choice DOES decide keeps its missing row: the run then says why it could not be read.
+    #>
+    param([Parameter(Mandatory)][string]$Provider, [object[]]$Desired, [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Live, [Parameter(Mandatory)][scriptblock]$KeyOf)
+    $have = @{}; foreach ($x in @($Live)) { if ($x) { $have["$(& $KeyOf $x)".ToLowerInvariant()] = $true } }
+    foreach ($d in @($Desired)) {
+        if ($null -eq $d) { continue }
+        $k = "$(& $KeyOf $d)".ToLowerInvariant()
+        if ($have.ContainsKey($k)) { continue }
+        $e = ConvertTo-PimPolicyChoiceDesired -Provider $Provider -Desired $d -LiveRules $null
+        if ([int]$e.PolicyChoice.decided -gt 0 -or $e.PolicyChoice.emergencyOverride) { continue }
+        $have[$k] = $true
+        $Live.Add([pscustomobject]@{ GroupName = "$($d.GroupName)"; PolicyRole = "$(if ($d.PSObject.Properties['PolicyRole']) { $d.PolicyRole })"; PolicyId = ''; Rules = @(); NeverModified = $false; PolicyChoiceNoRead = $true })
+    }
+}
+
+function Publish-PimPolicyChoiceRunState {
+    <#
+      PIM 100.93. After a policy provider's read + plan: say in plain words what the run found ("12 settings wait for your
+      choice; 0 changes"), keep the summary on the context ('<provider>.choiceSummary' -- the scope result carries it), and
+      store the live read for the Policies page (pim.Settings 'PolicyLiveValues<...>': the spread of the current values).
+      A plan (WhatIf) stores nothing. NEVER throws: reporting must not turn a read-only run into a failure.
+        -Desired = the TEMPLATE rows (what the recommendation is)   -Effective = the rows the choices left
+    #>
+    param([Parameter(Mandatory)][string]$Provider, [object[]]$Desired, [object[]]$Effective, [object[]]$Live, [Parameter(Mandatory)][scriptblock]$KeyOf, [AllowNull()][object]$Plan, [AllowNull()][object]$Decision, [hashtable]$Context)
+    try {
+        $sum = Get-PimPolicyChoiceRunSummary -Effective $Effective -Changes $(if ($Plan) { [int]$Plan.changes } else { 0 }) -Held ([bool]($Decision -and $Decision.hold))
+        if ($Context) { $Context["$Provider.choiceSummary"] = $sum }
+        Write-Host ("    [policy] {0}: {1}" -f $Provider, (Format-PimPolicyChoiceRunSummary -Summary $sum)) -ForegroundColor DarkCyan
+        $unread = @(@($Effective) | Where-Object { $_ -and [int]$_.PolicyChoice.decided -gt 0 -and -not $_.PolicyChoice.hasLive })
+        if ($unread.Count) {
+            Write-Warning ("  [policy] {0}: {1} policy(ies) with a choice could not be read in this run, so nothing was written for them (read again on the next run): {2}{3}" -f `
+                $Provider, $unread.Count, ((@($unread | Select-Object -First 5 | ForEach-Object { "$($_.PolicyChoice.name)" })) -join ', '), $(if ($unread.Count -gt 5) { ', ...' } else { '' }))
+        }
+        if ($Context -and $Context['__pimWhatIf']) { return }
+        if (-not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { return }
+        $liveBy = @{}; foreach ($x in @($Live)) { if ($x) { $liveBy["$(& $KeyOf $x)".ToLowerInvariant()] = $x } }
+        $rows = @(foreach ($d in @($Desired)) {
+            if ($null -eq $d) { continue }
+            $l = $liveBy["$(& $KeyOf $d)".ToLowerInvariant()]
+            $read = [bool]($l -and (-not $l.PSObject.Properties['State'] -or "$($l.State)" -eq 'read'))
+            # objectId: what Microsoft's per-object defaults are keyed by (an Entra role's role definition id)
+            $oid = ''
+            if ($Provider -eq 'EntraRolePolicies' -and $Context -and $Context['rolePolRoleIds'] -is [System.Collections.IDictionary]) { $oid = "$($Context['rolePolRoleIds']["$($d.RoleDefinitionName)".ToLowerInvariant()])" }
+            @{ desired = $d; liveRules = $(if ($read) { @($l.Rules) } else { $null }); policyId = $(if ($l) { "$($l.PolicyId)" } else { '' }); objectId = $oid
+               neverModified = [bool]($l -and (($l.PSObject.Properties['NeverModified'] -and $l.NeverModified) -or ($l.PSObject.Properties['IsDefaultPolicy'] -and $l.IsDefaultPolicy))) }
+        })
+        $snap = New-PimPolicyLiveValuesSnapshot -Provider $Provider -Rows $rows -Summary $sum
+        Set-PimSetting -Name (Get-PimPolicyLiveValuesSettingName -Provider $Provider) -Value $snap
+    } catch { Write-Warning "  [policy] ${Provider}: the run's policy-choice summary could not be recorded (nothing else is affected): $($_.Exception.Message)" }
 }
 
 function Invoke-PimGraphPolicyGuardedApply {
@@ -6527,14 +6650,41 @@ function Invoke-PimGraphPolicyGuardedApply {
     $spec = Get-PimPolicyBreakerSpec -Provider $Provider
     if ($null -eq $Context) { $Context = @{} }
     $plan = $Context["$($spec.Provider).plan"]; $dec = $Context["$($spec.Provider).breaker"]
+    # PIM 100.93 (owner 2026-10-12: "it must still be approved as guard"): a policy is written ONLY as part of a planned
+    # change set a SuperAdmin approved. No plan in the context (a direct call, not a scope run) = nothing was planned =
+    # NOTHING is written. Until 100.93 this branch applied the item ("one item is not a mass change").
     if (-not $plan -or -not $dec) {
-        Write-Verbose "$($spec.Provider): no breaker plan in the context (a direct single-item call, not a scope run) -- applying '$($Item.key)'"
-        return (& $Apply $Item $Context)
+        Write-Verbose "$($spec.Provider): no change plan in the context (a direct call, not a scope run) -- nothing written for '$($Item.key)'"
+        return [pscustomobject]@{ pimApplied = $false; note = 'no change set was planned for this run, so nothing was written (a policy is written only from an approved change set)' }
     }
+    # What the provider may act on: ONLY the fields a choice decided (the same row the plan was built from).
+    $__liveRules = $null
+    if ($Item.live -and $Item.live.PSObject.Properties['Rules'] -and -not ($Item.live.PSObject.Properties['PolicyChoiceNoRead'] -and $Item.live.PolicyChoiceNoRead)) { $__liveRules = @($Item.live.Rules) }
+    $key = "$($Item.key)".Trim().ToLowerInvariant()
+    $__pinned = $Context["$($spec.Provider).effectiveByKey"]
+    $__eff = $null
+    if ($__pinned -is [hashtable] -and $__pinned.ContainsKey($key)) { $__eff = $__pinned[$key] }
+    elseif ($null -ne $Item.desired) { $__eff = ConvertTo-PimPolicyChoiceDesired -Provider $spec.Provider -Desired $Item.desired -LiveRules $__liveRules }
     if (-not $Context["$($spec.Provider).breakerState"]) { $Context["$($spec.Provider).breakerState"] = @{ holdRecorded = $false; visited = @{}; approvalCleared = $false } }
     $st = $Context["$($spec.Provider).breakerState"]
-    $key = "$($Item.key)".Trim().ToLowerInvariant()
     $pp = if ($plan.byKey.ContainsKey($key)) { $plan.byKey[$key] } else { $null }
+    # A planned policy is written with the PLANNED rules only (the ones the approved plan hash names).
+    if ($pp -and $__eff) { $__eff = Select-PimPolicyPlannedRules -Row $__eff -RuleIds @($pp.rules | ForEach-Object { "$($_.ruleId)" }) }
+    $__run = if ($__eff) { [pscustomobject]@{ key = $Item.key; desired = $__eff; live = $Item.live } } else { $Item }
+    if (-not $pp) {
+        # NOT in the planned change set -> nothing a choice decides is written for it.
+        if (-not $__eff) { return [pscustomobject]@{ pimApplied = $false; note = 'not part of the planned change set -- nothing was written' } }
+        #  * BUG-185: an ACTIVE emergency override's approval switch-off is authorised on its own (SuperAdmin + passcode,
+        #    time-boxed, audited); its row carries nothing else (ConvertTo-PimPolicyChoiceDesired).
+        if ($__eff.PolicyChoice.emergencyOverride) { return (& $Apply $__run $Context) }
+        #  * a policy a choice decides but that could not be read: the row carries NOTHING to write; the provider's apply
+        #    only says why (group / role not found, policy not readable yet) -- its own, classified message.
+        if ([int]$__eff.PolicyChoice.decided -gt 0 -and -not $__eff.PolicyChoice.hasLive) {
+            [void](& $Apply $__run $Context)
+            return [pscustomobject]@{ pimApplied = $false; note = 'a choice exists for this policy, but the policy could not be read in this run -- nothing was written; it is read again on the next run' }
+        }
+        return [pscustomobject]@{ pimApplied = $false; note = 'nothing to write: no chosen setting of this policy differs from what it has' }
+    }
     if ($pp -and $dec.hold) {
         if (-not $st.holdRecorded) {
             $st.holdRecorded = $true
@@ -6563,7 +6713,7 @@ function Invoke-PimGraphPolicyGuardedApply {
             })
         } catch { }
     }
-    try { & $Apply $Item $Context }
+    try { & $Apply $__run $Context }
     finally {
         if ($pp) {
             $st.visited[$key] = $true
@@ -6646,8 +6796,11 @@ function Invoke-PimAzResPolicyUpdate {
     #>
     param([Parameter(Mandatory)][object]$Item, [hashtable]$Context = @{})
     if ($null -eq $Context) { $Context = @{} }
-    $d = $Item.desired; $l = $Item.live
+    $l = $Item.live
+    # PIM 100.93: act ONLY on the fields a choice decided (the same row this run's plan was built from).
+    $d = ConvertTo-PimPolicyChoiceDesired -Provider 'AzResPolicies' -Desired $Item.desired -LiveRules $(if ($l -and "$($l.State)" -eq 'read') { @($l.Rules) } else { $null })
     $label = "$($d.RoleName) @ $($d.AzScope)"
+    if (-not [int]$d.PolicyChoice.decided) { return [pscustomobject]@{ pimApplied = $false; note = 'nothing to write: no setting of this policy has a choice' } }
     if (-not $Context['azResPol']) { $Context['azResPol'] = @{ failStreak = 0; holdRecorded = $false; visited = @{}; approvalCleared = $false } }
     $st = $Context['azResPol']
 
@@ -6806,6 +6959,7 @@ function New-PimAzResPoliciesProvider {
             param($ctx)
             if ($null -eq $ctx) { $ctx = @{} }
             $ctx['azResPol'] = @{ failStreak = 0; holdRecorded = $false; visited = @{}; approvalCleared = $false }
+            Reset-PimPolicyChoiceCache      # PIM 100.93
             $d = @(Get-PimAzResPolicyDesiredSet)
             $ctx['azResPolDesired'] = $d
             $d
@@ -6817,10 +6971,19 @@ function New-PimAzResPoliciesProvider {
             if (-not $ctx['azResPolArmRoleCache']) { $ctx['azResPolArmRoleCache'] = @{} }
             $live = New-Object System.Collections.Generic.List[object]
             foreach ($d in $desired) { $live.Add((Get-PimAzResPolicyLive -Scope "$($d.AzScope)" -RoleName "$($d.RoleName)" -RoleCache $ctx['azResPolArmRoleCache'])) }
-            $verdicts = @(Write-PimAzResPolicyVerification -Desired $desired -Live $live.ToArray())
+            # PIM 100.93: verified and planned against what the customer's CHOICES decided -- a field without a choice (or on
+            # Keep current, or asked again) is not on the row, so it is neither a difference nor a change.
+            $liveForChoice = @{}; foreach ($x in $live.ToArray()) { if ($x) { $liveForChoice[(Get-PimAzResPolicyKey -Row $x)] = $x } }
+            $effective = @(foreach ($d in $desired) {
+                if ($null -eq $d) { continue }
+                $lx = $liveForChoice[(Get-PimAzResPolicyKey -Row $d)]
+                ConvertTo-PimPolicyChoiceDesired -Provider 'AzResPolicies' -Desired $d -LiveRules $(if ($lx -and "$($lx.State)" -eq 'read') { @($lx.Rules) } else { $null })
+            })
+            $ctx['AzResPolicies.effective'] = $effective
+            $verdicts = @(Write-PimAzResPolicyVerification -Desired $effective -Live $live.ToArray())
             $ctx['azResPolVerdicts'] = $verdicts
             # PLAN FIRST: the whole change set and the breaker decision exist before any ApplyUpdate runs.
-            $plan = Get-PimAzResPolicyChangePlan -Desired $desired -Live $live.ToArray() -Verdicts $verdicts
+            $plan = Get-PimAzResPolicyChangePlan -Desired $effective -Live $live.ToArray() -Verdicts $verdicts
             $appr = Get-PimAzResPolicyMassChangeApproval
             $dec = Test-PimAzResPolicyBreaker -Plan $plan -Approval $appr
             $ctx['azResPolPlan'] = $plan; $ctx['azResPolBreaker'] = $dec
@@ -6837,10 +7000,19 @@ function New-PimAzResPoliciesProvider {
             }
             if ($dec.hold -or ($ctx["__pimWhatIf"] -and [int]$plan.changes -gt 0)) { Write-PimPolicyImpactLog -Provider 'AzResPolicies' -Plan $plan }
             [void](Clear-PimPolicyMassHoldRecord -Provider 'AzResPolicies' -Decision $dec -Context $ctx)   # PIM 100.84
+            Publish-PimPolicyChoiceRunState -Provider 'AzResPolicies' -Desired $desired -Effective $effective -Live $live.ToArray() -KeyOf { param($r) Get-PimAzResPolicyKey -Row $r } -Plan $plan -Decision $dec -Context $ctx
             $live.ToArray()
         }
         KeyOf = { param($r) Get-PimAzResPolicyKey -Row $r }
-        Equal = { param($d,$l) (Get-PimAzResPolicyVerdict -Desired $d -Live $l).state -in @('matches','kept') }
+        Equal = {
+            param($d,$l)
+            # PIM 100.93: a policy on which no choice would write anything is in sync, whatever it holds and whether or not
+            # it could be read -- an undecided setting is never drift and never an error. A policy a choice decides is
+            # verified as before (and an unreadable one says so).
+            $e = ConvertTo-PimPolicyChoiceDesired -Provider 'AzResPolicies' -Desired $d -LiveRules $(if ($l -and "$($l.State)" -eq 'read') { @($l.Rules) } else { $null })
+            if (-not [int]$e.PolicyChoice.decided) { return $true }
+            (Get-PimAzResPolicyVerdict -Desired $e -Live $l).state -in @('matches','kept')
+        }
         ApplyCreate = { param($item,$ctx) throw "AzResPolicies: no live policy read for '$($item.key)' -- nothing written" }
         ApplyUpdate = { param($item,$ctx) Invoke-PimAzResPolicyUpdate -Item $item -Context $ctx }
     }

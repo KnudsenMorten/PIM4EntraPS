@@ -244,6 +244,11 @@ if (Test-Path -LiteralPath $_policyBaselineLib) { . $_policyBaselineLib }
 # (GET /api/policy-templates), and the per-type standard template the grid's PolicyTemplate picker shows for blank.
 $_policyTplCatalogLib = Join-Path $solutionRoot 'engine\_shared\PIM-PolicyTemplateCatalog.ps1'
 if (Test-Path -LiteralPath $_policyTplCatalogLib) { . $_policyTplCatalogLib }
+# PIM 100.93: the customer's policy CHOICES (Microsoft default / PIM Manager recommendation / Keep current, per setting) --
+# GET / PUT /api/policy-choices. The library needs nothing from the engine: the Manager reads the stores and the last policy
+# run's live read from pim.Settings and never calls the tenant for this.
+$_policyChoicesLib = Join-Path $solutionRoot 'engine\_shared\PIM-PolicyChoices.ps1'
+if (Test-Path -LiteralPath $_policyChoicesLib) { . $_policyChoicesLib }
 
 # Safe, reversible commits for Review & Save (engine/_shared/PIM-CommitBackup.ps1,
 # REQUIREMENTS.md s28 [M1]) -- timestamped backup before every commit, all-or-
@@ -7869,8 +7874,60 @@ function Get-PimManagerPolicyHoldState {
     $script:PimPolicyHoldStateCache = @{ atUtc = $now; state = $state }
     return $state
 }
+function Get-PimManagerPolicyChoiceState {
+    <#
+      PIM 100.93. What GET / PUT /api/policy-choices are built from, read from pim.Settings in one place:
+        choices     'PolicyChoices' (normalised)            advisories  'PolicyAdvisories'
+        defaults    the SHIPPED Microsoft-default table (templates\policy\microsoft-defaults.json) -- what "Microsoft
+                    default" means, the same in every tenant
+        tenantRead  'MicrosoftPolicyDefaults': what this tenant's untouched policies say (the cross-check; empty = unknown)
+        snapshots   provider -> the last policy run's live read ('PolicyLiveValuesGroups' / '...EntraRoles' / '...AzureRoles')
+      A setting that is not stored yet reads as empty -- never an error: before the first choice there is nothing to read.
+    #>
+    $cs = Get-PimManagerSettingCs
+    $read = { param($n) try { Get-PimSqlSetting -ConnectionString $cs -Name $n } catch { $null } }
+    $table = Get-PimMicrosoftPolicyDefaultsTable -Path (Join-Path $solutionRoot 'templates\policy\microsoft-defaults.json')
+    $snaps = @{}
+    foreach ($p in @('GroupsPolicies', 'EntraRolePolicies', 'AzResPolicies')) { $snaps[$p] = & $read (Get-PimPolicyLiveValuesSettingName -Provider $p) }
+    @{
+        choices    = ConvertTo-PimPolicyChoicesStore -Value (& $read (Get-PimPolicyChoicesSettingName))
+        advisories = & $read (Get-PimPolicyAdvisoriesSettingName)
+        defaults   = $table
+        tenantRead = & $read (Get-PimMicrosoftPolicyDefaultsSettingName)
+        snapshots  = $snaps
+    }
+}
+function Get-PimManagerPolicyChoiceCounts {
+    <#
+      PIM 100.93 (lane policy-page). How many policy settings WAIT for the customer's choice and how many are ASKED AGAIN
+      after new advice -- the two numbers Overview, the menu and the Get Started step show. Counted with the SAME resolver
+      and the same rule as the value view (Get-PimPolicyChoicesView: no choice = waiting, else an older advisory number =
+      asked again), without building the view. { known; waiting; needsReview }.
+      A read that FAILS is "not known" (known = false), never "0 waiting" and never "everything waits": -Read is the seam
+      (setting name -> stored value); its default reads pim.Settings and lets a failure through to the catch below.
+    #>
+    param([scriptblock]$Read)
+    $r = [ordered]@{ known = $false; waiting = 0; needsReview = 0 }
+    if (-not ((Get-Command Resolve-PimPolicyChoice -ErrorAction SilentlyContinue) -and (Get-Command Get-PimPolicyFieldsForType -ErrorAction SilentlyContinue))) { return $r }
+    try {
+        # (no closure: the default reader runs in THIS scope, so it sees $pccCs and the Manager's own functions)
+        $pccCs = $null
+        if (-not $Read) { $pccCs = Get-PimManagerSettingCs; $Read = { param($settingName) Get-PimSqlSetting -ConnectionString $pccCs -Name $settingName } }
+        $choices = ConvertTo-PimPolicyChoicesStore -Value (& $Read (Get-PimPolicyChoicesSettingName))
+        $adv = & $Read (Get-PimPolicyAdvisoriesSettingName)
+        $nWait = 0; $nReview = 0
+        foreach ($t in @(Get-PimPolicyChoiceTypes)) {
+            foreach ($fd in @(Get-PimPolicyFieldsForType -Type $t)) {
+                $res = Resolve-PimPolicyChoice -Store $choices -Type $t -FieldId $fd.id -Advisories $adv
+                if (-not $res.choice) { $nWait++ } elseif ($res.needsReview) { $nReview++ }
+            }
+        }
+        $r.waiting = $nWait; $r.needsReview = $nReview; $r.known = $true
+    } catch { $r.known = $false; $r.waiting = 0; $r.needsReview = 0 }
+    return $r
+}
 function Get-PimManagerAttentionSources {
-    $src = [ordered]@{ policyHolds = @(); approvals = @(); offboardApproved = @(); rfa = @(); guardHolds = @(); guardReleases = @(); secondApprover = $null; workloadHolds = @(); errors = @() }
+    $src = [ordered]@{ policyHolds = @(); approvals = @(); offboardApproved = @(); rfa = @(); guardHolds = @(); guardReleases = @(); secondApprover = $null; workloadHolds = @(); policyChoices = $null; errors = @() }
     $errs = New-Object System.Collections.Generic.List[string]
     $toInt = { param($v) $n = 0; [void][int]::TryParse("$v", [ref]$n); $n }
     # 1. the policy mass-change holds -- the engine lib in an ISOLATED child scope (BUG-261: the module copy cannot see the
@@ -7977,6 +8034,14 @@ function Get-PimManagerAttentionSources {
             }
         }
     } catch { $errs.Add("workload prerequisites: $($_.Exception.Message)") }
+    # 7. PIM 100.93: policy settings that wait for the customer's choice, or are asked again after new advice. NOT blocking:
+    #    nothing is held and nothing fails while a setting waits -- the engine simply leaves that setting alone.
+    try {
+        if (Get-Command Get-PimManagerPolicyChoiceCounts -ErrorAction SilentlyContinue) {
+            $pcc = Get-PimManagerPolicyChoiceCounts
+            if ($pcc -and $pcc.known) { $src.policyChoices = [pscustomobject]@{ waiting = (& $toInt $pcc.waiting); needsReview = (& $toInt $pcc.needsReview) } }
+        }
+    } catch { $errs.Add("policy choices: $($_.Exception.Message)") }
     $src.errors = @($errs.ToArray())
     return [pscustomobject]$src
 }
@@ -8070,7 +8135,23 @@ function Get-PimManagerAttention {
             text = ("{0} held: the prerequisites of {1} are not green, so {2} wait (run Initialize-PimWorkloadPrereqs.ps1)" -f (& $plural $wh.Count 'workload assignment area' 'workload assignment areas'), ((@($wh | ForEach-Object { "$($_.workload) ($($_.state))" })) -join ', '), (& $plural $rows 'assignment' 'assignments'))
             canAct = $isSuper; who = 'the person who runs the prerequisite script for that workload (a SuperAdmin / the platform operator)' })
     }
-    $total = 0; foreach ($i in $items) { $total += [int]$i.count }
+    # PIM 100.93 (lane policy-page): two NON-BLOCKING lines (blocking = $false, amber). A setting that waits for a choice
+    # holds nothing and breaks nothing, so it is never part of the red menu count or of `total` -- Overview lists it under
+    # "What needs your attention" with a link to Templates > Policy settings.
+    $pc = $s.policyChoices
+    if ($pc) {
+        if ([int]$pc.waiting -gt 0) {
+            $items.Add([ordered]@{ id = 'policy-choices-waiting'; tab = 'policysettings'; count = [int]$pc.waiting; blocking = $false; sev = 'amber'
+                text = ("{0} for your choice -- PIM Manager changes no policy setting until you choose" -f (& $plural ([int]$pc.waiting) 'policy setting waits' 'policy settings wait'))
+                canAct = $isSuper; who = 'a SuperAdmin chooses (Templates > Policy settings)' })
+        }
+        if ([int]$pc.needsReview -gt 0) {
+            $items.Add([ordered]@{ id = 'policy-choices-review'; tab = 'policysettings'; count = [int]$pc.needsReview; blocking = $false; sev = 'amber'
+                text = ("{0} new advice -- please choose again; nothing is changed for it until you do" -f (& $plural ([int]$pc.needsReview) 'policy setting has' 'policy settings have'))
+                canAct = $isSuper; who = 'a SuperAdmin chooses (Templates > Policy settings)' })
+        }
+    }
+    $total = 0; foreach ($i in $items) { if ($i.Contains('blocking') -and -not $i.blocking) { continue }; $total += [int]$i.count }
     return [ordered]@{ generatedUtc = $now.ToString('o'); total = $total; items = @($items.ToArray()); errors = @($errs.ToArray()) }
 }
 
@@ -11871,7 +11952,11 @@ function Handle-Request {
             $script:lastHeartbeat = Get-Date
             try {
                 $gsRaw = Get-PimManagerSetting -Name 'GetStartedConfirmations'
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ confirmations = $(if ($gsRaw) { $gsRaw } else { [ordered]@{} }); confirmable = @($script:PimGetStartedConfirmSteps) })
+                # PIM 100.93: the Policies step is done when no policy setting waits for a choice -- a fact every role may
+                # read here (the value view itself is Admin+). known = false: the count could not be read (never "0 waiting").
+                $gsPc = [ordered]@{ known = $false; waiting = 0; needsReview = 0 }
+                try { if (Get-Command Get-PimManagerPolicyChoiceCounts -ErrorAction SilentlyContinue) { $gsPc = Get-PimManagerPolicyChoiceCounts } } catch { }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ confirmations = $(if ($gsRaw) { $gsRaw } else { [ordered]@{} }); confirmable = @($script:PimGetStartedConfirmSteps); policyChoices = $gsPc })
                 return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the Get Started confirmations could not be read: $($_.Exception.Message)" }
@@ -14770,6 +14855,68 @@ function Handle-Request {
             $script:lastHeartbeat = Get-Date
             try {
                 Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerPolicyTemplatesPage)
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
+
+        # -------------------------------------------------------------------
+        # PIM 100.93 (owner 2026-10-12: "we will newer force a policy chg on a customer ... customer must choose per setting
+        # and select use ms default, use recommendation, keep current ... it must still be approved as guard") -- the POLICY
+        # CHOICES (engine\_shared\PIM-PolicyChoices.ps1). Thin routes over the library; the page is built on them.
+        #   (Microsoft default = the SHIPPED table, the same in every tenant; this tenant's untouched policies are a cross-check
+        #    that is shown next to it and never changes what is written.)
+        #   GET /api/policy-choices   (Admin+)      the value view: per policy type and setting the Microsoft default, the PIM
+        #                                           Manager recommendation, the current values (as the last policy run read
+        #                                           them), the choice that stands, "asked again", what each choice would change
+        #   PUT /api/policy-choices   (SuperAdmin)  { choices: [ { type, field, choice, objectKey? } ] } -- choice = microsoft |
+        #                                           recommendation | keep | none (take the choice back). Saves pim.Settings
+        #                                           'PolicyChoices', audited per choice in plain words. NOTHING is written to
+        #                                           the tenant here: the next policy run plans the change and HOLDS it until a
+        #                                           SuperAdmin approves it (the same person may approve -- a second step).
+        if ($path -eq '/api/policy-choices' -and ($method -eq 'GET' -or $method -eq 'PUT')) {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Get-Command Get-PimPolicyChoicesView -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = 'The policy choices library is not part of this installation.' }; return 500 }
+            $pcWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
+            if ($method -eq 'GET' -and -not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to read the policy settings.' }; return 403 }
+            if ($method -eq 'PUT' -and -not $pcWrite) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to choose a policy setting.' }; return 403 }
+            try {
+                $pcState = Get-PimManagerPolicyChoiceState
+                $pcSaved = $null
+                if ($method -eq 'PUT') {
+                    $pb = Read-RequestJson -Request $req
+                    $pcItems = @($(if ($pb -and $pb.PSObject.Properties['choices']) { $pb.choices } else { @() }) | Where-Object { $null -ne $_ })
+                    $pcCs = Get-PimManagerSettingCs
+                    $pcBy = Get-PimManagerActorName
+                    $pcSaved = Set-PimPolicyChoices -Items $pcItems -By $pcBy -Advisories $pcState.advisories -Defaults $pcState.defaults -Snapshots $pcState.snapshots `
+                        -Read { Get-PimSqlSetting -ConnectionString $pcCs -Name (Get-PimPolicyChoicesSettingName) } `
+                        -Write { param($v) Set-PimSqlSetting -ConnectionString $pcCs -Name (Get-PimPolicyChoicesSettingName) -ValueJson (ConvertTo-Json -InputObject $v -Depth 8 -Compress) }
+                    if (-not $pcSaved.ok) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = ((@($pcSaved.errors) -join ' ')); errors = @($pcSaved.errors) }; return 400 }
+                    foreach ($sv in @($pcSaved.saved)) {
+                        try {
+                            Write-PimManagerAuditEvent -Action 'policy.choice.save' -Target ("policychoice:{0}/{1}{2}" -f $sv.type, $sv.field, $(if ("$($sv.objectKey)") { "/$($sv.objectKey)" } else { '' })) -Result 'ok' `
+                                -Before ([ordered]@{ choice = "$($sv.before)" }) -After ([ordered]@{ choice = "$($sv.choice)"; advisory = [int]$sv.advisory; text = "$($sv.text)"; policiesThatWouldChange = [int]$sv.wouldChange.count })
+                        } catch { Write-Warning "  [manager] policy choice saved but NOT written to the audit trail: $($_.Exception.Message)" }
+                    }
+                    $pcState = Get-PimManagerPolicyChoiceState
+                }
+                $pcView = Get-PimPolicyChoicesView -Choices $pcState.choices -Advisories $pcState.advisories -Defaults $pcState.defaults -Snapshots $pcState.snapshots -TenantRead $pcState.tenantRead
+                $pcView['ok'] = $true; $pcView['canWrite'] = $pcWrite
+                # ONE truth for what waits for approval (PIM 100.84): the same hold state every other page reads.
+                $pcHold = $null; try { $pcHold = Get-PimManagerPolicyHoldState -Fresh } catch { $pcHold = $null }
+                $pcView['holds'] = $(if ($pcHold) { [ordered]@{ known = [bool]$pcHold.known; waiting = [int]$pcHold.waiting; policies = [int]$pcHold.policies; holds = @($pcHold.holds) } } else { [ordered]@{ known = $false; waiting = 0; policies = 0; holds = @() } })
+                if ($pcSaved) {
+                    $pcN = [int]$pcSaved.changes
+                    $pcView['saved'] = @($pcSaved.saved)
+                    $pcView['approval'] = [ordered]@{
+                        needed = [bool]($pcN -gt 0); policies = $pcN
+                        text = $(if ($pcN -gt 0) { "Saved. Nothing has changed in your tenant yet: $pcN polic$(if ($pcN -eq 1) { 'y' } else { 'ies' }) would change, and the change waits for a SuperAdmin to approve it on Reviews & controls > Approvals after the next policy run (within 30 minutes) has planned it." }
+                                 else { 'Saved. As far as the last policy run read your tenant, this changes no policy. If a later run finds a change, it waits for a SuperAdmin to approve it.' })
+                    }
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body $pcView
                 return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }
