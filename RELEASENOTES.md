@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.614 -- 2026-10-13
+
+- An assignment to a group that is retired or not defined is refused when you commit it, with the row and the two ways out, and a group cannot be retired or removed while assignments still name it; the Power BI prerequisite names the group and the one identity that must be in it and checks the membership itself; a workload PIM Manager could not read is never counted as ready
+
 ## 2.4.613 -- 2026-10-12
 
 - Status reports say who has to act and how to solve it: every report carries an outcome (ok, warning, held, failed) and who acts, a configuration problem carries its solution in plain steps, the status report goes every hour with the setup checks and the role of the installation, and every update run is reported

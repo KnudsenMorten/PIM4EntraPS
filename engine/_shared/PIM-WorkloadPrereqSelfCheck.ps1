@@ -88,10 +88,16 @@ function Get-PimWorkloadPrereqSelfCheckIdentity {
     if (-not $claims -or -not "$($claims.oid)".Trim()) { throw 'the engine''s Graph token could not be read (no object id) -- nothing was checked' }
     $oid = "$($claims.oid)".Trim().ToLowerInvariant()
     $sp = $null
-    try { $sp = Invoke-PimGraph -Path "/servicePrincipals/$oid`?`$select=id,appId,displayName,servicePrincipalType" } catch { $sp = $null }
+    try { $sp = Invoke-PimGraph -Path "/servicePrincipals/$oid`?`$select=id,appId,displayName,servicePrincipalType,alternativeNames" } catch { $sp = $null }
     $kind = if ($sp -and "$($sp.servicePrincipalType)" -ieq 'ManagedIdentity') { 'managedIdentity' } elseif ($sp) { 'application' } elseif ("$($claims.xms_mirid)".Trim()) { 'managedIdentity' } else { 'application' }
+    # PIM 100.108 (d): this token's identity IS the one every call of this process is made as, the Power BI call included
+    # (PIM-Rest asks for the identity PIM_ManagedIdentityClientId names, else the system-assigned one) -- so it is the ONE
+    # identity the Power BI group needs. identityKind says which of the job's identities it is.
+    $miCid = if ("$($global:PIM_ManagedIdentityClientId)".Trim()) { "$($global:PIM_ManagedIdentityClientId)".Trim() } else { "$($env:PIM_ManagedIdentityClientId)".Trim() }
+    $fallbackKind = if ($kind -ne 'managedIdentity') { 'application' } elseif ($miCid) { 'user-assigned' } else { 'system-assigned' }
+    $identityKind = if ($sp -and (Get-Command Get-PimPrereqIdentityKind -ErrorAction SilentlyContinue)) { Get-PimPrereqIdentityKind -ServicePrincipal $sp -Fallback $fallbackKind } else { $fallbackKind }
     $engine = @{ objectId = $oid; appId = $(if ($sp -and "$($sp.appId)") { "$($sp.appId)" } else { "$($claims.appid)" })
-                 displayName = $(if ($sp -and "$($sp.displayName)") { "$($sp.displayName)" } else { 'PIM engine' }); kind = $kind }
+                 displayName = $(if ($sp -and "$($sp.displayName)") { "$($sp.displayName)" } else { 'PIM engine' }); kind = $kind; identityKind = $identityKind }
     return [pscustomobject]@{ claims = $claims; engine = $engine; tenantId = "$($claims.tid)".Trim().ToLowerInvariant(); tokenRoles = @($claims.roles | Where-Object { "$_".Trim() }) }
 }
 

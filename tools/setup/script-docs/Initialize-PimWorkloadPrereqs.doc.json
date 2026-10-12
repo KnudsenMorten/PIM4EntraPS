@@ -156,7 +156,7 @@
     { "name": "TenantId", "required": true, "default": null, "help": "Your tenant id; every sign-in and token is checked against it." },
     { "name": "SubscriptionId", "required": false, "default": null, "help": "The hosting subscription (finds the engine identity from the tick job; holds the dedicated Sentinel workspace)." },
     { "name": "ResourceGroup", "required": false, "default": null, "help": "The hosting resource group." },
-    { "name": "TickJobName", "required": false, "default": "ca-pim-tick", "help": "The engine's job (its identity is the engine identity when -EngineObjectId is not given)." },
+    { "name": "TickJobName", "required": false, "default": "ca-pim-tick", "help": "The engine's job. When -EngineObjectId is not given, the engine identity is the identity this job signs in as: the user-assigned one its PIM_ManagedIdentityClientId names, else its system-assigned one." },
     { "name": "SqlServerFqdn", "required": false, "default": null, "help": "The environment's store; without it (or access to it) the result is not recorded here." },
     { "name": "SqlDatabase", "required": false, "default": "PimPlatform", "help": "The store's database." },
     { "name": "ClientId", "required": false, "default": null, "help": "Automation from the repository only: a certificate identity (with -CertThumbprint). Never shown by PIM Manager." },
@@ -178,7 +178,7 @@
     "the engine identity and its application permissions; Microsoft Graph's and the Power BI Service's service principals",
     "Defender Unified RBAC role definitions and the permission catalog; the Log Analytics workspaces (Azure Resource Graph) and their Sentinel state",
     "Intune role definitions; the tenant's licences (AAD_PREMIUM_P2)",
-    "the Power BI admin-API group and its members; the Fabric tenant settings",
+    "the Power BI admin-API group and the groups the engine identity is a member of (its own group list); the Fabric tenant settings",
     "the engine's Azure role assignments at each scope; the delegation rows in the store (AzureRbac)",
     "the stored result in pim.Settings 'WorkloadPrereqs' (to merge)"
   ],

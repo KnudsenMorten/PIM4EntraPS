@@ -194,6 +194,9 @@ Note "caller: $ranBy"
 
 $engine = Resolve-PimPrereqEngineIdentity -EngineObjectId $EngineObjectId -EngineAppId $EngineAppId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -TickJobName $TickJobName
 Note "engine identity: $($engine.displayName) ($($engine.objectId), $($engine.kind))"
+# PIM 100.108 (d): a tick job can carry two identities; the engine signs in as ONE of them (Power BI included). Say which.
+if ("$($engine.why)".Trim()) { Note "   this is the identity the engine signs in as: $(Get-PimPowerBiPrereqIdentityText -Identity $engine) -- $($engine.why)" }
+if (@($engine.notUsed | Where-Object { $_ }).Count) { Note "   the tick job also carries $(@($engine.notUsed | Where-Object { $_ }) -join ', ') -- the engine does not sign in as it, so it needs no group membership" }
 
 $roleMap = @{}; $roleNames = @()
 if (Get-Command Get-PimGraphAppRoleMap -ErrorAction SilentlyContinue) { $roleMap = Get-PimGraphAppRoleMap -RoleSet Engine; $roleNames = @(Get-PimEngineSpnGraphRoles) }
@@ -226,6 +229,12 @@ foreach ($c in $checks) {
     if ($c.detail) { Note "   $($c.detail)" }
     if ($c.manualStep) { Write-Host "      TO DO: $($c.manualStep)" -ForegroundColor Yellow; Write-Host "      Learn: $($c.learn)" -ForegroundColor DarkYellow }
 }
+# PIM 100.108 (d): a change Graph REFUSED (HTTP 403) is never left as a bare failure -- the exact step to do by hand, once more.
+$refusedChecks = @($checks | Where-Object { $_ -and $_.PSObject.Properties['refused'] -and -not $_.ok })
+if ($refusedChecks.Count) {
+    Write-Host '  Graph refused a change for the identity signed in here (HTTP 403). Do this yourself, then press Check again in PIM Manager:' -ForegroundColor Yellow
+    foreach ($c in $refusedChecks) { Write-Host "      $($c.manualStep)" -ForegroundColor Yellow }
+}
 $stateCol = switch ($result.state) { 'ok' { 'Green' } 'failed' { 'Red' } default { 'Yellow' } }
 Write-Host "  => $Workload prerequisites: $($result.state.ToUpperInvariant())" -ForegroundColor $stateCol
 
@@ -249,7 +258,7 @@ if ($cs -and $PSCmdlet.ShouldProcess("pim.Settings WorkloadPrereqs", "record the
         if (-not $bw -or "$($bw.state)" -ne $mergedRec.state -or $backRan -ne $mergedRec.ranUtc) { throw "read-back FAILED: pim.Settings WorkloadPrereqs.$Workload is '$($bw.state)' @ '$backRan', expected '$($mergedRec.state)' @ '$($mergedRec.ranUtc)'." }
         Write-PimSetupAudit -ConnectionString $cs -Action 'settings.workloadprereqs.record' -Target "WorkloadPrereqs:$Workload" -Before $before -After @{ state = $mergedRec.state; ranUtc = $mergedRec.ranUtc; failed = @($mergedRec.failed); pending = @($mergedRec.pending) }
         $recorded = $true
-        Note 'recorded in pim.Settings WorkloadPrereqs (merged) and read back -- the Manager shows it on the template cards and Coverage & gaps.'
+        Note 'recorded in pim.Settings WorkloadPrereqs (merged) and read back -- the Manager shows it on the template cards and Discovery and gaps.'
         if ($mergedRec.state -ne $result.state) { Note "recorded state: $($mergedRec.state) (kept from earlier: confirmations / results this run could not decide)" }
         $result = $mergedRec
     } catch {

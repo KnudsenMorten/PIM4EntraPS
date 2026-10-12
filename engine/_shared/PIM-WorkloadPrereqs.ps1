@@ -143,11 +143,11 @@ function Get-PimWorkloadPrereqCatalog {
     $c['PowerBI'] = @{ workload = 'PowerBI'; title = 'Power BI / Fabric (workspace roles)'; checks = @(
         @{ id = 'powerbi.group'; name = 'The security group for Fabric admin-API access exists'; kind = 'api'; required = $true; fixable = $true
            fix = 'creates the security group through Graph (securityEnabled, not mail-enabled) and reads it back'
-           manualStep = 'Microsoft Entra admin center > Groups > New group > Security.'
+           manualStep = 'Microsoft Entra admin center > Groups > New group > Group type: Security > Group name: grp-pim-powerbi-admin-api (the name PIM looks for) > Members: the engine identity > Create. PIM Manager names the group and the identity, with its object id, on this prerequisite once it has checked.'
            learn = $L.fabricSpAdmin }
         @{ id = 'powerbi.groupMember'; name = 'The engine identity is a member of that group'; kind = 'api'; required = $true; fixable = $true
            fix = 'adds the engine identity to the group through Graph and reads the membership back'
-           manualStep = 'Microsoft Entra admin center > Groups > <group> > Members > Add members > the engine identity.'
+           manualStep = 'Microsoft Entra admin center > Groups > grp-pim-powerbi-admin-api > Members > Add members > the engine identity (search for its object id). PIM Manager names the group and the identity, with its object id, on this prerequisite once it has checked.'
            learn = $L.fabricSpAdmin }
         @{ id = 'powerbi.noAdminConsent'; name = 'The engine identity holds NO admin-consent Power BI application permission'; kind = 'api'; required = $true; fixable = $false
            fix = ''
@@ -157,9 +157,12 @@ function Get-PimWorkloadPrereqCatalog {
            fix = 'enables the setting through the Fabric admin API (POST /v1/admin/tenantsettings/{name}/update), KEEPING every security group already listed and adding this one, then reads it back. Only possible when the caller may call Fabric admin APIs (a Fabric administrator, or a service principal an admin-API setting already allows).'
            manualStep = 'Fabric admin portal (app.fabric.microsoft.com) > Settings > Admin portal > Tenant settings > Admin API settings > "Service principals can access read-only admin APIs" > Enabled > Specific security groups > add the group > Apply. Needs a Fabric administrator. If PIM cannot read the tenant settings itself, press Confirm on this prerequisite in PIM Manager once the setting is on.'
            learn = $L.fabricSpAdmin }
-        @{ id = 'powerbi.adminApi'; name = 'The engine identity gets 200 from the Power BI admin API (GET admin/groups)'; kind = 'api'; required = $false; fixable = $false
+        # PIM 100.108: the CONFIRMATION of the workload (confirmation = $true). It never decides the stored state (required
+        # stays $false -- the assignment gate is unchanged), but Get-PimWorkloadPrereqView counts Power BI as READY only
+        # when this call answered 200 as the engine: a person's Confirm on the tenant setting does not make it ready.
+        @{ id = 'powerbi.adminApi'; name = 'The engine identity gets 200 from the Power BI admin API (GET admin/groups)'; kind = 'api'; required = $false; fixable = $false; confirmation = $true
            fix = ''
-           manualStep = 'A confirmation, not a prerequisite: PIM''s own daily self-check calls it as the engine. A tenant-setting change can take a while to apply; press Check again later if it still answers 401.'
+           manualStep = 'Nothing to do here by itself: PIM''s own daily check calls the Power BI admin API as the engine identity, and Power BI is counted as ready only when that call answers 200. If it answers 401 or 403: the engine identity must be a member of the security group, and the Fabric tenant setting must be on for that group (the two prerequisites above). A tenant-setting change can take 15 minutes to apply; then press Check again.'
            learn = $L.fabricSpAdmin }
     ) }
     $c['AzureRbac'] = @{ workload = 'AzureRbac'; title = 'Azure RBAC (resource roles)'; checks = @(
@@ -372,9 +375,13 @@ function New-PimWorkloadPrereqCheck {
           [string]$By = '', [string]$CheckedUtc = '',
           # §97.1: machine-readable facts for the fix command (missingRoles = Graph roles the engine lacks;
           # missingScopes = Azure scopes without User Access Administrator; groupName = the Power BI admin-API group).
-          [hashtable]$Data = @{})
+          [hashtable]$Data = @{},
+          # PIM 100.108: the step for THIS tenant (the group and the identity by name and object id) in place of the
+          # catalog's general one. '' = the catalog's.
+          [string]$ManualStep = '')
     $d = Get-PimWorkloadPrereqCheckDef -Id $Id
     if (-not $d) { throw "New-PimWorkloadPrereqCheck: '$Id' is not in the prerequisite catalog." }
+    $stepText = if ("$ManualStep".Trim()) { "$ManualStep".Trim() } else { "$($d.manualStep)" }
     $req = $true; if ($d.ContainsKey('required')) { $req = [bool]$d.required }
     $o = [ordered]@{
         id         = $Id
@@ -384,7 +391,7 @@ function New-PimWorkloadPrereqCheck {
         required   = $req
         detail     = "$Detail"
         fixable    = [bool]$d.fixable
-        manualStep = $(if ($Status -in @('ok', 'fixed', 'skipped')) { '' } else { "$($d.manualStep)" })
+        manualStep = $(if ($Status -in @('ok', 'fixed', 'skipped')) { '' } else { $stepText })
         learn      = "$($d.learn)"
     }
     if ("$By".Trim()) { $o['by'] = "$By".Trim() }
@@ -611,6 +618,140 @@ function Test-PimPowerBiAdminConsentGrants {
         $n = $RoleNames["$($_.appRoleId)"]; if ($n) { $n } else { "$($_.appRoleId)" } })
     if ($held.Count) { return @{ ok = $false; held = $held; detail = "holds Power BI Service application permission(s): $($held -join ', ')" } }
     return @{ ok = $true; held = @(); detail = 'no Power BI Service application permission' }
+}
+
+# --- PIM 100.108: Power BI -- WHICH identity, WHICH group, and the step that names both ---------------------------------
+function Get-PimPrereqIdentityKind {
+    <#
+      PURE. What kind of identity a service principal is: 'application' | 'user-assigned' | 'system-assigned' |
+      'managedIdentity' (a managed identity Graph did not say the kind of). Graph marks a managed identity's kind in
+      alternativeNames: 'isExplicit=True' = user-assigned, 'isExplicit=False' = system-assigned. -Fallback is used when
+      that mark is absent (the engine knows its own kind from PIM_ManagedIdentityClientId).
+    #>
+    param([object]$ServicePrincipal, [string]$Fallback = '')
+    if (-not $ServicePrincipal) { return "$Fallback" }
+    $type = "$(Get-PimWorkloadPrereqRecordField -Object $ServicePrincipal -Name 'servicePrincipalType')"
+    if ($type -and $type -ine 'ManagedIdentity') { return 'application' }
+    $alt = @(@(Get-PimWorkloadPrereqRecordField -Object $ServicePrincipal -Name 'alternativeNames') | ForEach-Object { "$_".Trim() })
+    if (@($alt | Where-Object { $_ -ieq 'isExplicit=True' }).Count) { return 'user-assigned' }
+    if (@($alt | Where-Object { $_ -ieq 'isExplicit=False' }).Count) { return 'system-assigned' }
+    if ("$Fallback".Trim()) { return "$Fallback".Trim() }
+    if ($type) { return 'managedIdentity' }
+    return ''
+}
+
+function Select-PimPrereqTickJobIdentity {
+    <#
+      PURE. PIM 100.108 (d): WHICH identity of the hosted tick job the engine signs in as -- for Graph and for the Power
+      BI call alike (engine\_shared\PIM-Rest.ps1 asks the token endpoint for the identity PIM_ManagedIdentityClientId
+      names, else for the job's system-assigned one). -Job = ARM Microsoft.App/jobs/{name}.
+        * the job's env PIM_ManagedIdentityClientId is set -> the USER-ASSIGNED identity with that client id;
+        * else the SYSTEM-ASSIGNED identity; else, when the job has exactly one user-assigned identity, that one.
+      Returns @{ objectId; clientId; identityKind; why; notUsed = @(object ids of the job's other identities) }.
+      THROWS when the job names an identity it does not carry, or has none.
+    #>
+    param([Parameter(Mandatory)][object]$Job, [string]$JobName = 'ca-pim-tick')
+    $cid = ''
+    $tpl = $null
+    if ($Job.PSObject.Properties['properties'] -and $Job.properties -and $Job.properties.PSObject.Properties['template']) { $tpl = $Job.properties.template }
+    if ($tpl) {
+        foreach ($c in @($tpl.containers)) {
+            if (-not $c) { continue }
+            foreach ($e in @($c.env)) { if ($e -and "$($e.name)" -eq 'PIM_ManagedIdentityClientId' -and "$($e.value)".Trim()) { $cid = "$($e.value)".Trim().ToLowerInvariant() } }
+        }
+    }
+    $idn = $null; if ($Job.PSObject.Properties['identity']) { $idn = $Job.identity }
+    $sys = ''; if ($idn -and $idn.PSObject.Properties['principalId']) { $sys = "$($idn.principalId)".Trim().ToLowerInvariant() }
+    $ua = New-Object System.Collections.Generic.List[object]
+    if ($idn -and $idn.PSObject.Properties['userAssignedIdentities'] -and $idn.userAssignedIdentities) {
+        foreach ($p in $idn.userAssignedIdentities.PSObject.Properties) {
+            $ua.Add(@{ resourceId = "$($p.Name)"; objectId = "$($p.Value.principalId)".Trim().ToLowerInvariant(); clientId = "$($p.Value.clientId)".Trim().ToLowerInvariant() })
+        }
+    }
+    $pick = $null
+    if ($cid) {
+        $hit = @($ua | Where-Object { $_.clientId -eq $cid })[0]
+        if (-not $hit -or -not $hit.objectId) { throw "the tick job '$JobName' names the user-assigned identity with client id $cid (PIM_ManagedIdentityClientId), but that identity is not attached to the job." }
+        $pick = @{ objectId = $hit.objectId; clientId = $cid; identityKind = 'user-assigned'; why = "the tick job's PIM_ManagedIdentityClientId names it" }
+    } elseif ($sys) {
+        $pick = @{ objectId = $sys; clientId = ''; identityKind = 'system-assigned'; why = 'the tick job names no user-assigned identity, so it signs in as its system-assigned one' }
+    } elseif ($ua.Count -eq 1 -and $ua[0].objectId) {
+        $pick = @{ objectId = $ua[0].objectId; clientId = $ua[0].clientId; identityKind = 'user-assigned'; why = 'it is the only identity the tick job has' }
+    } else {
+        throw "the tick job '$JobName' has no identity the engine can sign in as -- run the hosting step first."
+    }
+    $others = @(@(@($sys) + @($ua | ForEach-Object { $_.objectId })) | Where-Object { $_ -and $_ -ne $pick.objectId } | Select-Object -Unique)
+    $pick['notUsed'] = @($others)
+    return $pick
+}
+
+function Get-PimPowerBiPrereqIdentityText {
+    # PURE. The engine identity as a person must find it: "<name> (object id <id>, <kind>)".
+    param([object]$Identity)
+    $name = "$(Get-PimWorkloadPrereqRecordField -Object $Identity -Name 'displayName')".Trim(); if (-not $name) { $name = 'the engine identity' }
+    $oid = "$(Get-PimWorkloadPrereqRecordField -Object $Identity -Name 'objectId')".Trim()
+    $k = "$(Get-PimWorkloadPrereqRecordField -Object $Identity -Name 'identityKind')".Trim()
+    if (-not $k) { $k = "$(Get-PimWorkloadPrereqRecordField -Object $Identity -Name 'kind')".Trim() }
+    $kind = switch ($k) {
+        'user-assigned'   { 'user-assigned managed identity' }
+        'system-assigned' { 'system-assigned managed identity' }
+        'managedIdentity' { 'managed identity' }
+        'application'     { 'application' }
+        default           { '' }
+    }
+    $in = New-Object System.Collections.Generic.List[string]
+    if ($oid) { $in.Add("object id $oid") }
+    if ($kind) { $in.Add("$kind") }
+    if ($in.Count) { return "$name ($($in -join ', '))" }
+    return $name
+}
+
+function Get-PimPowerBiPrereqSteps {
+    <#
+      PURE. PIM 100.108 (a): the steps of the three Power BI prerequisites for THIS tenant -- the security group by name
+      (and object id once it exists) and the ONE identity that must be in it, by name, object id and kind. "Add the
+      group" without saying which group, or which member, is what this replaces.
+      Returns @{ group; groupMember; tenantSetting; addYourself (the exact manual step after a refusal); who; groupText }.
+    #>
+    param([string]$GroupName = '', [string]$GroupId = '', [object]$Identity = $null)
+    $g = "$GroupName".Trim(); if (-not $g) { $g = 'grp-pim-powerbi-admin-api' }
+    $gid = "$GroupId".Trim()
+    $gq = "'$g'"; if ($gid) { $gq = "'$g' (object id $gid)" }
+    $who = Get-PimPowerBiPrereqIdentityText -Identity $Identity
+    $oid = "$(Get-PimWorkloadPrereqRecordField -Object $Identity -Name 'objectId')".Trim()
+    $find = if ($oid) { "search for the object id $oid" } else { 'search for the engine identity' }
+    return @{
+        who = $who; groupText = $gq
+        group = "Microsoft Entra admin center > Groups > New group > Group type: Security > Group name: $g > Members: $who > Create. This is the only member the group needs: it is the identity PIM uses for the Power BI call."
+        groupMember = "Microsoft Entra admin center > Groups > $gq > Members > Add members > $find > select $who > Select. This is the only member the group needs: it is the identity PIM uses for the Power BI call."
+        tenantSetting = "Fabric admin portal (app.fabric.microsoft.com) > Settings > Admin portal > Tenant settings > Admin API settings > ""Service principals can access read-only admin APIs"" > Enabled > Specific security groups > add the group $gq > Apply. The group must contain $who. Needs a Fabric administrator. If PIM cannot read the tenant settings itself, press Confirm on this prerequisite in PIM Manager once the setting is on."
+        addYourself = "Add these members to this group yourself: group $gq <- $who."
+    }
+}
+
+function Get-PimPowerBiPrereqFacts {
+    <#
+      PURE. What a stored Power BI record says about the group and the identity (for the view: a record written before
+      100.108, or a check re-created by Confirm / Withdraw, carries only the general step).
+      Returns @{ groupName; groupId; identity = @{ displayName; objectId; identityKind } }.
+    #>
+    param([object]$Record)
+    $gn = ''; $gid = ''; $idn = $null
+    foreach ($c in @(Get-PimWorkloadPrereqRecordField -Object $Record -Name 'checks')) {
+        if (-not $c -or "$($c.id)" -notin @('powerbi.group', 'powerbi.groupMember')) { continue }
+        $x = "$(Get-PimWorkloadPrereqRecordField -Object $c -Name 'groupName')".Trim(); if ($x -and -not $gn) { $gn = $x }
+        $x = "$(Get-PimWorkloadPrereqRecordField -Object $c -Name 'groupId')".Trim(); if ($x -and -not $gid) { $gid = $x }
+        if ("$($c.id)" -eq 'powerbi.group' -and "$($c.detail)" -match "^(created )?'([^']+)' \(([0-9a-fA-F-]{36})\)") { if (-not $gn) { $gn = $Matches[2] }; if (-not $gid) { $gid = $Matches[3] } }
+        $m = @(Get-PimWorkloadPrereqRecordField -Object $c -Name 'members' | Where-Object { $_ })[0]
+        if ($m -and -not $idn) { $idn = @{ displayName = "$(Get-PimWorkloadPrereqRecordField -Object $m -Name 'displayName')"; objectId = "$(Get-PimWorkloadPrereqRecordField -Object $m -Name 'objectId')"; identityKind = "$(Get-PimWorkloadPrereqRecordField -Object $m -Name 'identityKind')" } }
+    }
+    if (-not $idn) {
+        $oid = "$(Get-PimWorkloadPrereqRecordField -Object $Record -Name 'engineObjectId')".Trim(); $name = ''
+        $ei = "$(Get-PimWorkloadPrereqRecordField -Object $Record -Name 'engineIdentity')"
+        if ($ei -match '^(.*?)\s*\(([0-9a-fA-F-]{36})\)\s*$') { $name = $Matches[1].Trim(); if (-not $oid) { $oid = $Matches[2] } }
+        $idn = @{ displayName = $name; objectId = $oid; identityKind = '' }
+    }
+    return @{ groupName = $gn; groupId = $gid; identity = $idn }
 }
 
 function Merge-PimWorkloadPrereqsSetting {
@@ -938,8 +1079,13 @@ function Get-PimWorkloadPrereqView {
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($w in (Get-PimWorkloadPrereqWorkloads)) {
         $r = Get-PimWorkloadPrereqStoredRecord -Stored $Stored -Workload $w
+        # PIM 100.108 (e): ready = what the page COUNTS ("N of M workloads ready"). state ok, AND -- for a workload with a
+        # confirmation call (Power BI: the engine gets 200 from the admin API) -- that call answered 200. A person's Confirm
+        # on the tenant setting makes the STATE ok; it never makes the workload ready by itself. notReady says why;
+        # confirmation = @{ id; status; ok; detail } ($null for a workload without one). The state -- and with it the
+        # assignment gate -- is unchanged.
         $v = [ordered]@{ workload = $w; title = $cat[$w].title; command = ''; next = ''; state = 'notRun'; chip = 'amber'; ranUtc = ''; ranBy = ''; selfChecked = $false
-                         ageDays = $null; failed = @(); pending = @(); checks = @(); engineObjectId = '' }
+                         ageDays = $null; failed = @(); pending = @(); checks = @(); engineObjectId = ''; ready = $false; notReady = ''; confirmation = $null }
         if ($r) {
             # 🪤 pwsh 7's ConvertFrom-Json turns an ISO string into a [datetime] (the Manager's read), PS 5.1 leaves it a
             # string (the setup script's read). Take either; never stringify a [datetime] and re-parse it.
@@ -972,6 +1118,31 @@ function Get-PimWorkloadPrereqView {
             $v.chip = $(switch ($st) { 'ok' { 'green' } 'failed' { 'red' } default { 'amber' } })
             $envW = @{}; foreach ($k in @($Env.Keys)) { $envW[$k] = $Env[$k] }
             $v.command = Get-PimWorkloadPrereqFixCommand -Workload $w -Record $r -Env $envW
+            # PIM 100.108 (a): every open Power BI step NAMES the group and the identity (a record from before this, or a
+            # check re-created by Confirm / Withdraw, carries only the general step).
+            if ($w -eq 'PowerBI') {
+                $facts = Get-PimPowerBiPrereqFacts -Record $r
+                $steps = Get-PimPowerBiPrereqSteps -GroupName $facts.groupName -GroupId $facts.groupId -Identity $facts.identity
+                $stepOf = @{ 'powerbi.group' = 'group'; 'powerbi.groupMember' = 'groupMember'; 'powerbi.tenantSetting' = 'tenantSetting' }
+                $v.checks = @(@($v.checks) | ForEach-Object {
+                    $cid = "$($_.id)"
+                    if ($stepOf.ContainsKey($cid) -and -not [bool]$_.ok -and "$($_.status)" -ne 'confirmed') { Copy-PimWorkloadPrereqCheck -Check $_ -Set @{ manualStep = $steps[$stepOf[$cid]] } } else { $_ } })
+            }
+            # PIM 100.108 (e): ready only with the confirmation call answered 200 as the engine.
+            $v.ready = ($st -eq 'ok')
+            $confDef = @(@($cat[$w].checks) | Where-Object { $_.ContainsKey('confirmation') -and $_.confirmation })[0]
+            if ($confDef) {
+                $cc = @(@($v.checks) | Where-Object { "$($_.id)" -eq "$($confDef.id)" })[0]
+                $cs = if ($cc) { "$($cc.status)" } else { 'notChecked' }
+                $cd = if ($cc) { "$($cc.detail)".Trim() } else { '' }
+                $v.confirmation = [ordered]@{ id = "$($confDef.id)"; name = "$($confDef.name)"; status = $cs; ok = ($cs -eq 'ok'); detail = $cd }
+                if ($st -eq 'ok' -and $cs -ne 'ok') {
+                    $v.ready = $false
+                    $v.chip = 'amber'
+                    $v.notReady = if ($cs -eq 'failed') { "PIM's own call did not get through, so this workload is not counted as ready: $(if ($cd) { $cd } else { "$($confDef.name) failed" })" }
+                                  else { "PIM has not confirmed this with its own call yet ($($confDef.name)) -- press Check again. Until then it is not counted as ready." }
+                }
+            }
         }
         $v.next = Get-PimWorkloadPrereqNextStep -State $v.state -Command $v.command -Confirmable @($v.checks | Where-Object { $_.canConfirm }).Count
         $out.Add([pscustomobject]$v)
