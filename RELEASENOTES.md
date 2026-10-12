@@ -13,6 +13,18 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.609 -- 2026-10-12
+
+- Discovery and gaps opens on Status = Gap; Stage and Ignore both count gaps, and one line says how many of the gaps shown are selected and how many groups and roles that creates
+
+## 2.4.608 -- 2026-10-12
+
+- Discovery and gaps opens on Status = Gap; Stage and Ignore both count gaps, and one line says how many of the gaps shown are selected and how many groups and roles that creates
+
+## 2.4.607 -- 2026-10-12
+
+- Discovery and gaps opens on Status = Gap; Stage and Ignore both count gaps, and one line says how many of the gaps shown are selected and how many groups and roles that creates
+
 ## 2.4.606 -- 2026-10-12
 
 - An installation that existed before the Policies step in Get Started gets no reminder mail for that step -- the step stays open on the page; a new installation gets the normal reminder
