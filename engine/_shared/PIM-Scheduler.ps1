@@ -77,6 +77,13 @@ $script:PimTickOnlyJobTypes += 'enrolled-tenants'
 # 'WorkloadPrereqs' (engine/_shared/PIM-WorkloadPrereqSelfCheck.ps1). Read-only towards the tenant. Tick-only: 'Check again' QUEUES it.
 $script:PimJobTypes += 'workload-prereqs'
 $script:PimTickOnlyJobTypes += 'workload-prereqs'
+# PIM 100.93: 'policy-defaults' is the tenant CROSS-CHECK of the shipped Microsoft-default table (templates/policy/
+# microsoft-defaults.json -- what "Microsoft default" means, the same in every tenant). It reads this tenant's untouched
+# policies per policy type and records what they say + matchesShipped in pim.Settings 'MicrosoftPolicyDefaults'; a mismatch
+# is reported and never changes what is written
+# (engine/_shared/PIM-PolicyChoices.ps1). Read-only towards the tenant. Tick-only: Run now QUEUES it.
+$script:PimJobTypes += 'policy-defaults'
+$script:PimTickOnlyJobTypes += 'policy-defaults'
 # AUDIT-1.3 (2026-10-05): 'audit-retention' deletes audit rows older than AuditRetentionMonths (min 13; unset = keep every
 # row, which is the default) through the append-only trigger's one door, and records audit.retention (PIM-AuditRetention.ps1).
 $script:PimJobTypes += 'audit-retention'
@@ -383,6 +390,8 @@ function Get-PimDefaultJobSchedule {
         [pscustomobject]@{ name='enrolled-tenants'; type='enrolled-tenants'; intervalMinutes=1440; enabled=$true }
         # §97.1: daily -- the workload prerequisites, checked by the engine itself (Check again on the prerequisite chips = Run now).
         [pscustomobject]@{ name='workload-prereqs'; type='workload-prereqs'; intervalMinutes=1440; enabled=$true }
+        # PIM 100.93: daily -- checks the shipped Microsoft-default table against this tenant's untouched policies (read-only).
+        [pscustomobject]@{ name='policy-defaults'; type='policy-defaults'; intervalMinutes=1440; enabled=$true }
         [pscustomobject]@{ name='audit-retention'; type='audit-retention'; intervalMinutes=1440; enabled=$true }
         # CONFIG-1.3: daily (SCHED-1: the cadence counts from the job's finish); "Back up now" on Backups & restore runs one on demand.
         [pscustomobject]@{ name='config-backup'; type='config-backup'; intervalMinutes=1440; enabled=$true }
@@ -1415,6 +1424,14 @@ function Initialize-PimDefaultJobHandlers {
         # §95.4: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimInstallKeyJob).
         [pscustomobject]@{ ran=$false; unimplemented=$true
             detail='unimplemented:install-key (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'policy-defaults' -Handler {
+        param($job,$now,$whatIf)
+        # PIM 100.93: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimPolicyDefaultsJob) --
+        # it reads Graph / ARM as the engine, which never runs on the Manager's request loop.
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:policy-defaults (wired by Start-PimScheduler; the Manager only queues it)'
             whatIf=[bool]$whatIf }
     }
     Register-PimJobHandler -Type 'workload-prereqs' -Handler {

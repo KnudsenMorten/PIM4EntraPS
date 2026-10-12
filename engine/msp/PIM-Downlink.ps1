@@ -73,6 +73,12 @@ if ($PSScriptRoot) {
         $__ss = Join-Path $PSScriptRoot '..\_shared\PIM-SqlStore.ps1'
         if (Test-Path -LiteralPath $__ss) { . $__ss }
     }
+    # PIM 100.93: the managing tenant's policy choices (the class 'policies' / capability 'msp-policies'). Loaded the
+    # same lazy way; a tree without the file simply carries no policy choices (the plan and the apply check for it).
+    if (-not (Get-Command Get-PimDownlinkPolicyChoicesPlan -ErrorAction SilentlyContinue)) {
+        $__pm = Join-Path $PSScriptRoot 'PIM-PolicyChoicesMsp.ps1'
+        if (Test-Path -LiteralPath $__pm) { . $__pm }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -1699,6 +1705,10 @@ function New-PimAcceptanceRecord {
     # Which classes actually ran = the ones the downlink carries, minus the ones held. Named
     # explicitly rather than derived at the far end, because "not mentioned" is not an outcome.
     $allClasses = @('msp-admins', 'msp-roles', 'msp-groups')
+    # PIM 100.93: 'msp-policies' is a class of THIS run only when the bundle carried policy choices -- an older managing
+    # tenant's bundle has none, and a class that did not arrive did not "run".
+    $polPlan = Get-PimDownlinkValue -Object $Plan -Key 'policyChoices'
+    if ($null -ne $polPlan -and [bool](Get-PimDownlinkValue -Object $polPlan -Key 'present')) { $allClasses += 'msp-policies' }
     $blockedSet = @($BlockedCapabilities | Where-Object { $_ })
     $heldCaps   = @($blockedSet)   # a class in classHeld is there because the CUSTOMER blocked it
     $ranCaps    = @($allClasses | Where-Object { $heldCaps -notcontains $_ })
@@ -2699,6 +2709,23 @@ function Get-PimDownlinkPlan {
         }
     }
 
+    # 3c) PIM 100.93 -- THE MANAGING TENANT'S POLICY CHOICES (class 'policies', capability 'msp-policies').
+    # Carried in the same signed payload as everything above (key 'policyChoices'), so it is covered by the same
+    # signature, expiry and anti-rollback checks. A bundle WITHOUT the key (an older managing tenant) plans nothing and
+    # the tenant keeps what it holds. A customer who blocked 'msp-policies' gets NO managing-tenant defaults: reported
+    # HELD like the other classes, and the apply empties what was stored from an earlier pull.
+    # 🔒 Only CHOICES are read from it -- never a policy value, a change set or an approval. What a choice changes in
+    # this tenant is planned by this tenant's own engine and held until a SuperAdmin of THIS tenant approves it.
+    $policyPlan = $null
+    if (Get-Command Get-PimDownlinkPolicyChoicesPlan -ErrorAction SilentlyContinue) {
+        $polClass = Test-PimDownlinkClassAllowed -Class 'policies' -BlockedCapabilities $BlockedCapabilities
+        $policyPlan = Get-PimDownlinkPolicyChoicesPlan -Payload $payload -ClassAllowed $polClass `
+                          -ReplicatedGroups $(if ($null -ne $definitionPlan) { @($definitionPlan.create) } else { @() })
+        if ($null -ne $policyPlan -and [bool]$policyPlan.held -and [bool]$policyPlan.present) {
+            $classHeld.Add([ordered]@{ kind = 'policies'; name = "(the managing tenant's policy choices)"; UserName = ''; GroupTag = ''; reason = $polClass.reason }) | Out-Null
+        }
+    }
+
     # 4) resolve the sync-file staging path for this scenario.
     $sync = Resolve-PimDownlinkSyncPath -SyncFileLocation "$($ctx.syncFileLocation)" -TenantId $TenantId -CentralRoot $CentralRoot -LocalRoot $LocalRoot
 
@@ -2759,6 +2786,10 @@ function Get-PimDownlinkPlan {
         }
     }
     if ($notSynced.Count)   { $reason += "; $($notSynced.Count) admin(s) NOT SYNCED -- their row at the managing tenant is not ManagementMode=msp (a managed tenant that still holds them withdraws them only inside its retraction budget)" }
+    # 100.93: said only when the bundle carries them, so a plan for an older managing tenant reads exactly as before.
+    if ($null -ne $policyPlan -and [bool]$policyPlan.present -and -not [bool]$policyPlan.held) {
+        $reason += "; $([int]$policyPlan.settings) policy choice(s) from the managing tenant (defaults only -- this tenant's own choices win, and every change waits for this tenant's SuperAdmin)"
+    }
     if ($classHeld.Count)   { $reason += "; $($classHeld.Count) HELD -- the customer blocked that capability" }
     # IMP-13: named in the reason, because the operator cannot fix this one from our side and the
     # symptom without it (an account recreated on every tick, forever) points nowhere near the cause.
@@ -2791,6 +2822,9 @@ function Get-PimDownlinkPlan {
         # somewhere it should not have been.
         retracts        = $false
         classHeld       = @($classHeld.ToArray())
+        # PIM 100.93: $null = this bundle carries no policy choices and the class is not blocked (nothing to do).
+        # Else @{ present; held; reason; set; groupNames; settings } -- see Get-PimDownlinkPolicyChoicesPlan.
+        policyChoices   = $policyPlan
         # IMP-13. A FIELD, so a caller asserts the property instead of parsing the reason line --
         # the same rule `retracts` established. `adminRecognitionChecked` is the load-bearing half:
         # an EMPTY unrecognisedAdmins list means "none" only when this is $true; when it is $false
@@ -3336,6 +3370,29 @@ function Invoke-PimManagedDownlink {
         Write-Host "[downlink] $(@($plan.assignments).Count) role assignment(s) projected but NOT applied: no -SlaveStoreConnectionString supplied (staged to file only)." -ForegroundColor Yellow
     }
 
+    # 4b) PIM 100.93 -- the managing tenant's POLICY CHOICES become this tenant's DEFAULTS (pim.Settings 'PolicyChoices',
+    #     the managingTenant block only). This tenant's own choices are never touched and always win; a bundle without
+    #     the artifact leaves the block as it is; a blocked class ('msp-policies') empties it.
+    #     🔒 Nothing is written to a policy here and no approval is created: the policy run of THIS tenant plans what a
+    #     choice changes and HOLDS it until a SuperAdmin of THIS tenant approves that change set.
+    $policyApply = $null
+    if ("$SlaveStoreConnectionString".Trim() -and $null -ne $plan.policyChoices) {
+        if (Get-Command Invoke-PimDownlinkPolicyChoicesApply -ErrorAction SilentlyContinue) {
+            try {
+                $policyApply = Invoke-PimDownlinkPolicyChoicesApply -ConnectionString $SlaveStoreConnectionString -PolicyPlan $plan.policyChoices `
+                                   -BundleVersion ([int64]$plan.baselineVersion) -NowUtc $NowUtc -WhatIfMode:$WhatIfMode
+            } catch {
+                $policyApply = [pscustomobject]@{ ok = $false; changed = $false; detail = "the managing tenant's policy choices could NOT be stored: $($_.Exception.Message)" }
+            }
+            Write-Host "[downlink] policy choices: $($policyApply.detail)" -ForegroundColor $(if ($policyApply.ok) { 'Green' } else { 'Red' })
+            foreach ($x in @($policyApply.dropped)) { if ("$x".Trim()) { Write-Host "[downlink]   LEFT OUT $x" -ForegroundColor Yellow } }
+        } else {
+            Write-Host "[downlink] policy choices: this installation has no policy choices library -- the managing tenant's choices are not stored" -ForegroundColor Yellow
+        }
+    } elseif ($null -ne $plan.policyChoices) {
+        Write-Host "[downlink] policy choices from the managing tenant NOT stored: no -SlaveStoreConnectionString supplied." -ForegroundColor Yellow
+    }
+
     # SEC-24 -- RECORD THE APPLIED VERSION as this tenant's new anti-rollback floor (its OWN pim.Settings).
     # Only after a real apply into the store (not WhatIf), and only when no apply step failed: a floor raised
     # over a failed apply would mark a version as applied that is not. Monotonic + read back (Set-PimBaselineApplied).
@@ -3343,7 +3400,7 @@ function Invoke-PimManagedDownlink {
     # this one superseded, and a green run is the one nobody re-reads.
     $floorRecorded = $null
     if (-not $WhatIfMode -and $trustRead -and [int64]$plan.baselineVersion -gt 0) {
-        $applyFailed = @(@($adminApply, $defApply, $assignApply) | Where-Object { $null -ne $_ -and -not [bool]$_.ok })
+        $applyFailed = @(@($adminApply, $defApply, $assignApply, $policyApply) | Where-Object { $null -ne $_ -and -not [bool]$_.ok })
         if ($applyFailed.Count) {
             Write-Host "[downlink] anti-rollback floor NOT advanced: $($applyFailed.Count) apply step(s) failed, so v$($plan.baselineVersion) is not recorded as applied" -ForegroundColor Yellow
         } else {
@@ -3354,7 +3411,7 @@ function Invoke-PimManagedDownlink {
             } catch {
                 $msg = "APPLIED, but the anti-rollback floor could NOT be recorded ($($_.Exception.Message)) -- an older signed bundle would still be accepted on the next pull"
                 Write-Host "[downlink] $msg" -ForegroundColor Red
-                return ([pscustomobject]@{ ok = $false; reason = $msg; plan = $plan; staged = @($staged.ToArray()); fanout = $fanout; admins = $adminApply; definitions = $defApply; assignments = $assignApply
+                return ([pscustomobject]@{ ok = $false; reason = $msg; plan = $plan; staged = @($staged.ToArray()); fanout = $fanout; admins = $adminApply; definitions = $defApply; assignments = $assignApply; policyChoices = $policyApply
                                            slaveRing = $SlaveRing; slaveRingSource = 'local'; trust = @{ floor = $effFloor; storeFloor = $trustFloor; revokedSigners = @($revoked).Count; read = $trustRead; centralKill = $kill; recorded = $null } })
             }
         }
@@ -3376,20 +3433,20 @@ function Invoke-PimManagedDownlink {
     # red step inside a green run, the shape nobody re-reads. A run with any failed apply step is now NOT ok and says
     # which steps failed (partial = something else did apply); the caller (Invoke-PimScenarioDeploy) stops there.
     $failedSteps = New-Object System.Collections.Generic.List[string]
-    foreach ($__ap in @(@('admins', $adminApply), @('groups', $defApply), @('roles', $assignApply))) {
+    foreach ($__ap in @(@('admins', $adminApply), @('groups', $defApply), @('roles', $assignApply), @('policy choices', $policyApply))) {
         if ($null -ne $__ap[1] -and -not [bool]$__ap[1].ok) { $failedSteps.Add("$($__ap[0]): $($__ap[1].detail)") | Out-Null }
     }
     if ($failedSteps.Count) {
-        $appliedCount = @(@($adminApply, $defApply, $assignApply) | Where-Object { $null -ne $_ -and [bool]$_.ok }).Count
+        $appliedCount = @(@($adminApply, $defApply, $assignApply, $policyApply) | Where-Object { $null -ne $_ -and [bool]$_.ok }).Count
         $msg = "APPLY FAILED ($($failedSteps.Count) step(s)$(if ($appliedCount) { "; PARTIAL -- $appliedCount other step(s) applied" })): $($failedSteps.ToArray() -join ' | ')"
         Write-Host "[downlink] $msg" -ForegroundColor Red
         return ([pscustomobject]@{ ok = $false; partial = [bool]$appliedCount; failedSteps = @($failedSteps.ToArray()); reason = $msg; plan = $plan; staged = @($staged.ToArray()); fanout = $fanout
-                                   admins = $adminApply; definitions = $defApply; assignments = $assignApply; acceptance = $acceptance; acceptancePath = $acceptancePath
+                                   admins = $adminApply; definitions = $defApply; assignments = $assignApply; policyChoices = $policyApply; acceptance = $acceptance; acceptancePath = $acceptancePath
                                    slaveRing = $SlaveRing; slaveRingSource = 'local'; trust = @{ floor = $effFloor; storeFloor = $trustFloor; revokedSigners = @($revoked).Count; read = $trustRead; centralKill = $kill; recorded = $floorRecorded } })
     }
 
     # BUG-175: slaveRing is the LOCAL ring that gated this run (authoritative), reported back in the result.
-    return ([pscustomobject]@{ ok = $true; partial = $false; failedSteps = @(); reason = $plan.reason; plan = $plan; staged = @($staged.ToArray()); fanout = $fanout; admins = $adminApply; definitions = $defApply; assignments = $assignApply; acceptance = $acceptance; acceptancePath = $acceptancePath
+    return ([pscustomobject]@{ ok = $true; partial = $false; failedSteps = @(); reason = $plan.reason; plan = $plan; staged = @($staged.ToArray()); fanout = $fanout; admins = $adminApply; definitions = $defApply; assignments = $assignApply; policyChoices = $policyApply; acceptance = $acceptance; acceptancePath = $acceptancePath
                                slaveRing = $SlaveRing; slaveRingSource = 'local'; trust = @{ floor = $effFloor; storeFloor = $trustFloor; revokedSigners = @($revoked).Count; read = $trustRead; centralKill = $kill; recorded = $floorRecorded } })
 }
 

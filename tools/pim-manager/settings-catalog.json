@@ -2096,10 +2096,10 @@
       "confirmOn": false,
       "confirmOff": false,
       "info": {
-        "what": "The longest activation PIM Manager lets any policy template allow, picked from 1 hour to 3 days. On every run the engine applies it to the activation policies it writes for the groups and roles PIM Manager manages: a template whose 'An activation lasts at most' is longer is shortened to this value. A template that is already shorter is left as it is.",
-        "enabled": "When set lower than a template: on the next engine run the activation policies that use that template are shortened to this value in Entra, through the normal policy apply and its safety checks (a large change set is held for approval). The engine log names each template it shortened.",
+        "what": "The longest activation PIM Manager lets any policy template recommend, picked from 1 hour to 3 days. It caps the PIM Manager recommendation for the groups and roles PIM Manager manages: a template whose 'An activation lasts at most' is longer is recommended at this value instead. A template that is already shorter is left as it is. It is part of the recommendation only: PIM Manager never changes a policy on its own.",
+        "enabled": "When set lower than a template: the recommendation shown on Templates > Policy settings is shortened to this value. A policy is shortened in Entra only where a SuperAdmin chose 'PIM Manager recommendation' for 'Longest activation', and that change set is held until a SuperAdmin approves it (Reviews & controls > Approvals) -- whatever its size. The engine log names each template it shortened.",
         "disabled": "At the default (1 day): nothing changes -- Entra itself allows at most 24 hours for an activation, so the default never shortens a template.",
-        "risk": "Medium when you lower it: people who activate for longer than the new value have to activate again sooner. Activations already running are not cut short. Reversible: pick a longer value and save; the next engine run applies the template's own value again.",
+        "risk": "Medium when you lower it: where 'PIM Manager recommendation' is chosen and the change is approved, people who activate for longer than the new value have to activate again sooner. Activations already running are not cut short. Reversible: pick a longer value and save; the recommendation is the template's own value again.",
         "requires": "SuperAdmin to change it. Free (Community) and Pro. Applies only to groups and roles PIM Manager manages.",
         "recommended": "Leave it at 1 day and set the activation length per template; lower it to enforce a maximum across every template.",
         "docUrl": "https://invardia.com/docs/pim/settings/OperationalPolicy.maxActivationDuration/"
@@ -2348,7 +2348,7 @@
     {
       "key": "PolicyTemplateDefaults.group",
       "label": "Policy template used where a delegation names none -- PIM for Groups",
-      "where": "Get Started > Activation policies",
+      "where": "Templates > Policy templates",
       "route": "/api/settings/policy-template-defaults",
       "type": "choice",
       "default": "Built-in default (Groups_Standard)",
@@ -2356,19 +2356,19 @@
       "confirmOn": true,
       "confirmOff": false,
       "info": {
-        "what": "The policy template the engine applies to the PIM for Groups policy of every group PIM manages whose definition leaves the policy template blank. The template sets how long an activation lasts, what is required to activate (for example MFA, justification) and whether approval is needed.",
-        "enabled": "When set: on its next run the engine compares each such group's live member policy with the chosen template and updates the ones that differ. Only groups PIM manages are touched. The run is held, and nothing is written, when it would change more than 25 policies, more than 25 % of the checked policies (when at least 8 were checked), or weaken more than 3 policy settings. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours.",
-        "disabled": "At the built-in default: these groups follow Groups_Standard.",
-        "risk": "Picking a weaker template weakens activation rules on many groups at once; picking one that requires approval makes every such activation wait for an approver. Reversible: pick the previous template; the next run puts the old rules back.",
+        "what": "The policy template that gives the PIM Manager recommendation for the PIM for Groups policy of every group PIM Manager manages whose definition leaves the policy template blank. A template recommends how long an activation lasts, what is required to activate (for example multifactor authentication, a reason) and whether approval is needed. It is a recommendation only: PIM Manager never changes a policy on its own.",
+        "enabled": "When set: the recommendation shown for these groups on Templates > Policy settings follows the chosen template. A policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set also says when it would change more than 25 policies, more than 25 % of the checked policies (when at least 8 were checked), or weaken more than 3 policy settings.",
+        "disabled": "At the built-in default: the recommendation for these groups comes from Groups_Standard.",
+        "risk": "Picking another template changes what 'PIM Manager recommendation' means for many groups at once. Where that choice is made, the next policy run plans the change and holds it for a SuperAdmin's approval; settings on 'Keep current' or 'Microsoft default' are not affected. Reversible: pick the previous template.",
         "requires": "SuperAdmin to change it. Free (Community) and Pro. The template must exist and be written for PIM for Groups. The engine needs RoleManagementPolicy.ReadWrite.AzureADGroup.",
-        "recommended": "Keep the built-in default unless your organisation has its own group standard; name a template on the definitions that need stricter rules.",
+        "recommended": "Keep the built-in default unless your organisation has its own group standard; name a template on the definitions that need stricter rules. Then choose per setting on Templates > Policy settings.",
         "docUrl": "https://invardia.com/docs/pim/settings/PolicyTemplateDefaults.group/"
       }
     },
     {
       "key": "PolicyTemplateDefaults.directoryRole",
       "label": "Policy template used where a delegation names none -- Entra ID roles",
-      "where": "Get Started > Activation policies",
+      "where": "Templates > Policy templates",
       "route": "/api/settings/policy-template-defaults",
       "type": "choice",
       "default": "Built-in default (EntraIDRoles_Standard)",
@@ -2376,19 +2376,19 @@
       "confirmOn": true,
       "confirmOff": false,
       "info": {
-        "what": "The policy template the engine applies to the Entra ID role policy of every role your delegations assign (to groups, in administrative units, or directly) when the row leaves the policy template blank. If two rows name the same role with different templates, the one requiring approval wins.",
-        "enabled": "When set: on its next run the engine updates each such role's PIM policy (activation length, activation checks, approval) to match the chosen template. Only roles a delegation names are touched. The run is held, and nothing is written, when it would change more than 25 policies, more than 25 % of the checked policies (when at least 8 were checked), or weaken more than 3 policy settings. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours.",
-        "disabled": "At the built-in default: these roles follow EntraIDRoles_Standard.",
-        "risk": "A role policy applies to everyone who holds that role in the tenant, not only PIM's groups. A weaker template weakens it for all of them. Reversible: pick the previous template; the next run restores the old rules.",
+        "what": "The policy template that gives the PIM Manager recommendation for the Entra ID role policy of every role your delegations assign (to groups, in administrative units, or directly) when the row leaves the policy template blank. If two rows name the same role with different templates, the one requiring approval wins. It is a recommendation only: PIM Manager never changes a policy on its own.",
+        "enabled": "When set: the recommendation shown for these roles on Templates > Policy settings follows the chosen template. A role's policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set also says when it would change more than 25 policies, more than 25 % of the checked policies (when at least 8 were checked), or weaken more than 3 policy settings.",
+        "disabled": "At the built-in default: the recommendation for these roles comes from EntraIDRoles_Standard.",
+        "risk": "A role policy applies to everyone who holds that role in the tenant, not only the groups PIM Manager manages. Picking another template changes what 'PIM Manager recommendation' means for all of them; where that choice is made, the next policy run plans the change and holds it for a SuperAdmin's approval. Reversible: pick the previous template.",
         "requires": "SuperAdmin to change it. Free (Community) and Pro. The template must exist and be written for Entra ID roles. The engine needs RoleManagementPolicy.ReadWrite.Directory.",
-        "recommended": "Keep the built-in default, and name an approval-required template on the rows for your most privileged roles.",
+        "recommended": "Keep the built-in default, and name an approval-required template on the rows for your most privileged roles. Then choose per setting on Templates > Policy settings.",
         "docUrl": "https://invardia.com/docs/pim/settings/PolicyTemplateDefaults.directoryRole/"
       }
     },
     {
       "key": "PolicyTemplateDefaults.azureRole",
       "label": "Policy template used where a delegation names none -- Azure resource roles",
-      "where": "Get Started > Activation policies",
+      "where": "Templates > Policy templates",
       "route": "/api/settings/policy-template-defaults",
       "type": "choice",
       "default": "Built-in default (AzureRoles_Standard)",
@@ -2396,12 +2396,12 @@
       "confirmOn": true,
       "confirmOff": false,
       "info": {
-        "what": "The policy template the engine applies to the PIM policy of each Azure role and scope pair your Azure delegations assign when the row leaves the policy template blank. If two rows name the same pair with different templates, the one requiring approval wins.",
-        "enabled": "When set: on its next run the engine updates the role policy on each such scope (activation length, activation checks, approval) to match the chosen template. Only role and scope pairs a delegation names are touched. The run is held, and nothing is written, when it would change more than 25 policies, more than 25 % of the checked policies (when at least 8 were checked), or weaken more than 3 policy settings. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours.",
-        "disabled": "At the built-in default: these pairs follow AzureRoles_Standard (the same rules as the Entra role standard).",
-        "risk": "An Azure role policy applies to everyone eligible for that role on that scope. A weaker template weakens it for all of them. Reversible: pick the previous template; the next run restores the old rules.",
+        "what": "The policy template that gives the PIM Manager recommendation for the PIM policy of each Azure role and scope pair your Azure delegations assign when the row leaves the policy template blank. If two rows name the same pair with different templates, the one requiring approval wins. It is a recommendation only: PIM Manager never changes a policy on its own.",
+        "enabled": "When set: the recommendation shown for these Azure roles on Templates > Policy settings follows the chosen template. A policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set also says when it would change more than 25 policies, more than 25 % of the checked policies (when at least 8 were checked), or weaken more than 3 policy settings.",
+        "disabled": "At the built-in default: the recommendation for these pairs comes from AzureRoles_Standard (the same rules as the Entra role standard).",
+        "risk": "An Azure role policy applies to everyone eligible for that role on that scope. Picking another template changes what 'PIM Manager recommendation' means for all of them; where that choice is made, the next policy run plans the change and holds it for a SuperAdmin's approval. PIM Manager never switches approval off on an Azure role policy. Reversible: pick the previous template.",
         "requires": "SuperAdmin to change it. Free (Community) and Pro. The template must exist and be written for Azure resource roles. The engine's identity needs a role that may change role management policies on those scopes (for example User Access Administrator or Owner).",
-        "recommended": "Keep the built-in default, and name an approval-required template on rows that grant Owner or User Access Administrator.",
+        "recommended": "Keep the built-in default, and name an approval-required template on rows that grant Owner or User Access Administrator. Then choose per setting on Templates > Policy settings.",
         "docUrl": "https://invardia.com/docs/pim/settings/PolicyTemplateDefaults.azureRole/"
       }
     },

@@ -895,5 +895,16 @@ function Initialize-PimPolicyTemplateStore {
     <# Kept name for every existing caller (db-init, Manager boot, Migrate-PimToSql, the scenario harness):
        seeds a fresh store and applies shipped upgrades with BUG-55 semantics (Update-PimPolicyTemplateStore). #>
     [CmdletBinding()] param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$TemplateDir, [string]$Actor = 'system:policy-template-store')
-    return (Update-PimPolicyTemplateStore -ConnectionString $ConnectionString -TemplateDir $TemplateDir -Actor $Actor)
+    $res = Update-PimPolicyTemplateStore -ConnectionString $ConnectionString -TemplateDir $TemplateDir -Actor $Actor
+    # PIM 100.93: the ADVISORY numbers follow the SHIPPED templates (pim.Settings 'PolicyAdvisories'): a shipped change of a
+    # recommended value raises that field's number, and choices made on an older number are asked again. Reported, never
+    # fatal -- a store whose advisories could not be updated keeps its numbers, so no choice is asked again by mistake.
+    try {
+        if (-not (Get-Command Update-PimPolicyAdvisoryStore -ErrorAction SilentlyContinue) -and $PSScriptRoot) {
+            $pcLib = Join-Path $PSScriptRoot 'PIM-PolicyChoices.ps1'
+            if (Test-Path -LiteralPath $pcLib) { . $pcLib }
+        }
+        if (Get-Command Update-PimPolicyAdvisoryStore -ErrorAction SilentlyContinue) { [void](Update-PimPolicyAdvisoryStore -ConnectionString $ConnectionString -TemplateDir $TemplateDir) }
+    } catch { Write-Warning "  [policy] the advisory numbers could not be updated from the shipped templates: $($_.Exception.Message)" }
+    return $res
 }

@@ -224,7 +224,7 @@ function Get-PimPolicyHoldLead {
     $t = if ($Impact) { $Impact.totals } else { $null }
     $mix = if ($t) { " ({0} setting change(s): {1} tighten, {2} loosen, {3} neutral)" -f $t.settings, $t.tightens, $t.loosens, $t.neutral } else { '' }
     $why = if ($Impact -and @($Impact.reasons).Count) { ' ' + (@($Impact.reasons) -join ' ') } else { '' }
-    "NEEDS APPROVAL -- $Changes $Noun(s) would change$mix, which is more than the engine changes at once without a person looking. NOTHING was written.$why Review the WhatIf (current -> new, per setting) on the Approvals page (Reviews & controls > Approvals) and approve it there, or fix the template/rows. --"
+    "NEEDS APPROVAL -- $Changes $Noun(s) would change$mix because of the policy settings you chose; every policy change waits for a SuperAdmin's approval (PIM 100.93). NOTHING was written.$why Review the WhatIf (current -> new, per setting) on the Approvals page (Reviews & controls > Approvals) and approve it there, or change your choice. --"
 }
 
 function ConvertTo-PimMailHtmlText {
@@ -255,7 +255,7 @@ function Format-PimPolicyHoldMail {
         $imp = Get-PimPolicyImpactReportSafe -Plan ([pscustomobject]@{ policies = @($Hold.policies); notificationDefaultsAligned = @($Hold.notificationDefaultsAligned); adminPathAligned = @($Hold.adminPathAligned) })
     }
     $n = [int]$Hold.changes
-    $headline = "$n $(if ($n -eq 1) { $noun } else { $noun -replace 'y$', 'ies' }) would change -- more than PIM changes at once without a person looking, so NOTHING was changed. It needs your approval."
+    $headline = "$n $(if ($n -eq 1) { $noun } else { $noun -replace 'y$', 'ies' }) would change because of the policy settings you chose. Every policy change waits for a SuperAdmin's approval, so NOTHING was changed."
     $sb = New-Object System.Text.StringBuilder
     if ($imp) {
         $t = $imp.totals
@@ -281,7 +281,7 @@ function Format-PimPolicyHoldMail {
     # planned differently, so the mail now sends you to the Approvals page, which always shows the CURRENT change set.
     # One mail per hold: you are not mailed again while it stands unless it grows weaker (or after 24 hours).
     $action = 'Open the PIM Manager, <b>Reviews &amp; controls &rsaquo; Approvals</b>: <i>Policy changes waiting for your approval</i> shows the change set that is held <b>now</b>, with its WhatIf, and an <b>Approve this change set</b> button (Admin role). ' +
-              'If it is not intended, fix the template or the rows instead. You are not mailed again for this hold while it stands, unless it starts weakening more policies. ' +
+              'If it is not intended, change your choice for the setting instead. You are not mailed again for this hold while it stands, unless it starts weakening more policies. ' +
               'Scripted: <code>' + (& $e $cmd) + '</code> -- valid only while this exact change set is the one held.'
     [pscustomobject]@{ headline = $headline; detailHtml = $sb.ToString(); actionHtml = $action; subject = "$n $(if ($n -eq 1) { $noun } else { $noun -replace 'y$', 'ies' }) held -- needs approval" }
 }

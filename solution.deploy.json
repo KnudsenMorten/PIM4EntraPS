@@ -61,10 +61,15 @@
       "name": "msp-groups",
       "optional": true,
       "description": "SEC-10 / MSP-3 step 4 -- declines the GROUP DEFINITIONS the projection would create in this tenant. A customer whose group estate is governed elsewhere blocks this and still takes admins and roles for groups that already exist."
+    },
+    {
+      "name": "msp-policies",
+      "optional": true,
+      "description": "PIM 100.93 -- declines the managing tenant's POLICY CHOICES (which of Microsoft default / PIM Manager recommendation / keep current it chose per policy setting). When they arrive they are only the DEFAULT here: this tenant's own choice for a setting always wins, and every policy change they lead to is held until a SuperAdmin of THIS tenant approves it. Blocking this means this tenant has no managing-tenant defaults at all -- a setting nobody chose locally waits for a local choice, and what an earlier pull stored is taken away. The arriving choices are reported HELD with this capability named."
     }
   ],
 
-  "_capabilities_msp_policies_comment": "'msp-policies' is DELIBERATELY NOT DECLARED YET, and that is the honest state rather than an oversight. Get-PimDownlinkCapabilityName maps the class name and Test-PimDownlinkClassAllowed would honour it, but Get-PimDownlinkPlan gates only admins/roles/groups -- the downlink does not carry policy artifacts today. Declaring it would advertise a consent gate over something that never arrives, which is precisely the BUG-29 family (a gate documented as active while no code path implements it). Declare it in the SAME change that makes the plan carry policies, never before.",
+  "_capabilities_msp_policies_comment": "'msp-policies' is DECLARED since PIM 100.93, in the SAME change that made the plan carry something for it to gate: the signed bundle now carries the managing tenant's policy CHOICES (payload key 'policyChoices'), Get-PimDownlinkPlan gates them through Test-PimDownlinkClassAllowed -Class 'policies', and Invoke-PimManagedDownlink stores them as defaults only (engine/msp/PIM-PolicyChoicesMsp.ps1). It was deliberately absent before that -- a declared capability that gates nothing advertises a consent gate that does not exist (the BUG-29 family). What it does NOT gate: the PolicyTemplate id on a group definition, which travels with the group and belongs to 'msp-groups'.",
 
   "_deploy_comment": "Entry point for the capabilities above. Idempotent and safe to re-run daily -- a re-run IS the updater, and every already-current step is a clean no-op. Self-gating: it verifies the deployment (hosted GUI smoke + deploy-validation tests) and AUTO-ROLLS-BACK the 'code' step to the captured pre-deploy revision on a verify failure. Schema is never auto-reverted, because reverting an additive schema change could drop a column that now holds data.",
 

@@ -1,0 +1,635 @@
+{
+  "schema": 2,
+  "_what": "PIM 100.93 -- Microsoft's default PIM policy settings. THIS TABLE is what 'Microsoft default' means in PIM Manager: the same in every tenant, always available. Microsoft's documentation does not state these defaults, so each value is CAPTURED from a policy nobody ever changed in a fresh tenant. Per policy type: 'fields' = setting id -> { value, source, capturedDate, verified }; 'exceptions' = object id (an Entra role's role definition / template id) -> { setting id: value } for objects whose default differs from the type's. The job policy-defaults reads this tenant's untouched policies as a CROSS-CHECK only: a difference is reported, it never changes what is written. A change of a value here in a later release is an ADVISORY for that setting (a choice made earlier is asked again).",
+  "_status": "directoryRole: measured 2026-10-12 on a fresh tenant, 145 Entra role policies, all never modified -- verified = true, EXCEPT activationRequireMfa: activation asks 126 roles for a reason only and 19 roles for a reason + multifactor authentication. The type's value is the 126-role one (No); the 19 role template ids are NOT filled in yet (exceptions is empty), so that entry stays verified = false until they are. groupMember / groupOwner / azureRole: no untouched read yet -- the values are what this code base's notes state (verified = false) and are to be captured from a fresh group / subscription before release.",
+  "types": {
+    "directoryRole": {
+      "fields": {
+        "activationMaxDuration": {
+          "value": {
+            "maximumDuration": "PT8H",
+            "isExpirationRequired": true
+          },
+          "source": "read from an untouched tenant",
+          "capturedDate": "2026-10-12",
+          "verified": true
+        },
+        "activationRequireMfa": {
+          "value": {
+            "required": false
+          },
+          "source": "read from an untouched tenant",
+          "capturedDate": "2026-10-12",
+          "verified": true
+        },
+        "activationRequireJustification": {
+          "value": {
+            "required": true
+          },
+          "source": "read from an untouched tenant",
+          "capturedDate": "2026-10-12",
+          "verified": true
+        },
+        "activationRequireTicket": {
+          "value": {
+            "required": false
+          },
+          "source": "read from an untouched tenant",
+          "capturedDate": "2026-10-12",
+          "verified": true
+        },
+        "approvalRequired": {
+          "value": {
+            "required": false
+          },
+          "source": "read from an untouched tenant",
+          "capturedDate": "2026-10-12",
+          "verified": true
+        },
+        "eligibleAssignmentExpiry": {
+          "value": {
+            "maximumDuration": "P365D",
+            "isExpirationRequired": false
+          },
+          "source": "read from an untouched tenant",
+          "capturedDate": "2026-10-12",
+          "verified": true
+        },
+        "activeAssignmentExpiry": {
+          "value": {
+            "maximumDuration": "P180D",
+            "isExpirationRequired": false
+          },
+          "source": "read from an untouched tenant",
+          "capturedDate": "2026-10-12",
+          "verified": true
+        },
+        "adminEligibleAssignmentChecks": {
+          "value": {
+            "enabledRules": []
+          },
+          "source": "read from an untouched tenant",
+          "capturedDate": "2026-10-12",
+          "verified": true
+        },
+        "adminActiveAssignmentChecks": {
+          "value": {
+            "enabledRules": [
+              "Justification"
+            ]
+          },
+          "source": "read from an untouched tenant",
+          "capturedDate": "2026-10-12",
+          "verified": true
+        },
+        "notifyAdmins": {
+          "value": {
+            "rules": {
+              "Notification_Admin_EndUser_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Admin_Admin_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Admin_Admin_Eligibility": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              }
+            }
+          },
+          "source": "read from an untouched tenant",
+          "capturedDate": "2026-10-12",
+          "verified": true
+        },
+        "notifyRequester": {
+          "value": {
+            "rules": {
+              "Notification_Requestor_EndUser_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Requestor_Admin_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Requestor_Admin_Eligibility": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              }
+            }
+          },
+          "source": "read from an untouched tenant",
+          "capturedDate": "2026-10-12",
+          "verified": true
+        },
+        "notifyApprovers": {
+          "value": {
+            "rules": {
+              "Notification_Approver_EndUser_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Approver_Admin_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Approver_Admin_Eligibility": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              }
+            }
+          },
+          "source": "read from an untouched tenant",
+          "capturedDate": "2026-10-12",
+          "verified": true
+        }
+      },
+      "exceptions": {
+        "29232cdf-9323-42fd-ade2-1d097af3e4de": { "activationRequireMfa": { "required": true } },
+        "194ae4cb-b126-40b2-bd5b-6091b380977d": { "activationRequireMfa": { "required": true } },
+        "3a2c62db-5318-420d-8d74-23affee5d9d5": { "activationRequireMfa": { "required": true } },
+        "fe930be7-5e62-47db-91af-98c3a49a38b1": { "activationRequireMfa": { "required": true } },
+        "b0f54661-2d74-4c50-afa3-1ec803f12efe": { "activationRequireMfa": { "required": true } },
+        "62e90394-69f5-4237-9190-012177145e10": { "activationRequireMfa": { "required": true } },
+        "4ba39ca4-527c-499a-b93d-d9b492c50246": { "activationRequireMfa": { "required": true } },
+        "e00e864a-17c5-4a4b-9c06-f5b95a8d5bd8": { "activationRequireMfa": { "required": true } },
+        "9360feb5-f418-4baa-8175-e2a00bac4301": { "activationRequireMfa": { "required": true } },
+        "f28a1f50-f6e7-4571-818b-6a12f2af6b6c": { "activationRequireMfa": { "required": true } },
+        "75941009-915a-4869-abe7-691bff18279e": { "activationRequireMfa": { "required": true } },
+        "17315797-102d-40b4-93e0-432062caca18": { "activationRequireMfa": { "required": true } },
+        "e8611ab8-c189-46e8-94e1-60213ab1f814": { "activationRequireMfa": { "required": true } },
+        "158c047a-c907-4556-b7ef-446551a6b5f7": { "activationRequireMfa": { "required": true } },
+        "5c4f9dcd-47dc-4cf7-8c9a-9e4207cbfc91": { "activationRequireMfa": { "required": true } },
+        "44367163-eba1-44c3-98af-f5787879f96a": { "activationRequireMfa": { "required": true } },
+        "a9ea8996-122f-4c74-9520-8edcd192826c": { "activationRequireMfa": { "required": true } },
+        "b1be1c3e-b65d-4f19-8427-f6fa0d97feb9": { "activationRequireMfa": { "required": true } },
+        "7495fdc4-34c4-4d15-a289-98788ce399fd": { "activationRequireMfa": { "required": true } }
+      }
+    },
+    "groupMember": {
+      "fields": {
+        "activationMaxDuration": {
+          "value": {
+            "maximumDuration": "PT8H",
+            "isExpirationRequired": true
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "activationRequireMfa": {
+          "value": {
+            "required": true
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "activationRequireJustification": {
+          "value": {
+            "required": true
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "activationRequireTicket": {
+          "value": {
+            "required": false
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "approvalRequired": {
+          "value": {
+            "required": false
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "eligibleAssignmentExpiry": {
+          "value": {
+            "maximumDuration": "P365D",
+            "isExpirationRequired": true
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "activeAssignmentExpiry": {
+          "value": {
+            "maximumDuration": "P180D",
+            "isExpirationRequired": true
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "adminEligibleAssignmentChecks": {
+          "value": {
+            "enabledRules": []
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "adminActiveAssignmentChecks": {
+          "value": {
+            "enabledRules": [
+              "Justification"
+            ]
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "notifyAdmins": {
+          "value": {
+            "rules": {
+              "Notification_Admin_EndUser_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Admin_Admin_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Admin_Admin_Eligibility": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              }
+            }
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "notifyRequester": {
+          "value": {
+            "rules": {
+              "Notification_Requestor_EndUser_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Requestor_Admin_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Requestor_Admin_Eligibility": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              }
+            }
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "notifyApprovers": {
+          "value": {
+            "rules": {
+              "Notification_Approver_EndUser_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Approver_Admin_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Approver_Admin_Eligibility": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              }
+            }
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        }
+      },
+      "exceptions": {}
+    },
+    "groupOwner": {
+      "fields": {
+        "activationMaxDuration": {
+          "value": {
+            "maximumDuration": "PT8H",
+            "isExpirationRequired": true
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "activationRequireMfa": {
+          "value": {
+            "required": true
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "activationRequireJustification": {
+          "value": {
+            "required": true
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "activationRequireTicket": {
+          "value": {
+            "required": false
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "eligibleAssignmentExpiry": {
+          "value": {
+            "maximumDuration": "P365D",
+            "isExpirationRequired": true
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "activeAssignmentExpiry": {
+          "value": {
+            "maximumDuration": "P180D",
+            "isExpirationRequired": true
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "adminEligibleAssignmentChecks": {
+          "value": {
+            "enabledRules": []
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "adminActiveAssignmentChecks": {
+          "value": {
+            "enabledRules": [
+              "Justification"
+            ]
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "notifyAdmins": {
+          "value": {
+            "rules": {
+              "Notification_Admin_EndUser_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Admin_Admin_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Admin_Admin_Eligibility": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              }
+            }
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "notifyRequester": {
+          "value": {
+            "rules": {
+              "Notification_Requestor_EndUser_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Requestor_Admin_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Requestor_Admin_Eligibility": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              }
+            }
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "notifyApprovers": {
+          "value": {
+            "rules": {
+              "Notification_Approver_EndUser_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Approver_Admin_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Approver_Admin_Eligibility": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              }
+            }
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        }
+      },
+      "exceptions": {}
+    },
+    "azureRole": {
+      "fields": {
+        "activationMaxDuration": {
+          "value": {
+            "maximumDuration": "PT8H",
+            "isExpirationRequired": true
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "activationRequireMfa": {
+          "value": {
+            "required": false
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "activationRequireJustification": {
+          "value": {
+            "required": true
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "activationRequireTicket": {
+          "value": {
+            "required": false
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "approvalRequired": {
+          "value": {
+            "required": false
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "eligibleAssignmentExpiry": {
+          "value": {
+            "maximumDuration": "P365D",
+            "isExpirationRequired": true
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "activeAssignmentExpiry": {
+          "value": {
+            "maximumDuration": "P180D",
+            "isExpirationRequired": true
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "adminEligibleAssignmentChecks": {
+          "value": {
+            "enabledRules": []
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "adminActiveAssignmentChecks": {
+          "value": {
+            "enabledRules": [
+              "Justification"
+            ]
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "notifyAdmins": {
+          "value": {
+            "rules": {
+              "Notification_Admin_EndUser_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Admin_Admin_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Admin_Admin_Eligibility": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              }
+            }
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "notifyRequester": {
+          "value": {
+            "rules": {
+              "Notification_Requestor_EndUser_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Requestor_Admin_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Requestor_Admin_Eligibility": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              }
+            }
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        },
+        "notifyApprovers": {
+          "value": {
+            "rules": {
+              "Notification_Approver_EndUser_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Approver_Admin_Assignment": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              },
+              "Notification_Approver_Admin_Eligibility": {
+                "notificationLevel": "All",
+                "isDefaultRecipientsEnabled": true,
+                "notificationRecipients": []
+              }
+            }
+          },
+          "source": "from this code base's notes -- not read from an untouched tenant yet",
+          "capturedDate": "2026-10-12",
+          "verified": false
+        }
+      },
+      "exceptions": {}
+    }
+  }
+}
