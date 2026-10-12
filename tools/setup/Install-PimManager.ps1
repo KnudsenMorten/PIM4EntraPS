@@ -26,7 +26,12 @@
        with that line's fix), checks health, and reports 'completed' with the outputs Invardia's support needs -> exit 0
   A step that needs a higher role than the installer holds ends as a WARNING with the command for the right person; the
   install continues. -Resume re-runs from where it stopped: completed preflight / licence / support steps are skipped,
-  and the deploy itself is idempotent (each of its steps checks what exists first).
+  and the deploy itself is idempotent (each of its steps checks what exists first). The state file (state.json in
+  -StatePath) also remembers the PATH of the licence file -- a resume needs no -LicencePath; the file's content, a key or a
+  token is never written there -- and that THIS install opened the SQL firewall rule 'AllowSetupHost': the install closes
+  that rule on every way out (the end, a failed step, the next run), and never removes a rule it did not open itself.
+  The preflight also checks the PIM Manager administrators: a sign-in name that is not in the tenant, or administrators
+  without a mailbox and no alert recipients, stops the install there (exit 2), before anything is created.
 
   ENROLLMENT KEY instead of a licence file (framework 8.6 "SINGLE-TENANT enrollment too", owner 2026-10-08): with
   'enrollmentKey' in config.json (or -EnrollmentKey) -LicencePath is not needed. After the preflight, step 'enroll' claims
@@ -90,7 +95,10 @@ param(
     [scriptblock]$EnrollmentSleep,
     [int]$EnrollmentTimeoutSeconds = 900,
     # test seam: param([hashtable]$MspArgs, [scriptblock]$OnStep) -> exit code, in place of Invoke-PimMspBuild (mspRole managed)
-    [scriptblock]$MspBuild
+    [scriptblock]$MspBuild,
+    # test seam (REQ 98.4 b): param([string]$Op, $Target) -- 'get' answers the address of the SQL firewall rule 'AllowSetupHost'
+    # ('' = not there; throws = not readable), 'remove' deletes it. A real install uses ARM REST (below).
+    [scriptblock]$SetupHostRule
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -176,6 +184,17 @@ function Invoke-PimInstallRestRead {
 # A failed READ answers '' exactly as the az wrapper did (2>$null); a shape with no REST form is a code defect and throws.
 if (-not $Az) { $Az = { param([string[]]$AzArgs) try { Invoke-PimInstallRestRead -AzArgs $AzArgs } catch { if ("$($_.Exception.Message)" -like 'Invoke-PimInstallRestRead: no REST form*') { throw }; Write-Verbose "$($_.Exception.Message)"; '' } } }
 if (-not $ResolveHost) { $ResolveHost = { param([string]$HostName) try { @([System.Net.Dns]::GetHostAddresses($HostName)).Count -gt 0 } catch { $false } } }
+# REQ 98.4 (b): the SQL firewall rule this install opens, read and removed over ARM REST (PIM-ArmSetup.ps1). A failed read
+# THROWS (the caller then treats the rule as "not readable" and removes nothing); a rule or server that is not there = ''.
+# Under the offline -Az seam there is no ARM: the rule is then tracked only when a test hands in -SetupHostRule.
+if (-not $SetupHostRule -and -not $azSeam) {
+    $SetupHostRule = { param([string]$Op, $Target)
+        switch ($Op) {
+            'get'    { return "$((Get-PimArmSqlFirewallRule -SubscriptionId $Target['subscriptionId'] -ResourceGroup $Target['resourceGroup'] -Server $Target['server'] -Name $Target['name']).properties.startIpAddress)".Trim() }
+            'remove' { [void](Remove-PimArmSqlFirewallRule -SubscriptionId $Target['subscriptionId'] -ResourceGroup $Target['resourceGroup'] -Server $Target['server'] -Name $Target['name']) }
+        }
+    }
+}
 
 $events = New-Object System.Collections.Generic.List[object]
 $installId = ''
@@ -209,7 +228,31 @@ function Get-InstallRest([string]$Url, [string]$Resource) {
     try { return (& $Http $Url "$($t.accessToken)") } catch { return $null }
 }
 $script:enrolDir = ''
+# REQ 98.4 (a) + (b): what this install remembers for its next run, written to the state file with the completed steps:
+# the PATH of the licence file (never its content) and the SQL firewall rule this install opened. Read as a plain variable
+# (never $script:): the state is also saved from the deploy's -OnStep, a CHILD script, where $script: is the deploy's own.
+$pimInstallMem = @{ licencePath = ''; hostRule = $null; signedIn = $false }
+function Save-InstallState {
+    # -WhatIf: the state file lives outside the temp folder (clouddrive / home), so a preview never writes it.
+    if (-not $WhatIfPreference) { Save-PimInstallState -StatePath $StatePath -InstallId $installId -Completed @($done) -LicencePath "$($pimInstallMem.licencePath)" -SetupHostRule $pimInstallMem.hostRule }
+}
+function Close-InstallHostRule {
+    # REQ 98.4 (b): close the SQL firewall rule THIS install opened -- on every way out (the normal end, a failed step, a
+    # resume), read back; the record leaves the state file only when the rule is gone, so a run that could not close it
+    # hands it to the next one. A rule this install did not open has no record and is never touched. Not before the
+    # sign-in passed (no browser sign-in just to close), and never under -WhatIf / -PreflightOnly (they change nothing).
+    if ($WhatIfPreference -or $PreflightOnly -or -not $SetupHostRule -or -not $pimInstallMem.hostRule -or -not $pimInstallMem.signedIn) { return }
+    $t = $pimInstallMem.hostRule
+    try {
+        if ("$(& $SetupHostRule 'get' $t)".Trim()) { & $SetupHostRule 'remove' $t | Out-Null }
+        if ("$(& $SetupHostRule 'get' $t)".Trim()) { Write-Host "    the database firewall rule '$($t['name'])' on $($t['server']) is still there -- the next run of this installation closes it" -ForegroundColor Yellow; return }
+        $pimInstallMem.hostRule = $null
+        Save-InstallState
+        Write-Host "    the database firewall rule '$($t['name'])' this installation opened on $($t['server']) is closed" -ForegroundColor DarkGray
+    } catch { Write-Host "    the database firewall rule '$($t['name'])' on $($t['server']) could not be closed now ($((("$($_.Exception.Message)") -split "`n")[0])) -- the next run of this installation closes it" -ForegroundColor Yellow }
+}
 function Finish([int]$Code) {
+    try { Close-InstallHostRule } catch { Write-Verbose "setup-host rule close failed: $($_.Exception.Message)" }
     # framework 8.6: the per-run directory with the claimed licence + install key never outlives the run.
     if ($script:enrolDir) { Remove-PimEnrollmentRunDirectory -Path $script:enrolDir; $script:enrolDir = '' }
     Remove-Item Env:\PIM_GUIDED_INSTALL_RUN -ErrorAction SilentlyContinue
@@ -244,15 +287,25 @@ if (-not "$StatePath".Trim()) {
 $state = Read-PimInstallState -StatePath $StatePath
 $done = New-Object System.Collections.Generic.List[string]
 if ($Resume -and $state.installId -eq $installId) { foreach ($c in $state.completed) { $done.Add("$c") | Out-Null } }
-# -WhatIf: the state file lives outside the temp folder (clouddrive / home), so a preview never writes it.
-function Mark([string]$Id) { if (-not $done.Contains($Id)) { $done.Add($Id) | Out-Null }; if (-not $WhatIfPreference) { Save-PimInstallState -StatePath $StatePath -InstallId $installId -Completed @($done) } }
+function Mark([string]$Id) { if (-not $done.Contains($Id)) { $done.Add($Id) | Out-Null }; Save-InstallState }
+# REQ 98.4 (a): the licence file is remembered BY PATH in the state file of this installation. A later run without
+# -LicencePath (a resume) reads the same file again; a path given now is made a full path first, so it is still right in
+# another window or folder. A state file written before this (no licencePath) changes nothing here.
+$fullPath = { param([string]$p) if (-not "$p".Trim()) { return '' }; try { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath("$p".Trim()) } catch { "$p".Trim() } }
+$licenceFromState = $false
+if ("$LicencePath".Trim()) { $LicencePath = & $fullPath $LicencePath }
+elseif (-not $enrolling -and $state.installId -eq $installId -and "$($state.licencePath)".Trim()) { $LicencePath = "$($state.licencePath)".Trim(); $licenceFromState = $true }
+if ($state.installId -eq $installId) { $pimInstallMem.licencePath = "$($state.licencePath)".Trim() }
 # 2026-10-11 (HOGYM): the printed resume command must work in a FRESH window. Under Invardia's bootstrap the customer resumes
 # through it (it re-downloads the release and re-signs in); otherwise the installer is called by its full path, so a new
 # PowerShell window does not need the function defined.
+# REQ 98.4 (a): it is COMPLETE -- full paths for the answers and the state folder, and the licence file whenever this
+# installation has one (given now or remembered); never an empty -LicencePath ''.
+$configFull = & $fullPath $ConfigPath; $stateFull = & $fullPath $StatePath
 $resumeCmd = if (Get-Command Install-Invardia -ErrorAction SilentlyContinue) {
     ". ./bootstrap.ps1; Install-Invardia -Resume -InstallId $installId"
-} elseif ($enrolling -and -not "$LicencePath".Trim()) { "& '$PSCommandPath' -ConfigPath '$ConfigPath' -StatePath '$StatePath' -Resume" }
-  else { "& '$PSCommandPath' -ConfigPath '$ConfigPath' -LicencePath '$LicencePath' -StatePath '$StatePath' -Resume" }
+} elseif (-not "$LicencePath".Trim()) { "& '$PSCommandPath' -ConfigPath '$configFull' -StatePath '$stateFull' -Resume" }
+  else { "& '$PSCommandPath' -ConfigPath '$configFull' -LicencePath '$LicencePath' -StatePath '$stateFull' -Resume" }
 
 # the licence: a Pro licence for THIS tenant, verifiable offline. Anything else is a bad bundle (exit 3).
 function Get-InstallLicenceProblem([string]$Text, [string]$What) {
@@ -272,17 +325,30 @@ if ($enrolling) {
     if ("$LicencePath".Trim()) { Write-Host "    the licence file '$LicencePath' is not used: the enrollment returns this tenant's licence" -ForegroundColor Yellow }
     Write-Host ("    enrollment key: {0} -- sent only in the claim to Invardia, never written to a log, the state file or the support outputs" -f (Get-PimEnrollmentKeyMask -Key $enrolKey)) -ForegroundColor DarkGray
     Emit 'config' 'ok' ("PIM Manager $($script:PimInstallVersion): installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: from your Invardia enrollment (after the checks)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
-} elseif (-not "$LicencePath".Trim() -and $licenceDone) {
+} elseif ($licenceDone -and (-not "$LicencePath".Trim() -or ($licenceFromState -and -not (Test-Path -LiteralPath $LicencePath -PathType Leaf)))) {
+    # (a remembered licence file that is gone does not matter once the licence is registered)
     Emit 'config' 'ok' ("PIM Manager $($script:PimInstallVersion): installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: already registered (resume)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
 } else {
     if (-not "$LicencePath".Trim()) { Emit 'config' 'failed' 'no licence: give the licence file (-LicencePath) or an Invardia enrollment key (enrollmentKey in the answers)' 'Download the installation bundle again from invardia.com, or contact support.'; Finish 3 }
+    # REQ 98.4 (a): the remembered file is gone -- said in plain words, with the one command that gives it again
+    if ($licenceFromState -and -not (Test-Path -LiteralPath $LicencePath -PathType Leaf)) {
+        if (Get-Command Install-Invardia -ErrorAction SilentlyContinue) { Emit 'config' 'failed' "the licence file this installation was started with is not there any more: $LicencePath" 'Download the installation bundle again from invardia.com (it carries the licence file), then resume the installation:' $resumeCmd }
+        else { Emit 'config' 'failed' "the licence file this installation was started with is not there any more: $LicencePath" 'Put the file back in that place, or resume the installation with the licence file:' "& '$PSCommandPath' -ConfigPath '$configFull' -LicencePath '<the licence file>' -StatePath '$stateFull' -Resume" }
+        Finish 3
+    }
+    if ($licenceFromState) { Write-Host "    the licence file is the one this installation was started with: $LicencePath" -ForegroundColor DarkGray }
     try { $licText = Get-Content -Raw -LiteralPath $LicencePath -ErrorAction Stop } catch { $licText = '' }
     $lp = Get-InstallLicenceProblem -Text $licText -What "the licence file '$LicencePath'"
     $lic = $lp.lic
     if ($lp.why) { Emit 'config' 'failed' $lp.why 'Download the installation bundle again from invardia.com, or contact support.'; Finish 3 }
+    $pimInstallMem.licencePath = $LicencePath   # REQ 98.4 (a): the PATH of a licence file that was read and accepted -- saved with the first completed step
     Emit 'config' 'ok' ("PIM Manager $($script:PimInstallVersion): installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: $($lic.Customer), valid until $($lic.ValidTo)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
 }
 $names = Get-PimInstallNames -Config $cfg
+# REQ 98.4 (b): the SQL firewall rule of THIS install (a single-tenant install; a managed tenant's build owns its own window
+# and closes it in its last step). A record in the state file counts only when it names exactly this install's rule.
+$hostRuleTarget = [ordered]@{ name = 'AllowSetupHost'; server = "$($names.sqlServer)"; resourceGroup = "$($names.resourceGroup)"; subscriptionId = "$($cfg.subscriptionId)" }
+if ("$($cfg.mspRole)" -ne 'managed' -and $state.installId -eq $installId -and (Test-PimInstallSetupHostRuleRecord -Record $state.setupHostRule -Target $hostRuleTarget)) { $pimInstallMem.hostRule = $state.setupHostRule }
 
 # ================================================================== 1b. framework 8.13: the handed-over sign-in
 # Each audience is checked on its own claims (Import-PimHandoffTokens, PIM-Rest.ps1): this installation's tenant, a signed-in
@@ -335,6 +401,7 @@ Pre 'preflight-signin' {
     @{ state = 'ok'; message = "signed in as $($script:who.userName)" }
 }
 if ($preflightFailed) { Finish 2 }
+$pimInstallMem.signedIn = $true   # REQ 98.4 (b): from here a way out may close this install's own SQL firewall rule (Close-InstallHostRule)
 # framework 8.13: ONE event says HOW the person signed in, so Invardia's tracked install can show it. Audience names and
 # the source only -- never token content. "Through Invardia" = the Azure (ARM) sign-in the checks above used was handed over.
 $hoAccepted = @(if ($script:handoff -and $script:handoff.accepted) { @($script:handoff.accepted.Keys) | Sort-Object })
@@ -413,6 +480,40 @@ Pre 'preflight-sql-region' {
     }
     if (@($rv.unknown).Count) { return @{ state = 'warning'; message = "$($rv.message) -- the deploy steps will tell" } }
     @{ state = 'ok'; message = $rv.message }
+}
+
+# REQ 98.4 (c) + (d) (install findings 2026-10-11): the PIM Manager administrators are checked HERE, before anything is
+# created. (d) a sign-in name that is not in the tenant used to stop the sign-in step about an hour into the install;
+# (c) administrators without a mailbox and no alert recipients used to fail the end-of-install check after everything was
+# built. One Graph read per administrator (a $filter, so "not there" is an empty answer and never a guessed error); the
+# person installing is looked up by object id (a guest's sign-in name differs from the name in the token). A read that
+# fails is a WARNING, never a stop. The verdict is Get-PimInstallAdminVerdict (pure, _PimGuidedInstall.ps1).
+Pre 'preflight-admins' {
+    # An object id is looked up by id. A value that is neither an address nor an object id (the sign-in step also accepts a
+    # GROUP name) is not a user this check can judge: it gets no filter and ends as "could not be checked", never a stop.
+    $ask = @($cfg.superAdmins | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | ForEach-Object {
+        if ($_ -match '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$') { @{ upn = $_; filter = "id eq '$_'"; byId = $true } }
+        elseif ($_ -match '^[^\s@]+@[^\s@]+$') { @{ upn = $_; filter = "userPrincipalName eq '$($_.Replace("'", "''"))'" } }
+        else { @{ upn = $_; filter = '' } } })
+    if (-not $ask.Count -and "$($who.userName)".Trim() -and "$($who.objectId)".Trim() -and -not "$($who.supportAppId)".Trim()) { $ask = @(@{ upn = "$($who.userName)".Trim(); filter = "id eq '$("$($who.objectId)".Trim())'" }) }
+    $admins = @(foreach ($a in $ask) {
+        if (-not $a.filter) { @{ upn = $a.upn; found = $null; mail = '' }; continue }
+        $r = Get-InstallRest('https://graph.microsoft.com/v1.0/users?$filter=' + [uri]::EscapeDataString($a.filter) + '&$select=id,userPrincipalName,mail') 'https://graph.microsoft.com'
+        if ($null -eq $r -or -not $r.PSObject.Properties['value']) { @{ upn = $a.upn; found = $null; mail = '' } }
+        else {
+            $hit = @($r.value | Where-Object { $_ }) | Select-Object -First 1
+            # an object id that is no USER may be a group or an app the sign-in step accepts by id: not judged here
+            if (-not $hit -and $a.byId) { @{ upn = $a.upn; found = $null; mail = '' } }
+            else { @{ upn = $a.upn; found = [bool]$hit; mail = "$($hit.mail)".Trim() } }
+        }
+    })
+    $av = Get-PimInstallAdminVerdict -Admins $admins -AlertRecipients @($cfg.alertRecipients)
+    # An installation that COMPLETED before (a re-run): its alert recipients may have been set in the PIM Manager since, and
+    # the preflight cannot read the store -- then the missing mailbox is a reminder, and the end-of-install check decides.
+    if ("$($av.kind)" -eq 'no-mailbox' -and $state.installId -eq $installId -and @($state.completed) -contains 'completed') {
+        return @{ state = 'warning'; message = "$("$($av.message)" -replace '; nothing was created$', '') -- this installation completed before: check PIM Manager > Settings > Alerting > Recipients" }
+    }
+    $av
 }
 if ($preflightFailed) { Finish 2 }
 if ($PreflightOnly) { Write-Host 'preflight passed -- nothing was changed (-PreflightOnly)' -ForegroundColor Green; Finish 0 }
@@ -537,6 +638,24 @@ if ($managedInstall) {
 
 if (-not $managedInstall) {# ================================================================== 3. deploy
 $deployArgs = ConvertTo-PimInstallDeployArgs -Config $cfg -SignedInUpn $who.userName
+# REQ 98.4 (b) (install finding 2026-10-11): a run that DIED left 'AllowSetupHost' on the SQL server, the next run took it
+# for somebody else's and the end-of-install check failed with a fix only possible in the portal. Now THIS install owns its
+# window: before the deploy starts it reads the rule and -- when it is not there -- writes into the state file that the rule
+# opened from here on is its own (before anything is created, so a run that dies still leaves the record). The deploy is
+# told the caller owns the window (-KeepSetupHostRule: it opens / moves the rule and leaves it open for the licence step
+# and the check), and the install closes it: the end-of-install check removes it and reads it back, and every way out
+# (Finish, the finally below) closes what is left. A rule that was there BEFORE this install has no record: never removed.
+if ($SetupHostRule) {
+    $ruleNow = $null
+    try { $ruleNow = "$(& $SetupHostRule 'get' $hostRuleTarget)".Trim() } catch { $ruleNow = $null; Write-Verbose "setup-host rule read failed: $($_.Exception.Message)" }
+    $hostPlan = Get-PimInstallSetupHostRulePlan -Recorded $pimInstallMem.hostRule -Target $hostRuleTarget -RuleIp $ruleNow
+    if ($hostPlan.record) {
+        $pimInstallMem.hostRule = [ordered]@{ name = $hostRuleTarget.name; server = $hostRuleTarget.server; resourceGroup = $hostRuleTarget.resourceGroup; subscriptionId = $hostRuleTarget.subscriptionId; openedUtc = [datetime]::UtcNow.ToString('o') }
+        Save-InstallState
+    }
+    Write-Host "    database firewall rule 'AllowSetupHost': $($hostPlan.reason)" -ForegroundColor DarkGray
+    if ($hostPlan.owned) { $deployArgs['KeepSetupHostRule'] = $true }
+}
 $onStep = { param($ev) $e = ConvertTo-PimInstallStepEvent -DeployEvent $ev -InstallId $installId -ResumeCommand $resumeCmd; if ($e) { Send-Event $e; if ("$($e.state)" -in 'ok', 'warning', 'skipped') { Mark "$($e.step.id)" } } }
 if (-not $Deploy) { $Deploy = { param([hashtable]$DeployArgs, [scriptblock]$OnStep) & (Join-Path $here 'Invoke-PimDeployAll.ps1') @DeployArgs -OnStep $OnStep } }
 $summary = $null
@@ -596,6 +715,9 @@ if ($deployArgs.Contains('UpdateRing')) { $vArgs['UpdateRing'] = [int]$deployArg
 if ($deployArgs.Contains('UpdateSource')) { $vArgs['UpdateSource'] = "$($deployArgs['UpdateSource'])" }
 if ($cfg.engineAzureRootUserAccessAdmin) { $vArgs['EngineAzureRootUserAccessAdmin'] = $true }
 if ($mailEv) { $vArgs['MailDeferredReason'] = "$($mailEv.message)" }
+# REQ 98.4 (b): the rule this install opened is closed BY the check (after its store reads; removed and read back), so its
+# 'SQL setup host rule' line is a fact and never fails for this install's own window. Without a record the check only reads.
+if ($pimInstallMem.hostRule) { $vArgs['CloseSetupHostRule'] = $true }
 if (-not $VerifyInstall) { $VerifyInstall = { param([hashtable]$A) @(& (Join-Path $here 'Confirm-PimInstall.ps1') @A) | Where-Object { $_ -and $_.PSObject.Properties['done'] } | Select-Object -Last 1 } }
 $vr = $null
 try { $vr = & $VerifyInstall $vArgs } catch { $vr = $null; Write-Verbose "verify-install threw: $($_.Exception.Message)" }
@@ -643,6 +765,9 @@ Mark 'completed'
 Emit 'completed' 'completed' $(if ($outputs.portalUrl) { "open the PIM Manager: $($outputs.portalUrl)" } else { 'installation complete' }) -Outputs $outputs
 Finish 0
 } finally {
+    # REQ 98.4 (b): a way out that did not pass Finish (a throw, an interrupted run) still closes this install's own SQL
+    # firewall rule -- while the handed-over sign-in below is still in memory. Nothing to do when Finish already closed it.
+    if ($pimInstallMem -and $pimInstallMem.hostRule -and (Get-Command Close-InstallHostRule -ErrorAction SilentlyContinue)) { try { Close-InstallHostRule } catch { Write-Verbose "setup-host rule close failed: $($_.Exception.Message)" } }
     # framework 8.13: the handed-over tokens never outlive this run -- the bootstrap runs this script in ITS session, so a
     # global left behind would sit in the caller's memory after the install returns.
     $global:PimHandoffTokens = $null; $script:handoff = $null; $script:PimHandoffRaw = $null
