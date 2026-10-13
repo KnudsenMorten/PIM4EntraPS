@@ -14394,6 +14394,7 @@
     bindLive();
     // PIM 100.123 (lane adclean): what waits for a SuperAdmin + the server discovery settings, below this card
     if (typeof pimAdcleanAfterHybridSettings === 'function') pimAdcleanAfterHybridSettings(host).catch(() => { });
+    if (typeof pimHandoverAdRightNotice === 'function') pimHandoverAdRightNotice(host).catch(() => { });   // lane handover: "Delete Group objects" missing
     const btn = document.getElementById('setHybridAdSave');
     if (btn) btn.onclick = async () => {
       const values = {};
@@ -19337,7 +19338,7 @@
         '<th style="padding:3px 6px;">Area</th><th style="padding:3px 6px;">Item</th><th style="padding:3px 6px;">Verdict</th><th style="padding:3px 6px;">Why</th></tr></thead><tbody>' +
         rows.map(r => '<tr class="reconcile-item" style="border-bottom:1px solid #eaeef2;"><td style="padding:3px 6px;">' + escapeHtml(r.scope) + '</td>' +
           '<td style="padding:3px 6px;">' + escapeHtml(r.it.label || r.it.key) + '</td>' +
-          '<td style="padding:3px 6px;white-space:nowrap;">' + (r.it.eligible ? '<b style="color:#cf222e;">' + (mode === 'enforce' ? 'removed' : 'would remove') + '</b>' : 'held (' + escapeHtml(r.it.rule === 'admin' ? 'admin' : 'rule ' + r.it.rule) + ')') + '</td>' +
+          '<td style="padding:3px 6px;white-space:nowrap;">' + (r.it.eligible ? '<b style="color:#cf222e;">' + (mode === 'enforce' ? 'removed' : 'would remove') + '</b>' : 'Left alone -- ' + escapeHtml(r.it.rule === 'admin' ? 'admin account' : (String(r.it.rule) === '1' ? 'not created by PIM' : 'rule ' + r.it.rule))) + '</td>' +   // owner 2026-10-13: "held" is reserved for guard holds that wait for a SuperAdmin
           '<td style="padding:3px 6px;color:#57606a;">' + escapeHtml(r.it.reason || '') + '</td></tr>').join('') +
         '</tbody></table></details>';
     }
@@ -23620,7 +23621,8 @@
     // §91.6: a problem's "Open in Grid" shows ONLY the rows that problem covers (until "Show all rows")
     if (v.problem && v.problem.rows && v.problem.rows.size) order = order.filter(i => v.problem.rows.has(i));
     if (f) order = order.filter(i => cols.some(c => String((p.rows[i] || {})[c] || '').toLowerCase().indexOf(f) >= 0));
-    if (v.sortCol && v.sortDir) {
+    if (v.sortCol && v.sortDir && pimS2IsCol(v.sortCol)) order = pimS2SortOrder(base, p, order, v.sortCol, v.sortDir);   // lane states2 (100.132): a state column
+    else if (v.sortCol && v.sortDir) {
       const c = v.sortCol, d = v.sortDir;
       const coll = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
       order = order.map((i, pos) => ({ i, pos })).sort((a, b) => {
@@ -23629,6 +23631,7 @@
         return (coll.compare(x, y) * d) || (a.pos - b.pos);
       }).map(o => o.i);
     }
+    else order = pimS2DefaultOrder(base, p, order);   // lane states2 (100.132): no sort chosen -- the rows with a problem first
     return order;
   }
   function renderGrid(base) {
@@ -23833,6 +23836,7 @@
     if (showProvenance) {
       html.push('<th class="grid-src-head" title="Where this row came from. From the managing tenant = sent by your provider on a pull and kept in step with theirs; Local = this tenant\'s own row, which the downlink never touches.">Source</th>');
     }
+    html.push(pimS2HeadHtml(base));   // lane states2 (100.132): the state column(s) of the groups / accounts a row names
     for (const col of visHeader) {
       const gv = gridView(base);
       const arrow = (gv.sortCol === col && gv.sortDir) ? (gv.sortDir > 0 ? ' &#x25B2;' : ' &#x25BC;') : '';
@@ -23921,7 +23925,7 @@
           : __retireStaged.has(idx)
             ? ' <span class="row-retire-wait" data-retire="staged" title="Staged as Retire here, not committed yet. Nothing happens to the group until you commit under Pending changes." style="background:#eaeef2;color:#57606a;border-radius:10px;padding:1px 7px;font-size:10.5px;white-space:nowrap;">delete staged, not committed</span>'
             : '';
-        html.push(`<td class="row-actions row-actions-left">${actHtmlL}${pimStatesRowTag(base, idx, row, deleted, retireTag)}</td>`);   // lane states (100.118): + the group's state, as text
+        html.push(`<td class="row-actions row-actions-left">${actHtmlL}${pimS2HasCols(base) ? retireTag : pimStatesRowTag(base, idx, row, deleted, retireTag)}</td>`);   // lane states (100.118): + the group's state, as text -- lane states2 (100.132): a column of its own instead
       }
       if (showProvenance) {
         const owner = String(row.Owner || row.owner || '').trim().toLowerCase();
@@ -23932,6 +23936,7 @@
             : '<span title="This tenant&rsquo;s own row. The downlink never touches it." style="background:#eaeef2;color:#57606a;border-radius:10px;padding:1px 7px;font-size:10.5px;">local</span>') +
           '</td>');
       }
+      html.push(pimS2CellsHtml(base, p, idx, deleted));   // lane states2 (100.132)
       for (const col of visHeader) {
         const v = row[col] || '';
         const spec = colSpecs[col];
@@ -23996,6 +24001,7 @@
     }
     main.innerHTML = html.join('');
     pimGridRetireBannerBind();
+    pimS2AfterRender(base, p);   // lane states2 (100.132): the states of the groups / accounts, read when old
     // PIM 100.117: read the switch when this list has groups waiting to be deleted; only the note above the table is
     // redrawn when the answer arrives (a full redraw would take a cell being edited away).
     if (__retireRows.committed.length && isServer && !PIM_GROUP_RETIRE_P && (!PIM_GROUP_RETIRE_AT || (Date.now() - PIM_GROUP_RETIRE_AT) > 30000)) {
@@ -24122,6 +24128,7 @@
           // report as unresolvable, one run later, far from the click that caused it.
           if (!(await confirmGroupDeleteWithDependents(base, idx))) return;
           p.deletes.add(idx);
+          await pimS2OfferAdminMemberships(base, [idx]);   // lane states2 (100.132): an admin row's memberships, asked once
           // Per spec: per-row delete also clears that row from selection
           // (deleted rows can't be selected).
           if (p.selection) p.selection.delete(idx);
@@ -24423,6 +24430,7 @@
         const ok = await showConfirm('Take these rows out of PIM', msg, true);
         if (!ok) return;
         for (const i of go) p.deletes.add(i);
+        await pimS2OfferAdminMemberships(base, go);   // lane states2 (100.132): the admins' memberships, asked once
         p.selection.clear();
         markBadges();
         renderGrid(base);
@@ -39888,7 +39896,7 @@
     else if (/^\d{9,11}$/.test(s)) d = new Date(Number(s) * 1000);
     else { const t = Date.parse(s); if (!isNaN(t)) d = new Date(t); }
     if (!d || isNaN(d.getTime())) return s;
-    try { return fmtTime(d.toISOString()); } catch (e) { return d.toISOString().slice(0, 16).replace('T', ' ') + ' UTC'; }
+    try { return fmtTime(d); } catch (e) { return s; } // BRAND-2.10: the viewer's local zone, never a UTC suffix
   }
   function pimAdcleanCn(dn) {
     // The readable name of a distinguished name: its first part without "CN=".
@@ -40252,6 +40260,328 @@
     return api('POST', '/api/hybrid-ad/cleanup/also-delete', { groups: Array.isArray(groupNames) ? groupNames : [groupNames], reason: String(reason || '') });
   }
   // ===== lane adclean end =====
+  // ===== lane handover begin =====
+  // PIM 100.123 known gap (2026-10-13): an install made before 2.4.618 cannot delete in Active Directory until the customer
+  // re-runs Initialize-PimHybridWorkerAd.ps1 -AllowGroupCleanup (the worker's permission group lacks "Delete Group objects").
+  // Shown on Settings > Hybrid Active Directory ONLY when an approved clean-up item failed for exactly that reason
+  // (GET /api/hybrid-ad/cleanup/right-notice decides; failure class AD-CLEANUP-RIGHT-MISSING). PIM Manager never runs it:
+  // the two lines (download + run) carry THIS install's OU for new AD groups and the worker that reported.
+  // PURE: the card's HTML from the route's answer ('' = nothing to show).
+  function pimHandoverAdRightNoticeHtml(n) {
+    if (!n || !n.show || !Array.isArray(n.command) || !n.command.length) return '';
+    const esc = escapeHtml, cmd = n.command.join('\n'), gs = Array.isArray(n.groups) ? n.groups : [];
+    let h = '<div style="font-weight:600;margin-bottom:4px;">The hybrid worker may not delete groups in Active Directory yet</div>' +
+      '<div style="margin-bottom:6px;">' + gs.length + ' approved group' + (gs.length === 1 ? ' was' : 's were') + ' not deleted: Active Directory refused it, because the worker\'s permission group has no ' +
+      '"Delete Group objects" right on the OU for new AD groups' + (n.groupsOuKnown ? ' (<code>' + esc(n.groupsOu) + '</code>)' : '') + '. Nothing was deleted. ' +
+      'On a domain controller, as a domain administrator, run the two lines below. Fill in <code>-ComputerOu</code> and <code>-GmsaOu</code> with the values used at the install; ' +
+      'the script grants that one right and changes nothing else. The worker deletes the approved groups at its next run (about hourly). PIM Manager does not run this for you.</div>';
+    if (!n.groupsOuKnown) h += '<div style="color:#9a6700;margin-bottom:6px;">The OU for new AD groups is not set on this page: put the OU the PIM groups live in after <code>-GroupsOu</code>.</div>';
+    h += '<div class="gs-code"><pre id="setAdRightNoticeCmd" style="white-space:pre-wrap;word-break:break-all;">' + esc(cmd) + '</pre>' +
+      '<button type="button" id="setAdRightNoticeCopy" class="btn-sec">Copy</button>' +
+      // the links of what the server's command names; the card is about Initialize-PimHybridWorkerAd, so its link is
+      // there even when the server's text does not spell the file name out (never a command without its doc link)
+      (pimScriptDocLinksFor(cmd) || pimScriptDocLinksFor('Initialize-PimHybridWorkerAd.ps1')) + '</div>';
+    const out = Array.isArray(n.outsideGroupsOu) ? n.outsideGroupsOu : [];
+    if (out.length) h += '<div style="color:#9a6700;margin-top:6px;">' + out.length + ' of these group(s) lie outside that OU (' + out.map(x => '<code>' + esc(x) + '</code>').join(', ') +
+      '): the script grants the right on the OU for new AD groups only; their OU needs "Delete Group objects" for the worker\'s permission group as well.</div>';
+    h += '<details style="margin-top:6px;"><summary>The groups (' + gs.length + ')</summary><div style="font-size:11.5px;">' +
+      gs.map(g => '<span style="font-family:monospace;">' + esc(g.name) + '</span>' + (g.dn ? ' <span style="color:#57606a;">' + esc(g.dn) + '</span>' : '')).join('<br>') + '</div></details>' +
+      '<div style="color:#57606a;font-size:11px;margin-top:4px;">Failure class ' + esc(n.failureClass || 'AD-CLEANUP-RIGHT-MISSING') + '. The notice goes away by itself once the worker has deleted the groups.</div>';
+    return h;
+  }
+  async function pimHandoverAdRightNotice(host) {
+    if (!host || !isServer) return;
+    let n = null;
+    try { n = await api('GET', '/api/hybrid-ad/cleanup/right-notice'); } catch (e) { return; }   // not an Admin / no hybrid AD: no notice
+    const old = document.getElementById('setAdRightNotice'); if (old) old.remove();
+    const html = pimHandoverAdRightNoticeHtml(n);
+    if (!html || !document.body.contains(host)) return;
+    const box = document.createElement('div');
+    box.id = 'setAdRightNotice';
+    box.className = 'set-card';
+    box.style.cssText = 'margin:0 0 12px;padding:10px 12px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;font-size:12.5px;';
+    box.innerHTML = html;
+    host.insertBefore(box, host.firstChild);
+    const cp = document.getElementById('setAdRightNoticeCopy');
+    if (cp) cp.onclick = async () => { try { await navigator.clipboard.writeText(n.command.join('\n')); cp.textContent = 'Copied'; } catch (e) { cp.textContent = 'Select the text above and copy it'; } };
+  }
+  // ===== lane handover end =====
+  // ===== lane states2 begin =====
+  // PIM 100.132 (owner 2026-10-13 evening, settled by his screenshot of the Access view: "why dont we have it for all groups,
+  // accounts view"): a STATE COLUMN on every record list of the Access view -- Administrator accounts, the direct and
+  // indirect group lists, and "Who gets what" -- for every group AND every account a row names, in the SAME words as the
+  // group states (100.118). Where a row names both (who gets which group), both states are shown in two columns.
+  //   * the words, the colour (tone) and the sort rank are the SERVER'S answer (GET /api/group-states, GET /api/account-
+  //     states -- stored facts only); a failed read is "Not known" on every row, never a guessed state;
+  //   * a real column of the table: the list menu filters it, hides / moves it, and a click on its header sorts it;
+  //   * owner: "maybe sort it so issue accounts/groups are top" -- the DEFAULT order puts the rows with a problem first (by
+  //     the server's rank), then the rest in the list's usual order; a header click wins, and the third click on the same
+  //     header brings the default back;
+  //   * owner: "+ use colors" -- each state is a coloured chip (class st-tone-<tone>); the colour only repeats the words;
+  //   * a state is information: nothing here writes, stages or removes anything, and no number or dot goes in the menu.
+  // `var` and function declarations only: the table can be drawn before this block has run.
+  var PIM_ASTATES, PIM_ASTATES_AT, PIM_ASTATES_P, PIM_ASTATES_ERR, PIM_ASTATES_IDX, PIM_S2_GTAG, PIM_S2_GTAG_SRC, PIM_S2_BASEKEYS;
+  function pimS2Allowed() { try { return pimStatesAllowed(); } catch (_) { return false; } }
+  function pimS2AcctLoad(force) {
+    if (!pimS2Allowed()) return Promise.resolve(null);
+    if (!force && PIM_ASTATES_AT && (Date.now() - PIM_ASTATES_AT) < 30000) return Promise.resolve(PIM_ASTATES || null);
+    if (PIM_ASTATES_P) return PIM_ASTATES_P;
+    PIM_ASTATES_P = api('GET', '/api/account-states')
+      .then(d => {
+        if (d && d.ok === true && Array.isArray(d.accounts) && d.counts) { PIM_ASTATES = d; PIM_ASTATES_ERR = ''; }
+        else { PIM_ASTATES = null; PIM_ASTATES_ERR = String((d && d.error) || 'the server did not answer with the account states'); }
+      })
+      .catch(e => { PIM_ASTATES = null; PIM_ASTATES_ERR = String((e && e.body && e.body.error) || (e && e.message) || 'the request failed'); })
+      .then(() => { PIM_ASTATES_AT = Date.now(); PIM_ASTATES_P = null; PIM_ASTATES_IDX = null; return PIM_ASTATES || null; });
+    return PIM_ASTATES_P;
+  }
+  function pimS2AcctKey(v) { let s = String(v || '').trim(); const i = s.indexOf('@'); if (i >= 0) s = s.substring(0, i); return s.toLowerCase(); }
+  function pimS2AcctIndex() {
+    if (PIM_ASTATES_IDX) return PIM_ASTATES_IDX;
+    const ix = {};
+    ((PIM_ASTATES && PIM_ASTATES.accounts) || []).forEach(a => { if (a && a.key) ix[String(a.key)] = a; });
+    PIM_ASTATES_IDX = ix;
+    return ix;
+  }
+  // group tag (lower) -> the group's state; a group with a stored row wins over one that is only staged / not managed
+  function pimS2GroupByTag() {
+    if (PIM_S2_GTAG && PIM_S2_GTAG_SRC === PIM_GSTATES) return PIM_S2_GTAG;
+    const ix = {};
+    ((PIM_GSTATES && PIM_GSTATES.groups) || []).forEach(g => {
+      const t = String((g && g.tag) || '').trim().toLowerCase();
+      if (!t) return;
+      if (!ix[t] || (g.hasRow && !ix[t].hasRow)) ix[t] = g;
+    });
+    PIM_S2_GTAG = ix; PIM_S2_GTAG_SRC = PIM_GSTATES;
+    return ix;
+  }
+  // The rank and tone of a state when the server did not send one (the page's own two states): the server's table, copied.
+  function pimS2RankOf(id) {
+    const m = { 'create-failed': 1, 'missing': 2, 'unknown': 3, 'marked-delete': 4, 'not-managed': 5, 'not-checked': 6, 'waiting-create': 7, 'waiting-disable': 7,
+      'waiting-commit': 8, 'deleted-row-left': 9, 'deleted-gone': 9, 'managed': 10, 'active': 10, 'disabled': 10, 'ad-only': 10 };
+    return Object.prototype.hasOwnProperty.call(m, id) ? m[id] : 3;
+  }
+  function pimS2ToneOf(id) {
+    if (id === 'create-failed' || id === 'missing') return 'bad';
+    if (id === 'waiting-create' || id === 'waiting-commit' || id === 'waiting-disable') return 'info';
+    if (id === 'deleted-row-left' || id === 'deleted-gone' || id === 'ad-only') return 'muted';
+    if (id === 'managed' || id === 'active' || id === 'disabled') return 'ok';
+    return 'warn';
+  }
+  function pimS2Unknown(reason) { return { state: 'unknown', label: 'Not known', tone: 'warn', rank: 3, reason: String(reason || '') }; }
+  // Which state columns a record list gets: [{ label, kind: 'group-def' | 'group-tag' | 'account', cols }]
+  function pimS2Cols(base) {
+    try {
+      if (PIM_GROUP_DEF_ENTITIES.indexOf(base) >= 0) return [{ label: 'State', kind: 'group-def', cols: ['GroupName'] }];
+      if (base === 'Account-Definitions-Admins') return [{ label: 'State', kind: 'account', cols: ['UserPrincipalName', 'UserName'] }];
+      if (base === 'PIM-Assignments-Admins') return [{ label: 'Group state', kind: 'group-tag', cols: ['GroupTag'] }, { label: 'Account state', kind: 'account', cols: ['Username', 'UserName', 'UserPrincipalName'] }];
+      if (base === 'PIM-Assignments-Groups') return [{ label: 'Group state', kind: 'group-tag', cols: ['TargetGroupTag'] }, { label: 'Member group state', kind: 'group-tag', cols: ['SourceGroupTag'] }];
+      if (PIM_DELEGATION_ENTITIES.indexOf(base) >= 0) return [{ label: 'Group state', kind: 'group-tag', cols: ['GroupTag'] }];
+    } catch (_) { }
+    return [];
+  }
+  function pimS2HasCols(base) { return pimS2Allowed() && pimS2Cols(base).length > 0; }
+  function pimS2IsCol(c) { return /^__s2:\d+$/.test(String(c || '')); }
+  function pimS2First(row, cols) { for (const c of cols) { const v = String((row && row[c]) || '').trim(); if (v) return v; } return ''; }
+  // The state of one column of one row; null = nothing to say (no group / account on the row, or the answer is on its way).
+  function pimS2State(base, p, idx, spec) {
+    const row = (p && p.rows) ? p.rows[idx] : null;
+    if (!row || !spec) return null;
+    if (spec.kind === 'group-def') { try { return pimStatesRowState(base, p, idx); } catch (_) { return null; } }
+    const v = pimS2First(row, spec.cols);
+    if (!v) return null;
+    if (spec.kind === 'group-tag') {
+      if (!PIM_GSTATES_AT) return null;
+      if (!PIM_GSTATES) return pimS2Unknown('The state of the groups could not be read (' + String(PIM_GSTATES_ERR || 'no answer') + ').');
+      return pimS2GroupByTag()[v.toLowerCase()] || pimS2Unknown('No stored group definition has the tag ' + v + ', so the state of its group is not known.');
+    }
+    // account
+    const key = pimS2AcctKey(v);
+    if (base === 'Account-Definitions-Admins' && p.baseline) {
+      if (!PIM_S2_BASEKEYS) PIM_S2_BASEKEYS = new WeakMap();
+      let ks = PIM_S2_BASEKEYS.get(p.baseline);
+      if (!ks) { ks = new Set(p.baseline.map(r => pimS2AcctKey(pimS2First(r, spec.cols))).filter(Boolean)); PIM_S2_BASEKEYS.set(p.baseline, ks); }
+      if (!ks.has(key)) return { state: 'waiting-commit', label: 'Waiting for commit', tone: 'info', rank: 8, reason: 'Staged here and not committed. Nothing happens until it is committed under Pending changes.' };
+    }
+    if (!PIM_ASTATES_AT) return null;
+    if (!PIM_ASTATES) return pimS2Unknown('The state of the administrator accounts could not be read (' + String(PIM_ASTATES_ERR || 'no answer') + ').');
+    return pimS2AcctIndex()[key] || pimS2Unknown('No administrator row names the account ' + v + ', so its state is not known.');
+  }
+  function pimS2Chip(g, kind) {
+    if (!g) return '';
+    const tone = String(g.tone || pimS2ToneOf(g.state));
+    const tip = pimStatesText(g.reason) + (g.stagedText ? ' ' + pimStatesText(g.stagedText) : '') + (g.scheduledUtc ? ' (scheduled ' + pimStatesText(g.scheduledUtc) + ')' : '');
+    const cls = (kind === 'account' ? 'acct-state' : 'grp-state') + ' st-chip st-tone-' + tone.replace(/[^a-z-]/g, '');
+    return '<span class="' + cls + '" data-state="' + escapeHtml(String(g.state)) + '" data-tone="' + escapeHtml(tone) + '" title="' + escapeHtml(tip) + '" style="' + pimStatesTone(tone) +
+      'border-radius:10px;padding:1px 7px;font-size:10.5px;font-weight:600;white-space:nowrap;">' + escapeHtml(String(g.label || g.state)) + '</span>';
+  }
+  function pimS2RankOfState(g) { return g ? (Number(g.rank) > 0 ? Number(g.rank) : pimS2RankOf(g.state)) : 99; }
+  // A row's place in the default order: its most urgent state; a row with no state to show sorts with the normal rows (10).
+  function pimS2RowRank(base, p, idx) {
+    let best = 10;
+    pimS2Cols(base).forEach(spec => { const g = pimS2State(base, p, idx, spec); if (g) { const r = pimS2RankOfState(g); if (r < best) best = r; } });
+    return best;
+  }
+  // The table: the heads (sortable like every other column; data-col "__s2:<n>") and the cells.
+  function pimS2HeadHtml(base) {
+    if (!pimS2HasCols(base)) return '';
+    const gv = gridView(base);
+    return pimS2Cols(base).map((spec, i) => {
+      const c = '__s2:' + i;
+      const arrow = (gv.sortCol === c && gv.sortDir) ? (gv.sortDir > 0 ? ' &#x25B2;' : ' &#x25BC;') : '';
+      return '<th class="grid-sort-th s2-head" data-col="' + c + '" style="cursor:pointer;user-select:none;" title="The ' + escapeHtml(spec.label.toLowerCase()) +
+        ' in words, from what PIM Manager has stored (hover a state for why). Rows with a problem come first; click to sort.">' +
+        '<div class="grid-th-in" style="min-width:40px;">' + escapeHtml(spec.label) + arrow + '</div></th>';
+    }).join('');
+  }
+  function pimS2CellsHtml(base, p, idx, deleted) {
+    if (!pimS2HasCols(base)) return '';
+    return pimS2Cols(base).map((spec, i) => '<td class="s2-cell" data-s2="' + i + '" data-s2-kind="' + spec.kind + '" contenteditable="false" style="white-space:nowrap;">' +
+      (deleted ? '' : pimS2CellInner(base, p, idx, spec)) + '</td>').join('');
+  }
+  function pimS2CellInner(base, p, idx, spec) {
+    const g = pimS2State(base, p, idx, spec);
+    return pimS2Chip(g, spec.kind === 'account' ? 'account' : 'group') + (spec.kind === 'account' ? pimS2GoneExtraHtml(base, idx, g) : '');
+  }
+  // The order: a header sort on a state column sorts by the server's rank (then the words); no sort = problems first.
+  function pimS2SortOrder(base, p, order, c, d) {
+    const i = parseInt(String(c).split(':')[1], 10);
+    const spec = pimS2Cols(base)[i];
+    if (!spec) return order;
+    return order.map((x, pos) => ({ x, pos, g: pimS2State(base, p, x, spec) })).sort((a, b) => {
+      if (!a.g && b.g) return 1; if (a.g && !b.g) return -1;            // blanks last, whatever the direction
+      const r = (pimS2RankOfState(a.g) - pimS2RankOfState(b.g)) || String((a.g && a.g.label) || '').localeCompare(String((b.g && b.g.label) || ''));
+      return (r * d) || (a.pos - b.pos);
+    }).map(o => o.x);
+  }
+  // A row the person added here (not committed) stays at the top, where "+ Add row" puts it: it is what they are editing.
+  function pimS2DefaultOrder(base, p, order) {
+    if (!pimS2HasCols(base)) return order;
+    let added = {};
+    try { added = pendingRowStates(base).states || {}; } catch (_) { added = {}; }
+    return order.map((x, pos) => ({ x, pos, r: added[x] === 'added' ? 0 : pimS2RowRank(base, p, x) })).sort((a, b) => (a.r - b.r) || (a.pos - b.pos)).map(o => o.x);
+  }
+  // After every draw of a list: fills nothing new (the cells were drawn with what is known), hides the older "waiting to
+  // be deleted" tag where the state says it, and reads the states when they are older than 30 s. When the answer arrives
+  // the list is drawn again (problems first) -- unless somebody is typing in it, then only the state cells are filled.
+  function pimS2AfterRender(base, p) {
+    if (!p || !pimS2HasCols(base)) return;
+    const main = document.getElementById('gridMain');
+    if (!main) return;
+    pimS2HideOldTags(base, p, main);
+    pimS2BindGoneButtons(base, main);
+    const specs = pimS2Cols(base);
+    const needG = specs.some(s => s.kind !== 'account'), needA = specs.some(s => s.kind === 'account');
+    const staleG = needG && !PIM_GSTATES_P && (!PIM_GSTATES_AT || (Date.now() - PIM_GSTATES_AT) > 30000);
+    const staleA = needA && !PIM_ASTATES_P && (!PIM_ASTATES_AT || (Date.now() - PIM_ASTATES_AT) > 30000);
+    const waits = [];
+    if (staleG || (needG && PIM_GSTATES_P)) waits.push(staleG ? pimStatesLoad(true) : PIM_GSTATES_P);
+    if (staleA || (needA && PIM_ASTATES_P)) waits.push(staleA ? pimS2AcctLoad(true) : PIM_ASTATES_P);
+    if (!waits.length) return;
+    Promise.all(waits).then(() => {
+      if (currentGridBase !== base || !pendingChanges[base]) return;
+      const m = document.getElementById('gridMain');
+      const typing = !!(m && document.activeElement && m.contains(document.activeElement) && document.activeElement !== document.body);
+      if (!typing) { renderGrid(base); return; }
+      pimS2FillCells(base, pendingChanges[base], m);
+    });
+  }
+  function pimS2FillCells(base, p, main) {
+    const specs = pimS2Cols(base);
+    main.querySelectorAll('table.grid tbody tr[data-idx] td.s2-cell').forEach(td => {
+      const tr = td.parentElement; const idx = parseInt(tr.getAttribute('data-idx'), 10); const i = parseInt(td.getAttribute('data-s2'), 10);
+      if (isNaN(idx) || !specs[i] || (p.deletes && p.deletes.has(idx))) return;
+      td.innerHTML = pimS2CellInner(base, p, idx, specs[i]);
+    });
+    pimS2HideOldTags(base, p, main);
+    pimS2BindGoneButtons(base, main);
+  }
+  function pimS2HideOldTags(base, p, main) {
+    if (PIM_GROUP_DEF_ENTITIES.indexOf(base) < 0) return;
+    main.querySelectorAll('table.grid tbody tr[data-idx]').forEach(tr => {
+      const old = tr.querySelector('.row-retire-wait[data-retire="waiting"]');
+      if (!old) return;
+      const chip = tr.querySelector('td.s2-cell .grp-state');
+      const s = chip ? chip.getAttribute('data-state') : '';
+      old.style.display = (s === 'marked-delete' || s === 'deleted-row-left') ? 'none' : '';
+    });
+  }
+  // ---- an admin row taken out: its memberships (owner 2026-10-13, screenshot of a commit refused with PIM-FK-002) -------
+  // Taking an admin row out while PIM-Assignments-Admins rows still name it is refused at commit (PIM-FK-002 -- right, and
+  // unchanged). So the page counts those rows when the row is taken out (the row's x, "Take N row(s) out of PIM", the
+  // state's own button) and asks ONCE whether they go too. Yes = they are staged as rows taken out in the same step (rows
+  // only: for an account that is gone nothing happens in the tenant; for one that exists it is the ordinary staged removal,
+  // with every commit check and guard). No = only the admin row is staged, and the commit refuses as before. Nothing is
+  // taken out without the click.
+  async function pimS2AdminMemberships(adminRows) {
+    const want = new Set();
+    (adminRows || []).forEach(r => {
+      ['UserPrincipalName', 'UserName'].forEach(c => { const v = String((r && r[c]) || '').trim().toLowerCase(); if (v) { want.add(v); want.add(pimS2AcctKey(v)); } });
+    });
+    const out = [];
+    if (!want.size) return out;
+    const b = 'PIM-Assignments-Admins';
+    let data = null;
+    try { data = await loadCsv(b); } catch (_) { data = null; }
+    const header = (data && Array.isArray(data.header) && data.header.length) ? data.header : [];
+    const rows = (data && Array.isArray(data.rows)) ? data.rows : [];
+    if (!rows.length && !(pendingChanges[b] && pendingChanges[b].rows && pendingChanges[b].rows.length)) return out;
+    ensurePending(b, header, rows);
+    const p = pendingChanges[b];
+    (p.rows || []).forEach((r, i) => {
+      if (p.deletes && p.deletes.has(i)) return;
+      const u = String((r && (r.Username || r.UserName)) || '').trim().toLowerCase();
+      if (u && (want.has(u) || want.has(pimS2AcctKey(u)))) out.push({ base: b, idx: i, row: r });
+    });
+    return out;
+  }
+  // Resolves the number of memberships staged as taken out (0 when there were none or the person said no).
+  async function pimS2OfferAdminMemberships(base, idxs) {
+    if (base !== 'Account-Definitions-Admins' || !isServer) return 0;
+    const p = pendingChanges[base];
+    const admins = (idxs || []).map(i => p && p.rows ? p.rows[i] : null).filter(Boolean);
+    let deps = [];
+    try { deps = await pimS2AdminMemberships(admins); } catch (_) { deps = []; }
+    if (!deps.length) return 0;
+    const names = admins.map(r => String(r.UserPrincipalName || r.UserName || '').trim()).filter(Boolean);
+    const who = names.length === 1 ? names[0] : (names.length + ' administrators');
+    const n = deps.length;
+    const html = '<p id="s2MemAsk" data-count="' + n + '"><b>' + escapeHtml(who) + (names.length === 1 ? ' has ' : ' have ') + n + ' membership' + (n === 1 ? '' : 's') +
+      ' in PIM Manager</b> -- take ' + (n === 1 ? 'it' : 'them') + ' out too?</p>' +
+      '<p>' + deps.slice(0, 8).map(d => escapeHtml(String(d.row.Username || d.row.UserName || '') + ' -> ' + String(d.row.GroupTag || '') + (d.row.AssignmentType ? ' (' + d.row.AssignmentType + ')' : ''))).join('<br>') + (n > 8 ? '<br>...' : '') + '</p>' +
+      '<p style="color:#57606a">Yes = these membership rows are taken out in the same step. For an account that is gone nothing happens in the tenant; ' +
+      'for one that still exists the membership is removed by the next engine run, under the normal commit checks. No = only the administrator row is ' +
+      'taken out, and the commit refuses it while a membership still names it. Nothing happens until you <b>Commit</b> under <b>Pending changes</b>.</p>';
+    const yes = await showConfirm('Take the memberships out too?', html, true, 'Yes, take ' + (n === 1 ? 'it' : 'them') + ' out too');
+    if (!yes) return 0;
+    deps.forEach(d => { const pd = pendingChanges[d.base]; if (pd) { pd.deletes.add(d.idx); if (pd.selection) pd.selection.delete(d.idx); } });
+    try { markBadges(); } catch (_) { }
+    return n;
+  }
+  // The state of a gone account names its memberships, and its row offers the one step that takes both out.
+  function pimS2GoneExtraHtml(base, idx, g) {
+    if (base !== 'Account-Definitions-Admins' || !g || g.state !== 'deleted-gone' || !(Number(g.memberships) > 0)) return '';
+    const n = Number(g.memberships);
+    return ' <span class="s2-mem-left">' + n + ' membership' + (n === 1 ? '' : 's') + ' left</span> <button type="button" class="s2-acct-out" data-idx="' + idx +
+      '" title="Take this row out of PIM Manager together with the ' + n + ' membership row(s) that still name it. Staged; nothing happens until you commit.">Take out with its memberships</button>';
+  }
+  function pimS2BindGoneButtons(base, main) {
+    main.querySelectorAll('button.s2-acct-out').forEach(btn => {
+      btn.onclick = async (ev) => {
+        if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+        const idx = parseInt(btn.getAttribute('data-idx'), 10);
+        const p = pendingChanges[base];
+        if (!p || isNaN(idx) || p.deletes.has(idx)) return;
+        const n = await pimS2OfferAdminMemberships(base, [idx]);
+        if (!n) return;               // said no: nothing is staged from this button
+        p.deletes.add(idx);
+        if (p.selection) p.selection.delete(idx);
+        try { markBadges(); } catch (_) { }
+        renderGrid(base);
+      };
+    });
+  }
+  // ===== lane states2 end =====
 </script>
 </body>
 </html>

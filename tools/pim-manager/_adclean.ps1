@@ -754,7 +754,8 @@ function Invoke-PimAdCleanRoute {
     # The ONE entry point of the route block in Open-PimManager.ps1. $null = not one of this file's routes.
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Method, $Body = $null)
     $mine = @('GET /api/hybrid-ad/cleanup', 'POST /api/hybrid-ad/cleanup/approve', 'POST /api/hybrid-ad/cleanup/withdraw', 'POST /api/hybrid-ad/cleanup/also-delete', 'GET /api/hybrid-ad/waiting',
-        'POST /api/hybrid-ad/waiting/decide', 'GET /api/hybrid-ad/server-groups/waiting', 'POST /api/hybrid-ad/server-groups/approve', 'GET /api/settings/hybrid-ad-discovery', 'PUT /api/settings/hybrid-ad-discovery', 'POST /api/hybrid-ad/discovery/preview')
+        'POST /api/hybrid-ad/waiting/decide', 'GET /api/hybrid-ad/server-groups/waiting', 'POST /api/hybrid-ad/server-groups/approve', 'GET /api/settings/hybrid-ad-discovery', 'PUT /api/settings/hybrid-ad-discovery', 'POST /api/hybrid-ad/discovery/preview',
+        'GET /api/hybrid-ad/cleanup/right-notice')   # lane handover: the "Delete Group objects" notice (Get-PimAdCleanRightNoticeView, end of file)
     if ("$Method $Path" -notin $mine) { return $null }
     # an edition without the hybrid Active Directory code (its engine files are not shipped): say so, never half-work
     if (-not (Get-Command Get-PimHybridAdCleanupDecision -ErrorAction SilentlyContinue) -or -not (Get-Command Get-PimHybridAdDiscoverySettingCatalog -ErrorAction SilentlyContinue)) {
@@ -772,6 +773,91 @@ function Invoke-PimAdCleanRoute {
         'GET /api/settings/hybrid-ad-discovery' { return (Get-PimAdCleanDiscoverySettingsView) }
         'PUT /api/settings/hybrid-ad-discovery' { return (Invoke-PimAdCleanDiscoverySettingsSave -Body $Body) }
         'POST /api/hybrid-ad/discovery/preview' { return (Invoke-PimAdCleanDiscoveryPreview -Body $Body) }
+        'GET /api/hybrid-ad/cleanup/right-notice' { return (Get-PimAdCleanRightNoticeView) }
     }
     return $null
+}
+
+# =====================================================================================================================
+# lane handover (PIM 100.123 known gap, 2026-10-13): the AD clean-up cannot delete anything at an install made before
+# 2.4.618 until the CUSTOMER re-runs Initialize-PimHybridWorkerAd.ps1 -AllowGroupCleanup -- the worker's gMSA lacks
+# "Delete Group objects" on the groups OU. PIM Manager never runs it (the customer runs every deployment command): it
+# SHOWS the exact two-line command for THIS install, and only when an approved clean-up item failed for that reason.
+#   GET /api/hybrid-ad/cleanup/right-notice   (Admin)  -> { show; failureClass; groups[]; groupsOu; groupsOuKnown;
+#                                                           workerHost; outsideGroupsOu[]; command (two lines); text }
+# The failure catalog class is AD-CLEANUP-RIGHT-MISSING (engine/_shared/PIM-FailureCatalog.ps1), same command.
+# =====================================================================================================================
+function Test-PimAdCleanRightMissingReason {
+    # PURE. TRUE when a clean-up result's reason is the worker's "may not delete" (access denied on the delete), the
+    # sentence Invoke-PimHybridAdCleanupJob writes (engine/hybrid-ad/PIM-HybridAdCleanup.ps1), or a bare access-denied
+    # answer to a deletion. Any other failure (the group changed, the server is unreachable, ...) is FALSE.
+    param([AllowNull()][string]$Reason)
+    $r = "$Reason"
+    if (-not $r.Trim()) { return $false }
+    if ($r -match "(?i)may not delete groups in that OU|'Delete Group objects'") { return $true }
+    $denied = [bool]($r -match '(?i)access is denied|access denied|insufficient access rights|unauthorizedaccess|0x80070005|E_ACCESSDENIED')
+    return ($denied -and $r -match '(?i)\bdelet')
+}
+
+function ConvertTo-PimAdCleanPsLiteral {
+    # PURE. A value as a single-quoted PowerShell string ('' inside doubles the quote): safe to paste, never expanded.
+    param([AllowNull()][string]$Value)
+    return "'" + ("$Value" -replace "'", "''") + "'"
+}
+
+function Get-PimAdCleanRightNoticeCommand {
+    # PURE. The two lines the customer runs on a domain controller (download + run), with THIS install's values: the OU
+    # for new AD groups (setting HybridAdGroupsOu) and the worker computer that reported. -ComputerOu / -GmsaOu are not
+    # stored by PIM Manager: they are the values used at the install (angle-bracket placeholders the person fills in).
+    param([string]$GroupsOu = '', [string]$WorkerHost = '')
+    $ou = "$GroupsOu".Trim(); $wh = "$WorkerHost".Trim()
+    $run = '.\Initialize-PimHybridWorkerAd.ps1 -WorkerComputerName ' + $(if ($wh -match '^[A-Za-z0-9-]{1,15}$') { $wh } else { '<worker computer name>' }) +
+        " -ComputerOu '<OU of the worker computer, as at install>' -GmsaOu '<OU of the gMSA, as at install>' -GroupsOu " +
+        $(if ($ou) { ConvertTo-PimAdCleanPsLiteral $ou } else { "'<OU for new AD groups>'" }) + ' -AllowGroupCleanup'
+    if (Get-Command Get-PimSupportScriptCommand -ErrorAction SilentlyContinue) { return @(Get-PimSupportScriptCommand -Script 'Initialize-PimHybridWorkerAd' -Run @($run)) }
+    return @('Invoke-WebRequest https://invardia.com/support/pim/Initialize-PimHybridWorkerAd.ps1 -OutFile Initialize-PimHybridWorkerAd.ps1', $run)
+}
+
+function Get-PimAdCleanRightNotice {
+    <#
+      PURE. From the worker's result record ('AdCleanupResult': { items: { key: { name, dn, status, reason, atEpoch } } })
+      and the stored groups OU: show = $true ONLY when at least one item's CURRENT status is 'failed' with the access-denied
+      reason (Test-PimAdCleanRightMissingReason). A deleted / waiting / expired / skipped item, or a failure for any other
+      reason, shows nothing. outsideGroupsOu = failed groups whose DN is not below the groups OU (the script grants the
+      right on that OU only; their OU needs the same right granted there).
+    #>
+    param([AllowNull()][object]$ResultDoc, [string]$GroupsOu = '', [string]$WorkerHost = '')
+    $ou = "$GroupsOu".Trim()
+    $items = ConvertTo-PimHybridAdCleanupMap (Get-PimHybridAdCleanupField $ResultDoc 'items')
+    $hit = New-Object System.Collections.Generic.List[object]
+    foreach ($k in @($items.Keys)) {
+        $x = $items[$k]
+        if ("$(Get-PimHybridAdCleanupField $x 'status')" -ne 'failed') { continue }
+        $reason = "$(Get-PimHybridAdCleanupField $x 'reason')"
+        if (-not (Test-PimAdCleanRightMissingReason -Reason $reason)) { continue }
+        $hit.Add([ordered]@{ name = "$(Get-PimHybridAdCleanupField $x 'name')"; dn = "$(Get-PimHybridAdCleanupField $x 'dn')"; reason = $reason; atEpoch = (Get-PimHybridAdCleanupField $x 'atEpoch') })
+    }
+    $outside = @()
+    if ($ou) { $outside = @($hit | Where-Object { $_.dn -and -not ("$($_.dn)".ToLowerInvariant().EndsWith(',' + $ou.ToLowerInvariant())) } | ForEach-Object { $_.name }) }
+    $show = [bool]($hit.Count -gt 0)
+    $cmd = @(); $text = ''
+    if ($show) {
+        $cmd = @(Get-PimAdCleanRightNoticeCommand -GroupsOu $ou -WorkerHost $WorkerHost)
+        $text = "The hybrid worker may not delete groups in Active Directory: $($hit.Count) approved group(s) were not deleted. Its permission group lacks 'Delete Group objects' on the OU for new AD groups. On a domain controller, as a domain administrator, run the two lines below (the same values as at the install for -ComputerOu and -GmsaOu); it grants that one right and changes nothing else. The worker deletes the approved groups at its next run."
+    }
+    return [ordered]@{ show = $show; failureClass = 'AD-CLEANUP-RIGHT-MISSING'; groups = $hit.ToArray(); groupsOu = $ou; groupsOuKnown = [bool]$ou
+        workerHost = "$WorkerHost".Trim(); outsideGroupsOu = @($outside); command = @($cmd); text = $text }
+}
+
+function Get-PimAdCleanRightNoticeView {
+    # GET /api/hybrid-ad/cleanup/right-notice -- Admin (the same reader as the clean-up list). Reads only.
+    $me = Get-PimAdCleanCaller
+    if (-not $me.admin) { return @{ status = 403; body = [ordered]@{ error = 'Admin role required to see the Active Directory clean-up notice.' } } }
+    try {
+        $store = Get-PimAdCleanStore
+        $resDoc = $null; try { $resDoc = ConvertFrom-PimAdCleanJson "$(& $store.ReadRaw 'AdCleanupResult')" } catch { $resDoc = $null }
+        $ou = ''; try { $ou = "$(& $store.ReadText 'HybridAdGroupsOu')".Trim() } catch { $ou = '' }
+        $wh = ''; try { $rep = Read-PimAdCleanCandidateReport; $wh = "$($rep.host)" } catch { $wh = '' }
+        return @{ status = 200; body = (Get-PimAdCleanRightNotice -ResultDoc $resDoc -GroupsOu $ou -WorkerHost $wh) }
+    } catch { return @{ status = 503; body = [ordered]@{ error = "the clean-up notice could not be read: $($_.Exception.Message)" } } }
 }
