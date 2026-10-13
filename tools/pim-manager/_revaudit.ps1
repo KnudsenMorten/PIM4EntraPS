@@ -194,8 +194,9 @@ function Get-PimRevauditAdminLevel {
 function Get-PimRevauditCallerLevel {
     <#
       PURE. The caller's own level (0 = most privileged), or $null when he has none: the MORE restrictive (the higher
-      number) of his portal profile's levelMax and the level of his own admin row. Neither known = no level ceiling (an
-      administrator of the whole tenant, as Test-PimPortalCanDeleteAdmin reads an Admin without a profile).
+      number) of his portal profile's levelMax and the level of his own admin row. Neither known = $null: since CODE REVIEW 1
+      FIXES 2026-10-13 (decision 55) such a caller may NOT touch a target at L0 / L1 or of an unknown level
+      (Get-PimRevauditLevelRefusal) -- it used to mean "no ceiling at all".
     #>
     param([AllowNull()][object]$Profile, [string]$Identity = '', [object[]]$Admins = @())
     $levels = New-Object System.Collections.Generic.List[int]
@@ -320,6 +321,176 @@ function Test-PimRevauditScope {
     return ''
 }
 
+function Get-PimRevauditLevelRefusal {
+    <#
+      PURE. THE LEVEL RULE, in ONE place (CODE REVIEW 1 FIXES 2026-10-13, owner decisions (36), (52), (55)): a caller below
+      SuperAdmin never acts on a target at a MORE privileged level (level 0 = most privileged). $null = allowed, else
+      @{ code; reason }. Used by the revoke, the PUT commit's removals, Remove from PIM and Delete account.
+        * the target is a defined admin whose level cannot be read -> refused (level-unknown), whoever asks
+        * the caller has a level (his profile's levelMax / his own admin row): target level < his -> more-privileged
+        * the caller has NO level (decision 55): he may not touch L0 or L1, nor a target whose level is not known
+          (caller-level-unknown -- it needs a SuperAdmin, or a defined level for him); L2 and below as before
+    #>
+    param([AllowNull()][object]$CallerLevel, [AllowNull()][object]$TargetLevel, [bool]$TargetLevelUnreadable = $false, [string]$Who = 'the target', [string]$Verb = 'revoke')
+    if ($TargetLevelUnreadable) {
+        $cl = if ($null -ne $CallerLevel) { "your level L$CallerLevel" } else { 'your level' }
+        return @{ code = 'level-unknown'; reason = "the level of '$Who' cannot be read from the admin's row, so it cannot be compared with $cl -- not done (set Level on the admin, or ask a SuperAdmin)" }
+    }
+    if ($null -eq $CallerLevel) {
+        if ($null -eq $TargetLevel) {
+            return @{ code = 'caller-level-unknown'; reason = "your own level is not defined (no portal profile level and no admin row of your own) and the level of '$Who' is not known either, so it cannot be shown to be level 2 or below -- a SuperAdmin can $Verb it, or define your level" }
+        }
+        if ([int]$TargetLevel -le 1) {
+            return @{ code = 'caller-level-unknown'; reason = "'$Who' is level L$TargetLevel and your own level is not defined (no portal profile level and no admin row of your own) -- level 0 and level 1 need a caller with a defined level at or above it, or a SuperAdmin" }
+        }
+        return $null
+    }
+    if ($null -ne $TargetLevel -and [int]$TargetLevel -lt [int]$CallerLevel) {
+        return @{ code = 'more-privileged'; reason = "'$Who' is level L$TargetLevel, more privileged than your level L$CallerLevel -- a level-$CallerLevel admin cannot $Verb it (ask an admin at level $TargetLevel or above, or a SuperAdmin)" }
+    }
+    return $null
+}
+
+function Test-PimRevauditAdminTarget {
+    <#
+      PURE. CODE REVIEW 1 FIXES 2026-10-13, owner decisions (52) + (55): may this caller DELETE (-Action delete) or REMOVE FROM
+      PIM (-Action remove) this admin account? THE SAME RULE AS REVOKE: a SuperAdmin anything; otherwise the caller's scope
+      (his portal profile: Test-PimPortalCanDeleteAdmin for a delete, Test-PimPortalCanManageAdmin for a remove) and the level
+      rule (Get-PimRevauditLevelRefusal: the same or a less privileged level; no level of his own = not L0 / L1).
+      -Caller @{ role; isSuperAdmin; identity; profile; level }. Returns @{ allowed; code; reason }.
+    #>
+    param([hashtable]$Caller, [AllowNull()][object]$AdminRow, [ValidateSet('delete', 'remove')][string]$Action = 'delete')
+    $no = { param($c, $r) [pscustomobject]@{ allowed = $false; code = $c; reason = $r } }
+    if ($null -eq $Caller) { return (& $no 'role' 'who is asking is not known') }
+    if ([bool]$Caller.isSuperAdmin) { return [pscustomobject]@{ allowed = $true; code = 'superadmin'; reason = 'SuperAdmin' } }
+    if ($null -eq $AdminRow) { return (& $no 'no-admin' 'the admin row was not found') }
+    $role = "$($Caller.role)"
+    $prof = $Caller.profile
+    if ($role -ne 'Admin' -and $null -eq $prof) { return (& $no 'role' "an Admin role or a delegated profile is needed -- you are signed in as $(if ($role) { $role } else { 'Reader' })") }
+    $name = Get-PimRevauditRowValue $AdminRow @('UserPrincipalName'); if (-not $name) { $name = Get-PimRevauditRowValue $AdminRow @('UserName') }
+    # Fix round r619: the LEVEL rule is asked FIRST, so a more privileged target is refused as 'more-privileged' (with both
+    # levels) whatever the profile says; the scope below still refuses everything outside it. Both must pass -- unchanged.
+    $tl = Get-PimRevauditAdminLevel -AdminRow $AdminRow
+    $lv = Get-PimRevauditLevelRefusal -CallerLevel $Caller.level -TargetLevel $tl -TargetLevelUnreadable ($null -eq $tl) -Who $name -Verb $(if ($Action -eq 'delete') { 'delete' } else { 'remove' })
+    if ($lv) { return (& $no $lv.code $lv.reason) }
+    if ($null -ne $prof) {
+        if ($Action -eq 'delete') {
+            if (-not (Get-Command Test-PimPortalCanDeleteAdmin -ErrorAction SilentlyContinue)) { return (& $no 'out-of-scope' 'the scope library is not loaded') }
+            $sc = Test-PimPortalCanDeleteAdmin -Profile $prof -AdminRow $AdminRow
+            if (-not $sc.allowed) { return (& $no 'out-of-scope' "outside your scope -- $($sc.reason)") }
+        } else {
+            if (-not (Get-Command Test-PimPortalCanManageAdmin -ErrorAction SilentlyContinue)) { return (& $no 'out-of-scope' 'the scope library is not loaded') }
+            $short = Get-PimRevauditRowValue $AdminRow @('UserName')
+            if (-not ((Test-PimPortalCanManageAdmin -Profile $prof -AdminName "$name") -or ($short -and (Test-PimPortalCanManageAdmin -Profile $prof -AdminName $short)))) { return (& $no 'out-of-scope' "outside your scope -- your profile may not act on '$name'") }
+        }
+    }
+    return [pscustomobject]@{ allowed = $true; code = 'ok'; reason = "within your scope and level (L$(if ($null -ne $Caller.level) { $Caller.level } else { '?' }) -> L$tl)" }
+}
+
+function Test-PimRevauditAdminSponsor {
+    <#
+      PURE. Owner decision (52): "a dept manager should also be alow to propose a deletion of an consultant which he is the
+      sponsor of". Is -Identity a SPONSOR of this admin? An owner of the admin's sponsor department (Department ->
+      PIM-Definitions-Departments.Owners, -DepartmentOwners @{ lower department -> owners text }), or the admin row's own
+      ManagerEmail. Names are compared case-insensitively, whole entries only.
+    #>
+    param([string]$Identity = '', [AllowNull()][object]$AdminRow, [hashtable]$DepartmentOwners = @{})
+    $me = "$Identity".Trim().ToLowerInvariant()
+    if (-not $me -or $me -eq '<unauthenticated>' -or $null -eq $AdminRow) { return $false }
+    $names = New-Object System.Collections.Generic.List[string]
+    $dep = (Get-PimRevauditRowValue $AdminRow @('Department')).ToLowerInvariant()
+    if ($dep -and $DepartmentOwners -and $DepartmentOwners.ContainsKey($dep)) { foreach ($x in ("$($DepartmentOwners[$dep])" -split '[|;,]')) { if ("$x".Trim()) { $names.Add("$x".Trim().ToLowerInvariant()) } } }
+    foreach ($x in ((Get-PimRevauditRowValue $AdminRow @('ManagerEmail')) -split '[|;,]')) { if ("$x".Trim()) { $names.Add("$x".Trim().ToLowerInvariant()) } }
+    return ($names -contains $me)
+}
+
+function Get-PimRevauditAssignmentTargetFacts {
+    <#
+      PURE. CODE REVIEW 1 FIXES 2026-10-13 (decision 55): the facts of ONE assignment ROW of the configuration (a removed row
+      or one marked Action = Remove in a PUT commit) in the shape Test-PimRevauditScope / the level rule read:
+      the admin it names (Username / UserName / UserPrincipalName), the group it names (GroupTag, TargetGroupTag,
+      SourceGroupTag -> the stored definition), or the Entra role (RoleDefinitionName) for a direct role row.
+    #>
+    param([AllowNull()][object]$Row, [hashtable]$Definitions = @{}, [object[]]$Admins = @())
+    $o = @{ known = $true; type = 'assignment'; principal = ''; principalKind = ''; adminRow = $null; adminLevel = $null; adminLevelUnreadable = $false
+            principalGroup = $null; containerGroup = $null; facets = @(); missing = @(); departments = @(); targetLevel = $null; adminDepartment = ''; groupDepartments = @() }
+    $haveFacets = [bool](Get-Command Get-PimGroupFacets -ErrorAction SilentlyContinue)
+    $facets = New-Object System.Collections.Generic.List[hashtable]; $missing = New-Object System.Collections.Generic.List[string]
+    $who = Get-PimRevauditRowValue $Row @('Username', 'UserName', 'UserPrincipalName', 'PrincipalName')
+    $o.principal = $who
+    if ($who) {
+        $o.adminRow = Find-PimRevauditAdminRow -Admins $Admins -Names @($who)
+        if ($o.adminRow) { $o.adminLevel = Get-PimRevauditAdminLevel -AdminRow $o.adminRow; $o.adminLevelUnreadable = ($null -eq $o.adminLevel); $o.adminDepartment = (Get-PimRevauditRowValue $o.adminRow @('Department')).ToLowerInvariant() }
+    }
+    $byTag = @{}
+    foreach ($d in $Definitions.Values) { $t = (Get-PimRevauditRowValue $d @('GroupTag')).ToLowerInvariant(); if ($t -and -not $byTag.ContainsKey($t)) { $byTag[$t] = $d } }
+    $groups = New-Object System.Collections.Generic.List[object]
+    foreach ($col in @('GroupTag', 'TargetGroupTag', 'SourceGroupTag')) {
+        $t = Get-PimRevauditRowValue $Row @($col)
+        if (-not $t) { continue }
+        $def = $byTag[$t.ToLowerInvariant()]
+        if (-not $def) { $missing.Add("the group '$t' has no stored definition, so its scope and level cannot be checked"); continue }
+        $groups.Add($def)
+        if ($haveFacets) { $facets.Add((Get-PimGroupFacets -Row $def -Base '')) }
+    }
+    if (-not $groups.Count -and -not $missing.Count) {
+        $rn = Get-PimRevauditRowValue $Row @('RoleDefinitionName')
+        if ($rn) { $facets.Add((Get-PimRevauditEntraRoleFacets -RoleName $rn -AuScoped ([bool](Get-PimRevauditRowValue $Row @('AdministrativeUnitTag'))))) }
+        elseif (-not $o.adminRow) { $missing.Add('the row names no group, no role and no defined admin, so its scope and level cannot be checked') }
+    }
+    if (-not $haveFacets) { $missing.Add('the scope library is not loaded') }
+    $o.facets = @($facets.ToArray()); $o.missing = @($missing.ToArray())
+    # fix round r619: a generic List is turned into an ARRAY first -- @() over a List[object] throws "Argument types do not
+    # match" in PowerShell 7 (the trap of BUG-262 / the admin-accounts 500)
+    $groupsArr = [object[]]$groups.ToArray()
+    $o.groupDepartments = @($groupsArr | ForEach-Object { (Get-PimRevauditRowValue $_ @('Department')).ToLowerInvariant() } | Where-Object { $_ } | Select-Object -Unique)
+    if ($o.adminRow) { $o.targetLevel = $o.adminLevel }
+    elseif ($groups.Count -and $haveFacets) {
+        $lv = @($groupsArr | ForEach-Object { (Get-PimGroupFacets -Row $_ -Base '').level } | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ })
+        if ($lv.Count) { $o.targetLevel = [int](($lv | Measure-Object -Minimum).Minimum) }
+    }
+    return $o
+}
+
+function Test-PimRevauditAssignmentRemovals {
+    <#
+      PURE. CODE REVIEW 1 FIXES 2026-10-13, owner decision (55) "Same rule everywhere": the revoke rule's scope + level check
+      for every assignment row a PUT commit REMOVES (a deleted row, or one marked Action = Remove). A SuperAdmin is not
+      limited. -SkipScope: the caller's scope was already checked by the commit's own delegated-write rule (a delegated
+      operator); the LEVEL rule still applies. Refused WHOLE. Returns @{ allowed; reason; refused; checked }.
+    #>
+    param([hashtable]$Caller, [object[]]$Rows = @(), [hashtable]$Definitions = @{}, [object[]]$Admins = @(), [switch]$SkipScope)
+    $rows = @(@($Rows) | Where-Object { $null -ne $_ })
+    if ($Caller -and [bool]$Caller.isSuperAdmin) { return [pscustomobject]@{ allowed = $true; reason = 'SuperAdmin'; refused = @(); checked = $rows.Count } }
+    $refused = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $rows) {
+        $f = Get-PimRevauditAssignmentTargetFacts -Row $r -Definitions $Definitions -Admins $Admins
+        $who = if ($f.principal) { $f.principal } else { (@($r.PSObject.Properties | Where-Object { "$($_.Value)".Trim() } | Select-Object -First 2 | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ', ') }
+        $grp = Get-PimRevauditRowValue $r @('GroupTag', 'TargetGroupTag', 'RoleDefinitionName')
+        $label = if ($grp) { "$who -> $grp" } else { "$who" }
+        if (-not $SkipScope -and $Caller -and $null -ne $Caller.profile) {
+            $why = Test-PimRevauditScope -Profile $Caller.profile -Facts $f
+            if ($why) { $refused.Add([ordered]@{ principal = $who; code = 'out-of-scope'; reason = "${label}: outside your scope -- $why" }); continue }
+        }
+        $lv = Get-PimRevauditLevelRefusal -CallerLevel $(if ($Caller) { $Caller.level } else { $null }) -TargetLevel $f.targetLevel -TargetLevelUnreadable ([bool]($f.adminRow -and $f.adminLevelUnreadable)) -Who $who -Verb 'remove'
+        if ($lv) { $refused.Add([ordered]@{ principal = $who; code = $lv.code; reason = "${label}: $($lv.reason)" }) }
+    }
+    $n = $refused.Count
+    $reason = if ($n) { ("Nothing was saved: {0} of {1} removed assignment(s) may not be removed by you. " -f $n, $rows.Count) + ((@($refused | Select-Object -First 5 | ForEach-Object { "$($_.reason)" })) -join ' | ') + $(if ($n -gt 5) { " | ... and $($n - 5) more" } else { '' }) } else { '' }
+    return [pscustomobject]@{ allowed = ($n -eq 0); reason = $reason; refused = @($refused.ToArray()); checked = $rows.Count }
+}
+
+function Get-PimRevauditCaller {
+    # The caller of THIS request, with his level read from the stored rows (-Admins), as the rule reads him:
+    # @{ role; identity; isSuperAdmin; profile; level }. Never throws.
+    param([object[]]$Admins = @())
+    $role = $null; try { $role = Get-PimManagerRole } catch { $role = $null }
+    $scope = $null; try { $scope = Get-PimManagerCallerScope } catch { $scope = $null }
+    $c = @{ role = "$(if ($role) { $role.role })"; identity = "$(if ($role) { $role.identity })"; isSuperAdmin = [bool]($scope -and $scope.isSuperAdmin); profile = $(if ($scope) { $scope.profile } else { $null }); level = $null }
+    if (-not $c.isSuperAdmin) { $c.level = Get-PimRevauditCallerLevel -Profile $c.profile -Identity $c.identity -Admins @($Admins) }
+    return $c
+}
+
 function Test-PimRevauditRevoke {
     <#
       PURE. THE VERDICT for a batch of revoke rows (the file header states the rule).
@@ -363,20 +534,17 @@ function Test-PimRevauditRevoke {
             continue
         }
         # MANAGED: the caller's own permission over the target -- scope, then level. No SuperAdmin is asked for.
-        $needFacts = ($null -ne $Caller.profile) -or ($null -ne $Caller.level)
-        if ($needFacts -and (-not $f -or -not $f.known)) {
+        # CODE REVIEW 1 FIXES 2026-10-13 (decision 55, "Same rule everywhere"): the facts are needed for EVERY caller below
+        # SuperAdmin -- an Admin with no level of his own is still compared (he may not touch L0 / L1), so a target that
+        # cannot be read is refused for him too (it used to pass unchecked).
+        if (-not $f -or -not $f.known) {
             & $add $it 'managed-unknown' "${label}: PIM Manager manages this assignment, but it is not in the stored read of the tenant, so your scope and level cannot be checked against it. It works again after the next read of the tenant (a SuperAdmin can revoke it now)"
             continue
         }
         $why = Test-PimRevauditScope -Profile $Caller.profile -Facts $f
         if ($why) { & $add $it 'out-of-scope' "${label}: outside your scope -- $why"; continue }
-        if ($null -ne $Caller.level -and $f) {
-            if ($f.adminRow -and $f.adminLevelUnreadable) { & $add $it 'level-unknown' "${label}: the level of '$who' cannot be read from the admin's row, so it cannot be compared with your level L$($Caller.level) -- not revoked (set Level on the admin, or ask a SuperAdmin)"; continue }
-            if ($null -ne $f.targetLevel -and [int]$f.targetLevel -lt [int]$Caller.level) {
-                & $add $it 'more-privileged' "${label}: '$who' is level L$($f.targetLevel), more privileged than your level L$($Caller.level) -- a level-$($Caller.level) admin cannot revoke it (ask an admin at level $($f.targetLevel) or above, or a SuperAdmin)"
-                continue
-            }
-        }
+        $lv = Get-PimRevauditLevelRefusal -CallerLevel $Caller.level -TargetLevel $f.targetLevel -TargetLevelUnreadable ([bool]($f.adminRow -and $f.adminLevelUnreadable)) -Who $who -Verb 'revoke'
+        if ($lv) { if ($lv.code -ne 'more-privileged') { $needsSuper = $true }; & $add $it $lv.code "${label}: $($lv.reason)"; continue }
     }
     $n = $refused.Count
     $reason = ''

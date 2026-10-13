@@ -10,6 +10,18 @@ if (-not (Get-Command Get-PimAdminAutoDisableDate -ErrorAction SilentlyContinue)
     $__dsPath = Join-Path $PSScriptRoot '..\_shared\PIM-DateSafe.ps1'
     if (Test-Path -LiteralPath $__dsPath) { . $__dsPath }
 }
+# CODE REVIEW 2 FIXES 2026-10-13 (lane review2, owner decision 57: "Customer limit + SuperAdmin release"): the pull path
+# loaded neither the removal budget nor the guard holds, so a retraction ran under a literal 5 (that PIM_RemoveMaxCount
+# could RAISE) and "HELD" was a line of text. Both libraries are loaded here; the retraction asks the SAME budget as the
+# engine (the Guards-page limit; a server setting only lowers it) and a held list is a real hold on the Guards page.
+if (-not (Get-Command Get-PimRemoveBudget -ErrorAction SilentlyContinue)) {
+    $__dgPath = Join-Path $PSScriptRoot '..\_shared\PIM-DisableGuard.ps1'
+    if (Test-Path -LiteralPath $__dgPath) { . $__dgPath }
+}
+if (-not (Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue)) {
+    $__grPath = Join-Path $PSScriptRoot '..\_shared\PIM-GuardRelease.ps1'
+    if (Test-Path -LiteralPath $__grPath) { . $__grPath }
+}
 
 # PIM-Downlink.ps1 -- the PURE, offline-testable decision brain for the §31.3
 # master->managed (managed tenant) admin/permission SYNC (downlink) + the scenario-bound
@@ -3311,6 +3323,50 @@ function Invoke-PimManagedDownlink {
                     catch { Write-Host "[downlink]   the applied-intent record could not be saved ($($_.Exception.Message)) -- the revoke may be queued again next pull (harmless: a second revoke changes nothing)" -ForegroundColor Yellow }
                 }
             }
+            # CODE REVIEW 1 FIXES 2026-10-13 (lane review1), owner decisions (51) + (61): the managing tenant's SuperAdmin approved
+            # the DELETE of ONE central admin (a signed 'delete-account' decision in this bundle). This tenant records it as a
+            # CENTRAL delete pin in ITS OWN store -- only for a central admin it holds for the managing tenant, never for a
+            # customer's own admin of the same name (the session-revoke rule, R25-31). The engine then deletes THIS tenant's
+            # account once, pinned to its own object id on first sight, through the one guarded delete, at most one central admin
+            # per run (guard msp.central-admin-delete). Nothing is deleted here; an unreadable store pins nothing (next pull).
+            if (-not (Get-Command New-PimAdminDeletePin -ErrorAction SilentlyContinue)) {
+                $__pinLib = Join-Path (Split-Path -Parent $PSScriptRoot) '_shared\PIM-AdminDeletePins.ps1'
+                if (Test-Path -LiteralPath $__pinLib) { . $__pinLib }
+            }
+            if (@($bundleIntents).Count -and (Get-Command Get-PimDownlinkAccountDeletes -ErrorAction SilentlyContinue) -and (Get-Command New-PimAdminDeletePin -ErrorAction SilentlyContinue)) {
+                $adApplied = @()
+                try { $ap2 = Get-PimSqlSetting -ConnectionString $SlaveStoreConnectionString -Name 'DownlinkIntentsApplied'; if ($ap2) { $adApplied = @(@(if ($ap2 -is [string]) { $ap2 | ConvertFrom-Json } else { $ap2 }).ids) } } catch { $adApplied = @() }
+                $adRefused = $null
+                $adDeletes = @(Get-PimDownlinkAccountDeletes -Intents $bundleIntents -TenantId $TenantId -Applied $adApplied -Refused ([ref]$adRefused))
+                foreach ($rf in @($adRefused)) { if ($rf) { Write-Host "[downlink]   REFUSED central account delete '$($rf.key)': $($rf.why)" -ForegroundColor Yellow } }
+                $adDone = New-Object System.Collections.Generic.List[string]
+                if ($adDeletes.Count) {
+                    $adSel = $null
+                    try {
+                        $adSel = Select-PimDownlinkSessionRevokeTargets -Revokes $adDeletes -Owner 'MSP' `
+                                    -CentralRows @(Get-PimSqlRows -ConnectionString $SlaveStoreConnectionString -Entity 'Account-Definitions-Admins-Central') `
+                                    -LocalRows @(Get-PimSqlRows -ConnectionString $SlaveStoreConnectionString -Entity 'Account-Definitions-Admins')
+                    } catch { Write-Host "[downlink]   the admin rows could not be read to check the central account delete(s): $($_.Exception.Message) -- nothing pinned now, retried on the next pull" -ForegroundColor Red; $adDeletes = @() }
+                    if ($adSel) {
+                        foreach ($sk in @($adSel.skipped)) { Write-Host "[downlink]   SKIPPED central account delete: $($sk.why -replace 'NOT revoked', 'NOT deleted')" -ForegroundColor Yellow; if ("$($sk.why)" -match 'OWN admin') { $adDone.Add("$($sk.id)") } }
+                        $adDeletes = @($adSel.revoke)
+                    }
+                }
+                foreach ($ad in $adDeletes) {
+                    if ($WhatIfMode) { Write-Host "[downlink]   WOULD pin the delete of central admin '$($ad.key)' (approved by SuperAdmin $($ad.approvedBy) on the managing tenant)" -ForegroundColor Cyan; continue }
+                    try {
+                        $pin = New-PimAdminDeletePin -Key "$($ad.key)" -Upn "$($ad.key)@$dom" -ObjectId '' -Source central -RequestId "$($ad.id)" -RequestedBy "msp-downlink ($($ad.by))" -ApprovedBy "$($ad.approvedBy)" -Note "approved on the managing tenant: $($ad.reason)"
+                        [void](Add-PimAdminDeletePin -Pin $pin -ConnectionString $SlaveStoreConnectionString)
+                        $adDone.Add($ad.id)
+                        Write-Host "[downlink]   PINNED: delete central admin '$($ad.key)' here once (approved by SuperAdmin $($ad.approvedBy) on the managing tenant); the engine deletes this tenant's account, one central admin per run" -ForegroundColor Cyan
+                    } catch { Write-Host "[downlink]   the central account delete of '$($ad.key)' could NOT be pinned: $($_.Exception.Message) -- retried on the next pull" -ForegroundColor Red }
+                }
+                if ($adDone.Count) {
+                    $keep2 = @(@($adApplied) + @($adDone.ToArray()) | Select-Object -Last 500)
+                    try { Set-PimSqlSetting -ConnectionString $SlaveStoreConnectionString -Name 'DownlinkIntentsApplied' -Value ([pscustomobject]@{ ids = @($keep2) }) }
+                    catch { Write-Host "[downlink]   the applied-intent record could not be saved ($($_.Exception.Message)) -- the pin is written again next pull (it replaces the approved one; a tombstone is never replaced)" -ForegroundColor Yellow }
+                }
+            }
         } else {
             Write-Host "[downlink] admins NOT staged: no managed tenant default domain (-SlaveDefaultDomain, or an ambient tenant to read it from). Refusing to build UPNs at a guessed domain." -ForegroundColor Yellow
         }
@@ -3589,8 +3645,10 @@ function Invoke-PimDownlinkAssignmentApply {
             $wouldPrune = $stale
         } elseif (-not $AllowFullPrune -and -not $AllowRetraction) {
             $wouldRetract = $stale
-        } elseif (-not $AllowFullPrune -and $stale.Count -gt $budget) {
-            $retractHeld = $stale
+        } elseif (-not $AllowFullPrune -and -not ($rd = Resolve-PimDownlinkRetraction -Scope 'Downlink-Assignments' -Keys @($stale | ForEach-Object { "$entity|$_" }) -ConnectionString $ConnectionString -WhatIfMode ([bool]$WhatIfMode)).allowed) {
+            # CODE REVIEW 2 (owner decision 57): over the customer's budget = HELD as a real guard hold until a SuperAdmin of
+            # this tenant releases exactly this list -- never 5 per pull, run after run.
+            $retractHeld = $stale; $budget = [int]$rd.budget
         } else {
             foreach ($k in $stale) {
                 if (-not $WhatIfMode) { Remove-PimSqlRow -ConnectionString $ConnectionString -Entity $entity -Key $k }
@@ -3604,7 +3662,7 @@ function Invoke-PimDownlinkAssignmentApply {
     if ($withdrawn.Count) { $detail += "; $($withdrawn.Count) row(s) withdrawn on the managing tenant's authorisation (revoked centrally)" }
     if ($wouldPrune.Count) { $detail += "; REFUSED to prune $($wouldPrune.Count) synced row(s) because the projection was EMPTY -- pass -AllowFullPrune to withdraw them" }
     if ($wouldRetract.Count) { $detail += "; WOULD REMOVE $($wouldRetract.Count) synced row(s) that no longer reach this tenant -- reported only (retraction needs the removal opt-in)" }
-    if ($retractHeld.Count) { $detail += "; HELD: $($retractHeld.Count) retraction(s) exceed the removal budget of $budget -- NOTHING withdrawn" }
+    if ($retractHeld.Count) { $detail += "; HELD: $($retractHeld.Count) retraction(s) exceed the removal budget of $budget -- NOTHING withdrawn; a SuperAdmin of this tenant releases exactly this list on Operations > Guards (scope Downlink-Assignments)" }
     if ($WhatIfMode) { $detail = "[whatif] $detail" }
     return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = $wouldPrune; wouldRetract = $wouldRetract; retractHeld = $retractHeld; retractionBudget = $budget; withdrawn = @($withdrawn); deferred = @($deferred.ToArray()); detail = $detail }
 }
@@ -3807,7 +3865,7 @@ function Invoke-PimDownlinkDefinitionApply {
     if ($staleArr.Count) {
         $labels = @($staleArr | ForEach-Object { "$($_.Entity)|$($_.Key)" })
         if (-not $AllowFullPrune -and -not $AllowRetraction) { $wouldRetract = $labels }
-        elseif (-not $AllowFullPrune -and $staleArr.Count -gt $budget) { $retractHeld = $labels }
+        elseif (-not $AllowFullPrune -and -not ($rd = Resolve-PimDownlinkRetraction -Scope 'Downlink-Definitions' -Keys $labels -ConnectionString $ConnectionString -WhatIfMode ([bool]$WhatIfMode)).allowed) { $retractHeld = $labels; $budget = [int]$rd.budget }   # CODE REVIEW 2 (decision 57): a real hold, released by a SuperAdmin
         else {
             foreach ($s in $staleArr) {
                 if (-not $WhatIfMode) { Remove-PimSqlRow -ConnectionString $ConnectionString -Entity $s.Entity -Key $s.Key }
@@ -3819,20 +3877,68 @@ function Invoke-PimDownlinkDefinitionApply {
     if ($takeOverRefused) { $detail += "; $takeOverRefused row(s) deferred: held locally (the customer already has a row with that key -- not taken over)" }
     if ($wouldPrune.Count) { $detail += "; REFUSED to prune $($wouldPrune.Count) synced row(s) because the managing tenant published none -- pass -AllowFullPrune to withdraw them" }
     if ($wouldRetract.Count) { $detail += "; WOULD REMOVE $($wouldRetract.Count) synced row(s) that no longer reach this tenant -- reported only (retraction needs the removal opt-in)" }
-    if ($retractHeld.Count) { $detail += "; HELD: $($retractHeld.Count) retraction(s) exceed the removal budget of $budget -- NOTHING withdrawn" }
+    if ($retractHeld.Count) { $detail += "; HELD: $($retractHeld.Count) retraction(s) exceed the removal budget of $budget -- NOTHING withdrawn; a SuperAdmin of this tenant releases exactly this list on Operations > Guards (scope Downlink-Definitions)" }
     if ($WhatIfMode) { $detail = "[whatif] $detail" }
     return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = @($wouldPrune.ToArray()); wouldRetract = $wouldRetract; retractHeld = $retractHeld; retractionBudget = $budget; takeOverRefused = $takeOverRefused; deferred = @($deferred.ToArray()); detail = $detail }
 }
 
 function Get-PimDownlinkRetractionBudget {
-    # §71 -- the removal budget a downlink retraction runs under: the engine's own G4 budget when it is
-    # loaded (hard ceiling 5), else the same knob read directly, else 5. Never above the engine's.
-    if (Get-Command Get-PimRemoveBudget -ErrorAction SilentlyContinue) { try { return [int](Get-PimRemoveBudget) } catch { } }
+    # §71 / CODE REVIEW 2 (owner decision 57): the removal budget a downlink retraction runs under is the ENGINE's own --
+    # the Guards-page limit of engine.remove-budget, which a server setting (PIM_RemoveMaxCount) can only LOWER (0 = none).
+    # PIM-DisableGuard.ps1 is loaded by this file. Should it ever be missing: the literal default 5, lowered by the
+    # setting -- never raised (it used to be a literal 5 that the setting could raise without a ceiling).
+    if (Get-Command Get-PimRemoveBudget -ErrorAction SilentlyContinue) { try { return [int](Get-PimRemoveBudget -WarningAction SilentlyContinue) } catch { } }
     $budget = 5
-    if (Get-Command Get-PimSafetyKnob -ErrorAction SilentlyContinue) {
-        $kb = 0; if ([int]::TryParse("$(Get-PimSafetyKnob -Name 'PIM_RemoveMaxCount')", [ref]$kb) -and $kb -ge 0 -and $kb -le 5) { $budget = $kb }
-    }
+    $raw = "$($global:PIM_RemoveMaxCount)"; if (-not $raw.Trim()) { $raw = "$([Environment]::GetEnvironmentVariable('PIM_RemoveMaxCount', 'Process'))" }
+    $kb = 0; if ([int]::TryParse($raw.Trim(), [ref]$kb)) { if ($kb -lt 0) { $kb = 0 }; if ($kb -lt $budget) { $budget = $kb } }
     return $budget
+}
+
+function Resolve-PimDownlinkRetraction {
+    <#
+      CODE REVIEW 2 FIXES 2026-10-13 (lane review2, owner decision 57: "Customer limit + SuperAdmin release"). THE decision for
+      the UNNAMED retractions of one apply (rows the managing tenant's package simply stopped carrying; rows it withdrew BY
+      NAME never come here -- REQ-REV-DOWN-1, no limit). NEVER throws.
+        * at most the budget (Get-PimDownlinkRetractionBudget)        -> allowed; any older hold of this scope is cleared
+        * more than the budget:
+            - a SuperAdmin of THIS managed tenant released exactly this list (Operations > Guards, plan hash, one run)
+                                                                       -> allowed, the whole list, whatever its size
+            - otherwise                                                -> HELD: nothing withdrawn, and a REAL hold of
+              engine.remove-budget for -Scope ('Downlink-Admins' / 'Downlink-Assignments' / 'Downlink-Definitions') is
+              recorded with the exact list, so the Guards page shows it and its release is offered. It is NOT applied 5
+              per run: the list stays held until it is released (or until it falls within the budget by itself).
+        * -WhatIfMode: never uses a release and records nothing (a plan).
+      Returns @{ allowed; held; released; budget; planHash; releasedBy }.
+    #>
+    param([string]$Scope, [string[]]$Keys = @(), [string]$ConnectionString = '', [bool]$WhatIfMode = $true)
+    $keys = @(@($Keys) | Where-Object { "$_".Trim() } | ForEach-Object { "retract|$("$_".Trim().ToLowerInvariant())" })
+    $budget = Get-PimDownlinkRetractionBudget
+    $res = [pscustomobject]@{ allowed = $true; held = $false; released = $false; budget = [int]$budget; planHash = ''; releasedBy = '' }
+    # the guard store is this managed tenant's own pim.Settings: when the pull process has no store configured globally, the
+    # store the apply writes to is used for the hold (restored afterwards; a test seam $global:PIM_GuardReleaseStore wins).
+    $setCs = $false
+    try {
+        if (-not ("$($global:PIM_EngineSqlCs)".Trim()) -and "$ConnectionString".Trim() -and -not ($global:PIM_GuardReleaseStore -is [hashtable])) {
+            $hasCs = $false
+            if (Get-Command Get-PimGuardStoreCs -ErrorAction SilentlyContinue) { try { $hasCs = [bool]"$(Get-PimGuardStoreCs)".Trim() } catch { $hasCs = $false } }
+            if (-not $hasCs) { $global:PIM_EngineSqlCs = "$ConnectionString"; $setCs = $true }
+        }
+        if ($keys.Count -le $budget) {
+            if (-not $WhatIfMode -and (Get-Command Clear-PimGuardHold -ErrorAction SilentlyContinue)) { [void](Clear-PimGuardHold -GuardId 'engine.remove-budget' -Scope $Scope -RunKind 'downlink') }
+            return $res
+        }
+        $res.allowed = $false; $res.held = $true
+        if (Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue) {
+            $g = Invoke-PimGuardHoldOrRelease -GuardId 'engine.remove-budget' -Scope $Scope -Keys $keys -Count $keys.Count -RunKind 'downlink' -WhatIf:$WhatIfMode `
+                    -Measured @{ toRemove = $keys.Count; budget = [int]$budget }
+            $res.planHash = "$($g.planHash)"
+            if ($g.released -and $keys.Count -le [int]$g.release.raiseTo) {
+                $res.allowed = $true; $res.held = $false; $res.released = $true; $res.releasedBy = "$($g.release.createdBy)"
+            }
+        }
+        return $res
+    } catch { $res.allowed = $false; $res.held = $true; return $res }
+    finally { if ($setCs) { $global:PIM_EngineSqlCs = $null } }
 }
 
 # ---------------------------------------------------------------------------
@@ -4035,11 +4141,12 @@ function Invoke-PimDownlinkAdminApply {
     # beside it were already report-first. Measured on RIDE 2026-09-15: re-targeting one SAMPLE admin away
     # from the tenant removed its central row on the next pull while its membership stayed "WOULD REMOVE".
     # Framework MSP-4 SURFACE item 8 is one rule for every row: reported, and removed only under the removal
-    # opt-in (-AllowRetraction) + the budget (PIM_RemoveMaxCount, default 5), or the decouple (-AllowFullPrune).
-    $budget = 5
-    if (Get-Command Get-PimSafetyKnob -ErrorAction SilentlyContinue) {
-        $kb = 0; if ([int]::TryParse("$(Get-PimSafetyKnob -Name 'PIM_RemoveMaxCount')", [ref]$kb) -and $kb -ge 0) { $budget = $kb }
-    }
+    # opt-in (-AllowRetraction) + the budget, or the decouple (-AllowFullPrune).
+    # CODE REVIEW 2 FIXES 2026-10-13 (owner decision 57): the budget is the customer's own (the Guards-page limit; a server
+    # setting only lowers it) -- it was a literal 5 that PIM_RemoveMaxCount could RAISE without a ceiling -- and over it the
+    # list is a real hold a SuperAdmin of this tenant releases (Resolve-PimDownlinkRetraction). Admins the managing tenant
+    # withdrew BY NAME (REQ-REV-DOWN-1) are not counted, as decided.
+    $budget = Get-PimDownlinkRetractionBudget
     $withdrawnAdmins = @()
     if (@($Withdrawals).Count -and $stale.Count) {
         $authA = @{}; foreach ($w in @($Withdrawals)) { $wk = "$w".Trim().ToLowerInvariant(); if ($wk) { $authA[$wk] = $true } }
@@ -4053,7 +4160,7 @@ function Invoke-PimDownlinkAdminApply {
     if ($stale.Count) {
         if (@($Admins).Count -eq 0 -and -not $AllowFullPrune) { $wouldPrune = $stale }
         elseif (-not $AllowFullPrune -and -not $AllowRetraction) { $wouldRetract = $stale }
-        elseif ($stale.Count -gt $budget -and -not $AllowFullPrune) { $retractHeld = $stale }
+        elseif (-not $AllowFullPrune -and -not ($rd = Resolve-PimDownlinkRetraction -Scope 'Downlink-Admins' -Keys @($stale | ForEach-Object { "$entity|$_" }) -ConnectionString $ConnectionString -WhatIfMode ([bool]$WhatIfMode)).allowed) { $retractHeld = $stale; $budget = [int]$rd.budget }
         else {
             foreach ($k in $stale) {
                 if (-not $WhatIfMode) { Remove-PimSqlRow -ConnectionString $ConnectionString -Entity $entity -Key $k }
@@ -4064,7 +4171,7 @@ function Invoke-PimDownlinkAdminApply {
     $detail = "${entity}: +$created ~$updated -$removed (left $foreign of the managed tenant's own admin row(s) untouched); TAP on for $tapOn"
     if ($migrated) { $detail += "; MIGRATED $migrated central admin row(s) out of $localEntity into $entity (one-time)" }
     if ($wouldRetract.Count) { $detail += "; WOULD REMOVE $($wouldRetract.Count) central admin(s) that no longer reach this tenant -- reported only (retraction needs the removal opt-in, -AllowRetraction)" }
-    if ($retractHeld.Count) { $detail += "; HELD: would withdraw $($retractHeld.Count) central admin(s), over the retraction budget of $budget -- NOTHING withdrawn (check the managing tenant's ManagementMode / Ring / Target, then re-run with -AllowFullPrune or raise PIM_RemoveMaxCount)" }
+    if ($retractHeld.Count) { $detail += "; HELD: would withdraw $($retractHeld.Count) central admin(s), over the retraction budget of $budget -- NOTHING withdrawn (check the managing tenant's ManagementMode / Ring / Target; if they are meant to go, a SuperAdmin of this tenant releases exactly this list on Operations > Guards, scope Downlink-Admins)" }
     # Surfaced, never swallowed: a TAP with no recipient is minted, mailed nowhere, and the code
     # is unrecoverable afterwards. That must read as a WARNING in the sync output, not as success.
     if ($tapNoRecipient) { $detail += "; WARNING $tapNoRecipient admin(s) get a TAP (enforced for every admin) but name NO sponsor department (and carry no legacy ManagerEmail) -- the engine REFUSES to issue a TAP it cannot deliver, so they cannot sign in: set the admin's Department at the managing tenant and give that department Owners" }

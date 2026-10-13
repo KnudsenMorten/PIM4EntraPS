@@ -68,7 +68,7 @@ function Get-PimGuardReleaseCatalog {
             what = 'A commit is not saved until a SuperAdmin approves exactly the rows it takes out, in the commit popup, with a reason, when it (1) takes more than {limit} rows out of one list, or (2) keeps none of the rows the list has now, or (3) would leave {keep} rows or fewer of a list that has more than {minList} rows. The numbers in (2) and (3) are fixed.' }
         [pscustomobject]@{ guardId = 'engine.remove-budget'; title = 'Removal budget'; release = 'release'; locked = ''
             protects = 'Access in the tenant from being removed in bulk by one engine run.'
-            what = 'At most {limit} removals per scope per run; more are held and none of them is applied. A SuperAdmin approves the exact list when it is committed (the commit popup) and the run then applies exactly those items, whatever their number; a list the run already holds is released here for exactly that plan. This covers group deletion (Lifecycle = Retire) too.' }
+            what = 'At most {limit} removals per scope per run; more are held and none of them is applied. A SuperAdmin approves the exact list when it is committed (the commit popup) and the run then applies exactly those items, whatever their number; a list the run already holds is released here for exactly that plan. This covers group deletion (Lifecycle = Retire), group deletes from the Drift page, offboarding, and -- in a managed tenant -- the rows the managing tenant stopped sending (rows it withdrew by name are not counted).' }
         [pscustomobject]@{ guardId = 'engine.disable-guard'; title = 'Account-disable circuit breaker'; release = 'release'; locked = ''
             protects = 'Admin accounts from being disabled in bulk by one engine run.'
             what = 'At most {limit} accounts disabled per run; more are held and none of them is disabled. A SuperAdmin releases exactly the held list of accounts here, for one run.' }
@@ -89,6 +89,32 @@ function Get-PimGuardReleaseCatalog {
         [pscustomobject]@{ guardId = 'engine.offboarding-approval'; title = 'Offboarding approval'; release = 'approval'; locked = ''
             protects = 'An admin from being disabled or offboarded on one person''s word.'
             what = 'A disable or offboarding waits for its approval on the Approvals page.' }
+        # CODE REVIEW 1 FIXES 2026-10-13 (lane review1), owner decision (61): "make a guard here - only 1 admin can be deleted at
+        # the time". The number is the owner's own and FIXED (not a customer setting); approval = the managing tenant's SuperAdmin.
+        [pscustomobject]@{ guardId = 'msp.central-admin-delete'; title = 'Central admin delete (managed tenants)'; release = 'info'; locked = ''
+            protects = 'The admins of every managed tenant from being deleted in bulk by one central decision.'
+            what = 'A central admin deleted on the managing tenant is deleted in a managed tenant only when a SuperAdmin of the managing tenant approved that delete, and one approval names exactly ONE admin (an approval naming two or more is refused). A managed tenant deletes at most 1 central admin per run; a second approved one waits for the next run and stays disabled meanwhile. Without the approval the account is only disabled. The number 1 is fixed by the product owner and is not a setting.' }
+        # CODE REVIEW 2 FIXES 2026-10-13 (lane review2, owner decisions 58 + 60): two numbers that were literals in the code.
+        [pscustomobject]@{ guardId = 'manager.bulk-revoke'; title = 'Bulk revoke'; release = 'approval'; locked = ''
+            protects = 'Active and eligible assignments from being revoked in bulk in one click.'
+            what = 'A revoke of more than {limit} assignments in one batch must be confirmed with its exact count, and needs an APPROVED request on the Approvals page. The approver has permission over the assignments (scope and level) or is a SuperAdmin, and is never the person who asked.' }
+        [pscustomobject]@{ guardId = 'engine.admin-delete'; title = 'Admin account deletes per run'; release = 'info'; locked = ''
+            protects = 'Admin accounts from being deleted in bulk by one engine run.'
+            what = 'At most {limit} admin accounts are deleted in one engine run (rows set to AccountStatus = Deleted); the rest wait for the next run. Every delete itself was approved before it was stored.' }
+        # CODE REVIEW 2 FIXES 2026-10-13 (lane review2, owner decision 60): the hybrid Active Directory guards are listed
+        # too ("we need to show in Guards all guards"). Their time windows are NOT counts and stay FIXED -- stated here.
+        [pscustomobject]@{ guardId = 'hybrid-ad.members-kept'; title = 'AD sync keeps members on a doubt'; release = 'approval'; locked = ''
+            protects = 'Members of an Active Directory group from being removed because Entra ID could not be read or confirmed.'
+            what = 'When the Entra group behind an Active Directory group cannot be confirmed, its AD members are KEPT, never removed. Kept for 30 minutes = an alert, again every 4 hours until it heals (fixed times, not counts). It heals by itself when Entra ID answers; a group that is gone is decided by a SuperAdmin on Settings > Hybrid Active Directory.' }
+        [pscustomobject]@{ guardId = 'hybrid-ad.waiting-for-superadmin'; title = 'AD group waits for a SuperAdmin'; release = 'approval'; locked = ''
+            protects = 'An Active Directory group whose Entra group is gone, was never found or was replaced from being emptied or deleted without a person deciding.'
+            what = 'The group is held and nothing is removed until a SuperAdmin decides on Settings > Hybrid Active Directory. "Gone" counts after 24 hours; the alert is sent at once and then once a day; a decision is used within 48 hours (fixed times, not counts).' }
+        [pscustomobject]@{ guardId = 'hybrid-ad.cleanup.approve'; title = 'AD clean-up approval'; release = 'approval'; locked = ''
+            protects = 'Groups in Active Directory from being deleted without a SuperAdmin having read the exact list.'
+            what = 'An Active Directory group is deleted only from a list a SuperAdmin approved, item by item, on Settings > Hybrid Active Directory. The approval is used within 72 hours; a "delete in AD too" request waits at most 30 days (fixed times, not counts) and deletes only the exact AD object it named when it was made (same distinguished name and creation date, no new member).' }
+        [pscustomobject]@{ guardId = 'hybrid-ad.server-groups.approve'; title = 'Server groups approval'; release = 'approval'; locked = ''
+            protects = 'Active Directory from getting server groups created for servers nobody approved.'
+            what = 'New servers wait in a list; their server groups are created only after a SuperAdmin approves that exact list on Settings > Hybrid Active Directory. The approval is used once, within 72 hours (a fixed time, not a count).' }
         [pscustomobject]@{ guardId = 'engine.reconcile-paused'; title = 'Daily reconcile paused'; release = 'info'; locked = ''
             protects = 'The tenant from the daily reconcile while somebody has paused it.'
             what = 'Resumed on the Jobs page (s96.5).' }
@@ -141,8 +167,10 @@ function Test-PimGuardReleasable {
 }
 
 function Get-PimGuardHoldItemCap {
-    <# PURE. LITERAL. How many item keys a hold record carries. A hold that had to be cut is NOT releasable on the page:
-       an approval is for a list the SuperAdmin can read in full (PIM 100.119), never for "the first n of them". #>
+    <# PURE. LITERAL. CODE REVIEW 2 FIXES 2026-10-13 (owner decision 60: "no 500-item release cap"): a hold record carries
+       its WHOLE list, whatever its size (pim.Settings.ValueJson is NVARCHAR(MAX)), so a SuperAdmin release works for any
+       size. This number is no longer a cap: it is only the size an OLDER version cut a list at -- a hold that older
+       version wrote with itemsTruncated is still not releasable, and the next run records the list in full. #>
     500
 }
 
@@ -249,7 +277,7 @@ function New-PimGuardRelease {
     # PIM 100.119: no ceiling on an exact list -- but the list must BE exact: a hold whose item list had to be cut cannot
     # be read in full on the page, so it is not released there.
     if ($Hold.PSObject.Properties['itemsTruncated'] -and $Hold.itemsTruncated) {
-        throw ("REFUSED -- the held plan has {0} item(s), more than the {1} the page can list in full, so it cannot be read item by item here. Approve the list when it is committed (the commit popup shows and records every item), or make the change in smaller parts." -f $count, (Get-PimGuardHoldItemCap))
+        throw ("REFUSED -- the held plan has {0} item(s), and an older version recorded only the first {1} of them, so it cannot be read item by item here. The next run records the whole list; release it then (or approve the list when it is committed)." -f $count, (Get-PimGuardHoldItemCap))
     }
     $max = $now.AddHours(24)
     if ($Mode -eq 'until') {
@@ -559,13 +587,11 @@ function Invoke-PimGuardHoldOrRelease {
             return $res
         }
         if (-not $NoHold) {
-            # PIM 100.119: the WHOLE list up to Get-PimGuardHoldItemCap (it was the first 50) -- a release is for a list that
-            # can be read item by item; a hold that had to be cut is not releasable on the page (New-PimGuardRelease).
-            $cap = [int](Get-PimGuardHoldItemCap)
+            # CODE REVIEW 2 FIXES 2026-10-13 (owner decision 60): the WHOLE list, whatever its size -- it was cut at 500, and
+            # a cut hold could never be released. A release is for a list that can be read item by item.
             $allKeys = @(@($Keys) | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
-            $items = @($allKeys | Select-Object -First $cap)
             $hold = [pscustomobject][ordered]@{ guardId = "$GuardId".Trim().ToLowerInvariant(); scope = "$Scope".Trim(); planHash = $res.planHash; count = $Count
-                items = @($items); itemsTruncated = ($allKeys.Count -gt $cap)
+                items = @($allKeys); itemsTruncated = $false
                 measured = $Measured; runKind = $RunKind; firstSeenUtc = $NowUtc.ToUniversalTime().ToString('o'); lastSeenUtc = $NowUtc.ToUniversalTime().ToString('o') }
             [void](Set-PimGuardHold -Hold $hold)
         }
@@ -1013,8 +1039,20 @@ function Get-PimGuardsView {
         if ($LastStops -and $LastStops.ContainsKey($id)) { $stop = $LastStops[$id]; if ("$($stop.atUtc)" -and (-not $lastUtc -or "$($stop.atUtc)" -gt $lastUtc)) { $lastUtc = "$($stop.atUtc)" } }
         $lim = $null
         if (-not $isNever -and (Get-Command Get-PimGuardLimitState -ErrorAction SilentlyContinue)) { try { $lim = Get-PimGuardLimitState -GuardId $id -Fresh } catch { $lim = $null } }
+        # CODE REVIEW 2 FIXES 2026-10-13 (owner decision 59: "Show it, keep 0 possible"): the EFFECTIVE number in this process
+        # next to the stored one -- a server setting may lower it (0 = a full stop) and the page says so; it never raises it.
+        if ($lim -and (Get-Command Get-PimGuardEffectiveLimit -ErrorAction SilentlyContinue)) {
+            $eff = $null; try { $eff = Get-PimGuardEffectiveLimit -GuardId $id } catch { $eff = $null }
+            if ($eff) {
+                $lim | Add-Member -NotePropertyName effective -NotePropertyValue ([int]$eff.effective) -Force
+                $lim | Add-Member -NotePropertyName effectiveNote -NotePropertyValue "$($eff.note)" -Force
+                $lim | Add-Member -NotePropertyName serverSetting -NotePropertyValue "$($eff.knob)" -Force
+                $lim | Add-Member -NotePropertyName serverSettingValue -NotePropertyValue "$($eff.knobValue)" -Force
+                $lim | Add-Member -NotePropertyName lowered -NotePropertyValue ([bool]$eff.lowered) -Force
+            }
+        }
         $what = "$($g.what)"
-        if ($what.Contains('{limit}')) { $what = $what.Replace('{limit}', $(if ($lim) { "$([int]$lim.value)" } else { 'the limit' })) }
+        if ($what.Contains('{limit}')) { $what = $what.Replace('{limit}', $(if ($lim -and $lim.PSObject.Properties['effective']) { "$([int]$lim.effective)" } elseif ($lim) { "$([int]$lim.value)" } else { 'the limit' })) }
         if ($what.Contains('{keep}') -and (Get-Command Get-PimCommitGuardFewLeftRows -ErrorAction SilentlyContinue)) { $what = $what.Replace('{keep}', "$([int](Get-PimCommitGuardFewLeftRows))").Replace('{minList}', "$([int](Get-PimCommitGuardFewLeftMinList))") }
         $releasable = [bool](Test-PimGuardReleasable -GuardId $id).ok
         $commitOk = (-not $isNever) -and ($id -in $atCommit)

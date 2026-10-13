@@ -111,7 +111,7 @@ function Read-PimAdCleanCandidateReport {
     #>
     $store = Get-PimAdCleanStore
     $raw = & $store.ReadCache 'ad-cleanup-candidates'
-    $out = @{ found = $false; ok = $false; reason = ''; ageHours = $null; stale = $true; refreshedUtc = ''; refreshedEpoch = [long]0; host = ''; planOnly = $false; ous = @(); pattern = ''; candidates = @(); notOffered = @(); byId = @{} }
+    $out = @{ found = $false; ok = $false; reason = ''; ageHours = $null; stale = $true; refreshedUtc = ''; refreshedEpoch = [long]0; host = ''; planOnly = $false; ous = @(); pattern = ''; candidates = @(); notOffered = @(); byId = @{}; mirroredByName = @{} }
     $doc = ConvertFrom-PimAdCleanJson "$raw"
     if ($null -eq $doc) { $out.reason = 'The hybrid worker has not reported yet. It lists the old PIM groups at every run of its "Group definitions" job (hourly).'; return $out }
     $out.found = $true
@@ -142,6 +142,21 @@ function Read-PimAdCleanCandidateReport {
     }
     $out.candidates = $list.ToArray()
     $out.notOffered = @(foreach ($n in @(Get-PimHybridAdCleanupField $doc 'notOffered')) { if ($n) { [ordered]@{ name = "$(Get-PimHybridAdCleanupField $n 'name')"; reason = "$(Get-PimHybridAdCleanupField $n 'reason')" } } })
+    # CODE REVIEW 1 FIXES 2026-10-13 (finding 6): the AD objects of the DEFINED mirrored groups (mirrored[]), by lower name --
+    # "delete in AD too" pins the exact object from here. A name two objects carry is left out (never pinned on a guess).
+    $mirBy = @{}; $mirDup = @{}
+    foreach ($m in @(Get-PimHybridAdCleanupField $doc 'mirrored')) {
+        if ($null -eq $m) { continue }
+        $nm = "$(Get-PimHybridAdCleanupField $m 'name')".Trim(); $mdn = "$(Get-PimHybridAdCleanupField $m 'dn')".Trim(); $mcr = "$(Get-PimHybridAdCleanupField $m 'created')".Trim()
+        if (-not $nm -or -not $mdn -or -not $mcr) { continue }
+        $k = $nm.ToLowerInvariant()
+        if ($mirBy.ContainsKey($k)) { $mirDup[$k] = $true; continue }
+        $mc2 = 0; [void][int]::TryParse("$(Get-PimHybridAdCleanupField $m 'memberCount')", [ref]$mc2)
+        $mirBy[$k] = [ordered]@{ name = $nm; dn = $mdn; created = $mcr; memberCount = $mc2; membersTruncated = [bool](Get-PimHybridAdCleanupField $m 'membersTruncated')
+            members = @(Get-PimHybridAdCleanupField $m 'members' | Where-Object { "$_".Trim() } | ForEach-Object { "$_" }); memberOf = @(Get-PimHybridAdCleanupField $m 'memberOf' | Where-Object { "$_".Trim() } | ForEach-Object { "$_" }) }
+    }
+    foreach ($k in @($mirDup.Keys)) { $mirBy.Remove($k) }
+    $out['mirroredByName'] = $mirBy
     return $out
 }
 
@@ -305,10 +320,22 @@ function Invoke-PimAdCleanAlsoDelete {
         if (-not (Test-PimHybridAdCleanupPattern $pattern)) { return @{ status = 409; body = [ordered]@{ ok = $false; error = 'The naming of the groups mirrored to Active Directory is not set narrowly enough. Nothing was recorded.' } } }
         $bad = @($names | Where-Object { -not $defined.ContainsKey($_.ToLowerInvariant()) -or $defined[$_.ToLowerInvariant()] -notlike $pattern })
         if ($bad.Count) { return @{ status = 400; body = [ordered]@{ ok = $false; error = "Not a group that is defined in PIM Manager and mirrored to Active Directory: $($bad -join ', '). Nothing was recorded."; unknown = $bad } } }
+        # CODE REVIEW 1 FIXES 2026-10-13 (lane review1, finding 6): the request PINS the exact AD object -- distinguished name,
+        # creation date, members, member-of -- from the worker's current report, and the worker checks it like a reviewed
+        # item (a moved / re-created object, or one that gained a member or a member-of, is not deleted). No current report,
+        # or a group the report does not hold (exactly once), refuses the whole request: nothing is pinned by name only.
+        $rep = Read-PimAdCleanCandidateReport
+        if (-not $rep.found -or $rep.stale) { return @{ status = 409; body = [ordered]@{ ok = $false; error = "The hybrid worker's report is $(if (-not $rep.found) { 'missing' } else { "$($rep.ageHours) hours old" }), so the AD objects cannot be pinned. Wait for its next run (hourly). Nothing was recorded." } } }
+        $noObj = @($names | Where-Object { -not $rep.mirroredByName.ContainsKey($_.ToLowerInvariant()) })
+        if ($noObj.Count) { return @{ status = 409; body = [ordered]@{ ok = $false; error = "The worker's report holds no single AD object for: $($noObj -join ', ') (not mirrored yet, outside the configured OUs, or two objects carry the name). Nothing was recorded."; unknown = $noObj } } }
         $now = Get-PimAdCleanEpoch
         for ($try = 1; $try -le 2; $try++) {
             $ap = Read-PimAdCleanApprovalDoc
-            foreach ($n in $names) { $ap.also[$n.ToLowerInvariant()] = [ordered]@{ name = $defined[$n.ToLowerInvariant()]; requestedBy = $me.identity; requestedAtEpoch = $now; reason = $reason } }
+            foreach ($n in $names) {
+                $o = $rep.mirroredByName[$n.ToLowerInvariant()]
+                $ap.also[$n.ToLowerInvariant()] = [ordered]@{ name = $defined[$n.ToLowerInvariant()]; requestedBy = $me.identity; requestedAtEpoch = $now; reason = $reason
+                    dn = "$($o.dn)"; created = "$($o.created)"; memberCount = [int]$o.memberCount; membersTruncated = [bool]$o.membersTruncated; members = [string[]]@($o.members); memberOf = [string[]]@($o.memberOf) }
+            }
             if (Save-PimAdCleanApprovalDoc -Doc $ap) {
                 foreach ($n in $names) { Write-PimManagerAuditEvent -Action 'hybrid-ad.cleanup.also-delete' -Target "group:$($defined[$n.ToLowerInvariant()])" -After ([ordered]@{ reason = $reason; requestedAtEpoch = $now }) -Result 'ok' }
                 return @{ status = 200; body = [ordered]@{ ok = $true; recorded = $names.Count; note = "Recorded for $($names.Count) group(s): once the group is deleted in PIM Manager and in Microsoft Entra ID, the hybrid worker also takes its AD group out of its server's local Administrators and deletes it in Active Directory." } }

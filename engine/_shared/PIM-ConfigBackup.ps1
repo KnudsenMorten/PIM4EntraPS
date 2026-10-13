@@ -64,6 +64,7 @@ function Get-PimConfigBackupSettingDenyList {
                      'HybridWorkerHeartbeat', 'HybridAdSyncLive', 'HybridAdSyncLiveWatch', 'RecalcSignature', 'RecalcEntitySignatures',
                      'CommitWatch', 'CommitOutcomes', 'AlertFeed', 'DriftAlertState', 'UplinkState', 'LicenceRequestState',
                      'UnmanagedAdmins', 'AzResPolicyMassHold', 'AzResPolicyMassChangeApproval', 'GroupsPolicyMassHold',
+                     'GroupsPolicyMassChangeApproval', 'EntraRolePolicyMassHold', 'EntraRolePolicyMassChangeApproval',   # CODE REVIEW 2 (2026-10-13): a restore never brings back a policy hold or approval
                      'RemoveRowAbsentSeen', 'TenantCacheState', 'RingOrder', 'WorkloadPrereqs', 'CutoverState', 'PendingChanges',
                      'ApprovalRequests', 'GuardTrips', 'AccessReviewCampaigns', 'AccessReviewCycleState', 'AccessReviewReminders',
                      'AutoExtendDecisions', 'AutoExtendOutlook', 'CompanyReviewCampaigns', 'OwnerReviews', 'RfaRequests',
@@ -75,6 +76,8 @@ function Get-PimConfigBackupSettingDenyList {
                      # revoked approval / release ACTIVE again (used = []), and move a limit with no 'guard.limit' audit.
                      # A limit is set by a SuperAdmin on the Guards page, never by a restore.
                      'GuardApprovals', 'GuardReleases', 'GuardHolds', 'GuardLimits',
+                     # review 1 fixes 2026-10-13 (decision 54): a restored delete pin would make a tombstone ACTIVE again
+                     'AdminDeletePins',
                      # PIM 100.123: the AD clean-up / server-group approvals and the worker's own records -- an old approval restored would be usable again
                      'HybridAdCleanupApproval', 'HybridAdServerAutoGroupsApproval', 'AdServerAutoGroups', 'AdServerAutoGroupsWaiting', 'AdServerAutoGroupsProgress', 'AdCleanupResult', 'AdCleanupLocalAdmin')
         statePrefix = @('JobRunOutput:', 'SchedulerState', 'SchedulerLease', 'JobScope', 'HybridAdSyncMemory')   # 100.122 F1: the AD sync's memory (Entra ids of THIS tenant) is never restored

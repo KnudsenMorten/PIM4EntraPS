@@ -173,7 +173,16 @@ function Get-PimAdminStatusDecision {
     return (& $mk $st $null $false $false $false $true "unknown AccountStatus '$st' (expected Enabled / Disabled / Revoked / Removed / Deleted) -- the account is left as it is" $false)
 }
 
-$script:PimAdminDeleteMaxPerRun = 5
+function Get-PimAdminDeleteMaxPerRun { <# CODE REVIEW 2 (2026-10-13, owner decision 60): the guard limit engine.admin-delete (Operations > Guards, 1..5..25), a literal 5 when the limit library is not loaded -- never a $script: default (BUG-79-6b). #> if (Get-Command Get-PimAdminDeleteLimit -ErrorAction SilentlyContinue) { return [int](Get-PimAdminDeleteLimit) }; return 5 }
+# CODE REVIEW 1 FIXES 2026-10-13 (lane review1), owner decisions (51) + (54): every account delete is ONE pinned decision
+# (PIM-AdminDeletePins.ps1) -- loaded here so the one delete function below can never run without it.
+if (-not (Get-Command Get-PimAdminDeletePinDecision -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-AdminDeletePins.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-AdminDeletePins.ps1') }
+function Get-PimCentralAdminDeleteMaxPerRun {
+    # PURE. LITERAL. Owner decision (61), his words: "make a guard here - only 1 admin can be deleted at the time". A managed
+    # tenant deletes at most ONE central admin per run on the managing tenant's approval; the owner set the number himself, so
+    # it is NOT a customer setting (the guard msp.central-admin-delete on the Guards page says so).
+    1
+}
 function Test-PimAdminDeleteEnabled {
     # §96.5 D1: the operator allows an operator-controlled account delete (default ON). A kill switch exists:
     # $global:PIM_AdminAccountDeleteEnabled = $false, or env PIM_ADMIN_ACCOUNT_DELETE = 0 / false / off.
@@ -186,23 +195,45 @@ function Remove-PimAdminAccountApproved {
     <#
       §96.5 D1 (operator 2026-10-06: "I will only allow deletion of admins in a operator controlled action (delete in gui or
       via api)" ... "i allow operators to delete an admin"). THE ONLY place PIM deletes a user account (Test-PimNoAccountDelete
-      allows exactly this one call, by its marker). It runs only for a row whose AccountStatus is Deleted -- a value only a
-      SuperAdmin stages in the Manager, held for the offboard approval before it is stored -- from the Admins scope's
-      ApplyUpdate. A prune or reconcile never reaches it: Admins.ApplyRemove reports only (71.22), and an absent row is never
-      a delete.
-      Guards (each refuses = nothing deleted, reported): the kill switch; no disable decision for this pass (fail closed); a
-      break-glass account; an MSP status change that did not verify; an ENABLED account the circuit breaker did not allow; more
-      than $script:PimAdminDeleteMaxPerRun deletes in one pass. Sessions are revoked first; Entra keeps a deleted user
-      restorable (Deleted users) for 30 days.
+      allows exactly this one call, by its marker). It runs only for a row whose AccountStatus is Deleted AND whose account
+      was pinned by the person who decided the delete (Delete account / a commit that passed the delete rule -- same rule as
+      revoke, review 1 fixes 2026-10-13) -- from the Admins scope's ApplyUpdate. A prune or reconcile never reaches it:
+      Admins.ApplyRemove reports only (71.22), and an absent row is never a delete.
+      Guards (each refuses = nothing deleted, reported): the pin (once, this object id only); the kill switch; no disable
+      decision for this pass (fail closed); a break-glass account; an MSP status change that did not verify; an ENABLED
+      account the circuit breaker did not allow; more than Get-PimAdminDeleteMaxPerRun (the guard limit engine.admin-delete)
+      deletes in one pass; for a central admin, more than Get-PimCentralAdminDeleteMaxPerRun (1, guard
+      msp.central-admin-delete). Sessions are revoked first; Entra keeps a deleted user restorable (Deleted users) for 30 days.
     #>
-    param([Parameter(Mandatory)][object]$Item, [Parameter(Mandatory)][hashtable]$Context)
+    # CODE REVIEW 1 FIXES 2026-10-13 (lane review1), owner decision (54) "Yes, once and pinned": the delete acts ONCE, on the
+    # exact account (object id) pinned when the operator chose it (PIM-AdminDeletePins.ps1), and the pin is then a TOMBSTONE.
+    # A row marked Deleted with no approved pin (an older version's), a pin for another object id (a restored or a new account
+    # with the same name), a tombstone or a delete that was started and never confirmed: NOT deleted, reported. -Source
+    # central (decision 51): a central row, deleted only on the managing tenant's signed SuperAdmin approval (a central pin),
+    # at most Get-PimCentralAdminDeleteMaxPerRun (1, decision 61) per run.
+    param([Parameter(Mandatory)][object]$Item, [Parameter(Mandatory)][hashtable]$Context, [ValidateSet('local', 'central')][string]$Source = 'local',
+          [AllowNull()][object[]]$Pins = $null, [switch]$PinsGiven)
     $l = $Item.live
     $key = "$($Item.key)".Trim().ToLowerInvariant()
     $uid = "$($l.id)".Trim()
     $upn = "$($l.userPrincipalName)".Trim()
     $refuse = { param($why) Write-Host ("    [!] {0}: NOT deleted -- {1}" -f $Item.key, $why) -ForegroundColor Yellow; return [pscustomobject]@{ pimApplied = $false; reason = "NOT deleted -- $why" } }
-    if (-not $uid) { return (& $refuse 'the account was not found (already deleted?)') }
+    if (-not (Get-Command Get-PimAdminDeletePinDecision -ErrorAction SilentlyContinue)) { return (& $refuse 'the delete pins library (PIM-AdminDeletePins.ps1) is not loaded -- nothing is deleted (fail closed)') }
+    $pinsNow = if ($PinsGiven) { $Pins } else { Get-PimAdminDeletePins }
+    $pd = Get-PimAdminDeletePinDecision -Pins $pinsNow -Key $key -LiveObjectId $uid -Source $Source
+    if (-not $uid) {
+        # gone already: an approved pin is closed (tombstone) so it can never act on a later account of the same name
+        if ($pd.pin -and "$($pd.pin.status)" -in @('approved', 'failed')) {
+            try { Set-PimAdminDeletePinState -Id "$($pd.pin.id)" -Status 'deleted' -Note 'the account was not found when the engine came to delete it' } catch { Write-Warning "  [admins] $($Item.key): the delete pin could not be closed: $($_.Exception.Message)" }
+        }
+        return (& $refuse 'the account was not found (already deleted?)')
+    }
+    if (-not $pd.act) { return (& $refuse "$($pd.reason)") }
     if (-not (Test-PimAdminDeleteEnabled)) { return (& $refuse 'account delete is switched off on this environment (PIM_ADMIN_ACCOUNT_DELETE)') }
+    if ($Source -eq 'central') {
+        $cn = [int]$Context['adminsCentralDeletedCount']
+        if ($cn -ge [int](Get-PimCentralAdminDeleteMaxPerRun)) { return (& $refuse "guard msp.central-admin-delete: only $(Get-PimCentralAdminDeleteMaxPerRun) central admin is deleted per run -- this one waits for the next run (it stays disabled meanwhile)") }
+    }
     $st = $Context['adminsDisable']
     if (-not $st) { return (& $refuse 'no circuit-breaker decision was made for this pass (fail closed)') }
     if (@($st.breakGlass) -contains $key) { return (& $refuse 'BREAK-GLASS account -- never deleted') }
@@ -213,13 +244,34 @@ function Remove-PimAdminAccountApproved {
         return (& $refuse "account-disable circuit breaker [$tr]")
     }
     $n = [int]$Context['adminsDeletedCount']
-    if ($n -ge $script:PimAdminDeleteMaxPerRun) { return (& $refuse "more than $($script:PimAdminDeleteMaxPerRun) account deletes in one run -- the rest wait for the next run") }
+    $__adMax = Get-PimAdminDeleteMaxPerRun; if ($n -ge $__adMax) { return (& $refuse "more than $__adMax account deletes in one run -- the rest wait for the next run") }
+    # ONE-SHOT: the pin is CLAIMED before the call (a run that cannot record the claim deletes nothing), closed as a tombstone
+    # after a confirmed delete or a 404, and marked failed (retried next run, same object id only) on any other error.
+    $pinId = "$($pd.pin.id)"
+    try { Set-PimAdminDeletePinState -Id $pinId -Status 'claimed' -ObjectId "$($pd.pinObjectId)" -Note "delete started for object id $uid" }
+    catch { return (& $refuse "the delete could not be recorded before it was made ($($_.Exception.Message)) -- nothing is deleted without its record") }
     try { Invoke-PimGraph -Method POST -Path "/users/$uid/revokeSignInSessions" -Body @{} | Out-Null } catch { Write-Warning ("  [admins] {0}: revoke before delete failed: {1}" -f $upn, $_.Exception.Message) }
-    $r = Invoke-PimGraph -Method DELETE -Path "/users/$uid"   # 71.21-operator-delete: the ONE allowed user delete (§96.5 D1)
+    $r = $null
+    try { $r = Invoke-PimGraph -Method DELETE -Path "/users/$uid" }   # 71.21-operator-delete: the ONE allowed user delete (§96.5 D1)
+    catch {
+        $msg = "$($_.Exception.Message)"
+        if ($msg -match '(?i)\b404\b|NotFound|does not exist|Request_ResourceNotFound') {
+            try { Set-PimAdminDeletePinState -Id $pinId -Status 'deleted' -Note "already gone (404) when deleted: object id $uid" } catch { Write-Warning "  [admins] ${upn}: the tombstone could not be written: $($_.Exception.Message)" }
+            return (& $refuse 'the account was already gone (404) -- the row is closed')
+        }
+        # Not swallowed (fix round r619): a pin that cannot be marked FAILED stays CLAIMED, and a claimed pin never acts again
+        # (fail closed -- the operator confirms the delete again). Said in the run log, then the delete failure is thrown.
+        try { Set-PimAdminDeletePinState -Id $pinId -Status 'failed' -Note "the delete call failed: $msg" }
+        catch { Write-Warning ("  [admins] {0}: the delete failed AND its pin could not be marked failed ({1}) -- the pin stays CLAIMED and never acts again; confirm the delete again (Delete account)" -f $upn, $_.Exception.Message) }
+        throw
+    }
+    try { Set-PimAdminDeletePinState -Id $pinId -Status 'deleted' -Note "deleted: object id $uid" }
+    catch { Write-Warning "  [admins] ${upn}: deleted, but the tombstone could not be written ($($_.Exception.Message)) -- the pin stays CLAIMED, which never acts again" }
     $Context['adminsDeletedCount'] = $n + 1
-    Write-Host ("    [-] {0}: account DELETED (operator request, AccountStatus=Deleted; restorable from Entra Deleted users for 30 days)" -f $upn) -ForegroundColor Yellow
+    if ($Source -eq 'central') { $Context['adminsCentralDeletedCount'] = [int]$Context['adminsCentralDeletedCount'] + 1 }
+    Write-Host ("    [-] {0}: account DELETED ({1}, object id {2}, once; restorable from Entra Deleted users for 30 days)" -f $upn, $(if ($Source -eq 'central') { "the managing tenant's SuperAdmin approval" } else { 'operator request, pinned' }), $uid) -ForegroundColor Yellow
     if (Get-Command Write-PimAdminLifecycleAudit -ErrorAction SilentlyContinue) {
-        Write-PimAdminLifecycleAudit -Action 'account.delete' -Target $upn -After @{ reason = 'AccountStatus=Deleted (operator request)'; restorableDays = 30; transport = 'rest' }
+        Write-PimAdminLifecycleAudit -Action 'account.delete' -Target $upn -After @{ reason = $(if ($Source -eq 'central') { 'AccountStatus=Deleted (managing tenant SuperAdmin approval)' } else { 'AccountStatus=Deleted (operator request)' }); objectId = $uid; pinId = $pinId; approvedBy = "$($pd.pin.approvedBy)"; source = $Source; restorableDays = 30; transport = 'rest' }
     }
     if ($null -eq $r -or "$r" -eq '') { return [pscustomobject]@{ pimApplied = $true; deleted = $upn } }
     return $r
@@ -718,6 +770,12 @@ function New-PimAdminsProvider {
             $on = Test-PimAdminValueTrue $l.accountEnabled
             # the account still exists: delete it (ApplyUpdate) -- a LOCAL row only; a central Deleted is a disable (see ApplyUpdate)
             if ($dec.PSObject.Properties['delete'] -and $dec.delete -and -not ((Get-Command Test-PimAdminRowIsCentral -ErrorAction SilentlyContinue) -and (Test-PimAdminRowIsCentral -Row $d))) { return $false }
+            # Review 1 fixes (decision 51): a central Deleted row with the managing tenant's approved delete still waiting is
+            # unequal even once the account is disabled, so ApplyUpdate reaches the one guarded delete (one per run).
+            if ($dec.PSObject.Properties['delete'] -and $dec.delete -and (Get-Command Get-PimAdminDeletePinDecision -ErrorAction SilentlyContinue)) {
+                $__eq = Get-PimAdminDeletePinDecision -Pins (Get-PimAdminDeletePins) -Key (Get-PimAdminDeletePinKeyOfRow -Row $d) -LiveObjectId "$($l.id)" -Source central
+                if ($__eq.act) { return $false }
+            }
             if ($dec.disable -and $on) { return $false }
             # §96.5 D1 (b): a Removed admin is equal once it is disabled -- its attributes are no longer PIM's business.
             if ($dec.PSObject.Properties['removed'] -and $dec.removed) { return $true }
@@ -822,7 +880,21 @@ function New-PimAdminsProvider {
                 return (Remove-PimAdminAccountApproved -Item $item -Context $ctx)
             }
             if ($dec.PSObject.Properties['delete'] -and $dec.delete -and $__centralRow) {
-                Write-Host ("    [admins] {0}: CENTRAL row says Deleted -- disabled here, never deleted by the managing tenant's word" -f $item.key) -ForegroundColor DarkYellow
+                # CODE REVIEW 1 FIXES 2026-10-13 (lane review1), owner decisions (51) + (61): a central admin the managing tenant
+                # deleted IS deleted here when -- and only when -- the managing tenant's SuperAdmin approved it (the signed
+                # 'delete-account' decision the downlink turned into a CENTRAL pin), pinned to THIS tenant's own object id, through
+                # the same one guarded delete, at most one central admin per run. Without that approval, or while it waits for the
+                # next run, the account is DISABLED below, as before. Never by the managing tenant's word alone.
+                $__cpins = if (Get-Command Get-PimAdminDeletePins -ErrorAction SilentlyContinue) { Get-PimAdminDeletePins } else { $null }
+                $__cdec = if (Get-Command Get-PimAdminDeletePinDecision -ErrorAction SilentlyContinue) { Get-PimAdminDeletePinDecision -Pins $__cpins -Key "$($item.key)" -LiveObjectId "$($l.id)" -Source central } else { $null }
+                if ($__cdec -and $__cdec.act) {
+                    $__cres = Remove-PimAdminAccountApproved -Item $item -Context $ctx -Source central -Pins $__cpins -PinsGiven
+                    if ($__cres -and $__cres.PSObject.Properties['pimApplied'] -and -not $__cres.pimApplied -and "$($__cres.reason)" -notmatch 'already gone|not found') {
+                        Write-Host ("    [admins] {0}: central delete not made now ({1}) -- disabled here meanwhile" -f $item.key, "$($__cres.reason)") -ForegroundColor DarkYellow
+                    } else { return $__cres }
+                } else {
+                    Write-Host ("    [admins] {0}: CENTRAL row says Deleted -- disabled here; {1}" -f $item.key, $(if ($__cdec) { "$($__cdec.reason)" } else { 'the delete pins library is not loaded' })) -ForegroundColor DarkYellow
+                }
             }
             $attrs = Get-PimAdminAttributePlan -Desired $d -Live $l
             # §96.5 D1 (b): a Removed admin is only ever DISABLED (through the same guards below) -- no attribute PATCH, no
@@ -5690,11 +5762,11 @@ $script:PimAzResPolicyStandardRuleIds = @(
 # Get-PimEnginePolicyTemplateDefaultId, which falls back to this value (Get-PimPolicyTemplateCodeDefaults) -- and to
 # EntraIDRoles_Standard while a store does not hold AzureRoles_Standard yet.
 $script:PimAzResPolicyDefaultTemplate = 'AzureRoles_Standard'
-# Breaker defaults (pim.Settings 'AzResPolicyBreaker' overrides each key). The percentage only applies
-# once at least this many policies were checked, so a tiny estate is not blocked by a ratio.
-# PIM 100.82: every trigger HOLDS until a SuperAdmin of the tenant approves (2.4.594 only warned on count / percent).
-$script:PimAzResPolicyBreakerDefaults = @{ MaxChanges = 25; MaxPercent = 25; MaxWeakening = 3 }
-$script:PimAzResPolicyBreakerMinCheckedForPercent = 8
+# CODE REVIEW 2 FIXES 2026-10-13 (lane review2, owner decision 60): the policy breaker's numbers DECIDE NOTHING -- EVERY
+# change set is held for a SuperAdmin (PIM 100.93). The two counts left (25 policies, 3 weakening changes) are FIXED words in
+# the hold text ("many policies change", "settings are weakened"); the percentage, its minimum of 8 checked, and the hidden
+# pim.Settings '<prefix>Breaker' override (no page ever showed it) are GONE. Literals returned by a function (BUG-79-6b).
+function Get-PimPolicyBreakerFixedCounts { @{ MaxChanges = 25; MaxWeakening = 3 } }
 $script:PimAzResPolicyApprovalValidHours = 24
 
 function Get-PimAzResPolicyTargets {
@@ -6176,7 +6248,7 @@ function ConvertTo-PimAzResUtc {
 # thresholds key, hold record, approval record and failure code, so an approval can never cover another
 # provider's change set. Measured motivation for the Graph providers: the first 2.4.338 run on internal
 # changed 293 of 706 group policies in one tick (owner + notification alignment) with nothing to hold it.
-#   <prefix>Breaker            pim.Settings  {"MaxChanges":n,"MaxPercent":n,"MaxWeakening":n}
+#   <prefix>Breaker            NO LONGER READ (CODE REVIEW 2, 2026-10-13): the counts are fixed words; every change set holds
 #   <prefix>MassHold           pim.Settings  the held plan (what an approval must match)
 #   <prefix>MassChangeApproval pim.Settings  { planHash, approvedBy, approvedUtc, expiresUtc }
 # ---------------------------------------------------------------------------
@@ -6198,33 +6270,14 @@ function Get-PimPolicyBreakerSpec {
 
 function Get-PimPolicyBreakerThresholds {
     <#
-      The breaker thresholds for ONE provider: code defaults (MaxChanges 25, MaxPercent 25, MaxWeakening 3),
-      each key overridable from SQL -- pim.Settings '<prefix>Breaker'. An unreadable or malformed setting
-      falls back to the defaults, and says so.
+      The two FIXED counts the hold text names for ONE provider (MaxChanges 25, MaxWeakening 3). CODE REVIEW 2 FIXES
+      2026-10-13 (owner decision 60): they decide NOTHING -- every change set is held for a SuperAdmin -- so they are not
+      settable: the pim.Settings '<prefix>Breaker' override is no longer read, and there is no percentage.
     #>
     [CmdletBinding()] param([Parameter(Mandatory)][string]$Provider)
-    $spec = Get-PimPolicyBreakerSpec -Provider $Provider
-    $key = "$($spec.Prefix)Breaker"
-    $t = [ordered]@{ MaxChanges = [int]$script:PimAzResPolicyBreakerDefaults.MaxChanges; MaxPercent = [double]$script:PimAzResPolicyBreakerDefaults.MaxPercent
-                     MaxWeakening = [int]$script:PimAzResPolicyBreakerDefaults.MaxWeakening; MinCheckedForPercent = $script:PimAzResPolicyBreakerMinCheckedForPercent; source = 'default' }
-    $hasStore = [bool](Get-Command Get-PimSetting -ErrorAction SilentlyContinue)
-    $mirror = ($global:PIM_NamingConventions -is [System.Collections.IDictionary] -and $global:PIM_NamingConventions.Contains($key))
-    if ($hasStore -or $mirror) {
-        try {
-            # pim.Settings through the store bridge, else the hydrated pim.Settings mirror (Import-PimSettingsFromStore)
-            $raw = $null
-            if ($hasStore) { $raw = Get-PimSetting -Name $key }
-            if ($null -eq $raw -and $mirror) { $raw = $global:PIM_NamingConventions[$key] }
-            $o = ConvertFrom-PimAzResSettingValue $raw
-            if ($o) {
-                foreach ($k in @('MaxChanges','MaxPercent','MaxWeakening')) {
-                    $p = $o.PSObject.Properties[$k]
-                    if ($p -and "$($p.Value)" -match '^\d+(\.\d+)?$') { $t[$k] = $(if ($k -eq 'MaxPercent') { [double]$p.Value } else { [int][double]$p.Value }); $t.source = "pim.Settings['$key']" }
-                }
-            }
-        } catch { Write-Warning "  [engine] $($spec.Provider): pim.Settings['$key'] could not be read ($($_.Exception.Message)) -- using the default thresholds." }
-    }
-    [pscustomobject]$t
+    [void](Get-PimPolicyBreakerSpec -Provider $Provider)   # an unknown provider still throws
+    $c = Get-PimPolicyBreakerFixedCounts
+    [pscustomobject][ordered]@{ MaxChanges = [int]$c.MaxChanges; MaxWeakening = [int]$c.MaxWeakening; source = 'fixed' }
 }
 
 function Get-PimPolicyMassChangeApproval {
@@ -6398,9 +6451,8 @@ function Write-PimPolicyMassHoldAlert {
 
 function Get-PimAzResPolicyBreakerThresholds {
     <#
-      The breaker thresholds: code defaults (MaxChanges 25, MaxPercent 25, MaxWeakening 3), each key
-      overridable from SQL -- pim.Settings 'AzResPolicyBreaker' = {"MaxChanges":n,"MaxPercent":n,"MaxWeakening":n}.
-      An unreadable or malformed setting falls back to the defaults, and says so.
+      The fixed counts the hold text names (MaxChanges 25, MaxWeakening 3) -- not settable, they decide nothing
+      (CODE REVIEW 2, 2026-10-13: pim.Settings 'AzResPolicyBreaker' is no longer read; no percentage).
     #>
     [CmdletBinding()] param()
     Get-PimPolicyBreakerThresholds -Provider 'AzResPolicies'
@@ -6431,7 +6483,8 @@ function Test-PimPolicyBreaker {
     <#
       PURE. The mass-change circuit breaker -- same decision shape as Test-PimDisablePassAllowed:
         { allowed; abort (= hold); tripped; reason; warnings; ... }
-      Trips when N > MaxChanges, OR (T >= 8 and N/T > MaxPercent %), OR W > MaxWeakening. A trip is a HOLD (write
+      EVERY change set trips ('needs-approval'); N > 25 and W > 3 only add their words (CODE REVIEW 2: no percentage, no
+      settable number). A trip is a HOLD (write
       nothing) unless an UNEXPIRED approval covers it -- given by a SuperAdmin of the tenant in PIM Manager.
       PIM 100.82 (owner 2026-10-11: "super admin per tenant must approve mass changes" / "move policy break back to be a
       guard rail"): 2.4.594 had made the count / percent triggers a warning (100.72 (1)); that is REVERSED -- many policy
@@ -6455,15 +6508,12 @@ function Test-PimPolicyBreaker {
     $raw = [Math]::Max(0, [int]$Plan.changes)
     if ($raw -ge 1) { $tripped.Add('needs-approval'); $reasons.Add(("{0} policy change{1} from your policy choices wait{2} for a SuperAdmin's approval" -f $raw, $(if ($raw -eq 1) { '' } else { 's' }), $(if ($raw -eq 1) { 's' } else { '' }))) }
     # PIM 100.82 (owner 2026-10-11): the count and percent triggers HOLD again -- 2.4.594 (100.72 (1)) only warned.
-    if ($n -gt [int]$Thresholds.MaxChanges) { $tripped.Add('max-changes'); $reasons.Add("would change $n policies (> cap $($Thresholds.MaxChanges))") }
-    if ($t -ge [int]$Thresholds.MinCheckedForPercent -and $t -gt 0) {
-        $pct = 100.0 * $n / $t
-        # PIM 100.119 A3 (owner 2026-10-13): what is SHOWN says counts -- how many policies change, of how many checked. The
-        # decision is untouched: the same condition adds the same 'max-percent' entry to tripped, and every change set is
-        # held whatever this says.
-        if ($pct -gt [double]$Thresholds.MaxPercent) { $tripped.Add('max-percent'); $reasons.Add(("would change {0} of the {1} checked policies" -f $n, $t)) }
-    }
-    if ($w -gt [int]$Thresholds.MaxWeakening) { $tripped.Add('max-weakening'); $reasons.Add("$w weakening change(s) (> cap $($Thresholds.MaxWeakening))") }
+    # CODE REVIEW 2 FIXES 2026-10-13 (owner decision 60): the two fixed counts only ADD a descriptive reason to a change set
+    # that is held anyway; the percentage ('max-percent') is gone. A caller's -Thresholds can never be read as "no hold".
+    $fx = Get-PimPolicyBreakerFixedCounts
+    $mc = [int]$fx.MaxChanges; $mw = [int]$fx.MaxWeakening
+    if ($n -gt $mc) { $tripped.Add('max-changes'); $reasons.Add("would change $n policies (more than $mc)") }
+    if ($w -gt $mw) { $tripped.Add('max-weakening'); $reasons.Add("$w weakening change(s) (more than $mw)") }
     $base = @{ changes = $n; checked = $t; weakening = $w; planHash = "$($Plan.planHash)"; thresholds = $Thresholds; tripped = $tripped.ToArray()
                warnings = @(); warningReason = '' }   # kept for the decision's shape; always empty since 100.82
     if (-not $tripped.Count) {
@@ -6496,7 +6546,7 @@ function New-PimAzResPolicyMassHold {
         code = 'AZ-POLICY-MASS-HOLD'; planHash = "$($Plan.planHash)"; heldUtc = $NowUtc.ToUniversalTime().ToString('o')
         changes = [int]$Plan.changes; checked = [int]$Plan.checked; weakening = [int]$Plan.weakening; ruleChanges = [int]$Plan.ruleChanges
         tripped = @($Decision.tripped); reason = "$($Decision.reason)"; approvalNote = "$($Decision.approvalNote)"
-        thresholds = [pscustomobject]@{ MaxChanges = $Decision.thresholds.MaxChanges; MaxPercent = $Decision.thresholds.MaxPercent; MaxWeakening = $Decision.thresholds.MaxWeakening; MinCheckedForPercent = $Decision.thresholds.MinCheckedForPercent; source = $Decision.thresholds.source }
+        thresholds = [pscustomobject]@{ MaxChanges = $Decision.thresholds.MaxChanges; MaxWeakening = $Decision.thresholds.MaxWeakening; source = $Decision.thresholds.source }
         policies = @($top | ForEach-Object { [pscustomobject]@{ scope = $_.scope; role = $_.role; policyId = $_.policyId; template = $_.template; rules = @($_.rules | ForEach-Object { [pscustomobject]@{ ruleId = $_.ruleId; live = $_.live; target = $_.target } }) } })
         morePolicies = [Math]::Max(0, [int]$Plan.changes - @($top).Count)
         weakenings = @($Plan.weakenings)
@@ -6680,7 +6730,7 @@ function New-PimGraphPolicyMassHold {
         code = $spec.Code; provider = $spec.Provider; planHash = "$($Plan.planHash)"; heldUtc = $NowUtc.ToUniversalTime().ToString('o')
         changes = [int]$Plan.changes; checked = [int]$Plan.checked; weakening = [int]$Plan.weakening; ruleChanges = [int]$Plan.ruleChanges
         tripped = @($Decision.tripped); reason = "$($Decision.reason)"; approvalNote = "$($Decision.approvalNote)"
-        thresholds = [pscustomobject]@{ MaxChanges = $Decision.thresholds.MaxChanges; MaxPercent = $Decision.thresholds.MaxPercent; MaxWeakening = $Decision.thresholds.MaxWeakening; MinCheckedForPercent = $Decision.thresholds.MinCheckedForPercent; source = $Decision.thresholds.source }
+        thresholds = [pscustomobject]@{ MaxChanges = $Decision.thresholds.MaxChanges; MaxWeakening = $Decision.thresholds.MaxWeakening; source = $Decision.thresholds.source }
         policies = @($top | ForEach-Object { [pscustomobject]@{ name = $_.name; role = $_.role; policyId = $_.policyId; template = $_.template; rules = @($_.rules | ForEach-Object { [pscustomobject]@{ ruleId = $_.ruleId; live = $_.live; target = $_.target } }) } })
         morePolicies = [Math]::Max(0, [int]$Plan.changes - @($top).Count)
         weakenings = @($Plan.weakenings)
@@ -8386,6 +8436,21 @@ function New-PimOffboardingProvider {
             if (-not $ctx['offboardBlocked'] -and $destructive.Count -gt 0) {
                 if (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue) {
                     $rb = Test-PimRemoveBudgetAllowed -ToRemove $destructive.Count -Scope 'AdminOffboarding' -Scanned @($ctx['offboardAll']).Count -Operation 'auto-disable'
+                    # CODE REVIEW 2 FIXES 2026-10-13 (owner decision 60: "every hold gets a SuperAdmin release"): over the budget
+                    # the offboarding list is a REAL hold (scope AdminOffboarding, the exact accounts) that a SuperAdmin releases on
+                    # Operations > Guards for one run -- it used to be a trip only, with "apply them in batches" as the way out.
+                    $__obWhatIf = [bool]$ctx['__pimWhatIf']
+                    if (-not $__obWhatIf -and (Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue)) {
+                        if (-not $rb.allowed) {
+                            $__obKeys = @($destructive | ForEach-Object { "offboard|$("$($_.UserPrincipalName)".Trim().ToLowerInvariant())" })
+                            $__obG = Invoke-PimGuardHoldOrRelease -GuardId 'engine.remove-budget' -Scope 'AdminOffboarding' -Keys $__obKeys -Count $destructive.Count -RunKind 'admin-offboarding' `
+                                        -Measured @{ toRemove = $destructive.Count; budget = [int]$rb.budget }
+                            if ($__obG.released -and $destructive.Count -le [int]$__obG.release.raiseTo) {
+                                Write-Host ("    [AdminOffboarding] the released plan goes ahead for this run -- exactly these {0} offboarding(s)" -f $destructive.Count) -ForegroundColor Magenta
+                                $rb = [pscustomobject]@{ allowed = $true; abort = $false; tripped = $null; reason = 'released for this run'; toRemove = $destructive.Count; budget = [int]$rb.budget; scope = 'AdminOffboarding'; operation = 'auto-disable'; scanned = @($ctx['offboardAll']).Count }
+                            }
+                        } elseif (Get-Command Clear-PimGuardHold -ErrorAction SilentlyContinue) { [void](Clear-PimGuardHold -GuardId 'engine.remove-budget' -Scope 'AdminOffboarding' -RunKind 'admin-offboarding') }
+                    }
                     if (-not $rb.allowed) {
                         if (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue) { Write-PimRemoveBudgetAlert -Decision $rb }
                         $ctx['offboardBlocked'] = "removal budget: $($rb.reason)"
@@ -8397,6 +8462,20 @@ function New-PimOffboardingProvider {
                 if ($global:PIM_DesiredResolved -is [hashtable] -and $global:PIM_DesiredResolved.ContainsKey('Account-Definitions-Admins')) { $resolved = [bool]$global:PIM_DesiredResolved['Account-Definitions-Admins'] }
                 if (Get-Command Test-PimExplicitDisablePassAllowed -ErrorAction SilentlyContinue) {
                     $dec = Test-PimExplicitDisablePassAllowed -ToDisable $toDisable -Scanned @($ctx['offboardAll']).Count -Desired @($ctx['offboardAll']) -DesiredResolved $resolved
+                    # CODE REVIEW 2 FIXES 2026-10-13 (owner decision 60): the COUNT trip (G2) of the offboarding's disables is a
+                    # REAL hold (engine.disable-guard, scope AdminOffboarding, exactly these accounts) a SuperAdmin releases for
+                    # one run. G1 (desired set not resolved) and G3 (feature off) are never released.
+                    if (-not [bool]$ctx['__pimWhatIf'] -and (Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue)) {
+                        if (-not $dec.allowed -and "$($dec.tripped)" -eq 'mass-disable') {
+                            $__odKeys = @($destructive | Where-Object { $_.steps -contains 'disable' } | ForEach-Object { "disable|$("$($_.UserPrincipalName)".Trim().ToLowerInvariant())" })
+                            $__odG = Invoke-PimGuardHoldOrRelease -GuardId 'engine.disable-guard' -Scope 'AdminOffboarding' -Keys $__odKeys -Count $toDisable -RunKind 'admin-offboarding' `
+                                        -Measured @{ toDisable = $toDisable; scanned = @($ctx['offboardAll']).Count }
+                            if ($__odG.released) {
+                                $__od2 = Test-PimExplicitDisablePassAllowed -ToDisable $toDisable -Scanned @($ctx['offboardAll']).Count -Desired @($ctx['offboardAll']) -DesiredResolved $resolved -MaxCount ([int]$__odG.release.raiseTo)
+                                if ($__od2.allowed) { $dec = $__od2; Write-Host ("    [AdminOffboarding] account-disable breaker RELEASED for this run: exactly these {0} account(s)" -f $toDisable) -ForegroundColor Magenta }
+                            }
+                        } elseif ($dec.allowed -and (Get-Command Clear-PimGuardHold -ErrorAction SilentlyContinue)) { [void](Clear-PimGuardHold -GuardId 'engine.disable-guard' -Scope 'AdminOffboarding' -RunKind 'admin-offboarding') }
+                    }
                     if (-not $dec.allowed) {
                         if (Get-Command Write-PimDisableAbortAlert -ErrorAction SilentlyContinue) { Write-PimDisableAbortAlert -Scope 'AdminOffboarding' -Decision $dec }
                         $ctx['offboardBlocked'] = "account-disable circuit breaker [$($dec.tripped)]: $($dec.reason)"

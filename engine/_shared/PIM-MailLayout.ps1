@@ -359,7 +359,7 @@ function Get-PimAlertMailModel {
     $envName = "$($ev['name'])".Trim()
     # the environment's own NAME only: when nothing names it, Get-PimMailEnvironmentInfo falls back to the tenant -- that
     # is the Customer row, so the Environment row is left out instead of saying the same thing twice
-    if ($envName -and ($envName -ieq $customer -or $envName -ieq "$($ev['tenantId'])".Trim())) { $envName = '' }
+    if ($envName -and ($envName -ieq $customer -or $envName -ieq "$($ev['tenantId'])".Trim() -or $envName -ieq ("tenant " + "$($ev['tenantId'])".Trim()))) { $envName = '' }
     $ver = "$($ev['version'])".Trim()
     $solution = ('PIM Manager ' + $ver).Trim()
     $problem = ConvertTo-PimAlertOneLine (& $get 'AlertProblem')

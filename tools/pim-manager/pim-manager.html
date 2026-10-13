@@ -19524,10 +19524,17 @@
       // the More info button of each limit (settings catalog: GuardLimits.*), by guard
       const info = g.guardId === 'manager.commit-removal' ? settingInfoBtn('GuardLimits.CommitRemoval')
         : g.guardId === 'engine.remove-budget' ? settingInfoBtn('GuardLimits.RemoveBudget')
-        : g.guardId === 'engine.disable-guard' ? settingInfoBtn('GuardLimits.DisableBreaker') : '';
+        : g.guardId === 'engine.disable-guard' ? settingInfoBtn('GuardLimits.DisableBreaker')
+        : g.guardId === 'manager.bulk-revoke' ? settingInfoBtn('GuardLimits.BulkRevoke')
+        : g.guardId === 'engine.admin-delete' ? settingInfoBtn('GuardLimits.AdminDelete') : '';
+      // CODE REVIEW 2 (owner decision 59: "Show it, keep 0 possible"): a server setting may LOWER the number in use (0 = a
+      // full stop); the page shows the number in effect and why, next to the one set here.
+      const effHtml = (L.effective !== undefined && L.effective !== null && Number(L.effective) !== Number(L.value))
+        ? '<div class="gp-limit-effective" style="color:#9a6700;font-size:11.5px;">In effect now: <b>' + escapeHtml(String(L.effective)) + '</b> &mdash; ' + escapeHtml(L.effectiveNote || ('lowered by the server setting ' + (L.serverSetting || ''))) + '</div>'
+        : ((L.effectiveNote || '') ? '<div class="gp-limit-effective" style="color:#57606a;font-size:11.5px;">' + escapeHtml(L.effectiveNote) + '</div>' : '');
       return '<div class="gp-limit" data-guard="' + escapeHtml(g.guardId) + '" style="font-size:12px;margin-top:6px;">' +
         '<b>Limit:</b> <span class="gp-limit-value">' + escapeHtml(String(L.value)) + '</span> ' + escapeHtml(L.unit || '') +
-        ' <span class="gp-limit-source" style="color:#57606a;">(' + who + ')</span>' + info +
+        ' <span class="gp-limit-source" style="color:#57606a;">(' + who + ')</span>' + info + effHtml +
         '<div class="gp-limit-range" style="color:#57606a;font-size:11.5px;">Can be set from <b>' + escapeHtml(String(L.floor)) + '</b> to <b>' + escapeHtml(String(L.ceiling)) + '</b>; default ' + escapeHtml(String(L.default)) + '. ' + escapeHtml(L.why || '') + '</div>' +
         // PIM 100.119 B5: ONE number can bound several actions -- every one of them is said here, and again when it is set.
         (asList(L.bounds).length ? '<div class="gp-limit-bounds" style="color:#57606a;font-size:11.5px;margin-top:2px;">This one number bounds' + (asList(L.bounds).length > 1 ? ' <b>' + asList(L.bounds).length + ' things</b>' : '') + ':<ul style="margin:2px 0 2px 18px;padding:0;">' +
@@ -23181,17 +23188,31 @@
   // operator types DELETE; staged as AccountStatus=Deleted + every delegation removed; the commit holds it for the offboard
   // approval; the engine then deletes the account ONCE (Remove-PimAdminAccountApproved). Entra keeps it restorable 30 days.
   async function acctStageDelete(ids) {
-    // Operator 2026-10-06: Admins and delegated operators too -- the SERVER decides per admin (a delegated operator only at-or-below
-    // its level / tier ceiling; Test-PimPortalCanDeleteAdmin) and refuses the commit whole otherwise.
-    if (!(roleAtLeast('Admin') || PIM_ROLE === 'Delegated')) { alert('Deleting an admin account needs an administrator or a delegated operator role.'); return; }
+    // CODE REVIEW 1 FIXES 2026-10-13 (owner decisions 52-54): Delete account goes to DELETE /api/admin-accounts/<upn>, where the
+    // SERVER applies the same rule as revoke (your scope, the admin at your level or less privileged; a SuperAdmin anything),
+    // pins the exact account by its object id and the engine deletes it ONCE. A sponsor who may not delete the admin himself
+    // PROPOSES it instead -- someone with permission over the admin approves it on Approvals (never the proposer).
+    if (!isServer) { alert('Static mode -- cannot edit. Restart with -Server.'); return; }
     ids = (ids || []).filter(x => x && x.upn);
     if (!ids.length) return;
     const who = ids.length === 1 ? ids[0].upn : (ids.length + ' admin accounts');
-    const typed = window.prompt('DELETE ' + who + ' in Entra ID?\n\nThe account(s) are deleted (not only disabled) after you commit -- your delete is the approval -- and every delegation is removed. ' +
-      'Entra keeps a deleted user restorable for 30 days (Entra admin center > Users > Deleted users).\n\nType DELETE to continue:');
+    const typed = window.prompt('DELETE ' + who + ' in Entra ID?\n\nIf you may delete it (your scope, and the admin at your level or a less privileged one), the exact account is deleted ONCE by the next engine run and every delegation is removed. ' +
+      'If you are its sponsor but may not delete it yourself, the delete is proposed for approval instead. Entra keeps a deleted user restorable for 30 days.\n\nType DELETE to continue:');
     if (typed == null) return;
     if (String(typed).trim() !== 'DELETE') { alert('Not deleted: you did not type DELETE.'); return; }
-    await acctStageStatus(ids, 'Deleted', true);
+    const why = window.prompt('Why is ' + who + ' deleted? (recorded with the delete)');
+    if (why == null || !String(why).trim()) { alert('Not deleted: a reason is required.'); return; }
+    const lines = [];
+    for (const id of ids) {
+      try {
+        const r = await api('DELETE', '/api/admin-accounts/' + encodeURIComponent(id.upn), { confirm: 'DELETE', justification: String(why).trim() });
+        lines.push(id.upn + ': ' + (r && r.action === 'delete-account-proposed' ? 'PROPOSED -- ' + (r.note || 'waits for approval') : 'deleted once by the next engine run (object id ' + ((r && r.objectId) || '?') + ')'));
+      } catch (e) {
+        lines.push(id.upn + ': NOT deleted -- ' + String((e && e.body && (e.body.error || e.body.reason)) || (e && e.message) || e));
+      }
+    }
+    await showConfirm('Delete account', '<ul>' + lines.map(l => '<li>' + escapeHtml(l) + '</li>').join('') + '</ul>', false);
+    try { if (typeof loadAccountGrid === 'function') loadAccountGrid(); } catch (_) { }
   }
   // §96.5 D1 (b) "Remove from PIM" (operator 2026-10-06, decision D1 = both): every delegation removed AND the account
   // DISABLED and KEPT in Entra ID. Admin + SuperAdmin, like Disable & remove delegations; held for the offboard approval on
@@ -25184,6 +25205,15 @@
     try {
       return await api('PUT', '/api/csv/' + encodeURIComponent(base), body, { timeoutMs: PIM_COMMIT_TIMEOUT_MS });
     } catch (e) {
+      // CODE REVIEW 1 FIXES 2026-10-13 (decision 52): a commit that DELETES admin accounts (a grid edit, an import, an undo to
+      // AccountStatus = Deleted) needs the same typed DELETE as Delete account. The server says so (gate delete-confirm); the
+      // person types DELETE and the commit is sent once more with it. The server still applies the delete rule per admin.
+      if (e && e.status === 409 && e.body && e.body.gate === 'delete-confirm' && !body.deleteConfirm) {
+        const t = window.prompt(String(e.body.error || 'This commit deletes admin accounts.') + '\n\nType DELETE to commit it:');
+        if (t == null || String(t).trim() !== 'DELETE') throw e;
+        body.deleteConfirm = 'DELETE';
+        return await api('PUT', '/api/csv/' + encodeURIComponent(base), body, { timeoutMs: PIM_COMMIT_TIMEOUT_MS });
+      }
       if (e && e.status) throw e;   // the server ANSWERED (a refusal / an error): that answer is the outcome
       return await commitOutcomeAfterNoAnswer(base, body.clientCommitId, e);
     }

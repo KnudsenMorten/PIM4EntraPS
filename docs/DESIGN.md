@@ -670,6 +670,19 @@ container, or from the scheduler with no `Connect-*` step.
   - **The Guards page lists every guard**: what it protects in one sentence, its limit (editable by
     a SuperAdmin where it has one), whether an exemption can be approved and the open approvals, and
     its last trip. The locked ones are shown locked with the reason.
+  - **Code review 2 (2026-10-13).** Five guards now have a limit: besides the three above, the bulk
+    revoke (1..5..25 assignments in one batch -- the typed count and the approval threshold read the
+    same number) and admin account deletes per run (1..5..25). Each limit shows the number **in
+    effect**: a server setting may lower it in one process (0 stops every one) and the page says so;
+    nothing but the page raises it. Every hold can be released by a SuperAdmin for exactly its list,
+    whatever its size (no item cap): the offboarding pass, group deletes from the change queue and,
+    in a managed tenant, rows the managing tenant stopped sending (over that tenant's own removal
+    limit; rows it withdrew by name are not counted) are recorded as holds. An offboarding, an
+    account delete or an over-limit bulk revoke is approved by a person with permission over the
+    target (scope and level, the revoke rule) or a SuperAdmin, never by the person who asked. The
+    hybrid Active Directory guards are listed with their fixed time windows. The policy breaker has
+    no percentage and no hidden setting: every change set is held, and "many policies change" /
+    "settings are weakened" are fixed words in the hold text.
 - **Safety alerts are really sent.** The removal budget, the account-disable breaker and the policy
   mass-change hold (§6) all alert through one sender, `Send-PimSafetyAlert`. It uses the
   `alert-notice` mail template, sends to `PIM_AlertRecipient` together with the Manager's Alerting
@@ -1012,14 +1025,26 @@ reversible**. The logic lives in a pure, injectable core
   after the person who restored).
 - **Retention.** `Get-PimBackupRetentionPlan` (pure) keeps the newest N per entity (default 10) and
   prunes the oldest; applied after each commit. Snapshots live in `pim.Backups`.
-- **Deleting an admin account (2.4.513).** PIM never deletes a user account on its own: a reconcile or prune only reports an
-  account that is not defined. The one exception is an operator decision: a SuperAdmin, an Admin, or a delegated operator for
-  admins at or below its own level chooses **Delete account** on Admin accounts and types DELETE; the row is staged as
-  `AccountStatus=Deleted` with every delegation removed, the typed DELETE is the approval (it is never parked for a second
-  person, and it is audited as operator-approved), and after the commit the engine deletes the account once -- sessions revoked first, never a
-  break-glass account, at most five per run, never an enabled account the disable circuit breaker did not allow, and a
-  switch per environment turns it off. Entra keeps a deleted user restorable for 30 days. A deleted account's row is never
-  provisioned again.
+- **Deleting an admin account (2.4.513; once and pinned since the code review of 2026-10-13).** PIM never deletes a user
+  account on its own: a reconcile or prune only reports an account that is not defined. The one exception is an operator
+  decision, under the same rule as a revoke: the person who chooses **Delete account** (or commits a row to
+  `AccountStatus=Deleted`) and types DELETE must have the admin inside his scope and at his own level or a less privileged
+  one (level 0 is the most privileged; a person with no level of his own never deletes a level-0 or level-1 admin); a
+  SuperAdmin may delete any admin. A sponsor of the admin (an owner of the admin's sponsor department) who may not delete
+  him himself **proposes** the delete; someone with permission over that admin, or a SuperAdmin, approves it on the
+  Approvals page -- never the person who proposed it. When the delete is decided, PIM Manager reads the account's object
+  id in Microsoft Entra ID and records it (the *pin*). The engine deletes exactly that object, once -- sessions revoked
+  first, never a break-glass account, at most the limit of the guard *Admin account deletes per run* per run, never an
+  enabled account the disable circuit breaker did not allow, and a switch per environment turns it off -- and then closes
+  the record. A restored account, or a new account later created with the same name, is never deleted by that decision;
+  a row marked Deleted without a recorded account (before this version) is not deleted until an operator confirms the
+  delete again. Entra keeps a deleted user restorable for 30 days. A deleted account's row is never provisioned again.
+- **Deleting a central admin in the managed tenants (2026-10-13).** A central admin deleted on the managing tenant is
+  deleted in a managed tenant only when a SuperAdmin of the managing tenant approves that delete, for exactly one admin
+  per approval. The approval travels in the signed package; each managed tenant records it for its own account of that
+  admin (never for a customer's own admin of the same name), deletes that account once, pinned to its own object id, and
+  deletes at most one central admin per run (guard *Central admin delete*, fixed at 1). Without the approval the central
+  admin is only disabled in the managed tenants.
 - **Importing administrators (2.4.513).** Admin accounts › Import administrators (SuperAdmin): a header line naming the
   columns, one administrator per line, `;` `,` or TAB; the UserPrincipalName is the key. Each line is previewed as new,
   overwrite, skip or invalid before anything is staged; *Skip existing* leaves known admins alone, *Overwrite existing*
