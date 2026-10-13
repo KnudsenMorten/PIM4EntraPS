@@ -1645,6 +1645,252 @@ function Set-PimManagerSettingObject {
     if (Get-Command Update-PimManagerSettingMirror -ErrorAction SilentlyContinue) { Update-PimManagerSettingMirror -Name $Name -Value $Value }
 }
 
+# ---------------------------------------------------------------------------
+# PIM 100.117 (owner 2026-10-13: "we dont see the view in settings" / "fix in the gui settings afterwards") --
+# THE GROUP-DELETION SWITCH. The page told an administrator, in three places, to switch group deletion on under
+# "Settings > Feature gates > EnableGroupRetirement"; no such switch existed anywhere. The engine reads it
+# (Test-PimGroupRetirementEnabled, PIM-EngineProviders.ps1) from $global:PIM_EnableGroupRetirement, then the environment
+# variable PIM_EnableGroupRetirement of the engine job, then pim.Settings 'EnableGroupRetirement'; unset = ON in a test
+# tenant and OFF in a production tenant. These functions read and write THAT store setting (JSON true / false) and say
+# only what PIM Manager can know: the engine job runs in its own process, so its environment is not readable from a
+# hosted Manager, and that is said rather than guessed. Nothing here changes what the engine deletes or any guard.
+# Literals come from functions: a $script: variable is $null in a child scope behind a load guard.
+# ---------------------------------------------------------------------------
+function Get-PimManagerGroupRetirementSettingName { 'EnableGroupRetirement' }
+function Get-PimManagerGroupRetirementEnvName     { 'PIM_EnableGroupRetirement' }
+function Get-PimManagerGroupRetirementJobId       { 'full-reconcile' }
+function Get-PimManagerGroupRetirementPlace       { 'Settings > Approvals & policy > Group deletion' }
+function Get-PimManagerGroupRetirementEntities {
+    # PURE. The entities the engine's Get-PimRetireGroupRows reads (tests/Test-PimGroupRetirementSwitch.ps1 holds the two
+    # lists equal).
+    @('PIM-Definitions-Roles', 'PIM-Definitions-Services', 'PIM-Definitions-Organization', 'PIM-Definitions-Tasks',
+      'PIM-Definitions-Departments', 'PIM-Definitions-Processes', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg')
+}
+function Test-PimManagerGroupRetirementReleasable {
+    # PURE. Can a guard release (Operations > Guards) let a group-deletion pass over the removal budget through? NO: the
+    # GroupRetirement provider asks Test-PimRemoveBudgetAllowed itself and records no releasable hold; only the engine
+    # core's remove pass goes through Resolve-PimRemoveBudgetRelease. The test suite reads the provider's source and
+    # fails when that changes, so this answer cannot go stale silently.
+    $false
+}
+function ConvertTo-PimManagerGroupRetirementFlag {
+    # PURE. One value -> $true / $false / $null (not set), with the engine's own vocabulary when it is loaded.
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [bool]) { return [bool]$Value }
+    if ("$Value".Trim() -eq '') { return $null }
+    if (Get-Command Test-PimExplicitFlagValue -ErrorAction SilentlyContinue) { return (Test-PimExplicitFlagValue -Value $Value) }
+    return ("$Value".Trim().ToLowerInvariant() -in @('1', 'true', 'yes', 'y', 'on', 'enable', 'enabled'))
+}
+function ConvertTo-PimManagerGroupRetirementStored {
+    # PURE. The stored text of pim.Settings 'EnableGroupRetirement' -> 'on' | 'off' | 'unset', read the way the engine
+    # reads it (JSON-parsed; null or blank = NOT SET, never "off").
+    param([AllowNull()][string]$Raw)
+    if ($null -eq $Raw -or "$Raw".Trim() -eq '') { return 'unset' }
+    $v = $null
+    try { $v = "$Raw" | ConvertFrom-Json } catch { $v = "$Raw" }
+    $f = ConvertTo-PimManagerGroupRetirementFlag -Value $v
+    if ($null -eq $f) { return 'unset' }
+    if ($f) { return 'on' }
+    return 'off'
+}
+function Get-PimManagerRetireGroupCount {
+    # The groups whose definition is marked Lifecycle = Retire, counted from the STORE (the committed rows; the engine's
+    # rule: a GroupName and a Lifecycle that starts with "retire"). @{ known; total; byEntity; error }. known = $false
+    # when the store could not be read -- a failed read is never a count of 0. -ReadRows { param($entities) -> @{ entity
+    # = rows } } is the test seam.
+    param([scriptblock]$ReadRows)
+    $by = [ordered]@{}; $total = 0
+    try {
+        $ents = @(Get-PimManagerGroupRetirementEntities)
+        $all = if ($ReadRows) { & $ReadRows $ents } else { Get-PimManagerEntityRowsBulk -Entities $ents }
+        foreach ($e in $ents) {
+            $n = 0
+            foreach ($r in @($all[$e])) {
+                if ($null -eq $r) { continue }
+                $gn = ''; $lc = ''
+                if ($r -is [System.Collections.IDictionary]) { $gn = "$($r['GroupName'])"; $lc = "$($r['Lifecycle'])" }
+                else {
+                    if ($r.PSObject.Properties['GroupName']) { $gn = "$($r.GroupName)" }
+                    if ($r.PSObject.Properties['Lifecycle']) { $lc = "$($r.Lifecycle)" }
+                }
+                if (-not $gn.Trim()) { continue }
+                if ($lc.Trim() -notmatch '(?i)^retire') { continue }
+                $n++
+            }
+            if ($n -gt 0) { $by[$e] = $n; $total += $n }
+        }
+        return [ordered]@{ known = $true; total = [int]$total; byEntity = $by; error = '' }
+    } catch {
+        return [ordered]@{ known = $false; total = 0; byEntity = [ordered]@{}; error = "$($_.Exception.Message)" }
+    }
+}
+function Get-PimManagerGroupRetirementLimits {
+    # The two numbers of the removal guard, read from the code that owns them (never copied): budget =
+    # Get-PimRemoveBudget (PIM-DisableGuard.ps1), releaseCeiling = Get-PimGuardReleaseCeiling (PIM-GuardRelease.ps1).
+    # $null = that function is not loaded here, so the number is not known. The budget is the one THIS process reads; the
+    # engine job may be set lower through its own environment (it can never be set higher).
+    $budget = $null; $ceil = $null
+    if (Get-Command Get-PimRemoveBudget -ErrorAction SilentlyContinue) { try { $budget = [int](Get-PimRemoveBudget -WarningAction SilentlyContinue) } catch { $budget = $null } }
+    if (Get-Command Get-PimGuardReleaseCeiling -ErrorAction SilentlyContinue) {
+        try { $c = Get-PimGuardReleaseCeiling -GuardId 'engine.remove-budget'; if ($c -and $null -ne $c.count) { $ceil = [int]$c.count } } catch { $ceil = $null }
+    }
+    return [ordered]@{ budget = $budget; releaseCeiling = $ceil; releasable = [bool](Test-PimManagerGroupRetirementReleasable) }
+}
+function Get-PimManagerGroupRetirementConfirmText {
+    # PURE. What a SuperAdmin agrees to when switching group deletion ON -- with the real count from the store.
+    param([Parameter(Mandatory)][object]$Marked, [AllowNull()][object]$Limits)
+    $job = Get-PimManagerGroupRetirementJobId
+    $cnt = if ($Marked.known) {
+        if ([int]$Marked.total -eq 1) { '1 group is marked Retire right now.' } else { "$([int]$Marked.total) groups are marked Retire right now." }
+    } else { "How many groups are marked Retire right now could NOT be counted ($($Marked.error))." }
+    $guard = 'The removal guard still applies.'
+    if ($Limits -and $null -ne $Limits.budget) {
+        $guard = "The removal guard still applies: the engine deletes at most $([int]$Limits.budget) groups in one run, and when more marked groups than that still exist it deletes none of them in that run."
+        if (-not $Limits.releasable) { $guard += ' A release on Operations > Guards does not cover group deletion.' }
+    }
+    return ("Switch group deletion ON? On its next full run (the job '$job') the engine will DELETE, in Microsoft Entra ID, every group whose definition is marked Retire: " +
+            "its role assignments are removed, its members are taken out and the group is deleted. This cannot be undone. $cnt $guard")
+}
+function Get-PimManagerGroupRetirementState {
+    <#
+      Everything the Settings card, the two delete dialogs and the group grid show about the switch. Says only what PIM
+      Manager can know from the store and its own process:
+        stored      'on' | 'off' | 'unset' | 'unknown' (the store could not be read)  -- pim.Settings 'EnableGroupRetirement'
+        tenantClass 'test' | 'production' | 'unknown'   -- Resolve-PimEnvironmentClass, as THIS process reads it
+        env         @{ known; set; value }  known = the engine runs with this process's environment (not hosted). Hosted:
+                    the engine job is another container and its environment cannot be read -- known = $false.
+        effective   'on' | 'off' | 'unknown', source 'environment' | 'setting' | 'default' | 'unknown', and text (one line)
+        marked      the Retire count from the store; limits = the removal guard's two numbers; lastGuardStop = the last
+                    recorded stop of the removal guard when it was for group deletion (pim.Settings 'GuardTrips').
+      Seams (tests): -ReadSetting { -> raw text or $null; may throw }, -ReadRows, -ReadTrips { -> the GuardTrips object },
+      -TenantClass, -Hosted, -EnvValue.
+    #>
+    param([scriptblock]$ReadSetting, [scriptblock]$ReadRows, [scriptblock]$ReadTrips, [string]$TenantClass, [Nullable[bool]]$Hosted = $null, [AllowNull()][object]$EnvValue = $null, [switch]$NoEnvRead)
+    $name = Get-PimManagerGroupRetirementSettingName; $envName = Get-PimManagerGroupRetirementEnvName
+    $stored = 'unknown'; $storedErr = ''
+    try {
+        $raw = if ($ReadSetting) { & $ReadSetting } else { Get-PimSqlSettingRaw -ConnectionString (Get-PimManagerSettingCs) -Name $name }
+        $stored = ConvertTo-PimManagerGroupRetirementStored -Raw $(if ($null -eq $raw) { $null } else { "$raw" })
+    } catch { $stored = 'unknown'; $storedErr = "$($_.Exception.Message)" }
+    $cls = "$TenantClass".Trim().ToLowerInvariant()
+    if (-not $cls) {
+        $cls = 'unknown'
+        if (Get-Command Resolve-PimEnvironmentClass -ErrorAction SilentlyContinue) {
+            try { $cls = if ((Resolve-PimEnvironmentClass) -eq 'test') { 'test' } else { 'production' } } catch { $cls = 'unknown' }
+        }
+    }
+    if ($cls -eq 'protected') { $cls = 'production' }
+    $isHosted = if ($null -ne $Hosted) { [bool]$Hosted } else { [bool]$script:PimHosted }
+    $ev = $EnvValue
+    if ($null -eq $ev -and -not $NoEnvRead) {
+        $ev = Get-Variable -Name $envName -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+        if ($null -eq $ev -or "$ev".Trim() -eq '') { $ev = [Environment]::GetEnvironmentVariable($envName, 'Process') }
+    }
+    $envSet = ($null -ne $ev -and "$ev".Trim() -ne '')
+    $envKnown = -not $isHosted
+    $eff = 'unknown'; $src = 'unknown'; $text = ''
+    if ($envKnown -and $envSet) {
+        $f = ConvertTo-PimManagerGroupRetirementFlag -Value $ev
+        $eff = if ($f) { 'on' } else { 'off' }; $src = 'environment'
+        $text = "$eff -- set by the engine's environment ($envName = $("$ev".Trim())), which wins over this setting"
+    } elseif ($stored -eq 'unknown') {
+        $text = "not known -- the setting could not be read: $storedErr"
+    } elseif ($stored -in @('on', 'off')) {
+        $eff = $stored; $src = 'setting'; $text = "$stored (set here)"
+    } elseif ($cls -eq 'test') {
+        $eff = 'on'; $src = 'default'; $text = 'on -- not set; this is a test tenant'
+    } elseif ($cls -eq 'production') {
+        $eff = 'off'; $src = 'default'; $text = 'off -- not set; this is a production tenant'
+    } else {
+        $text = 'not known -- not set, and whether this is a test or a production tenant could not be read'
+    }
+    $envNote = ''
+    if (-not $envKnown) {
+        $envNote = "PIM Manager cannot read the environment of the engine job from here. If $envName is set on that job, it wins over this setting."
+    }
+    $marked = Get-PimManagerRetireGroupCount -ReadRows $ReadRows
+    $limits = Get-PimManagerGroupRetirementLimits
+    $stop = $null
+    try {
+        $gs = if ($ReadTrips) { & $ReadTrips } else { Get-PimManagerSetting -Name 'GuardTrips' }
+        if ($gs -is [string]) { $gs = $gs | ConvertFrom-Json }
+        $e = $null
+        if ($gs -is [System.Collections.IDictionary]) { $e = $gs['engine.remove-budget'] }
+        elseif ($gs -and $gs.PSObject.Properties['engine.remove-budget']) { $e = $gs.PSObject.Properties['engine.remove-budget'].Value }
+        if ($e -and "$($e.area)".Trim() -ieq 'GroupRetirement') {
+            $when = "$($e.lastSeenUtc)"
+            if ($e.lastSeenUtc -is [datetime]) { $when = $e.lastSeenUtc.ToUniversalTime().ToString('o') }
+            $held = 0; [void][int]::TryParse("$($e.heldCount)", [ref]$held)
+            $stop = [ordered]@{ atUtc = $when; held = $held }
+        }
+    } catch { $stop = $null }
+    return [ordered]@{
+        setting = $name; envName = $envName; place = (Get-PimManagerGroupRetirementPlace); job = (Get-PimManagerGroupRetirementJobId)
+        stored = $stored; storedError = $storedErr; tenantClass = $cls
+        env = [ordered]@{ known = [bool]$envKnown; set = [bool]($envKnown -and $envSet); value = $(if ($envKnown -and $envSet) { "$ev".Trim() } else { '' }) }
+        effective = $eff; source = $src; text = $text; envNote = $envNote
+        marked = $marked; limits = $limits; lastGuardStop = $stop
+        confirmOn = (Get-PimManagerGroupRetirementConfirmText -Marked $marked -Limits $limits)
+    }
+}
+function Invoke-PimManagerGroupRetirementChange {
+    <#
+      PUT /api/settings/group-retirement { enabled: true|false, confirm?: true, marked?: <the count the confirmation showed> }.
+      Returns @{ status; body }. SuperAdmin only (403). enabled must be a real JSON boolean (400: the text "false" would
+      read as true). Switching ON needs confirm = true AND the count the person saw must still be the count in the store
+      (409 with the current confirmation text otherwise) -- so nobody agrees to "3 groups" while 65 are deleted. The value
+      is written as JSON true / false to the setting the engine reads, read back, and audited. -WriteSetting { param($json) }
+      and the Get-PimManagerGroupRetirementState seams are for tests.
+    #>
+    param([AllowNull()][object]$Body, [scriptblock]$ReadSetting, [scriptblock]$WriteSetting, [scriptblock]$ReadRows, [scriptblock]$ReadTrips, [string]$TenantClass, [Nullable[bool]]$Hosted = $null, [switch]$NoEnvRead)
+    $name = Get-PimManagerGroupRetirementSettingName
+    if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+        return @{ status = 403; body = [ordered]@{ ok = $false; error = 'SuperAdmin role required to switch group deletion on or off.' } }
+    }
+    $en = $null
+    if ($null -ne $Body) {
+        if ($Body -is [System.Collections.IDictionary]) { if ($Body.Contains('enabled')) { $en = $Body['enabled'] } }
+        elseif ($Body.PSObject.Properties['enabled']) { $en = $Body.enabled }
+    }
+    if (-not ($en -is [bool])) { return @{ status = 400; body = [ordered]@{ ok = $false; error = 'enabled (true / false, a JSON boolean) is required. Nothing was saved.' } } }
+    $get = { param($n) if ($null -eq $Body) { $null } elseif ($Body -is [System.Collections.IDictionary]) { $Body[$n] } elseif ($Body.PSObject.Properties[$n]) { $Body.PSObject.Properties[$n].Value } else { $null } }
+    $sp = @{ ReadSetting = $ReadSetting; ReadRows = $ReadRows; ReadTrips = $ReadTrips; TenantClass = $TenantClass; Hosted = $Hosted; NoEnvRead = [bool]$NoEnvRead }
+    $before = Get-PimManagerGroupRetirementState @sp
+    if ($en) {
+        $confirmed = ((& $get 'confirm') -is [bool]) -and [bool](& $get 'confirm')
+        # a count that was not sent (or is no number) matches nothing -- not even "0 groups" or "could not be counted" (-1)
+        $seen = 0; if (-not [int]::TryParse("$(& $get 'marked')".Trim(), [ref]$seen)) { $seen = -2 }
+        $now = if ($before.marked.known) { [int]$before.marked.total } else { -1 }
+        if (-not $confirmed -or $seen -ne $now) {
+            return @{ status = 409; body = [ordered]@{ ok = $false; needsConfirm = $true; marked = $now; confirmText = "$($before.confirmOn)"
+                error = $(if ($confirmed) { 'The number of groups marked Retire changed since you were asked. Read the confirmation again. Nothing was saved.' } else { 'Switching group deletion on needs your confirmation. Nothing was saved.' }) } }
+        }
+    }
+    $json = if ($en) { 'true' } else { 'false' }
+    try {
+        if ($WriteSetting) { & $WriteSetting $json }
+        else {
+            Set-PimSqlSetting -ConnectionString (Get-PimManagerSettingCs) -Name $name -ValueJson $json
+            if (Get-Command Update-PimManagerSettingMirror -ErrorAction SilentlyContinue) { Update-PimManagerSettingMirror -Name $name -Value ([bool]$en) }
+        }
+    } catch {
+        return @{ status = 500; body = [ordered]@{ ok = $false; error = "the setting was NOT saved: $($_.Exception.Message)" } }
+    }
+    $after = Get-PimManagerGroupRetirementState @sp
+    $want = if ($en) { 'on' } else { 'off' }
+    if ("$($after.stored)" -ne $want) {
+        return @{ status = 500; body = [ordered]@{ ok = $false; error = "the setting was written but reads back as '$($after.stored)', not '$want'. Treat it as NOT saved." } }
+    }
+    Write-PimManagerAuditEvent -Action 'settings.group-retirement' -Target $name `
+        -Before ([ordered]@{ stored = "$($before.stored)"; effective = "$($before.effective)" }) `
+        -After ([ordered]@{ stored = "$($after.stored)"; effective = "$($after.effective)"; markedRetire = $(if ($after.marked.known) { [int]$after.marked.total } else { $null }) }) -Result 'ok'
+    $note = if ($en) { "Group deletion is ON: the next full run (the job '$(Get-PimManagerGroupRetirementJobId)') deletes the groups marked Retire, within the removal guard." }
+            else { 'Group deletion is OFF: a group marked Retire stays in Microsoft Entra ID until this is switched on.' }
+    if ("$($after.source)" -eq 'environment') { $note += " The engine's environment ($($after.envName)) still decides: $($after.text)." }
+    return @{ status = 200; body = [ordered]@{ ok = $true; enabled = [bool]$en; note = $note; state = $after } }
+}
+
 function Get-PimManagerWarningOverrides {
     <#
       Read the override store pim.Settings['WarningOverrides']. Returns the RAW container
@@ -13472,6 +13718,22 @@ function Handle-Request {
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; enabled = $on; note = $(if ($on) { 'Self-approval is ON: the administrator who raised a request may approve it. Every such approval is recorded as a self-approval in the audit. Turn it off again as soon as a second administrator exists.' } else { 'Self-approval is OFF: a different administrator must approve (separation of duties).' }) })
                 return 200
             }
+        }
+        # PIM 100.117: the group-deletion switch (pim.Settings 'EnableGroupRetirement', the setting the engine reads).
+        # GET (any role): the effective state and where it comes from, the Retire count from the store, the removal guard's
+        # two numbers. PUT { enabled, confirm?, marked? } (SuperAdmin): audited; switching ON needs the confirmation.
+        if ($path -eq '/api/settings/group-retirement' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $grs = Get-PimManagerGroupRetirementState
+            $grs['canWrite'] = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
+            Write-JsonResponse -Response $resp -Status 200 -Body $grs
+            return 200
+        }
+        if ($path -eq '/api/settings/group-retirement' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            $grr = Invoke-PimManagerGroupRetirementChange -Body (Read-RequestJson -Request $req)
+            Write-JsonResponse -Response $resp -Status ([int]$grr.status) -Body $grr.body
+            return [int]$grr.status
         }
         # PIM 100.24 DEPT-OWNER-ACCESS: the default of "Give PIM Manager Reader access (their normal account)" when a
         # department owner is added (Access > Departments & owners, Get Started, imports). GET (any role) / PUT { enabled }

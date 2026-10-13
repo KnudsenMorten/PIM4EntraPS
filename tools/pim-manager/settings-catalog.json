@@ -1746,6 +1746,26 @@
       }
     },
     {
+      "key": "EnableGroupRetirement",
+      "label": "Group deletion",
+      "where": "Settings > Approvals & policy > Group deletion",
+      "route": "/api/settings/group-retirement",
+      "type": "boolean",
+      "default": "Not set: off in a production tenant, on in a tenant named as a test tenant",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "Decides whether the engine deletes, in Microsoft Entra ID, the groups whose definition is marked Retire -- the mark that the bin on a group row and 'Remove all delegations, delete the group(s)' stage. The engine reads the switch at the start of its daily full run (the job full-reconcile). The card shows the state in effect and where it comes from; before the switch is turned on, PIM Manager asks for confirmation with the number of groups marked Retire at that moment.",
+        "enabled": "When on: at its next full run the engine removes the role assignments of every group marked Retire, takes its members out and deletes the group. It deletes only groups that carry your tenant's group naming prefix and whose name is unique in the tenant. After the delete the definition row stays in PIM Manager, still marked Retire, until you remove the row.",
+        "disabled": "When off: a group marked Retire stays in Microsoft Entra ID with whatever it still holds. The mark is kept, PIM Manager shows the group as waiting to be deleted, and nothing is deleted until the switch is on.",
+        "risk": "Deleting a group cannot be undone by PIM Manager: role assignments held by the group go with it. The removal guard still applies and cannot be switched off here: one run deletes only a small number of groups (the card shows the number), and when more marked groups than that still exist the run deletes none of them. Reversible for the future only: switch it off and no further group is deleted; groups already deleted stay deleted.",
+        "requires": "SuperAdmin to change it. Free (Community) and Pro. A setting made in the engine job's own environment wins over this switch; the card says so where PIM Manager can read it.",
+        "recommended": "Leave it off until you have groups to delete. Mark a few groups at a time, switch it on, start the full run from Jobs, check that the groups are gone, then remove their rows.",
+        "docUrl": "https://invardia.com/docs/pim/settings/EnableGroupRetirement/"
+      }
+    },
+    {
       "key": "DepartmentOwnersGetReader",
       "label": "Give new department owners Reader access (their normal account)",
       "where": "Access > Departments & owners (also Get Started > Departments & owners)",
