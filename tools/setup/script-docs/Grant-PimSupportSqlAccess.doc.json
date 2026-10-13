@@ -1,0 +1,51 @@
+{
+  "script": "Grant-PimSupportSqlAccess.ps1",
+  "product": "pim",
+  "title": "Give the Invardia Support app its standing database access on an existing installation",
+  "purpose": "Gives the Invardia Support app its standing access to the database of an existing PIM Manager installation: membership of the SQL admin group, and its own database user (created from the application's client id) in the database owner role. Run once per installation; -WhatIf shows it first.",
+  "whenToRun": "Once, on an installation made before PIM Manager installs gave the Invardia Support app this access by themselves, when you have an Invardia Support app and want Invardia support to be able to run PIM Manager's setup and repair scripts against the database. Also when the end-of-install check shows the line 'Invardia support: database access' as a warning. New installations do this by themselves when a Support app is named. For a private installation (the SQL server has no public endpoint), run it from a machine inside the PIM network.",
+  "standalone": true,
+  "sourcePath": "tools/setup/Grant-PimSupportSqlAccess.ps1",
+  "runAs": [
+    { "kind": "azureRbac", "name": "SQL Server Contributor (or Contributor / Owner)", "scope": "the PIM SQL server (or its resource group)", "why": "Reads the server, its Microsoft Entra administrator and its firewall rules; opens and removes the one firewall rule 'AllowSetupHost'; and, only in the Support app's own session when the database refuses the sign-in, changes the server's administrator for the step and puts it back." },
+    { "kind": "other", "name": "A database owner: a member of the SQL admin group (grp-pim-sql-admins) or the server's Microsoft Entra administrator", "scope": "the PIM database", "why": "Creates the Support app's database user and adds it to db_owner. In the Invardia Support app's own session this is not needed: the Support app is made the server's administrator for the step." },
+    { "kind": "entraRole", "name": "Privileged Role Administrator", "scope": "the tenant (only to add the member to the SQL admin group)", "why": "The SQL admin group is role-assignable: adding a member needs this role. Without it the membership is reported as a warning with the next step, and the database user is still created." },
+    { "kind": "other", "name": "The Invardia Support app's session in this window, or your own browser sign-in", "scope": "the target tenant and subscription", "why": "A session of another tenant than -TenantId, or of another application than -SupportAppId, is refused. No Azure CLI, no PowerShell modules, no secret on the command line." }
+  ],
+  "changes": [
+    { "target": "The PIM database", "action": "grant", "object": "a database user for the Invardia Support app, created from the application's client id (CREATE USER ... WITH SID, never FROM EXTERNAL PROVIDER) when no user has that id; an existing user of the Support app is reused whatever its name", "permission": "db_owner (database owner)", "scope": "the one PIM database (-SqlDatabase, default PimPlatform)", "why": "PIM Manager's setup and repair scripts create database users for the product's identities, add them to fixed database roles, apply the schema and write settings; adding a member to a fixed database role needs db_owner. This is a standing right of the vendor's support identity.", "undo": "Run Grant-PimSupportAccess.ps1 -Remove (drops the user and the membership), or switch the Invardia Support app off in Microsoft Entra ID, which ends the access at once." },
+    { "target": "Microsoft Entra ID", "action": "grant", "object": "the Invardia Support app's service principal as a member of the SQL admin group (members/$ref)", "permission": "member of grp-pim-sql-admins (the SQL server's administrator group)", "scope": "the PIM SQL server", "why": "The owner's rule for every installation: the Support app is a member of the SQL admin group and stays one.", "undo": "Run Grant-PimSupportAccess.ps1 -Remove, or remove the member in the Microsoft Entra admin center." },
+    { "target": "Azure SQL server", "action": "create", "object": "the firewall rule 'AllowSetupHost' for this machine's public address, only when it is not there yet; removed again at the end of the run and read back, also after a failed step", "scope": "the PIM SQL server", "why": "The database steps connect from this machine.", "undo": "None needed: the run removes it. If the run is killed: Azure portal > the SQL server > Networking > Firewall rules: delete 'AllowSetupHost'." },
+    { "target": "Azure SQL server", "action": "update", "object": "the server's Microsoft Entra administrator, set to the Invardia Support app FOR THE STEP -- only in the Support app's own session and only when the database refuses its sign-in; put back exactly as it was read (login, id, type, tenant, Entra-only setting) and read back, also after a failed step", "scope": "the PIM SQL server", "why": "An application that is only a member of the administrator group has not been accepted by the database on the servers this was measured on; as the administrator it can create its own database user.", "undo": "None needed: the run puts it back and proves it. Exit code 2 means it could not: the values to set by hand are printed (Azure portal > the SQL server > Microsoft Entra ID > Set admin)." }
+  ],
+  "parameters": [
+    { "name": "TenantId", "required": true, "default": null, "help": "The tenant id. Every sign-in is pinned to it." },
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The subscription of the PIM SQL server." },
+    { "name": "ResourceGroup", "required": true, "default": null, "help": "The resource group of the PIM SQL server." },
+    { "name": "SqlServerName", "required": true, "default": null, "help": "The SQL server name or its FQDN (sql-x or sql-x.database.windows.net)." },
+    { "name": "SqlDatabase", "required": false, "default": "PimPlatform", "help": "The PIM database." },
+    { "name": "SupportAppId", "required": false, "default": "the application of the Support session in this window", "help": "The Invardia Support app's application (client) id. Required with a browser sign-in. In the Support app's own session it may be left out; a different id is refused." },
+    { "name": "DbUserName", "required": false, "default": "invardia-support", "help": "The name for the database user when one has to be created. An existing user with the Support app's id keeps its name." },
+    { "name": "SqlAdminGroupName", "required": false, "default": "grp-pim-sql-admins", "help": "The SQL admin group's name." },
+    { "name": "SetupHostIp", "required": false, "default": "read from api.ipify.org (said on screen)", "help": "This machine's public address for the temporary firewall rule." },
+    { "name": "SignInWaitSeconds", "required": false, "default": "300", "help": "How long to wait for the database to accept the Support app's sign-in after it became the administrator for the step." }
+  ],
+  "readsOnly": [
+    "the subscription (visible, and in -TenantId)",
+    "the SQL server: its public network access, its Microsoft Entra administrator and its Entra-only setting, before and after",
+    "the firewall rule 'AllowSetupHost', before and after",
+    "the Invardia Support app's service principal, the SQL admin group and its members (Microsoft Graph)",
+    "sys.database_principals and sys.database_role_members in the PIM database (is there a user with the Support app's id, is it in db_owner)"
+  ],
+  "network": [
+    "login.microsoftonline.com (sign-in)",
+    "management.azure.com (Azure Resource Manager)",
+    "graph.microsoft.com",
+    "<server>.database.windows.net:1433",
+    "api.ipify.org (this machine's public address, unless -SetupHostIp is given)",
+    "localhost (the browser returns the sign-in to a local port on this computer)"
+  ],
+  "whatIf": "Signs in, reads the SQL server (administrator, Entra-only setting, firewall rule), the Support app and the SQL admin group, prints 'before', and prints one 'What if:' line for each thing it would do: add the member, open and remove the firewall rule, make the Support app the administrator for the step (only in a Support session, only when refused) and put the administrator back, create the database user and add it to db_owner. It does not connect to the database. Nothing is changed.",
+  "undo": "Run Grant-PimSupportAccess.ps1 -Remove (drops the database user and takes back the membership), or switch the Invardia Support app off in Microsoft Entra ID. The firewall rule and the server's administrator are put back by the run itself.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Grant-PimSupportSqlAccess/"
+}

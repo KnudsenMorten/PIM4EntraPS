@@ -46,6 +46,10 @@
                                           "# BUILD-NO-OPTIONAL-LOADS", so the optional loads the inlined engine libraries
                                           end with (a variable assigned from Join-Path, then dot-sourced when the file
                                           exists) are replaced by a comment, and any dot-source left fails the build.
+      Grant-PimSupportSqlAccess.ps1    -- 100.116 (framework 4.1b): an EXISTING install gives the Invardia Support app its
+                                          standing database access (member of the SQL admin group + its own database user
+                                          in the database owner role); the server's administrator and firewall are put back
+                                          exactly as read. Also built with NO dot-source left.
 
     SCRIPT-DOC-1 (framework 12.7) + framework 12.10 item 11 ("scripts are big concern"), 2026-10-09:
       * every script in $script:PimScriptDocScripts (tools\setup\_PimScriptDoc.ps1) must have its manifest
@@ -69,7 +73,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$OutDir,
-    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1', 'Set-PimSqlTier.ps1', 'New-PimHubPrepareScript.ps1', 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1', 'pim-hybrid-worker/Install-PimHybridWorker.ps1', 'Set-PimLicense.ps1'),
+    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1', 'Set-PimSqlTier.ps1', 'New-PimHubPrepareScript.ps1', 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1', 'pim-hybrid-worker/Install-PimHybridWorker.ps1', 'Set-PimLicense.ps1', 'Grant-PimSupportSqlAccess.ps1'),
     # 12.10 item 11: the code-signing certificate (thumbprint of a certificate WITH its private key in CurrentUser\My or
     # LocalMachine\My). Empty = not signed, said loudly.
     [string]$SigningCertThumbprint = "$env:PIM_CODESIGN_THUMBPRINT",

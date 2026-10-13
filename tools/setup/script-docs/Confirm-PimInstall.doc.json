@@ -49,6 +49,7 @@
     { "name": "ClosingStep", "required": false, "default": "sqlhostclose", "help": "The caller's step that closes the rule (shown in the line)." },
     { "name": "CloseSetupHostRule", "required": false, "default": false, "help": "Remove this run's 'AllowSetupHost' rule and read it back." },
     { "name": "EngineAzureRootUserAccessAdmin", "required": false, "default": false, "help": "The root repair also grants the engine User Access Administrator (so it can assign Azure roles)." },
+    { "name": "SupportAppId", "required": false, "default": "", "help": "The Invardia Support app's application (client) id, when the installation named one. The line 'Invardia support: database access' then reads whether a database user with that id is in the database owner role. Without it the line says 'not checked'. Read only: nothing is created or repaired by this line." },
     { "name": "MasterSubscriptionId", "required": false, "default": null, "help": "Managed tenant: the managing tenant's subscription (for the lines it can read from here)." },
     { "name": "MasterStorageAccount", "required": false, "default": null, "help": "Managed tenant: the managing tenant's bundle store." },
     { "name": "ManagingTenantStep", "required": false, "default": null, "help": "Managed tenant: the managing tenant's step shown when a line cannot be read from here." },

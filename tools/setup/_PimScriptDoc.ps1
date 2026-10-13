@@ -65,6 +65,7 @@ $script:PimScriptDocScripts = @(
     @{ Path = 'setup/New-PimHostingPrerequisites.ps1';             Standalone = $false }
     @{ Path = 'setup/Convert-PimToPrivate.ps1';                    Standalone = $false }
     @{ Path = 'setup/Set-PimSqlPublicAccess.ps1';                  Standalone = $false }
+    @{ Path = 'setup/Grant-PimSupportSqlAccess.ps1';               Standalone = $true }
     @{ Path = 'pim-hybrid-worker/Deploy-PimHybridWorker.ps1';      Standalone = $false }
     @{ Path = 'pim-hybrid-worker/New-PimHybridWorkerInfra.ps1';    Standalone = $false }
     @{ Path = 'pim-hybrid-worker/Set-PimHybridWorkerPeering.ps1';  Standalone = $false }
