@@ -221,6 +221,15 @@ function Get-PimDisableMaxCount {
     # The cap: refuse a run that would disable MORE than this many accounts.
     # CmdletBinding so a caller can route/suppress the warning below (-WarningAction / -WarningVariable).
     [CmdletBinding()] param()
+    # CODE REVIEW 2 (2026-10-13, owner decision 59): the number is the EFFECTIVE limit -- the same function GET /api/guards
+    # shows (Get-PimGuardEffectiveLimit), so the page and the engine can never disagree. 0 stays possible (a full stop).
+    if (Get-Command Get-PimGuardEffectiveLimit -ErrorAction SilentlyContinue) {
+        $e = $null; try { $e = Get-PimGuardEffectiveLimit -GuardId 'engine.disable-guard' } catch { $e = $null }
+        if ($e) {
+            if ($e.ignored -and "$($e.note)") { Write-Warning ("PIM_DisableMaxCount: {0}. This setting can only lower the limit; a SuperAdmin raises it on Operations > Guards." -f $e.note) }
+            return [int]$e.effective
+        }
+    }
     $lim = 3
     if (Get-Command Get-PimGuardLimit -ErrorAction SilentlyContinue) { try { $lim = [int](Get-PimGuardLimit -GuardId 'engine.disable-guard' -Fallback 3) } catch { $lim = 3 } }
     if ($lim -lt 1) { $lim = 3 }
@@ -684,6 +693,14 @@ function Get-PimRemoveBudget {
     # The max removals/deletes allowed in ONE scope pass: the limit set on the Guards page (default 5). The knob can
     # lower it for this process; a knob above the limit is ignored and warned about (IMP-01's lesson).
     [CmdletBinding()] param()
+    # CODE REVIEW 2 (2026-10-13, owner decision 59): the EFFECTIVE limit, the same number GET /api/guards shows.
+    if (Get-Command Get-PimGuardEffectiveLimit -ErrorAction SilentlyContinue) {
+        $e = $null; try { $e = Get-PimGuardEffectiveLimit -GuardId 'engine.remove-budget' } catch { $e = $null }
+        if ($e) {
+            if ($e.ignored -and "$($e.note)") { Write-Warning ("PIM_RemoveMaxCount: {0}. This setting can only lower the budget; a SuperAdmin raises it on Operations > Guards." -f $e.note) }
+            return [int]$e.effective
+        }
+    }
     $lim = 5
     if (Get-Command Get-PimGuardLimit -ErrorAction SilentlyContinue) { try { $lim = [int](Get-PimGuardLimit -GuardId 'engine.remove-budget' -Fallback 5) } catch { $lim = 5 } }
     if ($lim -lt 1) { $lim = 5 }
@@ -709,9 +726,13 @@ function Get-PimRemoveBudgetWayThrough {
     #>
     param([string]$Scope = '', [int]$Budget = 5)
     $s = "$Scope".Trim()
-    if ($s -in @('AdminOffboarding', 'GroupDelete')) {
-        $t = ("Apply them in batches of at most {0}: there is no approval of a whole list for this kind of change." -f $Budget)
-        return [pscustomobject]@{ kind = 'batches'; mail = $t; todo = ("Read the held items on Jobs > Engine logs & errors, then apply them in batches of at most {0}" -f $Budget); action = "Open Jobs > Engine logs & errors and read the held items. $t" }
+    # CODE REVIEW 2 FIXES 2026-10-13 (owner decision 60): the offboarding pass, a group DELETE from the queue and a managed
+    # tenant's retractions now record a REAL hold -- released by a SuperAdmin on Operations > Guards, for exactly that list.
+    if ($s -in @('AdminOffboarding', 'GroupDelete') -or $s -like 'Downlink-*') {
+        $what = switch -Wildcard ($s) { 'AdminOffboarding' { 'offboardings' } 'GroupDelete' { 'group deletes' } default { 'rows the managing tenant stopped sending' } }
+        $mail = ("Let a SuperAdmin approve exactly this list: open Operations &gt; Guards, read the held {0} and release that plan -- the next run applies exactly those, whatever their number. Nothing is applied before that." -f $what)
+        return [pscustomobject]@{ kind = 'release'; mail = $mail; todo = ("Read the held {0} on Operations > Guards and let a SuperAdmin release exactly that plan" -f $what)
+                                  action = ("Open Operations > Guards: a SuperAdmin reads the held {0} and releases exactly that plan for one run." -f $what) }
     }
     $what = if ($s -eq 'GroupRetirement') { 'groups' } else { 'removals' }
     $mail = ("Apply them in batches of at most {1}, or let a SuperAdmin approve exactly this list: open Operations &gt; Guards, read the held {0} and release that plan for one run -- " +

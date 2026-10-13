@@ -2470,6 +2470,7 @@
       "label": "Limit: commit removal check",
       "where": "Operations > Guards",
       "route": "/api/guards/{guardId}/limit",
+      "limit": { "guardId": "manager.commit-removal", "min": 5, "max": 200, "default": 25, "minRole": "SuperAdmin" },
       "type": "number",
       "default": "25 rows of one list in one commit",
       "feature": "safety-brake",
@@ -2490,6 +2491,7 @@
       "label": "Limit: removal budget",
       "where": "Operations > Guards",
       "route": "/api/guards/{guardId}/limit",
+      "limit": { "guardId": "engine.remove-budget", "min": 1, "max": 25, "default": 5, "minRole": "SuperAdmin" },
       "type": "number",
       "default": "5 removals per scope per run",
       "feature": "safety-brake",
@@ -2510,6 +2512,7 @@
       "label": "Limit: account-disable circuit breaker",
       "where": "Operations > Guards",
       "route": "/api/guards/{guardId}/limit",
+      "limit": { "guardId": "engine.disable-guard", "min": 1, "max": 25, "default": 3, "minRole": "SuperAdmin" },
       "type": "number",
       "default": "3 accounts per run",
       "feature": "safety-brake",
@@ -2523,6 +2526,48 @@
         "requires": "SuperAdmin to change it, on Operations > Guards. Free (Community) and Pro.",
         "recommended": "Keep 3: a real offboarding is a few accounts. For a larger one, release that exact list once instead of raising the limit.",
         "docUrl": "https://invardia.com/docs/pim/settings/GuardLimits.DisableBreaker/"
+      }
+    },
+    {
+      "key": "GuardLimits.BulkRevoke",
+      "label": "Limit: bulk revoke",
+      "where": "Operations > Guards",
+      "route": "/api/guards/{guardId}/limit",
+      "limit": { "guardId": "manager.bulk-revoke", "min": 1, "max": 25, "default": 5, "minRole": "SuperAdmin" },
+      "type": "number",
+      "default": "5 assignments in one batch",
+      "feature": "safety-brake",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "How many assignments one bulk revoke may take away before it needs more than a click. A batch larger than this must be confirmed by typing its exact count, and it needs an approved request on the Approvals page. Both checks use this one number.",
+        "enabled": "When set: a revoke of up to this many assignments goes ahead after the usual confirmation. A larger batch is confirmed with its count and approved by a person with permission over the assignments (their scope and level) or a SuperAdmin -- never by the person who asked.",
+        "disabled": "At the default: 5 assignments in one batch. The check itself cannot be switched off.",
+        "risk": "A higher number lets one person revoke more access in one batch without a second person. The number can only be set from 1 to 25; a stored value outside that range is ignored and 5 applies. Reversible at any time.",
+        "requires": "SuperAdmin to change it, on Operations > Guards. Free (Community) and Pro.",
+        "recommended": "Keep 5. For a planned larger revoke, have it approved once instead of raising the limit.",
+        "docUrl": "https://invardia.com/docs/pim/settings/GuardLimits.BulkRevoke/"
+      }
+    },
+    {
+      "key": "GuardLimits.AdminDelete",
+      "label": "Limit: admin account deletes per run",
+      "where": "Operations > Guards",
+      "route": "/api/guards/{guardId}/limit",
+      "limit": { "guardId": "engine.admin-delete", "min": 1, "max": 25, "default": 5, "minRole": "SuperAdmin" },
+      "type": "number",
+      "default": "5 account deletes per run",
+      "feature": "safety-brake",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "How many admin accounts one engine run may delete. An account is deleted only when its row says Deleted, which was approved before it was stored. When more accounts are waiting, the rest are deleted by the next run.",
+        "enabled": "When set: up to this many approved account deletes are carried out per run; the others wait for the next run. Break-glass accounts are never deleted, whatever this number is.",
+        "disabled": "At the default: 5 account deletes per run. The limit itself cannot be switched off.",
+        "risk": "A higher number deletes more accounts in one run. A deleted account can be restored from the directory's deleted users for 30 days. The number can only be set from 1 to 25; a stored value outside that range is ignored and 5 applies. Reversible at any time.",
+        "requires": "SuperAdmin to change it, on Operations > Guards. Free (Community) and Pro.",
+        "recommended": "Keep 5.",
+        "docUrl": "https://invardia.com/docs/pim/settings/GuardLimits.AdminDelete/"
       }
     },
     {
@@ -2597,7 +2642,7 @@
       "confirmOff": false,
       "info": {
         "what": "The policy template that gives the PIM Manager recommendation for the PIM for Groups policy of every group PIM Manager manages whose definition leaves the policy template blank. A template recommends how long an activation lasts, what is required to activate (for example multifactor authentication, a reason) and whether approval is needed. It is a recommendation only: PIM Manager never changes a policy on its own.",
-        "enabled": "When set: the recommendation shown for these groups on Templates > Policy settings follows the chosen template. A policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set says how many policies change and how many settings are weakened, and points out when more than 25 policies change or more than 3 settings are weakened.",
+        "enabled": "When set: the recommendation shown for these groups on Templates > Policy settings follows the chosen template. A policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set says how many policies change and how many settings are weakened, and points out when more than 25 policies change or more than 3 settings are weakened (fixed numbers, not a setting: they never decide whether a change set is held).",
         "disabled": "At the built-in default: the recommendation for these groups comes from Groups_Standard.",
         "risk": "Picking another template changes what 'PIM Manager recommendation' means for many groups at once. Where that choice is made, the next policy run plans the change and holds it for a SuperAdmin's approval; settings on 'Keep current' or 'Microsoft default' are not affected. Reversible: pick the previous template.",
         "requires": "SuperAdmin to change it. Free (Community) and Pro. The template must exist and be written for PIM for Groups. The engine needs RoleManagementPolicy.ReadWrite.AzureADGroup.",
@@ -2617,7 +2662,7 @@
       "confirmOff": false,
       "info": {
         "what": "The policy template that gives the PIM Manager recommendation for the Entra ID role policy of every role your delegations assign (to groups, in administrative units, or directly) when the row leaves the policy template blank. If two rows name the same role with different templates, the one requiring approval wins. It is a recommendation only: PIM Manager never changes a policy on its own.",
-        "enabled": "When set: the recommendation shown for these roles on Templates > Policy settings follows the chosen template. A role's policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set says how many policies change and how many settings are weakened, and points out when more than 25 policies change or more than 3 settings are weakened.",
+        "enabled": "When set: the recommendation shown for these roles on Templates > Policy settings follows the chosen template. A role's policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set says how many policies change and how many settings are weakened, and points out when more than 25 policies change or more than 3 settings are weakened (fixed numbers, not a setting: they never decide whether a change set is held).",
         "disabled": "At the built-in default: the recommendation for these roles comes from EntraIDRoles_Standard.",
         "risk": "A role policy applies to everyone who holds that role in the tenant, not only the groups PIM Manager manages. Picking another template changes what 'PIM Manager recommendation' means for all of them; where that choice is made, the next policy run plans the change and holds it for a SuperAdmin's approval. Reversible: pick the previous template.",
         "requires": "SuperAdmin to change it. Free (Community) and Pro. The template must exist and be written for Entra ID roles. The engine needs RoleManagementPolicy.ReadWrite.Directory.",
@@ -2637,7 +2682,7 @@
       "confirmOff": false,
       "info": {
         "what": "The policy template that gives the PIM Manager recommendation for the PIM policy of each Azure role and scope pair your Azure delegations assign when the row leaves the policy template blank. If two rows name the same pair with different templates, the one requiring approval wins. It is a recommendation only: PIM Manager never changes a policy on its own.",
-        "enabled": "When set: the recommendation shown for these Azure roles on Templates > Policy settings follows the chosen template. A policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set says how many policies change and how many settings are weakened, and points out when more than 25 policies change or more than 3 settings are weakened.",
+        "enabled": "When set: the recommendation shown for these Azure roles on Templates > Policy settings follows the chosen template. A policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set says how many policies change and how many settings are weakened, and points out when more than 25 policies change or more than 3 settings are weakened (fixed numbers, not a setting: they never decide whether a change set is held).",
         "disabled": "At the built-in default: the recommendation for these pairs comes from AzureRoles_Standard (the same rules as the Entra role standard).",
         "risk": "An Azure role policy applies to everyone eligible for that role on that scope. Picking another template changes what 'PIM Manager recommendation' means for all of them; where that choice is made, the next policy run plans the change and holds it for a SuperAdmin's approval. PIM Manager never switches approval off on an Azure role policy. Reversible: pick the previous template.",
         "requires": "SuperAdmin to change it. Free (Community) and Pro. The template must exist and be written for Azure resource roles. The engine's identity needs a role that may change role management policies on those scopes (for example User Access Administrator or Owner).",

@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.619 -- 2026-10-13
+
+- Code reviews 2026-10-13: an account delete acts once on the pinned account; deleting and revoking follow scope + level everywhere; a sponsor proposes, someone with permission approves (never self); MSP central admin delete with the managing tenant SuperAdmin approval, one per run; managed-tenant withdrawals held on the Guards page above the customer limit; every hold has a SuperAdmin release; bulk-revoke and admin-delete limits on the Guards page; mails show the environment name, never a bare tenant id
+
 ## 2.4.618 -- 2026-10-13
 
 - Batch 2026-10-13: SuperAdmin approval for guards (counts, Guards page), AD sync never removes on a doubt, revoke rule by scope and level, group states + one remove/delete dialog, list menu on every list, settings sweep + two protection switches, AD clean-up and server groups approved in batches, retry after a create, sales designer pack, private-database support job

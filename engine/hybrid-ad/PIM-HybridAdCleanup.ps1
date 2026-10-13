@@ -145,11 +145,22 @@ function Get-PimHybridAdCleanupCandidates {
     if ($DefinitionCount -le 0) { return (& $bad 'the store holds no group definition at all -- an empty store is treated like an unreadable one, so nothing is proposed') }
     if (-not $AdOk) { return (& $bad 'Active Directory could not be read') }
     $cand = New-Object System.Collections.Generic.List[object]; $no = New-Object System.Collections.Generic.List[object]
+    $mir = New-Object System.Collections.Generic.List[object]
     foreach ($g in @($AdGroups)) {
         if ($null -eq $g) { continue }
         $name = "$($g.Name)".Trim(); $dn = "$($g.DistinguishedName)".Trim()
         if (-not $name -or $name -notlike $Pattern) { continue }
-        if ($DefinedNames.ContainsKey($name.ToLowerInvariant())) { continue }                 # defined: not ours to offer
+        if ($DefinedNames.ContainsKey($name.ToLowerInvariant())) {
+            # CODE REVIEW 1 FIXES 2026-10-13 (lane review1, finding 6): a DEFINED mirrored group is not offered, but its AD
+            # object is REPORTED (mirrored[]), so a "delete in AD too" request can pin the exact object -- distinguished name,
+            # creation date, members, member-of -- when it is made, and the worker checks it like a reviewed item.
+            if ($dn -and "$($g.Created)".Trim() -and (Test-PimHybridAdDnUnderAny -Dn $dn -Ous $Ous)) {
+                $mm = @($g.Members | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
+                $mir.Add([ordered]@{ name = $name; dn = $dn; created = "$($g.Created)".Trim(); memberCount = $mm.Count; members = @($mm | Select-Object -First 200); membersTruncated = [bool]($mm.Count -gt 200)
+                        memberOf = @($g.MemberOf | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() }) })
+            }
+            continue                                                                             # defined: not ours to offer
+        }
         if (-not $dn -or -not (Test-PimHybridAdDnUnderAny -Dn $dn -Ous $Ous)) { continue }    # outside the configured OUs: never offered, never named
         $why = Get-PimHybridAdCleanupProtectedReason -Group $g -Protected $Protected
         if ($why) { $no.Add([ordered]@{ name = $name; reason = $why }); continue }
@@ -163,7 +174,7 @@ function Get-PimHybridAdCleanupCandidates {
                 description = "$($g.Description)"; memberCount = $members.Count; members = @($members | Select-Object -First 200); membersTruncated = [bool]($members.Count -gt 200)
                 memberOf = @($g.MemberOf | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() }); server = $server; serverInAd = $inAd })
     }
-    return @{ ok = $true; reason = ''; candidates = @($cand.ToArray() | Sort-Object { $_.name }); notOffered = $no.ToArray() }
+    return @{ ok = $true; reason = ''; candidates = @($cand.ToArray() | Sort-Object { $_.name }); notOffered = $no.ToArray(); mirrored = @($mir.ToArray() | Sort-Object { $_.name }) }
 }
 
 function Get-PimHybridAdCleanupDecision {
@@ -181,9 +192,11 @@ function Get-PimHybridAdCleanupDecision {
         6. NO definition of that name exists in PIM Manager (a group that gained a definition since the review is skipped);
         7. exactly ONE AD group carries the name (none = already gone; two = skipped);
         8. that group lies below one of the configured OUs;
-        9. (reviewed) it is the SAME object that was reviewed: same distinguished name, same creation date;
+        9. it is the SAME object that was reviewed / named when "delete in AD too" was requested: same distinguished name,
+           same creation date (review 1 fixes 2026-10-13: the 'also' request is checked like a reviewed item; one with no
+           captured object deletes nothing);
        10. it is not protected (adminCount = 1, critical system object, the shared server-admins group, a worker group);
-       11. (reviewed) it has no member and no "member of" that the reviewer did not see;
+       11. it has no member and no "member of" that the reviewer / requester did not see;
        12. (delete in AD too) the Entra group of that name is confirmed gone (-EntraExists $false; unknown = wait);
        13. for a per-server group: its server no longer has it in local Administrators (the server lane reported
            'removed' / 'not a member'), or the server is not in Active Directory any more, or the SuperAdmin ticked
@@ -218,14 +231,20 @@ function Get-PimHybridAdCleanupDecision {
     $g = $found[0]
     $dn = "$($g.DistinguishedName)".Trim()
     if (-not $dn -or -not (Test-PimHybridAdDnUnderAny -Dn $dn -Ous $Ous)) { return (& $r 'skip' 'the group is outside the configured OUs') }
-    if ($Kind -eq 'reviewed') {
-        if ((ConvertTo-PimHybridAdDnKey $dn) -ne (ConvertTo-PimHybridAdDnKey "$($Item.dn)") -or "$($g.Created)".Trim() -ne "$($Item.created)".Trim() -or -not "$($Item.created)".Trim()) {
-            return (& $r 'skip' 'this is not the object that was reviewed (it was moved, or deleted and created again) -- review the list again')
-        }
+    # CODE REVIEW 1 FIXES 2026-10-13 (lane review1, finding 6): a "delete in AD too" request is checked like a reviewed item --
+    # the SAME object (distinguished name + creation date captured when the request was made) and no member / member-of the
+    # requester did not see. It was pinned by name only for 30 days. A request with no captured object (made by an older
+    # version) deletes nothing: it is requested again.
+    if ($Kind -eq 'also' -and (-not "$($Item.dn)".Trim() -or -not "$($Item.created)".Trim())) {
+        return (& $r 'skip' 'the request carries no captured AD object (made by an older version, by name only) -- nothing is deleted; request "delete in AD too" again')
+    }
+    if ((ConvertTo-PimHybridAdDnKey $dn) -ne (ConvertTo-PimHybridAdDnKey "$($Item.dn)") -or "$($g.Created)".Trim() -ne "$($Item.created)".Trim() -or -not "$($Item.created)".Trim()) {
+        if ($Kind -eq 'also') { return (& $r 'skip' 'this is not the AD object that was named when "delete in AD too" was requested (it was moved, or deleted and created again) -- request it again') }
+        return (& $r 'skip' 'this is not the object that was reviewed (it was moved, or deleted and created again) -- review the list again')
     }
     $why = Get-PimHybridAdCleanupProtectedReason -Group $g -Protected $Protected
     if ($why) { return (& $r 'skip' "never deleted: $why") }
-    if ($Kind -eq 'reviewed') {
+    if ($Kind -eq 'reviewed' -or $Kind -eq 'also') {
         $seen = @{}; foreach ($m in @($Item.members)) { if ("$m".Trim()) { $seen[(ConvertTo-PimHybridAdDnKey "$m")] = $true } }
         $now = @($g.Members | Where-Object { "$_".Trim() })
         $reviewedCount = 0; [void][int]::TryParse("$($Item.memberCount)", [ref]$reviewedCount)
@@ -237,7 +256,8 @@ function Get-PimHybridAdCleanupDecision {
         $seenOf = @{}; foreach ($m in @($Item.memberOf)) { if ("$m".Trim()) { $seenOf[(ConvertTo-PimHybridAdDnKey "$m")] = $true } }
         $newOf = @($g.MemberOf | Where-Object { "$_".Trim() -and -not $seenOf.ContainsKey((ConvertTo-PimHybridAdDnKey "$_")) })
         if ($newOf.Count) { return (& $r 'skip' "the group became a member of $($newOf.Count) group(s) the reviewer did not see -- review the list again") }
-    } else {
+    }
+    if ($Kind -eq 'also') {
         if ($null -eq $EntraExists) { return (& $r 'wait' 'whether the Entra group of this name is gone could not be checked') }
         if ([bool]$EntraExists) { return (& $r 'wait' 'the Entra group of this name still exists -- the AD group goes after it') }
     }
@@ -359,7 +379,11 @@ function Read-PimHybridAdCleanupApproval {
     $am = ConvertTo-PimHybridAdCleanupMap (Get-PimHybridAdCleanupField $raw 'alsoDelete')
     foreach ($k in @($am.Keys)) {
         $x = $am[$k]; if ($null -eq $x) { continue }
+        # finding 6 (review 1 fixes 2026-10-13): the AD object pinned when the request was made (dn, created, members, member-of)
         $also.Add(@{ key = "also:$k"; name = "$(Get-PimHybridAdCleanupField $x 'name')"; withoutServer = $false
+                dn = "$(Get-PimHybridAdCleanupField $x 'dn')"; created = "$(Get-PimHybridAdCleanupField $x 'created')"
+                members = @(Get-PimHybridAdCleanupField $x 'members'); memberCount = (Get-PimHybridAdCleanupField $x 'memberCount'); membersTruncated = [bool](Get-PimHybridAdCleanupField $x 'membersTruncated')
+                memberOf = @(Get-PimHybridAdCleanupField $x 'memberOf')
                 by = "$(Get-PimHybridAdCleanupField $x 'requestedBy')"; atEpoch = (Get-PimHybridAdCleanupField $x 'requestedAtEpoch') })
     }
     return @{ ok = $true; reason = ''; reviewed = $rev.ToArray(); also = $also.ToArray() }
@@ -407,7 +431,7 @@ function Invoke-PimHybridAdCleanupJob {
         if (-not $cand.ok -and $adWhy) { $cand.reason = "$($cand.reason): $adWhy" }
         try {
             & $Store.SaveCandidates ([ordered]@{ v = 1; refreshedUtc = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); refreshedEpoch = $now; host = "$env:COMPUTERNAME"; planOnly = [bool]$WhatIf
-                    ok = [bool]$cand.ok; reason = "$($cand.reason)"; ous = @($scope.ous); pattern = $Pattern; candidates = @($cand.candidates); notOffered = @($cand.notOffered) })
+                    ok = [bool]$cand.ok; reason = "$($cand.reason)"; ous = @($scope.ous); pattern = $Pattern; candidates = @($cand.candidates); notOffered = @($cand.notOffered); mirrored = @($cand.mirrored) })
         } catch { Write-Warning "[hybrid-ad-cleanup] the candidate list was not saved: $($_.Exception.Message)" }
 
         # 2. the approved list

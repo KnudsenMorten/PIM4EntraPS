@@ -19,6 +19,8 @@
 # retry of a half-applied batch turns a recovered state into a permanent 'failed'.
 
 Set-StrictMode -Off
+# CODE REVIEW 2 (2026-10-13): the group-delete hold needs the guard holds in every host that drains the queue.
+if (-not (Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-GuardRelease.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-GuardRelease.ps1') }
 
 # 🔒 The ONE break-glass reader (pim.Settings['BreakGlassAccounts'] unioned with the legacy global/env).
 # The drain re-checks every revoke / session revoke against it at EXECUTION time (see
@@ -899,16 +901,36 @@ function Invoke-PimQueueActionDrain {
     # 🔒 PIM 100.22 (d): the removal budget (G4) over EVERY group delete this drain would carry out -- decided once, before the
     # first one, so a batch over the budget deletes NONE (never a partial mass-deletion) and the trip is mailed.
     $gdN = @($committed | Where-Object { "$($_.payload.type)".Trim() -eq 'group-delete' }).Count
-    $gdBudget = $null
+    $gdBudget = $null; $gdHeld = $false
     if ($gdN -gt 0) {
         if (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue) {
             $gdBudget = Test-PimRemoveBudgetAllowed -ToRemove $gdN -Scope 'GroupDelete' -Scanned $gdN -Operation 'delete group'
+            # CODE REVIEW 2 FIXES 2026-10-13 (owner decision 60: "every hold gets a SuperAdmin release"): over the budget the
+            # group deletes are a REAL hold (engine.remove-budget, scope GroupDelete, exactly these groups) that a SuperAdmin
+            # releases on Operations > Guards -- and the held entries STAY in the queue (committed, not claimed, not failed),
+            # so the drain after the release applies exactly them. They used to be refused as TERMINAL failures, which no
+            # release could ever bring back.
+            if (Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue) {
+                $gdKeys = @($committed | Where-Object { "$($_.payload.type)".Trim() -eq 'group-delete' } | ForEach-Object { "delete-group|$("$($_.payload.groupName)".Trim().ToLowerInvariant())|$("$($_.payload.groupId)".Trim().ToLowerInvariant())" })
+                if (-not $gdBudget.allowed) {
+                    $gdG = Invoke-PimGuardHoldOrRelease -GuardId 'engine.remove-budget' -Scope 'GroupDelete' -Keys $gdKeys -Count $gdN -RunKind 'queue' -Measured @{ toRemove = $gdN; budget = [int]$gdBudget.budget }
+                    if ($gdG.released -and $gdN -le [int]$gdG.release.raiseTo) {
+                        Write-Host ("  [queue] GroupDelete: the released plan goes ahead -- exactly these {0} group delete(s)" -f $gdN) -ForegroundColor Magenta
+                        $gdBudget = [pscustomobject]@{ allowed = $true; abort = $false; tripped = $null; reason = 'released for this drain'; toRemove = $gdN; budget = [int]$gdBudget.budget; scope = 'GroupDelete'; operation = 'delete group'; scanned = $gdN }
+                    } else { $gdHeld = $true }
+                } elseif (Get-Command Clear-PimGuardHold -ErrorAction SilentlyContinue) { [void](Clear-PimGuardHold -GuardId 'engine.remove-budget' -Scope 'GroupDelete' -RunKind 'queue') }
+            }
             if (-not $gdBudget.allowed -and (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue)) { try { Write-PimRemoveBudgetAlert -Decision $gdBudget } catch { Write-Warning "  [queue] the removal-budget alert could not be sent: $($_.Exception.Message)" } }
         } else { $gdBudget = [pscustomobject]@{ allowed = $false; reason = 'the removal budget (PIM-DisableGuard.ps1) is not loaded in this engine -- refusing to delete groups (fail closed)' } }
     }
 
     foreach ($e in @($committed | Sort-Object { "$($_.enqueuedUtc)" })) {
         $id = [guid]"$($e.id)"
+        # CODE REVIEW 2: a HELD group delete is not claimed and not failed -- it waits, committed, for the SuperAdmin's release.
+        if ($gdHeld -and "$($e.payload.type)".Trim() -eq 'group-delete') {
+            $results.Add([pscustomobject]@{ id="$($e.id)"; outcome='held'; detail="group-delete HELD by the removal budget ($($gdBudget.reason)) -- nothing was changed; it stays queued until a SuperAdmin releases exactly this list on Operations > Guards (scope GroupDelete)" })
+            continue
+        }
         # 🔒 CLAIM BEFORE ACTING. A directory action is not rollback-able, so the claim cannot live
         # in the same transaction as the effect the way a pim.Rows write can. Claiming FIRST means a
         # crash mid-action leaves the entry 'applying' -- visible and attributable -- instead of

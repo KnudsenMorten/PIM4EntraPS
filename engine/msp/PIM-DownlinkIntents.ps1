@@ -33,7 +33,7 @@
 #>
 Set-StrictMode -Off
 
-$script:PimDownlinkIntentOps      = @('withdraw', 'rename', 'revoke-sessions')   # §79.6: revoke-sessions
+$script:PimDownlinkIntentOps      = @('withdraw', 'rename', 'revoke-sessions', 'delete-account')   # §79.6: revoke-sessions; review 1 fixes (decision 51): delete-account
 $script:PimDownlinkIntentMaxAgeDays = 30     # an intent nobody pulled in a month is stale, not pending
 
 function New-PimDownlinkIntent {
@@ -48,7 +48,11 @@ function New-PimDownlinkIntent {
         # §79.6 (operator 2026-09-25: "verify that a reset sessions centrally in msp mode for an admin also resets the sessions
         # in all managed tenants. important if person leaves msp"): -Op revoke-sessions -- every managed tenant revokes the sign-in
         # sessions of ITS account for this central admin (Entity Account-Definitions-Admins, Key = the admin's UserName).
-        [Parameter(Mandatory)][ValidateSet('withdraw', 'rename', 'revoke-sessions')][string]$Op,
+        # CODE REVIEW 1 FIXES 2026-10-13 (lane review1), owner decisions (51) + (61): -Op delete-account -- every managed tenant
+        # (or the ones in 'tenants') DELETES its account of this ONE central admin, pinned to its own object id, through its one
+        # guarded delete. It carries the managing tenant's SuperAdmin approval (-ApprovedBy, -ApprovedRole SuperAdmin) and names
+        # exactly ONE admin: a key that names two or more (',', ';', '|', whitespace, '*') is refused (guard msp.central-admin-delete).
+        [Parameter(Mandatory)][ValidateSet('withdraw', 'rename', 'revoke-sessions', 'delete-account')][string]$Op,
         [Parameter(Mandatory)][string]$Entity,
         [Parameter(Mandatory)][string]$Key,
         [string]$To = '',
@@ -56,12 +60,19 @@ function New-PimDownlinkIntent {
         [string]$Reason = '',
         # §79.6: the managed tenants (tenant ids) this intent is for; EMPTY = every tenant that pulls the bundle.
         [string[]]$Tenants = @(),
+        [string]$ApprovedBy = '',
+        [string]$ApprovedRole = '',
         [datetime]$NowUtc = [datetime]::UtcNow
     )
     $e = "$Entity".Trim(); $k = "$Key".Trim(); $t = "$To".Trim()
     if (-not $e -or -not $k) { return $null }
     if ($Op -eq 'rename' -and (-not $t -or $t -ieq $k)) { return $null }   # a rename to itself is not a rename
     if ($Op -eq 'revoke-sessions' -and $e -notin @('Account-Definitions-Admins', 'Account-Definitions-Admins-Central')) { return $null }
+    if ($Op -eq 'delete-account') {
+        if ($e -notin @('Account-Definitions-Admins', 'Account-Definitions-Admins-Central')) { return $null }
+        if (-not (Test-PimDownlinkSingleAdminKey -Key $k)) { return $null }
+        if ("$ApprovedRole".Trim() -cne 'SuperAdmin' -or -not "$ApprovedBy".Trim() -or "$ApprovedBy".Trim() -eq '<unauthenticated>') { return $null }
+    }
     $o = [ordered]@{
         op      = "$Op"
         entity  = $e
@@ -78,7 +89,49 @@ function New-PimDownlinkIntent {
     $tn = @($given | Where-Object { $_ -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' } | Sort-Object -Unique)
     if ($given.Count -and @($given | Where-Object { $_ -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' }).Count) { return $null }
     if ($tn.Count) { $o['tenants'] = $tn }
+    if ($Op -eq 'delete-account') { $o['approvedBy'] = "$ApprovedBy".Trim(); $o['approvedRole'] = 'SuperAdmin'; $o['approvedUtc'] = $o.utc }
     return $o
+}
+
+function Test-PimDownlinkSingleAdminKey {
+    # PURE. Does -Key name exactly ONE admin (a user name / UPN with no list separator, no wildcard)? Owner decision (61):
+    # "only 1 admin can be deleted at the time".
+    param([AllowNull()][string]$Key)
+    $k = "$Key".Trim()
+    if (-not $k) { return $false }
+    if ($k -match '[,;|\s\*\?]') { return $false }
+    if (([regex]::Matches($k, '@')).Count -gt 1) { return $false }
+    return $true
+}
+
+function Get-PimDownlinkAccountDeletes {
+    <#
+      PURE. CODE REVIEW 1 FIXES 2026-10-13 (decisions 51 + 61). The central admin deletes THIS managed tenant was told to make:
+      op delete-account, for this tenant (no 'tenants' list, or one naming -TenantId), approved by a SuperAdmin of the managing
+      tenant (approvedRole = SuperAdmin, approvedBy set), naming exactly ONE admin, not already turned into a pin (-Applied: the
+      "delete|key|utc" ids this tenant recorded). An intent without that approval is NOT a delete (the row stays a disable).
+      Returns [ { key; utc; id; by; approvedBy; reason } ] and, for the refused ones, writes nothing -- see -Refused.
+    #>
+    param([object[]]$Intents = @(), [string]$TenantId = '', [string[]]$Applied = @(), [ref]$Refused)
+    $tid = "$TenantId".Trim().ToLowerInvariant()
+    $done = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($a in @($Applied)) { if ("$a".Trim()) { [void]$done.Add("$a".Trim()) } }
+    $out = New-Object System.Collections.Generic.List[object]; $bad = New-Object System.Collections.Generic.List[object]
+    foreach ($i in @($Intents)) {
+        if (-not $i -or "$($i.op)" -ne 'delete-account' -or -not "$($i.key)".Trim()) { continue }
+        $tn = @(@($i.tenants) | Where-Object { "$_".Trim() })
+        if ($tn.Count -and -not ($tid -and (@($tn | ForEach-Object { "$_".Trim().ToLowerInvariant() }) -contains $tid))) { continue }
+        $u = $i.utc
+        $uStr = if ($u -is [datetime]) { $u.ToUniversalTime().ToString('o') } else {
+            try { [datetime]::Parse("$u".Trim(), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime().ToString('o') } catch { "$u".Trim() } }
+        $id = ("delete|{0}|{1}" -f "$($i.key)".Trim().ToLowerInvariant(), $uStr)
+        if ($done.Contains($id)) { continue }
+        if (-not (Test-PimDownlinkSingleAdminKey -Key "$($i.key)")) { $bad.Add([pscustomobject]@{ key = "$($i.key)"; id = $id; why = "the decision names more than ONE admin ('$($i.key)') -- refused (guard msp.central-admin-delete: one admin per approval)" }) | Out-Null; continue }
+        if ("$($i.approvedRole)".Trim() -cne 'SuperAdmin' -or -not "$($i.approvedBy)".Trim()) { $bad.Add([pscustomobject]@{ key = "$($i.key)"; id = $id; why = "no SuperAdmin approval of the managing tenant is recorded on the decision -- NOT a delete (the account stays disabled)" }) | Out-Null; continue }
+        $out.Add([pscustomobject]@{ key = "$($i.key)".Trim(); utc = $uStr; id = $id; by = "$($i.by)"; approvedBy = "$($i.approvedBy)".Trim(); reason = "$($i.reason)" }) | Out-Null
+    }
+    if ($Refused) { $Refused.Value = @($bad.ToArray()) }
+    return @($out.ToArray())
 }
 
 function Add-PimDownlinkIntent {
@@ -273,6 +326,9 @@ function Get-PimDownlinkIntentSummary {
         if (-not $i) { continue }
         if ("$($i.op)" -eq 'rename') {
             $out.Add(("rename {0}: '{1}' -> '{2}'{3}" -f $i.entity, $i.key, $i.to, $(if ("$($i.by)") { " (by $($i.by))" } else { '' }))) | Out-Null
+        } elseif ("$($i.op)" -eq 'delete-account') {
+            $tn = @(@($i.tenants) | Where-Object { "$_".Trim() })
+            $out.Add(("DELETE the account of central admin '{0}' in {1} (approved by SuperAdmin {2})" -f $i.key, $(if ($tn.Count) { "$($tn.Count) chosen tenant(s)" } else { 'every managed tenant where it exists' }), "$($i.approvedBy)")) | Out-Null
         } elseif ("$($i.op)" -eq 'revoke-sessions') {
             $tn = @(@($i.tenants) | Where-Object { "$_".Trim() })
             $out.Add(("revoke sign-in sessions of '{0}' in {1}{2}" -f $i.key, $(if ($tn.Count) { "$($tn.Count) chosen tenant(s)" } else { 'every managed tenant' }), $(if ("$($i.by)") { " (by $($i.by))" } else { '' }))) | Out-Null

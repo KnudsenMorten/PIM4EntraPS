@@ -427,6 +427,7 @@ if (Test-Path -LiteralPath $_sensAuthLib) { . $_sensAuthLib }
 $_writeGuardLib = Join-Path $solutionRoot 'engine\_shared\PIM-ManagerWriteGuards.ps1'
 . $_writeGuardLib
 . (Join-Path $PSScriptRoot '_revaudit.ps1')   # lane revaudit (100.122 F4): who may revoke what -- POST /api/revoke and POST /api/queue/commit call it; a missing file stops the Manager (fail closed)
+. (Join-Path $PSScriptRoot '_approvers.ps1')  # CODE REVIEW 2 (owner decision 58): who may APPROVE an offboarding / account delete / bulk revoke -- Test-PimApprovalApproverAllowed; a missing file stops the Manager (fail closed)
 
 # Alert FEED + recorded-send proof (engine/_shared/PIM-AlertFeed.ps1, REQUIREMENTS
 # §26c / §28 [H2] + the [M5] residual). The PUSH side of the dashboard: every fired
@@ -505,6 +506,9 @@ if (Test-Path -LiteralPath $_lastPrivLib) { . $_lastPrivLib }
 # §96.6 / GUARD-1.6: releasing a guard (Operations > Guards; /api/guards/<id>/release)
 $_guardRelLib = Join-Path $solutionRoot 'engine\_shared\PIM-GuardRelease.ps1'
 if (Test-Path -LiteralPath $_guardRelLib) { . $_guardRelLib }
+# CODE REVIEW 1 FIXES 2026-10-13 (lane review1), decision (54): every admin account delete is ONE pinned decision. Loaded
+# UNCONDITIONALLY: a Manager without it could not record what the operator chose, so it must not start without it.
+. (Join-Path $solutionRoot 'engine\_shared\PIM-AdminDeletePins.ps1')
 # §100.57: the pending-actions reminder -- the Manager reads its setting (ConvertTo-PimPendingReminderConfig) for the Settings
 # card and the Reports overview; the tick sends it.
 $_pendRemLib = Join-Path $solutionRoot 'engine\_shared\PIM-PendingReminders.ps1'
@@ -7092,14 +7096,36 @@ function Invoke-PimManagerCsvPut {
         # at-or-below its level / tier ceiling). One refused admin refuses the commit whole -- nothing is saved.
         $__delDenied = @()
         if ($delHeld.Count -gt 0) {
-            $__isSa = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin'); $__isAdm = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
-            $__prof = if ($callerScope -is [System.Collections.IDictionary]) { $callerScope['profile'] } elseif ($callerScope -and $callerScope.PSObject.Properties['profile']) { $callerScope.profile } else { $null }
+            # CODE REVIEW 1 FIXES 2026-10-13, owner decisions (52) + (54): ONE rule on both delete paths -- this commit and
+            # DELETE /api/admin-accounts. (1) the typed DELETE travels with the commit (deleteConfirm = 'DELETE'); (2) THE SAME
+            # RULE AS REVOKE per admin (Test-PimRevauditAdminTarget: scope + level; an Admin with no level of his own never
+            # deletes an L0 / L1 admin; a SuperAdmin anything) -- it replaces the old "an Admin may delete anyone"; (3) the
+            # account is PINNED by its live object id before anything is saved (the engine deletes only that object, once).
+            # One refusal refuses the commit whole -- nothing is saved.
+            $__typed = "$(if ($body -and $body.PSObject.Properties['deleteConfirm']) { $body.deleteConfirm })".Trim()
+            if ($__typed -cne 'DELETE') {
+                Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{ ok = $false; base = $base; gate = 'delete-confirm'; deleteConfirmRequired = $true
+                    upns = @($delHeld | ForEach-Object { "$($_.upn)" })
+                    error = "This commit DELETES $($delHeld.Count) admin account(s) ($(@($delHeld | ForEach-Object { "$($_.upn)" }) -join ', ')). Type DELETE to confirm -- nothing was saved." })
+                return 409
+            }
             $__curByKey = @{}; foreach ($__r in @($current.rows)) { $__k = "$(Get-PimStoreRowKey -Base $base -Row $__r)".Trim().ToLowerInvariant(); if ($__k) { $__curByKey[$__k] = $__r } }
+            $__delCaller = Get-PimRevauditCaller -Admins @($current.rows)
             foreach ($__d in $delHeld) {
                 $__row = $__curByKey["$($__d.key)".Trim().ToLowerInvariant()]
                 if ($null -eq $__row) { $__delDenied += "$($__d.upn): a new row cannot be deleted"; continue }
-                $__ok = if (Get-Command Test-PimPortalCanDeleteAdmin -ErrorAction SilentlyContinue) { Test-PimPortalCanDeleteAdmin -Profile $(if ($__isSa -or ($__isAdm -and -not $__prof)) { $null } else { $__prof }) -AdminRow $__row -IsSuperAdmin:$__isSa -IsAdmin:($__isAdm -and -not $__prof) } else { [pscustomobject]@{ allowed = $__isSa; reason = 'SuperAdmin only (the rule could not be loaded)' } }
+                $__ok = Test-PimRevauditAdminTarget -Caller $__delCaller -AdminRow $__row -Action delete
                 if (-not $__ok.allowed) { $__delDenied += "$($__d.upn): $($__ok.reason)" }
+            }
+            if ($__delDenied.Count -eq 0) {
+                foreach ($__d in $delHeld) {
+                    $__row = $__curByKey["$($__d.key)".Trim().ToLowerInvariant()]
+                    $__du = if ("$($__row.UserPrincipalName)".Trim()) { "$($__row.UserPrincipalName)".Trim() } else { "$($__d.upn)" }
+                    $__oid = Resolve-PimManagerAdminObjectId -Upn $__du
+                    if (-not $__oid.id) { $__delDenied += "${__du}: the account could not be pinned ($($__oid.error)) -- an account is deleted only by its object id, read when it is chosen"; continue }
+                    try { [void](Add-PimAdminDeletePin -Pin (New-PimAdminDeletePin -Key $__du -Upn $__du -ObjectId $__oid.id -Source local -RequestId "commit:$base" -RequestedBy "$($__delCaller.identity)" -ApprovedBy "$($__delCaller.identity)" -Note 'Delete account committed through Review & commit')) }
+                    catch { $__delDenied += "${__du}: the delete could not be recorded ($($_.Exception.Message))" }
+                }
             }
         }
         if ($__delDenied.Count -gt 0) {
@@ -7249,6 +7275,40 @@ function Invoke-PimManagerCsvPut {
         }
     }
 
+    # CODE REVIEW 1 FIXES 2026-10-13, owner decision (55) "Same rule everywhere": the revoke rule's scope + LEVEL check for
+    # every assignment row this commit REMOVES (deleted, or newly marked Action = Remove) -- a caller below SuperAdmin never
+    # removes a delegation of a MORE privileged level, and an Admin with no level of his own never one at L0 / L1. Refused
+    # whole, with the reason per row. A delegated operator's scope was checked by its own write rule above (level still here).
+    if ($base -like 'PIM-Assignments-*') {
+        $rmCaller = Get-PimRevauditCaller
+        if (-not $rmCaller.isSuperAdmin) {
+            $wasRemove = @{}
+            foreach ($cr in @($current.rows)) { if ("$(Get-PimRevauditRowValue $cr @('Action'))" -ieq 'Remove') { $k0 = "$(Get-PimStoreRowKey -Base $base -Row $cr)".Trim().ToLowerInvariant(); if ($k0) { $wasRemove[$k0] = $true } } }
+            $rmRows = New-Object System.Collections.Generic.List[object]
+            foreach ($rr in @($diff.removes)) { if ($null -ne $rr) { $rmRows.Add($rr) } }
+            foreach ($ar in @($rowsOrdered)) {
+                if ($null -eq $ar -or "$(Get-PimRevauditRowValue $ar @('Action'))" -ine 'Remove') { continue }
+                $k1 = "$(Get-PimStoreRowKey -Base $base -Row $ar)".Trim().ToLowerInvariant()
+                if ($k1 -and $wasRemove.ContainsKey($k1)) { continue }
+                $rmRows.Add($ar)
+            }
+            if ($rmRows.Count) {
+                $rmDir = Get-PimRevauditDirectory
+                if (-not $rmDir.ok) {
+                    Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{ ok = $false; base = $base; gate = 'removal-level'; error = "Nothing was saved: the stored definitions could not be read ($($rmDir.error)), so who may remove these assignments cannot be decided. Try again; a SuperAdmin is not limited by this." })
+                    return 403
+                }
+                $rmCaller.level = Get-PimRevauditCallerLevel -Profile $rmCaller.profile -Identity $rmCaller.identity -Admins @($rmDir.admins)
+                $rmV = Test-PimRevauditAssignmentRemovals -Caller $rmCaller -Rows @($rmRows.ToArray()) -Definitions $rmDir.definitions -Admins @($rmDir.admins) -SkipScope:([bool]($delegCtx -and $delegCtx.isDelegated))
+                if (-not $rmV.allowed) {
+                    foreach ($rf in @($rmV.refused)) { try { Write-PimManagerAuditEvent -Action 'revoke.refused.commit-removal' -Target "$($rf.principal) | $base" -Result 'refused' -After ([ordered]@{ code = "$($rf.code)"; reason = "$($rf.reason)" }) } catch { } }
+                    Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{ ok = $false; base = $base; gate = 'removal-level'; error = "$($rmV.reason)"; refused = @($rmV.refused); denied = @($rmV.refused) })
+                    return 403
+                }
+            }
+        }
+    }
+
     # [Fix 5] EMPTY-SET / LARGE-DELTA guard (mirrors the engine disable-guard;
     # the 53-user mass-disable precondition was an empty/over-broad desired set).
     # Refuse a commit that empties the entity or removes more than the safety
@@ -7272,7 +7332,9 @@ function Invoke-PimManagerCsvPut {
         $gaBudget = 5; $gaOther = @(); $gaOtherErr = ''; $gaOpen = @{}
         $gaMarked = @(@($rowsOrdered) | Where-Object { Get-PimManagerGuardRowFlag -Row $_ }).Count -gt 0
         if ($gaMarked) {
-            if (Get-Command Get-PimGuardLimit -ErrorAction SilentlyContinue) { try { $gaBudget = [int](Get-PimGuardLimit -GuardId 'engine.remove-budget' -Fallback 5 -Fresh) } catch { $gaBudget = 5 } }
+            # CODE REVIEW 2 (owner decision 59): the EFFECTIVE budget (a server setting may lower it) -- the same number the engine applies.
+            if (Get-Command Get-PimGuardEffectiveLimit -ErrorAction SilentlyContinue) { try { $gaBudget = [int](Get-PimGuardEffectiveLimit -GuardId 'engine.remove-budget' -Fresh).effective } catch { $gaBudget = 5 } }
+            elseif (Get-Command Get-PimGuardLimit -ErrorAction SilentlyContinue) { try { $gaBudget = [int](Get-PimGuardLimit -GuardId 'engine.remove-budget' -Fallback 5 -Fresh) } catch { $gaBudget = 5 } }
             $gaOpen = Get-PimManagerGuardOpenItemIds
             if (@(@(Get-PimGuardGroupDeletionEntities) | Where-Object { $_ -ieq $base }).Count) {
                 try { $gaOther = @(Get-PimManagerOtherRetireRows -Base $base) } catch { $gaOther = @(); $gaOtherErr = "$($_.Exception.Message)" }
@@ -11515,10 +11577,12 @@ function Test-PimRowIsBreakGlass {
 function Get-PimRevokeGuardPlan {
     param(
         [object[]]$Rows = @(),
-        [int]$ConfirmThreshold = 5,
+        # CODE REVIEW 2 (2026-10-13, owner decision 60): -1 = the guard limit manager.bulk-revoke (Operations > Guards,
+        # Get-PimBulkRevokeLimit, default 5) -- the SAME number the approval threshold reads. It was the literal 5.
+        [int]$ConfirmThreshold = -1,
         [Nullable[int]]$ConfirmCount = $null
     )
-    if ($ConfirmThreshold -lt 1) { $ConfirmThreshold = 1 }
+    if ($ConfirmThreshold -lt 0) { $ConfirmThreshold = $(if (Get-Command Get-PimBulkRevokeLimit -ErrorAction SilentlyContinue) { [int](Get-PimBulkRevokeLimit) } else { 5 }) }
     $bg = Get-PimBreakGlassIdentifiers
     $toRevoke = New-Object System.Collections.ArrayList
     $skipped  = New-Object System.Collections.ArrayList
@@ -11856,8 +11920,10 @@ function Get-PimManagerOffboardHeldIntent {
     $out = [ordered]@{ accountStatus = ''; stripDelegations = [bool]$strip; note = '' }
     if ($st -ieq 'Removed') { $out.accountStatus = 'Removed' }
     elseif ($st -ieq 'Deleted') {
-        if ($role -ieq 'SuperAdmin') { $out.accountStatus = 'Deleted' }
-        else { $out.note = 'the request asked to DELETE the account but was not raised by a SuperAdmin -- staged as a plain offboard (disable) instead' }
+        # CODE REVIEW 1 FIXES 2026-10-13 (decision 54): a delete is ONE pinned decision (Delete account, which reads the
+        # account's object id). An offboard request that carries a held Deleted (raised by an older version) has no pinned
+        # account, so it is staged as the plain offboard (a DISABLE), whoever raised it -- the delete is confirmed again.
+        $out.note = 'the request asked to DELETE the account; a delete is now made only through Delete account (it pins the exact account) -- staged as a plain offboard (disable) instead: confirm the delete again with Delete account'
     }
     return [pscustomobject]$out
 }
@@ -11925,6 +11991,124 @@ function Get-PimManagerAdminRemovalPlan {
     $res.delegations = @(Get-PimManagerAdminDelegationRows -Upn $res.upn -UserName $res.userName -Rows @($AssignmentRows))
     $res.status = 202
     return [pscustomobject]$res
+}
+
+function Resolve-PimManagerAdminObjectId {
+    <#
+      CODE REVIEW 1 FIXES 2026-10-13 (decision 54): the LIVE object id of the account the operator chose, read from Microsoft
+      Entra ID at the moment of the decision (a READ, never a write). Returns @{ id; upn; error }. '' id = not resolved: the
+      caller refuses (no account is pinned on a guess). Test seam: $script:PimAdminObjectIdResolver { param($upn) -> id }.
+    #>
+    param([Parameter(Mandatory)][string]$Upn)
+    $u = "$Upn".Trim()
+    $o = [ordered]@{ id = ''; upn = $u; error = '' }
+    if (-not $u -or $u -notmatch '@') { $o.error = "'$u' is not a user principal name"; return [pscustomobject]$o }
+    try {
+        if ($script:PimAdminObjectIdResolver -is [scriptblock]) { $o.id = "$(& $script:PimAdminObjectIdResolver $u)".Trim().ToLowerInvariant() }
+        elseif (Get-Command Invoke-PimGraphGetAll -ErrorAction SilentlyContinue) {
+            $q = [uri]::EscapeDataString("userPrincipalName eq '$($u.Replace("'", "''"))'")
+            $hits = @(Invoke-PimGraphGetAll -Uri "https://graph.microsoft.com/v1.0/users?`$filter=$q&`$select=id,userPrincipalName")
+            if ($hits.Count -eq 1) { $o.id = "$($hits[0].id)".Trim().ToLowerInvariant() }
+            elseif ($hits.Count -gt 1) { $o.error = "$($hits.Count) accounts answer to '$u'" }
+            else { $o.error = "no account '$u' was found in Microsoft Entra ID" }
+        } else { $o.error = 'this Manager has no connection to Microsoft Entra ID to read the account' }
+    } catch { $o.error = "the account could not be read: $($_.Exception.Message)" }
+    if ($o.id -and $o.id -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { $o.error = "'$($o.id)' is not an object id"; $o.id = '' }
+    return [pscustomobject]$o
+}
+
+function Get-PimManagerAdminDeletePlan {
+    <#
+      PURE. CODE REVIEW 1 FIXES 2026-10-13, owner decisions (52) + (53): what DELETE /api/admin-accounts/<upn> does for THIS
+      caller. THE SAME RULE AS REVOKE (Test-PimRevauditAdminTarget): inside his scope, the target at his level or less
+      privileged, typed DELETE; a SuperAdmin anything. A caller who does not pass the rule but is a SPONSOR of the admin
+      (Test-PimRevauditAdminSponsor) may PROPOSE the delete -- it is approved on the Approvals page by someone with permission
+      over the admin, never by himself.
+      Returns @{ status; mode = 'delete' | 'propose' | ''; error; code; upn; userName; row; delegations }.
+        400 confirm / justification / upn   404 no admin row   409 already Deleted   403 neither allowed nor a sponsor
+    #>
+    param([AllowEmptyString()][string]$Upn = '', [hashtable]$Caller, [AllowEmptyString()][string]$Confirm = '', [AllowEmptyString()][string]$Justification = '',
+          [object[]]$AdminRows = @(), [object[]]$AssignmentRows = @(), [hashtable]$DepartmentOwners = @{})
+    $res = [ordered]@{ status = 0; mode = ''; error = ''; code = ''; upn = "$Upn".Trim(); userName = ''; row = $null; delegations = @() }
+    if ("$Confirm".Trim() -cne 'DELETE') { $res.status = 400; $res.code = 'typed-delete'; $res.error = "confirmation required: send confirm = 'DELETE' (in the body, or the X-PIM-Confirm header) -- nothing was requested."; return [pscustomobject]$res }
+    if (-not $res.upn) { $res.status = 400; $res.error = 'userPrincipalName is required.'; return [pscustomobject]$res }
+    if (-not "$Justification".Trim()) { $res.status = 400; $res.error = 'a justification is required -- it is recorded with the delete.'; return [pscustomobject]$res }
+    $found = Find-PimManagerOffboardAdminRow -Target $res.upn -Rows @($AdminRows)
+    if (-not $found.row) { $res.status = 404; $res.error = "'$($res.upn)' is not a managed admin account in this store."; return [pscustomobject]$res }
+    $row = $found.row; $res.row = $row
+    $res.upn = $(if ("$($row.UserPrincipalName)".Trim()) { "$($row.UserPrincipalName)".Trim() } else { $res.upn })
+    $res.userName = "$($row.UserName)".Trim()
+    if ("$($row.AccountStatus)".Trim() -ieq 'Deleted') { $res.status = 409; $res.error = "'$($res.upn)' is already AccountStatus=Deleted -- nothing to request."; return [pscustomobject]$res }
+    $res.delegations = @(Get-PimManagerAdminDelegationRows -Upn $res.upn -UserName $res.userName -Rows @($AssignmentRows))
+    $v = Test-PimRevauditAdminTarget -Caller $Caller -AdminRow $row -Action delete
+    if ($v.allowed) { $res.status = 202; $res.mode = 'delete'; $res.code = "$($v.code)"; return [pscustomobject]$res }
+    if (Test-PimRevauditAdminSponsor -Identity "$($Caller.identity)" -AdminRow $row -DepartmentOwners $DepartmentOwners) {
+        $res.status = 202; $res.mode = 'propose'; $res.code = 'sponsor'
+        $res.error = "you are a sponsor of '$($res.upn)' but may not delete it yourself ($($v.reason)) -- the delete is PROPOSED: someone with permission over this admin, or a SuperAdmin, approves it on the Approvals page"
+        return [pscustomobject]$res
+    }
+    $res.status = 403; $res.code = "$($v.code)"; $res.error = "Delete account refused -- nothing was requested: $($v.reason)"
+    return [pscustomobject]$res
+}
+
+function Invoke-PimManagerAdminDelete {
+    <#
+      CODE REVIEW 1 FIXES 2026-10-13 (decision 54): carry out ONE admin account delete the rule allowed. In this order, and
+      nothing at all when a step fails: (1) the live object id is read (Resolve-PimManagerAdminObjectId) -- unreadable =
+      refused; (2) the PIN is stored (PIM-AdminDeletePins.ps1: this object id, once); (3) the admin row (AccountStatus =
+      Deleted) and every delegation of the admin (Action = Remove) are queued AND committed -- the decision was the operator's
+      (or the approver's) own act; (4) the engine is started. The engine then deletes exactly that object id, once.
+      Returns @{ ok; status; error; objectId; pinId; queued }. Seams: -ReadRows / -Enqueue / -Commit.
+    #>
+    param([Parameter(Mandatory)][string]$Upn, [Parameter(Mandatory)][string]$By, [string]$ApprovedBy = '', [string]$RequestedBy = '', [string]$RequestId = '',
+          [string]$Justification = '', [object]$AdminRow, [object[]]$Delegations = @(),
+          [scriptblock]$Enqueue = { param($change) Add-PimSqlQueueChange -ConnectionString (Get-PimManagerStoreCs) -Change $change },
+          [scriptblock]$Commit = { param($ids, $who) [void](Set-PimSqlQueueCommitted -ConnectionString (Get-PimManagerStoreCs) -Ids @($ids) -By $who) })
+    $out = [ordered]@{ ok = $false; status = 500; error = ''; objectId = ''; pinId = ''; queued = 0 }
+    $oid = Resolve-PimManagerAdminObjectId -Upn $Upn
+    if (-not $oid.id) { $out.status = 409; $out.error = "the account to delete could not be pinned: $($oid.error) -- nothing was deleted or requested (an account is deleted only by its object id, read when it is chosen)"; return [pscustomobject]$out }
+    $out.objectId = $oid.id
+    $apb = if ("$ApprovedBy".Trim()) { "$ApprovedBy".Trim() } else { "$By".Trim() }
+    try {
+        $pin = New-PimAdminDeletePin -Key $Upn -Upn $Upn -ObjectId $oid.id -Source local -RequestId $RequestId -RequestedBy $(if ($RequestedBy) { $RequestedBy } else { $By }) -ApprovedBy $apb -Note "$Justification"
+        [void](Add-PimAdminDeletePin -Pin $pin)
+        $out.pinId = "$($pin.id)"
+    } catch { $out.status = 500; $out.error = "the delete could not be recorded ($($_.Exception.Message)) -- nothing was deleted or requested"; return [pscustomobject]$out }
+    $ids = New-Object System.Collections.Generic.List[string]
+    try {
+        $row = [ordered]@{}
+        if ($AdminRow -is [System.Collections.IDictionary]) { foreach ($k in @($AdminRow.Keys)) { $row[$k] = $AdminRow[$k] } } else { foreach ($p in $AdminRow.PSObject.Properties) { $row[$p.Name] = $p.Value } }
+        $row['AccountStatus'] = 'Deleted'
+        $key = Get-PimStoreRowKey -Base 'Account-Definitions-Admins' -Row ([pscustomobject]$row)
+        if (-not $key) { throw "the admin row for '$Upn' has no UserName -- it cannot be addressed in the store" }
+        $ch = New-PimChange -Entity 'Account-Definitions-Admins' -Key $key -Op 'Update' -Payload ([pscustomobject]$row) -By $By -Kind 'DesiredState' -Origin 'Authorised' `
+                -Justification "Delete account (pinned object id $($oid.id)): $Justification"
+        & $Enqueue $ch; $ids.Add("$($ch.id)")
+        foreach ($ar in @($Delegations)) {
+            $rm = [ordered]@{}
+            if ($ar -is [System.Collections.IDictionary]) { foreach ($k in @($ar.Keys)) { $rm[$k] = $ar[$k] } } else { foreach ($p in $ar.PSObject.Properties) { $rm[$p.Name] = $p.Value } }
+            $rm['Action'] = 'Remove'
+            $ak = Get-PimStoreRowKey -Base 'PIM-Assignments-Admins' -Row ([pscustomobject]$rm)
+            if (-not $ak) { continue }
+            $c2 = New-PimChange -Entity 'PIM-Assignments-Admins' -Key $ak -Op 'Update' -Payload ([pscustomobject]$rm) -By $By -Kind 'DesiredState' -Origin 'Authorised' -Justification "Delete account of $Upn`: remove the delegation $ak"
+            & $Enqueue $c2; $ids.Add("$($c2.id)")
+        }
+        & $Commit @($ids.ToArray()) $By
+    } catch {
+        # the pin stays APPROVED but no row says Deleted: nothing is deleted until a commit marks the row (the pin is pinned to this object id only)
+        $out.status = 500; $out.error = "the delete was pinned but could not be queued ($($_.Exception.Message)) -- nothing is deleted until the row is marked Deleted"; $out.queued = $ids.Count
+        return [pscustomobject]$out
+    }
+    $out.queued = $ids.Count; $out.ok = $true; $out.status = 202
+    try { if (Get-Command Start-PimManagerTickNow -ErrorAction SilentlyContinue) { [void](Start-PimManagerTickNow -Reason 'admin-delete') } } catch { }
+    return [pscustomobject]$out
+}
+
+function Get-PimManagerDepartmentOwnersForRule {
+    # @{ lower department -> owners text } for the sponsor rule; an unreadable index = no sponsors (a proposal is then refused, never guessed).
+    $o = @{}
+    try { $idx = Get-PimManagerDepartmentOwnerIndex; if ($idx -is [hashtable]) { foreach ($k in @($idx.Keys)) { $o["$k".ToLowerInvariant()] = "$($idx[$k])" } } } catch { }
+    return $o
 }
 
 function Find-PimManagerOffboardAdminRow {
@@ -14235,7 +14419,45 @@ function Handle-Request {
                 # find a different approver. Settings > Approvals: "Allow self-approval" (SuperAdmin, audited, default OFF).
                 $selfOk = $false
                 try { $sa = Get-PimManagerSettingObject -Name 'ApprovalSelfApprove'; if ($sa -and $sa.PSObject.Properties['enabled']) { $selfOk = [bool]$sa.enabled } } catch { $selfOk = $false }
+                # CODE REVIEW 2 FIXES 2026-10-13 (owner decision 58: "Permission over target, never self"): an offboarding, an
+                # account delete, a disable and an over-limit bulk revoke are approved only by a person with permission over the
+                # target (the revoke rule: scope + level) or a SuperAdmin -- never by the person who asked, whatever
+                # ApprovalSelfApprove says. ONE function decides it (tools/pim-manager/_approvers.ps1). It used to be any Admin.
+                $apprReq = @(@(Get-PimApprovalRequests) | Where-Object { "$($_.id)" -eq $apprId }) | Select-Object -First 1
+                if ($apprReq) {
+                    $apv = Test-PimApprovalApproverAllowed -Request $apprReq -Decision $decision
+                    if ($apv.governed) { $selfOk = $false }
+                    if (-not $apv.allowed) {
+                        Write-PimManagerAuditEvent -Action 'approval.request.refused' -Target "$($apprReq.target)" -After @{ id = "$($apprReq.id)"; approver = "$me"; action = "$($apprReq.action)"; code = "$($apv.code)"; reason = "$($apv.reason)" } -Result 'refused'
+                        Write-JsonResponse -Response $resp -Status ([int]$apv.status) -Body ([ordered]@{ ok = $false; code = "$($apv.code)"; reason = "$($apv.reason)"; error = "$($apv.reason)" })
+                        return [int]$apv.status
+                    }
+                } elseif ("$decision".Trim().ToLowerInvariant() -eq 'approve') {
+                    # session review of lane review2: a request that cannot be found here was never checked -- never approve it
+                    Write-JsonResponse -Response $resp -Status 404 -Body @{ ok = $false; error = "approval request '$apprId' was not found -- nothing was approved" }
+                    return 404
+                }
+                # CODE REVIEW 1 FIXES 2026-10-13 (lane review1, owner decisions 52 + 53): a sponsor's PROPOSED account delete
+                # ('admin-delete'). WHO may approve it was decided just above by the ONE approver check (Test-PimApprovalApproverAllowed:
+                # the delete rule, never the proposer). Approved, the pinned delete is made at once (Invoke-PimManagerAdminDelete).
+                $adReq = $null; $adRow = $null; $adAsg = @()
+                if ($apprReq -and "$($apprReq.action)" -ieq 'admin-delete' -and $decision -eq 'approve') {
+                    $adReq = $apprReq; $selfOk = $false
+                    try {
+                        $adAdmins = @(Get-PimSqlRows -ConnectionString (Get-PimManagerStoreCs) -Entity 'Account-Definitions-Admins'); $adAsg = @(Get-PimSqlRows -ConnectionString (Get-PimManagerStoreCs) -Entity 'PIM-Assignments-Admins')
+                        $adRow = (Find-PimManagerOffboardAdminRow -Target "$($adReq.target)" -Rows @($adAdmins)).row
+                    } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; reason = "the admin rows could not be read ($($_.Exception.Message)) -- nothing was approved" }; return 500 }
+                    if (-not $adRow) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; reason = "'$($adReq.target)' is not a managed admin account any more -- nothing was approved" }; return 409 }
+                }
                 $res = Set-PimApprovalDecision -Id $apprId -Approver "$me" -Decision $decision -Note $note -AllowSelfApprove $selfOk
+                if ($res.ok -and $adReq -and "$($adReq.action)" -ieq 'admin-delete' -and $decision -eq 'approve' -and $adRow) {
+                    $adDo = Invoke-PimManagerAdminDelete -Upn "$($adRow.UserPrincipalName)" -By "$me" -ApprovedBy "$me" -RequestedBy "$($adReq.requestor)" -RequestId $apprId `
+                                -Justification "$($adReq.justification)" -AdminRow $adRow -Delegations @(Get-PimManagerAdminDelegationRows -Upn "$($adRow.UserPrincipalName)" -UserName "$($adRow.UserName)" -Rows @($adAsg))
+                    Write-PimManagerAuditEvent -Action 'admin.delete.approved' -Target "$($adReq.target)" -Result $(if ($adDo.ok) { 'ok' } else { 'denied' }) -After ([ordered]@{ id = $apprId; proposedBy = "$($adReq.requestor)"; approvedBy = "$me"; objectId = "$($adDo.objectId)"; pinId = "$($adDo.pinId)"; error = "$($adDo.error)" })
+                    Write-JsonResponse -Response $resp -Status $(if ($adDo.ok) { 200 } else { [int]$adDo.status }) -Body ([ordered]@{ ok = [bool]$adDo.ok; id = $apprId; status = "$($res.status)"; objectId = "$($adDo.objectId)"; queued = [int]$adDo.queued
+                        reason = $(if ($adDo.ok) { "approved: the account is deleted by the engine once (object id $($adDo.objectId))" } else { "approved, but the delete could not be made: $($adDo.error)" }) })
+                    return $(if ($adDo.ok) { 200 } else { [int]$adDo.status })
+                }
                 if (-not $res.request) {
                     Write-JsonResponse -Response $resp -Status 404 -Body @{ ok = $false; error = "$($res.reason)" }
                     return 404
@@ -17296,6 +17518,58 @@ function Handle-Request {
         if ($admRemoveMode) {
             $script:lastHeartbeat = Get-Date
             $admPathUpn = $(if ($admRemoveMode -eq 'delete') { [uri]::UnescapeDataString("$($Matches[1])") } else { '' })
+            # CODE REVIEW 1 FIXES 2026-10-13, owner decisions (52) + (53): the DELETE route no longer asks for a SuperAdmin plus a
+            # second approver. It applies THE SAME RULE AS REVOKE for the person who calls it (scope + level, typed DELETE; a
+            # SuperAdmin anything), and a SPONSOR of the admin who does not pass it may PROPOSE the delete (approved on the
+            # Approvals page by someone with permission over the admin, never by himself). The account is pinned by its object id.
+            if ($admRemoveMode -eq 'delete') {
+                $bodyD = Read-RequestJson -Request $req
+                $roleD = Get-PimManagerRole
+                if (-not "$($roleD.identity)".Trim() -or "$($roleD.identity)" -eq '<unauthenticated>' -or "$($roleD.role)" -eq 'Demo') {
+                    Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'a signed-in person is needed to delete or propose the delete of an admin account.' }
+                    return 403
+                }
+                $confD = "$(if ($bodyD -and $bodyD.PSObject.Properties['confirm']) { $bodyD.confirm })".Trim()
+                if (-not $confD) { $confD = "$($req.Headers['X-PIM-Confirm'])".Trim() }
+                $justD = "$(if ($bodyD) { $bodyD.justification })".Trim()
+                $csD = Get-PimManagerStoreCs
+                if (-not $csD -or -not (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue)) {
+                    Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no SQL store is wired in this host, so the request cannot be checked against the admin rows.' }
+                    return 503
+                }
+                $admRowsD = @(); $asgRowsD = @()
+                try { $admRowsD = @(Get-PimSqlRows -ConnectionString $csD -Entity 'Account-Definitions-Admins'); $asgRowsD = @(Get-PimSqlRows -ConnectionString $csD -Entity 'PIM-Assignments-Admins') }
+                catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the admin rows could not be read ($($_.Exception.Message)) -- nothing was requested" }; return 500 }
+                $callerD = Get-PimRevauditCaller -Admins @($admRowsD)
+                $planD = Get-PimManagerAdminDeletePlan -Upn $admPathUpn -Caller $callerD -Confirm $confD -Justification $justD -AdminRows $admRowsD -AssignmentRows $asgRowsD -DepartmentOwners (Get-PimManagerDepartmentOwnersForRule)
+                if ($planD.status -eq 404 -and $admPathUpn -and @(Get-PimManagerCentralAdminRows | Where-Object { "$($_.UserPrincipalName)".Trim() -ieq $admPathUpn }).Count) {
+                    Write-JsonResponse -Response $resp -Status 409 -Body @{ error = "'$admPathUpn' is a CENTRAL admin managed by the managing tenant -- it is read-only here. A SuperAdmin of the managing tenant deletes it there (Delete account on every managed tenant)." }
+                    return 409
+                }
+                if ($planD.status -ne 202) {
+                    Write-PimManagerAuditEvent -Action 'admin.delete.refused' -Target "$($planD.upn)" -Result 'denied' -After ([ordered]@{ code = "$($planD.code)"; reason = "$($planD.error)"; by = "$($roleD.identity)" })
+                    Write-JsonResponse -Response $resp -Status $planD.status -Body @{ error = "$($planD.error)"; code = "$($planD.code)" }
+                    return [int]$planD.status
+                }
+                if ($planD.mode -eq 'propose') {
+                    if (-not (Get-Command Add-PimApprovalRequest -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = 'the approval-gate library is not loaded -- nothing was proposed' }; return 500 }
+                    try {
+                        $aprD = Add-PimApprovalRequest -Requestor "$($roleD.identity)" -Action 'admin-delete' -Target $planD.upn -Justification $justD -Ticket "$(if ($bodyD) { $bodyD.ticket })".Trim() `
+                                    -Detail ([ordered]@{ kind = 'admin-delete-proposal'; upn = $planD.upn; userName = $planD.userName; proposedBy = "$($roleD.identity)"; delegations = @($planD.delegations).Count })
+                    } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the proposal could not be recorded ($($_.Exception.Message)) -- nothing was proposed" }; return 500 }
+                    Write-PimManagerAuditEvent -Action 'admin.delete.proposed' -Target $planD.upn -Result 'ok' -After ([ordered]@{ approvalId = "$($aprD.id)"; by = "$($roleD.identity)"; via = 'api' })
+                    Write-JsonResponse -Response $resp -Status 202 -Body ([ordered]@{ ok = $true; action = 'delete-account-proposed'; upn = $planD.upn; approvalId = "$($aprD.id)"; approvalRaised = $true
+                        note = "Proposed: the delete of '$($planD.upn)' waits on the Approvals page for someone with permission over this admin (scope and level), or a SuperAdmin -- never you. Nothing is deleted until then." })
+                    return 202
+                }
+                $doD = Invoke-PimManagerAdminDelete -Upn $planD.upn -By "$($roleD.identity)" -Justification $justD -AdminRow $planD.row -Delegations @($planD.delegations)
+                Write-PimManagerAuditEvent -Action 'admin.delete.requested' -Target $planD.upn -Result $(if ($doD.ok) { 'ok' } else { 'denied' }) `
+                    -Before ([ordered]@{ accountStatus = "$($planD.row.AccountStatus)" }) `
+                    -After ([ordered]@{ accountStatus = 'Deleted'; objectId = "$($doD.objectId)"; pinId = "$($doD.pinId)"; delegations = @($planD.delegations).Count; by = "$($roleD.identity)"; rule = "$($planD.code)"; via = 'api'; error = "$($doD.error)" })
+                Write-JsonResponse -Response $resp -Status ([int]$doD.status) -Body ([ordered]@{ ok = [bool]$doD.ok; action = 'delete-account'; upn = $planD.upn; objectId = "$($doD.objectId)"; queued = [int]$doD.queued
+                    error = "$($doD.error)"; directory = 'unchanged -- the Manager makes no directory write; the engine deletes exactly this object id, once, on its next run' })
+                return [int]$doD.status
+            }
             if (-not (Test-PimManagerRoleAtLeast -Minimum $(if ($admRemoveMode -eq 'delete') { 'SuperAdmin' } else { 'Admin' }))) {
                 $why = $(if ($admRemoveMode -eq 'delete') { 'SuperAdmin role required to delete an admin account.' } else { 'Admin role required to remove an admin from PIM.' })
                 Write-JsonResponse -Response $resp -Status 403 -Body @{ error = $why }
@@ -17333,6 +17607,15 @@ function Handle-Request {
             if ($plan.status -ne 202) {
                 Write-JsonResponse -Response $resp -Status $plan.status -Body @{ error = "$($plan.error)" }
                 return [int]$plan.status
+            }
+            # CODE REVIEW 1 FIXES 2026-10-13, decision (55) "Same rule everywhere": Remove from PIM takes the admin's delegations
+            # away -- the revoke rule's scope + LEVEL check applies (an Admin with no level of his own may not touch L0 / L1).
+            $rmRow = (Find-PimManagerOffboardAdminRow -Target $plan.upn -Rows @($admRows)).row
+            $rmVerdict = Test-PimRevauditAdminTarget -Caller (Get-PimRevauditCaller -Admins @($admRows)) -AdminRow $rmRow -Action remove
+            if (-not $rmVerdict.allowed) {
+                Write-PimManagerAuditEvent -Action 'admin.remove-from-pim.refused' -Target $plan.upn -Result 'denied' -After ([ordered]@{ code = "$($rmVerdict.code)"; reason = "$($rmVerdict.reason)"; by = "$($role.identity)" })
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "Remove from PIM refused -- nothing was requested: $($rmVerdict.reason)"; code = "$($rmVerdict.code)" }
+                return 403
             }
             $verbTxt = $(if ($admRemoveMode -eq 'delete') { 'Delete account' } else { 'Remove from PIM' })
             $hold = Request-PimManagerOffboardHold -Upn $plan.upn -What "$verbTxt (AccountStatus '$($plan.accountStatus)', $(@($plan.delegations).Count) delegation(s) removed)" `
@@ -19276,9 +19559,26 @@ function Handle-Request {
             $to     = "$($body.to)".Trim()
             $reason = "$($body.reason)".Trim()
             # §79.6: 'revoke-sessions' -- every managed tenant (or the ones in 'tenants') revokes ITS account's sign-in sessions.
-            if ($op -notin @('withdraw', 'rename', 'revoke-sessions')) {
-                Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "op must be 'withdraw', 'rename' or 'revoke-sessions'" }
+            if ($op -notin @('withdraw', 'rename', 'revoke-sessions', 'delete-account')) {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "op must be 'withdraw', 'rename', 'revoke-sessions' or 'delete-account'" }
                 return 400
+            }
+            # CODE REVIEW 1 FIXES 2026-10-13, owner decisions (51) + (61): 'delete-account' -- this SuperAdmin approves the DELETE
+            # of ONE central admin in every managed tenant where he exists (or the ones in 'tenants'). Typed DELETE and a reason;
+            # exactly one admin per approval (guard msp.central-admin-delete) -- a key naming two or more is refused; the intent
+            # carries who approved it, in the signed bundle. Each managed tenant deletes ITS account once, pinned to its own
+            # object id, at most one central admin per run. Without this approval a central Deleted stays a disable downlevel.
+            $apprBy = ''; $apprRole = ''
+            if ($op -eq 'delete-account') {
+                if ("$($body.confirm)".Trim() -cne 'DELETE') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "confirmation required: send confirm = 'DELETE' -- nothing was recorded"; gate = 'typed-delete' }; return 400 }
+                if ("$($body.reason)".Trim().Length -lt 10) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'a reason of at least 10 characters is required to approve the delete of a central admin -- nothing was recorded' }; return 400 }
+                if (-not (Test-PimDownlinkSingleAdminKey -Key $key)) {
+                    Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "guard msp.central-admin-delete: ONE approval names exactly ONE central admin ('$key' names more than one, or a wildcard) -- nothing was recorded"; gate = 'msp.central-admin-delete' }
+                    return 400
+                }
+                $rD = Get-PimManagerRole
+                if (-not (Test-PimGuardSignedInSuperAdmin -Role "$($rD.role)" -Identity "$($rD.identity)")) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'a signed-in SuperAdmin approves the delete of a central admin.' }; return 403 }
+                $apprBy = "$($rD.identity)"; $apprRole = 'SuperAdmin'
             }
             $tenantsIn = @(); if ($body.PSObject.Properties['tenants'] -and $body.tenants) { $tenantsIn = @($body.tenants | ForEach-Object { "$_" }) }
             $who = ''
@@ -19289,7 +19589,7 @@ function Handle-Request {
                 Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "'tenants' must hold tenant ids; not tenant ids: $($badTenants -join ', ') -- nothing was recorded" }
                 return 400
             }
-            $intent = New-PimDownlinkIntent -Op $op -Entity $entity -Key $key -To $to -By $who -Reason $reason -Tenants $tenantsIn
+            $intent = New-PimDownlinkIntent -Op $op -Entity $entity -Key $key -To $to -By $who -Reason $reason -Tenants $tenantsIn -ApprovedBy $apprBy -ApprovedRole $apprRole
             if (-not $intent) {
                 Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'an intent needs an entity and a key (and, for a rename, a different target) -- nothing was recorded' }
                 return 400

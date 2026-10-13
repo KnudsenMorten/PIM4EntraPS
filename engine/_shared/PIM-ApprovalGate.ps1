@@ -88,8 +88,10 @@ if (-not (Get-Command Get-PimRevokeGuardPlan -ErrorAction SilentlyContinue)) {
         # Pure what-if planner for a bulk revoke: split rows into {toRevoke,
         # skipped(break-glass)} + report whether a count-confirmation is required and
         # satisfied. No side effects. (Engine-side copy of the #81 Manager helper.)
-        param([object[]]$Rows = @(), [int]$ConfirmThreshold = 5, [Nullable[int]]$ConfirmCount = $null)
-        if ($ConfirmThreshold -lt 1) { $ConfirmThreshold = 1 }
+        # CODE REVIEW 2 (2026-10-13): -1 = the guard limit manager.bulk-revoke (Get-PimBulkRevokeLimit, Operations > Guards,
+        # default 5) -- it was the literal 5. 0 (a server setting that stops every batch) asks for the count of every batch.
+        param([object[]]$Rows = @(), [int]$ConfirmThreshold = -1, [Nullable[int]]$ConfirmCount = $null)
+        if ($ConfirmThreshold -lt 0) { $ConfirmThreshold = $(if (Get-Command Get-PimBulkRevokeLimit -ErrorAction SilentlyContinue) { [int](Get-PimBulkRevokeLimit) } else { 5 }) }
         $bg = Get-PimBreakGlassIdentifiers
         $toRevoke = New-Object System.Collections.ArrayList
         $skipped  = New-Object System.Collections.ArrayList
@@ -117,7 +119,10 @@ if (-not (Get-Command Get-PimRevokeGuardPlan -ErrorAction SilentlyContinue)) {
 # authoring/onboarding commit (s28 [M4]) -- a maker stages a privileged-role
 # attach / guest-into-privileged-group / disable change, a different checker
 # approves it before commit (see engine/_shared/PIM-SensitiveAuthoring.ps1).
-$script:PimApprovalActions  = @('offboard','revoke','disable','authoring')
+# CODE REVIEW 1 FIXES 2026-10-13 (decisions 52 + 53): 'admin-delete' -- a sponsor PROPOSES the delete of an admin account
+# (a consultant he sponsors); it is approved by someone with permission over that admin (scope + level), or a SuperAdmin,
+# NEVER by the proposer himself (Open-PimManager.ps1, /api/approvals/decide).
+$script:PimApprovalActions  = @('offboard','revoke','disable','authoring','admin-delete')
 $script:PimApprovalStatuses = @('Pending','Approved','Denied','Executed','Expired')
 # Where approval requests live in the settings/SQL store (one JSON blob: a list).
 $script:PimApprovalSettingName = 'ApprovalRequests'
@@ -126,10 +131,12 @@ $script:PimApprovalSettingName = 'ApprovalRequests'
 function Get-PimRevokeApprovalThreshold {
     # A revoke batch with MORE than this many (post-break-glass) rows needs an
     # APPROVED request. At/below it, the interim #81 count-confirm guard suffices.
-    # Operator-tunable via $global:PIM_RevokeApprovalThreshold (default 5 -- matches
-    # the #81 ConfirmThreshold / the DisableGuard absolute cap).
+    # CODE REVIEW 2 (2026-10-13, owner decision 60): THE GUARD LIMIT manager.bulk-revoke (Operations > Guards, 1..5..25),
+    # the same number as the typed count. $global:PIM_RevokeApprovalThreshold may only LOWER it (0 = every batch needs an
+    # approval); it used to REPLACE it with no ceiling, so 100000 switched the approval off.
+    if (Get-Command Get-PimBulkRevokeLimit -ErrorAction SilentlyContinue) { return [int](Get-PimBulkRevokeLimit) }
     $v = $global:PIM_RevokeApprovalThreshold
-    if ($null -ne $v -and "$v" -match '^\d+$' -and [int]$v -ge 1) { return [int]$v }
+    if ($null -ne $v -and "$v" -match '^\d+$' -and [int]$v -lt 5) { return [int]$v }
     return 5
 }
 

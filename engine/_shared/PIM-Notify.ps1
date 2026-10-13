@@ -258,7 +258,9 @@ function Get-PimMailEnvironmentInfo {
         $tn = "$($global:PIM_TenantName)".Trim(); $tid = "$($global:PIM_TenantId)".Trim()
         $ver = ''
         try { $vf = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'VERSION'; if (Test-Path -LiteralPath $vf) { $ver = "$(Get-Content -Raw -LiteralPath $vf)".Trim() } } catch { }
-        $script:PimMailEnvInfo = @{ name = $(if ($name) { $name } elseif ($tn) { $tn } else { $tid }); tenantName = $tn; tenantId = $tid; version = $ver }
+        # owner 2026-10-13 (a mail tagged with a bare tenant GUID: "we cannot use this to anything. must be environment
+        # name"): the environment NAME first; a tenant id is only the last resort, and then SAID to be one.
+        $script:PimMailEnvInfo = @{ name = $(if ($name) { $name } elseif ($tn) { $tn } elseif ($tid) { "tenant $tid" } else { '' }); tenantName = $tn; tenantId = $tid; version = $ver }
     }
     $i = @{} + $script:PimMailEnvInfo; $i['portal'] = "$PortalBase".Trim()
     return $i

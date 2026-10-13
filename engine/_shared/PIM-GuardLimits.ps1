@@ -5,8 +5,9 @@
   SuperAdmin sets them"): THE LIMIT OF A GUARD. Counts only -- there is no percentage in any guard's rule.
 
 .DESCRIPTION
-  Three guards have a limit a SuperAdmin can set on Operations > Guards, each inside a FLOOR and a CEILING that are
-  literals in this file (Get-PimGuardLimitCatalog) and are stated on the page:
+  Five guards have a limit a SuperAdmin can set on Operations > Guards, each inside a FLOOR and a CEILING that are
+  literals in this file (Get-PimGuardLimitCatalog) and are stated on the page (CODE REVIEW 2, 2026-10-13, added
+  manager.bulk-revoke 1..5..25 and engine.admin-delete 1..5..25):
 
     manager.commit-removal   rows of ONE list removed in ONE commit before a SuperAdmin must approve   5 .. 25 .. 200
     engine.remove-budget     removals in one scope in one engine run before the run holds them          1 ..  5 ..  25
@@ -57,7 +58,91 @@ function Get-PimGuardLimitCatalog {
                 'admin accounts disabled because their row says so (AccountStatus, a passed disable date)'
                 'admin accounts disabled by an offboarding in one run'
                 'admin accounts disabled by the inactivity sweep, where it is set to enforce') }
+        # CODE REVIEW 2 FIXES 2026-10-13 (lane review2, owner decision 60): the bulk revoke's two checks -- the typed
+        # count and the approval -- read ONE number, set here. It used to be the literal 5 in two places and a $global:
+        # knob that could RAISE it without a ceiling.
+        [pscustomobject]@{ guardId = 'manager.bulk-revoke'; floor = 1; default = 5; ceiling = 25
+            unit = 'assignments revoked in one batch'
+            why = 'Floor 1: 0 would ask for an approval of every single revoke. Ceiling 25: more than that in one batch is "many"; a larger batch is approved on the Approvals page by a person with permission over every assignment in it, or a SuperAdmin.'
+            bounds = @(
+                'the count of assignments a bulk revoke must be confirmed with (typed by the person who revokes)'
+                'the size of a bulk revoke above which it needs an approved request on the Approvals page') }
+        # CODE REVIEW 2 FIXES 2026-10-13 (lane review2, owner decision 60): admin ACCOUNT deletes per engine run (the
+        # operator's Delete account, AccountStatus = Deleted). It was $script:PimAdminDeleteMaxPerRun = 5.
+        [pscustomobject]@{ guardId = 'engine.admin-delete'; floor = 1; default = 5; ceiling = 25
+            unit = 'account deletes per run'
+            why = 'Floor 1: 0 would stop every account delete the operator asked for. Ceiling 25: an account delete cannot be undone by the next run (Entra keeps it restorable for 30 days); more than that in one run waits for the next run.'
+            bounds = @('admin accounts deleted in one engine run because their row says AccountStatus = Deleted (the rest wait for the next run)') }
     )
+}
+
+function Get-PimGuardLimitKnob {
+    <#
+      PURE. LITERAL. The SERVER SETTING that may LOWER a guard's limit in one process ($global:<name>, then the process
+      environment when env = $true), or $null when the guard has none (CODE REVIEW 2, owner decision 59: "Show it, keep 0
+      possible" -- a server setting only lowers a limit, 0 stops every one, and the Guards page shows the EFFECTIVE number
+      and why). Nothing here can raise a limit.
+    #>
+    param([string]$GuardId)
+    switch ("$GuardId".Trim().ToLowerInvariant()) {
+        'engine.remove-budget'   { return @{ name = 'PIM_RemoveMaxCount'; env = $true } }
+        'engine.disable-guard'   { return @{ name = 'PIM_DisableMaxCount'; env = $true } }
+        'manager.commit-removal' { return @{ name = 'PIM_CommitMaxRemoveAbs'; env = $false } }
+        'manager.bulk-revoke'    { return @{ name = 'PIM_RevokeApprovalThreshold'; env = $false } }
+    }
+    return $null
+}
+
+function Get-PimGuardEffectiveLimit {
+    <#
+      The number a guard USES right now in THIS process, and why. NEVER throws. $null when the guard has no limit.
+        @{ guardId; stored (the Guards-page value or the default); effective; knob; knobValue; lowered; ignored; note }
+      * the server setting (Get-PimGuardLimitKnob) is a whole number below the stored value -> effective = that number,
+        0 included (0 = nothing gets through; a full stop stays possible -- owner decision 59);
+      * a negative number counts as 0 (the stricter reading);
+      * at or above the stored value, or not a number -> ignored (a server setting can never raise a limit), said in note.
+    #>
+    param([Parameter(Mandatory)][string]$GuardId, [switch]$Fresh)
+    $st = $null
+    try { $st = Get-PimGuardLimitState -GuardId $GuardId -Fresh:$Fresh } catch { $st = $null }
+    if ($null -eq $st) { return $null }
+    $stored = [int](Get-PimGuardLimit -GuardId $GuardId -Fallback ([int]$st.default))
+    $o = [ordered]@{ guardId = "$($st.guardId)"; stored = $stored; effective = $stored; knob = ''; knobValue = ''; lowered = $false; ignored = $false; note = '' }
+    $k = Get-PimGuardLimitKnob -GuardId $GuardId
+    if (-not $k) { return [pscustomobject]$o }
+    $o.knob = "$($k.name)"
+    $v = Get-Variable -Name $k.name -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+    # The process environment is read by the ONE knob reader of the engine (Get-PimSafetyKnob, PIM-DisableGuard.ps1) -- never
+    # here: this file decides limits and approvals, and nothing in it reads an environment variable (H34).
+    if (($null -eq $v -or "$v".Trim() -eq '') -and $k.env -and (Get-Command Get-PimSafetyKnob -ErrorAction SilentlyContinue)) { $v = Get-PimSafetyKnob -Name "$($k.name)" }
+    if ($null -eq $v -or "$v".Trim() -eq '') { return [pscustomobject]$o }
+    $o.knobValue = "$v".Trim()
+    $n = 0
+    if (-not [int]::TryParse("$v".Trim(), [ref]$n)) {
+        $o.ignored = $true; $o.note = ("the server setting {0}='{1}' is not a whole number -- ignored, {2} applies" -f $k.name, $o.knobValue, $stored)
+        return [pscustomobject]$o
+    }
+    if ($n -lt 0) { $n = 0 }
+    if ($n -lt $stored) {
+        $o.effective = $n; $o.lowered = $true
+        $o.note = $(if ($n -eq 0) { "the server setting $($k.name)=0 stops every one of them in this process (a server setting can only lower the limit of $stored)" }
+                    else { "lowered to $n by the server setting $($k.name) in this process (a server setting can only lower the limit of $stored)" })
+    } elseif ($n -gt $stored) {
+        $o.ignored = $true; $o.note = ("the server setting {0}={1} is above the limit of {2} -- ignored: a server setting can only lower a limit; a SuperAdmin raises it here" -f $k.name, $n, $stored)
+    }
+    return [pscustomobject]$o
+}
+
+function Get-PimBulkRevokeLimit {
+    <# The bulk revoke's number (manager.bulk-revoke), effective in this process: the typed count AND the approval
+       threshold. NEVER throws; the literal default 5 when the library cannot answer. #>
+    try { $e = Get-PimGuardEffectiveLimit -GuardId 'manager.bulk-revoke'; if ($e) { return [int]$e.effective } } catch { }
+    return 5
+}
+
+function Get-PimAdminDeleteLimit {
+    <# Admin account deletes per engine run (engine.admin-delete). NEVER throws; the literal default 5 on any failure. #>
+    try { return [int](Get-PimGuardLimit -GuardId 'engine.admin-delete' -Fallback 5) } catch { return 5 }
 }
 
 function Get-PimCommitGuardFewLeftRows {
