@@ -1,20 +1,22 @@
-<!-- subject: Delegation approval needed: {{RequestorUpn}} -> {{RoleName}} -->
-<!-- tokens: ApproverName, RequestorUpn, RoleName, GroupName, Justification, RequestedAt, ApprovalUrl -->
+<!-- subject: Please approve or deny {{RoleName}} for {{RequestorUpn}} - {{DecisionDeadline}} -->
+<!-- tokens: ApproverName, RequestorUpn, RoleName, GroupName, Justification, RequestedAt, DecisionDeadline, ApprovalUrl -->
 <!-- Sent to an approver when an admin's DELEGATION (assignment to a delegation / permission group) needs their
      decision. This is DELEGATION-time approval, handled in our layer (PIM Manager / engine). ACTIVATION approval
      is a SEPARATE mechanism handled natively by Entra PIM per the group's role-management policy and is NEVER
-     sent by this engine. To customize: edit it in the Manager (Settings > Mail templates); the edited copy is kept in SQL and is never overwritten by updates. -->
+     sent by this engine. PIM 100.135: the decision and its deadline are in the subject ({{DecisionDeadline}} = "decide by
+     <time>", or "it waits for your decision"); the ONE button that approves in PIM Manager is added by the product --
+     a reply to the mail never approves. To customize: edit it in the Manager (Settings > Mail templates); the edited copy is kept in SQL and is never overwritten by updates. -->
 <html>
 <body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
   <p>Hello {{ApproverName}},</p>
-  <p>A privileged <b>delegation</b> is waiting for your approval &mdash; an admin is being assigned to a delegation / permission group:</p>
+  <p>A privileged <b>delegation</b> is waiting for your approval: an admin is to be added to a delegation / permission group.</p>
   <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
     <tr><td><b>Requestor</b></td><td>{{RequestorUpn}}</td></tr>
     <tr><td><b>Role / group</b></td><td>{{RoleName}} ({{GroupName}})</td></tr>
     <tr><td><b>Justification</b></td><td>{{Justification}}</td></tr>
     <tr><td><b>Requested at</b></td><td>{{RequestedAt}}</td></tr>
   </table>
-  <p><a href="{{ApprovalUrl}}">Open the approval request in the PIM Manager</a> to approve or deny.</p>
-  <p style="color:#57606a;">Unanswered requests escalate to the next owner per the delegation approval policy. (This is delegation approval only &mdash; activation of an eligible role is handled separately by Entra PIM.)</p>
+  <p>Approve or deny it in PIM Manager with the button below ({{DecisionDeadline}}). A reply to this mail does not approve or deny it.</p>
+  <p style="color:#57606a;">Unanswered requests are passed on to the next owner per the delegation approval policy. (This is delegation approval only; activation of an eligible role is handled separately by Entra PIM.)</p>
 </body>
 </html>

@@ -294,6 +294,18 @@ $script:PimFailureRules = @(
     # apply (or could not prove it never did). FIRST of the workload rules: the message quotes the original
     # WORKLOAD-RESOURCE-MISSING / -ROLE-NOT-FOUND / ... cause, which would otherwise win. (A never-applied one is no
     # failure at all -- the engine completes it without calling the workload.)
+    # PIM 100.135 (internal 2026-10-13, 6 PIM-Assignments-Workloads rows for Power BI workspace roles): listing the
+    # workspace's users answered "HTTP 404 : PowerBIEntityNotFound" -- the workspace in the row does not exist, or PIM
+    # Manager's identity is not a member/admin of it (Power BI answers the same for both). It was UNCLASSIFIED. Ahead of
+    # every generic rule: a 404 here is neither a replication delay nor a missing Entra object.
+    @{ code = 'POWERBI-WORKSPACE-NOT-FOUND'
+       match = { param($m, $row) $m -match '(?i)PowerBIEntityNotFound' }
+       title = 'The Power BI workspace was not found, or PIM Manager has no access to it'
+       cause = 'Power BI answered PowerBIEntityNotFound for the workspace in this row: either no workspace has that id, or the identity PIM Manager runs as is not a member (admin) of it -- Power BI gives the same answer for both. Nothing was assigned for this row.'
+       remedy = 'Check the workspace id (Resource) on the Workloads row and correct it, or add the identity PIM Manager runs as to the workspace as Admin (Power BI > the workspace > Manage access). The next run assigns the role.'
+       retryable = $true; severity = 'environment'
+       fixes = @() }
+
     @{ code = 'WORKLOAD-REMOVE-NEEDS-DATA'
        match = { param($m, $row) $m -match 'WORKLOAD-REMOVE-NEEDS-DATA' }
        title = 'Removing this workload binding needs data the row does not have'
@@ -670,6 +682,12 @@ function Get-PimFailureSolutionCatalog {
             what = 'A workload access does not say which resource it is for: {item}.'
             affected = 'Nothing is applied by this row. Everything else is applied.'
             steps = @('Open Advanced View (grid), fill in the Resource column on that row (Workload templates shows what the workload expects) and commit.', $stop)
+            after = $next }
+        'POWERBI-WORKSPACE-NOT-FOUND' = @{ short = 'the Power BI workspace was not found, or PIM Manager''s identity has no access to it'
+            what = 'Power BI did not find the workspace of a workload access, or the identity PIM Manager runs as has no access to it: {item}.'
+            affected = 'Only these workspace roles: they are not given. Nothing was changed in Power BI, and everything else is applied.'
+            steps = @('Open Advanced View (grid) and check the workspace (Resource) on the Workloads row; correct it and commit in Pending changes.',
+                      'If the workspace is right: in Power BI open the workspace, Manage access, and add the identity PIM Manager runs as as Admin.')
             after = $next }
         'WORKLOAD-CONTAINER-MISSING' = @{ short = 'the group is not set up inside the workload yet'
             what = 'The group is not set up inside the workload yet, so the role cannot be attached: {item}.'

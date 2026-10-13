@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.623 -- 2026-10-13
+
+- Alert mails rewritten to the Invardia format (environment name first, calm summary, facts, plain cause + fix, one button, technical details only at the end); Power BI workspace not found has its own failure class; a setup-script comment no longer names a customer
+
 ## 2.4.622 -- 2026-10-13
 
 - Initialize-PimMailSender: a refused Exchange step now prints Exchange's own reason (it printed only 400 Bad Request)

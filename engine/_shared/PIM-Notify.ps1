@@ -32,6 +32,10 @@ if ($PSScriptRoot) {
         $__pimMail2Path = Join-Path $PSScriptRoot $__pimMail2
         if (Test-Path -LiteralPath $__pimMail2Path) { . $__pimMail2Path }
     }
+    # PIM 100.135: a failure mail names each cause and its fix in plain words -- from the failure catalog (its classes and
+    # their customer-ready solutions). Loaded only when this process does not have it yet.
+    $__pimFailCat = Join-Path $PSScriptRoot 'PIM-FailureCatalog.ps1'
+    if ((Test-Path -LiteralPath $__pimFailCat) -and -not (Get-Command Get-PimFailureClassification -ErrorAction SilentlyContinue)) { . $__pimFailCat }
 }
 
 # --- EMAIL CONTROLS authority (the GUI-state == actual-behavior fix) -----------
@@ -447,49 +451,57 @@ function Send-PimNotifyMail {
         # a dead link in every reminder. An empty one now points at the same page.
         foreach ($k in 'ReviewUrl', 'ApprovalUrl') { if (-not "$($Tokens[$k])".Trim()) { $Tokens[$k] = $portal.url } }
     }
-    # PIM 100.105: the ALERT mail is ONE table (Customer, Environment, Solution, Who acts, Status, Problem, What to do,
-    # the findings, When, Support). It is built HERE, at the one chokepoint, from the caller's tokens and what the product
-    # knows of this environment -- so every sender gets the same shape, and a sender that passes none of the new tokens
-    # still gets a whole table (Who acts "Not known", Status "Warning").
+    # PIM 100.135 (Invardia's format): an approval mail says the decision AND the deadline in its subject -- the phrase is
+    # never empty (a request without a known deadline waits until it is decided).
+    if ("$Type" -match '^approval-' -and -not "$($Tokens['DecisionDeadline'])".Trim()) { $Tokens = @{} + $Tokens; $Tokens['DecisionDeadline'] = 'it waits for your decision' }
+    $envF = Get-PimMailEnvironmentInfo -PortalBase "$($portal.base)"
+    $envFrame = @{ name = $envF.name; tenantName = $envF.tenantName; tenantId = $envF.tenantId; version = $envF.version }
+    $homeF = ''; $notifF = ''
+    if ("$($portal.base)".Trim()) {
+        $homeF = "$($portal.base)".Trim()
+        if (Get-Command Get-PimAudienceLink -ErrorAction SilentlyContinue) { try { $notifF = "$((Get-PimAudienceLink -Type 'settings' -Base $portal.base -LinkTab 'settings' -Query 'section=notifications').url)" } catch { $notifF = '' } }
+    }
+    # PIM 100.135: the ALERT mail is built HERE, at the one chokepoint, in Invardia's format (New-PimEventMail): logo, "PIM
+    # Manager for <environment> - <topic>", a calm summary, facts, the causes with their fixes, ONE button to the alert's
+    # page, Details for support, footer -- from the caller's tokens (the four words of 100.105 decide the kind of mail) and
+    # what the product knows of this environment. AlertTable is that whole mail; AlertSubject is "<environment>: <what>".
     $alertModel = $null
     if ("$Type" -eq 'alert-notice' -and (Get-Command Add-PimAlertMailTokens -ErrorAction SilentlyContinue)) {
         try {
-            $am = Add-PimAlertMailTokens -Tokens $Tokens -Environment (Get-PimMailEnvironmentInfo)
+            $am = Add-PimAlertMailTokens -Tokens $Tokens -Environment $envFrame -PortalUrl "$($portal.url)" -HomeUrl $homeF -NotificationsUrl $notifF
             $Tokens = $am.tokens; $alertModel = $am.model
         } catch {
-            Write-Warning "  [Mail] the alert table could not be built ($($_.Exception.Message)) -- the alert is sent with its title and detail only."
+            Write-Warning "  [Mail] the alert mail could not be built ($($_.Exception.Message)) -- the alert is sent with its title and detail only."
             $Tokens = @{} + $Tokens; [void]$Tokens.Remove('AlertFindings')
             $Tokens['AlertTable'] = '<p><b>' + [System.Net.WebUtility]::HtmlEncode("$($Tokens['AlertTitle'])") + '</b></p><p>' + "$($Tokens['AlertDetail'])" + '</p>'
+            $Tokens['AlertSubject'] = "$($Tokens['AlertTitle'])"
         }
     }
     $r = ConvertTo-PimNotifyRendering -TemplateText $tpl.text -Tokens $Tokens
-    # the plain-text part carries the same rows, one per line (not table cells run together)
-    if ($alertModel -and "$($tpl.text)" -match '\{\{AlertTable\}\}' -and (Get-Command ConvertTo-PimAlertMailText -ErrorAction SilentlyContinue)) {
-        try { $r.BodyText = ConvertTo-PimAlertMailText -Model $alertModel } catch { }
+    if ($alertModel -and "$($tpl.text)" -match '\{\{AlertTable\}\}') {
+        # the plain-text part carries the same content, in the same order
+        try { $r.BodyText = "$($alertModel.mail.text)" } catch { }
+        # the template's own <html>/<body> wrapper and its comments (subject / tokens / notes) are not content: the designed
+        # mail is the body (the logo markers <!--pim-logo--> stay -- the wordmark replaces them when the PNG is missing)
+        if ($r.BodyHtml -match 'class="pim-mail"') {
+            $mb = [regex]::Match($r.BodyHtml, '(?is)<body\b[^>]*>(.*)</body>')
+            $inner = if ($mb.Success) { $mb.Groups[1].Value } else { [regex]::Replace($r.BodyHtml, '(?is)</?html\b[^>]*>', '') }
+            $r.BodyHtml = ([regex]::Replace($inner, '(?s)<!--(?!/?pim-logo-->).*?-->', '')).Trim()
+        }
     }
-    # §100.5 MAIL-2 leftover (b), 2.4.555: an alert / transactional template (not built with New-PimMailDocument) is put in
-    # the ONE designed layout here -- logo + environment header, its own content unchanged, the blue button AFTER it and the
-    # designed footer (environment, tenant, version, Open PIM Manager, Change what you receive). A template that opts out
-    # (<!-- pim-no-layout -->) or is already designed keeps its body; the old button / MAIL-1 footer below then apply.
-    if ((Get-Command ConvertTo-PimMailLayoutFrame -ErrorAction SilentlyContinue) -and $r.BodyHtml -notmatch 'class="pim-mail"' -and $tpl.text -notmatch '<!--\s*pim-no-layout\s*-->') {
-        $envF = Get-PimMailEnvironmentInfo -PortalBase "$($portal.base)"
-        $homeF = ''; $notifF = ''
-        if ("$($portal.base)".Trim()) {
-            $homeF = "$($portal.base)".Trim()
-            if (Get-Command Get-PimAudienceLink -ErrorAction SilentlyContinue) { try { $notifF = "$((Get-PimAudienceLink -Type 'settings' -Base $portal.base -LinkTab 'settings' -Query 'section=notifications').url)" } catch { $notifF = '' } }
-        }
+    # the subject of the shipped alert template (old or new) is the model's "<environment>: <what happened>"; a subject a
+    # customer wrote is kept (the environment is still put first below)
+    if ($alertModel -and "$($tpl.text)" -match '<!--\s*subject:\s*(\[PIM Alert\]\s*\{\{AlertTitle\}\}|\{\{AlertSubject\}\})\s*-->') { $r.Subject = "$($alertModel.subject)" }
+    # §100.5 MAIL-2 leftover (b) -> PIM 100.135: a TEMPLATE mail (not built by New-PimEventMail / New-PimMailDocument) is put in
+    # Invardia's structure here -- logo, "PIM Manager for <environment> - <topic>", the calm summary of its type, facts, its
+    # own content unchanged, ONE blue button, Details for support, footer -- with a text part in the same order. A template
+    # that opts out (<!-- pim-no-layout -->) or is already designed keeps its body; the old button / MAIL-1 footer below apply.
+    if ((Get-Command New-PimFramedMail -ErrorAction SilentlyContinue) -and $r.BodyHtml -notmatch 'class="pim-mail"' -and $tpl.text -notmatch '<!--\s*pim-no-layout\s*-->') {
         try {
-            $framed = ConvertTo-PimMailLayoutFrame -BodyHtml $r.BodyHtml -Subject "$($r.Subject)" -Button $(if ($portal.url) { @{ url = $portal.url; label = 'Open in PIM Manager' } } else { $null }) `
-                        -HomeUrl $homeF -NotificationsUrl $notifF -Environment @{ name = $envF.name; tenantName = $envF.tenantName; tenantId = $envF.tenantId; version = $envF.version } `
-                        -HomeLinkAsWords:([bool]$alertModel)   # PIM 100.105: no raw hosting address under the alert's button
-            if ("$framed".Trim()) { $r.BodyHtml = $framed }
+            $fm = New-PimFramedMail -BodyHtml $r.BodyHtml -BodyText "$($r.BodyText)" -Subject "$($r.Subject)" -Type $Type -Button $(if ($portal.url) { @{ url = $portal.url; label = '' } } else { $null }) `
+                        -HomeUrl $homeF -NotificationsUrl $notifF -Environment $envFrame
+            if ($fm -and "$($fm.html)".Trim()) { $r.BodyHtml = $fm.html; $r.BodyText = $fm.text }
         } catch { Write-Verbose "  [Mail] the designed layout could not be applied ($($_.Exception.Message)) -- the template is sent as it is" }
-        if ($portal.url -and "$($r.BodyText)" -notmatch [regex]::Escape($portal.url)) { $r.BodyText = "$($r.BodyText)`r`n`r`nOpen in PIM Manager: $($portal.url)" }
-        # MAIL-1: the plain-text part names the environment too (the HTML footer is the designed one, so the block below skips)
-        if ($envF.name -and "$($r.BodyHtml)" -match 'class="pim-env-footer"' -and "$($r.BodyText)" -notmatch '-- Environment: ') {
-            $r.BodyText = "$($r.BodyText)`r`n`r`n-- Environment: $($envF.name)" + $(if ($envF.tenantName -or $envF.tenantId) { " | tenant $($envF.tenantName) ($($envF.tenantId))" } else { '' }) +
-                          $(if ($envF.version) { " | PIM Manager $($envF.version)" } else { '' }) + $(if ($portal.base) { " | $($portal.base)" } else { '' })
-        }
     }
     if ($portal.url -and $r.BodyHtml -notmatch [regex]::Escape($portal.base)) {
         # MAIL-2 item 1: the bulletproof blue button (a table cell carries the colour, so Outlook draws it too).
@@ -506,8 +518,11 @@ function Send-PimNotifyMail {
     # subject starts with it and the footer carries environment, tenant name + id, PIM Manager version and the link.
     $envInfo = Get-PimMailEnvironmentInfo -PortalBase "$($portal.base)"
     if ($envInfo.name) {
+        # PIM 100.135 (Invardia's format): "<environment name>: <what happened>" -- the name first, the old [..] tags
+        # ("[PIM Alert]", "[PIM Discovery]") dropped, never prefixed twice
+        if (Get-Command Get-PimMailSubjectLine -ErrorAction SilentlyContinue) { $r.Subject = Get-PimMailSubjectLine -EnvironmentName $envInfo.name -What "$($r.Subject)" }
         # StartsWith, never -like: '[...]' is a wildcard character SET to -like ("[Contoso]*" matched "CUSTOM ...")
-        if (-not "$($r.Subject)".StartsWith("[$($envInfo.name)]", [System.StringComparison]::OrdinalIgnoreCase)) { $r.Subject = "[$($envInfo.name)] $($r.Subject)" }
+        elseif (-not "$($r.Subject)".StartsWith("[$($envInfo.name)]", [System.StringComparison]::OrdinalIgnoreCase)) { $r.Subject = "[$($envInfo.name)] $($r.Subject)" }
     }
     # MAIL-2: a designed mail (PIM-MailLayout.ps1 New-PimMailDocument) carries its OWN footer with the same facts -- one footer,
     # not two. Every other mail gets the MAIL-1 footer here, as before.

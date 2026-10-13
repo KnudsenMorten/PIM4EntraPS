@@ -71,7 +71,7 @@ function New-PimMailButton {
     $u = ConvertTo-PimMailText $Url.Trim()
     return ('<table role="presentation" class="pim-mail-button" cellspacing="0" cellpadding="0" border="0" style="margin:18px 0 6px 0;border-collapse:separate;"><tr>' +
             # PIM 100.105 ("the button's text is squeezed"): the padding sits on the CELL -- Outlook ignores padding on a link
-            '<td align="center" bgcolor="' + $bg + '" style="border-radius:6px;background:' + $bg + ';border:1px solid ' + $b.accentFill + ';padding:11px 24px;">' +
+            '<td align="center" bgcolor="' + $bg + '" style="border-radius:6px;background:' + $bg + ';border:1px solid ' + $b.accentFill + ';padding:11px 24px;font-family:' + $b.font + ';">' +
             '<a href="' + $u + '" target="_blank" style="display:inline-block;font-family:' + $b.font + ';font-size:15px;font-weight:600;line-height:20px;color:' + $fg + ';text-decoration:none;white-space:nowrap;">' +
             (ConvertTo-PimMailText $Label) + ' &rarr;</a></td></tr></table>')
 }
@@ -209,15 +209,357 @@ function ConvertTo-PimMailCssString {
 }
 
 # =====================================================================================================================
-# PIM 100.105 -- THE ALERT MAIL IS ONE TABLE (owner 2026-10-12: "it is too much text. we like tables. short and easy
-# format - make things bold"; "action (who), status (error, warning, etc), problem (summary), action (what)"; "you know
-# the name of the customer, the environment, solution ... put that in"; "tell where they can get support").
-# Every mail of type 'alert-notice' is: Customer | Environment | Solution | Who acts | Status | Problem | What to do |
-# the findings (one row each, kind | name) | When | Support -- labels left, values bold -- then the button.
-# PURE (tokens in, HTML / text out), so the body is tested without sending. The callers pass four plain-text tokens
-# (AlertWho, AlertStatus, AlertProblem, AlertTodo) and, when the alert has a list, AlertFindings = @(@{ kind; name }).
-# A caller that passes none of them still gets a whole table (Who acts "Not known", Status "Warning", Problem = its
-# title, What to do = its old action text in one line).
+# PIM 100.135 -- THE MAIL FORMAT FROM INVARDIA (owner 2026-10-13 on a job-failure mail: "example of mail that must be
+# rewritten. ask invardia about format"; Invardia's answer = its DESIGN §14 + framework §12.11 MAIL-2 items 1, 4, 7).
+# EVERY PIM Manager mail has ONE structure, in this order:
+#   logo -> heading "PIM Manager for <environment> - <topic>" (never the subject again) -> a calm summary panel (1-3
+#   sentences: what happened / is anything lost or changed / does anyone need to act; no CRITICAL or FAILED) -> facts
+#   (Environment, Product + version, Job, When, Items affected; an empty value is LEFT OUT) -> a per-cause list (plain
+#   cause + plain fix, grouped, with counts; unclassified = "Not recognised yet - PIM support looks at it") -> ONE solid
+#   blue button to the exact page (+ at most one outlined) -> a small "Details for support" block, the ONLY place for raw
+#   lines, URLs, ids and class codes -> footer (site + support) -- and a plain-text part with the same content.
+# Subject "<environment name>: <what happened, in plain words>" ("tenant <id>" only when there is no name).
+# PURE: a model in, strings out (New-PimEventMail), so every rule is tested offline (tests/Test-PimMailFormat.ps1).
+# =====================================================================================================================
+function Get-PimMailTimeZoneId {
+    <#
+      The time zone a mail shows its times in. A mail cannot know its reader's zone, so the ENVIRONMENT's configured zone
+      is used when there is one: $global:PIM_MailTimeZone, else the 'TimeZone' setting (pim.Settings, hydrated into
+      $global:PIM_NamingConventions), else env PIM_TIMEZONE. '' = none configured -> the mail says UTC (labelled).
+    #>
+    if ("$($global:PIM_MailTimeZone)".Trim()) { return "$($global:PIM_MailTimeZone)".Trim() }
+    if ($global:PIM_NamingConventions -is [System.Collections.IDictionary] -and $global:PIM_NamingConventions.Contains('TimeZone') -and "$($global:PIM_NamingConventions['TimeZone'])".Trim()) {
+        return "$($global:PIM_NamingConventions['TimeZone'])".Trim()
+    }
+    if ("$($env:PIM_TIMEZONE)".Trim()) { return "$($env:PIM_TIMEZONE)".Trim() }
+    return ''
+}
+
+function Format-PimMailWhen {
+    <#
+      PURE. A time for a mail, to the minute: in -TimeZoneId when this runtime knows that zone ("2026-10-13 22:31
+      Europe/Copenhagen"), else UTC, said as UTC ("2026-10-13 20:31 UTC"). -Value: a [datetime] (UTC) or text such as
+      "2026-10-13 20:31:07 UTC" / ISO. '' when it is neither.
+    #>
+    param([AllowNull()][object]$Value, [string]$TimeZoneId = '')
+    $utc = $null
+    if ($Value -is [datetime]) { $utc = ([datetime]$Value).ToUniversalTime() }
+    else {
+        $m = [regex]::Match("$Value", '(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})')
+        if ($m.Success) {
+            try { $utc = [datetime]::SpecifyKind([datetime]::ParseExact(($m.Groups[1].Value + ' ' + $m.Groups[2].Value), 'yyyy-MM-dd HH:mm', [System.Globalization.CultureInfo]::InvariantCulture), [System.DateTimeKind]::Utc) } catch { $utc = $null }
+        }
+    }
+    if ($null -eq $utc) { return '' }
+    $tz = "$TimeZoneId".Trim()
+    if ($tz -and $tz -notmatch '^(?i)(utc|etc/utc|gmt|z)$') {
+        try {
+            $zi = [System.TimeZoneInfo]::FindSystemTimeZoneById($tz)
+            return ([System.TimeZoneInfo]::ConvertTimeFromUtc($utc, $zi).ToString('yyyy-MM-dd HH:mm', [System.Globalization.CultureInfo]::InvariantCulture) + ' ' + $tz)
+        } catch { }
+    }
+    return ($utc.ToString('yyyy-MM-dd HH:mm', [System.Globalization.CultureInfo]::InvariantCulture) + ' UTC')
+}
+
+function Get-PimMailSubjectLine {
+    <#
+      PURE. "<environment name>: <what happened>" -- the name FIRST; "tenant <id>" only when there is no name. Leading
+      [..] tags ("[PIM Alert]"), "--" and the old product name are removed; no full stop at the end. A subject that already
+      starts with the name is not prefixed twice.
+    #>
+    param([string]$EnvironmentName = '', [string]$TenantId = '', [AllowEmptyString()][string]$What = '')
+    $w = ("$What" -replace '\s+', ' ').Trim()
+    $w = [regex]::Replace($w, '^(\[[^\]]*\]\s*)+', '')
+    $w = ($w -replace '\s+--\s+', ', ' -replace 'PIM4EntraPS', 'PIM Manager').Trim().TrimEnd('.').Trim()
+    if (-not $w) { $w = 'Message from PIM Manager' }
+    $n = ("$EnvironmentName" -replace '\s+', ' ').Trim()
+    if (-not $n -and "$TenantId".Trim()) { $n = 'tenant ' + "$TenantId".Trim() }
+    if (-not $n) { return $w }
+    if ($w.StartsWith($n + ':', [System.StringComparison]::OrdinalIgnoreCase)) { return $w }
+    return ($n + ': ' + $w)
+}
+
+function Get-PimMailHeadingLine {
+    # PURE. "PIM Manager for <environment> - <topic>" ("PIM Manager - <topic>" when the environment has no name).
+    param([string]$EnvironmentName = '', [string]$Topic = '')
+    $t = ("$Topic" -replace '\s+', ' ').Trim()
+    if (-not $t) { $t = 'Notice' }
+    $t = $t.Substring(0, 1).ToUpperInvariant() + $t.Substring(1)
+    $n = ("$EnvironmentName" -replace '\s+', ' ').Trim()
+    if ($n) { return ('PIM Manager for ' + $n + ' - ' + $t) }
+    return ('PIM Manager - ' + $t)
+}
+
+function Test-PimMailTenantIdLabel {
+    # PURE. Is this environment label only "tenant <id>" (Get-PimMailEnvironmentInfo's last resort)? Such a label may be in
+    # the SUBJECT, never in the body (a GUID belongs in Details for support).
+    param([AllowNull()][string]$Label)
+    return [bool]("$Label".Trim() -match '^(?i)(tenant\s+)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+}
+
+function Split-PimMailBodyText {
+    <#
+      PURE. A line for the BODY of a mail without what belongs only in "Details for support": web addresses, GUIDs /
+      object ids and class codes ([UNCLASSIFIED], [AZ-POLICY-MASS-HOLD]). Returns @{ text; moved } -- moved = the raw values
+      taken out, for the details block. Shouting words (FAILED, CRITICAL, ERROR, STUCK) are lower-cased.
+    #>
+    param([AllowNull()][string]$Text)
+    $t = "$Text"
+    $moved = New-Object System.Collections.Generic.List[string]
+    foreach ($m in [regex]::Matches($t, '(?i)\bhttps?://[^\s<>"'']+')) { $v = $m.Value.TrimEnd('.', ',', ';', ')'); if (-not $moved.Contains($v)) { $moved.Add($v) } }
+    $t = [regex]::Replace($t, '(?i)\s*\(?\bhttps?://[^\s<>"'']+\)?', '')
+    foreach ($m in [regex]::Matches($t, '(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b')) { if (-not $moved.Contains($m.Value)) { $moved.Add($m.Value) } }
+    $t = [regex]::Replace($t, '(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b', '(id in the details)')
+    foreach ($m in [regex]::Matches($t, '\[[A-Z][A-Z0-9]{2,}(?:-[A-Z0-9]+)*\]')) { if (-not $moved.Contains($m.Value)) { $moved.Add($m.Value) } }
+    $t = [regex]::Replace($t, '\s*\[[A-Z][A-Z0-9]{2,}(?:-[A-Z0-9]+)*\]', '')
+    $t = [regex]::Replace($t, '\bUNCLASSIFIED\b', 'not recognised')
+    $t = [regex]::Replace($t, '\b(FAILED|CRITICAL|ERROR|STUCK|WARNING|HELD|ESCALATED|EMERGENCY|ALERT)\b', { param($x) $x.Value.ToLowerInvariant() })
+    $t = ($t -replace 'PIM4EntraPS', 'PIM Manager' -replace '[ \t]+', ' ').Trim()
+    return @{ text = $t; moved = @($moved.ToArray()) }
+}
+
+function Get-PimMailFailureGroups {
+    <#
+      PURE. The "<n>x <title> [<CODE>][: <raw>]" groups of an engine failure line (Format-PimFailureSummary), counts added
+      up per code across scopes, in first-seen order: @(@{ code; count; title; raw }). Empty when the text has none.
+    #>
+    param([AllowNull()][string]$Text)
+    $t = ("$Text" -replace '\s+', ' ')
+    $ms = @([regex]::Matches($t, '(\d+)x ([^\[\];]{2,200}?) \[([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)\]'))
+    $order = New-Object System.Collections.Generic.List[string]
+    $by = @{}
+    for ($i = 0; $i -lt $ms.Count; $i++) {
+        $m = $ms[$i]
+        $start = $m.Index + $m.Length
+        $end = if ($i + 1 -lt $ms.Count) { $ms[$i + 1].Index } else { $t.Length }
+        $tail = if ($end -gt $start) { $t.Substring($start, $end - $start) } else { '' }
+        $raw = ''
+        $rm = [regex]::Match($tail, '^\s*:\s*(.*)$')
+        if ($rm.Success) { $raw = $rm.Groups[1].Value }
+        $raw = [regex]::Replace($raw, '\.?\s*Open Jobs > Engine logs & errors.*$', '')
+        $raw = [regex]::Replace($raw, '\s+--\s+auto-fix available.*$', '')
+        $raw = [regex]::Replace($raw, '\s*\d+ item\(s\) (failed|WAITING)\b.*$', '')
+        $raw = $raw.Trim().TrimEnd(';').Trim()
+        $code = $m.Groups[3].Value.ToUpperInvariant()
+        $n = 0; [void][int]::TryParse($m.Groups[1].Value, [ref]$n)
+        # ['count'], never .count: on a dictionary .Count is the number of its KEYS
+        if (-not $by.ContainsKey($code)) { $by[$code] = [ordered]@{ code = $code; count = 0; title = $m.Groups[2].Value.Trim(); raw = '' }; $order.Add($code) }
+        $by[$code]['count'] = [int]$by[$code]['count'] + $n
+        if (-not $by[$code]['raw'] -and $raw) { $by[$code]['raw'] = $raw }
+    }
+    return @($order | ForEach-Object { [pscustomobject]$by[$_] })
+}
+
+function Resolve-PimMailCause {
+    <#
+      The PLAIN cause and the PLAIN fix of one failure class, for the mail body: from the failure catalog when it is loaded
+      (Get-PimFailureSolution: its short cause and its first step). An UNCLASSIFIED group whose raw text a catalog rule now
+      explains is classified again. Unclassified = "Not recognised yet - PIM support looks at it" (no fix to do).
+      Returns @{ code; cause; fix; customer } -- never a class code, never a raw line (the caller keeps those for Details).
+    #>
+    param([string]$Code, [string]$Title = '', [string]$Raw = '')
+    $c = "$Code".Trim().ToUpperInvariant()
+    if (($c -eq 'UNCLASSIFIED' -or -not $c) -and "$Raw".Trim() -and (Get-Command Get-PimFailureClassification -ErrorAction SilentlyContinue)) {
+        try { $k = Get-PimFailureClassification -Message "$Raw" -Row $null; if ($k -and "$($k.code)".Trim() -and "$($k.code)" -ne 'UNCLASSIFIED') { $c = "$($k.code)".ToUpperInvariant(); $Title = "$($k.title)" } } catch { }
+    }
+    if ($c -eq 'UNCLASSIFIED' -or -not $c) {
+        return [pscustomobject]@{ code = 'UNCLASSIFIED'; cause = 'Not recognised yet - PIM support looks at it'; fix = ''; customer = $false }
+    }
+    $sol = $null
+    if (Get-Command Get-PimFailureSolution -ErrorAction SilentlyContinue) { try { $sol = Get-PimFailureSolution -Code $c } catch { $sol = $null } }
+    $fk = ''
+    if (Get-Command Get-PimFailureFixKind -ErrorAction SilentlyContinue) { try { $fk = "$(Get-PimFailureFixKind -Code $c)" } catch { $fk = '' } }
+    $cause = ''; $fix = ''
+    if ($sol -and "$($sol.short)".Trim()) {
+        $cause = "$($sol.short)".Trim()
+        $fix = "$(@($sol.steps)[0])".Trim()
+    } else {
+        $cause = ("$Title" -replace '\s+', ' ').Trim()
+        if (-not $cause) { $cause = 'A problem PIM Manager knows' }
+        $fix = switch ($c) {
+            'THROTTLED'     { 'Nothing to do: Microsoft slowed PIM Manager down, and it tries again on its next run.'; break }
+            'SERVICE-ERROR' { 'Nothing to do now: it is tried again on the next run. If it keeps coming back, PIM support looks at it.'; break }
+            default         { 'Open Jobs > Engine logs & errors in PIM Manager: the item shows its cause and how to fix it.' }
+        }
+    }
+    $cause = $cause.Substring(0, 1).ToUpperInvariant() + $cause.Substring(1)
+    return [pscustomobject]@{ code = $c; cause = $cause.TrimEnd('.'); fix = $fix; customer = ($fk -eq 'customer-config') }
+}
+
+function New-PimEventMail {
+    <#
+      PURE. THE builder of a PIM Manager mail in Invardia's format (see the block above). -Model (hashtable):
+        environment   the environment's name (Get-PimMailEnvironmentInfo .name; "tenant <id>" is used in the subject only)
+        tenantId      the tenant id (subject fallback, and a line in Details for support)
+        version       the product version
+        subjectWhat   what happened, in plain words (the subject after "<environment>: ")
+        topic         the heading's last part ("Job delta-workloads", "Safety check", "Approval needed")
+        opener        "For your information:" / "Please take a look:" (guard and action mails), '' for none
+        summary       1-3 calm sentences
+        qa            @(@{ q; a }) -- the guard's "Should you be worried? / Was anything changed? / Do you need to do anything?"
+        facts         @(@{ label; value }) -- an empty value is left out
+        contentHtml   ready HTML placed after the facts (a template's own content; the caller made it safe)
+        sections      @(@{ title; lines = @() }) -- plain lines (e.g. the policies a hold names)
+        causesTitle   the heading of the cause list
+        causes        @(@{ title; count; fix; names = @() }) -- grouped, one entry per cause
+        button        @{ url; label } -- the ONE solid blue button;  secondary @{ url; label } -- at most one outlined
+        details       @('raw line', ...) -- Details for support (raw lines, URLs, ids, class codes)
+        homeUrl / notificationsUrl   the footer links
+      Returns @{ subject; heading; html; text }. Every body string is passed through Split-PimMailBodyText, so a URL, a
+      GUID or a class code that slips into a body line moves to Details for support instead of showing in the body.
+    #>
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Model)
+    $b = Get-PimMailBrand
+    $g = { param($k) if ($Model.Contains($k)) { $Model[$k] } else { $null } }
+    $moved = New-Object System.Collections.Generic.List[string]
+    $clean = { param($s) $x = Split-PimMailBodyText "$s"; foreach ($v in @($x.moved)) { if ($v -and -not $moved.Contains($v)) { $moved.Add($v) } }; "$($x.text)" }
+    $enc = { param($s) [System.Net.WebUtility]::HtmlEncode("$s") }
+    $envName = ("$(& $g 'environment')" -replace '\s+', ' ').Trim()
+    $bodyEnv = if (Test-PimMailTenantIdLabel $envName) { '' } else { $envName }
+    $tid = "$(& $g 'tenantId')".Trim()
+    $ver = "$(& $g 'version')".Trim()
+    $what = & $clean (& $g 'subjectWhat')
+    $subject = Get-PimMailSubjectLine -EnvironmentName $envName -TenantId $tid -What $what
+    $heading = Get-PimMailHeadingLine -EnvironmentName $bodyEnv -Topic (& $clean (& $g 'topic'))
+    # the heading never repeats the subject
+    $subjWhat = ($subject -replace ('^' + [regex]::Escape($envName) + ':\s*'), '')
+    if ($subjWhat -and $heading.EndsWith(' - ' + $subjWhat.Substring(0, 1).ToUpperInvariant() + $subjWhat.Substring(1))) { $heading = Get-PimMailHeadingLine -EnvironmentName $bodyEnv -Topic 'Notice' }
+    $opener = & $clean (& $g 'opener')
+    $summary = & $clean (& $g 'summary')
+    $qa = @(@(& $g 'qa') | Where-Object { $_ -and "$($_.q)".Trim() -and "$($_.a)".Trim() } | ForEach-Object { [pscustomobject]@{ q = (& $clean $_.q); a = (& $clean $_.a) } })
+    $facts = @(@(& $g 'facts') | Where-Object { $_ -and "$($_.label)".Trim() -and "$($_.value)".Trim() } | ForEach-Object { [pscustomobject]@{ label = "$($_.label)".Trim(); value = (& $clean $_.value) } } | Where-Object { $_.value })
+    $sections = @(@(& $g 'sections') | Where-Object { $_ -and "$($_.title)".Trim() -and @($_.lines | Where-Object { "$_".Trim() }).Count } | ForEach-Object {
+        [pscustomobject]@{ title = (& $clean $_.title); lines = @(@($_.lines) | Where-Object { "$_".Trim() } | ForEach-Object { & $clean $_ } | Where-Object { $_ }) } })
+    $causes = @(@(& $g 'causes') | Where-Object { $_ -and "$($_.title)".Trim() } | ForEach-Object {
+        # a hashtable's .count is the number of its KEYS -- read the 'count' key of a dictionary by index
+        $cnt = 0; try { $cnt = if ($_ -is [System.Collections.IDictionary]) { [int]$_['count'] } else { [int]$_.count } } catch { $cnt = 0 }
+        [pscustomobject]@{ title = (& $clean $_.title); count = $cnt; fix = (& $clean $_.fix); names = @(@($_.names) | Where-Object { "$_".Trim() } | ForEach-Object { & $clean $_ } | Where-Object { $_ }) } })
+    $causesTitle = & $clean (& $g 'causesTitle')
+    if (-not $causesTitle) { $causesTitle = 'What happened, by cause' }
+    $contentHtml = "$(& $g 'contentHtml')"
+    $btnM = & $g 'button'; $secM = & $g 'secondary'
+    $btnHtml = ''; $btnText = New-Object System.Collections.Generic.List[string]
+    if ($btnM -and (Test-PimMailLinkUrl -Url "$($btnM.url)")) {
+        $lbl = if ("$($btnM.label)".Trim()) { "$($btnM.label)".Trim() } else { 'Open in PIM Manager' }
+        $btnHtml += New-PimMailButton -Url "$($btnM.url)" -Label $lbl
+        $btnText.Add($lbl + ': ' + "$($btnM.url)".Trim())
+        if ($secM -and (Test-PimMailLinkUrl -Url "$($secM.url)")) {
+            $sl = if ("$($secM.label)".Trim()) { "$($secM.label)".Trim() } else { 'Open PIM Manager' }
+            $btnHtml += New-PimMailButton -Url "$($secM.url)" -Label $sl -Tone secondary
+            $btnText.Add($sl + ': ' + "$($secM.url)".Trim())
+        }
+    }
+    $homeUrl = "$(& $g 'homeUrl')".Trim(); $notifUrl = "$(& $g 'notificationsUrl')".Trim()
+    # Details for support: the caller's raw lines, then what was moved out of the body, then the tenant id
+    $details = New-Object System.Collections.Generic.List[string]
+    foreach ($d in @(& $g 'details')) { $x = ("$d" -replace '\s+', ' ').Trim(); if ($x -and -not $details.Contains($x)) { $details.Add($x) } }
+    foreach ($v in $moved) { $hit = $false; foreach ($d in $details) { if ($d.Contains($v)) { $hit = $true; break } }; if (-not $hit) { $details.Add($v) } }
+    if ($tid -and -not @($details | Where-Object { $_.Contains($tid) }).Count) { $details.Add('Tenant id: ' + $tid) }
+
+    # ---------------- HTML ----------------
+    $f = $b.font
+    $logo = '<!--pim-logo--><img src="cid:pim-logo" width="180" height="46" alt="Invardia PIM Manager" style="display:block;border:0;outline:none;width:180px;height:auto;"><!--/pim-logo-->'
+    $envCell = if ($bodyEnv) { '<div style="font-family:' + $f + ';font-size:9.5px;letter-spacing:.6px;text-transform:uppercase;color:' + $b.muted + ';">Environment</div><div style="font-family:' + $f + ';font-size:13px;font-weight:600;color:' + $b.heading + ';">' + (& $enc $bodyEnv) + '</div>' } else { '' }
+    $h = New-Object System.Collections.Generic.List[string]
+    $h.Add('<table role="presentation" class="pim-mail-header" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;"><tr>' +
+           '<td valign="middle" style="padding:0 0 10px 0;font-family:' + $f + ';">' + $logo + '</td>' +
+           '<td valign="middle" align="right" style="padding:0 0 10px 0;text-align:right;font-family:' + $f + ';">' + $envCell + '</td></tr>' +
+           '<tr><td colspan="2" style="height:3px;line-height:3px;font-size:1px;font-family:' + $f + ';background:' + $b.blue + ';">&nbsp;</td></tr></table>')
+    $h.Add('<h1 class="pim-mail-heading" style="margin:18px 0 10px 0;font-family:' + $f + ';font-size:20px;line-height:26px;font-weight:700;color:' + $b.heading + ';">' + (& $enc $heading) + '</h1>')
+    if ($summary -or $opener -or $qa.Count) {
+        $p = New-Object System.Collections.Generic.List[string]
+        $lead = (@($(if ($opener) { '<b>' + (& $enc $opener) + '</b>' }), $(if ($summary) { & $enc $summary })) | Where-Object { $_ }) -join ' '
+        if ($lead) { $p.Add('<div style="margin:0;">' + $lead + '</div>') }
+        if ($qa.Count) {
+            $rows = foreach ($x in $qa) { '<tr><td valign="top" style="font-family:' + $f + ';font-size:14px;line-height:20px;color:' + $b.text + ';padding:6px 0 0 0;"><b>' + (& $enc $x.q) + '</b> ' + (& $enc $x.a) + '</td></tr>' }
+            $p.Add('<table role="presentation" class="pim-mail-qa" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-collapse:collapse;margin:4px 0 0 0;">' + (@($rows) -join '') + '</table>')
+        }
+        $h.Add('<div class="pim-mail-summary" style="margin:0 0 16px 0;padding:12px 16px;background:' + $b.surfaceAlt + ';border:1px solid ' + $b.border + ';border-left:4px solid ' + $b.blue + ';border-radius:6px;font-family:' + $f + ';font-size:14px;line-height:21px;color:' + $b.text + ';">' + ($p.ToArray() -join '') + '</div>')
+    }
+    if ($facts.Count) {
+        $rows = foreach ($x in $facts) {
+            '<tr class="pim-mail-fact"><td valign="top" style="font-family:' + $f + ';font-size:13px;line-height:20px;color:' + $b.muted + ';padding:5px 18px 5px 0;white-space:nowrap;border-bottom:1px solid ' + $b.grid + ';">' + (& $enc $x.label) + '</td>' +
+            '<td valign="top" style="font-family:' + $f + ';font-size:14px;line-height:20px;color:' + $b.text + ';padding:5px 0;border-bottom:1px solid ' + $b.grid + ';">' + (& $enc $x.value) + '</td></tr>'
+        }
+        $h.Add('<table role="presentation" class="pim-mail-facts" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-collapse:collapse;margin:0 0 14px 0;">' + (@($rows) -join '') + '</table>')
+    }
+    if ("$contentHtml".Trim()) { $h.Add('<div class="pim-mail-content" style="margin:6px 0 0 0;font-family:' + $f + ';font-size:14px;line-height:1.5;color:' + $b.text + ';">' + $contentHtml + '</div>') }
+    foreach ($s in $sections) {
+        $lines = foreach ($l in $s.lines) { '<div style="padding:2px 0;">' + (& $enc $l) + '</div>' }
+        $h.Add('<div class="pim-mail-section" style="margin:16px 0 0 0;"><h2 style="margin:0 0 6px 0;font-family:' + $f + ';font-size:15px;font-weight:700;color:' + $b.heading + ';">' + (& $enc $s.title) + '</h2>' +
+               '<div style="font-family:' + $f + ';font-size:13.5px;line-height:20px;color:' + $b.text + ';">' + (@($lines) -join '') + '</div></div>')
+    }
+    if ($causes.Count) {
+        $rows = foreach ($c in $causes) {
+            $cnt = if ($c.count -gt 0) { ' <span style="color:' + $b.muted + ';font-weight:400;">(' + $c.count + ' item' + $(if ($c.count -ne 1) { 's' } else { '' }) + ')</span>' } else { '' }
+            $nm = ''
+            if ($c.names.Count) {
+                $shown = @($c.names | Select-Object -First 8)
+                $nm = '<div style="color:' + $b.muted + ';font-size:12.5px;padding-top:2px;">' + (& $enc ($shown -join ', ')) + $(if ($c.names.Count -gt $shown.Count) { ' and ' + ($c.names.Count - $shown.Count) + ' more' } else { '' }) + '</div>'
+            }
+            $fx = if ($c.fix) { '<div style="padding-top:2px;">What to do: ' + (& $enc $c.fix) + '</div>' } else { '' }
+            '<tr class="pim-mail-cause"><td valign="top" style="font-family:' + $f + ';font-size:14px;line-height:20px;color:' + $b.text + ';padding:8px 0;border-bottom:1px solid ' + $b.grid + ';">' +
+            '<div><b>' + (& $enc $c.title) + '</b>' + $cnt + '</div>' + $fx + $nm + '</td></tr>'
+        }
+        $h.Add('<div class="pim-mail-causes" style="margin:16px 0 0 0;"><h2 style="margin:0 0 4px 0;font-family:' + $f + ';font-size:15px;font-weight:700;color:' + $b.heading + ';">' + (& $enc $causesTitle) + '</h2>' +
+               '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-collapse:collapse;">' + (@($rows) -join '') + '</table></div>')
+    }
+    if ($btnHtml) { $h.Add('<div class="pim-mail-buttons" style="margin:8px 0 0 0;">' + $btnHtml + '</div>') }
+    if ($details.Count) {
+        $dl = foreach ($d in $details) { '<div style="padding:1px 0;word-break:break-all;">' + (& $enc $d) + '</div>' }
+        $h.Add('<div class="pim-mail-details" style="margin:22px 0 0 0;padding:8px 12px;background:' + $b.surfaceAlt + ';border:1px solid ' + $b.grid + ';border-radius:6px;font-family:Consolas,Menlo,monospace;font-size:11px;line-height:16px;color:' + $b.muted + ';">' +
+               '<div style="font-family:' + $f + ';font-size:11.5px;font-weight:600;margin-bottom:3px;">Details for support</div>' + (@($dl) -join '') + '</div>')
+    }
+    $foot = New-Object System.Collections.Generic.List[string]
+    $prod = ('PIM Manager ' + $ver).Trim()
+    $foot.Add((& $enc $prod) + $(if ($bodyEnv) { ' for <b>' + (& $enc $bodyEnv) + '</b>' } else { '' }))
+    if (Test-PimMailLinkUrl -Url $homeUrl) { $foot.Add('<a href="' + (& $enc $homeUrl) + '" style="color:' + $b.accent + ';">Open PIM Manager</a>') }
+    $foot.Add('Support: <a href="mailto:' + (Get-PimAlertSupportMail) + '" style="color:' + $b.accent + ';">' + (Get-PimAlertSupportMail) + '</a> &middot; <a href="' + (Get-PimAlertSupportPortal) + '" style="color:' + $b.accent + ';">customer portal</a>')
+    if (Test-PimMailLinkUrl -Url $notifUrl) { $foot.Add('<a href="' + (& $enc $notifUrl) + '" style="color:' + $b.accent + ';">Change what you receive</a>') }
+    $h.Add('<div class="pim-env-footer" style="margin:22px 0 0 0;padding-top:10px;border-top:1px solid ' + $b.border + ';font-family:' + $f + ';font-size:12px;line-height:18px;color:' + $b.muted + ';">' + ($foot.ToArray() -join '<br>') + '</div>')
+    $pre = '<div class="pim-mail-preheader" style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:' + $b.surfaceAlt + ';">' + (& $enc $(if ($summary) { $summary } else { $heading })) + '</div>'
+    $html = $pre + '<table role="presentation" class="pim-mail" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="' + $b.surfaceAlt + '" style="background:' + $b.surfaceAlt + ';border-collapse:collapse;"><tr><td align="center" style="padding:20px 10px;font-family:' + $f + ';">' +
+            '<table role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" bgcolor="' + $b.surface + '" style="width:100%;max-width:640px;background:' + $b.surface + ';border:1px solid ' + $b.border + ';border-radius:8px;border-collapse:separate;"><tr><td style="padding:22px 26px 20px 26px;font-family:' + $f + ';color:' + $b.text + ';">' +
+            ($h.ToArray() -join '') + '</td></tr></table></td></tr></table>'
+
+    # ---------------- plain text: the same content, in the same order ----------------
+    $t = New-Object System.Collections.Generic.List[string]
+    $t.Add($heading); $t.Add('')
+    $lead = (@($opener, $summary) | Where-Object { "$_".Trim() }) -join ' '
+    if ($lead) { $t.Add($lead) }
+    foreach ($x in $qa) { $t.Add($x.q + ' ' + $x.a) }
+    if ($lead -or $qa.Count) { $t.Add('') }
+    foreach ($x in $facts) { $t.Add($x.label + ': ' + $x.value) }
+    if ($facts.Count) { $t.Add('') }
+    if ("$(& $g 'contentText')".Trim()) { $t.Add("$(& $g 'contentText')".Trim()); $t.Add('') }
+    foreach ($s in $sections) { $t.Add($s.title + ':'); foreach ($l in $s.lines) { $t.Add('  ' + $l) }; $t.Add('') }
+    if ($causes.Count) {
+        $t.Add($causesTitle + ':')
+        foreach ($c in $causes) {
+            $t.Add('- ' + $c.title + $(if ($c.count -gt 0) { ' (' + $c.count + ' item' + $(if ($c.count -ne 1) { 's' } else { '' }) + ')' } else { '' }))
+            if ($c.fix) { $t.Add('  What to do: ' + $c.fix) }
+            if ($c.names.Count) { $shown = @($c.names | Select-Object -First 8); $t.Add('  ' + ($shown -join ', ') + $(if ($c.names.Count -gt $shown.Count) { ' and ' + ($c.names.Count - $shown.Count) + ' more' } else { '' })) }
+        }
+        $t.Add('')
+    }
+    foreach ($x in $btnText) { $t.Add($x) }
+    if ($btnText.Count) { $t.Add('') }
+    if ($details.Count) { $t.Add('Details for support:'); foreach ($d in $details) { $t.Add('  ' + $d) }; $t.Add('') }
+    $t.Add('--')
+    $t.Add('Environment: ' + $(if ($bodyEnv) { $bodyEnv } else { '(no name)' }) + ' | ' + $prod)
+    if (Test-PimMailLinkUrl -Url $homeUrl) { $t.Add('Open PIM Manager: ' + $homeUrl) }
+    $t.Add('Support: ' + (Get-PimAlertSupportMail) + ' - customer portal ' + (Get-PimAlertSupportPortal))
+    if (Test-PimMailLinkUrl -Url $notifUrl) { $t.Add('Change what you receive: ' + $notifUrl) }
+    return @{ subject = $subject; heading = $heading; html = $html; text = ($t.ToArray() -join "`r`n") }
+}
+
+# =====================================================================================================================
+# PIM 100.105 -> 100.135 -- THE ALERT MAIL. The callers pass four plain-text tokens (AlertWho, AlertStatus, AlertProblem,
+# AlertTodo; owner 2026-10-12) and, when the alert has a list, AlertFindings = @(@{ kind; name }). Since 100.135 they are
+# no longer printed as one table: they are the INPUTS of Invardia's format (New-PimEventMail above) -- the status picks
+# the kind of mail (Held back = a guard trip, Error = a failure, Needs customer's action = a decision), the problem is
+# what happened (subject + summary), what to do answers "Do you need to do anything?". A caller that passes none of them
+# still gets a whole mail (Who acts "Not known", Status "Warning", the problem = its title).
 # =====================================================================================================================
 $script:PimAlertWhoValues     = @('Customer', 'PIM Manager team', 'Not known')
 $script:PimAlertStatusValues  = @('Error', 'Warning', 'Held back', "Needs customer's action")
@@ -339,118 +681,262 @@ function ConvertTo-PimAlertFindingRows {
     return ($rows.ToArray() -join '')
 }
 
+function ConvertTo-PimAlertPlainLines {
+    # HTML (or plain text) -> plain LINES: <br>, </p>, </tr> ... end a line; tags dropped, entities decoded, blank lines out.
+    param([AllowNull()][string]$Text)
+    $d = "$Text" -replace '(?s)<!--.*?-->', ' '
+    $d = $d -replace '(?i)<br\s*/?>', "`n" -replace '(?i)</(p|div|li|tr|h[1-6])>', "`n" -replace '(?i)</t[dh]>', ' '
+    $d = [System.Net.WebUtility]::HtmlDecode(($d -replace '</?[A-Za-z][^<>]*>', ''))
+    return @($d -split "`r?`n" | ForEach-Object { ($_ -replace '[ \t]+', ' ').Trim() } | Where-Object { $_ -and $_ -notmatch '^-+$' })
+}
+
+function Get-PimAlertMailKind {
+    <#
+      PURE. Which kind of mail an alert is (PIM 100.135): 'guard' (a safety check held something back), 'failure' (a job
+      could not do its work), 'action' (someone has to decide / approve), 'info' (anything else). From the status word the
+      sender passed (PIM 100.105) and the page it links to.
+    #>
+    param([string]$Status = '', [string]$Tab = '')
+    switch ("$Status") {
+        'Held back' { return 'guard' }
+        'Error'     { return 'failure' }
+        "Needs customer's action" { return 'action' }
+    }
+    if ("$Tab" -eq 'approvals') { return 'action' }
+    return 'info'
+}
+
 function Get-PimAlertMailModel {
     <#
-      PURE. What ONE alert mail says, from the caller's tokens and what the product knows of this environment
-      (-Environment = Get-PimMailEnvironmentInfo: name, tenantName, tenantId, version). Returns
-        @{ title; customer; environment; solution; who; status; problem; todo; findings; detailHtml; when; support }
-      customer / environment are '' when not known (their row is then left out -- never an empty value, never
-      "scheduler"). detailHtml is '' when the alert has findings or the detail says nothing beyond the problem.
-      -NowUtc: used when the caller passed no time.
+      PURE. What ONE alert mail says (PIM 100.135, Invardia's format), from the caller's tokens and what the product knows of
+      this environment (-Environment = Get-PimMailEnvironmentInfo: name, tenantName, tenantId, version). The four words of
+      100.105 (AlertWho / AlertStatus / AlertProblem / AlertTodo) are its inputs: the status picks the KIND of mail, the
+      problem is what happened, what to do answers "Do you need to do anything?". Optional tokens override a part:
+      AlertSubjectWhat, AlertTopic, AlertSummary, AlertWorried, AlertChanged, AlertAct, AlertDeadline, AlertJob.
+      -PortalUrl: the deep link of the ONE button; -HomeUrl / -NotificationsUrl: the footer; -TimeZoneId: the environment's
+      zone (default: Get-PimMailTimeZoneId; none = UTC, labelled).
+      Returns the model (the 100.105 keys title; customer; environment; solution; who; status; problem; todo; findings;
+      detailHtml; when; support -- plus kind; job; topic; subjectWhat; summary; opener; qa; facts; causes; sections;
+      details; mail = @{ subject; heading; html; text }).
     #>
-    param([hashtable]$Tokens = @{}, [hashtable]$Environment = @{}, [datetime]$NowUtc = [datetime]::UtcNow)
+    param([hashtable]$Tokens = @{}, [hashtable]$Environment = @{}, [datetime]$NowUtc = [datetime]::UtcNow,
+          [string]$PortalUrl = '', [string]$HomeUrl = '', [string]$NotificationsUrl = '', [AllowNull()][object]$TimeZoneId = $null)
     $tk = if ($Tokens) { $Tokens } else { @{} }
     $ev = if ($Environment) { $Environment } else { @{} }
     $get = { param($n) if ($tk.ContainsKey($n) -and $null -ne $tk[$n]) { "$($tk[$n])" } else { '' } }
-    $title = ConvertTo-PimAlertTitleText (& $get 'AlertTitle')
+    $rawTitle = & $get 'AlertTitle'
+    $title = ConvertTo-PimAlertTitleText $rawTitle
     if (-not $title) { $title = 'PIM Manager alert' }
     $customer = "$($ev['tenantName'])".Trim()
     if (-not $customer) { $customer = ConvertTo-PimAlertPlainText (& $get 'TenantName') }
     $envName = "$($ev['name'])".Trim()
-    # the environment's own NAME only: when nothing names it, Get-PimMailEnvironmentInfo falls back to the tenant -- that
-    # is the Customer row, so the Environment row is left out instead of saying the same thing twice
-    if ($envName -and ($envName -ieq $customer -or $envName -ieq "$($ev['tenantId'])".Trim() -or $envName -ieq ("tenant " + "$($ev['tenantId'])".Trim()))) { $envName = '' }
+    $tid = "$($ev['tenantId'])".Trim()
     $ver = "$($ev['version'])".Trim()
     $solution = ('PIM Manager ' + $ver).Trim()
+    $who = Resolve-PimAlertWho (& $get 'AlertWho')
+    $status = Resolve-PimAlertStatus (& $get 'AlertStatus')
     $problem = ConvertTo-PimAlertOneLine (& $get 'AlertProblem')
     if (-not $problem) { $problem = ConvertTo-PimAlertOneLine (ConvertTo-PimAlertPlainText $title) }
     $todo = ConvertTo-PimAlertOneLine (& $get 'AlertTodo')
     if (-not $todo) { $todo = ConvertTo-PimAlertOneLine (& $get 'AlertAction') -FromHtml }
-    if (-not $todo) { $todo = 'Open PIM Manager and look at this alert' }
     $findings = @(); if ($tk.ContainsKey('AlertFindings')) { $findings = @(ConvertTo-PimAlertFindingList -Findings $tk['AlertFindings']) }
     $detail = (& $get 'AlertDetail') -replace 'PIM4EntraPS', 'PIM Manager'
     $detailPlain = ConvertTo-PimAlertPlainText $detail
-    if ($findings.Count -or -not $detailPlain -or $detailPlain.TrimEnd('.') -ieq $problem -or $detailPlain.TrimEnd('.') -ieq $title.TrimEnd('.')) { $detail = '' }
-    # When: the product keeps no time zone for an environment (the page shows times in the browser's), so a mail says UTC
-    # -- to the minute, never with seconds.
-    $when = ''
-    $wm = [regex]::Match((& $get 'WhenUtc'), '(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})')
-    if ($wm.Success) { $when = $wm.Groups[1].Value + ' ' + $wm.Groups[2].Value + ' UTC' }
-    else { $when = $NowUtc.ToUniversalTime().ToString('yyyy-MM-dd HH:mm') + ' UTC' }
+    $detailLines = @(ConvertTo-PimAlertPlainLines $detail)
+    $tab = (& $get 'AlertTab').Trim()
+    $evt = (& $get 'AlertEvent').Trim()
+    $kind = Get-PimAlertMailKind -Status $status -Tab $tab
+    $job = (& $get 'AlertJob').Trim()
+    if (-not $job) { $jm = [regex]::Match("$rawTitle", "(?i)^\s*Job\s+'([^']+)'"); if ($jm.Success) { $job = $jm.Groups[1].Value.Trim() } }
+    # -TimeZoneId is [object], never [string]: a [string] parameter turns $null into '' and the environment's zone was never read
+    $tz = if ($null -eq $TimeZoneId) { Get-PimMailTimeZoneId } else { "$TimeZoneId" }
+    $whenSrc = (& $get 'WhenUtc')
+    $when = Format-PimMailWhen -Value $whenSrc -TimeZoneId $tz
+    if (-not $when) { $when = Format-PimMailWhen -Value $NowUtc -TimeZoneId $tz }
+
+    # ---- the per-cause list: a failure's classes from its detail; an alert's findings grouped by kind ----
+    $causes = New-Object System.Collections.Generic.List[object]
+    $groups = @()
+    if ($kind -eq 'failure') { $groups = @(Get-PimMailFailureGroups $detailPlain) }
+    $byCode = [ordered]@{}
+    foreach ($gr in $groups) {
+        $rc = Resolve-PimMailCause -Code $gr.code -Title $gr.title -Raw $gr.raw
+        if (-not $byCode.Contains($rc.code)) { $byCode[$rc.code] = [pscustomobject]@{ code = $rc.code; title = $rc.cause; fix = $rc.fix; count = 0; names = @(); customer = [bool]$rc.customer; classes = @() } }
+        $byCode[$rc.code].count += [int]$gr.count
+        $byCode[$rc.code].classes += ('{0} x{1}' -f $gr.code, $gr.count)
+    }
+    foreach ($k in @($byCode.Keys)) { $causes.Add($byCode[$k]) }
+    $items = 0
+    foreach ($c in $causes) { $items += [int]$c.count }
+    if ($findings.Count) {
+        $fk = [ordered]@{}
+        foreach ($f in $findings) { if (-not $fk.Contains($f.kind)) { $fk[$f.kind] = New-Object System.Collections.Generic.List[string] }; $fk[$f.kind].Add($f.name) }
+        foreach ($k in @($fk.Keys)) { $causes.Add([pscustomobject]@{ code = ''; title = "$k"; fix = ''; count = $fk[$k].Count; names = @($fk[$k].ToArray()); customer = $true; classes = @() }) }
+        if (-not $items) { $items = $findings.Count }
+    }
+    $trigger = ''
+    if ($detailPlain -match '\(triggered run\)') { $trigger = 'triggered' } elseif ($detailPlain -match '\(scheduled run\)') { $trigger = 'scheduled' }
+    $plural = { param($n) if ([int]$n -eq 1) { '1 item' } else { "$n items" } }
+
+    # ---- subject, topic, summary, the three answers of a guard ----
+    $subjWhat = ConvertTo-PimAlertOneLine (& $get 'AlertSubjectWhat')
+    if (-not $subjWhat) {
+        if ($kind -eq 'failure' -and $job) { $subjWhat = if ($items) { "The job $job could not finish $(& $plural $items)" } else { "The job $job could not finish" } }
+        else { $subjWhat = $problem }
+    }
+    $deadline = ConvertTo-PimAlertOneLine (& $get 'AlertDeadline')
+    if ($kind -eq 'action') { $subjWhat = $subjWhat + $(if ($deadline) { ' - decide by ' + $deadline } else { ' - it waits for your decision' }) }
+    $topic = ConvertTo-PimAlertOneLine (& $get 'AlertTopic')
+    if (-not $topic) {
+        $topic = switch ($kind) {
+            'failure' { if ($job) { "Job $job" } else { 'Engine run' }; break }
+            'guard'   { 'Safety check'; break }
+            'action'  { 'Your decision is needed'; break }
+            default {
+                switch -Regex ($evt) {
+                    '^coverage$'        { 'Discovery and gaps'; break }
+                    '^drift$'           { 'Drift'; break }
+                    '^mail-test$'       { 'Test mail'; break }
+                    '^expiring-access$' { 'Expiring access'; break }
+                    '^break-glass$'     { 'Break-glass accounts'; break }
+                    default             { if ($job) { "Job $job" } else { 'Notice' } }
+                }
+            }
+        }
+    }
+    $summary = ConvertTo-PimAlertOneLine (& $get 'AlertSummary') -MaxLength 600
+    $opener = ''
+    $qa = @()
+    if ($kind -eq 'guard') {
+        $opener = if ($who -eq 'Customer') { 'Please take a look:' } else { 'For your information:' }
+        $worried = ConvertTo-PimAlertOneLine (& $get 'AlertWorried')
+        if (-not $worried) { $worried = 'No. A safety check stopped this on purpose, before anything was changed' }
+        $changed = ConvertTo-PimAlertOneLine (& $get 'AlertChanged')
+        if (-not $changed) { $changed = 'No. Nothing was changed; it waits until someone decides' }
+        $act = ConvertTo-PimAlertOneLine (& $get 'AlertAct')
+        if (-not $act) {
+            $act = if ($who -eq 'PIM Manager team') { 'No. PIM support handles it' }
+                   elseif ($todo) { 'Yes: ' + $todo.Substring(0, 1).ToLowerInvariant() + $todo.Substring(1) }
+                   else { 'Yes: a SuperAdmin of your tenant decides in PIM Manager' }
+        }
+        $qa = @(@{ q = 'Should you be worried?'; a = $worried + '.' }, @{ q = 'Was anything changed?'; a = $changed + '.' }, @{ q = 'Do you need to do anything?'; a = $act + '.' })
+        if (-not $summary) { $summary = $problem + '.' }
+    } elseif ($kind -eq 'action') {
+        $opener = 'Please take a look:'
+        if (-not $summary) { $summary = $problem + '.' + $(if ($todo) { ' ' + $todo + '.' } else { '' }) + ' Nothing changes until it is decided.' }
+    } elseif ($kind -eq 'failure') {
+        if (-not $summary) {
+            $s = New-Object System.Collections.Generic.List[string]
+            $jobWords = if ($job) { $(if ($trigger -eq 'scheduled') { 'The scheduled job ' } else { 'The job ' }) + $job + $(if ($trigger -eq 'triggered') { ' (started by hand)' } else { '' }) } else { 'An engine run' }
+            if ($items) {
+                $s.Add("$jobWords could not finish $(& $plural $items); the rest of the run was applied.")
+                $s.Add('Nothing was changed for ' + $(if ($items -eq 1) { 'that item' } else { 'those items' }) + ', and PIM Manager tries again on its next run.')
+            } else {
+                $s.Add("$jobWords stopped before it finished.")
+                $s.Add('What it did not reach is tried again on its next run.')
+            }
+            $cust = @($causes | Where-Object { $_.customer }).Count
+            $unk = @($causes | Where-Object { $_.code -eq 'UNCLASSIFIED' }).Count
+            if ($causes.Count -and $cust -eq $causes.Count) { $s.Add('Someone in your IT needs to fix the cause below.') }
+            elseif ($causes.Count -and $unk -eq $causes.Count) { $s.Add('PIM support looks at it; you do not need to do anything yet.') }
+            elseif ($causes.Count) { $s.Add('Please look at each cause below.') }
+            else { $s.Add('Please take a look at Jobs > Engine logs & errors in PIM Manager.') }
+            $summary = $s.ToArray() -join ' '
+        }
+    } else {
+        if (-not $summary) { $summary = $problem + '.' + $(if ($todo) { ' ' + $todo + '.' } else { '' }) }
+    }
+
+    # ---- facts (an empty value is left out by the builder) ----
+    $envFact = if (Test-PimMailTenantIdLabel $envName) { '' } else { $envName }
+    $facts = @(
+        @{ label = 'Environment'; value = $envFact }
+        @{ label = 'Product'; value = $solution }
+        @{ label = 'Job'; value = $job }
+        @{ label = 'When'; value = $when }
+        @{ label = 'Items affected'; value = $(if ($items) { "$items" } else { '' }) }
+    )
+    # ---- an extra section: what a guard held / what an alert found, when the caller gave no findings ----
+    $sections = @()
+    $problemPlain = $problem.TrimEnd('.')
+    $detailAdds = ($detailPlain -and $detailPlain.TrimEnd('.') -ine $problemPlain -and $detailPlain.TrimEnd('.') -ine $title.TrimEnd('.'))
+    if ($kind -ne 'failure' -and -not $findings.Count -and $detailAdds -and $detailLines.Count) {
+        $show = @($detailLines | Select-Object -First 25)
+        if ($detailLines.Count -gt $show.Count) { $show += ('and ' + ($detailLines.Count - $show.Count) + ' more lines in PIM Manager') }
+        $sections = @(@{ title = $(if ($kind -eq 'guard') { 'What was held back' } else { 'What it is about' }); lines = $show })
+    }
+    # ---- the ONE button ----
+    $label = switch ($kind) {
+        'failure' { if ($tab -eq 'jobs' -or -not $tab) { 'Open Engine logs & errors' } else { 'Open in PIM Manager' }; break }
+        'guard'   { 'Review what was held back'; break }
+        'action'  { if ($tab -eq 'approvals') { 'Review and approve' } else { 'Open in PIM Manager' }; break }
+        default   { 'Open in PIM Manager' }
+    }
+    # ---- Details for support: the raw words, the class codes, the raw line ----
+    $details = New-Object System.Collections.Generic.List[string]
+    if ("$rawTitle".Trim()) { $details.Add('Alert: ' + ("$rawTitle".Trim() -replace 'PIM4EntraPS', 'PIM Manager')) }
+    if ($evt) { $details.Add('Event: ' + $evt) }
+    $cls = @($causes | ForEach-Object { @($_.classes) } | Where-Object { $_ })
+    if ($cls.Count) { $details.Add('Classes: ' + ($cls -join ', ')) }
+    if ($detailPlain) { $raw = $detailPlain; if ($raw.Length -gt 1500) { $raw = $raw.Substring(0, 1497) + '...' }; $details.Add('Raw: ' + $raw) }
+    $inst = (& $get 'Instance').Trim()
+    if ($inst) { $details.Add('Sent by: ' + $inst) }
+    if ($tz -and $when -notmatch 'UTC$') { $u = Format-PimMailWhen -Value $(if ($whenSrc) { $whenSrc } else { $NowUtc }) -TimeZoneId ''; if ($u) { $details.Add('Time (UTC): ' + $u) } }
+
+    $evModel = [ordered]@{
+        environment = $envName; tenantId = $tid; version = $ver; subjectWhat = $subjWhat; topic = $topic
+        opener = $opener; summary = $summary; qa = $qa; facts = $facts; sections = $sections
+        causesTitle = $(if ($findings.Count -and $kind -ne 'failure') { 'What was found' } else { 'What happened, by cause' })
+        causes = @($causes.ToArray()); details = @($details.ToArray())
+        button = $(if ("$PortalUrl".Trim()) { @{ url = "$PortalUrl".Trim(); label = $label } } else { $null })
+        homeUrl = $HomeUrl; notificationsUrl = $NotificationsUrl
+    }
+    $mail = New-PimEventMail -Model $evModel
     return [ordered]@{
         title = $title; customer = $customer; environment = $envName; solution = $solution
-        who = (Resolve-PimAlertWho (& $get 'AlertWho')); status = (Resolve-PimAlertStatus (& $get 'AlertStatus'))
-        problem = $problem; todo = $todo; findings = @($findings); detailHtml = $detail; when = $when
+        who = $who; status = $status; problem = $problem; todo = $todo; findings = @($findings); detailHtml = $detail; when = $when
         support = ((Get-PimAlertSupportMail) + ' - customer portal ' + (Get-PimAlertSupportPortal))
+        kind = $kind; job = $job; topic = $topic; subjectWhat = $subjWhat; summary = $summary; opener = $opener; qa = $qa
+        facts = $facts; causes = @($causes.ToArray()); sections = $sections; details = @($details.ToArray()); items = $items
+        subject = $mail.subject; heading = $mail.heading; mail = $mail
     }
 }
 
 function New-PimAlertMailTable {
-    # PURE. The model as THE table of the alert mail (HTML). -MaxFindings caps the finding rows shown.
+    # PURE. The model as the alert mail's HTML (PIM 100.135: the whole designed mail -- the name is kept from 100.105, when it
+    # was one table). -MaxFindings is accepted for older callers; the builder caps the names it shows.
     param([Parameter(Mandatory)][System.Collections.IDictionary]$Model, [int]$MaxFindings = 50)
-    $b = Get-PimMailBrand
-    $tone = switch ("$($Model.status)") { 'Error' { $b.danger; break } 'Warning' { $b.warning; break } 'Held back' { $b.warning; break } default { $b.accent } }
-    $rows = New-Object System.Collections.Generic.List[string]
-    if ("$($Model.customer)".Trim())    { $rows.Add((Get-PimAlertRowHtml -Label 'Customer' -ValueHtml (ConvertTo-PimMailText $Model.customer))) }
-    if ("$($Model.environment)".Trim()) { $rows.Add((Get-PimAlertRowHtml -Label 'Environment' -ValueHtml (ConvertTo-PimMailText $Model.environment))) }
-    $rows.Add((Get-PimAlertRowHtml -Label 'Solution' -ValueHtml (ConvertTo-PimMailText $Model.solution)))
-    $rows.Add((Get-PimAlertRowHtml -Label 'Who acts' -ValueHtml (ConvertTo-PimMailText $Model.who)))
-    $rows.Add((Get-PimAlertRowHtml -Label 'Status' -ValueHtml (ConvertTo-PimMailText $Model.status) -Color $tone))
-    $rows.Add((Get-PimAlertRowHtml -Label 'Problem' -ValueHtml (ConvertTo-PimMailText $Model.problem)))
-    $rows.Add((Get-PimAlertRowHtml -Label 'What to do' -ValueHtml (ConvertTo-PimMailText $Model.todo)))
-    $fr = ConvertTo-PimAlertFindingRows -Findings $Model.findings -MaxRows $MaxFindings
-    if ($fr) { $rows.Add($fr) }
-    elseif ("$($Model.detailHtml)".Trim()) { $rows.Add((Get-PimAlertRowHtml -Label 'Details' -ValueHtml "$($Model.detailHtml)" -Class 'pim-alert-detail' -NotBold)) }
-    $rows.Add((Get-PimAlertRowHtml -Label 'When' -ValueHtml (ConvertTo-PimMailText $Model.when)))
-    $sup = '<a href="mailto:' + (Get-PimAlertSupportMail) + '" style="color:' + $b.accent + ';">' + (Get-PimAlertSupportMail) + '</a> - customer portal ' +
-           '<a href="' + (Get-PimAlertSupportPortal) + '" style="color:' + $b.accent + ';">' + (Get-PimAlertSupportPortal) + '</a>'
-    $rows.Add((Get-PimAlertRowHtml -Label 'Support' -ValueHtml $sup))
-    return ('<table role="presentation" class="pim-alert-table" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-collapse:collapse;margin:8px 0 6px 0;">' + ($rows.ToArray() -join '') + '</table>')
+    if ($Model.Contains('mail') -and $Model['mail']) { return "$($Model['mail'].html)" }
+    return ''
 }
 
 function ConvertTo-PimAlertMailText {
-    # PURE. The same rows as the plain-text part of the mail: "Label: value", one per line.
+    # PURE. The plain-text part of the alert mail: the same content as the HTML, in the same order.
     param([Parameter(Mandatory)][System.Collections.IDictionary]$Model, [int]$MaxFindings = 50)
-    $l = New-Object System.Collections.Generic.List[string]
-    $l.Add("$($Model.title)"); $l.Add('')
-    if ("$($Model.customer)".Trim())    { $l.Add('Customer: ' + $Model.customer) }
-    if ("$($Model.environment)".Trim()) { $l.Add('Environment: ' + $Model.environment) }
-    $l.Add('Solution: ' + $Model.solution)
-    $l.Add('Who acts: ' + $Model.who)
-    $l.Add('Status: ' + $Model.status)
-    $l.Add('Problem: ' + $Model.problem)
-    $l.Add('What to do: ' + $Model.todo)
-    $list = @($Model.findings)
-    if ($list.Count) {
-        $show = @(if ($MaxFindings -gt 0 -and $list.Count -gt $MaxFindings) { $list[0..($MaxFindings - 1)] } else { $list })
-        foreach ($f in $show) { $l.Add("$($f.kind): $($f.name)") }
-        if ($show.Count -lt $list.Count) { $l.Add("and $($list.Count - $show.Count) more in PIM Manager") }
-    } elseif ("$($Model.detailHtml)".Trim()) {
-        $d = "$($Model.detailHtml)" -replace '(?i)<br\s*/?>', "`n" -replace '(?i)</(p|div|li|tr|h[1-6])>', "`n" -replace '(?i)</t[dh]>', ' '
-        $d = [System.Net.WebUtility]::HtmlDecode(($d -replace '</?[A-Za-z][^<>]*>', ''))
-        $dl = @($d -split "`r?`n" | ForEach-Object { ($_ -replace '[ \t]+', ' ').Trim() } | Where-Object { $_ })
-        if ($dl.Count -eq 1) { $l.Add('Details: ' + $dl[0]) } elseif ($dl.Count) { $l.Add('Details:'); foreach ($x in $dl) { $l.Add('  ' + $x) } }
-    }
-    $l.Add('When: ' + $Model.when)
-    $l.Add('Support: ' + $Model.support)
-    return ($l.ToArray() -join "`r`n")
+    if ($Model.Contains('mail') -and $Model['mail']) { return "$($Model['mail'].text)" }
+    return ''
 }
 
 function Add-PimAlertMailTokens {
     <#
-      PURE. The caller's tokens plus what the alert template renders: AlertTable (the whole table) and, for a template a
-      customer wrote themselves, each value on its own (AlertCustomer, AlertEnvironment, AlertSolution, AlertWho,
-      AlertStatus, AlertProblem, AlertTodo, AlertFindingRows, AlertWhen, AlertSupport -- HTML-encoded). AlertTitle is
-      the title as a person reads it (no "--"). Returns @{ tokens; model }. The caller's hashtable is not changed.
+      PURE. The caller's tokens plus what the alert template renders: AlertTable (the WHOLE designed mail, PIM 100.135),
+      AlertSubject ("<environment>: <what happened>") and, for a template a customer wrote themselves, each value on its own
+      (AlertCustomer, AlertEnvironment, AlertSolution, AlertWho, AlertStatus, AlertProblem, AlertTodo, AlertFindingRows,
+      AlertWhen, AlertSupport, AlertSummary, AlertHeading -- HTML-encoded). AlertTitle is the title as a person reads it.
+      Returns @{ tokens; model }. The caller's hashtable is not changed.
     #>
-    param([hashtable]$Tokens = @{}, [hashtable]$Environment = @{}, [datetime]$NowUtc = [datetime]::UtcNow)
-    $m = Get-PimAlertMailModel -Tokens $Tokens -Environment $Environment -NowUtc $NowUtc
+    param([hashtable]$Tokens = @{}, [hashtable]$Environment = @{}, [datetime]$NowUtc = [datetime]::UtcNow,
+          [string]$PortalUrl = '', [string]$HomeUrl = '', [string]$NotificationsUrl = '', [AllowNull()][object]$TimeZoneId = $null)
+    $m = Get-PimAlertMailModel -Tokens $Tokens -Environment $Environment -NowUtc $NowUtc -PortalUrl $PortalUrl -HomeUrl $HomeUrl -NotificationsUrl $NotificationsUrl -TimeZoneId $TimeZoneId
     $t = @{}; if ($Tokens) { foreach ($k in @($Tokens.Keys)) { $t[$k] = $Tokens[$k] } }
     [void]$t.Remove('AlertFindings')
     $t['AlertTitle']       = $m.title
+    $t['AlertSubject']     = $m.subject
+    $t['AlertHeading']     = ConvertTo-PimMailText $m.heading
+    $t['AlertSummary']     = ConvertTo-PimMailText $m.summary
     $t['AlertTable']       = New-PimAlertMailTable -Model $m
     $t['AlertCustomer']    = ConvertTo-PimMailText $m.customer
-    $t['AlertEnvironment'] = ConvertTo-PimMailText $m.environment
+    $t['AlertEnvironment'] = ConvertTo-PimMailText $(if (Test-PimMailTenantIdLabel $m.environment) { '' } else { $m.environment })
     $t['AlertSolution']    = ConvertTo-PimMailText $m.solution
     $t['AlertWho']         = ConvertTo-PimMailText $m.who
     $t['AlertStatus']      = ConvertTo-PimMailText $m.status
@@ -478,38 +964,85 @@ function Get-PimAlertMailArgs {
     return $out
 }
 
-function ConvertTo-PimMailLayoutFrame {
+function Get-PimMailTypeInfo {
     <#
-      PURE. §100.5 MAIL-2 leftover (b), 2.4.555: an ALERT or TRANSACTIONAL mail (a template that is not itself built with
-      New-PimMailDocument) is put in the ONE designed layout -- logo header with the environment, the subject as the heading,
-      the template's own body content unchanged, the blue button and the designed footer (environment / tenant / version,
-      Open PIM Manager, Change what you receive). A customer-EDITED template keeps every word: only its <html>/<body>
-      wrapper is replaced by the frame. Returns the new body HTML, or the input unchanged when:
+      PURE. PIM 100.135: what a TEMPLATE mail (one not built by New-PimEventMail / New-PimMailDocument) says in Invardia's
+      frame -- @{ topic; summary; label }: the heading's topic, the calm 1-3 sentence summary (what happened / is anything
+      changed / does anyone act) and the label of its ONE button. Literals in a function (the BUG-79-6b trap).
+    #>
+    param([string]$Type)
+    switch ("$Type") {
+        'access-review-reminder' { return @{ topic = 'Access review'; summary = 'An access review is waiting for your decisions. Nothing changes until you decide; please answer before the review closes.'; label = 'Open the access review' } }
+        'ad-password-delivery'   { return @{ topic = 'New on-premises admin account'; summary = 'This mail carries the first password of a new on-premises admin account. Nothing else was changed. Please hand it to the admin safely and delete this mail afterwards.'; label = '' } }
+        'approval-request'       { return @{ topic = 'Approval needed'; summary = 'A delegation waits for your approval. Nothing is granted until you decide. Approve or deny it in PIM Manager with the button below; a reply to this mail does not decide it.'; label = 'Review and approve' } }
+        'approval-escalation'    { return @{ topic = 'Approval needed'; summary = 'A delegation waits for your approval: the first approver did not decide in time, so it has come to you. Nothing is granted until you decide. Approve or deny it in PIM Manager with the button below; a reply to this mail does not decide it.'; label = 'Review and approve' } }
+        'discovery-notice'       { return @{ topic = 'Discovery'; summary = 'Discovery found new items that PIM Manager does not manage yet. Nothing was changed. Please review them when it suits you.'; label = 'Open Discovery and gaps' } }
+        'emergency-override'     { return @{ topic = 'Emergency override'; summary = 'An emergency override is active on a group, so approval is switched off for it until the override ends. Nothing else was changed. Please check that it was expected.'; label = 'Open in PIM Manager' } }
+        'new-admin'              { return @{ topic = 'Welcome'; summary = 'A new admin account was created. Its sign-in details follow in a separate mail; there is nothing else to do.'; label = 'Open in PIM Manager' } }
+        'new-permission'         { return @{ topic = 'Permission change'; summary = 'A permission of a group changed. This is for your information; you do not need to do anything unless you did not expect it.'; label = 'Open in PIM Manager' } }
+        'new-role'               { return @{ topic = 'Role assignment'; summary = 'A role was assigned. This is for your information; you do not need to do anything unless you did not expect it.'; label = 'Open in PIM Manager' } }
+        'offboarding-notice'     { return @{ topic = 'Admin account disabled'; summary = 'An admin account was disabled, so its access has ended. You do not need to do anything unless you did not expect it.'; label = 'Open in PIM Manager' } }
+        'rfa-notice'             { return @{ topic = 'Request for authorization'; summary = ''; label = 'Open in PIM Manager' } }
+        'tap-delivery'           { return @{ topic = 'Temporary Access Pass'; summary = 'This mail carries a Temporary Access Pass for an admin account. Nothing else was changed. Please hand it to the admin safely and delete this mail afterwards.'; label = '' } }
+        'update-outcome'         { return @{ topic = 'Update'; summary = 'This is the result of a PIM Manager update.'; label = 'Open in PIM Manager' } }
+        'alert-notice'           { return @{ topic = 'Alert'; summary = ''; label = 'Open in PIM Manager' } }
+        default                  { return @{ topic = 'Notice'; summary = ''; label = 'Open in PIM Manager' } }
+    }
+}
+
+function New-PimFramedMail {
+    <#
+      PURE. §100.5 MAIL-2 leftover (b) -> PIM 100.135: a TEMPLATE mail (not itself built by New-PimEventMail or
+      New-PimMailDocument) is put in Invardia's structure: logo -> "PIM Manager for <environment> - <topic>" -> the calm
+      summary of its type -> facts (Environment, Product, When) -> the template's own content, unchanged -> ONE blue button
+      -> Details for support (the tenant id) -> footer; plus a text part in the same order. A customer-EDITED template keeps
+      every word: only its <html>/<body> wrapper is replaced. Returns @{ html; text } or $null (body unchanged) when:
         * the body is already a designed mail (class="pim-mail"),
         * the template opts out with <!-- pim-no-layout --> (e.g. a mail that must stay plain).
-      -Subject: the rendered subject; leading [..] tags ("[PIM Alert]", the environment) are dropped for the heading.
+      -Subject: the rendered subject ([..] tags dropped); -BodyText: the template's own text part.
     #>
-    param([AllowEmptyString()][string]$BodyHtml, [string]$Subject = '', [hashtable]$Button = $null, [string]$HomeUrl = '', [string]$NotificationsUrl = '',
-          [hashtable]$Environment = @{},
-          # PIM 100.105: the footer's home link shows its words only ("Open PIM Manager"), not the raw hosting address
-          [switch]$HomeLinkAsWords)
+    param([AllowEmptyString()][string]$BodyHtml, [string]$BodyText = '', [string]$Subject = '', [string]$Type = '', [hashtable]$Button = $null,
+          [string]$HomeUrl = '', [string]$NotificationsUrl = '', [hashtable]$Environment = @{}, [datetime]$NowUtc = [datetime]::UtcNow,
+          [AllowNull()][object]$TimeZoneId = $null)
     $h = "$BodyHtml"
-    if ($h -match 'class="pim-mail"' -or $h -match '<!--\s*pim-no-layout\s*-->') { return $h }
+    if ($h -match 'class="pim-mail"' -or $h -match '<!--\s*pim-no-layout\s*-->') { return $null }
     $inner = $h
     $m = [regex]::Match($h, '(?is)<body\b[^>]*>(.*)</body>')
     if ($m.Success) { $inner = $m.Groups[1].Value }
     else { $inner = [regex]::Replace($inner, '(?is)</?html\b[^>]*>', '') }
+    $inner = [regex]::Replace($inner, '(?is)<head\b.*?</head>', '')
     $inner = [regex]::Replace($inner, '(?s)<!--.*?-->', '').Trim()   # template comments (subject / tokens) are not content
-    $title = ("$Subject" -replace '^\s*(\[[^\]]*\]\s*)+', '').Trim()
-    if (-not $title) { $title = 'PIM Manager' }
-    # the button goes AFTER the content (an alert reads first, then "Open ..."); none when the content already links there
-    $btn = ''
+    $info = Get-PimMailTypeInfo -Type $Type
+    $env = if ($Environment) { $Environment } else { @{} }
+    $tz = if ($null -eq $TimeZoneId) { Get-PimMailTimeZoneId } else { "$TimeZoneId" }
+    $ver = "$($env['version'])".Trim()
+    $envName = "$($env['name'])".Trim()
+    # ONE button, after the content; none when the content already links the same page
+    $btn = $null
     if ($Button -and "$($Button.url)".Trim() -and $inner -notmatch [regex]::Escape(("$($Button.url)" -split '\?')[0])) {
-        $btn = New-PimMailButton -Url "$($Button.url)" -Label $(if ("$($Button.label)".Trim()) { "$($Button.label)" } else { 'Open in PIM Manager' })
+        $lbl = if ("$($Button.label)".Trim()) { "$($Button.label)" } elseif ("$($info.label)".Trim()) { "$($info.label)" } else { 'Open in PIM Manager' }
+        $btn = @{ url = "$($Button.url)".Trim(); label = $lbl }
     }
-    $b = Get-PimMailBrand
-    return (New-PimMailDocument -Title $title -Preheader $title -BodyHtml ('<div class="pim-mail-content" style="margin:14px 0 0 0;font-family:' + $b.font + ';font-size:14px;line-height:1.5;color:' + $b.text + ';">' + $inner + '</div>' + $btn) `
-                -HomeUrl $HomeUrl -NotificationsUrl $NotificationsUrl -Environment $Environment -HomeLinkAsWords:$HomeLinkAsWords)
+    $model = [ordered]@{
+        environment = $envName; tenantId = "$($env['tenantId'])".Trim(); version = $ver
+        subjectWhat = "$Subject"; topic = "$($info.topic)"; summary = "$($info.summary)"
+        facts = @(@{ label = 'Environment'; value = $(if (Test-PimMailTenantIdLabel $envName) { '' } else { $envName }) }, @{ label = 'Product'; value = ('PIM Manager ' + $ver).Trim() }, @{ label = 'When'; value = (Format-PimMailWhen -Value $NowUtc -TimeZoneId $tz) })
+        contentHtml = $inner; contentText = "$BodyText"
+        button = $btn; details = @(); homeUrl = $HomeUrl; notificationsUrl = $NotificationsUrl
+    }
+    $mail = New-PimEventMail -Model $model
+    return @{ html = $mail.html; text = $mail.text; heading = $mail.heading }
+}
+
+function ConvertTo-PimMailLayoutFrame {
+    # The framed body HTML only (New-PimFramedMail), or the input unchanged when it is designed already / opts out.
+    param([AllowEmptyString()][string]$BodyHtml, [string]$Subject = '', [hashtable]$Button = $null, [string]$HomeUrl = '', [string]$NotificationsUrl = '',
+          [hashtable]$Environment = @{}, [string]$Type = '',
+          # PIM 100.105: kept for older callers -- the footer's home link is always the words "Open PIM Manager" now
+          [switch]$HomeLinkAsWords)
+    $f = New-PimFramedMail -BodyHtml $BodyHtml -Subject $Subject -Type $Type -Button $Button -HomeUrl $HomeUrl -NotificationsUrl $NotificationsUrl -Environment $Environment
+    if ($null -eq $f) { return "$BodyHtml" }
+    return $f.html
 }
 
 function New-PimMailDocument {
@@ -544,29 +1077,38 @@ function New-PimMailDocument {
             else { '<!--pim-logo--><img src="cid:pim-logo" width="180" height="46" alt="Invardia PIM Manager" style="display:block;border:0;outline:none;width:180px;height:auto;"><!--/pim-logo-->' }
     $envCell = if ($envName) { '<div style="font-family:' + $b.font + ';font-size:9.5px;letter-spacing:.6px;text-transform:uppercase;color:' + $b.muted + ';">Environment</div><div style="font-family:' + $b.font + ';font-size:13px;font-weight:600;color:' + $b.heading + ';">' + (ConvertTo-PimMailText $envName) + '</div>' } else { '' }
 
+    # PIM 100.135 (Invardia's format): the heading names the product and the environment ("PIM Manager for <environment> -
+    # <title>"); the footer is site + support; the tenant id (a GUID) is only in the small "Details for support" block.
+    $headTitle = "$Title"
+    if (-not $Print -and $headTitle -notmatch '^PIM Manager\b') { $headTitle = Get-PimMailHeadingLine -EnvironmentName $(if (Test-PimMailTenantIdLabel $envName) { '' } else { $envName }) -Topic $Title }
     $foot = New-Object System.Collections.Generic.List[string]
     $envBits = New-Object System.Collections.Generic.List[string]
-    if ($envName) { $envBits.Add('Environment: <b>' + (ConvertTo-PimMailText $envName) + '</b>') }
-    if ($tn -or $tid) { $envBits.Add('tenant ' + (ConvertTo-PimMailText $tn) + $(if ($tid) { ' (' + (ConvertTo-PimMailText $tid) + ')' } else { '' })) }
+    if ($envName -and -not (Test-PimMailTenantIdLabel $envName)) { $envBits.Add('Environment: <b>' + (ConvertTo-PimMailText $envName) + '</b>') }
+    if ($tn -and $tn -ine $envName) { $envBits.Add('tenant ' + (ConvertTo-PimMailText $tn)) }
     if ($ver) { $envBits.Add('PIM Manager ' + (ConvertTo-PimMailText $ver)) }
     if ($envBits.Count) { $foot.Add($envBits.ToArray() -join ' &middot; ') }
-    if (Test-PimMailLinkUrl -Url $HomeUrl) {
-        if ($HomeLinkAsWords) { $foot.Add('<a href="' + (ConvertTo-PimMailText $HomeUrl.Trim()) + '" style="color:' + $b.accent + ';">Open PIM Manager</a>') }
-        else { $foot.Add('Open PIM Manager: <a href="' + (ConvertTo-PimMailText $HomeUrl.Trim()) + '" style="color:' + $b.accent + ';">' + (ConvertTo-PimMailText $HomeUrl.Trim()) + '</a>') }
-    }
+    # the home link is the words "Open PIM Manager" (no raw hosting address in the body); -HomeLinkAsWords is kept for callers
+    if (Test-PimMailLinkUrl -Url $HomeUrl) { $foot.Add('<a href="' + (ConvertTo-PimMailText $HomeUrl.Trim()) + '" style="color:' + $b.accent + ';">Open PIM Manager</a>') }
+    $foot.Add('Support: <a href="mailto:' + (Get-PimAlertSupportMail) + '" style="color:' + $b.accent + ';">' + (Get-PimAlertSupportMail) + '</a> &middot; <a href="' + (Get-PimAlertSupportPortal) + '" style="color:' + $b.accent + ';">customer portal</a>')
     $why = if ("$AudienceLabel".Trim()) { 'You get this report as <b>' + (ConvertTo-PimMailText $AudienceLabel) + '</b>.' } else { '' }
     if (Test-PimMailLinkUrl -Url $NotificationsUrl) { $why = ($why + ' <a href="' + (ConvertTo-PimMailText $NotificationsUrl.Trim()) + '" style="color:' + $b.accent + ';">Change what you receive</a>.').Trim() }
     if ($why) { $foot.Add($why) }
     if ($Print) { $foot.Add('Generated ' + (ConvertTo-PimMailText $gen) + '.') }
-    $footer = '<div class="pim-env-footer" style="margin:26px 0 0 0;padding-top:10px;border-top:1px solid ' + $b.border + ';font-family:' + $b.font + ';font-size:12px;line-height:18px;color:' + $b.muted + ';">' + ($foot.ToArray() -join '<br>') + '</div>'
+    $detailsBlock = ''
+    if ($tid -and -not $Print) {
+        $detailsBlock = '<div class="pim-mail-details" style="margin:22px 0 0 0;padding:8px 12px;background:' + $b.surfaceAlt + ';border:1px solid ' + $b.grid + ';border-radius:6px;font-family:Consolas,Menlo,monospace;font-size:11px;line-height:16px;color:' + $b.muted + ';">' +
+                        '<div style="font-family:' + $b.font + ';font-size:11.5px;font-weight:600;margin-bottom:3px;">Details for support</div><div>Tenant id: ' + (ConvertTo-PimMailText $tid) + '</div></div>'
+    }
+    $footer = $detailsBlock + '<div class="pim-env-footer" style="margin:26px 0 0 0;padding-top:10px;border-top:1px solid ' + $b.border + ';font-family:' + $b.font + ';font-size:12px;line-height:18px;color:' + $b.muted + ';">' + ($foot.ToArray() -join '<br>') + '</div>'
 
     $inner = '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;"><tr>' +
              '<td valign="middle" style="padding:0 0 10px 0;">' + $logo + '</td>' +
              '<td valign="middle" align="right" style="padding:0 0 10px 0;text-align:right;">' + $envCell + '</td></tr>' +
              '<tr><td colspan="2" style="height:3px;line-height:3px;font-size:1px;background:' + $b.blue + ';">&nbsp;</td></tr></table>' +
-             '<h1 style="margin:18px 0 2px 0;font-family:' + $b.font + ';font-size:22px;font-weight:700;color:' + $b.heading + ';">' + (ConvertTo-PimMailText $Title) + '</h1>' +
+             '<h1 class="pim-mail-heading" style="margin:18px 0 2px 0;font-family:' + $b.font + ';font-size:22px;font-weight:700;color:' + $b.heading + ';">' + (ConvertTo-PimMailText $headTitle) + '</h1>' +
              $(if ("$Subtitle".Trim()) { '<div style="font-family:' + $b.font + ';font-size:13px;color:' + $b.muted + ';">' + (ConvertTo-PimMailText $Subtitle) + '</div>' } else { '' }) +
-             $SummaryHtml + $btn + $BodyHtml + $footer
+             # PIM 100.135: summary first, then the content, then the ONE button (no longer between the summary and the tables)
+             $SummaryHtml + $BodyHtml + $btn + $footer
 
     if (-not $Print) {
         $pre = if ("$Preheader".Trim()) { '<div class="pim-mail-preheader" style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:' + $b.surfaceAlt + ';">' + (ConvertTo-PimMailText $Preheader) + '</div>' } else { '' }

@@ -1068,7 +1068,7 @@ foreach ($item in $exoPlan) {
         continue
     }
     $r = Invoke-ExoWhenHydrated -Cmdlet $item.cmdlet -What $item.what -Parameters $item.parameters
-    # 2026-10-13 (Nunagreen: "could not scope ... 400 (Bad Request)" and nothing else): the failure line carries Exchange's
+    # 2026-10-13 (a customer install: "could not scope ... 400 (Bad Request)" and nothing else): the failure line carries Exchange's
     # own answer -- the 400's text was kept in $r.detail and printed nowhere, so the customer could not tell why.
     if (-not $r.ok) {
         $exoSaid = (("$($r.detail)" -replace '\s+', ' ').Trim())
