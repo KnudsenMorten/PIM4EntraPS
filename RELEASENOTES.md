@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.622 -- 2026-10-13
+
+- Initialize-PimMailSender: a refused Exchange step now prints Exchange's own reason (it printed only 400 Bad Request)
+
 ## 2.4.621 -- 2026-10-13
 
 - State column on every Access-view list (accounts + groups, problems first, colours, a queued new account never red); Deleted admin rows whose account is gone leave the plan (no create=2); AD-right notice for older hybrid installs; adoption counts in the identified heartbeat; reconcile says Left alone; AD clean-up times in local time (no UTC)
