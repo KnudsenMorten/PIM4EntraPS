@@ -1132,7 +1132,7 @@ function Invoke-PimUplinkCycle {
             $hbCounts = @{ sqlUsedMb = [int64]$SqlSpace['sqlUsedMb']; sqlMaxMb = [int64]$SqlSpace['sqlMaxMb'] }
         }
         if ($sender.Mode -eq 'identified' -and $AssetCounts) {
-            foreach ($k in 'users', 'guests', 'servicePrincipals', 'groups') {
+            foreach ($k in 'users', 'guests', 'servicePrincipals', 'groups', 'usersTotal', 'usersDisabled') {
                 $n = 0L
                 if ($AssetCounts.ContainsKey($k) -and $null -ne $AssetCounts[$k] -and [long]::TryParse("$($AssetCounts[$k])", [ref]$n) -and $n -ge 0) {
                     if ($null -eq $hbCounts) { $hbCounts = @{} }
@@ -1497,7 +1497,14 @@ function Invoke-PimUplinkJob {
     $assets = $null
     try {
         $tc = & $get 'TenantObjectCounts'; if ($tc -is [string] -and "$tc".Trim()) { $tc = $tc | ConvertFrom-Json }
-        if ($tc) { $assets = @{ users = $tc.Members; guests = $tc.Guests; servicePrincipals = $tc.ServicePrincipals; groups = $tc.Groups } }
+        if ($tc) {
+            $assets = @{ users = $tc.Members; guests = $tc.Guests; servicePrincipals = $tc.ServicePrincipals; groups = $tc.Groups }
+            # 100.128 (owner via Invardia 2026-10-13: the dashboard's Users = ALL user objects): usersTotal = every user
+            # incl. disabled and guests; usersDisabled = total - enabled members - guests. Left out unless all three are numbers.
+            $assets['usersTotal'] = $tc.Users
+            $tu = 0L; $tm = 0L; $tg = 0L
+            if ([long]::TryParse("$($tc.Users)", [ref]$tu) -and [long]::TryParse("$($tc.Members)", [ref]$tm) -and [long]::TryParse("$($tc.Guests)", [ref]$tg) -and ($tu - $tm - $tg) -ge 0) { $assets['usersDisabled'] = $tu - $tm - $tg }
+        }
     } catch { $assets = $null }
     # PIM 100.56 / framework 8.9: the endpoints from what the environment already records (identified only; no ARM read).
     $endpoints = @()

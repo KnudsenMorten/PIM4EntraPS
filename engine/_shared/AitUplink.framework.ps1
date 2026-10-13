@@ -350,7 +350,7 @@ function New-AitUplinkReport {
     $d = [int64]0; if ($null -ne $DurationMs -and [int64]::TryParse("$DurationMs", [ref]$d) -and $d -ge 0) { $o['DurationMs'] = [int][Math]::Min($d, [int64]2147483646) }
     if ($Counts -and $Counts.Count) {
         $c = [ordered]@{}
-        foreach ($k in @($Counts.Keys | Sort-Object | Select-Object -First 10)) {
+        foreach ($k in @($Counts.Keys | Sort-Object | Select-Object -First 40)) {   # 40 keys: agreed by SI + PIM + Invardia, owner yes 2026-10-13 (Invardia accepts 40 since 1.0.413)
             if ("$k" -notmatch '^[a-z][A-Za-z0-9]{0,30}$') { continue }
             $n = 0.0; if (-not [double]::TryParse("$($Counts[$k])", [ref]$n) -or $n -lt 0) { continue }
             $c["$k"] = if ($anon) { Get-AitUplinkCountBucket -Count $n } else { [int64][Math]::Floor($n) }
