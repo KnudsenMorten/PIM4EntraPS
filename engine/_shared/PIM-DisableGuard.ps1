@@ -22,10 +22,11 @@
              own once a provider opted out of the generic empty-desired prune guard).
 
     GUARD 2  Mass-disable circuit breaker.
-             Refuse to disable when the number OR the % of accounts to disable in a
-             single run exceeds a conservative threshold. On a trip the WHOLE disable
-             pass aborts (disable NOTHING -- never a partial mass-disable), logs loudly
-             and surfaces an alert. Thresholds are configurable; defaults are safe.
+             Refuse to disable when the NUMBER of accounts to disable in a single run
+             exceeds the limit (a count -- PIM 100.119 removed the percentage). On a
+             trip the WHOLE disable pass aborts (disable NOTHING -- never a partial
+             mass-disable), logs loudly and surfaces an alert. The limit is set by a
+             SuperAdmin on Operations > Guards inside a floor and a ceiling; default 3.
 
     GUARD 3  Feature OFF by default.
              The account-disable / offboarding capability is DISABLED unless an
@@ -89,9 +90,10 @@ function Get-PimSafetyKnobNames {
     [CmdletBinding()] param()
     @(
         @{ name = 'PIM_AccountDisableEnabled'; env = 'PIM_AccountDisableEnabled'; what = 'the account-disable opt-in/opt-out' }
-        @{ name = 'PIM_DisableMaxCount';       env = 'PIM_DisableMaxCount';       what = 'G2 absolute blast-radius cap' }
-        @{ name = 'PIM_DisableMaxPercent';     env = 'PIM_DisableMaxPercent';     what = 'G2 percentage blast-radius cap' }
-        @{ name = 'PIM_RemoveMaxCount';        env = 'PIM_RemoveMaxCount';        what = 'G4 universal removal budget' }
+        @{ name = 'PIM_DisableMaxCount';       env = 'PIM_DisableMaxCount';       what = 'G2 blast-radius cap (can only LOWER the limit set on the Guards page)' }
+        # PIM 100.119 (owner 2026-10-13: counts only, "no percentage anywhere"): PIM_DisableMaxPercent IS GONE with the
+        # percentage rule it set. Nothing reads it, so it is not listed -- a knob that does nothing is not advertised.
+        @{ name = 'PIM_RemoveMaxCount';        env = 'PIM_RemoveMaxCount';        what = 'G4 universal removal budget (can only LOWER the limit set on the Guards page)' }
         # 🔴 71.22 -- PIM_RemoveUnmanagedAdmins IS GONE. It gated a capability that no longer
         # exists: PIM never disables an account merely because it is absent from the desired set
         # (operator, 2026-09-16). Nothing reads the knob, so listing it would advertise a switch
@@ -202,41 +204,36 @@ function Test-PimExplicitFlagValue {
 # guard still reported itself as active. A cap that can be raised without limit is not a
 # circuit breaker, it is a suggestion. The ceilings are deliberately generous enough for
 # any legitimate offboarding batch and far below "the whole tenant".
-$script:PimDisableMaxCountCeiling   = 50
-$script:PimDisableMaxPercentCeiling = 25
+#
+# PIM 100.119 (owner 2026-10-13: "drop the percentage in the guards and focus alone on amounts like 5" / "Approved,
+# SuperAdmin sets them"): the breaker is a COUNT, and only a count -- the percentage dimension and its
+# PIM_DisableMaxPercent knob are removed. The count is the limit a SuperAdmin sets on Operations > Guards
+# (PIM-GuardLimits.ps1, pim.Settings 'GuardLimits', inside its floor and ceiling; default 3). The PIM_DisableMaxCount knob
+# ($global: / environment) can still LOWER it for one process and can no longer raise it: the people who may raise a
+# limit are the tenant's SuperAdmins, on the page, audited -- not an environment variable.
+# Every number below is a literal returned by a function, never a $script: variable (BUG-79-6b).
+if (-not (Get-Command Get-PimGuardLimit -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-GuardLimits.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-GuardLimits.ps1') }
+
+# The DEFAULT is 3 (owner 2026-10-13, after the review; it was 5): a literal here and in the limit catalog.
+function Get-PimDisableMaxCountDefault { 3 }
 
 function Get-PimDisableMaxCount {
-    # Absolute cap: refuse a run that would disable MORE than this many accounts.
-    # CmdletBinding so a caller can route/suppress the override warnings below
-    # (-WarningAction / -WarningVariable); without it those are silently unbound.
+    # The cap: refuse a run that would disable MORE than this many accounts.
+    # CmdletBinding so a caller can route/suppress the warning below (-WarningAction / -WarningVariable).
     [CmdletBinding()] param()
+    $lim = 3
+    if (Get-Command Get-PimGuardLimit -ErrorAction SilentlyContinue) { try { $lim = [int](Get-PimGuardLimit -GuardId 'engine.disable-guard' -Fallback 3) } catch { $lim = 3 } }
+    if ($lim -lt 1) { $lim = 3 }
     $v = Get-PimSafetyKnob -Name 'PIM_DisableMaxCount'      # SEC-07: $global: then $env:
     if ($null -ne $v -and "$v" -match '^\d+$') {
         $req = [int]$v
-        if ($req -gt $script:PimDisableMaxCountCeiling) {
-            Write-Warning ("PIM_DisableMaxCount={0} exceeds the hard ceiling {1} -- CLAMPED to {1}. The mass-disable breaker cannot be raised past its ceiling." -f $req, $script:PimDisableMaxCountCeiling)
-            return $script:PimDisableMaxCountCeiling
+        if ($req -gt $lim) {
+            Write-Warning ("PIM_DisableMaxCount={0} is above the limit of {1} set for the account-disable breaker -- IGNORED, {1} applies. This setting can only lower the limit; a SuperAdmin raises it on Operations > Guards." -f $req, $lim)
+            return $lim
         }
-        Write-Warning ("PIM_DisableMaxCount override IN EFFECT: {0} (default 5). The mass-disable breaker is running wider than standard." -f $req)
         return $req
     }
-    return 5
-}
-function Get-PimDisableMaxPercent {
-    # Relative cap (% of the SCANNED live population): refuse a run that would disable
-    # MORE than this fraction of everything it looked at. 0 disables this dimension.
-    [CmdletBinding()] param()
-    $v = Get-PimSafetyKnob -Name 'PIM_DisableMaxPercent'    # SEC-07: $global: then $env:
-    if ($null -ne $v -and "$v" -match '^\d+(\.\d+)?$') {
-        $req = [double]$v
-        if ($req -gt $script:PimDisableMaxPercentCeiling) {
-            Write-Warning ("PIM_DisableMaxPercent={0} exceeds the hard ceiling {1} -- CLAMPED to {1}." -f $req, $script:PimDisableMaxPercentCeiling)
-            return [double]$script:PimDisableMaxPercentCeiling
-        }
-        Write-Warning ("PIM_DisableMaxPercent override IN EFFECT: {0} (default 10)." -f $req)
-        return $req
-    }
-    return 10
+    return $lim
 }
 
 function Test-PimAccountDisableEnabled {
@@ -278,29 +275,24 @@ function Test-PimMassDisableSafe {
     # GUARD 2 -- blast-radius check. Returns the decision object for a disable pass.
     #   abort  = $true  -> DO NOT disable anything this run (caller must skip ALL removes)
     #   reason = why
-    # Trips when the proposed disable count exceeds the absolute cap OR the % cap.
+    # Trips when the proposed disable count exceeds the cap. PIM 100.119: a COUNT only -- the share of the scanned
+    # population no longer decides anything (the owner's example: 2 of 3 is 67 % and says nothing about 2 being many).
+    # -MaxPercent is still ACCEPTED so an older caller keeps binding, and is IGNORED.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][int]$ToDisable,   # how many accounts this run would disable
-        [Parameter(Mandatory)][int]$Scanned,     # size of the scanned live population
+        [Parameter(Mandatory)][int]$Scanned,     # size of the scanned live population (reported, never a rule)
         [int]$MaxCount = -1,
         [double]$MaxPercent = -1
     )
     if ($MaxCount   -lt 0) { $MaxCount   = Get-PimDisableMaxCount }
-    if ($MaxPercent -lt 0) { $MaxPercent = Get-PimDisableMaxPercent }
     if ($ToDisable -le 0) {
-        return [pscustomobject]@{ abort=$false; reason='nothing to disable'; toDisable=$ToDisable; scanned=$Scanned; maxCount=$MaxCount; maxPercent=$MaxPercent }
+        return [pscustomobject]@{ abort=$false; reason='nothing to disable'; toDisable=$ToDisable; scanned=$Scanned; maxCount=$MaxCount }
     }
     if ($ToDisable -gt $MaxCount) {
-        return [pscustomobject]@{ abort=$true; reason=("would disable $ToDisable accounts (> absolute cap $MaxCount)"); toDisable=$ToDisable; scanned=$Scanned; maxCount=$MaxCount; maxPercent=$MaxPercent }
+        return [pscustomobject]@{ abort=$true; reason=("would disable $ToDisable accounts (more than the limit of $MaxCount per run)"); toDisable=$ToDisable; scanned=$Scanned; maxCount=$MaxCount }
     }
-    if ($MaxPercent -gt 0 -and $Scanned -gt 0) {
-        $pct = (100.0 * $ToDisable / $Scanned)
-        if ($pct -gt $MaxPercent) {
-            return [pscustomobject]@{ abort=$true; reason=("would disable $ToDisable of $Scanned scanned accounts ({0:N1}% > cap {1}%)" -f $pct, $MaxPercent); toDisable=$ToDisable; scanned=$Scanned; maxCount=$MaxCount; maxPercent=$MaxPercent }
-        }
-    }
-    return [pscustomobject]@{ abort=$false; reason='within blast-radius limits'; toDisable=$ToDisable; scanned=$Scanned; maxCount=$MaxCount; maxPercent=$MaxPercent }
+    return [pscustomobject]@{ abort=$false; reason='within the limit'; toDisable=$ToDisable; scanned=$Scanned; maxCount=$MaxCount }
 }
 
 function Test-PimDisablePassAllowed {
@@ -338,12 +330,12 @@ function Test-PimDisablePassAllowed {
     if (-not (Test-PimDesiredSetResolved -Desired $Desired -Resolved $DesiredResolved)) {
         return [pscustomobject]@{ allowed=$false; abort=$true; tripped='empty-desired'; reason='desired set is empty/unresolved -- refusing to disable (a disable requires a positively-confirmed desired set)'; toDisable=$ToDisable; scanned=$Scanned; tenantId=$TenantId; environment=$envUsed }
     }
-    # G2: blast radius
-    $mass = Test-PimMassDisableSafe -ToDisable $ToDisable -Scanned $Scanned -MaxCount $MaxCount -MaxPercent $MaxPercent
+    # G2: blast radius -- a COUNT (PIM 100.119). -MaxPercent is accepted for older callers and ignored.
+    $mass = Test-PimMassDisableSafe -ToDisable $ToDisable -Scanned $Scanned -MaxCount $MaxCount
     if ($mass.abort) {
-        return [pscustomobject]@{ allowed=$false; abort=$true; tripped='mass-disable'; reason=("circuit breaker: " + $mass.reason); toDisable=$ToDisable; scanned=$Scanned; maxCount=$mass.maxCount; maxPercent=$mass.maxPercent; tenantId=$TenantId; environment=$envUsed }
+        return [pscustomobject]@{ allowed=$false; abort=$true; tripped='mass-disable'; reason=("circuit breaker: " + $mass.reason); toDisable=$ToDisable; scanned=$Scanned; maxCount=$mass.maxCount; tenantId=$TenantId; environment=$envUsed }
     }
-    return [pscustomobject]@{ allowed=$true; abort=$false; tripped=$null; reason='ok'; toDisable=$ToDisable; scanned=$Scanned; maxCount=$mass.maxCount; maxPercent=$mass.maxPercent; tenantId=$TenantId; environment=$envUsed }
+    return [pscustomobject]@{ allowed=$true; abort=$false; tripped=$null; reason='ok'; toDisable=$ToDisable; scanned=$Scanned; maxCount=$mass.maxCount; tenantId=$TenantId; environment=$envUsed }
 }
 
 # =============================================================================
@@ -360,9 +352,9 @@ function Test-PimDisablePassAllowed {
 # ABSOLUTE cap (a bulk "set AccountStatus" edit across many rows still trips it), but:
 #   * G3 defaults ON for it. An EXPLICIT PIM_AccountDisableEnabled=false still wins (SEC-07: a
 #     switch that can be ignored is not a switch), so an operator can still turn it off.
-#   * G2's PERCENTAGE dimension is not applied. It measures "share of the scanned population",
-#     which is the right signal for an inferred removal and the wrong one here: in an 8-admin
-#     tenant disabling ONE named admin is 12.5% and would trip the 10% cap on every run.
+#   * G2 is a COUNT. (It used to have a percentage dimension that this path switched off: in an
+#     8-admin tenant disabling ONE named admin is an eighth of the population and tripped it on
+#     every run. PIM 100.119 removed the percentage from the breaker altogether.)
 # =============================================================================
 function Resolve-PimExplicitDisableOverride {
     # $true when the account-disable knob is UNSET (explicit per-row disables are on by
@@ -387,7 +379,7 @@ function Test-PimExplicitDisablePassAllowed {
         [string]$TenantId = $null
     )
     return (Test-PimDisablePassAllowed -ToDisable $ToDisable -Scanned $Scanned -Desired $Desired -DesiredResolved $DesiredResolved `
-                -FeatureOverride (Resolve-PimExplicitDisableOverride) -MaxCount $MaxCount -MaxPercent 0 -TenantId $TenantId)
+                -FeatureOverride (Resolve-PimExplicitDisableOverride) -MaxCount $MaxCount -TenantId $TenantId)
 }
 
 # =============================================================================
@@ -672,31 +664,62 @@ function Assert-PimAdminPopulationComparable {
 # This gate is DELIBERATELY DIFFERENT from the others:
 #   * ALWAYS ON -- not opt-in, not environment-aware. It applies in a test tenant too.
 #   * applies to EVERY scope's remove set and to the delete paths, not just disable.
-#   * HARD CEILING of 5. An operator may lower it; RAISING it above 5 is clamped, the
+#   * its limit is a COUNT, default 5, that only a SuperAdmin changes (Operations > Guards, inside
+#     a floor and a ceiling). An environment setting may lower it and can never raise it, the
 #     same lesson as IMP-01 (an override that can neuter the guard is not a guard).
 # A trip DROPS the whole remove set for that scope -- never a partial removal -- and
 # ALERTS by email, because the operator's instruction was that this must be noticed.
-# §96.6 / BUG-291: the ONLY way past it is a guard RELEASE (PIM-GuardRelease.ps1): a SuperAdmin releases the exact held
-# plan (plan hash) for one run or until <= 24 h, and the engine raises the budget for that run to the plan's count, at
-# most 50. The configured budget itself still cannot be raised.
+# PIM 100.119 (owner 2026-10-13): two ways past it, both for an EXACT LIST, both a SuperAdmin of the tenant, both recorded:
+#   * the list is approved when it is COMMITTED (the commit popup) -- the run applies exactly those items without counting
+#     them against the budget, whatever their number (Resolve-PimRemoveBudgetApproval, PIM-GuardRelease.ps1);
+#   * a plan the run already holds is RELEASED on Operations > Guards for one run or until <= 24 h (plan hash).
+# The ceiling of 50 on a release is gone: what is approved is the list itself, not a number.
+# THE BUDGET ITSELF is the limit a SuperAdmin sets on Operations > Guards (PIM-GuardLimits.ps1, pim.Settings 'GuardLimits',
+# inside its floor and ceiling; default 5). The PIM_RemoveMaxCount knob ($global: / environment) can only LOWER it.
+# Every number is a literal returned by a function, never a $script: variable (BUG-79-6b).
 # =============================================================================
-$script:PimRemoveBudgetDefault = 5
-$script:PimRemoveBudgetCeiling = 5
+function Get-PimRemoveBudgetDefault { 5 }
 
 function Get-PimRemoveBudget {
-    # The max removals/deletes allowed in ONE scope pass. Lowering is honoured; raising
-    # above the ceiling is clamped and warned about (IMP-01's lesson).
+    # The max removals/deletes allowed in ONE scope pass: the limit set on the Guards page (default 5). The knob can
+    # lower it for this process; a knob above the limit is ignored and warned about (IMP-01's lesson).
     [CmdletBinding()] param()
+    $lim = 5
+    if (Get-Command Get-PimGuardLimit -ErrorAction SilentlyContinue) { try { $lim = [int](Get-PimGuardLimit -GuardId 'engine.remove-budget' -Fallback 5) } catch { $lim = 5 } }
+    if ($lim -lt 1) { $lim = 5 }
     $req = Get-PimSafetyKnob -Name 'PIM_RemoveMaxCount'     # SEC-07: $global: then $env:
-    if ($null -eq $req -or "$req".Trim() -eq '') { return $script:PimRemoveBudgetDefault }
+    if ($null -eq $req -or "$req".Trim() -eq '') { return $lim }
     $n = 0
-    if (-not [int]::TryParse("$req".Trim(), [ref]$n)) { return $script:PimRemoveBudgetDefault }
+    if (-not [int]::TryParse("$req".Trim(), [ref]$n)) { return $lim }
     if ($n -lt 0) { return 0 }
-    if ($n -gt $script:PimRemoveBudgetCeiling) {
-        Write-Warning ("PIM_RemoveMaxCount={0} exceeds the hard ceiling {1} -- CLAMPED. The removal budget cannot be raised above {1}." -f $n, $script:PimRemoveBudgetCeiling)
-        return $script:PimRemoveBudgetCeiling
+    if ($n -gt $lim) {
+        Write-Warning ("PIM_RemoveMaxCount={0} is above the removal budget of {1} -- IGNORED, {1} applies. This setting can only lower the budget; a SuperAdmin raises it on Operations > Guards." -f $n, $lim)
+        return $lim
     }
     return $n
+}
+
+function Get-PimRemoveBudgetWayThrough {
+    <#
+      PURE. How a held removal of -Scope gets through, in the words of what is really possible there (PIM 100.117 found the
+      mail sending people to a release that did not exist for group deletion):
+        kind 'commit+release'  the engine's remove pass and group deletion: approved at commit, or released on the Guards page
+        kind 'batches'         a path with no approval of a list (the offboarding pass, a group DELETE from the queue)
+      @{ kind; mail (HTML-safe sentence); todo (plain); action (plain, for the guard record) }.
+    #>
+    param([string]$Scope = '', [int]$Budget = 5)
+    $s = "$Scope".Trim()
+    if ($s -in @('AdminOffboarding', 'GroupDelete')) {
+        $t = ("Apply them in batches of at most {0}: there is no approval of a whole list for this kind of change." -f $Budget)
+        return [pscustomobject]@{ kind = 'batches'; mail = $t; todo = ("Read the held items on Jobs > Engine logs & errors, then apply them in batches of at most {0}" -f $Budget); action = "Open Jobs > Engine logs & errors and read the held items. $t" }
+    }
+    $what = if ($s -eq 'GroupRetirement') { 'groups' } else { 'removals' }
+    $mail = ("Apply them in batches of at most {1}, or let a SuperAdmin approve exactly this list: open Operations &gt; Guards, read the held {0} and release that plan for one run -- " +
+             "the next run then applies exactly those, whatever their number. The next time, approve the list when you commit it: " +
+             "Review &amp; commit asks a SuperAdmin for it and the run does not hold it.") -f $what, $Budget
+    $todo = ("Read the held items on Operations > Guards and let a SuperAdmin release exactly that plan for one run, or apply them in batches of at most {0}" -f $Budget)
+    $action = ("Open Operations > Guards: a SuperAdmin reads the held {0} and releases exactly that plan for one run. A list approved at commit (Review & commit) is not held." -f $what)
+    return [pscustomobject]@{ kind = 'commit+release'; mail = $mail; todo = $todo; action = $action }
 }
 
 function Test-PimRemoveBudgetAllowed {
@@ -922,10 +945,12 @@ function Write-PimRemoveBudgetAlert {
                "read or a bulk edit can never clear out access in one pass. This run wanted to delete {1}, which is over that ceiling, " +
                "so it applied NONE of them and left '{2}' exactly as it was. {3}") -f `
                $Decision.budget, $what, $Decision.scope, $(if ($kinds.Count) { '' } else { 'Nothing else in this run was affected.' })
+    # PIM 100.119 (7) / 100.117: the way through is said per scope -- the old text sent every reader to "release it on
+    # Operations > Guards (at most 50)", which was not possible for group deletion and is no longer a limit anywhere.
+    $way = Get-PimRemoveBudgetWayThrough -Scope "$($Decision.scope)" -Budget ([int]$Decision.budget)
     $action = ("Open Jobs > Engine logs &amp; errors and read the {0} held item(s) -- each one names exactly what it would have deleted. " +
-               "If they are all intended, apply them in batches of at most {1}, or a SuperAdmin releases exactly this plan for one run " +
-               "on Operations &gt; Guards (at most 50). If they are NOT intended, nothing needs undoing: " +
-               "no change was made.") -f $Decision.toRemove, $Decision.budget
+               "If they are all intended: {1} If they are NOT intended, nothing needs undoing: " +
+               "no change was made.") -f $Decision.toRemove, $way.mail
     try {
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
             Write-PimAuditEvent -Action 'engine.remove.budget.exceeded' -Target "$($Decision.scope)" -After @{
@@ -941,11 +966,11 @@ function Write-PimRemoveBudgetAlert {
             -Headline $headline -Detail $detail -Action $action `
             -Who 'Customer' -Status 'Held back' `
             -Problem ("{0} deletion(s) in '{1}' were held back by a safety limit of {2} per run: nothing was changed" -f $Decision.toRemove, $Decision.scope, $Decision.budget) `
-            -Todo ("Read the held items on Jobs > Engine logs & errors, then apply them in batches of at most {0} or let a SuperAdmin release this plan on Operations > Guards" -f $Decision.budget)
+            -Todo $way.todo
     # GUARD-1: state + audit 'guard.trip' + telemetry (the mail above IS this guard's mail)
     if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
         [void](Invoke-PimGuardTrip -GuardId 'engine.remove-budget' -Outcome halted -Area "$($Decision.scope)" -Job 'engine' -CallerMailed `
-            -Title ("{0} deletion(s) in '{1}' were blocked" -f $Decision.toRemove, $Decision.scope) -Detail $headline -ActionText 'Open Jobs > Engine logs & errors and read the held items; to let exactly that plan through once, release it on Operations > Guards (at most 50).' `
+            -Title ("{0} deletion(s) in '{1}' were blocked" -f $Decision.toRemove, $Decision.scope) -Detail $headline -ActionText $way.action `
             -Measured @{ toRemove = $Decision.toRemove } -Thresholds @{ budget = $Decision.budget } -HeldCount ([int]$Decision.toRemove))
     }
     if ($PassThru) { return $r }

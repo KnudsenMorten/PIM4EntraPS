@@ -33,6 +33,9 @@
       3. Identities         -- the three objects above, for -GmsaName and (when given) -ServerGmsaName. AES256 only.
       4. Rights             -- on <GmsaName>-PermissionGroup, least privilege per OU:
                                -GroupsOu        create groups; write member / displayName / description on its groups
+                               -AllowGroupCleanup: also delete group objects in -GroupsOu -- needed only for the reviewed
+                                                clean-up of old PIM groups (a SuperAdmin approves the exact list in PIM
+                                                Manager; without this right an approved deletion is reported as refused).
                                -AdminAccountsOu create users; full control of the user objects BELOW that OU
                                -GrantProtectedGroupMembership: write 'member' on AdminSDHolder (adminCount=1 groups: SDProp
                                                 replaces their ACL hourly, so an OU grant never reaches them).
@@ -65,6 +68,8 @@ param(
     [Parameter(Mandatory)][string]$GroupsOu,
     [string[]]$AdminAccountsOu = @(),
     [switch]$GrantProtectedGroupMembership,
+    # PIM 100.123: the reviewed clean-up of old PIM groups -- the worker may DELETE group objects in -GroupsOu (opt-in)
+    [switch]$AllowGroupCleanup,
     # server onboarding, tier-split: its own identity + the GPO that makes its PermissionGroup local admin on -ServerOu
     [ValidatePattern('^$|^[A-Za-z0-9-]{1,15}$')][string]$ServerGmsaName = '',
     [string[]]$ServerOu = @(),
@@ -332,6 +337,11 @@ function Grant-Ace([string]$Dn, [string[]]$Specs, [string]$Why) {
 # READ on the OU itself first (2026-10-04, internal: the Delegation Groups OU had inheritance OFF, so the worker could
 # not even see it and every create failed with "Cannot find an object with identity").
 Grant-Ace -Dn $GroupsOu -Why 'PIM-for-AD groups: read the OU + create + member/displayName/description' -Specs @('/I:T GR', '/I:T CC;group', '/I:S RPWP;member;group', '/I:S RPWP;displayName;group', '/I:S RPWP;description;group')
+if ($AllowGroupCleanup) {
+    # PIM 100.123: "Delete Group objects" on the groups OU (this object and all descendants). Nothing is deleted by this
+    # grant: the worker deletes only the exact groups a SuperAdmin approved on the clean-up review page.
+    Grant-Ace -Dn $GroupsOu -Why 'PIM-for-AD groups: delete group objects (the reviewed clean-up of old PIM groups)' -Specs @('/I:T DC;group')
+}
 foreach ($ou in @($AdminAccountsOu | Where-Object { "$_".Trim() })) {
     Grant-Ace -Dn $ou -Why 'admin accounts: create users + full control of the users below' -Specs @('/I:T CC;user', '/I:S GA;;user')
 }

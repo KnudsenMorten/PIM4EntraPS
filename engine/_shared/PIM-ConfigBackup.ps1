@@ -51,7 +51,14 @@ function Get-PimConfigBackupSettingDenyList {
     [ordered]@{
         secret   = @('ApiKeys', 'InvardiaInstallKey', 'LicenceRequestToken', 'EmergencyPassphrase', 'SqlConnectionString',
                      'StorePointer', 'SqlStore', 'ClientSecret', 'SupportClientSecret')
+        # REVIEW FIXES 2026-10-13: ReconcileRemovalMode, EnableAutomaticOffboarding and GuardReleaseSecondPerson are this
+        # environment's own protection switches. A restore wrote them as any other setting -- or BLANKED them: a ticked
+        # name the backup does not hold is written as NULL, and a blank removal-mode row means ENFORCE -- past the
+        # confirmation and the "count you saw" check of the Settings page, tools/pim-manager/_settings.ps1, and it
+        # switched the second person of a guard release off with no 'settings.guard-release-second-person' audit.
+        # They are changed on their own pages only.
         identity = @('License', 'Licence', 'LicenceState', 'Edition', 'EditionUpgrade', 'InstallId', 'TelemetryInstallId',
+                     'ReconcileRemovalMode', 'EnableAutomaticOffboarding', 'GuardReleaseSecondPerson',
                      'InstallKeyClaimState', 'SchedulerTickJobId', 'DemoMode', 'DemoGuestGroup')   # s98: a restore never flips demo mode
         state    = @('UpdateState', 'SchedulerTriggers', 'JobRunHistory', 'ConvergenceState', 'EngineItemFailures',
                      'HybridWorkerHeartbeat', 'HybridAdSyncLive', 'HybridAdSyncLiveWatch', 'RecalcSignature', 'RecalcEntitySignatures',
@@ -63,8 +70,14 @@ function Get-PimConfigBackupSettingDenyList {
                      'DiscoveryBaseline', 'DiscoveryRoleBaseline', 'DownlinkIntents', 'DownlinkIntentsApplied', 'DownlinkApplied',
                      'EngineDesiredCounts', 'AdminOffboardState', 'ConformanceTemplateState',
                      'DefenderRoleCreatePending', 'IntakeRequests', 'LifecycleEscalationLog', 'ChangeQueue', 'DesiredState',
-                     'DockerBuildRequest', 'SchedulerState', 'SchedulerLease')
-        statePrefix = @('JobRunOutput:', 'SchedulerState', 'SchedulerLease', 'JobScope')
+                     'DockerBuildRequest', 'SchedulerState', 'SchedulerLease',
+                     # PIM 100.119 B1: the guards' own records. An old copy written over the live one would make a consumed or
+                     # revoked approval / release ACTIVE again (used = []), and move a limit with no 'guard.limit' audit.
+                     # A limit is set by a SuperAdmin on the Guards page, never by a restore.
+                     'GuardApprovals', 'GuardReleases', 'GuardHolds', 'GuardLimits',
+                     # PIM 100.123: the AD clean-up / server-group approvals and the worker's own records -- an old approval restored would be usable again
+                     'HybridAdCleanupApproval', 'HybridAdServerAutoGroupsApproval', 'AdServerAutoGroups', 'AdServerAutoGroupsWaiting', 'AdServerAutoGroupsProgress', 'AdCleanupResult', 'AdCleanupLocalAdmin')
+        statePrefix = @('JobRunOutput:', 'SchedulerState', 'SchedulerLease', 'JobScope', 'HybridAdSyncMemory')   # 100.122 F1: the AD sync's memory (Entra ids of THIS tenant) is never restored
         # ...Change (case-sensitive, PascalCase) = a PENDING change request (e.g. the break-glass maker/checker request) --
         # runtime state, never configuration. Named by pattern on purpose: the engine never names that request row
         # (Test-PimBreakGlassMakerChecker), and 'Exchange' never matches.

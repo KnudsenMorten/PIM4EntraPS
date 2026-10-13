@@ -341,6 +341,48 @@ function Test-PimQueueEntryNeedsOwnCommit {
     return ($t -eq 'group-delete')
 }
 
+function Get-PimQueueGroupDeleteDefinedNames {
+    <#
+      🔒 100.122 F2 (audit 2026-10-13) -- the names of every group PIM Manager DEFINES (retired rows included), for the
+      queued delete's guard 6, read FAIL CLOSED: @{ ok; names; reason; entities }.
+      ok = $true ONLY when
+        * the group-definition reader is loaded and did not throw, AND
+        * it read at least one definition entity, AND
+        * EVERY entity it read is flagged positively resolved ($global:PIM_DesiredResolved[<entity>] = $true -- the flag
+          Get-PimDesiredRowsFromStore sets: $true after a store read that answered, $false after one that failed or
+          when there is no store to read).
+      Anything else is ok = $false with the reason, and the caller deletes nothing (retried on the next drain).
+      How the entities are known without a second copy of the list: the flags are collected in a fresh table for the
+      duration of this one read, then merged back into the process's table (other readers see the newest flags).
+    #>
+    $out = [ordered]@{ ok = $false; names = @(); reason = ''; entities = @() }
+    if (-not (Get-Command Get-PimGroupDefinitionRows -ErrorAction SilentlyContinue)) {
+        $out.reason = 'the group definition reader (PIM-EngineProviders.ps1) is not loaded in this engine'
+        return [pscustomobject]$out
+    }
+    $saved = $global:PIM_DesiredResolved
+    $probe = @{}
+    $rows = @(); $err = ''
+    $global:PIM_DesiredResolved = $probe
+    try { $rows = @(Get-PimGroupDefinitionRows -IncludeRetired) }
+    catch { $err = "$($_.Exception.Message)" }
+    finally {
+        # the reader may have replaced the table (it does when the variable is not a hashtable): read what is there now
+        $now = $global:PIM_DesiredResolved
+        if (($now -is [hashtable]) -and -not [object]::ReferenceEquals($now, $probe)) { foreach ($k in @($now.Keys)) { $probe[$k] = $now[$k] } }
+        if ($saved -is [hashtable]) { foreach ($k in @($probe.Keys)) { $saved[$k] = $probe[$k] }; $global:PIM_DesiredResolved = $saved }
+        else { $global:PIM_DesiredResolved = $probe }
+    }
+    $out.entities = @($probe.Keys | Sort-Object)
+    if ($err) { $out.reason = "the read failed: $err"; return [pscustomobject]$out }
+    $bad = @($probe.Keys | Where-Object { -not [bool]$probe[$_] } | Sort-Object)
+    if ($bad.Count) { $out.reason = "the definitions '$($bad -join "', '")' could not be read from the store"; return [pscustomobject]$out }
+    if (-not $probe.Count) { $out.reason = 'no definition entity was positively read (the store did not confirm a single read)'; return [pscustomobject]$out }
+    $out.ok = $true
+    $out.names = @($rows | Where-Object { $null -ne $_ } | ForEach-Object { "$($_.GroupName)" } | Where-Object { "$_".Trim() })
+    return [pscustomobject]$out
+}
+
 function Invoke-PimQueueGroupDelete {
     <#
       🔒 PIM 100.22 (d) (owner 2026-10-09) -- the ENGINE half of Drift > Delete of a whole extra group.
@@ -410,12 +452,19 @@ function Invoke-PimQueueGroupDelete {
     if ($same.Count -gt 1) { return (& $refuse $true ("{0} live groups are named '{1}' (ids {2}) -- PIM cannot prove which one was staged, so it deletes none. Rename or delete the other group first." -f $same.Count, $gn, (@($same | ForEach-Object { "$($_.id)" }) -join ', '))) }
 
     # 6. defined in PIM now (an Import into PIM after the Delete wins)
-    if (-not $DefinedGroupNames) {
-        if (Get-Command Get-PimGroupDefinitionRows -ErrorAction SilentlyContinue) { $DefinedGroupNames = { @(Get-PimGroupDefinitionRows -IncludeRetired | ForEach-Object { "$($_.GroupName)" }) } }
-        else { return (& $refuse $false 'the PIM group definitions cannot be read in this engine (PIM-EngineProviders.ps1 not loaded). It will be retried.') }
-    }
+    # 🔒 100.122 F2: the read must be PROVEN, not merely "did not throw". A failed store read of a definition entity does
+    #    not throw -- it answers an empty list and flags the entity unresolved (Get-PimDesiredRowsFromStore) -- so a
+    #    DEFINED group would pass this guard as "not defined" exactly while the store is unreadable (the same partial read
+    #    that listed it as an extra on the Drift page). Get-PimQueueGroupDeleteDefinedNames refuses unless every entity
+    #    the read touched is positively resolved. (-DefinedGroupNames is the test seam and is taken as given.)
     $defined = $null
-    try { $defined = @(& $DefinedGroupNames) } catch { return (& $refuse $false "the PIM group definitions could not be read ($($_.Exception.Message)) -- never delete on a guess. It will be retried.") }
+    if (-not $DefinedGroupNames) {
+        $dn = Get-PimQueueGroupDeleteDefinedNames
+        if (-not $dn.ok) { return (& $refuse $false "the PIM group definitions could not be read completely ($($dn.reason)) -- never delete on a guess. It will be retried.") }
+        $defined = @($dn.names)
+    } else {
+        try { $defined = @(& $DefinedGroupNames) } catch { return (& $refuse $false "the PIM group definitions could not be read ($($_.Exception.Message)) -- never delete on a guess. It will be retried.") }
+    }
     if (@($defined | Where-Object { "$_".Trim() -ieq $gn }).Count) { return (& $refuse $true "'$gn' is now DEFINED in PIM (imported after the Delete was queued) -- PIM never deletes a group it defines. Discard this entry, or remove the definition first.") }
 
     # 7. break-glass: no break-glass account may lose this group's access with it

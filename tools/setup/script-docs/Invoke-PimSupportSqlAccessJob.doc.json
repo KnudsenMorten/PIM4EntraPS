@@ -1,0 +1,50 @@
+{
+  "script": "Invoke-PimSupportSqlAccessJob.ps1",
+  "product": "pim",
+  "title": "Give the Invardia Support app its database user on an installation with a private database, from inside",
+  "purpose": "Gives the Invardia Support app its database user on a PIM Manager installation whose database is private (public network access off), from inside: a one-time job in the installation's own environment creates the user from the application's client id and adds it to the database owner role, the result is read back, and the job is removed. Nothing is opened; -WhatIf shows it first.",
+  "whenToRun": "Once, on an installation whose SQL server has public network access off, when you have an Invardia Support app and want Invardia support to be able to run PIM Manager's setup and repair scripts against the database. It is the route for a private database: Grant-PimSupportSqlAccess.ps1 stops there, because the machine it runs on cannot reach the database. You run it yourself; Invardia support does not run it for you. Safe to run again: when the user is already there with its role, the job reads once and changes nothing.",
+  "standalone": true,
+  "sourcePath": "tools/setup/Invoke-PimSupportSqlAccessJob.ps1",
+  "runAs": [
+    { "kind": "azureRbac", "name": "Contributor (or Owner)", "scope": "the resource group of the PIM Manager installation", "why": "Reads the installation's database setup job and its environment; creates, starts and deletes the one-time job; and assigns to that job the user-assigned identities the setup job already carries (the assign action on those identities is part of Contributor)." },
+    { "kind": "azureRbac", "name": "Log Analytics Reader", "scope": "the Log Analytics workspace of the installation's Container Apps environment (optional)", "why": "Reads the job's log lines. Without it the verdict still comes from how the execution ended; the script then says the log could not be read." },
+    { "kind": "other", "name": "Your own browser sign-in, or the Invardia Support app's session in this window", "scope": "the target tenant and subscription", "why": "A session of another tenant than -TenantId, or of another application than -SupportAppId, is refused. No Azure CLI, no PowerShell modules, no secret on the command line." }
+  ],
+  "changes": [
+    { "target": "The PIM database", "action": "grant", "object": "a database user for the Invardia Support app, created by the one-time job from the application's client id (CREATE USER ... WITH SID, never FROM EXTERNAL PROVIDER) when no user has that id; an existing user of the Support app is reused whatever its name; nothing is sent when it is already a member of the role", "permission": "db_owner (database owner)", "scope": "the one PIM database the installation's database setup job names (PIM_SqlDatabase, default PimPlatform)", "why": "PIM Manager's setup and repair scripts create database users for the product's identities, add them to fixed database roles, apply the schema and write settings; adding a member to a fixed database role needs db_owner. This is a standing right of the vendor's support identity.", "undo": "Run Grant-PimSupportAccess.ps1 -Remove from inside the network (drops the user), or switch the Invardia Support app off in Microsoft Entra ID, which ends the access at once." },
+    { "target": "Azure (the PIM resource group)", "action": "create", "object": "the one-time Container Apps job (default name caj-pim-supportsql, tag pim-one-time-job = support-sql-access) in the installation's own Container Apps environment, on the image of the database setup job, with the user-assigned identities that job already carries (the SQL admin identity and, when it differs, the image-pull identity). No role, no group membership and no permission is given to any identity.", "scope": "the resource group of the installation", "why": "A private database has no route from outside; the job runs where the route already is. No firewall rule, no public access and no network path is opened.", "undo": "None needed: the run removes the job and reads back that it is gone, also after a failed step. If the run is killed: Azure portal > the resource group > caj-pim-supportsql > Delete, or run the script again (it removes a leftover that carries its tag first)." },
+    { "target": "Azure (the PIM resource group)", "action": "remove", "object": "the one-time job this run created -- or a leftover of the same name that carries this script's tag. A job of that name without the tag is never touched.", "scope": "the resource group of the installation", "why": "The job is for one run. It carries the SQL admin identity, so it is not left behind.", "undo": "None needed: the installation does not use this job." }
+  ],
+  "parameters": [
+    { "name": "TenantId", "required": true, "default": null, "help": "The tenant id. Every sign-in is pinned to it." },
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The subscription of the PIM Manager installation." },
+    { "name": "ResourceGroup", "required": true, "default": null, "help": "The resource group of the PIM Manager installation (its Container Apps environment and jobs)." },
+    { "name": "SupportAppId", "required": false, "default": "the application of the Support session in this window", "help": "The Invardia Support app's application (client) id. Required with a browser sign-in. In the Support app's own session it may be left out; a different id is refused." },
+    { "name": "DbUserName", "required": false, "default": "invardia-support", "help": "The name for the database user when one has to be created. An existing user with the Support app's id keeps its name." },
+    { "name": "TemplateJobName", "required": false, "default": "ca-pim-dbinit", "help": "The installation's own job the identity, the image, the environment and the database are read from. It is only read." },
+    { "name": "JobName", "required": false, "default": "caj-pim-supportsql", "help": "The name of the one-time job (created, run once, removed)." },
+    { "name": "SqlIdentityClientId", "required": false, "default": "the identity the template job names (its setting PIM_DBINIT_MI_CLIENT_ID)", "help": "Only when the template job does not name its database identity itself: the client id of a user-assigned identity that job already carries. An identity the job does not carry is refused." },
+    { "name": "TimeoutSeconds", "required": false, "default": "600", "help": "How long to wait for the one-time job to end." }
+  ],
+  "readsOnly": [
+    "the subscription (visible, and in -TenantId)",
+    "the installation's database setup job (ca-pim-dbinit): environment, image, registry, identities, PIM_SqlServer, PIM_SqlDatabase, PIM_DBINIT_MI_CLIENT_ID",
+    "whether a job of the one-time name is already there, and its tags",
+    "the Invardia Support app's service principal (Microsoft Graph): does the application exist in this tenant",
+    "the one-time job's provisioning state and its execution's status",
+    "the Container Apps environment (its Log Analytics workspace id) and the execution's console lines in that workspace",
+    "inside the job: sys.database_principals and sys.database_role_members in the PIM database (is there a user with the Support app's id, is it in db_owner)"
+  ],
+  "network": [
+    "login.microsoftonline.com (sign-in)",
+    "management.azure.com (Azure Resource Manager)",
+    "graph.microsoft.com",
+    "api.loganalytics.io (the job's log lines)",
+    "localhost (the browser returns the sign-in to a local port on this computer)",
+    "from this computer: nothing to the SQL server. The database is reached only by the job, inside the installation's network, over its private endpoint"
+  ],
+  "whatIf": "Signs in, reads the database setup job, whether a job of the one-time name exists and that the Support app exists in the tenant, prints the database, the identity and the image it would use, and one 'What if:' line for each thing it would do: create the one-time job, start it once (create the database user from the client id and add it to db_owner), read the result, remove the job. It also prints the whole script the job would run. No job is created, nothing reaches the database. Nothing is changed.",
+  "undo": "Run Grant-PimSupportAccess.ps1 -Remove from inside the network (drops the database user), or switch the Invardia Support app off in Microsoft Entra ID. The one-time job is removed by the run itself.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Invoke-PimSupportSqlAccessJob/"
+}

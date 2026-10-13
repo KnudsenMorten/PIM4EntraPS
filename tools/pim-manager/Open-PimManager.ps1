@@ -343,6 +343,9 @@ if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\discovery\PIM-Discov
 # §80.2 server onboarding: a Discovery 'ad-server' item is named by the customer's PIM-for-AD naming (pure functions only
 # are used here -- the AD writes are the hybrid worker's).
 if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\hybrid-ad\PIM-HybridAdGroups.ps1')) { . (Join-Path $solutionRoot 'engine\hybrid-ad\PIM-HybridAdGroups.ps1') }   # §84 Pro: loaded only when present
+# PIM 100.123 (lane adclean): the AD clean-up review, the AD sync's waiting groups and the server discovery settings. It loads
+# engine\hybrid-ad\PIM-HybridAdServerDiscovery.ps1 + PIM-HybridAdCleanup.ps1 itself (pure functions only are used here).
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '_adclean.ps1')) { . (Join-Path $PSScriptRoot '_adclean.ps1') }
 # REQ-AR-2 (operator 2026-09-26): access reviews PER DEPARTMENT, driven by review rules (Settings > Access reviews).
 if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\access-reviews\PIM-AccessReviewCycle.ps1')) { . (Join-Path $solutionRoot 'engine\access-reviews\PIM-AccessReviewCycle.ps1') }   # §84 Pro: loaded only when present
 # §100.42 (owner 2026-10-09: no PowerShell modules; "we dont use that legacy code"): the access-review and template-
@@ -417,8 +420,13 @@ if (Test-Path -LiteralPath $_sensAuthLib) { . $_sensAuthLib }
 #   * Test-PimCommitDeltaGuard  -- empty-set / large-delta safety net on commit +
 #     restore (mirrors the engine disable-guard; the 53-user mass-disable precondition).
 # Loads AFTER PIM-PortalAccess.ps1 (it calls Get-PimGroupFacets / Test-PimPortalCan*).
+# REVIEW FIXES 2026-10-13 (owner: "Refuse the save"): loaded UNCONDITIONALLY -- a missing file stops the Manager (fail
+# closed, as _revaudit.ps1 / _settings.ps1 do). It used to sit behind Test-Path, and the three callers of
+# Test-PimCommitDeltaGuard skipped their check when the function was not there: a missing library = no check, silently.
+# Each of the three now refuses when the function is missing (the commit, the restore of a list, the departments save).
 $_writeGuardLib = Join-Path $solutionRoot 'engine\_shared\PIM-ManagerWriteGuards.ps1'
-if (Test-Path -LiteralPath $_writeGuardLib) { . $_writeGuardLib }
+. $_writeGuardLib
+. (Join-Path $PSScriptRoot '_revaudit.ps1')   # lane revaudit (100.122 F4): who may revoke what -- POST /api/revoke and POST /api/queue/commit call it; a missing file stops the Manager (fail closed)
 
 # Alert FEED + recorded-send proof (engine/_shared/PIM-AlertFeed.ps1, REQUIREMENTS
 # §26c / §28 [H2] + the [M5] residual). The PUSH side of the dashboard: every fired
@@ -1667,11 +1675,12 @@ function Get-PimManagerGroupRetirementEntities {
       'PIM-Definitions-Departments', 'PIM-Definitions-Processes', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg')
 }
 function Test-PimManagerGroupRetirementReleasable {
-    # PURE. Can a guard release (Operations > Guards) let a group-deletion pass over the removal budget through? NO: the
-    # GroupRetirement provider asks Test-PimRemoveBudgetAllowed itself and records no releasable hold; only the engine
-    # core's remove pass goes through Resolve-PimRemoveBudgetRelease. The test suite reads the provider's source and
-    # fails when that changes, so this answer cannot go stale silently.
-    $false
+    # PURE. Can more group deletions than the removal budget get through with an approval? YES since PIM 100.119 (5)
+    # (owner 2026-10-13): the GroupRetirement provider applies the groups a SuperAdmin approved at commit
+    # (Use-PimGuardApprovalItems) and records a releasable hold for the rest (Invoke-PimGuardHoldOrRelease, scope
+    # GroupRetirement). The test suite reads the provider's source and fails when either call is gone, so this answer
+    # cannot go stale silently.
+    $true
 }
 function ConvertTo-PimManagerGroupRetirementFlag {
     # PURE. One value -> $true / $false / $null (not set), with the engine's own vocabulary when it is loaded.
@@ -1726,16 +1735,237 @@ function Get-PimManagerRetireGroupCount {
     }
 }
 function Get-PimManagerGroupRetirementLimits {
-    # The two numbers of the removal guard, read from the code that owns them (never copied): budget =
-    # Get-PimRemoveBudget (PIM-DisableGuard.ps1), releaseCeiling = Get-PimGuardReleaseCeiling (PIM-GuardRelease.ps1).
-    # $null = that function is not loaded here, so the number is not known. The budget is the one THIS process reads; the
-    # engine job may be set lower through its own environment (it can never be set higher).
-    $budget = $null; $ceil = $null
+    # The number of the removal guard, read from the code that owns it (never copied): budget = Get-PimRemoveBudget
+    # (PIM-DisableGuard.ps1) when that file is loaded here, else the limit itself (Get-PimGuardLimit, PIM-GuardLimits.ps1).
+    # $null = neither is loaded, so the number is not known. The budget is the one THIS process reads; the engine job may
+    # be set lower through its own environment (it can never be set higher).
+    # PIM 100.119: releaseCeiling is always $null -- an approval of an exact list has no ceiling. approvable = the groups
+    # can be approved in the commit popup and a held list can be released on the Guards page.
+    $budget = $null
     if (Get-Command Get-PimRemoveBudget -ErrorAction SilentlyContinue) { try { $budget = [int](Get-PimRemoveBudget -WarningAction SilentlyContinue) } catch { $budget = $null } }
-    if (Get-Command Get-PimGuardReleaseCeiling -ErrorAction SilentlyContinue) {
-        try { $c = Get-PimGuardReleaseCeiling -GuardId 'engine.remove-budget'; if ($c -and $null -ne $c.count) { $ceil = [int]$c.count } } catch { $ceil = $null }
+    if ($null -eq $budget -and (Get-Command Get-PimGuardLimit -ErrorAction SilentlyContinue)) { try { $budget = [int](Get-PimGuardLimit -GuardId 'engine.remove-budget') } catch { $budget = $null } }
+    return [ordered]@{ budget = $budget; releaseCeiling = $null; releasable = [bool](Test-PimManagerGroupRetirementReleasable); approvable = [bool](Test-PimManagerGroupRetirementReleasable) }
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# PIM 100.119 (owner 2026-10-13): A GUARD THAT STOPS A COMMIT IS ANSWERED IN THE COMMIT POPUP -- BY A SUPERADMIN.
+# The commit handlers ask Get-PimManagerCommitGuardAsks what this commit needs approved (the exact lists), and
+# Resolve-PimManagerGuardApproval whether the request carries a valid approval of exactly those lists. The server
+# decides every rule; the page only shows what the server said. Nothing here can be satisfied by a role below
+# SuperAdmin, by a setting, by an environment variable or by a caller that is not a signed-in person.
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimManagerGuardRowLabel {
+    # PURE. One row in the words of the popup: the columns that name it, at most six, 'Column=value' joined with ', '.
+    param([AllowNull()][object]$Row, [string]$Base = '')
+    if ($null -eq $Row) { return '' }
+    $want = @('GroupName', 'GroupTag', 'Username', 'UserName', 'UserPrincipalName', 'TargetGroupTag', 'SourceGroupTag', 'RoleDefinitionName', 'AdministrativeUnitTag', 'AzScope', 'AzScopePermission', 'Department', 'Company', 'AssignmentType')
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($n in $want) {
+        $v = ''
+        if ($Row -is [System.Collections.IDictionary]) { if ($Row.Contains($n)) { $v = "$($Row[$n])".Trim() } }
+        elseif ($Row.PSObject.Properties[$n]) { $v = "$($Row.PSObject.Properties[$n].Value)".Trim() }
+        if ($v) { $parts.Add("$n=$v") }
+        if ($parts.Count -ge 6) { break }
     }
-    return [ordered]@{ budget = $budget; releaseCeiling = $ceil; releasable = [bool](Test-PimManagerGroupRetirementReleasable) }
+    if (-not $parts.Count -and $Base -and (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue)) { try { $k = "$(Get-PimStoreRowKey -Base $Base -Row $Row)"; if ($k) { $parts.Add($k) } } catch { } }
+    return ($parts -join ', ')
+}
+function Get-PimManagerGuardRowFlag {
+    # PURE. 'remove' when the row is marked Action = Remove, 'retire' when Lifecycle starts with "retire" AND it names a
+    # group, else ''. The engine's own two tests (Test-PimRowIsRemove, Get-PimRetireGroupRows).
+    param([AllowNull()][object]$Row)
+    if ($null -eq $Row) { return '' }
+    $g = { param($n) if ($Row -is [System.Collections.IDictionary]) { if ($Row.Contains($n)) { "$($Row[$n])".Trim() } else { '' } } elseif ($Row.PSObject.Properties[$n]) { "$($Row.PSObject.Properties[$n].Value)".Trim() } else { '' } }
+    if ((& $g 'Action') -ieq 'Remove') { return 'remove' }
+    if ((& $g 'Lifecycle') -match '(?i)^retire' -and (& $g 'GroupName')) { return 'retire' }
+    return ''
+}
+function Get-PimManagerCommitGuardAsks {
+    <#
+      PURE over what it is given. What ONE commit of -Base needs a SuperAdmin to approve, as a list of asks:
+        @{ key = '<guardId>|<scope>'; guardId; scope; title; text; count; limit; items = [item ids]; labels; listHash; newCount }
+      * manager.commit-removal -- the commit removal check tripped (-DeltaGuard, from Test-PimCommitDeltaGuard): the rows
+        this commit takes out of the list (-Diff.removes). Item id 'commit-remove|<base>|<store key>'.
+      * engine.remove-budget, scope = the list -- the commit MARKS at least one row Action = Remove and the list would
+        then hold more removals nobody has approved than one run may apply (-Budget). The ask is the EXACT list of those
+        rows; rows already covered by an open approval (-OpenItemIds) are left out.
+      * engine.remove-budget, scope GroupRetirement -- the commit marks at least one group Lifecycle = Retire and more
+        groups than the budget would then wait for deletion, counted over all eight group lists (-OtherRetireRows = the
+        stored Retire rows of the OTHER lists, @{ Entity; Row }).
+      A row without an identity (Get-PimGuardItemId: a list that cannot be approved this way, no store key, a row the
+      managing tenant sent) is never part of an ask: it cannot be approved here, and the run holds it as before.
+    #>
+    param([Parameter(Mandatory)][string]$Base, [AllowNull()][object[]]$BeforeRows = @(), [AllowNull()][object[]]$AfterRows = @(), [AllowNull()][object]$Diff,
+          [AllowNull()][object]$DeltaGuard, [AllowNull()][hashtable]$OpenItemIds, [int]$Budget = 5, [AllowNull()][object[]]$OtherRetireRows = @(), [switch]$SkipBudget)
+    $asks = New-Object System.Collections.Generic.List[object]
+    $open = if ($OpenItemIds) { $OpenItemIds } else { @{} }
+    # 1. the commit removal check
+    if ($DeltaGuard -and -not $DeltaGuard.allowed) {
+        $ids = New-Object System.Collections.Generic.List[string]; $labels = New-Object System.Collections.Generic.List[string]
+        $n = 0
+        foreach ($r in @($(if ($Diff) { $Diff.removes } else { @() }))) {
+            if ($null -eq $r) { continue }
+            $n++
+            $k = ''; if (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue) { try { $k = "$(Get-PimStoreRowKey -Base $Base -Row $r)".Trim() } catch { $k = '' } }
+            if (-not $k) { $k = "row-$n" }
+            $ids.Add(("commit-remove|{0}|{1}" -f $Base, $k).ToLowerInvariant()); $labels.Add((Get-PimManagerGuardRowLabel -Row $r -Base $Base))
+        }
+        if (-not $ids.Count) { $ids.Add(("commit-remove|{0}|(the whole list: {1} row(s))" -f $Base, [int]$DeltaGuard.removeCount).ToLowerInvariant()) }
+        $scope = "$Base"
+        # the three cases of the check (PIM 100.119 A1), each in its own words, with its own numbers
+        $text = switch ("$($DeltaGuard.rule)") {
+            'empty-set' { ("This commit takes out ALL {0} row(s) {1} has now -- none of them would be left." -f [int]$DeltaGuard.removeCount, $Base) }
+            'few-left'  { ("This commit takes {0} row(s) out of {1} and would leave {2} of the rows it has now -- {3} or fewer left of a list that has more than {4} rows." -f [int]$DeltaGuard.removeCount, $Base, [int]$DeltaGuard.survive, [int]$DeltaGuard.keep, [int]$DeltaGuard.minList) }
+            default     { ("This commit takes {0} row(s) out of {1} -- more than the limit of {2} rows of one list in one commit." -f [int]$DeltaGuard.removeCount, $Base, [int]$DeltaGuard.limit) }
+        }
+        $asks.Add([pscustomobject][ordered]@{ key = "manager.commit-removal|$scope".ToLowerInvariant(); guardId = 'manager.commit-removal'; scope = $scope; title = 'Commit removal check'
+            text = $text; rule = "$($DeltaGuard.rule)"; count = [int]$DeltaGuard.removeCount; limit = [int]$DeltaGuard.limit; newCount = [int]$DeltaGuard.removeCount
+            items = @($ids.ToArray()); labels = @($labels.ToArray()); listHash = (Get-PimGuardListHash -GuardId 'manager.commit-removal' -Scope $scope -ItemIds $ids.ToArray()) })
+    }
+    if ($SkipBudget -or -not (Get-Command Get-PimGuardItemId -ErrorAction SilentlyContinue)) { return $asks.ToArray() }
+    # 2 / 3. the removal budget, asked at commit
+    $isGroupList = @(@(Get-PimGuardGroupDeletionEntities) | Where-Object { $_ -ieq $Base }).Count -gt 0
+    $isRemoveList = @(@(Get-PimGuardApprovableEntities) | Where-Object { $_ -ieq $Base }).Count -gt 0
+    $flag = if ($isGroupList) { 'retire' } elseif ($isRemoveList) { 'remove' } else { '' }
+    if (-not $flag) { return $asks.ToArray() }
+    $kind = if ($flag -eq 'retire') { 'delete-group' } else { 'remove' }
+    $was = @{}
+    foreach ($r in @($BeforeRows)) { if ((Get-PimManagerGuardRowFlag -Row $r) -eq $flag) { $id = Get-PimGuardItemId -Entity $Base -Row $r -Kind $kind; if ($id) { $was[$id] = $true } } }
+    $now = [ordered]@{}; $new = 0
+    foreach ($r in @($AfterRows)) {
+        if ((Get-PimManagerGuardRowFlag -Row $r) -ne $flag) { continue }
+        $id = Get-PimGuardItemId -Entity $Base -Row $r -Kind $kind
+        if (-not $id -or $now.Contains($id)) { continue }
+        $now[$id] = (Get-PimManagerGuardRowLabel -Row $r -Base $Base)
+        if (-not $was.ContainsKey($id)) { $new++ }
+    }
+    if ($new -lt 1) { return $asks.ToArray() }   # this commit marks nothing new: an unrelated commit is never stopped for old marks
+    if ($flag -eq 'retire') {
+        foreach ($o in @($OtherRetireRows)) {
+            if ($null -eq $o -or "$($o.Entity)" -ieq $Base) { continue }
+            if ((Get-PimManagerGuardRowFlag -Row $o.Row) -ne 'retire') { continue }
+            $id = Get-PimGuardItemId -Entity "$($o.Entity)" -Row $o.Row -Kind delete-group
+            if ($id -and -not $now.Contains($id)) { $now[$id] = ("{0} ({1})" -f (Get-PimManagerGuardRowLabel -Row $o.Row -Base "$($o.Entity)"), "$($o.Entity)") }
+        }
+    }
+    $ids = New-Object System.Collections.Generic.List[string]; $labels = New-Object System.Collections.Generic.List[string]
+    foreach ($id in @($now.Keys)) { if (-not $open.ContainsKey($id)) { $ids.Add($id); $labels.Add("$($now[$id])") } }
+    if ($ids.Count -le $Budget) { return $asks.ToArray() }
+    $scope = if ($flag -eq 'retire') { 'GroupRetirement' } else { "$Base" }
+    $text = if ($flag -eq 'retire') {
+                ("{0} group(s) would then be marked for deletion (Lifecycle = Retire) -- more than the {1} one engine run may delete. Without an approval the run deletes NONE of them. Approved, the run deletes exactly these {0} group(s) in Microsoft Entra ID (where group deletion is switched on): role assignments removed, members taken out, the group deleted. This cannot be undone." -f $ids.Count, $Budget)
+            } else {
+                ("{0} row(s) of {1} would then be marked Action = Remove -- more than the {2} removals one engine run may apply in one scope. Without an approval the run applies NONE of them. Approved, the run removes exactly these {0} item(s), and nothing else, in the tenant." -f $ids.Count, $Base, $Budget)
+            }
+    $asks.Add([pscustomobject][ordered]@{ key = "engine.remove-budget|$scope".ToLowerInvariant(); guardId = 'engine.remove-budget'; scope = $scope; title = $(if ($flag -eq 'retire') { 'Removal budget: group deletion' } else { 'Removal budget' })
+        text = $text; rule = 'remove-budget'; count = $ids.Count; limit = [int]$Budget; newCount = [int]$new
+        items = @($ids.ToArray()); labels = @($labels.ToArray()); listHash = (Get-PimGuardListHash -GuardId 'engine.remove-budget' -Scope $scope -ItemIds $ids.ToArray()) })
+    return $asks.ToArray()
+}
+function Get-PimManagerGuardApprovalMinReason { 10 }
+function Resolve-PimManagerGuardApproval {
+    <#
+      PURE over what it is given. Does the request carry a valid approval of EXACTLY -Asks?
+        -Approval   the request's guardApproval: { approve: true, reason: '...', lists: { '<guardId>|<scope>': '<listHash>' } }
+        -Role / -Identity   the SERVER's reading of who is signed in (Get-PimManagerRole) -- never a value from the request
+      Returns @{ ok; status; code; canApprove; error }:
+        ok                     no ask, or a SuperAdmin approved exactly these lists with a reason
+        403 not-superadmin     the request CARRIES an approval and the caller is not a SuperAdmin
+        409 superadmin-required  nothing approved, the caller is not a SuperAdmin (the popup says who must approve)
+        409 approval-required    nothing approved, the caller is a SuperAdmin (the popup offers Approve)
+        409 reason-required / list-changed   the approval is not valid for what would be saved now
+    #>
+    param([AllowNull()][object[]]$Asks = @(), [AllowNull()][object]$Approval, [string]$Role = '', [string]$Identity = '')
+    $list = @(@($Asks) | Where-Object { $_ })
+    if (-not $list.Count) { return @{ ok = $true; status = 200; code = 'none'; canApprove = $false; error = '' } }
+    # PIM 100.119 B4: ONE function decides "is this the SuperAdmin role", with the rule the route gate uses (any case, not
+    # trimmed) -- and the identity must be a signed-in one.
+    $isSuper = [bool](Test-PimGuardSignedInSuperAdmin -Role $Role -Identity $Identity)
+    $carries = $false
+    if ($null -ne $Approval) {
+        $ap = $null
+        if ($Approval -is [System.Collections.IDictionary]) { if ($Approval.Contains('approve')) { $ap = $Approval['approve'] } }
+        elseif ($Approval.PSObject.Properties['approve']) { $ap = $Approval.approve }
+        $carries = ($ap -is [bool] -and $ap)   # a real JSON true: the text "false" must never read as an approval
+    }
+    if (-not $isSuper) {
+        if ($carries) { return @{ ok = $false; status = 403; code = 'not-superadmin'; canApprove = $false; error = 'Only a SuperAdmin can approve what a guard stops. Nothing was saved.' } }
+        return @{ ok = $false; status = 409; code = 'superadmin-required'; canApprove = $false; error = 'A SuperAdmin must approve this before it is saved. Nothing was saved.' }
+    }
+    if (-not $carries) { return @{ ok = $false; status = 409; code = 'approval-required'; canApprove = $true; error = 'This needs your approval as SuperAdmin before it is saved. Nothing was saved.' } }
+    $get = { param($o, $n) if ($null -eq $o) { $null } elseif ($o -is [System.Collections.IDictionary]) { if ($o.Contains($n)) { $o[$n] } else { $null } } elseif ($o.PSObject.Properties[$n]) { $o.PSObject.Properties[$n].Value } else { $null } }
+    $reason = "$(& $get $Approval 'reason')".Trim()
+    if ($reason.Length -lt (Get-PimManagerGuardApprovalMinReason)) {
+        return @{ ok = $false; status = 409; code = 'reason-required'; canApprove = $true; error = "A reason of at least $(Get-PimManagerGuardApprovalMinReason) characters is required to approve. Nothing was saved." }
+    }
+    $lists = & $get $Approval 'lists'
+    foreach ($a in $list) {
+        $h = "$(& $get $lists "$($a.key)")".Trim().ToLowerInvariant()
+        if (-not $h -or $h -ne "$($a.listHash)".Trim().ToLowerInvariant()) {
+            return @{ ok = $false; status = 409; code = 'list-changed'; canApprove = $true; error = 'What you approved is not what would be saved now: the list changed, or it was not all shown. Read the list again and approve it. Nothing was saved.' }
+        }
+    }
+    return @{ ok = $true; status = 200; code = 'approved'; canApprove = $true; error = ''; reason = $reason }
+}
+function Get-PimManagerGuardAskBody {
+    # PURE. What the commit popup gets when a guard stops a commit: every ask with EVERY row of its list (an approval is
+    # for the exact list, so the whole list is shown -- there is no ceiling on it), whether THIS caller can approve, and
+    # the sentence for each role.
+    param([Parameter(Mandatory)][object[]]$Asks, [Parameter(Mandatory)][hashtable]$Verdict, [string]$Base = '')
+    $out = @(foreach ($a in @($Asks)) {
+        [ordered]@{ key = "$($a.key)"; guardId = "$($a.guardId)"; scope = "$($a.scope)"; title = "$($a.title)"; text = "$($a.text)"; rule = "$($a.rule)"
+            count = [int]$a.count; limit = [int]$a.limit; newCount = [int]$a.newCount; listHash = "$($a.listHash)"
+            labels = @($a.labels); labelsShown = @($a.labels).Count; allShown = $true }
+    })
+    $first = @($Asks)[0]
+    return [ordered]@{
+        ok = $false; base = $Base; gate = "$($first.rule)"; guard = $true; approvalRequired = $true; superAdminRequired = $true
+        canApprove = [bool]$Verdict.canApprove; code = "$($Verdict.code)"; reasonMinLength = (Get-PimManagerGuardApprovalMinReason)
+        guards = @($out); removeCount = [int]$first.count
+        error = ((@($Asks | ForEach-Object { "$($_.text)" }) -join ' ') + ' ' + "$($Verdict.error)")
+    }
+}
+function Save-PimManagerGuardApprovals {
+    <#
+      Record the approvals a commit carried (after the server verified them): one record per ask. The commit removal
+      check's record is CONSUMED (that commit used it); the removal budget's is ACTIVE for the run (or PENDING when the
+      setting 'GuardReleaseSecondPerson' is ON). THROWS when they cannot be stored -- the caller then does not save.
+      Returns the records.
+    #>
+    param([Parameter(Mandatory)][object[]]$Asks, [Parameter(Mandatory)][string]$Reason, [Parameter(Mandatory)][string]$By, [Parameter(Mandatory)][string]$Role, [string]$Base = '', [string]$CommitId = '')
+    $second = $false; try { $second = [bool](Test-PimGuardReleaseSecondPersonOn) } catch { $second = $true }
+    $recs = @(foreach ($a in @($Asks)) {
+        $isCommit = ("$($a.guardId)" -eq 'manager.commit-removal')
+        New-PimGuardApproval -GuardId "$($a.guardId)" -Scope "$($a.scope)" -ItemIds @($a.items) -Labels @($a.labels) -ListHash "$($a.listHash)" -Reason $Reason -By $By -Role $Role `
+            -Base $Base -CommitId $CommitId -Consumed:$isCommit -SecondPerson ($second -and -not $isCommit)
+    })
+    [void](Add-PimGuardApproval -Approvals $recs)
+    return $recs
+}
+function Get-PimManagerGuardOpenItemIds {
+    # The item ids an open (active or pending) approval of the removal budget already covers. An unreadable store =
+    # nothing covered (the commit asks again -- never "covered" on a guess).
+    $open = @{}
+    try {
+        $now = [datetime]::UtcNow
+        foreach ($a in @((Get-PimGuardApprovalsDoc).approvals)) {
+            if ($null -eq $a -or "$($a.guardId)" -ne 'engine.remove-budget') { continue }
+            if ((Get-PimGuardApprovalState -Approval $a -NowUtc $now) -notin @('active', 'pending')) { continue }
+            $used = @{}; foreach ($u in @($a.used)) { $used["$u".Trim().ToLowerInvariant()] = $true }
+            foreach ($i in @($a.items)) { $s = "$i".Trim().ToLowerInvariant(); if ($s -and -not $used.ContainsKey($s)) { $open[$s] = $true } }
+        }
+    } catch { $open = @{} }
+    return $open
+}
+function Get-PimManagerOtherRetireRows {
+    # The stored Lifecycle = Retire rows of the group lists OTHER than -Base, as @{ Entity; Row }. THROWS when the store
+    # cannot be read (the caller then asks for nothing it cannot list -- and says so).
+    param([string]$Base = '')
+    $ents = @(Get-PimGuardGroupDeletionEntities | Where-Object { $_ -ine $Base })
+    $all = Get-PimManagerEntityRowsBulk -Entities $ents
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($e in $ents) { foreach ($r in @($all[$e])) { if ($null -ne $r -and (Get-PimManagerGuardRowFlag -Row $r) -eq 'retire') { $out.Add([pscustomobject]@{ Entity = $e; Row = $r }) } } }
+    return $out.ToArray()
 }
 function Get-PimManagerGroupRetirementConfirmText {
     # PURE. What a SuperAdmin agrees to when switching group deletion ON -- with the real count from the store.
@@ -1746,8 +1976,10 @@ function Get-PimManagerGroupRetirementConfirmText {
     } else { "How many groups are marked Retire right now could NOT be counted ($($Marked.error))." }
     $guard = 'The removal guard still applies.'
     if ($Limits -and $null -ne $Limits.budget) {
-        $guard = "The removal guard still applies: the engine deletes at most $([int]$Limits.budget) groups in one run, and when more marked groups than that still exist it deletes none of them in that run."
-        if (-not $Limits.releasable) { $guard += ' A release on Operations > Guards does not cover group deletion.' }
+        $guard = "The removal guard still applies: without an approval the engine deletes at most $([int]$Limits.budget) groups in one run, and when more marked groups than that still exist it deletes none of them in that run."
+        # PIM 100.119 (the guards build): group deletion goes through the same approval as every removal.
+        if ($Limits.releasable) { $guard += ' A SuperAdmin approves the exact list of groups when the marks are committed (the commit asks for it), or releases a list the run already holds on Operations > Guards; the run then deletes exactly those groups.' }
+        else { $guard += ' A release on Operations > Guards does not cover group deletion.' }
     }
     return ("Switch group deletion ON? On its next full run (the job '$job') the engine will DELETE, in Microsoft Entra ID, every group whose definition is marked Retire: " +
             "its role assignments are removed, its members are taken out and the group is deleted. This cannot be undone. $cnt $guard")
@@ -2352,6 +2584,10 @@ if (Test-Path -LiteralPath $_driftSnapLib) { . $_driftSnapLib }
 $_coverageLib = Join-Path $solutionRoot 'engine\coverage\PIM-Coverage.ps1'
 if (Test-Path -LiteralPath $_coverageLib) { . $_coverageLib }
 if (Test-Path -LiteralPath $validator)  { . $validator }
+. (Join-Path $PSScriptRoot '_settings.ps1')   # PIM 100.121 (lane settings): the feature settings + the two protection switches (functions only)
+$_statesLib = Join-Path $PSScriptRoot '_states.ps1'; if (Test-Path -LiteralPath $_statesLib) { . $_statesLib }   # PIM 100.118: the state of every group, in words (GET /api/group-states)
+# PIM 100.120 (lane listmenu): the saved layouts of the list menu (GET / PUT / DELETE /api/list-layouts).
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '_listmenu.ps1')) { . (Join-Path $PSScriptRoot '_listmenu.ps1') }
 
 # ---------------------------------------------------------------------------
 # Hosted tenant-auth context (no -ConnectPlatform / no mgmt box / no bootstrap).
@@ -4047,26 +4283,48 @@ function Invoke-PimManagerBackupRestore {
     # snapshot first, so a restore is itself undoable (it previously took none), and (b)
     # runs the SAME empty-set / large-delta guard the commit path uses -- refusing to
     # roll back to an empty / much-smaller set unless $Confirm is set.
-    param([Parameter(Mandatory)][string]$Id, [switch]$Confirm)
+    # PIM 100.119: the guard on a restore is answered like the commit's -- a SUPERADMIN approves exactly the rows the
+    # restore takes out (-GuardApproval = the request's guardApproval), with a reason, recorded. -Confirm is accepted
+    # for an older caller and approves nothing. A refusal throws 'restore refused: ...' and leaves what the popup needs
+    # in $script:PimRestoreGuardAsk.
+    param([Parameter(Mandatory)][string]$Id, [switch]$Confirm, [AllowNull()][object]$GuardApproval)
+    $script:PimRestoreGuardAsk = $null
     try { Initialize-PimBackupStore -ConnectionString $script:PimSqlCs } catch { }
     $snap = Get-PimSqlBackupSnapshot -ConnectionString $script:PimSqlCs -Id $Id
     if (-not $snap) { throw "snapshot '$Id' not found" }
     $plan = Get-PimSnapshotRestorePlan -Snapshot $snap
 
     # Current live rows for this entity (the 'before' of the restore).
+    # PIM 100.119, fix list 2026-10-13: FAIL CLOSED. A read that failed used to count as "the list has no rows", so the
+    # removal check below saw nothing to take out and the restore went ahead unchecked. Rows that cannot be read cannot
+    # be checked: nothing is restored.
     $curRows = @()
     try {
         $curRows = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $plan.entity)
-    } catch { $curRows = @() }
+    } catch { throw "the rows '$($plan.entity)' has now could not be read ($($_.Exception.Message)) -- nothing was restored: a restore that cannot be checked is not applied" }
 
     # [Fix 5] empty-set / large-delta guard on the restore (restore is a full-set
     # replace; rows in the live set but not in the snapshot are removed).
+    $restoreAsks = @(); $restoreVerdict = $null
+    # REVIEW FIXES 2026-10-13 (owner: "Refuse the save"): no guard function = NO restore. It used to skip the check.
+    if (-not (Get-Command Test-PimCommitDeltaGuard -ErrorAction SilentlyContinue)) { throw "the guard library is not loaded -- nothing was saved; repair the installation (engine\_shared\PIM-ManagerWriteGuards.ps1 is missing or did not load, so the removal check of this restore cannot run and the restore was not applied)" }
     if (Get-Command Test-PimCommitDeltaGuard -ErrorAction SilentlyContinue) {
         $restoreCount = @($plan.rows).Count
-        $removed = [Math]::Max(0, (@($curRows).Count) - $restoreCount)
-        $g = Test-PimCommitDeltaGuard -BeforeCount (@($curRows).Count) -AfterCount $restoreCount -RemoveCount $removed -Confirm:$Confirm
+        $rBase = if ("$($plan.base)".Trim()) { "$($plan.base)" } else { "$($plan.entity)" }
+        $rDiff = $null; try { $rDiff = Compare-PimRowSets -Before $curRows -After @($plan.rows) -Base $rBase } catch { $rDiff = $null }
+        # No diff = which rows survive is not known: counted as NONE surviving (every current row taken out), never as
+        # "the difference in size" -- a backup of 25 other rows over 25 rows is 25 removals, not 0 (review R3).
+        $removed = if ($rDiff) { @($rDiff.removes).Count } else { @($curRows).Count }
+        $g = Test-PimCommitDeltaGuard -BeforeCount (@($curRows).Count) -AfterCount $restoreCount -RemoveCount $removed
         if (-not $g.allowed) {
-            throw "restore refused: $($g.reason)"
+            $restoreAsks = @(Get-PimManagerCommitGuardAsks -Base "$($plan.entity)" -BeforeRows $curRows -AfterRows @($plan.rows) -Diff $rDiff -DeltaGuard $g -SkipBudget)
+            $rRole = Get-PimManagerRole
+            $restoreVerdict = Resolve-PimManagerGuardApproval -Asks $restoreAsks -Approval $GuardApproval -Role "$($rRole.role)" -Identity "$($rRole.identity)"
+            if (-not $restoreVerdict.ok) {
+                foreach ($ga in $restoreAsks) { [void](Set-PimGuardLastStop -GuardId "$($ga.guardId)" -By "$($rRole.identity)" -Base "$($plan.entity)" -Count ([int]$ga.count) -Limit ([int]$ga.limit)) }
+                $script:PimRestoreGuardAsk = @{ status = [int]$restoreVerdict.status; body = (Get-PimManagerGuardAskBody -Asks $restoreAsks -Verdict $restoreVerdict -Base "$($plan.entity)") }
+                throw "restore refused: $($g.reason) $($restoreVerdict.error)"
+            }
         }
     }
 
@@ -4089,7 +4347,7 @@ function Invoke-PimManagerBackupRestore {
     if ($true) {
         # 🔴 -AllowEmpty, for the same reason as the commit's own restore script (Invoke-PimManagerSafeCommit):
         # restoring a snapshot that legitimately held NO rows is an operator UNDO, already gated by the
-        # delta guard above (it refuses unless $Confirm) and preceded by a pre-restore snapshot. Without
+        # delta guard above (it refuses unless a SuperAdmin approved it) and preceded by a pre-restore snapshot. Without
         # it the store refused every restore-to-empty with a 500 -- BUG-05's shape on the SQL store, found
         # 2026-09-12 when Test-PimManagerEndpoints' FIX5 block first ran against a populated SQL entity
         # (on the old file store that block had silently skipped).
@@ -4101,6 +4359,19 @@ function Invoke-PimManagerBackupRestore {
         try {
             [void](Set-PimSqlEntityRowsTransactional -ConnectionString $script:PimSqlCs -Entity $plan.entity -Base $plan.base -Rows @($plan.rows) -AllowEmpty)
         } finally { if ($rCtx) { [void](Set-PimCommitJournalContext -Context $prevCtx) } }
+    }
+    # PIM 100.119: the SuperAdmin's approval of what the restore took out -- who, when, why and exactly which rows.
+    if (@($restoreAsks).Count -and $restoreVerdict -and $restoreVerdict.ok) {
+        try {
+            $rAp = Get-PimManagerRole
+            foreach ($gr in @(Save-PimManagerGuardApprovals -Asks $restoreAsks -Reason "$($restoreVerdict.reason)" -By "$($rAp.identity)" -Role "$($rAp.role)" -Base "$($plan.entity)" -CommitId $restoreCommitId)) {
+                Write-PimManagerAuditEvent -Action 'guard.commit.approve' -Target "$($gr.guardId)" -CorrelationId $restoreCommitId -Result 'ok' `
+                    -After ([ordered]@{ approvalId = "$($gr.id)"; base = "$($plan.entity)"; via = "restore of backup $Id"; approvedBy = "$($gr.approvedBy)"; approvedUtc = "$($gr.approvedUtc)"; reason = "$($gr.reason)"; count = [int]$gr.count; items = @($gr.items); labels = @($gr.labels); listHash = "$($gr.listHash)" })
+            }
+        } catch {
+            Write-Warning "  [restore] the restore landed, but the SuperAdmin's approval of it was not recorded: $($_.Exception.Message)"
+            try { Write-PimManagerAuditEvent -Action 'guard.commit.approve' -Target "$($plan.entity)" -CorrelationId $restoreCommitId -Result 'error' -After ([ordered]@{ error = "$($_.Exception.Message)"; via = "restore of backup $Id"; reason = "$($restoreVerdict.reason)" }) } catch { }
+        }
     }
     # BUG-292 (§96): the rows before and after, so the caller audits WHAT the restore changed and attributes it to the person.
     return @{ ok = $true; entity = $plan.entity; base = $plan.base; rowCount = @($plan.rows).Count; preRestoreSnapshotId = $preId; beforeRows = @($curRows); afterRows = @($plan.rows); commitId = $restoreCommitId }
@@ -6664,9 +6935,8 @@ function Invoke-PimManagerCsvPut {
     # turns "adm-bo" into "adm-bo@domain"). A staged change says what the page submitted, so attribution (second
     # approver) and clean-up after the commit match against these as well as against the stored rows.
     $pendingSubmitted = @($rowsOrdered)
-    # Explicit operator acknowledgement for the empty-set / large-delta guard.
-    $confirmDestructive = $false
-    if ($body -and ($null -ne $body.confirm) -and ("$($body.confirm)" -ieq 'true' -or "$($body.confirm)" -eq '1' -or $body.confirm -eq $true)) { $confirmDestructive = $true }
+    # PIM 100.119: the body's `confirm` is NOT read any more -- it used to clear the commit removal check for whoever sent
+    # it (100.72 (2)). A SuperAdmin's `guardApproval` does that now, checked where the guard is evaluated below.
     # CONFIG-1.2 / §96.2: an UNDO is this same commit (every gate below applies), labelled with the commit it reverses --
     # journaled as Source 'undo' + UndoOf. Optional; absent = a normal commit. Server-side role check (D3): SuperAdmin may
     # undo every commit, an Admin only one they initiated, a delegated administrator none.
@@ -6783,7 +7053,7 @@ function Invoke-PimManagerCsvPut {
         # §79.9: EVERY row this commit touches must be the delegated caller's (owned) AND inside their profile.
         # R25-03: the ceiling comes from the stored groups + the role / scope granted (in the library); the
         # columns a delegated caller may write are the entity's own -- anything else is refused.
-        $dwMaxDays = 0; try { $mv = Get-PimManagerSettingObject -Name 'OwnerExtendMaxDays'; if ("$mv" -match '^\d+$') { $dwMaxDays = [int]"$mv" } } catch { }
+        $dwMaxDays = 0; try { $mv = Get-PimManagerSettingObject -Name 'OwnerExtendMaxDays'; $dwMaxDays = [int](Get-PimManagerOwnerExtendMaxDays -Stored $mv) } catch { $dwMaxDays = 0 }   # review fixes 2026-10-13: bounded on the read (1 to 3650); outside = 0 = the default
         $dwCols = New-Object System.Collections.Generic.List[string]
         foreach ($x in @($diff.adds)) { foreach ($c in @(Get-PimDelegatedRowColumns $x)) { $dwCols.Add("$c") } }
         foreach ($m in @($diff.modifies)) {
@@ -6983,16 +7253,47 @@ function Invoke-PimManagerCsvPut {
     # the 53-user mass-disable precondition was an empty/over-broad desired set).
     # Refuse a commit that empties the entity or removes more than the safety
     # threshold of current rows, UNLESS the operator passed confirm=true.
+    # PIM 100.119 (owner 2026-10-13) REPLACES 100.72 (2) "the same person confirms": a guard that stops a commit is answered
+    # in the popup by a SUPERADMIN -- the exact rows, a reason, recorded. Counts only (no share of the list). The same
+    # answer covers the removal budget: when this commit marks more removals (Action = Remove) or group deletions
+    # (Lifecycle = Retire) than one engine run may apply, the SuperAdmin approves that exact list HERE and the run applies
+    # exactly those items; nothing is accepted that a later run would hold. confirm=true approves nothing any more.
+    # A delegated administrator and the MCP commit tool never carry an approval, so they are answered with the ask.
+    $guardAsks = @(); $guardVerdict = $null
+    # REVIEW FIXES 2026-10-13 (owner: "Refuse the save"): no guard function = NO commit. It used to skip the check.
+    if (-not (Get-Command Test-PimCommitDeltaGuard -ErrorAction SilentlyContinue)) {
+        Write-JsonResponse -Response $resp -Status 500 -Body ([ordered]@{ ok = $false; base = $base; code = 'guard-library-missing'; error = "the guard library is not loaded -- nothing was saved; repair the installation (engine\_shared\PIM-ManagerWriteGuards.ps1 is missing or did not load, so the removal check of this commit cannot run)" })
+        return 500
+    }
     if (Get-Command Test-PimCommitDeltaGuard -ErrorAction SilentlyContinue) {
-        $deltaGuard = Test-PimCommitDeltaGuard -BeforeCount (@($current.rows).Count) -AfterCount (@($rowsOrdered).Count) -RemoveCount (@($diff.removes).Count) -Confirm:$confirmDestructive
-        if (-not $deltaGuard.allowed) {
-            # PIM 100.72 (2) (owner 2026-10-11): a SAME-PERSON CONFIRM ("are you sure?"), not a guard -- no GUARD-1 trip, not on
-            # the Guards page; the person who committed confirms (confirm=true) and the commit goes through.
-            Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
-                ok = $false; base = $base; gate = "$($deltaGuard.rule)"; error = "$($deltaGuard.reason)"
-                confirmRequired = $true; removeCount = [int]$deltaGuard.removeCount; beforeCount = (@($current.rows).Count); afterCount = (@($rowsOrdered).Count)
-            })
-            return 409
+        $deltaGuard = Test-PimCommitDeltaGuard -BeforeCount (@($current.rows).Count) -AfterCount (@($rowsOrdered).Count) -RemoveCount (@($diff.removes).Count)
+        # §97.1: the removal budget costs reads (the limit, the open approvals, the other group lists) -- made only when the
+        # rows this commit would store carry a Remove / Retire mark at all. No mark = nothing a run could hold.
+        $gaBudget = 5; $gaOther = @(); $gaOtherErr = ''; $gaOpen = @{}
+        $gaMarked = @(@($rowsOrdered) | Where-Object { Get-PimManagerGuardRowFlag -Row $_ }).Count -gt 0
+        if ($gaMarked) {
+            if (Get-Command Get-PimGuardLimit -ErrorAction SilentlyContinue) { try { $gaBudget = [int](Get-PimGuardLimit -GuardId 'engine.remove-budget' -Fallback 5 -Fresh) } catch { $gaBudget = 5 } }
+            $gaOpen = Get-PimManagerGuardOpenItemIds
+            if (@(@(Get-PimGuardGroupDeletionEntities) | Where-Object { $_ -ieq $base }).Count) {
+                try { $gaOther = @(Get-PimManagerOtherRetireRows -Base $base) } catch { $gaOther = @(); $gaOtherErr = "$($_.Exception.Message)" }
+            }
+        }
+        $guardAsks = @(Get-PimManagerCommitGuardAsks -Base $base -BeforeRows @($current.rows) -AfterRows @($rowsOrdered) -Diff $diff -DeltaGuard $deltaGuard `
+                        -OpenItemIds $gaOpen -Budget $gaBudget -OtherRetireRows $gaOther -SkipBudget:(-not $gaMarked))
+        if ($guardAsks.Count) {
+            $gaRole = Get-PimManagerRole
+            $gaBody = if ($body -and $body.PSObject.Properties['guardApproval']) { $body.guardApproval } else { $null }
+            $guardVerdict = Resolve-PimManagerGuardApproval -Asks $guardAsks -Approval $gaBody -Role "$($gaRole.role)" -Identity "$($gaRole.identity)"
+            if (-not $guardVerdict.ok) {
+                foreach ($ga in $guardAsks) { [void](Set-PimGuardLastStop -GuardId "$($ga.guardId)" -By "$($gaRole.identity)" -Base $base -Count ([int]$ga.count) -Limit ([int]$ga.limit)) }
+                Write-PimManagerAuditEvent -Action 'guard.commit.held' -Target $base -Result $(if ([int]$guardVerdict.status -eq 403) { 'denied' } else { 'held' }) `
+                    -After ([ordered]@{ code = "$($guardVerdict.code)"; role = "$($gaRole.role)"; guards = @($guardAsks | ForEach-Object { [ordered]@{ guardId = "$($_.guardId)"; scope = "$($_.scope)"; count = [int]$_.count; limit = [int]$_.limit; listHash = "$($_.listHash)" } }) })
+                $gaOut = Get-PimManagerGuardAskBody -Asks $guardAsks -Verdict $guardVerdict -Base $base
+                $gaOut['beforeCount'] = (@($current.rows).Count); $gaOut['afterCount'] = (@($rowsOrdered).Count)
+                if ($gaOtherErr) { $gaOut['note'] = "The groups marked for deletion in the other group lists could not be read ($gaOtherErr), so they are not in this list." }
+                Write-JsonResponse -Response $resp -Status ([int]$guardVerdict.status) -Body $gaOut
+                return [int]$guardVerdict.status
+            }
         }
     }
 
@@ -7117,6 +7418,27 @@ function Invoke-PimManagerCsvPut {
     }
     & $__lap 'backup+apply'
     $writtenPath = 'sql'
+    # PIM 100.119: the SuperAdmin's approval of what the commit guards stopped is RECORDED now -- who, when, why and
+    # exactly what -- BEFORE the engine is started below, so the run that applies the removals finds it. If it cannot be
+    # recorded the rows are saved all the same and the run holds them as it always did (never "approved" on a guess);
+    # the answer says so.
+    $guardApprovalNote = ''; $guardApprovalIds = @()
+    if (@($guardAsks).Count -and $guardVerdict -and $guardVerdict.ok) {
+        $gaWho = Get-PimManagerRole
+        try {
+            $gaRecs = @(Save-PimManagerGuardApprovals -Asks $guardAsks -Reason "$($guardVerdict.reason)" -By "$($gaWho.identity)" -Role "$($gaWho.role)" -Base $base -CommitId "$($commitRes.commitId)")
+            $guardApprovalIds = @($gaRecs | ForEach-Object { "$($_.id)" })
+            foreach ($gr in $gaRecs) {
+                Write-PimManagerAuditEvent -Action 'guard.commit.approve' -Target "$($gr.guardId)" -CorrelationId "$($commitRes.commitId)" -Result 'ok' `
+                    -After ([ordered]@{ approvalId = "$($gr.id)"; base = $base; scope = "$($gr.scope)"; approvedBy = "$($gr.approvedBy)"; approvedUtc = "$($gr.approvedUtc)"; reason = "$($gr.reason)"
+                                        count = [int]$gr.count; items = @($gr.items); labels = @($gr.labels); listHash = "$($gr.listHash)"; status = "$($gr.status)"; expiresUtc = "$($gr.expiresUtc)"; commitId = "$($commitRes.commitId)" })
+            }
+            if (@($gaRecs | Where-Object { "$($_.status)" -eq 'pending' }).Count) { $guardApprovalNote = 'Saved. The approval of the removals waits for a second SuperAdmin on Operations > Guards before a run may use it.' }
+        } catch {
+            $guardApprovalNote = "Saved -- but your approval could NOT be recorded ($($_.Exception.Message)), so the engine run will HOLD these removals. A SuperAdmin releases the held list on Operations > Guards."
+            Write-PimManagerAuditEvent -Action 'guard.commit.approve' -Target $base -CorrelationId "$($commitRes.commitId)" -Result 'error' -After ([ordered]@{ error = "$($_.Exception.Message)"; base = $base })
+        }
+    }
     # 🔴 §33.28: an 'authoring' approval that authorised THIS commit is consumed ONCE, as the design says
     # (Set-PimApprovalRequestExecuted). The PUT never latched it, so one approval stayed usable for every
     # later sensitive commit on the same entity until it expired.
@@ -7169,6 +7491,7 @@ function Invoke-PimManagerCsvPut {
         concurrency = $concurrencyNote
     }
     if ($undoOf) { $putOut['undoOf'] = $undoOf }   # CONFIG-1.2
+    if (@($guardAsks).Count) { $putOut['guardApproved'] = [bool](@($guardApprovalIds).Count); $putOut['guardApprovalIds'] = @($guardApprovalIds); if ($guardApprovalNote) { $putOut['guardNote'] = $guardApprovalNote } }   # PIM 100.119
     # BUG-190: the rest of the commit landed; the disabling value(s) were held for the offboard approval.
     # 202 (Accepted, not all applied) so no caller mistakes it for "everything I sent is now stored".
     $putStatus = 200
@@ -7538,8 +7861,10 @@ function Save-PimManagerDepartments {
         [switch]$PreserveMissing,
         # @{ from; to } pairs (Import-PimApproversFromCsv): the renamed department keeps its definition row.
         [object[]]$Renames = @(),
-        # The operator's acknowledgement for the empty-set / large-delta guard.
-        [switch]$Confirm
+        # PIM 100.119: the removal check is approved by a SUPERADMIN -- the request's guardApproval ({ approve; reason;
+        # lists }). -Confirm is accepted for an older caller and approves nothing.
+        [switch]$Confirm,
+        [AllowNull()][object]$GuardApproval
     )
 
     $rows = @($Departments | ForEach-Object {
@@ -7578,6 +7903,17 @@ function Save-PimManagerDepartments {
     $entityErr = ''
     $snapshotId = ''
     $deptBase = 'PIM-Definitions-Departments'
+    # REVIEW FIXES 2026-10-13 (owner: "Refuse the save"): no guard function = NOTHING saved, to either store. The check
+    # used to be skipped, and the setting below was written whatever happened.
+    if (-not (Get-Command Test-PimCommitDeltaGuard -ErrorAction SilentlyContinue)) {
+        return @{ ok = $false; count = 0; error = "the guard library is not loaded -- nothing was saved; repair the installation (engine\_shared\PIM-ManagerWriteGuards.ps1 is missing or did not load, so the removal check of this save cannot run)" }
+    }
+    # ...and the "write the setting when the entity write throws" fallback below is kept ONLY for a failure AFTER the
+    # removal check gave its answer (a store hiccup on the write). When the check itself could not be made -- the rows the
+    # list has now could not be read, the merge / the difference / the check threw -- the setting is NOT written: it is the
+    # list Get-PimManagerDepartments falls back to (every department the entity does not hold, and the whole list when the
+    # entity cannot be read), so writing it then would change the owner chain with no removal check at all.
+    $deptChecked = $false
     if ($cs -and (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue) -and (Get-Command Set-PimSqlEntityRowsTransactional -ErrorAction SilentlyContinue)) {
         try {
             $curRows = @(Get-PimSqlRows -ConnectionString $cs -Entity $deptBase)
@@ -7585,14 +7921,24 @@ function Save-PimManagerDepartments {
             $merged = Merge-PimManagerDepartmentRows -Current $curRows -Departments $rows -PreserveMissing:$PreserveMissing -Renames @($Renames)
             $merged = @($merged)
             $ddiff = Compare-PimRowSets -Before $curRows -After $merged -Base $deptBase
+            $deptAsks = @(); $deptVerdict = $null
             if (Get-Command Test-PimCommitDeltaGuard -ErrorAction SilentlyContinue) {
-                $dg = Test-PimCommitDeltaGuard -BeforeCount $curRows.Count -AfterCount $merged.Count -RemoveCount (@($ddiff.removes).Count) -Confirm:$Confirm
+                $dg = Test-PimCommitDeltaGuard -BeforeCount $curRows.Count -AfterCount $merged.Count -RemoveCount (@($ddiff.removes).Count)
                 if (-not $dg.allowed) {
-                    # Nothing written to EITHER store: the guard's refusal must not be half-applied.
-                    return @{ ok = $false; count = 0; confirmRequired = $true; gate = "$($dg.rule)"; removeCount = [int]$dg.removeCount
-                              error = "departments were NOT saved: $($dg.reason)" }
+                    # PIM 100.119: a SuperAdmin approves exactly the departments this save takes out, with a reason.
+                    $deptAsks = @(Get-PimManagerCommitGuardAsks -Base $deptBase -BeforeRows $curRows -AfterRows $merged -Diff $ddiff -DeltaGuard $dg -SkipBudget)
+                    $dRole = Get-PimManagerRole
+                    $deptVerdict = Resolve-PimManagerGuardApproval -Asks $deptAsks -Approval $GuardApproval -Role "$($dRole.role)" -Identity "$($dRole.identity)"
+                    if (-not $deptVerdict.ok) {
+                        foreach ($ga in $deptAsks) { [void](Set-PimGuardLastStop -GuardId "$($ga.guardId)" -By "$($dRole.identity)" -Base $deptBase -Count ([int]$ga.count) -Limit ([int]$ga.limit)) }
+                        # Nothing written to EITHER store: the guard's refusal must not be half-applied.
+                        return @{ ok = $false; count = 0; approvalRequired = $true; gate = "$($dg.rule)"; removeCount = [int]$dg.removeCount; status = [int]$deptVerdict.status
+                                  guardAsk = (Get-PimManagerGuardAskBody -Asks $deptAsks -Verdict $deptVerdict -Base $deptBase)
+                                  error = "departments were NOT saved: $($dg.reason) $($deptVerdict.error)" }
+                    }
                 }
             }
+            $deptChecked = $true   # the removal check gave its answer (nothing to ask, or a SuperAdmin approved exactly the list)
             $dspec = Get-PimCsvSpec -BaseName $deptBase
             $prevCs = $script:PimSqlCs
             if (-not "$($script:PimSqlCs)".Trim()) { $script:PimSqlCs = $cs }
@@ -7601,9 +7947,24 @@ function Save-PimManagerDepartments {
             } finally { $script:PimSqlCs = $prevCs }
             $snapshotId = "$($cres.snapshotId)"
             $entityOk = $true
+            # PIM 100.119: the SuperAdmin's approval of the departments this save took out -- who, when, why, which.
+            if (@($deptAsks).Count -and $deptVerdict -and $deptVerdict.ok) {
+                try {
+                    $dAp = Get-PimManagerRole
+                    foreach ($gr in @(Save-PimManagerGuardApprovals -Asks $deptAsks -Reason "$($deptVerdict.reason)" -By "$($dAp.identity)" -Role "$($dAp.role)" -Base $deptBase -CommitId "$($cres.commitId)")) {
+                        Write-PimManagerAuditEvent -Action 'guard.commit.approve' -Target "$($gr.guardId)" -CorrelationId "$($cres.commitId)" -Result 'ok' `
+                            -After ([ordered]@{ approvalId = "$($gr.id)"; base = $deptBase; via = 'departments saved from Settings'; approvedBy = "$($gr.approvedBy)"; approvedUtc = "$($gr.approvedUtc)"; reason = "$($gr.reason)"; count = [int]$gr.count; items = @($gr.items); labels = @($gr.labels); listHash = "$($gr.listHash)" })
+                    }
+                } catch { Write-Warning "  [departments] saved, but the SuperAdmin's approval of the removal was not recorded: $($_.Exception.Message)" }
+            }
             Write-PimMutationLog -BaseName $deptBase -Adds @($ddiff.adds).Count -Removes @($ddiff.removes).Count -Modifies @($ddiff.modifies).Count `
                 -NewRowCount $merged.Count -Diff $ddiff -Summary ("departments saved from Settings: {0} added, {1} removed, {2} changed (other definition columns preserved)" -f @($ddiff.adds).Count, @($ddiff.removes).Count, @($ddiff.modifies).Count) -CommitId "$($cres.commitId)"
-        } catch { $entityErr = "$($_.Exception.Message)" }
+        } catch {
+            $entityErr = "$($_.Exception.Message)"
+            if (-not $deptChecked) {
+                return @{ ok = $false; count = 0; error = "the removal check of this save could not be made ($entityErr) -- nothing was saved, to either store: a save that cannot be checked is not applied" }
+            }
+        }
     } else {
         $entityErr = 'no SQL store is wired in this host (PIM v2 is SQL-only -- configure the store)'
     }
@@ -10208,6 +10569,9 @@ function ConvertTo-PimActiveAssignmentsPageRequest {
     $size = 0; $sizeTxt = (& $one 'pageSize').Trim(); if ($sizeTxt -match '^\d{1,6}$') { $size = [int]$sizeTxt }
     $on = { param($n) ((& $one $n).Trim() -in @('1', 'true', 'yes')) }
     $q = (& $one 'q').Trim(); if ($q.Length -gt 200) { $q = $q.Substring(0, 200) }
+    # PIM 100.120: ?lm= = the list menu's conditions (JSON text), checked by ConvertTo-PimListQuery before it is used.
+    # Carried as text and never cut: a text that is too long must be REFUSED as too long, not read as its first part.
+    $lm = (& $one 'lm')
     return [pscustomobject]@{
         page = $page; pageSize = $size
         type = (& $one 'type').Trim().ToLowerInvariant()
@@ -10217,6 +10581,7 @@ function ConvertTo-PimActiveAssignmentsPageRequest {
         descending = ((& $one 'dir').Trim().ToLowerInvariant() -eq 'desc')
         showDeleted = (& $on 'showDeleted'); showManaged = (& $on 'showManaged'); showProduct = (& $on 'showProduct')
         showSupport = (& $on 'showSupport'); showBreakGlass = (& $on 'showBreakGlass')
+        lm = $lm
     }
 }
 
@@ -10361,11 +10726,24 @@ function Get-PimActiveAssignmentsPagedAnswer {
     # REQ 100.112 holds here too: stored rows that cannot be read, or that are not all there, are "the stored read could
     # not be loaded (<reason>)" -- never an empty list, never "no snapshot yet", and nothing is queued because of it.
     $res = $null; $view = $null; $loadErr = ''
+    # PIM 100.120: the list menu's conditions (?lm=), checked again here (the gate before the handler already answered
+    # 400 for one that is not a list query): columns from a closed list, the five operators, values as SQL PARAMETERS.
+    # No ?lm= = no condition: the statement and its parameters are what they were.
+    $lmCond = @(); $lmSearch = ''; $lmArgs = @{}   # (the two arguments are passed only with a list filter)
+    $lmText = ''; try { $lmText = "$($PageRequest.lm)" } catch { $lmText = '' }
+    if ($lmText.Trim()) {
+        if (-not (Get-Command ConvertTo-PimListQuery -ErrorAction SilentlyContinue)) { throw 'the list filter cannot be applied: _listmenu.ps1 is not loaded' }
+        $lmQuery = ConvertTo-PimListQuery -Text $lmText -Columns (Get-PimListQueryColumns -List 'active-assignments') -SortColumns (Get-PimListQuerySortColumns -List 'active-assignments')
+        if (-not $lmQuery.ok) { throw "the list filter was refused: $($lmQuery.error)" }   # never answered as if there were no filter
+        $lmCond = @($lmQuery.filters); $lmSearch = "$($lmQuery.search)"
+        $lmArgs = @{ Conditions = $lmCond; ListSearch = $lmSearch }
+        $body['listQuery'] = [ordered]@{ applied = $true; conditions = $lmCond.Count; search = [bool]$lmSearch }
+    }
     try {
         $res = Invoke-PimSqlActiveAssignmentsQuery -ConnectionString $cs -SnapshotId $sid -Type "$($PageRequest.type)" -Search "$($PageRequest.q)" `
                   -Aliases @($PageRequest.aliases) -ScopeIs @($PageRequest.scopeIs) -Sort "$($PageRequest.sort)" -Descending:([bool]$PageRequest.descending) `
                   -Page ([int]$PageRequest.page) -PageSize $size -ShowDeleted ([bool]$PageRequest.showDeleted) -ShowManaged ([bool]$PageRequest.showManaged) `
-                  -ShowProduct ([bool]$PageRequest.showProduct) -ShowSupport ([bool]$PageRequest.showSupport) -ShowBreakGlass ([bool]$PageRequest.showBreakGlass)
+                  -ShowProduct ([bool]$PageRequest.showProduct) -ShowSupport ([bool]$PageRequest.showSupport) -ShowBreakGlass ([bool]$PageRequest.showBreakGlass) @lmArgs
         $view = Get-PimActiveAssignmentsViewCounts -Groups @($res.groups) -ShowDeleted ([bool]$PageRequest.showDeleted) -ShowManaged ([bool]$PageRequest.showManaged) `
                   -ShowProduct ([bool]$PageRequest.showProduct) -ShowSupport ([bool]$PageRequest.showSupport) -ShowBreakGlass ([bool]$PageRequest.showBreakGlass)
         $expected = -1
@@ -12108,6 +12486,22 @@ function Handle-Request {
             return 200
         }
 
+        # PIM 100.120 (lane listmenu): the saved layouts of the list menu -- personal (any signed-in role) and shared
+        # (SuperAdmin only, checked on the server). The whole route lives in _listmenu.ps1.
+        if ($path -like '/api/list-layouts*') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Get-Command Invoke-PimManagerListLayoutRequest -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = '_listmenu.ps1 was not loaded -- file missing next to Open-PimManager.ps1' }; return 500 }
+            $llSt = Invoke-PimManagerListLayoutRequest -Method $method -Path $path -Request $req -Response $resp
+            if ($null -ne $llSt) { return [int]$llSt }
+        }
+        # PIM 100.120: the list menu's conditions for a list the server pages (?lm= on the current-delegations and the
+        # audit list). One that is not exactly a list query is refused HERE with 400 and the reason; a good one, or none,
+        # goes on to the list's own handler (its role gate first), which applies it over the whole list before paging.
+        if ($method -eq 'GET' -and (Get-Command Invoke-PimManagerListQueryGate -ErrorAction SilentlyContinue)) {
+            $lqSt = Invoke-PimManagerListQueryGate -Path $path -Request $req -Response $resp
+            if ($null -ne $lqSt) { return [int]$lqSt }
+        }
+
         if ($path -eq '/api/config' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             $data = Build-PimGraphData
@@ -12431,25 +12825,24 @@ function Handle-Request {
             Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; value = $want }
             return 200
         }
-        # 100.67 (b) (owner 2026-10-10: "in the dashboard and counter over, make option to hide company and env name. on by
-        # def"): HideCompanyAndEnvironmentName, ON by default (never set = hidden). Every role reads it; SuperAdmin changes it
-        # (Settings > Naming & accounts, or the toggle on the Dashboard). It also decides the environment label in every export.
+        # 100.124 (owner 2026-10-13: "this is a mistake and should not be shown at customers ... it must always shown company
+        # and tenantname" / "Remove it everywhere"): the option of 100.67 (b) to hide the company and environment name is
+        # RETIRED. The stored value is never read again -- the Dashboard, the Counters overview and every export always show
+        # the names, also where it is stored as true. GET answers "not hidden" (a page still open from before the update shows
+        # the names); a PUT is refused with 410. Nothing is deleted from the store.
         if ($path -eq '/api/settings/hide-names' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
-            $raw = $null; try { $raw = Get-PimSetting -Name 'HideCompanyAndEnvironmentName' } catch { $raw = $null }
-            Write-JsonResponse -Response $resp -Status 200 -Body @{ value = [bool](Test-PimHideNamesValue -Value $raw); default = $true; canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin'); placeholder = (Get-PimTableExportPlaceholder) }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ value = $false; default = $false; canWrite = $false; retired = $true }
             return 200
         }
         if ($path -eq '/api/settings/hide-names' -and $method -eq 'PUT') {
             $script:lastHeartbeat = Get-Date
-            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change whether the company and environment name are shown.' }; return 403 }
-            $hb = Read-RequestJson -Request $req
-            if (-not $hb -or -not $hb.PSObject.Properties['value'] -or -not ($hb.value -is [bool])) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'send { value: true|false } (true = hide the names)' }; return 400 }
-            $before = $true; try { $before = [bool](Test-PimHideNamesValue -Value (Get-PimSetting -Name 'HideCompanyAndEnvironmentName')) } catch { }
-            Set-PimManagerSettingObject -Name 'HideCompanyAndEnvironmentName' -Value $(if ($hb.value) { 'true' } else { 'false' })
-            Write-PimManagerAuditEvent -Action 'settings.hide-names.save' -Target 'HideCompanyAndEnvironmentName' -Result 'ok' -Before @{ hidden = $before } -After @{ hidden = [bool]$hb.value }
-            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; value = [bool]$hb.value }
-            return 200
+            Write-PimManagerAuditEvent -Action 'settings.hide-names.save' -Target 'settings:hide-names' -After @{ refused = 'gone'; reason = 'the option to hide the company and environment name is retired (100.124)' } -Result 'refused'
+            Write-JsonResponse -Response $resp -Status 410 -Body @{
+                ok = $false; gone = $true
+                error = 'The option to hide the company and environment name is retired: PIM Manager always shows the company and the environment name. Nothing was changed.'
+            }
+            return 410
         }
 
         # 100.67 (a) EXPORT -- what a view shows, as Excel (.xlsx) or PDF. GET /api/export/capabilities tells the page whether
@@ -12463,7 +12856,7 @@ function Handle-Request {
         }
         # POST /api/export { view, title, format: 'pdf'|'xlsx', sections: [{ heading, columns, rows }] }. The rows come from
         # the page's own data model; the server re-checks the caller's role against the VIEW (the payload is the browser's),
-        # caps the size (said in the file), names the environment by the hide-names setting, audits who / view / format /
+        # caps the size (said in the file), names the environment (always, 100.124), audits who / view / format /
         # row count (never the content) and returns the file.
         if ($path -eq '/api/export' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
@@ -12481,7 +12874,7 @@ function Handle-Request {
                 $pc = Test-PimTableExportPdfAvailable
                 if (-not $pc.available) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; pdfUnavailable = $true; error = "$($pc.reason)" }; return 409 }
             }
-            $xHide = $true; try { $xHide = [bool](Test-PimHideNamesValue -Value (Get-PimSetting -Name 'HideCompanyAndEnvironmentName')) } catch { $xHide = $true }
+            $xHide = $false   # 100.124: the hide option is retired -- an export always names the environment
             $xEnv = ''; $xTen = ''
             if (-not $xHide) {
                 try { $xEnv = "$(Get-PimSetting -Name 'EnvironmentName')".Trim() } catch { }
@@ -12935,6 +13328,19 @@ function Handle-Request {
                 return 500
             }
         }
+        # PIM 100.123 (lane adclean) -- ONE block for all of _adclean.ps1's routes: the reviewed clean-up of old PIM groups in
+        # Active Directory (/api/hybrid-ad/cleanup...), the SuperAdmin's decision for an AD group whose membership sync waits
+        # (/api/hybrid-ad/waiting...), and the server discovery settings (/api/settings/hybrid-ad-discovery, .../discovery/preview).
+        # Every role check, validation and audit entry is in Invoke-PimAdCleanRoute's functions; $null = not one of its routes.
+        if (($path -like '/api/hybrid-ad/cleanup*' -or $path -like '/api/hybrid-ad/waiting*' -or $path -like '/api/hybrid-ad/server-groups/*' -or $path -eq '/api/hybrid-ad/discovery/preview' -or $path -eq '/api/settings/hybrid-ad-discovery') -and (Get-Command Invoke-PimAdCleanRoute -ErrorAction SilentlyContinue)) {
+            $script:lastHeartbeat = Get-Date
+            $adcBody = $null; if ($method -in @('POST', 'PUT')) { $adcBody = Read-RequestJson -Request $req }
+            $adc = Invoke-PimAdCleanRoute -Path $path -Method $method -Body $adcBody
+            if ($adc) {
+                Write-JsonResponse -Response $resp -Status ([int]$adc.status) -Body $adc.body
+                return [int]$adc.status
+            }
+        }
         # 97.1 / WIZARD-1 (owner 2026-10-07): a Get Started step whose work happens OUTSIDE the product (the PIM Activator
         # rollout to the admins' browsers) is done by a CONFIRMATION, saved as a real setting -- pim.Settings
         # 'GetStartedConfirmations' = { <step>: { by, utc } }. Only the steps named here can be confirmed; "done" for every
@@ -13149,16 +13555,19 @@ function Handle-Request {
                             Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'departments cannot be saved empty -- that would remove every department and the approval owner chain with it. Remove them individually in the Advanced grid if that is really the intent.' }
                             return 400
                         }
-                        $deptConfirm = [bool]($body -and $body.PSObject.Properties['confirm'] -and ("$($body.confirm)" -match '(?i)^(true|1|yes)$'))
+                        # PIM 100.119: confirm=true approves nothing any more -- a SuperAdmin's guardApproval does.
+                        $deptApproval = if ($body -and $body.PSObject.Properties['guardApproval']) { $body.guardApproval } else { $null }
                         # PIM 100.24: the owners BEFORE the save, so a NEW owner can be told apart. Unreadable = no grant at
                         # all this time (an empty "before" would make every owner look new).
                         $deptOwnersBefore = $null; try { $deptOwnersBefore = @(Get-PimManagerDepartments) } catch { $deptOwnersBefore = $null }
-                        $dsave = Save-PimManagerDepartments -Departments $arr -Confirm:$deptConfirm
+                        $dsave = Save-PimManagerDepartments -Departments $arr -GuardApproval $deptApproval
                         if (-not $dsave.ok) {
-                            # BUG-177: the delta guard's refusal is a 409 the screen can confirm, not a store failure.
-                            if ($dsave.confirmRequired) {
-                                Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; confirmRequired = $true; gate = "$($dsave.gate)"; removeCount = [int]$dsave.removeCount; error = "$($dsave.error)" }
-                                return 409
+                            # BUG-177 / PIM 100.119: the removal check's refusal is the ask a SuperAdmin answers (409; 403 when
+                            # somebody who is not a SuperAdmin sent an approval), not a store failure.
+                            if ($dsave.approvalRequired) {
+                                $dAsk = $dsave.guardAsk; $dAsk['error'] = "$($dsave.error)"
+                                Write-JsonResponse -Response $resp -Status ([int]$dsave.status) -Body $dAsk
+                                return [int]$dsave.status
                             }
                             Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "departments were NOT saved: $($dsave.error)" }
                             return 503
@@ -13213,7 +13622,7 @@ function Handle-Request {
                 # BUG-142: through the ONE writer, so an import reaches the engine's store too.
                 # BUG-177: an import MERGES -- departments it did not name are kept, every definition column survives.
                 $dsave = Save-PimManagerDepartments -Departments @($plan.departments) -PreserveMissing
-                if (-not $dsave.ok) { Write-JsonResponse -Response $resp -Status $(if ($dsave.confirmRequired) { 409 } else { 503 }) -Body @{ error = "departments were NOT saved: $($dsave.error)"; confirmRequired = [bool]$dsave.confirmRequired }; return $(if ($dsave.confirmRequired) { 409 } else { 503 }) }
+                if (-not $dsave.ok) { Write-JsonResponse -Response $resp -Status $(if ($dsave.approvalRequired) { 409 } else { 503 }) -Body @{ error = "departments were NOT saved: $($dsave.error)"; approvalRequired = [bool]$dsave.approvalRequired; superAdminRequired = [bool]$dsave.approvalRequired }; return $(if ($dsave.approvalRequired) { 409 } else { 503 }) }
                 Write-PimManagerAuditEvent -Action 'settings.departments.import' -Target "pattern:$pattern" -Result 'ok' -After $plan.summary
                 # PIM 100.24: an import grants like the page -- new owners become Readers (grantReaderToOwners, default =
                 # the DepartmentOwnersGetReader setting), with a summary of who was added.
@@ -13269,7 +13678,7 @@ function Handle-Request {
                 # BUG-142: through the ONE writer, so an import reaches the engine's store too.
                 # BUG-177: merge, keep unnamed departments, and carry a RENAMED department's definition row over.
                 $dsave = Save-PimManagerDepartments -Departments @($plan.departments) -PreserveMissing -Renames @($plan.renamed)
-                if (-not $dsave.ok) { Write-JsonResponse -Response $resp -Status $(if ($dsave.confirmRequired) { 409 } else { 503 }) -Body @{ error = "departments were NOT saved: $($dsave.error)"; confirmRequired = [bool]$dsave.confirmRequired }; return $(if ($dsave.confirmRequired) { 409 } else { 503 }) }
+                if (-not $dsave.ok) { Write-JsonResponse -Response $resp -Status $(if ($dsave.approvalRequired) { 409 } else { 503 }) -Body @{ error = "departments were NOT saved: $($dsave.error)"; approvalRequired = [bool]$dsave.approvalRequired; superAdminRequired = [bool]$dsave.approvalRequired }; return $(if ($dsave.approvalRequired) { 409 } else { 503 }) }
                 Write-PimManagerAuditEvent -Action 'settings.approvers.import' -Target 'csv' -Result 'ok' -After $plan.summary
                 # PIM 100.24: a CSV import grants like the page (new owners -> Reader, default ON), with a summary.
                 $afterDepts = @(); try { $afterDepts = @(Get-PimManagerDepartments) } catch { $afterDepts = @($plan.departments) }
@@ -13445,13 +13854,23 @@ function Handle-Request {
             $actions = @(if ($q.ContainsKey('action')) { "$($q['action'])" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
             # BUG-264: the change summary only where it is read -- every event when searching (the search reads it), else the page;
             # and when not searching, before/after themselves are read only for the page (-NoPayload + Read-PimManagerAuditPayloads).
-            $events = @(Get-PimManagerAuditEvents -Months $months -NoChange:(-not $search) -Actions $actions -NoPayload:(-not $search))
+            # PIM 100.120: the list menu's conditions, search and sort (?lm=), applied below over the WHOLE filtered list
+            # before paging. Checked here again (the gate before the handlers already answered 400 for a bad one). A search
+            # or a condition on the change text needs the change summary of every event, exactly as ?q= does.
+            $lmAudit = $null; $lmDeep = $false
+            if ($q.ContainsKey('lm') -and "$($q['lm'])".Trim() -and (Get-Command ConvertTo-PimListQuery -ErrorAction SilentlyContinue)) {
+                $lmAudit = ConvertTo-PimListQuery -Text "$($q['lm'])" -Columns (Get-PimListQueryColumns -List 'audit') -SortColumns (Get-PimListQuerySortColumns -List 'audit')
+                if (-not $lmAudit.ok) { Write-JsonResponse -Response $resp -Status 400 -Body ([ordered]@{ ok = $false; listQueryRefused = $true; error = "The list filter was refused: $($lmAudit.error)." }); return 400 }
+                $lmDeep = [bool]($lmAudit.needsText -or @($lmAudit.filters | Where-Object { "$($_.col)" -ceq 'change' }).Count)
+            }
+            $events = @(Get-PimManagerAuditEvents -Months $months -NoChange:(-not ($search -or $lmDeep)) -Actions $actions -NoPayload:(-not ($search -or $lmDeep)))
             if ($auditScope) { $events = @(Select-PimAuditEventsInScope -Events $events -Ownership $auditScope.ownership -Identity $auditScope.identity) }
             # Category counts BEFORE search/category filtering (chips show totals).
             $counts = @{}
             foreach ($e in $events) { $c = "$($e.category)"; if ($c) { $counts[$c] = ([int]$counts[$c]) + 1 } }
 
             $sorted = @(Select-PimAuditEvents -Events $events -Category $category -Search $search -FromUtc $fromUtc -ToUtc $toUtc)
+            if ($lmAudit -and $lmAudit.active) { $sorted = @(Select-PimListRows -Rows $sorted -Query $lmAudit -Read ${function:Get-PimAuditListValue} -Columns (Get-PimListQueryColumns -List 'audit')) }
             $matchCount = $sorted.Count
             $skip = ($page - 1) * $pageSize
             $pageItems = @($sorted | Select-Object -Skip $skip -First $pageSize)
@@ -13734,6 +14153,34 @@ function Handle-Request {
             $grr = Invoke-PimManagerGroupRetirementChange -Body (Read-RequestJson -Request $req)
             Write-JsonResponse -Response $resp -Status ([int]$grr.status) -Body $grr.body
             return [int]$grr.status
+        }
+        # PIM 100.121 (lane settings): the feature settings the code read and Settings did not show, and the two protection
+        # switches (automatic offboarding, the removal mode of the daily reconcile). GET (any role) = the state; PUT = the
+        # change, SuperAdmin only -- the role is checked inside the change function (tools/pim-manager/_settings.ps1).
+        if ($path -in @(Get-PimManagerSettingsRoutePaths) -and $method -in @('GET', 'PUT')) {
+            $script:lastHeartbeat = Get-Date
+            $lsr = Invoke-PimManagerSettingsRoute -Path $path -Method $method -Body $(if ($method -eq 'PUT') { Read-RequestJson -Request $req } else { $null })
+            Write-JsonResponse -Response $resp -Status ([int]$lsr.status) -Body $lsr.body
+            return [int]$lsr.status
+        }
+        # PIM 100.118 (lane states): the state of every group, in words, from stored facts only (tools/pim-manager/_states.ps1).
+        # GET, Admin (it names every group with the PIM naming in the tenant, like the active assignments). Read-only: it
+        # reads the store, never the tenant, and stages nothing. A fact that cannot be read is "Not known" in the answer.
+        if ($path -eq '/api/group-states' -and $method -eq 'GET') {
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = 'Admin role required to see the state of the groups.' }
+                return 403
+            }
+            $script:lastHeartbeat = Get-Date
+            if (-not (Get-Command Get-PimGroupStates -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; error = 'the group-state reader (tools/pim-manager/_states.ps1) is not loaded in this Manager, so no group state is known.' }
+                return 503
+            }
+            $gst = $null
+            try { $gst = Get-PimGroupStates }
+            catch { $gst = [ordered]@{ ok = $false; error = "The group states could not be computed ($($_.Exception.Message)), so no group state is known."; groups = @(); counts = [ordered]@{}; total = 0 } }
+            Write-JsonResponse -Response $resp -Status 200 -Body $gst
+            return 200
         }
         # PIM 100.24 DEPT-OWNER-ACCESS: the default of "Give PIM Manager Reader access (their normal account)" when a
         # department owner is added (Access > Departments & owners, Get Started, imports). GET (any role) / PUT { enabled }
@@ -14141,10 +14588,14 @@ function Handle-Request {
                 if (Get-Command Select-PimGuardTripsShown -ErrorAction SilentlyContinue) { $gl = @(Select-PimGuardTripsShown -Trips $gl) }
             } catch { $gl = @() }
             # §96.6 / GUARD-1.6: the Guards page -- every guard, its state, what it holds now (plan hash + items), its releases.
-            $gHolds = @(); $gRels = @(); $gCat = @(); $gSecond = $false; $gReadErr = ''
+            # PIM 100.119 (6): EVERY guard is listed -- what it protects, its limit (floor / default / ceiling, who set it),
+            # whether an exemption can be approved and the approvals given at commit, its last trip. No guard has an "off";
+            # the never-releasable ones are LOCKED with the reason.
+            $gHolds = @(); $gRels = @(); $gCat = @(); $gSecond = $false; $gReadErr = ''; $gAppr = @(); $gStops = @{}
             if (Get-Command Get-PimGuardsView -ErrorAction SilentlyContinue) {
                 try { $gHolds = @(Get-PimGuardHolds -Fresh); $gRels = @(Get-PimGuardReleases) } catch { $gReadErr = "$($_.Exception.Message)" }
-                try { $gCat = @(Get-PimGuardsView -Trips $gl -Holds $gHolds -Releases $gRels) } catch { $gReadErr = "$($_.Exception.Message)" }
+                try { $gDoc = Get-PimGuardApprovalsDoc; $gAppr = @($gDoc.approvals); $gStops = $gDoc.lastStops } catch { $gReadErr = "$($_.Exception.Message)" }
+                try { $gCat = @(Get-PimGuardsView -Trips $gl -Holds $gHolds -Releases $gRels -Approvals $gAppr -LastStops $gStops) } catch { $gReadErr = "$($_.Exception.Message)" }
                 $gSecond = [bool](Test-PimGuardReleaseSecondPersonOn)
             }
             # PIM 100.84: what the policy breaker holds NOW, on its own row -- the hold RECORDS (the same read as the Approvals
@@ -14158,8 +14609,65 @@ function Handle-Request {
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ guards = @($gl); total = @($gl).Count
                 catalog = @($gCat); holds = @($gHolds); releases = @($gRels); secondPerson = $gSecond
                 canRelease = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin'); me = "$((Get-PimManagerRole).identity)"
+                canSetLimits = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin'); canSwitchOff = $false
+                approvalLifetimeHours = $(if (Get-Command Get-PimGuardApprovalLifetimeHours -ErrorAction SilentlyContinue) { [int](Get-PimGuardApprovalLifetimeHours) } else { 0 })
                 neverReleasable = @($(if (Get-Command Get-PimGuardNeverReleasable -ErrorAction SilentlyContinue) { Get-PimGuardNeverReleasable }))
                 readError = $gReadErr })
+            return 200
+        }
+        # PIM 100.119 (3): PUT /api/guards/<guardId>/limit { value: <count> } | { reset: true } -- a SuperAdmin sets the limit
+        # of ONE guard inside its floor and ceiling (PIM-GuardLimits.ps1). 403 for every other role; 400 for a value
+        # outside floor..ceiling, a guard without a limit or a LOCKED (never-releasable) guard -- nothing is changed and the
+        # default / the previous value keeps applying. Audited 'guard.limit' with before and after. There is no "off".
+        if ($path -match '^/api/guards/([a-z0-9][a-z0-9.-]{0,99})/limit$' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            $glId = $Matches[1].ToLowerInvariant()
+            if (-not (Get-Command Set-PimGuardLimit -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = 'the guard limit library is not loaded' }; return 500 }
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = 'SuperAdmin role required to set the limit of a guard.' }; return 403 }
+            $glRole = Get-PimManagerRole
+            $glBody = Read-RequestJson -Request $req
+            if ($null -eq $glBody) { Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'a JSON body is required: { value: <count> } or { reset: true }' }; return 400 }
+            $glReset = [bool]($glBody.PSObject.Properties['reset'] -and $glBody.reset -is [bool] -and $glBody.reset)
+            $glVal = if ($glBody.PSObject.Properties['value']) { $glBody.value } else { $null }
+            try {
+                $glRes = if ($glReset) { Set-PimGuardLimit -GuardId $glId -Value $null -By "$($glRole.identity)" -Role "$($glRole.role)" -Reset }
+                         else { Set-PimGuardLimit -GuardId $glId -Value $glVal -By "$($glRole.identity)" -Role "$($glRole.role)" }
+            } catch {
+                $glMsg = "$($_.Exception.Message)"
+                Write-PimManagerAuditEvent -Action 'guard.limit' -Target $glId -After ([ordered]@{ value = "$glVal"; reset = $glReset; refused = $glMsg }) -Result 'refused'
+                $glCode = if ($glMsg -like 'REFUSED --*') { 400 } else { 500 }
+                Write-JsonResponse -Response $resp -Status $glCode -Body @{ ok = $false; error = $glMsg }; return $glCode
+            }
+            Write-PimManagerAuditEvent -Action 'guard.limit' -Target $glId -Before ([ordered]@{ value = [int]$glRes.before.value; source = "$($glRes.before.source)" }) `
+                -After ([ordered]@{ value = [int]$glRes.after.value; source = "$($glRes.after.source)"; floor = [int]$glRes.floor; ceiling = [int]$glRes.ceiling; default = [int]$glRes.default }) -Result 'ok'
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; guardId = $glId; limit = $glRes.after })
+            return 200
+        }
+        # PIM 100.119: an approval given at commit, on the Guards page --
+        #   POST   /api/guards/<guardId>/approval/<approvalId>/approve   the second person (a DIFFERENT SuperAdmin), when required
+        #   DELETE /api/guards/<guardId>/approval/<approvalId>           revoke: its unused items are held again
+        # SuperAdmin only (403), audited. An approval is only ever CREATED by the commit that carries it.
+        if ($path -match '^/api/guards/([a-z0-9][a-z0-9.-]{0,99})/approval/([0-9a-fA-F-]{36})(/approve)?$' -and $method -in @('POST', 'DELETE')) {
+            $script:lastHeartbeat = Get-Date
+            $gaId = $Matches[1].ToLowerInvariant(); $gaRec = "$($Matches[2])"; $gaIsApprove = [bool]$Matches[3]
+            if (-not (Get-Command Revoke-PimGuardApproval -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = 'the guard release library is not loaded' }; return 500 }
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = 'SuperAdmin role required to approve or revoke what a guard stops.' }; return 403 }
+            $gaMe = Get-PimManagerRole; $gaNow = [datetime]::UtcNow
+            try { $gaDoc = Get-PimGuardApprovalsDoc } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "the approvals could not be read: $($_.Exception.Message)" }; return 500 }
+            $gaCur = @($gaDoc.approvals | Where-Object { $_ -and "$($_.id)" -eq $gaRec -and "$($_.guardId)" -eq $gaId })
+            if (-not $gaCur.Count) { Write-JsonResponse -Response $resp -Status 404 -Body @{ ok = $false; error = "no approval $gaRec of $gaId" }; return 404 }
+            try {
+                $gaUpd = if ($gaIsApprove -and $method -eq 'POST') { Approve-PimGuardApproval -Approval $gaCur[0] -By "$($gaMe.identity)" -Role "$($gaMe.role)" -NowUtc $gaNow }
+                         elseif (-not $gaIsApprove -and $method -eq 'DELETE') { Revoke-PimGuardApproval -Approval $gaCur[0] -By "$($gaMe.identity)" -Role "$($gaMe.role)" -NowUtc $gaNow }
+                         else { throw 'REFUSED -- use POST .../approve or DELETE .../<approvalId>.' }
+            } catch { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 409 }
+            $gaNext = @($gaDoc.approvals | ForEach-Object { if ($_ -and "$($_.id)" -eq $gaRec) { $gaUpd } else { $_ } })
+            $gaW = 0
+            try { $gaW = Save-PimGuardApprovalsDoc -Approvals $gaNext -LastStops $gaDoc.lastStops -NowUtc $gaNow -ExpectedText $gaDoc.text -Cas }
+            catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "NOT stored: $($_.Exception.Message)" }; return 500 }
+            if ([int]$gaW -ne 1) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; error = 'The approvals changed while you were saving (an engine run may have used one). Reload the Guards page and try again.' }; return 409 }
+            Write-PimManagerAuditEvent -Action $(if ($gaIsApprove) { 'guard.approval.approve' } else { 'guard.approval.revoke' }) -Target $gaId -Before $gaCur[0] -After $gaUpd -Result 'ok'
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; approval = $gaUpd })
             return 200
         }
         # §96.6 / GUARD-1.6: second person for a guard release (CONFIG-1.5 / D5) -- default OFF. GET any role, PUT SuperAdmin, audited.
@@ -17243,7 +17751,7 @@ function Handle-Request {
             try { $orj = @(Get-PimManagerEffectiveSchedule | Where-Object { "$($_.type)" -eq 'owner-review' })[0]; if ($orj -and $orj.enabled) { $revCad = [int][math]::Max(1, [math]::Round([int]$orj.intervalMinutes / 1440)) } } catch { $revCad = 0 }
             $revMap = @{}; try { $revMap = ConvertTo-PimOwnerReviewMap (Get-PimManagerSettingObject -Name 'OwnerReviews') } catch { $revMap = @{} }
             [void](Add-PimOwnerReviewStatus -People $people -Reviews $revMap -CadenceDays $revCad)
-            $maxDays = 0; try { $mv = Get-PimManagerSettingObject -Name 'OwnerExtendMaxDays'; if ("$mv" -match '^\d+$') { $maxDays = [int]"$mv" } } catch { }
+            $maxDays = 0; try { $mv = Get-PimManagerSettingObject -Name 'OwnerExtendMaxDays'; $maxDays = [int](Get-PimManagerOwnerExtendMaxDays -Stored $mv) } catch { $maxDays = 0 }   # review fixes 2026-10-13: bounded on the read (1 to 3650); outside = 0 = the default
             if ($maxDays -le 0) { $maxDays = [int]$script:PimOwnerExtendMaxDaysDefault }
             if ($maxDays -le 0) { $maxDays = 365 }
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
@@ -17471,7 +17979,7 @@ function Handle-Request {
             $t = Resolve-PimManagerOwnerTarget -UserName "$($body.userName)" -Verb 'extend'
             if ($t.status -ne 200) { Write-JsonResponse -Response $resp -Status $t.status -Body @{ error = $t.error }; return $t.status }
             $row = $t.row; $role = $t.role; $isAdmin = $t.isAdmin; $un = "$($row.UserName)".Trim(); if (-not $un) { $un = "$($row.UserPrincipalName)".Trim() }
-            $maxDays = 0; try { $mv = Get-PimManagerSettingObject -Name 'OwnerExtendMaxDays'; if ("$mv" -match '^\d+$') { $maxDays = [int]"$mv" } } catch { }
+            $maxDays = 0; try { $mv = Get-PimManagerSettingObject -Name 'OwnerExtendMaxDays'; $maxDays = [int](Get-PimManagerOwnerExtendMaxDays -Stored $mv) } catch { $maxDays = 0 }   # review fixes 2026-10-13: bounded on the read (1 to 3650); outside = 0 = the default
             $chk = Test-PimOwnerExtendRequest -Row $row -NewDate $newDate -MaxDays $maxDays
             if (-not $chk.ok) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = $chk.reason }; return 400 }
             $cs = (Get-PimManagerStoreCs)
@@ -19774,6 +20282,14 @@ function Handle-Request {
             $split = Split-PimManagerQueueCommitIds -Ids $ids -Entries $pendNow -DeleteCommit ([bool]$bodyIn.deleteCommit)
             $ownSkipped = @($split.skipped)
             $delCommitted = @($pendNow | Where-Object { $split.commit -contains "$($_.id)" -and (Test-PimManagerQueueEntryNeedsOwnCommit -Entry $_) })
+            # Owner decisions (34)-(36) (lane revaudit): a STAGED revoke is checked again for the person who commits, from the
+            # stored rows as they are now -- an Admin cannot commit a not-managed revoke a SuperAdmin staged. Refused whole.
+            $rvCommit = Test-PimRevauditQueueCommit -Ids @($split.commit) -Entries $pendNow
+            if (-not $rvCommit.allowed) {
+                Write-PimRevauditRefusalAudit -Verdict $rvCommit -Stage 'commit'
+                Write-JsonResponse -Response $resp -Status 403 -Body (Get-PimRevauditRefusalBody -Verdict $rvCommit -Stage 'commit')
+                return 403
+            }
             $res = @()
             if (@($split.commit).Count) {
                 try { $res = @(Set-PimSqlQueueCommitted -ConnectionString $cs -Ids @($split.commit) -By $who) }
@@ -21263,6 +21779,16 @@ function Handle-Request {
             # excluded + large-batch count-confirmation) BEFORE doing anything.
             $plan = Get-PimRevokeGuardPlan -Rows $rowsIn -ConfirmCount $confirmCount
 
+            # REQ 100.122 F4, owner decisions (15) (30) (34)-(36) (lane revaudit, _revaudit.ps1): WHO may revoke WHAT, decided
+            # here from the STORED rows -- preview and commit both, refused whole with the reason per row. Not managed = a
+            # SuperAdmin only; managed = the caller's own scope and level, no SuperAdmin. Break-glass rows are skipped above.
+            $rvVerdict = Test-PimRevauditRequest -Rows @($plan.toRevoke) -ManagedOnly ([bool]($body -and $body.managedOnly))
+            if (-not $rvVerdict.allowed) {
+                Write-PimRevauditRefusalAudit -Verdict $rvVerdict -Stage 'stage'
+                Write-JsonResponse -Response $resp -Status 403 -Body (Get-PimRevauditRefusalBody -Verdict $rvVerdict -Stage 'stage')
+                return 403
+            }
+
             # [H3] APPROVAL gate (the full approval-gated revoke, on top of the interim
             # #81 guard above): an over-threshold (post-break-glass) batch requires an
             # APPROVED maker/checker 'revoke' request for this batch label; at/below the
@@ -21442,15 +21968,15 @@ function Handle-Request {
             $body = Read-RequestJson -Request $req
             $snapId = if ($body -and $body.id) { "$($body.id)" } else { '' }
             $base   = if ($body -and $body.base) { "$($body.base)" } else { '' }
-            # [Fix 5] explicit operator acknowledgement for the restore delta guard.
-            $confirmRestore = $false
-            if ($body -and ($null -ne $body.confirm) -and ("$($body.confirm)" -ieq 'true' -or "$($body.confirm)" -eq '1' -or $body.confirm -eq $true)) { $confirmRestore = $true }
+            # PIM 100.119: the restore's removal check is approved by a SUPERADMIN (guardApproval: approve + reason + the list
+            # hash the 409 handed out). confirm=true approves nothing any more.
+            $restoreApproval = if ($body -and $body.PSObject.Properties['guardApproval']) { $body.guardApproval } else { $null }
             if (-not "$snapId".Trim()) {
                 Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = "missing snapshot 'id' in body" }
                 return 400
             }
             try {
-                $r = Invoke-PimManagerBackupRestore -Id $snapId -Confirm:$confirmRestore
+                $r = Invoke-PimManagerBackupRestore -Id $snapId -GuardApproval $restoreApproval
                 if (-not "$base".Trim()) { $base = "$($r.entity)" }
                 # BUG-292: the audit names what the restore changed (row by row) and records the restorer as the initiator, so
                 # the engine's applies name the person; it used to log 0 / 0 / 0, which also skipped the attribution.
@@ -21468,7 +21994,15 @@ function Handle-Request {
                 # [Fix 5] a guard refusal ("restore refused: ...") is a 409 confirm-required,
                 # not a 500 (the store was untouched -- nothing failed, it was prevented).
                 if ("$($_.Exception.Message)" -like 'restore refused:*') {
-                    Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; base = $base; gate = 'delta-guard'; confirmRequired = $true; error = "$($_.Exception.Message)" }
+                    # PIM 100.119: the answer says what a SuperAdmin must approve (the rows, the list hash) -- 409, or 403
+                    # when somebody who is not a SuperAdmin sent an approval.
+                    $rAsk = $script:PimRestoreGuardAsk; $script:PimRestoreGuardAsk = $null
+                    if ($rAsk -and $rAsk.body) {
+                        $rAsk.body['gate'] = 'delta-guard'; $rAsk.body['error'] = "$($_.Exception.Message)"
+                        Write-JsonResponse -Response $resp -Status ([int]$rAsk.status) -Body $rAsk.body
+                        return [int]$rAsk.status
+                    }
+                    Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; base = $base; gate = 'delta-guard'; approvalRequired = $true; superAdminRequired = $true; error = "$($_.Exception.Message)" }
                     return 409
                 }
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; base = $base; error = "$($_.Exception.Message)" }
@@ -21705,6 +22239,14 @@ function Handle-Request {
             $script:lastHeartbeat = Get-Date
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
                 Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = 'Admin role required to delete a group. Roles are stored in SQL -- ask a SuperAdmin to grant you access.' }
+                return 403
+            }
+            # Owner decision (30) (lane revaudit): an EXTRA group is by definition not managed by PIM Manager -- staging its
+            # deletion is a SuperAdmin's, on every page. An Admin is refused with the reason (and it is audited).
+            $rvGd = Get-PimRevauditGroupDeleteRefusal -Stage 'stage'
+            if ($rvGd) {
+                Write-PimManagerAuditEvent -Action 'drift.group.delete.refused' -Target 'group-delete' -Result 'refused' -After ([ordered]@{ reason = $rvGd; stage = 'stage' })
+                Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{ ok = $false; gate = 'superadmin-only'; needsSuperAdmin = $true; error = $rvGd })
                 return 403
             }
             $b = Read-RequestJson -Request $req

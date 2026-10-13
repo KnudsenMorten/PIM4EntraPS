@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.618 -- 2026-10-13
+
+- Batch 2026-10-13: SuperAdmin approval for guards (counts, Guards page), AD sync never removes on a doubt, revoke rule by scope and level, group states + one remove/delete dialog, list menu on every list, settings sweep + two protection switches, AD clean-up and server groups approved in batches, retry after a create, sales designer pack, private-database support job
+
 ## 2.4.617 -- 2026-10-13
 
 - Group deletion has a switch: Settings > Approvals & policy > Group deletion, for a SuperAdmin, with a confirmation that says how many groups will be deleted; the texts that pointed at a menu that does not exist point at it; a group marked for deletion shows as waiting to be deleted, with the reason

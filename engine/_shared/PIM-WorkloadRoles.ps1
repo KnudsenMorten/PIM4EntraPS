@@ -421,6 +421,24 @@ function Find-PimDefenderRoleIdByName {
 if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }   # IMP-02 reader (the create-pending marker)
 $script:PimDefenderManagedRoleDescription = 'Managed by PIM4EntraPS: the custom Defender XDR role of the permission group of the same name.'
 
+function Get-PimDefenderManagedRoleDescription {
+    # The marker every role PIM Manager creates carries, as a LITERAL (a $script: value read from a child scope can be
+    # $null; a null marker must never read as "every role is ours" -- nor as "no role is ours" without saying so).
+    return 'Managed by PIM4EntraPS: the custom Defender XDR role of the permission group of the same name.'
+}
+
+function Test-PimDefenderRoleIsOwn {
+    <#
+      PURE. 100.122 F5. Is this live Defender XDR role PIM Manager's OWN -- a custom role (not built-in) that carries the
+      description PIM Manager writes when it creates one? The same test the duplicate clean-up applies before a DELETE.
+      Anything else ($null, a built-in role, another description, no description) is NOT own.
+    #>
+    param([AllowNull()][object]$Role)
+    if ($null -eq $Role) { return $false }
+    if ($Role.isBuiltIn) { return $false }
+    return ("$($Role.description)".Trim() -ceq (Get-PimDefenderManagedRoleDescription))
+}
+
 function Get-PimDefenderDuplicateRolePlan {
     <#
       PURE. Two or more live roles share a name. They are healed ONLY when every one is PIM's OWN custom role (not built-in,
@@ -524,6 +542,12 @@ function Resolve-PimDefenderSpecRole {
         $role = $hits[0]
         Set-PimDefenderCreatePending -Name $Name -Clear
         if (-not (Test-PimWorkloadStringSetEqual -A @($role.actions) -B @($Actions))) {
+            # 100.122 F5 (owner decision (17), 2026-10-13: "a Defender role is changed only when it is PIM Manager's
+            # own"). The role was found by NAME alone: a role somebody made by hand under that name (or a built-in one)
+            # had its permissions replaced. The delete path always asked (Get-PimDefenderDuplicateRolePlan); so does this.
+            if (-not (Test-PimDefenderRoleIsOwn -Role $role)) {
+                throw ("DEFENDER-ROLE-NOT-OWN: the Defender XDR role '{0}' (id {1}) exists and its permissions differ from the workload template, but it was not created by PIM Manager{2} -- its permissions were NOT changed. Rename or delete that role in the Defender portal (Settings > Permissions > Roles) so PIM Manager creates its own, or change the template to the permissions the role has." -f $Name, $role.id, $(if ($role.isBuiltIn) { ' (it is a built-in role)' } else { ' (it does not carry PIM Manager''s description)' }))
+            }
             try { Invoke-PimGraph -Beta -Method PATCH -Path "/roleManagement/defender/roleDefinitions/$($role.id)" -Body @{ rolePermissions = @(@{ allowedResourceActions = @($Actions) }) } | Out-Null }
             catch { throw (Get-PimDefenderRoleWriteErrorText -Name $Name -Actions $Actions -Message "$($_.Exception.Message)$(if ($_.ErrorDetails) { ' ' + $_.ErrorDetails.Message })" -Verb 'update') }
             Write-Host ("    [~] Defender XDR role '{0}': permissions set to the spec ({1})" -f $Name, (@($Actions) -join '; ')) -ForegroundColor Green

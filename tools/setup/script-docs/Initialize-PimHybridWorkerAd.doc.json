@@ -12,7 +12,7 @@
   ],
   "changes": [
     { "target": "Active Directory (-GmsaOu)", "action": "create", "object": "per identity: the gMSA (AES256), <name>-PermissionGroup (the gMSA its only member) and <name>-PrincipalsAllowedAccess (the worker computer)", "why": "AD is written only by gMSAs, one per privilege tier; every right goes to the PermissionGroup", "undo": "delete the gMSAs and their two groups" },
-    { "target": "Active Directory OUs", "action": "update", "object": "ACEs for <GmsaName>-PermissionGroup: -GroupsOu read + create groups + write member/displayName/description; each -AdminAccountsOu create users + full control below; AdminSDHolder write member only with -GrantProtectedGroupMembership (Tier 0)", "why": "least privilege per OU", "undo": "dsacls <dn> /R <DOMAIN>\\<GmsaName>-PermissionGroup" },
+    { "target": "Active Directory OUs", "action": "update", "object": "ACEs for <GmsaName>-PermissionGroup: -GroupsOu read + create groups + write member/displayName/description (+ delete groups only with -AllowGroupCleanup); each -AdminAccountsOu create users + full control below; AdminSDHolder write member only with -GrantProtectedGroupMembership (Tier 0)", "why": "least privilege per OU", "undo": "dsacls <dn> /R <DOMAIN>\\<GmsaName>-PermissionGroup" },
     { "target": "Group Policy (only with -ServerGmsaName + -ServerOu)", "action": "create", "object": "a GPO (Restricted Groups: <ServerGmsaName>-PermissionGroup member of BUILTIN\\Administrators, adds only) linked to each -ServerOu", "why": "server onboarding by the Tier-1 identity", "undo": "unlink and delete the GPO" },
     { "target": "Active Directory (-ProvisionOdj, Azure VM)", "action": "create", "object": "the worker's computer account in -ComputerOu and the offline domain-join blob (printed)", "why": "joins the Azure VM without line of sight; an Azure Arc server is already joined", "undo": "delete the computer account" },
     { "target": "the forest (-CreateKdsRootKey)", "action": "create", "object": "a KDS root key (Add-KdsRootKey), usable about 10 hours later", "why": "no gMSA exists without one", "undo": "none (forest-wide; leave it)" }
@@ -25,6 +25,7 @@
     { "name": "GroupsOu", "required": true, "default": null, "help": "Where PIM creates and maintains AD groups." },
     { "name": "AdminAccountsOu", "required": false, "default": null, "help": "OU(s) of the AD admin accounts PIM creates." },
     { "name": "GrantProtectedGroupMembership", "required": false, "default": false, "help": "Write member on AdminSDHolder (protected groups) -- the worker becomes Tier 0." },
+    { "name": "AllowGroupCleanup", "required": false, "default": false, "help": "Also grant 'Delete Group objects' on -GroupsOu, for the reviewed clean-up of old PIM groups (a SuperAdmin approves the exact list in PIM Manager)." },
     { "name": "ServerGmsaName", "required": false, "default": null, "help": "The Tier-1 server onboarding identity; needs -ServerOu." },
     { "name": "ServerOu", "required": false, "default": null, "help": "The servers OU(s) for the GPO. Keep the worker out of them (the script warns)." },
     { "name": "ServerAdminGpoName", "required": false, "default": "PIM for AD: <ServerGmsaName>-PermissionGroup is local administrator (servers)", "help": "The GPO name." },

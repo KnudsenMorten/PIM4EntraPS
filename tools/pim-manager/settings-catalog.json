@@ -846,26 +846,6 @@
       }
     },
     {
-      "key": "HideCompanyAndEnvironmentName",
-      "label": "Hide company and environment name",
-      "where": "Settings > Naming & accounts > Hide company and environment name (also the toggle on the Dashboard and the Counters overview)",
-      "route": "/api/settings/hide-names",
-      "type": "boolean",
-      "default": "On (names hidden)",
-      "feature": "",
-      "confirmOn": false,
-      "confirmOff": false,
-      "info": {
-        "what": "Keeps the company (tenant) name and the environment name off the Dashboard, the Counters overview and every exported PDF and Excel file, so screenshots and shared files can be shown to anyone.",
-        "enabled": "On (the default): the Dashboard and the Counters overview show PIM Manager in place of the tenant name and the environment name, the tenant id and the instance switcher are hidden there, the browser tab says PIM Manager, and every export names the environment as PIM Manager. Other pages show the names as before.",
-        "disabled": "Off: the Dashboard, the Counters overview and the browser tab show the tenant name, the environment name and the tenant id like every other page, and exports name the environment (environment name and tenant name).",
-        "risk": "Cosmetic: nothing is changed in your tenant and no data is hidden from the counters or tables. Turning it off puts your company and environment name into screenshots and exported files you may share. Reversible at any time.",
-        "requires": "SuperAdmin role to change; every signed-in role can read it. Free (Community) and Pro.",
-        "recommended": "Leave it on, and turn it off only while you need the names on the Dashboard -- for example to tell several environments apart.",
-        "docUrl": "https://invardia.com/docs/pim/settings/HideCompanyAndEnvironmentName/"
-      }
-    },
-    {
       "key": "AdminAccountUpnSuffix",
       "label": "Admin account domain",
       "where": "Settings > Naming & accounts > Admin account domain",
@@ -1563,6 +1543,186 @@
         "requires": "Pro (On-premises Active Directory feature), a running hybrid worker on PowerShell 7. SuperAdmin to change. Works with HybridAdSyncBatchSize.",
         "recommended": "Keep 8. Raise it only if activations of server groups reach AD too slowly and the worker logs show no throttling.",
         "docUrl": "https://invardia.com/docs/pim/settings/HybridAdSyncParallel/"
+      }
+    },
+    {
+      "key": "HybridAdEndTimeAsUtc",
+      "label": "Read activation end times as UTC",
+      "where": "Settings > Hybrid AD & workloads > Hybrid Active Directory (PIM for AD)",
+      "route": "/api/settings/hybrid-ad",
+      "type": "choice",
+      "default": "Off (end times are read as before)",
+      "feature": "pim-for-active-directory",
+      "confirmOn": true,
+      "confirmOff": true,
+      "info": {
+        "what": "How the hybrid worker reads the time at which an activation ends. Type on or off. On: the end time is always read as UTC, which is what Microsoft Entra sends. Off: it is read as before, which is only exact when the clock of the hybrid worker is set to UTC.",
+        "enabled": "When on: a member leaves the on-premises AD group exactly when the activation ends, whatever time zone the hybrid worker runs in. In a forest with time-limited group membership every active member is re-added once, with the corrected time, in the first pass after the change.",
+        "disabled": "When off or blank (the default): nothing changes compared with earlier versions. On a hybrid worker whose clock is UTC the result is the same as on. On a worker in another time zone a membership can end earlier or later than the activation, by the time zone difference.",
+        "risk": "Switching it changes the end time of running memberships by the time zone difference of the hybrid worker: in a forest with time-limited membership each active member is re-added once with the corrected time, and a member whose corrected end time has already passed is removed in that pass. On a worker whose clock is UTC nothing changes. Reversible: switch it back; members are re-added once again.",
+        "requires": "Pro (On-premises Active Directory feature) and a running hybrid worker on PowerShell 7. SuperAdmin to change. The hybrid worker picks the change up within a few minutes.",
+        "recommended": "Switch it on when the clock of your hybrid worker is not UTC and members leave their AD groups at the wrong time. On a worker that runs in UTC it makes no difference.",
+        "docUrl": "https://invardia.com/docs/pim/settings/HybridAdEndTimeAsUtc/"
+      }
+    },
+    {
+      "key": "HybridAdServerSearchOus",
+      "label": "Server discovery: only these OUs",
+      "where": "Settings > Hybrid AD & workloads > Hybrid Active Directory (PIM for AD)",
+      "route": "/api/settings/hybrid-ad-discovery",
+      "type": "list",
+      "default": "Blank (the whole domain)",
+      "feature": "pim-for-active-directory",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "The organizational units the hybrid worker looks in when it lists Windows servers. Enter distinguished names, one per line or separated by a semicolon; several OUs are allowed and sub-OUs are included. A server is always an enabled Windows Server that is not a domain controller.",
+        "enabled": "When set: from the worker's next listing (hourly) only servers below one of these OUs are listed, proposed on Discovery and gaps, and handled by server onboarding. Use Preview to see the number of servers before you save.",
+        "disabled": "When blank / at the default: the whole domain is searched.",
+        "risk": "A server outside the OUs is no longer listed or proposed, and server onboarding no longer adds its PIM group to its local Administrators. It keeps the group and the access it already has; nothing is removed. Reversible: clear or edit the list.",
+        "requires": "Pro (On-premises Active Directory feature) and a running hybrid worker. SuperAdmin to change. An OU that does not exist simply matches no server.",
+        "recommended": "Leave blank unless your servers live in a few known OUs; then name those OUs.",
+        "docUrl": "https://invardia.com/docs/pim/settings/HybridAdServerSearchOus/"
+      }
+    },
+    {
+      "key": "HybridAdServerExcludeOus",
+      "label": "Server discovery: OUs to leave out",
+      "where": "Settings > Hybrid AD & workloads > Hybrid Active Directory (PIM for AD)",
+      "route": "/api/settings/hybrid-ad-discovery",
+      "type": "list",
+      "default": "Blank (nothing left out)",
+      "feature": "pim-for-active-directory",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "Organizational units whose servers the hybrid worker never lists. Enter distinguished names, one per line or separated by a semicolon; sub-OUs are included. It works with the whole domain and with the list of OUs to look in.",
+        "enabled": "When set: from the worker's next listing servers below these OUs are not listed, not proposed and not handled by server onboarding.",
+        "disabled": "When blank / at the default: no OU is left out.",
+        "risk": "A server in a left-out OU keeps the group and access it already has, but is no longer proposed or onboarded. Nothing is removed. Reversible: clear or edit the list.",
+        "requires": "Pro (On-premises Active Directory feature) and a running hybrid worker. SuperAdmin to change.",
+        "recommended": "Use it for OUs of test, retired or quarantined servers.",
+        "docUrl": "https://invardia.com/docs/pim/settings/HybridAdServerExcludeOus/"
+      }
+    },
+    {
+      "key": "HybridAdServerActiveDays",
+      "label": "Server discovery: last changed within (days)",
+      "where": "Settings > Hybrid AD & workloads > Hybrid Active Directory (PIM for AD)",
+      "route": "/api/settings/hybrid-ad-discovery",
+      "type": "number",
+      "default": "90 days",
+      "feature": "pim-for-active-directory",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "A server is listed only when its computer object in Active Directory last changed within this many days. This is the date the object changed in the directory (a domain-joined computer renews its password about every 30 days, which changes the object). It is not the last sign-in of the computer. Allowed 1-3650.",
+        "enabled": "When set: the worker's next listing uses this number of days.",
+        "disabled": "When blank / at the default: 90 days.",
+        "risk": "A small number hides servers that are switched off for a while; a large number lists servers that were decommissioned without removing their computer object. A server that falls out keeps its group and access; nothing is removed. Reversible: change the number.",
+        "requires": "Pro (On-premises Active Directory feature) and a running hybrid worker. SuperAdmin to change.",
+        "recommended": "Keep 90 days.",
+        "docUrl": "https://invardia.com/docs/pim/settings/HybridAdServerActiveDays/"
+      }
+    },
+    {
+      "key": "HybridAdServerNameInclude",
+      "label": "Server discovery: only names like",
+      "where": "Settings > Hybrid AD & workloads > Hybrid Active Directory (PIM for AD)",
+      "route": "/api/settings/hybrid-ad-discovery",
+      "type": "list",
+      "default": "Blank (every name)",
+      "feature": "pim-for-active-directory",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "Wildcards for the server names to list, separated by a comma, a semicolon or a new line (for example SRV-*, FS??). Letters, digits, - and _ with the wildcards * and ?.",
+        "enabled": "When set: only servers whose name matches at least one wildcard are listed from the worker's next listing.",
+        "disabled": "When blank / at the default: every server name is listed.",
+        "risk": "A server whose name does not match is no longer listed, proposed or onboarded; it keeps the group and access it has. Nothing is removed. Reversible: clear or edit the list.",
+        "requires": "Pro (On-premises Active Directory feature) and a running hybrid worker. SuperAdmin to change.",
+        "recommended": "Leave blank unless your naming standard separates the servers PIM Manager should handle.",
+        "docUrl": "https://invardia.com/docs/pim/settings/HybridAdServerNameInclude/"
+      }
+    },
+    {
+      "key": "HybridAdServerNameExclude",
+      "label": "Server discovery: never names like",
+      "where": "Settings > Hybrid AD & workloads > Hybrid Active Directory (PIM for AD)",
+      "route": "/api/settings/hybrid-ad-discovery",
+      "type": "list",
+      "default": "Blank (no name left out)",
+      "feature": "pim-for-active-directory",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "Wildcards for server names that are never listed, separated by a comma, a semicolon or a new line (for example TEST-*). A wildcard that would match every server is refused.",
+        "enabled": "When set: servers whose name matches one of the wildcards are left out from the worker's next listing.",
+        "disabled": "When blank / at the default: no server is left out by name.",
+        "risk": "A left-out server keeps the group and access it has, but is no longer proposed or onboarded. Nothing is removed. Reversible: clear or edit the list.",
+        "requires": "Pro (On-premises Active Directory feature) and a running hybrid worker. SuperAdmin to change.",
+        "recommended": "Use it for test or lab servers that follow a naming pattern.",
+        "docUrl": "https://invardia.com/docs/pim/settings/HybridAdServerNameExclude/"
+      }
+    },
+    {
+      "key": "HybridAdServerAutoGroupOus",
+      "label": "New servers in these OUs are offered for approval as one list",
+      "where": "Settings > Hybrid AD & workloads > Hybrid Active Directory (PIM for AD)",
+      "route": "/api/settings/hybrid-ad-discovery",
+      "type": "list",
+      "default": "Blank (no list: every server is a proposal)",
+      "feature": "pim-for-active-directory",
+      "confirmOn": true,
+      "confirmOff": false,
+      "info": {
+        "what": "The organizational units whose newly found Windows servers are collected into one list for a SuperAdmin. Enter distinguished names, one per line or separated by a semicolon; sub-OUs are included. Each OU must lie inside where the worker looks and outside the left-out OUs. Naming an OU creates nothing by itself.",
+        "enabled": "When set: at each listing the hybrid worker puts every listed server in these OUs that has no group on the waiting list shown on this page. Nothing is created until a SuperAdmin approves that exact list. After the approval the worker defines the groups in batches, run after run; the engine creates each group, it is mirrored to Active Directory and added to the server's local Administrators. The groups are empty: nobody gets access until a person delegates it. Each definition is written to the audit trail.",
+        "disabled": "When blank / at the default: no list is built. Every new server is a proposal on Discovery and gaps that a person accepts and commits.",
+        "risk": "After an approval, groups are created without a commit per group, one per server of the approved list. A server a person chose Ignore for, and a server whose group was removed again, are never offered. Clearing the list stops new servers from being offered; an approval already given is still carried out for servers that are in these OUs when the worker runs, and groups already defined stay. Reversible: clear or edit the list.",
+        "requires": "Pro (On-premises Active Directory feature), a running hybrid worker with server onboarding, and the OU for new AD groups. SuperAdmin to change and to approve a list.",
+        "recommended": "Name only the OUs where every server should be onboarded the same way; leave everything else a proposal.",
+        "docUrl": "https://invardia.com/docs/pim/settings/HybridAdServerAutoGroupOus/"
+      }
+    },
+    {
+      "key": "HybridAdServerAutoGroupMaxPerRun",
+      "label": "Server groups created per run",
+      "where": "Settings > Hybrid AD & workloads > Hybrid Active Directory (PIM for AD)",
+      "route": "/api/settings/hybrid-ad-discovery",
+      "type": "number",
+      "default": "50 groups",
+      "feature": "pim-for-active-directory",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "How many server groups of an approved list the hybrid worker creates in one run. Allowed 1-1000. The worker runs about once an hour and goes on, run after run, until the approved list is done. It does not decide whether something is created: nothing is created without an approval.",
+        "enabled": "When set: after a SuperAdmin approved a list of new servers, each run creates at most this many of its groups. The page shows how many are created and about how long the rest takes at this number.",
+        "disabled": "When blank / at the default: 50 groups per run. A list of 1,000 servers then takes about 20 runs (about 20 hours).",
+        "risk": "A small number makes a long list slow; an approval is valid for 72 hours, and what is not created by then waits for a new approval. A large number creates many groups in one run, which loads the engine and Active Directory at once. It never creates more than the approved list. Reversible: change the number; it applies from the next run.",
+        "requires": "Pro (On-premises Active Directory feature) and a running hybrid worker. SuperAdmin to change. Only matters when OUs for new servers are named.",
+        "recommended": "Keep 50. Raise it for a large first roll-out so the list is done well within 72 hours, then set it back.",
+        "docUrl": "https://invardia.com/docs/pim/settings/HybridAdServerAutoGroupMaxPerRun/"
+      }
+    },
+    {
+      "key": "HybridAdCleanupOus",
+      "label": "Clean-up: also look for old PIM groups in these OUs",
+      "where": "Settings > Hybrid AD & workloads > Hybrid Active Directory (PIM for AD)",
+      "route": "/api/settings/hybrid-ad-discovery",
+      "type": "list",
+      "default": "Blank (only the OU for new AD groups)",
+      "feature": "pim-for-active-directory",
+      "confirmOn": true,
+      "confirmOff": false,
+      "info": {
+        "what": "Extra organizational units where the hybrid worker looks for old PIM groups: Active Directory groups that carry the PIM naming but have no definition in PIM Manager any more. The OU for new AD groups is always included. Enter distinguished names, one per line or separated by a semicolon; sub-OUs are included.",
+        "enabled": "When set: from the worker's next run old PIM groups in these OUs are listed on the clean-up review too. Listing deletes nothing: a group is deleted only after a SuperAdmin approved exactly that group on the review.",
+        "disabled": "When blank / at the default: only the OU for new AD groups is looked in. With no OU at all, nothing is ever proposed or deleted.",
+        "risk": "It widens where a SuperAdmin can approve deletions. A group outside the named OUs is never offered and never deleted, whatever its name. Reversible: clear or edit the list; an approval already given for a group that is then outside the OUs is not carried out.",
+        "requires": "Pro (On-premises Active Directory feature), a running hybrid worker, and the right to delete group objects in these OUs for the worker's account. SuperAdmin to change.",
+        "recommended": "Leave blank unless an earlier installation created its groups in another OU.",
+        "docUrl": "https://invardia.com/docs/pim/settings/HybridAdCleanupOus/"
       }
     },
     {
@@ -2297,12 +2457,72 @@
       "confirmOff": true,
       "info": {
         "what": "Whether releasing a safety guard needs a second SuperAdmin. A release lets one held engine plan through for one run or until a time (at most 24 hours) -- for example more removals than the per-run removal budget, or more account disables than the circuit breaker allows.",
-        "enabled": "When on: a new release is created as pending. The engine will not use it until a different SuperAdmin approves it on the Guards page. The person who created it cannot approve it. If the setting cannot be read, PIM Manager treats it as on.",
+        "enabled": "When on: a new release is created as pending. The engine will not use it until a different SuperAdmin approves it on the Guards page. The person who created it cannot approve it. The same holds for an approval of removals given in the commit popup: the engine uses it only after a different SuperAdmin approved it on the Guards page. If the setting cannot be read, PIM Manager treats it as on.",
         "disabled": "When off (the default): one SuperAdmin with a reason of at least 10 characters releases a guard alone, and the next matching engine run may use it.",
         "risk": "Off means a single SuperAdmin can let the engine remove or disable more than the guards normally allow in one run. The switch itself can be turned off by one SuperAdmin. Releases are always audited and bound to the exact plan; a changed plan is held again. Reversible at any time; a release already pending stays pending.",
         "requires": "SuperAdmin to change it. Free (Community) and Pro. Needs at least two SuperAdmins when on.",
         "recommended": "On, when you have two or more SuperAdmins: a release can remove access at scale, so it deserves a second pair of eyes.",
         "docUrl": "https://invardia.com/docs/pim/settings/GuardReleaseSecondPerson/"
+      }
+    },
+    {
+      "key": "GuardLimits.CommitRemoval",
+      "label": "Limit: commit removal check",
+      "where": "Operations > Guards",
+      "route": "/api/guards/{guardId}/limit",
+      "type": "number",
+      "default": "25 rows of one list in one commit",
+      "feature": "safety-brake",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "How many rows of one list a single commit may take out before a SuperAdmin has to approve it. It is a count: there is no share of the list in the rule, so taking 2 rows out of a list of 3 does not ask, and taking 26 rows out of a list of 1000 does. Two more cases always ask, whatever this number is, and their numbers are fixed: a commit that keeps none of the rows the list has now (also when it adds new ones), and a commit that would leave 2 rows or fewer of a list that has more than 5 rows.",
+        "enabled": "When set: a commit that takes more rows than this out of one list is not saved. The commit popup shows the rows and the two numbers. An Admin reads that a SuperAdmin must approve; a SuperAdmin gets an Approve button and must give a reason. The approval covers exactly the rows shown and is recorded with who, when, why and every row.",
+        "disabled": "At the default: 25 rows. The check itself cannot be switched off.",
+        "risk": "A higher number lets an Admin remove more rows of a list in one commit without a second pair of eyes. A lower number asks a SuperAdmin more often. The number can only be set from 5 to 200; a stored value outside that range is ignored and 25 applies. Reversible at any time.",
+        "requires": "SuperAdmin to change it, on Operations > Guards. Free (Community) and Pro.",
+        "recommended": "Keep 25 unless routine clean-ups in your lists are larger. Raise it for a planned bulk change rather than permanently, or let a SuperAdmin approve that one commit.",
+        "docUrl": "https://invardia.com/docs/pim/settings/GuardLimits.CommitRemoval/"
+      }
+    },
+    {
+      "key": "GuardLimits.RemoveBudget",
+      "label": "Limit: removal budget",
+      "where": "Operations > Guards",
+      "route": "/api/guards/{guardId}/limit",
+      "type": "number",
+      "default": "5 removals per scope per run",
+      "feature": "safety-brake",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "How many removals one engine run may apply in one scope without an approval. When a run would remove more, it removes none of them in that scope and holds the list. This ONE number bounds seven things: removals a row asks for (Action = Remove), per kind of assignment; the clean-up of leftovers PIM Manager manages (a full run with prune); removals by the daily reconcile, where it is set to enforce; groups deleted because their definition is marked Retire; groups deleted from the change queue (a DELETE chosen on the Drift page); admin accounts offboarded in one run; and, in a managed tenant, central admins the managing tenant withdraws in one pull. Raising it raises all seven.",
+        "enabled": "When set: up to this many removals per scope are applied by a run without asking. More than this needs a SuperAdmin's approval of the exact list: in the commit popup when the removals are committed (the run then applies exactly those items, whatever their number), or on Operations > Guards for a list a run already holds. Anything that is not in the approved list is still held.",
+        "disabled": "At the default: 5 removals per scope per run. The guard itself cannot be switched off.",
+        "risk": "A higher number lets one run remove more access without anyone approving the list: a wrong bulk edit or a bad read does more damage before it is noticed. The number can only be set from 1 to 25; a stored value outside that range is ignored and 5 applies. Reversible at any time.",
+        "requires": "SuperAdmin to change it, on Operations > Guards. Free (Community) and Pro.",
+        "recommended": "Keep 5. For a planned clean-up, let a SuperAdmin approve that list when it is committed instead of raising the limit for every run.",
+        "docUrl": "https://invardia.com/docs/pim/settings/GuardLimits.RemoveBudget/"
+      }
+    },
+    {
+      "key": "GuardLimits.DisableBreaker",
+      "label": "Limit: account-disable circuit breaker",
+      "where": "Operations > Guards",
+      "route": "/api/guards/{guardId}/limit",
+      "type": "number",
+      "default": "3 accounts per run",
+      "feature": "safety-brake",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "How many admin accounts one engine run may disable. It is a count of accounts: the share of the scanned accounts plays no part. When a run would disable more, it disables none of them and holds the list. The number bounds three things: accounts disabled because their row says so (the account status, a passed disable date), accounts disabled by an offboarding in one run, and accounts disabled by the inactivity sweep where it is set to enforce.",
+        "enabled": "When set: up to this many accounts are disabled by a run when their rows say so. More than this is held until a SuperAdmin releases exactly that list of accounts on Operations > Guards, for one run. Break-glass accounts are never disabled, whatever this number is.",
+        "disabled": "At the default: 3 accounts per run. The breaker itself cannot be switched off.",
+        "risk": "A higher number lets one run lock more administrators out before anyone has looked at the list. The number can only be set from 1 to 25; a stored value outside that range is ignored and 3 applies. Reversible at any time.",
+        "requires": "SuperAdmin to change it, on Operations > Guards. Free (Community) and Pro.",
+        "recommended": "Keep 3: a real offboarding is a few accounts. For a larger one, release that exact list once instead of raising the limit.",
+        "docUrl": "https://invardia.com/docs/pim/settings/GuardLimits.DisableBreaker/"
       }
     },
     {
@@ -2377,7 +2597,7 @@
       "confirmOff": false,
       "info": {
         "what": "The policy template that gives the PIM Manager recommendation for the PIM for Groups policy of every group PIM Manager manages whose definition leaves the policy template blank. A template recommends how long an activation lasts, what is required to activate (for example multifactor authentication, a reason) and whether approval is needed. It is a recommendation only: PIM Manager never changes a policy on its own.",
-        "enabled": "When set: the recommendation shown for these groups on Templates > Policy settings follows the chosen template. A policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set also says when it would change more than 25 policies, more than 25 % of the checked policies (when at least 8 were checked), or weaken more than 3 policy settings.",
+        "enabled": "When set: the recommendation shown for these groups on Templates > Policy settings follows the chosen template. A policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set says how many policies change and how many settings are weakened, and points out when more than 25 policies change or more than 3 settings are weakened.",
         "disabled": "At the built-in default: the recommendation for these groups comes from Groups_Standard.",
         "risk": "Picking another template changes what 'PIM Manager recommendation' means for many groups at once. Where that choice is made, the next policy run plans the change and holds it for a SuperAdmin's approval; settings on 'Keep current' or 'Microsoft default' are not affected. Reversible: pick the previous template.",
         "requires": "SuperAdmin to change it. Free (Community) and Pro. The template must exist and be written for PIM for Groups. The engine needs RoleManagementPolicy.ReadWrite.AzureADGroup.",
@@ -2397,7 +2617,7 @@
       "confirmOff": false,
       "info": {
         "what": "The policy template that gives the PIM Manager recommendation for the Entra ID role policy of every role your delegations assign (to groups, in administrative units, or directly) when the row leaves the policy template blank. If two rows name the same role with different templates, the one requiring approval wins. It is a recommendation only: PIM Manager never changes a policy on its own.",
-        "enabled": "When set: the recommendation shown for these roles on Templates > Policy settings follows the chosen template. A role's policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set also says when it would change more than 25 policies, more than 25 % of the checked policies (when at least 8 were checked), or weaken more than 3 policy settings.",
+        "enabled": "When set: the recommendation shown for these roles on Templates > Policy settings follows the chosen template. A role's policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set says how many policies change and how many settings are weakened, and points out when more than 25 policies change or more than 3 settings are weakened.",
         "disabled": "At the built-in default: the recommendation for these roles comes from EntraIDRoles_Standard.",
         "risk": "A role policy applies to everyone who holds that role in the tenant, not only the groups PIM Manager manages. Picking another template changes what 'PIM Manager recommendation' means for all of them; where that choice is made, the next policy run plans the change and holds it for a SuperAdmin's approval. Reversible: pick the previous template.",
         "requires": "SuperAdmin to change it. Free (Community) and Pro. The template must exist and be written for Entra ID roles. The engine needs RoleManagementPolicy.ReadWrite.Directory.",
@@ -2417,7 +2637,7 @@
       "confirmOff": false,
       "info": {
         "what": "The policy template that gives the PIM Manager recommendation for the PIM policy of each Azure role and scope pair your Azure delegations assign when the row leaves the policy template blank. If two rows name the same pair with different templates, the one requiring approval wins. It is a recommendation only: PIM Manager never changes a policy on its own.",
-        "enabled": "When set: the recommendation shown for these Azure roles on Templates > Policy settings follows the chosen template. A policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set also says when it would change more than 25 policies, more than 25 % of the checked policies (when at least 8 were checked), or weaken more than 3 policy settings.",
+        "enabled": "When set: the recommendation shown for these Azure roles on Templates > Policy settings follows the chosen template. A policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set says how many policies change and how many settings are weakened, and points out when more than 25 policies change or more than 3 settings are weakened.",
         "disabled": "At the built-in default: the recommendation for these pairs comes from AzureRoles_Standard (the same rules as the Entra role standard).",
         "risk": "An Azure role policy applies to everyone eligible for that role on that scope. Picking another template changes what 'PIM Manager recommendation' means for all of them; where that choice is made, the next policy run plans the change and holds it for a SuperAdmin's approval. PIM Manager never switches approval off on an Azure role policy. Reversible: pick the previous template.",
         "requires": "SuperAdmin to change it. Free (Community) and Pro. The template must exist and be written for Azure resource roles. The engine's identity needs a role that may change role management policies on those scopes (for example User Access Administrator or Owner).",
@@ -2443,6 +2663,286 @@
         "requires": "SuperAdmin to change it. Delegated entries need Pro; Reader, Admin and SuperAdmin are Free (Community). At least one SuperAdmin must remain.",
         "recommended": "Keep two SuperAdmins (so second-approver controls work), give everyday operators Admin, and limit who can sign in to PIM Manager at all with the app's user assignment.",
         "docUrl": "https://invardia.com/docs/pim/settings/ManagerAccess.RoleMapping/"
+      }
+    },
+    {
+      "key": "EnableAutomaticOffboarding",
+      "label": "Automatic offboarding",
+      "where": "Settings > Approvals & policy > Automatic offboarding",
+      "route": "/api/settings/auto-offboarding",
+      "type": "boolean",
+      "default": "Not set: off in a production tenant, on in a tenant named as a test tenant",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "Decides whether the engine acts by itself on an admin account that is due for offboarding: its offboard date has passed, it is marked Retire, or its status is Revoked. The offboarding job (admin-offboarding) reads the switch at every run. The card shows the state in effect and where it comes from. PIM Manager asks for confirmation before the switch is changed, in either direction.",
+        "enabled": "When on: from its next run the offboarding job disables such an account, signs it out everywhere, removes its group memberships and eligibilities and sends the offboarding notice. The account itself is never deleted.",
+        "disabled": "When off: the offboarding job does nothing for these accounts. The group memberships and eligibilities such an account holds stay until the switch is on or somebody removes them by hand.",
+        "risk": "On: access is removed without a person looking at each account, so a wrong offboard date or a wrong Retire mark takes a working administrator's access away. The account-disable guard still applies and cannot be switched off here. Off: an account that should have lost its access keeps it. Switching off later does not put removed access back.",
+        "requires": "SuperAdmin to change it, with a confirmation. A setting made in the engine job's own environment wins over this switch; the card says so where PIM Manager can read it.",
+        "recommended": "On once your offboard dates are maintained and you have checked, on Jobs, which accounts the offboarding job lists. Off while you are still cleaning up dates.",
+        "docUrl": "https://invardia.com/docs/pim/settings/EnableAutomaticOffboarding/"
+      }
+    },
+    {
+      "key": "ReconcileRemovalMode",
+      "label": "Daily reconcile: removal of leftovers",
+      "where": "Settings > Approvals & policy > Daily reconcile: removal of leftovers",
+      "route": "/api/settings/reconcile-removal",
+      "type": "choice",
+      "default": "Not set: leftovers are removed",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "Decides what the daily full run (the job full-reconcile) does with a leftover: a live assignment or membership that PIM Manager put in your tenant, whose definition was later removed by a PIM Manager commit, and for which nothing similar is configured. The card shows the mode in effect, where it comes from and what the last daily run counted. PIM Manager asks for confirmation before the mode is changed.",
+        "enabled": "When set to 'Remove leftovers': the daily run removes the leftovers that qualify. It never disables or deletes an admin account, never removes a shared Defender XDR or Intune assignment, and never removes anything that existed before PIM Manager recorded its changes.",
+        "disabled": "When set to 'Report only': the daily run removes none of them and lists on Jobs what it would remove. Not set at all means 'Remove leftovers'.",
+        "risk": "Remove leftovers: a removal cannot be undone from this page; the removal guard still applies and cannot be switched off here, and when more items qualify than the guard allows in one run, none is removed in that run. Report only: access whose definition was removed stays live in your tenant until somebody removes it by hand.",
+        "requires": "SuperAdmin to change it, with a confirmation. While nothing is set here, a value in the engine job's own environment decides; the card says so where PIM Manager can read it.",
+        "recommended": "Remove leftovers, so that removing a definition also removes the access. Use Report only while you investigate what a run would remove, then set it back.",
+        "docUrl": "https://invardia.com/docs/pim/settings/ReconcileRemovalMode/"
+      }
+    },
+    {
+      "key": "ApprovalRequestTtlHours",
+      "label": "An approval request expires after (hours)",
+      "where": "Settings > Approvals & policy > Approval and request limits",
+      "route": "/api/settings/feature-settings",
+      "type": "number",
+      "default": "72 hours (allowed: 1 to 720)",
+      "feature": "second-approver",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "How long an approval request (offboard, revoke and similar) may wait for a decision. A request that nobody decided in this time is closed as expired and can no longer be approved; the change must be requested again.",
+        "enabled": "When set: requests raised from then on, and requests still waiting, expire after the number of hours you chose. PIM Manager applies the new value at once.",
+        "disabled": "When blank or default: a request expires after 72 hours.",
+        "risk": "A long time lets an old request be approved long after the reason for it was checked. A very short time makes requests expire before a second administrator has seen them, for example over a weekend. Reversible: set another value or go back to the default.",
+        "requires": "SuperAdmin to change it. A whole number of hours from 1 to 720.",
+        "recommended": "72 hours. Raise it only if your approvers are regularly away longer than a weekend.",
+        "docUrl": "https://invardia.com/docs/pim/settings/ApprovalRequestTtlHours/"
+      }
+    },
+    {
+      "key": "BreakGlassChangeTtlHours",
+      "label": "A change to the emergency access list waits for its second SuperAdmin for at most (hours)",
+      "where": "Settings > Approvals & policy > Approval and request limits",
+      "route": "/api/settings/feature-settings",
+      "type": "number",
+      "default": "72 hours (allowed: 1 to 168)",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "A change to the list of emergency access (break-glass) accounts is requested by one SuperAdmin and approved by another. This is how long such a request may wait. After that it expires and can never be approved; it must be raised again.",
+        "enabled": "When set: a request waits for the number of hours you chose. PIM Manager applies the new value at once, also to a request that is waiting.",
+        "disabled": "When blank or default: a request waits for 72 hours.",
+        "risk": "The emergency access list decides which accounts every guard leaves alone. A long wait lets a forgotten request be approved days later; the longest allowed is one week. A very short wait can make it impossible to get a second SuperAdmin in time. Reversible: set another value or go back to the default.",
+        "requires": "SuperAdmin to change it. A whole number of hours from 1 to 168.",
+        "recommended": "72 hours.",
+        "docUrl": "https://invardia.com/docs/pim/settings/BreakGlassChangeTtlHours/"
+      }
+    },
+    {
+      "key": "OwnerExtendMaxDays",
+      "label": "Longest extension a department owner may give (days)",
+      "where": "Settings > Approvals & policy > Approval and request limits",
+      "route": "/api/settings/feature-settings",
+      "type": "number",
+      "default": "365 days (allowed: 1 to 3650)",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "A department owner can move the end date of one of their people further into the future on the My people page. This is the furthest they may move it, counted in days from today. An earlier date is not an extension and keeps its own approval path.",
+        "enabled": "When set: an extension beyond the number of days you chose is refused, with the limit in the message. PIM Manager applies the new value at once.",
+        "disabled": "When blank or default: an owner may extend by up to 365 days.",
+        "risk": "A high number lets an owner keep an account alive for years without anybody else looking at it. A low number means owners must extend more often. Reversible: set another value or go back to the default; dates already extended stay as they are.",
+        "requires": "SuperAdmin to change it. A whole number of days from 1 to 3650.",
+        "recommended": "365 days or less, matching how often you want an owner to confirm that a person still needs access.",
+        "docUrl": "https://invardia.com/docs/pim/settings/OwnerExtendMaxDays/"
+      }
+    },
+    {
+      "key": "RequireGroupOwners",
+      "label": "Refuse to create a group that has no owner",
+      "where": "Settings > Approvals & policy > Groups",
+      "route": "/api/settings/feature-settings",
+      "type": "boolean",
+      "default": "Off",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "When the engine creates a group in Microsoft Entra ID it looks for an owner: the owners or sponsor on the group's definition, or the contact of its department. This switch decides what happens when none of them resolves to a person.",
+        "enabled": "When on: the engine does not create the group and reports the failure on Jobs, naming the group. The group is created on a later run once an owner is set.",
+        "disabled": "When off (the default): the group is created without an owner and the run says so in a warning every time. An owner set later is attached by a later run without touching the group.",
+        "risk": "On: a definition without an owner blocks its group, and everything that depends on the group, until someone fills the owner in -- on an estate where many definitions have no owner, most new groups will not be created. Off: groups can exist that nobody is responsible for. Reversible: switch it back; groups already created are not changed.",
+        "requires": "SuperAdmin to change it. The engine reads it at its next run.",
+        "recommended": "Off until your group definitions carry owners. Switch it on when you want every new group to have a responsible person from the start.",
+        "docUrl": "https://invardia.com/docs/pim/settings/RequireGroupOwners/"
+      }
+    },
+    {
+      "key": "StaleGroupDays",
+      "label": "Report a group as unused when nobody activated it for (days)",
+      "where": "Settings > Approvals & policy > Groups",
+      "route": "/api/settings/feature-settings",
+      "type": "number",
+      "default": "90 days (allowed: 7 to 3650)",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "The validation reports a permission or role group that nobody has activated for a long time, or ever, so you can decide whether the access is still needed. This is the number of days without an activation after which a group is reported.",
+        "enabled": "When set: a group is reported after the number of days you chose. The report is a note on the validation; nothing is removed and no commit is blocked.",
+        "disabled": "When blank or default: a group is reported after 90 days without an activation.",
+        "risk": "None for access: this only changes when a note appears. A low number produces many notes for groups that are used rarely on purpose; a high number hides access nobody uses. The check runs only when activation data for your groups has been read.",
+        "requires": "SuperAdmin to change it. A whole number of days from 7 to 3650.",
+        "recommended": "90 days. Use a longer time if you have groups that are meant for rare tasks, such as a yearly audit.",
+        "docUrl": "https://invardia.com/docs/pim/settings/StaleGroupDays/"
+      }
+    },
+    {
+      "key": "RequiredAuthMethods",
+      "label": "Sign-in methods an admin account must have (at least one of them)",
+      "where": "Settings > Automation > Admin accounts",
+      "route": "/api/settings/feature-settings",
+      "type": "list",
+      "default": "microsoftAuthenticator, passkey, fido2, windowsHelloForBusiness, certificate",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "The validation checks the sign-in methods registered on each admin account. An admin with none of the methods in this list is reported, and so is an admin who has only weak methods (text message, voice call, e-mail). The names are the method names Microsoft Entra ID uses.",
+        "enabled": "When set: an admin must have at least one of the methods you listed. The report is a warning on the validation; no commit is blocked and no account is changed.",
+        "disabled": "When blank or default: the list is the Microsoft Authenticator app, a passkey, a FIDO2 security key, Windows Hello for Business and a certificate.",
+        "risk": "None for access: this only changes which admins get a warning. Taking strong methods out of the list produces warnings for admins who are well protected. Text message, voice call, phone and e-mail cannot be put in the list. Reversible: change the list or go back to the default.",
+        "requires": "SuperAdmin to change it. Up to 12 method names, letters and digits only. The check runs only when the engine may read the sign-in methods of users and that data has been read.",
+        "recommended": "The default list. Shorten it to passkey, fido2 and windowsHelloForBusiness if every admin must be phishing-resistant.",
+        "docUrl": "https://invardia.com/docs/pim/settings/RequiredAuthMethods/"
+      }
+    },
+    {
+      "key": "TapCreateLeadHours",
+      "label": "Issue a Temporary Access Pass this long before its start time (hours)",
+      "where": "Settings > Automation > Admin accounts",
+      "route": "/api/settings/feature-settings",
+      "type": "number",
+      "default": "48 hours (allowed: 0 to 720)",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "For an admin account that asks for a Temporary Access Pass with a start time in the future, the engine waits until the start time is near before it issues and mails the pass. This is how many hours before the start time the pass is issued.",
+        "enabled": "When set: a pass whose start time is further away than the number of hours you chose is left for a later run. With 0 the pass is issued only once its start time has come.",
+        "disabled": "When blank or default: a pass is issued up to 48 hours before its start time.",
+        "risk": "A pass is a sign-in credential in a mailbox. A long lead time means it sits there longer before it can be used; a short one leaves the new admin less time to find the mail before the first day. Reversible: set another value; passes already issued are not recalled.",
+        "requires": "SuperAdmin to change it. A whole number of hours from 0 to 720. The engine reads it at its next run.",
+        "recommended": "48 hours.",
+        "docUrl": "https://invardia.com/docs/pim/settings/TapCreateLeadHours/"
+      }
+    },
+    {
+      "key": "TapReissueUntilOnboarded",
+      "label": "Issue a new Temporary Access Pass every time the last one ran out",
+      "where": "Settings > Automation > Admin accounts",
+      "route": "/api/settings/feature-settings",
+      "type": "boolean",
+      "default": "Off",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "Decides whether the engine issues a Temporary Access Pass once per admin account, or keeps issuing a new one whenever the previous pass has run out and the admin has still not completed their first sign-in.",
+        "enabled": "When on: each time the last pass has expired the engine issues a new one and mails it, for as long as the admin row asks for a pass.",
+        "disabled": "When off (the default): a pass is issued once. If the admin missed it, an administrator sends a new one with Reset TAP on the admin's row.",
+        "risk": "On: a new sign-in credential is created and mailed again and again without anybody asking for it -- for an account nobody uses, this goes on until the row stops asking for a pass. Reversible: switch it off; passes already issued stay valid until they expire.",
+        "requires": "SuperAdmin to change it. A mail sender must be set up. The engine reads it at its next run.",
+        "recommended": "Off. Send a new pass on purpose with Reset TAP.",
+        "docUrl": "https://invardia.com/docs/pim/settings/TapReissueUntilOnboarded/"
+      }
+    },
+    {
+      "key": "AdminMailboxForwarding",
+      "label": "Manage mail forwarding on the mailboxes of admin accounts",
+      "where": "Settings > Automation > Admin accounts",
+      "route": "/api/settings/feature-settings",
+      "type": "boolean",
+      "default": "Off",
+      "feature": "",
+      "confirmOn": true,
+      "confirmOff": false,
+      "info": {
+        "what": "An admin row can ask for the mail sent to the admin account to be forwarded to the person's normal mailbox. This switch decides whether the engine sets that forwarding in Exchange Online when it creates or updates an admin account. Most admin accounts have no mailbox; for those nothing happens either way.",
+        "enabled": "When on: for an admin account that has a mailbox, a row that asks for forwarding gets it (the mail is forwarded, not kept in the admin mailbox), and forwarding found on a mailbox whose row does not ask for it is cleared. A missing permission is reported once per run and changes nothing.",
+        "disabled": "When off (the default): the engine never reads or changes mail forwarding.",
+        "risk": "On: the engine changes mailbox settings in Exchange Online, and it clears forwarding that somebody set by hand on an admin mailbox when the row does not ask for it. Mail for a privileged account then lands in a normal mailbox, which is usually less protected. Reversible: switch it off; forwarding already set or cleared stays as it is.",
+        "requires": "SuperAdmin to change it. The engine's identity needs permission to manage Exchange Online as an application, with an Exchange role that may change mailboxes. The engine reads the switch at its next run.",
+        "recommended": "Off, unless your admin accounts have mailboxes and you want their mail to reach the person.",
+        "docUrl": "https://invardia.com/docs/pim/settings/AdminMailboxForwarding/"
+      }
+    },
+    {
+      "key": "DiscoveryNotifyRecipients",
+      "label": "Send a mail about newly discovered resources to",
+      "where": "Settings > Automation > Discovery and intake",
+      "route": "/api/settings/feature-settings",
+      "type": "text",
+      "default": "Empty (no mail)",
+      "feature": "desired-state-engine",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "When the discovery sweep finds resources it has not seen before -- a new subscription, management group, resource group, workspace or role -- it records each in the audit trail. With an address here it also sends one mail per sweep that lists what is new.",
+        "enabled": "When set: after a sweep that found something new, one mail with the list goes to the addresses you entered (several are separated by a semicolon).",
+        "disabled": "When blank or default: no mail is sent. New resources are still recorded in the audit trail.",
+        "risk": "The mail names resources in your tenant, so send it only to people who may know them. It follows your mail controls: a redirect or the mail kill switch applies to it too. Reversible: clear the field.",
+        "requires": "SuperAdmin to change it. Up to 20 e-mail addresses. A mail sender must be set up, and the discovery sweep (a Pro feature) must be switched on under Settings > Features & edition. The engine reads it at its next run.",
+        "recommended": "The mailbox of the team that decides what PIM Manager should manage.",
+        "docUrl": "https://invardia.com/docs/pim/settings/DiscoveryNotifyRecipients/"
+      }
+    },
+    {
+      "key": "IntakeEnabled",
+      "label": "Read access requests from the ServiceNow drop store",
+      "where": "Settings > Automation > Discovery and intake",
+      "route": "/api/settings/feature-settings",
+      "type": "boolean",
+      "default": "Off",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "Switches the ServiceNow intake on: the scheduled intake job reads the requests your ServiceNow integration has dropped for PIM Manager and turns each into a proposal.",
+        "enabled": "When on: at its next run the intake job processes every request once. An accepted request becomes a proposal on Pending changes that an administrator reviews and commits; a rejected or unsupported one is marked with the reason. Nothing is applied to your tenant without a commit.",
+        "disabled": "When off (the default): the intake job reports that the integration is not enabled and reads nothing. Requests already dropped stay where they are.",
+        "risk": "On: people outside PIM Manager can put proposals into Pending changes. They still need an administrator's commit, but a busy administrator may commit a proposal without checking where it came from. Reversible: switch it off; proposals already created stay on Pending changes until committed or discarded.",
+        "requires": "SuperAdmin to change it. Your ServiceNow integration must deliver the requests; the intake job must be enabled on Jobs.",
+        "recommended": "Off unless you run the ServiceNow integration.",
+        "docUrl": "https://invardia.com/docs/pim/settings/IntakeEnabled/"
+      }
+    },
+    {
+      "key": "DiscoveryAutoCreate",
+      "label": "Discovery: what happens with a newly discovered resource",
+      "where": "Settings > Automation > Discovery: new resources",
+      "route": "/api/discovery-policy",
+      "type": "map",
+      "default": "Report only, for every type of resource",
+      "feature": "desired-state-engine",
+      "confirmOn": true,
+      "confirmOff": false,
+      "info": {
+        "what": "Per type of resource the discovery sweep can find -- an Azure subscription, a management group, a resource group, a Power BI workspace -- you choose what PIM Manager does with a new one: report it only, stage a group definition for your review, or queue the creation of its delegation group as a normal change.",
+        "enabled": "When a type is set to 'Stage for review': a definition row for the new resource is staged on Pending changes and nothing happens until an administrator commits it. When set to 'Create automatically': the creation is queued as a change and the engine creates the group without a person committing it.",
+        "disabled": "For a type left on 'Report only' (the default): a new resource is recorded in the audit trail. Nothing is staged or created.",
+        "risk": "Create automatically means groups appear in Microsoft Entra ID because somebody created a resource -- for example a test subscription -- with no administrator involved. Stage for review keeps a person in the decision. Reversible: set the type back; groups already created stay.",
+        "requires": "SuperAdmin to change it. Pro, and the discovery sweep switched on (Settings > Features & edition).",
+        "recommended": "Report only, or Stage for review for the types you always want managed. Use Create automatically only where every new resource of that type must be governed from its first day.",
+        "docUrl": "https://invardia.com/docs/pim/settings/DiscoveryAutoCreate/"
       }
     }
   ]

@@ -340,8 +340,8 @@ function Invoke-PimDiscoveryAutoCreate {
     # and act on each bucket. Emits clear run-log lines:
     #   resource.discovered  <type> <name>  policy=<flag|pending|auto>   (every create)
     #   resource.autocreate  <type> <name>  -> pending|auto              (staged/committed)
-    # For 'pending' it UPSERTs the desired definition row (Set-PimSqlRow) so it shows up
-    # in the normal pending/desired set for review. For 'auto' it ENQUEUEs a Create
+    # For 'pending' it PROPOSES a Create in the review queue (Add-PimSqlQueueChangeIfAbsent, Origin 'Proposal',
+    # de-duplicated) -- it never writes a definition row itself (100.122 F3). For 'auto' it ENQUEUEs a Create
     # change (Add-PimSqlQueueChange) -- the SAME change-queue the GUI commit uses, so the
     # normal engine create flow (and its approval/prune opt-in rules) applies; no row is
     # ever pruned/removed from this path. WhatIf logs the decisions without writing.
@@ -380,11 +380,17 @@ function Invoke-PimDiscoveryAutoCreate {
         if (-not $cs) { Write-Host ("    resource.autocreate  {0,-18} {1}  SKIPPED (no SQL store)" -f $row.resourceType, $row.key) -ForegroundColor DarkYellow; continue }
         try {
             if ($policy -eq 'pending') {
-                # Stage the desired DEFINITION row -- it now shows in the normal desired
-                # set for a human to review + commit (no auto-commit).
-                Set-PimSqlRow -ConnectionString $cs -Entity $row.entity -Key $row.key -Data $row.payload
-                Write-Host ("    resource.autocreate  {0,-18} {1}  -> pending (staged for review)" -f $row.resourceType, $row.key) -ForegroundColor Green
-                [void]$committed.Add([pscustomobject]@{ resourceType=$row.resourceType; key=$row.key; policy='pending' })
+                # 100.122 F3 (owner decision (17), 2026-10-13): "pending" is a PROPOSAL IN THE REVIEW QUEUE, as its text
+                # always said. It used to write the definition row itself (Set-PimSqlRow) into the store the providers
+                # read, so a live group that happened to carry the generated name was treated as defined (policy,
+                # owners) without anybody having reviewed it. Now: a Create on pim.ChangeQueue, Origin 'Proposal',
+                # status pending -- nothing is defined until a person commits it. De-duplicated (the sweep runs every
+                # day): no second entry while one is open for the same entity + key. No de-duplicating writer = refuse.
+                if (-not (Get-Command Add-PimSqlQueueChangeIfAbsent -ErrorAction SilentlyContinue)) { throw 'the review queue writer (Add-PimSqlQueueChangeIfAbsent) is not loaded -- the proposal was NOT written, and no definition row is written instead' }
+                $change = New-PimChange -Entity $row.entity -Key $row.key -Op Create -Payload $row.payload -By 'discovery-pending' -Kind 'DesiredState' -Origin 'Proposal'
+                $added = [bool](Add-PimSqlQueueChangeIfAbsent -ConnectionString $cs -Change $change)
+                Write-Host ("    resource.autocreate  {0,-18} {1}  -> pending ({2})" -f $row.resourceType, $row.key, $(if ($added) { 'proposed in the review queue' } else { 'already waiting in the review queue -- nothing added' })) -ForegroundColor Green
+                [void]$committed.Add([pscustomobject]@{ resourceType=$row.resourceType; key=$row.key; policy='pending'; queued=$added })
             } else {
                 # AUTO: enqueue a Create on the SAME change queue the GUI commit uses, so the
                 # normal create flow (approval/prune opt-in honoured; never a destructive
@@ -1038,7 +1044,7 @@ function Send-PimDiscoveryNotices {
     # -NoMail suppresses ONLY the notification mail (audit above always runs).
     if ($NoMail) { return [pscustomobject]@{ audited=$audited; notified=$false; recipient=''; reason='mail suppressed'; items=@($items).Count } }
     # opt-in notification: resolve a recipient (explicit param wins, else the global).
-    $rcpt = if ($PSBoundParameters.ContainsKey('Recipient')) { "$Recipient".Trim() } else { "$($global:PIM_DiscoveryNotifyRecipients)".Trim() }
+    $rcpt = if ($PSBoundParameters.ContainsKey('Recipient')) { "$Recipient".Trim() } else { "$(if (Get-Command Get-PimFeatureSetting -ErrorAction SilentlyContinue) { Get-PimFeatureSetting -Name 'DiscoveryNotifyRecipients' } else { $global:PIM_DiscoveryNotifyRecipients })".Trim() }
     if (-not $rcpt) { return [pscustomobject]@{ audited=$audited; notified=$false; recipient=''; reason='no recipient (opt-in)'; items=@($items).Count } }
     if (@($items).Count -eq 0) { return [pscustomobject]@{ audited=$audited; notified=$false; recipient=$rcpt; reason='no fresh items'; items=0 } }
     if (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) {

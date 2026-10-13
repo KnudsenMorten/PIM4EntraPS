@@ -14,11 +14,18 @@
     * Optional second person (framework CONFIG-1.5, PIM D5): setting 'GuardReleaseSecondPerson' { enabled } -- default OFF,
       the same model as 'ApprovalSelfApprove'. When ON a release is created PENDING and a DIFFERENT SuperAdmin approves it.
 
-  What a release can do (the ceilings are literals here, never $script: values -- see BUG-79-6b):
-    engine.remove-budget      G4: the removal budget is RAISED for that run to the plan's count, at most 50 (the release
-                              ceiling; the configured budget itself still defaults to 5 and can only be lowered).
-    engine.disable-guard      G2 (row-driven account disables, absolute cap 5): raised for that run to the plan's count, at
-                              most 50 accounts. G1 (desired set resolved) and G3 (opt-in) are NOT releasable.
+  PIM 100.119 (owner 2026-10-13): COUNTS ONLY -- no percentage in any rule or text here -- and an approval of an EXACT
+  list has no ceiling (the release ceilings "50" and "25 %" are gone: what is approved is the list itself, item by item).
+  A guard's limit is a count a SuperAdmin sets inside a floor and a ceiling (PIM-GuardLimits.ps1). No guard can be switched
+  off. Two ways to approve what a guard holds, both for an exact list, both SuperAdmin only, both recorded:
+    * AT COMMIT (the commit popup): 'GuardApprovals' -- see "Approvals given at commit" below. The removal budget and group
+      deletion: the approved items are applied by the run without counting against the budget, each item ONCE.
+    * AFTER THE RUN HELD IT (Operations > Guards): a release, as before, bound to the plan hash.
+
+  What a release can do:
+    engine.remove-budget      G4: the held plan is applied for that run -- exactly the plan the hash names, whatever its size.
+    engine.disable-guard      G2 (row-driven account disables): the held list of accounts is disabled for that run -- exactly
+                              that list. G1 (desired set resolved) and G3 (opt-in) are NOT releasable.
     engine.empty-desired      the prune of a scope whose definitions are gone runs for that run (the live items are still
                               filtered by the managed-key ledger, and G4 still caps them).
     engine.last-global-admin  PIM 100.72 (7): the held changes that would remove the last Global Administrator apply for
@@ -29,47 +36,86 @@
   deletion by a prune, shared workload assignments (SEC-83), groups PIM does not own (SEC-85), items that fail the s96.5
   removal rules. Those protections live in the providers and the disable selector and a release never reaches them.
 
-  Store: pim.Settings (SQL) -- 'GuardReleases' { releases: [...] } and 'GuardHolds' { holds: [...] }. The engine consumes a
-  one-run release with an atomic compare-and-set (Set-PimSqlSettingIfUnchanged) so two runs cannot both use it.
+  Store: pim.Settings (SQL) -- 'GuardReleases' { releases: [...] }, 'GuardHolds' { holds: [...] } and 'GuardApprovals'
+  { approvals: [...]; lastStops: {...} }. The engine consumes a one-run release, and the items of an approval, with an
+  atomic compare-and-set (Set-PimSqlSettingIfUnchanged) so two runs cannot both use them.
   Test seam: $global:PIM_GuardReleaseStore = @{} (setting name -> JSON text) replaces SQL.
 #>
 
 Set-StrictMode -Off
 
+# PIM 100.119: the limit of a guard (a count inside a floor and a ceiling) -- its own file, loaded here when it is not yet.
+if (-not (Get-Command Get-PimGuardLimit -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-GuardLimits.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-GuardLimits.ps1') }
+
 function Get-PimGuardReleaseCatalog {
-    <# PURE. Every guard the Guards page lists and how it is released. release = release | approval | info | never. #>
+    <#
+      PURE. EVERY guard the Guards page lists (PIM 100.119: "we need to show in Guards all guards").
+        protects  what it protects, in one sentence
+        what      the rule and how what it holds is approved ({limit} = the limit in effect, filled in by Get-PimGuardsView)
+        release   release  = a SuperAdmin releases the held plan on the Guards page (and, for the removal budget, approves
+                             the exact list in the commit popup)
+                  commit   = a SuperAdmin approves the exact list in the commit popup
+                  approval = approved on the Approvals page
+                  info     = nothing to approve here
+                  never    = LOCKED: no limit, no exemption, no approval, no switch
+        locked    the reason a 'never' guard is locked (shown on its row)
+      No guard has an "off".
+    #>
     @(
-        [pscustomobject]@{ guardId = 'engine.remove-budget'; title = 'Removal budget (G4)'; release = 'release'; ceiling = 50; ceilingPercent = $null
-            what = 'At most 5 removals per scope per run. A release raises it for ONE run to exactly the held plan, at most 50.' }
-        [pscustomobject]@{ guardId = 'engine.disable-guard'; title = 'Account-disable circuit breaker (G2)'; release = 'release'; ceiling = 50; ceilingPercent = 25
-            what = 'At most 5 accounts disabled per run. A release raises it for ONE run to the held plan, at most 50 accounts.' }
-        [pscustomobject]@{ guardId = 'engine.empty-desired'; title = 'Empty definitions'; release = 'release'; ceiling = $null; ceilingPercent = $null
+        # PIM 100.119 (1)(2): the commit removal check is a guard again -- a SuperAdmin approves it in the commit popup.
+        [pscustomobject]@{ guardId = 'manager.commit-removal'; title = 'Commit removal check'; release = 'commit'; locked = ''
+            protects = 'A list in the configuration from losing many rows, or all of them, in one commit.'
+            what = 'A commit is not saved until a SuperAdmin approves exactly the rows it takes out, in the commit popup, with a reason, when it (1) takes more than {limit} rows out of one list, or (2) keeps none of the rows the list has now, or (3) would leave {keep} rows or fewer of a list that has more than {minList} rows. The numbers in (2) and (3) are fixed.' }
+        [pscustomobject]@{ guardId = 'engine.remove-budget'; title = 'Removal budget'; release = 'release'; locked = ''
+            protects = 'Access in the tenant from being removed in bulk by one engine run.'
+            what = 'At most {limit} removals per scope per run; more are held and none of them is applied. A SuperAdmin approves the exact list when it is committed (the commit popup) and the run then applies exactly those items, whatever their number; a list the run already holds is released here for exactly that plan. This covers group deletion (Lifecycle = Retire) too.' }
+        [pscustomobject]@{ guardId = 'engine.disable-guard'; title = 'Account-disable circuit breaker'; release = 'release'; locked = ''
+            protects = 'Admin accounts from being disabled in bulk by one engine run.'
+            what = 'At most {limit} accounts disabled per run; more are held and none of them is disabled. A SuperAdmin releases exactly the held list of accounts here, for one run.' }
+        [pscustomobject]@{ guardId = 'engine.empty-desired'; title = 'Empty definitions'; release = 'release'; locked = ''
+            protects = 'A scope whose definitions were lost from being read as "remove everything".'
             what = 'A scope whose definitions are gone is never pruned. A release lets ONE run prune it (managed items only, the removal budget still applies).' }
         # PIM 100.72 (7): removing the LAST Global Administrator does not heal -- held; released only for exactly that plan, one run.
-        [pscustomobject]@{ guardId = 'engine.last-global-admin'; title = 'Last Global Administrator'; release = 'release'; ceiling = $null; ceilingPercent = $null
+        [pscustomobject]@{ guardId = 'engine.last-global-admin'; title = 'Last Global Administrator'; release = 'release'; locked = ''
+            protects = 'The tenant from being left without a Global Administrator.'
             what = 'A change that would leave the tenant with no Global Administrator is held (the rest of the run goes ahead). Give another person Global Administrator first; a release lets ONE run apply exactly the held plan.' }
         # PIM 100.72 (4): 'engine.ledger-unreadable' is telemetry, not a guard (Get-PimNotAGuardIds) -- the prune still removes
         # nothing while the ledger cannot be read, and heals on the next run that reads it.
         # PIM 100.82 (owner 2026-10-11): many policy changes in one run HOLD again (2.4.594 only warned), weakening or not; a SuperAdmin approves.
-        [pscustomobject]@{ guardId = 'engine.policy-mass-change'; title = 'Policy mass-change breaker'; release = 'approval'; ceiling = $null; ceilingPercent = $null
+        [pscustomobject]@{ guardId = 'engine.policy-mass-change'; title = 'Policy mass-change breaker'; release = 'approval'; locked = ''
+            protects = 'The activation and assignment settings of your roles and groups from changing without a SuperAdmin having seen the change.'
             # PIM 100.93 (owner 2026-10-12: "it must still be approved as guard"): EVERY change set, whatever its size.
             what = 'Holds EVERY policy change set, whatever its size: a policy changes only from a choice made on Templates > Policy settings, and nothing is written until a SuperAdmin approves that exact change set on the Approvals page (valid 24 h). The same person may approve, as a second step.' }
-        [pscustomobject]@{ guardId = 'engine.offboarding-approval'; title = 'Offboarding approval'; release = 'approval'; ceiling = $null; ceilingPercent = $null
+        [pscustomobject]@{ guardId = 'engine.offboarding-approval'; title = 'Offboarding approval'; release = 'approval'; locked = ''
+            protects = 'An admin from being disabled or offboarded on one person''s word.'
             what = 'A disable or offboarding waits for its approval on the Approvals page.' }
-        [pscustomobject]@{ guardId = 'engine.reconcile-paused'; title = 'Daily reconcile paused'; release = 'info'; ceiling = $null; ceilingPercent = $null
+        [pscustomobject]@{ guardId = 'engine.reconcile-paused'; title = 'Daily reconcile paused'; release = 'info'; locked = ''
+            protects = 'The tenant from the daily reconcile while somebody has paused it.'
             what = 'Resumed on the Jobs page (s96.5).' }
-        [pscustomobject]@{ guardId = 'engine.break-glass'; title = 'Break-glass exclusion'; release = 'never'; ceiling = $null; ceilingPercent = $null
+        [pscustomobject]@{ guardId = 'engine.break-glass'; title = 'Break-glass exclusion'; release = 'never'
+            protects = 'The emergency accounts you reach for when everything else is locked out.'
+            locked = 'Without a break-glass account a lockout cannot be repaired.'
             what = 'A break-glass account is never disabled, revoked or offboarded.' }
-        [pscustomobject]@{ guardId = 'engine.prune-admin-delete'; title = 'Admin deletion by a prune'; release = 'never'; ceiling = $null; ceilingPercent = $null
+        [pscustomobject]@{ guardId = 'engine.prune-admin-delete'; title = 'Admin deletion by a prune'; release = 'never'
+            protects = 'Admin accounts from being deleted by a clean-up run.'
+            locked = 'A deleted account cannot be brought back by the next run.'
             what = 'A prune or reconcile never deletes an admin account; only the operator''s Delete account does.' }
-        [pscustomobject]@{ guardId = 'engine.shared-workload-assignment'; title = 'Shared workload assignments (SEC-83)'; release = 'never'; ceiling = $null; ceilingPercent = $null
+        [pscustomobject]@{ guardId = 'engine.shared-workload-assignment'; title = 'Shared workload assignments (SEC-83)'; release = 'never'
+            protects = 'The access of other principals that share a Defender XDR or Intune assignment with a PIM group.'
+            locked = 'Removing the assignment would take away access PIM Manager does not manage.'
             what = 'A Defender XDR / Intune assignment that also holds another principal is never deleted.' }
-        [pscustomobject]@{ guardId = 'engine.unowned-group'; title = 'Groups PIM does not own (SEC-85)'; release = 'never'; ceiling = $null; ceilingPercent = $null
+        [pscustomobject]@{ guardId = 'engine.unowned-group'; title = 'Groups PIM does not own (SEC-85)'; release = 'never'
+            protects = 'The members of groups PIM Manager does not manage.'
+            locked = 'PIM Manager only changes what it defines.'
             what = 'Memberships in groups PIM does not manage are never removed.' }
-        [pscustomobject]@{ guardId = 'engine.reconcile-unproven'; title = 'Removal rules of the reconcile (96.5)'; release = 'never'; ceiling = $null; ceilingPercent = $null
+        [pscustomobject]@{ guardId = 'engine.reconcile-unproven'; title = 'Removal rules of the reconcile (96.5)'; release = 'never'
+            protects = 'Access PIM Manager cannot prove it created.'
+            locked = 'An item nobody defined here is never PIM Manager''s to remove.'
             what = 'An item PIM did not define, did not make live, or did not remove is never removed.' }
         # PIM 100.72 (7): with no SuperAdmin left nobody could release, approve or undo it -- never releasable.
-        [pscustomobject]@{ guardId = 'manager.last-superadmin'; title = 'Last PIM Manager SuperAdmin'; release = 'never'; ceiling = $null; ceilingPercent = $null
+        [pscustomobject]@{ guardId = 'manager.last-superadmin'; title = 'Last PIM Manager SuperAdmin'; release = 'never'
+            protects = 'The last person who can approve, release and undo in PIM Manager.'
+            locked = 'With no SuperAdmin left nobody could approve anything again.'
             what = 'The Manager access map never ends without a SuperAdmin. Add another SuperAdmin first.' }
     )
 }
@@ -89,18 +135,48 @@ function Test-PimGuardReleasable {
     $c = @(Get-PimGuardReleaseCatalog | Where-Object { $_.guardId -eq $id })
     if (-not $c.Count) { return [pscustomobject]@{ ok = $false; reason = "unknown guard '$id'" } }
     if ($c[0].release -eq 'approval') { return [pscustomobject]@{ ok = $false; reason = "'$id' is released through its own approval (Approvals page), not here" } }
+    if ($c[0].release -eq 'commit') { return [pscustomobject]@{ ok = $false; reason = "'$id' is approved by a SuperAdmin in the commit popup, not here" } }
     if ($c[0].release -ne 'release') { return [pscustomobject]@{ ok = $false; reason = "'$id' has no release" } }
     return [pscustomobject]@{ ok = $true; reason = '' }
 }
 
-function Get-PimGuardReleaseCeiling {
-    <# PURE. The most one release can open: @{ count; percent } -- $null = no count ceiling of its own. LITERALS. #>
-    param([string]$GuardId)
-    switch ("$GuardId".Trim().ToLowerInvariant()) {
-        'engine.remove-budget' { return [pscustomobject]@{ count = 50; percent = $null } }
-        'engine.disable-guard' { return [pscustomobject]@{ count = 50; percent = 25 } }
-        default { return [pscustomobject]@{ count = $null; percent = $null } }
-    }
+function Get-PimGuardHoldItemCap {
+    <# PURE. LITERAL. How many item keys a hold record carries. A hold that had to be cut is NOT releasable on the page:
+       an approval is for a list the SuperAdmin can read in full (PIM 100.119), never for "the first n of them". #>
+    500
+}
+
+function Get-PimGuardReleaseLifetimeHours {
+    <# PURE. LITERAL. The longest a release lasts (one-run that no run used, or "until"): 24 h. #>
+    24
+}
+
+function Get-PimGuardClockSkewMinutes {
+    <# PURE. LITERAL. How far in the future a record's creation time may lie before it is not believed: 5 minutes. #>
+    5
+}
+
+function Test-PimGuardRecordWindow {
+    <#
+      PURE (PIM 100.119 B2). Do the times of an approval / release record make sense? $true only when
+        * -StartUtc (created / approved) is there, parses, and is not later than now + the clock skew (5 minutes), and
+        * -ExpiresUtc parses and is not later than that start + the literal lifetime of the record's kind.
+      Anything else -- no start, a start "tomorrow", an end in 2099 -- is $false, and the record is never usable.
+    #>
+    param([AllowNull()][object]$StartUtc, [AllowNull()][object]$ExpiresUtc, [Parameter(Mandatory)][int]$LifetimeHours, [datetime]$NowUtc = [datetime]::UtcNow)
+    $s = ConvertTo-PimGuardUtc $StartUtc
+    $e = ConvertTo-PimGuardUtc $ExpiresUtc
+    if (-not $s -or -not $e) { return $false }
+    if ($s -gt $NowUtc.ToUniversalTime().AddMinutes([int](Get-PimGuardClockSkewMinutes))) { return $false }
+    if ($e -gt $s.AddHours($LifetimeHours)) { return $false }
+    return $true
+}
+
+function Get-PimGuardApprovalLifetimeHours {
+    <# PURE. LITERAL. How long an approval given at commit stays usable when no run has applied it: 48 h. Group deletion
+       is applied by the DAILY full run only, so 24 h (the policy change-set lifetime) could end minutes before the run
+       that should use it; 48 h always covers one daily run and the one after a failed run. #>
+    48
 }
 
 function Get-PimGuardPlanHash {
@@ -134,6 +210,10 @@ function Get-PimGuardReleaseState {
     if ($st -in @('consumed', 'revoked')) { return $st }
     $exp = ConvertTo-PimGuardUtc $Release.expiresUtc
     if (-not $exp -or $NowUtc.ToUniversalTime() -ge $exp) { return 'expired' }
+    # PIM 100.119 B2: a record is usable only when its own times make sense -- a hand-written or restored record with an
+    # end in 2099, no creation time, or one "created tomorrow" is expired, never usable.
+    if (-not (Test-PimGuardRecordWindow -StartUtc $Release.createdUtc -ExpiresUtc $Release.expiresUtc -LifetimeHours (Get-PimGuardReleaseLifetimeHours) -NowUtc $NowUtc)) { return 'expired' }
+    if (-not "$($Release.id)".Trim() -or -not "$($Release.createdBy)".Trim()) { return 'expired' }
     if ($st -eq 'pending') { return 'pending' }
     if ($st -eq 'active') { return 'active' }
     return 'expired'   # an unknown status is never usable
@@ -143,14 +223,15 @@ function New-PimGuardRelease {
     <#
       PURE. A new release record for the CURRENT hold of one guard + scope. THROWS 'REFUSED -- ...' on every rule it breaks:
       SuperAdmin, a releasable guard, a reason (>= 10 characters), a 64-hex plan hash EQUAL to the hold's, one-run or until
-      (until in the future, at most 24 h), the plan within the guard's release ceiling.
+      (until in the future, at most 24 h), and a hold that carries its WHOLE list (PIM 100.119: the release is for exactly
+      the list the SuperAdmin can read; there is no count ceiling and no percentage).
     #>
     param([Parameter(Mandatory)][string]$GuardId, [string]$Scope = '', [Parameter(Mandatory)][string]$PlanHash, [AllowNull()][object]$Hold,
           [ValidateSet('one-run', 'until')][string]$Mode = 'one-run', [AllowNull()][object]$UntilUtc, [string]$Reason = '',
           [Parameter(Mandatory)][string]$By, [string]$Role = '', [bool]$SecondPerson = $false, [datetime]$NowUtc = [datetime]::UtcNow)
     $now = $NowUtc.ToUniversalTime()
-    if ("$Role".Trim() -ne 'SuperAdmin') { throw 'REFUSED -- only a SuperAdmin may release a guard.' }
-    if (-not "$By".Trim()) { throw 'REFUSED -- the releasing person is unknown.' }
+    if (-not (Test-PimGuardSuperAdminRole -Role $Role)) { throw 'REFUSED -- only a SuperAdmin may release a guard.' }   # B4: the one role rule
+    if (-not "$By".Trim() -or "$By".Trim() -eq '<unauthenticated>') { throw 'REFUSED -- the releasing person is unknown.' }
     $id = "$GuardId".Trim().ToLowerInvariant()
     $rl = Test-PimGuardReleasable -GuardId $id
     if (-not $rl.ok) { throw "REFUSED -- $($rl.reason)." }
@@ -165,13 +246,10 @@ function New-PimGuardRelease {
         throw "REFUSED -- plan hash $h does not match what the guard holds now ($($Hold.planHash)). The plan changed: review it and release the current one."
     }
     $count = 0; [void][int]::TryParse("$($Hold.count)", [ref]$count)
-    $ceil = Get-PimGuardReleaseCeiling -GuardId $id
-    if ($null -ne $ceil.count -and $count -gt [int]$ceil.count) {
-        throw ("REFUSED -- the held plan has {0} item(s), over the release ceiling of {1}. Apply it in smaller batches." -f $count, $ceil.count)
-    }
-    if ($null -ne $ceil.percent -and $Hold.PSObject.Properties['percent'] -and "$($Hold.percent)" -ne '') {
-        $pct = 0.0; [void][double]::TryParse("$($Hold.percent)", [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$pct)
-        if ($pct -gt [double]$ceil.percent) { throw ("REFUSED -- the held plan disables {0:N1} % of the scanned accounts, over the release ceiling of {1} %." -f $pct, $ceil.percent) }
+    # PIM 100.119: no ceiling on an exact list -- but the list must BE exact: a hold whose item list had to be cut cannot
+    # be read in full on the page, so it is not released there.
+    if ($Hold.PSObject.Properties['itemsTruncated'] -and $Hold.itemsTruncated) {
+        throw ("REFUSED -- the held plan has {0} item(s), more than the {1} the page can list in full, so it cannot be read item by item here. Approve the list when it is committed (the commit popup shows and records every item), or make the change in smaller parts." -f $count, (Get-PimGuardHoldItemCap))
     }
     $max = $now.AddHours(24)
     if ($Mode -eq 'until') {
@@ -193,7 +271,7 @@ function New-PimGuardRelease {
 function Approve-PimGuardRelease {
     <# PURE. The second person approves a PENDING release. THROWS: not SuperAdmin, the same person, not pending (or expired). #>
     param([Parameter(Mandatory)][object]$Release, [Parameter(Mandatory)][string]$By, [string]$Role = '', [datetime]$NowUtc = [datetime]::UtcNow)
-    if ("$Role".Trim() -ne 'SuperAdmin') { throw 'REFUSED -- only a SuperAdmin may approve a guard release.' }
+    if (-not (Test-PimGuardSuperAdminRole -Role $Role)) { throw 'REFUSED -- only a SuperAdmin may approve a guard release.' }
     if ("$By".Trim() -ieq "$($Release.createdBy)".Trim()) { throw 'REFUSED -- the second person must be a different SuperAdmin than the one who released it.' }
     $st = Get-PimGuardReleaseState -Release $Release -NowUtc $NowUtc
     if ($st -ne 'pending') { throw "REFUSED -- the release is $st, not waiting for approval." }
@@ -205,7 +283,7 @@ function Approve-PimGuardRelease {
 function Revoke-PimGuardRelease {
     <# PURE. End a pending / active release now. THROWS: not SuperAdmin, already ended. #>
     param([Parameter(Mandatory)][object]$Release, [Parameter(Mandatory)][string]$By, [string]$Role = '', [datetime]$NowUtc = [datetime]::UtcNow)
-    if ("$Role".Trim() -ne 'SuperAdmin') { throw 'REFUSED -- only a SuperAdmin may revoke a guard release.' }
+    if (-not (Test-PimGuardSuperAdminRole -Role $Role)) { throw 'REFUSED -- only a SuperAdmin may revoke a guard release.' }
     $st = Get-PimGuardReleaseState -Release $Release -NowUtc $NowUtc
     if ($st -notin @('pending', 'active')) { throw "REFUSED -- the release is already $st." }
     $r = [pscustomobject]@{}; foreach ($p in $Release.PSObject.Properties) { $r | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value }
@@ -214,15 +292,14 @@ function Revoke-PimGuardRelease {
 }
 
 function Test-PimGuardReleaseCovers {
-    <# PURE. Does an ACTIVE release cover what this run asks for? Count within raiseTo and the ceiling; percent within the ceiling. #>
-    param([Parameter(Mandatory)][object]$Release, [int]$Requested = 0, [double]$RequestedPercent = -1)
-    $ceil = Get-PimGuardReleaseCeiling -GuardId "$($Release.guardId)"
-    if ($null -ne $ceil.count) {
+    <# PURE. Does an ACTIVE release cover what this run asks for? The release is bound to the plan hash (the exact list);
+       the count it was given for (raiseTo) must cover the request as well -- a record whose count is smaller than the plan
+       it names is not used. PIM 100.119: no ceiling, no percentage. #>
+    param([Parameter(Mandatory)][object]$Release, [int]$Requested = 0)
+    if ("$($Release.guardId)".Trim().ToLowerInvariant() -in @('engine.remove-budget', 'engine.disable-guard')) {
         $raise = 0; [void][int]::TryParse("$($Release.raiseTo)", [ref]$raise)
-        $lim = [Math]::Min($raise, [int]$ceil.count)
-        if ($Requested -gt $lim) { return $false }
+        if ($Requested -gt $raise) { return $false }
     }
-    if ($null -ne $ceil.percent -and $RequestedPercent -ge 0 -and $RequestedPercent -gt [double]$ceil.percent) { return $false }
     return $true
 }
 
@@ -419,17 +496,17 @@ function Use-PimGuardRelease {
     <#
       Engine: is this exact plan released? Returns the release record (and, for a ONE-RUN release, marks it consumed by an
       atomic compare-and-set first -- a run that loses the race does not get it), or $null. NEVER throws.
-      A release that does not cover -Requested / -RequestedPercent is not used (and not consumed).
+      A release that does not cover -Requested is not used (and not consumed).
     #>
     param([Parameter(Mandatory)][string]$GuardId, [string]$Scope = '', [Parameter(Mandatory)][string]$PlanHash,
-          [int]$Requested = 0, [double]$RequestedPercent = -1, [string]$RunKind = '', [datetime]$NowUtc = [datetime]::UtcNow)
+          [int]$Requested = 0, [string]$RunKind = '', [datetime]$NowUtc = [datetime]::UtcNow)
     try {
         for ($try = 0; $try -lt 3; $try++) {
             $text = Get-PimGuardStoreText -Name 'GuardReleases'
             $all = @(ConvertFrom-PimGuardList -Value $text -Prop 'releases')
             $rel = Find-PimGuardRelease -Releases $all -GuardId $GuardId -Scope $Scope -PlanHash $PlanHash -NowUtc $NowUtc
             if (-not $rel) { return $null }
-            if (-not (Test-PimGuardReleaseCovers -Release $rel -Requested $Requested -RequestedPercent $RequestedPercent)) { return $null }
+            if (-not (Test-PimGuardReleaseCovers -Release $rel -Requested $Requested)) { return $null }
             $now = $NowUtc.ToUniversalTime().ToString('o')
             $used = 0; [void][int]::TryParse("$($rel.usedCount)", [ref]$used)
             $new = foreach ($r in $all) {
@@ -468,13 +545,13 @@ function Invoke-PimGuardHoldOrRelease {
       -WhatIf (a plan): never uses a release and records nothing.
     #>
     param([Parameter(Mandatory)][string]$GuardId, [string]$Scope = '', [AllowNull()][AllowEmptyCollection()][string[]]$Keys = @(),
-          [int]$Count = 0, [double]$Percent = -1, [AllowNull()][object]$Measured, [string]$RunKind = '', [switch]$WhatIf,
+          [int]$Count = 0, [AllowNull()][object]$Measured, [string]$RunKind = '', [switch]$WhatIf,
           [switch]$NoHold, [datetime]$NowUtc = [datetime]::UtcNow)
     $res = [pscustomobject]@{ released = $false; release = $null; planHash = '' }
     try {
         $res.planHash = Get-PimGuardPlanHash -GuardId $GuardId -Scope $Scope -Keys @($Keys)
         if ($WhatIf) { return $res }
-        $rel = Use-PimGuardRelease -GuardId $GuardId -Scope $Scope -PlanHash $res.planHash -Requested $Count -RequestedPercent $Percent -RunKind $RunKind -NowUtc $NowUtc
+        $rel = Use-PimGuardRelease -GuardId $GuardId -Scope $Scope -PlanHash $res.planHash -Requested $Count -RunKind $RunKind -NowUtc $NowUtc
         if ($rel) {
             $res.released = $true; $res.release = $rel
             [void](Clear-PimGuardHold -GuardId $GuardId -Scope $Scope)
@@ -482,9 +559,13 @@ function Invoke-PimGuardHoldOrRelease {
             return $res
         }
         if (-not $NoHold) {
-            $items = @(@($Keys) | Where-Object { "$_".Trim() } | Select-Object -First 50 | ForEach-Object { "$_" })
+            # PIM 100.119: the WHOLE list up to Get-PimGuardHoldItemCap (it was the first 50) -- a release is for a list that
+            # can be read item by item; a hold that had to be cut is not releasable on the page (New-PimGuardRelease).
+            $cap = [int](Get-PimGuardHoldItemCap)
+            $allKeys = @(@($Keys) | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
+            $items = @($allKeys | Select-Object -First $cap)
             $hold = [pscustomobject][ordered]@{ guardId = "$GuardId".Trim().ToLowerInvariant(); scope = "$Scope".Trim(); planHash = $res.planHash; count = $Count
-                percent = $(if ($Percent -ge 0) { [Math]::Round($Percent, 1) } else { $null }); items = @($items); itemsTruncated = (@($Keys).Count -gt 50)
+                items = @($items); itemsTruncated = ($allKeys.Count -gt $cap)
                 measured = $Measured; runKind = $RunKind; firstSeenUtc = $NowUtc.ToUniversalTime().ToString('o'); lastSeenUtc = $NowUtc.ToUniversalTime().ToString('o') }
             [void](Set-PimGuardHold -Hold $hold)
         }
@@ -496,9 +577,9 @@ function Resolve-PimRemoveBudgetRelease {
     <#
       Engine, G4 (BUG-291). Called with the removal-budget decision of a scope on a run that writes. NEVER throws.
         allowed decision  -> the hold of this scope (same kind of run) is cleared; returns $null.
-        tripped decision  -> the plan (every remove and type-change key) is hashed; a matching ACTIVE release raises the
-                             budget for THIS run to the plan's count, at most 50 (literal), and is consumed (one-run);
-                             returns @{ decision (allowed); used }. No release -> the hold is recorded; returns $null.
+        tripped decision  -> the plan (every remove and type-change key) is hashed; a matching ACTIVE release lets THIS run
+                             apply exactly that plan, whatever its size (PIM 100.119: no ceiling), and is consumed
+                             (one-run); returns @{ decision (allowed); used }. No release -> the hold is recorded; $null.
     #>
     param([Parameter(Mandatory)][object]$Decision, [string]$Scope = '', [object[]]$Remove = @(), [object[]]$Retype = @(), [int]$Scanned = 0, [string]$RunKind = '')
     try {
@@ -508,13 +589,386 @@ function Resolve-PimRemoveBudgetRelease {
         $g = Invoke-PimGuardHoldOrRelease -GuardId 'engine.remove-budget' -Scope $Scope -Keys $keys -Count $n -RunKind $RunKind `
                 -Measured @{ toRemove = $n; budget = [int]$Decision.budget; scanned = $Scanned }
         if (-not $g.released) { return $null }
-        $lim = [Math]::Min([int]$g.release.raiseTo, 50)
+        $lim = [int]$g.release.raiseTo
         if ($n -gt $lim) { return $null }
-        try { Write-Host ("[engine] {0,-20} removal budget RAISED for this run to {1} (released plan, ceiling 50): {2} removal(s) go ahead" -f $Scope, $lim, $n) -ForegroundColor Magenta } catch { }
+        try { Write-Host ("[engine] {0,-20} removal budget: the released plan goes ahead for this run -- exactly these {1} removal(s)" -f $Scope, $n) -ForegroundColor Magenta } catch { }
         return [pscustomobject]@{
             decision = [pscustomobject]@{ allowed = $true; abort = $false; tripped = $null; reason = 'released for this run'; toRemove = $n; budget = $lim; scope = $Scope; operation = 'remove'; scanned = $Scanned }
             used = [pscustomobject]@{ guardId = 'engine.remove-budget'; releaseId = "$($g.release.id)"; planHash = $g.planHash } }
     } catch { return $null }
+}
+
+# ------------------------------------------------------------------------------------------------------------------------
+# PIM 100.119: APPROVALS GIVEN AT COMMIT (owner 2026-10-13: "we need an easy way for a super admin to accept a guard in the
+# popup ... and APPROVE it" / "approve at commit ... that EXACT list once").
+#
+# A SuperAdmin approves, in the commit popup, the exact list a guard would stop:
+#   manager.commit-removal   the rows the commit takes out of one list. Used by that commit itself; kept as the record.
+#   engine.remove-budget     the removals (rows marked Action = Remove) of one list, and group deletions (Lifecycle =
+#                            Retire), that are more than one run may apply. The run applies exactly the approved ITEMS
+#                            without counting them against the budget -- any number; every item ONCE; anything that is not
+#                            in the list is judged against the budget as always.
+# THE IDENTITY OF AN ITEM (Get-PimGuardItemId) is what both sides can compute from the stored row alone:
+#   remove|<list>|<the row's store key>            the store key is the columns that NAME the delegation
+#   delete-group|<list>|<the row's store key>|<group name>
+# Only lists whose store key names exactly what is removed can be approved this way (Get-PimGuardApprovableEntities, a
+# literal list); every other list keeps the release of the held plan on the Guards page. A row the MANAGING tenant sent
+# (Owner set, not Local) has no identity here: a managed tenant's SuperAdmin cannot approve it.
+# NEVER-RELEASABLE guards take no approval: refused at creation and ignored at use, as for a release.
+# Store: pim.Settings 'GuardApprovals' { approvals: [...]; lastStops: { <guardId>: { atUtc; by; base; count; limit } } }.
+# ------------------------------------------------------------------------------------------------------------------------
+function Get-PimGuardCommitApprovable {
+    <# PURE. LITERAL. The guards that can be approved in the commit popup. #>
+    @('manager.commit-removal', 'engine.remove-budget')
+}
+
+function Get-PimGuardApprovableEntities {
+    <# PURE. LITERAL. The lists whose Action = Remove rows can be approved at commit: their store key (Get-PimStoreRowKey)
+       names exactly the delegation the row removes. #>
+    @('PIM-Assignments-Admins', 'PIM-Assignments-Groups', 'PIM-Assignments-Roles-Groups', 'PIM-Assignments-Roles-AUs',
+      'PIM-Assignments-Azure-Resources', 'PIM-Assignments-Roles-Direct')
+}
+
+function Get-PimGuardGroupDeletionEntities {
+    <# PURE. LITERAL. The lists whose Lifecycle = Retire rows delete a group (the engine's Get-PimRetireGroupRows reads the
+       same eight; tests/Test-PimGuardCommitApproval.ps1 holds the lists equal). #>
+    @('PIM-Definitions-Roles', 'PIM-Definitions-Services', 'PIM-Definitions-Organization', 'PIM-Definitions-Tasks',
+      'PIM-Definitions-Departments', 'PIM-Definitions-Processes', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg')
+}
+
+function Get-PimGuardRowValue {
+    <# PURE. One column of a row (object or dictionary) as trimmed text; '' when it is not there. #>
+    param([AllowNull()][object]$Row, [string]$Name)
+    if ($null -eq $Row) { return '' }
+    if ($Row -is [System.Collections.IDictionary]) { if ($Row.Contains($Name)) { return "$($Row[$Name])".Trim() }; return '' }
+    $p = $Row.PSObject.Properties[$Name]
+    if ($p -and $null -ne $p.Value) { return "$($p.Value)".Trim() }
+    return ''
+}
+
+function Test-PimGuardRowFromManagingTenant {
+    <# PURE. A row the managing tenant sent: Owner is set and is not Local (the same test the Manager's row gate uses). #>
+    param([AllowNull()][object]$Row)
+    $o = Get-PimGuardRowValue -Row $Row -Name 'Owner'
+    return [bool]($o -and $o -ine 'Local')
+}
+
+function Get-PimGuardItemId {
+    <#
+      PURE. The identity of ONE removal, the same on the Manager (at commit) and in the engine (at apply):
+        -Kind remove        'remove|<list>|<store key>'                      for a row marked Action = Remove
+        -Kind delete-group  'delete-group|<list>|<store key>|<group name>'   for a definition row marked Lifecycle = Retire
+      '' = this item has NO identity and can never be covered by an approval: a list that is not approvable, a row with no
+      store key, a row the managing tenant sent, a group row without a name, or the store-key function is not loaded.
+    #>
+    param([string]$Entity, [AllowNull()][object]$Row, [ValidateSet('remove', 'delete-group')][string]$Kind = 'remove')
+    $e = "$Entity".Trim()
+    if (-not $e -or $null -eq $Row) { return '' }
+    $list = if ($Kind -eq 'delete-group') { @(Get-PimGuardGroupDeletionEntities) } else { @(Get-PimGuardApprovableEntities) }
+    $hit = @($list | Where-Object { $_ -ieq $e })
+    if (-not $hit.Count) { return '' }
+    if (Test-PimGuardRowFromManagingTenant -Row $Row) { return '' }
+    if (-not (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue)) { return '' }
+    $k = ''
+    try { $k = "$(Get-PimStoreRowKey -Base $hit[0] -Row $Row)".Trim() } catch { $k = '' }
+    if (-not $k) { return '' }
+    # PIM 100.119 B3: '|' joins the parts of the identity. For a group deletion the store key is ONE column (the tag)
+    # followed by the group name, so a '|' in either would let two different rows share one identity (tag 'k' + name
+    # 'x|y' = tag 'k|x' + name 'y'): such a row has no identity. For a removal the key is the LAST part and its own
+    # '|' separates its columns (user|group, group|role|scope): the key must have exactly the number of parts its list has
+    # columns (Get-PimGuardEntityKeyParts) -- one '|' more means a column VALUE carries the separator, and that row has
+    # no identity either.
+    if ($Kind -eq 'delete-group') {
+        $gn = Get-PimGuardRowValue -Row $Row -Name 'GroupName'
+        if (-not $gn) { return '' }
+        if ($k.Contains('|') -or $gn.Contains('|')) { return '' }
+        return ("delete-group|{0}|{1}|{2}" -f $hit[0], $k, $gn).ToLowerInvariant()
+    }
+    $parts = (Get-PimGuardEntityKeyParts)["$($hit[0])"]
+    if (-not $parts -or @($k.Split('|')).Count -ne [int]$parts) { return '' }
+    return ("remove|{0}|{1}" -f $hit[0], $k).ToLowerInvariant()
+}
+
+function Get-PimGuardEntityKeyParts {
+    <# PURE. LITERAL. How many columns the store key of each approvable list has (Get-PimStoreRowKey joins them with '|'). #>
+    @{ 'PIM-Assignments-Admins' = 2; 'PIM-Assignments-Groups' = 2; 'PIM-Assignments-Roles-Groups' = 2; 'PIM-Assignments-Roles-AUs' = 3
+       'PIM-Assignments-Azure-Resources' = 3; 'PIM-Assignments-Roles-Direct' = 3 }
+}
+
+function ConvertTo-PimGuardItemIdList {
+    <# PURE. Item ids: lower-case, trimmed, de-duplicated, ordinally sorted; empty ones dropped. #>
+    param([AllowNull()][AllowEmptyCollection()][string[]]$ItemIds = @())
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $l = New-Object System.Collections.Generic.List[string]
+    foreach ($x in @($ItemIds)) { $s = "$x".Trim().ToLowerInvariant(); if ($s -and $seen.Add($s)) { $l.Add($s) } }
+    $a = $l.ToArray(); [Array]::Sort($a, [StringComparer]::Ordinal)
+    return $a   # emitted item by item: every caller wraps the call in @( ) (a ",$a" return nests inside @( ))
+}
+
+function Get-PimGuardListHash {
+    <# PURE. The hash the popup shows and sends back: SHA-256 over the guard, the scope and the exact item ids. #>
+    param([Parameter(Mandatory)][string]$GuardId, [string]$Scope = '', [AllowNull()][AllowEmptyCollection()][string[]]$ItemIds = @())
+    Get-PimGuardPlanHash -GuardId $GuardId -Scope $Scope -Keys @(ConvertTo-PimGuardItemIdList -ItemIds $ItemIds)
+}
+
+function Get-PimGuardApprovalState {
+    <# PURE. pending | active | consumed | revoked | expired -- the state an approval record is in at -NowUtc. #>
+    param([Parameter(Mandatory)][object]$Approval, [datetime]$NowUtc = [datetime]::UtcNow)
+    $st = "$($Approval.status)".Trim().ToLowerInvariant()
+    if ($st -in @('consumed', 'revoked')) { return $st }
+    $exp = ConvertTo-PimGuardUtc $Approval.expiresUtc
+    if (-not $exp -or $NowUtc.ToUniversalTime() -ge $exp) { return 'expired' }
+    # PIM 100.119 B2: usable only when the record is whole and its own times make sense -- approved at a time that
+    # parses and is not in the future (5 minutes of clock skew), ending no later than that time + the literal lifetime
+    # (48 h), with an id, the person who approved, where it came from, and at least one item.
+    if (-not (Test-PimGuardRecordWindow -StartUtc $Approval.approvedUtc -ExpiresUtc $Approval.expiresUtc -LifetimeHours (Get-PimGuardApprovalLifetimeHours) -NowUtc $NowUtc)) { return 'expired' }
+    if (-not "$($Approval.id)".Trim() -or -not "$($Approval.approvedBy)".Trim() -or "$($Approval.source)".Trim() -ne 'commit') { return 'expired' }
+    if (-not @(@($Approval.items) | Where-Object { "$_".Trim() }).Count) { return 'expired' }
+    if ($st -eq 'pending') { return 'pending' }
+    if ($st -eq 'active') { return 'active' }
+    return 'expired'   # an unknown status is never usable
+}
+
+function Approve-PimGuardApproval {
+    <# PURE. The second person approves a PENDING approval (the setting 'GuardReleaseSecondPerson' is ON). THROWS: not a
+       SuperAdmin, the same person, not pending (or expired). #>
+    param([Parameter(Mandatory)][object]$Approval, [Parameter(Mandatory)][string]$By, [string]$Role = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    if (-not (Test-PimGuardSuperAdminRole -Role $Role)) { throw 'REFUSED -- only a SuperAdmin may approve what a guard stops.' }
+    if ("$By".Trim() -ieq "$($Approval.approvedBy)".Trim()) { throw 'REFUSED -- the second person must be a different SuperAdmin than the one who approved it first.' }
+    $st = Get-PimGuardApprovalState -Approval $Approval -NowUtc $NowUtc
+    if ($st -ne 'pending') { throw "REFUSED -- the approval is $st, not waiting for a second person." }
+    $r = [pscustomobject]@{}; foreach ($p in $Approval.PSObject.Properties) { $r | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value }
+    foreach ($n in 'secondBy', 'secondUtc') { if (-not $r.PSObject.Properties[$n]) { $r | Add-Member -NotePropertyName $n -NotePropertyValue '' } }
+    $r.status = 'active'; $r.secondBy = "$By".Trim(); $r.secondUtc = $NowUtc.ToUniversalTime().ToString('o')
+    $r
+}
+
+function Test-PimGuardCommitApprovable {
+    <# PURE. @{ ok; reason } -- may -GuardId be approved at commit? Never-releasable guards: NEVER. #>
+    param([string]$GuardId)
+    $id = "$GuardId".Trim().ToLowerInvariant()
+    if (-not $id) { return [pscustomobject]@{ ok = $false; reason = 'no guard named' } }
+    if ($id -in @(Get-PimGuardNeverReleasable)) { return [pscustomobject]@{ ok = $false; reason = "the guard '$id' is NEVER releasable: it takes no approval, no exemption and no limit" } }
+    if ($id -notin @(Get-PimGuardCommitApprovable)) { return [pscustomobject]@{ ok = $false; reason = "'$id' is not approved in the commit popup" } }
+    return [pscustomobject]@{ ok = $true; reason = '' }
+}
+
+function New-PimGuardApproval {
+    <#
+      PURE. The record of ONE approval given in the commit popup. THROWS 'REFUSED -- ...' on every rule it breaks:
+      a SuperAdmin (exactly that role), a known person, a guard that can be approved at commit, a reason of at least 10
+      characters, at least one item, and -ListHash EQUAL to the hash of exactly -ItemIds (what the person was shown is what
+      is recorded -- a list that changed in between is refused).
+      -Consumed: the approval is used by the commit that carries it (manager.commit-removal); the record is the evidence.
+      -SecondPerson (the setting 'GuardReleaseSecondPerson' is ON): an approval a RUN will use is stored PENDING until a
+      DIFFERENT SuperAdmin approves it on the Guards page -- the same rule as for a release.
+    #>
+    param([Parameter(Mandatory)][string]$GuardId, [string]$Scope = '', [AllowNull()][AllowEmptyCollection()][string[]]$ItemIds = @(),
+          [AllowNull()][AllowEmptyCollection()][string[]]$Labels = @(), [string]$ListHash = '', [string]$Reason = '',
+          [Parameter(Mandatory)][string]$By, [string]$Role = '', [string]$Base = '', [string]$CommitId = '', [switch]$Consumed,
+          [bool]$SecondPerson = $false, [datetime]$NowUtc = [datetime]::UtcNow)
+    $now = $NowUtc.ToUniversalTime()
+    if (-not (Test-PimGuardSuperAdminRole -Role $Role)) { throw 'REFUSED -- only a SuperAdmin may approve what a guard stops.' }
+    if (-not "$By".Trim() -or "$By".Trim() -eq '<unauthenticated>') { throw 'REFUSED -- the approving person is unknown.' }
+    $id = "$GuardId".Trim().ToLowerInvariant()
+    $ca = Test-PimGuardCommitApprovable -GuardId $id
+    if (-not $ca.ok) { throw "REFUSED -- $($ca.reason)." }
+    if ("$Reason".Trim().Length -lt 10) { throw 'REFUSED -- a reason of at least 10 characters is required.' }
+    $items = @(ConvertTo-PimGuardItemIdList -ItemIds $ItemIds)
+    if (-not $items.Count) { throw 'REFUSED -- there is nothing to approve: the list is empty.' }
+    $h = Get-PimGuardListHash -GuardId $id -Scope $Scope -ItemIds $items
+    if ("$ListHash".Trim().ToLowerInvariant() -ne $h) {
+        throw 'REFUSED -- the list changed after it was shown: what you approved is not what would be saved now. Review the list and approve it again.'
+    }
+    [pscustomobject][ordered]@{
+        id = [guid]::NewGuid().ToString(); guardId = $id; scope = "$Scope".Trim(); base = "$Base".Trim(); source = 'commit'; commitId = "$CommitId".Trim()
+        items = @($items); labels = @(@($Labels) | Where-Object { "$_".Trim() } | Select-Object -First 200 | ForEach-Object { "$_" }); count = $items.Count; listHash = $h
+        reason = "$Reason".Trim(); approvedBy = "$By".Trim(); approvedUtc = $now.ToString('o')
+        expiresUtc = $now.AddHours([int](Get-PimGuardApprovalLifetimeHours)).ToString('o')
+        status = $(if ($Consumed) { 'consumed' } elseif ($SecondPerson) { 'pending' } else { 'active' }); secondPerson = [bool]($SecondPerson -and -not $Consumed); secondBy = ''; secondUtc = ''
+        used = @($(if ($Consumed) { $items } else { @() })); usedCount = $(if ($Consumed) { $items.Count } else { 0 })
+        consumedUtc = $(if ($Consumed) { $now.ToString('o') } else { '' }); consumedBy = $(if ($Consumed) { 'the commit that carried it' } else { '' })
+        revokedBy = ''; revokedUtc = ''
+    }
+}
+
+function Revoke-PimGuardApproval {
+    <# PURE. End a PENDING / ACTIVE approval now (its unused items are held again). THROWS: not SuperAdmin, already ended. #>
+    param([Parameter(Mandatory)][object]$Approval, [Parameter(Mandatory)][string]$By, [string]$Role = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    if (-not (Test-PimGuardSuperAdminRole -Role $Role)) { throw 'REFUSED -- only a SuperAdmin may revoke an approval.' }
+    $st = Get-PimGuardApprovalState -Approval $Approval -NowUtc $NowUtc
+    if ($st -notin @('pending', 'active')) { throw "REFUSED -- the approval is already $st." }
+    $r = [pscustomobject]@{}; foreach ($p in $Approval.PSObject.Properties) { $r | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value }
+    foreach ($n in 'revokedBy', 'revokedUtc') { if (-not $r.PSObject.Properties[$n]) { $r | Add-Member -NotePropertyName $n -NotePropertyValue '' } }
+    $r.status = 'revoked'; $r.revokedBy = "$By".Trim(); $r.revokedUtc = $NowUtc.ToUniversalTime().ToString('o')
+    $r
+}
+
+function Get-PimGuardApprovalOpenItems {
+    <# PURE. The item ids of -Approvals a run may still use: ACTIVE records of a commit-approvable -GuardId, minus the items
+       already used. Returns a hashtable itemId -> the approval record. A never-releasable or unknown guard: empty. #>
+    param([AllowNull()][object[]]$Approvals, [Parameter(Mandatory)][string]$GuardId, [datetime]$NowUtc = [datetime]::UtcNow)
+    $open = @{}
+    $id = "$GuardId".Trim().ToLowerInvariant()
+    if (-not (Test-PimGuardCommitApprovable -GuardId $id).ok) { return $open }
+    foreach ($a in @($Approvals)) {
+        if ($null -eq $a) { continue }
+        if ("$($a.guardId)".Trim().ToLowerInvariant() -ne $id) { continue }
+        if ((Get-PimGuardApprovalState -Approval $a -NowUtc $NowUtc) -ne 'active') { continue }
+        if (-not "$($a.approvedBy)".Trim()) { continue }   # a record nobody approved opens nothing
+        $used = @{}; foreach ($u in @($a.used)) { $s = "$u".Trim().ToLowerInvariant(); if ($s) { $used[$s] = $true } }
+        foreach ($i in @($a.items)) { $s = "$i".Trim().ToLowerInvariant(); if ($s -and -not $used.ContainsKey($s) -and -not $open.ContainsKey($s)) { $open[$s] = $a } }
+    }
+    return $open
+}
+
+function Compress-PimGuardApprovals {
+    <# PURE. Drop records that ENDED more than -KeepDays (30) ago -- the audit keeps the history. #>
+    param([AllowNull()][object[]]$Approvals, [datetime]$NowUtc = [datetime]::UtcNow, [int]$KeepDays = 30)
+    $cut = $NowUtc.ToUniversalTime().AddDays(-1 * [Math]::Max(1, $KeepDays))
+    @(@($Approvals) | Where-Object {
+        if ($null -eq $_) { return $false }
+        if ((Get-PimGuardApprovalState -Approval $_ -NowUtc $NowUtc) -in @('pending', 'active')) { return $true }
+        $end = ConvertTo-PimGuardUtc $(if ("$($_.consumedUtc)") { $_.consumedUtc } elseif ("$($_.revokedUtc)") { $_.revokedUtc } else { $_.expiresUtc })
+        return ($end -and $end -ge $cut)
+    })
+}
+
+function Get-PimGuardApprovalsDoc {
+    <# The stored approvals: @{ text; approvals; lastStops }. THROWS only when a configured store fails. #>
+    $t = Get-PimGuardStoreText -Name 'GuardApprovals'
+    $stops = @{}
+    if ("$t".Trim()) {
+        try {
+            $o = "$t" | ConvertFrom-Json
+            if ($o -and $o.PSObject.Properties['lastStops'] -and $o.lastStops) { foreach ($p in @($o.lastStops.PSObject.Properties)) { $stops["$($p.Name)".ToLowerInvariant()] = $p.Value } }
+        } catch { $stops = @{} }
+    }
+    return @{ text = $t; approvals = @(ConvertFrom-PimGuardList -Value $t -Prop 'approvals'); lastStops = $stops }
+}
+
+function Save-PimGuardApprovalsDoc {
+    <# Write the approvals (compressed) and the last stops. -Cas -ExpectedText: only if nobody changed it since; 1 / 0.
+       THROWS on a store failure -- the Manager must never claim an approval it did not store. #>
+    param([AllowNull()][object[]]$Approvals, [AllowNull()][hashtable]$LastStops, [datetime]$NowUtc = [datetime]::UtcNow, [AllowNull()][string]$ExpectedText, [switch]$Cas)
+    $keep = @(Compress-PimGuardApprovals -Approvals $Approvals -NowUtc $NowUtc)
+    $ls = [ordered]@{}; if ($LastStops) { foreach ($k in @($LastStops.Keys | Sort-Object)) { $ls["$k"] = $LastStops[$k] } }
+    $json = ConvertTo-Json -InputObject ([ordered]@{ approvals = $keep; lastStops = $ls }) -Depth 8 -Compress
+    if ($Cas) { return [int](Set-PimGuardStoreText -Name 'GuardApprovals' -Json $json -Expected $ExpectedText -Cas) }
+    return [int](Set-PimGuardStoreText -Name 'GuardApprovals' -Json $json)
+}
+
+function Add-PimGuardApproval {
+    <# Manager: store new approval records (compare-and-set, re-read up to 3 times). THROWS when they are not stored. #>
+    param([Parameter(Mandatory)][object[]]$Approvals, [datetime]$NowUtc = [datetime]::UtcNow)
+    for ($try = 0; $try -lt 3; $try++) {
+        $doc = Get-PimGuardApprovalsDoc
+        $w = Save-PimGuardApprovalsDoc -Approvals (@($doc.approvals) + @($Approvals)) -LastStops $doc.lastStops -NowUtc $NowUtc -ExpectedText $doc.text -Cas
+        if ([int]$w -eq 1) { return $true }
+    }
+    throw 'the approval could not be stored (the approvals kept changing) -- nothing was approved'
+}
+
+function Set-PimGuardLastStop {
+    <# Manager: remember when a commit guard last stopped a commit (the Guards page's "last trip"). NEVER throws. #>
+    param([Parameter(Mandatory)][string]$GuardId, [string]$By = '', [string]$Base = '', [int]$Count = 0, [int]$Limit = 0, [datetime]$NowUtc = [datetime]::UtcNow)
+    try {
+        for ($try = 0; $try -lt 3; $try++) {
+            $doc = Get-PimGuardApprovalsDoc
+            $stops = $doc.lastStops
+            $stops["$GuardId".Trim().ToLowerInvariant()] = [ordered]@{ atUtc = $NowUtc.ToUniversalTime().ToString('o'); by = "$By"; base = "$Base"; count = $Count; limit = $Limit }
+            $w = Save-PimGuardApprovalsDoc -Approvals @($doc.approvals) -LastStops $stops -NowUtc $NowUtc -ExpectedText $doc.text -Cas
+            if ([int]$w -eq 1) { return $true }
+        }
+    } catch { }
+    return $false
+}
+
+function Use-PimGuardApprovalItems {
+    <#
+      Engine: which of -ItemIds did a SuperAdmin approve at commit? Each one found in an ACTIVE approval of -GuardId is
+      marked USED first (atomic compare-and-set -- a run that loses the race does not get it), so an item is let through
+      ONCE; an approval whose items are all used is consumed. Returns @{ ids = [string[]]; approvals = @(...) }.
+      NEVER throws: any failure = nothing approved (the guard decides as if there were no approval).
+      -WhatIf (a plan): nothing is approved and nothing is marked.
+    #>
+    param([Parameter(Mandatory)][string]$GuardId, [AllowNull()][AllowEmptyCollection()][string[]]$ItemIds = @(), [string]$Scope = '', [string]$RunKind = '',
+          [switch]$WhatIf, [datetime]$NowUtc = [datetime]::UtcNow)
+    $none = [pscustomobject]@{ ids = @(); approvals = @() }
+    try {
+        if ($WhatIf) { return $none }
+        $want = @(ConvertTo-PimGuardItemIdList -ItemIds $ItemIds)
+        if (-not $want.Count) { return $none }
+        for ($try = 0; $try -lt 3; $try++) {
+            $doc = Get-PimGuardApprovalsDoc
+            $open = Get-PimGuardApprovalOpenItems -Approvals @($doc.approvals) -GuardId $GuardId -NowUtc $NowUtc
+            if (-not $open.Count) { return $none }
+            $hit = @($want | Where-Object { $open.ContainsKey($_) })
+            if (-not $hit.Count) { return $none }
+            $byAppr = @{}; foreach ($h in $hit) { $aid = "$($open[$h].id)"; if (-not $byAppr.ContainsKey($aid)) { $byAppr[$aid] = New-Object System.Collections.Generic.List[string] }; $byAppr[$aid].Add($h) }
+            $now = $NowUtc.ToUniversalTime().ToString('o')
+            $usedAppr = New-Object System.Collections.Generic.List[object]
+            $new = foreach ($a in @($doc.approvals)) {
+                if ($a -and $byAppr.ContainsKey("$($a.id)")) {
+                    $c = [pscustomobject]@{}; foreach ($p in $a.PSObject.Properties) { $c | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value }
+                    foreach ($n in 'used', 'usedCount', 'consumedUtc', 'consumedBy') { if (-not $c.PSObject.Properties[$n]) { $c | Add-Member -NotePropertyName $n -NotePropertyValue $(if ($n -eq 'used') { @() } elseif ($n -eq 'usedCount') { 0 } else { '' }) } }
+                    $u = @(ConvertTo-PimGuardItemIdList -ItemIds (@(@($a.used) | ForEach-Object { "$_" }) + @($byAppr["$($a.id)"].ToArray())))
+                    $c.used = @($u); $c.usedCount = $u.Count
+                    $all = @(ConvertTo-PimGuardItemIdList -ItemIds @(@($a.items) | ForEach-Object { "$_" }))
+                    if ($u.Count -ge $all.Count) { $c.status = 'consumed'; $c.consumedUtc = $now; $c.consumedBy = "engine $RunKind".Trim() }
+                    $usedAppr.Add([pscustomobject]@{ id = "$($a.id)"; approvedBy = "$($a.approvedBy)"; reason = "$($a.reason)"; items = @($byAppr["$($a.id)"].ToArray()); left = ($all.Count - $u.Count) })
+                    $c
+                } else { $a }
+            }
+            $w = Save-PimGuardApprovalsDoc -Approvals @($new) -LastStops $doc.lastStops -NowUtc $NowUtc -ExpectedText $doc.text -Cas
+            if ([int]$w -ne 1) { continue }   # another run changed the list: read again
+            foreach ($ua in $usedAppr) {
+                try {
+                    if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+                        Write-PimAuditEvent -Action 'guard.approval.used' -Target "$GuardId" -After @{ approvalId = "$($ua.id)"; scope = "$Scope"; approvedBy = "$($ua.approvedBy)"; reason = "$($ua.reason)"; items = @($ua.items); itemsLeft = [int]$ua.left; run = $RunKind } | Out-Null
+                    }
+                } catch { }
+            }
+            return [pscustomobject]@{ ids = @($hit); approvals = @($usedAppr.ToArray()) }
+        }
+        Write-Warning "[guard] $GuardId ${Scope}: the approvals could not be used (the store kept changing) -- the guard decides without them this run."
+        return $none
+    } catch {
+        Write-Warning "[guard] $GuardId ${Scope}: the approvals could not be read ($($_.Exception.Message)) -- the guard decides without them this run."
+        return $none
+    }
+}
+
+function Resolve-PimRemoveBudgetApproval {
+    <#
+      Engine, the removal budget (PIM 100.119 (4)): split the removals of one scope into the ITEMS a SuperAdmin approved at
+      commit and the rest. Only a TARGETED removal carries a row (Action = Remove) and so an identity; a prune item and a
+      reconcile removal never do, and stay in 'rest'. One Remove row can match two live items (eligible and active): both
+      are that one item. NEVER throws. Returns @{ approved; rest; ids; approvals }.
+      -WhatIf (a plan): nothing is approved, nothing is marked used.
+    #>
+    param([string]$Scope = '', [string]$Entity = '', [AllowNull()][object[]]$Remove = @(), [string]$RunKind = '', [switch]$WhatIf, [datetime]$NowUtc = [datetime]::UtcNow)
+    $res = [pscustomobject]@{ approved = @(); rest = @(@($Remove) | Where-Object { $_ }); ids = @(); approvals = @() }
+    try {
+        if ($WhatIf -or -not "$Entity".Trim()) { return $res }
+        $idOf = @{}; $ids = New-Object System.Collections.Generic.List[string]
+        $i = 0
+        foreach ($x in @($res.rest)) {
+            $i++
+            if (-not ($x.PSObject.Properties['targeted'] -and $x.targeted -and $x.PSObject.Properties['row'] -and $x.row)) { continue }
+            $id = Get-PimGuardItemId -Entity $Entity -Row $x.row -Kind remove
+            if ($id) { $idOf[$i] = $id; $ids.Add($id) }
+        }
+        if (-not $ids.Count) { return $res }
+        $u = Use-PimGuardApprovalItems -GuardId 'engine.remove-budget' -ItemIds $ids.ToArray() -Scope $Scope -RunKind $RunKind -NowUtc $NowUtc
+        if (-not @($u.ids).Count) { return $res }
+        $ok = @{}; foreach ($k in @($u.ids)) { $ok["$k"] = $true }
+        $ap = New-Object System.Collections.Generic.List[object]; $rs = New-Object System.Collections.Generic.List[object]
+        $i = 0
+        foreach ($x in @($res.rest)) { $i++; if ($idOf.ContainsKey($i) -and $ok.ContainsKey($idOf[$i])) { $ap.Add($x) } else { $rs.Add($x) } }
+        try { Write-Host ("[engine] {0,-20} {1} removal(s) were approved by a SuperAdmin when they were committed ({2}) -- applied without counting against the removal budget" -f $Scope, $ap.Count, ((@($u.approvals | ForEach-Object { $_.approvedBy } | Select-Object -Unique)) -join ', ')) -ForegroundColor Magenta } catch { }
+        return [pscustomobject]@{ approved = $ap.ToArray(); rest = $rs.ToArray(); ids = @($u.ids); approvals = @($u.approvals) }
+    } catch { return $res }
 }
 
 function Test-PimGuardReleaseSecondPersonOn {
@@ -532,23 +986,47 @@ function Get-PimGuardsView {
       PURE. The Guards page model: every catalog guard with its state (clear / holding), what it holds now (the holds of
       that guard, the policy breaker's per-provider trips folded in), the releases of it, and whether it is releasable.
     #>
-    param([AllowNull()][object[]]$Trips, [AllowNull()][object[]]$Holds, [AllowNull()][object[]]$Releases, [datetime]$NowUtc = [datetime]::UtcNow)
+    <# PIM 100.119 (6): every row also says what the guard PROTECTS, its LIMIT (value, floor, default, ceiling, who set it --
+       $null when the guard has none), whether an exemption can be approved (exemption = 'commit' | 'release' |
+       'commit+release' | 'approvals' | 'none' | 'locked') with the approvals given at commit, and its last trip. A
+       never-releasable guard is LOCKED with the reason; there is no "off" for any guard. #>
+    param([AllowNull()][object[]]$Trips, [AllowNull()][object[]]$Holds, [AllowNull()][object[]]$Releases, [AllowNull()][object[]]$Approvals,
+          [AllowNull()][hashtable]$LastStops, [datetime]$NowUtc = [datetime]::UtcNow)
     $rel = @(@($Releases) | Where-Object { $_ } | ForEach-Object {
         $c = [pscustomobject]@{}; foreach ($p in $_.PSObject.Properties) { $c | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value }
         $c | Add-Member -NotePropertyName state -NotePropertyValue (Get-PimGuardReleaseState -Release $_ -NowUtc $NowUtc) -Force
         $c })
+    $apr = @(@($Approvals) | Where-Object { $_ } | ForEach-Object {
+        $c = [pscustomobject]@{}; foreach ($p in $_.PSObject.Properties) { $c | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value }
+        $c | Add-Member -NotePropertyName state -NotePropertyValue (Get-PimGuardApprovalState -Approval $_ -NowUtc $NowUtc) -Force
+        $c })
     $never = @(Get-PimGuardNeverReleasable)
+    $atCommit = @(Get-PimGuardCommitApprovable)
     $cat = foreach ($g in @(Get-PimGuardReleaseCatalog)) {
         $id = $g.guardId
+        $isNever = ($id -in $never)
         $hs = @(@($Holds) | Where-Object { $_ -and "$($_.guardId)".Trim().ToLowerInvariant() -eq $id })
         $tr = @(@($Trips) | Where-Object { $_ -and ("$($_.guardId)" -eq $id -or "$($_.guardId)".StartsWith("$id.")) })
         $last = @($tr | Sort-Object { "$($_.lastSeenUtc)" } -Descending | Select-Object -First 1)
+        $lastUtc = if ($last.Count) { "$($last[0].lastSeenUtc)" } else { '' }
+        $stop = $null
+        if ($LastStops -and $LastStops.ContainsKey($id)) { $stop = $LastStops[$id]; if ("$($stop.atUtc)" -and (-not $lastUtc -or "$($stop.atUtc)" -gt $lastUtc)) { $lastUtc = "$($stop.atUtc)" } }
+        $lim = $null
+        if (-not $isNever -and (Get-Command Get-PimGuardLimitState -ErrorAction SilentlyContinue)) { try { $lim = Get-PimGuardLimitState -GuardId $id -Fresh } catch { $lim = $null } }
+        $what = "$($g.what)"
+        if ($what.Contains('{limit}')) { $what = $what.Replace('{limit}', $(if ($lim) { "$([int]$lim.value)" } else { 'the limit' })) }
+        if ($what.Contains('{keep}') -and (Get-Command Get-PimCommitGuardFewLeftRows -ErrorAction SilentlyContinue)) { $what = $what.Replace('{keep}', "$([int](Get-PimCommitGuardFewLeftRows))").Replace('{minList}', "$([int](Get-PimCommitGuardFewLeftMinList))") }
+        $releasable = [bool](Test-PimGuardReleasable -GuardId $id).ok
+        $commitOk = (-not $isNever) -and ($id -in $atCommit)
+        $ex = if ($isNever) { 'locked' } elseif ($commitOk -and $releasable) { 'commit+release' } elseif ($commitOk) { 'commit' } elseif ($releasable) { 'release' } elseif ("$($g.release)" -eq 'approval') { 'approvals' } else { 'none' }
         [pscustomobject][ordered]@{
-            guardId = $id; title = $g.title; what = $g.what; release = $g.release; never = ($id -in $never)
-            releasable = [bool](Test-PimGuardReleasable -GuardId $id).ok; ceiling = $g.ceiling; ceilingPercent = $g.ceilingPercent
+            guardId = $id; title = $g.title; protects = "$($g.protects)"; what = $what; release = $g.release; never = $isNever
+            locked = $isNever; lockedReason = $(if ($isNever) { "$($g.locked)" } else { '' }); canSwitchOff = $false
+            releasable = $releasable; exemption = $ex; limit = $lim
             state = $(if ($hs.Count) { 'holding' } else { 'clear' }); holds = @($hs)
-            lastTripUtc = $(if ($last.Count) { "$($last[0].lastSeenUtc)" } else { '' }); tripCount = $(if ($last.Count) { [int]("0$($last[0].tripCount)" -replace '[^0-9]', '') } else { 0 })
+            lastTripUtc = $lastUtc; tripCount = $(if ($last.Count) { [int]("0$($last[0].tripCount)" -replace '[^0-9]', '') } else { 0 }); lastStop = $stop
             releases = @($rel | Where-Object { "$($_.guardId)" -eq $id } | Sort-Object { "$($_.createdUtc)" } -Descending)
+            approvals = @($(if ($isNever) { @() } else { @($apr | Where-Object { "$($_.guardId)" -eq $id } | Sort-Object { "$($_.approvedUtc)" } -Descending) }))
         }
     }
     return @($cat)

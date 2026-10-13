@@ -154,6 +154,33 @@ $script:PimFailureRules = @(
        retryable = $false; severity = 'data'
        fixes = @() }
 
+    # ---- 100.122 F6 (owner 2026-10-13): two live objects carry ONE defined name -- the engine touches neither ----------
+    # AHEAD of the "unresolved / not found / not created yet" rules: the engine resolves a duplicated name to nothing
+    # (Resolve-PimLiveGroupIdByName / Resolve-PimLiveAuIdByName, PIM-EngineProviders.ps1), so the item that names it fails
+    # with one of THOSE messages -- and "nothing to do, it is created on the next run" would be the wrong thing to tell
+    # the customer.
+    # REVIEW FIXES 2026-10-13: matched ONLY on a message that carries the literal class id. These two rules also matched
+    # on the row's name / tag, or on a message that merely quoted the name, of a duplicate the run had registered -- so a
+    # 403 or a throttle on a row that happens to name such a group was classed "duplicate" (wrong cause, wrong step for
+    # the customer). The orchestrator holds every row that names a registered duplicate itself
+    # (Split-PimDuplicateNameItems, PIM-EngineProviders.ps1) with a message that STARTS with the class id, and the
+    # resolver's warning carries it too; any other failure keeps its own class.
+    @{ code = 'DUPLICATE-GROUP-NAME'
+       match = { param($m, $row) "$m" -match '(?i)(^|[^A-Za-z0-9-])DUPLICATE-GROUP-NAME([^A-Za-z0-9-]|$)' }
+       title = 'Two groups in Entra ID carry the same name -- PIM Manager touches neither'
+       cause = 'PIM Manager finds a group by the name its definition carries, and two live groups have that name. Choosing one would put owners, policy, members or roles on a group by chance, so the name is resolved to nothing and every item that names the group waits. Nothing was changed on either group.'
+       remedy = 'In the Microsoft Entra admin center, rename or delete the group that is NOT the one PIM Manager should manage (the job log names both object ids). The next run finds the one that is left and applies the waiting items.'
+       retryable = $true; severity = 'environment'
+       fixes = @() }
+
+    @{ code = 'DUPLICATE-AU-NAME'
+       match = { param($m, $row) "$m" -match '(?i)(^|[^A-Za-z0-9-])DUPLICATE-AU-NAME([^A-Za-z0-9-]|$)' }
+       title = 'Two administrative units in Entra ID carry the same name -- PIM Manager touches neither'
+       cause = 'PIM Manager finds an administrative unit by the name its definition carries, and two live administrative units have that name. Choosing one would scope a role or place a group by chance, so the name is resolved to nothing and every item that names the unit waits. Nothing was changed on either unit.'
+       remedy = 'In the Microsoft Entra admin center, rename or delete the administrative unit that is NOT the one PIM Manager should use (the job log names both object ids). The next run finds the one that is left and applies the waiting items.'
+       retryable = $true; severity = 'environment'
+       fixes = @() }
+
     @{ code = 'ENTRA-ROLE-UNRESOLVED'
        # 2026-10-07 (Invardia fix request 7429f13c, a customer): RolesAUs says "unresolved group/AU/role" -- the same failure
        # with the administrative unit as a third part; it fell through to UNCLASSIFIED.
@@ -231,6 +258,21 @@ $script:PimFailureRules = @(
        title = 'The admin account is not created yet, so its Temporary Access Pass waits'
        cause = 'The pass is issued by the TAP job and the account is created by the Admin accounts job; they run on their own schedules. An admin that has just become due (a new row, or a scheduled ProvisionDate that has passed) reaches the TAP job before its account exists.'
        remedy = 'Nothing to do: once the Admin accounts job has created the account, the next TAP run issues the pass. If it persists for hours, look for a failed Admin accounts item for the same person.'
+       retryable = $true; severity = 'transient'
+       fixes = @() }
+
+    # 100.125 (a customer, 2.4.615, 2026-10-13; Invardia fix request e37ce115): the run created a group and, 20 seconds
+    # later, the add of that group to its administrative unit answered "HTTP 404 : Request_ResourceNotFound -- Resource
+    # '<the new group id>' does not exist" -- "Unrecognised failure", the run FAILED, and the next run added it. The
+    # orchestrator (Invoke-PimEngineScope) now tries such a step again within the run, and tags what still does not go
+    # through [NEW-OBJECT-NOT-VISIBLE-YET] -- ONLY when the "not found" answer names an object THIS RUN created
+    # (Get-PimNewObjectIdInMessage); a "not found" for anything else is never tagged. Matched on the tag alone, and AFTER
+    # the older lag classes above, so a message they already own keeps its class.
+    @{ code = 'NEW-OBJECT-NOT-VISIBLE-YET'
+       match = { param($m, $row) $m -match '\[NEW-OBJECT-NOT-VISIBLE-YET\]' }
+       title = 'An object this run created is not visible to Microsoft Entra yet, so the step that uses it waits'
+       cause = 'The same run created a group, an administrative unit or an account, and a following step that uses it (an administrative unit membership, an owner, a membership, a role assignment or a policy) was answered "not found" for that new object. Microsoft Entra serves a new object to its other services only after a short while. The engine tried the step again within the run before it left it waiting.'
+       remedy = 'Nothing to do: the next run applies it, and the status turns OK by itself. If it still waits after two hours it is shown as a failure -- then check that the object named in the message still exists.'
        retryable = $true; severity = 'transient'
        fixes = @() }
 
@@ -352,6 +394,15 @@ $script:PimFailureRules = @(
        retryable = $true; severity = 'environment'
        fixes = @() }
 
+    # 100.122 F5 (owner 2026-10-13): a Defender role is changed only when it is PIM Manager's own.
+    @{ code = 'DEFENDER-ROLE-NOT-OWN'
+       match = { param($m, $row) $m -match '(?i)DEFENDER-ROLE-NOT-OWN' }
+       title = 'A Defender XDR role of this name exists and was not created by PIM Manager -- not changed'
+       cause = 'The workload template names a custom Defender XDR role, and a live role already has that name with other permissions. It was not created by PIM Manager (it is built-in, or does not carry PIM Manager''s description), so its permissions were not replaced.'
+       remedy = 'Rename or delete that role in the Defender portal (Settings > Permissions > Roles) so PIM Manager creates its own, or set the template to the permissions the role already has.'
+       retryable = $true; severity = 'environment'
+       fixes = @() }
+
     @{ code = 'DEFENDER-ASSIGNMENT-SHARED'
        match = { param($m, $row) $m -match '(?i)DEFENDER-ASSIGNMENT-SHARED' }
        title = 'The Defender XDR assignment is shared with other principals'
@@ -423,6 +474,35 @@ $script:PimFailureRules = @(
 # product fix request. product-defect = PIM itself must change (an unexplained failure, an engine that does not converge,
 # a Microsoft-side error PIM should absorb). A rule may override its severity's default with fixKind; these three do.
 $script:PimFailureFixKindOverrides = @{ 'SERVICE-ERROR' = 'product-defect'; 'THROTTLED' = 'product-defect'; 'GROUP-POLICY-UNREADABLE' = 'product-defect' }
+
+function Test-PimFailureNamesDuplicate {
+    <#
+      100.122 F6. Does this failing item name a group / administrative unit the RUN found twice under one name
+      ($global:PIM_DuplicateLiveNames, written by Register-PimDuplicateLiveName in PIM-EngineProviders.ps1)? TRUE when the
+      row carries the duplicated name (GroupName / AUDisplayName), a tag that maps to it (GroupTag / TargetGroupTag /
+      SourceGroupTag / AdministrativeUnitTag), or the message quotes the name. No register (no duplicate seen, or another
+      process) = FALSE at once.
+      REVIEW FIXES 2026-10-13: NO catalog rule calls this any more -- the two DUPLICATE-* classes match on the class id
+      in the message only (a 403 or a throttle on a row naming a registered duplicate must keep its own class). Kept as
+      a pure question about the register ("does this item name a duplicate the run saw?"); never use it to classify.
+    #>
+    param([ValidateSet('group', 'administrativeUnit')][string]$Kind = 'group', [string]$Message = '', [AllowNull()][object]$Row)
+    $reg = $global:PIM_DuplicateLiveNames
+    if (-not ($reg -is [hashtable]) -or -not ($reg[$Kind] -is [hashtable]) -or -not $reg[$Kind].Count) { return $false }
+    $get = { param($n) if ($null -eq $Row) { '' } elseif ($Row -is [System.Collections.IDictionary]) { if ($Row.Contains($n)) { "$($Row[$n])".Trim().ToLowerInvariant() } else { '' } } elseif ($Row.PSObject.Properties[$n]) { "$($Row.$n)".Trim().ToLowerInvariant() } else { '' } }
+    $nameCols = if ($Kind -eq 'group') { @('GroupName') } else { @('AUDisplayName') }
+    $tagCols = if ($Kind -eq 'group') { @('GroupTag', 'TargetGroupTag', 'SourceGroupTag') } else { @('AdministrativeUnitTag') }
+    $rowNames = @($nameCols | ForEach-Object { & $get $_ } | Where-Object { $_ })
+    $rowTags = @($tagCols | ForEach-Object { & $get $_ } | Where-Object { $_ })
+    $msg = "$Message".ToLowerInvariant()
+    foreach ($k in @($reg[$Kind].Keys)) {
+        $e = $reg[$Kind][$k]
+        if ($rowNames -contains "$k") { return $true }
+        foreach ($t in @($e.tags)) { if ("$t" -and $rowTags -contains "$t") { return $true } }
+        if ($msg -and "$k".Length -ge 3 -and $msg.Contains("'$k'")) { return $true }
+    }
+    return $false
+}
 
 function Get-PimFailureCatalogCodes {
     <# PURE. Every code the catalog can give (UNCLASSIFIED included), upper-case. #>
@@ -618,6 +698,22 @@ function Get-PimFailureSolutionCatalog {
             affected = 'Nothing was assigned for this row. Everything else is applied.'
             steps = @('In the Defender portal open Settings > Permissions > Roles and rename or delete the extra role.')
             after = 'The next run uses the role that is left, and the status turns OK by itself.' }
+        'DEFENDER-ROLE-NOT-OWN' = @{ short = 'a Defender XDR role of that name exists and was not created by PIM Manager'
+            what = 'A Defender XDR role with the name of the workload template already exists and was not created by PIM Manager, so its permissions were not changed: {item}.'
+            affected = 'The role keeps the permissions it had. Nothing was changed, and everything else is applied.'
+            steps = @('In the Defender portal open Settings > Permissions > Roles and rename or delete that role, so PIM Manager creates its own.',
+                      'Or set the permissions of the role in Workload templates to the ones the existing role has, and commit in Pending changes.')
+            after = $next }
+        'DUPLICATE-GROUP-NAME' = @{ short = 'two groups in Entra ID have the same name, so PIM Manager touches neither'
+            what = 'Two groups in Entra ID have the same name, so PIM Manager does not choose one and touches neither: {item}.'
+            affected = 'Nothing was changed on either group. Every item that names the group waits; everything else is applied.'
+            steps = @('In the Microsoft Entra admin center, rename or delete the group that is not the one PIM Manager should manage (Jobs > Engine logs & errors names both object ids).')
+            after = 'The next run finds the group that is left, applies the waiting items, and the status turns OK by itself.' }
+        'DUPLICATE-AU-NAME' = @{ short = 'two administrative units in Entra ID have the same name, so PIM Manager touches neither'
+            what = 'Two administrative units in Entra ID have the same name, so PIM Manager does not choose one and touches neither: {item}.'
+            affected = 'Nothing was changed on either administrative unit. Every item that names it waits; everything else is applied.'
+            steps = @('In the Microsoft Entra admin center, rename or delete the administrative unit that is not the one PIM Manager should use (Jobs > Engine logs & errors names both object ids).')
+            after = 'The next run finds the administrative unit that is left, applies the waiting items, and the status turns OK by itself.' }
         'DEFENDER-ASSIGNMENT-SHARED' = @{ short = 'the Defender XDR assignment is shared with others, so it was not changed'
             what = 'A Defender XDR role assignment is shared with other people or groups, so it was not changed: {item}.'
             affected = 'Nothing was changed, so nobody lost access. The group keeps the data sources it had.'

@@ -14,38 +14,49 @@
 #
 # Pure: no persistence, no network, no $script:/$global: reads except the
 # threshold knobs (which fall back to safe defaults). Fully testable offline.
+#
+# PIM 100.119 (owner 2026-10-13) REPLACES two things said above: the check is a COUNT only (no fraction of the
+# rows), and it is no longer cleared by the person who committed ("confirm"): a SUPERADMIN approves exactly the
+# rows in the commit popup, with a reason, recorded. The count is the limit set on Operations > Guards.
 
 Set-StrictMode -Off
 
+# The limit of the commit removal check (a count inside a floor and a ceiling; default 25) -- its own file.
+if (-not (Get-Command Get-PimGuardLimit -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-GuardLimits.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-GuardLimits.ps1') }
+
 function Get-PimCommitGuardThresholds {
-    # The empty/large-delta guard knobs, customizable but with safe defaults:
-    #   PIM_CommitMaxRemovePct  -- refuse a commit that removes MORE than this
-    #                              fraction (0..1) of the current rows. Default 0.5.
+    # The numbers of the commit removal check:
     #   PIM_CommitMaxRemoveAbs  -- refuse a commit that removes MORE than this
-    #                              absolute count of rows. Default 25.
-    #   PIM_CommitMinForEmptyGuard -- only apply the "after-set is empty" refusal
-    #                              when the BEFORE set had at least this many rows
-    #                              (so legitimately clearing a 1-2 row test entity
-    #                              isn't blocked). Default 1 (any non-empty before).
-    # A caller MAY override per-call; otherwise these resolve from $global:PIM_*.
+    #                              count of rows. Default 25 (see PIM 100.119 below). Can only LOWER the limit.
+    #   PIM_CommitMinForEmptyGuard -- NO LONGER READ (see the fix list note below): the "no original row
+    #                              survives" case applies to every list that has at least 1 row.
+    #
+    # PIM 100.119 (owner 2026-10-13: "50% group deletions of 3 groups would trigger if i select 2/3 ... drop the
+    # percentage in the guards and focus alone on amounts"): THE SHARE IS GONE. The check is a COUNT -- more than
+    # maxRemoveAbs rows of one list in one commit -- plus "this commit would EMPTY the list" (not a share). The count is
+    # the limit a SuperAdmin sets on Operations > Guards (PIM-GuardLimits.ps1, pim.Settings 'GuardLimits', inside its
+    # floor and ceiling; default 25, a literal fallback here). $global:PIM_CommitMaxRemovePct is no longer read.
+    # $global:PIM_CommitMaxRemoveAbs can only LOWER the limit for this process (tests, a stricter host).
+    #
+    # PIM 100.119, fix list 2026-10-13 ("no guard can be switched off"; "a setting may only LOWER a limit"):
+    #   * -MaxRemoveAbs (a caller's own number) can only LOWER the limit too -- it used to REPLACE it, so a caller
+    #     passing 100000 had no count check at all.
+    #   * the "no original row survives" case applies to EVERY list that has rows. $global:PIM_CommitMinForEmptyGuard and
+    #     -MinForEmptyGuard used to raise the size a list needed before that case applied (1000 = the case never
+    #     applied): both are still ACCEPTED so an older caller keeps binding, and are IGNORED. The number is the
+    #     literal 1.
     param(
-        [Nullable[double]]$MaxRemovePct,
         [Nullable[int]]$MaxRemoveAbs,
         [Nullable[int]]$MinForEmptyGuard
     )
-    $pct = if ($null -ne $MaxRemovePct) { [double]$MaxRemovePct }
-           elseif ($null -ne $global:PIM_CommitMaxRemovePct) { [double]$global:PIM_CommitMaxRemovePct }
-           else { 0.5 }
-    $abs = if ($null -ne $MaxRemoveAbs) { [int]$MaxRemoveAbs }
-           elseif ($null -ne $global:PIM_CommitMaxRemoveAbs) { [int]$global:PIM_CommitMaxRemoveAbs }
-           else { 25 }
-    $minEmpty = if ($null -ne $MinForEmptyGuard) { [int]$MinForEmptyGuard }
-                elseif ($null -ne $global:PIM_CommitMinForEmptyGuard) { [int]$global:PIM_CommitMinForEmptyGuard }
-                else { 1 }
-    if ($pct -lt 0) { $pct = 0 } ; if ($pct -gt 1) { $pct = 1 }
+    $lim = 25
+    if (Get-Command Get-PimGuardLimit -ErrorAction SilentlyContinue) { try { $lim = [int](Get-PimGuardLimit -GuardId 'manager.commit-removal' -Fallback 25) } catch { $lim = 25 } }
+    if ($lim -lt 1) { $lim = 25 }
+    $abs = $lim
+    if ($null -ne $MaxRemoveAbs -and [int]$MaxRemoveAbs -lt $abs) { $abs = [int]$MaxRemoveAbs }
+    if ($null -ne $global:PIM_CommitMaxRemoveAbs -and "$($global:PIM_CommitMaxRemoveAbs)" -match '^\d+$' -and [int]$global:PIM_CommitMaxRemoveAbs -lt $abs) { $abs = [int]$global:PIM_CommitMaxRemoveAbs }
     if ($abs -lt 0) { $abs = 0 }
-    if ($minEmpty -lt 0) { $minEmpty = 0 }
-    return @{ maxRemovePct = $pct; maxRemoveAbs = $abs; minForEmptyGuard = $minEmpty }
+    return @{ maxRemoveAbs = $abs; minForEmptyGuard = 1 }
 }
 
 function Test-PimCommitDeltaGuard {
@@ -66,50 +77,74 @@ function Test-PimCommitDeltaGuard {
     #                   while still removing rows).
     #   $Confirm     -- operator explicitly acknowledged a destructive commit.
     #
-    # Returns @{ allowed; reason; rule; removeCount; removePct; threshold } where rule
-    # is 'ok' | 'empty-set' | 'over-threshold' | 'confirmed'.
+    # Returns @{ allowed; reason; rule; removeCount; limit; threshold } where rule
+    # is 'ok' | 'empty-set' | 'over-threshold' | 'approved'.
+    #
+    # PIM 100.119 (owner 2026-10-13): COUNTS ONLY -- no share of the list decides anything (2 of 3 does not trip; 26 of
+    # 1000 does). And the way through is no longer "the same person confirms": -Approved means A SUPERADMIN APPROVED
+    # EXACTLY THESE ROWS in the commit popup, with a reason -- the CALLER proves that (role, reason, the list hash) before
+    # it passes the switch; this function only decides whether an approval is needed at all.
+    # -Confirm is still ACCEPTED so an older caller keeps binding, and is IGNORED: it approves nothing.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][int]$BeforeCount,
         [Parameter(Mandatory)][int]$AfterCount,
         [Nullable[int]]$RemoveCount,
+        [switch]$Approved,
         [switch]$Confirm,
-        [Nullable[double]]$MaxRemovePct,
         [Nullable[int]]$MaxRemoveAbs,
         [Nullable[int]]$MinForEmptyGuard
     )
-    $th = Get-PimCommitGuardThresholds -MaxRemovePct $MaxRemovePct -MaxRemoveAbs $MaxRemoveAbs -MinForEmptyGuard $MinForEmptyGuard
+    $th = Get-PimCommitGuardThresholds -MaxRemoveAbs $MaxRemoveAbs -MinForEmptyGuard $MinForEmptyGuard
     $before = [Math]::Max(0, $BeforeCount)
     $after  = [Math]::Max(0, $AfterCount)
     $removed = if ($null -ne $RemoveCount) { [Math]::Max(0, [int]$RemoveCount) } else { [Math]::Max(0, $before - $after) }
-    $pct = if ($before -gt 0) { [double]$removed / [double]$before } else { 0.0 }
+    $lim = [int]$th.maxRemoveAbs
 
     # ADD-ONLY / pure-grow / no-removal commits are always fine.
     if ($removed -le 0) {
-        return [pscustomobject]@{ allowed = $true; reason = 'no rows removed -- safe commit'; rule = 'ok'; removeCount = 0; removePct = 0.0; threshold = $th }
+        return [pscustomobject]@{ allowed = $true; reason = 'no rows removed -- safe commit'; rule = 'ok'; removeCount = 0; limit = $lim; threshold = $th }
     }
 
-    $emptyHit = ($after -eq 0 -and $before -ge $th.minForEmptyGuard)
-    $overHit  = ($removed -gt $th.maxRemoveAbs) -or ($pct -gt $th.maxRemovePct)
+    # PIM 100.119 A1 (owner 2026-10-13, after the review) -- THREE cases, counts only:
+    #   (i)   more than the limit removed from one list in one commit                                    'over-threshold'
+    #   (ii)  NO ORIGINAL ROW SURVIVES: removed >= before (it was "after = 0", which a commit that removes all 25 rows
+    #         and adds one new row walked past)                                                          'empty-set'
+    #   (iii) the commit would leave FEW of the original rows: keep (2) or fewer, of a list that has more than minList (5)
+    #         rows -- 24 of 25 asks, 4 of 6 asks, 3 of 6 does not, and 2 of 3 does not (the owner's example) 'few-left'
+    # keep and minList are literals from functions (PIM-GuardLimits.ps1) and are not settable.
+    $keep = 2; $minList = 5
+    if (Get-Command Get-PimCommitGuardFewLeftRows -ErrorAction SilentlyContinue) { $keep = [int](Get-PimCommitGuardFewLeftRows); $minList = [int](Get-PimCommitGuardFewLeftMinList) }
+    $survive = [Math]::Max(0, $before - $removed)
+    $emptyHit = ($removed -ge $before -and $before -ge $th.minForEmptyGuard -and $before -gt 0)
+    $overHit  = ($removed -gt $lim)
+    $fewHit   = ($before -gt $minList -and $survive -le $keep)
 
-    if (-not $emptyHit -and -not $overHit) {
-        return [pscustomobject]@{ allowed = $true; reason = ("removes {0} of {1} row(s) -- within safety threshold" -f $removed, $before); rule = 'ok'; removeCount = $removed; removePct = $pct; threshold = $th }
+    if (-not $emptyHit -and -not $overHit -and -not $fewHit) {
+        return [pscustomobject]@{ allowed = $true; reason = ("removes {0} of {1} row(s) -- within the limit of {2} rows per commit" -f $removed, $before, $lim); rule = 'ok'; removeCount = $removed; limit = $lim; survive = $survive; keep = $keep; minList = $minList; threshold = $th }
     }
 
-    if ($Confirm) {
-        $why = if ($emptyHit) { 'empties the store' } else { 'removes a large share of rows' }
-        return [pscustomobject]@{ allowed = $true; reason = ("destructive commit ({0}) explicitly confirmed" -f $why); rule = 'confirmed'; removeCount = $removed; removePct = $pct; threshold = $th }
+    $rule = if ($emptyHit) { 'empty-set' } elseif ($overHit) { 'over-threshold' } else { 'few-left' }
+    if ($Approved) {
+        $why = if ($emptyHit) { 'keeps none of the rows the list has' } elseif ($overHit) { "removes more than $lim rows" } else { "leaves $survive of $before rows" }
+        return [pscustomobject]@{ allowed = $true; reason = ("the commit ({0}) was approved by a SuperAdmin" -f $why); rule = 'approved'; tripped = $rule; removeCount = $removed; limit = $lim; survive = $survive; keep = $keep; minList = $minList; threshold = $th }
     }
 
     if ($emptyHit) {
         return [pscustomobject]@{
-            allowed = $false; rule = 'empty-set'; removeCount = $removed; removePct = $pct; threshold = $th
-            reason = ("This commit would EMPTY the entity (was {0} row(s), would be 0). This is the precondition of a mass-disable incident -- re-submit with confirm=true to proceed if intended." -f $before)
+            allowed = $false; rule = 'empty-set'; removeCount = $removed; limit = $lim; survive = $survive; keep = $keep; minList = $minList; threshold = $th
+            reason = ("This commit takes out ALL {0} row(s) the list has now -- none of them would be left{1}. Nothing was saved. A SuperAdmin must approve exactly these rows before it is saved." -f $before, $(if ($after -gt 0) { " (the $after row(s) it would hold afterwards are new)" } else { '' }))
+        }
+    }
+    if (-not $overHit) {
+        return [pscustomobject]@{
+            allowed = $false; rule = 'few-left'; removeCount = $removed; limit = $lim; survive = $survive; keep = $keep; minList = $minList; threshold = $th
+            reason = ("This commit takes {0} of {1} row(s) out of the list and would leave {2} of them -- {3} or fewer left of a list that has more than {4} rows. Nothing was saved. A SuperAdmin must approve exactly these rows before it is saved." -f $removed, $before, $survive, $keep, $minList)
         }
     }
     return [pscustomobject]@{
-        allowed = $false; rule = 'over-threshold'; removeCount = $removed; removePct = $pct; threshold = $th
-        reason = ("This commit removes {0} of {1} row(s) ({2:P0}), over the safety threshold (max {3} rows or {4:P0}). Re-submit with confirm=true to proceed if intended." -f $removed, $before, $pct, $th.maxRemoveAbs, $th.maxRemovePct)
+        allowed = $false; rule = 'over-threshold'; removeCount = $removed; limit = $lim; survive = $survive; keep = $keep; minList = $minList; threshold = $th
+        reason = ("This commit takes {0} of {1} row(s) out of the list -- more than the limit of {2} rows in one commit. Nothing was saved. A SuperAdmin must approve exactly these rows before it is saved." -f $removed, $before, $lim)
     }
 }
 

@@ -1299,6 +1299,11 @@ function Initialize-PimDefaultJobHandlers {
         if (-not (Get-Command Invoke-PimHybridAdGroupsJob -ErrorAction SilentlyContinue)) {
             return [pscustomobject]@{ ran=$false; unimplemented=$true; detail='unimplemented:hybrid-ad-groups (PIM-HybridAdGroups.ps1 is not loaded on this worker)'; whatIf=[bool]$whatIf }
         }
+        # PIM 100.123 (lane adclean): with PIM-HybridAdCleanup.ps1 loaded the mirror is followed, under the same AD-write lock,
+        # by the reviewed clean-up (report the old PIM groups; delete exactly the list a SuperAdmin approved).
+        if ((Get-Command Invoke-PimHybridAdGroupsJobWithCleanup -ErrorAction SilentlyContinue) -and (Get-Command Invoke-PimHybridAdWriteLocked -ErrorAction SilentlyContinue)) {
+            return (Invoke-PimHybridAdWriteLocked -Action { Invoke-PimHybridAdGroupsJobWithCleanup -NowUtc $now -WhatIf:$whatIf })
+        }
         if (Get-Command Invoke-PimHybridAdWriteLocked -ErrorAction SilentlyContinue) { Invoke-PimHybridAdWriteLocked -Action { Invoke-PimHybridAdGroupsJob -NowUtc $now -WhatIf:$whatIf } }
         else { Invoke-PimHybridAdGroupsJob -NowUtc $now -WhatIf:$whatIf }
     }
@@ -1329,6 +1334,9 @@ function Initialize-PimDefaultJobHandlers {
         if (-not (Get-Command Invoke-PimHybridAdServersJob -ErrorAction SilentlyContinue)) {
             return [pscustomobject]@{ ran=$false; unimplemented=$true; detail='unimplemented:hybrid-ad-servers (PIM-HybridAdGroups.ps1 is not loaded on this worker)'; whatIf=[bool]$whatIf }
         }
+        # PIM 100.123 (lane adclean): with PIM-HybridAdServerDiscovery.ps1 loaded the job runs through the customer's discovery
+        # filters, defines the groups of new servers in the OUs a SuperAdmin named, and does the approved clean-up's server step.
+        if (Get-Command Invoke-PimHybridAdServersJobWithDiscovery -ErrorAction SilentlyContinue) { return (Invoke-PimHybridAdServersJobWithDiscovery -NowUtc $now -WhatIf:$whatIf) }
         Invoke-PimHybridAdServersJob -NowUtc $now -WhatIf:$whatIf
     }
     Register-PimJobHandler -Type 'verify-convergence' -Handler {

@@ -555,10 +555,11 @@ container, or from the scheduler with no `Connect-*` step.
   1. **Positively-resolved desired set required** — if the desired set is empty, null, or its
      read could not be confirmed (the SQL read errored), the disable pass **aborts** (a disable
      requires a desired set we are *sure* about, not merely "0 rows came back").
-  2. **Mass-disable cap** — if a run would disable more than a small absolute count
-     (`PIM_DisableMaxCount`, default 5) **or** more than a small percentage of the scanned
-     population (`PIM_DisableMaxPercent`, default 10%), the **whole** disable pass aborts and
-     **nothing** is disabled (never a partial mass-disable). It logs loudly + raises an alert.
+  2. **Mass-disable cap** — if a run would disable more accounts than the limit (a **count**,
+     default 3), the **whole** disable pass aborts and **nothing** is disabled (never a partial
+     mass-disable). It logs loudly + raises an alert. The limit is set by a SuperAdmin on the
+     Guards page inside a fixed range; the share of the scanned population plays no part (see
+     "Guard limits and approvals" below).
   3. **Off by default** — the account-disable capability is disabled unless the persisted
      opt-in `PIM_AccountDisableEnabled` is explicitly set; with it off, zero accounts are ever
      disabled. (Defence-in-depth: the `Admins` provider's `ApplyRemove` re-checks this opt-in,
@@ -566,13 +567,109 @@ container, or from the scheduler with no `Connect-*` step.
 - **Removal budget (G4)** (`Test-PimRemoveBudgetAllowed`, `PIM-DisableGuard.ps1`). The breaker above
   guards one provider class; the budget guards **every** scope. It is always on, whatever the
   environment. When one scope pass would remove (or change the type of) more items than the budget,
-  the pass drops **all** of that scope's removals: nothing is partly removed. The budget is
-  `PIM_RemoveMaxCount`, default 5 with a hard ceiling of 5. An operator may lower it, and a higher
-  value is clamped with a warning. The check runs for a plan and for a real run, so a plan shows
+  the pass drops **all** of that scope's removals that nobody approved: nothing is partly removed.
+  The budget is a count, default 5, set by a SuperAdmin on the Guards page inside a fixed range;
+  the setting `PIM_RemoveMaxCount` can lower it for one process and a higher value is ignored with
+  a warning (see "Guard limits and approvals" below). The check runs for a plan and for a real run, so a plan shows
   the abort too. **Only a real run alerts** (`Write-PimRemoveBudgetAlert`): it writes the
   `engine.remove.budget.exceeded` audit event and mails the operators. A plan (`-WhatIf`, such as
   the read-only convergence check) logs the finding and sends nothing, because it could not have
   removed anything (v2.4.371).
+- **Guard limits and approvals.** The rules below hold for every guard.
+  - **Counts only.** No guard's rule or text uses a share of a list or of the scanned accounts. A
+    share says nothing on a small set: two rows of three is two thirds and still only two rows.
+  - **Three guards have a limit, and a SuperAdmin sets it** on the Guards page, inside a floor and a
+    ceiling that are fixed in the code and stated on the page:
+
+    | Guard | What the limit counts | Floor | Default | Ceiling |
+    |---|---|---|---|---|
+    | Commit removal check | rows of one list taken out in one commit | 5 | 25 | 200 |
+    | Removal budget | removals in one scope in one engine run | 1 | 5 | 25 |
+    | Account-disable circuit breaker | accounts disabled in one engine run | 1 | 3 | 25 |
+
+    The removal budget is ONE number for every way the engine removes: removals a row asks for, the
+    clean-up of leftovers, the reconcile where it enforces, offboarding, group deletion (from a
+    Retire mark and from the change queue) and, on a managed tenant, the central admins the managing
+    tenant withdraws. The Guards page lists them on the limit's row and again when the limit is
+    set, so nobody raises it for one of them without seeing the others. Setting a limit never
+    overwrites a change somebody else made at the same moment: it is written only if the stored
+    limits are still what was read, and otherwise read again.
+
+    The floors are above zero because zero would stop every removal or disable, which is switching
+    the action off and not a limit. The ceilings stop a limit from being raised until the guard
+    never asks: more than the ceiling is "many", and a larger change goes through the approval of
+    its exact list instead. The limits are stored in the SQL store. The code that owns a guard asks
+    one function for its limit, and that function always returns a number inside the range: a
+    stored value outside it, a value that is not a whole number, and a store that cannot be read
+    all give the default. There is no value that means "no limit" and no switch that turns a guard
+    off. A process setting can lower a limit; one that is higher than the limit is ignored with a
+    warning. The same holds for a number a caller passes to the commit removal check: it can lower
+    the limit and never raise it. With nothing stored at all -- no limit, no approval, no release --
+    the product behaves as it did before limits could be set: a run holds more than 5 removals in
+    one scope, and a commit asks above 25 rows of one list.
+  - **A guard that stops a commit is answered in the commit dialog, by a SuperAdmin.** The server
+    answers the commit with the list the guard stopped: the rows, the count, the limit and a hash of
+    exactly that list. An Admin sees the rows and the numbers, reads that a SuperAdmin must approve,
+    and can only close the dialog. A SuperAdmin gets an Approve button and must give a reason; the
+    commit is sent again carrying the hash. The server decides who may approve from the signed-in
+    identity, on every route, and refuses an approval whose hash is not the hash of the list that
+    would be saved now. The commit removal check asks in three cases, all counts: the commit takes
+    more rows than the limit out of one list; it keeps none of the rows the list has now (also when
+    it adds new rows at the same time, so the list is not empty afterwards); or it would leave 2
+    rows or fewer of a list that has more than 5 rows. The last two numbers are fixed and are
+    stated in the dialog and on the Guards page. Taking 2 of 3 rows out asks nothing; 24 of 25
+    asks. The second case applies to every list that has rows; no setting narrows it. The same
+    answer covers a restore from a backup and the departments save. A restore is checked against
+    the rows the list has at that moment: when those rows cannot be read, nothing is restored, and
+    when the difference between the two sets cannot be worked out, every current row counts as
+    taken out. "SuperAdmin" is decided by one rule everywhere -- the routes, the approval, the
+    limit: the role is that word, in any case, and nothing else, and the person must be signed in.
+  - **The removal budget is approved at commit.** When a commit marks more removals in one list than
+    one run may apply, the same dialog says so and the SuperAdmin approves that exact list once.
+    The engine then applies exactly those items without counting them against the budget, whatever
+    their number. Each approved item is let through once; an approval is used up when all its items
+    were applied and ends by itself after 48 hours. Items that are not in the list are judged
+    against the budget as always, and over it they are held. A commit that marks nothing new is
+    never stopped for marks that were already there.
+  - **What an item is.** An approval names items, not a number. A removal is identified by its list
+    and the columns that name the delegation; a group deletion also by the group name, so a row that
+    was renamed after the approval is not the approved group. The Manager and the engine compute the
+    identity from the stored row alone, so they agree. A row the managing tenant sent has no
+    identity and cannot be approved by a managed tenant. Neither has a row whose key or group name
+    contains the character that separates the parts of an identity: two different rows could
+    otherwise spell the same one. Lists whose key does not name exactly what
+    is removed (workload roles) cannot be approved at commit: the run holds them and a SuperAdmin
+    releases the held plan.
+  - **Group deletion goes through the same approval.** The groups a SuperAdmin approved when the
+    Retire marks were committed are deleted; the others are judged against the budget, and a held
+    list of groups can be released on the Guards page like any other. Every other rule of group
+    deletion still applies to an approved group: the switch, the naming prefix, a unique live name,
+    and not being listed as desired.
+  - **Release after the fact.** A plan a run already holds is released on the Guards page for one
+    run or until a time, bound to the plan. There is no ceiling on its size and no percentage. A
+    held list too long to be shown in full is not released there, because a release is for a list
+    that can be read item by item.
+  - **Recorded.** Every approval is stored with who approved it, when, why and every item, is shown
+    on the Guards page, and is written to the audit trail when it is given and when the engine uses
+    it. With "second person" on, an approval a run will use waits for a different SuperAdmin.
+  - **A record cannot come back, and a hand-written one is not believed.** Approvals, releases, held lists
+    and limits are not part of a configuration backup, are refused by a restore even from an older
+    backup that carries them, and are never copied by an environment import or a settings copy --
+    so an approval that was used or revoked stays that way, and a limit only changes on the Guards
+    page, audited. A record is usable only when its own times add up: it has the time it was given,
+    that time is not in the future, and its end is no later than that time plus the fixed lifetime
+    (48 hours for an approval, 24 for a release). A record with an end far in the future, or with
+    no start, counts as ended. An approval must also say who gave it, that it came from a commit,
+    and at least one item; a release who made it. This narrows what a record written around the
+    product can do; it is not a signature, and whoever can write the settings store directly is
+    outside what the guards protect against.
+  - **Locked guards.** The break-glass exclusion, admin deletion by a prune, shared workload
+    assignments, groups the product does not own, the removal rules of the reconcile and the last
+    Manager SuperAdmin have no limit and take no approval, exemption or release. They refuse one
+    when it is created and ignore a stored record that claims one.
+  - **The Guards page lists every guard**: what it protects in one sentence, its limit (editable by
+    a SuperAdmin where it has one), whether an exemption can be approved and the open approvals, and
+    its last trip. The locked ones are shown locked with the reason.
 - **Safety alerts are really sent.** The removal budget, the account-disable breaker and the policy
   mass-change hold (§6) all alert through one sender, `Send-PimSafetyAlert`. It uses the
   `alert-notice` mail template, sends to `PIM_AlertRecipient` together with the Manager's Alerting
@@ -694,6 +791,10 @@ top of the engine delta — it does NOT reimplement reconciliation.**
   next run **even with `EnableGroupRetirement` off** -- the committed item is the per-item intent -- behind every other guard:
   the removal budget over all group deletes of the run (over it, none is deleted), the naming prefix, the id still carrying
   the queued name, a unique live name, not defined in PIM by then, no break-glass account among its (transitive) members;
+  the "not defined in PIM" check **fails closed**: the definitions are read again at that moment, and unless every group
+  definition entity the read touched is confirmed as read by the store (a failed store read answers an empty list
+  without an error, so "no error" proves nothing) the delete is refused, nothing is changed and the same queue item is
+  tried again on the next run (`Get-PimQueueGroupDeleteDefinedNames`, `engine/_shared/PIM-QueueActions.ps1`);
   it removes the group's directory role assignments and members first and reads the deletion back. Who queued it, who
   committed it and when are audited. A delegation's Delete stays its queued revoke. The engine itself never deletes an
   undefined group otherwise: the Groups provider has no remove, and the daily reconcile removes only ledger-confirmed,
@@ -1062,6 +1163,27 @@ apply. They run in a fixed dependency **order**:
 | 92 | GroupRetirement | `PIM-Definitions-*` | retires a group whose definition is marked for retirement (`Lifecycle=Retire`) — see the note below |
 | 95 | HybridAdProvisioning | `Account-Definitions-Admins` (AD platform) | **PLANS** on-prem AD accounts + gMSA/sMSA; on-prem write is hybrid-worker-only (see §6.5) |
 
+##### A step that uses an object the same run just created
+Microsoft Entra serves a new group, administrative unit or account to its other endpoints only after a short while. A
+run that creates a group and, seconds later, adds it to its administrative unit (or sets its owners, a membership, a
+role assignment or a policy) can therefore be answered "not found" for the object it created itself. The orchestrator
+(`Invoke-PimEngineScope`, `engine/_shared/PIM-EngineCore.ps1`) handles this in one place, for every provider:
+- **It remembers what the run created.** Every object a create step returns with an id is registered with the time
+  (`Register-PimNewObjectsFromResult`); the registry lives for the process and an entry counts for 15 minutes.
+- **It tries the step again, bounded.** A create or update step that fails with a "not found" answer (404 family; a
+  401, 403, 429 or 5xx is never "not found") which **names an object this run created before that step was called** is
+  run again after 5, 10 and 15 seconds -- at most three more attempts, at most 60 seconds of waiting per new object and
+  120 seconds per scope (`Get-PimNewObjectRetryPolicy`, `Get-PimNewObjectRetryDecision`).
+- **Provenance is the gate, not the status code.** A "not found" that names no object of this run is a real missing
+  object: it fails at once, exactly as before. A remove is never tried again. A step that created the object itself in
+  the same call is not run again either (it would create it twice).
+- **What still does not go through waits.** The item is recorded with the failure class
+  `NEW-OBJECT-NOT-VISIBLE-YET` (transient, retryable) instead of "Unrecognised failure": the run reads *waiting*, not
+  failed, no alert is sent, and the next run applies it. Like every waiting class it becomes a real failure again when
+  it is still waiting after the waiting window (two hours). A plan (`-WhatIf`) calls no step and waits for nothing.
+The administrative-unit provider's own retry for an administrative unit created in the same pass stays as it is; the
+orchestrator's rule sits around it and covers the other direction (an existing unit, a new group) and every other step.
+
 ##### The four verbs — what each one touches (the canonical table)
 Operator, 2026-09-22: *"we need to be 100% good to explain DELETE REMOVE REVOKE STOP MANAGING"*, after
 *"how can i remove the delegation - is that only done in the revoke or how ?"* and *"nobody knows how to
@@ -1132,14 +1254,181 @@ stays, still marked Retire, until an administrator takes it out. A mark that is 
 committed is shown as staged. This is information, so it puts no number in the menu.
 
 **The removal budget is said before the commit.** When more groups are (or would be) marked Retire
-than one run may delete, the delete dialogs, the card and the note say so: over the budget a run
-deletes none of them, and a guard release does not cover group deletion, so groups are deleted a
-budget's worth at a time. The numbers shown are read from the guard's own functions at run time;
-the page carries no copy of them, and nothing in this view can change a guard.
+than one run may delete, the delete dialogs, the card and the note say so: without an approval a
+run over the budget deletes none of them. A SuperAdmin approves the exact list of groups when the
+marks are committed, and the run then deletes exactly those; a list a run already holds is released
+on the Guards page. The budget shown is read from the guard's own function at run time; the page
+carries no copy of it, and nothing in this view can change a guard.
+
+**What Review & commit says about a Retire mark.** The line reads "marked for deletion" and says
+what really happens next: the daily full run deletes the group, not the run that follows the
+commit, and only where group deletion is switched on. When the switch is off the line says the
+group is not deleted and names where the switch is.
+
+**The state of every group, in words** (2026-10-13). A group has one state, computed by the server
+from stored facts only (`GET /api/group-states`, Admin; `tools/pim-manager/_states.ps1`). Nothing in
+it reads the tenant, writes, or stages; a fact that cannot be read gives **Not known** with the
+reason, never a guess.
+
+| the state says | it is computed from |
+|---|---|
+| **Managed** | a committed definition, and the name is in the last read of the tenant |
+| **Waiting for commit** | the definition is only staged in Pending changes |
+| **Waiting to be created** | committed, not in the read, nothing recorded about it, no failing item |
+| **Could not be created** | committed, not in the read, and the last engine run's failing items (scope Groups) name it -- with that run's reason |
+| **Marked for deletion** | the definition is marked Retire and the group is still in the read -- with why it waits: the switch is off, the next full run, a guard, or "not known" |
+| **Deleted -- row left** | marked Retire and no longer in the read: only the row is left |
+| **Missing in Entra ID** | committed, the engine recorded it BEFORE the read, and the read did not find it |
+| **Not managed** | in the read (it carries the group naming prefix) and no definition names it |
+| **Not checked** | no read yet, a read older than 26 hours, a name the read does not cover, or a group created at or after the read |
+| **Not known** | a stored fact this state needs could not be read |
+
+The facts and their two traps:
+
+- *In Microsoft Entra ID* is the stored tenant list of groups. It is written only when the read of the
+  tenant completed, and it lists **only groups whose name starts with the group naming prefix**. A
+  name without that prefix is therefore *Not checked* -- never *Missing*. The lists are read every
+  12 hours; a read older than 26 hours is not used to say that a group exists or is gone.
+- *It existed* is what the engine recorded: the managed-key ledger (the engine matched or created the
+  group) and the applied outcome per commit (created / updated / already present). It counts as
+  "existed before the read" only when it is **older than the read, less a 10-minute margin** (the
+  read's time is stamped when it ends). A group the engine created after the read is not in the list
+  yet: it is *Not checked* until the next read, never *Missing*.
+- *Could not be created* reads the stored failing items **raw**. The reader the rest of PIM Manager
+  uses answers an empty list when the read fails, which would read as "nothing failed". The same
+  holds for what is staged: the pending store's own parser turns unreadable text into "nothing
+  staged", so the text is parsed once more and an unreadable value is *Not known*.
+- *Why a marked group waits* is the group-deletion switch (above), the guard holds for group deletion
+  (asked fresh, so an unreadable store is said) and the removal budget -- counted over the groups
+  that are **really left to delete** (marked and still in the read), which is what the engine counts.
+
+Where it is shown: every row of a group table carries its state as text (filled after the table is
+drawn, so a late answer never redraws a cell being edited), and **Delegation overview** has
+*Groups and their state*: the counts per state on top, each a filter, and the groups as a plain
+table with a **State** column and the reason beside it. A request that fails shows *Not known* on
+every row and no list -- never the last good answer passed off as current. A state is information:
+it puts no number or dot in the menu.
+
+**One dialog for "remove from PIM Manager" or "delete the group".** The bin, the broom and the three
+bulk buttons of a group table, and the list on Delegation overview, open the same dialog. It shows
+the state of what was picked and three choices, each in the words of what is left behind:
+
+| choice | the access | the group | the row |
+|---|---|---|---|
+| **Stop managing** | stays | stays in Microsoft Entra ID | leaves PIM Manager |
+| **Remove the access, keep the group** | removed by the next engine run | stays | stays |
+| **Remove the access and delete the group in Microsoft Entra ID** | removed | deleted by the engine's full run; cannot be undone | stays, marked Retire, until the group is gone |
+
+Which choices are offered for a group is the **server's** answer, per state: no delete on *Not
+known* (nothing is deleted on a guess), no delete where there is nothing to delete (*Waiting to be
+created*, *Could not be created*, *Missing*, *Deleted -- row left*, already *Marked for deletion*),
+and for *Deleted -- row left* only "take the row out". *Stop managing* is not offered while a
+delegation still names the group (a removal that is already staged or already an Action = Remove
+row is not in the way -- the commit's own rule). For many groups the dialog gives the count per
+choice, names the groups a choice is not offered for with the reason, and stages only for the rest.
+The delete choice says where the switch is and the removal budget before the commit, as above.
+
+*Not checked* is the one state where the delete is **offered with a warning**: PIM Manager has not
+seen the group recently, so it cannot say that the name still stands for the group that is meant.
+The server marks such a group (`deleteNeedsConfirm`) and gives the reason in words
+(`deleteWarning`): the name does not carry the prefix the reading covers, there is no reading of
+the tenant yet, the last reading is older than 26 hours (with when it was), or the group was
+created after the last reading. When the delete choice is selected the dialog shows that warning --
+what is not known and why, the names concerned (only the *Not checked* ones of a mixed selection),
+and that the engine's own checks still decide when it runs -- with a box, *I have checked that this
+is the right group*. The stage button stays disabled until the box is ticked, and nothing is staged
+without it however the button is reached. A *Not checked* group for which no mark arrived is
+treated the same. Nothing changes for a *Managed* group, and *Not known* still offers no delete.
+The dialog **only stages** what the older controls staged -- rows taken out, the delegation rows
+removed, `Lifecycle = Retire` -- through the same function; it adds no way to remove or delete
+anything, sends no write of its own, and the commit and its guards are unchanged.
+
+**The rows left behind.** A row marked Retire whose group is gone used to stay visible as "waiting
+to be deleted" for ever. It now reads *Deleted -- row left*, and both the note above the group table
+and Delegation overview say how many such rows there are with one button that opens the dialog on
+all of them, *Stop managing* pre-selected. The store still keeps the row until an administrator
+commits its removal.
 
 🪤 `Lifecycle` is on the **defaultHeader of every group-definition entity**. In SQL mode that header
 *is* the grid, so before 2.4.414 the flag could not be set, seen or cleared from any screen — the one
 act the product has that deletes a group was unreachable, which is why it read as missing.
+
+#### Feature settings and the two protection switches (Settings)
+Some values the code reads could not be set by anybody in a hosted installation: they were read from
+a variable of the running process only, which nothing sets in a container. They are settings now.
+The rule for what goes on the Settings page: **features and configuration a customer chooses** --
+never a platform or hosting value (those belong in the documentation), and of the settings that
+remove or weaken a protection only the two named below. Guard limits and the alert recipient are on
+the Guards page; the hybrid Active Directory names are in their own card.
+
+**One catalog, one reader** (`engine/_shared/PIM-FeatureSettings.ps1`, loaded together with the
+store so the engine, the scheduler and PIM Manager all have it). Each setting has a type, the
+default the code used before, the bounds the reader accepts and the range Settings offers.
+`Get-PimFeatureSetting` reads the process variable first, then the process environment, then the
+stored setting, then the default -- so anything that set the variable still decides. A value that
+is set but not usable (a word where a number belongs, a number outside the bounds) gives the
+default and one warning; it is never guessed at. A switch is read as text: only `true` / `1` /
+`yes` / `on` is on. Reading a switch with a boolean cast would turn the stored text `false` into
+*on*; that was the case for two of these values.
+
+| Setting | Type | Default | Settings accepts | Read by |
+|---|---|---|---|---|
+| `ApprovalRequestTtlHours` | hours | 72 | 1 to 720 | PIM Manager (approval requests) |
+| `BreakGlassChangeTtlHours` | hours | 72 | 1 to 168 | PIM Manager (a change to the emergency access list) |
+| `OwnerExtendMaxDays` | days | 365 | 1 to 3650 | PIM Manager (a department owner's extension) |
+| `RequireGroupOwners` | switch | off | on / off | the engine, when it creates a group |
+| `StaleGroupDays` | days | 90 | 7 to 3650 | the validation (unused groups, a note) |
+| `RequiredAuthMethods` | list | the five strong methods | up to 12 method names; no weak method | the validation (admin sign-in methods, a warning) |
+| `TapCreateLeadHours` | hours | 48 | 0 to 720 | the engine (Temporary Access Pass) |
+| `TapReissueUntilOnboarded` | switch | off | on / off | the engine (Temporary Access Pass) |
+| `AdminMailboxForwarding` | switch | off | on / off, switch-on confirmed | the engine (admin mailboxes) |
+| `DiscoveryNotifyRecipients` | e-mail addresses | empty | up to 20 addresses | the discovery sweep |
+| `IntakeEnabled` | switch | off | on / off | the ServiceNow intake job |
+
+Two more names go through the reader but are **not** on the page and are **not** read from the
+store (`DiscoveryAutoImportPowerBi`, `DiscoveryAutoImportRules`): both make the discovery sweep
+create delegations without a person, so a stored row that no page validates must never switch them
+on. What a customer chooses instead is the discovery policy per kind of resource (*Settings >
+Automation > Discovery: new resources*: report only, stage for review, or create automatically),
+which uses the route that existed already (`GET` / `PUT /api/discovery-policy`).
+
+`GET /api/settings/feature-settings` answers every setting with its stored state (`set`, `unset`,
+`invalid`, `unknown`), its value, default and range, and one line about what PIM Manager cannot
+know (a setting the engine reads takes effect at its next run; a value in the engine job's own
+environment wins and cannot be read from a hosted PIM Manager). `PUT` changes **one** setting:
+SuperAdmin only, the name must be one of the eleven, the value must be of the right JSON type and
+inside the range -- otherwise nothing is saved and the answer says why. The value is written as
+JSON, read back, mirrored into the running PIM Manager (no restart) and audited
+(`settings.feature-setting`, before and after). *Back to the default* stores "not set". **With
+nothing stored, every setting behaves exactly as before**: each default equals what the code did.
+
+**Automatic offboarding** (*Settings > Approvals & policy*, `GET` / `PUT
+/api/settings/auto-offboarding`) writes the setting the engine's own check reads
+(`EnableAutomaticOffboarding`, JSON `true` / `false`). Not set means on in a tenant named as a test
+tenant and off in a production tenant, as before; the card keeps "not set" apart from "off" the same
+way the group-deletion card does. On: the offboarding job disables an admin account that is due
+(offboard date passed, marked Retire, or status Revoked), signs it out, removes its group
+memberships and eligibilities and sends the notice; the account is never deleted and the
+account-disable guard still applies.
+
+**Daily reconcile: removal of leftovers** (`GET` / `PUT /api/settings/reconcile-removal`) writes
+`ReconcileRemovalMode`. A leftover is a live item PIM Manager put in the tenant, whose definition a
+commit removed, with nothing similar configured. *Remove leftovers* (the default when nothing is
+stored) hands the qualifying ones to the normal remove path; *Report only* removes none and lists
+them on Jobs. The engine reads the stored value first: a stored row decides whatever the engine
+job's environment says, and a row with an empty value reads as the default. Therefore the route can
+store **only one of the two words** -- never a blank, never "not set" -- and the card shows a row
+with an empty value, or a word that is neither mode (which the engine reads as report only), as
+exactly that.
+
+Both are **protection switches**: only a SuperAdmin may change them (the role is checked on the
+server before anything is read; an Admin gets `403` with the reason), **every change in either
+direction needs a confirmation** whose sentence comes from the server and says what switching does,
+and every change is audited (`settings.auto-offboarding`, `settings.reconcile-removal-mode`).
+Choosing *Remove leftovers* also carries the number the confirmation showed -- how many items the
+last daily run counted -- and is refused when that number is no longer current, so the question is
+asked again with the new number; an unknown count is said as unknown, never as 0. Nothing in these
+routes changes a guard, and reading a state never writes.
 
 
 #### `AdminTap` (order 35) — the issuance contract
@@ -1704,6 +1993,59 @@ The worker writes a per-job heartbeat; the main tick leaves a job to the worker 
 Manager's Jobs view shows it per job (live / plan-only / not seen). A version change stops the continuous loop and the
 task restarts it on the new code; a daily task (or an on-demand run) moves the worker to the version its ring approves.
 
+**The membership sync never removes on a doubt.** Just-in-time access is the design: in an AD group PIM Manager defines, a
+user whose account name carries the AD suffix and who has no active assignment is removed; every other member is kept and
+reported. What must never happen is that a failed or wrong read is taken for "nobody is active". So a removal rests on
+evidence, and the sync decides in two steps: the plan (who would leave by the just-in-time rule) and the decision (which
+of those leave in this pass). The decision only ever takes removals out of the plan; adds and re-adds are never delayed.
+
+| What Entra ID said for the group in this pass | A member whose activation has run out | A member who left the active list before the recorded end time, or has no recorded end time | The job |
+|---|---|---|---|
+| **Found** under its defined name, the active members read in full | removed at once, whatever the number, also when it empties the group | kept; removed when a second complete pass at least 5 and at most 30 minutes after the first says the same; active again = the hold is gone | warning while somebody is kept |
+| **Found, but one active member could not be read** | removed at once | kept -- that unreadable member may be this account | warning |
+| **Not known** -- a failed, throttled or partial read, an answer without a list, a name search that came back empty, two groups with one name | kept | kept | warning |
+| **Renamed** -- the remembered group carries another name now and no group carries the defined name | kept | kept; nobody is added from the renamed group either | warning |
+| **Replaced** -- the remembered group is gone or renamed and ANOTHER group carries the name | removed when the end time recorded for the member from the old group has passed | kept until that recorded end time; a member without one waits for a SuperAdmin. New activations in the new group are added | warning, "waiting for a SuperAdmin" |
+| **Gone** -- the remembered id answers "not found" and the deleted items were checked | kept | kept; after 24 hours of that, seen in at least 3 different hours, the group is *confirmed gone* and its members wait for a SuperAdmin | warning |
+| **Never found** -- defined, in AD, and no Entra group of that name was ever seen | kept | kept; after 24 hours the members wait for a SuperAdmin | warning |
+| **The sync's own memory cannot be read** | removed only when Entra ID itself lists the activation as ended | kept | warning |
+
+*Run out* means: Entra ID itself lists the member with an end time that has passed, or the end time recorded for the member
+at the last complete pass has passed. A recorded end time is trusted while the complete passes are not more than 30
+minutes apart -- so when Entra ID has trouble for a while and an activation runs out meanwhile, the member is removed by
+the first pass that reads properly again. After a longer gap the recorded times are stale (an activation may have been
+extended unseen): they are dropped, and the member takes the two-pass way.
+
+The Entra group's object id is remembered once seen and the group is looked up by that id afterwards, and it counts as
+found only while it still carries the defined name -- a name search is never enough to say a group is gone, and a renamed
+or re-created group is never taken for the old one. A hold is a wait state that every pass decides again from what Entra
+ID says then: nothing in normal operation waits for a person. An active assignment for an account that no longer exists
+(not found on 3 passes over 30 minutes, not in the deleted items) stops holding its group and is reported. With the AD
+time-limited membership feature on, a membership still runs out by itself in AD, independent of all this.
+
+**A doubt is visible at once.** A pass that keeps anybody, or that could not read a group, is recorded as a *warning* run
+(amber) in the same pass, with a line per group and per kept member in the result and the live view. A group that has
+kept members for 30 minutes raises the alert "members kept" through the guard mechanism (state, audit, mail), again every
+4 hours until it heals; "waiting for a SuperAdmin" raises its own alert at once and then once a day. An alert that was not
+delivered is tried again after 5 minutes. A group that is gone and holds no PIM-managed member is not reported at all:
+there is nothing for a person to decide.
+
+The sync keeps a small memory in the store for this (per AD group: the Entra id, the active members and their end times at
+the last complete pass, who waits since when, since when the group is not known or gone). It is split over a fixed number
+of small values written with compare-and-set (two worker processes never overwrite each other's holds), only a changed
+value is written, a group that is no longer defined leaves it, and it is never part of a configuration backup or an
+environment import (the ids belong to one tenant). Without a store the sync still adds, and removes only what Entra ID
+itself reports as ended. What a SuperAdmin can decide for a group that waits is the *HybridAdSyncMemory decisions record*
+at the end of this chapter.
+
+**The end time of an activation is read as UTC only where that is switched on.** PowerShell 7 hands the end time over as a
+date value, and earlier versions read that value in the hybrid worker's own time zone -- exact on a worker whose clock is
+UTC, off by the time zone difference on any other. The correct reading is the setting `HybridAdEndTimeAsUtc` (**Settings →
+Hybrid Active Directory**, a SuperAdmin; `on` or `off`), **off by default**, so an upgrade changes no membership: switching
+it re-adds every active member once with the corrected time in a forest with time-limited membership. It is read like
+every other hybrid setting (the worker's settings from the store, or the worker's environment), one reading per pass, and
+anything but `on` -- not set, another text, settings that cannot be read -- is off.
+
 **Self-healing (24x7).** Every REST call has a time limit (180 s, one retry), so a call that never answers fails the pass
 instead of freezing it. Inside the continuous loop a watchdog thread ends the process when no pass has completed for 10
 minutes; the sync task (started every minute, one instance at a time) then starts a fresh loop. The 5-minute worker tick
@@ -1751,6 +2093,243 @@ server is reached differ:
   customer's Tier-0 model allows, administrators only, kept out of the servers OU whose GPO makes the Tier-1 server
   identity a local administrator (the AD step warns when it is in it). PIM Manager cannot enforce the on-premises
   hardening; it documents it.
+
+#### HybridAdSyncMemory decisions record -- a SuperAdmin's decision for an AD group that waits
+
+Two store values per sync job (`<job>` = `hybrid-ad-sync` for the critical groups, `hybrid-ad-sync-servers` for the
+per-server groups) connect the sync and the page on which a SuperAdmin decides.
+
+**The waiting record -- written by the sync, read by the page.** Setting `HybridAdSyncMemory.<job>.waiting`:
+
+```json
+{ "v": 1,
+  "groups": [
+    { "group": "<AD group name = the defined PIM group name>",
+      "kind": "gone | never-seen | replaced",
+      "state": "waiting-for-superadmin",
+      "entraGroupId": "<the remembered Entra object id; empty for never-seen>",
+      "replacementGroupId": "<the other group that carries the name now; only for replaced>",
+      "sinceUtc": "2026-01-31T08:00:00Z",
+      "confirmedUtc": "2026-02-01T08:02:00Z",
+      "inDeletedItems": true,
+      "memberCount": 3,
+      "members": [ "<AD account name>" ] } ] }
+```
+
+`members` are the accounts that stay in the AD group and that only a SuperAdmin can decide about (at most 200 names;
+`memberCount` is the real number). A member that is kept "until the recorded end time" is not listed: it leaves by itself.
+Nothing waiting = no groups. The value is rewritten only when its content changes.
+
+**The decisions record -- written by the page, only read by the sync.** Setting `HybridAdSyncMemory.<job>.decisions`, in
+the same job as the waiting entry:
+
+```json
+{ "v": 1,
+  "groups": {
+    "<AD group name>": {
+      "kind": "gone | never-seen | replaced",
+      "forEntraGroupId": "<entraGroupId of the waiting entry; empty for never-seen>",
+      "decidedBy": "<sign-in name of the SuperAdmin>",
+      "decidedAtEpoch": 1769932800,
+      "adoptEntraGroupId": "<replacementGroupId of the waiting entry>",
+      "removeMembers": [ "<AD account name>" ] } } }
+```
+
+| Field | Rule |
+|---|---|
+| group name (the key) | matched without regard to case |
+| `kind`, `forEntraGroupId`, `decidedBy`, `decidedAtEpoch` | all required. `decidedAtEpoch` is a NUMBER: whole seconds since 1970-01-01 UTC (date text is not accepted) |
+| `adoptEntraGroupId` | only with `kind` = `replaced`: "the new group of that name is the one" |
+| `removeMembers` | the exact accounts approved for removal |
+| one entry | says ONE thing: `adoptEntraGroupId` or `removeMembers`, never both, never neither |
+
+*Who may write it:* a signed-in **SuperAdmin**, through a PIM Manager action that checks the role on the server -- never
+an Admin, never the engine, never the hybrid worker. The action should refuse a group that is not in the current waiting
+record and a name that is not in that entry's `members`. The sync never writes, changes or clears this value, and it is
+never restored from a backup or imported into another environment.
+
+*How the sync uses it* (every pass). An entry is used only when all of this holds; otherwise it is left out, said once in
+the worker's log, and the group keeps waiting:
+
+1. the value was read from the store in this pass and is valid JSON; the entry is complete; `decidedAtEpoch` is not more
+   than 10 minutes ahead and not older than **48 hours** -- an approval does not last for ever;
+2. the group is in exactly that situation **in this pass**: the same `kind`, `forEntraGroupId` equal to the Entra id the
+   sync remembers for the group, and Entra ID saying so again now (a pass in which Entra ID could not be read applies no
+   decision; a group that was restored meanwhile is back under the normal rules).
+
+`adoptEntraGroupId` is used only when it is the id of the group that carries the name in this pass. From then on that group
+is the group behind the AD group: its id is remembered, the waiting entry disappears, and the normal rules run on its
+evidence. The holds and end times remembered from the old group decide nothing any more, so the pass that adopts makes no
+unexpected removal; a member who is not active in the adopted group is removed by the usual second pass 5 to 30 minutes
+later.
+
+`removeMembers` removes a named account in that pass only when it is in the AD group, carries the AD admin suffix, is not
+on the never-remove list, has no active assignment, and is one the sync itself holds as "waiting for a SuperAdmin" in this
+pass. Any other name is skipped and stays. The removal is reported as "removed on a SuperAdmin's approval (who)". Members
+that are not named keep waiting.
+
+"Keep them" needs no entry: keeping is what the sync does. To end a wait without removing anybody, restore the Entra
+group (it is found by its id again and the sync continues by itself) or take the group out of the definitions.
+### 6.5b Hybrid worker: server discovery settings, automatic groups per OU, the reviewed AD clean-up, and the SuperAdmin approval for waiting groups (built 2026-10-13, not released)
+
+Four additions to the hybrid worker and to **Settings > Hybrid Active Directory**. The rule behind all of them: the
+worker pulls everything from the store (it has no inbound path), it never removes or deletes on a doubt, and what a
+person must decide is decided by a **SuperAdmin**, checked on the server and written to the audit trail.
+
+**Code.** `engine/hybrid-ad/PIM-HybridAdServerDiscovery.ps1` (discovery filters, automatic groups),
+`engine/hybrid-ad/PIM-HybridAdCleanup.ps1` (candidates, decision, deletion), `tools/pim-manager/_adclean.ps1` (the
+Manager's routes), one marked block in the page. The scheduler's `hybrid-ad-servers` and `hybrid-ad-groups` handlers
+run the existing jobs through two wrappers when these files are loaded; there is no new job type and no new scheduled
+task. Still no ActiveDirectory module: LDAP through .NET.
+
+#### Server discovery: the customer's filters
+
+A server is always an **enabled Windows Server that is not a domain controller**. On top of that, each its own
+settings row (blank = the default):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `HybridAdServerSearchOus` | blank = the whole domain | Only these OUs, **several allowed**, sub-OUs included. One distinguished name per line (or `;` between them — a DN holds commas). |
+| `HybridAdServerExcludeOus` | blank | OUs to leave out, sub-OUs included. |
+| `HybridAdServerActiveDays` | 90 | "Last seen": the computer object last **changed** within N days (1–3650). It is the directory's change date, not a last sign-in — the setting's text says so. |
+| `HybridAdServerNameInclude` / `HybridAdServerNameExclude` | blank | Wildcards on the server name. A pattern that would leave out every server is refused. |
+| `HybridAdServerAutoGroupOus` | blank = no list | The OUs whose new servers are **offered** to a SuperAdmin as one list (see below). Naming an OU creates nothing. Must lie inside the search OUs and outside the left-out OUs (checked at save **and** by the worker). |
+| `HybridAdServerAutoGroupMaxPerRun` | 50 | Groups created per run (1–1000) from an **approved** list, run after run until the list is done. It never creates anything by itself. |
+| `HybridAdCleanupOus` | blank = only the OU for new AD groups | Extra OUs where old PIM groups are looked for. |
+
+The worker lists the domain's Windows servers once, stores that **inventory** (tenant cache `ad-servers-inventory`),
+applies the filters and hands the existing server job exactly the selected servers. The cached server list
+(`ad-servers`) gains each server's OU, its automatic mark and the filter counts. **Preview:** the Manager applies the
+*same* filter function to the inventory for unsaved values — "with these values the worker finds N of M servers", with
+the list — and saves nothing. A server that falls out of the filter **keeps its group and its access**; it only stops
+being listed, proposed and onboarded. A stored value that does not pass the check falls back to its default *for the
+filter*, is reported, and switches the automatic groups off until it is corrected.
+
+#### New servers: always approved by a SuperAdmin, created in batches
+
+Owner decision 2026-10-13 ("Always approve, in batches"). Default (no OU named): unchanged — a new server is a proposal
+on Discovery and gaps that a person accepts and commits. For the OUs a SuperAdmin names:
+
+1. **Offered, never created.** Every run of the server job writes the *eligible* servers that no approval covers as
+   **the waiting list** (settings row `AdServerAutoGroupsWaiting`: server, OU, distinguished name, the group it would
+   get; a list id = the SHA-256 fingerprint of the sorted "server|group" lines). One server or a thousand: **no server
+   group is created without a SuperAdmin's approval of the list.** A server is eligible only when all of this holds in
+   that run: it passed every discovery filter and lies below a named OU; the group definitions, the Discovery
+   decisions and the worker's record were all **read** (any one unreadable = nothing is offered and nothing is
+   created); its name is a plain computer name; its group name matches the mirrored naming pattern and is at most 64
+   characters; no group of that name is defined; no person decided on that server on Discovery and gaps (Ignore, or
+   Create for his own commit); it never got a group this way before (a group a person removed is not put back).
+2. **Approved once.** Settings > Hybrid Active Directory shows the list (Review) with how long it will take at the
+   current number of groups per run. `POST /api/hybrid-ad/server-groups/approve { listId, count, confirm, reason }`
+   (SuperAdmin; an Admin gets 403 with the reason and sees the button disabled) accepts only the id of the list that is
+   in the store now, whose fingerprint matches its servers, with the confirmed number. The approval
+   (`HybridAdServerAutoGroupsApproval`: list id, servers + group names, who, when as a number, reason) is built from the
+   worker's record, never from the request, and audited (who, when, how many, which list, the reason). **One approved
+   list at a time:** while an approval is not older than 72 hours and the worker has not reported it done, a second
+   approval is refused (409) — replacing it would drop the servers of the first list that are not created yet.
+3. **Created in batches.** Each run creates at most `HybridAdServerAutoGroupMaxPerRun` groups of the approved list
+   (default 50, in name order), run after run (about hourly) until the list is done: 1,000 servers at 50 per run are
+   20 runs. "Creates" = the worker writes the **definition** of the per-server group (the row the Discovery proposal
+   stages); from there the existing path runs — the engine creates the Entra group, the mirror job the AD group,
+   server onboarding adds it to the server's local Administrators, the just-in-time sync fills it. The group is empty
+   until a person delegates it. Each run **checks every condition again** for each server: one of the approved list
+   that is not eligible any more (moved out of the OU, filtered out, ignored by a person, would get another group
+   name) is not created and is reported. A server is created at most once per approval: the worker's record
+   (`AdServerAutoGroups`) carries, per server, the approval it was created under. A definition whose tag another
+   definition already uses is never overwritten. A server found after the approval is not covered by it: it is on the
+   next waiting list.
+4. **72 hours.** An approval is used only when it parses, names who and when, is not dated in the future, is not
+   older than 72 hours and its list id is the fingerprint of its own servers (an edited record does not match). When
+   the 72 hours run out before the list is done, the rest is not approved any more: those servers are a new waiting
+   list, and the page says so. The page warns before the approval when the list cannot be done in 72 hours at the
+   current number per run.
+5. **Progress.** The worker writes `AdServerAutoGroupsProgress` (list id, total, created, remaining, not eligible,
+   batch size, runs left, expired, the servers not created with their reasons). The page shows "n of m created, about
+   h hours left at k per run"; the job's detail line says the same. No number or dot in the menu.
+
+Per run the store is read once each for the definitions, the Discovery decisions, the record, the approval and the
+waiting list; then one definition write and one audit event per created group
+(`hybrid-ad.server.auto-group`: server, group, OU, who approved, the list), and the record written **twice** (before
+with the batch marked `pending`, after with the result) — never once per group. A write that fails does not stop the
+others: the job fails with the servers and reasons named (so it is seen on the Jobs page), and the next run tries
+them again under the same approval. If the record cannot be written first, nothing is defined.
+
+**The record** (settings row `AdServerAutoGroups`, `{ v, servers: { <server>: { group, atEpoch, list[, state] } } }`)
+is what keeps a group a person removed from being put back, so nothing is ever dropped from it and it has no size
+limit in the code: one row, about 140 bytes per server (5,000 servers ≈ 0.7 MB). An entry left `pending` by a run
+that was cut off is settled by the next run: defined = done, not defined = created then. A record that cannot be read
+(for example too large for the host's JSON parser — Windows PowerShell 5.1 stops at about 2 MB, roughly 14,000
+servers; PowerShell 7 has no such limit) stops everything with a warning; it is never treated as empty. The approval
+and the decision records are approvals of one moment in one installation: they are not part of the configuration
+backup and are never restored, imported or copied; no generic settings route can write them.
+
+#### Old PIM groups left in Active Directory: the reviewed clean-up
+
+Nothing in the product deleted an AD group before: a group deleted in PIM Manager stayed in AD and stayed local
+administrator on its server. The clean-up is three steps, and only the third deletes.
+
+1. **Report** (every `hybrid-ad-groups` run): the AD groups that match the mirrored naming pattern, lie **below the
+   configured OUs** (the OU for new AD groups + `HybridAdCleanupOus`) and have **no definition** in PIM Manager — each
+   with its members, the groups it is a member of, its server (for a per-server group, and whether that server still
+   exists), created / changed. Stored as tenant cache `ad-cleanup-candidates`. Nothing is proposed at all (`ok = false`,
+   with the reason) when: no OU is configured, the pattern is too wide, the definitions could not be read **or the
+   store holds no group definition at all** (an empty store is treated like an unreadable one), or AD could not be read.
+   A group AD protects (`adminCount = 1`), a critical system object, the shared server-admins group and the worker
+   identities' own groups are listed as *never offered*. A group outside the OUs is not even named.
+2. **Review** (Settings > Hybrid Active Directory > *Review clean-up*): a SuperAdmin ticks the exact groups, types a
+   reason and confirms the number. `POST /api/hybrid-ad/cleanup/approve` accepts only ids of the worker's **current**
+   report, which must be a good one and not older than 26 hours; one unknown id refuses the whole request. The approval
+   (`HybridAdCleanupApproval`) is built from the worker's report — name, distinguished name, creation date, the members
+   and member-of the reviewer saw — never from what the browser sent. An Admin can read the list and is refused (403)
+   when approving.
+3. **Delete** (the next run; the approval row is a hybrid settings row, so the change lane starts that run at once).
+   The worker deletes a group only when **all** of this holds in that run:
+   1. the approval names who approved and when (a number), is not dated in the future and is not older than **72 hours**;
+   2. an OU is configured; 3. the definitions were read and the store is not empty; 4. AD was read;
+   5. the name still matches the mirrored pattern; 6. **no definition of that name exists** (a group that gained a
+   definition since the review is skipped and reported); 7. exactly one AD group carries the name; 8. it lies below a
+   configured OU; 9. it is the **same object** that was reviewed (same distinguished name, same creation date — an
+   object that was moved, or deleted and created again, is not it); 10. it is not protected; 11. it has no member and
+   no member-of that the reviewer did not see; 12. for a per-server group: its server confirmed that the group is out
+   of local Administrators, or the server is not in AD any more, or the SuperAdmin ticked "delete even if the server
+   cannot be reached"; 13. the worker is not in plan-only mode.
+   Anything else is `skipped` / `waiting` / `expired` with the reason. Each deletion is logged three ways: a line in
+   the worker log, an audit event (`hybrid-ad.cleanup.delete`: the object, who approved), and the result record
+   (`AdCleanupResult`) the review page shows.
+
+The tier split is kept. The **server identity** (job `hybrid-ad-servers`) removes exactly that group from that server's
+local Administrators and records the outcome (`AdCleanupLocalAdmin`); the **groups identity** deletes the AD object
+afterwards. The object is deleted as it is, with its members: where the forest has the AD recycle bin, restoring it
+brings the members back. Deleting needs "Delete Group objects" on the OU for the groups identity's permission group —
+**not** part of the default grant; `Initialize-PimHybridWorkerAd.ps1 -AllowGroupCleanup` adds it. Without it an
+approved deletion is reported as failed with exactly that hint.
+
+**"Delete in AD too."** `POST /api/hybrid-ad/cleanup/also-delete` (SuperAdmin) records, for groups that are *defined
+and mirrored now*, that the AD group goes with the group. The worker acts only after the definition is gone **and**
+the Entra group of that name is confirmed gone (unknown = wait), 30 days at most, with the same OU / pattern /
+protection / server rules. Page helper for the remove / delete dialog: `pimAdcleanAlsoDeleteInAd(names, reason)`.
+
+#### The SuperAdmin approval for AD groups whose membership sync waits
+
+The membership sync holds instead of removing in two cases that need a person: the Entra group behind an AD group is
+confirmed deleted (or was never seen) and members without a time limit remain, or a **different** Entra group now
+carries the name. It writes those groups to `HybridAdSyncMemory.<job>.waiting` and reads
+`HybridAdSyncMemory.<job>.decisions`; the format of both is the sync's (see *HybridAdSyncMemory decisions record*).
+
+- `GET /api/hybrid-ad/waiting` (Admin): each waiting group with its case in words, since when, the Entra ids, and the
+  **members concerned**; the decision on record when it was made for exactly the state shown.
+- `POST /api/hybrid-ad/waiting/decide` (SuperAdmin; an Admin gets 403 with the reason): `{ job, group, kind,
+  entraGroupId, action: remove | adopt, members, adoptEntraGroupId, reason }`. The route writes a decision only when
+  the group is in the sync's **current** waiting record of that job and `kind` + `entraGroupId` are the ones in that
+  record now — the page sends what the person saw, so a stale page is refused (409). `remove`: every named account
+  must be in that entry's members; `adopt`: only for a replaced group, only the id that carries the name now. A reason
+  is required. The row is read, this one group's entry replaced, entries of groups that no longer wait (or older than
+  48 hours) dropped, written back compare-and-set, read back, and audited (`hybrid-ad.waiting.decide`: who, when, job,
+  group, case, the accounts, the reason; the previous entry as *before*).
+- What is written: `{ "v": 1, "groups": { "<AD group name>": { "kind", "forEntraGroupId", "decidedBy",
+  "decidedAtEpoch" (a number), "reason", and either "adoptEntraGroupId" or "removeMembers": [ ... ] } } }`.
+
+"Keep them" needs no decision: keeping is what the sync does. None of these lists puts a number or a dot in the menu.
 
 ### 6.6 Access Review overview (read-only data layer)
 
@@ -6598,7 +7177,10 @@ the count and percent triggers a warning; 2.4.595 reversed that, and since then 
 by a **SuperAdmin of the tenant** in PIM Manager. Since 2.4.598 the thresholds no longer decide whether
 a change set is held: **every non-empty change set is held** — one policy or a thousand, also the
 first application to a policy nobody ever changed — and the thresholds only add their reason to the
-text. An approval covers exactly the change set whose hash it names; the earlier rule that an approval
+text. What a person reads about a held change set is in counts and words: how many policies change
+out of how many were checked, how many settings are weakened, and the reasons spelled out ("many
+policies change", "settings are weakened"); no percentage is shown in the log, the mail, the
+Approvals card or the settings help. The rule itself, and the hold record it writes, are unchanged. An approval covers exactly the change set whose hash it names; the earlier rule that an approval
 also covered a later plan with no new weakening is gone. A provider plans only the settings the customer chose
 (§6, "Policy settings"). The plan hash, the approval that covers exactly one plan, and the `held` job
 outcome below are unchanged. A hold whose plan no longer exists is cleared by the next run that applies
@@ -8291,6 +8873,36 @@ direct groups carry a **type** (role, organisation, department, process, project
 selects the entity they are stored in; the permission-group wizard no longer offers Department or
 Organization. Every onclick handler the page references is checked to exist by a static guard.
 
+**Who may revoke what (2026-10-13).** A revoke is staged with `POST /api/revoke` and applied only after it is
+committed with `POST /api/queue/commit`. Both calls ask the same rule (`tools/pim-manager/_revaudit.ps1`), for the
+person who makes the call, and the rule decides from **stored rows** — never from what the page sent beyond the ids
+that address the assignment:
+
+* **A SuperAdmin** revokes anything. It is always a person's own action; nothing revokes automatically.
+* **An assignment PIM Manager does not manage** — an old manual assignment, a leftover of an older design, an *extra*
+  on the Drift page — is removed by a **SuperAdmin only**, on every page, at staging **and** at commit. An Admin
+  cannot commit such a revoke even when a SuperAdmin staged it. The pages show the action disabled with the reason.
+* **An assignment PIM Manager manages** is revoked by the person who has permission over the target, without a
+  SuperAdmin: it must be **inside his scope** — the ceiling of his portal profile (service, tier, level, Azure scope,
+  the departments it is limited to, the admins it manages), judged on the stored definition of the groups involved
+  and the stored admin row — and the target must **not be an admin at a more privileged level than the caller**
+  (level 0 is the most privileged: a level-4 admin never revokes a level-0 or level-1 admin; the same level or a less
+  privileged one is allowed). The caller's level is the more restrictive of his profile's level ceiling and the level
+  of his own admin row; an Admin with neither is an administrator of the whole tenant, as before.
+* A refused revoke is refused **whole**, with the reason per row, and every refusal is written to the audit trail.
+
+*Managed* is not a yes/no. The engine writes the list of live assignments it matched to a definition with every drift
+read. A row whose identity is in that list is **managed** — also when the row is missing from the stored read of the
+tenant or that read is older or newer: a managed assignment is never filed as not managed. A row is **not managed**
+only on positive evidence: the list is complete, the row is in the stored read, the list is at least as new as that
+read, and the identity is not in it. Everything else is **not known**; it is refused for everybody but a SuperAdmin
+with a reason that says the mark could not be established (never "not managed"), and works again after the next
+engine read. An **active Azure role assignment** is removed by its role-assignment id, which is not part of the
+identity (principal, role, scope): the id in the request must be the id of the stored row with that identity.
+
+A request can declare that it comes from a view of managed assignments (`managedOnly`); the rule then refuses a row
+that is not established as managed for everybody, a SuperAdmin included.
+
 ### 18.1h Commit safety — boot data, concurrency, scoped slices (v2.4.370)
 
 The Manager's commit is a **full-set replace** of one entity (`PUT /api/csv/<base>` →
@@ -8877,7 +9489,8 @@ Departments & owners page edits only Department / Owners / Contact / Notes. `Mer
 column over; a renamed department carries its row over under the new name; a new department gets a
 new row. The page's list is the full list, so a department removed there is removed; the two
 imports keep every department they do not name. A row with no department name is never touched.
-The delta guard's refusal is a `409` the screen can confirm. (Before v2.4.370 a save replaced the
+The removal check's refusal is a `409` that a SuperAdmin approves in the guard dialog, with a
+reason (it used to be confirmed by whoever saved). (Before v2.4.370 a save replaced the
 rows with the four fields only, and dropped the ring, target and replication settings.)
 
 Every write emits a `settings.<section>.save` audit event (imports emit
@@ -9116,8 +9729,8 @@ shared export bar (`wireExportBar`) registers its rows automatically. A page wit
 The page POSTs `{ view, title, format, sections: [{ heading, columns, rows }] }` to `/api/export`. The server re-checks
 the caller's role against the VIEW (a fixed list: most pages Reader; the audit trail Admin plus the Pro evidence licence,
 like the audit CSV export; backups and the environment report Admin; the role mapping SuperAdmin; an unknown view is
-refused), caps the export at 50,000 rows (the file says when it was cut), names the environment by the hide-names
-setting below, records `export.<format>` in the audit trail (view, format, row count, whether it was cut -- never the
+refused), caps the export at 50,000 rows (the file says when it was cut), names the environment (see
+below), records `export.<format>` in the audit trail (view, format, row count, whether it was cut -- never the
 content) and returns the file. Excel is written with .NET packaging only: a zip with the content types, the workbook,
 styles and one worksheet per section (inline strings, a bold header row that is frozen and filtered, numbers as numbers,
 XML-escaped text, worksheet names made legal and unique). PDF uses the PDF library and font bundled in the image for the
@@ -9125,13 +9738,11 @@ as-built document, through the as-built loader (one font resolver per process): 
 header row repeated on every page, title, environment, time and version on the page and in the footer. An image without
 the library answers 409 with the reason, and the page disables the PDF item with that reason as its tooltip.
 
-**Hidden company and environment name.** Setting `HideCompanyAndEnvironmentName`, ON by default (only an explicit off
-shows the names; a missing or unreadable value hides them). While on, the Dashboard and the Counters overview show
-"PIM Manager" in place of the tenant name and the environment name, hide the tenant id and the instance switcher, and
-the browser tab reads "PIM Manager"; other pages are unchanged. Every export names the environment as "PIM Manager"
-while it is on, else "<environment name> (<tenant name>)". SuperAdmin changes it in Settings > Naming & accounts or
-with the toggle on the Dashboard / Counters overview (one environment-wide setting, audited); other roles see the
-toggle read-only.
+**Company and environment name are always shown.** The earlier option to hide them on the Dashboard and the Counters
+overview is retired: there is no setting, no Settings card and no toggle. Every page shows the tenant name, the
+environment name and the tenant id, and every export names the environment as "<environment name> (<tenant name>)".
+A value stored by an earlier version is kept in the store and read by nothing; a request to change it is refused
+(410). The environment name itself is still typed by a SuperAdmin in Settings > Naming & accounts.
 
 **Impact counters.** `GET /api/impact` (every signed-in role; counts only) computes, from data PIM already stores:
 activations handled (a ledger `pim.ImpactActivations` the active-assignments snapshot job fills -- every time-bound
@@ -9998,6 +10609,7 @@ idempotent: one read says the user is there with the role, and nothing is sent.
 |---|---|
 | A new installation with a Support app named | The support-access step of the install (`Grant-PimSupportAccess.ps1`), at every level, while the install can still reach the database. The step's text says the standing right in plain words. With no Support app named, nothing is created and the install says so in one line. |
 | An installation made before that | The one-time script `Grant-PimSupportSqlAccess.ps1` (published, two lines to run it), once per installation. |
+| An installation whose database is private (public network access off) | `Invoke-PimSupportSqlAccessJob.ps1` (published, two lines to run it; the customer runs it): a one-time job inside the installation's own environment creates the user. See "From inside" below. |
 | The nightly updater | Nothing. The updater's own database right does not include creating users or giving the owner role, and no setting in the store names a Support app -- and a setting that could give an application the owner role would be a way to raise one's own rights. |
 
 **The one-time script, step by step.** (1) It reads and keeps the SQL server's Entra administrator and the
@@ -10016,6 +10628,45 @@ does not read back as it was, the script ends with its own exit code and prints 
 (7) In a Support session it then signs in to the database again as the Support app: that is the proof. In a
 person's session it says the sign-in "was not checked", and why. `-WhatIf` reads and prints the plan and
 connects to no database.
+
+**From inside: a private database.** A database with public network access off has no route from a setup
+machine, and none is made for this: no firewall rule, no public access, no jump host. The script
+`Invoke-PimSupportSqlAccessJob.ps1` runs the grant where the route already is -- inside the installation's
+own network -- and the customer starts it (parameters on the command line, browser sign-in, no Azure CLI and
+no PowerShell module).
+
+* **Which identity.** An installation with a private database already has one identity that may create a
+  database user from inside: the user-assigned identity its database setup job signs in with (the server's
+  administrator, or a member of the SQL admin group). The one-time job is given *that* identity, and the
+  identity the setup job pulls its image with, and nothing else. No role, no group membership and no
+  permission is given to any identity. The script reads the identity off the setup job itself and prints its
+  name. When the installation has no such job, when the job does not name a user-assigned identity, or when
+  its image is pulled with the job's own system identity or with a password, the script stops before any
+  change and prints the options -- it never attaches an identity the installation's own job does not carry,
+  and it copies no secret.
+* **What the job runs.** Not a second implementation: the job's script is built, at run time, from the same
+  functions the one-time script above uses (the id as a SID, the statement, the read, the read-back), so the
+  two cannot drift apart. It is handed to the container as its start command, so it needs nothing from the
+  image but the token client and the SQL client -- an installation on an older version works. The job is told
+  five things: the server, the database, the Support app's id, the user name and which identity to sign in as.
+* **The run.** (1) Read the setup job and plan the one-time job; read whether a job of the one-time name
+  exists (a leftover that carries this script's tag is removed first; a job of that name without the tag is
+  not touched and stops the run); read that the Support app exists in the tenant. (2) Create the job, tagged
+  as a one-time job. (3) Start it once and wait, for a bounded time. (4) Read the execution's result and its
+  log lines. (5) In a `finally` -- so also after a failed job, a job that never ends or a refused request --
+  remove the job and read back that it is gone.
+* **The verdict.** PASS needs the execution to end as succeeded, which the job does only after it read the
+  user and its role back, and no result line that says otherwise. The job writes one result line: created,
+  added to the role, or unchanged. The log reaches the workspace a few minutes late and may not be readable
+  by the person running the script; a missing log is said as a warning and never turns a result around. FAIL
+  prints the job's own reason. A job that could not be removed is a FAIL of its own, with the place to delete
+  it, even when the user is in place.
+* **Run twice.** When the user is there with its role, the job sends one read and no statement. The job
+  itself is created and removed on every run; nothing of it stays.
+* **What it does not do.** It does not add the Support app to the SQL admin group (that is given from outside
+  the network, by the install or the one-time script), it does not touch the installation's own jobs, the SQL
+  server, its firewall or its administrator, and it does not sign in to the database from the machine it
+  runs on.
 
 **Proven, never assumed.** The end-of-install check (30.1) has a line for it. It reads the user by the Support
 app's id and its role from the database. "In place" needs that evidence; when the check itself ran as the
@@ -10038,6 +10689,40 @@ called `PIM-…` that nobody defined keeps its members and its policies, and bre
 store with **no definitions at all** (a new install, or a store that could not be read) makes the engine skip every
 scope; "no rows" never means "remove everything". The v1-parity policy baseline that stamped templates onto every
 matching group was retired for the same reason.
+
+**Three places where that rule is enforced by construction (2026-10-13).**
+
+* **A discovery proposal is a proposal.** Resource discovery has three modes per resource type: *flag* (log only),
+  *pending* and *auto*. In *pending* mode the engine does not write a definition row; it adds one **Create proposal to
+  the review queue** (`Add-PimSqlQueueChangeIfAbsent`: origin *Proposal*, status *pending*, de-duplicated so the daily
+  sweep never stacks the same proposal twice). Nothing is defined — and so nothing in the tenant is treated as PIM
+  Manager's — until a person commits the proposal. If the de-duplicating queue writer is not available, nothing is
+  written at all.
+* **A Defender XDR custom role is changed only when it is PIM Manager's own.** A workload template names a custom role
+  and its permissions. The role is found by name; before its permissions are replaced the engine checks that the role
+  is a custom role carrying the description PIM Manager writes when it creates one (`Test-PimDefenderRoleIsOwn`) — the
+  same test the duplicate clean-up applies before a delete. A role somebody made by hand under that name, or a
+  built-in role, is left exactly as it is and the item fails with the class `DEFENDER-ROLE-NOT-OWN`. A hand-made role
+  whose permissions already match is still bound by name, because binding writes nothing to the role.
+* **One name, two live objects: the engine touches neither.** Groups and administrative units are found by the display
+  name their definition carries, and Entra ID does not keep display names unique. When two live groups (or two
+  administrative units) carry a defined name, the name **resolves to nothing**: the engine then holds no object id for
+  either of them and cannot put owners, policy, members or roles on one of them by chance. The duplicate is counted in
+  what the run already holds (the group and AU lists of the run, and the answer of the one on-demand lookup) — no
+  extra directory call. It is reported in the job log with both object ids, the run remembers the name, and every
+  item that then fails for a row naming it is classified `DUPLICATE-GROUP-NAME` / `DUPLICATE-AU-NAME` instead of
+  "not created yet". Neither copy is part of the set of groups the removal scopes work in. The state heals by itself:
+  once one of the two is renamed or deleted the name resolves again on the next run; nothing has to be acknowledged.
+  **A duplicated name is a doubt, and on a doubt nothing is removed and nothing is written.** The engine's
+  orchestrator applies one filter for every scope, after a provider has read the desired rows and the live state and
+  before anything is compared: live items that belong to *either* object of a duplicated defined name are taken out
+  (they can be neither a removal nor an update), and every desired row or explicit Remove row that names the
+  duplicate is taken out of the plan and reported as a failure item of the class above. Without it the row would no
+  longer match its live assignment, and a prune would have removed that assignment. If the check itself cannot be
+  made, the scope is reported as not checked and applies nothing.
+
+Each of the three classes carries its customer-facing solution in the failure catalog (what is wrong, whether anything
+is affected, the step to take, what happens afterwards), like every other customer-configuration class.
 
 ### 28.2 Staged changes are shared, locked and optionally second-approved
 A change staged in the Manager is written to the store at once, not kept in the browser. Every administrator sees every
@@ -10478,3 +11163,193 @@ being reported as a failed update. If the job cannot sign in to the database, it
 update creates the user, or `Deploy-PimAsBuiltJob.ps1` run once. The updater cannot assign Azure roles; the job's right to write its container and the support custom
 role are reported in the update log and given by `Initialize-PimHostingAccess.ps1`, run once by an Owner of the resource
 group. The guided install can grant Invardia support the `asbuilt` level on its own.
+
+## 31. The list menu on every list view (built 2026-10-13, not released)
+
+Every list of PIM Manager carries the same menu: a toolbar above the table to search, filter, choose and order the
+columns, sort, page and save the set-up under a name. It is **one component that attaches to the tables the pages
+already render** -- no list was rewritten, and no id, class or row of an existing table changes. A layout decides only
+what a person **sees** in a list: a filter hides rows in that list and nowhere else. Nothing is removed from the
+store, from discovery or from what the engine manages, and the toolbar says how many rows the layout hides.
+
+### 31.1 How it attaches
+The component is one marked block at the end of the page script (and one in the style sheet). It watches the page and
+attaches to every table of the open page that has a heading row of at least two heading cells and no merged heading
+cells. A table that the page draws again (most lists do, on every tick) gets the same toolbar back with what was open
+and typed in it. The toolbar is inserted directly before the table; where a list has its own pager, that pager is moved
+up into the toolbar, with its ids and handlers. A table opts out with `data-lm="off"`; a table outside a page panel
+opts in with `data-lm="<key>"`.
+
+Each list has a **key** `<page>:<list>` (the table's id, else its own class, else its first three headings; the
+Advanced View adds the record type). The key names the list in a saved layout. A column is known by its heading, so a
+layout survives a column that is added later; a heading that is renamed is a new column to an older layout.
+
+### 31.2 The toolbar
+Left: **Search every text column**, **Filters**, **Columns**, **Layout**, "N selected" and the selection help.
+Right: "N row(s) · a-b" (and "N hidden by this layout"), **Per page** (All, 25, 50, 100, 200) and the pager. The
+toolbar is sticky at the top of the list while it scrolls; a list's own sticky heading row sits under it, and a list's
+own sticky action bar stays above it.
+
+* **Filters.** Conditions on a column's text -- *contains*, *does not contain*, *is*, *starts with* -- on one column
+  or on "Any column"; several conditions must all match. For a column with few different values (at most 30) there is
+  "show only these values": each value with the number of rows it gives under the other filters. The value a filter
+  compares is the cell's text; the count is a label of its own. There is no number minimum / maximum filter. A cell is
+  read as a person reads it: a field's value, a dropdown's chosen option, never the words on a button. Every active
+  filter is a chip that removes it; "Clear all" removes them together.
+* **Columns.** Every named column of the list can be hidden and shown again, and moved left or right ("Find a column"
+  narrows the list of columns). Columns without a heading -- the selection box, a row's action buttons -- and the
+  **Actions** column keep their place and cannot be hidden: a person who hid the actions would lose every action and
+  not know why. "Show every column" gives the standard order back.
+* **Sort.** A click on a heading sorts ascending, a second click descending, a third gives the list's own order back;
+  numbers sort as numbers, dates as dates, empty cells last. A list that already sorts with its own headings (the
+  Advanced View, Review current delegations) keeps that; its sort is not part of a layout.
+* **Per page** pages a list in the browser. The default is all rows, as before.
+
+### 31.3 Layouts: personal and shared
+A layout is the columns and their order, the hidden columns, the sort, the filters, the search text and the page size
+of one list. It never holds a page number or a selection.
+
+* **Your layouts** -- every signed-in person saves their own ("Save as a layout"), whatever their role.
+* **For everyone** -- only a SuperAdmin saves, changes, publishes or deletes one ("Save as a layout for everyone",
+  "Publish for everyone") and marks one as the **tenant default** of a list ("Save as the tenant default"). The check
+  is on the server: anyone else is refused with the reason, and the page shows that sentence.
+* **Reset to the tenant default** returns a list to the default layout, or to its standard columns when there is none.
+
+Named layouts are stored in the SQL store through the Manager's settings path -- one setting for the shared layouts,
+one per person for the personal ones (the setting's name carries a hash of the person's sign-in name, and the name is
+checked inside the value on every read). `GET /api/list-layouts` answers the shared layouts and the caller's own, never
+another person's; `PUT` / `DELETE /api/list-layouts` and `PUT /api/list-layouts/default` change them. The server
+checks every layout field by field and stores only what it checked; anything that is not exactly a layout is refused.
+A store that cannot be read is never written over. A change to a shared layout is in the audit trail. Limits: 30
+layouts per list and person, 20 filters and 50 values per layout, a name of at most 80 characters.
+
+A person's **last set-up** of each list (not a named layout) is kept in the browser and comes back the next time.
+Remembered filters, sort and search are applied only when the page is opened **from the menu**; opened from a link,
+the list shows every row and offers "Apply them", so a link that points at a list shows what it says. A list a person
+never set up opens with the tenant default.
+
+### 31.4 Selection
+In a list with row checkboxes: **Shift + click** selects every row between the last ticked row and this one, in the
+order the list shows (after its filter and sort); **Ctrl + click** on a row adds or removes that one row. Both go
+through the list's own checkboxes, so the list hears each tick as if the person had made it.
+
+**A selected row that the layout hides is taken out of the selection**, again through its own checkbox, and the toolbar
+says how many were taken out. While a row is hidden its selection box is switched off, so the list's own "select all"
+cannot tick it. A bulk action of a list therefore works on exactly the selected rows that are visible --
+the list's own selection holds nothing else. If a list does not let a hidden row be unticked, the toolbar says so and
+asks for the selection or the filter to be cleared first. Only a checkbox that is a selection is ever clicked (the
+column under the "select all" box, or a heading-less column of selection boxes) -- never a checkbox that is a setting
+of the row.
+
+### 31.5 Lists read from the server page by page
+Two lists are read page by page from the server -- Review current delegations (when its rows are stored as a table)
+and Audit. A filter that worked on the page shown would not be a filter on the list, so for these two the toolbar
+filters nothing itself: its conditions, its search and (Audit) its sort travel with the list's own request as one
+parameter, `lm`, and **the server applies them over the whole list before it pages**. The answer carries the number of
+matching rows of the whole list; the toolbar shows that number ("N row(s) match in the whole list · n on this page"),
+and the list's own pager -- moved up into the toolbar -- pages the filtered list. A request without `lm` is answered
+exactly as before.
+
+* **The parameter is checked before it is used**, and again where it is applied: a column is one of a closed list per
+  list (current delegations: principal, role, scope, type, justification; audit: when, actor, category, action, target,
+  result, change; or `*` for every text column), an operator is one of the five, a value is a text of at most 200
+  characters, at most 10 conditions. Anything else is refused with `400` and the reason -- never repaired, never
+  ignored, and never answered as if there were no filter.
+* **A value is only ever text.** For current delegations the conditions are part of the SQL statement that counts and
+  pages: the column expression comes from a closed list in the code, the comparison is one of five fixed forms, and
+  every value is a SQL parameter (`%`, `_` and `[` in a value are literal). For Audit the list is filtered and sorted
+  in memory, after the page's own filters and before the count and the page.
+* **What the toolbar does not offer there**: "Show only these values" (the values and counts of one page are not the
+  list's -- it says so), its own "Per page", and a condition on a column the server cannot filter on (Activated and
+  Expires of current delegations). A layout that holds such a condition shows, in red, that it is not applied.
+  Current delegations keeps its own heading sort, which already runs in SQL.
+* When the server answers the whole list (current delegations stored as one document, or a person with a delegated
+  scope), every row is in the browser, and the toolbar filters them all there, with value counts, as on any other list.
+
+### 31.5a Lists that are not a table
+Four lists are drawn as rows or cards, not as a table: **Delegation overview** (the live assignments of the selected
+person, group or role), **Approvals**, **Validate** and the row-level diff of **Pending changes**. They have the same
+toolbar, placed before the rows: search, conditions (with "does not contain"), sort (a "Sort" box, since there is no
+heading to click), Per page, layouts, and -- where the rows have selection boxes -- Shift + click and Ctrl + click
+through those boxes. What a "column" is, is declared per list: Validate has Severity, Code, Message, Suggestion and
+Where; the diff has Change (add / remove / modify); Delegation overview and Approvals are one entry per row, searched,
+filtered and sorted on their text. None of the four has columns to hide or move, and the toolbar says so (the Columns
+button is off, with the reason). Section titles between rows stay where they are: rows are sorted inside their own
+section. Every button of a row and of the list keeps working -- nothing of a row is rebuilt.
+
+These four are **review lists**: what waits for approval, what is wrong, what a commit will change, what a person
+holds. A filter or search there is for the visit only -- it is not remembered and does not come from a tenant default,
+so a review list never opens with rows already hidden. Its sort and page size are remembered.
+
+### 31.6 Which lists have it
+The inventory below is by page. Attachment is by the rule of 31.1, so a table added to one of these pages later has
+the menu without further work. Attached (every table of the page that fits 31.1):
+
+| Page | Lists |
+|---|---|
+| Admin accounts | the accounts table; the Temporary Access Pass table |
+| Advanced View | the rows of the chosen record type (one layout per record type) |
+| Pending changes / queue | the queue; recent commits; the row-level diff (rows, 31.5a) |
+| Review current delegations | the table of current assignments (filtered by the server when it is read page by page, 31.5) |
+| Delegation overview | the live assignments of the selection (rows, 31.5a); the groups and their state (table) |
+| Approvals, Validate | the requests; the findings (rows, 31.5a) |
+| Discovery & gaps | the report, its proposal lists, the target check |
+| Drift | the areas, each area's items, the ignored items |
+| Jobs, Engine logs, Job schedule | each table |
+| Audit | the events (filtered and sorted by the server, 31.5) |
+| Guards | the guards, the releases |
+| Access reviews, Access requests, My people | the rules, the campaigns, the evidence, the requests, the people and their extensions |
+| Commit history, Configuration backups | the commits and the backups, and the tables the page shows under one of them |
+| Departments, External companies, Import administrators | each table |
+| Manager access & roles, Emergency access, Mail templates | each table |
+| Workload templates, Custom workloads, Policy templates | each table |
+| Role Lookup, Reports | the result tables |
+| Tenant Baseline, MSP downlink, Managed tenants, Replication overview | each table |
+| Support | the ticket list |
+
+Not attached:
+
+| What | Why |
+|---|---|
+| Settings | its tables are forms that edit settings, not lists to browse |
+| Create, Get Started, Client onboarding, Onboarding, Free vs Pro, Home, Counters overview, Delegation Map, Environment report | wizards, tiles, a graph and a document -- no list view |
+| The boxes of the Delegation overview graph | a graph with its own column filters, not a list |
+| Tables in a dialog, in an exported or printed document, key / value tables | not a list view of a page |
+| A table whose heading cells are merged | the columns cannot be told apart |
+### 30.9 The design configurator pack: a short sales designer and the full technical one
+The design configurator is a content pack: the questionnaire (`questions.json`), the rules that turn answers into a
+design document and a deck, the drawings, three sample answer sets and a reference renderer. Invardia's site shows the
+form and renders the outputs; PIM Manager owns the questions. Since pack 1.3.0 the same pack serves two designers.
+
+* **The technical designer** (customer portal) asks every section: all 86 questions.
+* **The sales designer** (public, a wizard) asks 15 of them on four pages. The pages are data in the pack, the top-level
+  field `salesWizard` of `questions.json`: a list of `{ title, why, questions }`, the ids in the order asked. An id the
+  pack does not have is skipped.
+
+| Page | Questions |
+|---|---|
+| Your organisation | organisation name, short name, edition, tenancy |
+| Public or private | network exposure, the admins' path to a private GUI, network placement, Azure region (and its name when it is another region) |
+| What it governs | workloads, Azure write access, where the hybrid worker runs |
+| Features | access reviews, the access request portal, the PIM Activator browser extension |
+
+**The rule the 15 are chosen by.** Only what decides the architecture and what the product covers: public or private,
+where it runs, one tenant or several, the workloads, the edition and the features that add a part to the design. No
+question about how admins are organised (break-glass accounts, SuperAdmins, the naming prefix, the second approver) is
+asked there; the whole "Admin model" section is left to the technical designer. Ten questions are asked of every
+visitor; five appear only when an earlier answer makes them relevant (a private design, another region, Azure roles,
+on-premises AD), and the question that decides each of them is asked before it.
+
+**Sample values.** Every question the sales designer does not ask takes its value from one sample design, named by
+`sampleValuesFrom` (the single-tenant, public sample). That sample holds a value for every question of the pack, so a
+visitor who chooses a private or a multi-tenant design still gets a complete document. A question keeps its conditions
+and its edition gating: a sample value that needs a Pro edition falls back to the question's default on Community.
+
+**The document says what is sample.** The answer set names the questions whose value came from the sample
+(`sampleValues`: the sample's name and the ids). The design document then prints one paragraph under its header naming
+the sections that use sample values, and the answer appendix marks each such answer "(sample value)". A document made
+with the technical designer carries no such paragraph.
+
+Pack versions are semantic and kept equal in four places (the README header, the questionnaire, the mapping and the
+cost model); every file of a pack is listed with its SHA-256 in `SHA256SUMS`. An older pack is kept unchanged beside
+the current one.

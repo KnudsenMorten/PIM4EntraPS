@@ -305,8 +305,8 @@ function Test-PimPortalCanManageGroup {
     #
     # NETWORK GATE: tier-0 management requires the PAW zone -- BUT super-admins are
     # NOT zone-locked by default (break-glass safety; a misdetected/blank zone must
-    # never lock a super-admin out of tier 0). Set $Tier0RequiresPawForSuperAdmin
-    # (or $global:PIM_Tier0RequiresPawForSuperAdmin) to ALSO gate super-admins.
+    # never lock a super-admin out of tier 0). The policy setting PawEnforcementForSuperAdmin
+    # (or the -EnforcePawForSuperAdmin parameter) ALSO gates super-admins; default off.
     # Regular portal-admins are always zone-gated for tier 0 when a zone is given.
     param(
         [AllowNull()][object]$Profile, [Parameter(Mandatory)][hashtable]$Facets,
