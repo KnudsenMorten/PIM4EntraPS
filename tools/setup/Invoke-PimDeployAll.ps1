@@ -2780,6 +2780,7 @@ function Invoke-DefaultStepRunner {
             if ($LicenceExpected -or "$UpdateSource".Trim() -eq 'Invardia' -or $script:PimEnrollResult) { $cvArgs['LicenceExpected'] = $true }
             if ("$script:PimMailDeferredReason".Trim()) { $cvArgs['MailDeferredReason'] = "$script:PimMailDeferredReason" }
             if ($EngineAzureRootUserAccessAdmin) { $cvArgs['EngineAzureRootUserAccessAdmin'] = $true }
+            if ("$SupportAppId".Trim()) { $cvArgs['SupportAppId'] = "$SupportAppId".Trim() }   # PIM 100.116: the 'support-sql' line
             $w = $script:PimSetupHostWindow
             if ($KeepSetupHostRule) { $cvArgs['SetupHostRuleOwner'] = 'caller' }
             elseif (-not $w -or -not $w.plan -or ("$($w.plan.reason)" -like 'not applicable*')) { $cvArgs['SetupHostRuleOwner'] = 'none' }

@@ -61,7 +61,9 @@
   sign-in app and its members group, the SQL admin group grp-pim-sql-admins. It grants: Microsoft Graph application
   permissions to the engine job identity (the engine set) and the Manager identity (a read-only set); AcrPull, Reader,
   Contributor (updater, on the resource group) and Reader at the tenant root to the engine; SQL database roles
-  (db_datareader, db_datawriter, db_ddladmin) to the identities; the Invardia Support app's access when named.
+  (db_datareader, db_datawriter, db_ddladmin) to the identities; the Invardia Support app's access when named -- at
+  every level that includes its standing access to the PIM database (member of the SQL admin group, its own database
+  user with db_owner), which stays until you switch the Support app off.
   Logs: a transcript of the run in the temp folder (pim-manager-logs); its path is printed.
 
 .LINK
@@ -541,7 +543,7 @@ if ($WhatIfPreference) {
         catch { Write-Host "    the deploy plan could not be read: $($_.Exception.Message)" -ForegroundColor Yellow }
         Write-Host "  What if: register the $($cfg.edition) licence in the PIM database (pim.Settings License + the install key; Set-PimLicense.ps1)" -ForegroundColor Yellow
         if ("$($cfg.supportAppId)".Trim()) {
-            Write-Host "  What if: give the Invardia Support app $($cfg.supportAppId) '$($cfg.supportAccess)' access (Grant-PimSupportAccess.ps1: at 'asbuilt' ONLY start the as-built job + read its PDF container; at 'troubleshoot' also a contained SQL user with db_datareader + VIEW DEFINITION; at 'setup' also membership of the SQL admin group and ownership of PIM's own app registrations and groups)" -ForegroundColor Yellow
+            Write-Host "  What if: give the Invardia Support app $($cfg.supportAppId) '$($cfg.supportAccess)' access (Grant-PimSupportAccess.ps1: at 'asbuilt' ONLY start the as-built job + read its PDF container; at 'troubleshoot' also a contained SQL user with db_datareader + VIEW DEFINITION; at 'setup' also ownership of PIM's own app registrations and groups; at EVERY level its standing access to the PIM database: membership of the SQL admin group and its own database user with the database owner role, which stays after the installation until you switch the Support app off)" -ForegroundColor Yellow
         }
         Write-Host '  What if: run the end-of-install check (Confirm-PimInstall.ps1). It REPAIRS what it can, so it is not run under -WhatIf -- run without -WhatIf to apply.' -ForegroundColor Yellow
     }
@@ -686,7 +688,11 @@ else {
     else { Emit 'licence' 'failed' 'the licence could not be stored in the PIM database' 'Fix the cause above, then resume the installation:' $resumeCmd; Finish 1 }
 }
 
-if (-not "$($cfg.supportAppId)".Trim()) { Emit 'support-app-access' 'skipped' 'no Invardia Support app was named' }
+# PIM REQUIREMENTS 100.116 (framework 4.1b): a named Support app also gets its STANDING database access here -- member of
+# the SQL admin group + its own database user (from its client id) in db_owner -- while this install can still reach the
+# database (the setup firewall rule is closed by the check below). Grant-PimSupportAccess does it at every level; the
+# check's line 'support-sql' then proves it. No Support app named: nothing is created, and this one line says so.
+if (-not "$($cfg.supportAppId)".Trim()) { Emit 'support-app-access' 'skipped' 'no Invardia Support app was named -- no support access and no database user for Invardia support were created' }
 elseif ($done.Contains('support-app-access')) { Emit 'support-app-access' 'skipped' 'already granted (resume)' }
 else {
     Emit 'support-app-access' 'started'
@@ -694,7 +700,7 @@ else {
     if (-not $GrantSupport) { $GrantSupport = { param([hashtable]$A) & (Join-Path $here 'Grant-PimSupportAccess.ps1') @A | Out-Host; @{ ok = (-not $LASTEXITCODE) } } }
     $gr = $null
     try { $gr = & $GrantSupport @{ AppId = $cfg.supportAppId; Level = $cfg.supportAccess; TenantId = $cfg.tenantId; SubscriptionId = $cfg.subscriptionId; ResourceGroup = $names.resourceGroup; SqlServer = $names.sqlFqdn } } catch { $gr = $null }
-    if ($gr -and $gr.ok) { Emit 'support-app-access' 'ok' "the Invardia Support app has '$($cfg.supportAccess)' access"; Mark 'support-app-access' }
+    if ($gr -and $gr.ok) { Emit 'support-app-access' 'ok' "the Invardia Support app has '$($cfg.supportAccess)' access, and standing access to the PIM database: it is a member of the SQL admin group and has its own database user with the database owner role. This stays after the installation; you end it by switching the Invardia Support app off in Microsoft Entra ID"; Mark 'support-app-access' }
     else { Emit 'support-app-access' 'warning' 'the Invardia Support app could not be given its access with your rights' 'Ask a Privileged Role Administrator to run:' $grantCmd }
 }
 
@@ -715,6 +721,7 @@ if ($deployArgs.Contains('UpdateRing')) { $vArgs['UpdateRing'] = [int]$deployArg
 if ($deployArgs.Contains('UpdateSource')) { $vArgs['UpdateSource'] = "$($deployArgs['UpdateSource'])" }
 if ($cfg.engineAzureRootUserAccessAdmin) { $vArgs['EngineAzureRootUserAccessAdmin'] = $true }
 if ($mailEv) { $vArgs['MailDeferredReason'] = "$($mailEv.message)" }
+if ("$($cfg.supportAppId)".Trim()) { $vArgs['SupportAppId'] = "$($cfg.supportAppId)".Trim() }   # 100.116: the 'support-sql' line
 # REQ 98.4 (b): the rule this install opened is closed BY the check (after its store reads; removed and read back), so its
 # 'SQL setup host rule' line is a fact and never fails for this install's own window. Without a record the check only reads.
 if ($pimInstallMem.hostRule) { $vArgs['CloseSetupHostRule'] = $true }

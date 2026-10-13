@@ -30,7 +30,12 @@
                           result = ok; not run yet = WARNING "first report due within 60 min"; failing / anonymous on a
                           licensed install = WARNING with the reason; never a stop (PIM 100.75)
       easyauth            Easy Auth is on and every SuperAdmin may sign in
-      sql-host-rule       no 'AllowSetupHost' SQL firewall rule is left                                      REPAIRS when this run owns it
+      support-sql         the Invardia Support app's standing database access (PIM 100.116): "in place" only on evidence --
+                          a database user with the Support app's id in db_owner, read from the database (and, when this
+                          check runs AS the Support app, that read is its own database sign-in); otherwise a WARNING
+                          "could not be checked" / "NOT in place" with the one-time script; "not checked" when no
+                          Support app was named. Never a stop.
+      sql-host-rule      no 'AllowSetupHost' SQL firewall rule is left                                      REPAIRS when this run owns it
       managed tenant only: registered on the managing tenant, its pull subnet allowed, the first pull OK
                           (WARNING with the exact step when the managing tenant cannot be read from here)
                           -EnrollmentWait (an ENROLLED managed tenant, PIM 100.74): a subnet not allowed yet and a first pull
@@ -81,6 +86,9 @@ param(
     [string]$ClosingStep = 'sqlhostclose',
     [switch]$CloseSetupHostRule,
     [switch]$EngineAzureRootUserAccessAdmin,
+    # PIM 100.116 (framework 4.1b): the Invardia Support app's application (client) id, when the install named one -- the
+    # line 'support-sql' then proves its standing database access (its own database user, by that id, in db_owner)
+    [ValidatePattern('^$|^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$SupportAppId = '',
     # managed tenant: where the managing tenant is, for the lines it can read from here
     [string]$MasterSubscriptionId,
     [string]$MasterStorageAccount,
@@ -112,6 +120,8 @@ $here = $PSScriptRoot
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-TenantSizing.ps1')
 # SCRIPT-DOC-1 (framework 12.7): every fix command this check prints carries the script's doc page + the checksum check
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+# PIM 100.116: the Support app's standing database access -- the read (by SID) and the fix command, pure
+. (Join-Path $PSScriptRoot '_PimSupportSqlAccess.ps1')
 # 🔴 The store: Connect-PimSetupStore + its token provider (PIM-Rest: Get-PimRestToken) + the reads (PIM-SqlStore:
 # Get-PimSqlSetting / Invoke-PimSqlScalar) -- loaded HERE, AT FILE SCOPE. The live proof on a managing tenant
 # (2026-10-08, the check run ON ITS OWN through the Invardia Support app) failed every store line twice over, and both
@@ -413,6 +423,30 @@ function Get-CvFact([string]$Id) {
                 $v = Test-PimEasyAuthSignInAllowed -Enabled $true -AssignmentRequired ([bool]$sp.appRoleAssignmentRequired) -AssignedPrincipalIds $assigned -SuperAdmins $sa
                 return @{ readable = $true; ok = $v.ok; reason = $v.reason; appName = "$($sp.displayName)" }
             }
+            'support-sql' {
+                # PIM 100.116 (framework 4.1b item 3). Evidence 1: a database user with the Support app's id (the client id
+                # as a SID), in the role -- read from the database. Evidence 2, where this run has it: the read itself was a
+                # database sign-in AS the Support app (the SQL token's application id is the Support app's).
+                if (-not "$SupportAppId".Trim()) { return @{ readable = $true; notApplicable = $true; reason = 'not checked: no Invardia Support app was named to this check (no support access was asked for, or -SupportAppId was not passed)' } }
+                $supRole = Get-PimSupportSqlRoleName
+                $supQ = Get-PimSupportSqlUserReadSql -AppId $SupportAppId -Role $supRole
+                $supRaw = if ($StoreRead) { & $StoreRead 'scalar' $supQ } else { Invoke-CvStoreRead { param($cs) Invoke-PimSqlScalar -ConnectionString $cs -Sql $supQ } }
+                $supSt = ConvertFrom-PimSupportSqlUserRead $supRaw
+                $asSup = $null
+                if (-not $StoreRead) {
+                    try {
+                        $supTok = Get-CvToken 'https://database.windows.net'
+                        if ($supTok -and (Get-Command ConvertFrom-PimJwtClaims -ErrorAction SilentlyContinue)) {
+                            $supClaims = ConvertFrom-PimJwtClaims -Token $supTok
+                            $supTokApp = "$(if ($supClaims.appid) { $supClaims.appid } else { $supClaims.azp })".Trim()
+                            $supIsUser = [bool]"$(if ($supClaims.upn) { $supClaims.upn } else { $supClaims.unique_name })".Trim()
+                            $asSup = ((-not $supIsUser) -and $supTokApp -ieq "$SupportAppId".Trim())
+                        }
+                    } catch { $asSup = $null }
+                    $supTok = $null
+                }
+                return @{ readable = $true; userName = "$($supSt.userName)"; inRole = [bool]$supSt.inRole; role = $supRole; signedInAsSupport = $asSup }
+            }
             'sql-host-rule' {
                 if ($SetupHostRuleOwner -eq 'none') { return @{ readable = $true; notApplicable = $true; reason = 'no setup-host window in this install (private store or no host-side SQL)' } }
                 $n = Get-CvArm (Get-CvResId 'Microsoft.Sql/servers' $sqlServer 'firewallRules/AllowSetupHost' $sqlRg) 'sql'
@@ -531,6 +565,9 @@ $fix['manager-rg-reader'] = "Azure portal > resource group $ResourceGroup > Acce
 $fix['easyauth'] = (@("Microsoft Entra admin center > Enterprise applications > the PIM Manager's sign-in application > Users and groups: assign the SuperAdmins (or a group that holds them)", (& $viaResume 'the check')) | Where-Object { $_ }) -join "`n"
 # REQ 98.4 (b): when the rule is THIS install's own (-CloseSetupHostRule) the resume closes it -- the portal is the second way, not the only one
 $fix['sql-host-rule'] = (@($(if ($SetupHostRuleOwner -eq 'this' -and $CloseSetupHostRule) { & $viaResume 'this' }), "Azure portal > SQL server $sqlServer (resource group $sqlRg) > Networking > Firewall rules: delete 'AllowSetupHost'") | Where-Object { $_ }) -join "`n"
+# PIM 100.116: the one-time script (two lines: the download, then the run) -- run by somebody who is a database owner
+# here (a member of the SQL admin group / the server's administrator), or by Invardia support in its Support session
+$fix['support-sql'] = if ("$SupportAppId".Trim()) { (@('Run once (a member of the SQL admin group, or Invardia support in its Support session; -WhatIf shows it first):') + @(Get-PimSupportSqlFixCommand -TenantId $TenantId -SubscriptionId $SubscriptionId -ResourceGroup $sqlRg -SqlServerName $sqlServer -SupportAppId "$SupportAppId".Trim())) -join "`n" } else { '' }
 $fix['msp-registered'] = 'on the managing tenant: Invoke-PimMspBuild.ps1 -Role Master -ConfigPath <its config> -Apply -From register-<n> (with an enrollment key this happens by itself)'
 $fix['msp-subnet'] = "on the managing tenant: add this tenant's pull subnet id as slaves[<n>].subnetResourceId, then Invoke-PimMspBuild.ps1 -Role Master -ConfigPath <its config> -Apply -From network-<n> (with an enrollment key this happens by itself)"
 $fix['msp-first-pull'] = "Azure portal > Container Apps job $DownlinkJobName > Run now (after the managing tenant allows the subnet; it also retries every 5 minutes by itself)"

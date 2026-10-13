@@ -9936,6 +9936,63 @@ principals under app-only auth, so membership is read per type; adding a member 
 returns an "already exist" error, which is success; setting the SQL admin is asynchronous, so the new admin
 is polled for; and the group is never added as a member of itself.
 
+### 27.11 The Invardia Support app's standing database access
+
+When an installation names an Invardia Support app, that application gets a **standing** right on the PIM
+database -- it stays after the installation, until the customer ends it:
+
+* it is a **member of the SQL admin group** (27.10), at every support level, and
+* it has **its own database user** in the PIM database, in the **database owner role**.
+
+**Why a database user as well as the group.** Membership of the admin group has not given an *application* a
+database sign-in on the servers this was measured on: the sign-in was refused with the group in the token. A
+database user of its own works at once. The user is created from the application's **client id** written as
+a SID (the id's bytes), so the database never has to look the application up in the directory.
+
+**Why database owner.** The product's setup and repair scripts create database users for the product's
+identities and add them to fixed database roles, apply the schema and write settings. Adding a member to a
+fixed database role needs the database owner role; no smaller fixed role covers it.
+
+**Found by id, never by name.** One id can exist once in a database, so every statement looks the user up by
+its id: a user the Support app already has under another name is reused and gets the role, and is never
+duplicated. A user of the wanted *name* that belongs to another id is left alone and reported. The statement is
+idempotent: one read says the user is there with the role, and nothing is sent.
+
+**Who gives it.**
+
+| When | What does it |
+|---|---|
+| A new installation with a Support app named | The support-access step of the install (`Grant-PimSupportAccess.ps1`), at every level, while the install can still reach the database. The step's text says the standing right in plain words. With no Support app named, nothing is created and the install says so in one line. |
+| An installation made before that | The one-time script `Grant-PimSupportSqlAccess.ps1` (published, two lines to run it), once per installation. |
+| The nightly updater | Nothing. The updater's own database right does not include creating users or giving the owner role, and no setting in the store names a Support app -- and a setting that could give an application the owner role would be a way to raise one's own rights. |
+
+**The one-time script, step by step.** (1) It reads and keeps the SQL server's Entra administrator and the
+Entra-only setting, and reads the setup firewall rule; it prints them. It stops here, before any change, when
+the server is private, when the firewall rule is already there for another address (another setup may be using
+it), or when the application does not exist in the tenant. (2) It adds the Support app to the SQL admin group;
+a refusal is a warning with the next step. (3) It opens the setup firewall rule for the machine it runs on,
+unless the rule is already there for that address, in which case it uses it and leaves it. (4) It signs in to
+the database. Only when the database refuses **and** the run is the Support app's own session, the Support app
+is made the server's administrator *for the step* -- with the Entra-only setting sent back as it was read -- and
+the script waits, for a bounded time, until a database sign-in answers. A person's session never changes the
+administrator. (5) It creates the user and gives the role, and reads both back. (6) In a `finally` -- so also
+after a failed statement, a refused sign-in or a failed request -- it puts the administrator back exactly as it
+was read and reads it back, then removes the firewall rule it opened and reads that back. If the administrator
+does not read back as it was, the script ends with its own exit code and prints the values to set by hand.
+(7) In a Support session it then signs in to the database again as the Support app: that is the proof. In a
+person's session it says the sign-in "was not checked", and why. `-WhatIf` reads and prints the plan and
+connects to no database.
+
+**Proven, never assumed.** The end-of-install check (30.1) has a line for it. It reads the user by the Support
+app's id and its role from the database. "In place" needs that evidence; when the check itself ran as the
+Support app, its own read is a database sign-in as the Support app and the line says so. A read that failed is
+"could not be checked", never "in place" and never a failed install.
+
+**How the customer ends it.** Switching the Support app off, or deleting it, in Microsoft Entra ID ends the
+access at once. `Grant-PimSupportAccess.ps1 -Remove` drops the user -- by the Support app's id, whatever its
+name -- and takes back the membership. The security review pack lists the right as a standing right of the
+vendor's support identity.
+
 ---
 
 ## 28. Change control, ownership and daily checks (2026-09)
@@ -10240,6 +10297,7 @@ table and does not call the install done while a required line fails.
 | Scheduled jobs on + the tick has run (the scheduler feature switch, the tick's recorded job stamps or its last execution) | no -- a warning with the next step | no |
 | Telemetry to Invardia delivered (the telemetry switch, then what the `uplink` job recorded: identified and clean = ok; no report yet = "telemetry not confirmed yet (first report due within 60 min)"; failing, or anonymous although an install key is stored or expected = a warning with the reason) | no -- telemetry never fails an install | no |
 | Sign-in: Easy Auth on, every SuperAdmin allowed | yes | no |
+| Invardia support: database access (27.11) -- "in place" only when the check read, from the database, a user with the Support app's id in the database owner role; otherwise "could not be checked" or "NOT in place" with the one-time script; "not checked" when no Support app was named | no -- a warning at most, never a stop | no |
 | SQL setup-host firewall rule removed | yes | yes, when this run opened it |
 | Managed tenant: registered, pull subnet allowed, first pull | a warning with the exact step when the managing tenant cannot be read from the managed tenant | no |
 

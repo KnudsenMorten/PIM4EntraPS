@@ -36,6 +36,7 @@ $script:PimInstallVerifyLines = [ordered]@{
     'telemetry'          = 'Telemetry to Invardia delivered'
     'engine-size'        = 'Engine job sized for the tenant'
     'easyauth'           = 'Sign-in (Easy Auth) + SuperAdmins allowed'
+    'support-sql'        = 'Invardia support: database access'
     'sql-host-rule'      = 'SQL setup host rule closed'
     'msp-registered'     = 'Registered on the managing tenant'
     'msp-subnet'         = 'Pull subnet allowed on the managing tenant'
@@ -49,9 +50,11 @@ function Get-PimInstallVerifyNetworkWaitText {
 
 function Get-PimInstallVerifyLineIds {
     <# PURE. The line ids a role checks, in order. Single + Master: the common lines. Slave (managed tenant): + the three MSP lines.
-       PIM 100.75 (HOGYM 2026-10-11): + 'scheduler' and 'telemetry' for EVERY role -- never required (a warning at most). #>
+       PIM 100.75 (HOGYM 2026-10-11): + 'scheduler' and 'telemetry' for EVERY role -- never required (a warning at most).
+       PIM 100.116 (framework 4.1b): + 'support-sql' for EVERY role, BEFORE 'sql-host-rule' (it reads the database, and the
+       rule's own line closes the window) -- never required: "in place" only on evidence, else a warning or "not named". #>
     param([ValidateSet('Single', 'Master', 'Slave')][string]$Role = 'Single')
-    $ids = @('superadmins', 'updater', 'licence', 'mailsender', 'alerting', 'engine-graph', 'engine-root-reader', 'manager-rg-reader', 'engine-first-run', 'scheduler', 'telemetry', 'engine-size', 'easyauth', 'sql-host-rule')
+    $ids = @('superadmins', 'updater', 'licence', 'mailsender', 'alerting', 'engine-graph', 'engine-root-reader', 'manager-rg-reader', 'engine-first-run', 'scheduler', 'telemetry', 'engine-size', 'easyauth', 'support-sql', 'sql-host-rule')
     if ($Role -eq 'Slave') { $ids += @('msp-registered', 'msp-subnet', 'msp-first-pull') }
     return $ids
 }
@@ -357,6 +360,29 @@ function Get-PimInstallVerifyRows {
                 if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'failed' $unread (& $fx $id))); break }
                 if ([bool](Get-PimFactValue $f 'ok')) { $rows.Add((New-PimInstallVerifyRow $id 'ok' "$(Get-PimFactValue $f 'reason')")) }
                 else { $rows.Add((New-PimInstallVerifyRow $id 'failed' "$(Get-PimFactValue $f 'reason')" (& $fx $id))) }
+            }
+            'support-sql' {
+                # PIM 100.116 (framework 4.1b item 3: PROVEN, never assumed). Fact: { notApplicable; reason } when no Support
+                # app was named; else { readable; userName; inRole; role; signedInAsSupport ($true = THIS check's own database
+                # sign-in was the Support app's; $false = the run is somebody else; $null = not known) }.
+                # "in place" ONLY on evidence: a database user with the Support app's id, in the role, read from the
+                # database. Anything else is a WARNING with the reason and the next step -- never ok on no evidence, and
+                # never a failed install (the line is not required).
+                if ($null -eq $f) { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'could not be checked: this check was not told whether an Invardia Support app was named' (& $fx $id) $false)); break }
+                if ([bool](Get-PimFactValue $f 'notApplicable')) { $rows.Add((New-PimInstallVerifyRow $id 'info' "$(Get-PimFactValue $f 'reason')" '' $false)); break }
+                if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "could not be checked: $(if ("$(Get-PimFactValue $f 'error')".Trim()) { "$(Get-PimFactValue $f 'error')".Trim() } else { 'the database could not be read' })" (& $fx $id) $false)); break }
+                $sqlUser = "$(Get-PimFactValue $f 'userName')".Trim(); $sqlRole = "$(Get-PimFactValue $f 'role')".Trim(); if (-not $sqlRole) { $sqlRole = 'db_owner' }
+                if ($sqlUser -and (Get-PimFactValue $f 'inRole') -eq $true) {
+                    $asSup = Get-PimFactValue $f 'signedInAsSupport'
+                    $proof = if ($asSup -eq $true) { 'and this check read it in a database sign-in AS the Support app' }
+                             elseif ($asSup -eq $false) { 'a sign-in as the Support app was not tried (this check ran as another identity)' }
+                             else { 'a sign-in as the Support app was not tried or could not be told from this run' }
+                    $rows.Add((New-PimInstallVerifyRow $id 'ok' "in place: the database user [$sqlUser] has the Support app's id and is in $sqlRole (read from the database); $proof" '' $false))
+                } elseif ($sqlUser) {
+                    $rows.Add((New-PimInstallVerifyRow $id 'warning' "NOT in place: the Support app's database user [$sqlUser] is not in $sqlRole" (& $fx $id) $false))
+                } else {
+                    $rows.Add((New-PimInstallVerifyRow $id 'warning' 'NOT in place: no database user has the Support app''s id' (& $fx $id) $false))
+                }
             }
             'sql-host-rule' {
                 if ([bool](Get-PimFactValue $f 'notApplicable')) { $rows.Add((New-PimInstallVerifyRow $id 'info' "$(Get-PimFactValue $f 'reason')" '' $false)); break }

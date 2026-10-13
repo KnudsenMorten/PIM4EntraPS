@@ -1338,6 +1338,8 @@ function Get-PimMspBuildPlan {
     if ("$($updRing.ring)" -match "^[0-3]$") { $vArgs["UpdateRing"] = [int]$updRing.ring }
     if ("$(& $V 'updater.source')".Trim() -eq 'invardia') { $vArgs['UpdateSource'] = 'Invardia' }
     if ("$(& $V 'acr.agentPoolName')".Trim()) { $vArgs['AcrAgentPoolName'] = "$(& $V 'acr.agentPoolName')".Trim() }
+    # PIM 100.116 (framework 4.1b): the check's 'support-sql' line proves the Support app's standing database access
+    if ("$(& $V 'support.appId')".Trim()) { $vArgs['SupportAppId'] = "$(& $V 'support.appId')".Trim() }
     if ($Role -eq 'Slave') {
         $vArgs['DownlinkJobName'] = $job
         if ($enrolMasterStore -and $enrolMasterStore -notmatch '^\{\{') { $vArgs['MasterStorageAccount'] = $enrolMasterStore }

@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.616 -- 2026-10-13
+
+- Invardia Support keeps its access to the database: when a Support app is named, the install gives it its own database user and adds it to the SQL admin group, the end-of-install check says whether that is in place, and one script (Grant-PimSupportSqlAccess.ps1) gives an existing installation the same
+
 ## 2.4.615 -- 2026-10-13
 
 - Active assignments on a large tenant: the assignments are stored as rows in a table and written in batches, so the snapshot no longer times out, and the list asks for one page at a time with search, filters and sorting done in the database

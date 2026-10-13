@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-  Gives (or with -Remove takes back) the customer's Invardia Support app its access to this PIM Manager installation: troubleshoot = a read-only contained SQL user; setup = member of the SQL admin group and owner of PIM's own app registrations and groups; asbuilt = start the as-built job (caj-pim-asbuilt) and read the PDFs it writes, nothing else (troubleshoot and setup include it). Every change is read back.
+  Gives (or with -Remove takes back) the customer's Invardia Support app its access to this PIM Manager installation: troubleshoot = a read-only contained SQL user; setup = member of the SQL admin group and owner of PIM's own app registrations and groups; asbuilt = start the as-built job (caj-pim-asbuilt) and read the PDFs it writes, nothing else (troubleshoot and setup include it). Every change is read back. Every level also gives the Support app its standing database access: membership of the SQL admin group and its own database user in the database owner role.
 
 .DESCRIPTION
   §95.2 / GUIDED-INSTALL §4.6.
@@ -21,6 +21,13 @@
                 failure is reported and the rest of the access stands. Needs Owner / User Access Administrator (or Role Based
                 Access Control Administrator once the role exists) on the PIM resource group.
   -Remove       takes back every level: the membership, the ownerships, the contained user and the as-built assignments.
+
+  EVERY level (PIM REQUIREMENTS 100.116, framework 4.1b) also gives the Support app its STANDING database access: it is
+  made a member of the SQL admin group, and it gets its own database user -- created from the application's client id,
+  found by that id whatever its name -- in db_owner (database owner: what PIM Manager's setup and repair scripts need to
+  create database users, add them to fixed database roles and apply the schema). It stays until -Remove, or until the
+  customer switches the Support app off in Microsoft Entra ID. With -Level asbuilt it needs -SqlServer (the installer
+  passes it); without a SQL server it is said in one line and nothing is created.
 
   The support app's Azure roles and API permissions are granted by Invardia's New-InvardiaSupportApp.ps1, not here.
   Runs as the signed-in account (PIM-Rest: the Invardia Support app's REST session, else the browser sign-in; no az CLI);
@@ -59,6 +66,7 @@ $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 . (Join-Path $here '_PimSetupShared.ps1')
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+. (Join-Path $PSScriptRoot '_PimSupportSqlAccess.ps1')   # 100.116: the standing database access (the user by SID + db_owner)
 $null = Start-PimScriptRun -Script 'Grant-PimSupportAccess'
 $script:grantRc = 0
 try {
@@ -76,7 +84,9 @@ $abScoped = [bool]("$SubscriptionId".Trim() -and "$ResourceGroup".Trim())
 # A failure is a PROBLEM (exit 1) when the as-built access is the point of the run (-Level asbuilt) or when it is taken back
 # (-Remove); with troubleshoot / setup it is REPORTED and the rest of the access stands.
 $abHard = ($Level -eq 'asbuilt') -or $Remove
-$needRest = (-not $Graph) -or (-not $Sql -and $Level -ne 'asbuilt' -and ("$SqlServer".Trim() -or ("$ResourceGroup".Trim() -and "$SubscriptionId".Trim()))) -or ($abWanted -and $abScoped -and -not $Arm)
+# 100.116: the standing database access is given at EVERY level, so -Level asbuilt reaches the database too when -SqlServer
+# is given (asbuilt never goes looking for the server itself).
+$needRest = (-not $Graph) -or (-not $Sql -and ("$SqlServer".Trim() -or ($Level -ne 'asbuilt' -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim()))) -or ($abWanted -and $abScoped -and -not $Arm)
 if ($needRest -and -not $global:PIM_SetupRestMode -and -not "$($global:PIM_ClientId)".Trim()) {
     if ("$SubscriptionId".Trim()) { [void](Connect-PimSetupRest -SubscriptionId "$SubscriptionId".Trim() -TenantId $TenantId) } else { [void](Connect-PimSetupRest -TenantId $TenantId) }
 }
@@ -98,16 +108,21 @@ if (-not $Graph) {
         Invoke-RestMethod @a
     }.GetNewClosure()
 }
-if ($Level -ne 'asbuilt' -and -not $Sql -and "$SqlServer".Trim()) {
+if (-not $Sql -and "$SqlServer".Trim()) {
     . (Join-Path (Split-Path -Parent (Split-Path -Parent $here)) 'engine\_shared\PIM-SqlStore.ps1')
-    $sTok = ''; try { $sTok = "$(Get-PimRestToken -Resource 'https://database.windows.net' -TenantId $TenantId)".Trim() } catch { $sTok = '' }
-    $cs = "Server=tcp:$SqlServer,1433;Database=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30"
+    $script:gsaSqlToken = ''; try { $script:gsaSqlToken = "$(Get-PimRestToken -Resource 'https://database.windows.net' -TenantId $TenantId)".Trim() } catch { $script:gsaSqlToken = '' }
+    $script:gsaSqlConn = "Server=tcp:$SqlServer,1433;Database=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30"
+    # 100.116 (the defect found): this was a .GetNewClosure() block. A closure runs in its own module scope and cannot see
+    # Resolve-PimSqlClientType, which the line above loads into THIS script's scope (the trap recorded in
+    # engine\_shared\PIM-EngineCore.ps1, 2.4.466) -- so a real run (no -Sql seam) ends in "The term
+    # 'Resolve-PimSqlClientType' is not recognized", the SQL part is reported as not done, and the Support app gets no
+    # database user. Found by reading the code; every test hands in -Sql. A PLAIN scriptblock sees this script's scope.
     $Sql = {
         param([string]$Query)
-        $c = New-Object (Resolve-PimSqlClientType).FullName $cs
-        $c.AccessToken = $sTok; $c.Open()
+        $c = New-Object (Resolve-PimSqlClientType).FullName $script:gsaSqlConn
+        $c.AccessToken = $script:gsaSqlToken; $c.Open()
         try { $cmd = $c.CreateCommand(); $cmd.CommandText = $Query; $cmd.CommandTimeout = 60; return $cmd.ExecuteScalar() } finally { $c.Close() }
-    }.GetNewClosure()
+    }
 }
 
 $problems = New-Object System.Collections.Generic.List[string]
@@ -133,11 +148,14 @@ $objects = @(
     @{ kind = 'groups';       name = $(if ($suffix) { "PIM4EntraPS Manager users$suffix (members, no guests)" } else { 'PIM4EntraPS Manager users (members, no guests)' }); what = 'Manager members group' }
 )
 
-# ---- setup: SQL admin group membership + ownerships (granted only at setup; taken back by -Remove)
-if ($Level -eq 'setup' -or $Remove) {
-    foreach ($o in $objects) {
-        $obj = Find-One $o.kind $o.name
-        if (-not $obj) { Say "($($o.what) '$($o.name)' does not exist here -- nothing to do)" 'DarkGray'; continue }
+# ---- ownerships: granted only at setup. SQL admin group MEMBERSHIP: at every level (100.116 / framework 4.1b: the Support
+# app is a member of the SQL admin group of every install and stays one). Both are taken back by -Remove.
+$ownerLevel = ($Level -eq 'setup' -or $Remove)
+foreach ($o in $objects) {
+    if (-not $ownerLevel -and $o.what -ne 'SQL admin group') { continue }
+    $obj = Find-One $o.kind $o.name
+    if (-not $obj) { Say "($($o.what) '$($o.name)' does not exist here -- nothing to do)" 'DarkGray'; continue }
+    if ($ownerLevel) {
         $owners = Get-Ids "/$($o.kind)/$($obj.id)/owners?`$select=id"
         $isOwner = $owners -contains "$($sp.id)"
         if ($Remove -and $isOwner -and $PSCmdlet.ShouldProcess($o.name, 'remove owner')) {
@@ -146,29 +164,50 @@ if ($Level -eq 'setup' -or $Remove) {
             try { [void](& $Graph 'POST' "/$($o.kind)/$($obj.id)/owners/`$ref" $ref); Say "owner added: $($o.what) '$($o.name)'" 'Green' }
             catch { if ("$_" -match 'already exist') { Say "owner (already): $($o.what) '$($o.name)'" } else { $problems.Add("add owner of '$($o.name)': $($_.Exception.Message)") } }
         } elseif (-not $Remove) { Say "owner (already): $($o.what) '$($o.name)'" }
-        if ($o.what -ne 'SQL admin group') { continue }
-        $members = Get-Ids "/groups/$($obj.id)/members?`$select=id"
-        $isMember = $members -contains "$($sp.id)"
-        if ($Remove -and $isMember -and $PSCmdlet.ShouldProcess($o.name, 'remove member')) {
-            try { [void](& $Graph 'DELETE' "/groups/$($obj.id)/members/$($sp.id)/`$ref" $null); Say "member removed: SQL admin group '$($o.name)'" 'Green' } catch { $problems.Add("remove member of '$($o.name)': $($_.Exception.Message) (a role-assignable group needs Privileged Role Administrator)") }
-        } elseif (-not $Remove -and -not $isMember -and $PSCmdlet.ShouldProcess($o.name, 'add member')) {
-            try { [void](& $Graph 'POST' "/groups/$($obj.id)/members/`$ref" $ref); Say "member added: SQL admin group '$($o.name)' (SQL picks it up with the app's next token)" 'Green' }
-            catch { if ("$_" -match 'already exist') { Say "member (already): SQL admin group '$($o.name)'" } else { $problems.Add("add member to '$($o.name)': $($_.Exception.Message) (a role-assignable group needs Privileged Role Administrator)") } }
-        } elseif (-not $Remove) { Say "member (already): SQL admin group '$($o.name)'" }
+    }
+    if ($o.what -ne 'SQL admin group') { continue }
+    $members = Get-Ids "/groups/$($obj.id)/members?`$select=id"
+    $isMember = $members -contains "$($sp.id)"
+    if ($Remove -and $isMember -and $PSCmdlet.ShouldProcess($o.name, 'remove member')) {
+        try { [void](& $Graph 'DELETE' "/groups/$($obj.id)/members/$($sp.id)/`$ref" $null); Say "member removed: SQL admin group '$($o.name)'" 'Green' } catch { $problems.Add("remove member of '$($o.name)': $($_.Exception.Message) (a role-assignable group needs Privileged Role Administrator)") }
+    } elseif (-not $Remove -and -not $isMember -and $PSCmdlet.ShouldProcess($o.name, 'add member')) {
+        try { [void](& $Graph 'POST' "/groups/$($obj.id)/members/`$ref" $ref); Say "member added: SQL admin group '$($o.name)' (it stays a member; SQL picks it up with the app's next token)" 'Green' }
+        catch { if ("$_" -match 'already exist') { Say "member (already): SQL admin group '$($o.name)'" } else { $problems.Add("add member to '$($o.name)': $($_.Exception.Message) (a role-assignable group needs Privileged Role Administrator)") } }
+    } elseif (-not $Remove) { Say "member (already): SQL admin group '$($o.name)'" }
+}
+
+# ---- 100.116 (framework 4.1b): the STANDING database access, at every level -- the Support app's own database user,
+# looked up BY ITS ID (the client id as a SID, never by name, never FROM EXTERNAL PROVIDER), in the database owner role.
+# Why a user and not only the group: membership alone has not given an APPLICATION a database sign-in on the servers this
+# was measured on. Why db_owner: PIM's setup scripts add identities to fixed database roles, which needs db_owner.
+if (-not $Remove) {
+    $stRole = Get-PimSupportSqlRoleName
+    if (-not $Sql) {
+        Write-Host '  standing database access NOT set: no -SqlServer given -- no database user was created for the Support app' -ForegroundColor Yellow
+    } elseif ($PSCmdlet.ShouldProcess("$SqlServer/$SqlDatabase", "standing database access: the Support app's own database user (from its client id) in $stRole")) {
+        $st = Invoke-PimSupportSqlUser -Sql $Sql -AppId $AppId -DbUserName $DbUserName -Role $stRole
+        if ($st.ok) {
+            Say "standing database access: database user [$($st.userName)] ($(if ($st.created) { 'created from the client id' } else { 'already there' })) is in $stRole (read back). It ends when the Support app is switched off in Microsoft Entra ID, or with -Remove." 'Green'
+            # a user of the Support app that already exists under another name is the one every later statement uses
+            if ("$($st.userName)".Trim()) { $DbUserName = "$($st.userName)" }
+        } else { $problems.Add("standing database access: $($st.problem) (the signed-in account must be a member of '$SqlAdminGroupName' or the server's Entra admin)") }
     }
 }
 
-# ---- troubleshoot: a read-only contained user from the app's SID (and dropped by -Remove)
+# ---- troubleshoot: read access + VIEW DEFINITION on the same user (and the user is dropped by -Remove)
 if (($Level -eq 'troubleshoot' -or $Remove) -and $Sql) {
     $u = $DbUserName.Replace(']', ']]')
     try {
         if ($Remove) {
             if ($PSCmdlet.ShouldProcess("$SqlServer/$SqlDatabase", "DROP USER [$DbUserName]")) {
+                # the user of the Support app's id whatever its name (100.116), then the one of this name
+                [void](& $Sql (Get-PimSupportSqlUserDropSql -AppId $AppId))
                 [void](& $Sql "IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$($DbUserName.Replace("'", "''"))') DROP USER [$u];")
                 Say "SQL user [$DbUserName] removed" 'Green'
             }
         } elseif ($PSCmdlet.ShouldProcess("$SqlServer/$SqlDatabase", "contained user [$DbUserName] (db_datareader + VIEW DEFINITION)")) {
-            $t = Get-PimSqlContainedUserSql -DbUserName $DbUserName -AppId $AppId -Roles @('db_datareader') -RevokeRoles @('db_datawriter', 'db_ddladmin', 'db_owner')
+            # 100.116: db_owner is no longer taken back here -- it is the standing right given above
+            $t = Get-PimSqlContainedUserSql -DbUserName $DbUserName -AppId $AppId -Roles @('db_datareader') -RevokeRoles @('db_datawriter', 'db_ddladmin')
             [void](& $Sql ($t + "`nGRANT VIEW DEFINITION TO [$u];"))
             $back = & $Sql "SELECT COUNT(*) FROM sys.database_role_members m JOIN sys.database_principals r ON r.principal_id = m.role_principal_id JOIN sys.database_principals p ON p.principal_id = m.member_principal_id WHERE r.name = N'db_datareader' AND p.name = N'$($DbUserName.Replace("'", "''"))'"
             if ([int]"$back" -ge 1) { Say "SQL user [$DbUserName]: db_datareader + VIEW DEFINITION (read back)" 'Green' } else { $problems.Add("SQL user [$DbUserName] was not read back in db_datareader") }
