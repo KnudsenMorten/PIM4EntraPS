@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.620 -- 2026-10-13
+
+- Heartbeat counts: usersTotal (all users incl. disabled and guests) and usersDisabled for Invardia's dashboard; the framework uplink client keeps 40 count keys (was 10)
+
 ## 2.4.619 -- 2026-10-13
 
 - Code reviews 2026-10-13: an account delete acts once on the pinned account; deleting and revoking follow scope + level everywhere; a sponsor proposes, someone with permission approves (never self); MSP central admin delete with the managing tenant SuperAdmin approval, one per run; managed-tenant withdrawals held on the Guards page above the customer limit; every hold has a SuperAdmin release; bulk-revoke and admin-delete limits on the Guards page; mails show the environment name, never a bare tenant id
