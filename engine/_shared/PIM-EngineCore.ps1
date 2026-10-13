@@ -36,7 +36,7 @@ if (-not (Get-Command Add-PimDataQualityNote -ErrorAction SilentlyContinue) -and
 if (-not (Get-Command Set-PimManagedKeyConfirmations -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-ManagedKeys.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-ManagedKeys.ps1') }
 # CONFIG-1.1 / 96.1: the applied outcome per row + the per-key commit resolution (BUG-294) read the change journal.
 if (-not (Get-Command Resolve-PimJournalCommitForKey -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-CommitJournal.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-CommitJournal.ps1') }
-# 96.5: the daily reconcile's removal of PIM-managed leftovers (report-only by default) is planned inside the scope pass.
+# 96.5: the daily reconcile's removal of PIM-managed leftovers (ENFORCE by default since 2.4.517; report-only when the setting says report) is planned inside the scope pass.
 if (-not (Get-Command Get-PimReconcileRemovalPlan -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-ReconcileRemoval.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-ReconcileRemoval.ps1') }
 
 # ---- pure diff core (testable, no I/O) ------------------------------------
@@ -609,6 +609,167 @@ function Resolve-PimEngineChangeCommit {
     return $null
 }
 
+# ---- 100.125: a step that uses an object THIS RUN just created ---------------------------------------------------------
+# Measured 2026-10-13 at a customer (2.4.615): the run created a group; 20 seconds later the add of that group to its
+# administrative unit answered "HTTP 404 : Request_ResourceNotFound -- Resource '<the new group id>' does not exist";
+# the item was reported "Unrecognised failure [UNCLASSIFIED]", the run FAILED, a fix request was filed -- and the next
+# run added it. Microsoft Entra serves a new object to its other endpoints only after a short while.
+#
+# THE RULE (one place, for every provider: owners, memberships, administrative units, role assignments, policies):
+#   * the orchestrator remembers the id of every object a Create handler returned (Register-PimNewObjectsFromResult);
+#   * a Create or Update handler that fails with a "not found" answer NAMING such an id is run again after a short wait
+#     -- a few times, within a wait budget per object and per scope (Get-PimNewObjectRetryPolicy);
+#   * what still does not go through is tagged [NEW-OBJECT-NOT-VISIBLE-YET]: a WAITING item of the failure catalog
+#     (transient, applied by the next run, no alert), never UNCLASSIFIED.
+# !! PROVENANCE, NOT THE STATUS CODE, IS THE GATE (the TEST-16 lesson, PIM-EngineProviders.ps1): a "not found" that names
+#    no object this run created is a REAL missing object -- it is never retried and never tagged. A Remove is never
+#    retried. An id the failing handler created ITSELF during the same call is never a reason to run that handler again
+#    (it would create the object twice); it is only tagged.
+# The registry is process-wide (a job run is one process) with an age window, so it also holds between the scopes of a
+# run that do not share one Context.
+function Get-PimNewObjectRetryPolicy {
+    <# PURE. Literals (never a $script: default: the BUG-79-6b trap). delaysSeconds = the wait before attempt 2, 3, 4. #>
+    return [pscustomobject]@{ delaysSeconds = @(5, 10, 15); windowMinutes = 15; perObjectSeconds = 60; perScopeSeconds = 120 }
+}
+
+function Get-PimNewObjectRegistry {
+    <# id (lower case) -> @{ kind; createdUtc; waitedSeconds } for the objects this process created. #>
+    if (-not ($global:PimNewObjectsThisRun -is [hashtable])) { $global:PimNewObjectsThisRun = @{} }
+    return $global:PimNewObjectsThisRun
+}
+
+function Register-PimNewObjectThisRun {
+    <# Remember that THIS run created the object -Id (a GUID; anything else is ignored). The first registration wins. #>
+    param([string]$Id, [string]$Kind = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    $k = "$Id".Trim().ToLowerInvariant()
+    if ($k -notmatch '^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$' -or $k -eq '00000000-0000-0000-0000-000000000000') { return }
+    $reg = Get-PimNewObjectRegistry
+    if (-not $reg.ContainsKey($k)) { $reg[$k] = @{ kind = "$Kind"; createdUtc = $NowUtc.ToUniversalTime(); waitedSeconds = 0 } }
+}
+
+function Set-PimCreatedThisRunMark {
+    <#
+      REVIEW FIXES 2026-10-13. A Create handler says "THIS call created this object" by marking what it returns:
+      pimCreated = $true (a table gets the key, an object the property). Only the branch that really POSTed the new object
+      calls this -- never the "already exists" branch, never a rename in place. Returns nothing; never throws.
+    #>
+    param([AllowNull()][object]$Object)
+    if ($null -eq $Object -or $Object -is [string] -or $Object -is [ValueType]) { return }
+    try {
+        if ($Object -is [System.Collections.IDictionary]) { $Object['pimCreated'] = $true }
+        else { Add-Member -InputObject $Object -NotePropertyName 'pimCreated' -NotePropertyValue $true -Force }
+    } catch { }
+}
+
+function Register-PimNewObjectsFromResult {
+    <#
+      What a Create handler returned: an object that carries an 'id' GUID AND the mark pimCreated = $true (a real boolean;
+      Set-PimCreatedThisRunMark) is an object this run created.
+      REVIEW FIXES 2026-10-13: the mark is required. Every 'id' GUID used to be registered -- but the Create handlers of
+      Groups and AdministrativeUnits also return an object that was ALREADY THERE (the "already exists -- validated,
+      skipped" branch, and a rename in place). A real "not found" for such an object within the window was then shown
+      as waiting (NEW-OBJECT-NOT-VISIBLE-YET) instead of as a failure. No mark = not registered = a "not found" that
+      names it is a real failure (the strict reading).
+    #>
+    param([AllowNull()][object]$Result, [string]$Kind = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    foreach ($o in @($Result)) {
+        if ($null -eq $o -or $o -is [string] -or $o -is [ValueType]) { continue }
+        $id = ''; $made = $false
+        try {
+            if ($o -is [System.Collections.IDictionary]) {
+                if ($o.Contains('id')) { $id = "$($o['id'])" }
+                if ($o.Contains('pimCreated')) { $made = ($o['pimCreated'] -is [bool]) -and [bool]$o['pimCreated'] }
+            } else {
+                $pp = $o.PSObject.Properties['id']; if ($pp) { $id = "$($pp.Value)" }
+                $pc = $o.PSObject.Properties['pimCreated']; if ($pc) { $made = ($pc.Value -is [bool]) -and [bool]$pc.Value }
+            }
+        } catch { $id = ''; $made = $false }
+        if ($id -and $made) { Register-PimNewObjectThisRun -Id $id -Kind $Kind -NowUtc $NowUtc }
+    }
+}
+
+function Test-PimNotFoundAnswer {
+    <# PURE. TRUE for a "not found" answer (HTTP 404 / Request_ResourceNotFound / ResourceNotFound / NotFound). A 401, 403,
+       429 or 5xx in the same text is never "not found". #>
+    param([string]$Message)
+    $m = "$Message"
+    if (-not $m.Trim()) { return $false }
+    if ($m -match '(?i)HTTP\s*(401|403|429|5\d\d)\b') { return $false }
+    return [bool]($m -match '(?i)HTTP\s*404\b|\bRequest_ResourceNotFound\b|\bResourceNotFound\b|\bNotFound\b')
+}
+
+function Get-PimNewObjectIdInMessage {
+    <#
+      The first id in -Message that THIS run created within the window (Get-PimNewObjectRetryPolicy.windowMinutes), else ''.
+      -KnownIds, when passed, limits the answer to those ids (the ids that existed BEFORE the failing handler was called).
+    #>
+    param([string]$Message, [string[]]$KnownIds, [datetime]$NowUtc = [datetime]::UtcNow)
+    $reg = Get-PimNewObjectRegistry
+    if (-not $reg.Count) { return '' }
+    $limit = $PSBoundParameters.ContainsKey('KnownIds')
+    $known = @(@($KnownIds) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
+    $win = [int](Get-PimNewObjectRetryPolicy).windowMinutes
+    foreach ($mm in [regex]::Matches("$Message", '(?i)[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}')) {
+        $k = $mm.Value.ToLowerInvariant()
+        if (-not $reg.ContainsKey($k)) { continue }
+        if ($limit -and ($known -notcontains $k)) { continue }
+        $age = ($NowUtc.ToUniversalTime() - ([datetime]$reg[$k].createdUtc).ToUniversalTime()).TotalMinutes
+        if ($age -lt 0 -or $age -gt $win) { continue }
+        return $k
+    }
+    return ''
+}
+
+function Get-PimNewObjectRetryDecision {
+    <#
+      Should the handler that just failed be run again? @{ retry; id; delaySeconds; budgetSeconds; reason }.
+        -Attempt   the attempt that just failed (1 = the first call)
+        -KnownIds  the ids registered BEFORE the handler was called (an id it created itself never counts)
+      retry only when: the op is Create or Update; the answer is "not found"; it names an object this run created (and
+      knew before the call) within the window; an attempt is left; and the wait fits the budget of that object and of the
+      scope. budgetSeconds is what the wait costs the budgets (the policy's delay); delaySeconds is what is slept -- the
+      same, unless the Context carries '__pimNewObjectRetryDelaySeconds' (the offline tests pass 0).
+    #>
+    param([string]$Message, [string]$Op, [int]$Attempt = 1, [string[]]$KnownIds = @(), [hashtable]$Context, [datetime]$NowUtc = [datetime]::UtcNow)
+    $out = [ordered]@{ retry = $false; id = ''; delaySeconds = 0; budgetSeconds = 0; reason = '' }
+    if ("$Op" -notin @('Create', 'Update')) { $out.reason = 'only a create or an update is tried again'; return [pscustomobject]$out }
+    if (-not (Test-PimNotFoundAnswer -Message $Message)) { $out.reason = 'the answer is not "not found"'; return [pscustomobject]$out }
+    $id = Get-PimNewObjectIdInMessage -Message $Message -KnownIds $KnownIds -NowUtc $NowUtc
+    if (-not $id) { $out.reason = 'the answer names no object this run created before this step'; return [pscustomobject]$out }
+    $out.id = $id
+    $pol = Get-PimNewObjectRetryPolicy
+    $delays = @($pol.delaysSeconds)
+    if ($Attempt -lt 1) { $Attempt = 1 }
+    if ($Attempt -gt $delays.Count) { $out.reason = 'every attempt is used'; return [pscustomobject]$out }
+    $nominal = [int]$delays[$Attempt - 1]
+    $entry = (Get-PimNewObjectRegistry)[$id]
+    $usedObject = 0; if ($entry) { $usedObject = [int]$entry.waitedSeconds }
+    $usedScope = 0; if ($null -ne $Context -and $Context.ContainsKey('__pimNewObjectWaitedSeconds')) { $usedScope = [int]$Context['__pimNewObjectWaitedSeconds'] }
+    if (($usedObject + $nominal) -gt [int]$pol.perObjectSeconds) { $out.reason = 'the wait budget of this object is used'; return [pscustomobject]$out }
+    if (($usedScope + $nominal) -gt [int]$pol.perScopeSeconds) { $out.reason = 'the wait budget of this scope is used'; return [pscustomobject]$out }
+    $sleep = $nominal
+    if ($null -ne $Context -and $Context.ContainsKey('__pimNewObjectRetryDelaySeconds')) { $sleep = [Math]::Max(0, [int]$Context['__pimNewObjectRetryDelaySeconds']) }
+    $out.retry = $true; $out.delaySeconds = $sleep; $out.budgetSeconds = $nominal
+    $out.reason = 'the object was created by this run and is not visible to this request yet'
+    return [pscustomobject]$out
+}
+
+function Add-PimNewObjectWait {
+    <# Count a wait against the budget of the object and of the scope (the Context is per run, the key is reset per scope). #>
+    param([string]$Id, [int]$Seconds, [hashtable]$Context)
+    $k = "$Id".Trim().ToLowerInvariant()
+    $reg = Get-PimNewObjectRegistry
+    if ($k -and $reg.ContainsKey($k)) { $reg[$k].waitedSeconds = [int]$reg[$k].waitedSeconds + [int]$Seconds }
+    if ($null -ne $Context) { $Context['__pimNewObjectWaitedSeconds'] = [int]$Context['__pimNewObjectWaitedSeconds'] + [int]$Seconds }
+}
+
+function Get-PimNewObjectWaitingMessage {
+    <# PURE. The failure text of an item that still waits for an object this run created -- the tag is what the failure
+       catalog matches (NEW-OBJECT-NOT-VISIBLE-YET); the raw answer stays in the text. #>
+    param([string]$Scope, [string]$Id, [string]$Message)
+    return ("[NEW-OBJECT-NOT-VISIBLE-YET] {0}: the object {1} was created by this run and Microsoft Entra does not serve it to this request yet, so this item WAITS and is applied on the next run. Raw answer: {2}" -f $Scope, $Id, $Message)
+}
+
 # ---- orchestrator ---------------------------------------------------------
 function Invoke-PimEngineScope {
     # -Changes feeds a COMMIT-QUEUE-FED delta: when supplied, the scope still diffs
@@ -654,6 +815,7 @@ function Invoke-PimEngineScope {
     # Per-scope read-quality flags (the Context is shared by every scope of a run): a partial read in one scope must not
     # be taken for one in the next. SEC-80: __pimLiveNarrowed = the provider read only the principals the rows name.
     $Context['__pimLiveIncomplete'] = $null; $Context['__pimLiveNarrowed'] = $false
+    $Context['__pimNewObjectWaitedSeconds'] = 0   # 100.125: the wait budget for objects this run created is per scope
     # REQ-U wave 2: structured live FINDINGS a provider raises from its own live read (the workload providers' orphan
     # group / unmanaged binding / wrong permissions warnings). They travel back as the scope result's `findings`; the
     # drift snapshot lists and counts them (PIM-DriftSnapshot.ps1).
@@ -697,6 +859,38 @@ function Invoke-PimEngineScope {
             ok=$false; notChecked=$true; error="the live state could not be read: $__lre"; detail="${Scope}: the live state could not be read -- not checked, nothing applied: $__lre"
             warnings=@($Context['__pimScopeWarnings']) }
     }
+    # --- 100.122 F6 (owner 2026-10-13): ONE NAME, TWO LIVE OBJECTS = A DOUBT -- NOTHING REMOVED, NOTHING WRITTEN -----------
+    # The ONE place, for EVERY provider: after GetDesired / GetLive, before anything below sees the two sets (the diff, the
+    # prune, the reconcile removal plan, the budget). A live item that belongs to EITHER object of a duplicated defined
+    # name leaves the live set (it can be neither a removal nor an update); a desired row naming the duplicate leaves the
+    # desired set (no create attempt) and is reported below as a failure item DUPLICATE-GROUP-NAME / DUPLICATE-AU-NAME.
+    # Without this a second object of the same name -- which anybody in the tenant can create -- made the row
+    # unresolvable, and the live assignment it used to match was planned as a REMOVAL. The filter cannot run:
+    # the scope is NOT CHECKED and applies nothing (fail closed).
+    $__dupHeld = New-Object System.Collections.Generic.List[object]
+    if (Get-Command Split-PimDuplicateNameItems -ErrorAction SilentlyContinue) {
+        try {
+            $__dn = Split-PimDuplicateNameItems -Desired $desired -Live $live
+            if ($__dn.active) {
+                $desired = @($__dn.desired); $live = @($__dn.live)
+                foreach ($__dh in @($__dn.held)) { $__dupHeld.Add([pscustomobject]@{ held = $__dh; op = 'Create' }) }
+                # Fix round 1 (gate 2026-10-13, F6.24 / F6.28): the live items set aside are still LIVE. Without this the
+                # ledger update at the end of the pass read them as "no longer live" and erased their managed-key record,
+                # so after the duplicate went away a removal that should happen was never made again. The live read of
+                # this pass is therefore not complete for the ledger (the ledger then only learns, never forgets).
+                if ([int]$__dn.droppedLive -gt 0) { $Context['__pimLiveIncomplete'] = ("{0} live item(s) set aside: a defined name is carried by two live objects" -f [int]$__dn.droppedLive) }
+                if ($__dupHeld.Count -or [int]$__dn.droppedLive) {
+                    Write-Warning ("[engine] {0}: a defined name is carried by TWO live objects -- {1} row(s) not applied and {2} live item(s) left exactly as they are (never removed, never changed)." -f $Scope, $__dupHeld.Count, [int]$__dn.droppedLive)
+                }
+            }
+        } catch {
+            $__dnErr = "the duplicate-name check could not be made: $($_.Exception.Message)"
+            Write-Warning ("[engine] {0}: {1} -- nothing was compared and nothing applied (NOT CHECKED)." -f $Scope, $__dnErr)
+            return [pscustomobject]@{ scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf; create=0; update=0; remove=0; nochange=0; applied=0; skipped=0; errors=0; plan=@()
+                ok=$false; notChecked=$true; error=$__dnErr; detail="${Scope}: $__dnErr -- not checked, nothing applied"
+                warnings=@($Context['__pimScopeWarnings']) }
+        }
+    }
     # Destructive prune (remove live items not in desired) is gated TWICE:
     #   1. -Mode Full AND -Prune must BOTH be set (Full alone reconciles create/update only).
     #      A partial/non-authoritative desired set must never silently disable real admins.
@@ -713,7 +907,8 @@ function Invoke-PimEngineScope {
     # this run used are returned with the scope result.
     $__runKind = "$Mode$(if ($Prune) { '+Prune' })$(if ($PSBoundParameters.ContainsKey('Changes') -and $null -ne $Changes) { '+Queue' })"
     $__guardReleases = New-Object System.Collections.Generic.List[object]
-    $__canRelease = [bool](Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue)
+    $__guardApprovals = New-Object System.Collections.Generic.List[object]   # PIM 100.119: approvals given at commit that this run used
+    $__canRelease =[bool](Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue)
     # GUARD-1 'engine.empty-desired' (2026-10-05): a FULL prune run remembers each scope's desired count, and alerts ONCE
     # when a scope that had definitions now has none while live items remain (gate 2 below then refuses the prune). Plans
     # (-WhatIf) and the remove-only scopes (allowEmptyDesiredPrune) are not counted. Never throws.
@@ -756,6 +951,14 @@ function Invoke-PimEngineScope {
     # Targeted removals run in EVERY mode (no -Prune): the row itself says what to remove, as in v1.
     $removeRows = @()
     if ($p.GetRemoveRows) { $removeRows = @(& $p.GetRemoveRows $Context | Where-Object { $null -ne $_ }) }
+    # 100.122 F6: an explicit Remove row that names a duplicated object is not applied either (which of the two would it mean?).
+    if ($removeRows.Count -and (Get-Command Split-PimDuplicateNameItems -ErrorAction SilentlyContinue)) {
+        $__dnR = Split-PimDuplicateNameItems -Desired $removeRows -Live @() -NoRefresh
+        if ($__dnR.active -and @($__dnR.held).Count) {
+            $removeRows = @($__dnR.desired)
+            foreach ($__dh in @($__dnR.held)) { $__dupHeld.Add([pscustomobject]@{ held = $__dh; op = 'Remove' }) }
+        }
+    }
     $cmp = @{ Desired = $desired; Live = $live; KeyOf = $p.KeyOf; Equal = $p.Equal; Prune = $doPrune }
     if ($removeRows.Count) { $cmp['RemoveRows'] = $removeRows }
     if ($p.TypeKeyOf) {
@@ -972,7 +1175,23 @@ function Invoke-PimEngineScope {
     $__held = New-Object System.Collections.Generic.List[object]
     $__retype = @(@($diff.update) | Where-Object { $_ -and $_.PSObject.Properties['typeChange'] -and $_.typeChange })
     $__rmTotal = @($diff.remove).Count + $__retype.Count
-    $__heldCand = @(@(@($diff.remove) + $__retype) | Where-Object { $_ -and (($_.PSObject.Properties['targeted'] -and $_.targeted) -or ($_.PSObject.Properties['typeChange'] -and $_.typeChange)) })
+    # PIM 100.119 (4) (owner 2026-10-13: "approve at commit ... that EXACT list once; the run applies it without holding,
+    # any size; anything not in the approved list is still held"): the removals a SuperAdmin approved when they were
+    # committed are taken OUT of the count -- each approved item once -- and applied whatever the budget says. Everything
+    # else ($__rmRest: a row nobody approved, a prune item, a reconcile removal) is judged against the budget as always.
+    # Only a run that WRITES uses an approval; a plan (-WhatIf) and the drift read never do. The approved items still pass
+    # every later protection (the last Global Administrator, the provider's own refusals).
+    $__rmApproved = @(); $__rmRest = @($diff.remove)
+    $__driftRead0 = [bool]($WhatIf -and $global:PIM_DriftReadPlan)
+    if (@($diff.remove).Count -gt 0 -and -not $WhatIf -and -not $__driftRead0 -and (Get-Command Resolve-PimRemoveBudgetApproval -ErrorAction SilentlyContinue)) {
+        $__ap = Resolve-PimRemoveBudgetApproval -Scope $Scope -Entity $(if ($p.entity) { "$($p.entity)" } else { '' }) -Remove @($diff.remove) -RunKind $__runKind
+        if (@($__ap.approved).Count) {
+            $__rmApproved = @($__ap.approved); $__rmRest = @($__ap.rest)
+            foreach ($__a in @($__ap.approvals)) { $__guardApprovals.Add([pscustomobject]@{ guardId = 'engine.remove-budget'; approvalId = "$($__a.id)"; approvedBy = "$($__a.approvedBy)"; items = @($__a.items).Count }) }
+        }
+    }
+    $__rmBudgeted = @($__rmRest).Count + $__retype.Count
+    $__heldCand = @(@(@($__rmRest) + $__retype) | Where-Object { $_ -and (($_.PSObject.Properties['targeted'] -and $_.targeted) -or ($_.PSObject.Properties['typeChange'] -and $_.typeChange)) })
     $__keepUpdate = @(@($diff.update) | Where-Object { -not ($_.PSObject.Properties['typeChange'] -and $_.typeChange) })
     # BUG-269 (operator 2026-10-01: "fix"): the DRIFT READ is a plan that can never write, and its job is to LIST what is
     # there -- a budget trip dropped the whole list, so a scope with 6+ extras showed 0 extras and "in sync". On the drift
@@ -995,20 +1214,23 @@ function Invoke-PimEngineScope {
         # The BREAKDOWN goes with the count: the alert must be able to say whether these are assignment
         # type changes (which delete the old type first) or rows the operator marked Action=Remove.
         # Without it the mail read as "the engine decided to delete 9 things" (operator, 2026-09-20).
-        $rb = Test-PimRemoveBudgetAllowed -ToRemove $__rmTotal -Scope $Scope -Scanned (@($live).Count) -Operation 'remove' `
-                -TypeChanges (@($__retype).Count + @(@($diff.remove) | Where-Object { $_ -and $_.PSObject.Properties['typeChange'] -and $_.typeChange }).Count) `
-                -RemoveRows  (@(@($diff.remove) | Where-Object { $_ -and $_.PSObject.Properties['targeted'] -and $_.targeted }).Count)
-        # §96.6 / BUG-291: G4 is releasable for EXACTLY this set (plan hash), one run, at most 50 (PIM-GuardRelease.ps1).
+        # PIM 100.119: the count is what was NOT approved at commit ($__rmBudgeted); 0 = allowed.
+        $rb = Test-PimRemoveBudgetAllowed -ToRemove $__rmBudgeted -Scope $Scope -Scanned (@($live).Count) -Operation 'remove' `
+                -TypeChanges (@($__retype).Count + @(@($__rmRest) | Where-Object { $_ -and $_.PSObject.Properties['typeChange'] -and $_.typeChange }).Count) `
+                -RemoveRows  (@(@($__rmRest) | Where-Object { $_ -and $_.PSObject.Properties['targeted'] -and $_.targeted }).Count)
+        # §96.6 / BUG-291: G4 is releasable for EXACTLY this set (plan hash), one run (PIM-GuardRelease.ps1). PIM 100.119:
+        # no ceiling of 50 -- and the plan that is hashed, held and released is what was not approved at commit.
         if (-not $WhatIf -and $__canRelease) {
-            $__g4 = Resolve-PimRemoveBudgetRelease -Decision $rb -Scope $Scope -Remove @($diff.remove) -Retype @($__retype) -Scanned @($live).Count -RunKind $__runKind
+            $__g4 = Resolve-PimRemoveBudgetRelease -Decision $rb -Scope $Scope -Remove @($__rmRest) -Retype @($__retype) -Scanned @($live).Count -RunKind $__runKind
             if ($__g4) { $__guardReleases.Add($__g4.used); $rb = $__g4.decision }
         }
         if (-not $rb.allowed) {
             # A -WhatIf (plan / verify) run removes nothing: it is logged, never mailed as an engine failure.
             if (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue) { Write-PimRemoveBudgetAlert -Decision $rb -PlanOnly:([bool]$WhatIf) }
             else { Write-Host ("[engine] {0}: REMOVAL BUDGET exceeded -- {1}" -f $Scope, $rb.reason) -ForegroundColor Red }
-            $diff = [pscustomobject]@{ create = @($diff.create); update = $__keepUpdate; remove = @(); nochange = @($diff.nochange) }
-            foreach ($__x in $__heldCand) { $__held.Add([pscustomobject]@{ item = $__x; budget = $rb.budget; toRemove = $__rmTotal }) }
+            # the approved items go ahead; everything else in this scope is held whole (never a partial pick of the rest)
+            $diff = [pscustomobject]@{ create = @($diff.create); update = $__keepUpdate; remove = @($__rmApproved); nochange = @($diff.nochange) }
+            foreach ($__x in $__heldCand) { $__held.Add([pscustomobject]@{ item = $__x; budget = $rb.budget; toRemove = $__rmBudgeted }) }
             if (-not $script:__disableAborted) { $script:__disableAborted = 'remove-budget' }
         }
     }
@@ -1139,7 +1361,24 @@ function Invoke-PimEngineScope {
                 if ($__isRetype) {
                     throw ("REFUSED: a 'type change' reached the orchestrator for '{0}'. The engine does not replace one assignment type with the other -- both are supported, and only an Action=Remove row removes an assignment. This item was NOT applied." -f $item.key)
                 }
-                $__r = & $p.$handlerName $item $Context
+                # 100.125: a "not found" that names an object THIS RUN created before this call is replication, not a
+                # fault -- the handler is run again after a short wait, a few times, within the wait budget
+                # (Get-PimNewObjectRetryDecision). Anything else is thrown on at once, exactly as before.
+                $__nvKnown = @((Get-PimNewObjectRegistry).Keys)
+                $__nvAttempt = 0
+                while ($true) {
+                    $__nvAttempt++
+                    try { $__r = & $p.$handlerName $item $Context; break }
+                    catch {
+                        $__nv = Get-PimNewObjectRetryDecision -Message "$($_.Exception.Message)" -Op $op -Attempt $__nvAttempt -KnownIds $__nvKnown -Context $Context
+                        if (-not $__nv.retry) { throw }
+                        Write-Host ("    [~] {0} {1}: object {2} was created by this run and is not visible to this request yet (not found) -- trying again in {3}s ({4}/{5})." -f $op, $item.key, $__nv.id, $__nv.delaySeconds, $__nvAttempt, @((Get-PimNewObjectRetryPolicy).delaysSeconds).Count) -ForegroundColor DarkGray
+                        Add-PimNewObjectWait -Id $__nv.id -Seconds $__nv.budgetSeconds -Context $Context
+                        if ($__nv.delaySeconds -gt 0) { Start-Sleep -Seconds $__nv.delaySeconds }
+                    }
+                }
+                # ...and what a Create returned is an object this run created: a later step may have to wait for it.
+                if ($op -eq 'Create') { Register-PimNewObjectsFromResult -Result $__r -Kind $Scope }
                 $__reported = $false
                 foreach ($__o in @($__r)) {
                     if ($null -ne $__o -and $__o.PSObject -and ($__o.PSObject.Properties.Name -contains 'pimApplied') -and (-not $__o.pimApplied)) { $__reported = $true }
@@ -1180,6 +1419,12 @@ function Invoke-PimEngineScope {
                     # line. The delegation never deployed, the job read ok, the Manager's Engine errors showed
                     # nothing, and only verify-convergence complained 18 hours later with no cause. It is a
                     # failure of the row, so it is recorded like one: ENTRA-NESTING-ROLE-ASSIGNABLE, fix = Eligible.
+                    # 100.125: still "not found" for an object this run created (the retries are used, the budget is
+                    # used, or the handler created it itself) -> a WAITING item with its own class, never UNCLASSIFIED.
+                    if ($op -ne 'Remove' -and (Test-PimNotFoundAnswer -Message $em)) {
+                        $__nvId = Get-PimNewObjectIdInMessage -Message $em
+                        if ($__nvId) { $em = Get-PimNewObjectWaitingMessage -Scope $Scope -Id $__nvId -Message $em }
+                    }
                     $script:__errors++; Write-Host ("    [x] {0} {1} FAILED: {2}" -f $op, $item.key, $em) -ForegroundColor Red
                     & $watchAdd $op $item 'failed' $em
                     Write-PimEngineChangeAudit -Scope $Scope -Entity $entity -Op $op -Item $item -Result 'error' -ErrorMessage $em
@@ -1224,6 +1469,23 @@ function Invoke-PimEngineScope {
             $__hEnt = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
             try { $script:__failures.Add((New-PimEngineItemFailure -Scope $Scope -Entity $__hEnt -Op $__hOp -Key "$($__it.key)" -Message $__hMsg -Row $__hRow)) }
             catch { Write-Warning ("    [engine] could not classify the held item {0}: {1}" -f $__it.key, $_.Exception.Message) }
+        }
+    }
+    # 100.122 F6: every row that names a duplicated group / AU is a FAILURE ITEM the customer sees (never a silent skip,
+    # never a create that fails later with another text). A plan (WhatIf) only shows it.
+    foreach ($__dq in $__dupHeld) {
+        $__dh = $__dq.held
+        $__dKey = ''; try { $__dKey = "$(& $p.KeyOf $__dh.row)" } catch { $__dKey = '' }
+        if (-not $__dKey) { $__dKey = "$($__dh.code)|$($__dh.name)" }
+        Write-Host ("    [h] {0} HELD: {1}" -f $__dKey, $__dh.message) -ForegroundColor Red
+        if ($WhatIf) { continue }
+        $__dItem = [pscustomobject]@{ key = $__dKey; desired = $__dh.row; row = $__dh.row }
+        & $watchAdd $__dq.op $__dItem 'held' $__dh.message
+        $script:__errors++
+        if (Get-Command New-PimEngineItemFailure -ErrorAction SilentlyContinue) {
+            $__dEnt = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
+            try { $script:__failures.Add((New-PimEngineItemFailure -Scope $Scope -Entity $__dEnt -Op $__dq.op -Key $__dKey -Message $__dh.message -Row $__dh.row)) }
+            catch { Write-Warning ("    [engine] could not classify the held item {0}: {1}" -f $__dKey, $_.Exception.Message) }
         }
     }
     foreach ($i in $diff.create) { & $do 'Create' $i 'ApplyCreate' }
@@ -1369,6 +1631,7 @@ function Invoke-PimEngineScope {
         removeRowsDone=$__rowsDone
         unmanaged=@($__unmanaged).Count           # SEC-80: live items a prune left alone (not defined in PIM Manager)
         guardReleases=$__guardReleases.ToArray()  # §96.6: the guard releases this run used ({ guardId; releaseId; planHash })
+        guardApprovals=$__guardApprovals.ToArray()  # PIM 100.119: the approvals given at commit this run used ({ guardId; approvalId; approvedBy; items })
         reconcileRemoval=$__rrPlan                # 96.5: the daily reconcile's removal plan (report / enforce), $null otherwise
         reconcileRemoved=[int]$script:__rrRemoved # 96.5: how many of them an ENFORCE pass really removed
         appliedOutcomes=$script:__outcomes.Count  # 96.1: rows recorded in pim.CommitApplied by this pass
@@ -1546,8 +1809,9 @@ function Invoke-PimEngineDiscoverySweep {
     # workspaces (LIVE, best-effort), reconcile against the existing definitions, and run
     # each reconcile plan through the per-resource-type AUTO-CREATE policy
     # ($global:PIM_DiscoveryAutoCreate; default 'flag' for every type). Emits
-    # resource.discovered / resource.autocreate run-log lines. 'pending' stages a desired
-    # row for review; 'auto' enqueues a Create on the normal change queue (no prune from
+    # resource.discovered / resource.autocreate run-log lines. 'pending' PROPOSES a Create in the
+    # review queue (100.122 F3: it never writes a definition row itself -- nothing is defined until a
+    # person commits it); 'auto' enqueues a Create on the normal change queue (no prune from
     # this path). Skipped entirely when every type's policy is 'flag' (nothing to stage)
     # AND there is nothing to flag -- but we always RUN it so new resources are at least
     # flagged, matching the legacy resource.discovered behaviour. -WhatIf logs only.

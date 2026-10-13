@@ -21,15 +21,30 @@
     * A removal only ever touches a USER whose sAMAccountName carries the AD-admin suffix ('-AD' by default) -- the accounts
       PIM itself put there. v1 removed ANY non-matching member (service accounts, nested groups). Other members are
       reported as 'kept (not PIM-managed)'. HybridAdProtectedMembers adds names that are never removed.
+    * 100.122 F1 (2026-10-13) -- NEVER REMOVE ON A DOUBT. The rule above is the design and stays; what is not the design is a
+      failed or wrong read taken as "nobody is active". The Entra group behind an AD group has three answers (found /
+      confirmed gone / not known), it is looked up by its remembered object id, and a removal is made only with the group
+      found and its active list read in full: at once when the member's recorded end time has passed, otherwise when the
+      next complete pass says the same. Not known = nobody is removed in that pass; confirmed gone (24 hours) = the members
+      stay and wait for a SuperAdmin. See "100.122 F1" below Get-PimHybridAdMembershipPlan.
     * No plaintext gMSA password anywhere: the task runs AS the gMSA (PIM-HybridAd.ps1 Test-PimHybridAdRunAsGmsa).
     * -WhatIf / plan mode on every step; results are returned for the worker's status report.
     * The PAM feature is DETECTED, never enabled (enabling it is irreversible for the forest).
 #>
 
+function Test-PimHybridAdFunction {
+    # Is this PIM function loaded? 🔴 NOT Get-Command: for a name that is NOT loaded, Get-Command searches every folder of
+    # PATH for an executable -- ~55 ms a call, measured 2026-10-13. The continuous sync asks this many times per pass (the
+    # setting reader asks once per setting), so a pass spent most of its time looking for files. Every name asked here is a
+    # PowerShell function, so the function drive is the whole answer (it sees functions of the calling scopes too).
+    param([Parameter(Mandatory)][string]$Name)
+    return [bool](Test-Path -LiteralPath "Function:\$Name")
+}
+
 function Get-PimHybridAdSetting {
     # One reader: $global:PIM_<Name> -> $env:PIM_<Name> -> hydrated pim.Settings -> default (Get-PimAdminLifecycleSetting when loaded).
     param([Parameter(Mandatory)][string]$Name, $Default = $null)
-    if (Get-Command Get-PimAdminLifecycleSetting -ErrorAction SilentlyContinue) { return (Get-PimAdminLifecycleSetting -Name $Name -Default $Default) }
+    if (Test-PimHybridAdFunction 'Get-PimAdminLifecycleSetting') { return (Get-PimAdminLifecycleSetting -Name $Name -Default $Default) }
     $g = Get-Variable -Name "PIM_$Name" -Scope Global -ValueOnly -ErrorAction SilentlyContinue
     if ($null -ne $g -and "$g".Trim() -ne '') { return $g }
     $e = [Environment]::GetEnvironmentVariable("PIM_$Name", 'Process')
@@ -59,6 +74,9 @@ $script:PimHybridAdSettingCatalog = @(
     # 2026-10-04 scale (operator: "it could run fx 50 servers per batch"): the server lane's parallel Graph reads
     [ordered]@{ name = 'HybridAdSyncBatchSize'; label = 'Groups per batch'; naming = $false; default = '50'; help = 'How many AD groups one parallel batch reads from Graph per pass (the server lane cuts its groups into batches of this size). 1-1000.' }
     [ordered]@{ name = 'HybridAdSyncParallel'; label = 'Batches at once'; naming = $false; default = '8'; help = 'How many batches run at the same time (PowerShell 7 on the hybrid worker). Higher is faster until Graph starts throttling. 1-64.' }
+    # 100.122 F1, owner's decision (29) 2026-10-13: the correct UTC reading of an activation's end time is a switch PER
+    # INSTALL, off by default (an upgrade changes no membership). Read by Test-PimHybridAdEndTimeAsUtc.
+    [ordered]@{ name = 'HybridAdEndTimeAsUtc'; label = 'Read activation end times as UTC'; naming = $false; default = 'off'; help = 'on = the end time of an activation is always read as UTC. off (or blank) = as before: on a hybrid worker whose clock is not set to UTC, a membership can end earlier or later by the time zone difference. Switching it re-adds every active member once with the corrected time. Type on or off.' }
 )
 
 function Get-PimHybridAdSettingCatalog { return $script:PimHybridAdSettingCatalog }
@@ -84,6 +102,7 @@ function Test-PimHybridAdSettingsInput {
             'HybridAdProtectedMembers' { if ($v -match '[*?]') { $err.Add('Never remove: account names only, no wildcards') } }
             'HybridAdSyncBatchSize' { $i = 0; if ($v -and (-not [int]::TryParse($v, [ref]$i) -or $i -lt 1 -or $i -gt 1000)) { $err.Add('Groups per batch: a whole number 1-1000 (or blank = 50)') } }
             'HybridAdSyncParallel' { $i = 0; if ($v -and (-not [int]::TryParse($v, [ref]$i) -or $i -lt 1 -or $i -gt 64)) { $err.Add('Batches at once: a whole number 1-64 (or blank = 8)') } }
+            'HybridAdEndTimeAsUtc' { if ($v -and $v -notmatch '^(?i)(on|off)$') { $err.Add('Read activation end times as UTC: on or off (or blank = off)') } else { $v = $v.ToLowerInvariant() } }
         }
         $out["$k"] = $v
     }
@@ -126,7 +145,7 @@ function Get-PimHybridAdGroupPattern {
     if ($explicit) { return $explicit }
     $marker = "$(Get-PimHybridAdSetting -Name 'HybridAdGroupMarker' -Default '-S_AD')".Trim()
     $prefix = ''
-    if (Get-Command Get-PimGroupNamePrefix -ErrorAction SilentlyContinue) { try { $prefix = "$(Get-PimGroupNamePrefix)".Trim() } catch { $prefix = '' } }
+    if (Test-PimHybridAdFunction 'Get-PimGroupNamePrefix') { try { $prefix = "$(Get-PimGroupNamePrefix)".Trim() } catch { $prefix = '' } }
     return "$prefix*$marker"
 }
 
@@ -137,9 +156,9 @@ function Get-PimHybridAdSuffixes {
       conventions name no suffix maps an admin to the same name in AD. Returns @{ cloud; ad }.
     #>
     $map = $null
-    if (Get-Command Get-PimNamingConvention -ErrorAction SilentlyContinue) { try { $map = Get-PimNamingConvention -Key 'EnvironmentSuffixes' } catch { $map = $null } }
+    if (Test-PimHybridAdFunction 'Get-PimNamingConvention') { try { $map = Get-PimNamingConvention -Key 'EnvironmentSuffixes' } catch { $map = $null } }
     if (-not $map -and $global:PIM_NamingConventions -is [System.Collections.IDictionary] -and $global:PIM_NamingConventions.Contains('EnvironmentSuffixes')) { $map = $global:PIM_NamingConventions['EnvironmentSuffixes'] }
-    if (-not $map -and (Get-Command Get-PimShippedNamingConventions -ErrorAction SilentlyContinue)) { try { $map = (Get-PimShippedNamingConventions)['EnvironmentSuffixes'] } catch { $map = $null } }
+    if (-not $map -and (Test-PimHybridAdFunction 'Get-PimShippedNamingConventions')) { try { $map = (Get-PimShippedNamingConventions)['EnvironmentSuffixes'] } catch { $map = $null } }
     $get = { param($k) if ($map -is [System.Collections.IDictionary]) { "$($map[$k])" } elseif ($map) { "$($map.$k)" } else { '' } }
     $cloud = "$(Get-PimHybridAdSetting -Name 'HybridAdCloudSuffix' -Default (& $get 'entra'))".Trim()
     $ad = "$(Get-PimHybridAdSetting -Name 'HybridAdAccountSuffix' -Default (& $get 'ad'))".Trim()
@@ -250,6 +269,617 @@ function Get-PimHybridAdMembershipPlan {
         if (-not $liveBy.ContainsKey($k)) { $w = $want[$k]; $out.add += @{ samAccountName = $w.samAccountName; ttlSeconds = $(if ($PamEnabled) { $w.ttlSeconds } else { $null }); reason = 'active PIM assignment' } }
     }
     return $out
+}
+
+# ---- 100.122 F1: NEVER REMOVE ON A DOUBT ---------------------------------------------------------------------------------
+# Owner 2026-10-13: "we can not have any wrongly deletions of data" / "so we dont flush a group in ad, that would be
+# critically". Get-PimHybridAdMembershipPlan above stays exactly as it was (the just-in-time rule: a suffix-named user
+# without an active assignment leaves the AD group). Everything below only ever takes removals OUT of that plan:
+#   * the Entra group has these answers, never two -- FOUND / NOT KNOWN / GONE / REPLACED (another group carries the name) /
+#     RENAMED. NOT KNOWN (a failed, throttled or partial read, a name search that came back empty, an id never seen, a
+#     group that no longer carries the defined name) = nobody is removed in this pass;
+#   * CONFIRMED GONE (the remembered id answers 404 and the deleted items were checked, over 24 hours), NEVER SEEN for 24
+#     hours and REPLACED never empty an AD group by themselves: the members stay and the group waits for a SuperAdmin,
+#     whose decision arrives as the record 'HybridAdSyncMemory.<job>.decisions' (take the replacement group as the one, or
+#     remove NAMED members; valid 48 hours, used only while the group is in exactly the state it was made for). In a
+#     REPLACED group a member remembered from the old group leaves when the end time recorded for them has passed;
+#   * with the group FOUND and the read complete: an EXPECTED removal (the end time recorded for the member has passed) is
+#     made at once, whatever the number; an UNEXPECTED one (the member left the active list before that end time, or no end
+#     time was ever recorded) is made only when a second complete pass at least 5 and at most 30 minutes after the first
+#     says the same. A hold is a wait state every pass decides again -- nothing here waits for a person. A recorded end
+#     time is trusted while the complete passes are not more than 30 minutes apart (the owner: Entra has trouble for 30
+#     minutes, the end time passes meanwhile -> removed as expected when it answers again); after a longer gap it is stale
+#     and the member takes the two-pass way.
+#   * a doubt is VISIBLE at once: a pass that keeps anybody returns a WARNING for the job, and a group that has kept
+#     members for 30 minutes raises the guard alert, again every 4 hours until it heals.
+# Windows, counts and limits come from FUNCTIONS returning a literal: a $script: variable is $null in a child script scope.
+function Get-PimHybridAdGoneConfirmHours { return 24 }      # owner's decision (14): 24 hours before "gone" counts as confirmed
+function Get-PimHybridAdGoneConfirmMinMarks { return 3 }    # ... seen gone in at least 3 different clock hours of that window
+function Get-PimHybridAdNeverSeenHours { return 24 }        # an Entra group never seen and still not there after this = waits for a SuperAdmin
+function Get-PimHybridAdConfirmMinMinutes { return 5 }      # the confirming pass is at least this long after the first sighting
+function Get-PimHybridAdConfirmMaxMinutes { return 30 }     # ... and at most this long; older = the wait starts again
+function Get-PimHybridAdHoldAlertMinutes { return 30 }      # a group that has kept members for this long raises the alert
+function Get-PimHybridAdHoldAlertRepeatHours { return 4 }   # ... again every 4 hours until it heals
+function Get-PimHybridAdWaitingAlertRepeatHours { return 24 }   # "waiting for a SuperAdmin": at once, then once a day
+function Get-PimHybridAdAlertRetryMinutes { return 5 }      # an alert that was not delivered is tried again after this
+function Get-PimHybridAdStaleMinutes { return 30 }          # no pass for this long = the recorded end times are stale
+function Get-PimHybridAdOrphanPasses { return 3 }           # a principal that answers "not found" on this many passes ...
+function Get-PimHybridAdOrphanMinutes { return 30 }         # ... over this long is an assignment for an account that no longer exists
+function Get-PimHybridAdMemoryBucketCount { return 32 }     # the sync memory is kept in this many small settings (one write = one bucket)
+function Get-PimHybridAdMemoryMaxMembers { return 500 }     # members remembered per AD group (active list, and the waiting ones)
+function Get-PimHybridAdMemoryMaxOrphans { return 50 }      # "not found" principals tracked per AD group
+function Get-PimHybridAdWaitingMaxMembers { return 200 }    # member names listed per group in the "waiting for a SuperAdmin" record
+function Get-PimHybridAdDecisionMaxHours { return 48 }      # a SuperAdmin's decision in the decisions record is used for this long, then it is dead
+function Get-PimHybridAdDecisionFutureMinutes { return 10 } # ... and never one dated further ahead than this (two clocks)
+function Test-PimHybridAdEndTimeAsUtc {
+    <#
+      Owner's decision (29), 2026-10-13: is a [datetime] end time read as UTC (the correct reading) on THIS install?
+      The per-install setting 'HybridAdEndTimeAsUtc' (pim.Settings, its own row; Settings > Hybrid Active Directory, a
+      SuperAdmin) = 'on'. Read like every other hybrid knob (Get-PimHybridAdSetting: the global, the worker's environment
+      variable PIM_HybridAdEndTimeAsUtc, then the settings hydrated from the SQL store). DEFAULT OFF, and OFF on anything
+      else: not set, blank, any other text, a reader that throws -- so an upgrade, or a store that cannot be read, changes
+      no membership. $false = the end time is read exactly as before this lane (see ConvertTo-PimHybridAdEndUtc).
+    #>
+    try { return [bool]("$(Get-PimHybridAdSetting -Name 'HybridAdEndTimeAsUtc' -Default '')".Trim() -ieq 'on') }
+    catch { return $false }
+}
+
+function ConvertTo-PimHybridAdEpoch {
+    # whole seconds since 1970 (UTC). The memory keeps numbers, never date text (ConvertFrom-Json turns date text into a
+    # [datetime] on PowerShell 7 and leaves it a string on 5.1). Kind Unspecified is taken as UTC.
+    param([datetime]$Utc)
+    if ($Utc.Kind -eq [System.DateTimeKind]::Local) { $Utc = $Utc.ToUniversalTime() }
+    return [long][math]::Floor(($Utc - (New-Object datetime 1970, 1, 1, 0, 0, 0, ([System.DateTimeKind]::Utc))).TotalSeconds)
+}
+function Format-PimHybridAdEpoch {
+    param([long]$Epoch)
+    return ((New-Object datetime 1970, 1, 1, 0, 0, 0, ([System.DateTimeKind]::Utc)).AddSeconds($Epoch).ToString('yyyy-MM-dd HH:mm', [cultureinfo]::InvariantCulture) + ' UTC')
+}
+function ConvertTo-PimHybridAdEndUtc {
+    <#
+      The end time of an active assignment as UTC, or $null (no end). THROWS on text that is not a time.
+        text         parsed with the invariant culture; text without a zone is UTC (Graph always sends one)
+        [datetime]   PowerShell 7's JSON reader hands back a [datetime] instead of the text. Until this lane the reader
+                     turned it into text and parsed that as LOCAL time -- right on a worker whose clock is UTC, off by the
+                     zone offset on any other. -AsUtc $true reads it correctly (Utc as it is, Local converted, Unspecified
+                     = UTC). Without -AsUtc the install's setting decides (Test-PimHybridAdEndTimeAsUtc, 'HybridAdEndTimeAsUtc',
+                     default OFF): off reads it EXACTLY AS BEFORE, so the first pass after an upgrade changes no
+                     membership (a corrected end time re-adds every active member once in a forest with time-limited
+                     membership). Owner's decision (29): on for the internal install and the test tenants first.
+    #>
+    param([object]$Value, [object]$AsUtc = $null)
+    if ($null -eq $Value) { return $null }
+    $utcMode = if ($null -ne $AsUtc) { [bool]$AsUtc } else { [bool](Test-PimHybridAdEndTimeAsUtc) }
+    if ($Value -is [datetimeoffset]) { return $Value.UtcDateTime }
+    if ($Value -is [datetime]) {
+        if (-not $utcMode) { return [datetimeoffset]::Parse("$Value", [Globalization.CultureInfo]::InvariantCulture).UtcDateTime }   # as before this lane
+        if ($Value.Kind -eq [System.DateTimeKind]::Local) { return $Value.ToUniversalTime() }
+        return [datetime]::SpecifyKind($Value, [System.DateTimeKind]::Utc)
+    }
+    $t = "$Value".Trim()
+    if (-not $t) { return $null }
+    return [datetimeoffset]::Parse($t, [Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime
+}
+
+function Test-PimHybridAdNotFound {
+    # "This id does not exist" is said ONLY by an HTTP 404 that the directory itself names ResourceNotFound. A timeout, a
+    # 429, a 5xx, a 403 or a 404 from anything in between (a proxy) is a failed read, not an answer.
+    param([string]$Message)
+    return [bool]("$Message" -match 'HTTP 404\b' -and "$Message" -match '(?i)ResourceNotFound')
+}
+function Test-PimHybridAdSameName {
+    # is the Entra group's display name the DEFINED name? (B1: a remembered id is followed only while it carries the name)
+    param([string]$A, [string]$B)
+    return ("$A".Trim() -ieq "$B".Trim())
+}
+
+function Test-PimHybridAdPartialItems {
+    # Defence only: a read that handed back a PAGE instead of the items (it carries a next link nobody followed). The
+    # product's REST client never does that -- it follows every page or throws -- so a thrown error is the real shape.
+    param([object[]]$Items = @())
+    foreach ($i in @($Items)) { if ($null -ne $i -and $i.PSObject -and $i.PSObject.Properties['@odata.nextLink'] -and "$($i.'@odata.nextLink')") { return $true } }
+    return $false
+}
+
+function Get-PimHybridAdWhyText {
+    # the reader's short code -> the words on the worker's result line (the codes are what the memory stores: stable text)
+    param([string]$Code, [string]$Detail = '')
+    switch ("$Code") {
+        'never-seen'         { return 'it was not found by name and PIM Manager has never seen its id' }
+        'name-lookup-failed' { return 'the search for the group failed' }
+        'ambiguous'          { return 'more than one Entra group carries this name' }
+        'exists-failed'      { return 'the lookup by its id failed' }
+        'gone-unconfirmed'   { return ('its id answers "not found" -- not confirmed until that holds for {0} hours' -f (Get-PimHybridAdGoneConfirmHours)) }
+        'renamed'            { return $(if ("$Detail".Trim()) { "$Detail".Trim() } else { 'the Entra group was renamed and no group carries the defined name' }) }
+        'instances-failed'   { return 'the read of its active members failed' }
+        'instances-partial'  { return 'the read of its active members came back partial' }
+        default              { return 'Entra ID gave no answer for it in this pass' }
+    }
+}
+
+function New-PimHybridAdGroupMemory {
+    # What the sync remembers about ONE AD group between passes (all times = epoch seconds, 0 = not set):
+    #   id   the Entra group's object id, once seen     m    sam -> end time of the activation (0 = no end) at the last complete pass
+    #   p    sam -> FIRST time the member was seen without an active assignment (the hold; A2: confirmed 5 - 30 minutes later)
+    #   o / on   principal id -> first time / number of passes it answered "not found" (B2)
+    #   us / uw   NOT KNOWN since / why (code)          ss   no complete pass since (0 = the last pass was complete): the
+    #                                                        recorded end times are stale once that lasts 30 minutes (B4)
+    #   xs / xm / xh / xd / xc   the group is absent (gone, or never seen): since / clock hours seen / last hour / in deleted
+    #   items (1/0) / confirmed at                      rid / rs   another group carries the name: its id / since
+    #   hs / ha / ht   members held since / hold alert delivered / last alert attempt     wa   "waiting" alert delivered
+    return @{ id = ''; m = @{}; p = @{}; o = @{}; on = @{}; us = [long]0; uw = ''; ss = [long]0
+              xs = [long]0; xm = 0; xh = [long]-1; xd = 0; xc = [long]0; rid = ''; rs = [long]0
+              hs = [long]0; ha = [long]0; ht = [long]0; wa = [long]0 }
+}
+function Copy-PimHybridAdGroupMemory {
+    param([hashtable]$Memory)
+    $n = New-PimHybridAdGroupMemory
+    if (-not $Memory) { return $n }
+    foreach ($k in @('id', 'uw', 'rid')) { if ($Memory.ContainsKey($k)) { $n[$k] = "$($Memory[$k])" } }
+    foreach ($k in @('us', 'ss', 'xs', 'xh', 'xc', 'rs', 'hs', 'ha', 'ht', 'wa')) { if ($Memory.ContainsKey($k) -and $null -ne $Memory[$k]) { $n[$k] = [long]$Memory[$k] } }
+    foreach ($k in @('xm', 'xd')) { if ($Memory.ContainsKey($k) -and $null -ne $Memory[$k]) { $n[$k] = [int]$Memory[$k] } }
+    foreach ($k in @('m', 'p', 'o', 'on')) { if ($Memory[$k] -is [hashtable]) { foreach ($s in @($Memory[$k].Keys)) { $n[$k]["$s"] = [long]$Memory[$k][$s] } } }
+    return $n
+}
+function Limit-PimHybridAdMemoryMap {
+    # at most -Max entries. -Oldest: the entries with the SMALLEST value stay (B7: the oldest holds are never the ones
+    # dropped); otherwise the same ones every time (ordinal name order).
+    param([hashtable]$Map, [int]$Max, [switch]$Oldest)
+    if (-not $Map -or $Map.Count -le $Max) { return $Map }
+    $keys = [string[]]@($Map.Keys); [Array]::Sort($keys, [System.StringComparer]::Ordinal)
+    if ($Oldest) { $keys = [string[]]@($keys | Sort-Object @{ Expression = { [long]$Map[$_] } }, @{ Expression = { "$_" } }) }
+    $o = @{}; for ($i = 0; $i -lt $Max; $i++) { $o[$keys[$i]] = $Map[$keys[$i]] }
+    return $o
+}
+
+function Get-PimHybridAdGuardedPlan {
+    <#
+      PURE. One AD group. Takes the plan of Get-PimHybridAdMembershipPlan (-Plan, untouched) and decides which of its
+      removals are made in THIS pass. add / readd / keep / kept pass through unchanged -- adds are never delayed.
+        -Answer   what Entra said for the group in this pass (the reader's -Answer entry; $null = no answer = NOT KNOWN):
+                  @{ state = found|gone|replaced|renamed|unknown; complete; id; altId; why; detail; deleted;
+                     principalFailed (count); principalNotFound (ids) }
+        -Memory   the group's memory from the last pass (New-PimHybridAdGroupMemory). -MemoryReadable $false = the store
+                  could not be read: only a member Entra ITSELF reports as ended is removed. -MemoryStale = no pass for
+                  longer than Get-PimHybridAdStaleMinutes: a RECORDED end time is not trusted in this pass (B4).
+        -Active   the active list the plan was made from
+        -Decision a SuperAdmin's decision for THIS group from the decisions record (Read-PimHybridAdSyncMemory hands over
+                  only a valid one, at most 48 hours old): @{ kind = gone|never-seen|replaced; forId (the Entra id the
+                  decision was made for, '' = never seen); adoptId; remove (account names); by }. It is used only when
+                  the group is in exactly that state IN THIS PASS -- same kind, same remembered id, and Entra saying so
+                  again now. adoptId (replaced): that group is the one behind the AD group from here on. remove: those
+                  accounts, and only those that wait for a SuperAdmin in this pass, are removed. DESIGN.md
+                  "HybridAdSyncMemory decisions record".
+      Returns @{ add; readd; keep; kept; remove[]; held[] { samAccountName; reason; hold }; notes[]; state =
+                 known|not-known|waiting|replaced|memory; kind; reason (the group's line); detail; warning; memory (for
+                 the next pass; $null = do not save) }.
+      hold: confirm (waits for the second pass) | principal | not-known | replaced | superadmin | memory.
+      remove[] is ALWAYS a subset of -Plan.remove (tests/Test-PimHybridAdNoDoubtRemoval.ps1).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Plan, [object[]]$Active = @(), [hashtable]$Answer = $null, [hashtable]$Memory = $null,
+          [bool]$MemoryReadable = $true, [bool]$MemoryStale = $false, [hashtable]$Decision = $null,
+          [datetime]$NowUtc = [datetime]::UtcNow, [string]$CloudSuffix = '', [string]$AdSuffix = '')
+    $now = ConvertTo-PimHybridAdEpoch $NowUtc
+    $max = Get-PimHybridAdMemoryMaxMembers
+    $out = @{ add = @($Plan.add); readd = @($Plan.readd); keep = @($Plan.keep); kept = @($Plan.kept); remove = @(); held = @(); notes = @()
+              state = 'known'; kind = ''; reason = ''; detail = ''; memory = $null; warning = $false }
+    $st = 'unknown'; $complete = $false; $why = ''; $ansId = ''; $altId = ''; $pFailed = 0; $pNotFound = @()
+    if ($Answer) {
+        $st = "$($Answer.state)"; $complete = [bool]$Answer.complete; $why = "$($Answer.why)"; $ansId = "$($Answer.id)".Trim(); $altId = "$($Answer.altId)".Trim()
+        $out.detail = "$($Answer.detail)"
+        if ($null -ne $Answer.principalFailed) { $pFailed = [int]$Answer.principalFailed }
+        $pNotFound = @(@($Answer.principalNotFound) | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    }
+    # what Entra ITSELF says about the members in this pass: active (end time, 0 = none) / listed with an end time that has passed
+    $activeNow = @{}; $endedNow = @{}
+    foreach ($a in @($Active)) {
+        if ($null -eq $a) { continue }
+        $sam = ConvertTo-PimHybridAdAccountName -MailNickname "$($a.mailNickname)" -CloudSuffix $CloudSuffix -AdSuffix $AdSuffix
+        if (-not $sam) { continue }
+        $k = $sam.ToLowerInvariant()
+        if ($a.endUtc) {
+            $e = ConvertTo-PimHybridAdEpoch ([datetime]$a.endUtc)
+            if ($e -le $now) { if (-not $activeNow.ContainsKey($k)) { $endedNow[$k] = [long]$e }; continue }
+            if (-not $activeNow.ContainsKey($k) -or ($activeNow[$k] -ne 0 -and $activeNow[$k] -lt $e)) { $activeNow[$k] = [long]$e }
+        } else { $activeNow[$k] = [long]0 }
+        if ($endedNow.ContainsKey($k)) { $endedNow.Remove($k) }
+    }
+    if (-not $MemoryReadable) {
+        # B6: no memory -- "expected" by a recorded end time and "second pass" cannot be judged
+        $out.state = 'memory'
+        $certain = ($st -eq 'found' -and $complete)
+        foreach ($r in @($Plan.remove)) {
+            $k = "$($r.samAccountName)".ToLowerInvariant()
+            if ($certain -and $endedNow.ContainsKey($k)) { $out.remove += @{ samAccountName = $r.samAccountName; reason = 'no active PIM assignment (Entra ID reports the activation as ended)' } }
+            else { $out.held += @{ samAccountName = $r.samAccountName; hold = 'memory'; reason = 'kept -- the sync''s own record of the last pass could not be read' } }
+        }
+        $out.warning = ($out.held.Count -gt 0)
+        $out.reason = 'the sync''s own record of the last pass could not be read from the store -- only a member whose activation Entra ID itself reports as ended is removed'
+        return $out
+    }
+    $mem = Copy-PimHybridAdGroupMemory -Memory $Memory
+    $next = Copy-PimHybridAdGroupMemory -Memory $Memory
+    # B4: the end times RECORDED for the members are trusted only while the complete passes have not been apart for longer
+    # than Get-PimHybridAdStaleMinutes -- for the whole job (-MemoryStale) or for this group (ss = no complete pass since).
+    # A short spell of trouble does not make them stale: the owner's "the end time has passed meanwhile -> removed as expected".
+    $stale = [bool]$MemoryStale -or ([long]$mem.ss -gt 0 -and ($now - [long]$mem.ss) -gt ((Get-PimHybridAdStaleMinutes) * 60))
+    # the remembered id and the id that answers differ: that is ANOTHER group (A3), whoever called
+    if ($st -eq 'found' -and $mem.id -and $ansId -and $ansId -ne $mem.id) { $st = 'replaced'; $altId = $ansId; $ansId = $mem.id }
+    # a SuperAdmin's decision for this group (already checked for its fields and its age by the reader of the record)
+    $dec = $null
+    if ($Decision -is [hashtable]) {
+        $dec = @{ kind = "$($Decision.kind)".Trim().ToLowerInvariant(); forId = "$($Decision.forId)".Trim(); adoptId = "$($Decision.adoptId)".Trim(); by = "$($Decision.by)".Trim(); remove = @{} }
+        foreach ($dn in @($Decision.remove)) { if ("$dn".Trim()) { $dec.remove["$dn".Trim().ToLowerInvariant()] = $true } }
+        if (($dec.adoptId -and $dec.remove.Count) -or (-not $dec.adoptId -and -not $dec.remove.Count) -or -not $dec.by) {
+            $out.notes += 'a SuperAdmin''s decision is on record for this group but it does not say ONE thing (take the new group, or remove named members) -- not used'
+            $dec = $null
+        }
+    }
+    $decFor = [bool]($dec -and $dec.forId -eq "$($mem.id)".Trim())   # made for the group this AD group is remembered with ('' = never seen)
+    if ($st -eq 'replaced' -and $decFor -and $dec.kind -eq 'replaced' -and $dec.adoptId -and $altId -and $dec.adoptId -eq $altId) {
+        # the decision says the new group is the one behind the AD group: from now on the normal rules, on ITS evidence. The
+        # holds and end times remembered from the OLD group decide nothing here: no unexpected removal in this pass.
+        $st = 'found'; $ansId = $altId; $mem.id = $altId; $mem.p = @{}; $next.p = @{}; $stale = $true
+        $out.notes += "the Entra group $altId is taken as the group behind this AD group (decided by $($dec.by))"
+    }
+    $setHold = { param($any) if ($any) { if ([long]$next.hs -le 0) { $next.hs = $now } } else { $next.hs = [long]0; $next.ha = [long]0; $next.ht = [long]0 } }
+    if ($st -eq 'found' -and $complete) {
+        # ---- FOUND, the read of the active members complete ----
+        # B2: a principal of the active list that could not be read may be ANY member -- unexpected removals wait for it
+        $nextO = @{}; $nextOn = @{}; $orphans = 0; $openNotFound = 0
+        $oMax = Get-PimHybridAdMemoryMaxOrphans
+        foreach ($pp in $pNotFound) {
+            $first = $now; if ($mem.o.ContainsKey($pp)) { $first = [long]$mem.o[$pp] }
+            $cnt = 1; if ($mem.on.ContainsKey($pp)) { $cnt = [math]::Min((Get-PimHybridAdOrphanPasses), [int]$mem.on[$pp] + 1) }
+            if ($nextO.Count -lt $oMax -or $mem.o.ContainsKey($pp)) { $nextO[$pp] = $first; $nextOn[$pp] = [long]$cnt }
+            if ($cnt -ge (Get-PimHybridAdOrphanPasses) -and ($now - $first) -ge ((Get-PimHybridAdOrphanMinutes) * 60)) { $orphans++ } else { $openNotFound++ }
+        }
+        $pDoubt = ($pFailed -gt 0 -or $openNotFound -gt 0)
+        if ($orphans) { $out.notes += "$orphans active assignment(s) in the Entra group are for an account that no longer exists (not found on $(Get-PimHybridAdOrphanPasses) passes over $(Get-PimHybridAdOrphanMinutes) minutes, not in the deleted items) -- ignored" }
+        $minAge = (Get-PimHybridAdConfirmMinMinutes) * 60; $maxAge = (Get-PimHybridAdConfirmMaxMinutes) * 60
+        $nextM = @{}; foreach ($k in @($activeNow.Keys)) { $nextM[$k] = $activeNow[$k] }
+        $nextP = @{}
+        foreach ($r in @($Plan.remove)) {
+            $k = "$($r.samAccountName)".ToLowerInvariant()
+            $rec = $null; if ($mem.m.ContainsKey($k)) { $rec = [long]$mem.m[$k] }
+            # EXPECTED: Entra itself lists the member with an end time that has passed, or the end time RECORDED at the last
+            # complete pass has passed (B4: not after a spell without complete passes -- it may have been extended unseen)
+            $expected = $endedNow.ContainsKey($k) -or (-not $stale -and $null -ne $rec -and $rec -gt 0 -and $rec -le $now)
+            if ($expected) {
+                $out.remove += @{ samAccountName = $r.samAccountName; reason = 'no active PIM assignment (the activation ended)' }
+            } elseif ($pDoubt) {
+                $out.held += @{ samAccountName = $r.samAccountName; hold = 'principal'; reason = 'kept -- an active member of the Entra group could not be read (this account may be that member)' }
+                $nextP[$k] = $(if ($mem.p.ContainsKey($k)) { [long]$mem.p[$k] } else { $now })
+            } elseif ($mem.p.ContainsKey($k)) {
+                $age = $now - [long]$mem.p[$k]
+                if (($age -ge $minAge) -and ($age -le $maxAge)) {
+                    $out.remove += @{ samAccountName = $r.samAccountName; reason = "no active PIM assignment (confirmed by a second pass $([int][math]::Floor($age / 60)) min after the first)" }
+                    $nextP[$k] = [long]$mem.p[$k]
+                } elseif ($age -gt $maxAge) {
+                    $out.held += @{ samAccountName = $r.samAccountName; hold = 'confirm'; reason = "kept -- first seen without an active assignment more than $(Get-PimHybridAdConfirmMaxMinutes) minutes ago; the wait for a second pass starts again" }
+                    $nextP[$k] = $now
+                } else {
+                    $out.held += @{ samAccountName = $r.samAccountName; hold = 'confirm'; reason = "kept -- waiting for a second pass at least $(Get-PimHybridAdConfirmMinMinutes) minutes after $(Format-PimHybridAdEpoch ([long]$mem.p[$k])) (no active PIM assignment)" }
+                    $nextP[$k] = [long]$mem.p[$k]
+                }
+            } else {
+                $out.held += @{ samAccountName = $r.samAccountName; hold = 'confirm'; reason = "kept -- waiting for a second pass at least $(Get-PimHybridAdConfirmMinMinutes) minutes after $(Format-PimHybridAdEpoch $now) (no active PIM assignment)" }
+                $nextP[$k] = $now
+            }
+            # the recorded end time stays while the member is still in AD (a removal that failed, or one that waits) -- but NOT
+            # a stale one: it is dropped here, or the very next pass (seconds later, no longer "stale") would take it as
+            # expected. Without it the member is an unexpected removal and takes the two passes 5 - 30 minutes apart.
+            if (-not $nextM.ContainsKey($k)) { if ($endedNow.ContainsKey($k)) { $nextM[$k] = [long]$endedNow[$k] } elseif ($null -ne $rec -and -not $stale) { $nextM[$k] = $rec } }
+        }
+        if ($nextP.Count -gt $max) {
+            # B7: never dropped silently, and the OLDEST holds are the ones that stay tracked
+            $out.notes += "more than $max members waiting: the rest is not tracked ($($nextP.Count - $max) member(s) stay until the tracked ones are decided)"
+            $out.warning = $true
+        }
+        $next.m = Limit-PimHybridAdMemoryMap -Map $nextM -Max $max
+        $next.p = Limit-PimHybridAdMemoryMap -Map $nextP -Max $max -Oldest
+        $next.o = $nextO; $next.on = $nextOn
+        if ($ansId) { $next.id = $ansId }
+        $next.us = [long]0; $next.uw = ''; $next.ss = [long]0; $next.rid = ''; $next.rs = [long]0; $next.wa = [long]0
+        $next.xs = [long]0; $next.xm = 0; $next.xh = [long]-1; $next.xd = 0; $next.xc = [long]0
+        & $setHold ($out.held.Count -gt 0)
+        # (24): a doubt is a warning at once -- somebody kept, or a member of the Entra group that could not be read
+        # (that person may be missing from the adds)
+        if ($out.held.Count -or $pDoubt) { $out.warning = $true }
+        if ($pDoubt) { $out.reason = "$($pFailed + $openNotFound) active member(s) of the Entra group could not be read -- a member whose activation ended is removed, every other removal waits" }
+        $out.memory = $next
+        return $out
+    }
+    if ($st -eq 'replaced') {
+        # ---- A3: the remembered group is gone (or renamed away) and ANOTHER group carries the name. It is not the old one:
+        # its activations are added (the plan's adds), a member remembered from the old group stays until the end time
+        # recorded for them has passed, and whoever is left waits for a SuperAdmin. No removal rests on the new group's word:
+        # not even an activation IT lists as ended. A SuperAdmin's decision may name members of the waiting ones to remove.
+        if ([long]$next.ss -le 0) { $next.ss = $now }
+        $decRemove = [bool]($decFor -and $dec.kind -eq 'replaced' -and $dec.remove.Count -and $complete)
+        if ($dec -and -not $decRemove -and -not ($decFor -and $dec.kind -eq 'replaced')) { $out.notes += 'a SuperAdmin''s decision is on record for this group, but it was made for another situation (another state or another Entra group) -- not used' }
+        if ("$($next.rid)" -ne $altId -or [long]$next.rs -le 0) { $next.rid = $altId; $next.rs = $now }
+        $next.xs = [long]0; $next.xm = 0; $next.xh = [long]-1; $next.xd = 0; $next.xc = [long]0
+        if ([long]$next.us -le 0) { $next.us = $now }
+        $next.uw = 'replaced'
+        $nextM = @{}; foreach ($k in @($mem.m.Keys)) { $nextM[$k] = [long]$mem.m[$k] }
+        if ($complete) { foreach ($k in @($activeNow.Keys)) { $nextM[$k] = $activeNow[$k] } }
+        $waiting = 0
+        foreach ($r in @($Plan.remove)) {
+            $k = "$($r.samAccountName)".ToLowerInvariant()
+            $rec = $null; if ($mem.m.ContainsKey($k)) { $rec = [long]$mem.m[$k] }
+            if (-not $complete) {
+                $out.held += @{ samAccountName = $r.samAccountName; hold = 'not-known'; reason = 'kept -- the Entra group was replaced by another group of the same name, and that group could not be read' }
+            } elseif ($null -ne $rec -and $rec -gt 0 -and $rec -le $now) {
+                $out.remove += @{ samAccountName = $r.samAccountName; reason = 'no active PIM assignment (the activation ended)' }
+            } elseif ($null -ne $rec -and $rec -gt $now) {
+                $out.held += @{ samAccountName = $r.samAccountName; hold = 'replaced'; reason = "kept until the recorded end time $(Format-PimHybridAdEpoch $rec) -- the Entra group was replaced by another group of the same name" }
+            } elseif ($decRemove -and $dec.remove.ContainsKey($k)) {
+                $out.remove += @{ samAccountName = $r.samAccountName; reason = "removed on a SuperAdmin's approval ($($dec.by)) -- the Entra group was replaced by another group of the same name" }
+            } else {
+                $waiting++
+                $out.held += @{ samAccountName = $r.samAccountName; hold = 'superadmin'; reason = 'waiting for a SuperAdmin: the Entra group was replaced by another group of the same name' }
+            }
+        }
+        $next.m = Limit-PimHybridAdMemoryMap -Map $nextM -Max $max
+        $out.state = 'replaced'; $out.kind = 'replaced'; $out.warning = $true
+        $out.reason = "the Entra group was replaced by another group of the same name (remembered id $($mem.id), now $altId) -- new activations are added, nobody is removed on the new group's word; $waiting member(s) wait for a SuperAdmin"
+        & $setHold $true
+        $out.memory = $next
+        return $out
+    }
+    # ---- NOT KNOWN, RENAMED or GONE: nobody is removed. The holds keep their first sighting (A2); the recorded end times
+    # go stale when this lasts (B4: ss). The ONE removal possible here: a member a SuperAdmin's decision names, in a group
+    # that is CONFIRMED gone / never found and that Entra reports so again in this very pass. ----
+    if ([long]$next.ss -le 0) { $next.ss = $now }
+    # (24) a READ that failed is a warning at once, also when nobody is kept by it (an activation may be missing from the adds)
+    $readFailed = [bool]($st -eq 'found' -or ($st -eq 'unknown' -and $why -ne 'never-seen'))
+    $absent = $false
+    if ($st -eq 'found') {
+        # the group answers (the read of its members was not complete): it is not gone
+        if ($ansId) { $next.id = $ansId }
+        $next.xs = [long]0; $next.xm = 0; $next.xh = [long]-1; $next.xd = 0; $next.xc = [long]0; $next.wa = [long]0
+        $next.rid = ''; $next.rs = [long]0
+    } elseif ($st -eq 'renamed') {
+        $next.xs = [long]0; $next.xm = 0; $next.xh = [long]-1; $next.xd = 0; $next.xc = [long]0; $next.wa = [long]0
+        $next.rid = ''; $next.rs = [long]0
+        $why = 'renamed'
+    } elseif ($st -eq 'gone' -and ($next.id -or $ansId) -and (-not $ansId -or -not $next.id -or $ansId -eq $next.id)) {
+        if (-not $next.id) { $next.id = $ansId }
+        $absent = $true; $why = 'gone-unconfirmed'; $out.kind = 'gone'
+    } elseif ($st -eq 'unknown' -and $why -eq 'never-seen' -and -not $next.id -and -not $ansId) {
+        # B3: defined, in AD, and no Entra group of that name was ever seen
+        $absent = $true; $out.kind = 'never-seen'
+    }
+    if ($absent -and [long]$next.xc -le 0) {
+        if ([long]$next.xs -le 0) { $next.xs = $now; $next.xm = 0; $next.xh = [long]-1 }
+        $hr = [long][math]::Floor($now / 3600)
+        if ($hr -ne [long]$next.xh) { $next.xm = [int]$next.xm + 1; $next.xh = $hr }
+        if ($out.kind -eq 'gone') { $next.xd = [int][bool]$Answer.deleted }
+        $window = $(if ($out.kind -eq 'gone') { Get-PimHybridAdGoneConfirmHours } else { Get-PimHybridAdNeverSeenHours }) * 3600
+        if (($now - [long]$next.xs) -ge $window -and [int]$next.xm -ge (Get-PimHybridAdGoneConfirmMinMarks)) { $next.xc = $now }
+    }
+    if ([long]$next.us -le 0) { $next.us = $now }
+    if (-not $why) { $why = 'no-answer' }
+    $next.uw = $why
+    if ([long]$next.xc -gt 0) {
+        if (-not $out.kind) { $out.kind = $(if ($next.id) { 'gone' } else { 'never-seen' }) }
+        $out.state = 'waiting'
+        $out.reason = $(if ($out.kind -eq 'gone') {
+            "waiting for a SuperAdmin: the Entra group is gone (confirmed $(Format-PimHybridAdEpoch $next.xc), $(if ($next.xd) { 'it is in the deleted items' } else { 'it is not in the deleted items' })) -- the members stay until a SuperAdmin decides"
+        } else {
+            "waiting for a SuperAdmin: no Entra group of this name has been found for $(Get-PimHybridAdNeverSeenHours) hours (since $(Format-PimHybridAdEpoch $next.xs)) -- the members stay until a SuperAdmin decides"
+        })
+        $hr2 = $(if ($out.kind -eq 'gone') { 'waiting for a SuperAdmin: the Entra group is gone' } else { 'waiting for a SuperAdmin: the Entra group was never found' })
+        # $absent: Entra said "gone" / "never found" again in THIS pass (a pass where the read failed applies no decision)
+        $decRemove = [bool]($absent -and $decFor -and $dec.kind -eq $out.kind -and $dec.remove.Count -and ($out.kind -ne 'gone' -or $dec.forId))
+        if ($dec -and -not $decRemove -and -not ($decFor -and $dec.kind -eq $out.kind)) { $out.notes += 'a SuperAdmin''s decision is on record for this group, but it was made for another situation (another state or another Entra group) -- not used' }
+        foreach ($r in @($Plan.remove)) {
+            if ($decRemove -and $dec.remove.ContainsKey("$($r.samAccountName)".ToLowerInvariant())) { $out.remove += @{ samAccountName = $r.samAccountName; reason = "removed on a SuperAdmin's approval ($($dec.by)) -- $($hr2 -replace '^waiting for a SuperAdmin: ', '')" } }
+            else { $out.held += @{ samAccountName = $r.samAccountName; hold = 'superadmin'; reason = $hr2 } }
+        }
+    } else {
+        $out.state = 'not-known'
+        $since = Format-PimHybridAdEpoch $next.us
+        $out.reason = "the Entra group could not be confirmed since $since ($(Get-PimHybridAdWhyText -Code $why -Detail $out.detail)) -- nobody is removed in this pass"
+        foreach ($r in @($Plan.remove)) { $out.held += @{ samAccountName = $r.samAccountName; hold = 'not-known'; reason = "kept -- the Entra group could not be confirmed since $since" } }
+    }
+    $out.warning = ($out.held.Count -gt 0 -or $st -eq 'renamed' -or $readFailed)
+    # the 30-minute alert counts from the first member KEPT (or from the rename: nobody is added from that group)
+    & $setHold ($out.held.Count -gt 0 -or $st -eq 'renamed')
+    $out.memory = $next
+    return $out
+}
+
+# ---- the sync memory in the SQL store (pim.Settings 'HybridAdSyncMemory.<job>.<bucket>') ----
+function Get-PimHybridAdMemoryBucket {
+    # which bucket a group's memory lives in: the same answer on every host and edition (String.GetHashCode is not)
+    param([string]$Name)
+    $h = [long]7
+    foreach ($ch in "$Name".ToLowerInvariant().ToCharArray()) { $h = ($h * 31 + [int]$ch) % 2147483647 }
+    return [int]($h % (Get-PimHybridAdMemoryBucketCount))
+}
+function Get-PimHybridAdEmptyBucketJson { return '{"v":1,"g":{}}' }
+function Get-PimHybridAdEmptyWaitingJson { return '{"v":1,"groups":[]}' }
+function ConvertTo-PimHybridAdMemoryJson {
+    # one bucket (group name in lower case -> memory) -> JSON text that is the SAME for the same content (ordered keys,
+    # empty fields left out), so an unchanged pass writes nothing. Never '' (compare-and-set reads '' as "no value").
+    param([hashtable]$Groups)
+    if (-not $Groups -or -not $Groups.Count) { return (Get-PimHybridAdEmptyBucketJson) }
+    $names = [string[]]@($Groups.Keys); [Array]::Sort($names, [System.StringComparer]::Ordinal)
+    $g = [ordered]@{}
+    foreach ($n in $names) {
+        $mem = $Groups[$n]; $o = [ordered]@{}
+        foreach ($f in @('id', 'rid', 'uw')) { if ("$($mem[$f])") { $o[$f] = "$($mem[$f])" } }
+        foreach ($f in @('m', 'p', 'o', 'on')) {
+            if ($mem[$f] -is [hashtable] -and $mem[$f].Count) {
+                $ks = [string[]]@($mem[$f].Keys); [Array]::Sort($ks, [System.StringComparer]::Ordinal)
+                $mo = [ordered]@{}; foreach ($k in $ks) { $mo[$k] = [long]$mem[$f][$k] }; $o[$f] = $mo
+            }
+        }
+        foreach ($f in @('us', 'ss', 'xs', 'xc', 'rs', 'hs', 'ha', 'ht', 'wa')) { if ([long]$mem[$f] -gt 0) { $o[$f] = [long]$mem[$f] } }
+        if ([long]$mem.xs -gt 0) { $o['xm'] = [int]$mem.xm; $o['xh'] = [long]$mem.xh; $o['xd'] = [int]$mem.xd }
+        if ($o.Count) { $g[$n] = $o }
+    }
+    if (-not $g.Count) { return (Get-PimHybridAdEmptyBucketJson) }
+    return ([ordered]@{ v = 1; g = $g } | ConvertTo-Json -Depth 6 -Compress)
+}
+function ConvertFrom-PimHybridAdMemoryJson {
+    # THROWS on text that is not the memory's JSON (the caller then treats the bucket as empty: holds, never removals)
+    param([string]$Json)
+    $out = @{}
+    if (-not "$Json".Trim()) { return $out }
+    $d = $Json | ConvertFrom-Json
+    if (-not $d -or -not $d.PSObject.Properties['g'] -or -not $d.g) { return $out }
+    foreach ($gp in @($d.g.PSObject.Properties)) {
+        $src = $gp.Value; if ($null -eq $src) { continue }
+        $mem = New-PimHybridAdGroupMemory
+        foreach ($f in @('id', 'uw', 'rid')) { if ($src.PSObject.Properties[$f]) { $mem[$f] = "$($src.$f)" } }
+        foreach ($f in @('us', 'ss', 'xs', 'xh', 'xc', 'rs', 'hs', 'ha', 'ht', 'wa')) { if ($src.PSObject.Properties[$f] -and $null -ne $src.$f) { $mem[$f] = [long]$src.$f } }
+        foreach ($f in @('xm', 'xd')) { if ($src.PSObject.Properties[$f] -and $null -ne $src.$f) { $mem[$f] = [int]$src.$f } }
+        foreach ($f in @('m', 'p', 'o', 'on')) { if ($src.PSObject.Properties[$f] -and $src.$f) { foreach ($mp in @($src.$f.PSObject.Properties)) { $mem[$f]["$($mp.Name)"] = [long]$mp.Value } } }
+        $out["$($gp.Name)".ToLowerInvariant()] = $mem
+    }
+    return $out
+}
+function Get-PimHybridAdMemoryStore {
+    <#
+      The store seam: @{ kind; LoadAll = { param($prefix) -> @{ settingName = jsonText } };
+                         Save = { param($name, $json, $expected) -> $true (written) | $false (the stored value is no longer
+                         $expected: somebody else wrote it) } }  -- compare-and-set, so two processes never overwrite each
+      other's holds (B9). The SQL store, or $NULL when this process has none: there is NO silent fallback to a table in the
+      process (B6) -- the job then runs as "memory not readable". Tests hand in New-PimHybridAdProcessStore explicitly.
+      PLAIN scriptblocks, no closure -- see Publish-PimHybridAdSyncLive.
+    #>
+    $cs = Get-PimHybridAdStoreConnectionString
+    if ($cs -and (Test-PimHybridAdFunction 'Invoke-PimSqlQuery') -and (Test-PimHybridAdFunction 'Set-PimSqlSettingIfUnchanged')) {
+        return @{ kind = 'sql'
+            LoadAll = { param($prefix) $h = @{}; foreach ($r in @(Invoke-PimSqlQuery -ConnectionString (Get-PimHybridAdStoreConnectionString) -Sql 'SELECT Name, ValueJson FROM pim.Settings WHERE Name LIKE @p' -Parameters @{ p = "$prefix%" })) { if ($r -and "$($r.ValueJson)") { $h["$($r.Name)"] = "$($r.ValueJson)" } }; $h }
+            Save = { param($name, $json, $expected) ([int](Set-PimSqlSettingIfUnchanged -ConnectionString (Get-PimHybridAdStoreConnectionString) -Name "$name" -NewValueJson "$json" -ExpectedValueJson "$expected") -gt 0) } }
+    }
+    return $null
+}
+function New-PimHybridAdProcessStore {
+    # TESTS ONLY, and only when handed in with -Store: the same seam over a table in this process, with the compare-and-set
+    param([hashtable]$Table = @{})
+    $script:PimHybridAdTestStoreTable = $Table
+    return @{ kind = 'process'; table = $Table
+        LoadAll = { param($prefix) $h = @{}; foreach ($k in @($script:PimHybridAdTestStoreTable.Keys)) { if ("$k".StartsWith("$prefix", [System.StringComparison]::OrdinalIgnoreCase) -and "$($script:PimHybridAdTestStoreTable[$k])") { $h["$k"] = "$($script:PimHybridAdTestStoreTable[$k])" } }; $h }
+        Save = { param($name, $json, $expected) if ("$($script:PimHybridAdTestStoreTable["$name"])" -cne "$expected") { return $false }; $script:PimHybridAdTestStoreTable["$name"] = "$json"; return $true } }
+}
+function Get-PimHybridAdMemoryPrefix { param([string]$Job) return "HybridAdSyncMemory.$Job." }
+function Read-PimHybridAdSyncMemory {
+    <#
+      The memory of one sync job. Returns @{ ok; reason; stored = @{ settingName = jsonText as the store holds it };
+      groups = @{ lowerName = memory }; lastPass (epoch, 0 = none); adopt = @{ lowerName = Entra id } }.
+      ok = $false: no store, or the store could not be read and this process holds no copy of its own last write -- the
+      pass then removes only what Entra itself reports as ended and writes nothing (B6).
+      A bucket that failed to SAVE (an error, not a lost compare-and-set) is kept in this process and laid over the store's
+      copy -- only while the store still holds the value it was based on.
+      '<prefix>decisions' is READ here and never written -- the record a SuperAdmin's page writes (DESIGN.md
+      "HybridAdSyncMemory decisions record"): { v: 1, groups: { "<group name>": { kind; forEntraGroupId; decidedBy;
+      decidedAtEpoch; adoptEntraGroupId | removeMembers[] } } }. decisions = lower-case group name -> @{ kind; forId;
+      adoptId; remove; by; at } for every entry that is COMPLETE and not older than Get-PimHybridAdDecisionMaxHours (48)
+      at -NowUtc; anything else is left out with a warning line -- a record that cannot be read is no decision at all.
+    #>
+    param([Parameter(Mandatory)][string]$Job, [hashtable]$Store = $null, [datetime]$NowUtc = [datetime]::UtcNow)
+    $bad = @{ ok = $false; reason = ''; stored = @{}; groups = @{}; lastPass = [long]0; decisions = @{} }
+    if (-not $Store) { $bad.reason = 'this process has no store for the sync memory'; return $bad }
+    $prefix = Get-PimHybridAdMemoryPrefix -Job $Job
+    $stored = $null; $liveRead = $true
+    try { $stored = & $Store.LoadAll $prefix; if ($stored -isnot [hashtable]) { throw 'the store gave no table of settings' } }
+    catch {
+        Write-Warning "[$Job] the sync memory could not be read from the store: $($_.Exception.Message)"
+        $stored = $null; $liveRead = $false
+        if ($script:PimHybridAdMemoryLast -is [hashtable] -and $script:PimHybridAdMemoryLast[$Job] -is [hashtable]) { $stored = @{}; foreach ($k in @($script:PimHybridAdMemoryLast[$Job].Keys)) { $stored[$k] = $script:PimHybridAdMemoryLast[$Job][$k] } }
+        if ($null -eq $stored) { $bad.reason = "the store could not be read: $($_.Exception.Message)"; return $bad }
+    }
+    $view = @{}; foreach ($k in @($stored.Keys)) { $view["$k"] = "$($stored[$k])" }
+    if ($script:PimHybridAdMemoryDirty -is [hashtable] -and $script:PimHybridAdMemoryDirty[$Job] -is [hashtable]) {
+        foreach ($k in @($script:PimHybridAdMemoryDirty[$Job].Keys)) {
+            $d = $script:PimHybridAdMemoryDirty[$Job][$k]
+            if ("$($stored[$k])" -ceq "$($d.base)") { $view[$k] = "$($d.json)" } else { $script:PimHybridAdMemoryDirty[$Job].Remove($k) }   # somebody else wrote it meanwhile: theirs counts
+        }
+    }
+    $groups = @{}; $lastPass = [long]0; $decisions = @{}
+    $nowE = ConvertTo-PimHybridAdEpoch $NowUtc
+    foreach ($name in @($view.Keys)) {
+        if ("$name" -match '\.\d+$') {
+            try { $b = ConvertFrom-PimHybridAdMemoryJson -Json "$($view[$name])"; foreach ($k in @($b.Keys)) { $groups[$k] = $b[$k] } }
+            catch { Write-Warning "[$Job] the sync memory '$name' is not readable and is started again (nobody is removed on an empty memory): $($_.Exception.Message)" }
+        } elseif ("$name" -like '*.pass') {
+            try { $pj = "$($view[$name])" | ConvertFrom-Json; if ($pj -and $pj.PSObject.Properties['lc']) { $lastPass = [long]$pj.lc } } catch { $lastPass = [long]0 }
+        } elseif ("$name" -like '*.decisions' -and $liveRead) {
+            # the record is used only when the store itself was read in THIS pass (never from this process's copy of an
+            # earlier read: a decision that was withdrawn meanwhile must not be applied)
+            $skipped = New-Object System.Collections.Generic.List[string]
+            try {
+                $dj = "$($stored[$name])" | ConvertFrom-Json
+                if ($dj -and $dj.PSObject.Properties['groups'] -and $dj.groups) {
+                    foreach ($dp in @($dj.groups.PSObject.Properties)) {
+                        $dv = $dp.Value; $gk = "$($dp.Name)".Trim().ToLowerInvariant()
+                        if (-not $gk -or $null -eq $dv -or -not $dv.PSObject) { continue }
+                        $get = { param($f) if ($dv.PSObject.Properties[$f] -and $null -ne $dv.$f) { $dv.$f } else { $null } }
+                        $kind = "$(& $get 'kind')".Trim().ToLowerInvariant(); $by = "$(& $get 'decidedBy')".Trim()
+                        $atRaw = & $get 'decidedAtEpoch'; $at = [long]0
+                        # a NUMBER of seconds only: date text is not accepted (it reads differently on 5.1 and 7)
+                        if ($atRaw -is [int] -or $atRaw -is [long] -or $atRaw -is [double] -or $atRaw -is [decimal]) { try { $at = [long][math]::Floor([double]$atRaw) } catch { $at = [long]0 } }
+                        $adoptId = "$(& $get 'adoptEntraGroupId')".Trim()
+                        $rm = @(@(& $get 'removeMembers') | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
+                        $why = ''
+                        if ($kind -notin @('gone', 'never-seen', 'replaced')) { $why = 'no valid kind' }
+                        elseif (-not $dv.PSObject.Properties['forEntraGroupId']) { $why = 'no forEntraGroupId' }
+                        elseif (-not $by) { $why = 'no decidedBy' }
+                        elseif ($at -le 0) { $why = 'no decidedAtEpoch (a number of seconds)' }
+                        elseif ($at -gt ($nowE + (Get-PimHybridAdDecisionFutureMinutes) * 60)) { $why = 'dated in the future' }
+                        elseif (($nowE - $at) -gt ((Get-PimHybridAdDecisionMaxHours) * 3600)) { $why = "older than $(Get-PimHybridAdDecisionMaxHours) hours" }
+                        elseif ($adoptId -and $rm.Count) { $why = 'both adoptEntraGroupId and removeMembers' }
+                        elseif (-not $adoptId -and -not $rm.Count) { $why = 'neither adoptEntraGroupId nor removeMembers' }
+                        elseif ($adoptId -and $kind -ne 'replaced') { $why = 'adoptEntraGroupId needs kind = replaced' }
+                        if ($why) { $skipped.Add("$($dp.Name) ($why)"); continue }
+                        $decisions[$gk] = @{ kind = $kind; forId = "$(& $get 'forEntraGroupId')".Trim(); adoptId = $adoptId; remove = $rm; by = $by; at = $at }
+                    }
+                }
+            } catch { $decisions = @{}; Write-PimHybridAdItemLines -Job "$Job-decisions" -Lines @("the SuperAdmin decisions record is not readable and is not used: $($_.Exception.Message)") }
+            if ($skipped.Count) { Write-PimHybridAdItemLines -Job "$Job-decisions" -Lines @("SuperAdmin decision(s) not used: $($skipped.ToArray() -join '; ')") }
+        }
+    }
+    return @{ ok = $true; reason = ''; stored = $stored; groups = $groups; lastPass = $lastPass; decisions = $decisions }
+}
+function Save-PimHybridAdSyncMemory {
+    <#
+      Writes ONLY the values whose text changed, each with compare-and-set against what Read-PimHybridAdSyncMemory saw
+      (-Stored). A lost compare-and-set (another process wrote the bucket) is NOT retried and NOT kept: the next pass reads
+      the newer value -- this pass's new holds in that bucket start again, nothing of the other process is overwritten.
+      Never throws; returns @{ written; lost; failed }.
+    #>
+    param([Parameter(Mandatory)][string]$Job, [Parameter(Mandatory)][hashtable]$Groups, [hashtable]$Stored = @{}, [Parameter(Mandatory)][hashtable]$Store,
+          [string]$WaitingJson = '', [string]$PassJson = '')
+    $prefix = Get-PimHybridAdMemoryPrefix -Job $Job
+    $n = Get-PimHybridAdMemoryBucketCount
+    $empty = Get-PimHybridAdEmptyBucketJson
+    $buckets = @{}
+    foreach ($k in @($Groups.Keys)) { $b = Get-PimHybridAdMemoryBucket -Name "$k"; if (-not $buckets.ContainsKey($b)) { $buckets[$b] = @{} }; $buckets[$b]["$k"] = $Groups[$k] }
+    $want = @{}
+    for ($b = 0; $b -lt $n; $b++) { $want["$prefix$b"] = $(if ($buckets.ContainsKey($b)) { ConvertTo-PimHybridAdMemoryJson -Groups $buckets[$b] } else { $empty }) }
+    if ("$WaitingJson") { $want["${prefix}waiting"] = "$WaitingJson" }
+    if ("$PassJson") { $want["${prefix}pass"] = "$PassJson" }
+    if ($script:PimHybridAdMemoryDirty -isnot [hashtable]) { $script:PimHybridAdMemoryDirty = @{} }
+    if ($script:PimHybridAdMemoryDirty[$Job] -isnot [hashtable]) { $script:PimHybridAdMemoryDirty[$Job] = @{} }
+    if ($script:PimHybridAdMemoryLast -isnot [hashtable]) { $script:PimHybridAdMemoryLast = @{} }
+    $res = @{ written = 0; lost = 0; failed = 0 }
+    $after = @{}; foreach ($name in @($Stored.Keys)) { $after["$name"] = "$($Stored[$name])" }
+    foreach ($name in @($want.Keys)) {
+        $old = ''; if ($Stored.ContainsKey($name)) { $old = "$($Stored[$name])" }
+        if ($want[$name] -ceq $old) { if ($script:PimHybridAdMemoryDirty[$Job].ContainsKey($name)) { $script:PimHybridAdMemoryDirty[$Job].Remove($name) }; continue }
+        if (-not $old -and ($want[$name] -ceq $empty -or $want[$name] -ceq (Get-PimHybridAdEmptyWaitingJson))) { continue }   # nothing stored, nothing to say
+        try {
+            if (& $Store.Save $name $want[$name] $old) { $res.written++; $after[$name] = $want[$name]; if ($script:PimHybridAdMemoryDirty[$Job].ContainsKey($name)) { $script:PimHybridAdMemoryDirty[$Job].Remove($name) } }
+            else { $res.lost++; if ($script:PimHybridAdMemoryDirty[$Job].ContainsKey($name)) { $script:PimHybridAdMemoryDirty[$Job].Remove($name) }; Write-Warning "[$Job] the sync memory '$name' was changed by another process since this pass read it -- not overwritten; the next pass reads the newer value" }
+        } catch { $res.failed++; $script:PimHybridAdMemoryDirty[$Job][$name] = @{ json = $want[$name]; base = $old }; Write-Warning "[$Job] the sync memory '$name' was not written (kept in this process, written at the next pass): $($_.Exception.Message)" }
+    }
+    $script:PimHybridAdMemoryLast[$Job] = $after
+    return $res
 }
 
 function Test-PimHybridAdAccessDenied {
@@ -519,11 +1149,19 @@ function Invoke-PimHybridAdMembershipSync {
     <#
       For each mirrored group: plan from -ActiveByGroup (groupName -> active members) and the live AD members, then (with
       -Apply) add / re-add / remove. A group that cannot be read is reported failed and the others continue.
-      Returns @{ pamEnabled; results[] { group; samAccountName; op; status; reason } }.
+      100.122 F1 -- a REMOVAL is made only on evidence (Get-PimHybridAdGuardedPlan): -Answer is what Entra said for each
+      group in this pass (the reader's -Answer table; a group without an answer is NOT KNOWN = nobody is removed), -Memory
+      the sync memory (lower-case group name -> memory), -MemoryStale "no pass for a long time", -Decisions a SuperAdmin's
+      decisions (lower-case group name -> decision, from Read-PimHybridAdSyncMemory). Adds and re-adds need none of them.
+      Returns @{ pamEnabled; results[] { group; samAccountName; op; status; reason }; memory (for the next pass); states;
+      warning }. Rows of this lane: op 'entra' (the group's own line: status not-known | waiting | replaced | memory | note)
+      and status 'held' (a member kept, with the reason and hold = confirm | principal | not-known | replaced | superadmin |
+      memory). warning = somebody was kept in this pass, or a group needs a look.
     #>
     param(
         [Parameter(Mandatory)][string[]]$Groups, [Parameter(Mandatory)][hashtable]$ActiveByGroup, [Parameter(Mandatory)][hashtable]$Adapter,
         [switch]$Apply, [datetime]$NowUtc = [datetime]::UtcNow, [string[]]$Protected = @(), [object]$PamEnabled = $null,
+        [hashtable]$Answer = $null, [hashtable]$Memory = $null, [bool]$MemoryReadable = $true, [bool]$MemoryStale = $false, [hashtable]$Decisions = $null,
         # 2026-10-04 scale: the live members of every group, read in ONE pass (adapter GetMembersMany); a group not in it is read on its own
         [hashtable]$LiveByGroup = $null
     )
@@ -531,11 +1169,33 @@ function Invoke-PimHybridAdMembershipSync {
     $sfx = Get-PimHybridAdSuffixes
     $cloudSfx = $sfx.cloud; $adSfx = $sfx.ad
     $res = New-Object System.Collections.Generic.List[object]
+    $nextMem = @{}; $states = @{}; $warn = $false
     foreach ($g in @($Groups)) {
+        $gk = "$g".ToLowerInvariant()
+        $gmem = $null; if ($Memory -and $Memory[$gk] -is [hashtable]) { $gmem = $Memory[$gk] }
         try { $live = if ($LiveByGroup -and $LiveByGroup.ContainsKey($g)) { @($LiveByGroup[$g]) } else { @(& $Adapter.GetMembers $g) } }
-        catch { $res.Add([pscustomobject]@{ group = $g; samAccountName = ''; op = 'read'; status = 'failed'; reason = "$($_.Exception.Message)" }); continue }
+        catch {
+            $res.Add([pscustomobject]@{ group = $g; samAccountName = ''; op = 'read'; status = 'failed'; reason = "$($_.Exception.Message)" })
+            # no pass for this group: its memory stays, with "no complete pass since" (B4: once that lasts 30 minutes its
+            # recorded end times are not trusted)
+            if ($gmem) { $keepMem = Copy-PimHybridAdGroupMemory -Memory $gmem; if ([long]$keepMem.ss -le 0) { $keepMem.ss = ConvertTo-PimHybridAdEpoch $NowUtc }; $nextMem[$gk] = $keepMem }
+            continue
+        }
         $act = @(); if ($ActiveByGroup.ContainsKey($g)) { $act = @($ActiveByGroup[$g]) }
         $plan = Get-PimHybridAdMembershipPlan -Active $act -LiveMembers $live -PamEnabled $pam -NowUtc $NowUtc -CloudSuffix $cloudSfx -AdSuffix $adSfx -Protected $Protected
+        # 100.122 F1: which of the plan's removals are made in THIS pass (never more than the plan has; adds untouched)
+        $ans = $null; if ($Answer -and $Answer.ContainsKey($g)) { $ans = $Answer[$g] }
+        $decision = $null; if ($Decisions -and $Decisions[$gk] -is [hashtable]) { $decision = $Decisions[$gk] }
+        $guarded = Get-PimHybridAdGuardedPlan -Plan $plan -Active $act -Answer $ans -Memory $gmem -MemoryReadable $MemoryReadable -MemoryStale $MemoryStale -Decision $decision -NowUtc $NowUtc -CloudSuffix $cloudSfx -AdSuffix $adSfx
+        if ($guarded.memory) { $nextMem[$gk] = $guarded.memory }
+        $states[$g] = $guarded.state
+        if ($guarded.warning) { $warn = $true }
+        if ($guarded.reason -and ($guarded.state -ne 'memory' -or @($guarded.held).Count)) {
+            $res.Add([pscustomobject]@{ group = $g; samAccountName = ''; op = 'entra'; status = $(if ($guarded.state -eq 'known') { 'principal' } else { $guarded.state }); kind = $guarded.kind; reason = $guarded.reason; detail = $guarded.detail })
+        }
+        foreach ($nt in @($guarded.notes)) { $res.Add([pscustomobject]@{ group = $g; samAccountName = ''; op = 'entra'; status = 'note'; kind = ''; reason = "$nt"; detail = '' }) }
+        foreach ($k in $guarded.held) { $res.Add([pscustomobject]@{ group = $g; samAccountName = $k.samAccountName; op = 'none'; status = 'held'; reason = $k.reason; hold = $k.hold }) }
+        $plan.remove = @($guarded.remove)
         foreach ($k in $plan.kept) { $res.Add([pscustomobject]@{ group = $g; samAccountName = $k.samAccountName; op = 'none'; status = 'kept'; reason = $k.reason }) }
         # 2.4.465: members already right are reported too ('member', never counted as a change) -- the live view shows
         # them with current vs expected TTL, as v1's console did every cycle.
@@ -555,7 +1215,44 @@ function Invoke-PimHybridAdMembershipSync {
             }
         }
     }
-    return [pscustomobject]@{ pamEnabled = $pam; results = $res.ToArray() }
+    return [pscustomobject]@{ pamEnabled = $pam; results = $res.ToArray(); memory = $nextMem; states = $states; warning = $warn }
+}
+
+function Invoke-PimHybridAdInstanceBatch {
+    <#
+      The active MEMBER instances of up to N groups through Graph `$batch (20 per round trip). -Items: { name; id }.
+      -Post = { param($bodyJson) } sends one batch and returns the answer (or throws); 3 tries per round trip.
+      Returns groupName -> the list, ONLY for a group whose sub-response is a complete answer: status 200, a body that
+      carries a `value` LIST, no next link (B5: a 200 with any other body is not "nobody is active"). Every other group
+      is simply not in the result -- the caller reads it again on its own.
+      Self-contained (no other function of this file): the parallel reader runs this text in its own runspaces.
+    #>
+    param([object[]]$Items = @(), [Parameter(Mandatory)][scriptblock]$Post, [int]$RetrySeconds = 2)
+    $items = @($Items); $got = @{}
+    for ($k = 0; $k -lt $items.Count; $k += 20) {
+        $slice = @($items[$k..([Math]::Min($k + 20, $items.Count) - 1)])
+        $reqs = for ($r = 0; $r -lt $slice.Count; $r++) {
+            @{ id = "$r"; method = 'GET'; url = "/identityGovernance/privilegedAccess/group/assignmentScheduleInstances?`$filter=groupId eq '$($slice[$r].id)' and accessId eq 'member'" }
+        }
+        $body = @{ requests = @($reqs) } | ConvertTo-Json -Depth 6
+        $resp = $null
+        for ($try = 1; $try -le 3; $try++) {
+            try { $resp = & $Post $body; break }
+            catch { $resp = $null; if ($RetrySeconds -gt 0) { Start-Sleep -Seconds ($RetrySeconds * $try) } }
+        }
+        if (-not $resp -or -not $resp.responses) { continue }   # not answered: every group of this slice is read again by the caller
+        foreach ($rr in @($resp.responses)) {
+            if ($null -eq $rr) { continue }
+            $ix = -1
+            if (-not [int]::TryParse("$($rr.id)", [ref]$ix) -or $ix -lt 0 -or $ix -ge $slice.Count) { continue }
+            if ("$($rr.status)" -ne '200' -or $null -eq $rr.body) { continue }
+            $b = $rr.body
+            if (-not $b.PSObject.Properties['value'] -or $b.value -isnot [array]) { continue }
+            if ($b.PSObject.Properties['@odata.nextLink'] -and "$($b.'@odata.nextLink')") { continue }
+            $got["$($slice[$ix].name)"] = @($b.value)
+        }
+    }
+    return $got
 }
 
 function Get-PimHybridAdActiveGroupMembers {
@@ -571,15 +1268,41 @@ function Get-PimHybridAdActiveGroupMembers {
           fills the id cache instead of one lookup per group;
         * active instances: with -Parallel > 1 on PowerShell 7, the groups are cut into batches of -BatchSize (default 50);
           each batch runs in its own runspace (ForEach-Object -Parallel, at most -Parallel at once) and reads its groups
-          through Graph `$batch (20 per round trip). Anything a batch could not answer (throttled, failed, paged) is read
-          again one by one through -Graph afterwards -- a batch never loses a read;
+          through Graph `$batch (20 per round trip, Invoke-PimHybridAdInstanceBatch). Anything a batch could not answer
+          (throttled, failed, paged, a body without a list) is read again one by one through -Graph afterwards;
         * principals: more than 20 unknown ids are resolved through /directoryObjects/getByIds (1,000 per call).
       With a custom -Graph (tests) or on Windows PowerShell 5.1 the reads stay one by one, exactly as before.
+
+      100.122 F1 -- THE ANSWER PER GROUP (-Answer, a table this function FILLS; a caller that removes members MUST read it:
+      the returned list alone cannot tell "nobody is active" from "the read failed"):
+        @{ state; complete; id; altId; why (a code, Get-PimHybridAdWhyText); detail; deleted; principalFailed;
+           principalNotFound }
+        state found     the group answers under the DEFINED name (looked up by its remembered id, -KnownIds, or found by
+                        name for the first time)
+              gone      the remembered id answers 404, the deleted items answered, and no other group carries the name
+              replaced  the remembered id is gone -- or carries another name now -- and exactly ONE other group carries the
+                        name (altId). The returned list is THAT group's active members: adds only, see the decision.
+              renamed   the remembered id answers under another name and no group carries the defined name. NOTHING is
+                        read for it: nobody is added from a group that does not carry the defined name (B1).
+              unknown   everything else: a failed, throttled or partial read, an empty name search, two groups with one name
+        complete        the read of the active members answered in full (a failed principal read is counted apart:
+                        principalFailed / principalNotFound, B2)
+      A failure is NEVER kept as an answer -- not here and not in the caches.
     #>
     param([Parameter(Mandatory)][string[]]$GroupNames, [scriptblock]$Graph, [string]$Prefix = '',
-          [ValidateRange(1, 1000)][int]$BatchSize = 50, [ValidateRange(1, 64)][int]$Parallel = 1)
+          [ValidateRange(1, 1000)][int]$BatchSize = 50, [ValidateRange(1, 64)][int]$Parallel = 1,
+          # -KnownIds = the Entra object ids the sync remembers (group name -> id). -GraphPost = the seam for the bulk reads
+          # ( { param($path, $body) } ); -BatchPost = the seam for the `$batch round trip ( { param($bodyJson) } ): with it
+          # the batch path runs (one batch after the other) on any edition -- tests drive the production path with it.
+          [hashtable]$KnownIds = $null, [hashtable]$Answer = $null, [scriptblock]$GraphPost = $null, [scriptblock]$BatchPost = $null)
     $realGraph = -not $Graph
     if (-not $Graph) { $Graph = { param($p) @(Invoke-PimGraph -Path $p -All) } }
+    if (-not $GraphPost -and $realGraph) { $GraphPost = { param($p, $b) Invoke-PimGraph -Method POST -Path $p -Body $b } }   # a READ: the only path sent is /directoryObjects/getByIds
+    if ($null -eq $KnownIds) { $KnownIds = @{} }
+    if ($null -eq $Answer) { $Answer = @{} }
+    # decision (29): how a [datetime] end time is read is the install's setting, asked ONCE per pass (one pass never mixes
+    # the two readings); off unless the setting says 'on'
+    $endAsUtc = [bool](Test-PimHybridAdEndTimeAsUtc)
     $out = @{}
     # group ids + users change rarely; the ACTIVE instances are read fresh on every call. With $script:PimHybridAdCacheSeconds
     # set (the continuous loop) the first two are kept that long, so a pass costs ~one Graph call per group (or per batch).
@@ -591,91 +1314,235 @@ function Get-PimHybridAdActiveGroupMembers {
     $userCache = $script:PimHybridAdGraphCache.users
     $names = @($GroupNames | Where-Object { "$_".Trim() } | Select-Object -Unique)
 
-    # (1) group ids
-    $unknown = @($names | Where-Object { -not $groupCache.ContainsKey($_) })
-    if ($unknown.Count -gt 20 -and "$Prefix".Trim()) {
-        $pe = "$Prefix".Trim().Replace("'", "''")
-        try { foreach ($g in @(& $Graph "/groups?`$filter=startswith(displayName,'$pe')&`$select=id,displayName")) { if ("$($g.displayName)".Trim()) { $groupCache["$($g.displayName)"] = "$($g.id)" } } }
-        catch { Write-Warning "[hybrid-ad] group id listing failed, reading ids one by one: $($_.Exception.Message)" }
-        $unknown = @($names | Where-Object { -not $groupCache.ContainsKey($_) })
-        if ($unknown.Count -gt 20) { foreach ($n in $unknown) { $groupCache[$n] = '' } }   # listed and not there = no such group
-    }
-    foreach ($name in $unknown) {
-        $esc = $name.Replace("'", "''")
-        $grp = @(& $Graph "/groups?`$filter=displayName eq '$esc'&`$select=id,displayName")
-        $groupCache[$name] = if ($grp.Count) { "$($grp[0].id)" } else { '' }
+    # What this pass learns per group. state: unknown (no id) | byid (an id to verify) | found | ambiguous | gone | replaced
+    # | renamed. readId = the group whose active members are read ('' = none). complete = that read answered in full.
+    $ev = @{}
+    foreach ($n in $names) { $ev[$n] = @{ id = ''; readId = ''; altId = ''; state = 'unknown'; why = 'never-seen'; rwhy = ''; detail = ''; deleted = $false; complete = $true; pfail = 0; pnf = (New-Object System.Collections.Generic.List[string]) } }
+    $doubt = { param($n, $why, $detail) $e = $ev[$n]; if ($e.complete) { $e.complete = $false; $e.rwhy = "$why"; if (-not $e.detail) { $e.detail = "$detail" } } }
+    $nameSearch = {
+        # the Entra groups carrying exactly this name: @{ ok; ids[]; error }
+        param($n)
+        $esc = "$n".Replace("'", "''")
+        try {
+            $grp = @(& $Graph "/groups?`$filter=displayName eq '$esc'&`$select=id,displayName")
+            if (Test-PimHybridAdPartialItems -Items $grp) { return @{ ok = $false; ids = @(); error = 'the search came back partial (a next link that was not followed)' } }
+            return @{ ok = $true; ids = @($grp | Where-Object { $null -ne $_ } | ForEach-Object { "$($_.id)".Trim() } | Where-Object { $_ } | Select-Object -Unique); error = '' }
+        } catch { return @{ ok = $false; ids = @(); error = "$($_.Exception.Message)" } }
     }
 
-    # (2) active instances
-    $withId = @($names | Where-Object { $groupCache[$_] })
+    # (1) group ids. A remembered id wins: that group is looked up BY ID in (1b); its name is not searched.
+    foreach ($n in $names) {
+        $kid = ''
+        if ($KnownIds.ContainsKey($n)) { $kid = "$($KnownIds[$n])".Trim() }
+        if (-not $kid -and $groupCache.ContainsKey($n)) { $kid = "$($groupCache[$n])".Trim() }
+        if ($kid) { $ev[$n].id = $kid; $ev[$n].state = 'byid'; $ev[$n].why = '' }
+    }
+    $unknown = @($names | Where-Object { -not $ev[$_].id })
+    $listedMany = $false
+    if ($unknown.Count -gt 20 -and "$Prefix".Trim()) {
+        $pe = "$Prefix".Trim().Replace("'", "''")
+        $listOk = $false; $listErr = ''
+        try {
+            $rows = @(& $Graph "/groups?`$filter=startswith(displayName,'$pe')&`$select=id,displayName")
+            if (Test-PimHybridAdPartialItems -Items $rows) { throw 'the listing came back partial (a next link that was not followed)' }
+            $byN = @{}
+            foreach ($g in $rows) {
+                if ($null -eq $g) { continue }
+                $dn = "$($g.displayName)".Trim(); $gid = "$($g.id)".Trim()
+                if (-not $dn -or -not $gid) { continue }
+                if (-not $byN.ContainsKey($dn)) { $byN[$dn] = New-Object System.Collections.Generic.List[string] }
+                if (-not $byN[$dn].Contains($gid)) { $byN[$dn].Add($gid) }
+            }
+            foreach ($n in $unknown) {
+                if (-not $byN.ContainsKey($n)) { continue }
+                $ev[$n].id = $byN[$n][0]; $ev[$n].readId = $ev[$n].id
+                if ($byN[$n].Count -eq 1) { $ev[$n].state = 'found'; $ev[$n].why = ''; $groupCache[$n] = $ev[$n].id }
+                else { $ev[$n].state = 'ambiguous'; $ev[$n].why = 'ambiguous'; $ev[$n].detail = "$($byN[$n].Count) Entra groups are named '$n'" }
+            }
+            $listOk = $true
+        } catch { $listErr = "$($_.Exception.Message)"; Write-Warning "[hybrid-ad] group id listing failed: $listErr" }
+        $unknown = @($names | Where-Object { -not $ev[$_].id })
+        if ($unknown.Count -gt 20) {
+            # Too many to ask one by one. Listed and not there = NOT KNOWN (never "no such group"); a failed listing too.
+            $listedMany = $true
+            if (-not $listOk) { foreach ($n in $unknown) { $ev[$n].why = 'name-lookup-failed'; $ev[$n].detail = $listErr } }
+        }
+    }
+    if (-not $listedMany) {
+        foreach ($name in $unknown) {
+            $s = & $nameSearch $name
+            if (-not $s.ok) { $ev[$name].why = 'name-lookup-failed'; $ev[$name].detail = "$($s.error)"; continue }
+            if (@($s.ids).Count -eq 1) { $ev[$name].id = @($s.ids)[0]; $ev[$name].readId = $ev[$name].id; $ev[$name].state = 'found'; $ev[$name].why = ''; $groupCache[$name] = $ev[$name].id }
+            elseif (@($s.ids).Count -gt 1) { $ev[$name].id = @($s.ids)[0]; $ev[$name].readId = $ev[$name].id; $ev[$name].state = 'ambiguous'; $ev[$name].why = 'ambiguous'; $ev[$name].detail = "$(@($s.ids).Count) Entra groups are named '$name'" }
+            # none: stays unknown / never-seen -- an empty name search is never "gone"
+        }
+    }
+
+    # (1b) a remembered id is VERIFIED in every pass: FOUND only when Entra answers for the id AND the group still carries
+    # the DEFINED name (B1). "Gone" for this pass needs the id itself to answer 404 AND an answer from the deleted items (in
+    # them, or 404 there too) AND no other group of that name. Another group of that name = REPLACED, never the old one (A3).
+    # Anything else -- a failed, throttled or partial read -- leaves the group NOT KNOWN.
+    $toCheck = @($names | Where-Object { $ev[$_].state -eq 'byid' })
+    $exists = @{}; $absent = @{}
+    if ($toCheck.Count -and $GraphPost) {
+        $idsAll = @($toCheck | ForEach-Object { $ev[$_].id } | Select-Object -Unique)
+        for ($c = 0; $c -lt $idsAll.Count; $c += 1000) {
+            $ids = @($idsAll[$c..([Math]::Min($c + 1000, $idsAll.Count) - 1)])
+            try {
+                $r = & $GraphPost '/directoryObjects/getByIds' @{ ids = $ids; types = @('group') }
+                if ($null -eq $r -or -not $r.PSObject.Properties['value']) { throw 'the answer carries no list' }
+                if ($r.PSObject.Properties['@odata.nextLink'] -and "$($r.'@odata.nextLink')") { throw 'the answer came back partial (a next link that was not followed)' }
+                $got = @{}; foreach ($o in @($r.value)) { if ($null -ne $o -and "$($o.id)".Trim() -and $o.PSObject.Properties['displayName']) { $got["$($o.id)".Trim()] = "$($o.displayName)" } }
+                foreach ($i in $ids) { if ($got.ContainsKey($i)) { $exists[$i] = $got[$i] } else { $absent[$i] = $true } }
+            } catch { Write-Warning "[hybrid-ad] the lookup of $($ids.Count) group id(s) failed -- those groups are not known in this pass: $($_.Exception.Message)" }
+        }
+    }
+    foreach ($n in $toCheck) {
+        $e = $ev[$n]; $id = $e.id
+        $liveName = $null; $is404 = $false; $decided = $false
+        if ($exists.ContainsKey($id)) { $liveName = "$($exists[$id])" }
+        elseif ($GraphPost -and -not $absent.ContainsKey($id)) { $e.state = 'unknown'; $e.why = 'exists-failed'; $e.detail = 'the bulk lookup by id failed'; $e.readId = $id; $decided = $true }
+        else {
+            # no bulk seam, or the bulk answer did not carry the id (or its name): ask for the id itself
+            try {
+                $one = @(& $Graph "/groups/$($id)?`$select=id,displayName")[0]
+                if ($one -and "$($one.id)".Trim() -eq $id -and $one.PSObject.Properties['displayName']) { $liveName = "$($one.displayName)" }
+                else { $e.state = 'unknown'; $e.why = 'exists-failed'; $e.detail = 'the lookup by id gave no group with its name'; $e.readId = $id; $decided = $true }
+            } catch {
+                if (Test-PimHybridAdNotFound -Message "$($_.Exception.Message)") { $is404 = $true }
+                else { $e.state = 'unknown'; $e.why = 'exists-failed'; $e.detail = "$($_.Exception.Message)"; $e.readId = $id; $decided = $true }
+            }
+        }
+        if ($decided) { continue }
+        if (-not $is404 -and (Test-PimHybridAdSameName -A $liveName -B $n)) { $e.state = 'found'; $e.readId = $id; continue }
+        $inDeleted = $null
+        if ($is404) {
+            $delErr = ''
+            try { $del = @(& $Graph "/directory/deletedItems/$($id)?`$select=id")[0]; if ($del -and "$($del.id)".Trim() -eq $id) { $inDeleted = $true } else { $delErr = 'the deleted items gave no answer for the id' } }
+            catch { if (Test-PimHybridAdNotFound -Message "$($_.Exception.Message)") { $inDeleted = $false } else { $delErr = "$($_.Exception.Message)" } }
+            if ($null -eq $inDeleted) { $e.state = 'unknown'; $e.why = 'exists-failed'; $e.detail = "the id answers 'not found', the deleted items could not be read: $delErr"; continue }
+        }
+        # the remembered id no longer carries the name (gone, or renamed): who carries it now?
+        $s = & $nameSearch $n
+        if (-not $s.ok) { $e.state = 'unknown'; $e.why = 'name-lookup-failed'; $e.detail = "$($s.error)"; continue }
+        $others = @(@($s.ids) | Where-Object { $_ -ne $id })
+        $what = $(if ($is404) { 'the remembered group is gone' } else { "the Entra group was renamed to '$liveName'" })
+        if ($others.Count -eq 1) { $e.state = 'replaced'; $e.why = 'replaced'; $e.altId = $others[0]; $e.readId = $others[0]; $e.detail = "$what; another group carries the name"; $e.deleted = [bool]$inDeleted }
+        elseif ($others.Count -gt 1) { $e.state = 'ambiguous'; $e.why = 'ambiguous'; $e.readId = $others[0]; $e.detail = "$what; $($others.Count) other Entra groups are named '$n'" }
+        elseif ($is404) { $e.state = 'gone'; $e.why = 'gone-unconfirmed'; $e.deleted = [bool]$inDeleted; if ($groupCache.ContainsKey($n)) { $groupCache.Remove($n) } }
+        elseif (@($s.ids) -contains $id) { $e.state = 'unknown'; $e.why = 'exists-failed'; $e.detail = "the lookup by id says the group is named '$liveName', the search by name still finds it under '$n'" }
+        else { $e.state = 'renamed'; $e.why = 'renamed'; $e.detail = "the Entra group was renamed to '$liveName' and no group carries the defined name"; if ($groupCache.ContainsKey($n)) { $groupCache.Remove($n) } }
+    }
+
+    # (2) active instances -- for every group that has one to read (also a doubtful one: adds are never delayed). Not for a
+    # group that is gone, and not for a RENAMED one: nobody is added from a group that does not carry the defined name.
+    $withId = @($names | Where-Object { $ev[$_].readId })
     $instByGroup = @{}
-    if ($realGraph -and $Parallel -gt 1 -and $PSVersionTable.PSVersion.Major -ge 7 -and $withId.Count -gt 1) {
-        $token = Get-PimRestToken -Resource 'graph'
-        $timeout = 100; if (Get-Command Get-PimRestTimeoutSec -ErrorAction SilentlyContinue) { $timeout = [int](Get-PimRestTimeoutSec) }
+    $useParallel = ($realGraph -and $Parallel -gt 1 -and $PSVersionTable.PSVersion.Major -ge 7 -and $withId.Count -gt 1)
+    if ($BatchPost -or $useParallel) {
         $chunks = New-Object System.Collections.Generic.List[object]
         for ($c = 0; $c -lt $withId.Count; $c += $BatchSize) {
-            $chunks.Add(@($withId[$c..([Math]::Min($c + $BatchSize, $withId.Count) - 1)] | ForEach-Object { [pscustomobject]@{ name = $_; id = $groupCache[$_] } }))
+            $chunks.Add(@($withId[$c..([Math]::Min($c + $BatchSize, $withId.Count) - 1)] | ForEach-Object { [pscustomobject]@{ name = $_; id = $ev[$_].readId } }))
         }
-        $answers = $chunks | ForEach-Object -ThrottleLimit $Parallel -Parallel {
-            $tok = $using:token; $to = $using:timeout
-            $items = @($_); $got = @{}
-            for ($k = 0; $k -lt $items.Count; $k += 20) {
-                $slice = @($items[$k..([Math]::Min($k + 20, $items.Count) - 1)])
-                $reqs = for ($r = 0; $r -lt $slice.Count; $r++) {
-                    @{ id = "$r"; method = 'GET'; url = "/identityGovernance/privilegedAccess/group/assignmentScheduleInstances?`$filter=groupId eq '$($slice[$r].id)' and accessId eq 'member'" }
-                }
-                $body = @{ requests = @($reqs) } | ConvertTo-Json -Depth 6
-                $resp = $null
-                for ($try = 1; $try -le 3; $try++) {
-                    try { $resp = Invoke-RestMethod -Method POST -Uri 'https://graph.microsoft.com/v1.0/$batch' -Headers @{ Authorization = "Bearer $tok" } -Body $body -ContentType 'application/json' -TimeoutSec $to; break }
-                    catch { Start-Sleep -Seconds (2 * $try) }
-                }
-                if (-not $resp -or -not $resp.responses) { continue }
-                foreach ($rr in @($resp.responses)) {
-                    $nm = $slice[[int]$rr.id].name
-                    $paged = $rr.body -and $rr.body.PSObject.Properties['@odata.nextLink'] -and "$($rr.body.'@odata.nextLink')"
-                    if ([int]$rr.status -eq 200 -and -not $paged) { $got[$nm] = @($rr.body.value) }
-                }
+        $answers = @()
+        if ($BatchPost) {
+            $answers = @(foreach ($ch in $chunks) { Invoke-PimHybridAdInstanceBatch -Items @($ch) -Post $BatchPost -RetrySeconds 0 })
+        } else {
+            $token = Get-PimRestToken -Resource 'graph'
+            $timeout = 100; if (Test-PimHybridAdFunction 'Get-PimRestTimeoutSec') { $timeout = [int](Get-PimRestTimeoutSec) }
+            $fnText = "${function:Invoke-PimHybridAdInstanceBatch}"
+            $answers = $chunks | ForEach-Object -ThrottleLimit $Parallel -Parallel {
+                $tok = $using:token; $to = $using:timeout
+                $fn = [scriptblock]::Create($using:fnText)
+                & $fn -Items @($_) -Post { param($body) Invoke-RestMethod -Method POST -Uri 'https://graph.microsoft.com/v1.0/$batch' -Headers @{ Authorization = "Bearer $tok" } -Body $body -ContentType 'application/json' -TimeoutSec $to }
             }
-            $got
         }
-        foreach ($a in @($answers)) { if ($a -is [hashtable]) { foreach ($k in $a.Keys) { $instByGroup[$k] = @($a[$k]) } } }
+        foreach ($a in @($answers)) { if ($a -is [hashtable]) { foreach ($k in @($a.Keys)) { $instByGroup[$k] = @($a[$k]) } } }
     }
     foreach ($name in $withId) {
-        if ($instByGroup.ContainsKey($name)) { continue }   # answered by a batch
-        $instByGroup[$name] = @(& $Graph "/identityGovernance/privilegedAccess/group/assignmentScheduleInstances?`$filter=groupId eq '$($groupCache[$name])' and accessId eq 'member'")
+        if ($instByGroup.ContainsKey($name)) { continue }   # answered by a batch (status 200, a value list, no next link -- anything else is read again here)
+        # 100.122 F1: a failed or partial read is NOT "nobody is active" -- the group's answer is then not complete
+        try {
+            $items = @(& $Graph "/identityGovernance/privilegedAccess/group/assignmentScheduleInstances?`$filter=groupId eq '$($ev[$name].readId)' and accessId eq 'member'")
+            if (Test-PimHybridAdPartialItems -Items $items) {
+                & $doubt $name 'instances-partial' 'the read came back partial (a next link that was not followed)'
+                $items = @($items | Where-Object { $null -ne $_ -and $_.PSObject.Properties['principalId'] })
+            }
+            $instByGroup[$name] = $items
+        } catch { $instByGroup[$name] = @(); & $doubt $name 'instances-failed' "$($_.Exception.Message)" }
     }
 
     # (3) principals
-    $newIds = @($instByGroup.Values | ForEach-Object { @($_) } | ForEach-Object { "$($_.principalId)" } | Where-Object { $_ -and -not $userCache.ContainsKey($_) } | Select-Object -Unique)
-    if ($realGraph -and $newIds.Count -gt 20) {
+    $newIds = @($instByGroup.Values | ForEach-Object { @($_) } | Where-Object { $null -ne $_ } | ForEach-Object { "$($_.principalId)" } | Where-Object { $_ -and -not $userCache.ContainsKey($_) } | Select-Object -Unique)
+    if ($GraphPost -and $newIds.Count -gt 20) {
         for ($c = 0; $c -lt $newIds.Count; $c += 1000) {
             $ids = @($newIds[$c..([Math]::Min($c + 1000, $newIds.Count) - 1)])
             try {
-                $r = Invoke-PimGraph -Method POST -Path '/directoryObjects/getByIds' -Body @{ ids = $ids; types = @('user', 'group') }
-                foreach ($o in @($r.value)) { $userCache["$($o.id)"] = $(if ("$($o.'@odata.type')" -eq '#microsoft.graph.user') { $o } else { $null }) }
+                $r = & $GraphPost '/directoryObjects/getByIds' @{ ids = $ids; types = @('user', 'group') }
+                # only what the answer CARRIES is kept: an id it left out is read on its own below (never "not a user")
+                foreach ($o in @($r.value)) {
+                    if ($null -eq $o -or -not "$($o.id)".Trim()) { continue }
+                    if ("$($o.'@odata.type')" -eq '#microsoft.graph.user') { if ($o.PSObject.Properties['mailNickname']) { $userCache["$($o.id)"] = $o } }
+                    elseif ("$($o.'@odata.type')") { $userCache["$($o.id)"] = $null }
+                }
             } catch { Write-Warning "[hybrid-ad] bulk principal read failed, reading them one by one: $($_.Exception.Message)" }
         }
     }
     foreach ($name in $names) {
-        if (-not $groupCache[$name]) { $out[$name] = @(); continue }
+        $out[$name] = @()
+        if (-not $instByGroup.ContainsKey($name)) { continue }   # nothing was read for it (no id, gone, renamed)
+        $e = $ev[$name]
         $list = New-Object System.Collections.Generic.List[object]
         foreach ($i in @($instByGroup[$name])) {
-            $principal = "$($i.principalId)"; if (-not $principal) { continue }
+            if ($null -eq $i) { & $doubt $name 'instances-partial' 'the list of active assignments carries an empty item'; continue }   # B5
+            $principal = "$($i.principalId)".Trim()
+            if (-not $principal) { & $doubt $name 'instances-partial' 'an active assignment came back without its principal id'; continue }
             if (-not $userCache.ContainsKey($principal)) {
-                $u = $null
+                # 100.122 F1 (case 1, B2): a principal that could not be READ is not "not active", and the failure is NOT
+                # cached. It is COUNTED for the group (principalFailed, or principalNotFound for a 404 the deleted items do
+                # not explain): the decision then makes no unexpected removal there -- this principal may be anybody.
+                # (Until 2026-10-13: `catch { $u = $null }`, cached -- the person left the AD group while the activation ran.)
+                $u = $null; $answered = $false
                 # /directoryObjects, not /users: a nested GROUP principal is normal here, and /users answered it with a 404
                 # that filled the worker log every pass (seen live 2026-09-29). The type decides -- a group has a mailNickname too.
-                try { $u = @(& $Graph "/directoryObjects/$($principal)?`$select=id,mailNickname,userPrincipalName")[0] } catch { $u = $null }
+                try {
+                    $u = @(& $Graph "/directoryObjects/$($principal)?`$select=id,mailNickname,userPrincipalName")[0]
+                    if ($null -ne $u) { $answered = $true } else { $e.pfail++; if (-not $e.detail) { $e.detail = "the read of principal $principal gave nothing" } }
+                } catch {
+                    $pmsg = "$($_.Exception.Message)"
+                    if (Test-PimHybridAdNotFound -Message $pmsg) {
+                        # the id answers 404: an ANSWER only when the deleted items carry it (a deleted principal)
+                        $inDel = $null
+                        try { $dp = @(& $Graph "/directory/deletedItems/$($principal)?`$select=id")[0]; if ($dp -and "$($dp.id)".Trim() -eq $principal) { $inDel = $true } }
+                        catch { if (Test-PimHybridAdNotFound -Message "$($_.Exception.Message)") { $inDel = $false } }
+                        if ($inDel -eq $true) { $answered = $true; $u = $null }
+                        elseif ($inDel -eq $false) { if (-not $e.pnf.Contains($principal)) { $e.pnf.Add($principal) } }   # not found anywhere: 3 passes over 30 minutes make it "no longer exists"
+                        else { $e.pfail++ }
+                    } else { $e.pfail++ }
+                    if (-not $answered -and -not $e.detail) { $e.detail = $pmsg }
+                }
+                if (-not $answered) { continue }
                 if ($u -and "$($u.'@odata.type')" -and "$($u.'@odata.type')" -ne '#microsoft.graph.user') { $u = $null }
+                elseif ($u -and -not $u.PSObject.Properties['mailNickname']) { $e.pfail++; if (-not $e.detail) { $e.detail = "the read of principal $principal came back without its mail nickname" }; continue }
                 $userCache[$principal] = $u
             }
             $u = $userCache[$principal]
-            if (-not $u -or -not "$($u.mailNickname)".Trim()) { continue }   # not a user (nested group) -- skipped, as in v1
-            $end = $null; if ("$($i.endDateTime)".Trim()) { $end = [datetimeoffset]::Parse("$($i.endDateTime)", [Globalization.CultureInfo]::InvariantCulture).UtcDateTime }
+            if (-not $u -or -not "$($u.mailNickname)".Trim()) { continue }   # an ANSWER: not a user (nested group) or deleted -- skipped, as in v1
+            $end = $null
+            try { $end = ConvertTo-PimHybridAdEndUtc -Value $i.endDateTime -AsUtc $endAsUtc }
+            catch { & $doubt $name 'instances-partial' "an end time could not be read ('$($i.endDateTime)')"; continue }
             $list.Add([pscustomobject]@{ mailNickname = "$($u.mailNickname)"; endUtc = $end })
         }
         $out[$name] = $list.ToArray()
+    }
+    # the answer per group: FOUND + complete is the only one an unexpected removal may rest on
+    foreach ($name in $names) {
+        $e = $ev[$name]
+        $state = $(if ($e.state -in @('found', 'gone', 'replaced', 'renamed')) { $e.state } else { 'unknown' })
+        $why = $(if ($state -in @('found', 'replaced') -and -not $e.complete) { "$($e.rwhy)" } elseif ($state -eq 'found') { '' } else { "$($e.why)" })
+        $Answer[$name] = @{ state = $state; complete = [bool]($state -in @('found', 'replaced') -and $e.complete); why = $why; detail = "$($e.detail)"
+            id = $(if ($e.state -eq 'ambiguous' -and -not $KnownIds.ContainsKey($name)) { '' } else { "$($e.id)" }); altId = "$($e.altId)"; deleted = [bool]$e.deleted
+            principalFailed = [int]$e.pfail; principalNotFound = @($e.pnf.ToArray()) }
     }
     return $out
 }
@@ -701,7 +1568,7 @@ function Get-PimHybridAdMirroredDefinitions {
     }
     $fromStore = ($null -eq $Rows)
     if ($null -eq $Rows) {
-        if (-not (Get-Command Get-PimDesiredRows -ErrorAction SilentlyContinue)) { return @{ ok = $false; rows = @(); pattern = $pattern; reason = 'the engine core (Get-PimDesiredRows) is not loaded on this worker' } }
+        if (-not (Test-PimHybridAdFunction 'Get-PimDesiredRows')) { return @{ ok = $false; rows = @(); pattern = $pattern; reason = 'the engine core (Get-PimDesiredRows) is not loaded on this worker' } }
         $all = New-Object System.Collections.Generic.List[object]
         foreach ($e in $script:PimHybridAdGroupEntities) {
             foreach ($r in @(Get-PimDesiredRows -Entity $e)) { if ($null -ne $r) { $all.Add($r) } }
@@ -776,7 +1643,12 @@ function Invoke-PimHybridAdSyncJob {
           # 'servers' = only the per-server groups, 'all' = everything (the original single loop).
           [ValidateSet('all', 'critical', 'servers')][string]$Lane = 'all',
           # $null = read the server lane's liveness stamp; tests pass it
-          [object]$ServersLaneAlive = $null)
+          [object]$ServersLaneAlive = $null,
+          # 100.122 F1 seams (tests): -Store = the sync memory's store (Get-PimHybridAdMemoryStore by default: the SQL store,
+          # or none -- never a table in the process), -GraphPost / -BatchPost = the bulk-read and `$batch seams of the
+          # reader, -Alert = { param($guardId, $title, $detail, $action, $count, $now) } returning $true when DELIVERED
+          # (default: the guard-trip mechanism, Invoke-PimGuardTrip).
+          [hashtable]$Store = $null, [scriptblock]$GraphPost = $null, [scriptblock]$BatchPost = $null, [scriptblock]$Alert = $null)
     $defs = Get-PimHybridAdMirroredDefinitions -Rows $Rows
     if (-not $defs.ok) { return [pscustomobject]@{ ran = $false; unimplemented = $true; detail = "unimplemented:hybrid-ad-sync -- $($defs.reason)"; whatIf = [bool]$WhatIf } }
     $jobName = if ($Lane -eq 'servers') { 'hybrid-ad-sync-servers' } else { 'hybrid-ad-sync' }
@@ -816,7 +1688,18 @@ function Invoke-PimHybridAdSyncJob {
     $bs = 50; [void][int]::TryParse("$(Get-PimHybridAdSetting -Name 'HybridAdSyncBatchSize' -Default '50')", [ref]$bs); if ($bs -lt 1) { $bs = 50 }
     $par = 8; [void][int]::TryParse("$(Get-PimHybridAdSetting -Name 'HybridAdSyncParallel' -Default '8')", [ref]$par); if ($par -lt 1) { $par = 1 }
     $prefix = (("$($defs.pattern)" -split '\*')[0]).Trim()
-    $gArgs = @{ GroupNames = $present; Prefix = $prefix; BatchSize = [Math]::Min(1000, $bs); Parallel = [Math]::Min(64, $par) }; if ($Graph) { $gArgs['Graph'] = $Graph }
+    # 100.122 F1: the sync memory (the Entra ids once seen, the last complete active list, who waits since when) -- from
+    # the store. No store, or a store that cannot be read in a fresh process = "memory not readable" (B6): a warning, and
+    # only a member whose activation Entra itself reports as ended is removed.
+    if (-not $Store) { $Store = Get-PimHybridAdMemoryStore }
+    $memRead = Read-PimHybridAdSyncMemory -Job $jobName -Store $Store -NowUtc $NowUtc
+    $nowE = ConvertTo-PimHybridAdEpoch $NowUtc
+    # B4: no pass of this job for longer than the window = every recorded end time is stale in this pass
+    $memStale = [bool]($memRead.ok -and ([long]$memRead.lastPass -le 0 -or ($nowE - [long]$memRead.lastPass) -gt ((Get-PimHybridAdStaleMinutes) * 60)))
+    $knownIds = @{}; foreach ($pn in $present) { $pm = $memRead.groups[$pn.ToLowerInvariant()]; if ($pm -is [hashtable] -and "$($pm.id)".Trim()) { $knownIds[$pn] = "$($pm.id)".Trim() } }
+    $answer = @{}
+    $gArgs = @{ GroupNames = $present; Prefix = $prefix; BatchSize = [Math]::Min(1000, $bs); Parallel = [Math]::Min(64, $par); KnownIds = $knownIds; Answer = $answer }
+    if ($Graph) { $gArgs['Graph'] = $Graph }; if ($GraphPost) { $gArgs['GraphPost'] = $GraphPost }; if ($BatchPost) { $gArgs['BatchPost'] = $BatchPost }
     $active = Get-PimHybridAdActiveGroupMembers @gArgs
     # AD: the server lane reads every server group's members in ONE paged LDAP read (adapter GetMembersMany over the server
     # pattern); the critical lane reads its few groups one by one (member DNs cached either way).
@@ -825,15 +1708,221 @@ function Invoke-PimHybridAdSyncJob {
         try { $liveMap = & $Adapter.GetMembersMany (Get-PimHybridAdServerGroupName -Server '*') } catch { Write-Warning "[hybrid-ad] bulk member read failed, reading groups one by one: $($_.Exception.Message)"; $liveMap = $null }
     }
     $prot = @("$(Get-PimHybridAdSetting -Name 'HybridAdProtectedMembers' -Default '')" -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    $r = Invoke-PimHybridAdMembershipSync -Groups $present -ActiveByGroup $active -Adapter $Adapter -Apply:(-not $WhatIf) -NowUtc $NowUtc -Protected $prot -LiveByGroup $liveMap
+    $r = Invoke-PimHybridAdMembershipSync -Groups $present -ActiveByGroup $active -Adapter $Adapter -Apply:(-not $WhatIf) -NowUtc $NowUtc -Protected $prot -LiveByGroup $liveMap -Answer $answer -Memory $memRead.groups -MemoryReadable ([bool]$memRead.ok) -MemoryStale $memStale -Decisions $memRead.decisions
+    $heldRows = @($r.results | Where-Object { $_.status -eq 'held' })
+    $groupRows = @($r.results | Where-Object { $_.op -eq 'entra' -and $_.status -ne 'note' })
+    $guardNote = ''; $waitList = @()
+    if ($memRead.ok) {
+        if ($script:PimHybridAdMemoryDown -is [hashtable] -and $script:PimHybridAdMemoryDown.ContainsKey($jobName)) { $script:PimHybridAdMemoryDown.Remove($jobName) }
+        # The memory for the next pass. A defined group that was not synced in this pass (not in AD yet) keeps what it had; a
+        # group that is no longer defined in this lane is dropped -- the memory never outgrows the definitions.
+        $nextAll = @{}
+        foreach ($dn in $names) { $dk = $dn.ToLowerInvariant(); if ($r.memory[$dk] -is [hashtable]) { $nextAll[$dk] = $r.memory[$dk] } elseif ($memRead.groups[$dk] -is [hashtable]) { $nextAll[$dk] = $memRead.groups[$dk] } }
+        try { $guardNote = Invoke-PimHybridAdGuardAlerts -Job $jobName -Groups $present -Memory $nextAll -Results $r.results -NowUtc $NowUtc -WhatIf:$WhatIf -Alert $Alert }
+        catch { Write-Warning "[$jobName] the guard alert was not raised: $($_.Exception.Message)" }
+        $waitList = @(Get-PimHybridAdWaitingList -Groups $present -Memory $nextAll -Results $r.results)
+        $passJson = '{"v":1,"lc":' + ([long]([math]::Floor($nowE / 600)) * 600) + '}'   # the last pass, to 10 minutes: one small write per 10 minutes
+        [void](Save-PimHybridAdSyncMemory -Job $jobName -Groups $nextAll -Stored $memRead.stored -Store $Store -WaitingJson (ConvertTo-PimHybridAdWaitingJson -List $waitList) -PassJson $passJson)
+    } else {
+        try { $guardNote = Invoke-PimHybridAdMemoryDownAlert -Job $jobName -Reason "$($memRead.reason)" -Held $heldRows.Count -NowUtc $NowUtc -WhatIf:$WhatIf -Alert $Alert }
+        catch { Write-Warning "[$jobName] the guard alert was not raised: $($_.Exception.Message)" }
+    }
+    # the item lines: stable text only (a group's error text changes from pass to pass and would print every few seconds)
     Write-PimHybridAdItemLines -Job $jobName -Lines @($r.results | Where-Object { $_.status -ne 'member' } | ForEach-Object { "{0,-8} {1,-7} {2} / {3}  {4}" -f $_.status, $_.op, $_.group, $_.samAccountName, $_.reason })
     $c = { param($op) @($r.results | Where-Object { $_.op -eq $op -and ($_.status -eq 'done' -or $_.status -eq 'plan') }).Count }
     $failed = @($r.results | Where-Object { $_.status -eq 'failed' })
     $wi = if ($WhatIf) { ' (whatif)' } else { '' }
     $ttl = if ($r.pamEnabled) { 'on' } else { 'off -- the AD PAM feature is not enabled' }
-    $detail = ("$($jobName)$($laneNote){0}: groups={1} add={2} readd={3} remove={4} kept={5} failed={6} (TTL membership: {7}){8}" -f $wi, $present.Count, (& $c 'add'), (& $c 'readd'), (& $c 'remove'), @($r.results | Where-Object { $_.status -eq 'kept' }).Count, $failed.Count, $ttl, $missText)
+    # A1: somebody kept, or a group that needs a look = a WARNING for the job (amber: not green, not failed)
+    $warning = [bool]($r.warning -or -not $memRead.ok)
+    $heldText = ''
+    if ($warning -or $heldRows.Count -or $groupRows.Count) {
+        $hc = { param($h) @($heldRows | Where-Object { $_.hold -eq $h }).Count }
+        $gc = { param($s) @($groupRows | Where-Object { $_.status -eq $s }).Count }
+        $bits = New-Object System.Collections.Generic.List[string]
+        if ((& $hc 'confirm') -gt 0) { $bits.Add("waiting for a second pass to confirm: $(& $hc 'confirm')") }
+        if ((& $hc 'not-known') -gt 0 -or (& $gc 'not-known') -gt 0) { $bits.Add("Entra group not confirmed: $(& $hc 'not-known') in $(& $gc 'not-known') group(s)") }
+        if ((& $hc 'principal') -gt 0) { $bits.Add("an active member of the Entra group could not be read: $(& $hc 'principal')") }
+        if ((& $hc 'replaced') -gt 0) { $bits.Add("kept until their recorded end time (Entra group replaced): $(& $hc 'replaced')") }
+        if ((& $hc 'superadmin') -gt 0) { $bits.Add("waiting for a SuperAdmin: $(& $hc 'superadmin')") }
+        if (-not $memRead.ok) { $bits.Add("the sync's own memory could not be read ($($memRead.reason)): $(& $hc 'memory') kept") }
+        $heldText = "; $(if ($warning) { 'WARNING -- ' })NOT removed on a doubt: $($heldRows.Count) member(s)$(if ($bits.Count) { ' -- ' + ($bits.ToArray() -join ', ') })"
+        if ($waitList.Count) {
+            $heldText += "; groups waiting for a SuperAdmin: " + (@($waitList | Select-Object -First 10 | ForEach-Object { "$($_.group) ($($_.memberCount) member(s), $($_.kindText))" }) -join ', ') + $(if ($waitList.Count -gt 10) { " ... and $($waitList.Count - 10) more" } else { '' })
+        }
+        if ($guardNote) { $heldText += "; $guardNote" }
+    }
+    $detail = ("$($jobName)$($laneNote){0}: groups={1} add={2} readd={3} remove={4} kept={5} failed={6} (TTL membership: {7}){8}{9}" -f $wi, $present.Count, (& $c 'add'), (& $c 'readd'), (& $c 'remove'), @($r.results | Where-Object { $_.status -eq 'kept' }).Count, $failed.Count, $ttl, $missText, $heldText)
     if ($failed.Count) { throw ("$detail -- " + (@($failed | ForEach-Object { "$($_.group)/$($_.samAccountName) $($_.op): $($_.reason)" }) -join '; ')) }
-    return [pscustomobject]@{ ran = $true; whatIf = [bool]$WhatIf; groups = $present.Count; groupNames = $present; missingGroups = $missing; pamEnabled = $r.pamEnabled; results = $r.results; detail = $detail }
+    return [pscustomobject]@{ ran = $true; whatIf = [bool]$WhatIf; groups = $present.Count; groupNames = $present; missingGroups = $missing; pamEnabled = $r.pamEnabled; results = $r.results; detail = $detail
+        # PIM 100.75 convention: warning = $true -> the run is recorded 'warning'. No warningSummary: a warning run is shown,
+        # not mailed -- the mail is the guard alert after 30 minutes (Invoke-PimHybridAdGuardAlerts).
+        warning = $warning; warningKind = $(if ($warning) { 'hybrid-ad-kept-on-doubt' } else { '' })
+        held = $heldRows.Count; notKnownGroups = @($groupRows | Where-Object { $_.status -eq 'not-known' } | ForEach-Object { $_.group })
+        waitingGroups = @($waitList | ForEach-Object { $_.group }); waiting = $waitList }
+}
+
+function Get-PimHybridAdWaitingList {
+    <#
+      PURE. The AD groups that wait for a SuperAdmin after this pass, each with the members that stay:
+        gone        the Entra group is CONFIRMED gone (owner 2026-10-13, decision (13): "Wait for a SuperAdmin")
+        never-seen  no Entra group of that name was ever seen, for 24 hours (B3)
+        replaced    another Entra group carries the name now (A3) -- a SuperAdmin says whether it is the one
+      Nothing removes these members automatically, also not after a wait.
+    #>
+    param([string[]]$Groups = @(), [hashtable]$Memory = @{}, [object[]]$Results = @())
+    $iso = { param($e) if ([long]$e -le 0) { '' } else { (New-Object datetime 1970, 1, 1, 0, 0, 0, ([System.DateTimeKind]::Utc)).AddSeconds([long]$e).ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture) } }
+    $max = Get-PimHybridAdWaitingMaxMembers
+    $list = New-Object System.Collections.Generic.List[object]
+    $sorted = [string[]]@($Groups); [Array]::Sort($sorted, [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($g in $sorted) {
+        $m = $Memory[$g.ToLowerInvariant()]
+        if ($m -isnot [hashtable]) { continue }
+        $kind = ''
+        if ([long]$m.xc -gt 0) { $kind = $(if ("$($m.id)") { 'gone' } else { 'never-seen' }) } elseif ("$($m.rid)") { $kind = 'replaced' }
+        if (-not $kind) { continue }
+        $mem = [string[]]@($Results | Where-Object { $_.group -eq $g -and $_.status -eq 'held' -and $_.hold -eq 'superadmin' } | ForEach-Object { "$($_.samAccountName)" } | Where-Object { $_ })
+        [Array]::Sort($mem, [System.StringComparer]::OrdinalIgnoreCase)
+        # a group that is gone / was never found and holds NOBODY has nothing for a person to decide: not listed, no alert
+        if (-not $mem.Count -and $kind -ne 'replaced') { continue }
+        $text = switch ($kind) { 'gone' { 'the Entra group is gone' } 'never-seen' { 'the Entra group was never found' } default { 'the Entra group was replaced by another group of the same name' } }
+        $list.Add([pscustomobject][ordered]@{ group = $g; kind = $kind; kindText = $text; state = 'waiting-for-superadmin'; entraGroupId = "$($m.id)"; replacementGroupId = "$($m.rid)"
+            sinceUtc = (& $iso $(if ($kind -eq 'replaced') { $m.rs } else { $m.xs })); confirmedUtc = (& $iso $m.xc); inDeletedItems = [bool]$m.xd
+            memberCount = $mem.Count; members = @($mem | Select-Object -First $max) })
+    }
+    return $list.ToArray()
+}
+function ConvertTo-PimHybridAdWaitingJson {
+    # the waiting list as the store value 'HybridAdSyncMemory.<job>.waiting': same content = same text (an unchanged pass writes nothing)
+    param([object[]]$List = @())
+    if (-not @($List).Count) { return (Get-PimHybridAdEmptyWaitingJson) }
+    $rows = @(foreach ($x in @($List)) { [ordered]@{ group = $x.group; kind = $x.kind; state = $x.state; entraGroupId = $x.entraGroupId; replacementGroupId = $x.replacementGroupId; sinceUtc = $x.sinceUtc; confirmedUtc = $x.confirmedUtc; inDeletedItems = [bool]$x.inDeletedItems; memberCount = [int]$x.memberCount; members = @($x.members) } })
+    return ([ordered]@{ v = 1; groups = @($rows) } | ConvertTo-Json -Depth 6 -Compress)
+}
+function Get-PimHybridAdWaitingGroups {
+    <#
+      B10 -- the READER of the waiting record: the AD groups that wait for a SuperAdmin, for a page (and for anything that
+      wants to show the way out). One object per group: job; group; kind (gone | never-seen | replaced); entraGroupId;
+      replacementGroupId; sinceUtc; confirmedUtc; inDeletedItems; memberCount; members. @() when nothing waits or there is
+      no store. The ways out: restore the Entra group (it is found by its id again and the sync continues by itself), or
+      a SuperAdmin's decision in 'HybridAdSyncMemory.<job>.decisions' (take the replacement group as the one, or remove
+      named members) -- format and rules: DESIGN.md "HybridAdSyncMemory decisions record"; read by
+      Read-PimHybridAdSyncMemory, applied by Get-PimHybridAdGuardedPlan. The sync never writes that record.
+    #>
+    param([string[]]$Job = @('hybrid-ad-sync', 'hybrid-ad-sync-servers'), [hashtable]$Store = $null)
+    if (-not $Store) { $Store = Get-PimHybridAdMemoryStore }
+    if (-not $Store) { return @() }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($j in @($Job)) {
+        $prefix = Get-PimHybridAdMemoryPrefix -Job $j
+        $raw = $null; try { $raw = & $Store.LoadAll $prefix } catch { Write-Warning "[$j] the waiting record could not be read: $($_.Exception.Message)"; continue }
+        if ($raw -isnot [hashtable] -or -not "$($raw["${prefix}waiting"])") { continue }
+        try {
+            $d = "$($raw["${prefix}waiting"])" | ConvertFrom-Json
+            foreach ($x in @($d.groups)) {
+                if ($null -eq $x) { continue }
+                $out.Add([pscustomobject][ordered]@{ job = $j; group = "$($x.group)"; kind = "$($x.kind)"; entraGroupId = "$($x.entraGroupId)"; replacementGroupId = "$($x.replacementGroupId)"
+                    sinceUtc = $x.sinceUtc; confirmedUtc = $x.confirmedUtc; inDeletedItems = [bool]$x.inDeletedItems; memberCount = [int]$x.memberCount; members = @($x.members) })
+            }
+        } catch { Write-Warning "[$j] the waiting record is not readable: $($_.Exception.Message)" }
+    }
+    return $out.ToArray()
+}
+
+function Get-PimHybridAdDefaultAlert {
+    # The alert call: the existing guard-trip mechanism (state, audit, mail, telemetry). Returns $true when the alert was
+    # DELIVERED -- mailed, or recorded with the customer's guard mail switched off (then the record is the delivery).
+    # $null when the mechanism is not loaded in this process. The dedupe is this lane's own (per group), so every trip mails.
+    if (-not (Test-PimHybridAdFunction 'Invoke-PimGuardTrip')) { return $null }
+    return { param($guardId, $title, $detail, $action, $count, $at)
+        $t = Invoke-PimGuardTrip -GuardId $guardId -Outcome held -Area 'hybrid-ad' -Job $Job -Title $title -Detail $detail -ActionText $action -HeldCount $count -NowUtc $at -MailDedupHours 0
+        return [bool]($t -and ($t.mailed -or -not $t.mailDue)) }
+}
+function Invoke-PimHybridAdGuardAlerts {
+    <#
+      The alerts of 100.122 F1, through the guard-trip mechanism (-Alert = the seam: { param($guardId, $title, $detail,
+      $action, $count, $at) } returning $true when DELIVERED):
+        hybrid-ad.members-kept            A1: a group has kept members for Get-PimHybridAdHoldAlertMinutes (30) -- counted
+                                          from the FIRST member kept in it, whatever happened in between -- again every 4
+                                          hours until nobody is kept there
+        hybrid-ad.waiting-for-superadmin  a group waits for a SuperAdmin (gone / never found / replaced): at once, then
+                                          once a day
+      "Alert sent" is STAMPED in -Memory (ha / wa) only when the call says it was delivered; a call that did not deliver is
+      tried again after Get-PimHybridAdAlertRetryMinutes (ht). The caller saves -Memory. Every group is NAMED with the
+      number of members it holds. Returns a short note for the job's detail line. -WhatIf = plan only: no alert, no stamp.
+    #>
+    param([Parameter(Mandatory)][string]$Job, [string[]]$Groups = @(), [hashtable]$Memory = @{}, [object[]]$Results = @(),
+          [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf, [scriptblock]$Alert = $null)
+    if ($WhatIf) { return '' }
+    $now = ConvertTo-PimHybridAdEpoch $NowUtc
+    $retry = (Get-PimHybridAdAlertRetryMinutes) * 60
+    $wait = New-Object System.Collections.Generic.List[string]; $kept = New-Object System.Collections.Generic.List[string]
+    foreach ($g in @($Groups)) {
+        $m = $Memory[$g.ToLowerInvariant()]; if ($m -isnot [hashtable]) { continue }
+        if ([long]$m.ht -gt 0 -and ($now - [long]$m.ht) -lt $retry) { continue }
+        if ([long]$m.xc -gt 0 -or "$($m.rid)") {
+            # nobody waits in a gone / never-found group = nothing for a person to decide: no alert (the same rule as the waiting list)
+            if (-not "$($m.rid)" -and -not @($Results | Where-Object { $_.status -eq 'held' -and $_.group -eq $g -and $_.hold -eq 'superadmin' }).Count) { continue }
+            if ([long]$m.wa -le 0 -or ($now - [long]$m.wa) -ge ((Get-PimHybridAdWaitingAlertRepeatHours) * 3600)) { $wait.Add($g) }
+        } elseif ([long]$m.hs -gt 0 -and ($now - [long]$m.hs) -ge ((Get-PimHybridAdHoldAlertMinutes) * 60)) {
+            if ([long]$m.ha -le 0 -or ($now - [long]$m.ha) -ge ((Get-PimHybridAdHoldAlertRepeatHours) * 3600)) { $kept.Add($g) }
+        }
+    }
+    if (-not $wait.Count -and -not $kept.Count) { return '' }
+    if (-not $Alert) { $Alert = Get-PimHybridAdDefaultAlert }
+    $heldIn = { param($g) @($Results | Where-Object { $_.status -eq 'held' -and $_.group -eq $g }).Count }
+    $note = @()
+    $send = { param($guardId, $names, $title, $lead, $todo, $stamp)
+        $lines = @($names | Select-Object -First 50 | ForEach-Object {
+            $gname = "$_"; $n = & $heldIn $gname
+            $gwhy = "$(@($Results | Where-Object { $_.op -eq 'entra' -and $_.status -ne 'note' -and $_.group -eq $gname } | Select-Object -First 1 | ForEach-Object { $_.reason }))"
+            "$gname -- $n member(s) kept$(if ($gwhy) { ": $gwhy" })" })
+        $text = $lead + ($lines -join '; ') + $(if (@($names).Count -gt 50) { " ... and $(@($names).Count - 50) more" } else { '' })
+        $count = 0; foreach ($g in $names) { $count += (& $heldIn $g) }
+        $delivered = $false
+        if ($Alert) { try { $delivered = [bool](& $Alert $guardId $title $text $todo $count $NowUtc) } catch { $delivered = $false; Write-Warning "[$Job] the alert '$guardId' failed: $($_.Exception.Message)" } }
+        else { Write-PimHybridAdItemLines -Job "$Job-guard" -Lines @("the alert '$guardId' could not be raised: the guard-trip mechanism is not loaded in this process") }
+        foreach ($g in $names) { $m = $Memory[$g.ToLowerInvariant()]; if ($delivered) { $m[$stamp] = $now; $m.ht = [long]0 } else { $m.ht = $now } }
+        return $delivered
+    }
+    if ($wait.Count) {
+        $names = @($wait.ToArray())
+        $ok = & $send 'hybrid-ad.waiting-for-superadmin' $names "$($names.Count) Active Directory group(s) wait for a SuperAdmin: the Entra group behind them is gone, was never found or was replaced" `
+            'The members of these Active Directory groups were NOT removed and stay until a SuperAdmin decides: ' `
+            'Restore the Entra group from the deleted items if it was deleted by mistake -- the sync then continues by itself. If the group is meant to be gone, or another group took its name, a SuperAdmin decides about the members that remain.' 'wa'
+        $note += "alert $(if ($ok) { 'sent' } else { 'NOT delivered (tried again in ' + (Get-PimHybridAdAlertRetryMinutes) + ' minutes)' }): $($names.Count) group(s) waiting for a SuperAdmin"
+    }
+    if ($kept.Count) {
+        $names = @($kept.ToArray())
+        $ok = & $send 'hybrid-ad.members-kept' $names "Members were kept in $($names.Count) Active Directory group(s) for more than $(Get-PimHybridAdHoldAlertMinutes) minutes because Entra ID could not confirm them" `
+            'Access that may have ended is still in place in these Active Directory groups -- nobody is removed on a doubt: ' `
+            'Check that the Entra group exists under its defined name and that the hybrid worker can read it and its members. When Entra ID answers again the sync continues by itself; nothing has to be approved.' 'ha'
+        $note += "alert $(if ($ok) { 'sent' } else { 'NOT delivered (tried again in ' + (Get-PimHybridAdAlertRetryMinutes) + ' minutes)' }): $($names.Count) group(s) have kept members for more than $(Get-PimHybridAdHoldAlertMinutes) minutes"
+    }
+    return ($note -join '; ')
+}
+function Invoke-PimHybridAdMemoryDownAlert {
+    # B6: the sync memory cannot be read (or this process has no store). The clock is kept in THIS process -- there is no
+    # store to keep it in: an alert after 30 minutes, again every 4 hours, stamped only when delivered.
+    param([Parameter(Mandatory)][string]$Job, [string]$Reason = '', [int]$Held = 0, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf, [scriptblock]$Alert = $null)
+    $now = ConvertTo-PimHybridAdEpoch $NowUtc
+    if ($script:PimHybridAdMemoryDown -isnot [hashtable]) { $script:PimHybridAdMemoryDown = @{} }
+    if ($script:PimHybridAdMemoryDown[$Job] -isnot [hashtable]) { $script:PimHybridAdMemoryDown[$Job] = @{ since = $now; sent = [long]0; tried = [long]0 } }
+    $s = $script:PimHybridAdMemoryDown[$Job]
+    if ($WhatIf) { return '' }
+    if (($now - [long]$s.since) -lt ((Get-PimHybridAdHoldAlertMinutes) * 60)) { return '' }
+    if ([long]$s.sent -gt 0 -and ($now - [long]$s.sent) -lt ((Get-PimHybridAdHoldAlertRepeatHours) * 3600)) { return '' }
+    if ([long]$s.tried -gt 0 -and ($now - [long]$s.tried) -lt ((Get-PimHybridAdAlertRetryMinutes) * 60)) { return '' }
+    if (-not $Alert) { $Alert = Get-PimHybridAdDefaultAlert }
+    $delivered = $false
+    if ($Alert) {
+        try { $delivered = [bool](& $Alert 'hybrid-ad.members-kept' "The hybrid AD sync ($Job) cannot read its own memory for more than $(Get-PimHybridAdHoldAlertMinutes) minutes" `
+            "Since $(Format-PimHybridAdEpoch ([long]$s.since)): $Reason. $Held member(s) without an active assignment are kept; only a member whose activation Entra ID itself reports as ended is removed." `
+            'Check that the hybrid worker can reach the PIM Manager database. When it can, the sync continues by itself; nothing has to be approved.' $Held $NowUtc) }
+        catch { $delivered = $false }
+    }
+    if ($delivered) { $s.sent = $now; $s.tried = [long]0 } else { $s.tried = $now }
+    return "alert $(if ($delivered) { 'sent' } else { 'NOT delivered' }): the sync's own memory cannot be read"
 }
 
 function Format-PimHybridAdLiveLines {
@@ -858,7 +1947,9 @@ function Format-PimHybridAdLiveLines {
     foreach ($g in @($Result.groupNames)) {
         & $add "Validating PIM members for group $g" 'info'
         $items = if ($by.ContainsKey($g)) { $by[$g].ToArray() } else { @() }   # .ToArray(), never @() over a List from a hashtable (pwsh 7 "Argument types do not match")
-        if (-not @($items | Where-Object { $_.status -ne 'kept' }).Count) { & $add '  no active PIM member' 'dim' }
+        # 100.122 F1: the group's own line first -- why nobody is removed from it in this pass
+        foreach ($x in @($items | Where-Object { $_.op -eq 'entra' })) { & $add "  PIM for AD: $($x.reason)" $(if ("$($x.status)" -eq 'note') { 'info' } else { 'bad' }) }
+        if (-not @($items | Where-Object { $_.status -ne 'kept' -and $_.status -ne 'held' -and $_.op -ne 'entra' }).Count) { & $add '  no active PIM member' 'dim' }
         foreach ($x in $items) {
             $u = "$($x.samAccountName)"
             $want = if ($x.PSObject.Properties['ttlSeconds']) { $x.ttlSeconds } else { $null }
@@ -877,6 +1968,7 @@ function Format-PimHybridAdLiveLines {
             switch ("$($x.op)") {
                 'none' {
                     if ($x.status -eq 'kept') { & $add "  PIM for AD: $u stays in $g -- $($x.reason)" 'dim' }
+                    elseif ($x.status -eq 'held') { & $add "  PIM for AD: $u stays in $g -- $($x.reason)" $(if ("$($x.hold)" -eq 'confirm') { 'info' } else { 'bad' }) }
                     else { & $add "  PIM for AD: User $u is already member of $g" 'ok' }
                 }
                 'add' {
@@ -890,7 +1982,7 @@ function Format-PimHybridAdLiveLines {
                 }
                 'remove' {
                     if ($x.status -eq 'failed') { & $add "  PIM for AD: FAILED removing user $u from $g -- $($x.reason)" 'bad' }
-                    else { & $add "${pfx}Removing user $u from group $g (no active PIM assignment)" 'change' }
+                    else { & $add "${pfx}Removing user $u from group $g ($(if ("$($x.reason)".Trim()) { "$($x.reason)" } else { 'no active PIM assignment' }))" 'change' }
                 }
                 'read' { & $add "  PIM for AD: the members of $g could not be read -- $($x.reason)" 'bad' }
             }
@@ -902,7 +1994,7 @@ function Format-PimHybridAdLiveLines {
 
 function Get-PimHybridAdStoreConnectionString {
     $cs = "$($global:PIM_SqlConnectionString)".Trim()
-    if (-not $cs -and (Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue)) { try { $cs = "$(Get-PimSqlConnectionString)".Trim() } catch { $cs = '' } }
+    if (-not $cs -and (Test-PimHybridAdFunction 'Get-PimSqlConnectionString')) { try { $cs = "$(Get-PimSqlConnectionString)".Trim() } catch { $cs = '' } }
     return $cs
 }
 
@@ -922,7 +2014,7 @@ function Publish-PimHybridAdSyncLive {
         $st = $script:PimHybridAdLive
         if (-not $Load -or -not $Save) {
             $cs = Get-PimHybridAdStoreConnectionString
-            if (-not $cs -or -not (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) { return $false }
+            if (-not $cs -or -not (Test-PimHybridAdFunction 'Get-PimSqlSetting')) { return $false }
             # 🔴 PLAIN scriptblocks, NO .GetNewClosure(): a closure cannot see Get-PimSqlSetting dot-sourced into the
             # scheduler's SCRIPT scope -- 2.4.465 on the worker: "Get-PimSqlSetting is not recognized" every pass. They are
             # invoked inside this function, so $cs resolves by dynamic scope.
@@ -976,8 +2068,8 @@ function Invoke-PimHybridAdSyncLoop {
         [ValidateSet('hybrid-ad-sync', 'hybrid-ad-sync-servers', 'hybrid-ad-changes')][string]$JobName = 'hybrid-ad-sync',
         [scriptblock]$StopWhen = { $false },
         [scriptblock]$Pass = { param($now, $whatIf) Invoke-PimScheduledJob -Job ([pscustomobject]@{ name = $JobName; type = $JobName }) -NowUtc $now -WhatIf:$whatIf },
-        [scriptblock]$Record = { param($res, $started) if (Get-Command Write-PimJobRunRecord -ErrorAction SilentlyContinue) { Write-PimJobRunRecord -Job ([pscustomobject]@{ name = $JobName; type = $JobName }) -Result $res -StartedUtc $started -RunId ([guid]::NewGuid().ToString('N')) | Out-Null } },
-        [scriptblock]$Heartbeat = { if (Get-Command Save-PimHybridWorkerHeartbeat -ErrorAction SilentlyContinue) { Save-PimHybridWorkerHeartbeat -Scope @($JobName) -PlanOnly:([bool]$WhatIf) } },   # $WhatIf: the loop's own parameter (dynamic scope)
+        [scriptblock]$Record = { param($res, $started) if (Test-PimHybridAdFunction 'Write-PimJobRunRecord') { Write-PimJobRunRecord -Job ([pscustomobject]@{ name = $JobName; type = $JobName }) -Result $res -StartedUtc $started -RunId ([guid]::NewGuid().ToString('N')) | Out-Null } },
+        [scriptblock]$Heartbeat = { if (Test-PimHybridAdFunction 'Save-PimHybridWorkerHeartbeat') { Save-PimHybridWorkerHeartbeat -Scope @($JobName) -PlanOnly:([bool]$WhatIf) } },   # $WhatIf: the loop's own parameter (dynamic scope)
         [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s },
         [scriptblock]$Clock = { [datetime]::UtcNow },
         # 2.4.465: the Manager's LIVE view (written only while somebody watches -- Publish-PimHybridAdSyncLive)
@@ -992,7 +2084,7 @@ function Invoke-PimHybridAdSyncLoop {
     )
     $script:PimHybridAdCacheSeconds = [math]::Max(0, $RefreshSeconds)
     $start = & $Clock; $lastRecord = [datetime]::MinValue; $lastBeat = [datetime]::MinValue
-    $passes = 0; $recorded = 0; $failures = 0; $stop = ''
+    $passes = 0; $recorded = 0; $failures = 0; $stop = ''; $wasWarn = $false
     if ($StallMinutes -gt 0) { try { Start-PimHybridSyncWatchdog -StallMinutes $StallMinutes } catch { Write-Warning "[$JobName] watchdog not started: $($_.Exception.Message)" } }
     try {
     while ($true) {
@@ -1008,7 +2100,11 @@ function Invoke-PimHybridAdSyncLoop {
         $acted = $inner -and $inner.PSObject.Properties['results'] -and @($inner.results | Where-Object { $_.status -eq 'done' -or $_.status -eq 'failed' }).Count -gt 0
         $bad = $threw -or ($res -and $res.PSObject.Properties['ok'] -and -not $res.ok)
         if ($bad) { $failures++ }
-        if ($acted -or $bad -or ($now - $lastRecord).TotalSeconds -ge $RecordEverySeconds) {
+        # 100.122 F1 (A1): a pass that turns to WARNING (somebody kept on a doubt) -- or back -- is recorded AT ONCE, not at
+        # the next 5-minute record: a doubt must be visible when it starts
+        $warn = [bool]($inner -and $inner.PSObject.Properties['warning'] -and $inner.warning)
+        $turned = ($warn -ne $wasWarn); $wasWarn = $warn
+        if ($acted -or $bad -or $turned -or ($now - $lastRecord).TotalSeconds -ge $RecordEverySeconds) {
             try { & $Record $res $now; $recorded++ } catch { Write-Warning "[$JobName] run record not written: $($_.Exception.Message)" }
             $lastRecord = $now
             if ($res) { Write-Host ("[$JobName] {0:HH:mm:ss} {1}" -f $now, "$($res.detail)") }
@@ -1109,7 +2205,7 @@ function Invoke-PimHybridAdDeltaPass {
     param([hashtable]$State = $script:PimHybridAdDeltaState, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf,
           [scriptblock]$Stamp = { Get-PimHybridAdChangeStamp },
           [scriptblock]$RunJob = { param($type, $now, $whatIf) Invoke-PimScheduledJob -Job ([pscustomobject]@{ name = $type; type = $type }) -NowUtc $now -WhatIf:$whatIf },
-          [scriptblock]$Record = { param($type, $res, $started) if (Get-Command Write-PimJobRunRecord -ErrorAction SilentlyContinue) { Write-PimJobRunRecord -Job ([pscustomobject]@{ name = $type; type = $type }) -Result $res -StartedUtc $started -RunId ([guid]::NewGuid().ToString('N')) | Out-Null } })
+          [scriptblock]$Record = { param($type, $res, $started) if (Test-PimHybridAdFunction 'Write-PimJobRunRecord') { Write-PimJobRunRecord -Job ([pscustomobject]@{ name = $type; type = $type }) -Result $res -StartedUtc $started -RunId ([guid]::NewGuid().ToString('N')) | Out-Null } })
     $cur = & $Stamp
     if (-not $cur.ok) { return @{ ran = @(); reason = "change check failed: $($cur.error)" } }   # keep the old stamp: retried next pass
     $due = Get-PimHybridAdDeltaDue -Previous $State.stamp -Current $cur
@@ -1263,7 +2359,7 @@ function Get-PimHybridAdServerGroupName {
     param([Parameter(Mandatory)][string]$Server)
     $fmt = "$(Get-PimHybridAdSetting -Name 'HybridAdServerGroupFormat' -Default '{prefix}AD-SRV-{server}{cloud}{marker}')".Trim()
     $prefix = ''
-    if (Get-Command Get-PimGroupNamePrefix -ErrorAction SilentlyContinue) { try { $prefix = "$(Get-PimGroupNamePrefix)".Trim() } catch { $prefix = '' } }
+    if (Test-PimHybridAdFunction 'Get-PimGroupNamePrefix') { try { $prefix = "$(Get-PimGroupNamePrefix)".Trim() } catch { $prefix = '' } }
     $marker = "$(Get-PimHybridAdSetting -Name 'HybridAdGroupMarker' -Default '-S_AD')".Trim()
     $sfx = Get-PimHybridAdSuffixes
     return $fmt.Replace('{prefix}', $prefix).Replace('{server}', "$Server".Trim()).Replace('{cloud}', $sfx.cloud).Replace('{marker}', $marker)
@@ -1363,9 +2459,9 @@ function Invoke-PimHybridAdServersJob {
     if (-not $SaveCache) {
         $SaveCache = {
             param($items)
-            if (-not (Get-Command Set-PimSqlTenantCache -ErrorAction SilentlyContinue)) { throw 'Set-PimSqlTenantCache is not loaded' }
+            if (-not (Test-PimHybridAdFunction 'Set-PimSqlTenantCache')) { throw 'Set-PimSqlTenantCache is not loaded' }
             $cs = "$($global:PIM_SqlConnectionString)".Trim()
-            if (-not $cs -and (Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue)) { $cs = "$(Get-PimSqlConnectionString)".Trim() }
+            if (-not $cs -and (Test-PimHybridAdFunction 'Get-PimSqlConnectionString')) { $cs = "$(Get-PimSqlConnectionString)".Trim() }
             if (-not $cs) { throw 'no SQL store connection' }
             Set-PimSqlTenantCache -ConnectionString $cs -Kind 'ad-servers' -Value ([ordered]@{ refreshedUtc = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'); items = @($items) })
         }

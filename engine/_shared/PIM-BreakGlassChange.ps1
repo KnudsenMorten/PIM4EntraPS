@@ -59,7 +59,7 @@ function Get-PimBreakGlassChangeSettingName { 'BreakGlassAccountsChange' }
 function Get-PimBreakGlassChangeTtlHours {
     # How long a request may wait for a checker. Default 72 h; $global:PIM_BreakGlassChangeTtlHours
     # (1..168) overrides it.
-    $v = $global:PIM_BreakGlassChangeTtlHours
+    $v = if (Get-Command Get-PimFeatureSetting -ErrorAction SilentlyContinue) { Get-PimFeatureSetting -Name 'BreakGlassChangeTtlHours' } else { $global:PIM_BreakGlassChangeTtlHours }   # PIM 100.121: process -> environment -> store -> 72
     if ($null -ne $v -and "$v" -match '^\d+$' -and [int]$v -ge 1 -and [int]$v -le 168) { return [int]$v }
     return 72
 }

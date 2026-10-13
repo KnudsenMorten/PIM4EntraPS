@@ -1554,6 +1554,7 @@ function Test-PimAdminMailboxForwardingEnabled {
   [CmdletBinding()]
   param([object]$Override = $null)
   $v = if ($null -ne $Override) { $Override }
+       elseif (Get-Command Get-PimFeatureSetting -ErrorAction SilentlyContinue) { Get-PimFeatureSetting -Name 'AdminMailboxForwarding' }   # PIM 100.121: process -> environment -> store -> off
        elseif ($null -ne $global:PIM_AdminMailboxForwarding -and "$($global:PIM_AdminMailboxForwarding)".Trim()) { $global:PIM_AdminMailboxForwarding }
        else { $env:PIM_AdminMailboxForwarding }
   return ("$v".Trim() -match '(?i)^(true|1|yes|on)$')

@@ -39,9 +39,11 @@ $script:PimImportNeverCopyExact = @(
     'EnvironmentName',  # this environment's own display name ("EFIF (test)") -- never carried to another one
     'DemoMode', 'DemoGuestGroup',   # s98: a live demo's own switch -- an import never turns another environment into a demo
     'LogRepeatSeen',    # §100.46: which repeating log lines THIS environment already printed (runtime state)
+    'GuardApprovals', 'GuardReleases', 'GuardHolds', 'GuardLimits', 'HybridAdCleanupApproval', 'HybridAdServerAutoGroupsApproval', 'AdServerAutoGroups', 'AdServerAutoGroupsWaiting', 'AdServerAutoGroupsProgress', 'AdCleanupResult', 'AdCleanupLocalAdmin',   # PIM 100.119 B1: another environment's approvals / releases / holds are not this one's, and a guard's limit is set here by a SuperAdmin (audited), never carried in
+    'ReconcileRemovalMode', 'EnableAutomaticOffboarding',   # REVIEW FIXES 2026-10-13: the TARGET's own protection switches -- an import never changes whether THIS environment removes leftovers or offboards on its own; they are set on its Settings page (confirmation + the count shown)
     'WorkloadPrereqs'   # checks made against the SOURCE's engine identity (2026-10-04: r1-pro-ca showed mfnpr's green checks)
 )
-$script:PimImportNeverCopyPrefix = @('JobRunOutput:', 'SchedulerState', 'SchedulerLease', 'JobScope')
+$script:PimImportNeverCopyPrefix = @('JobRunOutput:', 'SchedulerState', 'SchedulerLease', 'JobScope', 'HybridAdSyncMemory')   # 100.122 F1: the AD sync's memory belongs to one tenant
 $script:PimImportUnion = @{ ManagerAccess = 'managerAccess'; PortalAdmins = 'portalAdmins' }
 
 function Test-PimImportSettingNeverCopy {

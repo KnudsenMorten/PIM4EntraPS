@@ -136,7 +136,7 @@ function Get-PimRevokeApprovalThreshold {
 function Get-PimApprovalRequestTtlHours {
     # A PENDING request that is not decided within this many hours is EXPIRED (a stale
     # approval must not be executable forever). Operator-tunable; default 72h.
-    $v = $global:PIM_ApprovalRequestTtlHours
+    $v = if (Get-Command Get-PimFeatureSetting -ErrorAction SilentlyContinue) { Get-PimFeatureSetting -Name 'ApprovalRequestTtlHours' } else { $global:PIM_ApprovalRequestTtlHours }   # PIM 100.121: process -> environment -> store -> 72
     if ($null -ne $v -and "$v" -match '^\d+$' -and [int]$v -ge 1) { return [int]$v }
     return 72
 }

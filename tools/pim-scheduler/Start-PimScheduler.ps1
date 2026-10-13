@@ -122,6 +122,9 @@ trap { if (Get-Command Complete-PimStartupLog -ErrorAction SilentlyContinue) { t
 . "$shared\PIM-LastPrivileged.ps1"    # PIM 100.72 (7): never remove the last Global Administrator (BLOCK + release)
 if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAd.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAd.ps1" }   # §84 Pro: loaded only when present          # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
 if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1" }   # §84 Pro: loaded only when present    # §80.2 PIM-for-AD replacement: AD group mirror + JIT membership (hybrid worker only)
+# PIM 100.123 (lane adclean): the customer's server discovery filters + automatic groups per OU, and the reviewed AD clean-up. After PIM-HybridAdGroups.ps1.
+if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAdServerDiscovery.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAdServerDiscovery.ps1" }
+if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAdCleanup.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAdCleanup.ps1" }
 . "$shared\PIM-EngineProviders.ps1"
 # REQ-U wave 2: the workload role catalogs (discovery-defender / discovery-intune -> Invoke-PimWorkloadRoleDiscoveryJob). The
 # providers file dot-sources it too; named here so the tick's gated capability is visibly loaded (Test-PimScheduler).
@@ -469,8 +472,9 @@ $engineHandler = {
     $mode  = if ("$($job.type)" -eq 'engine-full') { 'Full' } else { 'Delta' }
     # 96.5 / D4: a PAUSE stops ONLY the daily reconcile (commits, deltas and Run now still apply). Read right before it runs,
     # so a pause set in the Manager a minute ago holds; the run is recorded as SKIPPED with who / since / why.
-    # Purpose 2: the daily reconcile also plans the removal of PIM-managed leftovers -- REPORT ONLY unless pim.Settings
-    # 'ReconcileRemovalMode' says enforce (PIM-ReconcileRemoval.ps1).
+    # Purpose 2: the daily reconcile also plans the removal of PIM-managed leftovers. The mode is ENFORCE by default (since
+    # 2.4.517: unset = the qualifying leftovers are removed); it only reports when pim.Settings 'ReconcileRemovalMode' says
+    # report -- or any other word (PIM-ReconcileRemoval.ps1). A SuperAdmin sets it under Settings (PIM 100.121).
     $__rrMode = ''
     if ($mode -eq 'Full' -and (Get-Command Get-PimReconcileJobName -ErrorAction SilentlyContinue) -and "$($job.name)" -eq (Get-PimReconcileJobName)) {
         $__gate = Get-PimReconcilePauseGate -Job $job -NowUtc $now -WhatIf:$whatIf
@@ -787,7 +791,7 @@ Register-PimDiscoveryHandler `
     } `
     -GetAutoImportRules {
         param($scope)
-        if ($global:PIM_DiscoveryAutoImportRules) { @($global:PIM_DiscoveryAutoImportRules) } else { @() }
+        if (Get-Command Get-PimFeatureSetting -ErrorAction SilentlyContinue) { @(Get-PimFeatureSetting -Name 'DiscoveryAutoImportRules') } elseif ($global:PIM_DiscoveryAutoImportRules) { @($global:PIM_DiscoveryAutoImportRules) } else { @() }
     } `
     -GetLiveRoles {
         param($service)
@@ -817,7 +821,7 @@ Register-PimDiscoveryHandler `
             throw "[discovery] the proposal '$($change.entity)/$($change.key)' could NOT be written to pim.ChangeQueue -- it is NOT queued: $($_.Exception.Message)"
         }
     } `
-    -AutoImportPowerBI:([bool]$global:PIM_DiscoveryAutoImportPowerBi)
+    -AutoImportPowerBI:([bool]$(if (Get-Command Get-PimFeatureSetting -ErrorAction SilentlyContinue) { Get-PimFeatureSetting -Name 'DiscoveryAutoImportPowerBi' } else { ($global:PIM_DiscoveryAutoImportPowerBi -is [bool]) -and $global:PIM_DiscoveryAutoImportPowerBi }))
 $script:__discoDupes = 0
 Write-PimStartupLine -Message "[scheduler] discovery handler wired (Azure/PowerBI scope-discovery + Entra role-catalog -> change queue: SQL pim.ChangeQueue, de-duplicated)" -ForegroundColor Cyan
 

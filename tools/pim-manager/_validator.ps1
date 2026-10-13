@@ -2319,7 +2319,7 @@ function Invoke-PimPreflightValidation {
         } catch { $authCache = $null }
     }
     if ($adminIndex.Count -gt 0) {
-        $required = if ($global:PIM_RequiredAuthMethods) { @($global:PIM_RequiredAuthMethods) } else { @('microsoftAuthenticator','passkey','fido2','windowsHelloForBusiness','certificate') }
+        $required = if (Get-Command Get-PimFeatureSetting -ErrorAction SilentlyContinue) { @(Get-PimFeatureSetting -Name 'RequiredAuthMethods') } elseif ($global:PIM_RequiredAuthMethods) { @($global:PIM_RequiredAuthMethods) } else { @('microsoftAuthenticator','passkey','fido2','windowsHelloForBusiness','certificate') }
         $weakOnly = @('sms','voice','phone','email')
         $reqLc = @($required | ForEach-Object { "$_".ToLowerInvariant() })
         $weakLc = @($weakOnly | ForEach-Object { "$_".ToLowerInvariant() })
@@ -2455,7 +2455,7 @@ function Invoke-PimPreflightValidation {
         catch { $activityCache = $null }
     }
     if ($activityCache -and $groupTagIndex.Count -gt 0) {
-        $staleDays = if ($global:PIM_StaleGroupDays) { [int]$global:PIM_StaleGroupDays } else { 90 }
+        $staleDays = if (Get-Command Get-PimFeatureSetting -ErrorAction SilentlyContinue) { [int](Get-PimFeatureSetting -Name 'StaleGroupDays') } elseif ($global:PIM_StaleGroupDays) { [int]$global:PIM_StaleGroupDays } else { 90 }
         $nowUtc = (Get-Date).ToUniversalTime()
         $actByTag = @{}
         foreach ($prop in $activityCache.PSObject.Properties) { $actByTag["$($prop.Name)".ToLowerInvariant()] = "$($prop.Value)" }

@@ -122,9 +122,9 @@ if ($global:PIM_ActiveScenario) {
     try {
         $scn = Get-PimScenario -Id "$($global:PIM_ActiveScenario)"
         if ($scn) {
-            [void](Set-PimScenarioContext -Scenario $scn -Quiet)
+            $scnCtx = Set-PimScenarioContext -Scenario $scn -Quiet   # 100.121: the banner reads the context, not a global copy
             $spnAuth = Resolve-PimScenarioSpnAuth -Scenario $scn -LocalTenantId "$($global:PIM_TenantId)"
-            Write-Host "    Scenario: $($scn.id) ($($scn.role)) -- spnModel=$($spnAuth.spnModel) hosting=$($global:PIM_HostingLocation)" -ForegroundColor DarkCyan
+            Write-Host "    Scenario: $($scn.id) ($($scn.role)) -- spnModel=$($spnAuth.spnModel) hosting=$($scnCtx.hostingLocation)" -ForegroundColor DarkCyan
             if ($spnAuth.multiTenant -and "$($spnAuth.tenantId)".Trim()) {
                 Write-Host "    Auth   : multi-tenant SPN -> authenticating against MANAGED tenant $($spnAuth.tenantId) (was $($global:PIM_TenantId))" -ForegroundColor DarkYellow
                 $global:PIM_TenantId = "$($spnAuth.tenantId)"
@@ -161,6 +161,9 @@ if (Test-Path -LiteralPath "$shared\..\discovery\PIM-Discovery.ps1") { . "$share
 . "$shared\PIM-Notify.ps1"                      # mail notifications (REST sendMail)
 if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAd.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAd.ps1" }   # §84 Pro: loaded only when present                    # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
 if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1" }   # §84 Pro: loaded only when present              # §80.2 PIM-for-AD replacement: AD group mirror + JIT membership (hybrid worker only)
+# PIM 100.123 (lane adclean): the customer's server discovery filters + automatic groups per OU, and the reviewed AD clean-up. After PIM-HybridAdGroups.ps1.
+if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAdServerDiscovery.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAdServerDiscovery.ps1" }
+if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAdCleanup.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAdCleanup.ps1" }
 . "$shared\PIM-EngineProviders.ps1"
 # 🔒 No filters FILE (operator, 2026-09-12: "we dont support files in pim v2" -- "we support filters,
 # but from sql"). The v1 Filters.locked.ps1 only fed filtered lists no v2 code reads; v2 filters live in

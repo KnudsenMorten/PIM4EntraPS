@@ -18,8 +18,8 @@
     Landscape A4 when the table is wide, a header row that repeats on every page. No library = Test-PimTableExportPdfAvailable
     says why, and the page disables the PDF item; nothing is downloaded.
 
-  The environment label in a file is the caller's decision (the Manager passes the placeholder when the setting
-  HideCompanyAndEnvironmentName is on -- the default). Nothing here reads SQL, Graph or ARM.
+  The environment label in a file is the caller's decision. Since 100.124 the Manager always passes -Hide $false: the
+  option to hide the names is retired and its stored value is read by nothing. Nothing here reads SQL, Graph or ARM.
 #>
 
 $script:PimTableExportPlaceholder = 'PIM Manager'
@@ -35,23 +35,13 @@ function Get-PimTableExportLimits {
 
 function Get-PimTableExportPlaceholder { return $script:PimTableExportPlaceholder }
 
-function Test-PimHideNamesValue {
-    <#
-      PURE. Is the stored HideCompanyAndEnvironmentName value ON (names hidden)? ON BY DEFAULT (owner 2026-10-10: "on by
-      def"): only an explicit "off" spelling shows the names -- $false, 0, or the text false / off / 0 / no / disabled. $null
-      (never set), '', a typo: hidden. A name shown by accident is the failure this setting exists to prevent.
-    #>
-    param([AllowNull()][object]$Value)
-    if ($null -eq $Value) { return $true }
-    if ($Value -is [bool]) { return [bool]$Value }
-    if ($Value -is [int] -or $Value -is [long]) { return ([long]$Value -ne 0) }
-    $t = "$Value".Trim().Trim('"')
-    return -not ($t -match '^(?i)(false|off|0|no|disabled)$')
-}
-
 function Get-PimTableExportEnvironmentLabel {
-    <# PURE. The environment label a file names: the placeholder while names are hidden, else the environment name, else the tenant name. #>
-    param([bool]$Hide = $true, [AllowEmptyString()][string]$EnvironmentName = '', [AllowEmptyString()][string]$TenantName = '')
+    <#
+      PURE. The environment label a file names: the environment name and the company (tenant) name -- "Production
+      (Contoso)" -- or the one that is known, or the product name when neither is. 100.124: the names are ALWAYS shown, so
+      -Hide defaults to $false; the parameter is kept only so a caller that still passes it does not break.
+    #>
+    param([bool]$Hide = $false, [AllowEmptyString()][string]$EnvironmentName = '', [AllowEmptyString()][string]$TenantName = '')
     if ($Hide) { return $script:PimTableExportPlaceholder }
     $e = "$EnvironmentName".Trim(); $t = "$TenantName".Trim()
     if ($e -and $t) { return "$e ($t)" }

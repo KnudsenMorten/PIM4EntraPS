@@ -14,7 +14,7 @@
 #                                 Test-PimFeatureAvailable) + PIM-License.ps1
 #     * update source          -> PIM-UpdateLifecycle.ps1 (Get-PimUpdateSourceProfile)
 #     * MSP downlink / rings   -> Setup-PimMsp.ps1 / Invoke-PimMspFanout.ps1 +
-#                                 $global:PIM_ConfigVariant / $global:PIM_Ring
+#                                 $global:PIM_ConfigVariant (the ring gate itself is PIM-RingGate.ps1)
 #     * SQL/web hosting        -> PIM-SqlStore.ps1 (Get-PimSqlConnectionString)
 #     * SPN model              -> Invoke-PimEngineCore.ps1 cert-SPN auth
 #   This module does NOT introduce new primitives -- it MAPS a scenario onto the
@@ -540,25 +540,16 @@ function Set-PimScenarioContext {
     $ctx = Resolve-PimScenarioContext -Scenario $Scenario
     # ConfigVariant drives config-msp/ vs config-local/ (existing engine knob).
     $global:PIM_ConfigVariant = $ctx.configVariant
-    # Ring gating flag for the managed downlink pull (existing MSP pull reads PIM_Ring).
-    # AutomateIT RING-1: this DECLARES that the scenario consumes a ring plan (plane 2 --
-    # a managing tenant gating which template version its managed tenants may pull). It is not
-    # the gate: the decision comes from the vendored platform core in PIM-RingGate.ps1,
-    # which PIM consumes rather than redefines. Do NOT confuse this with the ADMIN ring
-    # (tenant.Ring <= admin.Ring in PIM-Downlink.ps1, §77.20) -- that is assignment scoping, a
-    # different axis that RING-1 does not replace.
-    $global:PIM_ScenarioRingGated = $ctx.ringGated
     # The active scenario id (so subsequent Get-PimActiveScenario is stable in-process).
     $global:PIM_ActiveScenario = "$($ctx.id)"
-    # Distribution edition (branding + update origin).
-    $global:PIM_DistributionEdition = $ctx.distributionEdition
-    # Hosting + SPN model + sync-file location so the runtime (SQL/web resolution,
-    # cert-SPN auth, sync-file staging) reflects the scenario. These are the existing
-    # knobs the per-area wiring (s31.3 hosting/SPN/sync-file resolution) reads.
-    $global:PIM_HostingLocation       = $ctx.hostingLocation
-    $global:PIM_SpnModel              = $ctx.spnModel
-    $global:PIM_SyncFileLocation      = $ctx.syncFileLocation
-    $global:PIM_SyncAdminsPermissions = [bool]$ctx.syncAdminsPermissions
+    # 100.121 (dead-code clean-up, 2026-10-13): ConfigVariant and ActiveScenario are the ONLY globals this sets. Six more
+    # were written here and read by no product code -- copies of ringGated, distributionEdition, hostingLocation, spnModel,
+    # syncFileLocation and syncAdminsPermissions. Those VALUES are alive: every reader takes them from the scenario
+    # context itself (what this function returns / Resolve-PimScenarioContext), never from a global.
+    # ringGated (AutomateIT RING-1) only DECLARES that the scenario consumes a ring plan (a managing tenant gating which
+    # template version its managed tenants may pull). It is not the gate: the decision comes from the vendored platform
+    # core in PIM-RingGate.ps1. Do NOT confuse it with the ADMIN ring (tenant.Ring <= admin.Ring in PIM-Downlink.ps1,
+    # §77.20) -- that is assignment scoping, a different axis that RING-1 does not replace.
     if (-not $Quiet) {
         Write-Host ("[scenario] {0} ({1}) -- configVariant={2} updateSource={3} ringGated={4} edition={5} hosting={6} spn={7}" -f `
             $ctx.id, $ctx.role, $ctx.configVariant, $ctx.updateSourceProfile, $ctx.ringGated, $ctx.activeEdition, $ctx.hostingLocation, $ctx.spnModel) -ForegroundColor Cyan

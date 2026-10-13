@@ -451,14 +451,15 @@ function Update-PimAdminsDisableDecision {
             # FAIL CLOSED: no breaker loaded means no disable, never an unguarded one.
             $decision = [pscustomobject]@{ allowed = $false; abort = $true; tripped = 'guard-not-loaded'; reason = 'PIM-DisableGuard.ps1 is not loaded in this process'; toDisable = $cand.Count; scanned = @($Live).Count }
         }
-        # §96.6 / GUARD-1.6: the ABSOLUTE cap (G2) on explicit disables is releasable for ONE run -- exactly this set of
-        # accounts (plan hash over their keys), at most 50 (literal ceiling). G1 / G3, break-glass (taken out above) and an
-        # unauthorised status change (taken out above) are never released. A plan (WhatIf) never uses a release.
+        # §96.6 / GUARD-1.6: the cap (G2) on explicit disables is releasable for ONE run -- exactly this set of accounts
+        # (plan hash over their keys). PIM 100.119: no ceiling of 50 and no percentage -- what is released is the list
+        # itself. G1 / G3, break-glass (taken out above) and an unauthorised status change (taken out above) are never
+        # released. A plan (WhatIf) never uses a release.
         if (-not $decision.allowed -and "$($decision.tripped)" -eq 'mass-disable' -and -not $Context['__pimWhatIf'] -and (Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue)) {
             $__gr = Invoke-PimGuardHoldOrRelease -GuardId 'engine.disable-guard' -Scope 'Admins' -Keys @($cand.Keys | ForEach-Object { "$_" }) -Count $cand.Count `
                 -Measured @{ toDisable = $cand.Count; scanned = @($Live).Count }
             if ($__gr.released) {
-                $__d2 = Test-PimExplicitDisablePassAllowed -ToDisable $cand.Count -Scanned @($Live).Count -Desired $all -DesiredResolved $resolved -MaxCount ([Math]::Min([int]$__gr.release.raiseTo, 50))
+                $__d2 = Test-PimExplicitDisablePassAllowed -ToDisable $cand.Count -Scanned @($Live).Count -Desired $all -DesiredResolved $resolved -MaxCount ([int]$__gr.release.raiseTo)
                 if ($__d2.allowed) { $decision = $__d2; Write-Host ("    [admins] account-disable breaker RELEASED for this run (plan {0}): {1} account(s)" -f $__gr.planHash.Substring(0, 12), $cand.Count) -ForegroundColor Magenta }
             }
         } elseif (-not $Context['__pimWhatIf'] -and (Get-Command Clear-PimGuardHold -ErrorAction SilentlyContinue)) { [void](Clear-PimGuardHold -GuardId 'engine.disable-guard' -Scope 'Admins') }
@@ -796,6 +797,9 @@ function New-PimAdminsProvider {
             if (Get-Command Invoke-PimAdminMailboxForwarding -ErrorAction SilentlyContinue) {
                 $null = Invoke-PimAdminMailboxForwarding -Row $item.desired -UserPrincipalName $upn -UserId "$($u.id)"
             }
+            # Review fixes 2026-10-13: THIS call created the account (POST /users) -- only a marked result is remembered
+            # as "created by this run" (Register-PimNewObjectsFromResult, PIM-EngineCore.ps1).
+            if (Get-Command Set-PimCreatedThisRunMark -ErrorAction SilentlyContinue) { Set-PimCreatedThisRunMark -Object $u }
             $u
         }
         ApplyUpdate = {
@@ -1729,19 +1733,234 @@ function Invoke-PimRenameInPlace {
     return $null
 }
 
+# ---------------------------------------------------------------------------
+# 100.122 F6 (owner decision (17), 2026-10-13: "two objects in the tenant with one defined name = the engine touches
+# neither and reports it"). The engine finds a live group / administrative unit by its display NAME, and Entra does not
+# keep names unique. A name two live objects carry used to resolve to whichever came first (or last): description,
+# owners, policy, memberships and role assignments went to one of them by chance. Now a duplicated name resolves to
+# NOTHING -- the engine holds no id for either object, so it cannot write to either -- and it is a NAMED failure
+# (DUPLICATE-GROUP-NAME / DUPLICATE-AU-NAME), never a guess. Counted in what the run already holds
+# ($Global:Groups_All_ID / $Global:AU_All_ID, and the answer of the one on-demand read): no extra Graph call.
+# The register is per process; an item that then fails for a row naming the duplicate is classified with the class
+# (PIM-FailureCatalog.ps1 reads the register), and the warning below names both ids in the job log.
+# ---------------------------------------------------------------------------
+function Get-PimDuplicateLiveNames {
+    # The duplicated names seen in this process: @{ group = @{ lower name -> @{ name; ids; tags } }; administrativeUnit = @{ ... } }.
+    if (-not ($global:PIM_DuplicateLiveNames -is [hashtable])) { $global:PIM_DuplicateLiveNames = @{ group = @{}; administrativeUnit = @{} } }
+    foreach ($k in 'group', 'administrativeUnit') { if (-not ($global:PIM_DuplicateLiveNames[$k] -is [hashtable])) { $global:PIM_DuplicateLiveNames[$k] = @{} } }
+    return $global:PIM_DuplicateLiveNames
+}
+function Register-PimDuplicateLiveName {
+    # Remember a duplicated name (with the tags that name it, for the failure class) and say so ONCE per name.
+    param([Parameter(Mandatory)][ValidateSet('group', 'administrativeUnit')][string]$Kind, [Parameter(Mandatory)][string]$Name, [string[]]$Ids = @())
+    $reg = Get-PimDuplicateLiveNames
+    $k = "$Name".Trim().ToLowerInvariant(); if (-not $k) { return }
+    $first = -not $reg[$Kind].ContainsKey($k)
+    $tags = @()
+    try {
+        $map = $null
+        if ($Kind -eq 'group' -and (Get-Command Get-PimTagToGroupName -ErrorAction SilentlyContinue)) { $map = Get-PimTagToGroupName }
+        elseif ($Kind -eq 'administrativeUnit' -and (Get-Command Get-PimTagToAuName -ErrorAction SilentlyContinue)) { $map = Get-PimTagToAuName }
+        if ($map -is [System.Collections.IDictionary]) { $tags = @(@($map.Keys) | Where-Object { "$($map[$_])".Trim().ToLowerInvariant() -eq $k } | ForEach-Object { "$_".ToLowerInvariant() }) }
+    } catch { $tags = @() }
+    $reg[$Kind][$k] = @{ name = "$Name".Trim(); ids = @(@($Ids) | Where-Object { "$_" } | Select-Object -Unique); tags = $tags }
+    if ($first) {
+        $code = if ($Kind -eq 'group') { 'DUPLICATE-GROUP-NAME' } else { 'DUPLICATE-AU-NAME' }
+        $what = if ($Kind -eq 'group') { 'groups' } else { 'administrative units' }
+        Write-Warning ("  [engine] {0}: {1} live {2} are named '{3}' (ids {4}) -- PIM Manager touches NEITHER and resolves the name to nothing until one of them is renamed or deleted in Entra ID." -f $code, @($Ids).Count, $what, "$Name".Trim(), (@($Ids) -join ', '))
+    }
+}
+function Unregister-PimDuplicateLiveName {
+    # The name resolves to ONE object (or none) again: it is no longer a duplicate -- the status heals by itself, in a
+    # long-running process too (the scheduler keeps this register across runs).
+    param([Parameter(Mandatory)][ValidateSet('group', 'administrativeUnit')][string]$Kind, [string]$Name)
+    $reg = $global:PIM_DuplicateLiveNames
+    if (-not ($reg -is [hashtable]) -or -not ($reg[$Kind] -is [hashtable]) -or -not $reg[$Kind].Count) { return }
+    $k = "$Name".Trim().ToLowerInvariant()
+    if ($k -and $reg[$Kind].ContainsKey($k)) { $reg[$Kind].Remove($k) }
+}
+function Update-PimDuplicateLiveNameRegister {
+    <#
+      100.122 F6 -- fill the register for EVERY defined group / AU name from what the run already holds
+      ($Global:Groups_All_ID / $Global:AU_All_ID), with no Graph call, so the orchestrator's filter
+      (Split-PimDuplicateNameItems) never depends on a resolver having been asked first. One pass over each list; the
+      definitions are read ONLY when a list really holds a name twice (or the register is not empty), so a tenant
+      without duplicates pays one loop and nothing else. A defined name the list holds exactly once leaves the register
+      (it heals by itself). Throws when the definitions cannot be read while a duplicate exists -- the caller then
+      applies nothing (a doubt = nothing removed, nothing written).
+    #>
+    $reg = Get-PimDuplicateLiveNames
+    foreach ($kind in 'group', 'administrativeUnit') {
+        $cache = if ($kind -eq 'group') { @($Global:Groups_All_ID) } else { @($Global:AU_All_ID) }
+        $by = @{}; $disp = @{}
+        foreach ($o in $cache) {
+            if ($null -eq $o) { continue }
+            $n = "$($o.DisplayName)"; $id = "$($o.Id)"; if (-not $n -or -not $id) { continue }
+            $k = $n.ToLowerInvariant()
+            if (-not $by.ContainsKey($k)) { $by[$k] = @{}; $disp[$k] = $n }
+            $by[$k][$id.ToLowerInvariant()] = $id
+        }
+        $dupKeys = @(@($by.Keys) | Where-Object { $by[$_].Count -gt 1 })
+        if (-not $dupKeys.Count -and -not $reg[$kind].Count) { continue }
+        # the DEFINED names (and the tags that name them)
+        $defined = @{}
+        if ($kind -eq 'group') {
+            foreach ($d in @(Get-PimGroupDefinitionRows -IncludeRetired)) {
+                $n = "$($d.GroupName)".Trim().ToLowerInvariant(); if (-not $n) { continue }
+                if (-not $defined.ContainsKey($n)) { $defined[$n] = New-Object System.Collections.Generic.List[string] }
+                $t = "$($d.GroupTag)".Trim().ToLowerInvariant(); if ($t) { $defined[$n].Add($t) }
+            }
+        } else {
+            foreach ($d in @(Get-PimDesiredRows -Entity 'PIM-Definitions-AU')) {
+                $n = "$(Get-PimRowProp -Row $d -Names @('AUDisplayName'))".Trim().ToLowerInvariant(); if (-not $n) { continue }
+                if (-not $defined.ContainsKey($n)) { $defined[$n] = New-Object System.Collections.Generic.List[string] }
+                $t = "$(Get-PimRowProp -Row $d -Names @('AdministrativeUnitTag', 'AUTag'))".Trim().ToLowerInvariant(); if ($t) { $defined[$n].Add($t) }
+            }
+        }
+        foreach ($k in $dupKeys) {
+            if (-not $defined.ContainsKey($k)) { continue }      # two objects of a name nobody defined are not PIM Manager's business
+            Register-PimDuplicateLiveName -Kind $kind -Name $disp[$k] -Ids @($by[$k].Values)
+            $more = @($defined[$k].ToArray())
+            if ($more.Count) { $reg[$kind][$k].tags = @(@($reg[$kind][$k].tags) + $more | Where-Object { "$_" } | Select-Object -Unique) }
+        }
+        foreach ($k in @($reg[$kind].Keys)) {
+            if ($by.ContainsKey($k) -and $by[$k].Count -eq 1) { [void]$reg[$kind].Remove($k) }   # one object left: no longer a duplicate
+        }
+    }
+}
+function Get-PimDuplicateNameHit {
+    <#
+      PURE (given the register). Does this row / live item belong to a registered duplicate? By NAME (GroupName /
+      AUDisplayName), by a TAG that names it (GroupTag / TargetGroupTag / SourceGroupTag / AdministrativeUnitTag), or by
+      an ID: any top-level value (or element of a list value) that IS one of the registered object ids, or a directory
+      scope '/administrativeUnits/<id>' of one. Returns @{ kind; name; ids } or $null.
+    #>
+    param([AllowNull()][object]$Item, [AllowNull()][hashtable]$Register)
+    if ($null -eq $Item -or -not ($Register -is [hashtable])) { return $null }
+    $pairs = @()
+    if ($Item -is [System.Collections.IDictionary]) { $pairs = @(foreach ($k in @($Item.Keys)) { , @("$k", $Item[$k]) }) }
+    else { $pairs = @(foreach ($p in @($Item.PSObject.Properties)) { , @("$($p.Name)", $p.Value) }) }
+    foreach ($kind in 'group', 'administrativeUnit') {
+        $r = $Register[$kind]; if (-not ($r -is [hashtable]) -or -not $r.Count) { continue }
+        $nameCols = if ($kind -eq 'group') { @('groupname') } else { @('audisplayname') }
+        $tagCols = if ($kind -eq 'group') { @('grouptag', 'targetgrouptag', 'sourcegrouptag') } else { @('administrativeunittag') }
+        foreach ($k in @($r.Keys)) {
+            $e = $r[$k]
+            $ids = @(@($e.ids) | ForEach-Object { "$_".ToLowerInvariant() })
+            $tags = @(@($e.tags) | ForEach-Object { "$_".ToLowerInvariant() })
+            foreach ($pr in $pairs) {
+                $col = "$($pr[0])".ToLowerInvariant(); $val = $pr[1]
+                if ($null -eq $val) { continue }
+                $vals = if ($val -is [string]) { @($val) } elseif ($val -is [System.Collections.IEnumerable] -and -not ($val -is [System.Collections.IDictionary])) { @($val | Where-Object { $_ -is [string] }) } elseif ($val -is [valuetype]) { @() } else { @() }
+                foreach ($v0 in $vals) {
+                    $v = "$v0".Trim().ToLowerInvariant(); if (-not $v) { continue }
+                    $hit = $false
+                    if ($nameCols -contains $col -and $v -eq "$k") { $hit = $true }
+                    elseif ($tagCols -contains $col -and $tags -contains $v) { $hit = $true }
+                    elseif ($ids -contains $v) { $hit = $true }
+                    elseif ($v -match '/administrativeunits/([^/]+)/?$' -and $ids -contains $Matches[1]) { $hit = $true }
+                    if ($hit) { return @{ kind = $kind; name = "$($e.name)"; ids = @($e.ids) } }
+                }
+            }
+        }
+    }
+    return $null
+}
+function Split-PimDuplicateNameItems {
+    <#
+      100.122 F6 -- THE ONE FILTER, called by Invoke-PimEngineScope for EVERY provider after GetDesired / GetLive (and for
+      the explicit Remove rows), before the plan is made. A duplicated name is a doubt, and on a doubt nothing is removed
+      and nothing is written:
+        * a LIVE item that belongs to EITHER object of a registered duplicate is taken out of the diff entirely (it can
+          then be neither a removal nor an update);
+        * a DESIRED row (or a Remove row) that names the duplicate is HELD: not a create, not an update, not a removal --
+          the orchestrator reports it as a failure item DUPLICATE-GROUP-NAME / DUPLICATE-AU-NAME.
+      Returns @{ active; desired; live; held = @(@{ row; kind; name; ids; code; message }); droppedLive }.
+    #>
+    param([AllowNull()][object[]]$Desired = @(), [AllowNull()][object[]]$Live = @(), [switch]$NoRefresh)
+    if (-not $NoRefresh) { Update-PimDuplicateLiveNameRegister }
+    $reg = $global:PIM_DuplicateLiveNames
+    $n = 0; if ($reg -is [hashtable]) { foreach ($k in 'group', 'administrativeUnit') { if ($reg[$k] -is [hashtable]) { $n += $reg[$k].Count } } }
+    if (-not $n) { return [pscustomobject]@{ active = $false; desired = @($Desired); live = @($Live); held = @(); droppedLive = 0 } }
+    $keepD = New-Object System.Collections.Generic.List[object]; $keepL = New-Object System.Collections.Generic.List[object]
+    $held = New-Object System.Collections.Generic.List[object]; $dropped = 0
+    foreach ($d in @($Desired)) {
+        if ($null -eq $d) { continue }
+        $h = Get-PimDuplicateNameHit -Item $d -Register $reg
+        if (-not $h) { $keepD.Add($d); continue }
+        $code = if ($h.kind -eq 'group') { 'DUPLICATE-GROUP-NAME' } else { 'DUPLICATE-AU-NAME' }
+        $what = if ($h.kind -eq 'group') { 'groups' } else { 'administrative units' }
+        $msg = ("{0}: {1} live {2} are named '{3}' (ids {4}) -- PIM Manager does not choose one and touches neither: this row was NOT applied and nothing was removed. Rename or delete the one PIM Manager should not use in Entra ID; the next run applies the row." -f $code, @($h.ids).Count, $what, $h.name, (@($h.ids) -join ', '))
+        $held.Add([pscustomobject]@{ row = $d; kind = $h.kind; name = $h.name; ids = @($h.ids); code = $code; message = $msg })
+    }
+    foreach ($l in @($Live)) {
+        if ($null -eq $l) { continue }
+        if (Get-PimDuplicateNameHit -Item $l -Register $reg) { $dropped++ } else { $keepL.Add($l) }
+    }
+    return [pscustomobject]@{ active = $true; desired = $keepD.ToArray(); live = $keepL.ToArray(); held = $held.ToArray(); droppedLive = $dropped }
+}
+function Get-PimLiveNameIds {
+    # PURE. The DISTINCT ids of the cached objects that carry exactly this display name (the same comparison the
+    # resolvers always used: -eq, i.e. case-insensitive). The cache objects carry Id / DisplayName (SDK shape).
+    param([AllowNull()][object[]]$Cache, [string]$Name)
+    $n = "$Name"; if (-not $n) { return @() }
+    $ids = New-Object System.Collections.Generic.List[string]
+    foreach ($o in @($Cache)) {
+        if ($null -eq $o) { continue }
+        if ("$($o.DisplayName)" -ne $n) { continue }
+        $id = "$($o.Id)"; if (-not $id) { continue }
+        if (-not @($ids | Where-Object { $_ -ieq $id }).Count) { $ids.Add($id) }
+    }
+    return @($ids.ToArray())
+}
 function Resolve-PimLiveGroupIdByName {
     # Cache first (lean context holds only PIM-prefixed groups + engine-created ones); on a
     # miss, resolve ON-DEMAND by displayName (a 150k-group tenant is never bulk-listed) + cache.
+    # 100.122 F6: a name TWO live groups carry resolves to $null (and is registered as DUPLICATE-GROUP-NAME).
     param([string]$Name)
     if (-not $Name) { return $null }
-    $g = @($Global:Groups_All_ID) | Where-Object { "$($_.DisplayName)" -eq "$Name" } | Select-Object -First 1
-    if ($g) { return "$($g.Id)" }
+    $ids = @(Get-PimLiveNameIds -Cache @($Global:Groups_All_ID) -Name "$Name")
+    if ($ids.Count -gt 1) { Register-PimDuplicateLiveName -Kind group -Name "$Name" -Ids $ids; return $null }
+    if ($ids.Count -eq 1) { Unregister-PimDuplicateLiveName -Kind group -Name "$Name"; return "$($ids[0])" }
     try {
         $esc = $Name -replace "'", "''"
         $r = @(Invoke-PimGraph -Headers @{ ConsistencyLevel = 'eventual' } -All -Path "/groups?`$filter=displayName eq '$esc'&`$count=true&`$select=id,displayName,securityEnabled,mailNickname")
+        # the same answer, counted: more than one group of that name = a duplicate (nothing is cached, nothing is resolved)
+        $rIds = @(@($r | Where-Object { $_ -and "$($_.id)" }) | ForEach-Object { "$($_.id)" } | Select-Object -Unique)
+        if ($rIds.Count -gt 1) { Register-PimDuplicateLiveName -Kind group -Name "$Name" -Ids $rIds; return $null }
+        Unregister-PimDuplicateLiveName -Kind group -Name "$Name"
         if ($r.Count) { if (Get-Command Add-PimContextObject -ErrorAction SilentlyContinue) { Add-PimContextObject -Kind Group -Object $r[0] }; return "$($r[0].id)" }
     } catch { Write-Verbose "group resolve ($Name): $($_.Exception.Message)" }
     return $null
+}
+function Resolve-PimLiveAuIdByName {
+    # 100.122 F6: the ONE live administrative unit of this display name, from the run's own AU list ($Global:AU_All_ID --
+    # no Graph call). $null when none carries it, and when TWO do (registered as DUPLICATE-AU-NAME).
+    param([string]$Name)
+    if (-not "$Name") { return $null }
+    $ids = @(Get-PimLiveNameIds -Cache @($Global:AU_All_ID) -Name "$Name")
+    if ($ids.Count -gt 1) { Register-PimDuplicateLiveName -Kind administrativeUnit -Name "$Name" -Ids $ids; return $null }
+    Unregister-PimDuplicateLiveName -Kind administrativeUnit -Name "$Name"
+    if ($ids.Count -eq 1) { return "$($ids[0])" }
+    return $null
+}
+function Get-PimLiveAuIdByNameMap {
+    # 100.122 F6: lower-case AU display name -> id for every live AU whose name is UNIQUE. A name two AUs carry is left
+    # out (and registered), so a lookup of it finds nothing instead of the last one read.
+    $byName = @{}
+    foreach ($a in @($Global:AU_All_ID)) {
+        if ($null -eq $a) { continue }
+        $n = "$($a.DisplayName)"; $id = "$($a.Id)"; if (-not $n -or -not $id) { continue }
+        $k = $n.ToLowerInvariant()
+        if (-not $byName.ContainsKey($k)) { $byName[$k] = New-Object System.Collections.Generic.List[string] }
+        if (-not @($byName[$k] | Where-Object { $_ -ieq $id }).Count) { $byName[$k].Add($id) }
+    }
+    $out = @{}
+    foreach ($k in @($byName.Keys)) {
+        if ($byName[$k].Count -gt 1) { $nm = "$(@($Global:AU_All_ID | Where-Object { $_ -and "$($_.DisplayName)".ToLowerInvariant() -eq $k } | Select-Object -First 1).DisplayName)"; Register-PimDuplicateLiveName -Kind administrativeUnit -Name $(if ($nm) { $nm } else { $k }) -Ids @($byName[$k].ToArray()) }
+        else { $out[$k] = "$($byName[$k][0])"; Unregister-PimDuplicateLiveName -Kind administrativeUnit -Name $k }
+    }
+    return $out
 }
 function Get-PimLiveGroupIdsByName {
     # SEC-86: EVERY live group with exactly this display name (a fresh, filtered read -- never the cache). $null when the
@@ -2464,6 +2683,8 @@ function New-PimAdministrativeUnitsProvider {
             # can tell replication lag from a genuinely missing AU. Only here -- the already-exists
             # branch above returns early and deliberately does not register.
             Register-PimAuCreatedThisPass -Context $ctx -AuId "$($au.id)" -AuName "$($item.key)"
+            # Review fixes 2026-10-13: the same for the orchestrator's register -- only this branch marks its result.
+            if (Get-Command Set-PimCreatedThisRunMark -ErrorAction SilentlyContinue) { Set-PimCreatedThisRunMark -Object $au }
             $au
         }
     }
@@ -2717,7 +2938,7 @@ function New-PimGroupsProvider {
             # Set $global:PIM_RequireGroupOwners = $true to restore the strict, refuse-to-create
             # behaviour; the knob now works in BOTH directions.
             $ownerIds = Resolve-PimGroupOwnerIds -Row $d -Ctx $ctx
-            $require = $false; if ($null -ne $global:PIM_RequireGroupOwners) { $require = [bool]$global:PIM_RequireGroupOwners }
+            $require = if (Get-Command Get-PimFeatureSetting -ErrorAction SilentlyContinue) { [bool](Get-PimFeatureSetting -Name 'RequireGroupOwners') } else { ($global:PIM_RequireGroupOwners -is [bool]) -and [bool]$global:PIM_RequireGroupOwners }   # PIM 100.121: never [bool] on text -- the stored text "false" would read as TRUE
             if (-not $ownerIds.Count) {
                 if ($require) {
                     throw "no owner resolves for group '$gn' and \$global:PIM_RequireGroupOwners is set -- set Owners/SponsorUpn on the definition, or a Department contact, or clear the flag to create it and assign the owner later."
@@ -2743,7 +2964,9 @@ function New-PimGroupsProvider {
             $auTag = Get-PimRowProp -Row $d -Names @('AdministrativeUnitTag')
             if ($auTag -and $g.id) {
                 $auName = $ctx['tagToAuName'][$auTag.ToLowerInvariant()]
-                $au = @($Global:AU_All_ID) | Where-Object { "$($_.DisplayName)" -eq "$auName" } | Select-Object -First 1
+                # 100.122 F6: the ONE live AU of that name; a name two AUs carry resolves to nothing (DUPLICATE-AU-NAME).
+                $__auId = Resolve-PimLiveAuIdByName "$auName"
+                $au = if ($__auId) { [pscustomobject]@{ Id = $__auId; DisplayName = "$auName" } } else { $null }
                 if ($au) {
                     # §70.19 (measured on internal 2026-09-13): the attach right after the create answered
                     # 404 Request_ResourceNotFound for BOTH new groups -- the group had not replicated yet --
@@ -2764,6 +2987,9 @@ function New-PimGroupsProvider {
             # owners are enforced above (refuse ownerless) but ATTACHED by the GroupOwners
             # scope (order 25) -- a separate, re-runnable pass that tolerates replication of
             # the just-created group and repairs missing owners on existing groups.
+            # Review fixes 2026-10-13: THIS call created the group (the "already exists" and rename-in-place branches above
+            # return without the mark) -- only a marked result is remembered as "created by this run" (PIM-EngineCore.ps1).
+            if (Get-Command Set-PimCreatedThisRunMark -ErrorAction SilentlyContinue) { Set-PimCreatedThisRunMark -Object $g }
             $g
         }
     }
@@ -2794,7 +3020,7 @@ function New-PimAuMembersProvider {
             param($ctx)
             Ensure-PimContextLoaded
             $tagToAu = Get-PimTagToAuName
-            $auByName = @{}; foreach ($a in @($Global:AU_All_ID)) { $n = "$($a.DisplayName)"; if ($n) { $auByName[$n.ToLowerInvariant()] = "$($a.Id)" } }
+            $auByName = Get-PimLiveAuIdByNameMap   # 100.122 F6: unique names only -- a name two AUs carry is in nobody's map (DUPLICATE-AU-NAME)
             $out = New-Object System.Collections.Generic.List[object]
             foreach ($d in (Get-PimGroupDefinitionRows)) {
                 $auTag = "$($d.AdministrativeUnitTag)"; if (-not $auTag) { continue }   # not an AU-scoped group
@@ -2818,7 +3044,9 @@ function New-PimAuMembersProvider {
             # so this scope can never see, let alone plan against, anything else in the tenant.
             foreach ($r in @(Get-PimDesiredRows -Entity 'PIM-Definitions-AU')) {
                 $auName = "$(Get-PimRowProp -Row $r -Names @('AUDisplayName'))"; if (-not $auName) { continue }
-                $au = @($Global:AU_All_ID) | Where-Object { "$($_.DisplayName)" -eq $auName } | Select-Object -First 1
+                # 100.122 F6: the ONE live AU of that name; a name two AUs carry resolves to nothing (DUPLICATE-AU-NAME).
+                $__auId = Resolve-PimLiveAuIdByName "$auName"
+                $au = if ($__auId) { [pscustomobject]@{ Id = $__auId; DisplayName = "$auName" } } else { $null }
                 if (-not $au) { continue }
                 try {
                     # TEST-16: a 404 here on an AU this pass just created is replication lag, not a
@@ -3272,7 +3500,7 @@ function New-PimRolesAUsProvider {
             param($ctx)
             Ensure-PimContextLoaded
             $tagToName = Get-PimTagToGroupName; $tagToAu = Get-PimTagToAuName
-            $auByName = @{}; foreach ($a in @($Global:AU_All_ID)) { $n = "$($a.DisplayName)"; if ($n) { $auByName[$n.ToLowerInvariant()] = "$($a.Id)" } }
+            $auByName = Get-PimLiveAuIdByNameMap   # 100.122 F6: unique names only -- a name two AUs carry is in nobody's map (DUPLICATE-AU-NAME)
             $ctx['auTagToId'] = @{}; $ctx['rauGid'] = @{}
             $out = New-Object System.Collections.Generic.List[object]
             # 68.6 row 24: Remove rows are resolved like desired rows (same key as the live
@@ -6097,7 +6325,7 @@ function Write-PimPolicyMassHoldAlert {
           # grown weaker since -- log and audit, but no new mail (and the job's own "held" alert skips it too).
           [bool]$MailDue = $true)
     $spec = Get-PimPolicyBreakerSpec -Provider $Provider
-    Write-Host ("[engine] {0}: mass-change circuit breaker HELD [{1}] -- N={2} T={3} W={4} planHash={5}. Wrote NOTHING this run." -f $spec.Provider, (@($Hold.tripped) -join ', '), $Hold.changes, $Hold.checked, $Hold.weakening, $Hold.planHash) -ForegroundColor Red
+    Write-Host ("[engine] {0}: mass-change circuit breaker HELD [{1}] -- N={2} T={3} W={4} planHash={5}. Wrote NOTHING this run." -f $spec.Provider, (ConvertTo-PimPolicyTrippedWords -Tripped @($Hold.tripped)), $Hold.changes, $Hold.checked, $Hold.weakening, $Hold.planHash) -ForegroundColor Red
     try {
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
             Write-PimAuditEvent -Action "$($spec.Audit).held" -Target $spec.Provider -After @{ planHash = $Hold.planHash; changes = $Hold.changes; checked = $Hold.checked; weakening = $Hold.weakening; tripped = @($Hold.tripped) } | Out-Null
@@ -6107,7 +6335,7 @@ function Write-PimPolicyMassHoldAlert {
     if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
         $gm = @{}; foreach ($k in 'changes', 'checked', 'weakening') { if ($Hold.PSObject.Properties[$k]) { $gm[$k] = $Hold.$k } }
         [void](Invoke-PimGuardTrip -GuardId ("engine.policy-mass-change." + "$($spec.Provider)".ToLowerInvariant()) -Outcome held -Area "$($spec.Provider)" -Job 'engine' -CallerMailed `
-            -Title ("policy mass-change held in {0} [{1}]" -f $spec.Provider, (@($Hold.tripped) -join ', ')) -Detail $Message `
+            -Title ("policy mass-change held in {0} [{1}]" -f $spec.Provider, (ConvertTo-PimPolicyTrippedWords -Tripped @($Hold.tripped))) -Detail $Message `
             -ActionText 'Open Approvals: approve the change set, or fix the definitions. Nothing was written.' -Measured $gm -HeldCount ([int]$(if ($Hold.PSObject.Properties['changes']) { $Hold.changes } else { 0 })))
     }
     # 🔴 BUG-184 (§33.28): this sent Type 'alert' -- a template that does not exist -- with tokens the real
@@ -6191,6 +6419,14 @@ function Test-PimAzResPolicyBreaker {
     Test-PimPolicyBreaker -Plan $Plan -Thresholds $Thresholds -Approval $Approval -NowUtc $NowUtc
 }
 
+function ConvertTo-PimPolicyTrippedWords {
+    <# PURE (PIM 100.119 A3). The reasons a policy change set carries, in words for what a person reads (the log line, the
+       mail, the failure text) -- counts, never a share. The codes themselves (the hold record's 'tripped') are unchanged. #>
+    param([AllowNull()][AllowEmptyCollection()][string[]]$Tripped = @())
+    $w = @{ 'needs-approval' = 'needs approval'; 'max-changes' = 'many policies change'; 'max-percent' = 'many of the checked policies change'; 'max-weakening' = 'settings are weakened' }
+    return (@(@($Tripped) | Where-Object { "$_".Trim() } | ForEach-Object { if ($w.ContainsKey("$_")) { $w["$_"] } else { "$_" } }) -join ', ')
+}
+
 function Test-PimPolicyBreaker {
     <#
       PURE. The mass-change circuit breaker -- same decision shape as Test-PimDisablePassAllowed:
@@ -6222,7 +6458,10 @@ function Test-PimPolicyBreaker {
     if ($n -gt [int]$Thresholds.MaxChanges) { $tripped.Add('max-changes'); $reasons.Add("would change $n policies (> cap $($Thresholds.MaxChanges))") }
     if ($t -ge [int]$Thresholds.MinCheckedForPercent -and $t -gt 0) {
         $pct = 100.0 * $n / $t
-        if ($pct -gt [double]$Thresholds.MaxPercent) { $tripped.Add('max-percent'); $reasons.Add(("would change {0} of {1} checked policies ({2:N1}% > cap {3}%)" -f $n, $t, $pct, $Thresholds.MaxPercent)) }
+        # PIM 100.119 A3 (owner 2026-10-13): what is SHOWN says counts -- how many policies change, of how many checked. The
+        # decision is untouched: the same condition adds the same 'max-percent' entry to tripped, and every change set is
+        # held whatever this says.
+        if ($pct -gt [double]$Thresholds.MaxPercent) { $tripped.Add('max-percent'); $reasons.Add(("would change {0} of the {1} checked policies" -f $n, $t)) }
     }
     if ($w -gt [int]$Thresholds.MaxWeakening) { $tripped.Add('max-weakening'); $reasons.Add("$w weakening change(s) (> cap $($Thresholds.MaxWeakening))") }
     $base = @{ changes = $n; checked = $t; weakening = $w; planHash = "$($Plan.planHash)"; thresholds = $Thresholds; tripped = $tripped.ToArray()
@@ -6275,7 +6514,7 @@ function Format-PimAzResPolicyMassHoldMessage {
     $wk = @($Hold.weakenings | ForEach-Object { "$($_.role) @ $($_.scope) $($_.ruleId): $($_.change)" })
     $imp = if ($Hold.PSObject.Properties['impact']) { $Hold.impact } else { $null }
     ((Get-PimPolicyHoldLead -Noun 'Azure role policy' -Impact $imp -Changes ([int]$Hold.changes)) + ' ' +
-     "AzResPolicies [AZ-POLICY-MASS-HOLD]: HELD by the mass-change circuit breaker [" + (@($Hold.tripped) -join ', ') + "] -- $($Hold.reason). " +
+     "AzResPolicies [AZ-POLICY-MASS-HOLD]: HELD by the mass-change circuit breaker [" + (ConvertTo-PimPolicyTrippedWords -Tripped @($Hold.tripped)) + "] -- $($Hold.reason). " +
      "Wrote NOTHING this run. N=$($Hold.changes) policies to change, T=$($Hold.checked) checked, W=$($Hold.weakening) weakening. planHash=$($Hold.planHash). " +
      "Policies: " + ($pol -join '; ') + $(if ($Hold.morePolicies) { "; and $($Hold.morePolicies) more" } else { '' }) + ". " +
      "Weakening changes: " + $(if ($wk.Count) { $wk -join '; ' } else { 'none' }) + ". " +
@@ -6461,7 +6700,7 @@ function Format-PimGraphPolicyMassHoldMessage {
     $wk = @($Hold.weakenings | ForEach-Object { "$($_.name) $($_.ruleId): $($_.change)" })
     $imp = if ($Hold.PSObject.Properties['impact']) { $Hold.impact } else { $null }
     ((Get-PimPolicyHoldLead -Noun $(if ($spec.Provider -eq 'GroupsPolicies') { 'PIM for Groups policy' } else { 'Entra role policy' }) -Impact $imp -Changes ([int]$Hold.changes)) + ' ' +
-     "$($spec.Provider) [$($spec.Code)]: HELD by the mass-change circuit breaker [" + (@($Hold.tripped) -join ', ') + "] -- $($Hold.reason). " +
+     "$($spec.Provider) [$($spec.Code)]: HELD by the mass-change circuit breaker [" + (ConvertTo-PimPolicyTrippedWords -Tripped @($Hold.tripped)) + "] -- $($Hold.reason). " +
      "Wrote NOTHING this run. N=$($Hold.changes) policies to change, T=$($Hold.checked) checked, W=$($Hold.weakening) weakening. planHash=$($Hold.planHash). " +
      "Policies: " + ($pol -join '; ') + $(if ($Hold.morePolicies) { "; and $($Hold.morePolicies) more" } else { '' }) + ". " +
      "Weakening changes: " + $(if ($wk.Count) { $wk -join '; ' } else { 'none' }) + ". " +
@@ -7040,7 +7279,16 @@ function Get-PimAdminTapLeadHours {
     # #10 -- v1 $global:PIM_TapCreateLeadHours, default 48 (v1 11395). Global, env or pim.Settings.
     $v = "$(Get-PimAdminLifecycleSetting -Name 'TapCreateLeadHours' -Default '')".Trim()
     $n = 0
-    if ($v -and [int]::TryParse($v, [ref]$n) -and $n -ge 0) { return $n }
+    # REVIEW FIXES 2026-10-13: an upper bound on the read, equal to what Settings offers (0 to 720 hours, the catalog of
+    # PIM-FeatureSettings.ps1 -- Test-PimFeatureSettings holds the two equal). Above it = the default, with one warning.
+    if ($v -and [int]::TryParse($v, [ref]$n) -and $n -ge 0) {
+        if ($n -le 720) { return $n }
+        if (-not ($global:PIM_FeatureSettingWarned -is [hashtable])) { $global:PIM_FeatureSettingWarned = @{} }
+        if (-not $global:PIM_FeatureSettingWarned.ContainsKey('TapCreateLeadHours')) {
+            $global:PIM_FeatureSettingWarned['TapCreateLeadHours'] = $true
+            Write-Warning "[settings] 'TapCreateLeadHours' is set but not usable ($n is above 720 hours) -- the default (48) applies."
+        }
+    }
     return 48
 }
 
@@ -8250,7 +8498,11 @@ function Get-PimRetireGroupRows {
             $gn = (Get-PimRowProp -Row $r -Names @('GroupName')).Trim()
             if (-not $gn) { continue }
             if ((Get-PimRowProp -Row $r -Names @('Lifecycle')).Trim() -notmatch '(?i)^retire') { continue }
-            [void]$out.Add([pscustomobject]@{ GroupName = $gn; Entity = $e })
+            # PIM 100.119 (5): ItemId = the identity a SuperAdmin approves at commit (list + store key + group name); '' when
+            # the row has none (no store key, a row the managing tenant sent) -- such a row can never be covered by an approval.
+            $iid = ''
+            if (Get-Command Get-PimGuardItemId -ErrorAction SilentlyContinue) { try { $iid = "$(Get-PimGuardItemId -Entity $e -Row $r -Kind delete-group)" } catch { $iid = '' } }
+            [void]$out.Add([pscustomobject]@{ GroupName = $gn; Entity = $e; ItemId = $iid })
         }
     }
     return $out.ToArray()
@@ -8264,7 +8516,7 @@ function New-PimGroupRetirementProvider {
             param($ctx)
             $rows = @($ctx['retireRows'] | Where-Object { $null -ne $_ })
             if (-not $rows.Count) { return @() }
-            $rec = { param($r, $complete, $note) [pscustomobject]@{ GroupName = $r.GroupName; groupId = ''; complete = [bool]$complete; blocked = ''; note = $note } }
+            $rec = { param($r, $complete, $note) [pscustomobject]@{ GroupName = $r.GroupName; groupId = ''; complete = [bool]$complete; blocked = ''; note = $note; itemId = "$($r.ItemId)" } }
             if (-not (Test-PimGroupRetirementEnabled)) {
                 Write-Host ("    [GroupRetirement] SKIPPED -- automatic group retirement is DISABLED (operator policy): {0} Lifecycle=Retire row(s) not processed. Set PIM_EnableGroupRetirement=true (global, env or pim.Settings 'EnableGroupRetirement') to opt in." -f $rows.Count) -ForegroundColor DarkYellow
                 return @($rows | ForEach-Object { & $rec $_ $true 'group retirement disabled' })
@@ -8288,7 +8540,18 @@ function New-PimGroupRetirementProvider {
                     $x.complete = $true; $x.note = 'not engine-owned (prefix)'; [void]$live.Add($x); continue
                 }
                 $gid = Resolve-PimLiveGroupIdByName $r.GroupName
-                if (-not $gid) { $x.complete = $true; $x.note = 'already gone -- remove the row (or its Retire flag) to finish'; [void]$live.Add($x); continue }
+                if (-not $gid) {
+                    # REVIEW FIXES 2026-10-13: "no id" is not "no group". Since 100.122 F6 the resolver also answers
+                    # nothing for a name TWO live groups carry (and for a read that failed), and this row then said
+                    # "already gone -- remove the row" while both groups existed. Every live group of that name is asked
+                    # for FIRST (a fresh read, never the cache); only a read that finds NONE says "already gone".
+                    $__named = Get-PimLiveGroupIdsByName -Name "$($r.GroupName)"
+                    if ($null -ne $__named -and @($__named).Count -eq 0) { $x.complete = $true; $x.note = 'already gone -- remove the row (or its Retire flag) to finish'; [void]$live.Add($x); continue }
+                    if ($null -eq $__named) { $x.blocked = 'the groups of this name could not be read -- nothing deleted, and the row is NOT finished (never "already gone" on a read that failed); the next run reads again' }
+                    elseif (@($__named).Count -gt 1) { $x.blocked = ("name not unique -- nothing deleted: {0} live groups are named '{1}' (ids {2}) -- PIM cannot prove which one it manages, so it retires none. Keep the definition row; rename or delete the extra group, then the next run retires the one left." -f @($__named).Count, $r.GroupName, (@($__named) -join ', ')) }
+                    else { $x.blocked = ("the group '{0}' was not resolved by its name in this run, although one live group carries it (id {1}) -- nothing deleted on two reads that disagree; the next run reads again" -f $r.GroupName, "$(@($__named)[0])") }
+                    [void]$live.Add($x); continue
+                }
                 $x.groupId = "$gid"
                 # 🔴 SEC-86 (§33.38): the group is found by DISPLAY NAME and Entra allows duplicates -- a group someone made by
                 # hand with the same name could be the one emptied and deleted. Retire only a name that is UNIQUE live; an
@@ -8305,12 +8568,46 @@ function New-PimGroupRetirementProvider {
             $pending = @($live | Where-Object { -not $_.complete -and -not $_.blocked })
             if ($pending.Count -gt 0) {
                 if (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue) {
-                    $rb = Test-PimRemoveBudgetAllowed -ToRemove $pending.Count -Scope 'GroupRetirement' -Scanned $rows.Count -Operation 'delete group'
+                    # PIM 100.119 (5) (owner 2026-10-13): group deletion goes through the SAME approval as every removal.
+                    #   1. the groups a SuperAdmin approved when the Retire marks were committed (the exact list, each group
+                    #      once) are deleted whatever the budget says -- they do not count against it;
+                    #   2. the rest is judged against the budget; over it, a plan the run already holds can be released on
+                    #      Operations > Guards for exactly that list (scope GroupRetirement), as for every other scope;
+                    #   3. what is neither approved nor released is held -- ONLY those groups; the approved ones go ahead.
+                    # A plan (WhatIf) uses no approval and no release, records no hold and sends no mail. Every other rule of
+                    # this provider (the switch, the naming prefix, a unique name, not still desired) was applied above and
+                    # is not touched by an approval.
+                    $whatIf = [bool]$ctx['__pimWhatIf']
+                    $okIds = @{}
+                    if (-not $whatIf -and (Get-Command Use-PimGuardApprovalItems -ErrorAction SilentlyContinue)) {
+                        $want = @($pending | Where-Object { "$($_.itemId)".Trim() } | ForEach-Object { "$($_.itemId)" })
+                        if ($want.Count) {
+                            $ua = Use-PimGuardApprovalItems -GuardId 'engine.remove-budget' -ItemIds $want -Scope 'GroupRetirement' -RunKind 'group-retirement'
+                            foreach ($k in @($ua.ids)) { $okIds["$k"] = $true }
+                            if ($okIds.Count) { Write-Host ("    [GroupRetirement] {0} group deletion(s) were approved by a SuperAdmin when they were committed -- applied without counting against the removal budget" -f $okIds.Count) -ForegroundColor Magenta }
+                        }
+                    }
+                    $rest = @($pending | Where-Object { -not ("$($_.itemId)".Trim() -and $okIds.ContainsKey("$($_.itemId)".Trim().ToLowerInvariant())) })
+                    $rb = Test-PimRemoveBudgetAllowed -ToRemove $rest.Count -Scope 'GroupRetirement' -Scanned $rows.Count -Operation 'delete group'
+                    $restKeys = @($rest | ForEach-Object { "delete-group|$("$($_.GroupName)".Trim().ToLowerInvariant())" })
+                    if (-not $rb.allowed -and -not $whatIf -and (Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue)) {
+                        $gr = Invoke-PimGuardHoldOrRelease -GuardId 'engine.remove-budget' -Scope 'GroupRetirement' -Keys $restKeys -Count $rest.Count -RunKind 'group-retirement' `
+                                -Measured @{ toRemove = $rest.Count; budget = [int]$rb.budget; scanned = $rows.Count }
+                        if ($gr.released -and $rest.Count -le [int]$gr.release.raiseTo) {
+                            Write-Host ("    [GroupRetirement] the released plan goes ahead for this run -- exactly these {0} group deletion(s)" -f $rest.Count) -ForegroundColor Magenta
+                            $rb = [pscustomobject]@{ allowed = $true; abort = $false; tripped = $null; reason = 'released for this run'; toRemove = $rest.Count; budget = [int]$rb.budget; scope = 'GroupRetirement'; operation = 'delete group'; scanned = $rows.Count }
+                        }
+                    } elseif ($rb.allowed -and -not $whatIf -and (Get-Command Clear-PimGuardHold -ErrorAction SilentlyContinue)) {
+                        [void](Clear-PimGuardHold -GuardId 'engine.remove-budget' -Scope 'GroupRetirement' -RunKind 'group-retirement')
+                    }
                     if (-not $rb.allowed) {
-                        if (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue) { Write-PimRemoveBudgetAlert -Decision $rb }
-                        $ctx['retireBlocked'] = "removal budget: $($rb.reason)"
+                        if (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue) { Write-PimRemoveBudgetAlert -Decision $rb -PlanOnly:$whatIf }
+                        foreach ($x in $rest) { $x.blocked = "removal budget: $($rb.reason) Not approved: a SuperAdmin approves this exact list when it is committed (Review & commit), or releases the held plan on Operations > Guards." }
                     }
                 } else { $ctx['retireBlocked'] = 'the removal budget (PIM-DisableGuard.ps1) is not loaded -- refusing to delete groups (fail closed)' }
+            } elseif (-not $ctx['__pimWhatIf'] -and (Get-Command Clear-PimGuardHold -ErrorAction SilentlyContinue)) {
+                # nothing left to delete: a stale hold must not be offered for release
+                [void](Clear-PimGuardHold -GuardId 'engine.remove-budget' -Scope 'GroupRetirement' -RunKind 'group-retirement')
             }
             $live.ToArray()
         }

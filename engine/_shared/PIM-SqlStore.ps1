@@ -1262,6 +1262,78 @@ function ConvertTo-PimSqlLikeContains {
     return '%' + $t + '%'
 }
 
+function Get-PimActiveAssignmentsConditionColumn {
+    <#
+      PURE. PIM 100.120. A list-menu condition's column name -> the SQL expression it compares. A CLOSED list: the text
+      of a condition is built from these literals only, never from what the request sent. Unknown = '' (the caller
+      refuses). -Exact: "is" / "starts with" / "any of" compare the name itself; "contains" on principal also reads the
+      sign-in name, as the page shows both.
+    #>
+    param([string]$Key = '', [switch]$Exact)
+    switch -CaseSensitive ("$Key") {
+        'principal'     { if ($Exact) { return "ISNULL(a.Principal, N'')" } else { return "CONCAT(ISNULL(a.Principal, N''), N' ', ISNULL(a.PrincipalUpn, N''))" } }
+        'role'          { return "ISNULL(a.Role, N'')" }
+        'scope'         { return "ISNULL(a.Scope, N'')" }
+        'type'          { return "ISNULL(a.Kind, N'')" }
+        'justification' { return "ISNULL(a.Justification, N'')" }
+        '*'             { return "ISNULL(a.SearchText, N'')" }
+    }
+    return ''
+}
+
+function Get-PimActiveAssignmentsConditionSql {
+    <#
+      PURE. PIM 100.120. The list menu's conditions (already checked: ConvertTo-PimListQuery) -> the text added to the
+      WHERE of the paged query, and its parameters: @{ sql; parameters; count }. Every VALUE is a parameter (@lmc0,
+      @lmc1, ... -- the names come from a counter here, @lmq for the search); the only text that varies is a column
+      expression from the closed list above and one of five fixed comparisons. No condition and no search = '' and no
+      parameter, so the statement is what it was. A column or an operator outside the lists THROWS (fail closed).
+    #>
+    param([AllowNull()][object[]]$Conditions, [AllowNull()][string]$Search = '')
+    $sb = New-Object System.Text.StringBuilder
+    $p = @{}
+    $n = 0
+    foreach ($c in @($Conditions)) {
+        if ($null -eq $c) { continue }
+        if ($n -ge 10) { throw 'more than 10 list conditions' }
+        $op = "$($c.op)"
+        $exact = (@('equals', 'startsWith', 'anyOf') -ccontains $op)
+        $col = Get-PimActiveAssignmentsConditionColumn -Key "$($c.col)" -Exact:$exact
+        if (-not $col) { throw 'a list condition names a column that is not in the list of known columns' }
+        $name = 'lmc' + $n
+        $text = "$($c.value)".Trim().ToLowerInvariant()
+        if ($text.Length -gt 200) { $text = $text.Substring(0, 200) }
+        if ($op -ceq 'contains') {
+            [void]$sb.Append("`n  AND LOWER($col) LIKE @$name ESCAPE N'\'")
+            $p[$name] = (ConvertTo-PimSqlLikeContains -Text $text)
+        } elseif ($op -ceq 'notContains') {
+            [void]$sb.Append("`n  AND LOWER($col) NOT LIKE @$name ESCAPE N'\'")
+            $p[$name] = (ConvertTo-PimSqlLikeContains -Text $text)
+        } elseif ($op -ceq 'startsWith') {
+            [void]$sb.Append("`n  AND LOWER(LTRIM($col)) LIKE @$name ESCAPE N'\'")
+            $p[$name] = (ConvertTo-PimSqlLikeContains -Text $text).Substring(1)
+        } elseif ($op -ceq 'equals') {
+            [void]$sb.Append("`n  AND LOWER(LTRIM(RTRIM($col))) = @$name")
+            $p[$name] = $text
+        } elseif ($op -ceq 'anyOf') {
+            $vals = @(@($c.values) | ForEach-Object { "$_" })
+            $hasEmpty = (@($vals | Where-Object { -not "$_".Trim() }).Count -gt 0)
+            [void]$sb.Append("`n  AND (LOWER(LTRIM(RTRIM($col))) IN (SELECT CAST(j.[value] AS NVARCHAR(400)) FROM OPENJSON(@$name) j)")
+            if ($hasEmpty) { [void]$sb.Append(" OR LTRIM(RTRIM($col)) = N''") }
+            [void]$sb.Append(')')
+            $p[$name] = (ConvertTo-PimSqlJsonStringArray -Values @($vals | Select-Object -First 50))
+        } else { throw 'a list condition has an operator that is not one of the five known ones' }
+        $n++
+    }
+    $s = "$Search".Trim().ToLowerInvariant()
+    if ($s.Length -gt 200) { $s = $s.Substring(0, 200) }
+    if ($s) {
+        [void]$sb.Append("`n  AND a.SearchText LIKE @lmq ESCAPE N'\'")
+        $p['lmq'] = (ConvertTo-PimSqlLikeContains -Text $s)
+    }
+    return @{ sql = $sb.ToString(); parameters = $p; count = $n }
+}
+
 function Get-PimActiveAssignmentsViewCounts {
     <#
       PURE. The page's counters from the grouped counts of a whole generation (-Groups: Kind, IsDeleted, Managed, OwnKind,
@@ -1313,7 +1385,10 @@ function Invoke-PimSqlActiveAssignmentsQuery {
         [Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][long]$SnapshotId,
         [string]$Type = 'all', [string]$Search = '', [string[]]$Aliases = @(), [string[]]$ScopeIs = @(),
         [string]$Sort = 'principal', [switch]$Descending, [int]$Page = 1, [int]$PageSize = 0,
-        [bool]$ShowDeleted = $false, [bool]$ShowManaged = $false, [bool]$ShowProduct = $false, [bool]$ShowSupport = $false, [bool]$ShowBreakGlass = $false
+        [bool]$ShowDeleted = $false, [bool]$ShowManaged = $false, [bool]$ShowProduct = $false, [bool]$ShowSupport = $false, [bool]$ShowBreakGlass = $false,
+        # PIM 100.120: the list menu's conditions and search (checked by the caller), added to the filter of the COUNT and
+        # of the page -- so "filtered" is the number of matching rows of the whole list. None = the statement as it was.
+        [AllowNull()][object[]]$Conditions = @(), [AllowNull()][string]$ListSearch = ''
     )
     $max = Get-PimActiveAssignmentsPageSizeMax
     if ($PageSize -le 0) { $PageSize = Get-PimActiveAssignmentsPageSizeDefault }
@@ -1337,6 +1412,8 @@ a.SnapshotId = @sid
   AND (@q = N'' OR a.SearchText LIKE @qLike ESCAPE N'\' OR (@hasAl = 1 AND EXISTS (SELECT 1 FROM @al x WHERE x.v IN (LOWER(LTRIM(RTRIM(a.Scope))), LOWER(LTRIM(RTRIM(a.Role))), LOWER(LTRIM(RTRIM(a.Principal)))))))
   AND (@hasSc = 0 OR EXISTS (SELECT 1 FROM @sc y WHERE y.v = LOWER(LTRIM(RTRIM(a.Scope)))))
 '@
+    $lmSql = Get-PimActiveAssignmentsConditionSql -Conditions $Conditions -Search $ListSearch
+    if ("$($lmSql.sql)") { $where = $where + "$($lmSql.sql)" }
     $sql = @"
 SET NOCOUNT ON;
 DECLARE @al TABLE (v NVARCHAR(400) NOT NULL PRIMARY KEY);
@@ -1356,6 +1433,7 @@ ORDER BY $col $dir, a.Seq ASC OFFSET @off ROWS FETCH NEXT @take ROWS ONLY OPTION
             aliasJson = (ConvertTo-PimSqlJsonStringArray -Values $al); scopeJson = (ConvertTo-PimSqlJsonStringArray -Values $sc)
             showDeleted = [bool]$ShowDeleted; showManaged = [bool]$ShowManaged; showProduct = [bool]$ShowProduct; showSupport = [bool]$ShowSupport; showBreakGlass = [bool]$ShowBreakGlass
             off = [int](($Page - 1) * $PageSize); take = [int]$PageSize }
+    foreach ($lmKey in @($lmSql.parameters.Keys)) { $p["$lmKey"] = $lmSql.parameters[$lmKey] }
     $sets = Invoke-PimSqlQuerySets -ConnectionString $ConnectionString -Sql $sql -Parameters $p -CommandTimeoutSec (Get-PimActiveAssignmentsQueryTimeoutSec)
     if ($sets.Count -lt 3) { throw "the active-assignments query answered $($sets.Count) of 3 result sets" }
     $filtered = [long]0
@@ -2779,3 +2857,7 @@ if (Test-Path -LiteralPath $__rcnRem) { . $__rcnRem }
 # CONFIG-1.3 / PIM §96.3: the configuration backup (pim.ConfigBackups) rides with the store too.
 $__cfgBak = Join-Path $PSScriptRoot 'PIM-ConfigBackup.ps1'
 if (Test-Path -LiteralPath $__cfgBak) { . $__cfgBak }
+# PIM 100.121: the feature-setting reader rides with the store -- it reads what Import-PimSettingsFromStore hydrates, so
+# every process that can hold a stored setting (the engine, the scheduler, the Manager) has the reader for it.
+$__featSet = Join-Path $PSScriptRoot 'PIM-FeatureSettings.ps1'
+if (Test-Path -LiteralPath $__featSet) { . $__featSet }
