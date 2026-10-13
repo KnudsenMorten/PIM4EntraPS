@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.615 -- 2026-10-13
+
+- Active assignments on a large tenant: the assignments are stored as rows in a table and written in batches, so the snapshot no longer times out, and the list asks for one page at a time with search, filters and sorting done in the database
+
 ## 2.4.614 -- 2026-10-13
 
 - An assignment to a group that is retired or not defined is refused when you commit it, with the row and the two ways out, and a group cannot be retired or removed while assignments still name it; the Power BI prerequisite names the group and the one identity that must be in it and checks the membership itself; a workload PIM Manager could not read is never counted as ready

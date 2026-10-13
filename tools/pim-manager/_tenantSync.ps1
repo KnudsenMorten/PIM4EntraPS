@@ -63,6 +63,9 @@
 # 'active-assignments' (§70.1b option 2): { refreshedUtc; rows; counts; surfaceErrors; partial; ok; error; durationMs;
 # source; correlationId } -- written by the scheduler job 'active-assignments-snapshot', read by the Manager's
 # GET /api/active-assignments. See engine/_shared/PIM-ActiveAssignments.ps1.
+# REQ 100.114 (2): since the table form the stored document is { rowStore = 'table'; snapshotId; rowCount; refreshedUtc;
+# counts; ... } WITHOUT rows -- the rows are in pim.ActiveAssignmentRows (PIM-SqlStore.ps1). Get-PimTenantCacheEntry
+# attaches them (same shape as before) unless -HeaderOnly. The one-document form of earlier versions is still read as is.
 # 'drift' (Drift page, 2026-09-14): { refreshedUtc; durationSeconds; total; counts; scopesFailed; ok; scopes[...] } -- written
 # by the scheduler job 'drift-snapshot', read by GET /api/drift. See engine/_shared/PIM-DriftSnapshot.ps1.
 # 'coverage-report' (REQ-I + REQ-U, Coverage & gaps page): { computedUtc; ok; counts; sources[]; rows[]; ... } -- written by the
@@ -120,14 +123,26 @@ function Set-PimTenantCacheEntry {
 
 function Get-PimTenantCacheEntry {
     # One cache kind, parsed; $null when absent. Never throws (a cache is a convenience, not a gate).
-    param([Parameter(Mandatory)][ValidateScript({ $script:PimTenantCacheKinds -contains $_ })][string]$Kind)
+    param([Parameter(Mandatory)][ValidateScript({ $script:PimTenantCacheKinds -contains $_ })][string]$Kind,
+          # REQ 100.114 (2): 'active-assignments' in the TABLE form is a small header (rowStore = 'table') whose rows are
+          # in pim.ActiveAssignmentRows. By default the rows are read and attached, so every reader of the whole set gets
+          # the shape it always got; -HeaderOnly returns the header alone (the paged endpoint asks the table itself).
+          [switch]$HeaderOnly)
     # REQ 100.112: $null means "absent" OR "could not be read" -- the reason of a FAILED read is kept per kind
     # (Get-PimTenantCacheReadError), so a caller can tell the two apart instead of treating a failure as "nothing stored".
     if ($null -eq $script:PimTenantCacheReadErrors) { $script:PimTenantCacheReadErrors = @{} }
     $script:PimTenantCacheReadErrors.Remove($Kind)
     $cs = Get-PimTenantCacheStoreCs
     if ($cs -and (Get-Command Get-PimSqlTenantCache -ErrorAction SilentlyContinue)) {
-        try { return (Get-PimSqlTenantCache -ConnectionString $cs -Kind $Kind) }
+        try {
+            $e = Get-PimSqlTenantCache -ConnectionString $cs -Kind $Kind
+            if ($Kind -eq 'active-assignments' -and -not $HeaderOnly -and $null -ne $e -and $e.PSObject.Properties['rowStore'] -and "$($e.rowStore)" -eq 'table') {
+                # the rows of that generation, or a FAILED read with its reason -- never a header passed off as an empty snapshot
+                if (-not (Get-Command Expand-PimSqlActiveAssignmentsEntry -ErrorAction SilentlyContinue)) { throw 'the reader of the stored active-assignment rows is not loaded in this process' }
+                $e = Expand-PimSqlActiveAssignmentsEntry -ConnectionString $cs -Entry $e
+            }
+            return $e
+        }
         catch {
             $script:PimTenantCacheReadErrors[$Kind] = "$($_.Exception.Message)"
             Write-Warning ("  [tenant-cache] SQL read of '{0}' failed: {1}" -f $Kind, $_.Exception.Message); return $null

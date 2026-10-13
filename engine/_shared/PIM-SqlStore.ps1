@@ -543,6 +543,10 @@ IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCach
     if (Get-Command Initialize-PimCommitApplied -ErrorAction SilentlyContinue) { [void](Initialize-PimCommitApplied -ConnectionString $ConnectionString) }
     # CONFIG-1.3: the configuration backup tables (PIM-ConfigBackup.ps1). Never fails the open.
     if (Get-Command Initialize-PimConfigBackupStore -ErrorAction SilentlyContinue) { [void](Initialize-PimConfigBackupStore -ConnectionString $ConnectionString) }
+    # REQ 100.114 (2): the active-assignment rows (pim.ActiveAssignmentRows + pim.ActiveAssignmentSnapshots, below in this
+    # file). Never fails the open: a store that cannot take the tables keeps the one-document snapshot, and says so.
+    $aaDdl = Initialize-PimSqlActiveAssignmentRows -ConnectionString $ConnectionString
+    if (-not $aaDdl.ok) { Write-Warning "[store] pim.ActiveAssignmentRows could not be created: $($aaDdl.error) -- the active-assignments snapshot stays one document in pim.TenantCache" }
 }
 
 function Invoke-PimDepartmentRowKeyMigration {
@@ -772,6 +776,596 @@ function Get-PimSqlTenantCacheStamps {
         $out["$($r.Kind)"] = $txt
     }
     return $out
+}
+
+# --- active-assignment rows (pim.ActiveAssignmentRows) -- REQ 100.114 (2) / 100.110 ---------------------------------
+# The active-assignments snapshot used to be ONE document in pim.TenantCache (22 MB at 38,000 assignments): written as
+# one row (the write timed out, 100.110) and read + parsed whole for every request (25-63 s, 100.114). The ROWS now live
+# in pim.ActiveAssignmentRows, one row per assignment, indexed for what the page filters and sorts on; the
+# pim.TenantCache row 'active-assignments' keeps only the small header and names the generation (snapshotId) its rows
+# are in. Writing = a new generation, batch by batch; the header is switched to it in ONE transaction after the row
+# count was verified, so a reader sees the previous complete generation or the new complete one, never a part.
+# A store where the table cannot be created keeps the one-document form (the caller falls back to it).
+# Every default / limit is a FUNCTION returning a literal: a $script: variable is $null in a child scope behind a
+# Get-Command load guard, and `-gt $null` is TRUE.
+function Get-PimActiveAssignmentRowsBatchSize         { return 500 }    # rows per write batch (one transaction each)
+function Get-PimActiveAssignmentRowsCommandTimeoutSec { return 120 }    # per batch / per statement of the snapshot write
+function Get-PimActiveAssignmentRowsWriteAttempts     { return 4 }      # tries per batch on a transient error
+function Get-PimActiveAssignmentRowsRetryDelayMs      { return 1500 }   # first wait; doubled per further try
+function Get-PimActiveAssignmentsPageSizeDefault      { return 200 }
+function Get-PimActiveAssignmentsPageSizeMax          { return 2000 }
+function Get-PimActiveAssignmentsQueryTimeoutSec      { return 60 }
+function Get-PimActiveAssignmentsAliasMax             { return 60 }     # exact-name alternatives per text search
+function Get-PimActiveAssignmentsTableFormName        { return 'table' }
+
+function Get-PimActiveAssignmentRowsDdl {
+    <# PURE. The two tables + the indexes. Idempotent (every object guarded); additive only. #>
+@'
+IF OBJECT_ID('pim.ActiveAssignmentSnapshots') IS NULL
+CREATE TABLE pim.ActiveAssignmentSnapshots (
+    SnapshotId    BIGINT        NOT NULL CONSTRAINT PK_pim_ActiveAssignmentSnapshots PRIMARY KEY,
+    State         NVARCHAR(20)  NOT NULL,
+    StartedUtc    DATETIME2     NOT NULL CONSTRAINT DF_pim_AaSnapshots_Started DEFAULT SYSUTCDATETIME(),
+    CompletedUtc  DATETIME2     NULL,
+    RowsExpected  INT           NOT NULL CONSTRAINT DF_pim_AaSnapshots_Rows DEFAULT 0,
+    MarksKey      NVARCHAR(100) NULL,
+    MarksUtc      DATETIME2     NULL
+);
+IF OBJECT_ID('pim.ActiveAssignmentRows') IS NULL
+CREATE TABLE pim.ActiveAssignmentRows (
+    SnapshotId    BIGINT         NOT NULL,
+    Seq           INT            NOT NULL,
+    RowId         NVARCHAR(900)  NULL,
+    Kind          NVARCHAR(40)   NOT NULL,
+    Principal     NVARCHAR(400)  NULL,
+    PrincipalId   NVARCHAR(100)  NULL,
+    PrincipalKind NVARCHAR(40)   NULL,
+    PrincipalUpn  NVARCHAR(400)  NULL,
+    Role          NVARCHAR(400)  NULL,
+    Scope         NVARCHAR(400)  NULL,
+    GroupId       NVARCHAR(100)  NULL,
+    StartUtc      DATETIME2      NULL,
+    EndUtc        DATETIME2      NULL,
+    Justification NVARCHAR(400)  NULL,
+    IdentityKey   NVARCHAR(450)  NULL,
+    Managed       BIT            NOT NULL CONSTRAINT DF_pim_AaRows_Managed DEFAULT 0,
+    OwnKind       NVARCHAR(20)   NOT NULL CONSTRAINT DF_pim_AaRows_OwnKind DEFAULT N'',
+    SearchText    NVARCHAR(4000) NULL,
+    RowJson       NVARCHAR(MAX)  NOT NULL,
+    CONSTRAINT PK_pim_ActiveAssignmentRows PRIMARY KEY CLUSTERED (SnapshotId, Seq)
+);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_pim_AaRows_Kind' AND object_id = OBJECT_ID('pim.ActiveAssignmentRows'))
+CREATE INDEX IX_pim_AaRows_Kind ON pim.ActiveAssignmentRows (SnapshotId, Kind, PrincipalKind, Managed, OwnKind) INCLUDE (PrincipalId);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_pim_AaRows_Principal' AND object_id = OBJECT_ID('pim.ActiveAssignmentRows'))
+CREATE INDEX IX_pim_AaRows_Principal ON pim.ActiveAssignmentRows (SnapshotId, Principal, Seq) INCLUDE (Kind, PrincipalKind, Managed, OwnKind);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_pim_AaRows_Role' AND object_id = OBJECT_ID('pim.ActiveAssignmentRows'))
+CREATE INDEX IX_pim_AaRows_Role ON pim.ActiveAssignmentRows (SnapshotId, Role, Seq) INCLUDE (Kind, PrincipalKind, Managed, OwnKind);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_pim_AaRows_Scope' AND object_id = OBJECT_ID('pim.ActiveAssignmentRows'))
+CREATE INDEX IX_pim_AaRows_Scope ON pim.ActiveAssignmentRows (SnapshotId, Scope, Seq) INCLUDE (Kind, PrincipalKind, Managed, OwnKind);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_pim_AaRows_EndUtc' AND object_id = OBJECT_ID('pim.ActiveAssignmentRows'))
+CREATE INDEX IX_pim_AaRows_EndUtc ON pim.ActiveAssignmentRows (SnapshotId, EndUtc, Seq) INCLUDE (Kind, PrincipalKind, Managed, OwnKind);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_pim_AaRows_PrincipalId' AND object_id = OBJECT_ID('pim.ActiveAssignmentRows'))
+CREATE INDEX IX_pim_AaRows_PrincipalId ON pim.ActiveAssignmentRows (SnapshotId, PrincipalId);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_pim_AaRows_GroupId' AND object_id = OBJECT_ID('pim.ActiveAssignmentRows'))
+CREATE INDEX IX_pim_AaRows_GroupId ON pim.ActiveAssignmentRows (SnapshotId, GroupId);
+'@
+}
+
+function Initialize-PimSqlActiveAssignmentRows {
+    # Create the tables + indexes when they are not there. NEVER throws: returns @{ ok; error }. ok=$false = this store
+    # keeps the one-document snapshot (the identity may lack CREATE TABLE); the writer and the readers both handle that.
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    try {
+        [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimActiveAssignmentRowsDdl) -CommandTimeoutSec (Get-PimActiveAssignmentRowsCommandTimeoutSec))
+        return [pscustomobject]@{ ok = $true; error = '' }
+    } catch {
+        return [pscustomobject]@{ ok = $false; error = "$($_.Exception.Message)" }
+    }
+}
+
+function Test-PimSqlTransientError {
+    <#
+      PURE. Is this failure worth one more try of the SAME statement? A command / connection timeout, a deadlock victim,
+      a dropped connection, Azure SQL "busy / reconfiguring / resource limit". Walks the inner exceptions. Anything else
+      (a constraint, a missing object, a permission) is not transient: it fails at once.
+    #>
+    param([AllowNull()][object]$Exception)
+    $numbers = @(-2, 53, 64, 121, 233, 1205, 4060, 10053, 10054, 10060, 10928, 10929, 40143, 40197, 40501, 40540, 40613, 49918, 49919, 49920)
+    $e = $Exception
+    if ($e -is [System.Management.Automation.ErrorRecord]) { $e = $e.Exception }
+    $depth = 0
+    while ($null -ne $e -and $depth -lt 8) {
+        if ($e -is [System.TimeoutException]) { return $true }
+        $n = $null
+        try { if ($e.PSObject.Properties['Number']) { $n = $e.Number } } catch { $n = $null }
+        if ($null -ne $n -and ($numbers -contains [int]$n)) { return $true }
+        if ("$($e.Message)" -match '(?i)timeout expired|timed out|transport-level error|deadlocked|connection was (forcibly )?closed|not currently available|service is busy') { return $true }
+        $e = $e.InnerException; $depth++
+    }
+    return $false
+}
+
+function New-PimSqlActiveAssignmentRowTable {
+    <# The batch buffer: a DataTable with the table's WRITTEN columns (Managed / OwnKind keep their defaults). #>
+    $t = New-Object System.Data.DataTable 'ActiveAssignmentRows'
+    [void]$t.Columns.Add('SnapshotId', [long])
+    [void]$t.Columns.Add('Seq', [int])
+    foreach ($c in 'RowId', 'Kind', 'Principal', 'PrincipalId', 'PrincipalKind', 'PrincipalUpn', 'Role', 'Scope', 'GroupId') { [void]$t.Columns.Add($c, [string]) }
+    [void]$t.Columns.Add('StartUtc', [datetime])
+    [void]$t.Columns.Add('EndUtc', [datetime])
+    foreach ($c in 'Justification', 'IdentityKey', 'SearchText', 'RowJson') { [void]$t.Columns.Add($c, [string]) }
+    return ,$t
+}
+
+function Write-PimSqlActiveAssignmentRowBatch {
+    <#
+      ONE batch of rows into pim.ActiveAssignmentRows: one bulk insert in ONE transaction of its own, with the snapshot
+      write's command timeout. -Attempt > 1 = a retry: whatever an earlier try may have left of exactly this batch
+      (SnapshotId + its Seq range) is removed first, so a retry can never double a row. Throws on failure.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][long]$SnapshotId, [Parameter(Mandatory)][System.Data.DataTable]$Table, [int]$Attempt = 1)
+    if ($Table.Rows.Count -eq 0) { return 0 }
+    $timeout = Get-PimActiveAssignmentRowsCommandTimeoutSec
+    $first = [int]$Table.Rows[0]['Seq']; $last = [int]$Table.Rows[$Table.Rows.Count - 1]['Seq']
+    $c = New-PimSqlConnection -ConnectionString $ConnectionString
+    try {
+        $c.Open()
+        if ($Attempt -gt 1) {
+            $cmd = $c.CreateCommand(); $cmd.CommandTimeout = $timeout
+            $cmd.CommandText = 'DELETE FROM pim.ActiveAssignmentRows WHERE SnapshotId = @s AND Seq BETWEEN @a AND @b'
+            [void]$cmd.Parameters.AddWithValue('@s', $SnapshotId); [void]$cmd.Parameters.AddWithValue('@a', $first); [void]$cmd.Parameters.AddWithValue('@b', $last)
+            [void]$cmd.ExecuteNonQuery()
+        }
+        $ct = $c.GetType(); $asm = $ct.Assembly; $ns = $ct.Namespace
+        $bcType  = $asm.GetType("$ns.SqlBulkCopy", $true)
+        $optType = $asm.GetType("$ns.SqlBulkCopyOptions", $true)
+        $txType  = $asm.GetType("$ns.SqlTransaction", $true)
+        $opt = [Enum]::Parse($optType, 'UseInternalTransaction')
+        $bc = $bcType.GetConstructor([type[]]@($ct, $optType, $txType)).Invoke(@($c, $opt, $null))
+        try {
+            $bc.DestinationTableName = 'pim.ActiveAssignmentRows'
+            $bc.BulkCopyTimeout = $timeout
+            $bc.BatchSize = $Table.Rows.Count          # the whole batch = one internal transaction
+            foreach ($col in $Table.Columns) { [void]$bc.ColumnMappings.Add($col.ColumnName, $col.ColumnName) }
+            $bc.WriteToServer($Table)
+        } finally { try { $bc.Close() } catch { } }
+        return $Table.Rows.Count
+    } finally { if ($c) { $c.Close(); $c.Dispose() } }
+}
+
+function Invoke-PimSqlActiveAssignmentBatchWrite {
+    <#
+      One batch with the retry: up to Get-PimActiveAssignmentRowsWriteAttempts tries, a growing wait between them, and only
+      for a TRANSIENT failure (Test-PimSqlTransientError). Returns @{ rows; attempts }. Throws the last error.
+      -Writer / -Sleep are the test seams (default: Write-PimSqlActiveAssignmentRowBatch / Start-Sleep).
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][long]$SnapshotId, [Parameter(Mandatory)][System.Data.DataTable]$Table,
+          [scriptblock]$Writer = $null, [scriptblock]$Sleep = $null)
+    if (-not $Writer) { $Writer = { param($cs, $sid, $tbl, $attempt) Write-PimSqlActiveAssignmentRowBatch -ConnectionString $cs -SnapshotId $sid -Table $tbl -Attempt $attempt } }
+    if (-not $Sleep) { $Sleep = { param($ms) Start-Sleep -Milliseconds $ms } }
+    $max = Get-PimActiveAssignmentRowsWriteAttempts
+    $delay = Get-PimActiveAssignmentRowsRetryDelayMs
+    for ($attempt = 1; $attempt -le $max; $attempt++) {
+        try {
+            $n = & $Writer $ConnectionString $SnapshotId $Table $attempt
+            return [pscustomobject]@{ rows = [int]$Table.Rows.Count; attempts = $attempt; written = $n }
+        } catch {
+            $transient = Test-PimSqlTransientError -Exception $_.Exception
+            if (-not $transient -or $attempt -ge $max) { throw }
+            Write-Warning ("  [active-assignments] a batch write did not complete (try {0} of {1}): {2} -- trying again" -f $attempt, $max, $_.Exception.Message)
+            & $Sleep $delay
+            $delay = $delay * 2
+        }
+    }
+}
+
+function Get-PimSqlActiveAssignmentsForm {
+    <#
+      Which form the stored snapshot has, read CHEAPLY (the first characters of the row, never the document):
+      'none' (no row) | 'table' (the header of a table-form snapshot) | 'document' (the one-document form of 2.4.611 and
+      before). Throws on a failed read.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $rows = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT LEFT(ValueJson, 40) AS Head FROM pim.TenantCache WHERE Kind = @k" -Parameters @{ k = 'active-assignments' })
+    if ($rows.Count -eq 0) { return 'none' }
+    $head = "$($rows[0].Head)"
+    if (-not $head.Trim()) { return 'none' }
+    if ($head -match '^\s*\{\s*"rowStore"\s*:\s*"table"') { return 'table' }
+    return 'document'
+}
+
+function Test-PimActiveAssignmentsTableEntry {
+    <# PURE. Is this parsed pim.TenantCache 'active-assignments' entry the header of a table-form snapshot? #>
+    param([AllowNull()][object]$Entry)
+    if ($null -eq $Entry) { return $false }
+    $v = $null
+    if ($Entry -is [System.Collections.IDictionary]) { if ($Entry.Contains('rowStore')) { $v = $Entry['rowStore'] } }
+    elseif ($Entry.PSObject.Properties['rowStore']) { $v = $Entry.rowStore }
+    return ("$v" -eq (Get-PimActiveAssignmentsTableFormName))
+}
+
+function Get-PimSqlActiveAssignmentsCurrentSnapshotId {
+    # The generation the stored header points at; 0 when there is none / it is the one-document form. Throws on a failed read.
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    # The writer puts rowStore and snapshotId FIRST in the header, so the first characters answer this (no JSON function,
+    # no document).
+    $v = Invoke-PimSqlScalar -ConnectionString $ConnectionString -Sql 'SELECT LEFT(ValueJson, 120) FROM pim.TenantCache WHERE Kind = @k' -Parameters @{ k = 'active-assignments' }
+    if ($null -eq $v -or $v -is [System.DBNull] -or -not "$v".Trim()) { return [long]0 }
+    $m = [regex]::Match("$v", '^\s*\{\s*"rowStore"\s*:\s*"table"\s*,\s*"snapshotId"\s*:\s*(\d{1,18})')
+    if (-not $m.Success) { return [long]0 }
+    return [long]$m.Groups[1].Value
+}
+
+function Start-PimSqlActiveAssignmentSnapshot {
+    <#
+      Open a NEW generation for the snapshot write and return its id (greater than every id in the store). Removes what
+      no reader can need any more: every generation that is neither the one the header points at nor this new one -- the
+      leftovers of a failed write and generations before the current one -- in bounded deletes. The CURRENT generation is
+      never touched here: it stays complete and readable until the header is switched (Complete-...), and after the switch
+      it stays as the previous generation until the NEXT write starts, so a reader that read the header just before the
+      switch still finds its rows.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [int]$ExpectedRows = 0, [datetime]$NowUtc = [datetime]::UtcNow)
+    $timeout = Get-PimActiveAssignmentRowsCommandTimeoutSec
+    $current = Get-PimSqlActiveAssignmentsCurrentSnapshotId -ConnectionString $ConnectionString
+    $max = Invoke-PimSqlScalar -ConnectionString $ConnectionString -Sql 'SELECT ISNULL(MAX(SnapshotId), 0) FROM pim.ActiveAssignmentSnapshots'
+    $maxId = [long]0; if ($null -ne $max -and $max -isnot [System.DBNull]) { $maxId = [long]$max }
+    $epoch = [datetime]::SpecifyKind([datetime]'1970-01-01T00:00:00', [DateTimeKind]::Utc)
+    $id = [long][math]::Floor(($NowUtc.ToUniversalTime() - $epoch).TotalMilliseconds)
+    if ($id -le $maxId) { $id = $maxId + 1 }
+    if ($id -le $current) { $id = $current + 1 }
+    [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql "INSERT INTO pim.ActiveAssignmentSnapshots (SnapshotId, State, RowsExpected) VALUES (@s, N'writing', @n)" -Parameters @{ s = $id; n = $ExpectedRows } -CommandTimeoutSec $timeout)
+    $removed = 0
+    for ($i = 0; $i -lt 100000; $i++) {
+        $n = Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql 'DELETE TOP (5000) FROM pim.ActiveAssignmentRows WHERE SnapshotId <> @keep AND SnapshotId <> @new' -Parameters @{ keep = $current; new = $id } -CommandTimeoutSec $timeout
+        if ([int]$n -le 0) { break }
+        $removed += [int]$n
+    }
+    [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql 'DELETE FROM pim.ActiveAssignmentSnapshots WHERE SnapshotId <> @keep AND SnapshotId <> @new' -Parameters @{ keep = $current; new = $id } -CommandTimeoutSec $timeout)
+    return [pscustomobject]@{ snapshotId = $id; previousSnapshotId = $current; removedRows = $removed }
+}
+
+function Complete-PimSqlActiveAssignmentSnapshot {
+    <#
+      THE SWITCH. One transaction: the generation's row count is checked against what was written, the generation is
+      marked complete and the pim.TenantCache header is replaced by -HeaderJson (which names this generation). A count
+      that does not match rolls everything back and throws -- the header keeps pointing at the previous generation.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][long]$SnapshotId, [Parameter(Mandatory)][int]$ExpectedRows,
+          [Parameter(Mandatory)][string]$HeaderJson, [datetime]$RefreshedUtc = [datetime]::UtcNow)
+    $sql = @'
+SET XACT_ABORT ON;
+BEGIN TRAN;
+DECLARE @have BIGINT = (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = @s);
+IF @have <> @n
+BEGIN
+    ROLLBACK;
+    DECLARE @msg NVARCHAR(300) = CONCAT(N'active-assignment rows incomplete: ', @have, N' of ', @n, N' stored for generation ', @s, N' -- the previous snapshot stays in place');
+    THROW 51114, @msg, 1;
+END
+UPDATE pim.ActiveAssignmentSnapshots SET State = N'complete', CompletedUtc = SYSUTCDATETIME(), RowsExpected = @n WHERE SnapshotId = @s;
+MERGE pim.TenantCache AS t USING (SELECT @k AS Kind) AS src ON t.Kind = src.Kind
+WHEN MATCHED THEN UPDATE SET ValueJson = @v, RefreshedUtc = @r, UpdatedUtc = SYSUTCDATETIME()
+WHEN NOT MATCHED THEN INSERT (Kind, ValueJson, RefreshedUtc, UpdatedUtc) VALUES (@k, @v, @r, SYSUTCDATETIME());
+COMMIT;
+'@
+    [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $sql -Parameters @{ s = $SnapshotId; n = $ExpectedRows; k = 'active-assignments'; v = $HeaderJson; r = $RefreshedUtc.ToUniversalTime() } -CommandTimeoutSec (Get-PimActiveAssignmentRowsCommandTimeoutSec))
+}
+
+function Get-PimSqlActiveAssignmentRowsJson {
+    <#
+      Every stored row of one generation as ONE JSON array string ('[{...},{...}]'), in snapshot order -- for the readers
+      that still need the whole set (the coverage report, the Home tile, a delegated caller's filtered answer). The stored
+      row JSON is passed through, never parsed here. -Kind = only that assignment type. -ExpectedRows (when no -Kind): a
+      generation that holds another number of rows throws -- a part of a snapshot is never returned as the snapshot.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][long]$SnapshotId, [string]$Kind = '', [int]$ExpectedRows = -1)
+    $sb = New-Object System.Text.StringBuilder 65536
+    [void]$sb.Append('[')
+    $n = 0
+    $c = New-PimSqlConnection -ConnectionString $ConnectionString
+    try {
+        $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandTimeout = Get-PimActiveAssignmentsQueryTimeoutSec
+        if ("$Kind".Trim()) {
+            $cmd.CommandText = 'SELECT RowJson FROM pim.ActiveAssignmentRows WHERE SnapshotId = @s AND Kind = @k ORDER BY Seq'
+            [void]$cmd.Parameters.AddWithValue('@k', "$Kind".Trim())
+        } else { $cmd.CommandText = 'SELECT RowJson FROM pim.ActiveAssignmentRows WHERE SnapshotId = @s ORDER BY Seq' }
+        [void]$cmd.Parameters.AddWithValue('@s', $SnapshotId)
+        $rd = $cmd.ExecuteReader()
+        try {
+            while ($rd.Read()) {
+                if ($n -gt 0) { [void]$sb.Append(',') }
+                [void]$sb.Append($rd.GetString(0))
+                $n++
+            }
+        } finally { $rd.Close() }
+    } finally { if ($c) { $c.Close(); $c.Dispose() } }
+    if ($ExpectedRows -ge 0 -and -not "$Kind".Trim() -and $n -ne $ExpectedRows) {
+        throw "the stored active-assignment rows are incomplete ($n of $ExpectedRows for generation $SnapshotId)"
+    }
+    [void]$sb.Append(']')
+    return $sb.ToString()
+}
+
+function Expand-PimSqlActiveAssignmentsEntry {
+    <#
+      A table-form header (parsed) -> the SAME shape the one-document form had: the header's fields plus 'rows' (every
+      row, parsed). For the readers that work on the whole set. Throws when the rows cannot be read or are incomplete.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][object]$Entry)
+    $sid = [long]0; [void][long]::TryParse("$($Entry.snapshotId)", [ref]$sid)
+    $exp = -1; if ("$($Entry.rowCount)".Trim() -match '^\d+$') { $exp = [int]"$($Entry.rowCount)" }
+    $json = Get-PimSqlActiveAssignmentRowsJson -ConnectionString $ConnectionString -SnapshotId $sid -ExpectedRows $exp
+    $rows = @()
+    if ($json.Length -gt 2) {
+        # Windows PowerShell 5.1 hands a JSON array back as ONE object, pwsh 7 enumerates it: foreach covers both.
+        $parsed = $json | ConvertFrom-Json
+        $rows = @(foreach ($x in $parsed) { $x })
+        $parsed = $null
+    }
+    $json = $null
+    $out = [ordered]@{}
+    foreach ($p in @($Entry.PSObject.Properties)) { $out[$p.Name] = $p.Value }
+    $out['rows'] = $rows
+    return [pscustomobject]$out
+}
+
+function Get-PimSqlActiveAssignmentServicePrincipalIds {
+    # The distinct principal ids of kind servicePrincipal in one generation (index-only). For the "own identities" marks.
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][long]$SnapshotId)
+    $rows = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT DISTINCT PrincipalId FROM pim.ActiveAssignmentRows WHERE SnapshotId = @s AND PrincipalKind = N'servicePrincipal' AND PrincipalId IS NOT NULL AND PrincipalId <> N''" -Parameters @{ s = $SnapshotId })
+    return @($rows | ForEach-Object { "$($_.PrincipalId)" } | Where-Object { $_ })
+}
+
+function ConvertTo-PimSqlJsonStringArray {
+    <# PURE. A string list -> a compact JSON array of strings ('[]' for none); trimmed, empty values dropped, lower-cased. #>
+    param([AllowNull()][string[]]$Values)
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('[')
+    $first = $true
+    foreach ($v in @($Values)) {
+        $s = "$v".Trim().ToLowerInvariant()
+        if (-not $s) { continue }
+        if (-not $first) { [void]$sb.Append(',') }
+        $first = $false
+        [void]$sb.Append('"')
+        foreach ($ch in $s.ToCharArray()) {
+            if ($ch -eq '"') { [void]$sb.Append('\"') }
+            elseif ($ch -eq '\') { [void]$sb.Append('\\') }
+            elseif ([int]$ch -lt 0x20) { [void]$sb.Append(('\u{0:x4}' -f [int]$ch)) }
+            else { [void]$sb.Append($ch) }
+        }
+        [void]$sb.Append('"')
+    }
+    [void]$sb.Append(']')
+    return $sb.ToString()
+}
+
+function Get-PimActiveAssignmentMarksKey {
+    <# PURE. One key for everything the MANAGED / own-identity marks of a generation are computed from. #>
+    param([string]$ManagedStamp = '', [bool]$ManagedKnown = $false, [string[]]$Product = @(), [string[]]$Support = @(), [string[]]$BreakGlass = @())
+    $norm = { param($a) (@(@($a) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ } | Sort-Object -Unique) -join ',') }
+    $text = @("m=$ManagedKnown", "ml=$ManagedStamp", "p=$(& $norm $Product)", "s=$(& $norm $Support)", "b=$(& $norm $BreakGlass)") -join '|'
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($text)) } finally { $sha.Dispose() }
+    return (-join ($h | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Sync-PimSqlActiveAssignmentMarks {
+    <#
+      Bring the stored marks of one generation up to date, in SQL, set-based, ONLY when what they are computed from changed
+      (-MarksKey differs from the one recorded for the generation):
+        Managed  = the row's identity is in the engine's 'managed-live' list (pim.TenantCache, read inside SQL -- the list
+                   never travels to this process)
+        OwnKind  = breakglass | support | product | '' (that order of precedence) from the three small lists
+      Returns @{ updated; changed }. Throws on failure (the caller reports it; rows are then served with the marks they have).
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][long]$SnapshotId, [Parameter(Mandatory)][string]$MarksKey,
+          [bool]$ManagedKnown = $false, [string[]]$Product = @(), [string[]]$Support = @(), [string[]]$BreakGlass = @())
+    $sql = @'
+SET NOCOUNT ON; SET XACT_ABORT ON;
+IF EXISTS (SELECT 1 FROM pim.ActiveAssignmentSnapshots WHERE SnapshotId = @s AND MarksKey = @mk)
+BEGIN
+    SELECT 0 AS Updated, 0 AS Changed;
+    RETURN;
+END
+DECLARE @bg TABLE (v NVARCHAR(400) NOT NULL PRIMARY KEY);
+DECLARE @sup TABLE (v NVARCHAR(400) NOT NULL PRIMARY KEY);
+DECLARE @prod TABLE (v NVARCHAR(400) NOT NULL PRIMARY KEY);
+DECLARE @m TABLE (v NVARCHAR(450) NOT NULL PRIMARY KEY);
+INSERT @bg (v) SELECT DISTINCT LOWER(LEFT(CAST(j.[value] AS NVARCHAR(MAX)), 400)) FROM OPENJSON(@bgJson) j WHERE j.[value] IS NOT NULL AND j.[value] <> N'';
+INSERT @sup (v) SELECT DISTINCT LOWER(LEFT(CAST(j.[value] AS NVARCHAR(MAX)), 400)) FROM OPENJSON(@supJson) j WHERE j.[value] IS NOT NULL AND j.[value] <> N'';
+INSERT @prod (v) SELECT DISTINCT LOWER(LEFT(CAST(j.[value] AS NVARCHAR(MAX)), 400)) FROM OPENJSON(@prodJson) j WHERE j.[value] IS NOT NULL AND j.[value] <> N'';
+IF @useManaged = 1
+BEGIN
+    INSERT @m (v)
+    SELECT DISTINCT LOWER(LEFT(CAST(j.[value] AS NVARCHAR(MAX)), 450))
+    FROM pim.TenantCache t CROSS APPLY OPENJSON(t.ValueJson, '$.identities') j
+    WHERE t.Kind = N'managed-live' AND ISJSON(t.ValueJson) = 1 AND j.[value] IS NOT NULL AND j.[value] <> N'';
+    IF NOT EXISTS (SELECT 1 FROM @m)
+        INSERT @m (v)
+        SELECT LOWER(LEFT(JSON_VALUE(t.ValueJson, '$.identities'), 450)) FROM pim.TenantCache t
+        WHERE t.Kind = N'managed-live' AND ISJSON(t.ValueJson) = 1 AND JSON_VALUE(t.ValueJson, '$.identities') IS NOT NULL AND JSON_VALUE(t.ValueJson, '$.identities') <> N'';
+END
+BEGIN TRAN;
+UPDATE a SET Managed = n.Managed, OwnKind = n.OwnKind
+FROM pim.ActiveAssignmentRows a
+CROSS APPLY (SELECT
+    CAST(CASE WHEN a.IdentityKey IS NOT NULL AND a.IdentityKey <> N'' AND EXISTS (SELECT 1 FROM @m m WHERE m.v = LOWER(a.IdentityKey)) THEN 1 ELSE 0 END AS BIT) AS Managed,
+    CASE WHEN EXISTS (SELECT 1 FROM @bg b WHERE b.v IN (LOWER(a.PrincipalId), LOWER(LTRIM(RTRIM(a.Principal))), LOWER(LTRIM(RTRIM(a.PrincipalUpn))))) THEN N'breakglass'
+         WHEN EXISTS (SELECT 1 FROM @sup s WHERE s.v = LOWER(a.PrincipalId)) THEN N'support'
+         WHEN EXISTS (SELECT 1 FROM @prod p WHERE p.v = LOWER(a.PrincipalId)) THEN N'product'
+         ELSE N'' END AS OwnKind) n
+WHERE a.SnapshotId = @s AND (a.Managed <> n.Managed OR a.OwnKind <> n.OwnKind);
+DECLARE @chg INT = @@ROWCOUNT;
+UPDATE pim.ActiveAssignmentSnapshots SET MarksKey = @mk, MarksUtc = SYSUTCDATETIME() WHERE SnapshotId = @s;
+COMMIT;
+SELECT 1 AS Updated, @chg AS Changed;
+'@
+    $p = @{ s = $SnapshotId; mk = $MarksKey; useManaged = [bool]$ManagedKnown
+            bgJson   = (ConvertTo-PimSqlJsonStringArray -Values @($BreakGlass | Where-Object { "$_" -notmatch '^\s*<' }))
+            supJson  = (ConvertTo-PimSqlJsonStringArray -Values $Support)
+            prodJson = (ConvertTo-PimSqlJsonStringArray -Values $Product) }
+    $sets = Invoke-PimSqlQuerySets -ConnectionString $ConnectionString -Sql $sql -Parameters $p -CommandTimeoutSec (Get-PimActiveAssignmentRowsCommandTimeoutSec)
+    $row = $null
+    for ($i = 0; $i -lt $sets.Count; $i++) { foreach ($r in $sets[$i]) { if ($null -ne $r -and $r.PSObject.Properties['Updated']) { $row = $r } } }
+    if ($null -eq $row) { return [pscustomobject]@{ updated = $false; changed = 0 } }
+    return [pscustomobject]@{ updated = ([int]$row.Updated -eq 1); changed = [int]$row.Changed }
+}
+
+function Invoke-PimSqlQuerySets {
+    <# Like Invoke-PimSqlQuery, for a batch that answers SEVERAL result sets: returns a list, one object[] per set. #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Sql, [hashtable]$Parameters = @{}, [int]$CommandTimeoutSec = 0)
+    Assert-PimSqlDemoScope -Sql $Sql
+    $sets = New-Object System.Collections.Generic.List[object]
+    $c = New-PimSqlConnection -ConnectionString $ConnectionString
+    try {
+        $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $Sql
+        if ($CommandTimeoutSec -gt 0) { $cmd.CommandTimeout = $CommandTimeoutSec }
+        foreach ($k in $Parameters.Keys) { [void]$cmd.Parameters.AddWithValue("@$k", $(if ($null -eq $Parameters[$k]) { [DBNull]::Value } else { $Parameters[$k] })) }
+        $rd = $cmd.ExecuteReader()
+        try {
+            do {
+                $rows = New-Object System.Collections.Generic.List[object]
+                while ($rd.Read()) { $o = [ordered]@{}; for ($i = 0; $i -lt $rd.FieldCount; $i++) { $o[$rd.GetName($i)] = $(if ($rd.IsDBNull($i)) { $null } else { $rd.GetValue($i) }) }; $rows.Add([pscustomobject]$o) }
+                $sets.Add($rows.ToArray())
+            } while ($rd.NextResult())
+        } finally { $rd.Close() }
+    } finally { if ($c) { $c.Close(); $c.Dispose() } }
+    # an ARRAY of the sets (index it; Windows PowerShell 5.1 cannot wrap a generic list in @() -- "Argument types do not match")
+    return ,($sets.ToArray())
+}
+
+function Get-PimActiveAssignmentsSortColumn {
+    <#
+      PURE. The page's sort key -> the column it sorts on. A CLOSED list: the ORDER BY text is built from these literals
+      only, never from what the request sent. An unknown key = the default (principal).
+    #>
+    param([string]$Key = '')
+    switch ("$Key".Trim().ToLowerInvariant()) {
+        'principal'     { return 'a.Principal' }
+        'role'          { return 'a.Role' }
+        'scope'         { return 'a.Scope' }
+        'type'          { return 'a.Kind' }
+        'start'         { return 'a.StartUtc' }
+        'end'           { return 'a.EndUtc' }
+        'justification' { return 'a.Justification' }
+    }
+    return 'a.Principal'
+}
+
+function ConvertTo-PimSqlLikeContains {
+    <# PURE. A search text -> the LIKE pattern for "contains" with ESCAPE '\' (the text's own % _ [ \ are literals). #>
+    param([AllowNull()][string]$Text)
+    $t = "$Text"
+    $t = $t.Replace('\', '\\').Replace('%', '\%').Replace('_', '\_').Replace('[', '\[')
+    return '%' + $t + '%'
+}
+
+function Get-PimActiveAssignmentsViewCounts {
+    <#
+      PURE. The page's counters from the grouped counts of a whole generation (-Groups: Kind, IsDeleted, Managed, OwnKind,
+      N) and the five "show" ticks -- the SAME rule the page applies to a row (deleted first, then its own kind, then
+      managed): total, deleted, managed, own{product,support,breakglass}, hidden, hiddenBy{...}, and the per-type counts of
+      what is not hidden.
+    #>
+    param([AllowNull()][object[]]$Groups, [bool]$ShowDeleted = $false, [bool]$ShowManaged = $false, [bool]$ShowProduct = $false, [bool]$ShowSupport = $false, [bool]$ShowBreakGlass = $false)
+    $own = [ordered]@{ product = 0; support = 0; breakglass = 0 }
+    $hiddenBy = [ordered]@{ product = 0; support = 0; breakglass = 0; managed = 0; deleted = 0 }
+    $visible = [ordered]@{ all = 0; 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0 }
+    $byType = [ordered]@{ total = 0; 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0 }
+    $total = [long]0; $deleted = [long]0; $managed = [long]0; $hidden = [long]0
+    $showOwn = @{ product = $ShowProduct; support = $ShowSupport; breakglass = $ShowBreakGlass }
+    foreach ($g in @($Groups)) {
+        if ($null -eq $g) { continue }
+        $n = [long]$g.N; $kind = "$($g.Kind)"; $ok = "$($g.OwnKind)"
+        $isDel = ([int]$g.IsDeleted -eq 1); $isMan = [bool]$g.Managed
+        $total += $n; $byType['total'] += $n
+        if ($byType.Contains($kind)) { $byType[$kind] += $n }
+        if ($isDel) { $deleted += $n }
+        if ($isMan) { $managed += $n }
+        if ($own.Contains($ok)) { $own[$ok] += $n }
+        $why = ''
+        if (-not $ShowDeleted -and $isDel) { $why = 'deleted' }
+        elseif ($own.Contains($ok) -and -not $showOwn[$ok]) { $why = $ok }
+        elseif (-not $ShowManaged -and $isMan) { $why = 'managed' }
+        if ($why) { $hidden += $n; $hiddenBy[$why] += $n; continue }
+        $visible['all'] += $n
+        if ($visible.Contains($kind)) { $visible[$kind] += $n }
+    }
+    return [ordered]@{ total = $total; deleted = $deleted; managed = $managed; own = $own; hidden = $hidden; hiddenBy = $hiddenBy; visible = $visible; byType = $byType }
+}
+
+function Invoke-PimSqlActiveAssignmentsQuery {
+    <#
+      COUNTS + ONE PAGE of one generation, filter, sort and paging IN SQL. Every value of the request is a PARAMETER; the
+      only text that varies is the ORDER BY column and direction, taken from a closed list in this file
+      (Get-PimActiveAssignmentsSortColumn). Returns:
+        @{ groups   = the grouped counts of the whole generation (for Get-PimActiveAssignmentsViewCounts)
+           filtered = how many rows match the filter (all pages)
+           rows     = this page: @{ seq; json (the stored row, as written); managed; ownKind }
+           page; pageSize }
+      -Type all | entra-role | azure-rbac | pim-for-groups | deleted. -Search = "contains", over principal id, principal,
+      role, scope and justification (lower-cased both sides). -Aliases = exact names (principal / role / scope) that also
+      match the search (the page's tag <-> display-name pairs). -ScopeIs = exact scope names (the group-delete check).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][long]$SnapshotId,
+        [string]$Type = 'all', [string]$Search = '', [string[]]$Aliases = @(), [string[]]$ScopeIs = @(),
+        [string]$Sort = 'principal', [switch]$Descending, [int]$Page = 1, [int]$PageSize = 0,
+        [bool]$ShowDeleted = $false, [bool]$ShowManaged = $false, [bool]$ShowProduct = $false, [bool]$ShowSupport = $false, [bool]$ShowBreakGlass = $false
+    )
+    $max = Get-PimActiveAssignmentsPageSizeMax
+    if ($PageSize -le 0) { $PageSize = Get-PimActiveAssignmentsPageSizeDefault }
+    if ($PageSize -gt $max) { $PageSize = $max }
+    if ($Page -lt 1) { $Page = 1 }
+    $typeV = "$Type".Trim().ToLowerInvariant()
+    if (@('all', 'entra-role', 'azure-rbac', 'pim-for-groups', 'deleted') -notcontains $typeV) { $typeV = 'all' }
+    $q = "$Search".Trim().ToLowerInvariant()
+    if ($q.Length -gt 200) { $q = $q.Substring(0, 200) }
+    $aliasMax = Get-PimActiveAssignmentsAliasMax
+    $al = @(@($Aliases) | Where-Object { "$_".Trim() } | Select-Object -First $aliasMax)
+    $sc = @(@($ScopeIs) | Where-Object { "$_".Trim() } | Select-Object -First $aliasMax)
+    $col = Get-PimActiveAssignmentsSortColumn -Key $Sort
+    $dir = if ($Descending) { 'DESC' } else { 'ASC' }
+    $where = @'
+a.SnapshotId = @sid
+  AND (@showDeleted = 1 OR a.PrincipalKind IS NULL OR a.PrincipalKind <> N'deleted')
+  AND (a.OwnKind = N'' OR (a.OwnKind = N'product' AND @showProduct = 1) OR (a.OwnKind = N'support' AND @showSupport = 1) OR (a.OwnKind = N'breakglass' AND @showBreakGlass = 1))
+  AND (@showManaged = 1 OR a.Managed = 0)
+  AND (@type = N'all' OR (@type = N'deleted' AND a.PrincipalKind = N'deleted') OR (@type <> N'deleted' AND a.Kind = @type))
+  AND (@q = N'' OR a.SearchText LIKE @qLike ESCAPE N'\' OR (@hasAl = 1 AND EXISTS (SELECT 1 FROM @al x WHERE x.v IN (LOWER(LTRIM(RTRIM(a.Scope))), LOWER(LTRIM(RTRIM(a.Role))), LOWER(LTRIM(RTRIM(a.Principal)))))))
+  AND (@hasSc = 0 OR EXISTS (SELECT 1 FROM @sc y WHERE y.v = LOWER(LTRIM(RTRIM(a.Scope)))))
+'@
+    $sql = @"
+SET NOCOUNT ON;
+DECLARE @al TABLE (v NVARCHAR(400) NOT NULL PRIMARY KEY);
+DECLARE @sc TABLE (v NVARCHAR(400) NOT NULL PRIMARY KEY);
+INSERT @al (v) SELECT DISTINCT LOWER(LEFT(CAST(j.[value] AS NVARCHAR(MAX)), 400)) FROM OPENJSON(@aliasJson) j WHERE j.[value] IS NOT NULL AND j.[value] <> N'';
+INSERT @sc (v) SELECT DISTINCT LOWER(LEFT(CAST(j.[value] AS NVARCHAR(MAX)), 400)) FROM OPENJSON(@scopeJson) j WHERE j.[value] IS NOT NULL AND j.[value] <> N'';
+DECLARE @hasAl BIT = CASE WHEN EXISTS (SELECT 1 FROM @al) THEN 1 ELSE 0 END;
+DECLARE @hasSc BIT = CASE WHEN EXISTS (SELECT 1 FROM @sc) THEN 1 ELSE 0 END;
+SELECT a.Kind, CASE WHEN a.PrincipalKind = N'deleted' THEN 1 ELSE 0 END AS IsDeleted, a.Managed, a.OwnKind, COUNT_BIG(*) AS N
+FROM pim.ActiveAssignmentRows a WHERE a.SnapshotId = @sid
+GROUP BY a.Kind, CASE WHEN a.PrincipalKind = N'deleted' THEN 1 ELSE 0 END, a.Managed, a.OwnKind;
+SELECT COUNT_BIG(*) AS N FROM pim.ActiveAssignmentRows a WHERE $where OPTION (RECOMPILE);
+SELECT a.Seq, a.RowJson, a.Managed, a.OwnKind FROM pim.ActiveAssignmentRows a WHERE $where
+ORDER BY $col $dir, a.Seq ASC OFFSET @off ROWS FETCH NEXT @take ROWS ONLY OPTION (RECOMPILE);
+"@
+    $p = @{ sid = $SnapshotId; type = $typeV; q = $q; qLike = (ConvertTo-PimSqlLikeContains -Text $q)
+            aliasJson = (ConvertTo-PimSqlJsonStringArray -Values $al); scopeJson = (ConvertTo-PimSqlJsonStringArray -Values $sc)
+            showDeleted = [bool]$ShowDeleted; showManaged = [bool]$ShowManaged; showProduct = [bool]$ShowProduct; showSupport = [bool]$ShowSupport; showBreakGlass = [bool]$ShowBreakGlass
+            off = [int](($Page - 1) * $PageSize); take = [int]$PageSize }
+    $sets = Invoke-PimSqlQuerySets -ConnectionString $ConnectionString -Sql $sql -Parameters $p -CommandTimeoutSec (Get-PimActiveAssignmentsQueryTimeoutSec)
+    if ($sets.Count -lt 3) { throw "the active-assignments query answered $($sets.Count) of 3 result sets" }
+    $filtered = [long]0
+    foreach ($r in $sets[1]) { if ($null -ne $r) { $filtered = [long]$r.N } }
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $sets[2]) {
+        if ($null -eq $r) { continue }
+        $rows.Add([pscustomobject]@{ seq = [int]$r.Seq; json = "$($r.RowJson)"; managed = [bool]$r.Managed; ownKind = "$($r.OwnKind)" })
+    }
+    return [pscustomobject]@{ groups = @($sets[0]); filtered = $filtered; rows = $rows.ToArray(); page = $Page; pageSize = $PageSize; sort = $col; descending = [bool]$Descending }
 }
 
 # --- row CRUD -------------------------------------------------------------------
