@@ -1,16 +1,16 @@
-<!-- subject: ESCALATED approval: {{RequestorUpn}} requests {{RoleName}} -->
-<!-- tokens: ApproverName, PreviousApprover, RequestorUpn, RoleName, GroupName, Justification, RequestedAt, EscalatedAfterHours, ApprovalUrl -->
-<!-- Sent when a serial approval escalates to the next owner. To customize: edit it in the Manager (Settings > Mail templates); the edited copy is kept in SQL and is never overwritten by updates. -->
+<!-- subject: Please approve or deny {{RoleName}} for {{RequestorUpn}} (passed on to you) - {{DecisionDeadline}} -->
+<!-- tokens: ApproverName, PreviousApprover, RequestorUpn, RoleName, GroupName, Justification, RequestedAt, EscalatedAfterHours, DecisionDeadline, ApprovalUrl -->
+<!-- Sent when a serial approval is passed on to the next owner. PIM 100.135: the decision and its deadline are in the subject; the ONE button that approves in PIM Manager is added by the product -- a reply to the mail never approves. To customize: edit it in the Manager (Settings > Mail templates); the edited copy is kept in SQL and is never overwritten by updates. -->
 <html>
 <body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
   <p>Hello {{ApproverName}},</p>
-  <p>An approval request was not decided by {{PreviousApprover}} within {{EscalatedAfterHours}} hour(s) and has <b>escalated to you</b>:</p>
+  <p>An approval request was not decided by {{PreviousApprover}} within {{EscalatedAfterHours}} hour(s), so it has been passed on to you:</p>
   <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
     <tr><td><b>Requestor</b></td><td>{{RequestorUpn}}</td></tr>
     <tr><td><b>Role / group</b></td><td>{{RoleName}} ({{GroupName}})</td></tr>
     <tr><td><b>Justification</b></td><td>{{Justification}}</td></tr>
     <tr><td><b>Originally requested</b></td><td>{{RequestedAt}}</td></tr>
   </table>
-  <p><a href="{{ApprovalUrl}}">Open the approval in the Entra portal</a> to approve or deny.</p>
+  <p>Approve or deny it in PIM Manager with the button below ({{DecisionDeadline}}). A reply to this mail does not approve or deny it.</p>
 </body>
 </html>

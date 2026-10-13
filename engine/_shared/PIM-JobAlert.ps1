@@ -152,9 +152,10 @@ function Get-PimJobAlertMailParts {
     }
     if ($status -ne 'held') {
         $out.who = 'Not known'; $out.status = 'Error'
-        $out.problem = "The job '$name' failed"
+        # PIM 100.135: plain words, no "FAILED" -- the mail builder adds how many items and each cause with its fix
+        $out.problem = "The job '$name' could not finish"
         $out.todo = 'Open Jobs > Engine logs & errors: every failing item is listed with its cause and, where there is one, a fix'
-        $out.headline = "The job '$name' failed."
+        $out.headline = "The job '$name' could not finish."
         $out.actionHtml = 'Open the PIM Manager, <b>Jobs &rsaquo; Engine logs &amp; errors</b>: every failing item is listed there with its cause and, where there is one, a fix.'
         return [pscustomobject]$out
     }

@@ -804,9 +804,16 @@ function ConvertTo-PimEscalationTokens {
         [Parameter(Mandatory)][object]$Target,
         [Parameter(Mandatory)][object]$Request,
         [string]$ApproverName = '',
-        [string]$ApprovalUrl = ''
+        [string]$ApprovalUrl = '',
+        # PIM 100.135: the decision's deadline goes in the subject ("decide by <time>"); none known = "it waits for your decision"
+        [AllowNull()][object]$DecideByUtc = $null
     )
     $appr = if ($ApproverName) { $ApproverName } else { "$(@($Target.notify)[0])" }
+    $deadline = 'it waits for your decision'
+    if ($null -ne $DecideByUtc -and "$DecideByUtc".Trim() -and (Get-Command Format-PimMailWhen -ErrorAction SilentlyContinue)) {
+        $w = Format-PimMailWhen -Value $DecideByUtc -TimeZoneId (Get-PimMailTimeZoneId)
+        if ($w) { $deadline = 'decide by ' + $w }
+    }
     @{
         ApproverName        = $appr
         PreviousApprover    = "$($Target.previousApprover)"
@@ -816,6 +823,7 @@ function ConvertTo-PimEscalationTokens {
         Justification       = (Get-PimNotifyField -Item $Request -Name 'justification')
         RequestedAt         = (Get-PimNotifyField -Item $Request -Name 'requestedUtc')
         EscalatedAfterHours = "$($Target.elapsedHours)"
+        DecisionDeadline    = $deadline
         ApprovalUrl         = "$ApprovalUrl"
     }
 }
