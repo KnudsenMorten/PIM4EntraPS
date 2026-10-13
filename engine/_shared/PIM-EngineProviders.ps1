@@ -564,6 +564,52 @@ function Get-PimScheduledAdminCreationReport {
     return [pscustomobject]@{ ok = $true; reason = ''; pending = $sorted; next = $(if ($sorted.Count) { $sorted[0] } else { $null }); tapDeferred = $tapDeferred }
 }
 
+function Test-PimAdminRowAccountGone {
+    # PURE. 100.131 (b): the mark Set-PimAdminsAccountGoneMarks puts on a desired row for ONE pass (see there).
+    param([object]$Row)
+    if ($null -eq $Row) { return $false }
+    if ($Row -is [System.Collections.IDictionary]) { return ($Row.Contains('__pimAccountGone') -and [bool]$Row['__pimAccountGone']) }
+    $p = $Row.PSObject.Properties['__pimAccountGone']
+    return ($null -ne $p -and [bool]$p.Value)
+}
+
+function Set-PimAdminsAccountGoneMarks {
+    <#
+      100.131 (b) -- owner 2026-10-13: "Fix count + leave rows". A row with AccountStatus = Deleted whose account is NOT in
+      THIS pass's live read is done: there is nothing to create (a Deleted row is never provisioned -- ApplyCreate refused it
+      every run, which is the misleading "create=2 ... skipped=2") and nothing to delete (no account). It is marked for this
+      pass (__pimAccountGone), and KeyOf then gives it no key, so the diff leaves it out: no create is planned for it, and no
+      update / delete either. The row itself stays (history).
+      🔒 THE DELETE PATH IS UNTOUCHED: the decision is made on the live read of the pass ONLY -- a Deleted row whose account
+      IS in the live set is never marked, so it stays in the plan as an update and the pinned one-time delete (the one
+      guarded delete function, from ApplyUpdate) reaches it exactly as before (pinned -> deleted once; no pin -> "an operator must
+      confirm the delete again"). A row is never marked on its own words alone. A closed delete pin (tombstone) is named in
+      the log when there is one. Every desired row's mark is reset first, so a mark never outlives its pass.
+      Returns the marked keys.
+    #>
+    param([object[]]$Desired = @(), [object[]]$Live = @(), [Parameter(Mandatory)][scriptblock]$KeyOf, [AllowNull()][object[]]$Pins = $null)
+    $liveKeys = @{}
+    foreach ($l in @($Live)) { if ($null -eq $l) { continue }; $k = "$(& $KeyOf $l)".Trim().ToLowerInvariant(); if ($k) { $liveKeys[$k] = $true } }
+    $gone = New-Object System.Collections.Generic.List[string]
+    foreach ($d in @($Desired)) {
+        if ($null -eq $d) { continue }
+        if ($d -is [System.Collections.IDictionary]) { $d['__pimAccountGone'] = $false } else { Add-Member -InputObject $d -NotePropertyName '__pimAccountGone' -NotePropertyValue $false -Force }
+        if ("$(Get-PimRowProp -Row $d -Names @('AccountStatus'))".Trim() -ine 'Deleted') { continue }
+        $k = "$(& $KeyOf $d)".Trim().ToLowerInvariant()
+        if (-not $k -or $liveKeys.ContainsKey($k)) { continue }   # the account is there: it stays in the plan (the pinned delete reaches it)
+        if ($d -is [System.Collections.IDictionary]) { $d['__pimAccountGone'] = $true } else { $d.__pimAccountGone = $true }
+        $tomb = ''
+        if ($null -ne $Pins -and (Get-Command Find-PimAdminDeletePin -ErrorAction SilentlyContinue)) {
+            $pin = Find-PimAdminDeletePin -Pins $Pins -Key $k
+            if ($pin -and "$($pin.status)" -ieq 'deleted') { $tomb = ' (deleted by its pinned delete)' }
+        }
+        $gone.Add("$k$tomb")
+    }
+    # Unrolled on purpose: every caller collects with @(...). `return , $arr` would make @(...) a ONE-element array holding
+    # the string[] (Count always 1, "-join" = "System.String[]") -- the engine then logged a gone row on every pass.
+    return $gone.ToArray()
+}
+
 function New-PimAdminsProvider {
     @{
         scope  = 'Admins'
@@ -743,6 +789,17 @@ function New-PimAdminsProvider {
             }
             # #1: the explicit disables of this pass, decided once through the circuit breaker.
             [void](Update-PimAdminsDisableDecision -Context $ctx -Live $live)
+            # 100.131 (b): a row marked Deleted whose account is not in THIS live read is done -- no create planned (it was
+            # skipped every run), no delete (no account). Decided on this read only; a Deleted row whose account is here stays.
+            $__keyOfLive = { param($r) $u = Get-PimRowProp -Row $r -Names @('userPrincipalName','UserPrincipalName','UPN','upn'); if (-not $u) { $u = Get-PimRowProp -Row $r -Names @('UserName','Username') }
+                             if (Get-Command Get-PimUpnLocalPart -ErrorAction SilentlyContinue) { Get-PimUpnLocalPart -Upn "$u" } else { $s = "$u".Trim(); $i = $s.IndexOf('@'); if ($i -ge 0) { $s = $s.Substring(0, $i) }; $s.ToLowerInvariant() } }
+            $__pinsNow = $null
+            if (Get-Command Get-PimAdminDeletePins -ErrorAction SilentlyContinue) { try { $__pinsNow = Get-PimAdminDeletePins } catch { $__pinsNow = $null } }
+            $__gone = @(Set-PimAdminsAccountGoneMarks -Desired @($ctx['adminsDesiredAll']) -Live $live -KeyOf $__keyOfLive -Pins $__pinsNow)
+            $ctx['adminsDeletedGone'] = $__gone
+            if ($__gone.Count) {
+                Write-Host ("    [admins] {0} row(s) say AccountStatus=Deleted and their account is not in this read -- done: nothing to create, nothing to delete (rows kept): {1}" -f $__gone.Count, (($__gone | Select-Object -First 8) -join ', ')) -ForegroundColor DarkGray
+            }
             $live
         }
         # BUG-13: key on the UPN's LOCAL PART, not the whole UPN. The desired UPN is
@@ -753,6 +810,8 @@ function New-PimAdminsProvider {
         # the domain is a tenant detail.
         KeyOf = {
             param($r)
+            # 100.131 (b): a Deleted row whose account is not in this pass's live read has no key for this pass (no create, no delete)
+            if (Test-PimAdminRowAccountGone -Row $r) { return '' }
             $upn = Get-PimRowProp -Row $r -Names @('userPrincipalName','UserPrincipalName','UPN','upn')
             if (-not $upn) { $upn = Get-PimRowProp -Row $r -Names @('UserName','Username') }
             if (Get-Command Get-PimUpnLocalPart -ErrorAction SilentlyContinue) { return (Get-PimUpnLocalPart -Upn "$upn") }

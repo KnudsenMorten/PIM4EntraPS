@@ -2590,6 +2590,7 @@ if (Test-Path -LiteralPath $_coverageLib) { . $_coverageLib }
 if (Test-Path -LiteralPath $validator)  { . $validator }
 . (Join-Path $PSScriptRoot '_settings.ps1')   # PIM 100.121 (lane settings): the feature settings + the two protection switches (functions only)
 $_statesLib = Join-Path $PSScriptRoot '_states.ps1'; if (Test-Path -LiteralPath $_statesLib) { . $_statesLib }   # PIM 100.118: the state of every group, in words (GET /api/group-states)
+$_acctStatesLib = Join-Path $PSScriptRoot '_accountStates.ps1'; if ((Test-Path -LiteralPath $_acctStatesLib) -and (Get-Command Get-PimStateRankOf -ErrorAction SilentlyContinue)) { . $_acctStatesLib }   # PIM 100.132: the state of every admin account, in words (GET /api/account-states)
 # PIM 100.120 (lane listmenu): the saved layouts of the list menu (GET / PUT / DELETE /api/list-layouts).
 if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '_listmenu.ps1')) { . (Join-Path $PSScriptRoot '_listmenu.ps1') }
 
@@ -14364,6 +14365,24 @@ function Handle-Request {
             try { $gst = Get-PimGroupStates }
             catch { $gst = [ordered]@{ ok = $false; error = "The group states could not be computed ($($_.Exception.Message)), so no group state is known."; groups = @(); counts = [ordered]@{}; total = 0 } }
             Write-JsonResponse -Response $resp -Status 200 -Body $gst
+            return 200
+        }
+        # PIM 100.132 (lane states2): the state of every administrator account, in words, from stored facts only
+        # (tools/pim-manager/_accountStates.ps1). GET, Admin (like the group states). Read-only: no tenant call, nothing staged.
+        if ($path -eq '/api/account-states' -and $method -eq 'GET') {
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = 'Admin role required to see the state of the administrator accounts.' }
+                return 403
+            }
+            $script:lastHeartbeat = Get-Date
+            if (-not (Get-Command Get-PimAccountStates -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; error = 'the account-state reader (tools/pim-manager/_accountStates.ps1) is not loaded in this Manager, so no account state is known.' }
+                return 503
+            }
+            $ast = $null
+            try { $ast = Get-PimAccountStates }
+            catch { $ast = [ordered]@{ ok = $false; error = "The account states could not be computed ($($_.Exception.Message)), so no account state is known."; accounts = @(); counts = [ordered]@{}; total = 0 } }
+            Write-JsonResponse -Response $resp -Status 200 -Body $ast
             return 200
         }
         # PIM 100.24 DEPT-OWNER-ACCESS: the default of "Give PIM Manager Reader access (their normal account)" when a

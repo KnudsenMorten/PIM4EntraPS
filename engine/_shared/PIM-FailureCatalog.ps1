@@ -420,6 +420,18 @@ $script:PimFailureRules = @(
        retryable = $false; severity = 'data'
        fixes = @() }
 
+    # PIM 100.123 known gap (lane handover, 2026-10-13): the reviewed AD clean-up is refused by Active Directory because the
+    # hybrid worker's permission group lacks "Delete Group objects" on the groups OU -- every install made before 2.4.618.
+    # The worker's own sentence (engine/hybrid-ad/PIM-HybridAdCleanup.ps1) names the right; ahead of PERMISSION-DENIED so an
+    # "Access is denied" / 0x80070005 from AD keeps THIS class. The customer runs the command; PIM never grants it itself.
+    @{ code = 'AD-CLEANUP-RIGHT-MISSING'
+       match = { param($m, $row) $m -match "(?i)AD-CLEANUP-RIGHT-MISSING|may not delete groups in that OU|'Delete Group objects'" }
+       title = 'The hybrid worker may not delete groups in Active Directory'
+       cause = 'A SuperAdmin approved the deletion of old PIM groups in Active Directory, and Active Directory refused it: the hybrid worker''s permission group has no "Delete Group objects" right on the OU for new AD groups. Installs made before this right existed do not have it. Nothing was deleted.'
+       remedy = 'On a domain controller, as a domain administrator, run the published Initialize-PimHybridWorkerAd.ps1 again with -AllowGroupCleanup and the values used at the install (Settings > Hybrid Active Directory in PIM Manager shows the command with this install''s OU). The worker deletes the approved groups at its next run.'
+       retryable = $true; severity = 'environment'
+       fixes = @() }
+
     # §97 (owner 2026-10-08, live on a production managing tenant): Discovery's LIST of management groups (or
     # subscriptions) refused with 403 is not "a change that is not being deployed" -- it is the engine not being able to
     # SEE Azure, because it holds Reader on its hosting subscription only. Ahead of PERMISSION-DENIED so it gets its own
@@ -725,6 +737,11 @@ function Get-PimFailureSolutionCatalog {
             steps = @('If the removals are intended: open Guards and release the held run (a SuperAdmin), or commit the removals in smaller batches.',
                       'If they are not intended: undo the Remove rows in Advanced View (grid) and commit in Pending changes.')
             after = 'After the release the next run removes them and the status turns OK by itself.' }
+        'AD-CLEANUP-RIGHT-MISSING' = @{ short = 'the hybrid worker may not delete groups in Active Directory yet'
+            what = 'Active Directory refused the approved deletion of old PIM groups, because the hybrid worker may not delete groups in the OU for new AD groups yet: {item}.'
+            affected = 'Nothing was deleted in Active Directory. The groups and their members stay as they are; everything else the worker does keeps working.'
+            steps = @('On a domain controller, as a domain administrator, run these two lines with the values used at the install (Settings > Hybrid Active Directory in PIM Manager shows them with your OU filled in): Invoke-WebRequest https://invardia.com/support/pim/Initialize-PimHybridWorkerAd.ps1 -OutFile Initialize-PimHybridWorkerAd.ps1 -- then -- .\Initialize-PimHybridWorkerAd.ps1 -WorkerComputerName <worker> -ComputerOu ''<OU of the worker computer>'' -GmsaOu ''<OU of the gMSA>'' -GroupsOu ''<OU for new AD groups>'' -AllowGroupCleanup. It grants the one right "Delete Group objects" on that OU and changes nothing else.')
+            after = 'The worker deletes the approved groups at its next run (about hourly) and the status turns OK by itself. An approval that expired meanwhile is approved again on the same page.' }
         'AZURE-NOT-VISIBLE' = @{ short = 'PIM Manager cannot see the Azure management groups and subscriptions'
             what = 'PIM Manager cannot see your Azure management groups and subscriptions: {item}.'
             affected = 'Discovery shows nothing for Azure. Access that is already defined keeps working.'

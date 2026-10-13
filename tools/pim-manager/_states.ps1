@@ -47,20 +47,114 @@ function Get-PimGroupStateReadMarginMinutes {
 }
 function Get-PimGroupStateJobName { 'tenant-cache' }
 
+function Get-PimStateRankOf {
+    <#
+      PURE. PIM 100.132 (owner 2026-10-13: "maybe sort it so issue accounts/groups are top"). The ONE sort rank of a state
+      id, the same for groups and accounts, so the page and the list menu sort alike: a problem first, in the owner's order,
+      then the deleted rows, then everything that is as it should be. A state the code does not know sorts with the problems.
+    #>
+    param([AllowNull()][string]$State)
+    switch ("$State") {
+        'create-failed'    { return 1 }
+        'missing'          { return 2 }
+        'unknown'          { return 3 }
+        'marked-delete'    { return 4 }
+        'not-managed'      { return 5 }
+        'not-checked'      { return 6 }
+        'waiting-create'   { return 7 }
+        'waiting-disable'  { return 7 }
+        'waiting-commit'   { return 8 }
+        'deleted-row-left' { return 9 }
+        'deleted-gone'     { return 9 }
+        'managed'          { return 10 }
+        'active'           { return 10 }
+        'disabled'         { return 10 }
+        'ad-only'          { return 10 }
+    }
+    return 3
+}
+function Get-PimStateToneOf {
+    <#
+      PURE. PIM 100.132 (owner 2026-10-13: "+ use colors"). The ONE colour of a state id, the same for groups and accounts:
+      bad (red) = Could not be created, Missing; warn (amber) = Not known, Marked for deletion, Not managed, Not checked;
+      info (blue) = waiting; muted (grey) = deleted, AD only; ok (green) = Active / Managed / Disabled as asked. The colour
+      only repeats the words, it never replaces them. A state the code does not know is amber.
+    #>
+    param([AllowNull()][string]$State)
+    switch ("$State") {
+        { $_ -in @('create-failed', 'missing') } { return 'bad' }
+        { $_ -in @('unknown', 'marked-delete', 'not-managed', 'not-checked') } { return 'warn' }
+        { $_ -in @('waiting-create', 'waiting-commit', 'waiting-disable') } { return 'info' }
+        { $_ -in @('deleted-row-left', 'deleted-gone', 'ad-only') } { return 'muted' }
+        { $_ -in @('managed', 'active', 'disabled') } { return 'ok' }
+    }
+    return 'warn'
+}
+
 function Get-PimGroupStateCatalog {
-    # PURE. Every state, in display order: id, the WORDS shown, a tone for the colour, and what it means.
-    @(
-        [ordered]@{ id = 'managed';          label = 'Managed';              tone = 'ok';    meaning = 'Defined in PIM Manager and found in Microsoft Entra ID.' }
-        [ordered]@{ id = 'waiting-commit';   label = 'Waiting for commit';   tone = 'info';  meaning = 'Staged in Pending changes, not committed. Nothing happens until it is committed.' }
-        [ordered]@{ id = 'waiting-create';   label = 'Waiting to be created'; tone = 'info'; meaning = 'Committed, and not in Microsoft Entra ID yet. The engine creates it on its next run.' }
-        [ordered]@{ id = 'create-failed';    label = 'Could not be created'; tone = 'bad';   meaning = 'Committed, not in Microsoft Entra ID, and the last engine run failed on it.' }
-        [ordered]@{ id = 'marked-delete';    label = 'Marked for deletion';  tone = 'wait';  meaning = 'Its definition is marked Retire and the group is still in Microsoft Entra ID.' }
-        [ordered]@{ id = 'deleted-row-left'; label = 'Deleted -- row left';  tone = 'wait';  meaning = 'Marked Retire and no longer in Microsoft Entra ID: only the row is left. Take the row out to finish.' }
-        [ordered]@{ id = 'missing';          label = 'Missing in Entra ID';  tone = 'bad';   meaning = 'Defined, it was in Microsoft Entra ID before, and the last read did not find it: it was deleted outside PIM Manager.' }
-        [ordered]@{ id = 'not-managed';      label = 'Not managed';          tone = 'muted'; meaning = 'In Microsoft Entra ID with the PIM naming, and no group definition in PIM Manager names it.' }
-        [ordered]@{ id = 'not-checked';      label = 'Not checked';          tone = 'muted'; meaning = 'Whether it is in Microsoft Entra ID was not checked: no read, an old read, or a name the read does not cover.' }
-        [ordered]@{ id = 'unknown';          label = 'Not known';            tone = 'warn';  meaning = 'A stored fact this state needs could not be read. The reason is given; nothing is guessed.' }
+    # PURE. Every state, in display order: id, the WORDS shown, a tone for the colour, the sort rank, and what it means.
+    $c = @(
+        [ordered]@{ id = 'managed';          label = 'Managed';              meaning = 'Defined in PIM Manager and found in Microsoft Entra ID.' }
+        [ordered]@{ id = 'waiting-commit';   label = 'Waiting for commit';   meaning = 'Staged in Pending changes, not committed. Nothing happens until it is committed.' }
+        [ordered]@{ id = 'waiting-create';   label = 'Waiting to be created'; meaning = 'Committed, and not in Microsoft Entra ID yet. The engine creates it on its next run.' }
+        [ordered]@{ id = 'create-failed';    label = 'Could not be created'; meaning = 'Committed, not in Microsoft Entra ID, and an engine run after the commit failed on it.' }
+        [ordered]@{ id = 'marked-delete';    label = 'Marked for deletion';  meaning = 'Its definition is marked Retire and the group is still in Microsoft Entra ID.' }
+        [ordered]@{ id = 'deleted-row-left'; label = 'Deleted -- row left';  meaning = 'Marked Retire and no longer in Microsoft Entra ID: only the row is left. Take the row out to finish.' }
+        [ordered]@{ id = 'missing';          label = 'Missing in Entra ID';  meaning = 'Defined, it was in Microsoft Entra ID before, and the last read did not find it: it was deleted outside PIM Manager.' }
+        [ordered]@{ id = 'not-managed';      label = 'Not managed';          meaning = 'In Microsoft Entra ID with the PIM naming, and no group definition in PIM Manager names it.' }
+        [ordered]@{ id = 'not-checked';      label = 'Not checked';          meaning = 'Whether it is in Microsoft Entra ID was not checked: no read, an old read, or a name the read does not cover.' }
+        [ordered]@{ id = 'unknown';          label = 'Not known';            meaning = 'A stored fact this state needs could not be read. The reason is given; nothing is guessed.' }
     )
+    foreach ($x in $c) { $x['tone'] = (Get-PimStateToneOf -State $x.id); $x['rank'] = (Get-PimStateRankOf -State $x.id) }
+    return $c
+}
+
+function Read-PimStateQueueRows {
+    <#
+      PIM 100.132 (owner 2026-10-13: "make sure that a new user which is in the queue doesnt become red"). The OPEN entries of
+      the change queue (pim.ChangeQueue: pending / committed / applying) for the given record types, as rows
+      @{ entity; name (lower); key; op; status; enqueuedUtc }. name = the group name / the account name part the entry's row
+      names (its payload IS the row). THROWS when the store cannot be read; a store from before the table answers none.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string[]]$Entities)
+    $p = @{}; $names = New-Object System.Collections.Generic.List[string]; $i = 0
+    foreach ($e in @($Entities)) { $p["e$i"] = "$e"; $names.Add("@e$i"); $i++ }
+    if (-not $names.Count) { return @() }
+    $rows = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Parameters $p -Sql ("IF OBJECT_ID('pim.ChangeQueue') IS NOT NULL SELECT Entity, [Key] AS QKey, Op, Status, Payload, EnqueuedUtc FROM pim.ChangeQueue WHERE Status IN ('pending', 'committed', 'applying') AND Entity IN (" + ($names -join ', ') + ")"))
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $rows) {
+        if ($null -eq $r) { continue }
+        $pl = $null
+        $pt = "$($r.Payload)".Trim()
+        if ($pt) { try { $pl = ConvertFrom-Json -InputObject $pt } catch { $pl = $null } }
+        $nm = ''
+        foreach ($f in @('GroupName', 'UserPrincipalName', 'UserName', 'Username')) { if (-not $nm) { $nm = Get-PimGroupStateField -Row $pl -Name $f } }
+        if (-not $nm) { $nm = "$($r.QKey)".Trim() }
+        if (-not $nm) { continue }
+        $out.Add([pscustomobject]@{ entity = "$($r.Entity)"; name = $nm.ToLowerInvariant(); key = "$($r.QKey)"; op = "$($r.Op)"; status = "$($r.Status)".Trim().ToLowerInvariant(); enqueuedUtc = $r.EnqueuedUtc; payload = $pl })
+    }
+    return $out.ToArray()
+}
+
+function Read-PimGroupStateRowTimes {
+    <#
+      PIM 100.132 (owner 2026-10-13): when each group definition row was last committed (pim.Rows.UpdatedUtc), as rows
+      @{ entity; name (lower); updatedUtc }. "Could not be created" needs a failing engine run AFTER that time. THROWS when
+      the store cannot be read. Read-only.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string[]]$Entities)
+    $p = @{}; $names = New-Object System.Collections.Generic.List[string]; $i = 0
+    foreach ($e in @($Entities)) { $p["e$i"] = "$e"; $names.Add("@e$i"); $i++ }
+    if (-not $names.Count) { return @() }
+    $sql = 'SELECT Entity, LOWER(JSON_VALUE(DataJson, ''$.GroupName'')) AS GroupKey, MAX(UpdatedUtc) AS UpdatedUtc FROM pim.Rows WHERE ISJSON(DataJson) = 1 AND Entity IN (' +
+           ($names -join ', ') + ') GROUP BY Entity, LOWER(JSON_VALUE(DataJson, ''$.GroupName''))'
+    $rows = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Parameters $p -Sql $sql)
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $rows) {
+        if ($null -eq $r -or -not "$($r.GroupKey)".Trim()) { continue }
+        $out.Add([pscustomobject]@{ entity = "$($r.Entity)"; name = "$($r.GroupKey)".Trim().ToLowerInvariant(); updatedUtc = $r.UpdatedUtc })
+    }
+    return $out.ToArray()
 }
 
 function ConvertTo-PimGroupStateUtc {
@@ -281,9 +375,15 @@ function Resolve-PimGroupState {
         -Retirement the object of Get-PimManagerGroupRetirementState (or $null = not read)
         -Holds      @{ ok; error; list } -- the guard holds for group deletion
     #>
+    # PIM 100.132 (owner 2026-10-13: "make sure that a new user which is in the queue doesnt become red"):
+    #   -Queue @{ ok; error } and -Queued the open change-queue entry of this name (or $null): an open entry ALWAYS wins
+    #   over "Missing" / "Could not be created" (it is waiting); an unreadable queue turns a red answer into "Not known".
+    #   -CommitUtc when the row was last committed, -CommitKnown $false when that could not be read: "Could not be created"
+    #   needs a failing run AFTER the commit.
     param([Parameter(Mandatory)][string]$Name, [bool]$Retire, [Parameter(Mandatory)][object]$Cache, [bool]$InCache,
           [Parameter(Mandatory)][object]$Evidence, [AllowNull()][object]$Seen, [Parameter(Mandatory)][object]$Failures, [AllowNull()][object]$Fail,
-          [AllowNull()][object]$RetireFail, [AllowNull()][object]$Retirement, [AllowNull()][object]$Holds)
+          [AllowNull()][object]$RetireFail, [AllowNull()][object]$Retirement, [AllowNull()][object]$Holds,
+          [AllowNull()][object]$Queue = $null, [AllowNull()][object]$Queued = $null, [AllowNull()][object]$CommitUtc = $null, [bool]$CommitKnown = $true)
     $r = { param($s, $t, $w, $ie) [ordered]@{ state = "$s"; reason = "$t"; why = "$w"; inEntra = "$ie" } }
     $mark = if ($Retire) { ' Its definition is marked Retire.' } else { '' }
     $st = "$($Cache.status)"
@@ -353,21 +453,44 @@ function Resolve-PimGroupState {
         $t += 'Only the row is left, still marked Retire: take the row out to finish.'
         return (& $r 'deleted-row-left' $t 'row-left' 'no')
     }
+    # 100.132: an open change-queue entry for it wins over every red answer -- it is waiting, never "missing" or "failed".
+    if ($Queued) {
+        $qs = "$($Queued.status)"
+        $t = "It is not in Microsoft Entra ID yet (read $readTxt), and a change for it waits in the change queue ($qs$(if ($null -ne $Queued.enqueuedUtc -and "$($Queued.enqueuedUtc)".Trim()) { ", queued $(Format-PimGroupStateUtc -Value $Queued.enqueuedUtc)" })). "
+        $t += $(if ($qs -eq 'pending') { 'It is done once that change is committed and the engine has run.' } else { 'The engine creates it when it runs the queue.' })
+        return (& $r 'waiting-create' $t 'queued' 'no')
+    }
+    $queueBad = ($null -ne $Queue -and -not $Queue.ok)
+    $queueTxt = if ($queueBad) { " Whether a change for it waits in the change queue could not be read ($($Queue.error)), so this is not said." } else { '' }
     if (-not $Failures.ok) {
         return (& $r 'unknown' "It is not in the last read of Microsoft Entra ID ($readTxt), and whether the last engine run failed on it could not be read ($($Failures.error))." 'failures-unreadable' 'unknown')
     }
+    $failNote = ''
     if ($Fail) {
-        $t = "It is not in Microsoft Entra ID (read $readTxt) and the last engine run failed on it$(if ("$($Fail.lastSeenUtc)".Trim()) { " ($("$($Fail.lastSeenUtc)".Trim()))" }): "
-        $t += ("$("$($Fail.title)".Trim()) $("$($Fail.message)".Trim())".Trim())
-        if (-not "$($Fail.title)$($Fail.message)".Trim()) { $t += 'no reason was recorded' }
-        $t += '. The reason and the fix are under Jobs > Engine logs & errors.'
-        if ($had) { $t += " It was in Microsoft Entra ID before (recorded $(Format-PimGroupStateUtc -Value $Seen.firstUtc))." }
-        return (& $r 'create-failed' $t 'run-failed' 'no')
+        # 100.132: red only for a failing run AFTER the row was last committed (positive evidence, never a guess).
+        $ft = ConvertTo-PimGroupStateUtc -Value $Fail.lastSeenUtc
+        $cu = ConvertTo-PimGroupStateUtc -Value $CommitUtc
+        if (-not $CommitKnown) {
+            return (& $r 'unknown' "It is not in Microsoft Entra ID (read $readTxt) and an engine run reported a problem on it, but when its row was last committed could not be read, so whether that run came after the commit is not known." 'commit-time-unreadable' 'unknown')
+        }
+        $afterCommit = ($null -ne $ft) -and ($null -eq $cu -or $ft -ge $cu.AddMinutes(-1 * [int](Get-PimGroupStateReadMarginMinutes)))
+        if ($afterCommit) {
+            $t = "It is not in Microsoft Entra ID (read $readTxt) and the last engine run failed on it$(if ("$($Fail.lastSeenUtc)".Trim()) { " ($("$($Fail.lastSeenUtc)".Trim()))" }): "
+            $t += ("$("$($Fail.title)".Trim()) $("$($Fail.message)".Trim())".Trim())
+            if (-not "$($Fail.title)$($Fail.message)".Trim()) { $t += 'no reason was recorded' }
+            $t += '. The reason and the fix are under Jobs > Engine logs & errors.'
+            if ($had) { $t += " It was in Microsoft Entra ID before (recorded $(Format-PimGroupStateUtc -Value $Seen.firstUtc))." }
+            if ($queueBad) { return (& $r 'unknown' ($t + $queueTxt) 'queue-unreadable' 'unknown') }
+            return (& $r 'create-failed' $t 'run-failed' 'no')
+        }
+        $failNote = " An engine run reported a problem on it$(if ($null -ne $ft) { " on $(Format-PimGroupStateUtc -Value $ft)" } else { ' (no time recorded)' }), before its row was last committed$(if ($null -ne $cu) { " ($(Format-PimGroupStateUtc -Value $cu))" }); the next run shows whether the change fixed it."
     }
     if ($had) {
-        return (& $r 'missing' "It was in Microsoft Entra ID (PIM Manager recorded it on $(Format-PimGroupStateUtc -Value $Seen.lastUtc)) and the last read ($readTxt) did not find it: it was deleted outside PIM Manager. The engine creates it again on its next run unless its row is taken out first." 'deleted-outside' 'no')
+        $t = "It was in Microsoft Entra ID (PIM Manager recorded it on $(Format-PimGroupStateUtc -Value $Seen.lastUtc)) and the last read ($readTxt) did not find it: it was deleted outside PIM Manager. The engine creates it again on its next run unless its row is taken out first."
+        if ($queueBad) { return (& $r 'unknown' ($t + $queueTxt) 'queue-unreadable' 'unknown') }
+        return (& $r 'missing' $t 'deleted-outside' 'no')
     }
-    return (& $r 'waiting-create' "It is committed and not in Microsoft Entra ID yet (read $readTxt). The engine creates it on its next run." 'next-run' 'no')
+    return (& $r 'waiting-create' ("It is committed and not in Microsoft Entra ID yet (read $readTxt). The engine creates it on its next run." + $failNote) 'next-run' 'no')
 }
 
 function Get-PimGroupStates {
@@ -382,13 +505,15 @@ function Get-PimGroupStates {
       -ReadFailures { -> raw text of 'EngineItemFailures' }, -ReadEvidence { -> evidence rows }, -ReadHolds { -> holds },
       -Retirement (the object of Get-PimManagerGroupRetirementState), -Prefix, -NowUtc.
     #>
+    # 100.132: + -ReadQueue { param($entities) -> Read-PimStateQueueRows rows } and -ReadRowTimes { param($entities) -> rows
+    #   @{ entity; name; updatedUtc } } (when each definition row was last committed); every group carries rank + tone.
     param([scriptblock]$ReadRows, [scriptblock]$ReadPending, [scriptblock]$ReadCache, [scriptblock]$ReadFailures, [scriptblock]$ReadEvidence,
           [scriptblock]$ReadHolds, [AllowNull()][object]$Retirement = $null, [switch]$NoRetirementRead, [AllowNull()][string]$Prefix = $null,
-          [datetime]$NowUtc = [datetime]::UtcNow)
+          [datetime]$NowUtc = [datetime]::UtcNow, [scriptblock]$ReadQueue, [scriptblock]$ReadRowTimes)
     $now = $NowUtc.ToUniversalTime()
     $catalog = @(Get-PimGroupStateCatalog)
-    $labelOf = @{}; $toneOf = @{}
-    foreach ($c in $catalog) { $labelOf[$c.id] = $c.label; $toneOf[$c.id] = $c.tone }
+    $labelOf = @{}; $toneOf = @{}; $rankOf = @{}
+    foreach ($c in $catalog) { $labelOf[$c.id] = $c.label; $toneOf[$c.id] = $c.tone; $rankOf[$c.id] = $c.rank }
     $counts = [ordered]@{}; foreach ($c in $catalog) { $counts[$c.id] = 0 }
     $sources = [ordered]@{}
     $base = [ordered]@{ ok = $false; error = ''; computedUtc = $now.ToString('yyyy-MM-ddTHH:mm:ssZ'); tenantRead = $null; sources = $sources; catalog = $catalog
@@ -551,6 +676,30 @@ function Get-PimGroupStates {
     $sources['retirement'] = [ordered]@{ ok = ($null -ne $ret); effective = $(if ($ret) { "$($ret.effective)" } else { 'unknown' }); text = $(if ($ret) { "$($ret.text)" } else { '' })
                                           place = $(if ($ret) { "$($ret.place)" } else { '' }); job = $(if ($ret) { "$($ret.job)" } else { '' }) }
 
+    # 100.132: the open change-queue entries (an open entry is never red) and when each row was last committed
+    $queue = @{ ok = $true; error = '' }; $queuedBy = @{}
+    try {
+        $qRows = if ($ReadQueue) { & $ReadQueue $ents } else { Read-PimStateQueueRows -ConnectionString (Get-PimManagerSettingCs) -Entities $ents }
+        foreach ($q in @($qRows)) {
+            if ($null -eq $q) { continue }
+            if ("$($q.op)".Trim() -and "$($q.op)".Trim() -notin @('Create', 'Update')) { continue }
+            $qn = (Get-PimGroupStateField -Row $q -Name 'name').ToLowerInvariant()
+            if ($qn) { $queuedBy["$($q.entity)|$qn"] = $q }
+        }
+    } catch { $queue = @{ ok = $false; error = "$($_.Exception.Message)" }; $queuedBy = @{} }
+    $sources['queue'] = [ordered]@{ ok = [bool]$queue.ok; error = "$($queue.error)" }
+    $times = @{ ok = $true; error = '' }; $timeBy = @{}
+    try {
+        $tRows = if ($ReadRowTimes) { & $ReadRowTimes $ents } else { Read-PimGroupStateRowTimes -ConnectionString (Get-PimManagerSettingCs) -Entities $ents }
+        foreach ($tr in @($tRows)) {
+            if ($null -eq $tr) { continue }
+            $tn = (Get-PimGroupStateField -Row $tr -Name 'name').ToLowerInvariant()
+            $tv = if ($tr -is [System.Collections.IDictionary]) { $tr['updatedUtc'] } else { $tr.updatedUtc }
+            if ($tn) { $timeBy["$($tr.entity)|$tn"] = (ConvertTo-PimGroupStateUtc -Value $tv) }
+        }
+    } catch { $times = @{ ok = $false; error = "$($_.Exception.Message)" }; $timeBy = @{} }
+    $sources['rowTimes'] = [ordered]@{ ok = [bool]$times.ok; error = "$($times.error)" }
+
     # ---- 5. one state per group ---------------------------------------------------------------------------------------
     $out = New-Object System.Collections.Generic.List[object]
     $seenStaged = @{}
@@ -559,8 +708,11 @@ function Get-PimGroupStates {
         $ev = if ($evBy.ContainsKey($lower)) { $evBy[$lower] } else { $null }
         $f = if ($fail.groups.ContainsKey($lower)) { $fail.groups[$lower] } else { $null }
         $rf = if ($fail.retire.ContainsKey($lower)) { $fail.retire[$lower] } else { $null }
+        $qk = "$($d.entity)|$lower"
         $res = Resolve-PimGroupState -Name $d.name -Retire ([bool]$d.retire) -Cache $cache -InCache ($inEntra.ContainsKey($lower)) -Evidence $evid -Seen $ev `
-                                     -Failures $fail -Fail $f -RetireFail $rf -Retirement $ret -Holds $holds
+                                     -Failures $fail -Fail $f -RetireFail $rf -Retirement $ret -Holds $holds `
+                                     -Queue $queue -Queued $(if ($queuedBy.ContainsKey($qk)) { $queuedBy[$qk] } else { $null }) `
+                                     -CommitUtc $(if ($timeBy.ContainsKey($qk)) { $timeBy[$qk] } else { $null }) -CommitKnown ([bool]$times.ok)
         $staged = ''; $stagedText = ''; $stagedBy = ''
         if (-not $stagedOk) { $staged = 'unknown'; $stagedText = "What is staged for it could not be read ($stagedErr)." }
         else {
@@ -635,7 +787,12 @@ function Get-PimGroupStates {
     }
 
     $sorted = @($out | Sort-Object { "$($_.name)".ToLowerInvariant() }, { "$($_.entity)" })
-    foreach ($g in $sorted) { $counts[$g.state] = [int]$counts[$g.state] + 1 }
+    foreach ($g in $sorted) {
+        $counts[$g.state] = [int]$counts[$g.state] + 1
+        # 100.132: the sort rank (problems first) and the colour, on every group, the same as on every account
+        $g['rank'] = $(if ($rankOf.ContainsKey("$($g.state)")) { $rankOf["$($g.state)"] } else { Get-PimStateRankOf -State "$($g.state)" })
+        $g['tone'] = Get-PimStateToneOf -State "$($g.state)"
+    }
     $base.ok = $true
     $base.groups = $sorted
     $base.total = $sorted.Count

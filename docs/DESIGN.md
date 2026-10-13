@@ -1334,6 +1334,72 @@ table with a **State** column and the reason beside it. A request that fails sho
 every row and no list -- never the last good answer passed off as current. A state is information:
 it puts no number or dot in the menu.
 
+**Red needs positive evidence; a group or account in the queue is never red** (2026-10-13).
+*Could not be created* needs a failing engine run **after** the definition row was last committed
+(the row's stored time, less the 10-minute margin); an older failure is said beside *Waiting to be
+created*. An open change-queue entry (pending / committed / applying, a create or an update) for the
+name always wins over *Missing* and *Could not be created*: it is *Waiting to be created*. When the
+queue or the row's commit time cannot be read, an answer that would be red is *Not known* instead.
+
+**One colour and one sort rank per state, the same for groups and accounts.** The server sends
+`tone` and `rank` with every state. Colours: red = *Could not be created*, *Missing in Entra ID*;
+amber = *Not known*, *Marked for deletion*, *Not managed*, *Not checked*; blue = waiting (for commit,
+to be created, to be disabled); grey = *Deleted -- row left*, *Deleted -- account gone*, *AD only*;
+green = *Managed*, *Active*, *Disabled* as asked. The colour only repeats the words. Rank, problems
+first: Could not be created, Missing, Not known, Marked for deletion, Not managed, Not checked,
+waiting to be created / disabled, Waiting for commit, then the deleted rows, then everything normal.
+
+**The state of every administrator account, in words** (2026-10-13). Computed by the server from
+stored facts only (`GET /api/account-states`, Admin; `tools/pim-manager/_accountStates.ps1`, which
+uses the group-state helpers). Nothing in it reads the tenant, writes or stages.
+
+| the state says | it is computed from |
+|---|---|
+| **Active** | a committed admin row, and the engine's read matched the account to it |
+| **Waiting for commit** | only staged, or only proposed in the change queue |
+| **Waiting to be created** | committed and not in Microsoft Entra ID yet; the scheduled create date when the row has one (ProvisionDate); also every account with an open change-queue entry |
+| **Waiting to be disabled** | the row asks Disabled / Revoked / Removed and the read found the account not yet as asked |
+| **Could not be created** | not in the read, and a failing engine run AFTER the commit names it (scope Admins) |
+| **Disabled** | the row asks Disabled / Revoked / Removed and the account is as asked (or was never created, by design) |
+| **Marked for deletion** | AccountStatus Deleted and the account is still there -- with whether a pinned one-time delete waits, or an operator has to confirm the delete again |
+| **Deleted -- account gone** | AccountStatus Deleted and the read found no account (or the pinned delete was done); the row is kept as history -- with how many memberships in PIM Manager still name it |
+| **Missing in Entra ID** | the engine recorded it BEFORE the read, and the read did not find it |
+| **AD only** | TargetPlatform AD: it lives in on-premises AD |
+| **Not managed** | an account with an admin naming prefix the engine's read found, with no row |
+| **Not checked** | no read, a read older than 26 hours, a read that did not check the admin accounts or listed only part of them, an account created after the read, a row marked Deleted after the read |
+| **Not known** | a stored fact this state needs could not be read |
+
+*In Microsoft Entra ID* for an account is **the engine's own read of the administrator accounts**,
+stored by the drift snapshot (every 4 hours): the accounts whose name starts with an admin naming
+prefix plus every account a row names, diffed against the rows (missing / changed / extra). A row in
+neither list was matched. A row committed after that read was not looked for, so it is never
+*Missing*. The failing items and the delete pins are read raw.
+
+**A state column on every record list of the Access view.** The record lists (Administrator
+accounts, every direct and indirect group list, and the "Who gets what" lists) carry the state of
+every group and every account a row names as a real column: *State* on a group list and on
+Administrator accounts; *Group state* + *Account state* on who gets which group; *Group state* +
+*Member group state* on group-in-group; *Group state* on the role, AU, Azure and workload lists (by
+the row's group tag). The list menu filters, hides and moves the column like any other; a click on
+its header sorts by the rank. With no sort chosen the rows with a problem come first, then the rest
+in their usual order (a row added here stays on top); a header sort wins, and its third click
+brings the default back. On a group list the column replaces the small state label of the actions
+cell.
+
+**Taking an admin row out asks about its memberships.** Taking an administrator row out of PIM
+Manager while membership rows still name it is refused at commit (PIM-FK-002, unchanged). So the
+row's x, "Take N row(s) out of PIM" and the button on a *Deleted -- account gone* state count those
+membership rows and ask once whether they go too. Yes stages them as rows taken out in the same
+step (for an account that is gone nothing happens in the tenant; for one that exists it is the
+ordinary staged removal, with every commit check and guard); no stages only the administrator row.
+
+**A row marked Deleted whose account is gone is done** (engine, 2026-10-13). The Admins scope used
+to plan such a row as a create on every run and skip it ("create=2 ... skipped=2"). Now, after its
+live read, the scope marks for that pass every row with AccountStatus = Deleted whose account is not
+in the read; the row gets no diff key, so no create, update or delete is planned for it, and the row
+stays. A Deleted row whose account IS in the read is never marked: it stays an update, and the
+pinned one-time delete (or "an operator must confirm the delete again") runs exactly as before.
+
 **One dialog for "remove from PIM Manager" or "delete the group".** The bin, the broom and the three
 bulk buttons of a group table, and the list on Delegation overview, open the same dialog. It shows
 the state of what was picked and three choices, each in the words of what is left behind:
@@ -2328,6 +2394,19 @@ afterwards. The object is deleted as it is, with its members: where the forest h
 brings the members back. Deleting needs "Delete Group objects" on the OU for the groups identity's permission group —
 **not** part of the default grant; `Initialize-PimHybridWorkerAd.ps1 -AllowGroupCleanup` adds it. Without it an
 approved deletion is reported as failed with exactly that hint.
+
+**When the right is missing (an install made before 2.4.618).** PIM Manager never grants the right itself: the customer
+runs every deployment command. `GET /api/hybrid-ad/cleanup/right-notice` (Admin, read-only) looks at the result record
+and answers `show` only when an approved item's **current** status is `failed` with the worker's access-denied reason
+(a deleted, waiting, skipped or expired item, or a failure for any other reason, shows nothing). Settings > Hybrid Active
+Directory then shows, above the other cards, a notice with the two lines for **this** install -- the download line and
+`.\Initialize-PimHybridWorkerAd.ps1 -WorkerComputerName <the worker that reported> -ComputerOu '<as at install>'
+-GmsaOu '<as at install>' -GroupsOu '<the stored OU for new AD groups>' -AllowGroupCleanup` -- with Copy and the
+"What does this script do?" link. The two OUs PIM Manager does not store stay named placeholders; a group that lies
+outside the groups OU is named, because the script grants the right on that OU only. The notice disappears by itself once
+the worker has deleted the groups. The same failure is the failure catalog's customer-configuration class
+**AD-CLEANUP-RIGHT-MISSING**, whose solution carries the same two lines. Code: the last functions of
+`tools/pim-manager/_adclean.ps1`, the page's `lane handover` block.
 
 **"Delete in AD too."** `POST /api/hybrid-ad/cleanup/also-delete` (SuperAdmin) records, for groups that are *defined
 and mirrored now*, that the AD group goes with the group. The worker acts only after the definition is gone **and**
@@ -10881,6 +10960,29 @@ role (managing / managed) instead of an empty one.
 - **Switched off:** nothing is ever sent, and invardia.com is never called.
 
 The install key is the Container Apps secret, or else the key claimed by the job `install-key` (§29.3).
+
+**Adoption counts (with an install key only).** The heartbeat's counts also say how much the installation is used, as whole
+numbers. They are read from the environment's own database only (no Graph or Azure call), with one count query each, and
+only when a heartbeat is due (once an hour). A count whose source cannot be read is left out, never sent as 0. An
+anonymous heartbeat carries none of them.
+
+| key | what it counts |
+|---|---|
+| `managedAdmins` | admin accounts defined in PIM Manager, not marked Deleted |
+| `managedGroups` | PIM groups defined (by group name; retired groups not counted) |
+| `delegations` | delegation rows of every kind (role, group, Azure, workload, admin membership), not marked Remove |
+| `privilegedRoles` | distinct Entra roles that a delegation grants |
+| `eligibleAssignments` | eligible assignments PIM Manager manages, as the engine last confirmed them in the tenant |
+| `activeAssignments` | active assignments in the last complete tenant-wide read (Entra roles, Azure RBAC, PIM for Groups) |
+| `azureRoleAssignments` | the Azure RBAC assignments of that read |
+| `activations30d` | activations (time-bound active assignments the snapshot job saw) that started in the last 30 days |
+| `approvals30d` | approval decisions (approved / denied requests, approved mass-change holds) in the last 30 days |
+| `accessReviewsCompleted30d` | review decisions (access reviews, external-company reviews, owner keep / remove / extend) in the last 30 days |
+| `managedTenants` | enabled managed tenants -- a managing installation only |
+| `hybridAdGroups` | on-premises AD groups the hybrid worker keeps in sync -- with the hybrid AD feature, once the worker ran |
+| `hybridServers` | servers the hybrid worker lists -- with the hybrid AD feature, once the worker ran |
+
+With the database space and the tenant object counts this is 21 counts, within the framework's limit of 40.
 
 **Endpoints and guard links (with an install key only).** The heartbeat names the environment's addresses, so support can
 open them from the customer record and from every mail about the environment (framework contract §8.9):

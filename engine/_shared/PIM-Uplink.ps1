@@ -19,6 +19,8 @@
       single | managing | managed (+ ManagingTenantId) and the setup Controls, each with checkedUtc and, for unknown, a
       reason (lane repfix, additive -- see Test-PimUplinkAdditiveEnabled). Identified only (PIM 100.36): Counts { sqlUsedMb, sqlMaxMb } -- the store's allocated data
       pages and max size, MB (Get-PimUplinkSqlSpace); a failed / empty read leaves both out, never a 0.
+      Identified only (PIM 100.128): the adoption counts in Counts (managedAdmins ... hybridServers, Get-PimUplinkAdoptionCounts)
+      -- COUNT queries on the store, run once per heartbeat; an unreadable source leaves its key out, never a 0.
       Identified only (PIM 100.56, framework 8.9): Endpoints [ { kind; url; label? } ] -- the Manager, the RFA portal, the
       access request API, the MCP server, each only where it exists (Get-PimUplinkEndpoints); a guard record's Link is a deep
       link into that Manager (Get-PimGuardLink, PIM-Guard.ps1).
@@ -544,6 +546,89 @@ function Get-PimUplinkSqlSpace {
     } catch { return $null }
 }
 
+# PIM 100.128 (owner via Invardia 2026-10-13: "selling points of adoption") -- the ADOPTION counts of the IDENTIFIED heartbeat,
+# for Invardia's back-office dashboard. Whole numbers per install, from PIM's OWN SQL store only (no Graph / ARM read), one
+# scalar COUNT per key, computed only when a heartbeat is due (hourly). A key whose source cannot be read (the query throws,
+# the table is not there, the result is NULL / not a number / negative) is LEFT OUT -- never a 0. Anonymous mode sends none.
+# The heartbeat's other keys (sqlUsedMb, sqlMaxMb, users, guests, servicePrincipals, groups, usersTotal, usersDisabled = 8)
+# plus these 13 = 21, under the framework's 40-key cap (sync/_AitUplink.ps1).
+function Get-PimUplinkAdoptionCountKeys {
+    <# PURE. Every adoption key, in the order the heartbeat builds them (a literal: child-scope safe). #>
+    return @('managedAdmins', 'managedGroups', 'delegations', 'privilegedRoles', 'eligibleAssignments', 'activeAssignments',
+             'azureRoleAssignments', 'activations30d', 'approvals30d', 'accessReviewsCompleted30d', 'managedTenants',
+             'hybridAdGroups', 'hybridServers')
+}
+
+function Get-PimUplinkAdoptionQueries {
+    <#
+      PURE. key -> one scalar SQL statement (column n). -MspMaster adds managedTenants (a managing install's registry);
+      -HybridAd adds hybridAdGroups + hybridServers (the hybrid worker's own records). Every JSON read is guarded by ISJSON
+      (JSON_VALUE over text that is not JSON throws, and SQL Server does not promise to short-circuit an AND). A source that
+      exists but holds nothing answers NULL where "nothing recorded" is not the same as "none" (no complete active-assignments
+      snapshot, no hybrid-worker record) -- NULL = the key is left out.
+    #>
+    param([switch]$MspMaster, [switch]$HybridAd)
+    $j = { param($p) "CASE WHEN ISJSON(DataJson) = 1 THEN LTRIM(RTRIM(JSON_VALUE(DataJson, '$.$p'))) END" }
+    $defs = "N'PIM-Definitions-Roles', N'PIM-Definitions-Services', N'PIM-Definitions-Organization', N'PIM-Definitions-Tasks', N'PIM-Definitions-Departments', N'PIM-Definitions-Processes', N'PIM-Definitions-Projects', N'PIM-Definitions-CrossOrg'"
+    $snap = "(SELECT MAX(SnapshotId) FROM pim.ActiveAssignmentSnapshots WHERE State = N'complete')"
+    $q = [ordered]@{
+        # admin rows defined in PIM (Account-Definitions-Admins), not AccountStatus = Deleted
+        managedAdmins        = "SELECT COUNT_BIG(*) AS n FROM pim.Rows WHERE Entity = N'Account-Definitions-Admins' AND UPPER(ISNULL($(& $j 'AccountStatus'), N'')) <> N'DELETED'"
+        # PIM groups defined (the eight group-definition entities, by GroupName, retired groups excluded) -- the engine's own list
+        managedGroups        = "SELECT COUNT_BIG(DISTINCT LOWER(g)) AS n FROM (SELECT $(& $j 'GroupName') AS g, $(& $j 'Lifecycle') AS l FROM pim.Rows WHERE Entity IN ($defs)) x WHERE ISNULL(g, N'') <> N'' AND LOWER(ISNULL(l, N'')) NOT LIKE N'retire%'"
+        # delegation rows of every kind (PIM-Assignments-*), not Action = Remove
+        delegations          = "SELECT COUNT_BIG(*) AS n FROM pim.Rows WHERE Entity LIKE N'PIM-Assignments-%' AND UPPER(ISNULL($(& $j 'Action'), N'')) <> N'REMOVE'"
+        # distinct Entra roles that a (non-Remove) delegation row grants: role -> group, role -> group in an AU, role -> user
+        privilegedRoles      = "SELECT COUNT_BIG(DISTINCT LOWER(r)) AS n FROM (SELECT COALESCE(NULLIF($(& $j 'RoleDefinitionName'), N''), $(& $j 'RoleName')) AS r, $(& $j 'Action') AS a FROM pim.Rows WHERE Entity IN (N'PIM-Assignments-Roles-Groups', N'PIM-Assignments-Roles-AUs', N'PIM-Assignments-Roles-Direct')) x WHERE ISNULL(r, N'') <> N'' AND UPPER(ISNULL(a, N'')) <> N'REMOVE'"
+        # eligible assignments PIM manages, confirmed in the tenant by the engine (the active-assignments read holds ACTIVE ones only)
+        eligibleAssignments  = "SELECT COUNT_BIG(*) AS n FROM pim.ManagedKeys WHERE [Key] LIKE N'%|eligible'"
+        # every active assignment of the last complete tenant-wide read (Entra roles + Azure RBAC + PIM for Groups)
+        activeAssignments    = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap) END AS n"
+        azureRoleAssignments = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND Kind = N'azure-rbac') END AS n"
+        # the activation ledger (pim.ImpactActivations: every time-bound active assignment the snapshot job saw, once) -- by start
+        activations30d       = "SELECT COUNT_BIG(*) AS n FROM pim.ImpactActivations WHERE StartUtc >= DATEADD(day, -30, SYSUTCDATETIME())"
+        # approval decisions in the audit trail (approved / denied requests, approved mass-change holds) -- the Dashboard's rule
+        approvals30d         = "SELECT COUNT_BIG(*) AS n FROM pim.AuditEvents WHERE Ts >= DATEADD(day, -30, SYSUTCDATETIME()) AND (Action IN (N'approval.request.approved', N'approval.request.denied') OR Action LIKE N'%.policy.masschange.approved')"
+        # review decisions in the audit trail (access-review decision, company-review answer, owner keep / remove / extend)
+        accessReviewsCompleted30d = "SELECT COUNT_BIG(*) AS n FROM pim.AuditEvents WHERE Ts >= DATEADD(day, -30, SYSUTCDATETIME()) AND Action IN (N'access-review.decision', N'company-review.answer', N'owner.keep', N'owner.remove', N'owner.extend')"
+    }
+    if ($MspMaster) { $q['managedTenants'] = 'SELECT COUNT_BIG(*) AS n FROM platform.Tenants WHERE Enabled = 1' }
+    if ($HybridAd) {
+        # the AD groups the worker keeps in sync: its sync memory (pim.Settings 'HybridAdSyncMemory.<job>.<bucket>', '$.g' = one
+        # entry per AD group). No memory record at all = the worker never ran = left out.
+        $q['hybridAdGroups'] = "SELECT CASE WHEN COUNT(*) = 0 THEN NULL ELSE COUNT_BIG(DISTINCT j.[key]) END AS n FROM pim.Settings s OUTER APPLY OPENJSON(CASE WHEN ISJSON(s.ValueJson) = 1 THEN s.ValueJson END, '$.g') j WHERE s.Name LIKE N'HybridAdSyncMemory.%'"
+        # the servers the worker lists (pim.TenantCache 'ad-servers' items); no list = left out
+        $q['hybridServers']  = "SELECT (SELECT COUNT_BIG(*) FROM OPENJSON(CASE WHEN ISJSON(t.ValueJson) = 1 THEN t.ValueJson END, '$.items')) AS n FROM pim.TenantCache t WHERE t.Kind = N'ad-servers' AND ISJSON(t.ValueJson) = 1"
+    }
+    return $q
+}
+
+function Get-PimUplinkAdoptionCounts {
+    <#
+      PIM 100.128. Runs each adoption query on its own (one unreadable source never hides the others) and returns
+      @{ key = [long] } with ONLY the readable keys ($null when none was). -Query { param($Name, $Sql) } returns the scalar
+      (the job binds Invoke-PimSqlScalar on the store's MI connection; tests pass a stub over seeded data). A throw, NULL /
+      DBNull, a non-number or a negative = that key LEFT OUT. Never throws.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Query, [switch]$MspMaster, [switch]$HybridAd)
+    $out = @{}
+    try {
+        $qs = Get-PimUplinkAdoptionQueries -MspMaster:$MspMaster -HybridAd:$HybridAd
+        foreach ($k in @($qs.Keys)) {
+            $v = $null
+            try { $v = & $Query "$k" "$($qs[$k])" } catch { continue }
+            $v = @($v) | Select-Object -First 1
+            if ($null -ne $v -and -not ($v -is [System.DBNull]) -and -not ($v -is [string]) -and -not ($v -is [ValueType])) { $v = Get-PimUplinkField $v 'n' }
+            if ($null -eq $v -or $v -is [System.DBNull]) { continue }
+            $n = 0L
+            if (-not [long]::TryParse("$v", [System.Globalization.NumberStyles]::Integer, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$n) -or $n -lt 0) { continue }
+            $out["$k"] = $n
+        }
+    } catch { }
+    if ($out.Count -eq 0) { return $null }
+    return $out
+}
+
 function Get-PimUplinkField {
     # A property of a PSCustomObject / DataRow-like object or a dictionary, $null when absent (PIM-Uplink.ps1 stands alone).
     param([AllowNull()][object]$Object, [string]$Name)
@@ -1011,6 +1096,9 @@ function Invoke-PimUplinkCycle {
           # framework 8.11 ASSET-COUNTS (owner 2026-10-10): @{ users; guests; servicePrincipals } the tick recorded
           # (pim.Settings 'TenantObjectCounts') -> the IDENTIFIED heartbeat's Counts; a missing / non-number key is left out.
           [AllowNull()][hashtable]$AssetCounts = $null,
+          # PIM 100.128: { } -> @{ key = [long] } (Get-PimUplinkAdoptionCounts). INVOKED ONLY when the IDENTIFIED heartbeat is
+          # due (once an hour), never otherwise; its keys join the heartbeat's Counts (an existing key is never overwritten).
+          [AllowNull()][scriptblock]$AdoptionCounts = $null,
           # PIM 100.56 / framework 8.9 ENDPOINTS: [ { kind; url; label? } ] (Get-PimUplinkEndpoints) -> the IDENTIFIED heartbeat's
           # Endpoints, checked entry by entry (Select-PimUplinkEndpoints); the manager url is also the base of every guard's Link.
           [AllowNull()][object[]]$Endpoints = @(),
@@ -1137,6 +1225,20 @@ function Invoke-PimUplinkCycle {
                 if ($AssetCounts.ContainsKey($k) -and $null -ne $AssetCounts[$k] -and [long]::TryParse("$($AssetCounts[$k])", [ref]$n) -and $n -ge 0) {
                     if ($null -eq $hbCounts) { $hbCounts = @{} }
                     $hbCounts[$k] = $n
+                }
+            }
+        }
+        if ($sender.Mode -eq 'identified' -and $AdoptionCounts) {
+            # PIM 100.128: computed here, once per heartbeat; a failure leaves every adoption key out, never the heartbeat.
+            $ad = $null; try { $ad = & $AdoptionCounts } catch { $ad = $null }
+            $ad = @($ad | Where-Object { $_ -is [System.Collections.IDictionary] }) | Select-Object -First 1
+            if ($ad) {
+                foreach ($k in (Get-PimUplinkAdoptionCountKeys)) {
+                    $n = 0L
+                    if ($ad.Contains($k) -and $null -ne $ad[$k] -and [long]::TryParse("$($ad[$k])", [ref]$n) -and $n -ge 0) {
+                        if ($null -eq $hbCounts) { $hbCounts = @{} }
+                        if (-not $hbCounts.ContainsKey($k)) { $hbCounts[$k] = $n }
+                    }
                 }
             }
         }
@@ -1517,13 +1619,22 @@ function Invoke-PimUplinkJob {
         $scRole = Resolve-PimUplinkScenarioRole -GetSetting $get
         if ($scRole -eq 'msp-managed') { try { $mgTid = "$(& $get 'MspManagingTenantId')".Trim() } catch { $mgTid = '' } }
     }
+    # PIM 100.128: the adoption counts -- a PLAIN scriptblock (dynamic scope: $cs / $adMsp / $adHy), invoked by the cycle ONLY
+    # when the identified heartbeat is due, so the COUNT queries run once an hour at most. Identified only (needs the key).
+    $adoption = $null
+    if ($on -and "$key".Trim() -and (Get-Command Invoke-PimSqlScalar -ErrorAction SilentlyContinue)) {
+        $adMsp = ($scRole -eq 'msp-master')
+        $adHy = $true
+        try { if (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) { $adHy = [bool](Test-PimFeatureAvailable -Key 'hybrid.ad' -Quiet) } } catch { $adHy = $false }
+        $adoption = { Get-PimUplinkAdoptionCounts -Query { param($n, $s) Invoke-PimSqlScalar -ConnectionString $cs -Sql $s } -MspMaster:$adMsp -HybridAd:$adHy }
+    }
     if ($on) {
         try { $ef = & $get 'EngineItemFailures'; if ($ef -is [string] -and "$ef".Trim()) { $ef = $ef | ConvertFrom-Json }; $engFails = @(@($ef) | Where-Object { $null -ne $_ }) } catch { $engFails = @() }
         $updRun = ConvertTo-PimUplinkUpdateRun -UpdateState $us
     }
     $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
             -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $(if ($WhatIf) { 0 } else { 2500 }) `
-            -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints `
+            -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints -AdoptionCounts $adoption `
             -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun
     # PIM 100.75: a failed send / an install that should be identified but is anonymous = a WARNING run (never a failure).
     $rawKey = ''; try { $rawKey = "$(& $get 'InvardiaInstallKey')".Trim() } catch { $rawKey = '' }
