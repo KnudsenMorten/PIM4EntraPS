@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.617 -- 2026-10-13
+
+- Group deletion has a switch: Settings > Approvals & policy > Group deletion, for a SuperAdmin, with a confirmation that says how many groups will be deleted; the texts that pointed at a menu that does not exist point at it; a group marked for deletion shows as waiting to be deleted, with the reason
+
 ## 2.4.616 -- 2026-10-13
 
 - Invardia Support keeps its access to the database: when a Support app is named, the install gives it its own database user and adds it to the SQL admin group, the end-of-install check says whether that is in place, and one script (Grant-PimSupportSqlAccess.ps1) gives an existing installation the same

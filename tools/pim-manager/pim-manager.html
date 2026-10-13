@@ -8898,7 +8898,7 @@
   const SETTINGS_CATEGORIES = [
     { key: 'naming',    label: 'Naming & accounts',      match: ['setEnvNameHost', 'setAdminDomainHost', 'setHideNamesHost','setGroupNamingCard', /admin name prefixes/i, /naming conventions/i, /naming words/i, /^filters/i] },
     { key: 'features',  label: 'Features & edition',     match: ['setFeaturesCard', 'setDemoModeHost', 'setGovPreviewCard', 'setLicenceCard', 'setEditionCard', 'setScenarioCard', 'setFeatureGatesCard'] },
-    { key: 'approvals', label: 'Approvals & policy',     match: ['setSelfApproveHost', 'setOpPolicyCard'] },
+    { key: 'approvals', label: 'Approvals & policy',     match: ['setSelfApproveHost', 'setGroupRetirementHost', 'setOpPolicyCard'] },   // PIM 100.117: Group deletion
     { key: 'automation', label: 'Automation',            match: ['setAutomationHost'] },   // §100.49: auto-extend policy
     { key: 'rings',     label: 'Deployment rings',       match: ['setRingsHost'] },
     { key: 'mail',      label: 'Mail & alerting',        match: ['setMailTransportCard', 'setEmailControlsCard', 'setAlertingCard', 'setPendingRemindersCard'] },   // §100.57: Reminders: what waits on you
@@ -9099,6 +9099,7 @@
     h += `<div id="setRfaBrandingHost"></div>`;   // operator 2026-10-05: the portal's company name + support e-mail
     h += `<div id="setRfaBrokerHost"></div>`;   // §82/§90: RFA broker & API (Pro; SuperAdmin)
     h += `<div id="setSelfApproveHost"></div>`;   // single-administrator tenants: allow self-approval (SuperAdmin)
+    h += `<div id="setGroupRetirementHost"></div>`;   // PIM 100.117: the group-deletion switch the engine reads (SuperAdmin)
     h += `<div id="setAutomationHost"></div>`;   // §100.49: the global auto-extend policy (moved here from My people)
     // §91.2 (operator 2026-10-02): the deployment rings are also defined HERE (managing tenant only; the card removes itself elsewhere)
     h += `<div id="setRingsHost" class="set-card" style="font-size:12.5px;"></div>`;
@@ -9369,6 +9370,7 @@
     renderRfaBrandingSection(document.getElementById('setRfaBrandingHost'));
     renderRfaBrokerSection(document.getElementById('setRfaBrokerHost'));
     renderSelfApproveSection(document.getElementById('setSelfApproveHost'));
+    renderGroupRetirementSection(document.getElementById('setGroupRetirementHost'));
     renderAutoExtendSettingsSection(document.getElementById('setAutomationHost'));
     pimTenantMode().then(() => { const rh = document.getElementById('setRingsHost'); if (!rh) return; if (pimIsMspMaster()) renderDeploymentRingsCard(rh); else rh.remove(); }).catch(() => { });
 
@@ -11489,6 +11491,173 @@
       const m = document.getElementById('selfApproveMsg');
       try { const r = await api('PUT', '/api/settings/approval-self-approve', { enabled: cb.checked }); if (m) { m.textContent = r.note || 'Saved.'; m.style.color = '#1a7f37'; } renderSelfApproveSection(host); }
       catch (e) { if (m) { m.textContent = e.message || String(e); m.style.color = '#cf222e'; } cb.checked = !cb.checked; }
+    };
+  }
+
+  // ----- Settings: group deletion (PIM 100.117) --------------------------------------------------------------------------
+  // Owner 2026-10-13: "we dont see the view in settings". Three texts sent an administrator to "Settings > Feature gates >
+  // EnableGroupRetirement" -- a switch that did not exist; a group marked Retire then waited for ever. The switch is here
+  // now: GET / PUT /api/settings/group-retirement reads and writes the setting the engine reads. Everything below says only
+  // what the server could read from the store (the state in effect and where it comes from, how many groups are marked
+  // Retire, the removal guard's own numbers); what it cannot read (the engine job's environment) is said, not guessed.
+  var PIM_GROUP_RETIRE = null, PIM_GROUP_RETIRE_AT = 0, PIM_GROUP_RETIRE_P = null;   // var: the grid and the dialogs read it
+  var PIM_GROUP_RETIRE_PLACE = 'Settings > Approvals & policy > Group deletion';
+  // The state, read at most every 30 s unless forced. Resolves null when it cannot be read -- never a guessed state.
+  function pimGroupRetireLoad(force) {
+    if (typeof isServer === 'undefined' || !isServer) return Promise.resolve(null);
+    if (!force && PIM_GROUP_RETIRE_AT && (Date.now() - PIM_GROUP_RETIRE_AT) < 30000) return Promise.resolve(PIM_GROUP_RETIRE);
+    if (PIM_GROUP_RETIRE_P) return PIM_GROUP_RETIRE_P;
+    PIM_GROUP_RETIRE_P = api('GET', '/api/settings/group-retirement')
+      .then(d => { PIM_GROUP_RETIRE = (d && typeof d.effective === 'string' && d.marked) ? d : null; })
+      .catch(() => { PIM_GROUP_RETIRE = null; })
+      .then(() => { PIM_GROUP_RETIRE_AT = Date.now(); PIM_GROUP_RETIRE_P = null; return PIM_GROUP_RETIRE; });
+    return PIM_GROUP_RETIRE_P;
+  }
+  function pimGroupRetirePlace(st) { return String((st && st.place) || PIM_GROUP_RETIRE_PLACE); }
+  // PURE: why a group marked Retire is still there, and what happens next. kind = 'off' | 'on' | 'unknown'.
+  function pimGroupRetireWait(st) {
+    const place = pimGroupRetirePlace(st);
+    if (!st) return { kind: 'unknown', text: 'Whether group deletion is switched on could not be read from here, so it is not known when these groups are deleted. The switch is under ' + place + '.' };
+    const job = String(st.job || 'full-reconcile');
+    let kind = 'unknown', t;
+    if (st.effective === 'off') { kind = 'off'; t = 'Group deletion is switched off (' + String(st.text || 'off') + '), so nothing is deleted. A SuperAdmin switches it on under ' + place + '.'; }
+    else if (st.effective === 'on') { kind = 'on'; t = 'Group deletion is on (' + String(st.text || 'on') + '). The groups wait for the next full engine run: the job ' + job + ', which runs daily.'; }
+    else t = 'Whether group deletion is on is not known (' + String(st.text || 'not read') + '). The switch is under ' + place + '.';
+    if (st.envNote) t += ' ' + String(st.envNote);
+    const gs = st.lastGuardStop;
+    if (kind === 'on' && gs && gs.atUtc) t += ' The removal guard stopped a group-deletion run on ' + fmtTime(gs.atUtc) + ' (' + (Number(gs.held) || 0) + ' deletion(s) held back; that run deleted no group).';
+    return { kind: kind, text: t };
+  }
+  // PURE: what the removal guard does with `total` groups marked Retire -- '' when that is within one run, or when the
+  // guard's numbers are not known. Both numbers come from the server, which reads them from the guard's own code.
+  function pimGroupRetireLimitText(st, total) {
+    const lim = (st && st.limits) || {};
+    const b = lim.budget, c = lim.releaseCeiling;
+    if (typeof b !== 'number' || !(Number(total) > b)) return '';
+    let t = total + ' groups are marked Retire. The removal guard lets the engine delete at most ' + b + ' groups in one run; when more marked groups than that still exist, the run deletes NONE of them.';
+    if (lim.releasable) {
+      t += ' A SuperAdmin can release exactly that plan for one run under Operations > Guards' +
+        (typeof c === 'number' ? '; one release covers at most ' + c + (total > c ? ', so one release cannot cover these ' + total : '') : '') + '.';
+    } else {
+      t += ' A release under Operations > Guards does not cover group deletion' +
+        (typeof c === 'number' ? ' (where a release applies, it covers at most ' + c + ' in one run' + (total > c ? ' -- ' + total + ' is over that as well' : '') + ')' : '') +
+        '. Delete them at most ' + b + ' at a time: mark ' + b + ', let the full run delete them, then mark the next.';
+    }
+    return t;
+  }
+  // The groups marked Retire once `extra` more are marked: the store's count per record type, and for a record type that
+  // is open here what is staged in it instead. null = the store's count is not known.
+  function pimGroupRetireTotal(st, extra) {
+    const m = st && st.marked;
+    if (!m || !m.known) return null;
+    const by = m.byEntity || {};
+    const isRetire = r => !!String((r && r.GroupName) || '').trim() && /^retire/i.test(String((r && r.Lifecycle) || '').trim());
+    let n = 0; const open = {};
+    Object.keys(pendingChanges || {}).forEach(b => {
+      const p = pendingChanges[b];
+      if (!p || !p.rows || PIM_GROUP_DEF_ENTITIES.indexOf(b) < 0) return;
+      open[b] = true;
+      p.rows.forEach((r, i) => { if (!(p.deletes && p.deletes.has(i)) && isRetire(r)) n++; });
+    });
+    Object.keys(by).forEach(b => { if (!open[b]) n += Number(by[b]) || 0; });
+    return n + (Number(extra) || 0);
+  }
+  function pimGroupRetireGoJobs(ev) { if (ev) ev.preventDefault(); switchTab('jobs'); }
+  function pimGroupRetireGoSwitch(ev) { if (ev) ev.preventDefault(); switchTab('settings'); setTimeout(function () { showSettingsSection('setGroupRetirementHost'); }, 600); }
+  // PURE over what is staged: the rows of a group record type that are marked Retire -- committed (the stored row already
+  // says Retire) or only staged here. Rows taken out are left out.
+  function pimGridRetireRows(base, p) {
+    const out = { committed: [], staged: [] };
+    if (!p || !p.rows || PIM_GROUP_DEF_ENTITIES.indexOf(base) < 0) return out;
+    const isRetire = r => !!String((r && r.GroupName) || '').trim() && /^retire/i.test(String((r && r.Lifecycle) || '').trim());
+    const was = new Set((p.baseline || []).filter(isRetire).map(r => String(r.GroupName).trim().toLowerCase()));
+    p.rows.forEach((r, i) => {
+      if ((p.deletes && p.deletes.has(i)) || !isRetire(r)) return;
+      (was.has(String(r.GroupName).trim().toLowerCase()) ? out.committed : out.staged).push(i);
+    });
+    return out;
+  }
+  // The note above a group table that has rows marked Retire: waiting to be deleted, why (only what the store says), the
+  // job that deletes them and the way to it. '' when no row is marked.
+  function pimGridRetireBannerHtml(base, p) {
+    const rr = pimGridRetireRows(base, p);
+    const nC = rr.committed.length, nS = rr.staged.length;
+    if (!nC && !nS) return '';
+    const esc = escapeHtml;
+    const st = PIM_GROUP_RETIRE;
+    const w = nC ? (PIM_GROUP_RETIRE_AT ? pimGroupRetireWait(st) : { kind: 'reading', text: 'Reading whether group deletion is switched on...' }) : { kind: 'staged', text: '' };
+    let h = '<div id="gridRetireBanner" class="grid-retire-banner" data-kind="' + w.kind + '" data-waiting="' + nC + '" data-staged="' + nS + '" style="margin:4px 0 8px;padding:6px 10px;border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;font-size:12px;line-height:1.5;">';
+    if (nC) {
+      const total = PIM_GROUP_RETIRE_AT ? pimGroupRetireTotal(st, 0) : null;
+      const lim = total === null ? '' : pimGroupRetireLimitText(st, total);
+      h += '<b>' + nC + ' group' + (nC === 1 ? ' here is' : 's here are') + ' marked Retire and waiting to be deleted in Microsoft Entra ID.</b> ' + esc(w.text) +
+        ' <a href="#" id="gridRetireJobs">Open Jobs</a> (Run now on <code>' + esc(String((st && st.job) || 'full-reconcile')) + '</code>) &middot; <a href="#" id="gridRetireSwitch">Open the switch</a>.' +
+        (lim ? '<br><span id="gridRetireLimit" style="color:#7d4e00;">' + esc(lim) + '</span>' : '') +
+        '<br><span style="color:#57606a;">When a group is gone from Microsoft Entra ID its row stays here, still marked Retire: take the row out then (the x) to finish. Taking the row out earlier leaves the group in Entra ID.</span>';
+    }
+    if (nS) h += (nC ? '<br>' : '') + '<b>' + nS + ' group' + (nS === 1 ? ' is' : 's are') + ' staged as Retire here and not committed yet.</b> Nothing happens to ' + (nS === 1 ? 'it' : 'them') + ' until you commit under Pending changes.';
+    return h + '</div>';
+  }
+  function pimGridRetireBannerBind() {
+    const j = document.getElementById('gridRetireJobs'); if (j) j.onclick = pimGroupRetireGoJobs;
+    const s = document.getElementById('gridRetireSwitch'); if (s) s.onclick = pimGroupRetireGoSwitch;
+  }
+  async function renderGroupRetirementSection(host) {
+    if (!host || !isServer) return;
+    const esc = escapeHtml;
+    const st = await pimGroupRetireLoad(true);
+    const head = '<div class="set-card" id="setGroupRetirement"><h3 style="margin:0 0 4px;font-size:14px;">Group deletion</h3>' +
+      '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">A group whose definition is marked Retire -- by the bin on a group row, or by &quot;Remove all delegations, delete the group(s)&quot; -- ' +
+      'is deleted in Microsoft Entra ID only while this is on. The engine reads the switch at its full run (the job <code>full-reconcile</code>, daily).</div>';
+    if (!st) {
+      host.innerHTML = head + '<div id="groupRetireState" style="color:#cf222e;font-size:12px;">The state of the switch could not be read, so it is not shown and cannot be changed from here right now.</div>' + settingInfoBtn('EnableGroupRetirement') + '</div>';
+      return;
+    }
+    // the box shows what applies without the environment: the stored value, or the default of this kind of tenant
+    const boxOn = st.stored === 'on' || (st.stored === 'unset' && st.tenantClass === 'test');
+    const canFlip = !!st.canWrite && st.stored !== 'unknown';
+    const m = st.marked || {};
+    const total = m.known ? (Number(m.total) || 0) : null;
+    const wait = pimGroupRetireWait(st);
+    const limit = total === null ? '' : pimGroupRetireLimitText(st, total);
+    host.innerHTML = head +
+      '<label style="font-weight:normal;"><input type="checkbox" id="groupRetireOn"' + (boxOn ? ' checked' : '') + (canFlip ? '' : ' disabled') + '> Delete the groups marked Retire in Microsoft Entra ID</label>' + settingInfoBtn('EnableGroupRetirement') +
+      '<div id="groupRetireState" data-effective="' + esc(String(st.effective)) + '" data-source="' + esc(String(st.source)) + '" style="font-size:12px;margin-top:4px;">In effect: <b>' + esc(String(st.text || '')) + '</b></div>' +
+      (st.envNote ? '<div id="groupRetireEnvNote" style="color:#57606a;font-size:11.5px;margin-top:2px;">' + esc(String(st.envNote)) + '</div>' : '') +
+      '<div id="groupRetireMarked" style="font-size:12px;margin-top:6px;">' + (total === null
+        ? 'Marked Retire right now: <b>not counted</b> -- the store could not be read (' + esc(String(m.error || '')) + ').'
+        : 'Marked Retire right now: <b>' + total + '</b> group' + (total === 1 ? '' : 's') + '.') + '</div>' +
+      (total ? '<div id="groupRetireNext" style="font-size:12px;margin-top:2px;">' + esc(wait.text) + ' <a href="#" id="groupRetireJobs">Open Jobs</a> to start it with Run now.</div>' : '') +
+      (limit ? '<div id="groupRetireLimit" style="color:#9a6700;font-size:12px;margin-top:2px;">' + esc(limit) + '</div>' : '') +
+      (st.canWrite ? '' : '<div style="color:#8c959f;font-size:11px;margin-top:4px;">Only a SuperAdmin can change this.</div>') +
+      '<div id="groupRetireMsg" style="font-size:12px;margin-top:4px;"></div></div>';
+    const jl = document.getElementById('groupRetireJobs'); if (jl) jl.onclick = pimGroupRetireGoJobs;
+    const cb = document.getElementById('groupRetireOn');
+    if (cb && canFlip) cb.onchange = async function () {
+      const want = cb.checked;
+      const say = (t, bad) => { const el = document.getElementById('groupRetireMsg'); if (el) { el.textContent = t; el.style.color = bad ? '#cf222e' : '#1a7f37'; } };
+      try {
+        let r = null;
+        if (want) {
+          // the confirmation is the server's sentence, with the count it read from the store just now; the server refuses a
+          // switch-on whose count is no longer the one the person saw (409) and hands back the current sentence
+          const cur = (await pimGroupRetireLoad(true)) || st;
+          let text = String(cur.confirmOn || ''), marked = (cur.marked && cur.marked.known) ? cur.marked.total : -1;
+          for (let round = 0; ; round++) {
+            if (!(await pimConfirm({ title: 'Switch on: Group deletion?', body: text, okLabel: 'Switch it on', danger: true }))) { cb.checked = !want; return; }
+            try { r = await api('PUT', '/api/settings/group-retirement', { enabled: true, confirm: true, marked: marked }); break; }
+            catch (e) {
+              if (round < 2 && e && e.status === 409 && e.body && e.body.needsConfirm) { text = String(e.body.confirmText || text); marked = e.body.marked; continue; }
+              throw e;
+            }
+          }
+        } else {
+          r = await api('PUT', '/api/settings/group-retirement', { enabled: false });
+        }
+        PIM_GROUP_RETIRE_AT = 0;
+        await renderGroupRetirementSection(host);
+        say((r && r.note) || 'Saved.', false);
+      } catch (e) { say((e && e.message) || String(e), true); cb.checked = !want; }
     };
   }
 
@@ -23417,6 +23586,10 @@
       </div>
     </div>`);
     html.push(tenantBadgeBar);
+    // PIM 100.117: a group marked Retire is WAITING TO BE DELETED, not a normal row -- the note says why and which job does it.
+    const __retireRows = pimGridRetireRows(base, p);
+    const __retireCommitted = new Set(__retireRows.committed), __retireStaged = new Set(__retireRows.staged);
+    html.push(pimGridRetireBannerHtml(base, p));
 
     // ---- Bulk-action bar (Roadmap #6 + #7) ---------------------------
     // Visible only when one or more rows are selected. The AccountStatus
@@ -23627,7 +23800,13 @@
                 '<button data-act="acct-remove-from-pim" class="row-acct-remove-from-pim" title="REMOVE this admin FROM PIM: every delegation removed, the account DISABLED and KEPT in Entra ID (not deleted), the admin out of the active lists (AccountStatus = Removed). Held for the offboard approval. Staged in Pending changes.">&#x2B07;</button> ')
               : '') +
             '<button data-act="delete" title="Take this ROW out of PIM. The group is NOT deleted and nobody loses access -- PIM simply stops managing it. Use the bin to delete the group itself.">&#x2715;</button>';
-        html.push(`<td class="row-actions row-actions-left">${actHtmlL}</td>`);
+        // PIM 100.117: information, not an error -- it puts no number in the menu.
+        const retireTag = deleted ? '' : __retireCommitted.has(idx)
+          ? ' <span class="row-retire-wait" data-retire="waiting" title="Marked Retire: this group is waiting to be deleted in Microsoft Entra ID. The note above the table says why, and which job deletes it." style="background:#fff8c5;color:#7d4e00;border:1px solid #d4a72c;border-radius:10px;padding:1px 7px;font-size:10.5px;font-weight:600;white-space:nowrap;">waiting to be deleted</span>'
+          : __retireStaged.has(idx)
+            ? ' <span class="row-retire-wait" data-retire="staged" title="Staged as Retire here, not committed yet. Nothing happens to the group until you commit under Pending changes." style="background:#eaeef2;color:#57606a;border-radius:10px;padding:1px 7px;font-size:10.5px;white-space:nowrap;">delete staged, not committed</span>'
+            : '';
+        html.push(`<td class="row-actions row-actions-left">${actHtmlL}${retireTag}</td>`);
       }
       if (showProvenance) {
         const owner = String(row.Owner || row.owner || '').trim().toLowerCase();
@@ -23701,6 +23880,17 @@
       html.push('</tbody></table>');
     }
     main.innerHTML = html.join('');
+    pimGridRetireBannerBind();
+    // PIM 100.117: read the switch when this list has groups waiting to be deleted; only the note above the table is
+    // redrawn when the answer arrives (a full redraw would take a cell being edited away).
+    if (__retireRows.committed.length && isServer && !PIM_GROUP_RETIRE_P && (!PIM_GROUP_RETIRE_AT || (Date.now() - PIM_GROUP_RETIRE_AT) > 30000)) {
+      pimGroupRetireLoad(true).then(() => {
+        const el = document.getElementById('gridRetireBanner');
+        if (!el || currentGridBase !== base || !pendingChanges[base]) return;
+        const fresh = pimGridRetireBannerHtml(base, pendingChanges[base]);
+        if (fresh) { el.outerHTML = fresh; pimGridRetireBannerBind(); }
+      });
+    }
     main.querySelectorAll('th.grid-sort-th').forEach(th => {
       const box = th.querySelector('.grid-th-in');
       let wDown = 0, resized = false;
@@ -26586,10 +26776,18 @@
       px.rows.forEach((r, i) => { if (!px.deletes.has(i) && x.cols.some(c => tagSet.has(lc(r[c])))) hit.push(i); });
       if (hit.length) { plan.push({ base: x.base, idx: hit }); total += hit.length; }
     }
-    let retireOn = null;
+    // PIM 100.117: the switch is read from where it lives (Settings > Approvals & policy > Group deletion), and the removal
+    // guard's limit is said BEFORE the commit, counted over every group that will then be marked Retire.
+    let retireSt = null, retireNote = '';
     if (deleteGroup) {
-      try { const fg = await api('GET', '/api/settings/feature-gates'); const g = (fg && (fg.value || fg)) || {}; const gates = g.gates || g; const v = gates.EnableGroupRetirement;
-            if (v !== undefined && v !== null && v !== '') retireOn = !!(v === true || /^(true|1|yes|on|enabled?)$/i.test(String(v))); } catch (_) { retireOn = null; }
+      retireSt = await pimGroupRetireLoad(true);
+      const w = pimGroupRetireWait(retireSt);
+      const newly = picks.filter(i => !/^retire/i.test(String(p.rows[i].Lifecycle || '').trim())).length;
+      const totalAfter = pimGroupRetireTotal(retireSt, newly);
+      const lim = totalAfter === null ? '' : pimGroupRetireLimitText(retireSt, totalAfter);
+      retireNote = ' <span class="grp-retire-switch" data-kind="' + w.kind + '" style="color:' + (w.kind === 'on' ? '#57606a' : '#cf222e') + ';">' + escapeHtml(w.text) +
+        (w.kind === 'on' ? ' Start it under Jobs with Run now.' : '') + '</span>' +
+        (lim ? ' <span class="grp-retire-limit" style="color:#9a6700;">' + escapeHtml(lim) + '</span>' : '');
     }
     const who = picks.length === 1 ? '<b>' + escapeHtml(names[0]) + '</b>' : '<b>' + picks.length + ' groups</b> (' + names.slice(0, 5).map(escapeHtml).join(', ') + (picks.length > 5 ? ', &hellip;' : '') + ')';
     const lines = plan.map(x => '<li>' + escapeHtml(entityLabel(x.base)) + ': ' + x.idx.length + ' removed</li>').join('') || '<li>no delegation names ' + (picks.length === 1 ? 'it' : 'them') + '</li>';
@@ -26598,7 +26796,7 @@
       '<p>The next engine run takes this access away in Entra ID / Azure.</p>' +
       (deleteGroup
         ? '<p><b>The group' + (picks.length > 1 ? 's are' : ' is') + ' then DELETED in Entra ID</b> (Lifecycle = Retire): its remaining role assignments and members are removed and the group object is deleted. This cannot be undone.' +
-          (retireOn === false ? ' <span style="color:#cf222e;">Automatic group retirement is OFF in this environment (Settings &rsaquo; Feature gates &rsaquo; EnableGroupRetirement), so the delete waits until it is switched on.</span>' : '') + '</p>'
+          retireNote + '</p>'
         : '<p>The group definition stays.</p>') +
       '<p style="color:#57606a;">Nothing is saved yet -- review and commit under <b>Pending changes</b>.</p>';
     const ok = await showConfirm(title, body, true, deleteGroup ? 'Remove delegations and delete' : 'Remove delegations');
@@ -26650,20 +26848,18 @@
 
     // Is automatic retirement actually switched on in this environment? If it is not, the flag is
     // still the right thing to stage -- but saying "deleted" would be a lie, so the wording changes.
-    let retireOn = null;   // null = could not be read
-    try {
-      const fg = await api('GET', '/api/settings/feature-gates');
-      const g = (fg && (fg.value || fg)) || {};
-      const gates = g.gates || g;
-      const v = gates.EnableGroupRetirement;
-      if (v !== undefined && v !== null && v !== '') retireOn = !!(v === true || /^(true|1|yes|on|enabled?)$/i.test(String(v)));
-    } catch (_) { retireOn = null; }
-
-    const willText = (retireOn === true)
-      ? 'The engine will then DELETE it in Entra ID on its next run.'
-      : (retireOn === false)
-        ? 'Automatic group retirement is currently OFF in this environment, so the flag is recorded and NOTHING is deleted until somebody turns it on (Settings > Feature gates > EnableGroupRetirement).'
-        : 'Whether the engine acts on it depends on the group-retirement switch, which could not be read from here (Settings > Feature gates > EnableGroupRetirement).';
+    // PIM 100.117: read from where the switch lives; null = could not be read (said, never guessed).
+    const retireSt = await pimGroupRetireLoad(true);
+    const retireWait = pimGroupRetireWait(retireSt);
+    const retirePlace = pimGroupRetirePlace(retireSt);
+    const retireTotal = pimGroupRetireTotal(retireSt, /^retire/i.test(String(row.Lifecycle || '').trim()) ? 0 : 1);
+    const retireLimit = retireTotal === null ? '' : pimGroupRetireLimitText(retireSt, retireTotal);
+    const willText = ((retireWait.kind === 'on')
+      ? 'The engine will then DELETE it in Entra ID on its next full run (the job ' + String(retireSt.job || 'full-reconcile') + ', daily -- or start it under Jobs with Run now). ' + retireWait.text
+      : (retireWait.kind === 'off')
+        ? 'The mark is recorded and NOTHING is deleted yet. ' + retireWait.text
+        : 'Whether the engine acts on it depends on the group-deletion switch (' + retirePlace + '). ' + retireWait.text) +
+      (retireLimit ? '\n\n' + retireLimit : '');
     const notCovered = live.checked ? '' :
       '\n\nNote: the live check could not run (' + live.reason + '), so this is based on the delegation rows only.';
     const ok = window.confirm('DELETE the group "' + name + '" in Entra ID?\n\n' +

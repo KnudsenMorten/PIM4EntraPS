@@ -1103,6 +1103,40 @@ off unless opted in) and the engine's **ownership-by-name** rule — a group who
 with the tenant's managed prefix is refused, because the engine cannot prove it owns it. The removal
 budget applies on top.
 
+**The switch is a setting an administrator can see.** *Settings > Approvals & policy > Group deletion*
+reads and writes the same store setting the engine reads (`EnableGroupRetirement`, JSON `true` /
+`false`) through `GET` / `PUT /api/settings/group-retirement`. Changing it needs the SuperAdmin role
+and is audited; everybody else sees it read-only. The card shows the state **in effect** and where
+it comes from, and keeps "not set" apart from "off":
+
+| the card says | meaning |
+|---|---|
+| `on (set here)` / `off (set here)` | a SuperAdmin chose it |
+| `off -- not set; this is a production tenant` | nobody chose; the default of a production tenant |
+| `on -- not set; this is a test tenant` | nobody chose; the default of a tenant named as a test tenant |
+| `set by the engine's environment (...), which wins over this setting` | shown where PIM Manager runs with the engine's environment |
+| `not known -- ...` | the store could not be read; nothing is assumed |
+
+In a hosted installation the engine job is a separate container, so PIM Manager cannot read that
+job's environment; the card says so in one line instead of guessing. Switching it **on** asks for
+confirmation with the server's own sentence -- the engine will delete, in Microsoft Entra ID, every
+group marked Retire on its next full run, this cannot be undone, and **how many groups are marked
+Retire right now** (counted from the store). The server refuses a switch-on that does not carry the
+confirmation and that count, so a count that changed while the question was open is asked again.
+
+**What happens next is on the page.** A group row whose stored definition is marked Retire carries
+*waiting to be deleted*, and a note above the table says how many, why (the switch is off, or they
+wait for the next full run, or the switch could not be read), names the job that deletes them (the
+daily full run, `full-reconcile`) with a link to Jobs, and says what is left afterwards: the row
+stays, still marked Retire, until an administrator takes it out. A mark that is staged but not yet
+committed is shown as staged. This is information, so it puts no number in the menu.
+
+**The removal budget is said before the commit.** When more groups are (or would be) marked Retire
+than one run may delete, the delete dialogs, the card and the note say so: over the budget a run
+deletes none of them, and a guard release does not cover group deletion, so groups are deleted a
+budget's worth at a time. The numbers shown are read from the guard's own functions at run time;
+the page carries no copy of them, and nothing in this view can change a guard.
+
 🪤 `Lifecycle` is on the **defaultHeader of every group-definition entity**. In SQL mode that header
 *is* the grid, so before 2.4.414 the flag could not be set, seen or cleared from any screen — the one
 act the product has that deletes a group was unreachable, which is why it read as missing.
