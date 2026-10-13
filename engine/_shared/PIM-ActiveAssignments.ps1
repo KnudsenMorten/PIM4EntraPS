@@ -189,6 +189,177 @@ function ConvertTo-PimActiveAssignmentsSnapshotJson {
     return $sb.ToString()
 }
 
+# ===========================================================================
+# REQ 100.114 (2) / 100.110 -- THE ROWS IN A TABLE (pim.ActiveAssignmentRows, engine/_shared/PIM-SqlStore.ps1)
+# ===========================================================================
+function ConvertTo-PimActiveAssignmentsRowJson {
+    # PURE. ONE snapshot row (an ordered dictionary, or an object) as compact JSON -- the same text the one-document
+    # serialiser writes for that row (same keys, order and values).
+    # -KeyCache: the quoted field names, kept by the caller across the rows of one snapshot (every row has the same few).
+    param([Parameter(Mandatory)][AllowNull()][object]$Row, [hashtable]$KeyCache = $null)
+    if ($null -eq $Row) { return 'null' }
+    if ($null -eq $KeyCache) { $KeyCache = @{} }
+    $sb = New-Object System.Text.StringBuilder 512
+    [void]$sb.Append('{')
+    $first = $true
+    $isDict = ($Row -is [System.Collections.IDictionary])
+    $names = if ($isDict) { @($Row.Keys) } else { @(foreach ($pp in $Row.PSObject.Properties) { $pp.Name }) }
+    foreach ($fk in $names) {
+        if (-not $first) { [void]$sb.Append(',') }
+        $first = $false
+        $kq = $KeyCache[$fk]
+        if ($null -eq $kq) { $kq = (ConvertTo-PimActiveAssignmentsJsonString -Value ([string]$fk)) + ':'; $KeyCache[$fk] = $kq }
+        [void]$sb.Append($kq)
+        $fv = if ($isDict) { $Row[$fk] } else { $Row.$fk }
+        if ($null -eq $fv) { [void]$sb.Append('null') }
+        elseif (($fv -is [string]) -and ($fv -notmatch '[\x00-\x1f"\\]')) { [void]$sb.Append('"').Append($fv).Append('"') }
+        else { [void]$sb.Append((ConvertTo-PimActiveAssignmentsJsonString -Value $fv)) }
+    }
+    [void]$sb.Append('}')
+    return $sb.ToString()
+}
+
+function ConvertTo-PimActiveAssignmentsStoreValues {
+    <#
+      PURE. One snapshot row -> the values of its table row (pim.ActiveAssignmentRows), each cut to its column's length:
+      the columns the page filters and sorts on, the row's MANAGED identity (Get-PimActiveRowIdentity), the lower-cased
+      text the page's search looks in (principal id, principal, role, scope, justification) and the whole row as JSON.
+      Dates that cannot be read are stored as no date (the row's own text stays in RowJson).
+    #>
+    param([Parameter(Mandatory)][object]$Row, [hashtable]$KeyCache = $null)
+    # (written without helper script blocks: this runs once per row of a snapshot of tens of thousands)
+    $names = @('id', 'type', 'principal', 'principalId', 'principalKind', 'principalUpn', 'role', 'scope', 'groupId', 'start', 'end', 'justification', 'accessId', 'roleDefinitionId', 'directoryScopeId')
+    $val = @{}
+    if ($Row -is [System.Collections.IDictionary]) { foreach ($n in $names) { if ($Row.Contains($n)) { $val[$n] = $Row[$n] } } }
+    else { foreach ($n in $names) { $p = $Row.PSObject.Properties[$n]; if ($p) { $val[$n] = $p.Value } } }
+    $limit = @{ id = 900; type = 40; principal = 400; principalId = 100; principalKind = 40; principalUpn = 400; role = 400; scope = 400; groupId = 100; justification = 400 }
+    $cut = @{}
+    foreach ($n in @($limit.Keys)) {
+        $v = $val[$n]
+        if ($null -eq $v) { $cut[$n] = $null; continue }
+        $s = [string]$v
+        if ($s.Length -gt $limit[$n]) { $s = $s.Substring(0, $limit[$n]) }
+        $cut[$n] = $s
+    }
+    $dates = @{}
+    $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+    foreach ($n in 'start', 'end') {
+        $v = $val[$n]; $dates[$n] = $null
+        if ($null -eq $v) { continue }
+        if ($v -is [datetime]) { $dates[$n] = $v.ToUniversalTime(); continue }
+        $s = ([string]$v).Trim(); if (-not $s) { continue }
+        $d = [datetime]::MinValue
+        if ([datetime]::TryParse($s, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$d) -and $d.Year -ge 1753) { $dates[$n] = $d }
+    }
+    $search = ([string]$val['principalId'] + "`n" + [string]$val['principal'] + "`n" + [string]$val['role'] + "`n" + [string]$val['scope'] + "`n" + [string]$val['justification']).ToLowerInvariant()
+    if ($search.Length -gt 4000) { $search = $search.Substring(0, 4000) }
+    $kind = ([string]$val['type']).Trim(); if (-not $kind) { $kind = '(none)' }; if ($kind.Length -gt 40) { $kind = $kind.Substring(0, 40) }
+    # the MANAGED identity (the rule of Get-PimActiveRowIdentity, from the values already read)
+    $idKey = ''
+    switch ($kind) {
+        'pim-for-groups' { $idKey = ConvertTo-PimManagedIdentity -Kind 'g' -PrincipalId ([string]$val['principalId']) -GroupId ([string]$val['groupId']) -AccessId ([string]$val['accessId']) }
+        'entra-role'     { $idKey = ConvertTo-PimManagedIdentity -Kind 'r' -PrincipalId ([string]$val['principalId']) -RoleDefinitionId ([string]$val['roleDefinitionId']) -Scope ([string]$val['directoryScopeId']) }
+        'azure-rbac'     { $idKey = ConvertTo-PimManagedIdentity -Kind 'a' -PrincipalId ([string]$val['principalId']) -RoleDefinitionId ([string]$val['roleDefinitionId']) -Scope ([string]$val['scope']) }
+    }
+    if ($idKey.Length -gt 450) { $idKey = $idKey.Substring(0, 450) }
+    return [ordered]@{
+        RowId         = $cut['id']
+        Kind          = $kind
+        Principal     = $cut['principal']
+        PrincipalId   = $cut['principalId']
+        PrincipalKind = $cut['principalKind']
+        PrincipalUpn  = $cut['principalUpn']
+        Role          = $cut['role']
+        Scope         = $cut['scope']
+        GroupId       = $cut['groupId']
+        StartUtc      = $dates['start']
+        EndUtc        = $dates['end']
+        Justification = $cut['justification']
+        IdentityKey   = $idKey
+        SearchText    = $search
+        RowJson       = (ConvertTo-PimActiveAssignmentsRowJson -Row $Row -KeyCache $KeyCache)
+    }
+}
+
+function ConvertTo-PimActiveAssignmentsHeaderJson {
+    <#
+      PURE. The pim.TenantCache 'active-assignments' document of a TABLE-form snapshot: the entry WITHOUT its rows, with
+      rowStore / snapshotId / rowCount FIRST (the store reads the form and the generation from the first characters).
+    #>
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Entry, [Parameter(Mandatory)][long]$SnapshotId, [Parameter(Mandatory)][int]$RowCount)
+    $head = [ordered]@{}
+    foreach ($k in @($Entry.Keys)) { if ("$k" -ne 'rows' -and "$k" -ne 'rowStore' -and "$k" -ne 'snapshotId' -and "$k" -ne 'rowCount') { $head[$k] = $Entry[$k] } }
+    $inner = ConvertTo-PimActiveAssignmentsSnapshotJson -Entry $head
+    $lead = '{"rowStore":"table","snapshotId":' + $SnapshotId.ToString([System.Globalization.CultureInfo]::InvariantCulture) + ',"rowCount":' + $RowCount.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    if ($inner.Length -le 2) { return $lead + '}' }
+    return $lead + ',' + $inner.Substring(1)
+}
+
+function Save-PimActiveAssignmentsSnapshotRows {
+    <#
+      Store one snapshot in the TABLE form: a new generation of rows in pim.ActiveAssignmentRows, written in batches of
+      Get-PimActiveAssignmentRowsBatchSize (each its own transaction, with a command timeout and a retry on a transient
+      error -- engine/_shared/PIM-SqlStore.ps1), then ONE transaction that checks the row count and switches the
+      pim.TenantCache header to the new generation.
+        .stored = $true   the snapshot is stored ({ where; rows; batches; retries; seconds; snapshotId })
+        .stored = $false  NOTHING was written and the caller keeps the one-document form: the row store is not loaded in
+                          this process, there is no SQL store, or the table is not there and could not be created
+                          (.reason; .said = worth a line in the job's detail)
+      THROWS when the table is there and a write fails: the header still names the previous generation, whose rows are
+      untouched -- the previous complete snapshot stays in place and readable.
+      -Writer / -Sleep: test seams, passed to Invoke-PimSqlActiveAssignmentBatchWrite.
+    #>
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Entry, [string]$ConnectionString = '', [scriptblock]$Writer = $null, [scriptblock]$Sleep = $null)
+    $no = { param($why, $said) [pscustomobject]@{ stored = $false; reason = "$why"; said = [bool]$said; where = ''; rows = 0; batches = 0; retries = 0; seconds = 0; snapshotId = [long]0 } }
+    foreach ($fn in 'Initialize-PimSqlActiveAssignmentRows', 'Start-PimSqlActiveAssignmentSnapshot', 'Invoke-PimSqlActiveAssignmentBatchWrite', 'Complete-PimSqlActiveAssignmentSnapshot', 'New-PimSqlActiveAssignmentRowTable') {
+        if (-not (Get-Command $fn -ErrorAction SilentlyContinue)) { return (& $no 'the row store is not loaded in this process' $false) }
+    }
+    if (-not "$ConnectionString".Trim() -and (Get-Command Get-PimTenantCacheStoreCs -ErrorAction SilentlyContinue)) { $ConnectionString = "$(Get-PimTenantCacheStoreCs)" }
+    if (-not "$ConnectionString".Trim()) { return (& $no 'no SQL store in this process' $false) }
+    $ddl = Initialize-PimSqlActiveAssignmentRows -ConnectionString $ConnectionString
+    if (-not $ddl.ok) { return (& $no "the table pim.ActiveAssignmentRows is not there and could not be created: $($ddl.error)" $true) }
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $rows = @(); if ($null -ne $Entry['rows']) { $rows = @($Entry['rows']) }   # a reference per row, never a copy of the rows
+    $total = $rows.Count
+    $gen = Start-PimSqlActiveAssignmentSnapshot -ConnectionString $ConnectionString -ExpectedRows $total
+    $sid = [long]$gen.snapshotId
+    $size = Get-PimActiveAssignmentRowsBatchSize
+    $batches = 0; $retries = 0; $seq = 0; $written = 0
+    $table = New-PimSqlActiveAssignmentRowTable
+    $keyCache = @{}
+    if ($total -gt 0) {
+        $e = ([System.Collections.IEnumerable]$rows).GetEnumerator()
+        $more = $e.MoveNext()
+        while ($more -or $table.Rows.Count -gt 0) {
+            if ($more) {
+                $row = $e.Current
+                $more = $e.MoveNext()
+                if ($null -ne $row) {
+                    $v = ConvertTo-PimActiveAssignmentsStoreValues -Row $row -KeyCache $keyCache
+                    $dr = $table.NewRow()
+                    $dr['SnapshotId'] = $sid; $dr['Seq'] = $seq
+                    foreach ($k in @($v.Keys)) { if ($null -eq $v[$k]) { $dr[$k] = [System.DBNull]::Value } else { $dr[$k] = $v[$k] } }
+                    $table.Rows.Add($dr)
+                    $seq++
+                }
+            }
+            # a full batch, or the last (partial) one once the rows have run out
+            if ($table.Rows.Count -ge $size -or (-not $more -and $table.Rows.Count -gt 0)) {
+                $r = Invoke-PimSqlActiveAssignmentBatchWrite -ConnectionString $ConnectionString -SnapshotId $sid -Table $table -Writer $Writer -Sleep $Sleep
+                $batches++; $retries += ([int]$r.attempts - 1); $written += [int]$r.rows
+                $table.Clear()
+            }
+        }
+    }
+    $table.Dispose()
+    $header = ConvertTo-PimActiveAssignmentsHeaderJson -Entry $Entry -SnapshotId $sid -RowCount $seq
+    Complete-PimSqlActiveAssignmentSnapshot -ConnectionString $ConnectionString -SnapshotId $sid -ExpectedRows $seq -HeaderJson $header
+    $sw.Stop()
+    return [pscustomobject]@{ stored = $true; reason = ''; said = $false; where = "sql:pim.ActiveAssignmentRows/$sid + pim.TenantCache/active-assignments"
+        rows = $written; batches = $batches; retries = $retries; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 2); snapshotId = $sid }
+}
+
 function Select-PimActiveAssignmentsPimGroupCandidates {
     # BUG-217 (§33.28). PURE. The groups whose PIM-for-Groups assignments the Revoke snapshot reads: EVERY group that
     # can carry one -- security-enabled or Microsoft 365 -- whatever it is called. A mail-only distribution list is
@@ -943,10 +1114,6 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
         source        = 'scheduler'
         correlationId = "$($global:PIM_JobCorrelationId)"
     }
-    # 🔴 100.31 SNAPSHOT-OOM: ONE compact string written row by row, not `ConvertTo-Json -Depth 12` over the whole document
-    # (which built a second, dictionary-shaped copy of every row before it wrote a character). The rows are released
-    # before the SQL write, so the write holds the string and nothing else.
-    $json = ConvertTo-PimActiveAssignmentsSnapshotJson -Entry $entry
     # 100.68: the Dashboard's "Activations handled" ledger -- every time-bound active assignment seen, recorded once
     # (insert-only, engine/_shared/PIM-ImpactCounters.ps1). Never fails the snapshot: a ledger error is said in the detail.
     $ledTxt = ''
@@ -954,11 +1121,29 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
         $led = Update-PimImpactActivationLedger -ConnectionString (Get-PimTenantCacheStoreCs) -Rows $snap.rows
         $ledTxt = if ($led.ok) { "; activation ledger +$($led.added)" } else { "; activation ledger NOT updated ($($led.error))" }
     }
-    $entry['rows'] = $null; $snap['rows'] = $null
-    $where = Set-PimTenantCacheEntry -Kind $kind -ValueJson $json
-    $json = $null
+    # REQ 100.114 (2) / 100.110: THE ROWS GO INTO A TABLE, IN BATCHES (pim.ActiveAssignmentRows); pim.TenantCache keeps the
+    # small header that names the generation. The one-row write of the whole snapshot (22 MB at 38,000 assignments) is
+    # what timed out. A failed batch write THROWS from here: the run is recorded failed and the previous complete
+    # snapshot stays in place and readable. Only a store that cannot hold the table at all (.stored = $false) still gets
+    # the one-document form below.
+    $where = ''; $formTxt = ''
+    $tbl = Save-PimActiveAssignmentsSnapshotRows -Entry $entry
+    if ($tbl.stored) {
+        $entry['rows'] = $null; $snap['rows'] = $null
+        $where = "$($tbl.where)"
+        $formTxt = "; {0} row(s) in {1} batch(es), {2}s{3}" -f $tbl.rows, $tbl.batches, $tbl.seconds, $(if ($tbl.retries) { ", $($tbl.retries) batch retr$(if ($tbl.retries -eq 1) { 'y' } else { 'ies' })" } else { '' })
+    } else {
+        # 100.31 SNAPSHOT-OOM: ONE compact string written row by row, not a `-Depth 12` serialisation of the whole document
+        # (which built a second, dictionary-shaped copy of every row before it wrote a character). The rows are released
+        # before the SQL write, so the write holds the string and nothing else.
+        $json = ConvertTo-PimActiveAssignmentsSnapshotJson -Entry $entry
+        $entry['rows'] = $null; $snap['rows'] = $null
+        $where = Set-PimTenantCacheEntry -Kind $kind -ValueJson $json
+        $json = $null
+        if ("$($tbl.reason)".Trim() -and [bool]$tbl.said) { $formTxt = "; stored as one document ($($tbl.reason))" }
+    }
     $c = $snap.counts
-    $sum = "{0} total ({1} entra-role, {2} azure-rbac, {3} pim-for-groups) in {4}s -> {5}" -f $c.total, $c['entra-role'], $c['azure-rbac'], $c['pim-for-groups'], $snap.elapsedSec, $where
+    $sum = "{0} total ({1} entra-role, {2} azure-rbac, {3} pim-for-groups) in {4}s -> {5}{6}" -f $c.total, $c['entra-role'], $c['azure-rbac'], $c['pim-for-groups'], $snap.elapsedSec, $where, $formTxt
     if (-not $snap.ok) {
         throw ("[$type] active assignments could not be read from any surface; the failure was stored so the Revoke tab shows it. " + "$($entry.error)")
     }
@@ -1201,6 +1386,11 @@ function ConvertTo-PimActiveAssignmentsSnapshotView {
         source          = 'scheduler-snapshot'
     }
     if ("$($Entry.error)".Trim()) { $view['error'] = "$($Entry.error)" }
+    # REQ 100.114 (2): a table-form snapshot says so, with the generation its rows are in (the paged answer asks that table).
+    $rs = ''
+    if ($Entry -is [System.Collections.IDictionary]) { if ($Entry.Contains('rowStore')) { $rs = "$($Entry['rowStore'])" } }
+    elseif ($Entry.PSObject.Properties['rowStore']) { $rs = "$($Entry.rowStore)" }
+    if ($rs -eq 'table') { $view['rowStore'] = 'table'; $view['snapshotId'] = "$($Entry.snapshotId)"; $view['rowCount'] = $Entry.rowCount }
     return $view
 }
 

@@ -2854,6 +2854,51 @@ tabs (Active Assignments / Revoke, the tenant-list pickers, workload connectors,
 conformance deploy) work the moment the app starts. The legacy SDK code paths
 remain as a fallback for the local (on-box) edition where the modules exist.
 
+**The active-assignment rows are a table (2026-10-13).** A large tenant holds tens of thousands of active
+assignments. Stored as one document that was a row of more than 20 MB: writing it could time out, and every request
+read and parsed all of it. The rows are now in `pim.ActiveAssignmentRows`, one row per assignment:
+
+| Column | What it holds |
+|---|---|
+| `SnapshotId`, `Seq` | the generation (one per read of the tenant) and the row's position in it -- the clustered key |
+| `Kind`, `Principal`, `PrincipalId`, `PrincipalKind`, `Role`, `Scope`, `GroupId`, `StartUtc`, `EndUtc`, `Justification` | what the page filters and sorts on (texts cut to the column's length) |
+| `IdentityKey` | the row's identity as the engine's "managed" list states it |
+| `Managed`, `OwnKind` | the two marks the page hides rows by (managed by PIM Manager; PIM Manager's own identity / support app / break-glass) |
+| `SearchText` | principal id, principal, role, scope and justification, lower-cased -- what the text box searches |
+| `RowJson` | the whole row exactly as the read produced it; this is what the page receives |
+
+Indexes: kind (+ principal kind and the two marks, for the counts), principal, role, scope, expiry, principal id and
+group, each led by the generation. `pim.ActiveAssignmentSnapshots` has one row per generation (state, row count, and
+the key of what its marks were last computed from).
+
+- **Writing** (the `active-assignments-snapshot` job): a new generation is opened, the rows are written in batches of
+  500 -- each batch one bulk insert in its own transaction, with a 120 s command timeout, tried up to four times with
+  a growing wait when the failure is transient (a timeout, a deadlock, a dropped connection, a busy database); a retry
+  first removes whatever the failed try left of that batch. No statement carries more than one batch.
+- **The switch is one transaction.** It counts the generation's rows, refuses when the number is not what was written,
+  and replaces the small header in `pim.TenantCache` (kind `active-assignments`: `rowStore = "table"`, `snapshotId`,
+  `rowCount`, `refreshedUtc`, `counts`, the per-surface errors -- no rows). A reader goes from the header to that
+  generation's rows, so it sees the previous complete read or the new complete one, never a part. A write that fails
+  leaves the header on the previous generation, whose rows are untouched; the job run is recorded failed.
+- **Generations.** The previous generation is kept until the *next* write starts (a reader that held the old header
+  still finds its rows); that write removes everything except the current one, in bounded deletes -- including the
+  leftovers of a failed write.
+- **Reading a page.** One batch of three statements: the grouped counts of the generation, the number of rows that
+  match the filter, and the page (`ORDER BY <column>, Seq OFFSET .. FETCH NEXT ..`). Every value of the request is a
+  parameter; the sort column is chosen from a closed list in the code. The stored `RowJson` is passed to the page as
+  text with the two marks appended -- no row is parsed on the way.
+- **The marks** are columns, brought up to date by one set-based statement only when what they are computed from
+  changed (the engine's managed list, PIM Manager's own identities, the support app, the break-glass list) -- the
+  managed list is read inside the database and never travels to the Manager.
+- **Stored rows that cannot be read**, or a generation that does not hold the number of rows its header states, are
+  "The stored read could not be loaded (<reason>)" -- never an empty list, never "no snapshot yet", and no read of
+  the tenant is asked for because of it.
+- **Compatibility.** The table is created with the store (every path that creates or upgrades a store, including
+  the nightly updater) and again by the job before it writes. A store that cannot hold it keeps the one-document
+  form, and the job says so in its run detail. A snapshot stored as one document by an earlier version is read as
+  it always was. The readers that work on the whole set (the Discovery and gaps report, the Home expiring-access
+  tile, a caller with a portal profile) get the header with every row attached -- the same shape as before.
+
 **Active PIM assignments — a scheduled snapshot, read across three surfaces, with honest error
 surfacing.** The live read takes minutes in a large tenant, so it never runs in the Manager's
 request loop. Scheduler job `active-assignments-snapshot` (default every **120 min**, editable on the
@@ -8110,6 +8155,24 @@ both are drawn from the same filtered rows (`applyRevokeFilter`).
   until the read has landed.
 - **List view column widths.** Scope has a 22ch floor and breaks only after `/` (a `<wbr>` after each slash, the full
   path as the tooltip); Principal and Role / Group are capped with an ellipsis + tooltip; Type and the dates never wrap.
+- **One page at a time (2026-10-13).** The snapshot's rows are kept in a table, not in one document (below, "The
+  active-assignment rows are a table"). The page asks `GET /api/active-assignments?page=N&pageSize=200` with its
+  filter -- `type` (all, entra-role, azure-rbac, pim-for-groups, deleted), `q` (the text box), `sort` + `dir`, and one
+  parameter per tick that is on (`showDeleted`, `showManaged`, `showProduct`, `showSupport`, `showBreakGlass`) -- and
+  gets back the counts of the whole stored read plus one page of rows, filtered, sorted and paged by the database.
+  Every counter on the page (the type chips, the number on each tick, "n hidden" with its reasons) is the server's
+  count over the whole read. A type chip, a tick, a column header and the text box (300 ms after the typing stops)
+  each ask again for page 1; **Previous** / **Next** and "Rows 201-400 of 29,502 (page 2 of 148)" sit under the
+  table. A selection is kept across pages and a revoke posts the rows of every page. What needs every row of the
+  filter fetches it page by page, 2,000 rows a request, once per filter and stored read: the **graph view**, **Export
+  CSV** / **Print** / the Export menu (the file is the whole filtered list, never the page on screen) and **select
+  all**. A search text that is only in a group's *tag* still finds the group: the page sends the matching display
+  names as `alias` (60 at most; beyond that it says so). The group-delete check asks for that one group's live
+  assignments (`type=pim-for-groups`, `scope=<name>`) instead of the whole read.
+  A request **without** `page`, a snapshot that is still stored as one document, and a caller with a portal profile
+  (whose rows are checked one by one against their scope) get the whole set as before, and the page then filters in
+  the browser as it always did -- so an installation shows its existing snapshot until the first read in the new
+  form has completed, and no read of the tenant is started because the form changed.
 
 **Delegation overview** (Reviews & controls) renders the stored active-assignments snapshot
 (§11.1): the snapshot time and cadence, one row per active Entra role / Azure / PIM for Groups

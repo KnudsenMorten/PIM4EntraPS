@@ -21669,9 +21669,11 @@
     return { heading: String(heading || ''), columns: cols.map(c => String(c[0])),
              rows: list.map(it => cols.map(c => pimExportCol(typeof c[1] === 'function' ? c[1](it) : (it == null ? '' : it[c[1]])))) };
   }
-  function pimExportSet(tab, title, fn) {
+  // prepare (optional, async): run and awaited before fn when the export is made -- a view that shows one page of a
+  // larger list fetches the rest there, so the file is the whole filtered list (REQ 100.114).
+  function pimExportSet(tab, title, fn, prepare) {
     if (!tab || typeof fn !== 'function') return;
-    pimExportReg()[tab] = { title: title || '', fn: fn, explicit: true };
+    pimExportReg()[tab] = { title: title || '', fn: fn, explicit: true, prepare: (typeof prepare === 'function' ? prepare : null) };
     try { pimExportRefresh(); } catch (_) { }
   }
   function pimExportRegisterBar(idPrefix, getData) {
@@ -21725,6 +21727,10 @@
   }
   async function pimExportDownload(format) {
     const tab = pimExportActiveTab();
+    const regP = pimExportReg()[tab];
+    if (regP && typeof regP.prepare === 'function') {
+      try { await regP.prepare(); } catch (e) { alert('Could not export: ' + ((e && e.message) || e)); return; }
+    }
     const payload = pimExportPayload(tab, format);
     if (!payload) { alert('This page has nothing to export yet.'); return; }
     const btn = document.getElementById('pimExportBtn');
@@ -26360,10 +26366,17 @@
     const names = [String(row && row.GroupName || '').trim().toLowerCase(), String(row && row.GroupTag || '').trim().toLowerCase()].filter(Boolean);
     if (!names.length) return { checked: false, count: 0, reason: 'the row has no group name to match' };
     try {
-      const d = await api('GET', '/api/active-assignments');
+      // REQ 100.114 (2): ask for THIS group's live assignments only (type + exact scope, every tick on, 5 rows) -- the
+      // server counts them in SQL. A server that cannot page this snapshot answers every row, and they are filtered here.
+      const d = await api('GET', '/api/active-assignments?page=1&pageSize=5&type=pim-for-groups&showDeleted=1&showManaged=1&showProduct=1&showSupport=1&showBreakGlass=1' +
+        names.map(n => '&scope=' + encodeURIComponent(n)).join(''));
       const rows = (d && Array.isArray(d.rows)) ? d.rows : [];
       // REQ 100.112: a stored snapshot that could not be loaded is "not checked", never "no live assignments".
       if (d && d.snapshotReadError) return { checked: false, count: 0, reason: 'the live assignment snapshot could not be loaded (' + String(d.snapshotReadError) + ')' };
+      if (d && d.paged === true) {
+        if (d.snapshotMissing) return { checked: false, count: 0, reason: 'the live assignment snapshot is still being refreshed' };
+        return { checked: true, count: Number(d.totalFiltered) || 0, who: rows.slice(0, 5).map(r => String(r.principal || '')) };
+      }
       if (!rows.length && d && d.refreshQueued) return { checked: false, count: 0, reason: 'the live assignment snapshot is still being refreshed' };
       const hit = rows.filter(r => String(r && r.type || '') === 'pim-for-groups' &&
         names.indexOf(String(r.scope || '').trim().toLowerCase()) >= 0);
@@ -32920,7 +32933,23 @@
     stateInFlight: false,
     // §100.47 (c): 'graph' (default) | 'list' -- remembered per browser (localStorage 'pim.revoke.view').
     view: 'graph',
-    lastRender: 'message'   // what #revResults holds: 'table' (rows to draw) | 'message' (loading / empty / error)
+    lastRender: 'message',  // what #revResults holds: 'table' (rows to draw) | 'message' (loading / empty / error)
+    // REQ 100.114 (2): PAGED = the server answered counts + ONE page (filter, sort and paging in SQL). REV.rows is then the
+    // page on screen, the counters come from REV.pview, and the whole filtered set (the graph, an export, "select all") is
+    // fetched page by page only when one of those needs it (REV.all). paged = false = the whole-set answer, as before
+    // (a snapshot still stored as one document, a delegated administrator, an older server): everything stays client-side.
+    paged: false,
+    page: 1,
+    pageSize: 200,
+    pageCount: 0,
+    totalFiltered: 0,
+    pview: null,            // { total, deleted, managed, own{}, hidden, hiddenBy{}, visible{} } for the ticks as sent
+    aliasCapped: false,     // the text search matched more tags than one request carries
+    known: new Map(),       // row id -> row, for every row this page has received (a selection outlives its page)
+    all: null,              // { key, rows, done } -- the whole filtered set for REV.all.key, when it has been fetched
+    allInFlight: null,      // the promise of the fetch under way (one at a time)
+    pageSeq: 0,             // a newer request wins over an older answer
+    searchTimer: null
   };
   try { const _v = localStorage.getItem('pim.revoke.view'); if (_v === 'list' || _v === 'graph') REV.view = _v; } catch (_) { }
 
@@ -33233,9 +33262,12 @@
     }
     setRevBusy(true);
     try {
-      const url = '/api/active-assignments' + (force ? '?refresh=1' : '');
+      // REQ 100.114 (2): the page asks for ONE page (and the counts) with its filters; a server that cannot page this
+      // snapshot answers the whole set, and the page then works as it always did (REV.paged = false).
+      const url = '/api/active-assignments?' + revPageQuery(quiet ? REV.page : 1) + (force ? '&refresh=1' : '');
       const data = await api('GET', url);
       loaded = true; REV.loadedOnce = true; REV.lastLoadFailed = false;
+      revTakePageAnswer(data, quiet ? REV.page : 1);
       // REQ 100.112: a stored snapshot that could not be loaded is its own state (never "no snapshot yet"); the stamp says
       // which stored snapshot this answer is, for the state poll.
       REV.snapshotReadError = String((data && data.snapshotReadError) || '');
@@ -33268,10 +33300,18 @@
       }
       // A revoke marked "queued" stays marked while the snapshot still carries the row; once a newer snapshot
       // no longer has it, the revoke has landed and the marker is dropped.
+      if (REV.paged) {
+        // One page cannot say which rows the snapshot no longer has. A "revoke queued" mark is kept until a snapshot
+        // that was READ AFTER the revoke was queued is on screen; a selection is kept on a quiet reload.
+        const readAt = Date.parse(REV.loadedUtc || '');
+        if (!isNaN(readAt)) { for (const [id, at] of Array.from(REV.revokeQueued.entries())) { const q = Date.parse(at || ''); if (!isNaN(q) && q < readAt) REV.revokeQueued.delete(id); } }
+        if (!quiet) REV.selected.clear();
+      } else {
       const present = new Set(REV.rows.map(r => r.id));
       for (const id of Array.from(REV.revokeQueued.keys())) { if (!present.has(id)) REV.revokeQueued.delete(id); }
       if (quiet) { for (const id of Array.from(REV.selected)) { if (!present.has(id)) REV.selected.delete(id); } }
       else REV.selected.clear();
+      }
       updateRevokeBadge();
       renderRevokeTable();
     } catch (e) {
@@ -33291,6 +33331,180 @@
       // old -- the light state is asked once after a full load (never after the load the state itself asked for, and never
       // after a load that failed), and only the state is polled from then on.
       if (loaded && !fromState) revCheckState(); else revSchedulePoll();
+    }
+  }
+
+  // ===================================================================
+  // REQ 100.114 (2) -- ONE PAGE AT A TIME. The server keeps the rows in a table and answers the counts plus one page, with
+  // the type chip, the five ticks, the text search and the sort applied in SQL. Every control of the page stays; what it
+  // does is ask again instead of filtering 40,000 rows in the browser. The whole filtered set is fetched (page by page,
+  // 2,000 rows a request) only by what needs every row: the graph view, an export, "select all".
+  // ===================================================================
+  const REV_ALL_PAGE = 2000;      // rows per request when the whole filtered set is fetched
+  const REV_ALIAS_MAX = 60;       // tag <-> name alternatives one request carries (the server's limit)
+  // The tags / names whose OTHER spelling contains the search text, and which do not contain it themselves (those rows
+  // already match by their own text). The server matches them exactly against principal / role / scope.
+  function revAliasKeysFor(q) {
+    const out = []; REV.aliasCapped = false;
+    if (!q) return out;
+    const idx = revAliasIndex();
+    for (const k in idx) {
+      if (k.indexOf(q) >= 0) continue;
+      if (String(idx[k] || '').toLowerCase().indexOf(q) < 0) continue;
+      if (out.length >= REV_ALIAS_MAX) { REV.aliasCapped = true; break; }
+      out.push(k);
+    }
+    return out;
+  }
+  // The filter of the page as the request's query string (without the page number): also the key of the fetched set.
+  function revFilterQuery() {
+    const p = [];
+    const add = (k, v) => p.push(k + '=' + encodeURIComponent(v));
+    const tf = (REV.typeFilter === 'deleted' && !REV.showDeleted) ? 'all' : (REV.typeFilter || 'all');
+    add('type', tf);
+    const q = String(REV.textFilter || '').toLowerCase().trim();
+    if (q) { add('q', q); for (const a of revAliasKeysFor(q)) add('alias', a); } else REV.aliasCapped = false;
+    add('sort', REV.sortKey || 'principal');
+    add('dir', REV.sortDir === -1 ? 'desc' : 'asc');
+    if (REV.showDeleted) add('showDeleted', 1);
+    if (REV.showManaged) add('showManaged', 1);
+    if (REV.showProduct) add('showProduct', 1);
+    if (REV.showSupport) add('showSupport', 1);
+    if (REV.showBreakGlass) add('showBreakGlass', 1);
+    return p.join('&');
+  }
+  function revPageQuery(page, size) {
+    return 'page=' + (Math.max(1, Number(page) || 1)) + '&pageSize=' + (Number(size) || REV.pageSize || 200) + '&' + revFilterQuery();
+  }
+  function revRemember(rows) { for (const r of (rows || [])) { if (r && r.id != null) REV.known.set(r.id, r); } }
+  function revRowById(id) { return REV.known.get(id) || null; }
+  function revSelectedRows() { const out = []; for (const id of REV.selected) { const r = REV.known.get(id); if (r) out.push(r); } return out; }
+  function revDeselectWhere(pred) { for (const id of Array.from(REV.selected)) { const r = REV.known.get(id); if (r && pred(r)) REV.selected.delete(id); } }
+  // What one answer says about paging (the snapshot fields are read by the caller).
+  function revTakePageAnswer(data, page) {
+    const rows = Array.isArray(data && data.rows) ? data.rows : [];
+    REV.paged = !!(data && data.paged === true);
+    if (REV.paged) {
+      REV.page = Number(data.page) || page || 1;
+      REV.pageSize = Number(data.pageSize) || REV.pageSize || 200;
+      REV.pageCount = Number(data.pageCount) || 0;
+      REV.totalFiltered = Number(data.totalFiltered) || 0;
+      REV.pview = data.view || null;
+      revRemember(rows);
+    } else {
+      REV.page = 1; REV.pageCount = 0; REV.totalFiltered = rows.length; REV.pview = null; REV.all = null;
+      REV.known = new Map(); revRemember(rows);
+    }
+  }
+  // Another page, or the same page for another filter / sort. Only in paged mode; the snapshot facts stay as loaded.
+  async function revFetchPage(page) {
+    if (!REV.paged || !isServer) { renderRevokeTable(); return; }
+    const seq = ++REV.pageSeq;
+    const filterKey = revFilterQuery();
+    // (not setRevBusy: that disables the text box, and a box that goes disabled while you type loses the caret)
+    const busy = document.getElementById('revBusy');
+    if (busy) busy.style.display = '';
+    try {
+      const data = await api('GET', '/api/active-assignments?' + revPageQuery(page));
+      if (seq !== REV.pageSeq) return;                         // a newer request is under way: its answer is the one to show
+      if (!data || data.paged !== true) {                      // the server answered the whole set: work on it as before
+        revTakePageAnswer(data, 1);
+        REV.rows = Array.isArray(data && data.rows) ? data.rows : [];
+        renderRevokeTable();
+        return;
+      }
+      const stamp = String(data.snapshotStamp || '');
+      revTakePageAnswer(data, page);
+      REV.rows = Array.isArray(data.rows) ? data.rows : [];
+      REV.managedKnown = !!data.managedKnown;
+      REV.ownKnown = data.ownKnown || REV.ownKnown;
+      REV.ownErrors = Array.isArray(data.ownErrors) ? data.ownErrors : REV.ownErrors;
+      if (stamp && stamp !== REV.snapStamp) {                  // a new read landed in between: take its "as of" facts too
+        REV.snapStamp = stamp; REV.fullForStamp = stamp;
+        REV.loadedUtc = data.refreshedUtc || data.loadedUtc || REV.loadedUtc;
+        REV.stale = !!data.stale; REV.snapshotHint = data.hint || '';
+        REV.surfaceErrors = Array.isArray(data.surfaceErrors) ? data.surfaceErrors : [];
+      }
+      if (REV.all && REV.all.key !== (REV.snapStamp + '|' + filterKey)) REV.all = null;
+      renderRevokeTable();
+    } catch (e) {
+      if (seq !== REV.pageSeq) return;
+      setRevStatus('Could not load that page: ' + String((e && e.message) || e) + ' -- the rows shown are the previous ones. Change the filter or press Refresh to try again.', 'warn');
+    } finally {
+      if (seq === REV.pageSeq && busy && !REV.inFlight) busy.style.display = 'none';
+    }
+  }
+  // A filter, a tick or the sort changed. Whole-set mode: draw again. Paged mode: ask the server for page 1 of the new
+  // filter (the text box waits 300 ms for the typing to stop).
+  function revRefilter(debounce) {
+    if (!REV.paged) { renderRevokeTable(); return; }
+    if (REV.searchTimer) { clearTimeout(REV.searchTimer); REV.searchTimer = null; }
+    if (debounce) { REV.searchTimer = setTimeout(() => { REV.searchTimer = null; revFetchPage(1); }, 300); return; }
+    revFetchPage(1);
+  }
+  // EVERY row of the current filter, in the filter's order -- for the graph, an export and "select all". Whole-set mode:
+  // the rows are already here. Paged mode: fetched once per filter and snapshot, 2,000 rows a request; a snapshot that
+  // changes while it is fetched starts the fetch again (twice at most). onProgress(got, total).
+  async function revEnsureAll(onProgress) {
+    if (!REV.paged) return applyRevokeFilter();
+    const filterKey = revFilterQuery();
+    const key = REV.snapStamp + '|' + filterKey;
+    if (REV.all && REV.all.key === key && REV.all.done) return REV.all.rows;
+    if (REV.allInFlight && REV.allInFlight.key === key) return REV.allInFlight.promise;
+    const run = (async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const rows = []; let stamp = null, total = null, restart = false;
+        for (let page = 1; page < 100000; page++) {
+          const d = await api('GET', '/api/active-assignments?' + revPageQuery(page, REV_ALL_PAGE));
+          if (!d || d.paged !== true) throw new Error('the stored read changed form while it was loaded -- press Refresh');
+          const s = String(d.snapshotStamp || '');
+          if (stamp === null) stamp = s; else if (s !== stamp) { restart = true; break; }
+          const got = Array.isArray(d.rows) ? d.rows : [];
+          for (const r of got) rows.push(r);
+          total = Number(d.totalFiltered) || 0;
+          if (typeof onProgress === 'function') { try { onProgress(rows.length, total); } catch (_) { } }
+          if (!got.length || rows.length >= total) break;
+        }
+        if (restart) continue;
+        revRemember(rows);
+        const doneKey = String(stamp || '') + '|' + filterKey;
+        REV.all = { key: doneKey, rows: rows, done: true };
+        return rows;
+      }
+      throw new Error('the stored read kept changing while it was loaded -- try again in a moment');
+    })();
+    REV.allInFlight = { key: key, promise: run };
+    try { return await run; }
+    finally { if (REV.allInFlight && REV.allInFlight.promise === run) REV.allInFlight = null; }
+  }
+  // "Rows 201-400 of 29,502" + Previous / Next, under the table (paged mode only).
+  function revPagerHtml() {
+    if (!REV.paged) return '';
+    const total = REV.totalFiltered, size = REV.pageSize || 200, page = REV.page || 1;
+    const from = total ? ((page - 1) * size + 1) : 0, to = Math.min(total, page * size);
+    const pages = Math.max(1, REV.pageCount || Math.ceil(total / size));
+    const fmt = (n) => { try { return Number(n).toLocaleString('en-US'); } catch (_) { return String(n); } };
+    return '<div class="rev-pager" id="revPager" style="display:flex;align-items:center;gap:10px;padding:8px 4px;font-size:12px;color:#57606a;">' +
+      '<span id="revPagerText">Rows ' + fmt(from) + '&ndash;' + fmt(to) + ' of ' + fmt(total) + ' (page ' + fmt(page) + ' of ' + fmt(pages) + ')</span>' +
+      '<button type="button" id="revPagePrev" class="ghost"' + (page <= 1 ? ' disabled' : '') + '>&larr; Previous</button>' +
+      '<button type="button" id="revPageNext" class="ghost"' + (page >= pages ? ' disabled' : '') + '>Next &rarr;</button>' +
+      (REV.aliasCapped ? '<span id="revAliasNote" title="The search also matches a group by its tag. More groups match this text by tag than one request carries.">More than ' + REV_ALIAS_MAX + ' groups match this text by their tag only &mdash; type more of the name to see them all.</span>' : '') +
+      '</div>';
+  }
+  // The graph in paged mode: it draws EVERY row of the filter, so the whole filtered set is fetched first (with progress).
+  async function revDrawGraphPaged() {
+    const det = document.getElementById('dgvDetail');
+    const key = REV.snapStamp + '|' + revFilterQuery();
+    try {
+      const have = !!(REV.all && REV.all.key === key && REV.all.done);
+      if (!have) setRevStatus('Loading every row of this filter for the graph...', 'busy');
+      const rows = await revEnsureAll((got, total) => setRevStatus('Loading the graph: ' + got + ' of ' + total + ' rows...', 'busy'));
+      if (key !== (REV.snapStamp + '|' + revFilterQuery())) return;        // the filter changed meanwhile: that draw wins
+      if (!have) setRevStatus('');
+      if (REV.view === 'graph' && REV.lastRender === 'table') renderRevGraph(rows);
+    } catch (e) {
+      setRevStatus('');
+      if (det) det.innerHTML = '<span style="color:#cf222e">The graph could not be loaded: ' + escapeHtml(String((e && e.message) || e)) + ' -- use List view.</span>';
     }
   }
 
@@ -33338,6 +33552,8 @@
   }
 
   function applyRevokeFilter() {
+    // REQ 100.114 (2): in paged mode the server filtered and sorted -- REV.rows IS the page of the current filter.
+    if (REV.paged) return REV.rows;
     const q = (REV.textFilter || '').toLowerCase().trim();
     const tf = REV.typeFilter;
     let rows = REV.rows;
@@ -33374,14 +33590,21 @@
   function renderRevokeTable() {
     const results = document.getElementById('revResults');
     const filtered = applyRevokeFilter();
+    // REQ 100.114 (2): a page past the end of a filter that still has rows (a new, smaller read) = show its first page.
+    if (REV.paged && filtered.length === 0 && REV.totalFiltered > 0 && REV.page > 1) { revFetchPage(1); return; }
 
     // Per-type counters (over the rows the operator can see: deleted principals count only when shown, §70.22).
-    const deletedN = REV.rows.filter(r => String(r.principalKind || '') === 'deleted').length;
-    const managedN = REV.rows.filter(r => r.managed === true).length;
-    const countable = REV.rows.filter(r => !revHiddenReason(r));
+    // REQ 100.114 (2): in paged mode every counter is the SERVER's, over the whole stored read (REV.pview) -- the page
+    // holds one page of rows and must not count that.
+    const pv = REV.paged ? (REV.pview || { total: 0, deleted: 0, managed: 0, own: {}, hidden: 0, hiddenBy: {}, visible: {} }) : null;
+    const totalRows = pv ? (Number(pv.total) || 0) : REV.rows.length;
+    const deletedN = pv ? (Number(pv.deleted) || 0) : REV.rows.filter(r => String(r.principalKind || '') === 'deleted').length;
+    const managedN = pv ? (Number(pv.managed) || 0) : REV.rows.filter(r => r.managed === true).length;
+    const countable = pv ? [] : REV.rows.filter(r => !revHiddenReason(r));
     // Owner 2026-10-08: the three own-access groups -- a count on each tick, and every hidden row counted in the note.
     const ownN = { product: 0, support: 0, breakglass: 0 };
-    for (const r of REV.rows) { const k = revOwnKind(r); if (k) ownN[k]++; }
+    if (pv) { for (const k in ownN) ownN[k] = Number((pv.own || {})[k]) || 0; }
+    else for (const r of REV.rows) { const k = revOwnKind(r); if (k) ownN[k]++; }
     const ownTog = { product: ['revProductToggle', 'revShowProduct', "show PIM Manager's own identities", 'product'],
                      support: ['revSupportToggle', 'revShowSupport', 'show the Invardia Support app', 'support'],
                      breakglass: ['revBreakGlassToggle', 'revShowBreakGlass', 'show break-glass accounts', 'breakGlass'] };
@@ -33395,7 +33618,8 @@
     }
     const hiddenBy = {};
     let hiddenN = 0;
-    for (const r of REV.rows) { const why = revHiddenReason(r); if (why) { hiddenN++; hiddenBy[why] = (hiddenBy[why] || 0) + 1; } }
+    if (pv) { hiddenN = Number(pv.hidden) || 0; for (const k in (pv.hiddenBy || {})) { if (Number(pv.hiddenBy[k]) > 0) hiddenBy[k] = Number(pv.hiddenBy[k]); } }
+    else for (const r of REV.rows) { const why = revHiddenReason(r); if (why) { hiddenN++; hiddenBy[why] = (hiddenBy[why] || 0) + 1; } }
     const hn = document.getElementById('revHiddenNote');
     if (hn) {
       const names = { product: 'PIM Manager', support: 'Invardia Support app', breakglass: 'break-glass', managed: 'managed', deleted: 'deleted' };
@@ -33415,6 +33639,7 @@
     for (const r of countable) {
       if (counts.hasOwnProperty(r.type)) counts[r.type]++;
     }
+    if (pv) { for (const k in counts) counts[k] = Number((pv.visible || {})[k]) || 0; }
     setRevChips(counts);   // BUG-97: single writer; renders real numbers only once data has landed
     const delToggle = document.getElementById('revDeletedToggle');
     if (delToggle) {
@@ -33457,7 +33682,7 @@
       return;
     }
 
-    if (REV.rows.length === 0) {
+    if (totalRows === 0) {
       if (REV.loadError || (REV.surfaceErrors && REV.surfaceErrors.length)) {
         // Genuine read failure (not just an empty tenant): show which surface
         // failed + the remediation hint, not "click Refresh".
@@ -33555,7 +33780,10 @@
       out.push('</tr>');
     }
     out.push('</tbody></table>');
+    out.push(revPagerHtml());   // REQ 100.114 (2): "Rows a-b of n" + Previous / Next ('' when the whole set is on screen)
     results.innerHTML = out.join('');
+    const pgPrev = document.getElementById('revPagePrev'); if (pgPrev) pgPrev.onclick = () => revFetchPage(Math.max(1, (REV.page || 1) - 1));
+    const pgNext = document.getElementById('revPageNext'); if (pgNext) pgNext.onclick = () => revFetchPage((REV.page || 1) + 1);
 
     // Export bar ([H5]/[L5]): the "who has what is active" extract for a ticket /
     // auditor trail. Exports the FILTERED (visible) rows so the export equals the
@@ -33563,8 +33791,17 @@
     const expBar = document.getElementById('revExportBar');
     if (expBar) {
       expBar.style.display = 'inline-flex';
-      const expData = () => {
-        const f = applyRevokeFilter();
+      // REQ 100.114 (2): an export is EVERY row of the current filter, not the page on screen -- in paged mode the whole
+      // filtered set is fetched first (expAll); the rows on hand are used only when that set is already here.
+      const expAll = async () => {
+        if (!REV.paged) return null;
+        let said = false;
+        try { return await revEnsureAll((got, total) => { said = true; setRevStatus('Preparing the export: ' + got + ' of ' + total + ' rows...', 'busy'); }); }
+        finally { if (said) setRevStatus(''); }   // only the progress line this export wrote is cleared
+      };
+      const expData = (all) => {
+        const have = (REV.paged && REV.all && REV.all.done && REV.all.key === (REV.snapStamp + '|' + revFilterQuery())) ? REV.all.rows : null;
+        const f = all || have || applyRevokeFilter();
         return {
           filename: 'pim-active-assignments-' + new Date().toISOString().slice(0, 10) + '.csv',
           title: 'Active PIM assignments (who has what)',
@@ -33573,9 +33810,10 @@
           rows: f.map(r => [r.principal || '', r.role || '', r.scope || '', r.type || '', formatRevWhen(r.start), r.end ? formatRevWhen(r.end) : 'no expiration', r.justification || ''])
         };
       };
-      const ec = document.getElementById('revExpCsv'); if (ec) ec.onclick = () => { const d = expData(); downloadCsv(d.filename, d.headers, d.rows); };
-      const ep = document.getElementById('revExpPrint'); if (ep) ep.onclick = () => { const d = expData(); printTable(d.title, d.subtitle, d.headers, d.rows); };
-      pimExportSet('revoke', 'Delegation overview (all privileged permissions)', () => { const d = expData(); return [{ heading: d.title, columns: d.headers, rows: d.rows }]; });   // 100.67
+      const expFail = (e) => setRevStatus('Could not prepare the export: ' + String((e && e.message) || e), 'err');
+      const ec = document.getElementById('revExpCsv'); if (ec) ec.onclick = async () => { try { const d = expData(await expAll()); downloadCsv(d.filename, d.headers, d.rows); } catch (e) { expFail(e); } };
+      const ep = document.getElementById('revExpPrint'); if (ep) ep.onclick = async () => { try { const d = expData(await expAll()); printTable(d.title, d.subtitle, d.headers, d.rows); } catch (e) { expFail(e); } };
+      pimExportSet('revoke', 'Delegation overview (all privileged permissions)', () => { const d = expData(); return [{ heading: d.title, columns: d.headers, rows: d.rows }]; }, expAll);   // 100.67
     }
 
     // Wire row checkboxes.
@@ -33616,13 +33854,14 @@
         const k = th.dataset.sort;
         if (REV.sortKey === k) REV.sortDir = -REV.sortDir;
         else { REV.sortKey = k; REV.sortDir = 1; }
-        renderRevokeTable();
+        revRefilter();
       };
     });
 
     // §100.47 (c): the same filtered rows feed the graph view (drawn only while it is the view on screen).
     shown('table');
-    if (REV.view === 'graph') {
+    if (REV.view === 'graph' && REV.paged) revDrawGraphPaged();   // every row of the filter, fetched page by page
+    else if (REV.view === 'graph') {
       try { renderRevGraph(filtered); }
       catch (e) { const d = document.getElementById('dgvDetail'); if (d) d.innerHTML = '<span style="color:#cf222e">The graph could not be drawn: ' + escapeHtml(String(e.message || e)) + ' -- use List view.</span>'; }
     }
@@ -33689,6 +33928,19 @@
   }
 
   function toggleRevokeAll(on) {
+    // REQ 100.114 (2): "all" is every row of the filter, as before -- in paged mode the other pages are fetched for it.
+    if (REV.paged && REV.totalFiltered > REV.rows.length) {
+      const head = document.getElementById('revHeadCheck');
+      if (head) head.disabled = true;
+      revEnsureAll((got, total) => setRevStatus((on ? 'Selecting' : 'Clearing') + ' every row of this filter: ' + got + ' of ' + total + '...', 'busy'))
+        .then(rows => {
+          for (const r of rows) { if (on) { if (revSelectable(r)) REV.selected.add(r.id); } else REV.selected.delete(r.id); }
+          setRevStatus(on ? (REV.selected.size + ' selected -- every row of this filter, on all pages.') : '');
+          renderRevokeTable();
+        })
+        .catch(e => { setRevStatus('Could not load every row of this filter: ' + String((e && e.message) || e), 'err'); renderRevokeTable(); });
+      return;
+    }
     const visible = applyRevokeFilter().filter(revSelectable).map(r => r.id);
     if (on) { for (const id of visible) REV.selected.add(id); }
     else    { for (const id of visible) REV.selected.delete(id); }
@@ -33825,7 +34077,8 @@
       setRevStatus('Type a justification first -- it is stored with the pending change.', 'warn');
       return;
     }
-    const selected  = REV.rows.filter(r => REV.selected.has(r.id));
+    // REQ 100.114 (2): in paged mode a selection can span pages -- the rows are the ones this page has received (REV.known).
+    const selected  = REV.paged ? revSelectedRows() : REV.rows.filter(r => REV.selected.has(r.id));
     const alreadyQ  = selected.filter(r => REV.revokeQueued.has(r.id));
     const addressable = selected.filter(r => !REV.revokeQueued.has(r.id));
     if (selected.length === 0) {
@@ -34043,7 +34296,7 @@
                  '&mdash; do not simply re-run it.</span></div>');
     }
     for (const r of results) {
-      const row = REV.rows.find(x => x.id === r.id) || { principal:'?', role:'?', type:'?' };
+      const row = (REV.paged ? revRowById(r.id) : REV.rows.find(x => x.id === r.id)) || { principal:'?', role:'?', type:'?' };
       const label = (row.principal || '') + ' / ' + (row.role || '') + ' [' + (row.type || '') + ']';
       if (r.ok) {
         // The server answers the same revoke while an earlier one is still waiting as "already queued" (nothing added).
@@ -34151,17 +34404,20 @@
     dgvWire();
 
     const search = document.getElementById('revSearch');
-    if (search) search.oninput = () => { REV.textFilter = search.value; renderRevokeTable(); };
+    // REQ 100.114 (2): every control below ends in revRefilter() -- it draws again (whole-set mode) or asks the server
+    // for page 1 of the new filter (paged mode; the text box waits for the typing to stop).
+    if (search) search.oninput = () => { REV.textFilter = search.value; revRefilter(true); };
 
     document.querySelectorAll('#revTopBar .rev-type-chip').forEach(chip => {
-      chip.onclick = () => { REV.typeFilter = chip.dataset.type; renderRevokeTable(); };
+      chip.onclick = () => { REV.typeFilter = chip.dataset.type; revRefilter(); };
     });
     const showMg = document.getElementById('revShowManaged');
     if (showMg) showMg.onchange = () => {
       REV.showManaged = !!showMg.checked;
       // hiding them again must not leave hidden rows selected for a revoke
       if (!REV.showManaged) { for (const r of REV.rows) { if (r.managed === true) REV.selected.delete(r.id); } }
-      renderRevokeTable();
+      if (!REV.showManaged && REV.paged) revDeselectWhere(r => r.managed === true);   // ...also the ones selected on another page
+      revRefilter();
     };
     // Owner 2026-10-08: PIM Manager's own identities / the Invardia Support app / break-glass -- hidden by default, one tick each.
     [['revShowProduct', 'product'], ['revShowSupport', 'support'], ['revShowBreakGlass', 'breakglass']].forEach(([cbId, kind]) => {
@@ -34171,7 +34427,8 @@
         REV[REV_OWN[kind].flag] = !!cb.checked;
         // hiding them again must not leave hidden rows selected for a revoke
         if (!cb.checked) { for (const r of REV.rows) { if (revOwnKind(r) === kind) REV.selected.delete(r.id); } }
-        renderRevokeTable();
+        if (!cb.checked && REV.paged) revDeselectWhere(r => revOwnKind(r) === kind);
+        revRefilter();
       };
     });
     const showDel = document.getElementById('revShowDeleted');
@@ -34179,7 +34436,8 @@
       REV.showDeleted = !!showDel.checked;
       // hiding them again must not leave hidden rows selected for a revoke
       if (!REV.showDeleted) { for (const r of REV.rows) { if (String(r.principalKind || '') === 'deleted') REV.selected.delete(r.id); } }
-      renderRevokeTable();
+      if (!REV.showDeleted && REV.paged) revDeselectWhere(r => String(r.principalKind || '') === 'deleted');
+      revRefilter();
     };
 
     const j = document.getElementById('revJustify');

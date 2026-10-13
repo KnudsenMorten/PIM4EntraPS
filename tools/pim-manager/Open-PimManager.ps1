@@ -9844,13 +9844,15 @@ function Get-PimActiveAssignmentsCached {
     # return straight away with refreshQueued=$true; the page never waits for the read.
     # Response keeps ok / rows / loadedUtc / counts / surfaceErrors / cacheHit and adds refreshedUtc, ageSeconds,
     # cadenceMinutes, stale, snapshotMissing, refreshQueued, hint.
-    param([switch]$QueueRefresh, [string]$Reason = 'manager', [datetime]$NowUtc = [datetime]::UtcNow)
+    # REQ 100.114 (2): -HeaderOnly = the stored header WITHOUT its rows (a table-form snapshot keeps them in
+    # pim.ActiveAssignmentRows; the paged answer asks that table for one page). Without it every row is attached, as before.
+    param([switch]$QueueRefresh, [string]$Reason = 'manager', [datetime]$NowUtc = [datetime]::UtcNow, [switch]$HeaderOnly)
     if (-not (Get-Command ConvertTo-PimActiveAssignmentsSnapshotView -ErrorAction SilentlyContinue)) {
         throw 'engine/_shared/PIM-ActiveAssignments.ps1 is not loaded -- the active-assignments snapshot cannot be read.'
     }
     $entry = $null; $readErr = ''; $stamp = ''
     if (Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue) {
-        $entry = Get-PimTenantCacheEntry -Kind 'active-assignments'
+        $entry = if ($HeaderOnly) { Get-PimTenantCacheEntry -Kind 'active-assignments' -HeaderOnly } else { Get-PimTenantCacheEntry -Kind 'active-assignments' }
         if ($null -eq $entry -and (Get-Command Get-PimTenantCacheReadError -ErrorAction SilentlyContinue)) { $readErr = "$(Get-PimTenantCacheReadError -Kind 'active-assignments')".Trim() }
     }
     # REQ 100.112 (A): A FAILED READ IS NOT A MISSING SNAPSHOT. At a large customer the stored row (one 22 MB document)
@@ -9926,7 +9928,226 @@ function Get-PimActiveAssignmentsState {
 # be old: the page takes "queued / running" from ?state=1.
 # (This is not the old 5-minute cache of the LIVE read -- that read left the Manager with 70.1b option 2.)
 # ---------------------------------------------------------------------------
-function Clear-PimActiveAssignmentsResponseCache { $script:PimAaResponseCache = $null }
+function Clear-PimActiveAssignmentsResponseCache { $script:PimAaResponseCache = $null; $script:PimAaMarksContext = $null }
+
+# ---------------------------------------------------------------------------
+# REQ 100.114 (2) -- GET /api/active-assignments?page=N : COUNTS + ONE PAGE, filter / sort / paging IN SQL.
+# A table-form snapshot (rows in pim.ActiveAssignmentRows) is never loaded whole for this: the Manager reads the small
+# header, makes sure the stored MANAGED / own-identity marks are current (one set-based statement, only when what they
+# are computed from changed) and asks the table for the counts and one page. Every value of the request reaches SQL as a
+# parameter (Invoke-PimSqlActiveAssignmentsQuery). The stored row JSON is passed through as text, never parsed here.
+# Not this path (the whole-set answer below it, unchanged): a snapshot still in the one-document form, no snapshot, a
+# caller with a portal profile (their rows are filtered one by one by the scope guard), a request without ?page=.
+# ---------------------------------------------------------------------------
+function ConvertTo-PimActiveAssignmentsPageRequest {
+    <#
+      PURE. The query string of GET /api/active-assignments -> the page request, or $null when the request does not ask
+      for a page (no ?page=). Nothing here is trusted further than its type: numbers are clamped, the type and the sort key
+      are checked against closed lists downstream, texts are cut, and every value is later a SQL PARAMETER.
+        page, pageSize, type, q, alias (repeatable), scope (repeatable, exact), sort, dir (asc|desc),
+        showDeleted, showManaged, showProduct, showSupport, showBreakGlass (1 = show; absent = hidden, the page's default)
+    #>
+    param([AllowNull()][object]$Query)
+    if ($null -eq $Query) { return $null }
+    $one = { param($n) $v = $null; try { $v = $Query[$n] } catch { $v = $null }; if ($null -eq $v) { '' } else { "$v" } }
+    $many = {
+        param($n)
+        $vals = $null
+        try { if ($Query -is [System.Collections.Specialized.NameValueCollection]) { $vals = $Query.GetValues($n) } else { $vals = $Query[$n] } } catch { $vals = $null }
+        @(@($vals) | Where-Object { $null -ne $_ -and "$_".Trim() } | ForEach-Object { $s = "$_".Trim(); if ($s.Length -gt 400) { $s.Substring(0, 400) } else { $s } })
+    }
+    $pageTxt = (& $one 'page').Trim()
+    if (-not $pageTxt) { return $null }
+    $page = 1; if ($pageTxt -match '^\d{1,7}$') { $page = [int]$pageTxt }; if ($page -lt 1) { $page = 1 }
+    $size = 0; $sizeTxt = (& $one 'pageSize').Trim(); if ($sizeTxt -match '^\d{1,6}$') { $size = [int]$sizeTxt }
+    $on = { param($n) ((& $one $n).Trim() -in @('1', 'true', 'yes')) }
+    $q = (& $one 'q').Trim(); if ($q.Length -gt 200) { $q = $q.Substring(0, 200) }
+    return [pscustomobject]@{
+        page = $page; pageSize = $size
+        type = (& $one 'type').Trim().ToLowerInvariant()
+        q = $q
+        aliases = @(& $many 'alias'); scopeIs = @(& $many 'scope')
+        sort = (& $one 'sort').Trim().ToLowerInvariant()
+        descending = ((& $one 'dir').Trim().ToLowerInvariant() -eq 'desc')
+        showDeleted = (& $on 'showDeleted'); showManaged = (& $on 'showManaged'); showProduct = (& $on 'showProduct')
+        showSupport = (& $on 'showSupport'); showBreakGlass = (& $on 'showBreakGlass')
+    }
+}
+
+function Get-PimActiveAssignmentsMarksContext {
+    <#
+      What the stored marks of one generation are computed from, read once and kept in memory per generation (10 minutes;
+      1 minute when something could not be read, so it is tried again soon): PIM Manager's own identities + the Invardia
+      Support app (the directory, through Get-PimManagerReviewOwnPrincipals), the break-glass list (the store). Dropped by
+      the same writes that drop the kept answer (a revoke, a change of the break-glass list).
+      Returns @{ product; support; breakGlass; ownKnown{product,support,breakGlass}; errors[]; supportNameFallback }.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][long]$SnapshotId, [datetime]$NowUtc = [datetime]::UtcNow)
+    $c = $script:PimAaMarksContext
+    if ($null -ne $c -and [long]$c.sid -eq $SnapshotId -and "$($c.cs)" -ceq $ConnectionString) {
+        $age = ($NowUtc.ToUniversalTime() - ([datetime]$c.atUtc).ToUniversalTime()).TotalMinutes
+        if ($age -ge 0 -and $age -lt [double]$c.ttlMinutes) { return $c.value }
+    }
+    $errs = New-Object System.Collections.Generic.List[string]
+    $v = [ordered]@{ product = @(); support = @(); breakGlass = @(); ownKnown = [ordered]@{ product = $false; support = $false; breakGlass = $false }; errors = @(); supportNameFallback = $false }
+    if (Get-Command Get-PimManagerReviewOwnPrincipals -ErrorAction SilentlyContinue) {
+        try {
+            $spIds = @(Get-PimSqlActiveAssignmentServicePrincipalIds -ConnectionString $ConnectionString -SnapshotId $SnapshotId)
+            $own = Get-PimManagerReviewOwnPrincipals -ServicePrincipalIds $spIds
+            if ($own) {
+                $v.product = @($own.product); $v.support = @($own.support)
+                $v.ownKnown.product = [bool]$own.productKnown; $v.ownKnown.support = [bool]$own.supportKnown
+                foreach ($e in @($own.errors)) { $errs.Add("$e") }
+                if (@($own.fallbackNameMatches).Count) { $v.supportNameFallback = $true }
+            }
+        } catch { $errs.Add("PIM Manager's own identities could not be read: $($_.Exception.Message)") }
+    }
+    try {
+        if (Get-Command Get-PimBreakGlassAccountStatus -ErrorAction SilentlyContinue) {
+            $bgS = Get-PimBreakGlassAccountStatus -ConnectionString "$($script:PimSqlCs)"
+            if ($bgS.storeConfigured -and -not $bgS.storeOk) { $errs.Add("the break-glass list could not be read ($($bgS.error)) -- break-glass rows are not marked here; a revoke still protects them") }
+            else { $v.breakGlass = @($bgS.accounts); $v.ownKnown.breakGlass = $true }
+        }
+    } catch { $errs.Add("the break-glass list could not be read: $($_.Exception.Message)") }
+    $v.errors = @($errs.ToArray())
+    $ttl = if ($errs.Count -or -not $v.ownKnown.product -or -not $v.ownKnown.support) { 1 } else { 10 }
+    $script:PimAaMarksContext = @{ sid = $SnapshotId; cs = $ConnectionString; atUtc = $NowUtc.ToUniversalTime(); ttlMinutes = $ttl; value = $v }
+    return $v
+}
+
+function ConvertTo-PimActiveAssignmentsPagedJson {
+    <#
+      PURE. The answer as JSON text: -Body (every field but the rows) serialised once, and the page's rows spliced in as
+      the stored row JSON with its two marks appended -- no row is parsed or re-serialised.
+    #>
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Body, [AllowNull()][object[]]$Rows)
+    $token = '@@PIM-AA-ROWS-' + [guid]::NewGuid().ToString('N') + '@@'
+    $Body['rows'] = $token
+    $json = ConvertTo-PimJson -Body $Body
+    $sb = New-Object System.Text.StringBuilder 65536
+    [void]$sb.Append('[')
+    $first = $true
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        $j = "$($r.json)".Trim()
+        if ($j.Length -lt 2 -or $j[0] -ne '{' -or $j[$j.Length - 1] -ne '}') { continue }
+        if (-not $first) { [void]$sb.Append(',') }
+        $first = $false
+        $marks = '"managed":' + $(if ([bool]$r.managed) { 'true' } else { 'false' }) + ',"ownKind":"' + $(if ("$($r.ownKind)" -in @('product', 'support', 'breakglass')) { "$($r.ownKind)" } else { '' }) + '"}'
+        if ($j.Length -eq 2) { [void]$sb.Append('{').Append($marks) }
+        else { [void]$sb.Append($j, 0, $j.Length - 1).Append(',').Append($marks) }
+    }
+    [void]$sb.Append(']')
+    return $json.Replace('"' + $token + '"', $sb.ToString())
+}
+
+function Get-PimActiveAssignmentsPagedAnswer {
+    <#
+      The bytes of the paged answer, or $null when this request is not a paged one (see the block comment above): the
+      caller then builds the whole-set answer exactly as before. Nothing is queued and nothing is read whole before the
+      form of the stored snapshot is known.
+    #>
+    # -Request: the HTTP request (its query string is read here); -PageRequest: the page request itself (tests).
+    param([AllowNull()][object]$Request = $null, [AllowNull()][object]$PageRequest = $null, [switch]$QueueRefresh, [AllowNull()][object]$Scope, [datetime]$NowUtc = [datetime]::UtcNow)
+    if ($null -eq $PageRequest -and $null -ne $Request) {
+        try { $PageRequest = ConvertTo-PimActiveAssignmentsPageRequest -Query $Request.QueryString } catch { $PageRequest = $null }
+    }
+    if ($null -eq $PageRequest) { return $null }   # no ?page= : the whole-set answer
+    if ($null -eq $Scope) { return $null }
+    if (-not [bool]$Scope.isSuperAdmin -and $null -ne $Scope.profile) { return $null }
+    foreach ($fn in 'Get-PimSqlActiveAssignmentsForm', 'Invoke-PimSqlActiveAssignmentsQuery', 'Sync-PimSqlActiveAssignmentMarks', 'Get-PimActiveAssignmentsViewCounts', 'Get-PimTenantCacheStoreCs') {
+        if (-not (Get-Command $fn -ErrorAction SilentlyContinue)) { return $null }
+    }
+    $cs = "$(Get-PimTenantCacheStoreCs)"
+    if (-not $cs.Trim()) { return $null }
+    $form = ''
+    try { $form = "$(Get-PimSqlActiveAssignmentsForm -ConnectionString $cs)" } catch { return $null }   # the whole-set path says why in its own words
+    if ($form -ne 'table') { return $null }
+
+    $body = Get-PimActiveAssignmentsCached -HeaderOnly -QueueRefresh:$QueueRefresh -Reason $(if ($QueueRefresh) { 'revoke-tab-refresh' } else { 'revoke-tab' }) -NowUtc $NowUtc
+    $sizeDefault = Get-PimActiveAssignmentsPageSizeDefault
+    $size = [int]$PageRequest.pageSize; if ($size -le 0) { $size = $sizeDefault }
+    $sizeMax = Get-PimActiveAssignmentsPageSizeMax; if ($size -gt $sizeMax) { $size = $sizeMax }
+    $body['paged'] = $true
+    $body['page'] = [int]$PageRequest.page; $body['pageSize'] = $size; $body['pageCount'] = 0; $body['totalFiltered'] = 0
+    $body['managedKnown'] = $false
+    $body.ownKnown = [ordered]@{ product = $false; support = $false; breakGlass = $false }
+    $body.ownErrors = @(); $body['productPrincipalIds'] = @(); $body['supportPrincipalIds'] = @()
+    $sid = [long]0
+    [void][long]::TryParse("$($body['snapshotId'])", [ref]$sid)
+    if ([bool]$body['snapshotMissing'] -or "$($body['snapshotReadError'])".Trim() -or $sid -le 0) {
+        # nothing to page: the missing / could-not-be-loaded answer, as the whole-set path gives it
+        return ,([System.Text.Encoding]::UTF8.GetBytes((ConvertTo-PimActiveAssignmentsPagedJson -Body $body -Rows @())))
+    }
+
+    # the marks: MANAGED (the engine's 'managed-live' list) + PIM Manager's own identities / support app / break-glass
+    $mlStamp = ''; $mlKnown = $false
+    try {
+        $st = Get-PimTenantCacheStamps -Kinds @('managed-live')
+        if ($null -ne $st -and [bool]$st.ok -and $st.stamps.ContainsKey('managed-live')) { $mlKnown = $true; $mlStamp = "$($st.stamps['managed-live'])" }
+    } catch { $mlKnown = $false }
+    $ctx = Get-PimActiveAssignmentsMarksContext -ConnectionString $cs -SnapshotId $sid -NowUtc $NowUtc
+    try {
+        $mk = Get-PimActiveAssignmentMarksKey -ManagedStamp $mlStamp -ManagedKnown $mlKnown -Product @($ctx.product) -Support @($ctx.support) -BreakGlass @($ctx.breakGlass)
+        [void](Sync-PimSqlActiveAssignmentMarks -ConnectionString $cs -SnapshotId $sid -MarksKey $mk -ManagedKnown $mlKnown -Product @($ctx.product) -Support @($ctx.support) -BreakGlass @($ctx.breakGlass))
+    } catch { $body['managedError'] = "the marks could not be brought up to date: $($_.Exception.Message)" }
+    if ($mlKnown) {
+        $body['managedKnown'] = $true
+        $mf = $script:PimAaManagedFacts
+        if ($null -eq $mf -or "$($mf.stamp)" -cne $mlStamp -or "$($mf.cs)" -cne $cs) {
+            $mf = @{ stamp = $mlStamp; cs = $cs; computedUtc = ''; complete = $false }
+            try {
+                $fr = @(Invoke-PimSqlQuery -ConnectionString $cs -Sql "SELECT JSON_VALUE(ValueJson, '`$.computedUtc') AS ComputedUtc, JSON_VALUE(ValueJson, '`$.complete') AS Complete FROM pim.TenantCache WHERE Kind = @k AND ISJSON(ValueJson) = 1" -Parameters @{ k = 'managed-live' })
+                if ($fr.Count) { $mf.computedUtc = "$($fr[0].ComputedUtc)"; $mf.complete = ("$($fr[0].Complete)".Trim().ToLowerInvariant() -eq 'true') }
+                $script:PimAaManagedFacts = $mf
+            } catch { }
+        }
+        $body['managedComputedUtc'] = "$($mf.computedUtc)"
+        $body['managedComplete'] = [bool]$mf.complete
+    }
+    # (property form on purpose: a source check finds the whole-set handler by its first `$body['ownKnown'] =`)
+    $body.ownKnown = $ctx.ownKnown
+    $body.ownErrors = @($ctx.errors)
+    $body['productPrincipalIds'] = @($ctx.product)
+    $body['supportPrincipalIds'] = @($ctx.support)
+    if ([bool]$ctx.supportNameFallback) { $body['supportNameFallback'] = $true }
+
+    # REQ 100.112 holds here too: stored rows that cannot be read, or that are not all there, are "the stored read could
+    # not be loaded (<reason>)" -- never an empty list, never "no snapshot yet", and nothing is queued because of it.
+    $res = $null; $view = $null; $loadErr = ''
+    try {
+        $res = Invoke-PimSqlActiveAssignmentsQuery -ConnectionString $cs -SnapshotId $sid -Type "$($PageRequest.type)" -Search "$($PageRequest.q)" `
+                  -Aliases @($PageRequest.aliases) -ScopeIs @($PageRequest.scopeIs) -Sort "$($PageRequest.sort)" -Descending:([bool]$PageRequest.descending) `
+                  -Page ([int]$PageRequest.page) -PageSize $size -ShowDeleted ([bool]$PageRequest.showDeleted) -ShowManaged ([bool]$PageRequest.showManaged) `
+                  -ShowProduct ([bool]$PageRequest.showProduct) -ShowSupport ([bool]$PageRequest.showSupport) -ShowBreakGlass ([bool]$PageRequest.showBreakGlass)
+        $view = Get-PimActiveAssignmentsViewCounts -Groups @($res.groups) -ShowDeleted ([bool]$PageRequest.showDeleted) -ShowManaged ([bool]$PageRequest.showManaged) `
+                  -ShowProduct ([bool]$PageRequest.showProduct) -ShowSupport ([bool]$PageRequest.showSupport) -ShowBreakGlass ([bool]$PageRequest.showBreakGlass)
+        $expected = -1
+        if ("$($body['rowCount'])".Trim() -match '^\d+$') { $expected = [long]"$($body['rowCount'])" }
+        if ($expected -ge 0 -and [long]$view.total -ne $expected) { $loadErr = "the stored rows are incomplete ($([long]$view.total) of $expected)" }
+    } catch {
+        Write-Warning ("  [active-assignments] the stored rows could not be read: {0}" -f $_.Exception.Message)
+        $loadErr = "$($_.Exception.Message)"
+        if (Get-Command ConvertTo-PimActiveAssignmentsReadErrorText -ErrorAction SilentlyContinue) { $loadErr = "$(ConvertTo-PimActiveAssignmentsReadErrorText -Message $loadErr)" }
+        if (-not $loadErr.Trim()) { $loadErr = 'the stored rows could not be read' }
+    }
+    if ($loadErr) {
+        $body['ok'] = $false
+        $body['error'] = "The stored read could not be loaded ($loadErr)."
+        $body['snapshotReadError'] = $loadErr
+        $body['snapshotMissing'] = $false
+        $body['cacheHit'] = $false
+        $body['hint'] = "$($body['error']) A snapshot is stored; no new read of the tenant was asked for because of this."
+        return ,([System.Text.Encoding]::UTF8.GetBytes((ConvertTo-PimActiveAssignmentsPagedJson -Body $body -Rows @())))
+    }
+    $body['view'] = $view
+    $body['ownCounts'] = $view.own
+    $body['totalFiltered'] = [long]$res.filtered
+    $body['pageSize'] = [int]$res.pageSize
+    $body['pageCount'] = [int][math]::Ceiling([double]$res.filtered / [double]$res.pageSize)
+    $body['aliasMax'] = Get-PimActiveAssignmentsAliasMax
+    return ,([System.Text.Encoding]::UTF8.GetBytes((ConvertTo-PimActiveAssignmentsPagedJson -Body $body -Rows @($res.rows))))
+}
 
 function Test-PimActiveAssignmentsResponseCacheClearingRequest {
     # PURE. Which write requests change what the page's answer is built from, beyond what the key already carries:
@@ -20655,6 +20876,9 @@ function Handle-Request {
                 if ($stateOnly) { Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimActiveAssignmentsState); return 200 }
                 # REQ 100.112 (D): a repeat load of the unfiltered answer is served from memory (not ?refresh=1, not a delegated caller).
                 $aaScope = Get-PimManagerCallerScope
+                # REQ 100.114 (2): ?page=N = counts + ONE page from SQL; $null = not a paged case, the whole set below.
+                $aaPaged = Get-PimActiveAssignmentsPagedAnswer -Request $req -QueueRefresh:$queueRefresh -Scope $aaScope
+                if ($null -ne $aaPaged) { Write-PimJsonBytesResponse -Response $resp -Status 200 -Bytes $aaPaged; return 200 }
                 $aaKept = Get-PimActiveAssignmentsResponseCacheLookup -QueueRefresh:$queueRefresh -Scope $aaScope
                 if ($null -ne $aaKept.bytes) { Write-PimJsonBytesResponse -Response $resp -Status 200 -Bytes $aaKept.bytes; return 200 }
                 $body = Get-PimActiveAssignmentsCached -QueueRefresh:$queueRefresh -Reason $(if ($queueRefresh) { 'revoke-tab-refresh' } else { 'revoke-tab' })
