@@ -2,12 +2,16 @@
   "id": "powerbi",
   "name": "Microsoft Power BI / Fabric (workspace roles)",
   "auth": "powerbi",
-  "status": "structure built v2.4.181 (fits the connector schema: static roles + per-row workspace scope). Live-validation pending a Power BI service principal with tenant/workspace access (the test SPN saw 0 workspaces).",
-  "permissionsNeeded": ["Power BI: Tenant.ReadWrite.All or workspace admin; 'Allow service principals to use Power BI APIs' tenant setting"],
+  "transport": "powerbi-admin",
+  "listOncePerPath": true,
+  "status": "PIM 100.142 (built, not live-proven): list / add / remove through the Power BI ADMIN api only (GetGroupUsersAsAdmin, AddUserAsAdmin, DeleteUserAsAdmin) -- the engine identity is never a member of a workspace.",
+  "permissionsNeeded": ["Entra directory role 'Fabric Administrator' for the engine identity (Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -GrantFabricAdministrator)", "Fabric tenant settings > Admin API settings: 'Service principals can access read-only admin APIs' and 'Service principals can access admin APIs used for updates' for a security group the engine identity is in", "Fabric tenant settings > Developer settings: 'Service principals can call Fabric public APIs'"],
   "prerequisites": {
-    "tokenAdapter": "auth=powerbi -> token for https://analysis.windows.net/powerbi/api, supplied via $global:PIM_WorkloadTokens['powerbi'] (launcher-minted) or Get-AzAccessToken.",
+    "tokenAdapter": "auth=powerbi -> token for https://analysis.windows.net/powerbi/api (the engine identity).",
+    "adminApiOnly": "PIM 100.142: every call is a Power BI ADMIN api call (/v1.0/myorg/admin/groups/{workspace}/users). The admin api allows 200 requests per hour per tenant: one listing per workspace per run, and a 429 is waited out (Retry-After), never hammered.",
     "scopeIsWorkspace": "Row Scope = the Power BI workspace (group) id; the PIM group is added to that workspace with the access right named by RoleName.",
-    "rolesAreFixed": "Power BI workspace roles are a fixed enum (no list API) -- declared as a static roles array below."
+    "rolesAreFixed": "Power BI workspace roles are a fixed enum (no list API) -- declared as a static roles array below.",
+    "addOnly": "Owner 2026-10-14 ('Keep refusing for now'): this release only ADDS. A Remove row is refused and reported exactly as before (no DELETE is ever made); removal comes after the add path is proven live."
   },
   "roles": [
     { "id": "Admin", "name": "Admin", "description": "Workspace admin" },
@@ -19,14 +23,15 @@
     "baseUrl": "https://api.powerbi.com",
     "listAssignments": {
       "method": "GET",
-      "path": "/v1.0/myorg/groups/{scope}/users",
+      "path": "/v1.0/myorg/admin/groups/{scope}/users",
       "itemsPath": "value",
       "assignmentId": "identifier",
-      "principalIds": "identifier"
+      "principalIds": "identifier",
+      "roleId": "groupUserAccessRight"
     },
     "assign": {
       "method": "POST",
-      "path": "/v1.0/myorg/groups/{scope}/users",
+      "path": "/v1.0/myorg/admin/groups/{scope}/users",
       "body": {
         "identifier": "{groupId}",
         "principalType": "Group",
@@ -35,7 +40,7 @@
     },
     "remove": {
       "method": "DELETE",
-      "path": "/v1.0/myorg/groups/{scope}/users/{assignmentId}"
+      "path": "/v1.0/myorg/admin/groups/{scope}/users/{assignmentId}"
     }
   }
 }

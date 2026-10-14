@@ -30,7 +30,12 @@
       PowerBI      security group (create) | engine identity is a member (add) | no admin-consent Power BI application
                    permission on it (Microsoft's rule for read-only admin APIs; reported, never removed automatically) |
                    Fabric tenant setting "Service principals can access read-only admin APIs" for that group (Fabric
-                   admin API, keeping every existing group; portal step when the caller may not).
+                   admin API, keeping every existing group; portal step when the caller may not) | the engine identity
+                   holds the Entra directory role Fabric Administrator (PIM 100.142: PIM gives workspace roles through
+                   the Power BI ADMIN api). Assigning it is OPT-IN (-GrantFabricAdministrator): a permanent, active
+                   assignment at the directory scope, looked up by name, read back; an existing one is kept. The Fabric
+                   setting "Service principals can access admin APIs used for updates" is NEVER switched by this script --
+                   it prints the one instruction for it.
       AzureRbac    User Access Administrator (or Owner) for the engine identity at every scope in your
                    PIM-Assignments-Azure-Resources rows (+ -AzureScope). Assigning it is OPT-IN
                    (-GrantAzureUserAccessAdministrator): it is standing privilege (SEC-34).
@@ -59,6 +64,10 @@
 
 .EXAMPLE
     .\Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -TenantId <tenant-id> -EngineObjectId <engine-object-id>
+
+.EXAMPLE
+    # Power BI through the admin API (PIM 100.142): also make the engine identity a Fabric Administrator (opt-in).
+    .\Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -TenantId <tenant-id> -EngineObjectId <engine-object-id> -GrantFabricAdministrator
 
 .EXAMPLE
     # Sentinel on a dedicated workspace for Defender Data Operations roles (opt-in: billed per GB ingested):
@@ -100,7 +109,10 @@ param(
     [switch]$EnableSentinel,
     [string]$PowerBiSecurityGroupName = 'grp-pim-powerbi-admin-api',
     [string[]]$AzureScope = @(),
-    [switch]$GrantAzureUserAccessAdministrator
+    [switch]$GrantAzureUserAccessAdministrator,
+    # PIM 100.142 (PowerBI only, OPT-IN): assign the Entra directory role Fabric Administrator to the engine identity
+    # (permanent, active, directory scope) -- the Power BI admin API that gives the workspace roles needs it.
+    [switch]$GrantFabricAdministrator
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Rest.ps1')
@@ -118,6 +130,7 @@ function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 
 if ("$TenantId".Trim() -notmatch '^[0-9a-fA-F-]{36}$') { throw "-TenantId must be the tenant GUID (got '$TenantId')." }
+if ($GrantFabricAdministrator -and $Workload -ne 'PowerBI') { throw '-GrantFabricAdministrator belongs to -Workload PowerBI (the Power BI admin API needs it); nothing was changed.' }
 $unknown = @($ConfirmPortalStep | Where-Object { "$_".Trim() -and -not (Get-PimWorkloadPrereqCheckDef -Id "$_".Trim()) })
 if ($unknown.Count) { throw "-ConfirmPortalStep: unknown check id(s): $($unknown -join ', '). Known for ${Workload}: $((@((Get-PimWorkloadPrereqCatalog -Workload $Workload)[$Workload].checks) | ForEach-Object { $_.id }) -join ', ')" }
 $hasStoreHelpers = [bool](Get-Command Connect-PimSetupStore -ErrorAction SilentlyContinue)
@@ -150,7 +163,8 @@ if ($mode -eq 'certificate') {
     $graphScopes = @('Application.Read.All', 'AppRoleAssignment.ReadWrite.All') + @(switch ($Workload) {
         'DefenderXdr' { 'RoleManagement.Read.Defender' }
         'Intune'      { 'DeviceManagementRBAC.Read.All' }
-        'PowerBI'     { 'Group.ReadWrite.All', 'GroupMember.ReadWrite.All' }
+        # PIM 100.142: + the directory role read (Fabric Administrator check); write only with -GrantFabricAdministrator.
+        'PowerBI'     { 'Group.ReadWrite.All', 'GroupMember.ReadWrite.All', $(if ($GrantFabricAdministrator) { 'RoleManagement.ReadWrite.Directory' } else { 'RoleManagement.Read.Directory' }) }
         'EntraRoles'  { 'Organization.Read.All' }
     })
     Write-Host "Signing in to Microsoft Graph in the browser (permissions asked: $($graphScopes -join ', '))..." -ForegroundColor Yellow
@@ -209,6 +223,7 @@ $ctx = @{
     confirm = @($ConfirmPortalStep); skipDataOperations = [bool]$SkipDataOperations; sentinelWorkspaceId = $SentinelWorkspaceId
     enableSentinel = [bool]$EnableSentinel; hostingSubscriptionId = $SubscriptionId; hostingResourceGroup = $ResourceGroup; pollSeconds = 5
     powerBiGroupName = $PowerBiSecurityGroupName; azureScopes = @($AzureScope); grantUaa = [bool]$GrantAzureUserAccessAdministrator
+    grantFabricAdmin = [bool]$GrantFabricAdministrator   # PIM 100.142: opt-in, PowerBI only
     engineCertThumbprint = $EngineCertThumbprint; graphSp = $null; engineAssignments = $null; azureRows = @()
     should = { param($t, $a) $__cmdlet.ShouldProcess($t, $a) }.GetNewClosure()
     whatIf = [bool]$WhatIfPreference   # the runner says which LATER step cannot be previewed when an earlier fix was not made
@@ -234,6 +249,12 @@ $refusedChecks = @($checks | Where-Object { $_ -and $_.PSObject.Properties['refu
 if ($refusedChecks.Count) {
     Write-Host '  Graph refused a change for the identity signed in here (HTTP 403). Do this yourself, then press Check again in PIM Manager:' -ForegroundColor Yellow
     foreach ($c in $refusedChecks) { Write-Host "      $($c.manualStep)" -ForegroundColor Yellow }
+}
+# PIM 100.142: the ONE plain instruction for the Fabric tenant settings the admin API needs. Printed, never set by this
+# script for the "used for updates" setting -- switching on admin-API writes for service principals is the tenant's call.
+if ($Workload -eq 'PowerBI') {
+    Write-Host '  Fabric tenant settings (once, by a Fabric administrator):' -ForegroundColor Cyan
+    Write-Host "      $(Get-PimFabricAdminApiInstruction -GroupName $PowerBiSecurityGroupName)" -ForegroundColor Cyan
 }
 $stateCol = switch ($result.state) { 'ok' { 'Green' } 'failed' { 'Red' } default { 'Yellow' } }
 Write-Host "  => $Workload prerequisites: $($result.state.ToUpperInvariant())" -ForegroundColor $stateCol

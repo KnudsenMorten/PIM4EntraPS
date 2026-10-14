@@ -8821,7 +8821,27 @@ function Get-PimManagerWorkloadPrereqState {
     if ($tj) { $envVals.subscriptionId = $tj.subscriptionId; $envVals.resourceGroup = $tj.resourceGroup; $envVals.tickJobName = $tj.jobName }
     $view = @(Get-PimWorkloadPrereqView -Stored $stored -Env $envVals -NowUtc ([datetime]::UtcNow) -StaleDays (Get-PimWorkloadPrereqStaleDays))
     if ($storeErr) { foreach ($v in $view) { $v.state = 'unreadable'; $v.chip = 'amber'; $v.command = ''; $v.next = (Get-PimWorkloadPrereqNextStep -State 'unreadable') } }
-    return @{ view = $view; storeErr = $storeErr }
+    return @{ view = $view; storeErr = $storeErr; stored = $stored; env = $envVals }
+}
+function Get-PimManagerPowerBiAdminNotice {
+    <#
+      PIM 100.142 (4). The calm line + the two-line command the page shows where a Power BI workload row or a discovered
+      workspace is staged -- ONLY while the engine's currently failing items hold POWERBI-ADMIN-NOT-GRANTED (the last run of
+      the workload job hit it). Read-only; the command is never run by PIM Manager (the customer runs it).
+    #>
+    param([hashtable]$State)
+    $fails = @()
+    if (Get-Command Get-PimEngineItemFailures -ErrorAction SilentlyContinue) { try { $fails = @(Get-PimEngineItemFailures) } catch { $fails = @() } }
+    $rec = $null; $oid = ''; $grp = ''
+    try {
+        $rec = Get-PimWorkloadPrereqStoredRecord -Stored $State.stored -Workload 'PowerBI'
+        if ($rec) {
+            $oid = "$(Get-PimWorkloadPrereqRecordField -Object $rec -Name 'engineObjectId')".Trim()
+            $grp = "$((Get-PimPowerBiPrereqFacts -Record $rec).groupName)".Trim()
+        }
+    } catch { $oid = ''; $grp = '' }
+    $envH = @{}; if ($State.env -is [hashtable]) { $envH = $State.env }
+    return (Get-PimPowerBiAdminNotice -Failures $fails -Env $envH -EngineObjectId $oid -GroupName $grp)
 }
 function Get-PimManagerPolicyHoldState {
     <#
@@ -9119,7 +9139,7 @@ function Get-PimManagerAttention {
             if ($bgv -and $bgv.open) {
                 $items.Add([ordered]@{ id = 'breakglass'; tab = 'emergency'; count = 1
                     text = ("1 break-glass account change raised by {0} is waiting for a second SuperAdmin" -f $(if ("$($bgv.maker)".Trim()) { "$($bgv.maker)" } else { 'an administrator' }))
-                    canAct = [bool]$bgv.canApprove; who = 'a SuperAdmin other than the one who raised it approves it' })
+                    canAct = [bool]$bgv.canApprove; who = $(if ($bgv.selfApprove) { 'a SuperAdmin approves it (self-approval is on)' } else { 'a SuperAdmin other than the one who raised it approves it' }) })
             }
         }
     } catch { $errs.Add("break-glass request: $($_.Exception.Message)") }
@@ -11124,6 +11144,53 @@ function Get-PimManagerBreakGlassCheckers {
     return @(Get-PimBreakGlassCheckerCandidates -AccessModel $ma -EnvSuperAdmins "$env:PIM_SuperAdmins" -Maker $Maker)
 }
 
+function Get-PimManagerBreakGlassSelfApprove {
+    # PIM 100.138 (owner 2026-10-13, "Self-approve covers it"): is the setting ApprovalSelfApprove ON for the
+    # break-glass list? FAIL CLOSED -- absent, unreadable, no store, or anything but enabled = true is OFF, so the
+    # second SuperAdmin stays. Only the literal boolean true (or the text 'true') counts as ON.
+    $on = $false
+    try {
+        $so = Get-PimManagerSettingObject -Name 'ApprovalSelfApprove'
+        if ($so -and $so.PSObject.Properties['enabled']) {
+            $ev = $so.enabled
+            $on = [bool](($ev -is [bool] -and $ev) -or ($ev -is [string] -and "$ev".Trim() -eq 'true'))
+        }
+    } catch { $on = $false }
+    return [bool]$on
+}
+
+function Invoke-PimManagerBreakGlassApprove {
+    <#
+      PIM 100.138 -- THE APPROVE ROUTE'S SERVER-SIDE RULE (POST /api/settings/breakglass-accounts/request/approve).
+        * Only a SuperAdmin approves -- an Admin (or less) is refused 'not-superadmin', whatever ApprovalSelfApprove says.
+        * The maker may approve their own request ONLY when ApprovalSelfApprove is ON (Get-PimManagerBreakGlassSelfApprove,
+          fail-closed); OFF = the library refuses the maker 'same-person' exactly as before.
+      Returns the Invoke-PimBreakGlassChangeApproval outcome (+ selfApproved). THROWS only on a store failure.
+    #>
+    param([Parameter(Mandatory)][string]$RequestId, [string]$Note = '')
+    $role = Get-PimManagerRole
+    if ("$($role.role)" -ne 'SuperAdmin') {
+        return [pscustomobject]@{ ok = $false; code = 'not-superadmin'; reason = 'only a SuperAdmin can approve a break-glass change'; request = $null; accounts = @(); selfApproved = $false }
+    }
+    $self = [bool](Get-PimManagerBreakGlassSelfApprove)
+    $res = Invoke-PimBreakGlassChangeApproval -ConnectionString "$($script:PimSqlCs)" -RequestId $RequestId -Checker "$($role.identity)" -Note $Note -AllowSelfApprove:$self
+    $sa = [bool]($res.request -and $res.request.selfApproved)
+    $res | Add-Member -NotePropertyName selfApproved -NotePropertyValue $sa -Force
+    return $res
+}
+
+function Write-PimManagerBreakGlassApplyAudit {
+    # PIM 100.138: the audit row for an APPLIED approval. A maker approving their own request (ApprovalSelfApprove ON)
+    # is written as 'settings.breakglass-accounts.self-approved' with selfApproved = true; any other approval keeps
+    # 'settings.breakglass-accounts.applied'. -Audit already carries who (checker), maker, added, removed, justification.
+    param([Parameter(Mandatory)][object]$Request, [Parameter(Mandatory)][System.Collections.IDictionary]$Audit)
+    $self = [bool]($Request -and $Request.selfApproved)
+    $Audit['selfApproved'] = $self
+    $evt = if ($self) { 'settings.breakglass-accounts.self-approved' } else { 'settings.breakglass-accounts.applied' }
+    Write-PimManagerAuditEvent -Action $evt -Target 'settings:breakglass-accounts' -Before @{ accounts = @($Request.snapshot) } -After $Audit -Result 'ok'
+    return $evt
+}
+
 function ConvertTo-PimManagerBreakGlassRequestView {
     param([AllowNull()][object]$Request)
     if ($null -eq $Request) { return $null }
@@ -11133,9 +11200,10 @@ function ConvertTo-PimManagerBreakGlassRequestView {
     $isSuper = ("$($role.role)" -eq 'SuperAdmin')
     $open = [bool](Test-PimBreakGlassChangeOpen -Request $r)
     $isMaker = ((ConvertTo-PimBreakGlassIdentityKey -Identity $me) -eq (ConvertTo-PimBreakGlassIdentityKey -Identity $r.maker))
+    $selfOn = [bool](Get-PimManagerBreakGlassSelfApprove)     # PIM 100.138: fail-closed
     $others = @()
     if ($open) { $others = @(Get-PimManagerBreakGlassCheckers -Maker $r.maker) }
-    $only = [bool]($open -and $others.Count -eq 0)
+    $only = [bool]($open -and $others.Count -eq 0 -and -not $selfOn)
     $onlyNote = ''
     if ($only) {
         $onlyNote = ('No other SuperAdmin is configured, so nobody can approve this request in the Manager. Grant a second SuperAdmin ' +
@@ -11147,8 +11215,10 @@ function ConvertTo-PimManagerBreakGlassRequestView {
         maker = $r.maker; justification = $r.justification; createdUtc = $r.createdUtc; expiresUtc = $r.expiresUtc
         added = @($r.added); removed = @($r.removed); proposed = @($r.proposed); snapshot = @($r.snapshot); confirmEmpty = [bool]$r.confirmEmpty
         checker = $r.checker; decidedUtc = $r.decidedUtc; closedBy = $r.closedBy; closedUtc = $r.closedUtc; closeNote = $r.closeNote; applied = @($r.applied)
+        selfApproved = [bool]$r.selfApproved
         isMaker = [bool]$isMaker
-        canApprove = [bool]($open -and $isSuper -and -not $isMaker)
+        selfApprove = [bool]$selfOn
+        canApprove = [bool]($open -and $isSuper -and (-not $isMaker -or $selfOn))
         canReject  = [bool]($open -and $isSuper -and -not $isMaker)
         canCancel  = [bool]($open -and $isSuper -and $isMaker)
         otherSuperAdmins = [int]$others.Count
@@ -13449,7 +13519,13 @@ function Handle-Request {
                 # Operator 2026-10-02: "i need to have a way to see it is working and green" -- the worker's per-job status
                 # (the same heartbeat check the Jobs page badges use), shown at the top of the card.
                 $v['worker'] = @()
-                if (Get-Command Get-PimHybridWorkerJobStatus -ErrorAction SilentlyContinue) {
+                # PIM 100.139: On-premises Active Directory switched OFF under Features -- the card says so in one calm line and
+                # shows no worker status (no red "needs attention" box for a worker nobody installed).
+                $hyOff = $false
+                if (Get-Command Test-PimHybridAdFeatureOff -ErrorAction SilentlyContinue) { $hyOff = [bool](Test-PimHybridAdFeatureOff) }
+                elseif (Get-Command Test-PimFeatureEnabled -ErrorAction SilentlyContinue) { try { $hyOff = -not [bool](Test-PimFeatureEnabled -Key 'hybrid.ad') } catch { $hyOff = $true } }
+                $v['featureOn'] = (-not $hyOff)
+                if (-not $hyOff -and (Get-Command Get-PimHybridWorkerJobStatus -ErrorAction SilentlyContinue)) {
                     $v['worker'] = @(foreach ($t in @('hybrid-ad-sync', 'hybrid-ad-sync-servers', 'hybrid-ad-changes', 'hybrid-ad-apply', 'hybrid-ad-groups', 'hybrid-ad-servers')) {
                         $s = Get-PimHybridWorkerJobStatus -Type $t
                         if ($s) { [ordered]@{ type = $t; state = "$($s.state)"; host = "$($s.host)"; lastSeenUtc = "$($s.lastSeenUtc)"; minutesAgo = $s.minutesAgo; fresh = [bool]$s.fresh } }
@@ -15106,6 +15182,9 @@ function Handle-Request {
                     runningCount = [int]$vm.runningCount
                     overdueCount = $(if ($vm.PSObject.Properties['overdueCount']) { [int]$vm.overdueCount } else { 0 })
                     failingCount = $(if ($vm.PSObject.Properties['failingCount']) { [int]$vm.failingCount } else { 0 })
+                    # PIM 100.48: genuinely stuck jobs + what the "Needs attention" banner and the menu number count (failing or stuck)
+                    stuckCount     = $(if ($vm.PSObject.Properties['stuckCount']) { [int]$vm.stuckCount } else { 0 })
+                    attentionCount = $(if ($vm.PSObject.Properties['attentionCount']) { [int]$vm.attentionCount } else { 0 })
                     heldCount    = $(if ($vm.PSObject.Properties['heldCount']) { [int]$vm.heldCount } else { 0 })   # 71.13 needs approval
                     # §95.2o job lanes: runs waiting for an area / a slot, Run now presses queued, how many run side by side
                     waitingCount = $(if ($vm.PSObject.Properties['waitingCount']) { [int]$vm.waitingCount } else { 0 })
@@ -16414,7 +16493,8 @@ function Handle-Request {
         #   PUT  /api/settings/breakglass-accounts              (SuperAdmin) { accounts, justification, confirmEmpty?, baseHash? }
         #                                                        -> 202 { pending, requestId, diff, expiresUtc } -- NOT applied
         #   GET  /api/settings/breakglass-accounts/request      (Reader+) the current request with its diff
-        #   POST /api/settings/breakglass-accounts/request/approve (SuperAdmin, NOT the maker) { requestId, note? }
+        #   POST /api/settings/breakglass-accounts/request/approve (SuperAdmin, NOT the maker -- unless ApprovalSelfApprove
+        #                                                        is ON: then the maker too, audited .self-approved; PIM 100.138) { requestId, note? }
         #   POST /api/settings/breakglass-accounts/request/reject  (SuperAdmin, NOT the maker) { requestId, note? }
         #   POST /api/settings/breakglass-accounts/request/cancel  (the maker, still SuperAdmin) { requestId, note? }
         # Every outcome of every mutation is audited (settings.breakglass-accounts.*), refusals included.
@@ -16444,6 +16524,7 @@ function Handle-Request {
                 error             = "$($bgs.error)"
                 listHash          = $(if ($bgs.storeOk) { Get-PimBreakGlassListHash -Accounts @($bgs.storeAccounts) } else { '' })
                 makerChecker      = $true
+                selfApprove       = [bool](Get-PimManagerBreakGlassSelfApprove)     # PIM 100.138 (fail-closed)
                 me                = "$((Get-PimManagerRole).identity)"
                 request           = $bgReq
                 requestError      = $bgReqErr
@@ -16524,7 +16605,8 @@ function Handle-Request {
                 diff = [ordered]@{ added = @($bgR.added); removed = @($bgR.removed) }
                 expiresUtc = "$($bgR.expiresUtc)"; request = $bgView
                 onlySuperAdmin = [bool]$bgView.onlySuperAdmin
-                note = $(if ($bgView.onlySuperAdmin) { "Request raised -- NOT applied. $($bgView.onlySuperAdminNote)" } else { 'Request raised -- NOT applied. Another SuperAdmin must approve it before the list changes.' })
+                selfApprove = [bool]$bgView.selfApprove
+                note = $(if ($bgView.selfApprove) { 'Request raised -- NOT applied yet. Self-approval is on, so you can approve your own request.' } elseif ($bgView.onlySuperAdmin) { "Request raised -- NOT applied. $($bgView.onlySuperAdminNote)" } else { 'Request raised -- NOT applied. Another SuperAdmin must approve it before the list changes.' })
             })
             return 202
         }
@@ -16549,7 +16631,9 @@ function Handle-Request {
             if (-not $bgId) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'requestId is required' }; return 400 }
             $bgWho = "$((Get-PimManagerRole).identity)"
             try {
-                if ($bgAct -eq 'approve') { $bgRes = Invoke-PimBreakGlassChangeApproval -ConnectionString "$($script:PimSqlCs)" -RequestId $bgId -Checker $bgWho -Note $bgNote }
+                # PIM 100.138: the approve rule is Invoke-PimManagerBreakGlassApprove -- SuperAdmin only; the maker only
+                # when ApprovalSelfApprove is ON (read fail-closed). Enforced HERE, not by the button.
+                if ($bgAct -eq 'approve') { $bgRes = Invoke-PimManagerBreakGlassApprove -RequestId $bgId -Note $bgNote }
                 else { $bgRes = Close-PimBreakGlassChangeRequest -ConnectionString "$($script:PimSqlCs)" -RequestId $bgId -Actor $bgWho -Decision $bgAct -Note $bgNote }
             } catch {
                 $bgMsg = "$($_.Exception.Message)"
@@ -16562,7 +16646,8 @@ function Handle-Request {
             if ($bgRes.ok) {
                 if ($bgAct -eq 'approve') {
                     $bgAudit['accounts'] = @($bgRes.accounts)
-                    Write-PimManagerAuditEvent -Action 'settings.breakglass-accounts.applied' -Target 'settings:breakglass-accounts' -Before @{ accounts = @($bgR.snapshot) } -After $bgAudit -Result 'ok'
+                    # PIM 100.138: a maker approving their own request (ApprovalSelfApprove ON) is audited as SELF-APPROVED.
+                    [void](Write-PimManagerBreakGlassApplyAudit -Request $bgR -Audit $bgAudit)
                 } elseif ($bgAct -eq 'reject') {
                     Write-PimManagerAuditEvent -Action 'settings.breakglass-accounts.rejected' -Target 'settings:breakglass-accounts' -After $bgAudit -Result 'ok'
                 } else {
@@ -16580,7 +16665,7 @@ function Handle-Request {
             # was made); an EXPIRED one likewise; the maker approving/rejecting their own request is refused (403).
             $bgEvt = switch ("$($bgRes.code)") { 'stale' { 'settings.breakglass-accounts.stale' } 'expired' { 'settings.breakglass-accounts.expired' } 'failed' { 'settings.breakglass-accounts.apply-failed' } default { "settings.breakglass-accounts.$bgAct" } }
             Write-PimManagerAuditEvent -Action $bgEvt -Target 'settings:breakglass-accounts' -After $bgAudit -Result $(if ("$($bgRes.code)" -eq 'failed') { 'error' } else { 'refused' })
-            $bgCode = switch ("$($bgRes.code)") { 'same-person' { 403 } 'not-maker' { 403 } 'not-found' { 404 } 'failed' { 500 } default { 409 } }
+            $bgCode = switch ("$($bgRes.code)") { 'same-person' { 403 } 'not-maker' { 403 } 'not-superadmin' { 403 } 'not-found' { 404 } 'failed' { 500 } default { 409 } }
             Write-JsonResponse -Response $resp -Status $bgCode -Body ([ordered]@{
                 ok = $false; code = "$($bgRes.code)"; error = "$($bgRes.reason)"
                 request = $(if ($bgR) { ConvertTo-PimManagerBreakGlassRequestView -Request $bgR } else { $null })
@@ -20010,6 +20095,8 @@ function Handle-Request {
                 connectorWorkloads = (Get-PimWorkloadPrereqConnectorMap)
                 # REQ-W: workloads whose assignment is never held (Entra), so the GUI's held note follows the server rule.
                 ungatedWorkloads = @(Get-PimWorkloadPrereqUngated)
+                # PIM 100.142 (4): Power BI cannot be reached through the admin API yet -> one calm line + the two-line command.
+                powerBiAdmin = (Get-PimManagerPowerBiAdminNotice -State $__ps)
             })
             return 200
         }

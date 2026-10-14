@@ -298,11 +298,26 @@ $script:PimFailureRules = @(
     # workspace's users answered "HTTP 404 : PowerBIEntityNotFound" -- the workspace in the row does not exist, or PIM
     # Manager's identity is not a member/admin of it (Power BI answers the same for both). It was UNCLASSIFIED. Ahead of
     # every generic rule: a 404 here is neither a replication delay nor a missing Entra object.
+    # PIM 100.142 (owner 2026-10-13: "Admin API, no membership"): the powerbi connector calls ONLY the Power BI ADMIN api
+    # (/v1.0/myorg/admin/groups/{workspace}/users). A 401 / 403 there -- or Power BI's own "PowerBINotAuthorized" / "API is not
+    # accessible for application" answer -- means PIM Manager's identity is not a Fabric Administrator yet, or the Fabric
+    # tenant settings do not let service principals use the admin APIs. The connector tags it POWERBI-ADMIN-NOT-GRANTED
+    # (Invoke-PimPowerBiAdminRequest, PIM-WorkloadConnectors.ps1); the raw admin-api answer is matched too (discovery reads
+    # /admin/groups). Ahead of POWERBI-WORKSPACE-NOT-FOUND and of the generic PERMISSION-DENIED: the cause is one grant.
+    @{ code = 'POWERBI-ADMIN-NOT-GRANTED'
+       match = { param($m, $row) ($m -match 'POWERBI-ADMIN-NOT-GRANTED') -or
+                 (($m -match '(?i)api\.powerbi\.com/v1\.0/myorg/admin/') -and ($m -match '(?i)HTTP 40[13]\b|PowerBINotAuthorized|API is not accessible for application')) }
+       title = 'PIM Manager cannot use the Power BI admin API yet'
+       cause = 'PIM Manager''s identity is not a Fabric Administrator yet, or Fabric does not let it use the admin API. PIM Manager gives Power BI workspace roles through the Power BI admin API only, so nothing was given or taken away in Power BI for this row.'
+       remedy = 'Run the workload prerequisites script once as a Global Administrator (two lines: Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -GrantFabricAdministrator; PIM Manager shows them with this tenant''s values) -- it makes the identity a Fabric Administrator. Then in the Fabric admin portal, Tenant settings > Admin API settings, switch on "Service principals can access read-only admin APIs" and "Service principals can access admin APIs used for updates" for a security group the identity is in. The next run applies the row.'
+       retryable = $true; severity = 'environment'
+       fixes = @() }
+
     @{ code = 'POWERBI-WORKSPACE-NOT-FOUND'
        match = { param($m, $row) $m -match '(?i)PowerBIEntityNotFound' }
-       title = 'The Power BI workspace was not found, or PIM Manager has no access to it'
-       cause = 'Power BI answered PowerBIEntityNotFound for the workspace in this row: either no workspace has that id, or the identity PIM Manager runs as is not a member (admin) of it -- Power BI gives the same answer for both. Nothing was assigned for this row.'
-       remedy = 'Check the workspace id (Resource) on the Workloads row and correct it, or add the identity PIM Manager runs as to the workspace as Admin (Power BI > the workspace > Manage access). The next run assigns the role.'
+       title = 'The Power BI workspace was not found'
+       cause = 'Power BI answered PowerBIEntityNotFound for the workspace in this row. Through the admin API (PIM 100.142) that means no workspace has that id -- it was deleted, or the row names a wrong id. Nothing was assigned for this row.'
+       remedy = 'Check the workspace id on the Workloads row and correct it, or take the row out when the workspace is gone. The next run assigns the role.'
        retryable = $true; severity = 'environment'
        fixes = @() }
 
@@ -683,11 +698,17 @@ function Get-PimFailureSolutionCatalog {
             affected = 'Nothing is applied by this row. Everything else is applied.'
             steps = @('Open Advanced View (grid), fill in the Resource column on that row (Workload templates shows what the workload expects) and commit.', $stop)
             after = $next }
-        'POWERBI-WORKSPACE-NOT-FOUND' = @{ short = 'the Power BI workspace was not found, or PIM Manager''s identity has no access to it'
-            what = 'Power BI did not find the workspace of a workload access, or the identity PIM Manager runs as has no access to it: {item}.'
+        'POWERBI-ADMIN-NOT-GRANTED' = @{ short = 'PIM Manager''s identity is not a Fabric Administrator yet, or Fabric does not let it use the admin API'
+            what = 'PIM Manager cannot reach Power BI yet: its identity is not a Fabric Administrator yet, or Fabric does not let it use the admin API: {item}.'
+            affected = 'Only these Power BI workspace roles: nothing was given or taken away in Power BI. Everything else is applied.'
+            steps = @('A Global Administrator runs the workload prerequisites script once -- the two lines PIM Manager shows next to the Power BI rows (Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -GrantFabricAdministrator). It makes PIM Manager''s identity a Fabric Administrator.',
+                      'In the Fabric admin portal, Tenant settings > Admin API settings: switch on "Service principals can access read-only admin APIs" and "Service principals can access admin APIs used for updates" for Specific security groups, with a group PIM Manager''s identity is in.')
+            after = 'The next run gives the workspace roles, and the status turns OK by itself. A Fabric setting can take about 15 minutes to apply.' }
+        'POWERBI-WORKSPACE-NOT-FOUND' = @{ short = 'the Power BI workspace was not found'
+            what = 'Power BI does not have the workspace a workload access names: {item}.'
             affected = 'Only these workspace roles: they are not given. Nothing was changed in Power BI, and everything else is applied.'
-            steps = @('Open Advanced View (grid) and check the workspace (Resource) on the Workloads row; correct it and commit in Pending changes.',
-                      'If the workspace is right: in Power BI open the workspace, Manage access, and add the identity PIM Manager runs as as Admin.')
+            steps = @('Open Advanced View (grid) and check the workspace id on the Workloads row; correct it and commit in Pending changes.',
+                      'If the workspace was deleted: take the row out in Advanced View (grid) and commit in Pending changes.')
             after = $next }
         'WORKLOAD-CONTAINER-MISSING' = @{ short = 'the group is not set up inside the workload yet'
             what = 'The group is not set up inside the workload yet, so the role cannot be attached: {item}.'

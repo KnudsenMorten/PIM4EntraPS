@@ -176,6 +176,15 @@ function Invoke-PimWorkloadConnectorApi {
     if (-not $Op) { throw ("connector '{0}' does not define the API operation this step needs." -f $Connector.id) }
     $uri = (Expand-PimWorkloadConnectorTokens -Text "$($Connector.api.baseUrl)" -Tokens $Tokens) + (Expand-PimWorkloadConnectorTokens -Text "$($Op.path)" -Tokens $Tokens)
     $method = if ("$($Op.method)".Trim()) { "$($Op.method)".Trim().ToUpperInvariant() } else { 'GET' }
+    # PIM 100.142: the Power BI connector calls the ADMIN api only, through its own rate-aware client (200 requests per
+    # hour per tenant; a 429 is waited out, never hammered; a refusal is tagged POWERBI-ADMIN-NOT-GRANTED).
+    if ("$($Connector.transport)".Trim() -ieq 'powerbi-admin') {
+        if ($method -eq 'GET' -and "$($Op.itemsPath)" -eq 'value') {
+            $items = @(Invoke-PimPowerBiAdminRequest -Method 'GET' -Url $uri -All)
+            return [pscustomobject]@{ value = $items }
+        }
+        return (Invoke-PimPowerBiAdminRequest -Method $method -Url $uri -Body $Body)
+    }
     $aud = Get-PimWorkloadConnectorAudience -Connector $Connector -Tokens $Tokens
     if (-not (Get-Command Invoke-PimRest -ErrorAction SilentlyContinue)) {
         throw ("connector '{0}' cannot run: the REST client (Invoke-PimRest, PIM-Rest.ps1) is not loaded in this process." -f $Connector.id)
@@ -186,6 +195,93 @@ function Invoke-PimWorkloadConnectorApi {
     }
     if ($null -ne $Body) { return (Invoke-PimRest -Method $method -Url $uri -Resource $aud -Body $Body) }
     return (Invoke-PimRest -Method $method -Url $uri -Resource $aud)
+}
+
+# ---------------------------------------------------------------------------
+# PIM 100.142 (owner 2026-10-13: "Admin API, no membership") -- the Power BI ADMIN api client.
+#   GetGroupUsersAsAdmin   GET    /v1.0/myorg/admin/groups/{workspace}/users
+#   AddUserAsAdmin         POST   /v1.0/myorg/admin/groups/{workspace}/users            { identifier; principalType; groupUserAccessRight }
+#   DeleteUserAsAdmin      DELETE /v1.0/myorg/admin/groups/{workspace}/users/{principal}
+# The caller must be a Fabric Administrator and Fabric must let service principals use the admin APIs; the admin api allows
+# 200 requests per hour per tenant. So: a process-wide budget below that limit (calls past it are not made), a 429 waited
+# out ONCE or twice when Power BI asks for a short wait (Retry-After), and otherwise a pause for the rest of the run -- the
+# remaining rows are retried on the next run. Never hammered. State lives in $global: (never $script:, BUG-79-6b).
+# ---------------------------------------------------------------------------
+function Get-PimPowerBiAdminHourlyBudget { return 180 }        # Microsoft's limit is 200/hour; discovery reads the same api
+function Get-PimPowerBiAdminMaxWaitSeconds { return 120 }      # a longer Retry-After pauses the api for the run instead
+
+function ConvertTo-PimPowerBiAdminError {
+    <#
+      PURE. A failed admin-api call's message -> the message the engine records. 401 / 403, or Power BI's own
+      "PowerBINotAuthorized" / "API is not accessible for application" answer -> tagged POWERBI-ADMIN-NOT-GRANTED (the
+      failure catalog's class: the identity is not a Fabric Administrator yet, or Fabric does not let it use the admin
+      API). Anything else (a 404 PowerBIEntityNotFound = POWERBI-WORKSPACE-NOT-FOUND, a 400, a 5xx) is returned unchanged.
+    #>
+    param([AllowNull()][string]$Message)
+    $m = "$Message"
+    if ($m -match 'POWERBI-ADMIN-NOT-GRANTED') { return $m }
+    if ($m -match '(?i)HTTP 40[13]\b|PowerBINotAuthorized|API is not accessible for application') {
+        return ("POWERBI-ADMIN-NOT-GRANTED: the Power BI admin API refused PIM Manager's identity -- it is not a Fabric Administrator yet, or Fabric does not let it use the admin API (run Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -GrantFabricAdministrator once). Power BI answered: {0}" -f $m)
+    }
+    return $m
+}
+
+function Invoke-PimPowerBiAdminRequest {
+    <#
+      ONE Power BI admin-api call for the powerbi connector. -Url is the full https://api.powerbi.com/v1.0/myorg/admin/...
+      url. Goes through Invoke-PimPowerBI (PIM-Rest.ps1; its own retry switched OFF with -MaxRetry 0, so THIS function owns
+      the 429 handling) -- or Invoke-PimRest -Resource powerbi where PIM-Rest's wrapper is not loaded.
+      $global:PIM_PowerBiAdminSleep (a scriptblock taking seconds) replaces Start-Sleep in tests.
+    #>
+    param([string]$Method = 'GET', [Parameter(Mandatory)][string]$Url, [object]$Body = $null, [switch]$All)
+    if ("$Url" -notmatch '(?i)^https://api\.powerbi\.com/v1\.0/myorg/admin/') {
+        throw ("POWERBI-ADMIN-ONLY: the Power BI connector calls only the admin api (/v1.0/myorg/admin/...); refused: {0} {1}" -f $Method, $Url)
+    }
+    $now = [datetime]::UtcNow
+    if ($global:PIM_PowerBiAdminPauseUntilUtc -is [datetime] -and $now -lt $global:PIM_PowerBiAdminPauseUntilUtc) {
+        throw ("POWERBI-ADMIN-THROTTLED: the Power BI admin API answered HTTP 429 (Too Many Requests) earlier in this run; PIM Manager does not call it again before {0:HH:mm:ss} UTC. Not called: {1} {2}" -f $global:PIM_PowerBiAdminPauseUntilUtc, $Method, $Url)
+    }
+    if (-not ($global:PIM_PowerBiAdminCallLog -is [System.Collections.Generic.List[datetime]])) { $global:PIM_PowerBiAdminCallLog = New-Object 'System.Collections.Generic.List[datetime]' }
+    $log = $global:PIM_PowerBiAdminCallLog
+    $cut = $now.AddHours(-1)
+    for ($i = $log.Count - 1; $i -ge 0; $i--) { if ($log[$i] -lt $cut) { $log.RemoveAt($i) } }
+    $budget = [int](Get-PimPowerBiAdminHourlyBudget); if ($budget -lt 1) { $budget = 180 }   # literal floor
+    $maxWait = [int](Get-PimPowerBiAdminMaxWaitSeconds); if ($maxWait -lt 1) { $maxWait = 120 }
+    $sleep = if ($global:PIM_PowerBiAdminSleep -is [scriptblock]) { $global:PIM_PowerBiAdminSleep } else { { param($s) Start-Sleep -Seconds $s } }
+    $attempt = 0
+    while ($true) {
+        if ($log.Count -ge $budget) {
+            throw ("POWERBI-ADMIN-THROTTLED: PIM Manager made {0} Power BI admin API calls in the last hour (Power BI allows 200 per hour per tenant), so it does not call it again now (429 avoided). Not called: {1} {2}" -f $log.Count, $Method, $Url)
+        }
+        $log.Add([datetime]::UtcNow)
+        try {
+            if (Get-Command Invoke-PimPowerBI -ErrorAction SilentlyContinue) {
+                if ($null -ne $Body) { return (Invoke-PimPowerBI -Method $Method -Path $Url -Body $Body -All:$All -MaxRetry 0) }
+                return (Invoke-PimPowerBI -Method $Method -Path $Url -All:$All -MaxRetry 0)
+            }
+            if (-not (Get-Command Invoke-PimRest -ErrorAction SilentlyContinue)) { throw 'the REST client (Invoke-PimRest, PIM-Rest.ps1) is not loaded in this process' }
+            if ($null -ne $Body) { return (Invoke-PimRest -Method $Method -Url $Url -Resource 'powerbi' -Body $Body -All:$All -MaxRetry 0) }
+            return (Invoke-PimRest -Method $Method -Url $Url -Resource 'powerbi' -All:$All -MaxRetry 0)
+        } catch {
+            $m = "$($_.Exception.Message)"
+            if ($m -match '(?i)HTTP 429\b|TooManyRequests') {
+                $ra = 0
+                $le = $global:PimLastRestError
+                if ($le -and $le.PSObject.Properties['retryAfter']) { [void][int]::TryParse("$($le.retryAfter)", [ref]$ra) }
+                $wait = if ($ra -gt 0) { $ra } else { [int](30 * [Math]::Pow(2, $attempt)) }
+                if ($attempt -lt 2 -and $wait -le $maxWait) {
+                    Write-Host ("    [powerbi-admin] HTTP 429 -- waiting {0} s as Power BI asks, then one more try ({1} {2})" -f $wait, $Method, $Url) -ForegroundColor DarkYellow
+                    & $sleep $wait
+                    $attempt++
+                    continue
+                }
+                $pause = [Math]::Max($wait, 60)
+                $global:PIM_PowerBiAdminPauseUntilUtc = [datetime]::UtcNow.AddSeconds($pause)
+                throw ("POWERBI-ADMIN-THROTTLED: the Power BI admin API answered HTTP 429 (Too Many Requests; 200 requests per hour per tenant). PIM Manager does not call it again for {0} s; this and the remaining Power BI workspace roles are retried on the next run. {1}" -f $pause, $m)
+            }
+            throw (ConvertTo-PimPowerBiAdminError -Message $m)
+        }
+    }
 }
 
 function New-PimWorkloadConnectorBody {
@@ -577,9 +673,12 @@ function Resolve-PimWorkloadBinding {
         }
         $b.present = $present.ContainsKey("$($role.id)".ToLowerInvariant())
     } else {
-        $ak = ("$wid|$($Row.Resource)|$($Row.Scope)|$($Row.Company)|" + (Expand-PimWorkloadConnectorTokens -Text "$($conn.api.listAssignments.path)" -Tokens $tokens) + "|$($role.id)").ToLowerInvariant()
+        # PIM 100.142: a connector marked listOncePerPath (powerbi -- the admin api allows 200 requests per hour) reads each
+        # listing ONCE per run, whatever the role; the role filter is applied here instead of in a second call.
+        $once = [bool]$conn.listOncePerPath
+        $ak = ("$wid|$($Row.Resource)|$($Row.Scope)|$($Row.Company)|" + (Expand-PimWorkloadConnectorTokens -Text "$($conn.api.listAssignments.path)" -Tokens $tokens) + "|$(if ($once) { '*' } else { "$($role.id)" })").ToLowerInvariant()
         if (-not $Cache.assign.ContainsKey($ak)) {
-            try { $Cache.assign[$ak] = @{ ok = $true; items = @(Get-PimWorkloadConnectorAssignments -Connector $conn -Tokens $tokens -RoleId "$($role.id)") } }
+            try { $Cache.assign[$ak] = @{ ok = $true; items = @(Get-PimWorkloadConnectorAssignments -Connector $conn -Tokens $tokens -RoleId $(if ($once) { '' } else { "$($role.id)" })) } }
             catch { $Cache.assign[$ak] = @{ ok = $false; error = "$($_.Exception.Message)" } }
         }
         $ac = $Cache.assign[$ak]
@@ -587,7 +686,9 @@ function Resolve-PimWorkloadBinding {
             $b.error = ("workload '{0}' assignment listing failed: {1}" -f $wid, $ac.error)
             return $b
         }
-        foreach ($it in @($ac.items)) {
+        $listed = @($ac.items)
+        if ($once -and "$($conn.api.listAssignments.roleId)".Trim()) { $listed = @($listed | Where-Object { $_ -and "$($_.roleId)" -ieq "$($role.id)" }) }
+        foreach ($it in $listed) {
             if (@($it.principals) -contains "$gid") { $b.existing = $it; break }
         }
         $b.present = ($null -ne $b.existing)
@@ -704,7 +805,11 @@ function Invoke-PimWorkloadBindingRemove {
     $tokens = @{} + $Binding.tokens
     if (-not $Binding.membership) {
         $ex = $Binding.existing
-        if (-not (Test-PimWorkloadCreatedByTool -DisplayName "$($ex.displayName)")) {
+        # PIM 100.142: where the "assignment" IS the row's own group (a connector flag assignmentIsRowPrincipal), deleting it
+        # would touch exactly what the row names. NO shipped connector sets the flag: owner 2026-10-14 "Keep refusing for
+        # now" -- Power BI only ADDS until the add path is proven live; its Remove rows keep v1's refusal below.
+        $rowPrincipal = ([bool]$conn.assignmentIsRowPrincipal -and $ex -and "$($Binding.groupId)".Trim() -and "$($ex.id)" -ieq "$($Binding.groupId)" -and @($ex.principals).Count -le 1)
+        if (-not $rowPrincipal -and -not (Test-PimWorkloadCreatedByTool -DisplayName "$($ex.displayName)")) {
             $msg = ("{0} assignment '{1}' for '{2}' was not created by PIM4EntraPS -- remove it in the workload's portal (shared or manual assignments are never deleted)." -f $conn.name, $(if ("$($ex.displayName)".Trim()) { $ex.displayName } else { $ex.id }), $Binding.row.GroupTag)
             Write-Host ("    [workloads] {0}" -f $msg) -ForegroundColor Yellow
             return [pscustomobject]@{ pimApplied = $false; reason = $msg }

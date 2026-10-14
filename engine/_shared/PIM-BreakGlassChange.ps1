@@ -17,7 +17,8 @@
     and created / expiry times (default 72 h).
   * ONE open request at a time. A second request while one is open is refused (409); the maker may cancel
     their own.
-  * A DIFFERENT SuperAdmin approves (maker != checker, case-insensitive on the normalised identity).
+  * A DIFFERENT SuperAdmin approves (maker != checker, case-insensitive on the normalised identity) --
+    unless ApprovalSelfApprove is ON, when the maker may approve it too (100.138; see -AllowSelfApprove).
     Approve re-reads the stored list: a list that changed since the request was made is refused and the
     request closes as STALE. Otherwise the list is written with a compare-and-set against that snapshot
     (Set-PimBreakGlassAccountList -ExpectedSnapshotHash), read back, and the request closes as APPLIED.
@@ -32,8 +33,10 @@
   ------------------------------------------------------------------------------------------
     1. That queue's endpoints sit behind the approvalsPreview flag (default off); this gate is always on.
     2. Its checker honours $global:PIM_AllowSelfApprove (self-approval for a single-operator lab). This
-       gate has NO self-approve switch: the documented route for a one-SuperAdmin environment is the
-       host-side operator script (tools/setup/Set-PimBreakGlassAccounts.ps1), audited as 'setup'.
+       gate follows ONLY the Manager setting ApprovalSelfApprove (PIM 100.138, owner 2026-10-13: "Self-approve
+       covers it"): ON lets the SuperAdmin who raised the request approve it, audited as self-approved; OFF
+       (the default, and whenever the setting cannot be read) keeps the second SuperAdmin. The host-side
+       operator script (tools/setup/Set-PimBreakGlassAccounts.ps1, audited as 'setup') stays as before.
     3. Its consumers (offboard / revoke / disable / authoring gates, the engine) read the whole queue;
        a record they must learn to ignore is a record one of them will one day act on. A separate row
        is ignored by construction -- the engine never reads it.
@@ -132,6 +135,7 @@ function ConvertTo-PimBreakGlassChangeRecord {
     $r.closedUtc     = ConvertTo-PimBreakGlassChangeUtcText -Value (& $get $Value 'closedUtc')
     $r.closeNote     = "$(& $get $Value 'closeNote')"
     $r.applied       = & $lst (& $get $Value 'applied')
+    $r.selfApproved  = [bool](& $get $Value 'selfApproved')     # PIM 100.138: the maker approved it (ApprovalSelfApprove ON)
     return $r
 }
 
@@ -258,6 +262,10 @@ function Resolve-PimBreakGlassChangeDecision {
       cancel  : the maker only.
       An expired request can never be approved (it closes as 'expired', whatever the decision).
       Role checks are the CALLER's (the Manager's SuperAdmin gate); this decides identity and state.
+      PIM 100.138 (owner 2026-10-13, "Self-approve covers it"): -AllowSelfApprove (the caller passes it ONLY when
+      the setting ApprovalSelfApprove is ON, read fail-closed) lets the MAKER approve their own request; the
+      record then carries selfApproved = $true. It changes nothing else: the maker still cannot REJECT (they
+      cancel), and stale / expiry / not-pending are decided exactly as before. Default (switch absent) = today.
     #>
     [CmdletBinding()]
     param(
@@ -267,7 +275,8 @@ function Resolve-PimBreakGlassChangeDecision {
         [Parameter(Mandatory)][ValidateSet('approve','reject','cancel')][string]$Decision,
         [string]$CurrentHash = '',
         [string]$Note = '',
-        [datetime]$NowUtc = [datetime]::UtcNow
+        [datetime]$NowUtc = [datetime]::UtcNow,
+        [switch]$AllowSelfApprove
     )
     $o = { param($ok, $code, $reason, $req) [pscustomobject]@{ ok = [bool]$ok; code = $code; reason = $reason; request = $req } }
     if ($null -eq $Request) { return (& $o $false 'not-found' 'there is no break-glass change request' $null) }
@@ -286,7 +295,8 @@ function Resolve-PimBreakGlassChangeDecision {
         $n.status = 'cancelled'; $n.closedBy = "$Actor"; $n.closedUtc = $now.ToString('o'); $n.closeNote = "$Note"
         return (& $o $true 'cancelled' 'request cancelled by its maker -- nothing was changed' $n)
     }
-    if ($isMaker) {
+    $selfApprove = [bool]($isMaker -and $Decision -eq 'approve' -and $AllowSelfApprove)
+    if ($isMaker -and -not $selfApprove) {
         $what = if ($Decision -eq 'approve') { 'approve' } else { 'reject' }
         $alt = if ($Decision -eq 'approve') { 'another SuperAdmin must approve it' } else { 'cancel it instead' }
         return (& $o $false 'same-person' ("you raised this request, so you cannot {0} it -- {1}" -f $what, $alt) $r)
@@ -302,7 +312,8 @@ function Resolve-PimBreakGlassChangeDecision {
         return (& $o $false 'stale' 'the list changed since the request was made -- raise a new request' $n)
     }
     $n.status = 'approved'; $n.checker = "$Actor"; $n.decidedUtc = $now.ToString('o'); $n.closeNote = "$Note"
-    return (& $o $true 'approved' 'approved -- applying' $n)
+    $n.selfApproved = $selfApprove
+    return (& $o $true 'approved' $(if ($selfApprove) { 'self-approved -- applying' } else { 'approved -- applying' }) $n)
 }
 
 function Get-PimBreakGlassCheckerCandidates {
@@ -453,12 +464,13 @@ function Invoke-PimBreakGlassChangeApproval {
         [Parameter(Mandatory)][string]$RequestId,
         [Parameter(Mandatory)][string]$Checker,
         [string]$Note = '',
-        [datetime]$NowUtc = [datetime]::UtcNow
+        [datetime]$NowUtc = [datetime]::UtcNow,
+        [switch]$AllowSelfApprove      # PIM 100.138: ONLY when ApprovalSelfApprove is ON (the caller reads it, fail-closed)
     )
     $mk = { param($ok, $code, $reason, $req, $acc) [pscustomobject]@{ ok = [bool]$ok; code = $code; reason = $reason; request = $req; accounts = @($acc) } }
     $state = Get-PimBreakGlassStoredListState -ConnectionString $ConnectionString
     $rec = Get-PimBreakGlassChangeRecordRaw -ConnectionString $ConnectionString
-    $dec = Resolve-PimBreakGlassChangeDecision -Request $rec.request -RequestId $RequestId -Actor $Checker -Decision approve -CurrentHash $state.hash -Note $Note -NowUtc $NowUtc
+    $dec = Resolve-PimBreakGlassChangeDecision -Request $rec.request -RequestId $RequestId -Actor $Checker -Decision approve -CurrentHash $state.hash -Note $Note -NowUtc $NowUtc -AllowSelfApprove:$AllowSelfApprove
     if (-not $dec.ok) {
         if ($dec.code -in @('stale', 'expired')) {
             [void](Save-PimBreakGlassChangeRecord -ConnectionString $ConnectionString -Request $dec.request -ExpectedRaw $rec.raw)

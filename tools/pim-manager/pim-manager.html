@@ -1467,7 +1467,7 @@
          ONLY -- hidden until the tenant mode says msp-master (applyMspMasterOnlyTabs), and the server refuses elsewhere. -->
     <div class="tab" data-tab="msptenants" title="The managed tenants this managing tenant replicates to — name, tenant id, the managing tenant's copy of each tenant's ring, the tags replication targets, and whether it is enabled.">Managed tenant registry</div>
     <div class="tab" data-tab="replication" title="Every replicable admin, membership, group, nesting and binding on this managing tenant, and which managed tenants it reaches — computed by the same plan every tenant runs.">Replication overview</div>
-    <div class="tab" data-tab="jobs" title="The scheduler — see each job's cadence, last result and next run, spot overdue or failing runs, re-run on demand, and export the run history.">Jobs <span id="jobsRunBadge" class="badge" style="display:none;background:#cf222e;color:#fff" title="jobs that failed"></span></div>
+    <div class="tab" data-tab="jobs" title="The scheduler — see each job's cadence, last result and next run, spot failing runs, re-run on demand, and export the run history.">Jobs <span id="jobsRunBadge" class="badge" style="display:none;background:#cf222e;color:#fff" title="jobs that failed"></span></div>
     <div class="tab" data-tab="enginelogs" title="Every recent engine run across all jobs, newest first — what failed and why, with each run's full log.">Engine logs &amp; errors <span id="engLogErrBadge" class="badge" style="display:none;background:#cf222e;color:#fff" title="failed runs nobody has acknowledged yet"></span></div>
     <div class="tab" data-tab="jobschedule" title="When each scheduled job runs, in plain words — which area it covers, whether it is on, and how often. Mail jobs included.">Job schedule</div>
     <div class="tab" data-tab="settings" title="Configure the Manager — naming conventions, feature customization, operational policy, alerting, permission template packs, email controls, and instances.">Settings</div>
@@ -13080,6 +13080,8 @@
     // 100.100: the explanation is under "What this is & how to use it" (TAB_GUIDANCE.coverage), not a paragraph here.
     // One plain block per workload that was NOT READ (what is missing + the steps), filled below.
     h.push('<div id="covNotRead"></div>');
+    // PIM 100.142 (4): Power BI workspaces listed while PIM Manager cannot reach Power BI's admin API yet -> one calm line + command.
+    h.push('<div id="covPbiAdmin"></div>');
     // REQ-U (prereqs): the compact "Workload prerequisites" section -- the ready ones folded into one line -- filled below.
     h.push('<div id="covPrereqs" style="margin-bottom:10px;"></div>');
     if (d.snapshotMissing) {
@@ -13134,6 +13136,7 @@
       '<th>Workload</th><th>Item</th><th>Status</th><th>Delegated by</th><th>Why</th>' + (canIgnore ? '<th style="width:92px;"></th>' : '') + '</tr></thead><tbody id="covTbody"></tbody></table>');
     body.innerHTML = h.join('');
     covRenderNotRead(document.getElementById('covNotRead'), d);          // 100.100
+    if (rowsAll.some(r => /^power\s*bi$/i.test(String((r && r.workload) || '').trim()))) pbiAdminNoteInto(document.getElementById('covPbiAdmin'));   // 100.142
     // REQ-U (prereqs). PIM 100.108 (e): a workload this report could NOT read is never counted as ready in that line.
     renderWorkloadPrereqChips(document.getElementById('covPrereqs'), null, { notRead: covNotReadSources(d).map(s => ({ workload: COV_PREREQ_OF[s.workload] || '', source: s.workload, reason: s.reason || '' })).filter(x => x.workload) });
     covRenderRows(body, d, canStage);
@@ -13842,12 +13845,18 @@
       const who = rq.isMaker ? 'you' : esc(String(rq.maker || ''));
       h.push('<div id="bgPending" style="margin:6px 0 10px;padding:8px 10px;border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;font-size:12px;">');
       h.push('<div style="font-weight:700;color:#9a6700;">Change requested by ' + who + ' &mdash; ' +
-        (rq.isMaker ? '<span id="bgAwaiting">awaiting approval by another SuperAdmin</span>' : 'awaiting a second SuperAdmin') + '</div>');
+        (rq.isMaker ? (rq.selfApprove ? '<span id="bgAwaiting">awaiting approval</span>' : '<span id="bgAwaiting">awaiting approval by another SuperAdmin</span>') : 'awaiting a second SuperAdmin') + '</div>');
       h.push('<div style="margin-top:4px;">Raised ' + esc(homeFmtWhen(rq.createdUtc)) + ' &middot; <b>expires ' + esc(homeFmtWhen(rq.expiresUtc)) + '</b> (' + esc(fmtTime(rq.expiresUtc)) + ')</div>');
       h.push('<div style="margin-top:4px;">Justification: <i>' + esc(String(rq.justification || '')) + '</i></div>');
       h.push('<div style="margin-top:4px;">What it changes:</div>' + bgDiffHtml(esc, rq.added, rq.removed));
       if (rq.onlySuperAdmin && rq.onlySuperAdminNote) h.push('<div class="bgOnlySuper" style="color:#cf222e;margin-top:4px;">' + esc(String(rq.onlySuperAdminNote)) + '</div>');
-      if (rq.canApprove) {
+      if (rq.canApprove && rq.isMaker) {
+        // PIM 100.138: Settings > Approvals has self-approval ON, so the server lets the requester approve too.
+        h.push('<div class="bgSelfApprove" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">' +
+          '<span id="bgSelfApproveLine">Self-approval is on, so you can approve your own request.</span> ' +
+          '<button class="btn" id="bgApprove">Approve</button> ' + (rq.canCancel ? '<button class="btn-sec" id="bgCancel">Cancel my request</button> ' : '') +
+          '<span class="setMsg" id="bgDecMsg"></span></div>');
+      } else if (rq.canApprove) {
         h.push('<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">' +
           '<input id="bgDecisionNote" type="text" placeholder="Note (optional, audited)" style="min-width:240px;"> ' +
           '<button class="btn" id="bgApprove">Approve and apply</button> <button class="btn-sec" id="bgReject">Reject</button> <span class="setMsg" id="bgDecMsg"></span></div>');
@@ -13869,7 +13878,7 @@
         '<input id="bgAdd" type="text" placeholder="breakglass01@contoso.onmicrosoft.com" style="min-width:280px;"> <button class="btn-sec" id="bgAddBtn">+ Add</button></div>');
       h.push('<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">' +
         '<input id="bgJust" type="text" placeholder="Justification (required, audited)" style="min-width:320px;"> ' +
-        '<button class="btn" id="bgSave">Request change (a second SuperAdmin approves)</button> <span class="setMsg" id="bgMsg"></span></div>');
+        '<button class="btn" id="bgSave">' + ((d && d.selfApprove) ? 'Request change' : 'Request change (a second SuperAdmin approves)') + '</button> <span class="setMsg" id="bgMsg"></span></div>');
     } else if (isSuper && pending) {
       h.push('<div style="color:#57606a;font-size:11px;margin-top:6px;">A new change can be requested once this request is approved, rejected, cancelled or expired.</div>');
     } else if (!isSuper) {
@@ -13904,7 +13913,7 @@
     const ab = host.querySelector('#bgApprove');
     if (ab) ab.onclick = () => {
       if (!confirm('Approve this break-glass change?\n\n' + (rq.added || []).map(x => '+ ' + x).concat((rq.removed || []).map(x => '- ' + x)).join('\n') +
-        '\n\nRequested by ' + rq.maker + '. It applies immediately.')) return;
+        '\n\nRequested by ' + (rq.isMaker ? 'you' : rq.maker) + '. It applies immediately.')) return;
       decide('approve');
     };
     const rb = host.querySelector('#bgReject'); if (rb) rb.onclick = () => decide('reject');
@@ -13937,7 +13946,8 @@
       try {
         const r = await api('PUT', '/api/settings/breakglass-accounts', body);
         // 202: a REQUEST was raised; nothing is applied until another SuperAdmin approves it.
-        say('Request raised -- awaiting approval by another SuperAdmin' + ((r && r.expiresUtc) ? ' (expires ' + homeFmtWhen(r.expiresUtc) + ')' : '') + '. Nothing has changed yet.' +
+        if (r && r.selfApprove) say('Request raised. Self-approval is on, so you can approve your own request.', false);   // PIM 100.138
+        else say('Request raised -- awaiting approval by another SuperAdmin' + ((r && r.expiresUtc) ? ' (expires ' + homeFmtWhen(r.expiresUtc) + ')' : '') + '. Nothing has changed yet.' +
           ((r && r.onlySuperAdmin && r.request && r.request.onlySuperAdminNote) ? ' ' + String(r.request.onlySuperAdminNote) : ''), false);
         setTimeout(() => renderSettingsBreakGlassSection(host), 1500);
       } catch (e) {
@@ -14358,7 +14368,12 @@
     // heartbeat the worker writes (fresh = seen within 10 min for the continuous sync, 90 min for the others).
     const hwJobs = { 'hybrid-ad-sync': 'Critical group sync', 'hybrid-ad-sync-servers': 'Server group sync', 'hybrid-ad-changes': 'Change detection', 'hybrid-ad-apply': 'Apply changes', 'hybrid-ad-groups': 'Group definitions', 'hybrid-ad-servers': 'Server onboarding' };
     const ws = Array.isArray(d.worker) ? d.worker : [];
-    if (ws.length) {
+    // PIM 100.139 (owner 2026-10-13): On-premises Active Directory is a feature you switch on, off by default. Off = one calm
+    // line instead of the red "Hybrid worker needs attention" box -- an install without AD has nothing to worry about here.
+    if (d.featureOn === false) {
+      h += '<div id="setHybridAdWorker" data-off="1" style="margin:0 0 10px;padding:8px 10px;border-radius:6px;border:1px solid #d0d7de;background:#f6f8fa;color:#57606a;font-size:12px;">' +
+           'Switched off under Features. <a href="#" id="setHybridAdFeatures">Settings &rsaquo; Features</a> switches it on when the hybrid worker is installed.</div>';
+    } else if (ws.length) {
       const allOk = ws.every(w => w.state === 'live');
       h += '<div id="setHybridAdWorker" data-ok="' + (allOk ? '1' : '0') + '" style="margin:0 0 10px;padding:8px 10px;border-radius:6px;border:1px solid ' + (allOk ? '#1a7f37' : '#cf222e') + ';background:' + (allOk ? '#dafbe1' : '#ffebe9') + ';font-size:12px;">' +
            '<b>' + (allOk ? '&#x2714; Hybrid worker is working' : '&#x26A0; Hybrid worker needs attention') + '</b>' +
@@ -14414,7 +14429,11 @@
         if (msg) { msg.style.color = '#cf222e'; msg.textContent = String((e && e.message) || e); }
       }
     };
-    function bindLive() { const a = document.getElementById('setHybridAdLive'); if (a) a.onclick = (ev) => { ev.preventDefault(); openHybridAdLive(); }; }
+    function bindLive() {
+      const a = document.getElementById('setHybridAdLive'); if (a) a.onclick = (ev) => { ev.preventDefault(); openHybridAdLive(); };
+      // PIM 100.139: the "switched off" line links to the Features card where it is switched on
+      const f = document.getElementById('setHybridAdFeatures'); if (f) f.onclick = (ev) => { ev.preventDefault(); switchTab('settings'); navScrollToAnchor('setFeatureGatesCard'); };
+    }
   }
 
   // ----- The LIVE view of the continuous PIM-for-AD sync -- 2.4.465 -----------------------------------------------------
@@ -15055,12 +15074,37 @@
   }
   // PURE: does switching this entry to `on` need a confirmation, and what does it say.
   function pimSettingInfoNeedsConfirm(s, on) { return !!(s && ((on && s.confirmOn) || (!on && s.confirmOff))); }
+  // PIM 100.137 (owner 2026-10-13: "people get woried when they see this"): the dialog is a plain question of what the
+  // switch does FOR THE READER (confirm.on|off.title), ONE calm sentence (body), at most one short Note / Tip line (note),
+  // and everything else -- the old long consequence + reversibility + what it needs -- behind a closed "More info". Only a
+  // switch that makes things LESS safe (tone 'lessSafe') gets the red button. Whether it asks never changes here.
   function pimSettingInfoConfirmOpts(s, on) {
     const i = (s && s.info) || {};
     const label = String((s && (s.label || s.key)) || 'this setting');
+    const c = (s && s.confirm && s.confirm[on ? 'on' : 'off']) || null;
+    const isBool = String((s && s.type) || '') === 'boolean';
+    const long = String((on ? i.enabled : i.disabled) || '');
+    const more = [];
+    if (c && Array.isArray(c.more) && c.more.length) c.more.forEach(t => { if (t) more.push({ label: '', text: String(t) }); });
+    else if (c && long) more.push({ label: on ? (isBool ? 'When on' : 'When set') : (isBool ? 'When off' : 'When blank'), text: long });
+    if (i.risk) more.push({ label: 'Good to know', text: String(i.risk) });
+    if (i.requires) more.push({ label: 'Needs', text: String(i.requires) });
+    const url = /^https:\/\/invardia\.com\//.test(String(i.docUrl || '')) ? String(i.docUrl) : '';
+    if (c) {
+      return {
+        title: String(c.title || ''),
+        body: String(c.body || ''),
+        note: String(c.note || ''),
+        more: more, moreUrl: url,
+        okLabel: isBool ? (on ? 'Switch it on' : 'Switch it off') : 'Yes, go ahead',
+        danger: String(c.tone || '') === 'lessSafe'
+      };
+    }
+    // an entry without its short texts yet: the old wording, the details still behind More info
     return {
       title: (on ? 'Switch on: ' : 'Switch off: ') + label + '?',
-      body: String((on ? i.enabled : i.disabled) || '') + (i.risk ? ' Risk: ' + String(i.risk) : ''),
+      body: long,
+      more: more.filter(m => m.label !== 'When on' && m.label !== 'When off' && m.label !== 'When set' && m.label !== 'When blank'), moreUrl: url,
       okLabel: on ? 'Switch it on' : 'Switch it off',
       danger: true
     };
@@ -15151,6 +15195,11 @@
         '<div role="dialog" aria-modal="true" style="background:#fff;border-radius:10px;max-width:480px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.25);padding:16px 18px;box-sizing:border-box;">' +
           '<div style="font-size:14px;font-weight:600;">' + esc(opts.title || 'Confirm') + '</div>' +
           (opts.body ? ('<div style="color:#57606a;font-size:12.5px;margin-top:8px;line-height:1.5;">' + esc(opts.body) + '</div>') : '') +
+          (opts.note ? ('<div class="pcm-note" style="color:#24292f;font-size:12.5px;margin-top:8px;line-height:1.5;">' + esc(opts.note) + '</div>') : '') +
+          ((Array.isArray(opts.more) && opts.more.length) ? ('<details class="pcm-more" style="margin-top:10px;font-size:12px;color:#57606a;line-height:1.5;"><summary style="cursor:pointer;color:#0969da;">More info</summary>' +
+            opts.more.map(m => '<p style="margin:6px 0 0;">' + (m && m.label ? '<b>' + esc(String(m.label)) + ':</b> ' : '') + esc(String((m && m.text) || '')) + '</p>').join('') +
+            (opts.moreUrl ? '<p style="margin:6px 0 0;"><a href="' + esc(String(opts.moreUrl)) + '" target="_blank" rel="noopener">Read more on invardia.com</a></p>' : '') +
+            '</details>') : '') +
           '<div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end;">' +
             '<button id="pcmCancel">Cancel</button>' +
             '<button id="pcmOk" class="' + (danger ? 'danger' : 'primary') + '">' + esc(opts.okLabel || 'OK') + '</button>' +
@@ -15158,7 +15207,8 @@
         '</div>';
       document.body.appendChild(ov);
       function done(v) { try { document.removeEventListener('keydown', onKey); document.body.removeChild(ov); } catch (e) {} resolve(v); }
-      function onKey(e) { if (e.key === 'Escape') done(false); else if (e.key === 'Enter') done(true); }
+      // Enter on the "More info" summary (or its link) opens it -- it never answers the question
+      function onKey(e) { if (e.key === 'Escape') done(false); else if (e.key === 'Enter' && !(e.target && e.target.closest && e.target.closest('summary, a'))) done(true); }
       document.addEventListener('keydown', onKey);
       ov.querySelector('#pcmCancel').onclick = () => done(false);
       ov.querySelector('#pcmOk').onclick = () => done(true);
@@ -18740,6 +18790,12 @@
       return '<span title="This deployment is scoped to other job types (PIM_SCHED_JOBS); this job is not run here. Its history is still under History." ' +
         'style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#eaeef2;color:#57606a;">not run here</span>';
     }
+    // PIM 100.139: the feature this job belongs to is switched off under Features (today: On-premises Active Directory, the
+    // hybrid worker jobs) -- grey and calm: never overdue, never "hybrid worker not seen", never counted as needing attention.
+    if (j.featureOff) {
+      return '<span class="jobFeatureOff" title="' + esc0('On-premises Active Directory is switched off under Settings > Features, so this job does not run. Switch it on there when the hybrid worker is installed.') + '" ' +
+        'style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#eaeef2;color:#57606a;">switched off</span>';
+    }
     let bg = '#eaeef2', fg = '#57606a', label = 'idle';
     if (j.inProgress || j.status === 'running') { bg = '#dafbe1'; fg = '#1a7f37'; label = 'running'; }
     else if (j.status === 'skipped') { bg = '#eaeef2'; fg = '#57606a'; label = 'not run here'; }
@@ -18766,12 +18822,27 @@
     // completed with nothing to do IS ok -- green "ok", the same as a run that changed something. The result text says which.
     else if (j.status === 'completed') { bg = '#dafbe1'; fg = '#1a7f37'; label = 'ok'; }
     let html = '<span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:' + bg + ';color:' + fg + ';">' + esc0(label) + '</span>';
-    // [M6] overdue badge -- the job missed its scheduled fire window (didn't fire).
-    if (j.overdue) {
-      const by = (j.overdueByMinutes != null && j.overdueByMinutes > 0) ? (' ' + jobMinsAgo(j.overdueByMinutes)) : '';
-      html += ' <span title="' + esc0('expected by ' + fmtTime(j.expectedRunUtc)) + '" style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#fff1d6;color:#9a6700;">overdue' + by + '</span>';
+    // PIM 100.48 (owner 2026-10-10 / 2026-10-13: "people dont undersand what overdue means. should they be worried and do
+    // anything"): a run that starts a few minutes late (behind another run in its area) is NORMAL -- at most a grey "next
+    // run waiting" with a tooltip, never an amber badge and never counted under Needs attention. Only a job that is
+    // genuinely STUCK (no run for more than 3x its interval and at least an hour) says so, in one calm line.
+    if (j.stuck) {
+      html += '<div class="jobStuckLine" style="color:#57606a;font-size:11px;margin-top:3px;">' + esc0(jobStuckText(j)) + '</div>';
+    } else if (j.overdue) {
+      html += ' <span class="jobNextWaiting" title="' + esc0('The next run starts when the current run in this area finishes, usually within a few minutes. This is normal -- nothing to do. Expected around ' + fmtTime(j.expectedRunUtc) + '.') + '" style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#eaeef2;color:#57606a;">next run waiting</span>';
     }
     return html;
+  }
+  // PIM 100.48: the one calm line of a genuinely stuck job (no run for more than 3x its interval and at least an hour), in the
+  // viewer's local time -- never "overdue", never UTC.
+  function jobStuckText(j) {
+    const since = j && (j.stuckSinceUtc || j.lastRunUtc);
+    return 'Has not run since ' + (since ? fmtTime(since) : 'it was set up') + ' - PIM Manager will start it again';
+  }
+  // PIM 100.48: what the "Needs attention" banner and the menu number count -- a job whose latest run FAILED, or one that is
+  // genuinely stuck. A run that is merely a few minutes late, waiting, queued or switched off never counts.
+  function jobNeedsAttention(j) {
+    return !!j && !j.featureOff && !j.outOfScope && (((Number(j.unackedFailureCount) || 0) > 0) || !!j.stuck);
   }
   // Compact "Nm/Nh/Nd ago" for an overdue-by-minutes number.
   function jobMinsAgo(mins) {
@@ -19437,6 +19508,32 @@
     body.insertBefore(sec, body.firstChild);
   }
 
+  // PIM 100.141 -- PURE. The words of a guard's state on the Guards page (owner 2026-10-13: "what does clear mean - is it
+  // enforced/protected or ?, and why show ofboarding approval if it is not managed there"). waiting = the policy breaker's
+  // count of change sets that wait for a person when its hold records were read, else null. Returns
+  // { holding, label, line, approvalsLink, reviewTarget }:
+  //   holding  -> "Holding back changes", reviewTarget = where it is released ('approvals' | 'hybrid-ad' | 'here');
+  //   working  -> "Protecting" + "nothing held right now" / "last held something on <date, viewer's local time>";
+  //   Offboarding approval -> "Protecting" + "approvals are on the Approvals page" (a link there).
+  function pimGuardStateView(g, waiting) {
+    g = g || {};
+    const id = String(g.guardId || '');
+    const holding = !g.never && ((waiting !== null && waiting !== undefined) ? Number(waiting) > 0 : g.state === 'holding');
+    const reviewTarget = (id === 'engine.policy-mass-change' || id === 'engine.offboarding-approval' || id === 'manager.bulk-revoke') ? 'approvals'
+      : (id.indexOf('hybrid-ad.') === 0 ? 'hybrid-ad' : (g.release === 'approval' ? 'approvals' : 'here'));
+    if (holding) return { holding: true, label: 'Holding back changes', line: 'Review', approvalsLink: false, reviewTarget: reviewTarget };
+    if (id === 'engine.offboarding-approval') return { holding: false, label: 'Protecting', line: 'approvals are on the Approvals page', approvalsLink: true, reviewTarget: 'approvals' };
+    return { holding: false, label: 'Protecting', line: g.lastTripUtc ? 'last held something on ' + pimGuardDate(g.lastTripUtc) : 'nothing held right now', approvalsLink: false, reviewTarget: reviewTarget };
+  }
+  // PIM 100.141: a date in the viewer's own time zone, short ("7 Oct", the year only when it is not this year) -- never UTC.
+  function pimGuardDate(iso) {
+    const d = pimParseTime(iso);
+    if (!d) return String(iso || '');
+    const o = { day: 'numeric', month: 'short' };
+    if (d.getFullYear() !== new Date().getFullYear()) o.year = 'numeric';
+    try { return d.toLocaleDateString(undefined, o); } catch (_) { return fmtTime(iso, { dateOnly: true }); }
+  }
+
   // §96.6 / GUARD-1.6 (operator 2026-10-06: "I need a way to release guards"): THE Guards page. Every guard, its state
   // (clear / holding), what it holds right now (the items and the plan hash), and its release. A release is explicit and
   // narrow: this guard, this scope, this exact plan (a changed plan needs a new release), ONE run or until a time (at most
@@ -19461,7 +19558,8 @@
       'commit+release': 'a SuperAdmin approves the exact list in the commit popup, or releases a held list on this page', 'approvals': 'approved on the Approvals page', 'none': 'none needed' })[g.exemption] || '';
     pimExportSet('guards', 'Guards', () => [   // 100.67
       pimExportRows('Guards', [['Guard', g => g.title || g.guardId], ['Id', 'guardId'],
-        ['State', g => g.never ? 'locked' : ((g.guardId === 'engine.policy-mass-change' && g.policyHoldsKnown === true) ? (asList(g.policyHolds).some(x => x && !x.approved) ? 'holding' : 'clear') : (g.release === 'approval' ? 'approved elsewhere' : (g.state === 'holding' ? 'holding' : 'clear')))],
+        // PIM 100.141: the same words as the page ("Protecting" / "Holding back changes" + the small line)
+        ['State', g => { const v = pimGuardStateView(g, (g.guardId === 'engine.policy-mass-change' && g.policyHoldsKnown === true) ? asList(g.policyHolds).filter(x => x && !x.approved).length : null); return v.label + (v.holding ? '' : ' -- ' + v.line); }],
         ['Protects', 'protects'], ['Limit', limitText], ['Exemption', exemptionText], ['Locked because', 'lockedReason'],
         ['Last trip', 'lastTripUtc'], ['Trips', 'tripCount'], ['What it does', 'what'],
         ['Holds now', g => asList(g.holds).map(h => (h.scope || '') + ' ' + (h.count != null ? h.count : asList(h.items).length) + ' item(s)').join('; ')]], cat),
@@ -19491,10 +19589,23 @@
       }).join('');
     };
     const canLimit = !!d.canSetLimits && roleAtLeast('SuperAdmin');
-    const stateOf = g => g.never ? badge('locked', '#eaeef2', '#57606a')
-      : polKnown(g) ? (polWaiting(g).length ? badge('holding', '#ffebe9', '#cf222e') : badge('clear', '#dafbe1', '#1a7f37'))
-      : g.release === 'approval' ? badge('approved elsewhere', '#ddf4ff', '#0969da')
-      : g.state === 'holding' ? badge('holding', '#ffebe9', '#cf222e') : badge('clear', '#dafbe1', '#1a7f37');
+    // PIM 100.141 (owner 2026-10-13: "what does clear mean - is it enforced/protected or ?" / "why show offboarding approval if
+    // it is not managed there"): every working guard is a green "Protecting" with one small line under it; a guard holding
+    // something is "Holding back changes" with a Review link to where it is released; Offboarding approval is "Protecting"
+    // with a link to the Approvals page. Text and links only -- what a guard does is unchanged.
+    const stateOf = g => {
+      const v = pimGuardStateView(g, polKnown(g) ? polWaiting(g).length : null);
+      return v.holding ? badge('Holding back changes', '#ffebe9', '#cf222e') : badge('Protecting', '#dafbe1', '#1a7f37');
+    };
+    const stateLineHtml = g => {
+      const v = pimGuardStateView(g, polKnown(g) ? polWaiting(g).length : null);
+      if (v.holding) {
+        const prov = polKnown(g) ? String((polWaiting(g)[0] || {}).provider || '').toLowerCase() : '';
+        return '<div class="gp-lasttrip gp-review-line" style="font-size:11px;"><a href="#" class="gp-review" data-guard="' + escapeHtml(g.guardId) + '" data-target="' + escapeHtml(v.reviewTarget) + '" data-provider="' + escapeHtml(prov) + '">Review</a></div>';
+      }
+      if (v.approvalsLink) return '<div class="gp-lasttrip" style="font-size:11px;"><a href="#" class="gp-approvals-link">' + escapeHtml(v.line) + '</a></div>';
+      return '<div class="gp-lasttrip" style="color:#8c959f;font-size:11px;">' + escapeHtml(v.line) + '</div>';
+    };
     const localNowPlus = hours => { const t = new Date(Date.now() + hours * 3600000 - new Date().getTimezoneOffset() * 60000); return t.toISOString().slice(0, 16); };
     const holdHtml = (g, h) => {
       const items = (h.items || []).map(k => '<li style="font-family:Consolas,monospace;font-size:11px;">' + escapeHtml(k) + '</li>').join('');
@@ -19561,8 +19672,7 @@
       const holds = (g.holds || []).map(h => holdHtml(g, h)).join('');
       return '<tr class="gp-guard' + (g.never ? ' gp-guard-locked' : '') + '" data-guard="' + escapeHtml(g.guardId) + '" data-state="' + escapeHtml(g.state || '') + '" data-locked="' + (g.never ? '1' : '0') + '">' +
         '<td style="padding:6px 8px;vertical-align:top;"><b>' + escapeHtml(g.title || g.guardId) + '</b><div style="color:#8c959f;font-size:11px;">' + escapeHtml(g.guardId) + '</div></td>' +
-        '<td style="padding:6px 8px;vertical-align:top;white-space:nowrap;">' + stateOf(g) +
-          '<div class="gp-lasttrip" style="color:#8c959f;font-size:11px;">' + (g.lastTripUtc ? 'last trip ' + escapeHtml(fmtTime(g.lastTripUtc)) : 'never tripped') + '</div></td>' +
+        '<td style="padding:6px 8px;vertical-align:top;white-space:nowrap;">' + stateOf(g) + stateLineHtml(g) + '</td>' +
         '<td style="padding:6px 8px;vertical-align:top;font-size:12px;">' +
           '<div class="gp-protects"><b>Protects:</b> ' + escapeHtml(g.protects || '') + '</div>' +
           '<div class="gp-what" style="color:#57606a;margin-top:2px;">' + escapeHtml(g.what || '') + '</div>' +
@@ -19603,7 +19713,7 @@
     const never = cat.filter(g => g.never);
     body.innerHTML =
       '<h2 style="font-size:16px;margin:0 0 4px;">Guards</h2>' +
-      '<div id="gpIntro" style="color:#57606a;font-size:12px;margin-bottom:10px;">Every guard that protects your tenant: what it protects, its limit, whether an exemption can be approved, and when it last tripped. ' +
+      '<div id="gpIntro" style="color:#57606a;font-size:12px;margin-bottom:10px;">Every guard that protects your tenant: what it protects, its limit, whether an exemption can be approved, and when it last held something back. ' +
         '<b>No guard can be switched off.</b> A limit is a count, set by a SuperAdmin inside the range shown on its row. An exemption is always for <b>one exact list</b>: ' +
         'a SuperAdmin approves it in the commit popup when the change is committed, or releases a list a run already holds here (for <b>one run</b> or until a time, at most 24 hours). A changed list has to be approved again. ' +
         'Every approval needs a reason and is recorded in the audit trail. The locked guards have no limit and no exemption.</div>' +
@@ -19633,6 +19743,17 @@
     const say = (msg, bad) => { const n = document.createElement('div'); n.className = 'gp-msg'; n.style.cssText = 'font-size:12px;margin:6px 0;color:' + (bad ? '#cf222e' : '#1a7f37'); n.textContent = msg; body.insertBefore(n, body.firstChild); };
     // PIM 100.84: "open" on the policy breaker's row goes to Approvals, on THAT change set (where a SuperAdmin approves it).
     body.querySelectorAll('.gp-pol-open').forEach(a => a.addEventListener('click', ev => { ev.preventDefault(); APPR_FOCUS_CHANGESET = String(a.dataset.provider || ''); switchTab('approvals'); }));
+    // PIM 100.141: "approvals are on the Approvals page" and the Review link of a guard that holds something -- to where it
+    // is released: the Approvals page, Settings > Hybrid Active Directory, or the held list on this page.
+    body.querySelectorAll('.gp-approvals-link').forEach(a => a.addEventListener('click', ev => { ev.preventDefault(); APPR_FOCUS_CHANGESET = ''; switchTab('approvals'); }));
+    body.querySelectorAll('.gp-review').forEach(a => a.addEventListener('click', ev => {
+      ev.preventDefault();
+      const t = String(a.dataset.target || 'here');
+      if (t === 'approvals') { APPR_FOCUS_CHANGESET = String(a.dataset.provider || ''); switchTab('approvals'); return; }
+      if (t === 'hybrid-ad') { switchTab('settings'); navScrollToAnchor('setHybridAdHost'); return; }
+      const row = a.closest('tr.gp-guard'); const hold = row && row.querySelector('.gp-hold');
+      if (hold) { const det = hold.querySelector('details'); if (det) det.open = true; try { hold.scrollIntoView({ block: 'center' }); } catch (_) { } }
+    }));
     body.querySelectorAll('.gp-release-form').forEach(f => {
       const mode = f.querySelector('.gp-mode'), until = f.querySelector('.gp-until');
       mode.addEventListener('change', () => { until.style.display = mode.value === 'until' ? '' : 'none'; });
@@ -19704,7 +19825,7 @@
     if (!j) return 9;
     if ((Number(j.unackedFailureCount) || 0) > 0) return 0;
     if (j.needsApproval) return 1;
-    if (j.overdue) return 2;
+    if (j.stuck) return 2;   // PIM 100.48: genuinely stuck -- a merely late run is not sorted up
     if (j.inProgress) return 3;
     if (j.waitingFor || j.waitingForSlot || j.queued) return 4;
     return 5;
@@ -19716,7 +19837,7 @@
     let label = '', tip = '';
     if (j.waitingFor) {
       label = (j.queued ? 'queued -- starts when ' + esc0(j.waitingFor) + ' has finished' : 'waiting for ' + esc0(j.waitingFor)) + at;
-      tip = 'Another run (' + j.waitingFor + ') is working on the same area (' + (j.waitingArea || '') + '). Two runs never write the same area at once; this one starts as soon as that run has finished. Not overdue, not failed.';
+      tip = 'Another run (' + j.waitingFor + ') is working on the same area (' + (j.waitingArea || '') + '). Two runs never write the same area at once; this one starts as soon as that run has finished. This is normal -- nothing to do.';
     } else if (j.waitingForSlot) {
       label = 'waiting for a free slot' + at;
       tip = 'The most runs that may go side by side are running. This one starts as soon as one of them finishes.';
@@ -19738,7 +19859,8 @@
     catch (e) { body.innerHTML = stateError('Failed to load jobs', e.message); return; }
     const jobs = data.jobs || [];
     const running = data.runningCount || 0;
-    const overdue = data.overdueCount || 0;     // [M6] jobs that missed their fire window
+    // PIM 100.48: a late run is normal and is NOT counted anywhere a person reads it; only failing and genuinely stuck jobs are.
+    const stuckN = jobs.filter(j => j && j.stuck && !j.featureOff && !j.outOfScope).length;
     const failing = data.failingCount || 0;     // jobs whose LATEST run failed (self-heals; no Ack -- 2026-09-21)
     const held = data.heldCount || 0;           // 71.13 jobs with a standing policy HOLD (needs approval)
     const waitingN = data.waitingCount || 0;    // §95.2o runs waiting for an area another run is working on
@@ -19748,7 +19870,7 @@
     window._jobsCanRun = canRun;
     // menu badges (PIM 100.94): the number of RUNNING jobs is a fact -- it stays on this page and is no longer a number in
     // the menu. Jobs and Engine logs both carry the count of jobs that FAILED (an error), set in one place.
-    setEngineErrBadge(jobs.filter(j => (Number(j.unackedFailureCount) || 0) > 0).length);
+    setEngineErrBadge(jobs.filter(jobNeedsAttention).length);   // PIM 100.48: failing or genuinely stuck, never "late"
 
     const h = [];
     // §71.43 -- the environment's UPDATE RING sits at the top of Jobs, above the scheduled
@@ -19769,13 +19891,14 @@
       (jobs.length ? exportBarHtml('jobs') + ' ' : '') +
       '<button id="jobsRefresh" class="ghost" style="font-size:12px;">Refresh</button>' +
       '<label style="font-size:12px;color:#57606a;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="jobsAuto"> auto-refresh</label></div>');
-    // [M6] "needs attention" banner: overdue (missed a fire window) and/or failing
-    // (its latest run failed). Tells the admin a scheduled run FAILED or never
-    // fired -- the exact gap [M6] called out -- without opening each row.
-    if (overdue > 0 || failing > 0 || held > 0) {
+    // [M6] "needs attention" banner -- PIM 100.48 (owner 2026-10-13: "people dont undersand what overdue means. should they be
+    // worried and do anything"): ONLY a job whose latest run FAILED, a job that is genuinely STUCK (no run for more than 3x its
+    // interval and at least an hour), and a held change set waiting for a person. A run that is a few minutes late is normal
+    // and never appears here.
+    if (stuckN > 0 || failing > 0 || held > 0) {
       const parts = [];
-      if (overdue > 0) parts.push('<b style="color:#9a6700;">' + overdue + ' overdue</b> (a scheduled run did not fire on time)');
       if (failing > 0) parts.push('<b style="color:#cf222e;">' + failing + ' failing</b> (the latest run failed -- clears by itself when a later run succeeds)');
+      if (stuckN > 0) parts.push('<b style="color:#9a6700;">' + stuckN + ' not running</b> (has not run for a long time -- PIM Manager will start it again)');
       if (held > 0) parts.push('<b style="color:#9a6700;">' + held + ' need approval</b> (a safety breaker held a change set -- approve the plan named in the job result)');
       const attnRed = (failing > 0);
       h.push('<div style="padding:10px 12px;margin-bottom:12px;border:1px solid ' + (attnRed ? '#cf6679' : '#d4a72c') + ';background:' + (attnRed ? '#ffebe9' : '#fff8c5') + ';border-radius:6px;color:' + (attnRed ? '#7d1a1a' : '#7d4e00') + ';font-size:12px;">' +
@@ -19896,13 +20019,13 @@
           : '';
         const pullNote = unusedNote;
         const rowKey = 'jd-' + String(j.name || '').replace(/[^A-Za-z0-9_-]/g, '_');
-        rowH.push('<tr class="jobRow" data-job="' + esc0(j.name) + '" style="border-bottom:1px solid #eaeef2;' + (neverUsed ? 'opacity:.55;' : '') + rowBg + (j.overdue ? 'box-shadow:inset 3px 0 0 #d4a72c;' : (j.unackedFailureCount > 0 ? 'box-shadow:inset 3px 0 0 #cf222e;' : (j.needsApproval ? 'box-shadow:inset 3px 0 0 #d4a72c;' : ''))) + '">' +
+        rowH.push('<tr class="jobRow" data-job="' + esc0(j.name) + '" style="border-bottom:1px solid #eaeef2;' + (neverUsed ? 'opacity:.55;' : '') + rowBg + (j.unackedFailureCount > 0 ? 'box-shadow:inset 3px 0 0 #cf222e;' : (j.stuck ? 'box-shadow:inset 3px 0 0 #d4a72c;' : (j.needsApproval ? 'box-shadow:inset 3px 0 0 #d4a72c;' : ''))) + '">' +
           '<td style="padding:6px 8px;white-space:nowrap;"><button class="ghost jobExpand" data-target="' + esc0(rowKey) + '" aria-expanded="false" title="Show the cadence, what this job works on and its recent history" style="font-size:11px;padding:0 4px;">&#9656;</button> <b>' + esc0(j.name) + '</b>' + scope + pullNote + '</td>' +
           '<td style="padding:6px 8px;">' + jobStatusPill(j) + jobLaneBadge(j) + hybridWorkerBadge(j) + '</td>' +
           '<td style="padding:6px 8px;white-space:nowrap;" title="' + esc0(fmtTime(j.lastRunUtc, { seconds: true })) + '">' + lastCell + '</td>' +
           '<td style="padding:6px 8px;max-width:280px;">' + result + '</td>' +
           '<td style="padding:6px 8px;white-space:nowrap;" title="' + esc0(fmtTime(j.nextRunUtc)) + (j.nextRunSynthesized ? ' (computed from cadence)' : '') +
-            (j.lastFinishedUtc && j.intervalMinutes ? esc0(' = last run finished ' + fmtTime(j.lastFinishedUtc) + ' + ' + j.intervalMinutes + ' min') : '') + '">' + (j.overdue ? '<span style="color:#9a6700;font-weight:600;">' : '') + nextCell + (j.overdue ? '</span>' : '') + '</td>' +
+            (j.lastFinishedUtc && j.intervalMinutes ? esc0(' = last run finished ' + fmtTime(j.lastFinishedUtc) + ' + ' + j.intervalMinutes + ' min') : '') + '">' + nextCell + '</td>' +
           '<td style="padding:6px 8px;text-align:right;white-space:nowrap;">' + (j.type === 'hybrid-ad-sync' ? '<button class="btn-sec jobsHybridLive" title="Watch the continuous PIM-for-AD sync live (TTL checks, adds, removes)">Live view</button> ' : '') + runBtn + ' ' + logBtn + '</td>' +
           '</tr>');
         // the details panel: everything that used to widen the line
@@ -19993,8 +20116,8 @@
     wireExportBar('jobs', () => ({
       filename: 'pim-jobs-' + new Date().toISOString().replace(/[:.]/g, '-') + '.csv',
       title: 'PIM Manager — scheduled & recent jobs',
-      subtitle: jobs.length + ' job(s)' + (overdue ? ' · ' + overdue + ' overdue' : '') + (failing ? ' · ' + failing + ' failing' : ''),
-      headers: ['Job', 'Type', 'Scope', 'Cadence', 'Enabled', 'Status', 'LastRunUtc', 'LastResult', 'LastOk', 'DurationMs', 'NextRunUtc', 'RecentFailures', 'UnackedFailures', 'Overdue'],
+      subtitle: jobs.length + ' job(s)' + (failing ? ' · ' + failing + ' failing' : '') + (stuckN ? ' · ' + stuckN + ' not running' : ''),
+      headers: ['Job', 'Type', 'Scope', 'Cadence', 'Enabled', 'Status', 'LastRunUtc', 'LastResult', 'LastOk', 'DurationMs', 'NextRunUtc', 'RecentFailures', 'UnackedFailures', 'NotRunningSince'],
       rows: jobs.map(j => [
         j.name || '', j.type || '', j.scope || '', j.cadence || '',
         (j.enabled ? 'yes' : 'no'),
@@ -20006,7 +20129,7 @@
         (j.enabled && j.nextRunUtc ? (j.nextRunSynthesized ? '~' : '') + j.nextRunUtc : ''),
         (j.recentFailureCount || 0),
         (j.unackedFailureCount || 0),
-        (j.overdue ? 'yes' : 'no')
+        (j.stuck ? fmtTime(j.stuckSinceUtc || j.lastRunUtc) : '')
       ])
     }));
 
@@ -20206,7 +20329,7 @@
     if (typeof isServer !== 'undefined' && !isServer) return;
     try {
       const d = await api('GET', '/api/jobs');
-      setEngineErrBadge(((d && d.jobs) || []).filter(j => (Number(j.unackedFailureCount) || 0) > 0).length);
+      setEngineErrBadge(((d && d.jobs) || []).filter(jobNeedsAttention).length);   // PIM 100.48: failing or genuinely stuck
     } catch (e) { /* a badge never breaks the page */ }
   }
   async function renderEngineLogs() {
@@ -24639,7 +24762,12 @@
         `<span class="diff-col"><b>${escapeHtml(c)}</b>: ${escapeHtml((m.before&&m.before[c])||'')} → ${escapeHtml((m.after&&m.after[c])||'')}</span>`).join('')}</div>`);
     }
     lines.push('</div></details>');
+    // PIM 100.142 (4): a staged Power BI workload row while PIM Manager cannot reach Power BI's admin API yet -> one calm line
+    // + the two-line command under the card (filled by pbiAdminNoteInto; empty when the last run did not hit it).
+    const pbiStaged = base === 'PIM-Assignments-Workloads' && (asList(diff.adds).some(pbiIsPowerBiRow) || asList(diff.modifies).some(m => pbiIsPowerBiRow(m && m.after)));
+    if (pbiStaged) lines.push('<div class="pbiAdminHost"></div>');
     card.innerHTML = `<h3>${escapeHtml(base)}</h3>` + sharedStagersHtml(base) + lines.join('');
+    if (pbiStaged) pbiAdminNoteInto(card.querySelector('.pbiAdminHost'));
   }
 
   function formatRowSummary(row) {
@@ -35350,6 +35478,25 @@
   // The template -> workload map comes from the server; the packs themselves carry no prerequisite info.
   // ===================================================================
   let _pimPrereqCache = null;
+  // PIM 100.142 (4): where a Power BI workload row or a discovered Power BI workspace is staged, and the engine's last run hit
+  // POWERBI-ADMIN-NOT-GRANTED (GET /api/workload-prereqs -> powerBiAdmin, decided by the server), ONE calm line and the
+  // two-line command (download + run) with Copy and "What does this script do?" -- the same block as every other command.
+  // Nothing is shown otherwise. PIM Manager never runs the command: a Global Administrator of the tenant does.
+  let PBI_ADMIN_SEQ = 0;
+  async function pbiAdminNoteInto(host) {
+    if (!host) return;
+    let data = null;
+    try { data = await pimWorkloadPrereqsLoad(); } catch (_) { data = null; }
+    const n = data && data.powerBiAdmin;
+    if (!n || !n.show || !String(n.command || '').trim()) { host.innerHTML = ''; return; }
+    const id = 'pbiAdminCmd' + (++PBI_ADMIN_SEQ);
+    host.innerHTML = '<div class="pbiAdminNote" data-failure-class="' + escapeHtml(n.failureClass || 'POWERBI-ADMIN-NOT-GRANTED') + '" style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:8px 10px;margin:6px 0;font-size:12px;color:#24292f;min-width:0;overflow-wrap:anywhere;">' +
+      '<div class="pbiAdminLine">' + escapeHtml(String(n.line || 'PIM Manager cannot reach Power BI yet. A Global Administrator runs these two lines once:')) + '</div>' +
+      gsCode(id, String(n.command)) +
+      (n.fabric ? '<div class="pbiAdminFabric" style="color:#57606a;margin-top:2px;">' + escapeHtml(String(n.fabric)) + '</div>' : '') + '</div>';
+    host.querySelectorAll('.gsCopy').forEach(b => b.onclick = () => { const el = document.getElementById(b.dataset.src); try { navigator.clipboard.writeText(el ? el.textContent : ''); sharedToast('Copied'); } catch (_) { } });
+  }
+  function pbiIsPowerBiRow(r) { return !!r && /^power\s*-?\s*bi$/i.test(String(r.Workload || '').trim()); }
   function pimWorkloadPrereqsLoad(force) {
     const now = Date.now();
     if (!force && _pimPrereqCache && (now - _pimPrereqCache.at) < 60000) return _pimPrereqCache.promise;

@@ -15,6 +15,14 @@
       "feature": "second-approver",
       "confirmOn": false,
       "confirmOff": true,
+      "confirm": {
+        "off": {
+          "tone": "lessSafe",
+          "title": "Save sensitive changes without a second approver?",
+          "body": "When off, sensitive changes are saved straight away, without another administrator approving them.",
+          "note": "Note: this removes the four-eyes check on sensitive changes."
+        }
+      },
       "info": {
         "what": "Requires a second administrator to approve any Review & Save commit or row deletion that touches privileged access before PIM Manager writes it. The check runs in PIM Manager at the moment you commit; it applies from the next commit after you save.",
         "enabled": "A commit that PIM Manager classifies as sensitive is refused until a different administrator has approved it on the Approvals page. You cannot approve your own change unless self-approval is switched on (Settings > Approvals & policy). Changes that are not sensitive commit as before.",
@@ -55,6 +63,14 @@
       "feature": "",
       "confirmOn": false,
       "confirmOff": true,
+      "confirm": {
+        "off": {
+          "tone": "lessSafe",
+          "title": "Stop all mail from PIM Manager?",
+          "body": "When off, PIM Manager sends no mail at all, including alerts and the first sign-in mail for new admins.",
+          "note": "Note: nothing on screen shows that mail is not sent, and skipped mail is not sent later."
+        }
+      },
       "info": {
         "what": "The master switch for every mail PIM Manager and the engine send. It covers alerts, digests, reminders, escalations, the tier report, access-request and review mails, and the mail that delivers a new admin's first sign-in (Temporary Access Pass). The engine and jobs check it on every send, so a change applies to the next mail.",
         "enabled": "Mail is sent through your configured mail sender to the intended recipients, still subject to Email controls (kill switch, redirect, allowlist). The daily summary, tier report, reminders and escalations jobs run on their schedule.",
@@ -95,6 +111,14 @@
       "feature": "entra-azure-intune-defender",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Let PIM Manager manage Intune and Defender XDR roles?",
+          "body": "When on, PIM Manager adds and removes Intune and Defender XDR role assignments to match your definitions.",
+          "note": "Note: it also removes assignments that your definitions no longer include."
+        }
+      },
       "info": {
         "what": "Lets the engine apply your workload role delegation. This covers Intune and Defender XDR role assignments, including Defender custom roles built from a role specification, and the generic workload-connector rows (where Pro connectors also need a licence). If you never set it, it counts as on whenever such assignment rows exist. A value you save always wins.",
         "enabled": "On the next engine run, the engine creates and updates the Intune and Defender XDR role assignments (and custom Defender roles) your definitions describe, and removes the ones your definitions remove. Rows for Pro connectors run only with a Pro licence.",
@@ -115,6 +139,14 @@
       "feature": "more-workload-connectors",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Let PIM Manager manage app roles in your applications?",
+          "body": "When on, PIM Manager adds and removes app-role assignments in your enterprise applications to match your definitions.",
+          "note": "Note: it also removes app-role assignments that your definitions no longer include."
+        }
+      },
       "info": {
         "what": "The switch for the enterprise-app app-role connector. The engine applies app-role assignments from your app-role definitions only when it is on. Azure DevOps, Dataverse, Business Central and Power Platform rows actually run under 'Workload connectors: Intune + Defender XDR' and need the Pro licence this entry names. This switch does not stop them.",
         "enabled": "On the next engine run, the engine assigns the enterprise-application app roles your definitions describe, and removes the ones they no longer include, if a Pro licence is installed.",
@@ -155,6 +187,20 @@
       "feature": "access-request-portal",
       "confirmOn": true,
       "confirmOff": true,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Let admins ask for their account on the request portal?",
+          "body": "When on, the people you list can ask for their disabled admin account to be enabled for a limited time.",
+          "note": "Note: a request can be approved automatically or by one owner, so choose the approval rules with care."
+        },
+        "off": {
+          "tone": "neutral",
+          "title": "Stop taking requests from the request portal?",
+          "body": "When off, new requests from the portal are not handled.",
+          "note": "Note: accounts that are enabled right now stay enabled until you disable them yourself."
+        }
+      },
       "info": {
         "what": "Turns on the access-request job that runs every minute. It publishes who may request access to the public request portal, takes in submitted requests, decides them (auto-approved or by the department owner, per department), enables the admin account for the approved time, and disables it again when the time is over. It also shows pending requests on the PIM Manager home page.",
         "enabled": "Within a minute, people listed as eligible can request their disabled admin account enabled from the portal with a one-time PIN. Approved requests enable the account on the engine's next run, and accounts are disabled again when their window ends. The decision mails are sent.",
@@ -175,6 +221,14 @@
       "feature": "access-request-portal",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Let other systems, such as ServiceNow, ask for access?",
+          "body": "When on, a system you allow can ask PIM Manager for admin access for a limited time.",
+          "note": "Note: anyone with a valid API key can send requests, so keep the keys safe."
+        }
+      },
       "info": {
         "what": "Accepts access requests that other systems (for example ServiceNow) send to the REST API on the public broker. A caller can ask for an admin account to be enabled, or a group membership, for a set time, and read or cancel the request. Callers use an allow-listed Entra application token or a PIM API key.",
         "enabled": "On its next run (within a minute), the access-request job takes in API requests and decides them with the same rules as portal requests. Group requests become a time-limited active membership that is removed at the end. SuperAdmins can create API keys.",
@@ -195,6 +249,14 @@
       "feature": "",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Let AI assistants work with PIM Manager?",
+          "body": "When on, an AI assistant can use PIM Manager with the same rights as the person it signs in as.",
+          "note": "Note: what the assistant reads, such as who holds admin access, is shared with that assistant."
+        }
+      },
       "info": {
         "what": "Opens the Model Context Protocol endpoint on PIM Manager, so an AI assistant or agent signed in with an Entra account can read who has what, pending changes, jobs and problems. It can also stage and commit changes through the same checks as the PIM Manager page. The signed-in person's PIM Manager role decides what it may do. PIM Manager checks the switch on every call, so a change applies at once.",
         "enabled": "Signed-in assistants can call the endpoint. Every tool call, reads included, is written to the audit trail. Demo viewers stay refused.",
@@ -203,6 +265,34 @@
         "requires": "A Pro licence (switching it on, or calling it, without one is refused). SuperAdmin to change it. The endpoint's Entra sign-in set up for PIM Manager.",
         "recommended": "Off unless you use an assistant with PIM Manager. If on, use it with accounts that have the lowest PIM Manager role that does the job.",
         "docUrl": "https://invardia.com/docs/pim/settings/FeatureGates.mcp.server/"
+      }
+    },
+    {
+      "key": "FeatureGates.hybrid.ad",
+      "label": "On-premises Active Directory (hybrid worker)",
+      "where": "Settings > Features & edition > Feature customization",
+      "route": "/api/settings/feature-gates",
+      "type": "boolean",
+      "default": "Off",
+      "feature": "pim-for-active-directory",
+      "confirmOn": true,
+      "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Use PIM Manager with your on-premises Active Directory?",
+          "body": "When on, PIM Manager keeps your AD admin accounts and AD groups in step through the hybrid worker.",
+          "note": "Tip: switch this on only when the hybrid worker is installed."
+        }
+      },
+      "info": {
+        "what": "Lets PIM Manager work with your on-premises Active Directory through the hybrid worker, a small service you install on a domain-joined server. It creates admin accounts in AD, mirrors the PIM groups you mark for AD to AD groups, and puts people who activate a PIM group into its AD group for the activation time.",
+        "enabled": "The hybrid worker's jobs run on their schedule, and the Jobs page and Settings > Hybrid Active Directory show whether the worker has checked in.",
+        "disabled": "The hybrid worker's jobs do not run and are shown as switched off. Nothing is changed in Active Directory, and nothing warns about a missing hybrid worker.",
+        "risk": "Low. Switched on without an installed hybrid worker, the hybrid jobs report that the worker has not checked in. Switched off on an install that uses it, AD admin accounts, AD groups and activation-time AD membership are no longer kept in step until you switch it on again.",
+        "requires": "A Pro licence that covers this tenant. SuperAdmin to change it. The hybrid worker installed on a domain-joined server, with its own service accounts.",
+        "recommended": "Off unless you use on-premises Active Directory with PIM Manager. Switch it on after the hybrid worker is installed.",
+        "docUrl": "https://invardia.com/docs/pim/settings/FeatureGates.hybrid.ad/"
       }
     },
     {
@@ -235,6 +325,14 @@
       "feature": "signed-licence",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Ask Invardia for your licence automatically?",
+          "body": "When on, PIM Manager asks Invardia for a licence when one is needed and installs it after checking it.",
+          "note": "Note: this sends your tenant id to invardia.com."
+        }
+      },
       "info": {
         "what": "Runs the licence-request job every 30 minutes. When no valid Pro licence for this tenant is installed, or the installed one ends within 30 days, PIM Manager asks Invardia for its licence. When one is delivered, it checks the file (checksum, signature, Pro, this tenant) and installs it, with no restart.",
         "enabled": "On the next 30-minute run, if a licence is needed, PIM Manager sends Invardia the product name, version, this tenant's id, an installation id, and the id and end date of the installed licence if there is one. It then polls until Invardia answers, and shows the status under Settings > Licence. A rejection is never re-requested automatically.",
@@ -255,6 +353,14 @@
       "feature": "signed-updates",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Get Pro updates from Invardia?",
+          "body": "When on, PIM Manager collects Pro updates from Invardia and installs each one only after checking it.",
+          "note": "Note: this sends your licence file and tenant id to invardia.com."
+        }
+      },
       "info": {
         "what": "Runs the install-key job every 6 hours. When this install has a Pro licence for this tenant and no Invardia install key yet, it claims one by sending Invardia the licence file and this tenant's id. The key lets the nightly update take signed Pro releases from Invardia, for the ring Invardia has set, when the update job is deployed with Invardia as its source.",
         "enabled": "On the next 6-hour run, if no key is held, PIM Manager claims one and shows the result under Settings > Licence. Each update is installed only after its signature, release number and archive checksum are checked. A release that asks for a manual step is held. Status telemetry then also travels with this key.",
@@ -275,6 +381,14 @@
       "feature": "",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Send status reports to Invardia?",
+          "body": "When on, PIM Manager tells Invardia how its jobs are doing, so support can help sooner.",
+          "note": "Note: this sends job status, with secrets removed, out of your environment to invardia.com."
+        }
+      },
       "info": {
         "what": "Runs the uplink job every hour. It reports to Invardia which jobs ran and whether they succeeded (one report per job, never one per run), and every hour a heartbeat with version, edition and licence state. Without an install key it is anonymous: no tenant, no server name, no error text, only an error class and rounded counts. With a Pro install key, reports carry the error text with secrets removed.",
         "enabled": "From the next hourly run, the job reports at most 20 job results per cycle and the heartbeat every hour. A failed send never fails anything else and is retried on the next cycle.",
@@ -295,6 +409,14 @@
       "feature": "",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Send setup health to Invardia?",
+          "body": "When on, PIM Manager tells Invardia which parts of the setup are missing, so support can help before you ask.",
+          "note": "Tip: names of people and groups, tenant data and secrets are never sent."
+        }
+      },
       "info": {
         "what": "Adds a setup report to the hourly uplink run: once a day and whenever something changes, the state of the critical settings (updater deployed and scheduled, update ring, install key, licence, mail sender, alert recipients, engine permissions, last successful run, backup, update pinned) as ok, missing, wrong or unknown, plus how many engine permissions are expected, missing and extra. The same list drives the health lines on Home.",
         "enabled": "With a Pro install key, the next uplink run sends the setup report, then one a day and one on every change. Invardia support sees what is missing and can help before you call. Without an install key nothing of this is sent.",
@@ -315,6 +437,19 @@
       "feature": "desired-state-engine",
       "confirmOn": true,
       "confirmOff": true,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Run PIM Manager's jobs on their schedule?",
+          "body": "When on, PIM Manager applies your definitions to your tenant on a schedule, adding and removing access to match."
+        },
+        "off": {
+          "tone": "lessSafe",
+          "title": "Pause all scheduled jobs?",
+          "body": "When off, no job runs, so your definitions are not applied, reminders are not sent and access windows are not closed.",
+          "note": "Note: the jobs still show as green, so missed work can go unnoticed."
+        }
+      },
       "info": {
         "what": "The master switch for the scheduler. Every scheduled job checks it before it runs: engine reconcile runs, the change queue, discovery, digests and reminders, access-request handling, licence checks and requests, telemetry, hybrid AD jobs and the rest. It applies from the next scheduler tick.",
         "enabled": "Jobs run on the cadence shown on the Job schedule page. The engine reconciles your definitions into the tenant, which creates, updates and removes accounts, groups and assignments.",
@@ -335,6 +470,14 @@
       "feature": "second-approver",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Allow offboarding and removals with approval?",
+          "body": "When on, one administrator can ask to offboard an admin or remove access, and another administrator approves it.",
+          "note": "Note: an approved offboarding disables the account and removes its access."
+        }
+      },
       "info": {
         "what": "Turns on the action paths of the Approvals page: raising an approval request, deciding it, and running an approved offboarding. When off, the page can be viewed, but PIM Manager refuses those actions. PIM Manager reads the switch on every request, so it applies at once. The page banner updates on the next reload.",
         "enabled": "An administrator can raise an offboarding or revoke request with a justification. A different administrator approves it, and running it stages the disable and revoke, which the engine applies on its next run (the account is disabled, never deleted). Requests from 'Second-approver on sensitive changes' can be raised and decided too.",
@@ -355,6 +498,14 @@
       "feature": "permission-template-packs",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Allow template exemptions and deployments?",
+          "body": "When on, a SuperAdmin can exempt this tenant from parts of a template and deploy templates.",
+          "note": "Note: a deployment adds role assignments in your tenant on the next run."
+        }
+      },
       "info": {
         "what": "Turns on the action paths of the Template Rollout page: adding and revoking exemptions, approving a template version, and deploying a template's rows. When off, the page and its conformance view can be read, but PIM Manager refuses those actions. It applies at once, and the banner updates on the next reload. Promoting a template entry to a ring is not covered by this switch.",
         "enabled": "A SuperAdmin can record exemptions (template entries this tenant deliberately does not follow), approve template versions, and deploy. Deploying writes the template's rows into your workload assignments as a normal commit, and the engine applies them on its next run.",
@@ -395,6 +546,14 @@
       "feature": "msp-define-once",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Change how this environment is used?",
+          "body": "This changes whether PIM Manager works on its own, manages other tenants, or is managed by another tenant.",
+          "note": "Note: managing and managed tenants need a Pro licence."
+        }
+      },
       "info": {
         "what": "Says which deployment shape this install runs as: a single tenant, a managing tenant, or a managed tenant (hosted centrally or locally). The mode badge at the top, the managing-tenant pages, the managed-tenant pull and publish rows on the Job schedule, the MSP licence requirement and the hourly licence check all follow it. PIM Manager applies it at once, and the engine and jobs from their next run.",
         "enabled": "When set to managing tenant: the managed-tenant registry and replication pages appear, the managed-tenant enrolment job runs (it updates the network rules of the replication store), and a Pro licence becomes mandatory. As a managed tenant, the pull from the managing tenant is listed and also needs a Pro licence.",
@@ -855,6 +1014,13 @@
       "feature": "naming-conventions",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Change the domain for new admin accounts?",
+          "body": "New admin accounts get this domain, and existing accounts keep their address."
+        }
+      },
       "info": {
         "what": "The domain after the @ in every admin account PIM creates in this tenant, picked from the tenant's verified domains. On a managed tenant it is also the domain the admins replicated from the managing tenant are created at -- the managing tenant's domain is never carried over.",
         "enabled": "When set: from the next engine run, new admin accounts whose row has no full address are created as <name>@<this domain>, and the admin wizard proposes that domain. Existing accounts keep their address -- nothing is renamed. Only a verified domain can be saved.",
@@ -875,6 +1041,14 @@
       "feature": "",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Let demo visitors look around?",
+          "body": "When on, members of the demo guest group can read every page, but cannot change anything.",
+          "note": "Note: visitors can see who holds admin access, while secrets stay hidden."
+        }
+      },
       "info": {
         "what": "For a live demo environment. While on, every signed-in member of the demo guest group becomes a demo viewer: they can open every page and stage changes in their own browser, but the server refuses every commit, approval, job run, revoke and settings change they try. Everyone else keeps their own role.",
         "enabled": "Within about 15 seconds of saving, members of the demo guest group get read-only access to every page at Reader level -- even if they hold no PIM Manager role -- and any role they had above that is capped. If the group cannot be read from Entra ID, nobody is treated as a demo viewer until it can: every signed-in person keeps their own role (a visitor without one sees nothing), a warning is logged and Home shows it. Applies to the hosted PIM Manager only, never the local console.",
@@ -935,6 +1109,14 @@
       "feature": "naming-conventions",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Change the suffixes in admin account names?",
+          "body": "New admin accounts get the new suffix, and existing accounts keep their names.",
+          "note": "Note: on a hybrid setup, existing admins can lose the link to their AD account."
+        }
+      },
       "info": {
         "what": "One suffix per environment: Entra ID (cloud) and on-premises Active Directory. It fills the {Platform} / {EnvironmentSuffix} token in admin and group names, e.g. admin-abc-id for the cloud account and admin-abc-ad for its AD twin.",
         "enabled": "When set: new admin names use the new suffix. The hybrid worker also uses the two suffixes to pair a cloud admin with its AD account (replace the cloud suffix with the AD suffix) for just-in-time AD group membership, and it only REMOVES AD group members whose name ends with the AD suffix. Group names whose pattern contains {Platform} use the suffix of your default environment.",
@@ -1195,6 +1377,14 @@
       "feature": "desired-state-engine",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Change how PIM groups are named?",
+          "body": "New PIM groups get names in this pattern, and existing groups keep their names.",
+          "note": "Note: groups whose names start the old way are no longer picked up by themselves."
+        }
+      },
       "info": {
         "what": "The name of a PIM group, built around its tag ({Role}). It is also how PIM Manager and the engine recognise your groups: the literal text before the first token (PIM- by default) is the prefix used to find managed groups.",
         "enabled": "When set: new group names from the wizards and template packs use it. From the next engine run the literal prefix decides which groups the engine reads from the tenant, which groups may be retired, which groups the hybrid worker mirrors to AD (prefix + -S_AD), and how tags are read back from names.",
@@ -1295,6 +1485,13 @@
       "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Create admin accounts in Active Directory?",
+          "body": "When set, PIM Manager creates the day-to-day admin accounts in this OU of your Active Directory."
+        }
+      },
       "info": {
         "what": "The on-premises Active Directory OU (distinguished name, e.g. OU=Admins,DC=example,DC=com) where new day-to-day admin accounts are created. Only for tenants with on-premises AD.",
         "enabled": "When set: on its next scheduled run the hybrid worker creates every due on-premises admin row (Environment / platform AD) that is not high-privilege as an AD user in this OU, with an initial password delivered to the admin mail recipient.",
@@ -1315,6 +1512,13 @@
       "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Create high-privilege admin accounts in Active Directory?",
+          "body": "When set, PIM Manager creates the high-privilege (Tier 0) admin accounts in this OU of your Active Directory."
+        }
+      },
       "info": {
         "what": "The on-premises AD OU where new high-privilege (L0 / Tier 0) admin accounts are created -- rows with Purpose = HighPriv, or with no Purpose and a user name that matches the high-privilege admin pattern.",
         "enabled": "When set: on its next scheduled run the hybrid worker creates due high-privilege AD admin rows as AD users in this OU.",
@@ -1355,6 +1559,14 @@
       "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Change which AD groups PIM Manager keeps in sync?",
+          "body": "PIM Manager keeps the AD groups whose names end with this marker in step with PIM.",
+          "note": "Note: in a group that newly matches, admin accounts without an active activation are taken out."
+        }
+      },
       "info": {
         "what": "The text at the end of a PIM group name that marks the group as also existing in your on-premises Active Directory. The hybrid worker mirrors every defined PIM group named <your group prefix>*<marker> to an AD security group of the same name, and keeps that AD group's members in step with who has the PIM group activated. The marker is also the {marker} part of the per-server group name.",
         "enabled": "When set: only defined PIM groups ending in this marker are mirrored and synced. Groups that newly match are created in AD (if an OU for new AD groups is set) and their members synced: users carrying the AD admin suffix without an active PIM activation are removed. The hybrid worker's change check picks up a saved value on its next pass and re-runs the group mirror at once.",
@@ -1375,6 +1587,14 @@
       "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Use your own pattern for the AD groups kept in sync?",
+          "body": "PIM Manager keeps every AD group whose name matches this pattern in step with PIM.",
+          "note": "Note: in a group that newly matches, admin accounts without an active activation are taken out."
+        }
+      },
       "info": {
         "what": "A full wildcard that replaces the derived pattern for which PIM groups are mirrored to AD. Only groups defined in PIM Manager are ever considered -- the pattern never reaches AD groups PIM Manager does not define. The card's preview shows the effective pattern and how many defined groups match today.",
         "enabled": "When set: every defined PIM group whose name matches the wildcard is mirrored to AD and has its AD membership synced from active PIM activations. The value must contain * and may not be * alone. The marker setting is then ignored for matching.",
@@ -1395,6 +1615,14 @@
       "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Change how cloud admins are matched to AD accounts?",
+          "body": "PIM Manager uses this suffix to find the AD account that belongs to each cloud admin.",
+          "note": "Note: a wrong suffix can add or take out the wrong AD account."
+        }
+      },
       "info": {
         "what": "The end of a cloud admin account name (its mail nickname) that the hybrid worker swaps for the AD admin suffix to find the matching on-premises account. Example: Admin-JDOE-ID in Entra ID becomes Admin-JDOE-AD in AD. Only a trailing suffix is swapped; a name without it maps to the same name in AD.",
         "enabled": "When set: activated members are mapped to AD accounts with this suffix swapped out. A changed value changes which AD account is added to a group when someone activates the PIM group, from the next sync pass.",
@@ -1415,6 +1643,14 @@
       "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Change the suffix of AD admin accounts?",
+          "body": "PIM Manager adds AD accounts with this suffix when someone activates, and takes them out when the activation ends.",
+          "note": "Note: other accounts with this suffix in those groups are taken out too, unless they are listed under Never remove."
+        }
+      },
       "info": {
         "what": "The end of the AD admin account a cloud admin maps to, and the safety marker for removals: the sync only ever removes a USER from a mirrored AD group when its account name ends in this suffix. Service accounts, nested groups and users without the suffix are always kept and reported as not PIM-managed.",
         "enabled": "When set: activated members are added as <name><suffix> in AD, and every user in a mirrored group that carries this suffix but has no active PIM activation is removed on the next sync pass (the sync runs continuously on the hybrid worker).",
@@ -1435,6 +1671,14 @@
       "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Create missing AD groups in this OU?",
+          "body": "When set, PIM Manager creates the AD groups it keeps in sync that are missing, in this OU.",
+          "note": "Note: groups it creates are not deleted again if you clear this later."
+        }
+      },
       "info": {
         "what": "The distinguished name of the organizational unit (OU=...,DC=...) where the hybrid worker creates AD groups for mirrored PIM groups that do not exist in AD yet. Groups are created as global security groups with the PIM group's name, a display name of <name> (separate group) and its description.",
         "enabled": "When set: on the next group mirror run (hourly, and at once when the worker sees the change) every mirrored PIM group missing in AD is created in this OU; the continuous sync then fills it with the people who have it activated. Existing groups elsewhere keep their place and have their display name and description corrected.",
@@ -1475,6 +1719,14 @@
       "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Make this group local administrator on your servers?",
+          "body": "Members of this group become local administrators on every server PIM Manager onboards.",
+          "note": "Note: clearing it later does not take the group off the servers, so do that by hand."
+        }
+      },
       "info": {
         "what": "One AD group (name, or DOMAIN\\name) that server onboarding also adds to the local Administrators group of every onboarded server -- next to that server's own per-server group. It replaces the shared all-servers group of the older PIM-for-AD scripts.",
         "enabled": "When set: on the next server onboarding run (hourly) the worker adds this group to local Administrators on every server whose per-server group is defined and already exists in AD. Its members become local administrators on all those servers.",
@@ -1495,6 +1747,20 @@
       "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": true,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Keep these accounts in the AD groups?",
+          "body": "The accounts on this list always stay in the AD groups PIM Manager keeps in sync, even without an activation.",
+          "note": "Note: these accounts keep standing admin access outside just-in-time control."
+        },
+        "off": {
+          "tone": "neutral",
+          "title": "Empty the Never remove list?",
+          "body": "When the list is empty, admin accounts without an active activation are taken out of the AD groups PIM Manager keeps in sync.",
+          "note": "Note: the accounts that were on the list are taken out on the next pass."
+        }
+      },
       "info": {
         "what": "Account names (comma or semicolon separated, no wildcards) that the just-in-time sync never removes from a mirrored AD group, even when they carry the AD admin suffix and have no active PIM activation. They are reported as kept (protected).",
         "enabled": "When set: the listed accounts keep their membership in every mirrored AD group permanently, from the next sync pass. People with an active activation are still added as usual.",
@@ -1555,6 +1821,20 @@
       "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": true,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Read activation end times as UTC?",
+          "body": "When on, people leave the AD group exactly when their activation ends, whatever the server's time zone.",
+          "note": "Note: active members are added once more, with the corrected end time."
+        },
+        "off": {
+          "tone": "neutral",
+          "title": "Stop reading activation end times as UTC?",
+          "body": "When off, end times are read as before, which can be off by the time zone of the server.",
+          "note": "Note: active members are added once more, with the changed end time."
+        }
+      },
       "info": {
         "what": "How the hybrid worker reads the time at which an activation ends. Type on or off. On: the end time is always read as UTC, which is what Microsoft Entra sends. Off: it is read as before, which is only exact when the clock of the hybrid worker is set to UTC.",
         "enabled": "When on: a member leaves the on-premises AD group exactly when the activation ends, whatever time zone the hybrid worker runs in. In a forest with time-limited group membership every active member is re-added once, with the corrected time, in the first pass after the change.",
@@ -1675,6 +1955,13 @@
       "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Offer new servers in these OUs for approval?",
+          "body": "New servers in these OUs are offered as one list, and nothing is created until a SuperAdmin approves it."
+        }
+      },
       "info": {
         "what": "The organizational units whose newly found Windows servers are collected into one list for a SuperAdmin. Enter distinguished names, one per line or separated by a semicolon; sub-OUs are included. Each OU must lie inside where the worker looks and outside the left-out OUs. Naming an OU creates nothing by itself.",
         "enabled": "When set: at each listing the hybrid worker puts every listed server in these OUs that has no group on the waiting list shown on this page. Nothing is created until a SuperAdmin approves that exact list. After the approval the worker defines the groups in batches, run after run; the engine creates each group, it is mirrored to Active Directory and added to the server's local Administrators. The groups are empty: nobody gets access until a person delegates it. Each definition is written to the audit trail.",
@@ -1715,6 +2002,13 @@
       "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Also look for old PIM groups in these OUs?",
+          "body": "Old PIM groups in these OUs are listed for clean-up, and each one is deleted only after a SuperAdmin approves it."
+        }
+      },
       "info": {
         "what": "Extra organizational units where the hybrid worker looks for old PIM groups: Active Directory groups that carry the PIM naming but have no definition in PIM Manager any more. The OU for new AD groups is always included. Enter distinguished names, one per line or separated by a semicolon; sub-OUs are included.",
         "enabled": "When set: from the worker's next run old PIM groups in these OUs are listed on the clean-up review too. Listing deletes nothing: a group is deleted only after a SuperAdmin approved exactly that group on the review.",
@@ -1775,6 +2069,19 @@
       "feature": "access-request-portal",
       "confirmOn": true,
       "confirmOff": true,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Connect the request portal to this storage account?",
+          "body": "PIM Manager handles portal and API requests through this storage account every minute."
+        },
+        "off": {
+          "tone": "neutral",
+          "title": "Disconnect the request portal?",
+          "body": "When blank, new portal and API requests are not taken in.",
+          "note": "Tip: access that is open right now still ends on time."
+        }
+      },
       "info": {
         "what": "The Azure storage account shared by the public request portal and the engine. The portal writes requests there; the engine pulls them every minute with its managed identity, re-decides each one, and writes back status, the eligibility list and the API settings. The public side never reaches PIM directly.",
         "enabled": "When set: the request-portal sync runs every minute against this account -- taking in portal and API requests, enabling accounts and ad-hoc memberships, ending them when time is up, and sending the mails.",
@@ -1815,6 +2122,14 @@
       "feature": "access-request-portal",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Let these applications ask for access?",
+          "body": "Each listed application can ask PIM Manager for admin access for a limited time, and the request is approved on arrival.",
+          "note": "Note: the approval must happen in that system, because PIM Manager does not ask a second person."
+        }
+      },
       "info": {
         "what": "The Entra application (client) ids allowed to call the access request REST API, typically your ticketing system. The engine publishes the list to the portal for a fast answer and re-checks every API request itself.",
         "enabled": "When set: a listed application can request, through the API, that an admin account is enabled for 1-744 hours or that an account gets a timed group membership. API requests are approved on arrival -- no department owner decision -- and the engine applies them on its next run, within a few minutes. It can also send proposals, which only become pending changes for an administrator.",
@@ -1835,6 +2150,14 @@
       "feature": "access-request-portal",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Offer these groups on the request portal?",
+          "body": "People who may use the portal can ask for these groups for a few hours, once a department owner approves.",
+          "note": "Tip: only offer groups you are happy to hand out for a few hours."
+        }
+      },
       "info": {
         "what": "The permission groups that people using the request portal (typically consultants) may ask to join for a short time, in addition to the access they already have. Only defined groups are offered, and a group the account already holds is not shown.",
         "enabled": "When set: the next sync run (every minute) publishes the offered groups to each eligible account on the portal. A request always waits for an Owner of the person's department, who is mailed and must decide within 24 hours. On approval the engine adds an active, time-limited membership on its next run and removes it automatically when the time is up.",
@@ -1875,6 +2198,14 @@
       "feature": "access-request-portal",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Create an API key?",
+          "body": "Whoever holds this key can ask PIM Manager for admin access for a limited time.",
+          "note": "Note: the key is shown only once, so revoke it at once if it leaks."
+        }
+      },
       "info": {
         "what": "Keys for systems that cannot use an Entra application token to call the access request API. Each key has a name, scopes (requests.write to submit, requests.read to read status) and a lifetime of 1-3650 days. The key is shown once; only its hash is stored. It is sent as the X-Api-Key header.",
         "enabled": "When a key is created: the next request-portal sync (within a minute or two) publishes its hash to the portal, and a caller with requests.write can then ask for admin accounts to be enabled or timed group memberships to be added -- approved on arrival and applied by the engine on its next run.",
@@ -1895,6 +2226,14 @@
       "feature": "second-approver",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "lessSafe",
+          "title": "Let administrators approve their own requests?",
+          "body": "When on, the person who asked for a change, such as an offboarding, can also approve it.",
+          "note": "Note: this removes the second pair of eyes on these changes."
+        }
+      },
       "info": {
         "what": "Separation of duties for approval requests (offboard, revoke and similar): by default the administrator who raises a request may not approve it -- a different administrator must. This switch lifts that rule for tenants with only one PIM Manager administrator.",
         "enabled": "When on: takes effect at once. The person who raised a request can approve it on the Approvals page, and an offboarding change (offboard, Removed, Deleted) committed in the admin grid is committed straight away instead of being held for a second person. Each such decision is recorded as self-approved in the audit, and the card shows who switched it on and when.",
@@ -2035,6 +2374,14 @@
       "feature": "",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "lessSafe",
+          "title": "Send mail without encryption?",
+          "body": "Mail, including one-time sign-in codes, and the relay password travel to your mail relay without encryption.",
+          "note": "Note: use this only for an internal relay on a network you control."
+        }
+      },
       "info": {
         "what": "Whether the connection to the SMTP relay is encrypted with STARTTLS or sent in clear text (None). Only STARTTLS on a plain port is supported; implicit TLS on port 465 is not.",
         "enabled": "When set to None: mail, the relay user name and password, and any TAP codes travel unencrypted between PIM Manager and the relay. Takes effect for the PIM Manager at once and for the engine and jobs on their next run.",
@@ -2095,6 +2442,14 @@
       "feature": "alerts-and-notifications",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "lessSafe",
+          "title": "Stop all outgoing mail?",
+          "body": "When on, PIM Manager sends no mail at all until you switch it off again.",
+          "note": "Note: nobody is told about problems in the meantime, and stopped mail is not sent later."
+        }
+      },
       "info": {
         "what": "An emergency stop for every email PIM Manager sends: alerts, the daily digest, the tier report, TAP codes, approval, review and reminder mails, and test mails. It is checked at the single point every mail passes through.",
         "enabled": "When on: every email is dropped with the reason 'email kill switch on'. The PIM Manager stops at once; the engine and scheduled jobs stop from their next run. New admin accounts cannot receive their TAP by mail, and the engine reports that. The Teams/generic alert webhook and Teams/Slack TAP chat delivery are not email and keep working.",
@@ -2115,6 +2470,14 @@
       "feature": "alerts-and-notifications",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "lessSafe",
+          "title": "Send all mail to this one address?",
+          "body": "All mail from PIM Manager, including one-time sign-in codes, goes only to this address.",
+          "note": "Note: whoever reads this mailbox can sign in as new admins, and nobody else gets mail."
+        }
+      },
       "info": {
         "what": "A test and lab control: every PIM Manager email is sent to this one address instead of its real recipient. The original recipient is kept in the mail so you can see who it was meant for.",
         "enabled": "When set: alerts, digests, TAP codes, approval and review mails all go only to this address -- in the PIM Manager at once, in the engine and scheduled jobs from their next run. The allowlist is then checked against this address.",
@@ -2135,6 +2498,14 @@
       "feature": "alerts-and-notifications",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "lessSafe",
+          "title": "Send mail only to these addresses?",
+          "body": "Only the addresses on this list get mail from PIM Manager.",
+          "note": "Note: everyone else, such as new admins and approvers, stops getting mail."
+        }
+      },
       "info": {
         "what": "Limits PIM Manager email to the listed addresses. Any recipient not on the list is dropped; a mail with several recipients keeps only the listed ones. Matching is on the full address, not case-sensitive, and wildcards or whole domains are not supported.",
         "enabled": "When set: only listed addresses receive mail -- alerts, digests, TAP codes, approval and review mails alike. The PIM Manager applies it at once; the engine and scheduled jobs from their next run. If a redirect is set, the redirect address must be on the list or nothing is sent.",
@@ -2155,6 +2526,14 @@
       "feature": "",
       "confirmOn": false,
       "confirmOff": true,
+      "confirm": {
+        "off": {
+          "tone": "lessSafe",
+          "title": "Remove all alert recipients?",
+          "body": "With no recipients, alerts are still recorded, but nobody gets them by mail.",
+          "note": "Note: nobody is told about failed runs or use of the emergency accounts."
+        }
+      },
       "info": {
         "what": "Who is mailed when PIM Manager raises an alert: job and engine failures, drift, expiring access, break-glass use, coverage gaps, missing targets and uncommitted changes. The same list receives the safety-breaker mails, the daily digest and the tier report unless those have their own lists, and it is the last fallback for TAP mails nobody else can receive.",
         "enabled": "When set: each recipient gets one mail per alert. Alerts raised in the PIM Manager use the list at once; the engine and scheduled jobs read it at each run. Addresses that do not look like mail addresses are dropped when you save.",
@@ -2215,6 +2594,14 @@
       "feature": "",
       "confirmOn": false,
       "confirmOff": true,
+      "confirm": {
+        "off": {
+          "tone": "lessSafe",
+          "title": "Stop alerts for these events?",
+          "body": "Alerts for the events you switched off are no longer mailed or posted.",
+          "note": "Note: turning off failure or emergency-account alerts hides them from the people who should act."
+        }
+      },
       "info": {
         "what": "Which situations send an alert. Run failure: a scheduled run failed or a safety breaker held it (re-mailed at most daily). Drift: the tenant differs from the desired state (default every two weeks). Expiring access: access ending within 14 days or lifecycle dates due within 30 days. Break-glass: an emergency override was activated. Coverage: new gaps, orphan or unmanaged privileged groups, ownerless departments, unanswered reviews. Target missing: a delegation's Azure resource or role is gone (daily). Pending: changes staged over a day ago and never committed (daily).",
         "enabled": "When an event is on: its alert is mailed to the alert recipients and posted to the webhook, and recorded in Recent alerts. The PIM Manager applies a change at once; scheduled jobs on their next run. Run-failure alerts wait 45 minutes after a commit while it rolls out. A further event, sessions-revoked (a sign-in session revoke was queued), is listed by its raw name.",
@@ -2235,6 +2622,14 @@
       "feature": "",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Post alerts to this web address?",
+          "body": "PIM Manager posts its alerts, with account and group names, to this address.",
+          "note": "Tip: treat the address like a password, because anyone who has it can post to that channel."
+        }
+      },
       "info": {
         "what": "An HTTPS address -- a Microsoft Teams incoming webhook or any endpoint that accepts JSON -- that receives each alert in addition to email. It works even when no mail sending is set up and is not affected by the email kill switch.",
         "enabled": "When set: every enabled alert raised by the PIM Manager itself (break-glass, expiring access on Home, sessions revoked, test alerts, and job failures it records) is posted with its title, details, tenant name and a link back to PIM Manager. Only https addresses on public host names are accepted; private, loopback and bare host names are rejected and the card says why.",
@@ -2315,6 +2710,13 @@
       "feature": "policy-templates",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "safer",
+          "title": "Require MFA when someone activates?",
+          "body": "When on, people must complete MFA when they activate a role or group that PIM Manager manages."
+        }
+      },
       "info": {
         "what": "A floor on every activation policy the engine writes for the groups and roles PIM Manager manages. When it is on, the engine adds MFA to the 'To activate, require' checks of any policy template that sets those checks without MFA (a template that asks for a Conditional Access authentication context counts as covered). It never removes a check a template asks for.",
         "enabled": "When on: on the next engine run every managed group and role whose template sets activation checks without MFA requires MFA when someone activates, through the normal policy apply and its safety checks. A template that sets no activation checks at all is reported in the engine log and left to Entra.",
@@ -2355,6 +2757,14 @@
       "feature": "",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Keep configuration backups for fewer days?",
+          "body": "Backups older than this are deleted at the next daily run.",
+          "note": "Tip: pin any backup you must keep before you save."
+        }
+      },
       "info": {
         "what": "How many days PIM Manager keeps its daily configuration backups (departments, external companies, admins, group definitions, delegations, workload bindings and settings -- never secrets). Any whole number from 1 to 3650.",
         "enabled": "When set: once a day the backup job takes a backup (or records 'no change') and then deletes every backup older than this many days. Pinned backups are always kept, the newest real backup is always kept so there is a restore point, and a backup a kept 'no change' record points to is kept. Each prune is written to the audit trail.",
@@ -2375,6 +2785,14 @@
       "feature": "audit-trail",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Delete old audit history?",
+          "body": "Audit history older than this is deleted every day and cannot be brought back.",
+          "note": "Tip: check your own retention rules before you save."
+        }
+      },
       "info": {
         "what": "How long the audit trail keeps its rows. 0 keeps every row forever. Any other value must be 13 to 1200 months. Audit rows can never be edited, and the database itself refuses any delete that does not come from the retention job.",
         "enabled": "When set (13 months or more): the daily audit-retention job deletes the audit rows older than that, at most 50,000 per run (the rest on the following runs), and records each run -- cutoff, rows deleted, rows left -- as a new event in the audit trail.",
@@ -2415,6 +2833,14 @@
       "feature": "admin-accounts",
       "confirmOn": false,
       "confirmOff": true,
+      "confirm": {
+        "off": {
+          "tone": "lessSafe",
+          "title": "Stop renewing access by default?",
+          "body": "When off, access that has no renewal choice of its own ends on its end date.",
+          "note": "Note: many people can lose access on their end dates without anyone acting."
+        }
+      },
       "info": {
         "what": "What a blank AutoExtend cell on a delegation row means. Who decides an extension, first match wins: an access review outcome (Keep extends, Remove does not), then an owner's Deny of that exact end date, then the row's own TRUE / FALSE, and only then this default.",
         "enabled": "When on: a row with a blank AutoExtend value is renewed by the engine before it ends, like a row set to TRUE, unless a review or an owner says otherwise. Silence means extend.",
@@ -2435,6 +2861,14 @@
       "feature": "second-approver",
       "confirmOn": false,
       "confirmOff": true,
+      "confirm": {
+        "off": {
+          "tone": "lessSafe",
+          "title": "Save changes without a second approver?",
+          "body": "When off, the person who prepared a change can also save it.",
+          "note": "Note: this removes the four-eyes check on your configuration."
+        }
+      },
       "info": {
         "what": "Whether a change must be committed by a different administrator than the one who staged it. Off: anyone may commit what they staged. Sensitive: changes classed as sensitive (a privileged role or scope added to a group, a guest put into a privileged group, a disable or offboarding) need a second person. All: every change does.",
         "enabled": "When set to Sensitive or All: a commit that carries out a change you staged yourself -- or, under All, any direct edit you make -- is refused with 'a second administrator must commit this', and the refusal is audited. Another administrator opens the shared queue and commits it. Applies from the next commit.",
@@ -2455,6 +2889,14 @@
       "feature": "safety-brake",
       "confirmOn": false,
       "confirmOff": true,
+      "confirm": {
+        "off": {
+          "tone": "lessSafe",
+          "title": "Let one SuperAdmin release a hold alone?",
+          "body": "When off, one SuperAdmin can release a held run alone, after giving a reason.",
+          "note": "Note: this removes the second-person check on large removals."
+        }
+      },
       "info": {
         "what": "Whether releasing a safety guard needs a second SuperAdmin. A release lets one held engine plan through for one run or until a time (at most 24 hours) -- for example more removals than the per-run removal budget, or more account disables than the circuit breaker allows.",
         "enabled": "When on: a new release is created as pending. The engine will not use it until a different SuperAdmin approves it on the Guards page. The person who created it cannot approve it. The same holds for an approval of removals given in the commit popup: the engine uses it only after a different SuperAdmin approved it on the Guards page. If the setting cannot be read, PIM Manager treats it as on.",
@@ -2580,6 +3022,14 @@
       "feature": "alerts-and-notifications",
       "confirmOn": false,
       "confirmOff": true,
+      "confirm": {
+        "off": {
+          "tone": "lessSafe",
+          "title": "Stop reminder mail?",
+          "body": "When off, nobody is reminded by mail about changes or requests that wait for them.",
+          "note": "Note: held work can then wait without anyone noticing."
+        }
+      },
       "info": {
         "what": "Whether PIM Manager mails your SuperAdmins when something waits on them: open required Get Started steps, policy change sets held by the circuit breaker, approval and access requests, guard holds and releases, a break-glass change, and staged changes a second administrator must commit. One mail lists everything, each item with a link to the exact place where you act. It is sent by your own PIM Manager, not by Invardia.",
         "enabled": "When on (the default): the first reminder goes out when an approval has waited the set number of hours (default 4) or a Get Started step has been open that long (default 24), then it repeats every set number of hours (default 24) while anything waits. It stops by itself when nothing waits. Alert recipients who are not SuperAdmins get the Get Started part. Each person can switch either part off for themselves under Notifications.",
@@ -2600,6 +3050,22 @@
       "feature": "break-glass-override",
       "confirmOn": true,
       "confirmOff": true,
+      "confirm": {
+        "on": {
+          "tone": "safer",
+          "title": "Protect your emergency accounts?",
+          "body": "PIM Manager will never change, disable or sign out the accounts on this list.",
+          "note": "Tip: only add your real emergency (break-glass) accounts.",
+          "more": ["A change to the list needs approval, and applies from the next run after it is approved.","If the list cannot be read, PIM Manager removes nothing at all in that run.","You can take an account off the list again with a new approved request."]
+        },
+        "off": {
+          "tone": "lessSafe",
+          "title": "Stop protecting these emergency accounts?",
+          "body": "Accounts you take off the list can be changed, disabled or signed out by PIM Manager again.",
+          "note": "Note: only do this for accounts that are no longer emergency accounts.",
+          "more": ["A change to the list needs approval, and applies from the next run after it is approved.","When the list is empty, no account is protected this way."]
+        }
+      },
       "info": {
         "what": "The emergency accounts PIM must never lock out, by sign-in name (UPN) or object id. Both PIM Manager and the engine read this one list. A change is not applied directly: it becomes a request that a different SuperAdmin must approve within 72 hours, and every step is audited.",
         "enabled": "When an account is on the list: every revoke, disable, sign-in session revoke and offboarding path in PIM skips it -- the engine, queued actions, access reviews and the disable circuit breaker. From the engine's next run after the request is approved.",
@@ -2640,6 +3106,14 @@
       "feature": "policy-templates",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Use another default policy template for PIM groups?",
+          "body": "PIM Manager's recommendation for these groups then follows the template you chose.",
+          "note": "Tip: no policy changes until a SuperAdmin approves the change."
+        }
+      },
       "info": {
         "what": "The policy template that gives the PIM Manager recommendation for the PIM for Groups policy of every group PIM Manager manages whose definition leaves the policy template blank. A template recommends how long an activation lasts, what is required to activate (for example multifactor authentication, a reason) and whether approval is needed. It is a recommendation only: PIM Manager never changes a policy on its own.",
         "enabled": "When set: the recommendation shown for these groups on Templates > Policy settings follows the chosen template. A policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set says how many policies change and how many settings are weakened, and points out when more than 25 policies change or more than 3 settings are weakened (fixed numbers, not a setting: they never decide whether a change set is held).",
@@ -2660,6 +3134,14 @@
       "feature": "policy-templates",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Use another default policy template for Entra ID roles?",
+          "body": "PIM Manager's recommendation for these roles then follows the template you chose.",
+          "note": "Note: a role's policy applies to everyone who holds that role, and nothing changes until a SuperAdmin approves."
+        }
+      },
       "info": {
         "what": "The policy template that gives the PIM Manager recommendation for the Entra ID role policy of every role your delegations assign (to groups, in administrative units, or directly) when the row leaves the policy template blank. If two rows name the same role with different templates, the one requiring approval wins. It is a recommendation only: PIM Manager never changes a policy on its own.",
         "enabled": "When set: the recommendation shown for these roles on Templates > Policy settings follows the chosen template. A role's policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set says how many policies change and how many settings are weakened, and points out when more than 25 policies change or more than 3 settings are weakened (fixed numbers, not a setting: they never decide whether a change set is held).",
@@ -2680,6 +3162,14 @@
       "feature": "policy-templates",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Use another default policy template for Azure roles?",
+          "body": "PIM Manager's recommendation for these Azure roles then follows the template you chose.",
+          "note": "Note: an Azure role's policy applies to everyone eligible for it, and nothing changes until a SuperAdmin approves."
+        }
+      },
       "info": {
         "what": "The policy template that gives the PIM Manager recommendation for the PIM policy of each Azure role and scope pair your Azure delegations assign when the row leaves the policy template blank. If two rows name the same pair with different templates, the one requiring approval wins. It is a recommendation only: PIM Manager never changes a policy on its own.",
         "enabled": "When set: the recommendation shown for these Azure roles on Templates > Policy settings follows the chosen template. A policy changes only for the settings where a SuperAdmin chose 'PIM Manager recommendation'. Every change set that comes from a choice is held, whatever its size, and nothing is written until it is approved. A SuperAdmin of the tenant approves the held change set in PIM Manager (Reviews & controls > Approvals); the approval is valid for 24 hours. The held change set says how many policies change and how many settings are weakened, and points out when more than 25 policies change or more than 3 settings are weakened (fixed numbers, not a setting: they never decide whether a change set is held).",
@@ -2700,6 +3190,14 @@
       "feature": "access-map",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Give these people more rights in PIM Manager?",
+          "body": "The people and groups you mapped get their new PIM Manager role within seconds.",
+          "note": "Tip: give Admin and SuperAdmin only to people who need them, because they can change admin access in your tenant."
+        }
+      },
       "info": {
         "what": "Who may do what in PIM Manager: each sign-in name is mapped to Reader (view only), Delegated (view only, limited to the groups they own), Admin (stage, commit and revoke) or SuperAdmin (everything, including settings, emergency access and this map). Each entry is one person; groups are not expanded.",
         "enabled": "When saved: the server enforces the map on every request, within about 15 seconds. Saving is refused if no SuperAdmin would remain, and a new Delegated entry needs Pro. Without Pro, an existing Delegated entry acts as Reader.",
@@ -2920,6 +3418,15 @@
       "feature": "",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Forward admin mail to the person's normal mailbox?",
+          "body": "When on, PIM Manager sends mail for admin accounts on to the mailbox you chose for each admin.",
+          "note": "Note: it also removes forwarding that someone set up by hand on an admin mailbox, if PIM Manager wasn't asked for it.",
+          "more": ["Only admin accounts that have a mailbox are changed, and the mail is forwarded, not kept in the admin mailbox.","Mail for an admin account then lands in a normal mailbox, which is usually less protected.","If a permission is missing, PIM Manager says so once per run and changes nothing.","Switching it off later leaves forwarding as it is at that moment."]
+        }
+      },
       "info": {
         "what": "An admin row can ask for the mail sent to the admin account to be forwarded to the person's normal mailbox. This switch decides whether the engine sets that forwarding in Exchange Online when it creates or updates an admin account. Most admin accounts have no mailbox; for those nothing happens either way.",
         "enabled": "When on: for an admin account that has a mailbox, a row that asks for forwarding gets it (the mail is forwarded, not kept in the admin mailbox), and forwarding found on a mailbox whose row does not ask for it is cleared. A missing permission is reported once per run and changes nothing.",
@@ -2980,6 +3487,14 @@
       "feature": "desired-state-engine",
       "confirmOn": true,
       "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Let PIM Manager act on new resources it finds?",
+          "body": "With Stage for review a new resource waits for an administrator, and with Create automatically PIM Manager creates its group by itself.",
+          "note": "Note: with Create automatically, groups appear without any administrator involved."
+        }
+      },
       "info": {
         "what": "Per type of resource the discovery sweep can find -- an Azure subscription, a management group, a resource group, a Power BI workspace -- you choose what PIM Manager does with a new one: report it only, stage a group definition for your review, or queue the creation of its delegation group as a normal change.",
         "enabled": "When a type is set to 'Stage for review': a definition row for the new resource is staged on Pending changes and nothing happens until an administrator commits it. When set to 'Create automatically': the creation is queued as a change and the engine creates the group without a person committing it.",

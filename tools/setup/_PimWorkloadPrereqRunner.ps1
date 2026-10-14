@@ -371,6 +371,79 @@ function Invoke-PimPrereqAsEngine {
     })
 }
 
+function Get-PimPrereqFabricAdminRole {
+    <#
+      PIM 100.142. The Entra built-in directory role "Fabric Administrator", LOOKED UP by its display name (never a
+      hard-coded id): GET roleManagement/directory/roleDefinitions?$filter=displayName eq '...'. Its roleTemplateId is the
+      templateId (the id for a built-in role). Older tenants may still show the former name "Power BI Administrator" --
+      looked up second. Returns @{ id; displayName } or $null when neither exists.
+    #>
+    foreach ($name in @('Fabric Administrator', 'Power BI Administrator')) {
+        $r = @(Invoke-PimGraph -All -Path "/roleManagement/directory/roleDefinitions?`$filter=displayName eq '$name'&`$select=id,displayName,templateId,isBuiltIn")
+        $hit = @($r | Where-Object { $_ -and "$($_.displayName)" -ieq $name }) | Select-Object -First 1
+        if ($hit) {
+            $rid = if ("$($hit.templateId)".Trim()) { "$($hit.templateId)".Trim() } else { "$($hit.id)".Trim() }
+            if ($rid) { return @{ id = $rid; displayName = "$($hit.displayName)" } }
+        }
+    }
+    return $null
+}
+
+function Get-PimPrereqFabricAdminAssignments {
+    # The engine identity's ACTIVE assignments of that role at the directory scope ('/'): roleManagement/directory/roleAssignments.
+    param([hashtable]$Ctx, [Parameter(Mandatory)][string]$RoleId)
+    $oid = "$($Ctx.engine.objectId)".Trim()
+    $rows = @(Invoke-PimGraph -All -Path "/roleManagement/directory/roleAssignments?`$filter=principalId eq '$oid' and roleDefinitionId eq '$RoleId'&`$select=id,principalId,roleDefinitionId,directoryScopeId")
+    return @($rows | Where-Object { $_ -and "$($_.principalId)" -ieq $oid -and "$($_.roleDefinitionId)" -ieq $RoleId -and ("$($_.directoryScopeId)" -eq '/' -or -not "$($_.directoryScopeId)".Trim()) })
+}
+
+function Invoke-PimPrereqFabricAdmin {
+    <#
+      PIM 100.142 (owner 2026-10-13: "Admin API, no membership"). Check -- and with -GrantFabricAdministrator, assign -- the
+      Entra directory role Fabric Administrator to the ENGINE identity as a PERMANENT ACTIVE assignment at the directory
+      scope ('/'): POST roleManagement/directory/roleAssignments { principalId; roleDefinitionId; directoryScopeId = '/' },
+      then read back. Idempotent: an existing active assignment is left as it is, nothing is posted twice. Without the
+      switch (and in the engine's own self-check) nothing is ever assigned -- the check only reports.
+    #>
+    param([hashtable]$Ctx)
+    $who = Get-PimPowerBiPrereqIdentityText -Identity $Ctx.engine
+    $grant = ($Ctx.ContainsKey('grantFabricAdmin') -and [bool]$Ctx.grantFabricAdmin)
+    $delay = if ("$env:PIM_PREREQ_READBACK_SECONDS".Trim()) { [int]$env:PIM_PREREQ_READBACK_SECONDS } else { 5 }
+    $role = Invoke-PimPrereqProbe { Get-PimPrereqFabricAdminRole }
+    if (-not $role.ok) { return (New-PimWorkloadPrereqCheck -Id 'powerbi.fabricAdmin' -Status 'notChecked' -Detail "could not look the role 'Fabric Administrator' up: $($role.error) (the caller needs RoleManagement.Read.Directory)") }
+    if (-not $role.value) { return (New-PimWorkloadPrereqCheck -Id 'powerbi.fabricAdmin' -Status 'notChecked' -Detail "this tenant lists no directory role named 'Fabric Administrator'") }
+    $rid = "$($role.value.id)"; $rname = "$($role.value.displayName)"
+    $have = Invoke-PimPrereqProbe { Get-PimPrereqFabricAdminAssignments -Ctx $Ctx -RoleId $rid }
+    if (-not $have.ok) { return (New-PimWorkloadPrereqCheck -Id 'powerbi.fabricAdmin' -Status 'notChecked' -Detail "could not read the role assignments of ${who}: $($have.error) (the caller needs RoleManagement.Read.Directory)") }
+    if (@($have.value).Count) { return (New-PimWorkloadPrereqCheck -Id 'powerbi.fabricAdmin' -Status 'ok' -Detail "$who holds the directory role '$rname' (active, directory scope)" -Data @{ roleDefinitionId = $rid }) }
+    if ($Ctx.ContainsKey('selfCheck') -and $Ctx.selfCheck) {
+        return (New-PimWorkloadPrereqCheck -Id 'powerbi.fabricAdmin' -Status 'failed' -Data @{ roleDefinitionId = $rid } -Detail "$who does not hold the directory role '$rname' -- PIM never grants itself a role: a Global Administrator runs Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -GrantFabricAdministrator once")
+    }
+    if (-not $grant) {
+        return (New-PimWorkloadPrereqCheck -Id 'powerbi.fabricAdmin' -Status 'failed' -Data @{ roleDefinitionId = $rid } -Detail "$who does not hold the directory role '$rname' (not assigned: run again with -GrantFabricAdministrator to assign it)")
+    }
+    if (-not (Test-PimPrereqShould -Ctx $Ctx -Target $Ctx.engine.displayName -Action "assign the Entra directory role '$rname' (permanent, active, directory scope)")) {
+        return (New-PimWorkloadPrereqCheck -Id 'powerbi.fabricAdmin' -Status 'failed' -Data @{ roleDefinitionId = $rid } -Detail "$who does not hold the directory role '$rname' ($(Get-PimPrereqNotDoneReason -Ctx $Ctx -Verb 'assigned'))")
+    }
+    $body = [ordered]@{ '@odata.type' = '#microsoft.graph.unifiedRoleAssignment'; principalId = "$($Ctx.engine.objectId)"; roleDefinitionId = $rid; directoryScopeId = '/' }
+    $p = Invoke-PimPrereqProbe { Invoke-PimGraph -Method POST -Path '/roleManagement/directory/roleAssignments' -Body $body }
+    if (-not $p.ok -and [int]$p.code -eq 403) {
+        return (New-PimWorkloadPrereqCheck -Id 'powerbi.fabricAdmin' -Status 'failed' -Data @{ roleDefinitionId = $rid; refused = 403 } `
+            -Detail "Graph refused to assign the directory role '$rname' to $who (HTTP 403: the identity signed in here may not assign directory roles -- sign in as a Global Administrator or Privileged Role Administrator)")
+    }
+    if (-not $p.ok -and "$($p.error)" -notmatch '(?i)already exist|conflicting object') {
+        return (New-PimWorkloadPrereqCheck -Id 'powerbi.fabricAdmin' -Status 'failed' -Data @{ roleDefinitionId = $rid } -Detail "could not assign the directory role '$rname' to ${who}: $($p.error)")
+    }
+    for ($try = 1; $try -le 6; $try++) {
+        $back = Invoke-PimPrereqProbe { Get-PimPrereqFabricAdminAssignments -Ctx $Ctx -RoleId $rid }
+        if ($back.ok -and @($back.value).Count) {
+            return (New-PimWorkloadPrereqCheck -Id 'powerbi.fabricAdmin' -Status 'fixed' -Data @{ roleDefinitionId = $rid } -Detail "assigned the directory role '$rname' to $who (permanent, active, directory scope) and read it back. Power BI honours it after a short while (up to about 30 minutes).")
+        }
+        if ($try -lt 6 -and $delay -gt 0) { Start-Sleep -Seconds $delay }
+    }
+    return (New-PimWorkloadPrereqCheck -Id 'powerbi.fabricAdmin' -Status 'notChecked' -Data @{ roleDefinitionId = $rid } -Detail "assigned the directory role '$rname' to $who, but the read-back does not show it yet (Entra can take a few minutes) -- press Check again in PIM Manager")
+}
+
 function Invoke-PimPrereqPowerBI {
     param([hashtable]$Ctx)
     $out = New-Object System.Collections.Generic.List[object]
@@ -484,6 +557,9 @@ function Invoke-PimPrereqPowerBI {
             else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -ManualStep $steps.tenantSetting -Status 'failed' -Detail "could not enable it: $(if ($u.ok) { $bv.detail } else { $u.error })")) }
         } else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -ManualStep $steps.tenantSetting -Status 'failed' -Detail "$($v.detail) ($(Get-PimPrereqNotDoneReason -Ctx $Ctx -Verb 'changed'))")) }
     }
+    # 4b. PIM 100.142: the engine identity holds the Entra directory role Fabric Administrator (the Power BI admin API's
+    #     AddUserAsAdmin / DeleteUserAsAdmin need it). Assigned only with -GrantFabricAdministrator (opt-in: standing privilege).
+    $out.Add((Invoke-PimPrereqFabricAdmin -Ctx $Ctx))
     # 5. Confirmation: the admin API as the engine. It does not decide the stored state (optional), but PIM 100.108 (e): the
     #    Manager counts Power BI as READY only when this answered 200 (Get-PimWorkloadPrereqView).
     $e = Invoke-PimPrereqAsEngine -Ctx $Ctx -Url 'https://api.powerbi.com/v1.0/myorg/admin/groups?$top=1' -Resource 'powerbi'

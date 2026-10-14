@@ -157,6 +157,14 @@ function Get-PimWorkloadPrereqCatalog {
            fix = 'enables the setting through the Fabric admin API (POST /v1/admin/tenantsettings/{name}/update), KEEPING every security group already listed and adding this one, then reads it back. Only possible when the caller may call Fabric admin APIs (a Fabric administrator, or a service principal an admin-API setting already allows).'
            manualStep = 'Fabric admin portal (app.fabric.microsoft.com) > Settings > Admin portal > Tenant settings > Admin API settings > "Service principals can access read-only admin APIs" > Enabled > Specific security groups > add the group > Apply. Needs a Fabric administrator. If PIM cannot read the tenant settings itself, press Confirm on this prerequisite in PIM Manager once the setting is on.'
            learn = $L.fabricSpAdmin }
+        # PIM 100.142 (owner 2026-10-13: "Admin API, no membership"): the workspace roles are given through the Power BI ADMIN
+        # api, whose writes need the caller to be a Fabric Administrator. OPTIONAL (required = $false) so the assignment gate
+        # and the stored state of existing installs do not change; the engine's 401/403 on the admin api is its own failure
+        # class (POWERBI-ADMIN-NOT-GRANTED), and the Manager shows the command where Power BI rows are staged.
+        @{ id = 'powerbi.fabricAdmin'; name = 'The engine identity holds the Entra directory role Fabric Administrator'; kind = 'api'; required = $false; fixable = $true
+           fix = 'OPT-IN (-GrantFabricAdministrator): assigns the directory role Fabric Administrator (looked up by name) to the engine identity as a permanent, active assignment at the directory scope through Graph, and reads it back. Never automatic -- it is standing privilege.'
+           manualStep = 'A Global Administrator runs the published Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -GrantFabricAdministrator once (browser sign-in, no PowerShell modules) -- or: Microsoft Entra admin center > Roles & admins > Fabric Administrator > Add assignments > the engine identity > Assignment type: Active, permanently assigned. Then, in the Fabric admin portal, Tenant settings > Admin API settings: "Service principals can access read-only admin APIs" and "Service principals can access admin APIs used for updates" for Specific security groups, with the group the engine identity is in.'
+           learn = $L.fabricSpAdmin }
         # PIM 100.108: the CONFIRMATION of the workload (confirmation = $true). It never decides the stored state (required
         # stays $false -- the assignment gate is unchanged), but Get-PimWorkloadPrereqView counts Power BI as READY only
         # when this call answered 200 as the engine: a person's Confirm on the tenant setting does not make it ready.
@@ -727,6 +735,44 @@ function Get-PimPowerBiPrereqSteps {
         tenantSetting = "Fabric admin portal (app.fabric.microsoft.com) > Settings > Admin portal > Tenant settings > Admin API settings > ""Service principals can access read-only admin APIs"" > Enabled > Specific security groups > add the group $gq > Apply. The group must contain $who. Needs a Fabric administrator. If PIM cannot read the tenant settings itself, press Confirm on this prerequisite in PIM Manager once the setting is on."
         addYourself = "Add these members to this group yourself: group $gq <- $who."
     }
+}
+
+# --- PIM 100.142: Power BI through the ADMIN api -- the one Fabric instruction and the notice the Manager shows ---------
+function Get-PimFabricAdminApiInstruction {
+    <#
+      PURE. The ONE plain instruction for the Fabric tenant settings the admin api needs (the exact admin-portal names, from
+      the owner's tenant 2026-10-13). PIM never switches these itself: the read-only setting is set by the prerequisites
+      script where it may, the "used for updates" one is a person's decision in the portal.
+    #>
+    param([string]$GroupName = '')
+    $g = "$GroupName".Trim(); if (-not $g) { $g = 'grp-pim-powerbi-admin-api' }
+    return ("In the Fabric admin portal (app.fabric.microsoft.com) > Settings > Admin portal > Tenant settings > Admin API settings, set ""Service principals can access read-only admin APIs"" and ""Service principals can access admin APIs used for updates"" to Enabled for Specific security groups, with the same group for both: '{0}' (PIM Manager's identity is in it). Check also that Developer settings > ""Service principals can call Fabric public APIs"" is enabled. A change can take about 15 minutes to apply." -f $g)
+}
+
+function Get-PimPowerBiAdminGrantCommand {
+    # PURE. The two lines (download + run) a Global Administrator runs once: the published prerequisites script for Power BI
+    # with -GrantFabricAdministrator. Browser sign-in; no identity on the command line (framework rule 3).
+    param([hashtable]$Env = @{})
+    return ((Get-PimWorkloadPrereqCommand -Workload 'PowerBI' -Env $Env) + ' -GrantFabricAdministrator')
+}
+
+function Get-PimPowerBiAdminNotice {
+    <#
+      PURE. PIM 100.142 (4): what the Manager shows where a Power BI workload row or a discovered workspace is staged. show =
+      $true ONLY when the engine's currently failing items (Get-PimEngineItemFailures) hold at least one
+      POWERBI-ADMIN-NOT-GRANTED; then one calm line, the two-line command for THIS install and the Fabric instruction.
+      -Env: tenantId (+ subscriptionId / resourceGroup / tickJobName); -EngineObjectId from the stored Power BI record.
+    #>
+    param([AllowNull()][object[]]$Failures = @(), [hashtable]$Env = @{}, [string]$EngineObjectId = '', [string]$GroupName = '')
+    $hit = @(@($Failures) | Where-Object { $_ -and "$($_.code)" -eq 'POWERBI-ADMIN-NOT-GRANTED' })
+    $out = [ordered]@{ show = [bool]$hit.Count; failureClass = 'POWERBI-ADMIN-NOT-GRANTED'; items = $hit.Count; line = ''; command = ''; fabric = '' }
+    if (-not $hit.Count) { return $out }
+    $e = @{}; foreach ($k in @($Env.Keys)) { $e[$k] = $Env[$k] }
+    if ("$EngineObjectId".Trim() -and -not "$($e['engineObjectId'])".Trim()) { $e['engineObjectId'] = "$EngineObjectId".Trim() }
+    $out.line = 'PIM Manager cannot reach Power BI yet, so Power BI workspace roles are not given. A Global Administrator runs these two lines once:'
+    $out.command = Get-PimPowerBiAdminGrantCommand -Env $e
+    $out.fabric = Get-PimFabricAdminApiInstruction -GroupName $GroupName
+    return $out
 }
 
 function Get-PimPowerBiPrereqFacts {

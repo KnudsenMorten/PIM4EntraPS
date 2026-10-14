@@ -131,6 +131,21 @@ $script:PimJobTypes += 'hybrid-ad-sync-servers'
 $script:PimJobTypes += 'hybrid-ad-changes'
 $script:PimHybridWorkerJobTypes = @('hybrid-ad-apply', 'hybrid-ad-groups', 'hybrid-ad-sync', 'hybrid-ad-sync-servers', 'hybrid-ad-changes', 'hybrid-ad-servers')
 function Get-PimHybridWorkerJobTypes { @($script:PimHybridWorkerJobTypes) }
+# PIM 100.139: the text a hybrid job shows while the feature is off (Jobs page, run record, Settings > Hybrid AD).
+$script:PimHybridAdOffText = 'switched off under Features'
+function Test-PimHybridAdFeatureOff {
+    <#
+      PIM 100.139 (owner 2026-10-13: "hybrid worker should be a feature to turn on (off by default)"). $true when the feature
+      'hybrid.ad' (On-premises Active Directory) is switched OFF -- and, with -Type, only for a hybrid worker job type (any
+      other type: $false). The KILL SWITCH only (Test-PimFeatureEnabled): the Pro licence keeps its own, unchanged gate.
+      A process without the feature catalog loaded answers $false (the behaviour before 100.139); a gate read that THROWS
+      answers $true -- "cannot tell" never starts a writer in on-premises AD.
+    #>
+    param([string]$Type = '')
+    if ("$Type".Trim() -and "$Type".Trim().ToLowerInvariant() -notin $script:PimHybridWorkerJobTypes) { return $false }
+    if (-not (Get-Command Test-PimFeatureEnabled -ErrorAction SilentlyContinue)) { return $false }
+    try { return (-not [bool](Test-PimFeatureEnabled -Key 'hybrid.ad')) } catch { return $true }
+}
 # §80.2: a SCHEDULER INSTANCE. The hybrid worker runs its own scheduler next to the container tick against the SAME store.
 # Sharing the one lease, the one SchedulerState and the one JobScope record, it would (a) fight the tick for the lease,
 # (b) advance every job it does not run (out-of-scope still stamps next-run) and (c) overwrite the scope the Manager
@@ -1915,6 +1930,8 @@ function Get-PimJobFeatureKey {
         'reminders'        { return 'alerting.email' }
         'escalations'      { return 'alerting.email' }
         'msp-pull'         { return 'msp.downlink' }
+        # PIM 100.139: the hybrid worker jobs follow the On-premises Active Directory switch (off by default)
+        { $_ -in $script:PimHybridWorkerJobTypes } { return 'hybrid.ad' }
         default            { return $null }   # core/engine jobs are not gated by a feature
     }
 }
@@ -1956,6 +1973,13 @@ function Invoke-PimScheduledJob {
                                    outOfScope=$true
                                    detail="not scheduled on this worker (PIM_SCHED_JOBS = $((Get-PimJobScope) -join ', '))"
                                    ranUtc=$NowUtc.ToString('o') }
+    }
+    # PIM 100.139: the On-premises Active Directory feature is switched OFF -- a hybrid job does not run, anywhere (the main
+    # tick, the hybrid worker's scheduler and its continuous loops all come through here). Asked BEFORE the worker delegation
+    # ("runs on the hybrid worker ...") and before the licence: off is the deliberate answer, and it is calm -- ok, not ran,
+    # never "hybrid worker required".
+    if (Test-PimHybridAdFeatureOff -Type "$($Job.type)") {
+        return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$true; ran=$false; detail=$script:PimHybridAdOffText; skippedFeature='hybrid.ad'; featureOff=$true; ranUtc=$NowUtc.ToString('o') }
     }
     # §80.2: a hybrid job whose hybrid worker is alive runs THERE -- the main tick reports it as delegated, not as
     # "hybrid worker required" (which would read as a fault while the worker is doing the job).
@@ -2488,6 +2512,28 @@ function Get-PimRunFailureHistory {
     }
 }
 
+function Get-PimJobStuckState {
+    <#
+      PIM 100.48 -- PURE. Is ONE job genuinely STUCK? Owner 2026-10-10 / 2026-10-13: a run that starts a few minutes late
+      (behind another run in its area) is normal and says nothing; only a job that has not run for MORE than 3x its interval
+      AND at least -MinMinutes (60) needs attention -- shown as "Has not run since <local time> - PIM Manager will start it
+      again", never "overdue". Not stuck: switched off, on-demand (no cadence), running now, or never run (no basis).
+      Returns @{ stuck; sinceUtc (the last run, ISO); thresholdMinutes; minutesSince }.
+    #>
+    param([Parameter(Mandatory)][object]$Job, [datetime]$NowUtc = [datetime]::UtcNow, [string]$LastRunUtc, [bool]$InProgress = $false, [int]$MinMinutes = 60)
+    $out = [pscustomobject]@{ stuck = $false; sinceUtc = ''; thresholdMinutes = 0; minutesSince = 0 }
+    $en = $true; if ($Job.PSObject.Properties['enabled']) { $en = [bool]$Job.enabled }
+    $iv = 0; if ($Job.PSObject.Properties['intervalMinutes']) { $iv = [int]$Job.intervalMinutes }
+    if (-not $en -or $iv -le 0 -or $InProgress) { return $out }
+    $last = Get-PimUtcStamp $LastRunUtc
+    if ($null -eq $last) { return $out }
+    $limit = [Math]::Max(3 * $iv, $MinMinutes)
+    $since = [int][Math]::Floor(($NowUtc.ToUniversalTime() - $last).TotalMinutes)
+    $out.thresholdMinutes = $limit; $out.minutesSince = $since; $out.sinceUtc = $last.ToString('o')
+    $out.stuck = ($since -gt $limit)
+    return $out
+}
+
 function Get-PimJobOverdueState {
     # PURE: is ONE job overdue? Overdue = enabled, has a cadence, and its NEXT scheduled
     # run (last run + interval, or the persisted nextRunUtc) is in the past by more than a
@@ -2657,6 +2703,7 @@ function Get-PimJobsStatus {
     $lockMap = $null; try { $lockMap = (Get-PimSchedulerLocksRaw).Map } catch { $lockMap = $null }
     $pendTrig = @(); try { $pendTrig = @(Get-PimPendingTriggers) } catch { $pendTrig = @() }
     $jobScopeRead = $false; $jobScopeOnce = $null
+    $hyOffOnce = $null   # PIM 100.139: is On-premises Active Directory switched off? (read once, on the first hybrid row)
     $rows = New-Object System.Collections.Generic.List[object]
     foreach ($j in @($Jobs)) {
         $name = "$($j.name)"
@@ -2768,6 +2815,15 @@ function Get-PimJobsStatus {
             $outOfScope = ("$($j.type)".Trim().ToLowerInvariant() -notin @($jobScope))
         }
         if ($outOfScope) { $od = [pscustomobject]@{ overdue = $false; expectedUtc = $null; overdueByMinutes = 0; reason = 'not scheduled on this deployment' } }
+        # PIM 100.139: a hybrid worker job while On-premises Active Directory is switched OFF under Features -- shown as
+        # switched off: never late, never failing, never "hybrid worker not seen", never counted under needs attention. The
+        # gate is read ONCE per view (only when the view has a hybrid job at all).
+        $featOff = $false
+        if ("$($j.type)".Trim().ToLowerInvariant() -in $script:PimHybridWorkerJobTypes) {
+            if ($null -eq $hyOffOnce) { $hyOffOnce = [bool](Test-PimHybridAdFeatureOff) }
+            $featOff = [bool]$hyOffOnce
+        }
+        if ($featOff) { $od = [pscustomobject]@{ overdue = $false; expectedUtc = $null; overdueByMinutes = 0; reason = $script:PimHybridAdOffText } }
         # [M6] LAST-RUN ACK: is the latest FAILED run muted? + recent failure count.
         $lastRunId = $(if ($last) { "$($last.runId)" } else { '' })
         $lastAcked = ($lastRunId -and ($acks -contains $lastRunId))
@@ -2872,15 +2928,15 @@ function Get-PimJobsStatus {
             }
         }
         if ($approvedPending) { $standingHeld = @() }
-        if ($outOfScope) { $recentFails = @(); $unackedFails = @(); $recoveredFails = @(); $unrunnable = @(); $unimplemented = @(); $heldRuns = @(); $standingHeld = @() }
+        if ($outOfScope -or $featOff) { $recentFails = @(); $unackedFails = @(); $recoveredFails = @(); $unrunnable = @(); $unimplemented = @(); $heldRuns = @(); $standingHeld = @() }
         # §95.2o QUEUED / WAITING (operator 2026-10-07: "i have run them manually many times"): a Run now that is queued, or a
         # due run, while another run holds the area it writes, says what it waits for -- never "overdue" or "failed".
         $myTrig = @($pendTrig | Where-Object { $_ -and (("$(if ($_.PSObject.Properties['job']) { $_.job })".Trim() -eq $name) -or (-not "$(if ($_.PSObject.Properties['job']) { $_.job })".Trim() -and "$($_.type)" -eq "$($j.type)" -and "$($_.scope)" -eq "$(if ($j.PSObject.Properties['scope']) { $j.scope })")) })
-        $queued = [bool]($myTrig.Count -and -not $inProg -and -not $outOfScope)
+        $queued = [bool]($myTrig.Count -and -not $inProg -and -not $outOfScope -and -not $featOff)
         $queuedSince = if ($queued) { $q0 = Get-PimUtcStamp $myTrig[0].requestedUtc; if ($null -ne $q0) { $q0.ToString('o') } else { '' } } else { '' }
         $dueNow = $false; if ($en -and "$persistNext".Trim()) { $pnx = Get-PimUtcStamp $persistNext; $dueNow = ($null -ne $pnx -and $pnx -le $now) }
         $waitingFor = ''; $waitingArea = ''; $waitingSince = ''; $waitingSlot = $false
-        if (($queued -or $dueNow) -and -not $inProg -and -not $outOfScope -and $null -ne $lockMap) {
+        if (($queued -or $dueNow) -and -not $inProg -and -not $outOfScope -and -not $featOff -and $null -ne $lockMap) {
             $ls = $null; try { $ls = Get-PimJobLaneState -Job $j -Map $lockMap -NowUtc $now } catch { $ls = $null }
             if ($ls -and $ls.conflict) {
                 $waitingFor = "$($ls.conflict.job)" -replace '^job:', ''
@@ -2889,6 +2945,13 @@ function Get-PimJobsStatus {
             } elseif ($ls -and $ls.capReached) { $waitingSlot = $true; $waitingSince = if ($queuedSince) { $queuedSince } else { "$persistNext" } }
         }
         if ($waitingFor -or $waitingSlot -or $queued) { $od = [pscustomobject]@{ overdue = $false; expectedUtc = $od.expectedUtc; overdueByMinutes = 0; reason = 'waiting' } }
+        # PIM 100.48 (owner 2026-10-10 / 2026-10-13: "people dont undersand what overdue means"): a run that starts a few minutes
+        # late is NORMAL -- 'overdue' stays in the data as a quiet "next run waiting", never a badge or a banner. Only a job that
+        # is genuinely STUCK (no run for more than 3x its interval AND at least an hour) needs attention.
+        $stk = [pscustomobject]@{ stuck = $false; sinceUtc = '' }
+        if (-not $outOfScope -and -not $featOff -and -not $queued -and -not $waitingFor -and -not $waitingSlot) {
+            $stk = Get-PimJobStuckState -Job $j -NowUtc $now -LastRunUtc "$lastRun" -InProgress ([bool]$inProg)
+        }
         $jobAreas = @(); try { $jobAreas = @((Get-PimJobAreas -Job $j).areas) } catch { $jobAreas = @() }
         $rows.Add([pscustomobject]@{
             name            = $name
@@ -2912,7 +2975,13 @@ function Get-PimJobsStatus {
             # BUG-112: the GUI renders these muted and excludes them from "needs attention".
             outOfScope      = [bool]$outOfScope
             # §80.2: the hybrid worker as this job sees it ($null for every other job) -- live / plan-only / not seen
-            hybridWorker    = $(if ("$($j.type)".Trim().ToLowerInvariant() -in $script:PimHybridWorkerJobTypes) { Get-PimHybridWorkerJobStatus -Type "$($j.type)" -NowUtc $now -Heartbeat $hwHeartbeat } else { $null })
+            # PIM 100.139: switched off under Features (On-premises Active Directory) -- the page shows a grey "switched off"
+            featureOff      = $(if ($featOff) { 'hybrid.ad' } else { '' })
+            featureOffText  = $(if ($featOff) { $script:PimHybridAdOffText } else { '' })
+            # PIM 100.48: genuinely stuck (no run for > 3x the interval AND >= 1 h) -- the only "late" that needs attention
+            stuck           = [bool]$stk.stuck
+            stuckSinceUtc   = "$($stk.sinceUtc)"
+            hybridWorker    = $(if ($featOff) { $null } elseif ("$($j.type)".Trim().ToLowerInvariant() -in $script:PimHybridWorkerJobTypes) { Get-PimHybridWorkerJobStatus -Type "$($j.type)" -NowUtc $now -Heartbeat $hwHeartbeat } else { $null })
             lastRan         = $(if ($last) { [bool]$last.ran } else { $null })
             lastDurationMs  = $(if ($last) { [int64]$last.durationMs } else { $null })   # [int64] -- see BUG-04
             lastRunId       = $lastRunId
@@ -2971,7 +3040,7 @@ function Get-PimJobsStatus {
     # (operator 2026-09-21: "maybe sort the jobs so failed are top in list" / "hard to go through all"); within each group
     # by last activity (newest first), then name.
     $sorted = @($rows | Sort-Object `
-        @{ Expression = { if ($_.inProgress) { 0 } elseif ($_.unackedFailureCount -gt 0) { 1 } elseif ($_.needsApproval) { 2 } elseif ($_.overdue) { 3 } elseif ($_.waitingFor -or $_.waitingForSlot -or $_.queued) { 4 } else { 5 } } }, `
+        @{ Expression = { if ($_.inProgress) { 0 } elseif ($_.unackedFailureCount -gt 0) { 1 } elseif ($_.needsApproval) { 2 } elseif ($_.stuck) { 3 } elseif ($_.waitingFor -or $_.waitingForSlot -or $_.queued) { 4 } else { 5 } } }, `
         @{ Expression = { "$($_.lastRunUtc)" }; Descending = $true }, `
         @{ Expression = { $_.name } })
     return [pscustomobject]@{
@@ -2980,6 +3049,10 @@ function Get-PimJobsStatus {
         runningCount = @($rows | Where-Object { $_.inProgress }).Count
         overdueCount = @($rows | Where-Object { $_.overdue }).Count
         failingCount = @($rows | Where-Object { $_.unackedFailureCount -gt 0 }).Count
+        # PIM 100.48: genuinely stuck jobs, and what the "Needs attention" banner + the menu number count: FAILING or STUCK
+        # (never merely late -- overdueCount stays in the data only, the page no longer shows it)
+        stuckCount     = @($rows | Where-Object { $_.stuck }).Count
+        attentionCount = @($rows | Where-Object { $_.unackedFailureCount -gt 0 -or $_.stuck }).Count
         # 71.13: jobs with a standing HOLD (needs approval) -- counted under "needs attention", never under failing.
         heldCount    = @($rows | Where-Object { $_.needsApproval }).Count
         # §95.2o: runs waiting for an area (or a free slot) and Run now presses queued -- shown, never counted as attention
