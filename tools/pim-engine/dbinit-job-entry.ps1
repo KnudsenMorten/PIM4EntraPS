@@ -245,6 +245,30 @@ try {
             }
         }
     }
+    # ---- LEAST-PRIVILEGE ACCESS (framework §12.23 P4/P9, PIM 100.156) ------------------------------
+    # The ADMIN half of the access model, from inside, as the server's Entra admin: the signed procedure, its 2099
+    # in-database certificate (private key removed), pim_updater + EXECUTE, the updater's own DDL user, then one
+    # converge. ADDITIVE (no fixed role is taken away here). Opt-in until the setup ships the model:
+    # PIM_DBINIT_SQL_ACCESS = '{"updaterUserName":"ca-pim-update","updaterAppId":"<client id>"}'. After this, every
+    # update is applied by the updater alone -- nothing routine needs the admin group again.
+    if (-not $failed -and "$($env:PIM_DBINIT_SQL_ACCESS)".Trim()) {
+        Step 'least-privilege access'
+        try {
+            . (Join-Path $solRoot 'engine/_shared/PIM-InstallNames.ps1')
+            . (Join-Path $solRoot 'engine/_shared/PIM-SqlAccess.ps1')
+            $sa = "$($env:PIM_DBINIT_SQL_ACCESS)".Trim() | ConvertFrom-Json
+            $q = { param($csx, $sql) $c2 = $conn.CreateCommand(); $c2.CommandText = $sql; $c2.CommandTimeout = 120
+                   $rd = $c2.ExecuteReader(); $rows = New-Object System.Collections.Generic.List[object]
+                   while ($rd.Read()) { $o = [ordered]@{}; for ($i = 0; $i -lt $rd.FieldCount; $i++) { $o[$rd.GetName($i)] = $(if ($rd.IsDBNull($i)) { $null } else { $rd.GetValue($i) }) }; $rows.Add([pscustomobject]$o) }
+                   $rd.Close(); $rows.ToArray() }
+            $x = { param($csx, $sql) $c2 = $conn.CreateCommand(); $c2.CommandText = $sql; $c2.CommandTimeout = 120; [void]$c2.ExecuteNonQuery() }
+            $ar = Invoke-PimSqlAccessInstall -Query $q -Exec $x -UpdaterUserName "$($sa.updaterUserName)" -UpdaterAppId "$($sa.updaterAppId)"
+            Say ("access model installed: signer $($ar.signer) (expires $($ar.signerExpiry)), " +
+                 "$($ar.converge.statements) statement(s) converged; users $(@($ar.converge.users) -join ', ')") 'Green'
+        } catch {
+            Say "FAILED least-privilege access: $($_.Exception.Message)" 'Red'; $failed++
+        }
+    }
     # ---- POLICY TEMPLATES (2026-09-12: "move templates to sql") ---------------------------------
     # The engine reads PIM policy templates from pim.Settings 'PolicyTemplates' ONLY. A fresh store gets
     # the shipped templates as its baseline HERE; on an existing store, templates still UNMODIFIED since the

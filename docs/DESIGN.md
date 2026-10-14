@@ -60,6 +60,7 @@ the alternative was found to fail in practice.
 28. [Change control, ownership and daily checks (2026-09)](#28-change-control-ownership-and-daily-checks-2026-09)
 29. [Talking to Invardia: the licence request and status telemetry](#29-talking-to-invardia-the-licence-request-and-status-telemetry)
 30. [Finishing an install: the end-of-install check, alert recipients and install tracking](#30-finishing-an-install-the-end-of-install-check-alert-recipients-and-install-tracking)
+32. [The 2026-10 security redesign: database access, Strict guards, names, mail, sign-in, releases, the manual](#32-the-2026-10-security-redesign-database-access-strict-guards-names-mail-sign-in-releases-the-manual)
 
 ---
 
@@ -11480,3 +11481,84 @@ with the technical designer carries no such paragraph.
 Pack versions are semantic and kept equal in four places (the README header, the questionnaire, the mapping and the
 cost model); every file of a pack is listed with its SHA-256 in `SHA256SUMS`. An older pack is kept unchanged beside
 the current one.
+
+## 32. The 2026-10 security redesign: database access, Strict guards, names, mail, sign-in, releases, the manual
+
+The redesign of October 2026 tightened how every part of PIM Manager reaches the database, how changes are guarded right
+after an update, and how releases travel. Parts marked **(in build)** are designed and decided, and being built.
+
+### 32.1 Database access: one user and one role per component
+
+- **Entra sign-in only**, no SQL logins and no passwords. Each component's database user is created from its own
+  managed identity's client id (a SID, no directory lookup). The image-pull identity has no database user.
+- **One custom role per component:** `pim_web`, `pim_engine`, `pim_updater`, `pim_asbuilt`, `pim_publish`,
+  `pim_downlink`, `pim_hybrid`. One catalog in code (`engine/_shared/PIM-SqlAccess.ps1`, `Get-PimSqlAccessCatalog`)
+  lists every grant: schema-level where a component owns the data, object-level elsewhere, no DELETE where a component
+  never deletes.
+- **One signed grant procedure,** `pim.usp_ApplyAccess`, is the only way grants change after a release. It checks every
+  rule itself: the role must be `pim_` + lower-case letters and a custom role (never a fixed `db_` role); the permission
+  SELECT / INSERT / UPDATE / DELETE / EXECUTE; the target an object or schema in `pim`, `platform` or `pimdemo`, never a
+  three-part name, never EXECUTE on a whole schema, never the procedure itself. It can also create a component's
+  contained user (from its client id, `TYPE = E`) and only into that component's role; a name clash is refused, never
+  dropped.
+- **The certificate lives in the database.** The admin run creates it once (`EXPIRY_DATE = 20991231`, a password
+  generated inside SQL and never returned), creates a user from it with exactly CREATE ROLE / ALTER ANY ROLE / ALTER ANY
+  USER and CONTROL on the product schemas, signs the procedure and **removes the private key**. Altering the procedure
+  drops the signature, so a changed procedure has no rights. Nothing is stored, rotated or maintained.
+- **The updater** holds `pim_updater`, `db_ddladmin` (its schema right) and EXECUTE on the procedure, nothing else in
+  security. After the schema step of every update it converges the access model through the procedure
+  (`Invoke-PimSqlAccessConverge`): every catalog role and grant, every existing component user into its role, extra
+  grants revoked. Not installed yet = nothing changes; a failure never blocks the update.
+- **Proven on a live installation (ring 0, 2026-10-14):** the SID built from a client id finds the user; the updater
+  grants through the procedure and is refused directly; the engine cannot run the procedure; a fixed role and a dbo
+  object are refused; the certificate expires 2099 with no private key.
+- **Five years without contact (framework 12.23 P9).** After the install the SQL admin group may stay empty for years:
+  no update needs it. Recovery needs no one inside the database: a Global Administrator adds the Invardia Support app to
+  the group (an Entra change), or an Owner of the server re-points its Entra administrator.
+- **Moving an existing installation:** run 1 (additive: roles, procedure, certificate, users into roles) through the
+  Support app with a plan and a rollback record; run 2 drops `db_datareader` / `db_datawriter` / `db_ddladmin` from the
+  portal and engine and takes the updater out of the admin group **(in build)**. The in-network init job can do run 1
+  from inside a private network (`PIM_DBINIT_SQL_ACCESS`). New installs get the model from setup **(in build)**.
+  Per-component views over `pim.Settings` / `pim.Rows` **(in build)**.
+
+### 32.2 Strict guard mode
+
+For 24 hours after an update that changed the engine's code (a fingerprint of `engine/`, the engine and scheduler
+entry points and `sql/`), every numbered guard limit is halved: `max(1, floor(configured / 2))`. It covers the commit
+removal check, the removal budget, the mass-disable breaker, bulk revoke, account delete, the policy brake counts and the
+hybrid server batch. Only the engine job starts it (`pim.Settings` `GuardStrict`, from `EngineFingerprint`); the first
+version on an installation only records the fingerprint. The Guards page shows configured and effective limits and the
+end time; the header badge "Guard mode: Strict" is shown to SuperAdmins; a SuperAdmin ends it early with a reason
+(audited `guard.strict.end`). The heartbeat carries the guard mode.
+
+### 32.3 Install names
+
+Every resource name an installation uses (portal, engine, updater, as-built job and identity, SQL admin group, publish
+and downlink jobs) is resolved by one function, `Get-PimInstallName`: the installation's record in `pim.Settings`
+`InstallNames`, else its environment variables, else today's name. The updater writes the record; every script and job
+reads through the resolver, so an installation with its own names keeps working.
+
+### 32.4 Mail subjects
+
+One format on every mail, built in one place (`Get-PimMailSubjectLine`): `[<Environment>] <Failed | Warning | Action
+needed:> <what> [<ticket>] [PIM Manager]`, at most 120 characters, cut at a word boundary. The severity comes from the
+alert type (a failure: Failed; a guard or an action: Action needed; otherwise Warning).
+
+### 32.5 The portal's sign-in and headers
+
+Every response carries Content-Security-Policy (own origin only, `frame-ancestors 'none'`), Strict-Transport-Security
+(one year), X-Frame-Options DENY, nosniff and Referrer-Policy same-origin. Sessions are 8 hours, fixed. The sign-in
+front without a secret -- OpenID Connect code flow with PKCE, the portal's managed identity as a federated credential,
+the portal bound to the local interface behind it -- replaces Easy Auth **(in build)**.
+
+### 32.6 Release control
+
+Every release is published with a fingerprint of the engine code and `engineChanged`; a publish whose answer is lost is
+read back before any retry. Rings 0 and 1 take every release; rings 2 and 3 take only a version the release owner marked
+APPROVED, inside named waves, with evidence collected after an engine change **(in build)**.
+
+### 32.7 The manual inside the portal
+
+The product's own manual (`tools/pim-manager/manual/`: one page per topic plus `index.json`) ships in every release and
+is the single source of the Pro docs on invardia.com, so the portal and the website show the same text for the
+installed version. The portal's Documentation menu renders it, also on private-network installations **(in build)**.

@@ -546,6 +546,10 @@ IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCach
     # CR8 item 1 (PIM 100.152): the commit snapshot table (pim.Backups) is created HERE too -- the Manager used to create it
     # on first use, and after the cut-over it has no right to change the schema (the updater runs this before every roll).
     if (Get-Command Initialize-PimBackupStore -ErrorAction SilentlyContinue) { [void](Initialize-PimBackupStore -ConnectionString $ConnectionString) }
+    # Framework §12.23 / PIM 100.156: the activation ledger (pim.ImpactActivations) was created ONLY by the engine's
+    # snapshot job, right before its first insert -- the one engine DDL the updater did not already create. Created here
+    # too, so the engine can lose db_ddladmin (run 2) without that job failing. Never fails the open.
+    if (Get-Command Get-PimImpactActivationLedgerDdl -ErrorAction SilentlyContinue) { try { [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimImpactActivationLedgerDdl)) } catch { Write-Warning "[store] pim.ImpactActivations could not be created: $($_.Exception.Message)" } }
     # REQ 100.114 (2): the active-assignment rows (pim.ActiveAssignmentRows + pim.ActiveAssignmentSnapshots, below in this
     # file). Never fails the open: a store that cannot take the tables keeps the one-document snapshot, and says so.
     $aaDdl = Initialize-PimSqlActiveAssignmentRows -ConnectionString $ConnectionString
@@ -2862,6 +2866,8 @@ $__cfgBak = Join-Path $PSScriptRoot 'PIM-ConfigBackup.ps1'
 if (Test-Path -LiteralPath $__cfgBak) { . $__cfgBak }
 # CR8 item 1 (PIM 100.152): the commit snapshot table's DDL rides with the store, so the updater's schema step creates it.
 if (-not (Get-Command Initialize-PimBackupStore -ErrorAction SilentlyContinue)) { $__cmtBak = Join-Path $PSScriptRoot 'PIM-CommitBackup.ps1'; if (Test-Path -LiteralPath $__cmtBak) { . $__cmtBak } }
+# Framework §12.23 / PIM 100.156: the activation ledger's DDL rides with the store, so the updater's schema step creates it.
+if (-not (Get-Command Get-PimImpactActivationLedgerDdl -ErrorAction SilentlyContinue)) { $__impCnt = Join-Path $PSScriptRoot 'PIM-ImpactCounters.ps1'; if (Test-Path -LiteralPath $__impCnt) { . $__impCnt } }
 # PIM 100.121: the feature-setting reader rides with the store -- it reads what Import-PimSettingsFromStore hydrates, so
 # every process that can hold a stored setting (the engine, the scheduler, the Manager) has the reader for it.
 $__featSet = Join-Path $PSScriptRoot 'PIM-FeatureSettings.ps1'

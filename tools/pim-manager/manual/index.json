@@ -1,0 +1,13 @@
+[
+  { "page": "overview", "title": "PIM Manager: how it works", "summary": "What PIM Manager does, the parts it installs in your subscription, and how a change travels from the portal to your tenant." },
+  { "page": "install", "title": "Install", "summary": "What you need, the rights the installing person holds, the guided install and what it creates." },
+  { "page": "identities", "title": "Identities and permissions", "summary": "Every identity the product runs as, what each one may do and why, and what each one can never do." },
+  { "page": "sql-access", "title": "Database access (least privilege)", "summary": "One database user and one role per component, the signed grant procedure, an admin group that stays empty, and no passwords anywhere." },
+  { "page": "security", "title": "Security design", "summary": "Sign-in, the portal's security headers, data and encryption, network options, logging and audit, and where to find the full security review pack." },
+  { "page": "guards", "title": "Guards and Strict mode", "summary": "Every safety limit, what happens when one trips, how a held change is approved, and the 24-hour Strict mode after an engine change." },
+  { "page": "operations", "title": "Day-to-day operations", "summary": "Staging and committing, approvals, scheduled jobs, mail, backups and undo, and what to watch." },
+  { "page": "release-and-updates", "title": "Releases, rings and updates", "summary": "How a version travels from build to your installation: rings, approval, waves, evidence, signed updates and your controls." },
+  { "page": "upgrade", "title": "Upgrade notes", "summary": "What changes for an existing installation in this version, and the one-time security cut-over." },
+  { "page": "support-access", "title": "Support access", "summary": "When Invardia can reach your installation, what it can and cannot do, how you approve it and how you end it." },
+  { "page": "naming", "title": "Naming conventions", "summary": "The names PIM Manager gives groups, accounts and Azure resources, what you can change and what stays fixed." }
+]

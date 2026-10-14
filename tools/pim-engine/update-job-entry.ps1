@@ -69,6 +69,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-FailureCatalog.ps1')   # 100.31 the OOM code the sizing self-correct reads
 . (Join-Path $solRoot 'engine\_shared\PIM-TenantSizing.ps1')     # 100.31 the tick's size for this tenant + the SQL tier / max size (100.37)
 . (Join-Path $solRoot 'engine\_shared\PIM-ConvergeDefaults.ps1') # 100.40 / framework 12.16 the install defaults an EXISTING install converges to
+. (Join-Path $solRoot 'engine\_shared\PIM-SqlAccess.ps1')        # framework 12.23 / PIM 100.156 least-privilege roles via the signed procedure
 . (Join-Path $solRoot 'engine\_shared\PIM-AsBuilt.ps1')          # 100.61 the as-built job + store + view an EXISTING install converges to
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
@@ -849,6 +850,14 @@ try {
                         -PulledSchemaVersion "$($plan.version)" -DeployedSchemaVersion "$($plan.version)"
         if ($rePlan.SqlUpdateRequired) { throw "schema re-preflight still reports drift: $($rePlan.reason)" }
         Say '  schema up to date.' 'Green'
+        # Framework §12.23 P4/P9 (PIM 100.156): least-privilege access converges THROUGH THE SIGNED PROCEDURE ONLY -- the
+        # updater holds no security right of its own. Not installed yet = nothing changes (the admin run installs it).
+        # A failure here is reported and never blocks the update: the broad roles still carry the install.
+        try {
+            $acc = Invoke-PimSqlAccessConverge -ConnectionString $csUpd
+            if ($acc.applied) { Say "  database access converged: $($acc.statements) statement(s) through the signed procedure; revoked $($acc.revoked); users $(@($acc.users) -join ', ')" 'DarkGray' }
+            else { Say "  database access: $($acc.reason)" 'DarkGray' }
+        } catch { Say "  database access NOT converged (the update continues; the broad roles still apply): $($_.Exception.Message)" 'Yellow' }
     }
 } catch {
     $schemaOk = $false

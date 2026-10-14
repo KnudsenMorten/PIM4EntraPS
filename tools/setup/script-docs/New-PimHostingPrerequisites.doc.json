@@ -50,6 +50,7 @@
     { "name": "SqlServerName", "required": false, "default": "sql-ait-<token>", "help": "Your own SQL server name (without .database.windows.net)." },
     { "name": "SkipSql", "required": false, "default": false, "help": "Create no SQL server (a central store is used)." },
     { "name": "SqlAdminGroupName", "required": false, "default": "grp-pim-sql-admins", "help": "The SQL admin group." },
+    { "name": "UpdateJobName", "required": false, "default": "ca-pim-update", "help": "The name of the update job whose identity the SQL admin group setup looks up. Change it only when your installation uses its own resource names (the names are recorded per installation, so renames keep working)." },
     { "name": "SupportAppId", "required": false, "default": null, "help": "The Invardia Support app's application id, added to the SQL admin group (alias -TroubleshootingAppId)." },
     { "name": "SkipSqlAdminGroup", "required": false, "default": false, "help": "Keep a single-principal SQL admin instead of the group." },
     { "name": "SetupHostIp", "required": false, "default": null, "help": "This host's public IP for the temporary AllowSetupHost rule; without it the IP is read from api.ipify.org (said on screen)." }
