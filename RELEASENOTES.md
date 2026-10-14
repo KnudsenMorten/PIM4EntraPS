@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.632 -- 2026-10-14
+
+- Docs: the 2026-10-14 night handoff (no code change -- proves the update path and engineChanged=false)
+
 ## 2.4.631 -- 2026-10-14
 
 - Security headers on every Manager page and a test that every page needs sign-in; the Manager starts without the right to change the database schema (framework 12.11f CR8); GuardMode as an object while Strict; release calls read the state back after a server error and engineChanged can be switched off (12.22)
