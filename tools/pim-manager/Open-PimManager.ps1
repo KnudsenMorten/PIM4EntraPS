@@ -313,6 +313,7 @@ if (Test-Path -LiteralPath $_setupLib) { . $_setupLib }
 # never loaded by the engine or the scheduler -- the engine cannot read demo data, PIM-SqlStore refuses it outside this module).
 . (Join-Path $solutionRoot 'engine\_shared\PIM-ImpactCounters.ps1')
 . (Join-Path $solutionRoot 'engine\_shared\PIM-DemoData.ps1')
+. (Join-Path $solutionRoot 'engine\_shared\PIM-Docs.ps1')   # PIM 100.157: the documentation shipped with this version
 function Test-PimManagerDemoDataOn {
     # 100.68 (b): the SQL flag pimdemo.Meta DemoEnvironment (written only by tools/setup/Set-PimDemoMode.ps1, which refuses
     # anything but the internal demo environment) AND PIM_DEMO_MODE not off. Cached 60 s; no store = off. Never throws.
@@ -16060,6 +16061,19 @@ function Handle-Request {
         # 100.68 (a): the impact counters (Dashboard + Counters overview), cumulative, from data PIM already stores; each with
         # its More info (how it is counted). An unreadable source is n/a, never 0. On the flagged demo environment: the demo
         # dataset's counters, marked demoData. Every signed-in role reads them (counts only, no names).
+        # PIM 100.157: Settings > Documentation -- the pages SHIPPED with this version (tools/pim-manager/manual), rendered here
+        # so a private-network install reads them too. Read-only, every signed-in role (it is the product manual).
+        if ($path -eq '/api/docs' -and $method -eq 'GET') {
+            $dix = Get-PimDocsIndex -ManualDir (Get-PimDocsDir -SolutionRoot $solutionRoot)
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $dix.ok; version = "$(Get-PimSolutionVersion)"; pages = @($dix.pages); error = $dix.error })
+            return 200
+        }
+        if ($path -eq '/api/docs/page' -and $method -eq 'GET') {
+            $dpg = Get-PimDocsPage -ManualDir (Get-PimDocsDir -SolutionRoot $solutionRoot) -Slug "$($req.QueryString['p'])"
+            if (-not $dpg.ok) { Write-JsonResponse -Response $resp -Status 404 -Body ([ordered]@{ ok = $false; error = $dpg.error }); return 404 }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; page = $dpg.page; title = $dpg.title; html = $dpg.html })
+            return 200
+        }
         if ($path -eq '/api/impact' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             try {

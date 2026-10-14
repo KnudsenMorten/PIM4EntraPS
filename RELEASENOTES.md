@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.633 -- 2026-10-15
+
+- Settings > Documentation: the product documentation now ships inside the portal (also on private-network installs); least-privilege SQL access (per-component roles through a signed procedure) converges on every update; the environment report no longer expects the web app to hold schema rights
+
 ## 2.4.632 -- 2026-10-14
 
 - Docs: the 2026-10-14 night handoff (no code change -- proves the update path and engineChanged=false)

@@ -1,6 +1,6 @@
 # PIM Manager -- Security review pack
 
-**Product:** PIM Manager &nbsp;|&nbsp; **Version:** 2.4.554 &nbsp;|&nbsp; **Date:** 2026-10-10
+**Product:** PIM Manager &nbsp;|&nbsp; **Version:** 2.4.632 &nbsp;|&nbsp; **Date:** 2026-10-14
 
 This pack is for the CISO and the security team who must approve PIM Manager before it is installed. It describes the product and this version, not one customer's environment. Every statement was checked against the product's code for this version, not only against its design documents. Where the product does NOT yet control a risk, the pack says so and names the open item (SP-GAP-n) on the product's backlog.
 
@@ -25,7 +25,7 @@ PIM Manager keeps privileged access in Microsoft Entra ID and Azure in line with
 
 ### Components (all in your subscription)
 - **Engine job** `ca-pim-tick` -- an Azure Container Apps job on a schedule. It reads the desired state from SQL and applies it to Entra ID, PIM for Groups, Azure RBAC, Intune and Defender XDR role management through REST calls with its managed identity.
-- **Manager** `ca-pim-manager` -- the web GUI (Container App). Administrators sign in with Entra ID (App Service Authentication, "Easy Auth"). Its Microsoft Graph rights are read-only; changes are queued in SQL and applied by the engine.
+- **Manager** `ca-pim-manager` -- the web GUI (Container App). Administrators sign in with Entra ID through the product's sign-in front (OpenID Connect code flow with PKCE, no client secret); the Manager itself listens only on the container's loopback address, behind it. Its Microsoft Graph rights are read-only; changes are queued in SQL and applied by the engine.
 - **Updater job** `ca-pim-update` -- builds the new version from source inside your own container registry and rolls the Manager and jobs (chapter 6).
 - **Azure SQL Database** -- the desired state, settings, audit log and commit journal. Entra-only authentication. The installer creates it on the Standard tier, S0 at minimum (never Basic, never serverless), with a 250 GB maximum size; a higher tier you set is kept, and a `pim-sql-tier-pin` tag stops the product changing its tier.
 - **Azure Container Registry** -- holds the images built in your subscription (Premium for private network setups, Basic otherwise).
@@ -62,15 +62,15 @@ Every identity the product creates or uses, with its purpose and lifetime. Runti
 | ca-pim-tick (engine) | System-assigned managed identity of the engine job | Reads the tenant and applies the desired state | None (managed identity) | Lives as long as the job |
 | ca-pim-manager (Manager) | System-assigned managed identity of the Manager app | Reads the tenant for the GUI, writes SQL, starts the engine on Run now | None (managed identity) | Lives as long as the app |
 | ca-pim-update (updater) | System-assigned managed identity of the update job | Builds the new version in your registry and rolls the apps; applies schema | None (managed identity) | Lives as long as the job |
-| id-pim-<token> | User-assigned managed identity | Pulls images from your registry; attached to the Manager and jobs | None (managed identity) | Kept until the resource group is removed |
+| id-pim-<token> | User-assigned managed identity | Pulls images from your registry; attached to the Manager and jobs. No database access | None (managed identity) | Kept until the resource group is removed |
 | id-pim-sql-<token> | User-assigned managed identity (private SQL only) | SQL administrator for the in-cloud schema bootstrap job | None (managed identity) | Kept until removed |
 | Downlink / baseline-publish / RFA broker jobs | System-assigned managed identities (MSP and access-request options only) | Pull or publish the MSP bundle; serve access requests | None (managed identity) | Lives as long as the job/app |
-| Manager sign-in app registration | App registration (Easy Auth) | Entra sign-in to the Manager; app assignment required | Client secret, 2 years, stored as a Container Apps secret | Until the Manager is removed |
+| Manager sign-in app registration | App registration (sign-in front) | Entra sign-in to the Manager (OpenID Connect code flow + PKCE, 8 h fixed session); app assignment required | None -- the web app's managed identity is a federated credential on the registration (no secret, no certificate) | Until the Manager is removed |
 | Manager users group (members, no guests) | Dynamic security group (optional) | Lets all member accounts sign in, never guests | n/a | Until removed |
 | Access-request API app registration | App registration (RFA option) | Token audience for the access-request broker; no API permissions | None | Until removed |
 | Engine app registration (certificate) | App registration + service principal (classic deploy path only) | Engine identity for installs that do not run on managed identity | Self-signed certificate, 2 years, on the deploy host | Until removed; see SP-GAP-13 |
 | Deploy app registration | App registration (optional, unattended deploys) | Runs deploys without a person signed in | Certificate on the deploy host | Until removed |
-| grp-pim-sql-admins | Role-assignable security group | The SQL server's Entra administrator; members are the product's deploy/update identities | n/a | Until removed |
+| grp-pim-sql-admins | Role-assignable security group | The SQL server's Entra administrator; its standing member is the Invardia Support app (when you name one). No runtime identity of the web app or the engine is a member; the updater leaves it as soon as its own DDL-only database user is proven (next). People get in just-in-time through PIM for Groups | n/a | Until removed |
 | PIM Activator app registration | App registration (optional) | The browser extension's sign-in; users activate their own eligible roles and groups | None (public client, PKCE) | Until removed |
 | Mail sender | Shared mailbox + Exchange RBAC for Applications scope (optional) | Sends TAP codes, approvals and alerts from one mailbox | None (send right on that one mailbox) | Until removed |
 | Invardia Support app | Multi-purpose vendor app registration created in YOUR tenant by Invardia's setup script | Setup and support by Invardia, with your consent (chapter 5) | Client secret (90 days for customers), held in Invardia's support Key Vault | Until you remove it |
@@ -92,11 +92,15 @@ Every permission the product grants or requires, per identity, read from the ins
 - Workload identities may only be given Reader, User Access Administrator or Role Based Access Control Administrator by the reachability planner; Owner and Contributor are refused there.
 - The baseline-publish job has no fixed SQL role: SELECT on named objects only, and db_owner / db_datawriter / db_ddladmin / db_datareader are revoked.
 - Storage keys are disabled where the product creates storage; access is Azure RBAC.
+- **One identity per job in SQL:** every component that uses the database has its own contained database user, mapped from its own managed identity. The image-pull identity has no database access, and the web app holds no db_ddladmin (from 2.4.631): it cannot change the schema.
+- **SQL admin group = Invardia Support app:** no runtime identity of the web app or the engine is a member.
+- **One custom database role per component** (pim_web, pim_engine, pim_updater, pim_asbuilt, pim_publish, pim_downlink, pim_hybrid), object- or schema-level, never db_owner. Grants change after a release ONLY through one **certificate-signed procedure** (pim.usp_ApplyAccess) under fixed rules: a pim_ role, SELECT / INSERT / UPDATE / DELETE / EXECUTE, PIMs own schemas, never itself, never a fixed role. Its certificate lives in the database, expires 2099-12-31 and has **no private key** (removed after signing); altering the procedure drops the signature. The updater may only EXECUTE it and is refused when it grants directly; the engine cannot run it (proven on a live installation). Every update applies schema and grants with the updaters own database user alone, so the SQL admin group may stay empty for years.
+- **The web app cannot change the engine:** start-only rights on the named engine job (Jobs Operator), no registry push, no SQL admin.
 
 ### Least-privilege gaps (honest)
 - AccessReview.ReadWrite.All is broader than the access-review provider needs; no narrower Graph permission exists.
-- The Manager has db_datawriter and db_ddladmin in SQL like the engine (SP-GAP-7).
-- The registry pull identity is also a member of the SQL admin group, and the updater holds Contributor on the resource group (SP-GAP-7).
+- Until an installations second cut-over run, the Manager and the engine also keep db_datareader and db_datawriter on the whole database and the engine keeps db_ddladmin, next to their own roles. Per-component views over the generic settings and rows tables follow (SP-GAP-7).
+- The updater holds Contributor on the resource group and is still in the SQL admin group until its own DDL-only database user is proven (SP-GAP-7).
 - The deploy app registration is subscription Owner by default and, with -GrantGraph, holds RoleManagement.ReadWrite.Directory (SP-GAP-13).
 - The standalone Grant-PimEnginePermissions script grants whatever role and scope it is given; it has no allow-list (SP-GAP-13).
 
@@ -138,7 +142,7 @@ Every permission the product grants or requires, per identity, read from the ins
 | Engine (ca-pim-tick) | Azure RBAC | Reader | The ca-pim-tick job resource | Read its own execution status | Run status in the GUI | No |
 | Engine (ca-pim-tick) | Azure RBAC | Storage Table Data Contributor | The access-request storage account | Store access-request state | Access requests (RFA) | Yes (RFA option) |
 | Engine (ca-pim-tick) | Azure RBAC (custom role) | Microsoft.Storage/storageAccounts/read + write | The one MSP bundle storage account | Maintain the bundle store's network rules (MSP managing tenant, public-signed mode) | MSP bundle publication | Yes (MSP only) |
-| Engine (ca-pim-tick) | SQL | db_datareader, db_datawriter, db_ddladmin | The PIM database | Read and write the desired state, audit and journal; apply schema changes | Everything | No |
+| Engine (ca-pim-tick) | SQL | Role pim_engine (read/write the pim schema, read the tenant registry); db_datareader, db_datawriter, db_ddladmin only until the second cut-over run | The PIM database | Read and write the desired state, audit and journal | Everything | No |
 | Engine (ca-pim-tick) | Exchange RBAC for Applications | Application Mail.Send | A management scope containing ONE sender mailbox | Send TAP codes, approvals and alerts | Mail (the GUI shows codes instead) | Yes (mail option) |
 | Engine (ca-pim-tick) | Key Vault RBAC | Key Vault Secrets User | The one SMTP relay secret | Read the SMTP relay password | Mail through an SMTP relay | Yes (SMTP option) |
 | Engine (ca-pim-tick) | Other | Member of a Power BI security group + the Fabric tenant setting for read-only admin APIs | Power BI / Fabric | Read Power BI workspaces for discovery | Power BI provider | Yes (Power BI workload) |
@@ -147,16 +151,16 @@ Every permission the product grants or requires, per identity, read from the ins
 | Manager (ca-pim-manager) | Azure RBAC | Reader | The PIM resource group only | Read the installation's own architecture (apps, jobs, registry, SQL, Key Vault, network) for the Environment report | Environment report (the architecture section shows "not readable") | No |
 | Manager (ca-pim-manager) | Azure RBAC | Container Apps Jobs Operator | The ca-pim-tick job only | Start the engine on Run now / commit | Run now (the engine still runs on its schedule) | Default on; can be skipped |
 | Manager (ca-pim-manager) | Azure RBAC | AcrPull | Your container registry (legacy path; normally the pull identity) | Pull its image | Start-up | No |
-| Manager (ca-pim-manager) | SQL | db_datareader, db_datawriter, db_ddladmin | The PIM database | Read and stage changes, settings and audit | GUI | No |
+| Manager (ca-pim-manager) | SQL | Role pim_web (read; write staged changes, settings and audit; no schema right since 2.4.631); db_datareader, db_datawriter only until the second cut-over run | The PIM database | Read and stage changes, settings and audit | GUI | No |
 | Manager (ca-pim-manager) | Key Vault RBAC | Key Vault Secrets User | The one emergency-passphrase secret | Emergency sign-in check | Emergency access | Yes |
 | Manager (ca-pim-manager) | Exchange RBAC for Applications | Application Mail.Send | The one sender mailbox scope | Send mail from the GUI (test mail, approvals) | GUI mail | Yes (mail option) |
 | Updater (ca-pim-update) | Azure RBAC | Contributor | The environment's resource group (and the registry when it is in another group) | Update container apps and jobs; schedule image builds | Updates | Can be skipped (then updates are manual) |
 | Updater (ca-pim-update) | Azure RBAC | AcrPull | Your container registry | Pull built images | Updates | No |
-| Updater (ca-pim-update) | SQL | Member of grp-pim-sql-admins (fallback: db_datareader, db_datawriter, db_ddladmin) | The SQL server | Apply schema changes during an update | Schema updates | No |
+| Updater (ca-pim-update) | SQL | Its own database user: role pim_updater + db_ddladmin + EXECUTE on the signed grant procedure only (no security right of its own); leaves grp-pim-sql-admins in the second cut-over run | The PIM database | Apply schema changes during an update | Schema updates | No |
 | Pull identity (id-pim-<token>) | Azure RBAC | AcrPull | Your container registry | Pull images for the Manager and jobs | Start-up | No |
-| Pull identity (id-pim-<token>) | SQL | Member of grp-pim-sql-admins | The SQL server | Schema bootstrap (see SP-GAP-7) | Bootstrap | No |
+| Pull identity (id-pim-<token>) | SQL | None -- removed from grp-pim-sql-admins (2026-10-14); an image-pull identity has no database access | n/a | Nothing: every component that uses the database has its own database user | Nothing | n/a |
 | SQL bootstrap identity (id-pim-sql-<token>) | SQL | SQL Entra administrator (or group member) | The SQL server (private SQL only) | Create the database users from inside the private network | Private SQL installs | Yes (private SQL) |
-| grp-pim-sql-admins | SQL | SQL server Entra administrator | The SQL server | One managed group instead of a person as SQL admin | Schema changes, recovery | No |
+| grp-pim-sql-admins | SQL | SQL server Entra administrator | The SQL server | One managed group instead of a person as SQL admin; its standing member is the Invardia Support app, people get in just-in-time through PIM for Groups | Schema changes, recovery | No |
 | Downlink job (MSP managed tenant) | Graph application | The engine permission set above | The managed tenant | Apply the bundle pulled from the managing tenant | MSP managed tenant | Yes (MSP only) |
 | Downlink job (MSP managed tenant) | Azure RBAC + SQL | AcrPull; member of grp-pim-sql-admins (fallback: the three db roles) | Registry; SQL server | Pull image; write the store | MSP managed tenant | Yes (MSP only) |
 | Baseline-publish job (MSP managing tenant) | Azure RBAC | Storage Blob Data Contributor | The bundle container only | Publish the signed bundle | MSP publication | Yes (MSP only) |
@@ -214,8 +218,8 @@ Every permission the product grants or requires, per identity, read from the ins
 
 ### Data sent to Invardia
 All outbound, HTTPS, to invardia.com. Nothing is sent about users, groups or roles by design; the exact fields are below.
-- **Telemetry uplink** (run reports hourly, a heartbeat every 4 hours; feature gate `telemetry.uplink`, **on by default**, switch off in Settings > Features; switching off sends one final opt-out record and then nothing). Two modes: **anonymous** (no licence install key: a random install id, bucketed counts, no tenant, host or text) and **identified** (with an install key: adds tenant id, host name and redacted error text). The redaction removes tokens, keys, SAS signatures and PEM blocks; it does **not** remove e-mail addresses, UPNs or object names that can appear in an error message (SP-GAP-9).
-- **Licence request** (every 30 minutes until a licence is installed; gate `licence.autoRequest`, on by default): product, version, tenant id, install id, current licence id and expiry. No contact details.
+- **Telemetry uplink** (run reports hourly, a heartbeat every 4 hours; feature gate `telemetry.uplink`, **on by default**, switch off in Settings > Features; switching off sends one final opt-out record and then nothing). Two modes: **anonymous** (no licence install key: a random install id, bucketed counts, no tenant, host or text) and **identified** (with an install key: adds tenant id, host name and redacted error text). The redaction removes tokens, keys, SAS signatures and PEM blocks; it does **not** remove e-mail addresses, UPNs or object names that can appear in an error message (SP-GAP-9). The identified heartbeat also carries the environment name your administrators gave the installation (the name shown in the Manager header) and the guard mode (`normal`, or `strict` with its end time).
+- **Licence request** (every 30 minutes until a licence is installed; gate `licence.autoRequest`, on by default): product, version, tenant id, install id, current licence id and expiry. No contact details. When a licence is installed, the request also proves it: it sends the SHA-256 of the installed licence file and, with an install key, the key in a request header, so only the installation that holds the licence can ask for its renewal.
 - **Install-key claim and update manifest** (Pro, gate `updates.invardia`): product, tenant id, licence, ring.
 - **Install tracking** (only when an install is started from an Invardia install token): the step names and outcomes.
 - Licence validation itself is offline: a signature check with no network call.
@@ -261,6 +265,10 @@ The app's tenant rights are created by Invardia's own setup script (published at
 - PIM Manager's own grant script (`Grant-PimSupportAccess.ps1`) adds, at every level, the standing database access described above; at troubleshoot level, db_datareader + VIEW DEFINITION on the same database user; at setup level, ownership of the product's sign-in app, access-request app, SQL admin group and users group.
 - **As-built document (level `asbuilt`, also part of troubleshoot and setup):** the Support app may start the one as-built job (`caj-pim-asbuilt`) and read its executions, and may read the one storage container `asbuilt` -- nothing else. The job writes a PDF describing the installation's configuration (no secrets, people, user names or object ids) to that container. The storage account accepts only Entra tokens (no shared key, no anonymous access), so the PDF is **readable only by the Support app's identity after you grant it**, and it is **deleted after 24 hours**. Your admins download the same PDF from PIM Manager without any of this.
 
+### Security changes to an existing installation
+- Infrastructure changes to an installation that is already running (for example tightening database rights, turning on SQL auditing or shortening the sign-in session) are **never made by the updater**. They are made by Invardia through the Support app, one environment at a time, with a script that shows a plan first, reads every change back and writes a rollback record. Every SQL statement goes through Invardia's support SQL route, which records the statement and its reason before it runs.
+- Order: Invardia's own environment first, then the test environments, then each customer environment in batches, with a check of the engine runs between batches. Customers are told beforehand.
+
 ### Credential and conditions
 - The Support app uses a **client secret** (this is the only identity in the product allowed one, and only for setup and support, never for the runtime). For customers it expires after 90 days; old secrets are removed when a new one is made. Invardia keeps it in its support Key Vault.
 - Invardia's sign-in tool checks that the token's tenant and app match the environment, refuses a production environment without an explicit production switch, and stops when you have disabled the environment.
@@ -282,12 +290,15 @@ The app's tenant rights are created by Invardia's own setup script (published at
 - The updater job `ca-pim-update` **builds the product from source inside your own container registry** and rolls the Manager and jobs. No pre-built vendor image is pulled.
 - **Invardia update channel (Pro):** the update manifest is signed (RS256, RSA 4096) and verified against a public key embedded in the product -- never fetched at run time. The manifest must name your ring, a version, a SHA-256, a size and a sequence number (replays are refused); the download must be HTTPS; the archive's SHA-256 and size are checked before unpacking, and the version inside must match the manifest.
 - **Source-archive channel (default for self-hosted updates):** the archive is fetched from a storage container the update job is configured with. Today this path checks only the archive's format, **not a signature or hash**, and its ring file is unsigned (SP-GAP-2).
+- **No storage token in the updater:** Pro installations fetch the source archive from invardia.com for the version their signed manifest names; the update job no longer keeps a storage SAS URL in its settings. The container registry's admin user is off.
 - **Community edition:** updated from the public source repository; no signature check of the release tag (SP-GAP-2).
 - **Licences:** signed (RSA-SHA256) and verified offline against embedded public certificates, both before storing and after reading back.
 
 ### Rings, who releases, and your control
-- Rings 0-3. Customers are on ring 2 by default. Ring 2 is never advanced automatically.
-- A release is built only from a tagged source version and published by a dedicated publisher identity; ring 2 releases require the release owner's written approval in the publish step (a recorded text, not a cryptographic second signature).
+- Rings 0-3: **0** development, **1** test, **2** design partners, **3** broad. Ring 2 is never advanced automatically.
+- A release is built only from a tagged source version and published by a dedicated publisher identity. Each release carries a fingerprint of the engine code and says whether the engine changed since the previous release.
+- **Release control:** Invardia refuses a ring 2 or ring 3 release, or an early wave, of a version the release owner has not marked APPROVED (with a reason, audited, append-only). A wave serves a version to named installations inside a ring only after that version was released to a lower ring; stopping a wave never moves an installation back. After a release that changed engine code, installations report more often for the first hours, and each release collects evidence (guard trips, the engine's own changes, run results) for the owner's decision. Rings 0 and 1 are never held. A publish whose answer is lost (a server error) is read back before anything is retried, so a release is never published twice.
+- **Strict guards after an engine change:** for 24 hours after an update that changed engine code, every numbered safety limit is halved (chapter 7).
 - **Invardia holds the update-signing key.** Your controls: `PIM_UPDATE_HOLD=1` freezes the environment at its version; downgrades are refused unless you allow them; a minimum-from version prevents skipping a required step; updates run on a schedule you can change (default 03:00 UTC daily); the update job can be removed for fully manual updates.
 
 ### Source availability
@@ -320,7 +331,8 @@ The app's tenant rights are created by Invardia's own setup script (published at
 - **Mass-disable breaker:** a run that would disable more accounts than the limit disables none and holds the list; a SuperAdmin releases exactly that list of accounts for one run.
 - An approval or a release is given only by a SuperAdmin of the tenant signed in to the Manager, is bound to the exact list (a changed list is held again), needs a reason and is audited (who, when, why and every item). A release lasts one run or at most 24 hours. Approvals, releases, held lists and limits are never restored from a configuration backup and never copied by an environment import or a settings copy, so a used or revoked approval cannot come back; a record whose own times do not add up (no start time, a start in the future, an end later than its lifetime allows) counts as ended. The break-glass exclusion, account deletion by a prune or reconcile, shared workload assignments, objects the product does not own and the last Manager SuperAdmin are locked: they have no limit and can never be approved, exempted or released.
 - **Account deletion -- one operator-controlled path.** The product never deletes an account it does not manage, and a prune or reconcile never deletes anything: an undefined account is only reported. The only delete is an operator's **Delete account** on a PIM-managed admin account (a SuperAdmin, an Admin, or a delegated operator for admins at or below its level, typing DELETE; that confirmation is the approval). The engine then deletes it once -- sessions revoked first, never a break-glass account, never an enabled account the disable circuit breaker did not allow, at most 5 per run, and never on a managed tenant on the managing tenant's word (there it is disabled). Entra keeps a deleted user restorable for 30 days. Turn the path off per environment with `PIM_ADMIN_ACCOUNT_DELETE=0`.
-- Every guard trip is mailed, audited and reported.
+- **Strict mode after an engine change.** For 24 hours after an update that changed engine code, every numbered limit is halved from the value the SuperAdmin configured: effective = max(1, floor(configured / 2)), so a limit of 1 stays 1. It covers the commit removal check, the removal budget, the mass-disable breaker, bulk revoke, account deletion, the policy brake counts and the hybrid server batch. The Guards page shows configured and effective limits and when Strict ends; the header shows "Guard mode: Strict" to SuperAdmins. A SuperAdmin can end Strict early with a reason, which is audited. A strict trip is held like any other trip. On the first version that brings Strict to an installation, it only records the engine fingerprint, so the switch itself never starts it.
+- Every guard trip is mailed, audited and reported. Every mail subject names the environment and, when it matters, a severity word: `[<Environment>] Failed | Warning | Action needed: <what happened> [<ticket>] [PIM Manager]`, at most 120 characters.
 - **Break-glass accounts** in Settings are never removed, disabled or revoked; if the list cannot be read, every account is treated as protected.
 - The engine has a dry-run (-WhatIf) mode; scheduled jobs can be paused one by one or all at once.
 
@@ -330,7 +342,8 @@ The app's tenant rights are created by Invardia's own setup script (published at
 ### Audit
 - `pim.AuditEvents` records actor, source, action, target, before, after and dry-run flag; append-only by trigger; purged only by the retention job (minimum 13 months; default keep forever).
 - Logs of the Container Apps go to the Log Analytics workspace in your subscription.
-- Limits: SQL principals with db_ddladmin (the runtime identities) or SQL admin can drop the append-only triggers, and a direct SQL write bypasses the journal (SP-GAP-6). Azure SQL auditing and diagnostic settings are not configured by the installer (SP-GAP-12).
+- **SQL auditing** is on: the SQL server sends its security audit events to the installation's own Log Analytics workspace, kept 90 days, so every statement by any identity -- including the Invardia Support app -- can be reviewed there.
+- Limits: SQL principals with db_ddladmin (the engine and the updater; no longer the web app) or SQL admin can drop the append-only triggers, and a direct SQL write bypasses the journal -- it is then still in the SQL audit (SP-GAP-6).
 
 <a id="threat-model"></a>
 ## 8. Threat model and hardening
@@ -342,15 +355,15 @@ The top risks for a privileged-access product, the control that exists in this v
 | Threat | Control in this version | Not controlled today (backlog id) |
 |---|---|---|
 | Privilege escalation through the engine identity (it can assign any directory role and grant any app permission) | Managed identity (no credential to steal); Manager is read-only in Graph; engine applies only DB-defined objects; guards; break-glass protection; every change audited and journaled | No hard refusal to assign the most privileged roles (e.g. Global Administrator) -- they are only classified sensitive (SP-GAP-1) |
-| Compromised Manager administrator | Entra sign-in with app assignment required, no guests by default; roles Reader/Admin/SuperAdmin; staged commits; guards; audit and journal; undo | MFA is not enforced by the product (it relies on your Conditional Access); signed-token verification is opt-in; maker/checker is Pro and off by default (SP-GAP-5) |
+| Compromised Manager administrator | Entra sign-in with app assignment required, no guests by default; roles Reader/Admin/SuperAdmin; sign-in front with no client secret and an 8 h fixed session; every request to the Manager carries the user's verified, signed ID token; security headers (CSP, HSTS, frame-ancestors none, nosniff, same-origin referrer); staged commits; guards (halved for 24 h after an engine change); audit and journal; undo | MFA is not enforced by the product (it relies on your Conditional Access); maker/checker is Pro and off by default (SP-GAP-5) |
 | Update tampering | Invardia channel: signed manifest, embedded key, hash + size + version + ring + replay checks; builds in your registry; HOLD; no automatic ring-2 advance | Source-archive channel, its ring file and the Community git update are not signature-checked; the hybrid worker's source download is not hash-checked (SP-GAP-2) |
 | Script tampering (a privileged person runs a modified setup script) | Scripts are single self-contained files with a published SHA256SUMS.txt; no pipe-to-execute in the product; no second-stage code download | Scripts are not Authenticode-signed; the GUI commands show no verify step; one command downloads and runs on one line (SP-GAP-3) |
 | Vendor (Invardia) access misuse or compromise | No access without the Support app, which is yours to create, lower, switch off and remove; secret expiry; tenant/app/production checks in Invardia's sign-in tool | A named Support app holds a standing db_owner right on the PIM database (chapter 5); setup level is tier-0 equivalent; Conditional Access lock off by default; actions not in PIM's audit (SP-GAP-11) |
-| Tampering with the audit trail | Append-only triggers on the audit log and journal; retention minimum 13 months | Runtime identities hold db_ddladmin and can drop the triggers (SP-GAP-6) |
-| Lateral movement between product identities | Separate identities per component; Manager read-only in Graph; publish job without fixed SQL roles | Pull identity is SQL admin; updater is resource-group Contributor; Manager holds db_ddladmin; an engine secret, if used, also reaches the Manager (SP-GAP-7) |
+| Tampering with the audit trail | Append-only triggers on the audit log and journal; retention minimum 13 months | The engine and updater identities hold db_ddladmin and can drop the triggers; SQL auditing to your workspace records it (SP-GAP-6) |
+| Lateral movement between product identities | Separate identities per component; one database user per component; the image-pull identity has no database access; the SQL admin group holds only the Invardia Support app and, until its own DDL-only user is proven, the updater; the web app has no db_ddladmin and only start rights on the engine job; publish job without fixed SQL roles | Updater is resource-group Contributor; web app and engine still use broad database roles until the per-component roles ship (next); an engine secret, if used, also reaches the Manager (SP-GAP-7) |
 | Data leaving the tenant | No directory data in telemetry by design; anonymous mode without an install key; opt-out | Identified-mode error text is not stripped of names/UPNs; the licence request sends the tenant id on by default (SP-GAP-9) |
-| Network exposure | Manager created closed until Entra sign-in is verified; workers have no ingress; Entra-only SQL; private options | Default is public ingress and the SQL 'Allow Azure services' rule; no explicit SQL minimum TLS (SP-GAP-12) |
-| Secrets at rest | Managed identities everywhere at runtime; Key Vault for secrets; API keys hashed | Install key and licence pull token stored in settings in plain text (TDE only); emergency passphrase stored as unsalted SHA-256; vaults without purge protection (SP-GAP-8) |
+| Network exposure | Manager created closed until Entra sign-in is verified; workers have no ingress; Entra-only SQL; private options | Default is public ingress and the SQL 'Allow Azure services' rule (network lock-down is your choice); no explicit SQL minimum TLS (SP-GAP-12) |
+| Secrets at rest | Managed identities everywhere at runtime; no sign-in secret (federated credential); no storage SAS in the updater; registry admin user off; Key Vault for secrets with purge protection on the product's own vaults; API keys hashed | Install key and licence pull token stored in settings in plain text (TDE only); emergency passphrase stored as unsalted SHA-256 (SP-GAP-8) |
 
 **Hardening checklist you can apply**
 
@@ -358,10 +371,10 @@ The top risks for a privileged-access product, the control that exists in this v
 |---|---|---|
 | 1 | List your break-glass accounts in Settings (Get Started step) -- the list is empty until you do | The engine then never touches them |
 | 2 | Require MFA and compliant devices for the Manager sign-in app with Conditional Access | The product does not enforce MFA itself |
-| 3 | Turn on signed-token verification for the hosted Manager (PIM_HOSTED_REQUIRE_SIGNED_TOKEN) | Defence in depth on the sign-in headers |
+| 3 | Keep the Manager's sign-in limited to named people and groups (assignment required) | The sign-in front verifies every request's signed token; assignment narrows who can get one |
 | 4 | Enable maker/checker (Pro) and keep self-approval off | A second person for sensitive changes |
 | 5 | Use the private network options: internal Container Apps environment and SQL private endpoint; or add IP allow-rules | Removes public exposure and the 'Allow Azure services' SQL rule |
-| 6 | Set the SQL server's minimum TLS to 1.2 and enable Azure SQL auditing to your workspace | Not configured by the installer |
+| 6 | Set the SQL server's minimum TLS to 1.2, and set alerts on the SQL security audit table in your workspace | TLS is not set by the installer; SQL auditing is on (90 days) and alerts are yours to choose |
 | 7 | Keep User Access Administrator at the tenant root off unless you manage Azure RBAC with the product | Least privilege |
 | 8 | Grant the Invardia Support app only when needed, at troubleshoot level, and remove it afterwards; enable its Conditional Access lock | Vendor access only on demand |
 | 9 | Monitor the engine and Manager managed identities with Entra workload identity alerts; treat them as tier 0 | They hold tier-0-equivalent rights |

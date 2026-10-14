@@ -458,6 +458,14 @@ Security is layered through the whole product, not bolted on:
   deployment tooling signs in with certificates. A client secret is used only where
   the platform itself requires one (the sign-in registration that fronts the
   Manager), and never lives in a configuration file.
+- **Least-privilege database access.** Every component has its own database user
+  and its own role; nobody can grant itself more. After a release, grants change
+  only through one certificate-signed procedure whose certificate lives in the
+  database with its private key removed — no passwords, nothing to rotate, and no
+  database administrator needed for years. SQL auditing keeps every security
+  event in your own Log Analytics workspace for 90 days.
+- **Strict guards after an update.** For 24 hours after an update that changed
+  the engine, every safety limit is halved, so a new version starts carefully.
 - **It tells you exactly which permission is missing.** When a call is refused,
   you don't get a bare "access denied" — you get the precise permission to grant
   (for the automation identity) or the privileged role to activate (when you're
