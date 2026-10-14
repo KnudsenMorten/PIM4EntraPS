@@ -1318,14 +1318,16 @@ function Invoke-PimUplinkCycle {
                 if ($envHb.Length -gt 100) { $envHb = $envHb.Substring(0, 100).Trim() }
                 if ($envHb) { $hb | Add-Member -NotePropertyName 'EnvironmentName' -NotePropertyValue $envHb -Force; $hbAdd += 'EnvironmentName' }
             } catch { }
-            # framework §12.11b GUARD-STRICT item 5 (CR4): GuardMode normal | strict (+ GuardModeUntilUtc while strict), so
-            # Invardia shows it; additive (a refusal drops it for 24 h). Left out when the mode cannot be read.
+            # framework §12.11b GUARD-STRICT item 5 (CR4): GuardMode on the identified heartbeat, so Invardia shows it; additive
+            # (a refusal drops it for 24 h); left out when the mode cannot be read. The contract (Invardia 2026-10-14): the plain
+            # word "normal", and while Strict the OBJECT { mode = "Strict"; until = <UTC>; startedBy = <the release version> } --
+            # so the page and mails say until when and after which release.
             try {
                 if (Get-Command Get-PimGuardStrictState -ErrorAction SilentlyContinue) {
                     $gmS = Get-PimGuardStrictState
                     if (-not "$($gmS.readError)".Trim()) {
-                        $hb | Add-Member -NotePropertyName 'GuardMode' -NotePropertyValue $(if ($gmS.active) { 'strict' } else { 'normal' }) -Force; $hbAdd += 'GuardMode'
-                        if ($gmS.active -and "$($gmS.untilUtc)".Trim()) { $hb | Add-Member -NotePropertyName 'GuardModeUntilUtc' -NotePropertyValue "$($gmS.untilUtc)" -Force; $hbAdd += 'GuardModeUntilUtc' }
+                        $gmV = if ($gmS.active) { [pscustomobject][ordered]@{ mode = 'Strict'; until = "$($gmS.untilUtc)"; startedBy = "$($gmS.version)" } } else { 'normal' }
+                        $hb | Add-Member -NotePropertyName 'GuardMode' -NotePropertyValue $gmV -Force; $hbAdd += 'GuardMode'
                     }
                 }
             } catch { }

@@ -2475,7 +2475,17 @@ function Initialize-PimManagerStore {
         $__inner = if ($_.Exception.InnerException) { " | inner: $($_.Exception.InnerException.Message)" } else { '' }
         throw (Get-PimManagerStoreRequiredMessage -Reason "the SQL store could not be reached [$($_.Exception.GetType().Name)]: $($_.Exception.Message)$__inner.")
     }
-    Initialize-PimSqlStore -ConnectionString $cs
+    # CR8 item 1 (framework §12.11f, PIM 100.152): the Manager may have NO right to change the schema (db_ddladmin dropped
+    # at the cut-over); the updater applies it before every roll. A schema step that is refused while the store's tables
+    # exist is said once and the Manager starts; a store WITHOUT its tables still fails the start, as before.
+    try { Initialize-PimSqlStore -ConnectionString $cs }
+    catch {
+        $__se = "$($_.Exception.Message)"
+        $__has = $false
+        try { $__has = [bool]([int](Invoke-PimSqlScalar -ConnectionString $cs -Sql "SELECT CASE WHEN OBJECT_ID('pim.Settings') IS NOT NULL AND OBJECT_ID('pim.Rows') IS NOT NULL THEN 1 ELSE 0 END") -eq 1) } catch { $__has = $false }
+        if (-not $__has) { throw }
+        Write-Host ("  [store] schema step not applied by the Manager ({0}) -- the updater applies the schema before every roll; the store's tables are in place" -f $(if ($__se.Length -gt 160) { $__se.Substring(0, 160) + '...' } else { $__se })) -ForegroundColor DarkYellow
+    }
     if ($global:PIM_NamingConventions -is [hashtable]) { [void](Import-PimSettingsSeed -ConnectionString $cs -Seed $global:PIM_NamingConventions) }
     Initialize-PimManagerPolicyTemplates -ConnectionString $cs
     Initialize-PimManagerMailTemplates -ConnectionString $cs
@@ -10358,6 +10368,23 @@ function Expand-PimBootTemplate {
     return [regex]::Replace($Html, '__PIM_[A-Z_]+__', $eval)
 }
 
+function Get-PimManagerSecurityHeaders {
+    <#
+      PURE. LITERAL. Framework §12.11f CR8 item 3 (PIM 100.152): the security headers of EVERY Manager response.
+      The page is one file with inline scripts and styles and loads nothing from elsewhere (no external script, style, font
+      or fetch; downloads are local blob: links; the print / mail previews are same-origin windows and a srcdoc frame), so:
+      only this origin, inline allowed, never framed by another site, HTTPS remembered for a year, no MIME sniffing, no
+      referrer to other sites.
+    #>
+    return [ordered]@{
+        'Content-Security-Policy'   = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+        'Strict-Transport-Security' = 'max-age=31536000'
+        'X-Frame-Options'           = 'DENY'
+        'X-Content-Type-Options'    = 'nosniff'
+        'Referrer-Policy'           = 'same-origin'
+    }
+}
+
 function Write-JsonResponse {
     param(
         [Parameter(Mandatory)][object]$Response,   # an HttpListenerResponse, or the MCP capture (REQ 93)
@@ -12455,6 +12482,9 @@ function Invoke-Server {
             if ($script:PimHosted -and "$script:CurrentRequestPrincipal".Trim()) {
                 try { $xc = Get-PimEasyAuthPrincipalExtras -Request $ctx.Request; $script:CurrentRequestNames = @($xc.names); $script:CurrentRequestGroupIds = @($xc.groups) } catch { }
             }
+            # framework §12.11f CR8 item 3 (PIM 100.152): security headers on EVERY response, set once here before any route
+            # writes its body (Get-PimManagerSecurityHeaders). Never stops a request.
+            try { $__sh = Get-PimManagerSecurityHeaders; foreach ($__hk in @($__sh.Keys)) { $ctx.Response.Headers[$__hk] = "$($__sh[$__hk])" } } catch { }
             try {
                 $status = Handle-Request -Context $ctx -ExpectedToken $token
             } catch {
