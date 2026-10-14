@@ -48,6 +48,36 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 function Step([string]$m) { Write-Host "==> $m" -ForegroundColor Cyan }
+
+# Framework §12.22 WRITE-CALLS 3(c) (owner approved 2026-10-14, PIM 100.154): a 5xx on a call that CHANGES something is
+# "unknown", never "failed" and never "done" -- the state is READ BACK first:
+#   GET <endpoint>/api/releases/pim-manager/state?kind=<kind>&version=<v>  (the publisher identity)
+#   -> { version: { version, exists, sha256, engineChanged, publishedAt }, rings: { "<n>": { version, sequence, releasedAt } } }
+function Get-PimInvardiaReadBackVerdict {
+    <# PURE. What a read-back says about the call that answered 5xx: @{ verdict = done | not-done | unknown; reason }.
+       -Call publish: done = the version exists with OUR sha256. -Call promote: done = ring <n> carries the version. #>
+    param([AllowNull()]$State, [Parameter(Mandatory)][ValidateSet('publish', 'promote')][string]$Call, [string]$Version, [string]$Sha256 = '', [int]$Ring = -1)
+    if ($null -eq $State) { return @{ verdict = 'unknown'; reason = 'the state could not be read back -- check by hand before any retry' } }
+    if ($Call -eq 'publish') {
+        $v = $State.version
+        if ($null -eq $v -or $null -eq $v.exists) { return @{ verdict = 'unknown'; reason = 'the read-back did not say whether the version exists' } }
+        if (-not [bool]$v.exists) { return @{ verdict = 'not-done'; reason = "version $Version is not stored at Invardia" } }
+        if ("$Sha256".Trim() -and "$($v.sha256)".Trim() -and "$($v.sha256)".Trim().ToLowerInvariant() -ne "$Sha256".Trim().ToLowerInvariant()) { return @{ verdict = 'unknown'; reason = "version $Version is stored with a DIFFERENT archive (sha256 $($v.sha256)) -- check by hand" } }
+        return @{ verdict = 'done'; reason = "version $Version is stored (sha256 matches) -- the 5xx came after the commit" }
+    }
+    $rg = $null; if ($State.rings) { $rp = $State.rings.PSObject.Properties["$Ring"]; if ($rp) { $rg = $rp.Value } }
+    if ($null -eq $rg) { return @{ verdict = 'not-done'; reason = "ring $Ring carries no release of this kind" } }
+    if ("$($rg.version)".Trim() -eq "$Version") { return @{ verdict = 'done'; reason = "ring $Ring carries $Version (sequence $($rg.sequence)) -- the 5xx came after the commit" } }
+    return @{ verdict = 'not-done'; reason = "ring $Ring carries $($rg.version), not $Version" }
+}
+function Invoke-PimInvardiaReadBack {
+    # The GET itself; $null when it cannot be read (a route not live yet, a network error) -- the caller then says "unknown".
+    param([string]$Endpoint, [string]$Token, [string]$Kind, [string]$Version)
+    try {
+        $u = "$($Endpoint.TrimEnd('/'))/api/releases/pim-manager/state?kind=$Kind&version=$Version"
+        return (Invoke-RestMethod -Method GET -Uri $u -Headers @{ Authorization = "Bearer $Token" } -TimeoutSec 60)
+    } catch { return $null }
+}
 $sol = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $repo = Split-Path (Split-Path $sol -Parent) -Parent
 if (-not "$Version".Trim()) { $Version = (Get-Content -LiteralPath (Join-Path $sol 'VERSION') -Raw).Trim() }
@@ -86,6 +116,13 @@ if ($Promote) {
     }
     $ok = ($status -in 200, 201, 202)
     Write-Host ("    HTTP {0} {1}" -f $status, $content.Substring(0, [Math]::Min(400, $content.Length))) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })
+    if (-not $ok -and $status -ge 500) {
+        # §12.22 3(c): a 5xx is "unknown" -- read the ring back before any retry or failure report
+        $rb = Get-PimInvardiaReadBackVerdict -State (Invoke-PimInvardiaReadBack -Endpoint $Endpoint -Token $token -Kind $Kind -Version $Version) -Call promote -Version $Version -Ring $Ring
+        Write-Host ("    read-back after HTTP {0}: {1} -- {2}" -f $status, $rb.verdict, $rb.reason) -ForegroundColor $(if ($rb.verdict -eq 'done') { 'Green' } else { 'Yellow' })
+        if ($rb.verdict -eq 'done') { return [pscustomobject]@{ promoted = $true; version = $Version; ring = $Ring; status = $status; url = $purl; readBack = $rb.reason } }
+        if ($rb.verdict -eq 'unknown') { throw "UNKNOWN -- the promotion answered HTTP $status and the ring could not be confirmed ($($rb.reason)); do not retry before checking" }
+    }
     if (-not $ok) { throw "Invardia refused the promotion (HTTP $status)" }
     return [pscustomobject]@{ promoted = $true; version = $Version; ring = $Ring; status = $status; url = $purl }
 }
@@ -132,11 +169,16 @@ $prevTag = @(& git -C $repo tag -l 'PIM4EntraPS-v2.*' 2>$null | ForEach-Object {
              Where-Object { $_.v -lt [version]$Version } | Sort-Object v -Descending | Select-Object -First 1)
 $prevHash = if ($prevTag) { Get-PimEngineHashAtTag $repo $prevTag[0].tag } else { '' }
 $engineChanged = (-not $engineHash -or -not $prevHash -or $engineHash -ne $prevHash)
+# Joint rule (owner approved 2026-10-14, PIM 100.154 (b)): a new field on a changing call can be turned OFF without a release.
+# PIM_PUBLISH_ENGINECHANGED = 0 / off / false / no -> the publish call carries no engineChanged (Invardia then treats the
+# release as it did before the field existed).
+$sendEngineChanged = -not ("$env:PIM_PUBLISH_ENGINECHANGED".Trim() -match '^(?i)(0|off|false|no)$')
+if (-not $sendEngineChanged) { Write-Host '    engineChanged NOT sent (PIM_PUBLISH_ENGINECHANGED is off)' -ForegroundColor Yellow }
 Write-Host ("    engine: {0} vs {1} -> engineChanged={2}" -f $(if ($engineHash) { $engineHash.Substring(0, 12) } else { '(none)' }), $(if ($prevTag) { "$($prevTag[0].tag) $(if ($prevHash) { $prevHash.Substring(0, 12) })" } else { '(no previous release)' }), $engineChanged.ToString().ToLowerInvariant())
 
 # UPDATE-1.7: PIM decides the ring. Ring 2 / 3 reach customers: only on the operator's own words (memory/ring-2 rule).
 if ($Ring -ge 2 -and -not "$OperatorApproval".Trim()) { throw "ring $Ring reaches customers -- pass -OperatorApproval with the operator's own words (e.g. 'release $Version to ring $Ring'); nothing was sent" }
-$url = "$($Endpoint.TrimEnd('/'))/api/releases/pim-manager?kind=$Kind&version=$Version" + $(if ($Ring -ge 0) { "&ring=$Ring" } else { '' }) + "&engineChanged=$($engineChanged.ToString().ToLowerInvariant())"
+$url = "$($Endpoint.TrimEnd('/'))/api/releases/pim-manager?kind=$Kind&version=$Version" + $(if ($Ring -ge 0) { "&ring=$Ring" } else { '' }) + $(if ($sendEngineChanged) { "&engineChanged=$($engineChanged.ToString().ToLowerInvariant())" } else { '' })
 Write-Host ("    ring: {0}{1}" -f $(if ($Ring -ge 0) { "$Ring (published AND released to it)" } else { 'none (registered only, released to no ring)' }), $(if ("$OperatorApproval".Trim()) { " -- operator: '$OperatorApproval'" } else { '' }))
 if (-not $Apply) {
     Write-Host "`nPLAN ONLY -- nothing was sent. With -Apply the zip is POSTed to $url as Invardia.Publisher.pim-manager (tenant $TenantId)." -ForegroundColor Yellow
@@ -171,5 +213,12 @@ try {
 }
 $ok = ($status -in 200, 201, 202)
 Write-Host ("    HTTP {0} {1}" -f $status, $content.Substring(0, [Math]::Min(400, $content.Length))) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })
+if (-not $ok -and $status -ge 500) {
+    # §12.22 3(c): a 5xx is "unknown" -- read the version back before any retry or failure report
+    $rb = Get-PimInvardiaReadBackVerdict -State (Invoke-PimInvardiaReadBack -Endpoint $Endpoint -Token $token -Kind $Kind -Version $Version) -Call publish -Version $Version -Sha256 $hash
+    Write-Host ("    read-back after HTTP {0}: {1} -- {2}" -f $status, $rb.verdict, $rb.reason) -ForegroundColor $(if ($rb.verdict -eq 'done') { 'Green' } else { 'Yellow' })
+    if ($rb.verdict -eq 'done') { return [pscustomobject]@{ published = $true; version = $Version; sha256 = $hash; size = $bytes.Length; status = $status; url = $url; engineHash = $engineHash; engineChanged = $engineChanged; readBack = $rb.reason } }
+    if ($rb.verdict -eq 'unknown') { throw "UNKNOWN -- the publish answered HTTP $status and the version could not be confirmed ($($rb.reason)); do not retry before checking" }
+}
 if (-not $ok) { throw "Invardia refused the release (HTTP $status)" }
 [pscustomobject]@{ published = $true; version = $Version; sha256 = $hash; size = $bytes.Length; status = $status; url = $url; engineHash = $engineHash; engineChanged = $engineChanged }

@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.631 -- 2026-10-14
+
+- Security headers on every Manager page and a test that every page needs sign-in; the Manager starts without the right to change the database schema (framework 12.11f CR8); GuardMode as an object while Strict; release calls read the state back after a server error and engineChanged can be switched off (12.22)
+
 ## 2.4.630 -- 2026-10-14
 
 - Guards: Strict for 24 hours after an update that changes the engine -- every guard with a number uses half its limit, a SuperAdmin can end it early (framework 12.11b CR4); the data-quality check and its daily mail are removed (100.151)
