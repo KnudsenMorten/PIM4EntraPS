@@ -499,10 +499,8 @@ deployment is a supported choice) and no credentials lying around.
   the damage would not fix itself: a **policy change** (it waits for a SuperAdmin of the tenant — see chapter 7),
   **many removals or account disables in one run**, a change that would remove the tenant's **last Global
   Administrator** (held until a SuperAdmin releases exactly that change), and the **last PIM Manager SuperAdmin**
-  (refused: add another one first). Everything else is a warning. Anything that looks different from the last runs
-  (each area's key numbers compared with the median of its last three runs), and access that is not yet in line with
-  your definitions, is collected into **one daily "Data quality alert" mail** that names the likely cause and the
-  fix. Form mistakes are plain form errors, and platform problems (database, licence) are reported to support as
+  (refused: add another one first). Everything else is a warning, shown on its own page (for example access that is
+  not yet in line with your definitions). Form mistakes are plain form errors, and platform problems (database, licence) are reported to support as
   telemetry — none of these appear on the Guards page. *(2.4.594, 2.4.595)*
 - **A hold that is no longer needed clears itself.** ✅ 2026-10-12 — When the plan a guard held is no longer wanted
   (for example the removals were taken back, or the change was applied), the next run finds nothing to hold and

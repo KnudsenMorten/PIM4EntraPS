@@ -53,7 +53,6 @@ function Get-PimMailReportCatalog {
         [pscustomobject]@{ type = 'sessions-revoked'; kind = 'alert'; label = 'Sign-in sessions revoked'; job = ''; recipientList = 'recipients'; severity = 'warning'; plain = 'Sessions of an account were revoked.' }
         [pscustomobject]@{ type = 'expiring-access'; kind = 'alert'; label = 'Access expiring soon'; job = 'reminders'; recipientList = 'recipients'; severity = 'info'; plain = 'Admin accounts or assignments reach their end date soon.' }
         [pscustomobject]@{ type = 'pending-uncommitted'; kind = 'alert'; label = 'Changes staged but never committed'; job = ''; recipientList = 'recipients'; severity = 'info'; plain = 'Staged changes or queued actions are older than a day.' }
-        [pscustomobject]@{ type = 'data-quality'; kind = 'alert'; label = 'Data quality alert'; job = 'data-quality'; recipientList = 'recipients'; severity = 'warning'; plain = 'Something looks different from the last runs (one mail a day at most, warnings only).' }
         [pscustomobject]@{ type = 'approval-escalation'; kind = 'transactional'; label = 'Approval reminders and escalations'; job = 'escalations'; recipientList = ''; severity = ''; plain = 'Sent to the approvers of each waiting request.' }
         [pscustomobject]@{ type = 'access-review-reminder'; kind = 'transactional'; label = 'Access review reminders'; job = ''; recipientList = ''; severity = ''; plain = 'Sent to the reviewers of an open access review.' }
     )

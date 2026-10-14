@@ -1318,6 +1318,17 @@ function Invoke-PimUplinkCycle {
                 if ($envHb.Length -gt 100) { $envHb = $envHb.Substring(0, 100).Trim() }
                 if ($envHb) { $hb | Add-Member -NotePropertyName 'EnvironmentName' -NotePropertyValue $envHb -Force; $hbAdd += 'EnvironmentName' }
             } catch { }
+            # framework §12.11b GUARD-STRICT item 5 (CR4): GuardMode normal | strict (+ GuardModeUntilUtc while strict), so
+            # Invardia shows it; additive (a refusal drops it for 24 h). Left out when the mode cannot be read.
+            try {
+                if (Get-Command Get-PimGuardStrictState -ErrorAction SilentlyContinue) {
+                    $gmS = Get-PimGuardStrictState
+                    if (-not "$($gmS.readError)".Trim()) {
+                        $hb | Add-Member -NotePropertyName 'GuardMode' -NotePropertyValue $(if ($gmS.active) { 'strict' } else { 'normal' }) -Force; $hbAdd += 'GuardMode'
+                        if ($gmS.active -and "$($gmS.untilUtc)".Trim()) { $hb | Add-Member -NotePropertyName 'GuardModeUntilUtc' -NotePropertyValue "$($gmS.untilUtc)" -Force; $hbAdd += 'GuardModeUntilUtc' }
+                    }
+                }
+            } catch { }
             if ($SetupEnabled -and $null -ne $SetupFacts) {
                 $ctl = @(); try { $ctl = @(ConvertTo-PimUplinkHeartbeatControls -Facts $SetupFacts -Extended:$SetupExtended -NowUtc $NowUtc) } catch { $ctl = @() }
                 if ($ctl.Count) {

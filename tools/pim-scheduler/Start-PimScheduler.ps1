@@ -119,7 +119,6 @@ trap { if (Get-Command Complete-PimStartupLog -ErrorAction SilentlyContinue) { t
 . "$shared\PIM-EngineCore.ps1"        # NEW REST+SQL engine (diff + providers)
 . "$shared\PIM-DisableGuard.ps1"      # account-disable circuit breaker (incident 2026-06-15)
 . "$shared\PIM-Guard.ps1"             # GUARD-1: a guard trip -> state + audit + mail + telemetry
-. "$shared\PIM-DataQuality.ps1"       # PIM 100.72 (6): key numbers per run, anomalies vs the median of 3, the ONE daily data quality alert
 . "$shared\PIM-LastPrivileged.ps1"    # PIM 100.72 (7): never remove the last Global Administrator (BLOCK + release)
 if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAd.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAd.ps1" }   # §84 Pro: loaded only when present          # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
 if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1" }   # §84 Pro: loaded only when present    # §80.2 PIM-for-AD replacement: AD group mirror + JIT membership (hybrid worker only)
@@ -373,11 +372,6 @@ Register-PimJobHandler -Type 'licence-check' -Handler {
     param($job, $now, $whatIf)
     Invoke-PimLicenceCheckJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
-# PIM 100.72 (6): the REAL 'data-quality' handler -- the ONE daily "Data quality alert" (warnings only; never fails for a finding).
-Register-PimJobHandler -Type 'data-quality' -Handler {
-    param($job, $now, $whatIf)
-    Invoke-PimDataQualityJob -Job $job -NowUtc $now -WhatIf:$whatIf
-}
 # AUDIT-1.3: the REAL 'audit-retention' handler. Keep-forever (the default) does nothing; a failed delete FAILS the run.
 Register-PimJobHandler -Type 'audit-retention' -Handler {
     param($job, $now, $whatIf)
@@ -488,10 +482,6 @@ $engineHandler = {
     $res = if ($__rrMode) { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf -ReconcileRemoval $__rrMode }
            elseif ($__sel.Count) { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf -Changes $__sel }
            else { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf }
-    # PIM 100.72 (6): the run's key numbers, judged against the median of the last 3 runs of each scope -- an anomaly becomes a
-    # note for the ONE daily "Data quality alert" (with its likely cause). Never a plan, never a selection run (partial numbers).
-    # Warnings only: it never changes this run's outcome, and it never throws.
-    if (-not $whatIf -and -not $__sel.Count -and (Get-Command Save-PimRunMetrics -ErrorAction SilentlyContinue)) { try { [void](Save-PimRunMetrics -Results @($res) -Mode $mode -NowUtc $now) } catch { } }
     # PIM 100.72 (4): an unreadable managed-key ledger is TELEMETRY (not a guard): the prune removed nothing (fail closed) and
     # the run is a WARNING -- amber on the Jobs page, a Kind 'run' warning to Invardia.
     $__ledgerWarn = @(@($res) | Where-Object { $_ -and $_.PSObject.Properties['ledgerUnreadable'] -and $_.ledgerUnreadable } | ForEach-Object { "$($_.scope)" })
@@ -718,16 +708,7 @@ Register-PimJobHandler -Type 'verify-convergence' -Handler {
                  ForEach-Object { "$($_.key) (unapplied $($_.ageMinutes)m)" })
         # Owner decision 2026-10-11 ~22:00 ("committed but still not in the tenant" = "Immediate failure alert"): PIM 100.72 (5)
         # is REVERSED -- past the grace window the run FAILS again with CONVERGENCE FAILURE, exactly as before 2.4.594, which
-        # raises the engine-failure alert mail at once. The line in the daily "Data quality alert" stays as well (best effort:
-        # it never stands in the way of the failure below).
-        if (-not $whatIf -and (Get-Command Add-PimDataQualityNote -ErrorAction SilentlyContinue)) {
-            try { [void](Add-PimDataQualityNote -Kind 'convergence' -Area 'verify-convergence' `
-                -Title ("{0} definition(s) not in the tenant past the grace window" -f [int]$verdict.persistent) `
-                -Detail (($top | Select-Object -First 5) -join '; ') `
-                -Cause 'Usually an engine run that keeps failing for these items (see Jobs > Engine logs & errors), a permission the engine lacks, or a target that no longer exists.' `
-                -Fix 'Open the Jobs page and the failing engine job: fix what it names, then Run now. tools/setup/Repair-PimJobBindingBacklog.ps1 quantifies and clears a backlog.' `
-                -Measured @{ persistent = [int]$verdict.persistent; total = [int]$verdict.total } -NowUtc $now) } catch { }
-        }
+        # raises the engine-failure alert mail at once. (The line in the daily "Data quality alert" went with that check, 100.151.)
         # PIM 100.113 (owner 2026-10-12: "why is this still an error"): when EVERY item past the grace window is an item the
         # engine's own apply fails on for a customer-configuration cause (the currently-failing set, pim.Settings
         # 'EngineItemFailures' -- same scope + key, no new tenant read), the run says THAT: the cause's class in brackets
@@ -841,6 +822,19 @@ if ("$env:PIM_SCHED_JOBS".Trim()) {
 $_verFile0 = Join-Path $here '..\..\VERSION'
 $_ver0 = if (Test-Path -LiteralPath $_verFile0) { (Get-Content -LiteralPath $_verFile0 -Raw).Trim() } else { '' }
 [void](Complete-PimStartupLog -Summary ("[scheduler] started{0}{1}" -f $(if ($_ver0) { " v$_ver0" } else { '' }), $(if ("$Instance".Trim() -or "$env:PIM_SCHED_INSTANCE".Trim()) { " (instance $("$Instance$env:PIM_SCHED_INSTANCE".Trim()))" } else { '' })))
+
+# CR4 GUARD-STRICT (framework §12.11b): the ENGINE JOB compares its engine code with the fingerprint stored in pim.Settings;
+# a changed engine starts Strict (every guard with a number uses half its limit for 24 h). ONLY the container's engine job --
+# never the hybrid worker (its code is updated on its own and would flip the record) nor a local run. An install with no
+# stored fingerprint only records it (no customer goes Strict because this arrives). Never stops the scheduler.
+try {
+    $_jobNow = "$env:CONTAINER_APP_JOB_NAME".Trim()
+    $_engineJob = if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { Get-PimInstallName -Role engine } else { 'ca-pim-tick' }
+    if ($_jobNow -and $_jobNow -ieq $_engineJob -and (Get-Command Update-PimGuardStrictFromEngine -ErrorAction SilentlyContinue)) {
+        $_gs = Update-PimGuardStrictFromEngine -SolutionRoot (Resolve-Path (Join-Path $here '..\..')).Path -Version $_ver0
+        if ($_gs.action -ne 'none') { Write-Host ("[scheduler] guard mode: {0} -- {1}" -f $_gs.action, $_gs.reason) -ForegroundColor $(if ($_gs.action -eq 'strict') { 'Yellow' } else { 'DarkGray' }) }
+    }
+} catch { Write-Warning "[scheduler] the guard mode was not checked: $($_.Exception.Message)" }
 
 $iv = if ($IntervalSeconds -gt 0) { $IntervalSeconds } elseif ($env:PIM_SCHED_INTERVAL) { [int]$env:PIM_SCHED_INTERVAL } else { 300 }
 

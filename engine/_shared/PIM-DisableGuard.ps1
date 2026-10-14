@@ -966,6 +966,9 @@ function Write-PimRemoveBudgetAlert {
                "read or a bulk edit can never clear out access in one pass. This run wanted to delete {1}, which is over that ceiling, " +
                "so it applied NONE of them and left '{2}' exactly as it was. {3}") -f `
                $Decision.budget, $what, $Decision.scope, $(if ($kinds.Count) { '' } else { 'Nothing else in this run was affected.' })
+    # CR4 GUARD-STRICT: a trip while Strict halved the limit says so, calmly, with the configured and the effective number
+    $strictT = if (Get-Command Get-PimGuardStrictTripText -ErrorAction SilentlyContinue) { Get-PimGuardStrictTripText -GuardId 'engine.remove-budget' } else { @{ text = ''; strict = $false } }
+    if ($strictT.text) { $detail = "$detail $($strictT.text)" }
     # PIM 100.119 (7) / 100.117: the way through is said per scope -- the old text sent every reader to "release it on
     # Operations > Guards (at most 50)", which was not possible for group deletion and is no longer a limit anywhere.
     $way = Get-PimRemoveBudgetWayThrough -Scope "$($Decision.scope)" -Budget ([int]$Decision.budget)
@@ -992,7 +995,7 @@ function Write-PimRemoveBudgetAlert {
     if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
         [void](Invoke-PimGuardTrip -GuardId 'engine.remove-budget' -Outcome halted -Area "$($Decision.scope)" -Job 'engine' -CallerMailed `
             -Title ("{0} deletion(s) in '{1}' were blocked" -f $Decision.toRemove, $Decision.scope) -Detail $headline -ActionText $way.action `
-            -Measured @{ toRemove = $Decision.toRemove } -Thresholds @{ budget = $Decision.budget } -HeldCount ([int]$Decision.toRemove))
+            -Measured @{ toRemove = $Decision.toRemove } -Thresholds $(if ($strictT.strict) { @{ budget = $Decision.budget; strict = $true; configured = [int]$strictT.configured } } else { @{ budget = $Decision.budget } }) -HeldCount ([int]$Decision.toRemove))
     }
     if ($PassThru) { return $r }
 }
@@ -1024,8 +1027,10 @@ function Write-PimDisableAbortAlert {
     # SEC-07 (same class): the recipient is read $global: then $env: (the containers set it as an ENV
     # VAR). BUG-184: through Send-PimSafetyAlert, so the send actually uses a template that exists and
     # a failed send is reported under 'disable-abort-alert-mail' ("nobody is being paged").
+    # CR4 GUARD-STRICT: a trip while Strict halved the limit says so, calmly, with the configured and the effective number
+    $strictD = if (Get-Command Get-PimGuardStrictTripText -ErrorAction SilentlyContinue) { Get-PimGuardStrictTripText -GuardId 'engine.disable-guard' } else { @{ text = '' } }
     $r = Send-PimSafetyAlert -SwallowScope 'disable-abort-alert-mail' `
-            -Title ("account-disable circuit breaker tripped -- {0} [{1}]" -f $Scope, $Decision.tripped) -Detail $msg `
+            -Title ("account-disable circuit breaker tripped -- {0} [{1}]" -f $Scope, $Decision.tripped) -Detail $(if ($strictD.text) { "$msg $($strictD.text)" } else { $msg }) `
             -Who 'Customer' -Status 'Held back' `
             -Problem ("Disabling accounts in '{0}' was held back by a safety check: no account was disabled" -f $Scope) `
             -Todo 'Open Jobs > Engine logs & errors and check why so many accounts would be disabled before the next run'

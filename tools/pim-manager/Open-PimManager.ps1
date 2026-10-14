@@ -4573,8 +4573,6 @@ $script:PimAlertEventCatalog += 'coverage'
 $script:PimAlertEventCatalog += 'target-missing'
 # §79.2: staged changes / queued actions nobody committed (the scheduler's 'pending-check' job, PIM-PendingCheck.ps1).
 $script:PimAlertEventCatalog += 'pending-uncommitted'
-# PIM 100.72 (6): the ONE daily "Data quality alert" (the scheduler's 'data-quality' job, PIM-DataQuality.ps1).
-$script:PimAlertEventCatalog += 'data-quality'
 # 97.1 / WIZARD-1: the Get Started steps that are done by a CONFIRMATION (their work happens outside the product).
 # 2026-10-08 (owner): 'naming' = "these names are right" (step 1), 'policies' = the activation policies verified and
 # approved, 'breakglass-later' = the break-glass step skipped for now (a deferral: the step stays not-done and every
@@ -14954,8 +14952,27 @@ function Handle-Request {
                 canSetLimits = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin'); canSwitchOff = $false
                 approvalLifetimeHours = $(if (Get-Command Get-PimGuardApprovalLifetimeHours -ErrorAction SilentlyContinue) { [int](Get-PimGuardApprovalLifetimeHours) } else { 0 })
                 neverReleasable = @($(if (Get-Command Get-PimGuardNeverReleasable -ErrorAction SilentlyContinue) { Get-PimGuardNeverReleasable }))
+                # CR4 GUARD-STRICT (framework §12.11b): the guard mode -- Strict for 24 h after an engine-changing release
+                strict = $(if (Get-Command Get-PimGuardStrictState -ErrorAction SilentlyContinue) { $gst = Get-PimGuardStrictState -Fresh; [ordered]@{ active = [bool]$gst.active; sinceUtc = "$($gst.sinceUtc)"; untilUtc = "$($gst.untilUtc)"; version = "$($gst.version)"; endedBy = "$($gst.endedBy)"; endedUtc = "$($gst.endedUtc)"; endedReason = "$($gst.endedReason)"; canEnd = [bool]((Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') -and $gst.active); hours = [int](Get-PimGuardStrictHours) } } else { $null })
                 readError = $gReadErr })
             return 200
+        }
+        # CR4 GUARD-STRICT (framework §12.11b item 3): POST /api/guards/strict/end { reason } -- a SuperAdmin ends Strict mode
+        # early with a reason (>= 10 characters). Audited 'guard.strict.end'. 403 other roles, 400 no reason, 409 not active.
+        if ($path -eq '/api/guards/strict/end' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Get-Command Stop-PimGuardStrict -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = 'the guard library is not loaded' }; return 500 }
+            $seRole = Get-PimManagerRole
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = 'Only a SuperAdmin ends Strict mode early.' }; return 403 }
+            $seBody = Read-RequestJson -Request $req
+            $seReason = if ($seBody -and $seBody.PSObject.Properties['reason']) { "$($seBody.reason)" } else { '' }
+            $seRes = $null
+            try { $seRes = Stop-PimGuardStrict -By "$($seRole.identity)" -Role "$($seRole.role)" -Reason $seReason }
+            catch { $seRes = @{ ok = $false; status = 500; error = "$($_.Exception.Message)" } }
+            Write-PimManagerAuditEvent -Action 'guard.strict.end' -Target 'guards' -After ([ordered]@{ reason = $seReason; ok = [bool]$seRes.ok; error = "$($seRes.error)" }) -Result $(if ($seRes.ok) { 'ok' } else { 'refused' })
+            $seCode = [int]$seRes.status
+            Write-JsonResponse -Response $resp -Status $seCode -Body ([ordered]@{ ok = [bool]$seRes.ok; error = "$($seRes.error)"; strict = $seRes.state })
+            return $seCode
         }
         # PIM 100.119 (3): PUT /api/guards/<guardId>/limit { value: <count> } | { reset: true } -- a SuperAdmin sets the limit
         # of ONE guard inside its floor and ceiling (PIM-GuardLimits.ps1). 403 for every other role; 400 for a value
@@ -17288,6 +17305,14 @@ function Handle-Request {
                     $body.message = 'The update state could not be read: this Manager has no SQL store wired, ' +
                                     'so the ring this environment is on is not known here.'
                 }
+                # CR4 GUARD-STRICT (framework §12.11b item 4): the header shows "Guard mode: Strict" to SuperAdmins
+                $body['guardMode'] = 'normal'; $body['guardModeUntilUtc'] = ''; $body['guardModeVersion'] = ''
+                try {
+                    if ((Get-Command Get-PimGuardStrictState -ErrorAction SilentlyContinue) -and (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                        $gm = Get-PimGuardStrictState
+                        if ($gm.active) { $body['guardMode'] = 'strict'; $body['guardModeUntilUtc'] = "$($gm.untilUtc)"; $body['guardModeVersion'] = "$($gm.version)" }
+                    }
+                } catch { }
                 Write-JsonResponse -Response $resp -Status 200 -Body $body
                 return 200
             } catch {

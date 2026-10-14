@@ -96,11 +96,8 @@ $script:PimTickOnlyJobTypes += 'config-backup'
 # PIM 100.72 (4): telemetry, not a guard -- the run is a WARNING (Jobs page + run telemetry). A single tenant is not checked.
 $script:PimJobTypes += 'licence-check'
 $script:PimTickOnlyJobTypes += 'licence-check'
-# PIM 100.72 (6) (owner 2026-10-11, framework 12.21): 'data-quality' sends the ONE daily "Data quality alert" -- the anomalies
-# the engine runs found (key numbers vs the median of the last 3 runs, with the likely cause from the settings change log) and
-# the other warnings handed in (policy mass-change counts, convergence). Warnings only; it never blocks (PIM-DataQuality.ps1).
-$script:PimJobTypes += 'data-quality'
-$script:PimTickOnlyJobTypes += 'data-quality'
+# PIM 100.151 (owner 2026-10-14: "i have not asked for a data health model for pim ... i dont see the relevance"): the
+# 'data-quality' job and its mail are REMOVED. A schedule an install stored with it drops it (Get-PimRetiredJobNames).
 # REQ-AR-2 (operator 2026-09-26): 'access-review-cycle' starts the per-DEPARTMENT access review campaigns the review rules
 # make due (PIM-AccessReviewCycle.ps1). Checks every 6 h; the cadence per department is the rule's cadenceDays.
 $script:PimJobTypes += 'access-review-cycle'
@@ -411,8 +408,6 @@ function Get-PimDefaultJobSchedule {
         # CONFIG-1.3: daily (SCHED-1: the cadence counts from the job's finish); "Back up now" on Backups & restore runs one on demand.
         [pscustomobject]@{ name='config-backup'; type='config-backup'; intervalMinutes=1440; enabled=$true }
         [pscustomobject]@{ name='licence-check'; type='licence-check'; intervalMinutes=60; enabled=$true }
-        # PIM 100.72 (6): daily -- ONE "Data quality alert" when something is off (Alerting event 'data-quality'); otherwise silent.
-        [pscustomobject]@{ name='data-quality'; type='data-quality'; intervalMinutes=1440; enabled=$true }
         # REQ-AR-2: no-op until review rules are saved and enabled (Settings > Access reviews); Pro 'reviews.campaigns'.
         [pscustomobject]@{ name='access-review-cycle'; type='access-review-cycle'; intervalMinutes=360; enabled=$true }
         # §82: every tick (the tick runs every 5 min); inert until the RFA portal is deployed + enabled (Pro 'rfa.portal').
@@ -594,10 +589,20 @@ function Merge-PimJobSchedule {
         }
         $out.Add($e)
     }
+    $retired = @(Get-PimRetiredJobNames)
     foreach ($s in @($Stored)) {
-        if ($s -and "$($s.name)".Trim() -and -not $seen.Contains("$($s.name)")) { $out.Add($s) }
+        # PIM 100.151: a job the PRODUCT retired on purpose (Get-PimRetiredJobNames) is dropped from a stored schedule -- it
+        # has no handler any more and must not show as an "unimplemented" job on the Jobs page. Every other stored job
+        # without a catalog entry is still KEPT (see above).
+        if ($s -and "$($s.name)".Trim() -and -not $seen.Contains("$($s.name)") -and $retired -notcontains "$($s.name)".Trim().ToLowerInvariant()) { $out.Add($s) }
     }
     @($out.ToArray())
+}
+
+function Get-PimRetiredJobNames {
+    # PURE. LITERAL. Jobs the product removed on purpose; a stored schedule that still names one drops it.
+    #   data-quality -- PIM 100.151 (owner 2026-10-14): the data-quality check and its mail are removed.
+    return @('data-quality')
 }
 
 function Get-PimJobSchedule {
@@ -1489,13 +1494,6 @@ function Initialize-PimDefaultJobHandlers {
         # §95.2: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimLicenceRequestJob).
         [pscustomobject]@{ ran=$false; unimplemented=$true
             detail='unimplemented:licence-request (wired by Start-PimScheduler)'
-            whatIf=[bool]$whatIf }
-    }
-    Register-PimJobHandler -Type 'data-quality' -Handler {
-        param($job,$now,$whatIf)
-        # PIM 100.72 (6): the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimDataQualityJob).
-        [pscustomobject]@{ ran=$false; unimplemented=$true
-            detail='unimplemented:data-quality (wired by Start-PimScheduler)'
             whatIf=[bool]$whatIf }
     }
     Register-PimJobHandler -Type 'pending-check' -Handler {

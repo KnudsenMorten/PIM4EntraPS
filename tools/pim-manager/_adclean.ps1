@@ -600,6 +600,8 @@ function Get-PimAdCleanServerWaitingView {
         }
         # the estimate for the list that waits, at the batch size in the settings now
         $batchNow = 50; [void][int]::TryParse("$(& (Get-PimAdCleanStore).ReadText 'HybridAdServerAutoGroupMaxPerRun')", [ref]$batchNow); if ($batchNow -lt 1) { $batchNow = 50 }
+        # CR4 GUARD-STRICT: the same half the worker uses while Strict is active
+        if (Get-Command Get-PimGuardStrictState -ErrorAction SilentlyContinue) { try { if ((Get-PimGuardStrictState).active) { $batchNow = Get-PimGuardStrictHalf -Configured $batchNow } } catch { } }
         $runs = [int][math]::Ceiling(@($w.servers).Count / [double]$batchNow)
         return @{ status = 200; body = [ordered]@{ canApprove = [bool]$me.super; role = $me.role; approvalMaxHours = (Get-PimHybridAdServerApprovalMaxHours)
                 estimate = [ordered]@{ batchSize = $batchNow; runs = $runs; hours = [math]::Round(($runs * (Get-PimAdCleanServerRunMinutes)) / 60.0, 1); minutesPerRun = (Get-PimAdCleanServerRunMinutes); fitsIn72Hours = [bool](($runs * (Get-PimAdCleanServerRunMinutes)) -le ((Get-PimHybridAdServerApprovalMaxHours) * 60)) }
