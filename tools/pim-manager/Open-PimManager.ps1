@@ -8843,6 +8843,24 @@ function Get-PimManagerPowerBiAdminNotice {
     $envH = @{}; if ($State.env -is [hashtable]) { $envH = $State.env }
     return (Get-PimPowerBiAdminNotice -Failures $fails -Env $envH -EngineObjectId $oid -GroupName $grp)
 }
+function Get-PimManagerPowerBiWorkspaceNotice {
+    <#
+      PIM 100.142b (3). The calm line, the workspaces PIM Manager is not in yet and the two-line command
+      (-AddEngineToWorkspaces -WorkspaceId <those>) the page shows where a Power BI workload row or a discovered workspace is
+      staged -- ONLY while the engine's currently failing items hold POWERBI-ENGINE-NOT-IN-WORKSPACE. Read-only; the command
+      is never run by PIM Manager (a Fabric administrator of the tenant runs it, signed in as a person).
+    #>
+    param([hashtable]$State)
+    $fails = @()
+    if (Get-Command Get-PimEngineItemFailures -ErrorAction SilentlyContinue) { try { $fails = @(Get-PimEngineItemFailures) } catch { $fails = @() } }
+    $oid = ''
+    try {
+        $rec = Get-PimWorkloadPrereqStoredRecord -Stored $State.stored -Workload 'PowerBI'
+        if ($rec) { $oid = "$(Get-PimWorkloadPrereqRecordField -Object $rec -Name 'engineObjectId')".Trim() }
+    } catch { $oid = '' }
+    $envH = @{}; if ($State.env -is [hashtable]) { $envH = $State.env }
+    return (Get-PimPowerBiWorkspaceNotice -Failures $fails -Env $envH -EngineObjectId $oid)
+}
 function Get-PimManagerPolicyHoldState {
     <#
       PIM 100.84 (owner 2026-10-11: "there is inconsistence among things") -- ONE TRUTH for held policy change sets. The
@@ -20097,6 +20115,8 @@ function Handle-Request {
                 ungatedWorkloads = @(Get-PimWorkloadPrereqUngated)
                 # PIM 100.142 (4): Power BI cannot be reached through the admin API yet -> one calm line + the two-line command.
                 powerBiAdmin = (Get-PimManagerPowerBiAdminNotice -State $__ps)
+                # PIM 100.142b (3): PIM Manager is not in some Power BI workspaces yet -> the workspaces + the two-line command.
+                powerBiWorkspace = (Get-PimManagerPowerBiWorkspaceNotice -State $__ps)
             })
             return 200
         }

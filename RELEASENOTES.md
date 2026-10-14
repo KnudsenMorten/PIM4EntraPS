@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.627 -- 2026-10-14
+
+- Power BI: one setup line (a person signs in) adds PIM Manager to the workspaces it manages; the engine then adds the PIM groups itself through the Fabric workspace API (add only)
+
 ## 2.4.626 -- 2026-10-14
 
 - A run record lost when two engine runs collide is kept and saved again (no more false failed mails); one lost record is reported as interrupted (RUN-NO-RESULT), never as failed

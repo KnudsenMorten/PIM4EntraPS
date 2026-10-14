@@ -36,6 +36,13 @@
                    assignment at the directory scope, looked up by name, read back; an existing one is kept. The Fabric
                    setting "Service principals can access admin APIs used for updates" is NEVER switched by this script --
                    it prints the one instruction for it.
+                   PIM 100.142b: the engine gives the workspace roles through the Fabric workspace API, which needs it to
+                   be a workspace Admin. -AddEngineToWorkspaces (OPT-IN; run by a Fabric administrator signed in as a
+                   PERSON) adds the engine identity as Admin of every workspace PIM has Power BI rows for (from the store
+                   with -SqlServerFqdn) and every -WorkspaceId: GET admin/groups/{ws}/users, POST admin/groups/{ws}/users
+                   { identifier = engine object id; principalType = App; groupUserAccessRight = Admin } only where it is not
+                   Admin, read back, a table of workspace / before / after. Never removes anyone. Without the switch:
+                   report only. Run it again when a new workspace gets rows.
       AzureRbac    User Access Administrator (or Owner) for the engine identity at every scope in your
                    PIM-Assignments-Azure-Resources rows (+ -AzureScope). Assigning it is OPT-IN
                    (-GrantAzureUserAccessAdministrator): it is standing privilege (SEC-34).
@@ -68,6 +75,11 @@
 .EXAMPLE
     # Power BI through the admin API (PIM 100.142): also make the engine identity a Fabric Administrator (opt-in).
     .\Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -TenantId <tenant-id> -EngineObjectId <engine-object-id> -GrantFabricAdministrator
+
+.EXAMPLE
+    # Power BI (PIM 100.142b): add the engine identity as Admin of the workspaces PIM gives roles in (a Fabric administrator,
+    # signed in as a person; PIM Manager shows this line with the workspaces filled in).
+    .\Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -TenantId <tenant-id> -EngineObjectId <engine-object-id> -AddEngineToWorkspaces -WorkspaceId <workspace-id>,<workspace-id>
 
 .EXAMPLE
     # Sentinel on a dedicated workspace for Defender Data Operations roles (opt-in: billed per GB ingested):
@@ -112,7 +124,14 @@ param(
     [switch]$GrantAzureUserAccessAdministrator,
     # PIM 100.142 (PowerBI only, OPT-IN): assign the Entra directory role Fabric Administrator to the engine identity
     # (permanent, active, directory scope) -- the Power BI admin API that gives the workspace roles needs it.
-    [switch]$GrantFabricAdministrator
+    [switch]$GrantFabricAdministrator,
+    # PIM 100.142b (PowerBI only, OPT-IN; owner 2026-10-14 "One script run"): add the engine identity as Admin of every
+    # Power BI workspace PIM has rows for (and -WorkspaceId), so the engine can give the workspace roles through the Fabric
+    # workspace API. Run by a Fabric administrator signed in in the browser as a PERSON. Without it: report only.
+    [switch]$AddEngineToWorkspaces,
+    # PowerBI: workspace ids to check (and, with -AddEngineToWorkspaces, add the engine to) -- PIM Manager fills them in.
+    # The store's PIM-Assignments-Workloads rows are read too when -SqlServerFqdn reaches the store.
+    [string[]]$WorkspaceId = @()
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Rest.ps1')
@@ -131,6 +150,7 @@ function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 
 if ("$TenantId".Trim() -notmatch '^[0-9a-fA-F-]{36}$') { throw "-TenantId must be the tenant GUID (got '$TenantId')." }
 if ($GrantFabricAdministrator -and $Workload -ne 'PowerBI') { throw '-GrantFabricAdministrator belongs to -Workload PowerBI (the Power BI admin API needs it); nothing was changed.' }
+if (($AddEngineToWorkspaces -or @($WorkspaceId | Where-Object { "$_".Trim() }).Count) -and $Workload -ne 'PowerBI') { throw '-AddEngineToWorkspaces and -WorkspaceId belong to -Workload PowerBI (the Power BI workspaces); nothing was changed.' }
 $unknown = @($ConfirmPortalStep | Where-Object { "$_".Trim() -and -not (Get-PimWorkloadPrereqCheckDef -Id "$_".Trim()) })
 if ($unknown.Count) { throw "-ConfirmPortalStep: unknown check id(s): $($unknown -join ', '). Known for ${Workload}: $((@((Get-PimWorkloadPrereqCatalog -Workload $Workload)[$Workload].checks) | ForEach-Object { $_.id }) -join ', ')" }
 $hasStoreHelpers = [bool](Get-Command Connect-PimSetupStore -ErrorAction SilentlyContinue)
@@ -183,7 +203,8 @@ if ($mode -eq 'certificate') {
             if ("$((ConvertFrom-PimEpJwtClaims "$($at.access_token)").tid)" -ne "$TenantId".Trim()) { throw 'the Azure sign-in landed in another tenant' }
             Add-PimRestSessionToken -Resource 'arm' -Token "$($at.access_token)" -ExpiresUtc ((Get-Date).ToUniversalTime().AddSeconds([int]$at.expires_in - 60))
             # The same sign-in's refresh token, for the store (when recording) and Fabric (Power BI) -- no extra prompt.
-            $more = @(); if ("$SqlServerFqdn".Trim()) { $more += 'https://database.windows.net' }; if ($Workload -eq 'PowerBI') { $more += 'https://api.fabric.microsoft.com' }
+            # PIM 100.142b: + Power BI (https://analysis.windows.net/powerbi/api) as the PERSON, for the workspace step.
+            $more = @(); if ("$SqlServerFqdn".Trim()) { $more += 'https://database.windows.net' }; if ($Workload -eq 'PowerBI') { $more += 'https://api.fabric.microsoft.com'; $more += 'https://analysis.windows.net/powerbi/api' }
             foreach ($aud in $more) {
                 try {
                     $rt = Invoke-RestMethod -Method POST -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Body @{
@@ -224,6 +245,7 @@ $ctx = @{
     enableSentinel = [bool]$EnableSentinel; hostingSubscriptionId = $SubscriptionId; hostingResourceGroup = $ResourceGroup; pollSeconds = 5
     powerBiGroupName = $PowerBiSecurityGroupName; azureScopes = @($AzureScope); grantUaa = [bool]$GrantAzureUserAccessAdministrator
     grantFabricAdmin = [bool]$GrantFabricAdministrator   # PIM 100.142: opt-in, PowerBI only
+    addEngineToWorkspaces = [bool]$AddEngineToWorkspaces; workspaceIds = @($WorkspaceId); workloadRows = @()   # PIM 100.142b
     engineCertThumbprint = $EngineCertThumbprint; graphSp = $null; engineAssignments = $null; azureRows = @()
     should = { param($t, $a) $__cmdlet.ShouldProcess($t, $a) }.GetNewClosure()
     whatIf = [bool]$WhatIfPreference   # the runner says which LATER step cannot be previewed when an earlier fix was not made
@@ -231,6 +253,11 @@ $ctx = @{
 if ($Workload -eq 'AzureRbac' -and $cs) {
     try { $ctx.azureRows = @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Assignments-Azure-Resources') }
     catch { if ($mode -eq 'certificate') { throw }; Note "the delegation rows could not be read from the store ($($_.Exception.Message)) -- pass -AzureScope to check a scope" }
+}
+if ($Workload -eq 'PowerBI' -and $cs) {
+    # PIM 100.142b: the workspaces PIM has Power BI rows for (Scope = the workspace id), read from the store when it is reachable.
+    try { $ctx.workloadRows = @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Assignments-Workloads') }
+    catch { if ($mode -eq 'certificate') { throw }; Note "the Workloads rows could not be read from the store ($($_.Exception.Message)) -- pass -WorkspaceId to name the workspaces" }
 }
 if ($Workload -eq 'EntraRoles' -and -not $roleNames.Count) { Note 'the engine Graph role list is checked by PIM itself (and granted with Grant-PimEnginePermissions.ps1); this standalone script checks the licence.' }
 
@@ -258,6 +285,24 @@ if ($Workload -eq 'PowerBI') {
 }
 $stateCol = switch ($result.state) { 'ok' { 'Green' } 'failed' { 'Red' } default { 'Yellow' } }
 Write-Host "  => $Workload prerequisites: $($result.state.ToUpperInvariant())" -ForegroundColor $stateCol
+
+# PIM 100.142b (owner 2026-10-14, "One script run"): PIM Manager is Admin of every Power BI workspace it gives roles in.
+# Without -AddEngineToWorkspaces this only REPORTS; with it, the engine identity is added as Admin where it is not (as the
+# PERSON signed in here), read back. Nobody is ever removed.
+$wsResult = $null
+if ($Workload -eq 'PowerBI') {
+    Write-Host "  Power BI workspaces: PIM Manager's identity as workspace Admin$(if (-not $AddEngineToWorkspaces) { ' (report only -- -AddEngineToWorkspaces adds it)' })" -ForegroundColor Cyan
+    $wsResult = Invoke-PimPrereqPowerBiWorkspaces -Ctx $ctx
+    if (@($wsResult.invalid).Count) { Write-Host "      not a workspace id, left out: $(@($wsResult.invalid) -join ', ')" -ForegroundColor Yellow }
+    if (-not @($wsResult.rows).Count) {
+        Note '   no Power BI workspace to check: no Power BI Workloads row was read and no -WorkspaceId was given (PIM Manager shows the command with the workspaces filled in).'
+    } else {
+        $tbl = @($wsResult.rows | Select-Object @{ n = 'Workspace'; e = { $_.workspaceId } }, @{ n = 'Before'; e = { $_.before } }, @{ n = 'After'; e = { $_.after } }, @{ n = 'Result'; e = { $_.result } }, @{ n = 'Detail'; e = { $_.detail } })
+        Write-Host (($tbl | Format-Table -AutoSize -Wrap | Out-String -Width 220).TrimEnd())
+        Write-Host ("      {0} added, {1} already Admin, {2} still missing, {3} failed" -f $wsResult.added, $wsResult.already, $wsResult.missing, $wsResult.failed) -ForegroundColor $(if ($wsResult.failed) { 'Red' } elseif ($wsResult.missing) { 'Yellow' } else { 'Green' })
+        if ($wsResult.added) { Note '   Next: the engine gives the workspace roles on its next run (Run now on the workload job in PIM Manager to do it at once).' }
+    }
+}
 
 $recorded = $false
 if ($cs -and $PSCmdlet.ShouldProcess("pim.Settings WorkloadPrereqs", "record the $Workload result")) {
@@ -294,6 +339,7 @@ if ($WhatIfPreference) {
     exit 0
 }
 if ($result.state -eq 'failed') { exit 1 }
+if ($AddEngineToWorkspaces -and $wsResult -and ([int]$wsResult.failed -gt 0 -or [int]$wsResult.missing -gt 0)) { exit 1 }   # PIM 100.142b: asked to add, not all added
 if ($result.state -ne 'ok') { exit 2 }
 exit 0
 } finally { Stop-PimScriptRun -Script 'Initialize-PimWorkloadPrereqs' }

@@ -775,6 +775,111 @@ function Get-PimPowerBiAdminNotice {
     return $out
 }
 
+# --- PIM 100.142b (owner 2026-10-14, "One script run"): the engine identity becomes Admin of the Power BI workspaces ---------
+# The Power BI admin WRITE answers 401 to a service principal (live, internal); Fabric's workspace api lets the engine add the
+# PIM group once it is a workspace Admin. A Fabric administrator, signed in as a PERSON, adds it ONCE per workspace with
+# Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -AddEngineToWorkspaces (the runner: Invoke-PimPrereqPowerBiWorkspaces).
+function Test-PimPowerBiWorkspaceId {
+    # PURE. A Power BI workspace (group) id is a GUID.
+    param([AllowNull()][string]$Id)
+    return [bool]("$Id".Trim() -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+}
+
+function Get-PimPowerBiWorkspaceIdsFromRows {
+    <#
+      PURE. PIM-Assignments-Workloads rows -> the distinct workspace ids (lower-case, first-seen order) of the Power BI rows that
+      ADD a role (Workload powerbi / Power BI / power-bi; Action empty or Assign; Scope = the workspace id). A Remove row adds
+      nothing (the connector is add-only), so it never makes the engine a workspace Admin. -Extra: more ids (the -WorkspaceId
+      parameter). Values that are not a workspace id are left out (Get-PimPowerBiWorkspaceIdsFromRows -Invalid lists them).
+    #>
+    param([object[]]$Rows = @(), [string[]]$Extra = @(), [switch]$Invalid)
+    $seen = @{}; $ok = New-Object System.Collections.Generic.List[string]; $bad = New-Object System.Collections.Generic.List[string]
+    $add = {
+        param($v)
+        $x = "$v".Trim(); if (-not $x) { return }
+        if (-not (Test-PimPowerBiWorkspaceId -Id $x)) { if (-not $bad.Contains($x)) { $bad.Add($x) }; return }
+        $k = $x.ToLowerInvariant(); if ($seen.ContainsKey($k)) { return }
+        $seen[$k] = $true; $ok.Add($k)
+    }
+    $field = { param($r, $n) if ($r -is [System.Collections.IDictionary]) { if ($r.Contains($n)) { "$($r[$n])" } else { '' } } elseif ($null -ne $r -and $r.PSObject.Properties[$n]) { "$($r.$n)" } else { '' } }
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        if ((("$(& $field $r 'Workload')").Trim().ToLowerInvariant() -replace '[^a-z0-9]', '') -ne 'powerbi') { continue }
+        $act = "$(& $field $r 'Action')".Trim()
+        if ($act -and $act -ine 'Assign') { continue }
+        & $add (& $field $r 'Scope')
+    }
+    foreach ($e in @($Extra)) { foreach ($p in @("$e" -split '[,;\s]+')) { & $add $p } }
+    if ($Invalid) { return @($bad.ToArray()) }
+    return @($ok.ToArray())
+}
+
+function Find-PimPowerBiEngineWorkspaceAccess {
+    <#
+      PURE. A workspace's users (GET /v1.0/myorg/admin/groups/{ws}/users -> value[]) -> the engine identity's access right
+      ('Admin' | 'Member' | 'Contributor' | 'Viewer' | ... ) or '' when it is not in the workspace. The engine is matched by its
+      service principal object id OR its application (client) id, on identifier and graphId: Power BI lists an App principal
+      by one or the other.
+    #>
+    param([object[]]$Users = @(), [Parameter(Mandatory)][hashtable]$Engine)
+    $ids = @("$($Engine.objectId)", "$($Engine.appId)" | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
+    if (-not $ids.Count) { return '' }
+    foreach ($u in @($Users)) {
+        if ($null -eq $u) { continue }
+        foreach ($v in @("$($u.identifier)", "$($u.graphId)")) {
+            if ($ids -contains "$v".Trim().ToLowerInvariant()) { return "$($u.groupUserAccessRight)".Trim() }
+        }
+    }
+    return ''
+}
+
+function Get-PimPowerBiAddEngineCommand {
+    # PURE. The two lines (download + run) a Fabric administrator runs once: the published prerequisites script for Power BI with
+    # -AddEngineToWorkspaces and the workspaces as a plain parameter list (parameters, not JSON). Browser sign-in, no credential.
+    param([hashtable]$Env = @{}, [string[]]$WorkspaceIds = @())
+    $cmd = (Get-PimWorkloadPrereqCommand -Workload 'PowerBI' -Env $Env) + ' -AddEngineToWorkspaces'
+    $ws = @(Get-PimPowerBiWorkspaceIdsFromRows -Extra @($WorkspaceIds))
+    if ($ws.Count) { $cmd += ' -WorkspaceId ' + ($ws -join ',') }
+    return $cmd
+}
+
+function Get-PimPowerBiFailureWorkspaceId {
+    # PURE. The workspace a failing item names: its row's Scope, else the message ("workspace <id>" / the Fabric url).
+    param([AllowNull()][object]$Failure)
+    if (-not $Failure) { return '' }
+    $row = $Failure.row
+    $s = ''
+    if ($row -is [System.Collections.IDictionary]) { if ($row.Contains('Scope')) { $s = "$($row['Scope'])" } }
+    elseif ($null -ne $row -and $row.PSObject.Properties['Scope']) { $s = "$($row.Scope)" }
+    if (Test-PimPowerBiWorkspaceId -Id $s) { return $s.Trim().ToLowerInvariant() }
+    $m = "$($Failure.message)"
+    foreach ($rx in @('(?i)/v1/workspaces/([0-9a-f-]{36})/roleAssignments', '(?i)\(workspace ([0-9a-f-]{36})[;)]')) {
+        $mm = [regex]::Match($m, $rx); if ($mm.Success) { return $mm.Groups[1].Value.ToLowerInvariant() }
+    }
+    return ''
+}
+
+function Get-PimPowerBiWorkspaceNotice {
+    <#
+      PURE. PIM 100.142b (3): what the Manager shows where a Power BI workload row or a discovered workspace is staged. show =
+      $true ONLY when the engine's currently failing items hold at least one POWERBI-ENGINE-NOT-IN-WORKSPACE; then one calm
+      line, the workspaces the engine is not in yet, and the two-line command (with -AddEngineToWorkspaces -WorkspaceId <those>)
+      for THIS install. -Env: tenantId (+ subscriptionId / resourceGroup / tickJobName); -EngineObjectId from the stored record.
+    #>
+    param([AllowNull()][object[]]$Failures = @(), [hashtable]$Env = @{}, [string]$EngineObjectId = '')
+    $hit = @(@($Failures) | Where-Object { $_ -and "$($_.code)" -eq 'POWERBI-ENGINE-NOT-IN-WORKSPACE' })
+    $out = [ordered]@{ show = [bool]$hit.Count; failureClass = 'POWERBI-ENGINE-NOT-IN-WORKSPACE'; items = $hit.Count; workspaces = @(); line = ''; command = '' }
+    if (-not $hit.Count) { return $out }
+    $ws = New-Object System.Collections.Generic.List[string]
+    foreach ($f in $hit) { $w = Get-PimPowerBiFailureWorkspaceId -Failure $f; if ($w -and -not $ws.Contains($w)) { $ws.Add($w) } }
+    $e = @{}; foreach ($k in @($Env.Keys)) { $e[$k] = $Env[$k] }
+    if ("$EngineObjectId".Trim() -and -not "$($e['engineObjectId'])".Trim()) { $e['engineObjectId'] = "$EngineObjectId".Trim() }
+    $out.workspaces = @($ws.ToArray())
+    $out.line = ('PIM Manager is not in {0} Power BI workspace{1} yet, so the workspace roles there are not given. A Fabric administrator runs these two lines once, signed in as a person (it adds PIM Manager as Admin of each workspace and removes nobody):' -f $(if ($ws.Count) { $ws.Count } else { 'a' }), $(if ($ws.Count -eq 1 -or -not $ws.Count) { '' } else { 's' }))
+    $out.command = Get-PimPowerBiAddEngineCommand -Env $e -WorkspaceIds @($ws.ToArray())
+    return $out
+}
+
 function Get-PimPowerBiPrereqFacts {
     <#
       PURE. What a stored Power BI record says about the group and the identity (for the view: a record written before

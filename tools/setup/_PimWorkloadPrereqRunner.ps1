@@ -569,6 +569,100 @@ function Invoke-PimPrereqPowerBI {
     return $out.ToArray()
 }
 
+function Get-PimPrereqPowerBiCallerClaims {
+    # The claims of the CALLER's Power BI token (https://analysis.windows.net/powerbi/api) -- $Ctx.powerBiCallerClaims wins
+    # (tests). $null when no token can be had.
+    param([hashtable]$Ctx)
+    if ($Ctx.ContainsKey('powerBiCallerClaims') -and $null -ne $Ctx.powerBiCallerClaims) { return $Ctx.powerBiCallerClaims }
+    try { return (ConvertFrom-PimPrereqJwt -Token (Get-PimRestToken -Resource 'powerbi' -TenantId $Ctx.tenantId)) } catch { return $null }
+}
+
+function Test-PimPrereqClaimsArePerson {
+    # PURE. TRUE for a delegated token of a PERSON (a scp claim, and not idtyp 'app'); an app-only token has roles, no scp.
+    param([AllowNull()][object]$Claims)
+    if (-not $Claims) { return $false }
+    if ("$($Claims.idtyp)" -ieq 'app') { return $false }
+    return [bool]("$($Claims.scp)".Trim())
+}
+
+function Get-PimPrereqPowerBiWorkspaceUsers {
+    # GET /v1.0/myorg/admin/groups/{ws}/users AS THE CALLER (the person's Power BI token) -> the users (value[]).
+    param([Parameter(Mandatory)][string]$WorkspaceId)
+    return @(Invoke-PimRest -Method 'GET' -Url "https://api.powerbi.com/v1.0/myorg/admin/groups/$WorkspaceId/users" -Resource 'powerbi' -All)
+}
+
+function Invoke-PimPrereqPowerBiWorkspaces {
+    <#
+      PIM 100.142b (owner 2026-10-14, "One script run"). For every distinct workspace PIM has Power BI rows for (the store's
+      PIM-Assignments-Workloads rows, $Ctx.workloadRows) plus -WorkspaceId ($Ctx.workspaceIds):
+        GET  https://api.powerbi.com/v1.0/myorg/admin/groups/{ws}/users                       (GetGroupUsersAsAdmin)
+        -- the engine identity (object id or app id) already Admin -> left alone;
+        -- otherwise, ONLY with -AddEngineToWorkspaces ($Ctx.addEngineToWorkspaces) and a PERSON signed in:
+        POST https://api.powerbi.com/v1.0/myorg/admin/groups/{ws}/users                       (AddUserAsAdmin)
+             { identifier = <engine service principal object id>; principalType = 'App'; groupUserAccessRight = 'Admin' }
+        then read back (retried through a short lag). Power BI accepts a person's delegated token for AddUserAsAdmin; it answers
+        401 to a service principal, so the Support app / a certificate identity never adds (reported, nothing sent).
+      Idempotent, NEVER removes anyone (no DELETE anywhere), -WhatIf / a declined prompt adds nothing. Without the switch it only
+      REPORTS. Returns @{ rows = @(@{ workspaceId; before; after; result; detail }); added; already; missing; failed; invalid }.
+    #>
+    param([hashtable]$Ctx)
+    $add = ($Ctx.ContainsKey('addEngineToWorkspaces') -and [bool]$Ctx.addEngineToWorkspaces)
+    $delay = if ("$env:PIM_PREREQ_READBACK_SECONDS".Trim()) { [int]$env:PIM_PREREQ_READBACK_SECONDS } else { 5 }
+    $who = Get-PimPowerBiPrereqIdentityText -Identity $Ctx.engine
+    $ws = @(Get-PimPowerBiWorkspaceIdsFromRows -Rows @($Ctx.workloadRows) -Extra @($Ctx.workspaceIds))
+    $invalid = @(Get-PimPowerBiWorkspaceIdsFromRows -Rows @($Ctx.workloadRows) -Extra @($Ctx.workspaceIds) -Invalid)
+    $rows = New-Object System.Collections.Generic.List[object]
+    $person = $true; $personWhy = ''
+    if ($add -and $ws.Count) {
+        $cl = Get-PimPrereqPowerBiCallerClaims -Ctx $Ctx
+        $person = Test-PimPrereqClaimsArePerson -Claims $cl
+        if (-not $person) { $personWhy = 'not added: Power BI accepts this add only from a PERSON signed in in the browser (a Fabric administrator) -- run the script without -UseSignedInAccount / -ClientId' }
+    }
+    $mk = { param($w, $b, $a, $r, $d) [pscustomobject]@{ workspaceId = $w; before = $b; after = $a; result = $r; detail = $d } }
+    foreach ($w in $ws) {
+        $g = Invoke-PimPrereqProbe { Get-PimPrereqPowerBiWorkspaceUsers -WorkspaceId $w }
+        if (-not $g.ok) {
+            $why = switch ([int]$g.code) {
+                401 { 'Power BI refused the read (HTTP 401): the person signed in here must be a Fabric administrator' }
+                403 { 'Power BI refused the read (HTTP 403): the person signed in here must be a Fabric administrator' }
+                404 { 'no workspace has this id (HTTP 404) -- correct the Workloads row' }
+                default { "the workspace's users could not be read: $($g.error)" }
+            }
+            $rows.Add((& $mk $w '?' '?' 'not read' $why)); continue
+        }
+        $before = Find-PimPowerBiEngineWorkspaceAccess -Users @($g.value) -Engine $Ctx.engine
+        $bText = if ($before) { $before } else { 'none' }
+        if ($before -ieq 'Admin') { $rows.Add((& $mk $w 'Admin' 'Admin' 'already Admin' "$who is Admin of the workspace")); continue }
+        if (-not $add) { $rows.Add((& $mk $w $bText $bText 'missing' 'report only: run again with -AddEngineToWorkspaces to add it as Admin')); continue }
+        if (-not $person) { $rows.Add((& $mk $w $bText $bText 'missing' $personWhy)); continue }
+        if (-not (Test-PimPrereqShould -Ctx $Ctx -Target "Power BI workspace $w" -Action "add $($Ctx.engine.displayName) as Admin")) {
+            $rows.Add((& $mk $w $bText $bText 'missing' (Get-PimPrereqNotDoneReason -Ctx $Ctx -Verb 'added'))); continue
+        }
+        $body = [ordered]@{ identifier = "$($Ctx.engine.objectId)"; principalType = 'App'; groupUserAccessRight = 'Admin' }
+        $p = Invoke-PimPrereqProbe { Invoke-PimRest -Method 'POST' -Url "https://api.powerbi.com/v1.0/myorg/admin/groups/$w/users" -Resource 'powerbi' -Body $body }
+        if (-not $p.ok -and [int]$p.code -in @(401, 403)) {
+            $rows.Add((& $mk $w $bText $bText 'failed' "Power BI refused the add (HTTP $($p.code)): the person signed in here must be a Fabric administrator. $($p.error)")); continue
+        }
+        if (-not $p.ok -and "$($p.error)" -notmatch '(?i)already') {
+            $rows.Add((& $mk $w $bText $bText 'failed' "could not add ${who}: $($p.error)")); continue
+        }
+        $after = ''
+        for ($try = 1; $try -le 6; $try++) {
+            $back = Invoke-PimPrereqProbe { Get-PimPrereqPowerBiWorkspaceUsers -WorkspaceId $w }
+            if ($back.ok) { $after = Find-PimPowerBiEngineWorkspaceAccess -Users @($back.value) -Engine $Ctx.engine; if ($after -ieq 'Admin') { break } }
+            if ($try -lt 6 -and $delay -gt 0) { Start-Sleep -Seconds $delay }
+        }
+        if ($after -ieq 'Admin') { $rows.Add((& $mk $w $bText 'Admin' 'added' "added $who as Admin and read it back")) }
+        elseif ($before) { $rows.Add((& $mk $w $bText $(if ($after) { $after } else { $bText }) 'failed' "Power BI kept $who as $before -- change it to Admin in the workspace's Manage access (PIM Manager never removes or downgrades anyone)")) }
+        else { $rows.Add((& $mk $w 'none' $(if ($after) { $after } else { 'none' }) 'failed' "added $who, but the read-back does not show it as Admin yet -- run the same command again in a few minutes")) }
+    }
+    $count = { param($r) @($rows | Where-Object { $_.result -eq $r }).Count }
+    return [pscustomobject]@{
+        rows = @($rows.ToArray()); invalid = @($invalid)
+        added = (& $count 'added'); already = (& $count 'already Admin'); missing = (& $count 'missing'); failed = (& $count 'failed') + (& $count 'not read')
+    }
+}
+
 function Invoke-PimPrereqAzureRbac {
     param([hashtable]$Ctx)
     $out = New-Object System.Collections.Generic.List[object]

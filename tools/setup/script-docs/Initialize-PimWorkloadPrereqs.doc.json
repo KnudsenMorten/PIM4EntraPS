@@ -16,8 +16,14 @@
     {
       "kind": "other",
       "name": "delegated Azure access (user_impersonation) through the first-party public client 'Microsoft Azure PowerShell'",
-      "scope": "Azure Resource Manager, plus Fabric (PowerBI) and the store (with -SqlServerFqdn) from the same sign-in",
-      "why": "Needed for DefenderXdr (Sentinel), AzureRbac, PowerBI (Fabric tenant setting), to find the engine identity from the hosted tick job, and to record the result in the store."
+      "scope": "Azure Resource Manager, plus Fabric and Power BI (PowerBI) and the store (with -SqlServerFqdn) from the same sign-in",
+      "why": "Needed for DefenderXdr (Sentinel), AzureRbac, PowerBI (Fabric tenant setting; the Power BI admin API as YOU for the workspace step), to find the engine identity from the hosted tick job, and to record the result in the store."
+    },
+    {
+      "kind": "entraRole",
+      "name": "Fabric Administrator (signed in as a person) -- or Admin of each workspace",
+      "scope": "the Power BI workspaces PIM has rows for (PowerBI with -AddEngineToWorkspaces only)",
+      "why": "Reads each workspace's users and adds PIM Manager's identity as workspace Admin through the Power BI admin API (GetGroupUsersAsAdmin / AddUserAsAdmin). Power BI accepts that add only from a PERSON's sign-in: it answers HTTP 401 to a service principal, so the Invardia Support session or a certificate identity only reports. A Global Administrator holds the Fabric administrator rights too. Without the admin rights the workspace is reported as not read."
     },
     {
       "kind": "entraRole",
@@ -121,6 +127,15 @@
       "undo": "Entra admin center > Roles & admins > Fabric Administrator > Assignments > Active assignments > remove the engine identity."
     },
     {
+      "target": "Microsoft Power BI",
+      "action": "grant",
+      "object": "workspace Admin for the engine identity (POST https://api.powerbi.com/v1.0/myorg/admin/groups/{workspace}/users { identifier = the engine's object id; principalType = App; groupUserAccessRight = Admin }) in every workspace PIM has Power BI rows for and every -WorkspaceId, ONLY where it is not Admin yet (GET .../admin/groups/{workspace}/users first), read back; nobody is ever removed or changed (PowerBI, OPT-IN with -AddEngineToWorkspaces; without it the same table is printed, report only)",
+      "permission": "Fabric Administrator (or Admin of that workspace), signed in in the browser as a person",
+      "scope": "each Power BI workspace named by a Power BI Workloads row or -WorkspaceId",
+      "why": "PIM Manager gives Power BI workspace roles through the Fabric workspace API (Add Workspace Role Assignment), which only a member or admin of the workspace may call. The Power BI admin API refuses that write to a service principal, so a person adds PIM Manager once per workspace. Run it again when a new workspace gets rows.",
+      "undo": "Power BI / Fabric portal > the workspace > Manage access > remove PIM Manager's identity (the engine then cannot give roles there any more: POWERBI-ENGINE-NOT-IN-WORKSPACE)."
+    },
+    {
       "target": "Azure Resource Manager",
       "action": "grant",
       "object": "Azure role assignment for the engine identity (Microsoft.Authorization/roleAssignments) at each scope it is missing (AzureRbac, OPT-IN with -GrantAzureUserAccessAdministrator)",
@@ -188,7 +203,9 @@
     { "name": "PowerBiSecurityGroupName", "required": false, "default": "grp-pim-powerbi-admin-api", "help": "PowerBI: the admin-API security group." },
     { "name": "AzureScope", "required": false, "default": null, "help": "AzureRbac: more Azure scopes to check." },
     { "name": "GrantAzureUserAccessAdministrator", "required": false, "default": "off", "help": "AzureRbac, OPT-IN: assign User Access Administrator to the engine where it is missing." },
-    { "name": "GrantFabricAdministrator", "required": false, "default": "off", "help": "PowerBI, OPT-IN: assign the Entra directory role Fabric Administrator to the engine identity (permanent, active, directory scope) when it holds none. The Power BI admin API that gives the workspace roles needs it." }
+    { "name": "GrantFabricAdministrator", "required": false, "default": "off", "help": "PowerBI, OPT-IN: assign the Entra directory role Fabric Administrator to the engine identity (permanent, active, directory scope) when it holds none. The Power BI admin API that gives the workspace roles needs it." },
+    { "name": "AddEngineToWorkspaces", "required": false, "default": "off", "help": "PowerBI, OPT-IN: add PIM Manager's identity as Admin of every Power BI workspace PIM has rows for (and every -WorkspaceId) where it is not Admin yet, as the person signed in (a Fabric administrator). Never removes anyone. Without it the workspaces are only reported." },
+    { "name": "WorkspaceId", "required": false, "default": null, "help": "PowerBI: one or more Power BI workspace ids (comma-separated) to check, and with -AddEngineToWorkspaces to add PIM Manager to. PIM Manager fills them in; the store's Power BI rows are read too with -SqlServerFqdn." }
   ],
   "readsOnly": [
     "the engine identity and its application permissions; Microsoft Graph's and the Power BI Service's service principals",
@@ -197,10 +214,11 @@
     "the Power BI admin-API group and the groups the engine identity is a member of (its own group list); the Fabric tenant settings",
     "the engine's Azure role assignments at each scope; the delegation rows in the store (AzureRbac)",
     "the stored result in pim.Settings 'WorkloadPrereqs' (to merge)",
-    "the engine identity's active assignments of the directory role Fabric Administrator (PowerBI)"
+    "the engine identity's active assignments of the directory role Fabric Administrator (PowerBI)",
+    "the users of each Power BI workspace PIM has rows for (GET admin/groups/{workspace}/users) and the PIM-Assignments-Workloads rows in the store (PowerBI, with -SqlServerFqdn)"
   ],
   "network": [ "login.microsoftonline.com", "graph.microsoft.com", "management.azure.com", "api.fabric.microsoft.com", "api.powerbi.com", "<server>.database.windows.net (only with -SqlServerFqdn)", "localhost (the browser returns the sign-in to a local port on this computer)" ],
-  "whatIf": "Signs in, runs every check of the workload, and prints one \"What if:\" line per fix it would make (grant a Graph application permission, create the Power BI group, add the engine to it, enable the Fabric setting, assign Fabric Administrator with -GrantFabricAdministrator, assign User Access Administrator, create the Sentinel workspace, register the providers, enable Sentinel). A fix that depends on an earlier one not made yet says it cannot be previewed. Nothing is changed and nothing is recorded; the exit code is 0.",
-  "undo": "Reverse each change listed above: remove the engine's new application permissions and Azure role assignments, remove the engine from the Power BI group (or delete the group), take the group out of the Fabric setting, remove the engine identity's Fabric Administrator assignment, and remove Sentinel / the dedicated workspace if the script created them.",
+  "whatIf": "Signs in, runs every check of the workload, and prints one \"What if:\" line per fix it would make (grant a Graph application permission, create the Power BI group, add the engine to it, enable the Fabric setting, assign Fabric Administrator with -GrantFabricAdministrator, add PIM Manager as Admin of a Power BI workspace with -AddEngineToWorkspaces, assign User Access Administrator, create the Sentinel workspace, register the providers, enable Sentinel). A fix that depends on an earlier one not made yet says it cannot be previewed. Nothing is changed and nothing is recorded; the exit code is 0.",
+  "undo": "Reverse each change listed above: remove the engine's new application permissions and Azure role assignments, remove the engine from the Power BI group (or delete the group), take the group out of the Fabric setting, remove the engine identity's Fabric Administrator assignment, remove PIM Manager's identity from the Power BI workspaces in Manage access, and remove Sentinel / the dedicated workspace if the script created them.",
   "docUrl": "https://invardia.com/docs/pim/scripts/Initialize-PimWorkloadPrereqs/"
 }

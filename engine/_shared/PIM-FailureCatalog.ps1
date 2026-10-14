@@ -317,6 +317,20 @@ $script:PimFailureRules = @(
     # tenant settings do not let service principals use the admin APIs. The connector tags it POWERBI-ADMIN-NOT-GRANTED
     # (Invoke-PimPowerBiAdminRequest, PIM-WorkloadConnectors.ps1); the raw admin-api answer is matched too (discovery reads
     # /admin/groups). Ahead of POWERBI-WORKSPACE-NOT-FOUND and of the generic PERMISSION-DENIED: the cause is one grant.
+    # PIM 100.142b (owner 2026-10-14, "One script run"): the powerbi connector ADDS the PIM group through the Fabric workspace
+    # api (POST api.fabric.microsoft.com/v1/workspaces/{ws}/roleAssignments), which only a member/admin of the workspace may
+    # call. A 401 / 403 there = PIM Manager's identity is not in that workspace yet. The connector tags it
+    # POWERBI-ENGINE-NOT-IN-WORKSPACE (Invoke-PimFabricWorkspaceRequest); the raw Fabric answer is matched too. FIRST of the
+    # Power BI rules and ahead of the generic PERMISSION-DENIED: the cause is one script run by the customer.
+    @{ code = 'POWERBI-ENGINE-NOT-IN-WORKSPACE'
+       match = { param($m, $row) ($m -match 'POWERBI-ENGINE-NOT-IN-WORKSPACE') -or
+                 (($m -match '(?i)api\.fabric\.microsoft\.com/v1/workspaces/[^/\s]+/roleAssignments') -and ($m -match '(?i)HTTP 40[13]\b|InsufficientPrivileges')) }
+       title = 'PIM Manager is not in this Power BI workspace yet'
+       cause = 'PIM Manager gives Power BI workspace roles through the Fabric workspace API, which only a member or admin of the workspace may call. PIM Manager''s identity is not in this workspace yet, so nothing was given in Power BI for this row.'
+       remedy = 'A Fabric administrator runs the workload prerequisites script once (two lines: Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -AddEngineToWorkspaces; PIM Manager shows them with this tenant''s values and the workspaces), signed in in the browser as a person. It adds PIM Manager''s identity as Admin of each workspace. The next run applies the row. Run it again when a new workspace is added.'
+       retryable = $true; severity = 'environment'
+       fixes = @() }
+
     @{ code = 'POWERBI-ADMIN-NOT-GRANTED'
        match = { param($m, $row) ($m -match 'POWERBI-ADMIN-NOT-GRANTED') -or
                  (($m -match '(?i)api\.powerbi\.com/v1\.0/myorg/admin/') -and ($m -match '(?i)HTTP 40[13]\b|PowerBINotAuthorized|API is not accessible for application')) }
@@ -326,8 +340,10 @@ $script:PimFailureRules = @(
        retryable = $true; severity = 'environment'
        fixes = @() }
 
+    # PIM 100.142b: a Fabric workspace-api 404 (WorkspaceNotFound / EntityNotFound) on the ADD is the same class.
     @{ code = 'POWERBI-WORKSPACE-NOT-FOUND'
-       match = { param($m, $row) $m -match '(?i)PowerBIEntityNotFound' }
+       match = { param($m, $row) ($m -match '(?i)PowerBIEntityNotFound') -or
+                 (($m -match '(?i)api\.fabric\.microsoft\.com/v1/workspaces/[^/\s]+/roleAssignments') -and ($m -match '(?i)HTTP 404\b')) }
        title = 'The Power BI workspace was not found'
        cause = 'Power BI answered PowerBIEntityNotFound for the workspace in this row. Through the admin API (PIM 100.142) that means no workspace has that id -- it was deleted, or the row names a wrong id. Nothing was assigned for this row.'
        remedy = 'Check the workspace id on the Workloads row and correct it, or take the row out when the workspace is gone. The next run assigns the role.'
@@ -711,6 +727,12 @@ function Get-PimFailureSolutionCatalog {
             affected = 'Nothing is applied by this row. Everything else is applied.'
             steps = @('Open Advanced View (grid), fill in the Resource column on that row (Workload templates shows what the workload expects) and commit.', $stop)
             after = $next }
+        'POWERBI-ENGINE-NOT-IN-WORKSPACE' = @{ short = 'PIM Manager is not in the Power BI workspace yet'
+            what = 'PIM Manager cannot give the Power BI workspace role yet, because its identity is not in that workspace: {item}.'
+            affected = 'Only these Power BI workspace roles: nothing was given or taken away in Power BI. Everything else is applied.'
+            steps = @('A Fabric administrator runs the workload prerequisites script once, signed in in the browser as a person -- the two lines PIM Manager shows next to the Power BI rows (Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -AddEngineToWorkspaces, with the workspaces listed). It adds PIM Manager''s identity as Admin of each workspace and removes nobody.',
+                      'When a new Power BI workspace gets a Workloads row later, run the same two lines again.')
+            after = 'The next run gives the workspace roles, and the status turns OK by itself. Nothing has to be acknowledged.' }
         'POWERBI-ADMIN-NOT-GRANTED' = @{ short = 'PIM Manager''s identity is not a Fabric Administrator yet, or Fabric does not let it use the admin API'
             what = 'PIM Manager cannot reach Power BI yet: its identity is not a Fabric Administrator yet, or Fabric does not let it use the admin API: {item}.'
             affected = 'Only these Power BI workspace roles: nothing was given or taken away in Power BI. Everything else is applied.'
