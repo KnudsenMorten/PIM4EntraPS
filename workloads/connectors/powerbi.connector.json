@@ -4,14 +4,16 @@
   "auth": "powerbi",
   "transport": "powerbi-admin",
   "listOncePerPath": true,
-  "status": "PIM 100.142 (built, not live-proven): list / add / remove through the Power BI ADMIN api only (GetGroupUsersAsAdmin, AddUserAsAdmin, DeleteUserAsAdmin) -- the engine identity is never a member of a workspace.",
-  "permissionsNeeded": ["Entra directory role 'Fabric Administrator' for the engine identity (Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -GrantFabricAdministrator)", "Fabric tenant settings > Admin API settings: 'Service principals can access read-only admin APIs' and 'Service principals can access admin APIs used for updates' for a security group the engine identity is in", "Fabric tenant settings > Developer settings: 'Service principals can call Fabric public APIs'"],
+  "addOnly": true,
+  "status": "PIM 100.142b (built, not live-proven): the workspace's users are READ through the Power BI ADMIN api (GetGroupUsersAsAdmin); the PIM group is ADDED through the Fabric workspace api (Add Workspace Role Assignment), where the engine identity is a workspace Admin (added once by Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -AddEngineToWorkspaces). Add-only: a Remove row is refused, no DELETE is ever made.",
+  "permissionsNeeded": ["Fabric tenant settings > Admin API settings: 'Service principals can access read-only admin APIs' for a security group the engine identity is in (the READ)", "Fabric tenant settings > Developer settings: 'Service principals can call Fabric public APIs'", "The engine identity is Admin of every workspace a row names (Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -AddEngineToWorkspaces, run once by a Fabric administrator signed in as a person; re-run when a new workspace is added)"],
   "prerequisites": {
-    "tokenAdapter": "auth=powerbi -> token for https://analysis.windows.net/powerbi/api (the engine identity).",
-    "adminApiOnly": "PIM 100.142: every call is a Power BI ADMIN api call (/v1.0/myorg/admin/groups/{workspace}/users). The admin api allows 200 requests per hour per tenant: one listing per workspace per run, and a 429 is waited out (Retry-After), never hammered.",
-    "scopeIsWorkspace": "Row Scope = the Power BI workspace (group) id; the PIM group is added to that workspace with the access right named by RoleName.",
+    "tokenAdapter": "auth=powerbi -> token for https://analysis.windows.net/powerbi/api (the READ); the assign operation names its own token resource https://api.fabric.microsoft.com (the ADD).",
+    "adminApiRead": "PIM 100.142: the listing is a Power BI ADMIN api call (/v1.0/myorg/admin/groups/{workspace}/users). The admin api allows 200 requests per hour per tenant: one listing per workspace per run, and a 429 is waited out (Retry-After), never hammered.",
+    "fabricApiAdd": "PIM 100.142b (owner 2026-10-14, 'One script run'): the Power BI admin api refuses its WRITE to a service principal (HTTP 401; Microsoft: the 'admin APIs used for updates' setting covers Fabric admin APIs only). The add goes through Fabric's Add Workspace Role Assignment, which supports managed identities when the caller is already a workspace Admin. A 401 / 403 there = POWERBI-ENGINE-NOT-IN-WORKSPACE.",
+    "scopeIsWorkspace": "Row Scope = the Power BI workspace (group) id; the PIM group is added to that workspace with the role named by RoleName.",
     "rolesAreFixed": "Power BI workspace roles are a fixed enum (no list API) -- declared as a static roles array below.",
-    "addOnly": "Owner 2026-10-14 ('Keep refusing for now'): this release only ADDS. A Remove row is refused and reported exactly as before (no DELETE is ever made); removal comes after the add path is proven live."
+    "addOnly": "Owner 2026-10-13/14 ('Keep refusing for now'): this connector only ADDS. A Remove row is refused and reported exactly as before; the connector has no remove operation and no DELETE is ever made."
   },
   "roles": [
     { "id": "Admin", "name": "Admin", "description": "Workspace admin" },
@@ -31,16 +33,14 @@
     },
     "assign": {
       "method": "POST",
-      "path": "/v1.0/myorg/admin/groups/{scope}/users",
+      "transport": "fabric-workspace",
+      "baseUrl": "https://api.fabric.microsoft.com",
+      "tokenResource": "https://api.fabric.microsoft.com",
+      "path": "/v1/workspaces/{scope}/roleAssignments",
       "body": {
-        "identifier": "{groupId}",
-        "principalType": "Group",
-        "groupUserAccessRight": "{roleName}"
+        "principal": { "id": "{groupId}", "type": "Group" },
+        "role": "{roleName}"
       }
-    },
-    "remove": {
-      "method": "DELETE",
-      "path": "/v1.0/myorg/admin/groups/{scope}/users/{assignmentId}"
     }
   }
 }

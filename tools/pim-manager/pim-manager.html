@@ -35482,18 +35482,38 @@
   // POWERBI-ADMIN-NOT-GRANTED (GET /api/workload-prereqs -> powerBiAdmin, decided by the server), ONE calm line and the
   // two-line command (download + run) with Copy and "What does this script do?" -- the same block as every other command.
   // Nothing is shown otherwise. PIM Manager never runs the command: a Global Administrator of the tenant does.
+  // PIM 100.142b: the same hosts also show POWERBI-ENGINE-NOT-IN-WORKSPACE (powerBiWorkspace): the workspaces PIM Manager is
+  // not in yet and the two lines a Fabric administrator runs once (-AddEngineToWorkspaces -WorkspaceId <those>).
   let PBI_ADMIN_SEQ = 0;
   async function pbiAdminNoteInto(host) {
     if (!host) return;
     let data = null;
     try { data = await pimWorkloadPrereqsLoad(); } catch (_) { data = null; }
     const n = data && data.powerBiAdmin;
-    if (!n || !n.show || !String(n.command || '').trim()) { host.innerHTML = ''; return; }
-    const id = 'pbiAdminCmd' + (++PBI_ADMIN_SEQ);
-    host.innerHTML = '<div class="pbiAdminNote" data-failure-class="' + escapeHtml(n.failureClass || 'POWERBI-ADMIN-NOT-GRANTED') + '" style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:8px 10px;margin:6px 0;font-size:12px;color:#24292f;min-width:0;overflow-wrap:anywhere;">' +
-      '<div class="pbiAdminLine">' + escapeHtml(String(n.line || 'PIM Manager cannot reach Power BI yet. A Global Administrator runs these two lines once:')) + '</div>' +
-      gsCode(id, String(n.command)) +
-      (n.fabric ? '<div class="pbiAdminFabric" style="color:#57606a;margin-top:2px;">' + escapeHtml(String(n.fabric)) + '</div>' : '') + '</div>';
+    // PIM 100.142b (3): the engine is not in some Power BI workspaces yet (POWERBI-ENGINE-NOT-IN-WORKSPACE, decided by the
+    // server: powerBiWorkspace) -> one calm line, the workspaces, and the two-line command with -AddEngineToWorkspaces.
+    const w = data && data.powerBiWorkspace;
+    const showA = !!(n && n.show && String(n.command || '').trim());
+    const showW = !!(w && w.show && String(w.command || '').trim());
+    if (!showA && !showW) { host.innerHTML = ''; return; }
+    const box = 'background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:8px 10px;margin:6px 0;font-size:12px;color:#24292f;min-width:0;overflow-wrap:anywhere;';
+    let html = '';
+    if (showA) {
+      const id = 'pbiAdminCmd' + (++PBI_ADMIN_SEQ);
+      html += '<div class="pbiAdminNote" data-failure-class="' + escapeHtml(n.failureClass || 'POWERBI-ADMIN-NOT-GRANTED') + '" style="' + box + '">' +
+        '<div class="pbiAdminLine">' + escapeHtml(String(n.line || 'PIM Manager cannot reach Power BI yet. A Global Administrator runs these two lines once:')) + '</div>' +
+        gsCode(id, String(n.command)) +
+        (n.fabric ? '<div class="pbiAdminFabric" style="color:#57606a;margin-top:2px;">' + escapeHtml(String(n.fabric)) + '</div>' : '') + '</div>';
+    }
+    if (showW) {
+      const id = 'pbiAdminCmd' + (++PBI_ADMIN_SEQ);
+      const wsList = (Array.isArray(w.workspaces) ? w.workspaces : (w.workspaces ? [w.workspaces] : [])).map(x => String(x || '').trim()).filter(Boolean);
+      html += '<div class="pbiAdminNote pbiWorkspaceNote" data-failure-class="' + escapeHtml(w.failureClass || 'POWERBI-ENGINE-NOT-IN-WORKSPACE') + '" style="' + box + '">' +
+        '<div class="pbiAdminLine">' + escapeHtml(String(w.line || 'PIM Manager is not in these Power BI workspaces yet. A Fabric administrator runs these two lines once:')) + '</div>' +
+        (wsList.length ? '<div class="pbiWorkspaceList" style="color:#57606a;margin:2px 0;">Workspaces PIM Manager is not in yet: ' + wsList.map(x => '<code>' + escapeHtml(x) + '</code>').join(', ') + '</div>' : '') +
+        gsCode(id, String(w.command)) + '</div>';
+    }
+    host.innerHTML = html;
     host.querySelectorAll('.gsCopy').forEach(b => b.onclick = () => { const el = document.getElementById(b.dataset.src); try { navigator.clipboard.writeText(el ? el.textContent : ''); sharedToast('Copied'); } catch (_) { } });
   }
   function pbiIsPowerBiRow(r) { return !!r && /^power\s*-?\s*bi$/i.test(String(r.Workload || '').trim()); }

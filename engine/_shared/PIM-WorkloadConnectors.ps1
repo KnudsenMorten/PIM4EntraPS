@@ -174,9 +174,18 @@ function Invoke-PimWorkloadConnectorApi {
         [object]$Body = $null
     )
     if (-not $Op) { throw ("connector '{0}' does not define the API operation this step needs." -f $Connector.id) }
-    $uri = (Expand-PimWorkloadConnectorTokens -Text "$($Connector.api.baseUrl)" -Tokens $Tokens) + (Expand-PimWorkloadConnectorTokens -Text "$($Op.path)" -Tokens $Tokens)
+    # PIM 100.142b: an operation may name its own baseUrl (the powerbi ADD goes to api.fabric.microsoft.com, its READ to
+    # api.powerbi.com); without one the connector's baseUrl applies, as before.
+    $base = if ("$($Op.baseUrl)".Trim()) { "$($Op.baseUrl)" } else { "$($Connector.api.baseUrl)" }
+    $uri = (Expand-PimWorkloadConnectorTokens -Text $base -Tokens $Tokens) + (Expand-PimWorkloadConnectorTokens -Text "$($Op.path)" -Tokens $Tokens)
     $method = if ("$($Op.method)".Trim()) { "$($Op.method)".Trim().ToUpperInvariant() } else { 'GET' }
-    # PIM 100.142: the Power BI connector calls the ADMIN api only, through its own rate-aware client (200 requests per
+    # PIM 100.142b (owner 2026-10-14, "One script run"): the powerbi ADD -- Fabric's Add Workspace Role Assignment, as the
+    # engine identity, which is a workspace Admin once Initialize-PimWorkloadPrereqs.ps1 -AddEngineToWorkspaces ran. Its own
+    # client: POST to /v1/workspaces/{ws}/roleAssignments only (never a DELETE), token resource api.fabric.microsoft.com.
+    if ("$($Op.transport)".Trim() -ieq 'fabric-workspace') {
+        return (Invoke-PimFabricWorkspaceRequest -Method $method -Url $uri -Body $Body)
+    }
+    # PIM 100.142: the Power BI connector READS through the ADMIN api only, through its own rate-aware client (200 requests per
     # hour per tenant; a 429 is waited out, never hammered; a refusal is tagged POWERBI-ADMIN-NOT-GRANTED).
     if ("$($Connector.transport)".Trim() -ieq 'powerbi-admin') {
         if ($method -eq 'GET' -and "$($Op.itemsPath)" -eq 'value') {
@@ -200,9 +209,9 @@ function Invoke-PimWorkloadConnectorApi {
 # ---------------------------------------------------------------------------
 # PIM 100.142 (owner 2026-10-13: "Admin API, no membership") -- the Power BI ADMIN api client.
 #   GetGroupUsersAsAdmin   GET    /v1.0/myorg/admin/groups/{workspace}/users
-#   AddUserAsAdmin         POST   /v1.0/myorg/admin/groups/{workspace}/users            { identifier; principalType; groupUserAccessRight }
-#   DeleteUserAsAdmin      DELETE /v1.0/myorg/admin/groups/{workspace}/users/{principal}
-# The caller must be a Fabric Administrator and Fabric must let service principals use the admin APIs; the admin api allows
+# PIM 100.142b: READ ONLY. The admin WRITE (AddUserAsAdmin) answered HTTP 401 to a service principal live (2026-10-14), so the
+# add goes through the Fabric workspace api (Invoke-PimFabricWorkspaceRequest below) and this client refuses every non-GET.
+# Fabric must let service principals use the read-only admin APIs; the admin api allows
 # 200 requests per hour per tenant. So: a process-wide budget below that limit (calls past it are not made), a 429 waited
 # out ONCE or twice when Power BI asks for a short wait (Retry-After), and otherwise a pause for the rest of the run -- the
 # remaining rows are retried on the next run. Never hammered. State lives in $global: (never $script:, BUG-79-6b).
@@ -239,6 +248,11 @@ function Invoke-PimPowerBiAdminRequest {
     param([string]$Method = 'GET', [Parameter(Mandatory)][string]$Url, [object]$Body = $null, [switch]$All)
     if ("$Url" -notmatch '(?i)^https://api\.powerbi\.com/v1\.0/myorg/admin/') {
         throw ("POWERBI-ADMIN-ONLY: the Power BI connector calls only the admin api (/v1.0/myorg/admin/...); refused: {0} {1}" -f $Method, $Url)
+    }
+    # PIM 100.142b: the admin api is READ only now (its write answers 401 to a service principal), and Power BI is add-only
+    # (owner 2026-10-13/14): no DELETE and no write is ever sent through this client.
+    if ("$Method".Trim().ToUpperInvariant() -ne 'GET') {
+        throw ("POWERBI-ADD-ONLY: the Power BI admin api is only READ by PIM Manager (the add goes through the Fabric workspace api; nothing is ever removed); refused: {0} {1}" -f $Method, $Url)
     }
     $now = [datetime]::UtcNow
     if ($global:PIM_PowerBiAdminPauseUntilUtc -is [datetime] -and $now -lt $global:PIM_PowerBiAdminPauseUntilUtc) {
@@ -283,6 +297,92 @@ function Invoke-PimPowerBiAdminRequest {
                 throw ("POWERBI-ADMIN-THROTTLED: the Power BI admin API answered HTTP 429 (Too Many Requests; 200 requests per hour per tenant). PIM Manager does not call it again for {0} s; this and the remaining Power BI workspace roles are retried on the next run. {1}" -f $pause, $m)
             }
             throw (ConvertTo-PimPowerBiAdminError -Message $m)
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# PIM 100.142b (owner 2026-10-14, "One script run") -- the Fabric workspace api client: the powerbi connector's ADD.
+#   Add Workspace Role Assignment   POST https://api.fabric.microsoft.com/v1/workspaces/{workspace}/roleAssignments
+#                                   { principal = { id = <PIM group object id>; type = 'Group' }; role = Viewer|Contributor|Member|Admin }
+# Live 2026-10-14 (internal): the Power BI admin WRITE (AddUserAsAdmin) answers HTTP 401 to a service principal (Microsoft:
+# the "admin APIs used for updates" setting covers Fabric admin APIs only). Fabric's own call supports managed identities,
+# but only for a caller that is already a member/admin of the workspace -- the customer's Fabric administrator adds the engine
+# identity as Admin ONCE (Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -AddEngineToWorkspaces). A 401 / 403 here =
+# POWERBI-ENGINE-NOT-IN-WORKSPACE. ONLY that POST is ever sent: no DELETE, no PATCH (add-only, owner 2026-10-13/14).
+# ---------------------------------------------------------------------------
+function Get-PimFabricApiResource { return 'https://api.fabric.microsoft.com' }   # the token resource (audience) of the Fabric api
+
+function Get-PimFabricWorkspaceIdFromUrl {
+    # PURE. '.../v1/workspaces/<ws>/roleAssignments' -> '<ws>' ('' when the url is not that path).
+    param([AllowNull()][string]$Url)
+    if ("$Url" -match '(?i)/v1/workspaces/([^/?\s]+)/roleAssignments') { return $Matches[1] }
+    return ''
+}
+
+function ConvertTo-PimFabricWorkspaceError {
+    <#
+      PURE. A failed Fabric workspace call's message -> the message the engine records. 401 / 403 (or Fabric's own
+      "InsufficientPrivileges" / "Unauthorized" answer) -> tagged POWERBI-ENGINE-NOT-IN-WORKSPACE (the failure catalog's
+      class: PIM Manager's identity is not a member/admin of this workspace yet). Fabric's answer goes FIRST after the tag
+      (as 2.4.625 did for the admin api): the engine shortens long item lines, and the reason must never be the part cut off.
+      Anything else (a 404 = POWERBI-WORKSPACE-NOT-FOUND by the catalog, a 400, a 409, a 5xx) is returned unchanged.
+    #>
+    param([AllowNull()][string]$Message, [string]$WorkspaceId = '')
+    $m = "$Message"
+    if ($m -match 'POWERBI-ENGINE-NOT-IN-WORKSPACE') { return $m }
+    if ($m -match '(?i)HTTP 40[13]\b|InsufficientPrivileges|\bUnauthorized\b') {
+        $said = ("$m" -replace '\s+', ' ').Trim(); if ($said.Length -gt 300) { $said = $said.Substring(0, 300) + ' ...' }
+        $ws = "$WorkspaceId".Trim(); if (-not $ws) { $ws = Get-PimFabricWorkspaceIdFromUrl -Url $m }
+        return ("POWERBI-ENGINE-NOT-IN-WORKSPACE (Fabric answered: {0}) -- PIM Manager's identity is not in this Power BI workspace yet (workspace {1}; a Fabric administrator runs Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -AddEngineToWorkspaces once)" -f $said, $(if ($ws) { $ws } else { '<unknown>' }))
+    }
+    return $m
+}
+
+function Invoke-PimFabricWorkspaceRequest {
+    <#
+      ONE Fabric workspace-api call for the powerbi connector's ADD, as the engine identity (Invoke-PimRest, token resource
+      https://api.fabric.microsoft.com, its own retry OFF with -MaxRetry 0 so THIS function owns the 429). Refuses anything
+      but POST https://api.fabric.microsoft.com/v1/workspaces/{ws}/roleAssignments -- the connector never removes.
+      429: a Retry-After <= Get-PimPowerBiAdminMaxWaitSeconds is waited out (max 2 tries), a longer one pauses the Fabric api
+      for the rest of the run (the remaining adds are retried on the next run -- THROTTLED). Never hammered.
+      $global:PIM_PowerBiAdminSleep (a scriptblock taking seconds) replaces Start-Sleep in tests, as for the admin client.
+    #>
+    param([string]$Method = 'POST', [Parameter(Mandatory)][string]$Url, [object]$Body = $null)
+    $verb = "$Method".Trim().ToUpperInvariant()
+    if ($verb -ne 'POST' -or "$Url" -notmatch '(?i)^https://api\.fabric\.microsoft\.com/v1/workspaces/[^/?\s]+/roleAssignments$') {
+        throw ("POWERBI-ADD-ONLY: the Power BI connector only ADDS a workspace role through POST https://api.fabric.microsoft.com/v1/workspaces/{{workspace}}/roleAssignments (nothing is ever removed); refused: {0} {1}" -f $Method, $Url)
+    }
+    $ws = Get-PimFabricWorkspaceIdFromUrl -Url $Url
+    if ($global:PIM_FabricWorkspacePauseUntilUtc -is [datetime] -and [datetime]::UtcNow -lt $global:PIM_FabricWorkspacePauseUntilUtc) {
+        throw ("POWERBI-FABRIC-THROTTLED: the Fabric api answered HTTP 429 (Too Many Requests) earlier in this run; PIM Manager does not call it again before {0:HH:mm:ss} UTC. Not called: {1} {2}" -f $global:PIM_FabricWorkspacePauseUntilUtc, $verb, $Url)
+    }
+    $maxWait = [int](Get-PimPowerBiAdminMaxWaitSeconds); if ($maxWait -lt 1) { $maxWait = 120 }   # literal floor
+    $sleep = if ($global:PIM_PowerBiAdminSleep -is [scriptblock]) { $global:PIM_PowerBiAdminSleep } else { { param($s) Start-Sleep -Seconds $s } }
+    $resource = Get-PimFabricApiResource
+    if (-not (Get-Command Invoke-PimRest -ErrorAction SilentlyContinue)) { throw 'the REST client (Invoke-PimRest, PIM-Rest.ps1) is not loaded in this process' }
+    $attempt = 0
+    while ($true) {
+        try {
+            return (Invoke-PimRest -Method 'POST' -Url $Url -Resource $resource -Body $Body -MaxRetry 0)
+        } catch {
+            $m = "$($_.Exception.Message)"
+            if ($m -match '(?i)HTTP 429\b|TooManyRequests') {
+                $ra = 0
+                $le = $global:PimLastRestError
+                if ($le -and $le.PSObject.Properties['retryAfter']) { [void][int]::TryParse("$($le.retryAfter)", [ref]$ra) }
+                $wait = if ($ra -gt 0) { $ra } else { [int](30 * [Math]::Pow(2, $attempt)) }
+                if ($attempt -lt 2 -and $wait -le $maxWait) {
+                    Write-Host ("    [fabric] HTTP 429 -- waiting {0} s as Fabric asks, then one more try (POST {1})" -f $wait, $Url) -ForegroundColor DarkYellow
+                    & $sleep $wait
+                    $attempt++
+                    continue
+                }
+                $pause = [Math]::Max($wait, 60)
+                $global:PIM_FabricWorkspacePauseUntilUtc = [datetime]::UtcNow.AddSeconds($pause)
+                throw ("POWERBI-FABRIC-THROTTLED: the Fabric api answered HTTP 429 (Too Many Requests). PIM Manager does not call it again for {0} s; this and the remaining Power BI workspace roles are retried on the next run. {1}" -f $pause, $m)
+            }
+            throw (ConvertTo-PimFabricWorkspaceError -Message $m -WorkspaceId $ws)
         }
     }
 }
@@ -806,6 +906,15 @@ function Invoke-PimWorkloadBindingRemove {
     # eligibility (offboarding / review / a removed delegation), which the group providers handle like any permission group.
     if ($conn -and $conn.groupOnly) { return [pscustomobject]@{ pimApplied = $false; reason = ("custom workload '{0}' is group-only -- nothing to detach in the application; remove the group's membership or definition to end the access" -f $conn.id) } }
     $tokens = @{} + $Binding.tokens
+    # PIM 100.142b: an ADD-ONLY connector (powerbi; owner 2026-10-13/14 "Keep refusing for now") never removes -- refused and
+    # reported in today's words BEFORE anything else is looked at, whatever the assignment is called. It has no remove op.
+    if ($conn -and [bool]$conn.addOnly) {
+        $ex = $Binding.existing
+        $exName = if ($ex -and "$($ex.displayName)".Trim()) { "$($ex.displayName)" } elseif ($ex) { "$($ex.id)" } else { "$($Binding.groupId)" }
+        $msg = ("{0} assignment '{1}' for '{2}' was not created by PIM4EntraPS -- remove it in the workload's portal (shared or manual assignments are never deleted)." -f $conn.name, $exName, $Binding.row.GroupTag)
+        Write-Host ("    [workloads] {0}" -f $msg) -ForegroundColor Yellow
+        return [pscustomobject]@{ pimApplied = $false; reason = $msg }
+    }
     if (-not $Binding.membership) {
         $ex = $Binding.existing
         # PIM 100.142: where the "assignment" IS the row's own group (a connector flag assignmentIsRowPrincipal), deleting it

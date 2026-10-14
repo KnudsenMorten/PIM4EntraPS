@@ -32,6 +32,7 @@ function Get-PimRestResourceMap {
     graph    = 'https://graph.microsoft.com'
     arm      = 'https://management.azure.com'
     powerbi  = 'https://analysis.windows.net/powerbi/api'
+    fabric   = 'https://api.fabric.microsoft.com'     # PIM 100.142b: Fabric workspace role assignments (the engine adds the PIM group)
     defender = 'https://api.securitycenter.microsoft.com'
     exo      = 'https://outlook.office365.com'   # Exchange Online REST admin API (app-only ManageAsApp)
   }
