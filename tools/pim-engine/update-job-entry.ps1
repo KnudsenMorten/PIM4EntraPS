@@ -47,6 +47,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
            "(resolved from '$PSCommandPath'). The image layout is not what this job expects.")
 }
 . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1')
+. (Join-Path $solRoot 'engine\_shared\PIM-InstallNames.ps1')   # CR5 step 1 (PIM 100.149): every resource name from one resolver
 . (Join-Path $solRoot 'engine\_shared\PIM-ArmContainerApps.ps1')
 . (Join-Path $solRoot 'engine\_shared\PIM-SyncAutomateIT.ps1')   # the decision core (semver + pin gate)
 . (Join-Path $solRoot 'engine\_shared\PIM-AcrBuild.ps1')         # §55 build in the registry, over ARM
@@ -160,6 +161,23 @@ function Invoke-PimUpdaterConvergeStep {
         foreach ($l in @($cv.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
         Say ("converge ($When): $($cv.changed) changed, $($cv.warnings) to fix by hand") $(if ($cv.warnings) { 'Yellow' } elseif ($cv.changed) { 'Cyan' } else { 'DarkGray' })
     } catch { Say "  converge skipped: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2d-bis. CR5 step 1 (framework §12.11c item 6, PIM 100.149) -- THE INSTALL RECORD ------------------------------------
+    # pim.Settings 'InstallNames' = the names THIS install runs with, from what the updater was deployed with (its variables)
+    # and the as-built job's name. Existing installs record TODAY's names -- nothing is renamed; every reader
+    # (Get-PimInstallName) answers the same as before. Written only when it changes. Never fails the update.
+    try {
+        if ($storeSeam -and (Get-Command New-PimInstallNamesRecord -ErrorAction SilentlyContinue)) {
+            $inCur = & $storeSeam 'get' 'InstallNames' $null
+            $inNames = @{ web = $managerApp; engine = $tickJob; updater = $selfJob
+                          sqlAdminGroup = $(if ("$($env:PIM_SqlAdminGroupName)".Trim()) { "$($env:PIM_SqlAdminGroupName)".Trim() } else { Get-PimInstallName -Role sqlAdminGroup -NoRecord })
+                          asbuilt = (Get-PimInstallName -Role asbuilt -Record $inCur); asbuiltIdentity = (Get-PimInstallName -Role asbuiltIdentity -Record $inCur) }
+            $inRec = New-PimInstallNamesRecord -Names $inNames -Current $inCur
+            if ($inRec.changed) {
+                & $storeSeam 'set' 'InstallNames' ([pscustomobject]$inRec.record) | Out-Null
+                Say ("install record: InstallNames stored (" + ((@($inRec.record.Keys) | Where-Object { $_ -ne 'recordedUtc' } | ForEach-Object { "$_=$($inRec.record[$_])" }) -join ', ') + ")") 'Cyan'
+            } else { Say 'install record: InstallNames unchanged' 'DarkGray' }
+        }
+    } catch { Say "  install record not written: $($_.Exception.Message)" 'Yellow' }
     # ---- 2e. PIM 100.61 -- THE AS-BUILT JOB ON EXISTING ENVIRONMENTS (no manual Deploy-PimAsBuiltJob) ---------------------
     # Storage (Entra-only), container + 1-day rule, caj-pim-asbuilt on the Manager's image, and -- over this job's own SQL
     # connection, so a PRIVATE SQL server works too -- the view, the job's reader user and the install facts. What needs an

@@ -423,9 +423,10 @@ function Invoke-ManagerSmokeGate {
       fix is the same shape as BUG-09's: report what actually happened, never a fixed string.
     #>
     param([string]$RepoRoot, [string[]]$RolledApps)
-    if (-not $PSCmdlet.ShouldProcess('ca-pim-manager','post-deploy GUI smoke gate')) { return 'NOT RUN (-WhatIf)' }
+    # CR5 step 1 (PIM 100.149): the Manager is $ManagerApp (the parameter), never a literal name
+    if (-not $PSCmdlet.ShouldProcess("$ManagerApp",'post-deploy GUI smoke gate')) { return 'NOT RUN (-WhatIf)' }
     if ($SkipSmoke) { Write-Host "==> -SkipSmoke set: skipping post-deploy GUI smoke gate (NOT recommended)." -ForegroundColor Yellow; return 'SKIPPED (-SkipSmoke -- NOT a pass)' }
-    if ('ca-pim-manager' -notin $RolledApps) { return 'not applicable (the Manager was not rolled)' }  # gate only when the Manager was actually rolled
+    if ("$ManagerApp" -notin $RolledApps) { return 'not applicable (the Manager was not rolled)' }  # gate only when the Manager was actually rolled
     # 2026-10-10 (a customer's managed install failed the 'code' step here): the GUI smoke is a DEV gate (az CLI, a reachable
     # Manager). Inside a customer install (Invoke-PimDeployAll without -RunDevGates) the deploy's verify step runs the REST
     # community verify instead -- so this gate defers to it rather than failing a gate that cannot run on a customer host.
@@ -447,7 +448,7 @@ function Invoke-ManagerSmokeGate {
     # Hand the gate everything this script already knows. -ResourceGroup in particular was the
     # difference between "the gate ran" and "the gate could not find the app": the smoke's own
     # default for it is EMPTY, so without this it could not list revisions to read live logs from.
-    $smokeArgs = @{ App = 'ca-pim-manager'; ResourceGroup = $ResourceGroup; AsReleaseGate = $true }
+    $smokeArgs = @{ App = "$ManagerApp"; ResourceGroup = $ResourceGroup; AsReleaseGate = $true }
     if ("$SmokeWorkspaceId".Trim()) { $smokeArgs['WorkspaceId'] = $SmokeWorkspaceId }
     if ("$SmokeEasyAuthAud".Trim()) { $smokeArgs['EasyAuthAud'] = $SmokeEasyAuthAud }
     if ("$SmokeFqdn".Trim())        { $smokeArgs['Fqdn']        = $SmokeFqdn }

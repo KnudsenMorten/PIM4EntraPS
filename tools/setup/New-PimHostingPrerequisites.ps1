@@ -140,6 +140,8 @@ param(
     # admin before. Same model on public and private SQL. -SkipSqlAdminGroup keeps the single-principal
     # admin of earlier versions.
     [string]$SqlAdminGroupName = 'grp-pim-sql-admins',
+    # CR5 step 1 (PIM 100.149): the updater job's name, a parameter (today's name is the default), never a literal below
+    [string]$UpdateJobName = 'ca-pim-update',
     # The Invardia Support app's application id (added to the SQL admin group). The old name -TroubleshootingAppId still binds.
     [Alias('TroubleshootingAppId')][string]$SupportAppId,
     [switch]$SkipSqlAdminGroup,
@@ -620,7 +622,7 @@ if ($SkipSql) {
             return
         }
         $r = Invoke-PimSqlAdminGroupStep -Graph $inv.Graph -Arm $inv.Arm -TenantId $inv.TenantId -SubscriptionId $SubscriptionId `
-                -ResourceGroup $rg -SqlServerName $sqlSrv -GroupName $SqlAdminGroupName -NoDiscovery -UpdateJobName 'ca-pim-update' `
+                -ResourceGroup $rg -SqlServerName $sqlSrv -GroupName $SqlAdminGroupName -NoDiscovery -UpdateJobName $UpdateJobName `
                 -SupportAppId $SupportAppId -ExtraMembers $ExtraMembers -Mode converge
         Write-PimSqlAdminGroupReport -Result $r -Indent '         '
         if ($r.ok) { $script:sqlAdminGroupOk = $true; return }

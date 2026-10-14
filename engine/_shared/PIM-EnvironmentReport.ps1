@@ -612,7 +612,16 @@ function Get-PimEnvironmentReport {
         $name = if ($o) { "$($o.displayName)" } else { '' }
         $role = 'product'
         if ($id -eq $mgrOid) { $role = 'manager' } elseif ($id -eq $tickOid) { $role = 'engine' } elseif ($supIds -contains $id) { $role = 'support' }
-        else { foreach ($e in $expIds) { $mn = "$(Get-PimEnvReportField $e.match 'managedIdentityName')"; if ($mn -and $name -ieq $mn) { $role = "$($e.role)" } } }
+        else {
+            foreach ($e in $expIds) {
+                $mn = "$(Get-PimEnvReportField $e.match 'managedIdentityName')"
+                # CR5 step 1 (PIM 100.149): THIS install's name for the role (the install record); the expected file's name
+                # (today's) is the default
+                $inRole = switch ("$($e.role)") { 'engine' { 'engine' } 'manager' { 'web' } 'updater' { 'updater' } default { '' } }
+                if ($inRole -and (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue)) { $mn = Get-PimInstallName -Role $inRole }
+                if ($mn -and $name -ieq $mn) { $role = "$($e.role)" }
+            }
+        }
         $kind = if ($role -eq 'support') { 'Application (Invardia Support app)' } elseif ($o -and "$($o.servicePrincipalType)" -eq 'ManagedIdentity') { 'Managed identity' } elseif ($o) { "Service principal ($($o.servicePrincipalType))" } else { 'Service principal' }
         $purpose = & $rolePurpose $role; if (-not $purpose -and $role -eq 'product') { $purpose = 'A PIM Manager identity (in the product resource group or PIM''s SQL admin group); no declared permission set' }
         $x = & $addId $role $kind $name $id "$(if ($o) { $o.appId })" $purpose 'Microsoft Graph' $o

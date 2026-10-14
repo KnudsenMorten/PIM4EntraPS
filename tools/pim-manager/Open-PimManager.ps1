@@ -218,6 +218,10 @@ if (Test-Path -LiteralPath $_workloadConnLib) { . $_workloadConnLib }
 # block + New-PimSqlConnection (and, on Windows headless, the Write-Host shim).
 $_restLib = Join-Path $solutionRoot 'engine\_shared\PIM-Rest.ps1'
 if (Test-Path -LiteralPath $_restLib) { . $_restLib }
+# framework §12.11c NAMING (CR5) step 1 / PIM 100.149: every name of THIS installation from one resolver (record ->
+# environment -> today's name), never a literal
+$_installNamesLib = Join-Path $solutionRoot 'engine\_shared\PIM-InstallNames.ps1'
+if (Test-Path -LiteralPath $_installNamesLib) { . $_installNamesLib }
 
 # SQL-only data layer (engine/_shared/PIM-SqlStore.ps1 + its change-queue dep) --
 # powers the SQL storage backend. Raw ADO.NET; connection string resolved from
@@ -5575,7 +5579,8 @@ function Get-PimManagerMailIdentities {
                 $o.managerObjectId = "$($self.id)"
                 $rid = @(@($self.alternativeNames) | Where-Object { "$_" -match '^/subscriptions/' }) | Select-Object -First 1
                 if ("$rid" -match '(?i)^/subscriptions/([^/]+)/resourcegroups/([^/]+)/') { $o.subscriptionId = $Matches[1]; $o.resourceGroup = $Matches[2] }
-                $job = if ("$($env:PIM_ENGINE_JOB_NAME)".Trim()) { "$($env:PIM_ENGINE_JOB_NAME)".Trim() } else { 'ca-pim-tick' }
+                # CR5 step 1 (PIM 100.149): the install record (incl. PIM_ENGINE_JOB_NAME); today's name is the default
+                $job = if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { Get-PimInstallName -Role engine } elseif ("$($env:PIM_ENGINE_JOB_NAME)".Trim()) { "$($env:PIM_ENGINE_JOB_NAME)".Trim() } else { 'ca-pim-tick' }
                 $tj = Get-PimManagerTickJobId
                 if ($tj -match '(?i)/jobs/([^/]+)$') { $job = $Matches[1] }
                 $o.tickJobName = $job
@@ -11320,7 +11325,8 @@ function Get-PimManagerPermissionHealthBody {
         $self = $self.value[0]
         $selfRid = @(@($self.alternativeNames) | Where-Object { "$_" -match '^/subscriptions/' }) | Select-Object -First 1
         if ("$($self.servicePrincipalType)" -eq 'ManagedIdentity' -and $selfRid) {
-            $engineJob = if ("$($env:PIM_ENGINE_JOB_NAME)".Trim()) { "$($env:PIM_ENGINE_JOB_NAME)".Trim() } else { 'ca-pim-tick' }
+            # CR5 step 1 (PIM 100.149): the install record (incl. PIM_ENGINE_JOB_NAME); today's name is the default
+            $engineJob = if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { Get-PimInstallName -Role engine } elseif ("$($env:PIM_ENGINE_JOB_NAME)".Trim()) { "$($env:PIM_ENGINE_JOB_NAME)".Trim() } else { 'ca-pim-tick' }
             $rgPrefix = ("$selfRid" -replace '(?i)^(/subscriptions/[^/]+/resourcegroups/[^/]+/).*$', '$1').ToLowerInvariant()
             $cands = Invoke-PimGraph -Path ("/servicePrincipals?`$filter=displayName eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $engineJob)
             $eng = @(@($cands.value) | Where-Object { @($_.alternativeNames) | Where-Object { "$_".ToLowerInvariant().StartsWith($rgPrefix) } }) | Select-Object -First 1
@@ -11583,7 +11589,7 @@ function Get-PimManagerEnvironmentReport {
                 sqlDatabase = $(if ("$($global:PIM_SqlDatabase)".Trim()) { "$($global:PIM_SqlDatabase)".Trim() } else { "$($env:PIM_SqlDatabase)".Trim() })
                 keyVault = "$($global:PIM_EmergencyVault)".Trim(); registry = ''; hosted = [bool]("$($env:PIM_HOSTED)" -eq '1')
                 engineAppId = $(if ("$($global:PIM_EngineClientId)".Trim()) { "$($global:PIM_EngineClientId)".Trim() } else { "$($global:PIM_ClientId)".Trim() })
-                sqlAdminGroup = $(if ("$($env:PIM_SQL_ADMIN_GROUP)".Trim()) { "$($env:PIM_SQL_ADMIN_GROUP)".Trim() } else { 'grp-pim-sql-admins' })
+                sqlAdminGroup = $(if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { Get-PimInstallName -Role sqlAdminGroup } elseif ("$($env:PIM_SQL_ADMIN_GROUP)".Trim()) { "$($env:PIM_SQL_ADMIN_GROUP)".Trim() } else { 'grp-pim-sql-admins' })
             }
         }
         definedGroups   = {
@@ -11635,7 +11641,8 @@ function Get-PimManagerReviewOwnPrincipals {
         # Grant-PimSupportAccess makes this contained user FROM THE APP'S SID -- the SID is the support app's app id.
         $sqlSid = { Invoke-PimSqlScalar -ConnectionString $cs -Sql "SELECT TOP 1 sid FROM sys.database_principals WHERE name = N'invardia-support' AND type IN ('E','X')" }.GetNewClosure()
     }
-    $groupName = if ("$($env:PIM_SQL_ADMIN_GROUP)".Trim()) { "$($env:PIM_SQL_ADMIN_GROUP)".Trim() } else { 'grp-pim-sql-admins' }
+    # CR5 step 1 (PIM 100.149): the install record (incl. PIM_SQL_ADMIN_GROUP / PIM_SqlAdminGroupName); today's name is the default
+    $groupName = if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { Get-PimInstallName -Role sqlAdminGroup } elseif ("$($env:PIM_SQL_ADMIN_GROUP)".Trim()) { "$($env:PIM_SQL_ADMIN_GROUP)".Trim() } else { 'grp-pim-sql-admins' }
     $r = Get-PimReviewOwnPrincipals -ServicePrincipalIds $ServicePrincipalIds -SelfAppId (Get-PimManagerSelfAppId) -ProductAppIds $productApps `
             -Graph $graph -SqlSupportSid $sqlSid -SqlAdminGroupName $groupName
     if ($r -and ($r.productKnown -or $r.supportKnown)) { $script:PimReviewOwnCache = @{ at = (Get-Date); key = $key; result = $r } }
@@ -19857,7 +19864,7 @@ function Handle-Request {
                     name = 'software-update'; type = 'software-update'; readOnly = $true
                     label = 'Software update (build & roll)'
                     plain = 'Builds this environment''s image from the source archive for its ring and rolls the Manager, the tick and itself. Separate from the definitions pull above: it changes the SOFTWARE, not the configuration.'
-                    jobName = 'ca-pim-update'
+                    jobName = $(if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { Get-PimInstallName -Role updater } else { 'ca-pim-update' })   # CR5 step 1
                     schedule = 'a cron on the Container Apps job itself (deployed with Deploy-PimUpdateJob -Cron; default 0 3 * * * UTC)'
                     setWhere = 'the deployment, not this page -- its cadence lives with the job, and what it installs is decided by PIM_UPDATE_RING + the ring channel'
                     ring = "$env:PIM_UPDATE_RING"

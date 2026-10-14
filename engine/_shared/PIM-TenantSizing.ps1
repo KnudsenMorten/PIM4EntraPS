@@ -69,6 +69,9 @@ $script:PimTenantSizingTagPrefix = 'pim-sizing-'
 function Get-PimJobSettingSuffix {
     <# PURE. The per-job suffix of a PIM_Bootstrap_*_<Job> setting: ca-pim-tick -> Tick, ca-pim-downlink-s6 -> DownlinkS6, Tick -> Tick. #>
     param([Parameter(Mandatory)][string]$Job)
+    # CR5 step 1 (PIM 100.149): THIS install's engine job is 'Tick' whatever it is named (ca-pim-tick today, ca-pim-engine
+    # at a new install) -- its stored size settings keep their keys
+    if ((Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) -and "$Job".Trim() -ieq (Get-PimInstallName -Role engine)) { return 'Tick' }
     $j = "$Job".Trim() -replace '^(?i)ca-pim-', ''
     $parts = @(($j -split '[-_]') | Where-Object { $_ } | ForEach-Object { $_.Substring(0, 1).ToUpperInvariant() + $_.Substring(1).ToLowerInvariant() })
     return ($parts -join '')

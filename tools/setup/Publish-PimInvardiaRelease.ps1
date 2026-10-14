@@ -114,13 +114,33 @@ if ($bytes.Length -lt 4 -or $bytes[0] -ne 0x50 -or $bytes[1] -ne 0x4B) { throw '
 $sha = [System.Security.Cryptography.SHA256]::Create(); try { $hash = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
 Write-Host ("    {0}`n    {1} entries, {2:N0} bytes, SHA-256 {3}" -f $zip, $count, $bytes.Length, $hash)
 
+# Framework §12.11b GUARD-STRICT (CR4) item 1: engineChanged on the publish call -- true when the ENGINE code differs from
+# the previous release. engineHash = SHA-256 over "<path> <blob id>" of every file under the engine folders in the TAGGED
+# tree (git ls-tree: content-addressed, so no checkout and no working-tree drift); the previous release = the highest
+# PIM4EntraPS-v<x> tag below this version. No previous release, or a hash that cannot be computed = true (Strict is the
+# safe side). A GUI / template / text-only release keeps Normal.
+function Get-PimEngineHashAtTag([string]$RepoRoot, [string]$Ref) {
+    $paths = @('SOLUTIONS/PIM4EntraPS/engine', 'SOLUTIONS/PIM4EntraPS/tools/pim-engine', 'SOLUTIONS/PIM4EntraPS/tools/pim-scheduler', 'SOLUTIONS/PIM4EntraPS/sql')
+    $lines = @(& git -C $RepoRoot ls-tree -r $Ref -- @paths 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $lines.Count) { return '' }
+    $norm = @($lines | ForEach-Object { $p = "$_" -split "`t", 2; if ($p.Count -eq 2) { $p[1] + ' ' + (($p[0] -split ' ')[2]) } } | Sort-Object -CaseSensitive)
+    $s = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($s.ComputeHash([Text.Encoding]::UTF8.GetBytes(($norm -join "`n"))))).Replace('-', '').ToLowerInvariant() } finally { $s.Dispose() }
+}
+$engineHash = Get-PimEngineHashAtTag $repo $tag
+$prevTag = @(& git -C $repo tag -l 'PIM4EntraPS-v2.*' 2>$null | ForEach-Object { $v = "$_" -replace '^PIM4EntraPS-v', ''; try { [pscustomobject]@{ tag = "$_"; v = [version]$v } } catch { } } |
+             Where-Object { $_.v -lt [version]$Version } | Sort-Object v -Descending | Select-Object -First 1)
+$prevHash = if ($prevTag) { Get-PimEngineHashAtTag $repo $prevTag[0].tag } else { '' }
+$engineChanged = (-not $engineHash -or -not $prevHash -or $engineHash -ne $prevHash)
+Write-Host ("    engine: {0} vs {1} -> engineChanged={2}" -f $(if ($engineHash) { $engineHash.Substring(0, 12) } else { '(none)' }), $(if ($prevTag) { "$($prevTag[0].tag) $(if ($prevHash) { $prevHash.Substring(0, 12) })" } else { '(no previous release)' }), $engineChanged.ToString().ToLowerInvariant())
+
 # UPDATE-1.7: PIM decides the ring. Ring 2 / 3 reach customers: only on the operator's own words (memory/ring-2 rule).
 if ($Ring -ge 2 -and -not "$OperatorApproval".Trim()) { throw "ring $Ring reaches customers -- pass -OperatorApproval with the operator's own words (e.g. 'release $Version to ring $Ring'); nothing was sent" }
-$url = "$($Endpoint.TrimEnd('/'))/api/releases/pim-manager?kind=$Kind&version=$Version" + $(if ($Ring -ge 0) { "&ring=$Ring" } else { '' })
+$url = "$($Endpoint.TrimEnd('/'))/api/releases/pim-manager?kind=$Kind&version=$Version" + $(if ($Ring -ge 0) { "&ring=$Ring" } else { '' }) + "&engineChanged=$($engineChanged.ToString().ToLowerInvariant())"
 Write-Host ("    ring: {0}{1}" -f $(if ($Ring -ge 0) { "$Ring (published AND released to it)" } else { 'none (registered only, released to no ring)' }), $(if ("$OperatorApproval".Trim()) { " -- operator: '$OperatorApproval'" } else { '' }))
 if (-not $Apply) {
     Write-Host "`nPLAN ONLY -- nothing was sent. With -Apply the zip is POSTed to $url as Invardia.Publisher.pim-manager (tenant $TenantId)." -ForegroundColor Yellow
-    return [pscustomobject]@{ published = $false; version = $Version; ring = $Ring; zip = $zip; sha256 = $hash; size = $bytes.Length; url = $url }
+    return [pscustomobject]@{ published = $false; version = $Version; ring = $Ring; zip = $zip; sha256 = $hash; size = $bytes.Length; url = $url; engineHash = $engineHash; engineChanged = $engineChanged }
 }
 
 Step 'publisher identity (certificate, from Key Vault unless passed)'
@@ -152,4 +172,4 @@ try {
 $ok = ($status -in 200, 201, 202)
 Write-Host ("    HTTP {0} {1}" -f $status, $content.Substring(0, [Math]::Min(400, $content.Length))) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })
 if (-not $ok) { throw "Invardia refused the release (HTTP $status)" }
-[pscustomobject]@{ published = $true; version = $Version; sha256 = $hash; size = $bytes.Length; status = $status; url = $url }
+[pscustomobject]@{ published = $true; version = $Version; sha256 = $hash; size = $bytes.Length; status = $status; url = $url; engineHash = $engineHash; engineChanged = $engineChanged }

@@ -31,7 +31,7 @@
 Set-StrictMode -Off
 
 $script:PimAsBuiltSchema    = 'pim-manager-asbuilt/1'
-$script:PimAsBuiltJobName   = 'caj-pim-asbuilt'
+# the job's name: Get-PimAsBuiltJobName (CR5 step 1 -- the install record; today's name caj-pim-asbuilt is the default)
 $script:PimAsBuiltContainer = 'asbuilt'
 $script:PimAsBuiltView      = 'pim.vw_AsBuiltSettings'
 $script:PimAsBuiltRoleName  = 'PIM Manager as-built runner'
@@ -43,7 +43,7 @@ $script:PimAsBuiltBlobWriterRole   = 'Storage Blob Data Contributor'          # 
 # IS the app id (the SID of its contained database user) and properties.principalId the object id -- both readable over ARM by
 # the updater's Contributor, so the database user is made WITHOUT Graph (a system identity's app id needs Graph, which the
 # updater's identity does not have: "the app id of caj-pim-asbuilt's identity could not be resolved" on every run).
-$script:PimAsBuiltIdentityName = 'id-pim-asbuilt'
+# its name: Get-PimAsBuiltIdentityName (CR5 step 1 -- the install record; today's name id-pim-asbuilt is the default)
 $script:PimAsBuiltMsiApi       = 'api-version=2023-01-31'
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -167,12 +167,14 @@ $script:PimAsBuiltSectionTitles = [ordered]@{
 # ---------------------------------------------------------------------------------------------------------------------
 function Get-PimAsBuiltQuestionCatalog { return @($script:PimAsBuiltQuestions) }
 function Get-PimAsBuiltSettingNames { return @($script:PimAsBuiltSettingNames) }
-function Get-PimAsBuiltJobName { return $script:PimAsBuiltJobName }
+# CR5 step 1 (PIM 100.149): the job and its identity are named by the install record (Get-PimInstallName); today's
+# names are the default -- an existing install resolves exactly what it runs with
+function Get-PimAsBuiltJobName { if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { return (Get-PimInstallName -Role asbuilt) }; return 'caj-pim-asbuilt' }
 function Get-PimAsBuiltContainerName { return $script:PimAsBuiltContainer }
-function Get-PimAsBuiltIdentityName { return $script:PimAsBuiltIdentityName }
+function Get-PimAsBuiltIdentityName { if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { return (Get-PimInstallName -Role asbuiltIdentity) }; return 'id-pim-asbuilt' }
 function Get-PimAsBuiltIdentityResourceId {
     <# PURE. The ARM id of the job's user-assigned identity id-pim-asbuilt (in the PIM resource group). #>
-    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [string]$Name = $script:PimAsBuiltIdentityName)
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [string]$Name = (Get-PimAsBuiltIdentityName))
     return "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.ManagedIdentity/userAssignedIdentities/$Name"
 }
 function Get-PimAsBuiltJobIdentity {
@@ -181,7 +183,7 @@ function Get-PimAsBuiltJobIdentity {
       resourceId }. 'user' = id-pim-asbuilt is attached (principalId / clientId from identity.userAssignedIdentities);
       'system' = only the former system-assigned identity (an install from before the fix -- the converge switches it).
     #>
-    param($Job, [string]$Name = $script:PimAsBuiltIdentityName)
+    param($Job, [string]$Name = (Get-PimAsBuiltIdentityName))
     $out = @{ kind = 'none'; principalId = ''; clientId = ''; resourceId = '' }
     if (-not $Job -or -not $Job.identity) { return $out }
     $ua = $Job.identity.userAssignedIdentities
@@ -1035,7 +1037,7 @@ function Test-PimAsBuiltRollSkip {
     #>
     param([AllowEmptyString()][string]$JobName, [AllowEmptyString()][string]$ConvergedImage, [AllowEmptyString()][string]$TargetImage)
     $c = "$ConvergedImage".Trim(); $t = "$TargetImage".Trim()
-    return ([bool]("$JobName".Trim() -eq $script:PimAsBuiltJobName -and $c -and $t -and $c -ieq $t))
+    return ([bool]("$JobName".Trim() -eq (Get-PimAsBuiltJobName) -and $c -and $t -and $c -ieq $t))
 }
 
 function Get-PimAsBuiltStoreReadFailureText {
@@ -1081,7 +1083,7 @@ function Invoke-PimAsBuiltConverge {
       Returns @{ lines = @(@{ id; level = info | changed | warn; text }); changed; warnings; jobImage; identity }. NEVER throws.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup,
-          [string]$ManagerApp = 'ca-pim-manager', [string]$JobName = $script:PimAsBuiltJobName,
+          [string]$ManagerApp = 'ca-pim-manager', [string]$JobName = (Get-PimAsBuiltJobName),
           [Parameter(Mandatory)][scriptblock]$Arm, [scriptblock]$Sql = $null,
           [scriptblock]$Sleep = $null, [int[]]$BusyWaits = @(10, 20, 30, 30, 30))
     if (-not $Sleep) { $Sleep = { param($s) Start-Sleep -Seconds $s } }
@@ -1154,7 +1156,7 @@ function Invoke-PimAsBuiltConverge {
         }
 
         # ---- the job's user-assigned identity id-pim-asbuilt (clientId = app id, principalId = object id; both over ARM) ----
-        $uamiName = $script:PimAsBuiltIdentityName
+        $uamiName = Get-PimAsBuiltIdentityName
         $uamiId = Get-PimAsBuiltIdentityResourceId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $uamiName
         $uami = & $get "$uamiId`?$($script:PimAsBuiltMsiApi)"
         if (-not $uami -and $location) {
@@ -1273,7 +1275,7 @@ function Get-PimAsBuiltSupportGrants {
       Returns @( @{ what; roleDefinitionId; scope } ).
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$StorageAccount,
-          [string]$JobName = $script:PimAsBuiltJobName, [string]$Container = $script:PimAsBuiltContainer, [string]$StorageResourceGroup = '')
+          [string]$JobName = (Get-PimAsBuiltJobName), [string]$Container = $script:PimAsBuiltContainer, [string]$StorageResourceGroup = '')
     $srg = if ("$StorageResourceGroup".Trim()) { "$StorageResourceGroup".Trim() } else { $ResourceGroup }
     $rd = Get-PimAsBuiltRoleDefinition -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup
     return @(
