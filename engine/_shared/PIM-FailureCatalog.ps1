@@ -53,6 +53,19 @@ $script:PimFailureRules = @(
        retryable = $false; severity = 'policy'
        fixes = @() }
 
+    # PIM 100.143 (Invardia fix-request watcher 2026-10-14, a customer production environment on 2.4.622): "the execution
+    # 'ca-pim-tick-<n>' finished without recording this run's result" went up as UNCLASSIFIED. The execution SUCCEEDED; only
+    # the run's record was lost (the run-history write lost every compare-and-set to an overlapping execution -- handed over
+    # and retried since 100.143). Transient: the next turn runs the job again; nothing for the customer. Ahead of the
+    # data / environment rules: the text quotes an execution name, never an HTTP status.
+    @{ code = 'RUN-NO-RESULT'
+       match = { param($m, $row) $m -match '(?i)\[RUN-NO-RESULT\]|finished without recording this run''s result' }
+       title = 'The run ended without recording its result'
+       cause = 'The scheduled execution finished normally, but the record of this run did not reach the store before it ended (another execution was writing the run history at the same moment). The job itself did its work; only its result is missing.'
+       remedy = 'Nothing to do -- the job runs again on its next turn. One such run is not a failure; two in a row show as failing.'
+       retryable = $true; severity = 'transient'
+       fixes = @() }
+
     # 100.31 SNAPSHOT-OOM (2026-10-09, live on a production tenant of ~10.8k identity objects, ca-pim-tick at 0.5 CPU /
     # 1 GiB): the active-assignments-snapshot job died with "Exception of type 'System.OutOfMemoryException' was thrown."
     # and telemetry filed it UNCLASSIFIED. Ahead of every data / environment rule: an out-of-memory job is the cause, and
