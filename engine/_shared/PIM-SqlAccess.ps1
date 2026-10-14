@@ -25,7 +25,7 @@
 
 Set-StrictMode -Off
 
-$script:PimSqlAccessMarker = 'pim-access v1'
+$script:PimSqlAccessMarker = 'pim-access v2'
 $script:PimSqlAccessSchemas = @('pim', 'platform', 'pimdemo')
 $script:PimSqlAccessPermissions = @('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'EXECUTE')
 
@@ -109,24 +109,49 @@ function Get-PimSqlAccessProcedureText {
     return @"
 CREATE OR ALTER PROCEDURE [pim].[usp_ApplyAccess]
     @Action     NVARCHAR(10),
-    @Role       SYSNAME,
+    @Role       SYSNAME = NULL,
     @Permission NVARCHAR(20) = NULL,
     @Target     NVARCHAR(300) = NULL,
     @UserName   SYSNAME = NULL,
-    @AppId      UNIQUEIDENTIFIER = NULL
+    @AppId      UNIQUEIDENTIFIER = NULL,
+    @What       NVARCHAR(10) = NULL
 AS
 BEGIN
     -- $m -- framework 12.23 P4/P9. FROZEN: general rules only; altering this procedure drops its signature.
     SET NOCOUNT ON; SET XACT_ABORT ON;
     DECLARE @s NVARCHAR(MAX), @sch SYSNAME, @obj SYSNAME, @t NVARCHAR(400), @sid VARBINARY(16);
+    -- v2 (SI's real-SQL finding 1): a ddladmin-only caller cannot SEE grants or certificates, so the state is read
+    -- HERE, under the signature. Read-only: facts (procedure + signer) or the grants held by pim_* roles.
+    IF @Action = N'state'
+    BEGIN
+        IF @What = N'facts'
+            SELECT 1 AS procExists, 1 AS procCurrent,
+              (SELECT TOP 1 c.name FROM sys.crypt_properties cp JOIN sys.certificates c ON c.thumbprint = cp.thumbprint
+                 WHERE cp.major_id = @@PROCID) AS signer,
+              (SELECT TOP 1 c.expiry_date FROM sys.crypt_properties cp JOIN sys.certificates c ON c.thumbprint = cp.thumbprint
+                 WHERE cp.major_id = @@PROCID) AS signerExpiry,
+              (SELECT TOP 1 CASE WHEN c.pvt_key_encryption_type = 'NA' THEN 1 ELSE 0 END FROM sys.crypt_properties cp
+                 JOIN sys.certificates c ON c.thumbprint = cp.thumbprint WHERE cp.major_id = @@PROCID) AS privateKeyRemoved;
+        ELSE IF @What = N'grants'
+            SELECT r.name AS role, dp.permission_name AS perm,
+              CASE dp.class WHEN 3 THEN N'SCHEMA::' + SCHEMA_NAME(dp.major_id)
+                            WHEN 1 THEN OBJECT_SCHEMA_NAME(dp.major_id) + N'.' + OBJECT_NAME(dp.major_id) END AS [on]
+            FROM sys.database_permissions dp JOIN sys.database_principals r ON r.principal_id = dp.grantee_principal_id
+            WHERE r.type = 'R' AND r.is_fixed_role = 0 AND r.name LIKE N'pim[_]%' AND dp.state IN ('G', 'W') AND dp.class IN (1, 3);
+        ELSE THROW 51011, N'usp_ApplyAccess: state needs @What = facts or grants.', 1;
+        RETURN;
+    END
     IF @Role IS NULL OR LEN(@Role) < 6 OR LEN(@Role) > 34 OR LEFT(@Role, 4) COLLATE Latin1_General_BIN2 <> N'pim_'
        OR SUBSTRING(@Role, 5, 30) COLLATE Latin1_General_BIN2 LIKE N'%[^a-z]%'
         THROW 51001, N'usp_ApplyAccess: the role must be pim_<lower-case letters>.', 1;
     IF @Action = N'role'
     BEGIN
+        -- v2 (SI's real-SQL finding 2): AUTHORIZATION [dbo] needs IMPERSONATE on dbo, which the signer never gets. A role
+        -- created HERE is owned by the signer; the admin run creates every catalog role owned by dbo, and moves any
+        -- signer-owned role to dbo before it ever drops an old signer.
         IF DATABASE_PRINCIPAL_ID(@Role) IS NULL
         BEGIN
-            SET @s = N'CREATE ROLE ' + QUOTENAME(@Role) + N' AUTHORIZATION [dbo];';
+            SET @s = N'CREATE ROLE ' + QUOTENAME(@Role) + N';';
             EXEC sys.sp_executesql @s;
         END
         RETURN;
@@ -216,6 +241,11 @@ BEGIN
     OPEN oldc; FETCH NEXT FROM oldc INTO @old;
     WHILE @@FETCH_STATUS = 0
     BEGIN
+        -- v2: a role the procedure created is owned by its signer -- hand it to dbo first, or the DROP USER fails.
+        SET @s = NULL;
+        SELECT @s = STRING_AGG(CONVERT(NVARCHAR(MAX), N'ALTER AUTHORIZATION ON ROLE::' + QUOTENAME(r.name) + N' TO [dbo];'), N' ')
+          FROM sys.database_principals r WHERE r.type = 'R' AND r.owning_principal_id = DATABASE_PRINCIPAL_ID(@old);
+        IF @s IS NOT NULL EXEC sys.sp_executesql @s;
         IF DATABASE_PRINCIPAL_ID(@old) IS NOT NULL BEGIN SET @s = N'DROP USER ' + QUOTENAME(@old) + N';'; EXEC sys.sp_executesql @s; END
         SET @s = N'DROP CERTIFICATE ' + QUOTENAME(@old) + N';'; EXEC sys.sp_executesql @s;
         FETCH NEXT FROM oldc INTO @old;
@@ -227,7 +257,7 @@ BEGIN
            + N' WITH SUBJECT = ''PIM Manager access procedure signer'', EXPIRY_DATE = ''20991231'';';
     EXEC sys.sp_executesql @s;
     SET @s = N'CREATE USER ' + QUOTENAME(@cert) + N' FROM CERTIFICATE ' + QUOTENAME(@cert) + N';'; EXEC sys.sp_executesql @s;
-    SET @s = N'GRANT CREATE ROLE, ALTER ANY ROLE, ALTER ANY USER TO ' + QUOTENAME(@cert) + N';'; EXEC sys.sp_executesql @s;
+    SET @s = N'GRANT CREATE ROLE, ALTER ANY ROLE, ALTER ANY USER, VIEW DEFINITION TO ' + QUOTENAME(@cert) + N';'; EXEC sys.sp_executesql @s;
     SET @s = N'GRANT CONTROL ON SCHEMA::[pim] TO ' + QUOTENAME(@cert) + N';'; EXEC sys.sp_executesql @s;
     IF SCHEMA_ID(N'platform') IS NOT NULL BEGIN SET @s = N'GRANT CONTROL ON SCHEMA::[platform] TO ' + QUOTENAME(@cert) + N';'; EXEC sys.sp_executesql @s; END
     IF SCHEMA_ID(N'pimdemo') IS NOT NULL BEGIN SET @s = N'GRANT CONTROL ON SCHEMA::[pimdemo] TO ' + QUOTENAME(@cert) + N';'; EXEC sys.sp_executesql @s; END
@@ -236,10 +266,12 @@ BEGIN
     SET @s = N'ALTER CERTIFICATE ' + QUOTENAME(@cert) + N' REMOVE PRIVATE KEY;'; EXEC sys.sp_executesql @s;
 END
 "@)
-    [void]$b.Add(@"
-IF DATABASE_PRINCIPAL_ID(N'pim_updater') IS NULL EXEC(N'CREATE ROLE [pim_updater] AUTHORIZATION [dbo];');
-GRANT EXECUTE ON OBJECT::[pim].[usp_ApplyAccess] TO [pim_updater];
-"@)
+    # v2: EVERY catalog role is created HERE, owned by dbo (the procedure cannot create a dbo-owned role). A role the
+    # procedure created later is owned by its CALLER (a signature adds rights, not identity -- real SQL, VM 2026-10-15),
+    # so every pim_* role not owned by dbo is handed to dbo here too.
+    $roleLines = @(foreach ($r in (Get-PimSqlAccessCatalog).Keys) { "IF DATABASE_PRINCIPAL_ID(N'$r') IS NULL EXEC(N'CREATE ROLE [$r] AUTHORIZATION [dbo];');" })
+    $ownLine = "DECLARE @own NVARCHAR(MAX); SELECT @own = STRING_AGG(CONVERT(NVARCHAR(MAX), N'ALTER AUTHORIZATION ON ROLE::' + QUOTENAME(name) + N' TO [dbo];'), N' ') FROM sys.database_principals WHERE type = 'R' AND is_fixed_role = 0 AND name LIKE N'pim[_]%' AND owning_principal_id <> 1; IF @own IS NOT NULL EXEC sys.sp_executesql @own;"
+    [void]$b.Add((($roleLines -join "`n") + "`n" + $ownLine + "`n" + 'GRANT EXECUTE ON OBJECT::[pim].[usp_ApplyAccess] TO [pim_updater];'))
     if ("$UpdaterUserName" -and "$UpdaterAppId") {
         if ("$UpdaterUserName" -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._@-]{0,127}$') { throw "Get-PimSqlAccessAdminBatches: '$UpdaterUserName' is not a safe database user name." }
         $g = [guid]"$UpdaterAppId"
@@ -400,12 +432,12 @@ function Invoke-PimSqlAccessConverge {
     if (-not $Query) { $Query = { param($cs, $sql) Invoke-PimSqlQuery -ConnectionString $cs -Sql $sql } }
     if (-not $Exec) { $Exec = { param($cs, $sql) [void](Invoke-PimSqlNonQuery -ConnectionString $cs -Sql $sql) } }
     if (-not $NameMap) { $NameMap = Get-PimSqlAccessInstallNameMap }
-    $parts = (Get-PimSqlAccessStateSql) -split ';\s*\r?\nSELECT r\.name', 2
-    $facts = @(& $Query $ConnectionString ($parts[0] + ';'))[0]
+    $st = Get-PimSqlAccessState -ConnectionString $ConnectionString -Query $Query
+    $facts = $st.facts
     if (-not $facts -or "$($facts.procExists)" -ne '1' -or -not "$($facts.signer)") {
         return [pscustomobject]@{ applied = $false; reason = 'the access procedure is not installed yet -- an admin run (setup or the Support-app cut-over) installs it; nothing changed'; statements = 0 }
     }
-    $held = @(& $Query $ConnectionString ('SELECT r.name' + $parts[1]))
+    $held = @($st.held)
     $principals = @(& $Query $ConnectionString "SELECT name, CONVERT(VARCHAR(40), sid, 1) AS sid FROM sys.database_principals WHERE type = 'E';")
     $users = @(Get-PimSqlAccessComponentUsers -Principals $principals -NameMap $NameMap)
     $revoke = @(Get-PimSqlAccessRevokeList -Held $held)
@@ -443,10 +475,30 @@ function Invoke-PimSqlAccessInstall {
     param([string]$ConnectionString = '', [Parameter(Mandatory)][scriptblock]$Query, [Parameter(Mandatory)][scriptblock]$Exec,
           [string]$UpdaterUserName = '', [string]$UpdaterAppId = '', [System.Collections.IDictionary]$NameMap)
     foreach ($b in @(Get-PimSqlAccessAdminBatches -UpdaterUserName $UpdaterUserName -UpdaterAppId $UpdaterAppId)) { & $Exec $ConnectionString $b }
-    $parts = (Get-PimSqlAccessStateSql) -split ';\s*\r?\nSELECT r\.name', 2
-    $facts = @(& $Query $ConnectionString ($parts[0] + ';'))[0]
+    $facts = (Get-PimSqlAccessState -ConnectionString $ConnectionString -Query $Query).facts
     $v = Test-PimSqlAccessInstalledState -Facts $facts
     if (-not $v.ok) { throw "the access model did not install: $($v.problems -join '; ')" }
     $conv = Invoke-PimSqlAccessConverge -ConnectionString $ConnectionString -Query $Query -Exec $Exec -NameMap $NameMap
     return [pscustomobject]@{ ok = $true; signer = "$($facts.signer)"; signerExpiry = $facts.signerExpiry; converge = $conv }
+}
+
+function Get-PimSqlAccessState {
+    <#
+      The access state, read the way a LEAST-PRIVILEGE caller can see it (v2, SI's real-SQL finding 1: a ddladmin-only
+      updater sees no grants and no certificates in the catalog views). First through the signed procedure
+      (@Action = 'state'); when that is not possible (no procedure, the v1 procedure, no EXECUTE) the direct catalog read
+      -- which an admin, or an updater still in the admin group, can see. Returns { facts; held; via }.
+    #>
+    [CmdletBinding()] param([AllowEmptyString()][string]$ConnectionString = '', [Parameter(Mandatory)][scriptblock]$Query)
+    try {
+        $f = @(& $Query $ConnectionString "EXEC [pim].[usp_ApplyAccess] @Action = N'state', @What = N'facts';")[0]
+        if ($f -and "$($f.procExists)" -eq '1') {
+            $h = @(& $Query $ConnectionString "EXEC [pim].[usp_ApplyAccess] @Action = N'state', @What = N'grants';")
+            return [pscustomobject]@{ facts = $f; held = $h; via = 'procedure' }
+        }
+    } catch { }
+    $parts = (Get-PimSqlAccessStateSql) -split ';\s*\r?\nSELECT r\.name', 2
+    $f = @(& $Query $ConnectionString ($parts[0] + ';'))[0]
+    $h = @(& $Query $ConnectionString ('SELECT r.name' + $parts[1]))
+    return [pscustomobject]@{ facts = $f; held = $h; via = 'catalog' }
 }

@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.634 -- 2026-10-15
+
+- Least-privilege SQL access procedure v2, proven on real SQL: the state is read inside the signed procedure, every role is created owned by dbo, a new role never needs rights the updater lacks
+
 ## 2.4.633 -- 2026-10-15
 
 - Settings > Documentation: the product documentation now ships inside the portal (also on private-network installs); least-privilege SQL access (per-component roles through a signed procedure) converges on every update; the environment report no longer expects the web app to hold schema rights
