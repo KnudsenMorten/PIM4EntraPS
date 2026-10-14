@@ -87,7 +87,12 @@ function Get-PimRunKeyNumbers {
         $d = Get-PimDqField $r 'desiredCount'; $l = Get-PimDqField $r 'liveCount'
         if ($null -eq $d -or $null -eq $l) { continue }
         $m = "$(Get-PimDqField $r 'mode')".Trim(); if (-not $m) { $m = "$Mode".Trim() }; if (-not $m) { $m = 'Delta' }
-        $out.Add(@{ key = "$sc|$m"; scope = $sc; mode = $m; numbers = [ordered]@{
+        # PIM 100.146 (a customer 2026-10-14, "AdminMembers live 75, expected 18-28"): a NARROWED live read (only the principals
+        # the rows name) and a FULL read (every membership of every owned group) count different things -- each has its own
+        # history, so a run that switches read is never judged against the other read's numbers
+        $narrow = [bool](Get-PimDqField $r 'liveNarrowed')
+        $k = "$sc|$m"; if ($narrow) { $k += '|narrowed' }
+        $out.Add(@{ key = $k; scope = $sc; mode = $m; narrowed = $narrow; numbers = [ordered]@{
             desired = [int]$d; live = [int]$l; remove = [int](Get-PimDqField $r 'remove'); errors = [int](Get-PimDqField $r 'errors') } })
     }
     return @($out.ToArray())

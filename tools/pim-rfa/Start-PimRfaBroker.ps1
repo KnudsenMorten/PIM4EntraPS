@@ -42,6 +42,8 @@ $sol = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $sol 'engine\rfa\PIM-Rfa.ps1')
 . (Join-Path $sol 'engine\rfa\PIM-RfaStore.ps1')
 . (Join-Path $sol 'engine\rfa\PIM-RfaBroker.ps1')
+# framework §12.11a MAIL-3: the ONE subject builder of PIM (pure -- no network, no store)
+. (Join-Path $sol 'engine\_shared\PIM-MailLayout.ps1')
 
 $script:RfaPageFile = Join-Path $PSScriptRoot 'rfa-portal.html'
 $script:RfaMailTemplate = Join-Path $sol 'templates\mail\rfa-notice.mailtemplate.html'
@@ -52,7 +54,20 @@ function Read-PimRfaBrokerConfig {
     $salt = "$(@($cfg | Where-Object { $_.RowKey -eq 'salt' })[0].value)".Trim()
     $set = @($cfg | Where-Object { $_.RowKey -eq 'settings' })[0]
     $apps = @("$($set.apiAppIds)" -split ',' | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
-    return [pscustomobject]@{ salt = $salt; apiAppIds = $apps; companyName = "$($set.companyName)"; supportEmail = "$($set.supportEmail)" }
+    # environmentName: published by rfa-sync (the Manager header's name) -- the "[<environment>]" of the broker's mail subjects
+    $script:RfaBrokerEnvironmentName = "$($set.environmentName)".Trim()
+    return [pscustomobject]@{ salt = $salt; apiAppIds = $apps; companyName = "$($set.companyName)"; supportEmail = "$($set.supportEmail)"; environmentName = $script:RfaBrokerEnvironmentName }
+}
+
+function Get-PimRfaBrokerMailSubject {
+    # Framework §12.11a MAIL-3: the broker sends its own mails (PIN, "sign in with your admin account"), so it formats their
+    # subject with the same builder as every other PIM mail: "[<environment>] <what> [PIM Manager]". The environment is
+    # the name rfa-sync published; before the first sync, the tenant name the deployment set. These mails carry no
+    # severity word (a PIN is information).
+    param([AllowEmptyString()][string]$What = '')
+    $envName = "$($script:RfaBrokerEnvironmentName)".Trim()
+    if (-not $envName) { $envName = "$env:PIM_RFA_TENANT_NAME".Trim() }
+    return (Get-PimMailSubjectLine -EnvironmentName $envName -What $What)
 }
 
 function Send-PimRfaBrokerMail {
@@ -63,6 +78,7 @@ function Send-PimRfaBrokerMail {
     $html = [IO.File]::ReadAllText($script:RfaMailTemplate)
     $subject = 'PIM'; if ($html -match '<!--\s*subject:\s*(.+?)\s*-->') { $subject = $Matches[1] }
     foreach ($k in $Tokens.Keys) { $v = [System.Net.WebUtility]::HtmlEncode("$($Tokens[$k])"); if ($k -in @('Detail')) { $v = "$($Tokens[$k])" }; $html = $html.Replace("{{$k}}", $v); $subject = $subject.Replace("{{$k}}", "$($Tokens[$k])") }
+    $subject = Get-PimRfaBrokerMailSubject -What $subject
     $tok = Get-PimRestToken -Resource 'graph'
     $body = @{ message = @{ subject = $subject; body = @{ contentType = 'HTML'; content = $html }; toRecipients = @(@{ emailAddress = @{ address = $To } }) }; saveToSentItems = $false } | ConvertTo-Json -Depth 8
     Invoke-RestMethod -Method POST -Uri "https://graph.microsoft.com/v1.0/users/$([uri]::EscapeDataString($sender))/sendMail" -Headers @{ Authorization = "Bearer $tok" } -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($body)) | Out-Null

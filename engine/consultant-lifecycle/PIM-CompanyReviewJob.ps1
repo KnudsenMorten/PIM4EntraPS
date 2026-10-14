@@ -155,7 +155,8 @@ function Invoke-PimCompanyReviewJob {
     }
     foreach ($ml in $mails) {
         if (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) { break }
-        $tok = @{ Title = $ml.title; Headline = $ml.headline; Detail = $ml.detail; Action = $ml.action; PortalUrl = "$($ml.url)"; TenantName = "$($global:PIM_TenantName)"; WhenUtc = $now.ToString('yyyy-MM-dd HH:mm') + ' UTC' }
+        # framework §12.11a MAIL-3: every company-review mail (start, reminder, escalation) asks someone to answer
+        $tok = @{ Title = $ml.title; Headline = $ml.headline; Detail = $ml.detail; Action = $ml.action; PortalUrl = "$($ml.url)"; TenantName = "$($global:PIM_TenantName)"; WhenUtc = $now.ToString('yyyy-MM-dd HH:mm') + ' UTC'; MailSeverity = 'action' }
         try { [void](Send-PimNotifyMail -Type 'rfa-notice' -Tokens $tok -Recipient $ml.to) } catch { $errors.Add("mail to $($ml.to) failed: $($_.Exception.Message)") }
     }
     if ($Store) {

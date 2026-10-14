@@ -421,7 +421,7 @@ function Get-PimDiscoveryDelta {
     # ($Handled, the stable keys we've already proposed/handled), return ONLY the
     # items NOT yet handled -- so a handled item never reappears on the next run, AND
     # roll the handled set forward. PURE; storage-agnostic (the caller persists
-    # $rolled to output/state/discovery-handled-<scope>.json).
+    # $rolled to pim.Settings DiscoveryHandled-<scope>, PIM 100.147).
     #   $Current item must expose a .stableKey (reconcile-plan create/rename rows do).
     param(
         [object[]]$Current = @(),
@@ -921,36 +921,55 @@ function Import-PimApproversFromCsv {
 # containers (auto-import rules) + rename in place; it can never strip access.
 # ===========================================================================
 
-function Get-PimDiscoveryHandledPath {
-    # Per-scope handled-set file: output/state/discovery-handled-<scope>.json
-    # (config-dir aware, same resolution as the other engine state files).
+function Get-PimDiscoveryHandledSettingName {
+    # PURE. The pim.Settings name of a scope's handled set: DiscoveryHandled-<scope> (letters, digits, _ and - only).
     param([Parameter(Mandatory)][string]$Scope)
-    $dir = if (Get-Command Get-PimConfigDir -ErrorAction SilentlyContinue) { try { Get-PimConfigDir } catch { $null } } else { $null }
-    if (-not $dir) { $dir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'output\state' }
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
-    $safe = ($Scope -replace '[^A-Za-z0-9_-]', '_').ToLowerInvariant()
-    Join-Path $dir ("discovery-handled-$safe.json")
+    return ('DiscoveryHandled-' + ($Scope -replace '[^A-Za-z0-9_-]', '_').ToLowerInvariant())
+}
+
+function Get-PimDiscoveryHandledStore {
+    <#
+      Where the handled sets live: pim.Settings (PIM 100.147 -- PIM v2 is SQL-only). They lived in a FILE
+      (output/state/discovery-handled-<scope>.json) until 2.4.627: a hosted job runs in a fresh container every time, so the
+      file was gone at the next run and every role / scope was reported "new" again on every run (a customer, 145 Entra
+      roles, 2026-10-14). Returns @{ seam = @{ get; set } } (the test seam $global:PIM_DiscoveryHandledStore: two
+      scriptblocks) or @{ cs = <connection string> } (pim.Settings, read by the callers with Get-PimSqlSetting directly --
+      never a .GetNewClosure() scriptblock: a closure gets its own module scope and cannot see the dot-sourced store
+      functions, the rule Test-PimHybridWorker L19 enforces). THROWS when there is no store: a sweep that cannot read what
+      it reported before must fail, never report everything as new again.
+    #>
+    $seam = $global:PIM_DiscoveryHandledStore
+    if ($seam -is [System.Collections.IDictionary] -and $seam['get'] -is [scriptblock] -and $seam['set'] -is [scriptblock]) { return @{ seam = $seam } }
+    $cs = $null
+    if ("$($global:PIM_EngineSqlCs)".Trim()) { $cs = "$($global:PIM_EngineSqlCs)" }
+    elseif (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) { $cs = Get-PimSqlSettingsConnectionString }
+    if (-not "$cs".Trim() -or -not (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) {
+        throw 'discovery: the store (pim.Settings) is not reachable -- the roles and scopes already reported cannot be read'
+    }
+    return @{ cs = "$cs" }
 }
 
 function Get-PimDiscoveryHandledSet {
-    # Read the previously-handled stable keys for a scope (the array the delta
-    # rolls forward). Missing / unreadable file -> empty set (never throws).
+    # Read the previously-handled stable keys for a scope (the array the delta rolls forward) from pim.Settings
+    # (Get-PimDiscoveryHandledStore). Never stored yet -> empty set (the first run reports what it finds). A store that
+    # cannot be read THROWS (the job fails) -- never an empty set, which would report everything as new again.
     param([Parameter(Mandatory)][string]$Scope)
-    $path = Get-PimDiscoveryHandledPath -Scope $Scope
-    if (-not (Test-Path -LiteralPath $path)) { return @() }
-    try {
-        $doc = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
-        return @($doc.handled)
-    } catch { return @() }
+    $st = Get-PimDiscoveryHandledStore
+    $name = Get-PimDiscoveryHandledSettingName -Scope $Scope
+    $doc = if ($st.seam) { & $st.seam.get $name } else { Get-PimSqlSetting -ConnectionString $st.cs -Name $name }
+    if ($null -eq $doc) { return @() }
+    if ($doc -is [string]) { try { $doc = $doc | ConvertFrom-Json } catch { return @() } }
+    return @(@($doc.handled) | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
 }
 
 function Save-PimDiscoveryHandledSet {
-    # Persist the rolled-forward handled set for a scope.
+    # Persist the rolled-forward handled set for a scope in pim.Settings. Returns the setting name.
     param([Parameter(Mandatory)][string]$Scope, [string[]]$Handled = @())
-    $path = Get-PimDiscoveryHandledPath -Scope $Scope
-    $doc  = [pscustomobject]@{ scope = "$Scope"; handled = @($Handled); updatedUtc = ([datetime]::UtcNow).ToString('o') }
-    $doc | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $path -Encoding UTF8
-    return $path
+    $st = Get-PimDiscoveryHandledStore
+    $name = Get-PimDiscoveryHandledSettingName -Scope $Scope
+    $doc = [pscustomobject]@{ scope = "$Scope"; handled = [object[]]@($Handled); updatedUtc = ([datetime]::UtcNow).ToString('o') }
+    if ($st.seam) { & $st.seam.set $name $doc } else { Set-PimSqlSetting -ConnectionString $st.cs -Name $name -Value $doc }
+    return $name
 }
 
 function Select-PimReconcilePlanByKeys {

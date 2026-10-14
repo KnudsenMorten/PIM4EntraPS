@@ -79,14 +79,45 @@ function Get-PimLicenceRequestDecision {
     return @{ action = 'knock'; reason = $why; clearHint = $clear }
 }
 
+function Get-PimLicenceFileSha256 {
+    <#
+      PURE. Framework §12.11f CR8 B2 (PIM 100.148): the SHA-256 (64 lower-case hex) of the licence FILE this install holds --
+      the UTF-8 bytes of the stored text, a leading BOM left out (the text was stored without it, Test-PimLicenceDelivery).
+      '' when no licence text is held.
+    #>
+    param([AllowNull()][string]$LicenceText)
+    $t = "$LicenceText".TrimStart([char]0xFEFF)
+    if (-not $t.Trim()) { return '' }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return (-join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($t)) | ForEach-Object { $_.ToString('x2') })) } finally { $sha.Dispose() }
+}
+
+function New-PimLicenceKnockHeaders {
+    <#
+      PURE. Framework §12.11f CR8 B2 (PIM 100.148): the knock's proof of possession in a header -- X-Invardia-Install-Key
+      when this install has a usable key (Resolve-PimInvardiaInstallKey: 'inv-...'); no header otherwise.
+    #>
+    param([AllowNull()][string]$InstallKey)
+    $k = "$InstallKey".Trim()
+    if ($k -match '^inv-[A-Za-z0-9_-]{20,100}$') { return @{ 'X-Invardia-Install-Key' = $k } }
+    return @{}
+}
+
 function New-PimLicenceKnockBody {
-    <# PURE. The knock request body (contract field names). Empty optional fields are left out. #>
+    <#
+      PURE. The knock request body (contract field names). Empty optional fields are left out.
+      CR8 B2 (PIM 100.148): currentLicenceSha256 = the SHA-256 of the licence file held (Get-PimLicenceFileSha256), sent
+      whenever a licence is held -- Invardia auto-approves a renewal / re-issue only with a proof of possession (this, a
+      licence id it issued, or the install key header).
+    #>
     param([Parameter(Mandatory)][string]$Version, [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$InstallId,
-          [string]$Edition = '', [string]$ContactEmail = '', [string]$CurrentLicenceId = '', $CurrentValidTo)
+          [string]$Edition = '', [string]$ContactEmail = '', [string]$CurrentLicenceId = '', $CurrentValidTo, [string]$CurrentLicenceSha256 = '')
     $b = [ordered]@{ product = 'pim-manager'; version = $Version; tenantId = "$TenantId".ToLowerInvariant(); installId = $InstallId }
     if ("$Edition".Trim()) { $b['edition'] = "$Edition".Trim() }
     if ("$ContactEmail".Trim()) { $b['contactEmail'] = "$ContactEmail".Trim() }
     if ("$CurrentLicenceId".Trim()) { $b['currentLicenceId'] = "$CurrentLicenceId".Trim() }
+    $hs = "$CurrentLicenceSha256".Trim().ToLowerInvariant()
+    if ($hs -match '^[0-9a-f]{64}$') { $b['currentLicenceSha256'] = $hs }
     if ($CurrentValidTo) { try { $b['currentValidTo'] = ([datetime]$CurrentValidTo).ToString('yyyy-MM-dd') } catch { } }
     return $b
 }
@@ -141,8 +172,13 @@ function Invoke-PimLicenceRequestCycle {
     if ($d.action -eq 'knock') {
         $installId = "$(& $GetSetting 'InstallId')".Trim()
         if (-not $installId) { $installId = [guid]::NewGuid().ToString(); & $SetSetting 'InstallId' $installId }
-        $body = New-PimLicenceKnockBody -Version $Version -TenantId $tid -InstallId $installId -CurrentLicenceId "$(if ($lic) { $lic.LicenseId })" -CurrentValidTo $(if ($lic) { $lic.ValidTo })
-        $r = $null; try { $r = & $Http 'POST' "$base/api/licence-requests" $body @{} } catch { $r = @{ status = 0; body = $null; error = $_.Exception.Message } }
+        # CR8 B2 (PIM 100.148): the proof of possession -- the held licence file's SHA-256 in the body, the install key (when
+        # this install has one) in the header. Without either, Invardia keeps a renewal Pending for the owner.
+        $licText = ''; try { $lt = & $GetSetting 'License'; if ($lt -is [string]) { $licText = $lt } } catch { $licText = '' }
+        $body = New-PimLicenceKnockBody -Version $Version -TenantId $tid -InstallId $installId -CurrentLicenceId "$(if ($lic) { $lic.LicenseId })" -CurrentValidTo $(if ($lic) { $lic.ValidTo }) `
+                    -CurrentLicenceSha256 (Get-PimLicenceFileSha256 -LicenceText $licText)
+        $ikey = if (Get-Command Resolve-PimInvardiaInstallKey -ErrorAction SilentlyContinue) { Resolve-PimInvardiaInstallKey -GetSetting $GetSetting } else { '' }
+        $r = $null; try { $r = & $Http 'POST' "$base/api/licence-requests" $body (New-PimLicenceKnockHeaders -InstallKey $ikey) } catch { $r = @{ status = 0; body = $null; error = $_.Exception.Message } }
         if ("$($r.status)" -notin '200', '201', '202' -or -not "$($r.body.pullToken)") {
             $st = & $save 'Error' "the licence request could not be sent ($($r.status) $($r.error))" $null
             return @{ action = 'knock'; ok = $false; state = $st; message = $st.message }

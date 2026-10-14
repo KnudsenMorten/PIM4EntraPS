@@ -759,7 +759,7 @@ Write-PimStartupLine -Message "[scheduler] REST engine wired (scopes: $((Get-Pim
 # Wire the REAL discovery handler (the three discovery jobs: Azure / PowerBI / Entra).
 # It reconciles the live enumerated scopes against the current definitions, surfaces
 # ONLY not-yet-handled items (the handled-set delta, persisted per scope under
-# output/state/discovery-handled-<scope>.json) and enqueues just those fresh items
+# pim.Settings DiscoveryHandled-<scope>, PIM 100.147) and enqueues just those fresh items
 # onto the SAME change queue queue-apply drains -- propose-don't-auto-map, never
 # auto-delete (orphans are surfaced, never removed by a scheduled run). The existing
 # definition rows come from $global:PIM_DiscoveryExistingReader (a launcher hook that

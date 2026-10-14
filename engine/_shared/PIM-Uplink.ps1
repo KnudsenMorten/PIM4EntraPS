@@ -1308,6 +1308,16 @@ function Invoke-PimUplinkCycle {
                     if ("$($ir.managingTenantId)") { $hb | Add-Member -NotePropertyName 'ManagingTenantId' -NotePropertyValue "$($ir.managingTenantId)" -Force; $hbAdd += 'ManagingTenantId' }
                 }
             } catch { }
+            # framework §12.11a MAIL-3 item 4 / PIM 100.145: EnvironmentName = the name the Manager header shows (pim.Settings
+            # 'EnvironmentName'), so Invardia shows the same name as the mail subjects. Left out when none is set (never the
+            # tenant id); additive, so a platform that does not know it yet takes the heartbeat without it.
+            try {
+                $envSet = & $GetSetting 'EnvironmentName'
+                $envHb = if ($envSet -is [string]) { $envSet } elseif ($envSet -and $envSet.PSObject.Properties['name']) { "$($envSet.name)" } else { '' }
+                $envHb = ("$envHb" -replace '\s+', ' ').Trim()
+                if ($envHb.Length -gt 100) { $envHb = $envHb.Substring(0, 100).Trim() }
+                if ($envHb) { $hb | Add-Member -NotePropertyName 'EnvironmentName' -NotePropertyValue $envHb -Force; $hbAdd += 'EnvironmentName' }
+            } catch { }
             if ($SetupEnabled -and $null -ne $SetupFacts) {
                 $ctl = @(); try { $ctl = @(ConvertTo-PimUplinkHeartbeatControls -Facts $SetupFacts -Extended:$SetupExtended -NowUtc $NowUtc) } catch { $ctl = @() }
                 if ($ctl.Count) {
