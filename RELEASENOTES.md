@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.628 -- 2026-10-14
+
+- Mail subjects in one format: [environment] severity: what happened [PIM Manager] (framework 12.11a MAIL-3); the environment name on the heartbeat; discovery remembers reported items in SQL (no repeat mails); the data-quality check compares like with like; the licence request proves the held licence (CR8 B2)
+
 ## 2.4.627 -- 2026-10-14
 
 - Power BI: one setup line (a person signs in) adds PIM Manager to the workspaces it manages; the engine then adds the PIM groups itself through the Fabric workspace API (add only)

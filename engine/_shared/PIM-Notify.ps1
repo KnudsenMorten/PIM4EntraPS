@@ -517,13 +517,15 @@ function Send-PimNotifyMail {
     # the footer" -- a hold mail said only "this tenant"): EVERY mail names its environment, at this one chokepoint -- the
     # subject starts with it and the footer carries environment, tenant name + id, PIM Manager version and the link.
     $envInfo = Get-PimMailEnvironmentInfo -PortalBase "$($portal.base)"
-    if ($envInfo.name) {
-        # PIM 100.135 (Invardia's format): "<environment name>: <what happened>" -- the name first, the old [..] tags
-        # ("[PIM Alert]", "[PIM Discovery]") dropped, never prefixed twice
-        if (Get-Command Get-PimMailSubjectLine -ErrorAction SilentlyContinue) { $r.Subject = Get-PimMailSubjectLine -EnvironmentName $envInfo.name -What "$($r.Subject)" }
-        # StartsWith, never -like: '[...]' is a wildcard character SET to -like ("[Contoso]*" matched "CUSTOM ...")
-        elseif (-not "$($r.Subject)".StartsWith("[$($envInfo.name)]", [System.StringComparison]::OrdinalIgnoreCase)) { $r.Subject = "[$($envInfo.name)] $($r.Subject)" }
+    # Framework §12.11a MAIL-3 (CR6): EVERY subject, here at the one chokepoint -- "[<environment>] <severity word: >what
+    # happened [<ticket>] [PIM Manager]", max 120 characters; the old [..] tags ("[PIM Alert]", "[PIM Discovery]") dropped,
+    # never prefixed twice. The alert mail's severity comes from its model, a template mail's from its type / MailSeverity.
+    if (Get-Command Get-PimMailSubjectLine -ErrorAction SilentlyContinue) {
+        $sevS = if ($alertModel) { "$($alertModel.severity)" } elseif (Get-Command Get-PimMailTypeSeverity -ErrorAction SilentlyContinue) { Get-PimMailTypeSeverity -Type $Type -Tokens $Tokens } else { '' }
+        $r.Subject = Get-PimMailSubjectLine -EnvironmentName $envInfo.name -What "$($r.Subject)" -Severity $sevS -Ticket "$($Tokens['Ticket'])"
     }
+    # StartsWith, never -like: '[...]' is a wildcard character SET to -like ("[Contoso]*" matched "CUSTOM ...")
+    elseif ($envInfo.name -and -not "$($r.Subject)".StartsWith("[$($envInfo.name)]", [System.StringComparison]::OrdinalIgnoreCase)) { $r.Subject = "[$($envInfo.name)] $($r.Subject)" }
     # MAIL-2: a designed mail (PIM-MailLayout.ps1 New-PimMailDocument) carries its OWN footer with the same facts -- one footer,
     # not two. Every other mail gets the MAIL-1 footer here, as before.
     if ($envInfo.name -and $r.BodyHtml -notmatch 'class="pim-env-footer"') {

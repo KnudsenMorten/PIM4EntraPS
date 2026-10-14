@@ -170,6 +170,9 @@ function Invoke-PimRfaSyncJob {
     # the portal page's company name + support address (plain-string settings; a read that fails = not shown)
     $companyName = ''; try { $companyName = "$(Get-PimSqlSetting -ConnectionString $cs -Name 'CompanyName')" } catch { $companyName = '' }
     $supportEmail = ''; try { $supportEmail = "$(Get-PimSqlSetting -ConnectionString $cs -Name 'SupportEmail')" } catch { $supportEmail = '' }
+    # framework §12.11a MAIL-3: the broker's mails carry the same "[<environment>]" as every other PIM mail -- the name the
+    # Manager header shows (Get-PimMailEnvironmentInfo), published to the broker with the portal settings
+    $envNamePub = ''; if (Get-Command Get-PimMailEnvironmentInfo -ErrorAction SilentlyContinue) { try { $envNamePub = "$((Get-PimMailEnvironmentInfo).name)".Trim() } catch { $envNamePub = '' } }
     $salt = "$(if ($settings) { $settings.salt })".Trim()
     if (-not $salt -and -not $closeOnly) {
         $b = New-Object byte[] 16; $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create(); try { $rng.GetBytes($b) } finally { $rng.Dispose() }
@@ -269,7 +272,7 @@ function Invoke-PimRfaSyncJob {
             foreach ($o in @(if ($d) { $d.Owners })) {
                 $mails.Add(@{ to = $o; title = "Access request from $($nr.request.upn)"; headline = $(if ($nr.request.kind -eq 'group') { "Someone asks for AD-HOC membership of $($nr.request.groupName) (removed automatically when the time is up)." } else { 'Someone asks to have their admin account enabled.' })
                               detail = "<b>$([System.Net.WebUtility]::HtmlEncode($nr.request.upn))</b> asks for $($nr.request.hours) hours$(if ($nr.request.company) { " (consultant from $([System.Net.WebUtility]::HtmlEncode($nr.request.company)))" }). Reason: $([System.Net.WebUtility]::HtmlEncode($(if ($nr.request.reason) { $nr.request.reason } else { '(none given)' })))."
-                              action = 'Open Access requests in the PIM Manager and approve or deny it within 24 hours.'; url = $managerUrl })
+                              action = 'Open Access requests in the PIM Manager and approve or deny it within 24 hours.'; url = $managerUrl; severity = 'action' })
             }
             if (-not @(if ($d) { $d.Owners }).Count) { $errors.Add("$($nr.request.upn): the department has no Owner -- nobody can approve the request") }
         }
@@ -351,6 +354,8 @@ function Invoke-PimRfaSyncJob {
     foreach ($ml in $mails) {
         if (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) { break }
         $tok = @{ Title = $ml.title; Headline = $ml.headline; Detail = $ml.detail; Action = $ml.action; PortalUrl = "$($ml.url)"; TenantName = "$($global:PIM_TenantName)"; WhenUtc = $now.ToString('yyyy-MM-dd HH:mm') + ' UTC' }
+        # framework §12.11a MAIL-3: a mail that asks someone to decide says "Action needed" in its subject
+        if ("$($ml.severity)".Trim()) { $tok['MailSeverity'] = "$($ml.severity)" }
         try { $res = Send-PimNotifyMail -Type 'rfa-notice' -Tokens $tok -Recipient $ml.to; if ($res -and $res.PSObject.Properties['sent'] -and -not $res.sent -and "$($res.reason)" -notmatch '(?i)whatif|held') { $errors.Add("mail to $($ml.to) not sent: $($res.reason)") } }
         catch { $errors.Add("mail to $($ml.to) failed: $($_.Exception.Message)") }
     }
@@ -364,8 +369,8 @@ function Invoke-PimRfaSyncJob {
         # + what the portal page shows (operator 2026-10-05): pim.Settings 'CompanyName' (a plain string, like
         # EnvironmentName -- "so they know where they are signing in") and 'SupportEmail' (one address -> a "Need help?" line)
         $pub = Get-PimRfaPortalInfo -CompanyName $companyName -SupportEmail $supportEmail
-        if (-not $cfgS -or "$($cfgS.apiAppIds)" -ne $appsCsv -or "$($cfgS.companyName)" -ne $pub.companyName -or "$($cfgS.supportEmail)" -ne $pub.supportEmail) {
-            Set-PimRfaStoreEntity -Store $Store -Table 'RfaConfig' -PartitionKey 'config' -RowKey 'settings' -Entity @{ apiAppIds = $appsCsv; companyName = $pub.companyName; supportEmail = $pub.supportEmail }
+        if (-not $cfgS -or "$($cfgS.apiAppIds)" -ne $appsCsv -or "$($cfgS.companyName)" -ne $pub.companyName -or "$($cfgS.supportEmail)" -ne $pub.supportEmail -or "$($cfgS.environmentName)" -ne $envNamePub) {
+            Set-PimRfaStoreEntity -Store $Store -Table 'RfaConfig' -PartitionKey 'config' -RowKey 'settings' -Entity @{ apiAppIds = $appsCsv; companyName = $pub.companyName; supportEmail = $pub.supportEmail; environmentName = $envNamePub }
         }
         if (Get-Command Get-PimApiKeyPublishRows -ErrorAction SilentlyContinue) {
             $wantK = @{}; foreach ($k in @(Get-PimApiKeyPublishRows -Keys $apiKeys -NowUtc $now)) { $wantK["$($k.hash)"] = $k }

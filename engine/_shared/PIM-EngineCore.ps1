@@ -1623,6 +1623,9 @@ function Invoke-PimEngineScope {
         managedLive=$__managedLive                # drift read only: the live identities the engine matched to a definition
         create=$diff.create.Count; update=$diff.update.Count; remove=$diff.remove.Count; nochange=$diff.nochange.Count
         desiredCount=@($desired).Count; liveCount=@($live).Count   # PIM 100.72 (6): the run's key numbers (anomaly detection)
+        # PIM 100.146: HOW live was read -- the narrowed read (only the principals the rows name) counts far fewer items than
+        # the full read of every owned group; the anomaly check compares only runs read the same way
+        liveNarrowed=[bool]$Context['__pimLiveNarrowed']
         ledgerUnreadable=[bool]$__ledgerUnreadable                 # PIM 100.72 (4): telemetry, not a guard -- the tick marks the run 'warning'
         applied=$script:__applied; skipped=$script:__skipped; errors=$script:__errors; plan=$plan.ToArray(); ok=($script:__errors -eq 0)
         disableAborted=$script:__disableAborted

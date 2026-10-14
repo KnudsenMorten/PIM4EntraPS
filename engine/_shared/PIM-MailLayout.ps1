@@ -261,22 +261,81 @@ function Format-PimMailWhen {
     return ($utc.ToString('yyyy-MM-dd HH:mm', [System.Globalization.CultureInfo]::InvariantCulture) + ' UTC')
 }
 
+function Get-PimMailSeverityWord {
+    <#
+      PURE. Framework §12.11a MAIL-3 (CR6): the ONE severity word a subject may carry -- 'Failed', 'Warning' or 'Action
+      needed' -- from any spelling a sender uses (failure / error / critical, warning / rolledback, action / guard /
+      held back). '' for anything else, and for 'none' / 'info' (a normal report or information mail has no word).
+    #>
+    param([AllowNull()][string]$Value)
+    switch -Regex ("$Value".Trim()) {
+        '^(?i)(failed|failure|error|critical)$'                          { return 'Failed' }
+        '^(?i)(warning|rolledback|rolled back)$'                         { return 'Warning' }
+        '^(?i)(action needed|action|guard|held back|needs customer.s action)$' { return 'Action needed' }
+    }
+    return ''
+}
+
 function Get-PimMailSubjectLine {
     <#
-      PURE. "<environment name>: <what happened>" -- the name FIRST; "tenant <id>" only when there is no name. Leading
-      [..] tags ("[PIM Alert]"), "--" and the old product name are removed; no full stop at the end. A subject that already
-      starts with the name is not prefixed twice.
+      PURE. Framework §12.11a MAIL-3 (CR6, owner + Thomas approved 2026-10-14), the ONE subject format of every PIM mail:
+        [<Environment>] <severity word: >what happened [<ticket>] [PIM Manager]
+      * <Environment> = the name the Manager header shows; "tenant <id>" only when there is no name; none when neither.
+      * the severity word only when relevant (Get-PimMailSeverityWord: Failed / Warning / Action needed).
+      * [<ticket>] only when there is one.
+      * at most -MaxLength (120) characters: ONLY "what happened" is shortened (with "..."); brackets, severity word and
+        ticket are always kept.
+      Idempotent: a subject already in this format (the chokepoint formats a second time), or in the old
+      "<environment>: <what>" format (a template a customer stored), is taken apart and rebuilt, never prefixed twice; its
+      severity word and ticket are kept when the caller gives none. Leading [..] tags ("[PIM Alert]"), "--" and the old
+      product name are removed; no full stop at the end of "what happened".
     #>
-    param([string]$EnvironmentName = '', [string]$TenantId = '', [AllowEmptyString()][string]$What = '')
+    param([string]$EnvironmentName = '', [string]$TenantId = '', [AllowEmptyString()][string]$What = '',
+          [string]$Severity = '', [string]$Ticket = '', [int]$MaxLength = 120)
     $w = ("$What" -replace '\s+', ' ').Trim()
+    # take an already formatted subject apart: the product tag, the ticket, the environment tag, the severity word
+    $w = [regex]::Replace($w, '(\s*\[(?i:PIM Manager|PIM4EntraPS)\])+$', '')
+    $tk = "$Ticket".Trim()
+    $tm = [regex]::Match($w, '\s*\[([A-Za-z]{2,12}-\d+)\]$')
+    if ($tm.Success) { if (-not $tk) { $tk = $tm.Groups[1].Value }; $w = $w.Substring(0, $tm.Index) }
     $w = [regex]::Replace($w, '^(\[[^\]]*\]\s*)+', '')
-    $w = ($w -replace '\s+--\s+', ', ' -replace 'PIM4EntraPS', 'PIM Manager').Trim().TrimEnd('.').Trim()
-    if (-not $w) { $w = 'Message from PIM Manager' }
     $n = ("$EnvironmentName" -replace '\s+', ' ').Trim()
     if (-not $n -and "$TenantId".Trim()) { $n = 'tenant ' + "$TenantId".Trim() }
-    if (-not $n) { return $w }
-    if ($w.StartsWith($n + ':', [System.StringComparison]::OrdinalIgnoreCase)) { return $w }
-    return ($n + ': ' + $w)
+    if ($n -and $w.StartsWith($n + ':', [System.StringComparison]::OrdinalIgnoreCase)) { $w = $w.Substring($n.Length + 1).Trim() }
+    $sev = Get-PimMailSeverityWord $Severity
+    $sm = [regex]::Match($w, '^(?i)(Failed|Warning|Action needed)\s*:\s*')
+    if ($sm.Success) { if (-not $sev) { $sev = Get-PimMailSeverityWord $sm.Groups[1].Value }; $w = $w.Substring($sm.Length) }
+    # one full stop at the end goes; an ellipsis ("...", a subject shortened before) stays
+    $w = (($w -replace '\s+--\s+', ', ' -replace 'PIM4EntraPS', 'PIM Manager').Trim() -replace '(?<!\.)\.$', '').Trim()
+    # "Action needed" already says what an action subject's own tail said
+    if ($sev -eq 'Action needed') { $w = [regex]::Replace($w, '\s+-\s+it waits for your decision$', '') }
+    if (-not $w) { $w = 'Message from PIM Manager' }
+    $pre = ''
+    if ($n) { $pre = '[' + $n + '] ' }
+    if ($sev) { $pre += $sev + ': ' }
+    $post = ''
+    if ($tk) { $post = ' [' + $tk + ']' }
+    $post += ' [PIM Manager]'
+    $room = $MaxLength - $pre.Length - $post.Length
+    if ($w.Length -gt $room) {
+        # an approval's deadline (" - decide by <when>", PIM 100.135) is kept: the words before it are shortened instead
+        $tail = ''
+        $dm = [regex]::Match($w, '\s+-\s+decide by .+$')
+        if ($dm.Success -and $dm.Length -lt ($room - 10)) { $tail = $dm.Value; $w = $w.Substring(0, $dm.Index) }
+        $r2 = $room - $tail.Length
+        if ($w.Length -gt $r2) {
+            if ($r2 -le 3) { $w = '...' }
+            else {
+                $cut = $w.Substring(0, $r2 - 3)
+                # at a word boundary when one is near -- a cut that already ends a whole word ("... is not") keeps it
+                $sp = $cut.LastIndexOf(' ')
+                if ($w[$r2 - 3] -ne ' ' -and $sp -gt ($cut.Length / 2)) { $cut = $cut.Substring(0, $sp) }
+                $w = $cut.TrimEnd(' ', ',', ';', ':', '-') + '...'
+            }
+        }
+        $w += $tail
+    }
+    return ($pre + $w + $post)
 }
 
 function Get-PimMailHeadingLine {
@@ -392,7 +451,9 @@ function New-PimEventMail {
         environment   the environment's name (Get-PimMailEnvironmentInfo .name; "tenant <id>" is used in the subject only)
         tenantId      the tenant id (subject fallback, and a line in Details for support)
         version       the product version
-        subjectWhat   what happened, in plain words (the subject after "<environment>: ")
+        subjectWhat   what happened, in plain words (the subject's middle part, Get-PimMailSubjectLine)
+        severity      MAIL-3 severity word source ('failure' / 'warning' / 'action' / '' -- Get-PimMailSeverityWord)
+        ticket        a ticket number, when there is one ('' = none)
         topic         the heading's last part ("Job delta-workloads", "Safety check", "Approval needed")
         opener        "For your information:" / "Please take a look:" (guard and action mails), '' for none
         summary       1-3 calm sentences
@@ -419,10 +480,13 @@ function New-PimEventMail {
     $tid = "$(& $g 'tenantId')".Trim()
     $ver = "$(& $g 'version')".Trim()
     $what = & $clean (& $g 'subjectWhat')
-    $subject = Get-PimMailSubjectLine -EnvironmentName $envName -TenantId $tid -What $what
+    $subject = Get-PimMailSubjectLine -EnvironmentName $envName -TenantId $tid -What $what -Severity "$(& $g 'severity')" -Ticket "$(& $g 'ticket')"
     $heading = Get-PimMailHeadingLine -EnvironmentName $bodyEnv -Topic (& $clean (& $g 'topic'))
     # the heading never repeats the subject
-    $subjWhat = ($subject -replace ('^' + [regex]::Escape($envName) + ':\s*'), '')
+    # "what happened" of the MAIL-3 subject: without [env], the severity word, [ticket] and [PIM Manager]
+    $subjWhat = ($subject -replace '(\s*\[[^\]]*\])+$', '')
+    if ($envName) { $subjWhat = $subjWhat -replace ('^\[' + [regex]::Escape($envName) + '\]\s*'), '' }
+    $subjWhat = $subjWhat -replace '^(Failed|Warning|Action needed):\s*', ''
     if ($subjWhat -and $heading.EndsWith(' - ' + $subjWhat.Substring(0, 1).ToUpperInvariant() + $subjWhat.Substring(1))) { $heading = Get-PimMailHeadingLine -EnvironmentName $bodyEnv -Topic 'Notice' }
     $opener = & $clean (& $g 'opener')
     $summary = & $clean (& $g 'summary')
@@ -786,6 +850,13 @@ function Get-PimAlertMailModel {
     }
     $deadline = ConvertTo-PimAlertOneLine (& $get 'AlertDeadline')
     if ($kind -eq 'action') { $subjWhat = $subjWhat + $(if ($deadline) { ' - decide by ' + $deadline } else { ' - it waits for your decision' }) }
+    # MAIL-3 (framework §12.11a): the subject's severity word. A failure = Failed; a held change or a decision = Action
+    # needed; any other alert = Warning (drift, gaps, expiring, throttled) -- except a test mail, which is information.
+    # AlertSeverity overrides it ('none' = no word).
+    $severity = switch ($kind) { 'failure' { 'failure' } 'guard' { 'action' } 'action' { 'action' } default { 'warning' } }
+    if ($evt -eq 'mail-test' -or "$rawTitle" -match '(?i)\btest (mail|alert)\b') { $severity = '' }
+    $sevTok = (& $get 'AlertSeverity').Trim()
+    if ($sevTok) { $severity = if ($sevTok -ieq 'none') { '' } else { $sevTok } }
     $topic = ConvertTo-PimAlertOneLine (& $get 'AlertTopic')
     if (-not $topic) {
         $topic = switch ($kind) {
@@ -884,7 +955,7 @@ function Get-PimAlertMailModel {
     if ($tz -and $when -notmatch 'UTC$') { $u = Format-PimMailWhen -Value $(if ($whenSrc) { $whenSrc } else { $NowUtc }) -TimeZoneId ''; if ($u) { $details.Add('Time (UTC): ' + $u) } }
 
     $evModel = [ordered]@{
-        environment = $envName; tenantId = $tid; version = $ver; subjectWhat = $subjWhat; topic = $topic
+        environment = $envName; tenantId = $tid; version = $ver; subjectWhat = $subjWhat; severity = $severity; topic = $topic
         opener = $opener; summary = $summary; qa = $qa; facts = $facts; sections = $sections
         causesTitle = $(if ($findings.Count -and $kind -ne 'failure') { 'What was found' } else { 'What happened, by cause' })
         causes = @($causes.ToArray()); details = @($details.ToArray())
@@ -896,7 +967,7 @@ function Get-PimAlertMailModel {
         title = $title; customer = $customer; environment = $envName; solution = $solution
         who = $who; status = $status; problem = $problem; todo = $todo; findings = @($findings); detailHtml = $detail; when = $when
         support = ((Get-PimAlertSupportMail) + ' - customer portal ' + (Get-PimAlertSupportPortal))
-        kind = $kind; job = $job; topic = $topic; subjectWhat = $subjWhat; summary = $summary; opener = $opener; qa = $qa
+        kind = $kind; severity = $severity; job = $job; topic = $topic; subjectWhat = $subjWhat; summary = $summary; opener = $opener; qa = $qa
         facts = $facts; causes = @($causes.ToArray()); sections = $sections; details = @($details.ToArray()); items = $items
         subject = $mail.subject; heading = $mail.heading; mail = $mail
     }
@@ -988,6 +1059,29 @@ function Get-PimMailTypeInfo {
         'alert-notice'           { return @{ topic = 'Alert'; summary = ''; label = 'Open in PIM Manager' } }
         default                  { return @{ topic = 'Notice'; summary = ''; label = 'Open in PIM Manager' } }
     }
+}
+
+function Get-PimMailTypeSeverity {
+    <#
+      PURE. Framework §12.11a MAIL-3: the subject's severity word for a TEMPLATE mail of -Type (the alert mail carries its
+      own, Get-PimAlertMailModel). A sender's MailSeverity token wins ('none' = no word): an RFA / company-review mail that
+      asks someone to decide passes 'action'. Credentials, reports and information mails carry no word.
+    #>
+    param([string]$Type = '', [hashtable]$Tokens = @{})
+    $tk = if ($Tokens) { $Tokens } else { @{} }
+    $o = "$($tk['MailSeverity'])".Trim()
+    if ($o) { if ($o -ieq 'none') { return '' }; return (Get-PimMailSeverityWord $o) }
+    switch ("$Type") {
+        'access-review-reminder'   { return 'Action needed' }
+        'approval-request'         { return 'Action needed' }
+        'approval-escalation'      { return 'Action needed' }
+        'get-started-reminder'     { return 'Action needed' }
+        'pending-actions-reminder' { return 'Action needed' }
+        'discovery-notice'         { return 'Warning' }
+        'emergency-override'       { return 'Warning' }
+        'update-outcome'           { return (Get-PimMailSeverityWord "$($tk['Outcome'])") }
+    }
+    return ''
 }
 
 function New-PimFramedMail {
