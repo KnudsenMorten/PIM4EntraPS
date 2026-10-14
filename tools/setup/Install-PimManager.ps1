@@ -754,7 +754,7 @@ if ($healthy -and -not $warnings.Count) { Emit 'health-check' 'ok' 'the PIM Mana
 elseif ($healthy) { Emit 'health-check' 'warning' "deployed and healthy; still waiting for: $($warnings -join ', ')" }
 else { Emit 'health-check' 'warning' 'deployed, but the health check could not verify every part -- open the PIM Manager and check the status page' }
 
-$tickPid = Az-Text @('containerapp', 'job', 'show', '-g', $names.resourceGroup, '-n', 'ca-pim-tick', '--subscription', $cfg.subscriptionId, '--query', 'identity.principalId', '-o', 'tsv')
+$tickPid = Az-Text @('containerapp', 'job', 'show', '-g', $names.resourceGroup, '-n', $names.tickJob, '--subscription', $cfg.subscriptionId, '--query', 'identity.principalId', '-o', 'tsv')
 $fqdn = Az-Text @('containerapp', 'show', '-g', $names.resourceGroup, '-n', $names.managerApp, '--subscription', $cfg.subscriptionId, '--query', 'properties.configuration.ingress.fqdn', '-o', 'tsv')
 $verFile = Join-Path $sol 'VERSION'
 $outputs = [ordered]@{

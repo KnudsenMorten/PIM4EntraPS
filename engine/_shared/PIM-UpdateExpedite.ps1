@@ -296,7 +296,8 @@ function Invoke-PimUpdateExpediteTickStep {
             if (-not $on) { return $null }
             $sub = "$($env:PIM_SubscriptionId)".Trim(); $rg = "$($env:PIM_ResourceGroup)".Trim()
             if (-not $sub -or -not $rg -or -not (Get-Command Start-PimAcaJobExecution -ErrorAction SilentlyContinue)) { return $null }
-            $job = 'ca-pim-update'; if ("$($env:PIM_UpdateJobName)".Trim()) { $job = "$($env:PIM_UpdateJobName)".Trim() }
+            # CR5 step 1 (PIM 100.149): the install record (incl. PIM_UpdateJobName); today's name is the default
+            $job = 'ca-pim-update'; if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { $job = Get-PimInstallName -Role updater } elseif ("$($env:PIM_UpdateJobName)".Trim()) { $job = "$($env:PIM_UpdateJobName)".Trim() }
             $get = { param($n) Get-PimSetting -Name $n }
             $set = { param($n, $v) Set-PimSetting -Name $n -Value (ConvertTo-Json -InputObject $v -Depth 6 -Compress) }
             $key = ''

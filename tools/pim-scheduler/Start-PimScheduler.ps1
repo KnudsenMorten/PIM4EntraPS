@@ -93,6 +93,7 @@ if ($PSBoundParameters.ContainsKey('Verbose') -and $PSBoundParameters['Verbose']
 # A start that FAILS shows its whole start-up block (the lines it buffered are the diagnosis).
 trap { if (Get-Command Complete-PimStartupLog -ErrorAction SilentlyContinue) { try { [void](Complete-PimStartupLog -Force) } catch { } }; break }
 . "$shared\PIM-Rest.ps1"
+. "$shared\PIM-InstallNames.ps1"      # CR5 step 1 (PIM 100.149): every resource name of this install from one resolver
 . "$shared\PIM-PortalAccess.ps1"      # Get-PimPolicySetting (config-driven schedule)
 . "$shared\PIM-ChangeQueue.ps1"       # Get-PimQueueApplyPlan (queue-apply handler)
 # 🔴 §65 -- WITHOUT THIS THE QUEUE IS A BLACK HOLE. queue-apply gates on
@@ -868,7 +869,8 @@ function Invoke-PimUpdaterWatchdogIfConfigured {
     if ("$($env:PIM_UPDATE_WATCHDOG)".Trim() -eq '0') { return }   # explicit opt-out
     if (-not (Get-Command Invoke-PimUpdateWatchdog -ErrorAction SilentlyContinue)) { return }
     $stale = if ("$($env:PIM_UPDATE_STALE_HOURS)".Trim()) { [double]"$($env:PIM_UPDATE_STALE_HOURS)".Trim() } else { 48 }
-    $jn    = if ("$($env:PIM_UpdateJobName)".Trim()) { "$($env:PIM_UpdateJobName)".Trim() } else { 'ca-pim-update' }
+    # CR5 step 1 (PIM 100.149): the install record (incl. PIM_UpdateJobName); today's name is the default
+    $jn    = if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { Get-PimInstallName -Role updater } elseif ("$($env:PIM_UpdateJobName)".Trim()) { "$($env:PIM_UpdateJobName)".Trim() } else { 'ca-pim-update' }
     try {
         [void](Invoke-PimUpdateWatchdog -SubscriptionId $wsub -ResourceGroup $wrg -JobName $jn `
                  -StaleAfterHours $stale -Log { param($m, $c) Write-Host $m -ForegroundColor $c })

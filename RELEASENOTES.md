@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.629 -- 2026-10-14
+
+- Resource names read from the install record, today's names the default -- existing installs unchanged (framework 12.11c CR5 step 1); the publish call says whether the engine changed (12.11b CR4)
+
 ## 2.4.628 -- 2026-10-14
 
 - Mail subjects in one format: [environment] severity: what happened [PIM Manager] (framework 12.11a MAIL-3); the environment name on the heartbeat; discovery remembers reported items in SQL (no repeat mails); the data-quality check compares like with like; the licence request proves the held licence (CR8 B2)

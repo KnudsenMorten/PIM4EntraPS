@@ -57,7 +57,8 @@ function Get-PimJobCadenceDefinition {
             label = 'Managed-tenant pull (Data Definition Updater)'
             plain = 'Pulls the signed configuration from the managing tenant and applies it here (the Data Definition Updater job). Runs as its own job on this managed tenant, not in the scheduler tick.'
             scheduleKey = 'DownlinkSchedule'; runNowKey = 'DownlinkRunNow'; lastRunKey = 'DownlinkLastRun'
-            jobName = 'ca-pim-downlink-s6'
+            # CR5 step 1 (PIM 100.149): the name from the install record; today's name is the default
+            jobName = $(if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { Get-PimInstallName -Role downlink } else { 'ca-pim-downlink-s6' })
             # replicaTimeout 1800 s (Get-PimDownlinkJobYaml) + one trigger: a 'running' record older than this was killed.
             staleMinutes = 35
         }
@@ -67,7 +68,7 @@ function Get-PimJobCadenceDefinition {
         label = 'Publish to managed tenants'
         plain = 'Signs and publishes the configuration the managed tenants pull (the publish job). A commit that changes what is published also requests a publish.'
         scheduleKey = 'PublishSchedule'; runNowKey = 'PublishRunNow'; lastRunKey = 'PublishLastRun'
-        jobName = 'ca-pim-publish'
+        jobName = $(if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { Get-PimInstallName -Role publish } else { 'ca-pim-publish' })
         staleMinutes = 25   # replicaTimeout 1200 s (Get-PimBaselinePublishJobSpec) + one trigger
     }
 }

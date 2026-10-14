@@ -259,6 +259,8 @@ function Get-PimInstallNames {
     return [pscustomobject]@{
         token = $t; resourceGroup = $Config.resourceGroup; vnet = 'vnet-pim'; environment = 'cae-pim'; logAnalytics = 'log-pim'
         acr = "acrpim$t"; sqlServer = "sql-pim-$t"; sqlFqdn = "sql-pim-$t.database.windows.net"; sqlDatabase = 'PimPlatform'; managerApp = 'ca-pim-manager'
+        # CR5 step 1 (PIM 100.149): the engine + updater jobs named HERE, once (today's names) -- the install never repeats a literal
+        tickJob = 'ca-pim-tick'; updateJob = 'ca-pim-update'
     }
 }
 

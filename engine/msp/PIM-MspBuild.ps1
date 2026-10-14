@@ -972,7 +972,7 @@ function Get-PimMspBuildPlan {
         SqlConnectionString = "Server=tcp:$sqlFqdn,1433;Database=$db;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30"
         AdminAppId = $cid; AdminCertPem = '{{pem:deploy}}'; SqlAdminClientId = $cid; SqlAdminCertThumbprint = $thumb
         ManagerSuperAdmins = "$(& $V 'managerSuperAdmins')".Trim()
-        UpdateRing = $updRing.ring; SqlAdminGroupName = 'grp-pim-sql-admins'; SupportAppId = $cid
+        UpdateRing = $updRing.ring; SqlAdminGroupName = $(if ("$(& $V 'sqlAdminGroupName')".Trim()) { "$(& $V 'sqlAdminGroupName')".Trim() } else { 'grp-pim-sql-admins' }); SupportAppId = $cid   # CR5 step 1: a config key (today's name is the default)
         Exposure = $(if ("$(& $V 'exposure')".Trim()) { "$(& $V 'exposure')".Trim() } else { 'external' })
     }
     if ("$(& $V 'logAnalyticsName')".Trim()) { $hosting['LogAnalyticsWorkspaceName'] = "$(& $V 'logAnalyticsName')".Trim() }
