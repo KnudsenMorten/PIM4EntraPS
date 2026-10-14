@@ -220,13 +220,22 @@ function Get-PimHybridAdServerDiscoverySettings {
     if (-not $cross.ok) { foreach ($e in @($cross.errors)) { $problems.Add("$e") } }
     $days = 90; if ($clean['HybridAdServerActiveDays']) { [void][int]::TryParse($clean['HybridAdServerActiveDays'], [ref]$days) }; if ($days -lt 1) { $days = 90 }
     $max = 50; if ($clean['HybridAdServerAutoGroupMaxPerRun']) { [void][int]::TryParse($clean['HybridAdServerAutoGroupMaxPerRun'], [ref]$max) }; if ($max -lt 1 -or $max -gt 1000) { $max = 50 }
+    # CR4 GUARD-STRICT (framework §12.11b): for 24 h after an engine-changing release the batch is half the configured one
+    # (50 -> 25). The SuperAdmin's approval of the exact list still holds -- only how many are created per run changes.
+    $maxConfigured = $max; $strictNote = ''
+    if (Get-Command Get-PimGuardStrictState -ErrorAction SilentlyContinue) {
+        try {
+            $gs = Get-PimGuardStrictState
+            if ($gs.active) { $h = Get-PimGuardStrictHalf -Configured $max; if ($h -lt $max) { $max = $h; $strictNote = Get-PimGuardStrictNote -Configured $maxConfigured -Effective $h -Version "$($gs.version)" -UntilUtc "$($gs.untilUtc)" } }
+        } catch { }
+    }
     $auto = @(ConvertTo-PimHybridAdOuList $clean['HybridAdServerAutoGroupOus'])
     if ($problems.Count) { $auto = @() }
     return @{
         searchOus = @(ConvertTo-PimHybridAdOuList $clean['HybridAdServerSearchOus']); excludeOus = @(ConvertTo-PimHybridAdOuList $clean['HybridAdServerExcludeOus'])
         activeDays = $days
         nameInclude = @(ConvertTo-PimHybridAdPatternList $clean['HybridAdServerNameInclude']); nameExclude = @(ConvertTo-PimHybridAdPatternList $clean['HybridAdServerNameExclude'])
-        autoOus = $auto; autoMax = $max
+        autoOus = $auto; autoMax = $max; autoMaxConfigured = $maxConfigured; autoMaxStrictNote = $strictNote
         cleanupOus = @(ConvertTo-PimHybridAdOuList $clean['HybridAdCleanupOus'])
         problems = $problems.ToArray()
     }

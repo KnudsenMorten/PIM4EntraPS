@@ -109,18 +109,18 @@ function Get-PimGuardEffectiveLimit {
     $stored = [int](Get-PimGuardLimit -GuardId $GuardId -Fallback ([int]$st.default))
     $o = [ordered]@{ guardId = "$($st.guardId)"; stored = $stored; effective = $stored; knob = ''; knobValue = ''; lowered = $false; ignored = $false; note = '' }
     $k = Get-PimGuardLimitKnob -GuardId $GuardId
-    if (-not $k) { return [pscustomobject]$o }
+    if (-not $k) { return (Add-PimGuardStrictToEffective -Effective $o) }
     $o.knob = "$($k.name)"
     $v = Get-Variable -Name $k.name -Scope Global -ValueOnly -ErrorAction SilentlyContinue
     # The process environment is read by the ONE knob reader of the engine (Get-PimSafetyKnob, PIM-DisableGuard.ps1) -- never
     # here: this file decides limits and approvals, and nothing in it reads an environment variable (H34).
     if (($null -eq $v -or "$v".Trim() -eq '') -and $k.env -and (Get-Command Get-PimSafetyKnob -ErrorAction SilentlyContinue)) { $v = Get-PimSafetyKnob -Name "$($k.name)" }
-    if ($null -eq $v -or "$v".Trim() -eq '') { return [pscustomobject]$o }
+    if ($null -eq $v -or "$v".Trim() -eq '') { return (Add-PimGuardStrictToEffective -Effective $o) }
     $o.knobValue = "$v".Trim()
     $n = 0
     if (-not [int]::TryParse("$v".Trim(), [ref]$n)) {
         $o.ignored = $true; $o.note = ("the server setting {0}='{1}' is not a whole number -- ignored, {2} applies" -f $k.name, $o.knobValue, $stored)
-        return [pscustomobject]$o
+        return (Add-PimGuardStrictToEffective -Effective $o)
     }
     if ($n -lt 0) { $n = 0 }
     if ($n -lt $stored) {
@@ -130,7 +130,255 @@ function Get-PimGuardEffectiveLimit {
     } elseif ($n -gt $stored) {
         $o.ignored = $true; $o.note = ("the server setting {0}={1} is above the limit of {2} -- ignored: a server setting can only lower a limit; a SuperAdmin raises it here" -f $k.name, $n, $stored)
     }
-    return [pscustomobject]$o
+    return (Add-PimGuardStrictToEffective -Effective $o)
+}
+
+# =====================================================================================================================
+# GUARD-STRICT -- framework DOCS/REQUIREMENTS.md §12.11b (CR4, owner + Thomas approved 2026-10-14; PIM REQUIREMENTS
+# 100.144): for 24 h after a release that changed ENGINE code, every guard with a number uses HALF its configured value:
+# effective = max(1, floor(configured x 0.5)). It never raises anything, never lowers what a SuperAdmin approved for one
+# run (an approval / release exempts its exact items and never reads the limit), and a SuperAdmin may end it early with a
+# reason (audited). pim.Settings 'GuardStrict' = { sinceUtc; untilUtc; version; fingerprint; previousFingerprint;
+# endedBy; endedUtc; endedReason }. It STARTS only when the ENGINE JOB itself sees its engine code change (pim.Settings
+# 'EngineFingerprint', Update-PimGuardStrictFromEngine): an install with no stored fingerprint only records it -- no
+# customer goes Strict because this feature arrives, and an older version never reads any of it.
+# =====================================================================================================================
+function Get-PimGuardStrictSettingName { 'GuardStrict' }
+function Get-PimEngineFingerprintSettingName { 'EngineFingerprint' }
+function Get-PimGuardStrictHours { 24 }
+
+function Get-PimGuardStrictGuardIds {
+    # PURE. LITERAL. The guards with a number that Strict halves (the hybrid server batch is halved by its own reader,
+    # Get-PimHybridAdServerDiscoverySettings; the policy breaker holds every change set already; the MSP central delete is 1).
+    return @('manager.commit-removal', 'engine.remove-budget', 'engine.disable-guard', 'manager.bulk-revoke', 'engine.admin-delete')
+}
+
+function Get-PimGuardStrictHalf {
+    # PURE. The strict number of a configured limit: max(1, floor(configured x 0.5)). A limit of 1 stays 1; 0 stays 0 (a
+    # server setting that stops everything is never raised).
+    param([int]$Configured)
+    if ($Configured -le 0) { return 0 }
+    return [int][Math]::Max(1, [Math]::Floor($Configured * 0.5))
+}
+
+function ConvertFrom-PimGuardStrictText {
+    <# PURE. The stored 'GuardStrict' text -> @{ known; sinceUtc; untilUtc; version; endedBy; endedUtc; endedReason } (dates as
+       UTC [datetime] or $null). Text that is not JSON -> known = $false. #>
+    param([AllowNull()][string]$Text)
+    $o = @{ known = $false; sinceUtc = $null; untilUtc = $null; version = ''; endedBy = ''; endedUtc = $null; endedReason = ''; fingerprint = '' }
+    if ($null -eq $Text -or "$Text".Trim() -eq '') { $o.known = $true; return $o }
+    $j = $null; try { $j = "$Text" | ConvertFrom-Json } catch { return $o }
+    if ($j -is [string]) { try { $j = $j | ConvertFrom-Json } catch { return $o } }
+    if ($null -eq $j) { $o.known = $true; return $o }
+    $d = { param($v) if ($null -eq $v -or "$v".Trim() -eq '') { return $null }; if ($v -is [datetime]) { return $v.ToUniversalTime() }; try { return ([datetimeoffset]::Parse("$v", [Globalization.CultureInfo]::InvariantCulture)).UtcDateTime } catch { return $null } }
+    $o.known = $true
+    $o.sinceUtc = & $d $j.sinceUtc; $o.untilUtc = & $d $j.untilUtc; $o.endedUtc = & $d $j.endedUtc
+    $o.version = "$($j.version)".Trim(); $o.endedBy = "$($j.endedBy)".Trim(); $o.endedReason = "$($j.endedReason)".Trim(); $o.fingerprint = "$($j.fingerprint)".Trim()
+    return $o
+}
+
+function Test-PimGuardStrictActive {
+    # PURE. Strict is active when it started, has not reached its end and was not ended early.
+    param([AllowNull()]$State, [datetime]$NowUtc = [datetime]::UtcNow)
+    if ($null -eq $State -or -not $State.known -or $null -eq $State.sinceUtc -or $null -eq $State.untilUtc) { return $false }
+    if ($null -ne $State.endedUtc) { return $false }
+    $n = $NowUtc.ToUniversalTime()
+    return ($n -ge $State.sinceUtc -and $n -lt $State.untilUtc)
+}
+
+function Get-PimGuardSettingText {
+    # The stored JSON text of one guard setting (same store + seam as 'GuardLimits'), or $null. THROWS when a store fails.
+    param([Parameter(Mandatory)][string]$Name)
+    if ($global:PIM_GuardReleaseStore -is [hashtable]) { $v = $global:PIM_GuardReleaseStore[$Name]; if ($null -eq $v) { return $null }; return "$v" }
+    $cs = Get-PimGuardLimitStoreCs
+    if ($cs -and (Get-Command Get-PimSqlSettingRaw -ErrorAction SilentlyContinue)) { return (Get-PimSqlSettingRaw -ConnectionString $cs -Name $Name) }
+    return $null
+}
+
+function Set-PimGuardSettingText {
+    # Write one guard setting ONLY IF its stored text is still -Expected (compare-and-set). 1 = written, 0 = lost the race.
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Json, [AllowNull()][string]$Expected)
+    if ($global:PIM_GuardReleaseStore -is [hashtable]) {
+        if ("$($global:PIM_GuardReleaseStore[$Name])" -cne "$Expected") { return 0 }
+        $global:PIM_GuardReleaseStore[$Name] = $Json; return 1
+    }
+    $cs = Get-PimGuardLimitStoreCs
+    if (-not $cs -or -not (Get-Command Set-PimSqlSettingIfUnchanged -ErrorAction SilentlyContinue)) { throw 'REFUSED -- there is no settings store. Nothing was changed.' }
+    return [int](Set-PimSqlSettingIfUnchanged -ConnectionString $cs -Name $Name -NewValueJson $Json -ExpectedValueJson $Expected)
+}
+
+function Get-PimGuardStrictState {
+    <#
+      Strict mode NOW in this process. NEVER throws. Cached 30 s (like the limits); -Fresh reads again.
+        @{ active; sinceUtc; untilUtc; version; endedBy; endedUtc; endedReason; readError }
+      A store that cannot be read = NOT active (said in readError): the configured limits apply, as before CR4.
+    #>
+    param([switch]$Fresh, [datetime]$NowUtc = [datetime]::UtcNow)
+    $st = $null
+    if (-not ($global:PIM_GuardReleaseStore -is [hashtable]) -and -not $Fresh) {
+        $c = $global:PIM_GuardStrictCache
+        if ($c -is [hashtable] -and $c['at'] -is [datetime] -and ([datetime]::UtcNow - $c['at']).TotalSeconds -lt 30) { $st = $c['state'] }
+    }
+    $err = ''
+    if ($null -eq $st) {
+        try { $st = ConvertFrom-PimGuardStrictText -Text (Get-PimGuardSettingText -Name (Get-PimGuardStrictSettingName)) }
+        catch { $st = @{ known = $false }; $err = "the guard mode could not be read ($($_.Exception.Message))" }
+        if (-not ($global:PIM_GuardReleaseStore -is [hashtable])) { $global:PIM_GuardStrictCache = @{ at = [datetime]::UtcNow; state = $st } }
+    }
+    return [pscustomobject]@{
+        active = (Test-PimGuardStrictActive -State $st -NowUtc $NowUtc)
+        sinceUtc = $(if ($st.sinceUtc) { $st.sinceUtc.ToString('o') } else { '' }); untilUtc = $(if ($st.untilUtc) { $st.untilUtc.ToString('o') } else { '' })
+        version = "$($st.version)"; endedBy = "$($st.endedBy)"; endedUtc = $(if ($st.endedUtc) { $st.endedUtc.ToString('o') } else { '' }); endedReason = "$($st.endedReason)"
+        readError = $err
+    }
+}
+
+function Get-PimGuardStrictNote {
+    # PURE. The calm words for a strict limit: "Strict after the update to 2.4.630 until 2026-10-15 17:33 UTC: half of the
+    # configured 5".
+    param([int]$Configured, [int]$Effective, [string]$Version = '', [string]$UntilUtc = '')
+    $u = ''; try { if ("$UntilUtc".Trim()) { $u = ([datetimeoffset]::Parse("$UntilUtc", [Globalization.CultureInfo]::InvariantCulture)).UtcDateTime.ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture) + ' UTC' } } catch { $u = '' }
+    return ("Strict for 24 hours after the update{0}{1}: {2} instead of the configured {3}" -f $(if ($Version) { " to $Version" } else { '' }), $(if ($u) { ", until $u" } else { '' }), $Effective, $Configured)
+}
+
+function Get-PimEngineCodeFingerprint {
+    <#
+      The SHA-256 of THIS install's engine code: "<relative path> <file SHA-256>" of every file under engine/,
+      tools/pim-engine, tools/pim-scheduler and sql/ (the same folders the publish call's engineChanged compares), sorted.
+      '' when the folders cannot be read (then nothing is decided).
+    #>
+    param([Parameter(Mandatory)][string]$SolutionRoot)
+    try {
+        $lines = New-Object System.Collections.Generic.List[string]
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            foreach ($d in 'engine', 'tools/pim-engine', 'tools/pim-scheduler', 'sql') {
+                $p = Join-Path $SolutionRoot $d
+                if (-not (Test-Path -LiteralPath $p)) { continue }
+                foreach ($f in @(Get-ChildItem -LiteralPath $p -Recurse -File -ErrorAction Stop)) {
+                    $rel = $f.FullName.Substring($SolutionRoot.TrimEnd('\', '/').Length).TrimStart('\', '/') -replace '\\', '/'
+                    $h = -join ($sha.ComputeHash([IO.File]::ReadAllBytes($f.FullName)) | ForEach-Object { $_.ToString('x2') })
+                    $lines.Add("$rel $h")
+                }
+            }
+            if (-not $lines.Count) { return '' }
+            $all = (@($lines.ToArray()) | Sort-Object -CaseSensitive) -join "`n"
+            return (-join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($all)) | ForEach-Object { $_.ToString('x2') }))
+        } finally { $sha.Dispose() }
+    } catch { return '' }
+}
+
+function Get-PimGuardStrictStartPlan {
+    <#
+      PURE. What the engine job does with its fingerprint: @{ action = record | none | strict; reason; fingerprint }.
+        nothing stored                 -> record (the first run with this feature: NOT strict -- no customer goes Strict
+                                          because CR4 arrives)
+        the same fingerprint           -> none
+        a different fingerprint        -> strict (the engine code changed: 24 h Strict) + record
+    #>
+    param([AllowNull()][string]$Current, [AllowNull()][string]$StoredText)
+    $cur = "$Current".Trim().ToLowerInvariant()
+    if (-not $cur) { return @{ action = 'none'; reason = 'the engine code could not be read'; previous = '' } }
+    $prev = ''
+    if ("$StoredText".Trim()) { try { $j = "$StoredText" | ConvertFrom-Json; if ($j -is [string]) { $j = $j | ConvertFrom-Json }; $prev = "$($j.fingerprint)".Trim().ToLowerInvariant() } catch { $prev = '' } }
+    if (-not $prev) { return @{ action = 'record'; reason = 'first fingerprint of this install -- recorded, not strict'; previous = '' } }
+    if ($prev -eq $cur) { return @{ action = 'none'; reason = 'the engine code is unchanged'; previous = $prev } }
+    return @{ action = 'strict'; reason = 'the engine code changed'; previous = $prev }
+}
+
+function Update-PimGuardStrictFromEngine {
+    <#
+      Run by the ENGINE JOB once per execution (Start-PimScheduler, the container's tick only -- never the hybrid worker,
+      whose code is updated separately and would flip the record). NEVER throws. Returns @{ action; reason }.
+      'strict' writes GuardStrict { sinceUtc = now; untilUtc = now + 24 h; version; fingerprint; previousFingerprint } --
+      compare-and-set on EngineFingerprint first, so two executions seeing the same change start it once.
+    #>
+    param([Parameter(Mandatory)][string]$SolutionRoot, [string]$Version = '', [datetime]$NowUtc = [datetime]::UtcNow, [string]$Fingerprint = '')
+    try {
+        $fp = if ("$Fingerprint".Trim()) { "$Fingerprint".Trim().ToLowerInvariant() } else { Get-PimEngineCodeFingerprint -SolutionRoot $SolutionRoot }
+        $fpName = Get-PimEngineFingerprintSettingName
+        $storedText = Get-PimGuardSettingText -Name $fpName
+        $plan = Get-PimGuardStrictStartPlan -Current $fp -StoredText $storedText
+        if ($plan.action -eq 'none') { return @{ action = 'none'; reason = $plan.reason } }
+        $now = $NowUtc.ToUniversalTime()
+        $fpJson = ([pscustomobject]@{ fingerprint = $fp; version = "$Version"; recordedUtc = $now.ToString('o') } | ConvertTo-Json -Compress)
+        if ((Set-PimGuardSettingText -Name $fpName -Json $fpJson -Expected $storedText) -ne 1) { return @{ action = 'none'; reason = 'another execution recorded the fingerprint first' } }
+        if ($plan.action -eq 'record') { return @{ action = 'record'; reason = $plan.reason } }
+        $sName = Get-PimGuardStrictSettingName
+        $sPrev = Get-PimGuardSettingText -Name $sName
+        $rec = [pscustomobject]@{ sinceUtc = $now.ToString('o'); untilUtc = $now.AddHours((Get-PimGuardStrictHours)).ToString('o'); version = "$Version"
+                                  fingerprint = $fp; previousFingerprint = "$($plan.previous)"; endedBy = ''; endedUtc = ''; endedReason = '' }
+        [void](Set-PimGuardSettingText -Name $sName -Json ($rec | ConvertTo-Json -Compress) -Expected $sPrev)
+        $global:PIM_GuardStrictCache = $null
+        if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) { try { Write-PimAuditEvent -Action 'guard.strict.start' -Target 'guards' -After $rec -Result 'ok' } catch { } }
+        return @{ action = 'strict'; reason = "the engine code changed -- every guard with a number uses half its limit until $($rec.untilUtc)" }
+    } catch { return @{ action = 'none'; reason = "the guard mode was not checked: $($_.Exception.Message)" } }
+}
+
+function Stop-PimGuardStrict {
+    <#
+      A SuperAdmin ends Strict early, with a reason of at least 10 characters (framework §12.11b item 3). Audited.
+      Returns @{ ok; status (200 / 400 / 403 / 409); error; state }.
+    #>
+    param([Parameter(Mandatory)][string]$By, [AllowNull()][string]$Role, [AllowNull()][string]$Reason, [datetime]$NowUtc = [datetime]::UtcNow)
+    if (-not (Test-PimGuardSuperAdminRole -Role $Role)) { return @{ ok = $false; status = 403; error = 'Only a SuperAdmin ends Strict mode early.' } }
+    $why = "$Reason".Trim()
+    if ($why.Length -lt 10) { return @{ ok = $false; status = 400; error = 'Say why Strict mode ends early (at least 10 characters) -- it is recorded.' } }
+    $name = Get-PimGuardStrictSettingName
+    $text = Get-PimGuardSettingText -Name $name
+    $st = ConvertFrom-PimGuardStrictText -Text $text
+    if (-not (Test-PimGuardStrictActive -State $st -NowUtc $NowUtc)) { return @{ ok = $false; status = 409; error = 'Strict mode is not active.' } }
+    $j = "$text" | ConvertFrom-Json; if ($j -is [string]) { $j = $j | ConvertFrom-Json }
+    $j | Add-Member -NotePropertyName endedBy -NotePropertyValue "$By" -Force
+    $j | Add-Member -NotePropertyName endedUtc -NotePropertyValue $NowUtc.ToUniversalTime().ToString('o') -Force
+    $j | Add-Member -NotePropertyName endedReason -NotePropertyValue $why -Force
+    if ((Set-PimGuardSettingText -Name $name -Json ($j | ConvertTo-Json -Compress) -Expected $text) -ne 1) { return @{ ok = $false; status = 409; error = 'The guard mode changed meanwhile -- reload and try again.' } }
+    $global:PIM_GuardStrictCache = $null
+    if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) { try { Write-PimAuditEvent -Action 'guard.strict.end' -Target 'guards' -Before $text -After $j -Result 'ok' -Actor $By } catch { } }
+    return @{ ok = $true; status = 200; error = ''; state = (Get-PimGuardStrictState -Fresh -NowUtc $NowUtc) }
+}
+
+function Add-PimGuardStrictToEffective {
+    <#
+      The last step of Get-PimGuardEffectiveLimit: while Strict is active, a guard in Get-PimGuardStrictGuardIds uses half
+      its CONFIGURED value (stored), or less when a server setting already lowered it further (the smaller wins -- Strict
+      never raises). Adds strict / strictUntilUtc / strictVersion / configured; the note says it in calm words. NEVER throws.
+    #>
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Effective)
+    $Effective['strict'] = $false; $Effective['strictUntilUtc'] = ''; $Effective['strictVersion'] = ''
+    try {
+        if ((Get-PimGuardStrictGuardIds) -contains "$($Effective['guardId'])".ToLowerInvariant()) {
+            $s = Get-PimGuardStrictState
+            if ($s.active) {
+                $half = Get-PimGuardStrictHalf -Configured ([int]$Effective['stored'])
+                if ($half -lt [int]$Effective['effective']) {
+                    $Effective['effective'] = $half; $Effective['lowered'] = $true
+                    $Effective['strict'] = $true; $Effective['strictUntilUtc'] = "$($s.untilUtc)"; $Effective['strictVersion'] = "$($s.version)"
+                    $n = Get-PimGuardStrictNote -Configured ([int]$Effective['stored']) -Effective $half -Version "$($s.version)" -UntilUtc "$($s.untilUtc)"
+                    $Effective['note'] = $(if ("$($Effective['note'])".Trim()) { "$n; $($Effective['note'])" } else { $n })
+                }
+            }
+        }
+    } catch { }
+    return [pscustomobject]$Effective
+}
+
+function Get-PimGuardStrictTripText {
+    <#
+      The calm sentence a trip mail adds while Strict halved this guard's limit (framework §12.11b item 4: "a strict trip
+      behaves like any trip ... worded calmly with strict + configured + effective"); '' when Strict did not lower it.
+      Also @{ strict; configured; effective } for the trip record's Thresholds. NEVER throws.
+    #>
+    param([Parameter(Mandatory)][string]$GuardId)
+    $out = @{ text = ''; strict = $false; configured = 0; effective = 0 }
+    try {
+        $e = Get-PimGuardEffectiveLimit -GuardId $GuardId
+        if ($e -and $e.PSObject.Properties['strict'] -and $e.strict) {
+            $out.strict = $true; $out.configured = [int]$e.stored; $out.effective = [int]$e.effective
+            $out.text = ("Strict mode is on after a recent update: for 24 hours this limit is {0} instead of your configured {1}, so a larger change waits for a SuperAdmin or for Strict mode to end." -f $out.effective, $out.configured)
+        }
+    } catch { }
+    return $out
 }
 
 function Get-PimBulkRevokeLimit {
@@ -141,7 +389,9 @@ function Get-PimBulkRevokeLimit {
 }
 
 function Get-PimAdminDeleteLimit {
-    <# Admin account deletes per engine run (engine.admin-delete). NEVER throws; the literal default 5 on any failure. #>
+    <# Admin account deletes per engine run (engine.admin-delete), EFFECTIVE (CR4: half while Strict). NEVER throws; the
+       literal default 5 on any failure. #>
+    try { $e = Get-PimGuardEffectiveLimit -GuardId 'engine.admin-delete'; if ($e) { return [int]$e.effective } } catch { }
     try { return [int](Get-PimGuardLimit -GuardId 'engine.admin-delete' -Fallback 5) } catch { return 5 }
 }
 

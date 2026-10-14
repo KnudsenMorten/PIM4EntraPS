@@ -694,9 +694,9 @@ container, or from the scheduler with no `Connect-*` step.
   set waits for a SuperAdmin of the tenant, §17.7), many removals or account disables in one run (the
   two guards above), the tenant's last Global Administrator (held until a SuperAdmin releases exactly
   that change), and the last PIM Manager SuperAdmin (refused).
-  Everything else is a **warning**: access that is not yet in line with the definitions, and key
-  numbers that differ from the last runs, go into one daily "Data quality alert" mail and onto their
-  pages. A warning never holds a run.
+  Everything else is a **warning**: access that is not yet in line with the definitions shows on its
+  pages. A warning never holds a run. (The daily "Data quality alert" -- key numbers compared with the
+  last runs -- was removed in PIM 100.151, owner 2026-10-14: it mailed normal growth with no action.)
 - **A hold that is no longer needed clears itself (2.4.596, 2.4.598).** A guard's hold is removed by
   the same guard: when a later writing run of that scope finds nothing left to hold — the removals
   were taken back, or the plan is back inside the limit — it clears the hold. There is no acknowledge

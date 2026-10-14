@@ -8099,6 +8099,25 @@
     g.title = 'PIM Manager ' + (ver ? ver : '') + (ringPart ? ' on update ' + ringPart : '') + '.' +
       '\nA ring is changed on the update job by an operator, never from this page. Update details are on the Jobs page.';
     g.style.display = '';
+    // CR4 GUARD-STRICT (framework 12.11b item 4): "Guard mode: Strict" in the header -- SuperAdmins only (the server sends
+    // guardMode 'strict' to a SuperAdmin only), calm wording, the detail on Operations > Guards.
+    let gm = document.getElementById('guardModeGroup');
+    if (String(v.guardMode || '') === 'strict') {
+      if (!gm) {
+        gm = document.createElement('div');
+        gm.id = 'guardModeGroup'; gm.className = 'brand-group';
+        gm.innerHTML = '<span class="brand-cap">Guard mode</span><span class="brand-val"><b id="guardModeBadge">Strict</b></span>';
+        if (g.nextSibling) right.insertBefore(gm, g.nextSibling); else right.appendChild(gm);
+      }
+      let until = '';
+      try { if (v.guardModeUntilUtc) until = new Date(v.guardModeUntilUtc).toLocaleString(); } catch (_) { until = ''; }
+      gm.title = 'For 24 hours after the update' + (v.guardModeVersion ? ' to ' + v.guardModeVersion : '') +
+        ' every guard with a number uses half its limit' + (until ? ', until ' + until : '') + '.' +
+        '\nNothing else changes. Details, and ending it early, are on Operations > Guards.';
+      gm.style.display = '';
+    } else if (gm) {
+      gm.style.display = 'none';
+    }
   }
 
   // The fuller picture, on the Jobs tab (where "did the scheduled work happen?" already
@@ -8525,7 +8544,6 @@
     'coverage': 'New gaps, orphan groups or unmanaged privileged groups (Discovery & gaps)',
     'target-missing': 'Delegations whose Azure resource or role no longer exists (daily target check)',
     'pending-uncommitted': 'Changes staged or queued more than a day ago and never committed (daily pending check)',
-    'data-quality': 'Data quality alert: something looks different from the last runs (one mail a day at most, warnings only)'
   };
   // 2026-10-07 (operator: "Configuration drift detected should be a biweekly report by default, controllable in the
   // settings"): the drift report cadence, under Alerting in Settings -- the same setting (and the same SuperAdmin-gated
@@ -13506,7 +13524,6 @@
     'tenant-cache':                'Refreshes the lists of roles, administrative units, groups and Azure scopes the pickers and validation use.',
     'verify-convergence':          'Re-reads the tenant and proves that what was committed is actually deployed. Items still missing after the grace window fail this job and raise the failure alert at once; the daily data quality alert lists them too.',
     'policy-defaults':             'Checks the Microsoft default policy values PIM Manager ships against this tenant: it reads policies nobody has changed and notes any difference on the policy settings. It only reads; it changes nothing.',
-    'data-quality':                'Sends ONE daily "Data quality alert" when something looks different from the last runs (each scope\'s key numbers against the median of its last 3 runs, with the likely cause from the settings change log) or another warning was raised. Warnings only: it never blocks anything.',
     'hybrid-ad-apply':             'Applies on-premises Active Directory changes for hybrid admin accounts.',
     'hybrid-ad-servers':           'Lists the Windows servers in Active Directory for Discovery, and puts each server\'s PIM group into that server\'s local Administrators (adds only; runs on the hybrid worker).',
     'hybrid-ad-groups':            'Mirrors the PIM groups marked for Active Directory to on-premises AD groups (runs on the hybrid worker).',
@@ -19711,8 +19728,25 @@
         '<td style="padding:4px 8px;white-space:nowrap;">' + acts + '</td></tr>';
     }).join('');
     const never = cat.filter(g => g.never);
+    // CR4 GUARD-STRICT (framework 12.11b items 3 + 4): one calm line while Strict is active; a SuperAdmin may end it early
+    // with a reason (recorded). The rows below already show "In effect now" for every halved limit.
+    const st = d.strict || null;
+    let strictHtml = '';
+    if (st && st.active) {
+      let until = ''; try { until = st.untilUtc ? new Date(st.untilUtc).toLocaleString() : ''; } catch (_) { until = ''; }
+      strictHtml = '<div id="gpStrict" class="gp-strict" style="background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:8px 10px;margin:0 0 10px;font-size:12.5px;">' +
+        '<b>Guard mode: Strict</b> -- for ' + (Number(st.hours) || 24) + ' hours after the update' + (st.version ? ' to ' + escapeHtml(st.version) : '') +
+        ' every guard with a number uses half its limit' + (until ? ', until ' + escapeHtml(until) : '') + '. Nothing else changes; approvals you give still apply.' +
+        (st.canEnd && roleAtLeast('SuperAdmin')
+          ? '<div style="margin-top:6px;"><input id="gpStrictReason" type="text" maxlength="300" placeholder="Why end it early (recorded)" style="width:320px;max-width:100%;font-size:12px;padding:3px 6px;"> ' +
+            '<button type="button" class="gp-strict-end btn">End Strict mode now</button></div>'
+          : '') + '</div>';
+    } else if (st && st.endedUtc) {
+      strictHtml = '<div id="gpStrictEnded" style="color:#57606a;font-size:11.5px;margin:0 0 8px;">Strict mode after the update' + (st.version ? ' to ' + escapeHtml(st.version) : '') +
+        ' was ended early by ' + escapeHtml(st.endedBy || 'a SuperAdmin') + ' (' + escapeHtml(fmtTime(st.endedUtc)) + '): ' + escapeHtml(st.endedReason || '') + '</div>';
+    }
     body.innerHTML =
-      '<h2 style="font-size:16px;margin:0 0 4px;">Guards</h2>' +
+      '<h2 style="font-size:16px;margin:0 0 4px;">Guards</h2>' + strictHtml +
       '<div id="gpIntro" style="color:#57606a;font-size:12px;margin-bottom:10px;">Every guard that protects your tenant: what it protects, its limit, whether an exemption can be approved, and when it last held something back. ' +
         '<b>No guard can be switched off.</b> A limit is a count, set by a SuperAdmin inside the range shown on its row. An exemption is always for <b>one exact list</b>: ' +
         'a SuperAdmin approves it in the commit popup when the change is committed, or releases a list a run already holds here (for <b>one run</b> or until a time, at most 24 hours). A changed list has to be approved again. ' +
@@ -19767,6 +19801,12 @@
         catch (e) { say('Not released: ' + e.message, true); }
       });
     });
+    body.querySelectorAll('.gp-strict-end').forEach(b => b.addEventListener('click', async () => {
+      const r = String((document.getElementById('gpStrictReason') || {}).value || '').trim();
+      if (r.length < 10) { say('Say why Strict mode ends early (at least 10 characters) -- it is recorded.', true); return; }
+      try { await api('POST', '/api/guards/strict/end', { reason: r }); await renderGuardsPage(); try { await renderUpdateRingBadge(); } catch (_) { } say('Strict mode ended: every guard uses its configured limit again.', false); }
+      catch (e) { say('Strict mode was not ended: ' + e.message, true); }
+    }));
     body.querySelectorAll('.gp-approve').forEach(b => b.addEventListener('click', async () => {
       try { await api('POST', '/api/guards/' + encodeURIComponent(b.dataset.guard) + '/release/' + encodeURIComponent(b.dataset.id) + '/approve'); await renderGuardsPage(); say('Approved: the next run may use it.', false); }
       catch (e) { say('Not approved: ' + e.message, true); }

@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.630 -- 2026-10-14
+
+- Guards: Strict for 24 hours after an update that changes the engine -- every guard with a number uses half its limit, a SuperAdmin can end it early (framework 12.11b CR4); the data-quality check and its daily mail are removed (100.151)
+
 ## 2.4.629 -- 2026-10-14
 
 - Resource names read from the install record, today's names the default -- existing installs unchanged (framework 12.11c CR5 step 1); the publish call says whether the engine changed (12.11b CR4)

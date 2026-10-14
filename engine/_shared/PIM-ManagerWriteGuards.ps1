@@ -53,6 +53,10 @@ function Get-PimCommitGuardThresholds {
     if (Get-Command Get-PimGuardLimit -ErrorAction SilentlyContinue) { try { $lim = [int](Get-PimGuardLimit -GuardId 'manager.commit-removal' -Fallback 25) } catch { $lim = 25 } }
     if ($lim -lt 1) { $lim = 25 }
     $abs = $lim
+    # CR4 GUARD-STRICT (framework §12.11b): for 24 h after an engine-changing release, half the configured limit
+    if (Get-Command Get-PimGuardStrictState -ErrorAction SilentlyContinue) {
+        try { if ((Get-PimGuardStrictState).active) { $h = Get-PimGuardStrictHalf -Configured $lim; if ($h -lt $abs) { $abs = $h } } } catch { }
+    }
     if ($null -ne $MaxRemoveAbs -and [int]$MaxRemoveAbs -lt $abs) { $abs = [int]$MaxRemoveAbs }
     if ($null -ne $global:PIM_CommitMaxRemoveAbs -and "$($global:PIM_CommitMaxRemoveAbs)" -match '^\d+$' -and [int]$global:PIM_CommitMaxRemoveAbs -lt $abs) { $abs = [int]$global:PIM_CommitMaxRemoveAbs }
     if ($abs -lt 0) { $abs = 0 }
