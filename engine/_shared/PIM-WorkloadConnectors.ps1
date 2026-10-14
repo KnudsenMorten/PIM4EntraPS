@@ -221,7 +221,10 @@ function ConvertTo-PimPowerBiAdminError {
     $m = "$Message"
     if ($m -match 'POWERBI-ADMIN-NOT-GRANTED') { return $m }
     if ($m -match '(?i)HTTP 40[13]\b|PowerBINotAuthorized|API is not accessible for application') {
-        return ("POWERBI-ADMIN-NOT-GRANTED: the Power BI admin API refused PIM Manager's identity -- it is not a Fabric Administrator yet, or Fabric does not let it use the admin API (run Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -GrantFabricAdministrator once). Power BI answered: {0}" -f $m)
+        # Power BI's own answer goes FIRST (2026-10-14, internal): the engine shortens long item lines, and with the answer at
+        # the end every log line was cut before it -- nobody could see WHY Power BI refused.
+        $said = ("$m" -replace '\s+', ' ').Trim(); if ($said.Length -gt 300) { $said = $said.Substring(0, 300) + ' ...' }
+        return ("POWERBI-ADMIN-NOT-GRANTED (Power BI answered: {0}) -- PIM Manager's identity is not a Fabric Administrator yet, or Fabric does not let it use the admin API (run Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -GrantFabricAdministrator once)" -f $said)
     }
     return $m
 }

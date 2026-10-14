@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.625 -- 2026-10-14
+
+- Power BI: a refused admin-API call now shows Power BI's own answer first, so the reason is never cut off
+
 ## 2.4.624 -- 2026-10-14
 
 - Switch dialogs in plain words (one calm line, details behind More info); break-glass changes can be self-approved when self-approval is on; the hybrid worker is a feature you switch on (off by default); Guards say Protecting / Holding back changes; no more overdue noise on Jobs; Power BI workspace roles through the Power BI admin API (add only), with a one-time Fabric Administrator grant in the workload prerequisites script
