@@ -20,7 +20,8 @@
     * The EXECUTION TIME LIMIT -- a job that will not fit in what is left of this execution waits for the next one instead
       of being killed half-way (which is what left runs 'running' until a later tick closed them as interrupted).
     * Why a run was INTERRUPTED (Get-PimInterruptedRunVerdict): an update restart or a platform stop is not a product
-      failure; a crash, a time-limit kill or an execution that ended without a result is.
+      failure; a crash or a time-limit kill is. An execution that ended Succeeded without the run's result (RUN-NO-RESULT,
+      PIM 100.143) is interrupted: once is not a failure, twice in a row is.
 
   Every pure function takes its inputs as parameters (time injected) and is tested offline: tests/Test-PimJobLanes.ps1.
 #>
@@ -448,7 +449,10 @@ function Get-PimInterruptedRunVerdict {
         manager       -- a Run now inside the Manager, and the Manager restarted.
         time-limit    -- the execution Failed after running for the whole time limit: the job is longer than one execution.
         crashed       -- the execution Failed earlier (out of memory, a crash).
-        unrecorded    -- the execution Succeeded but this run's result was never written.
+        unrecorded    -- the execution Succeeded but this run's result was never written. Failure class RUN-NO-RESULT
+                         (PIM 100.143): 'interrupted', not 'failed' -- the job ran, only its record was lost (the run-history
+                         write lost every compare-and-set to another execution), and the next turn runs it again. Like
+                         'unknown': not counted as a failure once; two in a row are (Get-PimJobsStatus, the uplink).
         unknown       -- nothing says why. Not counted as a failure once; two in a row are (Get-PimJobsStatus).
     #>
     param([Parameter(Mandatory)][object]$Run, [string]$CurrentVersion = '', [string]$PlatformStatus = '', [string]$Execution = '',
@@ -477,8 +481,9 @@ function Get-PimInterruptedRunVerdict {
             detail = "interrupted: the execution$execTxt ended in Failed while this run (started $at) was in progress -- its container stopped (out of memory or a crash); it runs again on its next turn" }
     }
     if ($ps -eq 'Succeeded') {
-        return [pscustomobject]@{ status = 'failed'; cause = 'unrecorded'
-            detail = "the execution$execTxt finished without recording this run's result (started $at); it runs again on its next turn" }
+        # PIM 100.143: the [RUN-NO-RESULT] tag is the failure class (PIM-FailureCatalog.ps1) the uplink sends -- never UNCLASSIFIED.
+        return [pscustomobject]@{ status = 'interrupted'; cause = 'unrecorded'
+            detail = "the execution$execTxt finished without recording this run's result (started $at) [RUN-NO-RESULT]; it runs again on its next turn -- one such run is not a failure, two in a row show as failing" }
     }
     $own = if ($Run.PSObject.Properties['owner']) { "$($Run.owner)".Trim() } else { '' }
     if (-not $own -and "$($Run.reason)" -eq 'force-start') {
@@ -538,7 +543,10 @@ function Update-PimCasSetting {
         $n = 0
         try { $n = Set-PimSqlSettingIfUnchanged -ConnectionString $st.Cs -Name $Name -NewValueJson $json -ExpectedValueJson $raw } catch { $n = 0 }
         if ($n -ge 1) { return @{ ok = $true; value = $new } }
-        Start-Sleep -Milliseconds (40 * ($i + 1))
+        # PIM 100.143: a RANDOM part on top of the growing wait. Two executions that lost to each other used to wait exactly
+        # the same 40/80/120... ms and collide again on every attempt (live 2026-10-14 07:05 UTC: two overlapping ticks,
+        # the run-history ring changed under all 8 attempts and a finished run's record was lost).
+        Start-Sleep -Milliseconds ((40 * ($i + 1)) + (Get-Random -Minimum 0 -Maximum (60 * ($i + 1))))
     }
     Write-Warning "[scheduler] $Name changed under every one of $Attempts attempts -- this change was NOT saved."
     return @{ ok = $false; value = $null }

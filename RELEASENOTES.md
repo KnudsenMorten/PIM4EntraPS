@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.626 -- 2026-10-14
+
+- A run record lost when two engine runs collide is kept and saved again (no more false failed mails); one lost record is reported as interrupted (RUN-NO-RESULT), never as failed
+
 ## 2.4.625 -- 2026-10-14
 
 - Power BI: a refused admin-API call now shows Power BI's own answer first, so the reason is never cut off

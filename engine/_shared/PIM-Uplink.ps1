@@ -91,6 +91,19 @@ function Get-PimUplinkRunPlan {
     $since = $null; try { if ($SinceUtc) { $since = ([datetime]$SinceUtc).ToUniversalTime() } } catch { $since = $null }
     $byJob = [ordered]@{}
     $newest = $since
+    # PIM 100.143 RUN-NO-RESULT: a run whose execution ended without its record (closed 'interrupted', cause 'unrecorded') is
+    # a WARNING with that class -- never "failed, unclassified". TWO in a row of the same job (by name, the run before it of
+    # that job, any watermark) are FAILED with that class: the rule the Jobs view applies (Get-PimJobsStatus).
+    $isNoResult = { param($x) "$($x.status)".Trim().ToLowerInvariant() -eq 'interrupted' -and $x.PSObject.Properties['interruptedCause'] -and "$($x.interruptedCause)".Trim().ToLowerInvariant() -eq 'unrecorded' }
+    $noResultTwice = @{}
+    $byName = @{}
+    foreach ($x in @($Runs | Where-Object { $_ -and "$($_.finishedUtc)".Trim() -and "$($_.status)".Trim().ToLowerInvariant() -notin @('running', 'skipped', 'unimplemented', 'outofscope', 'disabled', '') })) {
+        $nm = "$($x.name)"; if (-not $byName.ContainsKey($nm)) { $byName[$nm] = New-Object System.Collections.Generic.List[object] }; $byName[$nm].Add($x)
+    }
+    foreach ($nm in @($byName.Keys)) {
+        $seq = @($byName[$nm] | Sort-Object { "$($_.startedUtc)" })
+        for ($k = 1; $k -lt $seq.Count; $k++) { if ((& $isNoResult $seq[$k]) -and (& $isNoResult $seq[$k - 1])) { $noResultTwice["$($seq[$k].runId)"] = $true } }
+    }
     foreach ($r in @($Runs | Where-Object { $_ })) {
         $fin = $null; try { if ("$($r.finishedUtc)") { $fin = ([datetime]"$($r.finishedUtc)").ToUniversalTime() } } catch { $fin = $null }
         if (-not $fin) { continue }
@@ -101,8 +114,9 @@ function Get-PimUplinkRunPlan {
         if ($js -and $fin -le $js) { continue }
         $out = Get-PimUplinkRunOutcome -Run $r
         if (-not $out) { continue }
+        if ("$($r.runId)".Trim() -and $noResultTwice.ContainsKey("$($r.runId)")) { $out = 'failed' }   # 100.143: the second in a row
         if (-not $newest -or $fin -gt $newest) { $newest = $fin }
-        if (-not $byJob.Contains($job)) { $byJob[$job] = @{ job = $job; latest = $r; latestFin = $fin; failed = $null; held = $false; throttled = $null; count = 0 } }
+        if (-not $byJob.Contains($job)) { $byJob[$job] = @{ job = $job; latest = $r; latestFin = $fin; failed = $null; held = $false; throttled = $null; noResult = $null; count = 0 } }
         $e = $byJob[$job]; $e.count++
         if ($fin -gt $e.latestFin) { $e.latest = $r; $e.latestFin = $fin }
         if ($out -eq 'failed' -and (-not $e.failed -or $fin -gt ([datetime]"$($e.failed.finishedUtc)").ToUniversalTime())) { $e.failed = $r }
@@ -115,6 +129,7 @@ function Get-PimUplinkRunPlan {
             if (-not $e.ContainsKey('kindRank') -or $rank -gt [int]$e.kindRank -or ($rank -eq [int]$e.kindRank -and $fin -gt $e.kindFin)) { $e.kind = $wk; $e.kindRank = $rank; $e.kindRun = $r; $e.kindFin = $fin }
         }
         if ("$($r.status)".Trim().ToLowerInvariant() -eq 'throttled' -and (-not $e.throttled -or $fin -gt ([datetime]"$($e.throttled.finishedUtc)").ToUniversalTime())) { $e.throttled = $r }
+        if ($out -eq 'warning' -and (& $isNoResult $r) -and (-not $e.noResult -or $fin -gt ([datetime]"$($e.noResult.finishedUtc)").ToUniversalTime())) { $e.noResult = $r }
     }
     $reports = New-Object System.Collections.Generic.List[object]
     # Failures first (they matter most when the rate limit leaves some for the next cycle), then the oldest first.
@@ -127,8 +142,12 @@ function Get-PimUplinkRunPlan {
         $dur = $null; if ($src.PSObject.Properties['durationMs']) { $dur = $src.durationMs }
         $txt = if ($outcome -eq 'failed') { "$($src.detail)" } else { '' }
         # §100.45: a warning because Microsoft throttled the job carries ErrorClass THROTTLED (and the throttled run's text).
+        # PIM 100.143: a warning because a run's record was lost carries ErrorClass RUN-NO-RESULT (throttling, if any, wins);
+        # a failure that IS the second RUN-NO-RESULT in a row carries it too (never left to the text classifier).
         $cls = ''
         if ($outcome -eq 'warning' -and $e.throttled) { $cls = 'THROTTLED'; $txt = "$($e.throttled.detail)" }
+        elseif ($outcome -eq 'warning' -and $e.noResult) { $cls = 'RUN-NO-RESULT'; $txt = "$($e.noResult.detail)" }
+        if ($outcome -eq 'failed' -and (& $isNoResult $src)) { $cls = 'RUN-NO-RESULT' }
         # PIM 100.99 (additive; the keys above are unchanged): kind = failed | held | warning | throttled | interrupted | '',
         # noteText = what that run said (a held run's detail, a declared warning's summary), warningKind, updateAction.
         $kind = ''; $note = ''; $wkind = ''
@@ -1345,7 +1364,8 @@ function Invoke-PimUplinkCycle {
     foreach ($p in @($plan.reports)) {
         # STOP at the first failure (a 429 says "wait") and at the per-cycle budget: the rest keep their watermark.
         if ($stopped -or $sent -ge $budget) { $left++; continue }
-        $cls = if ($p.outcome -eq 'failed') { Get-PimUplinkErrorClass -Text $p.errorText } elseif ($p.ContainsKey('errorClass') -and "$($p.errorClass)") { "$($p.errorClass)" } else { '' }
+        # PIM 100.143: a class the plan already knows (RUN-NO-RESULT) wins; otherwise a failure's text is classified.
+        $cls = if ($p.ContainsKey('errorClass') -and "$($p.errorClass)") { "$($p.errorClass)" } elseif ($p.outcome -eq 'failed') { Get-PimUplinkErrorClass -Text $p.errorText } else { '' }
         $rec = New-AitUplinkReport -Kind run @common -Job $p.job -Outcome $p.outcome -DurationMs $p.durationMs -ErrorClass $cls -ErrorText $p.errorText `
                  -Counts @{ runs = $p.runCount }
         # 100.34: fixKind beside the class -- added HERE, not in the framework client (sync/_AitUplink.ps1 must stay

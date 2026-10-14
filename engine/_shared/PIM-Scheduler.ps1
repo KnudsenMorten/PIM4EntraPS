@@ -2347,10 +2347,13 @@ function Update-PimJobRunHistory {
       a finished record and brought its 'running' record back). -Mutate gets the current runs and RETURNS the new list
       (or $null = no change). Without a compare-and-set store (one process): the old read-modify-write.
     #>
-    param([Parameter(Mandatory)][scriptblock]$Mutate)
+    # PIM 100.143: whether THIS change reached the store is left in $script:PimRunHistoryWriteOk (no pipeline output -- the
+    # callers do not capture one). -Attempts: how many compare-and-set rounds before giving up (Update-PimCasSetting).
+    param([Parameter(Mandatory)][scriptblock]$Mutate, [int]$Attempts = 8)
+    $script:PimRunHistoryWriteOk = $false
     # NOT named $Mutate inside the wrapper below: Update-PimCasSetting has its own $Mutate, and dynamic scope would find it.
     $historyMutate = $Mutate
-    $r = Update-PimCasSetting -Name 'JobRunHistory' -Depth 8 -Fallback {
+    $r = Update-PimCasSetting -Name 'JobRunHistory' -Depth 8 -Attempts ([Math]::Max(1, $Attempts)) -Fallback {
         $f = $null
         if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { try { $v = Get-PimSetting -Name 'JobRunHistory'; if ($v -is [string]) { $t = $v | ConvertFrom-Json; $f = @($t) } elseif ($v) { $f = @($v) } } catch { } }
         if ($null -eq $f) { $f = @($script:PimRunHistory) }
@@ -2362,10 +2365,12 @@ function Update-PimJobRunHistory {
         ,@(Select-PimJobRunHistoryKept -Runs @($n))
     }
     if ($r.noStore) {
+        $script:PimRunHistoryWriteOk = $true
         $n = & $Mutate @(Get-PimJobRunHistory)
         if ($null -ne $n) { Save-PimJobRunHistory -Runs @(Select-PimJobRunHistoryKept -Runs @($n)) }
         return
     }
+    $script:PimRunHistoryWriteOk = [bool]$r.ok
     if ($r.ok -and $null -ne $r.value) { $script:PimRunHistory = @($r.value) }
     if (-not $r.ok) { Write-Warning "[scheduler] JobRunHistory did NOT persist. Recent runs will not appear in the Jobs tab." }
 }
@@ -2385,20 +2390,73 @@ function Save-PimJobRunHistory {
     # escaped, roughly doubling the bytes written on every job run.
     $saved = $false; $why = 'no SQL settings store (Set-PimSetting) is wired -- PIM v2 is SQL-only'
     if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) {
-        try { Set-PimSetting -Name 'JobRunHistory' -Value ([object[]]@($Runs)) | Out-Null; $saved = $true } catch { $why = "$($_.Exception.Message)" }
+        try { Set-PimSetting -Name 'JobRunHistory' -Value ([object[]]@($Runs)) | Out-Null; $saved = $true } catch { $why = "$($_.Exception.Message)"; $script:PimRunHistoryWriteOk = $false }
     }
     if (-not $saved) { Write-Warning "[scheduler] JobRunHistory did NOT persist ($why). Recent runs will not appear in the Jobs tab." }
 }
 function Add-PimJobRunRecord {
     # Append one finished run to the ring, trimming to $script:PimRunHistoryMax per job.
-    param([Parameter(Mandatory)][object]$Run)
+    # -Attempts (PIM 100.143): a FINISHED run's record gets more compare-and-set rounds than a placeholder.
+    param([Parameter(Mandatory)][object]$Run, [int]$Attempts = 8)
     # drop any prior 'running' placeholder for the same runId (it's now finished)
-    Update-PimJobRunHistory -Mutate {
+    Update-PimJobRunHistory -Attempts $Attempts -Mutate {
         param($all)
         $all = @($all)
         if ("$($Run.runId)".Trim()) { $all = @($all | Where-Object { "$($_.runId)" -ne "$($Run.runId)" }) }
         ,@(@($Run) + $all)
     }
+}
+
+# ---- PIM 100.143: a finished run's record that could not be written is HANDED OVER, never dropped -------------------
+# Live 2026-10-14 07:05 UTC (a customer production environment, 2.4.622): the 07:00 execution started 4.5 minutes late and
+# ran beside the 07:05 one, which wrote a record for every hourly job. The 07:00 execution's finished 'delta-admin-tap'
+# record lost all 8 compare-and-set rounds on the run-history ring ("JobRunHistory changed under every one of 8 attempts
+# -- this change was NOT saved"); the scheduler only warned, released the job's locks and ended Succeeded. Its 'running'
+# record stayed, the 07:10 tick closed it as "finished without recording this run's result" and the uplink sent it as a
+# FAILED pim-engine-delta, UNCLASSIFIED. Now: the record is kept in memory, retried before every later job and at the end
+# of the tick, and the run keeps its 'job:<name>' lock until it lands -- so no other execution closes its 'running' record
+# meanwhile, and the same job does not start again before its result is there. Only if the very last attempt fails too
+# does the record stay 'running'; it is then closed as RUN-NO-RESULT (interrupted: once is not a failure).
+$script:PimUnsavedRunRecords = $null   # runId -> finished run record not yet in the store (this process only)
+
+function Add-PimUnsavedRunRecord {
+    param([Parameter(Mandatory)][object]$Run)
+    if ($null -eq $script:PimUnsavedRunRecords) { $script:PimUnsavedRunRecords = [ordered]@{} }
+    $id = "$($Run.runId)".Trim(); if (-not $id) { return }
+    $script:PimUnsavedRunRecords[$id] = $Run
+}
+
+function Test-PimRunRecordUnsaved {
+    param([string]$RunId)
+    return [bool]("$RunId".Trim() -and $null -ne $script:PimUnsavedRunRecords -and $script:PimUnsavedRunRecords.Contains("$RunId".Trim()))
+}
+
+function Save-PimUnsavedRunRecords {
+    <#
+      Write every finished run record this process could not write before, in ONE compare-and-set (each replaces its own
+      'running' record by runId; a record another execution already closed as interrupted is replaced by the real result).
+      -Owner: release the 'job:<name>' lock each of those runs kept until its record landed. Returns the number still unsaved.
+    #>
+    param([string]$Owner = '', [int]$Attempts = 16)
+    if ($null -eq $script:PimUnsavedRunRecords -or -not $script:PimUnsavedRunRecords.Count) { return 0 }
+    $pending = @($script:PimUnsavedRunRecords.Values)
+    $ids = @{}; foreach ($p in $pending) { $ids["$($p.runId)"] = $true }
+    Update-PimJobRunHistory -Attempts $Attempts -Mutate {
+        param($all)
+        ,@(@($pending) + @(@($all) | Where-Object { -not $ids.ContainsKey("$($_.runId)") }))
+    }
+    if (-not $script:PimRunHistoryWriteOk) { return [int]$script:PimUnsavedRunRecords.Count }
+    foreach ($p in $pending) {
+        $script:PimUnsavedRunRecords.Remove("$($p.runId)")
+        Write-Host ("[scheduler] the run record of '{0}' (run {1}) is saved now, on a later attempt" -f "$($p.name)", "$($p.runId)") -ForegroundColor DarkYellow
+        # Remove-PimAreaLocks is always loaded (PIM-JobLanes.ps1 is dot-sourced at the end of this file) -- never gated.
+        # A release that fails is SAID (the lock then expires at its TTL), never swallowed.
+        if ("$Owner".Trim()) {
+            try { [void](Remove-PimAreaLocks -Owner $Owner -RunId "$($p.runId)") }
+            catch { Write-Warning ("[scheduler] the job lock kept for run {0} ('{1}') was NOT released ({2}) -- it expires at its TTL" -f "$($p.runId)", "$($p.name)", $_.Exception.Message) }
+        }
+    }
+    return 0
 }
 
 # BUG-264 (remainder): the ring was PER NAME, and triggered runs carry one-off names ('trigger:engine-delta:<scope list>',
@@ -3211,7 +3269,14 @@ function Write-PimJobRunRecord {
         version     = (Get-PimRunningVersion)
     }
     $rec = Set-PimRunThrottleState -Run $rec   # §100.45: throttling is a retry, not a failure -- one rule for every job
-    Add-PimJobRunRecord -Run $rec
+    # PIM 100.143: more rounds for a FINISHED record, and one that still could not be written is handed over (retried
+    # before the next job and at the end of the tick), never dropped with only a warning.
+    $script:PimRunHistoryWriteOk = $true   # a writer that does not report (a test seam) counts as written
+    Add-PimJobRunRecord -Run $rec -Attempts 16
+    if (-not $script:PimRunHistoryWriteOk) {
+        Add-PimUnsavedRunRecord -Run $rec
+        Write-Warning ("[scheduler] the run record of '{0}' (run {1}) could not be saved yet -- it is kept and saved again before the next job and at the end of this run" -f "$($rec.name)", "$($rec.runId)")
+    }
     # ALERT-01: a finished run raises the failure alert HERE. Previously the ONLY
     # engine-failure producer was the Manager's POST /api/jobs/run handler, so a job
     # that failed on a SCHEDULED tick raised nothing -- alerting worked when someone
@@ -4025,6 +4090,8 @@ function Invoke-PimTickJobRun {
     $name = "$($Job.name)"
     $isTrig = ($Kind -eq 'trigger')
     $out = @{ outcome = 'ran'; result = $null; detail = ''; started = $null }
+    # PIM 100.143: an earlier run's record this execution could not write yet goes first (it releases that run's job lock).
+    if (-not $WhatIf) { try { [void](Save-PimUnsavedRunRecords -Owner $Owner) } catch { Write-Verbose "[scheduler] unsaved run records: $($_.Exception.Message)" } }
     # (0) the execution time limit: a job that does not fit in what is left of this execution waits for the next one
     # instead of being killed half-way (the 'running' record that then never reports back).
     if ($Kind -ne 'queue' -and -not $WhatIf -and $TimeLimitSeconds -gt 0) {
@@ -4122,7 +4189,13 @@ function Invoke-PimTickJobRun {
         }
         return [pscustomobject]$out
     } finally {
-        if ($lockOn) { [void](Remove-PimAreaLocks -Owner $Owner -RunId $runId) }
+        if ($lockOn) {
+            # PIM 100.143: a run whose record is not in the store yet keeps its 'job:<name>' lock until it is (Save-PimUnsavedRunRecords
+            # releases it; the tick's own release at its end is the last stop). While the owner holds a lock no other execution
+            # closes the run's 'running' record as "finished without recording", and the same job does not start again.
+            if (Test-PimRunRecordUnsaved -RunId $runId) { [void](Remove-PimAreaLocks -Owner $Owner -RunId $runId -Except @($al.job)) }
+            else { [void](Remove-PimAreaLocks -Owner $Owner -RunId $runId) }
+        }
     }
 }
 
@@ -4450,6 +4523,15 @@ function Invoke-PimSchedulerTick {
         $global:PIM_ScopeGateHook = $null; $script:PimScopeGateCtx = $null
         $script:PimTickOwner = $null
         $script:PimTickCtx = $null
+        # PIM 100.143: the last stop for a finished run's record this execution could not write -- BEFORE the locks go, so
+        # no other execution closes its 'running' record meanwhile. Still not written: said loudly; the next tick closes the
+        # record as RUN-NO-RESULT (interrupted -- once is not a failure).
+        if (-not $WhatIf) {
+            $leftN = 0
+            try { $leftN = [int](Save-PimUnsavedRunRecords -Owner $Owner -Attempts 24) } catch { $leftN = -1 }
+            if ($leftN -ne 0) { Write-Warning ("[scheduler] {0} finished run record(s) could NOT be saved before this execution ends: {1} -- the next run closes them as RUN-NO-RESULT" -f $(if ($leftN -lt 0) { 'the' } else { $leftN }), (@(@($script:PimUnsavedRunRecords.Values) | Where-Object { $_ } | ForEach-Object { "$($_.name) ($($_.runId))" }) -join ', ')) }
+            # kept: a looping scheduler (Start-PimScheduler) writes them on its next tick and replaces the closed record
+        }
         if ($useLocks) { try { [void](Remove-PimAreaLocks -Owner $Owner) } catch { Write-Warning "[scheduler] this tick's area locks were NOT released ($($_.Exception.Message)) -- they expire at their TTL" } }
         if ($haveLease) { [void](Remove-PimSchedulerLease -Owner $Owner) }
     }
