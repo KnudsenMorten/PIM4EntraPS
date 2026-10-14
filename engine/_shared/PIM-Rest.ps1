@@ -1326,9 +1326,11 @@ function Invoke-PimArm {
   Invoke-PimRest -Method $Method -Url $url -Body $Body -Resource 'arm' -All:$All -Headers $Headers
 }
 function Invoke-PimPowerBI {
-  param([string]$Method='GET',[Parameter(Mandatory)][string]$Path,[object]$Body,[switch]$All,[hashtable]$Headers=@{})
+  # PIM 100.142: -MaxRetry passes through, so the admin-api client (Invoke-PimPowerBiAdminRequest, PIM-WorkloadConnectors.ps1)
+  # can own the 429 handling (the admin api allows 200 requests per hour). The default (5) is unchanged for every other caller.
+  param([string]$Method='GET',[Parameter(Mandatory)][string]$Path,[object]$Body,[switch]$All,[hashtable]$Headers=@{},[int]$MaxRetry=5)
   $url = if ($Path -match '^https?://') { $Path } else { "https://api.powerbi.com/v1.0/myorg$Path" }
-  Invoke-PimRest -Method $Method -Url $url -Body $Body -Resource 'powerbi' -All:$All -Headers $Headers
+  Invoke-PimRest -Method $Method -Url $url -Body $Body -Resource 'powerbi' -All:$All -Headers $Headers -MaxRetry $MaxRetry
 }
 
 # ---- Exchange Online (app-only, pure REST, NO ExchangeOnlineManagement) ----

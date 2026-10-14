@@ -144,7 +144,13 @@ $script:PimFeatureCatalog = @(
     [ordered]@{ key='reports.tier';      label='Tier-impact report';                  group='Governance';   tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='TierReport';     description='Everyone who can reach tier 0, including through nested groups.' }
     # §75.4 / §80.2 (operator 2026-09-20, the AD-broker wizard): on-premises AD -- admin accounts, the PIM-for-AD group
     # mirror and JIT membership -- is Pro, enforced where the write happens (the hybrid worker's jobs).
-    [ordered]@{ key='hybrid.ad';         label='On-premises Active Directory (hybrid worker)'; group='Governance'; tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='HybridAd'; description='Admin accounts in on-premises AD, PIM groups mirrored to AD groups and just-in-time AD membership for activated PIM groups -- applied by the hybrid worker.' }
+    # PIM 100.139 (owner 2026-10-13: "hybrid worker should be a feature to turn on (off by default). this doesnt have ad at
+    # all"): an ON/OFF switch under Features, OFF by default. It was tier='core' (always on, not gateable), so an install with
+    # no Active Directory showed its hybrid jobs "overdue -- hybrid worker not seen" and Settings > Hybrid AD in red. OFF = the
+    # hybrid-ad-* jobs do not run (Invoke-PimScheduledJob, Test-PimHybridAdFeatureOff) and show as switched off on the Jobs
+    # page and in Settings > Hybrid AD -- never overdue, never "not seen", no alert. ON = the behaviour before. The Pro licence
+    # rule is unchanged (license='pro'). No upgrade step switches an existing install on or off: a stored value decides.
+    [ordered]@{ key='hybrid.ad';         label='On-premises Active Directory (hybrid worker)'; group='Governance'; tier='advanced'; license='pro'; scope='single'; defaultEnabled=$false; dependsOn=@(); proFeature='HybridAd'; description='Admin accounts in on-premises AD, PIM groups mirrored to AD groups and just-in-time AD membership for activated PIM groups -- applied by the hybrid worker. Off = the hybrid worker jobs do not run and are shown as switched off. Switch it on when the hybrid worker is installed.' }
     [ordered]@{ key='reports.evidence';  label='Evidence / audit export';             group='Governance';   tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='EvidenceExport'; description='Who may hold what, who held it and who approved it -- the evidence report and its export.' }
 
     # §82 (operator 2026-10-02, wizard: "Both Pro"). The company review is inert until a Company is defined; RFA needs the
