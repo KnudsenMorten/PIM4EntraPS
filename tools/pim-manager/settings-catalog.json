@@ -428,6 +428,34 @@
       }
     },
     {
+      "key": "FeatureGates.telemetry.causes",
+      "label": "Send error codes and causes to Invardia",
+      "where": "Settings > Features & edition > Feature customization",
+      "route": "/api/settings/feature-gates",
+      "type": "boolean",
+      "default": "On",
+      "feature": "",
+      "confirmOn": true,
+      "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Send error codes and causes to Invardia?",
+          "body": "When on, each job report names the cause of a problem with a stable error code, so support knows the fix before you call.",
+          "note": "Tip: secrets are never sent; the short technical line is seen by support only."
+        }
+      },
+      "info": {
+        "what": "Adds the cause of every problem to the hourly job reports: a stable error code (for example pim-entra-0104), the kind of cause, who acts and one short technical line, and adds the Microsoft services the tenant is licensed for to the hourly status. The same code is shown in mails and on Invardia's error pages.",
+        "enabled": "With a Pro install key, the next uplink run sends the codes with the job reports, and the next hourly status names the licensed services. Without an install key nothing of this is sent.",
+        "disabled": "Job reports go as before, without codes and licences. The other telemetry switches are not affected.",
+        "risk": "When on, it sends error codes, cause kinds, the tenant's licence names (for example the product ids of its Microsoft 365 plans) and one short technical line per cause, with secrets removed, to invardia.com. Reversible: switch it off and nothing more is sent.",
+        "requires": "A Pro install key (identified telemetry). 'Send status telemetry to Invardia' on. SuperAdmin to change it. Outbound HTTPS to Invardia's uplink.",
+        "recommended": "On. Invardia support receives the codes (since 2026-10-15).",
+        "docUrl": "https://invardia.com/docs/pim/settings/FeatureGates.telemetry.causes/"
+      }
+    },
+    {
       "key": "FeatureGates.scheduler.jobs",
       "label": "Scheduled jobs",
       "where": "Settings > Features & edition > Feature customization",

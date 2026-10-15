@@ -1095,6 +1095,145 @@ function Get-PimUplinkSupersededBy {
     } catch { return '' }
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# PIM 100.167 / framework DOCS/REQUIREMENTS.md 8.16 UPLINK-CAUSES (owner 2026-10-15: "across all solutions" / "each solution
+# cause drop cause at least" / "or define errorcodes" / "but more context in free text is needed"). Behind the feature
+# 'telemetry.causes' -- OFF until Invardia says its side is live; OFF = every record exactly as before (Test-PimErrorCodes D).
+#   run record  Reports[] (max 20): one item per cause the run names -- Report (the job id), Code (pim-<area>-<nnnn>),
+#               CauseClass, Action, FixedIn, RunMs; identified only: Detail (max 500, secret-scrubbed, INTERNAL).
+#   heartbeat   Capabilities (closed keys, booleans; a key PIM cannot judge cheaply is left out) + Licences (the tenant's
+#               subscribedSkus skuPartNumber ids) -- identified only, from ONE Graph read per heartbeat; a refused read
+#               leaves both out (never a guess).
+#   a refusal   Invardia refuses a whole record on a field it does not know: a record refused for its content goes ONCE more
+#               without Reports / Capabilities / Licences, and they stay off for 24 h (UplinkState.causesRefusedUtc).
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimUplinkCapabilityKeys {
+    <# PURE. framework 8.16: the CLOSED Capabilities keys (SI's list + PIM's additions). #>
+    return @('defenderXdr', 'defenderVulnMgmt', 'mdi', 'intune', 'entraP2Pim', 'cmdb', 'sentinel', 'dataLake',
+             'azureRbac', 'exchangeOnline', 'powerBi', 'hybridAd', 'tapPolicy')
+}
+
+function Get-PimUplinkCauseItemMax { <# PURE. framework 8.16: at most 20 Reports items, Detail at most 500 characters. #> return 20 }
+
+function ConvertTo-PimUplinkCauseId {
+    <# PURE. A value as an uplink id ^[a-z0-9-]{1,60}$ (lower case, other characters -> '-'), or '' when nothing is left. #>
+    param([AllowNull()][string]$Value)
+    $v = ("$Value".Trim().ToLowerInvariant() -replace '[^a-z0-9-]+', '-').Trim('-')
+    if ($v.Length -gt 60) { $v = $v.Substring(0, 60).Trim('-') }
+    return $v
+}
+
+function Get-PimUplinkCauseClasses {
+    <#
+      PURE. The catalog classes a run names, in the order of its text: every bracketed known class (failures, then the
+      WAITING / NEEDS APPROVAL parts -- each item is a cause the owner wants to see), UNCLASSIFIED kept. When the text names
+      none: -ErrorClass (RUN-NO-RESULT, CONVERGENCE, THROTTLED, a classified raw error), else for a failed run UNCLASSIFIED.
+      A held run without a class -> its provider's hold class (the cycle's own rule), else the generic held-for-approval code.
+    #>
+    param([string]$Outcome = '', [string]$Kind = '', [string]$Text = '', [string]$NoteText = '', [string]$ErrorClass = '')
+    $o = "$Outcome".Trim().ToLowerInvariant(); $k = "$Kind".Trim().ToLowerInvariant()
+    if ($o -notin @('failed', 'warning')) { return @() }
+    $known = @{}
+    if (Get-Command Get-PimFailureCatalogCodes -ErrorAction SilentlyContinue) { try { foreach ($c in @(Get-PimFailureCatalogCodes)) { $known["$c"] = $true } } catch { } }
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($m in [regex]::Matches("$Text $NoteText", '\[([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)\]')) {
+        $c = $m.Groups[1].Value
+        if ($known.ContainsKey($c) -and -not $out.Contains($c)) { $out.Add($c) }
+    }
+    if ($out.Count) { return $out.ToArray() }
+    $ec = "$ErrorClass".Trim().ToUpperInvariant()
+    if ($ec) { return @($ec) }
+    if ($o -eq 'failed') { return @('UNCLASSIFIED') }
+    if ($k -eq 'held') {
+        if ("$NoteText" -match 'GroupsPolicies') { return @('GROUP-POLICY-MASS-HOLD') }
+        if ("$NoteText" -match 'EntraRolePolicies') { return @('ENTRA-POLICY-MASS-HOLD') }
+        if ("$NoteText" -match 'AzResPolicies') { return @('AZ-POLICY-MASS-HOLD') }
+        return @('GENERIC:held-for-approval')
+    }
+    if ($k -eq 'throttled') { return @('THROTTLED') }
+    if ($k -eq 'interrupted') { return @('GENERIC:platform-timeout') }
+    return @()   # a declared warning about itself (e.g. telemetry not delivered) is no engine cause
+}
+
+function New-PimUplinkCauseReports {
+    <#
+      PURE. framework 8.16: the Reports[] items of ONE run report (the cycle's plan entry -Plan: job, outcome, kind,
+      durationMs, errorText, noteText, errorClass). Nothing for an ok run. Every item: Report, Code, CauseClass, Action,
+      FixedIn (only when known), RunMs (when known). -Identified adds Detail: the run text's part that names the cause + the
+      first engine message of that cause (-EngineFailures), through -Redact, at most 500 characters -- INTERNAL (owner,
+      support, the solution's worker); a customer mail uses the catalogue's customerText only.
+    #>
+    param([Parameter(Mandatory)][object]$Plan, [string]$ErrorClass = '', [AllowNull()][object[]]$EngineFailures = @(),
+          [bool]$Identified = $false, [scriptblock]$Redact = { param($t, $max) $x = "$t".Trim(); if ($x.Length -gt $max) { $x = $x.Substring(0, $max - 3) + '...' }; $x })
+    $g = { param($n) if ($Plan -is [System.Collections.IDictionary]) { if ($Plan.Contains($n)) { $Plan[$n] } } elseif ($Plan.PSObject.Properties[$n]) { $Plan.$n } }
+    $classes = @(Get-PimUplinkCauseClasses -Outcome "$(& $g 'outcome')" -Kind "$(& $g 'kind')" -Text "$(& $g 'errorText')" -NoteText "$(& $g 'noteText')" -ErrorClass $ErrorClass)
+    if (-not $classes.Count) { return @() }
+    $report = ConvertTo-PimUplinkCauseId "$(& $g 'job')"
+    if (-not $report) { $report = 'pim-run' }
+    $ms = $null; $dm = & $g 'durationMs'; $n0 = 0L; if ($null -ne $dm -and [long]::TryParse("$dm", [ref]$n0) -and $n0 -ge 0) { $ms = $n0 }
+    $text = "$(& $g 'errorText') $(& $g 'noteText')"
+    $items = New-Object System.Collections.Generic.List[object]
+    foreach ($cls in $classes) {
+        if ($items.Count -ge (Get-PimUplinkCauseItemMax)) { break }
+        $isGeneric = "$cls" -like 'GENERIC:*'
+        $info = if ($isGeneric) { Get-PimFailureCodeInfo -Class '' -CauseClass ("$cls".Substring(8)) } else { Get-PimFailureCodeInfo -Class "$cls" }
+        $it = [ordered]@{ Report = $report; Code = "$($info.code)"; CauseClass = "$($info.causeClass)"; Action = "$($info.action)" }
+        if ("$($info.fixedIn)".Trim()) { $it['FixedIn'] = "$($info.fixedIn)".Trim() }
+        if ($null -ne $ms) { $it['RunMs'] = $ms }
+        if ($Identified) {
+            $parts = New-Object System.Collections.Generic.List[string]
+            if (-not $isGeneric) {
+                $seg = [regex]::Match($text, '[^;:\r\n]{0,200}\[' + [regex]::Escape("$cls") + '\]')
+                if ($seg.Success) { $parts.Add($seg.Value.Trim()) }
+                $ef = @(@($EngineFailures) | Where-Object { $null -ne $_ -and "$($_.code)".Trim().ToUpperInvariant() -eq "$cls" -and "$($_.message)".Trim() }) | Select-Object -First 1
+                if ($ef) { $parts.Add((("$($ef.message)" -split "`r?`n")[0]).Trim()) }
+            }
+            if (-not $parts.Count) { $first = (("$text" -split "`r?`n") | Where-Object { "$_".Trim() } | Select-Object -First 1); if ($first) { $parts.Add("$first".Trim()) } }
+            $d = ''; if ($parts.Count) { $d = & $Redact ($parts -join ' | ') 500 }
+            if ("$d".Trim()) { $it['Detail'] = "$d" }
+        }
+        $items.Add([pscustomobject]$it)
+    }
+    return $items.ToArray()
+}
+
+function Get-PimUplinkTenantCapabilities {
+    <#
+      PURE. framework 8.16 heartbeat: the tenant's subscribedSkus (-Skus: skuPartNumber, capabilityStatus, servicePlans
+      [{ servicePlanName; provisioningStatus }]) -> @{ capabilities (ordered: closed key -> bool); licences (ids) }.
+      Only a SKU in use (capabilityStatus Enabled / Warning) counts; a plan switched off for the tenant does not.
+      Keys PIM judges from the licences: entraP2Pim, intune, defenderXdr, mdi, exchangeOnline, powerBi -- false only when
+      the list WAS read and no plan grants it. -HybridAd $true adds hybridAd = true (the product's own hybrid feature is on).
+      azureRbac, tapPolicy and SI's keys are never guessed: left out. -Skus $null (not read) = no licence-based key at all.
+    #>
+    param([AllowNull()][object[]]$Skus, [AllowNull()][object]$HybridAd = $null)
+    $caps = [ordered]@{}; $lic = New-Object System.Collections.Generic.List[string]
+    if ($null -ne $Skus) {
+        $plans = New-Object System.Collections.Generic.List[string]
+        foreach ($s in @($Skus)) {
+            if ($null -eq $s) { continue }
+            $st = "$($s.capabilityStatus)".Trim()
+            if ($st -and $st -notin @('Enabled', 'Warning')) { continue }
+            $pn = "$($s.skuPartNumber)".Trim()
+            if ($pn -match '^[A-Za-z0-9_.+-]{1,60}$' -and -not $lic.Contains($pn) -and $lic.Count -lt 50) { $lic.Add($pn) }
+            foreach ($p in @($s.servicePlans)) {
+                if ($null -eq $p) { continue }
+                if ("$($p.provisioningStatus)".Trim() -eq 'Disabled') { continue }
+                $n = "$($p.servicePlanName)".Trim().ToUpperInvariant(); if ($n -and -not $plans.Contains($n)) { $plans.Add($n) }
+            }
+        }
+        $has = { param([string[]]$pat) foreach ($x in $plans) { foreach ($q in $pat) { if ($x -like $q) { return $true } } }; return $false }
+        $caps['entraP2Pim'] = [bool](& $has @('AAD_PREMIUM_P2'))
+        $caps['intune'] = [bool](& $has @('INTUNE_A*'))
+        $caps['defenderXdr'] = [bool](& $has @('WINDEFATP', 'MDE_LITE', 'ATP_ENTERPRISE', 'THREAT_INTELLIGENCE', 'MTP', 'ATA'))
+        $caps['mdi'] = [bool](& $has @('ATA'))
+        $caps['exchangeOnline'] = [bool](& $has @('EXCHANGE_S_STANDARD*', 'EXCHANGE_S_ENTERPRISE*', 'EXCHANGE_S_DESKLESS*'))
+        $caps['powerBi'] = [bool](& $has @('BI_AZURE_P*', 'POWER_BI_*'))
+    }
+    if ($HybridAd -eq $true) { $caps['hybridAd'] = $true }
+    return [pscustomobject]@{ capabilities = $caps; licences = @($lic.ToArray()) }
+}
+
 function Invoke-PimUplinkCycle {
     <#
       One cycle with every seam injected (tests run it offline):
@@ -1136,7 +1275,15 @@ function Invoke-PimUplinkCycle {
           # the updater's last run as a run (ConvertTo-PimUplinkUpdateRun), or $null
           [AllowNull()][object]$UpdateRun = $null,
           # the heartbeat interval (a product constant: one hour). A parameter only so a test can keep an older timeline.
-          [double]$HeartbeatHours = (Get-PimUplinkHeartbeatHours))
+          [double]$HeartbeatHours = (Get-PimUplinkHeartbeatHours),
+          # PIM 100.167 / framework 8.16 UPLINK-CAUSES: Reports[] on run records, Capabilities + Licences on the identified
+          # heartbeat. OFF by default (feature 'telemetry.causes'): OFF = every record exactly as before.
+          [bool]$Causes = $false,
+          # { } -> the tenant's subscribedSkus (skuPartNumber, capabilityStatus, servicePlans); invoked ONLY when the identified
+          # heartbeat is due and -Causes is on; a throw = Capabilities / Licences left out.
+          [AllowNull()][scriptblock]$LicenceProbe = $null,
+          # $true when the product's hybrid AD feature is on (Capabilities.hybridAd); anything else = left out
+          [AllowNull()][object]$HybridAd = $null)
     $NowUtc = $NowUtc.ToUniversalTime()
     $endpoint = "$(& $GetSetting 'UplinkEndpoint')".Trim()
     $sender = Resolve-AitUplinkSender -Enabled $Enabled -InstallKey $InstallKey -Endpoint $endpoint
@@ -1221,8 +1368,25 @@ function Invoke-PimUplinkCycle {
         if ("$($r2.Status)" -eq 'ok') { $addState.on = $false; $addState.refusedNow = $true; $addState.reason = "$($r1.Reason)" }
         return $r2
     }
+    # PIM 100.167 / framework 8.16: the cause fields (Reports / Capabilities / Licences) -- their own switch and their own
+    # 24-hour hold after a refusal (UplinkState.causesRefusedUtc), so a refusal of them never turns the additive fields off.
+    # $postCause: the record goes as built; refused for its CONTENT while it carries cause fields (-cnames) -> those are
+    # removed, held 24 h, and the record goes on through $postAdd (which handles the additive fields as before).
+    $causePrev = $null; if ($state -and $state.PSObject.Properties['causesRefusedUtc']) { $causePrev = $state.causesRefusedUtc }
+    $causeHeld = Test-PimUplinkAdditiveHeld -RefusedUtc $causePrev -NowUtc $NowUtc
+    $causeState = @{ on = ([bool]$Causes -and -not $causeHeld); refusedNow = $false; reason = '' }
+    $postCause = {
+        param($rec, $names, $legacy, $cnames)
+        $cn = @(@($cnames) | Where-Object { "$_".Trim() })
+        if (-not $cn.Count -or $null -eq $rec) { return (& $postAdd $rec $names $legacy) }
+        $r1 = & $post $rec
+        if ("$($r1.Status)" -eq 'ok' -or -not (Test-PimUplinkValidationRefusal "$($r1.Reason)")) { return $r1 }
+        foreach ($n in $cn) { $rec.PSObject.Properties.Remove("$n") }
+        $causeState.on = $false; $causeState.refusedNow = $true; $causeState.reason = "$($r1.Reason)"
+        return (& $postAdd $rec $names $legacy)
+    }
     $isId = ($sender.Mode -eq 'identified')
-    $redact = { param($t, $max) $x = "$t".Trim(); if (Get-Command ConvertTo-AitUplinkRedacted -ErrorAction SilentlyContinue) { $x = ConvertTo-AitUplinkRedacted -Text $x }; if ($x.Length -gt $max) { $x = $x.Substring(0, $max - 3) + '...' }; $x }
+    $redact ={ param($t, $max) $x = "$t".Trim(); if (Get-Command ConvertTo-AitUplinkRedacted -ErrorAction SilentlyContinue) { $x = ConvertTo-AitUplinkRedacted -Text $x }; if ($x.Length -gt $max) { $x = $x.Substring(0, $max - 3) + '...' }; $x }
     # §11 opt-in: switched back ON after an opt-out -> ONE 'optin' report FIRST. Until it lands nothing else is sent (Invardia
     # still has this environment as opted out), and nothing from the opted-out period is ever sent: the floor restarts NOW.
     $consent = 'on'
@@ -1344,7 +1508,25 @@ function Invoke-PimUplinkCycle {
                 }
             }
         }
-        $r = & $postAdd $hb $hbAdd @{}
+        # PIM 100.167 / framework 8.16: Capabilities + Licences -- identified only, the cause switch on, ONE probe per heartbeat.
+        # Licences go as a JSON array, PROVEN in the text before it leaves (the ActiveGuards lesson): not an array = left out.
+        $hbCause = @()
+        if ($hb -and $isId -and $causeState.on) {
+            # a name of its own: the probe is a plain scriptblock read through dynamic scope -- a local '$skus' here would
+            # shadow a caller's '$skus' inside it (the test's stub returned $null that way)
+            $tenantSkuList = $null
+            if ($LicenceProbe) { try { $tenantSkuList = @(& $LicenceProbe) } catch { $tenantSkuList = $null } }
+            try {
+                $tc = Get-PimUplinkTenantCapabilities -Skus $tenantSkuList -HybridAd $HybridAd
+                if (@($tc.capabilities.Keys).Count) { $hb | Add-Member -NotePropertyName 'Capabilities' -NotePropertyValue ([pscustomobject]$tc.capabilities) -Force; $hbCause += 'Capabilities' }
+                if (@($tc.licences).Count) {
+                    $hb | Add-Member -NotePropertyName 'Licences' -NotePropertyValue ([object[]]@($tc.licences)) -Force
+                    $lt = ''; try { $lt = "$($hb | ConvertTo-Json -Depth 6 -Compress)" } catch { $lt = '' }
+                    if ($lt.Contains('"Licences":[')) { $hbCause += 'Licences' } else { $hb.PSObject.Properties.Remove('Licences') }
+                }
+            } catch { Write-Warning "[uplink] Capabilities / Licences could not be built: $($_.Exception.Message)" }
+        }
+        $r = & $postCause $hb $hbAdd @{} $hbCause
         if ("$($r.Status)" -eq 'ok') { $sent++; $hbSent = $true; $lastHb = $NowUtc.ToString('o') } else { $failed++; $stopped = $true; $why += "heartbeat: $($r.Reason)" }
         if ("$($r.Status)" -eq 'ok' -and $agOnHb) {
             foreach ($a in $activeNow) { if (-not $reported.ContainsKey("$($a.id)")) { $reported["$($a.id)"] = @{ sinceUtc = $NowUtc.ToString('o'); hold = $false } } }
@@ -1435,7 +1617,20 @@ function Invoke-PimUplinkCycle {
                 }
             } catch { Write-Warning "[uplink] the additive fields of $($p.job) could not be built: $($_.Exception.Message)" }
         }
-        $r = & $postAdd $rec $addNames $addLegacy
+        # PIM 100.167 / framework 8.16: Reports[] -- every cause the run names, with its stable code (the cause switch on).
+        $runCause = @()
+        if ($rec -and $causeState.on) {
+            try {
+                $ci = @(New-PimUplinkCauseReports -Plan $p -ErrorClass $cls -EngineFailures $EngineFailures -Identified $isId -Redact $redact)
+                if ($ci.Count) {
+                    $rec | Add-Member -NotePropertyName 'Reports' -NotePropertyValue ([object[]]$ci) -Force
+                    $rt = ''; try { $rt = "$($rec | ConvertTo-Json -Depth 6 -Compress)" } catch { $rt = '' }
+                    if ($rt.Contains('"Reports":[{')) { $runCause += 'Reports' }
+                    else { $rec.PSObject.Properties.Remove('Reports'); Write-Warning "[uplink] Reports of $($p.job) could not be written as a JSON array -- the record goes without it." }
+                }
+            } catch { Write-Warning "[uplink] the causes of $($p.job) could not be built: $($_.Exception.Message)" }
+        }
+        $r = & $postCause $rec $addNames $addLegacy $runCause
         if ("$($r.Status)" -eq 'ok') { $sent++; $marks[$p.job] = $p.finishedUtc }
         else { $failed++; $stopped = $true; $left++; $why += "$($p.job): $($r.Reason)" }
     }
@@ -1502,6 +1697,7 @@ function Invoke-PimUplinkCycle {
     }
     $msg = "$($sender.Mode): $sent sent$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($clearedSent) { " ($clearedSent guard(s) reported clear)" })$(if ($setupSent) { ' (setup report)' })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })$supNote"
     if ($addState.refusedNow) { $msg += '; Invardia refused the new report fields -- sent in the old form, tried again in 24 h' }
+    if ($causeState.refusedNow) { $msg += '; Invardia refused the cause fields (Reports / Capabilities / Licences) -- sent without them, tried again in 24 h' }
     $newState = [ordered]@{ mode = $sender.Mode; lastHeartbeatUtc = $lastHb; runWatermarkUtc = $floor; jobMarks = [pscustomobject]$marks
                             consent = $consent; lastCycleUtc = $NowUtc.ToString('o'); lastResult = $msg
                             # PIM 100.75: read by the end-of-install verify (Confirm-PimInstall 'telemetry')
@@ -1516,9 +1712,13 @@ function Invoke-PimUplinkCycle {
     # Lane repfix: when Invardia refused the additive fields (kept for 24 h, then they are tried again).
     if ($addState.refusedNow) { $newState['additiveRefusedUtc'] = $NowUtc.ToString('o') }
     elseif ($addHeld) { $apu = ConvertTo-PimUplinkUtc $addPrev; if ($apu) { $newState['additiveRefusedUtc'] = $apu.ToString('o') } }
+    # PIM 100.167: the cause fields' own hold (left out entirely while the switch was never refused -- the state stays as before)
+    if ($causeState.refusedNow) { $newState['causesRefusedUtc'] = $NowUtc.ToString('o') }
+    elseif ($causeHeld) { $cpu = ConvertTo-PimUplinkUtc $causePrev; if ($cpu) { $newState['causesRefusedUtc'] = $cpu.ToString('o') } }
     & $SetSetting 'UplinkState' ([pscustomobject]$newState)
     return @{ ran = $true; mode = $sender.Mode; sent = $sent; failed = $failed; left = $left; heartbeat = $hbSent; setup = $setupSent; message = $msg; reasons = @($why)
               additive = [bool]$addState.on; additiveRefused = [bool]$addState.refusedNow
+              causes = [bool]$causeState.on; causesRefused = [bool]$causeState.refusedNow
               guardsCleared = $clearedSent; activeGuards = $(if ($guardsKnown) { $activeNow.Count } else { -1 }) }
 }
 
@@ -1676,10 +1876,18 @@ function Invoke-PimUplinkJob {
         try { $ef = & $get 'EngineItemFailures'; if ($ef -is [string] -and "$ef".Trim()) { $ef = $ef | ConvertFrom-Json }; $engFails = @(@($ef) | Where-Object { $null -ne $_ }) } catch { $engFails = @() }
         $updRun = ConvertTo-PimUplinkUpdateRun -UpdateState $us
     }
+    # PIM 100.167 / framework 8.16: the cause fields -- feature 'telemetry.causes' (OFF by default until Invardia is live).
+    # The licence probe is a PLAIN scriptblock (dynamic scope), invoked by the cycle only when the identified heartbeat is due.
+    $causesOn = [bool]($on -and "$key".Trim() -and (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and (Test-PimFeatureAvailable -Key 'telemetry.causes' -Quiet))
+    $licProbe = $null; $hyAd = $null
+    if ($causesOn) {
+        if (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) { $licProbe = { @(Invoke-PimGraph -Path '/subscribedSkus?$select=skuPartNumber,capabilityStatus,servicePlans' -All) } }
+        try { if ([bool](Test-PimFeatureAvailable -Key 'hybrid.ad' -Quiet)) { $hyAd = $true } } catch { $hyAd = $null }
+    }
     $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
             -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $(if ($WhatIf) { 0 } else { 2500 }) `
             -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints -AdoptionCounts $adoption `
-            -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun
+            -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun -Causes $causesOn -LicenceProbe $licProbe -HybridAd $hyAd
     # PIM 100.75: a failed send / an install that should be identified but is anonymous = a WARNING run (never a failure).
     $rawKey = ''; try { $rawKey = "$(& $get 'InvardiaInstallKey')".Trim() } catch { $rawKey = '' }
     $claimSt = $null; try { $claimSt = & $get 'InstallKeyClaimState'; if ($claimSt -is [string]) { $claimSt = $claimSt | ConvertFrom-Json } } catch { $claimSt = $null }

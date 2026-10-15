@@ -23,6 +23,25 @@
     AUTO-FIX NEVER WRITES. The Manager is read-only (REQUIREMENTS 65): a fix is STAGED into Pending changes as an
     ordinary row edit or removal, and an operator commits it. Fixes are offered only where the change
     is unambiguous from the row itself; everything else carries a remedy, not a button.
+
+    STABLE ERROR CODES (framework DOCS/REQUIREMENTS.md 8.16 UPLINK-CAUSES; PIM REQUIREMENTS 100.167; owner 2026-10-15:
+    "or define errorcodes"). Every class above has ONE public code pim-<area>-<nnnn> + a CauseClass + who acts
+    (Get-PimFailureCodeTable). A code is NEVER changed or reused once released -- tests/pim-error-codes.freeze.txt pins
+    every released one (Test-PimErrorCodes). New causes get the next free number of their area.
+      area   what                                             numbers
+      eng    the engine job itself (memory, run record,       0101.. ; 0201 the convergence check
+             permission, throttling, Microsoft errors)
+      grd    a safety guard holds a change for approval       0101..
+      az     Azure resources, subscriptions, Azure PIM policy 0101..
+      entra  Entra ID roles, administrative units, objects    0101..
+      grp    groups and PIM for Groups                        0101..
+      def    Defender XDR roles and assignments               0101..
+      pbi    Power BI workspaces                              0101..
+      wl     workload connectors (custom workloads)           0101..
+      tap    accounts and Temporary Access Pass               0101..
+      ad     hybrid Active Directory (the hybrid worker)      0101..
+      gen    the GENERIC code of each CauseClass: a failure    0001..
+             that has no own class yet (UNCLASSIFIED = 0001)
 #>
 
 $script:PimFailureRules = @(
@@ -591,6 +610,109 @@ function Get-PimFailureFixKind {
     if (-not $rule) { return 'product-defect' }
     if ("$($rule.severity)" -in @('data', 'policy', 'environment')) { return 'customer-config' }
     return 'product-defect'
+}
+
+# ---------------------------------------------------------------------------------------------
+# PIM 100.167 / framework 8.16 UPLINK-CAUSES: the STABLE public error code of every class (the area table is in the file
+# header). One row per class: class -> code | causeClass | whoActs | fixedIn | since. A FUNCTION returning literals (the
+# BUG-79-6b trap: no $script: table read from a child script). Released codes are pinned by tests/pim-error-codes.freeze.txt:
+# never change or reuse one; add new causes with the next free number of their area.
+#   causeClass  framework 8.16 list + PIM's additions: customer-config, target-missing, replication-delay, throttled,
+#               upstream-error, held-for-approval (NOT a failure, never an alert), not-converged, permission,
+#               platform-timeout, too-large, missing-licence, no-data-source, settings-unreachable; 'unclassified' only
+#               for the generic code of a failure nobody has classified yet (itself a PIM defect, framework 8.16).
+#   whoActs     customer | support | product | nobody
+#   fixedIn     the PIM version that fixes a PRODUCT cause ('' = none known); it makes the Action 'fixed-in'.
+# ---------------------------------------------------------------------------------------------
+function Get-PimFailureCodeTable {
+    <# PURE. Ordered rows @{ class; code; causeClass; whoActs; fixedIn; since }: every catalog class, CONVERGENCE and the generic codes. #>
+    $rows = @(
+        # class                               code              causeClass           whoActs     fixedIn  since
+        ,@('ENGINE-OUT-OF-MEMORY',             'pim-eng-0101',   'too-large',         'support',  '',      '2.4.638')
+        ,@('RUN-NO-RESULT',                    'pim-eng-0102',   'settings-unreachable', 'nobody', '',     '2.4.638')
+        ,@('PERMISSION-DENIED',                'pim-eng-0103',   'permission',        'customer', '',      '2.4.638')
+        ,@('THROTTLED',                        'pim-eng-0104',   'throttled',         'nobody',   '',      '2.4.638')
+        ,@('SERVICE-ERROR',                    'pim-eng-0105',   'upstream-error',    'nobody',   '',      '2.4.638')
+        ,@('CONVERGENCE',                      'pim-eng-0201',   'not-converged',     'product',  '',      '2.4.638')
+        ,@('AZ-POLICY-MASS-HOLD',              'pim-grd-0101',   'held-for-approval', 'customer', '',      '2.4.638')
+        ,@('GROUP-POLICY-MASS-HOLD',           'pim-grd-0102',   'held-for-approval', 'customer', '',      '2.4.638')
+        ,@('ENTRA-POLICY-MASS-HOLD',           'pim-grd-0103',   'held-for-approval', 'customer', '',      '2.4.638')
+        ,@('REMOVE-BUDGET-HELD',               'pim-grd-0104',   'held-for-approval', 'customer', '',      '2.4.638')
+        ,@('AZ-POLICY-RULE-FAILED',            'pim-az-0101',    'customer-config',   'customer', '',      '2.4.638')
+        ,@('AZ-SUB-PLACEHOLDER',               'pim-az-0102',    'customer-config',   'customer', '',      '2.4.638')
+        ,@('AZ-SUB-NOT-FOUND',                 'pim-az-0103',    'target-missing',    'customer', '',      '2.4.638')
+        ,@('AZ-POLICY-NO-APPROVER',            'pim-az-0104',    'customer-config',   'customer', '',      '2.4.638')
+        ,@('AZ-POLICY-APPROVAL',               'pim-az-0105',    'customer-config',   'nobody',   '',      '2.4.638')
+        ,@('AZ-POLICY-MAX-DURATION',           'pim-az-0106',    'customer-config',   'customer', '',      '2.4.638')
+        ,@('AZ-POLICY-MFA',                    'pim-az-0107',    'customer-config',   'customer', '',      '2.4.638')
+        ,@('ARM-ROLE-NOT-FOUND',               'pim-az-0108',    'target-missing',    'customer', '',      '2.4.638')
+        ,@('AZURE-NOT-VISIBLE',                'pim-az-0109',    'permission',        'customer', '',      '2.4.638')
+        ,@('ENTRA-ROLE-NOT-IN-TENANT',         'pim-entra-0101', 'target-missing',    'customer', '',      '2.4.638')
+        ,@('ENTRA-GROUP-NOT-ROLE-ASSIGNABLE',  'pim-entra-0102', 'customer-config',   'customer', '',      '2.4.638')
+        ,@('DUPLICATE-AU-NAME',                'pim-entra-0103', 'customer-config',   'customer', '',      '2.4.638')
+        ,@('ENTRA-ROLE-UNRESOLVED',            'pim-entra-0104', 'target-missing',    'customer', '',      '2.4.638')
+        ,@('ENTRA-NESTING-ROLE-ASSIGNABLE',    'pim-entra-0105', 'customer-config',   'customer', '',      '2.4.638')
+        ,@('PRINCIPAL-NOT-REPLICATED-YET',     'pim-entra-0106', 'replication-delay', 'nobody',   '',      '2.4.638')
+        ,@('NEW-OBJECT-NOT-VISIBLE-YET',       'pim-entra-0107', 'replication-delay', 'nobody',   '',      '2.4.638')
+        ,@('AU-SCOPE-REFUSED',                 'pim-entra-0108', 'customer-config',   'customer', '',      '2.4.638')
+        ,@('DUPLICATE-GROUP-NAME',             'pim-grp-0101',   'customer-config',   'customer', '',      '2.4.638')
+        ,@('GROUP-POLICY-NOT-READY',           'pim-grp-0102',   'replication-delay', 'nobody',   '',      '2.4.638')
+        ,@('GROUP-NOT-CREATED-YET',            'pim-grp-0103',   'replication-delay', 'nobody',   '',      '2.4.638')
+        ,@('GROUP-POLICY-UNREADABLE',          'pim-grp-0104',   'upstream-error',    'product',  '',      '2.4.638')
+        ,@('DEFENDER-ROLE-CREATE-PENDING',     'pim-def-0101',   'replication-delay', 'nobody',   '',      '2.4.638')
+        ,@('DEFENDER-PERMISSION-PREREQUISITE', 'pim-def-0102',   'customer-config',   'customer', '',      '2.4.638')
+        ,@('DEFENDER-ROLE-AMBIGUOUS',          'pim-def-0103',   'customer-config',   'customer', '',      '2.4.638')
+        ,@('DEFENDER-ROLE-NOT-OWN',            'pim-def-0104',   'customer-config',   'customer', '',      '2.4.638')
+        ,@('DEFENDER-ASSIGNMENT-SHARED',       'pim-def-0105',   'customer-config',   'customer', '',      '2.4.638')
+        ,@('POWERBI-ENGINE-NOT-IN-WORKSPACE',  'pim-pbi-0101',   'permission',        'customer', '',      '2.4.638')
+        ,@('POWERBI-ADMIN-NOT-GRANTED',        'pim-pbi-0102',   'permission',        'customer', '',      '2.4.638')
+        ,@('POWERBI-WORKSPACE-NOT-FOUND',      'pim-pbi-0103',   'target-missing',    'customer', '',      '2.4.638')
+        ,@('WORKLOAD-REMOVE-NEEDS-DATA',       'pim-wl-0101',    'customer-config',   'customer', '',      '2.4.638')
+        ,@('WORKLOAD-CONNECTOR-UNKNOWN',       'pim-wl-0102',    'customer-config',   'customer', '',      '2.4.638')
+        ,@('WORKLOAD-ROLE-NOT-FOUND',          'pim-wl-0103',    'target-missing',    'customer', '',      '2.4.638')
+        ,@('WORKLOAD-GROUP-UNRESOLVED',        'pim-wl-0104',    'target-missing',    'customer', '',      '2.4.638')
+        ,@('WORKLOAD-RESOURCE-MISSING',        'pim-wl-0105',    'customer-config',   'customer', '',      '2.4.638')
+        ,@('WORKLOAD-CONTAINER-MISSING',       'pim-wl-0106',    'replication-delay', 'nobody',   '',      '2.4.638')
+        ,@('WORKLOAD-ACTION-UNKNOWN',          'pim-wl-0107',    'customer-config',   'customer', '',      '2.4.638')
+        ,@('ADMIN-NOT-CREATED-YET',            'pim-tap-0101',   'replication-delay', 'nobody',   '',      '2.4.638')
+        ,@('TAP-TENANT-POLICY',                'pim-tap-0102',   'customer-config',   'customer', '',      '2.4.638')
+        ,@('TAP-NO-RECIPIENT',                 'pim-tap-0103',   'customer-config',   'customer', '',      '2.4.638')
+        ,@('AD-CLEANUP-RIGHT-MISSING',         'pim-ad-0101',    'permission',        'customer', '',      '2.4.638')
+        # the generic code of each CauseClass (framework 8.16: "an unknown failure gets the generic code of its CauseClass")
+        ,@('UNCLASSIFIED',                     'pim-gen-0001',   'unclassified',      'product',  '',      '2.4.638')
+        ,@('GENERIC:customer-config',          'pim-gen-0002',   'customer-config',   'customer', '',      '2.4.638')
+        ,@('GENERIC:target-missing',           'pim-gen-0003',   'target-missing',    'customer', '',      '2.4.638')
+        ,@('GENERIC:replication-delay',        'pim-gen-0004',   'replication-delay', 'nobody',   '',      '2.4.638')
+        ,@('GENERIC:throttled',                'pim-gen-0005',   'throttled',         'nobody',   '',      '2.4.638')
+        ,@('GENERIC:upstream-error',           'pim-gen-0006',   'upstream-error',    'nobody',   '',      '2.4.638')
+        ,@('GENERIC:held-for-approval',        'pim-gen-0007',   'held-for-approval', 'customer', '',      '2.4.638')
+        ,@('GENERIC:not-converged',            'pim-gen-0008',   'not-converged',     'product',  '',      '2.4.638')
+        ,@('GENERIC:permission',               'pim-gen-0009',   'permission',        'customer', '',      '2.4.638')
+        ,@('GENERIC:platform-timeout',         'pim-gen-0010',   'platform-timeout',  'nobody',   '',      '2.4.638')
+        ,@('GENERIC:too-large',                'pim-gen-0011',   'too-large',         'support',  '',      '2.4.638')
+        ,@('GENERIC:missing-licence',          'pim-gen-0012',   'missing-licence',   'nobody',   '',      '2.4.638')
+        ,@('GENERIC:no-data-source',           'pim-gen-0013',   'no-data-source',    'nobody',   '',      '2.4.638')
+        ,@('GENERIC:settings-unreachable',     'pim-gen-0014',   'settings-unreachable', 'support', '',    '2.4.638')
+    )
+    foreach ($r in $rows) { [pscustomobject][ordered]@{ class = $r[0]; code = $r[1]; causeClass = $r[2]; whoActs = $r[3]; fixedIn = $r[4]; since = $r[5] } }
+}
+
+function Get-PimFailureCodeInfo {
+    <#
+      PURE. framework 8.16: a catalog class (any case; CONVERGENCE, UNCLASSIFIED) -> its row of Get-PimFailureCodeTable
+      plus Action (none | fixed-in | support | customer). An unknown class -> the generic code of -CauseClass when given,
+      else UNCLASSIFIED's (a failure is never sent without a code). Action: fixedIn known -> fixed-in; whoActs customer ->
+      customer; support / product -> support; nobody -> none.
+    #>
+    param([string]$Class, [string]$CauseClass = '')
+    $c = "$Class".Trim().ToUpperInvariant()
+    $all = @(Get-PimFailureCodeTable)
+    $row = $null
+    if ($c) { $row = @($all | Where-Object { $_.class -eq $c }) | Select-Object -First 1 }
+    if (-not $row -and "$CauseClass".Trim()) { $row = @($all | Where-Object { $_.class -eq ('GENERIC:' + "$CauseClass".Trim().ToLowerInvariant()) }) | Select-Object -First 1 }
+    if (-not $row) { $row = @($all | Where-Object { $_.class -eq 'UNCLASSIFIED' }) | Select-Object -First 1 }
+    $action = if ("$($row.fixedIn)".Trim()) { 'fixed-in' } elseif ($row.whoActs -eq 'customer') { 'customer' } elseif ($row.whoActs -in @('support', 'product')) { 'support' } else { 'none' }
+    return [pscustomobject][ordered]@{ class = $row.class; code = $row.code; causeClass = $row.causeClass; whoActs = $row.whoActs; fixedIn = "$($row.fixedIn)"; since = $row.since; action = $action; known = [bool]($c -and $row.class -eq $c) }
 }
 
 # ---------------------------------------------------------------------------------------------

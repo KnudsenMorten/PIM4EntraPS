@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.638 -- 2026-10-15
+
+- Every problem a job reports now carries a stable error code and its cause, so support knows the fix before you call (switch: Send error codes and causes to Invardia, on by default; Pro installs with an install key)
+
 ## 2.4.637 -- 2026-10-15
 
 - A SuperAdmin can cancel a running engine run from the Jobs page (final, never resumed); a run that makes no progress for an hour is reported while it keeps running; the managed-tenant pull and the publish see at once when an earlier run has ended; after an update, a run still on the old version is stopped and runs again on the new one
