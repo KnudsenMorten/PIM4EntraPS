@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.636 -- 2026-10-15
+
+- Every job now runs with the maximum run limit of 7 days, set at install and raised on every update: a long run on a very large tenant is never cut short, and the engine no longer plans its work to fit one hour
+
 ## 2.4.635 -- 2026-10-15
 
 - The documentation inside the portal and the security review pack describe the full design (no gaps list); the as-built reader is set up through the signed access procedure

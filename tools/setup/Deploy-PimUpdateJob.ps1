@@ -359,7 +359,7 @@ $jobResource = @{
         environmentId = $envId
         configuration = @{
             triggerType           = 'Schedule'
-            replicaTimeout        = 1800
+            replicaTimeout        = 604800   # framework 12.24 JOB-RUN-LIMIT: 7 days
             replicaRetryLimit     = 0
             scheduleTriggerConfig = @{ cronExpression = "$Cron"; parallelism = 1; replicaCompletionCount = 1 }
             registries            = @($jobRegistry)

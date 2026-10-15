@@ -972,7 +972,7 @@ function Get-PimAsBuiltJobSpec {
         environmentId = $EnvironmentId
         configuration = @{
             triggerType         = 'Manual'
-            replicaTimeout      = 600
+            replicaTimeout      = 604800   # framework 12.24 JOB-RUN-LIMIT: 7 days
             replicaRetryLimit   = 0
             manualTriggerConfig = @{ parallelism = 1; replicaCompletionCount = 1 }
             registries          = @(@{ server = $RegistryServer; identity = $regId })

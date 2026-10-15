@@ -3849,6 +3849,10 @@ failure. Now:
   current execution (its last run's duration, a full reconcile without one is assumed 35 minutes;
   limit = the tick job's timeout, `PIM_SCHED_TIME_LIMIT_SECONDS`): it waits for the next execution
   instead of being killed half-way. A fresh execution always starts it.
+- **Seven days per run, for every job.** Every PIM Container Apps job (the engine tick, the updater, the managed-tenant
+  pull, the publish, the database set-up, support and as-built jobs) runs with Azure's maximum run limit of 7 days, set at
+  install and raised on every update. The product never cuts a long run short: a very large tenant may need hours. A run
+  that DIED is found by its lease / the platform's status of its execution, never by the clock; a slow run is left running.
 - **Recorded when it ends.** Every run writes its result, with its own start and end time, the
   moment it ends — and its next-run stamp, before its locks are released, so no other execution
   starts it again. Each run gets its own clock (the tick's clock plus the time spent before it), so

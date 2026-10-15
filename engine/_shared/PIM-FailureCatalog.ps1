@@ -75,7 +75,7 @@ $script:PimFailureRules = @(
        match = { param($m, $row) $m -match '(?i)System\.OutOfMemoryException|OutOfMemoryException|Insufficient memory to continue|\bOOMKilled\b|exit code 137\b' }
        title = 'The engine job ran out of memory'
        cause = 'The scheduled engine job (ca-pim-tick) ran out of memory while it ran, so it was stopped and its work is not done. A tenant of 5,000 or more users, groups and service principals needs more than the 0.5 CPU / 1 GiB a small tenant''s job gets. The next update raises the job one size by itself (it reads this failure); the command below does it now.'
-       remedy = 'the engine job ran out of memory -- raise ca-pim-tick to the next size (2 CPU / 4 GiB, replica timeout 7200 s; 4 CPU / 8 GiB, 14400 s from 15,000 objects): az containerapp job update -g <resource group> -n ca-pim-tick --cpu 2.0 --memory 4Gi --replica-timeout 7200'
+       remedy = 'the engine job ran out of memory -- raise ca-pim-tick to the next size (2 CPU / 4 GiB; 4 CPU / 8 GiB from 15,000 objects; the run limit stays 7 days): az containerapp job update -g <resource group> -n ca-pim-tick --cpu 2.0 --memory 4Gi --replica-timeout 604800'
        retryable = $false; severity = 'environment'
        fixes = @() }
 

@@ -548,7 +548,7 @@ function Get-PimBaselinePublishJobSpec {
     [void]$y.Add("  environmentId: $EnvironmentId")
     [void]$y.Add('  configuration:')
     [void]$y.Add('    triggerType: Schedule')
-    [void]$y.Add('    replicaTimeout: 1200')
+    [void]$y.Add('    replicaTimeout: 604800')   # framework 12.24 JOB-RUN-LIMIT: 7 days
     [void]$y.Add('    replicaRetryLimit: 1')
     [void]$y.Add('    scheduleTriggerConfig:')
     [void]$y.Add("      cronExpression: `"$("$Cron".Trim())`"")
@@ -572,7 +572,7 @@ function Get-PimBaselinePublishJobSpec {
         properties = @{
             environmentId = "$EnvironmentId"
             configuration = @{
-                triggerType = 'Schedule'; replicaTimeout = 1200; replicaRetryLimit = 1
+                triggerType = 'Schedule'; replicaTimeout = 604800; replicaRetryLimit = 1
                 scheduleTriggerConfig = @{ cronExpression = "$("$Cron".Trim())"; parallelism = 1; replicaCompletionCount = 1 }
                 registries = @(@{ server = "$RegistryServer"; identity = $regId })
             }
