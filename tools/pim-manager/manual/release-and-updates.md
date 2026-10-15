@@ -22,6 +22,8 @@ build -> offline tests -> signed release -> ring 0 -> ring 1 -> APPROVED -> ring
 | 2 | Design partners | Only a version the release owner marked **APPROVED** (with a reason, audited), and only after it ran in a lower ring |
 | 3 | Everyone | The same approval |
 
+   A fix reaches rings 0 and 1 through the product team; the support agent proposes it as a candidate, and the owner
+   approves rings 2 and 3 -- an agent never does.
 4. **Waves.** Inside ring 2 or 3, a version can be served first to a named group of installations (a wave), for
    example "Ring 2 - first group". Stopping a wave never moves an installation back.
 5. **Evidence.** After a release that changed engine code, installations report more often for the first hours, and

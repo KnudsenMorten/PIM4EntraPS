@@ -39,7 +39,11 @@ those, under fixed rules:
 - the grantee must be one of PIM Manager's own roles (a `pim_` role), never a built-in role such as db_owner;
 - the permission must be SELECT, INSERT, UPDATE, DELETE or EXECUTE;
 - the object must be in PIM Manager's own schemas, never dbo, never another database;
-- the procedure can also create the database user for a component, and only into that component's role.
+- the procedure can also create the database user for a component, and only into that component's role;
+- the procedure reports the access state itself (its signer and every grant a `pim_` role holds), so the updater can
+  bring access in line without being able to read the security catalogue directly.
+
+Every product role is created by the install, owned by the database owner. Rights change only through the procedure.
 
 The procedure is **signed with a certificate that lives inside the database**. The signature gives the procedure, and
 only the procedure, the right to grant. The certificate:
@@ -53,8 +57,10 @@ If anyone changes the procedure, SQL Server drops the signature and the procedur
 only **run** the procedure; on its own it is refused when it tries to grant anything. The procedure's rules are general
 enough for every future release, so it never needs to be changed or re-signed.
 
-These properties are checked on a live installation: the updater can grant through the procedure and is refused
-without it; the engine cannot run the procedure; a built-in role and the dbo schema are refused.
+These properties are proven on a real SQL Server with a least-privilege updater, and on a live installation: the
+updater grants through the procedure and is refused without it; it reads the access state only through the procedure;
+the engine cannot run the procedure; a built-in role, the dbo schema, another database, CONTROL and the procedure
+itself are refused; a changed procedure has no rights until it is signed again.
 
 ## Five years without contact
 

@@ -8,8 +8,8 @@ before and after, who initiated it and who approved it, in the same transaction 
 
 ## Approvals
 
-- **Second approver (Pro):** changes classified as sensitive (privileged roles, tier 0 and 1, guests, offboarding) need a
-  second person. Self-approval is refused unless you switch it on.
+- **Second approver (Pro, on by default):** changes classified as sensitive (privileged roles, tier 0 and 1, guests,
+  offboarding) need a second person. Self-approval is always refused.
 - **Always on:** changing the break-glass list needs a second SuperAdmin.
 - **Guard approvals:** see [Guards and Strict mode](guards).
 
