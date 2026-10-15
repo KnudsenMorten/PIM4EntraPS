@@ -60,14 +60,17 @@ IF OBJECT_ID('pimdemo.Tenants') IS NULL CREATE TABLE pimdemo.Tenants (Id INT NOT
 }
 
 function Get-PimDemoRemoveSql {
-    <# PURE. Removes the demo dataset COMPLETELY: every pimdemo table, then the schema. #>
+    <#
+      PURE. Removes the demo dataset COMPLETELY: every row of every pimdemo table (the Dashboard then shows the real data).
+      Framework §12.23 run 2 (PIM 100.156): the web app has no DDL right, so the EMPTY tables stay (DROP TABLE / DROP
+      SCHEMA needed db_ddladmin); a later Enable fills them again without any DDL.
+    #>
 @'
-IF OBJECT_ID('pimdemo.Activity') IS NOT NULL DROP TABLE pimdemo.Activity;
-IF OBJECT_ID('pimdemo.Assignments') IS NOT NULL DROP TABLE pimdemo.Assignments;
-IF OBJECT_ID('pimdemo.Principals') IS NOT NULL DROP TABLE pimdemo.Principals;
-IF OBJECT_ID('pimdemo.Tenants') IS NOT NULL DROP TABLE pimdemo.Tenants;
-IF OBJECT_ID('pimdemo.Meta') IS NOT NULL DROP TABLE pimdemo.Meta;
-IF SCHEMA_ID('pimdemo') IS NOT NULL EXEC('DROP SCHEMA pimdemo');
+IF OBJECT_ID('pimdemo.Activity') IS NOT NULL DELETE FROM pimdemo.Activity;
+IF OBJECT_ID('pimdemo.Assignments') IS NOT NULL DELETE FROM pimdemo.Assignments;
+IF OBJECT_ID('pimdemo.Principals') IS NOT NULL DELETE FROM pimdemo.Principals;
+IF OBJECT_ID('pimdemo.Tenants') IS NOT NULL DELETE FROM pimdemo.Tenants;
+IF OBJECT_ID('pimdemo.Meta') IS NOT NULL DELETE FROM pimdemo.Meta;
 '@
 }
 
@@ -287,7 +290,7 @@ function Invoke-PimDemoModeChange {
           [switch]$Apply, [object]$Dataset = $null, [scriptblock]$Invoker = $null, [int]$ChunkSize = 2000)
     $plan = New-Object System.Collections.Generic.List[string]
     if ($Action -eq 'Disable') {
-        $plan.Add('drop every pimdemo table and the pimdemo schema (the demo data is removed completely; the environment''s own data is not touched)')
+        $plan.Add('delete every row of every pimdemo table (the demo data is removed completely; the empty tables stay -- no schema change; the environment''s own data is not touched)')
         if ($Apply) { [void](Invoke-PimDemoSql -Kind nonquery -ConnectionString $ConnectionString -Sql (Get-PimDemoRemoveSql) -Invoker $Invoker) }
         return [pscustomobject]@{ action = 'Disable'; applied = [bool]$Apply; plan = @($plan.ToArray()); counts = $null }
     }
@@ -296,12 +299,17 @@ function Invoke-PimDemoModeChange {
         throw "REFUSED: demo data is allowed only on the internal demo environment -- $r. Nothing was written."
     }
     if (-not $Dataset) { $Dataset = New-PimDemoDataset }
-    $plan.Add('create schema pimdemo + its tables (separate from every table the engine reads)')
+    $plan.Add('check the pimdemo tables are there (separate from every table the engine reads; created once only where this identity may create tables)')
     $plan.Add('replace any earlier demo rows')
     $plan.Add(("seed {0} users, {1} groups, {2} roles, {3} assignments, {4} activity rows over months, {5} managed tenants" -f $Dataset.counts.users, $Dataset.counts.groups, $Dataset.counts.roles, $Dataset.counts.assignments, $Dataset.counts.activity, $Dataset.counts.tenants))
     $plan.Add('set pimdemo.Meta DemoEnvironment = true (the Dashboard then shows the demo dataset, marked "Demo data")')
     if ($Apply) {
-        [void](Invoke-PimDemoSql -Kind nonquery -ConnectionString $ConnectionString -Sql (Get-PimDemoSchemaDdl) -Invoker $Invoker)
+        # Framework §12.23 run 2 (PIM 100.156): a read-only check (inside the demo scope) -- the web app runs no DDL once the
+        # tables exist; the create is a one-time fallback where the identity still may. Missing + refused = REFUSED, nothing written.
+        $dq = { param($cs, $sql, $p) Invoke-PimDemoSql -Kind query -ConnectionString $cs -Sql $sql -Parameters $p -Invoker $Invoker }
+        $rd = Confirm-PimSqlSchemaObject -ConnectionString $ConnectionString -Objects @('pimdemo.Meta', 'pimdemo.Principals', 'pimdemo.Assignments', 'pimdemo.Activity', 'pimdemo.Tenants') -Query $dq `
+                -Fallback { [void](Invoke-PimDemoSql -Kind nonquery -ConnectionString $ConnectionString -Sql (Get-PimDemoSchemaDdl) -Invoker $Invoker) }
+        if (-not $rd.ok) { throw "REFUSED: the demo tables are not in this store and this identity may not create them -- $($rd.message). Nothing was written." }
         [void](Invoke-PimDemoSql -Kind nonquery -ConnectionString $ConnectionString -Invoker $Invoker -Sql 'DELETE FROM pimdemo.Activity; DELETE FROM pimdemo.Assignments; DELETE FROM pimdemo.Principals; DELETE FROM pimdemo.Tenants; DELETE FROM pimdemo.Meta;')
         foreach ($tbl in @(@('Principals', $Dataset.principals), @('Assignments', $Dataset.assignments), @('Activity', $Dataset.activity), @('Tenants', $Dataset.tenants))) {
             $rows = @($tbl[1]); $sql = ConvertTo-PimDemoInsertSql -Table $tbl[0]

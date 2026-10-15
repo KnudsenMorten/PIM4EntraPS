@@ -311,12 +311,13 @@ function Save-PimActiveAssignmentsSnapshotRows {
     #>
     param([Parameter(Mandatory)][System.Collections.IDictionary]$Entry, [string]$ConnectionString = '', [scriptblock]$Writer = $null, [scriptblock]$Sleep = $null)
     $no = { param($why, $said) [pscustomobject]@{ stored = $false; reason = "$why"; said = [bool]$said; where = ''; rows = 0; batches = 0; retries = 0; seconds = 0; snapshotId = [long]0 } }
-    foreach ($fn in 'Initialize-PimSqlActiveAssignmentRows', 'Start-PimSqlActiveAssignmentSnapshot', 'Invoke-PimSqlActiveAssignmentBatchWrite', 'Complete-PimSqlActiveAssignmentSnapshot', 'New-PimSqlActiveAssignmentRowTable') {
+    foreach ($fn in 'Confirm-PimSqlActiveAssignmentRowsReady', 'Start-PimSqlActiveAssignmentSnapshot', 'Invoke-PimSqlActiveAssignmentBatchWrite', 'Complete-PimSqlActiveAssignmentSnapshot', 'New-PimSqlActiveAssignmentRowTable') {
         if (-not (Get-Command $fn -ErrorAction SilentlyContinue)) { return (& $no 'the row store is not loaded in this process' $false) }
     }
     if (-not "$ConnectionString".Trim() -and (Get-Command Get-PimTenantCacheStoreCs -ErrorAction SilentlyContinue)) { $ConnectionString = "$(Get-PimTenantCacheStoreCs)" }
     if (-not "$ConnectionString".Trim()) { return (& $no 'no SQL store in this process' $false) }
-    $ddl = Initialize-PimSqlActiveAssignmentRows -ConnectionString $ConnectionString
+    # §12.23 run 2 (PIM 100.156): a read-only check -- the schema step creates the tables; the create is only a fallback
+    $ddl = Confirm-PimSqlActiveAssignmentRowsReady -ConnectionString $ConnectionString
     if (-not $ddl.ok) { return (& $no "the table pim.ActiveAssignmentRows is not there and could not be created: $($ddl.error)" $true) }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()

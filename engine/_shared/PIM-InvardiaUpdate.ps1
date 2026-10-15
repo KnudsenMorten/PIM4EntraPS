@@ -144,6 +144,12 @@ function Invoke-PimInstallKeyClaimCycle {
     $claimStatus = [int]$r.status
     if ($claimStatus -eq 201 -and "$($r.body.key)" -match '^inv-[A-Za-z0-9_-]{20,100}$') {
         & $SetSetting 'InvardiaInstallKey' "$($r.body.key)"
+        # PIM 100.167 (lane G): Invardia's id of this environment, when the claim answer carries one (today it names the
+        # handle only) -> 'InvardiaEnvironmentId', the customer alert mail's portal link. Never fails the claim.
+        try {
+            $eid = "$($r.body.environmentId)".Trim().ToLowerInvariant()
+            if ($eid -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { & $SetSetting 'InvardiaEnvironmentId' $eid }
+        } catch { }
         return (& $save 'claimed' "install key claimed for environment $($r.body.environment)" $lh)
     }
     if ($claimStatus -eq 409) {
@@ -317,7 +323,11 @@ function Get-PimInvardiaUpdateTarget {
           # A manifest naming an OLDER version that is not a signed rollback is AHEAD: nothing is downloaded.
           [string]$HighestKnownVersion = '',
           [switch]$AllowDowngrade)
-    $res = @{ ok = $false; version = ''; sequence = 0; hold = $false; reason = ''; contextPath = ''; ahead = $false; attention = $false; noKey = $false }
+    # PIM 100.158 / framework 12.11e CR3: wave = the wave name from the SIGNED manifest ('' = served outside any wave);
+    # manifestVersion = the version that signed manifest names (also on a hold / ahead / already-built answer). served = a
+    # manifest (or a 204 "nothing released") was VERIFIED this run -- only then is the wave recorded.
+    $res = @{ ok = $false; version = ''; sequence = 0; hold = $false; reason = ''; contextPath = ''; ahead = $false; attention = $false; noKey = $false
+              wave = ''; manifestVersion = ''; served = $false }
     # 100.69: noKey tells the job this is the "not claimed YET" case (Get-PimInvardiaNoKeyOutcome decides waiting / warning),
     # never a failed run. Nothing is sent to Invardia without a key.
     if (-not "$InstallKey".Trim()) { $res.noKey = $true; $res.reason = 'this install has no install key (PIM_UPLINK_KEY, or claimed by the install-key job)'; return $res }
@@ -327,10 +337,12 @@ function Get-PimInvardiaUpdateTarget {
         $res.reason = "this environment has no update ring (PIM_UPDATE_RING = '$Ring', expected 0-3) -- PIM decides the ring, so a Pro pull without one is not made"; return $res
     }
     $p = Invoke-PimInvardiaManifestPull -Http $Http -BaseUrl $BaseUrl -InstallKey $InstallKey -LicenceText $LicenceText -Ring $ringN
-    if ($p.status -eq 204) { $res.ok = $true; $res.reason = $p.reason; return $res }
+    if ($p.status -eq 204) { $res.ok = $true; $res.served = $true; $res.reason = $p.reason; return $res }
     if ($p.status -ne 200) { $res.reason = $p.reason; return $res }
     $v = Test-PimInvardiaManifest -Response $p.body -TrustedKeys $TrustedKeys -AppliedSequence $AppliedSequence -RunningVersion $RunningVersion -Ring $ringN
     if (-not $v.ok) { $res.reason = $v.reason; return $res }
+    $res.served = $true; $res.manifestVersion = "$($v.version)"
+    if ($v.manifest -and $v.manifest.PSObject.Properties['wave'] -and "$($v.manifest.wave)".Trim()) { $res.wave = "$($v.manifest.wave)".Trim() }
     if ($UnprovenLegacySequence -gt 0 -and $v.sequence -lt $UnprovenLegacySequence) {
         # 🔒 Not a guess either way: the legacy value may be another ring's (a ring move -- harmless) or this ring's (a
         # replay -- refused). Without the ring recorded beside it nothing moves, and the operator is told the one fix.

@@ -146,6 +146,55 @@ function Test-PimAreaLockLive {
     return $true
 }
 
+# ---- PIM 100.166 (c3): a lock past its TTL whose execution is still RUNNING is NOT dead --------------------------------
+# With the 7-day run limit (framework 12.24) one step can be silent longer than the 15-min lock TTL -- one long SQL
+# statement, a Graph page loop with no heartbeat in between. Before this, the next tick swept such a lock away, took its
+# areas over and closed the run's 'running' record while the run was still working: two writers on one area.
+# DESIGN (SI's rule, 2026-10-15: "heartbeat for dead, report for slow, a person for stop"): a lock whose TTL has passed is
+# still HELD while the platform reports its execution Running / Processing (the per-tick cached execution-status read the
+# lanes already use, Get-PimLockHolderStatus; the tick's identity holds 'Reader' on its own job, BUG-268). An execution
+# that ENDED, or a status that cannot be read, keeps today's rule (the TTL decides). A slow run is never stopped here;
+# the no-progress report (100.166 c) names it.
+# WHY NOT a background heartbeat (a timer / runspace renewing the lock row during long calls): it adds a second writer
+# with its own SQL token and connection racing the main thread's compare-and-set on the same row, and it would keep a
+# truly HUNG process looking alive forever. The status guard is read-only, adds no writer, cannot deadlock, and it
+# answers the actual question -- is that execution still there? -- instead of trusting a timer.
+$script:PimLockAliveStatuses = @('Running', 'Processing')
+
+function Test-PimAreaLockHeld {
+    <#
+      PURE. A lock is HELD when it is live by its TTL (Test-PimAreaLockLive), or -- past its TTL -- when the execution it
+      names is in -AliveExecutions (execution name -> status, from Get-PimAliveExpiredExecutions). Without -AliveExecutions
+      this is exactly Test-PimAreaLockLive.
+    #>
+    param([object]$Lock, [Parameter(Mandatory)][datetime]$NowUtc, [hashtable]$AliveExecutions = @{})
+    if (Test-PimAreaLockLive -Lock $Lock -NowUtc $NowUtc) { return $true }
+    if (-not $Lock -or -not "$($Lock.owner)".Trim() -or -not $AliveExecutions -or -not $AliveExecutions.Count) { return $false }
+    $e = if ($Lock.PSObject.Properties['execution']) { "$($Lock.execution)".Trim() } else { '' }
+    return [bool]($e -and $AliveExecutions.ContainsKey($e))
+}
+
+function Get-PimAliveExpiredExecutions {
+    <#
+      The executions named by locks that are PAST their TTL but whose execution the platform still reports Running /
+      Processing: @{ <execution> = <status> }. -Status: param([string]$Execution) -> status ('' = unknown); default
+      Get-PimLockHolderStatus (cached per tick, '' for this process's own execution). Never throws; unknown = not alive.
+    #>
+    param([System.Collections.IDictionary]$Map, [Parameter(Mandatory)][datetime]$NowUtc, [scriptblock]$Status)
+    $out = @{}
+    if ($null -eq $Map) { return $out }
+    foreach ($k in @($Map.Keys)) {
+        $l = $Map[$k]
+        if (-not $l -or -not "$($l.owner)".Trim() -or (Test-PimAreaLockLive -Lock $l -NowUtc $NowUtc)) { continue }
+        $e = if ($l.PSObject.Properties['execution']) { "$($l.execution)".Trim() } else { '' }
+        if (-not $e -or $out.ContainsKey($e)) { continue }
+        $st = ''
+        try { $st = if ($Status) { "$(& $Status $e)".Trim() } else { "$(Get-PimLockHolderStatus -Execution $e)".Trim() } } catch { $st = '' }
+        if ($st -in $script:PimLockAliveStatuses) { $out[$e] = $st }
+    }
+    return $out
+}
+
 function ConvertFrom-PimLocksJson {
     # The stored lock document -> an ordered hashtable area -> lock object. Accepts JSON text (once or twice encoded) or a parsed object.
     param([AllowNull()][object]$Value)
@@ -219,11 +268,13 @@ function Get-PimLockHolderStatus {
 
 function Get-PimLockConflict {
     # PURE. The first lock in -Map on one of -Areas held by another run, or $null. Same owner + same run = no conflict.
-    param([System.Collections.IDictionary]$Map, [string[]]$Areas, [string]$Owner, [string]$RunId = '', [Parameter(Mandatory)][datetime]$NowUtc)
+    # PIM 100.166 (c3): -AliveExecutions -- a lock past its TTL whose execution is still Running counts as held.
+    param([System.Collections.IDictionary]$Map, [string[]]$Areas, [string]$Owner, [string]$RunId = '', [Parameter(Mandatory)][datetime]$NowUtc,
+          [hashtable]$AliveExecutions = @{})
     foreach ($a in @($Areas)) {
         if (-not $Map.Contains($a)) { continue }
         $l = $Map[$a]
-        if (-not (Test-PimAreaLockLive -Lock $l -NowUtc $NowUtc)) { continue }
+        if (-not (Test-PimAreaLockHeld -Lock $l -NowUtc $NowUtc -AliveExecutions $AliveExecutions)) { continue }
         if ("$($l.owner)" -eq "$Owner" -and (-not "$RunId".Trim() -or -not "$($l.runId)".Trim() -or "$($l.runId)" -eq "$RunId")) { continue }
         return [pscustomobject]@{ area = "$a"; job = "$($l.job)"; owner = "$($l.owner)"; runId = "$($l.runId)"; sinceUtc = $(if ($l.acquiredUtc -is [datetime]) { $l.acquiredUtc.ToUniversalTime().ToString('o') } else { "$($l.acquiredUtc)" }); execution = "$($l.execution)" }
     }
@@ -231,10 +282,11 @@ function Get-PimLockConflict {
 }
 
 function Get-PimLiveLockOwners {
-    # PURE. The distinct owners holding a live lock in -Map.
-    param([System.Collections.IDictionary]$Map, [Parameter(Mandatory)][datetime]$NowUtc)
+    # PURE. The distinct owners holding a live lock in -Map (PIM 100.166 c3: or a lock past its TTL whose execution is in
+    # -AliveExecutions -- that owner's run is still working, its 'running' record must not be closed).
+    param([System.Collections.IDictionary]$Map, [Parameter(Mandatory)][datetime]$NowUtc, [hashtable]$AliveExecutions = @{})
     $o = New-Object System.Collections.Generic.List[string]
-    foreach ($k in @($Map.Keys)) { $l = $Map[$k]; if ((Test-PimAreaLockLive -Lock $l -NowUtc $NowUtc) -and -not $o.Contains("$($l.owner)")) { $o.Add("$($l.owner)") } }
+    foreach ($k in @($Map.Keys)) { $l = $Map[$k]; if ((Test-PimAreaLockHeld -Lock $l -NowUtc $NowUtc -AliveExecutions $AliveExecutions) -and -not $o.Contains("$($l.owner)")) { $o.Add("$($l.owner)") } }
     return @($o.ToArray())
 }
 
@@ -247,27 +299,32 @@ function Request-PimAreaLocks {
       * -Cap > 0: refused while -Cap other owners already hold locks and this owner holds none (the lane cap)
     #>
     param([Parameter(Mandatory)][string]$Owner, [Parameter(Mandatory)][string[]]$Areas, [string]$Job = '', [string]$RunId = '',
-          [datetime]$NowUtc = [datetime]::UtcNow, [int]$TtlMinutes = 15, [int]$Cap = 0)
+          [datetime]$NowUtc = [datetime]::UtcNow, [int]$TtlMinutes = 15, [int]$Cap = 0,
+          # PIM 100.166 (c3) test seam: param([string]$Execution) -> the platform status; default Get-PimLockHolderStatus
+          [scriptblock]$AliveStatus)
     $ctx = @{ ok = $false; conflict = $null; capReached = $false; busy = 0; error = '' }
     $ttl = [Math]::Max(1, $TtlMinutes)
     $wrote = Update-PimSchedulerLocks -Ctx $ctx -Mutate {
         param($map, $c)
         $c.ok = $false; $c.conflict = $null; $c.capReached = $false
         $changed = $false
-        foreach ($k in @($map.Keys)) { if (-not (Test-PimAreaLockLive -Lock $map[$k] -NowUtc $NowUtc)) { $map.Remove($k); $changed = $true } }
-        $conf = Get-PimLockConflict -Map $map -Areas $Areas -Owner $Owner -RunId $RunId -NowUtc $NowUtc
+        # PIM 100.166 (c3): a lock past its TTL is swept ONLY when its execution is not reported Running -- a silent long step
+        # (one long SQL statement) keeps its areas; unknown status = today's TTL rule.
+        $alive = Get-PimAliveExpiredExecutions -Map $map -NowUtc $NowUtc -Status $AliveStatus
+        foreach ($k in @($map.Keys)) { if (-not (Test-PimAreaLockHeld -Lock $map[$k] -NowUtc $NowUtc -AliveExecutions $alive)) { $map.Remove($k); $changed = $true } }
+        $conf = Get-PimLockConflict -Map $map -Areas $Areas -Owner $Owner -RunId $RunId -NowUtc $NowUtc -AliveExecutions $alive
         while ($conf -and "$($conf.execution)".Trim()) {
-            $st = Get-PimLockHolderStatus -Execution $conf.execution
+            $st = if ($AliveStatus) { try { "$(& $AliveStatus "$($conf.execution)")".Trim() } catch { '' } } else { Get-PimLockHolderStatus -Execution $conf.execution }
             if (-not (Test-PimSchedulerLeaseHolderGone -Lease ([pscustomobject]@{ execution = $conf.execution }) -Status $st)) { break }
             $dead = "$($conf.owner)"
             foreach ($k in @($map.Keys)) { if ("$($map[$k].owner)" -eq $dead) { $map.Remove($k) } }
             $script:PimDeadLockOwners[$dead] = @{ execution = "$($conf.execution)"; status = $st }
             $changed = $true
-            $conf = Get-PimLockConflict -Map $map -Areas $Areas -Owner $Owner -RunId $RunId -NowUtc $NowUtc
+            $conf = Get-PimLockConflict -Map $map -Areas $Areas -Owner $Owner -RunId $RunId -NowUtc $NowUtc -AliveExecutions $alive
         }
         if ($conf) { $c.conflict = $conf; return $changed }
         if ($Cap -gt 0) {
-            $others = @(Get-PimLiveLockOwners -Map $map -NowUtc $NowUtc | Where-Object { $_ -ne $Owner })
+            $others = @(Get-PimLiveLockOwners -Map $map -NowUtc $NowUtc -AliveExecutions $alive | Where-Object { $_ -ne $Owner })
             $mine = @($map.Keys | Where-Object { "$($map[$_].owner)" -eq $Owner }).Count
             if (-not $mine -and $others.Count -ge $Cap) { $c.capReached = $true; $c.busy = $others.Count; return $changed }
         }
@@ -361,10 +418,12 @@ function Get-PimRunProgressState {
         reportDue   noProgress and this stall was not reported yet ('noProgressReportedUtc' older than the mark, or none)
       A lock that is not live (ended, expired) is never "no progress" -- the run is over, the report clears itself.
     #>
-    param([AllowNull()][object]$Lock, [Parameter(Mandatory)][datetime]$NowUtc, [int]$ThresholdMinutes = 0)
+    # PIM 100.166 (c3): -AliveExecutions -- a lock past its TTL whose execution is still Running is a live run (a silent
+    # long step is exactly the case to report).
+    param([AllowNull()][object]$Lock, [Parameter(Mandatory)][datetime]$NowUtc, [int]$ThresholdMinutes = 0, [hashtable]$AliveExecutions = @{})
     $th = if ($ThresholdMinutes -gt 0) { $ThresholdMinutes } else { [int]$script:PimNoProgressMinutes }
     $out = [ordered]@{ noProgress = $false; sinceUtc = ''; minutes = 0; reportDue = $false; text = '' }
-    if (-not $Lock -or -not (Test-PimAreaLockLive -Lock $Lock -NowUtc $NowUtc)) { return [pscustomobject]$out }
+    if (-not $Lock -or -not (Test-PimAreaLockHeld -Lock $Lock -NowUtc $NowUtc -AliveExecutions $AliveExecutions)) { return [pscustomobject]$out }
     $acq = Get-PimNoProgressStamp $(if ($Lock.PSObject.Properties['acquiredUtc']) { $Lock.acquiredUtc })
     $prg = Get-PimNoProgressStamp $(if ($Lock.PSObject.Properties['progressUtc']) { $Lock.progressUtc })
     $mark = $acq; if ($null -ne $prg -and ($null -eq $mark -or $prg -gt $mark)) { $mark = $prg }
@@ -385,17 +444,18 @@ function Get-PimNoProgressRuns {
       PURE. The live runs in a lock map, one entry per run (owner + runId), each with its Get-PimRunProgressState.
       -ExceptOwner: leave this process's own runs out (a tick reports OTHER executions; its own run is busy, not stalled).
     #>
-    param([System.Collections.IDictionary]$Map, [Parameter(Mandatory)][datetime]$NowUtc, [string]$ExceptOwner = '', [int]$ThresholdMinutes = 0)
+    param([System.Collections.IDictionary]$Map, [Parameter(Mandatory)][datetime]$NowUtc, [string]$ExceptOwner = '', [int]$ThresholdMinutes = 0,
+          [hashtable]$AliveExecutions = @{})
     $seen = @{}; $out = New-Object System.Collections.Generic.List[object]
     if ($null -eq $Map) { return @() }
     foreach ($k in @($Map.Keys | Sort-Object)) {
         $l = $Map[$k]
-        if (-not $l -or -not (Test-PimAreaLockLive -Lock $l -NowUtc $NowUtc)) { continue }
+        if (-not $l -or -not (Test-PimAreaLockHeld -Lock $l -NowUtc $NowUtc -AliveExecutions $AliveExecutions)) { continue }
         if ("$ExceptOwner".Trim() -and "$($l.owner)" -eq "$ExceptOwner") { continue }
         $key = "$($l.owner)|$($l.runId)"
         if ($seen.ContainsKey($key)) { continue }
         $seen[$key] = $true
-        $st = Get-PimRunProgressState -Lock $l -NowUtc $NowUtc -ThresholdMinutes $ThresholdMinutes
+        $st = Get-PimRunProgressState -Lock $l -NowUtc $NowUtc -ThresholdMinutes $ThresholdMinutes -AliveExecutions $AliveExecutions
         $out.Add([pscustomobject]@{ owner = "$($l.owner)"; runId = "$($l.runId)"; job = ("$($l.job)" -replace '^job:', ''); area = "$k"; state = $st })
     }
     return @($out.ToArray())
@@ -410,11 +470,14 @@ function Invoke-PimNoProgressCheck {
       released or retried here. Never throws. Returns the runs it reported.
       -Alert: test seam, param($run) -- default Invoke-PimJobRunAlert.
     #>
-    param([string]$Owner = '', [datetime]$NowUtc = [datetime]::UtcNow, [scriptblock]$Alert)
+    param([string]$Owner = '', [datetime]$NowUtc = [datetime]::UtcNow, [scriptblock]$Alert,
+          # PIM 100.166 (c3): a run past its lock TTL whose execution is still Running is reported too (test seam: -AliveStatus)
+          [scriptblock]$AliveStatus)
     $reported = New-Object System.Collections.Generic.List[object]
     try {
         $map = (Get-PimSchedulerLocksRaw).Map
-        $due = @(Get-PimNoProgressRuns -Map $map -NowUtc $NowUtc -ExceptOwner $Owner | Where-Object { $_.state.reportDue })
+        $alive = Get-PimAliveExpiredExecutions -Map $map -NowUtc $NowUtc -Status $AliveStatus
+        $due = @(Get-PimNoProgressRuns -Map $map -NowUtc $NowUtc -ExceptOwner $Owner -AliveExecutions $alive | Where-Object { $_.state.reportDue })
         foreach ($r in $due) {
             # Mark first: a mark that cannot be written means another tick is reporting it (or the store is busy) -- no mail.
             $runKey = "$($r.owner)|$($r.runId)"

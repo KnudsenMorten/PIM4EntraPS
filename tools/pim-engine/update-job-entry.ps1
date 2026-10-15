@@ -514,6 +514,17 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
         Send-PimUpdateOutcome -Action 'none' -Outcome 'failed' -ErrorText "Invardia: $($t.reason)"
         exit 1
     }
+    # PIM 100.158 / framework 12.11e CR3: record the wave this environment was SERVED (from the signed manifest) -- or that it
+    # was served outside any wave -- so the heartbeat can say it (pim.Settings 'ReleaseWave'). Only after a VERIFIED answer;
+    # a write that fails is a plain note, never a failed update.
+    if ($t.served) {
+        try {
+            . (Join-Path $solRoot 'engine\_shared\PIM-ReleaseControl.ps1')
+            $waveRec = ConvertTo-PimReleaseWaveRecord -Wave "$($t.wave)" -Version "$($t.manifestVersion)" -Ring $ring -NowUtc ([datetime]::UtcNow)
+            Set-PimSqlSetting -ConnectionString $csInv -Name 'ReleaseWave' -ValueJson ($waveRec | ConvertTo-Json -Depth 4 -Compress)
+            if ($waveRec.wave) { Say "Invardia: served as wave '$($waveRec.wave.name)' ($($waveRec.wave.version), ring $($waveRec.wave.ring))" 'Cyan' }
+        } catch { Say "  release wave not recorded: $($_.Exception.Message)" 'Yellow' }
+    }
     $targetVer = "$($t.version)"
     $script:PimInvardiaContext = "$($t.contextPath)"; $script:PimInvardiaSequence = [int]$t.sequence
     # The plan builds only when it has a source; the Invardia archive IS the source (already verified + re-packed above).

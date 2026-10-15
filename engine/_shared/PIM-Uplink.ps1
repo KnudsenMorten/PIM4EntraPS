@@ -1095,6 +1095,25 @@ function Get-PimUplinkSupersededBy {
     } catch { return '' }
 }
 
+function Get-PimUplinkEnvironmentId {
+    <#
+      PURE. PIM 100.167 (lane G, framework 8.16 "Order and links"): Invardia's id of THIS environment in an answer body
+      (`environmentId`, a GUID; the uplink report answer or the install-key claim answer), lower-case, or ''. Invardia does not
+      send it yet (2026-10-15: the uplink answer carries only supersededBy, the claim answer only the environment HANDLE) --
+      read the moment it does, so the customer mail links the environment's own portal page. Never throws.
+    #>
+    param([AllowNull()][object]$Body)
+    try {
+        if ($null -eq $Body) { return '' }
+        if ($Body -is [string]) { if (-not $Body.Trim().StartsWith('{')) { return '' }; $Body = $Body | ConvertFrom-Json -ErrorAction Stop }
+        $v = Get-PimUplinkField $Body 'environmentId'
+        if ($v -isnot [string]) { return '' }
+        $v = $v.Trim().ToLowerInvariant()
+        if ($v -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { return '' }
+        return $v
+    } catch { return '' }
+}
+
 # ---------------------------------------------------------------------------------------------------------------------
 # PIM 100.167 / framework DOCS/REQUIREMENTS.md 8.16 UPLINK-CAUSES (owner 2026-10-15: "across all solutions" / "each solution
 # cause drop cause at least" / "or define errorcodes" / "but more context in free text is needed"). Behind the feature
@@ -1283,7 +1302,12 @@ function Invoke-PimUplinkCycle {
           # heartbeat is due and -Causes is on; a throw = Capabilities / Licences left out.
           [AllowNull()][scriptblock]$LicenceProbe = $null,
           # $true when the product's hybrid AD feature is on (Capabilities.hybridAd); anything else = left out
-          [AllowNull()][object]$HybridAd = $null)
+          [AllowNull()][object]$HybridAd = $null,
+          # PIM 100.158 / framework 12.11e CR3: wave + releaseMode on the IDENTIFIED heartbeat (PIM-ReleaseControl.ps1,
+          # Get-PimReleaseControlHeartbeatFields: only the keys that are known). Its own switch (PIM_Telemetry_ReleaseControl,
+          # AUTO = ring 0 only) and its own 24-hour hold after a refusal (UplinkState.releaseControlRefusedUtc).
+          [bool]$ReleaseControl = $false,
+          [AllowNull()][System.Collections.IDictionary]$ReleaseControlFields = $null)
     $NowUtc = $NowUtc.ToUniversalTime()
     $endpoint = "$(& $GetSetting 'UplinkEndpoint')".Trim()
     $sender = Resolve-AitUplinkSender -Enabled $Enabled -InstallKey $InstallKey -Endpoint $endpoint
@@ -1384,6 +1408,21 @@ function Invoke-PimUplinkCycle {
         foreach ($n in $cn) { $rec.PSObject.Properties.Remove("$n") }
         $causeState.on = $false; $causeState.refusedNow = $true; $causeState.reason = "$($r1.Reason)"
         return (& $postAdd $rec $names $legacy)
+    }
+    # PIM 100.158 CR3: the release-control fields (wave / releaseMode) -- their own hold. $postRc sends a heartbeat that carries
+    # them (-rnames); refused for its CONTENT -> they are removed, held 24 h, and the heartbeat goes on through $postCause.
+    $rcPrev = $null; if ($state -and $state.PSObject.Properties['releaseControlRefusedUtc']) { $rcPrev = $state.releaseControlRefusedUtc }
+    $rcHeld = Test-PimUplinkAdditiveHeld -RefusedUtc $rcPrev -NowUtc $NowUtc
+    $rcState = @{ on = ([bool]$ReleaseControl -and -not $rcHeld); refusedNow = $false; reason = '' }
+    $postRc = {
+        param($rec, $names, $legacy, $cnames, $rnames)
+        $rn = @(@($rnames) | Where-Object { "$_".Trim() })
+        if (-not $rn.Count -or $null -eq $rec) { return (& $postCause $rec $names $legacy $cnames) }
+        $r1 = & $post $rec
+        if ("$($r1.Status)" -eq 'ok' -or -not (Test-PimUplinkValidationRefusal "$($r1.Reason)")) { return $r1 }
+        foreach ($n in $rn) { $rec.PSObject.Properties.Remove("$n") }
+        $rcState.on = $false; $rcState.refusedNow = $true; $rcState.reason = "$($r1.Reason)"
+        return (& $postCause $rec $names $legacy $cnames)
     }
     $isId = ($sender.Mode -eq 'identified')
     $redact ={ param($t, $max) $x = "$t".Trim(); if (Get-Command ConvertTo-AitUplinkRedacted -ErrorAction SilentlyContinue) { $x = ConvertTo-AitUplinkRedacted -Text $x }; if ($x.Length -gt $max) { $x = $x.Substring(0, $max - 3) + '...' }; $x }
@@ -1526,7 +1565,15 @@ function Invoke-PimUplinkCycle {
                 }
             } catch { Write-Warning "[uplink] Capabilities / Licences could not be built: $($_.Exception.Message)" }
         }
-        $r = & $postCause $hb $hbAdd @{} $hbCause
+        # PIM 100.158 CR3: wave / releaseMode -- identified only, the switch on, only the keys that are known (a key with $null
+        # = recorded and none, sent as JSON null); lower-case names, as SI sends them.
+        $hbRc = @()
+        if ($hb -and $isId -and $rcState.on -and $null -ne $ReleaseControlFields) {
+            foreach ($rk in @('wave', 'releaseMode')) {
+                if ($ReleaseControlFields.Contains($rk)) { $hb | Add-Member -NotePropertyName $rk -NotePropertyValue $ReleaseControlFields[$rk] -Force; $hbRc += $rk }
+            }
+        }
+        $r = & $postRc $hb $hbAdd @{} $hbCause $hbRc
         if ("$($r.Status)" -eq 'ok') { $sent++; $hbSent = $true; $lastHb = $NowUtc.ToString('o') } else { $failed++; $stopped = $true; $why += "heartbeat: $($r.Reason)" }
         if ("$($r.Status)" -eq 'ok' -and $agOnHb) {
             foreach ($a in $activeNow) { if (-not $reported.ContainsKey("$($a.id)")) { $reported["$($a.id)"] = @{ sinceUtc = $NowUtc.ToString('o'); hold = $false } } }
@@ -1543,6 +1590,17 @@ function Invoke-PimUplinkCycle {
                     $supNote = "; Invardia re-issued the licence (superseded by $sup) -- the licence request asks for it"
                 }
             } catch { $supNote = "" }
+            # PIM 100.167 (lane G): Invardia's id of this environment, when its answer carries one -> pim.Settings
+            # 'InvardiaEnvironmentId' (the customer alert mail links the environment's portal page with it). Written only
+            # when it changes; a missing / malformed answer changes nothing.
+            try {
+                $envBody = $null; if ($r -is [System.Collections.IDictionary]) { if ($r.Contains('Body')) { $envBody = $r['Body'] } } elseif ($r.PSObject.Properties['Body']) { $envBody = $r.Body }
+                $envId = Get-PimUplinkEnvironmentId -Body $envBody
+                if ($envId) {
+                    $prevEnv = ''; try { $pe = & $GetSetting 'InvardiaEnvironmentId'; if ($pe -is [string]) { $prevEnv = $pe.Trim().ToLowerInvariant() } } catch { }
+                    if ($prevEnv -ne $envId) { & $SetSetting 'InvardiaEnvironmentId' $envId }
+                }
+            } catch { }
         }
     }
     # PIM 100.10 (framework 8.7): the SETUP report -- identified only (anonymous Community sends nothing of this), its own
@@ -1698,6 +1756,7 @@ function Invoke-PimUplinkCycle {
     $msg = "$($sender.Mode): $sent sent$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($clearedSent) { " ($clearedSent guard(s) reported clear)" })$(if ($setupSent) { ' (setup report)' })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })$supNote"
     if ($addState.refusedNow) { $msg += '; Invardia refused the new report fields -- sent in the old form, tried again in 24 h' }
     if ($causeState.refusedNow) { $msg += '; Invardia refused the cause fields (Reports / Capabilities / Licences) -- sent without them, tried again in 24 h' }
+    if ($rcState.refusedNow) { $msg += '; Invardia refused the release-control fields (wave / releaseMode) -- sent without them, tried again in 24 h' }
     $newState = [ordered]@{ mode = $sender.Mode; lastHeartbeatUtc = $lastHb; runWatermarkUtc = $floor; jobMarks = [pscustomobject]$marks
                             consent = $consent; lastCycleUtc = $NowUtc.ToString('o'); lastResult = $msg
                             # PIM 100.75: read by the end-of-install verify (Confirm-PimInstall 'telemetry')
@@ -1715,10 +1774,14 @@ function Invoke-PimUplinkCycle {
     # PIM 100.167: the cause fields' own hold (left out entirely while the switch was never refused -- the state stays as before)
     if ($causeState.refusedNow) { $newState['causesRefusedUtc'] = $NowUtc.ToString('o') }
     elseif ($causeHeld) { $cpu = ConvertTo-PimUplinkUtc $causePrev; if ($cpu) { $newState['causesRefusedUtc'] = $cpu.ToString('o') } }
+    # PIM 100.158: the release-control fields' own hold (left out while never refused)
+    if ($rcState.refusedNow) { $newState['releaseControlRefusedUtc'] = $NowUtc.ToString('o') }
+    elseif ($rcHeld) { $rpu = ConvertTo-PimUplinkUtc $rcPrev; if ($rpu) { $newState['releaseControlRefusedUtc'] = $rpu.ToString('o') } }
     & $SetSetting 'UplinkState' ([pscustomobject]$newState)
     return @{ ran = $true; mode = $sender.Mode; sent = $sent; failed = $failed; left = $left; heartbeat = $hbSent; setup = $setupSent; message = $msg; reasons = @($why)
               additive = [bool]$addState.on; additiveRefused = [bool]$addState.refusedNow
               causes = [bool]$causeState.on; causesRefused = [bool]$causeState.refusedNow
+              releaseControl = [bool]$rcState.on; releaseControlRefused = [bool]$rcState.refusedNow
               guardsCleared = $clearedSent; activeGuards = $(if ($guardsKnown) { $activeNow.Count } else { -1 }) }
 }
 
@@ -1796,7 +1859,11 @@ function Invoke-PimUplinkJob {
       secret, never a file in the image, never returned by any API). Settings: UplinkState (shown on the Jobs page through
       the run detail), TelemetryInstallId, UplinkEndpoint (optional; default Invardia's).
     #>
-    param([object]$Job, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf)
+    param([object]$Job, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf,
+          # PIM 100.167 (lane G, framework 8.16 "Order and links"): a FLUSH before a customer alert mail -- the job's own
+          # cycle (same watermarks, so nothing is sent twice), a smaller budget and no pause between records.
+          # 0 / -1 = the hourly job's own values.
+          [int]$MaxPerCycle = 0, [int]$PauseMs = -1)
     $on = [bool]((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and (Test-PimFeatureAvailable -Key 'telemetry.uplink' -Quiet))
     # §11: OFF still runs ONE check -- an install that was on and is now off reports its opt-out once (Invoke-PimUplinkCycle).
     # Never on = nothing is sent and nothing is called; no SQL store while off = nothing to check, quietly.
@@ -1884,10 +1951,29 @@ function Invoke-PimUplinkJob {
         if (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) { $licProbe = { @(Invoke-PimGraph -Path '/subscribedSkus?$select=skuPartNumber,capabilityStatus,servicePlans' -All) } }
         try { if ([bool](Test-PimFeatureAvailable -Key 'hybrid.ad' -Quiet)) { $hyAd = $true } } catch { $hyAd = $null }
     }
+    $cyc = @{}
+    if ($MaxPerCycle -gt 0) { $cyc['MaxPerCycle'] = $MaxPerCycle }
+    $pause = if ($WhatIf) { 0 } elseif ($PauseMs -ge 0) { $PauseMs } else { 2500 }
+    # PIM 100.158 / framework 12.11e CR3: wave (what the updater was served, pim.Settings 'ReleaseWave') + releaseMode (the
+    # 4-hour window after an engine-changing release, from the engine's Strict start). PIM_Telemetry_ReleaseControl: on / off /
+    # AUTO (the default) = ring 0 only, until Invardia confirms (100.158). Identified only.
+    $rcOn = $false; $rcFields = $null
+    if ($on -and "$key".Trim()) {
+        if (-not (Get-Command Test-PimReleaseControlOn -ErrorAction SilentlyContinue)) { $rcLib = Join-Path $PSScriptRoot 'PIM-ReleaseControl.ps1'; if (Test-Path -LiteralPath $rcLib) { . $rcLib } }
+        if (Get-Command Test-PimReleaseControlOn -ErrorAction SilentlyContinue) {
+            $rcOn = [bool](Test-PimReleaseControlOn -Value "$env:PIM_Telemetry_ReleaseControl" -Ring $ring)
+            if ($rcOn) {
+                $rcWave = $null; try { $rcWave = & $get 'ReleaseWave' } catch { $rcWave = $null }
+                $rcStrict = $null; try { if (Get-Command Get-PimGuardStrictState -ErrorAction SilentlyContinue) { $rcStrict = Get-PimGuardStrictState } } catch { $rcStrict = $null }
+                try { $rcFields = Get-PimReleaseControlHeartbeatFields -WaveRecord $rcWave -StrictState $rcStrict -NowUtc $NowUtc } catch { $rcFields = $null }
+            }
+        }
+    }
     $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
-            -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $(if ($WhatIf) { 0 } else { 2500 }) `
+            -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $pause @cyc `
             -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints -AdoptionCounts $adoption `
-            -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun -Causes $causesOn -LicenceProbe $licProbe -HybridAd $hyAd
+            -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun -Causes $causesOn -LicenceProbe $licProbe -HybridAd $hyAd `
+            -ReleaseControl $rcOn -ReleaseControlFields $rcFields
     # PIM 100.75: a failed send / an install that should be identified but is anonymous = a WARNING run (never a failure).
     $rawKey = ''; try { $rawKey = "$(& $get 'InvardiaInstallKey')".Trim() } catch { $rawKey = '' }
     $claimSt = $null; try { $claimSt = & $get 'InstallKeyClaimState'; if ($claimSt -is [string]) { $claimSt = $claimSt | ConvertFrom-Json } } catch { $claimSt = $null }

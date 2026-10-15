@@ -77,28 +77,8 @@ function Get-PimErrorCodeArea {
     return ''
 }
 
-function Get-PimErrorDefaultText {
-    <# PURE. The customer sentence + the step of a code WITHOUT a customer-ready solution, by its cause class. #>
-    param([string]$CauseClass, [string]$WhoActs)
-    $next = 'It runs again on the next run by itself.'
-    switch ("$CauseClass") {
-        'replication-delay'    { return @("Microsoft has not finished creating an object PIM Manager needs, so this step waits. $next", 'Nothing to do.') }
-        'throttled'            { return @("Microsoft asked PIM Manager to slow down, so this step waits. $next", 'Nothing to do.') }
-        'upstream-error'       { return @("A Microsoft service answered with an error, so this step was not done. $next", $(if ($WhoActs -eq 'nobody') { 'Nothing to do.' } else { 'Nothing to do for you: Invardia support looks at it.' })) }
-        'held-for-approval'    { return @('A safety check held a large change for approval. Nothing was changed; an approver in your tenant decides.', 'Open Jobs > Engine logs & errors in PIM Manager, review the held change and approve it, or correct what caused it and commit in Pending changes.') }
-        'not-converged'        { return @('A change you committed is not in place in your tenant yet. PIM Manager tries again on every run, and Invardia support looks at why.', 'Nothing to do for you: Invardia support looks at it.') }
-        'unclassified'         { return @('PIM Manager met a problem it does not recognise yet. Nothing was changed wrongly; Invardia support looks at it.', 'Nothing to do for you: Invardia support looks at it.') }
-        'too-large'            { return @('The engine job needs more resources for this tenant, so part of its work is not done yet.', 'Nothing to do when updates are on: the next update gives the job more resources. Invardia support can do it with you now.') }
-        'settings-unreachable' { return @("PIM Manager could not save the result of one run in its own database. $next", $(if ($WhoActs -eq 'nobody') { 'Nothing to do.' } else { 'Nothing to do for you: Invardia support looks at it.' })) }
-        'platform-timeout'     { return @("The run was stopped before it finished. $next", 'Nothing to do.') }
-        'permission'           { return @('PIM Manager is not allowed to do this step in your tenant.', 'Open Get Started > Engine permissions in PIM Manager and run the shown command as a Global Administrator.') }
-        'target-missing'       { return @('A row names something that does not exist in your tenant (any more), so that row is not applied. Everything else is applied.', 'Open Jobs > Engine logs & errors in PIM Manager; the item shows what to correct or remove, then commit in Pending changes.') }
-        'customer-config'      { return @('A row or setting cannot be applied as it is written. Everything else is applied.', 'Open Jobs > Engine logs & errors in PIM Manager; the item shows what to change, then commit in Pending changes.') }
-        'missing-licence'      { return @('Your tenant does not have the Microsoft service this step needs, so the step does not apply. Nothing is wrong.', 'Nothing to do. If you add the service later, the step starts on its own.') }
-        'no-data-source'       { return @('Your tenant does not have the data this step reads, so the step does not apply. Nothing is wrong.', 'Nothing to do.') }
-    }
-    return @('PIM Manager met a problem. Invardia support looks at it.', 'Nothing to do for you: Invardia support looks at it.')
-}
+# Get-PimErrorDefaultText + Get-PimFailureCustomerText live in engine/_shared/PIM-FailureCatalog.ps1 (PIM 100.167, lane G):
+# the customer alert mail says the same sentence as errors.json, from ONE source.
 
 function New-PimErrorsCatalogue {
     <#
@@ -120,10 +100,10 @@ function New-PimErrorsCatalogue {
         $rule = $rules["$($row.class)"]
         $title = if ($rule) { "$($rule.title)" } elseif ($titleOf.ContainsKey("$($row.class)")) { $titleOf["$($row.class)"] } elseif ($genericTitle.ContainsKey("$($row.causeClass)")) { $genericTitle["$($row.causeClass)"] } else { "$($row.class)" }
         $def = Get-PimErrorDefaultText -CauseClass "$($row.causeClass)" -WhoActs "$($row.whoActs)"
-        $customer = "$($def[0])"; $steps = New-Object System.Collections.Generic.List[object]
+        $ct = if ("$($row.class)" -like 'GENERIC:*') { Get-PimFailureCustomerText -Class '' -CauseClass "$($row.causeClass)" } else { Get-PimFailureCustomerText -Class "$($row.class)" }
+        $customer = "$($ct.customerText)"; $steps = New-Object System.Collections.Generic.List[object]
         if ($sol.ContainsKey("$($row.class)")) {
             $s = $sol["$($row.class)"]
-            $customer = ("$($s.what)".Replace(': {item}', '').Replace('{item}', 'one or more items').Trim() + ' ' + "$($s.affected)".Trim()).Trim()
             foreach ($st in @($s.steps)) { if ("$st".Trim()) { $steps.Add([ordered]@{ who = 'customer'; text = "$st".Trim() }) } }
             if ("$($s.after)".Trim()) { $steps.Add([ordered]@{ who = 'nobody'; text = "$($s.after)".Trim() }) }
         } else {

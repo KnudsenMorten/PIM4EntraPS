@@ -2479,18 +2479,28 @@ function Initialize-PimManagerStore {
     # CR8 item 1 (framework §12.11f, PIM 100.152): the Manager may have NO right to change the schema (db_ddladmin dropped
     # at the cut-over); the updater applies it before every roll. A schema step that is refused while the store's tables
     # exist is said once and the Manager starts; a store WITHOUT its tables still fails the start, as before.
-    try { Initialize-PimSqlStore -ConnectionString $cs }
+    # Framework §12.23 run 2 (PIM 100.156): HOSTED (a Container App), the updater applied the schema -- and refreshed the
+    # publish job's control view -- BEFORE it rolled this Manager, so the web app runs NO DDL at start: a read-only check
+    # that the core tables are there, and the schema step is skipped. A local / developer store keeps the full init.
+    $script:PimManagerSchemaByUpdater = $false
+    if ("$($env:CONTAINER_APP_NAME)".Trim()) {
+        $__rd = Confirm-PimSqlSchemaObject -ConnectionString $cs -Objects @('pim.Rows', 'pim.Settings', 'pim.AuditEvents', 'pim.TenantCache', 'pim.ChangeQueue')
+        $script:PimManagerSchemaByUpdater = [bool]$__rd.ok
+    }
+    if ($script:PimManagerSchemaByUpdater) { Write-Host '  [store] schema applied by the updater -- the Manager does not change the schema' -ForegroundColor DarkGray }
+    else { try { Initialize-PimSqlStore -ConnectionString $cs }
     catch {
         $__se = "$($_.Exception.Message)"
         $__has = $false
         try { $__has = [bool]([int](Invoke-PimSqlScalar -ConnectionString $cs -Sql "SELECT CASE WHEN OBJECT_ID('pim.Settings') IS NOT NULL AND OBJECT_ID('pim.Rows') IS NOT NULL THEN 1 ELSE 0 END") -eq 1) } catch { $__has = $false }
         if (-not $__has) { throw }
         Write-Host ("  [store] schema step not applied by the Manager ({0}) -- the updater applies the schema before every roll; the store's tables are in place" -f $(if ($__se.Length -gt 160) { $__se.Substring(0, 160) + '...' } else { $__se })) -ForegroundColor DarkYellow
-    }
+    } }
     if ($global:PIM_NamingConventions -is [hashtable]) { [void](Import-PimSettingsSeed -ConnectionString $cs -Seed $global:PIM_NamingConventions) }
     Initialize-PimManagerPolicyTemplates -ConnectionString $cs
     Initialize-PimManagerMailTemplates -ConnectionString $cs
-    Initialize-PimManagerPublishJobViews -ConnectionString $cs
+    # §12.23 run 2: hosted, the updater's schema step refreshed the view (Initialize-PimSqlStore) -- no DDL from the web app
+    if (-not $script:PimManagerSchemaByUpdater) { Initialize-PimManagerPublishJobViews -ConnectionString $cs }
     $sqlSettings = Get-PimAllSqlSettings -ConnectionString $cs
     if (-not ($global:PIM_NamingConventions -is [hashtable])) { $global:PIM_NamingConventions = @{} }
     foreach ($k in @($sqlSettings.Keys)) { $global:PIM_NamingConventions[$k] = $sqlSettings[$k] }
@@ -2552,10 +2562,13 @@ function Set-PimManagerInstance {
     $global:PIM_SqlDatabase = "$($inst.sqlDatabase)"
     $cs = Get-PimSqlConnectionString
     $tc = New-PimSqlConnection -ConnectionString $cs; $tc.Open(); $tc.Close()
-    Initialize-PimSqlStore -ConnectionString $cs
+    # §12.23 run 2 (PIM 100.156): hosted, the updater owns the schema (see the start path); local stores keep the full init
+    $__byUpd = $false
+    if ("$($env:CONTAINER_APP_NAME)".Trim()) { $__byUpd = [bool](Confirm-PimSqlSchemaObject -ConnectionString $cs -Objects @('pim.Rows', 'pim.Settings', 'pim.AuditEvents', 'pim.TenantCache', 'pim.ChangeQueue')).ok }
+    if (-not $__byUpd) { Initialize-PimSqlStore -ConnectionString $cs }
     Initialize-PimManagerPolicyTemplates -ConnectionString $cs
     Initialize-PimManagerMailTemplates -ConnectionString $cs
-    Initialize-PimManagerPublishJobViews -ConnectionString $cs
+    if (-not $__byUpd) { Initialize-PimManagerPublishJobViews -ConnectionString $cs }
     $sqlSettings = Get-PimAllSqlSettings -ConnectionString $cs
     if (-not ($global:PIM_NamingConventions -is [hashtable])) { $global:PIM_NamingConventions = @{} }
     foreach ($k in @($sqlSettings.Keys)) { $global:PIM_NamingConventions[$k] = $sqlSettings[$k] }
@@ -4222,7 +4235,8 @@ function Invoke-PimManagerSafeCommit {
     if ($true) {
         # §88: the IF-guarded DDL ran on EVERY commit -- once per process is enough (a failure is retried next commit).
         if ($script:PimBackupStoreReadyFor -ne $script:PimSqlCs) {
-            try { Initialize-PimBackupStore -ConnectionString $script:PimSqlCs; $script:PimBackupStoreReadyFor = $script:PimSqlCs } catch { Write-Warning "  [backup] init store failed (non-fatal): $($_.Exception.Message)" }
+            # §12.23 run 2 (PIM 100.156): a read-only check -- the schema step creates pim.Backups; no DDL from the web app
+            try { Confirm-PimBackupStoreReady -ConnectionString $script:PimSqlCs; $script:PimBackupStoreReadyFor = $script:PimSqlCs } catch { Write-Warning "  [backup] store not ready (non-fatal): $($_.Exception.Message)" }
         }
         $save    = { param($s) Save-PimSqlBackupSnapshot -ConnectionString $script:PimSqlCs -Snapshot $s }
         # 🔒 -AllowEmpty IS DELIBERATE ON EXACTLY THESE TWO PATHS, AND NOWHERE ELSE.
@@ -4290,7 +4304,7 @@ function Invoke-PimManagerSafeCommit {
 
 function Get-PimManagerBackupList {
     param([string]$Entity)
-    try { Initialize-PimBackupStore -ConnectionString $script:PimSqlCs } catch { }
+    try { Confirm-PimBackupStoreReady -ConnectionString $script:PimSqlCs } catch { }
     return @(Get-PimSqlBackupSnapshots -ConnectionString $script:PimSqlCs -Entity $Entity)
 }
 
@@ -4309,7 +4323,7 @@ function Invoke-PimManagerBackupRestore {
     # in $script:PimRestoreGuardAsk.
     param([Parameter(Mandatory)][string]$Id, [switch]$Confirm, [AllowNull()][object]$GuardApproval)
     $script:PimRestoreGuardAsk = $null
-    try { Initialize-PimBackupStore -ConnectionString $script:PimSqlCs } catch { }
+    try { Confirm-PimBackupStoreReady -ConnectionString $script:PimSqlCs } catch { }
     $snap = Get-PimSqlBackupSnapshot -ConnectionString $script:PimSqlCs -Id $Id
     if (-not $snap) { throw "snapshot '$Id' not found" }
     $plan = Get-PimSnapshotRestorePlan -Snapshot $snap
@@ -13306,7 +13320,8 @@ function Handle-Request {
             if (-not $acc.list) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required for configuration backups.' }; return 403 }
             if (-not (Get-Command New-PimConfigBackup -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'the configuration backup library (PIM-ConfigBackup.ps1) is not loaded in this Manager' }; return 501 }
             $cs = Get-PimManagerSettingCs
-            [void](Initialize-PimConfigBackupStore -ConnectionString $cs)
+            # framework 12.23 run 2: a read-only check; the schema step creates the tables
+            [void](Confirm-PimConfigBackupStoreReady -ConnectionString $cs)
             if ($method -eq 'POST') {
                 $sb = Read-RequestJson -Request $req
                 $note = if ($sb -and $sb.PSObject.Properties['note']) { "$($sb.note)".Trim() } else { '' }

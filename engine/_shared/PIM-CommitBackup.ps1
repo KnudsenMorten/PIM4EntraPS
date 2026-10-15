@@ -225,6 +225,17 @@ CREATE INDEX IX_pim_Backups_Entity_Taken ON pim.Backups (Entity, TakenUtc);
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $ddl)
 }
 
+function Confirm-PimBackupStoreReady {
+    <#
+      Framework §12.23 run 2 prerequisite (PIM 100.156): the RUNTIME half (the Manager's commit / restore / backup list).
+      Read-only check that pim.Backups is there -- the schema step (Initialize-PimSqlStore, the updater) creates it; the
+      create (Initialize-PimBackupStore) is only a one-time fallback. THROWS a plain message when it is still missing.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $r = Confirm-PimSqlSchemaObject -ConnectionString $ConnectionString -Objects @('pim.Backups') -Fallback { Initialize-PimBackupStore -ConnectionString $ConnectionString }
+    if (-not $r.ok) { throw "[backup] $($r.message)" }
+}
+
 function Save-PimSqlBackupSnapshot {
     # Persist one snapshot record into pim.Backups. The full record (header + rows)
     # is serialised to BodyJson so a restore is a pure read-back.

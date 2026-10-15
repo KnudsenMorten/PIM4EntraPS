@@ -100,11 +100,17 @@ function Update-PimImpactActivationLedger {
       active-assignments snapshot job after it wrote the snapshot. Never throws to the caller's job: returns
       @{ ok; added; error }. -NonQuery is the test seam (default Invoke-PimSqlNonQuery).
     #>
-    param([Parameter(Mandatory)][string]$ConnectionString, [AllowNull()][object[]]$Rows, [scriptblock]$NonQuery = $null)
+    # -Query: test seam for the read-only schema check (default Invoke-PimSqlQuery).
+    param([Parameter(Mandatory)][string]$ConnectionString, [AllowNull()][object[]]$Rows, [scriptblock]$NonQuery = $null, [scriptblock]$Query = $null)
     if (-not $NonQuery) { $NonQuery = { param($cs, $sql, $p) Invoke-PimSqlNonQuery -ConnectionString $cs -Sql $sql -Parameters $p } }
     try {
         $acts = @(Select-PimImpactActivationRows -Rows $Rows)
-        [void](& $NonQuery $ConnectionString (Get-PimImpactActivationLedgerDdl) @{})
+        # Framework §12.23 run 2 prerequisite (PIM 100.156): the table comes from the schema step (Initialize-PimSqlStore);
+        # this write only checks it is there (read-only). The old create is a one-time fallback.
+        $nq = $NonQuery
+        $rd = Confirm-PimSqlSchemaObject -ConnectionString $ConnectionString -Objects @('pim.ImpactActivations') -Query $Query `
+                -Fallback { [void](& $nq $ConnectionString (Get-PimImpactActivationLedgerDdl) @{}) }
+        if (-not $rd.ok) { throw "$($rd.message)" }
         $added = 0
         for ($i = 0; $i -lt $acts.Count; $i += 500) {
             $chunk = @($acts[$i..([Math]::Min($i + 499, $acts.Count - 1))])

@@ -250,6 +250,155 @@ SELECT MAX(t) FROM (
     return $null
 }
 
+# ---------------------------------------------------------------------------
+# PIM 100.167 (lane G) / framework DOCS/REQUIREMENTS.md 8.16 UPLINK-CAUSES "Order and links" (owner 2026-10-15: the customer's
+# failure mail and the owner know the same cause at the same time; known defects with a fix and licence gaps do not mail the
+# customer as alerts):
+#   1. FIRST the run record goes to Invardia (the uplink job's own cycle, flushed: same watermarks, never twice), THEN the
+#      customer mail. Invardia down / no key / telemetry off = the mail goes anyway (never held for the uplink).
+#   2. The mail names each cause's stable code + the catalogue's ONE customer sentence (Get-PimFailureCustomerText -- the
+#      same words as errors.json and Invardia's page per code) + a link to the environment's page in the portal.
+#   3. NO customer alert when EVERY cause of a failed / warning run is a licence gap or missing data (missing-licence,
+#      no-data-source), Microsoft throttling, or a product defect already fixed in the running version (fixedIn <= it):
+#      those show on the Jobs page only. A HELD run (a change waiting for an approver in the tenant) is NOT quiet: that
+#      mail IS the approval request (memory: mass changes are held for the tenant's SuperAdmin).
+# ---------------------------------------------------------------------------
+function Get-PimJobAlertCauses {
+    <#
+      PURE. The causes a finished run names, each with its stable code and customer sentence: @( @{ class; code; causeClass;
+      whoActs; fixedIn; action; customerText } ), at most 5, in the order of the run's text. Classes: every bracketed catalog
+      class in the run's detail ([ENTRA-ROLE-UNRESOLVED]); none -> CONVERGENCE for a convergence failure, else the catalog's
+      classification of the text (Get-PimFailureClassification) for a FAILED run. Without the catalog loaded: none.
+    #>
+    param([Parameter(Mandatory)][object]$Run)
+    if (-not (Get-Command Get-PimFailureCustomerText -ErrorAction SilentlyContinue)) { return @() }
+    $status = "$(Get-PimJobAlertField -Item $Run -Name 'status')".Trim().ToLowerInvariant()
+    $detail = "$(Get-PimJobAlertField -Item $Run -Name 'detail')"
+    $known = @{}
+    if (Get-Command Get-PimFailureCatalogCodes -ErrorAction SilentlyContinue) { foreach ($k in @(Get-PimFailureCatalogCodes)) { $known["$k"] = $true } }
+    $classes = New-Object System.Collections.Generic.List[string]
+    foreach ($m in [regex]::Matches($detail, '\[([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)\]')) {
+        $c = $m.Groups[1].Value
+        if ($known.ContainsKey($c) -and -not $classes.Contains($c)) { $classes.Add($c) }
+    }
+    if (-not $classes.Count -and $detail -match '(?i)CONVERGENCE FAILURE') { $classes.Add('CONVERGENCE') }
+    if (-not $classes.Count -and $status -eq 'failed' -and "$detail".Trim() -and (Get-Command Get-PimFailureClassification -ErrorAction SilentlyContinue)) {
+        try { $cl = Get-PimFailureClassification -Message $detail; if ("$($cl.code)".Trim()) { $classes.Add("$($cl.code)".Trim().ToUpperInvariant()) } } catch { }
+    }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($c in $classes) {
+        if ($out.Count -ge 5) { break }
+        try { $out.Add((Get-PimFailureCustomerText -Class $c)) } catch { }
+    }
+    return @($out.ToArray())
+}
+
+function Test-PimJobAlertCustomerQuiet {
+    <#
+      PURE. Rule 3: is this alert one the customer is NOT mailed about? @{ quiet; reason }. Quiet only for a FAILED or WARNING
+      run whose every cause (at least one) is missing-licence / no-data-source / throttled, or a fix that is already in the
+      running version (fixedIn <= -RunningVersion; an unreadable version never makes it quiet). A HELD run is never quiet.
+    #>
+    param([Parameter(Mandatory)][object]$Run, [object[]]$Causes = @(), [string]$RunningVersion = '')
+    $status = "$(Get-PimJobAlertField -Item $Run -Name 'status')".Trim().ToLowerInvariant()
+    $cs = @(@($Causes) | Where-Object { $null -ne $_ })
+    if ($status -notin @('failed', 'warning') -or -not $cs.Count) { return [pscustomobject]@{ quiet = $false; reason = '' } }
+    $run = $null; [void][version]::TryParse("$RunningVersion".Trim(), [ref]$run)
+    $why = New-Object System.Collections.Generic.List[string]
+    foreach ($c in $cs) {
+        $cc = "$($c.causeClass)".Trim().ToLowerInvariant()
+        if ($cc -in @('missing-licence', 'no-data-source')) { $why.Add("$($c.code) does not apply in this tenant"); continue }
+        if ($cc -eq 'throttled') { $why.Add("$($c.code) is Microsoft throttling (retried)"); continue }
+        $fx = $null
+        if ("$($c.fixedIn)".Trim() -and $null -ne $run -and [version]::TryParse("$($c.fixedIn)".Trim(), [ref]$fx) -and $fx -le $run) { $why.Add("$($c.code) is fixed in $($c.fixedIn)"); continue }
+        return [pscustomobject]@{ quiet = $false; reason = '' }
+    }
+    return [pscustomobject]@{ quiet = $true; reason = ('not mailed to the customer: ' + (@($why.ToArray()) -join '; ') + ' -- shown on the Jobs page') }
+}
+
+function Get-PimJobAlertPortalLink {
+    <#
+      The customer's page at Invardia: https://portal.invardia.com/#/environments/<id> when this environment knows its
+      Invardia id (pim.Settings 'InvardiaEnvironmentId', written from Invardia's answers), else the portal's front page
+      https://portal.invardia.com/ (Invardia does not send the id yet, 2026-10-15). -EnvironmentId: a test seam. Never throws.
+    #>
+    param([AllowNull()][string]$EnvironmentId = $null)
+    $id = $EnvironmentId
+    if ($null -eq $id) {
+        $id = ''
+        try {
+            $cs = $null; if (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) { $cs = Get-PimSqlSettingsConnectionString }
+            if ($cs -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) { $v = Get-PimSqlSetting -ConnectionString $cs -Name 'InvardiaEnvironmentId'; if ($v -is [string]) { $id = $v } }
+        } catch { $id = '' }
+    }
+    $id = "$id".Trim().ToLowerInvariant()
+    if ($id -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { return "https://portal.invardia.com/#/environments/$id" }
+    return 'https://portal.invardia.com/'
+}
+
+function Add-PimJobAlertCodes {
+    <#
+      PURE. Rule 2: the mail parts with the causes' codes. The problem row names the code(s) in one line; the details start
+      with one calm line per cause (the code, the catalogue's sentence, "About this error" -> Invardia's page per code); the
+      action ends with the environment's page in the portal. Without causes the parts are returned unchanged.
+    #>
+    param([Parameter(Mandatory)][object]$Mail, [object[]]$Causes = @(), [string]$PortalLink = 'https://portal.invardia.com/')
+    $cs = @(@($Causes) | Where-Object { $null -ne $_ -and "$($_.code)".Trim() })
+    if (-not $cs.Count) { return $Mail }
+    $enc = { param($t) [System.Net.WebUtility]::HtmlEncode("$t") }
+    $codes = @($cs | ForEach-Object { "$($_.code)" } | Select-Object -Unique)
+    $lines = foreach ($c in $cs) {
+        $code = "$($c.code)"
+        ('<b>{0}</b> &ndash; {1} <a href="https://invardia.com/docs/pim/errors/{0}/">About this error</a>' -f (& $enc $code), (& $enc "$($c.customerText)"))
+    }
+    $Mail.detailHtml = ((@($lines) -join '<br>') + $(if ("$($Mail.detailHtml)".Trim()) { '<br><br>' + "$($Mail.detailHtml)" } else { '' }))
+    $label = if ($codes.Count -eq 1) { 'error code' } else { 'error codes' }
+    if ("$($Mail.problem)".Trim()) { $Mail.problem = "$($Mail.problem) ($label $($codes -join ', '))" }
+    $Mail.actionHtml = ("$($Mail.actionHtml)".Trim() + ' Your environment at Invardia: <a href="' + (& $enc $PortalLink) + '">' + (& $enc $PortalLink) + '</a>').Trim()
+    return $Mail
+}
+
+function Test-PimUplinkJobRunningNow {
+    <# Is the uplink job running right now in another execution (a live 'job:uplink' lock)? Then IT sends the run. Never throws. #>
+    param([datetime]$NowUtc = [datetime]::UtcNow)
+    try {
+        if (-not (Get-Command Get-PimSchedulerLocksRaw -ErrorAction SilentlyContinue) -or -not (Get-Command Test-PimAreaLockLive -ErrorAction SilentlyContinue)) { return $false }
+        $map = (Get-PimSchedulerLocksRaw).Map
+        if ($null -eq $map) { return $false }
+        foreach ($k in @($map.Keys)) { $l = $map[$k]; if ($l -and "$($l.job)" -eq 'job:uplink' -and (Test-PimAreaLockLive -Lock $l -NowUtc $NowUtc)) { return $true } }
+    } catch { }
+    return $false
+}
+
+function Invoke-PimJobAlertUplinkFirst {
+    <#
+      Rule 1: send the finished run to Invardia BEFORE its customer mail -- the uplink job's own cycle, flushed (at most 5
+      records, no pause; the same per-job watermarks, so a run is never sent twice). Skipped (the mail still goes): no uplink
+      in this process, the uplink job is running right now (it sends the run itself), or more than 6 flushes in 10 minutes in
+      this process (Invardia's rate limit is shared). -Flush: test seam (default Invoke-PimUplinkJob -MaxPerCycle 5 -PauseMs 0).
+      Returns @{ flushed; reason }. Never throws.
+    #>
+    param([object]$Run, [scriptblock]$Flush, [datetime]$NowUtc = [datetime]::UtcNow)
+    $out = [ordered]@{ flushed = $false; reason = '' }
+    try {
+        if ($null -eq $script:PimAlertUplinkFlushTimes) { $script:PimAlertUplinkFlushTimes = New-Object System.Collections.Generic.List[datetime] }
+        $now = $NowUtc.ToUniversalTime()
+        # literal limits, not $script: defaults (the BUG-79-6b trap: a $script: default is $null in a child script)
+        $recent = @($script:PimAlertUplinkFlushTimes | Where-Object { ($now - $_).TotalMinutes -lt 10 })
+        $script:PimAlertUplinkFlushTimes = New-Object System.Collections.Generic.List[datetime]; foreach ($t in $recent) { $script:PimAlertUplinkFlushTimes.Add($t) }
+        if ($recent.Count -ge 6) { $out.reason = 'six flushes in 10 minutes already -- the hourly uplink sends it'; return [pscustomobject]$out }
+        if (-not $Flush) {
+            if (-not (Get-Command Invoke-PimUplinkJob -ErrorAction SilentlyContinue)) { $out.reason = 'no uplink in this process'; return [pscustomobject]$out }
+            if (Test-PimUplinkJobRunningNow -NowUtc $now) { $out.reason = 'the uplink job is running now and sends this run'; return [pscustomobject]$out }
+            $Flush = { Invoke-PimUplinkJob -MaxPerCycle 5 -PauseMs 0 }
+        }
+        $script:PimAlertUplinkFlushTimes.Add($now)
+        $r = & $Flush
+        $out.flushed = $true; $out.reason = "$(if ($r -and $r.PSObject.Properties['detail']) { $r.detail } else { 'flushed' })"
+    } catch { $out.flushed = $false; $out.reason = "the uplink flush failed: $((("$($_.Exception.Message)") -split "`n")[0])" }
+    return [pscustomobject]$out
+}
+
 function Invoke-PimJobRunAlert {
     <#
       Called from Write-PimJobRunRecord for every finished run. Returns the sender
@@ -270,7 +419,10 @@ function Invoke-PimJobRunAlert {
     [CmdletBinding()]
     # 2026-09-26: an IDENTICAL failure (same job, same detail) is re-mailed at most once a day while it lasts -- a job on a
     # 5-minute tick that keeps failing the same way sent one mail an hour. A NEW or DIFFERENT failure still mails at once.
-    param([Parameter(Mandatory)][object]$Run, [int]$DebounceMinutes = 1440)
+    param([Parameter(Mandatory)][object]$Run, [int]$DebounceMinutes = 1440,
+          # PIM 100.167 (lane G) test seams: the uplink flush (default Invoke-PimUplinkJob), the running version (default
+          # Get-PimRunningVersion) and Invardia's environment id (default pim.Settings 'InvardiaEnvironmentId').
+          [scriptblock]$UplinkFlush, [string]$RunningVersion = '', [AllowNull()][string]$PortalEnvironmentId = $null)
 
     try {
         $d = Get-PimJobFailureAlert -Run $Run
@@ -290,8 +442,24 @@ function Invoke-PimJobRunAlert {
         # what is the change"): the mail body is HTML and tokens go in RAW -- so the plain detail is ENCODED (its
         # '<you>' vanished as a tag), and a HELD run carries the held plan itself: which policies, each setting
         # current -> new, and how to approve (Format-PimPolicyHoldMail, the same text as the engine's hold alert).
+        # PIM 100.167 (lane G) rule 3: a licence gap, missing data, throttling or a defect already fixed in this version is
+        # not mailed to the customer -- the Jobs page shows it (and Invardia has the run record).
+        $causes = @(Get-PimJobAlertCauses -Run $Run)
+        $rv = "$RunningVersion".Trim()
+        if (-not $rv -and (Get-Command Get-PimRunningVersion -ErrorAction SilentlyContinue)) { try { $rv = "$(Get-PimRunningVersion)".Trim() } catch { $rv = '' } }
+        $quiet = Test-PimJobAlertCustomerQuiet -Run $Run -Causes $causes -RunningVersion $rv
+        if ($quiet.quiet) {
+            Write-Host ("[alert] '{0}': {1}" -f (Get-PimJobAlertField -Item $Run -Name 'name'), $quiet.reason) -ForegroundColor DarkGray
+            return 'quiet'
+        }
+
         $mail = Get-PimJobAlertMailParts -Alert $d -Run $Run
         if ($mail.skip) { return 'none' }
+        # rule 2: each cause's code + the catalogue's sentence + the environment's page at Invardia
+        if ($causes.Count) { $mail = Add-PimJobAlertCodes -Mail $mail -Causes $causes -PortalLink (Get-PimJobAlertPortalLink -EnvironmentId $PortalEnvironmentId) }
+        # rule 1: the run record goes to Invardia BEFORE the mail (a skipped / failed flush never holds the mail)
+        $up = Invoke-PimJobAlertUplinkFirst -Run $Run -Flush $UplinkFlush
+        if (-not $up.flushed) { Write-Verbose ("[alert] run record not sent ahead of the mail: {0}" -f $up.reason) }
 
         if (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue) {
             # PIM 100.105: the alert table's rows -- only the ones this sender declares (Get-PimAlertMailArgs)
