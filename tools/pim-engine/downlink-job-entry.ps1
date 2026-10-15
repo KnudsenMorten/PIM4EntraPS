@@ -140,7 +140,10 @@ try {
     $cadenceCs = Get-PimSqlConnectionString -Server "$env:PIM_SqlServer".Trim() -Database $(if ("$env:PIM_SqlDatabase".Trim()) { "$env:PIM_SqlDatabase".Trim() } else { 'PimPlatform' })
 } catch { $cadenceErr = "$($_.Exception.Message)" }
 $cadenceLog = { param($m, $l) JobLog $m $l }
-$cadenceGate = Invoke-PimJobCadenceGate -Job 'pull' -StoreError $cadenceErr -Log $cadenceLog `
+# framework 12.24 / PIM 100.166 (a): a 'running' record of another execution is judged by that execution's platform status
+# (this job's own runs, read with its managed identity); unreadable = one plain line, and the 6 h fallback decides.
+$cadenceStatus = { param($e) $r = Get-PimJobOwnExecutionStatus -ExecutionName "$e"; if (-not $r.status) { JobLog "cadence: the status of the earlier run $e is unknown ($($r.reason)) -- a run without an end counts as abandoned after 6 h" 'INFO' }; $r.status }
+$cadenceGate = Invoke-PimJobCadenceGate -Job 'pull' -StoreError $cadenceErr -Log $cadenceLog -ExecutionStatus $cadenceStatus `
     -ExecutionName "$env:CONTAINER_APP_JOB_EXECUTION_NAME" -DeployedUtc "$env:PIM_CadenceDeployedUtc" `
     -ReadValues { param($names) Read-PimJobCadenceValues -ConnectionString $cadenceCs -Object 'pim.Settings' -Names $names } `
     -CompareAndSet { param($n, $v, $e) Set-PimJobCadenceValueIfUnchanged -ConnectionString $cadenceCs -Object 'pim.Settings' -Name $n -NewJson $v -ExpectedJson $e }

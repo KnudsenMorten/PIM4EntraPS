@@ -18856,6 +18856,8 @@
     else if (j.status === 'throttled') { bg = '#ffebe9'; fg = '#cf222e'; label = 'throttled -- stuck'; }
     // PIM 100.75: the run did its work but declared a WARNING (the uplink: telemetry not delivered) -- amber, never red.
     else if (j.status === 'warning') { bg = '#fff1d6'; fg = '#9a6700'; label = 'warning'; }
+    // PIM 100.166 b: a person stopped the last run on purpose -- grey, never red: final, not a failure; the next turn runs it.
+    else if (j.status === 'cancelled') { bg = '#eaeef2'; fg = '#57606a'; label = 'cancelled -- runs again next turn'; }
     else if (j.status === 'failed') { bg = '#ffebe9'; fg = '#cf222e'; label = 'failed'; }
     // 2026-10-07 (operator: "what is no-op ... people dont understand ... why not just ok ... state is green"): a run that
     // completed with nothing to do IS ok -- green "ok", the same as a run that changed something. The result text says which.
@@ -19911,6 +19913,13 @@
     }
     return ' <span class="jobLaneBadge" title="' + esc0(tip) + '" style="display:inline-block;margin-top:3px;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#ddf4ff;color:#0969da;">' + label + '</span>';
   }
+  // PIM 100.166 (c): a RUNNING run whose progress has not moved for an hour -- one calm amber line. It is NOT counted in
+  // the menu (jobNeedsAttention ignores it) and clears itself when the run moves on or ends. Nothing is stopped.
+  function jobNoProgressBadge(j) {
+    if (!j || !j.inProgress || !j.noProgress) return '';
+    const tip = (j.noProgressText || 'No progress for a while -- the run keeps going.') + ' Some reads are silent for a long time on a large tenant; if it lasts, open Engine logs & errors.';
+    return ' <span class="jobNoProgressBadge" title="' + esc0(tip) + '" style="display:inline-block;margin-top:3px;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#fff8c5;color:#9a6700;">no progress for ' + esc0(String(Number(j.noProgressMinutes) || 0)) + ' min -- still running</span>';
+  }
 
   async function renderJobs() {
     const body = document.getElementById('jobsBody');
@@ -19928,6 +19937,7 @@
     const waitingN = data.waitingCount || 0;    // §95.2o runs waiting for an area another run is working on
     const queuedN = data.queuedCount || 0;      // §95.2o Run now presses queued for the scheduler
     const canRun = !!data.canRun;            // Admin+ -> per-row controls are live
+    const canCancel = !!data.canCancel;      // PIM 100.166 b: SuperAdmin -> "Cancel run" on a running job
     const histCount = (data.historyCount != null) ? data.historyCount : null;
     window._jobsCanRun = canRun;
     // menu badges (PIM 100.94): the number of RUNNING jobs is a fact -- it stays on this page and is no longer a number in
@@ -20025,6 +20035,11 @@
         const runBtn = canRun
           ? ('<button class="primary jobRunBtn" data-name="' + esc0(j.name) + '" style="font-size:11px;padding:2px 8px;"' + (j.inProgress ? ' disabled title="already running"' : '') + '>Run now</button>')
           : '';
+        // PIM 100.166 b (owner 2026-10-15; "a person for stop"): a SuperAdmin can stop a run in progress. The run is then
+        // recorded as cancelled -- final, not retried, not a failure -- and the job runs again on its next normal turn.
+        const cancelBtn = (canCancel && j.inProgress)
+          ? ('<button class="ghost jobCancelBtn" data-name="' + esc0(j.name) + '" title="Stop this run now. It is recorded as cancelled and the job runs again on its next normal turn." style="font-size:11px;color:#cf222e;">Cancel run</button>')
+          : '';
         // [M6] History button -> recent runs (pass/fail/when) for this job.
         // BUG-113: two different things used to share one red badge. A FAILED RUN is a run that
         // went wrong and is worth an operator's attention; "no handler on this worker" is a
@@ -20083,12 +20098,12 @@
         const rowKey = 'jd-' + String(j.name || '').replace(/[^A-Za-z0-9_-]/g, '_');
         rowH.push('<tr class="jobRow" data-job="' + esc0(j.name) + '" style="border-bottom:1px solid #eaeef2;' + (neverUsed ? 'opacity:.55;' : '') + rowBg + (j.unackedFailureCount > 0 ? 'box-shadow:inset 3px 0 0 #cf222e;' : (j.stuck ? 'box-shadow:inset 3px 0 0 #d4a72c;' : (j.needsApproval ? 'box-shadow:inset 3px 0 0 #d4a72c;' : ''))) + '">' +
           '<td style="padding:6px 8px;white-space:nowrap;"><button class="ghost jobExpand" data-target="' + esc0(rowKey) + '" aria-expanded="false" title="Show the cadence, what this job works on and its recent history" style="font-size:11px;padding:0 4px;">&#9656;</button> <b>' + esc0(j.name) + '</b>' + scope + pullNote + '</td>' +
-          '<td style="padding:6px 8px;">' + jobStatusPill(j) + jobLaneBadge(j) + hybridWorkerBadge(j) + '</td>' +
+          '<td style="padding:6px 8px;">' + jobStatusPill(j) + jobLaneBadge(j) + jobNoProgressBadge(j) + hybridWorkerBadge(j) + '</td>' +
           '<td style="padding:6px 8px;white-space:nowrap;" title="' + esc0(fmtTime(j.lastRunUtc, { seconds: true })) + '">' + lastCell + '</td>' +
           '<td style="padding:6px 8px;max-width:280px;">' + result + '</td>' +
           '<td style="padding:6px 8px;white-space:nowrap;" title="' + esc0(fmtTime(j.nextRunUtc)) + (j.nextRunSynthesized ? ' (computed from cadence)' : '') +
             (j.lastFinishedUtc && j.intervalMinutes ? esc0(' = last run finished ' + fmtTime(j.lastFinishedUtc) + ' + ' + j.intervalMinutes + ' min') : '') + '">' + nextCell + '</td>' +
-          '<td style="padding:6px 8px;text-align:right;white-space:nowrap;">' + (j.type === 'hybrid-ad-sync' ? '<button class="btn-sec jobsHybridLive" title="Watch the continuous PIM-for-AD sync live (TTL checks, adds, removes)">Live view</button> ' : '') + runBtn + ' ' + logBtn + '</td>' +
+          '<td style="padding:6px 8px;text-align:right;white-space:nowrap;">' + (j.type === 'hybrid-ad-sync' ? '<button class="btn-sec jobsHybridLive" title="Watch the continuous PIM-for-AD sync live (TTL checks, adds, removes)">Live view</button> ' : '') + runBtn + (cancelBtn ? ' ' + cancelBtn : '') + ' ' + logBtn + '</td>' +
           '</tr>');
         // the details panel: everything that used to widen the line
         const areasTxt = asList(j.areas).length ? asList(j.areas).join(', ') : 'its own state only';
@@ -20163,6 +20178,10 @@
         b.onclick = () => ackJobRun(b.dataset.runid, b.dataset.name);
       });
     }
+    // PIM 100.166 b: Cancel run (SuperAdmin; the server refuses anyone else too).
+    document.querySelectorAll('.jobCancelBtn').forEach(b => {
+      b.onclick = () => cancelJobRun(b.dataset.name, b);
+    });
     // [M6] History (recent runs + pass/fail/when) is read-only -> available to everyone.
     document.querySelectorAll('.jobHistBtn').forEach(b => {
       b.onclick = () => openJobHistory(b.dataset.name);
@@ -20183,7 +20202,7 @@
       rows: jobs.map(j => [
         j.name || '', j.type || '', j.scope || '', j.cadence || '',
         (j.enabled ? 'yes' : 'no'),
-        (j.inProgress ? 'running' : (j.neverRun ? 'never run' : (j.status === 'held' ? (j.heldResolved ? 'held earlier -- nothing waits now' : (j.approvedPending ? 'approved -- applies next run' : 'needs approval')) : (j.status === 'interrupted' ? 'interrupted' : j.status === 'throttled' ? (j.throttleStuck ? 'throttled -- stuck' : 'throttled -- retrying') : j.status === 'warning' ? 'warning' : (j.lastOk === false ? 'failed' : (j.lastOk === true ? 'ok' : 'unknown')))))),
+        (j.inProgress ? 'running' : (j.neverRun ? 'never run' : (j.status === 'held' ? (j.heldResolved ? 'held earlier -- nothing waits now' : (j.approvedPending ? 'approved -- applies next run' : 'needs approval')) : (j.status === 'interrupted' ? 'interrupted' : j.status === 'cancelled' ? 'cancelled' : j.status === 'throttled' ? (j.throttleStuck ? 'throttled -- stuck' : 'throttled -- retrying') : j.status === 'warning' ? 'warning' : (j.lastOk === false ? 'failed' : (j.lastOk === true ? 'ok' : 'unknown')))))),
         (j.neverRun ? '' : (j.lastRunUtc || '')),
         (j.lastResult || ''),
         (j.lastOk === true ? 'true' : (j.lastOk === false ? 'false' : '')),
@@ -20283,6 +20302,34 @@
     }
   }
 
+  // PIM 100.166 b (owner 2026-10-15): stop the running run of a job. One calm line, the details behind More info. The
+  // platform stops the run; it is recorded as cancelled (final -- not retried, not a failure) and the job runs again on its
+  // next normal turn.
+  async function cancelJobRun(name, btn) {
+    const ok = await pimConfirm({
+      title: 'Cancel the running run of ' + name + '?',
+      body: 'The run stops now and the job runs again on its next normal turn.',
+      more: [
+        { label: 'What happens', text: 'PIM Manager asks Azure to stop the run. The run is recorded as cancelled by you: it is not retried, not resumed and not counted as a failure.' },
+        { label: 'Work in progress', text: 'Changes the run already made stay in place. Anything it had not reached yet is picked up by the next run.' },
+        { label: 'Same run, other jobs', text: 'Jobs running in the same engine run stop with it; they run again on their next turn.' }
+      ],
+      okLabel: 'Stop this run', danger: true
+    });
+    if (!ok) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Stopping…'; }
+    // The list is re-rendered FIRST, then the answer is shown -- a re-render replaces the message line.
+    let text = '', isErr = false;
+    try {
+      const r = await api('POST', '/api/jobs/cancel', { name: name });
+      text = (r.message || ('Cancelled ' + name)) + (r.moreInfo ? (' ' + r.moreInfo) : ''); isErr = !r.ok;
+    } catch (e) {
+      text = 'Could not cancel ' + name + ': ' + (e.message || e); isErr = true;
+    }
+    await renderJobs();
+    jobsActionMsg(text, isErr);
+  }
+
   // [M6] Acknowledge ("clear") the latest failed run -> mutes the failing signal. The run
   // RECORD stays in history (audit intact); only its overdue/failure badge is suppressed.
   async function ackJobRun(runId, name) {
@@ -20325,6 +20372,8 @@
         ? ('<span class="histThrottled" style="color:#9a6700;font-weight:600;" title="Microsoft throttled this run; it retries automatically. Not a failure.">THROTTLED &mdash; retrying</span>' + (r.throttleStuck ? ' <span style="color:#cf222e;">(stuck -- not completed for a long time)</span>' : ''))
         : (r.status === 'warning')
         ? '<span class="histWarning" style="color:#9a6700;font-weight:600;" title="The run did its work but needs a look -- the reason is in the result. Not a failure.">WARNING</span>'
+        : (r.status === 'cancelled')
+        ? '<span class="histCancelled" style="color:#57606a;font-weight:600;" title="A SuperAdmin stopped this run on purpose. Final: not retried, not a failure; the job runs again on its next normal turn.">CANCELLED</span>'
         : ok
         ? '<span style="color:#1a7f37;font-weight:600;">PASS</span>'
         : ('<span style="color:#cf222e;font-weight:600;">FAIL</span>' + (histOpen.has(r.runId) ? '' : ' <span style="color:#8c959f;" title="a later run succeeded -- nothing to do">(healed)</span>'));
@@ -20367,7 +20416,7 @@
       const intr = [];
       let failedAny = false;
       for (const r of list) {
-        if (r.status === 'unimplemented' || r.status === 'skipped' || /^no-handler/.test(String(r.detail || ''))) continue;
+        if (r.status === 'unimplemented' || r.status === 'skipped' || r.status === 'cancelled' || /^no-handler/.test(String(r.detail || ''))) continue;   // 100.166 b: a cancelled run is stepped over
         if (r.status === 'interrupted') { if (!failedAny && r.runId) intr.push(r.runId); continue; }
         // §100.45: a throttled run (retrying) is not failing -- the newest one ends the head; a STUCK one is failing
         if (r.status === 'throttled' && !r.throttleStuck) { if (!failedAny) break; continue; }

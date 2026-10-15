@@ -65,7 +65,8 @@ function Get-PimUplinkRunOutcome {
     <# PURE. ok | warning | failed | '' (not reportable: skipped, unimplemented, still running, nothing ran). #>
     param([AllowNull()][object]$Run)
     $st = "$($Run.status)".Trim().ToLowerInvariant()
-    if ($st -in @('running', 'skipped', 'unimplemented', 'outofscope', 'disabled', '')) { return '' }
+    # PIM 100.166 (b): a run a person CANCELLED is a deliberate act, not an outcome of the product -- not reported.
+    if ($st -in @('running', 'skipped', 'unimplemented', 'outofscope', 'disabled', 'cancelled', '')) { return '' }
     # §95.2o: an INTERRUPTED run (the scheduler restarted for an update, the platform stopped the execution) is not a
     # product failure -- reported as a warning, never as a failed run (Invardia fix request d0217f96).
     if ($st -eq 'interrupted') { return 'warning' }

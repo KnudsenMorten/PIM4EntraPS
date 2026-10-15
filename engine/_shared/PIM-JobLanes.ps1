@@ -38,6 +38,10 @@ $script:PimHeldAreas             = @{}       # area -> runId, held by THIS proce
 $script:PimExecStatusCache       = @{}       # execution -> platform status, per tick
 $script:PimDeadLockOwners        = @{}       # owner -> @{ execution; status } taken over this tick
 $script:PimScopeGateCtx          = $null
+# PIM 100.166 (c) NO-PROGRESS REPORT (owner 2026-10-15 via SI: "report on no progress, keep running"; "a log gap is not a
+# hang" -- logs lag 10-20 min and some reads are silent ~25 min). A live run whose progress mark has not moved for this long
+# is REPORTED once per stall (Jobs page line + one warning mail, debounced a day); it is never stopped or failed.
+$script:PimNoProgressMinutes     = 60
 
 # One area per engine scope (provider scope, lower case). A scope missing here is its own area 'engine:<scope>' -- never
 # shared with anything, so an unknown provider can never run beside the provider it might collide with... except itself.
@@ -308,7 +312,11 @@ function Remove-PimAreaLocks {
 
 function Update-PimAreaLocks {
     # Renew every lock this owner holds. @{ ok; lost } -- lost = an area this process holds is now another owner's.
-    param([Parameter(Mandatory)][string]$Owner, [datetime]$NowUtc = [datetime]::UtcNow, [int]$TtlMinutes = 15)
+    # PIM 100.166 (c): -ProgressUtc = the run's last progress mark; written as 'progressUtc' on this owner's locks (never
+    # moved back), so another execution can see a run that is alive but not moving.
+    param([Parameter(Mandatory)][string]$Owner, [datetime]$NowUtc = [datetime]::UtcNow, [int]$TtlMinutes = 15,
+          [AllowNull()][object]$ProgressUtc = $null)
+    $prog = $null; if ($null -ne $ProgressUtc) { $prog = Get-PimNoProgressStamp $ProgressUtc }
     $ctx = @{ lost = @() }
     $ok = Update-PimSchedulerLocks -Ctx $ctx -Mutate {
         param($map, $c)
@@ -321,11 +329,119 @@ function Update-PimAreaLocks {
             if ("$($l.owner)" -ne $Owner) { continue }
             $n = [ordered]@{}; foreach ($p in $l.PSObject.Properties) { $n[$p.Name] = $p.Value }
             $n['expiresUtc'] = $NowUtc.ToUniversalTime().AddMinutes([Math]::Max(1, $TtlMinutes)).ToString('o')
+            if ($null -ne $prog) {
+                $had = $null; if ($n.Contains('progressUtc')) { $had = Get-PimNoProgressStamp $n['progressUtc'] }
+                if ($null -eq $had -or $prog -gt $had) { $n['progressUtc'] = $prog.ToString('o') }
+            }
             $map[$k] = [pscustomobject]$n; $changed = $true
         }
         return $changed
     }
     return [pscustomobject]@{ ok = [bool]$ok; lost = @($ctx.lost) }
+}
+
+# ---- PIM 100.166 (c): the NO-PROGRESS report -- report, keep running ----------------------------------------------------
+function Get-PimNoProgressStamp {
+    # PURE. A lock time field (ISO text or [datetime]) -> UTC [datetime], or $null when it cannot be read.
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { return $Value.ToUniversalTime() }
+    $d = [datetime]::MinValue
+    $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+    if ([datetime]::TryParse("$Value", [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$d)) { return $d.ToUniversalTime() }
+    return $null
+}
+
+function Get-PimRunProgressState {
+    <#
+      PURE. One live run, seen through its lock (any of its areas: they are renewed together). Its progress mark is the
+      newer of 'progressUtc' (the engine's last item / page / scope, written at lock renewal) and 'acquiredUtc' (the start).
+      @{ noProgress; sinceUtc; minutes; reportDue; text }:
+        noProgress  the lock is live and the mark has not moved for -ThresholdMinutes or more
+        reportDue   noProgress and this stall was not reported yet ('noProgressReportedUtc' older than the mark, or none)
+      A lock that is not live (ended, expired) is never "no progress" -- the run is over, the report clears itself.
+    #>
+    param([AllowNull()][object]$Lock, [Parameter(Mandatory)][datetime]$NowUtc, [int]$ThresholdMinutes = 0)
+    $th = if ($ThresholdMinutes -gt 0) { $ThresholdMinutes } else { [int]$script:PimNoProgressMinutes }
+    $out = [ordered]@{ noProgress = $false; sinceUtc = ''; minutes = 0; reportDue = $false; text = '' }
+    if (-not $Lock -or -not (Test-PimAreaLockLive -Lock $Lock -NowUtc $NowUtc)) { return [pscustomobject]$out }
+    $acq = Get-PimNoProgressStamp $(if ($Lock.PSObject.Properties['acquiredUtc']) { $Lock.acquiredUtc })
+    $prg = Get-PimNoProgressStamp $(if ($Lock.PSObject.Properties['progressUtc']) { $Lock.progressUtc })
+    $mark = $acq; if ($null -ne $prg -and ($null -eq $mark -or $prg -gt $mark)) { $mark = $prg }
+    if ($null -eq $mark) { return [pscustomobject]$out }
+    $min = [int][Math]::Floor(($NowUtc.ToUniversalTime() - $mark).TotalMinutes)
+    $out.sinceUtc = $mark.ToString('o'); $out.minutes = [Math]::Max(0, $min)
+    if ($min -lt $th) { return [pscustomobject]$out }
+    $out.noProgress = $true
+    $rep = Get-PimNoProgressStamp $(if ($Lock.PSObject.Properties['noProgressReportedUtc']) { $Lock.noProgressReportedUtc })
+    $out.reportDue = [bool]($null -eq $rep -or $rep -lt $mark)
+    # One calm line (owner 2026-10-13): what, that nothing is wrong yet, that it clears itself.
+    $out.text = "No progress for $min min -- the run keeps going; this clears itself when it moves on or ends."
+    return [pscustomobject]$out
+}
+
+function Get-PimNoProgressRuns {
+    <#
+      PURE. The live runs in a lock map, one entry per run (owner + runId), each with its Get-PimRunProgressState.
+      -ExceptOwner: leave this process's own runs out (a tick reports OTHER executions; its own run is busy, not stalled).
+    #>
+    param([System.Collections.IDictionary]$Map, [Parameter(Mandatory)][datetime]$NowUtc, [string]$ExceptOwner = '', [int]$ThresholdMinutes = 0)
+    $seen = @{}; $out = New-Object System.Collections.Generic.List[object]
+    if ($null -eq $Map) { return @() }
+    foreach ($k in @($Map.Keys | Sort-Object)) {
+        $l = $Map[$k]
+        if (-not $l -or -not (Test-PimAreaLockLive -Lock $l -NowUtc $NowUtc)) { continue }
+        if ("$ExceptOwner".Trim() -and "$($l.owner)" -eq "$ExceptOwner") { continue }
+        $key = "$($l.owner)|$($l.runId)"
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $st = Get-PimRunProgressState -Lock $l -NowUtc $NowUtc -ThresholdMinutes $ThresholdMinutes
+        $out.Add([pscustomobject]@{ owner = "$($l.owner)"; runId = "$($l.runId)"; job = ("$($l.job)" -replace '^job:', ''); area = "$k"; state = $st })
+    }
+    return @($out.ToArray())
+}
+
+function Invoke-PimNoProgressCheck {
+    <#
+      Once per tick: every OTHER live run whose progress has not moved for the threshold is REPORTED -- one log line and
+      one warning mail (the job alert's warning class, Invoke-PimJobRunAlert: identical-alert debounce, a day) -- and the
+      report is MARKED on that run's locks ('noProgressReportedUtc'), so the next ticks stay quiet until the run moves
+      again (a new stall is a new report) or ends (its locks go, the report goes with them). NOTHING is stopped, failed,
+      released or retried here. Never throws. Returns the runs it reported.
+      -Alert: test seam, param($run) -- default Invoke-PimJobRunAlert.
+    #>
+    param([string]$Owner = '', [datetime]$NowUtc = [datetime]::UtcNow, [scriptblock]$Alert)
+    $reported = New-Object System.Collections.Generic.List[object]
+    try {
+        $map = (Get-PimSchedulerLocksRaw).Map
+        $due = @(Get-PimNoProgressRuns -Map $map -NowUtc $NowUtc -ExceptOwner $Owner | Where-Object { $_.state.reportDue })
+        foreach ($r in $due) {
+            # Mark first: a mark that cannot be written means another tick is reporting it (or the store is busy) -- no mail.
+            $runKey = "$($r.owner)|$($r.runId)"
+            $marked = Update-PimSchedulerLocks -Mutate {
+                param($m, $c)
+                $ch = $false
+                foreach ($k in @($m.Keys)) {
+                    $l = $m[$k]
+                    if ("$($l.owner)|$($l.runId)" -ne $runKey) { continue }
+                    $n = [ordered]@{}; foreach ($p in $l.PSObject.Properties) { $n[$p.Name] = $p.Value }
+                    $n['noProgressReportedUtc'] = $NowUtc.ToUniversalTime().ToString('o')
+                    $m[$k] = [pscustomobject]$n; $ch = $true
+                }
+                return $ch
+            }
+            if (-not $marked) { continue }
+            Write-Host ("[scheduler] job '{0}' (run {1}): {2}" -f $r.job, $r.runId, $r.state.text) -ForegroundColor DarkYellow
+            # The alert's summary is STABLE (no minutes, no times) so the day-long identical-alert debounce holds every repeat.
+            $run = [pscustomobject]@{ name = $r.job; type = 'no-progress'; status = 'warning'; runId = $r.runId
+                warningSummary = 'a run has made no progress for over an hour; it keeps running and nothing was stopped'
+                detail = $r.state.text }
+            try { if ($Alert) { [void](& $Alert $run) } elseif (Get-Command Invoke-PimJobRunAlert -ErrorAction SilentlyContinue) { [void](Invoke-PimJobRunAlert -Run $run) } }
+            catch { Write-Verbose "[scheduler] no-progress alert: $($_.Exception.Message)" }
+            $reported.Add($r)
+        }
+    } catch { Write-Verbose "[scheduler] no-progress check skipped: $($_.Exception.Message)" }
+    return @($reported.ToArray())
 }
 
 function Get-PimJobLaneState {
@@ -393,7 +509,7 @@ function Invoke-PimScopeGate {
         if ([datetime]::UtcNow -ge $deadline) {
             return [pscustomobject]@{ ok = $false; detail = ("waited {0} min for {1} (area {2}); the next run checks it" -f [Math]::Round($script:PimScopeGateWaitSeconds / 60.0), $who, $area) }
         }
-        try { [void](Invoke-PimSchedulerLeaseHeartbeat) } catch { Write-Verbose "[lanes] heartbeat while waiting: $($_.Exception.Message)" }
+        try { [void](Invoke-PimSchedulerLeaseHeartbeat -Waiting) } catch { Write-Verbose "[lanes] heartbeat while waiting: $($_.Exception.Message)" }
         Start-Sleep -Seconds ([Math]::Max(1, $script:PimScopeGatePollSeconds))
     }
 }
@@ -593,4 +709,159 @@ function Save-PimSchedulerJobStamps {
     if ($r.ok -and $r.value) { $script:PimSchedState = $r.value }
     if (-not $r.ok) { Write-Warning "[scheduler] SchedulerState did NOT persist for $(@($RanNames) -join ', '). The job may look due on the next tick." }
     return [bool]$r.ok
+}
+
+# ---- PIM 100.166 (b) CANCEL THE RUNNING RUN (owner wizard 2026-10-15; SI #700's model) -----------------------------------
+# "Heartbeat for dead, report for slow, a PERSON for stop" (framework 12.24): with a 7-day run limit nothing ever stops a
+# slow run by the clock, so a person must be able to. A SuperAdmin presses "Cancel the running run" on the Jobs page: the
+# platform stops the run's execution (ARM POST <job>/executions/<name>/stop), then its record becomes 'cancelled' -- FINAL:
+# never closed as interrupted, never retried, never resumed, never counted as a failure (ok stays $true: nothing broke), and
+# a late write by the dying run cannot turn it back (Add-PimJobRunRecord keeps a cancelled record). The job runs again on its
+# next normal turn, as a NEW run. Other jobs of the same execution stop with it; the scheduler closes those the normal way
+# (platform Stopped = interrupted, runs again). The Manager never runs the engine (section 22): it only asks the platform.
+$script:PimJobCancelApi = '2024-03-01'
+
+function Get-PimJobCancelTarget {
+    <#
+      PURE. Which run would "Cancel the running run" on -Name stop? -History: the run-history ring (any order).
+      -TickJobId: the engine job's ARM resource id. Returns @{ ok; code; message; run; execution; jobId; jobName }.
+        not-running    no 'running' record for the job
+        no-execution   the run is not inside a Container Apps job execution (a VM / workstation loop) -- cannot be stopped here
+        not-configured the engine job's resource id is unknown (SchedulerTickJobId / PIM_TickJobId)
+        other-job      the execution belongs to another job than the engine job
+        ok             the newest running record, its execution, and the job it runs in
+    #>
+    param([Parameter(Mandatory)][string]$Name, [object[]]$History = @(), [string]$TickJobId = '')
+    $out = [ordered]@{ ok = $false; code = ''; message = ''; run = $null; execution = ''; jobId = ''; jobName = '' }
+    $running = @(@($History) | Where-Object { $_ -and "$($_.name)" -eq "$Name" -and "$($_.status)" -eq 'running' -and -not "$($_.finishedUtc)".Trim() } |
+        Sort-Object { "$($_.startedUtc)" } -Descending)
+    if (-not $running.Count) { $out.code = 'not-running'; $out.message = "Nothing is running for $Name right now."; return [pscustomobject]$out }
+    $run = $running[0]; $out.run = $run
+    $exec = if ($run.PSObject.Properties['execution']) { "$($run.execution)".Trim() } else { '' }
+    if (-not $exec) { $out.code = 'no-execution'; $out.message = "This run of $Name is not in a container job, so it cannot be stopped from here."; return [pscustomobject]$out }
+    $out.execution = $exec
+    if ("$TickJobId" -notmatch '(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.App/jobs/([^/]+)$') {
+        $out.code = 'not-configured'; $out.message = 'The engine job is not known to this Manager (pim.Settings SchedulerTickJobId), so the run cannot be stopped from here.'
+        return [pscustomobject]$out
+    }
+    $jn = $Matches[1]
+    if ($exec -notmatch ('^(?i)' + [regex]::Escape($jn) + '-[a-z0-9]+$')) {
+        $out.code = 'other-job'; $out.message = "This run of $Name runs in '$exec', not in the engine job $jn, so it cannot be stopped from here."
+        return [pscustomobject]$out
+    }
+    $out.ok = $true; $out.code = 'ok'; $out.jobId = "$TickJobId"; $out.jobName = $jn
+    return [pscustomobject]$out
+}
+
+function New-PimCancelledRunRecord {
+    <# PURE. The 'running' record -Run as a FINAL 'cancelled' record: by whom, when, and why it is final. #>
+    param([Parameter(Mandatory)][object]$Run, [string]$By = '', [datetime]$NowUtc = [datetime]::UtcNow, [string]$Note = '')
+    $o = [ordered]@{}
+    foreach ($p in @($Run.PSObject.Properties)) { $o[$p.Name] = $p.Value }
+    $now = $NowUtc.ToUniversalTime()
+    $who = if ("$By".Trim()) { "$By".Trim() } else { 'a SuperAdmin' }
+    $st = Get-PimUtcStamp "$($Run.startedUtc)"
+    $o['status'] = 'cancelled'
+    $o['ok'] = $true                 # nothing broke: a person stopped it on purpose -- never a failed run
+    $o['cancelled'] = $true
+    $o['final'] = $true              # never retried, never resumed; the job's next normal turn is a NEW run
+    $o['cancelledBy'] = $who
+    $o['cancelledUtc'] = $now.ToString('o')
+    $o['finishedUtc'] = $now.ToString('o')
+    $o['durationMs'] = $(if ($null -ne $st) { [int64][Math]::Max([double]0, ($now - $st).TotalMilliseconds) } else { [int64]0 })
+    $o['detail'] = ("cancelled by {0} at {1} UTC -- stopped on purpose; it is not retried and runs again only on its next normal turn{2}" -f $who, $now.ToString('HH:mm'), $(if ("$Note".Trim()) { ". $Note" } else { '' }))
+    return [pscustomobject]$o
+}
+
+function Invoke-PimJobCancel {
+    <#
+      Cancel the running run of -Name. I/O injected:
+        -Arm      param($Method, $Path) -> the ARM answer; THROWS on an HTTP error (the message carries the status)
+        -History  the run-history ring (default: Get-PimJobRunHistory)
+        -Job      the job's schedule entry (its interval) -- a scheduled run's next turn is set from it
+      Order: the platform stops the execution FIRST; only a stop that landed (or an execution that had already ended, 404)
+      makes the record 'cancelled' -- a refused stop changes nothing, so a run that keeps going is never shown cancelled.
+      Then the cancelled run's area locks are released (its execution is gone). Never throws.
+      Returns @{ ok; code; status; message; moreInfo; run; execution; alsoStopped[] }.
+        code: cancelled | not-running | no-execution | not-configured | other-job | not-allowed | error | not-recorded
+    #>
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][scriptblock]$Arm, [object[]]$History, [string]$TickJobId = '',
+          [string]$By = '', [datetime]$NowUtc = [datetime]::UtcNow, [object]$Job)
+    $res = [ordered]@{ ok = $false; code = ''; status = ''; message = ''; moreInfo = ''; run = $null; execution = ''; alsoStopped = @() }
+    try {
+        $hist = if ($PSBoundParameters.ContainsKey('History')) { @($History) } else { @(Get-PimJobRunHistory) }
+        $t = Get-PimJobCancelTarget -Name $Name -History $hist -TickJobId $TickJobId
+        if (-not $t.ok) { $res.code = $t.code; $res.message = $t.message; return [pscustomobject]$res }
+        $run = $t.run; $exec = $t.execution; $res.execution = $exec
+        $note = ''
+        try { [void](& $Arm 'POST' ('{0}/executions/{1}/stop?api-version={2}' -f $t.jobId, $exec, $script:PimJobCancelApi)) }
+        catch {
+            $m = "$($_.Exception.Message)"
+            if ($m -match '(?i)\b403\b|AuthorizationFailed|forbidden') {
+                $res.code = 'not-allowed'
+                $res.message = 'PIM Manager is not allowed to stop the engine run. Nothing was changed.'
+                $res.moreInfo = ("The Manager's identity needs the action Microsoft.App/jobs/stop/action on the engine job {0} (scope: that job only). Without it the run keeps going and finishes by itself. Platform answer: {1}" -f $t.jobName, $m.Substring(0, [Math]::Min(200, $m.Length)))
+                return [pscustomobject]$res
+            }
+            if ($m -match '(?i)\b404\b|NotFound') { $note = 'Its execution had already ended' }
+            else {
+                $res.code = 'error'
+                $res.message = 'The engine run could not be stopped. Nothing was changed.'
+                $res.moreInfo = "Platform answer: $($m.Substring(0, [Math]::Min(300, $m.Length)))"
+                return [pscustomobject]$res
+            }
+        }
+        $cancelled = New-PimCancelledRunRecord -Run $run -By $By -NowUtc $NowUtc -Note $note
+        $rid = "$($run.runId)"
+        $also = @(@($hist) | Where-Object { $_ -and "$($_.status)" -eq 'running' -and "$($_.runId)" -ne $rid -and $_.PSObject.Properties['execution'] -and "$($_.execution)" -eq $exec } | ForEach-Object { "$($_.name)" } | Select-Object -Unique)
+        $script:PimRunHistoryWriteOk = $true
+        Update-PimJobRunHistory -Attempts 16 -Mutate {
+            param($all)
+            $all = @($all)
+            ,@(@($cancelled) + @($all | Where-Object { "$($_.runId)" -ne $rid }))
+        }
+        $res.run = $cancelled; $res.alsoStopped = $also
+        if (-not $script:PimRunHistoryWriteOk) {
+            $res.code = 'not-recorded'; $res.status = 'cancelled'
+            $res.message = "The run of $Name was stopped, but it could not be recorded as cancelled yet."
+            $res.moreInfo = 'The scheduler closes it as interrupted by the platform stop; it then runs again on its next turn.'
+            return [pscustomobject]$res
+        }
+        # NEVER RESUMED: the next tick must not start the same work again at once. A trigger run's trigger is removed only when
+        # its run ENDS (so it would be drained again); a scheduled run's slot is stamped only when it ends (so it would look
+        # due). Both are done here, as the run's end: the trigger(s) it was draining go, the job's next turn = now + interval.
+        $resumeNote = ''
+        $isTrig = [bool]($run.PSObject.Properties['trigger'] -and [bool]$run.trigger)
+        try {
+            if ($isTrig) {
+                $rs = Get-PimUtcStamp "$($run.startedUtc)"
+                [void](Update-PimJobTriggerList -Mutate {
+                    param($cur)
+                    @($cur) | Where-Object {
+                        $tq = Get-PimUtcStamp "$($_.requestedUtc)"
+                        -not ("$($_.type)" -eq "$($run.type)" -and "$($_.scope)" -eq "$($run.scope)" -and ($null -eq $rs -or $null -eq $tq -or $tq -le $rs)) } })
+            } elseif ($Job) {
+                $jc = $Job.PSObject.Copy()
+                $nr = (Get-PimNextRunAfterRun -Job $jc -ScheduledUtc $NowUtc -StartedUtc $NowUtc -FinishedUtc $NowUtc.ToUniversalTime()).ToString('o')
+                foreach ($kv in @(@('lastRunUtc', "$($run.startedUtc)"), @('lastFinishedUtc', $NowUtc.ToUniversalTime().ToString('o')), @('nextRunUtc', $nr))) { $jc | Add-Member -NotePropertyName $kv[0] -NotePropertyValue $kv[1] -Force }
+                [void](Save-PimSchedulerJobStamps -Jobs @($jc) -RanNames @("$Name") -NowUtc $NowUtc)
+            }
+        } catch { $resumeNote = " (its next turn could not be set: $($_.Exception.Message))" }
+        $own = if ($run.PSObject.Properties['owner']) { "$($run.owner)".Trim() } else { '' }
+        # The whole execution is gone, so are its locks. A release that does not land is SAID: the locks then expire by
+        # their own TTL (or the next run finds their execution ended and takes them over) -- the job is only delayed.
+        $lockNote = ''
+        if ($own) {
+            $relOk = $false
+            try { $relOk = [bool](Remove-PimAreaLocks -Owner $own) } catch { $relOk = $false; $lockNote = " (its locks were not released: $($_.Exception.Message) -- they expire by themselves)" }
+            if (-not $relOk -and -not $lockNote) { $lockNote = ' (its locks were not released -- they expire by themselves)' }
+        }
+        $res.ok = $true; $res.code = 'cancelled'; $res.status = 'cancelled'
+        $res.message = "The run of $Name was cancelled. It runs again on its next normal turn."
+        $res.moreInfo = ("Stopped execution {0}. The run is recorded as cancelled by {1}: it is final -- not retried, not resumed, not a failure{2}.{3}" -f $exec, "$($cancelled.cancelledBy)", "$resumeNote$lockNote", $(if ($also.Count) { " Also stopped with it (they run again on their next turn): $($also -join ', ')." } else { '' }))
+        return [pscustomobject]$res
+    } catch {
+        $res.code = 'error'; $res.message = 'The run could not be cancelled. Nothing was changed.'; $res.moreInfo = "$($_.Exception.Message)"
+        return [pscustomobject]$res
+    }
 }

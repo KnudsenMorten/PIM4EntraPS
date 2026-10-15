@@ -32,8 +32,13 @@
         that changed the job's inputs (trusted keys, URL, image) takes effect without waiting a day, and the build's
         "start and verify" steps keep working.
 
-    PURE except Invoke-PimJobCadenceGate / Complete-PimJobCadenceRun, whose I/O is injected (-ReadValues,
-    -CompareAndSet, -Write), so the offline tests drive the real gate with the store stubbed. ASCII only; PS 5.1 + 7.
+      * A 'running' record of ANOTHER execution is judged by the platform's status of that execution when the job can
+        read it (framework 12.24 / PIM 100.166 (a): Get-PimJobOwnExecutionStatus -- the job's own resource id in
+        PIM_JobId, read with its managed identity, 'Reader' on the job itself); unknown = abandoned after 6 h.
+
+    PURE except Invoke-PimJobCadenceGate / Complete-PimJobCadenceRun / Get-PimJobOwnExecutionStatus, whose I/O is
+    injected (-ReadValues, -CompareAndSet, -Write, -ArmGet), so the offline tests drive the real code with the store and
+    ARM stubbed. ASCII only; PS 5.1 + 7.
 #>
 Set-StrictMode -Off
 
@@ -322,6 +327,44 @@ function Complete-PimJobCadenceRunRecord {
 function ConvertTo-PimJobCadenceJson {
     param([Parameter(Mandatory)][object]$Value)
     return ($Value | ConvertTo-Json -Depth 5 -Compress)
+}
+
+function Get-PimJobOwnExecutionStatus {
+    <#
+      framework 12.24 / PIM 100.166 (a): the platform's status of ONE execution of THIS job, so the cadence gate can tell a
+      dead run (its execution ended) from a slow one (still Running) without guessing from the clock. Mirrors the tick's
+      Get-PimSchedulerExecutionStatus: the job's own resource id comes from its env (PIM_JobId, set by its deploy and by the
+      updater), the read is ARM <jobId>/executions/<name> with the job's MANAGED IDENTITY (never the engine SPN, which holds
+      no right on the job), and it needs 'Reader' on the job itself -- nothing broader.
+      Only an execution OF THIS JOB is ever asked about (the name must be '<job name>-<suffix>').
+      Never throws. Returns @{ status ('' = unknown); reason }. -ArmGet: param([string]$Path) -> parsed JSON (test seam).
+    #>
+    param([string]$JobId = "$($env:PIM_JobId)", [Parameter(Mandatory)][AllowEmptyString()][string]$ExecutionName, [scriptblock]$ArmGet)
+    $j = "$JobId".Trim()
+    if ($j -notmatch '(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.App/jobs/([^/]+)$') {
+        return [pscustomobject]@{ status = ''; reason = 'this job does not know its own resource id (PIM_JobId is not set; the next update or redeploy sets it)' }
+    }
+    $jn = $Matches[1]; $e = "$ExecutionName".Trim()
+    if ($e -notmatch ('^(?i)' + [regex]::Escape($jn) + '-[a-z0-9]+$')) {
+        return [pscustomobject]@{ status = ''; reason = "'$e' is not an execution of $jn -- not asked" }
+    }
+    if (-not $ArmGet) {
+        $ArmGet = {
+            param([string]$Path)
+            if (-not (Get-Command Get-PimManagedIdentityToken -ErrorAction SilentlyContinue)) { throw 'no managed identity token provider is loaded' }
+            $t = Get-PimManagedIdentityToken -Audience 'https://management.azure.com/'
+            Invoke-RestMethod -Method GET -Uri "https://management.azure.com$Path" -Headers @{ Authorization = "Bearer $($t.token)" } -TimeoutSec 30
+        }
+    }
+    try {
+        $r = & $ArmGet "$j/executions/$e`?api-version=2024-03-01"
+        $s = "$($r.properties.status)".Trim()
+        return [pscustomobject]@{ status = $s; reason = $(if ($s) { '' } else { 'the platform returned no status' }) }
+    } catch {
+        $m = (("$($_.Exception.Message)") -split "`n")[0]
+        $why = if ($m -match '\b403\b|AuthorizationFailed|Forbidden') { "the job's identity may not read its own runs ('Reader' on the job is missing)" } else { $m }
+        return [pscustomobject]@{ status = ''; reason = $why }
+    }
 }
 
 function Invoke-PimJobCadenceGate {

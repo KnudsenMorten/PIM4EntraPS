@@ -184,7 +184,10 @@ function Get-PimDownlinkJobEnv {
         [AllowEmptyCollection()][string[]]$BaselineTrustedKeys = @(),
         # The cadence (PIM-JobCadence.ps1): when this definition was deployed (ISO UTC). The pull runs once on the next
         # trigger after a redeploy, so the deploy's inputs take effect then and -Start verifies a real pull. Blank = none.
-        [string]$DeployedUtc = ''
+        [string]$DeployedUtc = '',
+        # framework 12.24 / PIM 100.166 (a): this job's OWN resource id (PIM_JobId), so the cadence gate can read the status
+        # of an earlier execution of this job. An id, not a secret. Blank or not a job id = not emitted.
+        [string]$JobId = ''
     )
     $placement = Get-PimDownlinkJobPlacement -Scenario $Scenario
     $ev = New-Object System.Collections.Generic.List[string]
@@ -230,6 +233,7 @@ function Get-PimDownlinkJobEnv {
     $__pins = @(@($BaselineTrustedKeys) | ForEach-Object { "$_" -split '[,;\s]+' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ -cmatch '^[A-Za-z0-9_-]{43}$' } | Select-Object -Unique)
     if ($__pins.Count) { $ev.Add("PIM_BaselineTrustedKeys=$($__pins -join ',')") | Out-Null }
     if ("$DeployedUtc".Trim() -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$') { $ev.Add("PIM_CadenceDeployedUtc=$("$DeployedUtc".Trim())") | Out-Null }
+    if ("$JobId".Trim() -match '(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.App/jobs/[^/]+$') { $ev.Add("PIM_JobId=$("$JobId".Trim())") | Out-Null }
     return @($ev.ToArray())
 }
 
@@ -668,7 +672,9 @@ function Get-PimDownlinkJobDeployPlan {
         # 71.35: the pinned master signing key ids (forwarded to the env builder).
         [AllowEmptyCollection()][string[]]$BaselineTrustedKeys = @(),
         # The cadence: the deploy stamp (forwarded to the env builder as PIM_CadenceDeployedUtc).
-        [string]$DeployedUtc = ''
+        [string]$DeployedUtc = '',
+        # framework 12.24 / PIM 100.166 (a): the job's own resource id (forwarded to the env builder as PIM_JobId).
+        [string]$JobId = ''
     )
     if ($SystemAssigned) { $ManagedIdentityClientId = '' }
     $placement = Get-PimDownlinkJobPlacement -Scenario $Scenario
@@ -691,7 +697,7 @@ function Get-PimDownlinkJobDeployPlan {
     $envVars = Get-PimDownlinkJobEnv -Scenario $Scenario -TenantId $TenantId -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -SyncRootCentral $SyncRootCentral -SyncRootLocal $SyncRootLocal `
         -EngineClientId $EngineClientId -EngineSecretRef $engineSecretRef `
         -ManagedIdentityClientId $ManagedIdentityClientId `
-        -SlaveAdminPrefixes $SlaveAdminPrefixes -AllowRetraction:$AllowRetraction -BaselineTrustedKeys $BaselineTrustedKeys -DeployedUtc $DeployedUtc
+        -SlaveAdminPrefixes $SlaveAdminPrefixes -AllowRetraction:$AllowRetraction -BaselineTrustedKeys $BaselineTrustedKeys -DeployedUtc $DeployedUtc -JobId $JobId
     $action = if ($Exists) { 'update' } else { 'create' }
     $jobArgs = Build-PimDownlinkJobArgs -Action $action -JobName $JobName -ResourceGroup $ResourceGroup `
         -EnvName $EnvName -Image $Image -AcrServer $AcrServer -Cron $Cron `

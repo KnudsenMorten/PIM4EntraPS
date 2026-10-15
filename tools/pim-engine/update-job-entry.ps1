@@ -68,6 +68,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateState.ps1')      # §71.43 the SAME run, recorded IN the environment
 . (Join-Path $solRoot 'engine\_shared\PIM-FailureCatalog.ps1')   # 100.31 the OOM code the sizing self-correct reads
 . (Join-Path $solRoot 'engine\_shared\PIM-TenantSizing.ps1')     # 100.31 the tick's size for this tenant + the SQL tier / max size (100.37)
+. (Join-Path $solRoot 'engine\_shared\PIM-JobSelfId.ps1')        # 100.166 (a) pull / publish learn their own id + Reader on themselves
 . (Join-Path $solRoot 'engine\_shared\PIM-ConvergeDefaults.ps1') # 100.40 / framework 12.16 the install defaults an EXISTING install converges to
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAccess.ps1')        # framework 12.23 / PIM 100.156 least-privilege roles via the signed procedure
 . (Join-Path $solRoot 'engine\_shared\PIM-AsBuilt.ps1')          # 100.61 the as-built job + store + view an EXISTING install converges to
@@ -128,6 +129,13 @@ function Invoke-PimUpdaterConvergeStep {
             foreach ($l in @($rl.log)) { Say "  run limit: $l" 'DarkGray' }
             Say ("run limit: $($rl.detail)") $(if (-not $rl.ok) { 'Yellow' } elseif (@($rl.changed).Count) { 'Cyan' } else { 'DarkGray' })
         } catch { Say "  run limit: not checked: $($_.Exception.Message)" 'Yellow' }
+        # PIM 100.166 (a): the pull / publish jobs learn their own id (PIM_JobId) and get 'Reader' on themselves where this
+        # identity may grant it (else a plain note). Never fails the update.
+        try {
+            $si = Invoke-PimJobSelfIdUpdate -SubscriptionId $sub -ResourceGroup $rg -Arm $armSeam
+            foreach ($l in @($si.log) + @($si.notes)) { Say "  own run status: $l" 'DarkGray' }
+            Say ("own run status: $($si.detail)") $(if (-not $si.ok) { 'Yellow' } elseif (@($si.envSet).Count) { 'Cyan' } else { 'DarkGray' })
+        } catch { Say "  own run status: not checked: $($_.Exception.Message)" 'Yellow' }
         # PIM 100.114 (owner 2026-10-12: "4 CPU / 8 GB at all ring 1+2 installs") -- THE MANAGER WEB APP'S SIZE, ON EVERY UPDATE.
         # Raise only; PIM_Bootstrap_Cpu_Manager / PIM_Bootstrap_Memory_Manager on this job wins. A run that rolled the Manager
         # carried the size in the roll's own write (step 1), so this finds nothing to change and reads the result back; a run
@@ -1073,6 +1081,15 @@ if ($tickJob) {
         Say "rolling the tick job $tickJob"
         [void](Invoke-PimArmBusyRetry -Write { Set-PimAcaJobImage -SubscriptionId $sub -ResourceGroup $rg -Name $tickJob -Image $targetImg -ContainerName $container })
     } catch { $jobFailed += $tickJob; Say "  tick job not rolled: $($_.Exception.Message)" 'Yellow' }
+    # PIM 100.166 (b) / framework 12.24: a run that started on the OLD image may run for days now (7-day limit) -- stop it,
+    # so old code does not keep writing after the roll. Closed as interrupted by the update; it runs again on the new code.
+    # Only after a roll that landed; never fails the update.
+    if ($tickJob -notin $jobFailed -and "$targetImg".Trim()) {
+        try {
+            $ov = Stop-PimAcaJobOtherVersionExecutions -SubscriptionId $sub -ResourceGroup $rg -Name $tickJob -KeepImage $targetImg
+            Say "  $($ov.detail)" $(if (-not $ov.ok) { 'Yellow' } elseif (@($ov.stopped).Count) { 'Cyan' } else { 'DarkGray' })
+        } catch { Say "  old-version runs not checked: $($_.Exception.Message)" 'Yellow' }
+    }
 }
 
 # ---- 2a + 2d. 100.31 / 100.37 / 100.40 (framework 12.15 + 12.16) -- CONVERGE THE INSTALL DEFAULTS, ON EVERY UPDATE ----

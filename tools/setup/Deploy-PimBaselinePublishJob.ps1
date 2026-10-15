@@ -113,6 +113,7 @@ $spec = Get-PimBaselinePublishJobSpec -JobName $JobName -Image $image -Environme
             -RegistryServer "$AcrName.azurecr.io" -RegistryIdentity $(if ("$RegistryIdentityResourceId".Trim()) { "$RegistryIdentityResourceId".Trim() } else { 'system' }) `
             -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -StorageAccount $StorageAccount -Container $Container `
             -SigningKeyId $signingKeyId -ValidDays $ValidDays -Scope $Scope -Exists $exists `
+            -JobId "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$JobName" `
             -DeployedUtc ([datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture))
 if (-not $spec.ok) { throw "REFUSED: $($spec.reason)" }
 Note ("env: " + ((@($spec.env.Keys) | ForEach-Object { "$_=$($spec.env[$_])" }) -join '  '))
@@ -167,6 +168,14 @@ foreach ($gr in $grants) {
     $after = @(& $roleNamesAt $gr.scope)
     if ($after -notcontains $gr.role) { throw "read-back FAILED: '$($gr.role)' is not assigned on $($gr.scope) -- the publish would 403." }
     Note 'granted + read back'
+}
+# framework 12.24 / PIM 100.166 (a): 'Reader' on ITSELF (scope = this job only, like the tick's BUG-268 grant), so the cadence
+# gate reads the status of an earlier run. A refusal is a WARNING: the publish still works, with the 6-hour fallback.
+Step "Reader on $JobName itself -- read the status of its own earlier runs"
+if (@(& $roleNamesAt $jobPath) -contains 'Reader') { Note 'already assigned' }
+else {
+    try { [void](New-PimArmRoleAssignment -Scope $jobPath -PrincipalId $oid -PrincipalType ServicePrincipal -Role 'Reader' -SubscriptionId $S); Note 'granted' }
+    catch { Warn "  NOT granted ($((("$($_.Exception.Message)") -split "`n")[0])) -- the publish still runs; a run without an end counts as abandoned after 6 h" }
 }
 
 # ---- 5. SQL: its OWN least-privilege READER user -- never the SQL admin group (SEC-39) ------------------------------
