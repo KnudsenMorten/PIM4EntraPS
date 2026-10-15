@@ -466,7 +466,16 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
         Send-PimUpdateOutcome -Action 'none' -Outcome 'failed' -ErrorText 'Invardia updates: no store for the licence and install key'
         exit 1
     }
-    $licText = ConvertTo-PimInvardiaLicenceText -Value $(try { Get-PimSqlSetting -ConnectionString $csInv -Name 'License' } catch { $null })
+    # 2026-10-16 (internal, 2.4.639 roll): one licence READ failed and was reported as "no licence is installed" -- the
+    # catch hid the real error, and the next run read it fine. A failed read is retried once and, if it still fails, SAID
+    # (the Pro pull then stops as before, but the log names the store error, never a missing licence).
+    $licRaw = $null; $licErr = ''
+    foreach ($try in 1, 2) {
+        try { $licRaw = Get-PimSqlSetting -ConnectionString $csInv -Name 'License'; $licErr = ''; break }
+        catch { $licErr = (("$($_.Exception.Message)") -split "`n")[0]; if ($try -eq 1) { Start-Sleep -Seconds 5 } }
+    }
+    if ($licErr) { Say "Invardia: the licence could NOT be read from the store ($licErr) -- this is a store error, not a missing licence; the next run retries" 'Yellow' }
+    $licText = ConvertTo-PimInvardiaLicenceText -Value $licRaw
     $invKey = Resolve-PimInvardiaInstallKey -GetSetting { param($n) Get-PimSqlSetting -ConnectionString $csInv -Name $n }
     $invBase = ''; try { $invBase = "$(Get-PimSqlSetting -ConnectionString $csInv -Name 'LicenceRequestBaseUrl')".Trim() } catch { }
     # 2026-10-09 -- the replay watermark is PER RING (PIM_UPDATE_INVARDIA_SEQ_R<ring>): Invardia numbers sequences per ring,
