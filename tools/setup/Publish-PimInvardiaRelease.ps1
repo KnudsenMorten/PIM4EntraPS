@@ -44,10 +44,51 @@ param(
     # 2026-10-07: RELEASE an already-published version to -Ring (POST /api/releases/pim-manager/<kind>/rings/<ring> {version}).
     # Versions are immutable: publishing one twice answers 409 versionExists -- promoting it to another ring is this call.
     [switch]$Promote,
-    [switch]$Apply
+    [switch]$Apply,
+    # PIM 100.158 CR3: where the "Invardia refused changedScopes" mark is kept for 24 h (default: the temp folder of this machine)
+    [string]$StateDir = ''
 )
 $ErrorActionPreference = 'Stop'
 function Step([string]$m) { Write-Host "==> $m" -ForegroundColor Cyan }
+# PIM 100.158 / framework 12.11e CR3 -- changedScopes on the publish call (&changedScopes=a,b | *) and the ring call
+# ("changedScopes": [..] | ["*"]), from the files this release changed since the previous release tag (PIM-ReleaseControl.ps1
+# maps files to scopes). Switch PIM_PUBLISH_CHANGEDSCOPES: on / off / AUTO (the default) = only a call for ring 0, until
+# Invardia confirms (100.158). Invardia refusing the FIELD (400 / 422 naming it) -> the call goes ONCE more without it, and the
+# field is held for 24 h (a mark file). A 409 notApproved is never that: it is shown plainly and never retried.
+. (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'engine\_shared\PIM-ReleaseControl.ps1')
+if (-not "$StateDir".Trim()) { $StateDir = Join-Path ([IO.Path]::GetTempPath()) 'pim-invardia-release' }
+$scopesMark = Join-Path $StateDir 'changedscopes-refused.json'
+function Get-PimScopesMark { param([string]$Path) try { if (Test-Path -LiteralPath $Path) { return ((Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json).refusedUtc) } } catch { }; return $null }
+function Set-PimScopesMark { param([string]$Path) try { New-Item -ItemType Directory -Force -Path (Split-Path $Path -Parent) | Out-Null; @{ refusedUtc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress | Set-Content -LiteralPath $Path -Encoding ascii } catch { } }
+function Get-PimPreviousReleaseTag {
+    # The highest PIM4EntraPS-v<x> tag below -Version ('' when none).
+    param([string]$RepoRoot, [string]$Version)
+    $p = @(& git -C $RepoRoot tag -l 'PIM4EntraPS-v2.*' 2>$null | ForEach-Object { $v = "$_" -replace '^PIM4EntraPS-v', ''; try { [pscustomobject]@{ tag = "$_"; v = [version]$v } } catch { } } |
+           Where-Object { $_.v -lt [version]$Version } | Sort-Object v -Descending | Select-Object -First 1)
+    if ($p.Count) { return "$($p[0].tag)" }
+    return ''
+}
+function Get-PimReleaseScopes {
+    # changedScopes for <tag> against the previous release tag. No previous tag, or a diff that cannot be read = @('*').
+    param([string]$RepoRoot, [string]$Tag, [string]$PrevTag)
+    if (-not "$PrevTag".Trim()) { return @('*') }
+    $files = @(& git -C $RepoRoot diff --name-only "$PrevTag" "$Tag" -- 'SOLUTIONS/PIM4EntraPS' 2>$null)
+    if ($LASTEXITCODE -ne 0) { return @('*') }
+    return @(Get-PimChangedScopes -Files $files)
+}
+function Invoke-PimInvardiaCall {
+    # One HTTP call, PS 5.1 + 7: a non-2xx answer is read from the exception's response. @{ status; content }.
+    param([string]$Method, [string]$Url, [string]$Token, $Body, [string]$ContentType, [int]$TimeoutSec = 120)
+    try {
+        $r = Invoke-WebRequest -Method $Method -Uri $Url -Headers @{ Authorization = "Bearer $Token" } -Body $Body -ContentType $ContentType -TimeoutSec $TimeoutSec -UseBasicParsing
+        return @{ status = [int]$r.StatusCode; content = "$($r.Content)" }
+    } catch {
+        $resp = $_.Exception.Response
+        if (-not $resp) { throw "the request failed: $($_.Exception.Message)" }
+        $c = "$($_.ErrorDetails.Message)"; if (-not $c) { $c = "$($_.Exception.Message)" }
+        return @{ status = [int]$resp.StatusCode; content = $c }
+    }
+}
 
 # Framework §12.22 WRITE-CALLS 3(c) (owner approved 2026-10-14, PIM 100.154): a 5xx on a call that CHANGES something is
 # "unknown", never "failed" and never "done" -- the state is READ BACK first:
@@ -93,7 +134,13 @@ if ($Promote) {
     if ($Ring -ge 2 -and -not "$OperatorApproval".Trim()) { throw "ring $Ring reaches customers -- pass -OperatorApproval with the operator's own words (e.g. 'release $Version to ring $Ring'); nothing was sent" }
     $purl = "$($Endpoint.TrimEnd('/'))/api/releases/pim-manager/$Kind/rings/$Ring"
     Write-Host ("    promote: {0} -> ring {1}{2}" -f $Version, $Ring, $(if ("$OperatorApproval".Trim()) { " -- operator: '$OperatorApproval'" } else { '' }))
-    if (-not $Apply) { Write-Host "`nPLAN ONLY -- nothing was sent. With -Apply: POST $purl {version:$Version}." -ForegroundColor Yellow; return [pscustomobject]@{ promoted = $false; version = $Version; ring = $Ring; url = $purl } }
+    # PIM 100.158 CR3: changedScopes on the ring call (switch + 24 h hold, see the top of this file)
+    $pScopes = @()
+    $pScopesOn = (Test-PimReleaseControlOn -Value "$env:PIM_PUBLISH_CHANGEDSCOPES" -Ring $Ring) -and -not (Test-PimChangedScopesHeld -RefusedUtc (Get-PimScopesMark $scopesMark))
+    if ($pScopesOn) { $pScopes = @(Get-PimReleaseScopes -RepoRoot $repo -Tag $tag -PrevTag (Get-PimPreviousReleaseTag -RepoRoot $repo -Version $Version)) }
+    Write-Host ("    changedScopes: {0}" -f $(if ($pScopes.Count) { $pScopes -join ',' } elseif ($pScopesOn) { '(none -- docs / tests only; not sent)' } else { '(not sent: PIM_PUBLISH_CHANGEDSCOPES off / auto for this ring, or held after a refusal)' }))
+    $pBody = [ordered]@{ version = $Version }; if ($pScopes.Count) { $pBody['changedScopes'] = @($pScopes) }
+    if (-not $Apply) { Write-Host "`nPLAN ONLY -- nothing was sent. With -Apply: POST $purl $($pBody | ConvertTo-Json -Compress)." -ForegroundColor Yellow; return [pscustomobject]@{ promoted = $false; version = $Version; ring = $Ring; url = $purl; changedScopes = @($pScopes) } }
     if (-not $ClientId -or -not $CertThumbprint) {
         if (-not $KeyVault -or -not $KeyVaultSubscription) { throw "pass -ClientId and -CertThumbprint, or -KeyVault and -KeyVaultSubscription to read them" }
         $kvArgs = @('keyvault', 'secret', 'show', '--vault-name', $KeyVault, '--subscription', $KeyVaultSubscription, '--query', 'value', '-o', 'tsv')
@@ -105,17 +152,19 @@ if ($Promote) {
     $token = Get-PimRestToken -Resource $Audience -TenantId $TenantId -ClientId $ClientId -CertThumbprint $CertThumbprint -Force
     if (-not "$token".Trim()) { throw 'no token for the Invardia Back Office audience' }
     Step "POST $purl"
-    $status = 0; $content = ''
-    try {
-        $r = Invoke-WebRequest -Method POST -Uri $purl -Headers @{ Authorization = "Bearer $token" } -Body (@{ version = $Version } | ConvertTo-Json -Compress) -ContentType 'application/json' -TimeoutSec 120 -UseBasicParsing
-        $status = [int]$r.StatusCode; $content = "$($r.Content)"
-    } catch {
-        $resp = $_.Exception.Response
-        if (-not $resp) { throw "the promote request failed: $($_.Exception.Message)" }
-        $status = [int]$resp.StatusCode; $content = "$($_.ErrorDetails.Message)"; if (-not $content) { $content = "$($_.Exception.Message)" }
+    $pr = Invoke-PimInvardiaCall -Method POST -Url $purl -Token $token -Body ($pBody | ConvertTo-Json -Compress) -ContentType 'application/json'
+    if ($pBody.Contains('changedScopes') -and (Test-PimChangedScopesRefusal -Status $pr.status -Content $pr.content)) {
+        # Invardia refused the FIELD: once more without it, and the field is held for 24 h
+        Write-Host ("    Invardia refused changedScopes (HTTP {0}) -- sent once more without it; held for 24 h" -f $pr.status) -ForegroundColor Yellow
+        Set-PimScopesMark $scopesMark
+        $pBody.Remove('changedScopes')
+        $pr = Invoke-PimInvardiaCall -Method POST -Url $purl -Token $token -Body ($pBody | ConvertTo-Json -Compress) -ContentType 'application/json'
     }
+    $status = [int]$pr.status; $content = "$($pr.content)"
     $ok = ($status -in 200, 201, 202)
     Write-Host ("    HTTP {0} {1}" -f $status, $content.Substring(0, [Math]::Min(400, $content.Length))) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })
+    $na = Get-PimNotApprovedText -Status $status -Content $content -Version $Version -Ring $Ring
+    if ($na) { throw $na }
     if (-not $ok -and $status -ge 500) {
         # §12.22 3(c): a 5xx is "unknown" -- read the ring back before any retry or failure report
         $rb = Get-PimInvardiaReadBackVerdict -State (Invoke-PimInvardiaReadBack -Endpoint $Endpoint -Token $token -Kind $Kind -Version $Version) -Call promote -Version $Version -Ring $Ring
@@ -124,7 +173,7 @@ if ($Promote) {
         if ($rb.verdict -eq 'unknown') { throw "UNKNOWN -- the promotion answered HTTP $status and the ring could not be confirmed ($($rb.reason)); do not retry before checking" }
     }
     if (-not $ok) { throw "Invardia refused the promotion (HTTP $status)" }
-    return [pscustomobject]@{ promoted = $true; version = $Version; ring = $Ring; status = $status; url = $purl }
+    return [pscustomobject]@{ promoted = $true; version = $Version; ring = $Ring; status = $status; url = $purl; changedScopes = @($(if ($pBody.Contains('changedScopes')) { $pScopes })) }
 }
 Step 'build the release zip from the tag'
 if (-not $OutDir) { $OutDir = Join-Path ([IO.Path]::GetTempPath()) 'pim-invardia-release' }
@@ -179,10 +228,18 @@ Write-Host ("    engine: {0} vs {1} -> engineChanged={2}" -f $(if ($engineHash) 
 # UPDATE-1.7: PIM decides the ring. Ring 2 / 3 reach customers: only on the operator's own words (memory/ring-2 rule).
 if ($Ring -ge 2 -and -not "$OperatorApproval".Trim()) { throw "ring $Ring reaches customers -- pass -OperatorApproval with the operator's own words (e.g. 'release $Version to ring $Ring'); nothing was sent" }
 $url = "$($Endpoint.TrimEnd('/'))/api/releases/pim-manager?kind=$Kind&version=$Version" + $(if ($Ring -ge 0) { "&ring=$Ring" } else { '' }) + $(if ($sendEngineChanged) { "&engineChanged=$($engineChanged.ToString().ToLowerInvariant())" } else { '' })
+# PIM 100.158 CR3: changedScopes on the publish call (switch + 24 h hold, see the top of this file)
+$scopes = @()
+$scopesOn = (Test-PimReleaseControlOn -Value "$env:PIM_PUBLISH_CHANGEDSCOPES" -Ring $Ring) -and -not (Test-PimChangedScopesHeld -RefusedUtc (Get-PimScopesMark $scopesMark))
+if ($scopesOn) { $scopes = @(Get-PimReleaseScopes -RepoRoot $repo -Tag $tag -PrevTag $(if ($prevTag) { "$($prevTag[0].tag)" } else { '' })) }
+$scopesQuery = ConvertTo-PimChangedScopesQuery -Scopes $scopes
+$urlNoScopes = $url
+if ($scopesQuery) { $url = "$url&changedScopes=$scopesQuery" }
+Write-Host ("    changedScopes: {0}" -f $(if ($scopes.Count) { $scopes -join ',' } elseif ($scopesOn) { '(none -- docs / tests only; not sent)' } else { '(not sent: PIM_PUBLISH_CHANGEDSCOPES off / auto for this ring, or held after a refusal)' }))
 Write-Host ("    ring: {0}{1}" -f $(if ($Ring -ge 0) { "$Ring (published AND released to it)" } else { 'none (registered only, released to no ring)' }), $(if ("$OperatorApproval".Trim()) { " -- operator: '$OperatorApproval'" } else { '' }))
 if (-not $Apply) {
     Write-Host "`nPLAN ONLY -- nothing was sent. With -Apply the zip is POSTed to $url as Invardia.Publisher.pim-manager (tenant $TenantId)." -ForegroundColor Yellow
-    return [pscustomobject]@{ published = $false; version = $Version; ring = $Ring; zip = $zip; sha256 = $hash; size = $bytes.Length; url = $url; engineHash = $engineHash; engineChanged = $engineChanged }
+    return [pscustomobject]@{ published = $false; version = $Version; ring = $Ring; zip = $zip; sha256 = $hash; size = $bytes.Length; url = $url; engineHash = $engineHash; engineChanged = $engineChanged; changedScopes = @($scopes) }
 }
 
 Step 'publisher identity (certificate, from Key Vault unless passed)'
@@ -201,18 +258,19 @@ if (-not "$token".Trim()) { throw 'no token for the Invardia Back Office audienc
 Step "POST $url"
 # Windows PowerShell 5.1 as well as 7 (HOST-1: scripts in tools\setup must run on both): a non-2xx answer is read from the
 # exception's response instead of -SkipHttpErrorCheck (PS 7 only).
-$status = 0; $content = ''
-try {
-    $r = Invoke-WebRequest -Method POST -Uri $url -Headers @{ Authorization = "Bearer $token" } -Body $bytes -ContentType 'application/zip' -TimeoutSec 600 -UseBasicParsing
-    $status = [int]$r.StatusCode; $content = "$($r.Content)"
-} catch {
-    $resp = $_.Exception.Response
-    if (-not $resp) { throw "the publish request failed: $($_.Exception.Message)" }
-    $status = [int]$resp.StatusCode
-    $content = "$($_.ErrorDetails.Message)"; if (-not $content) { $content = "$($_.Exception.Message)" }
+$pub = Invoke-PimInvardiaCall -Method POST -Url $url -Token $token -Body $bytes -ContentType 'application/zip' -TimeoutSec 600
+if ($scopesQuery -and (Test-PimChangedScopesRefusal -Status $pub.status -Content $pub.content)) {
+    # PIM 100.158: Invardia refused the FIELD -- once more without it, and it is held for 24 h
+    Write-Host ("    Invardia refused changedScopes (HTTP {0}) -- sent once more without it; held for 24 h" -f $pub.status) -ForegroundColor Yellow
+    Set-PimScopesMark $scopesMark
+    $url = $urlNoScopes; $scopes = @()
+    $pub = Invoke-PimInvardiaCall -Method POST -Url $url -Token $token -Body $bytes -ContentType 'application/zip' -TimeoutSec 600
 }
+$status = [int]$pub.status; $content = "$($pub.content)"
 $ok = ($status -in 200, 201, 202)
 Write-Host ("    HTTP {0} {1}" -f $status, $content.Substring(0, [Math]::Min(400, $content.Length))) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })
+$naP = Get-PimNotApprovedText -Status $status -Content $content -Version $Version -Ring $Ring
+if ($naP) { throw $naP }
 if (-not $ok -and $status -ge 500) {
     # §12.22 3(c): a 5xx is "unknown" -- read the version back before any retry or failure report
     $rb = Get-PimInvardiaReadBackVerdict -State (Invoke-PimInvardiaReadBack -Endpoint $Endpoint -Token $token -Kind $Kind -Version $Version) -Call publish -Version $Version -Sha256 $hash
@@ -221,4 +279,4 @@ if (-not $ok -and $status -ge 500) {
     if ($rb.verdict -eq 'unknown') { throw "UNKNOWN -- the publish answered HTTP $status and the version could not be confirmed ($($rb.reason)); do not retry before checking" }
 }
 if (-not $ok) { throw "Invardia refused the release (HTTP $status)" }
-[pscustomobject]@{ published = $true; version = $Version; sha256 = $hash; size = $bytes.Length; status = $status; url = $url; engineHash = $engineHash; engineChanged = $engineChanged }
+[pscustomobject]@{ published = $true; version = $Version; sha256 = $hash; size = $bytes.Length; status = $status; url = $url; engineHash = $engineHash; engineChanged = $engineChanged; changedScopes = @($scopes) }

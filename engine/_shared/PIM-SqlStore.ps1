@@ -554,6 +554,73 @@ IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCach
     # file). Never fails the open: a store that cannot take the tables keeps the one-document snapshot, and says so.
     $aaDdl = Initialize-PimSqlActiveAssignmentRows -ConnectionString $ConnectionString
     if (-not $aaDdl.ok) { Write-Warning "[store] pim.ActiveAssignmentRows could not be created: $($aaDdl.error) -- the active-assignments snapshot stays one document in pim.TenantCache" }
+    # Framework §12.23 run 2 prerequisite (PIM 100.156): the publish job's control view (REQ-Y licence row) was refreshed
+    # by the MANAGER at every start -- a CREATE OR ALTER VIEW the web app may not run once it has no DDL right. The schema
+    # step (the updater, before every roll) refreshes it now; a store without the view is left alone (the refresh SQL
+    # itself checks). Never fails the open.
+    if (Get-Command Get-PimPublishJobControlViewRefreshSql -ErrorAction SilentlyContinue) {
+        try { [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimPublishJobControlViewRefreshSql)) }
+        catch { Write-Warning "[store] the publish job's control view could not be refreshed: $($_.Exception.Message)" }
+    }
+}
+
+# ---- Framework §12.23 run 2 prerequisite (PIM 100.156): the RUNTIME never needs a DDL right ----------------------------
+# Every table / column / view is created by the schema step (Initialize-PimSqlStore, run by the updater before every roll
+# and by setup). A runtime path (the engine, the Manager) only CHECKS that what it is about to use is there -- read-only,
+# OBJECT_ID / COL_LENGTH -- once per process and store. When something is missing (an install whose updater has not run
+# since the object was added, a developer store), ONE -Fallback try of the old create is made: it works only where the
+# identity still holds the right (a developer box, an install before run 2) and is refused harmlessly afterwards; still
+# missing = a plain message naming the updater, never a DDL error from deep inside a job.
+$script:PimSchemaReadyCache = @{}
+
+function Get-PimSqlSchemaMissing {
+    <#
+      READ-ONLY. The -Objects (schema.object) and -Columns (@{ 'schema.table' = @('Col', ...) }) that are NOT in this
+      store. Returns string[] ('pim.X' / 'pim.X.Col'); empty = ready. THROWS when the store cannot be read.
+      -Query: param($cs, $sql, $params) -> rows (test seam; default Invoke-PimSqlQuery).
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [string[]]$Objects = @(), [hashtable]$Columns = @{}, [scriptblock]$Query)
+    if (-not $Query) { $Query = { param($cs, $sql, $p) Invoke-PimSqlQuery -ConnectionString $cs -Sql $sql -Parameters $p } }
+    $sel = New-Object System.Collections.Generic.List[string]; $p = @{}; $names = @{}; $i = 0
+    foreach ($o in @($Objects)) { if (-not "$o".Trim()) { continue }; $sel.Add("CASE WHEN OBJECT_ID(@o$i) IS NULL THEN 0 ELSE 1 END AS [k$i]"); $p["o$i"] = "$o"; $names["k$i"] = "$o"; $i++ }
+    foreach ($t in @($Columns.Keys)) {
+        foreach ($c in @($Columns[$t])) { if (-not "$c".Trim()) { continue }; $sel.Add("CASE WHEN COL_LENGTH(@o$i, @c$i) IS NULL THEN 0 ELSE 1 END AS [k$i]"); $p["o$i"] = "$t"; $p["c$i"] = "$c"; $names["k$i"] = "$t.$c"; $i++ }
+    }
+    if (-not $sel.Count) { return @() }
+    $rows = @(& $Query $ConnectionString ("SELECT " + ($sel -join ', ')) $p)
+    if (-not $rows.Count) { throw 'the schema check returned no row' }
+    $r = $rows[0]; $miss = New-Object System.Collections.Generic.List[string]
+    foreach ($k in @($names.Keys | Sort-Object { [int]("$_".Substring(1)) })) {
+        $v = if ($r -is [System.Collections.IDictionary]) { $r[$k] } else { $r.$k }
+        if ("$v" -ne '1') { $miss.Add("$($names[$k])") }
+    }
+    return @($miss.ToArray())
+}
+
+function Confirm-PimSqlSchemaObject {
+    <#
+      The runtime half of §12.23 run 2: is everything this path uses in the store? NEVER throws:
+      @{ ok; created; missing[]; message }. ok = ready (or created by the -Fallback). Cached per process and store once
+      ready (not when -Query is a test seam). -Fallback: { } -- the old create, tried ONCE only when something is missing.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [string[]]$Objects = @(), [hashtable]$Columns = @{},
+          [scriptblock]$Fallback, [scriptblock]$Query)
+    $key = "$ConnectionString|$(@($Objects) -join ',')|$(@($Columns.Keys | Sort-Object | ForEach-Object { "$_=$(@($Columns[$_]) -join '+')" }) -join ';')"
+    if (-not $Query -and $script:PimSchemaReadyCache.ContainsKey($key)) { return [pscustomobject]@{ ok = $true; created = $false; missing = @(); message = '' } }
+    $miss = @()
+    try { $miss = @(Get-PimSqlSchemaMissing -ConnectionString $ConnectionString -Objects $Objects -Columns $Columns -Query $Query) }
+    catch { return [pscustomobject]@{ ok = $false; created = $false; missing = @(); message = "the store could not be checked: $($_.Exception.Message)" } }
+    if (-not $miss.Count) { if (-not $Query) { $script:PimSchemaReadyCache[$key] = $true }; return [pscustomobject]@{ ok = $true; created = $false; missing = @(); message = '' } }
+    $why = ''
+    if ($Fallback) {
+        try {
+            [void](& $Fallback)
+            $miss = @(Get-PimSqlSchemaMissing -ConnectionString $ConnectionString -Objects $Objects -Columns $Columns -Query $Query)
+            if (-not $miss.Count) { if (-not $Query) { $script:PimSchemaReadyCache[$key] = $true }; return [pscustomobject]@{ ok = $true; created = $true; missing = @(); message = '' } }
+        } catch { $why = " ($((("$($_.Exception.Message)") -split "`n")[0]))" }
+    }
+    return [pscustomobject]@{ ok = $false; created = $false; missing = @($miss)
+        message = ("{0} {1} not in this store -- the next update creates it (the updater's schema step); this component does not create tables{2}" -f (@($miss) -join ', '), $(if (@($miss).Count -eq 1) { 'is' } else { 'are' }), $why) }
 }
 
 function Invoke-PimDepartmentRowKeyMigration {
@@ -868,6 +935,16 @@ function Initialize-PimSqlActiveAssignmentRows {
     } catch {
         return [pscustomobject]@{ ok = $false; error = "$($_.Exception.Message)" }
     }
+}
+
+function Confirm-PimSqlActiveAssignmentRowsReady {
+    # Framework §12.23 run 2 prerequisite (PIM 100.156): the RUNTIME half (the snapshot job). Read-only check that the two
+    # tables are there; the create (Initialize-PimSqlActiveAssignmentRows) is only a one-time fallback -- the schema step
+    # creates them. Same answer shape as Initialize-PimSqlActiveAssignmentRows: @{ ok; error }. NEVER throws.
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $r = Confirm-PimSqlSchemaObject -ConnectionString $ConnectionString -Objects @('pim.ActiveAssignmentSnapshots', 'pim.ActiveAssignmentRows') `
+            -Fallback { $i = Initialize-PimSqlActiveAssignmentRows -ConnectionString $ConnectionString; if (-not $i.ok) { throw "$($i.error)" } }
+    return [pscustomobject]@{ ok = [bool]$r.ok; error = "$($r.message)" }
 }
 
 function Test-PimSqlTransientError {
@@ -2866,6 +2943,9 @@ $__cfgBak = Join-Path $PSScriptRoot 'PIM-ConfigBackup.ps1'
 if (Test-Path -LiteralPath $__cfgBak) { . $__cfgBak }
 # CR8 item 1 (PIM 100.152): the commit snapshot table's DDL rides with the store, so the updater's schema step creates it.
 if (-not (Get-Command Initialize-PimBackupStore -ErrorAction SilentlyContinue)) { $__cmtBak = Join-Path $PSScriptRoot 'PIM-CommitBackup.ps1'; if (Test-Path -LiteralPath $__cmtBak) { . $__cmtBak } }
+# Framework §12.23 run 2 (PIM 100.156): the publish job's control-view refresh rides with the store, so the updater's schema
+# step runs it (it was run by the Manager at every start -- a CREATE OR ALTER VIEW the web app may not run after run 2).
+if (-not (Get-Command Get-PimPublishJobControlViewRefreshSql -ErrorAction SilentlyContinue)) { $__jobCad = Join-Path $PSScriptRoot 'PIM-JobCadence.ps1'; if (Test-Path -LiteralPath $__jobCad) { . $__jobCad } }
 # Framework §12.23 / PIM 100.156: the activation ledger's DDL rides with the store, so the updater's schema step creates it.
 if (-not (Get-Command Get-PimImpactActivationLedgerDdl -ErrorAction SilentlyContinue)) { $__impCnt = Join-Path $PSScriptRoot 'PIM-ImpactCounters.ps1'; if (Test-Path -LiteralPath $__impCnt) { . $__impCnt } }
 # PIM 100.121: the feature-setting reader rides with the store -- it reads what Import-PimSettingsFromStore hydrates, so

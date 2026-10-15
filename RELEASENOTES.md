@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.639 -- 2026-10-15
+
+- A failing job reaches Invardia before its alert mail, and the mail names the error code with a link to its page; no alert mail for licence gaps, throttling or problems already fixed; a long silent step is no longer mistaken for a stopped run; the engine and the portal no longer need the right to change the database structure; releases report which parts they change
+
 ## 2.4.638 -- 2026-10-15
 
 - Every problem a job reports now carries a stable error code and its cause, so support knows the fix before you call (switch: Send error codes and causes to Invardia, on by default; Pro installs with an install key)

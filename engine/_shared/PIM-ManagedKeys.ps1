@@ -48,6 +48,20 @@ IF COL_LENGTH('pim.ManagedKeys','SourceKey') IS NULL ALTER TABLE pim.ManagedKeys
 "@
 }
 
+function Assert-PimManagedKeysReady {
+    <#
+      Framework §12.23 run 2 prerequisite (PIM 100.156): the engine wrote this ledger with its DDL in front of every insert
+      (CREATE TABLE / ALTER TABLE ADD), which needs db_ddladmin. The schema step (Initialize-PimSqlStore, the updater)
+      creates the table and its columns; the write path only CHECKS (read-only, once per process). The old DDL is a
+      one-time fallback for a store whose identity still has the right. THROWS a plain message when it is still missing.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $r = Confirm-PimSqlSchemaObject -ConnectionString $ConnectionString -Objects @('pim.ManagedKeys') `
+            -Columns @{ 'pim.ManagedKeys' = @('ConfirmedUtc', 'CommitId', 'SourceEntity', 'SourceKey') } `
+            -Fallback { [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimManagedKeysDdl)) }
+    if (-not $r.ok) { throw "[managed keys] $($r.message)" }
+}
+
 function Get-PimManagedKeyNorm { param([string]$Key) "$Key".Trim().ToLowerInvariant() }
 
 function Get-PimManagedKeys {
@@ -81,8 +95,8 @@ function Update-PimManagedKeys {
     if (-not "$ConnectionString".Trim()) { throw 'no SQL store to write the managed-key ledger to' }
     $toJson = { param($arr) if (@($arr).Count) { ConvertTo-Json -InputObject @($arr) -Compress } else { '[]' } }
     if ($a.Count) {
-        $sql = (Get-PimManagedKeysDdl) + @"
-
+        Assert-PimManagedKeysReady -ConnectionString $ConnectionString
+        $sql = @"
 INSERT INTO pim.ManagedKeys (Scope, [Key])
 SELECT DISTINCT @s, j.[value] FROM OPENJSON(@j) j
 WHERE NOT EXISTS (SELECT 1 FROM pim.ManagedKeys m WHERE m.Scope = @s AND m.[Key] = j.[value]);
@@ -213,8 +227,9 @@ function Set-PimManagedKeyConfirmations {
         return $list.Count
     }
     if (-not "$ConnectionString".Trim()) { throw 'no SQL store to write the managed-key ledger to' }
-    # The DDL in its own batch: the MERGE below names the new columns, which must exist when it is compiled.
-    [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimManagedKeysDdl))
+    # The MERGE below names the newer columns, which must exist when it is compiled: checked first (read-only; the
+    # schema step creates them -- §12.23 run 2, PIM 100.156).
+    Assert-PimManagedKeysReady -ConnectionString $ConnectionString
     $json = ConvertTo-Json -InputObject @($list.ToArray()) -Compress -Depth 4
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Parameters @{ s = $s; j = $json; n = $NowUtc.ToUniversalTime() } -Sql @"
 MERGE pim.ManagedKeys AS t

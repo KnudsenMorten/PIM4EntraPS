@@ -715,6 +715,53 @@ function Get-PimFailureCodeInfo {
     return [pscustomobject][ordered]@{ class = $row.class; code = $row.code; causeClass = $row.causeClass; whoActs = $row.whoActs; fixedIn = "$($row.fixedIn)"; since = $row.since; action = $action; known = [bool]($c -and $row.class -eq $c) }
 }
 
+function Get-PimErrorDefaultText {
+    <#
+      PURE. framework 8.16: the customer sentence + the step of a code WITHOUT a customer-ready solution, by its cause class.
+      @( customerText, stepText ). ONE source for errors.json (tools/setup/New-PimErrorsJson.ps1) and the customer alert
+      mail (PIM-JobAlert.ps1), so the mail and Invardia's page per code say the same words.
+    #>
+    param([string]$CauseClass, [string]$WhoActs)
+    $next = 'It runs again on the next run by itself.'
+    switch ("$CauseClass") {
+        'replication-delay'    { return @("Microsoft has not finished creating an object PIM Manager needs, so this step waits. $next", 'Nothing to do.') }
+        'throttled'            { return @("Microsoft asked PIM Manager to slow down, so this step waits. $next", 'Nothing to do.') }
+        'upstream-error'       { return @("A Microsoft service answered with an error, so this step was not done. $next", $(if ($WhoActs -eq 'nobody') { 'Nothing to do.' } else { 'Nothing to do for you: Invardia support looks at it.' })) }
+        'held-for-approval'    { return @('A safety check held a large change for approval. Nothing was changed; an approver in your tenant decides.', 'Open Jobs > Engine logs & errors in PIM Manager, review the held change and approve it, or correct what caused it and commit in Pending changes.') }
+        'not-converged'        { return @('A change you committed is not in place in your tenant yet. PIM Manager tries again on every run, and Invardia support looks at why.', 'Nothing to do for you: Invardia support looks at it.') }
+        'unclassified'         { return @('PIM Manager met a problem it does not recognise yet. Nothing was changed wrongly; Invardia support looks at it.', 'Nothing to do for you: Invardia support looks at it.') }
+        'too-large'            { return @('The engine job needs more resources for this tenant, so part of its work is not done yet.', 'Nothing to do when updates are on: the next update gives the job more resources. Invardia support can do it with you now.') }
+        'settings-unreachable' { return @("PIM Manager could not save the result of one run in its own database. $next", $(if ($WhoActs -eq 'nobody') { 'Nothing to do.' } else { 'Nothing to do for you: Invardia support looks at it.' })) }
+        'platform-timeout'     { return @("The run was stopped before it finished. $next", 'Nothing to do.') }
+        'permission'           { return @('PIM Manager is not allowed to do this step in your tenant.', 'Open Get Started > Engine permissions in PIM Manager and run the shown command as a Global Administrator.') }
+        'target-missing'       { return @('A row names something that does not exist in your tenant (any more), so that row is not applied. Everything else is applied.', 'Open Jobs > Engine logs & errors in PIM Manager; the item shows what to correct or remove, then commit in Pending changes.') }
+        'customer-config'      { return @('A row or setting cannot be applied as it is written. Everything else is applied.', 'Open Jobs > Engine logs & errors in PIM Manager; the item shows what to change, then commit in Pending changes.') }
+        'missing-licence'      { return @('Your tenant does not have the Microsoft service this step needs, so the step does not apply. Nothing is wrong.', 'Nothing to do. If you add the service later, the step starts on its own.') }
+        'no-data-source'       { return @('Your tenant does not have the data this step reads, so the step does not apply. Nothing is wrong.', 'Nothing to do.') }
+    }
+    return @('PIM Manager met a problem. Invardia support looks at it.', 'Nothing to do for you: Invardia support looks at it.')
+}
+
+function Get-PimFailureCustomerText {
+    <#
+      PURE. framework 8.16: a catalog class -> its stable code (Get-PimFailureCodeInfo) and the ONE customer sentence of that
+      code -- the customer-ready solution's 'what' + 'affected' when the class has one (Get-PimFailureSolutionCatalog), else
+      the default sentence of its cause class. errors.json's customerText and the customer alert mail both come from here.
+      @{ class; code; causeClass; whoActs; fixedIn; action; customerText }.
+    #>
+    param([string]$Class, [string]$CauseClass = '')
+    $info = Get-PimFailureCodeInfo -Class $Class -CauseClass $CauseClass
+    $def = Get-PimErrorDefaultText -CauseClass "$($info.causeClass)" -WhoActs "$($info.whoActs)"
+    $customer = "$($def[0])"
+    $sol = Get-PimFailureSolutionCatalog
+    if ("$($info.class)" -and $sol.ContainsKey("$($info.class)")) {
+        $s = $sol["$($info.class)"]
+        $customer = ("$($s.what)".Replace(': {item}', '').Replace('{item}', 'one or more items').Trim() + ' ' + "$($s.affected)".Trim()).Trim()
+    }
+    return [pscustomobject][ordered]@{ class = "$($info.class)"; code = "$($info.code)"; causeClass = "$($info.causeClass)"; whoActs = "$($info.whoActs)"
+                                       fixedIn = "$($info.fixedIn)"; action = "$($info.action)"; customerText = $customer }
+}
+
 # ---------------------------------------------------------------------------------------------
 # PIM 100.115 (owner 2026-10-12: "ask invardia to send email to [the customer's admin] and explain the solution. learn
 # from this so future of this are solved from this lessons learned"). EVERY class whose FixKind is customer-config

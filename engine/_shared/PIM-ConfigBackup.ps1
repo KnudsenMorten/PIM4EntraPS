@@ -598,6 +598,19 @@ CREATE TABLE pim.ConfigBackupEntities (
 "@
 }
 
+function Confirm-PimConfigBackupStoreReady {
+    <#
+      Framework §12.23 run 2 prerequisite (PIM 100.156): the RUNTIME half (the config-backup job, the Manager's backup page).
+      Read-only check that both tables are there -- the schema step (Initialize-PimSqlStore, the updater) creates them; the
+      create (Initialize-PimConfigBackupStore) is only a one-time fallback. Never throws: @{ ok; detail }.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $r = Confirm-PimSqlSchemaObject -ConnectionString $ConnectionString -Objects @('pim.ConfigBackups', 'pim.ConfigBackupEntities') `
+            -Fallback { $i = Initialize-PimConfigBackupStore -ConnectionString $ConnectionString; if (-not $i.ok) { throw "$($i.detail)" } }
+    if ($r.ok) { return @{ ok = $true; detail = 'pim.ConfigBackups + pim.ConfigBackupEntities in place' } }
+    return @{ ok = $false; detail = "backup tables NOT in place: $($r.message)" }
+}
+
 function Initialize-PimConfigBackupStore {
     <# Creates the two tables. Never throws (a store must still open); returns @{ ok; detail }. #>
     param([Parameter(Mandatory)][string]$ConnectionString)
@@ -798,7 +811,9 @@ function Invoke-PimConfigBackupJob {
     $cs = $ConnectionString
     if (-not $cs -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue)) { try { $cs = Get-PimSqlSettingsConnectionString } catch { $cs = '' } }
     if (-not $cs) { throw '[config-backup] no SQL store -- the configuration cannot be read' }
-    [void](Initialize-PimConfigBackupStore -ConnectionString $cs)
+    # §12.23 run 2 (PIM 100.156): a read-only check; the schema step creates the tables
+    $cbReady = Confirm-PimConfigBackupStoreReady -ConnectionString $cs
+    if (-not $cbReady.ok) { throw "[config-backup] $($cbReady.detail)" }
     $b = New-PimConfigBackup -ConnectionString $cs -TakenBy 'system:config-backup' -Trigger 'scheduled' -NowUtc $NowUtc -WhatIf:$WhatIf
     $p = Invoke-PimConfigBackupPrune -ConnectionString $cs -NowUtc $NowUtc -By 'system:config-backup' -WhatIf:$WhatIf
     $what = if ($b.noChange) { "no change since $($b.sameAs) (recorded, no copy)" } else { "backup $($b.backupId): $($b.entities) entities, $($b.items) items, $($b.bytes) bytes compressed" }

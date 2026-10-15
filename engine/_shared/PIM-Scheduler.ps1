@@ -4307,7 +4307,9 @@ function Invoke-PimSchedulerTick {
         # A 'running' record whose owner holds no lock any more belongs to a run that ended without reporting back (a
         # restart, a crash, the time limit): close it now, saying why -- no 30-minute wait, no generic "interrupted".
         if (-not $WhatIf) {
-            $liveOwners = @(); try { $liveOwners = @(Get-PimLiveLockOwners -Map (Get-PimSchedulerLocksRaw).Map -NowUtc $now) } catch { $liveOwners = @() }
+            # PIM 100.166 (c3): an owner whose locks passed their TTL while its execution is still Running is ALIVE -- its
+            # 'running' record stays open (a silent long step is not a dead run).
+            $liveOwners = @(); try { $lm = (Get-PimSchedulerLocksRaw).Map; $liveOwners = @(Get-PimLiveLockOwners -Map $lm -NowUtc $now -AliveExecutions (Get-PimAliveExpiredExecutions -Map $lm -NowUtc $now)) } catch { $liveOwners = @() }
             if ($haveLease) { $liveOwners += $Owner }
             [void](Close-PimStaleRunningRecords -NowUtc $now -ByLocks -LiveOwners $liveOwners -OlderThanMinutes ([Math]::Max(30, 2 * $LeaseTtlMinutes)))
             # PIM 100.166 (c): another execution's run that is alive but has not moved for an hour -> reported once, kept running
