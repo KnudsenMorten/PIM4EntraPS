@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.641 -- 2026-10-16
+
+- The hourly status tells Invardia which release wave the install is in and when a new release is being watched more closely, on every install
+
 ## 2.4.640 -- 2026-10-16
 
 - The updater retries a licence read that fails once and names the real cause, instead of reporting that no licence is installed

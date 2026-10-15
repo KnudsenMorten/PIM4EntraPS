@@ -52,8 +52,8 @@ $ErrorActionPreference = 'Stop'
 function Step([string]$m) { Write-Host "==> $m" -ForegroundColor Cyan }
 # PIM 100.158 / framework 12.11e CR3 -- changedScopes on the publish call (&changedScopes=a,b | *) and the ring call
 # ("changedScopes": [..] | ["*"]), from the files this release changed since the previous release tag (PIM-ReleaseControl.ps1
-# maps files to scopes). Switch PIM_PUBLISH_CHANGEDSCOPES: on / off / AUTO (the default) = only a call for ring 0, until
-# Invardia confirms (100.158). Invardia refusing the FIELD (400 / 422 naming it) -> the call goes ONCE more without it, and the
+# maps files to scopes). Switch PIM_PUBLISH_CHANGEDSCOPES: ON for every ring by default since Invardia confirmed the field
+# (2026-10-16, 1.0.480); off / 0 / false / no = off (it was AUTO = ring 0 only until then). Invardia refusing the FIELD (400 / 422 naming it) -> the call goes ONCE more without it, and the
 # field is held for 24 h (a mark file). A 409 notApproved is never that: it is shown plainly and never retried.
 . (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'engine\_shared\PIM-ReleaseControl.ps1')
 if (-not "$StateDir".Trim()) { $StateDir = Join-Path ([IO.Path]::GetTempPath()) 'pim-invardia-release' }
@@ -136,9 +136,9 @@ if ($Promote) {
     Write-Host ("    promote: {0} -> ring {1}{2}" -f $Version, $Ring, $(if ("$OperatorApproval".Trim()) { " -- operator: '$OperatorApproval'" } else { '' }))
     # PIM 100.158 CR3: changedScopes on the ring call (switch + 24 h hold, see the top of this file)
     $pScopes = @()
-    $pScopesOn = (Test-PimReleaseControlOn -Value "$env:PIM_PUBLISH_CHANGEDSCOPES" -Ring $Ring) -and -not (Test-PimChangedScopesHeld -RefusedUtc (Get-PimScopesMark $scopesMark))
+    $pScopesOn = (Test-PimChangedScopesOn -Value "$env:PIM_PUBLISH_CHANGEDSCOPES") -and -not (Test-PimChangedScopesHeld -RefusedUtc (Get-PimScopesMark $scopesMark))
     if ($pScopesOn) { $pScopes = @(Get-PimReleaseScopes -RepoRoot $repo -Tag $tag -PrevTag (Get-PimPreviousReleaseTag -RepoRoot $repo -Version $Version)) }
-    Write-Host ("    changedScopes: {0}" -f $(if ($pScopes.Count) { $pScopes -join ',' } elseif ($pScopesOn) { '(none -- docs / tests only; not sent)' } else { '(not sent: PIM_PUBLISH_CHANGEDSCOPES off / auto for this ring, or held after a refusal)' }))
+    Write-Host ("    changedScopes: {0}" -f $(if ($pScopes.Count) { $pScopes -join ',' } elseif ($pScopesOn) { '(none -- docs / tests only; not sent)' } else { '(not sent: PIM_PUBLISH_CHANGEDSCOPES off, or held after a refusal)' }))
     $pBody = [ordered]@{ version = $Version }; if ($pScopes.Count) { $pBody['changedScopes'] = @($pScopes) }
     if (-not $Apply) { Write-Host "`nPLAN ONLY -- nothing was sent. With -Apply: POST $purl $($pBody | ConvertTo-Json -Compress)." -ForegroundColor Yellow; return [pscustomobject]@{ promoted = $false; version = $Version; ring = $Ring; url = $purl; changedScopes = @($pScopes) } }
     if (-not $ClientId -or -not $CertThumbprint) {
@@ -230,12 +230,12 @@ if ($Ring -ge 2 -and -not "$OperatorApproval".Trim()) { throw "ring $Ring reache
 $url = "$($Endpoint.TrimEnd('/'))/api/releases/pim-manager?kind=$Kind&version=$Version" + $(if ($Ring -ge 0) { "&ring=$Ring" } else { '' }) + $(if ($sendEngineChanged) { "&engineChanged=$($engineChanged.ToString().ToLowerInvariant())" } else { '' })
 # PIM 100.158 CR3: changedScopes on the publish call (switch + 24 h hold, see the top of this file)
 $scopes = @()
-$scopesOn = (Test-PimReleaseControlOn -Value "$env:PIM_PUBLISH_CHANGEDSCOPES" -Ring $Ring) -and -not (Test-PimChangedScopesHeld -RefusedUtc (Get-PimScopesMark $scopesMark))
+$scopesOn = (Test-PimChangedScopesOn -Value "$env:PIM_PUBLISH_CHANGEDSCOPES") -and -not (Test-PimChangedScopesHeld -RefusedUtc (Get-PimScopesMark $scopesMark))
 if ($scopesOn) { $scopes = @(Get-PimReleaseScopes -RepoRoot $repo -Tag $tag -PrevTag $(if ($prevTag) { "$($prevTag[0].tag)" } else { '' })) }
 $scopesQuery = ConvertTo-PimChangedScopesQuery -Scopes $scopes
 $urlNoScopes = $url
 if ($scopesQuery) { $url = "$url&changedScopes=$scopesQuery" }
-Write-Host ("    changedScopes: {0}" -f $(if ($scopes.Count) { $scopes -join ',' } elseif ($scopesOn) { '(none -- docs / tests only; not sent)' } else { '(not sent: PIM_PUBLISH_CHANGEDSCOPES off / auto for this ring, or held after a refusal)' }))
+Write-Host ("    changedScopes: {0}" -f $(if ($scopes.Count) { $scopes -join ',' } elseif ($scopesOn) { '(none -- docs / tests only; not sent)' } else { '(not sent: PIM_PUBLISH_CHANGEDSCOPES off, or held after a refusal)' }))
 Write-Host ("    ring: {0}{1}" -f $(if ($Ring -ge 0) { "$Ring (published AND released to it)" } else { 'none (registered only, released to no ring)' }), $(if ("$OperatorApproval".Trim()) { " -- operator: '$OperatorApproval'" } else { '' }))
 if (-not $Apply) {
     Write-Host "`nPLAN ONLY -- nothing was sent. With -Apply the zip is POSTed to $url as Invardia.Publisher.pim-manager (tenant $TenantId)." -ForegroundColor Yellow

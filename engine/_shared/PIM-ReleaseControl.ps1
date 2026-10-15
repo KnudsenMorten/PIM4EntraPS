@@ -57,6 +57,26 @@ function Test-PimReleaseControlOn {
     return $false
 }
 
+function Test-PimChangedScopesOn {
+    <#
+      PURE. PIM_PUBLISH_CHANGEDSCOPES since Invardia CONFIRMED the field (2026-10-16, Invardia 1.0.480: ids ^[A-Za-z0-9._-]{1,80}$,
+      at most 90, "*" alone = all; no refusal seen from PIM): ON for every ring call by default; 0/off/false/no = off.
+      (The heartbeat's wave / releaseMode keep Test-PimReleaseControlOn's AUTO = ring 0 only until confirmed separately.)
+    #>
+    param([AllowNull()][string]$Value)
+    return -not ("$Value".Trim().ToLowerInvariant() -in @('0', 'off', 'false', 'no'))
+}
+
+function Test-PimReleaseControlFieldsOn {
+    <#
+      PURE. PIM_Telemetry_ReleaseControl since Invardia CONFIRMED the heartbeat fields `wave` / `releaseMode` on every ring
+      (2026-10-16; its validator reads the lower-case keys first; none refused from ring 0 since 2.4.639): ON by default on
+      every ring; 0/off/false/no = off. A malformed field is refused 422 naming it -> the cycle's resend-without + 24 h hold.
+    #>
+    param([AllowNull()][string]$Value)
+    return -not ("$Value".Trim().ToLowerInvariant() -in @('0', 'off', 'false', 'no'))
+}
+
 function Get-PimChangedScopeOfFile {
     <#
       PURE. The scope of ONE changed file: a scope id, '*' (all -- a core or unknown file), or '' (not a scope: docs, tests ...).

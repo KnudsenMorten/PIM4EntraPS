@@ -1855,6 +1855,10 @@ deployment is a supported choice) and no credentials lying around.
   per-person list can leave out some older nestings, anything that list did not return, and every
   removal, is confirmed with a read of that group, and the full read is used if any part of the faster
   read fails.
+- **Long runs are never cut short.** ✅ 2026-10-15 Every scheduled job may run for up to seven days, the
+  longest the platform allows, so a run on a very large tenant finishes its work instead of being stopped
+  after an hour. New installs get it at setup and every update raises existing jobs to it. A run that has
+  really stopped is recognised from the platform's own status, never from the clock.
 
 ## 16. PIM Activator (browser extension)
 - **One-click bulk activation.** A browser extension for Edge and Chrome lets an admin pick
