@@ -1955,13 +1955,13 @@ function Invoke-PimUplinkJob {
     if ($MaxPerCycle -gt 0) { $cyc['MaxPerCycle'] = $MaxPerCycle }
     $pause = if ($WhatIf) { 0 } elseif ($PauseMs -ge 0) { $PauseMs } else { 2500 }
     # PIM 100.158 / framework 12.11e CR3: wave (what the updater was served, pim.Settings 'ReleaseWave') + releaseMode (the
-    # 4-hour window after an engine-changing release, from the engine's Strict start). PIM_Telemetry_ReleaseControl: on / off /
-    # AUTO (the default) = ring 0 only, until Invardia confirms (100.158). Identified only.
+    # 4-hour window after an engine-changing release, from the engine's Strict start). PIM_Telemetry_ReleaseControl: ON by
+    # default on every ring since Invardia confirmed the fields (2026-10-16); 0/off/false/no = off. Identified only.
     $rcOn = $false; $rcFields = $null
     if ($on -and "$key".Trim()) {
-        if (-not (Get-Command Test-PimReleaseControlOn -ErrorAction SilentlyContinue)) { $rcLib = Join-Path $PSScriptRoot 'PIM-ReleaseControl.ps1'; if (Test-Path -LiteralPath $rcLib) { . $rcLib } }
-        if (Get-Command Test-PimReleaseControlOn -ErrorAction SilentlyContinue) {
-            $rcOn = [bool](Test-PimReleaseControlOn -Value "$env:PIM_Telemetry_ReleaseControl" -Ring $ring)
+        if (-not (Get-Command Test-PimReleaseControlFieldsOn -ErrorAction SilentlyContinue)) { $rcLib = Join-Path $PSScriptRoot 'PIM-ReleaseControl.ps1'; if (Test-Path -LiteralPath $rcLib) { . $rcLib } }
+        if (Get-Command Test-PimReleaseControlFieldsOn -ErrorAction SilentlyContinue) {
+            $rcOn = [bool](Test-PimReleaseControlFieldsOn -Value "$env:PIM_Telemetry_ReleaseControl")
             if ($rcOn) {
                 $rcWave = $null; try { $rcWave = & $get 'ReleaseWave' } catch { $rcWave = $null }
                 $rcStrict = $null; try { if (Get-Command Get-PimGuardStrictState -ErrorAction SilentlyContinue) { $rcStrict = Get-PimGuardStrictState } } catch { $rcStrict = $null }
