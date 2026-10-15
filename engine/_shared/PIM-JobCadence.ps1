@@ -59,8 +59,11 @@ function Get-PimJobCadenceDefinition {
             scheduleKey = 'DownlinkSchedule'; runNowKey = 'DownlinkRunNow'; lastRunKey = 'DownlinkLastRun'
             # CR5 step 1 (PIM 100.149): the name from the install record; today's name is the default
             jobName = $(if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { Get-PimInstallName -Role downlink } else { 'ca-pim-downlink-s6' })
-            # replicaTimeout 1800 s (Get-PimDownlinkJobYaml) + one trigger: a 'running' record older than this was killed.
-            staleMinutes = 35
+            # framework 12.24: the job may run 7 days, so the timeout no longer says a run died. A 'running' record is in
+            # progress while the platform says its execution is Running (-LastExecutionStatus); when that cannot be read, it
+            # counts as abandoned only after staleMinutes -- no pull is expected to take 6 h, and a second pull must not
+            # start next to a slow one.
+            staleMinutes = 360
         }
     }
     return [pscustomobject]@{
@@ -69,7 +72,7 @@ function Get-PimJobCadenceDefinition {
         plain = 'Signs and publishes the configuration the managed tenants pull (the publish job). A commit that changes what is published also requests a publish.'
         scheduleKey = 'PublishSchedule'; runNowKey = 'PublishRunNow'; lastRunKey = 'PublishLastRun'
         jobName = $(if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { Get-PimInstallName -Role publish } else { 'ca-pim-publish' })
-        staleMinutes = 25   # replicaTimeout 1200 s (Get-PimBaselinePublishJobSpec) + one trigger
+        staleMinutes = 360  # framework 12.24: as the pull -- the execution's status first, else abandoned after 6 h
     }
 }
 
@@ -204,7 +207,9 @@ function Get-PimJobCadenceDecision {
       Order (first match wins):
         store-unreadable  the store could not be read -> RUN (loud). An unknown schedule must not stop the job.
         retry             this is the Container Apps retry of the SAME execution whose run failed or was killed -> RUN
-        in-progress       another execution started a run less than staleMinutes ago and has not finished -> SKIP
+        in-progress       another execution's run has not finished: the platform says its execution is Running
+                          (-LastExecutionStatus), or -- status unknown -- it started less than staleMinutes ago -> SKIP.
+                          A status saying the execution ended (Succeeded / Failed / Stopped / Degraded) = abandoned at once.
         run-now           a Run now request newer than the last start -> RUN (even when disabled: it is an explicit act)
         redeployed        the job was redeployed after the last start -> RUN once (PIM_CadenceDeployedUtc)
         disabled          switched off in the Job schedule -> SKIP
@@ -222,7 +227,9 @@ function Get-PimJobCadenceDecision {
         [string]$StoreError = '',
         [string]$ExecutionName = '',
         [AllowNull()][object]$DeployedUtc,
-        [switch]$ScheduleUnparseable
+        [switch]$ScheduleUnparseable,
+        # framework 12.24: the platform status of the execution named in the last 'running' record ('' = unknown).
+        [string]$LastExecutionStatus = ''
     )
     $def = Get-PimJobCadenceDefinition -Job $Job
     $now = (ConvertTo-PimJobCadenceUtc $NowUtc)
@@ -242,7 +249,9 @@ function Get-PimJobCadenceDecision {
     }
     $abandoned = ''
     if ($last.state -eq 'running' -and $last.startedUtc) {
-        if ($last.startedUtc -gt $now.AddMinutes(-1 * $def.staleMinutes)) {
+        $xs = "$LastExecutionStatus".Trim()
+        $alive = if ($xs -match '^(?i)(Running|Processing)$') { $true } elseif ($xs -match '^(?i)(Succeeded|Failed|Stopped|Degraded)$') { $false } else { $null }
+        if ($alive -eq $true -or ($null -eq $alive -and $last.startedUtc -gt $now.AddMinutes(-1 * $def.staleMinutes))) {
             return (& $mk $false 'in-progress' ("another execution started a $($def.verb) at $(ConvertTo-PimJobCadenceStamp $last.startedUtc) and has not finished") '')
         }
         $abandoned = " (the run started at $(ConvertTo-PimJobCadenceStamp $last.startedUtc) never recorded an end -- treated as abandoned)"
@@ -332,7 +341,10 @@ function Invoke-PimJobCadenceGate {
         [string]$ExecutionName = '',
         [AllowNull()][object]$DeployedUtc,
         [string]$StoreError = '',
-        [scriptblock]$Log = { param($m, $l) Write-Host "[$l] $m" }
+        [scriptblock]$Log = { param($m, $l) Write-Host "[$l] $m" },
+        # framework 12.24: param([string]$ExecutionName) -> the platform status of that execution ('' = unknown). Asked only
+        # when the last record is 'running' under ANOTHER execution; a throw = unknown (the staleMinutes rule decides).
+        [scriptblock]$ExecutionStatus
     )
     $def = Get-PimJobCadenceDefinition -Job $Job
     $err = "$StoreError".Trim()
@@ -349,8 +361,15 @@ function Invoke-PimJobCadenceGate {
     $sched = ConvertFrom-PimJobCadenceJson $raw[$def.scheduleKey]
     $rnow  = ConvertFrom-PimJobCadenceJson $raw[$def.runNowKey]
     $lrun  = ConvertFrom-PimJobCadenceJson $raw[$def.lastRunKey]
+    $xStatus = ''
+    if ($ExecutionStatus) {
+        $lv = Get-PimJobCadenceLastRunView -LastRun $lrun.value
+        if ($lv.state -eq 'running' -and "$($lv.executionName)".Trim() -and "$($lv.executionName)" -ne "$ExecutionName") {
+            try { $xStatus = "$(& $ExecutionStatus "$($lv.executionName)")".Trim() } catch { $xStatus = '' }
+        }
+    }
     $d = Get-PimJobCadenceDecision -Job $Job -Schedule $sched.value -ScheduleUnparseable:(-not $sched.ok) -LastRun $lrun.value -RunNow $rnow.value `
-            -NowUtc $NowUtc -StoreError $err -ExecutionName $ExecutionName -DeployedUtc $DeployedUtc
+            -NowUtc $NowUtc -StoreError $err -ExecutionName $ExecutionName -DeployedUtc $DeployedUtc -LastExecutionStatus $xStatus
     $res = [ordered]@{ run = [bool]$d.run; claimed = $false; decision = $d; record = $null; def = $def }
     if (-not $d.run) {
         & $Log ("{0} {1} -- the {2} {3}" -f $script:PimJobCadenceSkipMarker, $d.code, $def.verb, $d.reason) 'INFO'

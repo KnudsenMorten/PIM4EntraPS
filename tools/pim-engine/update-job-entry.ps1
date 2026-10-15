@@ -121,6 +121,13 @@ function Invoke-PimUpdaterConvergeStep {
         $sz = Invoke-PimJobSizingUpdate -SubscriptionId $sub -ResourceGroup $rg -JobName $tickJob -Arm $armSeam -Graph $graphSeam -Runs $runs -Environment $envMap -StoredCounts $stored
         foreach ($l in @($sz.log)) { Say "  sizing: $l" 'DarkGray' }
         Say ("sizing: $($sz.detail)") $(if (-not $sz.ok) { 'Yellow' } elseif ($sz.changed) { 'Cyan' } else { 'DarkGray' })
+        # framework 12.24 JOB-RUN-LIMIT (owner 2026-10-15): every PIM job in this resource group -> the 7-day maximum run limit.
+        # Raise only; never fails the update.
+        try {
+            $rl = Invoke-PimJobRunLimitUpdate -SubscriptionId $sub -ResourceGroup $rg -Arm $armSeam
+            foreach ($l in @($rl.log)) { Say "  run limit: $l" 'DarkGray' }
+            Say ("run limit: $($rl.detail)") $(if (-not $rl.ok) { 'Yellow' } elseif (@($rl.changed).Count) { 'Cyan' } else { 'DarkGray' })
+        } catch { Say "  run limit: not checked: $($_.Exception.Message)" 'Yellow' }
         # PIM 100.114 (owner 2026-10-12: "4 CPU / 8 GB at all ring 1+2 installs") -- THE MANAGER WEB APP'S SIZE, ON EVERY UPDATE.
         # Raise only; PIM_Bootstrap_Cpu_Manager / PIM_Bootstrap_Memory_Manager on this job wins. A run that rolled the Manager
         # carried the size in the roll's own write (step 1), so this finds nothing to change and reads the result back; a run

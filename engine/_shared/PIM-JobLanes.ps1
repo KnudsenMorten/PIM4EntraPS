@@ -400,11 +400,12 @@ function Invoke-PimScopeGate {
 
 # ---- the execution time limit ----------------------------------------------------------------------------------------
 function Get-PimSchedulerTimeLimitSeconds {
-    # The tick job's replica timeout: PIM_SCHED_TIME_LIMIT_SECONDS, else 3600 inside a Container Apps job execution
-    # (Setup-PimContainers -TickReplicaTimeout), else 0 = no limit (a VM / workstation loop).
+    # The tick job's replica timeout: PIM_SCHED_TIME_LIMIT_SECONDS, else the 7-day run limit inside a Container Apps job
+    # execution (framework 12.24 JOB-RUN-LIMIT, owner 2026-10-15: no product-chosen cap -- the planner defers a job only when
+    # it would not fit inside 7 days), else 0 = no limit (a VM / workstation loop).
     $v = 0
     if ([int]::TryParse("$($env:PIM_SCHED_TIME_LIMIT_SECONDS)".Trim(), [ref]$v) -and $v -gt 0) { return $v }
-    if ((Get-PimSchedulerExecutionName)) { return 3600 }
+    if ((Get-PimSchedulerExecutionName)) { return 604800 }
     return 0
 }
 

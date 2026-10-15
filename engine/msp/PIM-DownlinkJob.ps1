@@ -356,7 +356,7 @@ function Resolve-PimDownlinkRetractionOptIn {
 #   -RegistryIdentity: 'system' | <user-MI-resource-id> -- how the Job pulls from
 #                      ACR (AcrPull on that identity). Default 'system'.
 #   -Cpu/-Memory     : container resources (defaults 0.5 / 1Gi).
-#   -ReplicaTimeout  : per-execution timeout seconds (default 1800).
+#   -ReplicaTimeout  : per-execution timeout seconds (default 604800 = 7 days, framework 12.24 JOB-RUN-LIMIT).
 #   -ReplicaRetryLimit : retries on failure (default 1).
 #
 # Returns @{ ok; reason; action; args=string[]; private=$true; hasInlineSecret=$bool }.
@@ -397,7 +397,7 @@ function Get-PimDownlinkJobYaml {
         [string]$RegistryIdentity = '',   # '' = AUTO: the user-assigned MI if attached, else system (BUG-42)
         [double]$Cpu = 0.5,
         [string]$Memory = '1Gi',
-        [int]$ReplicaTimeout = 1800,
+        [int]$ReplicaTimeout = 604800,
         [int]$ReplicaRetryLimit = 1,
         # BUG-72/73: ACA secrets as `name=value`; referenced from env as `secretref:<name>`.
         [string[]]$Secrets = @()
@@ -515,7 +515,7 @@ function Build-PimDownlinkJobArgs {
         [string]$RegistryIdentity = '',   # '' = AUTO: the user-assigned MI if attached, else system (BUG-42)
         [double]$Cpu = 0.5,
         [string]$Memory = '1Gi',
-        [int]$ReplicaTimeout = 1800,
+        [int]$ReplicaTimeout = 604800,
         [int]$ReplicaRetryLimit = 1,
         # BUG-38: create/update now go through --yaml, because --command cannot express a command
         # with dashed arguments. The caller supplies the path the wrapper will write the returned

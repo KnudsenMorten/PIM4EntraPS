@@ -236,7 +236,7 @@ param(
     [ValidateSet('always-on','cron')][string]$WorkerMode = 'cron',
     [string]$TickCron        = '*/5 * * * *',     # UTC, 5 fields
     [string]$TickJobName     = 'ca-pim-tick',
-    [int]$TickReplicaTimeout = 3600,              # a full reconcile must fit inside this
+    [int]$TickReplicaTimeout = 604800,            # framework 12.24 JOB-RUN-LIMIT: 7 days (never lower; sizing enforces it)
     # 🔴 100.31 / framework 12.15 TENANT-SIZING-1 (2026-10-09): the tick is SIZED FOR THE TENANT. A ~10.8k-object tenant ran
     # the active-assignments snapshot out of memory at the 0.5 CPU / 1 GiB every tenant got. The users + groups + service
     # principals are counted here ONCE (Graph $count) and the job gets the band for that count (engine/_shared/
@@ -902,7 +902,7 @@ function Invoke-PimDbInitJob {
         environmentId = $envId
         configuration = @{
             triggerType         = 'Manual'
-            replicaTimeout      = 900
+            replicaTimeout      = 604800   # framework 12.24 JOB-RUN-LIMIT: 7 days
             replicaRetryLimit   = 0
             manualTriggerConfig = @{ parallelism = 1; replicaCompletionCount = 1 }
             registries          = @(@{ server = "$AcrName.azurecr.io"; identity = $regIdent })

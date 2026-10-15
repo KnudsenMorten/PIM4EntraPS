@@ -11,18 +11,22 @@
     "Exception of type 'System.OutOfMemoryException' was thrown." The job had the size every tenant got.
 
     THE RULE (per job, on that job's object count; Azure Container Apps Consumption pairs only):
-        <  5,000 objects  -> the job's default        (tick: 0.5 CPU / 1.0Gi, its own replicaTimeout)
-        5,000 - 14,999    -> 2.0 CPU / 4.0Gi, replicaTimeout 7200 s
-        >= 15,000         -> 4.0 CPU / 8.0Gi, replicaTimeout 14400 s   (the largest Consumption pair -- the cap)
+        <  5,000 objects  -> the job's default        (tick: 0.5 CPU / 1.0Gi)
+        5,000 - 14,999    -> 2.0 CPU / 4.0Gi
+        >= 15,000         -> 4.0 CPU / 8.0Gi   (the largest Consumption pair -- the cap)
+      * THE RUN LIMIT IS NOT SIZED (framework 12.24 JOB-RUN-LIMIT, owner 2026-10-15: *"job limit must be ... 7 days ... we
+        can not limit cap session runtime"*): every job's replicaTimeout is Azure's maximum, $script:PimJobRunLimitSeconds
+        (604,800 s = 7 days), at every band, on every update, whatever was set before. PIM_Bootstrap_ReplicaTimeout_<Job> is
+        ignored with a note. A dead run is found by its lease / execution status, never by the timeout.
       * It only ever RAISES: never below the job's default, never below what the job already runs.
-      * A size the customer set wins: PIM_Bootstrap_Cpu_<Job> / PIM_Bootstrap_Memory_<Job> / PIM_Bootstrap_ReplicaTimeout_<Job>
+      * A size the customer set wins: PIM_Bootstrap_Cpu_<Job> / PIM_Bootstrap_Memory_<Job>
         (<Job> as Get-PimJobSettingSuffix spells it: ca-pim-tick -> Tick). An invalid value is ignored with a note.
       * PIM's engine jobs (ca-pim-tick, and the active-assignments snapshot that runs INSIDE the tick) count
         users + groups + service principals.
       * Counts: Microsoft Graph $count (ConsistencyLevel: eventual), read at install and on every update; when that read
         fails, the counts RECORDED on the job (its pim-sizing-* tags) stand.
       * SELF-CORRECT: a job whose execution ran out of memory or hit its time limit since it was last sized is raised ONE
-        band (and its replicaTimeout one step, at most 21600 s = 6 h) by the next update.
+        band by the next update (its replicaTimeout is already the 7-day maximum).
 
     THE MANAGER WEB APP AND THE DATABASE (owner 2026-10-12, framework 12.15 "CHANGED FOR PIM", PIM REQUIREMENTS 100.114):
     the rule above sized JOBS only -- the product's web app was sized by nothing. Two product defaults, defined HERE and
@@ -43,8 +47,11 @@
 
 Set-StrictMode -Off
 
+# framework 12.24 JOB-RUN-LIMIT (owner 2026-10-15): EVERY PIM Container Apps job runs with Azure's maximum run limit, 7 days.
+# No product-chosen cap -- the installer, every job definition and the updater (Invoke-PimJobRunLimitUpdate) use this one value.
+$script:PimJobRunLimitSeconds = 604800
 $script:PimJobSizeDefaults = @{
-    Tick = @{ Cpu = '0.5'; Memory = '1.0Gi'; ReplicaTimeout = 3600 }
+    Tick = @{ Cpu = '0.5'; Memory = '1.0Gi'; ReplicaTimeout = $script:PimJobRunLimitSeconds }
 }
 # THE MANAGER WEB APP'S DEFAULT SIZE. Owner 2026-10-12: "4 CPU / 8 GB at all ring 1+2 installs" -- "lets give everyone a
 # good experience for now" -- "we can always lower it". Why: at 0.5 CPU / 1 GiB the Manager ran out of memory reading a
@@ -57,13 +64,11 @@ $script:PimSqlTierDefault = 'S3'
 $script:PimSqlMaxSizeBytesDefault = [int64]268435456000     # 250 GB
 # The bands, in order. Band 0 = the job's default.
 $script:PimJobSizeBands = @(
-    [pscustomobject]@{ Band = 1; MinObjects = 5000;  Cpu = '2.0'; Memory = '4.0Gi'; ReplicaTimeout = 7200 }
-    [pscustomobject]@{ Band = 2; MinObjects = 15000; Cpu = '4.0'; Memory = '8.0Gi'; ReplicaTimeout = 14400 }
+    [pscustomobject]@{ Band = 1; MinObjects = 5000;  Cpu = '2.0'; Memory = '4.0Gi'; ReplicaTimeout = $script:PimJobRunLimitSeconds }
+    [pscustomobject]@{ Band = 2; MinObjects = 15000; Cpu = '4.0'; Memory = '8.0Gi'; ReplicaTimeout = $script:PimJobRunLimitSeconds }
 )
 $script:PimJobSizeMaxCpu = 4.0
 $script:PimJobSizeMaxMemoryGi = 8.0
-$script:PimJobSelfCorrectTimeoutSteps = @(3600, 7200, 14400, 21600)
-$script:PimJobSelfCorrectMaxTimeout = 21600
 $script:PimTenantSizingTagPrefix = 'pim-sizing-'
 
 function Get-PimJobSettingSuffix {
@@ -141,7 +146,8 @@ function Get-PimJobDefaultSize {
     param([string]$Job = 'ca-pim-tick', [int]$DefaultReplicaTimeout = 0)
     $sfx = Get-PimJobSettingSuffix -Job $Job
     $d = if ($script:PimJobSizeDefaults.ContainsKey($sfx)) { $script:PimJobSizeDefaults[$sfx] } else { $script:PimJobSizeDefaults['Tick'] }
-    $t = if ($DefaultReplicaTimeout -gt 0) { $DefaultReplicaTimeout } else { [int]$d.ReplicaTimeout }
+    # framework 12.24: the timeout is never below the 7-day run limit -- a shorter -DefaultReplicaTimeout is not a cap.
+    $t = [Math]::Max([int]$DefaultReplicaTimeout, [int]$script:PimJobRunLimitSeconds)
     return [pscustomobject]@{ Cpu = "$($d.Cpu)"; Memory = "$($d.Memory)"; ReplicaTimeout = $t }
 }
 
@@ -372,16 +378,13 @@ function Get-PimJobSelfCorrection {
 }
 
 function Step-PimJobSize {
-    <# PURE. One band up (capped at 4 CPU / 8 GiB) and the replicaTimeout one step up (3600 -> 7200 -> 14400 -> 21600, max 6 h). #>
-    param([Parameter(Mandatory)][double]$Cpu, [Parameter(Mandatory)][double]$MemoryGi, [Parameter(Mandatory)][int]$ReplicaTimeout)
+    <# PURE. One band up (capped at 4 CPU / 8 GiB); the replicaTimeout is always the 7-day run limit (framework 12.24). #>
+    param([Parameter(Mandatory)][double]$Cpu, [Parameter(Mandatory)][double]$MemoryGi, [int]$ReplicaTimeout = 0)
     $band = Get-PimJobBandOf -Cpu $Cpu -MemoryGi $MemoryGi
     $next = @($script:PimJobSizeBands | Where-Object { $_.Band -eq ($band + 1) }) | Select-Object -First 1
     $c = $Cpu; $m = $MemoryGi
     if ($next) { $c = [Math]::Max($Cpu, [double]$next.Cpu); $m = [Math]::Max($MemoryGi, (ConvertTo-PimJobMemoryGi $next.Memory)) }
-    $t = $ReplicaTimeout
-    foreach ($s in $script:PimJobSelfCorrectTimeoutSteps) { if ($s -gt $ReplicaTimeout) { $t = $s; break } }
-    if ($t -gt $script:PimJobSelfCorrectMaxTimeout) { $t = [Math]::Max($ReplicaTimeout, $script:PimJobSelfCorrectMaxTimeout) }
-    if ($ReplicaTimeout -ge $script:PimJobSelfCorrectMaxTimeout) { $t = $ReplicaTimeout }
+    $t = [int]$script:PimJobRunLimitSeconds
     return [pscustomobject]@{ Cpu = [Math]::Min($c, $script:PimJobSizeMaxCpu); MemoryGi = [Math]::Min($m, $script:PimJobSizeMaxMemoryGi); ReplicaTimeout = $t
                               Band = (Get-PimJobBandOf -Cpu ([Math]::Min($c, $script:PimJobSizeMaxCpu)) -MemoryGi ([Math]::Min($m, $script:PimJobSizeMaxMemoryGi))) }
 }
@@ -431,11 +434,10 @@ function Get-PimContainerJobResources {
     $sfx = Get-PimJobSettingSuffix -Job $Job
     $gv = { param($n) if ($Settings -and $Settings.ContainsKey($n) -and -not [string]::IsNullOrWhiteSpace([string]$Settings[$n])) { "$($Settings[$n])".Trim() } else { $null } }
     $override = [ordered]@{}
+    # framework 12.24 JOB-RUN-LIMIT: the run limit is always Azure's maximum -- a customer value is not a size and is ignored.
     $n = 'PIM_Bootstrap_ReplicaTimeout_{0}' -f $sfx; $v = & $gv $n
-    if ($null -ne $v) {
-        if ($v -match '^\d+$' -and [int64]$v -ge 300 -and [int64]$v -le 86400) { $to = [int]$v; $override['ReplicaTimeout'] = $to; $source = 'customer' }
-        else { $notes.Add(("{0} = '{1}' is not a number of seconds between 300 and 86400 -- using {2}" -f $n, $v, $to)) }
-    }
+    if ($null -ne $v) { $notes.Add(("{0} = '{1}' is ignored -- every PIM job runs with the 7-day maximum run limit ({2} s)" -f $n, $v, $script:PimJobRunLimitSeconds)) }
+    $to = [Math]::Max([int]$to, [int]$script:PimJobRunLimitSeconds)
     $n = 'PIM_Bootstrap_Cpu_{0}' -f $sfx; $v = & $gv $n
     if ($null -ne $v) {
         $c = ConvertTo-PimJobCpu $v
@@ -735,6 +737,57 @@ function Invoke-PimJobSizingUpdate {
         }
         return [pscustomobject]@{ ok = $false; changed = $false; size = $null; detail = "$JobName not sized: $((("$($_.Exception.Message)") -split "`n")[0])"; log = @($log.ToArray()) }
     }
+}
+
+function Invoke-PimJobRunLimitUpdate {
+    <#
+      framework 12.24 JOB-RUN-LIMIT (owner 2026-10-15): EVERY PIM Container Apps job in this install's resource group gets
+      Azure's maximum run limit ($script:PimJobRunLimitSeconds = 7 days) on every update -- the tick, the updater itself (its
+      NEXT execution), pull / publish, db-init, support SQL, as-built. Raise only: a job already at the limit is not written.
+      A job is PIM's when its name carries 'pim' (the install's own resource group; nothing else is touched).
+      One PATCH per job: its configuration WITHOUT secrets (a GET returns them without values; sending them back would blank
+      them) + its template as read, replicaTimeout set. Busy (OperationInProgress) is waited out, then left for the next
+      update. Never throws. Returns @{ ok; changed[]; unchanged[]; failed[]; detail; log[] }.
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup,
+          [Parameter(Mandatory)][scriptblock]$Arm, [int[]]$BusyWaits = @(20, 20, 20, 20, 20, 20), [scriptblock]$Sleep)
+    $limit = [int]$script:PimJobRunLimitSeconds
+    $log = New-Object System.Collections.Generic.List[string]
+    $changed = New-Object System.Collections.Generic.List[string]; $same = New-Object System.Collections.Generic.List[string]; $failed = New-Object System.Collections.Generic.List[string]
+    $base = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs"
+    try { $list = & $Arm 'GET' "$base`?api-version=$($script:PimTenantSizingAcaApi)" $null }
+    catch { return [pscustomobject]@{ ok = $false; changed = @(); unchanged = @(); failed = @(); detail = "run limit: the jobs could not be listed ($((("$($_.Exception.Message)") -split "`n")[0]))"; log = @() } }
+    $jobs = @(@($list.value) | Where-Object { $_ -and "$($_.name)" -match '(?i)pim' })
+    foreach ($j in $jobs) {
+        $name = "$($j.name)"
+        $cur = 0; [void][int]::TryParse("$($j.properties.configuration.replicaTimeout)", [ref]$cur)
+        if ($cur -ge $limit) { $same.Add($name); continue }
+        $path = "$base/$name`?api-version=$($script:PimTenantSizingAcaApi)"
+        $body = {
+            param($jo)
+            $cfg = [ordered]@{}
+            foreach ($p in @($jo.properties.configuration.PSObject.Properties)) { if ($p.Name -ne 'secrets') { $cfg[$p.Name] = $p.Value } }
+            $cfg['replicaTimeout'] = $limit
+            @{ properties = @{ configuration = $cfg; template = $jo.properties.template } }
+        }
+        $try = @{ n = 0 }
+        try {
+            [void](Invoke-PimArmBusyRetry -Waits $BusyWaits -Sleep $Sleep -Write {
+                $try.n++
+                # The full job is read for the write (a list item may be abridged), and read AGAIN after a busy wait.
+                $jw = & $Arm 'GET' $path $null
+                if (-not $jw) { throw "job '$name' not found" }
+                & $Arm 'PATCH' $path (& $body $jw) })
+            $changed.Add($name); $log.Add(("{0}: replicaTimeout {1} s -> {2} s" -f $name, $cur, $limit))
+        } catch {
+            $m = (("$($_.Exception.Message)") -split "`n")[0]
+            $failed.Add($name)
+            $log.Add($(if ($m -match '(?i)OperationInProgress|active provisioning operation') { "${name}: busy -- raised on the next update" } else { "${name}: not raised ($m)" }))
+        }
+    }
+    $detail = ('run limit {0} s (7 days): {1} raised{2}, {3} already at it{4}' -f $limit, $changed.Count,
+        $(if ($changed.Count) { " ($($changed -join ', '))" } else { '' }), $same.Count, $(if ($failed.Count) { "; NOT raised: $($failed -join ', ')" } else { '' }))
+    return [pscustomobject]@{ ok = (-not $failed.Count); changed = @($changed.ToArray()); unchanged = @($same.ToArray()); failed = @($failed.ToArray()); detail = $detail; log = @($log.ToArray()) }
 }
 
 function Invoke-PimManagerAppSizeUpdate {

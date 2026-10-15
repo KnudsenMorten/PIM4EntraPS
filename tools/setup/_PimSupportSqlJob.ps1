@@ -255,7 +255,7 @@ function Get-PimSupportSqlJobPlan {
             @{ name = 'PIM_SUPPORTSQL_DB_USER'; value = "$DbUserName" }
             @{ name = 'PIM_SUPPORTSQL_MI_CLIENT_ID'; value = $cid }
         )
-        $cfg = [ordered]@{ triggerType = 'Manual'; replicaTimeout = 600; replicaRetryLimit = 0; manualTriggerConfig = @{ parallelism = 1; replicaCompletionCount = 1 } }
+        $cfg = [ordered]@{ triggerType = 'Manual'; replicaTimeout = 604800; replicaRetryLimit = 0; manualTriggerConfig = @{ parallelism = 1; replicaCompletionCount = 1 } }
         if ($regs.Count) { $cfg['registries'] = @($regs.ToArray()) }
         $props = [ordered]@{ environmentId = $p.environmentId }
         if ("$($Template.properties.workloadProfileName)".Trim()) { $props['workloadProfileName'] = "$($Template.properties.workloadProfileName)".Trim() }

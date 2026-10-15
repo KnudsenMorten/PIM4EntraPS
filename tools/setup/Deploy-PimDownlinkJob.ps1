@@ -451,7 +451,7 @@ $yamlPath = "in-memory:pim-$JobName-$ResourceGroup"
 function New-PimDownlinkJobResource {
     param([string]$Location, [string]$EnvironmentId, [string]$Image, [string]$Cron, [string[]]$Command = @(), [string[]]$EnvVars = @(),
           [string]$AcrServer, [string]$IdentityResourceId, [switch]$SystemAssigned, [string]$RegistryIdentity = '',
-          [object[]]$Secrets = @(), [double]$Cpu = 0.5, [string]$Memory = '1Gi', [int]$ReplicaTimeout = 1800, [int]$ReplicaRetryLimit = 1)
+          [object[]]$Secrets = @(), [double]$Cpu = 0.5, [string]$Memory = '1Gi', [int]$ReplicaTimeout = 604800, [int]$ReplicaRetryLimit = 1)
     if ("$IdentityResourceId".Trim()) {
         $ua = @{}; $ua["$IdentityResourceId".Trim()] = @{}
         $identity = @{ type = $(if ($SystemAssigned) { 'SystemAssigned,UserAssigned' } else { 'UserAssigned' }); userAssignedIdentities = $ua }
