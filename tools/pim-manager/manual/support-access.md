@@ -3,6 +3,25 @@
 Invardia has **no access** to your installation unless you create the **Invardia Support app** in your tenant. Most
 installations never do. PIM Manager runs, updates and protects itself without it.
 
+## The support team
+
+Every request -- a portal ticket, a mail to support@invardia.com, the in-product assistant, or an automatic event
+(a failed run, a guard trip, an install failure) -- becomes a numbered ticket (SUP-yyyy-nnnnn) and is handled at three
+levels:
+
+| Level | Who | What it does |
+|---|---|---|
+| 1 | Support agent (24x7) | Reads every event within minutes and **qualifies it before routing**: is it valid; a feature, a defect, a question or a customer-side setting; its priority (P1-P4); a bigger design; a hotfix; does it need the owner's yes. Answers how-to and customer-side questions from the published documentation. |
+| 2 | Product engineering (PIM Manager) | Reproduces and fixes a defect, tests it, releases it to ring 0 and ring 1, monitors it and reports back. |
+| 3 | Support manager / development owner | Bigger design changes, security defects, every reply on a P1, and the approval of rings 2 and 3. |
+
+- **Release rule:** the product fixes and releases to rings 0 and 1; the support agent proposes the version as a
+  candidate; the owner approves rings 2 and 3. An agent never approves a customer ring.
+- **Every message is checked** by a supervisor and a built-in gatekeeper before it reaches you, and every message shows
+  the level and role that wrote it.
+- You follow the ticket in the portal and by mail: Received, Acknowledged, Escalated, Fix in progress, Fix ready,
+  Resolved.
+
 ## When you want help
 
 1. Run Invardia's setup script for the Support app (published at https://invardia.com/support/) and choose a level.

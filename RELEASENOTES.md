@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.635 -- 2026-10-15
+
+- The documentation inside the portal and the security review pack describe the full design (no gaps list); the as-built reader is set up through the signed access procedure
+
 ## 2.4.634 -- 2026-10-15
 
 - Least-privilege SQL access procedure v2, proven on real SQL: the state is read inside the signed procedure, every role is created owned by dbo, a new role never needs rights the updater lacks

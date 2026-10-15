@@ -1028,6 +1028,19 @@ function Get-PimAsBuiltReaderUserSql {
     ) -join "`n")
 }
 
+function Get-PimAsBuiltReaderUserProcSql {
+    <#
+      PURE. The same reader user through the signed access procedure (framework 12.23, PIM 100.156): created from its app
+      id (TYPE = E) and put in pim_asbuilt, whose ONLY grant is SELECT on pim.vw_AsBuiltSettings (the catalog). Fails when
+      the procedure is not installed -- the caller then uses Get-PimAsBuiltReaderUserSql.
+    #>
+    param([Parameter(Mandatory)][string]$DbUserName, [Parameter(Mandatory)][string]$AppId)
+    if ("$DbUserName" -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw "'$DbUserName' is not a safe database user name" }
+    $g = [guid]::Empty
+    if (-not [guid]::TryParse("$AppId", [ref]$g)) { throw "'$AppId' is not an application id" }
+    return "EXEC [pim].[usp_ApplyAccess] @Action = N'user', @Role = N'pim_asbuilt', @UserName = N'$DbUserName', @AppId = '$g';"
+}
+
 function Test-PimAsBuiltRollSkip {
     <#
       PURE. Does the updater's generic job roll (update-job-entry 2b) SKIP this job? Only caj-pim-asbuilt, and only when the
@@ -1220,7 +1233,17 @@ function Invoke-PimAsBuiltConverge {
             [void](& $Sql (Get-PimAsBuiltViewSql) @{})
             # The reader user's SID is id-pim-asbuilt's clientId (= its app id), read over ARM above -- no Graph.
             $appId = $uamiCid
-            if ($appId) { [void](& $Sql (Get-PimAsBuiltReaderUserSql -DbUserName $JobName -AppId $appId) @{}) }
+            if ($appId) {
+                # Framework 12.23 P4/P9 (PIM 100.156): where the signed access procedure is installed, the reader user goes into
+                # pim_asbuilt THROUGH it (the role's SELECT on the view is in the catalog) -- a least-privilege updater has no
+                # right to CREATE USER / GRANT itself. No procedure yet (or it refuses): the direct statement, as before.
+                $viaProc = $false
+                try {
+                    [void](& $Sql (Get-PimAsBuiltReaderUserProcSql -DbUserName $JobName -AppId $appId) @{})
+                    $viaProc = $true
+                } catch { $viaProc = $false }
+                if (-not $viaProc) { [void](& $Sql (Get-PimAsBuiltReaderUserSql -DbUserName $JobName -AppId $appId) @{}) }
+            }
             else { & $add 'asbuilt-sql-user' 'warn' "as-built: the user-assigned identity $uamiName (the job's identity) is not readable -- $JobName's database user was not made this run; the next update retries, or run tools/setup/Deploy-PimAsBuiltJob.ps1 once" }
             $envObj = if ($envId) { & $get "$envId`?$aca" } else { $null }
             $facts = [ordered]@{ region = ("$location" -replace '\s', '').ToLowerInvariant(); resourceGroup = $ResourceGroup; recordedUtc = [datetime]::UtcNow.ToString('o') }

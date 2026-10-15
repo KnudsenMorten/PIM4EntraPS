@@ -17,7 +17,7 @@ changes the engine, for 24 hours (see [Guards and Strict mode](guards)).
 
 Each installation records the names of its own resources (portal, engine, updater, jobs, the SQL admin group). Every
 script and job reads them from that record, so an installation with its own names keeps working through updates.
-Existing installations recorded today's names; nothing changes for them.
+Existing installations record the names they already use; nothing changes for them.
 
 ## The security cut-over
 

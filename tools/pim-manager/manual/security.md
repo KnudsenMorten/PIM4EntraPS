@@ -1,7 +1,7 @@
 # Security design
 
 This page summarises the security design. The complete review pack for security teams (every identity and permission,
-data, the vendor's access, supply chain, the threat model, the compliance mapping and the known gaps with dates) is
+data, the vendor's access, supply chain, the threat model with its controls, the compliance mapping and the exit) is
 published at https://invardia.com/products/pim-manager/security/.
 
 ## Sign-in
