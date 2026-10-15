@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.640 -- 2026-10-16
+
+- The updater retries a licence read that fails once and names the real cause, instead of reporting that no licence is installed
+
 ## 2.4.639 -- 2026-10-15
 
 - A failing job reaches Invardia before its alert mail, and the mail names the error code with a link to its page; no alert mail for licence gaps, throttling or problems already fixed; a long silent step is no longer mistaken for a stopped run; the engine and the portal no longer need the right to change the database structure; releases report which parts they change
