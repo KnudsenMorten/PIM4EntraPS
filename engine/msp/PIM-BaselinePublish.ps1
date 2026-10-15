@@ -498,6 +498,9 @@ function Get-PimBaselinePublishJobSpec {
         # When the job was deployed (ISO UTC). The gate runs the publish once after a redeploy, so a deploy's inputs
         # (key, image) take effect on the next trigger and the build's first-publish step publishes. Omitted = no stamp.
         [string]$DeployedUtc = '',
+        # framework 12.24 / PIM 100.166 (a): the job's OWN resource id (PIM_JobId) -- the cadence gate reads the status of an
+        # earlier execution of this job with it. An id, not a credential. Omitted = not emitted.
+        [string]$JobId = '',
         [Parameter(Mandatory)][string]$RegistryServer,
         [string]$RegistryIdentity = 'system',
         [Parameter(Mandatory)][string]$SqlServerFqdn,
@@ -530,6 +533,10 @@ function Get-PimBaselinePublishJobSpec {
     if ("$DeployedUtc".Trim()) {
         if ("$DeployedUtc".Trim() -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$') { return @{ ok = $false; reason = "DeployedUtc '$DeployedUtc' is not an ISO UTC stamp (yyyy-MM-ddTHH:mm:ssZ)" } }
         $env['PIM_CadenceDeployedUtc'] = "$DeployedUtc".Trim()
+    }
+    if ("$JobId".Trim()) {
+        if ("$JobId".Trim() -notmatch '(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.App/jobs/[^/]+$') { return @{ ok = $false; reason = "JobId '$JobId' is not a Container Apps job resource id" } }
+        $env['PIM_JobId'] = "$JobId".Trim()
     }
     foreach ($k in @($env.Keys)) {
         $v = "$($env[$k])"

@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.637 -- 2026-10-15
+
+- A SuperAdmin can cancel a running engine run from the Jobs page (final, never resumed); a run that makes no progress for an hour is reported while it keeps running; the managed-tenant pull and the publish see at once when an earlier run has ended; after an update, a run still on the old version is stopped and runs again on the new one
+
 ## 2.4.636 -- 2026-10-15
 
 - Every job now runs with the maximum run limit of 7 days, set at install and raised on every update: a long run on a very large tenant is never cut short, and the engine no longer plans its work to fit one hour

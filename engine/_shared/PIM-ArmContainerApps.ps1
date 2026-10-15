@@ -296,6 +296,41 @@ function Set-PimAcaJobImage {
     Invoke-PimArm -Method PATCH -Path $path -Body @{ properties = @{ template = $job.properties.template } } -ApiVersion $script:PimAcaApi
 }
 
+function Stop-PimAcaJobOtherVersionExecutions {
+    <#
+      PIM 100.166 (b) / framework 12.24 (SI's rule, 2026-10-15: "the updater cancels a run that started on another version").
+      With a 7-day run limit an execution that started on the OLD image could keep running old code for days after the roll.
+      Run by the updater right after it rolled the job: every execution still Running / Processing whose containers do NOT run
+      -KeepImage is stopped (ARM POST <job>/executions/<name>/stop). The scheduler then closes its 'running' records as
+      interrupted by the update (its version differs) -- not a failure, the job runs again on its next turn, on the new code.
+      Kept: an execution on -KeepImage, and one whose image cannot be read (never stop what cannot be judged). Never throws.
+      -Arm: param($Method, $Path) -> GET returns the list's items (all pages), POST the answer; a test seam.
+      Returns @{ ok; stopped[]; kept[]; failed[]; detail }.
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name,
+          [Parameter(Mandatory)][string]$KeepImage, [scriptblock]$Arm)
+    if (-not $Arm) { $Arm = { param($m, $p) if ($m -eq 'GET') { @(Invoke-PimArm -Method GET -Path $p -ApiVersion $script:PimAcaApi -All) } else { Invoke-PimArm -Method $m -Path $p -ApiVersion $script:PimAcaApi -Body @{} } } }
+    $jobId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$Name"
+    $stopped = New-Object System.Collections.Generic.List[string]; $kept = New-Object System.Collections.Generic.List[string]; $failed = New-Object System.Collections.Generic.List[string]
+    $list = @()
+    try { $list = @(& $Arm 'GET' "$jobId/executions?api-version=$($script:PimAcaApi)") }
+    catch { return [pscustomobject]@{ ok = $false; stopped = @(); kept = @(); failed = @(); detail = "the runs of $Name could not be listed ($((("$($_.Exception.Message)") -split "`n")[0])) -- an old-version run, if any, finishes by itself" } }
+    $items = @(foreach ($x in $list) { if ($x -and $x.PSObject.Properties['value']) { @($x.value) } elseif ($x) { $x } })
+    foreach ($e in $items) {
+        $st = "$($e.properties.status)".Trim()
+        if ($st -notmatch '^(?i)(Running|Processing)$') { continue }
+        $en = "$($e.name)".Trim(); if (-not $en) { continue }
+        $imgs = @(@($e.properties.template.containers) | ForEach-Object { "$($_.image)".Trim() } | Where-Object { $_ })
+        if (-not $imgs.Count -or ($imgs -contains "$KeepImage".Trim())) { $kept.Add($en); continue }
+        try { [void](& $Arm 'POST' "$jobId/executions/$en/stop?api-version=$($script:PimAcaApi)"); $stopped.Add("$en ($($imgs -join ', '))") }
+        catch { $failed.Add("$en ($((("$($_.Exception.Message)") -split "`n")[0]))") }
+    }
+    $detail = if ($stopped.Count -or $failed.Count) {
+        ('runs of {0} on another version: {1} stopped{2}{3}' -f $Name, $stopped.Count, $(if ($stopped.Count) { " ($($stopped -join '; '))" } else { '' }), $(if ($failed.Count) { "; NOT stopped: $($failed -join '; ')" } else { '' }))
+    } else { "no run of $Name on another version" }
+    return [pscustomobject]@{ ok = (-not $failed.Count); stopped = @($stopped.ToArray()); kept = @($kept.ToArray()); failed = @($failed.ToArray()); detail = $detail }
+}
+
 function Get-PimUpdaterFollowUpDecision {
     <#
       §71.44 (operator, 2026-09-18) -- PURE. Should the updater start ONE more run of itself?

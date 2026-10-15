@@ -2400,6 +2400,9 @@ function Add-PimJobRunRecord {
     Update-PimJobRunHistory -Attempts $Attempts -Mutate {
         param($all)
         $all = @($all)
+        # PIM 100.166 (b): a run a person CANCELLED is final -- a late write by the stopped run (or a retry of its unsaved
+        # record) never turns it back into completed / failed / running.
+        if ("$($Run.runId)".Trim() -and "$($Run.status)" -ne 'cancelled' -and @($all | Where-Object { "$($_.runId)" -eq "$($Run.runId)" -and "$($_.status)" -eq 'cancelled' }).Count) { return $null }
         if ("$($Run.runId)".Trim()) { $all = @($all | Where-Object { "$($_.runId)" -ne "$($Run.runId)" }) }
         ,@(@($Run) + $all)
     }
@@ -2928,7 +2931,9 @@ function Get-PimJobsStatus {
         $healedBy = $null
         foreach ($r in $recentWindow) {
             $st = "$($r.status)"
-            if ($st -in @('unimplemented', 'skipped') -or "$($r.detail)" -match '^no-handler') { continue }
+            # PIM 100.166 (b): a CANCELLED run (a person stopped it) says nothing about the job's health -- stepped over, never a
+            # failure and never a recovery.
+            if ($st -in @('unimplemented', 'skipped', 'cancelled') -or "$($r.detail)" -match '^no-handler') { continue }
             if ($st -eq 'interrupted') { if (-not $headFails.Count) { [void]$intrHead.Add($r) }; continue }
             if (& $isThrottleOk $r) { if (-not $headFails.Count) { break }; continue }   # §100.45: the newest throttled run decides: retrying, not failing
             if ([bool]$r.ok -or $st -eq 'held') { break }
@@ -3009,6 +3014,13 @@ function Get-PimJobsStatus {
             $stk = Get-PimJobStuckState -Job $j -NowUtc $now -LastRunUtc "$lastRun" -InProgress ([bool]$inProg)
         }
         $jobAreas = @(); try { $jobAreas = @((Get-PimJobAreas -Job $j).areas) } catch { $jobAreas = @() }
+        # PIM 100.166 (c): a RUNNING run whose progress mark (on its lock) has not moved for the threshold -- one calm line,
+        # amber, never a number in the menu, never "failed"; it clears itself when the run moves on or ends.
+        $np = $null
+        if ($inProg -and $null -ne $lockMap) {   # PIM-JobLanes.ps1 is dot-sourced by this file: no capability gate
+            $lk = @(@($lockMap.Values) | Where-Object { $_ -and "$($_.runId)".Trim() -and "$($_.runId)" -eq "$($inProg.runId)" }) | Select-Object -First 1
+            if ($lk) { try { $np = Get-PimRunProgressState -Lock $lk -NowUtc $now } catch { $np = $null } }
+        }
         $rows.Add([pscustomobject]@{
             name            = $name
             type            = "$($j.type)"
@@ -3037,6 +3049,10 @@ function Get-PimJobsStatus {
             # PIM 100.48: genuinely stuck (no run for > 3x the interval AND >= 1 h) -- the only "late" that needs attention
             stuck           = [bool]$stk.stuck
             stuckSinceUtc   = "$($stk.sinceUtc)"
+            noProgress        = [bool]($np -and $np.noProgress)
+            noProgressSinceUtc = $(if ($np -and $np.noProgress) { "$($np.sinceUtc)" } else { '' })
+            noProgressMinutes = $(if ($np -and $np.noProgress) { [int]$np.minutes } else { 0 })
+            noProgressText    = $(if ($np -and $np.noProgress) { "$($np.text)" } else { '' })
             hybridWorker    = $(if ($featOff) { $null } elseif ("$($j.type)".Trim().ToLowerInvariant() -in $script:PimHybridWorkerJobTypes) { Get-PimHybridWorkerJobStatus -Type "$($j.type)" -NowUtc $now -Heartbeat $hwHeartbeat } else { $null })
             lastRan         = $(if ($last) { [bool]$last.ran } else { $null })
             lastDurationMs  = $(if ($last) { [int64]$last.durationMs } else { $null })   # [int64] -- see BUG-04
@@ -3108,6 +3124,9 @@ function Get-PimJobsStatus {
         # PIM 100.48: genuinely stuck jobs, and what the "Needs attention" banner + the menu number count: FAILING or STUCK
         # (never merely late -- overdueCount stays in the data only, the page no longer shows it)
         stuckCount     = @($rows | Where-Object { $_.stuck }).Count
+        # PIM 100.166 (c): running without progress -- shown on the Jobs page only, NEVER in attentionCount (a warning puts
+        # no number in the menu; owner 2026-10-12)
+        noProgressCount = @($rows | Where-Object { $_.noProgress }).Count
         attentionCount = @($rows | Where-Object { $_.unackedFailureCount -gt 0 -or $_.stuck }).Count
         # 71.13: jobs with a standing HOLD (needs approval) -- counted under "needs attention", never under failing.
         heldCount    = @($rows | Where-Object { $_.needsApproval }).Count
@@ -3188,7 +3207,7 @@ function Set-PimRunThrottleState {
         $prev = $Previous
         if (-not $PreviousGiven -and $null -eq $prev) {
             $prev = @(Get-PimJobRunHistory -Name "$($Run.name)" | Where-Object {
-                "$($_.runId)" -ne "$($Run.runId)" -and "$($_.finishedUtc)".Trim() -and "$($_.status)" -notin @('running', 'skipped', 'unimplemented', 'interrupted') }) | Select-Object -First 1
+                "$($_.runId)" -ne "$($Run.runId)" -and "$($_.finishedUtc)".Trim() -and "$($_.status)" -notin @('running', 'skipped', 'unimplemented', 'interrupted', 'cancelled') }) | Select-Object -First 1
         }
         $thr = if (Get-Command Get-PimThrottleAlertThresholds -ErrorAction SilentlyContinue) { Get-PimThrottleAlertThresholds } else { [pscustomobject]@{ afterRuns = 12; afterHours = 6 } }
         $s = if (Get-Command Get-PimThrottleStreak -ErrorAction SilentlyContinue) { Get-PimThrottleStreak -Previous $prev -Run $Run -AfterRuns $thr.afterRuns -AfterHours $thr.afterHours } else { [pscustomobject]@{ count = 1; sinceUtc = "$($Run.startedUtc)"; stuck = $false; alert = $false } }
@@ -4291,6 +4310,8 @@ function Invoke-PimSchedulerTick {
             $liveOwners = @(); try { $liveOwners = @(Get-PimLiveLockOwners -Map (Get-PimSchedulerLocksRaw).Map -NowUtc $now) } catch { $liveOwners = @() }
             if ($haveLease) { $liveOwners += $Owner }
             [void](Close-PimStaleRunningRecords -NowUtc $now -ByLocks -LiveOwners $liveOwners -OlderThanMinutes ([Math]::Max(30, 2 * $LeaseTtlMinutes)))
+            # PIM 100.166 (c): another execution's run that is alive but has not moved for an hour -> reported once, kept running
+            [void](Invoke-PimNoProgressCheck -Owner $Owner -NowUtc $now)
         }
     }
     # In-job heartbeat. Renewing only BETWEEN jobs was not enough: on internal (2026-09-13) one
@@ -4542,17 +4563,22 @@ function Invoke-PimSchedulerLeaseHeartbeat {
       renewals. Returns $false only when the guard is known LOST (someone else holds it), so a
       caller can stop writing; $true otherwise, including when no guarded tick is running.
       §95.2o: a lanes tick renews this owner's AREA LOCKS (and the legacy lease if it took one over).
+      PIM 100.166 (c): every call is a PROGRESS mark (an item applied, a page read, a scope started) -- kept in memory and
+      written on the locks at the next renewal -- EXCEPT -Waiting (the scope gate waiting for another run's area): that
+      keeps the locks alive but is not progress, so a run that only waits is reported after the no-progress threshold.
     #>
     [CmdletBinding()]
-    param([datetime]$NowUtc = [datetime]::UtcNow)
+    param([datetime]$NowUtc = [datetime]::UtcNow, [switch]$Waiting)
     $hb = $global:PIM_LeaseHeartbeat
     if ($null -eq $hb) { return $true }
     if ($hb.lost) { return $false }
     $now = $NowUtc.ToUniversalTime()
+    if (-not $Waiting) { $hb | Add-Member -NotePropertyName progressUtc -NotePropertyValue $now -Force }
     $gap = [math]::Max(1, [int]$hb.ttl / 3)
     if (($now - [datetime]$hb.lastUtc).TotalMinutes -lt $gap) { return $true }
     if ($hb.PSObject.Properties['locks'] -and $hb.locks) {
-        $u = $null; try { $u = Update-PimAreaLocks -Owner $hb.owner -NowUtc $now -TtlMinutes $hb.ttl } catch { $u = $null }
+        $pg = $null; if ($hb.PSObject.Properties['progressUtc']) { $pg = $hb.progressUtc }
+        $u = $null; try { $u = Update-PimAreaLocks -Owner $hb.owner -NowUtc $now -TtlMinutes $hb.ttl -ProgressUtc $pg } catch { $u = $null }
         if ($u -and @($u.lost).Count) {
             $hb.lost = $true
             Write-Warning ("[scheduler] area lock LOST mid-job ({0}) -- this run stops applying further items." -f (@($u.lost) -join ', '))

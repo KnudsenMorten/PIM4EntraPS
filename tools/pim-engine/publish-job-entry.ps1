@@ -85,7 +85,10 @@ $cs = Get-PimSqlConnectionString -Server "$SqlServer".Trim() -Database "$SqlData
 # Nothing stored = the daily cadence this job always had. A store that cannot be read = PUBLISH ANYWAY, loudly (a publish
 # is verified end to end before and after upload). The producer and the signer are loaded only when a publish is due.
 $cadenceLog = { param($m, $l) JobLog $m $l }
-$cadenceGate = Invoke-PimJobCadenceGate -Job 'publish' -Log $cadenceLog `
+# framework 12.24 / PIM 100.166 (a): a 'running' record of another execution is judged by that execution's platform status
+# (this job's own runs, read with its managed identity); unreadable = one plain line, and the 6 h fallback decides.
+$cadenceStatus = { param($e) $r = Get-PimJobOwnExecutionStatus -ExecutionName "$e"; if (-not $r.status) { JobLog "cadence: the status of the earlier run $e is unknown ($($r.reason)) -- a run without an end counts as abandoned after 6 h" 'INFO' }; $r.status }
+$cadenceGate = Invoke-PimJobCadenceGate -Job 'publish' -Log $cadenceLog -ExecutionStatus $cadenceStatus `
     -ExecutionName "$env:CONTAINER_APP_JOB_EXECUTION_NAME" -DeployedUtc "$env:PIM_CadenceDeployedUtc" `
     -ReadValues { param($names) Read-PimJobCadenceValues -ConnectionString $cs -Object 'pim.vw_PublishJobControl' -Names $names } `
     -CompareAndSet { param($n, $v, $e) Set-PimJobCadenceValueIfUnchanged -ConnectionString $cs -Object 'pim.vw_PublishJobLastRun' -Name $n -NewJson $v -ExpectedJson $e }

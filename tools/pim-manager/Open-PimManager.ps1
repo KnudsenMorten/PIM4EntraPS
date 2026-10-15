@@ -15266,6 +15266,7 @@ function Handle-Request {
                     generatedUtc = "$($vm.generatedUtc)"
                     historyCount = [int]$histCount
                     canRun       = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
+                    canCancel    = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')   # PIM 100.166 b: "Cancel the running run"
                 }
                 if ($histCount -eq 0) { $body.note = 'no runs recorded yet -- the scheduler has not run any job, or its run history is not shared with this instance. Next-run times are computed from each job''s cadence. Use "Run now" to execute a job immediately.' }
                 Write-JsonResponse -Response $resp -Status 200 -Body $body
@@ -15528,6 +15529,36 @@ function Handle-Request {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }
                 return 500
             }
+        }
+
+        # ----- Jobs tab: CANCEL THE RUNNING RUN (PIM 100.166 b, owner wizard 2026-10-15; SI #700's model) ---------------
+        # POST { name } -> the platform stops the run's execution, the run is recorded 'cancelled' (FINAL: not retried, not
+        # resumed, not a failure) and the job runs again on its next normal turn (Invoke-PimJobCancel, PIM-JobLanes.ps1).
+        # SuperAdmin only: stopping work in progress is "a person for stop" (framework 12.24), never automation. The Manager
+        # never runs or ends the engine itself (section 22) -- it asks the platform to stop the execution.
+        if ($path -eq '/api/jobs/cancel' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Only a SuperAdmin can cancel a running run.' }
+                return 403
+            }
+            if (-not (Get-Command Invoke-PimJobCancel -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $false; code = 'not-loaded'; message = 'The scheduler library is not loaded in this Manager.' }
+                return 200
+            }
+            $body = Read-RequestJson -Request $req
+            $name = "$($body.name)".Trim()
+            if (-not $name) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'name is required' }; return 400 }
+            $job = $null
+            try { $job = @(Get-PimManagerEffectiveSchedule | Where-Object { "$($_.name)" -eq $name }) | Select-Object -First 1 } catch { $job = $null }
+            $armSeam = { param($m, $p) if (-not (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)) { throw 'ARM is not available in this Manager' }; Invoke-PimArm -Method $m -Path $p -Body @{} }
+            $who = Get-PimManagerActorName
+            $r = Invoke-PimJobCancel -Name $name -Arm $armSeam -TickJobId (Get-PimManagerTickJobId) -By $who -Job $job
+            Write-PimManagerAuditEvent -Action 'schedule.job.cancel' -Target "job:$name" -After @{ code = "$($r.code)"; execution = "$($r.execution)"; alsoStopped = @($r.alsoStopped) } -Result $(if ($r.ok) { 'ok' } else { 'error' })
+            # Every outcome is a 200 with ok + code + one plain message (+ moreInfo): the page shows it as it is. A refused stop
+            # (code not-allowed / error) changed NOTHING -- the run keeps going.
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = [bool]$r.ok; name = $name; code = "$($r.code)"; status = "$($r.status)"; message = "$($r.message)"; moreInfo = "$($r.moreInfo)"; alsoStopped = @($r.alsoStopped) })
+            return 200
         }
 
         # ----- Jobs tab: read one run's log by runId ---------------------------

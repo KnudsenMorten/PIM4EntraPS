@@ -549,7 +549,7 @@ $plan = Get-PimDownlinkJobDeployPlan -Scenario $Scenario -TenantId $TenantId -Sl
     -EngineClientId $EngineClientId -EngineClientSecret $EngineClientSecret `
     -ManagedIdentityClientId $miClientId `
     -SlaveAdminPrefixes $SlaveAdminPrefixes -SystemAssigned:$engineSystemMi -AllowRetraction:$AllowRetraction `
-    -BaselineTrustedKeys $BaselineTrustedKeys `
+    -BaselineTrustedKeys $BaselineTrustedKeys -JobId (Get-DownlinkJobPath) `
     -DeployedUtc ([datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture))
 
 if (-not $plan.ok) { throw "deploy plan invalid: $($plan.reason)" }
@@ -669,6 +669,31 @@ if ($plan.action -eq 'create' -and -not $WhatIfPreference -and -not "$IdentityRe
             else { Warn "AcrPull grant to the Job's system MI FAILED ($grantErr) -- the job will not be able to pull." }
         }
     } catch { Warn "post-create grant skipped: $($_.Exception.Message)" }
+}
+
+# --- framework 12.24 / PIM 100.166 (a): 'Reader' on ITSELF, so the cadence gate can read the status of an earlier run ------
+# The same right the tick holds on itself (BUG-268), scope = this job only. The identity that reads is the one the container's
+# token call returns: the user-assigned identity when one is named (PIM_ManagedIdentityClientId), else the system identity.
+# A refused grant is a WARNING, never a failed deploy: without it the gate keeps its 6-hour fallback.
+if (-not $WhatIfPreference) {
+    try {
+        $selfJob = Get-PimArmAcaJob -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull
+        $selfOid = ''
+        if ("$IdentityResourceId".Trim() -and -not $engineSystemMi) {
+            $uaRes = Get-PimArmIdentity -ResourceId "$IdentityResourceId" -ErrorAsNull
+            $selfOid = if ($uaRes) { "$($uaRes.properties.principalId)".Trim() } else { '' }
+        } elseif ($selfJob) { $selfOid = "$($selfJob.identity.principalId)".Trim() }
+        if (-not $selfOid) { Warn "'Reader' on $JobName itself: no identity found -- the pull cannot read its own runs (6 h fallback)" }
+        else {
+            $selfScope = Get-DownlinkJobPath
+            $haveSelf = @(try { Get-PimArmRoleAssignments -Scope $selfScope -PrincipalId $selfOid -SubscriptionId $script:sub } catch { @() }) | Where-Object { "$($_.roleDefinitionName)".Trim() -eq 'Reader' }
+            if ($haveSelf) { Note "'Reader' on $JobName itself: already assigned" }
+            else {
+                try { [void](New-PimArmRoleAssignment -SubscriptionId $script:sub -Scope $selfScope -PrincipalId $selfOid -PrincipalType ServicePrincipal -Role 'Reader'); Note "'Reader' on $JobName itself: granted (the pull reads the status of its own earlier runs)" }
+                catch { Warn "'Reader' on $JobName itself was NOT granted ($((("$($_.Exception.Message)") -split "`n")[0])) -- the pull still runs; a run without an end counts as abandoned after 6 h" }
+            }
+        }
+    } catch { Warn "'Reader' on $JobName itself: not checked ($($_.Exception.Message))" }
 }
 
 # --- BUG-75: THE JOB'S IDENTITY NEEDS A SQL CONTAINED USER, AND A WARNING IS NOT A GRANT --------

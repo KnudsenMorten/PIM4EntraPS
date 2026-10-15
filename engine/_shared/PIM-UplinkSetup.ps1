@@ -221,7 +221,7 @@ function Test-PimSetupRunOk {
     # PURE. A finished run that did its work (completed / ok), not failed / held / skipped.
     param([AllowNull()][object]$Run)
     $st = "$($Run.status)".Trim().ToLowerInvariant()
-    if ($st -in @('failed', 'running', 'skipped', 'unimplemented', 'held', 'interrupted', 'disabled', 'outofscope', '')) { return $false }
+    if ($st -in @('failed', 'running', 'skipped', 'unimplemented', 'held', 'interrupted', 'disabled', 'outofscope', 'cancelled', '')) { return $false }   # cancelled (100.166 b): stopped by a person, did not do its work
     if ($Run.PSObject.Properties['ok'] -and -not [bool]$Run.ok) { return $false }
     return $true
 }
