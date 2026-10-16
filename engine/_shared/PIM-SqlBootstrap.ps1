@@ -52,7 +52,9 @@ function New-PimSqlUserDdl {
     param(
         [Parameter(Mandatory)][string]$DbUserName,
         [Parameter(Mandatory)][string]$Sid,
-        [string[]]$Roles = @('db_datareader','db_datawriter','db_ddladmin')
+        # PIM 100.156 B (framework 12.23 P3): NO default broad set any more -- the caller names the component's roles
+        # (Get-PimSqlComponentAccess). A pim_<x> role that does not exist yet is created owned by dbo (this runs as admin).
+        [string[]]$Roles = @()
     )
     if ("$DbUserName" -match "[\[\]']") { throw "New-PimSqlUserDdl: refusing a database user name containing brackets or quotes: '$DbUserName'" }
     if ("$Sid" -notmatch '^0x[0-9A-Fa-f]{32}$') { throw "New-PimSqlUserDdl: '$Sid' is not a 16-byte SID literal." }
@@ -73,6 +75,9 @@ function New-PimSqlUserDdl {
     [void]$sb.AppendLine('END')
     foreach ($r in @($Roles | Where-Object { "$_".Trim() })) {
         if ("$r" -match "[\[\]']") { throw "New-PimSqlUserDdl: refusing a role name containing brackets or quotes: '$r'" }
+        # an explicitly named fixed role (an operator / support principal) is kept as named -- a COMPONENT never gets one
+        # by default any more (Get-PimSqlComponentAccess).
+        if ("$r" -cmatch '^pim_[a-z]{2,30}$') { [void]$sb.AppendLine("IF DATABASE_PRINCIPAL_ID(N'$r') IS NULL EXEC(N'CREATE ROLE [$r] AUTHORIZATION [dbo];');") }
         [void]$sb.AppendLine("IF IS_ROLEMEMBER('$r','$lit') = 0 ALTER ROLE [$r] ADD MEMBER [$DbUserName];")
     }
     return $sb.ToString()
@@ -99,7 +104,12 @@ function Get-PimSqlBootstrapPlan {
         $sid = $null
         try { $sid = ConvertTo-PimSqlSid -AppId $app } catch { $plan.problems += "bad appId for '$name': $($_.Exception.Message)"; continue }
         $roles = @($p.roles | Where-Object { "$_".Trim() })
-        if (-not $roles.Count) { $roles = @('db_datareader','db_datawriter','db_ddladmin') }
+        # PIM 100.156 B: a principal without roles gets its COMPONENT's roles (Get-PimSqlComponentAccess, PIM-SqlAccess.ps1)
+        # -- never the old db_datareader + db_datawriter + db_ddladmin. Catalog not loaded: a problem, never a guess.
+        if (-not $roles.Count) {
+            if (Get-Command Get-PimSqlComponentAccess -ErrorAction SilentlyContinue) { $roles = @((Get-PimSqlComponentAccess -DbUserName $name).roles) }
+            else { $plan.problems += "no roles for '$name' and the access catalog (PIM-SqlAccess.ps1) is not loaded -- refusing to guess"; continue }
+        }
         $ddl = $null
         try { $ddl = New-PimSqlUserDdl -DbUserName $name -Sid $sid -Roles $roles } catch { $plan.problems += "$name : $($_.Exception.Message)"; continue }
         $plan.users += @{ name = $name; appId = $app; sid = $sid; roles = $roles; ddl = $ddl }

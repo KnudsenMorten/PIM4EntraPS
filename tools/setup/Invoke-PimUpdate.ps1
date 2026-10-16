@@ -203,7 +203,12 @@ param(
     # 🪤 The existing workaround was to pass this step -AcrName/-Apps so the build it should never
     # have been doing would at least not fail (see the comments in Invoke-PimDeployAll's schema
     # step). Feeding a step the arguments for work it should not do is not the same as stopping it.
-    [switch]$SchemaOnly
+    [switch]$SchemaOnly,
+    # PIM 100.156 B (framework 12.23 P8): after the schema, run the ADMIN half of the least-privilege model on the same
+    # admin identity (Invoke-PimSqlAccessInstall -WithPrerequisites -- the product code the Support-app cut-over runs).
+    # Invoke-PimDeployAll's schema step passes it, so the object grants (views the schema just created) are converged
+    # before the Manager is restarted onto the new store. Off by default: the mgmt1 / estate updater never does it.
+    [switch]$InstallSqlAccessModel
 )
 $ErrorActionPreference = 'Stop'
 $here    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
@@ -831,6 +836,32 @@ try {
             }
             if ($absentBefore.Count) { $createdBaseSchema = $true }
         }
+    }
+
+    # ---- LEAST-PRIVILEGE ACCESS MODEL (PIM 100.156 B, framework 12.23 P4/P8/P9) -- setup only (-InstallSqlAccessModel) ---
+    # The admin run, on the SAME admin connection that just applied the schema: platform schema + demo tables, the signed
+    # procedure (2099 in-database certificate, private key removed), pim_updater + EXECUTE, one converge (every component
+    # user into its pim_* role, the object grants on the views the schema just created). BEFORE the Manager restart below,
+    # so the Manager re-resolves its store with its pim_web grants in place. A failure FAILS this step: an install whose
+    # web app holds no broad role and no model cannot read its own store.
+    if ($InstallSqlAccessModel -and "$SqlConnectionString".Trim() -and $PSCmdlet.ShouldProcess('deployed DB', 'install the least-privilege access model')) {
+        Step '   SQL least-privilege access model (signed procedure + component roles; framework 12.23)'
+        if (-not (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-InstallNames.ps1') }
+        if (-not (Get-Command Invoke-PimSqlAccessInstall -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-SqlAccess.ps1') }
+        $accTok = Get-PimSqlAccessToken -ConnString $SqlConnectionString
+        $accConn = New-Object (Resolve-PimSqlClientType).FullName $SqlConnectionString
+        if ($accTok) { $accConn.AccessToken = $accTok }
+        $accConn.Open()
+        try {
+            $accQ = { param($csx, $sql) $m = $accConn.CreateCommand(); $m.CommandText = $sql; $m.CommandTimeout = 120
+                      $rd = $m.ExecuteReader(); $rows = New-Object System.Collections.Generic.List[object]
+                      try { while ($rd.Read()) { $o = [ordered]@{}; for ($i = 0; $i -lt $rd.FieldCount; $i++) { $o[$rd.GetName($i)] = $(if ($rd.IsDBNull($i)) { $null } else { $rd.GetValue($i) }) }; $rows.Add([pscustomobject]$o) } } finally { $rd.Close() }
+                      $rows.ToArray() }.GetNewClosure()
+            $accX = { param($csx, $sql) $m = $accConn.CreateCommand(); $m.CommandText = $sql; $m.CommandTimeout = 120; [void]$m.ExecuteNonQuery() }.GetNewClosure()
+            $acc = Invoke-PimSqlAccessInstall -Query $accQ -Exec $accX -WithPrerequisites -SetupGate
+            if ($acc.skipped) { Warn "access model: $($acc.reason)" }
+            else { Info ("access model installed: signer $($acc.signer) (expires $($acc.signerExpiry)); $($acc.converge.statements) statement(s) converged; users $(@($acc.converge.users) -join ', ')") }
+        } finally { $accConn.Close() }
     }
 
     if ($detection.SqlUpdateRequired) {

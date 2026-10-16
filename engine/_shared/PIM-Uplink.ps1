@@ -647,11 +647,87 @@ function Get-PimUplinkSqlSpace {
 # the table is not there, the result is NULL / not a number / negative) is LEFT OUT -- never a 0. Anonymous mode sends none.
 # The heartbeat's other keys (sqlUsedMb, sqlMaxMb, users, guests, servicePrincipals, groups, usersTotal, usersDisabled = 8)
 # plus these 13 = 21, under the framework's 40-key cap (sync/_AitUplink.ps1).
+# §33.0 MORE TELEMETRY (owner 2026-10-16 via Invardia: "add relevant. i want data"; Invardia accepted the flat keys the same
+# day): 12 more -- activity (activations24h / 7d, approvalsPending), standing access (permanentPrivilegedAssignments,
+# permanentGlobalAdmins, privilegedGuests, privilegedSpns, roleAssignmentsOutsidePim), hygiene (assignmentsExpiring7d) and
+# drift / convergence (driftItems, unconvergedItems, convergenceFailures24h) = 33. Same rule: unreadable = left out, never 0.
+# The 40-key ceiling is guarded IN CODE before the record is built (Limit-PimUplinkCounts).
 function Get-PimUplinkAdoptionCountKeys {
     <# PURE. Every adoption key, in the order the heartbeat builds them (a literal: child-scope safe). #>
     return @('managedAdmins', 'managedGroups', 'delegations', 'privilegedRoles', 'eligibleAssignments', 'activeAssignments',
              'azureRoleAssignments', 'activations30d', 'approvals30d', 'accessReviewsCompleted30d', 'managedTenants',
-             'hybridAdGroups', 'hybridServers')
+             'hybridAdGroups', 'hybridServers',
+             'activations24h', 'activations7d', 'approvalsPending', 'permanentPrivilegedAssignments', 'permanentGlobalAdmins',
+             'privilegedGuests', 'privilegedSpns', 'roleAssignmentsOutsidePim', 'assignmentsExpiring7d', 'driftItems',
+             'unconvergedItems', 'convergenceFailures24h')
+}
+
+function Get-PimUplinkCountsKeyMax {
+    <# PURE. Invardia refuses a WHOLE record whose Counts has more than 40 keys (agreed SI + PIM + Invardia 2026-10-13). A literal. #>
+    return 40
+}
+
+function Get-PimUplinkCountsPriority {
+    <#
+      PURE. Every Counts key the heartbeat may carry, MOST important first (a literal: child-scope safe). Above the cap the
+      keys at the END go first; a key not in this list ranks below every listed key (alphabetical among themselves).
+    #>
+    return @('sqlUsedMb', 'sqlMaxMb', 'users', 'guests', 'servicePrincipals', 'groups', 'usersTotal', 'usersDisabled') + @(Get-PimUplinkAdoptionCountKeys)
+}
+
+function Limit-PimUplinkCounts {
+    <#
+      The HARD CAP: a Counts map with at most Get-PimUplinkCountsKeyMax keys. Above it the lowest-priority keys
+      (Get-PimUplinkCountsPriority, unknown keys last, then alphabetical) are dropped -- deterministic, the same keys every
+      heartbeat -- and ONE Write-Warning names them. $null / empty in = the same out. Never throws.
+    #>
+    [CmdletBinding()] param([AllowNull()][hashtable]$Counts)
+    if ($null -eq $Counts -or $Counts.Count -eq 0) { return $Counts }
+    $max = Get-PimUplinkCountsKeyMax
+    if ($Counts.Count -le $max) { return $Counts }
+    try {
+        $prio = @(Get-PimUplinkCountsPriority)
+        $rank = @{}; for ($i = 0; $i -lt $prio.Count; $i++) { if (-not $rank.ContainsKey($prio[$i])) { $rank[$prio[$i]] = $i } }
+        $ordered = @(@($Counts.Keys) | Sort-Object @{ Expression = { if ($rank.ContainsKey("$_")) { [int]$rank["$_"] } else { [int]::MaxValue } } }, @{ Expression = { "$_" } })
+        $keep = @($ordered | Select-Object -First $max)
+        $drop = @($ordered | Select-Object -Skip $max)
+        $out = @{}; foreach ($k in $keep) { $out["$k"] = $Counts[$k] }
+        Write-Warning ("[uplink] the heartbeat's Counts had {0} keys, more than Invardia accepts ({1}) -- left out: {2}" -f $Counts.Count, $max, ($drop -join ', '))
+        return $out
+    } catch {
+        $out = @{}; foreach ($k in @(@($Counts.Keys) | Sort-Object | Select-Object -First $max)) { $out["$k"] = $Counts[$k] }
+        return $out
+    }
+}
+
+function Get-PimUplinkSettingJsonSql {
+    <#
+      PURE. A T-SQL prelude that reads pim.Settings[<Name>] into @v (JSON text) and @has (1 = the row exists). A value stored
+      DOUBLE-encoded (a JSON string whose text is the JSON -- Set-PimSetting with pre-serialised text: ConvergenceState,
+      ApprovalRequests, legacy JobRunHistory) is decoded once, inside SQL. Nothing leaves SQL but the caller's scalar.
+    #>
+    param([Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9.]+$')][string]$Name)
+    return "DECLARE @has BIT = CASE WHEN EXISTS (SELECT 1 FROM pim.Settings WHERE Name = N'$Name') THEN 1 ELSE 0 END; DECLARE @v NVARCHAR(MAX) = (SELECT ValueJson FROM pim.Settings WHERE Name = N'$Name'); IF @v IS NOT NULL AND ISJSON(@v) = 0 AND ISJSON(N'[' + @v + N']') = 1 SET @v = (SELECT TOP 1 [value] FROM OPENJSON(N'[' + @v + N']') WHERE [type] = 1);"
+}
+
+function Get-PimUplinkConvergenceFailures {
+    <#
+      PURE. convergenceFailures24h: FAILED verify-convergence runs (Get-PimUplinkRunOutcome = failed: an interrupted or
+      throttled run is not one) that finished in the last 24 hours, from the job run history. NOTE the history keeps the
+      newest 10 runs per job (PimRunHistoryMax), so at the job's 30-minute cadence this sees ~5 hours at most.
+    #>
+    param([AllowNull()][object[]]$Runs, [datetime]$NowUtc = [datetime]::UtcNow)
+    $cut = $NowUtc.ToUniversalTime().AddHours(-24)
+    $n = 0
+    foreach ($r in @($Runs)) {
+        if ($null -eq $r) { continue }
+        $t = "$($r.type)".Trim().ToLowerInvariant(); if (-not $t) { $t = "$($r.name)".Trim().ToLowerInvariant() }
+        if ($t -ne 'verify-convergence') { continue }
+        $fin = ConvertTo-PimUplinkUtc $r.finishedUtc
+        if (-not $fin -or $fin -lt $cut) { continue }
+        if ((Get-PimUplinkRunOutcome -Run $r) -eq 'failed') { $n++ }
+    }
+    return [long]$n
 }
 
 function Get-PimUplinkAdoptionQueries {
@@ -686,6 +762,26 @@ function Get-PimUplinkAdoptionQueries {
         approvals30d         = "SELECT COUNT_BIG(*) AS n FROM pim.AuditEvents WHERE Ts >= DATEADD(day, -30, SYSUTCDATETIME()) AND (Action IN (N'approval.request.approved', N'approval.request.denied') OR Action LIKE N'%.policy.masschange.approved')"
         # review decisions in the audit trail (access-review decision, company-review answer, owner keep / remove / extend)
         accessReviewsCompleted30d = "SELECT COUNT_BIG(*) AS n FROM pim.AuditEvents WHERE Ts >= DATEADD(day, -30, SYSUTCDATETIME()) AND Action IN (N'access-review.decision', N'company-review.answer', N'owner.keep', N'owner.remove', N'owner.extend')"
+        # §33.0 MORE TELEMETRY -- the activation ledger by start, the last day / week
+        activations24h       = "SELECT COUNT_BIG(*) AS n FROM pim.ImpactActivations WHERE StartUtc >= DATEADD(hour, -24, SYSUTCDATETIME())"
+        activations7d        = "SELECT COUNT_BIG(*) AS n FROM pim.ImpactActivations WHERE StartUtc >= DATEADD(day, -7, SYSUTCDATETIME())"
+        # PIM's own maker / checker queue (pim.Settings 'ApprovalRequests', a JSON array; status Pending). No row = an empty
+        # queue (Get-PimApprovalRequests reads it the same way); a value that is not JSON = left out.
+        approvalsPending     = "$(Get-PimUplinkSettingJsonSql -Name 'ApprovalRequests') SELECT CASE WHEN @v IS NULL THEN CAST(0 AS bigint) WHEN ISJSON(@v) = 0 THEN NULL ELSE (SELECT COUNT_BIG(*) FROM OPENJSON(@v) j WHERE j.[type] = 5 AND UPPER(ISNULL(CASE WHEN j.[type] = 5 THEN JSON_VALUE(j.[value], '$.status') END, N'')) = N'PENDING') END AS n"
+        # standing access from the last COMPLETE active-assignments snapshot: Entra role assignments with no end date
+        permanentPrivilegedAssignments = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND Kind = N'entra-role' AND EndUtc IS NULL) END AS n"
+        # ... of the Global Administrator role (template id 62e90394-...): the row's managed identity r|<principal>|<role>|<scope>
+        permanentGlobalAdmins = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND Kind = N'entra-role' AND EndUtc IS NULL AND IdentityKey LIKE N'r|%|62e90394-69f5-4237-9190-012177145e10|%') END AS n"
+        # distinct guests (#EXT# in the UPN -- counted IN SQL, no UPN leaves) / service principals holding any active assignment
+        privilegedGuests     = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(DISTINCT LOWER(PrincipalId)) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND PrincipalUpn LIKE N'%#EXT#%' AND ISNULL(PrincipalId, N'') <> N'') END AS n"
+        privilegedSpns       = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(DISTINCT LOWER(PrincipalId)) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND PrincipalKind = N'servicePrincipal' AND ISNULL(PrincipalId, N'') <> N'') END AS n"
+        # rows not managed by PIM (Managed = 0) -- only once the snapshot's marks were computed (MarksKey set), else unknown
+        roleAssignmentsOutsidePim = "SELECT CASE WHEN $snap IS NULL OR (SELECT MarksKey FROM pim.ActiveAssignmentSnapshots WHERE SnapshotId = $snap) IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND Managed = 0) END AS n"
+        assignmentsExpiring7d = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND EndUtc >= SYSUTCDATETIME() AND EndUtc < DATEADD(day, 7, SYSUTCDATETIME())) END AS n"
+        # the drift document's own total (pim.TenantCache kind 'drift'); no document = left out
+        driftItems           = "SELECT CASE WHEN ISJSON(ValueJson) = 1 THEN TRY_CAST(JSON_VALUE(ValueJson, '$.total') AS bigint) END AS n FROM pim.TenantCache WHERE Kind = N'drift'"
+        # items verify-convergence holds as not yet converged (pim.Settings 'ConvergenceState' firstSeen map); never ran = left out
+        unconvergedItems     = "$(Get-PimUplinkSettingJsonSql -Name 'ConvergenceState') SELECT CASE WHEN @has = 0 OR @v IS NULL OR ISJSON(@v) = 0 THEN NULL ELSE (SELECT COUNT_BIG(*) FROM OPENJSON(@v, '$.firstSeen')) END AS n"
     }
     if ($MspMaster) { $q['managedTenants'] = 'SELECT COUNT_BIG(*) AS n FROM platform.Tenants WHERE Enabled = 1' }
     if ($HybridAd) {
@@ -704,9 +800,12 @@ function Get-PimUplinkAdoptionCounts {
       @{ key = [long] } with ONLY the readable keys ($null when none was). -Query { param($Name, $Sql) } returns the scalar
       (the job binds Invoke-PimSqlScalar on the store's MI connection; tests pass a stub over seeded data). A throw, NULL /
       DBNull, a non-number or a negative = that key LEFT OUT. Never throws.
+      -Runs (§33.0 MORE TELEMETRY): the job run history the caller READ (Get-PimJobRunHistory) -> convergenceFailures24h
+      (Get-PimUplinkConvergenceFailures). $null = the history could not be read = that key left out.
     #>
-    param([Parameter(Mandatory)][scriptblock]$Query, [switch]$MspMaster, [switch]$HybridAd)
+    param([Parameter(Mandatory)][scriptblock]$Query, [switch]$MspMaster, [switch]$HybridAd, [AllowNull()][object[]]$Runs = $null, [datetime]$NowUtc = [datetime]::UtcNow)
     $out = @{}
+    if ($null -ne $Runs) { try { $out['convergenceFailures24h'] = [long](Get-PimUplinkConvergenceFailures -Runs $Runs -NowUtc $NowUtc) } catch { } }
     try {
         $qs = Get-PimUplinkAdoptionQueries -MspMaster:$MspMaster -HybridAd:$HybridAd
         foreach ($k in @($qs.Keys)) {
@@ -1328,6 +1427,513 @@ function Get-PimUplinkTenantCapabilities {
     return [pscustomobject]@{ capabilities = $caps; licences = @($lic.ToArray()) }
 }
 
+# =====================================================================================================================
+# §33.0 MORE TELEMETRY (owner 2026-10-16 via Invardia: "add relevant. i want data" / "also pim per domain"; Invardia
+# accepted all 8 names + shapes the same day; they stay OFF until Invardia says live) -- the STRUCTURED heartbeat fields:
+#   Security        { collectionUtc; domains: [ { domain; eligibleAssignments; activeAssignments; permanentAssignments;
+#                     outsidePim; privilegedPrincipals; guestsPrivileged; spnsPrivileged; assignmentsExpiring7d;
+#                     activations30d } ] }  -- the last COMPLETE active-assignments snapshot; at most 12 domains
+#   Collections     [ { kind; state; lastCompleteUtc; lastAttemptUtc; expected; collected; note } ]
+#   Jobs            [ { name; state; lastStartUtc; lastEndUtc; durationMs; prevDurationMs; nextRunUtc; failStreak;
+#                     throttled24h } ]  -- enabled PRODUCT jobs only, at most 60
+#   Convergence     { unconverged; persistent; oldestFirstSeenUtc }
+#   Mail            { mode; engine: { ok; atUtc }; manager: { ok; atUtc } }
+#   UpdatePending   { approvedVersion; lastBuiltVersion; hold; waitingSinceUtc }   -- from UpdateState
+#   SqlAccess       { model; run1; run2; updaterInAdminGroup; checkedUtc }        -- the updater's verdict in UpdateState
+#   FeaturesChanged [ '<area>.<name>:<on|off>' ]  -- at most 40, only features that differ from their catalog default
+# ONE switch per field, OFF by default: PIM_UPLINK_<FIELD> (PIM_UPLINK_SECURITY, ..._COLLECTIONS, ..._JOBS,
+# ..._CONVERGENCE, ..._MAIL, ..._UPDATEPENDING, ..._SQLACCESS, ..._FEATURESCHANGED) = 1 / true / on / yes switches it on.
+# IDENTIFIED heartbeat only; additive (Invardia refuses its content -> the heartbeat goes once more without the additive
+# fields and they are held 24 h -- UplinkState.additiveRefusedUtc). 🔒 PRIVACY: no UPN, display name, group / role NAME,
+# host or address in any field -- counts, product job names, closed codes and times only. A field whose source cannot be
+# read is LEFT OUT, never a guess.
+# =====================================================================================================================
+function Get-PimUplinkStateFieldNames {
+    <# PURE. The structured fields, in the order the heartbeat adds them (a literal: child-scope safe). #>
+    return @('Security', 'Collections', 'Jobs', 'Convergence', 'Mail', 'UpdatePending', 'SqlAccess', 'FeaturesChanged')
+}
+
+function Get-PimUplinkStateFieldSwitch {
+    <# PURE. The environment variable that switches one structured field on: PIM_UPLINK_<FIELD, upper case>. #>
+    param([Parameter(Mandatory)][string]$Field)
+    return "PIM_UPLINK_$("$Field".Trim().ToUpperInvariant())"
+}
+
+function Test-PimUplinkStateFieldOn {
+    <# PURE. OFF by default (until Invardia says live): only 1 / true / on / yes switches a field on. #>
+    param([AllowNull()][string]$Value)
+    return [bool]("$Value".Trim() -match '^(?i)(1|true|on|yes)$')
+}
+
+function Get-PimUplinkStateFieldSwitches {
+    <# Field -> on? from the environment; -Values @{ <Field> = '<text>' } replaces the environment (tests). #>
+    param([AllowNull()][hashtable]$Values = $null)
+    $out = [ordered]@{}
+    foreach ($f in (Get-PimUplinkStateFieldNames)) {
+        $v = ''
+        if ($null -ne $Values) { if ($Values.ContainsKey($f)) { $v = "$($Values[$f])" } }
+        else { $v = "$([Environment]::GetEnvironmentVariable((Get-PimUplinkStateFieldSwitch -Field $f)))" }
+        $out[$f] = (Test-PimUplinkStateFieldOn -Value $v)
+    }
+    return $out
+}
+
+function ConvertTo-PimUplinkIso {
+    <# PURE. A stored time as ISO-8601 UTC text, or $null (sent as JSON null). #>
+    param([AllowNull()][object]$Value)
+    $t = ConvertTo-PimUplinkUtc $Value
+    if ($t) { return $t.ToString('o') }
+    return $null
+}
+
+function ConvertTo-PimUplinkCount {
+    <# PURE. A whole number >= 0 as [long], or $null. #>
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value -or $Value -is [System.DBNull]) { return $null }
+    if ($Value -is [bool]) { return $null }
+    $n = 0L
+    if ([long]::TryParse("$Value", [System.Globalization.NumberStyles]::Integer, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$n) -and $n -ge 0) { return $n }
+    return $null
+}
+
+function ConvertFrom-PimUplinkStoredValue {
+    <# PURE. A pim.Settings value as an object: a JSON text (also a double-encoded one) is parsed; $null / unparsable = $null. #>
+    param([AllowNull()][object]$Value)
+    $v = $Value
+    for ($i = 0; $i -lt 2 -and $v -is [string]; $i++) {
+        $s = "$v".Trim(); if (-not $s) { return $null }
+        try { $v = $s | ConvertFrom-Json } catch { return $null }
+    }
+    return $v
+}
+
+# ---- Security ----------------------------------------------------------------------------------------------------
+function Get-PimUplinkSecurityDomains {
+    <# PURE. Every domain Invardia accepts (extensible: a new one = an entry here + its kind below). A literal. #>
+    return @('entraRoles', 'azureRoles', 'pimGroups', 'adminUnits', 'intune', 'defender', 'entraAppRoles', 'powerBi', 'hybridAd')
+}
+
+function Get-PimUplinkSecurityDomainMax { <# PURE. At most 12 domains per heartbeat (Invardia). #> return 12 }
+
+function Get-PimUplinkSecurityKinds {
+    <#
+      PURE. The domains PIM fills TODAY: the active-assignments snapshot row Kind -> domain, and the engine scopes whose
+      typed ledger keys (pim.ManagedKeys, '...|eligible') are that domain's eligible assignments (verified provider scopes:
+      EntraRoles / RolesAUs / EntraRolesDirect = Entra roles, AzRes = Azure roles, AdminMembers / GroupMembers = PIM for Groups).
+    #>
+    return @(
+        [ordered]@{ kind = 'entra-role';     domain = 'entraRoles'; scopes = @('EntraRoles', 'RolesAUs', 'EntraRolesDirect') }
+        [ordered]@{ kind = 'azure-rbac';     domain = 'azureRoles'; scopes = @('AzRes') }
+        [ordered]@{ kind = 'pim-for-groups'; domain = 'pimGroups';  scopes = @('AdminMembers', 'GroupMembers') }
+    )
+}
+
+function Get-PimUplinkSecurityNoScheduleDomains {
+    <# PURE. Domains whose snapshot rows carry NO end date (Azure Resource Graph returns none): permanent / expiring cannot be
+       told apart there, so those two numbers are left out of that domain rather than counting every row as permanent. #>
+    return @('azureRoles')
+}
+
+function Get-PimUplinkSecuritySql {
+    <#
+      PURE. ONE read-only batch over the last COMPLETE snapshot: one row per known kind (a kind with no active row still gets
+      its row), the counts computed IN SQL -- no principal, UPN or name ever leaves the store. No complete snapshot = no row
+      at all (the field is then left out).
+    #>
+    $kinds = @(Get-PimUplinkSecurityKinds)
+    $vals = (@($kinds | ForEach-Object { "(N'$($_.kind)')" }) -join ', ')
+    $elig = (@($kinds | ForEach-Object { "(k.Kind = N'$($_.kind)' AND m.Scope IN ($((@($_.scopes) | ForEach-Object { "N'$_'" }) -join ', ')))" }) -join ' OR ')
+    return @"
+SET NOCOUNT ON;
+DECLARE @s BIGINT = (SELECT MAX(SnapshotId) FROM pim.ActiveAssignmentSnapshots WHERE State = N'complete');
+IF @s IS NULL RETURN;
+DECLARE @c DATETIME2 = (SELECT CompletedUtc FROM pim.ActiveAssignmentSnapshots WHERE SnapshotId = @s);
+DECLARE @mk INT = CASE WHEN (SELECT MarksKey FROM pim.ActiveAssignmentSnapshots WHERE SnapshotId = @s) IS NULL THEN 0 ELSE 1 END;
+SELECT k.Kind AS kind, @c AS collectionUtc, @mk AS marksKnown,
+  (SELECT COUNT_BIG(*) FROM pim.ManagedKeys m WHERE m.[Key] LIKE N'%|eligible' AND ($elig)) AS eligibleAssignments,
+  COUNT_BIG(a.Seq) AS activeAssignments,
+  SUM(CASE WHEN a.Seq IS NOT NULL AND a.EndUtc IS NULL THEN 1 ELSE 0 END) AS permanentAssignments,
+  SUM(CASE WHEN a.Seq IS NOT NULL AND a.Managed = 0 THEN 1 ELSE 0 END) AS outsidePim,
+  COUNT(DISTINCT LOWER(NULLIF(a.PrincipalId, N''))) AS privilegedPrincipals,
+  COUNT(DISTINCT CASE WHEN a.PrincipalUpn LIKE N'%#EXT#%' THEN LOWER(NULLIF(a.PrincipalId, N'')) END) AS guestsPrivileged,
+  COUNT(DISTINCT CASE WHEN a.PrincipalKind = N'servicePrincipal' THEN LOWER(NULLIF(a.PrincipalId, N'')) END) AS spnsPrivileged,
+  SUM(CASE WHEN a.EndUtc >= SYSUTCDATETIME() AND a.EndUtc < DATEADD(day, 7, SYSUTCDATETIME()) THEN 1 ELSE 0 END) AS assignmentsExpiring7d,
+  (SELECT COUNT_BIG(*) FROM pim.ImpactActivations i WHERE i.Kind = k.Kind AND i.StartUtc >= DATEADD(day, -30, SYSUTCDATETIME())) AS activations30d
+FROM (VALUES $vals) k(Kind)
+LEFT JOIN pim.ActiveAssignmentRows a ON a.SnapshotId = @s AND a.Kind = k.Kind
+GROUP BY k.Kind;
+"@
+}
+
+function New-PimUplinkSecurityField {
+    <#
+      PURE. Security from the rows of Get-PimUplinkSecuritySql: { collectionUtc; domains = [ ... ] }, or $null (no complete
+      snapshot = no rows). A number that is not a whole number >= 0 is left out of its domain; outsidePim only once the
+      snapshot's marks were computed; permanent / expiring not for a domain without end dates.
+    #>
+    param([AllowNull()][object[]]$Rows)
+    $rows = @(@($Rows) | Where-Object { $null -ne $_ -and -not ($_ -is [System.DBNull]) })
+    if (-not $rows.Count) { return $null }
+    $map = @{}; foreach ($k in @(Get-PimUplinkSecurityKinds)) { $map["$($k.kind)"] = "$($k.domain)" }
+    $allowed = @(Get-PimUplinkSecurityDomains); $noSched = @(Get-PimUplinkSecurityNoScheduleDomains)
+    $collected = $null; $domains = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $rows) {
+        $dom = $map["$(Get-PimUplinkField $r 'kind')"]
+        if (-not $dom -or $allowed -notcontains $dom) { continue }
+        if ($domains.Count -ge (Get-PimUplinkSecurityDomainMax)) { break }
+        if ($null -eq $collected) { $collected = ConvertTo-PimUplinkIso (Get-PimUplinkField $r 'collectionUtc') }
+        $marks = ("$(Get-PimUplinkField $r 'marksKnown')" -match '^(1|True)$')
+        $d = [ordered]@{ domain = $dom }
+        foreach ($f in 'eligibleAssignments', 'activeAssignments', 'permanentAssignments', 'outsidePim', 'privilegedPrincipals', 'guestsPrivileged', 'spnsPrivileged', 'assignmentsExpiring7d', 'activations30d') {
+            if ($f -eq 'outsidePim' -and -not $marks) { continue }
+            if ($f -in @('permanentAssignments', 'assignmentsExpiring7d') -and $noSched -contains $dom) { continue }
+            $n = ConvertTo-PimUplinkCount (Get-PimUplinkField $r $f)
+            if ($null -ne $n) { $d[$f] = $n }
+        }
+        $domains.Add([pscustomobject]$d)
+    }
+    if (-not $domains.Count) { return $null }
+    return [pscustomobject][ordered]@{ collectionUtc = $collected; domains = [object[]]$domains.ToArray() }
+}
+
+# ---- Collections -------------------------------------------------------------------------------------------------
+function Get-PimUplinkCollectionKinds {
+    <# PURE. Collection kind -> the product job that collects it (a literal). #>
+    return [ordered]@{
+        directory = 'tenant-cache'; activeAssignments = 'active-assignments-snapshot'; drift = 'drift-snapshot'
+        entraDiscovery = 'discovery-entra'; azureDiscovery = 'discovery-azure'; powerbi = 'discovery-powerbi'
+        defender = 'discovery-defender'; intune = 'discovery-intune'; hybridAd = 'hybrid-ad-sync'
+    }
+}
+
+function Get-PimUplinkSnapshotSql {
+    <# PURE. The newest active-assignments snapshot (any state) + the newest complete one; read-only, one row or none. #>
+    return @'
+SET NOCOUNT ON;
+DECLARE @l BIGINT = (SELECT MAX(SnapshotId) FROM pim.ActiveAssignmentSnapshots);
+IF @l IS NULL RETURN;
+SELECT s.State AS state, s.StartedUtc AS startedUtc, s.RowsExpected AS expected,
+       (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows r WHERE r.SnapshotId = @l) AS collected,
+       (SELECT MAX(CompletedUtc) FROM pim.ActiveAssignmentSnapshots WHERE State = N'complete') AS lastCompleteUtc
+FROM pim.ActiveAssignmentSnapshots s WHERE s.SnapshotId = @l;
+'@
+}
+
+function Get-PimUplinkRunsByName {
+    <# PURE. Run history -> @{ name = @(runs newest first by startedUtc) }. #>
+    param([AllowNull()][object[]]$Runs)
+    $by = @{}
+    foreach ($r in @($Runs)) {
+        if ($null -eq $r) { continue }
+        $n = "$($r.name)".Trim(); if (-not $n) { continue }
+        if (-not $by.ContainsKey($n)) { $by[$n] = New-Object System.Collections.Generic.List[object] }
+        $by[$n].Add($r)
+    }
+    $out = @{}
+    foreach ($k in @($by.Keys)) { $out[$k] = @($by[$k].ToArray() | Sort-Object @{ Expression = { $t = ConvertTo-PimUplinkUtc $_.startedUtc; if ($t) { $t } else { [datetime]::MinValue } } } -Descending) }
+    return $out
+}
+
+function Get-PimUplinkCollectionNote {
+    <# PURE. The closed note code of a run: throttled | permission | $null. Only the code leaves -- never the run's text. #>
+    param([AllowNull()][object]$Run)
+    if ($null -eq $Run) { return $null }
+    $st = "$($Run.status)".Trim().ToLowerInvariant()
+    if ($st -eq 'throttled' -or "$($Run.detail)" -match '(?i)\b429\b|TooManyRequests|throttl') { return 'throttled' }
+    if ((Get-PimUplinkRunOutcome -Run $Run) -eq 'failed' -and "$($Run.detail)" -match '(?i)\b403\b|Forbidden|Authorization_RequestDenied|Insufficient privileges|AuthorizationFailed|permission') { return 'permission' }
+    return $null
+}
+
+function New-PimUplinkCollectionsField {
+    <#
+      PURE. Collections: one item per kind (Get-PimUplinkCollectionKinds) from the job run history; activeAssignments also
+      from the snapshot table (-Snapshot: the row of Get-PimUplinkSnapshotSql, expected / collected). state: running (a run
+      in progress) | never (no run recorded) | complete (newest run ok) | partial (newest a warning: throttled / held /
+      interrupted) | failed. note: throttled | permission | no-worker (hybridAd: the hybrid worker is not seen) | $null.
+      -HybridAdOn $false = no hybridAd item (nothing to collect). Times ISO UTC or null.
+    #>
+    param([AllowNull()][object[]]$Runs, [AllowNull()][object]$Snapshot = $null, [AllowNull()][object]$HybridWorkerState = $null,
+          [bool]$HybridAdOn = $false, [bool]$SnapshotRead = $false)
+    $by = Get-PimUplinkRunsByName -Runs $Runs
+    $kinds = Get-PimUplinkCollectionKinds
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($kind in @($kinds.Keys)) {
+        if ($kind -eq 'hybridAd' -and -not $HybridAdOn) { continue }
+        $runs = @(); if ($by.ContainsKey($kinds[$kind])) { $runs = @($by[$kinds[$kind]]) }
+        $latest = $runs | Select-Object -First 1
+        $fin = @($runs | Where-Object { "$($_.finishedUtc)".Trim() -and "$($_.status)".Trim().ToLowerInvariant() -ne 'running' })
+        $newestFin = $fin | Select-Object -First 1
+        $okRun = @($fin | Where-Object { (Get-PimUplinkRunOutcome -Run $_) -eq 'ok' }) | Select-Object -First 1
+        $state = 'never'
+        if ($latest -and ("$($latest.status)".Trim().ToLowerInvariant() -eq 'running' -or -not "$($latest.finishedUtc)".Trim())) { $state = 'running' }
+        elseif ($newestFin) {
+            $o = Get-PimUplinkRunOutcome -Run $newestFin
+            $state = switch ($o) { 'ok' { 'complete' } 'warning' { 'partial' } 'failed' { 'failed' } default { if ($okRun) { 'complete' } else { 'never' } } }
+        }
+        $note = Get-PimUplinkCollectionNote -Run $newestFin
+        $item = [ordered]@{ kind = $kind; state = $state; lastCompleteUtc = $(if ($okRun) { ConvertTo-PimUplinkIso $okRun.finishedUtc } else { $null })
+                            lastAttemptUtc = $(if ($latest) { ConvertTo-PimUplinkIso $latest.startedUtc } else { $null }); expected = $null; collected = $null; note = $note }
+        if ($kind -eq 'activeAssignments' -and $SnapshotRead -and $null -ne $Snapshot) {
+            $item.expected = ConvertTo-PimUplinkCount (Get-PimUplinkField $Snapshot 'expected')
+            $item.collected = ConvertTo-PimUplinkCount (Get-PimUplinkField $Snapshot 'collected')
+            $lc = ConvertTo-PimUplinkIso (Get-PimUplinkField $Snapshot 'lastCompleteUtc'); if ($lc) { $item.lastCompleteUtc = $lc }
+            $la = ConvertTo-PimUplinkIso (Get-PimUplinkField $Snapshot 'startedUtc')
+            if ($la -and (-not $item.lastAttemptUtc -or (ConvertTo-PimUplinkUtc $la) -gt (ConvertTo-PimUplinkUtc $item.lastAttemptUtc))) { $item.lastAttemptUtc = $la }
+            if ($state -eq 'never' -and $lc) { $item.state = 'complete' }
+        }
+        if ($kind -eq 'hybridAd' -and $null -ne $HybridWorkerState -and "$(Get-PimUplinkField $HybridWorkerState 'state')" -eq 'not seen') { $item.note = 'no-worker' }
+        $out.Add([pscustomobject]$item)
+    }
+    return $out.ToArray()   # callers wrap in @() (an empty list then stays a list)
+}
+
+# ---- Jobs --------------------------------------------------------------------------------------------------------
+function Get-PimUplinkJobsMax { <# PURE. At most 60 items (Invardia). #> return 60 }
+
+function Get-PimUplinkJobState {
+    <# PURE. A run's closed state: ok | failed | warning | throttled | held | interrupted | skipped. #>
+    param([AllowNull()][object]$Run)
+    $st = "$($Run.status)".Trim().ToLowerInvariant()
+    if ($st -in @('skipped', 'unimplemented', 'outofscope', 'disabled', 'cancelled')) { return 'skipped' }
+    if ($st -in @('throttled', 'interrupted', 'held', 'warning')) { return $st }
+    $o = Get-PimUplinkRunOutcome -Run $Run
+    if ($o -eq 'failed') { return 'failed' }
+    if ($o -eq 'warning') { return 'warning' }
+    return 'ok'
+}
+
+function New-PimUplinkJobsField {
+    <#
+      PURE. Jobs: one item per ENABLED job of -Schedule whose name is a PRODUCT job (-ProductNames: the shipped catalog,
+      Get-PimDefaultJobSchedule) -- a name a customer typed never leaves. At most 60, by name. -StateJobs: the scheduler
+      state's job list (nextRunUtc). failStreak = finished FAILED runs in a row, newest first; throttled24h = throttled runs
+      that finished in the last 24 hours (the history keeps the newest 10 per job).
+    #>
+    param([AllowNull()][object[]]$Schedule, [AllowNull()][object[]]$Runs, [AllowNull()][string[]]$ProductNames,
+          [AllowNull()][object[]]$StateJobs = @(), [datetime]$NowUtc = [datetime]::UtcNow)
+    $prod = @{}; foreach ($n in @($ProductNames)) { if ("$n".Trim()) { $prod["$n".Trim().ToLowerInvariant()] = $true } }
+    $next = @{}; foreach ($sj in @($StateJobs)) { if ($null -ne $sj -and "$($sj.name)".Trim()) { $next["$($sj.name)".Trim().ToLowerInvariant()] = $sj.nextRunUtc } }
+    $by = Get-PimUplinkRunsByName -Runs $Runs
+    $cut = $NowUtc.ToUniversalTime().AddHours(-24)
+    $seen = @{}
+    $items = New-Object System.Collections.Generic.List[object]
+    foreach ($j in @(@($Schedule) | Where-Object { $null -ne $_ } | Sort-Object { "$($_.name)" })) {
+        $name = "$($j.name)".Trim(); $lk = $name.ToLowerInvariant()
+        if (-not $name -or -not $prod.ContainsKey($lk) -or $seen.ContainsKey($lk)) { continue }
+        if ($j.PSObject.Properties['enabled'] -and -not [bool]$j.enabled) { continue }
+        if ($items.Count -ge (Get-PimUplinkJobsMax)) { break }
+        $seen[$lk] = $true
+        $runs = @(); if ($by.ContainsKey($name)) { $runs = @($by[$name]) }
+        $latest = $runs | Select-Object -First 1
+        $fin = @($runs | Where-Object { "$($_.finishedUtc)".Trim() -and "$($_.status)".Trim().ToLowerInvariant() -ne 'running' })
+        $state = 'never'
+        if ($latest -and ("$($latest.status)".Trim().ToLowerInvariant() -eq 'running' -or -not "$($latest.finishedUtc)".Trim())) { $state = 'running' }
+        elseif ($fin.Count) { $state = Get-PimUplinkJobState -Run $fin[0] }
+        $streak = 0; foreach ($f in $fin) { if ((Get-PimUplinkJobState -Run $f) -eq 'failed') { $streak++ } elseif ((Get-PimUplinkJobState -Run $f) -eq 'skipped') { continue } else { break } }
+        $thr = @($fin | Where-Object { "$($_.status)".Trim().ToLowerInvariant() -eq 'throttled' -and ($t = ConvertTo-PimUplinkUtc $_.finishedUtc) -and $t -ge $cut }).Count
+        $dur = { param($r) if ($null -eq $r -or -not $r.PSObject.Properties['durationMs']) { $null } else { ConvertTo-PimUplinkCount $r.durationMs } }
+        $nx = $null
+        if ($j.PSObject.Properties['nextRunUtc'] -and "$($j.nextRunUtc)".Trim()) { $nx = ConvertTo-PimUplinkIso $j.nextRunUtc }
+        elseif ($next.ContainsKey($lk)) { $nx = ConvertTo-PimUplinkIso $next[$lk] }
+        $items.Add([pscustomobject][ordered]@{
+            name = $name; state = $state
+            lastStartUtc = $(if ($latest) { ConvertTo-PimUplinkIso $latest.startedUtc } else { $null })
+            lastEndUtc = $(if ($fin.Count) { ConvertTo-PimUplinkIso $fin[0].finishedUtc } else { $null })
+            durationMs = $(if ($fin.Count) { & $dur $fin[0] } else { $null })
+            prevDurationMs = $(if ($fin.Count -gt 1) { & $dur $fin[1] } else { $null })
+            nextRunUtc = $nx; failStreak = [long]$streak; throttled24h = [long]$thr
+        })
+    }
+    return $items.ToArray()   # callers wrap in @()
+}
+
+# ---- Convergence / Mail / UpdatePending / SqlAccess / FeaturesChanged -------------------------------------------
+function New-PimUplinkConvergenceField {
+    <#
+      PURE. Convergence from pim.Settings 'ConvergenceState' (its firstSeen map: item key -> first seen unconverged):
+      unconverged = the items, persistent = those unconverged for 60 minutes or more (the verify-convergence grace, a
+      literal), oldestFirstSeenUtc. Only counts and a time leave -- the item keys name groups and people. No state = $null.
+    #>
+    param([AllowNull()][object]$State, [datetime]$NowUtc = [datetime]::UtcNow)
+    $st = ConvertFrom-PimUplinkStoredValue $State
+    if ($null -eq $st) { return $null }
+    $fs = Get-PimUplinkField $st 'firstSeen'
+    $vals = @()
+    if ($fs -is [System.Collections.IDictionary]) { $vals = @($fs.Values) } elseif ($null -ne $fs) { $vals = @($fs.PSObject.Properties | ForEach-Object { $_.Value }) }
+    $now = $NowUtc.ToUniversalTime(); $n = 0; $p = 0; $oldest = $null
+    foreach ($v in $vals) {
+        $n++
+        $t = ConvertTo-PimUplinkUtc $v
+        if (-not $t) { continue }
+        if (($now - $t).TotalMinutes -ge 60) { $p++ }
+        if (-not $oldest -or $t -lt $oldest) { $oldest = $t }
+    }
+    return [pscustomobject][ordered]@{ unconverged = [long]$n; persistent = [long]$p; oldestFirstSeenUtc = $(if ($oldest) { $oldest.ToString('o') } else { $null }) }
+}
+
+function ConvertTo-PimUplinkMailMode {
+    <# PURE. The stored MailMode -> none | sharedMailbox | smtp (absent / unknown = sharedMailbox, every install's default). #>
+    param([AllowNull()][object]$Value)
+    switch -regex ("$Value".Trim().Trim('"')) {
+        '^(?i)(none|off)$'                     { return 'none' }
+        '^(?i)(smtp|smtprelay|relay)$'         { return 'smtp' }
+    }
+    return 'sharedMailbox'
+}
+
+function New-PimUplinkMailField {
+    <#
+      PURE. Mail { mode; engine; manager } from pim.Settings 'MailMode' and 'MailSendProof' (each identity's last REAL send:
+      { ok; at; reason; mode; sender }). Only ok + the time leave -- never the sender address, the reason text or a host.
+      An identity with no proof = null.
+    #>
+    param([AllowNull()][object]$MailMode, [AllowNull()][object]$Proof)
+    $pr = ConvertFrom-PimUplinkStoredValue $Proof
+    $one = {
+        param($role)
+        $x = Get-PimUplinkField $pr $role
+        if ($null -eq $x) { return $null }
+        $ok = Get-PimUplinkField $x 'ok'
+        if ($null -eq $ok) { return $null }
+        [pscustomobject][ordered]@{ ok = [bool]("$ok" -match '^(?i)(true|1)$'); atUtc = (ConvertTo-PimUplinkIso (Get-PimUplinkField $x 'at')) }
+    }
+    $mm = $MailMode; if ($mm -is [string] -and "$mm".Trim().StartsWith('"')) { try { $mm = $mm | ConvertFrom-Json } catch { } }
+    return [pscustomobject][ordered]@{ mode = (ConvertTo-PimUplinkMailMode $mm); engine = (& $one 'engine'); manager = (& $one 'manager') }
+}
+
+function New-PimUplinkUpdatePendingField {
+    <# PURE. UpdatePending from the environment's UpdateState record (what the ring approved, what was last built, the hold, waiting since). #>
+    param([AllowNull()][object]$UpdateState)
+    $us = ConvertFrom-PimUplinkStoredValue $UpdateState
+    if ($null -eq $us) { return $null }
+    $s = { param($k) $v = "$(Get-PimUplinkField $us $k)".Trim(); if ($v -and $v.Length -le 40 -and $v -match '^[0-9A-Za-z.+-]+$') { $v } else { $null } }
+    $h = Get-PimUplinkField $us 'hold'
+    return [pscustomobject][ordered]@{
+        approvedVersion = (& $s 'approvedVersion'); lastBuiltVersion = (& $s 'lastBuiltVersion')
+        hold = $(if ($null -eq $h) { $false } else { [bool]("$h" -match '^(?i)(true|1)$') })
+        waitingSinceUtc = (ConvertTo-PimUplinkIso (Get-PimUplinkField $us 'waitingSinceUtc'))
+    }
+}
+
+function New-PimUplinkSqlAccessField {
+    <#
+      PURE. SqlAccess from UpdateState.sqlAccess -- the verdict the UPDATER records after its access converge
+      (New-PimSqlAccessVerdict, PIM-SqlAccess.ps1). The heartbeat only reads it, so the tick needs no right on the signed
+      procedure. Not recorded yet = $null.
+    #>
+    param([AllowNull()][object]$UpdateState)
+    $us = ConvertFrom-PimUplinkStoredValue $UpdateState
+    $sa = Get-PimUplinkField $us 'sqlAccess'
+    if ($null -eq $sa) { return $null }
+    $m = "$(Get-PimUplinkField $sa 'model')".Trim()
+    if ($m -notin @('least-privilege', 'broad')) { return $null }
+    $b = { param($k) $v = Get-PimUplinkField $sa $k; if ($null -eq $v) { $null } else { [bool]("$v" -match '^(?i)(true|1)$') } }
+    return [pscustomobject][ordered]@{ model = $m; run1 = (& $b 'run1'); run2 = (& $b 'run2'); updaterInAdminGroup = (& $b 'updaterInAdminGroup')
+                                       checkedUtc = (ConvertTo-PimUplinkIso (Get-PimUplinkField $sa 'checkedUtc')) }
+}
+
+function Get-PimUplinkFeaturesChangedMax { <# PURE. At most 40 ids (Invardia). #> return 40 }
+
+function New-PimUplinkFeaturesChangedField {
+    <#
+      PURE. FeaturesChanged: '<area>.<name>:<on|off>' for every feature whose resolved gate differs from its catalog
+      default (-Gates: key -> enabled; -Catalog: the feature catalog). Closed ids only (the catalog's own keys; a key without
+      a dot gets the area 'feature'), sorted, at most 40. Nothing changed = an empty list.
+    #>
+    param([AllowNull()][System.Collections.IDictionary]$Gates, [AllowNull()][object[]]$Catalog)
+    if ($null -eq $Gates -or $null -eq $Catalog) { return $null }
+    $ids = New-Object System.Collections.Generic.List[string]
+    foreach ($f in @($Catalog)) {
+        $key = "$(Get-PimUplinkField $f 'key')".Trim().ToLowerInvariant()
+        if (-not $key -or -not $Gates.Contains("$(Get-PimUplinkField $f 'key')")) { continue }
+        $def = [bool](Get-PimUplinkField $f 'defaultEnabled'); $now = [bool]$Gates["$(Get-PimUplinkField $f 'key')"]
+        if ($def -eq $now) { continue }
+        $id = ($key -replace '[^a-z0-9.-]', '-'); if ($id -notmatch '\.') { $id = "feature.$id" }
+        if ($id -notmatch '^[a-z0-9-]+\.[a-z0-9.-]+$') { continue }
+        $ids.Add("${id}:$(if ($now) { 'on' } else { 'off' })")
+    }
+    return @($ids.ToArray() | Sort-Object | Select-Object -First (Get-PimUplinkFeaturesChangedMax))   # callers wrap in @(): nothing changed = []
+}
+
+function Get-PimUplinkStateFields {
+    <#
+      The structured fields that are SWITCHED ON and readable: an ordered map field -> value. -Switches: field -> on
+      (Get-PimUplinkStateFieldSwitches). Every source is a seam: -GetSetting { param($Name) } (pim.Settings), -Query
+      { param($Sql) } (rows; read-only), -Runs (the job run history; $null = not read), -Schedule / -ProductJobNames /
+      -StateJobs (the jobs), -UpdateState, -Gates / -Catalog (the features), -HybridAdOn / -HybridWorkerState. Each field
+      is built on its own: a source that throws leaves THAT field out, never the others. Never throws.
+    #>
+    [CmdletBinding()] param([AllowNull()][System.Collections.IDictionary]$Switches, [scriptblock]$GetSetting = $null, [scriptblock]$Query = $null,
+          [AllowNull()][object[]]$Runs = $null, [AllowNull()][object[]]$Schedule = $null, [AllowNull()][string[]]$ProductJobNames = $null,
+          [AllowNull()][object[]]$StateJobs = @(), [AllowNull()][object]$UpdateState = $null, [bool]$UpdateStateRead = $false,
+          [AllowNull()][System.Collections.IDictionary]$Gates = $null, [AllowNull()][object[]]$Catalog = $null,
+          [bool]$HybridAdOn = $false, [AllowNull()][object]$HybridWorkerState = $null, [datetime]$NowUtc = [datetime]::UtcNow)
+    # every local here starts with __sf (or is $out): a caller's seam scriptblock reads ITS variables through dynamic
+    # scope, and a local named like one of them would shadow it (a test stub returned $null that way)
+    $out = [ordered]@{}
+    if ($null -eq $Switches) { return $out }
+    $__sfOn = { param($f) $Switches.Contains($f) -and [bool]$Switches[$f] }
+    if ((& $__sfOn 'Security') -and $Query) {
+        try { $__sfSecRows = @(& $Query (Get-PimUplinkSecuritySql)); $__sfV = New-PimUplinkSecurityField -Rows $__sfSecRows; if ($null -ne $__sfV) { $out['Security'] = $__sfV } }
+        catch { Write-Warning "[uplink] Security could not be read: $($_.Exception.Message)" }
+    }
+    if ((& $__sfOn 'Collections') -and $null -ne $Runs) {
+        try {
+            $__sfSnapRow = $null; $__sfSnapOk = $false
+            if ($Query) { try { $__sfSnapRow = @(& $Query (Get-PimUplinkSnapshotSql)) | Select-Object -First 1; $__sfSnapOk = $true } catch { $__sfSnapOk = $false } }
+            $out['Collections'] = [object[]]@(New-PimUplinkCollectionsField -Runs $Runs -Snapshot $__sfSnapRow -SnapshotRead $__sfSnapOk -HybridAdOn $HybridAdOn -HybridWorkerState $HybridWorkerState)
+        } catch { Write-Warning "[uplink] Collections could not be built: $($_.Exception.Message)" }
+    }
+    if ((& $__sfOn 'Jobs') -and $null -ne $Runs -and $null -ne $Schedule -and $null -ne $ProductJobNames) {
+        try { $out['Jobs'] = [object[]]@(New-PimUplinkJobsField -Schedule $Schedule -Runs $Runs -ProductNames $ProductJobNames -StateJobs $StateJobs -NowUtc $NowUtc) }
+        catch { Write-Warning "[uplink] Jobs could not be built: $($_.Exception.Message)" }
+    }
+    if ((& $__sfOn 'Convergence') -and $GetSetting) {
+        try { $__sfV = New-PimUplinkConvergenceField -State (& $GetSetting 'ConvergenceState') -NowUtc $NowUtc; if ($null -ne $__sfV) { $out['Convergence'] = $__sfV } }
+        catch { Write-Warning "[uplink] Convergence could not be read: $($_.Exception.Message)" }
+    }
+    if ((& $__sfOn 'Mail') -and $GetSetting) {
+        try { $out['Mail'] = New-PimUplinkMailField -MailMode (& $GetSetting 'MailMode') -Proof (& $GetSetting 'MailSendProof') }
+        catch { Write-Warning "[uplink] Mail could not be read: $($_.Exception.Message)" }
+    }
+    if ((& $__sfOn 'UpdatePending') -and $UpdateStateRead) {
+        try { $__sfV = New-PimUplinkUpdatePendingField -UpdateState $UpdateState; if ($null -ne $__sfV) { $out['UpdatePending'] = $__sfV } } catch { Write-Warning "[uplink] UpdatePending could not be built: $($_.Exception.Message)" }
+    }
+    if ((& $__sfOn 'SqlAccess') -and $UpdateStateRead) {
+        try { $__sfV = New-PimUplinkSqlAccessField -UpdateState $UpdateState; if ($null -ne $__sfV) { $out['SqlAccess'] = $__sfV } } catch { Write-Warning "[uplink] SqlAccess could not be built: $($_.Exception.Message)" }
+    }
+    if ((& $__sfOn 'FeaturesChanged') -and $null -ne $Gates -and $null -ne $Catalog) {
+        try { $out['FeaturesChanged'] = [string[]]@(New-PimUplinkFeaturesChangedField -Gates $Gates -Catalog $Catalog) } catch { Write-Warning "[uplink] FeaturesChanged could not be built: $($_.Exception.Message)" }
+    }
+    return $out
+}
+
+function Add-PimUplinkStateFields {
+    <#
+      Adds the structured fields of -Fields (Get-PimUplinkStateFields) to the heartbeat -Record, each PROVEN in the record's
+      own JSON text before it leaves (the ActiveGuards lesson: Windows PowerShell 5.1 can write a list as {"value":[..]}):
+      a list field must read as a JSON array, Security's domains too -- else that field is removed with one warning. Only
+      the declared names are taken. Returns the names that went on the record (the caller passes them to the additive hold).
+    #>
+    param([Parameter(Mandatory)][object]$Record, [AllowNull()][System.Collections.IDictionary]$Fields)
+    $added = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $Fields) { return [string[]]@() }
+    $lists = @('Collections', 'Jobs', 'FeaturesChanged')
+    foreach ($f in (Get-PimUplinkStateFieldNames)) {
+        if (-not $Fields.Contains($f) -or $null -eq $Fields[$f]) { continue }
+        $val = $Fields[$f]
+        if ($lists -contains $f) { $val = [object[]]@($val) }
+        $Record | Add-Member -NotePropertyName $f -NotePropertyValue $val -Force
+        $txt = ''; try { $txt = "$($Record | ConvertTo-Json -Depth 6 -Compress)" } catch { $txt = '' }
+        $ok = [bool]$txt
+        if ($ok -and $lists -contains $f) { $ok = $txt.Contains("`"${f}`":[") }
+        if ($ok -and $f -eq 'Security') { $ok = $txt.Contains('"domains":[') }
+        if ($ok) { $added.Add($f) }
+        else { $Record.PSObject.Properties.Remove($f); Write-Warning "[uplink] $f could not be written as the agreed JSON -- the heartbeat goes without it." }
+    }
+    return [string[]]$added.ToArray()
+}
+
 function Invoke-PimUplinkCycle {
     <#
       One cycle with every seam injected (tests run it offline):
@@ -1382,7 +1988,10 @@ function Invoke-PimUplinkCycle {
           # Get-PimReleaseControlHeartbeatFields: only the keys that are known). Its own switch (PIM_Telemetry_ReleaseControl,
           # AUTO = ring 0 only) and its own 24-hour hold after a refusal (UplinkState.releaseControlRefusedUtc).
           [bool]$ReleaseControl = $false,
-          [AllowNull()][System.Collections.IDictionary]$ReleaseControlFields = $null)
+          [AllowNull()][System.Collections.IDictionary]$ReleaseControlFields = $null,
+          # §33.0 MORE TELEMETRY: { } -> the switched-on structured fields (Get-PimUplinkStateFields: field -> value). INVOKED
+          # ONLY when the IDENTIFIED heartbeat is due and the additive fields are on; $null = none.
+          [AllowNull()][scriptblock]$StateFields = $null)
     $NowUtc = $NowUtc.ToUniversalTime()
     $endpoint = "$(& $GetSetting 'UplinkEndpoint')".Trim()
     $sender = Resolve-AitUplinkSender -Enabled $Enabled -InstallKey $InstallKey -Endpoint $endpoint
@@ -1550,6 +2159,9 @@ function Invoke-PimUplinkCycle {
                 }
             }
         }
+        # §33.0 MORE TELEMETRY: the 40-key ceiling, enforced HERE (a record above it is refused WHOLE by Invardia) -- the
+        # lowest-priority keys are dropped, deterministically, with one warning (Limit-PimUplinkCounts).
+        $hbCounts = Limit-PimUplinkCounts -Counts $hbCounts
         $hb = New-AitUplinkReport -Kind heartbeat @common -Edition (Get-PimUplinkEdition -License $License -ProHere $ProHere) -Hosting 'container' `
                 -RuntimeIdentity $RuntimeIdentity -LicenceState (Get-PimUplinkLicenceState -License $License) -Counts $hbCounts
         # §100.39 / framework §12.6b: the IDENTIFIED heartbeat names the installed licence (Invardia 1.0.230: optional `LicenceId`,
@@ -1630,6 +2242,14 @@ function Invoke-PimUplinkCycle {
                     if ($ctlText.Contains('"Controls":[{')) { $hbAdd += 'Controls' }
                     else { $hb.PSObject.Properties.Remove('Controls'); Write-Warning '[uplink] Controls could not be written as a JSON array -- the heartbeat goes without it.' }
                 }
+            }
+            # §33.0 MORE TELEMETRY: the structured fields (Security, Collections, Jobs, Convergence, Mail, UpdatePending,
+            # SqlAccess, FeaturesChanged) -- each behind its own switch (OFF by default), built ONCE per due identified
+            # heartbeat by -StateFields, additive (held 24 h with the others on a refusal). A throw = none of them.
+            if ($StateFields) {
+                $sfMap = $null; try { $sfMap = & $StateFields } catch { $sfMap = $null; Write-Warning "[uplink] the structured fields could not be built: $($_.Exception.Message)" }
+                $sfMap = @($sfMap | Where-Object { $_ -is [System.Collections.IDictionary] }) | Select-Object -First 1
+                if ($sfMap) { try { foreach ($sfn in @(Add-PimUplinkStateFields -Record $hb -Fields $sfMap)) { $hbAdd += $sfn } } catch { Write-Warning "[uplink] the structured fields could not be added: $($_.Exception.Message)" } }
             }
         }
         # PIM 100.167 / framework 8.16: Capabilities + Licences -- identified only, the cause switch on, ONE probe per heartbeat.
@@ -1984,10 +2604,10 @@ function Invoke-PimUplinkJob {
     if (-not (Get-Command Resolve-PimUplinkRing -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-UplinkSetup.ps1') }
     # 100.10 (Invardia 2026-10-09: "update level unknown" for every PIM install -- Reports.Ring empty): PIM_UPDATE_RING is set on
     # the UPDATE job only, and this job runs in the tick job. The environment's own record (UpdateState) carries the ring too.
-    $us = $null; try { $us = & $get 'UpdateState'; if ($us -is [string]) { $us = $us | ConvertFrom-Json } } catch { $us = $null }
+    $us = $null; $usRead = $false; try { $us = & $get 'UpdateState'; if ($us -is [string]) { $us = $us | ConvertFrom-Json }; $usRead = $true } catch { $us = $null }
     $ring = Resolve-PimUplinkRing -EnvRing "$env:PIM_UPDATE_RING" -UpdateState $us
     $rid = if ($env:IDENTITY_ENDPOINT -or $env:MSI_ENDPOINT) { 'mi-container' } else { 'spn-certificate' }
-    $runs = @(); if (Get-Command Get-PimJobRunHistory -ErrorAction SilentlyContinue) { try { $runs = @(Get-PimJobRunHistory) } catch { $runs = @() } }
+    $runs = @(); $runsRead = $false; if (Get-Command Get-PimJobRunHistory -ErrorAction SilentlyContinue) { try { $runs = @(Get-PimJobRunHistory); $runsRead = $true } catch { $runs = @() } }
     $key = if (Get-Command Resolve-PimInvardiaInstallKey -ErrorAction SilentlyContinue) { Resolve-PimInvardiaInstallKey -GetSetting $get } else { "$env:PIM_UPLINK_KEY" }
     # 100.10: the setup report -- its own switch (feature 'telemetry.setup', ON by default; it only ever sends with an install key).
     $setupOn = [bool]((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and (Test-PimFeatureAvailable -Key 'telemetry.setup' -Quiet))
@@ -2035,7 +2655,9 @@ function Invoke-PimUplinkJob {
         $adMsp = ($scRole -eq 'msp-master')
         $adHy = $true
         try { if (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) { $adHy = [bool](Test-PimFeatureAvailable -Key 'hybrid.ad' -Quiet) } } catch { $adHy = $false }
-        $adoption = { Get-PimUplinkAdoptionCounts -Query { param($n, $s) Invoke-PimSqlScalar -ConnectionString $cs -Sql $s } -MspMaster:$adMsp -HybridAd:$adHy }
+        # §33.0 MORE TELEMETRY: convergenceFailures24h from the run history this job already read ($null = not read = left out)
+        $adRuns = $null; if ($runsRead) { $adRuns = [object[]]@($runs) }   # never `= if {}`: an empty list would unroll to $null
+        $adoption = { Get-PimUplinkAdoptionCounts -Query { param($n, $s) Invoke-PimSqlScalar -ConnectionString $cs -Sql $s } -MspMaster:$adMsp -HybridAd:$adHy -Runs $adRuns -NowUtc $NowUtc }
     }
     if ($on) {
         try { $ef = & $get 'EngineItemFailures'; if ($ef -is [string] -and "$ef".Trim()) { $ef = $ef | ConvertFrom-Json }; $engFails = @(@($ef) | Where-Object { $null -ne $_ }) } catch { $engFails = @() }
@@ -2067,11 +2689,35 @@ function Invoke-PimUplinkJob {
             }
         }
     }
+    # §33.0 MORE TELEMETRY: the structured fields -- each OFF unless its own PIM_UPLINK_<FIELD> switch is on; identified only.
+    # A PLAIN scriptblock (dynamic scope; every name it reads starts with sfJob so nothing in the cycle can shadow it),
+    # invoked by the cycle ONLY when the identified heartbeat is due.
+    $stateSb = $null
+    $sfJobSw = Get-PimUplinkStateFieldSwitches
+    if ($on -and "$key".Trim() -and @($sfJobSw.Values | Where-Object { $_ }).Count) {
+        $sfJobCs = $cs; $sfJobGet = $get; $sfJobUs = $us; $sfJobUsRead = [bool]$usRead; $sfJobNow = $NowUtc
+        $sfJobRuns = $null; if ($runsRead) { $sfJobRuns = [object[]]@($runs) }
+        $stateSb = {
+            $sfQ = $null; if (Get-Command Invoke-PimSqlQuery -ErrorAction SilentlyContinue) { $sfQ = { param($sql) @(Invoke-PimSqlQuery -ConnectionString $sfJobCs -Sql $sql) } }
+            $sfSched = $null; $sfProd = $null; $sfStateJobs = @()
+            if ($sfJobSw['Jobs']) {
+                try { if (Get-Command Get-PimJobSchedule -ErrorAction SilentlyContinue) { $sfSched = [object[]]@(Get-PimJobSchedule) } } catch { $sfSched = $null }
+                try { if (Get-Command Get-PimDefaultJobSchedule -ErrorAction SilentlyContinue) { $sfProd = [string[]]@(Get-PimDefaultJobSchedule | ForEach-Object { "$($_.name)" }) } } catch { $sfProd = $null }
+                try { if (Get-Command Get-PimSchedulerState -ErrorAction SilentlyContinue) { $sfSs = Get-PimSchedulerState; if ($sfSs -and $sfSs.jobs) { $sfStateJobs = [object[]]@($sfSs.jobs) } } } catch { $sfStateJobs = @() }
+            }
+            $sfGates = $null; $sfCat = $null
+            if ($sfJobSw['FeaturesChanged'] -and (Get-Command Get-PimFeatureGateState -ErrorAction SilentlyContinue)) { try { $sfGates = (Get-PimFeatureGateState).gates; $sfCat = [object[]]@(Get-PimFeatureCatalog) } catch { $sfGates = $null; $sfCat = $null } }
+            $sfHyOn = $false; try { if (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) { $sfHyOn = [bool](Test-PimFeatureAvailable -Key 'hybrid.ad' -Quiet) } } catch { $sfHyOn = $false }
+            $sfHw = $null; if ($sfHyOn -and (Get-Command Get-PimHybridWorkerJobStatus -ErrorAction SilentlyContinue)) { try { $sfHw = Get-PimHybridWorkerJobStatus -Type 'hybrid-ad-sync' -NowUtc $sfJobNow } catch { $sfHw = $null } }
+            Get-PimUplinkStateFields -Switches $sfJobSw -GetSetting $sfJobGet -Query $sfQ -Runs $sfJobRuns -Schedule $sfSched -ProductJobNames $sfProd -StateJobs $sfStateJobs `
+                -UpdateState $sfJobUs -UpdateStateRead $sfJobUsRead -Gates $sfGates -Catalog $sfCat -HybridAdOn $sfHyOn -HybridWorkerState $sfHw -NowUtc $sfJobNow
+        }
+    }
     $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
             -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $pause @cyc `
             -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints -AdoptionCounts $adoption `
             -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun -Causes $causesOn -LicenceProbe $licProbe -HybridAd $hyAd `
-            -ReleaseControl $rcOn -ReleaseControlFields $rcFields
+            -ReleaseControl $rcOn -ReleaseControlFields $rcFields -StateFields $stateSb
     # PIM 100.75: a failed send / an install that should be identified but is anonymous = a WARNING run (never a failure).
     $rawKey = ''; try { $rawKey = "$(& $get 'InvardiaInstallKey')".Trim() } catch { $rawKey = '' }
     $claimSt = $null; try { $claimSt = & $get 'InstallKeyClaimState'; if ($claimSt -is [string]) { $claimSt = $claimSt | ConvertFrom-Json } } catch { $claimSt = $null }

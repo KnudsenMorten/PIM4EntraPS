@@ -614,7 +614,14 @@ $seedRode = $false     # set when the seed went in with the grant's bootstrap-jo
 # and runs the schema DDL. MEMBERS ONLY: this never creates the group or moves the admin, so running it
 # against an environment still on a single-principal admin changes nothing (it says so).
 $groupMember = $false
-if (-not $WhatIfPreference -and -not $SkipSqlAdminGroup -and $storePlan.hasStore -and $storePlan.writes.Contains('PIM_SqlServer')) {
+# PIM 100.156 B (framework 12.23 P5): whether the updater joins the group at all is the ONE switch
+# Get-PimSqlAdminGroupKeepsUpdater (_PimSqlAdminGroup.ps1) -- $true until the "updater out of the SQL admin group" lane
+# lands. Either way the updater ALSO gets its own contained user (pim_updater + db_ddladmin) in the next step.
+$keepsUpdater = [bool](Get-PimSqlAdminGroupKeepsUpdater)
+if (-not $keepsUpdater -and -not $WhatIfPreference -and $storePlan.hasStore) {
+    Note "SQL admin group '$SqlAdminGroupName': the updater is NOT made a member -- it reaches the store as its own contained user (framework 12.23 P5)"
+}
+if ($keepsUpdater -and -not $WhatIfPreference -and -not $SkipSqlAdminGroup -and $storePlan.hasStore -and $storePlan.writes.Contains('PIM_SqlServer')) {
     Step "SQL admin group '$SqlAdminGroupName' -- the updater identity"
     try {
         $inv = New-PimSqlAdminGroupInvokers -SubscriptionId $SubscriptionId
@@ -676,26 +683,35 @@ if (-not $WhatIfPreference -and $storePlan.hasStore) {
                 $solRootG = Split-Path -Parent (Split-Path -Parent $here)
                 if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRootG 'engine\_shared\PIM-Rest.ps1') }   # Get-PimRestToken
                 . (Join-Path $solRootG 'engine\_shared\PIM-SqlStore.ps1')  # New-PimSqlConnection
-                if ($UseSignedInAccount) {
-                    Grant-PimMiSql -DbUserName $JobName -MiAppId $updAppId -SqlServerFqdn "$($storePlan.writes['PIM_SqlServer'])" `
-                        -SqlDatabase "$($storePlan.writes['PIM_SqlDatabase'])" -TenantId $TenantId -UseSignedInAccount
-                } else {
-                $cred = if ("$SqlAdminCertThumbprint".Trim()) { @{ SqlAdminCertThumbprint = $SqlAdminCertThumbprint } }
-                        else { @{ SqlAdminClientSecret = $SqlAdminClientSecret } }
-                Grant-PimMiSql -DbUserName $JobName -MiAppId $updAppId -SqlServerFqdn "$($storePlan.writes['PIM_SqlServer'])" `
-                    -SqlDatabase "$($storePlan.writes['PIM_SqlDatabase'])" -TenantId $TenantId -SqlAdminClientId $SqlAdminClientId @cred
+                # PIM 100.156 B (framework 12.23 P4): the updater = a contained user with db_ddladmin + pim_updater (EXECUTE on
+                # the signed access procedure) -- then the admin run of the model (same product code as the cut-over), so the
+                # updater's role, its EXECUTE and the converge are in place before its first run.
+                $updRoles = @(Get-PimSetupSqlUserRoles -DbUserName $JobName -Component 'updater')
+                $sqlAuth = @{ SqlServerFqdn = "$($storePlan.writes['PIM_SqlServer'])"; SqlDatabase = "$($storePlan.writes['PIM_SqlDatabase'])"; TenantId = $TenantId }
+                if ($UseSignedInAccount) { $sqlAuth['UseSignedInAccount'] = $true }
+                else {
+                    $sqlAuth['SqlAdminClientId'] = $SqlAdminClientId
+                    if ("$SqlAdminCertThumbprint".Trim()) { $sqlAuth['SqlAdminCertThumbprint'] = $SqlAdminCertThumbprint } else { $sqlAuth['SqlAdminClientSecret'] = $SqlAdminClientSecret }
                 }
-                Note "database user [$JobName] granted (MI appId $updAppId)"
+                Grant-PimMiSql -DbUserName $JobName -MiAppId $updAppId -Roles $updRoles @sqlAuth
+                Note "database user [$JobName] granted (MI appId $updAppId): $($updRoles -join ' + ')"
+                $acc = Invoke-PimSetupSqlAccessModel @sqlAuth -UpdaterUserName $JobName -UpdaterAppId $updAppId
+                if ($acc.skipped) { Warn "least-privilege model: $($acc.reason)" }
+                else { Note "least-privilege model: signer $($acc.signer) (expires $($acc.signerExpiry)); $($acc.converge.statements) statement(s) converged; users $(@($acc.converge.users) -join ', ')" }
             } else {
                 $dbPath = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$DbInitJobName"
                 $dbEnv  = ConvertTo-PimJobEnvMap -Job (& $armInvoker -Method GET -Path $dbPath -ApiVersion $script:PimAcaApi) -ContainerName $DbInitJobName
                 $merged = Merge-PimDbInitPrincipals -Json $(if ($dbEnv.Contains('PIM_DBINIT_PRINCIPALS')) { "$($dbEnv['PIM_DBINIT_PRINCIPALS'])" } else { '' }) `
-                              -Name $JobName -AppId $updAppId
-                if (-not $merged.changed) {
+                              -Name $JobName -AppId $updAppId -Roles @(Get-PimSetupSqlUserRoles -DbUserName $JobName -Component 'updater')
+                # PIM 100.156 B: the job's admin run of the least-privilege model names the updater, so its contained user
+                # gets pim_updater + db_ddladmin + EXECUTE on the signed procedure in the same run.
+                $accWant = ConvertTo-Json -Compress -InputObject ([ordered]@{ mode = 'setup'; updaterUserName = $JobName; updaterAppId = $updAppId })
+                $accHave = $(if ($dbEnv.Contains('PIM_DBINIT_SQL_ACCESS')) { "$($dbEnv['PIM_DBINIT_SQL_ACCESS'])".Trim() } else { '' })
+                if (-not $merged.changed -and $accHave -eq $accWant) {
                     Note "[$JobName] is already one of $DbInitJobName's principals -- created by its last run"
                 } else {
                     # ARM, never az: the value is a JSON array, and cmd.exe strips its quotes (measured twice).
-                    $dbWrites = [ordered]@{ PIM_DBINIT_PRINCIPALS = $merged.json }
+                    $dbWrites = [ordered]@{ PIM_DBINIT_PRINCIPALS = $merged.json; PIM_DBINIT_SQL_ACCESS = $accWant }
                     # 2026-10-08: the update-state seed (step 4a) rides this same run instead of starting a second one.
                     if ($seedPlan.action -eq 'dbinit') { $dbWrites['PIM_DBINIT_UPDATE_SEED'] = ($seedInfo | ConvertTo-Json -Compress); $seedRode = $true }
                     [void](Invoke-PimUpdateJobEnvWrites -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -JobName $DbInitJobName `

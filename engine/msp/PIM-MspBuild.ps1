@@ -1074,19 +1074,20 @@ function Get-PimMspBuildPlan {
         -Script 'tools\setup\Invoke-PimDeployAll.ps1' -Arguments $hosting -Switches $hostingSwitches `
         -Why "managed-identity only (no engine app registration, no secret); the smoke gate runs inside; $($updRing.message)"))
 
-    # (parenthesised: the comma operator binds tighter than +, so the unwrapped form built ONE string -- caught by B5)
-    $members = @(("{{mi-job:$tick}}"), ("{{mi-app:$mgr}}"))
-    $sqlGroupArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; SqlServerName = $sqlName; TenantId = $tid; ClientId = $cid; CertThumbprint = $thumb; SupportAppId = $cid; ExtraMemberObjectIds = $members }
+    # PIM 100.156 B (framework 12.23 P5): the tick and the Manager are NOT members any more -- each reaches the store as its
+    # own contained user in its pim_* role (the hosting step's setup), never as a SQL administrator. The group holds the
+    # Invardia Support app (cert mode: the build's own identity is the Support app).
+    $sqlGroupArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; SqlServerName = $sqlName; TenantId = $tid; ClientId = $cid; CertThumbprint = $thumb; SupportAppId = $cid }
     if ($signedIn) {
         # Initialize-PimSqlAdminGroup with no -ClientId/-CertThumbprint = the signed-in az context (its own convention).
         # The signed-in administrator stays a member: it is who re-runs this build and who the store steps connect as.
         $sqlGroupArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; SqlServerName = $sqlName; TenantId = $tid
-                           ExtraMemberObjectIds = @(("{{mi-job:$tick}}"), ("{{mi-app:$mgr}}"), ('{{signed-in-user}}')) }
+                           ExtraMemberObjectIds = @(('{{signed-in-user}}')) }
     }
-    $steps.Add((New-PimMspBuildStep -Id 'sqlgroup' -Title 'SQL admin group grp-pim-sql-admins: tick + Manager identities + the Invardia Support app' `
+    $steps.Add((New-PimMspBuildStep -Id 'sqlgroup' -Title 'SQL admin group grp-pim-sql-admins: the Invardia Support app (the tick + Manager use their own least-privilege database users)' `
         -Script 'tools\setup\Initialize-PimSqlAdminGroup.ps1' -HostExe 'powershell' `
         -Arguments $sqlGroupArgs `
-        -Why 'the prerequisites add the environment, deploy and updater identities; the tick and Manager system identities and the Invardia Support app were never added'))
+        -Why 'framework 12.23 P5: the SQL admin group is the Invardia Support app only; runtime identities get a contained user in their own pim_* role, never admin'))
 
 
     $accessArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; SqlServerFqdn = $sqlFqdn; SqlDatabase = $db; TickJobName = $tick; ManagerApp = $mgr } + $storeArgs

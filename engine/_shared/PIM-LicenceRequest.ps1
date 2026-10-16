@@ -46,7 +46,8 @@ function Get-PimLicenceRequestDecision {
         * otherwise (no licence, not Pro here, expired, grace, or ending within 30 days) -> knock
       clearHint = $true when -SupersededBy names the licence that IS installed (the successor arrived): the job clears it.
     #>
-    param([bool]$Enabled, $License, [bool]$ProHere, $State, [bool]$HasToken, [datetime]$NowUtc, [string]$SupersededBy = '')
+    param([bool]$Enabled, $License, [bool]$ProHere, $State, [bool]$HasToken, [datetime]$NowUtc, [string]$SupersededBy = '',
+          [bool]$ProIntended = $true)
     $NowUtc = $NowUtc.ToUniversalTime()   # .NET compares DateTimes WITHOUT their kind -- everything here is UTC
     $hint = "$SupersededBy".Trim()
     $curId = if ($License) { "$($License.LicenseId)".Trim() } else { '' }
@@ -58,6 +59,11 @@ function Get-PimLicenceRequestDecision {
         if ($next -and $NowUtc -lt $next) { return @{ action = 'none'; reason = "waiting for Invardia (next check $($next.ToString('u')))"; clearHint = $clear } }
         return @{ action = 'pull'; reason = 'a request is pending at Invardia'; clearHint = $clear }
     }
+    # 2026-10-16 (owner via Invardia: "i chose community edt to ig798" / "but get license req mail"): a COMMUNITY install
+    # never asks for a Pro licence. Only an install meant to be Pro knocks -- one that holds a licence file (any status), an
+    # Invardia install key, or a superseded-licence hint (-ProIntended, from Invoke-PimLicenceRequestCycle). A request that
+    # is already pending is still pulled above, so an enrollment / trial in flight completes.
+    if (-not $ProIntended) { return @{ action = 'none'; reason = 'community edition: no licence is requested (a Pro install holds a licence file or an Invardia install key)'; clearHint = $clear } }
     # Invardia's contract (2026-10-04): a rejection is shown to the admin and NEVER re-requested automatically -- the
     # admin clears it (Settings > Licence: "request again", which removes LicenceRequestState) after talking to Invardia.
     # Checked BEFORE the superseded hint: a refused successor (e.g. the old licence was revoked) must not knock every 30 min.
@@ -160,7 +166,12 @@ function Invoke-PimLicenceRequestCycle {
     $proHere = [bool]($lic -and (Test-PimLicenseIsProForTenant -License $lic -TenantId $tid).pro)
     # §100.39: the superseded hint the heartbeat stored (PIM-Uplink.ps1). A plain string id; anything else is ignored.
     $hint = ''; try { $hv = & $GetSetting 'LicenceSupersededBy'; if ($hv -is [string]) { $hint = $hv.Trim() } } catch { $hint = '' }
-    $d = Get-PimLicenceRequestDecision -Enabled $Enabled -License $lic -ProHere $proHere -State $state -HasToken ([bool]$token) -NowUtc $NowUtc -SupersededBy $hint
+    # 2026-10-16: is this install meant to be Pro? A stored licence file (any status), an Invardia install key, or a superseded
+    # hint. A Community install has none of them and never knocks (Get-PimLicenceRequestDecision -ProIntended).
+    $hasLicFile = $false; try { $lt0 = & $GetSetting 'License'; $hasLicFile = [bool]("$lt0".Trim()) } catch { $hasLicFile = $false }
+    $hasKey = $false; if (Get-Command Resolve-PimInvardiaInstallKey -ErrorAction SilentlyContinue) { try { $hasKey = [bool](Resolve-PimInvardiaInstallKey -GetSetting $GetSetting) } catch { $hasKey = $false } }
+    $proIntended = [bool]($hasLicFile -or $hasKey -or $hint)
+    $d = Get-PimLicenceRequestDecision -Enabled $Enabled -License $lic -ProHere $proHere -State $state -HasToken ([bool]$token) -NowUtc $NowUtc -SupersededBy $hint -ProIntended $proIntended
     if ($d.clearHint) { & $SetSetting 'LicenceSupersededBy' ''; $hint = '' }   # the successor IS installed
     $save = { param($Status, $Msg, $Extra) $o = [ordered]@{ status = $Status; message = $Msg; updatedUtc = $NowUtc.ToString('o') }
               if ($state) { foreach ($k in 'requestId', 'requestedUtc', 'nextPollUtc') { if ($state.PSObject.Properties[$k] -and -not ($Extra -and $Extra.Contains($k))) { $o[$k] = $state.$k } } }

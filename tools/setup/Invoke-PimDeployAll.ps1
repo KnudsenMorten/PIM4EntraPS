@@ -122,7 +122,9 @@
     It grants: Microsoft Graph application permissions (engine set to the tick identity and the engine app; read-only set
     to the Manager identity; DelegatedPermissionGrant for the sign-in consent); AcrPull, Reader, Contributor (updater, on
     the resource group) and Reader at the tenant root (User Access Administrator only with
-    -EngineAzureRootUserAccessAdmin); SQL roles db_datareader, db_datawriter, db_ddladmin; Exchange scoped send right.
+    -EngineAzureRootUserAccessAdmin); SQL: the least-privilege model (a signed access procedure; one role per component --
+    pim_web, pim_engine, pim_updater + db_ddladmin; framework 12.23); Exchange scoped send right. The identity it runs
+    SQL as leaves the SQL admin group again at the end (unless -KeepSetupIdentityInSqlAdminGroup).
     Logs: a transcript of the run in the temp folder (pim-manager-logs); its path is printed.
 
 .LINK
@@ -424,6 +426,12 @@ param(
     # is made at all; without it the IP is read from https://api.ipify.org (a third-party service).
     [switch]$KeepSetupHostRule,
     [string]$SetupHostIp,
+    # PIM 100.156 B (framework 12.23 P5 "setup identities only for the length of an install, removed after"): at the end of
+    # the run the identity this deploy ran SQL as (the signed-in person, or the SQL admin application) leaves the SQL admin
+    # group again -- read back; never when it is the server's Entra admin itself (then it is reported). The next run makes
+    # it a member again before its first SQL step. -KeepSetupIdentityInSqlAdminGroup: for a caller that still needs SQL
+    # after this script and releases it itself (the guided install, Install-PimManager, after its licence / support steps).
+    [switch]$KeepSetupIdentityInSqlAdminGroup,
     # §53 -- the nightly updater installed by the `updater` step.
     [string]$UpdateJobName  = 'ca-pim-update',
     [string]$UpdateCron     = '0 3 * * *',   # UTC; stagger across an estate so 100 do not roll at once
@@ -829,9 +837,37 @@ if ($UseSignedInAccount) {
         Write-Host "    deploy identity: the SIGNED-IN user $($who.userName) ($($who.objectId)) -- no deploy application, no certificate" -ForegroundColor DarkGray
     }
 }
+$script:PimSetupAppSqlChecked = $false
+$script:PimSetupAppSqlOid = ''
+function Confirm-PimSetupAppSqlAdminMember {
+    # PIM 100.156 B (framework 12.23 P5): the SQL admin APPLICATION this deploy runs SQL as left the SQL admin group at the
+    # end of the last run (Invoke-PimSqlAdminGroupSetupRelease), so before the first SQL step it is made a member again
+    # (members-only: never creates the group or moves the admin). Best effort and never fatal -- a deploy identity without
+    # the Graph rights for a role-assignable group could not have been released either, so it is still a member (or the
+    # server's single admin). Once per run; public SQL only (private SQL is administered from inside the network).
+    if ($UseSignedInAccount -or $StepRunner -or $script:PimSetupAppSqlChecked) { return }
+    if (-not "$SqlServerFqdn".Trim() -or $SqlPrivateEndpoint -or -not "$SqlAdminClientId".Trim() -or -not "$TenantId".Trim()) { return }
+    $script:PimSetupAppSqlChecked = $true
+    try {
+        if (-not (Get-Command Invoke-PimSqlAdminGroupStep -ErrorAction SilentlyContinue)) { . (Join-Path $here '_PimSqlAdminGroup.ps1') }
+        $subG = $(if ("$SqlSubscriptionId".Trim()) { $SqlSubscriptionId } else { $SubscriptionId })
+        $inv = New-PimSqlAdminGroupInvokers -SubscriptionId $subG -TenantId $TenantId
+        $oid = Resolve-PimServicePrincipalObjectId -Graph $inv.Graph -AppId "$SqlAdminClientId".Trim()
+        $script:PimSetupAppSqlOid = "$oid"
+        $srv = ("$SqlServerFqdn".Trim() -split '\.')[0]
+        $sqlRg = $ResourceGroup
+        try { $res = Resolve-PimSqlServerFromFqdn -Arm $inv.Arm -SubscriptionId $subG -Server $srv; if ($res) { $sqlRg = $res.resourceGroup; $srv = $res.name } } catch { }
+        $r = Invoke-PimSqlAdminGroupStep -Graph $inv.Graph -Arm $inv.Arm -TenantId $inv.TenantId -SubscriptionId $subG -ResourceGroup $ResourceGroup `
+                -SqlResourceGroup $sqlRg -SqlServerName $srv -GroupName $SqlAdminGroupName -UpdateJobName '' -NoDiscovery -Mode membersOnly `
+                -ExtraMembers @([pscustomobject]@{ objectId = "$oid"; label = "SQL admin application $SqlAdminClientId (this deploy)" })
+        if (@($r.added).Count) { $global:PIM_SetupSqlAdminJustAdded = $true; Info "SQL admin group: this deploy's SQL admin application is a member again for this run (framework 12.23 P5)" }
+    } catch { Write-Verbose "SQL admin group membership of the deploy application not ensured: $($_.Exception.Message)" }
+}
 function Confirm-PimSignedInSqlAccess {
     # 71.33 -- before the FIRST step that connects to SQL as the signed-in user: make that user a member of the SQL admin
     # group (members-only). Returns '' when fine, else the reason the step must fail. Once per run.
+    # PIM 100.156 B: an SQL admin APPLICATION is made a member again here too (Confirm-PimSetupAppSqlAdminMember, never fatal).
+    if (-not $UseSignedInAccount) { Confirm-PimSetupAppSqlAdminMember }
     if (-not $UseSignedInAccount -or $StepRunner -or $script:PimSignedInSqlChecked) { return '' }
     if (-not "$SqlServerFqdn".Trim() -or $SqlPrivateEndpoint) { return '' }
     $script:PimSignedInSqlChecked = $true
@@ -1566,7 +1602,7 @@ function Get-PimDeployAllStepChanges {
                          "Azure: $(@($AzureRbacRoles) -join ', ') -> $TickJobName identity @ $(if ("$AzureRbacManagementGroupId".Trim()) { "management group $AzureRbacManagementGroupId" } else { $sub })",
                          "Azure: Reader$(if ($EngineAzureRootUserAccessAdmin) { ' + User Access Administrator' }) -> $TickJobName identity @ tenant root management group$(if ($SkipEngineAzureRootAccess) { ' (skipped: -SkipEngineAzureRootAccess)' })",
                          "Azure: Reader -> $ManagerApp identity @ resource group $rg only (the Environment report reads the architecture; PIM 100.22 b)",
-                         "Azure SQL: database users for $ManagerApp and $TickJobName with db_datareader, db_datawriter, db_ddladmin @ $SqlDatabase") }
+                         "Azure SQL: the least-privilege model @ $SqlDatabase (framework 12.23): a signed access procedure + one role per component; database users for $ManagerApp (pim_web) and $TickJobName (pim_engine), the updater pim_updater + db_ddladmin -- no db_datareader / db_datawriter") }
         'sqlaccess'  { @("Azure: subnet service endpoint Microsoft.Sql + a virtual network rule on $sql (Azure-services firewall rule verified)") }
         'schema'     { @("Azure SQL: idempotent schema upgrade of $SqlDatabase (never destructive)") }
         'mailsender' { @("Exchange Online: the shared sender mailbox$(if ("$MailSender".Trim()) { " $MailSender" }) + an Exchange RBAC send right scoped to that one mailbox for the Manager and tick identities") }
@@ -1939,6 +1975,8 @@ function Invoke-DefaultStepRunner {
             elseif ($hosted) {
                 return @{ ok=$false; ran=$true; detail='INFRA needs a SQL Entra admin: pass -SqlAdminClientId plus -SqlAdminCertThumbprint (production) or -SqlAdminClientSecret.' }
             }
+            # PIM 100.156 B: the SQL admin application released at the end of the last run is a member again first.
+            if (-not $UseSignedInAccount) { Confirm-PimSetupAppSqlAdminMember }
             # Declared support access (§64.7b): forwarded only when set, so an unset value stays ABSENT.
             if ("$SupportDbAppId".Trim()) {
                 $sqlAdminCred['SupportDbAppId']    = "$SupportDbAppId".Trim()
@@ -2466,7 +2504,7 @@ function Invoke-DefaultStepRunner {
                 & $upd -Source $Source @scenarioArgs -Apply -SqlConnectionString $SqlConnectionString `
                     -ResourceGroup $ResourceGroup -ManagerApp $ManagerApp -ImageTag (Get-EffectiveImageTag) `
                     -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps @sqlAuthArgs `
-                    -SchemaOnly -SkipVerify -SkipNotify | Out-Host
+                    -SchemaOnly -SkipVerify -SkipNotify -InstallSqlAccessModel | Out-Host
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
                 return @{ ok=$ok; ran=$true; detail='schema upgrade applied (preflight->apply->re-preflight)' }
             }
@@ -3307,6 +3345,30 @@ if ($needRollback -and $codeRan) {
             }
         }
     }
+}
+
+# =============================================================================
+# PIM 100.156 B (framework 12.23 P5) -- THE SETUP IDENTITY LEAVES THE SQL ADMIN GROUP.
+# Its standing member is the Invardia Support app only; this run's SQL identity (the signed-in person, or the SQL admin
+# application) was a member only for the length of the install. Public SQL only (on private SQL this host never was one).
+# Never fatal: a refusal is printed with what to do. -KeepSetupIdentityInSqlAdminGroup: the caller releases it itself.
+# =============================================================================
+# A caller that runs its own end-of-install steps (-SkipInstallVerify: the guided install, the MSP build) still needs SQL
+# after this script, so it owns the release too.
+if ($Apply -and -not $StepRunner -and $hosted -and -not $KeepSetupIdentityInSqlAdminGroup -and -not $SkipInstallVerify -and "$SqlServerFqdn".Trim() -and -not $SqlPrivateEndpoint -and "$TenantId".Trim()) {
+    $relOid = $(if ($UseSignedInAccount) { "$script:PimSignedInOid" } else { "$script:PimSetupAppSqlOid" })
+    try {
+        if (-not (Get-Command Invoke-PimSqlAdminGroupSetupRelease -ErrorAction SilentlyContinue)) { . (Join-Path $here '_PimSqlAdminGroup.ps1') }
+        $subR = $(if ("$SqlSubscriptionId".Trim()) { $SqlSubscriptionId } else { $SubscriptionId })
+        $invR = New-PimSqlAdminGroupInvokers -SubscriptionId $subR -TenantId $TenantId
+        if (-not "$relOid".Trim() -and "$SqlAdminClientId".Trim()) { $relOid = Resolve-PimServicePrincipalObjectId -Graph $invR.Graph -AppId "$SqlAdminClientId".Trim() }
+        $srvR = ("$SqlServerFqdn".Trim() -split '\.')[0]; $sqlRgR = $ResourceGroup
+        try { $resR = Resolve-PimSqlServerFromFqdn -Arm $invR.Arm -SubscriptionId $subR -Server $srvR; if ($resR) { $sqlRgR = $resR.resourceGroup; $srvR = $resR.name } } catch { }
+        $rel = Invoke-PimSqlAdminGroupSetupRelease -Graph $invR.Graph -Arm $invR.Arm -SubscriptionId $subR -SqlResourceGroup $sqlRgR -SqlServerName $srvR `
+                   -MemberObjectId $relOid -GroupName $SqlAdminGroupName -Label $(if ($UseSignedInAccount) { 'the signed-in administrator' } else { "the SQL admin application $SqlAdminClientId" })
+        Step "SQL admin group: $($rel.reason)"
+        if (-not $rel.ok) { Warn "  the setup identity could not be released -- the install itself is fine; remove it from '$SqlAdminGroupName' as described above." }
+    } catch { Warn "SQL admin group: the setup identity was not released ($($_.Exception.Message)) -- remove it from '$SqlAdminGroupName' as a Privileged Role Administrator." }
 }
 
 # =============================================================================

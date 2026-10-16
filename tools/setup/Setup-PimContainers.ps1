@@ -797,15 +797,25 @@ if ($useRegistryIdentity) {
 # Collecting rather than granting also fixes an ordering problem: the job creates every user in ONE
 # connection, so it can refuse a partial set instead of leaving half of them made.
 $script:PimDbInitPrincipals = @()
+# PIM 100.156 B (framework 12.23 P2/P3/P8): every component user gets ONLY its pim_* role (Get-PimSetupSqlUserRoles -- the
+# access catalog's answer); the updater pim_updater + db_ddladmin. No db_datareader / db_datawriter / db_ddladmin for the
+# web app or the engine any more. The grants behind the roles come from the access model at the end of this step.
+$script:PimSqlUsersGranted = @()
+$script:PimSqlModelInstalled = $false
 function Grant-PimMiSqlHere {
-    param([string]$DbUserName,[string]$MiAppId)
+    param([string]$DbUserName,[string]$MiAppId,[string[]]$Roles)
+    if (-not $PSBoundParameters.ContainsKey('Roles')) { $Roles = @(Get-PimSetupSqlUserRoles -DbUserName $DbUserName) }
+    $script:PimSqlUsersGranted += [pscustomobject]@{ name = $DbUserName; appId = $MiAppId; roles = @($Roles) }
     if ($UseInCloudDbInit) {
-        $script:PimDbInitPrincipals += @{ name = $DbUserName; appId = $MiAppId }
-        Note "db user '$DbUserName' queued for the in-cloud bootstrap (SQL is private; this host has no route)"
+        $script:PimDbInitPrincipals += @{ name = $DbUserName; appId = $MiAppId; roles = @($Roles) }
+        Note "db user '$DbUserName' ($(@($Roles) -join ' + ')) queued for the in-cloud bootstrap (SQL is private; this host has no route)"
         return
     }
+    # The model goes in BEFORE the first user (public SQL): the roles exist with their grants when a user joins one, and
+    # Grant-PimMiSql's fallback for a database without the model (today's set) stays inert on a new install.
+    if (-not $script:PimSqlModelInstalled) { Invoke-PimSqlAccessModelHere; $script:PimSqlModelInstalled = $true }
     if ($UseSignedInAccount) {
-        Grant-PimMiSql -DbUserName $DbUserName -MiAppId $MiAppId -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId -UseSignedInAccount
+        Grant-PimMiSql -DbUserName $DbUserName -MiAppId $MiAppId -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId -UseSignedInAccount -Roles $Roles
         return
     }
     if (-not "$SqlAdminClientId".Trim()) { throw "db user '$DbUserName': no -SqlAdminClientId (with -SqlAdminCertThumbprint) and no -UseSignedInAccount -- nothing can create the contained user." }
@@ -813,7 +823,28 @@ function Grant-PimMiSqlHere {
             else                          { @{ SqlAdminClientSecret   = $SqlAdminClientSecret } }
     Grant-PimMiSql -DbUserName $DbUserName -MiAppId $MiAppId `
         -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId `
-        -SqlAdminClientId $SqlAdminClientId @cred
+        -SqlAdminClientId $SqlAdminClientId @cred -Roles $Roles
+}
+
+function Invoke-PimSqlAccessModelHere {
+    <#
+      PIM 100.156 B: the ADMIN run of the least-privilege model (framework 12.23 P4/P8/P9) at the end of the infra step,
+      while this setup identity is still a SQL admin -- the same product code as the Support-app cut-over. Public SQL: from
+      this host (Invoke-PimSetupSqlAccessModel). Private SQL: the in-network init job does it (PIM_DBINIT_SQL_ACCESS).
+    #>
+    param([string]$UpdaterUserName = '', [string]$UpdaterAppId = '')
+    if ($UseInCloudDbInit -or $WhatIfPreference) { return }
+    Step 'SQL least-privilege model: signed access procedure + component roles (framework 12.23)'
+    $a = @{ SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase; TenantId = $TenantId; UpdaterUserName = $UpdaterUserName; UpdaterAppId = $UpdaterAppId }
+    if ($UseSignedInAccount) { $a['UseSignedInAccount'] = $true }
+    else {
+        $a['SqlAdminClientId'] = $SqlAdminClientId
+        if ($SqlAdminCertThumbprint) { $a['SqlAdminCertThumbprint'] = $SqlAdminCertThumbprint } else { $a['SqlAdminClientSecret'] = $SqlAdminClientSecret }
+    }
+    $r = Invoke-PimSetupSqlAccessModel @a
+    if ($r.skipped) { Warn "access model: $($r.reason)"; return }
+    Note ("access model installed: signer $($r.signer) (expires $($r.signerExpiry)); " +
+          "$($r.converge.statements) statement(s) converged; users $(@($r.converge.users) -join ', ')")
 }
 
 function Invoke-PimDbInitJob {
@@ -847,6 +878,13 @@ function Invoke-PimDbInitJob {
         # IF-NOT-EXISTS-guarded) schema here costs one more round trip on the same connection.
         'PIM_DBINIT_SCHEMA=1'
     )
+    # PIM 100.156 B (framework 12.23 P8 "new installs get the model on day one"): the job's admin run of the least-privilege
+    # model is ON for every install this script sets up -- the signed procedure, its 2099 certificate, the component roles,
+    # the updater's DDL user (when the updater exists already). Same product code as the Support-app cut-over.
+    $updP = @($script:PimSqlUsersGranted | Where-Object { @($_.roles) -contains 'pim_updater' }) | Select-Object -First 1
+    $envVars += ('PIM_DBINIT_SQL_ACCESS=' + (ConvertTo-Json -Compress -InputObject ([ordered]@{
+                    mode = 'setup'   # the job's setup gate: an existing install never cut over is left to the cut-over (P8)
+                    updaterUserName = $(if ($updP) { "$($updP.name)" } else { '' }); updaterAppId = $(if ($updP) { "$($updP.appId)" } else { '' }) })))
     if ("$SqlAdminIdentityClientId".Trim()) { $envVars += "PIM_DBINIT_MI_CLIENT_ID=$("$SqlAdminIdentityClientId".Trim())" }
     if (@($FeatureGates).Count)        { $envVars += "PIM_DBINIT_FEATURE_GATES=$((@($FeatureGates)        | Where-Object { "$_".Trim() }) -join ',')" }
     if (@($FeatureGatesDisable).Count) { $envVars += "PIM_DBINIT_FEATURE_DISABLE=$((@($FeatureGatesDisable) | Where-Object { "$_".Trim() }) -join ',')" }
@@ -1495,7 +1533,9 @@ if ($WorkerMode -eq 'cron') {
 # read/write/ddl, created by the same in-cloud job that creates every other principal. That works
 # on private SQL, survives the admin moving, and grants database rights only -- never server admin.
 if ("$SupportDbAppId".Trim()) {
-    Grant-PimMiSqlHere -DbUserName $SupportDbUserName -MiAppId $SupportDbAppId
+    # Not a runtime component (opt-in, PIM_SUPPORT_DB_APPID): its declared read/write/ddl set is kept as it was. The
+    # Invardia Support app reaches the store through the SQL admin group (framework 12.23 P5), not through this user.
+    Grant-PimMiSqlHere -DbUserName $SupportDbUserName -MiAppId $SupportDbAppId -Roles @('db_datareader', 'db_datawriter', 'db_ddladmin')
 }
 # 🔴 2026-09-13 -- THE NIGHTLY UPDATER CONNECTS TO THE STORE TOO. Its schema step runs as its own managed
 # identity before any container moves; with no contained user it cannot verify a release and refuses to
@@ -1507,14 +1547,21 @@ try { $updJobs = @(Get-PimArmAcaJobList -SubscriptionId $SubscriptionId -Resourc
 $updJob = @($updJobs | Where-Object { $_ -and "$($_.name)" -eq $UpdateJobName }) | Select-Object -First 1
 if ($updJob -and "$($updJob.oid)".Trim()) {
     $updAppId = Resolve-PimMiAppId -ObjectId "$($updJob.oid)".Trim() -What $UpdateJobName
-    Grant-PimMiSqlHere -DbUserName $UpdateJobName -MiAppId $updAppId
-    Note "MI $updAppId granted SQL (db user [$UpdateJobName]) -- the nightly updater's schema step"
+    # 100.156 B: the updater = a contained user with db_ddladmin (the one schema right a runtime identity keeps) + its
+    # pim_updater role (EXECUTE on the signed procedure, given by the access model below).
+    Grant-PimMiSqlHere -DbUserName $UpdateJobName -MiAppId $updAppId -Roles @(Get-PimSetupSqlUserRoles -DbUserName $UpdateJobName -Component 'updater')
+    Note "MI $updAppId granted SQL (db user [$UpdateJobName]: pim_updater + db_ddladmin) -- the nightly updater's schema step"
 } elseif ($updJob) {
     Warn "'$UpdateJobName' has no system identity -- it cannot be granted a database user; re-run Deploy-PimUpdateJob."
 } else {
     Note "'$UpdateJobName' is not installed yet -- Deploy-PimUpdateJob grants its database user when it installs it."
 }
 if ($UseInCloudDbInit) { Invoke-PimDbInitJob -Principals $script:PimDbInitPrincipals }
+elseif (-not $WhatIfPreference -and @($script:PimSqlUsersGranted).Count) {
+    # PIM 100.156 B -- the least-privilege model from day one (public SQL; the init job did it above on private SQL).
+    $updU = @($script:PimSqlUsersGranted | Where-Object { @($_.roles) -contains 'pim_updater' }) | Select-Object -First 1
+    Invoke-PimSqlAccessModelHere -UpdaterUserName $(if ($updU) { "$($updU.name)" } else { '' }) -UpdaterAppId $(if ($updU) { "$($updU.appId)" } else { '' })
+}
 
 # --- Persistent SQL compute (REQUIREMENTS S5: no auto-pause / cold starts) -----
 # Assert/disable serverless auto-pause on the hosted Azure SQL so /health + the

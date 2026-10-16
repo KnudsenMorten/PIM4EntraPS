@@ -119,6 +119,9 @@ function New-PimUpdateStateRecord {
         # 2026-10-08: where this environment's updates come from (PIM_UPDATE_SOURCE: 'invardia' / 'pim-src').
         # Optional; an older caller that does not pass it records ''.
         [AllowEmptyString()][AllowNull()][string]$Source,
+        # §33.0 MORE TELEMETRY (SqlAccess): the updater's access verdict of THIS run (New-PimSqlAccessVerdict); $null = this
+        # run did not converge access -> the previous record's verdict is carried forward. The key is written only when known.
+        [AllowNull()][object]$SqlAccess = $null,
         [datetime]$NowUtc = [datetime]::UtcNow
     )
     $ts = $NowUtc.ToUniversalTime().ToString('o')
@@ -138,7 +141,9 @@ function New-PimUpdateStateRecord {
         $lastSuccessAction  = "$Action"
     }
 
-    [ordered]@{
+    $sqlAcc = $SqlAccess
+    if ($null -eq $sqlAcc -and $Previous) { $sqlAcc = Get-PimUpdateStateField -Object $Previous -Key 'sqlAccess' }
+    $rec = [ordered]@{
         schema             = (Get-PimUpdateStateSchema)
         # 'run' = written by an update run. The deployment writes kind 'deploy' (New-PimUpdateStateDeployRecord)
         # until the first run replaces it. A record with no kind (written before 2026-10-08) is a run record.
@@ -176,6 +181,8 @@ function New-PimUpdateStateRecord {
         lastSuccessVersion = "$lastSuccessVersion"
         lastSuccessAction  = "$lastSuccessAction"
     }
+    if ($null -ne $sqlAcc) { $rec['sqlAccess'] = $sqlAcc }
+    return $rec
 }
 
 function Get-PimUpdateStateField {
