@@ -1041,6 +1041,46 @@ function Get-PimAsBuiltReaderUserProcSql {
     return "EXEC [pim].[usp_ApplyAccess] @Action = N'user', @Role = N'pim_asbuilt', @UserName = N'$DbUserName', @AppId = '$g';"
 }
 
+function Get-PimAsBuiltReaderAccessSql {
+    <#
+      PURE. What the UPDATER sends for the job's reader (framework 12.23 P4/P9, PIM 100.156 procedure v2 item 3): ONE batch
+      that decides IN SQL, so no rights are guessed from a failed call:
+        * the signed access procedure is there (pim.usp_ApplyAccess is visible -- the updater holds EXECUTE on it): the role
+          pim_asbuilt, its catalog grant(s) (SELECT on pim.vw_AsBuiltSettings -- the view may have been created seconds ago
+          by this same run, after the access converge of the schema step) and the user, ALL through the procedure. No
+          direct GRANT / CREATE USER / ALTER ROLE is ever run, so the updater needs no security right of its own. A refusal
+          of the procedure (another principal holds the name, an unsigned procedure) surfaces as the error -- there is NO
+          fallback to the direct statements, which would need an admin.
+        * no procedure (an install before the cut-over's run 1, whose updater is still an admin): the direct statements of
+          Get-PimAsBuiltReaderUserSql, as before.
+      -Grants: the pim_asbuilt catalog entries ({ perm; on }); default Get-PimSqlAccessCatalog's, else the one known grant.
+    #>
+    param([Parameter(Mandatory)][string]$DbUserName, [Parameter(Mandatory)][string]$AppId, [object[]]$Grants = $null)
+    $userLine = Get-PimAsBuiltReaderUserProcSql -DbUserName $DbUserName -AppId $AppId   # validates name + id
+    $direct = Get-PimAsBuiltReaderUserSql -DbUserName $DbUserName -AppId $AppId
+    if (-not $Grants) {
+        if (Get-Command Get-PimSqlAccessCatalog -ErrorAction SilentlyContinue) { $Grants = @((Get-PimSqlAccessCatalog)['pim_asbuilt']) }
+        else { $Grants = @([pscustomobject]@{ perm = 'SELECT'; on = 'pim.vw_AsBuiltSettings' }) }
+    }
+    $lines = New-Object System.Collections.Generic.List[string]
+    [void]$lines.Add("    EXEC [pim].[usp_ApplyAccess] @Action = N'role', @Role = N'pim_asbuilt';")
+    foreach ($gr in @($Grants | Where-Object { $_ })) {
+        if ("$($gr.perm)" -notmatch '^(SELECT|INSERT|UPDATE|DELETE|EXECUTE)$' -or "$($gr.on)" -notmatch '^(SCHEMA::[A-Za-z_]+|[A-Za-z_]+\.[A-Za-z_][A-Za-z0-9_]*)$') { throw "Get-PimAsBuiltReaderAccessSql: '$($gr.perm) $($gr.on)' is not a catalog grant" }
+        [void]$lines.Add("    EXEC [pim].[usp_ApplyAccess] @Action = N'grant', @Role = N'pim_asbuilt', @Permission = N'$($gr.perm)', @Target = N'$($gr.on)';")
+    }
+    [void]$lines.Add("    $userLine")
+    return (@(
+        "IF OBJECT_ID(N'pim.usp_ApplyAccess') IS NOT NULL",
+        'BEGIN'
+    ) + @($lines.ToArray()) + @(
+        'END',
+        'ELSE',
+        'BEGIN',
+        $direct,
+        'END'
+    ) -join "`n")
+}
+
 function Test-PimAsBuiltRollSkip {
     <#
       PURE. Does the updater's generic job roll (update-job-entry 2b) SKIP this job? Only caj-pim-asbuilt, and only when the
@@ -1234,15 +1274,12 @@ function Invoke-PimAsBuiltConverge {
             # The reader user's SID is id-pim-asbuilt's clientId (= its app id), read over ARM above -- no Graph.
             $appId = $uamiCid
             if ($appId) {
-                # Framework 12.23 P4/P9 (PIM 100.156): where the signed access procedure is installed, the reader user goes into
-                # pim_asbuilt THROUGH it (the role's SELECT on the view is in the catalog) -- a least-privilege updater has no
-                # right to CREATE USER / GRANT itself. No procedure yet (or it refuses): the direct statement, as before.
-                $viaProc = $false
-                try {
-                    [void](& $Sql (Get-PimAsBuiltReaderUserProcSql -DbUserName $JobName -AppId $appId) @{})
-                    $viaProc = $true
-                } catch { $viaProc = $false }
-                if (-not $viaProc) { [void](& $Sql (Get-PimAsBuiltReaderUserSql -DbUserName $JobName -AppId $appId) @{}) }
+                # Framework 12.23 P4/P9 (PIM 100.156 procedure v2 item 3): where the signed access procedure is installed, the
+                # role, its SELECT on the view and the reader user ALL go THROUGH it -- the updater holds no right to GRANT /
+                # CREATE USER itself, and is no longer in the SQL admin group. The batch decides in SQL (procedure present or
+                # not); a refusal by the procedure is reported, never retried with the direct statements (they need an admin).
+                try { [void](& $Sql (Get-PimAsBuiltReaderAccessSql -DbUserName $JobName -AppId $appId) @{}) }
+                catch { & $add 'asbuilt-sql-user' 'warn' "as-built: $JobName's database user / its read right was not converged: $(("$($_.Exception.Message)" -split "`n")[0]) -- the next update retries; a name held by another principal needs an admin (the Support-app cut-over)" }
             }
             else { & $add 'asbuilt-sql-user' 'warn' "as-built: the user-assigned identity $uamiName (the job's identity) is not readable -- $JobName's database user was not made this run; the next update retries, or run tools/setup/Deploy-PimAsBuiltJob.ps1 once" }
             $envObj = if ($envId) { & $get "$envId`?$aca" } else { $null }

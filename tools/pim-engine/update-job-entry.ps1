@@ -890,8 +890,11 @@ try {
         # A failure here is reported and never blocks the update: the broad roles still carry the install.
         try {
             $acc = Invoke-PimSqlAccessConverge -ConnectionString $csUpd
-            if ($acc.applied) { Say "  database access converged: $($acc.statements) statement(s) through the signed procedure; revoked $($acc.revoked); users $(@($acc.users) -join ', ')" 'DarkGray' }
-            else { Say "  database access: $($acc.reason)" 'DarkGray' }
+            # PIM 100.156: the line names WHO converged -- "as ca-pim-update (db_owner: no)" is the proof that the updater
+            # works as its own least-privilege user (the step before it leaves the SQL admin group); "as dbo" = still admin.
+            $accWho = "as $(if ("$($acc.runAs)") { "$($acc.runAs)" } else { '?' }) (db_owner: $(if ($acc.dbOwner) { 'yes' } else { 'no' }); state via $($acc.via))"
+            if ($acc.applied) { Say "  database access converged $accWho`: $($acc.statements) statement(s) through the signed procedure; revoked $($acc.revoked); users $(@($acc.users) -join ', ') ($($acc.visibleUsers) visible)" 'DarkGray' }
+            else { Say "  database access $accWho`: $($acc.reason)" 'DarkGray' }
         } catch { Say "  database access NOT converged (the update continues; the broad roles still apply): $($_.Exception.Message)" 'Yellow' }
     }
 } catch {

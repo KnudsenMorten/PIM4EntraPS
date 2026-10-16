@@ -151,6 +151,19 @@ if ($Promote) {
     . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
     $token = Get-PimRestToken -Resource $Audience -TenantId $TenantId -ClientId $ClientId -CertThumbprint $CertThumbprint -Force
     if (-not "$token".Trim()) { throw 'no token for the Invardia Back Office audience' }
+    # Invardia 2026-10-16: a RING call carries the UNION from the ring's CURRENT version to the target (the publish call keeps
+    # the release's own delta). The ring's version is read from Invardia's state; unreadable / empty = the previous-tag delta.
+    if ($pScopesOn) {
+        $ringBase = Get-PimRingBaseVersion -State (Invoke-PimInvardiaReadBack -Endpoint $Endpoint -Token $token -Kind $Kind -Version $Version) -Ring $Ring -Target $Version
+        if ($ringBase) {
+            & git -C $repo rev-parse --verify --quiet "refs/tags/PIM4EntraPS-v$ringBase" | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                $pScopes = @(Get-PimReleaseScopes -RepoRoot $repo -Tag $tag -PrevTag "PIM4EntraPS-v$ringBase")
+                Write-Host ("    changedScopes (ring {0} holds {1} -> union to {2}): {3}" -f $Ring, $ringBase, $Version, $(if ($pScopes.Count) { $pScopes -join ',' } else { '(none)' }))
+                $pBody.Remove('changedScopes'); if ($pScopes.Count) { $pBody['changedScopes'] = @($pScopes) }
+            }
+        }
+    }
     Step "POST $purl"
     $pr = Invoke-PimInvardiaCall -Method POST -Url $purl -Token $token -Body ($pBody | ConvertTo-Json -Compress) -ContentType 'application/json'
     if ($pBody.Contains('changedScopes') -and (Test-PimChangedScopesRefusal -Status $pr.status -Content $pr.content)) {
