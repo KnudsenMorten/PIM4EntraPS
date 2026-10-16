@@ -894,7 +894,7 @@ try {
             # PIM 100.156: the line names WHO converged -- "as ca-pim-update (db_owner: no)" is the proof that the updater
             # works as its own least-privilege user (the step before it leaves the SQL admin group); "as dbo" = still admin.
             $accWho = "as $(if ("$($acc.runAs)") { "$($acc.runAs)" } else { '?' }) (db_owner: $(if ($acc.dbOwner) { 'yes' } else { 'no' }); state via $($acc.via))"
-            if ($acc.applied) { Say "  database access converged $accWho`: $($acc.statements) statement(s) through the signed procedure; revoked $($acc.revoked); users $(@($acc.users) -join ', ') ($($acc.visibleUsers) visible)" 'DarkGray' }
+            if ($acc.applied) { Say "  database access converged $accWho`: $($acc.statements) statement(s) through the signed procedure ($([int]$acc.alreadyHeld) already held); revoked $($acc.revoked); users $(@($acc.users) -join ', ') ($($acc.visibleUsers) visible)" 'DarkGray' }
             else { Say "  database access $accWho`: $($acc.reason)" 'DarkGray' }
             # §33.0 MORE TELEMETRY (SqlAccess): the verdict goes into UpdateState, so the heartbeat only reads it. run 2 (the
             # runtime users lost their broad roles) is visible only to an updater that is still db_owner -- else unknown.

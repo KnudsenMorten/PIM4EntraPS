@@ -213,11 +213,14 @@ function Get-PimSqlAccessAdminBatches {
     <#
       ONCE per install, by an ADMIN (setup, or the Support-app cut-over). Idempotent: re-running changes nothing when the
       deployed procedure is this version and signed. Batches, in order:
-        1 schema pim (the procedure lives there)
+        1 the THREE product schemas pim / platform / pimdemo, dbo-owned (2.4.644: all of them, even empty -- the procedure
+          can only ever grant on these three, so once they all exist at signing no product schema can come "later")
         2 the procedure (only when missing or another version -- re-creating it would drop the signature)
         3 sign it when unsigned: a NEW in-database certificate (EXPIRY 2099, random password generated inside SQL and
           never returned), a user from it with exactly the rights the procedure exercises, ADD SIGNATURE, then the
-          private key REMOVED. Earlier signer certificates / users are dropped first.
+          private key REMOVED. Earlier signer certificates / users are dropped first. Then, on EVERY admin run (2.4.644
+          TOP-UP), the CURRENT signer gets CONTROL on each product schema -- an install signed by an older release before
+          one of the schemas existed is repaired by its next admin run, without a re-sign.
         4 the updater's role + EXECUTE on the procedure (the only security-related grant the updater ever holds)
         5 -UpdaterUserName / -UpdaterAppId given: the updater's contained user, in pim_updater + db_ddladmin
     #>
@@ -226,7 +229,9 @@ function Get-PimSqlAccessAdminBatches {
     $m = $script:PimSqlAccessMarker
     $proc = (Get-PimSqlAccessProcedureText).Replace("'", "''")
     $b = New-Object System.Collections.Generic.List[string]
-    [void]$b.Add("IF SCHEMA_ID(N'pim') IS NULL EXEC(N'CREATE SCHEMA [pim] AUTHORIZATION [dbo];');")
+    # 2.4.644 (live 2026-10-16, internal: pimdemo created AFTER run 1 signed -> 4 of 47 statements refused): every product
+    # schema exists BEFORE the signing, so the signer gets CONTROL on all three (the cut-over too, which has no prerequisites).
+    [void]$b.Add((@('pim', 'platform', 'pimdemo' | ForEach-Object { "IF SCHEMA_ID(N'$_') IS NULL EXEC(N'CREATE SCHEMA [$_] AUTHORIZATION [dbo];');" }) -join "`n"))
     [void]$b.Add(@"
 IF OBJECT_ID(N'pim.usp_ApplyAccess') IS NULL
    OR ISNULL(OBJECT_DEFINITION(OBJECT_ID(N'pim.usp_ApplyAccess')), N'') NOT LIKE N'%$m%'
@@ -258,12 +263,26 @@ BEGIN
     EXEC sys.sp_executesql @s;
     SET @s = N'CREATE USER ' + QUOTENAME(@cert) + N' FROM CERTIFICATE ' + QUOTENAME(@cert) + N';'; EXEC sys.sp_executesql @s;
     SET @s = N'GRANT CREATE ROLE, ALTER ANY ROLE, ALTER ANY USER, VIEW DEFINITION TO ' + QUOTENAME(@cert) + N';'; EXEC sys.sp_executesql @s;
-    SET @s = N'GRANT CONTROL ON SCHEMA::[pim] TO ' + QUOTENAME(@cert) + N';'; EXEC sys.sp_executesql @s;
-    IF SCHEMA_ID(N'platform') IS NOT NULL BEGIN SET @s = N'GRANT CONTROL ON SCHEMA::[platform] TO ' + QUOTENAME(@cert) + N';'; EXEC sys.sp_executesql @s; END
-    IF SCHEMA_ID(N'pimdemo') IS NOT NULL BEGIN SET @s = N'GRANT CONTROL ON SCHEMA::[pimdemo] TO ' + QUOTENAME(@cert) + N';'; EXEC sys.sp_executesql @s; END
+    -- CONTROL on the product schemas follows in the top-up below (it runs for the current signer on every admin run, so a
+    -- new signer gets it right after it is signed).
     SET @s = N'ADD SIGNATURE TO [pim].[usp_ApplyAccess] BY CERTIFICATE ' + QUOTENAME(@cert) + N' WITH PASSWORD = ' + QUOTENAME(@pw, '''') + N';';
     EXEC sys.sp_executesql @s;
     SET @s = N'ALTER CERTIFICATE ' + QUOTENAME(@cert) + N' REMOVE PRIVATE KEY;'; EXEC sys.sp_executesql @s;
+END
+-- 2.4.644 TOP-UP (PIM 100.156, live 2026-10-16: pimdemo was created AFTER run 1 signed the procedure, and 4 of 47 statements
+-- were refused -- the signer held CONTROL only on the schemas that existed at signing). For the CURRENT signer, on EVERY
+-- admin run (idempotent; an install signed by an older release is repaired by its next admin run, no re-sign): CONTROL on
+-- each product schema. (Real SQL, test VM 2026-10-16: the five permissions at DATABASE scope, with the grant option, do NOT
+-- let the signer grant on a schema -- "Cannot find the schema" -- so a schema-level right is the only one that works, and
+-- batch 1 makes sure all three schemas exist before the signing.)
+DECLARE @tsg SYSNAME, @ts NVARCHAR(MAX);
+SELECT TOP 1 @tsg = c.name FROM sys.crypt_properties cp JOIN sys.certificates c ON c.thumbprint = cp.thumbprint
+ WHERE cp.major_id = OBJECT_ID(N'pim.usp_ApplyAccess') AND c.name LIKE N'pim_access_signer%';
+IF @tsg IS NOT NULL AND DATABASE_PRINCIPAL_ID(@tsg) IS NOT NULL
+BEGIN
+    SELECT @ts = STRING_AGG(CONVERT(NVARCHAR(MAX), N'GRANT CONTROL ON SCHEMA::' + QUOTENAME(name) + N' TO ' + QUOTENAME(@tsg) + N';'), N' ')
+      FROM sys.schemas WHERE name IN (N'pim', N'platform', N'pimdemo');
+    IF @ts IS NOT NULL EXEC sys.sp_executesql @ts;
 END
 "@)
     # v2: EVERY catalog role is created HERE, owned by dbo (the procedure cannot create a dbo-owned role). A role the
@@ -560,16 +579,34 @@ function Invoke-PimSqlAccessConverge {
     $principals = @(& $Query $ConnectionString "SELECT name, CONVERT(VARCHAR(40), sid, 1) AS sid FROM sys.database_principals WHERE type = 'E';")
     $users = @(Get-PimSqlAccessComponentUsers -Principals $principals -NameMap $NameMap)
     $revoke = @(Get-PimSqlAccessRevokeList -Held $held)
-    $lines = @(Get-PimSqlAccessApplyBatches -Users $users -Revoke $revoke)
-    # Every line is tried: one refusal (e.g. a schema the signer was never given CONTROL on) must not leave the rest of the
+    $all = @(Get-PimSqlAccessApplyBatches -Users $users -Revoke $revoke)
+    # 2.4.644 (live 2026-10-16): a catalog grant the role ALREADY holds is converged -- it is not sent again, so it can never
+    # be reported as refused (internal: 4 grants on SCHEMA::pimdemo were held -- an admin had applied them -- and still
+    # logged as "4 of 47 refused"). The held list is what the state read returned (through the procedure: complete).
+    $heldKey = @{}
+    foreach ($h in $held) { if ($h -and "$($h.role)" -and "$($h.perm)" -and "$($h.on)") { $heldKey["grant|$($h.role)|$($h.perm)|$($h.on)".ToLowerInvariant()] = $true } }
+    $lines = New-Object System.Collections.Generic.List[string]; $already = 0
+    foreach ($l in $all) {
+        if ($l -match "@Action = N'grant', @Role = N'([^']+)', @Permission = N'([^']+)', @Target = N'([^']+)';$" -and $heldKey.ContainsKey("grant|$($Matches[1])|$($Matches[2])|$($Matches[3])".ToLowerInvariant())) { $already++; continue }
+        [void]$lines.Add($l)
+    }
+    # Every line is tried: one refusal (e.g. a schema the signer was never given a right on) must not leave the rest of the
     # catalog unapplied. Any refusal is then THROWN as one message (the caller reports it and never blocks the update).
-    $failed = New-Object System.Collections.Generic.List[string]
+    $failed = New-Object System.Collections.Generic.List[string]; $schemaRefused = $false
     foreach ($l in $lines) {
         try { & $Exec $ConnectionString $l }
-        catch { [void]$failed.Add(("{0} -> {1}" -f ($l -replace '^EXEC \[pim\]\.\[usp_ApplyAccess\] ', ''), (("$($_.Exception.Message)" -split "`n")[0]))) }
+        catch {
+            if ($l -match "@Target = N'SCHEMA::") { $schemaRefused = $true }
+            [void]$failed.Add(("{0} -> {1}" -f ($l -replace '^EXEC \[pim\]\.\[usp_ApplyAccess\] ', ''), (("$($_.Exception.Message)" -split "`n")[0])))
+        }
     }
-    if ($failed.Count) { throw ("{0} of {1} access statement(s) refused through the signed procedure (as {2}): {3}" -f $failed.Count, $lines.Count, $(if ($runAs) { $runAs } else { '?' }), (@($failed.ToArray() | Select-Object -First 3) -join ' | ')) }
-    return [pscustomobject]@{ applied = $true; reason = ''; statements = $lines.Count; users = @($users | ForEach-Object { "$($_.userName)->$($_.role)" }); revoked = $revoke.Count
+    if ($failed.Count) {
+        # A schema-level refusal on an install signed before 2.4.644: the signer has no right on a product schema created after
+        # the signing. Say what fixes it (the next admin run tops the signer up -- no re-sign) instead of a bare refusal.
+        $hint = if ($schemaRefused) { ' -- a product schema created after the procedure was signed: the signer holds no right on it until the next admin run (setup re-run / the Support-app cut-over) tops it up; nothing else is affected' } else { '' }
+        throw ("{0} of {1} access statement(s) refused through the signed procedure (as {2}): {3}{4}" -f $failed.Count, $lines.Count, $(if ($runAs) { $runAs } else { '?' }), (@($failed.ToArray() | Select-Object -First 3) -join ' | '), $hint)
+    }
+    return [pscustomobject]@{ applied = $true; reason = ''; statements = $lines.Count; alreadyHeld = $already; users = @($users | ForEach-Object { "$($_.userName)->$($_.role)" }); revoked = $revoke.Count
                               signer = "$($facts.signer)"; signerExpiry = $facts.signerExpiry; privateKeyRemoved = "$($facts.privateKeyRemoved)" -eq '1'
                               via = "$($st.via)"; runAs = $runAs; dbOwner = $dbOwner; visibleUsers = @($principals).Count }
 }

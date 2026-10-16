@@ -623,6 +623,56 @@ function Confirm-PimSqlSchemaObject {
         message = ("{0} {1} not in this store -- the next update creates it (the updater's schema step); this component does not create tables{2}" -f (@($miss) -join ', '), $(if (@($miss).Count -eq 1) { 'is' } else { 'are' }), $why) }
 }
 
+function Test-PimSqlCanCreateTable {
+    <#
+      READ-ONLY. May THIS identity create a table in this database (HAS_PERMS_BY_NAME CREATE TABLE -- db_ddladmin / db_owner
+      / an explicit grant)? $false when it may not OR the store cannot be read: never throws. -Query: param($cs, $sql) -> rows.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [scriptblock]$Query)
+    if (-not $Query) { $Query = { param($cs, $sql) Invoke-PimSqlQuery -ConnectionString $cs -Sql $sql } }
+    try {
+        $r = @(& $Query $ConnectionString "SELECT HAS_PERMS_BY_NAME(NULL, NULL, 'CREATE TABLE') AS canCreate;")[0]
+        return ($null -ne $r -and "$($r.canCreate)" -eq '1')
+    } catch { return $false }
+}
+
+function Wait-PimHostedStoreSchema {
+    <#
+      Framework §12.23 run 2 (PIM 100.156, live 2026-10-16 on a fresh community install): a HOSTED component whose store has
+      no core tables yet (the Manager's FIRST start, before the deploy's schema step ran) must not attempt DDL -- it holds no
+      DDL right, and the attempt logged "CREATE TABLE permission denied" with a stack trace. Instead: ONE calm line, then the
+      READ-ONLY check is repeated every -IntervalSeconds until the tables are there or -MaxWaitSeconds passed; one more line
+      when they appear. NEVER throws, never runs DDL. Returns { ready; checks; waitedSeconds; missing[] }.
+      -Check: param($cs, $objects) -> { ok; missing } (default Confirm-PimSqlSchemaObject, no -Fallback). -Sleep: param($s).
+      -Log: param($text) (default Write-Host). All three are test seams.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [string[]]$Objects = @(), [int]$IntervalSeconds = 30, [int]$MaxWaitSeconds = 900,
+          [scriptblock]$Check, [scriptblock]$Sleep, [scriptblock]$Log)
+    if (-not $Check) { $Check = { param($cs, $o) Confirm-PimSqlSchemaObject -ConnectionString $cs -Objects $o } }
+    if (-not $Sleep) { $Sleep = { param($s) Start-Sleep -Seconds $s } }
+    if (-not $Log) { $Log = { param($t) Write-Host $t -ForegroundColor DarkGray } }
+    if ($IntervalSeconds -lt 1) { $IntervalSeconds = 1 }
+    if ($MaxWaitSeconds -lt 0) { $MaxWaitSeconds = 0 }
+    $waited = 0; $checks = 0; $said = $false; $miss = @()
+    while ($true) {
+        $checks++
+        $r = $null; try { $r = & $Check $ConnectionString $Objects } catch { $r = $null }
+        if ($r -and $r.ok) {
+            if ($said) { & $Log ("  [store] the store's schema is there now (after {0} s) -- starting" -f $waited) }
+            return [pscustomobject]@{ ready = $true; checks = $checks; waitedSeconds = $waited; missing = @() }
+        }
+        if ($r -and $r.PSObject.Properties['missing']) { $miss = @($r.missing) }
+        if (-not $said) {
+            & $Log ("  [store] waiting for the store's schema -- the install / update creates it (checking again every {0} s)" -f $IntervalSeconds)
+            $said = $true
+        }
+        if ($waited -ge $MaxWaitSeconds) { return [pscustomobject]@{ ready = $false; checks = $checks; waitedSeconds = $waited; missing = @($miss) } }
+        $step = [Math]::Min($IntervalSeconds, [Math]::Max(1, $MaxWaitSeconds - $waited))
+        & $Sleep $step
+        $waited += $step
+    }
+}
+
 function Invoke-PimDepartmentRowKeyMigration {
     <#
       2.4.462 -- re-key PIM-Definitions-Departments to the new store key (Get-PimStoreRowKey: a department GROUP row by its

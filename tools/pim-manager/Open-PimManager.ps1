@@ -2445,6 +2445,9 @@ function Get-PimManagerStoreRequiredMessage {
             "variables; hosted: the container app's settings.)") -f $Reason
 }
 
+# The core tables a hosted Manager checks (read-only) before it serves: the updater's / the install's schema step creates them.
+$script:PimManagerCoreTables = @('pim.Rows', 'pim.Settings', 'pim.AuditEvents', 'pim.TenantCache', 'pim.ChangeQueue')
+
 function Initialize-PimManagerStore {
     # Resolve, open and initialise the SQL store; hydrate settings. THROWS when there is no store.
     $script:PimStorageMode = $null; $script:PimSqlCs = $null
@@ -2484,8 +2487,22 @@ function Initialize-PimManagerStore {
     # that the core tables are there, and the schema step is skipped. A local / developer store keeps the full init.
     $script:PimManagerSchemaByUpdater = $false
     if ("$($env:CONTAINER_APP_NAME)".Trim()) {
-        $__rd = Confirm-PimSqlSchemaObject -ConnectionString $cs -Objects @('pim.Rows', 'pim.Settings', 'pim.AuditEvents', 'pim.TenantCache', 'pim.ChangeQueue')
+        $__rd = Confirm-PimSqlSchemaObject -ConnectionString $cs -Objects $script:PimManagerCoreTables
         $script:PimManagerSchemaByUpdater = [bool]$__rd.ok
+        # 2.4.644 (live 2026-10-16, a fresh community install): the FIRST hosted start can come BEFORE the deploy's schema
+        # step. The web app holds no DDL right (run 2 / the new setup), so it must NOT try the full init (that logged
+        # "CREATE TABLE ... permission denied" with a stack trace): ONE calm line, then the read-only check again until the
+        # install / update has created the tables. An identity that still holds the DDL right (an install never cut over)
+        # keeps the full init below, as before.
+        if (-not $script:PimManagerSchemaByUpdater -and -not (Test-PimSqlCanCreateTable -ConnectionString $cs)) {
+            $__wmax = 900; $__wv = 0; if ([int]::TryParse("$($env:PIM_MANAGER_SCHEMA_WAIT_SECONDS)", [ref]$__wv) -and $__wv -ge 0) { $__wmax = $__wv }
+            $__w = Wait-PimHostedStoreSchema -ConnectionString $cs -Objects $script:PimManagerCoreTables -IntervalSeconds 30 -MaxWaitSeconds $__wmax
+            if (-not $__w.ready) {
+                Write-Host ("  [store] the store's schema is not there yet after {0} s -- the Manager stops now and the platform starts it again; the install / update creates the schema" -f $__w.waitedSeconds) -ForegroundColor DarkYellow
+                exit 3
+            }
+            $script:PimManagerSchemaByUpdater = $true
+        }
     }
     if ($script:PimManagerSchemaByUpdater) { Write-Host '  [store] schema applied by the updater -- the Manager does not change the schema' -ForegroundColor DarkGray }
     else { try { Initialize-PimSqlStore -ConnectionString $cs }
@@ -2564,7 +2581,13 @@ function Set-PimManagerInstance {
     $tc = New-PimSqlConnection -ConnectionString $cs; $tc.Open(); $tc.Close()
     # §12.23 run 2 (PIM 100.156): hosted, the updater owns the schema (see the start path); local stores keep the full init
     $__byUpd = $false
-    if ("$($env:CONTAINER_APP_NAME)".Trim()) { $__byUpd = [bool](Confirm-PimSqlSchemaObject -ConnectionString $cs -Objects @('pim.Rows', 'pim.Settings', 'pim.AuditEvents', 'pim.TenantCache', 'pim.ChangeQueue')).ok }
+    if ("$($env:CONTAINER_APP_NAME)".Trim()) {
+        $__byUpd = [bool](Confirm-PimSqlSchemaObject -ConnectionString $cs -Objects $script:PimManagerCoreTables).ok
+        # 2.4.644: no DDL from a web app without the right -- a database without its schema is said plainly, not as a DDL error
+        if (-not $__byUpd -and -not (Test-PimSqlCanCreateTable -ConnectionString $cs)) {
+            throw "The database '$($global:PIM_SqlDatabase)' has no PIM Manager schema yet -- the install / update creates it. Try again after the next update."
+        }
+    }
     if (-not $__byUpd) { Initialize-PimSqlStore -ConnectionString $cs }
     Initialize-PimManagerPolicyTemplates -ConnectionString $cs
     Initialize-PimManagerMailTemplates -ConnectionString $cs
