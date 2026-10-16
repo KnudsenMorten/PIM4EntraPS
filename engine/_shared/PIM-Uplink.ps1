@@ -278,6 +278,73 @@ function Test-PimUplinkValidationRefusal {
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
+# 2.4.644 BUG "one refused field trips every hold" (live 2026-10-16 18:14:57Z on internal): a 422 naming ONLY SqlAccess.model
+# also set the release-control and cause holds, because the first layer to see the refusal ($postRc) held its own group
+# without asking WHICH field was refused. Invardia's 422 names its fields (the sender appends "[fields: a, b.c]"), so each
+# hold now acts only on a named field of ITS group, and inside the additive group only the named top-level field(s) are
+# dropped and held. A refusal that names nothing (an older Invardia, an unparsable answer) keeps the old fail-safe cascade.
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimUplinkRefusedFields {
+    <#
+      PURE. The TOP-LEVEL record fields a refusal names: "...[fields: SqlAccess.model, Jobs[0].name, wave]" -> SqlAccess, Jobs,
+      wave (unique, in order). A leading "$." / "/" (a JSON path / pointer) is ignored. Nothing named = an empty list.
+    #>
+    param([AllowNull()][string]$Reason)
+    $out = New-Object System.Collections.Generic.List[string]
+    # to the end of the line: a path may carry its own brackets (Jobs[0].name); text after the list ends the last name below
+    $m = [regex]::Match("$Reason", '(?i)\bfields:\s*([^\r\n]*)')
+    if (-not $m.Success) { return @() }
+    foreach ($p in ($m.Groups[1].Value -split ',')) {
+        $t = ("$p".Trim().Trim('"', "'", ' ', '[', '(', ')') -replace '^\$\.?', '') -replace '^/+', ''
+        $top = ($t -split '[./\[\]\s"'')]', 2)[0].Trim()
+        if ($top -match '^[A-Za-z_][A-Za-z0-9_]{0,63}$' -and -not ($out -contains $top)) { $out.Add($top) }
+    }
+    return @($out)
+}
+
+function Get-PimUplinkReleaseControlFieldNames { <# PURE. The release-control group (a literal). #> return @('wave', 'releaseMode') }
+function Get-PimUplinkCauseFieldNames { <# PURE. The cause group (a literal). #> return @('Reports', 'Capabilities', 'Licences') }
+
+function Resolve-PimUplinkRefusalSplit {
+    <#
+      PURE. Which hold(s) a refusal that NAMES its fields trips, and what to drop from the record:
+        rc        a named field is wave / releaseMode                -> drop every release-control field on the record (-Rc)
+        causes    a named field is Reports / Capabilities / Licences -> drop every cause field on the record (-Causes)
+        additive  the named fields that are on the record's additive list (-Additive) -> drop ONLY those
+      -> @{ named = <the refusal names fields>; act = <named AND something to drop>; rc; causes (bool); additive; drop; fields }
+      act = $false means "do as before": the caller keeps the old fail-safe cascade (nothing named, or nothing it names is
+      one of the record's optional fields -- e.g. a core field).
+    #>
+    param([AllowNull()][string]$Reason, [AllowNull()][object[]]$Additive = @(), [AllowNull()][object[]]$Causes = @(), [AllowNull()][object[]]$Rc = @(),
+          [AllowNull()][object[]]$Fields = @())
+    # the sender's Fields (Invardia's answer, Send-PimUplinkRecord) win; else the "[fields: ...]" of the reason text
+    $fl = @(@($Fields) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $named = if ($fl.Count) { @(Get-PimUplinkRefusedFields -Reason "fields: $($fl -join ', ')") } else { @(Get-PimUplinkRefusedFields -Reason $Reason) }
+    $o = @{ named = [bool]$named.Count; act = $false; rc = $false; causes = $false; additive = @(); drop = @(); fields = $named }
+    if (-not $named.Count) { return $o }
+    $rcG = @(Get-PimUplinkReleaseControlFieldNames); $cG = @(Get-PimUplinkCauseFieldNames)
+    $o.rc = [bool](@($named | Where-Object { $rcG -contains $_ }).Count)
+    $o.causes = [bool](@($named | Where-Object { $cG -contains $_ }).Count)
+    # in the order Invardia named them, spelled as on the record
+    $recAdd = @(@($Additive) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $add = @(foreach ($nf in $named) { $hit = @($recAdd | Where-Object { $_ -eq $nf }) | Select-Object -First 1; if ($hit) { "$hit" } })
+    $o.additive = $add
+    $drop = @()
+    if ($o.rc) { $drop += @(@($Rc) | Where-Object { "$_".Trim() } | ForEach-Object { "$_" }) }
+    if ($o.causes) { $drop += @(@($Causes) | Where-Object { "$_".Trim() } | ForEach-Object { "$_" }) }
+    $drop += $add
+    $o.drop = @($drop | Select-Object -Unique)
+    $o.act = [bool]$o.drop.Count
+    return $o
+}
+
+function ConvertTo-PimUplinkHeldFieldList {
+    <# PURE. The stored per-field additive hold ("SqlAccess,Security" or a list) as a clean list of names; nothing = @(). #>
+    param([AllowNull()][object]$Value)
+    return @(@(@($Value) | ForEach-Object { "$_" -split ',' }) | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]{0,63}$' } | Select-Object -Unique)
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
 # §33.0 BUG (2026-10-16: internal held the cause fields from 2026-10-15 23:39Z and NOTHING said which record was refused or
 # why -- no run message, no console line, and Invardia keeps no refused bodies). Each of the three holds (additive / cause /
 # release-control) now records WHAT was refused beside its ...RefusedUtc: the record kind, the job (a run) or the guard id,
@@ -1241,13 +1308,16 @@ function Send-PimUplinkRecord {
     $r = $null
     try { $r = Send-AitUplink -Record $Record -Endpoint $Endpoint -AccessCode $AccessCode } catch { $r = [pscustomobject]@{ Status = 'failed'; Reason = "uplink POST failed: $($_.Exception.Message)"; Sent = $false } }
     $reason = "$($r.Reason)"
+    $refFields = @()
     if ("$($r.Status)" -ne 'ok' -and "$($box.err)".Trim()) {
         $detail = "$($box.err)".Trim()
-        try { $ej = $detail | ConvertFrom-Json -ErrorAction Stop; if ($ej.fields) { $detail = "fields: $(@($ej.fields) -join ', ')" } } catch { }
+        # 2.4.644: the refused field names also as a FIELD of the answer (Fields), so a hold need not parse the text
+        try { $ej = $detail | ConvertFrom-Json -ErrorAction Stop; if ($ej.fields) { $refFields = @(@($ej.fields) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }); $detail = "fields: $(@($ej.fields) -join ', ')" } } catch { }
         if ($detail.Length -gt 300) { $detail = $detail.Substring(0, 300) }
         $reason = "$reason [$detail]"
     }
     $o = [ordered]@{ Status = "$($r.Status)"; Reason = $reason; Sent = [bool]$r.Sent; Body = $null }
+    if ($refFields.Count) { $o['Fields'] = [string[]]$refFields }
     if ("$($r.Status)" -eq 'ok') { $o['Body'] = $box.body }
     return [pscustomobject]$o
 }
@@ -1429,7 +1499,7 @@ function Get-PimUplinkTenantCapabilities {
 
 # =====================================================================================================================
 # §33.0 MORE TELEMETRY (owner 2026-10-16 via Invardia: "add relevant. i want data" / "also pim per domain"; Invardia
-# accepted all 8 names + shapes the same day; they stay OFF until Invardia says live) -- the STRUCTURED heartbeat fields:
+# accepted all 8 names + shapes the same day; ON by default since 2.4.644 -- Invardia live 1.0.500, SqlAccess.model rule widened 2026-10-16) -- the STRUCTURED heartbeat fields:
 #   Security        { collectionUtc; domains: [ { domain; eligibleAssignments; activeAssignments; permanentAssignments;
 #                     outsidePim; privilegedPrincipals; guestsPrivileged; spnsPrivileged; assignmentsExpiring7d;
 #                     activations30d } ] }  -- the last COMPLETE active-assignments snapshot; at most 12 domains
@@ -1441,10 +1511,11 @@ function Get-PimUplinkTenantCapabilities {
 #   UpdatePending   { approvedVersion; lastBuiltVersion; hold; waitingSinceUtc }   -- from UpdateState
 #   SqlAccess       { model; run1; run2; updaterInAdminGroup; checkedUtc }        -- the updater's verdict in UpdateState
 #   FeaturesChanged [ '<area>.<name>:<on|off>' ]  -- at most 40, only features that differ from their catalog default
-# ONE switch per field, OFF by default: PIM_UPLINK_<FIELD> (PIM_UPLINK_SECURITY, ..._COLLECTIONS, ..._JOBS,
-# ..._CONVERGENCE, ..._MAIL, ..._UPDATEPENDING, ..._SQLACCESS, ..._FEATURESCHANGED) = 1 / true / on / yes switches it on.
-# IDENTIFIED heartbeat only; additive (Invardia refuses its content -> the heartbeat goes once more without the additive
-# fields and they are held 24 h -- UplinkState.additiveRefusedUtc). 🔒 PRIVACY: no UPN, display name, group / role NAME,
+# ONE switch per field, ON by default (2.4.644): PIM_UPLINK_<FIELD> (PIM_UPLINK_SECURITY, ..._COLLECTIONS, ..._JOBS,
+# ..._CONVERGENCE, ..._MAIL, ..._UPDATEPENDING, ..._SQLACCESS, ..._FEATURESCHANGED) = 0 / false / off / no switches it off.
+# IDENTIFIED heartbeat only; additive (Invardia refuses its content -> the heartbeat goes once more without the field(s)
+# its 422 names, held 24 h -- UplinkState.additiveRefusedUtc + additiveRefusedFields; a 422 naming no field = every
+# additive field, as before). 🔒 PRIVACY: no UPN, display name, group / role NAME,
 # host or address in any field -- counts, product job names, closed codes and times only. A field whose source cannot be
 # read is LEFT OUT, never a guess.
 # =====================================================================================================================
@@ -1454,15 +1525,15 @@ function Get-PimUplinkStateFieldNames {
 }
 
 function Get-PimUplinkStateFieldSwitch {
-    <# PURE. The environment variable that switches one structured field on: PIM_UPLINK_<FIELD, upper case>. #>
+    <# PURE. The environment variable that switches one structured field off: PIM_UPLINK_<FIELD, upper case>. #>
     param([Parameter(Mandatory)][string]$Field)
     return "PIM_UPLINK_$("$Field".Trim().ToUpperInvariant())"
 }
 
 function Test-PimUplinkStateFieldOn {
-    <# PURE. OFF by default (until Invardia says live): only 1 / true / on / yes switches a field on. #>
+    <# PURE. ON by default (2.4.644, Invardia live 1.0.500): unset / empty / anything else = on; only 0 / false / off / no switches a field off. #>
     param([AllowNull()][string]$Value)
-    return [bool]("$Value".Trim() -match '^(?i)(1|true|on|yes)$')
+    return -not [bool]("$Value".Trim() -match '^(?i)(0|false|off|no)$')
 }
 
 function Get-PimUplinkStateFieldSwitches {
@@ -2062,7 +2133,12 @@ function Invoke-PimUplinkCycle {
     # for 24 hours. A refusal for any other reason (429, 5xx, no network) is returned as it is.
     $addPrev = $null; if ($state -and $state.PSObject.Properties['additiveRefusedUtc']) { $addPrev = $state.additiveRefusedUtc }
     $addHeld = Test-PimUplinkAdditiveHeld -RefusedUtc $addPrev -NowUtc $NowUtc
-    $addState = @{ on = ([bool]$Additive -and -not $addHeld); refusedNow = $false; reason = ''; info = $null }
+    # 2.4.644: a hold of NAMED additive fields only (UplinkState.additiveRefusedFields, e.g. "SqlAccess"): the other additive
+    # fields keep going, only those are left out for the 24 h. No list stored = the whole group is held (as before).
+    $addPrevFields = @(); if ($addHeld -and $state -and $state.PSObject.Properties['additiveRefusedFields']) { $addPrevFields = @(ConvertTo-PimUplinkHeldFieldList $state.additiveRefusedFields) }
+    $addPartial = [bool]($addHeld -and $addPrevFields.Count)
+    $addState = @{ on = ([bool]$Additive -and (-not $addHeld -or $addPartial)); refusedNow = $false; reason = ''; info = $null
+                   held = @($addPrevFields); fields = @(); whole = $false }
     # §33.0 BUG (2026-10-16): WHAT a hold refused (New-PimUplinkRefusalInfo) + one console line. Never stops the record or the hold.
     $noteRefusal = {
         param($st, $what, $rec, $reason)
@@ -2071,23 +2147,65 @@ function Invoke-PimUplinkCycle {
             Write-Warning "[uplink] $(Format-PimUplinkRefusalLine -What $what -Info $st.info) -- sent without them, held 24 h"
         } catch { try { Write-Warning "[uplink] Invardia refused the $what -- what was refused could not be recorded: $($_.Exception.Message)" } catch { } }
     }
+    # 2.4.644: the additive fields under a per-field hold leave the record BEFORE its first send (their old value back, else
+    # removed); returns the additive names still on the record. Every layer calls it first -- idempotent.
+    $stripHeld = {
+        param($rec, $names, $legacy)
+        $nm = @(@($names) | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
+        if ($null -eq $rec -or -not @($addState.held).Count -or -not $nm.Count) { return $nm }
+        $keep = @()
+        foreach ($n in $nm) {
+            if (@($addState.held) -contains $n) {
+                if ($legacy -and $legacy.ContainsKey("$n")) { $rec | Add-Member -NotePropertyName "$n" -NotePropertyValue $legacy["$n"] -Force }
+                else { $rec.PSObject.Properties.Remove("$n") }
+            } else { $keep += $n }
+        }
+        return $keep
+    }
+    $addWhat = { param($f) if (@($f).Count) { "new report fields ($(@($f) -join ', '))" } else { 'new report fields' } }
+    # 2.4.644: a refusal that NAMES its fields (Resolve-PimUplinkRefusalSplit) -- each hold acts only on a named field of ITS
+    # group (release-control: wave / releaseMode; causes: Reports / Capabilities / Licences; additive: the named ones only),
+    # the record goes ONCE more without exactly those, and that answer is returned (never a loop). $null = nothing named that
+    # this record carries -> the caller does as before (the fail-safe cascade).
+    $postNamed = {
+        param($rec, $r1, $names, $legacy, $cnames, $rnames)
+        $rf = @(); try { if ($r1 -is [System.Collections.IDictionary]) { if ($r1.Contains('Fields')) { $rf = @($r1['Fields']) } } elseif ($r1.PSObject.Properties['Fields']) { $rf = @($r1.Fields) } } catch { $rf = @() }
+        $sp = $null; try { $sp = Resolve-PimUplinkRefusalSplit -Reason "$($r1.Reason)" -Fields $rf -Additive @($names) -Causes @($cnames) -Rc @($rnames) } catch { $sp = $null }
+        if ($null -eq $sp -or -not $sp.act) { return $null }
+        foreach ($n in @($sp.drop)) {
+            if ($legacy -and $legacy.ContainsKey("$n") -and @($sp.additive) -contains "$n") { $rec | Add-Member -NotePropertyName "$n" -NotePropertyValue $legacy["$n"] -Force }
+            else { $rec.PSObject.Properties.Remove("$n") }
+        }
+        if ($sp.rc) { $rcState.on = $false; $rcState.refusedNow = $true; $rcState.reason = "$($r1.Reason)"; & $noteRefusal $rcState 'release-control fields (wave / releaseMode)' $rec $r1.Reason }
+        if ($sp.causes) { $causeState.on = $false; $causeState.refusedNow = $true; $causeState.reason = "$($r1.Reason)"; & $noteRefusal $causeState 'cause fields (Reports / Capabilities / Licences)' $rec $r1.Reason }
+        if (@($sp.additive).Count) {
+            $addState.refusedNow = $true; $addState.reason = "$($r1.Reason)"
+            $addState.fields = @(@($addState.fields) + @($sp.additive) | Select-Object -Unique)
+            $addState.held = @(@($addState.held) + @($sp.additive) | Select-Object -Unique)   # the rest of this cycle leaves them out too
+            & $noteRefusal $addState (& $addWhat $sp.additive) $rec $r1.Reason
+        }
+        return (& $post $rec)
+    }
     $postAdd = {
         param($rec, $names, $legacy)
+        $nm = @(& $stripHeld $rec $names $legacy)
         $r1 = & $post $rec
-        $nm = @(@($names) | Where-Object { "$_".Trim() })
         if ("$($r1.Status)" -eq 'ok' -or $null -eq $rec -or -not $nm.Count -or -not (Test-PimUplinkValidationRefusal "$($r1.Reason)")) { return $r1 }
+        $rN = & $postNamed $rec $r1 $nm $legacy @() @()
+        if ($null -ne $rN) { return $rN }
         foreach ($n in $nm) {
             if ($legacy -and $legacy.ContainsKey("$n")) { $rec | Add-Member -NotePropertyName "$n" -NotePropertyValue $legacy["$n"] -Force }
             else { $rec.PSObject.Properties.Remove("$n") }
         }
         $r2 = & $post $rec
-        if ("$($r2.Status)" -eq 'ok') { $addState.on = $false; $addState.refusedNow = $true; $addState.reason = "$($r1.Reason)"; & $noteRefusal $addState 'new report fields' $rec $r1.Reason }
+        if ("$($r2.Status)" -eq 'ok') { $addState.on = $false; $addState.refusedNow = $true; $addState.whole = $true; $addState.reason = "$($r1.Reason)"; & $noteRefusal $addState 'new report fields' $rec $r1.Reason }
         return $r2
     }
     # PIM 100.167 / framework 8.16: the cause fields (Reports / Capabilities / Licences) -- their own switch and their own
     # 24-hour hold after a refusal (UplinkState.causesRefusedUtc), so a refusal of them never turns the additive fields off.
-    # $postCause: the record goes as built; refused for its CONTENT while it carries cause fields (-cnames) -> those are
-    # removed, held 24 h, and the record goes on through $postAdd (which handles the additive fields as before).
+    # $postCause: the record goes as built; refused for its CONTENT while it carries cause fields (-cnames) -> a refusal that
+    # names its fields is split by group ($postNamed); one that names nothing removes them, holds them 24 h, and the record
+    # goes on through $postAdd (which handles the additive fields as before).
     $causePrev = $null; if ($state -and $state.PSObject.Properties['causesRefusedUtc']) { $causePrev = $state.causesRefusedUtc }
     $causeHeld = Test-PimUplinkAdditiveHeld -RefusedUtc $causePrev -NowUtc $NowUtc
     $causeState = @{ on = ([bool]$Causes -and -not $causeHeld); refusedNow = $false; reason = ''; info = $null }
@@ -2095,15 +2213,20 @@ function Invoke-PimUplinkCycle {
         param($rec, $names, $legacy, $cnames)
         $cn = @(@($cnames) | Where-Object { "$_".Trim() })
         if (-not $cn.Count -or $null -eq $rec) { return (& $postAdd $rec $names $legacy) }
+        $nm = @(& $stripHeld $rec $names $legacy)
         $r1 = & $post $rec
         if ("$($r1.Status)" -eq 'ok' -or -not (Test-PimUplinkValidationRefusal "$($r1.Reason)")) { return $r1 }
+        $rN = & $postNamed $rec $r1 $nm $legacy $cn @()
+        if ($null -ne $rN) { return $rN }
         foreach ($n in $cn) { $rec.PSObject.Properties.Remove("$n") }
         $causeState.on = $false; $causeState.refusedNow = $true; $causeState.reason = "$($r1.Reason)"
         & $noteRefusal $causeState 'cause fields (Reports / Capabilities / Licences)' $rec $r1.Reason
-        return (& $postAdd $rec $names $legacy)
+        return (& $postAdd $rec $nm $legacy)
     }
     # PIM 100.158 CR3: the release-control fields (wave / releaseMode) -- their own hold. $postRc sends a heartbeat that carries
-    # them (-rnames); refused for its CONTENT -> they are removed, held 24 h, and the heartbeat goes on through $postCause.
+    # them (-rnames); refused for its CONTENT -> a refusal that names its fields is split by group ($postNamed: a 422 naming
+    # only SqlAccess.model never holds wave / releaseMode); one that names nothing removes them, holds them 24 h, and the
+    # heartbeat goes on through $postCause (the old fail-safe cascade).
     $rcPrev = $null; if ($state -and $state.PSObject.Properties['releaseControlRefusedUtc']) { $rcPrev = $state.releaseControlRefusedUtc }
     $rcHeld = Test-PimUplinkAdditiveHeld -RefusedUtc $rcPrev -NowUtc $NowUtc
     $rcState = @{ on = ([bool]$ReleaseControl -and -not $rcHeld); refusedNow = $false; reason = ''; info = $null }
@@ -2111,12 +2234,15 @@ function Invoke-PimUplinkCycle {
         param($rec, $names, $legacy, $cnames, $rnames)
         $rn = @(@($rnames) | Where-Object { "$_".Trim() })
         if (-not $rn.Count -or $null -eq $rec) { return (& $postCause $rec $names $legacy $cnames) }
+        $nm = @(& $stripHeld $rec $names $legacy)
         $r1 = & $post $rec
         if ("$($r1.Status)" -eq 'ok' -or -not (Test-PimUplinkValidationRefusal "$($r1.Reason)")) { return $r1 }
+        $rN = & $postNamed $rec $r1 $nm $legacy @(@($cnames) | Where-Object { "$_".Trim() }) $rn
+        if ($null -ne $rN) { return $rN }
         foreach ($n in $rn) { $rec.PSObject.Properties.Remove("$n") }
         $rcState.on = $false; $rcState.refusedNow = $true; $rcState.reason = "$($r1.Reason)"
         & $noteRefusal $rcState 'release-control fields (wave / releaseMode)' $rec $r1.Reason
-        return (& $postCause $rec $names $legacy $cnames)
+        return (& $postCause $rec $nm $legacy $cnames)
     }
     $isId = ($sender.Mode -eq 'identified')
     $redact ={ param($t, $max) $x = "$t".Trim(); if (Get-Command ConvertTo-AitUplinkRedacted -ErrorAction SilentlyContinue) { $x = ConvertTo-AitUplinkRedacted -Text $x }; if ($x.Length -gt $max) { $x = $x.Substring(0, $max - 3) + '...' }; $x }
@@ -2244,8 +2370,8 @@ function Invoke-PimUplinkCycle {
                 }
             }
             # §33.0 MORE TELEMETRY: the structured fields (Security, Collections, Jobs, Convergence, Mail, UpdatePending,
-            # SqlAccess, FeaturesChanged) -- each behind its own switch (OFF by default), built ONCE per due identified
-            # heartbeat by -StateFields, additive (held 24 h with the others on a refusal). A throw = none of them.
+            # SqlAccess, FeaturesChanged) -- each behind its own switch (ON by default, 0/false/off/no = off), built ONCE per due identified
+            # heartbeat by -StateFields, additive (a refusal naming one holds just that one 24 h; naming none holds them all). A throw = none of them.
             if ($StateFields) {
                 $sfMap = $null; try { $sfMap = & $StateFields } catch { $sfMap = $null; Write-Warning "[uplink] the structured fields could not be built: $($_.Exception.Message)" }
                 $sfMap = @($sfMap | Where-Object { $_ -is [System.Collections.IDictionary] }) | Select-Object -First 1
@@ -2462,11 +2588,19 @@ function Invoke-PimUplinkCycle {
     # §33.0 BUG (2026-10-16): the refusal names its record (kind, job, HTTP status, Invardia's answer), and while a hold lasts
     # every cycle says so, whichever caller set it. A failure to build the text keeps the plain sentence.
     $refText = { param($st, $what) $t = ''; try { if ($null -ne $st.info) { $t = " ($(Format-PimUplinkRefusalLine -What $what -Info $st.info))" } } catch { $t = '' }; $t }
-    if ($addState.refusedNow) { $msg += "; Invardia refused the new report fields -- sent in the old form, tried again in 24 h$(& $refText $addState 'new report fields')" }
+    # 2.4.644: the per-field additive hold -- which fields it holds now (this cycle's named ones + a hold still running); a
+    # whole-group refusal (nothing named) wins and stores no list (= every additive field held, as before).
+    $addFieldsOut = @()
+    if (-not $addState.whole) {
+        if ($addState.refusedNow) { $addFieldsOut = @(@($(if ($addPartial) { $addPrevFields })) + @($addState.fields) | Where-Object { "$_" } | Select-Object -Unique) }
+        elseif ($addPartial) { $addFieldsOut = @($addPrevFields) }
+    }
+    if ($addState.refusedNow -and $addState.whole) { $msg += "; Invardia refused the new report fields -- sent in the old form, tried again in 24 h$(& $refText $addState 'new report fields')" }
+    elseif ($addState.refusedNow) { $msg += "; Invardia refused $(@($addState.fields) -join ', ') -- sent without $(if (@($addState.fields).Count -eq 1) { 'it' } else { 'them' }) (the other new report fields still go), tried again in 24 h$(& $refText $addState (& $addWhat $addState.fields))" }
     if ($causeState.refusedNow) { $msg += "; Invardia refused the cause fields (Reports / Capabilities / Licences) -- sent without them, tried again in 24 h$(& $refText $causeState 'cause fields')" }
     if ($rcState.refusedNow) { $msg += "; Invardia refused the release-control fields (wave / releaseMode) -- sent without them, tried again in 24 h$(& $refText $rcState 'release-control fields')" }
     try {
-        if (-not $addState.refusedNow -and $addHeld) { $msg += Format-PimUplinkHeldNote -What 'new report fields' -Prefix 'additiveRefused' -State $state -RefusedUtc $addPrev }
+        if (-not $addState.refusedNow -and $addHeld) { $msg += Format-PimUplinkHeldNote -What (& $addWhat $addPrevFields) -Prefix 'additiveRefused' -State $state -RefusedUtc $addPrev }
         if (-not $causeState.refusedNow -and $causeHeld) { $msg += Format-PimUplinkHeldNote -What 'cause fields (Reports / Capabilities / Licences)' -Prefix 'causesRefused' -State $state -RefusedUtc $causePrev }
         if (-not $rcState.refusedNow -and $rcHeld) { $msg += Format-PimUplinkHeldNote -What 'release-control fields (wave / releaseMode)' -Prefix 'releaseControlRefused' -State $state -RefusedUtc $rcPrev }
     } catch { }
@@ -2484,6 +2618,8 @@ function Invoke-PimUplinkCycle {
     # Lane repfix: when Invardia refused the additive fields (kept for 24 h, then they are tried again).
     if ($addState.refusedNow) { $newState['additiveRefusedUtc'] = $NowUtc.ToString('o') }
     elseif ($addHeld) { $apu = ConvertTo-PimUplinkUtc $addPrev; if ($apu) { $newState['additiveRefusedUtc'] = $apu.ToString('o') } }
+    # 2.4.644: the hold names the fields it holds ("SqlAccess" / "SqlAccess,Security"); absent = the whole additive group.
+    if ($newState.Contains('additiveRefusedUtc') -and $addFieldsOut.Count) { $newState['additiveRefusedFields'] = (@($addFieldsOut) -join ',') }
     # PIM 100.167: the cause fields' own hold (left out entirely while the switch was never refused -- the state stays as before)
     if ($causeState.refusedNow) { $newState['causesRefusedUtc'] = $NowUtc.ToString('o') }
     elseif ($causeHeld) { $cpu = ConvertTo-PimUplinkUtc $causePrev; if ($cpu) { $newState['causesRefusedUtc'] = $cpu.ToString('o') } }
@@ -2497,7 +2633,7 @@ function Invoke-PimUplinkCycle {
     try { Set-PimUplinkRefusalState -State $newState -Prefix 'releaseControlRefused' -Info $(if ($rcState.refusedNow) { $rcState.info }) -Previous $state -Carry ([bool]$rcHeld) } catch { Write-Warning "[uplink] the release-control refusal record was not saved: $($_.Exception.Message)" }
     & $SetSetting 'UplinkState' ([pscustomobject]$newState)
     return @{ ran = $true; mode = $sender.Mode; sent = $sent; failed = $failed; left = $left; heartbeat = $hbSent; setup = $setupSent; message = $msg; reasons = @($why)
-              additive = [bool]$addState.on; additiveRefused = [bool]$addState.refusedNow
+              additive = [bool]$addState.on; additiveRefused = [bool]$addState.refusedNow; additiveHeldFields = @($addFieldsOut)
               causes = [bool]$causeState.on; causesRefused = [bool]$causeState.refusedNow
               releaseControl = [bool]$rcState.on; releaseControlRefused = [bool]$rcState.refusedNow
               guardsCleared = $clearedSent; activeGuards = $(if ($guardsKnown) { $activeNow.Count } else { -1 }) }
@@ -2689,7 +2825,7 @@ function Invoke-PimUplinkJob {
             }
         }
     }
-    # §33.0 MORE TELEMETRY: the structured fields -- each OFF unless its own PIM_UPLINK_<FIELD> switch is on; identified only.
+    # §33.0 MORE TELEMETRY: the structured fields -- each ON unless its own PIM_UPLINK_<FIELD> switch is 0/false/off/no; identified only.
     # A PLAIN scriptblock (dynamic scope; every name it reads starts with sfJob so nothing in the cycle can shadow it),
     # invoked by the cycle ONLY when the identified heartbeat is due.
     $stateSb = $null

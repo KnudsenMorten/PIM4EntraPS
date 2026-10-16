@@ -46,7 +46,13 @@ param(
     [switch]$Promote,
     [switch]$Apply,
     # PIM 100.158 CR3: where the "Invardia refused changedScopes" mark is kept for 24 h (default: the temp folder of this machine)
-    [string]$StateDir = ''
+    [string]$StateDir = '',
+    # REQUIREMENTS 33.0 RELEASE CONTEXT (owner 2026-10-16): the fix list for the owner's approval mail, the FALLBACK of
+    # Publish-PimInvardiaReleaseNotes.ps1 -- one point per entry, sent as the header X-Release-Notes on the PUBLISH call
+    # only (never the ring / promote call): [uri]::EscapeDataString of the points joined with a line feed (%0A between
+    # points), at most 8000 characters raw, never refused by Invardia. Not given = no header (no behaviour change).
+    # PIM_PUBLISH_RELEASENOTES = 0 / off / false / no turns the header off without a release (framework 12.22 3(b)).
+    [string[]]$ReleaseNotes = @()
 )
 $ErrorActionPreference = 'Stop'
 function Step([string]$m) { Write-Host "==> $m" -ForegroundColor Cyan }
@@ -78,9 +84,12 @@ function Get-PimReleaseScopes {
 }
 function Invoke-PimInvardiaCall {
     # One HTTP call, PS 5.1 + 7: a non-2xx answer is read from the exception's response. @{ status; content }.
-    param([string]$Method, [string]$Url, [string]$Token, $Body, [string]$ContentType, [int]$TimeoutSec = 120)
+    # -ExtraHeaders: more request headers (the publish call's X-Release-Notes); Authorization is never replaced by them.
+    param([string]$Method, [string]$Url, [string]$Token, $Body, [string]$ContentType, [int]$TimeoutSec = 120, [hashtable]$ExtraHeaders = @{})
     try {
-        $r = Invoke-WebRequest -Method $Method -Uri $Url -Headers @{ Authorization = "Bearer $Token" } -Body $Body -ContentType $ContentType -TimeoutSec $TimeoutSec -UseBasicParsing
+        $h = @{ Authorization = "Bearer $Token" }
+        if ($ExtraHeaders) { foreach ($k in @($ExtraHeaders.Keys)) { if ("$k" -ne 'Authorization') { $h["$k"] = "$($ExtraHeaders[$k])" } } }
+        $r = Invoke-WebRequest -Method $Method -Uri $Url -Headers $h -Body $Body -ContentType $ContentType -TimeoutSec $TimeoutSec -UseBasicParsing
         return @{ status = [int]$r.StatusCode; content = "$($r.Content)" }
     } catch {
         $resp = $_.Exception.Response
@@ -118,6 +127,17 @@ function Invoke-PimInvardiaReadBack {
         $u = "$($Endpoint.TrimEnd('/'))/api/releases/pim-manager/state?kind=$Kind&version=$Version"
         return (Invoke-RestMethod -Method GET -Uri $u -Headers @{ Authorization = "Bearer $Token" } -TimeoutSec 60)
     } catch { return $null }
+}
+function Get-PimReleaseNotesHeaderValue {
+    <# PURE. The X-Release-Notes value for the publish call (Invardia 2026-10-16): the points trimmed (empty ones and line
+       breaks inside a point dropped), joined with a line feed, cut at 8000 characters RAW, then [uri]::EscapeDataString (UTF-8;
+       %0A between points). @{ value = '' when there is nothing to send; raw; points; cut }. #>
+    param([string[]]$Points = @(), [int]$MaxRaw = 8000)
+    $p = @(@($Points) | ForEach-Object { ("$_" -replace '[\x00-\x1F]', ' ').Trim() } | Where-Object { $_ })
+    if (-not $p.Count) { return @{ value = ''; raw = ''; points = 0; cut = $false } }
+    $raw = $p -join "`n"; $cut = $false
+    if ($raw.Length -gt $MaxRaw) { $raw = $raw.Substring(0, $MaxRaw); $cut = $true }
+    return @{ value = [uri]::EscapeDataString($raw); raw = $raw; points = $p.Count; cut = $cut }
 }
 $sol = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $repo = Split-Path (Split-Path $sol -Parent) -Parent
@@ -250,9 +270,18 @@ $urlNoScopes = $url
 if ($scopesQuery) { $url = "$url&changedScopes=$scopesQuery" }
 Write-Host ("    changedScopes: {0}" -f $(if ($scopes.Count) { $scopes -join ',' } elseif ($scopesOn) { '(none -- docs / tests only; not sent)' } else { '(not sent: PIM_PUBLISH_CHANGEDSCOPES off, or held after a refusal)' }))
 Write-Host ("    ring: {0}{1}" -f $(if ($Ring -ge 0) { "$Ring (published AND released to it)" } else { 'none (registered only, released to no ring)' }), $(if ("$OperatorApproval".Trim()) { " -- operator: '$OperatorApproval'" } else { '' }))
+# REQUIREMENTS 33.0 RELEASE CONTEXT: the fix list as X-Release-Notes on the PUBLISH call only (switch PIM_PUBLISH_RELEASENOTES)
+$notesHeaders = @{}
+$notesHdr = Get-PimReleaseNotesHeaderValue -Points @($ReleaseNotes)
+if ($notesHdr.value -and ("$env:PIM_PUBLISH_RELEASENOTES".Trim() -match '^(?i)(0|off|false|no)$')) {
+    Write-Host '    release notes NOT sent (PIM_PUBLISH_RELEASENOTES is off)' -ForegroundColor Yellow
+} elseif ($notesHdr.value) {
+    $notesHeaders['X-Release-Notes'] = $notesHdr.value
+    Write-Host ("    release notes: {0} point(s), {1} characters raw{2} (X-Release-Notes on the publish call)" -f $notesHdr.points, $notesHdr.raw.Length, $(if ($notesHdr.cut) { ' -- CUT at 8000' } else { '' }))
+}
 if (-not $Apply) {
     Write-Host "`nPLAN ONLY -- nothing was sent. With -Apply the zip is POSTed to $url as Invardia.Publisher.pim-manager (tenant $TenantId)." -ForegroundColor Yellow
-    return [pscustomobject]@{ published = $false; version = $Version; ring = $Ring; zip = $zip; sha256 = $hash; size = $bytes.Length; url = $url; engineHash = $engineHash; engineChanged = $engineChanged; changedScopes = @($scopes) }
+    return [pscustomobject]@{ published = $false; version = $Version; ring = $Ring; zip = $zip; sha256 = $hash; size = $bytes.Length; url = $url; engineHash = $engineHash; engineChanged = $engineChanged; changedScopes = @($scopes); releaseNotesHeader = "$($notesHeaders['X-Release-Notes'])" }
 }
 
 Step 'publisher identity (certificate, from Key Vault unless passed)'
@@ -271,13 +300,13 @@ if (-not "$token".Trim()) { throw 'no token for the Invardia Back Office audienc
 Step "POST $url"
 # Windows PowerShell 5.1 as well as 7 (HOST-1: scripts in tools\setup must run on both): a non-2xx answer is read from the
 # exception's response instead of -SkipHttpErrorCheck (PS 7 only).
-$pub = Invoke-PimInvardiaCall -Method POST -Url $url -Token $token -Body $bytes -ContentType 'application/zip' -TimeoutSec 600
+$pub = Invoke-PimInvardiaCall -Method POST -Url $url -Token $token -Body $bytes -ContentType 'application/zip' -TimeoutSec 600 -ExtraHeaders $notesHeaders
 if ($scopesQuery -and (Test-PimChangedScopesRefusal -Status $pub.status -Content $pub.content)) {
     # PIM 100.158: Invardia refused the FIELD -- once more without it, and it is held for 24 h
     Write-Host ("    Invardia refused changedScopes (HTTP {0}) -- sent once more without it; held for 24 h" -f $pub.status) -ForegroundColor Yellow
     Set-PimScopesMark $scopesMark
     $url = $urlNoScopes; $scopes = @()
-    $pub = Invoke-PimInvardiaCall -Method POST -Url $url -Token $token -Body $bytes -ContentType 'application/zip' -TimeoutSec 600
+    $pub = Invoke-PimInvardiaCall -Method POST -Url $url -Token $token -Body $bytes -ContentType 'application/zip' -TimeoutSec 600 -ExtraHeaders $notesHeaders
 }
 $status = [int]$pub.status; $content = "$($pub.content)"
 $ok = ($status -in 200, 201, 202)

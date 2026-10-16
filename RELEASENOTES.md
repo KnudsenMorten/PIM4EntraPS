@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.644 -- 2026-10-16
+
+- One refused telemetry field no longer holds back all others; the 8 status fields are on by default; a database grant already in place is never reported as refused; a fresh install no longer logs a failed table create; the approval mail can carry the fix list
+
 ## 2.4.643 -- 2026-10-16
 
 - A Community install never asks Invardia for a Pro licence; new installs get the least-privilege SQL model from setup; 12 more telemetry counts (activations, pending approvals, standing privileged access, expiring, drift, convergence)
