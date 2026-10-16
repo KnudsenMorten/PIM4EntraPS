@@ -60,8 +60,9 @@
   database, managed identities, the Container Apps environment, the Manager app and its jobs (tick, updater), the Entra
   sign-in app and its members group, the SQL admin group grp-pim-sql-admins. It grants: Microsoft Graph application
   permissions to the engine job identity (the engine set) and the Manager identity (a read-only set); AcrPull, Reader,
-  Contributor (updater, on the resource group) and Reader at the tenant root to the engine; SQL database roles
-  (db_datareader, db_datawriter, db_ddladmin) to the identities; the Invardia Support app's access when named -- at
+  Contributor (updater, on the resource group) and Reader at the tenant root to the engine; the least-privilege SQL
+  model (one database role per component: pim_web, pim_engine, pim_updater + db_ddladmin; a signed access procedure),
+  the installer leaving the SQL admin group again at the end; the Invardia Support app's access when named -- at
   every level that includes its standing access to the PIM database (member of the SQL admin group, its own database
   user with db_owner), which stays until you switch the Support app off.
   Logs: a transcript of the run in the temp folder (pim-manager-logs); its path is printed.
@@ -100,7 +101,12 @@ param(
     [scriptblock]$MspBuild,
     # test seam (REQ 98.4 b): param([string]$Op, $Target) -- 'get' answers the address of the SQL firewall rule 'AllowSetupHost'
     # ('' = not there; throws = not readable), 'remove' deletes it. A real install uses ARM REST (below).
-    [scriptblock]$SetupHostRule
+    [scriptblock]$SetupHostRule,
+    # test seam (PIM 100.156 B, framework 12.23 P5): param([string]$ObjectId, [string]$SqlServer, [string]$ResourceGroup) ->
+    # @{ ok; released; reason } -- the signed-in installer leaves the SQL admin group at the end of the install. A real
+    # install: Invoke-PimSqlAdminGroupSetupRelease (_PimSqlAdminGroup.ps1). Not run for an Invardia Support-app session
+    # (the Support app is the group's standing member) or a managed-tenant install.
+    [scriptblock]$ReleaseSqlAdmin
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -744,6 +750,24 @@ if (-not [bool]$vr.done) {
 }
 if (@($vr.warnings).Count) { Emit 'verify-install' 'warning' "$($vr.sentence)" -Detail ([ordered]@{ lines = $vRows }) }
 else { Emit 'verify-install' 'ok' "$($vr.sentence)" -Detail ([ordered]@{ lines = $vRows }) }
+
+# PIM 100.156 B (framework 12.23 P5): the installer was a member of the SQL admin group only for the length of the install
+# (the deploy keeps it -- -SkipInstallVerify -- because the licence, support and verify steps above still needed SQL). Now
+# it leaves the group again, read back; the standing member is the Invardia Support app. Never fatal, never an event of its
+# own (the install is complete either way); not for a Support-app session, which IS that standing member.
+if ("$($script:who.objectId)".Trim() -and -not "$($script:who.supportAppId)".Trim()) {
+    $relR = $null
+    try {
+        if ($ReleaseSqlAdmin) { $relR = & $ReleaseSqlAdmin "$($script:who.objectId)" "$($names.sqlServer)" "$($names.resourceGroup)" }
+        elseif (-not $azSeam) {
+            if (-not (Get-Command Invoke-PimSqlAdminGroupSetupRelease -ErrorAction SilentlyContinue)) { . (Join-Path $here '_PimSqlAdminGroup.ps1') }
+            $invR = New-PimSqlAdminGroupInvokers -SubscriptionId $cfg.subscriptionId -TenantId $cfg.tenantId
+            $relR = Invoke-PimSqlAdminGroupSetupRelease -Graph $invR.Graph -Arm $invR.Arm -SubscriptionId $cfg.subscriptionId -SqlResourceGroup $names.resourceGroup `
+                        -SqlServerName $names.sqlServer -MemberObjectId "$($script:who.objectId)" -Label 'the signed-in administrator'
+        }
+    } catch { $relR = @{ ok = $false; reason = "$($_.Exception.Message)" } }
+    if ($relR) { Write-Host "    SQL admin group: $($relR.reason)" -ForegroundColor $(if ($relR.ok) { 'DarkGray' } else { 'Yellow' }) }
+}
 
 }   # end: not a managed-tenant install (2c ran the managed-tenant build instead of 3 - 4b)
 

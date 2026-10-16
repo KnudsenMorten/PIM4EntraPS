@@ -402,8 +402,10 @@ function Get-PimSqlAccessComponentUsers {
 
 function Get-PimSqlAccessInstallNameMap {
     <# The install's database user names per component role (CR5 install names; today's names by default). #>
-    [CmdletBinding()] param()
-    $nm = { param($r, $d) if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { try { return (Get-PimInstallName -Role $r) } catch { } }; return $d }
+    # -NoRecord (setup, PIM 100.156 B): the names from the environment / today's defaults only -- no read of the store.
+    [CmdletBinding()] param([switch]$NoRecord)
+    $nr = [bool]$NoRecord
+    $nm = { param($r, $d) if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { try { if ($nr) { return (Get-PimInstallName -Role $r -NoRecord) } else { return (Get-PimInstallName -Role $r) } } catch { } }; return $d }
     return [ordered]@{
         pim_web      = @(& $nm 'web' 'ca-pim-manager')
         pim_engine   = @(& $nm 'engine' 'ca-pim-tick')
@@ -412,6 +414,107 @@ function Get-PimSqlAccessInstallNameMap {
         pim_publish  = @(& $nm 'publish' 'ca-pim-publish')
         pim_downlink = @(& $nm 'downlink' 'ca-pim-downlink-s6')
     }
+}
+
+function Get-PimSqlComponentAccess {
+    <#
+      PURE (CR5 names via Get-PimInstallName when loaded). The ONE answer to "which database roles does this component's
+      contained user get" for a NEW install (framework 12.23 P2/P3/P8, PIM 100.156 B). Setup, the in-network init job and
+      the hybrid-worker grant all ask here, so the model cannot differ between them.
+        web       pim_web                       engine    pim_engine (also every other ca-pim-* worker app)
+        updater   pim_updater + db_ddladmin     asbuilt   pim_asbuilt
+        publish   pim_publish                   downlink  pim_downlink + pim_engine (ca-pim-downlink*; it runs the
+                                                          managed tenant's engine apply as a child)
+        hybrid    pim_hybrid                    vmhost    pim_web + pim_engine + pim_updater + db_ddladmin (the VM
+                                                          runs the Manager AND the engine AND applies its own schema)
+      NEVER db_datareader / db_datawriter / db_owner. db_ddladmin only for the one identity that applies the schema.
+      -Component wins; else the user name is matched against the install's names (Get-PimSqlAccessInstallNameMap).
+      Returns { component; roles[] }.
+    #>
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$DbUserName = '',
+          [ValidateSet('', 'web', 'engine', 'updater', 'asbuilt', 'publish', 'downlink', 'hybrid', 'vmhost')][string]$Component = '',
+          [System.Collections.IDictionary]$NameMap)
+    $c = "$Component"
+    if (-not $c) {
+        if (-not $NameMap) { $NameMap = Get-PimSqlAccessInstallNameMap -NoRecord }
+        $n = "$DbUserName".Trim()
+        foreach ($role in $NameMap.Keys) {
+            if (@($NameMap[$role] | Where-Object { "$_" -and "$_" -ieq $n }).Count) { $c = "$role" -replace '^pim_', ''; break }
+        }
+        if (-not $c -and $n -match '^(?i)ca-pim-downlink') { $c = 'downlink' }
+        if (-not $c) { $c = 'engine' }
+    }
+    $roles = switch ($c) {
+        'web'      { @('pim_web') }
+        'updater'  { @('pim_updater', 'db_ddladmin') }
+        'asbuilt'  { @('pim_asbuilt') }
+        'publish'  { @('pim_publish') }
+        # the downlink job also runs the ENGINE APPLY of the managed tenant (Invoke-PimScenarioRun, a child of
+        # downlink-job-entry.ps1), so it needs the engine's role beside its own (pim_downlink covers only the entry script).
+        'downlink' { @('pim_downlink', 'pim_engine') }
+        'hybrid'   { @('pim_hybrid') }
+        'vmhost'   { @('pim_web', 'pim_engine', 'pim_updater', 'db_ddladmin') }
+        default    { @('pim_engine') }
+    }
+    return [pscustomobject]@{ component = $c; roles = @($roles) }
+}
+
+function Get-PimSqlAccessPrerequisiteSql {
+    <#
+      PURE. What must exist BEFORE the admin batches sign the procedure, so the signer gets CONTROL on it: the platform
+      schema (empty is fine -- the shipped schema fills it) and the demo tables (the web app has no DDL right in the
+      model, so a first demo Enable must find them; PIM 100.156 run-2 note (a)). Idempotent. Admin only.
+    #>
+    [CmdletBinding()] param()
+    $l = New-Object System.Collections.Generic.List[string]
+    [void]$l.Add("IF SCHEMA_ID(N'platform') IS NULL EXEC(N'CREATE SCHEMA [platform] AUTHORIZATION [dbo];');")
+    if (-not (Get-Command Get-PimDemoSchemaDdl -ErrorAction SilentlyContinue)) {
+        $demo = Join-Path $PSScriptRoot 'PIM-DemoData.ps1'
+        if (Test-Path -LiteralPath $demo) { . $demo }
+    }
+    if (Get-Command Get-PimDemoSchemaDdl -ErrorAction SilentlyContinue) {
+        foreach ($s in ((Get-PimDemoSchemaDdl) -split "`r?`n" | Where-Object { "$_".Trim() })) { [void]$l.Add("$s") }
+    } else {
+        [void]$l.Add("IF SCHEMA_ID(N'pimdemo') IS NULL EXEC(N'CREATE SCHEMA [pimdemo] AUTHORIZATION [dbo];');")
+    }
+    return @($l.ToArray())
+}
+
+function Get-PimSqlAccessSetupGateSql {
+    <#
+      READ-ONLY. One row: is the procedure there (hasProc), and how many of the RUNTIME users (-UserNames: the web app and the
+      engine of this install) hold a broad fixed role (broadUsers) -- the mark of an existing install never cut over. A
+      support / extra user with broad roles does not count (a new install may declare one).
+    #>
+    [CmdletBinding()] param([string[]]$UserNames = @())
+    $names = @($UserNames | Where-Object { "$_" -match '^[A-Za-z0-9][A-Za-z0-9 ._@-]{0,127}$' } | ForEach-Object { "N'" + "$_".Replace("'", "''") + "'" })
+    if (-not $names.Count) { $names = @("N''") }
+    return @"
+SELECT CASE WHEN OBJECT_ID(N'pim.usp_ApplyAccess') IS NULL THEN 0 ELSE 1 END AS hasProc,
+  (SELECT COUNT(*) FROM sys.database_role_members m
+     JOIN sys.database_principals r ON r.principal_id = m.role_principal_id
+     JOIN sys.database_principals u ON u.principal_id = m.member_principal_id
+    WHERE r.name IN (N'db_datareader', N'db_datawriter') AND u.name IN ($($names -join ', '))) AS broadUsers;
+"@
+}
+
+function Test-PimSqlAccessSetupGate {
+    <#
+      PURE (PIM 100.156 B, framework 12.23 P8). May SETUP run the admin half of the model on this database?
+        * the procedure is there already (a new install re-run, or an install the cut-over moved)  -> yes (idempotent)
+        * no contained user holds db_datareader / db_datawriter (a NEW install)                    -> yes
+        * otherwise: an EXISTING install that was never cut over                                   -> NO: it moves by the
+          scripted Support-app cut-over (the customer told beforehand, the owner's yes per batch), never as a side effect
+          of re-running a setup script. Nothing is changed; the install keeps its current model.
+      Returns { install; reason }.
+    #>
+    [CmdletBinding()] param([object]$Row)
+    if ($null -eq $Row) { return [pscustomobject]@{ install = $false; reason = 'the database could not be read -- the least-privilege model was NOT installed' } }
+    if ("$($Row.hasProc)" -eq '1') { return [pscustomobject]@{ install = $true; reason = 'the access procedure is installed -- converging (idempotent)' } }
+    if ([int]"$($Row.broadUsers)" -eq 0) { return [pscustomobject]@{ install = $true; reason = 'a new store (no user holds a broad role) -- installing the least-privilege model' } }
+    return [pscustomobject]@{ install = $false; reason = ("an EXISTING install that was never cut over ($($Row.broadUsers) user(s) still hold db_datareader / db_datawriter) -- " +
+                                                         'the model is NOT installed by setup; it moves by the Support-app cut-over (framework 12.23 P8). Nothing changed.') }
 }
 
 function Invoke-PimSqlAccessConverge {
@@ -471,6 +574,37 @@ function Invoke-PimSqlAccessConverge {
                               via = "$($st.via)"; runAs = $runAs; dbOwner = $dbOwner; visibleUsers = @($principals).Count }
 }
 
+function New-PimSqlAccessVerdict {
+    <#
+      PURE (§33.0 MORE TELEMETRY, field SqlAccess). The verdict the UPDATER records in UpdateState.sqlAccess after its access
+      converge, so the heartbeat only READS it (the tick needs no right on the signed procedure):
+        model                 least-privilege (the signed procedure is installed: run 1 happened) | broad (not installed)
+        run1                  $true when the model is installed (the converge applied, or applied with some statements refused)
+        run2                  $true when no RUNTIME user (web / engine) holds db_datareader / db_datawriter any more (the
+                              cut-over's second run, framework 12.23 P8); $false when one does; $null when the updater cannot
+                              see it (-BroadUsers $null: a least-privilege updater does not see the other users' roles)
+        updaterInAdminGroup   the converge ran as dbo / db_owner (the updater is still in the SQL admin group)
+        checkedUtc            when
+      -Converge: what Invoke-PimSqlAccessConverge returned; -ErrorText: what it threw instead. Anything else = $null (no verdict).
+    #>
+    [CmdletBinding()] param([AllowNull()][object]$Converge = $null, [AllowEmptyString()][string]$ErrorText = '', [AllowNull()][object]$BroadUsers = $null,
+                            [datetime]$NowUtc = [datetime]::UtcNow)
+    $model = $null; $admin = $null
+    if ($null -ne $Converge -and $Converge.PSObject.Properties['applied']) {
+        $model = if ([bool]$Converge.applied) { 'least-privilege' } else { 'broad' }
+        if ($Converge.PSObject.Properties['dbOwner']) { $admin = [bool]$Converge.dbOwner }
+        if ($Converge.PSObject.Properties['runAs'] -and "$($Converge.runAs)" -eq 'dbo') { $admin = $true }
+    } elseif ("$ErrorText" -match 'refused through the signed procedure') {
+        # the procedure IS installed and ran; some statements were refused (e.g. a schema the signer has no CONTROL on)
+        $model = 'least-privilege'
+        if ("$ErrorText" -match '\(as ([^)]+)\)') { $who = $Matches[1].Trim(); if ($who -and $who -ne '?') { $admin = ($who -eq 'dbo') } }
+    }
+    if (-not $model) { return $null }
+    $run2 = $null; $bn = 0
+    if ($null -ne $BroadUsers -and [int]::TryParse("$BroadUsers", [ref]$bn)) { $run2 = ($bn -eq 0) }
+    return [ordered]@{ model = $model; run1 = ($model -eq 'least-privilege'); run2 = $run2; updaterInAdminGroup = $admin; checkedUtc = $NowUtc.ToUniversalTime().ToString('o') }
+}
+
 function Test-PimSqlAccessInstalledState {
     <#
       PURE. Judge the read-back after an admin run: the procedure exists, is THIS version, is signed by a pim_access_signer
@@ -494,16 +628,27 @@ function Invoke-PimSqlAccessInstall {
       then ONE converge so every component user is in its role at once. ADDITIVE: no fixed-role membership is removed here
       (the broad roles go in the cut-over's SECOND run, after a green pipeline). Must run as an admin of the database.
       -Query / -Exec: scriptblocks (cs, sql) -- the caller's own connection (Support app, dbinit job, setup host).
+      -WithPrerequisites (setup, PIM 100.156 B): first the platform schema + the demo tables (Get-PimSqlAccessPrerequisiteSql),
+      so the signer gets CONTROL on every product schema and the web app never needs a DDL right. The cut-over omits it.
     #>
     [CmdletBinding()]
     param([string]$ConnectionString = '', [Parameter(Mandatory)][scriptblock]$Query, [Parameter(Mandatory)][scriptblock]$Exec,
-          [string]$UpdaterUserName = '', [string]$UpdaterAppId = '', [System.Collections.IDictionary]$NameMap)
+          [string]$UpdaterUserName = '', [string]$UpdaterAppId = '', [System.Collections.IDictionary]$NameMap, [switch]$WithPrerequisites,
+          # -SetupGate (setup, PIM 100.156 B): first Test-PimSqlAccessSetupGate -- an existing install never cut over is
+          # LEFT ALONE (returns { ok; skipped = $true; reason }), the cut-over owns it (framework 12.23 P8).
+          [switch]$SetupGate)
+    if ($SetupGate) {
+        $gm = if ($NameMap) { $NameMap } else { Get-PimSqlAccessInstallNameMap -NoRecord }
+        $g = Test-PimSqlAccessSetupGate -Row (@(& $Query $ConnectionString (Get-PimSqlAccessSetupGateSql -UserNames (@($gm['pim_web']) + @($gm['pim_engine']))))[0])
+        if (-not $g.install) { return [pscustomobject]@{ ok = $true; skipped = $true; reason = $g.reason; signer = ''; signerExpiry = $null; converge = $null } }
+    }
+    if ($WithPrerequisites) { foreach ($p in @(Get-PimSqlAccessPrerequisiteSql)) { & $Exec $ConnectionString $p } }
     foreach ($b in @(Get-PimSqlAccessAdminBatches -UpdaterUserName $UpdaterUserName -UpdaterAppId $UpdaterAppId)) { & $Exec $ConnectionString $b }
     $facts = (Get-PimSqlAccessState -ConnectionString $ConnectionString -Query $Query).facts
     $v = Test-PimSqlAccessInstalledState -Facts $facts
     if (-not $v.ok) { throw "the access model did not install: $($v.problems -join '; ')" }
     $conv = Invoke-PimSqlAccessConverge -ConnectionString $ConnectionString -Query $Query -Exec $Exec -NameMap $NameMap
-    return [pscustomobject]@{ ok = $true; signer = "$($facts.signer)"; signerExpiry = $facts.signerExpiry; converge = $conv }
+    return [pscustomobject]@{ ok = $true; skipped = $false; reason = ''; signer = "$($facts.signer)"; signerExpiry = $facts.signerExpiry; converge = $conv }
 }
 
 function Get-PimSqlAccessState {

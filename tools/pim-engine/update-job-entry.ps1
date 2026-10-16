@@ -1,4 +1,4 @@
-﻿#Requires -Version 7.0
+#Requires -Version 7.0
 <#
 .SYNOPSIS
     §53 -- the in-container entry point of the nightly PIM update job (`ca-pim-update`).
@@ -260,6 +260,7 @@ $script:PimTelemetrySent    = $false
 $script:PimRingApproved       = ''
 $script:PimRingApprovedReason = ''
 $script:PimRunningVersion     = ''
+$script:PimSqlAccessVerdict   = $null   # §33.0 SqlAccess: set by the access converge (schema step); $null = carry the last one
 function Send-PimUpdateOutcome {
     param(
         [ValidateSet('none','built','rolled','schema','failed')][string]$Action = 'none',
@@ -329,7 +330,7 @@ function Send-PimUpdateOutcome {
                         -RunningVersion $script:PimRunningVersion `
                         -LastBuiltVersion "$($env:PIM_UPDATE_LAST_BUILT)" -TargetVersion $ToVersion `
                         -Action $Action -Outcome $Outcome -ErrorText $ErrorText -Previous $prev `
-                        -Source "$($env:PIM_UPDATE_SOURCE)" -WaitingSinceUtc $WaitingSinceUtc `
+                        -Source "$($env:PIM_UPDATE_SOURCE)" -WaitingSinceUtc $WaitingSinceUtc -SqlAccess $script:PimSqlAccessVerdict `
                         -DurationSeconds ([int]([datetime]::UtcNow - $script:PimUpdateStartedUtc).TotalSeconds)
         $saved = Save-PimUpdateState -ConnectionString $csState -Record $stateRec
         if ($saved.ok) { Say "update state: recorded ring '$($stateRec.ring)' / $Outcome in pim.Settings" 'DarkGray' }
@@ -895,7 +896,21 @@ try {
             $accWho = "as $(if ("$($acc.runAs)") { "$($acc.runAs)" } else { '?' }) (db_owner: $(if ($acc.dbOwner) { 'yes' } else { 'no' }); state via $($acc.via))"
             if ($acc.applied) { Say "  database access converged $accWho`: $($acc.statements) statement(s) through the signed procedure; revoked $($acc.revoked); users $(@($acc.users) -join ', ') ($($acc.visibleUsers) visible)" 'DarkGray' }
             else { Say "  database access $accWho`: $($acc.reason)" 'DarkGray' }
-        } catch { Say "  database access NOT converged (the update continues; the broad roles still apply): $($_.Exception.Message)" 'Yellow' }
+            # §33.0 MORE TELEMETRY (SqlAccess): the verdict goes into UpdateState, so the heartbeat only reads it. run 2 (the
+            # runtime users lost their broad roles) is visible only to an updater that is still db_owner -- else unknown.
+            try {
+                $accBroad = $null
+                if ($acc.dbOwner -and (Get-Command Get-PimSqlAccessSetupGateSql -ErrorAction SilentlyContinue)) {
+                    $accNm = Get-PimSqlAccessInstallNameMap
+                    $accRow = @(Invoke-PimSqlQuery -ConnectionString $csUpd -Sql (Get-PimSqlAccessSetupGateSql -UserNames (@($accNm['pim_web']) + @($accNm['pim_engine']))))[0]
+                    if ($accRow) { $accBroad = $accRow.broadUsers }
+                }
+                $script:PimSqlAccessVerdict = New-PimSqlAccessVerdict -Converge $acc -BroadUsers $accBroad
+            } catch { Say "  database access verdict not recorded (telemetry only; the update is unaffected): $($_.Exception.Message)" 'DarkGray' }
+        } catch {
+            Say "  database access NOT converged (the update continues; the broad roles still apply): $($_.Exception.Message)" 'Yellow'
+            try { $script:PimSqlAccessVerdict = New-PimSqlAccessVerdict -ErrorText "$($_.Exception.Message)" } catch { Say "  database access verdict not recorded (telemetry only): $($_.Exception.Message)" 'DarkGray' }
+        }
     }
 } catch {
     $schemaOk = $false

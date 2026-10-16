@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.643 -- 2026-10-16
+
+- A Community install never asks Invardia for a Pro licence; new installs get the least-privilege SQL model from setup; 12 more telemetry counts (activations, pending approvals, standing privileged access, expiring, drift, convergence)
+
 ## 2.4.642 -- 2026-10-16
 
 - Uplink refusals now name what Invardia refused (record, job, status, reason); the updater grants the as-built reader only through the signed procedure and its log names who converged database access

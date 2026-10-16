@@ -131,10 +131,12 @@ param(
     [string]$SqlDatabase = 'PimPlatform',
     # §71.10 (2026-09-15) -- NO SECRET: when no engine SPN secret is supplied the engine runs as the job's
     # own SYSTEM identity (ca-pim-tick's shape). This deploy grants it the engine's Graph app-role set and
-    # makes it a member of the SQL admin group. -SkipGraphGrant / -SkipSqlAdminGroup are the deliberate
-    # escape hatches for an identity whose rights are managed elsewhere.
+    # its own least-privilege database user (PIM 100.156 B: NOT the SQL admin group any more, framework 12.23 P5).
+    # -SkipGraphGrant / -SkipSqlAdminGroup are the deliberate escape hatches for an identity whose rights are managed
+    # elsewhere; -JoinSqlAdminGroup restores the old membership (not used by any setup path).
     [string]$SqlAdminGroupName = 'grp-pim-sql-admins',
     [switch]$SkipSqlAdminGroup,
+    [switch]$JoinSqlAdminGroup,
     [switch]$SkipGraphGrant,
     # 71.14: the explicit, default-OFF retraction opt-in. Sets PIM_DOWNLINK_ALLOW_RETRACTION=true on the job, so a
     # pull REMOVES rows that no longer reach this tenant (still within the removal budget). Omitted = report-only.
@@ -732,7 +734,11 @@ if (-not $WhatIfPreference -and $engineSystemMi) {
         Grant-PimMiGraph -MiObjectId $jobOid -SubscriptionId $SubscriptionId -ExpectedTenantId $tidForGrant -RoleSet Engine
         Note "Graph app-roles ensured for $JobName"
     }
-    if (-not $SkipSqlAdminGroup -and "$SqlServerFqdn".Trim()) {
+    # PIM 100.156 B (framework 12.23 P5): the downlink job is NOT made a member of the SQL admin group any more -- it reaches
+    # the store as its own contained user in its catalog roles (pim_downlink + pim_engine; the grant step below). The block
+    # below runs only for an explicit -JoinSqlAdminGroup (none of the setup paths pass it).
+    if ("$SqlServerFqdn".Trim() -and -not $JoinSqlAdminGroup) { Note "SQL admin group '$SqlAdminGroupName': $JobName is not a member -- it gets its own least-privilege database user (framework 12.23 P5)" }
+    if ($JoinSqlAdminGroup -and -not $SkipSqlAdminGroup -and "$SqlServerFqdn".Trim()) {
         Step "SQL admin group '$SqlAdminGroupName' -- $JobName's system identity"
         try {
             . (Join-Path $here '_PimSqlAdminGroup.ps1')

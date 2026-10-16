@@ -14,12 +14,15 @@
     database -- the unattended updater's schema step, the Invardia Support app -- needed a
     contained user created by that one principal, and an environment whose admin was a secret-only app
     could not be fixed unattended at all (EFIF/RIDE, UPD-15). The admin is therefore a SECURITY GROUP,
-    default 'grp-pim-sql-admins', whose members are:
-      * the environment's user-assigned identity  id-pim-<token>
-      * the updater job's system-assigned identity (ca-pim-update)
+    default 'grp-pim-sql-admins'. FRAMEWORK 12.23 P5 (PIM 100.156 B, 2026-10-16): its STANDING member is the Invardia
+    Support app ONLY (by appId or object id: -SupportAppId / -SupportObjectId), when given. For the length of an install:
+      * the setup identity (the signed-in person or the SQL admin application) -- released again at the end of the
+        install (Invoke-PimSqlAdminGroupSetupRelease)
       * the in-VNet SQL identity id-pim-sql-<token> on private SQL, so the in-cloud bootstrap still works
-      * the Invardia Support app (by appId or object id: -SupportAppId / -SupportObjectId), when given
       * the previous admin, so converging never takes access away from whoever had it
+    NOT members any more: the environment's user-assigned identity id-pim-<token> (it only pulls the image; added only
+    when named explicitly) and -- once the as-built GRANT runs through the signed procedure on a real update -- the
+    updater (Get-PimSqlAdminGroupKeepsUpdater, the ONE switch below; still $true until then).
     Contained users that exist keep working; nothing here drops one.
 
   GRAPH / ARM FACTS THIS HANDLES, EACH MEASURED LIVE ON EFIF + RIDE 2026-09-15
@@ -69,6 +72,19 @@ $script:PimSqlApi  = '2021-11-01'
 $script:PimMiApi   = '2023-01-31'
 $script:PimJobApi  = '2024-03-01'
 $script:PimGraphBase = 'https://graph.microsoft.com/v1.0'
+
+function Get-PimSqlAdminGroupKeepsUpdater {
+    <#
+      THE ONE SWITCH (PIM 100.156 B): does the updater's identity stay a member of the SQL admin group on a NEW install?
+      $true UNTIL the lane "updater out of the SQL admin group" lands (owner wizard 2026-10-16 (b): the as-built reader's
+      GRANT through the signed procedure first, proven on a real update on rings 0 + 1). The updater also gets its own
+      contained user (pim_updater + db_ddladmin, Deploy-PimUpdateJob) either way, so flipping this to $false is the whole
+      change for new installs. Every caller (the prerequisites, Deploy-PimUpdateJob, Initialize-PimSqlAdminGroup) asks here.
+      A literal in a FUNCTION, never a $script: variable (the child-scope trap: a $script: value is $null in a dot-sourcing
+      caller's scope).
+    #>
+    return $true
+}
 
 function Test-PimSqlAdminGuid {
     param([AllowEmptyString()][AllowNull()][string]$Value)
@@ -491,9 +507,10 @@ function Invoke-PimSqlAdminGroupStep {
     <#
       Resolve WHO belongs in the group for one environment, then Invoke-PimSqlAdminGroup. Used by the
       script and by both deploy scripts, so the member list cannot differ between them.
-        environment identity : -EnvironmentIdentityName, else the one id-pim-* (not id-pim-sql-*) in the group
+        environment identity : ONLY when -EnvironmentIdentityName names it (PIM 100.156 B / framework 12.23 P5: not discovered)
         SQL identity         : -SqlAdminIdentityName, else the one id-pim-sql-* in the group (private SQL)
-        updater identity     : -UpdateJobName's system-assigned identity, when the job exists
+        updater identity     : -UpdateJobName's system-assigned identity, when the job exists AND
+                               Get-PimSqlAdminGroupKeepsUpdater (the one switch) says so
         Invardia Support app : -SupportAppId / -SupportObjectId (old names -TroubleshootingAppId / -TroubleshootingObjectId still bind)
         extras               : -ExtraMembers @{ objectId; label } and -ExtraMemberObjectIds
       -NoDiscovery skips the two identity look-ups (a caller that knows exactly whom to add).
@@ -547,10 +564,15 @@ function Invoke-PimSqlAdminGroupStep {
             if (-not $pid0) { [void]$resolveProblems.Add("$What '$($hit[0].name)' has no principalId"); return }
             [void]$members.Add([pscustomobject]@{ objectId = $pid0; label = "$What $($hit[0].name)" })
         }
-        & $pick $EnvironmentIdentityName '^(?i)id-pim-' '^(?i)id-pim-sql-' 'environment identity'
+        # PIM 100.156 B (framework 12.23 P5): the environment identity id-pim-<token> only pulls the image -- it is no
+        # longer discovered (re-adding it would undo the cut-over that took it out). Named explicitly, it is still added.
+        if ("$EnvironmentIdentityName".Trim()) { & $pick $EnvironmentIdentityName '^(?i)id-pim-' '^(?i)id-pim-sql-' 'environment identity' }
+        else { [void]$resolveNotes.Add('the environment identity id-pim-<token> is not a member (it only pulls the image; framework 12.23 P5)') }
         & $pick $SqlAdminIdentityName '^(?i)id-pim-sql-' '' 'SQL identity'
     }
-    if ("$UpdateJobName".Trim()) {
+    if ("$UpdateJobName".Trim() -and -not (Get-PimSqlAdminGroupKeepsUpdater)) {
+        [void]$resolveNotes.Add("$("$UpdateJobName".Trim()) is not a member: the updater reaches the store as its own contained user (pim_updater + db_ddladmin; framework 12.23 P5)")
+    } elseif ("$UpdateJobName".Trim()) {
         try {
             $job = & $Arm -Method GET -Path "$rgPath/providers/Microsoft.App/jobs/$("$UpdateJobName".Trim())?api-version=$($script:PimJobApi)"
             $jp = "$($job.identity.principalId)".Trim()
@@ -629,6 +651,65 @@ function Remove-PimSqlAdminGroupMember {
         $m = "$($_.Exception.Message)"
         if (Test-PimSqlAdminPermissionError $m) { $m += ' -- removing a member needs GroupMember.ReadWrite.All (and, on a ROLE-ASSIGNABLE group, RoleManagement.ReadWrite.Directory)' }
         $out.problem = "remove $Label ($oid) from '$GroupName': $m"
+    }
+    return [pscustomobject]$out
+}
+
+function Get-PimSqlAdminGroupSetupReleasePlan {
+    <#
+      PURE (PIM 100.156 B, framework 12.23 P5). May the setup identity leave the SQL admin group now?
+        -MemberObjectId : the setup identity (the signed-in person, or the SQL admin application's service principal)
+        -CurrentAdmin   : the server's Entra admin { sid; login } ($null = none / unreadable)
+        -GroupId        : the SQL admin group's object id ('' = no group)
+      release = $true only when the group IS the server's admin (else membership grants nothing to take back) and the setup
+      identity is NOT the admin itself (taking that away would leave the server without an administrator).
+      Returns { release; reason }.
+    #>
+    param([AllowEmptyString()][string]$MemberObjectId, [object]$CurrentAdmin, [AllowEmptyString()][string]$GroupId)
+    $oid = "$MemberObjectId".Trim()
+    if (-not (Test-PimSqlAdminGuid $oid)) { return [pscustomobject]@{ release = $false; reason = 'no setup identity object id -- nothing to release' } }
+    $sid = if ($CurrentAdmin) { "$($CurrentAdmin.sid)".Trim() } else { '' }
+    if ($sid -and $sid -ieq $oid) { return [pscustomobject]@{ release = $false; reason = 'the setup identity IS the SQL server''s Entra admin (the SQL admin group could not be made the admin) -- it is not removed; a Privileged Role Administrator converges the server onto the group (Initialize-PimSqlAdminGroup.ps1)' } }
+    if (-not "$GroupId".Trim()) { return [pscustomobject]@{ release = $false; reason = 'there is no SQL admin group -- nothing to release' } }
+    if (-not $sid -or $sid -ine "$GroupId".Trim()) { return [pscustomobject]@{ release = $false; reason = 'the SQL admin group is not the server''s Entra admin -- membership grants nothing, nothing to release' } }
+    return [pscustomobject]@{ release = $true; reason = 'the setup identity leaves the SQL admin group (framework 12.23 P5: setup identities only for the length of an install)' }
+}
+
+function Invoke-PimSqlAdminGroupSetupRelease {
+    <#
+      PIM 100.156 B (framework 12.23 P5): at the END of an install, take the setup identity out of the SQL admin group again
+      and read it back -- the standing member is the Invardia Support app only. Never throws; a Graph refusal (a role-
+      assignable group needs RoleManagement.ReadWrite.Directory) leaves it a member and says so with the command to run.
+      Returns { ok; released; skipped; reason }.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Graph, [Parameter(Mandatory)][scriptblock]$Arm, [Parameter(Mandatory)][string]$SubscriptionId,
+          [Parameter(Mandatory)][string]$SqlResourceGroup, [Parameter(Mandatory)][string]$SqlServerName, [AllowEmptyString()][string]$MemberObjectId,
+          [string]$GroupName = 'grp-pim-sql-admins', [string]$Label = 'the setup identity',
+          [int]$PollSeconds = 5, [int]$PollCount = 24, [scriptblock]$Sleep = { param([int]$Seconds) Start-Sleep -Seconds $Seconds })
+    $out = [ordered]@{ ok = $true; released = $false; skipped = $true; reason = '' }
+    try {
+        $srvPath = "/subscriptions/$SubscriptionId/resourceGroups/$SqlResourceGroup/providers/Microsoft.Sql/servers/$SqlServerName"
+        $adm = $null
+        try { $adm = @((& $Arm -Method GET -Path "$srvPath/administrators?api-version=$($script:PimSqlApi)").value | Where-Object { $_ }) | Select-Object -First 1 } catch { $adm = $null }
+        $cur = if ($adm) { [pscustomobject]@{ sid = "$($adm.properties.sid)"; login = "$($adm.properties.login)" } } else { $null }
+        $flt = [uri]::EscapeDataString("displayName eq '$($GroupName.Replace("'", "''"))'")
+        $grp = @((& $Graph -Method GET -Path ('/groups?$filter=' + $flt + '&$select=id,displayName')).value | Where-Object { $_ }) | Select-Object -First 1
+        $plan = Get-PimSqlAdminGroupSetupReleasePlan -MemberObjectId $MemberObjectId -CurrentAdmin $cur -GroupId $(if ($grp) { "$($grp.id)" } else { '' })
+        $out.reason = $plan.reason
+        if (-not $plan.release) { return [pscustomobject]$out }
+        $out.skipped = $false
+        $rm = Remove-PimSqlAdminGroupMember -Graph $Graph -MemberObjectId $MemberObjectId -GroupObjectId "$($grp.id)" -GroupName $GroupName -Label $Label `
+                 -PollSeconds $PollSeconds -PollCount $PollCount -Sleep $Sleep
+        if ($rm.ok) {
+            $out.released = [bool]$rm.removed
+            $out.reason = $(if ($rm.removed) { "$Label left '$GroupName' (read back)" } else { "$Label was not a member of '$GroupName' -- nothing to release" })
+        } else {
+            $out.ok = $false
+            $out.reason = "$($rm.problem) -- $Label is STILL a member of '$GroupName'. A Privileged Role Administrator removes it (Entra admin center > Groups > $GroupName > Members)."
+        }
+    } catch {
+        $out.ok = $false; $out.skipped = $false
+        $out.reason = "the setup identity's SQL admin group membership could not be checked: $($_.Exception.Message)"
     }
     return [pscustomobject]$out
 }

@@ -1023,19 +1023,30 @@ function Merge-PimDbInitPrincipals {
       that are there. Same name + same appId = unchanged; same name + a different appId = replaced (the
       identity was rebuilt). Always returns an ARRAY shape (a one-element array collapses to an object in
       ConvertTo-Json, and the job then reads it as a set of properties).
+      PIM 100.156 B: each principal's 'roles' (its component's pim_* role) are KEPT for the ones already there, and -Roles
+      is set on the one merged in (a different role list counts as a change).
     #>
-    param([AllowEmptyString()][string]$Json, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$AppId)
+    param([AllowEmptyString()][string]$Json, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$AppId, [string[]]$Roles = @())
     $list = New-Object System.Collections.Generic.List[object]
     if ("$Json".Trim()) {
         $parsed = $null
         try { $parsed = ("$Json" | ConvertFrom-Json) } catch { throw "Merge-PimDbInitPrincipals: PIM_DBINIT_PRINCIPALS is not valid JSON -- refusing to overwrite it: $($_.Exception.Message)" }
-        foreach ($p in @($parsed)) { if ($p -and "$($p.name)".Trim()) { [void]$list.Add([ordered]@{ name = "$($p.name)"; appId = "$($p.appId)" }) } }
+        foreach ($p in @($parsed)) {
+            if ($p -and "$($p.name)".Trim()) {
+                $e = [ordered]@{ name = "$($p.name)"; appId = "$($p.appId)" }
+                $pr = @($p.roles | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
+                if ($pr.Count) { $e['roles'] = $pr }
+                [void]$list.Add($e)
+            }
+        }
     }
+    $want = @($Roles | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
     $changed = $true
     $hit = @($list | Where-Object { "$($_.name)" -ieq $Name })
-    if ($hit.Count -and "$($hit[0].appId)" -ieq $AppId) { $changed = $false }
-    elseif ($hit.Count) { $hit[0].appId = $AppId }
-    else { [void]$list.Add([ordered]@{ name = $Name; appId = $AppId }) }
+    $sameRoles = { param($e) $have = @(if ($e.Contains('roles')) { $e['roles'] }); (@($have | Sort-Object) -join ',') -eq (@($want | Sort-Object) -join ',') }
+    if ($hit.Count -and "$($hit[0].appId)" -ieq $AppId -and (-not $want.Count -or (& $sameRoles $hit[0]))) { $changed = $false }
+    elseif ($hit.Count) { $hit[0].appId = $AppId; if ($want.Count) { $hit[0]['roles'] = $want } }
+    else { $e = [ordered]@{ name = $Name; appId = $AppId }; if ($want.Count) { $e['roles'] = $want }; [void]$list.Add($e) }
     $out = ConvertTo-Json -Compress -Depth 5 -InputObject @($list.ToArray())
     if ($out -notmatch '^\s*\[') { $out = "[$out]" }
     return [pscustomobject]@{ json = $out; changed = $changed }

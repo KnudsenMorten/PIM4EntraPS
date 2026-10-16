@@ -182,7 +182,10 @@ function Compare-PimEnvReportNamedSet {
         if (-not $name) { continue }
         [void]$declSet.Add($name)
         $req = Get-PimEnvReportField $d 'required'; $req = if ($null -eq $req) { $true } else { [bool]$req }
-        $st = if (-not $Readable) { 'not readable' } elseif ($heldSet.Contains($name)) { 'expected' } else { 'missing' }
+        # PIM 100.156 B: a declared row may name 'coveredBy' -- held names that satisfy it too (the SQL role pim_engine is
+        # covered by the broad db_datareader of an install the least-privilege cut-over has not reached yet).
+        $cov = @(Get-PimEnvReportField $d 'coveredBy' | Where-Object { "$_" })
+        $st = if (-not $Readable) { 'not readable' } elseif ($heldSet.Contains($name) -or @($cov | Where-Object { $heldSet.Contains("$_") }).Count) { 'expected' } else { 'missing' }
         $rows.Add([pscustomobject][ordered]@{ area = $Area; permission = $name; scope = $Scope; status = $st; required = $req
             why = "$(Get-PimEnvReportField $d 'why')"; forbidden = $false; reason = $(if (-not $Readable) { $Reason } else { '' }) })
     }
@@ -641,7 +644,7 @@ function Get-PimEnvironmentReport {
     try {
         $f = [uri]::EscapeDataString("displayName eq '$($sqlGrpName.Replace("'", "''"))'")
         $gr = @(Get-PimEnvReportField (& $g "/groups?`$filter=$f&`$select=id,displayName,securityEnabled") 'value') | Select-Object -First 1
-        if ($gr) { [void](& $addId 'sql-admin-group' 'Group (SQL admin group)' "$($gr.displayName)" "$($gr.id)" '' 'Members administer PIM''s SQL database (the deploy, the in-cloud bootstrap, the engine and the Manager identities); never people for daily work' 'Microsoft Graph' $null) }
+        if ($gr) { [void](& $addId 'sql-admin-group' 'Group (SQL admin group)' "$($gr.displayName)" "$($gr.id)" '' 'Members administer PIM''s SQL database: the Invardia Support app as the only standing member (framework 12.23 P5), a setup identity only for the length of an install; the engine and the Manager use their own least-privilege database users, never this group; never people for daily work' 'Microsoft Graph' $null) }
         & $note 'identities' 'SQL admin group (Microsoft Graph)' $true ''
     } catch { & $note 'identities' 'SQL admin group (Microsoft Graph)' $false (ConvertTo-PimEnvReportReason $_) }
     if ($sqlAdmin -and "$($sqlAdmin.sid)") {

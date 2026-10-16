@@ -57,10 +57,10 @@
         { "role": "Key Vault Secrets User", "scope": "keyVault", "required": false, "why": "Reads the SMTP relay password (SMTP relay mail mode only)" }
       ],
       "sql": [
-        { "role": "db_datareader", "required": true, "why": "Reads the configuration store" },
-        { "role": "db_datawriter", "required": true, "why": "Records runs, the change queue and the journal" },
-        { "role": "db_ddladmin", "required": true, "why": "Creates a store table on first use (until the least-privilege second run moves this to the updater)" },
-        { "role": "pim_engine", "required": false, "why": "Least-privilege engine role (framework 12.23): read + write its own store, read the tenant registry; granted through the signed access procedure" }
+        { "role": "pim_engine", "required": true, "coveredBy": [ "db_datareader" ], "why": "Least-privilege engine role (framework 12.23): read + write its own store, read the tenant registry; granted through the signed access procedure. A new install gets this role only; an install the security cut-over has not reached yet still reads and writes through db_datareader + db_datawriter" },
+        { "role": "db_datareader", "required": false, "why": "Before the least-privilege cut-over only: reads the configuration store (the cut-over's second run removes it; a new install never has it)" },
+        { "role": "db_datawriter", "required": false, "why": "Before the least-privilege cut-over only: records runs, the change queue and the journal (removed by the second run; a new install never has it)" },
+        { "role": "db_ddladmin", "required": false, "why": "No longer needed: the engine makes no schema change at run time (the updater applies the schema); removed by the second run, never given to a new install" }
       ],
       "sqlForbidden": [ "db_owner" ],
       "exchange": [ { "role": "Application Mail.Send", "scope": "the sender mailbox (management scope)", "required": false, "when": "sharedMailbox", "why": "Sends TAP codes, reminders and alerts as the one sender mailbox" } ]
@@ -96,10 +96,10 @@
         { "role": "Key Vault Secrets User", "scope": "keyVault", "required": false, "why": "Reads the emergency passphrase hash and the SMTP relay password (when configured)" }
       ],
       "sql": [
-        { "role": "db_datareader", "required": true, "why": "Reads the configuration store" },
-        { "role": "db_datawriter", "required": true, "why": "Stages changes, settings and the audit trail" },
-        { "role": "db_ddladmin", "required": false, "why": "No longer needed from 2.4.631: the updater applies the schema and the Manager starts without it; removed at the security cut-over (framework 12.11f CR8)" },
-        { "role": "pim_web", "required": false, "why": "Least-privilege web role (framework 12.23): its store, read the tenant registry, register managed tenants; no schema right; granted through the signed access procedure" }
+        { "role": "pim_web", "required": true, "coveredBy": [ "db_datareader" ], "why": "Least-privilege web role (framework 12.23): its store, read the tenant registry, register managed tenants; no schema right; granted through the signed access procedure. A new install gets this role only; an install the security cut-over has not reached yet still works through db_datareader + db_datawriter" },
+        { "role": "db_datareader", "required": false, "why": "Before the least-privilege cut-over only: reads the configuration store (removed by the second run; a new install never has it)" },
+        { "role": "db_datawriter", "required": false, "why": "Before the least-privilege cut-over only: stages changes, settings and the audit trail (removed by the second run; a new install never has it)" },
+        { "role": "db_ddladmin", "required": false, "why": "No longer needed from 2.4.631: the updater applies the schema and the Manager starts without it; removed at the security cut-over (framework 12.11f CR8), never given to a new install" }
       ],
       "sqlForbidden": [ "db_owner" ],
       "exchange": [ { "role": "Application Mail.Send", "scope": "the sender mailbox (management scope)", "required": false, "when": "sharedMailbox", "why": "Sends the test mail and approval mails as the one sender mailbox" } ]
@@ -116,10 +116,10 @@
         { "role": "AcrPull", "scope": "registry", "required": false, "coveredBy": [ "Contributor", "Owner" ], "why": "Reads the registry it builds into" }
       ],
       "sql": [
-        { "role": "db_datareader", "required": false, "why": "Records the update state" },
-        { "role": "db_datawriter", "required": false, "why": "Records the update state" },
-        { "role": "db_ddladmin", "required": false, "why": "Applies the store schema before every roll (framework 12.23 P4: the updater's DDL is the one schema right a runtime identity keeps)" },
-        { "role": "pim_updater", "required": false, "why": "May EXECUTE the signed access procedure -- the only way it changes database access; it holds no security right of its own (framework 12.23 P4 / P9)" }
+        { "role": "db_ddladmin", "required": false, "why": "Applies the store schema before every roll (framework 12.23 P4: the updater's DDL is the one schema right a runtime identity keeps). Its own contained user; not needed while the updater is still a member of the SQL admin group" },
+        { "role": "pim_updater", "required": false, "why": "Reads and writes the store's update state, and may EXECUTE the signed access procedure -- the only way it changes database access; it holds no security right of its own (framework 12.23 P4 / P9)" },
+        { "role": "db_datareader", "required": false, "why": "Before the least-privilege cut-over only (an older setup gave it); a new install gives the updater pim_updater + db_ddladmin and nothing else" },
+        { "role": "db_datawriter", "required": false, "why": "Before the least-privilege cut-over only (an older setup gave it); a new install gives the updater pim_updater + db_ddladmin and nothing else" }
       ],
       "sqlForbidden": [ "db_owner" ]
     },
@@ -127,9 +127,9 @@
       "role": "support",
       "label": "Invardia Support app (application)",
       "declared": false,
-      "purpose": "Invardia's support and setup application, created at the customer's request. Its Graph grants are set by Invardia; its store access is read-only.",
-      "sql": [ { "role": "db_datareader", "required": false, "why": "Reads the store when the customer asks for support" },
-               { "role": "db_owner", "required": false, "why": "Standing database access the customer grants the Support app (PIM 100.116, framework 4.1b): setup, repair and the audited security cut-overs; ends with Grant-PimSupportAccess -Remove or by switching the app off" } ],
+      "purpose": "Invardia's support and setup application, created at the customer's request. Its Graph grants are set by Invardia. It is the SQL admin group's only standing member (framework 12.23 P5) -- setup, repair and the audited security cut-overs -- and has its own database user in the database owner role; both end when the customer switches the app off.",
+      "sql": [ { "role": "db_owner", "required": false, "why": "Standing database access the customer grants the Support app (PIM 100.116, framework 4.1b): setup, repair and the audited security cut-overs; ends with Grant-PimSupportAccess -Remove or by switching the app off" },
+               { "role": "db_datareader", "required": false, "why": "The 'troubleshoot' access level's read access to the store (also covered by the database owner role)" } ],
       "sqlForbidden": []
     },
     {

@@ -40,6 +40,9 @@ Step 'start'
 . (Join-Path $solRoot 'engine/_shared/PIM-Rest.ps1')
 . (Join-Path $solRoot 'engine/_shared/PIM-SqlStore.ps1')
 . (Join-Path $solRoot 'engine/_shared/PIM-SqlBootstrap.ps1')
+# PIM 100.156 B: the access catalog decides each principal's roles (Get-PimSqlComponentAccess) -- loaded BEFORE the plan.
+. (Join-Path $solRoot 'engine/_shared/PIM-InstallNames.ps1')
+. (Join-Path $solRoot 'engine/_shared/PIM-SqlAccess.ps1')
 
 $sqlServer = "$($env:PIM_SqlServer)".Trim()
 $sqlDb     = "$($env:PIM_SqlDatabase)".Trim(); if (-not $sqlDb) { $sqlDb = 'PimPlatform' }
@@ -185,7 +188,13 @@ try {
         if ("$($got.sid)" -ine $u.sid) { Say "WRONG SID for $($u.name): $($got.sid), expected $($u.sid)" 'Red'; $failed++; continue }
         $want = (@($u.roles) | Sort-Object) -join ','
         $have = (@("$($got.roles)".Split(',') | Where-Object { "$_".Trim() }) | Sort-Object) -join ','
-        if ($want -ne $have) { Say "WRONG ROLES for $($u.name): '$have', expected '$want'" 'Red'; $failed++; continue }
+        # PIM 100.156 B: EVERY wanted role must be held; an EXTRA one is reported, never a failure -- this job only adds,
+        # and an existing install still carries the broad roles until the cut-over's second run takes them away.
+        $heldR = @("$($got.roles)".Split(',') | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+        $miss = @(@($u.roles) | Where-Object { $heldR -notcontains "$_" })
+        if ($miss.Count) { Say "WRONG ROLES for $($u.name): '$have', expected '$want' (missing $($miss -join ', '))" 'Red'; $failed++; continue }
+        $extra = @($heldR | Where-Object { @($u.roles) -notcontains "$_" })
+        if ($extra.Count) { Say "  $($u.name) also holds $($extra -join ', ') (left as it is -- this job never takes a role away)" 'Yellow' }
         Say "verified $($u.name) -> $($got.sid) [$have]" 'Green'
     }
 
@@ -248,23 +257,26 @@ try {
     # ---- LEAST-PRIVILEGE ACCESS (framework §12.23 P4/P9, PIM 100.156) ------------------------------
     # The ADMIN half of the access model, from inside, as the server's Entra admin: the signed procedure, its 2099
     # in-database certificate (private key removed), pim_updater + EXECUTE, the updater's own DDL user, then one
-    # converge. ADDITIVE (no fixed role is taken away here). Opt-in until the setup ships the model:
-    # PIM_DBINIT_SQL_ACCESS = '{"updaterUserName":"ca-pim-update","updaterAppId":"<client id>"}'. After this, every
-    # update is applied by the updater alone -- nothing routine needs the admin group again.
+    # converge. ADDITIVE (no fixed role is taken away here). SETUP TURNS IT ON for every new private-SQL install (PIM
+    # 100.156 B: Setup-PimContainers / Deploy-PimUpdateJob stamp it on this job); unset = off, as before:
+    # PIM_DBINIT_SQL_ACCESS = '{"updaterUserName":"ca-pim-update","updaterAppId":"<client id>"}' (both optional). The
+    # prerequisites (platform schema + demo tables) come first, so the signer controls every product schema and the web
+    # app never needs DDL. After this, every update is applied by the updater alone -- nothing routine needs the admin group.
     if (-not $failed -and "$($env:PIM_DBINIT_SQL_ACCESS)".Trim()) {
         Step 'least-privilege access'
         try {
-            . (Join-Path $solRoot 'engine/_shared/PIM-InstallNames.ps1')
-            . (Join-Path $solRoot 'engine/_shared/PIM-SqlAccess.ps1')
             $sa = "$($env:PIM_DBINIT_SQL_ACCESS)".Trim() | ConvertFrom-Json
             $q = { param($csx, $sql) $c2 = $conn.CreateCommand(); $c2.CommandText = $sql; $c2.CommandTimeout = 120
                    $rd = $c2.ExecuteReader(); $rows = New-Object System.Collections.Generic.List[object]
                    while ($rd.Read()) { $o = [ordered]@{}; for ($i = 0; $i -lt $rd.FieldCount; $i++) { $o[$rd.GetName($i)] = $(if ($rd.IsDBNull($i)) { $null } else { $rd.GetValue($i) }) }; $rows.Add([pscustomobject]$o) }
                    $rd.Close(); $rows.ToArray() }
             $x = { param($csx, $sql) $c2 = $conn.CreateCommand(); $c2.CommandText = $sql; $c2.CommandTimeout = 120; [void]$c2.ExecuteNonQuery() }
-            $ar = Invoke-PimSqlAccessInstall -Query $q -Exec $x -UpdaterUserName "$($sa.updaterUserName)" -UpdaterAppId "$($sa.updaterAppId)"
+            $ar = Invoke-PimSqlAccessInstall -Query $q -Exec $x -UpdaterUserName "$($sa.updaterUserName)" -UpdaterAppId "$($sa.updaterAppId)" -WithPrerequisites -SetupGate:("$($sa.mode)" -eq 'setup')
+            if ($ar.skipped) { Say "least-privilege access NOT installed: $($ar.reason)" 'Yellow' }
+            else {
             Say ("access model installed: signer $($ar.signer) (expires $($ar.signerExpiry)), " +
                  "$($ar.converge.statements) statement(s) converged; users $(@($ar.converge.users) -join ', ')") 'Green'
+            }
         } catch {
             Say "FAILED least-privilege access: $($_.Exception.Message)" 'Red'; $failed++
         }

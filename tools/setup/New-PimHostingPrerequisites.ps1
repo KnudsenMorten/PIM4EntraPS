@@ -652,10 +652,11 @@ if ($SkipSql) {
             catch { throw ("could NOT create the SQL server '$sqlSrv' in '$Location' ($($_.Exception.Message); " +
                                         "'RegionDoesNotAllowProvisioning' means the region refuses new SQL servers for this subscription: deploy with another -Location).") }
         }
-        # The deploy identity stays able to administer the database through the group -- it is what
-        # creates the contained users and applies the schema from this host on public SQL.
+        # The deploy identity stays able to administer the database through the group FOR THE LENGTH OF THE INSTALL -- it
+        # is what creates the contained users and applies the schema from this host on public SQL; Invoke-PimDeployAll
+        # takes it out again at the end (PIM 100.156 B, framework 12.23 P5). The environment identity id-pim-<token> is
+        # NOT a member any more: it only pulls the image.
         Invoke-PimPrereqSqlAdminGroup -ExtraMembers @(
-            [pscustomobject]@{ objectId = "$uamiPrincipal".Trim(); label = "environment identity $uami" }
             [pscustomobject]@{ objectId = "$spOid".Trim();         label = "deploy identity $deployWho" })
     } else {
 
@@ -686,9 +687,9 @@ if ($SkipSql) {
                                     "'RegionDoesNotAllowProvisioning' means the region refuses new SQL servers for this subscription: deploy with another -Location).") }
     }
     # The SQL identity MUST be a member: the in-cloud bootstrap job administers the database as it.
+    # PIM 100.156 B: the environment identity id-pim-<token> is NOT a member (it only pulls the image).
     Invoke-PimPrereqSqlAdminGroup -ExtraMembers @(
         [pscustomobject]@{ objectId = "$sqlUamiOid".Trim();    label = "SQL identity $sqlUami" }
-        [pscustomobject]@{ objectId = "$uamiPrincipal".Trim(); label = "environment identity $uami" }
         [pscustomobject]@{ objectId = "$spOid".Trim();         label = "deploy identity $deployWho" })
     $admin0        = @(Get-PimArmSqlAdmins -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv) | Select-Object -First 1
     $adminNowSid   = "$($admin0.sid)".Trim()

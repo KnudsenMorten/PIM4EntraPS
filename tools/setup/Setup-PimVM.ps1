@@ -143,10 +143,15 @@ if ($GrantSql) {
     } else {
         $vmName = $env:COMPUTERNAME
         if ($PSCmdlet.ShouldProcess($SqlServerFqdn, "create VM-MI DB user [$vmName]")) {
-            Grant-PimMiSql -DbUserName $vmName -MiAppId $VmMiAppId `
+            # PIM 100.156 B (framework 12.23 P3): the VM runs the Manager AND the engine AND applies its own schema (it is its
+            # own updater) -- its catalog role set 'vmhost' = pim_web + pim_engine + pim_updater + db_ddladmin, never
+            # db_datareader / db_datawriter. Then the admin run of the least-privilege model gives those roles their grants.
+            $acc = Invoke-PimSetupSqlAccessModel -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId `
+                       -SqlAdminClientId $SqlAdminClientId -SqlAdminClientSecret $SqlAdminClientSecret
+            Grant-PimMiSql -DbUserName $vmName -MiAppId $VmMiAppId -Component 'vmhost' `
                 -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId `
                 -SqlAdminClientId $SqlAdminClientId -SqlAdminClientSecret $SqlAdminClientSecret
-            Write-Host "  VM MI [$vmName] granted db_datareader/writer/ddladmin on $SqlDatabase." -ForegroundColor Green
+            Write-Host "  VM MI [$vmName] granted $((Get-PimSetupSqlUserRoles -DbUserName $vmName -Component 'vmhost') -join ' + ') on $SqlDatabase (access model: signer $($acc.signer))." -ForegroundColor Green
         }
     }
 }

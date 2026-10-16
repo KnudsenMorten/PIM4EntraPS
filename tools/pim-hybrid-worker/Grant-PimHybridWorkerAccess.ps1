@@ -123,11 +123,11 @@ if ($SqlServer) {
     . (Join-Path $PSScriptRoot '_PimHybridWorkerSql.ps1')
     Assert-PimHwSqlUserName -UserName $SqlUserName
     $userSql = Get-PimHwSqlUserSql -UserName $SqlUserName -AppId $sp.appId -Roles @('db_datareader', 'db_datawriter')
-    if ($PSCmdlet.ShouldProcess("$SqlServer/$SqlDatabase", "CREATE USER [$SqlUserName] WITH SID (type E) when missing; db_datareader + db_datawriter")) {
+    if ($PSCmdlet.ShouldProcess("$SqlServer/$SqlDatabase", "CREATE USER [$SqlUserName] WITH SID (type E) when missing; pim_hybrid (db_datareader + db_datawriter where the store has no least-privilege model yet)")) {
         $tok = "$(Get-PimRestToken -Resource 'https://database.windows.net' -TenantId $TenantId)"
         $r = @(Invoke-PimHybridWorkerSql -Server $SqlServer -Database $SqlDatabase -AccessToken $tok -Batches @($userSql))
         $tok = $null
-        Info "SQL connected as $($r[-1]); user ${SqlUserName}: db_datareader + db_datawriter (never db_ddladmin)"
+        Info "SQL connected as $($r[-1]); user ${SqlUserName}: pim_hybrid on a store with the least-privilege model, else db_datareader + db_datawriter (never db_ddladmin)"
     }
 }
 Step 'done'

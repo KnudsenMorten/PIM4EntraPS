@@ -36,9 +36,14 @@ function Get-PimHwSqlUserSql {
       EXTERNAL PROVIDER), same name + different SID (the identity was rebuilt) = owned schemas to dbo, drop, recreate (the
       BUG-47 shape of setup's Get-PimSqlContainedUserSql), then the role memberships. NEVER db_ddladmin (refused).
     #>
-    param([Parameter(Mandatory)][string]$UserName, [Parameter(Mandatory)][string]$AppId, [string[]]$Roles = @('db_datareader', 'db_datawriter'))
+    # PIM 100.156 B (framework 12.23 P3): -ModelRole (default pim_hybrid, the access catalog's role for the worker) is the
+    # ONLY membership where the store carries the least-privilege model (a signed pim.usp_ApplyAccess -- every new install);
+    # -Roles (db_datareader + db_datawriter) only where it does not yet (an install the cut-over has not reached). '' = -Roles.
+    param([Parameter(Mandatory)][string]$UserName, [Parameter(Mandatory)][string]$AppId, [string[]]$Roles = @('db_datareader', 'db_datawriter'),
+          [string]$ModelRole = 'pim_hybrid')
     Assert-PimHwSqlUserName -UserName $UserName
     foreach ($r in $Roles) { if ($r -notin @('db_datareader', 'db_datawriter')) { throw "the hybrid worker gets db_datareader + db_datawriter only, not '$r'" } }
+    if ("$ModelRole" -and "$ModelRole" -cne 'pim_hybrid') { throw "the hybrid worker's model role is pim_hybrid, not '$ModelRole'" }
     $sid = ConvertTo-PimHwSqlSid -AppId $AppId
     $l = New-Object System.Collections.Generic.List[string]
     $l.Add("IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$UserName' AND sid = $sid)")
@@ -53,7 +58,19 @@ function Get-PimHwSqlUserSql {
     $l.Add('    END')
     $l.Add("    CREATE USER [$UserName] WITH SID = $sid, TYPE = E;")
     $l.Add('END')
-    foreach ($r in $Roles) { $l.Add("IF IS_ROLEMEMBER('$r', N'$UserName') = 0 ALTER ROLE [$r] ADD MEMBER [$UserName];") }
+    if ("$ModelRole") {
+        $l.Add("IF EXISTS (SELECT 1 FROM sys.crypt_properties cp JOIN sys.certificates c ON c.thumbprint = cp.thumbprint WHERE cp.major_id = OBJECT_ID(N'pim.usp_ApplyAccess') AND c.name LIKE N'pim[_]access[_]signer%')")
+        $l.Add('BEGIN')
+        $l.Add("    IF DATABASE_PRINCIPAL_ID(N'$ModelRole') IS NULL EXEC(N'CREATE ROLE [$ModelRole] AUTHORIZATION [dbo];');")
+        $l.Add("    IF IS_ROLEMEMBER('$ModelRole', N'$UserName') = 0 ALTER ROLE [$ModelRole] ADD MEMBER [$UserName];")
+        $l.Add('END')
+        $l.Add('ELSE')
+        $l.Add('BEGIN')
+        foreach ($r in $Roles) { $l.Add("    IF IS_ROLEMEMBER('$r', N'$UserName') = 0 ALTER ROLE [$r] ADD MEMBER [$UserName];") }
+        $l.Add('END')
+    } else {
+        foreach ($r in $Roles) { $l.Add("IF IS_ROLEMEMBER('$r', N'$UserName') = 0 ALTER ROLE [$r] ADD MEMBER [$UserName];") }
+    }
     $l.Add("SELECT USER_NAME();")
     return ($l -join "`r`n")
 }

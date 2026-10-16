@@ -133,25 +133,76 @@ function ConvertTo-PimSqlSidFromAppId {
     return '0x' + (($g.ToByteArray() | ForEach-Object { $_.ToString('X2') }) -join '')
 }
 
-function Grant-PimMiSql {
+function Get-PimSetupSqlUserRoles {
+    <#
+      PIM 100.156 B (framework 12.23 P2/P3/P8): the database roles setup gives ONE component's contained user on a NEW
+      install -- its pim_* role only (the updater: pim_updater + db_ddladmin; the VM host: -Component vmhost). The answer
+      is the access catalog's (engine/_shared/PIM-SqlAccess.ps1 Get-PimSqlComponentAccess), never a list of its own.
+    #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DbUserName, [string]$Component = '')
+    $shared = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared'
+    if (-not (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue)) { . (Join-Path $shared 'PIM-InstallNames.ps1') }
+    if (-not (Get-Command Get-PimSqlComponentAccess -ErrorAction SilentlyContinue)) { . (Join-Path $shared 'PIM-SqlAccess.ps1') }
+    $a = if ("$Component".Trim()) { Get-PimSqlComponentAccess -DbUserName $DbUserName -Component "$Component".Trim() } else { Get-PimSqlComponentAccess -DbUserName $DbUserName }
+    return @($a.roles)
+}
+
+function Get-PimSetupSqlUserGrantSql {
+    <#
+      PURE. The T-SQL Grant-PimMiSql runs for one contained user: create (or re-point, BUG-47) from the app id as a SID,
+      then every -Roles membership. A pim_<x> component role that does not exist yet is created owned by dbo (setup runs
+      as an admin); its GRANTS come from the access model (Invoke-PimSetupSqlAccessModel / the updater's converge).
+      ADDITIVE: nothing is ever taken away here -- a re-run of setup on an install that still has the broad roles keeps
+      them until the cut-over's second run (framework 12.23 P8).
+    #>
+    # -LegacyRoles: the fixed roles given INSTEAD-OF-NOTHING when the database does not carry the model yet (no signed
+    # pim.usp_ApplyAccess): an existing install that was never cut over keeps working when a setup script adds a user to
+    # it (its pim_* role would have no grants there). Inert wherever the model is installed -- i.e. on every new install,
+    # where setup installs the model BEFORE the first user (framework 12.23 P8).
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DbUserName, [Parameter(Mandatory)][string]$Sid, [string[]]$Roles = @(), [string[]]$LegacyRoles = @())
+    if ("$DbUserName" -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._@-]{0,127}$') { throw "Grant-PimMiSql: '$DbUserName' is not a safe database user name." }
+    $okFixed = @('db_datareader', 'db_datawriter', 'db_ddladmin')
+    foreach ($r in @($Roles)) { if (-not ("$r" -cmatch '^pim_[a-z]{2,30}$' -or "$r" -in $okFixed)) { throw "Grant-PimMiSql: '$r' is neither a pim_<letters> component role nor one of $($okFixed -join ', ')." } }
+    $n = "$DbUserName".Replace("'", "''"); $q = "[$("$DbUserName".Replace(']', ']]'))]"
+    $l = New-Object System.Collections.Generic.List[string]
+    # BUG-47 -- NOT an unconditional DROP + CREATE (an owner of a schema cannot be dropped): only recreate when the SID
+    # differs (the identity was rebuilt), handing owned schemas to dbo first.
+    [void]$l.Add("IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$n' AND sid = $Sid)")
+    [void]$l.Add('BEGIN')
+    [void]$l.Add("    IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$n')")
+    [void]$l.Add('    BEGIN')
+    [void]$l.Add('        DECLARE @reassign NVARCHAR(MAX);')
+    [void]$l.Add("        SELECT @reassign = STRING_AGG('ALTER AUTHORIZATION ON SCHEMA::' + QUOTENAME(s.name) + ' TO [dbo];', ' ')")
+    [void]$l.Add("        FROM sys.schemas s JOIN sys.database_principals p ON s.principal_id = p.principal_id WHERE p.name = N'$n';")
+    [void]$l.Add('        IF @reassign IS NOT NULL EXEC sp_executesql @reassign;')
+    [void]$l.Add("        DROP USER $q;")
+    [void]$l.Add('    END')
+    [void]$l.Add("    CREATE USER $q WITH SID = $Sid, TYPE = E;")
+    [void]$l.Add('END')
+    foreach ($r in @($Roles | Where-Object { "$_" })) {
+        if ("$r" -cmatch '^pim_[a-z]{2,30}$') { [void]$l.Add("IF DATABASE_PRINCIPAL_ID(N'$r') IS NULL EXEC(N'CREATE ROLE [$r] AUTHORIZATION [dbo];');") }
+        [void]$l.Add("IF IS_ROLEMEMBER('$r', N'$n') = 0 ALTER ROLE [$r] ADD MEMBER $q;")
+    }
+    $legacy = @($LegacyRoles | Where-Object { "$_" -and "$_" -notin @($Roles) })
+    foreach ($r in $legacy) { if ("$r" -notin $okFixed) { throw "Grant-PimMiSql: legacy role '$r' is not one of $($okFixed -join ', ')." } }
+    if ($legacy.Count) {
+        [void]$l.Add("IF NOT EXISTS (SELECT 1 FROM sys.crypt_properties cp JOIN sys.certificates c ON c.thumbprint = cp.thumbprint WHERE cp.major_id = OBJECT_ID(N'pim.usp_ApplyAccess') AND c.name LIKE N'pim[_]access[_]signer%')")
+        [void]$l.Add('BEGIN')
+        foreach ($r in $legacy) { [void]$l.Add("    IF IS_ROLEMEMBER('$r', N'$n') = 0 ALTER ROLE [$r] ADD MEMBER $q;") }
+        [void]$l.Add('END')
+    }
+    return ($l -join "`r`n")
+}
+
+function Open-PimSetupAdminSqlConnection {
+    <#
+      Open ONE connection to -SqlServerFqdn / -SqlDatabase as the SQL ADMIN this setup runs with: an admin application
+      (certificate preferred; secret for community callers) or the signed-in person (71.33). Shared by Grant-PimMiSql and
+      Invoke-PimSetupSqlAccessModel, so both authenticate the same way. The caller closes it.
+    #>
     [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$DbUserName,
-        [Parameter(Mandatory)][string]$MiAppId,
-        [Parameter(Mandatory)][string]$SqlServerFqdn,
-        [Parameter(Mandatory)][string]$SqlDatabase,
-        [Parameter(Mandatory)][string]$TenantId,
-        [string]$SqlAdminClientId,
-        # ONE of these. Secret was Mandatory, which made a CLIENT SECRET structurally required to
-        # deploy -- against the repo-root rule ("authenticate as its SPN using a CERTIFICATE, never
-        # a client secret") and impossible to satisfy in a tenant whose admin SPN is cert-only.
-        # Get-PimRestToken has supported -CertThumbprint all along; only this signature forced the
-        # secret. Added 2026-08-09 while deploying PIM §34.
-        [string]$SqlAdminClientSecret,
-        [string]$SqlAdminCertThumbprint,
-        # 71.33: connect as the SIGNED-IN az user (a member of the SQL admin group) instead of an admin application.
-        [switch]$UseSignedInAccount
-    )
+    param([Parameter(Mandatory)][string]$SqlServerFqdn, [Parameter(Mandatory)][string]$SqlDatabase, [Parameter(Mandatory)][string]$TenantId,
+          [string]$SqlAdminClientId, [string]$SqlAdminClientSecret, [string]$SqlAdminCertThumbprint, [switch]$UseSignedInAccount)
     if ($UseSignedInAccount) {
         if ("$SqlAdminClientId".Trim() -or $SqlAdminClientSecret -or $SqlAdminCertThumbprint) { throw 'Grant-PimMiSql: -UseSignedInAccount cannot be combined with -SqlAdminClientId/-SqlAdminClientSecret/-SqlAdminCertThumbprint.' }
         if (-not (Get-Command Connect-PimSignedInSql -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot '_PimSignedIn.ps1') }
@@ -174,60 +225,102 @@ function Grant-PimMiSql {
         $global:PIM_SqlAccessToken = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $SqlAdminClientId -ClientSecret $SqlAdminClientSecret -Force
     }
     }
-    $sid = ConvertTo-PimSqlSidFromAppId -AppId $MiAppId
     $cs  = "Server=tcp:$SqlServerFqdn,1433;Database=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30"
     $c = New-PimSqlConnection -ConnectionString $cs
     # REQ 100.76: signed in, a refused login right after this run made the person (or its group) the server's admin is
     # usually Entra replication -- mint a new token and try again for about two minutes before giving up.
-    $tries = if ($UseSignedInAccount) { 6 } else { 1 }
+    # PIM 100.156 B: an admin APPLICATION made a member of the SQL admin group again this run ($global:PIM_SetupSqlAdminJustAdded,
+    # Invoke-PimDeployAll) waits the same way -- it left the group at the end of the previous run (framework 12.23 P5).
+    $tries = if ($UseSignedInAccount -or $global:PIM_SetupSqlAdminJustAdded) { 6 } else { 1 }
     for ($i = 1; $i -le $tries; $i++) {
         try { $c.Open(); break }
         catch {
             if ($i -ge $tries -or "$($_.Exception.Message)" -notmatch '(?i)Login failed|18456') { throw }
             Write-Host "    SQL refused the sign-in (attempt $i of $tries) -- a new admin right takes a moment to reach SQL; new token in 20 s" -ForegroundColor Yellow
             Start-Sleep -Seconds 20
-            [void](Connect-PimSignedInSql -TenantId $TenantId)
+            if ($UseSignedInAccount) { [void](Connect-PimSignedInSql -TenantId $TenantId) }
+            elseif ($SqlAdminCertThumbprint) { $global:PIM_SqlAccessToken = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $SqlAdminClientId -CertThumbprint $SqlAdminCertThumbprint -Force }
+            else { $global:PIM_SqlAccessToken = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $SqlAdminClientId -ClientSecret $SqlAdminClientSecret -Force }
             $c = New-PimSqlConnection -ConnectionString $cs
         }
     }
+    return $c
+}
+
+function Invoke-PimSetupSqlAccessModel {
+    <#
+      PIM 100.156 B (framework 12.23 P4 / P8 "new installs get the model from the setup scripts on day one" / P9): the
+      ADMIN run of the least-privilege model, from the setup host, while the setup identity is still a SQL admin -- the
+      SAME product code the Support-app cut-over runs (Invoke-PimSqlAccessInstall): the platform schema + demo tables, the
+      signed procedure, its 2099 in-database certificate (private key removed), pim_updater + EXECUTE, the updater's
+      contained user (pim_updater + db_ddladmin) when -UpdaterUserName / -UpdaterAppId are given, and one converge (every
+      existing component user into its pim_* role). Idempotent; ADDITIVE (no fixed role is taken away). Public SQL only --
+      a private server gets the same run inside the network (ca-pim-dbinit, PIM_DBINIT_SQL_ACCESS).
+      Throws when the model does not read back installed. Returns the Invoke-PimSqlAccessInstall result ({ skipped = $true;
+      reason } for an existing install never cut over -- Test-PimSqlAccessSetupGate).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$SqlServerFqdn, [Parameter(Mandatory)][string]$SqlDatabase, [Parameter(Mandatory)][string]$TenantId,
+          [string]$SqlAdminClientId, [string]$SqlAdminClientSecret, [string]$SqlAdminCertThumbprint, [switch]$UseSignedInAccount,
+          [string]$UpdaterUserName = '', [string]$UpdaterAppId = '')
+    $shared = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared'
+    if (-not (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue)) { . (Join-Path $shared 'PIM-InstallNames.ps1') }
+    if (-not (Get-Command Invoke-PimSqlAccessInstall -ErrorAction SilentlyContinue)) { . (Join-Path $shared 'PIM-SqlAccess.ps1') }
+    $auth = @{ SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase; TenantId = $TenantId }
+    if ($UseSignedInAccount) { $auth['UseSignedInAccount'] = $true }
+    else {
+        $auth['SqlAdminClientId'] = $SqlAdminClientId
+        if ($SqlAdminCertThumbprint) { $auth['SqlAdminCertThumbprint'] = $SqlAdminCertThumbprint } else { $auth['SqlAdminClientSecret'] = $SqlAdminClientSecret }
+    }
+    $c = Open-PimSetupAdminSqlConnection @auth
     try {
-        # BUG-47 -- this used to be an unconditional DROP USER + CREATE USER, which is NOT
-        # idempotent and fails on the FIRST re-run of a working environment:
-        #
-        #   "The database principal owns a schema in the database, and cannot be dropped.
-        #    User, group, or role 'ca-pim-manager' already exists in the current database."
-        #
-        # The user holds db_ddladmin (it has to -- it applies the schema), so as soon as it
-        # creates a schema it OWNS that schema, and an owner cannot be dropped. Measured on the
-        # mfnpr production deploy: the very re-run that was fixing an unrelated defect died here,
-        # and it would fail identically on every customer whose environment has ever been used.
-        #
-        # The drop was never the point -- the point is that the contained user maps to the RIGHT
-        # SID. So: only recreate when the SID actually differs, and when it does, hand the owned
-        # schemas to dbo first so the drop can proceed. Role membership is applied unconditionally
-        # but guarded, because ALTER ROLE on an existing member is a no-op we should not depend on.
-        $b = @"
-IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name='$DbUserName' AND sid = $sid)
-BEGIN
-    IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name='$DbUserName')
-    BEGIN
-        -- Same NAME, different SID: the identity was rebuilt, so the user genuinely must be
-        -- replaced. Transfer anything it owns to dbo first, or the DROP cannot succeed.
-        DECLARE @reassign NVARCHAR(MAX);
-        SELECT @reassign = STRING_AGG('ALTER AUTHORIZATION ON SCHEMA::' + QUOTENAME(s.name) + ' TO [dbo];', ' ')
-        FROM sys.schemas s
-        JOIN sys.database_principals p ON s.principal_id = p.principal_id
-        WHERE p.name = '$DbUserName';
-        IF @reassign IS NOT NULL EXEC sp_executesql @reassign;
-        DROP USER [$DbUserName];
-    END
-    CREATE USER [$DbUserName] WITH SID = $sid, TYPE = E;
-END
-IF IS_ROLEMEMBER('db_datareader','$DbUserName') = 0 ALTER ROLE db_datareader ADD MEMBER [$DbUserName];
-IF IS_ROLEMEMBER('db_datawriter','$DbUserName') = 0 ALTER ROLE db_datawriter ADD MEMBER [$DbUserName];
-IF IS_ROLEMEMBER('db_ddladmin','$DbUserName')   = 0 ALTER ROLE db_ddladmin   ADD MEMBER [$DbUserName];
-"@
+        $q = { param($csx, $sql) $m = $c.CreateCommand(); $m.CommandText = $sql; $m.CommandTimeout = 120
+               $rd = $m.ExecuteReader(); $rows = New-Object System.Collections.Generic.List[object]
+               try { while ($rd.Read()) { $o = [ordered]@{}; for ($i = 0; $i -lt $rd.FieldCount; $i++) { $o[$rd.GetName($i)] = $(if ($rd.IsDBNull($i)) { $null } else { $rd.GetValue($i) }) }; $rows.Add([pscustomobject]$o) } } finally { $rd.Close() }
+               $rows.ToArray() }.GetNewClosure()
+        $x = { param($csx, $sql) $m = $c.CreateCommand(); $m.CommandText = $sql; $m.CommandTimeout = 120; [void]$m.ExecuteNonQuery() }.GetNewClosure()
+        # -SetupGate: an EXISTING install that was never cut over is left alone (the Support-app cut-over owns it, P8).
+        return (Invoke-PimSqlAccessInstall -Query $q -Exec $x -UpdaterUserName $UpdaterUserName -UpdaterAppId $UpdaterAppId -WithPrerequisites -SetupGate)
+    } finally { $c.Close() }
+}
+
+function Grant-PimMiSql {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DbUserName,
+        [Parameter(Mandatory)][string]$MiAppId,
+        [Parameter(Mandatory)][string]$SqlServerFqdn,
+        [Parameter(Mandatory)][string]$SqlDatabase,
+        [Parameter(Mandatory)][string]$TenantId,
+        [string]$SqlAdminClientId,
+        # ONE of these. Secret was Mandatory, which made a CLIENT SECRET structurally required to
+        # deploy -- against the repo-root rule ("authenticate as its SPN using a CERTIFICATE, never
+        # a client secret") and impossible to satisfy in a tenant whose admin SPN is cert-only.
+        # Get-PimRestToken has supported -CertThumbprint all along; only this signature forced the
+        # secret. Added 2026-08-09 while deploying PIM §34.
+        [string]$SqlAdminClientSecret,
+        [string]$SqlAdminCertThumbprint,
+        # 71.33: connect as the SIGNED-IN az user (a member of the SQL admin group) instead of an admin application.
+        [switch]$UseSignedInAccount,
+        # PIM 100.156 B (framework 12.23 P3): the user's roles. Default = its COMPONENT's (Get-PimSetupSqlUserRoles: the
+        # pim_* role only; the updater pim_updater + db_ddladmin) -- never the old db_datareader + db_datawriter +
+        # db_ddladmin. -Component names one the user name does not reveal (vmhost).
+        [string[]]$Roles,
+        [string]$Component = ''
+    )
+    if (-not $PSBoundParameters.ContainsKey('Roles')) { $Roles = @(Get-PimSetupSqlUserRoles -DbUserName $DbUserName -Component $Component) }
+    $sid = ConvertTo-PimSqlSidFromAppId -AppId $MiAppId
+    # A database that does not carry the model yet (an existing install, never cut over) keeps today's set for a component
+    # user, so a setup script adding one cannot leave it with an empty pim_* role there. Inert on a new install.
+    $legacy = if (@($Roles | Where-Object { "$_" -cmatch '^pim_[a-z]{2,30}$' }).Count) { @('db_datareader', 'db_datawriter', 'db_ddladmin') } else { @() }
+    $b = Get-PimSetupSqlUserGrantSql -DbUserName $DbUserName -Sid $sid -Roles $Roles -LegacyRoles $legacy
+    # everything the caller gave is passed on, so Open-PimSetupAdminSqlConnection refuses a mixed / missing credential
+    $auth = @{ SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase; TenantId = $TenantId; SqlAdminClientId = $SqlAdminClientId
+               SqlAdminClientSecret = $SqlAdminClientSecret; SqlAdminCertThumbprint = $SqlAdminCertThumbprint; UseSignedInAccount = [bool]$UseSignedInAccount }
+    $c = Open-PimSetupAdminSqlConnection @auth
+    try {
         $cmd = $c.CreateCommand(); $cmd.CommandText = $b; [void]$cmd.ExecuteNonQuery()
+        Write-Host "    database user [$DbUserName]: $(@($Roles) -join ' + ')" -ForegroundColor DarkGray
     } finally { $c.Close() }
 }
 
