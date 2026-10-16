@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.642 -- 2026-10-16
+
+- Uplink refusals now name what Invardia refused (record, job, status, reason); the updater grants the as-built reader only through the signed procedure and its log names who converged database access
+
 ## 2.4.641 -- 2026-10-16
 
 - The hourly status tells Invardia which release wave the install is in and when a new release is being watched more closely, on every install

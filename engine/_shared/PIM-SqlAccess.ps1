@@ -432,19 +432,43 @@ function Invoke-PimSqlAccessConverge {
     if (-not $Query) { $Query = { param($cs, $sql) Invoke-PimSqlQuery -ConnectionString $cs -Sql $sql } }
     if (-not $Exec) { $Exec = { param($cs, $sql) [void](Invoke-PimSqlNonQuery -ConnectionString $cs -Sql $sql) } }
     if (-not $NameMap) { $NameMap = Get-PimSqlAccessInstallNameMap }
+    # WHO this run is in the database (PIM 100.156: the proof that the updater converges as its OWN contained user, not as
+    # dbo through the SQL admin group). Read-only, visible to every principal; never fails the converge.
+    $runAs = ''; $dbOwner = $false
+    try {
+        $me = @(& $Query $ConnectionString "SELECT USER_NAME() AS userName, IS_ROLEMEMBER('db_owner') AS dbOwner;")[0]
+        if ($me) { $runAs = "$($me.userName)"; $dbOwner = ("$($me.dbOwner)" -eq '1') }
+    } catch { }
     $st = Get-PimSqlAccessState -ConnectionString $ConnectionString -Query $Query
     $facts = $st.facts
     if (-not $facts -or "$($facts.procExists)" -ne '1' -or -not "$($facts.signer)") {
-        return [pscustomobject]@{ applied = $false; reason = 'the access procedure is not installed yet -- an admin run (setup or the Support-app cut-over) installs it; nothing changed'; statements = 0 }
+        # A least-privilege caller sees no certificate in the catalog: an installed procedure WITHOUT the v2 state action
+        # (marker v1) reads as unsigned here. Say so -- "not installed" would send support to the wrong fix.
+        $why = if ($facts -and "$($facts.procExists)" -eq '1' -and "$($st.via)" -eq 'catalog' -and -not $dbOwner) {
+            'the access procedure is installed but this identity cannot read its state (a procedure older than v2, or no EXECUTE on it) -- re-sign it with v2 (ops sqlaccess-cutover.ps1 through the Support app); nothing changed'
+        } else { 'the access procedure is not installed yet -- an admin run (setup or the Support-app cut-over) installs it; nothing changed' }
+        return [pscustomobject]@{ applied = $false; reason = $why; statements = 0; via = "$($st.via)"; runAs = $runAs; dbOwner = $dbOwner }
     }
     $held = @($st.held)
+    # 🪤 Metadata visibility: a least-privilege updater (pim_updater + db_ddladmin, no ALTER ANY USER) sees ITSELF in
+    # sys.database_principals, not the other components' users -- so after the updater leaves the SQL admin group this list
+    # holds only the updater. Nothing is lost: the admin run (setup / the cut-over) converged every existing component user
+    # into its role, and a user the UPDATER makes (the as-built reader) is passed with its app id. Reported as visibleUsers.
     $principals = @(& $Query $ConnectionString "SELECT name, CONVERT(VARCHAR(40), sid, 1) AS sid FROM sys.database_principals WHERE type = 'E';")
     $users = @(Get-PimSqlAccessComponentUsers -Principals $principals -NameMap $NameMap)
     $revoke = @(Get-PimSqlAccessRevokeList -Held $held)
     $lines = @(Get-PimSqlAccessApplyBatches -Users $users -Revoke $revoke)
-    foreach ($l in $lines) { & $Exec $ConnectionString $l }
+    # Every line is tried: one refusal (e.g. a schema the signer was never given CONTROL on) must not leave the rest of the
+    # catalog unapplied. Any refusal is then THROWN as one message (the caller reports it and never blocks the update).
+    $failed = New-Object System.Collections.Generic.List[string]
+    foreach ($l in $lines) {
+        try { & $Exec $ConnectionString $l }
+        catch { [void]$failed.Add(("{0} -> {1}" -f ($l -replace '^EXEC \[pim\]\.\[usp_ApplyAccess\] ', ''), (("$($_.Exception.Message)" -split "`n")[0]))) }
+    }
+    if ($failed.Count) { throw ("{0} of {1} access statement(s) refused through the signed procedure (as {2}): {3}" -f $failed.Count, $lines.Count, $(if ($runAs) { $runAs } else { '?' }), (@($failed.ToArray() | Select-Object -First 3) -join ' | ')) }
     return [pscustomobject]@{ applied = $true; reason = ''; statements = $lines.Count; users = @($users | ForEach-Object { "$($_.userName)->$($_.role)" }); revoked = $revoke.Count
-                              signer = "$($facts.signer)"; signerExpiry = $facts.signerExpiry; privateKeyRemoved = "$($facts.privateKeyRemoved)" -eq '1' }
+                              signer = "$($facts.signer)"; signerExpiry = $facts.signerExpiry; privateKeyRemoved = "$($facts.privateKeyRemoved)" -eq '1'
+                              via = "$($st.via)"; runAs = $runAs; dbOwner = $dbOwner; visibleUsers = @($principals).Count }
 }
 
 function Test-PimSqlAccessInstalledState {

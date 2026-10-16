@@ -277,6 +277,81 @@ function Test-PimUplinkValidationRefusal {
     return [bool]($r -match '(?i)\b(400|422)\b|Unprocessable|Bad ?Request|\binvalid\b|fields:')
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# §33.0 BUG (2026-10-16: internal held the cause fields from 2026-10-15 23:39Z and NOTHING said which record was refused or
+# why -- no run message, no console line, and Invardia keeps no refused bodies). Each of the three holds (additive / cause /
+# release-control) now records WHAT was refused beside its ...RefusedUtc: the record kind, the job (a run) or the guard id,
+# the HTTP status and Invardia's answer (scrubbed, at most 1000). One Write-Warning names it; the run message names it, and
+# every later cycle while the hold lasts says so. Additive and fail-safe: a failure here never stops a record or a hold.
+# ---------------------------------------------------------------------------------------------------------------------
+function New-PimUplinkRefusalInfo {
+    <#
+      PURE. What Invardia refused: @{ utc; kind; job; status; reason } from the refused record and the sender's -Reason.
+        kind    the record's Kind (heartbeat | run | guard | setup ...; a guard 'cleared' record = guard-cleared), else 'record'
+        job     a run's Job, a guard's GuardId, else ''
+        status  the HTTP status in the reason (422, 400 ...), 0 when it names none
+        reason  the answer, secrets scrubbed (-AccessCode, an install key, a bearer token / JWT; the framework redact), <= 1000
+    #>
+    param([AllowNull()][object]$Record, [AllowNull()][string]$Reason, [datetime]$NowUtc = [datetime]::UtcNow, [AllowNull()][string]$AccessCode = '')
+    $kind = ("$(Get-PimUplinkField $Record 'Kind')".Trim().ToLowerInvariant() -replace '[^a-z0-9-]+', '-').Trim('-')
+    if (-not $kind) { $kind = 'record' }
+    if ($kind -eq 'guard' -and "$(Get-PimUplinkField $Record 'GuardOutcome')" -eq 'cleared') { $kind = 'guard-cleared' }
+    $job = "$(Get-PimUplinkField $Record 'Job')".Trim()
+    if (-not $job -and $kind -like 'guard*') { $job = "$(Get-PimUplinkField $Record 'GuardId')".Trim() }
+    if ($job.Length -gt 80) { $job = $job.Substring(0, 80) }
+    $r = "$Reason".Trim()
+    $status = 0
+    if ($r -match '\((\d{3})\)') { $status = [int]$Matches[1] }                                   # 5.1: "(422) Unprocessable Entity"
+    elseif ($r -match '(?i)status code[^0-9]{0,40}(\d{3})\b') { $status = [int]$Matches[1] }      # 7: "status code does not indicate success: 422"
+    elseif ($r -match '\b([45]\d\d)\b') { $status = [int]$Matches[1] }
+    if ("$AccessCode".Trim()) { $r = $r.Replace("$AccessCode".Trim(), '***') }
+    $r = $r -replace '(?i)\binv-[a-z0-9]{12,}', 'inv-***' -replace '(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+', 'Bearer ***' -replace 'eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*', '***'
+    if (Get-Command ConvertTo-AitUplinkRedacted -ErrorAction SilentlyContinue) { try { $r = "$(ConvertTo-AitUplinkRedacted -Text $r)" } catch { } }
+    if ($r.Length -gt 1000) { $r = $r.Substring(0, 997) + '...' }
+    return [ordered]@{ utc = $NowUtc.ToUniversalTime().ToString('o'); kind = $kind; job = $job; status = $status; reason = $r }
+}
+
+function Format-PimUplinkRefusalLine {
+    <# PURE. The one sentence that names a refusal: "Invardia refused the <what> on a <kind> record (job x): HTTP 422 -- <reason>". #>
+    param([string]$What, [AllowNull()][object]$Info)
+    if ($null -eq $Info) { return "Invardia refused the $What" }
+    $j = "$(Get-PimUplinkField $Info 'job')"; $s = "$(Get-PimUplinkField $Info 'status')"; $why = "$(Get-PimUplinkField $Info 'reason')"
+    return ("Invardia refused the {0} on a {1} record{2}: {3}{4}" -f $What, "$(Get-PimUplinkField $Info 'kind')", $(if ($j) { " (job $j)" } else { '' }),
+            $(if ($s -and $s -ne '0') { "HTTP $s" } else { 'no HTTP status' }), $(if ($why) { " -- $why" } else { '' }))
+}
+
+function Set-PimUplinkRefusalState {
+    <#
+      The ...RefusedKind / ...RefusedJob / ...RefusedStatus / ...RefusedReason of one hold (-Prefix 'causesRefused' etc.) into the
+      new UplinkState: this cycle's refusal (-Info), else -- while the hold lasts (-Carry) -- the previous state's values, so the
+      reason stays readable for the whole 24 h. Nothing is written while the hold was never set (the state stays as before).
+    #>
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$State, [Parameter(Mandatory)][string]$Prefix, [AllowNull()][object]$Info,
+          [AllowNull()][object]$Previous, [bool]$Carry = $false)
+    $map = [ordered]@{ Kind = 'kind'; Job = 'job'; Status = 'status'; Reason = 'reason' }
+    foreach ($k in $map.Keys) {
+        $n = "$Prefix$k"
+        if ($null -ne $Info) { $State[$n] = Get-PimUplinkField $Info $map[$k] }
+        elseif ($Carry -and $null -ne $Previous) { $pv = Get-PimUplinkField $Previous $n; if ($null -ne $pv) { $State[$n] = $pv } }
+    }
+}
+
+function Format-PimUplinkHeldNote {
+    <#
+      PURE. While a hold lasts (not refused THIS cycle): "; the <what> are held until <utc> (Invardia refused them <utc> on a
+      <kind> record (job x): HTTP 422)" -- from the stored state (-Prefix), so every uplink run of the 24 h says it, whichever
+      caller set it (the hourly job, the alert flush before a customer mail). A hold stored before this build has no reason.
+    #>
+    param([string]$What, [string]$Prefix, [AllowNull()][object]$State, [AllowNull()][object]$RefusedUtc)
+    $t = ConvertTo-PimUplinkUtc $RefusedUtc
+    if (-not $t) { return '' }
+    $until = $t.AddHours(24).ToString('yyyy-MM-dd HH:mm') + 'Z'; $at = $t.ToString('yyyy-MM-dd HH:mm:ss') + 'Z'
+    $kind = "$(Get-PimUplinkField $State "${Prefix}Kind")"
+    if (-not $kind) { return "; the $What are held until $until (Invardia refused them at $at; what was refused was not recorded)" }
+    $j = "$(Get-PimUplinkField $State "${Prefix}Job")"; $s = "$(Get-PimUplinkField $State "${Prefix}Status")"
+    return "; the $What are held until $until (Invardia refused them at $at on a $kind record$(if ($j) { " (job $j)" }): $(if ($s -and $s -ne '0') { "HTTP $s" } else { 'no HTTP status' }))"
+}
+
 function Get-PimUplinkFailureCodes {
     <#
       PURE. The catalog classes a failed run's text names AS FAILURES, largest group first (the order of the text):
@@ -1378,7 +1453,15 @@ function Invoke-PimUplinkCycle {
     # for 24 hours. A refusal for any other reason (429, 5xx, no network) is returned as it is.
     $addPrev = $null; if ($state -and $state.PSObject.Properties['additiveRefusedUtc']) { $addPrev = $state.additiveRefusedUtc }
     $addHeld = Test-PimUplinkAdditiveHeld -RefusedUtc $addPrev -NowUtc $NowUtc
-    $addState = @{ on = ([bool]$Additive -and -not $addHeld); refusedNow = $false; reason = '' }
+    $addState = @{ on = ([bool]$Additive -and -not $addHeld); refusedNow = $false; reason = ''; info = $null }
+    # §33.0 BUG (2026-10-16): WHAT a hold refused (New-PimUplinkRefusalInfo) + one console line. Never stops the record or the hold.
+    $noteRefusal = {
+        param($st, $what, $rec, $reason)
+        try {
+            if ($null -eq $st.info) { $st.info = New-PimUplinkRefusalInfo -Record $rec -Reason "$reason" -NowUtc $NowUtc -AccessCode "$($sender.AccessCode)" }
+            Write-Warning "[uplink] $(Format-PimUplinkRefusalLine -What $what -Info $st.info) -- sent without them, held 24 h"
+        } catch { try { Write-Warning "[uplink] Invardia refused the $what -- what was refused could not be recorded: $($_.Exception.Message)" } catch { } }
+    }
     $postAdd = {
         param($rec, $names, $legacy)
         $r1 = & $post $rec
@@ -1389,7 +1472,7 @@ function Invoke-PimUplinkCycle {
             else { $rec.PSObject.Properties.Remove("$n") }
         }
         $r2 = & $post $rec
-        if ("$($r2.Status)" -eq 'ok') { $addState.on = $false; $addState.refusedNow = $true; $addState.reason = "$($r1.Reason)" }
+        if ("$($r2.Status)" -eq 'ok') { $addState.on = $false; $addState.refusedNow = $true; $addState.reason = "$($r1.Reason)"; & $noteRefusal $addState 'new report fields' $rec $r1.Reason }
         return $r2
     }
     # PIM 100.167 / framework 8.16: the cause fields (Reports / Capabilities / Licences) -- their own switch and their own
@@ -1398,7 +1481,7 @@ function Invoke-PimUplinkCycle {
     # removed, held 24 h, and the record goes on through $postAdd (which handles the additive fields as before).
     $causePrev = $null; if ($state -and $state.PSObject.Properties['causesRefusedUtc']) { $causePrev = $state.causesRefusedUtc }
     $causeHeld = Test-PimUplinkAdditiveHeld -RefusedUtc $causePrev -NowUtc $NowUtc
-    $causeState = @{ on = ([bool]$Causes -and -not $causeHeld); refusedNow = $false; reason = '' }
+    $causeState = @{ on = ([bool]$Causes -and -not $causeHeld); refusedNow = $false; reason = ''; info = $null }
     $postCause = {
         param($rec, $names, $legacy, $cnames)
         $cn = @(@($cnames) | Where-Object { "$_".Trim() })
@@ -1407,13 +1490,14 @@ function Invoke-PimUplinkCycle {
         if ("$($r1.Status)" -eq 'ok' -or -not (Test-PimUplinkValidationRefusal "$($r1.Reason)")) { return $r1 }
         foreach ($n in $cn) { $rec.PSObject.Properties.Remove("$n") }
         $causeState.on = $false; $causeState.refusedNow = $true; $causeState.reason = "$($r1.Reason)"
+        & $noteRefusal $causeState 'cause fields (Reports / Capabilities / Licences)' $rec $r1.Reason
         return (& $postAdd $rec $names $legacy)
     }
     # PIM 100.158 CR3: the release-control fields (wave / releaseMode) -- their own hold. $postRc sends a heartbeat that carries
     # them (-rnames); refused for its CONTENT -> they are removed, held 24 h, and the heartbeat goes on through $postCause.
     $rcPrev = $null; if ($state -and $state.PSObject.Properties['releaseControlRefusedUtc']) { $rcPrev = $state.releaseControlRefusedUtc }
     $rcHeld = Test-PimUplinkAdditiveHeld -RefusedUtc $rcPrev -NowUtc $NowUtc
-    $rcState = @{ on = ([bool]$ReleaseControl -and -not $rcHeld); refusedNow = $false; reason = '' }
+    $rcState = @{ on = ([bool]$ReleaseControl -and -not $rcHeld); refusedNow = $false; reason = ''; info = $null }
     $postRc = {
         param($rec, $names, $legacy, $cnames, $rnames)
         $rn = @(@($rnames) | Where-Object { "$_".Trim() })
@@ -1422,6 +1506,7 @@ function Invoke-PimUplinkCycle {
         if ("$($r1.Status)" -eq 'ok' -or -not (Test-PimUplinkValidationRefusal "$($r1.Reason)")) { return $r1 }
         foreach ($n in $rn) { $rec.PSObject.Properties.Remove("$n") }
         $rcState.on = $false; $rcState.refusedNow = $true; $rcState.reason = "$($r1.Reason)"
+        & $noteRefusal $rcState 'release-control fields (wave / releaseMode)' $rec $r1.Reason
         return (& $postCause $rec $names $legacy $cnames)
     }
     $isId = ($sender.Mode -eq 'identified')
@@ -1754,9 +1839,17 @@ function Invoke-PimUplinkCycle {
         }
     }
     $msg = "$($sender.Mode): $sent sent$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($clearedSent) { " ($clearedSent guard(s) reported clear)" })$(if ($setupSent) { ' (setup report)' })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })$supNote"
-    if ($addState.refusedNow) { $msg += '; Invardia refused the new report fields -- sent in the old form, tried again in 24 h' }
-    if ($causeState.refusedNow) { $msg += '; Invardia refused the cause fields (Reports / Capabilities / Licences) -- sent without them, tried again in 24 h' }
-    if ($rcState.refusedNow) { $msg += '; Invardia refused the release-control fields (wave / releaseMode) -- sent without them, tried again in 24 h' }
+    # §33.0 BUG (2026-10-16): the refusal names its record (kind, job, HTTP status, Invardia's answer), and while a hold lasts
+    # every cycle says so, whichever caller set it. A failure to build the text keeps the plain sentence.
+    $refText = { param($st, $what) $t = ''; try { if ($null -ne $st.info) { $t = " ($(Format-PimUplinkRefusalLine -What $what -Info $st.info))" } } catch { $t = '' }; $t }
+    if ($addState.refusedNow) { $msg += "; Invardia refused the new report fields -- sent in the old form, tried again in 24 h$(& $refText $addState 'new report fields')" }
+    if ($causeState.refusedNow) { $msg += "; Invardia refused the cause fields (Reports / Capabilities / Licences) -- sent without them, tried again in 24 h$(& $refText $causeState 'cause fields')" }
+    if ($rcState.refusedNow) { $msg += "; Invardia refused the release-control fields (wave / releaseMode) -- sent without them, tried again in 24 h$(& $refText $rcState 'release-control fields')" }
+    try {
+        if (-not $addState.refusedNow -and $addHeld) { $msg += Format-PimUplinkHeldNote -What 'new report fields' -Prefix 'additiveRefused' -State $state -RefusedUtc $addPrev }
+        if (-not $causeState.refusedNow -and $causeHeld) { $msg += Format-PimUplinkHeldNote -What 'cause fields (Reports / Capabilities / Licences)' -Prefix 'causesRefused' -State $state -RefusedUtc $causePrev }
+        if (-not $rcState.refusedNow -and $rcHeld) { $msg += Format-PimUplinkHeldNote -What 'release-control fields (wave / releaseMode)' -Prefix 'releaseControlRefused' -State $state -RefusedUtc $rcPrev }
+    } catch { }
     $newState = [ordered]@{ mode = $sender.Mode; lastHeartbeatUtc = $lastHb; runWatermarkUtc = $floor; jobMarks = [pscustomobject]$marks
                             consent = $consent; lastCycleUtc = $NowUtc.ToString('o'); lastResult = $msg
                             # PIM 100.75: read by the end-of-install verify (Confirm-PimInstall 'telemetry')
@@ -1777,6 +1870,11 @@ function Invoke-PimUplinkCycle {
     # PIM 100.158: the release-control fields' own hold (left out while never refused)
     if ($rcState.refusedNow) { $newState['releaseControlRefusedUtc'] = $NowUtc.ToString('o') }
     elseif ($rcHeld) { $rpu = ConvertTo-PimUplinkUtc $rcPrev; if ($rpu) { $newState['releaseControlRefusedUtc'] = $rpu.ToString('o') } }
+    # §33.0 BUG (2026-10-16): beside each hold, WHAT was refused (...RefusedKind / Job / Status / Reason) -- this cycle's, else
+    # the stored one while the hold lasts. A failure here never stops the state (the hold itself is written above).
+    try { Set-PimUplinkRefusalState -State $newState -Prefix 'additiveRefused' -Info $(if ($addState.refusedNow) { $addState.info }) -Previous $state -Carry ([bool]$addHeld) } catch { Write-Warning "[uplink] the additive refusal record was not saved: $($_.Exception.Message)" }
+    try { Set-PimUplinkRefusalState -State $newState -Prefix 'causesRefused' -Info $(if ($causeState.refusedNow) { $causeState.info }) -Previous $state -Carry ([bool]$causeHeld) } catch { Write-Warning "[uplink] the cause refusal record was not saved: $($_.Exception.Message)" }
+    try { Set-PimUplinkRefusalState -State $newState -Prefix 'releaseControlRefused' -Info $(if ($rcState.refusedNow) { $rcState.info }) -Previous $state -Carry ([bool]$rcHeld) } catch { Write-Warning "[uplink] the release-control refusal record was not saved: $($_.Exception.Message)" }
     & $SetSetting 'UplinkState' ([pscustomobject]$newState)
     return @{ ran = $true; mode = $sender.Mode; sent = $sent; failed = $failed; left = $left; heartbeat = $hbSent; setup = $setupSent; message = $msg; reasons = @($why)
               additive = [bool]$addState.on; additiveRefused = [bool]$addState.refusedNow

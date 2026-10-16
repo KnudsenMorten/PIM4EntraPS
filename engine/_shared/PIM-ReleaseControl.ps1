@@ -77,6 +77,28 @@ function Test-PimReleaseControlFieldsOn {
     return -not ("$Value".Trim().ToLowerInvariant() -in @('0', 'off', 'false', 'no'))
 }
 
+function Get-PimRingBaseVersion {
+    <#
+      PURE. Invardia 2026-10-16: on a RING call changedScopes is the UNION of every change between the version that ring holds
+      NOW and the target (2.4.638 -> 2.4.640 = 2.4.639's + 2.4.640's scopes). -State = GET /api/releases/pim-manager/state
+      ({ rings: { "<n>": { version } } }). Returns that ring's current version when it is a release version BELOW -Target,
+      else '' (no state, the ring empty, the same or a newer version) -- the caller then falls back to the previous tag.
+    #>
+    param([AllowNull()][object]$State, [Parameter(Mandatory)][int]$Ring, [Parameter(Mandatory)][string]$Target)
+    if ($null -eq $State) { return '' }
+    $rings = if ($State -is [System.Collections.IDictionary]) { $State['rings'] } else { $State.rings }
+    if ($null -eq $rings) { return '' }
+    $rk = "$Ring"
+    $r = if ($rings -is [System.Collections.IDictionary]) { $rings[$rk] } elseif ($rings.PSObject.Properties[$rk]) { $rings.$rk } else { $null }
+    if ($null -eq $r) { return '' }
+    $v = if ($r -is [System.Collections.IDictionary]) { "$($r['version'])" } else { "$($r.version)" }
+    $v = $v.Trim()
+    $cv = $null; $tv = $null
+    if (-not [version]::TryParse($v, [ref]$cv) -or -not [version]::TryParse("$Target".Trim(), [ref]$tv)) { return '' }
+    if ($cv -ge $tv) { return '' }
+    return $v
+}
+
 function Get-PimChangedScopeOfFile {
     <#
       PURE. The scope of ONE changed file: a scope id, '*' (all -- a core or unknown file), or '' (not a scope: docs, tests ...).

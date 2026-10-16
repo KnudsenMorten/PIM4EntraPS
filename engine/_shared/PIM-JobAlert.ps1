@@ -460,6 +460,9 @@ function Invoke-PimJobRunAlert {
         # rule 1: the run record goes to Invardia BEFORE the mail (a skipped / failed flush never holds the mail)
         $up = Invoke-PimJobAlertUplinkFirst -Run $Run -Flush $UplinkFlush
         if (-not $up.flushed) { Write-Verbose ("[alert] run record not sent ahead of the mail: {0}" -f $up.reason) }
+        # §33.0 BUG (2026-10-16): this flush is the uplink cycle too -- a hold it sets (Invardia refused fields) is named on the
+        # console of THIS process, not only in UplinkState (the hourly uplink run then says it is held, and what was refused).
+        if ($up.flushed -and "$($up.reason)" -match 'tried again in 24 h') { Write-Warning ("[alert] the uplink flush ahead of the mail for '{0}': {1}" -f (Get-PimJobAlertField -Item $Run -Name 'name'), $up.reason) }
 
         if (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue) {
             # PIM 100.105: the alert table's rows -- only the ones this sender declares (Get-PimAlertMailArgs)
