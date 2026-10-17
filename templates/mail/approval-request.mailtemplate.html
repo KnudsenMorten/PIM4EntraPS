@@ -10,12 +10,12 @@
 <body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
   <p>Hello {{ApproverName}},</p>
   <p>A privileged <b>delegation</b> is waiting for your approval: an admin is to be added to a delegation / permission group.</p>
-  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
-    <tr><td><b>Requestor</b></td><td>{{RequestorUpn}}</td></tr>
-    <tr><td><b>Role / group</b></td><td>{{RoleName}} ({{GroupName}})</td></tr>
-    <tr><td><b>Justification</b></td><td>{{Justification}}</td></tr>
-    <tr><td><b>Requested at</b></td><td>{{RequestedAt}}</td></tr>
-  </table>
+  <div style="margin:12px 0 14px 0; font-size:14px; line-height:21px;">
+    <div style="margin:0 0 6px 0;"><b>Requestor:</b> {{RequestorUpn}}</div>
+    <div style="margin:0 0 6px 0;"><b>Role / group:</b> {{RoleName}} ({{GroupName}})</div>
+    <div style="margin:0 0 6px 0;"><b>Justification:</b> {{Justification}}</div>
+    <div style="margin:0 0 6px 0;"><b>Requested at:</b> {{RequestedAt}}</div>
+  </div>
   <p>Approve or deny it in PIM Manager with the button below ({{DecisionDeadline}}). A reply to this mail does not approve or deny it.</p>
   <p style="color:#57606a;">Unanswered requests are passed on to the next owner per the delegation approval policy. (This is delegation approval only; activation of an eligible role is handled separately by Entra PIM.)</p>
 </body>

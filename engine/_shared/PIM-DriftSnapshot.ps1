@@ -515,8 +515,14 @@ function Invoke-PimDriftSnapshotJob {
     $where = Set-PimTenantCacheEntry -Kind $kind -Value $doc
     # Delegation overview (All privileged permissions) reads which live assignments are MANAGED from here (pim.TenantCache kind 'managed-live').
     if ($script:PimLastManagedLive) {
-        try { [void](Set-PimTenantCacheEntry -Kind 'managed-live' -Value $script:PimLastManagedLive) }
+        $__mlStored = $false
+        try { [void](Set-PimTenantCacheEntry -Kind 'managed-live' -Value $script:PimLastManagedLive); $__mlStored = $true }
         catch { Write-Warning "[drift-snapshot] the managed list for Delegation overview (All privileged permissions) was not stored: $($_.Exception.Message)" }
+        # §33.0 MORE TELEMETRY round 2: the newest active-assignments generation is re-marked against the list just written, so
+        # the heartbeat's roleAssignmentsOutsidePim stays current between snapshots (set-based in SQL; never fails this job).
+        if ($__mlStored -and (Get-Command Update-PimActiveAssignmentsSnapshotMarks -ErrorAction SilentlyContinue)) {
+            try { $__mk = Update-PimActiveAssignmentsSnapshotMarks; if (-not $__mk.ok) { Write-Warning "[drift-snapshot] the active-assignments marks were not brought up to date: $($__mk.reason)" } } catch { }
+        }
     }
     $scopeDocs = @($doc.scopes)
     $failedNames = @($scopeDocs | Where-Object { -not $_.ok } | ForEach-Object { "$($_.scope)" })

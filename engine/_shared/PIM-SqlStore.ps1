@@ -562,6 +562,20 @@ IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCach
         try { [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimPublishJobControlViewRefreshSql)) }
         catch { Write-Warning "[store] the publish job's control view could not be refreshed: $($_.Exception.Message)" }
     }
+    # Framework §12.23 run 2 (PIM 100.156, 2.4.645 candidate): the EMPTY demo tables (pimdemo.Meta / Principals / Assignments /
+    # Activity / Tenants). Run 1 and the 2.4.644 admin batch create only the EMPTY pimdemo SCHEMA, and the web app holds no
+    # DDL right, so a first demo Enable there could not create them. The schema step (the updater -- or, on a community
+    # install, the setup identity's re-run) creates them here, idempotently, from the demo module's ONE definition
+    # (Get-PimDemoSchemaDdl), inside the demo scope. Tables only: NEVER a row (demo data stays the owner's switch,
+    # Set-PimDemoMode). Loaded only here, by the schema step -- no engine path reads the demo module. Never fails the open.
+    if (-not (Get-Command Get-PimDemoSchemaDdl -ErrorAction SilentlyContinue)) {
+        $__demoLib = Join-Path $PSScriptRoot 'PIM-DemoData.ps1'
+        if (Test-Path -LiteralPath $__demoLib) { . $__demoLib }
+    }
+    if ((Get-Command Get-PimDemoSchemaDdl -ErrorAction SilentlyContinue) -and (Get-Command Invoke-PimDemoSql -ErrorAction SilentlyContinue)) {
+        try { [void](Invoke-PimDemoSql -Kind nonquery -ConnectionString $ConnectionString -Sql (Get-PimDemoSchemaDdl)) }
+        catch { Write-Warning "[store] the demo tables (pimdemo) could not be created: $($_.Exception.Message) -- demo mode stays unavailable until the next update; nothing else is affected" }
+    } else { Write-Warning '[store] the demo module (PIM-DemoData.ps1) is not in this payload -- the demo tables were not created' }
 }
 
 # ---- Framework §12.23 run 2 prerequisite (PIM 100.156): the RUNTIME never needs a DDL right ----------------------------
@@ -1020,7 +1034,10 @@ function Test-PimSqlTransientError {
 }
 
 function New-PimSqlActiveAssignmentRowTable {
-    <# The batch buffer: a DataTable with the table's WRITTEN columns (Managed / OwnKind keep their defaults). #>
+    <#
+      The batch buffer: a DataTable with the table's WRITTEN columns. Managed is written too (2.4.645: the MANAGED mark as
+      the write already knows it, Get-PimSqlManagedLiveIdentitySet -- $false when not set); OwnKind keeps its default.
+    #>
     $t = New-Object System.Data.DataTable 'ActiveAssignmentRows'
     [void]$t.Columns.Add('SnapshotId', [long])
     [void]$t.Columns.Add('Seq', [int])
@@ -1028,7 +1045,49 @@ function New-PimSqlActiveAssignmentRowTable {
     [void]$t.Columns.Add('StartUtc', [datetime])
     [void]$t.Columns.Add('EndUtc', [datetime])
     foreach ($c in 'Justification', 'IdentityKey', 'SearchText', 'RowJson') { [void]$t.Columns.Add($c, [string]) }
+    $m = $t.Columns.Add('Managed', [bool]); $m.AllowDBNull = $false; $m.DefaultValue = $false
     return ,$t
+}
+
+function Get-PimSqlManagedLiveIdentitySet {
+    <#
+      2.4.645 (E3 regression, measured on the test VM): the engine's 'managed-live' identities as a case-sensitive set of
+      the SAME normalised values Sync-PimSqlActiveAssignmentMarks compares with (LOWER(LEFT(value, 450)), the scalar
+      fallback included -- normalised IN SQL, so both sides agree). The snapshot write marks MANAGED with it as it inserts
+      the rows, so the set-based marks pass after it (job or Manager page) rewrites only the rows it disagrees with --
+      normally none -- instead of ~9,500 rows x 6 index structures (19.5 MB of log at 40,000 rows, 1 s to 75 s on the
+      test VM depending on its disk). Correctness stays with that SQL pass; this is an optimisation only.
+      Returns the set, or $null when there is no list (or it is not JSON). Throws on a failed read (the caller ignores it).
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $sql = @'
+SET NOCOUNT ON;
+IF NOT EXISTS (SELECT 1 FROM pim.TenantCache WHERE Kind = N'managed-live' AND ISJSON(ValueJson) = 1) BEGIN SELECT CAST(0 AS INT) AS Has; RETURN; END
+SELECT CAST(1 AS INT) AS Has;
+DECLARE @m TABLE (v NVARCHAR(450) NOT NULL PRIMARY KEY);
+INSERT @m (v)
+SELECT DISTINCT LOWER(LEFT(CAST(j.[value] AS NVARCHAR(MAX)), 450))
+FROM pim.TenantCache t CROSS APPLY OPENJSON(t.ValueJson, '$.identities') j
+WHERE t.Kind = N'managed-live' AND ISJSON(t.ValueJson) = 1 AND j.[value] IS NOT NULL AND j.[value] <> N'';
+IF NOT EXISTS (SELECT 1 FROM @m)
+    INSERT @m (v)
+    SELECT LOWER(LEFT(JSON_VALUE(t.ValueJson, '$.identities'), 450)) FROM pim.TenantCache t
+    WHERE t.Kind = N'managed-live' AND ISJSON(t.ValueJson) = 1 AND JSON_VALUE(t.ValueJson, '$.identities') IS NOT NULL AND JSON_VALUE(t.ValueJson, '$.identities') <> N'';
+SELECT v FROM @m;
+'@
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $has = $false
+    $c = New-PimSqlConnection -ConnectionString $ConnectionString
+    try {
+        $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $sql; $cmd.CommandTimeout = Get-PimActiveAssignmentRowsCommandTimeoutSec
+        $rd = $cmd.ExecuteReader()
+        try {
+            if ($rd.Read()) { $has = ([int]$rd.GetValue(0) -eq 1) }
+            if ($has -and $rd.NextResult()) { while ($rd.Read()) { if (-not $rd.IsDBNull(0)) { [void]$set.Add([string]$rd.GetValue(0)) } } }
+        } finally { $rd.Close() }
+    } finally { if ($c) { $c.Close(); $c.Dispose() } }
+    if (-not $has) { return $null }
+    return ,$set
 }
 
 function Write-PimSqlActiveAssignmentRowBatch {

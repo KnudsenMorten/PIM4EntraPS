@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.645 -- 2026-10-17
+
+- Mails are easy to read on a phone (no tables, a topic line per item, summary first); the updater can be told to update now (ring 0 first); community installs can take the least-privilege database model; every install gets the empty demo tables on its next update; 7 more telemetry counts and an administrative-units domain; the Active assignments page opens fast on a large tenant
+
 ## 2.4.644 -- 2026-10-16
 
 - One refused telemetry field no longer holds back all others; the 8 status fields are on by default; a database grant already in place is never reported as refused; a fresh install no longer logs a failed table create; the approval mail can carry the fix list

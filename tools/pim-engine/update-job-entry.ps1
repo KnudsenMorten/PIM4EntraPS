@@ -72,6 +72,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-ConvergeDefaults.ps1') # 100.40 / framework 12.16 the install defaults an EXISTING install converges to
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAccess.ps1')        # framework 12.23 / PIM 100.156 least-privilege roles via the signed procedure
 . (Join-Path $solRoot 'engine\_shared\PIM-AsBuilt.ps1')          # 100.61 the as-built job + store + view an EXISTING install converges to
+. (Join-Path $solRoot 'engine\_shared\PIM-UpdateNow.ps1')        # framework 8.18 UPDATE-NOW: the 15-minute signal check + the run kind + own cron
+. (Join-Path $solRoot 'engine\_shared\PIM-GuardLimits.ps1')      # framework 8.18: an update-now waits while guard Strict mode is on
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
 # 100.61: the image the as-built converge (2e) left caj-pim-asbuilt on THIS run ('' = it did not converge the job) -- the job
@@ -433,6 +435,125 @@ $ring = "$($env:PIM_UPDATE_RING)".Trim()
 # unchanged. PIM-InvardiaUpdate.ps1 has the rules.
 $updSource = "$($env:PIM_UPDATE_SOURCE)".Trim().ToLowerInvariant()
 $script:PimInvardiaContext = ''; $script:PimInvardiaSequence = 0; $script:PimInvardiaApplied = 0; $script:PimInvardiaAhead = $false
+
+# ---- framework 8.18 UPDATE-NOW -- WHICH KIND OF EXECUTION IS THIS? (engine/_shared/PIM-UpdateNow.ps1 has the rules) ------
+# The cron is every 15 minutes once UPDATE NOW is on (PIM_UPDATE_NIGHTLY_UTC keeps the nightly time). The nightly slot and
+# a hand-started execution run the normal update EXACTLY as before; every other scheduled execution is a seconds-long
+# signal check that exits 0 with one line -- unless the signal says "now" for a version THIS RING approves, and then the
+# normal update below runs in this execution. No PIM_UPDATE_NIGHTLY_UTC (an install not converged yet) = 'legacy': a
+# full run, as before. Nothing here can fail the run: an unreadable signal, store or execution list = "no signal".
+function Get-PimUpdaterStoreCsHealed {
+    # The store's connection string (the job's own, else the Manager's -- the EFIF/RIDE shape, same self-heal as below).
+    $c = $null; try { $c = Get-PimSqlConnectionString } catch { $c = $null }
+    if (-not "$c".Trim()) {
+        try {
+            $heal = Resolve-PimUpdaterStoreSettings -JobServer "$($global:PIM_SqlServer)" -JobDatabase "$($global:PIM_SqlDatabase)" `
+                        -ManagerStore (Get-PimAcaStoreSettings -Resource $app) -ManagerApp $managerApp
+            if ($heal.source -eq 'manager' -and "$($heal.server)".Trim()) {
+                Set-Variable -Name 'PIM_SqlServer' -Scope Global -Value "$($heal.server)"
+                if ("$($heal.database)".Trim()) { Set-Variable -Name 'PIM_SqlDatabase' -Scope Global -Value "$($heal.database)" }
+                try { $c = Get-PimSqlConnectionString } catch { $c = $null }
+            }
+        } catch { }
+    }
+    return $c
+}
+function Get-PimUpdateNowRingApproval {
+    <# The version THIS ring approves right now, read the way the normal run reads it, without downloading anything:
+       @{ version; reason }. '' = nothing approved / not readable (the signal then starts nothing). #>
+    param([string]$Cs)
+    try {
+        if ($updSource -eq 'invardia') {
+            $lic = ConvertTo-PimInvardiaLicenceText -Value (Get-PimSqlSetting -ConnectionString $Cs -Name 'License')
+            $k = Resolve-PimInvardiaInstallKey -GetSetting { param($n) Get-PimSqlSetting -ConnectionString $Cs -Name $n }
+            $b = ''; try { $b = "$(Get-PimSqlSetting -ConnectionString $Cs -Name 'LicenceRequestBaseUrl')".Trim() } catch { }
+            $ringN = -1; if (-not [int]::TryParse($ring, [ref]$ringN) -or $ringN -lt 0 -or $ringN -gt 3) { return @{ version = ''; reason = "no update ring ('$ring')" } }
+            if (-not "$lic".Trim()) { return @{ version = ''; reason = 'no licence in the store' } }
+            $seq = Resolve-PimInvardiaAppliedSequence -JobEnv ([Environment]::GetEnvironmentVariables()) -Ring $ring
+            $p = Invoke-PimInvardiaManifestPull -Http { param($m, $u, $bd, $h) Invoke-PimLicenceHttp -Method $m -Url $u -Body $bd -Headers $h } `
+                     -BaseUrl $b -InstallKey $k -LicenceText $lic -Ring $ringN
+            if ($p.status -eq 204) { return @{ version = ''; reason = 'Invardia has nothing released for this ring' } }
+            if ($p.status -ne 200) { return @{ version = ''; reason = "the ring's manifest could not be read ($($p.reason))" } }
+            $v = Test-PimInvardiaManifest -Response $p.body -AppliedSequence ([int]$seq.applied) -RunningVersion "$($script:PimRunningVersion)" -Ring $ringN
+            if (-not $v.ok) { return @{ version = ''; reason = "the ring's manifest was refused ($($v.reason))" } }
+            if ($v.hold) { return @{ version = ''; reason = "the ring's manifest is held ($($v.reason))" } }
+            if ([int]$seq.unprovenLegacy -gt 0 -and $v.sequence -lt [int]$seq.unprovenLegacy) { return @{ version = ''; reason = 'the replay watermark needs a decision (see the nightly run)' } }
+            return @{ version = "$($v.version)"; reason = "the signed manifest for ring $ringN" }
+        }
+        if ($ring -and $srcUrlTpl) {
+            $chUrl = Get-PimUpdateChannelUrl -SourceTemplate $srcUrlTpl
+            $chFile = Join-Path ([IO.Path]::GetTempPath()) ("pim-channel-un-{0}.json" -f ([guid]::NewGuid().ToString('N').Substring(0, 6)))
+            try {
+                Invoke-WebRequest -Uri $chUrl -OutFile $chFile -UseBasicParsing -TimeoutSec 60
+                $rv = Get-PimRingVersion -Channel ((Get-Content -LiteralPath $chFile -Raw) | ConvertFrom-Json) -Ring $ring -CurrentVersion $lastBuilt
+                return @{ version = "$($rv.version)".Trim(); reason = "$($rv.reason)" }
+            } finally { Remove-Item -LiteralPath $chFile -Force -ErrorAction SilentlyContinue }
+        }
+        return @{ version = ''; reason = 'this environment has no ring source to approve a version' }
+    } catch { return @{ version = ''; reason = "the ring's approval could not be read ($((("$($_.Exception.Message)") -split "`n")[0]))" } }
+}
+$script:PimUpdateNowSignal = $null
+$unEnabled = Test-PimUpdateNowEnabled -Ring $ring -Value "$($env:PIM_UPDATE_NOW)"
+$unNightly = "$($env:PIM_UPDATE_NIGHTLY_UTC)".Trim()
+$unOwnExec = "$([Environment]::GetEnvironmentVariable('CONTAINER_APP_JOB_EXECUTION_NAME'))".Trim()
+$unExecs = $null
+$unKind = @{ kind = 'legacy'; reason = 'the updater runs on its nightly cron (no PIM_UPDATE_NIGHTLY_UTC) -- a full run, as before' }
+if ($unNightly -and $unEnabled) {
+    # ONE ARM read: the job's executions (the same path the watchdog reads) -- this execution's start time, whether the slot
+    # already had its scheduled execution, and whether another execution is running.
+    try { $unExecs = ConvertTo-PimUpdateNowExecutions -Items (Invoke-PimArm -Method GET -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs/$selfJob/executions" -ApiVersion $script:PimAcaApi) } catch { $unExecs = $null }
+    $unStart = $script:PimUpdateStartedUtc; $unTol = 180
+    if ($null -ne $unExecs -and $unOwnExec) {
+        $unMine = @($unExecs | Where-Object { "$($_.name)" -eq $unOwnExec }) | Select-Object -First 1
+        if ($unMine -and $null -ne $unMine.startUtc) { $unStart = $unMine.startUtc; $unTol = 120 }
+    }
+    $unKind = Get-PimUpdaterRunKind -NightlyUtc $unNightly -StartUtc $unStart -Executions $unExecs -OwnExecution $unOwnExec -ToleranceSeconds $unTol -Enabled $unEnabled
+}
+if ($unKind.kind -eq 'quick') {
+    $unCs = Get-PimUpdaterStoreCsHealed
+    . (Join-Path $solRoot 'engine\_shared\PIM-LicenceRequest.ps1')   # Invoke-PimLicenceHttp (the manifest read of the approval)
+    . (Join-Path $solRoot 'engine\_shared\PIM-InvardiaUpdate.ps1')   # the install key + the signal call
+    $unKey = ''; $unStrict = $false; $unStrictUntil = ''
+    if ("$unCs".Trim()) {
+        $unKey = Resolve-PimInvardiaInstallKey -GetSetting { param($n) Get-PimSqlSetting -ConnectionString $unCs -Name $n }
+        try { $unSt = ConvertFrom-PimGuardStrictText -Text (Get-PimSqlSettingRaw -ConnectionString $unCs -Name (Get-PimGuardStrictSettingName)); $unStrict = [bool](Test-PimGuardStrictActive -State $unSt); if ($unSt.untilUtc) { $unStrictUntil = $unSt.untilUtc.ToString('u') } } catch { $unStrict = $false }
+    } else { $unKey = Resolve-PimInvardiaInstallKey -GetSetting $null }
+    $unBase = ''; if ("$unCs".Trim()) { try { $unBase = "$(Get-PimSqlSetting -ConnectionString $unCs -Name 'LicenceRequestBaseUrl')".Trim() } catch { } }
+    $unRingN = -1; [void][int]::TryParse($ring, [ref]$unRingN)
+    # 🔒 No store = no state = "at most once per raisedAt" cannot be promised: the signal is not acted on (said in the line).
+    $unGet = $(if ("$unCs".Trim()) { { Get-PimSqlSetting -ConnectionString $unCs -Name (Get-PimUpdateNowStateName) } } else { $null })
+    $unSet = $(if ("$unCs".Trim()) { { param($o) Set-PimSqlSetting -ConnectionString $unCs -Name (Get-PimUpdateNowStateName) -ValueJson (ConvertTo-Json -InputObject $o -Depth 5 -Compress) } } else { $null })
+    $unQ = Invoke-PimUpdateNowQuickCheck -Enabled $unEnabled -InstallKey $unKey -Ring $ring -RunningVersion "$($script:PimRunningVersion)" `
+               -Hold ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') -StrictActive $unStrict -StrictUntil $unStrictUntil `
+               -Signal { param($et) if ($unRingN -lt 0 -or $unRingN -gt 3) { @{ status = 0 } } else { Invoke-PimInvardiaUpdateSignal -BaseUrl $unBase -InstallKey $unKey -Ring $unRingN -ETag $et } } `
+               -GetState $unGet -SetState $unSet `
+               -IsRunning { Get-PimUpdateNowOtherRunning -Executions $unExecs -OwnExecution $unOwnExec }
+    if (-not $unQ.run) { Say $unQ.line 'DarkGray'; exit 0 }
+    if (-not $unSet) { Say 'update now: a signal, but there is no store to record it in (at most one update per signal) -- not started' 'Yellow'; exit 0 }
+    $unAp = Get-PimUpdateNowRingApproval -Cs $unCs
+    $unAd = Get-PimUpdateNowApprovalDecision -SignalVersion "$($unQ.signal.version)" -ApprovedVersion "$($unAp.version)" -RunningVersion "$($script:PimRunningVersion)" -Ring $ring
+    if (-not $unAd.ok) { Say "$($unAd.line) ($($unAp.reason))" 'DarkGray'; exit 0 }
+    # Mark FIRST, update second: at most ONE update per raisedAt, whatever happens next (a failed one is the nightly's to retry).
+    if (-not (Set-PimUpdateNowHandled -GetState $unGet -SetState $unSet -Signal $unQ.signal)) { Say 'update now: the start could not be recorded -- not started (the nightly run takes it)' 'Yellow'; exit 0 }
+    Say $unQ.line 'Cyan'
+    Say $unAd.line 'Cyan'
+    $script:PimUpdateNowSignal = $unQ.signal
+} else {
+    Say "execution: $($unKind.kind) -- $($unKind.reason)" 'DarkGray'
+    if ($unKind.kind -eq 'nightly' -and (Get-PimUpdateNowOtherRunning -Executions $unExecs -OwnExecution $unOwnExec) -eq $true) {
+        # Never two updater executions at once: the one running is an update-now update (or a hand-started one) -- it IS
+        # tonight's update. Unreadable executions do not stop the nightly run (as before).
+        Say 'nightly: another execution of the updater is running -- it is tonight''s update; this one stops.' 'Yellow'
+        exit 0
+    }
+    # The updater's OWN cron follows the switch: an existing install gets its 15-minute cron here, on its next full run.
+    try {
+        $unArm = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
+        $unCron = Invoke-PimUpdateNowSelfCronUpdate -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob -Arm $unArm -Enabled $unEnabled -ApiVersion $script:PimAcaApi
+        Say $unCron.detail $(if (-not $unCron.ok) { 'Yellow' } elseif ($unCron.changed) { 'Cyan' } else { 'DarkGray' })
+    } catch { Say "update now: the updater's cron was not checked: $($_.Exception.Message)" 'Yellow' }
+}
+
 if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     Say "PIM_UPDATE_HOLD=1 -- this environment is frozen; the ring channel is not consulted." 'Yellow'
     # §71.43 -- a held environment has NO approved version to show, and saying so is the point: the

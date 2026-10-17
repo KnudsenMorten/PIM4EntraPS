@@ -5575,6 +5575,70 @@ function Get-PimDirectoryRolePolicyIndex {
     [pscustomobject]@{ policyByRole = $byRole; rulesByPolicy = $rules }
 }
 
+# §33.0 MORE TELEMETRY round 2 (owner "add relevant. i want data"): policy quality as COUNTS, from the EntraRolePolicies live
+# read (the directory roles whose policy PIM manages -- the rows' roles, plus every directory role with the baseline on).
+function ConvertTo-PimPolicyDurationHours {
+    <# PURE. An ISO 8601 duration (PT8H, P1D, PT30M) -> whole hours, rounded UP; $null when it is not one. #>
+    param([AllowNull()][object]$Duration)
+    $s = "$Duration".Trim(); if (-not $s) { return $null }
+    try { $ts = [System.Xml.XmlConvert]::ToTimeSpan($s) } catch { return $null }
+    if ($ts.TotalMinutes -le 0) { return $null }
+    return [long][math]::Ceiling($ts.TotalHours)
+}
+
+function Get-PimRolePolicySummary {
+    <#
+      PURE. -Live: the provider's live items { GroupName; PolicyId; Rules }. -Expected: how many roles the read looked for
+      (that exist). Per role, from its END-USER activation rules:
+        no approval  -- Approval_EndUser_Assignment absent or setting.isApprovalRequired false
+        no MFA       -- Enablement_EndUser_Assignment's enabledRules has no MultiFactorAuthentication AND
+                        AuthenticationContext_EndUser_Assignment is not enabled (a Conditional Access context counts as MFA)
+        max hours    -- the largest Expiration_EndUser_Assignment maximumDuration, whole hours rounded up
+      complete = every expected role was read with its rules. Returns
+      { computedUtc; complete; roles; withoutApproval; withoutMfa; maxActivationHours ($null when none had a duration) }.
+      Counts only -- no role name, no id.
+    #>
+    param([AllowNull()][object[]]$Live, [int]$Expected = 0, [datetime]$NowUtc = [datetime]::UtcNow)
+    $roles = 0; $noAppr = 0; $noMfa = 0; $max = $null; $readOk = 0
+    foreach ($l in @($Live)) {
+        if ($null -eq $l) { continue }
+        $rules = @(@($l.Rules) | Where-Object { $null -ne $_ })
+        $roles++
+        if ($rules.Count) { $readOk++ }
+        $appr = $false; $mfa = $false; $ctxOn = $false
+        foreach ($r in $rules) {
+            $id = "$($r.id)"
+            if ($id -eq 'Approval_EndUser_Assignment' -and $r.setting) { $appr = [bool]$r.setting.isApprovalRequired }
+            elseif ($id -eq 'Enablement_EndUser_Assignment') { $mfa = (@(@($r.enabledRules) | ForEach-Object { "$_" }) -contains 'MultiFactorAuthentication') }
+            elseif ($id -eq 'AuthenticationContext_EndUser_Assignment') { $ctxOn = [bool]$r.isEnabled }
+            elseif ($id -eq 'Expiration_EndUser_Assignment') {
+                $h = ConvertTo-PimPolicyDurationHours $r.maximumDuration
+                if ($null -ne $h -and ($null -eq $max -or $h -gt $max)) { $max = $h }
+            }
+        }
+        if (-not $appr) { $noAppr++ }
+        if (-not ($mfa -or $ctxOn)) { $noMfa++ }
+    }
+    $complete = ($readOk -eq $roles -and $roles -eq [math]::Max(0, $Expected))
+    return [ordered]@{ computedUtc = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); complete = [bool]$complete; roles = [long]$roles
+                       withoutApproval = [long]$noAppr; withoutMfa = [long]$noMfa; maxActivationHours = $max }
+}
+
+function Save-PimRolePolicySummary {
+    <#
+      Persist Get-PimRolePolicySummary as pim.Settings 'RolePolicySummary' (Set-PimSetting -- the host's SQL bridge; a host
+      without one keeps nothing). An incomplete read is stored as complete = false, so an older complete summary is never
+      re-used as if current. Never throws (a telemetry summary must not fail the policy provider). Returns $true when written.
+    #>
+    param([AllowNull()][object[]]$Live, [int]$Expected = 0, [datetime]$NowUtc = [datetime]::UtcNow)
+    try {
+        if (-not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { return $false }
+        $s = Get-PimRolePolicySummary -Live $Live -Expected $Expected -NowUtc $NowUtc
+        [void](Set-PimSetting -Name 'RolePolicySummary' -Value ([pscustomobject]$s))
+        return $true
+    } catch { Write-Verbose "role policy summary not stored: $($_.Exception.Message)"; return $false }
+}
+
 function New-PimEntraRolePoliciesProvider {
     @{
         scope = 'EntraRolePolicies'; entity = 'PIM-Assignments-Roles-Groups'; order = 75; refreshBefore = $true
@@ -5592,11 +5656,13 @@ function New-PimEntraRolePoliciesProvider {
             $targets = if ($ctx.ContainsKey('rolePolDesired')) { @($ctx['rolePolDesired']) } else { @(Get-PimManagedRolePolicyTargets) }
             # Many roles (the baseline) -> read every directory-role policy in two list calls instead of two per role.
             $index = if (@($targets | Where-Object { $_.Baseline }).Count) { Get-PimDirectoryRolePolicyIndex } else { $null }
+            $__polExpected = 0   # §33.0 round 2: roles that exist, for the policy-quality summary's completeness
             foreach ($t in $targets) {
                 # v2.4.336 regression: this read $rolesByName after the map moved to $ctx -- an empty
                 # variable under ErrorActionPreference=Stop, so EntraRolePolicies failed every tick.
                 $rid = $ctx['rolePolRoleIds'][$t.RoleDefinitionName.ToLowerInvariant()]
                 if (-not $rid) { continue }   # role does not exist -> nothing live; the diff makes it a create and ApplyUpdate reports it
+                $__polExpected++
                 $polId = $null; $rules = $null
                 if ($index -and $index.policyByRole.ContainsKey("$rid".ToLowerInvariant())) {
                     $polId = $index.policyByRole["$rid".ToLowerInvariant()]
@@ -5611,6 +5677,10 @@ function New-PimEntraRolePoliciesProvider {
                 }
                 $live.Add([pscustomobject]@{ GroupName=$t.RoleDefinitionName; PolicyId=$polId; Rules=$rules })
             }
+            # §33.0 MORE TELEMETRY round 2: the policy-quality COUNTS from what this read already holds (no extra call), for the
+            # heartbeat (rolesWithoutApproval / rolesWithoutMfaOnActivation / maxActivationHours). Not on a WhatIf / plan run;
+            # never fails the provider.
+            if (-not [bool]$ctx['__pimWhatIf']) { [void](Save-PimRolePolicySummary -Live $live.ToArray() -Expected $__polExpected) }
             # PLAN FIRST (mass-change circuit breaker, operator 2026-09-13).
             $planDesired = if ($ctx.ContainsKey('rolePolDesired')) { @($ctx['rolePolDesired']) } else { @((Get-PimEntraRolePolicyDesiredSet).items) }
             Add-PimPolicyChoiceUndecidedLive -Provider 'EntraRolePolicies' -Desired $planDesired -Live $live -KeyOf { param($r) (Get-PimRowProp -Row $r -Names @('GroupName','RoleDefinitionName')).ToLowerInvariant() }

@@ -145,6 +145,7 @@
     { "name": "EasyAuthAllowedPrincipals", "required": false, "default": "none", "help": "People / groups that may sign in (recommended)." },
     { "name": "EasyAuthAllowAllTenantUsers", "required": false, "default": false, "help": "Every member account may sign in (no guests)." },
     { "name": "KeepSetupHostRule", "required": false, "default": false, "help": "Keep the AllowSetupHost firewall rule (a caller that closes it later)." },
+    { "name": "KeepSetupIdentityInSqlAdminGroup", "required": false, "default": false, "help": "Keep the identity this run used for SQL in the SQL admin group at the end (a caller that still needs SQL afterwards and releases it itself). Without it, that identity leaves the group again at the end of the run and is made a member again by the next run." },
     { "name": "SetupHostIp", "required": false, "default": "read from api.ipify.org", "help": "This machine's public IP." },
     { "name": "UpdateJobName", "required": false, "default": "ca-pim-update", "help": "Name of the updater job." },
     { "name": "UpdateCron", "required": false, "default": "0 3 * * *", "help": "Updater schedule (UTC)." },

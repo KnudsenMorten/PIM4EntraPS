@@ -5,11 +5,11 @@
 <body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
   <p>Hello {{DisplayName}},</p>
   <p>Your admin account <b>{{UserPrincipalName}}</b> has been given a role assignment on {{Date}}:</p>
-  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
-    <tr><td><b>Role</b></td><td>{{RoleName}}</td></tr>
-    <tr><td><b>Via group</b></td><td>{{GroupName}} ({{GroupTag}})</td></tr>
-    <tr><td><b>Assignment type</b></td><td>{{AssignmentType}}</td></tr>
-  </table>
+  <div style="margin:12px 0 14px 0; font-size:14px; line-height:21px;">
+    <div style="margin:0 0 6px 0;"><b>Role:</b> {{RoleName}}</div>
+    <div style="margin:0 0 6px 0;"><b>Via group:</b> {{GroupName}} ({{GroupTag}})</div>
+    <div style="margin:0 0 6px 0;"><b>Assignment type:</b> {{AssignmentType}}</div>
+  </div>
   <p>Eligible assignments are activated on demand through PIM (or the PIM Activator extension) and may require justification, MFA, or approval depending on the role's policy.</p>
   <p style="color:#57606a;">If this assignment was not expected, contact your security operations team.</p>
 </body>

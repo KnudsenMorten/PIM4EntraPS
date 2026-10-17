@@ -3294,6 +3294,10 @@ function Write-PimJobRunRecord {
         Add-PimUnsavedRunRecord -Run $rec
         Write-Warning ("[scheduler] the run record of '{0}' (run {1}) could not be saved yet -- it is kept and saved again before the next job and at the end of this run" -f "$($rec.name)", "$($rec.runId)")
     }
+    # §33.0 MORE TELEMETRY round 2: the Graph 429 / 5xx retries this process counted (PIM-Rest.ps1) go into the hourly buckets
+    # behind the heartbeat's graphThrottled24h. Writes only when something was counted (or once, to create the record);
+    # never throws, never delays the run record above.
+    if (Get-Command Save-PimRestRetryCounts -ErrorAction SilentlyContinue) { try { [void](Save-PimRestRetryCounts) } catch { } }
     # ALERT-01: a finished run raises the failure alert HERE. Previously the ONLY
     # engine-failure producer was the Manager's POST /api/jobs/run handler, so a job
     # that failed on a SCHEDULED tick raised nothing -- alerting worked when someone
