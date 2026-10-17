@@ -504,7 +504,7 @@ function Send-PimNotifyMail {
         } catch { Write-Verbose "  [Mail] the designed layout could not be applied ($($_.Exception.Message)) -- the template is sent as it is" }
     }
     if ($portal.url -and $r.BodyHtml -notmatch [regex]::Escape($portal.base)) {
-        # MAIL-2 item 1: the bulletproof blue button (a table cell carries the colour, so Outlook draws it too).
+        # MAIL-2 item 1: the blue button (a coloured link, no table -- SUP-2026-00083).
         $block = if (Get-Command New-PimMailButton -ErrorAction SilentlyContinue) { New-PimMailButton -Url $portal.url -Label 'Open in PIM Manager' } else { '' }
         if (-not $block) {
             $block = '<p style="margin:18px 0 0 0;font-family:''Segoe UI'',Helvetica,Arial,sans-serif;font-size:14px;"><a href="' + [System.Net.WebUtility]::HtmlEncode($portal.url) +

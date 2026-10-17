@@ -973,6 +973,109 @@ function Test-PimRestTimeoutError {
   }
   return ("$($ErrorRecord)" -match 'HttpClient\.Timeout|operation has timed out|request was canceled')
 }
+# §33.0 MORE TELEMETRY round 2 (owner "add relevant. i want data"): RETRIES PER HTTP CODE. Every 429 / 5xx retry of a GRAPH
+# call (Invoke-PimRest's backoff loop and the $batch sub-requests) is counted in this process ($global: -- a dot-sourced
+# function's $script: follows the caller's scope); the scheduler persists the counts after every job run into hourly
+# buckets (pim.Settings 'GraphRetryCounts', Save-PimRestRetryCounts), and the heartbeat sends graphThrottled24h = the 429s
+# of the last 24 hours. Counts only -- no URL, no tenant, no body.
+function Add-PimRestRetryCount {
+  param([int]$Code, [string]$Resource = 'graph')
+  try {
+    if ("$Resource" -ne 'graph') { return }
+    $k = if ($Code -eq 429) { 'r429' } elseif ($Code -ge 500) { 'r5xx' } else { '' }
+    if (-not $k) { return }
+    if (-not ($global:PimRestRetryCounts -is [hashtable])) { $global:PimRestRetryCounts = @{ r429 = [long]0; r5xx = [long]0 } }
+    $global:PimRestRetryCounts[$k] = [long]$global:PimRestRetryCounts[$k] + 1
+  } catch { }
+}
+function Get-PimRestRetryCounts {
+  # A COPY of this process's not-yet-persisted counts: @{ r429; r5xx } (zeros when nothing was counted).
+  $c = $global:PimRestRetryCounts
+  if (-not ($c -is [hashtable])) { return @{ r429 = [long]0; r5xx = [long]0 } }
+  return @{ r429 = [long]$c['r429']; r5xx = [long]$c['r5xx'] }
+}
+function Get-PimRestRetryBucketHours { <# PURE. How many hourly buckets the record keeps (a literal). #> return 48 }
+function Merge-PimRestRetryBuckets {
+  <#
+    PURE. The stored record (raw JSON text, or $null / '' for none) plus -Add @{ r429; r5xx } in the bucket of -NowUtc's hour
+    -> the new record as JSON text: { sinceUtc; hours = { 'yyyy-MM-ddTHH:00:00Z' = { r429; r5xx } } }. Buckets older than
+    Get-PimRestRetryBucketHours are dropped; sinceUtc (when counting started here) is kept. A stored value that is not
+    the record's shape starts a new record. Built as text (no DateTime round-trip through ConvertFrom-Json on PS 7).
+  #>
+  param([AllowNull()][string]$Existing, [hashtable]$Add = @{}, [datetime]$NowUtc = [datetime]::UtcNow)
+  $now = $NowUtc.ToUniversalTime()
+  $cut = $now.AddHours(-1 * (Get-PimRestRetryBucketHours))
+  $inv = [System.Globalization.CultureInfo]::InvariantCulture
+  $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
+  $since = $now.ToString('yyyy-MM-ddTHH:mm:ssZ', $inv)
+  $hours = New-Object 'System.Collections.Generic.SortedDictionary[string,object]' ([System.StringComparer]::Ordinal)
+  if ("$Existing".Trim()) {
+    try {
+      $o = "$Existing" | ConvertFrom-Json
+      if ($null -ne $o -and $o.PSObject.Properties['hours']) {
+        $sv = $o.sinceUtc
+        if ($sv -is [datetime]) { $since = $sv.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', $inv) }
+        elseif ("$sv".Trim()) { $d0 = [datetime]::MinValue; if ([datetime]::TryParse("$sv", $inv, $styles, [ref]$d0)) { $since = $d0.ToString('yyyy-MM-ddTHH:mm:ssZ', $inv) } }
+        if ($null -ne $o.hours) {
+          foreach ($p in @($o.hours.PSObject.Properties)) {
+            $d = [datetime]::MinValue
+            if (-not [datetime]::TryParse("$($p.Name)", $inv, $styles, [ref]$d)) { continue }
+            if ($d -lt $cut) { continue }
+            $a = 0L; $b = 0L
+            [void][long]::TryParse("$($p.Value.r429)", [ref]$a); [void][long]::TryParse("$($p.Value.r5xx)", [ref]$b)
+            $hours[$d.ToString('yyyy-MM-ddTHH:00:00Z', $inv)] = @{ r429 = [math]::Max(0L, $a); r5xx = [math]::Max(0L, $b) }
+          }
+        }
+      }
+    } catch { $hours.Clear() }
+  }
+  $key = $now.ToString('yyyy-MM-ddTHH:00:00Z', $inv)
+  $ad = 0L; $bd = 0L; [void][long]::TryParse("$($Add['r429'])", [ref]$ad); [void][long]::TryParse("$($Add['r5xx'])", [ref]$bd)
+  if ($ad -gt 0 -or $bd -gt 0) {
+    $cur = if ($hours.ContainsKey($key)) { $hours[$key] } else { @{ r429 = 0L; r5xx = 0L } }
+    $hours[$key] = @{ r429 = [long]$cur.r429 + [math]::Max(0L, $ad); r5xx = [long]$cur.r5xx + [math]::Max(0L, $bd) }
+  }
+  $parts = @(foreach ($k in $hours.Keys) { '"{0}":{{"r429":{1},"r5xx":{2}}}' -f $k, [long]$hours[$k].r429, [long]$hours[$k].r5xx })
+  return ('{{"sinceUtc":"{0}","hours":{{{1}}}}}' -f $since, ($parts -join ','))
+}
+function Save-PimRestRetryCounts {
+  <#
+    Persist this process's counts into pim.Settings 'GraphRetryCounts' (compare-and-set, 5 tries -- several tick executions
+    run at once) and zero what was saved. Writes ONLY when something was counted (a quiet run touches nothing -- no read,
+    no write), so "no record" = no retry was ever recorded here. Never throws.
+    Returns @{ saved; reason }. -Read { param($cs,$name) } / -Write { param($cs,$name,$new,$expected) -> rows }: test seams.
+  #>
+  param([string]$ConnectionString = '', [datetime]$NowUtc = [datetime]::UtcNow, [scriptblock]$Read = $null, [scriptblock]$Write = $null)
+  try {
+    $c = Get-PimRestRetryCounts
+    $any = ([long]$c.r429 + [long]$c.r5xx) -gt 0
+    if (-not $any) { return @{ saved = $false; reason = 'nothing counted' } }
+    $cs = "$ConnectionString"
+    if (-not $cs.Trim() -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue)) { $cs = "$(Get-PimSqlSettingsConnectionString)" }
+    if (-not $cs.Trim()) { return @{ saved = $false; reason = 'no SQL store' } }
+    if (-not $Read) {
+      if (-not (Get-Command Get-PimSqlSettingRaw -ErrorAction SilentlyContinue)) { return @{ saved = $false; reason = 'the settings reader is not loaded' } }
+      $Read = { param($s, $n) Get-PimSqlSettingRaw -ConnectionString $s -Name $n }
+    }
+    if (-not $Write) {
+      if (-not (Get-Command Set-PimSqlSettingIfUnchanged -ErrorAction SilentlyContinue)) { return @{ saved = $false; reason = 'the settings writer is not loaded' } }
+      $Write = { param($s, $n, $new, $exp) Set-PimSqlSettingIfUnchanged -ConnectionString $s -Name $n -NewValueJson $new -ExpectedValueJson $exp }
+    }
+    for ($i = 0; $i -lt 5; $i++) {
+      $raw = & $Read $cs 'GraphRetryCounts'
+      $new = Merge-PimRestRetryBuckets -Existing $raw -Add $c -NowUtc $NowUtc
+      $n = 0; try { $n = [int](@(& $Write $cs 'GraphRetryCounts' $new $raw) | Select-Object -Last 1) } catch { $n = 0 }
+      if ($n -ge 1) {
+        if ($global:PimRestRetryCounts -is [hashtable]) {
+          $global:PimRestRetryCounts['r429'] = [math]::Max(0L, [long]$global:PimRestRetryCounts['r429'] - [long]$c.r429)
+          $global:PimRestRetryCounts['r5xx'] = [math]::Max(0L, [long]$global:PimRestRetryCounts['r5xx'] - [long]$c.r5xx)
+        }
+        return @{ saved = $true; reason = '' }
+      }
+    }
+    return @{ saved = $false; reason = 'another writer kept winning -- kept for the next run' }
+  } catch { return @{ saved = $false; reason = "$($_.Exception.Message)" } }
+}
 function Invoke-PimRest {
   [CmdletBinding()]
   param(
@@ -1022,6 +1125,7 @@ function Invoke-PimRest {
         if ($isTimeout -and $attempt -lt 1) { $attempt++; continue }
         if ($isTimeout) { throw "$Method $next -> timed out after $(Get-PimRestTimeoutSec) s (twice) -- the service did not answer" }
         if (($code -eq 429 -or $code -ge 500 -or $isReplDelay) -and $attempt -lt $MaxRetry) {
+          if ($code -eq 429 -or $code -ge 500) { Add-PimRestRetryCount -Code ([int]$code) -Resource $Resource }   # §33.0 round 2
           $wait = [Math]::Min(60, [Math]::Pow(2, $attempt + 1))
           try { $ra = [int]("$($_.Exception.Response.Headers['Retry-After'])"); if ($ra -gt 0) { $wait = $ra } } catch {}
           Start-Sleep -Seconds $wait; $attempt++; continue
@@ -1190,6 +1294,7 @@ function Invoke-PimGraphBatchGet {
         $status = 0; [void][int]::TryParse("$($br.status)", [ref]$status)
         if ($status -eq 429 -or $status -ge 500) {
           if ($status -eq 429) { $script:PimBatchStats.throttled++ } else { $script:PimBatchStats.serverErrors++ }
+          Add-PimRestRetryCount -Code $status -Resource 'graph'   # §33.0 round 2: graphThrottled24h
           $ra = 0
           try { if ($br.headers) { foreach ($hp in $br.headers.PSObject.Properties) { if ("$($hp.Name)" -ieq 'Retry-After') { [void][int]::TryParse("$($hp.Value)", [ref]$ra) } } } } catch { }
           if ($ra -gt $maxRetryAfter) { $maxRetryAfter = $ra }

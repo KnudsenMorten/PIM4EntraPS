@@ -7,8 +7,9 @@
     * a BRAND-2 header: the PIM Manager logo (inline CID image 'cid:pim-logo' in a mail -- the chokepoint
       Send-PimNotifyMail attaches docs/img/brand/pim-manager-512w.png -- or the inline SVG in a printed report),
       the environment name, and the 3 px brand-blue line;
-    * a summary first (tiles + one sentence), then sections with readable tables;
-    * ONE clear blue call-to-action button (bulletproof: a table cell with bgcolor, so Outlook draws it too) that
+    * a summary first (count lines + one sentence), then sections of "Topic: text" lines -- NO tables (SUP-2026-00083,
+      owner 2026-10-16: "Drop the tables in emails as it becomes hard to read on mobiles"), at most 600 px wide;
+    * ONE clear blue call-to-action button (a coloured link; a thick Outlook border keeps its size there) that
       deep-links to the page for the recipient's audience;
     * a footer (class "pim-env-footer", so the chokepoint does not add a second one) with the environment, tenant,
       version, a PLAIN "Open PIM Manager" link to the Manager home, and where to change your notifications.
@@ -59,8 +60,8 @@ function Get-PimMailToneColors {
 
 function New-PimMailButton {
     <#
-      The BLUE call-to-action (MAIL-2 item 1). Bulletproof for Outlook: the colour sits on a table CELL (bgcolor + style),
-      the link fills it, so a client that ignores padding on <a> still shows a blue button. '' for an unusable URL -- a
+      The BLUE call-to-action (MAIL-2 item 1): colour and padding sit on the link itself (no table cell any more,
+      SUP-2026-00083); mso-border-alt gives Outlook, which drops padding on a link, the same size. '' for an unusable URL -- a
       mail is sent without a button rather than with a broken one.
     #>
     param([AllowEmptyString()][string]$Url, [Parameter(Mandatory)][string]$Label, [ValidateSet('primary', 'secondary')][string]$Tone = 'primary')
@@ -69,34 +70,32 @@ function New-PimMailButton {
     $bg = if ($Tone -eq 'primary') { $b.accentFill } else { $b.surface }
     $fg = if ($Tone -eq 'primary') { '#ffffff' } else { $b.accent }
     $u = ConvertTo-PimMailText $Url.Trim()
-    return ('<table role="presentation" class="pim-mail-button" cellspacing="0" cellpadding="0" border="0" style="margin:18px 0 6px 0;border-collapse:separate;"><tr>' +
-            # PIM 100.105 ("the button's text is squeezed"): the padding sits on the CELL -- Outlook ignores padding on a link
-            '<td align="center" bgcolor="' + $bg + '" style="border-radius:6px;background:' + $bg + ';border:1px solid ' + $b.accentFill + ';padding:11px 24px;font-family:' + $b.font + ';">' +
-            '<a href="' + $u + '" target="_blank" style="display:inline-block;font-family:' + $b.font + ';font-size:15px;font-weight:600;line-height:20px;color:' + $fg + ';text-decoration:none;white-space:nowrap;">' +
-            (ConvertTo-PimMailText $Label) + ' &rarr;</a></td></tr></table>')
+    # SUP-2026-00083 (owner 2026-10-16, "Drop the tables in emails as it becomes hard to read on mobiles"): no <table> in a
+    # mail any more, not even for the button. The colour sits on the link itself; PIM 100.105 ("the button's text is
+    # squeezed") is kept by a thick Outlook-only border in the button colour (mso-border-alt) where Outlook drops the padding.
+    return ('<div class="pim-mail-button" style="margin:18px 0 6px 0;">' +
+            '<a href="' + $u + '" target="_blank" style="display:inline-block;background:' + $bg + ';border:1px solid ' + $b.accentFill + ';border-radius:6px;padding:11px 22px;' +
+            'mso-border-alt:solid ' + $bg + ' 11px;font-family:' + $b.font + ';font-size:15px;font-weight:600;line-height:20px;color:' + $fg + ';text-decoration:none;">' +
+            (ConvertTo-PimMailText $Label) + ' &rarr;</a></div>')
 }
 
 function New-PimMailSummaryTiles {
     <#
-      The summary FIRST (MAIL-2 item 7): a row of count tiles. Each tile @{ label; value; tone = neutral|accent|good|
-      warning|danger; hint }. Up to four per row; more wrap to a new row.
+      The summary FIRST (MAIL-2 item 7). Each tile @{ label; value; tone = neutral|accent|good|warning|danger; hint }.
+      SUP-2026-00083 (owner 2026-10-16): no table -- one LINE per count, "<b>Label:</b> value (hint)", a thin bar in the
+      tone's colour on the left, so it reads top-down on a phone.
     #>
     param([object[]]$Tiles = @())
     $b = Get-PimMailBrand
     $list = @($Tiles | Where-Object { $_ })
     if (-not $list.Count) { return '' }
-    $rows = New-Object System.Collections.Generic.List[string]
-    for ($i = 0; $i -lt $list.Count; $i += 4) {
-        $cells = for ($j = $i; $j -lt [Math]::Min($i + 4, $list.Count); $j++) {
-            $t = $list[$j]; $c = Get-PimMailToneColors -Tone "$($t.tone)"
-            '<td class="pim-mail-tile" valign="top" style="width:25%;padding:10px 12px;background:' + $c.bg + ';border:1px solid ' + $c.line + ';border-radius:6px;">' +
-            '<div style="font-family:' + $b.font + ';font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:' + $b.muted + ';">' + (ConvertTo-PimMailText $t.label) + '</div>' +
-            '<div style="font-family:' + $b.font + ';font-size:24px;font-weight:700;line-height:30px;color:' + $c.fg + ';">' + (ConvertTo-PimMailText $t.value) + '</div>' +
-            $(if ("$($t.hint)".Trim()) { '<div style="font-family:' + $b.font + ';font-size:11.5px;color:' + $b.muted + ';">' + (ConvertTo-PimMailText $t.hint) + '</div>' } else { '' }) + '</td>'
-        }
-        $rows.Add('<tr>' + (@($cells) -join '<td style="width:8px;font-size:1px;">&nbsp;</td>') + '</tr>')
+    $lines = foreach ($t in $list) {
+        $c = Get-PimMailToneColors -Tone "$($t.tone)"
+        '<div class="pim-mail-tile" style="margin:0 0 6px 0;padding:6px 10px;background:' + $c.bg + ';border-left:4px solid ' + $c.line + ';border-radius:4px;font-family:' + $b.font + ';font-size:14px;line-height:21px;color:' + $b.text + ';">' +
+        '<b>' + (ConvertTo-PimMailText $t.label) + ':</b> <span style="font-weight:700;color:' + $c.fg + ';">' + (ConvertTo-PimMailText $t.value) + '</span>' +
+        $(if ("$($t.hint)".Trim()) { ' <span style="font-size:13px;color:' + $b.muted + ';">(' + (ConvertTo-PimMailText $t.hint) + ')</span>' } else { '' }) + '</div>'
     }
-    return '<table role="presentation" class="pim-mail-tiles" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-collapse:separate;margin:14px 0 4px 0;">' + ($rows.ToArray() -join '<tr><td style="height:8px;font-size:1px;">&nbsp;</td></tr>') + '</table>'
+    return '<div class="pim-mail-tiles" style="margin:14px 0 4px 0;">' + (@($lines) -join '') + '</div>'
 }
 
 function New-PimMailCallout {
@@ -109,7 +108,11 @@ function New-PimMailCallout {
 
 function New-PimMailTable {
     <#
-      A readable table (MAIL-2 item 7). -Columns: @(@{ key; label; html = $false; width = '' }) -- a column with html=$true
+      A readable LIST of records (MAIL-2 item 7; the name is kept for its callers). SUP-2026-00083 (owner 2026-10-16: "Drop
+      the tables in emails as it becomes hard to read on mobiles / Make line with topic: / Then text."): no <table>. Each row
+      is ONE line "<b>topic:</b> text" -- the topic is the column marked topic = $true (else the first column); the other
+      columns follow as the text: their value alone when there is one other column, else "Label: value" joined with a dot.
+      An empty value is left out. -Columns: @(@{ key; label; html = $false; topic = $false }) -- a column with html=$true
       takes its cell as ready HTML (the caller encoded it); every other cell is encoded here. -Rows: objects or hashtables.
       -MaxRows caps the rows shown; the rest are counted in a last line (with -MoreUrl as a link to the full list).
     #>
@@ -117,22 +120,23 @@ function New-PimMailTable {
     $b = Get-PimMailBrand
     $cols = @($Columns | Where-Object { $_ })
     $all = @($Rows | Where-Object { $null -ne $_ })
-    if (-not $all.Count) { return '<p class="pim-mail-empty" style="font-family:' + $b.font + ';font-size:13px;color:' + $b.muted + ';margin:6px 0;">' + (ConvertTo-PimMailText $EmptyText) + '</p>' }
+    if (-not $all.Count) { return '<p class="pim-mail-empty" style="font-family:' + $b.font + ';font-size:14px;color:' + $b.muted + ';margin:6px 0;">' + (ConvertTo-PimMailText $EmptyText) + '</p>' }
     $show = if ($MaxRows -gt 0 -and $all.Count -gt $MaxRows) { @($all[0..($MaxRows - 1)]) } else { $all }
     $get = { param($row, $k) if ($row -is [System.Collections.IDictionary]) { if ($row.Contains($k)) { $row[$k] } else { $null } } else { $p = $row.PSObject.Properties[$k]; if ($p) { $p.Value } else { $null } } }
-    $th = foreach ($c in $cols) {
-        '<th align="left" style="padding:7px 8px;background:' + $b.surfaceAlt + ';border-bottom:1px solid ' + $b.border + ';font-family:' + $b.font + ';font-size:12px;font-weight:600;color:' + $b.heading + ';text-align:left;' + $(if ("$($c.width)".Trim()) { 'width:' + $c.width + ';' } else { '' }) + '">' + (ConvertTo-PimMailText $c.label) + '</th>'
-    }
-    $i = 0
+    $ti = 0
+    for ($k = 0; $k -lt $cols.Count; $k++) { if ($cols[$k].topic) { $ti = $k; break } }
     $tr = foreach ($r in $show) {
-        $bg = if ($i % 2) { '#fbfcfd' } else { $b.surface }; $i++
-        $tds = foreach ($c in $cols) {
-            $v = & $get $r "$($c.key)"
-            $cell = if ($c.html) { "$v" } else { ConvertTo-PimMailText $v }
-            if (-not "$cell".Trim()) { $cell = '<span style="color:' + $b.muted + ';">&mdash;</span>' }
-            '<td valign="top" style="padding:6px 8px;border-bottom:1px solid ' + $b.grid + ';font-family:' + $b.font + ';font-size:13px;color:' + $b.text + ';background:' + $bg + ';">' + $cell + '</td>'
-        }
-        '<tr>' + (@($tds) -join '') + '</tr>'
+        $cellOf = { param($c) $v = & $get $r "$($c.key)"; if ($c.html) { "$v" } else { ConvertTo-PimMailText $v } }
+        $topic = if ($cols.Count) { "$(& $cellOf $cols[$ti])".Trim() } else { '' }
+        if (-not $topic) { $topic = '&mdash;' }
+        $others = @(for ($k = 0; $k -lt $cols.Count; $k++) { if ($k -ne $ti) { $cols[$k] } })
+        $parts = @(foreach ($c in $others) {
+            $cell = "$(& $cellOf $c)".Trim()
+            if ($cell) { if ($others.Count -gt 1) { '<span style="color:' + $b.muted + ';">' + (ConvertTo-PimMailText $c.label) + ':</span> ' + $cell } else { $cell } }
+        })
+        $text = if ($parts.Count) { ' ' + ($parts -join ' &middot; ') } else { '' }
+        '<div class="pim-mail-row" style="padding:7px 0;border-bottom:1px solid ' + $b.grid + ';font-family:' + $b.font + ';font-size:14px;line-height:21px;color:' + $b.text + ';">' +
+        '<b>' + $topic + $(if ($parts.Count) { ':' } else { '' }) + '</b>' + $text + '</div>'
     }
     $more = ''
     if ($show.Count -lt $all.Count) {
@@ -140,7 +144,7 @@ function New-PimMailTable {
         $more = '<p class="pim-mail-more" style="font-family:' + $b.font + ';font-size:12.5px;color:' + $b.muted + ';margin:6px 0 0 0;">... and ' + $n + ' more' +
                 $(if (Test-PimMailLinkUrl -Url $MoreUrl) { ' &mdash; <a href="' + (ConvertTo-PimMailText $MoreUrl) + '" style="color:' + $b.accent + ';">' + (ConvertTo-PimMailText $MoreLabel) + '</a>' } else { '' }) + '.</p>'
     }
-    return '<table role="presentation" class="pim-mail-table" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-collapse:collapse;border:1px solid ' + $b.border + ';margin:6px 0 4px 0;"><thead><tr>' + (@($th) -join '') + '</tr></thead><tbody>' + (@($tr) -join '') + '</tbody></table>' + $more
+    return '<div class="pim-mail-table" style="margin:6px 0 4px 0;border-top:1px solid ' + $b.grid + ';">' + (@($tr) -join '') + '</div>' + $more
 }
 
 function New-PimMailSection {
@@ -152,6 +156,20 @@ function New-PimMailSection {
             '<h2 style="margin:0 0 4px 0;font-family:' + $b.font + ';font-size:16px;font-weight:700;color:' + $b.heading + ';">' + (ConvertTo-PimMailText $Title) + $link + '</h2>' +
             $(if ("$Note".Trim()) { '<div style="font-family:' + $b.font + ';font-size:12.5px;color:' + $b.muted + ';margin:0 0 4px 0;">' + (ConvertTo-PimMailText $Note) + '</div>' } else { '' }) +
             $Html + '</div>')
+}
+
+function New-PimMailFrameHtml {
+    <#
+      PURE. The outer frame of EVERY designed mail: a light page and a white card, at most 600 px wide (a phone shows it
+      whole, a desktop client keeps it narrow). SUP-2026-00083 (owner 2026-10-16, "Drop the tables in emails as it becomes
+      hard to read on mobiles"): plain <div>s, no layout table. class="pim-mail" marks a designed body (the chokepoint and
+      New-PimFramedMail look for it, so a mail is never framed twice).
+    #>
+    param([AllowEmptyString()][string]$InnerHtml = '')
+    $b = Get-PimMailBrand
+    return ('<div class="pim-mail" style="margin:0;padding:16px 8px;background:' + $b.surfaceAlt + ';">' +
+            '<div class="pim-mail-card" style="max-width:600px;margin:0 auto;padding:20px 18px;background:' + $b.surface + ';border:1px solid ' + $b.border + ';border-radius:8px;' +
+            'font-family:' + $b.font + ';font-size:15px;line-height:22px;color:' + $b.text + ';">' + $InnerHtml + '</div></div>')
 }
 
 function Get-PimMailBrandDir {
@@ -523,29 +541,24 @@ function New-PimEventMail {
     # ---------------- HTML ----------------
     $f = $b.font
     $logo = '<!--pim-logo--><img src="cid:pim-logo" width="180" height="46" alt="Invardia PIM Manager" style="display:block;border:0;outline:none;width:180px;height:auto;"><!--/pim-logo-->'
-    $envCell = if ($bodyEnv) { '<div style="font-family:' + $f + ';font-size:9.5px;letter-spacing:.6px;text-transform:uppercase;color:' + $b.muted + ';">Environment</div><div style="font-family:' + $f + ';font-size:13px;font-weight:600;color:' + $b.heading + ';">' + (& $enc $bodyEnv) + '</div>' } else { '' }
+    # SUP-2026-00083 (owner 2026-10-16): NO <table> anywhere in the mail -- the header, the answers, the facts and the causes
+    # are LINES ("<b>Topic:</b> text"), stacked top-down so a phone shows them without side-scrolling; max 600 px wide.
     $h = New-Object System.Collections.Generic.List[string]
-    $h.Add('<table role="presentation" class="pim-mail-header" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;"><tr>' +
-           '<td valign="middle" style="padding:0 0 10px 0;font-family:' + $f + ';">' + $logo + '</td>' +
-           '<td valign="middle" align="right" style="padding:0 0 10px 0;text-align:right;font-family:' + $f + ';">' + $envCell + '</td></tr>' +
-           '<tr><td colspan="2" style="height:3px;line-height:3px;font-size:1px;font-family:' + $f + ';background:' + $b.blue + ';">&nbsp;</td></tr></table>')
+    $h.Add('<div class="pim-mail-header" style="padding:0 0 10px 0;border-bottom:3px solid ' + $b.blue + ';font-family:' + $f + ';">' + $logo +
+           $(if ($bodyEnv) { '<div style="margin:8px 0 0 0;font-family:' + $f + ';font-size:13px;line-height:18px;color:' + $b.muted + ';"><b style="color:' + $b.heading + ';">Environment:</b> ' + (& $enc $bodyEnv) + '</div>' } else { '' }) + '</div>')
     $h.Add('<h1 class="pim-mail-heading" style="margin:18px 0 10px 0;font-family:' + $f + ';font-size:20px;line-height:26px;font-weight:700;color:' + $b.heading + ';">' + (& $enc $heading) + '</h1>')
     if ($summary -or $opener -or $qa.Count) {
         $p = New-Object System.Collections.Generic.List[string]
         $lead = (@($(if ($opener) { '<b>' + (& $enc $opener) + '</b>' }), $(if ($summary) { & $enc $summary })) | Where-Object { $_ }) -join ' '
         if ($lead) { $p.Add('<div style="margin:0;">' + $lead + '</div>') }
-        if ($qa.Count) {
-            $rows = foreach ($x in $qa) { '<tr><td valign="top" style="font-family:' + $f + ';font-size:14px;line-height:20px;color:' + $b.text + ';padding:6px 0 0 0;"><b>' + (& $enc $x.q) + '</b> ' + (& $enc $x.a) + '</td></tr>' }
-            $p.Add('<table role="presentation" class="pim-mail-qa" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-collapse:collapse;margin:4px 0 0 0;">' + (@($rows) -join '') + '</table>')
-        }
-        $h.Add('<div class="pim-mail-summary" style="margin:0 0 16px 0;padding:12px 16px;background:' + $b.surfaceAlt + ';border:1px solid ' + $b.border + ';border-left:4px solid ' + $b.blue + ';border-radius:6px;font-family:' + $f + ';font-size:14px;line-height:21px;color:' + $b.text + ';">' + ($p.ToArray() -join '') + '</div>')
+        foreach ($x in $qa) { $p.Add('<div class="pim-mail-qa" style="margin:8px 0 0 0;"><b>' + (& $enc $x.q) + '</b> ' + (& $enc $x.a) + '</div>') }
+        $h.Add('<div class="pim-mail-summary" style="margin:0 0 16px 0;padding:12px 14px;background:' + $b.surfaceAlt + ';border:1px solid ' + $b.border + ';border-left:4px solid ' + $b.blue + ';border-radius:6px;font-family:' + $f + ';font-size:15px;line-height:22px;color:' + $b.text + ';">' + ($p.ToArray() -join '') + '</div>')
     }
     if ($facts.Count) {
         $rows = foreach ($x in $facts) {
-            '<tr class="pim-mail-fact"><td valign="top" style="font-family:' + $f + ';font-size:13px;line-height:20px;color:' + $b.muted + ';padding:5px 18px 5px 0;white-space:nowrap;border-bottom:1px solid ' + $b.grid + ';">' + (& $enc $x.label) + '</td>' +
-            '<td valign="top" style="font-family:' + $f + ';font-size:14px;line-height:20px;color:' + $b.text + ';padding:5px 0;border-bottom:1px solid ' + $b.grid + ';">' + (& $enc $x.value) + '</td></tr>'
+            '<div class="pim-mail-fact" style="margin:0 0 6px 0;font-family:' + $f + ';font-size:14px;line-height:21px;color:' + $b.text + ';"><b>' + (& $enc $x.label) + ':</b> ' + (& $enc $x.value) + '</div>'
         }
-        $h.Add('<table role="presentation" class="pim-mail-facts" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-collapse:collapse;margin:0 0 14px 0;">' + (@($rows) -join '') + '</table>')
+        $h.Add('<div class="pim-mail-facts" style="margin:0 0 16px 0;">' + (@($rows) -join '') + '</div>')
     }
     if ("$contentHtml".Trim()) { $h.Add('<div class="pim-mail-content" style="margin:6px 0 0 0;font-family:' + $f + ';font-size:14px;line-height:1.5;color:' + $b.text + ';">' + $contentHtml + '</div>') }
     foreach ($s in $sections) {
@@ -555,18 +568,19 @@ function New-PimEventMail {
     }
     if ($causes.Count) {
         $rows = foreach ($c in $causes) {
-            $cnt = if ($c.count -gt 0) { ' <span style="color:' + $b.muted + ';font-weight:400;">(' + $c.count + ' item' + $(if ($c.count -ne 1) { 's' } else { '' }) + ')</span>' } else { '' }
+            $cnt = if ($c.count -gt 0) { ' <span style="color:' + $b.muted + ';">(' + $c.count + ' item' + $(if ($c.count -ne 1) { 's' } else { '' }) + ')</span>' } else { '' }
             $nm = ''
             if ($c.names.Count) {
                 $shown = @($c.names | Select-Object -First 8)
                 $nm = '<div style="color:' + $b.muted + ';font-size:12.5px;padding-top:2px;">' + (& $enc ($shown -join ', ')) + $(if ($c.names.Count -gt $shown.Count) { ' and ' + ($c.names.Count - $shown.Count) + ' more' } else { '' }) + '</div>'
             }
-            $fx = if ($c.fix) { '<div style="padding-top:2px;">What to do: ' + (& $enc $c.fix) + '</div>' } else { '' }
-            '<tr class="pim-mail-cause"><td valign="top" style="font-family:' + $f + ';font-size:14px;line-height:20px;color:' + $b.text + ';padding:8px 0;border-bottom:1px solid ' + $b.grid + ';">' +
-            '<div><b>' + (& $enc $c.title) + '</b>' + $cnt + '</div>' + $fx + $nm + '</td></tr>'
+            # ONE line "<b>Cause</b> (n items): What to do: ..." -- the topic bold first, its text after it (SUP-2026-00083)
+            $fx = if ($c.fix) { ': What to do: ' + (& $enc $c.fix) } else { '' }
+            '<div class="pim-mail-cause" style="padding:8px 0;border-bottom:1px solid ' + $b.grid + ';font-family:' + $f + ';font-size:14px;line-height:21px;color:' + $b.text + ';">' +
+            '<b>' + (& $enc $c.title) + '</b>' + $cnt + $fx + $nm + '</div>'
         }
-        $h.Add('<div class="pim-mail-causes" style="margin:16px 0 0 0;"><h2 style="margin:0 0 4px 0;font-family:' + $f + ';font-size:15px;font-weight:700;color:' + $b.heading + ';">' + (& $enc $causesTitle) + '</h2>' +
-               '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-collapse:collapse;">' + (@($rows) -join '') + '</table></div>')
+        $h.Add('<div class="pim-mail-causes" style="margin:16px 0 0 0;"><h2 style="margin:0 0 4px 0;font-family:' + $f + ';font-size:16px;font-weight:700;color:' + $b.heading + ';">' + (& $enc $causesTitle) + '</h2>' +
+               (@($rows) -join '') + '</div>')
     }
     if ($btnHtml) { $h.Add('<div class="pim-mail-buttons" style="margin:8px 0 0 0;">' + $btnHtml + '</div>') }
     if ($details.Count) {
@@ -582,9 +596,7 @@ function New-PimEventMail {
     if (Test-PimMailLinkUrl -Url $notifUrl) { $foot.Add('<a href="' + (& $enc $notifUrl) + '" style="color:' + $b.accent + ';">Change what you receive</a>') }
     $h.Add('<div class="pim-env-footer" style="margin:22px 0 0 0;padding-top:10px;border-top:1px solid ' + $b.border + ';font-family:' + $f + ';font-size:12px;line-height:18px;color:' + $b.muted + ';">' + ($foot.ToArray() -join '<br>') + '</div>')
     $pre = '<div class="pim-mail-preheader" style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:' + $b.surfaceAlt + ';">' + (& $enc $(if ($summary) { $summary } else { $heading })) + '</div>'
-    $html = $pre + '<table role="presentation" class="pim-mail" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="' + $b.surfaceAlt + '" style="background:' + $b.surfaceAlt + ';border-collapse:collapse;"><tr><td align="center" style="padding:20px 10px;font-family:' + $f + ';">' +
-            '<table role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" bgcolor="' + $b.surface + '" style="width:100%;max-width:640px;background:' + $b.surface + ';border:1px solid ' + $b.border + ';border-radius:8px;border-collapse:separate;"><tr><td style="padding:22px 26px 20px 26px;font-family:' + $f + ';color:' + $b.text + ';">' +
-            ($h.ToArray() -join '') + '</td></tr></table></td></tr></table>'
+    $html = $pre + (New-PimMailFrameHtml -InnerHtml ($h.ToArray() -join ''))
 
     # ---------------- plain text: the same content, in the same order ----------------
     $t = New-Object System.Collections.Generic.List[string]
@@ -600,8 +612,8 @@ function New-PimEventMail {
     if ($causes.Count) {
         $t.Add($causesTitle + ':')
         foreach ($c in $causes) {
-            $t.Add('- ' + $c.title + $(if ($c.count -gt 0) { ' (' + $c.count + ' item' + $(if ($c.count -ne 1) { 's' } else { '' }) + ')' } else { '' }))
-            if ($c.fix) { $t.Add('  What to do: ' + $c.fix) }
+            # "Topic: text", the same line as the HTML part (SUP-2026-00083)
+            $t.Add('- ' + $c.title + $(if ($c.count -gt 0) { ' (' + $c.count + ' item' + $(if ($c.count -ne 1) { 's' } else { '' }) + ')' } else { '' }) + $(if ($c.fix) { ': What to do: ' + $c.fix } else { '' }))
             if ($c.names.Count) { $shown = @($c.names | Select-Object -First 8); $t.Add('  ' + ($shown -join ', ') + $(if ($c.names.Count -gt $shown.Count) { ' and ' + ($c.names.Count - $shown.Count) + ' more' } else { '' })) }
         }
         $t.Add('')
@@ -717,21 +729,21 @@ function ConvertTo-PimAlertFindingList {
 }
 
 function Get-PimAlertRowHtml {
-    # One table row: the label left, the value right. -ValueHtml is ready HTML (already encoded by the caller).
+    # One LINE "<b>Label:</b> value" (SUP-2026-00083 -- it was a table row). -ValueHtml is ready HTML (already encoded by the
+    # caller). The topic is the bold part now; -NotBold is kept for older callers (the value is never bold).
     param([string]$Label, [string]$ValueHtml, [string]$Class = 'pim-alert-row', [string]$Color = '', [switch]$NotBold)
     $b = Get-PimMailBrand
     $col = if ("$Color".Trim()) { "$Color" } else { $b.text }
-    $val = if ($NotBold) { $ValueHtml } else { '<b>' + $ValueHtml + '</b>' }
-    return ('<tr class="' + $Class + '">' +
-            '<td valign="top" style="font-family:' + $b.font + ';font-size:13px;line-height:20px;color:' + $b.muted + ';padding:7px 16px 7px 0;white-space:nowrap;border-bottom:1px solid ' + $b.grid + ';">' + (ConvertTo-PimMailText $Label) + '</td>' +
-            '<td valign="top" style="font-family:' + $b.font + ';font-size:14px;line-height:20px;color:' + $col + ';padding:7px 0;border-bottom:1px solid ' + $b.grid + ';">' + $val + '</td></tr>')
+    $lab = if ("$Label".Trim()) { '<b>' + (ConvertTo-PimMailText $Label) + ':</b> ' } else { '' }
+    return ('<div class="' + $Class + '" style="margin:0 0 6px 0;font-family:' + $b.font + ';font-size:14px;line-height:21px;color:' + $col + ';">' + $lab + $ValueHtml + '</div>')
 }
 
 function ConvertTo-PimAlertFindingRows {
     <#
-      PURE. THE one function that turns an alert's findings into table rows: one row per finding, the kind left and the
-      name (bold) right, grouped by kind. '' for no findings. More than -MaxRows: the first -MaxRows, then one row that
-      says how many more there are. Never one paragraph joined with ";", never "[Kind] Workload: name".
+      PURE. THE one function that turns an alert's findings into LINES (the AlertFindingRows token): one line per finding,
+      "<b>kind:</b> name" (SUP-2026-00083: no table rows any more), grouped by kind. '' for no findings. More than -MaxRows:
+      the first -MaxRows, then one line that says how many more there are. Never one paragraph joined with ";", never
+      "[Kind] Workload: name".
     #>
     param([AllowNull()][object]$Findings, [int]$MaxRows = 50)
     $list = @(ConvertTo-PimAlertFindingList -Findings $Findings)
@@ -1169,7 +1181,7 @@ function New-PimMailDocument {
     $btn = if ($Button -and "$($Button.url)".Trim()) { New-PimMailButton -Url "$($Button.url)" -Label $(if ("$($Button.label)".Trim()) { "$($Button.label)" } else { 'Open in PIM Manager' }) } else { '' }
     $logo = if ($Print) { $svg = Get-PimMailLogoSvg; if ($svg) { '<span class="pim-mail-logo" style="display:inline-block;width:200px;">' + $svg + '</span>' } else { Get-PimMailWordmarkHtml } }
             else { '<!--pim-logo--><img src="cid:pim-logo" width="180" height="46" alt="Invardia PIM Manager" style="display:block;border:0;outline:none;width:180px;height:auto;"><!--/pim-logo-->' }
-    $envCell = if ($envName) { '<div style="font-family:' + $b.font + ';font-size:9.5px;letter-spacing:.6px;text-transform:uppercase;color:' + $b.muted + ';">Environment</div><div style="font-family:' + $b.font + ';font-size:13px;font-weight:600;color:' + $b.heading + ';">' + (ConvertTo-PimMailText $envName) + '</div>' } else { '' }
+    $envCell = if ($envName) { '<div style="margin:8px 0 0 0;font-family:' + $b.font + ';font-size:13px;line-height:18px;color:' + $b.muted + ';"><b style="color:' + $b.heading + ';">Environment:</b> ' + (ConvertTo-PimMailText $envName) + '</div>' } else { '' }
 
     # PIM 100.135 (Invardia's format): the heading names the product and the environment ("PIM Manager for <environment> -
     # <title>"); the footer is site + support; the tenant id (a GUID) is only in the small "Details for support" block.
@@ -1195,10 +1207,8 @@ function New-PimMailDocument {
     }
     $footer = $detailsBlock + '<div class="pim-env-footer" style="margin:26px 0 0 0;padding-top:10px;border-top:1px solid ' + $b.border + ';font-family:' + $b.font + ';font-size:12px;line-height:18px;color:' + $b.muted + ';">' + ($foot.ToArray() -join '<br>') + '</div>'
 
-    $inner = '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;"><tr>' +
-             '<td valign="middle" style="padding:0 0 10px 0;">' + $logo + '</td>' +
-             '<td valign="middle" align="right" style="padding:0 0 10px 0;text-align:right;">' + $envCell + '</td></tr>' +
-             '<tr><td colspan="2" style="height:3px;line-height:3px;font-size:1px;background:' + $b.blue + ';">&nbsp;</td></tr></table>' +
+    # SUP-2026-00083: the header is stacked (logo, then the environment line), no layout table
+    $inner = '<div class="pim-mail-header" style="padding:0 0 10px 0;border-bottom:3px solid ' + $b.blue + ';">' + $logo + $envCell + '</div>' +
              '<h1 class="pim-mail-heading" style="margin:18px 0 2px 0;font-family:' + $b.font + ';font-size:22px;font-weight:700;color:' + $b.heading + ';">' + (ConvertTo-PimMailText $headTitle) + '</h1>' +
              $(if ("$Subtitle".Trim()) { '<div style="font-family:' + $b.font + ';font-size:13px;color:' + $b.muted + ';">' + (ConvertTo-PimMailText $Subtitle) + '</div>' } else { '' }) +
              # PIM 100.135: summary first, then the content, then the ONE button (no longer between the summary and the tables)
@@ -1206,9 +1216,7 @@ function New-PimMailDocument {
 
     if (-not $Print) {
         $pre = if ("$Preheader".Trim()) { '<div class="pim-mail-preheader" style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:' + $b.surfaceAlt + ';">' + (ConvertTo-PimMailText $Preheader) + '</div>' } else { '' }
-        return ($pre + '<table role="presentation" class="pim-mail" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="' + $b.surfaceAlt + '" style="background:' + $b.surfaceAlt + ';border-collapse:collapse;"><tr><td align="center" style="padding:20px 10px;">' +
-                '<table role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" bgcolor="' + $b.surface + '" style="width:100%;max-width:640px;background:' + $b.surface + ';border:1px solid ' + $b.border + ';border-radius:8px;border-collapse:separate;"><tr><td style="padding:22px 26px 20px 26px;font-family:' + $b.font + ';color:' + $b.text + ';">' +
-                $inner + '</td></tr></table></td></tr></table>')
+        return ($pre + (New-PimMailFrameHtml -InnerHtml $inner))
     }
     # The print-ready document: @page puts the tenant + environment, the date and "Page x of y" on EVERY page (MAIL-2 item 7).
     $left = ConvertTo-PimMailCssString ((@($tn, $envName) | Where-Object { "$_".Trim() }) -join ' - ')
@@ -1216,7 +1224,7 @@ function New-PimMailDocument {
     $css = '@page{size:A4;margin:16mm 14mm 18mm 14mm;@bottom-left{content:"' + $left + '";font-size:9pt;color:#57606a;}' +
            '@bottom-right{content:"Page " counter(page) " of " counter(pages);font-size:9pt;color:#57606a;}@top-right{content:"' + $right + '";font-size:9pt;color:#57606a;}}' +
            'html,body{margin:0;padding:0;background:#ffffff;color:' + $b.text + ';font-family:' + $b.font + ';-webkit-print-color-adjust:exact;print-color-adjust:exact;}' +
-           '.pim-report{max-width:900px;margin:0 auto;padding:18px;}.pim-mail-table{page-break-inside:auto;}.pim-mail-table tr{page-break-inside:avoid;}' +
+           '.pim-report{max-width:900px;margin:0 auto;padding:18px;}.pim-mail-table{page-break-inside:auto;}.pim-mail-row{page-break-inside:avoid;}' +
            '.pim-mail-section h2{page-break-after:avoid;}.pim-mail-button{display:none;}.pim-mail-logo svg{width:200px;height:auto;}' +
            '@media screen{.pim-report-printhint{display:block;margin:0 0 12px;padding:8px 12px;border:1px solid #54aeff;background:#ddf4ff;border-radius:6px;font-size:12.5px;}}' +
            '@media print{.pim-report-printhint{display:none;}}'

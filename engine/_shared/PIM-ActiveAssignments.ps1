@@ -329,6 +329,15 @@ function Save-PimActiveAssignmentsSnapshotRows {
     $batches = 0; $retries = 0; $seq = 0; $written = 0
     $table = New-PimSqlActiveAssignmentRowTable
     $keyCache = @{}
+    # 2.4.645 (E3 regression, measured): the MANAGED mark goes in with the row when the engine's managed list is stored, so
+    # the set-based marks pass after this write (the job's Update-PimActiveAssignmentsSnapshotMarks, the Manager's page)
+    # rewrites only the rows it disagrees with -- normally none -- instead of every managed row and its five indexes.
+    # Optimisation only: that SQL pass stays the authority (the marks key is NOT set here), and no list / a failed read = $false.
+    $mlSet = $null
+    if ($total -gt 0 -and (Get-Command Get-PimSqlManagedLiveIdentitySet -ErrorAction SilentlyContinue)) {
+        try { $mlSet = Get-PimSqlManagedLiveIdentitySet -ConnectionString $ConnectionString } catch { $mlSet = $null }
+    }
+    $hasManagedCol = $table.Columns.Contains('Managed')
     if ($total -gt 0) {
         $e = ([System.Collections.IEnumerable]$rows).GetEnumerator()
         $more = $e.MoveNext()
@@ -341,6 +350,7 @@ function Save-PimActiveAssignmentsSnapshotRows {
                     $dr = $table.NewRow()
                     $dr['SnapshotId'] = $sid; $dr['Seq'] = $seq
                     foreach ($k in @($v.Keys)) { if ($null -eq $v[$k]) { $dr[$k] = [System.DBNull]::Value } else { $dr[$k] = $v[$k] } }
+                    if ($hasManagedCol) { $ik = "$($v['IdentityKey'])"; $dr['Managed'] = [bool]($null -ne $mlSet -and $ik -ne '' -and $mlSet.Contains($ik.ToLowerInvariant())) }
                     $table.Rows.Add($dr)
                     $seq++
                 }
@@ -1133,6 +1143,10 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
         $entry['rows'] = $null; $snap['rows'] = $null
         $where = "$($tbl.where)"
         $formTxt = "; {0} row(s) in {1} batch(es), {2}s{3}" -f $tbl.rows, $tbl.batches, $tbl.seconds, $(if ($tbl.retries) { ", $($tbl.retries) batch retr$(if ($tbl.retries -eq 1) { 'y' } else { 'ies' })" } else { '' })
+        # §33.0 round 2: the MANAGED marks of the new generation, here (not only when the Manager's page reads it)
+        $mkR = Update-PimActiveAssignmentsSnapshotMarks -SnapshotId ([long]$tbl.snapshotId)
+        if ($mkR.ok -and $mkR.updated) { $formTxt += "; managed marks computed ($($mkR.changed) row(s) marked)" }
+        elseif (-not $mkR.ok) { $formTxt += "; managed marks NOT computed ($($mkR.reason))" }
     } else {
         # 100.31 SNAPSHOT-OOM: ONE compact string written row by row, not a `-Depth 12` serialisation of the whole document
         # (which built a second, dictionary-shaped copy of every row before it wrote a character). The rows are released
@@ -1151,6 +1165,47 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
     $partialTxt = if ($errs.Count) { " PARTIAL -- could not read: " + (@($errs | ForEach-Object { "$($_.surface)" }) -join ', ') } else { '' }
     return [pscustomobject]@{ ran = $true; whatIf = $false; total = [int]$c.total; partial = [bool]$snap.partial
         detail = "$type`: $sum$partialTxt$ledTxt" }
+}
+
+function Update-PimActiveAssignmentsSnapshotMarks {
+    <#
+      §33.0 MORE TELEMETRY round 2 (owner "add relevant. i want data"). The MANAGED marks of a stored generation, computed
+      where the JOB runs -- the Manager's own code (Get-PimActiveAssignmentMarksKey + Sync-PimSqlActiveAssignmentMarks, set-based
+      in SQL against the engine's 'managed-live' list) -- so the heartbeat's roleAssignmentsOutsidePim no longer waits for
+      someone to open the Active assignments page. The break-glass list is marked too (the store); PIM Manager's own
+      identities / the Support app need a directory read and are left to the Manager (its key then differs, and its page
+      re-marks before it serves a row -- nothing it shows changes).
+      -SnapshotId 0 = the newest COMPLETE generation. Nothing is done while the managed list is not there (no marks are
+      better than marks that call every row unmanaged). Never throws: returns { ok; updated; changed; reason }.
+      -Stamps / -BreakGlass / -Sync: test seams.
+    #>
+    param([string]$ConnectionString = '', [long]$SnapshotId = 0, [scriptblock]$Stamps = $null, [scriptblock]$BreakGlass = $null, [scriptblock]$Sync = $null, [scriptblock]$Latest = $null)
+    $res = { param($ok, $upd, $chg, $why) [pscustomobject]@{ ok = [bool]$ok; updated = [bool]$upd; changed = [int]$chg; reason = "$why" } }
+    try {
+        if (-not "$ConnectionString".Trim() -and (Get-Command Get-PimTenantCacheStoreCs -ErrorAction SilentlyContinue)) { $ConnectionString = "$(Get-PimTenantCacheStoreCs)" }
+        if (-not "$ConnectionString".Trim()) { return (& $res $false $false 0 'no SQL store') }
+        if (-not $Sync) {
+            foreach ($fn in 'Get-PimActiveAssignmentMarksKey', 'Sync-PimSqlActiveAssignmentMarks') { if (-not (Get-Command $fn -ErrorAction SilentlyContinue)) { return (& $res $false $false 0 'the marks writer is not loaded') } }
+            $Sync = { param($cs, $sid, $mk, $known, $bg) Sync-PimSqlActiveAssignmentMarks -ConnectionString $cs -SnapshotId $sid -MarksKey $mk -ManagedKnown $known -BreakGlass @($bg) }
+        }
+        if ($SnapshotId -le 0) {
+            if (-not $Latest) { $Latest = { param($cs) Invoke-PimSqlScalar -ConnectionString $cs -Sql "SELECT MAX(SnapshotId) FROM pim.ActiveAssignmentSnapshots WHERE State = N'complete'" } }
+            $v = & $Latest $ConnectionString
+            $n = [long]0; if ($null -eq $v -or $v -is [System.DBNull] -or -not [long]::TryParse("$v", [ref]$n) -or $n -le 0) { return (& $res $true $false 0 'no complete generation') }
+            $SnapshotId = $n
+        }
+        if (-not $Stamps) { $Stamps = { if (Get-Command Get-PimTenantCacheStamps -ErrorAction SilentlyContinue) { Get-PimTenantCacheStamps -Kinds @('managed-live') } else { $null } } }
+        $st = & $Stamps
+        if ($null -eq $st -or -not [bool]$st.ok -or -not $st.stamps -or -not $st.stamps.ContainsKey('managed-live')) { return (& $res $true $false 0 'the managed list is not stored yet') }
+        $mlStamp = "$($st.stamps['managed-live'])"
+        $bg = @()
+        if (-not $BreakGlass) { $BreakGlass = { if (Get-Command Get-PimBreakGlassAccountStatus -ErrorAction SilentlyContinue) { Get-PimBreakGlassAccountStatus } else { $null } } }
+        $bgS = $null; try { $bgS = & $BreakGlass } catch { $bgS = $null }
+        if ($null -ne $bgS -and -not ([bool]$bgS.storeConfigured -and -not [bool]$bgS.storeOk)) { $bg = @(@($bgS.accounts) | Where-Object { $_ }) }
+        $mk = Get-PimActiveAssignmentMarksKey -ManagedStamp $mlStamp -ManagedKnown $true -BreakGlass @($bg)
+        $r = & $Sync $ConnectionString $SnapshotId $mk $true @($bg)
+        return (& $res $true ([bool]$r.updated) ([int]$r.changed) '')
+    } catch { return (& $res $false $false 0 "$($_.Exception.Message)") }
 }
 
 function Register-PimActiveAssignmentsSnapshotHandler {

@@ -396,7 +396,7 @@ function ConvertTo-PimDailyChangesHtml {
     )
     $summary = $tiles + '<p style="font-family:' + (Get-PimMailBrand).font + ';font-size:14px;margin:10px 0 0 0;">' + (& $enc $headline) + '</p>'
     if ($risky.Count) {
-        $rt = New-PimMailTable -Columns @(@{ key = 'when'; label = 'When' }, @{ key = 'actor'; label = 'Who' }, @{ key = 'what'; label = 'What' }, @{ key = 'riskReason'; label = 'Why it needs a look' }) `
+        $rt = New-PimMailTable -Columns @(@{ key = 'when'; label = 'When' }, @{ key = 'actor'; label = 'Who' }, @{ key = 'what'; label = 'What'; topic = $true }, @{ key = 'riskReason'; label = 'Why it needs a look' }) `
                                -Rows $risky -MaxRows $(if ($Print) { 0 } else { 15 }) -MoreUrl $auditAll -MoreLabel 'See them in the audit trail'
         $summary += New-PimMailCallout -Tone 'danger' -Title ("Needs a look ({0})" -f $risky.Count) -Html $rt
     }
@@ -404,15 +404,15 @@ function ConvertTo-PimDailyChangesHtml {
     if ($total -gt 0) {
         $kt = New-PimMailTable -Columns @(@{ key = 'kind'; label = 'Kind' }, @{ key = 'n'; label = 'Changes' }) -Rows @($kinds.Keys | ForEach-Object { [pscustomobject]@{ kind = $_; n = $kinds[$_] } })
         $pt = New-PimMailTable -Columns @(@{ key = 'actor'; label = 'Person' }, @{ key = 'changes'; label = 'Changes' }, @{ key = 'risky'; label = 'Need a look' }) -Rows @($Report.byActor)
-        $body += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr><td valign="top" style="width:48%;padding-right:2%;">' + (New-PimMailSection -Title 'By kind' -Html $kt) +
-                 '</td><td valign="top" style="width:50%;">' + (New-PimMailSection -Title 'By person' -Html $pt) + '</td></tr></table>'
+        # SUP-2026-00083 (owner 2026-10-16): no side-by-side layout table -- "By kind" then "By person", one under the other
+        $body += (New-PimMailSection -Title 'By kind' -Html $kt) + (New-PimMailSection -Title 'By person' -Html $pt)
         foreach ($k in @($kinds.Keys)) {
             $kr = @($Report.rows | Where-Object { $_.kind -eq $k })
             $rowsHtml = @($kr | ForEach-Object {
                 $w = (& $enc $_.what); if ($_.risky) { $w = '<span style="color:#cf222e;font-weight:600;">&#9888;</span> ' + $w }
                 [pscustomobject]@{ when = $_.when; actor = $_.actor; area = $_.area; what = $w; before = $_.before; after = $_.after }
             })
-            $cols = @(@{ key = 'when'; label = 'When'; width = '96px' }, @{ key = 'actor'; label = 'Who' }, @{ key = 'area'; label = 'Area' }, @{ key = 'what'; label = 'What'; html = $true })
+            $cols = @(@{ key = 'when'; label = 'When' }, @{ key = 'actor'; label = 'Who' }, @{ key = 'area'; label = 'Area' }, @{ key = 'what'; label = 'What'; html = $true; topic = $true })
             if (@($kr | Where-Object { "$($_.before)$($_.after)".Trim() -and $_.kind -eq 'Changed' }).Count) { $cols += @(@{ key = 'before'; label = 'Before' }, @{ key = 'after'; label = 'After' }) }
             $body += New-PimMailSection -Title ("{0} ({1})" -f $k, $kr.Count) -Html (New-PimMailTable -Columns $cols -Rows $rowsHtml -MaxRows $(if ($Print) { 0 } else { $MaxRowsPerKind }) -MoreUrl $auditAll -MoreLabel 'See all of them in the audit trail')
         }
@@ -522,13 +522,14 @@ function Get-PimTierZeroOneReport {
 }
 
 function ConvertTo-PimTierReportHtmlRows {
-    # PURE helper: tier-report rows -> HTML <tr> rows.
+    # PURE helper: tier-report rows -> HTML LINES, one per person, "<b>person:</b> Highest tier: T0 - Level(s): .. - Grants: n"
+    # (SUP-2026-00083, owner 2026-10-16: no tables in a mail -- these were <tr> rows for a customer template's table).
     param([object[]]$Report = @())
     $r = @($Report)
-    if ($r.Count -eq 0) { return '<tr><td colspan="4" style="color:#57606a;">No Tier 0/1 holders found.</td></tr>' }
+    if ($r.Count -eq 0) { return '<div class="pim-tier-row" style="margin:0 0 6px 0;color:#57606a;">No Tier 0/1 holders found.</div>' }
     $rows = foreach ($x in $r) {
         $lv = if (@($x.levels).Count) { (@($x.levels) -join ', ') } else { '&mdash;' }
-        '<tr><td>' + (ConvertTo-PimHtmlEncoded "$($x.user)") + '</td><td>T' + [int]$x.highestTier + '</td><td>' + $lv + '</td><td>' + [int]$x.grantCount + '</td></tr>'
+        '<div class="pim-tier-row" style="margin:0 0 6px 0;"><b>' + (ConvertTo-PimHtmlEncoded "$($x.user)") + ':</b> Highest tier: T' + [int]$x.highestTier + ' &middot; Level(s): ' + $lv + ' &middot; Grants: ' + [int]$x.grantCount + '</div>'
     }
     ($rows -join '')
 }
@@ -540,7 +541,7 @@ function ConvertTo-PimTierReportTokens {
     $label = if ("$TenantLabel".Trim()) { " - $TenantLabel" } else { '' }
     @{
         # MAIL-2: the designed body; ConvertTo-PimTierReportDesignedTokens replaces it per audience. A summary-only fallback here.
-        ReportHtml  = ('<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#24292f;padding:16px;"><table cellpadding="6" style="border-collapse:collapse;border:1px solid #d0d7de;"><tr><th align="left">User</th><th align="left">Highest tier</th><th align="left">Level(s)</th><th align="left">Grants</th></tr>' + (ConvertTo-PimTierReportHtmlRows -Report $rep) + '</table></div>')
+        ReportHtml  = ('<div style="font-family:''Segoe UI'',Arial,sans-serif;font-size:14px;line-height:21px;color:#24292f;padding:16px;max-width:600px;">' + (ConvertTo-PimTierReportHtmlRows -Report $rep) + '</div>')
         TenantLabel = $label
         T0Count     = "$(@($rep | Where-Object { [int]$_.highestTier -eq 0 }).Count)"
         T1Count     = "$(@($rep | Where-Object { [int]$_.highestTier -eq 1 }).Count)"

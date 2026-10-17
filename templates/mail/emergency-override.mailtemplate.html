@@ -5,12 +5,12 @@
 <body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
   <p>Hello,</p>
   <p><b>The approval for activations of a high-privilege group you own is switched off for now by the emergency override.</b></p>
-  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
-    <tr><td><b>Group</b></td><td>{{GroupName}}</td></tr>
-    <tr><td><b>Activated by</b></td><td>{{ActivatedBy}}</td></tr>
-    <tr><td><b>Reason</b></td><td>{{Reason}}</td></tr>
-    <tr><td><b>Auto-restores</b></td><td>{{ExpiresAtUtc}} UTC</td></tr>
-  </table>
+  <div style="margin:12px 0 14px 0; font-size:14px; line-height:21px;">
+    <div style="margin:0 0 6px 0;"><b>Group:</b> {{GroupName}}</div>
+    <div style="margin:0 0 6px 0;"><b>Activated by:</b> {{ActivatedBy}}</div>
+    <div style="margin:0 0 6px 0;"><b>Reason:</b> {{Reason}}</div>
+    <div style="margin:0 0 6px 0;"><b>Auto-restores:</b> {{ExpiresAtUtc}} UTC</div>
+  </div>
   <p>Activations of this group do not need approval until the override ends; the engine then puts the normal policy back by itself. Every action is in the engine audit log.</p>
   <p style="color:#57606a;">If you did not expect this override, please treat it as a security incident and contact your security operations team.</p>
 </body>

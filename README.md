@@ -1484,7 +1484,16 @@ then re-runs the deploy with those parameters. A re-run **is** the updater: ever
 step that is already current is skipped, and only what changed is rebuilt and rolled.
 
 The database schema is upgraded additively before the new version rolls, and a
-failed health check rolls the Manager back to the previous version. (The unattended
+failed health check rolls the Manager back to the previous version.
+
+**The re-run is what applies the new version's database changes.** The Manager and the
+engine have only the data rights they use (one database role each, no right to change the
+schema), so they never create or alter tables themselves. Every schema change of a release
+-- new tables, columns and views, the empty demo tables, and the database permissions -- is
+applied by the update's schema step, signed in as the deploy identity you set up in step 2.
+That identity is made a database administrator for the length of the run only and is
+removed again at the end. Until you run the update, a new version's objects are simply not
+there yet; nothing breaks, and the Manager says that the next update creates them. (The unattended
 in-cloud updater used by subscription environments needs a published release feed,
 so the community edition updates on your schedule, from GitHub.)
 

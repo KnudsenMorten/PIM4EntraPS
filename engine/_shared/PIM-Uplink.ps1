@@ -719,6 +719,13 @@ function Get-PimUplinkSqlSpace {
 # permanentGlobalAdmins, privilegedGuests, privilegedSpns, roleAssignmentsOutsidePim), hygiene (assignmentsExpiring7d) and
 # drift / convergence (driftItems, unconvergedItems, convergenceFailures24h) = 33. Same rule: unreadable = left out, never 0.
 # The 40-key ceiling is guarded IN CODE before the record is built (Limit-PimUplinkCounts).
+# §33.0 MORE TELEMETRY round 2 (2.4.645 candidate, owner "add relevant. i want data"): 7 more = 40, the cap exactly --
+# policy quality (rolesWithoutApproval, rolesWithoutMfaOnActivation, maxActivationHours: the per-role summary the
+# EntraRolePolicies live read persists, pim.Settings 'RolePolicySummary'), hygiene (accessReviewsOverdue: open review
+# campaigns past due, pim.Settings 'AccessReviewCampaigns'; breakGlassAccounts: the list the guards protect), activity
+# (approvalMedianMin30d: PIM's own maker / checker requests, requested -> decided) and platform (graphThrottled24h: Graph 429
+# retries the background jobs recorded, pim.Settings 'GraphRetryCounts'). And roleAssignmentsOutsidePim is now available
+# without a Manager page read: the snapshot job (and the drift job, after it rewrites the managed list) computes the marks.
 function Get-PimUplinkAdoptionCountKeys {
     <# PURE. Every adoption key, in the order the heartbeat builds them (a literal: child-scope safe). #>
     return @('managedAdmins', 'managedGroups', 'delegations', 'privilegedRoles', 'eligibleAssignments', 'activeAssignments',
@@ -726,7 +733,9 @@ function Get-PimUplinkAdoptionCountKeys {
              'hybridAdGroups', 'hybridServers',
              'activations24h', 'activations7d', 'approvalsPending', 'permanentPrivilegedAssignments', 'permanentGlobalAdmins',
              'privilegedGuests', 'privilegedSpns', 'roleAssignmentsOutsidePim', 'assignmentsExpiring7d', 'driftItems',
-             'unconvergedItems', 'convergenceFailures24h')
+             'unconvergedItems', 'convergenceFailures24h',
+             'rolesWithoutApproval', 'rolesWithoutMfaOnActivation', 'maxActivationHours', 'accessReviewsOverdue',
+             'approvalMedianMin30d', 'breakGlassAccounts', 'graphThrottled24h')
 }
 
 function Get-PimUplinkCountsKeyMax {
@@ -738,8 +747,17 @@ function Get-PimUplinkCountsPriority {
     <#
       PURE. Every Counts key the heartbeat may carry, MOST important first (a literal: child-scope safe). Above the cap the
       keys at the END go first; a key not in this list ranks below every listed key (alphabetical among themselves).
+      §33.0 round 2: an explicit order by value (Test-PimUplink MT29 pins it to be exactly the 8 + adoption keys) -- the
+      size of the install and its standing / unprotected access first, the derivable or short-window numbers last.
     #>
-    return @('sqlUsedMb', 'sqlMaxMb', 'users', 'guests', 'servicePrincipals', 'groups', 'usersTotal', 'usersDisabled') + @(Get-PimUplinkAdoptionCountKeys)
+    return @('sqlUsedMb', 'sqlMaxMb', 'users', 'guests', 'servicePrincipals', 'groups', 'usersTotal', 'usersDisabled',
+             'managedAdmins', 'managedGroups', 'delegations', 'privilegedRoles', 'eligibleAssignments', 'activeAssignments',
+             'permanentGlobalAdmins', 'permanentPrivilegedAssignments', 'roleAssignmentsOutsidePim', 'privilegedGuests', 'privilegedSpns',
+             'rolesWithoutApproval', 'rolesWithoutMfaOnActivation', 'breakGlassAccounts',
+             'activations30d', 'activations24h', 'activations7d', 'approvalsPending', 'approvals30d',
+             'accessReviewsOverdue', 'accessReviewsCompleted30d', 'assignmentsExpiring7d', 'azureRoleAssignments',
+             'managedTenants', 'hybridAdGroups', 'hybridServers', 'maxActivationHours', 'graphThrottled24h',
+             'convergenceFailures24h', 'driftItems', 'unconvergedItems', 'approvalMedianMin30d')
 }
 
 function Limit-PimUplinkCounts {
@@ -797,6 +815,29 @@ function Get-PimUplinkConvergenceFailures {
     return [long]$n
 }
 
+function Get-PimUplinkMarksCurrentSql {
+    <#
+      PURE. §33.0 round 2: a T-SQL CONDITION, true only when the MANAGED marks of snapshot <SnapshotExpr> are CURRENT: they
+      were computed (MarksKey set) AFTER the engine's managed list (pim.TenantCache 'managed-live') was last written, and that
+      list is COMPLETE. Marks computed with no list, a partial list or an older list are not believed (unknown -> false).
+    #>
+    param([Parameter(Mandatory)][string]$SnapshotExpr)
+    return "ISNULL((SELECT CASE WHEN s.MarksKey IS NOT NULL AND s.MarksUtc >= ml.UpdatedUtc THEN 1 ELSE 0 END FROM pim.ActiveAssignmentSnapshots s CROSS JOIN (SELECT UpdatedUtc FROM pim.TenantCache WHERE Kind = N'managed-live' AND (CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_VALUE(ValueJson, '$.complete') END) = N'true') ml WHERE s.SnapshotId = $SnapshotExpr), 0) = 1"
+}
+
+function Get-PimUplinkRolePolicySummaryMaxAgeHours { <# PURE. delta-policies runs every 30 min; older than this = stale = left out. #> return 26 }
+
+function Get-PimUplinkRolePolicySummarySql {
+    <#
+      PURE. One scalar over pim.Settings 'RolePolicySummary' (Save-PimRolePolicySummary): field <Field> as bigint, only when
+      the summary says complete = true and its computedUtc is within Get-PimUplinkRolePolicySummaryMaxAgeHours. No row,
+      not JSON, incomplete, stale or a missing field = NULL = the key is left out.
+    #>
+    param([Parameter(Mandatory)][ValidateSet('withoutApproval', 'withoutMfa', 'maxActivationHours', 'roles')][string]$Field)
+    $h = Get-PimUplinkRolePolicySummaryMaxAgeHours
+    return "$(Get-PimUplinkSettingJsonSql -Name 'RolePolicySummary') SELECT CASE WHEN @v IS NULL OR ISJSON(@v) = 0 THEN NULL WHEN ISNULL(JSON_VALUE(@v, '$.complete'), N'') <> N'true' THEN NULL WHEN ISNULL(TRY_CONVERT(datetimeoffset, JSON_VALUE(@v, '$.computedUtc')), CAST('0001-01-01' AS datetimeoffset)) < DATEADD(hour, -$h, SYSDATETIMEOFFSET()) THEN NULL ELSE TRY_CAST(JSON_VALUE(@v, '$.$Field') AS bigint) END AS n"
+}
+
 function Get-PimUplinkAdoptionQueries {
     <#
       PURE. key -> one scalar SQL statement (column n). -MspMaster adds managedTenants (a managing install's registry);
@@ -843,12 +884,29 @@ function Get-PimUplinkAdoptionQueries {
         privilegedGuests     = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(DISTINCT LOWER(PrincipalId)) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND PrincipalUpn LIKE N'%#EXT#%' AND ISNULL(PrincipalId, N'') <> N'') END AS n"
         privilegedSpns       = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(DISTINCT LOWER(PrincipalId)) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND PrincipalKind = N'servicePrincipal' AND ISNULL(PrincipalId, N'') <> N'') END AS n"
         # rows not managed by PIM (Managed = 0) -- only once the snapshot's marks were computed (MarksKey set), else unknown
-        roleAssignmentsOutsidePim = "SELECT CASE WHEN $snap IS NULL OR (SELECT MarksKey FROM pim.ActiveAssignmentSnapshots WHERE SnapshotId = $snap) IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND Managed = 0) END AS n"
+        # §33.0 round 2: only while the marks are CURRENT (Get-PimUplinkMarksCurrentSql: computed, from a COMPLETE managed
+        # list, after that list was last written) -- marks from no list / an older list would count managed rows as outside
+        roleAssignmentsOutsidePim = "SELECT CASE WHEN $snap IS NULL OR NOT $(Get-PimUplinkMarksCurrentSql -SnapshotExpr $snap) THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND Managed = 0) END AS n"
         assignmentsExpiring7d = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND EndUtc >= SYSUTCDATETIME() AND EndUtc < DATEADD(day, 7, SYSUTCDATETIME())) END AS n"
         # the drift document's own total (pim.TenantCache kind 'drift'); no document = left out
         driftItems           = "SELECT CASE WHEN ISJSON(ValueJson) = 1 THEN TRY_CAST(JSON_VALUE(ValueJson, '$.total') AS bigint) END AS n FROM pim.TenantCache WHERE Kind = N'drift'"
         # items verify-convergence holds as not yet converged (pim.Settings 'ConvergenceState' firstSeen map); never ran = left out
         unconvergedItems     = "$(Get-PimUplinkSettingJsonSql -Name 'ConvergenceState') SELECT CASE WHEN @has = 0 OR @v IS NULL OR ISJSON(@v) = 0 THEN NULL ELSE (SELECT COUNT_BIG(*) FROM OPENJSON(@v, '$.firstSeen')) END AS n"
+        # §33.0 round 2 -- policy quality from the per-role summary the EntraRolePolicies live read persists
+        # (pim.Settings 'RolePolicySummary', Save-PimRolePolicySummary): only a COMPLETE read of the last 26 hours
+        rolesWithoutApproval        = (Get-PimUplinkRolePolicySummarySql -Field 'withoutApproval')
+        rolesWithoutMfaOnActivation = (Get-PimUplinkRolePolicySummarySql -Field 'withoutMfa')
+        maxActivationHours          = (Get-PimUplinkRolePolicySummarySql -Field 'maxActivationHours')
+        # open access-review campaigns past their due date (pim.Settings 'AccessReviewCampaigns', the access-review-cycle
+        # job's own document). No row = no campaign ever started = 0; a value that is not JSON = left out.
+        accessReviewsOverdue = "$(Get-PimUplinkSettingJsonSql -Name 'AccessReviewCampaigns') SELECT CASE WHEN @v IS NULL THEN CAST(0 AS bigint) WHEN ISJSON(@v) = 0 THEN NULL ELSE (SELECT COUNT_BIG(*) FROM OPENJSON(@v, '$.campaigns') c WHERE c.[type] = 5 AND LOWER(ISNULL(CASE WHEN c.[type] = 5 THEN JSON_VALUE(c.[value], '$.status') END, N'')) = N'open' AND TRY_CONVERT(datetimeoffset, CASE WHEN c.[type] = 5 THEN JSON_VALUE(c.[value], '$.dueUtc') END) < SYSDATETIMEOFFSET()) END AS n"
+        # the median minutes from requested to decided of PIM's own maker / checker requests (pim.Settings 'ApprovalRequests')
+        # decided in the last 30 days; nothing decided = left out (no median of nothing)
+        approvalMedianMin30d = "$(Get-PimUplinkSettingJsonSql -Name 'ApprovalRequests') SELECT CASE WHEN @v IS NULL OR ISJSON(@v) = 0 THEN NULL ELSE (SELECT TOP 1 CAST(ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY d.m) OVER (), 0) AS bigint) FROM (SELECT DATEDIFF(second, x.r, x.dd) / 60.0 AS m FROM (SELECT TRY_CONVERT(datetimeoffset, CASE WHEN j.[type] = 5 THEN JSON_VALUE(j.[value], '$.requestedUtc') END) AS r, TRY_CONVERT(datetimeoffset, CASE WHEN j.[type] = 5 THEN JSON_VALUE(j.[value], '$.decidedUtc') END) AS dd FROM OPENJSON(@v) j) x WHERE x.r IS NOT NULL AND x.dd IS NOT NULL AND x.dd >= x.r AND x.dd >= DATEADD(day, -30, SYSDATETIMEOFFSET())) d) END AS n"
+        # Graph 429 retries recorded by the background jobs (pim.Settings 'GraphRetryCounts' hourly buckets, Save-PimRestRetryCounts)
+        # in the last 24 hours. The record is written only when a retry was counted, so no row = none recorded = 0 (as an empty
+        # approval queue is 0); a value that is not JSON = left out. Scope: the tick's job processes (not the Manager's calls).
+        graphThrottled24h    = "$(Get-PimUplinkSettingJsonSql -Name 'GraphRetryCounts') SELECT CASE WHEN @v IS NULL THEN CAST(0 AS bigint) WHEN ISJSON(@v) = 0 THEN NULL ELSE ISNULL((SELECT SUM(ISNULL(TRY_CAST(CASE WHEN h.[type] = 5 THEN JSON_VALUE(h.[value], '$.r429') END AS bigint), 0)) FROM OPENJSON(@v, '$.hours') h WHERE TRY_CONVERT(datetimeoffset, h.[key]) >= DATEADD(hour, -24, SYSDATETIMEOFFSET())), CAST(0 AS bigint)) END AS n"
     }
     if ($MspMaster) { $q['managedTenants'] = 'SELECT COUNT_BIG(*) AS n FROM platform.Tenants WHERE Enabled = 1' }
     if ($HybridAd) {
@@ -869,10 +927,14 @@ function Get-PimUplinkAdoptionCounts {
       DBNull, a non-number or a negative = that key LEFT OUT. Never throws.
       -Runs (§33.0 MORE TELEMETRY): the job run history the caller READ (Get-PimJobRunHistory) -> convergenceFailures24h
       (Get-PimUplinkConvergenceFailures). $null = the history could not be read = that key left out.
+      -BreakGlassAccounts (§33.0 round 2): the number of entries on the break-glass list the guards protect, as the caller
+      READ it (Get-PimUplinkBreakGlassCount); $null = unreadable = left out.
     #>
-    param([Parameter(Mandatory)][scriptblock]$Query, [switch]$MspMaster, [switch]$HybridAd, [AllowNull()][object[]]$Runs = $null, [datetime]$NowUtc = [datetime]::UtcNow)
+    param([Parameter(Mandatory)][scriptblock]$Query, [switch]$MspMaster, [switch]$HybridAd, [AllowNull()][object[]]$Runs = $null, [datetime]$NowUtc = [datetime]::UtcNow,
+          [AllowNull()][object]$BreakGlassAccounts = $null)
     $out = @{}
     if ($null -ne $Runs) { try { $out['convergenceFailures24h'] = [long](Get-PimUplinkConvergenceFailures -Runs $Runs -NowUtc $NowUtc) } catch { } }
+    if ($null -ne $BreakGlassAccounts) { $bgN = 0L; if ([long]::TryParse("$BreakGlassAccounts", [ref]$bgN) -and $bgN -ge 0) { $out['breakGlassAccounts'] = $bgN } }
     try {
         $qs = Get-PimUplinkAdoptionQueries -MspMaster:$MspMaster -HybridAd:$HybridAd
         foreach ($k in @($qs.Keys)) {
@@ -888,6 +950,26 @@ function Get-PimUplinkAdoptionCounts {
     } catch { }
     if ($out.Count -eq 0) { return $null }
     return $out
+}
+
+function Get-PimUplinkBreakGlassCount {
+    <#
+      §33.0 round 2. breakGlassAccounts: how many entries the break-glass list holds -- what the guards protect (the SQL list
+      unioned with the legacy setting, Get-PimBreakGlassAccountStatus). A count only; no entry leaves. $null when the list
+      cannot be read (a store that should be there and was not read) or the reader is not loaded. Never throws.
+      -Status: test seam (the verdict object).
+    #>
+    param([AllowNull()][object]$Status = $null)
+    try {
+        if ($null -eq $Status) {
+            if (-not (Get-Command Get-PimBreakGlassAccountStatus -ErrorAction SilentlyContinue)) { return $null }
+            $Status = Get-PimBreakGlassAccountStatus
+        }
+        if ($null -eq $Status) { return $null }
+        if ([bool](Get-PimUplinkField $Status 'storeConfigured') -and -not [bool](Get-PimUplinkField $Status 'storeOk')) { return $null }
+        $acc = @(@(Get-PimUplinkField $Status 'accounts') | Where-Object { $null -ne $_ -and "$_".Trim() -and "$_" -notmatch '^\s*<' })
+        return [long]$acc.Count
+    } catch { return $null }
 }
 
 function Get-PimUplinkField {
@@ -1509,6 +1591,8 @@ function Get-PimUplinkTenantCapabilities {
 #   Convergence     { unconverged; persistent; oldestFirstSeenUtc }
 #   Mail            { mode; engine: { ok; atUtc }; manager: { ok; atUtc } }
 #   UpdatePending   { approvedVersion; lastBuiltVersion; hold; waitingSinceUtc }   -- from UpdateState
+#                   + { signal; raisedAt; startedUtc } (framework 8.18 UPDATE-NOW, pim.Settings 'UpdateNowState') ONLY with
+#                   PIM_UPLINK_UPDATENOWFIELDS=1 -- OFF by default until Invardia's validator accepts them
 #   SqlAccess       { model; run1; run2; updaterInAdminGroup; checkedUtc }        -- the updater's verdict in UpdateState
 #   FeaturesChanged [ '<area>.<name>:<on|off>' ]  -- at most 40, only features that differ from their catalog default
 # ONE switch per field, ON by default (2.4.644): PIM_UPLINK_<FIELD> (PIM_UPLINK_SECURITY, ..._COLLECTIONS, ..._JOBS,
@@ -1599,6 +1683,21 @@ function Get-PimUplinkSecurityKinds {
     )
 }
 
+function Get-PimUplinkSecuritySubKinds {
+    <#
+      PURE. §33.0 round 2: domains that are a FILTERED part of a kind the snapshot already reads COMPLETELY (a literal).
+      adminUnits = the Entra role assignments scoped to an administrative unit: the snapshot's Entra role read
+      (/roleManagement/directory/roleAssignmentSchedules, unfiltered) returns every directory scope, and the row's identity
+      r|<principal>|<role>|<directoryScopeId> carries '/administrativeunits/<id>' (ConvertTo-PimManagedIdentity, lower-case);
+      the eligible ones PIM manages are the RolesAUs scope's ledger keys. A SUBSET of entraRoles -- never added on top of it.
+      Not filled (no complete read PIM holds): intune, defender, powerBi (pim.TenantCache holds their ROLE CATALOGS /
+      workspaces, not assignments), entraAppRoles (not read), hybridAd (the worker's AD group sync, not role assignments).
+    #>
+    return @(
+        [ordered]@{ kind = 'admin-unit'; domain = 'adminUnits'; parent = 'entra-role'; identityLike = 'r|%|%|/administrativeunits/%'; scopes = @('RolesAUs') }
+    )
+}
+
 function Get-PimUplinkSecurityNoScheduleDomains {
     <# PURE. Domains whose snapshot rows carry NO end date (Azure Resource Graph returns none): permanent / expiring cannot be
        told apart there, so those two numbers are left out of that domain rather than counting every row as permanent. #>
@@ -1614,12 +1713,34 @@ function Get-PimUplinkSecuritySql {
     $kinds = @(Get-PimUplinkSecurityKinds)
     $vals = (@($kinds | ForEach-Object { "(N'$($_.kind)')" }) -join ', ')
     $elig = (@($kinds | ForEach-Object { "(k.Kind = N'$($_.kind)' AND m.Scope IN ($((@($_.scopes) | ForEach-Object { "N'$_'" }) -join ', ')))" }) -join ' OR ')
+    # §33.0 round 2: a SUB-domain is a filtered view of its parent kind's rows (one aggregate row, always present). Its
+    # activations30d is NULL (left out): the activation ledger's key carries the scope's display name, not its id.
+    $sub = ''
+    foreach ($sk in @(Get-PimUplinkSecuritySubKinds)) {
+        $sel = (@($sk.scopes) | ForEach-Object { "N'$_'" }) -join ', '
+        $w = "a.SnapshotId = @s AND a.Kind = N'$($sk.parent)' AND a.IdentityKey LIKE N'$($sk.identityLike)'"
+        $sub += @"
+
+UNION ALL
+SELECT N'$($sk.kind)' AS kind, @c AS collectionUtc, @mk AS marksKnown,
+  (SELECT COUNT_BIG(*) FROM pim.ManagedKeys m WHERE m.[Key] LIKE N'%|eligible' AND m.Scope IN ($sel)) AS eligibleAssignments,
+  COUNT_BIG(a.Seq) AS activeAssignments,
+  ISNULL(SUM(CASE WHEN a.EndUtc IS NULL THEN 1 ELSE 0 END), 0) AS permanentAssignments,
+  ISNULL(SUM(CASE WHEN a.Managed = 0 THEN 1 ELSE 0 END), 0) AS outsidePim,
+  COUNT(DISTINCT LOWER(NULLIF(a.PrincipalId, N''))) AS privilegedPrincipals,
+  COUNT(DISTINCT CASE WHEN a.PrincipalUpn LIKE N'%#EXT#%' THEN LOWER(NULLIF(a.PrincipalId, N'')) END) AS guestsPrivileged,
+  COUNT(DISTINCT CASE WHEN a.PrincipalKind = N'servicePrincipal' THEN LOWER(NULLIF(a.PrincipalId, N'')) END) AS spnsPrivileged,
+  ISNULL(SUM(CASE WHEN a.EndUtc >= SYSUTCDATETIME() AND a.EndUtc < DATEADD(day, 7, SYSUTCDATETIME()) THEN 1 ELSE 0 END), 0) AS assignmentsExpiring7d,
+  CAST(NULL AS bigint) AS activations30d
+FROM pim.ActiveAssignmentRows a WHERE $w
+"@
+    }
     return @"
 SET NOCOUNT ON;
 DECLARE @s BIGINT = (SELECT MAX(SnapshotId) FROM pim.ActiveAssignmentSnapshots WHERE State = N'complete');
 IF @s IS NULL RETURN;
 DECLARE @c DATETIME2 = (SELECT CompletedUtc FROM pim.ActiveAssignmentSnapshots WHERE SnapshotId = @s);
-DECLARE @mk INT = CASE WHEN (SELECT MarksKey FROM pim.ActiveAssignmentSnapshots WHERE SnapshotId = @s) IS NULL THEN 0 ELSE 1 END;
+DECLARE @mk INT = CASE WHEN $(Get-PimUplinkMarksCurrentSql -SnapshotExpr '@s') THEN 1 ELSE 0 END;
 SELECT k.Kind AS kind, @c AS collectionUtc, @mk AS marksKnown,
   (SELECT COUNT_BIG(*) FROM pim.ManagedKeys m WHERE m.[Key] LIKE N'%|eligible' AND ($elig)) AS eligibleAssignments,
   COUNT_BIG(a.Seq) AS activeAssignments,
@@ -1632,7 +1753,8 @@ SELECT k.Kind AS kind, @c AS collectionUtc, @mk AS marksKnown,
   (SELECT COUNT_BIG(*) FROM pim.ImpactActivations i WHERE i.Kind = k.Kind AND i.StartUtc >= DATEADD(day, -30, SYSUTCDATETIME())) AS activations30d
 FROM (VALUES $vals) k(Kind)
 LEFT JOIN pim.ActiveAssignmentRows a ON a.SnapshotId = @s AND a.Kind = k.Kind
-GROUP BY k.Kind;
+GROUP BY k.Kind
+$sub;
 "@
 }
 
@@ -1645,7 +1767,7 @@ function New-PimUplinkSecurityField {
     param([AllowNull()][object[]]$Rows)
     $rows = @(@($Rows) | Where-Object { $null -ne $_ -and -not ($_ -is [System.DBNull]) })
     if (-not $rows.Count) { return $null }
-    $map = @{}; foreach ($k in @(Get-PimUplinkSecurityKinds)) { $map["$($k.kind)"] = "$($k.domain)" }
+    $map = @{}; foreach ($k in @(Get-PimUplinkSecurityKinds) + @(Get-PimUplinkSecuritySubKinds)) { $map["$($k.kind)"] = "$($k.domain)" }
     $allowed = @(Get-PimUplinkSecurityDomains); $noSched = @(Get-PimUplinkSecurityNoScheduleDomains)
     $collected = $null; $domains = New-Object System.Collections.Generic.List[object]
     foreach ($r in $rows) {
@@ -1938,7 +2060,9 @@ function Get-PimUplinkStateFields {
           [AllowNull()][object[]]$Runs = $null, [AllowNull()][object[]]$Schedule = $null, [AllowNull()][string[]]$ProductJobNames = $null,
           [AllowNull()][object[]]$StateJobs = @(), [AllowNull()][object]$UpdateState = $null, [bool]$UpdateStateRead = $false,
           [AllowNull()][System.Collections.IDictionary]$Gates = $null, [AllowNull()][object[]]$Catalog = $null,
-          [bool]$HybridAdOn = $false, [AllowNull()][object]$HybridWorkerState = $null, [datetime]$NowUtc = [datetime]::UtcNow)
+          [bool]$HybridAdOn = $false, [AllowNull()][object]$HybridWorkerState = $null, [datetime]$NowUtc = [datetime]::UtcNow,
+          # framework 8.18: UpdatePending's { signal; raisedAt; startedUtc } -- OFF by default (PIM_UPLINK_UPDATENOWFIELDS=1 = on)
+          [bool]$UpdateNowFields = [bool]("$env:PIM_UPLINK_UPDATENOWFIELDS".Trim() -match '^(?i)(1|true|on|yes)$'))
     # every local here starts with __sf (or is $out): a caller's seam scriptblock reads ITS variables through dynamic
     # scope, and a local named like one of them would shadow it (a test stub returned $null that way)
     $out = [ordered]@{}
@@ -1968,7 +2092,21 @@ function Get-PimUplinkStateFields {
         catch { Write-Warning "[uplink] Mail could not be read: $($_.Exception.Message)" }
     }
     if ((& $__sfOn 'UpdatePending') -and $UpdateStateRead) {
-        try { $__sfV = New-PimUplinkUpdatePendingField -UpdateState $UpdateState; if ($null -ne $__sfV) { $out['UpdatePending'] = $__sfV } } catch { Write-Warning "[uplink] UpdatePending could not be built: $($_.Exception.Message)" }
+        try {
+            $__sfV = New-PimUplinkUpdatePendingField -UpdateState $UpdateState
+            # framework 8.18 UPDATE-NOW: { signal; raisedAt; startedUtc } from pim.Settings 'UpdateNowState' (written by the
+            # updater's 15-minute check) -- behind PIM_UPLINK_UPDATENOWFIELDS, OFF by default (Invardia's validator does not
+            # accept the three fields yet). Unreadable = the three are left out, UpdatePending goes as before.
+            if ($null -ne $__sfV -and $UpdateNowFields -and $GetSetting) {
+                try {
+                    # loaded HERE, in this function's scope, when the caller has not (the tick does not load the updater's files)
+                    if (-not (Get-Command New-PimUpdateNowPendingFields -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-UpdateNow.ps1') }
+                    $__sfUn = New-PimUpdateNowPendingFields -State (& $GetSetting 'UpdateNowState') -NowUtc $NowUtc
+                    foreach ($__sfK in @($__sfUn.Keys)) { $__sfV | Add-Member -NotePropertyName $__sfK -NotePropertyValue $__sfUn[$__sfK] -Force }
+                } catch { Write-Warning "[uplink] the update-now fields could not be read: $($_.Exception.Message)" }
+            }
+            if ($null -ne $__sfV) { $out['UpdatePending'] = $__sfV }
+        } catch { Write-Warning "[uplink] UpdatePending could not be built: $($_.Exception.Message)" }
     }
     if ((& $__sfOn 'SqlAccess') -and $UpdateStateRead) {
         try { $__sfV = New-PimUplinkSqlAccessField -UpdateState $UpdateState; if ($null -ne $__sfV) { $out['SqlAccess'] = $__sfV } } catch { Write-Warning "[uplink] SqlAccess could not be built: $($_.Exception.Message)" }
@@ -2793,7 +2931,8 @@ function Invoke-PimUplinkJob {
         try { if (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) { $adHy = [bool](Test-PimFeatureAvailable -Key 'hybrid.ad' -Quiet) } } catch { $adHy = $false }
         # §33.0 MORE TELEMETRY: convergenceFailures24h from the run history this job already read ($null = not read = left out)
         $adRuns = $null; if ($runsRead) { $adRuns = [object[]]@($runs) }   # never `= if {}`: an empty list would unroll to $null
-        $adoption = { Get-PimUplinkAdoptionCounts -Query { param($n, $s) Invoke-PimSqlScalar -ConnectionString $cs -Sql $s } -MspMaster:$adMsp -HybridAd:$adHy -Runs $adRuns -NowUtc $NowUtc }
+        # §33.0 round 2: breakGlassAccounts from the guards' own list reader, read inside the block (once per due heartbeat)
+        $adoption = { Get-PimUplinkAdoptionCounts -Query { param($n, $s) Invoke-PimSqlScalar -ConnectionString $cs -Sql $s } -MspMaster:$adMsp -HybridAd:$adHy -Runs $adRuns -NowUtc $NowUtc -BreakGlassAccounts (Get-PimUplinkBreakGlassCount) }
     }
     if ($on) {
         try { $ef = & $get 'EngineItemFailures'; if ($ef -is [string] -and "$ef".Trim()) { $ef = $ef | ConvertFrom-Json }; $engFails = @(@($ef) | Where-Object { $null -ne $_ }) } catch { $engFails = @() }

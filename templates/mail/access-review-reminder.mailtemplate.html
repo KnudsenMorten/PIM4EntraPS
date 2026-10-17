@@ -5,12 +5,12 @@
 <body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
   <p>Hello {{ReviewerName}},</p>
   <p>You have an access review awaiting your decision. It is <b>{{DueStatus}}</b> with <b>{{PendingCount}}</b> item(s) still pending.</p>
-  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
-    <tr><td><b>Review</b></td><td>{{ReviewName}}</td></tr>
-    <tr><td><b>Scope / target</b></td><td>{{ScopeTarget}}</td></tr>
-    <tr><td><b>Due</b></td><td>{{DueDate}}</td></tr>
-    <tr><td><b>Pending</b></td><td>{{PendingCount}}</td></tr>
-  </table>
+  <div style="margin:12px 0 14px 0; font-size:14px; line-height:21px;">
+    <div style="margin:0 0 6px 0;"><b>Review:</b> {{ReviewName}}</div>
+    <div style="margin:0 0 6px 0;"><b>Scope / target:</b> {{ScopeTarget}}</div>
+    <div style="margin:0 0 6px 0;"><b>Due:</b> {{DueDate}}</div>
+    <div style="margin:0 0 6px 0;"><b>Pending:</b> {{PendingCount}}</div>
+  </div>
   <p><a href="{{ReviewUrl}}">Open the access review</a> to approve, deny, or recertify each item.</p>
 </body>
 </html>

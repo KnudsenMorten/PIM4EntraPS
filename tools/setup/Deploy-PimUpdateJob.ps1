@@ -108,6 +108,7 @@ if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join
 if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRootR 'engine\_shared\PIM-ArmSetup.ps1') }
 . (Join-Path $here '_PimUpdateRing.ps1')                # ring + source enforcement, ARM-safe env writes
 . (Join-Path $here '_PimSqlAdminGroup.ps1')             # the SQL admin group: membership for the updater identity
+. (Join-Path $solRootR 'engine\_shared\PIM-UpdateNow.ps1')   # framework 8.18 UPDATE-NOW: the 15-minute cron + PIM_UPDATE_NIGHTLY_UTC
 
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
@@ -291,6 +292,11 @@ if ($UpdateSource) {
     }
     Note "update source: $UpdateSource"
 }
+# framework 8.18 UPDATE-NOW: -Cron is the NIGHTLY time. The job keeps it as PIM_UPDATE_NIGHTLY_UTC ('HH:mm'), so the updater
+# can tell its nightly slot from its 15-minute signal checks (engine/_shared/PIM-UpdateNow.ps1). A -Cron that is not a daily
+# 'M H * * *' keeps its own cron and the marker 'none' = every execution a full run, as before.
+$unCronPlan = Get-PimUpdateNowCronPlan -NightlyCron $Cron
+$envVars += "PIM_UPDATE_NIGHTLY_UTC=$(if ($unCronPlan.ok) { $unCronPlan.nightlyUtc } else { 'none' })"
 $yamlNames = @($envVars | ForEach-Object { ("$_" -split '=', 2)[0] })
 # Throws -- before any create/update -- when no source can be resolved, or when the job carries a ring
 # value that is not a ring and -UpdateRing was not passed.
@@ -301,7 +307,17 @@ $ringPlan = Get-PimUpdateJobRingPlan -ExistingEnv $existingEnv -UpdateRing $Upda
 Step "update ring $($ringPlan.ring)"
 foreach ($m in @($ringPlan.messages)) { if ($m -match '(?i)CHANGES|default ring|KEPT|no query') { Warn $m } else { Note $m } }
 
-$entry = '/app/PIM4EntraPS/tools/pim-engine/update-job-entry.ps1'
+# framework 8.18 UPDATE-NOW, the cron: every 15 minutes on the nightly minute's quarter-hours when UPDATE NOW is on for this
+# environment (its ring is in Get-PimUpdateNowDefaultRings, or PIM_UPDATE_NOW=1 on the job), else the nightly cron itself.
+# The updater converges its OWN cron to the same answer on its next full run (Invoke-PimUpdateNowSelfCronUpdate).
+$unEnabled = Test-PimUpdateNowEnabled -Ring "$($ringPlan.ring)" -Value "$($existingEnv['PIM_UPDATE_NOW'])"
+$jobCron = if ($unCronPlan.ok -and $unEnabled) { $unCronPlan.quarterCron } elseif ($unCronPlan.ok) { $unCronPlan.nightlyCron } else { "$Cron" }
+Step 'schedule'
+if ($unCronPlan.ok -and $unEnabled) { Note "update now is ON for ring $($ringPlan.ring): cron '$jobCron' -- the nightly update at $($unCronPlan.nightlyUtc) UTC, a seconds-long signal check on the other slots" }
+elseif ($unCronPlan.ok) { Note "update now is off for ring $($ringPlan.ring): cron '$jobCron' (nightly at $($unCronPlan.nightlyUtc) UTC)" }
+else { Warn $unCronPlan.reason }
+
+$entry ='/app/PIM4EntraPS/tools/pim-engine/update-job-entry.ps1'
 
 # 🔴 THE COMMAND IS AN ARRAY, NEVER A MULTI-TOKEN STRING. `az containerapp job create --command pwsh -NoProfile
 # -File <x>` failed with "unrecognized arguments: -NoProfile -ExecutionPolicy Bypass -File ..." (first live install,
@@ -361,7 +377,7 @@ $jobResource = @{
             triggerType           = 'Schedule'
             replicaTimeout        = 604800   # framework 12.24 JOB-RUN-LIMIT: 7 days
             replicaRetryLimit     = 0
-            scheduleTriggerConfig = @{ cronExpression = "$Cron"; parallelism = 1; replicaCompletionCount = 1 }
+            scheduleTriggerConfig = @{ cronExpression = "$jobCron"; parallelism = 1; replicaCompletionCount = 1 }
             registries            = @($jobRegistry)
         }
         template = @{
@@ -865,7 +881,7 @@ if ($chRep.backward) {
     Write-Host '    (The updater itself refuses to move backward, so nothing rolls meanwhile -- but this environment does not update either.)' -ForegroundColor DarkGray
     exit 1
 }
-Write-Host "==> Nightly updater installed on ring $($ringPlan.ring). It runs $Cron (UTC)." -ForegroundColor Green
+Write-Host "==> Nightly updater installed on ring $($ringPlan.ring). It runs $Cron (UTC)$(if ($jobCron -ne "$Cron") { " and checks for an update-now signal on '$jobCron'" })." -ForegroundColor Green
 Write-Host "    Trigger it now with:" -ForegroundColor DarkGray
 Write-Host "      az containerapp job start -g $ResourceGroup -n $JobName --subscription $SubscriptionId" -ForegroundColor White
 Write-Host "    Watch it with:" -ForegroundColor DarkGray

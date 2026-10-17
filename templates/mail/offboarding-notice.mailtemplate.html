@@ -8,12 +8,12 @@
 <body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
   <p>Hello,</p>
   <p>The PIM engine has <b>disabled</b> the privileged admin account below, on its configured auto-disable date:</p>
-  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
-    <tr><td><b>Display name</b></td><td>{{DisplayName}}</td></tr>
-    <tr><td><b>UPN</b></td><td>{{UserPrincipalName}}</td></tr>
-    <tr><td><b>Auto-disable date</b></td><td>{{AutoDisableDate}}</td></tr>
-    <tr><td><b>Actions taken</b></td><td>{{Steps}}</td></tr>
-  </table>
+  <div style="margin:12px 0 14px 0; font-size:14px; line-height:21px;">
+    <div style="margin:0 0 6px 0;"><b>Display name:</b> {{DisplayName}}</div>
+    <div style="margin:0 0 6px 0;"><b>UPN:</b> {{UserPrincipalName}}</div>
+    <div style="margin:0 0 6px 0;"><b>Auto-disable date:</b> {{AutoDisableDate}}</div>
+    <div style="margin:0 0 6px 0;"><b>Actions taken:</b> {{Steps}}</div>
+  </div>
   <p><b>The account itself has been kept.</b> It remains in the directory, disabled, with its sessions revoked and its privileged access removed. Offboarding never deletes an account &mdash; if the account should be removed entirely, an administrator deletes it in Entra ID or with Delete account in PIM Manager.</p>
   <p style="color:#57606a;">Every step is recorded in the engine audit log ({{Date}}). If this was not expected, contact your security operations team immediately.</p>
 </body>

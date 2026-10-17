@@ -6,12 +6,12 @@
   <p>Hello,</p>
   <p>A Temporary Access Pass (TAP) has been issued for the privileged admin account:</p>
   <p style="font-size:16px;"><b>{{UserPrincipalName}}</b></p>
-  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
-    <tr><td><b>TAP code</b></td><td style="font-family:Consolas,monospace; font-size:16px;">{{TapCode}}</td></tr>
-    <tr><td><b>Valid from</b></td><td>{{TapStartLocal}} ({{TapStartUtc}})</td></tr>
-    <tr><td><b>Lifetime</b></td><td>{{TapLifetimeMinutes}} minute(s)</td></tr>
-    <tr><td><b>Expires at</b></td><td>{{TapExpiresUtc}}</td></tr>
-  </table>
+  <div style="margin:12px 0 14px 0; font-size:14px; line-height:21px;">
+    <div style="margin:0 0 6px 0;"><b>TAP code:</b> <span style="font-family:Consolas,monospace; font-size:16px;">{{TapCode}}</span></div>
+    <div style="margin:0 0 6px 0;"><b>Valid from:</b> {{TapStartLocal}} ({{TapStartUtc}})</div>
+    <div style="margin:0 0 6px 0;"><b>Lifetime:</b> {{TapLifetimeMinutes}} minute(s)</div>
+    <div style="margin:0 0 6px 0;"><b>Expires at:</b> {{TapExpiresUtc}}</div>
+  </div>
   <p><b>How to use it:</b></p>
   <ol>
     <li>Open <a href="https://mysignins.microsoft.com/security-info">https://mysignins.microsoft.com/security-info</a> from a browser where you are NOT already signed in to this account.</li>

@@ -5,10 +5,10 @@
 <body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
   <p>A discovery sweep found <b>{{ItemCount}} new item(s)</b> that PIM Manager does not manage yet.</p>
   <p>These were staged for review (a new resource is never auto-mapped to a principal). Open the PIM Manager to approve or adjust them.</p>
-  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
-    <tr><td><b>Scope</b></td><td>{{Scope}}</td></tr>
-    <tr><td><b>New items</b></td><td>{{ItemCount}}</td></tr>
-  </table>
+  <div style="margin:12px 0 14px 0; font-size:14px; line-height:21px;">
+    <div style="margin:0 0 6px 0;"><b>Scope:</b> {{Scope}}</div>
+    <div style="margin:0 0 6px 0;"><b>New items:</b> {{ItemCount}}</div>
+  </div>
   <p><b>Discovered:</b><br>{{DiscoveredList}}</p>
   <p style="color:#57606a;">You are receiving this because a discovery notification recipient is configured in the PIM Manager. Every discovered item is also recorded in the engine audit log (resource.discovered).</p>
 </body>

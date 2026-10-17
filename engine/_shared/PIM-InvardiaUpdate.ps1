@@ -63,6 +63,42 @@ function Invoke-PimInvardiaManifestPull {
     if ($p.status -eq 401) { $p.reason = Get-PimInvardiaPullReason -Status 401 -Body $p.body }
     $p
 }
+# ---- framework 8.18 UPDATE-NOW -- the signal (PIM-UpdateNow.ps1 decides what it means) ------------------------------
+# GET <base>/api/updates/pim-manager/signal?ring=N, the SAME install key header as the manifest pull, If-None-Match with
+# the ETag of the last answer. 200 { updateNow; version; raisedAt; by; scope } + ETag, 304 unchanged. Never throws.
+function Invoke-PimInvardiaSignalHttp {
+    <# The real seam: one GET, 15 s, @{ status; body; etag; error }. A non-2xx (304 / 404 / 5xx) is a status, never a throw. #>
+    param([Parameter(Mandatory)][string]$Url, [hashtable]$Headers = @{})
+    try {
+        $r = Invoke-WebRequest -Uri $Url -Method GET -Headers $Headers -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop
+        $et = ''; try { $et = "$(@($r.Headers['ETag'])[0])".Trim() } catch { $et = '' }
+        $b = $null; if ("$($r.Content)".Trim()) { try { $b = "$($r.Content)" | ConvertFrom-Json } catch { $b = $null } }
+        return @{ status = [int]$r.StatusCode; body = $b; etag = $et; error = '' }
+    } catch {
+        $code = 0; try { if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode } } catch { $code = 0 }
+        return @{ status = $code; body = $null; etag = ''; error = ((("$($_.Exception.Message)") -split "`n")[0]) }
+    }
+}
+
+function Invoke-PimInvardiaUpdateSignal {
+    <#
+      Ask Invardia whether an "update now" is raised for this environment's ring (or this environment). -Http { param($Url,
+      $Headers) } -> @{ status; body; etag } (default Invoke-PimInvardiaSignalHttp). No install key = NO call (status 0,
+      reason 'no install key'). Never throws.
+    #>
+    param([scriptblock]$Http, [string]$BaseUrl = '', [AllowEmptyString()][string]$InstallKey = '', [Parameter(Mandatory)][ValidateRange(0, 3)][int]$Ring, [AllowEmptyString()][string]$ETag = '')
+    if (-not "$InstallKey".Trim()) { return @{ status = 0; body = $null; etag = ''; error = 'no install key' } }
+    $base = if ("$BaseUrl".Trim()) { "$BaseUrl".Trim().TrimEnd('/') } else { $script:PimInvardiaDefaultBase }
+    if ($base -notmatch '^(?i)https://') { return @{ status = 0; body = $null; etag = ''; error = 'the update address is not https' } }
+    $url = "$base/api/updates/$($script:PimInvardiaProduct)/signal?ring=$Ring"
+    $h = @{ 'X-Invardia-Install-Key' = "$InstallKey".Trim() }
+    if ("$ETag".Trim()) { $h['If-None-Match'] = "$ETag".Trim() }
+    try {
+        if ($Http) { return (& $Http $url $h) }
+        return (Invoke-PimInvardiaSignalHttp -Url $url -Headers $h)
+    } catch { return @{ status = 0; body = $null; etag = ''; error = ((("$($_.Exception.Message)") -split "`n")[0]) } }
+}
+
 function Save-PimInvardiaArchive {
     param([Parameter(Mandatory)][string]$Url, [Parameter(Mandatory)][string]$OutFile, [Parameter(Mandatory)][string]$ExpectedSha256, [int64]$ExpectedSize = 0, [int]$TimeoutSeconds = 300)
     Save-InvardiaArchive -Url $Url -OutFile $OutFile -ExpectedSha256 $ExpectedSha256 -ExpectedSize $ExpectedSize -TimeoutSeconds $TimeoutSeconds
