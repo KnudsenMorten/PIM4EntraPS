@@ -541,6 +541,8 @@ IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCach
     if (Get-Command Initialize-PimCommitJournal -ErrorAction SilentlyContinue) { [void](Initialize-PimCommitJournal -ConnectionString $ConnectionString) }
     # CONFIG-1.1 / 96.1: the engine's applied outcome per row (PIM-CommitJournal.ps1). Never fails the open.
     if (Get-Command Initialize-PimCommitApplied -ErrorAction SilentlyContinue) { [void](Initialize-PimCommitApplied -ConnectionString $ConnectionString) }
+    # Framework §12.11f item 2 / PIM 100.144a: the captured signatures (PIM-SignedRequests.ps1). Never fails the open.
+    if (Get-Command Initialize-PimSignedRequestStore -ErrorAction SilentlyContinue) { [void](Initialize-PimSignedRequestStore -ConnectionString $ConnectionString) }
     # CONFIG-1.3: the configuration backup tables (PIM-ConfigBackup.ps1). Never fails the open.
     if (Get-Command Initialize-PimConfigBackupStore -ErrorAction SilentlyContinue) { [void](Initialize-PimConfigBackupStore -ConnectionString $ConnectionString) }
     # CR8 item 1 (PIM 100.152): the commit snapshot table (pim.Backups) is created HERE too -- the Manager used to create it
@@ -1756,6 +1758,8 @@ function Add-PimSqlQueueChange {
 INSERT INTO pim.ChangeQueue (Id, Entity, [Key], Op, Payload, EnqueuedUtc, [By], Status, Kind, Origin, Justification)
 VALUES (@id, @e, @k, @op, @p, @enq, @by, 'pending', @kind, @origin, @just);
 "@ -Parameters @{ id = [guid]$Change.id; e = "$($Change.entity)"; k = "$($Change.key)"; op = "$($Change.op)"; p = $payload; enq = $enq; by = "$($Change.by)"; kind = $kind; origin = $origin; just = $just })
+    # Framework §12.11f item 2 / PIM 100.144a: the requester's signature, when a signed-in Manager request enqueued this (never throws).
+    if ($global:PIM_SignedRequestCapture -and (Get-Command Save-PimSignedRequestForQueue -ErrorAction SilentlyContinue)) { [void](Save-PimSignedRequestForQueue -ConnectionString $ConnectionString -QueueId "$($Change.id)" -Role requester) }
 }
 
 function Add-PimSqlQueueChangeIfAbsent {
@@ -1778,6 +1782,7 @@ SELECT @id, @e, @k, @op, @p, @enq, @by, 'pending', @kind, @origin, @just
 WHERE NOT EXISTS (SELECT 1 FROM pim.ChangeQueue WITH (UPDLOCK, HOLDLOCK)
                   WHERE Entity=@e AND [Key]=@k AND Op=@op AND Status IN ('pending','committed','applying','failed'));
 "@ -Parameters @{ id = [guid]$Change.id; e = "$($Change.entity)"; k = "$($Change.key)"; op = "$($Change.op)"; p = $payload; enq = (ConvertTo-PimSqlUtcDateTime $Change.enqueuedUtc); by = "$($Change.by)"; kind = $kind; origin = $origin; just = $just }
+    if ([int]$n -gt 0 -and $global:PIM_SignedRequestCapture -and (Get-Command Save-PimSignedRequestForQueue -ErrorAction SilentlyContinue)) { [void](Save-PimSignedRequestForQueue -ConnectionString $ConnectionString -QueueId "$($Change.id)" -Role requester) }
     return ([int]$n -gt 0)
 }
 
@@ -1802,7 +1807,10 @@ SELECT @id, @e, @k, @op, @p, @enq, @by, 'pending', @kind, @origin, @just
 WHERE NOT EXISTS (SELECT 1 FROM pim.ChangeQueue WITH (UPDLOCK, HOLDLOCK)
                   WHERE Entity=@e AND [Key]=@k AND Op=@op AND Status='pending');
 "@ -Parameters @{ id = [guid]$Change.id; e = "$($Change.entity)"; k = "$($Change.key)"; op = "$($Change.op)"; p = $payload; enq = (ConvertTo-PimSqlUtcDateTime $Change.enqueuedUtc); by = "$($Change.by)"; kind = $kind; origin = $origin; just = $just }
-    if ([int]$n -gt 0) { return [pscustomobject]@{ added = $true; existingId = '' } }
+    if ([int]$n -gt 0) {
+        if ($global:PIM_SignedRequestCapture -and (Get-Command Save-PimSignedRequestForQueue -ErrorAction SilentlyContinue)) { [void](Save-PimSignedRequestForQueue -ConnectionString $ConnectionString -QueueId "$($Change.id)" -Role requester) }
+        return [pscustomobject]@{ added = $true; existingId = '' }
+    }
     $ex = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT TOP 1 Id FROM pim.ChangeQueue WHERE Entity=@e AND [Key]=@k AND Op=@op AND Status='pending' ORDER BY EnqueuedUtc" -Parameters @{ e = "$($Change.entity)"; k = "$($Change.key)"; op = "$($Change.op)" })
     return [pscustomobject]@{ added = $false; existingId = $(if ($ex.Count) { "$($ex[0].Id)" } else { '' }) }
 }
@@ -1838,6 +1846,8 @@ UPDATE pim.ChangeQueue
  WHERE Id=@id AND Status='pending';
 "@ -Parameters @{ id = $g; by = "$By" }
         if ([int]$n -eq 1) {
+            # Framework §12.11f item 2 / PIM 100.144a: the approver's signature (the person who committed the entry; never throws).
+            if ($global:PIM_SignedRequestCapture -and (Get-Command Save-PimSignedRequestForQueue -ErrorAction SilentlyContinue)) { [void](Save-PimSignedRequestForQueue -ConnectionString $ConnectionString -QueueId $id -Role approver) }
             $out.Add([pscustomobject]@{ id = $id; committed = $true; state = 'committed'; reason = '' })
         } else {
             # Say WHAT it is now. "0 rows" alone cannot distinguish "already committed by a
@@ -2339,6 +2349,11 @@ SELECT @jc, @e, k, op, b, CASE WHEN op = 'Remove' THEN NULL ELSE d END, i, a, @j
                          jc = "$($ctx.commitId)"; js = "$($ctx.source)"; ju = $(if ("$($ctx.undoOf)".Trim()) { "$($ctx.undoOf)" } else { $null }) }
         foreach ($k in $p.Keys) { [void]$cmd.Parameters.AddWithValue("@$k", $(if ($null -eq $p[$k]) { [DBNull]::Value } else { $p[$k] })) }
         [void]$cmd.ExecuteNonQuery()
+        # Framework §12.11f item 2 / PIM 100.144a: the commit's captured signatures join the same transaction (once per
+        # transaction; guarded -- a signature never fails the change). None on the context (mode off) = nothing.
+        if ($ctx.PSObject.Properties['signatures'] -and @($ctx.signatures).Count -and (Get-Command Add-PimSignedRequestRowsForJournalTx -ErrorAction SilentlyContinue)) {
+            Add-PimSignedRequestRowsForJournalTx -Connection $Connection -Transaction $Transaction -Context $ctx
+        }
         $batches++; $done += $chunk.Count
         if ($FailAfter -ge 0 -and $done -ge $FailAfter) { throw "injected mid-commit failure after $done statement(s) (test seam)" }
     }
@@ -3048,6 +3063,9 @@ if (Test-Path -LiteralPath $__mgdKeys) { . $__mgdKeys }
 # CONFIG-1.1: the change journal is written BY the store's write functions, so it must ride with the store.
 $__cmtJrn = Join-Path $PSScriptRoot 'PIM-CommitJournal.ps1'
 if (Test-Path -LiteralPath $__cmtJrn) { . $__cmtJrn }
+# Framework §12.11f item 2 / PIM 100.144a: the signed-request store is written next to the journal (same transaction) and by
+# the change queue's writers, so it rides with the store too. Inert while the mode is off.
+if (-not (Get-Command Add-PimSignedRequestRowsForJournalTx -ErrorAction SilentlyContinue)) { $__sgnReq = Join-Path $PSScriptRoot 'PIM-SignedRequests.ps1'; if (Test-Path -LiteralPath $__sgnReq) { . $__sgnReq } }
 # PIM 96.5: the daily reconcile's removal report + pause / resume ride with the store (the scheduler, the engine and the
 # Manager all read them).
 $__rcnRem = Join-Path $PSScriptRoot 'PIM-ReconcileRemoval.ps1'

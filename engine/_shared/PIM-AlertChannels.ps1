@@ -146,7 +146,7 @@ function New-PimWebhookPayload {
         $facts.Add([pscustomobject]@{ name = 'When (UTC)'; value = $whenUtc })
         $section = [pscustomobject]@{
             activityTitle    = $title
-            activitySubtitle = "PIM4EntraPS alert"
+            activitySubtitle = "PIM Manager alert"
             text             = "$Detail"
             facts            = $facts.ToArray()
             markdown         = $true
@@ -154,9 +154,9 @@ function New-PimWebhookPayload {
         $card = [ordered]@{
             '@type'      = 'MessageCard'
             '@context'   = 'http://schema.org/extensions'
-            summary      = "PIM4EntraPS: $title"
+            summary      = "PIM Manager: $title"
             themeColor   = $colour
-            title        = "PIM4EntraPS alert: $title"
+            title        = "PIM Manager alert: $title"
             sections     = @($section)
         }
         if ($link) {

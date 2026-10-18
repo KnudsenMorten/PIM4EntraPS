@@ -573,15 +573,26 @@ function Invoke-PimSqlAdminGroupStep {
     if ("$UpdateJobName".Trim() -and -not (Get-PimSqlAdminGroupKeepsUpdater)) {
         [void]$resolveNotes.Add("$("$UpdateJobName".Trim()) is not a member: the updater reaches the store as its own contained user (pim_updater + db_ddladmin; framework 12.23 P5)")
     } elseif ("$UpdateJobName".Trim()) {
-        try {
-            $job = & $Arm -Method GET -Path "$rgPath/providers/Microsoft.App/jobs/$("$UpdateJobName".Trim())?api-version=$($script:PimJobApi)"
-            $jp = "$($job.identity.principalId)".Trim()
-            if ($jp) { [void]$members.Add([pscustomobject]@{ objectId = $jp; label = "updater identity $UpdateJobName" }) }
-            else { [void]$resolveProblems.Add("$UpdateJobName has no system-assigned identity") }
-        } catch {
-            $m = "$($_.Exception.Message)"
-            if ($m -match '(?i)HTTP 404\b|ResourceNotFound|was not found') { [void]$resolveNotes.Add("$UpdateJobName does not exist yet -- Deploy-PimUpdateJob.ps1 adds its identity when it creates it") }
-            else { [void]$resolveProblems.Add("read $UpdateJobName`: $m") }
+        # CR5 step 2 (PIM 100.149): the updater is ca-pim-update at every install made before the new names and
+        # caj-pim-updater at a new one. The named job is read first (as always); only when it is NOT there and the name is
+        # one of the updater role's names is the role's other name read (never anything else).
+        $updNames = @("$UpdateJobName".Trim())
+        if ((Get-Command Test-PimInstallNameIsRole -ErrorAction SilentlyContinue) -and (Test-PimInstallNameIsRole -Role updater -Name $UpdateJobName)) { $updNames = @(Get-PimInstallNameCandidates -Role updater -Preferred "$UpdateJobName".Trim()) }
+        for ($ui = 0; $ui -lt $updNames.Count; $ui++) {
+            $UpdateJobName = $updNames[$ui]
+            try {
+                $job = & $Arm -Method GET -Path "$rgPath/providers/Microsoft.App/jobs/$("$UpdateJobName".Trim())?api-version=$($script:PimJobApi)"
+                $jp = "$($job.identity.principalId)".Trim()
+                if ($jp) { [void]$members.Add([pscustomobject]@{ objectId = $jp; label = "updater identity $UpdateJobName" }) }
+                else { [void]$resolveProblems.Add("$UpdateJobName has no system-assigned identity") }
+                break
+            } catch {
+                $m = "$($_.Exception.Message)"
+                $notThere = ($m -match '(?i)HTTP 404\b|ResourceNotFound|was not found')
+                if ($notThere -and $ui -lt ($updNames.Count - 1)) { continue }
+                if ($notThere) { [void]$resolveNotes.Add("$($updNames[0]) does not exist yet -- Deploy-PimUpdateJob.ps1 adds its identity when it creates it") }
+                else { [void]$resolveProblems.Add("read $UpdateJobName`: $m") }
+            }
         }
     }
     if ("$SupportObjectId".Trim()) {

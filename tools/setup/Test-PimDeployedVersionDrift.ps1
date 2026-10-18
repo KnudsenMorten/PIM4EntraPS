@@ -316,6 +316,16 @@ if ("$((Get-PimArmSubscription -SubscriptionId $S -ErrorAsNull).subscriptionId)"
 $subArgs = @('--subscription', $S)
 Write-Host ("  subscription: {0} (explicit)" -f $S) -ForegroundColor DarkGray
 
+# CR5 step 2 (PIM 100.149): an install made with the new names runs ca-pim-web / caj-pim-updater. A name NOT passed whose
+# today's resource is not in the group falls to the role's new name when THAT one is there; a passed name is used as given.
+if (-not (Get-Command Get-PimInstallNameCandidates -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-InstallNames.ps1') }
+if (-not $PSBoundParameters.ContainsKey('ManagerApp') -and -not (Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull)) {
+    foreach ($alt in @(Get-PimInstallNameCandidates -Role web -Preferred $ManagerApp | Select-Object -Skip 1)) { if (Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $alt -ErrorAsNull) { $ManagerApp = $alt; break } }
+}
+if (-not $PSBoundParameters.ContainsKey('UpdateJobName') -and -not (Get-PimArmAcaJob -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $UpdateJobName -ErrorAsNull)) {
+    foreach ($alt in @(Get-PimInstallNameCandidates -Role updater -Preferred $UpdateJobName | Select-Object -Skip 1)) { if (Get-PimArmAcaJob -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $alt -ErrorAsNull) { $UpdateJobName = $alt; break } }
+}
+
 # --- WHAT this environment is approved to run (BUG-171) ------------------------------------------
 # The ring entry in channel.json, read through the environment's OWN updater -- never the repo
 # VERSION file. No ring, an unreadable updater or a channel that approves nothing => CANNOT CHECK.

@@ -479,7 +479,7 @@ function Get-PimEnvironmentReport {
                             $szU = Test-PimJobUndersized -Counts $szRec.counts -Cpu $e.details['cpu'] -Memory $e.details['memory'] -ReplicaTimeout ([int]"0$($e.details['replicaTimeout'])") -SubscriptionId $sub -ResourceGroup $rgN -JobName $cd.name
                             $e.details['sizing'] = "$($szU.reason)"
                             if ($szU.undersized) { $e.details['sizingFix'] = "$($szU.command)" }
-                        } elseif ("$($cd.name)" -match '(?i)-tick$') { $e.details['sizing'] = 'no tenant size recorded on this job (installed before 2.4.539) -- the next update records it' }
+                        } elseif ("$($cd.name)" -match '(?i)-tick$' -or ((Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) -and "$($cd.name)" -ieq (Get-PimInstallName -Role engine))) { $e.details['sizing'] = 'no tenant size recorded on this job (installed before 2.4.539) -- the next update records it' }
                         $e.exposure = 'no ingress (outbound only)'
                     }
                     'microsoft.app/managedenvironments' {

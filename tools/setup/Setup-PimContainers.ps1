@@ -280,6 +280,13 @@ param(
     # version for the ring ("nothing releases to ring 2 without my approve"). Greenfield installs and
     # ring 0/1 are unaffected. -OverrideRingGate needs -Reason and is printed/audited.
     [string]$UpdateJobName = 'ca-pim-update',
+    # --- CR5 step 2 (framework §12.11c items 2-3, PIM 100.149): the NEW names, NEW installs only ----------------------
+    # -ManagerApp names the Manager entry of -Workers (empty = the entry's own name, 'ca-pim-manager'). -NewInstallNames
+    # (decided by Invoke-PimDeployAll from what the resource group holds -- Azure cannot rename) also puts the names on the
+    # Manager and the tick job (PIM_ManagerApp / PIM_TickJobName / PIM_UpdateJobName), so every reader resolves them
+    # before the updater writes the install record. Without the switch nothing here changes.
+    [string]$ManagerApp = '',
+    [switch]$NewInstallNames,
     [switch]$OverrideRingGate,
     [string]$Reason,
     # BUG-170 (via agent C1): the ring (and source) the SAME deploy run installs on an environment that
@@ -369,6 +376,11 @@ $subnetId = "/subscriptions/$SubscriptionId/resourceGroups/$VnetResourceGroup/pr
 # ESTATE-06: in cron mode the scheduler WORKERS are replaced by one scheduled Job, so the app
 # set collapses to the Manager alone. Done here (not by asking the caller to pass -Workers)
 # so the mode is a single switch and the two shapes cannot drift apart.
+# CR5 step 2: -ManagerApp renames the Manager ENTRY (the role is the entry, never the name -- see the Graph / Azure grants)
+$mgrWanted = "$ManagerApp".Trim()
+if ($mgrWanted) {
+    $Workers = @($Workers | ForEach-Object { if ($_.entry -eq 'manager' -and "$($_.name)" -ne $mgrWanted) { $c = @{} + $_; $c.name = $mgrWanted; $c } else { $_ } })
+}
 $workersAll = @($Workers)   # the full matrix, kept for an existing always-on environment (see "Existing shape" below)
 if ($WorkerMode -eq 'cron') {
     $cronCheck = Test-PimJobCron -Cron $TickCron
@@ -1014,6 +1026,13 @@ $commonEnv = @(
     "PIM_HOSTED=1","PIM_StorageBackend=sql",
     "PIM_SqlServer=$SqlServerFqdn","PIM_SqlDatabase=$SqlDatabase","PIM_TenantId=$TenantId"
 )
+# CR5 step 2 (PIM 100.149): an install made with the NEW names carries them on the Manager and the tick job -- the readers'
+# second source (Get-PimInstallName: record -> these -> today's name) -- so nothing reads today's name before the updater's
+# first run stores the record. Not set without -NewInstallNames: an install with today's names is exactly as before.
+if ($NewInstallNames) {
+    $commonEnv += @("PIM_ManagerApp=$ManagerApp", "PIM_TickJobName=$TickJobName", "PIM_UpdateJobName=$UpdateJobName")
+    Note "names: $ManagerApp / $TickJobName / $UpdateJobName (CR5 new-install names; recorded on the Manager and the tick job)"
+}
 # IMP-06a: carry the sender to BOTH the Manager and the tick Job -- $commonEnv feeds the job definition
 # too, and the tick Job is the process that actually mints TAPs and mails them, so a sender that
 # reached only the Manager would look configured in the GUI and still never send.
@@ -1313,7 +1332,12 @@ foreach ($w in $Workers) {
     # identity here IS this managed identity, and this line has just resolved it. Published rather
     # than re-derived, for the same reason as the SQL admin identity.
     if ($w.name -eq $ManagerApp) { $global:PIM_ManagerMiAppId = $appId }
-    Grant-PimMiSqlHere -DbUserName $w.name -MiAppId $appId
+    # 🔴 CR5 step 2: the ROLE comes from the workload ENTRY, never from the name. Every grant below used to ask
+    # "$($w.name) -match 'manager'" -- true for ca-pim-manager, FALSE for the new-install name ca-pim-web, which would have
+    # handed the web app the ENGINE's Graph write set and the engine's Azure roles. The entry is 'manager' whatever the name.
+    $isMgr = ("$($w.entry)" -eq 'manager')
+    if ($isMgr) { Grant-PimMiSqlHere -DbUserName $w.name -MiAppId $appId -Roles @(Get-PimSetupSqlUserRoles -DbUserName $w.name -Component 'web') }
+    else        { Grant-PimMiSqlHere -DbUserName $w.name -MiAppId $appId }
     if (-not $useRegistryIdentity) {
         # Legacy path only: move the registry off the admin credential and onto the app's own
         # identity now that it exists and can be granted AcrPull.
@@ -1336,9 +1360,8 @@ foreach ($w in $Workers) {
     # Directory app-roles for workers that touch Entra/PIM (everything except a pure
     # read-only manager). Without these the engine 403s on directory reads/writes.
     # §65.4 -- the Manager gets the READ-ONLY Graph set; everything else gets the engine set.
-    # Keyed off the app name because that is what the workload list carries here; 'ca-pim-manager'
-    # is identical in every environment (see the yaml note above), so this is stable across tenants.
-    Grant-PimMiGraph -MiObjectId $oid -SubscriptionId $SubscriptionId -ExpectedTenantId $TenantId -RoleSet $(if ("$($w.name)" -match 'manager') { 'Manager' } else { 'Engine' })
+    # Keyed off the workload ENTRY (CR5 step 2 -- it used to be the app name, which a new install no longer carries).
+    Grant-PimMiGraph -MiObjectId $oid -SubscriptionId $SubscriptionId -ExpectedTenantId $TenantId -RoleSet $(if ($isMgr) { 'Manager' } else { 'Engine' })
     # BUG-51: the Graph grant above covers the DIRECTORY half only. Without an ARM role this
     # identity sees an empty Azure -- azure-scopes=0, and managementGroups list 403s -- while
     # every directory read works perfectly. Same lesson as framework §10.0b, read backwards.
@@ -1355,15 +1378,15 @@ foreach ($w in $Workers) {
         # deploy is invoked with the ENGINE's role set to satisfy the tick job, and this call site
         # passed that same set to every workload. Reader covers every ARM call the Manager makes
         # (`*/read` includes roleAssignments and the PIM schedules).
-        $wRoles = if ("$($w.name)" -match 'manager') { @('Reader') } else { $AzureRbacRoles }
-        if ("$($w.name)" -match 'manager' -and @($AzureRbacRoles) -join ',' -ne 'Reader') {
+        $wRoles = if ($isMgr) { @('Reader') } else { $AzureRbacRoles }
+        if ($isMgr -and @($AzureRbacRoles) -join ',' -ne 'Reader') {
             Note "  $($w.name): Azure RBAC narrowed to Reader -- the GUI only reads Azure; revokes are queued and applied by the engine"
         }
         Grant-PimMiAzureRbac -MiObjectId $oid -Name $w.name -SubscriptionId $SubscriptionId `
             -Roles $wRoles -ManagementGroupId $AzureRbacManagementGroupId -Required:$RequireAzureRbac
         # PIM 100.22 (b) (owner 2026-10-09): the Manager ALSO gets Reader on the PIM resource group ONLY, so the Environment
         # report reads the installation's own architecture. Idempotent + read back; Confirm-PimInstall verifies / repairs it.
-        if ("$($w.name)" -match 'manager') {
+        if ($isMgr) {
             [void](Grant-PimManagerRgReader -MiObjectId $oid -Name $w.name -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Required:$RequireAzureRbac)
         }
     }

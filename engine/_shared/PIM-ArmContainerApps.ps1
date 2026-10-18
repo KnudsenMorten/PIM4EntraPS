@@ -92,7 +92,11 @@ function Set-PimAcaAppImage {
         # (the 100.50 lesson, Invoke-PimArmBusyRetry below) and would restart the app twice.
         [scriptblock]$Resize,
         # filled with what the write carried for the size: ['applied'] = @{ app; from; cpu; memory; detail } (absent = none)
-        [hashtable]$ResizeOut
+        [hashtable]$ResizeOut,
+        # CR7 (framework 12.11g, PIM 100.168): OTHER named containers of the same revision whose image moves in THIS write
+        # (@{ 'signin-front' = '<registry>/signin-front:1.1.0' }) -- the sign-in front rolls together with the Manager, one
+        # write, one new revision. A name the template does not carry is skipped (never added). Empty = today's write.
+        [hashtable]$SidecarImages
     )
     $app = Get-PimAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name
     if (-not $app) { throw "Set-PimAcaAppImage: container app '$Name' not found in $ResourceGroup." }
@@ -107,6 +111,13 @@ function Set-PimAcaAppImage {
                "Pass -ContainerName. Refusing to guess -- rolling the wrong container is silent.")
     }
     $target.image = $Image
+    if ($SidecarImages -and $SidecarImages.Count) {
+        foreach ($scName in @($SidecarImages.Keys)) {
+            if ("$scName" -eq "$($target.name)" -or -not "$($SidecarImages[$scName])".Trim()) { continue }
+            $sc = @($containers | Where-Object { "$($_.name)" -eq "$scName" }) | Select-Object -First 1
+            if ($sc) { $sc.image = "$($SidecarImages[$scName])".Trim() }
+        }
+    }
 
     if ($ExtraEnv -and $ExtraEnv.Count) {
         # Read-modify-write here too: keep every variable the container already has.
@@ -206,25 +217,40 @@ function Invoke-PimAcaRoll {
         [int]$TimeoutSeconds = 600,
         # PIM 100.114: the app's size, carried by the roll's OWN write (Set-PimAcaAppImage -Resize) and read back after it.
         # Without -Resize, and on the rollback, the template goes back with the resources it was read with -- unchanged.
-        [scriptblock]$Resize
+        [scriptblock]$Resize,
+        # CR7 (PIM 100.168): other named containers rolled in the SAME write (Set-PimAcaAppImage -SidecarImages), and put
+        # back with the Manager on a rollback. Only containers the app carries count. Empty = exactly today's roll.
+        [hashtable]$SidecarImages
     )
     $result = @{ app = $Name; from = ''; to = $Image; rolled = $false; healthy = $null
                  rolledBack = $false; state = ''; reason = ''
-                 resized = $false; sizeFrom = ''; size = ''; sizeConfirmed = $null; sizeDetail = '' }
+                 resized = $false; sizeFrom = ''; size = ''; sizeConfirmed = $null; sizeDetail = ''; sidecars = @{}; sidecarsFrom = @{} }
 
     $app = Get-PimAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name
     if (-not $app) { $result.reason = "container app '$Name' not found"; return $result }
     $result.from = Get-PimAcaAppImage -App $app -ContainerName $ContainerName
+    $scMove = @{}; $scFrom = @{}
+    if ($SidecarImages -and $SidecarImages.Count) {
+        foreach ($scName in @($SidecarImages.Keys)) {
+            $want = "$($SidecarImages[$scName])".Trim()
+            if (-not $want) { continue }
+            $sc = @(@($app.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -eq "$scName" }) | Select-Object -First 1
+            if (-not $sc) { continue }
+            if ("$($sc.image)" -ne $want) { $scMove["$scName"] = $want; $scFrom["$scName"] = "$($sc.image)" }
+        }
+    }
+    $result.sidecars = $scMove; $result.sidecarsFrom = $scFrom
 
-    if ("$($result.from)" -eq "$Image") {
+    if ("$($result.from)" -eq "$Image" -and -not $scMove.Count) {
         $result.reason = 'already on this image -- nothing to roll'
         $result.healthy = $true
         return $result
     }
 
     $rollResizeOut = @{}
-    [void](Set-PimAcaAppImage -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name `
-                              -Image $Image -ContainerName $ContainerName -Resize $Resize -ResizeOut $rollResizeOut)
+    $setArgs = @{ SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; Name = $Name; Image = $Image; ContainerName = $ContainerName; Resize = $Resize; ResizeOut = $rollResizeOut }
+    if ($scMove.Count) { $setArgs['SidecarImages'] = $scMove }
+    [void](Set-PimAcaAppImage @setArgs)
     $rollResize = $null; if ($rollResizeOut.ContainsKey('applied')) { $rollResize = $rollResizeOut['applied'] }
     $result.state = Wait-PimAcaProvisioned -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -TimeoutSeconds $TimeoutSeconds
     if ($result.state -notmatch '(?i)^Succeeded$') {
@@ -258,8 +284,9 @@ function Invoke-PimAcaRoll {
     }
 
     if ($result.rolled -and $result.healthy -eq $false -and "$($result.from)".Trim()) {
-        [void](Set-PimAcaAppImage -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name `
-                                  -Image $result.from -ContainerName $ContainerName)
+        $backArgs = @{ SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; Name = $Name; Image = $result.from; ContainerName = $ContainerName }
+        if ($scFrom.Count) { $backArgs['SidecarImages'] = $scFrom }
+        [void](Set-PimAcaAppImage @backArgs)
         $back = Wait-PimAcaProvisioned -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -TimeoutSeconds $TimeoutSeconds
         $result.rolledBack = ($back -match '(?i)^Succeeded$')
         if (-not $result.rolledBack) {

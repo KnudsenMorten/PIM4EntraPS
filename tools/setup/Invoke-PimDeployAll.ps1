@@ -198,6 +198,11 @@ param(
     # exists -- and it was copy-pasted into FOUR entry points, so fixing one changed nothing.
     @(),
     [string]$ManagerApp     = 'ca-pim-manager',
+    # CR5 step 2 (framework §12.11c items 2-3, PIM 100.149): a NEW install takes the new names (ca-pim-web, ca-pim-engine,
+    # caj-pim-updater; display names "PIM Manager ...") -- OFF by default (also $env:PIM_Setup_NewInstallNames = 1). Only
+    # names the caller did not pass change. Azure cannot rename: a resource group that already runs PIM keeps the names it
+    # has (decided from what is there, before any step), and an install made with the new names keeps them on a re-run.
+    [switch]$NewInstallNames,
     [string]$ImageTag,
 
     # --- SQL ---
@@ -704,6 +709,7 @@ function Get-PimDeployJobEnvValue {
 . (Join-Path $solRoot 'engine\_shared\PIM-DeployAll.ps1')
 . (Join-Path $solRoot 'engine\_shared\PIM-ScenarioProfile.ps1')     # s31 scenario -> knob resolver
 . (Join-Path $here '_PimRegions.ps1')                                # 100.62: region name check + live capability preflight (below)
+. (Join-Path $solRoot 'engine\_shared\PIM-InstallNames.ps1')         # CR5 step 2: the name set (today's / new) + display-name forms
 
 # ---- the registry SKU follows the EXPOSURE unless the caller said otherwise -------------------
 # Stated rather than silent: this is a cost difference (~10x) and a security posture, so a deploy
@@ -1104,6 +1110,52 @@ if ($Descriptor) {
     }
 }
 
+# =================================================================================================
+# CR5 STEP 2 (framework §12.11c items 2-3, PIM 100.149) -- WHICH NAMES THIS INSTALL USES, decided ONCE, here, before the
+# plan names anything. Azure cannot rename a container app or job, so the resource group decides first:
+#   today's Manager / tick / updater there  -> today's names (a requested switch is refused, said in one line)
+#   the new-name Manager / engine / updater -> the new names (an install made with them, re-run without the switch)
+#   nothing of PIM there                    -> the switch: -NewInstallNames / $env:PIM_Setup_NewInstallNames (OFF)
+# Only names the caller did not pass change (an explicit -ManagerApp / -TickJobName / -UpdateJobName always wins). The new
+# names need the on-demand (cron) shape: the always-on worker matrix has its own 'ca-pim-engine' app.
+# With the switch off and no new-name install in the group, NOTHING below changes a name: today's install, byte for byte.
+# =================================================================================================
+$script:PimNewNamesRequested = Test-PimNewInstallNamesSwitch -Explicit $(if ($PSBoundParameters.ContainsKey('NewInstallNames')) { [bool]$NewInstallNames } else { $null })
+$script:PimUseNewNames = $false
+if ($hosted -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim()) {
+    $nnApps = @(); $nnJobs = @(); $nnReadOk = $false
+    if (Test-PimDeployRest) {
+        $nnReadOk = $true
+        foreach ($nnKind in 'containerApps', 'jobs') {
+            try {
+                $nnList = @(@(Invoke-PimSetupArm -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/$nnKind" -ApiVersion (Get-PimSetupApiVersion aca) -All) |
+                            Where-Object { $_ } | ForEach-Object { "$($_.name)".Trim() } | Where-Object { $_ })
+                if ($nnKind -eq 'jobs') { $nnJobs = $nnList } else { $nnApps = $nnList }
+            } catch {
+                # a resource group that does not exist yet is an empty one (a new install); anything else is "could not read"
+                if ("$($_.Exception.Message)" -notmatch '(?i)ResourceGroupNotFound|HTTP 404\b') { $nnReadOk = $false }
+            }
+        }
+    }
+    $nnChoice = Resolve-PimSetupInstallNameChoice -RequestNew ([bool]$script:PimNewNamesRequested) -ExistingApps $nnApps -ExistingJobs $nnJobs -ReadOk $nnReadOk
+    if ($nnChoice.useNew -and $WorkerMode -ne 'cron') {
+        $nnChoice = @{ useNew = $false; refused = $true; reason = "the new names need the on-demand shape (-WorkerMode cron); '$WorkerMode' keeps today's names" }
+    }
+    $script:PimUseNewNames = [bool]$nnChoice.useNew
+    if ($script:PimUseNewNames) {
+        $nnSet = Get-PimInstallNameSet -New
+        if (-not $PSBoundParameters.ContainsKey('ManagerApp'))    { $ManagerApp    = $nnSet.web }
+        if (-not $PSBoundParameters.ContainsKey('TickJobName'))   { $TickJobName   = $nnSet.engine }
+        if (-not $PSBoundParameters.ContainsKey('UpdateJobName')) { $UpdateJobName = $nnSet.updater }
+        if (-not $PSBoundParameters.ContainsKey('EngineAppDisplayName')) { $nnEa = ConvertTo-PimNewDisplayName $EngineAppDisplayName; if ($nnEa) { $EngineAppDisplayName = $nnEa } }
+        Info "names: $ManagerApp / $TickJobName / $UpdateJobName -- $($nnChoice.reason)"
+    } elseif ($nnChoice.refused) {
+        Warn "names: today's ($ManagerApp / $TickJobName / $UpdateJobName) -- $($nnChoice.reason)"
+    }
+} elseif ($script:PimNewNamesRequested) {
+    Warn "names: today's -- the new names are for a hosted install with a resource group and subscription"
+}
+
 # 🪤 -Apps DEFAULTS TO THE SIX-APP MATRIX, WHICH ONLY EXISTS IN 'always-on' MODE. In cron mode
 # Setup-PimContainers creates the Manager and ONE tick Job -- the five workers are never created,
 # because the tick replaces them. Leaving the default alone made the CODE step ask
@@ -1175,9 +1227,12 @@ function Test-EngineAppRegPresent {
     try {
         # BUG-215: asked of -TenantId by name -- `az ad app list` would ask the DEFAULT account's tenant,
         # and an app of the same name in another company's directory would read as "present here".
-        $apps = Invoke-PimTenantGraphGet -Path ("/applications?`$filter=displayName eq '" + "$EngineAppDisplayName".Replace("'", "''") + "'&`$select=appId")
-        if ($null -eq $apps) { return $null }
-        if (@(@($apps.value) | Where-Object { "$($_.appId)".Trim() }).Count) { return $true }
+        # CR5 item 5: the name in BOTH forms ('PIM4EntraPS Engine' / 'PIM Manager Engine') -- the update may have renamed it
+        foreach ($eaForm in @(Get-PimDisplayNameForms "$EngineAppDisplayName")) {
+            $apps = Invoke-PimTenantGraphGet -Path ("/applications?`$filter=displayName eq '" + "$eaForm".Replace("'", "''") + "'&`$select=appId")
+            if ($null -eq $apps) { return $null }
+            if (@(@($apps.value) | Where-Object { "$($_.appId)".Trim() }).Count) { return $true }
+        }
         return $false
     } catch { return $null }
 }
@@ -2009,7 +2064,7 @@ function Invoke-DefaultStepRunner {
                 if ($pullName) { $derivedPull = "$((Get-PimArmIdentity -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $pullName -ErrorAsNull).id)" }
                 if ("$derivedPull".Trim() -notmatch '^/subscriptions/') {
                     $ids = @(Invoke-PimSetupArm -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.ManagedIdentity/userAssignedIdentities" -ApiVersion (Get-PimSetupApiVersion msi) -All -ErrorAsNull |
-                             Where-Object { $_ -and "$($_.name)" -match '^id-pim-' -and "$($_.name)" -notmatch '^id-pim-(sql-|asbuilt)' })   # never the as-built job's identity (HOGYM)
+                             Where-Object { $_ -and "$($_.name)" -match '^id-pim-' -and "$($_.name)" -notmatch '^id-pim-(sql-|asbuilt|web$|engine$|updater$|mcp$)' })   # never the as-built job's identity (HOGYM), nor a CR5 per-role identity
                     if ($ids.Count -eq 1) { $derivedPull = "$($ids[0].id)"; $pullName = "$($ids[0].name)" }
                 }
                 if ("$derivedPull".Trim() -match '^/subscriptions/') {
@@ -2139,6 +2194,8 @@ function Invoke-DefaultStepRunner {
                     }
                     $tickSizing = @{}
                     if ($TenantObjectCounts) { $tickSizing['TenantObjectCounts'] = $TenantObjectCounts }   # 100.31
+                    # CR5 step 2: the new-install names (decided above) reach the Manager entry and the env of both workloads
+                    if ($script:PimUseNewNames) { $tickSizing['ManagerApp'] = $ManagerApp; $tickSizing['NewInstallNames'] = $true }
                     try {
                     & $setup @deployId @tickSizing -SubscriptionId $SubscriptionId -TenantId $TenantId -Location $Location `
                         -ResourceGroup $ResourceGroup -VnetName $VnetName -VnetResourceGroup $VnetResourceGroup `
@@ -2530,6 +2587,14 @@ function Invoke-DefaultStepRunner {
                     $eaArgs['StableIdentifierUri'] = "api://$TenantId/pim4entraps-manager-$EnvLabel"
                     $eaArgs['LegacyDisplayNames']  = @()
                     $eaArgs['MembersGroupName']    = "PIM4EntraPS Manager users ($EnvLabel) (members, no guests)"
+                }
+                # CR5 (framework §12.11c item 5): a new-name install (step 2), or an install whose owner switched the display
+                # names on (PIM_Update_RenameDisplayNames), is "PIM Manager" where people read. The app and the group are
+                # FOUND by their stable identifier uri / mailNickname (both kept), so the name is a label only.
+                if ($script:PimUseNewNames -or (Test-PimRenameDisplayNamesSwitch)) {
+                    $eaArgs['AppDisplayName']   = ConvertTo-PimNewDisplayName $(if ($eaArgs.Contains('AppDisplayName')) { $eaArgs['AppDisplayName'] } else { 'PIM4EntraPS Manager' })
+                    $eaArgs['MembersGroupName'] = ConvertTo-PimNewDisplayName $(if ($eaArgs.Contains('MembersGroupName')) { $eaArgs['MembersGroupName'] } else { 'PIM4EntraPS Manager users (members, no guests)' })
+                    if (-not "$EnvLabel".Trim()) { $eaArgs['LegacyDisplayNames'] = @('PIM4EntraPS Manager', 'PIM4EntraPS-Manager', 'PIM-Manager-Hosted') }
                 }
                 # 🪤 A THROW IS A FAILURE TOO. Set-PimManagerEasyAuth reports most refusals by throwing, and
                 # an unhandled throw here escaped the runner before the Manager could be closed below.

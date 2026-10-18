@@ -17,6 +17,8 @@ $script:PimInstallGuid = '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
 # 100.62: the customer decides the region -- the config step checks only that it is a plausible region name (Test-PimSetupRegion);
 # Install-PimManager's preflight checks every service is offered there (Invoke-PimRegionPreflight) before anything is created.
 . (Join-Path $PSScriptRoot '_PimRegions.ps1')
+# CR5 step 2 (PIM 100.149): the name sets (today's / new) and the setup switch -- pure, no side effects.
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-InstallNames.ps1')
 
 # The stable step ids (the status page and support tickets refer to them) and their titles in customer language.
 # Order = run order. DeployAll's 'appreg' step is never shown: a guided install runs on managed identities only.
@@ -234,6 +236,13 @@ function Test-PimInstallConfig {
     if ($role -eq 'managed' -and -not $ek -and -not $ik -and -not $HasEnrollmentKey) { $err.Add("mspRole 'managed' needs enrollmentKey (or, from Invardia's installer, installKey + managing): a managed tenant is linked to its managing company by the enrollment key that company got from Invardia") }
     if ($role -eq 'managed' -and $ik -and -not $mg) { $err.Add("mspRole 'managed' with installKey needs 'managing' (the claim's managing block: bundleStorage, container, signingKeyIds) -- Invardia's installer claimed, so it hands it over") }
     if ($mg -and $role -ne 'managed') { $err.Add("'managing' belongs to a managed tenant (mspRole managed)") }
+    # CR5 step 2 (PIM 100.149): optional, NOT a wizard question (Invardia's contract is unchanged) -- an operator / Invardia
+    # may set it in config.json; carried only when given, so an install without it is exactly as before.
+    $nn = & $get 'newInstallNames'
+    if ($null -ne $nn -and "$nn".Trim()) {
+        if ("$nn".Trim() -notmatch '^(?i)(true|false|1|0|yes|no|on|off)$') { $err.Add('newInstallNames must be true or false') }
+        else { $c.newInstallNames = [bool]("$nn".Trim() -match '^(?i)(true|1|yes|on)$') }
+    }
     return @{ ok = ($err.Count -eq 0); errors = @($err); config = [pscustomobject]$c; enrollmentKey = $ek; enrollmentKeyIgnored = $ekIgnored }
 }
 
@@ -256,12 +265,22 @@ function Get-PimInstallNames {
     <# PURE. The resource names of a guided install (framework §5.5: purpose words; globally unique names carry the token). #>
     param([Parameter(Mandatory)][object]$Config)
     $t = Get-PimInstallToken -InstallId $Config.installId
-    return [pscustomobject]@{
+    $n = [pscustomobject]@{
         token = $t; resourceGroup = $Config.resourceGroup; vnet = 'vnet-pim'; environment = 'cae-pim'; logAnalytics = 'log-pim'
         acr = "acrpim$t"; sqlServer = "sql-pim-$t"; sqlFqdn = "sql-pim-$t.database.windows.net"; sqlDatabase = 'PimPlatform'; managerApp = 'ca-pim-manager'
         # CR5 step 1 (PIM 100.149): the engine + updater jobs named HERE, once (today's names) -- the install never repeats a literal
-        tickJob = 'ca-pim-tick'; updateJob = 'ca-pim-update'
+        tickJob = 'ca-pim-tick'; updateJob = 'ca-pim-update'; newNames = $false
     }
+    # CR5 step 2: config 'newInstallNames' (else $env:PIM_Setup_NewInstallNames) -> the new names (OFF by default). The
+    # deploy still checks the resource group first (Azure cannot rename) and keeps what is there. A MANAGED tenant's install
+    # (Invoke-PimMspBuild) keeps today's names: the managed-tenant build is not part of CR5 step 2 yet.
+    $explicit = if ($Config.PSObject.Properties['newInstallNames']) { $Config.newInstallNames } else { $null }
+    $managed = ($Config.PSObject.Properties['mspRole'] -and "$($Config.mspRole)".Trim() -ieq 'managed')
+    if (-not $managed -and (Test-PimNewInstallNamesSwitch -Explicit $explicit)) {
+        $ns = Get-PimInstallNameNewDefaults
+        $n.managerApp = $ns.web; $n.tickJob = $ns.engine; $n.updateJob = $ns.updater; $n.newNames = $true
+    }
+    return $n
 }
 
 function ConvertTo-PimInstallDeployArgs {
@@ -285,6 +304,8 @@ function ConvertTo-PimInstallDeployArgs {
         PrereqToken = $n.token; PrereqVnetAddressPrefix = $Config.vnetAddressPrefix; PrereqSubnetAddressPrefix = $Config.subnetAddressPrefix
         ManagerSuperAdmins = (@($admins) -join ','); UseSignedInAccount = $true; SkipAppReg = $true; Apply = $true
     }
+    # CR5 step 2: the new names -- the deploy decides them from the resource group (a new one: the new names)
+    if ($n.newNames) { $a['NewInstallNames'] = $true }
     if (@($portal).Count) { $a['EasyAuthAllowedPrincipals'] = @($portal) }
     if ($Config.allowAllMembers) { $a['EasyAuthAllowAllTenantUsers'] = $true }
     if ($Config.engineAzureRootUserAccessAdmin) { $a['EngineAzureRootUserAccessAdmin'] = $true }   # §97 opt-in

@@ -49,7 +49,11 @@ $script:PimUplinkProduct = 'pim-manager'
 # Invardia's limit (2026-10-04): 30 POSTs per MINUTE per client IP -- and several installs behind one NAT share it. So at most
 # 20 reports per cycle, ~2.5 s apart (the job passes -PauseMs 2500), and the cycle STOPS at the first failure (a 429 says
 # wait): what was not sent keeps its per-job watermark and goes next cycle.
+# PIM 100.158 (a): in the 4-hour release window the job runs every 15 minutes instead of hourly -- the SAME per-cycle budget
+# (20 reports, 2.5 s apart, stop at the first failure) applies to every run, so a minute never carries more than before.
 $script:PimUplinkMaxRunsPerCycle = 20
+# PIM 100.158 (CR3): the release-control library (pure) -- loaded here, at file level, so its functions outlive any one call.
+if (-not (Get-Command Get-PimReleaseModeWindow -ErrorAction SilentlyContinue)) { $__pimRcLib = Join-Path $PSScriptRoot 'PIM-ReleaseControl.ps1'; if (Test-Path -LiteralPath $__pimRcLib) { . $__pimRcLib } }
 
 function Get-PimUplinkJobId {
     <# PURE. The stable Job id Invardia stores: 'pim-' + the job TYPE (one-off trigger names collapse onto their type). #>
@@ -191,11 +195,60 @@ function Get-PimUplinkRunPlan {
 $script:PimUplinkHeartbeatHours = 1
 function Get-PimUplinkHeartbeatHours { <# PURE. The heartbeat interval in hours -- a literal (child-scope safe). #> return 1 }
 function Get-PimUplinkHeartbeatDue {
-    <# PURE. True when no heartbeat was sent in the last hour (less 10 minutes for the tick) -- or ever. #>
+    <#
+      PURE. True when no heartbeat was sent in the last interval (less the tick's slack) -- or ever. The slack is 10 minutes,
+      or a third of the interval when that is less: hourly = due from 50 minutes (as before); the 15-minute release-mode
+      interval (PIM 100.158 (a)) = due from 10 minutes, so a job run 15 minutes after the last one sends it.
+    #>
     param([AllowNull()][object]$LastHeartbeatUtc, [datetime]$NowUtc = [datetime]::UtcNow, [double]$Hours = (Get-PimUplinkHeartbeatHours))
     if (-not $Hours -or $Hours -le 0) { $Hours = 1 }
-    try { if ("$LastHeartbeatUtc") { return ($NowUtc.ToUniversalTime() -ge ([datetime]"$LastHeartbeatUtc").ToUniversalTime().AddMinutes(($Hours * 60) - 10)) } } catch { }
+    $slack = [Math]::Min(10, ($Hours * 60) / 3)
+    try { if ("$LastHeartbeatUtc") { return ($NowUtc.ToUniversalTime() -ge ([datetime]"$LastHeartbeatUtc").ToUniversalTime().AddMinutes(($Hours * 60) - $slack)) } } catch { }
     return $true
+}
+
+function Get-PimUplinkReleaseWindow {
+    <#
+      PIM 100.158 (a): the release window NOW (PIM-ReleaseControl.ps1 Get-PimReleaseModeWindow over the engine's Strict start,
+      Get-PimGuardStrictState), or $null -- outside it, without the libraries, or when it cannot be read. NEVER throws.
+    #>
+    param([datetime]$NowUtc = [datetime]::UtcNow, [AllowNull()][object]$StrictState = $null)
+    try {
+        if (-not (Get-Command Get-PimReleaseModeWindow -ErrorAction SilentlyContinue)) { return $null }
+        $s = $StrictState
+        if ($null -eq $s) { if (-not (Get-Command Get-PimGuardStrictState -ErrorAction SilentlyContinue)) { return $null }; $s = Get-PimGuardStrictState }
+        return (Get-PimReleaseModeWindow -StrictState $s -NowUtc $NowUtc)
+    } catch { return $null }
+}
+
+function Get-PimUplinkCadenceMinutes {
+    <#
+      PIM 100.158 (a) -- the scheduler's cadence override for the job 'uplink' (Register-PimJobCadenceResolver in
+      Start-PimScheduler.ps1): 15 inside the release window while telemetry is on (only ever SHORTER than the job's own
+      interval), else 0 = the job keeps its own interval (hourly). NEVER throws: 0 on any doubt.
+    #>
+    param([AllowNull()][object]$Job, [datetime]$NowUtc = [datetime]::UtcNow, [AllowNull()][object]$StrictState = $null)
+    try {
+        if (-not ((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and (Test-PimFeatureAvailable -Key 'telemetry.uplink' -Quiet))) { return 0 }
+        if (-not (Get-Command Get-PimReleaseModeJobMinutes -ErrorAction SilentlyContinue)) { return 0 }
+        $iv = 60; if ($Job -and $Job.PSObject.Properties['intervalMinutes']) { try { $iv = [int]$Job.intervalMinutes } catch { $iv = 60 } }
+        $s = $StrictState
+        if ($null -eq $s) { if (-not (Get-Command Get-PimGuardStrictState -ErrorAction SilentlyContinue)) { return 0 }; $s = Get-PimGuardStrictState }
+        return [int](Get-PimReleaseModeJobMinutes -StrictState $s -NowUtc $NowUtc -IntervalMinutes $iv)
+    } catch { return 0 }
+}
+
+function ConvertTo-PimScopeRunFacts {
+    <# PURE. PIM 100.158 (c): the run history as facts for Update-PimScopeStability -- @{ job = 'pim-<type>'; outcome; finishedUtc }. #>
+    param([AllowNull()][object[]]$Runs = @())
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($Runs | Where-Object { $_ })) {
+        $oc = Get-PimUplinkRunOutcome -Run $r
+        if (-not $oc -or -not "$($r.finishedUtc)".Trim()) { continue }
+        # the stamp as it is (a [datetime] under PowerShell 7's ConvertFrom-Json): Update-PimScopeStability reads either form
+        $out.Add(@{ job = (Get-PimUplinkJobId -Run $r); outcome = $oc; finishedUtc = $r.finishedUtc })
+    }
+    return [object[]]$out.ToArray()
 }
 
 function Get-PimUplinkEdition {
@@ -2212,6 +2265,10 @@ function Invoke-PimUplinkCycle {
           # AUTO = ring 0 only) and its own 24-hour hold after a refusal (UplinkState.releaseControlRefusedUtc).
           [bool]$ReleaseControl = $false,
           [AllowNull()][System.Collections.IDictionary]$ReleaseControlFields = $null,
+          # PIM 100.158 (c): Testing / Stable per engine scope (ConvertTo-PimScopeStabilityField: [ { id; state; sinceUtc;
+          # version; goodDays } ]) -> the IDENTIFIED heartbeat's `scopeStability`, an ADDITIVE field (a refusal naming it holds
+          # just it for 24 h). $null = left out -- the job passes it only while PIM_Telemetry_ScopeStability is on (OFF by default).
+          [AllowNull()][object[]]$ScopeStability = $null,
           # §33.0 MORE TELEMETRY: { } -> the switched-on structured fields (Get-PimUplinkStateFields: field -> value). INVOKED
           # ONLY when the IDENTIFIED heartbeat is due and the additive fields are on; $null = none.
           [AllowNull()][scriptblock]$StateFields = $null)
@@ -2510,6 +2567,15 @@ function Invoke-PimUplinkCycle {
                     }
                 }
             } catch { }
+            # framework §12.11f item 2 / PIM 100.144a: SignedRequests { mode; checked; wouldRefuse; refused; sinceUtc } -- the
+            # observe-only counts for telemetry. Additive, IDENTIFIED heartbeat only, and LEFT OUT while the mode is off (an
+            # install that never switched it on sends exactly what it sent before).
+            try {
+                if (Get-Command Get-PimSignedRequestHeartbeatValue -ErrorAction SilentlyContinue) {
+                    $srHb = Get-PimSignedRequestHeartbeatValue -Setting (& $GetSetting 'SignedRequests') -Stats (& $GetSetting 'SignedRequestStats')
+                    if ($null -ne $srHb) { $hb | Add-Member -NotePropertyName 'SignedRequests' -NotePropertyValue $srHb -Force; $hbAdd += 'SignedRequests' }
+                }
+            } catch { }
             if ($SetupEnabled -and $null -ne $SetupFacts) {
                 $ctl = @(); try { $ctl = @(ConvertTo-PimUplinkHeartbeatControls -Facts $SetupFacts -Extended:$SetupExtended -NowUtc $NowUtc) } catch { $ctl = @() }
                 if ($ctl.Count) {
@@ -2528,6 +2594,16 @@ function Invoke-PimUplinkCycle {
                 $sfMap = $null; try { $sfMap = & $StateFields } catch { $sfMap = $null; Write-Warning "[uplink] the structured fields could not be built: $($_.Exception.Message)" }
                 $sfMap = @($sfMap | Where-Object { $_ -is [System.Collections.IDictionary] }) | Select-Object -First 1
                 if ($sfMap) { try { foreach ($sfn in @(Add-PimUplinkStateFields -Record $hb -Fields $sfMap)) { $hbAdd += $sfn } } catch { Write-Warning "[uplink] the structured fields could not be added: $($_.Exception.Message)" } }
+            }
+            # PIM 100.158 (c) / framework 12.11e item 3: scopeStability -- a JSON array, PROVEN in the text before it leaves (the
+            # Controls form, an array under Windows PowerShell 5.1 too); not an array = left out, never a bad list.
+            if ($null -ne $ScopeStability -and @($ScopeStability).Count) {
+                try {
+                    $hb | Add-Member -NotePropertyName 'scopeStability' -NotePropertyValue ([object[]]@($ScopeStability)) -Force
+                    $ssText = ''; try { $ssText = "$($hb | ConvertTo-Json -Depth 6 -Compress)" } catch { $ssText = '' }
+                    if ($ssText.Contains('"scopeStability":[{')) { $hbAdd += 'scopeStability' }
+                    else { $hb.PSObject.Properties.Remove('scopeStability'); Write-Warning '[uplink] scopeStability could not be written as a JSON array -- the heartbeat goes without it.' }
+                } catch { try { $hb.PSObject.Properties.Remove('scopeStability') } catch { } }
             }
         }
         # PIM 100.167 / framework 8.16: Capabilities + Licences -- identified only, the cause switch on, ONE probe per heartbeat.
@@ -2973,16 +3049,39 @@ function Invoke-PimUplinkJob {
     # 4-hour window after an engine-changing release, from the engine's Strict start). PIM_Telemetry_ReleaseControl: ON by
     # default on every ring since Invardia confirmed the fields (2026-10-16); 0/off/false/no = off. Identified only.
     $rcOn = $false; $rcFields = $null
+    if (-not (Get-Command Test-PimReleaseControlFieldsOn -ErrorAction SilentlyContinue)) { $rcLib = Join-Path $PSScriptRoot 'PIM-ReleaseControl.ps1'; if (Test-Path -LiteralPath $rcLib) { . $rcLib } }
+    $rcStrict = $null
+    if ($on) { try { if (Get-Command Get-PimGuardStrictState -ErrorAction SilentlyContinue) { $rcStrict = Get-PimGuardStrictState } } catch { $rcStrict = $null } }
     if ($on -and "$key".Trim()) {
-        if (-not (Get-Command Test-PimReleaseControlFieldsOn -ErrorAction SilentlyContinue)) { $rcLib = Join-Path $PSScriptRoot 'PIM-ReleaseControl.ps1'; if (Test-Path -LiteralPath $rcLib) { . $rcLib } }
         if (Get-Command Test-PimReleaseControlFieldsOn -ErrorAction SilentlyContinue) {
             $rcOn = [bool](Test-PimReleaseControlFieldsOn -Value "$env:PIM_Telemetry_ReleaseControl")
             if ($rcOn) {
                 $rcWave = $null; try { $rcWave = & $get 'ReleaseWave' } catch { $rcWave = $null }
-                $rcStrict = $null; try { if (Get-Command Get-PimGuardStrictState -ErrorAction SilentlyContinue) { $rcStrict = Get-PimGuardStrictState } } catch { $rcStrict = $null }
                 try { $rcFields = Get-PimReleaseControlHeartbeatFields -WaveRecord $rcWave -StrictState $rcStrict -NowUtc $NowUtc } catch { $rcFields = $null }
             }
         }
+    }
+    # PIM 100.158 (a) / framework 12.11e item 3: inside the 4-hour release window the heartbeat goes every 15 minutes (the
+    # scheduler runs this job every 15 minutes then, Get-PimUplinkCadenceMinutes); outside it, hourly exactly as before.
+    # A FLUSH (-MaxPerCycle) keeps the same rule. The per-cycle budget is unchanged.
+    $rmWin = $null; if ($on) { $rmWin = Get-PimUplinkReleaseWindow -NowUtc $NowUtc -StrictState $rcStrict }
+    if ($null -ne $rmWin -and (Get-Command Get-PimReleaseModeEveryMinutes -ErrorAction SilentlyContinue)) { $cyc['HeartbeatHours'] = [double](Get-PimReleaseModeEveryMinutes) / 60.0 }
+    # PIM 100.158 (c): Testing / Stable per engine scope -- KEPT on every cycle of an identified install (pim.Settings
+    # 'ScopeStability'; the code hashed again only when VERSION changed), SENT only while PIM_Telemetry_ScopeStability is on
+    # (OFF by default until Invardia confirms the field). Best-effort: a failure here never fails the run or the heartbeat.
+    $ssField = $null
+    if ($on -and "$key".Trim() -and (Get-Command Update-PimScopeStability -ErrorAction SilentlyContinue)) {
+        try {
+            $ssPrev = $null; try { $ssPrev = & $get 'ScopeStability' } catch { $ssPrev = $null }
+            $ssHashes = $null
+            if (Test-PimScopeStabilityRehash -State $ssPrev -Version $ver) { $ssHashes = Get-PimScopeCodeHashes -SolutionRoot $sol }
+            $ssFacts = $null; if ($runsRead) { $ssFacts = ConvertTo-PimScopeRunFacts -Runs $runs }
+            $ssNew = Update-PimScopeStability -State $ssPrev -Hashes $ssHashes -Version $ver -RunFacts $ssFacts -NowUtc $NowUtc
+            $ssOldText = ''; try { $ssOldText = "$((ConvertTo-PimScopeStabilityState -State $ssPrev) | ConvertTo-Json -Depth 6 -Compress)" } catch { $ssOldText = '' }
+            $ssNewText = "$($ssNew | ConvertTo-Json -Depth 6 -Compress)"
+            if ($ssNew.scopes.Count -and $ssNewText -ne $ssOldText) { & $set 'ScopeStability' ([pscustomobject]$ssNew) }
+            if (Test-PimScopeStabilityOn -Value "$env:PIM_Telemetry_ScopeStability") { $ssField = ConvertTo-PimScopeStabilityField -State $ssNew }
+        } catch { Write-Warning "[uplink] the scope stability record was not updated: $($_.Exception.Message)"; $ssField = $null }
     }
     # §33.0 MORE TELEMETRY: the structured fields -- each ON unless its own PIM_UPLINK_<FIELD> switch is 0/false/off/no; identified only.
     # A PLAIN scriptblock (dynamic scope; every name it reads starts with sfJob so nothing in the cycle can shadow it),
@@ -3012,7 +3111,7 @@ function Invoke-PimUplinkJob {
             -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $pause @cyc `
             -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints -AdoptionCounts $adoption `
             -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun -Causes $causesOn -LicenceProbe $licProbe -HybridAd $hyAd `
-            -ReleaseControl $rcOn -ReleaseControlFields $rcFields -StateFields $stateSb
+            -ReleaseControl $rcOn -ReleaseControlFields $rcFields -ScopeStability $ssField -StateFields $stateSb
     # PIM 100.75: a failed send / an install that should be identified but is anonymous = a WARNING run (never a failure).
     $rawKey = ''; try { $rawKey = "$(& $get 'InvardiaInstallKey')".Trim() } catch { $rawKey = '' }
     $claimSt = $null; try { $claimSt = & $get 'InstallKeyClaimState'; if ($claimSt -is [string]) { $claimSt = $claimSt | ConvertFrom-Json } } catch { $claimSt = $null }

@@ -34,6 +34,8 @@ if (-not (Get-Command Invoke-PimLastGlobalAdminGuard -ErrorAction SilentlyContin
 if (-not (Get-Command Set-PimManagedKeyConfirmations -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-ManagedKeys.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-ManagedKeys.ps1') }
 # CONFIG-1.1 / 96.1: the applied outcome per row + the per-key commit resolution (BUG-294) read the change journal.
 if (-not (Get-Command Resolve-PimJournalCommitForKey -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-CommitJournal.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-CommitJournal.ps1') }
+# Framework §12.11f item 2 / PIM 100.144a: the signed-request check before each change (inert while the mode is off).
+if (-not (Get-Command Test-PimEngineSignedRequest -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-SignedRequests.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-SignedRequests.ps1') }
 # 96.5: the daily reconcile's removal of PIM-managed leftovers (ENFORCE by default since 2.4.517; report-only when the setting says report) is planned inside the scope pass.
 if (-not (Get-Command Get-PimReconcileRemovalPlan -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-ReconcileRemoval.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-ReconcileRemoval.ps1') }
 
@@ -479,6 +481,8 @@ function Write-PimEngineChangeAudit {
             job = "$($global:PIM_JobName)"
         }
         if ($ErrorMessage) { $after['error'] = $ErrorMessage }
+        # framework §12.11f item 2 / PIM 100.144a: a change whose signed request did not verify says so on its own audit row.
+        if ($Item -and $Item.PSObject.Properties['pimSignedRequest'] -and $null -ne $Item.pimSignedRequest) { $after['signedRequest'] = $Item.pimSignedRequest }
         # LOG-02: a provider that knows the exact before/after (policy rules) attaches it to the item.
         if ($Item -and $Item.PSObject.Properties['pimAuditDetail'] -and $null -ne $Item.pimAuditDetail) {
             $after['detail'] = $Item.pimAuditDetail
@@ -1321,6 +1325,30 @@ function Invoke-PimEngineScope {
             Write-Host ("    [s] {0} (skipped -- the scheduler lease was lost to another runner; that run applies it)" -f $item.key) -ForegroundColor DarkYellow
             return
         }
+        # framework §12.11f item 2 / PIM 100.144a -- SIGNED REQUESTS, right before the handler acts. Mode off (the default):
+        # nothing is resolved, read or checked. OBSERVE: the change is applied as today; a commit that does not verify is
+        # logged "would have refused: <reason>", carried on the change's audit row and counted. ENFORCE (only when set):
+        # that change is held -- not applied -- with the reason. Plans (-WhatIf) are never checked.
+        if (-not $WhatIf -and (Get-Command Test-PimEngineSignedRequest -ErrorAction SilentlyContinue)) {
+            $__srState = Initialize-PimSignedRequestRun
+            if ("$($__srState.mode)" -ne 'off') {
+                $__srRow = if ($op -eq 'Remove') { if ($item.PSObject.Properties['row'] -and $null -ne $item.row) { $item.row } elseif ($item.PSObject.Properties['live']) { $item.live } else { $null } } elseif ($item.PSObject.Properties['desired']) { $item.desired } else { $null }
+                $__srCommit = $null; try { $__srCommit = Resolve-PimEngineChangeCommit -Entity $entity -Op $op -Row $__srRow } catch { $__srCommit = $null }
+                $__srRefs = @(); try { $__srRefs = @(Get-PimEngineItemStoreRefs -Entity $entity -Row $__srRow) } catch { $__srRefs = @() }
+                $__srV = Test-PimEngineSignedRequest -Commit $__srCommit -Refs $__srRefs -Op $op -State $__srState
+                $__srLine = Add-PimSignedRequestObservation -Verdict $__srV -Scope $Scope -Op $op -Key "$($item.key)" -State $__srState
+                if ($__srLine) {
+                    Write-Host ("    [signed-request] {0}" -f $__srLine) -ForegroundColor $(if ($__srV.refuse) { 'Red' } else { 'DarkYellow' })
+                    try { $item | Add-Member -NotePropertyName pimSignedRequest -NotePropertyValue ([ordered]@{ mode = "$($__srV.mode)"; verified = $false; result = $(if ($__srV.refuse) { 'refused' } else { 'would have refused' }); reason = "$($__srV.reason)"; commitId = "$($__srV.commitId)" }) -Force } catch { }
+                }
+                if ($__srV.refuse) {
+                    $script:__skipped++
+                    & $watchAdd $op $item 'waiting' ("held: the signed request does not verify -- $($__srV.reason)")
+                    Write-PimEngineChangeAudit -Scope $Scope -Entity $entity -Op $op -Item $item -Result 'refused' -ErrorMessage ("signed request refused: $($__srV.reason)")
+                    return
+                }
+            }
+        }
         if (-not $WhatIf -and ($p.$handlerName -or ($__isRetype -and $p.ApplyRemove -and $p.ApplyCreate))) {
             try {
                 # BUG-35a: a handler that RETURNS WITHOUT ACTING must not be counted as applied.
@@ -1576,6 +1604,9 @@ function Invoke-PimEngineScope {
             Write-Warning ("  [engine] {0}: the applied outcome of {1} item(s) was NOT recorded: {2}" -f $Scope, $script:__outcomes.Count, $_.Exception.Message)
         }
     }
+    # framework §12.11f item 2 / PIM 100.144a: this pass's signed-request counts into pim.Settings 'SignedRequestStats' (the
+    # telemetry source). Mode off / nothing checked = nothing written. Never fails the run.
+    if (-not $WhatIf -and (Get-Command Save-PimSignedRequestStats -ErrorAction SilentlyContinue)) { [void](Save-PimSignedRequestStats) }
     if ([int]$script:__reportedShown -gt 3) { Write-Host ("    [r] ... and {0} more reported only -- NOT applied (same reason as above)" -f ([int]$script:__reportedShown - 3)) -ForegroundColor DarkYellow }
     $__done = ("[engine] {0,-20} done  applied={1} skipped={2} errors={3}" -f $Scope, $script:__applied, $script:__skipped, $script:__errors)
     # §100.46: "done applied=0 skipped=0 errors=0" after a no-op is the same line every run -- on change + daily; anything else prints.

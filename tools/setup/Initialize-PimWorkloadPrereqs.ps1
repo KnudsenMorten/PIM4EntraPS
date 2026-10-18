@@ -137,6 +137,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Rest.ps1')
 . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-WorkloadPrereqs.ps1')
 . (Join-Path $PSScriptRoot '_PimWorkloadPrereqRunner.ps1')
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-InstallNames.ps1')   # CR5 step 2: the engine job by either of its names
 . (Join-Path $PSScriptRoot '_PimEnginePermissions.ps1')   # browser sign-in (auth code + PKCE) -- the Grant-PimEnginePermissions pattern
 . (Join-Path $PSScriptRoot '_PimSignedIn.ps1')            # -UseSignedInAccount: the Support session, else the browser (framework 12.17)
 # Repository-only helpers: the store (Connect-PimSetupStore, the SQL writer) and the one Graph role map. The published

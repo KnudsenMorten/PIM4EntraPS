@@ -8593,7 +8593,7 @@ The former *Daily operations* menu is folded into Reviews & controls, and the fo
 schedule moved to Jobs, and the access list, emergency override, permission template packs and mail
 templates became Settings sections, visible by default with a plain-language explainer of every
 column. Deep links and alert links that pointed at the old tab resolve to the drift page. The page
-`<title>` is "PIM Manager (PIM4EntraPS)", which is what a bookmark shows.
+`<title>` is "PIM Manager", which is what a bookmark shows (the product name wherever people read it).
 
 **All records layout (2026-09-19).** The records page is a two-column CSS grid, and `switchTab()`
 prepends the "What this is & how to use it" guide as the panel's first child. With no explicit

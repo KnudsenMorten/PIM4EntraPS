@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.648 -- 2026-10-18
+
+- Behind the shared sign-in front the PIM Manager web app now keeps at most 3.75 CPU / 7.5 GB, so the app and its sign-in front together stay within what Azure allows (moving to the sign-in front was refused before, and rolled back by itself); the update never raises the Manager past that; the published mail-sender setup script loads nothing from its own folder
+
+## 2.4.647 -- 2026-10-18
+
+- For the four hours after an update that changes the engine, PIM Manager reports to Invardia every 15 minutes instead of hourly; the header shows "Ring N - Pre-release (name)" while an install runs an early (wave) version; each engine area is tracked as Testing or Stable after a change (sent to Invardia only once switched on); support can read and answer Invardia's release review from a script; new installs can take the new short resource names when that option is chosen, existing installs keep their names; the update can rename the display names people read to "PIM Manager" once that option is switched on; a setup check that decided the web app's permissions by its name now goes by its role, so a renamed web app can never get the engine's permissions; every change made in PIM Manager can carry the signed-in user's own sign-in proof and the engine can check it before it acts (off by default; a report-only mode comes first); PIM Manager can sign in without a stored secret through a shared sign-in front (off by default, moved environment by environment); the update builds the sign-in front's image for an install that is moved to it; four test checks were corrected
+
 ## 2.4.646 -- 2026-10-18
 
 - An install whose database has no public network access moves to the least-privilege database model by itself: its updater starts the install's own in-network database job, first the additive step, then (at least 12 hours later and only after the engine jobs ran clean) the step that takes the broad database roles away, proven as each identity and undone by itself if the proof fails; a run the product stops on purpose (an update, a stop during an update, a Manager restart) is no longer reported as a problem; a failed Azure role lookup gets its own error code (pim-az-0110) and is retried on the next run instead of being reported as unrecognised; the updater watchdog judges only full update runs, so the 15-minute update checks can no longer hide a failing nightly update; every engine run report names the engine areas that ran clean and the first one that failed; the standalone support scripts no longer warn about the missing demo module

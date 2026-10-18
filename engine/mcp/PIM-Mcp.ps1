@@ -91,8 +91,8 @@ function Invoke-PimMcpMessage {
             return (& $res $id ([ordered]@{
                 protocolVersion = $ver
                 capabilities = [ordered]@{ tools = [ordered]@{ listChanged = $false } }
-                serverInfo = [ordered]@{ name = 'pim4entraps'; title = 'PIM4EntraPS'; version = $ServerVersion }
-                instructions = "PIM4EntraPS -- privileged access in Microsoft Entra ID and Azure. Your tools follow your Manager role ($Role). Changes are STAGED as pending changes; a commit tool writes them through the same checks as the Manager (validation, second approver, Tier 0/1 review). Nothing here activates a role." }))
+                serverInfo = [ordered]@{ name = 'pim4entraps'; title = 'PIM Manager'; version = $ServerVersion }
+                instructions = "PIM Manager -- privileged access in Microsoft Entra ID and Azure. Your tools follow your Manager role ($Role). Changes are STAGED as pending changes; a commit tool writes them through the same checks as the Manager (validation, second approver, Tier 0/1 review). Nothing here activates a role." }))
         }
         'ping' { return (& $res $id ([ordered]@{})) }
         'tools/list' {
