@@ -276,6 +276,18 @@ try {
             else {
             Say ("access model installed: signer $($ar.signer) (expires $($ar.signerExpiry)), " +
                  "$($ar.converge.statements) statement(s) converged; users $(@($ar.converge.users) -join ', ')") 'Green'
+            # framework 12.23 P8 EXCEPTION (owner 2026-10-18): "run2": true -- set by the UPDATER only on a later update, once
+            # run 1 is old enough and the jobs ran green since -- takes the broad roles off the web app and the engine. Gated,
+            # proven AS each user, and put back by itself when the proof fails (Invoke-PimSqlAccessRun2).
+            if ($sa.PSObject.Properties['run2'] -and [bool]$sa.run2) {
+                Step 'least-privilege access: run 2'
+                $r2 = Invoke-PimSqlAccessRun2 -Query $q -Exec $x
+                if ($r2.nothingToDo) { Say 'run 2: nothing to drop -- the runtime users hold no broad role' 'Green' }
+                else {
+                    Say ("run 2: dropped " + ((@($r2.dropped) | ForEach-Object { "$($_.member) from $($_.role)" }) -join ', ')) 'Green'
+                    foreach ($p in @($r2.proofs)) { Say "run 2 PROOF $($p.user): $($p.detail) -> OK" 'Green' }
+                }
+            }
             }
         } catch {
             Say "FAILED least-privilege access: $($_.Exception.Message)" 'Red'; $failed++

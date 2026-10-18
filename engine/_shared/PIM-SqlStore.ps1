@@ -575,7 +575,12 @@ IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCach
     if ((Get-Command Get-PimDemoSchemaDdl -ErrorAction SilentlyContinue) -and (Get-Command Invoke-PimDemoSql -ErrorAction SilentlyContinue)) {
         try { [void](Invoke-PimDemoSql -Kind nonquery -ConnectionString $ConnectionString -Sql (Get-PimDemoSchemaDdl)) }
         catch { Write-Warning "[store] the demo tables (pimdemo) could not be created: $($_.Exception.Message) -- demo mode stays unavailable until the next update; nothing else is affected" }
-    } else { Write-Warning '[store] the demo module (PIM-DemoData.ps1) is not in this payload -- the demo tables were not created' }
+    } else {
+        # 2026-10-16 (Invardia): the standalone support scripts (Grant-PimSupportSqlAccess, Initialize-PimMailSender,
+        # Set-PimLicense ...) carry this store code WITHOUT the demo module -- a customer must not see a warning there; the
+        # updater's schema step (which has the module) creates the tables. Verbose only.
+        Write-Verbose '[store] the demo module (PIM-DemoData.ps1) is not in this payload -- the demo tables are left to the updater'
+    }
 }
 
 # ---- Framework §12.23 run 2 prerequisite (PIM 100.156): the RUNTIME never needs a DDL right ----------------------------
