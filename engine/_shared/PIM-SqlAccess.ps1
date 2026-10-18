@@ -708,3 +708,179 @@ function Get-PimSqlAccessState {
     $h = @(& $Query $ConnectionString ('SELECT r.name' + $parts[1]))
     return [pscustomobject]@{ facts = $f; held = $h; via = 'catalog' }
 }
+
+# ---- framework §12.23 P8 EXCEPTION (owner 2026-10-18): PRIVATE SQL, NEVER CUT OVER -- THE UPDATER STARTS THE IN-NETWORK
+# ADMIN RUN. The Support app has no route to a private database, so the install's own in-network admin job (ca-pim-dbinit)
+# does run 1 (Invoke-PimSqlAccessInstall) and, on a LATER update, run 2 (Invoke-PimSqlAccessRun2). The updater only
+# decides (Get-PimSqlAccessCutoverStep) and starts the job; it never runs admin SQL itself (Test-PimSqlAccess L4).
+
+$script:PimSqlAccessBroadRoles = @('db_datareader', 'db_datawriter', 'db_ddladmin')
+$script:PimSqlAccessRun2MinHours = 12
+
+function Get-PimSqlAccessSignerUtc {
+    <# PURE. The UTC time run 1 signed the procedure, from the signer's name (pim_access_signer_yyyyMMddHHmmss); $null when unreadable. #>
+    [CmdletBinding()] param([AllowEmptyString()][AllowNull()][string]$Signer)
+    if ("$Signer" -notmatch '^pim_access_signer_(\d{14})$') { return $null }
+    $d = [datetime]::MinValue
+    if (-not [datetime]::TryParseExact($Matches[1], 'yyyyMMddHHmmss', [Globalization.CultureInfo]::InvariantCulture,
+            ([Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal), [ref]$d)) { return $null }
+    return $d
+}
+
+function Test-PimSqlAccessRunsGreenSince {
+    <#
+      PURE. Did the install's jobs run green since -SinceUtc? -Runs: the scheduler's JobRunHistory rows ({ name; status;
+      startedUtc | startUtc }). Per job name, its LATEST run that started after -SinceUtc must not have failed, and at least
+      -MinJobs different jobs must have run since. Returns { ok; reason; jobs }.
+    #>
+    [CmdletBinding()] param([object[]]$Runs = @(), [Parameter(Mandatory)][datetime]$SinceUtc, [int]$MinJobs = 3)
+    $since = $SinceUtc.ToUniversalTime()
+    $after = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($Runs | Where-Object { $_ })) {
+        $s = "$($r.startedUtc)"; if (-not $s.Trim()) { $s = "$($r.startUtc)" }
+        $t = [datetime]::MinValue
+        if (-not [datetime]::TryParse($s, [Globalization.CultureInfo]::InvariantCulture, ([Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal), [ref]$t)) { continue }
+        if ($t -le $since) { continue }
+        [void]$after.Add([pscustomobject]@{ name = "$($r.name)"; status = "$($r.status)"; t = $t })
+    }
+    $latest = @($after | Group-Object name | ForEach-Object { @($_.Group | Sort-Object t)[-1] })
+    $bad = @($latest | Where-Object { "$($_.status)" -match '(?i)fail|error' })
+    if ($bad.Count) { return [pscustomobject]@{ ok = $false; jobs = $latest.Count; reason = "$($bad.Count) job(s) failed on their latest run since run 1: $((@($bad | ForEach-Object name) | Select-Object -First 5) -join ', ')" } }
+    if ($latest.Count -lt $MinJobs) { return [pscustomobject]@{ ok = $false; jobs = $latest.Count; reason = "only $($latest.Count) job(s) ran since run 1 (at least $MinJobs needed)" } }
+    return [pscustomobject]@{ ok = $true; jobs = $latest.Count; reason = "$($latest.Count) job(s) ran since run 1, none failed on its latest run" }
+}
+
+function Get-PimSqlAccessCutoverStep {
+    <#
+      PURE. Framework §12.23 P8 EXCEPTION: which in-network admin run, if any, should the UPDATER start now?
+        -PrivateSql        the store's SQL server has public network access OFF (a public one keeps the Support-app cut-over)
+        -AdminJobOk        the install's in-network admin job exists and runs THIS release's image
+        -UpdaterIsAdmin    the updater reached the store as dbo / db_owner (still in the SQL admin group: it can see the model)
+        -HasProc           the signed access procedure exists (run 1 done)
+        -BroadUsers        how many runtime users (web / engine) still hold db_datareader / db_datawriter
+        -SignerUtc         when run 1 signed the procedure; -RunsGreen: Test-PimSqlAccessRunsGreenSince since then
+      Returns { step = 'run1' | 'run2' | 'none'; reason }. run 2 never in the same update as run 1: at least
+      $script:PimSqlAccessRun2MinHours after the signing, and only on green runs since.
+    #>
+    [CmdletBinding()]
+    param([bool]$PrivateSql, [bool]$AdminJobOk, [bool]$UpdaterIsAdmin, [bool]$HasProc, [AllowNull()][object]$BroadUsers,
+          [AllowNull()][object]$SignerUtc, [AllowNull()][object]$RunsGreen, [datetime]$NowUtc = [datetime]::UtcNow)
+    $no = { param($why) [pscustomobject]@{ step = 'none'; reason = $why } }
+    if (-not $PrivateSql) { return (& $no 'public SQL: an existing install moves by the Support-app cut-over (framework 12.23 P8)') }
+    if (-not $UpdaterIsAdmin) { return (& $no 'the updater is not in the SQL admin group -- nothing to decide (the install is past the cut-over, or it cannot see the model)') }
+    $bn = 0
+    $broadKnown = ($null -ne $BroadUsers -and [int]::TryParse("$BroadUsers", [ref]$bn))
+    if (-not $HasProc) {
+        if (-not $AdminJobOk) { return (& $no 'run 1 is due, but the in-network admin job is missing or not on this release yet') }
+        return [pscustomobject]@{ step = 'run1'; reason = 'private SQL, never cut over: run 1 (the signed procedure, the roles, the updater''s own user -- additive) through the in-network admin job' }
+    }
+    if (-not $broadKnown) { return (& $no 'run 1 is done; whether run 2 is due could not be read') }
+    if ($bn -eq 0) { return (& $no 'run 1 and run 2 are done (no runtime user holds a broad role)') }
+    if (-not $AdminJobOk) { return (& $no 'run 2 is due, but the in-network admin job is missing or not on this release yet') }
+    if ($null -eq $SignerUtc) { return (& $no 'run 2 waits: the time of run 1 could not be read from the signer') }
+    $age = ($NowUtc.ToUniversalTime() - ([datetime]$SignerUtc).ToUniversalTime()).TotalHours
+    if ($age -lt $script:PimSqlAccessRun2MinHours) { return (& $no ("run 2 waits: run 1 is {0:N1} h old (at least {1} h)" -f $age, $script:PimSqlAccessRun2MinHours)) }
+    if ($null -eq $RunsGreen -or -not [bool]$RunsGreen.ok) { return (& $no ("run 2 waits: $(if ($RunsGreen) { $RunsGreen.reason } else { 'the run history could not be read' })")) }
+    return [pscustomobject]@{ step = 'run2'; reason = ("private SQL, run 1 done {0:N0} h ago and green since ({1}): run 2 (the broad roles off the web app and the engine) through the in-network admin job" -f $age, $RunsGreen.reason) }
+}
+
+function Get-PimSqlAccessRun2Plan {
+    <#
+      READ-ONLY. Run 2 (framework 12.23 P8: the broad roles off the RUNTIME users) -- its gates and what it would drop.
+      Gates: the signed procedure present + current + signed; web in pim_web and engine in pim_engine, neither db_owner; the
+      updater (when it has a user) in pim_updater + db_ddladmin; every web + engine catalog grant held whose object exists
+      (pimdemo always). -Query (cs, sql): the caller's connection. Returns { ok; gates[]; drop[] ({role; member}); users }.
+    #>
+    [CmdletBinding()] param([AllowEmptyString()][string]$ConnectionString = '', [Parameter(Mandatory)][scriptblock]$Query, [System.Collections.IDictionary]$NameMap)
+    if (-not $NameMap) { $NameMap = Get-PimSqlAccessInstallNameMap }
+    $gates = New-Object System.Collections.Generic.List[object]
+    $gate = { param($name, $ok, $detail) [void]$gates.Add([pscustomobject]@{ name = $name; ok = [bool]$ok; detail = "$detail" }) }
+    $parts = (Get-PimSqlAccessStateSql) -split ';\s*\r?\nSELECT r\.name', 2
+    $facts = @(& $Query $ConnectionString ($parts[0] + ';'))[0]
+    $held = @(& $Query $ConnectionString ('SELECT r.name' + $parts[1]))
+    & $gate 'signed procedure present + current' ($facts -and "$($facts.procExists)" -eq '1' -and "$($facts.procCurrent)" -eq '1' -and "$($facts.signer)") "signer $($facts.signer)"
+    $webUser = "$(@($NameMap['pim_web'])[0])"; $engUser = "$(@($NameMap['pim_engine'])[0])"; $updUser = "$(@($NameMap['pim_updater'])[0])"
+    $mem = @(& $Query $ConnectionString "SELECT r.name AS role, u.name AS member FROM sys.database_role_members m JOIN sys.database_principals r ON r.principal_id = m.role_principal_id JOIN sys.database_principals u ON u.principal_id = m.member_principal_id;")
+    $in = { param($u, $r) [bool](@($mem | Where-Object { "$($_.member)" -ieq $u -and "$($_.role)" -ieq $r }).Count) }
+    foreach ($p in @(@($webUser, 'pim_web'), @($engUser, 'pim_engine'))) {
+        & $gate "$($p[0]) is in $($p[1])" (& $in $p[0] $p[1]) ''
+        & $gate "$($p[0]) is NOT db_owner" (-not (& $in $p[0] 'db_owner')) 'db_owner is never taken away by run 2'
+    }
+    $updHas = [bool](@($mem | Where-Object { "$($_.member)" -ieq $updUser }).Count)
+    if ($updHas) { & $gate "updater [$updUser] keeps db_ddladmin + is in pim_updater" ((& $in $updUser 'db_ddladmin') -and (& $in $updUser 'pim_updater')) '' }
+    $cat = Get-PimSqlAccessCatalog
+    $heldKey = @{}; foreach ($h in $held) { if ($h) { $heldKey["$($h.role)|$($h.perm)|$($h.on)".ToLowerInvariant()] = $true } }
+    $gap = New-Object System.Collections.Generic.List[string]
+    foreach ($role in 'pim_web', 'pim_engine') {
+        foreach ($g in @($cat[$role])) {
+            if ($heldKey.ContainsKey("$role|$($g.perm)|$($g.on)".ToLowerInvariant())) { continue }
+            $on = "$($g.on)"
+            $existsSql = if ($on -like 'SCHEMA::*') { "SELECT CASE WHEN SCHEMA_ID(N'{0}') IS NULL THEN 0 ELSE 1 END AS e;" -f ($on -replace '^SCHEMA::', '').Replace("'", "''") }
+                         else { "SELECT CASE WHEN OBJECT_ID(N'{0}') IS NULL THEN 0 ELSE 1 END AS e;" -f $on.Replace("'", "''") }
+            $exists = "$(@(& $Query $ConnectionString $existsSql)[0].e)" -eq '1'
+            if ($exists -or $on -eq 'SCHEMA::pimdemo') { [void]$gap.Add("$role $($g.perm) $on") }
+        }
+    }
+    & $gate 'every web + engine catalog grant held (pimdemo too)' (-not $gap.Count) ($gap -join '; ')
+    $drop = @(foreach ($u in $webUser, $engUser) { foreach ($r in $script:PimSqlAccessBroadRoles) { if (& $in $u $r) { [pscustomobject]@{ role = $r; member = $u } } } })
+    return [pscustomobject]@{ ok = (-not @($gates | Where-Object { -not $_.ok }).Count); gates = @($gates.ToArray()); drop = $drop; users = @($webUser, $engUser) }
+}
+
+function Get-PimSqlAccessRun2ProofSql {
+    <# PURE. One row for -UserName, read AS that user: it reads + writes its store and can NOT create a table or hold a broad role. #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$UserName)
+    if ("$UserName" -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._@-]{0,127}$') { throw "Get-PimSqlAccessRun2ProofSql: '$UserName' is not a safe database user name." }
+    $n = "$UserName".Replace("'", "''")
+    return ("EXECUTE AS USER = N'$n'; SELECT (SELECT COUNT(*) FROM pim.Settings) AS settingsRows, HAS_PERMS_BY_NAME(N'pim.Rows', N'OBJECT', N'INSERT') AS rowsInsert, " +
+            "HAS_PERMS_BY_NAME(N'pim.Settings', N'OBJECT', N'UPDATE') AS settingsUpdate, HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'CREATE TABLE') AS createTable, " +
+            "IS_ROLEMEMBER(N'db_datareader') AS reader, IS_ROLEMEMBER(N'db_datawriter') AS writer, IS_ROLEMEMBER(N'db_ddladmin') AS ddl; REVERT;")
+}
+
+function Test-PimSqlAccessRun2Proof {
+    <# PURE. Judge one proof row (Get-PimSqlAccessRun2ProofSql). Returns { ok; detail }. #>
+    [CmdletBinding()] param([AllowNull()][object]$Row)
+    if ($null -eq $Row) { return [pscustomobject]@{ ok = $false; detail = 'no proof row' } }
+    $rows = 0; [void][int]::TryParse("$($Row.settingsRows)", [ref]$rows)
+    $ok = ($rows -gt 0) -and "$($Row.rowsInsert)" -eq '1' -and "$($Row.settingsUpdate)" -eq '1' -and "$($Row.createTable)" -eq '0' -and
+          "$($Row.reader)" -eq '0' -and "$($Row.writer)" -eq '0' -and "$($Row.ddl)" -eq '0'
+    return [pscustomobject]@{ ok = [bool]$ok; detail = ("reads pim.Settings ($rows rows), INSERT pim.Rows $($Row.rowsInsert), UPDATE pim.Settings $($Row.settingsUpdate), CREATE TABLE $($Row.createTable), db_datareader $($Row.reader), db_datawriter $($Row.writer), db_ddladmin $($Row.ddl)") }
+}
+
+function Invoke-PimSqlAccessRun2 {
+    <#
+      The ADMIN run 2 (framework 12.23 P8), from inside: Get-PimSqlAccessRun2Plan; REFUSES (throws, nothing changed) unless
+      every gate is green; drops the broad roles from the web app + engine; proves each user AS that user
+      (Test-PimSqlAccessRun2Proof). A failed proof PUTS BACK every membership it dropped and throws -- an unattended run has
+      nobody to roll it back, so it never leaves an install worse than it found it. Must run as an admin of the database.
+      Returns { dropped[]; proofs[]; nothingToDo }.
+    #>
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$ConnectionString = '', [Parameter(Mandatory)][scriptblock]$Query, [Parameter(Mandatory)][scriptblock]$Exec, [System.Collections.IDictionary]$NameMap)
+    $plan = Get-PimSqlAccessRun2Plan -ConnectionString $ConnectionString -Query $Query -NameMap $NameMap
+    $red = @($plan.gates | Where-Object { -not $_.ok })
+    if ($red.Count) { throw ("run 2 REFUSED, nothing changed -- gate(s) red: " + (($red | ForEach-Object { "$($_.name)$(if ($_.detail) { " ($($_.detail))" })" }) -join '; ')) }
+    if (-not @($plan.drop).Count) { return [pscustomobject]@{ dropped = @(); proofs = @(); nothingToDo = $true } }
+    $q = { param($s) "[$("$s".Replace(']', ']]'))]" }
+    $done = New-Object System.Collections.Generic.List[object]
+    try {
+        foreach ($d in @($plan.drop)) {
+            & $Exec $ConnectionString ("ALTER ROLE {0} DROP MEMBER {1};" -f (& $q $d.role), (& $q $d.member))
+            [void]$done.Add($d)
+        }
+        $proofs = New-Object System.Collections.Generic.List[object]
+        foreach ($u in @($plan.users)) {
+            $pr = Test-PimSqlAccessRun2Proof -Row (@(& $Query $ConnectionString (Get-PimSqlAccessRun2ProofSql -UserName $u))[0])
+            [void]$proofs.Add([pscustomobject]@{ user = $u; ok = $pr.ok; detail = $pr.detail })
+        }
+        $bad = @($proofs | Where-Object { -not $_.ok })
+        if ($bad.Count) { throw ("run 2 proof FAILED: " + (($bad | ForEach-Object { "$($_.user): $($_.detail)" }) -join ' | ')) }
+        return [pscustomobject]@{ dropped = @($done.ToArray()); proofs = @($proofs.ToArray()); nothingToDo = $false }
+    } catch {
+        $err = "$($_.Exception.Message)"
+        $back = New-Object System.Collections.Generic.List[string]
+        foreach ($d in @($done.ToArray())) {
+            try { & $Exec $ConnectionString ("ALTER ROLE {0} ADD MEMBER {1};" -f (& $q $d.role), (& $q $d.member)); [void]$back.Add("$($d.member)->$($d.role)") } catch { }
+        }
+        throw ("$err -- PUT BACK $($back.Count) of $($done.Count) dropped membership(s)$(if ($back.Count) { ': ' + ($back -join ', ') }); the install is on the broad roles as before")
+    }
+}

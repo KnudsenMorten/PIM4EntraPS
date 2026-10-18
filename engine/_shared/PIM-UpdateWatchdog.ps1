@@ -67,7 +67,12 @@ function Get-PimUpdateWatchdogPlan {
         [string]$LastGoodImage,
         [double]$StaleAfterHours = 48,
         [int]$MinFailures = 2,
-        [datetime]$Now = (Get-Date).ToUniversalTime()
+        [datetime]$Now = (Get-Date).ToUniversalTime(),
+        # 2.4.646 (framework 8.18 UPDATE-NOW): the updater job's PIM_UPDATE_NIGHTLY_UTC and whether update now is ON. With
+        # both, the job runs every 15 minutes and most executions are seconds-long signal checks that always exit 0 -- they
+        # must never count as "the updater works", or a nightly that fails every night stays hidden behind them.
+        [AllowEmptyString()][string]$NightlyUtc = '',
+        [bool]$UpdateNowOn = $false
     )
     # 🪤 CARRY THE COUNT EVEN WHEN NOT ACTING. The first version hard-coded failures = 0 on every
     # no-action path, so "1 failure, below the threshold" reported ZERO failures -- the caller could
@@ -92,6 +97,21 @@ function Get-PimUpdateWatchdogPlan {
     # install nobody has even tried yet.
     if (-not $ex.Count) { return (& $none 'the update job has no execution history yet') }
 
+    # 2.4.646: ONLY A FULL UPDATE RUN PROVES THE UPDATER WORKS. With update now on, an execution that starts on a 15-minute
+    # slot (not the nightly one, the first of its slot) is a quick signal check (Get-PimUpdaterRunKind, the rule the updater
+    # applies to itself): a Succeeded one says nothing about the update and is left out of the successes. A FAILED one stays a
+    # failure -- a check never fails on its own, so it was a full update the signal started there.
+    if ("$NightlyUtc".Trim() -and $UpdateNowOn -and (Get-Command Get-PimUpdaterRunKind -ErrorAction SilentlyContinue)) {
+        $exu = @($ex | ForEach-Object { [pscustomobject]@{ name = "$($_.name)"; status = "$($_.status)"; startUtc = (ConvertTo-PimUtcOrNull -Value "$($_.startTime)") } })
+        $ex = @($ex | Where-Object {
+            if ("$($_.status)" -ne 'Succeeded') { return $true }
+            $st = ConvertTo-PimUtcOrNull -Value "$($_.startTime)"
+            if (-not $st) { return $true }
+            $k = Get-PimUpdaterRunKind -NightlyUtc "$NightlyUtc" -StartUtc $st -Executions $exu -OwnExecution "$($_.name)" -Enabled $true
+            return ("$($k.kind)" -ne 'quick')
+        })
+        if (-not $ex.Count) { return (& $none 'only 15-minute checks so far -- no full update run to judge yet') }
+    }
     $succeeded = @($ex | Where-Object { "$($_.status)" -eq 'Succeeded' })
     $lastOk = $null
     foreach ($s in $succeeded) {
@@ -155,12 +175,18 @@ function Invoke-PimUpdateWatchdog {
         }
         $containers = @($job.properties.template.containers)
         $current = if ($containers.Count -eq 1) { "$($containers[0].image)" } else { '' }
-        $lastGood = ''
+        $lastGood = ''; $nightly = ''; $unValue = ''; $unRing = ''
         foreach ($c in $containers) {
             foreach ($v in @($c.env)) {
                 if ("$($v.name)" -eq 'PIM_UPDATE_LAST_GOOD') { $lastGood = "$($v.value)".Trim() }
+                if ("$($v.name)" -eq 'PIM_UPDATE_NIGHTLY_UTC') { $nightly = "$($v.value)".Trim() }
+                if ("$($v.name)" -eq 'PIM_UPDATE_NOW') { $unValue = "$($v.value)".Trim() }
+                if ("$($v.name)" -eq 'PIM_UPDATE_RING') { $unRing = "$($v.value)".Trim() }
             }
         }
+        # 2.4.646: the job's own update-now setting, read the way the updater reads it (Test-PimUpdateNowEnabled)
+        $unOn = $false
+        if (Get-Command Test-PimUpdateNowEnabled -ErrorAction SilentlyContinue) { $unOn = [bool](Test-PimUpdateNowEnabled -Ring $unRing -Value $unValue) }
         $execs = @(Invoke-PimArm -Method GET -Path "$base/executions" -ApiVersion $script:PimAcaApi -All) |
                  ForEach-Object {
                      [pscustomobject]@{ name = "$($_.name)"
@@ -168,7 +194,7 @@ function Invoke-PimUpdateWatchdog {
                                         startTime = "$($_.properties.startTime)" }
                  }
         $plan = Get-PimUpdateWatchdogPlan -Executions $execs -CurrentImage $current -LastGoodImage $lastGood `
-                    -StaleAfterHours $StaleAfterHours -MinFailures $MinFailures
+                    -StaleAfterHours $StaleAfterHours -MinFailures $MinFailures -NightlyUtc $nightly -UpdateNowOn $unOn
         if ($plan.action -ne 'restore') {
             & $say "  [watchdog] $($plan.reason)" 'DarkGray'
             return ($plan + @{ acted = $false })

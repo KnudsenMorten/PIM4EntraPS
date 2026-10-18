@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.646 -- 2026-10-18
+
+- An install whose database has no public network access moves to the least-privilege database model by itself: its updater starts the install's own in-network database job, first the additive step, then (at least 12 hours later and only after the engine jobs ran clean) the step that takes the broad database roles away, proven as each identity and undone by itself if the proof fails; a run the product stops on purpose (an update, a stop during an update, a Manager restart) is no longer reported as a problem; a failed Azure role lookup gets its own error code (pim-az-0110) and is retried on the next run instead of being reported as unrecognised; the updater watchdog judges only full update runs, so the 15-minute update checks can no longer hide a failing nightly update; every engine run report names the engine areas that ran clean and the first one that failed; the standalone support scripts no longer warn about the missing demo module
+
 ## 2.4.645 -- 2026-10-17
 
 - Mails are easy to read on a phone (no tables, a topic line per item, summary first); the updater can be told to update now (ring 0 first); community installs can take the least-privilege database model; every install gets the empty demo tables on its next update; 7 more telemetry counts and an administrative-units domain; the Active assignments page opens fast on a large tenant

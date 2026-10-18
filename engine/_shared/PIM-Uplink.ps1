@@ -69,7 +69,16 @@ function Get-PimUplinkRunOutcome {
     if ($st -in @('running', 'skipped', 'unimplemented', 'outofscope', 'disabled', 'cancelled', '')) { return '' }
     # §95.2o: an INTERRUPTED run (the scheduler restarted for an update, the platform stopped the execution) is not a
     # product failure -- reported as a warning, never as a failed run (Invardia fix request d0217f96).
-    if ($st -eq 'interrupted') { return 'warning' }
+    # 2.4.646 (Invardia fix request 68125df6: pim-gen-0010 platform-timeout, 8 hits on 4 installs, every one at an update roll --
+    # internal's full-reconcile 2026-10-15 23:07 carries interruptedCause 'update'): a run the PRODUCT stopped on purpose -- the
+    # update restarted the scheduler ('update'), the roll / a person stopped the execution ('stopped'), the Manager restarted
+    # during its Run now ('manager') -- is a planned act like a cancelled run: not reported. A crash / out of memory ('failed'),
+    # a lost record ('unrecorded', RUN-NO-RESULT) and an unknown cause stay a warning.
+    if ($st -eq 'interrupted') {
+        $ic = ''; if ($Run.PSObject.Properties['interruptedCause']) { $ic = "$($Run.interruptedCause)".Trim().ToLowerInvariant() }
+        if ($ic -in @('update', 'stopped', 'manager')) { return '' }
+        return 'warning'
+    }
     # §100.45: a THROTTLED run (Microsoft rate-limited it, nothing applied, retried) is normal -- a warning with ErrorClass
     # 'throttled', never a failed run, so it never opens a fix request (owner 2026-10-10). Checked before ok: it carries ok=false.
     if ($st -eq 'throttled') { return 'warning' }
@@ -161,8 +170,13 @@ function Get-PimUplinkRunPlan {
             } elseif ($kind -in @('held', 'throttled')) { $note = "$($kr.detail)" }
         }
         $ua = ''; if ($src.PSObject.Properties['updateAction']) { $ua = "$($src.updateAction)" }
+        # 2.4.646 (Invardia StepsOk): the providers of the reported run that ran clean, and -- on a FAILED report only -- the
+        # first that failed (Invardia keys a step ticket on Job + FailedStep + ErrorClass and resolves it on an ok run whose
+        # StepsOk names it). Absent on runs recorded before 2.4.646 and on non-engine jobs: nothing is sent then.
+        $sok = @(); if ($src.PSObject.Properties['stepsOk']) { $sok = @(@($src.stepsOk) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() }) }
+        $fst = ''; if ($outcome -eq 'failed' -and $src.PSObject.Properties['failedSteps']) { $fst = "$(@(@($src.failedSteps) | Where-Object { "$_".Trim() })[0])".Trim() }
         [void]$reports.Add(@{ job = $e.job; outcome = $outcome; durationMs = $dur; errorText = $txt; errorClass = $cls; finishedUtc = $e.latestFin.ToString('o'); runCount = $e.count
-                              kind = $kind; noteText = $note; warningKind = $wkind; updateAction = $ua })
+                              kind = $kind; noteText = $note; warningKind = $wkind; updateAction = $ua; stepsOk = $sok; failedStep = $fst })
     }
     $wm = $null; if ($newest) { $wm = ([datetime]$newest).ToString('o') }
     $arr = $reports.ToArray()
@@ -2600,7 +2614,13 @@ function Invoke-PimUplinkCycle {
         # PIM 100.143: a class the plan already knows (RUN-NO-RESULT) wins; otherwise a failure's text is classified.
         $cls = if ($p.ContainsKey('errorClass') -and "$($p.errorClass)") { "$($p.errorClass)" } elseif ($p.outcome -eq 'failed') { Get-PimUplinkErrorClass -Text $p.errorText } else { '' }
         $rec = New-AitUplinkReport -Kind run @common -Job $p.job -Outcome $p.outcome -DurationMs $p.durationMs -ErrorClass $cls -ErrorText $p.errorText `
-                 -Counts @{ runs = $p.runCount }
+                 -Counts @{ runs = $p.runCount } -FailedStep $(if ($p.ContainsKey('failedStep')) { "$($p.failedStep)" } else { '' })
+        # 2.4.646 (Invardia StepsOk, accepted since 2026-10-16, lenient): the providers that ran clean -- identified only (an
+        # anonymous record has none; Invardia ignores it there), at most 50, the step id shape.
+        if ($rec -and $sender.Mode -eq 'identified' -and $p.ContainsKey('stepsOk')) {
+            $sokIds = @(@($p.stepsOk) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ -match '^[a-z0-9][a-z0-9.-]{0,59}$' } | Select-Object -Unique | Select-Object -First 50)
+            if ($sokIds.Count) { $rec | Add-Member -NotePropertyName 'StepsOk' -NotePropertyValue @($sokIds) -Force }
+        }
         # 100.34: fixKind beside the class -- added HERE, not in the framework client (sync/_AitUplink.ps1 must stay
         # byte-identical), and only behind PIM_UPLINK_FIXKIND until Invardia's schema has the field.
         # §100.45: only a FAILED report carries FixKind -- a throttled warning is not a defect to fix, so it never opens one.

@@ -554,6 +554,19 @@ $script:PimFailureRules = @(
        remedy = 'Read the raw Graph error. The engine forgets the policy id it had and looks it up again on the next run. If it keeps failing, open the group in Entra ID > PIM for Groups and check that its policy exists and the engine identity can read it.'
        retryable = $true; severity = 'environment'
        fixes = @() }
+
+    # 2.4.646 (Invardia fix request f016ea51, internal 2026-10-16 16:22Z, one hit): "AzRes: could not look up ARM role 'Owner'
+    # at /providers/Microsoft.Management/managementGroups/mg-lz-corp: GET ..." came out UNCLASSIFIED. The management group
+    # exists and the same lookup answers today (read back 2026-10-18), so ARM's answer was a one-off. LAST on purpose: a
+    # 403 / 404 subscription / 429 / 5xx in the same message keeps its own class above; only an otherwise unexplained lookup
+    # failure lands here -- the item is retried on the next run (the lookup is cached per run only).
+    @{ code = 'ARM-ROLE-LOOKUP-FAILED'
+       match = { param($m, $row) $m -match "(?i)could not look up ARM role '[^']+' at " }
+       title = 'Azure did not answer the role lookup'
+       cause = 'Before it assigns an Azure role the engine looks the role name up at the scope. Azure answered that lookup with an error the engine does not recognise, so this assignment was not written in this run. Everything else was applied.'
+       remedy = 'Nothing to do when it happens once: the next run looks the role up again. If it repeats for the same scope, read the raw Azure error -- it names what Azure refused.'
+       retryable = $true; severity = 'transient'
+       fixes = @() }
 )
 
 # 100.34 UPLINK-ERRORCLASS: what a code means for Invardia's fix-request triage. customer-config = the customer's data,
@@ -647,6 +660,7 @@ function Get-PimFailureCodeTable {
         ,@('AZ-POLICY-MFA',                    'pim-az-0107',    'customer-config',   'customer', '',      '2.4.638')
         ,@('ARM-ROLE-NOT-FOUND',               'pim-az-0108',    'target-missing',    'customer', '',      '2.4.638')
         ,@('AZURE-NOT-VISIBLE',                'pim-az-0109',    'permission',        'customer', '',      '2.4.638')
+        ,@('ARM-ROLE-LOOKUP-FAILED',           'pim-az-0110',    'upstream-error',    'nobody',   '',      '2.4.646')
         ,@('ENTRA-ROLE-NOT-IN-TENANT',         'pim-entra-0101', 'target-missing',    'customer', '',      '2.4.638')
         ,@('ENTRA-GROUP-NOT-ROLE-ASSIGNABLE',  'pim-entra-0102', 'customer-config',   'customer', '',      '2.4.638')
         ,@('DUPLICATE-AU-NAME',                'pim-entra-0103', 'customer-config',   'customer', '',      '2.4.638')

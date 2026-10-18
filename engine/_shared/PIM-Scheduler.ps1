@@ -3285,6 +3285,7 @@ function Write-PimJobRunRecord {
         scopes      = @(Get-PimRunCleanScopes -Job $Job -Result $Result)
         version     = (Get-PimRunningVersion)
     }
+    $rec = Add-PimRunStepFields -Run $rec -Job $Job   # 2.4.646: stepsOk / failedSteps per provider (Invardia StepsOk)
     $rec = Set-PimRunThrottleState -Run $rec   # §100.45: throttling is a retry, not a failure -- one rule for every job
     # PIM 100.143: more rounds for a FINISHED record, and one that still could not be written is handed over (retried
     # before the next job and at the end of the tick), never dropped with only a warning.
@@ -3501,6 +3502,7 @@ function Invoke-PimJobForceStart {
         scopes      = @(Get-PimRunCleanScopes -Job $Job -Result $res)   # §95.2o, as Write-PimJobRunRecord
         version     = (Get-PimRunningVersion)
     }
+    $rec = Add-PimRunStepFields -Run $rec -Job $Job   # 2.4.646, as Write-PimJobRunRecord
     $rec = Set-PimRunThrottleState -Run $rec   # §100.45, as Write-PimJobRunRecord
     Add-PimJobRunRecord -Run $rec
     # ALERT-01: a finished run raises the failure alert HERE. Previously the ONLY
@@ -4074,6 +4076,49 @@ function Get-PimRunCleanScopes {
     if (-not (Test-PimEngineRunClean -Result $Result)) { return @() }
     $skip = @(Get-PimNotCheckedScopeKeys -Result $Result)
     return @(@(Get-PimEngineJobScopeKeys -Job $Job) | Where-Object { $_ -notin $skip })
+}
+function ConvertTo-PimRunStepId {
+    <# PURE. A provider scope name as an Invardia step id ^[a-z0-9][a-z0-9.-]{0,59}$ ('' when nothing is left). Stable across versions: the scope name, lower-cased. #>
+    param([AllowNull()][string]$Scope)
+    $s = ("$Scope".Trim().ToLowerInvariant() -replace '[^a-z0-9.-]', '-') -replace '^[^a-z0-9]+', ''
+    if ($s.Length -gt 60) { $s = $s.Substring(0, 60) }
+    return $s
+}
+function Get-PimEngineRunSteps {
+    <#
+      PURE. 2.4.646 (Invardia 2026-10-16/18 StepsOk; owner wizard 2026-10-18): the per-provider outcome of ONE engine job's
+      results (Invoke-PimEngine, one item per scope) -> @{ ok = step ids that ran CLEAN; failed = step ids with failed items
+      (or no provider), in run order }. A scope NOT CHECKED, or held / waiting without being clean, is in neither list:
+      Invardia resolves a step's ticket only on a run that names it in StepsOk, so a step that did not really run must
+      never be listed as ok.
+    #>
+    param([AllowNull()][object[]]$Results)
+    $ok = New-Object System.Collections.Generic.List[string]; $failed = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @($Results | Where-Object { $_ })) {
+        $id = ConvertTo-PimRunStepId -Scope "$($r.scope)"
+        if (-not $id) { continue }
+        $nc = ($r.PSObject.Properties['notChecked'] -and [bool]$r.notChecked)
+        $err = 0; if ($r.PSObject.Properties['errors']) { [void][int]::TryParse("$($r.errors)", [ref]$err) }
+        $unbound = ("$($r.detail)" -match 'no provider for scope')
+        if ($err -gt 0 -or $unbound) { if (-not $failed.Contains($id)) { [void]$failed.Add($id) }; continue }
+        if ($nc) { continue }
+        if ($r.PSObject.Properties['ok'] -and [bool]$r.ok -and -not $ok.Contains($id)) { [void]$ok.Add($id) }
+    }
+    return [pscustomobject]@{ ok = @($ok.ToArray()); failed = @($failed.ToArray()) }
+}
+function Add-PimRunStepFields {
+    <#
+      The engine handler leaves its per-provider steps in $global:PimEngineRunSteps ({ job; steps }) -- a FAILED engine job
+      ends in a throw, so the run record cannot read them from the result. Taken ONCE for the record of that job (then
+      cleared, so a later job never inherits them): stepsOk + failedSteps on the run record. Any other job: unchanged.
+    #>
+    param([Parameter(Mandatory)][object]$Run, [Parameter(Mandatory)][object]$Job)
+    $g = $global:PimEngineRunSteps
+    if (-not $g -or "$($g.job)" -ne "$($Job.name)") { return $Run }
+    $global:PimEngineRunSteps = $null
+    $Run | Add-Member -NotePropertyName stepsOk -NotePropertyValue @($g.steps.ok) -Force
+    $Run | Add-Member -NotePropertyName failedSteps -NotePropertyValue @($g.steps.failed) -Force
+    return $Run
 }
 function Add-PimTickReconciled {
     param([Parameter(Mandatory)][object]$Job, [AllowNull()][object]$Result)

@@ -165,6 +165,7 @@ if (Test-Path -LiteralPath "$shared\..\discovery\PIM-Discovery.ps1") { . "$share
 . "$shared\PIM-DateSafe.ps1"          # Get-PimUtcStamp, gated on by several handlers
 . "$shared\PIM-ArmContainerApps.ps1"  # §56.5 the ARM roller (Set-PimAcaJobImage) the watchdog repairs with
 . "$shared\PIM-UpdateWatchdog.ps1"    # §56.5 restore the updater when it adopts a build it cannot run
+. "$shared\PIM-UpdateNow.ps1"         # 2.4.646: the watchdog tells the updater's 15-minute checks from full runs (Get-PimUpdaterRunKind)
 . "$shared\PIM-JobAlert.ps1"          # ALERT-01: a FAILED scheduled run now raises engine-failure.
                                       # This process already had a mail path (PIM-Notify above) but
                                       # no alerting logic on top of it, so a 03:00 failure was silent.
@@ -463,6 +464,7 @@ if (Get-Command Invoke-PimCompanyReviewJob -ErrorAction SilentlyContinue) {
 # WhatIf (intent/recalc) -> plan only; otherwise the provider applies via REST.
 $engineHandler = {
     param($job,$now,$whatIf)
+    $global:PimEngineRunSteps = $null   # 2.4.646: an early exit (pause gate, a throw) never leaves an older run's steps behind
     $scope = if ($job.PSObject.Properties['scope'] -and "$($job.scope)".Trim()) { "$($job.scope)" } else { 'All' }
     $mode  = if ("$($job.type)" -eq 'engine-full') { 'Full' } else { 'Delta' }
     # 96.5 / D4: a PAUSE stops ONLY the daily reconcile (commits, deltas and Run now still apply). Read right before it runs,
@@ -510,6 +512,12 @@ $engineHandler = {
     # Invoke-PimEngineScope sets ok=($errors -eq 0), so both land here -- but the message must
     # say which, or the next reader debugs the wrong thing.
     $bad = @(@($res) | Where-Object { $_ -and $_.PSObject.Properties['ok'] -and -not $_.ok })
+    # 2.4.646 (Invardia StepsOk): the per-provider steps of THIS run, for its run record -- set before any exit below (a failed
+    # run ends in a throw, and the record cannot read them from that). A WhatIf plan applied nothing: no steps.
+    $global:PimEngineRunSteps = $null
+    if (-not $whatIf -and (Get-Command Get-PimEngineRunSteps -ErrorAction SilentlyContinue)) {
+        try { $global:PimEngineRunSteps = [pscustomobject]@{ job = "$($job.name)"; steps = (Get-PimEngineRunSteps -Results @($res)) } } catch { $global:PimEngineRunSteps = $null }
+    }
     # 71.13 -- a run whose ONLY errors are policy mass-change HOLDS is 'held' (needs approval), not failed.
     # A real item failure or an unbound scope in the same run still falls through to the throw below.
     $outcome = $null

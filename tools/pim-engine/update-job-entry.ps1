@@ -71,6 +71,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-JobSelfId.ps1')        # 100.166 (a) pull / publish learn their own id + Reader on themselves
 . (Join-Path $solRoot 'engine\_shared\PIM-ConvergeDefaults.ps1') # 100.40 / framework 12.16 the install defaults an EXISTING install converges to
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAccess.ps1')        # framework 12.23 / PIM 100.156 least-privilege roles via the signed procedure
+. (Join-Path $solRoot 'engine\_shared\PIM-SqlAccessCutover.ps1')  # framework 12.23 P8 exception: a private-SQL install starts its own in-network cut-over
 . (Join-Path $solRoot 'engine\_shared\PIM-AsBuilt.ps1')          # 100.61 the as-built job + store + view an EXISTING install converges to
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateNow.ps1')        # framework 8.18 UPDATE-NOW: the 15-minute signal check + the run kind + own cron
 . (Join-Path $solRoot 'engine\_shared\PIM-GuardLimits.ps1')      # framework 8.18: an update-now waits while guard Strict mode is on
@@ -223,6 +224,20 @@ function Invoke-PimUpdaterConvergeStep {
         $script:PimAsBuiltJobImageThisRun = "$($ab.jobImage)".Trim()
         foreach ($l in @($ab.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
     } catch { Say "  as-built converge skipped: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2f. framework 12.23 P8 EXCEPTION (owner 2026-10-18) -- A PRIVATE-SQL INSTALL NEVER CUT OVER MOVES BY ITSELF -----------
+    # The Support app has no route to a private database. This updater reads (as dbo, still in the SQL admin group), decides
+    # (run 1, later run 2) and STARTS the in-network admin job; the job does the admin SQL and reads it back. No admin SQL
+    # here (Test-PimSqlAccess L4). Public SQL: nothing (the Support-app cut-over). Never fails the update.
+    try {
+        if ("$csSize".Trim()) {
+            $coCs = "$csSize"
+            $coApp = "$((Get-PimJwtPrincipal -Token $global:PIM_SqlAccessToken).appid)".Trim()
+            $co = Invoke-PimSqlAccessCutoverStep -SubscriptionId $sub -ResourceGroup $rg -SqlServer "$($global:PIM_SqlServer)" -ConnectionString $coCs `
+                      -Query { param($cs, $sql) Invoke-PimSqlQuery -ConnectionString $cs -Sql $sql } -UpdaterJob $selfJob -UpdaterAppId $coApp -Arm $armSeam
+            foreach ($l in @($co.lines)) { Say "  database access cut-over: $l" 'DarkGray' }
+            Say ("database access cut-over: $($co.step) -- $($co.reason)$(if ($co.started) { " -> $($co.status)" })") $(if ($co.started -and "$($co.status)" -ne 'Succeeded') { 'Yellow' } elseif ($co.started) { 'Cyan' } else { 'DarkGray' })
+        }
+    } catch { Say "  database access cut-over not checked: $($_.Exception.Message)" 'Yellow' }
 }
 
 # 🔴 2026-09-18 (§71.43) -- THE STORE IS NEEDED BEFORE THE FIRST EXIT PATH, NOT ONLY AT THE SCHEMA STEP.
