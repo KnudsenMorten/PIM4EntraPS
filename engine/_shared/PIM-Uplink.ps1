@@ -928,8 +928,11 @@ function Get-PimUplinkAdoptionQueries {
         privilegedRoles      = "SELECT COUNT_BIG(DISTINCT LOWER(r)) AS n FROM (SELECT COALESCE(NULLIF($(& $j 'RoleDefinitionName'), N''), $(& $j 'RoleName')) AS r, $(& $j 'Action') AS a FROM pim.Rows WHERE Entity IN (N'PIM-Assignments-Roles-Groups', N'PIM-Assignments-Roles-AUs', N'PIM-Assignments-Roles-Direct')) x WHERE ISNULL(r, N'') <> N'' AND UPPER(ISNULL(a, N'')) <> N'REMOVE'"
         # eligible assignments PIM manages, confirmed in the tenant by the engine (the active-assignments read holds ACTIVE ones only)
         eligibleAssignments  = "SELECT COUNT_BIG(*) AS n FROM pim.ManagedKeys WHERE [Key] LIKE N'%|eligible'"
-        # every active assignment of the last complete tenant-wide read (Entra roles + Azure RBAC + PIM for Groups)
-        activeAssignments    = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap) END AS n"
+        # the active ROLE assignments of the last complete tenant-wide read: Entra roles + Azure RBAC. 2.4.650 (owner 2026-10-18,
+        # wizard "Roles only + groups separate"): PIM-for-Groups memberships are NOT role assignments -- at schools they are ~98%
+        # of the rows (one install 514k), so the fleet showed 837k "active assignments" for ~17k real ones. The group
+        # memberships stay visible per kind in the Security record (domains: pim-for-groups).
+        activeAssignments    = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND Kind IN (N'entra-role', N'azure-rbac')) END AS n"
         azureRoleAssignments = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND Kind = N'azure-rbac') END AS n"
         # the activation ledger (pim.ImpactActivations: every time-bound active assignment the snapshot job saw, once) -- by start
         activations30d       = "SELECT COUNT_BIG(*) AS n FROM pim.ImpactActivations WHERE StartUtc >= DATEADD(day, -30, SYSUTCDATETIME())"
@@ -953,7 +956,8 @@ function Get-PimUplinkAdoptionQueries {
         # rows not managed by PIM (Managed = 0) -- only once the snapshot's marks were computed (MarksKey set), else unknown
         # §33.0 round 2: only while the marks are CURRENT (Get-PimUplinkMarksCurrentSql: computed, from a COMPLETE managed
         # list, after that list was last written) -- marks from no list / an older list would count managed rows as outside
-        roleAssignmentsOutsidePim = "SELECT CASE WHEN $snap IS NULL OR NOT $(Get-PimUplinkMarksCurrentSql -SnapshotExpr $snap) THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND Managed = 0) END AS n"
+        # 2.4.650: ROLE assignments only (Entra roles + Azure RBAC), as the key says -- not group memberships (see activeAssignments)
+        roleAssignmentsOutsidePim = "SELECT CASE WHEN $snap IS NULL OR NOT $(Get-PimUplinkMarksCurrentSql -SnapshotExpr $snap) THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND Managed = 0 AND Kind IN (N'entra-role', N'azure-rbac')) END AS n"
         assignmentsExpiring7d = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND EndUtc >= SYSUTCDATETIME() AND EndUtc < DATEADD(day, 7, SYSUTCDATETIME())) END AS n"
         # the drift document's own total (pim.TenantCache kind 'drift'); no document = left out
         driftItems           = "SELECT CASE WHEN ISJSON(ValueJson) = 1 THEN TRY_CAST(JSON_VALUE(ValueJson, '$.total') AS bigint) END AS n FROM pim.TenantCache WHERE Kind = N'drift'"
@@ -2210,6 +2214,250 @@ function Add-PimUplinkStateFields {
     return [string[]]$added.ToArray()
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# PIM 100.116 / framework 4.1b (owner 2026-10-18, via Invardia): supportSqlAccess on the IDENTIFIED heartbeat -- does the
+# Invardia Support app hold BOTH halves of its standing database access on this install?
+#   group   member of the SQL admin group (the SQL server's Entra administrator when that is a group and can be read, else
+#           the install's SQL admin group by name), checked from the MEMBER's side (checkMemberObjects): a group's own
+#           member list hides the service principals the caller cannot read -- that produced a false alarm on 2026-10-18.
+#   dbUser  a database principal whose SID is the Support app's client id (SID form), in db_owner.
+# DETECT + ALERT ONLY (owner decision): nothing here adds or removes anything; healedUtc is ALWAYS null (Invardia repairs).
+# null = not determined (a read error, no right to see it) -- never a guess, never false on doubt.
+# Every read is the engine's own identity, already granted: Graph reads, one ARM read, one SQL scalar. No new right.
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimUplinkSupportTag { <# PURE. The tag Invardia's New-InvardiaSupportApp puts on what it creates (a literal). #> return 'InvardiaSupport' }
+function Get-PimUplinkSupportDbUserDefaultName { <# PURE. Grant-PimSupportAccess's default database user name (a literal). #> return 'invardia-support' }
+function Get-PimUplinkSupportSqlAccessBudgetSec { <# PURE. The most the whole check may take (a literal); later reads are skipped = null. #> return 45 }
+
+function Test-PimUplinkSupportSqlAccessOn {
+    <# PURE. PIM_Telemetry_SupportSqlAccess: ON by default (it only reads); 0 / false / off / no = off. #>
+    param([AllowNull()][string]$Value = $env:PIM_Telemetry_SupportSqlAccess)
+    return -not [bool]("$Value".Trim() -match '^(?i)(0|false|off|no)$')
+}
+
+function Test-PimUplinkSupportAppSp {
+    <# PURE. Is this service principal the Invardia Support app? Its tag; or (apps made before the tag) its display name. #>
+    param([AllowNull()][object]$Sp)
+    if ($null -eq $Sp) { return $false }
+    if (@($Sp.tags) -contains (Get-PimUplinkSupportTag)) { return $true }
+    return [bool]("$($Sp.displayName)" -match '^(?i)Invardia Support')
+}
+
+function ConvertTo-PimUplinkSupportSid {
+    # PURE. An application (client) id as a SQL SID literal (the GUID's bytes in ToByteArray order) -- the form
+    # Grant-PimSupportSqlAccess creates the user from. Not an id = ''.
+    param([AllowNull()][string]$AppId)
+    $g = [guid]::Empty
+    if (-not [guid]::TryParse("$AppId".Trim(), [ref]$g) -or $g -eq [guid]::Empty) { return '' }
+    return ('0x' + ((@($g.ToByteArray()) | ForEach-Object { $_.ToString('X2') }) -join ''))
+}
+
+function ConvertFrom-PimUplinkSupportSid {
+    # PURE. A SID as SQL returns it from CONVERT(NVARCHAR, sid, 1) ('0x' + 32 hex) -> the application id; else ''.
+    param([AllowNull()][string]$Sid)
+    if ("$Sid".Trim() -notmatch '^(0x)?([0-9a-fA-F]{32})$') { return '' }
+    $hex = $Matches[2]; $b = New-Object byte[] 16
+    for ($i = 0; $i -lt 16; $i++) { $b[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16) }
+    return ([guid]::new([byte[]]$b)).ToString()
+}
+
+function Get-PimUplinkSupportDbUserSql {
+    <#
+      PURE. ONE read-only scalar: '<visible>|<users with a Support SID>|<of them in db_owner>|<SID of the user named -DbUserName>|<that user in db_owner>'
+        visible  1 when this sign-in may see OTHER database users (VIEW DEFINITION or ALTER ANY USER on the database; db_owner
+                 has both). 0 = metadata visibility shows it only itself and the roles -- every count below would read 0, so
+                 the caller answers null, never false.
+      -AppIds: the Support app ids Microsoft Graph named (none = the SID columns read 0). -DbUserName: the name
+      Grant-PimSupportAccess gives the user (an external user, type E / X) -- its SID names the app when Graph could not.
+    #>
+    param([string[]]$AppIds = @(), [string]$DbUserName = (Get-PimUplinkSupportDbUserDefaultName))
+    if ("$DbUserName" -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._@-]{0,127}$') { throw "'$DbUserName' is not a safe database user name." }
+    $sids = @(@($AppIds) | ForEach-Object { ConvertTo-PimUplinkSupportSid $_ } | Where-Object { $_ } | Select-Object -Unique)
+    $inSid = if ($sids.Count) { "p.sid IN ($($sids -join ', '))" } else { '1 = 0' }
+    $n = "$DbUserName".Replace("'", "''")
+    $role = "FROM sys.database_role_members m JOIN sys.database_principals r ON r.principal_id = m.role_principal_id JOIN sys.database_principals p ON p.principal_id = m.member_principal_id WHERE r.name = N'db_owner'"
+    return ("SELECT CAST(CASE WHEN HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'VIEW DEFINITION') = 1 OR HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'ALTER ANY USER') = 1 THEN 1 ELSE 0 END AS NVARCHAR(10))" +
+            " + N'|' + CAST((SELECT COUNT(*) FROM sys.database_principals p WHERE $inSid) AS NVARCHAR(10))" +
+            " + N'|' + CAST((SELECT COUNT(*) $role AND $inSid) AS NVARCHAR(10))" +
+            " + N'|' + ISNULL((SELECT TOP 1 CONVERT(NVARCHAR(100), p.sid, 1) FROM sys.database_principals p WHERE p.name = N'$n' AND p.type IN ('E', 'X')), N'')" +
+            " + N'|' + CAST((SELECT COUNT(*) $role AND p.name = N'$n' AND p.type IN ('E', 'X')) AS NVARCHAR(10))")
+}
+
+function ConvertFrom-PimUplinkSupportDbUserRead {
+    # PURE. The scalar of Get-PimUplinkSupportDbUserSql -> @{ visible; sidUsers; sidInRole; namedAppId; namedExists; namedInRole }. Anything else THROWS.
+    param([AllowNull()]$Raw)
+    if ("$Raw" -notmatch '^([01])\|(\d+)\|(\d+)\|((0x)?[0-9A-Fa-f]*)\|(\d+)$') { throw 'the database did not answer the read of the Support app''s database user' }
+    $sid = "$($Matches[4])"
+    return @{ visible = ($Matches[1] -eq '1'); sidUsers = [int]$Matches[2]; sidInRole = [int]$Matches[3]
+              namedExists = [bool]$sid; namedAppId = (ConvertFrom-PimUplinkSupportSid $sid); namedInRole = [int]$Matches[6] }
+}
+
+function Resolve-PimUplinkSupportDbUser {
+    <#
+      PURE. The dbUser answer from the database read (-Read, ConvertFrom-PimUplinkSupportDbUserRead; $null = not read) and what
+      Graph said (-GraphKnown: the Support app lookup answered; -AppIds: the ids it named). Returns @{ value = $true|$false|$null; reason }.
+        not read / not visible                 -> null (never false on doubt)
+        a user with a Support SID is db_owner  -> true
+        Graph answered: none of its ids is a db_owner user -> false (the user named -DbUserName counts only when it carries
+                                                  one of those ids, or when Graph named no Support app at all)
+        Graph did not answer: the user named -DbUserName decides; no such user -> null (it may exist under another name)
+    #>
+    param([AllowNull()][hashtable]$Read, [bool]$GraphKnown = $false, [string[]]$AppIds = @())
+    if ($null -eq $Read) { return @{ value = $null; reason = 'the PIM database could not be read' } }
+    if (-not $Read.visible) { return @{ value = $null; reason = 'the engine''s database user may not see other database users (no VIEW DEFINITION) -- not determined; no right is added for it' } }
+    if ([int]$Read.sidInRole -ge 1) { return @{ value = $true; reason = 'a database user made from the Support app''s client id is in db_owner' } }
+    $ids = @(@($AppIds) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
+    $namedIsSupport = [bool]($Read.namedExists -and ((-not $GraphKnown) -or (-not $ids.Count) -or ($ids -contains "$($Read.namedAppId)".ToLowerInvariant())))
+    if ($namedIsSupport -and [int]$Read.namedInRole -ge 1) { return @{ value = $true; reason = "the Support app's database user is in db_owner" } }
+    if ($namedIsSupport) { return @{ value = $false; reason = "the Support app's database user exists but is NOT in db_owner" } }
+    if ($GraphKnown) {
+        if ([int]$Read.sidUsers -ge 1) { return @{ value = $false; reason = "the Support app's database user exists but is NOT in db_owner" } }
+        return @{ value = $false; reason = 'no database user is made from the Support app''s client id' }
+    }
+    return @{ value = $null; reason = 'the Support app''s client id is not known (Microsoft Graph did not answer) and no database user of the default name exists -- not determined' }
+}
+
+function Resolve-PimUplinkSupportGroupMember {
+    <#
+      PURE. The group answer. -GroupId: the SQL admin group ('' = not found; $null = could not be read). -SpsKnown: the
+      Support app lookup answered; -Checks: one per Support service principal { ok; member } (checkMemberObjects).
+      Returns @{ value = $true|$false|$null; reason }.
+    #>
+    param([AllowNull()][string]$GroupId, [bool]$GroupKnown = $false, [bool]$SpsKnown = $false, [object[]]$Checks = @())
+    if (-not $GroupKnown) { return @{ value = $null; reason = 'the SQL admin group could not be read' } }
+    if (-not "$GroupId".Trim()) { return @{ value = $false; reason = 'the SQL admin group does not exist in this tenant' } }
+    if (-not $SpsKnown) { return @{ value = $null; reason = 'the Invardia Support app could not be looked up' } }
+    $c = @(@($Checks) | Where-Object { $null -ne $_ })
+    if (-not $c.Count) { return @{ value = $false; reason = 'the Invardia Support app has no service principal in this tenant' } }
+    if (@($c | Where-Object { $_.ok -and $_.member }).Count) { return @{ value = $true; reason = 'the Invardia Support app is a member of the SQL admin group' } }
+    if (@($c | Where-Object { -not $_.ok }).Count) { return @{ value = $null; reason = 'the Support app''s group memberships could not be read' } }
+    return @{ value = $false; reason = 'the Invardia Support app is NOT a member of the SQL admin group' }
+}
+
+function New-PimUplinkSupportSqlAccessField {
+    <# PURE. The field: { group; dbUser; checkedUtc; healedUtc = null } -- only $true / $false / $null go through; healedUtc is ALWAYS null. #>
+    param([AllowNull()][object]$Group, [AllowNull()][object]$DbUser, [datetime]$CheckedUtc = [datetime]::UtcNow)
+    $b = { param($v) if ($v -is [bool]) { [bool]$v } else { $null } }
+    return [pscustomobject][ordered]@{ group = (& $b $Group); dbUser = (& $b $DbUser)
+                                       checkedUtc = $CheckedUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); healedUtc = $null }
+}
+
+function Test-PimUplinkSupportSqlAccessJson {
+    <# PURE. Is the record's JSON text carrying supportSqlAccess EXACTLY in the agreed shape? #>
+    param([AllowNull()][string]$Text)
+    return [bool]("$Text" -match '"supportSqlAccess":\{"group":(true|false|null),"dbUser":(true|false|null),"checkedUtc":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z","healedUtc":null\}')
+}
+
+function Add-PimUplinkSupportSqlAccessField {
+    <#
+      Puts supportSqlAccess on the heartbeat -Record and PROVES the record's JSON text (the scopeStability / Controls lesson)
+      before it leaves: not exactly the agreed shape = the field is removed with one warning. Never throws. Returns $true when it went on.
+    #>
+    param([Parameter(Mandatory)][object]$Record, [AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $false }
+    try {
+        $Record | Add-Member -NotePropertyName 'supportSqlAccess' -NotePropertyValue $Value -Force
+        $t = ''; try { $t = "$($Record | ConvertTo-Json -Depth 6 -Compress)" } catch { $t = '' }
+        if (Test-PimUplinkSupportSqlAccessJson -Text $t) { return $true }
+        $Record.PSObject.Properties.Remove('supportSqlAccess')
+        Write-Warning '[uplink] supportSqlAccess could not be written in the agreed form -- the heartbeat goes without it.'
+    } catch { try { $Record.PSObject.Properties.Remove('supportSqlAccess') } catch { } }
+    return $false
+}
+
+function Get-PimUplinkSupportSqlAccess {
+    <#
+      The check itself, READ-ONLY, every seam injected; NEVER throws; time-bounded (-BudgetSec: a read that would start
+      after it is skipped, its answer null). Returns @{ field; reasons[] }.
+        -Graph { param($Method, $Path, $Body) }  Microsoft Graph v1.0 (GET, and the read-only POST checkMemberObjects)
+        -Arm   { param($Method, $Path) }          ARM GET (the path carries its api-version); $null = not read
+        -Sql   { param($Query) }                  ONE scalar from the PIM database; $null = not read
+        -ServerPath   /subscriptions/../providers/Microsoft.Sql/servers/<name> ('' = the administrator is not read)
+        -GroupName    the install's SQL admin group (customer-settable; default grp-pim-sql-admins)
+    #>
+    param([AllowNull()][scriptblock]$Graph, [AllowNull()][scriptblock]$Arm, [AllowNull()][scriptblock]$Sql,
+          [string]$ServerPath = '', [string]$GroupName = 'grp-pim-sql-admins', [string]$DbUserName = (Get-PimUplinkSupportDbUserDefaultName),
+          [datetime]$NowUtc = [datetime]::UtcNow, [int]$BudgetSec = (Get-PimUplinkSupportSqlAccessBudgetSec))
+    $reasons = New-Object System.Collections.Generic.List[string]
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $inTime = { $sw.Elapsed.TotalSeconds -lt $BudgetSec }
+    $first = { param($e) (("$($e.Exception.Message)" -split "`n")[0]).Trim() }
+    $group = $null; $dbUser = $null
+    try {
+        # 1. the Support app's service principal(s): by its tag, else by its name (apps made before the tag)
+        $sps = @(); $spsKnown = $false
+        if ($Graph -and (& $inTime)) {
+            try {
+                $sel = '$select=id,appId,displayName,tags'
+                $f = [uri]::EscapeDataString("tags/any(t:t eq '$(Get-PimUplinkSupportTag)')")
+                $sps = @(@((& $Graph 'GET' "/servicePrincipals?`$filter=$f&$sel" $null).value) | Where-Object { Test-PimUplinkSupportAppSp $_ })
+                if (-not $sps.Count -and (& $inTime)) {
+                    $f2 = [uri]::EscapeDataString("startswith(displayName,'Invardia Support')")
+                    $sps = @(@((& $Graph 'GET' "/servicePrincipals?`$filter=$f2&$sel" $null).value) | Where-Object { Test-PimUplinkSupportAppSp $_ })
+                }
+                $spsKnown = $true
+            } catch { $reasons.Add("the Support app lookup: $(& $first $_)") }
+        }
+        $appIds = @($sps | ForEach-Object { "$($_.appId)".Trim() } | Where-Object { $_ })
+        # 2. dbUser: ONE scalar from the PIM database
+        $read = $null
+        if ($Sql -and (& $inTime)) {
+            try { $read = ConvertFrom-PimUplinkSupportDbUserRead (& $Sql (Get-PimUplinkSupportDbUserSql -AppIds $appIds -DbUserName $DbUserName)) }
+            catch { $read = $null; $reasons.Add("the database read: $(& $first $_)") }
+        }
+        $du = Resolve-PimUplinkSupportDbUser -Read $read -GraphKnown $spsKnown -AppIds $appIds
+        $dbUser = $du.value; if ($null -eq $dbUser -or -not $dbUser) { $reasons.Add("dbUser: $($du.reason)") }
+        # the app the database user names, when Graph found none by tag / name: its service principal by app id
+        if ($spsKnown -and -not $sps.Count -and $read -and "$($read.namedAppId)" -and $Graph -and (& $inTime)) {
+            try {
+                $f3 = [uri]::EscapeDataString("appId eq '$($read.namedAppId)'")
+                $sps = @(@((& $Graph 'GET' "/servicePrincipals?`$filter=$f3&`$select=id,appId,displayName,tags" $null).value) | Where-Object { $_ -and "$($_.id)".Trim() })
+            } catch { $spsKnown = $false; $reasons.Add("the Support app by its database user's id: $(& $first $_)") }
+        }
+        # 3. the group: the SQL server's Entra administrator when it is a group, else the install's group by name
+        $gid = $null; $gKnown = $false
+        if ("$ServerPath".Trim() -and $Arm -and (& $inTime)) {
+            try {
+                $srv = & $Arm 'GET' "$("$ServerPath".Trim())?api-version=2021-11-01"
+                $adm = if ($srv -and $srv.properties) { $srv.properties.administrators } else { $null }
+                if ($adm -and "$($adm.principalType)" -ieq 'Group' -and "$($adm.sid)".Trim()) { $gid = "$($adm.sid)".Trim(); $gKnown = $true }
+            } catch { $reasons.Add("the SQL server's administrator: $(& $first $_) -- the group is looked up by name") }
+        }
+        if (-not $gKnown -and $Graph -and (& $inTime)) {
+            try {
+                $gf = [uri]::EscapeDataString("displayName eq '$("$GroupName".Replace("'", "''"))'")
+                $gs = @(@((& $Graph 'GET' "/groups?`$filter=$gf&`$select=id,displayName" $null).value) | Where-Object { $_ -and "$($_.id)".Trim() })
+                if ($gs.Count -eq 1) { $gid = "$($gs[0].id)".Trim(); $gKnown = $true }
+                elseif (-not $gs.Count) { $gid = ''; $gKnown = $true }
+                else { $reasons.Add("$($gs.Count) groups are named '$GroupName'") }
+            } catch { $reasons.Add("the SQL admin group: $(& $first $_)") }
+        }
+        # 4. membership from the MEMBER's side (a read: checkMemberObjects changes nothing)
+        $checks = New-Object System.Collections.Generic.List[object]
+        if ($gKnown -and "$gid" -and $spsKnown) {
+            foreach ($sp in $sps) {
+                if (-not (& $inTime)) { $checks.Add([pscustomobject]@{ ok = $false; member = $false }); continue }
+                try {
+                    $r = & $Graph 'POST' "/servicePrincipals/$("$($sp.id)".Trim())/checkMemberObjects" @{ ids = @($gid) }
+                    $checks.Add([pscustomobject]@{ ok = $true; member = [bool](@(@($r.value) | Where-Object { "$_".Trim() -ieq $gid }).Count) })
+                } catch { $checks.Add([pscustomobject]@{ ok = $false; member = $false }); $reasons.Add("checkMemberObjects: $(& $first $_)") }
+            }
+        }
+        $gr = Resolve-PimUplinkSupportGroupMember -GroupId $gid -GroupKnown $gKnown -SpsKnown $spsKnown -Checks @($checks.ToArray())
+        $group = $gr.value; if ($null -eq $group -or -not $group) { $reasons.Add("group: $($gr.reason)") }
+    } catch { $reasons.Add("the check stopped: $(& $first $_)") }
+    if (-not (& $inTime)) { $reasons.Add("the check took longer than $BudgetSec s -- what was not read is null") }
+    return @{ field = (New-PimUplinkSupportSqlAccessField -Group $group -DbUser $dbUser -CheckedUtc $NowUtc); reasons = @($reasons.ToArray()) }
+}
+
+function Get-PimUplinkSqlServerPath {
+    <# PURE. The SQL server's ARM path from the subscription, resource group and the server (FQDN, tcp:..,1433 or a bare name); '' when any is missing. #>
+    param([AllowNull()][string]$SubscriptionId, [AllowNull()][string]$ResourceGroup, [AllowNull()][string]$Server)
+    $srv = ("$Server".Trim() -replace '^(?i)tcp:', '' -replace ',\d+$', '').Split('.')[0].Trim().ToLowerInvariant()
+    if (-not "$SubscriptionId".Trim() -or -not "$ResourceGroup".Trim() -or $srv -notmatch '^[a-z0-9][a-z0-9-]{0,62}$') { return '' }
+    return "/subscriptions/$("$SubscriptionId".Trim())/resourceGroups/$("$ResourceGroup".Trim())/providers/Microsoft.Sql/servers/$srv"
+}
+
 function Invoke-PimUplinkCycle {
     <#
       One cycle with every seam injected (tests run it offline):
@@ -2269,6 +2517,9 @@ function Invoke-PimUplinkCycle {
           # version; goodDays } ]) -> the IDENTIFIED heartbeat's `scopeStability`, an ADDITIVE field (a refusal naming it holds
           # just it for 24 h). $null = left out -- the job passes it only while PIM_Telemetry_ScopeStability is on (OFF by default).
           [AllowNull()][object[]]$ScopeStability = $null,
+          # PIM 100.116 / framework 4.1b: { } -> the supportSqlAccess value (New-PimUplinkSupportSqlAccessField). INVOKED ONLY
+          # when the IDENTIFIED heartbeat is due and the additive fields are on; $null = left out.
+          [AllowNull()][scriptblock]$SupportSqlAccess = $null,
           # §33.0 MORE TELEMETRY: { } -> the switched-on structured fields (Get-PimUplinkStateFields: field -> value). INVOKED
           # ONLY when the IDENTIFIED heartbeat is due and the additive fields are on; $null = none.
           [AllowNull()][scriptblock]$StateFields = $null)
@@ -2604,6 +2855,14 @@ function Invoke-PimUplinkCycle {
                     if ($ssText.Contains('"scopeStability":[{')) { $hbAdd += 'scopeStability' }
                     else { $hb.PSObject.Properties.Remove('scopeStability'); Write-Warning '[uplink] scopeStability could not be written as a JSON array -- the heartbeat goes without it.' }
                 } catch { try { $hb.PSObject.Properties.Remove('scopeStability') } catch { } }
+            }
+            # PIM 100.116 / framework 4.1b: supportSqlAccess { group; dbUser; checkedUtc; healedUtc = null } -- READ-ONLY, built
+            # ONCE per due identified heartbeat by -SupportSqlAccess (time-bounded, never throws), PROVEN in the text before it
+            # leaves (Add-PimUplinkSupportSqlAccessField); additive (a refusal naming it holds just it for 24 h).
+            if ($SupportSqlAccess) {
+                $ssaVal = $null; try { $ssaVal = & $SupportSqlAccess } catch { $ssaVal = $null; Write-Warning "[uplink] supportSqlAccess could not be built: $($_.Exception.Message)" }
+                $ssaVal = @($ssaVal | Where-Object { $null -ne $_ -and $_.PSObject.Properties['healedUtc'] }) | Select-Object -First 1
+                if ($ssaVal) { try { if (Add-PimUplinkSupportSqlAccessField -Record $hb -Value $ssaVal) { $hbAdd += 'supportSqlAccess' } } catch { } }
             }
         }
         # PIM 100.167 / framework 8.16: Capabilities + Licences -- identified only, the cause switch on, ONE probe per heartbeat.
@@ -3107,11 +3366,36 @@ function Invoke-PimUplinkJob {
                 -UpdateState $sfJobUs -UpdateStateRead $sfJobUsRead -Gates $sfGates -Catalog $sfCat -HybridAdOn $sfHyOn -HybridWorkerState $sfHw -NowUtc $sfJobNow
         }
     }
+    # PIM 100.116 / framework 4.1b: supportSqlAccess -- ON by default (it only reads; PIM_Telemetry_SupportSqlAccess = 0/off/
+    # false/no switches it off); identified only. A PLAIN scriptblock (dynamic scope; every name it reads starts with ssaJob),
+    # invoked by the cycle ONLY when the identified heartbeat is due. The engine's OWN identity (Invoke-PimRest: the managed
+    # identity in a container), the PIM database connection this job already uses -- no new right. Time-bounded: no retry on
+    # 429 / 5xx, each call at most 15 s (twice on a timeout), the whole check at most Get-PimUplinkSupportSqlAccessBudgetSec.
+    $ssaSb = $null
+    if ($on -and "$key".Trim() -and (Test-PimUplinkSupportSqlAccessOn) -and (Get-Command Invoke-PimRest -ErrorAction SilentlyContinue)) {
+        $ssaJobCs = $cs; $ssaJobNow = $NowUtc
+        $ssaJobGroup = 'grp-pim-sql-admins'
+        try { if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { $ssaJobGroup = "$(Get-PimInstallName -Role sqlAdminGroup)".Trim() } elseif ("$($env:PIM_SQL_ADMIN_GROUP)".Trim()) { $ssaJobGroup = "$($env:PIM_SQL_ADMIN_GROUP)".Trim() } } catch { }
+        if (-not $ssaJobGroup) { $ssaJobGroup = 'grp-pim-sql-admins' }
+        # The tick reads NO ARM (Test-PimUplink EP18), so the SQL server's Entra administrator is not read here: the group is
+        # the install's SQL admin group BY NAME (the name the install recorded; the -Arm seam stays for a caller that may).
+        $ssaSb = {
+            $ssaJobPrevTo = $global:PIM_RestTimeoutSec
+            try {
+                $global:PIM_RestTimeoutSec = 15
+                $ssaG = { param($M, $P, $B) Invoke-PimRest -Method $M -Url "https://graph.microsoft.com/v1.0$P" -Body $B -Resource 'graph' -MaxRetry 0 }
+                $ssaQ = $null; if (Get-Command Invoke-PimSqlScalar -ErrorAction SilentlyContinue) { $ssaQ = { param($q) Invoke-PimSqlScalar -ConnectionString $ssaJobCs -Sql $q } }
+                $ssaR = Get-PimUplinkSupportSqlAccess -Graph $ssaG -Arm $null -Sql $ssaQ -ServerPath '' -GroupName $ssaJobGroup -NowUtc $ssaJobNow
+                foreach ($ssaWhy in @($ssaR.reasons)) { Write-Host "  [uplink] supportSqlAccess: $ssaWhy" -ForegroundColor DarkGray }
+                $ssaR.field
+            } finally { $global:PIM_RestTimeoutSec = $ssaJobPrevTo }
+        }
+    }
     $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
             -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $pause @cyc `
             -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints -AdoptionCounts $adoption `
             -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun -Causes $causesOn -LicenceProbe $licProbe -HybridAd $hyAd `
-            -ReleaseControl $rcOn -ReleaseControlFields $rcFields -ScopeStability $ssField -StateFields $stateSb
+            -ReleaseControl $rcOn -ReleaseControlFields $rcFields -ScopeStability $ssField -StateFields $stateSb -SupportSqlAccess $ssaSb
     # PIM 100.75: a failed send / an install that should be identified but is anonymous = a WARNING run (never a failure).
     $rawKey = ''; try { $rawKey = "$(& $get 'InvardiaInstallKey')".Trim() } catch { $rawKey = '' }
     $claimSt = $null; try { $claimSt = & $get 'InstallKeyClaimState'; if ($claimSt -is [string]) { $claimSt = $claimSt | ConvertFrom-Json } } catch { $claimSt = $null }
