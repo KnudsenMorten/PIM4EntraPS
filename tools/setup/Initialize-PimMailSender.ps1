@@ -230,6 +230,10 @@ $ErrorActionPreference = 'Stop'
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 # Every helper is dot-sourced by a literal path relative to this script's folder, so Build-PimSupportScripts.ps1 can
 # inline it: the published file at https://invardia.com/support/pim/Initialize-PimMailSender.ps1 is ONE standalone script.
+# 2.4.648 (Invardia's 2.4.647 handover review): the published file loaded PIM-SignedRequests.ps1 from its own folder when
+# such a file sat there -- a code-injection path on a customer's machine. The next line tells the build to leave out every
+# OPTIONAL load the inlined engine libraries end with, and to fail on any load left (as Set-PimLicense / Grant-PimSupportSqlAccess).
+# BUILD-NO-OPTIONAL-LOADS
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')               # 12.7: the Documentation line + the run transcript
 . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Rest.ps1')
 . (Join-Path $PSScriptRoot '_PimMailSenderPlan.ps1')          # pure planners (tested offline)

@@ -213,7 +213,15 @@ if (-not $OutDir) { $OutDir = Join-Path ([IO.Path]::GetTempPath()) 'pim-invardia
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $zip = Join-Path $OutDir "pim-manager-src-$Version.zip"
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-& git -C $repo archive --format=zip "--prefix=pim-manager-src-$Version/" -o $zip $tag -- .dockerignore SOLUTIONS/PIM4EntraPS
+# CR7 (framework 12.11g, PIM 100.168): a tag that carries the shared sign-in front's source packs it too (FRAMEWORK/signin-front/src
+# + VERSION), so an opted-in install's updater can build signin-front:<pinned version>. An older tag has none and packs as
+# before (git archive refuses a pathspec that matches nothing). The updater re-pack keeps it; an updater already in the field
+# re-packs only .dockerignore + SOLUTIONS and builds the Manager exactly as before (tests/Test-PimSigninFront.ps1 IMG-F*).
+$zipPaths = @('.dockerignore', 'SOLUTIONS/PIM4EntraPS')
+# ls-tree, not an existence probe with cat-file: a missing path prints NOTHING (cat-file writes "fatal: ..." to stderr, which PS 5.1 with
+# ErrorActionPreference Stop turns into a terminating error -- measured on the test VM, 2026-10-18).
+foreach ($sfp in @('FRAMEWORK/signin-front/src', 'FRAMEWORK/signin-front/VERSION')) { if (@(& git -C $repo ls-tree --name-only $tag -- $sfp).Count) { $zipPaths += $sfp } }
+& git -C $repo archive --format=zip "--prefix=pim-manager-src-$Version/" -o $zip $tag -- @zipPaths
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $zip)) { throw "git archive failed (exit $LASTEXITCODE)" }
 
 Step 'check the zip'

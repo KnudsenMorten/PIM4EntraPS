@@ -978,6 +978,65 @@ function Get-PimDueJobs {
     @(@($Jobs) | Where-Object { Test-PimJobDue -Job $_ -NowUtc $NowUtc })
 }
 
+# ---- cadence overrides (PIM 100.158 (a)) ------------------------------------
+# A job TYPE may run more often for a while without anyone changing its interval: the uplink job runs every 15 minutes for
+# the 4 hours after an engine-changing release (framework 12.11e item 3), then hourly again. A resolver per type answers the
+# minutes for NOW (0 = no override). The override only ever SHORTENS the wait: the stored / catalog interval is never
+# changed (the Jobs page keeps showing the operator's cadence), only the next slot is pulled in and the next slot after a
+# run is counted with the shorter value. A resolver that throws = no override (a tick never fails because of one).
+$script:PimJobCadenceResolvers = @{}
+function Register-PimJobCadenceResolver {
+    param([Parameter(Mandatory)][string]$Type, [Parameter(Mandatory)][scriptblock]$Resolver)
+    $script:PimJobCadenceResolvers["$Type".ToLowerInvariant()] = $Resolver
+}
+function Get-PimJobCadenceOverrides {
+    <# The override minutes per job NAME for the given jobs, from the registered resolvers: @{ <name> = <minutes> }. NEVER throws. #>
+    param([object[]]$Jobs, [datetime]$NowUtc = [datetime]::UtcNow)
+    $out = @{}
+    if (-not $script:PimJobCadenceResolvers -or -not $script:PimJobCadenceResolvers.Count) { return $out }
+    foreach ($j in @($Jobs | Where-Object { $_ -and "$($_.name)".Trim() })) {
+        $rs = $script:PimJobCadenceResolvers["$($j.type)".ToLowerInvariant()]
+        if (-not $rs) { continue }
+        $m = 0; try { $m = [int](@(& $rs $j $NowUtc) | Select-Object -Last 1) } catch { $m = 0 }
+        if ($m -gt 0) { $out["$($j.name)"] = $m }
+    }
+    return $out
+}
+function Set-PimJobCadenceOverride {
+    <#
+      PURE. The jobs with their overrides applied (copies; the input is never changed): a job with an override m (enabled,
+      1 <= m < its interval) carries cadenceOverrideMinutes = m, and a next slot further out than its last finish (else its last
+      start) + m is pulled in to that time. Every other job is returned as it is.
+    #>
+    param([object[]]$Jobs, [hashtable]$Overrides = @{})
+    if (-not $Overrides -or -not $Overrides.Count) { return @($Jobs) }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($j in @($Jobs)) {
+        if (-not $j -or -not $Overrides.ContainsKey("$($j.name)")) { $out.Add($j); continue }
+        $m = 0; try { $m = [int]$Overrides["$($j.name)"] } catch { $m = 0 }
+        $iv = 60; try { $iv = [int]$j.intervalMinutes } catch { $iv = 60 }; if ($iv -le 0) { $iv = 60 }
+        $en = $true; if ($j.PSObject.Properties['enabled']) { $en = [bool]$j.enabled }
+        if (-not $en -or $m -le 0 -or $m -ge $iv) { $out.Add($j); continue }
+        $e = $j.PSObject.Copy()
+        $e | Add-Member -NotePropertyName cadenceOverrideMinutes -NotePropertyValue $m -Force
+        $base = $null
+        if ($e.PSObject.Properties['lastFinishedUtc']) { $base = Get-PimUtcStamp $e.lastFinishedUtc }
+        if ($null -eq $base -and $e.PSObject.Properties['lastRunUtc']) { $base = Get-PimUtcStamp $e.lastRunUtc }
+        $next = $null; if ($e.PSObject.Properties['nextRunUtc']) { $next = Get-PimUtcStamp $e.nextRunUtc }
+        if ($null -ne $base -and $null -ne $next -and $next -gt $base.AddMinutes($m)) { $e.nextRunUtc = $base.AddMinutes($m).ToString('o') }
+        $out.Add($e)
+    }
+    @($out.ToArray())
+}
+function Get-PimJobCadenceOverrideMinutes {
+    <# PURE. The override a resolved job carries for this tick (Set-PimJobCadenceOverride), else 0. #>
+    param([AllowNull()][object]$Job)
+    if ($null -eq $Job -or -not $Job.PSObject.Properties['cadenceOverrideMinutes']) { return 0 }
+    $m = 0; try { $m = [int]$Job.cadenceOverrideMinutes } catch { $m = 0 }
+    if ($m -lt 0) { $m = 0 }
+    return $m
+}
+
 # ---- handler registry -----------------------------------------------------
 function Register-PimJobHandler {
     param([Parameter(Mandatory)][string]$Type, [Parameter(Mandatory)][scriptblock]$Handler)
@@ -3186,6 +3245,9 @@ function ConvertTo-PimRunLogText {
             if ($inner.PSObject.Properties['log'] -and $inner.log) { foreach ($l in @($inner.log)) { $lines.Add("$l") } }
         }
     }
+    # framework §12.11f item 2 / PIM 100.144a: what the signed-request check said during this run (observe: "would have
+    # refused"; enforce: refused), so Jobs > Engine logs & errors shows it. Mode off = no line. Consumed once.
+    if (Get-Command Get-PimSignedRequestRunLogLines -ErrorAction SilentlyContinue) { try { foreach ($l in @(Get-PimSignedRequestRunLogLines)) { $lines.Add("$l") } } catch { } }
     return ($lines -join "`n")
 }
 function Set-PimRunThrottleState {
@@ -4242,7 +4304,11 @@ function Invoke-PimTickJobRun {
             # 🔴 lastRun = when THIS job started; SCHED-1: next = when THIS job FINISHED + its interval.
             $slotAt = if ($Slot -is [datetime]) { $Slot } else { $jobStart }
             $jobEnd = $TickNowUtc.Add([datetime]::UtcNow - $WallStart)
-            $nr = (Get-PimNextRunAfterRun -Job $Job -ScheduledUtc $slotAt -StartedUtc $jobStart -FinishedUtc $jobEnd).ToString('o')
+            $nrAt = Get-PimNextRunAfterRun -Job $Job -ScheduledUtc $slotAt -StartedUtc $jobStart -FinishedUtc $jobEnd
+            # PIM 100.158 (a): a cadence override for this tick (Set-PimJobCadenceOverride) counts the rest with ITS minutes
+            $ovm = Get-PimJobCadenceOverrideMinutes -Job $Job
+            if ($ovm -gt 0 -and $jobEnd.AddMinutes($ovm) -lt $nrAt) { $nrAt = $jobEnd.AddMinutes($ovm) }
+            $nr = $nrAt.ToString('o')
             $lr2 = $jobStart.ToString('o')
             if ($Job.PSObject.Properties['nextRunUtc']) { $Job.nextRunUtc = $nr } else { $Job | Add-Member -NotePropertyName nextRunUtc -NotePropertyValue $nr -Force }
             if ($Job.PSObject.Properties['lastRunUtc']) { $Job.lastRunUtc = $lr2 } else { $Job | Add-Member -NotePropertyName lastRunUtc -NotePropertyValue $lr2 -Force }
@@ -4394,6 +4460,9 @@ function Invoke-PimSchedulerTick {
         $st = Get-PimSchedulerState
         $stJobs = @(); if ($st -and $st.PSObject.Properties['jobs'] -and $st.jobs) { $stJobs = @($st.jobs) }
         $Jobs = @(Resolve-PimSchedulerJobs -Schedule @(Get-PimJobSchedule) -StateJobs $stJobs -NowUtc $now)
+        # PIM 100.158 (a): a registered cadence override (the uplink job's release window) pulls a next slot in. Never fails a tick.
+        try { $Jobs = @(Set-PimJobCadenceOverride -Jobs $Jobs -Overrides (Get-PimJobCadenceOverrides -Jobs $Jobs -NowUtc $now)) }
+        catch { Write-Warning "[scheduler] the cadence overrides were not applied: $($_.Exception.Message)" }
     }
     # BUG-134: the RESOLVED list is what runs -- check THAT, not the shipped default (once/process).
     Write-PimJobScopeBindingReport -Schedule @($Jobs)

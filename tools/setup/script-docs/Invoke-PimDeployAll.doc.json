@@ -83,6 +83,7 @@
     { "name": "ImageRepo", "required": false, "default": "pim-manager", "help": "Image repository in the registry." },
     { "name": "Apps", "required": false, "default": "discovered", "help": "The container apps to roll (empty = discover)." },
     { "name": "ManagerApp", "required": false, "default": "ca-pim-manager", "help": "Name of the Manager app." },
+    { "name": "NewInstallNames", "required": false, "default": "off (also $env:PIM_Setup_NewInstallNames)", "help": "A NEW install takes the new resource names (ca-pim-web, ca-pim-engine, caj-pim-updater) and \"PIM Manager\" display names. Azure cannot rename: a resource group that already runs PIM Manager keeps its names. Only names you did not pass change." },
     { "name": "ImageTag", "required": false, "default": "the package VERSION", "help": "Image tag to build and deploy." },
     { "name": "SqlServerFqdn", "required": false, "default": null, "help": "The Azure SQL server (<name>.database.windows.net)." },
     { "name": "SqlDatabase", "required": false, "default": "PimPlatform", "help": "The database." },

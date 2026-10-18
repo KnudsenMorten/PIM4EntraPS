@@ -720,6 +720,7 @@ Emit 'verify-install' 'started'
 $mailEv = @($events | Where-Object { "$($_.step.id)" -eq 'mailsender' -and "$($_.state)" -eq 'warning' }) | Select-Object -Last 1
 $vArgs = @{ Role = 'Single'; TenantId = $cfg.tenantId; SubscriptionId = $cfg.subscriptionId; ResourceGroup = $names.resourceGroup; SqlServerFqdn = $names.sqlFqdn
             SqlDatabase = $names.sqlDatabase; ManagerApp = $names.managerApp; EnvName = $names.environment; AcrName = $names.acr
+            TickJobName = $names.tickJob; UpdateJobName = $names.updateJob   # CR5: the names this install was made with
             SuperAdmins = @("$($deployArgs['ManagerSuperAdmins'])" -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
             AlertRecipients = @($cfg.alertRecipients); LicenceExpected = $true; SetupHostRuleOwner = 'this'; UseSignedInAccount = $true; ResumeCommand = $resumeCmd
             OutFile = (Join-Path $StatePath 'verify-install.json') }

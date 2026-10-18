@@ -77,7 +77,10 @@ function Get-PimJobSettingSuffix {
     # CR5 step 1 (PIM 100.149): THIS install's engine job is 'Tick' whatever it is named (ca-pim-tick today, ca-pim-engine
     # at a new install) -- its stored size settings keep their keys
     if ((Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) -and "$Job".Trim() -ieq (Get-PimInstallName -Role engine)) { return 'Tick' }
-    $j = "$Job".Trim() -replace '^(?i)ca-pim-', ''
+    # CR5 step 2: THIS install's managed-tenant pull job keeps its DownlinkS6 keys whatever it is named (caj-pim-downlink at
+    # a new install); a caj-pim-<purpose> job loses its prefix like a ca-pim-<purpose> one
+    if ((Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) -and "$Job".Trim() -ieq (Get-PimInstallName -Role downlink)) { return 'DownlinkS6' }
+    $j = "$Job".Trim() -replace '^(?i)caj?-pim-', ''
     $parts = @(($j -split '[-_]') | Where-Object { $_ } | ForEach-Object { $_.Substring(0, 1).ToUpperInvariant() + $_.Substring(1).ToLowerInvariant() })
     return ($parts -join '')
 }
@@ -276,6 +279,25 @@ function Get-PimManagerAppResize {
     $rec = ConvertFrom-PimTenantSizingTags -Tags $appTags -Job 'Manager'
     $settings = Get-PimJobSizingSettings -Environment $Environment -Recorded $rec.settings
     $size = Get-PimManagerAppResources -Current $cur -Settings $settings
+    # CR7 (framework 12.11g, live 2026-10-18 on the ring-1 test install: ContainerAppInvalidResourceTotal): behind the sign-in
+    # front the app's containers SHARE the Consumption maximum (4.0 CPU / 8.0Gi) -- the Manager gets what the front leaves
+    # (3.75 / 7.5Gi beside a 0.25 / 0.5Gi front). Every resize path (the updater's roll, the size update, setup) asks here,
+    # so no update ever raises the Manager past what the app may hold. Without a front: exactly as before.
+    $sfc = $null; if ($App -and $App.properties -and $App.properties.template) { $sfc = @(@($App.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -eq 'signin-front' })[0] }
+    if ($sfc -and $sfc.resources) {
+        $fcCpu = ConvertTo-PimJobCpu $sfc.resources.cpu; $fcMem = ConvertTo-PimJobMemoryGi $sfc.resources.memory
+        if ($null -ne $fcCpu -and $null -ne $fcMem) {
+            $roomCpu = [double]$script:PimJobSizeMaxCpu - [double]$fcCpu; $roomMem = (2 * [double]$script:PimJobSizeMaxCpu) - [double]$fcMem
+            $wCpu = [double](ConvertTo-PimJobCpu $size.Cpu); $wMem = [double](ConvertTo-PimJobMemoryGi $size.Memory)
+            if ($wCpu -gt $roomCpu -or $wMem -gt $roomMem) {
+                $nCpu = [Math]::Min($wCpu, $roomCpu); $nMem = [Math]::Min($wMem, $roomMem)
+                $size.Cpu = Format-PimJobCpu $nCpu; $size.Memory = Format-PimJobMemory $nMem
+                $haveC = $null; $haveM = $null; if ($cur) { $haveC = ConvertTo-PimJobCpu $cur.Cpu; $haveM = ConvertTo-PimJobMemoryGi $cur.Memory }
+                $size.Changed = [bool]($null -ne $haveC -and ($haveC -ne $nCpu -or $haveM -ne $nMem))
+                $size.Notes = @(@($size.Notes) + ("behind the sign-in front ({0} CPU / {1}) the Manager may hold at most {2} CPU / {3} -- the app's total is capped at {4} CPU" -f (Format-PimJobCpu $fcCpu), (Format-PimJobMemory $fcMem), $size.Cpu, $size.Memory, (Format-PimJobCpu $script:PimJobSizeMaxCpu)))
+            }
+        }
+    }
     $tags = $null
     if ($size.Changed) {
         $tags = @{}

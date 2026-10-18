@@ -117,6 +117,7 @@ trap { if (Get-Command Complete-PimStartupLog -ErrorAction SilentlyContinue) { t
 . "$shared\PIM-PendingReminders.ps1"   # 100.57: the pending-actions reminder to the SuperAdmins (Get Started + approvals), run by every tick
 . "$shared\PIM-FailureCatalog.ps1"    # classified item failures (cause/remedy/auto-fix), persisted in SQL
 . "$shared\PIM-EngineCore.ps1"        # NEW REST+SQL engine (diff + providers)
+. "$shared\PIM-SignedRequests.ps1"    # framework 12.11f item 2 / PIM 100.144a: the signed-request check + its run-log lines (inert while the mode is off)
 . "$shared\PIM-DisableGuard.ps1"      # account-disable circuit breaker (incident 2026-06-15)
 . "$shared\PIM-Guard.ps1"             # GUARD-1: a guard trip -> state + audit + mail + telemetry
 . "$shared\PIM-LastPrivileged.ps1"    # PIM 100.72 (7): never remove the last Global Administrator (BLOCK + release)
@@ -367,6 +368,14 @@ Write-PimStartupLine -Message "[scheduler] target check wired (pim.TenantCache/t
 Register-PimJobHandler -Type 'uplink' -Handler {
     param($job, $now, $whatIf)
     Invoke-PimUplinkJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
+# PIM 100.158 (a) / framework 12.11e item 3: for the 4 hours after an engine-changing release the uplink job runs every 15
+# minutes (Get-PimUplinkCadenceMinutes; 0 = its own interval). Never fails a tick: a resolver that throws = no override.
+if ((Get-Command Register-PimJobCadenceResolver -ErrorAction SilentlyContinue) -and (Get-Command Get-PimUplinkCadenceMinutes -ErrorAction SilentlyContinue)) {
+    Register-PimJobCadenceResolver -Type 'uplink' -Resolver {
+        param($job, $now)
+        Get-PimUplinkCadenceMinutes -Job $job -NowUtc $now
+    }
 }
 # The REAL 'licence-check' handler. PIM 100.72 (4): a refused / grace licence is TELEMETRY -- a 'warning' run, not a guard trip.
 Register-PimJobHandler -Type 'licence-check' -Handler {

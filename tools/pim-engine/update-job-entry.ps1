@@ -48,10 +48,12 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 }
 . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $solRoot 'engine\_shared\PIM-InstallNames.ps1')   # CR5 step 1 (PIM 100.149): every resource name from one resolver
+. (Join-Path $solRoot 'engine\_shared\PIM-DisplayNameRename.ps1')   # CR5 item 5: the display names people read (switch, OFF)
 . (Join-Path $solRoot 'engine\_shared\PIM-ArmContainerApps.ps1')
 . (Join-Path $solRoot 'engine\_shared\PIM-SyncAutomateIT.ps1')   # the decision core (semver + pin gate)
 . (Join-Path $solRoot 'engine\_shared\PIM-AcrBuild.ps1')         # §55 build in the registry, over ARM
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateSource.ps1')     # §55 where this ring's source comes from
+. (Join-Path $solRoot 'engine\_shared\PIM-SigninFrontImage.ps1') # CR7 (framework 12.11g, PIM 100.168) the sign-in front image -- opt-in only
 # 🔴 BUG-231 -- LOAD-BEARING, AND ITS ABSENCE IS SILENT. The desired-state gate below calls
 # Get-PimPolicyBaselineFromArchive / Compare-PimPolicyBaseline behind a `Get-Command ... -ErrorAction
 # SilentlyContinue` guard. Without this line that guard is FALSE FOREVER: the gate reports
@@ -197,6 +199,26 @@ function Invoke-PimUpdaterConvergeStep {
             } else { Say 'install record: InstallNames unchanged' 'DarkGray' }
         }
     } catch { Say "  install record not written: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2d-ter. CR5 item 5 (framework §12.11c item 5, PIM 100.149) -- THE DISPLAY NAMES PEOPLE READ ------------------------
+    # "PIM Manager", never "PIM4EntraPS", at EXISTING installs too. OFF until the owner switches it on: pim.Settings
+    # 'PIM_Update_RenameDisplayNames' (true), else this job's variable of the same name. Only objects that carry exactly the
+    # name PIM gave them; kept: the mailbox address, mailNickname, the Exchange scope. A rename this identity may not do is
+    # reported with the permission it needs. Read back, audited, never fails the update (engine/_shared/PIM-DisplayNameRename.ps1).
+    try {
+        $dnSet = $null; $dnSender = ''
+        if ($storeSeam) {
+            try { $dnSet = & $storeSeam 'get' 'PIM_Update_RenameDisplayNames' $null } catch { $dnSet = $null }
+            try { $dnSender = "$(& $storeSeam 'get' 'MailSender' $null)".Trim() } catch { $dnSender = '' }
+        }
+        if (-not $dnSender) { $dnSender = "$($env:PIM_MailSender)".Trim() }
+        $dnAudit = $null
+        if ($storeSeam) { $dnAudit = { param($tgt, $before, $after) & $storeSeam 'audit' "displayname.$tgt" @{ action = 'install.displayname.rename'; before = $before; after = $after } | Out-Null } }
+        $dn = Invoke-PimDisplayNameRenames -Enabled (Test-PimRenameDisplayNamesSwitch -Explicit $dnSet) -SenderMailbox $dnSender -Audit $dnAudit
+        foreach ($l in @($dn.lines)) { Say ("  " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+        if ($dn.ran) {
+            Say ("display names: $($dn.renamed) renamed, $($dn.current) already current, $(@($dn.cannot).Count) need a permission this identity does not hold") $(if (@($dn.cannot).Count) { 'Yellow' } elseif ($dn.renamed) { 'Cyan' } else { 'DarkGray' })
+        }
+    } catch { Say "  display names not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2e. PIM 100.61 -- THE AS-BUILT JOB ON EXISTING ENVIRONMENTS (no manual Deploy-PimAsBuiltJob) ---------------------
     # Storage (Entra-only), container + 1-day rule, caj-pim-asbuilt on the Manager's image, and -- over this job's own SQL
     # connection, so a PRIVATE SQL server works too -- the view, the job's reader user and the install facts. What needs an
@@ -256,6 +278,9 @@ $tickJob    = $(if ("$($env:PIM_TickJobName)".Trim()) { "$($env:PIM_TickJobName)
 $selfJob    = $(if ("$($env:PIM_UpdateJobName)".Trim()) { "$($env:PIM_UpdateJobName)".Trim() } else { 'ca-pim-update' })
 $targetImg  = "$($env:PIM_UPDATE_TARGET_IMAGE)".Trim()   # e.g. acr.azurecr.io/pim-manager:2.4.295
 $container  = $(if ("$($env:PIM_ManagerContainerName)".Trim()) { "$($env:PIM_ManagerContainerName)".Trim() } else { '' })
+# CR7 (PIM 100.168): the JOBS keep the configured container name exactly as before; $container (the MANAGER's container) is
+# resolved below from the app -- behind the sign-in front the Manager app carries two containers and '' cannot pick one.
+$jobContainer = $container
 
 Say "environment $rg (subscription $sub)" 'Cyan'
 
@@ -411,6 +436,9 @@ $resolveErr  = ''
 $app = $null; $ref = $null
 try {
     $app = Get-PimAcaApp -SubscriptionId $sub -ResourceGroup $rg -Name $managerApp
+    # CR7: a two-container revision (the sign-in front + the Manager) names the Manager as the one that is not the front.
+    # A single-container app (every install not behind the front) resolves to '' -- today's rule, unchanged.
+    $container = Resolve-PimManagerContainerName -App $app -Configured $container
     $cur = Get-PimAcaAppImage -App $app -ContainerName $container
     $ref = Split-PimImageReference -Image "$cur"
     if ($ref) {
@@ -423,6 +451,51 @@ try {
     else { $resolveErr = "the Manager's image ('$cur') names no registry" }
 } catch { $resolveErr = "$($_.Exception.Message)" }
 if ($resolveErr) { Say "  could not read this environment's registry from $managerApp`: $resolveErr" 'Yellow' }
+
+# ---- CR7 (framework 12.11g, PIM 100.168) -- DOES THIS INSTALL BUILD THE SIGN-IN FRONT IMAGE? ----------------------------
+# 🔒 OPT-IN ONLY: the Manager runs behind the front (PIM_HOSTED_AUTH_LAYER=signin-front on its app) or this job carries
+# PIM_BUILD_SIGNIN_FRONT=1 (Set-PimManagerSigninFront.ps1 sets it before it moves an environment). Decided from the app
+# object read above and this job's own environment -- NO call. Every other install: nothing below runs, nothing is logged,
+# nothing is fetched or built: byte for byte today's update.
+$sfOpt    = Get-PimSigninFrontOptIn -App $app -BuildFlag "$($env:PIM_BUILD_SIGNIN_FRONT)"
+$sfWanted = ''; $sfBuilt = ''; $sfNeed = $false; $sfResult = $null; $sfFrontImage = ''
+if ($sfOpt.optIn) {
+    $sfWanted = Get-PimSigninFrontPinnedVersion -SolutionRoot $solRoot
+    $sfBuilt  = "$($env:PIM_SIGNIN_FRONT_BUILT)".Trim()
+    $sfNeed   = [bool]($sfWanted -and $sfBuilt -ne $sfWanted)
+    Say ("sign-in front: $($sfOpt.reason); pinned $(if ($sfWanted) { $sfWanted } else { '(none)' }), built here $(if ($sfBuilt) { $sfBuilt } else { '(none yet)' })") 'DarkGray'
+}
+function Invoke-PimUpdaterSigninFrontStep {
+    <#
+      CR7: the front image step for THIS run (engine/_shared/PIM-SigninFrontImage.ps1 decides and builds). -ArchivePath = the
+      source archive this run already holds; '' = fetch the archive of -Version from the configured source (not for an
+      Invardia source -- its verified archive is the only one). NEVER fails the update: the result is logged and returned.
+    #>
+    param([string]$ArchivePath = '', [string]$Version = '')
+    $fetched = ''
+    try {
+        $arch = "$ArchivePath".Trim()
+        if (-not $arch -and $sfNeed -and "$Version".Trim() -and $srcUrlTpl -and $srcUrlTpl -notmatch '^invardia://') {
+            $fetched = Join-Path ([IO.Path]::GetTempPath()) ("pim-src-front-{0}.tar.gz" -f "$Version".Trim())
+            Say "sign-in front: fetching the source of $Version to build signin-front:$sfWanted" 'DarkGray'
+            $gotF = Get-PimUpdateSourceArchive -Url (Resolve-PimUpdateSourceUrl -Template $srcUrlTpl -Version "$Version".Trim()) -OutFile $fetched
+            if ($gotF.ok) { $arch = $fetched } else { Say "  sign-in front: source NOT fetched ($($gotF.reason)) -- the front image is not built this run" 'Yellow' }
+        }
+        $regF = if ($loginServer) { Split-PimImageReference -Image "$loginServer/x:y" } else { $null }
+        $poolF = "$($env:PIM_ACR_AGENT_POOL)".Trim()
+        $r = Invoke-PimSigninFrontImageStep -OptIn $true -Wanted $sfWanted -Built $sfBuilt -CurrentImage (Get-PimSigninFrontCurrentImage -App $app) `
+                -LoginServer $loginServer -ArchivePath $arch `
+                -SubscriptionId $sub -ResourceGroup $rg -RegistryName "$($regF.registryName)" -AgentPoolName $poolF -OnPoll { param($s) Say "  front build $s" 'DarkGray' } `
+                -Record { param($v) [void](Invoke-PimArmBusyRetry -Write { Set-PimAcaJobEnvValue -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob -VariableName 'PIM_SIGNIN_FRONT_BUILT' -Value $v }) }
+        foreach ($l in @($r.lines)) { Say $l $(if (-not $r.ok) { 'Yellow' } elseif ($r.built) { 'Green' } else { 'DarkGray' }) }
+        return $r
+    } catch {
+        Say "  sign-in front: the image step failed ($($_.Exception.Message)) -- the Manager update is not affected" 'Yellow'
+        return @{ ok = $false; action = 'error'; built = $false; version = $sfWanted; image = ''; reason = "$($_.Exception.Message)"; lines = @() }
+    } finally {
+        if ($fetched) { Remove-Item -LiteralPath $fetched -Force -ErrorAction SilentlyContinue }
+    }
+}
 
 # A bare version is the modern pin -- one value, identical in every environment. A full image
 # reference (PIM_UPDATE_TARGET_IMAGE) is still honoured so nothing already deployed changes meaning.
@@ -625,9 +698,12 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     $highestKnown = ''
     $hk = @(@("$($script:PimRunningVersion)", $lastBuilt, "$($env:PIM_UPDATE_LAST_GOOD)") | ForEach-Object { ConvertTo-PimUpdateVersion -Value $_ } | Where-Object { $_ } | Sort-Object -Descending)
     if ($hk.Count) { $highestKnown = "$($hk[0])" }
+    # CR7: an OPTED-IN install whose sign-in front image is not built yet asks for the verified archive even when the Manager
+    # is already built ($sfNeed) -- the front is built from it; the Manager plan below still compares PIM_UPDATE_LAST_BUILT
+    # and does not rebuild. Every other install passes $lastBuilt exactly as before.
     $t = Get-PimInvardiaUpdateTarget -Http { param($m, $u, $b, $h) Invoke-PimLicenceHttp -Method $m -Url $u -Body $b -Headers $h } `
             -InstallKey $invKey -LicenceText $licText -BaseUrl $invBase -AppliedSequence $script:PimInvardiaApplied `
-            -RunningVersion "$($script:PimRunningVersion)" -LastBuiltVersion $lastBuilt -Ring $ring `
+            -RunningVersion "$($script:PimRunningVersion)" -LastBuiltVersion $(if ($sfNeed) { '' } else { $lastBuilt }) -Ring $ring `
             -UnprovenLegacySequence ([int]$seqRes.unprovenLegacy) -HighestKnownVersion $highestKnown `
             -AllowDowngrade:("$($env:PIM_UPDATE_ALLOW_DOWNGRADE)".Trim() -eq '1')   # UPDATE-1.7: this environment's own ring
     Say "Invardia: $($t.reason)" $(if ($t.ok) { 'DarkGray' } elseif ($t.attention -or $t.noKey) { 'Yellow' } else { 'Red' })
@@ -763,6 +839,9 @@ if ($isAhead) {
     # 100.40: no version moves, but the install defaults still converge (sizing, database, 2d) -- an environment kept ahead
     # of its ring used to exit before any of that ran, so it never got them.
     Invoke-PimUpdaterConvergeStep -When 'ahead of the ring'
+    # CR7: an opted-in install that is ahead still gets its front image -- from the source of the version it RUNS (an
+    # Invardia source serves only the ring's version: then the next release builds it). Never changes this exit.
+    if ($sfOpt.optIn) { [void](Invoke-PimUpdaterSigninFrontStep -Version $aheadFrom) }
     Send-PimUpdateOutcome -Action 'none' -Outcome 'ahead'
     exit 0
 }
@@ -831,9 +910,24 @@ if ($plan.action -eq 'build') {
             [void](Set-PimAcaJobEnvValue -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob `
                      -VariableName 'PIM_UPDATE_LAST_BUILT' -Value $plan.version)
         } catch { Say "  could not record the built version (it will rebuild next run): $($_.Exception.Message)" 'Yellow' }
+        # CR7: an opted-in install builds the sign-in front from the SAME archive, after the Manager (whose build already
+        # succeeded -- a front failure is reported and never undoes or fails it).
+        if ($sfOpt.optIn) { $sfResult = Invoke-PimUpdaterSigninFrontStep -ArchivePath $ctx -Version "$($plan.version)" }
     } finally {
         Remove-Item -LiteralPath $ctx -Force -ErrorAction SilentlyContinue
     }
+}
+# CR7: opted in and the Manager was not built this run (already built here, or roll-only) -- the front image is checked /
+# built on its own: the verified Invardia archive this run fetched for it, else the configured source of the target version.
+$sfArch = $(if ($script:PimInvardiaContext -and (Test-Path -LiteralPath $script:PimInvardiaContext)) { "$script:PimInvardiaContext" } else { '' })
+if ($sfOpt.optIn -and -not $sfResult) { try { $sfResult = Invoke-PimUpdaterSigninFrontStep -ArchivePath $sfArch -Version "$($plan.version)" } finally { if ($sfArch) { Remove-Item -LiteralPath $sfArch -Force -ErrorAction SilentlyContinue } } }
+# CR7: behind the front, the Manager revision's front container moves to the pinned image TOGETHER with the Manager (one
+# write, Invoke-PimAcaRoll -SidecarImages) -- only to an image that exists: built or found this run, or recorded as built.
+if ($sfOpt.behindFront -and $loginServer) {
+    $sfVer = ''
+    if ($sfResult -and $sfResult.ok -and ($sfResult.built -or "$($sfResult.action)" -eq 'present') -and "$($sfResult.version)".Trim()) { $sfVer = "$($sfResult.version)".Trim() }
+    elseif ($sfBuilt) { $sfVer = $sfBuilt }
+    $sfFrontImage = Get-PimSigninFrontImageRef -LoginServer $loginServer -Version $sfVer
 }
 
 # From here on the image exists -- either this run built it, or the registry already held it.
@@ -1155,6 +1249,9 @@ Say "rolling $managerApp -> $targetImg"
 # PIM_Bootstrap_Cpu_Manager / PIM_Bootstrap_Memory_Manager on this job wins) the SAME write raises it: one write, one
 # restart, never an image PATCH followed by a size PATCH (the second is refused 409 OperationInProgress).
 $mgrSizeEnv = @{}; foreach ($ev in [Environment]::GetEnvironmentVariables().GetEnumerator()) { $mgrSizeEnv["$($ev.Key)"] = "$($ev.Value)" }
+# CR7: behind the sign-in front the front container rolls in the same write ($sfFrontImage, decided above); '' = no sidecar.
+$mgrSidecars = @{}
+if ($sfFrontImage) { $mgrSidecars['signin-front'] = $sfFrontImage; Say "  the sign-in front container moves with it -> $sfFrontImage" 'DarkGray' }
 $roll = Invoke-PimAcaRoll -SubscriptionId $sub -ResourceGroup $rg -Name $managerApp -Image $targetImg `
                           -ContainerName $container -Resize { param($rzContainer, $rzApp) Get-PimManagerAppResize -Container $rzContainer -App $rzApp -Environment $mgrSizeEnv } -HealthCheck {
     # Healthy = the app provisioned AND has an active revision the platform reports as running.
@@ -1165,9 +1262,10 @@ $roll = Invoke-PimAcaRoll -SubscriptionId $sub -ResourceGroup $rg -Name $manager
     # app at min-replicas 0 with no traffic reports neither. Treat only the explicitly bad ones as
     # bad, or this check fails every healthy scale-to-zero environment at 03:00.
     ($state -notmatch '(?i)^(Failed|Degraded)$')
-}
+} -SidecarImages $mgrSidecars
 
 if ($roll.reason) { Say "  $($roll.reason)" 'DarkGray' }
+if ($roll.sidecars -and $roll.sidecars.Count) { Say ("  sign-in front rolled with the Manager: " + (@($roll.sidecars.Keys | ForEach-Object { "$_ -> $($roll.sidecars[$_])" }) -join ', ')) 'DarkGray' }
 if ($roll.resized) {
     Say ("  sizing: $($roll.sizeDetail) -- in the same write as the image" + $(if ($roll.sizeConfirmed) { '; read back' } else { '; the size did NOT read back -- checked again below' })) $(if ($roll.sizeConfirmed) { 'Cyan' } else { 'Yellow' })
 }
@@ -1253,7 +1351,7 @@ $selfImageBefore = ''; $selfStamped = $false
 if ($tickJob) {
     try {
         Say "rolling the tick job $tickJob"
-        [void](Invoke-PimArmBusyRetry -Write { Set-PimAcaJobImage -SubscriptionId $sub -ResourceGroup $rg -Name $tickJob -Image $targetImg -ContainerName $container })
+        [void](Invoke-PimArmBusyRetry -Write { Set-PimAcaJobImage -SubscriptionId $sub -ResourceGroup $rg -Name $tickJob -Image $targetImg -ContainerName $jobContainer })
     } catch { $jobFailed += $tickJob; Say "  tick job not rolled: $($_.Exception.Message)" 'Yellow' }
     # PIM 100.166 (b) / framework 12.24: a run that started on the OLD image may run for days now (7-day limit) -- stop it,
     # so old code does not keep writing after the roll. Closed as interrupted by the update; it runs again on the new code.
@@ -1385,7 +1483,7 @@ if ($selfJob) {
         foreach ($wait in @(0, 10, 20, 40, 60)) {
             if ($wait) { Say "  an operation is still in flight -- retrying in ${wait}s" 'DarkGray'; Start-Sleep -Seconds $wait }
             try {
-                [void](Set-PimAcaJobImage -SubscriptionId $sub -ResourceGroup $rg -Name $selfJob -Image $targetImg -ContainerName $container)
+                [void](Set-PimAcaJobImage -SubscriptionId $sub -ResourceGroup $rg -Name $selfJob -Image $targetImg -ContainerName $jobContainer)
                 $stamped = $true; break
             } catch {
                 $lastErr = "$($_.Exception.Message)"

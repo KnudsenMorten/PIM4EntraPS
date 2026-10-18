@@ -440,7 +440,7 @@ function Get-PimCoverageEntraRows {
             if ($tag) { $boundTags[$tag.ToLowerInvariant()] = $true }
             if ($tag -and -not (Test-PimCoverageTagDefined -Model $Model -Tag $tag)) {
                 $out.Add((New-PimCoverageRow -Workload $W -Item ("{0} -> {1}" -f $role, $tag) -ItemId ("binding|{0}|{1}" -f $e, "$tag|$role") -CoveredBy @($gname) -Status 'Unmanaged binding' `
-                    -Reason ("a {0} row binds '{1}' to the group tag '{2}', but no PIM4EntraPS definition row defines that group -- the engine cannot resolve it" -f $e, $role, $tag)))
+                    -Reason ("a {0} row binds '{1}' to the group tag '{2}', but no PIM Manager definition row defines that group -- the engine cannot resolve it" -f $e, $role, $tag)))
             }
         }
     }
@@ -529,7 +529,7 @@ function Get-PimCoverageWorkloadRows {
         if ($b.tag) { $boundTags[$b.tag.ToLowerInvariant()] = $true }
         if ($b.tag -and -not (Test-PimCoverageTagDefined -Model $Model -Tag $b.tag)) {
             $out.Add((New-PimCoverageRow -Workload $W -Item ("{0} -> {1}" -f $b.role, $b.tag) -ItemId ("binding|{0}|{1}|{2}" -f $b.entity, $b.tag, $b.role) -CoveredBy @($b.tag) -Status 'Unmanaged binding' `
-                -Reason ("a {0} row binds the {1} role '{2}' to '{3}', which no PIM4EntraPS definition row defines" -f $b.entity, $W, $b.role, $b.tag)))
+                -Reason ("a {0} row binds the {1} role '{2}' to '{3}', which no PIM Manager definition row defines" -f $b.entity, $W, $b.role, $b.tag)))
         }
     }
     # A definition with this workload and no binding row: the group exists with no workload role (REQ-U orphan).
@@ -585,7 +585,7 @@ function Get-PimCoverageWorkloadRows {
             if (-not $gn -and -not $gid) { continue }
             if ($gn -and $Model.ownedNames.ContainsKey($gn.ToLowerInvariant())) { continue }
             $out.Add((New-PimCoverageRow -Workload $W -Item ("{0} -> {1}" -f $name, $(if ($gn) { $gn } else { $gid })) -ItemId ("live|{0}|{1}" -f $id, $(if ($gid) { $gid } else { $gn })) -Status 'Unmanaged binding' `
-                -Reason ("the tenant assigns the {0} role '{1}' to '{2}', which PIM4EntraPS does not define -- review it" -f $W, $name, $(if ($gn) { $gn } else { $gid }))))
+                -Reason ("the tenant assigns the {0} role '{1}' to '{2}', which PIM Manager does not define -- review it" -f $W, $name, $(if ($gn) { $gn } else { $gid }))))
         }
     }
     foreach ($k in @($byRole.Keys)) {
@@ -747,10 +747,10 @@ function Get-PimCoveragePimForGroupsRows {
         if ($detail.licences.Count)   { $grantsTxt += ("licences: " + (@($detail.licences | Select-Object -First 5) -join ', ')) }
         $grantsLine = if ($grantsTxt.Count) { ' Grants ' + ($grantsTxt -join '; ') + '.' } else { '' }
         $status = 'Unmanaged privileged group'
-        $why = ("onboarded to PIM for Groups ({0} active member(s), {1} owner(s)) and no PIM4EntraPS definition covers it -- review what it gates.{2}" -f $members.Count, $owners.Count, $grantsLine)
+        $why = ("onboarded to PIM for Groups ({0} active member(s), {1} owner(s)) and no PIM Manager definition covers it -- review what it gates.{2}" -f $members.Count, $owners.Count, $grantsLine)
         if (Test-PimCoverageNameMatchesPattern -Name $gname) {
             $status = 'Orphan group'
-            $why = ("named in the tenant's PIM group pattern and onboarded to PIM for Groups ({0} active member(s)), but no PIM4EntraPS definition row covers it -- a leftover of a removed definition?{1}" -f $members.Count, $grantsLine)
+            $why = ("named in the tenant's PIM group pattern and onboarded to PIM for Groups ({0} active member(s)), but no PIM Manager definition row covers it -- a leftover of a removed definition?{1}" -f $members.Count, $grantsLine)
         }
         $out.Add((New-PimCoverageRow -Workload $W -Item $gname -ItemId $gid -Status $status -Reason $why -Detail $detail))
     }

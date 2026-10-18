@@ -132,6 +132,7 @@ $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvoca
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\PIM4EntraPS
 . (Join-Path $here '_PimSetupShared.ps1')
 . (Join-Path $here '_PimMailSenderPlan.ps1')   # IMP-31 pure cores reused for SEC-34: time-bound PIM role request + active-grant read
+. (Join-Path $solRoot 'engine\_shared\PIM-InstallNames.ps1')   # CR5 item 5: the display name's earlier / current form
 
 $graphAppId = '00000003-0000-0000-c000-000000000000'
 $exoAppId   = '00000002-0000-0ff1-ce00-000000000000'   # Office 365 Exchange Online
@@ -283,6 +284,13 @@ if (@($existing).Count) {
     Write-Host "  matched on the stable identifier uri ($stableEngineUri)" -ForegroundColor DarkGray
 } else {
     $existing = @((Gr -Path "applications?`$filter=displayName eq '$DisplayName'").value)
+    # CR5 item 5: the other form of the name ('PIM4EntraPS Engine' <-> 'PIM Manager Engine') -- the update may have renamed it
+    if (-not @($existing).Count) {
+        foreach ($dnForm in @(Get-PimDisplayNameForms "$DisplayName" | Select-Object -Skip 1)) {
+            $existing = @((Gr -Path "applications?`$filter=displayName eq '$($dnForm.Replace("'", "''"))'").value)
+            if (@($existing).Count) { break }
+        }
+    }
     # 🪤 Keep this refusal. More than one app of this name means a fork has ALREADY happened, and
     # picking one at random would bind the engine to whichever Graph listed first -- silently, and
     # differently on the next run.

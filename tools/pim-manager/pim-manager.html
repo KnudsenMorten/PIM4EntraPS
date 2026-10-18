@@ -2749,6 +2749,14 @@
   document.querySelectorAll('.tab').forEach(t => {
     t.onclick = () => switchTab(t.dataset.tab);
   });
+  // CR7 (framework 12.11g, sign-in front CSP script-src 'self'): links built in HTML strings switch tabs through this ONE
+  // delegated listener (data-pim-switch-tab), never an inline onclick -- an inline handler would not run under that CSP.
+  document.addEventListener('click', function (ev) {
+    const a = ev.target && ev.target.closest ? ev.target.closest('[data-pim-switch-tab]') : null;
+    if (!a) return;
+    ev.preventDefault();
+    try { switchTab(a.getAttribute('data-pim-switch-tab')); } catch (_) { }
+  });
 
   // ===================================================================
   // CISO-friendly consolidated navigation (REQUIREMENTS §26d)
@@ -4984,7 +4992,7 @@
         method: 'POST',
         // Same defect as the admin-tap READ: a bare fetch with no session token is answered 401,
         // and the panel then blames TAP rather than the stale page.
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + PIM_TOKEN },
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN },
         body: JSON.stringify({ userPrincipalName: upn })
       });
       const d = await r.json();
@@ -5919,7 +5927,7 @@
         '<div style="border:1px solid #d0d7de; border-radius:8px; padding:16px; background:#fff;">' +
           '<div style="font-size:13px; font-weight:600; margin-bottom:6px;">Developed by Morten Knudsen</div>' +
           '<div style="font-size:12.5px; color:#1a1a1a; line-height:1.6;">' +
-            'PIM4EntraPS is built and maintained by <b>Morten Knudsen</b> &mdash; Microsoft MVP &amp; Microsoft Security MVP, ' +
+            'PIM Manager is built and maintained by <b>Morten Knudsen</b> &mdash; Microsoft MVP &amp; Microsoft Security MVP, ' +
             'independent cloud &amp; security architect.' +
             '<div style="margin-top:8px;">' +
               '<a href="https://github.com/KnudsenMorten" target="_blank" rel="noopener" style="color:#0969da; text-decoration:none;">github.com/KnudsenMorten</a>' +
@@ -8117,8 +8125,11 @@
     // (renderUpdateRingPanelInto), worded calmly; real updater failures still reach Invardia by telemetry.
     const ver = String(v.runningVersion || '').replace(/^v/i, '');
     const ringPart = (v.recorded && v.ring) ? (v.ringLabel || '') : '';
-    b.textContent = ringPart || ver || 'not recorded';   // no ring recorded yet: the version, as before
-    g.title = 'PIM Manager ' + (ver ? ver : '') + (ringPart ? ' on update ' + ringPart : '') + '.' +
+    // PIM 100.158 (b) / framework 12.11e item 2: while this install runs a wave version the server sends waveLabel
+    // ("Ring 2 - Pre-release (<wave>)"); no wave = exactly as before.
+    const waveLabel = String(v.waveLabel || '');
+    b.textContent = waveLabel || ringPart || ver || 'not recorded';   // no ring recorded yet: the version, as before
+    g.title = 'PIM Manager ' + (ver ? ver : '') + (waveLabel ? ' -- an early release (' + waveLabel + ')' : (ringPart ? ' on update ' + ringPart : '')) + '.' +
       '\nA ring is changed on the update job by an operator, never from this page. Update details are on the Jobs page.';
     g.style.display = '';
     // CR4 GUARD-STRICT (framework 12.11b item 4): "Guard mode: Strict" in the header -- SuperAdmins only (the server sends
@@ -8597,7 +8608,7 @@
     const added = Array.isArray(r.addedAsReader) ? r.addedAsReader : [];
     if (added.length) parts.push('<div style="padding:6px 10px;background:#ddf4ff;border:1px solid #54aeff;border-radius:6px;margin-bottom:4px;"><b>' + esc(added.join(', ')) + '</b> ' + (added.length === 1 ? 'was' : 'were') + ' not a PIM Manager user and ' + (added.length === 1 ? 'was' : 'were') + ' <b>added as Reader</b>, so the links in their mails open. No existing role was changed.</div>');
     const keep = Array.isArray(r.removedKeepAccess) ? r.removedKeepAccess : [];
-    if (keep.length) parts.push('<div style="padding:6px 10px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;margin-bottom:4px;">No longer a recipient, but still a Manager user: ' + keep.map(k => '<b>' + esc(k.identity) + '</b> (' + esc(k.role || 'Reader') + ')').join(', ') + '. Their access was not removed &mdash; remove it under <a href="#" onclick="switchTab(\'manageraccess\');return false;">Manager access &amp; roles</a> if it is no longer needed.</div>');
+    if (keep.length) parts.push('<div style="padding:6px 10px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;margin-bottom:4px;">No longer a recipient, but still a Manager user: ' + keep.map(k => '<b>' + esc(k.identity) + '</b> (' + esc(k.role || 'Reader') + ')').join(', ') + '. Their access was not removed &mdash; remove it under <a href="#" data-pim-switch-tab="manageraccess">Manager access &amp; roles</a> if it is no longer needed.</div>');
     if (r.readerError) parts.push('<div style="padding:6px 10px;background:#ffebe9;border:1px solid #ff8182;border-radius:6px;">' + esc(r.readerError) + '</div>');
     return parts.join('');
   }
@@ -8728,7 +8739,7 @@
       const msg = document.getElementById('asBuiltMsg');
       msg.textContent = 'Building the PDF…'; msg.style.color = '#57606a'; btn.disabled = true;
       try {
-        const resp = await fetch('/api/asbuilt/pdf', { headers: { 'Authorization': 'Bearer ' + PIM_TOKEN } });
+        const resp = await fetch('/api/asbuilt/pdf', { headers: { 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN } });
         if (!resp.ok) {
           let t = ''; try { const j = await resp.json(); t = j && j.error; } catch (_) { }
           throw new Error(t || ('HTTP ' + resp.status));
@@ -14778,7 +14789,7 @@
     if (exAll) exAll.onclick = async () => {
       exAll.disabled = true; const prev = exAll.textContent; exAll.textContent = 'Preparing…';
       try {
-        const resp = await fetch('/api/audit/export?' + filterQs(), { headers: { 'Accept': 'text/csv', 'Authorization': 'Bearer ' + PIM_TOKEN } });
+        const resp = await fetch('/api/audit/export?' + filterQs(), { headers: { 'Accept': 'text/csv', 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN } });
         if (!resp.ok) {
           let b401 = null; if (resp.status === 401) { try { b401 = await resp.json(); } catch (_) { b401 = null; } }
           throw new Error(resp.status === 401 ? http401Message(b401) : ('HTTP ' + resp.status));
@@ -14799,7 +14810,7 @@
     if (pr) pr.onclick = async () => {
       pr.disabled = true; const prev = pr.textContent; pr.textContent = 'Preparing…';
       try {
-        const resp = await fetch('/api/audit/export?' + filterQs() + '&purpose=print', { headers: { 'Accept': 'text/csv', 'Authorization': 'Bearer ' + PIM_TOKEN } });
+        const resp = await fetch('/api/audit/export?' + filterQs() + '&purpose=print', { headers: { 'Accept': 'text/csv', 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN } });
         if (!resp.ok) {
           let b401 = null; if (resp.status === 401) { try { b401 = await resp.json(); } catch (_) { b401 = null; } }
           throw new Error(resp.status === 401 ? http401Message(b401) : ('HTTP ' + resp.status));
@@ -19439,7 +19450,7 @@
         : (nWould ? 'would remove <b class="reconcile-would">' + escapeHtml(nWould) + '</b> leftover(s) PIM had created (report only -- nothing was removed)' : 'everything matches your configuration -- nothing to remove')) +
       '.</div>';
     if (nOther) h += '<div class="reconcile-other" style="font-size:12px;color:#57606a;margin-bottom:6px;">' + escapeHtml(nOther) +
-      ' assignment(s) exist that PIM did not create -- PIM leaves them alone. Clean them up on <a href="#" onclick="try{switchTab(\'revoke\')}catch(_){};return false;">Delegation overview (All privileged permissions)</a>.</div>';
+      ' assignment(s) exist that PIM did not create -- PIM leaves them alone. Clean them up on <a href="#" data-pim-switch-tab="revoke">Delegation overview (All privileged permissions)</a>.</div>';
     if (heldTxt) h += '<div style="font-size:11.5px;color:#8c959f;margin-bottom:6px;">Why left alone: ' + heldTxt + '</div>';
     (rep.errors || []).forEach(e => { h += '<div style="font-size:12px;color:#9a6700;">' + escapeHtml(e) + '</div>'; });
     const rows = [];
@@ -20709,7 +20720,7 @@
     if (xb) xb.onclick = async () => {
       const msg = container.querySelector('.azresApproveMsg');
       try {
-        const resp = await fetch('/api/engine/policy-hold/xlsx?provider=' + encodeURIComponent(xb.dataset.provider), { headers: { 'Authorization': 'Bearer ' + PIM_TOKEN } });
+        const resp = await fetch('/api/engine/policy-hold/xlsx?provider=' + encodeURIComponent(xb.dataset.provider), { headers: { 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN } });
         if (resp.status === 204) { if (msg) msg.textContent = 'Nothing is held any more -- there is no change set to export.'; return; }
         if (!resp.ok) { const t = await resp.text(); throw new Error(t || ('HTTP ' + resp.status)); }
         const cd = resp.headers.get('Content-Disposition') || '';
@@ -21031,7 +21042,7 @@
     const timeoutMs = (opts2 && opts2.timeoutMs) || 120000;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    const opts = { method, headers: { 'Authorization': 'Bearer ' + PIM_TOKEN }, signal: ctrl.signal };
+    const opts = { method, headers: { 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN }, signal: ctrl.signal };
     if (body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
@@ -22294,7 +22305,7 @@
     const btn = document.getElementById('pimExportBtn');
     if (btn) { btn.disabled = true; btn.textContent = 'Exporting...'; }
     try {
-      const resp = await fetch('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + PIM_TOKEN }, body: JSON.stringify(payload) });
+      const resp = await fetch('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN }, body: JSON.stringify(payload) });
       if (!resp.ok) {
         let b = null; try { b = await resp.json(); } catch (_) { b = null; }
         throw new Error(resp.status === 401 ? http401Message(b) : ((b && b.error) || ('HTTP ' + resp.status)));

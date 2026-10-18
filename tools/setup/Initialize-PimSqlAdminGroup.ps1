@@ -85,6 +85,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Rest.ps1')   # the ONE token client (framework 12.17)
 . (Join-Path $PSScriptRoot '_PimSignedIn.ps1')                    # the sign-in rule: the Support session, else the browser
 . (Join-Path $PSScriptRoot '_PimSqlAdminGroup.ps1')
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-InstallNames.ps1')   # CR5 step 2: the updater job by either of its names
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
 $null = Start-PimScriptRun -Script 'Initialize-PimSqlAdminGroup'
 try {

@@ -730,7 +730,8 @@ function Get-PimEnvironmentUpdaterEnv {
     $res = & $GetJobs
     if (-not $res -or -not $res.ok) { return [pscustomobject]@{ ok = $false; found = $false; deployed = $true; env = [ordered]@{}; reason = "$($res.reason)" } }
     $names = @(@($res.jobs | Where-Object { $_ } | ForEach-Object { "$($_.name)" }) + @($res.apps | ForEach-Object { "$_" }))
-    $deployed = @($names | Where-Object { $_ -like 'ca-pim-*' -or $_ -eq $UpdateJobName }).Count -gt 0
+    # CR5 step 2: a new install's jobs are caj-pim-<purpose> (its web app ca-pim-web still matches ca-pim-*)
+    $deployed = @($names | Where-Object { $_ -like 'ca-pim-*' -or $_ -like 'caj-pim-*' -or $_ -eq $UpdateJobName }).Count -gt 0
     $job = @($res.jobs | Where-Object { $_ -and "$($_.name)" -eq $UpdateJobName }) | Select-Object -First 1
     if (-not $job) { return [pscustomobject]@{ ok = $true; found = $false; deployed = $deployed; env = [ordered]@{}; reason = "no '$UpdateJobName' in $ResourceGroup" } }
     $envMap = ConvertTo-PimJobEnvMap -Job $job -ContainerName $UpdateJobName

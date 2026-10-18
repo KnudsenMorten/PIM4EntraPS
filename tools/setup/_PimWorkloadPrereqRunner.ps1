@@ -90,7 +90,15 @@ function Resolve-PimPrereqEngineIdentity {
         $sp = @(Invoke-PimGraph -All -Path "/servicePrincipals?`$filter=appId eq '$("$EngineAppId".Trim())'&`$select=$sel") | Select-Object -First 1
     } else {
         if (-not "$SubscriptionId".Trim() -or -not "$ResourceGroup".Trim()) { throw 'no engine identity: give -EngineObjectId, -EngineAppId, or -SubscriptionId + -ResourceGroup (+ -TickJobName) of the hosted tick job.' }
-        $job = Invoke-PimArm -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$TickJobName" -ApiVersion '2024-03-01'
+        # CR5 step 2 (PIM 100.149): the engine job is ca-pim-tick at every install made before the new names and ca-pim-engine
+        # at a new one -- a name of the engine role that is not there falls to the role's other name (never to anything else)
+        $jobNames = @($TickJobName)
+        if ((Get-Command Test-PimInstallNameIsRole -ErrorAction SilentlyContinue) -and (Test-PimInstallNameIsRole -Role engine -Name $TickJobName)) { $jobNames = @(Get-PimInstallNameCandidates -Role engine -Preferred $TickJobName) }
+        $job = $null
+        for ($ji = 0; $ji -lt $jobNames.Count; $ji++) {
+            try { $job = Invoke-PimArm -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$($jobNames[$ji])" -ApiVersion '2024-03-01'; $TickJobName = $jobNames[$ji]; break }
+            catch { if ($ji -lt ($jobNames.Count - 1) -and "$($_.Exception.Message)" -match '(?i)\b404\b|NotFound|was not found') { continue }; throw }
+        }
         $pick = Select-PimPrereqTickJobIdentity -Job $job -JobName $TickJobName
         $sp = Invoke-PimGraph -Path "/servicePrincipals/$($pick.objectId)`?`$select=$sel"
     }

@@ -126,6 +126,9 @@ function ConvertTo-PimBuildContextFromZip {
         $inside = "$(Get-Content -Raw -LiteralPath $vf)".Trim()
         if ($inside -ne $Version) { return @{ ok = $false; path = ''; reason = "the archive holds version $inside, the signed manifest says $Version" } }
         $items = @('SOLUTIONS'); if (Test-Path -LiteralPath (Join-Path $top '.dockerignore')) { $items = @('.dockerignore') + $items }
+        # CR7 (PIM 100.168): a release that carries the shared sign-in front's source keeps it in the context, so an opted-in
+        # install builds signin-front from it. The Manager build never sees it (.dockerignore keeps SOLUTIONS/PIM4EntraPS only).
+        if (Test-Path -LiteralPath (Join-Path $top 'FRAMEWORK/signin-front/src/Dockerfile')) { $items += 'FRAMEWORK' }
         Push-Location -LiteralPath $top
         try {
             # A RELATIVE output name, then a move: GNU tar reads 'C:' in an absolute Windows path as a remote host.

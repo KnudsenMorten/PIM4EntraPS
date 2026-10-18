@@ -128,6 +128,7 @@ $here = Split-Path -Parent $PSCommandPath
 $sharedDir = Join-Path (Split-Path -Parent (Split-Path -Parent $here)) 'engine\_shared'
 if (-not (Get-Command Invoke-PimRest -ErrorAction SilentlyContinue)) { . (Join-Path $sharedDir 'PIM-Rest.ps1') }
 . (Join-Path $sharedDir 'PIM-ArmSetup.ps1')
+. (Join-Path $sharedDir 'PIM-InstallNames.ps1')   # CR5 item 5: the display name's earlier / current form (never renamed back)
 # BUG-169: the sign-in consent scopes + the pure consent plan.
 . (Join-Path $here '_PimDeployGraph.ps1')
 
@@ -424,7 +425,10 @@ if (-not $appId) {
         # Current name first, then every name this app has ever shipped under. A tenant deployed
         # last month carries the old one; without searching for it, the rename creates a duplicate
         # instead of adopting -- the exact defect this whole block exists to end.
-        foreach ($nm in @(@($AppDisplayName) + @($LegacyDisplayNames))) {
+        # CR5 item 5: each name in BOTH forms ('PIM4EntraPS Manager' / 'PIM Manager') -- the update may have renamed it
+        $eaNames = New-Object System.Collections.Generic.List[string]
+        foreach ($nm0 in @(@($AppDisplayName) + @($LegacyDisplayNames))) { foreach ($f in @(Get-PimDisplayNameForms "$nm0")) { if (-not $eaNames.Contains($f)) { [void]$eaNames.Add($f) } } }
+        foreach ($nm in @($eaNames.ToArray())) {
             if (-not "$nm".Trim()) { continue }
             $appId = Get-PimEaFirstAppId -DisplayName "$nm"
             if ("$appId".Trim()) {
@@ -505,7 +509,10 @@ if ($PSCmdlet.ShouldProcess($appId, 'ensure reply URL, identifier URI and ID-tok
     # when it was first deployed. Safe now, and only now: identity is the stable uri, so the name
     # is a label rather than a key. Best-effort -- a failed rename is cosmetic, not functional.
     $curName = "$((Get-PimGraphApplication -Id $appId -ErrorAsNull).displayName)".Trim()
-    if ($curName -and $curName -ne $AppDisplayName) {
+    # CR5 item 5: an app the update already renamed to "PIM Manager" is never renamed BACK by a run that still asks for the
+    # earlier name -- the newer form is kept.
+    if ($curName -and (Test-PimDisplayNameIsNewerForm -Current $curName -Wanted $AppDisplayName)) { Note "display name '$curName' kept (the current form of '$AppDisplayName')" }
+    elseif ($curName -and $curName -ne $AppDisplayName) {
         [void](Update-PimEaApp @{ displayName = $AppDisplayName })
         $nowName = "$((Get-PimGraphApplication -Id $appId -ErrorAsNull).displayName)".Trim()
         if ($nowName -eq $AppDisplayName) { Note "renamed '$curName' -> '$AppDisplayName' (consistent with the sibling registrations)" }

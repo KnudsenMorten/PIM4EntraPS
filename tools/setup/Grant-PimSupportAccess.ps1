@@ -76,6 +76,7 @@ $G = 'https://graph.microsoft.com/v1.0'
 # on a machine holding several logins is another directory (code audit 2026-10-04). A caller that already set up PIM-Rest's
 # identity keeps it; otherwise sign in: the Invardia Support app's REST session for this tenant, else the person's browser.
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $here)) 'engine\_shared\PIM-AsBuilt.ps1')   # 100.61: the as-built grants (pure)
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $here)) 'engine\_shared\PIM-InstallNames.ps1')   # CR5: names + display-name forms
 # 100.61 (framework 8.12): the as-built document access -- start the ONE job caj-pim-asbuilt + read its executions, and
 # Storage Blob Data Reader on the ONE container 'asbuilt'. Level asbuilt grants ONLY that; troubleshoot and setup include it
 # (it is less than either); -Remove takes it back. Needs the subscription + resource group (where the job is).
@@ -128,8 +129,14 @@ if (-not $Sql -and "$SqlServer".Trim()) {
 $problems = New-Object System.Collections.Generic.List[string]
 function Say([string]$m, [string]$c = 'Gray') { Write-Host "  $m" -ForegroundColor $c }
 function Find-One([string]$Kind, [string]$DisplayName) {
-    $f = [uri]::EscapeDataString("displayName eq '$($DisplayName.Replace("'", "''"))'")
-    @((& $Graph 'GET' "/$Kind`?`$select=id,displayName,appId&`$filter=$f" $null).value) | Select-Object -First 1
+    # CR5 item 5: the name in BOTH forms ('PIM4EntraPS Manager ...' / 'PIM Manager ...') -- the update may have renamed it,
+    # and a new-name install (CR5 step 2) created it with the new one
+    foreach ($dn in @(Get-PimDisplayNameForms $DisplayName)) {
+        $f = [uri]::EscapeDataString("displayName eq '$($dn.Replace("'", "''"))'")
+        $hit = @((& $Graph 'GET' "/$Kind`?`$select=id,displayName,appId&`$filter=$f" $null).value) | Select-Object -First 1
+        if ($hit) { return $hit }
+    }
+    return $null
 }
 function Get-Ids([string]$Path) { @((& $Graph 'GET' $Path $null).value | ForEach-Object { "$($_.id)" }) }
 

@@ -493,6 +493,10 @@ if (Test-Path -LiteralPath $_schedLib) { . $_schedLib }
 # endpoint below, can change a ring -- a ring move is an operator act on the update job.
 $_updStateLib = Join-Path $solutionRoot 'engine\_shared\PIM-UpdateState.ps1'
 if (Test-Path -LiteralPath $_updStateLib) { . $_updStateLib }
+# PIM 100.158 (b) / framework 12.11e item 2 -- the release-control library (pure): the header says "Ring <N> - Pre-release
+# (<wave>)" while this install runs the version of the wave the updater was served (pim.Settings 'ReleaseWave').
+$_relCtlLib = Join-Path $solutionRoot 'engine\_shared\PIM-ReleaseControl.ps1'
+if (Test-Path -LiteralPath $_relCtlLib) { . $_relCtlLib }
 
 # Notifications / mailer (engine/_shared/PIM-Notify.ps1) -- the SAME render+send
 # path the engine uses (Send-PimNotifyMail -> Graph Mail.Send, gated on
@@ -623,6 +627,10 @@ $script:PimHosted = [bool]$Hosted -or ("$env:PIM_HOSTED" -in @('1','true','yes')
 # refuse the filesystem fallback for AUTHORIZATION data. Set from the SAME expression above, not
 # re-derived, so the Manager and the libs can never disagree about whether this is hosted.
 $global:PIM_Hosted = $script:PimHosted
+# 🟡 CR7 (§12.11g): behind the shared sign-in front? ONLY on the explicit PIM_HOSTED_AUTH_LAYER=signin-front -- unset, every
+# Manager keeps today's Easy Auth path. Decides the loopback bind and where the /api page token is read.
+$script:PimSigninFront = $false
+if ($script:PimHosted -and (Get-Command Get-PimHostedAuthLayer -ErrorAction SilentlyContinue)) { $script:PimSigninFront = ((Get-PimHostedAuthLayer) -eq 'signin-front') }
 $script:CurrentRequestPrincipal = $null
 
 function Get-PimEntraJwks {
@@ -709,7 +717,10 @@ function Get-PimEasyAuthPrincipal {
     # the caller's own words and every identity is refused -- see Get-PimHostedAuthLayer.
     $authLayer = 'easyauth'
     if (Get-Command Get-PimHostedAuthLayer -ErrorAction SilentlyContinue) { $authLayer = Get-PimHostedAuthLayer }
-    $strict = ($authLayer -eq 'signed-token') -or (Test-PimHostedSignedTokenRequired)
+    # 🟡 CR7 (§12.11g, OFF unless PIM_HOSTED_AUTH_LAYER=signin-front): the shared sign-in front forwards the
+    # user's signed ID token; X-MS-* headers are never read and the audience is the SAME app registration.
+    $front = ($authLayer -eq 'signin-front')
+    $strict = $front -or ($authLayer -eq 'signed-token') -or (Test-PimHostedSignedTokenRequired)
     $jwks = $null
     if ($strict) { $jwks = Get-PimEntraJwks }
     $issuers = @("$env:PIM_HOSTED_AUTH_ISSUERS" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -720,6 +731,18 @@ function Get-PimEasyAuthPrincipal {
         $issuers = @(Get-PimHostedDefaultIssuers -TenantId $tidPin)
     }
     $auds    = @("$env:PIM_HOSTED_EASYAUTH_AUD" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($front) {
+        # The front's BEARER paths carry the caller's own access token (or none): /mcp verifies it itself, /.well-known is
+        # public metadata -- no page principal here, and no red "REJECTED" line for every MCP call.
+        if (Test-PimManagerFrontBearerPath -Path "$($Request.Url.AbsolutePath)") { return '' }
+        $frontAud = @("$env:PIM_SIGNIN_FRONT_CLIENT_ID" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($frontAud.Count -gt 0) { $auds = $frontAud }
+        $d = Resolve-PimHostedPrincipal -SignedToken (Get-PimAuthorizationBearer -Authorization "$($Request.Headers['Authorization'])") `
+                -Jwks $jwks -ExpectedIssuers $issuers -ExpectedAudiences $auds -AuthLayer $authLayer
+        if ($d.trusted) { return "$($d.identity)" }
+        Write-Host ("  [auth] REJECTED principal [{0}] -- {1}" -f $d.layer, $d.reason) -ForegroundColor Red
+        return ''
+    }
     $d = Resolve-PimHostedPrincipal `
             -PrincipalName "$($Request.Headers['X-MS-CLIENT-PRINCIPAL-NAME'])" `
             -PrincipalBlob "$($Request.Headers['X-MS-CLIENT-PRINCIPAL'])" `
@@ -732,6 +755,22 @@ function Get-PimEasyAuthPrincipal {
     return ''
 }
 
+function Test-PimManagerApiPageToken {
+    <#
+      The /api page token check. OFF the sign-in front: exactly today's 'Authorization: Bearer <page token>'. 🟡 CR7
+      (§12.11g): behind the front, Authorization is the user's ID token (the front owns that header), so the page also
+      sends the token in X-PIM-Token and only that header counts (Test-PimManagerPageToken, PIM-HostedAuth.ps1). The
+      library missing behind the front = refused (the Authorization comparison can never match an ID token).
+    #>
+    param([Parameter(Mandatory)][System.Net.HttpListenerRequest]$Request, [string]$ExpectedToken = '')
+    $ah = $Request.Headers['Authorization']
+    if ($script:PimSigninFront) {
+        if (-not (Get-Command Test-PimManagerPageToken -ErrorAction SilentlyContinue)) { return $false }
+        return (Test-PimManagerPageToken -Authorization "$ah" -PageTokenHeader "$($Request.Headers['X-PIM-Token'])" -ExpectedToken "$ExpectedToken" -Front $true)
+    }
+    return [bool]($ah -and $ah -eq "Bearer $ExpectedToken")
+}
+
 function Get-PimEasyAuthPrincipalExtras {
     <#
       §98: the OTHER names and the group object ids in the auth edge's X-MS-CLIENT-PRINCIPAL claims blob. Called only
@@ -740,6 +779,8 @@ function Get-PimEasyAuthPrincipalExtras {
     #>
     param([Parameter(Mandatory)][System.Net.HttpListenerRequest]$Request)
     $out = @{ names = @(); groups = @() }
+    # CR7: behind the sign-in front no X-MS-* header is ever read (the front strips them; only it reaches us).
+    if ((Get-Command Get-PimHostedAuthLayer -ErrorAction SilentlyContinue) -and (Get-PimHostedAuthLayer) -eq 'signin-front') { return $out }
     $raw = "$($Request.Headers['X-MS-CLIENT-PRINCIPAL'])".Trim()
     if (-not $raw -or -not (Get-Command ConvertFrom-PimBase64Url -ErrorAction SilentlyContinue)) { return $out }
     $bytes = ConvertFrom-PimBase64Url -Text $raw
@@ -748,6 +789,78 @@ function Get-PimEasyAuthPrincipalExtras {
     if (Get-Command Get-PimPrincipalNamesFromBlob -ErrorAction SilentlyContinue) { $out.names = @(Get-PimPrincipalNamesFromBlob -Blob $blob) }
     $out.groups = @(@($blob.claims) | Where-Object { $_ -and "$($_.typ)" -in @('groups', 'http://schemas.microsoft.com/ws/2008/06/identity/claims/groups') -and "$($_.val)".Trim() } | ForEach-Object { "$($_.val)".Trim() })
     return $out
+}
+
+# ---------------------------------------------------------------------------
+# Framework §12.11f item 2 (CR8) / PIM 100.144a -- SIGNED REQUESTS, observe-only first (engine\_shared\PIM-SignedRequests.ps1).
+# The signed-in user's Entra token, as this request brought it (Easy Auth's token store: X-MS-TOKEN-AAD-ID-TOKEN; on /mcp
+# the verified bearer), is kept WITH the change it asked for, so the ENGINE can verify it before it acts. pim.Settings
+# 'SignedRequests'.mode off (the default) = nothing is captured. The ambient capture lives for ONE request only.
+# ---------------------------------------------------------------------------
+function Get-PimManagerSignedRequestMode {
+    # off | observe | enforce, cached 30 s (read only on a write request). No store / no library = off.
+    if (-not "$($script:PimSqlCs)".Trim() -or -not (Get-Command Get-PimSignedRequestConfig -ErrorAction SilentlyContinue)) { return 'off' }
+    $now = [datetime]::UtcNow
+    if ($script:PimSignedRequestModeCache -and ($now - $script:PimSignedRequestModeCache.at).TotalSeconds -lt 30) { return "$($script:PimSignedRequestModeCache.mode)" }
+    $mode = 'off'
+    try { $mode = (Get-PimSignedRequestConfig -Value (Get-PimSqlSetting -ConnectionString $script:PimSqlCs -Name 'SignedRequests')).mode }
+    catch { if ($script:PimSignedRequestModeCache) { $mode = "$($script:PimSignedRequestModeCache.mode)" } }
+    $script:PimSignedRequestModeCache = @{ at = $now; mode = $mode }
+    return $mode
+}
+
+function New-PimManagerSignedRequestCapture {
+    # The capture of THIS hosted request's signed ID token (role 'committer'), or $null (not hosted, no principal, no token).
+    param([Parameter(Mandatory)][System.Net.HttpListenerRequest]$Request, [string]$Identity = '')
+    if (-not $script:PimHosted -or -not "$Identity".Trim() -or -not (Get-Command New-PimSignedRequestCapture -ErrorAction SilentlyContinue)) { return $null }
+    $tok = "$($Request.Headers['X-MS-TOKEN-AAD-ID-TOKEN'])".Trim()
+    if (-not $tok) {
+        if (-not $script:PimSignedRequestNoTokenWarned) {
+            $script:PimSignedRequestNoTokenWarned = $true
+            Write-Warning '  [signed-requests] a signed-in write arrived WITHOUT X-MS-TOKEN-AAD-ID-TOKEN -- nothing can be signed until the auth edge stores tokens (Easy Auth token store on, framework 12.11f item 3). The engine reports these changes as unsigned.'
+        }
+        return $null
+    }
+    $strict = $false
+    try { $strict = ((Get-PimHostedAuthLayer) -eq 'signed-token') -or (Test-PimHostedSignedTokenRequired) } catch { $strict = $false }
+    $check = if ($strict) { 'verified by the Manager on receipt (signed-token layer: signature, issuer, audience, expiry)' } else { 'received through the auth edge, not verified by the Manager (edge-consistency layer) -- the engine verifies it' }
+    return (New-PimSignedRequestCapture -Token $tok -Identity "$Identity".Trim() -Role 'committer' -TokenKind id -Route ("{0} {1}" -f $Request.HttpMethod, $Request.Url.AbsolutePath) -ManagerCheck $check)
+}
+
+function Get-PimManagerCommitSignatures {
+    <#
+      The signatures a Review & Save commit carries (empty while the mode is off -- no ambient capture): the committer's own,
+      the latest token each COLLEAGUE captured when they staged a change this commit carries ('stage:<entity>'), and a
+      maker/checker approver's from the approval decision ('approval:<id>'). Never throws.
+    #>
+    param([string]$Base = '', [string]$Committer = '', [object]$Classification = $null, [string]$Approver = '', [string]$ApprovalId = '')
+    $amb = $null; if (Get-Command Get-PimSignedRequestAmbient -ErrorAction SilentlyContinue) { $amb = Get-PimSignedRequestAmbient }
+    if ($null -eq $amb) { return @() }
+    $out = New-Object System.Collections.Generic.List[object]
+    try {
+        $out.Add((Copy-PimSignedRequestCapture -Capture $amb -Role 'committer'))
+        $me = "$Committer".Trim(); if (-not $me) { $me = "$($amb.identity)" }
+        $others = @(@($(if ($Classification) { @($Classification.carried) } else { @() })) | Where-Object { $_ } | ForEach-Object { "$($_.by)".Trim() } | Where-Object { $_ -and $_.ToLowerInvariant() -ne $me.ToLowerInvariant() } | Select-Object -Unique)
+        if ($others.Count -and "$Base".Trim()) {
+            $st = Get-PimSignedRequestLatestFor -ConnectionString $script:PimSqlCs -CommitId "stage:$Base" -Identities $others
+            foreach ($k in @($st.Keys)) { $c = ConvertFrom-PimSignedRequestRow -Row $st[$k] -Role 'requester'; if ($c) { $out.Add($c) } }
+        }
+        if ("$ApprovalId".Trim() -and "$Approver".Trim() -and "$Approver".Trim().ToLowerInvariant() -ne $me.ToLowerInvariant()) {
+            $ap = Get-PimSignedRequestLatestFor -ConnectionString $script:PimSqlCs -CommitId ("approval:" + "$ApprovalId".Trim()) -Identities @("$Approver".Trim())
+            foreach ($k in @($ap.Keys)) { $c = ConvertFrom-PimSignedRequestRow -Row $ap[$k] -Role 'approver'; if ($c) { $out.Add($c) } }
+        }
+    } catch { Write-Warning "  [signed-requests] the commit's carried signatures could not be gathered (the committer's own is kept): $($_.Exception.Message)" }
+    return @($out.ToArray() | Where-Object { $null -ne $_ })
+}
+
+function Save-PimManagerSignedRequest {
+    # Keep THIS request's signature under a commit id that is not a journaled commit ('stage:<entity>', 'approval:<id>').
+    # No ambient capture (mode off) = nothing. Never throws.
+    param([Parameter(Mandatory)][string]$CommitId, [ValidateSet('requester', 'approver')][string]$Role = 'requester')
+    if (-not (Get-Command Get-PimSignedRequestAmbient -ErrorAction SilentlyContinue)) { return }
+    $amb = Get-PimSignedRequestAmbient
+    if ($null -eq $amb) { return }
+    [void](Save-PimSignedRequestRows -ConnectionString $script:PimSqlCs -CommitId $CommitId -Signatures @(Copy-PimSignedRequestCapture -Capture $amb -Role $Role))
 }
 
 # ---------------------------------------------------------------------------
@@ -4226,7 +4339,9 @@ function Invoke-PimManagerSafeCommit {
         # CONFIG-1.2 (§96.2): the commit this one undoes ('' = not an undo). Journaled as UndoOf on every row.
         [string]$UndoOf = '',
         # PIM 100.98: set ONLY by the grid commit, which has just run the retired-group gate on these rows itself.
-        [switch]$RetiredGroupGateDone
+        [switch]$RetiredGroupGateDone,
+        # framework §12.11f item 2 / PIM 100.144a: the maker/checker approval behind -Approver, so its signature rides along.
+        [string]$ApprovalId = ''
     )
     # §91.23 BACKSTOP: every commit path (grid, departments, workloads, conformance) lands here -- a row the managing tenant
     # sent (Owner=MSP) is never changed or removed by a managed tenant's Manager, whichever page asked.
@@ -4289,7 +4404,9 @@ function Invoke-PimManagerSafeCommit {
                 }
             }
         } catch { Write-Warning "  [journal] per-row initiators could not be resolved -- every row is journaled as the committer's: $($_.Exception.Message)" }
-        $__jctx = New-PimCommitJournalContext -CommitId $commitId -Source $Source -InitiatedBy "$who" -ApprovedBy $Approver -UndoOf $UndoOf -Attribution $__attr
+        # framework §12.11f item 2 / PIM 100.144a: the signed tokens of everyone this commit names (empty while the mode is off).
+        $__sigs = @(Get-PimManagerCommitSignatures -Base $Base -Committer "$who" -Classification $Classification -Approver $Approver -ApprovalId $ApprovalId)
+        $__jctx = New-PimCommitJournalContext -CommitId $commitId -Source $Source -InitiatedBy "$who" -ApprovedBy $Approver -UndoOf $UndoOf -Attribution $__attr -Signatures $__sigs
     }
     # §88: say how long the SQL part of a commit took and how much it really wrote, so a slow commit can be measured.
     $__sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -4412,7 +4529,7 @@ function Invoke-PimManagerBackupRestore {
         $restoreCommitId = [guid]::NewGuid().ToString('N')
         $rWho = if ("$who".Trim()) { "$who" } else { 'unknown' }
         $prevCtx = $null; $rCtx = $null
-        if (Get-Command New-PimCommitJournalContext -ErrorAction SilentlyContinue) { $rCtx = New-PimCommitJournalContext -CommitId $restoreCommitId -Source 'restore' -InitiatedBy $rWho; $prevCtx = Set-PimCommitJournalContext -Context $rCtx }
+        if (Get-Command New-PimCommitJournalContext -ErrorAction SilentlyContinue) { $rCtx = New-PimCommitJournalContext -CommitId $restoreCommitId -Source 'restore' -InitiatedBy $rWho -Signatures @(Get-PimManagerCommitSignatures -Committer $rWho); $prevCtx = Set-PimCommitJournalContext -Context $rCtx }
         try {
             [void](Set-PimSqlEntityRowsTransactional -ConnectionString $script:PimSqlCs -Entity $plan.entity -Base $plan.base -Rows @($plan.rows) -AllowEmpty)
         } finally { if ($rCtx) { [void](Set-PimCommitJournalContext -Context $prevCtx) } }
@@ -7523,7 +7640,8 @@ function Invoke-PimManagerCsvPut {
     & $__lap 'uplink+replication'
     $mcApprover = if ($mc -and "$($mc.gate)" -eq 'approved' -and $mc.approval) { "$($mc.approval.approver)" } else { '' }
     try {
-        $commitRes = Invoke-PimManagerSafeCommit -Base $base -NewRows $rowsOrdered -Current $current -SqlMode:$sqlMode -Classification $spClass -Approver $mcApprover -Source $(if ($undoOf) { 'undo' } else { $commitSource }) -UndoOf $undoOf -CommitId $__ccid -RetiredGroupGateDone
+        $commitRes = Invoke-PimManagerSafeCommit -Base $base -NewRows $rowsOrdered -Current $current -SqlMode:$sqlMode -Classification $spClass -Approver $mcApprover -Source $(if ($undoOf) { 'undo' } else { $commitSource }) -UndoOf $undoOf -CommitId $__ccid -RetiredGroupGateDone `
+                        -ApprovalId $(if ($mcApprover -and $mc.approval) { "$($mc.approval.id)" } else { '' })
     } catch {
         # The store was left exactly as before (snapshot restored). Surface
         # the clear error so the operator sees the commit was reversed.
@@ -10423,6 +10541,86 @@ function Get-PimManagerSecurityHeaders {
     }
 }
 
+function Test-PimManagerScriptsServedExternally {
+    <#
+      PURE. CR7 (framework 12.11g; the shared sign-in front sends CSP script-src 'self'): does the Manager serve its page's
+      inline scripts as same-origin files? ONLY a HOSTED Manager BEHIND THE FRONT (auth layer 'signin-front') -- the switch is
+      the auth layer itself. Every other Manager (Easy Auth, local break-glass) serves today's inline page, byte for byte:
+      no render cache, no /app/pim-manager.js route (it answers the ordinary 404).
+    #>
+    param([bool]$Hosted = $false, [string]$AuthLayer = '')
+    return ($Hosted -and "$AuthLayer".Trim().ToLowerInvariant() -eq 'signin-front')
+}
+
+function ConvertTo-PimManagerScriptFreePage {
+    <#
+      PURE. CR7: the RENDERED page with every inline <script>BODY</script> replaced by <script src="<Route>?r=<RenderId>&p=<n>">
+      -- same position, same order, parser-blocking like the inline block, so the page runs the SAME code in the SAME order.
+      The source page (tools/pim-manager/pim-manager.html) is untouched: every test that reads or runs it still does.
+      Returns @{ ok; html; parts; reason }. Not ok (the caller then serves the inline page, as before) when there is no
+      script block, when any <script> without src would remain, or when an inline on*= handler is left in the HTML.
+    #>
+    param([Parameter(Mandatory)][string]$Html, [Parameter(Mandatory)][string]$RenderId, [string]$Route = '/app/pim-manager.js')
+    $ms = [regex]::Matches($Html, '(?s)<script>(.*?)</script>')
+    if ($ms.Count -eq 0) { return @{ ok = $false; html = $Html; parts = @(); reason = 'no inline script block in the page' } }
+    $sb = New-Object System.Text.StringBuilder
+    $parts = New-Object System.Collections.Generic.List[string]
+    $at = 0
+    foreach ($m in $ms) {
+        [void]$sb.Append($Html.Substring($at, $m.Index - $at))
+        [void]$sb.Append('<script src="' + $Route + '?r=' + $RenderId + '&amp;p=' + $parts.Count + '"></script>')
+        $parts.Add($m.Groups[1].Value)
+        $at = $m.Index + $m.Length
+    }
+    [void]$sb.Append($Html.Substring($at))
+    $out = $sb.ToString()
+    if ([regex]::IsMatch($out, '<script(?![^>]*\ssrc=)[^>]*>')) { return @{ ok = $false; html = $Html; parts = @(); reason = 'a <script> without src would remain' } }
+    if ([regex]::IsMatch($out, '<[a-zA-Z][^>]*\son[a-z]{3,}\s*=\s*["'']')) { return @{ ok = $false; html = $Html; parts = @(); reason = 'an inline on*= handler is left in the HTML' } }
+    return @{ ok = $true; html = $out; parts = @($parts.ToArray()); reason = "$($parts.Count) script block(s) served as files" }
+}
+
+function Get-PimManagerPageScriptAnswer {
+    <#
+      PURE given the store. GET /app/pim-manager.js?r=<render id>&p=<n>: the n-th script block of THAT render of the page.
+      A render's scripts carry its boot data (role, data scoped to the person), so they are bound to the principal the page
+      was rendered for (hosted) and live 10 minutes. @{ status (200 / 403 / 404); body; reason }.
+    #>
+    param([hashtable]$Store = @{}, [string]$RenderId = '', [string]$Part = '', [string]$Principal = '', [bool]$Hosted = $false,
+          [datetime]$NowUtc = ([datetime]::UtcNow))
+    $rid = "$RenderId".Trim()
+    if (-not $rid -or $rid -notmatch '^[0-9a-f]{64}$' -or -not $Store.ContainsKey($rid)) { return @{ status = 404; body = ''; reason = 'unknown or expired page render -- reload the page' } }
+    $e = $Store[$rid]
+    if ($NowUtc -gt [datetime]$e.exp) { return @{ status = 404; body = ''; reason = 'expired page render -- reload the page' } }
+    if ($Hosted -and ("$($e.who)".Trim().ToLowerInvariant() -ne "$Principal".Trim().ToLowerInvariant() -or -not "$Principal".Trim())) { return @{ status = 403; body = ''; reason = 'this page render belongs to another sign-in' } }
+    $n = 0
+    if ("$Part" -notmatch '^\d{1,2}$' -or -not [int]::TryParse("$Part", [ref]$n) -or $n -ge @($e.parts).Count) { return @{ status = 404; body = ''; reason = 'no such script part' } }
+    return @{ status = 200; body = "$(@($e.parts)[$n])"; reason = 'ok' }
+}
+
+function Invoke-PimManagerExternalizeScripts {
+    <#
+      CR7: the page as it goes out. Behind the sign-in front ONLY (Test-PimManagerScriptsServedExternally): the inline
+      scripts become same-origin files bound to this render + this principal (ConvertTo-PimManagerScriptFreePage, kept in
+      $script:PimPageScripts for 10 minutes, at most 64 renders); anything unexpected -> the inline page, with a warning.
+      Every other Manager: the page is returned untouched and nothing is cached.
+    #>
+    param([Parameter(Mandatory)][string]$Html)
+    $layer = ''; if ($script:PimSigninFront) { $layer = 'signin-front' }
+    if (-not (Test-PimManagerScriptsServedExternally -Hosted ([bool]$script:PimHosted) -AuthLayer $layer)) { return $Html }
+    if ($null -eq $script:PimPageScripts) { $script:PimPageScripts = @{} }
+    $now = [datetime]::UtcNow
+    foreach ($k in @($script:PimPageScripts.Keys)) { if ($now -gt [datetime]$script:PimPageScripts[$k].exp) { $script:PimPageScripts.Remove($k) } }
+    while ($script:PimPageScripts.Count -ge 64) {
+        $oldest = @($script:PimPageScripts.Keys | Sort-Object { [datetime]$script:PimPageScripts[$_].exp })[0]
+        $script:PimPageScripts.Remove($oldest)
+    }
+    $rid = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
+    $c = ConvertTo-PimManagerScriptFreePage -Html $Html -RenderId $rid
+    if (-not $c.ok) { Write-Warning "[page] inline scripts kept: $($c.reason)"; return $Html }
+    $script:PimPageScripts[$rid] = @{ who = "$script:CurrentRequestPrincipal"; parts = @($c.parts); exp = $now.AddMinutes(10) }
+    return $c.html
+}
+
 function Write-JsonResponse {
     param(
         [Parameter(Mandatory)][object]$Response,   # an HttpListenerResponse, or the MCP capture (REQ 93)
@@ -12417,10 +12615,20 @@ function Invoke-Server {
         # container port (App Service sets WEBSITES_PORT/PORT). Easy Auth + private
         # inbound sit in front; the token is still required on /api.
         $port = if ("$env:WEBSITES_PORT" -match '^\d+$') { [int]$env:WEBSITES_PORT } elseif ("$env:PORT" -match '^\d+$') { [int]$env:PORT } elseif ($DesiredPort -gt 0) { $DesiredPort } else { 8080 }
+        # 🟡 CR7 (§12.11g item 2): behind the shared sign-in front the server binds 127.0.0.1 ONLY -- the front,
+        # in the same revision, is the only thing that reaches it. Any other layer: http://+:<port>/, unchanged.
+        $hostLayer = ''
+        if (Get-Command Get-PimHostedAuthLayer -ErrorAction SilentlyContinue) { $hostLayer = Get-PimHostedAuthLayer }
+        $hostPrefix = "http://+:$port/"
+        if (Get-Command Get-PimHostedListenerPrefix -ErrorAction SilentlyContinue) { $hostPrefix = Get-PimHostedListenerPrefix -AuthLayer $hostLayer -Port $port }
         $l = New-Object System.Net.HttpListener
-        $l.Prefixes.Add("http://+:$port/")
+        $l.Prefixes.Add($hostPrefix)
         $l.Start(); $listener = $l
-        Write-Host ("  [HOSTED] 24/7 business edition listening on http://+:{0}/ (Easy Auth identity; token required on /api)" -f $port) -ForegroundColor Green
+        if ($hostLayer -eq 'signin-front') {
+            Write-Host ("  [HOSTED] 24/7 business edition listening on {0} (sign-in front identity; token required on /api)" -f $hostPrefix) -ForegroundColor Green
+        } else {
+            Write-Host ("  [HOSTED] 24/7 business edition listening on http://+:{0}/ (Easy Auth identity; token required on /api)" -f $port) -ForegroundColor Green
+        }
     } else {
         # LOCAL (loopback) edition -- the sanctioned BREAK-GLASS / EMERGENCY path:
         # run on the box (SuperAdmin) when the hosted app / Easy Auth / network is
@@ -12523,6 +12731,12 @@ function Invoke-Server {
             # framework §12.11f CR8 item 3 (PIM 100.152): security headers on EVERY response, set once here before any route
             # writes its body (Get-PimManagerSecurityHeaders). Never stops a request.
             try { $__sh = Get-PimManagerSecurityHeaders; foreach ($__hk in @($__sh.Keys)) { $ctx.Response.Headers[$__hk] = "$($__sh[$__hk])" } } catch { }
+            # framework §12.11f item 2 / PIM 100.144a: THIS write request's signed token, kept with whatever change it asks for
+            # (journal context, change queue, staging, approval). Writes only; mode off = $null (nothing captured).
+            $global:PIM_SignedRequestCapture = $null
+            if ($script:PimHosted -and "$script:CurrentRequestPrincipal".Trim() -and "$($ctx.Request.HttpMethod)" -in @('POST', 'PUT', 'DELETE', 'PATCH')) {
+                try { if ((Get-PimManagerSignedRequestMode) -ne 'off') { $global:PIM_SignedRequestCapture = New-PimManagerSignedRequestCapture -Request $ctx.Request -Identity "$script:CurrentRequestPrincipal" } } catch { $global:PIM_SignedRequestCapture = $null }
+            }
             try {
                 $status = Handle-Request -Context $ctx -ExpectedToken $token
             } catch {
@@ -12532,6 +12746,7 @@ function Invoke-Server {
                 } catch { }
                 $status = 500
             }
+            $global:PIM_SignedRequestCapture = $null
             $ts = $started.ToString('HH:mm:ss')
             # BUG-264: the loop is single-threaded, so a slow request holds every request behind it -- name its duration.
             $took = ((Get-Date) - $started).TotalSeconds
@@ -12689,11 +12904,34 @@ function Handle-Request {
             '__PIM_SCRIPT_DOCS__'   = (ConvertTo-PimScriptSafeJson $scriptDocsJson)
         }
         $html = Expand-PimBootTemplate -Html $html -Values $bootValues
+        # CR7: hosted, the inline scripts go out as same-origin files (/app/pim-manager.js) -- CSP script-src 'self'.
+        $html = Invoke-PimManagerExternalizeScripts -Html $html
         Write-HtmlResponse -Response $resp -Html $html
         # Record a login the first time this identity opens the Manager (Audit tab
         # "Logins" category). Deduped per identity per session; best-effort.
         Write-PimManagerLoginAudit
         $script:lastHeartbeat = Get-Date
+        return 200
+    }
+
+    # CR7: the page's script blocks, one render at a time (Invoke-PimManagerExternalizeScripts). Same gate as GET /.
+    # Behind the sign-in front ONLY -- every other Manager never enters here and answers the ordinary 404 below.
+    if ($path -eq '/app/pim-manager.js' -and ($method -eq 'GET' -or $method -eq 'HEAD') -and $script:PimSigninFront) {
+        if ($script:PimHosted -and -not "$script:CurrentRequestPrincipal".Trim()) {
+            Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized'; detail = 'no authenticated principal -- this app must be reached through its authentication edge' }
+            return 401
+        }
+        $sa = Get-PimManagerPageScriptAnswer -Store $script:PimPageScripts -RenderId "$($req.QueryString['r'])" -Part "$($req.QueryString['p'])" `
+                -Principal "$script:CurrentRequestPrincipal" -Hosted ([bool]$script:PimHosted)
+        if ($sa.status -ne 200) { Write-JsonResponse -Response $resp -Status ([int]$sa.status) -Body @{ error = "$($sa.reason)" }; return [int]$sa.status }
+        try {
+            $resp.StatusCode = 200
+            $resp.ContentType = 'application/javascript; charset=utf-8'
+            $resp.Headers['Cache-Control'] = 'no-store'
+            $jsBytes = [System.Text.Encoding]::UTF8.GetBytes("$($sa.body)")
+            if ($method -eq 'GET') { $resp.ContentLength64 = $jsBytes.LongLength; $resp.OutputStream.Write($jsBytes, 0, $jsBytes.Length) }
+            $resp.OutputStream.Close()
+        } catch { Write-Host ("  [net] client gone before the page script was written: {0}" -f $_.Exception.Message) -ForegroundColor DarkGray }
         return 200
     }
 
@@ -12755,6 +12993,13 @@ function Handle-Request {
             } else { @{ ok = $false; status = 503; identity = ''; reason = 'PIM-HostedAuth.ps1 not loaded (refused)' } }
             # never the edge headers on this path: from here on the request's principal is the VERIFIED token's user, or nobody
             $script:CurrentRequestPrincipal = if ($bv.ok) { "$($bv.identity)" } else { $null }
+            # framework §12.11f item 2 / PIM 100.144a: on /mcp the signed token IS the verified bearer (an access token for
+            # this Manager's API) -- kept with any change a tool commits. Mode off = nothing.
+            $global:PIM_SignedRequestCapture = $null
+            if ($bv.ok -and "$ah" -match '^\s*Bearer\s+(\S+)\s*$' -and (Get-Command New-PimSignedRequestCapture -ErrorAction SilentlyContinue)) {
+                $__mcpTok = $Matches[1]
+                try { if ((Get-PimManagerSignedRequestMode) -ne 'off') { $global:PIM_SignedRequestCapture = New-PimSignedRequestCapture -Token $__mcpTok -Identity "$($bv.identity)" -Role 'committer' -TokenKind access -Route 'POST /mcp' -ManagerCheck 'verified by the Manager on receipt (MCP bearer: signature, issuer, audience, expiry, delegated scope)' } } catch { $global:PIM_SignedRequestCapture = $null }
+            }
             if (-not $bv.ok) {
                 if ($ah) { Write-Host ("  [mcp] REFUSED ({0}) -- {1}" -f $bv.status, $bv.reason) -ForegroundColor Red }
                 if ([int]$bv.status -eq 401) {
@@ -12798,8 +13043,7 @@ function Handle-Request {
 
     # All /api/* paths require Authorization: Bearer <token>.
     if ($path -like '/api/*') {
-        $authHeader = $req.Headers['Authorization']
-        if (-not $authHeader -or $authHeader -ne "Bearer $ExpectedToken") {
+        if (-not (Test-PimManagerApiPageToken -Request $req -ExpectedToken $ExpectedToken)) {
             # BRAND-2.11 (2026-10-05): the running version rides with the 401, so a page older than a deploy says "updated to vX" instead of "expired".
             Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized'; version = (Get-PimSolutionVersion) }
             return 401
@@ -13006,6 +13250,8 @@ function Handle-Request {
                 return 409
             }
             if ($u.written) { Write-PimManagerAuditEvent -Action 'pending.stage' -Target $pBase -Result 'ok' -After ([ordered]@{ added = $r.added; replaced = $r.replaced; dropped = $r.dropped; version = [int]$r.current.version }) }
+            # framework §12.11f item 2 / PIM 100.144a: the stager's signed token, carried by the commit that later takes this change.
+            if ($u.written) { Save-PimManagerSignedRequest -CommitId "stage:$pBase" -Role requester }
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; base = $pBase; current = $curOut; written = [bool]$u.written })
             return 200
         }
@@ -14656,6 +14902,8 @@ function Handle-Request {
                     return $code
                 }
                 Write-PimManagerAuditEvent -Action ("approval.request." + $res.status.ToLowerInvariant()) -Target "$($res.request.target)" -After @{ id = "$($res.request.id)"; approver = "$me"; action = "$($res.request.action)"; decision = $decision; selfApproved = [bool]($decision -eq 'approve' -and "$($res.request.requestor)".Trim() -ieq "$me".Trim()) }
+                # framework §12.11f item 2 / PIM 100.144a: the approver's signed token, carried by the commit this approval authorises.
+                if ($decision -eq 'approve') { Save-PimManagerSignedRequest -CommitId ("approval:" + "$($res.request.id)") -Role approver }
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; id = "$($res.request.id)"; status = "$($res.status)"; reason = "$($res.reason)" })
                 return 200
             } catch {
@@ -15028,6 +15276,65 @@ function Handle-Request {
         }
         # CR4 GUARD-STRICT (framework §12.11b item 3): POST /api/guards/strict/end { reason } -- a SuperAdmin ends Strict mode
         # early with a reason (>= 10 characters). Audited 'guard.strict.end'. 403 other roles, 400 no reason, 409 not active.
+        # framework §12.11f item 2 (CR8) / PIM 100.144a -- SIGNED REQUESTS (observe-only first).
+        #   GET  /api/signed-requests            the mode, the pinned audiences, the latest adoption, the engine's counts (Admin+)
+        #   POST /api/signed-requests/mode       { mode: off|observe|enforce; reason; confirmEnforce } (SuperAdmin; audited). The
+        #                                        Manager's own sign-in audiences are pinned with it, for the engine to check.
+        #   POST /api/signed-requests/adopt      { reason } (SuperAdmin, signed in with a token): ONE signed adoption of the
+        #                                        existing desired state -- the hash of every stored row now (audited).
+        if ($path -eq '/api/signed-requests' -and $method -eq 'GET') {
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required.' }; return 403 }
+            if (-not $script:PimSqlCs -or -not (Get-Command Get-PimSignedRequestConfig -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 409 -Body @{ error = 'no SQL store or the signed-request library is not loaded' }; return 409 }
+            try {
+                $srSet = Get-PimSqlSetting -ConnectionString $script:PimSqlCs -Name 'SignedRequests'
+                $srCfg = Get-PimSignedRequestConfig -Value $srSet
+                $srStats = Get-PimSqlSetting -ConnectionString $script:PimSqlCs -Name 'SignedRequestStats'
+                $srAd = @(); try { $srAd = @(Get-PimSignedRequestAdoptionRows -ConnectionString $script:PimSqlCs | Select-Object -First 1) } catch { $srAd = @() }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    mode = $srCfg.mode; unknownValue = [bool]$srCfg.unknown; audiences = @($srCfg.audiences); setting = $srSet; stats = $srStats
+                    latestAdoption = $(if ($srAd.Count) { [ordered]@{ commitId = "$($srAd[0].CommitId)"; by = "$($srAd[0].Identity)"; capturedUtc = "$($srAd[0].CapturedUtc)"; reason = "$($srAd[0].Reason)" } } else { $null })
+                    tokenOnThisRequest = [bool]"$($req.Headers['X-MS-TOKEN-AAD-ID-TOKEN'])".Trim()
+                })
+                return 200
+            } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }; return 500 }
+        }
+        if ($path -eq '/api/signed-requests/mode' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = 'Only a SuperAdmin sets the signed-request mode.' }; return 403 }
+            if (-not $script:PimSqlCs -or -not (Get-Command New-PimSignedRequestSettingValue -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; error = 'no SQL store or the signed-request library is not loaded' }; return 409 }
+            $smRole = Get-PimManagerRole
+            $smBody = Read-RequestJson -Request $req
+            $smGet = { param($n) if ($smBody -and $smBody.PSObject.Properties[$n]) { $smBody.$n } else { $null } }
+            $smAud = @(@("$env:PIM_HOSTED_EASYAUTH_AUD" -split '[,;]+') + @("$env:PIM_MCP_AUDIENCE" -split '[,;]+') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            $smTid = "$env:PIM_HOSTED_AUTH_TENANT".Trim(); if (-not $smTid) { $smTid = "$($global:PIM_TenantId)".Trim() }
+            try {
+                $smPrev = Get-PimSqlSetting -ConnectionString $script:PimSqlCs -Name 'SignedRequests'
+                $smRes = New-PimSignedRequestSettingValue -Previous $smPrev -Mode "$(& $smGet 'mode')" -Audiences $smAud -TenantId $smTid -By "$($smRole.identity)" -Reason "$(& $smGet 'reason')" -ConfirmEnforce ([bool]((& $smGet 'confirmEnforce') -eq $true))
+                if (-not $smRes.ok) {
+                    Write-PimManagerAuditEvent -Action 'signedrequests.mode' -Target 'signed-requests' -Result 'refused' -After ([ordered]@{ asked = "$(& $smGet 'mode')"; error = "$($smRes.error)" })
+                    Write-JsonResponse -Response $resp -Status ([int]$smRes.status) -Body @{ ok = $false; error = "$($smRes.error)" }; return [int]$smRes.status
+                }
+                Set-PimSqlSetting -ConnectionString $script:PimSqlCs -Name 'SignedRequests' -Value $smRes.value
+                $script:PimSignedRequestModeCache = @{ at = [datetime]::UtcNow; mode = "$($smRes.value.mode)" }
+                Write-PimManagerAuditEvent -Action 'signedrequests.mode' -Target 'signed-requests' -Result 'ok' -After ([ordered]@{ mode = "$($smRes.value.mode)"; previousMode = "$($smRes.value.previousMode)"; audiences = @($smRes.value.audiences); reason = "$($smRes.value.reason)" })
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; setting = $smRes.value
+                    note = $(if (-not @($smRes.value.audiences).Count -and "$($smRes.value.mode)" -ne 'off') { 'no audience is pinned (PIM_HOSTED_EASYAUTH_AUD is empty on this Manager) -- the engine cannot verify any token until one is' } else { '' }) })
+                return 200
+            } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 500 }
+        }
+        if ($path -eq '/api/signed-requests/adopt' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = 'Only a SuperAdmin adopts the existing desired state.' }; return 403 }
+            if (-not $script:PimSqlCs -or -not (Get-Command New-PimSignedRequestAdoption -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; error = 'no SQL store or the signed-request library is not loaded' }; return 409 }
+            if ((Get-PimManagerSignedRequestMode) -eq 'off') { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; error = 'signed requests are off -- switch them to observe first (POST /api/signed-requests/mode)' }; return 409 }
+            $adBody = Read-RequestJson -Request $req
+            $adReason = if ($adBody -and $adBody.PSObject.Properties['reason']) { "$($adBody.reason)" } else { '' }
+            $adRes = New-PimSignedRequestAdoption -ConnectionString $script:PimSqlCs -Capture (Get-PimSignedRequestAmbient) -Reason $adReason
+            Write-PimManagerAuditEvent -Action 'signedrequests.adopt' -Target 'signed-requests' -Result $(if ($adRes.ok) { 'ok' } else { 'refused' }) -CorrelationId "$($adRes.commitId)" -After ([ordered]@{ adoption = "$($adRes.commitId)"; rows = [int]$adRes.rows; reason = $adReason; error = "$($adRes.error)" })
+            if (-not $adRes.ok) { Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = "$($adRes.error)" }; return 400 }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; adoption = "$($adRes.commitId)"; rows = [int]$adRes.rows })
+            return 200
+        }
         if ($path -eq '/api/guards/strict/end' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
             if (-not (Get-Command Stop-PimGuardStrict -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = 'the guard library is not loaded' }; return 500 }
@@ -17424,6 +17731,16 @@ function Handle-Request {
                     if ((Get-Command Get-PimGuardStrictState -ErrorAction SilentlyContinue) -and (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
                         $gm = Get-PimGuardStrictState
                         if ($gm.active) { $body['guardMode'] = 'strict'; $body['guardModeUntilUtc'] = "$($gm.untilUtc)"; $body['guardModeVersion'] = "$($gm.version)" }
+                    }
+                } catch { }
+                # PIM 100.158 (b) / framework 12.11e item 2: while this install RUNS a wave version (pim.Settings 'ReleaseWave',
+                # recorded by the updater from the SIGNED manifest) the header reads "Ring <N> - Pre-release (<name>)". No wave,
+                # another version, or nothing readable = waveLabel '' and the header exactly as before.
+                $body['wave'] = $null; $body['waveLabel'] = ''
+                try {
+                    if ("$cs".Trim() -and (Get-Command Get-PimReleaseWaveHeader -ErrorAction SilentlyContinue)) {
+                        $wh = Get-PimReleaseWaveHeader -WaveRecord (Get-PimSqlSetting -ConnectionString $cs -Name 'ReleaseWave') -RunningVersion (Get-PimSolutionVersion)
+                        if ("$($wh.label)") { $body['wave'] = $wh.wave; $body['waveLabel'] = "$($wh.label)" }
                     }
                 } catch { }
                 Write-JsonResponse -Response $resp -Status 200 -Body $body

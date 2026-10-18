@@ -78,6 +78,7 @@ $here = Split-Path -Parent $PSCommandPath
 $solRootPsa = Split-Path -Parent (Split-Path -Parent $here)
 if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRootPsa 'engine\_shared\PIM-Rest.ps1') }
 if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRootPsa 'engine\_shared\PIM-ArmSetup.ps1') }
+. (Join-Path $solRootPsa 'engine\_shared\PIM-SigninFrontImage.ps1')   # CR7: -Verify checks the sign-in front the archive carries
 
 function Invoke-PimSharedKeyBlob {
     <#
@@ -215,10 +216,19 @@ Note "archive    $archive"
 # carries what was committed. Build-PimManagerImage learned this already -- it tars HEAD for the
 # same reason -- and a release artifact has even less business shipping an uncommitted tree.
 Step 'pack the build context from HEAD'
+# CR7 (framework 12.11g, PIM 100.168): the archive ALSO carries the shared sign-in front's source (FRAMEWORK/signin-front/src
+# + VERSION), so an install's updater can build signin-front:<pinned version> in its own registry. Repo-root shaped as before;
+# the Manager build is unchanged (.dockerignore keeps only SOLUTIONS/PIM4EntraPS in its context), and an updater already in
+# the field builds the Manager from this archive exactly as from the previous one (tests/Test-PimSigninFront.ps1 IMG-F*).
+# Only what exists at the packed revision is named -- `git archive` refuses a pathspec that matches nothing.
+$sfPaths = @('FRAMEWORK/signin-front/src', 'FRAMEWORK/signin-front/VERSION')
 $isRepo = Test-Path -LiteralPath (Join-Path $RepoRoot '.git')
 if ($isRepo) {
     if ($PSCmdlet.ShouldProcess($archive, 'git archive HEAD')) {
-        & git -C $RepoRoot archive --format=tar.gz -o $archive HEAD -- .dockerignore SOLUTIONS/PIM4EntraPS
+        $packPaths = @('.dockerignore', 'SOLUTIONS/PIM4EntraPS')
+        # ls-tree, not an existence probe with cat-file: a missing path prints nothing (cat-file's stderr "fatal" is a terminating error on PS 5.1).
+        foreach ($sfp in $sfPaths) { if (@(& git -C $RepoRoot ls-tree --name-only HEAD -- $sfp).Count) { $packPaths += $sfp } }
+        & git -C $RepoRoot archive --format=tar.gz -o $archive HEAD -- @packPaths
         if ($LASTEXITCODE -ne 0) { throw "Publish-PimSourceArchive: git archive failed (exit $LASTEXITCODE)." }
     }
 } else {
@@ -230,7 +240,8 @@ if ($isRepo) {
         Push-Location $RepoRoot
         try {
             $tmpName = "pim-src-$Version.tar.gz"
-            & tar -czf $tmpName .dockerignore SOLUTIONS/PIM4EntraPS
+            $tarPaths = @('.dockerignore', 'SOLUTIONS/PIM4EntraPS') + @($sfPaths | Where-Object { Test-Path -LiteralPath (Join-Path $RepoRoot $_) })
+            & tar -czf $tmpName @tarPaths
             if ($LASTEXITCODE -ne 0) { throw "Publish-PimSourceArchive: tar failed (exit $LASTEXITCODE)." }
             Move-Item -LiteralPath (Join-Path $RepoRoot $tmpName) -Destination $archive -Force
         } finally { Pop-Location }
@@ -262,6 +273,13 @@ if ((-not $WhatIfPreference) -and ($Verify -or $StorageAccount)) {
                "The Dockerfile does COPY SOLUTIONS/PIM4EntraPS, so a wrapping folder fails the build.")
     }
     Note "verified: $($listing.Count) entries, Dockerfile at the expected path"
+    # CR7: the sign-in front an opted-in install builds from this archive. NOT a refusal -- the Manager ships either way and
+    # an install not behind the front never reads it -- but said loudly, because an opted-in install cannot build its front
+    # from an archive without it (or with a component other than the one pinned).
+    $sfCheck = New-PimSigninFrontBuildContext -ArchivePath $archive -OutFile (Join-Path $OutDir ("signin-front-ctx-$Version.tar.gz"))
+    Remove-Item -LiteralPath (Join-Path $OutDir ("signin-front-ctx-$Version.tar.gz")) -Force -ErrorAction SilentlyContinue
+    if ($sfCheck.ok) { Note "sign-in front: carries FRAMEWORK/signin-front $($sfCheck.version) = the pinned version ($($sfCheck.files) source files)" }
+    else { Warn "sign-in front: an opted-in install could NOT build its front from this archive -- $($sfCheck.reason)" }
 }
 
 # ---- 3. upload + read link ----------------------------------------------------------------------

@@ -77,12 +77,15 @@ function New-PimCommitJournalContext {
       PURE. Who and why for the writes that follow. -Attribution: @{ '<key lower>' = @{ initiatedBy; approvedBy } } -- a
       commit that carries colleagues' staged changes names each row's own initiator (ConvertTo-PimCommitAttributionEntries).
     #>
+    # -Signatures (framework §12.11f item 2 / PIM 100.144a): the signed-in people's captured Entra tokens for this commit
+    # (PIM-SignedRequests.ps1); written ONCE per transaction next to the journal rows. Empty (mode off) = nothing written.
     param([string]$CommitId = '', [string]$Source = 'system', [string]$InitiatedBy = '', [string]$ApprovedBy = '',
-          [string]$UndoOf = '', [hashtable]$Attribution = @{})
+          [string]$UndoOf = '', [hashtable]$Attribution = @{}, [object[]]$Signatures = @())
     $id = if ("$CommitId".Trim()) { "$CommitId".Trim() } else { [guid]::NewGuid().ToString('N') }
     $ini = if ("$InitiatedBy".Trim()) { "$InitiatedBy".Trim() } else { Get-PimCommitJournalSystemActor }
     return [pscustomobject]@{ commitId = $id; source = $(if ("$Source".Trim()) { "$Source".Trim() } else { 'system' }); initiatedBy = $ini
-                              approvedBy = "$ApprovedBy".Trim(); undoOf = "$UndoOf".Trim(); attribution = $Attribution }
+                              approvedBy = "$ApprovedBy".Trim(); undoOf = "$UndoOf".Trim(); attribution = $Attribution
+                              signatures = @(@($Signatures) | Where-Object { $null -ne $_ }) }
 }
 
 function Get-PimCommitJournalSystemActor {
@@ -139,6 +142,11 @@ function Add-PimCommitJournalRowTx {
                      js = "$($Context.source)"; ju = $(if ("$($Context.undoOf)".Trim()) { "$($Context.undoOf)" } else { $null }) }
     foreach ($k in $p.Keys) { [void]$cmd.Parameters.AddWithValue("@$k", $(if ($null -eq $p[$k]) { [DBNull]::Value } else { $p[$k] })) }
     [void]$cmd.ExecuteNonQuery()
+    # framework §12.11f item 2 (PIM 100.144a): the commit's captured signatures ride in the SAME transaction (once per
+    # transaction; guarded -- a signature never fails the change). No signatures on the context (mode off) = nothing.
+    if ($Context.PSObject.Properties['signatures'] -and @($Context.signatures).Count -and (Get-Command Add-PimSignedRequestRowsForJournalTx -ErrorAction SilentlyContinue)) {
+        Add-PimSignedRequestRowsForJournalTx -Connection $Connection -Transaction $Transaction -Context $Context
+    }
 }
 
 function Get-PimRowJsonTx {

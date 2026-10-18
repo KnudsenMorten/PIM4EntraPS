@@ -424,7 +424,15 @@ function Get-PimSqlAccessInstallNameMap {
     # -NoRecord (setup, PIM 100.156 B): the names from the environment / today's defaults only -- no read of the store.
     [CmdletBinding()] param([switch]$NoRecord)
     $nr = [bool]$NoRecord
-    $nm = { param($r, $d) if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { try { if ($nr) { return (Get-PimInstallName -Role $r -NoRecord) } else { return (Get-PimInstallName -Role $r) } } catch { } }; return $d }
+    # CR5 step 2 (PIM 100.149): THIS install's name first (element [0] is THE user), then every other name the role carries
+    # at any install (today's / the CR5 name) -- so setup at a NEW install, which resolves without a record, still gives
+    # ca-pim-web pim_web (never the engine's role by default) and caj-pim-updater pim_updater.
+    $nm = { param($r, $d)
+        $first = $d
+        if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { try { if ($nr) { $first = (Get-PimInstallName -Role $r -NoRecord) } else { $first = (Get-PimInstallName -Role $r) } } catch { } }
+        $all = @($first)
+        if (Get-Command Get-PimInstallNameCandidates -ErrorAction SilentlyContinue) { try { $all = @(Get-PimInstallNameCandidates -Role $r -Preferred $first) } catch { } }
+        return $all }
     return [ordered]@{
         pim_web      = @(& $nm 'web' 'ca-pim-manager')
         pim_engine   = @(& $nm 'engine' 'ca-pim-tick')
@@ -461,7 +469,7 @@ function Get-PimSqlComponentAccess {
         foreach ($role in $NameMap.Keys) {
             if (@($NameMap[$role] | Where-Object { "$_" -and "$_" -ieq $n }).Count) { $c = "$role" -replace '^pim_', ''; break }
         }
-        if (-not $c -and $n -match '^(?i)ca-pim-downlink') { $c = 'downlink' }
+        if (-not $c -and $n -match '^(?i)caj?-pim-downlink') { $c = 'downlink' }
         if (-not $c) { $c = 'engine' }
     }
     $roles = switch ($c) {
