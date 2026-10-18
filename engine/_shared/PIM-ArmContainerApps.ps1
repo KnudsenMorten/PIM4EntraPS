@@ -1,4 +1,4 @@
-﻿<#
+<#
   PIM4EntraPS -- roll a Container App over ARM REST, with no `az` CLI.
 
   🔴 WHY THIS EXISTS (§53). PIM v2 is 100% cloud and has no unattended updater: every
@@ -436,6 +436,20 @@ function Test-PimArmBusyError {
     return ("$Message" -match '(?i)OperationInProgress|active provisioning operation')
 }
 
+function Test-PimArmNetworkError {
+    <#
+      2.4.649 -- PURE. Did the request never reach ARM (a socket error inside the job's container -- no HTTP status at all)?
+      Live 2026-10-18 (internal, the follow-up updater run): "GET .../containerApps/ca-pim-rfa -> HTTP 0 : Cannot assign requested
+      address" -- the app was already on the target and the run reported it "still on the previous build". The writes this is
+      used for (an image PATCH) are idempotent, so the request is simply asked again. 🔒 Only HTTP 0 / a socket-level message:
+      an ARM answer (4xx / 5xx with a status) is never treated as one.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Message)
+    $m = "$Message"
+    if ($m -match '(?i)-> HTTP [1-9]\d\d\b') { return $false }
+    return ($m -match '(?i)-> HTTP 0\b|Cannot assign requested address|No such host is known|connection (was )?(reset|refused|forcibly closed)|An error occurred while sending the request|The SSL connection could not be established|Name or service not known|timed out')
+}
+
 function Invoke-PimArmBusyRetry {
     <#
       100.50 -- run ONE ARM write on a Container Apps job/app and wait out "an operation is in progress" (Test-PimArmBusyError),
@@ -449,15 +463,22 @@ function Invoke-PimArmBusyRetry {
       -Write is the write (a scriptblock; invoked in the caller's scope chain -- dynamic scope, so it sees the caller's
       variables). -Sleep is a test seam. Locals carry a __pimBr prefix so they can never shadow a variable -Write uses.
     #>
-    param([Parameter(Mandatory)][scriptblock]$Write, [int[]]$Waits = @(20, 20, 20, 20, 20, 20), [scriptblock]$Sleep)
+    # -NetworkWaits (2.4.649, opt-in, ONLY for an idempotent write such as an image PATCH): a request that never reached ARM
+    # (Test-PimArmNetworkError) is asked again after each wait; without it such a failure is rethrown at once, as before.
+    param([Parameter(Mandatory)][scriptblock]$Write, [int[]]$Waits = @(20, 20, 20, 20, 20, 20), [scriptblock]$Sleep, [int[]]$NetworkWaits = @())
     if (-not $Sleep) { $Sleep = { param($s) Start-Sleep -Seconds $s } }
-    $__pimBrTry = 0
+    $__pimBrTry = 0; $__pimBrNet = 0
     while ($true) {
         $__pimBrT0 = [datetime]::UtcNow
         try {
             $__pimBrRes = & $Write
             return $__pimBrRes
         } catch {
+            if ($__pimBrNet -lt @($NetworkWaits).Count -and (Test-PimArmNetworkError -Message "$($_.Exception.Message)")) {
+                $__pimBrNw = [int]@($NetworkWaits)[$__pimBrNet]; $__pimBrNet++
+                if ($__pimBrNw -gt 0) { & $Sleep $__pimBrNw }
+                continue
+            }
             if (-not (Test-PimArmBusyError -Message "$($_.Exception.Message)") -or $__pimBrTry -ge @($Waits).Count) { throw }
             $__pimBrWait = [int]@($Waits)[$__pimBrTry]; $__pimBrTry++
             $__pimBrLast = $global:PimLastRestError

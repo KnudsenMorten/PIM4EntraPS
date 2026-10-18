@@ -616,6 +616,24 @@ function Invoke-PimSqlAdminGroupStep {
     return $r
 }
 
+function Test-PimSqlAdminMemberIsSupportApp {
+    <#
+      READ-ONLY. Is the directory object -ObjectId the Invardia Support app? $true (its tag 'InvardiaSupport', or a display name
+      starting 'Invardia Support' -- apps made before the tag) / $false (not a service principal: 404; or another one) /
+      $null (the read failed -- not proven either way). PIM 100.116: the Support app is never removed by PIM.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Graph, [Parameter(Mandatory)][string]$ObjectId)
+    try {
+        $sp = & $Graph -Method GET -Path ("/servicePrincipals/$("$ObjectId".Trim())" + '?$select=id,appId,displayName,tags')
+        if ($null -eq $sp) { return $false }
+        if (@($sp.tags) -contains 'InvardiaSupport') { return $true }
+        return [bool]("$($sp.displayName)" -match '^(?i)Invardia Support')
+    } catch {
+        if ("$($_.Exception.Message)" -match '(?i)HTTP 404\b|Request_ResourceNotFound|does not exist') { return $false }
+        return $null
+    }
+}
+
 function Remove-PimSqlAdminGroupMember {
     <#
       SEC-39 -- take ONE identity OUT of the SQL admin group, and read it back. Used when an identity that only needs a
@@ -650,6 +668,15 @@ function Remove-PimSqlAdminGroupMember {
         $ids = @(Get-PimGraphGroupMemberIds -Graph $Graph -GroupId $gid | ForEach-Object { "$_".ToLowerInvariant() })
         if ($ids -notcontains $oid.ToLowerInvariant()) { $out.ok = $true; return [pscustomobject]$out }
         $out.wasMember = $true
+        # PIM 100.116 / framework 4.1b (owner 2026-10-18): the Invardia Support app is the group's STANDING member -- PIM never
+        # removes it (only the customer's Grant-PimSupportAccess.ps1 -Remove does). A member that is not a service principal
+        # (a person) answers 404 here; anything that cannot be PROVEN not to be the Support app is left a member.
+        $isSupport = Test-PimSqlAdminMemberIsSupportApp -Graph $Graph -ObjectId $oid
+        if ($isSupport -ne $false) {
+            $out.problem = $(if ($isSupport) { "$Label ($oid) is the Invardia Support app -- PIM never removes it from '$GroupName' (the customer ends that access with Grant-PimSupportAccess.ps1 -Remove)" }
+                             else { "$Label ($oid) could not be proven NOT to be the Invardia Support app -- it was not removed from '$GroupName'" })
+            return [pscustomobject]$out
+        }
         try { [void](& $Graph -Method DELETE -Path "/groups/$gid/members/$oid/`$ref") }
         catch { if ("$($_.Exception.Message)" -notmatch '(?i)HTTP 404\b|Request_ResourceNotFound|does not exist') { throw } }
         for ($i = 0; $i -lt [Math]::Max(1, $PollCount); $i++) {

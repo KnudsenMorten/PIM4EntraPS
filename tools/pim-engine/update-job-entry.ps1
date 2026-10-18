@@ -1397,7 +1397,7 @@ try {
             Say "rolling $($r.name) (same image as the Manager)"
             # A job still provisioning a write from earlier in this run answers 409 OperationInProgress: wait it out (bounded,
             # Invoke-PimArmBusyRetry -- the GET inside Set-PimAcaJobImage is repeated on each attempt), never a failed update.
-            [void](Invoke-PimArmBusyRetry -Write { Set-PimAcaJobImage -SubscriptionId $sub -ResourceGroup $rg -Name $r.name -Image $targetImg })
+            [void](Invoke-PimArmBusyRetry -NetworkWaits @(5, 15, 30) -Write { Set-PimAcaJobImage -SubscriptionId $sub -ResourceGroup $rg -Name $r.name -Image $targetImg })
             $discovered++
         } catch { $jobFailed += $r.name; Say "  $($r.name) NOT rolled: $($_.Exception.Message)" 'Yellow' }
     }
@@ -1419,7 +1419,10 @@ try {
     foreach ($r in @($aplan.roll)) {
         try {
             Say "rolling app $($r.name) (same image as the Manager)"
-            [void](Set-PimAcaAppImage -SubscriptionId $sub -ResourceGroup $rg -Name $r.name -Image $targetImg)
+            # 2.4.649 (live 2026-10-18, internal: "GET .../ca-pim-rfa -> HTTP 0 : Cannot assign requested address" made a healthy
+            # update report "still on the previous build"): a busy app is waited out and a request that never reached ARM is asked
+            # again (the image PATCH is idempotent), as for the jobs above.
+            [void](Invoke-PimArmBusyRetry -NetworkWaits @(5, 15, 30) -Write { Set-PimAcaAppImage -SubscriptionId $sub -ResourceGroup $rg -Name $r.name -Image $targetImg })
             $discovered++
         } catch { $jobFailed += $r.name; Say "  app $($r.name) NOT rolled: $($_.Exception.Message)" 'Yellow' }
     }

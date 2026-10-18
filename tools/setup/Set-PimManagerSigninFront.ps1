@@ -221,6 +221,19 @@ function Get-PimSigninFrontSecretPlan {
     return @{ remove = @($rm); keep = @($keep) }
 }
 
+function Test-PimSigninFrontRevisionReady {
+    <#
+      PURE. Does the app serve the two-container revision NOW: the latest revision is the latest READY one, and its template
+      carries the front. Live 2026-10-18 (ring-1 test install): the front revision became Healthy, but the read-back 20 s after
+      the write still reached the OLD Manager-only revision (/healthz 404) -- so the switch waits on this, with Easy Auth ON.
+    #>
+    param([AllowNull()][object]$App)
+    if (-not $App -or -not $App.properties) { return $false }
+    $latest = "$($App.properties.latestRevisionName)"; $ready = "$($App.properties.latestReadyRevisionName)"
+    if (-not $latest.Trim() -or $latest -ne $ready) { return $false }
+    return [bool](@(@($App.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -eq $script:SfFrontName }).Count)
+}
+
 function Get-PimSigninFrontProbeVerdict {
     <#
       PURE. The read-back after the switch, from three answers of the live Manager:
@@ -530,11 +543,20 @@ try {
         $fp = $script:SfFrontPort
         [void](Set-PimArmAcaAppConfiguration -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -Mutate { param($cfg) $cfg.ingress.targetPort = $fp }.GetNewClosure())
     }
-    Step 'switch: Easy Auth OFF (the front signs people in from now on)'
+    # Wait (Easy Auth still ON) until the front revision is the one that serves -- up to 10 minutes.
+    $rdyBy = [datetime]::UtcNow.AddMinutes(10); $rdy = $false
+    while (-not $rdy -and [datetime]::UtcNow -lt $rdyBy) {
+        $cur = $null; try { $cur = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp } catch { }
+        $rdy = Test-PimSigninFrontRevisionReady -App $cur
+        if (-not $rdy) { Start-Sleep -Seconds 15 }
+    }
+    if (-not $rdy) { throw 'the two-container revision did not become the ready revision within 10 minutes' }
+    Step 'front revision ready -- switch: Easy Auth OFF (the front signs people in from now on)'
     Set-PimSfEasyAuth -Enabled $false
-    Start-Sleep -Seconds 20
     $hostP = "$(@($plan.hosts)[0])"
-    $hz = Invoke-PimSfProbe -Url "https://$hostP/healthz"
+    # Easy Auth off takes a moment to reach the edge: /healthz is asked every 10 s for up to 3 minutes before it counts.
+    $hzBy = [datetime]::UtcNow.AddMinutes(3)
+    do { Start-Sleep -Seconds 10; $hz = Invoke-PimSfProbe -Url "https://$hostP/healthz" } while ($hz.status -ne 200 -and [datetime]::UtcNow -lt $hzBy)
     $root = Invoke-PimSfProbe -Url "https://$hostP/" -Headers @{ 'Sec-Fetch-Mode' = 'navigate'; 'Accept' = 'text/html' }
     $api = Invoke-PimSfProbe -Url "https://$hostP/api/whoami" -Headers @{ 'Sec-Fetch-Mode' = 'cors' }
     $v = Get-PimSigninFrontProbeVerdict -HealthStatus $hz.status -RootStatus $root.status -RootLocation $root.location -ApiStatus $api.status -TenantId $TenantId -ClientId $appId

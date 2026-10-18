@@ -8831,6 +8831,15 @@ function New-PimGroupRetirementProvider {
                 return [pscustomobject]@{ pimApplied = $false; reason = $blocked }
             }
             $gid = "$($l.groupId)"; $gn = "$($l.GroupName)"
+            # PIM 100.116 / framework 4.1b: the SQL admin group (the database's administrators + the Invardia Support app's
+            # standing access) is never retired by PIM -- its members are never removed here.
+            $sqlAdminNames = @('grp-pim-sql-admins')
+            try { if (Get-Command Get-PimQueueProtectedSqlAdminGroupNames -ErrorAction SilentlyContinue) { $sqlAdminNames = @(Get-PimQueueProtectedSqlAdminGroupNames) } elseif (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { $sqlAdminNames += "$(Get-PimInstallName -Role sqlAdminGroup)".Trim() } } catch { }
+            if (@($sqlAdminNames | Where-Object { "$_".Trim() -and "$_".Trim() -ieq "$gn".Trim() }).Count) {
+                $why = "'$gn' is the SQL admin group of this installation (the database's administrators and the Invardia Support app's standing access) -- PIM never retires it"
+                Write-Host ("    [!] {0}: NOT retired -- {1}" -f $gn, $why) -ForegroundColor Yellow
+                return [pscustomobject]@{ pimApplied = $false; reason = $why }
+            }
             $warn = New-Object System.Collections.Generic.List[string]
             # 1. directory role assignments held BY the group (v1 11161-11171)
             try {

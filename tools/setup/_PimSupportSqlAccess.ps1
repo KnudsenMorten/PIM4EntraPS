@@ -160,6 +160,13 @@ function Add-PimSupportSqlAdminGroupMember {
         if (-not $grps.Count) { $o.state = 'no-group'; $o.detail = "the group '$GroupName' does not exist in this tenant"; return [pscustomobject]$o }
         if ($grps.Count -gt 1) { $o.state = 'refused'; $o.detail = "$($grps.Count) groups are named '$GroupName' -- not changed"; return [pscustomobject]$o }
         $gid = "$($grps[0].id)".Trim(); $o.groupId = $gid
+        # 2.4.649 (live 2026-10-18): GET /groups/{id}/members LEAVES OUT service principals the caller cannot read -- at 16
+        # installs the Support app was a member while the list showed 0-1 members. Asked from the MEMBER's side first
+        # (checkMemberObjects is a POST that reads, it changes nothing); the list below stays as the fallback.
+        try {
+            $cmo = & $Graph 'POST' "/servicePrincipals/$($o.spObjectId)/checkMemberObjects" @{ ids = @($gid) }
+            if (@($cmo.value) -contains $gid) { $o.state = 'member'; $o.detail = "already a member of '$GroupName'"; return [pscustomobject]$o }
+        } catch { }
         $ids = New-Object System.Collections.Generic.List[string]
         $next = "/groups/$gid/members?`$select=id&`$top=999"
         while ($next) {

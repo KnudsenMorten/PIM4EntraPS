@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.650 -- 2026-10-18
+
+- The counts PIM Manager reports to Invardia for "active assignments" and "role assignments outside PIM" now count role assignments only (Microsoft Entra roles and Azure roles); members of groups under PIM for Groups -- at schools by far the largest part -- are no longer counted as role assignments (they stay visible per kind in the security overview)
+
+## 2.4.649 -- 2026-10-18
+
+- PIM Manager reports to Invardia whether the Invardia Support app still has its database access (read from the app's own side, "unknown" when it cannot be read); PIM never removes that access -- a test now fails the release if any code could; the setup check of that access no longer misses it when Microsoft Graph hides the app from the group's member list; an update retries an app or job whose request was lost on the network instead of reporting it out of date; moving the web app onto the sign-in front waits until the new version is the one serving before Easy Auth is switched off
+
 ## 2.4.648 -- 2026-10-18
 
 - Behind the shared sign-in front the PIM Manager web app now keeps at most 3.75 CPU / 7.5 GB, so the app and its sign-in front together stay within what Azure allows (moving to the sign-in front was refused before, and rolled back by itself); the update never raises the Manager past that; the published mail-sender setup script loads nothing from its own folder

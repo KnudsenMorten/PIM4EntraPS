@@ -216,6 +216,50 @@ function Get-PimQueueActionBreakGlassTypes {
     @('entra-role-revoke','group-assignment-revoke','azure-rbac-revoke','session-revoke')
 }
 
+function Get-PimQueueProtectedSqlAdminGroupNames {
+    <# The install's SQL admin group name(s): the configured one (CR5 install names / PIM_SQL_ADMIN_GROUP) and the default. #>
+    $n = New-Object System.Collections.Generic.List[string]
+    $n.Add('grp-pim-sql-admins')
+    try { if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { $x = "$(Get-PimInstallName -Role sqlAdminGroup)".Trim(); if ($x) { $n.Add($x) } } } catch { }
+    foreach ($e in "$($env:PIM_SQL_ADMIN_GROUP)", "$($env:PIM_SqlAdminGroupName)", "$($global:PIM_SqlAdminGroupName)") { if ("$e".Trim()) { $n.Add("$e".Trim()) } }
+    return @($n | Select-Object -Unique)
+}
+
+function Test-PimQueueProtectedSqlAdminGroup {
+    <# PIM 100.116 / framework 4.1b: is -GroupName this install's SQL admin group? (-Names: test seam) #>
+    param([AllowNull()][string]$GroupName, [string[]]$Names)
+    if (-not "$GroupName".Trim()) { return $false }
+    if ($null -eq $Names) { $Names = @(Get-PimQueueProtectedSqlAdminGroupNames) }
+    return [bool](@($Names | Where-Object { "$_".Trim() -and "$_".Trim() -ieq "$GroupName".Trim() }).Count)
+}
+
+function Get-PimQueueActionSupportAppRefusal {
+    <#
+      PIM 100.116 / framework 4.1b (owner 2026-10-18: nothing in PIM may remove the Invardia Support app's access): a queued
+      PIM-for-Groups revoke whose principal IS the Invardia Support app (its tag 'InvardiaSupport', or a display name starting
+      'Invardia Support') is REFUSED, terminal -- the customer ends that access with Grant-PimSupportAccess.ps1 -Remove.
+      A principal that is not a service principal answers 404 (a person) and passes; a read that fails otherwise = refused,
+      NOT terminal (it is retried). Returns $null when the action may proceed. Nothing is changed on a refusal.
+    #>
+    param([Parameter(Mandatory)][object]$Payload, [Parameter(Mandatory)][scriptblock]$Graph)
+    $type = "$($Payload.type)".Trim()
+    if ($type -ne 'group-assignment-revoke') { return $null }
+    $prin = "$($Payload.principalId)".Trim()
+    if (-not $prin) { return $null }
+    $refuse = { param($terminal, $why) [pscustomobject]@{ ok = $false; terminal = [bool]$terminal; verification = 'none'; supportApp = $true; detail = "$type REFUSED at execution -- nothing was changed: $why" } }
+    $sp = $null
+    try { $sp = & $Graph 'GET' ("/servicePrincipals/$prin`?`$select=id,appId,displayName,tags") $null }
+    catch {
+        if ("$($_.Exception.Message)" -match '(?i)Request_ResourceNotFound|ResourceNotFound|\b404\b|does not exist') { return $null }
+        return (& $refuse $false "the principal could not be proven NOT to be the Invardia Support app ($((("$($_.Exception.Message)" -split "`n")[0]).Trim())). It will be retried.")
+    }
+    $sp = @($sp) | Select-Object -First 1
+    if ($null -ne $sp -and ((@($sp.tags) -contains 'InvardiaSupport') -or "$($sp.displayName)" -match '^(?i)Invardia Support')) {
+        return (& $refuse $true 'the principal is the Invardia Support app -- PIM never removes its access (the customer ends it with Grant-PimSupportAccess.ps1 -Remove)')
+    }
+    return $null
+}
+
 function Get-PimQueueActionBreakGlassRefusal {
     <#
       🔴 §33.28 (integration): the Manager checked break-glass only when the item was QUEUED. The engine
@@ -417,6 +461,9 @@ function Invoke-PimQueueGroupDelete {
     $gid = "$($p.groupId)".Trim(); $gn = "$($p.groupName)".Trim()
     if (-not $gid -or -not $gn) { return (& $refuse $true 'the entry does not name the group (groupId + groupName) -- queue the Delete again from the Drift page') }
     if ("$($p.stagedFrom)".Trim() -ne 'drift-extra') { return (& $refuse $true "the entry was not staged by the Drift page's Delete (stagedFrom='$($p.stagedFrom)') -- PIM deletes only a group it staged for deletion") }
+    # PIM 100.116 / framework 4.1b: the SQL admin group holds the Invardia Support app's standing access (and the database's
+    # administrators) -- PIM never deletes it, whatever its prefix.
+    if (Test-PimQueueProtectedSqlAdminGroup -GroupName $gn) { return (& $refuse $true "'$gn' is the SQL admin group of this installation (the database's administrators and the Invardia Support app's standing access) -- PIM never deletes it") }
 
     # 2. the removal budget (computed over the whole drain by Invoke-PimQueueActionDrain)
     if ($null -eq $Budget) {
@@ -563,6 +610,11 @@ function Invoke-PimQueueAction {
     catch { $bgRefusal = [pscustomobject]@{ ok=$false; terminal=$false; verification='none'; breakGlass=$true
                 detail="$type REFUSED at execution -- nothing was changed: the break-glass check itself failed ($($_.Exception.Message)). It will be retried." } }
     if ($bgRefusal) { return $bgRefusal }
+    # PIM 100.116 / framework 4.1b: the Invardia Support app's access is never revoked by PIM (both halves: Active + Eligible).
+    $supRefusal = $null
+    try { $supRefusal = Get-PimQueueActionSupportAppRefusal -Payload $p -Graph $graph }
+    catch { $supRefusal = [pscustomobject]@{ ok=$false; terminal=$false; verification='none'; supportApp=$true; detail="$type REFUSED at execution -- nothing was changed: the Support-app check failed ($($_.Exception.Message)). It will be retried." } }
+    if ($supRefusal) { return $supRefusal }
 
     # 68.6 row 27 (a): v1's revoker removed ELIGIBLE and ACTIVE assignments for Entra roles, Azure
     # resources and PIM for Groups (engine/PIM-Assignment-Revoker/PIM-Assignment-Revoker.ps1:623-781).
