@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.652 -- 2026-10-18
+
+- An update that did not reach every app yet (still on the previous build) and a missing Pro licence now each have their own error code and explanation, instead of unrecognised failure
+
+## 2.4.651 -- 2026-10-18
+
+- Every mail sender of PIM Manager is now named 'PIM Manager' (owner 2026-10-18) -- no '(notifications)', no environment part; the update renames every earlier sender name to it once the rename switch is on, and new installs use it
+
 ## 2.4.650 -- 2026-10-18
 
 - The counts PIM Manager reports to Invardia for "active assignments" and "role assignments outside PIM" now count role assignments only (Microsoft Entra roles and Azure roles); members of groups under PIM for Groups -- at schools by far the largest part -- are no longer counted as role assignments (they stay visible per kind in the security overview)

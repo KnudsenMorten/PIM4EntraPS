@@ -40,6 +40,7 @@
       wl     workload connectors (custom workloads)           0101..
       tap    accounts and Temporary Access Pass               0101..
       ad     hybrid Active Directory (the hybrid worker)      0101..
+      upd    the in-cloud updater (ca-pim-update)             0101..
       gen    the GENERIC code of each CauseClass: a failure    0001..
              that has no own class yet (UNCLASSIFIED = 0001)
 #>
@@ -90,6 +91,24 @@ $script:PimFailureRules = @(
     # and telemetry filed it UNCLASSIFIED. Ahead of every data / environment rule: an out-of-memory job is the cause, and
     # whatever HTTP status or Graph text the same message happens to quote is not. The interrupted-execution text
     # ("out of memory or a crash", PIM-JobLanes) is a guess, not evidence, and is deliberately NOT matched.
+    # The updater's own outcomes (update-job-entry.ps1 Send-PimUpdateOutcome). Invardia fix request 4aa736f5 (2026-10-18):
+    # both went up as UNCLASSIFIED and were merged under one request.
+    @{ code = 'UPDATE-ROLL-INCOMPLETE'
+       match = { param($m, $row) $m -match '(?i)still on the previous build' }
+       title = 'The update did not reach every part of PIM Manager'
+       cause = 'The update rolled the new version, but one or more apps or jobs (named in the message) were still running the previous version when the updater checked. Usually Azure had not finished starting the new version yet, or a request to Azure did not get through.'
+       remedy = 'Nothing to do at first: the next update run checks again and finishes the roll. If the same app is still named after two runs, contact Invardia support.'
+       retryable = $true; severity = 'transient'
+       fixes = @() }
+
+    @{ code = 'UPDATE-NO-LICENCE'
+       match = { param($m, $row) $m -match '(?i)no licence is installed -- Pro updates need' }
+       title = 'No Pro licence is installed, so the Pro update was not fetched'
+       cause = 'Pro updates come from Invardia and need the Pro licence that Invardia issues. This installation has none stored (or it could not be read this time), so nothing was fetched and nothing changed.'
+       remedy = 'If you have a Pro subscription, contact Invardia support to have the licence installed. If the message appears only once, it was a read that failed; the next run tries again.'
+       retryable = $true; severity = 'environment'
+       fixes = @() }
+
     @{ code = 'ENGINE-OUT-OF-MEMORY'
        match = { param($m, $row) $m -match '(?i)System\.OutOfMemoryException|OutOfMemoryException|Insufficient memory to continue|\bOOMKilled\b|exit code 137\b' }
        title = 'The engine job ran out of memory'
@@ -692,6 +711,8 @@ function Get-PimFailureCodeTable {
         ,@('TAP-TENANT-POLICY',                'pim-tap-0102',   'customer-config',   'customer', '',      '2.4.638')
         ,@('TAP-NO-RECIPIENT',                 'pim-tap-0103',   'customer-config',   'customer', '',      '2.4.638')
         ,@('AD-CLEANUP-RIGHT-MISSING',         'pim-ad-0101',    'permission',        'customer', '',      '2.4.638')
+        ,@('UPDATE-ROLL-INCOMPLETE',           'pim-upd-0101',   'platform-timeout',  'nobody',   '',      '2.4.652')
+        ,@('UPDATE-NO-LICENCE',                'pim-upd-0102',   'customer-config',   'support',  '',      '2.4.652')
         # the generic code of each CauseClass (framework 8.16: "an unknown failure gets the generic code of its CauseClass")
         ,@('UNCLASSIFIED',                     'pim-gen-0001',   'unclassified',      'product',  '',      '2.4.638')
         ,@('GENERIC:customer-config',          'pim-gen-0002',   'customer-config',   'customer', '',      '2.4.638')
@@ -910,6 +931,12 @@ function Get-PimFailureSolutionCatalog {
             affected = 'Nothing is applied by this row. Everything else is applied.'
             steps = @('Open Advanced View (grid), fill in the Resource column on that row (Workload templates shows what the workload expects) and commit.', $stop)
             after = $next }
+        'UPDATE-NO-LICENCE' = @{ short = 'no Pro licence is installed'
+            what = 'The Pro update was not fetched: this installation has no Pro licence from Invardia stored, or it could not be read this time: {item}.'
+            affected = 'Only the update: nothing was fetched and nothing changed. PIM Manager keeps running on its current version.'
+            steps = @('If the message appears only once, nothing is needed: a licence read failed and the next update run tries again.',
+                      'If it stays, contact Invardia support (invardia.com/support) to have the Pro licence installed for this installation.')
+            after = 'The next update run fetches the Pro update, and the status turns OK by itself. Nothing has to be acknowledged.' }
         'POWERBI-ENGINE-NOT-IN-WORKSPACE' = @{ short = 'PIM Manager is not in the Power BI workspace yet'
             what = 'PIM Manager cannot give the Power BI workspace role yet, because its identity is not in that workspace: {item}.'
             affected = 'Only these Power BI workspace roles: nothing was given or taken away in Power BI. Everything else is applied.'

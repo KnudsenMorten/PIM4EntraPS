@@ -90,7 +90,7 @@
   The mailbox domain, one of the tenant's verified domains. Default: the tenant's initial (onmicrosoft.com) domain.
 
 .PARAMETER DisplayName
-  The mailbox display name (what recipients see as the sender). Default 'PIM Manager (notifications)'.
+  The mailbox display name (what recipients see as the sender). Default 'PIM Manager'.
 
 .PARAMETER ScopeName
   The Exchange management scope name. Default '<MailboxName>-SendScope'; an existing scope for this mailbox is kept.
@@ -191,7 +191,7 @@ param(
     # used as it is (not created again). PIM Manager's Get Started > Mail sender prints the command with these filled in.
     [string]$MailboxName  = 'PIM-Engine',
     [string]$MailDomain,
-    [string]$DisplayName  = 'PIM Manager (notifications)',
+    [string]$DisplayName  = 'PIM Manager',
     # The Exchange names this script creates, also the company's: the management scope (default '<MailboxName>-SendScope')
     # and the role-assignment name prefix (default <MailboxName> -> '<prefix>-<short id>-MailSend'). A scope that already
     # restricts to this mailbox, and assignments already held by the sending identities, are KEPT under their existing

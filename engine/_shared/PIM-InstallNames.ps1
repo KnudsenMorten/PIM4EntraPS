@@ -141,11 +141,21 @@ function Resolve-PimSetupInstallNameChoice {
 # display name PIM gave an object in earlier releases to the name it carries now, and back -- so every FINDER can look for
 # both (an object the update renamed must still be found by the setup scripts, and vice versa). Only names PIM itself gave
 # are mapped: a name a customer chose is never one of them. Kept: the mailbox ADDRESS, mailNickname, the Exchange scope.
+function Test-PimSenderOldDisplayName {
+    # PURE. Is -Name a display name PIM gave a SENDER MAILBOX before the owner's 'PIM Manager' (2026-10-18)?
+    # 'PIM4EntraPS Engine (notifications)', 'PIM4EntraPS Engine (<part>, notifications)', and the never-approved
+    # 'PIM Manager (notifications)' / 'PIM Manager (<part>, notifications)' that 2.4.647-2.4.650 wrote.
+    param([AllowEmptyString()][string]$Name)
+    return [bool]("$Name".Trim() -match '^(?i)(PIM4EntraPS Engine|PIM Manager) \((.+, )?notifications\)$')
+}
+
 function ConvertTo-PimNewDisplayName {
     # PURE. The display name an object PIM named in an earlier release carries now ('' = not one of PIM's old names).
     param([AllowEmptyString()][string]$Name)
     $s = "$Name".Trim()
-    if ($s -match '^(?i)PIM4EntraPS Engine \(notifications\)$') { return 'PIM Manager (notifications)' }
+    # The SENDER MAILBOX (owner 2026-10-18 ~19:20Z): every one is 'PIM Manager' -- no '(notifications)', no install / ring
+    # part; the address tells them apart.
+    if (Test-PimSenderOldDisplayName $s) { return 'PIM Manager' }
     if ($s -match '^(?i)PIM4EntraPS Engine(?<r>( .*)?)$')  { return "PIM Manager Engine$($Matches['r'])" }
     if ($s -match '^(?i)PIM4EntraPS Deploy(?<r>( .*)?)$')  { return "PIM Manager Deploy$($Matches['r'])" }
     if ($s -match '^(?i)PIM4EntraPS Manager(?<r>( .*)?)$') { return "PIM Manager$($Matches['r'])" }

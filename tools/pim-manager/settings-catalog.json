@@ -2358,7 +2358,7 @@
       "where": "Settings > Mail & alerting > Mail sending (also Get Started > Mail sender)",
       "route": "/api/settings/mail/mailbox",
       "type": "text",
-      "default": "PIM-Engine at the tenant's initial domain, display name 'PIM Manager (notifications)'",
+      "default": "PIM-Engine at the tenant's initial domain, display name 'PIM Manager'",
       "feature": "",
       "confirmOn": false,
       "confirmOff": false,
