@@ -13,7 +13,10 @@
     engineApp      application  'PIM4EntraPS Engine'                               -> 'PIM Manager Engine'
     deployApp      application  'PIM4EntraPS Deploy'                               -> 'PIM Manager Deploy'
     membersGroup   group        'PIM4EntraPS Manager users (members, no guests)'   -> 'PIM Manager users (members, no guests)'
-    senderMailbox  user         'PIM4EntraPS Engine (notifications)'               -> 'PIM Manager (notifications)'
+    senderMailbox  user         'PIM4EntraPS Engine (notifications)'               -> 'PIM Manager'
+                                (also 'PIM4EntraPS Engine (<part>, notifications)' and the never-approved 'PIM Manager
+                                (notifications)' of 2.4.647-650 -- owner 2026-10-18 ~19:20Z: every sender is 'PIM Manager',
+                                no '(notifications)', no install / ring part; Test-PimSenderOldDisplayName)
   Every finder in setup looks for both forms (Get-PimDisplayNameForms), and no setup script renames one back
   (Test-PimDisplayNameIsNewerForm), so a renamed object is never forked into a second one.
 
@@ -68,7 +71,7 @@ function Get-PimDisplayNameRenameDecision {
         if (-not $Mailbox -or -not "$($Mailbox.id)".Trim()) { return @{ action = 'absent'; objectId = ''; before = '' } }
         $dn = "$($Mailbox.displayName)".Trim()
         if ($dn -ieq "$($Target.newName)") { return @{ action = 'current'; objectId = "$($Mailbox.id)"; before = $dn } }
-        if ($dn -ieq "$($Target.oldName)") { return @{ action = 'rename'; objectId = "$($Mailbox.id)"; before = $dn } }
+        if ($dn -ieq "$($Target.oldName)" -or (Test-PimSenderOldDisplayName $dn)) { return @{ action = 'rename'; objectId = "$($Mailbox.id)"; before = $dn } }
         return @{ action = 'absent'; objectId = "$($Mailbox.id)"; before = $dn }
     }
     $old = @(@($OldHits) | Where-Object { $_ -and "$($_.id)".Trim() -and "$($_.displayName)".Trim() -ieq "$($Target.oldName)" })

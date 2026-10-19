@@ -2245,7 +2245,7 @@ function Invoke-DefaultStepRunner {
                 } elseif ("$EnvLabel".Trim()) {
                     # §94: PIM-Engine@ is the tenant's first environment's sender -- each labelled one gets its own mailbox
                     $mailArgs['MailboxName'] = "PIM-Engine-$EnvLabel"
-                    $mailArgs['DisplayName'] = "PIM Manager ($EnvLabel, notifications)"
+                    $mailArgs['DisplayName'] = 'PIM Manager'   # owner 2026-10-18: every sender is "PIM Manager"; the address tells them apart
                 }
                 # Without this the script THROWS on its own first line -- "one of -AdminSecret /
                 # -AdminCertThumbprint is required" -- and this step's deliberate

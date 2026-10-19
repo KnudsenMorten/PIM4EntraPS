@@ -10698,6 +10698,15 @@ database -- it stays after the installation, until the customer ends it:
 * it is a **member of the SQL admin group** (27.10), at every support level, and
 * it has **its own database user** in the PIM database, in the **database owner role**.
 
+**How it stays in place (2.4.649).** PIM never removes either part. Every PIM step that could remove a member from the SQL
+admin group, revoke a PIM-for-Groups assignment, or delete or retire a group first checks that the target is not the Support
+app, and refuses when it is -- or when it cannot prove that it is not. A release test fails if any code path could remove
+either part, apart from the customer's own way of ending the access (`Grant-PimSupportAccess.ps1 -Remove`). Membership is
+read from the **member's side** (the application asks which groups it belongs to): a group's own member list leaves out
+applications the reader may not see, so it can show an application as missing while it is a member. Each installation
+reports both parts on its status heartbeat -- *true*, *false*, or *not known* when it cannot read them -- and Invardia, not
+the installation, puts back whatever is missing.
+
 **Why a database user as well as the group.** Membership of the admin group has not given an *application* a
 database sign-in on the servers this was measured on: the sign-in was refused with the group in the token. A
 database user of its own works at once. The user is created from the application's **client id** written as
@@ -10929,6 +10938,12 @@ Every hour PIM sends one report per job that ran since the last send, and every 
 sends one report: *failed* if any of its runs failed (with that run's failure), *warning* if one was held for approval,
 otherwise *ok*. Skipped and unimplemented runs are not reported, because nothing ran. The heartbeat carries the version, the
 edition, the hosting type, the runtime identity and the licence state.
+
+**What the assignment counts mean (2.4.650).** *Active assignments* and *role assignments outside PIM* count **role
+assignments only**: Microsoft Entra roles and Azure roles. Members of groups under PIM for Groups are not role assignments --
+in a school tenant they are by far the largest number -- and are reported separately, per kind, in the security overview.
+The heartbeat also carries the Invardia Support app's database access (27.11): the group membership and the database user,
+each *true*, *false* or *not known*.
 
 | | Without an install key (anonymous) | With an install key (Pro / trial) |
 |---|---|---|

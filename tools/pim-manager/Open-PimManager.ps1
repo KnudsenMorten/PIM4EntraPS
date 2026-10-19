@@ -5833,14 +5833,14 @@ function ConvertTo-PimManagerMailboxSetup {
       PURE. MAIL-NAMING (100.14, owner 2026-10-09: "we must be able to define the name of the shared mailbox ... as
       companies have their own naming"): what Get Started > Mail sender step 1 shows -- the stored pim.Settings
       'MailboxSetup' { name; domain; displayName; existing }, else (an install whose sender was set before) the sender's own
-      name and domain, else the script's defaults (PIM-Engine @ the initial domain, 'PIM Manager (notifications)').
+      name and domain, else the script's defaults (PIM-Engine @ the initial domain, 'PIM Manager').
       Returns { name; domain; displayName; existing; address; saved; defaults }.
     #>
     param($Value, [string]$Sender, [object[]]$Domains = @())
     if ($Value -is [string] -and "$Value".Trim()) { try { $Value = $Value | ConvertFrom-Json } catch { $Value = $null } }
     $g = { param($n) if ($null -eq $Value) { '' } elseif ($Value -is [System.Collections.IDictionary]) { "$($Value[$n])".Trim() } elseif ($Value.PSObject.Properties[$n]) { "$($Value.$n)".Trim() } else { '' } }
     $initial = "$(@(@($Domains) | Where-Object { $_ -and $_.isInitial }) | Select-Object -First 1 | ForEach-Object { $_.id })".Trim()
-    $defaults = [ordered]@{ name = 'PIM-Engine'; domain = $initial; displayName = 'PIM Manager (notifications)' }
+    $defaults = [ordered]@{ name = 'PIM-Engine'; domain = $initial; displayName = 'PIM Manager' }
     $name = & $g 'name'; $domain = & $g 'domain'; $display = & $g 'displayName'
     $saved = [bool]$name
     $existing = $false
