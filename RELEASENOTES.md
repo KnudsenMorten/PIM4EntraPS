@@ -13,13 +13,17 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.653 -- 2026-10-19
+
+- A scheduled run that Azure stopped before it finished now shows its own error code and explanation, instead of unrecognised failure
+
 ## 2.4.652 -- 2026-10-18
 
-- An update that did not reach every app yet (still on the previous build) and a missing Pro licence now each have their own error code and explanation, instead of unrecognised failure
+- An update that has not reached every app yet, and a missing Pro licence, now each show their own error code and explanation
 
 ## 2.4.651 -- 2026-10-18
 
-- Every mail sender of PIM Manager is now named 'PIM Manager' (owner 2026-10-18) -- no '(notifications)', no environment part; the update renames every earlier sender name to it once the rename switch is on, and new installs use it
+- Every mail sender of PIM Manager is now named "PIM Manager" -- no "(notifications)", no environment part (new installs, and existing ones once renaming is on)
 
 ## 2.4.650 -- 2026-10-18
 

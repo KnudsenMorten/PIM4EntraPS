@@ -86,11 +86,19 @@ $script:PimFailureRules = @(
        retryable = $true; severity = 'transient'
        fixes = @() }
 
-    # 100.31 SNAPSHOT-OOM (2026-10-09, live on a production tenant of ~10.8k identity objects, ca-pim-tick at 0.5 CPU /
-    # 1 GiB): the active-assignments-snapshot job died with "Exception of type 'System.OutOfMemoryException' was thrown."
-    # and telemetry filed it UNCLASSIFIED. Ahead of every data / environment rule: an out-of-memory job is the cause, and
-    # whatever HTTP status or Graph text the same message happens to quote is not. The interrupted-execution text
-    # ("out of memory or a crash", PIM-JobLanes) is a guess, not evidence, and is deliberately NOT matched.
+    # 2.4.653 (Invardia report 87315, internal 2026-10-19 06:24Z, filed under 4aa736f5 as UNCLASSIFIED): "interrupted: the
+    # execution 'ca-pim-tick-<n>' ended in Failed while this run ... was in progress" (PIM-JobLanes, cause 'crashed'). Measured:
+    # the platform scheduled the first replica, it never started, a second one did and ran; the execution hit its backoff limit
+    # and the job cleanup stopped the running replica. Azure's side, not the job's: transient, nobody acts. Ahead of
+    # ENGINE-OUT-OF-MEMORY, which deliberately does not read this text's "out of memory or a crash" guess.
+    @{ code = 'RUN-EXECUTION-FAILED'
+       match = { param($m, $row) $m -match '(?i)ended in Failed while this run' }
+       title = 'The scheduled execution stopped while the job was running'
+       cause = 'Azure ended the scheduled execution while this job was still running -- for example a replica that did not start, or the container stopping. The job did not finish this time; nothing it had not written yet was changed.'
+       remedy = 'Nothing to do -- the job runs again on its next turn. If it happens on many turns in a row, contact Invardia support.'
+       retryable = $true; severity = 'transient'
+       fixes = @() }
+
     # The updater's own outcomes (update-job-entry.ps1 Send-PimUpdateOutcome). Invardia fix request 4aa736f5 (2026-10-18):
     # both went up as UNCLASSIFIED and were merged under one request.
     @{ code = 'UPDATE-ROLL-INCOMPLETE'
@@ -109,6 +117,11 @@ $script:PimFailureRules = @(
        retryable = $true; severity = 'environment'
        fixes = @() }
 
+    # 100.31 SNAPSHOT-OOM (2026-10-09, live on a production tenant of ~10.8k identity objects, ca-pim-tick at 0.5 CPU /
+    # 1 GiB): the active-assignments-snapshot job died with "Exception of type 'System.OutOfMemoryException' was thrown."
+    # and telemetry filed it UNCLASSIFIED. Ahead of every data / environment rule: an out-of-memory job is the cause, and
+    # whatever HTTP status or Graph text the same message happens to quote is not. The interrupted-execution text
+    # ("out of memory or a crash", PIM-JobLanes) is a guess, not evidence, and is deliberately NOT matched.
     @{ code = 'ENGINE-OUT-OF-MEMORY'
        match = { param($m, $row) $m -match '(?i)System\.OutOfMemoryException|OutOfMemoryException|Insufficient memory to continue|\bOOMKilled\b|exit code 137\b' }
        title = 'The engine job ran out of memory'
@@ -665,6 +678,7 @@ function Get-PimFailureCodeTable {
         ,@('PERMISSION-DENIED',                'pim-eng-0103',   'permission',        'customer', '',      '2.4.638')
         ,@('THROTTLED',                        'pim-eng-0104',   'throttled',         'nobody',   '',      '2.4.638')
         ,@('SERVICE-ERROR',                    'pim-eng-0105',   'upstream-error',    'nobody',   '',      '2.4.638')
+        ,@('RUN-EXECUTION-FAILED',             'pim-eng-0106',   'platform-timeout',  'nobody',   '',      '2.4.653')
         ,@('CONVERGENCE',                      'pim-eng-0201',   'not-converged',     'product',  '',      '2.4.638')
         ,@('AZ-POLICY-MASS-HOLD',              'pim-grd-0101',   'held-for-approval', 'customer', '',      '2.4.638')
         ,@('GROUP-POLICY-MASS-HOLD',           'pim-grd-0102',   'held-for-approval', 'customer', '',      '2.4.638')
