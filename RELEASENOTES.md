@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.654 -- 2026-10-20
+
+- Large tenants: the active-assignments list now re-reads only groups that changed (full read weekly), instead of every group every 2 hours
+
 ## 2.4.653 -- 2026-10-19
 
 - A scheduled run that Azure stopped before it finished now shows its own error code and explanation, instead of unrecognised failure

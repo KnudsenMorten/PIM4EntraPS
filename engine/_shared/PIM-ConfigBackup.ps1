@@ -79,7 +79,9 @@ function Get-PimConfigBackupSettingDenyList {
                      # review 1 fixes 2026-10-13 (decision 54): a restored delete pin would make a tombstone ACTIVE again
                      'AdminDeletePins',
                      # PIM 100.123: the AD clean-up / server-group approvals and the worker's own records -- an old approval restored would be usable again
-                     'HybridAdCleanupApproval', 'HybridAdServerAutoGroupsApproval', 'AdServerAutoGroups', 'AdServerAutoGroupsWaiting', 'AdServerAutoGroupsProgress', 'AdCleanupResult', 'AdCleanupLocalAdmin')
+                     'HybridAdCleanupApproval', 'HybridAdServerAutoGroupsApproval', 'AdServerAutoGroups', 'AdServerAutoGroupsWaiting', 'AdServerAutoGroupsProgress', 'AdCleanupResult', 'AdCleanupLocalAdmin',
+                     # SNAP-INC (owner 2026-10-20): the snapshot's group delta link + last full read -- runtime state of THIS store's rows
+                     'ActiveAssignmentsGroupDelta')
         statePrefix = @('JobRunOutput:', 'SchedulerState', 'SchedulerLease', 'JobScope', 'HybridAdSyncMemory')   # 100.122 F1: the AD sync's memory (Entra ids of THIS tenant) is never restored
         # ...Change (case-sensitive, PascalCase) = a PENDING change request (e.g. the break-glass maker/checker request) --
         # runtime state, never configuration. Named by pattern on purpose: the engine never names that request row

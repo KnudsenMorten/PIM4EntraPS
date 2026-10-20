@@ -1317,6 +1317,73 @@ function Get-PimSqlActiveAssignmentServicePrincipalIds {
     return @($rows | ForEach-Object { "$($_.PrincipalId)" } | Where-Object { $_ })
 }
 
+# SNAP-INC (owner 2026-10-20): the snapshot's PIM-for-Groups read is INCREMENTAL -- groups whose membership did not change
+# carry their rows forward from the previous complete generation. These two read that generation back (the decision is in
+# engine/_shared/PIM-ActiveAssignments.ps1, Get-PimSnapshotGroupReadPlan). Both throw on a failed read: the caller then reads
+# every group in full, never a partial snapshot presented as complete.
+function Get-PimActiveAssignmentsCarryReadTimeoutSec { return 600 }   # per statement; a 500k-row generation is read back in one pass
+
+function Get-PimSqlActiveAssignmentGroupSummary {
+    <#
+      SNAP-INC. One line per group of one generation's PIM-for-Groups rows: { groupId; rows; alwaysRead }. alwaysRead = the group
+      holds a row that a MEMBERSHIP change cannot announce -- a row with an end date, a start still in the future, or an
+      owner (or unidentifiable) row: IdentityKey is 'g|<principal>|<group>|member' only for a plain member row. Index columns
+      only (no RowJson). Returns { groups; total; noGroup } (noGroup = rows without a group id: they cannot be carried).
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][long]$SnapshotId, [datetime]$NowUtc = [datetime]::UtcNow)
+    $sql = @'
+SELECT GroupId, COUNT_BIG(*) AS N,
+       MAX(CASE WHEN EndUtc IS NOT NULL OR (StartUtc IS NOT NULL AND StartUtc > @now) OR IdentityKey IS NULL OR IdentityKey NOT LIKE N'%|member' THEN 1 ELSE 0 END) AS AlwaysRead
+FROM pim.ActiveAssignmentRows WHERE SnapshotId = @s AND Kind = N'pim-for-groups'
+GROUP BY GroupId
+'@
+    $groups = New-Object System.Collections.Generic.List[object]
+    $total = [long]0; $noGroup = [long]0
+    $c = New-PimSqlConnection -ConnectionString $ConnectionString
+    try {
+        $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $sql; $cmd.CommandTimeout = Get-PimActiveAssignmentsCarryReadTimeoutSec
+        [void]$cmd.Parameters.AddWithValue('@s', $SnapshotId); [void]$cmd.Parameters.AddWithValue('@now', $NowUtc.ToUniversalTime())
+        $rd = $cmd.ExecuteReader()
+        try {
+            while ($rd.Read()) {
+                $n = [long]$rd.GetValue(1); $total += $n
+                if ($rd.IsDBNull(0) -or -not "$($rd.GetValue(0))".Trim()) { $noGroup += $n; continue }
+                $groups.Add([pscustomobject]@{ groupId = "$($rd.GetValue(0))".Trim().ToLowerInvariant(); rows = $n; alwaysRead = ([int]$rd.GetValue(2) -eq 1) })
+            }
+        } finally { $rd.Close() }
+    } finally { if ($c) { $c.Close(); $c.Dispose() } }
+    return [pscustomobject]@{ groups = $groups.ToArray(); total = $total; noGroup = $noGroup }
+}
+
+function Read-PimSqlActiveAssignmentGroupRows {
+    <#
+      SNAP-INC. The stored RowJson of one generation's PIM-for-Groups rows whose GroupId is in -GroupIds (lower-case ids),
+      handed to -OnChunk in chunks of up to 500 strings (the caller parses each chunk and drops the text: a 500k-row
+      generation is never held as text). Returns the number of rows handed over. Throws on a failed read.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][long]$SnapshotId,
+          [Parameter(Mandatory)][System.Collections.Generic.HashSet[string]]$GroupIds, [Parameter(Mandatory)][scriptblock]$OnChunk)
+    $n = 0
+    $chunk = New-Object System.Collections.Generic.List[string]
+    $c = New-PimSqlConnection -ConnectionString $ConnectionString
+    try {
+        $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandTimeout = Get-PimActiveAssignmentsCarryReadTimeoutSec
+        $cmd.CommandText = "SELECT GroupId, RowJson FROM pim.ActiveAssignmentRows WHERE SnapshotId = @s AND Kind = N'pim-for-groups' ORDER BY Seq"
+        [void]$cmd.Parameters.AddWithValue('@s', $SnapshotId)
+        $rd = $cmd.ExecuteReader()
+        try {
+            while ($rd.Read()) {
+                if ($rd.IsDBNull(0)) { continue }
+                if (-not $GroupIds.Contains("$($rd.GetValue(0))".Trim().ToLowerInvariant())) { continue }
+                $chunk.Add($rd.GetString(1)); $n++
+                if ($chunk.Count -ge 500) { & $OnChunk $chunk.ToArray(); $chunk.Clear() }
+            }
+        } finally { $rd.Close() }
+    } finally { if ($c) { $c.Close(); $c.Dispose() } }
+    if ($chunk.Count -gt 0) { & $OnChunk $chunk.ToArray(); $chunk.Clear() }
+    return $n
+}
+
 function ConvertTo-PimSqlJsonStringArray {
     <# PURE. A string list -> a compact JSON array of strings ('[]' for none); trimmed, empty values dropped, lower-cased. #>
     param([AllowNull()][string[]]$Values)

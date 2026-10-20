@@ -8835,7 +8835,11 @@ function New-PimGroupRetirementProvider {
             # standing access) is never retired by PIM -- its members are never removed here.
             $sqlAdminNames = @('grp-pim-sql-admins')
             try { if (Get-Command Get-PimQueueProtectedSqlAdminGroupNames -ErrorAction SilentlyContinue) { $sqlAdminNames = @(Get-PimQueueProtectedSqlAdminGroupNames) } elseif (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { $sqlAdminNames += "$(Get-PimInstallName -Role sqlAdminGroup)".Trim() } } catch { }
-            if (@($sqlAdminNames | Where-Object { "$_".Trim() -and "$_".Trim() -ieq "$gn".Trim() }).Count) {
+            # 33.0 item 5 (2026-10-20): and by the group's OBJECT ID (PIM_SQL_ADMIN_GROUP_ID / $global:PIM_SqlAdminGroupId, optional)
+            # -- a renamed SQL admin group is still never retired. None set = the names alone, as before.
+            $sqlAdminIds = @()
+            try { if (Get-Command Get-PimQueueProtectedSqlAdminGroupIds -ErrorAction SilentlyContinue) { $sqlAdminIds = @(Get-PimQueueProtectedSqlAdminGroupIds) } else { $sqlAdminIds = @(@("$($env:PIM_SQL_ADMIN_GROUP_ID)", "$($global:PIM_SqlAdminGroupId)") | ForEach-Object { "$_" -split '[,;\s]+' } | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() }) } } catch { }
+            if (@($sqlAdminNames | Where-Object { "$_".Trim() -and "$_".Trim() -ieq "$gn".Trim() }).Count -or ("$gid".Trim() -and @($sqlAdminIds | Where-Object { "$_".Trim() -and "$_".Trim() -ieq "$gid".Trim() }).Count)) {
                 $why = "'$gn' is the SQL admin group of this installation (the database's administrators and the Invardia Support app's standing access) -- PIM never retires it"
                 Write-Host ("    [!] {0}: NOT retired -- {1}" -f $gn, $why) -ForegroundColor Yellow
                 return [pscustomobject]@{ pimApplied = $false; reason = $why }

@@ -73,18 +73,43 @@ function Get-PimDriftExcludedNames {
     $g = "$SqlAdminGroupName".Trim()
     if (-not $g) { try { $g = "$($global:PIM_SqlAdminGroupName)".Trim() } catch { $g = '' } }
     if (-not $g) { $g = 'grp-pim-sql-admins' }
-    return , @($g)
+    # 33.0 item 5 (2026-10-20): every display-name form of it (CR5 item 5: the earlier and the current release's name), so
+    # the old and the new naming both match. Get-PimDisplayNameForms answers the name first; not loaded = the name alone.
+    $out = New-Object System.Collections.Generic.List[string]
+    $out.Add($g)
+    if (Get-Command Get-PimDisplayNameForms -ErrorAction SilentlyContinue) {
+        try { foreach ($f in @(Get-PimDisplayNameForms -Name $g)) { if ("$f".Trim() -and -not @($out | Where-Object { $_ -ieq "$f".Trim() }).Count) { $out.Add("$f".Trim()) } } } catch { }
+    }
+    return , @($out.ToArray())
+}
+function Get-PimDriftExcludedIds {
+    <# 33.0 item 5 (2026-10-20): the SQL admin group's OBJECT ID(s) when the install sets one ($env:PIM_SQL_ADMIN_GROUP_ID,
+       else $global:PIM_SqlAdminGroupId; -SqlAdminGroupId: the caller's / test seam). Optional: none = by name only, as
+       before. A renamed group is still excluded by its id. Lower-case, unique. #>
+    param([string]$SqlAdminGroupId = '')
+    $raw = "$SqlAdminGroupId".Trim()
+    if (-not $raw) { $raw = "$($env:PIM_SQL_ADMIN_GROUP_ID)".Trim() }
+    if (-not $raw) { try { $raw = "$($global:PIM_SqlAdminGroupId)".Trim() } catch { $raw = '' } }
+    return , @(@($raw -split '[,;\s]+') | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Select-Object -Unique)
 }
 function Test-PimDriftItemExcluded {
     <# PURE. True when this drift item names a platform-owned object. Matches the item's key AND its
-       label, because a provider may carry the group in either (an id-keyed item still labels it). #>
-    param([AllowNull()][object]$Item, [string[]]$Names = @())
+       label, because a provider may carry the group in either (an id-keyed item still labels it).
+       33.0 item 5 (2026-10-20): -Ids (the SQL admin group's object id) are matched against the key, the label, the group
+       AND the item's groupId / id -- a RENAMED group is still excluded when its id is known. #>
+    param([AllowNull()][object]$Item, [string[]]$Names = @(), [string[]]$Ids = @())
     if ($null -eq $Item) { return $false }
     $hay = "$(Get-PimDriftSnapshotField $Item 'key') $(Get-PimDriftSnapshotField $Item 'label') $(Get-PimDriftSnapshotField $Item 'group')"
     foreach ($n in @($Names)) {
         $nn = "$n".Trim()
         if (-not $nn) { continue }
         if ($hay.IndexOf($nn, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+    }
+    $idHay = "$hay $(Get-PimDriftSnapshotField $Item 'groupId') $(Get-PimDriftSnapshotField $Item 'id')"
+    foreach ($i in @($Ids)) {
+        $ii = "$i".Trim()
+        if (-not $ii) { continue }
+        if ($idHay.IndexOf($ii, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
     }
     return $false
 }
@@ -200,6 +225,7 @@ function ConvertTo-PimDriftSnapshotDocument {
     }
     $labelFn = [bool](Get-Command Get-PimFailureItemLabel -ErrorAction SilentlyContinue)
     $exclNames = Get-PimDriftExcludedNames
+    $exclIds = Get-PimDriftExcludedIds   # 33.0 item 5 (2026-10-20): the group's object id, when set (a rename keeps it excluded)
     foreach ($sd in $scopeDocs) {
         if (-not $sd.ok -or -not $sd.checked) { continue }
         # 🪤 `@(...)` AROUND THE WHOLE `if`, and `@($list).Count` -- both are load-bearing, and their
@@ -216,8 +242,10 @@ function ConvertTo-PimDriftSnapshotDocument {
             foreach ($it in $list) {
                 $lbl = ''
                 if ($labelFn) { try { $lbl = "$(Get-PimFailureItemLabel -Key "$($it.key)" -Row $payloads["$($sd.scope)|$($it.key)"])" } catch { $lbl = '' } }
-                $probe = [pscustomobject]@{ key = "$($it.key)"; label = $lbl }
-                if (Test-PimDriftItemExcluded -Item $probe -Names $exclNames) { $exclN++ } else { $keep.Add($it) }
+                $pl = $payloads["$($sd.scope)|$($it.key)"]
+                $plGid = "$(Get-PimDriftSnapshotField $pl 'groupId')"; if (-not $plGid.Trim()) { $plGid = "$(Get-PimDriftSnapshotField $pl 'GroupId')" }
+                $probe = [pscustomobject]@{ key = "$($it.key)"; label = $lbl; groupId = $plGid }
+                if (Test-PimDriftItemExcluded -Item $probe -Names $exclNames -Ids $exclIds) { $exclN++ } else { $keep.Add($it) }
             }
             $list = @($keep.ToArray())
         }
@@ -248,7 +276,7 @@ function ConvertTo-PimDriftSnapshotDocument {
         $wf = @(if ($findByScope.ContainsKey("$($sd.scope)")) { @($findByScope["$($sd.scope)"]) } else { @() })   # see the 5.1 note above
         if (@($wf).Count) {
             $keepW = New-Object System.Collections.Generic.List[object]
-            foreach ($f in $wf) { if (Test-PimDriftItemExcluded -Item $f -Names $exclNames) { $exclN++ } else { $keepW.Add($f) } }
+            foreach ($f in $wf) { if (Test-PimDriftItemExcluded -Item $f -Names $exclNames -Ids $exclIds) { $exclN++ } else { $keepW.Add($f) } }
             $wf = @($keepW.ToArray())
         }
         $planKeys = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)

@@ -14661,7 +14661,7 @@
   // stays one click away, folded -- never as cut-off JSON in the column.
   function auditRawHtml(e) {
     if (!e || !/^engine\.(groupspolicies|entrarolepolicies|azrespolicies)\./i.test(String(e.action || ''))) return '';
-    const obj = v => { if (typeof v === 'string' && /^\s*[{[]/.test(v)) { try { return JSON.parse(v); } catch (_) { return v; } } return v == null ? null : v; };
+    const obj = v => { if (typeof v === 'string' && /^\s*[\x7b\x5b]/.test(v)) { try { return JSON.parse(v); } catch (_) { return v; } } return v == null ? null : v; };
     const b = obj(e.before), a = obj(e.after);
     if (b == null && a == null) return '';
     let raw = '';
@@ -16068,7 +16068,7 @@
   // (pim.Settings MailboxSetup). Step 2 knows that address: Check and send a test mail makes it the sender (POST
   // /api/settings/mail/mailbox/use), runs the mail check and sends the test. The address is typed nowhere else.
   function mailboxStepsHtml(m, p, infoBtn) {
-    const mb = (m && m.mailbox) || {}, d = mb.defaults || { name: 'PIM-Engine', displayName: 'PIM Manager (notifications)' };
+    const mb = (m && m.mailbox) || {}, d = mb.defaults || { name: 'PIM-Engine', displayName: 'PIM Manager' };
     const val = (x) => escapeHtml(String(x == null ? '' : x));
     const name = mb.name != null ? mb.name : d.name, dom = String(mb.domain || d.domain || ''), disp = mb.displayName != null ? mb.displayName : d.displayName;
     const doms = Array.isArray(m && m.domains) ? m.domains : [];
