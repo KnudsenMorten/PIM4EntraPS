@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.655 -- 2026-10-20
+
+- Sign-in front 1.2.1 (opt-in installs only): pages load behind the front again, and the hourly silent sign-in refresh no longer signs a page out
+
 ## 2.4.654 -- 2026-10-20
 
 - Large tenants: the active-assignments list now re-reads only groups that changed (full read weekly), instead of every group every 2 hours
