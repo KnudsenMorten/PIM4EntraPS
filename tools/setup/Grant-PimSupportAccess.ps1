@@ -92,10 +92,18 @@ if ($needRest -and -not $global:PIM_SetupRestMode -and -not "$($global:PIM_Clien
     if ("$SubscriptionId".Trim()) { [void](Connect-PimSetupRest -SubscriptionId "$SubscriptionId".Trim() -TenantId $TenantId) } else { [void](Connect-PimSetupRest -TenantId $TenantId) }
 }
 # No -SqlServer given: the PIM store in -ResourceGroup (a guided install has exactly one). az sql server list -g over ARM.
+$script:gsaSqlAdminGroupId = ''
 if ($Level -ne 'asbuilt' -and -not "$SqlServer".Trim() -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim() -and -not $Sql) {
-    $found = @(@(Invoke-PimSetupArm -Path "/subscriptions/$("$SubscriptionId".Trim())/resourceGroups/$ResourceGroup/providers/Microsoft.Sql/servers" -ApiVersion (Get-PimSetupApiVersion sql) -All -ErrorAsNull) |
-                 Where-Object { $_ } | ForEach-Object { "$($_.properties.fullyQualifiedDomainName)".Trim() } | Where-Object { $_ })
-    if ($found.Count -eq 1) { $SqlServer = "$($found[0])".Trim(); Write-Host "  SQL server in $($ResourceGroup): $SqlServer" -ForegroundColor DarkGray }
+    $srvList = @(@(Invoke-PimSetupArm -Path "/subscriptions/$("$SubscriptionId".Trim())/resourceGroups/$ResourceGroup/providers/Microsoft.Sql/servers" -ApiVersion (Get-PimSetupApiVersion sql) -All -ErrorAsNull) |
+                 Where-Object { $_ -and "$($_.properties.fullyQualifiedDomainName)".Trim() })
+    $found = @($srvList | ForEach-Object { "$($_.properties.fullyQualifiedDomainName)".Trim() })
+    if ($found.Count -eq 1) {
+        $SqlServer = "$($found[0])".Trim(); Write-Host "  SQL server in $($ResourceGroup): $SqlServer" -ForegroundColor DarkGray
+        # 33.0 item 5 (2026-10-20): the server list already carries the server's Entra administrator -- when it is a GROUP its
+        # sid IS the SQL admin group's object id, and Find-One reads the group by that id (a renamed group is still found)
+        $adm1 = $srvList[0].properties.administrators
+        if ($adm1 -and "$($adm1.principalType)" -ieq 'Group' -and "$($adm1.sid)".Trim()) { $script:gsaSqlAdminGroupId = "$($adm1.sid)".Trim() }
+    }
     elseif ($found.Count -gt 1) { throw "resource group '$ResourceGroup' holds $($found.Count) SQL servers -- name the PIM one with -SqlServer" }
 }
 if (-not $Graph) {
@@ -128,7 +136,12 @@ if (-not $Sql -and "$SqlServer".Trim()) {
 
 $problems = New-Object System.Collections.Generic.List[string]
 function Say([string]$m, [string]$c = 'Gray') { Write-Host "  $m" -ForegroundColor $c }
-function Find-One([string]$Kind, [string]$DisplayName) {
+function Find-One([string]$Kind, [string]$DisplayName, [string]$Id = '') {
+    # 33.0 item 5 (2026-10-20): -Id (the SQL server administrator's sid, when the script has it) is read first; the
+    # display name below is the fallback (an id that does not read falls through to it)
+    if ("$Id".Trim()) {
+        try { $byId = & $Graph 'GET' "/$Kind/$([uri]::EscapeDataString("$Id".Trim()))?`$select=id,displayName" $null; if ($byId -and "$($byId.id)".Trim()) { return $byId } } catch { }
+    }
     # CR5 item 5: the name in BOTH forms ('PIM4EntraPS Manager ...' / 'PIM Manager ...') -- the update may have renamed it,
     # and a new-name install (CR5 step 2) created it with the new one
     foreach ($dn in @(Get-PimDisplayNameForms $DisplayName)) {
@@ -160,7 +173,7 @@ $objects = @(
 $ownerLevel = ($Level -eq 'setup' -or $Remove)
 foreach ($o in $objects) {
     if (-not $ownerLevel -and $o.what -ne 'SQL admin group') { continue }
-    $obj = Find-One $o.kind $o.name
+    $obj = Find-One $o.kind $o.name $(if ($o.what -eq 'SQL admin group') { $script:gsaSqlAdminGroupId } else { '' })
     if (-not $obj) { Say "($($o.what) '$($o.name)' does not exist here -- nothing to do)" 'DarkGray'; continue }
     if ($ownerLevel) {
         $owners = Get-Ids "/$($o.kind)/$($obj.id)/owners?`$select=id"

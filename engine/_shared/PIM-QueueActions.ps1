@@ -222,12 +222,38 @@ function Get-PimQueueProtectedSqlAdminGroupNames {
     $n.Add('grp-pim-sql-admins')
     try { if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { $x = "$(Get-PimInstallName -Role sqlAdminGroup)".Trim(); if ($x) { $n.Add($x) } } } catch { }
     foreach ($e in "$($env:PIM_SQL_ADMIN_GROUP)", "$($env:PIM_SqlAdminGroupName)", "$($global:PIM_SqlAdminGroupName)") { if ("$e".Trim()) { $n.Add("$e".Trim()) } }
+    # 33.0 item 5 (2026-10-20): every display-name form of each (CR5 item 5: the earlier and the current release's name), so
+    # a group the update renamed to its new form is still protected by the old name, and the other way round
+    if (Get-Command Get-PimDisplayNameForms -ErrorAction SilentlyContinue) {
+        foreach ($x in @($n.ToArray())) { try { foreach ($f in @(Get-PimDisplayNameForms -Name $x)) { if ("$f".Trim()) { $n.Add("$f".Trim()) } } } catch { } }
+    }
     return @($n | Select-Object -Unique)
 }
 
+function Get-PimQueueProtectedSqlAdminGroupIds {
+    <#
+      33.0 item 5 (2026-10-20): the install's SQL admin group by OBJECT ID -- $env:PIM_SQL_ADMIN_GROUP_ID, else
+      $global:PIM_SqlAdminGroupId (optional, a comma list allowed). The id survives a rename; the names above stay the
+      protection when none is set (exactly as before). Lower-case, unique.
+    #>
+    $ids = New-Object System.Collections.Generic.List[string]
+    foreach ($e in "$($env:PIM_SQL_ADMIN_GROUP_ID)", "$($global:PIM_SqlAdminGroupId)") {
+        foreach ($x in @("$e" -split '[,;\s]+')) { if ("$x".Trim()) { $ids.Add("$x".Trim().ToLowerInvariant()) } }
+    }
+    return @($ids | Select-Object -Unique)
+}
+
 function Test-PimQueueProtectedSqlAdminGroup {
-    <# PIM 100.116 / framework 4.1b: is -GroupName this install's SQL admin group? (-Names: test seam) #>
-    param([AllowNull()][string]$GroupName, [string[]]$Names)
+    <#
+      PIM 100.116 / framework 4.1b: is the group this install's SQL admin group? By -GroupId against the protected ids
+      (33.0 item 5, 2026-10-20: a renamed group is still protected) OR by -GroupName against the names.
+      (-Names / -Ids: test seams)
+    #>
+    param([AllowNull()][string]$GroupName, [string[]]$Names, [AllowNull()][string]$GroupId, [string[]]$Ids)
+    if ("$GroupId".Trim()) {
+        if ($null -eq $Ids) { $Ids = @(Get-PimQueueProtectedSqlAdminGroupIds) }
+        if (@($Ids | Where-Object { "$_".Trim() -and "$_".Trim() -ieq "$GroupId".Trim() }).Count) { return $true }
+    }
     if (-not "$GroupName".Trim()) { return $false }
     if ($null -eq $Names) { $Names = @(Get-PimQueueProtectedSqlAdminGroupNames) }
     return [bool](@($Names | Where-Object { "$_".Trim() -and "$_".Trim() -ieq "$GroupName".Trim() }).Count)
@@ -463,7 +489,7 @@ function Invoke-PimQueueGroupDelete {
     if ("$($p.stagedFrom)".Trim() -ne 'drift-extra') { return (& $refuse $true "the entry was not staged by the Drift page's Delete (stagedFrom='$($p.stagedFrom)') -- PIM deletes only a group it staged for deletion") }
     # PIM 100.116 / framework 4.1b: the SQL admin group holds the Invardia Support app's standing access (and the database's
     # administrators) -- PIM never deletes it, whatever its prefix.
-    if (Test-PimQueueProtectedSqlAdminGroup -GroupName $gn) { return (& $refuse $true "'$gn' is the SQL admin group of this installation (the database's administrators and the Invardia Support app's standing access) -- PIM never deletes it") }
+    if (Test-PimQueueProtectedSqlAdminGroup -GroupName $gn -GroupId $gid) { return (& $refuse $true "'$gn' is the SQL admin group of this installation (the database's administrators and the Invardia Support app's standing access) -- PIM never deletes it") }
 
     # 2. the removal budget (computed over the whole drain by Invoke-PimQueueActionDrain)
     if ($null -eq $Budget) {

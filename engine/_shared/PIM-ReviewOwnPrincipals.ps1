@@ -66,7 +66,9 @@ function Get-PimReviewOwnPrincipals {
         [string[]]$ProductAppIds = @(),
         [Parameter(Mandatory)][scriptblock]$Graph,
         [scriptblock]$SqlSupportSid,
-        [string]$SqlAdminGroupName = 'grp-pim-sql-admins'
+        [string]$SqlAdminGroupName = 'grp-pim-sql-admins',
+        # 33.0 item 5 (2026-10-20): the group's object id when known -- read by id first (a renamed group is still PIM's)
+        [string]$SqlAdminGroupId = ''
     )
     $tag = Get-PimReviewSupportTag
     $errors = New-Object System.Collections.Generic.List[string]
@@ -94,10 +96,19 @@ function Get-PimReviewOwnPrincipals {
     } else { $errors.Add('the identity this Manager runs as could not be resolved') }
 
     # 2. PIM's own SQL admin group: its service-principal members are the product's identities (and the support app)
-    if ("$SqlAdminGroupName".Trim()) {
+    if ("$SqlAdminGroupName".Trim() -or "$SqlAdminGroupId".Trim()) {
         try {
-            $f = [uri]::EscapeDataString("displayName eq '$("$SqlAdminGroupName".Replace("'", "''"))'")
-            $gs = @((& $Graph 'GET' "/groups?`$filter=$f&`$select=id,displayName" $null).value)
+            $gs = @()
+            if ("$SqlAdminGroupId".Trim()) {
+                try {
+                    $gi = & $Graph 'GET' ("/groups/{0}?`$select=id,displayName" -f [uri]::EscapeDataString("$SqlAdminGroupId".Trim())) $null
+                    if ($gi -and "$($gi.id)".Trim()) { $gs = @($gi) }
+                } catch { $gs = @() }   # the id does not read: the name below is the fallback
+            }
+            if (-not $gs.Count -and "$SqlAdminGroupName".Trim()) {
+                $f = [uri]::EscapeDataString("displayName eq '$("$SqlAdminGroupName".Replace("'", "''"))'")
+                $gs = @((& $Graph 'GET' "/groups?`$filter=$f&`$select=id,displayName" $null).value)
+            }
             foreach ($g in $gs) {
                 $m = & $Graph 'GET' "/groups/$($g.id)/members/microsoft.graph.servicePrincipal?`$select=id,appId,displayName,servicePrincipalType,alternativeNames,tags&`$top=999" $null
                 foreach ($o in @($m.value)) { if ($o -and "$($o.id)") { & $add $o; [void]$sqlGroupMembers.Add("$($o.id)".ToLowerInvariant()) } }

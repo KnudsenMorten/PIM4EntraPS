@@ -438,10 +438,12 @@ function Get-PimManagerLookupCaches {
             # 🔴 100.31 SNAPSHOT-OOM (2026-10-09): page by page, each group projected at once to the five fields (SDK casing;
             # PowerShell property names are case-insensitive, so .id / .displayName still answer). The old
             # `-All | ConvertTo-PimSdkShape` held every raw page AND a doubled-property copy of the whole group list.
-            $script:PimManager_Groups = @(Get-PimActiveAssignmentsGraphItems -Path "/groups?`$select=id,displayName,description,groupTypes,securityEnabled&`$top=999" | ForEach-Object {
+            # SNAP-INC (owner 2026-10-20): + isAssignableToRole -- a role-assignable group is re-read on every incremental run.
+            $script:PimManager_Groups = @(Get-PimActiveAssignmentsGraphItems -Path "/groups?`$select=id,displayName,description,groupTypes,securityEnabled,isAssignableToRole&`$top=999" | ForEach-Object {
                 $sec = $null; if ($_.PSObject.Properties['securityEnabled']) { $sec = $_.securityEnabled }
                 $gt = @(); if ($null -ne $_.groupTypes) { $gt = @($_.groupTypes) }
-                [pscustomobject]@{ Id = "$($_.id)"; DisplayName = [string]$_.displayName; Description = [string]$_.description; GroupTypes = $gt; SecurityEnabled = $sec }
+                $rag = $false; if ($_.PSObject.Properties['isAssignableToRole']) { $rag = [bool]$_.isAssignableToRole }
+                [pscustomobject]@{ Id = "$($_.id)"; DisplayName = [string]$_.displayName; Description = [string]$_.description; GroupTypes = $gt; SecurityEnabled = $sec; IsAssignableToRole = $rag }
             })
     } catch {
         Write-Warning "  [revoke] group cache load failed: $($_.Exception.Message). Group names may be blank."
@@ -670,8 +672,10 @@ function Invoke-PimActiveAssignmentsSnapshot {
     # loop would freeze every user for that long. Test-PimActiveAssignmentsSnapshot asserts it.
     # -Fresh: reload the group/role/AU lookups AND forget principal names resolved earlier in this process, so a
     # long-running scheduler loop does not keep a renamed or deleted principal's old label for ever.
+    # -GroupDelta: SNAP-INC (owner 2026-10-20) -- the incremental PIM-for-Groups read's context (New-PimSnapshotGroupDeltaContext);
+    # $null = every group is read, exactly as before. The result then carries 'groupDelta' (the state the job stores).
     [CmdletBinding()]
-    param([switch]$Fresh)
+    param([switch]$Fresh, [AllowNull()][hashtable]$GroupDelta = $null)
 
     if ($Fresh) { $script:PimManager_ResolvedById = @{} }
     # Initial connect + lookup caches (idempotent).
@@ -873,38 +877,61 @@ function Invoke-PimActiveAssignmentsSnapshot {
     # which lets the read skip them instead of spending a batch slot to collect a known error.
     $pimDynamicSkipped = @($pimGroupsToQuery | Where-Object { @($_.GroupTypes) -contains 'DynamicMembership' }).Count
     if ($pimDynamicSkipped) { $pimGroupsToQuery = @($pimGroupsToQuery | Where-Object { -not (@($_.GroupTypes) -contains 'DynamicMembership') }) }
-    if ($pimGroupsToQuery.Count -gt 0 -and (Get-Command Invoke-PimGraphBatchGet -ErrorAction SilentlyContinue)) {
+    # SNAP-INC (owner 2026-10-20): EVERY group above stays covered (BUG-217) -- an incremental run re-reads the changed and the
+    # always-re-read groups and carries the rows of the others forward from the previous complete generation. No context, or a
+    # plan that cannot be made = every group is read, as before (and no delta state is stored, so the next run is full too).
+    $pimGroupsToRead = $pimGroupsToQuery
+    $gdRun = $null; $gdPlan = $null; $gdCarried = $null; $gdText = ''
+    $gFailedIds = New-Object System.Collections.Generic.List[string]
+    if ($null -ne $GroupDelta -and $pimGroupsToQuery.Count -gt 0) {
+        try { $gdRun = Invoke-PimSnapshotGroupIncrementalPlan -Context $GroupDelta -Candidates $pimGroupsToQuery -NowUtc ([datetime]::UtcNow) }
+        catch { $gdRun = $null; Write-Warning ("  [revoke] pim-for-groups: the incremental plan failed ({0}) -- every group is read" -f $_.Exception.Message) }
+        if ($null -ne $gdRun) {
+            $gdPlan = $gdRun.plan
+            if ("$($gdPlan.mode)" -eq 'incremental') {
+                $gdCarried = $gdRun.carried
+                $pimGroupsToRead = @($pimGroupsToQuery | Where-Object { $gdPlan.reread.Contains("$($_.Id)".Trim().ToLowerInvariant()) })
+                $gdText = "incremental -- {0} changed + {1} always re-read of {2} groups, {3} carried forward ({4} rows){5}" -f $gdPlan.changed, $gdPlan.always, $pimGroupsToQuery.Count, $gdPlan.carry.Count, $gdPlan.carryRows, $(if ($gdPlan.removed -or $gdPlan.dropped) { "; $($gdPlan.removed) removed in the delta, $($gdPlan.dropped) group(s) dropped" } else { '' })
+            } else {
+                $gdText = "full read (reason: $($gdPlan.reason))"
+            }
+            if ($gdRun.deltaError) { $gdText += "; no delta link for the next run ($($gdRun.deltaError))" }
+            Write-Host ("  [revoke] pim-for-groups: {0}" -f $gdText) -ForegroundColor DarkGray
+        }
+    }
+    if ($pimGroupsToRead.Count -gt 0 -and (Get-Command Invoke-PimGraphBatchGet -ErrorAction SilentlyContinue)) {
         # REQUIREMENTS 67.1: the SAME one-filtered-query-per-group reads, through the engine's shared batch
         # reader -- which also follows @odata.nextLink (the inline loop below kept only the first page) and
         # re-runs a throttled (429) or 5xx request on its own instead of counting it as a failed group.
         $gFail = 0
         $gFirstErr = $null
-        $gRes = Invoke-PimGraphBatchGet -Paths @($pimGroupsToQuery | ForEach-Object { "/identityGovernance/privilegedAccess/group/assignmentSchedules?`$filter=groupId eq '$($_.Id)'" })
+        $gRes = Invoke-PimGraphBatchGet -Paths @($pimGroupsToRead | ForEach-Object { "/identityGovernance/privilegedAccess/group/assignmentSchedules?`$filter=groupId eq '$($_.Id)'" })
         if ($null -ne $gRes -and $gRes -isnot [System.Collections.IList]) { $gRes = @($gRes) }   # 100.31: one answer can arrive unrolled; the release below assigns by index
-        for ($i = 0; $i -lt $pimGroupsToQuery.Count; $i++) {
+        for ($i = 0; $i -lt $pimGroupsToRead.Count; $i++) {
             $gr = $gRes[$i]; $gRes[$i] = $null   # 100.31: released as it is consumed
             if ($gr -and $gr.ok) { foreach ($v in @($gr.items)) { if ($null -ne $v) { $pimGroupRows.Add($v) } }; continue }
             if ($gr -and (Test-PimGroupNotPimOnboardedError -Message "$($gr.error)")) { continue }   # BUG-217: not a PIM group -- nothing to list, not a failure
             $gFail++
+            $gFailedIds.Add("$($pimGroupsToRead[$i].Id)")   # SNAP-INC: re-read on the next run
             $errText = if ($gr) { "$($gr.error)" } else { 'no response' }
             if (-not $gFirstErr -and $gr -and ($gr.status -eq 401 -or $gr.status -eq 403 -or $errText -match 'HTTP (401|403)\b')) { $gFirstErr = $errText }
-            if ($gFail -le 3) { Write-Warning ("  [revoke] assignmentSchedules for group '{0}' failed: {1}" -f $pimGroupsToQuery[$i].DisplayName, $errText) }
+            if ($gFail -le 3) { Write-Warning ("  [revoke] assignmentSchedules for group '{0}' failed: {1}" -f $pimGroupsToRead[$i].DisplayName, $errText) }
         }
         $gRes = $null
         if ($gFail -gt 3) { Write-Warning ("  [revoke] assignmentSchedules failed for {0} group(s) total (first 3 shown)." -f $gFail) }
-        if ($pimGroupRows.Count -eq 0 -and $gFail -ge $pimGroupsToQuery.Count -and $gFirstErr) {
+        if ($pimGroupRows.Count -eq 0 -and $gFail -ge $pimGroupsToRead.Count -and $gFirstErr) {
             [void]$surfaceErrors.Add([ordered]@{
                 surface = 'pim-for-groups'
                 error   = $gFirstErr
                 hint    = (Get-PimActiveAssignmentSurfaceHint -Surface 'pim-for-groups' -ErrorMessage $gFirstErr)
             })
         }
-        Write-Host ("  [revoke] pim-for-groups: {0} active assignment(s) across {1} PIM group(s) ({2} batch round-trips; {3} dynamic group(s) skipped)" -f $pimGroupRows.Count, $pimGroupsToQuery.Count, [Math]::Ceiling($pimGroupsToQuery.Count / 20), $pimDynamicSkipped) -ForegroundColor DarkGray
-    } elseif ($pimGroupsToQuery.Count -gt 0) {
+        Write-Host ("  [revoke] pim-for-groups: {0} active assignment(s) across {1} PIM group(s) ({2} batch round-trips; {3} dynamic group(s) skipped)" -f $pimGroupRows.Count, $pimGroupsToRead.Count, [Math]::Ceiling($pimGroupsToRead.Count / 20), $pimDynamicSkipped) -ForegroundColor DarkGray
+    } elseif ($pimGroupsToRead.Count -gt 0) {
         $gFail = 0
         $gFirstErr = $null
-        for ($ofs = 0; $ofs -lt $pimGroupsToQuery.Count; $ofs += 20) {
-            $slice = $pimGroupsToQuery[$ofs..([Math]::Min($ofs + 19, $pimGroupsToQuery.Count - 1))]
+        for ($ofs = 0; $ofs -lt $pimGroupsToRead.Count; $ofs += 20) {
+            $slice = @($pimGroupsToRead[$ofs..([Math]::Min($ofs + 19, $pimGroupsToRead.Count - 1))])
             $requests = New-Object System.Collections.ArrayList
             for ($i = 0; $i -lt $slice.Count; $i++) {
                 [void]$requests.Add(@{
@@ -921,6 +948,7 @@ function Invoke-PimActiveAssignmentsSnapshot {
                         foreach ($v in @($br.body.value)) { $pimGroupRows.Add($v) }
                     } elseif ($br.status -ge 400 -and -not (Test-PimGroupNotPimOnboardedError -Message "$(if ($br.body -and $br.body.error) { "$($br.body.error.code) $($br.body.error.message)" })")) {
                         $gFail++
+                        if ("$($br.id)" -match '^\d+$' -and [int]$br.id -lt $slice.Count) { $gFailedIds.Add("$($slice[[int]$br.id].Id)") }   # SNAP-INC: re-read next run
                         $errCode = if ($br.body -and $br.body.error) { $br.body.error.code } else { $br.status }
                         $errMsg  = if ($br.body -and $br.body.error -and $br.body.error.message) { $br.body.error.message } else { "$errCode" }
                         if (-not $gFirstErr -and ($br.status -eq 401 -or $br.status -eq 403)) { $gFirstErr = "HTTP $($br.status) $errCode : $errMsg" }
@@ -929,6 +957,7 @@ function Invoke-PimActiveAssignmentsSnapshot {
                 }
             } catch {
                 $gFail += $slice.Count
+                foreach ($sg in $slice) { $gFailedIds.Add("$($sg.Id)") }   # SNAP-INC: re-read next run
                 if (-not $gFirstErr) { $gFirstErr = "$($_.Exception.Message)" }
                 if ($gFail -le 25) { Write-Warning "  [revoke] `$batch round-trip failed: $($_.Exception.Message)" }
             }
@@ -937,17 +966,17 @@ function Invoke-PimActiveAssignmentsSnapshot {
         # Only a surface-level error when EVERY queried group failed AND we got
         # nothing back -- a few per-group failures (e.g. dynamic groups) are
         # tolerated and must not mask a partially-successful read.
-        if ($pimGroupRows.Count -eq 0 -and $gFail -ge $pimGroupsToQuery.Count -and $gFirstErr) {
+        if ($pimGroupRows.Count -eq 0 -and $gFail -ge $pimGroupsToRead.Count -and $gFirstErr) {
             [void]$surfaceErrors.Add([ordered]@{
                 surface = 'pim-for-groups'
                 error   = $gFirstErr
                 hint    = (Get-PimActiveAssignmentSurfaceHint -Surface 'pim-for-groups' -ErrorMessage $gFirstErr)
             })
         }
-        Write-Host ("  [revoke] pim-for-groups: {0} active assignment(s) across {1} PIM group(s) ({2} batch round-trips)" -f $pimGroupRows.Count, $pimGroupsToQuery.Count, [Math]::Ceiling($pimGroupsToQuery.Count / 20)) -ForegroundColor DarkGray
-    } else {
+        Write-Host ("  [revoke] pim-for-groups: {0} active assignment(s) across {1} PIM group(s) ({2} batch round-trips)" -f $pimGroupRows.Count, $pimGroupsToRead.Count, [Math]::Ceiling($pimGroupsToRead.Count / 20)) -ForegroundColor DarkGray
+    } elseif ($pimGroupsToQuery.Count -eq 0) {
         Write-Warning "  [revoke] no groups in the lookup cache that can carry a PIM-for-Groups assignment. PIM-for-Groups rows will be empty."
-    }
+    }   # (else: an incremental run with nothing to re-read -- every group's rows are carried forward)
     # Casing-tolerant property read: SDK objects are PascalCase, REST/$batch
     # bodies are camelCase. Returns the first present alias (or '').
     $pf = {
@@ -1002,6 +1031,26 @@ function Invoke-PimActiveAssignmentsSnapshot {
         })
     }
     $pimGroupRows.Clear()
+    # SNAP-INC: the rows of the groups that did not change, carried forward from the previous complete generation -- with the
+    # group's CURRENT name (the lookup cache was just read). NOT when the group read itself failed as a surface: that run is
+    # stored as the failed read it is (and no delta state is written, so the next run reads every group).
+    $pfgFailed = $false
+    foreach ($se in $surfaceErrors) { if ("$($se.surface)" -eq 'pim-for-groups') { $pfgFailed = $true } }
+    if ($null -ne $gdCarried) {
+        if (-not $pfgFailed) {
+            foreach ($cr in $gdCarried) {
+                if ($null -eq $cr) { continue }
+                $cgid = "$($cr['groupId'])"
+                if ($script:PimManager_GroupById -and $script:PimManager_GroupById.ContainsKey($cgid) -and "$($script:PimManager_GroupById[$cgid].DisplayName)") {
+                    $cgl = [string]$script:PimManager_GroupById[$cgid].DisplayName
+                    $cacc = "$($cr['accessId'])"; if (-not $cacc) { $cacc = 'member' }
+                    $cr['role'] = "$cgl ($cacc)"; $cr['scope'] = $cgl
+                }
+                [void]$rows.Add($cr)
+            }
+        }
+        $gdCarried.Clear(); $gdCarried = $null
+    }
 
     # ---- BUG-98: second pass -- resolve every principal that the filtered caches missed ----
     # Done ONCE here rather than per surface: all three row builders have run, so the distinct
@@ -1027,7 +1076,10 @@ function Invoke-PimActiveAssignmentsSnapshot {
             if (-not $row.principal -or "$($row.principal)" -eq "$($row.principalId)") {
                 $row.principal = Resolve-PimManagerPrincipalLabel -PrincipalId ([string]$row.principalId)
             }
-            $row['principalKind'] = Get-PimManagerPrincipalKind -PrincipalId ([string]$row.principalId)
+            # SNAP-INC: a carried row keeps the kind it was stored with when this run has no answer for it (users are resolved
+            # only for the rows that need a name, so an unchanged user row would otherwise lose its 'user' chip)
+            $pk = Get-PimManagerPrincipalKind -PrincipalId ([string]$row.principalId)
+            if ($pk -or -not $row.Contains('principalKind')) { $row['principalKind'] = $pk }
         }
     } catch {
         Write-Warning "  [revoke] principal second-pass resolve failed: $($_.Exception.Message)"
@@ -1067,6 +1119,15 @@ function Invoke-PimActiveAssignmentsSnapshot {
         elapsedSec    = $elapsed
         durationMs    = [int64][math]::Round($sw.Elapsed.TotalMilliseconds, 0)
     }
+    # SNAP-INC: how the group part was read, and the delta state the JOB stores once the rows are saved (never stored here).
+    # No state when the group read failed as a surface: the next run then reads every group.
+    if ($null -ne $gdPlan) {
+        $gdState = $null
+        if (-not $pfgFailed) {
+            $gdState = New-PimSnapshotGroupDeltaState -Plan $gdPlan -PreviousState $gdRun.state -NowUtc $gdRun.nowUtc -DeltaLink "$($gdRun.deltaLink)" -PimGroupRows ([long]$counts['pim-for-groups']) -FailedGroupIds $gFailedIds.ToArray()
+        }
+        $payload['groupDelta'] = [ordered]@{ mode = "$($gdPlan.mode)"; reason = "$($gdPlan.reason)"; text = $gdText; state = $gdState }
+    }
     if ($allFailedEmpty) {
         $payload.error = "Active PIM assignments could not be read from any surface. " + (($errArr | ForEach-Object {
             $h = if ($_.hint) { " ($($_.hint))" } else { '' }
@@ -1074,6 +1135,341 @@ function Invoke-PimActiveAssignmentsSnapshot {
         }) -join '  |  ')
     }
     return $payload
+}
+
+# ===========================================================================
+# SNAP-INC (owner 2026-10-20) -- THE PIM-FOR-GROUPS READ IS INCREMENTAL
+# ===========================================================================
+# Measured live: one assignmentSchedules read per group for EVERY group (BUG-217) is 125,004 groups / 514,472 rows / 15.3 h /
+# 132,504 Graph 429s per run at a school tenant, back to back every 2 h. Owner decision: keep every group, but re-read only
+# the groups that CHANGED since the last run (Graph groups delta, members@delta), carry the rows of the others forward from
+# the previous complete generation (pim.ActiveAssignmentRows), and read every group in full once a week.
+#   * always re-read, every run: groups whose rows a membership delta cannot announce -- any row with an end date, a start
+#     still ahead, an owner row (Get-PimSqlActiveAssignmentGroupSummary) -- role-assignable groups, the groups in the
+#     engine's managed list (defined in PIM), and the groups whose read failed last time
+#   * FULL read when: no stored state / no delta link / the previous snapshot was not complete or is not the stored one /
+#     the last full read is Get-PimSnapshotGroupFullReadDays old / the delta read fails (410 = resync) / the previous rows
+#     cannot be read or do not add up. A full read takes its delta link BEFORE the group reads (the stored link advanced to
+#     now, or a fresh round when there is none / it is refused), so a change made during the long read is caught next time.
+#   * state in pim.Settings 'ActiveAssignmentsGroupDelta', written by the job ONLY after the rows were stored (a failed run
+#     never advances the delta link).
+function Get-PimSnapshotGroupDeltaSettingName { return 'ActiveAssignmentsGroupDelta' }
+function Get-PimSnapshotGroupFullReadDays     { return 7 }        # a full read of every group at least this often
+function Get-PimSnapshotGroupRetryMax         { return 2000 }     # failed group reads kept for the next run; more = not complete
+function Get-PimSnapshotGroupDeltaMaxPages    { return 200000 }   # a delta round that does not end is a failed read
+function Get-PimSnapshotGroupDeltaPath        { return '/groups/delta?$select=id,members' }
+
+function ConvertFrom-PimGroupDeltaPage {
+    # SNAP-INC. PURE. One page of GET /groups/delta -> { changed; removed; nextLink; deltaLink } (group ids lower-case). A group
+    # carrying '@removed' is deleted; any other group in the page changed (members@delta, created, or a selected property).
+    param([AllowNull()][object]$Page)
+    $changed = New-Object System.Collections.Generic.List[string]
+    $removed = New-Object System.Collections.Generic.List[string]
+    $next = ''; $delta = ''
+    if ($null -ne $Page -and $Page.PSObject) {
+        $vp = $Page.PSObject.Properties['value']
+        if ($vp -and $null -ne $vp.Value) {
+            foreach ($g in @($vp.Value)) {
+                if ($null -eq $g) { continue }
+                $id = "$($g.id)".Trim().ToLowerInvariant(); if (-not $id) { continue }
+                if ($g.PSObject.Properties['@removed']) { $removed.Add($id) } else { $changed.Add($id) }
+            }
+        }
+        $nl = $Page.PSObject.Properties['@odata.nextLink'];  if ($nl -and "$($nl.Value)".Trim()) { $next = "$($nl.Value)".Trim() }
+        $dl = $Page.PSObject.Properties['@odata.deltaLink']; if ($dl -and "$($dl.Value)".Trim()) { $delta = "$($dl.Value)".Trim() }
+    }
+    return [pscustomobject]@{ changed = $changed.ToArray(); removed = $removed.ToArray(); nextLink = $next; deltaLink = $delta }
+}
+
+function Read-PimGroupDeltaRound {
+    <#
+      SNAP-INC. Follow one delta round from -Link (the initial '/groups/delta?...' or a stored deltaLink) through every
+      @odata.nextLink to its @odata.deltaLink, one page at a time. -CollectIds keeps the changed / removed group ids (an
+      initial round only needs the link). NEVER throws: { ok; error; resync; changed; removed; deltaLink; pages }.
+      resync = Graph refused the link (HTTP 410 / resync required) -- the caller reads every group.
+      -Graph: param($path) -> one page (default Invoke-PimGraph -Path).
+    #>
+    param([Parameter(Mandatory)][string]$Link, [scriptblock]$Graph = $null, [switch]$CollectIds)
+    if (-not $Graph) { $Graph = { param($p) Invoke-PimGraph -Path $p } }
+    $changed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $removed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $next = $Link; $pages = 0; $max = Get-PimSnapshotGroupDeltaMaxPages
+    try {
+        while ($next) {
+            if ($pages -ge $max) { throw "the delta round did not end within $max pages" }
+            $resp = & $Graph $next
+            $pages++
+            $pg = ConvertFrom-PimGroupDeltaPage -Page $resp
+            $resp = $null
+            if ($CollectIds) { foreach ($i in $pg.changed) { [void]$changed.Add($i) }; foreach ($i in $pg.removed) { [void]$removed.Add($i) } }
+            if ($pg.deltaLink) {
+                return [pscustomobject]@{ ok = $true; error = ''; resync = $false; changed = $changed; removed = $removed; deltaLink = $pg.deltaLink; pages = $pages }
+            }
+            if (-not $pg.nextLink) { throw 'the delta round ended without a deltaLink' }
+            $next = $pg.nextLink
+        }
+        throw 'the delta round had no link to start from'
+    } catch {
+        $em = "$($_.Exception.Message)"
+        return [pscustomobject]@{ ok = $false; error = $em; resync = [bool]($em -match '(?i)HTTP 410\b|resyncRequired|syncStateNotFound|SyncStateInvalid|resync')
+            changed = $changed; removed = $removed; deltaLink = ''; pages = $pages }
+    }
+}
+
+function ConvertTo-PimSnapshotGroupUtc {
+    # SNAP-INC. PURE. A stored stamp (ISO text, or the [datetime] pwsh 7's ConvertFrom-Json makes of it) -> UTC [datetime], or $null.
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { if ($Value.Kind -eq [DateTimeKind]::Unspecified) { return [datetime]::SpecifyKind($Value, [DateTimeKind]::Utc) }; return $Value.ToUniversalTime() }
+    $s = "$Value".Trim(); if (-not $s) { return $null }
+    $d = [datetime]::MinValue
+    $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+    if ([datetime]::TryParse($s, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$d)) { return $d }
+    return $null
+}
+
+function ConvertFrom-PimSnapshotGroupDeltaState {
+    <#
+      SNAP-INC. PURE. The stored pim.Settings 'ActiveAssignmentsGroupDelta' (raw JSON text, or an already parsed object) -> the
+      normalised state { deltaLink; lastFullUtc; lastRunUtc; mode; snapshotId; pimGroupRows; complete; retryGroupIds }, $null
+      when nothing is stored, or { unreadable = $true } for a value that is not the state's shape.
+    #>
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    $o = $Value
+    if ($Value -is [string]) {
+        if (-not $Value.Trim()) { return $null }
+        try { $o = $Value | ConvertFrom-Json } catch { return [pscustomobject]@{ unreadable = $true } }
+    }
+    if ($null -eq $o -or -not $o.PSObject -or -not $o.PSObject.Properties['deltaLink']) { return [pscustomobject]@{ unreadable = $true } }
+    $sid = [long]0; [void][long]::TryParse("$($o.snapshotId)", [ref]$sid)
+    $pgr = [long]-1; if (-not [long]::TryParse("$($o.pimGroupRows)", [ref]$pgr)) { $pgr = -1 }
+    $retry = @(); if ($o.PSObject.Properties['retryGroupIds'] -and $null -ne $o.retryGroupIds) { $retry = @(@($o.retryGroupIds) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ }) }
+    return [pscustomobject]@{
+        unreadable    = $false
+        deltaLink     = "$($o.deltaLink)".Trim()
+        lastFullUtc   = (ConvertTo-PimSnapshotGroupUtc -Value $o.lastFullUtc)
+        lastRunUtc    = (ConvertTo-PimSnapshotGroupUtc -Value $o.lastRunUtc)
+        mode          = "$($o.mode)"
+        snapshotId    = $sid
+        pimGroupRows  = $pgr
+        complete      = ($o.PSObject.Properties['complete'] -and [bool]$o.complete)
+        retryGroupIds = $retry
+    }
+}
+
+function Get-PimSnapshotGroupFullReason {
+    # SNAP-INC. PURE. Why THIS run must read every group ('' = an incremental run may be tried). -State: normalised
+    # (ConvertFrom-PimSnapshotGroupDeltaState). -CurrentSnapshotId: the generation the stored header names (0 = none).
+    param([AllowNull()][object]$State, [long]$CurrentSnapshotId = 0, [datetime]$NowUtc = [datetime]::UtcNow)
+    if ($null -eq $State) { return 'first run (no stored delta state)' }
+    if ([bool]$State.unreadable) { return 'the stored delta state could not be read' }
+    if (-not "$($State.deltaLink)".Trim()) { return 'no stored delta link' }
+    if (-not [bool]$State.complete) { return 'the previous snapshot was not complete' }
+    if ($CurrentSnapshotId -le 0 -or [long]$State.snapshotId -ne $CurrentSnapshotId) { return 'the stored snapshot is not the one the delta state belongs to' }
+    if ($null -eq $State.lastFullUtc) { return 'no full read recorded' }
+    $now = $NowUtc.ToUniversalTime()
+    if (($now - $State.lastFullUtc).TotalDays -ge (Get-PimSnapshotGroupFullReadDays)) {
+        return ("weekly full read (last full read {0})" -f $State.lastFullUtc.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture))
+    }
+    return ''
+}
+
+function Get-PimSnapshotGroupReadPlan {
+    <#
+      SNAP-INC. PURE. THE DECISION. Which groups this run reads and which carry their rows forward:
+        { mode = 'full' | 'incremental'; reason; reread (HashSet of group ids, $null = every group); carry (HashSet); carryRows;
+          changed; always; removed; dropped; candidates }
+      -State / -CurrentSnapshotId / -NowUtc   see Get-PimSnapshotGroupFullReason
+      -Delta        Read-PimGroupDeltaRound -CollectIds from the stored deltaLink ($null = not read)
+      -Summary      Get-PimSqlActiveAssignmentGroupSummary of the current generation ($null = not read; -SummaryError says why)
+      -CandidateIds the groups a full read would read (BUG-217 candidates, dynamic groups already out)
+      -AlwaysIds    groups re-read every run on top of the summary's (role-assignable, managed in PIM)
+      Fail-safe: anything that does not add up is a FULL read with its reason, never a partial snapshot.
+    #>
+    param([AllowNull()][object]$State, [long]$CurrentSnapshotId = 0, [datetime]$NowUtc = [datetime]::UtcNow,
+          [AllowNull()][object]$Delta = $null, [AllowNull()][object]$Summary = $null, [string]$SummaryError = '',
+          [string[]]$CandidateIds = @(), [string[]]$AlwaysIds = @())
+    $cand = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($c in @($CandidateIds)) { $s = "$c".Trim().ToLowerInvariant(); if ($s) { [void]$cand.Add($s) } }
+    $full = { param($why) [pscustomobject]@{ mode = 'full'; reason = "$why"; reread = $null; carry = $null; carryRows = [long]0; changed = 0; always = 0; removed = 0; dropped = 0; candidates = $cand.Count } }
+    $why = Get-PimSnapshotGroupFullReason -State $State -CurrentSnapshotId $CurrentSnapshotId -NowUtc $NowUtc
+    if ($why) { return (& $full $why) }
+    if ($null -eq $Delta) { return (& $full 'the group delta was not read') }
+    if (-not [bool]$Delta.ok) {
+        if ([bool]$Delta.resync) { return (& $full "the delta link was refused (resync): $($Delta.error)") }
+        return (& $full "the group delta read failed: $($Delta.error)")
+    }
+    if ($null -eq $Summary) { return (& $full "the previous rows could not be read: $SummaryError") }
+    if ([long]$Summary.noGroup -gt 0) { return (& $full "$($Summary.noGroup) previous row(s) have no group id") }
+    if ([long]$Summary.total -ne [long]$State.pimGroupRows) { return (& $full ("the previous rows do not add up ({0} stored, {1} expected)" -f [long]$Summary.total, [long]$State.pimGroupRows)) }
+    $removed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($r in @($Delta.removed)) { $s = "$r".Trim().ToLowerInvariant(); if ($s) { [void]$removed.Add($s) } }
+    $reread = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $nChanged = 0; $nAlways = 0
+    foreach ($id in @($Delta.changed)) { $s = "$id".Trim().ToLowerInvariant(); if ($s -and $cand.Contains($s) -and -not $removed.Contains($s) -and $reread.Add($s)) { $nChanged++ } }
+    foreach ($g in @($Summary.groups)) { if ($null -eq $g -or -not [bool]$g.alwaysRead) { continue }; $s = "$($g.groupId)".Trim().ToLowerInvariant(); if ($s -and $cand.Contains($s) -and -not $removed.Contains($s) -and $reread.Add($s)) { $nAlways++ } }
+    foreach ($id in (@($AlwaysIds) + @($State.retryGroupIds))) { $s = "$id".Trim().ToLowerInvariant(); if ($s -and $cand.Contains($s) -and -not $removed.Contains($s) -and $reread.Add($s)) { $nAlways++ } }
+    $carry = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $carryRows = [long]0; $dropped = 0
+    foreach ($g in @($Summary.groups)) {
+        if ($null -eq $g) { continue }
+        $s = "$($g.groupId)".Trim().ToLowerInvariant()
+        if (-not $cand.Contains($s) -or $removed.Contains($s)) { $dropped++; continue }   # deleted, or no longer a group a full read would read
+        if ($reread.Contains($s)) { continue }
+        if ($carry.Add($s)) { $carryRows += [long]$g.rows }
+    }
+    return [pscustomobject]@{ mode = 'incremental'; reason = ''; reread = $reread; carry = $carry; carryRows = $carryRows
+        changed = $nChanged; always = $nAlways; removed = $removed.Count; dropped = $dropped; candidates = $cand.Count }
+}
+
+function ConvertFrom-PimActiveAssignmentsStoredRow {
+    # SNAP-INC. PURE. One stored row (parsed RowJson) -> the ordered row the snapshot builds, field for field. pwsh 7's
+    # ConvertFrom-Json turns the ISO start / end into [datetime]; they go back to the round-trip text the builder wrote.
+    param([AllowNull()][object]$Row)
+    if ($null -eq $Row) { return $null }
+    $o = [ordered]@{}
+    foreach ($p in $Row.PSObject.Properties) {
+        $v = $p.Value
+        if ($v -is [datetime]) {
+            $d = if ($v.Kind -eq [DateTimeKind]::Unspecified) { [datetime]::SpecifyKind($v, [DateTimeKind]::Utc) } else { $v.ToUniversalTime() }
+            $v = $d.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        $o[$p.Name] = $v
+    }
+    return $o
+}
+
+function New-PimSnapshotGroupDeltaContext {
+    <#
+      SNAP-INC. What the incremental read needs from the store, as a context the snapshot takes (-GroupDelta), or $null when
+      this process cannot run it (no SQL store, the row table is not there, a helper is not loaded) -- the read is then the
+      full read it always was. Nothing is read here: every read happens in Invoke-PimSnapshotGroupIncrementalPlan.
+      The scriptblocks are the test seams.
+    #>
+    param([string]$ConnectionString = '')
+    foreach ($fn in 'Get-PimSqlSettingRaw', 'Set-PimSqlSetting', 'Get-PimSqlActiveAssignmentsCurrentSnapshotId', 'Get-PimSqlActiveAssignmentGroupSummary', 'Read-PimSqlActiveAssignmentGroupRows', 'Confirm-PimSqlActiveAssignmentRowsReady', 'Invoke-PimGraph') {
+        if (-not (Get-Command $fn -ErrorAction SilentlyContinue)) { return $null }
+    }
+    if (-not "$ConnectionString".Trim() -and (Get-Command Get-PimTenantCacheStoreCs -ErrorAction SilentlyContinue)) { $ConnectionString = "$(Get-PimTenantCacheStoreCs)" }
+    if (-not "$ConnectionString".Trim()) { return $null }
+    $ddl = $null; try { $ddl = Confirm-PimSqlActiveAssignmentRowsReady -ConnectionString $ConnectionString } catch { $ddl = $null }
+    if ($null -eq $ddl -or -not [bool]$ddl.ok) { return $null }   # carried rows come from the table form only
+    return @{
+        cs                = $ConnectionString
+        settingName       = (Get-PimSnapshotGroupDeltaSettingName)
+        ReadState         = { param($ctx) Get-PimSqlSettingRaw -ConnectionString $ctx.cs -Name $ctx.settingName }
+        WriteState        = { param($ctx, $json) Set-PimSqlSetting -ConnectionString $ctx.cs -Name $ctx.settingName -ValueJson $json }
+        CurrentSnapshotId = { param($ctx) Get-PimSqlActiveAssignmentsCurrentSnapshotId -ConnectionString $ctx.cs }
+        ReadSummary       = { param($ctx, $sid, $now) Get-PimSqlActiveAssignmentGroupSummary -ConnectionString $ctx.cs -SnapshotId $sid -NowUtc $now }
+        ReadRows          = { param($ctx, $sid, $groupIds, $onChunk) Read-PimSqlActiveAssignmentGroupRows -ConnectionString $ctx.cs -SnapshotId $sid -GroupIds $groupIds -OnChunk $onChunk }
+        # the groups defined in PIM: the group part of the engine's managed list ('g|<principal>|<group>|<access>'); none stored = none
+        ManagedGroupIds   = { param($ctx)
+            if (-not (Get-Command Get-PimSqlManagedLiveIdentitySet -ErrorAction SilentlyContinue)) { return @() }
+            $set = Get-PimSqlManagedLiveIdentitySet -ConnectionString $ctx.cs
+            if ($null -eq $set) { return @() }
+            @(foreach ($k in $set) { $p = "$k".Split('|'); if ($p.Count -ge 4 -and $p[0] -eq 'g' -and $p[2]) { $p[2] } }) }
+        Graph             = { param($p) Invoke-PimGraph -Path $p }
+    }
+}
+
+function Invoke-PimSnapshotGroupIncrementalPlan {
+    <#
+      SNAP-INC. Run the decision for one snapshot: read the stored state + the generation it belongs to, then (when an
+      incremental run is allowed) the delta since the stored deltaLink, the previous generation's per-group summary and the
+      always-re-read groups, and decide (Get-PimSnapshotGroupReadPlan). An incremental plan reads its carried rows here, and a
+      carry that fails or does not add up turns the plan into a FULL read. A full read takes its delta link HERE, before any
+      group is read: the stored link advanced to now, else a fresh round from Get-PimSnapshotGroupDeltaPath. Returns { plan; state (the stored one, normalised); deltaLink; deltaError; carried (rows); nowUtc }.
+      -Context: New-PimSnapshotGroupDeltaContext (or a test's). -Candidates: the group objects a full read would read.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Context, [object[]]$Candidates = @(), [datetime]$NowUtc = [datetime]::UtcNow)
+    $now = $NowUtc.ToUniversalTime()
+    $candIds = @(foreach ($g in @($Candidates)) { if ($g -and "$($g.Id)".Trim()) { "$($g.Id)".Trim().ToLowerInvariant() } })
+    $state = $null
+    try { $state = ConvertFrom-PimSnapshotGroupDeltaState -Value (& $Context.ReadState $Context) } catch { $state = [pscustomobject]@{ unreadable = $true } }
+    $curId = [long]0
+    try { $v = & $Context.CurrentSnapshotId $Context; if ($null -ne $v) { $curId = [long]$v } } catch { $curId = 0 }
+    $delta = $null; $summary = $null; $sumErr = ''; $always = @()
+    if (-not (Get-PimSnapshotGroupFullReason -State $state -CurrentSnapshotId $curId -NowUtc $now)) {
+        $delta = Read-PimGroupDeltaRound -Link "$($state.deltaLink)" -Graph $Context.Graph -CollectIds
+        if ($delta.ok) {
+            try {
+                $summary = & $Context.ReadSummary $Context $curId $now
+                $always = @(@($Candidates | Where-Object { $_ -and $_.PSObject.Properties['IsAssignableToRole'] -and $_.IsAssignableToRole -eq $true } | ForEach-Object { "$($_.Id)" }) + @(& $Context.ManagedGroupIds $Context))
+            } catch { $summary = $null; $sumErr = "$($_.Exception.Message)" }
+        }
+    } elseif ($null -ne $state -and -not [bool]$state.unreadable -and "$($state.deltaLink)".Trim()) {
+        # a full read (weekly, or the previous snapshot not usable) with a stored link: advancing THAT link to now is far
+        # cheaper than a fresh round over every group and its members, and positions the next run just the same
+        $delta = Read-PimGroupDeltaRound -Link "$($state.deltaLink)" -Graph $Context.Graph
+    }
+    $plan = Get-PimSnapshotGroupReadPlan -State $state -CurrentSnapshotId $curId -NowUtc $now -Delta $delta -Summary $summary -SummaryError $sumErr -CandidateIds $candIds -AlwaysIds @($always)
+    $carried = New-Object System.Collections.Generic.List[object]
+    if ($plan.mode -eq 'incremental' -and $plan.carry.Count -gt 0) {
+        $onChunk = {
+            param([string[]]$chunk)
+            $parsed = ConvertFrom-Json -InputObject ('[' + ($chunk -join ',') + ']')   # assigned first: PS 5.1 emits the array as ONE object
+            foreach ($x in @($parsed)) { if ($null -ne $x) { $carried.Add((ConvertFrom-PimActiveAssignmentsStoredRow -Row $x)) } }
+        }   # (no GetNewClosure: a closure's module scope would not see the script-scope helpers; $carried resolves up the call stack)
+        try {
+            [void](& $Context.ReadRows $Context $curId $plan.carry $onChunk)
+            if ([long]$carried.Count -ne [long]$plan.carryRows) { throw ("{0} of {1} rows came back" -f $carried.Count, $plan.carryRows) }
+        } catch {
+            $carried.Clear()
+            $plan = [pscustomobject]@{ mode = 'full'; reason = "the previous rows could not be carried forward: $($_.Exception.Message)"; reread = $null; carry = $null; carryRows = [long]0
+                changed = 0; always = 0; removed = 0; dropped = 0; candidates = $plan.candidates }
+        }
+    }
+    $deltaLink = ''; $deltaError = ''
+    if ($null -ne $delta -and [bool]$delta.ok) { $deltaLink = "$($delta.deltaLink)" }   # the round already runs up to now -- before any group read
+    else {
+        # a FULL read starts a fresh round to its deltaLink BEFORE reading the groups: what changes during the read is caught next time
+        $round = Read-PimGroupDeltaRound -Link (Get-PimSnapshotGroupDeltaPath) -Graph $Context.Graph
+        if ($round.ok) { $deltaLink = "$($round.deltaLink)" } else { $deltaError = "$($round.error)" }
+    }
+    return [pscustomobject]@{ plan = $plan; state = $state; deltaLink = $deltaLink; deltaError = $deltaError; carried = $carried; nowUtc = $now }
+}
+
+function New-PimSnapshotGroupDeltaState {
+    <#
+      SNAP-INC. PURE. The pim.Settings 'ActiveAssignmentsGroupDelta' value after a run (the job stamps snapshotId once the rows are
+      stored). complete = the next run may be incremental: a delta link is held and the failed group reads fit in the retry list.
+    #>
+    param([Parameter(Mandatory)][object]$Plan, [AllowNull()][object]$PreviousState = $null, [datetime]$NowUtc = [datetime]::UtcNow,
+          [string]$DeltaLink = '', [long]$PimGroupRows = 0, [string[]]$FailedGroupIds = @())
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $now = $NowUtc.ToUniversalTime()
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $failed = @(foreach ($f in @($FailedGroupIds)) { $s = "$f".Trim().ToLowerInvariant(); if ($s -and $seen.Add($s)) { $s } })
+    $complete = ("$DeltaLink".Trim() -ne '' -and $failed.Count -le (Get-PimSnapshotGroupRetryMax))
+    $lastFull = $null
+    if ("$($Plan.mode)" -eq 'full') { $lastFull = $now }
+    elseif ($null -ne $PreviousState -and $null -ne $PreviousState.lastFullUtc) { $lastFull = $PreviousState.lastFullUtc }
+    $retry = [string[]]@(); if ($complete -and $failed.Count -gt 0) { $retry = [string[]]$failed }   # a variable, not $(...): that would unroll a 0/1-item list
+    return [ordered]@{
+        version       = 1
+        mode          = "$($Plan.mode)"
+        reason        = "$($Plan.reason)"
+        deltaLink     = "$DeltaLink".Trim()
+        lastFullUtc   = $(if ($null -ne $lastFull) { $lastFull.ToString('yyyy-MM-ddTHH:mm:ssZ', $inv) } else { '' })
+        lastRunUtc    = $now.ToString('yyyy-MM-ddTHH:mm:ssZ', $inv)
+        snapshotId    = [long]0
+        pimGroupRows  = [long]$PimGroupRows
+        complete      = [bool]$complete
+        retryGroupIds = $retry
+    }
+}
+
+function Save-PimSnapshotGroupDeltaState {
+    # SNAP-INC. Write the state for the generation that was just stored (-SnapshotId). Called by the job ONLY after the rows
+    # were saved. Never throws: { ok; error }.
+    param([Parameter(Mandatory)][hashtable]$Context, [Parameter(Mandatory)][System.Collections.IDictionary]$State, [Parameter(Mandatory)][long]$SnapshotId)
+    try {
+        $State['snapshotId'] = $SnapshotId
+        $json = ConvertTo-Json -InputObject $State -Depth 6 -Compress
+        [void](& $Context.WriteState $Context $json)
+        return [pscustomobject]@{ ok = $true; error = '' }
+    } catch { return [pscustomobject]@{ ok = $false; error = "$($_.Exception.Message)" } }
 }
 
 # ===========================================================================
@@ -1111,7 +1507,15 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
             detail = "unimplemented:$type -- no SQL store in this process, so the snapshot could only live in memory where the Manager can never read it (this is 'cannot answer', not 'nothing to do')" }
     }
 
-    $snap = Invoke-PimActiveAssignmentsSnapshot -Fresh
+    # SNAP-INC (owner 2026-10-20): the PIM-for-Groups part is read INCREMENTALLY when this store can carry rows forward (the
+    # context reads nothing itself). Passed only to a snapshot that takes it -- a stand-in without -GroupDelta still runs.
+    $gdCtx = $null
+    try { $gdCtx = New-PimSnapshotGroupDeltaContext } catch { $gdCtx = $null }
+    # Named switches, never a hashtable splat: @{ Fresh = $true } reaches a wrapper as '-Fresh:', $true and the bare $true then
+    # binds BY POSITION to -GroupDelta (VM gate 2026-10-20, Test-PimActiveAssignmentsSnapshot B6).
+    $useGd = $false
+    if ($null -ne $gdCtx) { $sc = Get-Command Invoke-PimActiveAssignmentsSnapshot -ErrorAction SilentlyContinue; $useGd = [bool]($sc -and $sc.Parameters.ContainsKey('GroupDelta')) }
+    $snap = if ($useGd) { Invoke-PimActiveAssignmentsSnapshot -Fresh -GroupDelta $gdCtx } else { Invoke-PimActiveAssignmentsSnapshot -Fresh }
     $errs = @($snap.surfaceErrors)
     $entry = [ordered]@{
         refreshedUtc  = "$($snap.refreshedUtc)"
@@ -1156,6 +1560,19 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
         $where = Set-PimTenantCacheEntry -Kind $kind -ValueJson $json
         $json = $null
         if ("$($tbl.reason)".Trim() -and [bool]$tbl.said) { $formTxt = "; stored as one document ($($tbl.reason))" }
+    }
+    # SNAP-INC: the delta state moves ONLY now -- the rows of this run are stored in the table form (a failed write threw
+    # above and left the previous state, which still names the previous generation). Not for a read that failed everywhere.
+    if ($snap.Contains('groupDelta') -and $null -ne $snap['groupDelta']) {
+        $gdr = $snap['groupDelta']
+        $formTxt += "; pim-for-groups $($gdr.text)"
+        if ($null -eq $gdr.state) { $formTxt += '; group delta state not advanced (the group read failed)' }
+        elseif (-not $tbl.stored) { $formTxt += '; group delta state not advanced (the rows are not in the table form)' }
+        elseif (-not [bool]$snap.ok) { $formTxt += '; group delta state not advanced (the read failed)' }
+        elseif ($null -ne $gdCtx) {
+            $gdw = Save-PimSnapshotGroupDeltaState -Context $gdCtx -State $gdr.state -SnapshotId ([long]$tbl.snapshotId)
+            if (-not $gdw.ok) { $formTxt += "; group delta state NOT saved ($($gdw.error)) -- the next run reads every group" }
+        }
     }
     $c = $snap.counts
     $sum = "{0} total ({1} entra-role, {2} azure-rbac, {3} pim-for-groups) in {4}s -> {5}{6}" -f $c.total, $c['entra-role'], $c['azure-rbac'], $c['pim-for-groups'], $snap.elapsedSec, $where, $formTxt

@@ -147,19 +147,34 @@ function Add-PimSupportSqlAdminGroupMember {
         would-add -ReadOnly, not a member     no-group  the group does not exist in this tenant
         no-sp     the application has no service principal here
         refused   Microsoft Graph refused (a role-assignable group needs Privileged Role Administrator)
+      -GroupId (33.0 item 5, 2026-10-20): the group's object id when the caller knows it (the SQL server's Entra
+      administrator, principalType Group: its sid IS the group's object id). The group is then read BY ID and its name
+      may be anything (a renamed group is still found); the display-name filter is only the fallback when no id is
+      given or the id does not read.
     #>
-    param([Parameter(Mandatory)][scriptblock]$Graph, [Parameter(Mandatory)][string]$SupportAppId, [string]$GroupName = 'grp-pim-sql-admins', [switch]$ReadOnly)
+    param([Parameter(Mandatory)][scriptblock]$Graph, [Parameter(Mandatory)][string]$SupportAppId, [string]$GroupName = 'grp-pim-sql-admins', [string]$GroupId = '', [switch]$ReadOnly)
     $o = [ordered]@{ state = ''; detail = ''; spObjectId = ''; spName = ''; groupId = '' }
     try {
         $f = [uri]::EscapeDataString("appId eq '$("$SupportAppId".Trim())'")
         $sp = @((& $Graph 'GET' "/servicePrincipals?`$select=id,appId,displayName&`$filter=$f" $null).value | Where-Object { $_ }) | Select-Object -First 1
         if (-not $sp -or -not "$($sp.id)".Trim()) { $o.state = 'no-sp'; $o.detail = "the application $SupportAppId has no service principal in this tenant"; return [pscustomobject]$o }
         $o.spObjectId = "$($sp.id)".Trim(); $o.spName = "$($sp.displayName)".Trim()
-        $gf = [uri]::EscapeDataString("displayName eq '$($GroupName.Replace("'", "''"))'")
-        $grps = @((& $Graph 'GET' "/groups?`$select=id,displayName&`$filter=$gf" $null).value | Where-Object { $_ })
-        if (-not $grps.Count) { $o.state = 'no-group'; $o.detail = "the group '$GroupName' does not exist in this tenant"; return [pscustomobject]$o }
-        if ($grps.Count -gt 1) { $o.state = 'refused'; $o.detail = "$($grps.Count) groups are named '$GroupName' -- not changed"; return [pscustomobject]$o }
-        $gid = "$($grps[0].id)".Trim(); $o.groupId = $gid
+        $gid = ''
+        # 33.0 item 5 (2026-10-20): by id first -- the name is configurable and may be renamed; the id never changes
+        if ("$GroupId".Trim()) {
+            try {
+                $gById = & $Graph 'GET' "/groups/$([uri]::EscapeDataString("$GroupId".Trim()))?`$select=id,displayName" $null
+                if ($gById -and "$($gById.id)".Trim()) { $gid = "$($gById.id)".Trim(); if ("$($gById.displayName)".Trim()) { $GroupName = "$($gById.displayName)".Trim() } }
+            } catch { $gid = '' }
+        }
+        if (-not $gid) {
+            $gf = [uri]::EscapeDataString("displayName eq '$($GroupName.Replace("'", "''"))'")
+            $grps = @((& $Graph 'GET' "/groups?`$select=id,displayName&`$filter=$gf" $null).value | Where-Object { $_ })
+            if (-not $grps.Count) { $o.state = 'no-group'; $o.detail = "the group '$GroupName' does not exist in this tenant"; return [pscustomobject]$o }
+            if ($grps.Count -gt 1) { $o.state = 'refused'; $o.detail = "$($grps.Count) groups are named '$GroupName' -- not changed"; return [pscustomobject]$o }
+            $gid = "$($grps[0].id)".Trim()
+        }
+        $o.groupId = $gid
         # 2.4.649 (live 2026-10-18): GET /groups/{id}/members LEAVES OUT service principals the caller cannot read -- at 16
         # installs the Support app was a member while the list showed 0-1 members. Asked from the MEMBER's side first
         # (checkMemberObjects is a POST that reads, it changes nothing); the list below stays as the fallback.
@@ -327,7 +342,9 @@ function Invoke-PimSupportSqlAccessGrant {
 
     # ---- 2. the SQL admin group -----------------------------------------------------------------------------------
     if ($Graph) {
-        $g = Add-PimSupportSqlAdminGroupMember -Graph $Graph -SupportAppId $SupportAppId -GroupName $SqlAdminGroupName -ReadOnly:$WhatIfOnly
+        # 33.0 item 5 (2026-10-20): the administrator read in step 1 IS the group when it is one -- found by its id, not its name
+        $admGid = if ($before -and "$($before['principalType'])" -ieq 'Group' -and "$($before['sid'])".Trim()) { "$($before['sid'])".Trim() } else { '' }
+        $g = Add-PimSupportSqlAdminGroupMember -Graph $Graph -SupportAppId $SupportAppId -GroupName $SqlAdminGroupName -GroupId $admGid -ReadOnly:$WhatIfOnly
         $res.group = $g
         switch ("$($g.state)") {
             'member'    { & $say "SQL admin group: the Invardia Support app is $($g.detail)" 'Green' }

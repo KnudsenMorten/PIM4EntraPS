@@ -11904,8 +11904,10 @@ function Get-PimManagerReviewOwnPrincipals {
     }
     # CR5 step 1 (PIM 100.149): the install record (incl. PIM_SQL_ADMIN_GROUP / PIM_SqlAdminGroupName); today's name is the default
     $groupName = if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { Get-PimInstallName -Role sqlAdminGroup } elseif ("$($env:PIM_SQL_ADMIN_GROUP)".Trim()) { "$($env:PIM_SQL_ADMIN_GROUP)".Trim() } else { 'grp-pim-sql-admins' }
+    # 33.0 item 5 (2026-10-20): the group's object id when the install sets it (optional) -- read by id before the name
+    $groupId = "$(if ("$($env:PIM_SQL_ADMIN_GROUP_ID)".Trim()) { $env:PIM_SQL_ADMIN_GROUP_ID } else { $global:PIM_SqlAdminGroupId })".Trim()
     $r = Get-PimReviewOwnPrincipals -ServicePrincipalIds $ServicePrincipalIds -SelfAppId (Get-PimManagerSelfAppId) -ProductAppIds $productApps `
-            -Graph $graph -SqlSupportSid $sqlSid -SqlAdminGroupName $groupName
+            -Graph $graph -SqlSupportSid $sqlSid -SqlAdminGroupName $groupName -SqlAdminGroupId $groupId
     if ($r -and ($r.productKnown -or $r.supportKnown)) { $script:PimReviewOwnCache = @{ at = (Get-Date); key = $key; result = $r } }
     return $r
 }

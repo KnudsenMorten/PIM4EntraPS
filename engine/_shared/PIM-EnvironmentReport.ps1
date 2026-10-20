@@ -642,8 +642,17 @@ function Get-PimEnvironmentReport {
     # the SQL admin group + the server's Entra administrator
     $sqlGrpName = "$(Get-PimEnvReportField $c 'sqlAdminGroup')".Trim(); if (-not $sqlGrpName) { $sqlGrpName = 'grp-pim-sql-admins' }
     try {
-        $f = [uri]::EscapeDataString("displayName eq '$($sqlGrpName.Replace("'", "''"))'")
-        $gr = @(Get-PimEnvReportField (& $g "/groups?`$filter=$f&`$select=id,displayName,securityEnabled") 'value') | Select-Object -First 1
+        # 33.0 item 5 (2026-10-20): when the server's Entra administrator is a group, its sid IS the group's object id --
+        # read by id first, so a renamed group is still the SQL admin group; the configured name is only the fallback
+        $gr = $null
+        if ($sqlAdmin -and "$($sqlAdmin.principalType)" -ieq 'Group' -and "$($sqlAdmin.sid)".Trim()) {
+            try { $gr = & $g ("/groups/{0}?`$select=id,displayName,securityEnabled" -f [uri]::EscapeDataString("$($sqlAdmin.sid)".Trim())) } catch { $gr = $null }
+            if ($gr -and -not "$(Get-PimEnvReportField $gr 'id')".Trim()) { $gr = $null }
+        }
+        if (-not $gr) {
+            $f = [uri]::EscapeDataString("displayName eq '$($sqlGrpName.Replace("'", "''"))'")
+            $gr = @(Get-PimEnvReportField (& $g "/groups?`$filter=$f&`$select=id,displayName,securityEnabled") 'value') | Select-Object -First 1
+        }
         if ($gr) { [void](& $addId 'sql-admin-group' 'Group (SQL admin group)' "$($gr.displayName)" "$($gr.id)" '' 'Members administer PIM''s SQL database: the Invardia Support app as the only standing member (framework 12.23 P5), a setup identity only for the length of an install; the engine and the Manager use their own least-privilege database users, never this group; never people for daily work' 'Microsoft Graph' $null) }
         & $note 'identities' 'SQL admin group (Microsoft Graph)' $true ''
     } catch { & $note 'identities' 'SQL admin group (Microsoft Graph)' $false (ConvertTo-PimEnvReportReason $_) }

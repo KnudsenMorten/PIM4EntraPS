@@ -368,6 +368,21 @@ function Invoke-PimSqlAdminGroup {
             $admin = [pscustomobject]@{ sid = $sid; login = "$($a.properties.login)"; objectId = $oid }
         }
     } catch { & $fail "read the Entra admin of $SqlServerName" $_.Exception.Message; return (& $result $null $false @{}) }
+    # 33.0 item 5 (2026-10-20): membersOnly, no -GroupObjectId and NO group under the configured name: the server's Entra
+    # admin, when it IS a group, is read by its object id (the admin's sid) -- a RENAMED SQL admin group is still joined.
+    # Only when the name finds nothing: a group that does carry the configured name stays the one used (today's behaviour),
+    # and converge never adopts another group. A user / an application as admin answers 404 here -> blocked as before.
+    if (-not $group -and $Mode -eq 'membersOnly' -and -not "$GroupObjectId".Trim() -and $admin -and (Test-PimSqlAdminGuid "$($admin.sid)")) {
+        $byId = $null
+        try { $byId = & $Graph -Method GET -Path ("/groups/$("$($admin.sid)".Trim())" + '?$select=id,displayName,securityEnabled,isAssignableToRole') } catch { $byId = $null }
+        if ($byId -and "$($byId.id)".Trim() -and -not ($byId.PSObject.Properties['securityEnabled'] -and $byId.securityEnabled -eq $false)) {
+            [void]$notes.Add("no group is named '$GroupName' -- the server's Entra admin group '$("$($byId.displayName)".Trim())' ($($byId.id)) is the SQL admin group (found by its id)")
+            $group = $byId
+            if ("$($byId.displayName)".Trim()) { $GroupName = "$($byId.displayName)".Trim() }
+            $admin.objectId = "$($byId.id)".Trim()
+            if ($byId.PSObject.Properties['isAssignableToRole'] -and $null -ne $byId.isAssignableToRole) { $state.roleAssignable = [bool]$byId.isAssignableToRole }
+        }
+    }
     $adOnlyBefore = $null
     try {
         $ao = & $Arm -Method GET -Path "$srvPath/azureADOnlyAuthentications/Default?api-version=$($script:PimSqlApi)"
@@ -732,6 +747,14 @@ function Invoke-PimSqlAdminGroupSetupRelease {
         $cur = if ($adm) { [pscustomobject]@{ sid = "$($adm.properties.sid)"; login = "$($adm.properties.login)" } } else { $null }
         $flt = [uri]::EscapeDataString("displayName eq '$($GroupName.Replace("'", "''"))'")
         $grp = @((& $Graph -Method GET -Path ('/groups?$filter=' + $flt + '&$select=id,displayName')).value | Where-Object { $_ }) | Select-Object -First 1
+        # 33.0 item 5 (2026-10-20): NO group under the configured name -> the admin's sid read above is tried as the group's
+        # object id (the release needs the group to BE the server's admin anyway) -- a RENAMED group is still released. A
+        # user / an application as admin answers 404 -> no group, nothing to release (as before). A group that does carry
+        # the configured name stays the one used (today's behaviour).
+        if (-not $grp -and $cur -and (Test-PimSqlAdminGuid "$($cur.sid)")) {
+            try { $grp = & $Graph -Method GET -Path ("/groups/$("$($cur.sid)".Trim())" + '?$select=id,displayName') } catch { $grp = $null }
+            if ($grp -and "$($grp.id)".Trim()) { if ("$($grp.displayName)".Trim()) { $GroupName = "$($grp.displayName)".Trim() } } else { $grp = $null }
+        }
         $plan = Get-PimSqlAdminGroupSetupReleasePlan -MemberObjectId $MemberObjectId -CurrentAdmin $cur -GroupId $(if ($grp) { "$($grp.id)" } else { '' })
         $out.reason = $plan.reason
         if (-not $plan.release) { return [pscustomobject]$out }
