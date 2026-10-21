@@ -61,6 +61,8 @@ param(
     [string]$WebIdentityResourceId = '',
     # front 1.3.0+: the Key Vault key id that wraps the front's Data Protection keys (Set-PimSigninFrontState prints it)
     [string]$KeyVaultKeyId = '',
+    # a PRIVATE install: this machine cannot reach the Manager -- skip the HTTP read-back; a person signs in from inside
+    [switch]$PrivateReadBackByPerson,
     [ValidateRange(1024, 65535)][int]$UpstreamPort = 8081,
     [ValidateRange(1, 24)][int]$SessionHours = 8,
     [string]$StateFile = '',
@@ -619,6 +621,13 @@ try {
     Step 'front revision ready -- switch: Easy Auth OFF (the front signs people in from now on)'
     Set-PimSfEasyAuth -Enabled $false
     $hostP = "$(@($plan.hosts)[0])"
+    if ($PrivateReadBackByPerson) {
+        # a PRIVATE install (no route from here): the read-back is a person signing in from inside the network; until then
+        # the rollback record stays (-Rollback -StateFile). Nothing here can prove it, so nothing here claims it.
+        Step "read-back: NOT from here (private install) -- a person signs in at https://$hostP/ from inside the network; undo: -Rollback -StateFile `"$StateFile`""
+        $plan.live = $true
+        return $plan
+    }
     # Easy Auth off takes a moment to reach the edge: /healthz is asked every 10 s for up to 3 minutes before it counts.
     $hzBy = [datetime]::UtcNow.AddMinutes(3)
     do { Start-Sleep -Seconds 10; $hz = Invoke-PimSfProbe -Url "https://$hostP/healthz" } while ($hz.status -ne 200 -and [datetime]::UtcNow -lt $hzBy)

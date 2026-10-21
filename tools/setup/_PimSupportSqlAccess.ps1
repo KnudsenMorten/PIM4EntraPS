@@ -331,7 +331,7 @@ function Invoke-PimSupportSqlAccessGrant {
 
     # ---- what stops the run BEFORE anything is changed (the group membership below is the first change) --------------
     # A PRIVATE server (public access off) is reached through its private endpoint from inside the network -- a firewall rule
-    # does nothing there, so none is opened. Decided by REACHING it, not by the setting alone (fvf 2026-10-21: the run stopped
+    # does nothing there, so none is opened. Decided by REACHING it, not by the setting alone (a customer 2026-10-21: the run stopped
     # on a machine inside the network that reached the server on 1433 through the private endpoint).
     $private = ("$($server.properties.publicNetworkAccess)" -ieq 'Disabled')
     if ($private) {

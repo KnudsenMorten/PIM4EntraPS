@@ -117,7 +117,7 @@ function Clear-PimSignedInMachineIdentity {
     <#
       Azure Arc and the Azure VM agent set IDENTITY_ENDPOINT / MSI_ENDPOINT (+ IMDS_ENDPOINT / IDENTITY_HEADER) MACHINE-WIDE,
       so on a customer's Arc-joined jump host every signed-in script used to stop with "IDENTITY_ENDPOINT is set in this
-      session" (fvf, 2026-10-21) and the admin had to clear them by hand. They name the MACHINE's identity, never the person:
+      session" (a customer, 2026-10-21) and the admin had to clear them by hand. They name the MACHINE's identity, never the person:
       this script clears them for ITS OWN PROCESS only -- the machine and its agent are untouched -- and says so in one line.
       Not in Azure Cloud Shell, where they are the signed-in user's own token broker. Returns the names it cleared.
     #>

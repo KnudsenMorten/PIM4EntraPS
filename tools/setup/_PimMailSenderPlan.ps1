@@ -181,6 +181,20 @@ function Test-PimLegacyMailSenderScopeName {
     return ("$Name" -match '^(?i)PIM4EntraPS-Sender(-.+)?$')
 }
 
+function Get-PimExoDuplicateScopeName {
+    <#
+      PURE. Exchange refuses a New-ManagementScope whose filter equals an existing scope's: "The <name> management scope has
+      the same RecipientRoot, RecipientFilter, ... property values that you specified. Use the existing management scope".
+      Returns that existing scope's name ('' for any other answer). A customer install, 2026-10-21: the scope read came back
+      empty right after the Exchange Administrator role was activated, so the plan did not adopt 'PIM4EntraPS-Sender' and
+      the create was refused -- the run now adopts the scope Exchange names instead of failing.
+    #>
+    [CmdletBinding()] param([AllowEmptyString()][AllowNull()][string]$Text)
+    $m = [regex]::Match("$Text", '(?i)The (?<n>[^\s|"]+) management scope has the same')
+    if ($m.Success) { return $m.Groups['n'].Value }
+    return ''
+}
+
 function Resolve-PimMailSenderScope {
     <#
       PURE. MAIL-NAMING (100.14): WHICH scope this sender's send right lives in, given the scopes that already exist.

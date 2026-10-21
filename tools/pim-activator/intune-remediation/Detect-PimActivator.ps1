@@ -7,7 +7,8 @@
 #      1. the PIM Activator settings are exactly as in the SETTINGS block below, for every browser in $Browsers
 #            Edge:    HKLM\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\<extension id>\policy
 #            Chrome:  HKLM\SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\<extension id>\policy
-#            (tenantCatalog, autoActivateMaxGroups, bulkActivateConfirmThreshold)
+#            (tenantCatalog for the extension of $Channel; autoActivateMaxGroups + bulkActivateConfirmThreshold with the
+#             SAME values for BOTH PIM Activator extensions -- production and test behave the same)
 #      2. nobody has asked for a repair -- the RepairStuck flag is not set, neither by a user
 #            HKCU\Software\PIM4EntraPS\PimActivator  RepairStuck = 1   (any signed-in user)
 #         nor by an admin for the whole device
@@ -53,7 +54,9 @@ $CloseEdge = $false
 # ========================================================================================================================
 
 # --- nothing to edit below this line ---
+# The channel picks ONLY which extension this is (its id); everything it checks is the same for both.
 $ExtensionId = if ($Channel -eq 'Test') { 'glldnbmjpdkjemcnficagdhgienfdpoo' } else { 'eheocihmlppcophaeakmdenhgcookkab' }
+$AllExtensions = [ordered]@{ 'eheocihmlppcophaeakmdenhgcookkab' = 'production'; 'glldnbmjpdkjemcnficagdhgienfdpoo' = 'test' }
 $PolicyRoots = @{ Edge = 'SOFTWARE\Policies\Microsoft\Edge'; Chrome = 'SOFTWARE\Policies\Google\Chrome' }
 $Selected    = @($Browsers | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
 # The same compact list form the Remediate script writes (see the note there about Windows PowerShell 5.1).
@@ -69,12 +72,23 @@ try {
     if (-not $Selected.Count -or $unknown.Count) { $problems += "`$Browsers must be 'Edge', 'Chrome' or both (got '$($Browsers -join "', '")')" }
     # 1. the settings, per browser (64-bit registry, as the browsers read it)
     foreach ($b in @($Selected | Where-Object { $PolicyRoots.ContainsKey($_) })) {
-        $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry64').OpenSubKey("$($PolicyRoots[$b])\3rdparty\extensions\$ExtensionId\policy")
-        if (-not $key) { $problems += "$b has no PIM Activator settings on this device yet"; continue }
-        if ("$($key.GetValue('tenantCatalog'))" -ne $Catalog) { $problems += "$b`: the tenant catalog differs" }
-        if ("$($key.GetValue('autoActivateMaxGroups'))" -ne "$AutoActivateMaxGroups") { $problems += "$b`: the auto-activate cap differs (device '$($key.GetValue('autoActivateMaxGroups'))', wanted '$AutoActivateMaxGroups')" }
-        if ("$($key.GetValue('bulkActivateConfirmThreshold'))" -ne "$BulkActivateConfirmThreshold") { $problems += "$b`: the confirm threshold differs (device '$($key.GetValue('bulkActivateConfirmThreshold'))', wanted '$BulkActivateConfirmThreshold')" }
-        $key.Close()
+        $hklm = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry64')
+        $key = $hklm.OpenSubKey("$($PolicyRoots[$b])\3rdparty\extensions\$ExtensionId\policy")
+        if (-not $key) { $problems += "$b has no PIM Activator settings on this device yet" }
+        else {
+            if ("$($key.GetValue('tenantCatalog'))" -ne $Catalog) { $problems += "$b`: the tenant catalog differs" }
+            $key.Close()
+        }
+        # the limits: the SAME values for both PIM Activator extensions (production and test behave the same)
+        foreach ($id in $AllExtensions.Keys) {
+            $which = if ($id -eq $ExtensionId) { '' } else { " for the $($AllExtensions[$id]) extension too (production and test get the same limits -- if another PIM Activator Remediation sets other values, give both the same)" }
+            $key = $hklm.OpenSubKey("$($PolicyRoots[$b])\3rdparty\extensions\$id\policy")
+            if (-not $key) { if ($id -ne $ExtensionId) { $problems += "$b`: the limits are not set$which" }; continue }
+            if ("$($key.GetValue('autoActivateMaxGroups'))" -ne "$AutoActivateMaxGroups") { $problems += "$b`: the auto-activate cap differs (device '$($key.GetValue('autoActivateMaxGroups'))', wanted '$AutoActivateMaxGroups')$which" }
+            if ("$($key.GetValue('bulkActivateConfirmThreshold'))" -ne "$BulkActivateConfirmThreshold") { $problems += "$b`: the confirm threshold differs (device '$($key.GetValue('bulkActivateConfirmThreshold'))', wanted '$BulkActivateConfirmThreshold')$which" }
+            $key.Close()
+        }
+        $hklm.Close()
     }
     # 2. a repair request
     foreach ($k in $FlagKeys) {
