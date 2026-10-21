@@ -1010,13 +1010,13 @@ function Assert-PimDeployedImage {
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$Expected
     )
-    # properties.template.containers[0].image, as the platform reports it now
+    # the image as the platform reports it now -- a job's one container, an app's Manager-side one (never [0] = the sign-in front)
     $obj = if ($Kind -eq 'job') {
         Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -ErrorAsNull
     } else {
         Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -ErrorAsNull
     }
-    $running = "$(@($obj.properties.template.containers)[0].image)"
+    $running = if ($Kind -eq 'job') { "$(@($obj.properties.template.containers)[0].image)" } else { "$((Get-PimAcaManagerContainer -App $obj -ContainerName $Name).image)" }
     $v = Test-PimImageDeployed -Expected $Expected -Running "$running".Trim()
     if (-not $v.ok) { throw "$Kind '$Name': $($v.reason)" }
     Note "image verified: $($v.reason)"
@@ -1291,14 +1291,14 @@ foreach ($w in $Workers) {
         if ($w.entry -eq 'manager') {
             # read back: the size the Manager declares now, against the decision
             $mgrApp = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $w.name -ErrorAsNull
-            $mgrNow = @($mgrApp.properties.template.containers)[0].resources
+            $mgrNow = (Get-PimAcaManagerContainer -App $mgrApp -ContainerName $w.name).resources   # never [0] = the sign-in front
             $mgrChk = Test-PimManagerAppUndersized -Cpu "$($mgrNow.cpu)" -Memory "$($mgrNow.memory)" -Tags $mgrApp.tags -AppName $w.name
             if ($script:PimManagerResizeSaid) { Note "Manager web app size: $($script:PimManagerResizeSaid)" }
             if ($mgrChk.undersized) { Warn "Manager web app size (read back): $($mgrChk.reason) -- the next update raises it" } else { Note "Manager web app size (read back): $($mgrChk.reason)" }
         }
         if ($mbeEnv.Count) {
             $mbeNames = @($mbeEnv.Keys)
-            $got = @(@(@((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $w.name -ErrorAsNull).properties.template.containers)[0].env) | ForEach-Object { "$($_.name)" })
+            $got = @(@((Get-PimAcaManagerContainer -App (Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $w.name -ErrorAsNull) -ContainerName $w.name).env) | ForEach-Object { "$($_.name)" })
             $miss = @($mbeNames | Where-Object { $got -notcontains $_ })
             if ($miss.Count) { throw "read-back: $($w.name) does not carry $($miss -join ', ') after the update" }
             Note "baseline trust on $($w.name): $($mbeNames -join ', ') set and read back"

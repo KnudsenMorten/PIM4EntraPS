@@ -160,7 +160,7 @@ Step "Resolve currently-deployed tag on $ManagerApp"
 $currentTag = ''
 $img = ''
 try {
-    $img = "$(@((Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties.template.containers)[0].image)".Trim()
+    $img = "$((Get-PimAcaManagerContainer -App (Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull) -ContainerName $ManagerApp).image)".Trim()   # never [0]: the sign-in front (2026-10-21)
     if ("$img".Trim()) { $currentTag = ("$img" -split ':')[-1] }
 } catch {}
 if (-not "$currentTag".Trim()) { Warn "could not read the deployed image tag for $ManagerApp (is it deployed in $ResourceGroup?). Nothing done."; return }
@@ -226,7 +226,7 @@ Info ("pre-update revision: " + $(if ($prevRev) { $prevRev } else { '(unknown --
 # unattended against customer environments, which is precisely where "ROLL BACK BY HAND" is the
 # least useful sentence available. The IMAGE survives in ACR; roll to it when the revision is gone.
 $prevImage = ''
-try { $prevImage = "$(@((Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties.template.containers)[0].image)".Trim() } catch { Write-Verbose "pre-update image read failed: $($_.Exception.Message)" }
+try { $prevImage = "$((Get-PimAcaManagerContainer -App (Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull) -ContainerName $ManagerApp).image)".Trim() } catch { Write-Verbose "pre-update image read failed: $($_.Exception.Message)" }
 Info ("pre-update image: " + $(if ($prevImage) { $prevImage } else { '(unknown)' }))
 
 # ---- 5. roll to the new tag via the existing zero-downtime roller ----------

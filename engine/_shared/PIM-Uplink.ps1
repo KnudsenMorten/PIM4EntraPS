@@ -1676,7 +1676,7 @@ function Get-PimUplinkTenantCapabilities {
 # =====================================================================================================================
 function Get-PimUplinkStateFieldNames {
     <# PURE. The structured fields, in the order the heartbeat adds them (a literal: child-scope safe). #>
-    return @('Security', 'Collections', 'Jobs', 'Convergence', 'Mail', 'UpdatePending', 'SqlAccess', 'FeaturesChanged')
+    return @('Security', 'Collections', 'Jobs', 'Convergence', 'Mail', 'UpdatePending', 'SqlAccess', 'FeaturesChanged', 'SignIn')
 }
 
 function Get-PimUplinkStateFieldSwitch {
@@ -2096,6 +2096,23 @@ function New-PimUplinkSqlAccessField {
                                        checkedUtc = (ConvertTo-PimUplinkIso (Get-PimUplinkField $sa 'checkedUtc')) }
 }
 
+function New-PimUplinkSignInField {
+    <#
+      PURE. Framework 8.17 SignIn { layer, version } from UpdateState.signIn -- the layer the UPDATER read from the running
+      Manager app (Get-PimSignInLayer). The heartbeat only reads it (the tick reads no ARM). Closed list: signin-front /
+      easyauth / none; version only for signin-front (a short dotted number), else null. Not recorded / unknown = $null.
+    #>
+    param([AllowNull()][object]$UpdateState)
+    $us = ConvertFrom-PimUplinkStoredValue $UpdateState
+    $si = Get-PimUplinkField $us 'signIn'
+    if ($null -eq $si) { return $null }
+    $layer = "$(Get-PimUplinkField $si 'layer')".Trim().ToLowerInvariant()
+    if ($layer -notin @('signin-front', 'easyauth', 'none')) { return $null }
+    $ver = $null
+    if ($layer -eq 'signin-front') { $v = "$(Get-PimUplinkField $si 'version')".Trim(); if ($v -match '^\d{1,4}(\.\d{1,6}){1,3}$') { $ver = $v } }
+    return [pscustomobject][ordered]@{ layer = $layer; version = $ver }
+}
+
 function Get-PimUplinkFeaturesChangedMax { <# PURE. At most 40 ids (Invardia). #> return 40 }
 
 function New-PimUplinkFeaturesChangedField {
@@ -2184,6 +2201,10 @@ function Get-PimUplinkStateFields {
     }
     if ((& $__sfOn 'FeaturesChanged') -and $null -ne $Gates -and $null -ne $Catalog) {
         try { $out['FeaturesChanged'] = [string[]]@(New-PimUplinkFeaturesChangedField -Gates $Gates -Catalog $Catalog) } catch { Write-Warning "[uplink] FeaturesChanged could not be built: $($_.Exception.Message)" }
+    }
+    if ((& $__sfOn 'SignIn') -and $UpdateStateRead) {
+        # framework 8.17 (Invardia validator live 2026-10-20 22:30Z, soft); PIM_UPLINK_SIGNIN=0 switches it off
+        try { $__sfV = New-PimUplinkSignInField -UpdateState $UpdateState; if ($null -ne $__sfV) { $out['SignIn'] = $__sfV } } catch { Write-Warning "[uplink] SignIn could not be built: $($_.Exception.Message)" }
     }
     return $out
 }

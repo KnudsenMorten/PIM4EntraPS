@@ -59,6 +59,8 @@ param(
     [string]$FrontImage = '',
     # the web identity (user-assigned managed identity) -- needed only when the Manager carries more than one
     [string]$WebIdentityResourceId = '',
+    # front 1.3.0+: the Key Vault key id that wraps the front's Data Protection keys (Set-PimSigninFrontState prints it)
+    [string]$KeyVaultKeyId = '',
     [ValidateRange(1024, 65535)][int]$UpstreamPort = 8081,
     [ValidateRange(1, 24)][int]$SessionHours = 8,
     [string]$StateFile = '',
@@ -151,12 +153,26 @@ function New-PimSigninFrontTemplate {
           any other scale rule is kept.
     #>
     param([Parameter(Mandatory)][object]$Template, [Parameter(Mandatory)][string]$FrontImage, [Parameter(Mandatory)][string]$TenantId,
-          [Parameter(Mandatory)][string]$ClientId, [Parameter(Mandatory)][string]$MiClientId, [int]$UpstreamPort = 8081, [int]$SessionHours = 8)
+          [Parameter(Mandatory)][string]$ClientId, [Parameter(Mandatory)][string]$MiClientId, [int]$UpstreamPort = 8081, [int]$SessionHours = 8,
+          # front 1.3.0+ (framework 12.11g item 9): the Key Vault key that wraps the front's keys; the SQL server + database are
+          # the Manager's own (PIM_SqlServer / PIM_SqlDatabase). 1.3.0+ refuses to start without them -- so does this template.
+          [string]$KeyVaultKeyId = '')
     $t = ($Template | ConvertTo-Json -Depth 30 | ConvertFrom-Json)
     $cs = @(@($t.containers) | Where-Object { $_ })
     $mgr = @($cs | Where-Object { "$($_.name)" -ne $script:SfFrontName })
     if ($mgr.Count -ne 1) { throw "the Manager's template has $($mgr.Count) non-front containers -- expected exactly one (the Manager)" }
     $m = $mgr[0]
+    $stateEnv = @()
+    $mEnvOf = { param($n) "$(@(@($m.env) | Where-Object { $_ -and "$($_.name)" -eq $n } | ForEach-Object { $_.value }) | Select-Object -First 1)".Trim() }
+    if ("$KeyVaultKeyId".Trim()) {
+        $stateEnv = @(
+            [pscustomobject]@{ name = 'SIGNIN_SQL_SERVER'; value = (& $mEnvOf 'PIM_SqlServer') }
+            [pscustomobject]@{ name = 'SIGNIN_SQL_DATABASE'; value = (& $mEnvOf 'PIM_SqlDatabase') }
+            [pscustomobject]@{ name = 'SIGNIN_KEYVAULT_KEY_ID'; value = "$KeyVaultKeyId".Trim() })
+        if (@($stateEnv | Where-Object { -not "$($_.value)" }).Count) { throw "the Manager carries no PIM_SqlServer / PIM_SqlDatabase -- the front's state cannot be placed" }
+    }
+    $fv = if ("$FrontImage" -match ':(\d+\.\d+\.\d+)$') { [version]$Matches[1] } else { $null }
+    if ($fv -and $fv -ge [version]'1.3.0' -and -not $stateEnv.Count) { throw "front $fv needs its state settings: pass -KeyVaultKeyId (run Set-PimSigninFrontState first)" }
     $set = [ordered]@{ PIM_HOSTED_AUTH_LAYER = 'signin-front'; PIM_SIGNIN_FRONT_CLIENT_ID = "$ClientId"; PORT = "$UpstreamPort" }
     $env = New-Object System.Collections.Generic.List[object]
     foreach ($e in @($m.env)) { if ($e -and -not $set.Contains("$($e.name)") -and "$($e.name)" -ne 'WEBSITES_PORT') { $env.Add($e) } }
@@ -186,7 +202,7 @@ function New-PimSigninFrontTemplate {
             [pscustomobject]@{ name = 'SIGNIN_SESSION_HOURS'; value = "$SessionHours" }
             [pscustomobject]@{ name = 'SIGNIN_BEARER_PATHS'; value = '/mcp,/.well-known' }
             [pscustomobject]@{ name = 'ASPNETCORE_HTTP_PORTS'; value = "$($script:SfFrontPort)" }
-        )
+        ) + $stateEnv
         probes    = @((& $probe 'Liveness'), (& $probe 'Readiness'))
     }
     $t | Add-Member -NotePropertyName containers -NotePropertyValue @($front, $m) -Force
@@ -232,6 +248,24 @@ function Test-PimSigninFrontRevisionReady {
     $latest = "$($App.properties.latestRevisionName)"; $ready = "$($App.properties.latestReadyRevisionName)"
     if (-not $latest.Trim() -or $latest -ne $ready) { return $false }
     return [bool](@(@($App.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -eq $script:SfFrontName }).Count)
+}
+
+function Test-PimSfBusy {
+    <#
+      PURE. Must the move wait before it changes the Manager? Yes while the updater run it started is still going (Running /
+      Processing) or the container app is provisioning (InProgress, or not read = unknown = wait). A finished run (Succeeded /
+      Failed / Stopped / Degraded) or none, on an app that is Succeeded / Failed / Canceled, is not busy.
+    #>
+    param([string]$ExecutionStatus = '', [string]$ProvisioningState = 'Succeeded')
+    if ("$ExecutionStatus".Trim() -in @('Running', 'Processing')) { return $true }
+    $p = "$ProvisioningState".Trim()
+    return (-not $p -or $p -in @('InProgress', 'Updating', 'Provisioning', 'Deleting'))
+}
+
+function Test-PimSfOperationInProgress {
+    <# PURE. Is this ARM error the transient "another operation on the app is running" (409 ContainerAppOperationInProgress)? #>
+    param([string]$Message = '')
+    return ("$Message" -match 'HTTP 409' -and "$Message" -match 'ContainerAppOperationInProgress')
 }
 
 function Get-PimSigninFrontProbeVerdict {
@@ -443,7 +477,7 @@ if ($reg) {
 }
 # ---- PIM 100.168: THE FRONT IMAGE -- built by this install's own updater, in its own registry, at the pinned version -------
 $sfPinned = "$(Get-Content -LiteralPath (Join-Path $solRootSf 'tools\pim-manager\signin-front.version') -Raw -ErrorAction SilentlyContinue)".Trim()
-$sfDefault = $null; $frontReady = $true
+$sfDefault = $null; $frontReady = $true; $sfExec = ''
 $sfProbe = { param($execName) @{ Digest = ''; Recorded = ''; RunStatus = '' } }
 if (-not "$FrontImage".Trim() -and -not (Test-PimSigninFrontLive -App $ca -Auth $auth)) {
     $sfDefault = Get-PimSigninFrontDefaultImage -App $ca -Pinned $sfPinned
@@ -492,6 +526,27 @@ if ($plan.steps -contains 'front-image') {
     if (-not $sfWait.ready) { throw "Set-PimManagerSigninFront: the front image is not there -- $($sfWait.reason). Nothing on the Manager changed; re-run when it is." }
     Step "front image ready: $($sfWait.reason)"
 }
+# 🔴 2026-10-20 fleet run (invardiademo, efif-rideakademiet-test): the updater run that builds the front image ALSO rolls the
+# Manager when a newer version is released -- the image was ready while that roll was still provisioning, the revision PATCH
+# got 409 ContainerAppOperationInProgress and the move rolled back. Worse, $ca was read BEFORE that run: the two-container
+# template and the rollback record would have carried the OLD Manager image and silently undone the roll. So: wait until the
+# updater run has ended and the app is not provisioning, THEN read the app again -- everything below works on that read.
+if ($plan.steps -contains 'front-image' -or (Test-PimSfBusy -ProvisioningState "$($ca.properties.provisioningState)")) {
+    $busyBy = [datetime]::UtcNow.AddMinutes($FrontImageWaitMinutes); $waited = $false
+    while ($true) {
+        $exSt = ''
+        if ($sfExec) { $ex = Get-PimArmAcaJobExecution -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $UpdateJob -Execution "$sfExec"; if ($ex) { $exSt = "$($ex.properties.status)" } }
+        $cur = $null; try { $cur = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp } catch { }
+        $pv = if ($cur) { "$($cur.properties.provisioningState)" } else { 'InProgress' }
+        if (-not (Test-PimSfBusy -ExecutionStatus $exSt -ProvisioningState $pv)) { break }
+        if ([datetime]::UtcNow -ge $busyBy) { throw "Set-PimManagerSigninFront: the updater run '$sfExec' ($exSt) / the Manager ($pv) is still busy after $FrontImageWaitMinutes min. Nothing on the Manager changed; re-run when it is done." }
+        if (-not $waited) { Note "waiting for the updater run ($exSt) and the Manager ($pv) to finish before the Manager is changed"; $waited = $true }
+        Start-Sleep -Seconds 20
+    }
+    $ca = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp
+    $auth = Get-PimSfAuth
+    Note "Manager read again after the updater run: $((@($ca.properties.template.containers) | ForEach-Object { ("$($_.image)" -split '/')[-1] }) -join ' + ')"
+}
 if (-not "$StateFile".Trim()) { $StateFile = Join-Path ([IO.Path]::GetTempPath()) ("pim-signin-front-$ManagerApp-" + (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss') + '.json') }
 $saved = [ordered]@{ savedUtc = (Get-Date).ToUniversalTime().ToString('o'); app = $ca; auth = $auth }
 $saved | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $StateFile -Encoding UTF8
@@ -536,9 +591,19 @@ if ($plan.steps -contains 'user-read-consent') {
 # The revision FIRST, with Easy Auth still on in front of it: there is no moment in which the Manager answers without a
 # sign-in in front. Then the ingress to the front's port, then Easy Auth off, then the proof -- or the rollback.
 Step "two-container revision: $script:SfFrontName ($FrontImage) + the Manager on 127.0.0.1:$UpstreamPort; replicas 1..1"
-$tpl = New-PimSigninFrontTemplate -Template $ca.properties.template -FrontImage $FrontImage -TenantId $TenantId -ClientId $appId -MiClientId "$($identity.clientId)" -UpstreamPort $UpstreamPort -SessionHours $SessionHours
+$tpl = New-PimSigninFrontTemplate -Template $ca.properties.template -FrontImage $FrontImage -TenantId $TenantId -ClientId $appId -MiClientId "$($identity.clientId)" -UpstreamPort $UpstreamPort -SessionHours $SessionHours -KeyVaultKeyId $KeyVaultKeyId
 try {
-    [void](Set-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -Resource @{ properties = @{ template = $tpl } })
+    # A 409 "operation in progress" is transient (a roll or a job update on the app): retried for up to 10 minutes, never
+    # treated as a failed switch -- the 2026-10-20 fleet run rolled two installs back on exactly this.
+    $opBy = [datetime]::UtcNow.AddMinutes(10)
+    while ($true) {
+        try { [void](Set-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -Resource @{ properties = @{ template = $tpl } }); break }
+        catch {
+            if (-not (Test-PimSfOperationInProgress -Message "$($_.Exception.Message)") -or [datetime]::UtcNow -ge $opBy) { throw }
+            Note 'the Manager is busy with another operation (409) -- retrying in 30 s'
+            Start-Sleep -Seconds 30
+        }
+    }
     if ([int]$ca.properties.configuration.ingress.targetPort -ne $script:SfFrontPort) {
         $fp = $script:SfFrontPort
         [void](Set-PimArmAcaAppConfiguration -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -Mutate { param($cfg) $cfg.ingress.targetPort = $fp }.GetNewClosure())

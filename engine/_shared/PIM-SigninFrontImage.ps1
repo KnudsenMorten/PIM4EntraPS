@@ -61,6 +61,34 @@ function Test-PimSigninFrontFlagOn {
     return ("$Value".Trim() -match '^(?i)(1|true|yes|on)$')
 }
 
+function Get-PimSignInLayer {
+    <#
+      PURE. Framework 8.17 SignIn (agreed SI + PIM + Invardia 2026-10-20): the web app's sign-in layer, read from the RUNNING
+      app, never from a config file. -App = the Manager container app (ARM), -AuthConfig = its authConfigs/current (ARM) and
+      -AuthRead = that read answered (a missing auth config is $null with -AuthRead $true = no Easy Auth).
+        a container named 'signin-front'           -> layer 'signin-front', version = its image tag up to the first '-'
+                                                      (signin-front:1.2.1-src-<hash> -> '1.2.1'; no tag = $null)
+        else authConfigs/current platform.enabled  -> 'easyauth' (version $null)
+        else                                       -> 'none'     (an OPEN web app is reported, never left out)
+      No app, or the auth config was not read on an app without the front = $null (not known -- never a guess).
+      @{ layer; version; checkedUtc }
+    #>
+    param([AllowNull()][object]$App, [AllowNull()][object]$AuthConfig = $null, [bool]$AuthRead = $false, [datetime]$NowUtc = [datetime]::UtcNow)
+    if ($null -eq $App -or $null -eq $App.properties) { return $null }
+    $ts = $NowUtc.ToUniversalTime().ToString('o')
+    $fr = @(@($App.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -eq 'signin-front' })
+    if ($fr.Count) {
+        $img = "$($fr[0].image)"
+        $tag = if ($img -match ':([^:/@]+)$') { $Matches[1] } else { '' }
+        $ver = (($tag -split '-')[0]).Trim()
+        return [ordered]@{ layer = 'signin-front'; version = $(if ($ver) { $ver } else { $null }); checkedUtc = $ts }
+    }
+    if (-not $AuthRead) { return $null }
+    $on = $false
+    if ($AuthConfig -and $AuthConfig.properties -and $AuthConfig.properties.platform) { $on = ("$($AuthConfig.properties.platform.enabled)" -match '^(?i)true$') }
+    return [ordered]@{ layer = $(if ($on) { 'easyauth' } else { 'none' }); version = $null; checkedUtc = $ts }
+}
+
 function Get-PimSigninFrontOptIn {
     <#
       PURE. Does this install build the front image? From the Manager app object ALREADY READ (-App, may be $null) and the
@@ -110,6 +138,26 @@ function Get-PimSigninFrontCurrentImage {
     $c = @(@($App.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -eq $script:PimSigninFrontContainerName }) | Select-Object -First 1
     if ($c) { return "$($c.image)".Trim() }
     return ''
+}
+
+function Test-PimSigninFrontStateReady {
+    <#
+      PURE. May the front container move to -Version? Front 1.3.0 (framework 12.11g item 9) REFUSES TO START without its state
+      settings (SIGNIN_SQL_SERVER, SIGNIN_SQL_DATABASE, SIGNIN_KEYVAULT_KEY_ID) -- moving an install's front to 1.3.0+ before
+      they are on its container would take the sign-in down. Below 1.3.0, or with all three set: ok. Returns @{ ok; reason }.
+    #>
+    param([AllowNull()][object]$App, [AllowEmptyString()][string]$Version)
+    if (-not (Test-PimSigninFrontVersionText $Version)) { return @{ ok = $true; reason = 'no front version' } }
+    if ([version]"$Version".Trim() -lt [version]'1.3.0') { return @{ ok = $true; reason = "front $Version needs no state settings" } }
+    $c = $null
+    if ($App -and $App.properties -and $App.properties.template) {
+        $c = @(@($App.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -eq $script:PimSigninFrontContainerName }) | Select-Object -First 1
+    }
+    if (-not $c) { return @{ ok = $false; reason = 'no signin-front container' } }
+    $missing = @('SIGNIN_SQL_SERVER', 'SIGNIN_SQL_DATABASE', 'SIGNIN_KEYVAULT_KEY_ID' | Where-Object {
+        $n = $_; -not @(@($c.env) | Where-Object { $_ -and "$($_.name)" -eq $n -and "$($_.value)".Trim() }).Count })
+    if ($missing.Count) { return @{ ok = $false; reason = "front $Version needs $($missing -join ', ') on its container first (Set-PimSigninFrontState)" } }
+    return @{ ok = $true; reason = 'state settings present' }
 }
 
 function Get-PimSigninFrontImageRef {

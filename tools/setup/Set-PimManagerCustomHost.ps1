@@ -253,6 +253,16 @@ function Get-PimCustomHostRemoveDnsLines {
              "    TXT   asuid.$label (next to $h)")
 }
 
+function Get-PchManagerContainer {
+    # PURE. The Manager's container on the app -- never [0]: on a sign-in front install [0] is 'signin-front', and
+    # PIM_MANAGER_HOSTNAMES written there never reaches the Manager (2026-10-21). By name, else the one that is not the front.
+    param([object]$App, [string]$Name = 'ca-pim-manager')
+    $cs = @(@($App.properties.template.containers) | Where-Object { $_ })
+    $c = @($cs | Where-Object { "$($_.name)" -eq $Name })[0]
+    if (-not $c) { $c = @($cs | Where-Object { "$($_.name)" -ne 'signin-front' })[0] }
+    return $c
+}
+
 if ($MyInvocation.InvocationName -eq '.') { return }   # dot-sourced by the tests: functions only
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
 $null = Start-PimScriptRun -Script 'Set-PimManagerCustomHost'
@@ -302,10 +312,10 @@ if ($Remove) {
             Write-Host "  deleted certificate $ownCert from environment $envName" -ForegroundColor Green
         } catch { Write-Warning "  certificate $ownCert was not deleted ($($_.Exception.Message)) -- another app may still bind it; delete it in the portal when it is free." }
     } elseif ($boundCert) { Write-Host "  certificate $($boundCert.Split('/')[-1]) kept (not created by this script for $rh, or still used by another name)" -ForegroundColor DarkGray }
-    $curHosts = "$(@($app.properties.template.containers[0].env | Where-Object { $_.name -eq 'PIM_MANAGER_HOSTNAMES' })[0].value)"
+    $curHosts = "$(@((Get-PchManagerContainer $app).env | Where-Object { $_.name -eq 'PIM_MANAGER_HOSTNAMES' })[0].value)"
     $newHosts = Remove-PimManagerHostname -Current $curHosts -Name $rh
     if (@("$curHosts" -split '[,;\s]+' | Where-Object { "$_".Trim() -ieq $rh }).Count) {
-        [void](Set-PimArmAcaAppEnvVars -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -Env @{ PIM_MANAGER_HOSTNAMES = $newHosts } -ContainerName "$($app.properties.template.containers[0].name)")
+        [void](Set-PimArmAcaAppEnvVars -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -Env @{ PIM_MANAGER_HOSTNAMES = $newHosts } -ContainerName "$((Get-PchManagerContainer $app).name)")
         Write-Host "  PIM_MANAGER_HOSTNAMES = $(if ($newHosts) {$newHosts} else {'(empty)'}) (new revision)" -ForegroundColor Green
     }
     if (-not $SkipEasyAuth) {
@@ -426,10 +436,10 @@ if ($plan.dns -eq 'privatezone' -and -not $zoneExists) {
 }
 
 # 4. known names (mail links follow only an auto-recorded ManagerUrl -- Resolve-PimManagerMailUrl)
-$curHosts = "$(@($app.properties.template.containers[0].env | Where-Object { $_.name -eq 'PIM_MANAGER_HOSTNAMES' })[0].value)"
+$curHosts = "$(@((Get-PchManagerContainer $app).env | Where-Object { $_.name -eq 'PIM_MANAGER_HOSTNAMES' })[0].value)"
 $newHosts = Merge-PimManagerHostnames -Current $curHosts -Add $plan.host
 if ($newHosts -ne $curHosts.ToLowerInvariant()) {
-    [void](Set-PimArmAcaAppEnvVars -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -Env @{ PIM_MANAGER_HOSTNAMES = $newHosts } -ContainerName "$($app.properties.template.containers[0].name)")
+    [void](Set-PimArmAcaAppEnvVars -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -Env @{ PIM_MANAGER_HOSTNAMES = $newHosts } -ContainerName "$((Get-PchManagerContainer $app).name)")
     Write-Host "  PIM_MANAGER_HOSTNAMES = $newHosts (new revision)" -ForegroundColor Green
 }
 Write-Host "  mail links: ManagerUrl switches to https://$($plan.host) on the next signed-in Manager page only if it is empty or was auto-recorded as the generated address; a ManagerUrl set in Settings is never overwritten." -ForegroundColor DarkGray

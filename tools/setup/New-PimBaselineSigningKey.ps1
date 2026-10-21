@@ -150,8 +150,8 @@ Write-Host '  A managed tenant REFUSES a bundle signed by a key it does not pin.
 if ("$PinOnManagerApp".Trim()) {
     . (Join-Path $solRoot 'engine\msp\PIM-DownlinkManager.ps1')
     Step "pin the key id on the Manager $PinOnManagerApp (PIM_BaselineTrustedKeys, merged)"
-    # The value of PIM_BaselineTrustedKeys on the app's first container ('' when the app or the variable is absent).
-    $readPin = { "$(@(@((Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $PinOnManagerApp -ErrorAsNull).properties.template.containers)[0].env) | Where-Object { $_ -and "$($_.name)" -eq 'PIM_BaselineTrustedKeys' } | ForEach-Object { "$($_.value)" }) -join ',')".Trim() }
+    # The value of PIM_BaselineTrustedKeys on the Manager's container (never [0]: on a sign-in front install that is the front) ('' when the app or the variable is absent).
+    $readPin = { "$(@(@(@(@((Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $PinOnManagerApp -ErrorAsNull).properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0].env) | Where-Object { $_ -and "$($_.name)" -eq 'PIM_BaselineTrustedKeys' } | ForEach-Object { "$($_.value)" }) -join ',')".Trim() }
     $cur = & $readPin
     $merge = Get-PimManagerBaselineEnvPlan -TrustedKeys @($cur, $keyId)
     if (-not $merge.ok) { throw "the Manager's existing pins could not be merged: $($merge.reason)" }
@@ -163,7 +163,7 @@ if ("$PinOnManagerApp".Trim()) {
         # Read-modify-write of the Manager's env (every other variable, secret ref and probe kept) -- az's --set-env-vars.
         $pinMap = @{}; foreach ($e in $pinEnv) { $kv = "$e" -split '=', 2; $pinMap[$kv[0]] = $kv[1] }
         $mgr = Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $PinOnManagerApp -ErrorAsNull
-        $first = if ($mgr) { "$(@($mgr.properties.template.containers)[0].name)" } else { '' }
+        $first = if ($mgr) { "$(@(@($mgr.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0].name)" } else { '' }   # the Manager, never [0] = the sign-in front
         try { [void](Set-PimArmAcaAppEnvVars -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $PinOnManagerApp -Env $pinMap -ContainerName $first) }
         catch { throw "could not set PIM_BaselineTrustedKeys on $PinOnManagerApp ($($_.Exception.Message))." }
         $back = & $readPin

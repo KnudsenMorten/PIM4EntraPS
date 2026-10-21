@@ -13,6 +13,22 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.659 -- 2026-10-21
+
+- Sign-in front 1.4.2: the app gets an access token for its own API (fixes 1.4.1, where that mode sent people back to the sign-in), and a session no longer ends after about an hour because the silent token refresh failed.
+
+## 2.4.658 -- 2026-10-21
+
+- Sign-in front 1.4.1: fixes 1.4.0, which failed on Linux (every request 500); keeps 1.4.0's access token, sessions and keys that survive updates, and small cookies. Support scripts: a private SQL server reached from inside the network needs no firewall rule; an Arc or VM machine identity no longer stops a sign-in; the browser sign-in works when localhost means IPv6. New: Set-PimSqlLeastPrivilege.ps1.
+
+## 2.4.657 -- 2026-10-21
+
+- Sign-in front 1.4.0 pinned: the app gets an access token for its own API instead of the ID token, sessions and keys survive restarts and updates (kept in the install's database, keys protected by its Key Vault), and old sign-in cookies can no longer block a sign-in; an install's front moves only once its database and key are prepared; scripts no longer mistake the sign-in front for the Manager (rollback, version read, host names).
+
+## 2.4.656 -- 2026-10-21
+
+- The heartbeat now reports how people sign in to the Manager (sign-in front and its version, Easy Auth, or none); the move to the sign-in front waits for a running update before it changes the app.
+
 ## 2.4.655 -- 2026-10-20
 
 - Sign-in front 1.2.1 (opt-in installs only): pages load behind the front again, and the hourly silent sign-in refresh no longer signs a page out

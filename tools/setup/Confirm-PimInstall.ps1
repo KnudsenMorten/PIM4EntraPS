@@ -391,7 +391,7 @@ function Get-CvFact([string]$Id) {
                 # is its own read: one that fails is "not read", never a failed check and never a hidden one.
                 try {
                     $ma = Get-CvArm (Get-CvResId 'Microsoft.App/containerApps' $ManagerApp)
-                    $mres = @($ma.properties.template.containers)[0].resources
+                    $mres = @(@($ma.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0].resources   # the Manager, never [0] = the sign-in front
                     $mu = Test-PimManagerAppUndersized -Cpu "$($mres.cpu)" -Memory "$($mres.memory)" -Tags $ma.tags -AppName $ManagerApp
                     $sizeFact['manager'] = @{ readable = [bool]$mu.readable; undersized = [bool]$mu.undersized; reason = "$($mu.reason)"; fix = "$($mu.fix)" }
                 } catch { $sizeFact['manager'] = @{ readable = $false; undersized = $false; reason = "the Manager web app's size was not read: $((("$($_.Exception.Message)") -split "`n")[0])"; fix = '' } }
@@ -500,7 +500,7 @@ function Invoke-CvRepair([string]$Id, $Fact) {
             }
             'updater' {
                 if ($NoUpdater -or -not "$AcrName".Trim() -or -not "$EnvName".Trim()) { return $false }
-                $img = "$(@((Get-CvArm (Get-CvResId 'Microsoft.App/containerApps' $ManagerApp)).properties.template.containers)[0].image)".Trim()
+                $img = "$(@(@((Get-CvArm (Get-CvResId 'Microsoft.App/containerApps' $ManagerApp)).properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0].image)".Trim()   # the Manager, never [0] = the sign-in front
                 $tag = if ("$img" -match ':([^:/@]+)$') { $Matches[1] } else { '' }
                 if (-not $tag) { return $false }
                 $a = @{ SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; EnvName = $EnvName; AcrName = $AcrName; ImageRepo = $ImageRepo; ImageTag = $tag

@@ -365,7 +365,7 @@ try {
         else {
             $mgrName = if ("$(Get-PimMspBuildValue -Object $config -Path 'managerApp')".Trim()) { "$(Get-PimMspBuildValue -Object $config -Path 'managerApp')".Trim() } else { 'ca-pim-manager' }
             $mgrApp = Get-PimArmAcaApp -SubscriptionId "$($config.subscriptionId)" -ResourceGroup "$($config.resourceGroup)" -Name $mgrName -ErrorAsNull
-            $mgrImage = "$(@($mgrApp.properties.template.containers)[0].image)".Trim()
+            $mgrImage = "$(@(@($mgrApp.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0].image)".Trim()   # the Manager, never [0] = the sign-in front
         }
     }
     $pin = Resolve-PimMspBuildImageTag -Explicit "$ImageTag" -ConfigTag $cfgTag -Resuming ([bool]"$From".Trim()) -ManagerImage $mgrImage

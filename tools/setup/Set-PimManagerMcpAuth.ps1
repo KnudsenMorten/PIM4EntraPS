@@ -50,6 +50,15 @@ if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join
 if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRootMcp 'engine\_shared\PIM-ArmSetup.ps1') }
 $script:AzCliAppId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'   # Microsoft Azure CLI (first-party, the same in every tenant)
 
+function Get-PimMcpManagerContainer($CaApp) {
+    # the Manager's container -- never [0]: on a sign-in front install [0] is 'signin-front' (2026-10-21). By name, else
+    # the one that is not the front.
+    $cs = @(@($CaApp.properties.template.containers) | Where-Object { $_ })
+    $c = @($cs | Where-Object { "$($_.name)" -eq $ManagerApp })[0]
+    if (-not $c) { $c = @($cs | Where-Object { "$($_.name)" -ne 'signin-front' })[0] }
+    return $c
+}
+
 function Get-PimManagerMcpAuthPlan {
     <#
       PURE. From the Manager's application (Graph object: appId, identifierUris, api.oauth2PermissionScopes,
@@ -176,7 +185,7 @@ $app = Get-PimGraphApplication -Id $appId
 if (-not $app) { throw "the Easy Auth application $appId was not found in tenant $TenantId" }
 $ca = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp
 if (-not $ca) { throw "container app $ManagerApp not found in $ResourceGroup" }
-$c0 = @($ca.properties.template.containers)[0]
+$c0 = Get-PimMcpManagerContainer $ca
 $plan = Get-PimManagerMcpAuthPlan -App $app -Auth $auth -NewScopeId ([guid]::NewGuid().ToString()) -EnvVars @($c0.env) -ManagerImage (Get-PimManagerImageForGate "$($c0.image)")
 Write-Host "==> $ManagerApp / application $appId : $($plan.reason)" -ForegroundColor Cyan
 if (-not $plan.ok) { throw $plan.reason }
@@ -200,7 +209,7 @@ if ($plan.steps -contains 'audiences') {
 }
 if ($plan.steps -contains 'mcp-audience-env') {
     # the env var BEFORE the exclusion: a Manager without it refuses /mcp (503), never trusts anything
-    [void](Set-PimArmAcaAppEnvVars -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -Env @{ PIM_MCP_AUDIENCE = "$($plan.envValue)" })
+    [void](Set-PimArmAcaAppEnvVars -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -Env @{ PIM_MCP_AUDIENCE = "$($plan.envValue)" } -ContainerName "$($c0.name)")
 }
 if ($plan.steps -contains 'exclude-paths') {
     # az containerapp auth update --excluded-paths: the merged list (the plan keeps every existing path)
@@ -213,7 +222,7 @@ if ($plan.steps -contains 'exclude-paths') {
 $app2 = Get-PimGraphApplication -Id $appId
 $auth2 = Get-PimMcpAuthState
 $ca2 = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp
-$c2 = @($ca2.properties.template.containers)[0]
+$c2 = Get-PimMcpManagerContainer $ca2
 $after = Get-PimManagerMcpAuthPlan -App $app2 -Auth $auth2 -NewScopeId ([guid]::NewGuid().ToString()) -EnvVars @($c2.env) -ManagerImage (Get-PimManagerImageForGate "$($c2.image)")
 if ($after.steps.Count) { throw "read-back: still $($after.reason)" }
 Write-Host "==> done. Scope api://$appId/mcp.access; the person's Manager role decides what the MCP tools may do." -ForegroundColor Green

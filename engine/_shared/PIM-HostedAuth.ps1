@@ -560,7 +560,9 @@ function Resolve-PimHostedPrincipal {
         # decision stays PURE: the caller (Get-PimEasyAuthPrincipal) resolves the layer from
         # env/platform with Get-PimHostedAuthLayer and passes it. Empty = 'easyauth' (the
         # pre-SEC-28 contract); an unrecognised value is 'none'.
-        [string]$AuthLayer = ''
+        [string]$AuthLayer = '',
+        # front 1.4.0: refuse the ID token behind the front (the caller reads PIM_SIGNIN_FRONT_REQUIRE_ACCESS_TOKEN)
+        [bool]$RequireFrontAccessToken = $false
     )
     $layerIn = "$AuthLayer".Trim().ToLowerInvariant()
     if (-not $layerIn) { $layerIn = 'easyauth' }
@@ -570,7 +572,7 @@ function Resolve-PimHostedPrincipal {
         # -PrincipalName / -PrincipalBlob are deliberately not consulted (the front strips them,
         # and nothing but the front can reach a loopback-bound Manager).
         return (Resolve-PimSigninFrontPrincipal -IdToken $SignedToken -Jwks $Jwks -ExpectedIssuers $ExpectedIssuers `
-                    -ExpectedAudiences $ExpectedAudiences -NowUtc $NowUtc)
+                    -ExpectedAudiences $ExpectedAudiences -NowUtc $NowUtc -RequireAccessToken $RequireFrontAccessToken)
     }
     if ($layerIn -eq 'none') {
         # 🔴 SEC-28: nothing in front strips client-supplied X-MS-* headers, so a "consistent"
@@ -677,11 +679,13 @@ function Test-PimManagerPageToken {
 
 function Resolve-PimSigninFrontPrincipal {
     <#
-      PURE given its inputs. CR7: who is calling, proven by the ID token the shared sign-in front forwarded.
+      PURE given its inputs. CR7: who is calling, proven by the token the shared sign-in front forwarded -- since front
+      1.4.0 an ACCESS token for this app's own API scope (-AccessScope, aud = the client id or api://<client id>, v1 or
+      v2 issuer), before it the user's ID token (no scp; refused with -RequireAccessToken).
       Same verification primitives as layer 2 (Test-PimJwtSignature + Test-PimJwtClaims) -- no new crypto.
       Fails CLOSED on: issuer or audience not pinned (any tenant's token would verify), no token, a malformed
-      token, no key set, a bad signature, bad iss / aud / exp / nbf, a token carrying 'scp' (an ACCESS token,
-      not the front's ID token), and a token that names no user.
+      token, no key set, a bad signature, bad iss / aud / exp / nbf, an access token without -AccessScope in its scp,
+      an ID token when -RequireAccessToken, and a token that names no user.
       Returns @{ trusted; identity; layer = 'signin-front'; reason } -- the Resolve-PimHostedPrincipal shape.
     #>
     [CmdletBinding()]
@@ -690,7 +694,11 @@ function Resolve-PimSigninFrontPrincipal {
         [object]$Jwks = $null,
         [string[]]$ExpectedIssuers = @(),
         [string[]]$ExpectedAudiences = @(),
-        [datetime]$NowUtc = ([datetime]::UtcNow)
+        [datetime]$NowUtc = ([datetime]::UtcNow),
+        # front 1.4.0: the delegated scope an access token must carry (the app registration's own scope)
+        [string]$AccessScope = 'user_impersonation',
+        # once every front forwards the access token: refuse the ID token
+        [bool]$RequireAccessToken = $false
     )
     $no = { param($why) return @{ trusted = $false; identity = ''; layer = 'signin-front'; reason = $why } }
     $iss = @($ExpectedIssuers | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
@@ -699,22 +707,31 @@ function Resolve-PimSigninFrontPrincipal {
         return (& $no 'sign-in front: the issuer (this tenant) AND the audience (PIM_SIGNIN_FRONT_CLIENT_ID or PIM_HOSTED_EASYAUTH_AUD) must both be pinned -- failing closed')
     }
     $tok = "$IdToken".Trim()
-    if (-not $tok) { return (& $no 'sign-in front: no forwarded ID token on this request (refused)') }
+    if (-not $tok) { return (& $no 'sign-in front: no forwarded token on this request (refused)') }
     $jwt = Get-PimJwtParts -Token $tok
-    if ($null -eq $jwt) { return (& $no 'sign-in front: the forwarded ID token is not a well-formed JWT') }
+    if ($null -eq $jwt) { return (& $no 'sign-in front: the forwarded token is not a well-formed JWT') }
     if ($null -eq $Jwks) { return (& $no 'sign-in front: no JWKS available to verify the token (failing closed)') }
     $sig = Test-PimJwtSignature -Jwt $jwt -Jwks $Jwks
     if (-not $sig.valid) { return (& $no ('sign-in front: token signature rejected: ' + $sig.reason)) }
+    $scp = @("$($jwt.payload.scp)".Trim() -split '\s+' | Where-Object { $_ })
+    $kind = 'ID token'
+    if ($scp.Count) {
+        # front 1.4.0 (framework 12.11g item 10): an ACCESS token for the app's OWN API -- the audience is this app as a GUID (v2)
+        # or its api:// URI (v1), and the delegated scope must be the one the front asks for. Any other scope: refused.
+        $kind = 'access token'
+        $aud = @($aud + @($aud | Where-Object { $_ -notmatch '^api://' } | ForEach-Object { "api://$_" }) | Select-Object -Unique)
+        if ($scp -notcontains "$AccessScope".Trim()) {
+            return (& $no ("sign-in front: the forwarded access token carries scope '$($scp -join ' ')', not '$AccessScope' -- refused"))
+        }
+    } elseif ($RequireAccessToken) {
+        return (& $no 'sign-in front: an ID token was forwarded, but this Manager accepts only the access token (PIM_SIGNIN_FRONT_REQUIRE_ACCESS_TOKEN) -- refused')
+    }
     $cl = Test-PimJwtClaims -Payload $jwt.payload -ExpectedIssuers $iss -ExpectedAudiences $aud -NowUtc $NowUtc
     if (-not $cl.valid) { return (& $no ('sign-in front: token claims rejected: ' + $cl.reason)) }
-    if ("$($jwt.payload.scp)".Trim()) {
-        # An ID token carries no delegated scope; an access token does. Only the front's ID token is accepted here.
-        return (& $no 'sign-in front: the forwarded token is an ACCESS token (has scp), not an ID token -- refused')
-    }
     $who = ''
     foreach ($c in @('preferred_username', 'upn', 'email', 'unique_name')) { $v = "$($jwt.payload.$c)".Trim(); if ($v) { $who = $v; break } }
     if (-not $who) { return (& $no 'sign-in front: the verified token carries no username claim') }
-    return @{ trusted = $true; identity = $who; layer = 'signin-front'; reason = 'sign-in front ID token verified (signature + claims)' }
+    return @{ trusted = $true; identity = $who; layer = 'signin-front'; reason = "sign-in front $kind verified (signature + claims)" }
 }
 
 function Get-PimHostedListenerPrefix {

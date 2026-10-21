@@ -358,7 +358,10 @@ function Get-RunningManagerInfo {
     if ($profile.isHosted -and (Test-PimUpdateArm)) {
         try {
             $mgr = Get-PimArmAcaApp -SubscriptionId "$SubscriptionId".Trim() -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
-            $img = "$(@($mgr.properties.template.containers)[0].image)"
+            # the MANAGER container (Get-PimAcaManagerContainer, PIM-ArmContainerApps.ps1 via _PimUpdateRing.ps1) -- never [0]:
+            # on a sign-in front install [0] is 'signin-front', whose 1.2.1 read as "the running version" (2026-10-21)
+            $mgrC = Get-PimAcaManagerContainer -App $mgr -ContainerName $ManagerApp
+            $img = "$($mgrC.image)"
             # BUG-230: a digest-pinned image is resolved to its version tag in the registry, else UNKNOWN.
             $rv = Resolve-PimRunningVersionFromImage -Image "$img" -TagResolver {
                 param($repo, $digest)
@@ -368,7 +371,7 @@ function Get-RunningManagerInfo {
             }
             $info.version = $rv.version; $info.versionNote = $rv.note
             # content hash is published as an image env/label; read the app env var if present.
-            $h = @(@(@($mgr.properties.template.containers)[0].env) | Where-Object { $_ -and $_.name -eq 'PIM_MANAGER_CONTENT_HASH' } | ForEach-Object { "$($_.value)" }) | Select-Object -First 1
+            $h = @(@(@($mgrC.env)) | Where-Object { $_ -and $_.name -eq 'PIM_MANAGER_CONTENT_HASH' } | ForEach-Object { "$($_.value)" }) | Select-Object -First 1
             if ("$h".Trim()) { $info.contentHash = "$h".Trim() }
         } catch {}
     } else {
@@ -669,7 +672,8 @@ try {
         # internal environment 2026-09-10 (only one revision survived), where the safety net could
         # only say "ROLL BACK BY HAND". The image is still in ACR and cannot be pruned away.
         try {
-            $prevImage = "$(@((Get-PimArmAcaApp -SubscriptionId "$SubscriptionId".Trim() -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties.template.containers)[0].image)".Trim()
+            # the MANAGER's image (not [0] = the sign-in front): a rollback to the front's image would break the Manager
+            $prevImage = "$((Get-PimAcaManagerContainer -App (Get-PimArmAcaApp -SubscriptionId "$SubscriptionId".Trim() -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull) -ContainerName $ManagerApp).image)".Trim()
         } catch { Write-Verbose "pre-update image read failed: $($_.Exception.Message)" }
         Info "pre-update image (rollback fallback): $(if($prevImage){$prevImage}else{'(unknown)'})"
     }

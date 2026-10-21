@@ -122,6 +122,8 @@ function New-PimUpdateStateRecord {
         # §33.0 MORE TELEMETRY (SqlAccess): the updater's access verdict of THIS run (New-PimSqlAccessVerdict); $null = this
         # run did not converge access -> the previous record's verdict is carried forward. The key is written only when known.
         [AllowNull()][object]$SqlAccess = $null,
+        # framework 8.17 SignIn: the Manager's sign-in layer read THIS run (Get-PimSignInLayer); $null = not read -> carried.
+        [AllowNull()][object]$SignIn = $null,
         [datetime]$NowUtc = [datetime]::UtcNow
     )
     $ts = $NowUtc.ToUniversalTime().ToString('o')
@@ -143,6 +145,8 @@ function New-PimUpdateStateRecord {
 
     $sqlAcc = $SqlAccess
     if ($null -eq $sqlAcc -and $Previous) { $sqlAcc = Get-PimUpdateStateField -Object $Previous -Key 'sqlAccess' }
+    $signIn = $SignIn
+    if ($null -eq $signIn -and $Previous) { $signIn = Get-PimUpdateStateField -Object $Previous -Key 'signIn' }
     $rec = [ordered]@{
         schema             = (Get-PimUpdateStateSchema)
         # 'run' = written by an update run. The deployment writes kind 'deploy' (New-PimUpdateStateDeployRecord)
@@ -182,6 +186,7 @@ function New-PimUpdateStateRecord {
         lastSuccessAction  = "$lastSuccessAction"
     }
     if ($null -ne $sqlAcc) { $rec['sqlAccess'] = $sqlAcc }
+    if ($null -ne $signIn) { $rec['signIn'] = $signIn }
     return $rec
 }
 

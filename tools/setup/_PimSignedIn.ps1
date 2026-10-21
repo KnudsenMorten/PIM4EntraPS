@@ -113,6 +113,24 @@ function Get-PimSignedInEnvironmentConflicts {
     return @($out)
 }
 
+function Clear-PimSignedInMachineIdentity {
+    <#
+      Azure Arc and the Azure VM agent set IDENTITY_ENDPOINT / MSI_ENDPOINT (+ IMDS_ENDPOINT / IDENTITY_HEADER) MACHINE-WIDE,
+      so on a customer's Arc-joined jump host every signed-in script used to stop with "IDENTITY_ENDPOINT is set in this
+      session" (fvf, 2026-10-21) and the admin had to clear them by hand. They name the MACHINE's identity, never the person:
+      this script clears them for ITS OWN PROCESS only -- the machine and its agent are untouched -- and says so in one line.
+      Not in Azure Cloud Shell, where they are the signed-in user's own token broker. Returns the names it cleared.
+    #>
+    param([hashtable]$Environment)
+    if (Test-PimCloudShell -Environment $Environment) { return @() }
+    $names = @('IDENTITY_ENDPOINT', 'MSI_ENDPOINT', 'IMDS_ENDPOINT', 'IDENTITY_HEADER', 'MSI_SECRET')
+    $set = @($names | Where-Object { "$(if ($Environment) { $Environment[$_] } else { [Environment]::GetEnvironmentVariable($_) })".Trim() })
+    if (-not $set.Count) { return @() }
+    foreach ($n in $set) { if ($Environment) { $Environment.Remove($n) } else { [Environment]::SetEnvironmentVariable($n, $null, 'Process') } }
+    Write-Host "  note: this machine's own identity ($($set -join ', '), set by Azure Arc or the Azure VM agent) is ignored for this run -- you sign in as yourself; the machine is not changed." -ForegroundColor DarkGray
+    return @($set)
+}
+
 function Get-PimSignedInConflictHint {
     # PURE. How to clear the named variables for THIS session only (§73.9: on an Azure Arc / Azure VM host
     # IDENTITY_ENDPOINT is set machine-wide, and an operator had to be told how to clear it).
@@ -160,7 +178,7 @@ function Get-PimSignedInIdentity {
       -Token / -Arm are the REST test seams: { param($Resource, $TenantId) <jwt> } and { param($Path) <ARM object> }.
     #>
     param([Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$SubscriptionId, [scriptblock]$Token, [scriptblock]$Arm)
-    $conf = @(Get-PimSignedInEnvironmentConflicts)
+    [void](Clear-PimSignedInMachineIdentity); $conf = @(Get-PimSignedInEnvironmentConflicts)
     if ($conf.Count) {
         return @{ ok = $false; reason = ("REFUSED: $($conf -join ', ') $(if ($conf.Count -eq 1) { 'is' } else { 'are' }) set in this session -- a token call would authenticate as " +
                  'that identity instead of the signed-in user. ' + (Get-PimSignedInConflictHint -Names $conf)) }
@@ -270,7 +288,7 @@ function Connect-PimSignedInSql {
       in-memory cache and is never returned, printed or written.
     #>
     param([Parameter(Mandatory)][string]$TenantId)
-    $conf = @(Get-PimSignedInEnvironmentConflicts)
+    [void](Clear-PimSignedInMachineIdentity); $conf = @(Get-PimSignedInEnvironmentConflicts)
     if ($conf.Count) { throw "REFUSED: $($conf -join ', ') set in this session -- the SQL token would be minted for that identity, not the signed-in user. $(Get-PimSignedInConflictHint -Names $conf)" }
     if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { throw 'Connect-PimSignedInSql: engine\_shared\PIM-Rest.ps1 is not loaded.' }
     Set-PimSignedInGlobals -TenantId $TenantId
