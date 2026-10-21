@@ -438,7 +438,7 @@ function Get-PimInteractiveToken {
   $state     = [guid]::NewGuid().ToString('N')
 
   # The redirect says "localhost" (what Entra's public clients accept on any port), and a browser may resolve it to the IPv4
-  # OR the IPv6 loopback: listen on BOTH, on the same port (fvf 2026-10-21: an IPv4-only listener, the jump host's browser
+  # OR the IPv6 loopback: listen on BOTH, on the same port (a customer 2026-10-21: an IPv4-only listener, the jump host's browser
   # went to [::1] -> "localhost refused to connect"). Loopback only -- never another interface.
   $tcps = @(New-PimLoopbackListeners)
   $port     = ([System.Net.IPEndPoint]$tcps[0].LocalEndpoint).Port

@@ -14,6 +14,10 @@
 #            autoActivateMaxGroups          REG_DWORD  the auto-activate cap                    written, or removed when $null
 #            bulkActivateConfirmThreshold   REG_DWORD  the "click again to confirm" threshold   written, or removed when $null
 #
+#      PRODUCTION AND TEST BEHAVE THE SAME. The tenant catalog goes to the extension of $Channel (it names the app that
+#      extension signs in with). The two LIMITS go to BOTH PIM Activator extensions (production and test) with the same
+#      values -- a device can never run the test extension with one limit and production with another, so approving
+#      test for production changes nothing in how it behaves.
 #      The extension id is the same in both browsers (one signed package). Each key belongs to the extension alone, so it
 #      never conflicts with any other extension policy. This part never touches the browsers themselves and works while
 #      they are open. A browser left out of $Browsers is not touched (its values stay as they are).
@@ -70,10 +74,12 @@
 #       the hour once Edge is closed). Or upload it with ..\Publish-PimActivatorRemediation.ps1.
 #    4. Edge picks up new settings on its next policy refresh; edge://policy -> "Reload policies" shows them at once.
 #
-#  ONE REMEDIATION PER CHANNEL AND SET OF VALUES
+#  ONE REMEDIATION PER CHANNEL -- WITH THE SAME LIMITS
 #    Production and test are two extensions (two ids): one Remediation each, e.g. "PIM Activator settings (PROD)"
-#    ($Channel = 'Released') and "PIM Activator settings (TEST)" ($Channel = 'Test'). Groups that need DIFFERENT values
-#    need their own Remediation and should not overlap (a device in both runs both; the last one wins).
+#    ($Channel = 'Released') and "PIM Activator settings (TEST)" ($Channel = 'Test'). Both write the two limits to BOTH
+#    extensions, so give both Remediations the SAME $AutoActivateMaxGroups and $BulkActivateConfirmThreshold: if they
+#    differ, each run reports "not OK" and the other one changes it back. Groups that need DIFFERENT values need their
+#    own Remediations and should not overlap (a device in both runs both; the last one wins).
 #    The repair clears BOTH PIM Activator extensions (production and test) on a flagged device -- a healthy one is
 #    simply reinstalled by its Edge policy.
 #
@@ -120,7 +126,8 @@ $TenantCatalog = @'
 #   0      = auto-activation is turned OFF on this device
 #   1-100  = at most this many groups. Ticking one more is refused with a message; if more are already ticked,
 #            only the first N are activated and the rest are marked "Not auto-activated".
-#   Needs PIM Activator 1.6.128 or later (older versions ignore it).
+#   Needs PIM Activator 1.6.135 or later (production first had it in 1.6.135; older versions ignore it). Enforced
+#   reliably from 1.6.140: a slow device no longer skips the limit, and un-ticking and re-ticking no longer gets past it.
 $AutoActivateMaxGroups = $null
 
 # Confirm threshold: when a user selects at least this many roles, the Activate button asks for a second click.
@@ -136,6 +143,7 @@ $CloseEdge = $false
 # ========================================================================================================================
 
 # --- nothing to edit below this line ---
+# The channel picks ONLY which extension this is (its id); everything it does is the same for both.
 $ExtensionId  = if ($Channel -eq 'Test') { 'glldnbmjpdkjemcnficagdhgienfdpoo' } else { 'eheocihmlppcophaeakmdenhgcookkab' }
 $AllExtensionIds = @('eheocihmlppcophaeakmdenhgcookkab', 'glldnbmjpdkjemcnficagdhgienfdpoo')   # production, test
 # Per browser: its policy root, its process name and where each user's profiles are (the SAME extension id in both).
@@ -160,16 +168,24 @@ try {
     foreach ($b in $Selected) {
         # The 64-bit registry on purpose: Intune runs scripts 32-bit unless told otherwise, and neither browser reads the
         # 32-bit copy (WOW6432Node).
+        $hklm = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry64')
+        # the tenant catalog: THIS channel's extension (the catalog names the app it signs in with)
         $keyPath = "$($BrowserInfo[$b].Root)\3rdparty\extensions\$ExtensionId\policy"
-        $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry64').CreateSubKey($keyPath, $true)
+        $key = $hklm.CreateSubKey($keyPath, $true)
         $key.SetValue('tenantCatalog', $Catalog, 'String')
-        if ($null -ne $AutoActivateMaxGroups)        { $key.SetValue('autoActivateMaxGroups', [int]$AutoActivateMaxGroups, 'DWord') }
-        else                                         { $key.DeleteValue('autoActivateMaxGroups', $false) }
-        if ($null -ne $BulkActivateConfirmThreshold) { $key.SetValue('bulkActivateConfirmThreshold', [int]$BulkActivateConfirmThreshold, 'DWord') }
-        else                                         { $key.DeleteValue('bulkActivateConfirmThreshold', $false) }
         $key.Close()
+        # the limits: the SAME values for BOTH PIM Activator extensions (production and test behave the same)
+        foreach ($id in $AllExtensionIds) {
+            $key = $hklm.CreateSubKey("$($BrowserInfo[$b].Root)\3rdparty\extensions\$id\policy", $true)
+            if ($null -ne $AutoActivateMaxGroups)        { $key.SetValue('autoActivateMaxGroups', [int]$AutoActivateMaxGroups, 'DWord') }
+            else                                         { $key.DeleteValue('autoActivateMaxGroups', $false) }
+            if ($null -ne $BulkActivateConfirmThreshold) { $key.SetValue('bulkActivateConfirmThreshold', [int]$BulkActivateConfirmThreshold, 'DWord') }
+            else                                         { $key.DeleteValue('bulkActivateConfirmThreshold', $false) }
+            $key.Close()
+        }
+        $hklm.Close()
     }
-    Write-Output ("Settings written ({0}; {4}): {1} tenant(s), cap = {2}, confirm threshold = {3}." -f $Channel,
+    Write-Output ("Settings written ({0}; {4}): {1} tenant(s), cap = {2}, confirm threshold = {3} (the limits for production AND test)." -f $Channel,
         @($TenantCatalog | ConvertFrom-Json | ForEach-Object { $_ }).Count,
         $(if ($null -eq $AutoActivateMaxGroups) { 'none' } else { $AutoActivateMaxGroups }),
         $(if ($null -eq $BulkActivateConfirmThreshold) { 'default' } else { $BulkActivateConfirmThreshold }),

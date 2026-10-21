@@ -152,7 +152,7 @@ function Get-PimMsInteractiveToken {
     $state = [guid]::NewGuid().ToString('N')
     $scope = Get-PimMsScopeString -Scopes $Scopes
     $tcp = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
-    $tcp.Start()
+    $tcp.Start(); $tcps = @($tcp); try { if ([System.Net.Sockets.Socket]::OSSupportsIPv6) { $tcp6 = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::IPv6Loopback, ([System.Net.IPEndPoint]$tcp.LocalEndpoint).Port); $tcp6.Start(); $tcps += $tcp6 } } catch { }   # a customer 2026-10-21: "localhost" may be [::1] -- BOTH loopbacks, same port
     $redirect = "http://localhost:$(([System.Net.IPEndPoint]$tcp.LocalEndpoint).Port)/"
     $authUrl  = New-PimMsAuthorizeUrl -Tenant $Tenant -ClientId $ClientId -RedirectUri $redirect -Scope $scope -State $state -CodeChallenge $pkce.Challenge -LoginHint $LoginHint
     $query = $null
@@ -168,8 +168,8 @@ function Get-PimMsInteractiveToken {
         $deadline = (Get-Date).AddMinutes(5)
         while (-not $query) {
             if ((Get-Date) -gt $deadline) { throw 'Timed out (5 minutes) waiting for the browser to finish the sign-in.' }
-            if (-not $tcp.Pending()) { Start-Sleep -Milliseconds 200; continue }
-            $client = $tcp.AcceptTcpClient()
+            $tcpReady = @($tcps | Where-Object { $_.Pending() })[0]; if (-not $tcpReady) { Start-Sleep -Milliseconds 200; continue }
+            $client = $tcpReady.AcceptTcpClient()
             try {
                 $stream      = $client.GetStream()
                 $requestLine = (New-Object System.IO.StreamReader($stream)).ReadLine()
@@ -180,7 +180,7 @@ function Get-PimMsInteractiveToken {
                 if ($requestLine -match '^GET /\?(\S+) HTTP') { $query = $Matches[1] }
             } finally { $client.Close() }
         }
-    } finally { $tcp.Stop() }
+    } finally { foreach ($tcpL in $tcps) { try { $tcpL.Stop() } catch { } } }
     $kv = @{}
     foreach ($pair in ($query -split '&')) {
         $k, $v = $pair -split '=', 2

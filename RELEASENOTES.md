@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.660 -- 2026-10-21
+
+- Creating an admin now links it at once: a consultant to its external company and internal department, an internal admin to its department. The mail-sender setup reuses an existing send scope instead of failing. Every browser sign-in in the setup scripts works when localhost means IPv6, and an Azure Arc or VM machine identity no longer stops a sign-in.
+
 ## 2.4.659 -- 2026-10-21
 
 - Sign-in front 1.4.2: the app gets an access token for its own API (fixes 1.4.1, where that mode sent people back to the sign-in), and a session no longer ends after about an hour because the silent token refresh failed.

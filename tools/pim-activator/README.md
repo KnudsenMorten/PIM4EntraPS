@@ -282,16 +282,18 @@ these through an Intune profile for these users.
 
 `intune-remediation\Detect-PimActivator.ps1` + `Remediate-PimActivator.ps1`. **Every run** it writes the extension's
 settings for **Microsoft Edge and Google Chrome** (only the extension's own registry key per browser — see
-[Managed settings reference](#managed-settings-reference); it never touches the browsers themselves). **Only when
-someone asks** (the registry value below) it also repairs the extension. Both scripts start with the same **SETTINGS**
-block — every option is explained line by line in `Remediate-PimActivator.ps1`:
+[Managed settings reference](#managed-settings-reference); it never touches the browsers themselves; it does not
+install the extension). **Production and test behave the same:** the two limits are written
+with the same values for both extensions. **Only when someone asks** (the registry value below) it also repairs the
+extension. Both scripts start with the same **SETTINGS** block — every option is explained line by line in
+`Remediate-PimActivator.ps1`:
 
 | Setting | Values | Meaning |
 |---|---|---|
 | `$Channel` | `'Released'` / `'Test'` | which extension (production or test id — the same id in Edge and Chrome) |
 | `$Browsers` | `@('Edge', 'Chrome')` (default) / `@('Edge')` / `@('Chrome')` | which browsers get the settings (and the repair); a browser left out is not touched |
 | `$TenantCatalog` | JSON list of tenants | `name`, `tenantId`, `clientId` required; optional fields in [Managed settings reference](#managed-settings-reference) |
-| `$AutoActivateMaxGroups` | `$null` / `0` / `1`–`100` | no limit / auto-activation OFF / at most N groups ticked "auto" (needs 1.6.128+) |
+| `$AutoActivateMaxGroups` | `$null` / `0` / `1`–`100` | no limit / auto-activation OFF / at most N groups ticked "auto" (needs 1.6.135+; reliably enforced from 1.6.140) |
 | `$BulkActivateConfirmThreshold` | `$null` / `1`–`100` | default 5 / Activate asks for a 2nd click at N roles |
 | `$CloseEdge` | `$false` / `$true` | a requested repair while the browser is open: wait until it is closed / close it — covers Edge **and** Chrome (name kept for existing copies) |
 
@@ -319,10 +321,18 @@ not recognise untouched.
 `Remediate-PimActivator.ps1`, **Run this script using the logged-on credentials = No** (runs as SYSTEM),
 **Enforce script signature check = No**, **Run script in 64-bit PowerShell = Yes**; assign it to the same group as the
 Edge policy (a user group runs it on that user's devices) and schedule it — **every hour** is a good choice. One
-Remediation per channel and set of values, e.g. `PIM Activator settings (PROD)` and `PIM Activator settings (TEST)`.
-Edge picks up new settings on its next policy refresh; `edge://policy` → **Reload policies** shows them at once (Chrome:
-`chrome://policy` → **Reload policies**). The Remediation does not install the extension in Chrome — Chrome needs its own
-`ExtensionInstallForcelist` policy with the same id and update URL.
+Remediation per channel, e.g. `PIM Activator settings (PROD)` and `PIM Activator settings (TEST)` — with the **same
+limits** in both (each writes them for both extensions; different values make the two undo each other every run, and
+the detection says so). Edge picks up new settings on its next policy refresh; `edge://policy` → **Reload policies**
+shows them at once (Chrome: `chrome://policy` → **Reload policies**). The Remediation does not install the extension
+— Edge gets it from the Edge management service, Chrome needs its own `ExtensionInstallForcelist` policy with the same
+id and update URL.
+
+**For users — which Edge profiles get PIM Activator.** It arrives through the Edge management service in every Edge
+profile that is **signed in with your work account**. Created a new profile and the extension is not there? Sign in to
+that profile with your work account (Edge: profile picture → *Sign in*); PIM Activator then installs by itself within a
+few minutes. A profile signed in with a personal account, an InPrivate window or a Guest window never runs it
+(InPrivate and Guest never run extensions).
 
 **Or upload it with `Publish-PimActivatorRemediation.ps1`** — creates the Remediation, or updates it in place when one
 with the same name exists (its assignments are kept), and reads it back:

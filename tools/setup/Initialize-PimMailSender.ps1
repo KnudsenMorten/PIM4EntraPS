@@ -1072,6 +1072,20 @@ foreach ($item in $exoPlan) {
         continue
     }
     $r = Invoke-ExoWhenHydrated -Cmdlet $item.cmdlet -What $item.what -Parameters $item.parameters
+    # 2026-10-21 (a customer install): the scope read came back empty right after the role activation, so the plan tried to CREATE
+    # a scope another name already holds with the same filter, and Exchange refused it naming that scope. Adopt the scope
+    # Exchange names (the same filter = the same sender) and point this run's assignments at it -- never a second scope.
+    if (-not $r.ok -and "$($item.cmdlet)" -eq 'New-ManagementScope') {
+        $dupScope = Get-PimExoDuplicateScopeName -Text "$($r.error) $($r.detail)"
+        if ($dupScope) {
+            $plannedScope = "$($item.parameters.Name)"
+            foreach ($later in $exoPlan) { if ($later.parameters -and "$($later.parameters.CustomResourceScope)" -eq $plannedScope) { $later.parameters.CustomResourceScope = $dupScope } }
+            $scopeName = $dupScope
+            Note "the existing scope '$dupScope' already restricts to $sender -- adopted (Exchange refused a second scope with the same filter)" 'DarkGray'
+            Add-Result 'exo:New-ManagementScope' 'already' "adopted $dupScope"
+            continue
+        }
+    }
     # 2026-10-13 (a customer install: "could not scope ... 400 (Bad Request)" and nothing else): the failure line carries Exchange's
     # own answer -- the 400's text was kept in $r.detail and printed nowhere, so the customer could not tell why.
     if (-not $r.ok) {

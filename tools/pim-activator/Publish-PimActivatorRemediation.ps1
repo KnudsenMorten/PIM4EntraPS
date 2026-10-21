@@ -138,7 +138,7 @@ function Get-PaGraphToken {
     $verifier = ConvertTo-PaB64Url $b
     $challenge = ConvertTo-PaB64Url ([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::ASCII.GetBytes($verifier)))
     $state = [guid]::NewGuid().ToString('N')
-    $tcp = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0); $tcp.Start()
+    $tcp = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0); $tcp.Start(); $tcps = @($tcp); try { if ([System.Net.Sockets.Socket]::OSSupportsIPv6) { $tcp6 = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::IPv6Loopback, ([System.Net.IPEndPoint]$tcp.LocalEndpoint).Port); $tcp6.Start(); $tcps += $tcp6 } } catch { }   # a customer 2026-10-21: "localhost" may be [::1] -- BOTH loopbacks, same port
     $redirect = "http://localhost:$(([Net.IPEndPoint]$tcp.LocalEndpoint).Port)/"
     $scope = 'https://graph.microsoft.com/DeviceManagementScripts.ReadWrite.All offline_access openid profile'
     $url = "https://login.microsoftonline.com/$Tenant/oauth2/v2.0/authorize?client_id=$cid&response_type=code&response_mode=query" +
@@ -153,8 +153,8 @@ function Get-PaGraphToken {
         $deadline = (Get-Date).AddMinutes(5)
         while (-not $query) {
             if ((Get-Date) -gt $deadline) { throw 'Timed out (5 min) waiting for the sign-in.' }
-            if (-not $tcp.Pending()) { Start-Sleep -Milliseconds 200; continue }
-            $c = $tcp.AcceptTcpClient()
+            $tcpReady = @($tcps | Where-Object { $_.Pending() })[0]; if (-not $tcpReady) { Start-Sleep -Milliseconds 200; continue }
+            $c = $tcpReady.AcceptTcpClient()
             try {
                 $s = $c.GetStream(); $line = (New-Object IO.StreamReader($s)).ReadLine()
                 $html = '<html><body style="font-family:sans-serif"><h3>Signed in.</h3>You can close this tab.</body></html>'
@@ -162,7 +162,7 @@ function Get-PaGraphToken {
                 if ($line -match '^GET /\?(\S+) HTTP') { $query = $Matches[1] }
             } finally { $c.Close() }
         }
-    } finally { $tcp.Stop() }
+    } finally { foreach ($tcpL in $tcps) { try { $tcpL.Stop() } catch { } } }
     $kv = @{}; foreach ($p in ($query -split '&')) { $k, $v = $p -split '=', 2; $kv[$k] = [uri]::UnescapeDataString(("$v" -replace '\+', ' ')) }   # (( )): inside a method call the -replace comma is an argument separator
     if ($kv['error']) { throw "Sign-in failed: $($kv['error']) -- $($kv['error_description'])" }
     if ($kv['state'] -ne $state) { throw 'Sign-in answer did not match (state) -- close all browser windows and run again.' }

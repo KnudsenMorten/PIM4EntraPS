@@ -44,7 +44,7 @@ const KNOWN_BAD_LEGACY_CLIENTIDS = []
 // Pure config helpers (bulk-activate confirm threshold resolution + bounds).
 // Kept in a separate, DOM/chrome-free module so they are unit-testable under
 // Node; the render path is unchanged.
-import { resolveBulkActivateConfirmThreshold, BULK_ACTIVATE_CONFIRM_THRESHOLD_DEFAULT, resolveAutoActivateMaxGroups, selectAutoActivateTargets, canTickAnotherAutoActivate, pickAutoActivateCandidates, tickedGroupIdsNotListed, countAutoActivateInUse, graphRetryDelayMs, GRAPH_RETRY_MAX, classifyActivationAnswer, activationAnswerText, isApprovalPendingStatus, APPROVAL_PENDING_TEXT } from './popup-config.js'
+import { resolveBulkActivateConfirmThreshold, BULK_ACTIVATE_CONFIRM_THRESHOLD_DEFAULT, resolveAutoActivateMaxFromRead, selectAutoActivateTargets, canTickAutoActivateNow, pickAutoActivateCandidates, tickedGroupIdsNotListed, countAutoActivateInUse, graphRetryDelayMs, GRAPH_RETRY_MAX, classifyActivationAnswer, activationAnswerText, isApprovalPendingStatus, APPROVAL_PENDING_TEXT } from './popup-config.js'
 
 // Network resilience primitives (timeout + watchdog). Kept in a separate
 // DOM/chrome-free module so they are unit-testable under Node. A bare fetch()
@@ -942,8 +942,13 @@ const ENV_CHECK_ENDPOINTS = [
   { key: 'login', label: 'Sign-in (login.microsoftonline.com:443)',          url: `${AUTHORITY}/v2.0/.well-known/openid-configuration`, readDate: true },
   { key: 'graph', label: 'Microsoft Graph (graph.microsoft.com:443)',         url: 'https://graph.microsoft.com/beta/$metadata' },
   { key: 'arm',   label: 'Azure Resource Manager (management.azure.com:443)', url: 'https://management.azure.com/subscriptions?api-version=2020-01-01' },
-  { key: 'feed',  label: 'Extension update feed (gh-pages:443)',              url: 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml', readVersion: true },
+  // ACT-TEST-PROD-PARITY (2026-10-21): THIS build's own feed (manifest update_url -- each channel's build carries its own feed),
+  // so the test channel is checked against the test feed, not production's. The fixed URL is only the fallback.
+  { key: 'feed',  label: 'Extension update feed (gh-pages:443)',              url: ownUpdateUrl() || 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml', readVersion: true },
 ]
+function ownUpdateUrl() {
+  try { const u = chrome.runtime.getManifest().update_url; return (typeof u === 'string' && /^https:\/\//.test(u)) ? u : '' } catch (_) { return '' }
+}
 
 async function envProbe(ep) {
   const t0 = Date.now()
@@ -952,7 +957,8 @@ async function envProbe(ep) {
     const ms = Date.now() - t0
     let dateHeader = null, published = null
     try { dateHeader = (r.headers && r.headers.get) ? r.headers.get('date') : null } catch (_) {}
-    if (ep.readVersion) { try { const tx = await r.text(); const m = tx.match(/version=['"]([0-9.]+)['"]/); if (m) published = m[1] } catch (_) {} }
+    // anchored on <updatecheck ...> -- the first version= in the file is the XML declaration's "1.0"
+    if (ep.readVersion) { try { const tx = await r.text(); const m = tx.match(/updatecheck[^>]*version=['"]([0-9.]+)['"]/); if (m) published = m[1] } catch (_) {} }
     // ANY HTTP response (even 401/403) proves the host is reachable over 443.
     const status = ms > 4000 ? 'warn' : 'ok'
     let detail = `reachable — HTTP ${r.status}, ${ms} ms` + (ms > 4000 ? ' (slow; proxy inspection?)' : '')
@@ -2408,26 +2414,40 @@ let autoActivateWait = { timer: null, tries: 0 }
 })()
 // Per-DEVICE cap (managed policy 'autoActivateMaxGroups', see popup-config.js). null = no limit,
 // 0 = auto-activation off on this device, N = at most N groups. Read once per popup; the sweep and
-// the tick handler both wait for it, so a slow managed-storage provider can never let the cap be skipped.
-let autoActivateMax = null
+// the tick handler both wait for it. 2026-10-21: the read FAILS CLOSED -- a managed-storage read that times out
+// used to mean "no limit" for the whole popup session (resolveAutoActivateMaxFromRead): now the last value the
+// policy gave on this device, or auto-activation paused when none is known. A late answer still lands (re-read
+// in the background; the sweep runs again on the next list load).
+const AUTO_MAX_LAST_KNOWN_KEY = 'managedCapLastKnown'   // ONLY ever written from a real managed-policy answer
+let autoActivateMax = 0
+let autoActivateMaxSource = 'unavailable'
+async function applyAutoActivateMaxRead(m) {
+  let last = null
+  try { const s = await getStored([AUTO_MAX_LAST_KNOWN_KEY]); last = s ? s[AUTO_MAX_LAST_KNOWN_KEY] : null } catch (_) {}
+  const r = resolveAutoActivateMaxFromRead(m, last)
+  autoActivateMax = r.max; autoActivateMaxSource = r.source
+  if (r.remember) { try { await setStored({ [AUTO_MAX_LAST_KNOWN_KEY]: r.remember }) } catch (_) {} }
+  if (r.source !== 'policy') console.warn('[PIM Activator] auto-activate limit: managed storage did not answer -- using ' + (r.source === 'last-known' ? 'the last known value (' + (r.max == null ? 'no limit' : r.max) + ')' : 'auto-activation PAUSED (no value known yet)'))
+  return r
+}
 const autoActivateMaxReady = (async () => {
-  try {
-    const m = await storageGet('managed', ['autoActivateMaxGroups'])
-    autoActivateMax = resolveAutoActivateMaxGroups(m ? m.autoActivateMaxGroups : null)
-  } catch (_) { autoActivateMax = null }
+  let m = null
+  try { m = await storageGet('managed', ['autoActivateMaxGroups']) } catch (_) { m = null }
+  const r = await applyAutoActivateMaxRead(m)
+  if (r.source !== 'policy') {
+    // keep asking in the background: a slow provider's answer replaces the fallback for the next sweep / tick
+    storageGet('managed', ['autoActivateMaxGroups'], 60000).then(late => { if (late && !late.__timedOut) applyAutoActivateMaxRead(late) }).catch(() => {})
+  }
 })()
 function autoActivateMaxText() {
+  if (autoActivateMaxSource === 'unavailable') return 'Auto-activation is paused: your organisation\'s limit could not be read yet. Reopen PIM Activator in a moment.'
   return autoActivateMax === 0
     ? 'Auto-activation is turned off on this device by your organisation.'
     : 'Your organisation allows at most ' + autoActivateMax + ' auto-activated group(s) on this device.'
 }
-// How many CURRENTLY LISTED direct groups are ticked 'auto'. Counted over the rows the user can see
-// (and untick), not over every key ever stored -- a stale key for a group that has gone must not
-// block a new tick the user has no way to free.
-function countAutoActivateTicked() {
-  return (eligibleRows || []).filter(r => r && r.kind === 'group' && !r.depth &&
-    isAutoActivate(r.rowKey || ('group:' + r.groupId))).length
-}
+// (The tick gate counts the CURRENTLY LISTED direct groups ticked 'auto' -- not every key ever stored, so a stale key
+// for a group that has gone never blocks a new tick the user has no way to free -- plus the slots in use:
+// canTickAutoActivateNow in popup-config.js.)
 function isAutoActivate(rowKey) { return !!(rowKey && autoActivate[rowKey]) }
 function toggleAutoActivate(rowKey) {
   if (!rowKey) return
@@ -4035,7 +4055,8 @@ function render() {
       // nothing is activated. Unticking is always allowed -- that is how a user gets back under it.
       if (autoCb.checked && !isAutoActivate(idAttr)) {
         await autoActivateMaxReady
-        if (!canTickAnotherAutoActivate(countAutoActivateTicked(), autoActivateMax)) {
+        // ticked AND in use (ticked + active + activated / sent for approval this session) -- the sweep's own count
+        if (!canTickAutoActivateNow(eligibleRows || [], isAutoActivate, new Set([...autoActivateStarted, ...autoActivateAwaitingApproval]), autoActivateMax)) {
           autoCb.checked = false
           const st0 = row.querySelector('.status')
           if (st0) st0.textContent = autoActivateMaxText() + (autoActivateMax ? ' Untick another group first.' : '')

@@ -348,7 +348,7 @@ function Get-HubAuthCode([string]$Tenant) {
     $challenge = ConvertTo-HubBase64Url ([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::ASCII.GetBytes($verifier)))
     $state     = [guid]::NewGuid().ToString('N')
     $tcp = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
-    $tcp.Start()
+    $tcp.Start(); $tcps = @($tcp); try { if ([System.Net.Sockets.Socket]::OSSupportsIPv6) { $tcp6 = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::IPv6Loopback, ([System.Net.IPEndPoint]$tcp.LocalEndpoint).Port); $tcp6.Start(); $tcps += $tcp6 } } catch { }   # a customer 2026-10-21: "localhost" may be [::1] -- BOTH loopbacks, same port
     $redirect = "http://localhost:$(([System.Net.IPEndPoint]$tcp.LocalEndpoint).Port)/"
     $scope = "$Arm/.default offline_access openid profile"
     $url = "https://login.microsoftonline.com/$Tenant/oauth2/v2.0/authorize?client_id=$SignInClientId&response_type=code&response_mode=query" +
@@ -372,8 +372,8 @@ function Get-HubAuthCode([string]$Tenant) {
         $deadline = (Get-Date).AddMinutes(5)
         while (-not $query) {
             if ((Get-Date) -gt $deadline) { throw 'Timed out (5 min) waiting for the sign-in.' }
-            if (-not $tcp.Pending()) { Start-Sleep -Milliseconds 200; continue }
-            $client = $tcp.AcceptTcpClient()
+            $tcpReady = @($tcps | Where-Object { $_.Pending() })[0]; if (-not $tcpReady) { Start-Sleep -Milliseconds 200; continue }
+            $client = $tcpReady.AcceptTcpClient()
             try {
                 $stream = $client.GetStream()
                 $line = (New-Object System.IO.StreamReader($stream)).ReadLine()
@@ -383,7 +383,7 @@ function Get-HubAuthCode([string]$Tenant) {
                 if ($line -match '^GET /\?(\S+) HTTP') { $query = $Matches[1] }
             } finally { $client.Close() }
         }
-    } finally { $tcp.Stop() }
+    } finally { foreach ($tcpL in $tcps) { try { $tcpL.Stop() } catch { } } }
     $kv = @{}
     foreach ($pair in ($query -split '&')) { $k, $v = $pair -split '=', 2; $kv[$k] = if ($null -ne $v) { [uri]::UnescapeDataString(($v -replace '\+', ' ')) } else { '' } }
     if ($kv['error']) { throw "Sign-in failed: $($kv['error']) -- $($kv['error_description'])" }

@@ -127,6 +127,46 @@ export function canTickAnotherAutoActivate(ticked, max) {
   if (max == null) return true
   return (Number(ticked) || 0) < max
 }
+// The TICK gate (2026-10-21, owner: "prod doesnt enforce the max = 3"). Ticking 'auto' ACTIVATES the group at once, and the
+// old gate counted only the TICKED groups -- so untick an active group, tick another (it activates), repeat: any number of
+// groups got activated through 'auto' while the tick count stayed under the cap. The tick now counts the DISTINCT groups
+// that are ticked (listed direct rows) OR in use (ticked + active, plus everything this popup session already activated or
+// sent for approval -- unticking a group activated this session does not free its slot); a new tick needs that below the cap.
+export function countAutoActivateClaimed(rows, isTicked, started) {
+  const ticked = (typeof isTicked === 'function') ? isTicked : (() => false)
+  const ids = new Set()
+  for (const r of (Array.isArray(rows) ? rows : [])) {
+    if (!r || r.kind !== 'group' || !r.groupId) continue
+    const isTick = ticked(r.rowKey || ('group:' + r.groupId))
+    if ((isTick && !r.depth) || (isTick && r.isActive)) ids.add(String(r.groupId).toLowerCase())
+  }
+  for (const id of (started instanceof Set ? started : [])) ids.add(String(id).toLowerCase())
+  return ids.size
+}
+export function canTickAutoActivateNow(rows, isTicked, started, max) {
+  if (max == null) return true
+  return countAutoActivateClaimed(rows, isTicked, started) < max
+}
+// The cap READ must FAIL CLOSED (2026-10-21). chrome.storage.managed.get is raced against a timeout (a dead provider must not
+// hang the popup -- 2026-06-17); on a timeout the old code resolved the cap from {__timedOut:true} = undefined = NO LIMIT, so a
+// slow managed-storage provider (busy device, first popup after the browser starts) silently switched the cap off for that
+// whole popup session. Now:
+//   a real answer           -> the policy value (missing = no limit), and it is remembered as the last known value
+//   timeout / error         -> the LAST KNOWN policy value from an earlier answer on this device ({ v: null|N })
+//   timeout, nothing known  -> 0 = auto-activation paused for this popup (never "no limit")
+// `read` = what storageGet returned ({__timedOut:true} on a timeout, null when it threw). Returns { max, source, remember }:
+// source = 'policy' | 'last-known' | 'unavailable'; remember = the { v } to store (only for a real answer).
+export function resolveAutoActivateMaxFromRead(read, lastKnown) {
+  const answered = !!(read && typeof read === 'object' && !read.__timedOut && !read.__error)
+  if (answered) {
+    const max = resolveAutoActivateMaxGroups(read.autoActivateMaxGroups)
+    return { max, source: 'policy', remember: { v: max } }
+  }
+  if (lastKnown && typeof lastKnown === 'object' && Object.prototype.hasOwnProperty.call(lastKnown, 'v')) {
+    return { max: lastKnown.v == null ? null : resolveAutoActivateMaxGroups(lastKnown.v), source: 'last-known', remember: null }
+  }
+  return { max: 0, source: 'unavailable', remember: null }
+}
 
 export function resolveBulkActivateConfirmThreshold(raw) {
   const n = (typeof raw === 'number') ? raw : parseInt(String(raw == null ? '' : raw).trim(), 10)

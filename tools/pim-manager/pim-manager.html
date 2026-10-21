@@ -17317,9 +17317,14 @@
       }
     },
     admins: {
-      load: async () => { await pimTenantMode(); return { admins: await gsRows('Account-Definitions-Admins'), roles: await gsRoleGroups() }; },
+      load: async () => {
+        await pimTenantMode();
+        let links = { companies: [], departments: [] }; try { links = await pimAdminLinkLists(); } catch (_) { }
+        return { admins: await gsRows('Account-Definitions-Admins'), roles: await gsRoleGroups(), companies: pimExternalCompanyOptions(links.companies), departments: links.departments || [] };
+      },
       body: (c, s) => {
         const admins = (s && s.admins) || [], roles = (s && s.roles) || [];
+        const cos = (s && s.companies) || [], dos = (s && s.departments) || [];
         const def = adminTypeKey('');
         return (admins.length ? '<div class="gs-facts">' + admins.length + ' admin account(s): ' + escapeHtml(admins.slice(0, 6).map(a => String(a.UserPrincipalName || a.UserName || '')).join(', ')) + (admins.length > 6 ? ', ...' : '') + '</div>' : '<div class="gs-facts">No admin accounts yet.</div>') +
           '<div class="gs-sub">Add an admin account</div>' +
@@ -17330,6 +17335,14 @@
           '<label class="gs-l" for="gsAdmType">Kind of account</label><select id="gsAdmType" name="adminType">' +
             '<option value="internal-adminuser"' + (def === 'internal-adminuser' ? ' selected' : '') + '>An admin account for an employee</option>' +
             '<option value="external-adminuser"' + (def === 'external-adminuser' ? ' selected' : '') + '>An admin account for an external consultant</option></select>' +
+          // ADMIN-CREATE-LINKS (owner 2026-10-21): a consultant's external company (shown for a consultant only) and, for
+          // every admin, the internal department that sponsors it -- the same columns as the New admin wizard.
+          '<div class="gsAdmCoRow"' + (/^internal/i.test(def) ? ' style="display:none;"' : '') + '><label class="gs-l" for="gsAdmCompany">Company (the consultant&rsquo;s external company)</label>' +
+            (cos.length ? '<select id="gsAdmCompany" name="adminCompany"><option value="">(choose the company)</option>' + cos.map(o => '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label) + '</option>').join('') + '</select>'
+                        : '<div class="gs-hint" id="gsAdmCompanyNone">No external company is defined yet (Reviews &amp; controls &rsaquo; External Companies (Consultants)) -- link it later on Admin accounts.</div>') + '</div>' +
+          '<label class="gs-l" for="gsAdmDept">Department (internal) -- its owners approve for this admin and receive its mail</label>' +
+            (dos.length ? '<select id="gsAdmDept" name="adminDepartment"><option value="">(choose the department)</option>' + dos.map(o => '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label) + '</option>').join('') + '</select>'
+                        : '<div class="gs-hint" id="gsAdmDeptNone">No department is defined yet (step Departments &amp; owners) -- link it later on Admin accounts.</div>') +
           '<label class="gs-l" for="gsAdmRole">May activate (optional)</label><select id="gsAdmRole" name="adminRole"><option value="">-- no ' + dimNoun() + ' yet --</option>' +
             roles.map(r => '<option value="' + escapeHtml(r.tag) + '">' + escapeHtml(r.name) + '</option>').join('') + '</select>' + gsErr('adminRole') +
           '<label class="gs-l" for="gsAdmAssign">How</label><select id="gsAdmAssign" name="adminAssign"><option value="Eligible">Eligible -- activates when needed (recommended)</option><option value="Active">Active -- always on</option></select>' +
@@ -17339,6 +17352,13 @@
         const inp = card.querySelector('[name="adminPerson"]');
         const first = card.querySelector('[name="adminFirst"]'), last = card.querySelector('[name="adminLast"]'), ini = card.querySelector('[name="adminInitials"]');
         let iniAuto = true;
+        // ADMIN-CREATE-LINKS: the company is a consultant's question -- shown for a consultant, hidden (and cleared) for an employee.
+        const typeSel = card.querySelector('[name="adminType"]'), coRow = card.querySelector('.gsAdmCoRow');
+        if (typeSel && coRow) typeSel.addEventListener('change', () => {
+          const internal = /^internal/i.test(String(typeSel.value || ''));
+          coRow.style.display = internal ? 'none' : '';
+          const co = coRow.querySelector('[name="adminCompany"]'); if (internal && co) co.value = '';
+        });
         const syncIni = () => { if (iniAuto && ini) ini.value = ((String(first.value || '').trim()[0] || '') + (String(last.value || '').trim()[0] || '')).toUpperCase(); };
         if (ini) ini.addEventListener('input', () => { iniAuto = !String(ini.value || '').trim(); });
         if (first) first.addEventListener('input', syncIni);
@@ -17363,7 +17383,13 @@
         else if (!/^[A-Za-z][A-Za-z0-9]{0,5}$/.test(ini)) errors.adminInitials = 'Letters (and a digit) only, no spaces.';
         if (role && !((s && s.roles) || []).some(r => r.tag === role)) errors.adminRole = 'That ' + dimNoun() + ' is not defined here.';
         if (Object.keys(errors).length) return { errors: errors };
-        const st = Object.assign(wizardAdminDefaultState(), { first: first, last: last, initials: ini, adminType: gsVal(form, 'adminType') || adminTypeKey(''), roleGroupSel: new Set(role ? [role] : []), assignmentType: gsVal(form, 'adminAssign') || 'Eligible' });
+        const aType = gsVal(form, 'adminType') || adminTypeKey('');
+        const st = Object.assign(wizardAdminDefaultState(), { first: first, last: last, initials: ini, adminType: aType, roleGroupSel: new Set(role ? [role] : []), assignmentType: gsVal(form, 'adminAssign') || 'Eligible',
+          // ADMIN-CREATE-LINKS: staged on the row by wizardAdminStage (Company + Department), the same save as the wizard.
+          company: /^internal/i.test(String(aType)) ? '' : gsVal(form, 'adminCompany'), department: gsVal(form, 'adminDepartment') });
+        // ADMIN-CREATE-LINKS: the admin type's consequences in ONE place (the wizard's own function) -- a consultant is saved as
+        // UserType External, never the default Internal. It also clears the company for an employee.
+        setWizardAdminType(st, aType);
         try { const r = await wizardAdminStage(st); return { wrote: true, note: 'Admin account ' + ((r && r.upn) || '') + ' staged -- commit it to create the account.' }; }
         catch (e) { const m = gsErrText(e); return { errors: /already used/i.test(m) ? { adminInitials: m.replace('Go back to the Person step and use', 'Use') } : { _: 'Nothing was staged: ' + m } }; }
       }
@@ -21298,12 +21324,14 @@
       _coLoading = api('GET', '/api/csv/' + encodeURIComponent('Account-Definitions-Companies')).then(r => {
         const rows = (r && r.rows) || [];
         _coCache = rows.map(x => ({ name: String(x && x.Company || '').trim(), type: /^internal$/i.test(String(x && x.Type || '').trim()) ? 'internal' : 'external' }))
-                       .filter(x => x.name).map(x => ({ value: x.name, label: x.name + ' (' + x.type + ')' }));
+                       .filter(x => x.name).map(x => ({ value: x.name, label: x.name + ' (' + x.type + ')', type: x.type }));
         _coLoaded = true;
-        if (typeof onLoaded === 'function') onLoaded();
         return _coCache;
       }).catch(() => []).finally(() => { _coLoading = null; });
     }
+    // ADMIN-CREATE-LINKS: the callback also fires when ANOTHER caller started the load (before, only the starter's did, and
+    // the New admin wizard kept saying "no external company is defined yet" while the companies were on their way).
+    if (_coLoading && typeof onLoaded === 'function') _coLoading.then(() => { if (_coLoaded) { try { onLoaded(); } catch (_) { } } });   // a failed load never loops
     return _coCache;
   }
   function gridQuickValueHtml(base, col, spec) {
@@ -28569,7 +28597,7 @@
   let _deptCache = null;
   let _deptLoading = null;   // the in-flight load, so callers can wait for it
   let _deptLoaded = false;   // true once the server has ANSWERED (an empty answer is then real)
-  function deptOptions() {
+  function deptOptions(onLoaded) {
     // An EMPTY cache is not an answer: [] is truthy, so the old "if (_deptCache) return" cached a
     // load that had not finished -- or had failed -- for the rest of the session, and the Edit
     // form's Department dropdown stayed at "-- none --" (2026-09-12).
@@ -28584,8 +28612,27 @@
         return _deptCache;
       }).catch(() => [] /* not loaded: the next call retries */).finally(() => { _deptLoading = null; });
     }
+    // ADMIN-CREATE-LINKS (owner 2026-10-21): a caller that renders before the answer is re-rendered when it arrives -- also
+    // when ANOTHER caller started the load (the wizard otherwise kept showing "no department defined yet").
+    if (_deptLoading && typeof onLoaded === 'function') _deptLoading.then(() => { if (_deptLoaded) { try { onLoaded(); } catch (_) { } } });   // a failed load never loops
     return _deptCache;
   }
+  // ADMIN-CREATE-LINKS (owner 2026-10-21: "when i created a consultant i didnt get option to link a external company to the
+  // consultant + internal dept. when i created an internal admin, i didnt get option to link internal dept"): the create
+  // flows (New admin wizard, Get Started > Admin accounts) wait for BOTH lists before they render, so a picker never shows
+  // "none defined yet" only because its list had not arrived. A list that cannot be read stays [] (the "link it later" note).
+  async function pimAdminLinkLists() {
+    // Read FRESH for every create: both lists are cached for the page, and a department or company added a minute ago (Get
+    // Started's Departments step, the Companies page) must be offered now, not after a reload.
+    if (isServer && !_coLoading) { _coCache = null; _coLoaded = false; }
+    if (isServer && !_deptLoading) { _deptCache = null; _deptLoaded = false; }
+    companyOptions(); deptOptions();
+    try { if (_coLoading) await _coLoading; } catch (_) { }
+    try { if (_deptLoading) await _deptLoading; } catch (_) { }
+    return { companies: (companyOptions() || []).slice(), departments: (deptOptions() || []).slice() };
+  }
+  // The companies a CONSULTANT is linked to: the external ones (Account-Definitions-Companies.Type blank = External, §89).
+  function pimExternalCompanyOptions(list) { return (list || []).filter(o => o && o.type !== 'internal'); }
 
   function wuxField(opts) {
     // opts: { id, label, sub, value, example, hint, options:[{value,label}], type='text'|'number'|'select'|'textarea', required, onInput, rows }
@@ -31333,7 +31380,10 @@
     let r;
     try {
       r = await api('POST', '/api/onboarding/guest-invite', {
-        email: email, displayName: display, firstName: String(s.first || '').trim(), lastName: String(s.last || '').trim(), company: '',
+        email: email, displayName: display, firstName: String(s.first || '').trim(), lastName: String(s.last || '').trim(),
+        // ADMIN-CREATE-LINKS: the company + department picked in the wizard (this sent company '' and no department, so a
+        // guest consultant was never linked to its company or its sponsor department). The server writes both on the row.
+        company: String(s.company || '').trim(), department: String(s.department || '').trim(),
         groupTag: firstTag,
         assignmentType: s.assignmentType,
         numOfDaysWhenExpire: parseInt(s.lifetimeDays, 10) || 0
@@ -31372,6 +31422,7 @@
     } catch (_) {}
 
     await pimTenantMode();   // the MSP fields below exist only on the managing tenant
+    try { await pimAdminLinkLists(); } catch (_) { }   // ADMIN-CREATE-LINKS: the company + department pickers render filled
     const state = wizardAdminDefaultState();
     // PIM 100.24: opened from Departments & owners ("Also create an admin account") -- pre-filled for that owner.
     if (prefill && typeof prefill === 'object') pimApplyAdminWizardPrefill(state, prefill);
@@ -31394,6 +31445,9 @@
       // owned/managed in THIS tenant; 'msp' = managed centrally from the MSP and
       // rolled out per-ring. Drives the ManagementMode column the engine reads.
       managementMode:'local',
+      // ADMIN-CREATE-LINKS: the consultant's external company, and the INTERNAL department that sponsors the admin (its
+      // owners approve for it and receive its mail) -- the same Company / Department columns Admin accounts > Edit sets.
+      company:'', department:'',
       upnSuffix: guessUpnSuffix(),
       userType:'Internal',
       status:'Enabled',
@@ -31479,7 +31533,8 @@
             // 2026-09-21 (operator: "we need to have the {Company} as a variable ... KONS-{Company}-{Initial}-{Tier}-c"):
             // the admin's own company. Fills {Company} in the name and is written to the account (companyName).
             if (!/^internal/i.test(String(s.adminType))) {
-              const cos = companyOptions(function () { try { rerender(); } catch (_) { } });
+              // ADMIN-CREATE-LINKS: a consultant is linked to an EXTERNAL company (an internal one is not a consultancy).
+              const cos = pimExternalCompanyOptions(companyOptions(function () { try { rerender(); } catch (_) { } }));
               if (cos.length) {
                 f.appendChild(wuxField({ id:'wf-company', label:'Company', type:'select', value:s.company || '',
                   hint:'The consultant’s company, from <b>External Companies (Consultants)</b>. Its reviews confirm this consultant; it fills <code>{Company}</code> if your naming uses it.',
@@ -31494,6 +31549,27 @@
                 nc.innerHTML = '<b>Company:</b> no external company is defined yet. Add it under <b>Reviews &amp; controls &rsaquo; External Companies (Consultants)</b>, then pick it here -- or create the admin now and link the company later.';
                 f.appendChild(nc);
               }
+            }
+            // ADMIN-CREATE-LINKS (owner 2026-10-21): EVERY admin -- internal or consultant -- is linked to the INTERNAL department
+            // that sponsors it; its owners approve for this admin and receive its mail (the TAP included). Asked here, at create,
+            // instead of only on Admin accounts > Edit afterwards.
+            const dos = deptOptions(function () { try { rerender(); } catch (_) { } });
+            const curDept = String(s.department || '').trim();
+            if (dos.length || curDept) {
+              const dsel = dos.slice();
+              if (curDept && !dsel.some(o => String(o.value) === curDept)) dsel.unshift({ value: curDept, label: curDept });   // a pre-filled value is kept
+              f.appendChild(wuxField({ id:'wf-dept', label:'Department (internal)', type:'select', value:curDept,
+                hint:'The internal department that sponsors this admin, from <b>Departments &amp; owners</b>. Its <b>owners</b> approve for this admin and receive its mail, including its Temporary Access Pass.',
+                sub:'Account-Definitions-Admins.Department',
+                options:[{ value:'', label:'(choose the department)' }].concat(dsel),
+                onInput:(v)=>{ s.department = String(v || ''); }
+              }));
+            } else {
+              const nd = document.createElement('div');
+              nd.id = 'wf-dept-none';
+              nd.style.cssText = 'font-size:12px; color:#57606a; background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:8px 10px; margin:2px 0 10px;';
+              nd.innerHTML = '<b>Department (internal):</b> no department is defined yet. Add it under <b>Access &rsaquo; Departments &amp; owners</b>, then pick it here -- or create the admin now and link the department later (Admin accounts &rsaquo; Edit).';
+              f.appendChild(nd);
             }
             // R1: browse the suffixes this tenant's admins already use, instead of typing one.
             // Still an INPUT (a combo), not a <select>: a genuinely new domain must remain typeable
