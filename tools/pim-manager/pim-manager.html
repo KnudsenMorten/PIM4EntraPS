@@ -29205,7 +29205,8 @@
   // from Get-PimRoleAssignableDefault (engine/_shared/PIM-RoleAssignable.ps1) -- the engine creates with the same rule,
   // and tests/Test-PimRoleAssignableDefault.ps1 runs both over one matrix. First match wins:
   //   1. the group holds an Entra ID role                         -> Yes, LOCKED (Entra refuses the role otherwise)
-  //   2. a direct group nested into a Tier-0 Entra-role group     -> Yes (Microsoft: protect sensitive access)
+  //   2. a direct group nested into a group holding an Entra role -> Yes, LOCKED, any tier (owner 2026-10-21: "an entra
+  //                                                                  role must force role assignable on"; was Tier 0 only)
   //   3. a direct group on Tier 0                                 -> Yes (the flag cannot be added later)
   //   4. everything else                                          -> No  (a permission group without an Entra role,
   //                                                                       a Tier 1 / Tier 2 direct group)
@@ -29218,13 +29219,13 @@
     if (o.holdsEntraRole) return { value: 'TRUE', locked: true, rule: 'entra-role',
       reason: 'Yes, locked: the group holds an Entra ID role, and Entra assigns a role only to a role-assignable group.' };
     const tn = pimTierNum(o.tier);
-    if (o.direct && o.nestsIntoTier0EntraRole) return { value: 'TRUE', locked: false, rule: 'tier0-nesting',
-      reason: 'Yes: it nests into a permission group holding a Tier-0 Entra ID role -- Microsoft recommends role-assignable for groups that reach sensitive access.' };
+    if (o.direct && (o.nestsIntoEntraRole || o.nestsIntoTier0EntraRole)) return { value: 'TRUE', locked: true, rule: 'entra-role-nesting',
+      reason: 'Yes, locked: it nests into a permission group holding an Entra ID role, so it must be role-assignable too.' };
     if (o.direct && tn === 0) return { value: 'TRUE', locked: false, rule: 'tier0',
       reason: 'Yes: a Tier-0 group -- only Global / Privileged Role Administrators and owners can then change its members (the flag cannot be added later).' };
     return { value: 'FALSE', locked: false, rule: 'default',
       reason: o.direct
-        ? 'No: a Tier ' + (tn != null ? tn : '1/2') + ' group that does not reach a Tier-0 Entra ID role -- role-assignable is not needed, and it would use one of the tenant\'s 500.'
+        ? 'No: a Tier ' + (tn != null ? tn : '1/2') + ' group that does not reach an Entra ID role -- role-assignable is not needed, and it would use one of the tenant\'s 500.'
         : 'No: this permission group holds no Entra ID role -- role-assignable is required only for a group that is assigned an Entra role (and uses one of the tenant\'s 500).' };
   }
   // Does this tag hold an Entra ID role? The Delegation Map's committed edges, plus any staged Roles-Groups / Roles-AUs row.
@@ -29253,7 +29254,7 @@
   // A DIRECT group wizard's default (direct-group / project / Get Started): its tier + the permission groups it nests into.
   function pimDirectGroupRoleAssignableDefault(s) {
     const sel = Array.from((s && s.permSel) || []);
-    return pimRoleAssignableDefault({ direct: true, tier: s && s.tier, nestsIntoTier0EntraRole: sel.some(pimTagIsTier0EntraRoleGroup) });
+    return pimRoleAssignableDefault({ direct: true, tier: s && s.tier, nestsIntoEntraRole: sel.some(pimTagHoldsEntraRole) });
   }
   // Apply a default to wizard state: it follows the rule live until the operator changes the field by hand (iraTouched);
   // a LOCKED default (an Entra role) always wins.
@@ -33061,18 +33062,8 @@
               hint:'AU placement for the group in Entra ID. <b>PIM-ROLES</b> is the standard for ' + dimNounPlural() + '.',
               onInput:(v)=>{ s.auTag=v; }
             }));
-            // 🔴 95.2c / 100.15: the default follows the rule (Tier, and -- after the next step -- the nesting), with a
-            // one-line reason; "(default)" marks the rule's answer. Changed by hand, it stays as chosen.
-            {
-              const raD = pimDirectGroupRoleAssignableDefault(s);
-              f.appendChild(wuxField({ id:'wr-ira', label:'Role-assignable security group?', type:'select', value:s.isRoleAssignable,
-                sub:'IsRoleAssignable',
-                options:[ { value:'TRUE', label:'Yes' + (raD.value === 'TRUE' ? ' (default)' : '') }, { value:'FALSE', label:'No' + (raD.value === 'FALSE' ? ' (default)' : '') } ],
-                hint:'<span id="wr-ira-why">' + escapeHtml(raD.reason) + (s.iraTouched && s.isRoleAssignable !== raD.value ? ' <b>Changed by hand</b> &mdash; the default is ' + (raD.value === 'TRUE' ? 'Yes' : 'No') + '.' : '') +
-                  ' Cannot be changed once the group exists.</span>',
-                onInput:(v)=>{ s.isRoleAssignable=v; s.iraTouched = true; rerender(); }
-              }));
-            }
+            // 🔴 Role-assignable is asked on the NEXT step, after the nesting (owner 2026-10-21: "it is wrong to ask for group
+            // type to be role assignable or not in the beginning. it should come after the assignment step with roles").
             // §62.5 -- A DELEGATION MUST CARRY A DEPARTMENT (operator: "same with a delegation, you
             // must assign a dept"). Without it the group is authored with no sponsor and the
             // validator's PIM-ROLE-OWNER-001 flags it afterwards -- a rule enforced too late to
@@ -33148,23 +33139,47 @@
           render: (s) => {
             const f = document.createElement('div');
             f.appendChild(wuxWhy(
-              'Pick the <b>permission groups</b> this role grants. Each pick becomes one row in <b>PIM-Assignments-Groups</b> (SQL).'
+              'Pick the <b>permission groups</b> this role grants. Each pick becomes one row in <b>PIM-Assignments-Groups</b> (SQL). ' +
+              'Then decide <b>Role-assignable</b>: when a picked group holds an <b>Entra ID role</b>, it is Yes and cannot be changed.'
             ));
             const items = listPermGroups().map(g => ({ key:g.tag, label:g.label, sub:g.tag + ' (' + (g.source||'') + ')' }));
             const cntEl = document.createElement('div'); cntEl.style.cssText='color:#57606a; font-size:11px; margin-top:6px;';
-            // 95.2c: nesting into a Tier-0 Entra-role group turns the role-assignable default to Yes -- say so here, live.
+            // 🔴 Owner 2026-10-21: asked HERE, after the nesting -- the nesting decides it. A picked group holding an Entra
+            // role LOCKS it to Yes (the No option is gone, a hand-chosen No is overridden), so it can no longer fail at commit.
+            // The field is built ONCE and updated in place (options, value, reason) -- never rebuilt inside its own event.
+            let raLocked = false;
+            const raFld = wuxField({ id:'wr-ira', label:'Role-assignable security group?', type:'select', value:s.isRoleAssignable,
+              sub:'IsRoleAssignable', options:[], hint:'<span id="wr-ira-why"></span>',
+              onInput:(v)=>{ const nv = raLocked ? 'TRUE' : v; if (nv === s.isRoleAssignable && s.iraTouched) return; s.isRoleAssignable = nv; s.iraTouched = true; refresh(); }
+            });
+            const raSel = raFld.querySelector('select'); const raWhy = raFld.querySelector('#wr-ira-why');
             const raEl = document.createElement('div'); raEl.id = 'wr-ira-nest'; raEl.style.cssText = 'font-size:11px; margin-top:6px; color:#57606a;';
             const refresh = () => {
               cntEl.textContent = s.permSel.size + ' permission group(s) selected';
               const d = pimApplyRoleAssignableDefault(s, pimDirectGroupRoleAssignableDefault(s));
               const warn = pimRoleAssignableNestWarning(s);
+              raLocked = !!d.locked;
+              const ro = d.locked
+                ? [ { value:'TRUE', label:'Yes -- required: a nested group holds an Entra ID role' } ]
+                : [ { value:'TRUE', label:'Yes' + (d.value === 'TRUE' ? ' (default)' : '') }, { value:'FALSE', label:'No' + (d.value === 'FALSE' ? ' (default)' : '') } ];
+              raSel.innerHTML = '';
+              ro.forEach(o => { const op = document.createElement('option'); op.value = o.value; op.textContent = o.label; raSel.appendChild(op); });
+              raSel.value = String(s.isRoleAssignable).toUpperCase() === 'TRUE' ? 'TRUE' : 'FALSE';
+              raWhy.innerHTML = escapeHtml(d.reason) + (!d.locked && s.iraTouched && s.isRoleAssignable !== d.value ? ' <b>Changed by hand</b> &mdash; the default is ' + (d.value === 'TRUE' ? 'Yes' : 'No') + '.' : '') +
+                ' Cannot be changed once the group exists.';
               raEl.style.color = warn ? '#9a6700' : '#57606a';
               raEl.textContent = 'Role-assignable: ' + (String(s.isRoleAssignable).toUpperCase() === 'TRUE' ? 'Yes' : 'No') +
-                (s.iraTouched && s.isRoleAssignable !== d.value ? ' (changed by hand; default ' + (d.value === 'TRUE' ? 'Yes' : 'No') + ')' : '') + ' -- ' + d.reason + (warn ? ' ⚠ ' + warn : '');
+                (!d.locked && s.iraTouched && s.isRoleAssignable !== d.value ? ' (changed by hand; default ' + (d.value === 'TRUE' ? 'Yes' : 'No') + ')' : '') + ' -- ' + d.reason + (warn ? ' ⚠ ' + warn : '');
             };
             f.appendChild(wuxPicklist({ items, multi:true, selected:s.permSel, onChange: refresh }));
-            refresh(); f.appendChild(cntEl); f.appendChild(raEl);
+            f.appendChild(cntEl); f.appendChild(raFld); f.appendChild(raEl); refresh();
             return f;
+          },
+          // Defence in depth: never leave this step with No while a nested group holds an Entra role.
+          validate: (s) => {
+            const d = pimApplyRoleAssignableDefault(s, pimDirectGroupRoleAssignableDefault(s));
+            if (d.locked && String(s.isRoleAssignable).toUpperCase() !== 'TRUE') return 'Role-assignable must be Yes: a nested permission group holds an Entra ID role.';
+            return true;
           }
         },
         {

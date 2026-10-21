@@ -1529,6 +1529,25 @@ function Get-PimUplinkCapabilityKeys {
              'azureRbac', 'exchangeOnline', 'powerBi', 'hybridAd', 'tapPolicy')
 }
 
+function ConvertTo-PimUplinkTokenScrubbed {
+    <#
+      PURE. 2026-10-21 (internal, 15:41:59Z): Invardia refused a run record with 422 [fields: Reports.Detail] -- the text
+      LOOKED LIKE A SECRET: a run of 40+ characters from [A-Za-z0-9+/_~.-] with upper case, lower case AND 4+ digits (a
+      token / base64 / trace-id fragment in an engine error). The cause fields were then held for 24 h. Invardia's rule
+      (packages/core/src/reportcauses.ts), mirrored: such a run becomes '[token]'; control characters become spaces.
+      Over-eager is fine here -- Detail is informational, and a scrubbed id is never worth a refused record.
+    #>
+    param([AllowNull()][string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return "$Text" }
+    $x = [regex]::Replace($Text, '[\x00-\x1F\x7F]', ' ')
+    return [regex]::Replace($x, '[A-Za-z0-9+/_~.\-]{40,}', {
+        param($m)
+        $v = $m.Value
+        if ($v -cmatch '[A-Z]' -and $v -cmatch '[a-z]' -and ([regex]::Matches($v, '[0-9]')).Count -ge 4) { return '[token]' }
+        return $v
+    })
+}
+
 function Get-PimUplinkCauseItemMax { <# PURE. framework 8.16: at most 20 Reports items, Detail at most 500 characters. #> return 20 }
 
 function ConvertTo-PimUplinkCauseId {
@@ -2726,7 +2745,7 @@ function Invoke-PimUplinkCycle {
         return (& $postCause $rec $nm $legacy $cnames)
     }
     $isId = ($sender.Mode -eq 'identified')
-    $redact ={ param($t, $max) $x = "$t".Trim(); if (Get-Command ConvertTo-AitUplinkRedacted -ErrorAction SilentlyContinue) { $x = ConvertTo-AitUplinkRedacted -Text $x }; if ($x.Length -gt $max) { $x = $x.Substring(0, $max - 3) + '...' }; $x }
+    $redact ={ param($t, $max) $x = "$t".Trim(); if (Get-Command ConvertTo-AitUplinkRedacted -ErrorAction SilentlyContinue) { $x = ConvertTo-AitUplinkRedacted -Text $x }; $x = (ConvertTo-PimUplinkTokenScrubbed -Text $x).Trim(); if ($x.Length -gt $max) { $x = $x.Substring(0, $max - 3) + '...' }; $x }
     # §11 opt-in: switched back ON after an opt-out -> ONE 'optin' report FIRST. Until it lands nothing else is sent (Invardia
     # still has this environment as opted out), and nothing from the opted-out period is ever sent: the floor restarts NOW.
     $consent = 'on'
