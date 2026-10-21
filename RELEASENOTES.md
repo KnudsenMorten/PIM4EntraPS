@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.661 -- 2026-10-21
+
+- Creating a direct group now asks Role-assignable after the permission groups are picked, and a group that reaches an Entra ID role is always role-assignable (No is no longer offered), so it can no longer fail at Commit. Telemetry no longer sends a token-like text in a cause detail, which made Invardia refuse the cause fields for 24 hours.
+
 ## 2.4.660 -- 2026-10-21
 
 - Creating an admin now links it at once: a consultant to its external company and internal department, an internal admin to its department. The mail-sender setup reuses an existing send scope instead of failing. Every browser sign-in in the setup scripts works when localhost means IPv6, and an Azure Arc or VM machine identity no longer stops a sign-in.

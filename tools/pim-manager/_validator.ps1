@@ -1029,7 +1029,7 @@ function Invoke-PimPreflightValidation {
             $f = if ($raFacts.ContainsKey($k)) { $raFacts[$k] } else { $null }
             $tn = & $raTierNum $g.TierLevel
             if ($null -eq $tn -or $tn -eq 0) { continue }
-            if ($f -and ($f.HoldsEntraRole -or $f.NestsIntoTier0EntraRole)) { continue }
+            if ($f -and ($f.HoldsEntraRole -or $f.NestsIntoEntraRole -or $f.NestsIntoTier0EntraRole)) { continue }
             $gn = & $raName $g $g.Tag
             [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-RA-004' -Csv "$($g.Csv)" -Row $g.Row -Column 'IsRoleAssignable' `
                 -Subject $gn -Target $gn `

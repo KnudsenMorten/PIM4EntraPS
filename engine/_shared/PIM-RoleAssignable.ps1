@@ -18,7 +18,8 @@
     1. the group itself holds an Entra ID role (a PIM-Assignments-Roles-Groups / -Roles-AUs row names it)
          -> TRUE, LOCKED (Entra refuses the role otherwise)
     2. a DIRECT group (job role / department / organisation / project / cross-org) nested into a permission group that
-       holds a TIER-0 Entra ID role -> TRUE (Microsoft: protect sensitive access)
+       holds an Entra ID role, ANY tier -> TRUE, LOCKED (owner 2026-10-21: "an entra role must force role assignable on.
+       it cannot be not role assignable. today it doesnt block it either so it fails at commit"; was Tier-0 only, unlocked)
     3. a DIRECT group on Tier 0 -> TRUE (the flag cannot be added later; a Tier-0 direct group is where a Tier-0
        nesting will land)
     4. everything else -> FALSE (a permission group without an Entra role; a Tier 1 / Tier 2 direct group)
@@ -68,25 +69,26 @@ function Get-PimRoleAssignableDefault {
         -HoldsEntraRole            the group itself is assigned an Entra ID role
         -DirectGroup               a direct group (job role / department / organisation / project / cross-org)
         -TierLevel                 the group's TierLevel ('T0' / 'T1' / 'T2' / '0' ...)
-        -NestsIntoTier0EntraRole   (direct group) it is nested into a permission group holding a Tier-0 Entra ID role
-      Returns [pscustomobject]@{ Value = 'TRUE'|'FALSE'; Locked = bool; Rule = 'entra-role'|'tier0-nesting'|'tier0'|'default';
+        -NestsIntoEntraRole        (direct group) it is nested into a permission group holding an Entra ID role (any tier)
+        -NestsIntoTier0EntraRole   (direct group) the same, for a Tier-0 role (a subset; kept for the callers that pass it)
+      Returns [pscustomobject]@{ Value = 'TRUE'|'FALSE'; Locked = bool; Rule = 'entra-role'|'entra-role-nesting'|'tier0'|'default';
                                  Reason = one line an operator can read }
     #>
-    param([switch]$HoldsEntraRole, [switch]$DirectGroup, [AllowNull()][string]$TierLevel, [switch]$NestsIntoTier0EntraRole)
+    param([switch]$HoldsEntraRole, [switch]$DirectGroup, [AllowNull()][string]$TierLevel, [switch]$NestsIntoEntraRole, [switch]$NestsIntoTier0EntraRole)
     if ($HoldsEntraRole) {
         return [pscustomobject]@{ Value = 'TRUE'; Locked = $true; Rule = 'entra-role'
             Reason = 'Yes, locked: the group holds an Entra ID role, and Entra assigns a role only to a role-assignable group.' }
     }
     $tn = ConvertTo-PimTierNumber $TierLevel
-    if ($DirectGroup -and $NestsIntoTier0EntraRole) {
-        return [pscustomobject]@{ Value = 'TRUE'; Locked = $false; Rule = 'tier0-nesting'
-            Reason = 'Yes: it nests into a permission group holding a Tier-0 Entra ID role -- Microsoft recommends role-assignable for groups that reach sensitive access.' }
+    if ($DirectGroup -and ($NestsIntoEntraRole -or $NestsIntoTier0EntraRole)) {
+        return [pscustomobject]@{ Value = 'TRUE'; Locked = $true; Rule = 'entra-role-nesting'
+            Reason = 'Yes, locked: it nests into a permission group holding an Entra ID role, so it must be role-assignable too.' }
     }
     if ($DirectGroup -and $tn -eq 0) {
         return [pscustomobject]@{ Value = 'TRUE'; Locked = $false; Rule = 'tier0'
             Reason = 'Yes: a Tier-0 group -- only Global / Privileged Role Administrators and owners can then change its members (the flag cannot be added later).' }
     }
-    $why = if ($DirectGroup) { "No: a Tier $(if ($null -ne $tn) { $tn } else { '1/2' }) group that does not reach a Tier-0 Entra ID role -- role-assignable is not needed, and it would use one of the tenant's 500." }
+    $why = if ($DirectGroup) { "No: a Tier $(if ($null -ne $tn) { $tn } else { '1/2' }) group that does not reach an Entra ID role -- role-assignable is not needed, and it would use one of the tenant's 500." }
            else { "No: this permission group holds no Entra ID role -- role-assignable is required only for a group that is assigned an Entra role (and uses one of the tenant's 500)." }
     return [pscustomobject]@{ Value = 'FALSE'; Locked = $false; Rule = 'default'; Reason = $why }
 }
@@ -97,7 +99,8 @@ function Get-PimRoleAssignableFacts {
         -Definitions   rows with GroupTag + TierLevel and either SourceEntity, or use -EntityOf (a scriptblock row -> entity)
         -RoleBindings  rows of PIM-Assignments-Roles-Groups / -Roles-AUs (GroupTag)
         -Nestings      rows of PIM-Assignments-Groups: TargetGroupTag is the MEMBER, SourceGroupTag the CONTAINER
-      Returns @{ '<tag lower>' = [pscustomobject]@{ Tag; Tier; Direct; HoldsEntraRole; NestsIntoTier0EntraRole; Tier0Containers } }
+      Returns @{ '<tag lower>' = [pscustomobject]@{ Tag; Tier; Direct; HoldsEntraRole; NestsIntoEntraRole; EntraRoleContainers;
+                                                     NestsIntoTier0EntraRole; Tier0Containers } }
     #>
     param([object[]]$Definitions = @(), [object[]]$RoleBindings = @(), [object[]]$Nestings = @(), [scriptblock]$EntityOf)
     $get = {
@@ -112,7 +115,7 @@ function Get-PimRoleAssignableFacts {
         $k = $tag.ToLowerInvariant(); if ($facts.ContainsKey($k)) { continue }
         $ent = if ($EntityOf) { "$(& $EntityOf $d)" } else { & $get $d 'SourceEntity' }
         $facts[$k] = [pscustomobject]@{ Tag = $tag; Tier = (& $get $d 'TierLevel'); Direct = (Test-PimDirectGroupEntity $ent)
-            HoldsEntraRole = $false; NestsIntoTier0EntraRole = $false; Tier0Containers = @() }
+            HoldsEntraRole = $false; NestsIntoEntraRole = $false; EntraRoleContainers = @(); NestsIntoTier0EntraRole = $false; Tier0Containers = @() }
     }
     foreach ($b in @($RoleBindings)) {
         $tag = & $get $b 'GroupTag'; if (-not $tag) { continue }
@@ -125,6 +128,10 @@ function Get-PimRoleAssignableFacts {
         $mk = $member.ToLowerInvariant(); $ck = $container.ToLowerInvariant()
         if (-not $facts.ContainsKey($mk) -or -not $facts.ContainsKey($ck)) { continue }
         $c = $facts[$ck]
+        if ($c.HoldsEntraRole) {
+            $facts[$mk].NestsIntoEntraRole = $true
+            $facts[$mk].EntraRoleContainers = @($facts[$mk].EntraRoleContainers) + @($c.Tag)
+        }
         if ($c.HoldsEntraRole -and (ConvertTo-PimTierNumber $c.Tier) -eq 0) {
             $facts[$mk].NestsIntoTier0EntraRole = $true
             $facts[$mk].Tier0Containers = @($facts[$mk].Tier0Containers) + @($c.Tag)
@@ -140,7 +147,7 @@ function Get-PimRoleAssignableDefaultForTag {
     $f = $null
     if ($Facts -and "$Tag".Trim()) { $k = "$Tag".Trim().ToLowerInvariant(); if ($Facts.ContainsKey($k)) { $f = $Facts[$k] } }
     if ($f) {
-        return Get-PimRoleAssignableDefault -HoldsEntraRole:([bool]$f.HoldsEntraRole) -DirectGroup:([bool]$f.Direct) -TierLevel "$($f.Tier)" -NestsIntoTier0EntraRole:([bool]$f.NestsIntoTier0EntraRole)
+        return Get-PimRoleAssignableDefault -HoldsEntraRole:([bool]$f.HoldsEntraRole) -DirectGroup:([bool]$f.Direct) -TierLevel "$($f.Tier)" -NestsIntoEntraRole:([bool]$f.NestsIntoEntraRole) -NestsIntoTier0EntraRole:([bool]$f.NestsIntoTier0EntraRole)
     }
     return Get-PimRoleAssignableDefault -DirectGroup:$DirectGroup -TierLevel $TierLevel
 }
