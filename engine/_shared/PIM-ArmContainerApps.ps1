@@ -53,6 +53,16 @@ function Get-PimAcaApp {
     Invoke-PimArm -Method GET -Path (Get-PimAcaAppId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name) -ApiVersion $script:PimAcaApi
 }
 
+function Get-PimAcaAuthConfig {
+    <# The app's authConfigs/current (Easy Auth). Read-only. Throws like Get-PimAcaApp (a 404 = the app has none). #>
+    param(
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [Parameter(Mandatory)][string]$ResourceGroup,
+        [Parameter(Mandatory)][string]$Name
+    )
+    Invoke-PimArm -Method GET -Path ((Get-PimAcaAppId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name) + '/authConfigs/current') -ApiVersion $script:PimAcaApi
+}
+
 function Get-PimAcaAppImage {
     <#
       The image the app's template currently declares, for the container that matters.
@@ -70,6 +80,28 @@ function Get-PimAcaAppImage {
     }
     if ($containers.Count -eq 1) { return "$($containers[0].image)" }
     return ''
+}
+
+function Get-PimAcaManagerContainer {
+    <#
+      The MANAGER's container on the ca-pim-manager app, never "the first one".
+      🪤 On a sign-in front install (CR7, framework 12.11g) the app carries two containers and [0] is
+      'signin-front': a version read of [0] says 1.2.1, and a rollback written into [0] puts the Manager
+      image into the front (2026-10-21). By name; else the only container; else the one that is not the
+      front; else $null (the caller refuses to guess).
+    #>
+    param([Parameter(Mandatory)][AllowNull()][object]$App, [string]$ContainerName = 'ca-pim-manager')
+    if (-not $App) { return $null }
+    $containers = @(@($App.properties.template.containers) | Where-Object { $_ })
+    if (-not $containers.Count) { return $null }
+    if ("$ContainerName".Trim()) {
+        $c = @($containers | Where-Object { "$($_.name)" -eq "$ContainerName".Trim() }) | Select-Object -First 1
+        if ($c) { return $c }
+    }
+    if ($containers.Count -eq 1) { return $containers[0] }
+    $notFront = @($containers | Where-Object { "$($_.name)" -ne 'signin-front' })
+    if ($notFront.Count -eq 1) { return $notFront[0] }
+    return $null
 }
 
 function Set-PimAcaAppImage {

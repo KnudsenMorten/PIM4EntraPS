@@ -1165,7 +1165,8 @@ function Invoke-PimAsBuiltConverge {
     try {
         $mgr = & $get "$rg/providers/Microsoft.App/containerApps/$ManagerApp`?$aca"
         if (-not $mgr) { & $add 'asbuilt' 'warn' "as-built: the Manager app '$ManagerApp' could not be read -- nothing converged"; return (& { [pscustomobject]@{ lines = @($lines.ToArray()); changed = 0; warnings = 1; jobImage = ''; identity = $idOut } }) }
-        $mc = @($mgr.properties.template.containers)[0]
+        # the Manager's container, never [0]: on a sign-in front install [0] is 'signin-front' (2026-10-21)
+        $mc = @(@($mgr.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0]
         $image = "$($mc.image)".Trim()
         $menv = @{}; foreach ($e in @($mc.env)) { if ($e -and "$($e.name)") { $menv["$($e.name)"] = "$($e.value)" } }
         $reg = @($mgr.properties.configuration.registries)[0]

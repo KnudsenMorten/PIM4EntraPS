@@ -3230,7 +3230,8 @@ if (-not $StepRunner -and $hosted -and -not $ValidateOnly -and (Test-PimDeployRe
     # the captured target was already gone by the time the rollback ran, and the safety net told
     # the operator to roll back by hand during a failed deploy. The image is the durable anchor.
     try {
-        $prevImage = "$(@((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties.template.containers)[0].image)".Trim()
+        # the MANAGER container, never [0] (on a sign-in front install [0] is the front, 2026-10-21)
+        $prevImage = "$(@(@((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0].image)".Trim()
     } catch { Write-Verbose "pre-deploy image read failed: $($_.Exception.Message)" }
     Info "pre-deploy image (rollback fallback): $(if($prevImage){$prevImage}else{'(unknown)'})"
 }

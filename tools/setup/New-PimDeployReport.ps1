@@ -159,7 +159,7 @@ Add-Section $sb '3. RESOURCE STATE' {
     Get-ReportArmList '/providers/Microsoft.App/managedEnvironments' 'aca' | ForEach-Object { [pscustomobject]@{ name = $_.name; state = $_.properties.provisioningState } } | Format-Table -AutoSize | Out-String -Width 250
     "`n--- container apps (image + revision + replicas) ---"
     Get-ReportArmList '/providers/Microsoft.App/containerApps' 'aca' | ForEach-Object {
-        [pscustomobject]@{ name = $_.name; image = @($_.properties.template.containers)[0].image; minReplicas = $_.properties.template.scale.minReplicas
+        [pscustomobject]@{ name = $_.name; image = (@($_.properties.template.containers) | ForEach-Object { "$($_.name)=$($_.image)" }) -join ' + '; minReplicas = $_.properties.template.scale.minReplicas
                            revision = $_.properties.latestRevisionName; fqdn = $_.properties.configuration.ingress.fqdn }
     } | Format-Table -AutoSize | Out-String -Width 250
     "`n--- container app JOBS (cron tick) ---"

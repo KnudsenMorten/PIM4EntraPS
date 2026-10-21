@@ -383,7 +383,7 @@ if (-not @($Apps | Where-Object { "$_".Trim() }).Count) {
     Write-Host ("  apps (discovered): {0}" -f $(if ($Apps.Count) { $Apps -join ', ' } else { '(none)' })) -ForegroundColor DarkGray
 }
 if (-not @($Jobs | Where-Object { "$_".Trim() }).Count) {
-    $mgrImg = "$(@((Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties.template.containers)[0].image)".Trim()
+    $mgrImg = "$((Get-PimAcaManagerContainer -App (Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull) -ContainerName $ManagerApp).image)".Trim()   # never [0]: the sign-in front (2026-10-21)
     $jobObjs = @(); $jobsRead = $true
     try { $jobObjs = @(Get-PimArmAcaJobList -SubscriptionId $S -ResourceGroup $ResourceGroup) } catch { $jobsRead = $false }
     if (-not $jobsRead -or -not $mgrImg) {
@@ -415,7 +415,8 @@ foreach ($t in $targets) {
         # containerapp revision show --query properties.createdTime
         if ($rev) { $rj = Get-PimArmAcaRevision -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $app -Revision $rev -ErrorAsNull; if ($rj -and "$($rj.properties.createdTime)".Trim()) { $created = "$($rj.properties.createdTime)".Trim() } }
     }
-    $img = "$($o.properties.template.containers[0].image)"
+    # an app: its Manager-side container, never [0] (the sign-in front, 2026-10-21); a job has one container
+    $img = if ($t.kind -eq 'app') { "$((Get-PimAcaManagerContainer -App $o -ContainerName $app).image)" } else { "$(@($o.properties.template.containers)[0].image)" }
     $deployed.Add([pscustomobject]@{
         app = $app; image = $img; revision = $rev; createdUtc = $created
         # Resolved here rather than inside the pure core, which must stay network-free.

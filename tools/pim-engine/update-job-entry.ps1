@@ -303,6 +303,7 @@ $script:PimRingApproved       = ''
 $script:PimRingApprovedReason = ''
 $script:PimRunningVersion     = ''
 $script:PimSqlAccessVerdict   = $null   # §33.0 SqlAccess: set by the access converge (schema step); $null = carry the last one
+$script:PimSignInLayer        = $null   # framework 8.17 SignIn: read from the Manager app below; $null = carry the last one
 function Send-PimUpdateOutcome {
     param(
         [ValidateSet('none','built','rolled','schema','failed')][string]$Action = 'none',
@@ -372,7 +373,7 @@ function Send-PimUpdateOutcome {
                         -RunningVersion $script:PimRunningVersion `
                         -LastBuiltVersion "$($env:PIM_UPDATE_LAST_BUILT)" -TargetVersion $ToVersion `
                         -Action $Action -Outcome $Outcome -ErrorText $ErrorText -Previous $prev `
-                        -Source "$($env:PIM_UPDATE_SOURCE)" -WaitingSinceUtc $WaitingSinceUtc -SqlAccess $script:PimSqlAccessVerdict `
+                        -Source "$($env:PIM_UPDATE_SOURCE)" -WaitingSinceUtc $WaitingSinceUtc -SqlAccess $script:PimSqlAccessVerdict -SignIn $script:PimSignInLayer `
                         -DurationSeconds ([int]([datetime]::UtcNow - $script:PimUpdateStartedUtc).TotalSeconds)
         $saved = Save-PimUpdateState -ConnectionString $csState -Record $stateRec
         if ($saved.ok) { Say "update state: recorded ring '$($stateRec.ring)' / $Outcome in pim.Settings" 'DarkGray' }
@@ -451,6 +452,17 @@ try {
     else { $resolveErr = "the Manager's image ('$cur') names no registry" }
 } catch { $resolveErr = "$($_.Exception.Message)" }
 if ($resolveErr) { Say "  could not read this environment's registry from $managerApp`: $resolveErr" 'Yellow' }
+# Framework 8.17 SignIn: the Manager's sign-in layer, read from the RUNNING app (the app above + its auth config), recorded
+# in UpdateState so the heartbeat only reads it (the tick reads no ARM). A read that fails records nothing -- the last
+# known layer is carried forward. Telemetry only: never changes or stops the update.
+try {
+    if ($app -and (Get-Command Get-PimSignInLayer -ErrorAction SilentlyContinue)) {
+        $siAuth = $null; $siRead = $true
+        try { $siAuth = Get-PimAcaAuthConfig -SubscriptionId $sub -ResourceGroup $rg -Name $managerApp }
+        catch { if ("$($_.Exception.Message)" -notmatch '404|NotFound') { $siRead = $false } }
+        $script:PimSignInLayer = Get-PimSignInLayer -App $app -AuthConfig $siAuth -AuthRead $siRead
+    }
+} catch { $script:PimSignInLayer = $null }
 
 # ---- CR7 (framework 12.11g, PIM 100.168) -- DOES THIS INSTALL BUILD THE SIGN-IN FRONT IMAGE? ----------------------------
 # 🔒 OPT-IN ONLY: the Manager runs behind the front (PIM_HOSTED_AUTH_LAYER=signin-front on its app) or this job carries
@@ -927,6 +939,9 @@ if ($sfOpt.behindFront -and $loginServer) {
     $sfVer = ''
     if ($sfResult -and $sfResult.ok -and ($sfResult.built -or "$($sfResult.action)" -eq 'present') -and "$($sfResult.version)".Trim()) { $sfVer = "$($sfResult.version)".Trim() }
     elseif ($sfBuilt) { $sfVer = $sfBuilt }
+    # front 1.3.0+ refuses to start without its state settings: the front stays where it is until they are on its container
+    $sfState = Test-PimSigninFrontStateReady -App $app -Version $sfVer
+    if (-not $sfState.ok) { Say "  the sign-in front stays on its current image: $($sfState.reason)" 'Yellow'; $sfVer = '' }
     $sfFrontImage = Get-PimSigninFrontImageRef -LoginServer $loginServer -Version $sfVer
 }
 

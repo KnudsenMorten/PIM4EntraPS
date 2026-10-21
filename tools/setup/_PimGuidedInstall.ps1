@@ -590,7 +590,7 @@ function Get-PimInstallSignedInIdentity {
       --subscription. Returns the same shape as Get-PimSignedInIdentity (_PimSignedIn.ps1).
     #>
     param([Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][scriptblock]$Az)
-    $conf = @(Get-PimSignedInEnvironmentConflicts)
+    [void](Clear-PimSignedInMachineIdentity); $conf = @(Get-PimSignedInEnvironmentConflicts)
     if ($conf.Count) {
         return @{ ok = $false; reason = ("REFUSED: $($conf -join ', ') $(if ($conf.Count -eq 1) { 'is' } else { 'are' }) set in this session -- a token call would authenticate as " +
                  'that identity instead of the signed-in user. ' + (Get-PimSignedInConflictHint -Names $conf)) }

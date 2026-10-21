@@ -442,7 +442,7 @@ if ($ResumeFromCapture) {
         if (-not (LoadCap "job-$($j.name)-full")) { throw "the capture is missing job '$($j.name)' -- cannot resume from it." }
     }
     $hadEasyAuth = [bool]($authCap.identityProviders.azureActiveDirectory.registration.clientId)
-    Say "captured manager : $ManagerApp  image=$($appCap.properties.template.containers[0].image)" 'Green'
+    Say "captured manager : $ManagerApp  image=$((@(@($appCap.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0]).image)" 'Green'
     Say "captured secrets : $(if ($appSec.Count) { (@($appSec)|ForEach-Object{$_.name}) -join ', ' } else { '(none)' })"
     Say "captured jobs    : $(if ($jobsCap.Count) { (@($jobsCap)|ForEach-Object{$_.name}) -join ', ' } else { '(none)' })"
     foreach ($s in @($appSec)) { if (-not $s.value) { throw "captured secret '$($s.name)' has NO VALUE -- restoring would produce a broken app." } }
@@ -498,7 +498,7 @@ $appSec = @(DropNulls (Get-PimArmAcaAppSecrets -SubscriptionId $SubscriptionId -
 $authCap = (Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties
 [void](SaveCap "app-$ManagerApp-auth" $authCap)
 $hadEasyAuth = [bool]($authCap.identityProviders.azureActiveDirectory.registration.clientId)
-Say "manager      : $ManagerApp  image=$($appCap.properties.template.containers[0].image)"
+Say "manager      : $ManagerApp  image=$((@(@($appCap.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0]).image)"
 Say "  secrets    : $(if ($appSec.Count) { (@($appSec)|ForEach-Object{$_.name}) -join ', ' } else { '(none)' })"
 Say ("  easy auth  : " + $(if ($hadEasyAuth) { "already configured ($($authCap.identityProviders.azureActiveDirectory.registration.clientId))" } else { 'NONE -- the internal-only env IS the access control today' })) `
     $(if ($hadEasyAuth) { 'Gray' } else { 'Yellow' })
@@ -978,20 +978,20 @@ $now = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $Resource
 function Cmp($what, $a, $b) {
     if ("$a" -eq "$b") { Say "  same: $what" } else { Bad "DIFFERS: $what  was='$a' now='$b'" }
 }
-Cmp 'image'        $appCap.properties.template.containers[0].image $now.properties.template.containers[0].image
-Cmp 'cpu'          $appCap.properties.template.containers[0].resources.cpu $now.properties.template.containers[0].resources.cpu
-Cmp 'memory'       $appCap.properties.template.containers[0].resources.memory $now.properties.template.containers[0].resources.memory
+Cmp 'image'        (@(@($appCap.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0]).image (@(@($now.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0]).image
+Cmp 'cpu'          (@(@($appCap.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0]).resources.cpu (@(@($now.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0]).resources.cpu
+Cmp 'memory'       (@(@($appCap.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0]).resources.memory (@(@($now.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0]).resources.memory
 Cmp 'minReplicas'  $appCap.properties.template.scale.minReplicas $now.properties.template.scale.minReplicas
 Cmp 'maxReplicas'  $appCap.properties.template.scale.maxReplicas $now.properties.template.scale.maxReplicas
 Cmp 'targetPort'   $appCap.properties.configuration.ingress.targetPort $now.properties.configuration.ingress.targetPort
-Cmp 'env var count' @($appCap.properties.template.containers[0].env).Count @($now.properties.template.containers[0].env).Count
+Cmp 'env var count' @((@(@($appCap.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0]).env).Count @((@(@($now.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0]).env).Count
 Cmp 'secret count'  @($appCap.properties.configuration.secrets).Count @($now.properties.configuration.secrets).Count
 Cmp 'registry'      $appCap.properties.configuration.registries[0].server $now.properties.configuration.registries[0].server
 Cmp 'identity type' $appCap.identity.type $now.identity.type
 # Every environment variable, by name AND value -- an env var that quietly went missing is the
 # failure this whole restore path could produce and still look healthy.
-$wasEnv = @{}; foreach ($e in @($appCap.properties.template.containers[0].env)) { $wasEnv[$e.name] = "$($e.value)$($e.secretRef)" }
-$nowEnv = @{}; foreach ($e in @($now.properties.template.containers[0].env))    { $nowEnv[$e.name] = "$($e.value)$($e.secretRef)" }
+$wasEnv = @{}; foreach ($e in @((@(@($appCap.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0]).env)) { $wasEnv[$e.name] = "$($e.value)$($e.secretRef)" }
+$nowEnv = @{}; foreach ($e in @((@(@($now.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0]).env))    { $nowEnv[$e.name] = "$($e.value)$($e.secretRef)" }
 foreach ($k in $wasEnv.Keys) {
     if (-not $nowEnv.ContainsKey($k)) { Bad "env var MISSING after restore: $k" }
     elseif ($wasEnv[$k] -ne $nowEnv[$k]) { Bad "env var CHANGED after restore: $k" }

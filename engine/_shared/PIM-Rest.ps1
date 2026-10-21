@@ -380,6 +380,25 @@ function Get-PimHandoffRefreshJson {
   return ($out | ConvertTo-Json -Compress)
 }
 
+function New-PimLoopbackListeners {
+  # The browser sign-in's redirect listeners: the IPv4 loopback on a free port AND the IPv6 loopback on the SAME port when
+  # the machine has IPv6 (a "localhost" redirect may resolve to either). Loopback only. A port the IPv6 side cannot take
+  # is retried on a new one (a few times); no IPv6 at all = the IPv4 listener alone, as before.
+  for ($try = 0; $try -lt 5; $try++) {
+    $v4 = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+    $v4.Start()
+    if (-not [System.Net.Sockets.Socket]::OSSupportsIPv6) { return $v4 }
+    $p = ([System.Net.IPEndPoint]$v4.LocalEndpoint).Port
+    try {
+      $v6 = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::IPv6Loopback, $p)
+      $v6.Start()
+      return @($v4, $v6)   # the caller wraps it in @(): one flat list
+    } catch { $v4.Stop() }
+  }
+  $only = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0); $only.Start()
+  return $only
+}
+
 function Get-PimInteractiveToken {
   param([Parameter(Mandatory)][string]$Audience,[string]$TenantId,[string]$ClientId,
         # section 9 account sign-in clarity: force a brand-new credential prompt (prompt=login)
@@ -418,9 +437,11 @@ function Get-PimInteractiveToken {
   $challenge = ConvertTo-PimBase64Url -Bytes ($sha.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($verifier)))
   $state     = [guid]::NewGuid().ToString('N')
 
-  $tcp = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
-  $tcp.Start()
-  $port     = ([System.Net.IPEndPoint]$tcp.LocalEndpoint).Port
+  # The redirect says "localhost" (what Entra's public clients accept on any port), and a browser may resolve it to the IPv4
+  # OR the IPv6 loopback: listen on BOTH, on the same port (fvf 2026-10-21: an IPv4-only listener, the jump host's browser
+  # went to [::1] -> "localhost refused to connect"). Loopback only -- never another interface.
+  $tcps = @(New-PimLoopbackListeners)
+  $port     = ([System.Net.IPEndPoint]$tcps[0].LocalEndpoint).Port
   $redirect = "http://localhost:$port/"
 
   # section 9 prompt clarity: select_account (always show the picker so a stale cached account
@@ -461,8 +482,9 @@ function Get-PimInteractiveToken {
   try {
     $deadline = (Get-Date).AddMinutes(5)
     while (-not $query) {
-      if ((Get-Date) -gt $deadline) { throw 'Timed out (5 min) waiting for the sign-in redirect.' }
-      if (-not $tcp.Pending()) { Start-Sleep -Milliseconds 200; continue }
+      if ((Get-Date) -gt $deadline) { throw 'Timed out (5 min) waiting for the sign-in to come back to this window -- nothing was changed. Run the same command again and finish the sign-in within 5 minutes.' }
+      $tcp = @($tcps | Where-Object { $_.Pending() })[0]
+      if (-not $tcp) { Start-Sleep -Milliseconds 200; continue }
       $client = $tcp.AcceptTcpClient()
       try {
         $stream = $client.GetStream()
@@ -475,7 +497,7 @@ function Get-PimInteractiveToken {
         if ($requestLine -match '^GET /\?(\S+) HTTP') { $query = $Matches[1] }
       } finally { $client.Close() }
     }
-  } finally { $tcp.Stop() }
+  } finally { foreach ($t in $tcps) { try { $t.Stop() } catch { } } }
 
   $kv = @{}
   foreach ($pair in ($query -split '&')) { $k,$v = $pair -split '=',2; $kv[$k] = if ($null -ne $v) { [uri]::UnescapeDataString(($v -replace '\+',' ')) } else { '' } }

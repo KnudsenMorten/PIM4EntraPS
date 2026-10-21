@@ -125,7 +125,8 @@ if ($Role -eq 'Master') {
 
     Step "the signing key ids $ManagerApp pins (the signingkey step pinned them)"
     $mgrObj = Get-PimArmAcaApp -SubscriptionId $subId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
-    $envList = @(); try { $envList = @(@($mgrObj.properties.template.containers)[0].env | Where-Object { $_ }) } catch { $envList = @() }
+    # the Manager's container, never [0] (on a sign-in front install [0] is the front, 2026-10-21)
+    $envList = @(); try { $envList = @(@(@(@($mgrObj.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0]).env | Where-Object { $_ }) } catch { $envList = @() }
     $pinVal = "$(@($envList | Where-Object { "$($_.name)" -eq 'PIM_BaselineTrustedKeys' }) | Select-Object -First 1 | ForEach-Object { $_.value })"
     $keyIds = @("$pinVal" -split '[,;\s]+' | Where-Object { $_ -cmatch '^[A-Za-z0-9_-]{43}$' })
     $given = @(@($SigningKeyIds) | ForEach-Object { "$_" -split '[,;\s]+' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })

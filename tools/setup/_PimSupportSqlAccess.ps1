@@ -274,6 +274,10 @@ function Invoke-PimSupportSqlAccessGrant {
         [int]$ReadBackTries = 36,
         [int]$FirewallWaitSeconds = 30,
         [scriptblock]$Sleep = { param([int]$Seconds) Start-Sleep -Seconds $Seconds },
+        # can this machine open a TCP connection to <host>:<port>? (a private server's endpoint, from inside the network)
+        [scriptblock]$Reach = { param([string]$HostName, [int]$Port)
+            $c = New-Object System.Net.Sockets.TcpClient
+            try { $t = $c.ConnectAsync($HostName, $Port); return ($t.Wait(8000) -and $c.Connected) } catch { return $false } finally { $c.Close() } },
         [string[]]$FixCommand = @(),
         [switch]$WhatIfOnly
     )
@@ -326,18 +330,27 @@ function Invoke-PimSupportSqlAccessGrant {
     & $show 'before:' $before $adOnlyBefore $ruleBefore
 
     # ---- what stops the run BEFORE anything is changed (the group membership below is the first change) --------------
-    if ("$($server.properties.publicNetworkAccess)" -ieq 'Disabled') {
-        $problems.Add("the SQL server $srv has public network access OFF -- this machine cannot reach the database. Run this script from a machine inside the PIM network. Nothing was changed.")
-        return (& $finish)
+    # A PRIVATE server (public access off) is reached through its private endpoint from inside the network -- a firewall rule
+    # does nothing there, so none is opened. Decided by REACHING it, not by the setting alone (fvf 2026-10-21: the run stopped
+    # on a machine inside the network that reached the server on 1433 through the private endpoint).
+    $private = ("$($server.properties.publicNetworkAccess)" -ieq 'Disabled')
+    if ($private) {
+        $fqdn = "$srv.database.windows.net"
+        $reachable = $false; try { $reachable = [bool](& $Reach $fqdn 1433) } catch { $reachable = $false }
+        if (-not $reachable) {
+            $problems.Add("the SQL server $srv is private (public network access off) and $fqdn is not reachable on port 1433 from this machine. Run this script from a machine inside the PIM network (check: Test-NetConnection $fqdn -Port 1433). Nothing was changed.")
+            return (& $finish)
+        }
+        & $say "the SQL server $srv is private and reachable from this machine on port 1433 (private endpoint) -- no firewall rule is needed" 'Green'
     }
     $ip = "$HostIp".Trim()
-    if ($ruleBefore -and $ip -and $ruleBefore -ne $ip) {
+    if (-not $private -and $ruleBefore -and $ip -and $ruleBefore -ne $ip) {
         $problems.Add("the firewall rule '$rule' is already on $srv for another address ($ruleBefore) -- another setup run may be using it, so it is not changed. When no install is running: Azure portal > SQL server $srv > Networking > Firewall rules: delete '$rule', then run this script again. Nothing was changed.")
         return (& $finish)
     }
     if (-not $WhatIfOnly) {
         if (-not $Sql) { $problems.Add('no database session in this run -- nothing was changed'); return (& $finish) }
-        if (-not $ruleBefore -and $ip -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { $problems.Add("this machine's public address is not known ('$ip') -- pass -SetupHostIp <address>. Nothing was changed."); return (& $finish) }
+        if (-not $private -and -not $ruleBefore -and $ip -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { $problems.Add("this machine's public address is not known ('$ip') -- pass -SetupHostIp <address>. Nothing was changed."); return (& $finish) }
     }
 
     # ---- 2. the SQL admin group -----------------------------------------------------------------------------------
@@ -361,14 +374,16 @@ function Invoke-PimSupportSqlAccessGrant {
 
     $sid = ConvertTo-PimSupportSqlSid -AppId $SupportAppId
     if ($WhatIfOnly) {
-        Write-Host "What if: open the firewall rule '$rule' on $srv for this machine's public address$(if ("$HostIp".Trim()) { " ($("$HostIp".Trim()))" })$(if ($ruleBefore) { " -- it is already there ($ruleBefore) and would be left as found" }), and remove it at the end"
+        if ($private) { Write-Host "What if: no firewall rule -- the private server is reached from this machine through its private endpoint" }
+        else { Write-Host "What if: open the firewall rule '$rule' on $srv for this machine's public address$(if ("$HostIp".Trim()) { " ($("$HostIp".Trim()))" })$(if ($ruleBefore) { " -- it is already there ($ruleBefore) and would be left as found" }), and remove it at the end" }
         Write-Host "What if: when the database refuses this sign-in and this run is the Invardia Support app's session: make the Invardia Support app the administrator of $srv for the step, then put $(if ($before) { "'$($before['login'])'" } else { 'the administrator' }) back exactly as read"
         Write-Host "What if: in the database $SqlDatabase, create the user [$DbUserName] from the Support app's client id (SID $sid) when no user has that id, and add it to $role"
         return (& $finish)
     }
 
     # ---- 3. the firewall rule -------------------------------------------------------------------------------------
-    if (-not $ruleBefore) {
+    if ($private) { }    # reached through the private endpoint: no rule (decided above)
+    elseif (-not $ruleBefore) {
         try {
             [void](& $Arm 'PUT' "$srvPath/firewallRules/$rule`?api-version=$api" @{ properties = @{ startIpAddress = $ip; endIpAddress = $ip } })
             $res.ruleOpened = $true

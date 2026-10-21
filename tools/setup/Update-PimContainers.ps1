@@ -294,11 +294,12 @@ function Get-PimRollJobLiveImage {
     return "$(@($j.properties.template.containers)[0].image)".Trim()
 }
 function Get-PimRollAppLiveImage {
-    # `az containerapp show --query properties.template.containers[0].image` -- '' when unreadable.
+    # the app's own (Manager-side) container image -- '' when unreadable. Never [0]: on a sign-in front install [0] is
+    # 'signin-front' (Get-PimAcaManagerContainer, 2026-10-21).
     param([Parameter(Mandatory)][string]$Name)
     $a = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -ErrorAsNull
     if (-not $a) { return '' }
-    return "$(@($a.properties.template.containers)[0].image)".Trim()
+    return "$((Get-PimAcaManagerContainer -App $a -ContainerName $Name).image)".Trim()
 }
 
 function Get-PimRollRevisionRows {
@@ -306,7 +307,7 @@ function Get-PimRollRevisionRows {
     param([Parameter(Mandatory)][string]$App)
     @(Get-PimArmAcaRevisions -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -ErrorAsNull | ForEach-Object {
         [pscustomobject]@{ name = "$($_.name)"; active = [bool]$_.properties.active; created = "$($_.properties.createdTime)"
-                           image = "$(@($_.properties.template.containers)[0].image)" } })
+                           image = "$((Get-PimAcaManagerContainer -App $_ -ContainerName $App).image)" } })   # never [0] = the sign-in front
 }
 function Get-PimRollNewestActiveRevision {
     # The ACTIVE revision, NEWEST by creation time -- never [0], which the API hands back OLDEST first.
@@ -720,7 +721,7 @@ if ($Rollback -or "$RollbackImage".Trim()) {   # §53.6: EITHER anchor puts us i
             # The image the ROLLED-BACK-TO revision actually runs. Take it from the Manager when it
             # is among the rolled apps (the Job runs the Manager's image), else the first one.
             $srcApp = @(@($rolledBack.ToArray()) | Where-Object { "$_" -eq "$ManagerApp" }) + @($rolledBack.ToArray()) | Select-Object -First 1
-            # the ACTIVE revisions with their own image (image = properties.template.containers[0].image of the revision)
+            # the ACTIVE revisions with their own image (the revision's Manager container -- Get-PimRollRevisionRows)
             $srcRev = $null
             if ("$srcApp".Trim()) {
                 $srcRev = @(Get-PimRollRevisionRows -App $srcApp) | Where-Object { $_.active } |

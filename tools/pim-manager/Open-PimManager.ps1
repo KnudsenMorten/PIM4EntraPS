@@ -738,7 +738,8 @@ function Get-PimEasyAuthPrincipal {
         $frontAud = @("$env:PIM_SIGNIN_FRONT_CLIENT_ID" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         if ($frontAud.Count -gt 0) { $auds = $frontAud }
         $d = Resolve-PimHostedPrincipal -SignedToken (Get-PimAuthorizationBearer -Authorization "$($Request.Headers['Authorization'])") `
-                -Jwks $jwks -ExpectedIssuers $issuers -ExpectedAudiences $auds -AuthLayer $authLayer
+                -Jwks $jwks -ExpectedIssuers $issuers -ExpectedAudiences $auds -AuthLayer $authLayer `
+                -RequireFrontAccessToken ("$env:PIM_SIGNIN_FRONT_REQUIRE_ACCESS_TOKEN".Trim() -match '^(1|true|yes|on)$')
         if ($d.trusted) { return "$($d.identity)" }
         Write-Host ("  [auth] REJECTED principal [{0}] -- {1}" -f $d.layer, $d.reason) -ForegroundColor Red
         return ''

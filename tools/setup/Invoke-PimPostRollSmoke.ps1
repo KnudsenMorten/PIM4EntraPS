@@ -82,9 +82,16 @@ if (-not $global:PIM_SetupRestStub -and -not "$($global:PIM_SetupRestMode)".Trim
     [void](Connect-PimSetupRest @cn)
 }
 function Get-PrManagerImage {
-    # az containerapp show --query properties.template.containers[0].image
+    # the MANAGER container's image -- never [0]: on a sign-in front install [0] is 'signin-front' (2026-10-21)
     $app = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
-    return "$(@($app.properties.template.containers)[0].image)".Trim()
+    return "$((Get-PrManagerContainer $app).image)".Trim()
+}
+function Get-PrManagerContainer($App) {
+    # by name, else the one container that is not the front (self-contained: this script loads only PIM-ArmSetup.ps1)
+    $cs = @(@($App.properties.template.containers) | Where-Object { $_ })
+    $c = @($cs | Where-Object { "$($_.name)" -eq $ManagerApp })[0]
+    if (-not $c) { $c = @($cs | Where-Object { "$($_.name)" -ne 'signin-front' })[0] }
+    return $c
 }
 function Get-ImageVersion([string]$img) { if ("$img" -match ':(\d+\.\d+\.\d+)(?:[^\d]|$)') { return $Matches[1] }; return '' }
 $safeEnv = ($Environment -replace '[^A-Za-z0-9_.-]', '_')
@@ -165,8 +172,8 @@ Say "rolling $ManagerApp back to $anchor ($anchorFrom)" 'Yellow'
 # az containerapp update --image: read-modify-write of the whole template (a fragment PATCH would drop the container's env).
 try {
     $app = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp
-    $c0 = @($app.properties.template.containers)[0]
-    if (-not $c0) { throw "$ManagerApp declares no container" }
+    $c0 = Get-PrManagerContainer $app      # ONLY the Manager's image moves -- the sign-in front keeps its own
+    if (-not $c0) { throw "$ManagerApp declares no Manager container" }
     $c0.image = $anchor
     [void](Set-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -Resource @{ properties = @{ template = $app.properties.template } })
 } catch { Say "rollback write refused: $($_.Exception.Message)" 'Red' }
