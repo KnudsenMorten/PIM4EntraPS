@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.668 -- 2026-10-23
+
+- Offboarding by one administrator: an administrator can now delete an admin, remove an admin from PIM, or disable or offboard one at once directly; a second administrator approves only for a sensitive (privileged, tier 0) admin, a break-glass account, or when the Pro second approver is switched on. Deleting is always done by a person, never automatically, and every such action is in the audit trail. Levels L0-L9: the Home view and the per-level count now include levels L6-L9 (Azure levels follow the management-group layer); an L7 group was counted as L1 before. The GitHub README is now a short front door that links to the documentation on invardia.com; the long design and feature files stay as engineering notes.
+
 ## 2.4.667 -- 2026-10-22
 
 - PIM Activator without Intune: Deploy-PimActivatorClient.ps1 (the install for PCs and servers without Intune) now takes the same settings as the Intune Remediation -- the auto-activation cap (e.g. at most 3 groups), the bulk confirm threshold and the group / Entra role / Azure role name filters -- and writes the limits for both the production and the test extension, so the two behave the same; the PIM Manager shows that command with the settings filled in, and the Edge for Business step tells admins that a new Edge profile gets the extension once it is signed in with the work account. The signed-request check (off by default) no longer fails to run when it is switched on (a closure could not see its own functions). Three outdated test checks were brought up to date.

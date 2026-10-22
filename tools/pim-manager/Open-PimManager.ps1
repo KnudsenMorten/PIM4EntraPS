@@ -4107,9 +4107,13 @@ function Request-PimManagerOffboardHold {
         # held Deleted is carried only for a SuperAdmin requestor.
         [System.Collections.IDictionary]$HeldFields = $null,
         [switch]$StripDelegations,
-        [string]$RequestorRole = ''
+        [string]$RequestorRole = '',
+        # OFFBOARD-ONE-ADMIN (owner 2026-10-22): WHY this one still needs a second administrator (Get-PimManagerOffboardApprovalNeed
+        # .reason -- maker-checker on, or a sensitive admin). Shown in the note; '' = not said.
+        [string]$HoldReason = ''
     )
     $res = [ordered]@{ approvalRequired = $true; gate = 'offboard-approval'; upn = $Upn; approvalRaised = $false; approvalId = ''; note = '' }
+    $why = $(if ("$HoldReason".Trim()) { " ($("$HoldReason".Trim()))" } else { '' })
     $detail = $null
     if (($HeldFields -and $HeldFields.Count) -or $StripDelegations) {
         $hf = [ordered]@{}
@@ -4119,10 +4123,14 @@ function Request-PimManagerOffboardHold {
     $just = "$Justification".Trim()
     $previewOff = $false
     try { if (Get-Command Resolve-PimGovernancePreview -ErrorAction SilentlyContinue) { $previewOff = -not (Test-PimGovernancePreviewEnabled -Resolved (Get-PimGovernancePreview) -Id 'approvalsPreview') } } catch { $previewOff = $false }
+    # OFFBOARD-ONE-ADMIN (owner 2026-10-22): a hold never ends in a silent refusal -- with the Approvals surface OFF the note
+    # says how to go on (switch Approvals on). The shipped default of approvalsPreview is NOT changed here.
+    $howOn = "To proceed: switch on Approvals (Settings -> Governance preview -> Approvals), then send it again with a justification; a different administrator approves it on the Approvals tab."
     if (-not $just) {
-        $res['note'] = "$What disables '$Upn' on the next engine run -- that is an OFFBOARD and needs a second administrator's approval. It was NOT saved. Re-send with a justification to raise the offboard approval request, or use the Offboard action."
+        $res['note'] = "$What disables '$Upn' on the next engine run -- that is an OFFBOARD and needs a second administrator's approval$why. It was NOT saved. Re-send with a justification to raise the offboard approval request, or use the Offboard action." + $(if ($previewOff) { " The Approvals surface is switched off. $howOn" } else { '' })
     } elseif ($previewOff) {
-        $res['note'] = "$What is an immediate OFFBOARD of '$Upn' and needs approval, but the Approvals surface is disabled (Settings -> Governance preview). It was NOT saved."
+        $res['note'] = "$What is an immediate OFFBOARD of '$Upn' and needs approval$why, but the Approvals surface is disabled (Settings -> Governance preview). It was NOT saved. $howOn"
+        $res['approvalsPreviewOff'] = $true
     } elseif (-not (Get-Command Add-PimApprovalRequest -ErrorAction SilentlyContinue)) {
         $res['note'] = "$What is an immediate OFFBOARD of '$Upn' and needs approval, but the approval-gate library is not loaded. It was NOT saved."
     } else {
@@ -4130,13 +4138,102 @@ function Request-PimManagerOffboardHold {
             $apr = Add-PimApprovalRequest -Requestor "$Requestor" -Action 'offboard' -Target $Upn -Justification $just -Ticket "$Ticket".Trim() -Detail $detail
             $res['approvalRaised'] = $true
             $res['approvalId'] = "$($apr.id)"
-            $res['note'] = "$What is an immediate OFFBOARD of '$Upn', so it was NOT saved: offboard approval request $($apr.id) was raised instead. A different administrator approves and executes it on the Approvals tab; that stages the disable for commit."
+            $res['note'] = "$What is an immediate OFFBOARD of '$Upn' that needs a second administrator$why, so it was NOT saved: offboard approval request $($apr.id) was raised instead. A different administrator approves and executes it on the Approvals tab; that stages the disable for commit."
             Write-PimManagerAuditEvent -Action 'approval.request.created' -Target $Upn -After @{ id = "$($apr.id)"; action = 'offboard'; requestor = "$Requestor"; via = $Via; held = $What }
         } catch {
             $res['note'] = "$What is an immediate OFFBOARD of '$Upn' and needs approval; raising the request failed ($($_.Exception.Message)). It was NOT saved."
         }
     }
     return $res
+}
+function Get-PimManagerOffboardApprovalNeed {
+    <#
+      OFFBOARD-ONE-ADMIN (owner 2026-10-22: "i dont want a second admin to approve fx deleting an admin or an admins delegations
+      ... second approvals is only for sensitive users and delegations"). Does THIS person-made offboard of THIS admin -- Remove
+      from PIM, AccountStatus Disabled / Revoked / Removed, Lifecycle Retire, a disable date at or before now -- need a SECOND
+      administrator? Supersedes the "always a second admin" of BUG-190 / section 96.5 D1 / code review 1 decision 55. In order:
+        1. the caller is not a signed-in person (no identity, '<unauthenticated>', None, Demo)       -> required 'not-a-person'
+        2. the Pro maker-checker feature 'makerchecker' is ON (Test-PimFeatureAvailable)             -> required 'makerchecker'
+        3. no admin row to judge (fail closed)                                                       -> required 'unclassified'
+        4. a break-glass account, or the list / its predicate cannot be read (fail closed)          -> required 'break-glass'
+           (kept on the approval path, where Test-PimOffboardExecutionAllowed Gate 2 still EXCLUDES it -- never applied directly)
+        5. SENSITIVE: the admin is HIGH-PRIVILEGE by Get-PimManagerAdminPrivilegeClass (100.29 -- level L0 or tier T0 on the
+           row or as a marker in its names, the high-priv naming pattern, Purpose = HighPriv)        -> required 'sensitive'
+        6. otherwise                                                                                 -> NOT required 'one-admin'
+      NOT decided here and unchanged: automatic / date-driven offboarding stays PROHIBITED (Gate 0 'automatic-prohibited'; a
+      FUTURE AutoDisableDate still only disables on its date and never deletes), the scope + level rule
+      (Test-PimRevauditAdminTarget), the engine's mass-disable circuit breaker (PIM-DisableGuard).
+      Seams (tests): -MakerChecker / -BreakGlass replace the live reads. Returns @{ required; rule; reason }.
+    #>
+    param([AllowNull()][object]$AdminRow, [string]$Identity = '', [string]$Role = '', [AllowNull()][object]$Conventions = $null,
+          [AllowNull()][object]$MakerChecker = $null, [AllowNull()][object]$BreakGlass = $null)
+    $out = { param($req, $rule, $why) [pscustomobject]@{ required = [bool]$req; rule = $rule; reason = $why } }
+    $id = "$Identity".Trim()
+    if (-not $id -or $id -eq '<unauthenticated>' -or "$Role".Trim() -in @('None', 'Demo')) { return (& $out $true 'not-a-person' 'it is not made by a signed-in person') }
+    $mc = $false
+    if ($null -ne $MakerChecker) { $mc = [bool]$MakerChecker }
+    elseif (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) { try { $mc = [bool](Test-PimFeatureAvailable -Key 'makerchecker' -Quiet) } catch { $mc = $false } }
+    if ($mc) { return (& $out $true 'makerchecker' "the second-approver policy (maker-checker) is switched on") }
+    if ($null -eq $AdminRow) { return (& $out $true 'unclassified' 'the admin row was not found, so it cannot be shown not to be sensitive') }
+    $cell = { param($n) if ($AdminRow -is [System.Collections.IDictionary]) { "$($AdminRow[$n])".Trim() } elseif ($AdminRow.PSObject.Properties[$n]) { "$($AdminRow.$n)".Trim() } else { '' } }
+    $upn = & $cell 'UserPrincipalName'; $un = & $cell 'UserName'
+    $bg = $BreakGlass
+    if ($null -eq $bg -and (Get-Command Get-PimBreakGlassIdentifiers -ErrorAction SilentlyContinue)) { try { $bg = @(Get-PimBreakGlassIdentifiers) } catch { $bg = $null } }
+    if ($null -eq $bg -or -not (Get-Command Test-PimRowIsBreakGlass -ErrorAction SilentlyContinue)) { return (& $out $true 'break-glass' 'the break-glass list cannot be checked here, so it cannot be shown not to be a break-glass account') }
+    $bgRow = [pscustomobject]@{ principal = $upn; principalUpn = $upn; principalName = $un; Username = $un }
+    if (Test-PimRowIsBreakGlass -Row $bgRow -Identifiers @($bg)) { return (& $out $true 'break-glass' 'a protected break-glass account (excluded from offboarding)') }
+    $conv = $Conventions
+    if ($null -eq $conv -and (Get-Command Get-PimNamingConventions -ErrorAction SilentlyContinue)) { try { $conv = Get-PimNamingConventions } catch { $conv = $null } }
+    $pc = Get-PimManagerAdminPrivilegeClass -Row $AdminRow -Conventions $conv
+    if ("$($pc.privilegeClass)" -eq 'high-priv') { return (& $out $true 'sensitive' "a sensitive admin -- $($pc.reason)") }
+    return (& $out $false 'one-admin' 'a day-to-day admin and the second-approver policy is off: one administrator decides')
+}
+function Invoke-PimManagerAdminOffboardDirect {
+    <#
+      OFFBOARD-ONE-ADMIN (owner 2026-10-22): carry out ONE person-made offboard that needs no second administrator
+      (Get-PimManagerOffboardApprovalNeed). The admin row -- AccountStatus = -AccountStatus (Removed), or AutoDisableDate = now
+      when none is given (what an approved plain offboard stages) -- and, with -Delegations, every delegation of the admin
+      (Action = Remove) are queued AND committed: the operator's own act is the decision, as Delete account does
+      (Invoke-PimManagerAdminDelete). The engine is then started. The Manager makes no directory call; the engine DISABLES
+      (never deletes) through its own guards (break-glass, the mass-disable circuit breaker). Audited 'admin.offboard.direct'.
+      Returns @{ ok; status; error; queued }. Seams: -Enqueue / -Commit.
+    #>
+    param([Parameter(Mandatory)][string]$Upn, [Parameter(Mandatory)][string]$By, [string]$Justification = '', [string]$What = '', [string]$Via = 'manager',
+          [object]$AdminRow, [string]$AccountStatus = '', [object[]]$Delegations = @(), [datetime]$NowUtc = [datetime]::UtcNow,
+          [scriptblock]$Enqueue = { param($change) Add-PimSqlQueueChange -ConnectionString (Get-PimManagerStoreCs) -Change $change },
+          [scriptblock]$Commit = { param($ids, $who) [void](Set-PimSqlQueueCommitted -ConnectionString (Get-PimManagerStoreCs) -Ids @($ids) -By $who) })
+    $out = [ordered]@{ ok = $false; status = 500; error = ''; queued = 0 }
+    $ids = New-Object System.Collections.Generic.List[string]
+    try {
+        if ($null -eq $AdminRow) { throw "no admin row for '$Upn'" }
+        $row = [ordered]@{}
+        if ($AdminRow -is [System.Collections.IDictionary]) { foreach ($k in @($AdminRow.Keys)) { $row[$k] = $AdminRow[$k] } } else { foreach ($p in $AdminRow.PSObject.Properties) { $row[$p.Name] = $p.Value } }
+        if ("$AccountStatus".Trim()) { $row['AccountStatus'] = "$AccountStatus".Trim() } else { $row['AutoDisableDate'] = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
+        $key = Get-PimStoreRowKey -Base 'Account-Definitions-Admins' -Row ([pscustomobject]$row)
+        if (-not $key) { throw "the admin row for '$Upn' has no UserName -- it cannot be addressed in the store" }
+        $ch = New-PimChange -Entity 'Account-Definitions-Admins' -Key $key -Op 'Update' -Payload ([pscustomobject]$row) -By $By -Kind 'DesiredState' -Origin 'Authorised' `
+                -Justification "$What by one administrator (OFFBOARD-ONE-ADMIN): $Justification"
+        & $Enqueue $ch; $ids.Add("$($ch.id)")
+        foreach ($ar in @($Delegations)) {
+            if ($null -eq $ar) { continue }
+            $rm = [ordered]@{}
+            if ($ar -is [System.Collections.IDictionary]) { foreach ($k in @($ar.Keys)) { $rm[$k] = $ar[$k] } } else { foreach ($p in $ar.PSObject.Properties) { $rm[$p.Name] = $p.Value } }
+            $rm['Action'] = 'Remove'
+            $ak = Get-PimStoreRowKey -Base 'PIM-Assignments-Admins' -Row ([pscustomobject]$rm)
+            if (-not $ak) { continue }
+            $c2 = New-PimChange -Entity 'PIM-Assignments-Admins' -Key $ak -Op 'Update' -Payload ([pscustomobject]$rm) -By $By -Kind 'DesiredState' -Origin 'Authorised' -Justification "$What of $Upn`: remove the delegation $ak"
+            & $Enqueue $c2; $ids.Add("$($c2.id)")
+        }
+        & $Commit @($ids.ToArray()) $By
+    } catch {
+        $out.error = "$($_.Exception.Message)"; $out.queued = $ids.Count
+        try { Write-PimManagerAuditEvent -Action 'admin.offboard.direct' -Target $Upn -Result 'failed' -After ([ordered]@{ by = $By; what = $What; justification = $Justification; via = $Via; error = $out.error; queued = $ids.Count }) } catch { }
+        return [pscustomobject]$out
+    }
+    $out.queued = $ids.Count; $out.ok = $true; $out.status = 202
+    try { Write-PimManagerAuditEvent -Action 'admin.offboard.direct' -Target $Upn -Result 'ok' -After ([ordered]@{ by = $By; what = $What; justification = $Justification; via = $Via; accountStatus = "$AccountStatus"; delegations = @($Delegations).Count; queueIds = @($ids.ToArray()) }) } catch { }
+    try { if (Get-Command Start-PimManagerTickNow -ErrorAction SilentlyContinue) { [void](Start-PimManagerTickNow -Reason 'admin-offboard') } } catch { }
+    return [pscustomobject]$out
 }
 function Get-PimManagerTickJobId {
     $id = "$($env:PIM_TickJobId)".Trim()
@@ -7332,6 +7429,49 @@ function Invoke-PimManagerCsvPut {
             }
             $offboardHolds = @()
         }
+        # OFFBOARD-ONE-ADMIN (owner 2026-10-22: "second approvals is only for sensitive users"): a held change to an EXISTING
+        # admin (kind modify -- Disabled / Revoked / Removed, Retire, a date at or before now) is written by this ONE
+        # administrator unless Get-PimManagerOffboardApprovalNeed asks for a second one (maker-checker on, a sensitive or
+        # break-glass admin, not a signed-in person). The scope + level rule still applies (Test-PimRevauditAdminTarget, the
+        # same rule as Remove from PIM): one refused admin refuses the commit whole -- nothing is saved. The held values are
+        # put back onto the rows to store, each audited admin.offboard.direct. An ADDED row carrying one stays held.
+        if ($offboardHolds.Count -gt 0) {
+            $__obRole = Get-PimManagerRole; $__obCaller = $null
+            $__obJust = "$(if ($body -and $body.PSObject.Properties['justification']) { $body.justification })".Trim()
+            $__obCur = @{}; foreach ($__r in @($current.rows)) { $__k = "$(Get-PimStoreRowKey -Base $base -Row $__r)".Trim().ToLowerInvariant(); if ($__k) { $__obCur[$__k] = $__r } }
+            $__obDirect = @(); $__obDenied = @()
+            foreach ($__h in @($offboardHolds)) {
+                if ($null -eq $__h -or "$($__h.kind)" -ne 'modify') { continue }
+                $__row = $__obCur["$($__h.key)".Trim().ToLowerInvariant()]
+                $__need = Get-PimManagerOffboardApprovalNeed -AdminRow $__row -Identity "$($__obRole.identity)" -Role "$($__obRole.role)"
+                $__h | Add-Member -NotePropertyName 'approvalNeed' -NotePropertyValue $__need -Force
+                if ($__need.required) { continue }
+                if ($null -eq $__obCaller) { $__obCaller = Get-PimRevauditCaller -Admins @($current.rows) }
+                $__v = Test-PimRevauditAdminTarget -Caller $__obCaller -AdminRow $__row -Action remove
+                if (-not $__v.allowed) { $__obDenied += "$($__h.upn): $($__v.reason)"; continue }
+                $__obDirect += $__h
+            }
+            if ($__obDenied.Count -gt 0) {
+                Write-PimManagerAuditEvent -Action 'admin.offboard.direct' -Target "$base" -Result 'denied' -After ([ordered]@{ by = "$($__obRole.identity)"; denied = @($__obDenied) })
+                Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{ ok = $false; base = $base; gate = 'offboard-level'
+                    error = "Offboard refused -- nothing was saved: $($__obDenied -join '; ')"; denied = @($__obDenied) })
+                return 403
+            }
+            if ($__obDirect.Count -gt 0) {
+                $__byKey = @{}
+                for ($__i = 0; $__i -lt @($adh.rows).Count; $__i++) { $__k = "$(Get-PimStoreRowKey -Base $base -Row $adh.rows[$__i])".Trim().ToLowerInvariant(); if ($__k) { $__byKey[$__k] = $__i } }
+                foreach ($__h in $__obDirect) {
+                    $__k = "$($__h.key)".Trim().ToLowerInvariant()
+                    if ($__byKey.ContainsKey($__k)) {
+                        $__row = $adh.rows[$__byKey[$__k]]
+                        foreach ($__c in @($__h.fields.Keys)) { if ($__row -is [System.Collections.IDictionary]) { $__row[$__c] = $__h.fields[$__c] } else { $__row | Add-Member -NotePropertyName $__c -NotePropertyValue $__h.fields[$__c] -Force } }
+                    }
+                    try { Write-PimManagerAuditEvent -Action 'admin.offboard.direct' -Target "$($__h.upn)" -Result 'ok' -After ([ordered]@{ by = "$($__obRole.identity)"; base = $base; fields = $__h.fields; justification = $__obJust; rule = "$($__h.approvalNeed.rule)"; via = "review-save $base" }) } catch { }
+                }
+                $offboardHolds = @($offboardHolds | Where-Object { $__obDirect -notcontains $_ })
+                if ($offboardHolds.Count -eq 0) { $rowsOrdered = @($adh.rows); $diff = Compare-PimRowSets -Before $current.rows -After $rowsOrdered -Base $base }
+            }
+        }
         if ($offboardHolds.Count -gt 0) {
             # Scope first: a held row outside the caller's portal scope is refused exactly as a write would be,
             # so no approval is ever raised against an admin the caller may not manage.
@@ -7362,7 +7502,7 @@ function Invoke-PimManagerCsvPut {
             } else {
                 $hUpn = $(if ("$($h.upn)".Trim()) { "$($h.upn)".Trim() } else { "$($h.key)" })   # the row key (UserName) when no UPN
             $r = Request-PimManagerOffboardHold -Upn $hUpn -What $what -Justification $just -Ticket $tick -Requestor "$((Get-PimManagerRole).identity)" -Via "review-save $base" `
-                    -HeldFields $h.fields -RequestorRole "$((Get-PimManagerRole).role)"
+                    -HeldFields $h.fields -RequestorRole "$((Get-PimManagerRole).role)" -HoldReason "$(if ($h.PSObject.Properties['approvalNeed']) { $h.approvalNeed.reason })"
             }
             $r['kind'] = "$($h.kind)"; $r['held'] = $h.fields
             Write-PimManagerAuditEvent -Action 'admin.commit.offboard-held' -Target "$($h.upn)" -Result $(if ($r.approvalRaised) { 'ok' } else { 'denied' }) -After ([ordered]@{ held = $h.fields; kind = "$($h.kind)"; approvalRaised = [bool]$r.approvalRaised; approvalId = "$($r.approvalId)"; via = "review-save $base" })
@@ -8917,10 +9057,13 @@ function Build-PimGraphData {
 # caller asks for them (?include=heavy) so the default Home load stays fast.
 # ---------------------------------------------------------------------------
 function Get-PimDelegationTierLevel {
-    # Resolve a delegation group's LEVEL (L0..L5) from the richest real signal:
+    # Resolve a delegation group's LEVEL (L0..L9) from the richest real signal:
     # explicit Level/TierLevel field, else parse the -L<n>- / -T<n>- marker out of
     # the GroupTag / GroupName / label produced by the naming convention. Returns
-    # an integer 0..5 or $null (untiered). PS 5.1-safe.
+    # an integer 0..9 or $null (untiered). PS 5.1-safe.
+    # LEVELS-L9 (2026-10-22): the model is L0-L9 (an Azure level follows the CAF management-group layer, up to L9). This
+    # read only L0-L5, so a group named ...-L7-T1-... fell through to the T marker and was counted as L1. The T fallback
+    # is the tier (T0-T2) and applies only when the name carries no L marker.
     param([object]$Node)
     if (-not $Node) { return $null }
     $cand = @()
@@ -8938,9 +9081,12 @@ function Get-PimDelegationTierLevel {
     }
     foreach ($c in $cand) {
         $s = "$c"
-        if ($s -match '(?i)(^|[-_.\s])L([0-5])([-_.\s]|$)') { return [int]$Matches[2] }
-        if ($s -match '(?i)(^|[-_.\s])T([0-5])([-_.\s]|$)') { return [int]$Matches[2] }
-        if ($s -match '^\s*([0-5])\s*$')                     { return [int]$Matches[1] }
+        if ($s -match '(?i)(^|[-_.\s])L([0-9])([-_.\s]|$)') { return [int]$Matches[2] }
+        if ($s -match '^\s*([0-9])\s*$')                     { return [int]$Matches[1] }
+    }
+    # no L marker and no level number anywhere: fall back to the T marker (checked only after every candidate)
+    foreach ($c in $cand) {
+        if ("$c" -match '(?i)(^|[-_.\s])T([0-2])([-_.\s]|$)') { return [int]$Matches[2] }
     }
     return $null
 }
@@ -9487,7 +9633,7 @@ function Get-PimHomeOverview {
     # BUG-264: time each tile -- /api/home holds the ONE request loop, and a slow load must name its slow tile.
     $hsw = [System.Diagnostics.Stopwatch]::StartNew(); $hT = [ordered]@{}
 
-    # ---- 1. Delegation estate: per-level (L0-L5) + gaps/orphans/unmanaged -----
+    # ---- 1. Delegation estate: per-level (L0-L9) + gaps/orphans/unmanaged -----
     # Sourced from the live graph model the Delegation Map renders (Build-PimGraphData):
     #   - tiers   = delegation groups (role/permission) bucketed by their level
     #   - orphans = groups with NO inbound/outbound edge (defined but unwired)
@@ -9498,7 +9644,7 @@ function Get-PimHomeOverview {
     try {
         $g = Get-PimHomeGraphData -Stamp $homeStamp
         $nodes = @($g.nodes); $edges = @($g.edges)
-        $byLevel = [ordered]@{ 'L0'=0;'L1'=0;'L2'=0;'L3'=0;'L4'=0;'L5'=0;'untiered'=0 }
+        $byLevel = [ordered]@{ 'L0'=0;'L1'=0;'L2'=0;'L3'=0;'L4'=0;'L5'=0;'L6'=0;'L7'=0;'L8'=0;'L9'=0;'untiered'=0 }
         $delegationGroups = @($nodes | Where-Object { $_.kind -eq 'role-group' -or $_.kind -eq 'permission-group' })
         foreach ($n in $delegationGroups) {
             $lvl = Get-PimDelegationTierLevel -Node $n
@@ -18205,9 +18351,26 @@ function Handle-Request {
                 return 403
             }
             $verbTxt = $(if ($admRemoveMode -eq 'delete') { 'Delete account' } else { 'Remove from PIM' })
+            # OFFBOARD-ONE-ADMIN (owner 2026-10-22): ONE administrator removes a day-to-day admin from PIM directly -- the row
+            # (AccountStatus = Removed) and every delegation are queued and committed now (Invoke-PimManagerAdminOffboardDirect).
+            # A second administrator is asked for only when Get-PimManagerOffboardApprovalNeed says so (maker-checker on, a
+            # sensitive or break-glass admin): then the offboard approval below, as before.
+            $rmNeed = Get-PimManagerOffboardApprovalNeed -AdminRow $rmRow -Identity "$($role.identity)" -Role "$($role.role)"
+            if (-not $rmNeed.required) {
+                $rmDo = Invoke-PimManagerAdminOffboardDirect -Upn $plan.upn -By "$($role.identity)" -Justification $admJust -What $verbTxt -Via "api $method $path" `
+                            -AdminRow $rmRow -AccountStatus $plan.accountStatus -Delegations @($plan.delegations)
+                Write-PimManagerAuditEvent -Action 'admin.remove-from-pim.requested' -Target $plan.upn -Result $(if ($rmDo.ok) { 'ok' } else { 'failed' }) `
+                    -Before ([ordered]@{ accountStatus = "$($plan.currentStatus)" }) `
+                    -After ([ordered]@{ accountStatus = "$($plan.accountStatus)"; delegations = @($plan.delegations).Count; direct = $true; rule = "$($rmNeed.rule)"; queued = [int]$rmDo.queued; by = "$($role.identity)"; via = 'api'; error = "$($rmDo.error)" })
+                Write-JsonResponse -Response $resp -Status ([int]$rmDo.status) -Body ([ordered]@{ ok = [bool]$rmDo.ok; action = 'remove-from-pim'; upn = $plan.upn; accountStatus = $plan.accountStatus
+                    delegations = @($plan.delegations).Count; approvalRequired = $false; approvalRaised = $false; queued = [int]$rmDo.queued; rule = "$($rmNeed.rule)"
+                    error = "$($rmDo.error)"; note = $(if ($rmDo.ok) { "Removed from PIM by one administrator ($($rmNeed.reason)): the change is committed; the engine disables the account and removes its delegations on its next run." } else { "Remove from PIM could not be recorded: $($rmDo.error)" })
+                    directory = 'unchanged -- the Manager makes no directory call; the engine acts on its next run' })
+                return [int]$rmDo.status
+            }
             $hold = Request-PimManagerOffboardHold -Upn $plan.upn -What "$verbTxt (AccountStatus '$($plan.accountStatus)', $(@($plan.delegations).Count) delegation(s) removed)" `
                         -Justification $admJust -Ticket $admTicket -Requestor "$($role.identity)" -Via "api $method $path" `
-                        -HeldFields $plan.heldFields -StripDelegations -RequestorRole "$($role.role)"
+                        -HeldFields $plan.heldFields -StripDelegations -RequestorRole "$($role.role)" -HoldReason "$($rmNeed.reason)"
             $auditAction = $(if ($admRemoveMode -eq 'delete') { 'admin.delete.requested' } else { 'admin.remove-from-pim.requested' })
             Write-PimManagerAuditEvent -Action $auditAction -Target $plan.upn -Result $(if ($hold.approvalRaised) { 'ok' } else { 'denied' }) `
                 -Before ([ordered]@{ accountStatus = "$($plan.currentStatus)" }) `
@@ -18385,14 +18548,30 @@ function Handle-Request {
             # is NOT written; an offboard approval request is raised (maker) when a justification is supplied, and a
             # DIFFERENT administrator approves + executes it, which stages the disable for commit. A FUTURE date is
             # unchanged (it changes nothing today). Other fields in the same request are still saved.
+            # OFFBOARD-ONE-ADMIN (owner 2026-10-22): the immediate date is held ONLY when Get-PimManagerOffboardApprovalNeed asks for
+            # a second administrator (maker-checker on, a sensitive or break-glass admin). Otherwise this ONE administrator's date
+            # is saved with the other fields -- after the same scope + level rule as Remove from PIM -- and audited
+            # admin.offboard.direct. A FUTURE date is unchanged (it only disables on its date, never deletes).
             $modifyApproval = $null
+            $modNeed = $null
             if ($changes.Contains('AutoDisableDate') -and (Test-PimModifyAutoDisableImmediate -Value "$($changes['AutoDisableDate'])")) {
+                $modNeed = Get-PimManagerOffboardApprovalNeed -AdminRow $row -Identity "$($role.identity)" -Role "$($role.role)"
+                if (-not $modNeed.required) {
+                    $modV = Test-PimRevauditAdminTarget -Caller (Get-PimRevauditCaller -Admins @($rows)) -AdminRow $row -Action remove
+                    if (-not $modV.allowed) {
+                        Write-PimManagerAuditEvent -Action 'admin.offboard.direct' -Target $upn -Result 'denied' -After ([ordered]@{ by = "$($role.identity)"; what = "AutoDisableDate '$($changes['AutoDisableDate'])'"; code = "$($modV.code)"; reason = "$($modV.reason)"; via = 'admin.modify autoDisableDate' })
+                        Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "An AutoDisableDate of now or earlier disables '$upn' -- refused, nothing was saved: $($modV.reason)"; code = "$($modV.code)"; gate = 'offboard-level' }
+                        return 403
+                    }
+                }
+            }
+            if ($modNeed -and $modNeed.required) {
                 $heldDate = "$($changes['AutoDisableDate'])"
                 [void]$changes.Remove('AutoDisableDate'); [void]$before.Remove('AutoDisableDate')
                 if ($changes.Contains('OffboardDate')) { [void]$changes.Remove('OffboardDate'); [void]$before.Remove('OffboardDate') }
                 # The SAME rule and outcome as the Review & Save PUT (Request-PimManagerOffboardHold).
                 $modifyApproval = Request-PimManagerOffboardHold -Upn $upn -What "An AutoDisableDate of '$heldDate'" `
-                                    -Justification "$($bodyIn.justification)" -Ticket "$($bodyIn.ticket)" -Requestor "$($role.identity)" -Via 'admin.modify autoDisableDate'
+                                    -Justification "$($bodyIn.justification)" -Ticket "$($bodyIn.ticket)" -Requestor "$($role.identity)" -Via 'admin.modify autoDisableDate' -HoldReason "$($modNeed.reason)"
                 $modifyApproval['heldAutoDisableDate'] = $heldDate
                 Write-PimManagerAuditEvent -Action 'admin.modify.offboard-held' -Target $upn -Result $(if ($modifyApproval.approvalRaised) { 'ok' } else { 'denied' }) -After ([ordered]@{ heldAutoDisableDate = $heldDate; approvalRaised = [bool]$modifyApproval.approvalRaised; approvalId = "$($modifyApproval.approvalId)"; by = "$($role.identity)" })
                 if ($changes.Count -eq 0) {
@@ -18450,6 +18629,10 @@ function Handle-Request {
             }
             Write-PimManagerAuditEvent -Action 'admin.modify' -Target $upn -Result 'ok' `
                 -Before ([ordered]@{ fields = $before }) -After ([ordered]@{ fields = $changes; by = "$($role.identity)" })
+            if ($modNeed -and -not $modNeed.required) {
+                # OFFBOARD-ONE-ADMIN: the immediate date was written by this one administrator.
+                try { Write-PimManagerAuditEvent -Action 'admin.offboard.direct' -Target $upn -Result 'ok' -After ([ordered]@{ by = "$($role.identity)"; what = "AutoDisableDate '$($changes['AutoDisableDate'])'"; justification = "$($bodyIn.justification)".Trim(); rule = "$($modNeed.rule)"; via = 'admin.modify autoDisableDate' }) } catch { }
+            }
             $modOut = [ordered]@{
                 ok      = $true
                 changed = $changes.Count
@@ -18502,7 +18685,27 @@ function Handle-Request {
                 return 200
             }
             if (-not $why) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'say why they no longer need access -- the PIM administrator who approves the removal sees it.' }; return 400 }
-            $hold = Request-PimManagerOffboardHold -Upn $upn -What "Removal requested by the department owner" -Justification $why -Requestor "$($t.role.identity)" -Via 'owner.remove'
+            # OFFBOARD-ONE-ADMIN (owner 2026-10-22): an owner who is himself an ADMINISTRATOR (Admin+) and passes the scope +
+            # level rule removes a day-to-day admin directly (the plain offboard: AutoDisableDate = now, committed). A plain
+            # department owner (not an administrator) still REQUESTS it -- a PIM administrator approves -- and a second
+            # administrator is still asked for when Get-PimManagerOffboardApprovalNeed says so.
+            $ownNeed = $null
+            if (Test-PimManagerRoleAtLeast -Minimum 'Admin') {
+                $ownNeed = Get-PimManagerOffboardApprovalNeed -AdminRow $t.row -Identity "$($t.role.identity)" -Role "$($t.role.role)"
+                if (-not $ownNeed.required) {
+                    $ownAdmins = @(); try { $ownAdmins = @((Read-PimRows 'Account-Definitions-Admins').rows) } catch { $ownAdmins = @() }
+                    $ownV = Test-PimRevauditAdminTarget -Caller (Get-PimRevauditCaller -Admins $ownAdmins) -AdminRow $t.row -Action remove
+                    if ($ownV.allowed) {
+                        $ownDo = Invoke-PimManagerAdminOffboardDirect -Upn $upn -By "$($t.role.identity)" -Justification $why -What 'Removal by the department owner' -Via 'owner.remove' -AdminRow $t.row
+                        Write-PimManagerAuditEvent -Action 'owner.remove' -Target $un -Result $(if ($ownDo.ok) { 'ok' } else { 'failed' }) -After ([ordered]@{ by = "$($t.role.identity)"; as = $t.as; reason = $why; direct = $true; rule = "$($ownNeed.rule)"; error = "$($ownDo.error)" })
+                        Write-JsonResponse -Response $resp -Status ([int]$ownDo.status) -Body ([ordered]@{ ok = [bool]$ownDo.ok; userName = $un; approvalId = ''; direct = $true
+                            note = $(if ($ownDo.ok) { 'Removed: the change is committed and the engine disables the account on its next run.' } else { "The removal could not be recorded: $($ownDo.error)" }) })
+                        return [int]$ownDo.status
+                    }
+                    $ownNeed = [pscustomobject]@{ required = $true; rule = 'level'; reason = "$($ownV.reason)" }
+                }
+            }
+            $hold = Request-PimManagerOffboardHold -Upn $upn -What "Removal requested by the department owner" -Justification $why -Requestor "$($t.role.identity)" -Via 'owner.remove' -HoldReason "$(if ($ownNeed) { $ownNeed.reason })"
             Write-PimManagerAuditEvent -Action 'owner.remove' -Target $un -Result $(if ($hold.approvalRaised) { 'ok' } else { 'failed' }) -After ([ordered]@{ by = "$($t.role.identity)"; as = $t.as; reason = $why; approvalId = "$($hold.approvalId)" })
             $st = if ($hold.approvalRaised) { 202 } else { 409 }
             Write-JsonResponse -Response $resp -Status $st -Body ([ordered]@{ ok = [bool]$hold.approvalRaised; userName = $un; approvalId = "$($hold.approvalId)"
@@ -19622,8 +19825,27 @@ function Handle-Request {
                     $removeNote = $parts -join ' '
                 } catch { $removeNote = "Decided Remove of $(@($state.removeAccess) -join ', '), but the removal could NOT be staged: $($_.Exception.Message)" }
             } elseif ($state.state -eq 'remove') {
-                $hold = Request-PimManagerOffboardHold -Upn $user -What "Removal decided in the access review of $($camp.department)" -Justification "access review $id ($($state.by))" -Requestor $me -Via 'accessreview.remove'
-                $removeNote = $(if ($hold -and $hold.approvalRaised) { 'Removal requested: a PIM administrator approves it; until then nothing changes.' } else { "Decided Remove, but the removal request was not raised: $(if ($hold) { $hold.note })" })
+                # OFFBOARD-ONE-ADMIN (owner 2026-10-22): the deciding reviewer, when he is himself an ADMINISTRATOR (Admin+) and
+                # passes the scope + level rule, removes a day-to-day admin directly (the plain offboard: AutoDisableDate = now,
+                # committed). A reviewer who is not an administrator still REQUESTS it, and a second administrator is still asked
+                # for when Get-PimManagerOffboardApprovalNeed says so.
+                $arNeed = $null; $arDone = $null
+                if (Test-PimManagerRoleAtLeast -Minimum 'Admin') {
+                    $arAdmins = @(); try { $arAdmins = @(Get-PimSqlRows -ConnectionString $cs -Entity 'Account-Definitions-Admins') } catch { $arAdmins = @() }
+                    $arRow = (Find-PimManagerOffboardAdminRow -Target $user -Rows $arAdmins).row
+                    $arNeed = Get-PimManagerOffboardApprovalNeed -AdminRow $arRow -Identity $me -Role "$($role.role)"
+                    if (-not $arNeed.required) {
+                        $arV = Test-PimRevauditAdminTarget -Caller (Get-PimRevauditCaller -Admins $arAdmins) -AdminRow $arRow -Action remove
+                        if ($arV.allowed) {
+                            $arDone = Invoke-PimManagerAdminOffboardDirect -Upn $user -By $me -Justification "access review $id ($($state.by))" -What "Removal decided in the access review of $($camp.department)" -Via 'accessreview.remove' -AdminRow $arRow
+                            $removeNote = $(if ($arDone.ok) { 'Removed: the change is committed and the engine disables the account on its next run.' } else { "Decided Remove, but the removal could not be recorded: $($arDone.error)" })
+                        } else { $arNeed = [pscustomobject]@{ required = $true; rule = 'level'; reason = "$($arV.reason)" } }
+                    }
+                }
+                if (-not $arDone) {
+                    $hold = Request-PimManagerOffboardHold -Upn $user -What "Removal decided in the access review of $($camp.department)" -Justification "access review $id ($($state.by))" -Requestor $me -Via 'accessreview.remove' -HoldReason "$(if ($arNeed) { $arNeed.reason })"
+                    $removeNote = $(if ($hold -and $hold.approvalRaised) { 'Removal requested: a PIM administrator approves it; until then nothing changes.' } else { "Decided Remove, but the removal request was not raised: $(if ($hold) { $hold.note })" })
+                }
             }
             Write-PimManagerAuditEvent -Action $(if ($ovr) { 'accessreview.override' } else { 'accessreview.decide' }) -Target "$id/$user" -Result 'ok' -After ([ordered]@{ by = $me; decision = $dec; state = $state.state; removeAccess = @($state.removeAccess); approvalId = "$(if ($hold) { $hold.approvalId })"; staged = @(if ($staged) { $staged.added }) })
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; state = $state.state; awaiting = @($state.awaiting); removeAccess = @($state.removeAccess)
