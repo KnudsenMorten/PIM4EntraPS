@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.666 -- 2026-10-22
+
+- Set-PimSigninFrontSqlState.ps1 (a private installation moved onto the sign-in front: the front's place in the database, run from inside the network) is now a published support script with its own documentation page, its line in the security pack and a -WhatIf preview, like every other published script.
+
 ## 2.4.665 -- 2026-10-22
 
 - A one-off network error on an Azure or Graph call (for example 'Cannot assign requested address') no longer fails the nightly update or a job -- the call is tried again up to three times (5, 10, 20 s); a request that may already have run is never sent twice.
