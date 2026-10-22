@@ -61,6 +61,10 @@ param(
     [string]$WebIdentityResourceId = '',
     # front 1.3.0+: the Key Vault key id that wraps the front's Data Protection keys (Set-PimSigninFrontState prints it)
     [string]$KeyVaultKeyId = '',
+    # front 1.4.0+ access-token mode (framework 12.11g item 10): 'api://<this app's client id>/user_impersonation' -- the
+    # scope must already be on the registration with its self-grant (the guided install's 'signin-front-app' step does it).
+    # Carried in the SAME revision write; '' = ID-token mode, as before.
+    [string]$UpstreamScope = '',
     # a PRIVATE install: this machine cannot reach the Manager -- skip the HTTP read-back; a person signs in from inside
     [switch]$PrivateReadBackByPerson,
     [ValidateRange(1024, 65535)][int]$UpstreamPort = 8081,
@@ -158,7 +162,11 @@ function New-PimSigninFrontTemplate {
           [Parameter(Mandatory)][string]$ClientId, [Parameter(Mandatory)][string]$MiClientId, [int]$UpstreamPort = 8081, [int]$SessionHours = 8,
           # front 1.3.0+ (framework 12.11g item 9): the Key Vault key that wraps the front's keys; the SQL server + database are
           # the Manager's own (PIM_SqlServer / PIM_SqlDatabase). 1.3.0+ refuses to start without them -- so does this template.
-          [string]$KeyVaultKeyId = '')
+          [string]$KeyVaultKeyId = '',
+          # 1.4.0+ access-token mode: SIGNIN_UPSTREAM_SCOPE = api://<ClientId>/<scope> (the front refuses any other client id)
+          [string]$UpstreamScope = '')
+    $us = "$UpstreamScope".Trim()
+    if ($us -and $us -notmatch ('^(?i)api://' + [regex]::Escape("$ClientId".Trim()) + '/[A-Za-z0-9_.-]+$')) { throw "-UpstreamScope '$us' must be api://$ClientId/<scope> (this app's own scope)" }
     $t = ($Template | ConvertTo-Json -Depth 30 | ConvertFrom-Json)
     $cs = @(@($t.containers) | Where-Object { $_ })
     $mgr = @($cs | Where-Object { "$($_.name)" -ne $script:SfFrontName })
@@ -204,7 +212,7 @@ function New-PimSigninFrontTemplate {
             [pscustomobject]@{ name = 'SIGNIN_SESSION_HOURS'; value = "$SessionHours" }
             [pscustomobject]@{ name = 'SIGNIN_BEARER_PATHS'; value = '/mcp,/.well-known' }
             [pscustomobject]@{ name = 'ASPNETCORE_HTTP_PORTS'; value = "$($script:SfFrontPort)" }
-        ) + $stateEnv
+        ) + $stateEnv + @(if ($us) { [pscustomobject]@{ name = 'SIGNIN_UPSTREAM_SCOPE'; value = $us } })
         probes    = @((& $probe 'Liveness'), (& $probe 'Readiness'))
     }
     $t | Add-Member -NotePropertyName containers -NotePropertyValue @($front, $m) -Force
@@ -593,7 +601,7 @@ if ($plan.steps -contains 'user-read-consent') {
 # The revision FIRST, with Easy Auth still on in front of it: there is no moment in which the Manager answers without a
 # sign-in in front. Then the ingress to the front's port, then Easy Auth off, then the proof -- or the rollback.
 Step "two-container revision: $script:SfFrontName ($FrontImage) + the Manager on 127.0.0.1:$UpstreamPort; replicas 1..1"
-$tpl = New-PimSigninFrontTemplate -Template $ca.properties.template -FrontImage $FrontImage -TenantId $TenantId -ClientId $appId -MiClientId "$($identity.clientId)" -UpstreamPort $UpstreamPort -SessionHours $SessionHours -KeyVaultKeyId $KeyVaultKeyId
+$tpl = New-PimSigninFrontTemplate -Template $ca.properties.template -FrontImage $FrontImage -TenantId $TenantId -ClientId $appId -MiClientId "$($identity.clientId)" -UpstreamPort $UpstreamPort -SessionHours $SessionHours -KeyVaultKeyId $KeyVaultKeyId -UpstreamScope $UpstreamScope
 try {
     # A 409 "operation in progress" is transient (a roll or a job update on the app): retried for up to 10 minutes, never
     # treated as a failed switch -- the 2026-10-20 fleet run rolled two installs back on exactly this.

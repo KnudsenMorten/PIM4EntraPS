@@ -1,7 +1,7 @@
 {
   "_comment": "The guided-install contract of the PIM Manager (GUIDED-INSTALL 4.1-4.6). Invardia's wizard asks exactly these questions and writes the answers to config.json for tools/setup/Install-PimManager.ps1, which validates them again (Test-PimInstallConfig). 'maps' = what the answer drives. Kept in step with Install-PimManager by tests/Test-PimGuidedInstall.ps1.",
   "product": "pim-manager",
-  "version": "2.4.661",
+  "version": "2.4.664",
   "entryPoint": "Install-PimManager -ConfigPath <config.json> [-LicencePath <file>] -Reporter <scriptblock> [-StatePath <dir>] [-Resume] [-PreflightOnly]",
   "licenceOrKey": "-LicencePath is required unless config.json carries enrollmentKey: an enrollment key (framework 8.6) makes the install claim the tenant at Invardia, which returns the licence and the install key.",
   "exitCodes": { "0": "succeeded (warnings allowed)", "1": "a step failed -- fix it and -Resume", "2": "preflight failed -- nothing was changed", "3": "bad answers or a bad licence -- nothing was changed" },
@@ -58,6 +58,11 @@
     { "id": "verify", "title": "Deployment health check" },
     { "id": "licence", "title": "Your licence" },
     { "id": "support-app-access", "title": "Invardia support access" },
+    { "id": "signin-front-vault", "title": "Key Vault for the sign-in" },
+    { "id": "signin-front-state", "title": "Sign-in state in the database" },
+    { "id": "signin-front-app", "title": "Sign-in application scope" },
+    { "id": "signin-front-image", "title": "Sign-in front image" },
+    { "id": "signin-front", "title": "Sign-in front for the PIM Manager" },
     { "id": "verify-install", "title": "End-of-install check" },
     { "id": "health-check", "title": "Final health check" },
     { "id": "completed", "title": "Installation complete" }
@@ -80,5 +85,6 @@
   ],
   "runsIn": "PowerShell 7 on the admin's own machine, signed in in the browser as your own administrator -- never a secret; no Azure CLI, no modules (PIM 2.4.554+)",
   "licence": "A Pro licence bound to the tenant above (a trial or a paid licence). A licence for another tenant, or one that names no tenant, is refused (exit 3).",
-  "costStatement": "About 27 USD a month (Azure Container Apps scale to zero, Basic registry, Azure SQL Standard S0 -- the minimum, never Basic, 250 GB maximum size -- external)."
+  "signIn": "The PIM Manager signs people in through the sign-in front (no client secret): its state is kept in the PIM database, its keys are wrapped by the install's own Key Vault (Standard, RBAC, purge protection; config keyVaultName, else kv-pim-<token>), and it passes an access token to the PIM Manager. portalUsers / allowAllMembers decide who may sign in.",
+  "costStatement": "About 27 USD a month (Azure Container Apps scale to zero, Basic registry, Azure SQL Standard S0 -- the minimum, never Basic, 250 GB maximum size -- external; the sign-in front's Key Vault is Standard: no monthly fee, a few cents of key operations)."
 }

@@ -1292,7 +1292,7 @@ foreach ($w in $Workers) {
             # read back: the size the Manager declares now, against the decision
             $mgrApp = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $w.name -ErrorAsNull
             $mgrNow = (Get-PimAcaManagerContainer -App $mgrApp -ContainerName $w.name).resources   # never [0] = the sign-in front
-            $mgrChk = Test-PimManagerAppUndersized -Cpu "$($mgrNow.cpu)" -Memory "$($mgrNow.memory)" -Tags $mgrApp.tags -AppName $w.name
+            $mgrChk = Test-PimManagerAppUndersized -Cpu "$($mgrNow.cpu)" -Memory "$($mgrNow.memory)" -Tags $mgrApp.tags -AppName $w.name -App $mgrApp
             if ($script:PimManagerResizeSaid) { Note "Manager web app size: $($script:PimManagerResizeSaid)" }
             if ($mgrChk.undersized) { Warn "Manager web app size (read back): $($mgrChk.reason) -- the next update raises it" } else { Note "Manager web app size (read back): $($mgrChk.reason)" }
         }

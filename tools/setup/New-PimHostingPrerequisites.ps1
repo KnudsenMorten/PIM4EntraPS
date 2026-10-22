@@ -643,9 +643,12 @@ if ($SkipSql) {
         if (-not $sqlId) {
             # Entra-only authentication with the deploy identity as the create-time Entra admin (az sql server create
             # --enable-ad-only-auth --external-admin-*), TLS 1.2 minimum as the CLI set it.
+            # APP-IDENTITY INSTALL (2026-10-21): a signed-in APPLICATION (the Invardia Support app) is an 'Application' admin
+            # named by its client id -- never 'User' (Get-PimSignedInSqlCreateAdmin); the group step below takes it over.
+            $ca0 = if ($signedIn) { Get-PimSignedInSqlCreateAdmin -SignedIn $signedIn } else { @{ principalType = 'Application'; login = "$spName"; sid = "$spOid" } }
             $sqlProps = @{ minimalTlsVersion = '1.2'
                            administrators = @{ administratorType = 'ActiveDirectory'; azureADOnlyAuthentication = $true
-                                               principalType = $(if ($signedIn) { 'User' } else { 'Application' }); login = "$spName"; sid = "$spOid"; tenantId = "$TenantId" } }
+                                               principalType = $ca0.principalType; login = "$($ca0.login)"; sid = "$($ca0.sid)"; tenantId = "$TenantId" } }
             # §94 (live 2026-10-03): 'West Europe is not accepting creation of new SQL servers' for a sponsorship
             # subscription -- the run went on and failed at the admin GROUP, which then took the blame. Stop HERE.
             try { [void](New-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlSrv -Location $Location -Properties $sqlProps) }

@@ -106,7 +106,10 @@ param(
     # @{ ok; released; reason } -- the signed-in installer leaves the SQL admin group at the end of the install. A real
     # install: Invoke-PimSqlAdminGroupSetupRelease (_PimSqlAdminGroup.ps1). Not run for an Invardia Support-app session
     # (the Support app is the group's standing member) or a managed-tenant install.
-    [scriptblock]$ReleaseSqlAdmin
+    [scriptblock]$ReleaseSqlAdmin,
+    # --- test seam (GUIDED-INSTALL-FRONT, offline tests/Test-PimGuidedInstall.ps1): param([hashtable]$A, [scriptblock]$OnStep)
+    # -> @{ ok; failedStep; reason; completed[]; keyVaultId } in place of Invoke-PimInstallSigninFront -- omit it for a real install ---
+    [scriptblock]$SigninFront
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -119,6 +122,13 @@ $sol = Split-Path -Parent (Split-Path -Parent $here)
 # Invardia Support-app session, else the person's browser sign-in -- Get-PimSignedInIdentity). Loaded at FILE scope (71.32).
 . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-ArmSetup.ps1')
+# GUIDED-INSTALL-FRONT (2026-10-21): the install ends on the sign-in front (vault + key, state, scope, image, the move)
+. (Join-Path $sol 'engine\_shared\PIM-SigninFrontImage.ps1')
+. (Join-Path $here '_PimInstallSigninFront.ps1')
+# the step's real I/O builds the front image (PIM-AcrBuild) and writes the front's database state (PIM-SqlStore): loaded HERE,
+# at file scope -- a library dot-sourced inside a function is gone when that function returns
+if (-not (Get-Command Invoke-PimAcrRestBuild -ErrorAction SilentlyContinue)) { . (Join-Path $sol 'engine\_shared\PIM-AcrBuild.ps1') }
+if (-not (Get-Command Resolve-PimSqlClientType -ErrorAction SilentlyContinue)) { . (Join-Path $sol 'engine\_shared\PIM-SqlStore.ps1') }
 $null = Start-PimScriptRun -Script 'Install-PimManager'
 # framework 8.13 INSTALL-HANDOFF (REQ 100.66): Invardia's bootstrap may have signed the person in already and handed this
 # process ACCESS tokens in PIM_HANDOFF_TOKENS. Take them out of the environment at once -- from here they live in memory
@@ -364,7 +374,12 @@ if ("$($cfg.mspRole)" -ne 'managed' -and $state.installId -eq $installId -and (T
 # (the bootstrap and the answers disagree about the tenant -- nothing is used and no browser opens). Any other refusal, or an
 # audience that was not handed over, falls back to PIM's own browser sign-in for that audience only, when it is first needed.
 # Only the reasons are ever printed or reported -- never token text.
-$script:handoff = Import-PimHandoffTokens -Json $script:PimHandoffRaw -TenantId $cfg.tenantId
+# APP-IDENTITY INSTALL (owner via Invardia 2026-10-21, Install-Invardia -ViaSupportApp): inside a Connect-InvardiaSupport
+# session the handoff carries the Invardia Support APP's tokens -- accepted for exactly that app of THIS tenant, never another.
+$script:handoffAppId = ''
+$isa = $global:InvardiaSupportState
+if ($isa -is [hashtable] -and "$($isa.TenantId)".Trim() -ieq "$($cfg.tenantId)".Trim() -and "$($isa.AppId)" -match '^[0-9a-fA-F-]{36}$') { $script:handoffAppId = "$($isa.AppId)".Trim().ToLowerInvariant() }
+$script:handoff = Import-PimHandoffTokens -Json $script:PimHandoffRaw -TenantId $cfg.tenantId -AllowedAppId $script:handoffAppId
 $script:PimHandoffRaw = $null
 $script:handoffBrowserFor = @()
 if ($script:handoff.present) {
@@ -403,18 +418,21 @@ Pre 'preflight-signin' {
     if (-not $script:who.ok) { return @{ state = 'failed'; message = $script:who.reason; actionText = 'Run the installation in a PowerShell window (a browser sign-in opens), or connect the Invardia Support app first:'; actionCommand = 'Connect-InvardiaSupport.ps1 -Environment <handle>' } }
     # 2026-10-06 (SI finding K): with no superAdmins named, the PERSON who installs becomes the Manager's first SuperAdmin.
     # The Invardia Support app is an application -- it must never be that admin. Refused before anything is written.
+    # APP-IDENTITY INSTALL (owner via Invardia 2026-10-21): superAdmins / portalUsers come ONLY from the answers -- an
+    # application is never "the signed-in admin". A bad ANSWER, so exit 3 (nothing was touched), with the line to add.
     if ("$($script:who.supportAppId)".Trim() -and -not @($cfg.superAdmins | Where-Object { "$_".Trim() }).Count) {
-        return @{ state = 'failed'; message = 'the installation runs as the Invardia Support app, so it cannot make the installer the PIM Manager administrator -- name at least one person in superAdmins'; actionText = 'Add the administrator''s sign-in name to config.json, then resume:'; actionCommand = '"superAdmins": ["admin@contoso.com"]' }
+        $script:appNoAdmins = $true
+        return @{ state = 'failed'; message = 'the installation runs as an application (the Invardia Support app), so it cannot make the installer the PIM Manager administrator -- name at least one person in superAdmins'; actionText = 'Add the administrator''s sign-in name to config.json, then start the installation again:'; actionCommand = '"superAdmins": ["admin@contoso.com"]' }
     }
     @{ state = 'ok'; message = "signed in as $($script:who.userName)" }
 }
-if ($preflightFailed) { Finish 2 }
+if ($preflightFailed) { Finish $(if ($script:appNoAdmins) { 3 } else { 2 }) }
 $pimInstallMem.signedIn = $true   # REQ 98.4 (b): from here a way out may close this install's own SQL firewall rule (Close-InstallHostRule)
 # framework 8.13: ONE event says HOW the person signed in, so Invardia's tracked install can show it. Audience names and
 # the source only -- never token content. "Through Invardia" = the Azure (ARM) sign-in the checks above used was handed over.
 $hoAccepted = @(if ($script:handoff -and $script:handoff.accepted) { @($script:handoff.accepted.Keys) | Sort-Object })
 if ($hoAccepted -contains (Get-PimHandoffAudienceKey 'https://management.azure.com')) {
-    Emit 'signin' 'ok' 'signed in once through Invardia (handoff)' -Detail ([ordered]@{ source = 'handoff'; handedOver = @($hoAccepted); browserFor = @($script:handoffBrowserFor) })
+    Emit 'signin' 'ok' $(if ("$($script:handoff.kind)" -eq 'app') { 'signed in once through Invardia (handoff) as the Invardia Support app' } else { 'signed in once through Invardia (handoff)' }) -Detail ([ordered]@{ source = 'handoff'; principal = $(if ("$($script:handoff.kind)" -eq 'app') { 'application' } else { 'user' }); handedOver = @($hoAccepted); browserFor = @($script:handoffBrowserFor) })
 } elseif ("$($who.supportAppId)".Trim()) {
     Emit 'signin' 'ok' 'signed in as the Invardia Support app' -Detail ([ordered]@{ source = 'support-app'; handedOver = @($hoAccepted) })
 } else {
@@ -446,11 +464,12 @@ Pre 'preflight-rights' {
         $dir = Get-InstallRest 'https://graph.microsoft.com/v1.0/me/transitiveMemberOf/microsoft.graph.directoryRole?$select=roleTemplateId' 'https://graph.microsoft.com'
     }
     $tpl = @(@($dir.value) | ForEach-Object { "$($_.roleTemplateId)" })
-    $v = Get-PimInstallRightsVerdict -AzureRoles $roles -DirectoryRoleTemplateIds $tpl -AppRoles $appRoles
+    $isApp = [bool]"$($who.supportAppId)".Trim()
+    $v = Get-PimInstallRightsVerdict -AzureRoles $roles -DirectoryRoleTemplateIds $tpl -AppRoles $appRoles -IsApp:$isApp
     $script:rights = $v
     if (-not $v.azureOk) { return @{ state = 'failed'; message = $v.message; actionText = 'Ask a subscription Owner to grant you Owner (or Contributor + User Access Administrator) on this subscription -- Azure portal > Subscriptions > the subscription > Access control (IAM) > Add role assignment:'; actionCommand = "$($who.userName) -> Owner on /subscriptions/$($cfg.subscriptionId)" } }
     if (-not $v.entraOk) { return @{ state = 'warning'; message = $v.message } }
-    @{ state = 'ok'; message = 'Owner-level rights on the subscription and an active directory admin role' }
+    @{ state = 'ok'; message = $(if ($isApp) { 'Owner-level rights on the subscription and every Microsoft Graph application permission the installation uses' } else { 'Owner-level rights on the subscription and an active directory admin role' }) }
 }
 
 Pre 'preflight-providers' {
@@ -645,7 +664,8 @@ if ($managedInstall) {
 }
 
 if (-not $managedInstall) {# ================================================================== 3. deploy
-$deployArgs = ConvertTo-PimInstallDeployArgs -Config $cfg -SignedInUpn $who.userName
+# APP-IDENTITY INSTALL (2026-10-21): an application is never the default SuperAdmin / portal user -- only the answers name them.
+$deployArgs = ConvertTo-PimInstallDeployArgs -Config $cfg -SignedInUpn $(if ("$($who.supportAppId)".Trim()) { '' } else { $who.userName })
 # REQ 98.4 (b) (install finding 2026-10-11): a run that DIED left 'AllowSetupHost' on the SQL server, the next run took it
 # for somebody else's and the end-of-install check failed with a fix only possible in the portal. Now THIS install owns its
 # window: before the deploy starts it reads the rule and -- when it is not there -- writes into the state file that the rule
@@ -708,6 +728,39 @@ else {
     try { $gr = & $GrantSupport @{ AppId = $cfg.supportAppId; Level = $cfg.supportAccess; TenantId = $cfg.tenantId; SubscriptionId = $cfg.subscriptionId; ResourceGroup = $names.resourceGroup; SqlServer = $names.sqlFqdn } } catch { $gr = $null }
     if ($gr -and $gr.ok) { Emit 'support-app-access' 'ok' "the Invardia Support app has '$($cfg.supportAccess)' access, and standing access to the PIM database: it is a member of the SQL admin group and has its own database user with the database owner role. This stays after the installation; you end it by switching the Invardia Support app off in Microsoft Entra ID"; Mark 'support-app-access' }
     else { Emit 'support-app-access' 'warning' 'the Invardia Support app could not be given its access with your rights' 'Ask a Privileged Role Administrator to run:' $grantCmd }
+}
+
+# ================================================================== 4a. GUIDED-INSTALL-FRONT: the sign-in front
+# Owner 2026-10-21 (trial end-to-end: "no quick dirty" / "biz depends on it works"): a NEW install ends on the shared sign-in
+# front -- the install's own Key Vault wraps its keys, its state is in the PIM database, it passes an access token to the
+# PIM Manager, no client secret is used -- never on Easy Auth. Five steps (signin-front-vault / -state / -app / -image /
+# signin-front), each its own event; a resume skips the ones done. Here, BEFORE the end-of-install check: the database is
+# still reachable from this machine (the check closes the setup window). A failed move rolls itself back to Easy Auth
+# (the PIM Manager is never without a sign-in) and the install stops with the resume command.
+# Under the LEGACY offline -Az seam with no -SigninFront seam there is no Azure to talk to: nothing is run (tests only).
+if ($SigninFront -or -not $azSeam) {
+    $sfIds = @(Get-PimInstallSigninFrontStepIds)
+    $sfDone = @($sfIds | Where-Object { $done.Contains($_) })
+    $sfOnStep = { param($Id, $State, $Message) Emit $Id $State $Message; if ("$State" -in 'ok', 'skipped') { Mark $Id } }
+    $sfArgs = @{ SubscriptionId = $cfg.subscriptionId; ResourceGroup = $names.resourceGroup; TenantId = $cfg.tenantId; Location = $cfg.location
+                 ManagerApp = $names.managerApp; AcrName = $names.acr; SqlDatabase = $names.sqlDatabase; KeyVaultName = $names.keyVault
+                 RepoRoot = (Split-Path -Parent (Split-Path -Parent $sol)); UpdateJob = $names.updateJob; Done = @($sfDone)
+                 StateFile = (Join-Path $StatePath 'signin-front-rollback.json') }
+    if (-not $SigninFront) {
+        $SigninFront = { param([hashtable]$A, [scriptblock]$OnStep)
+            $io = New-PimInstallSigninFrontIo -SubscriptionId $A.SubscriptionId -ResourceGroup $A.ResourceGroup -TenantId $A.TenantId -AcrName $A.AcrName `
+                    -SqlServerFqdn $names.sqlFqdn -SqlDatabase $A.SqlDatabase -SetupDir $here
+            Invoke-PimInstallSigninFront @A -OnStep $OnStep -Io $io }
+    }
+    $sfR = $null
+    try { $sfR = & $SigninFront $sfArgs $sfOnStep } catch { $sfR = @{ ok = $false; failedStep = 'signin-front'; reason = "$($_.Exception.Message)" } }
+    if (-not $sfR -or -not [bool]$sfR.ok) {
+        $sfStep = if ($sfR -and "$($sfR.failedStep)".Trim()) { "$($sfR.failedStep)" } else { 'signin-front' }
+        if (-not @($events | Where-Object { "$($_.step.id)" -eq $sfStep -and $_.state -eq 'failed' }).Count) { Emit $sfStep 'failed' "$(if ($sfR) { $sfR.reason } else { 'the sign-in front step did not answer' })" }
+        Emit 'verify-install' 'failed' "the PIM Manager is not on the sign-in front yet ($sfStep): $(if ($sfR) { $sfR.reason })" 'The PIM Manager still requires a sign-in (Easy Auth stays on until the front works). Fix the cause above, then resume the installation:' $resumeCmd
+        Finish 1
+    }
+    if ("$($sfR.keyVaultId)".Trim()) { $pimInstallMem['keyVaultId'] = "$($sfR.keyVaultId)".Trim() }
 }
 
 # ================================================================== 4b. INSTALL-HARDEN-1: the END-OF-INSTALL VERIFY
@@ -787,7 +840,7 @@ $outputs = [ordered]@{
     resourceGroup           = $names.resourceGroup
     sqlServerId             = (Az-Text @('sql', 'server', 'show', '-g', $names.resourceGroup, '-n', $names.sqlServer, '--subscription', $cfg.subscriptionId, '--query', 'id', '-o', 'tsv'))
     logAnalyticsWorkspaceId = (Az-Text @('monitor', 'log-analytics', 'workspace', 'show', '-g', $names.resourceGroup, '-n', $names.logAnalytics, '--subscription', $cfg.subscriptionId, '--query', 'id', '-o', 'tsv'))
-    keyVaultId              = ''
+    keyVaultId              = $(if ($pimInstallMem -and $pimInstallMem.Contains('keyVaultId')) { "$($pimInstallMem['keyVaultId'])" } else { '' })   # GUIDED-INSTALL-FRONT: the install's own vault
     runtimeIdentity         = 'mi-container'
     runtimeIdentityClientId = $(if ($tickPid) { "$((Get-InstallRest "https://graph.microsoft.com/v1.0/servicePrincipals/$tickPid`?`$select=appId" 'https://graph.microsoft.com').appId)" } else { '' })   # never `az ad`: it follows the default account's tenant
     version                 = $(if (Test-Path -LiteralPath $verFile) { "$(Get-Content -Raw -LiteralPath $verFile)".Trim() } else { '' })

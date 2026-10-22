@@ -319,6 +319,21 @@ function Connect-PimSignedInSql {
     return @{ userName = $t.userName; objectId = $t.objectId }
 }
 
+function Get-PimSignedInSqlCreateAdmin {
+    <#
+      PURE. APP-IDENTITY INSTALL (owner via Invardia 2026-10-21): the SQL server's CREATE-TIME Entra admin for a signed-in
+      deploy (-SignedIn = Get-PimSignedInIdentity's answer). The Invardia Support app (supportAppId set) is an APPLICATION,
+      never a 'User': principalType Application with its service principal's object id -- the same shape the deploy
+      application and the SQL identity already use (New-PimHostingPrerequisites). Either way the admin moves to the SQL
+      admin group right after (the prerequisites' group step); this is only who holds it in between.
+      @{ principalType; login; sid }.
+    #>
+    param([Parameter(Mandatory)][object]$SignedIn)
+    $app = "$($SignedIn.supportAppId)".Trim()
+    if ($app) { return @{ principalType = 'Application'; login = "invardia-support-$($app.ToLowerInvariant())"; sid = "$($SignedIn.objectId)".Trim().ToLowerInvariant() } }
+    return @{ principalType = 'User'; login = "$($SignedIn.userName)"; sid = "$($SignedIn.objectId)" }
+}
+
 function Invoke-PimSignedInSqlAdminMembership {
     <#
       Make the signed-in user a MEMBER of the SQL admin group of -SqlServerName (members-only: never creates the group,
@@ -327,6 +342,9 @@ function Invoke-PimSignedInSqlAdminMembership {
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$ResourceGroup,
           [Parameter(Mandatory)][string]$SqlServerName, [Parameter(Mandatory)][string]$UserObjectId, [string]$GroupName = 'grp-pim-sql-admins',
+          # APP-IDENTITY INSTALL (2026-10-21): the signed-in principal is an application -- a server whose admin was set by
+          # its client id elsewhere is recognised too (a direct admin by either id)
+          [string]$AppId = '',
           # test seam: @{ Graph; Arm; TenantId } instead of the signed-in session's REST invokers
           [object]$Invokers)
     # Loaded on demand through a variable path: Build-PimSupportScripts.ps1 inlines the literal dot-source-of-a-Join-Path
@@ -345,7 +363,7 @@ function Invoke-PimSignedInSqlAdminMembership {
     try {
         $list = & $inv.Arm -Method GET -Path "/subscriptions/$SubscriptionId/resourceGroups/$sqlRg/providers/Microsoft.Sql/servers/$srv/administrators?api-version=$($script:PimSqlApi)"
         $cur = @(@($list.value) | Where-Object { $_ }) | Select-Object -First 1
-        if ($cur -and "$($cur.properties.sid)".Trim() -ieq "$UserObjectId".Trim()) {
+        if ($cur -and ("$($cur.properties.sid)".Trim() -ieq "$UserObjectId".Trim() -or ("$AppId".Trim() -and "$($cur.properties.sid)".Trim() -ieq "$AppId".Trim()))) {
             $action = ".\Initialize-PimSqlAdminGroup.ps1 -SubscriptionId $SubscriptionId -TenantId $TenantId -ResourceGroup $sqlRg -SqlServerName $srv -GroupName $GroupName"
             Write-Host "    the signed-in user IS the Entra admin of $srv -- SQL is reachable. The SQL admin group '$GroupName' is not the admin yet; a Privileged Role Administrator converges it with: $action" -ForegroundColor Yellow
             return @{ ok = $true; blocked = $false; added = $false; direct = $true; reason = ''; action = $action }

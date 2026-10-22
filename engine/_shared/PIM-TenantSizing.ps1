@@ -315,17 +315,42 @@ function Get-PimManagerAppResize {
     return [pscustomobject]@{ change = [bool]$size.Changed; Cpu = $size.Cpu; Memory = $size.Memory; Tags = $tags; detail = $detail; notes = @($size.Notes); size = $size }
 }
 
+function Get-PimManagerFrontRoom {
+    <#
+      PURE. CR7: behind the sign-in front the app's containers share the Consumption maximum, so the Manager may hold at most
+      what the front leaves. -App: the container app as ARM returned it. Returns @{ Cpu; MemoryGi } (doubles) or $null when
+      there is no front (or its size is unreadable). The literal 4.0 is the floor if $script:PimJobSizeMaxCpu is not set in
+      the caller's scope ($script: is the CALLER's script scope -- trial install 11a17b54, 2026-10-21).
+    #>
+    param([AllowNull()][object]$App)
+    $sfc = $null; if ($App -and $App.properties -and $App.properties.template) { $sfc = @(@($App.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -eq 'signin-front' })[0] }
+    if (-not $sfc -or -not $sfc.resources) { return $null }
+    $fcCpu = ConvertTo-PimJobCpu $sfc.resources.cpu; $fcMem = ConvertTo-PimJobMemoryGi $sfc.resources.memory
+    if ($null -eq $fcCpu -or $null -eq $fcMem) { return $null }
+    $max = $(if ($script:PimJobSizeMaxCpu) { [double]$script:PimJobSizeMaxCpu } else { 4.0 })
+    return @{ Cpu = ($max - [double]$fcCpu); MemoryGi = ((2 * $max) - [double]$fcMem); FrontCpu = [double]$fcCpu; FrontMemoryGi = [double]$fcMem }
+}
+
 function Test-PimManagerAppUndersized {
     <#
       PURE. Is the Manager web app below its size? @{ readable; undersized; have; want; source; reason; fix }.
       want = Get-PimManagerAppResources for what it runs (-Cpu / -Memory) and the override recorded on it (-Tags), so a
       customer's own smaller size is NOT flagged. An unread size is not judged.
+      -App (2026-10-21, trial install 11a17b54 flagged "CPU 4.0, memory 8.0Gi" on a Manager behind the sign-in front): the
+      app as ARM returned it -- behind a front, want is capped at what the front leaves (Get-PimManagerFrontRoom), exactly as
+      every resize caps it, so a Manager that already holds all the room it may is never called undersized.
     #>
-    param([AllowNull()][object]$Cpu, [AllowNull()][object]$Memory, [AllowNull()]$Tags, [string]$AppName = 'ca-pim-manager')
+    param([AllowNull()][object]$Cpu, [AllowNull()][object]$Memory, [AllowNull()]$Tags, [string]$AppName = 'ca-pim-manager', [AllowNull()][object]$App)
     $d = Get-PimManagerAppDefaultSize
     $rec = ConvertFrom-PimTenantSizingTags -Tags $Tags -Job 'Manager'
     $cur = $null; if ("$Cpu".Trim() -and "$Memory".Trim()) { $cur = @{ Cpu = "$Cpu"; Memory = "$Memory" } }
     $size = Get-PimManagerAppResources -Current $cur -Settings $rec.settings
+    $room = Get-PimManagerFrontRoom -App $App
+    if ($room) {
+        $wCpu = [double](ConvertTo-PimJobCpu $size.Cpu); $wMem = [double](ConvertTo-PimJobMemoryGi $size.Memory)
+        if ($wCpu -gt $room.Cpu) { $size.Cpu = Format-PimJobCpu $room.Cpu }
+        if ($wMem -gt $room.MemoryGi) { $size.Memory = Format-PimJobMemory $room.MemoryGi }
+    }
     $want = ('{0} CPU / {1}' -f $size.Cpu, $size.Memory)
     if (-not "$($size.Have)".Trim()) { return [pscustomobject]@{ readable = $false; undersized = $false; have = ''; want = $want; source = $size.Source; fix = ''; reason = 'the Manager web app''s size could not be read' } }
     $hc = [double](ConvertTo-PimJobCpu $Cpu); $hm = [double](ConvertTo-PimJobMemoryGi $Memory)

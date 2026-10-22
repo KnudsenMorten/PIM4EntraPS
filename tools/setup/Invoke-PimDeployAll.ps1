@@ -828,6 +828,7 @@ if ($script:PimEnrolling) {
 # stacking duplicates.
 # =================================================================================================
 $script:PimSignedInOid = ''
+$script:PimSignedInAppId = ''
 $script:PimSignedInSqlChecked = $false
 if ($UseSignedInAccount) {
     # 71.33 -- one identity per deploy: a signed-in deploy never also carries an application credential.
@@ -839,6 +840,9 @@ if ($UseSignedInAccount) {
         $who = Get-PimSignedInIdentity -TenantId $TenantId -SubscriptionId $SubscriptionId
         if (-not $who.ok) { throw "Invoke-PimDeployAll: REFUSED (nothing was touched) -- $($who.reason)" }
         $script:PimSignedInOid = $who.objectId
+        # APP-IDENTITY INSTALL (2026-10-21): the signed-in principal may be the Invardia Support APP (no person) -- the SQL
+        # steps recognise it as a direct admin by its object id or its client id.
+        $script:PimSignedInAppId = "$($who.supportAppId)".Trim()
         Set-PimSignedInGlobals -TenantId $TenantId
         Write-Host "    deploy identity: the SIGNED-IN user $($who.userName) ($($who.objectId)) -- no deploy application, no certificate" -ForegroundColor DarkGray
     }
@@ -879,7 +883,7 @@ function Confirm-PimSignedInSqlAccess {
     $script:PimSignedInSqlChecked = $true
     try {
         $m = Invoke-PimSignedInSqlAdminMembership -SubscriptionId $(if ("$SqlSubscriptionId".Trim()) { $SqlSubscriptionId } else { $SubscriptionId }) -TenantId $TenantId `
-                -ResourceGroup $ResourceGroup -SqlServerName $SqlServerFqdn -UserObjectId $script:PimSignedInOid -GroupName $SqlAdminGroupName
+                -ResourceGroup $ResourceGroup -SqlServerName $SqlServerFqdn -UserObjectId $script:PimSignedInOid -AppId $script:PimSignedInAppId -GroupName $SqlAdminGroupName
         if (-not $m.ok -or $m.blocked) { $script:PimSignedInSqlChecked = $false; return "the signed-in user cannot reach SQL: $($m.reason)" }
         return ''
     } catch { $script:PimSignedInSqlChecked = $false; return "the signed-in user's SQL admin group membership could not be ensured: $($_.Exception.Message)" }

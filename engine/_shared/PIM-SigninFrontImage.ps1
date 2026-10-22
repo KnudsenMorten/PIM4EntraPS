@@ -374,6 +374,40 @@ function New-PimSigninFrontBuildContext {
     return $res
 }
 
+function New-PimSigninFrontBuildContextFromFolder {
+    <#
+      GUIDED-INSTALL-FRONT (owner 2026-10-21, trial E2E): the front's build context from a SOURCE FOLDER -- the release the
+      installer runs from (repo-root shaped: <RepoRoot>/FRAMEWORK/signin-front/src + VERSION, and the solution's pin) -- so a
+      NEW install builds its front itself, before its updater has ever reached Invardia. Same rules as the archive form:
+      src/** re-rooted (bin/ obj/ left out), built ONLY when VERSION is the version the solution pins. Never throws.
+      @{ ok; path; version; pinned; component; files; reason }.
+    #>
+    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$OutFile)
+    $res = @{ ok = $false; path = ''; version = ''; pinned = ''; component = ''; files = 0; reason = '' }
+    try {
+        $src = Join-Path $RepoRoot 'FRAMEWORK\signin-front\src'
+        if (-not (Test-Path -LiteralPath (Join-Path $src 'Dockerfile'))) { $res.reason = 'this copy of PIM Manager carries no FRAMEWORK/signin-front/src -- nothing to build here'; return $res }
+        $vf = Join-Path $RepoRoot 'FRAMEWORK\signin-front\VERSION'
+        $pf = Join-Path $RepoRoot 'SOLUTIONS\PIM4EntraPS\tools\pim-manager\signin-front.version'
+        $comp = if (Test-Path -LiteralPath $vf) { "$(Get-Content -LiteralPath $vf -Raw)".Trim([char]0xFEFF).Trim() } else { '' }
+        $pin = if (Test-Path -LiteralPath $pf) { "$(Get-Content -LiteralPath $pf -Raw)".Trim([char]0xFEFF).Trim() } else { '' }
+        $res.component = $comp; $res.pinned = $pin
+        if (-not (Test-PimSigninFrontVersionText $comp)) { $res.reason = 'no readable FRAMEWORK/signin-front/VERSION'; return $res }
+        if (-not (Test-PimSigninFrontVersionText $pin)) { $res.reason = 'no pinned sign-in front version (tools/pim-manager/signin-front.version)'; return $res }
+        if ($comp -ne $pin) { $res.reason = "the source carries component $comp, but this release pins $pin -- not built (only the pinned version is ever built)"; return $res }
+        $root = (Resolve-Path -LiteralPath $src).Path.TrimEnd('\', '/')
+        $ctx = [ordered]@{}
+        foreach ($f in @(Get-ChildItem -LiteralPath $root -Recurse -File)) {
+            $rel = $f.FullName.Substring($root.Length + 1).Replace('\', '/')
+            if ($rel -match '^(bin|obj)/' -or $rel -match '(^|/)\.\.(/|$)') { continue }
+            $ctx[$rel] = [IO.File]::ReadAllBytes($f.FullName)
+        }
+        Write-PimTarGz -OutFile $OutFile -Files $ctx
+        $res.ok = $true; $res.path = $OutFile; $res.version = $pin; $res.files = $ctx.Count; $res.reason = "signin-front $pin, $($ctx.Count) files (from this release's source)"
+    } catch { $res.ok = $false; $res.reason = "the front's build context could not be written: $($_.Exception.Message)" }
+    return $res
+}
+
 # ---- the registry -----------------------------------------------------------------------------------------------------
 
 function Test-PimSigninFrontImagePresent {
