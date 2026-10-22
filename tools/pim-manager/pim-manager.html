@@ -3894,7 +3894,7 @@
           // §96.5 D1 (b): Remove from PIM -- every delegation removed, the account DISABLED and KEPT, the admin out of the active list.
           (String(a.accountStatus || '').toLowerCase() === 'removed' ? '' :
           '<button class="btn-sec acctRemoveFromPim" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
-            ' title="REMOVE this admin FROM PIM: every delegation is removed and the account is DISABLED and KEPT in Entra ID (not deleted). The admin leaves this list; PIM keeps the account disabled. Held for the offboard approval (staged in Pending changes)." style="font-size:11px;color:#bc4c00;">Remove from PIM</button> ') +
+            ' title="REMOVE this admin FROM PIM: every delegation is removed and the account is DISABLED and KEPT in Entra ID (not deleted). The admin leaves this list; PIM keeps the account disabled. Staged in Pending changes; a second administrator approves only for a high-privilege or break-glass admin, or with maker-checker on." style="font-size:11px;color:#bc4c00;">Remove from PIM</button> ') +
           // §96.5 D1 (operator 2026-10-06: "i allow operators to delete an admin"): SuperAdmin only, typed confirmation.
           ((roleAtLeast('Admin') || PIM_ROLE === 'Delegated') && !a.readOnly ? '<button class="btn-sec acctDelete" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' +
             ' title="DELETE the account in Entra ID and remove every delegation it has (SuperAdmin, Admin, or a delegated operator for admins at or below its level; you type DELETE to confirm -- your delete IS the approval; Entra keeps it restorable for 30 days)." style="font-size:11px;color:#cf222e;border-color:#cf222e;">Delete account</button> ' : '') +
@@ -3953,7 +3953,7 @@
       '<button class="btn-sec" id="acctBulkEnable">Enable</button>' +
       '<button class="btn-sec" id="acctBulkDisable">Disable</button>' +
       '<button class="btn-sec" id="acctBulkDisableStrip">Disable &amp; remove delegations</button>' +
-      '<button class="btn-sec" id="acctBulkRemoveFromPim" style="color:#bc4c00;" title="Every delegation removed; each account DISABLED and KEPT in Entra ID; the admins leave this list (held for the offboard approval).">Remove from PIM</button>' +
+      '<button class="btn-sec" id="acctBulkRemoveFromPim" style="color:#bc4c00;" title="Every delegation removed; each account DISABLED and KEPT in Entra ID; the admins leave this list (a second administrator approves only for a high-privilege or break-glass admin, or with maker-checker on).">Remove from PIM</button>' +
       ((roleAtLeast('Admin') || PIM_ROLE === 'Delegated') ? '<button class="btn-sec" id="acctBulkDelete" style="color:#cf222e;border-color:#cf222e;">Delete account(s)</button>' : '') +
       '<button class="btn-sec" id="acctBulkClear">Clear selection</button></div>';
   }
@@ -5276,14 +5276,16 @@
   }
 
   // Tier / plane legend (REQUIREMENTS §26d / trustworthy-when-sparse). Plain-language
-  // key for the L0-L5 tiers and the CP/MP/WDP planes the estate is organized by, so a
+  // key for the L0-L9 levels and the CP/MP/WDP planes the estate is organized by, so a
   // sparse Home tab is still understandable. Static content (no data dependency).
+  // LEVELS-L9 (2026-10-22): L0-L9, the Azure levels following the CAF management-group layer (pimAzureScopeLevel).
   function homeLegendHtml() {
     const tiers = [
       ['L0', 'Tier-0 / control plane &mdash; highest privilege (e.g. Global Admin)'],
       ['L1', 'Broad admin within a tier'],
       ['L2', 'Scoped admin (e.g. Administrative-Unit scoped)'],
-      ['L3&ndash;L5', 'Progressively narrower / service-scoped delegation'],
+      ['L3&ndash;L5', 'Service admins: administrators L3, operators / contributors L4, readers L5'],
+      ['L3&ndash;L9', 'Azure: the management-group layer of the scope &mdash; Tenant Root Group L3, one level per layer below, a subscription, resource group or resource one more, up to L9'],
     ];
     const planes = [
       ['CP', 'Control plane &mdash; tenant-wide identity/governance'],
@@ -5589,17 +5591,17 @@
       });
     }
 
-    // --- Delegation tiers (L0-L5) ---
+    // --- Delegation levels (L0-L9; LEVELS-L9 2026-10-22: L0-L5 always, L6-L9 when the estate has them) ---
     const ti = t.tiers || {};
     if (ti.ok === false) {
       h += homeTile({ title: 'Delegation tiers', value: 'n/a', tone: 'neutral', tab: 'map', sub: esc(ti.error || 'unavailable') });
     } else {
       const bl = ti.byLevel || {};
-      const tierStr = ['L0', 'L1', 'L2', 'L3', 'L4', 'L5'].map(l => l + ':' + (bl[l] || 0)).join('  ');
+      const tierStr = ['L0', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'L7', 'L8', 'L9'].filter((l, i) => i < 6 || (bl[l] || 0) > 0).map(l => l + ':' + (bl[l] || 0)).join('  ');
       const lines = [esc(tierStr)];
       if (bl.untiered > 0) lines.push('<span style="color:#bf8700">' + bl.untiered + ' untiered</span>');
       h += homeTile({
-        title: 'Delegation groups by tier (L0–L5)',
+        title: 'Delegation groups by level (L0–L9)',
         value: ti.totalGroups != null ? ti.totalGroups : '&mdash;',
         sub: (ti.admins || 0) + ' admin account(s)',
         tone: 'neutral', tab: 'map', lines: lines
@@ -23569,7 +23571,7 @@
           : status === 'Removed' ? '<li class="acctRemovedNote"><b>The account is DISABLED and KEPT in Entra ID</b> (its sessions revoked) -- it is not deleted. The admin leaves the Admin accounts list (<i>Show removed from PIM</i> lists it again) and PIM keeps it disabled; <b>Enable</b> brings it back.</li>'
                               : '<li>The account stays in PIM, ' + (status ? escapeHtml(status.toLowerCase()) : 'its status unchanged') + '.</li>') : '') +
       (missing.length ? '<li style="color:#cf222e;">not a defined admin (skipped): ' + missing.map(escapeHtml).join(', ') + '</li>' : '') + '</ul>' +
-      (offb ? '<p style="color:#57606a;">A disable, removal or delete is an offboard: on commit it is held for a second administrator&rsquo;s approval unless self-approval is switched on (Settings &rsaquo; Approvals &amp; policy).</p>' : '') +
+      (offb ? '<p style="color:#57606a;">A disable, removal or delete is an offboard: you carry it out yourself when you commit. A disable or removal waits for a second administrator&rsquo;s approval only when the second-approver policy (maker-checker) is switched on, or the admin is high-privilege (level L0 / tier T0, high-priv name or purpose) or a break-glass account.</p>' : '') +
       '<p style="color:#57606a;">Nothing is saved yet -- review and commit under <b>Pending changes</b>.</p>';
     if (!nStatus && !nDel) { await showConfirm('Nothing to change', body, false); return; }
     const ok = await showConfirm(verb, body, offb, verb);
@@ -24225,10 +24227,10 @@
             // Admin accounts' own buttons -- acctStageStatus), with or without disabling the account.
             (base === 'Account-Definitions-Admins' && String(row.UserPrincipalName || '').trim()
               ? '<button data-act="acct-strip" class="row-acct-strip" title="REMOVE ALL DELEGATIONS of this admin, KEEP THE ACCOUNT as it is: every group delegation naming this admin is removed by the next engine run. Staged in Pending changes.">&#x1F9F9;</button> ' +
-                '<button data-act="acct-disable-strip" class="row-acct-disable-strip" title="DISABLE this admin and REMOVE ALL its delegations (the account stays in PIM, disabled; a disable is held for the offboard approval). Staged in Pending changes.">&#x26D4;</button> ' +
+                '<button data-act="acct-disable-strip" class="row-acct-disable-strip" title="DISABLE this admin and REMOVE ALL its delegations (the account stays in PIM, disabled; a second administrator approves only for a high-privilege or break-glass admin, or with maker-checker on). Staged in Pending changes.">&#x26D4;</button> ' +
                 // §96.5 D1 (b): Remove from PIM -- delegations removed, account DISABLED and KEPT, row marked AccountStatus = Removed.
                 (String(row.AccountStatus || '').trim().toLowerCase() === 'removed' ? '' :
-                '<button data-act="acct-remove-from-pim" class="row-acct-remove-from-pim" title="REMOVE this admin FROM PIM: every delegation removed, the account DISABLED and KEPT in Entra ID (not deleted), the admin out of the active lists (AccountStatus = Removed). Held for the offboard approval. Staged in Pending changes.">&#x2B07;</button> ')
+                '<button data-act="acct-remove-from-pim" class="row-acct-remove-from-pim" title="REMOVE this admin FROM PIM: every delegation removed, the account DISABLED and KEPT in Entra ID (not deleted), the admin out of the active lists (AccountStatus = Removed). Staged in Pending changes; a second administrator approves only for a high-privilege or break-glass admin, or with maker-checker on.">&#x2B07;</button> ')
               : '') +
             '<button data-act="delete" title="Take this ROW out of PIM. The group is NOT deleted and nobody loses access -- PIM simply stops managing it. Use the bin to delete the group itself.">&#x2715;</button>';
         // PIM 100.117: information, not an error -- it puts no number in the menu.

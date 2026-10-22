@@ -7,9 +7,11 @@
 
 # PIM Manager — delivered feature catalog
 
+> These are engineering notes; the customer documentation is at https://invardia.com/docs/pim-manager/.
+
 This is the delivered feature set of **PIM Manager**, written in plain language for IT
 admins and customers. Everything listed here is built and verified. It is grouped by
-area and is safe to share publicly. (Last reviewed 2026-10-12 for the releases 2.4.594 to 2.4.609; individual
+area and is safe to share publicly. (Last reviewed 2026-10-12; individual
 entries carry their own date.)
 
 PIM Manager is a privileged-access governance solution for Microsoft Entra. It models
@@ -183,19 +185,18 @@ deployment is a supported choice) and no credentials lying around.
 - **Give your Invardia support access, and take it back.** ✅ 2026-10-04 — One command gives your Invardia Support
   app either read-only access to the PIM database (troubleshoot) or setup access (it may repair and upgrade: database
   administration and ownership of PIM's own app registrations and groups). The same command with a remove switch
-  takes everything back. Nothing is granted twice, and every change is read back. *(2.4.488)*
+  takes everything back. Nothing is granted twice, and every change is read back.
 - **Pro updates arrive signed, through Invardia.** ✅ 2026-10-06 — A Pro installation claims its install key with its
   licence, then takes each new version from Invardia for its own update ring: the release is signed, checked against a
   key built into PIM, checked for its sequence (no replay, no step back) and its archive fingerprint, built in your own
   registry and rolled out at night. Proven on four environments, which each pulled, verified and rolled two releases.
-  *(2.4.517)*
 - **A new installation updates itself from day one, and Invardia support can install it.** ✅ 2026-10-07 — The guided
   install and the managing / managed tenant build set up Pro updates themselves: the update job, its ring (ring 3 by
   default, ring 2 for design partners) and the install key, which is in place within minutes. Invardia support can run
   the whole installation with its own Support app, limited to your tenant and subscriptions, and the app never becomes
   your PIM Manager administrator. The managing / managed tenant build also registers the licence and gives support its
   access, and refuses a licence that cannot run it. Rehearsed end to end on fresh tenants: a single tenant, a Community
-  installation, and a managing + managed tenant pair. *(2.4.519)*
+  installation, and a managing + managed tenant pair.
 - **Four update rings, and a version reaches you only when the release owner decides.** ✅ 2026-10-12 — Every
   installation is on one update ring. **Ring 0** is the vendor's own environment. **Ring 1** is the test environments.
   **Ring 2 and ring 3** are customers. A new version goes to ring 0 first and is checked there. It reaches a customer
@@ -206,11 +207,11 @@ deployment is a supported choice) and no credentials lying around.
   Invardia lists the guards that hold something at that moment, and reports a guard as cleared once it holds nothing.
   So the status support sees follows your installation, also after you released or approved something. The list
   names the guard, its outcome, its severity and since when. It does not name the accounts, groups or policies that
-  are held, and an installation without an install key does not send the list. *(2.4.605)*
+  are held, and an installation without an install key does not send the list.
 - **The access request broker deploys completely in one run.** ✅ 2026-10-04 — Deploying the access request broker
   now also registers its API, gives the broker its send right on your notification mailbox only, and tells PIM where
   the broker is. All three are read back and reported. If a step lacks what it needs, it prints the exact command
-  instead. *(2.4.488)*
+  instead.
 
 ## 4. MSP
 - **Support sees where your environment lives.** ✅ 2026-10-10 — With an install key, the heartbeat names the
@@ -223,9 +224,8 @@ deployment is a supported choice) and no credentials lying around.
   day as a safety pass. Measured on a managed test tenant: a pull went from about 200 s to under 40 s, and the daily
   container cost fell from about 13-15 to under 2 (DKK), leaving mostly the fixed cost of the hosting.
 - **Replication rings — roll a change to one wave of customers before the rest.** ✅ 2026-09-18
-  Three rings in the same order as the software rings — **0 = dev, 1 = test, 2 = broad** (since
-  2.4.388; the order used to be the reverse, and existing rows and tenants were converted so each
-  keeps its reach). Every managed tenant sets its own ring and every definition row carries one; a
+  Three rings in the same order as the software rings — **0 = dev, 1 = test, 2 = broad**
+  (existing rows and tenants from an older model were converted so each keeps its reach). Every managed tenant sets its own ring and every definition row carries one; a
   row reaches the tenants whose ring is at or below its own, so a new administrator starts on ring 0
   (dev tenants only) and is promoted 0 → 1 → 2. **Tags belong to the ring:** the provider names each
   ring and may narrow it with a tag rule once (e.g. *test = tenants tagged `wave:pilot`*), instead of
@@ -300,7 +300,7 @@ deployment is a supported choice) and no credentials lying around.
   on a definition renames it: name, description and, if you want, its tag. Every row that points at the tag is
   updated in the same change. After the commit, the engine renames the **existing** group or AU in Entra ID, so its
   members, roles and history stay with it. Earlier versions created a second group and left the old one with its
-  access. Changing the name directly in the grid works the same way. *(2.4.422)*
+  access. Changing the name directly in the grid works the same way.
 - **Mail about an administrator goes to their sponsor department's owners.** ✅ 2026-09-16 When PIM sends
   anything about an administrator account — the new-account notice, the Temporary Access Pass — it goes to
   the **owners of the department that sponsors that administrator**, all of them, not to a manager recorded
@@ -501,12 +501,11 @@ deployment is a supported choice) and no credentials lying around.
   Administrator** (held until a SuperAdmin releases exactly that change), and the **last PIM Manager SuperAdmin**
   (refused: add another one first). Everything else is a warning, shown on its own page (for example access that is
   not yet in line with your definitions). Form mistakes are plain form errors, and platform problems (database, licence) are reported to support as
-  telemetry — none of these appear on the Guards page. *(2.4.594, 2.4.595)*
+  telemetry — none of these appear on the Guards page.
 - **A hold that is no longer needed clears itself.** ✅ 2026-10-12 — When the plan a guard held is no longer wanted
   (for example the removals were taken back, or the change was applied), the next run finds nothing to hold and
   clears the hold by itself. Nobody has to acknowledge it. A held policy change set reads the same on every page that
   shows it — Approvals, Guards, Get Started and Overview — and the Guards page says what a guard holds right now.
-  *(2.4.596, 2.4.598)*
 
 ## 7. Engine — Providers / Connectors
 - **Map one PIM group to many workloads.** Connectors translate your PIM groups into the
@@ -534,7 +533,7 @@ deployment is a supported choice) and no credentials lying around.
   three buttons: **Microsoft default**, **PIM Manager recommendation** and **Keep current**. Each button shows the
   value it stands for, so you see what you choose. This covers Entra role policies, PIM for Groups policies (member
   and owner) and Azure role policies: how long an activation lasts, multifactor authentication, a reason, a ticket,
-  approval, how long an assignment may last, and who is notified. *(2.4.598)*
+  approval, how long an assignment may last, and who is notified.
   - **Nothing changes until you choose.** A setting without a choice is left exactly as it is in your tenant. It is
     listed as waiting for your choice — a note, not an error.
   - **A choice is not yet a change.** After you press **Save choices**, the next policy run plans the change and
@@ -545,17 +544,16 @@ deployment is a supported choice) and no credentials lying around.
     word **confirm**. The result still waits for a SuperAdmin's approval like any other choice.
   - **The recommendation is always shown.** The PIM Manager recommendation is the value of your policy template, so
     it is there from the first minute. **Keep current** can be chosen before your tenant's values are read, and
-    fills in by itself. *(2.4.599)*
+    fills in by itself.
   - **Microsoft default** can be chosen for Entra role policies and for PIM for Groups policies. For Azure role
     policies the button is shown switched off, with the reason. A single role or group can have its own choice.
-    *(2.4.604)*
   - **New advice asks again.** When a release changes a recommended value, that setting is asked again. Until you
     answer, your earlier choice stands and nothing changes.
   - **In an MSP setup (Pro), the managing tenant's choices are the default.** They travel to each managed tenant
     inside the signed set it already pulls. A managed tenant can choose differently per setting, and the change is
     approved by a SuperAdmin of *that* tenant.
   - **An existing installation gets no reminder mail for this step.** The Policies step stays open on the Get Started
-    page until every setting has a choice; a new installation gets the normal reminder. *(2.4.606)*
+    page until every setting has a choice; a new installation gets the normal reminder.
 - **A group's activation policy is fully managed and self-correcting.** ✅ 2026-06-16 — *(Changed 2026-10-12: this
   applies to the settings you chose a value for, and each correction waits for a SuperAdmin's approval — see the
   entry above.)* The
@@ -588,8 +586,7 @@ deployment is a supported choice) and no credentials lying around.
   many PIM policies at once, or weaken protection (for example remove MFA on activation),
   **nothing is changed**: the plan is held and shown for an administrator to approve under
   **Approvals**, which shows each held change set with its settings as current → new and its own **Approve**
-  button. The approval covers exactly that plan and nothing else. *(2.4.423: held changes stay listed at all times;
-  before that they could disappear from the page after Access reviews had been opened.)* The brake covers Entra role,
+  button. The approval covers exactly that plan and nothing else. Held changes stay listed at all times. The brake covers Entra role,
   Azure resource and PIM for Groups policies in every case. Ordinary drift is still corrected
   straight away, and applying a template to a brand-new group's untouched default policy is not
   treated as weakening, so creating new delegations does not trip it. *(Changed 2026-10-12: the brake no longer waits
@@ -641,7 +638,7 @@ deployment is a supported choice) and no credentials lying around.
   anything.
 - **Discovery and gaps — one page for what is in your tenant and not delegated yet (Pro).** ✅ 2026-10-12 — The
   separate Discovery page and the page for what is and is not delegated are now **one page, Discovery and gaps,
-  under the Access menu**. It replaces the Discovery inbox of 2026-09-27. *(2.4.604, 2.4.609)*
+  under the Access menu**. It replaces the Discovery inbox of 2026-09-27.
   - **What it lists.** Entra ID, Intune and Defender XDR roles, Power BI workspaces, Azure subscriptions and
     management groups, Administrative Units, PIM for Groups and, with a hybrid worker, Windows servers. Each item
     is covered or a **gap**. The page also shows groups that hold nothing and privileged groups PIM Manager does not
@@ -684,7 +681,7 @@ deployment is a supported choice) and no credentials lying around.
   shows an admin whose pass has lapsed. *(✅ 2026-08-21, verified against a live tenant.)*
   **Each admin gets one pass automatically.** When that pass expires, the system does **not**
   mint and mail a new one on its own. A new pass is issued only when an administrator clicks
-  **Reset TAP** in the Manager. *(2.4.416)*
+  **Reset TAP** in the Manager.
   - **It refuses to issue a pass it cannot deliver.** If the notification mailbox is not set up,
     the recipient address is missing, or email is switched off, the system **changes nothing** and
     says why. A sign-in credential that was created but never reached anyone is worse than the
@@ -695,7 +692,7 @@ deployment is a supported choice) and no credentials lying around.
     issuing a new credential on every cycle.
   - **The button tells you when it cannot work.** ✅ 2026-09-24 Without a notification mailbox, **Reset TAP** in
     Accounts & TAP is disabled and says why. A click always answers, even before the list under the grid has
-    finished loading. *(2.4.422, 2.4.423)*
+    finished loading.
   - **The code only ever appears in the email** — never in a web response, on screen, or in an
     audit record. Passes can also be re-issued on demand from the Manager by an administrator; the
     re-issue is queued, applied by the engine, and mailed to the account owner's address (below).
@@ -789,7 +786,7 @@ deployment is a supported choice) and no credentials lying around.
   flow, so nothing is granted until you confirm and the engine applies it. Guest invitation is
   cloud-only (you cannot invite a guest into on-prem Active Directory), and only an operator with
   the guest-invite delegation right (or a super-admin) may do it. If your tenant does not allow guest invitations,
-  the engine stops at once, changes nothing, and names the External collaboration setting to change. *(2.4.421)*
+  the engine stops at once, changes nothing, and names the External collaboration setting to change.
 - **Self-service consultant enable / disable.** ✅ 2026-06-15 A department or service owner can
   switch one of *their own* managed consultants on or off from the console — without a central
   request. The action is allowed only for the consultants that owner manages (a super-admin may
@@ -917,7 +914,9 @@ deployment is a supported choice) and no credentials lying around.
     checks.
   - **Break-glass** — whether an emergency override is active right now, who activated it, and when
     it expires.
-  - **Delegation by tier (L0–L5)** — how your delegation groups are spread across privilege levels.
+  - **Delegation by tier (L0–L9)** — how your delegation groups are spread across privilege levels
+    (Azure levels follow the management-group layer: Tenant Root Group L3, one level per layer below,
+    up to L9).
   - **Gaps, orphans & unmanaged** — groups that reach nothing, admins who reach nothing, and
     targets no group manages.
   - **Expiring access (next 14 days)** and **pending access reviews** — what needs renewing,
@@ -934,7 +933,7 @@ deployment is a supported choice) and no credentials lying around.
   change set). Warnings — gaps, validation warnings, corrected drift, policy settings waiting for a choice — are
   listed on their own page and put **no number and no dot** in the menu. Things that wait without blocking (an open
   Get Started step, changes waiting to be committed) show no number either; their page keeps its own count. On the
-  pages themselves a warning is amber, never red. *(2.4.595, 2.4.600, 2.4.605)*
+  pages themselves a warning is amber, never red.
 - **Get support from inside PIM Manager.** ✅ 2026-10-12 — A **Get support** button opens a support ticket at
   Invardia without leaving the product. It is on the Support page, on the log of a failed job, in the Overview
   attention list and on a Get Started step that is not done. The ticket is pre-filled with what you were looking
@@ -942,7 +941,7 @@ deployment is a supported choice) and no credentials lying around.
   see everything and can change it before it is sent.** Afterwards you get the ticket number, a link to the customer
   portal and a link for uploading files, and the page lists this environment's tickets. Admins and SuperAdmins can
   use it. It needs the install key that comes with a Pro or trial licence; without one the page shows the support
-  page and the contact address instead. *(2.4.597)*
+  page and the contact address instead.
 - **A missing engine permission is impossible to miss.** ✅ 2026-09-13 When the scheduled engine is
   refused a permission, the permission banner on Home turns **red** and names what was refused — it
   checks the engine's identity, not only the Manager's own.
@@ -1230,7 +1229,6 @@ deployment is a supported choice) and no credentials lying around.
   sits behind the panel. The list inside the panel scrolls inside the panel, and its buttons (Select all, Clear,
   Revoke) stay visible. On Delegation overview the panel can be **collapsed to one line** and expanded again; the
   page remembers it while the browser stays open. **Back to overview** is a clear button on both pages.
-  *(2.4.592, 2.4.603)*
 - **Onboarding panel.** ✅ 2026-06-15 — a dedicated **Onboarding** tab to **invite an external
   consultant as a guest** straight into the delegation model (it prepares the invitation and the
   account + group placement for you to review and commit) and to **enable or disable a managed
@@ -1288,7 +1286,7 @@ deployment is a supported choice) and no credentials lying around.
   and must draw its whole chain — up to the people, down to the roles and scopes — with every line joining the
   right boxes and sitting exactly on them. The focus toggle, Back to overview, search, the risk overlay, removing
   access, three screen widths, export and print are covered too, so a change that breaks the lines is caught
-  before it ships. *(2.4.442)*
+  before it ships.
 
 - **The Access map also maps — put people into groups and permissions into groups, from either end.**
   ✅ 2026-09-21 Selecting a person offers **+ Assign to a direct group**, so you can put them into a job
@@ -1750,7 +1748,7 @@ deployment is a supported choice) and no credentials lying around.
   (weekly, monthly, quarterly, half-yearly or yearly) and the engine creates a recurring access review of its
   members, reviewed by the group's owners. It needs one additional permission for the engine's identity, which
   Microsoft requires for creating reviews. Once granted, every group with a review cycle gets its review, and
-  reviewers are notified by mail. *(2.4.422)* **Retired in 2.4.453:** access reviews now run per department (below);
+  reviewers are notified by mail. **Retired:** access reviews now run per department (below);
   a group's review cycle no longer creates a review, and reviews created earlier stay in Entra with their history
   until you remove them there.
 - **Access reviews per department, run by PIM.** ✅ 2026-09-27 — Review rules on the Access reviews page set a
@@ -1764,7 +1762,7 @@ deployment is a supported choice) and no credentials lying around.
   account. A round nobody answers is chased with a weekly reminder, three times, then the alert recipients are told;
   the rule decides whether an unanswered person **keeps** access (the default) or gets an offboarding approval
   request. A SuperAdmin can decide any open person, every decision is in the audit trail, and a department without an
-  owner is reported to the alert recipients every day. *(2.4.447–2.4.454)*
+  owner is reported to the alert recipients every day.
 - **Ignore an admin account PIM should not manage.** ✅ 2026-10-01 — Admin accounts lists the privileged accounts that
   exist in the directory but not in PIM. Next to **Import**, **Ignore** (with an optional reason) leaves one out: it is
   no longer listed or counted, on Admin accounts or on Home, for every administrator. Nothing changes in the directory.
@@ -1776,15 +1774,15 @@ deployment is a supported choice) and no credentials lying around.
   account stays enabled and keeps its access; to take the access away, use offboarding. Admin accounts also lists the
   admin accounts that exist in the directory but not in PIM, each with **Import**: the definition is read from the
   account and a row is offered to keep each group membership it holds in groups PIM manages, all staged for Review &
-  commit. *(2.4.455–2.4.456)*
+  commit.
 - **Review decisions and reviewer changes are carried out by the engine.** ✅ 2026-09-25 — When a reviewer
   records Approve / Deny / Don't know, or an admin changes who reviews, the Manager records it and starts the
   engine, which applies it within moments and checks that it took effect. The Manager itself only reads, so it
   no longer needs permission to change access reviews, and a correctly set-up environment no longer refuses
-  these buttons. *(2.4.442)*
+  these buttons.
 - **A new admin's pass waits for the account.** ✅ 2026-09-24 — The temporary access pass and the account are
   handled by two jobs on their own schedules. If the pass job reaches a new admin first, it waits for the account
-  and issues the pass on its next run, instead of reporting a failure. *(2.4.421)*
+  and issues the pass on its next run, instead of reporting a failure.
 - **Emergency break-glass override.** ✅ 2026-06-14 — In a genuine emergency an authorized
   super-admin can temporarily lift the approval requirement on the affected privileged
   access, gated by a passphrase. The passphrase is verified against a secret held in your
@@ -1805,7 +1803,7 @@ deployment is a supported choice) and no credentials lying around.
   a chosen period, read the request's status, or cancel it. PIM enables the account, switches it off again when the
   period ends or the request is cancelled, and sending the same ticket twice never opens a second window. The caller
   signs in with its own Entra application, and only the applications you list are accepted. A system can also
-  *propose* a change, which waits for an administrator instead of being applied. *(2.4.486)*
+  *propose* a change, which waits for an administrator instead of being applied.
 
 - **An admin requests their own account back, for a set time (Pro).** ✅ 2026-10-03 — A disabled admin, typically a
   consultant who is only switched on when needed, opens the access request portal, signs in with a one-time PIN sent to
@@ -1823,11 +1821,11 @@ deployment is a supported choice) and no credentials lying around.
   who still works for them. A consultant the company reports as having left is **switched off at once**, and removing
   their access waits for an internal approver, so nothing is deleted on an outside party's word alone.
   *(Changed 2026-10-12: on the External companies page the button of an open company row is **Save**, and it saves
-  at once. After a save the list shows the saved values without reloading the page. 2.4.601)*
+  at once. After a save the list shows the saved values without reloading the page.)*
 - **A new admin's first mail reaches someone.** ✅ 2026-10-12 — The New admin account wizard asks where the admin's
   mail goes. Forwarding to the owner's everyday office address is **on by default**, and the address is required
   while it is on. So the Temporary Access Pass reaches the admin the first time, and does not have to be issued
-  again. The wizard is the same for internal and external admins. *(2.4.602)*
+  again. The wizard is the same for internal and external admins.
 ## 14. Scale / Performance
 - **Built for large tenants.** The solution never bulk-lists hundreds of thousands of users
   or groups. It looks users up on demand and queries only the PIM-managed groups by name
@@ -2012,7 +2010,7 @@ deployment is a supported choice) and no credentials lying around.
   labelled, never hidden, so everything stays discoverable. Changing the edition or any feature switch is
   restricted to a senior administrator and recorded in the audit trail.
 - **Your Pro licence covers every Pro feature of its edition -- also the ones added after it was issued.**
-  v2.4.539 (2026-10-09) — the licence names your **edition**, and the product decides which features that
+  (2026-10-09) — the licence names your **edition**, and the product decides which features that
   edition includes, so a new feature never needs a new licence. **Pro Enterprise** and **Pro Business** both
   include every single-tenant Pro capability, current and future; Pro Business differs only by the number of
   managed admin accounts it covers. **Pro MSP** adds the multi-tenant half (managing and managed tenants). A
@@ -2039,12 +2037,12 @@ deployment is a supported choice) and no credentials lying around.
   asks Invardia for it every 30 minutes and installs the signed file as soon as it is ready. Before installing, PIM checks
   the file itself: its signature, that it is Pro, and that it is for this tenant. A renewal Invardia has already approved
   arrives on the first try. The Licence page shows where the request stands. PIM sends only the tenant id, its version
-  and an installation id. The switch is off until you turn it on. *(2.4.489)*
+  and an installation id. The switch is off until you turn it on.
 - **A licence works only in its own tenant.** ✅ 2026-10-04 — Every licence names the tenant (or, for a managing tenant,
   the tenants) it was issued for, and a licence that names no tenant is not accepted anywhere. Where PIM runs as a
   managed identity, it takes the tenant from that identity's own sign-in, not from a setting. So a licence file copied
   to another installation does not unlock Pro there, even if the setting is edited to match. Proven live: a licence
-  for another tenant, with the setting changed to that tenant, was refused on the next run. *(2.4.488)*
+  for another tenant, with the setting changed to that tenant, was refused on the next run.
 - **From Community to Pro without reinstalling.** ✅ 2026-10-01 — register the Pro licence on a Community
   installation and the Pro features switch on at once; the edition shown, the features unlocked and the update
   path all follow the same check (a Pro licence for **this** tenant), so a licence for another tenant -- or one
@@ -2082,7 +2080,7 @@ deployment is a supported choice) and no credentials lying around.
 
 ### Licensing — what is free and what is paid
 
-✅ 2026-09-19 (v2.4.380). The line: **the community edition is free for a single tenant**; a **Pro licence** adds
+✅ 2026-09-19. The line: **the community edition is free for a single tenant**; a **Pro licence** adds
 advanced single-tenant capabilities and the whole multi-tenant half. The product **enforces** it — in the engine,
 the scheduled jobs and the portal, which always says why a capability is off. Free capabilities never depend on the
 licence state.
@@ -2119,3 +2117,383 @@ until it is, the page shows the same script run from the installation's own file
 ---
 *Items still in progress or planned are tracked internally in REQUIREMENTS.md and are not
 listed here. Only delivered, verified capabilities appear in this catalog.*
+
+---
+
+## Editions — what is free and what is paid
+
+The line is simple: **the community edition is free for a single tenant**, and a **Pro licence** adds a
+set of advanced single-tenant capabilities and the whole multi-tenant half. The product
+**enforces** this: a Pro capability without a valid licence is switched off in the engine, the scheduled
+jobs and the portal, and the portal says why. Everything in the free edition keeps working whatever the
+licence state.
+
+**Try Pro free for 60 days at [invardia.com/trial](https://invardia.com/trial/), or buy it at [invardia.com/order](https://invardia.com/order/).** Licensed customers get support at **[portal.invardia.com](https://portal.invardia.com/)** or [support@invardia.com](mailto:support@invardia.com); questions to [info@invardia.com](mailto:info@invardia.com). See [Getting a licence](#getting-a-licence).
+
+![Free vs Pro — the page a Pro menu item opens on a Community install](img/manager-free-vs-pro.png)
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="img/brand/pim-manager-community-reversed.svg">
+    <img src="img/brand/pim-manager-community.svg" alt="Invardia PIM Manager Community edition" width="380">
+  </picture>
+  &nbsp;&nbsp;&nbsp;
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="img/brand/pim-manager-pro-reversed.svg">
+    <img src="img/brand/pim-manager-pro.svg" alt="Invardia PIM Manager Pro edition" width="330">
+  </picture>
+</p>
+
+### Free — the community edition, for a single tenant
+
+Everything an organisation needs to govern its own tenant:
+
+- the full **portal** — model, review, commit, and see what changed;
+- **eligible, time-boxed access** with approval and a complete audit trail;
+- **Entra ID roles, PIM for Groups, administrative units and Azure RBAC**;
+- **Intune and Defender XDR** role delegation, including Defender custom roles;
+- **delegation by group** — permission groups and tiering, so access is granted by
+  membership rather than by hand;
+- **policy templates** — a Standard and a RequireApproval template per kind, renameable, with a default per kind;
+- **drift detection** — what exists in the directory versus what your model says;
+- **reports**, including standing access and expiring access, and the **current delegations** list;
+- **administrator accounts and first-time access passes**, issued and tracked;
+- **permission templates imported by script** (`Import-PimPermissionTemplate.ps1`) and tenant preparation from one
+  configuration file (`Invoke-PimTenantPrep.ps1`);
+- **updated with one command from the public release**;
+- **community support** (GitHub issues on the public repository).
+
+### Pro — licensed capabilities for a single tenant
+
+On top of the free edition, a Pro licence adds:
+
+- **Discovery and gaps** — what is and is not delegated through PIM across every workload, and the
+  scheduled jobs that find new roles, groups and resources;
+- the **other workload connectors** — Power BI, enterprise-app roles, Azure DevOps, Dataverse,
+  Business Central and Power Platform;
+- **revoking current delegations** from the portal (the list itself is free);
+- **access reviews** — campaigns with decisions recorded and enforced;
+- a **second approver** for sensitive changes (separation of duties);
+- **delegated administration** — portal users limited to a tier, level, service or scope;
+- the **tier-impact report** — everyone who can reach tier 0, including through nested groups;
+- the **evidence export** — who may hold what, who held it, and who approved;
+- the **access request API** — a ticketing system such as ServiceNow switches a disabled admin account on for a set
+  time, reads the request's status or cancels it, and PIM switches the account off again when the time is up;
+- **PIM for on-premises Active Directory** — admin accounts in on-premises AD, PIM groups mirrored to AD groups and
+  just-in-time AD membership for activated PIM groups, applied by a small hybrid worker.
+
+> ⚠️ Without a licence, the second approver is switched off too — sensitive changes then need one administrator,
+> not two. Install the licence before you rely on it.
+
+### Pro — the multi-tenant half
+
+For a service provider, or any organisation running more than one tenant:
+
+- **define once, target many** — target tenants by tag and by rollout wave rather
+  than editing each tenant;
+- **signed definition sets, verified on arrival** — a tenant applies a definition set
+  only if it verifies against a key that tenant trusts;
+- **see what reaches each tenant and what is held back**, per definition;
+- **per-customer rules** where one customer must differ;
+- **a read-only preview** of exactly what a tenant would receive, before it does;
+- **fleet conformance** — which tenants are on which version of which definition set;
+- **rollout waves** — reach one wave of customers before the rest;
+- **central accounts whose lifecycle flows down** to the tenants they belong to;
+- **removals remain the tenant's call** — the provider proposes, the tenant disposes;
+- **controlled release rings** for the software itself;
+- **the provider-hosted option** — the provider runs the portal and database for the
+  customer;
+- **support with an agreed response time**, at portal.invardia.com.
+
+A managing tenant or a managed tenant **requires** a Pro licence: without one, its publishing and
+downlink jobs refuse to run and the portal shows a red banner on its MSP pages.
+
+### How licensing works
+
+- **A licence is one signed file.** It names you, the edition, the capabilities, the tenants it covers and the
+  dates it runs between.
+- **Verified offline.** The environment checks the signature against a key built into the product — no
+  activation server, no call home, no internet needed.
+- **Bound to your tenants.** A licence that names tenants is valid only there.
+- **Gentle expiry.** After the end date a grace period keeps the licensed capabilities running with a warning;
+  only afterwards do they switch off. The free capabilities are never affected.
+- **Settings › Licence** in the portal shows the status, the customer, the valid-until date and the tenant it is
+  bound to, and which Pro capabilities are on.
+
+**Register a licence — in the portal.** **Settings › Licence › Register a licence**: pick the issued licence
+file, or paste its contents, and save. It is checked against the signing certificate **before** anything is
+stored, so a file that does not verify is refused, nothing is written and the page says so. Registering needs
+the senior-administrator role and is recorded in the audit trail.
+
+**Or from PowerShell**, as a member of the environment's SQL admin group: line 1 downloads the script from
+Invardia, line 2 runs it. You sign in through the browser – no command-line tool, no PowerShell module, no
+certificate and no secret. The licence is verified first, stored in the environment's database and read back
+(add `-WhatIf` to see what it would do without writing anything):
+
+```powershell
+Invoke-WebRequest https://invardia.com/support/pim/Set-PimLicense.ps1 -OutFile Set-PimLicense.ps1
+.\Set-PimLicense.ps1 -LicensePath <file> -SqlServer <server>.database.windows.net -TenantId <tenant> -UseSignedInAccount
+```
+
+[What does this script do?](https://invardia.com/docs/pim/scripts/Set-PimLicense/)
+
+The running portal and jobs pick it up on their next start.
+
+### Defaults in this release
+
+What an environment does before anyone changes a setting (the full table is in
+[DESIGN.md › Defaults](../DESIGN.md#19b-defaults--what-an-environment-does-before-anyone-changes-a-setting)):
+
+- **Always on (free):** the engine, the delegation map and Review & Save.
+- **Off until you switch them on (free):** email alerts, Teams / webhook alerts; scheduled jobs are switched on by the
+  hosted deploy.
+- **Switch themselves on when you have rows for them:** the Intune + Defender XDR connectors (free) and the
+  app-role / Azure DevOps / Dataverse / Business Central / Power Platform connectors (Pro).
+- **Pro, on when licensed:** Discovery and gaps, revoke, access review campaigns, delegated administration, the
+  tier-impact report and the evidence export. **Pro, off until switched on:** the second approver, discovery,
+  Power BI and MSP.
+- **Policy templates:** `Groups_Standard`, `EntraIDRoles_Standard` and `AzureRoles_Standard` are the defaults per kind.
+- **Policy settings:** no policy setting is changed until you chose a value for it (Microsoft default,
+  PIM Manager recommendation or Keep current), and every change that follows waits for a SuperAdmin's approval.
+- **Alert mail:** the drift mail goes out **monthly** (a dropdown on the Drift page changes it); the
+  same drift or job failure is mailed once and then at most daily; failure and drift alerts wait 45 minutes after a
+  change to your definitions so a rollout in progress is not reported as broken.
+- **Workload assignments:** groups are always created; a new Intune / Defender / Power BI / connector assignment waits
+  until that workload's prerequisites are green; Azure waits only when a check found a problem.
+- **Prerequisite results** are re-checked after 30 days (they keep working meanwhile); **licences** have a 30-day grace
+  period unless the licence says otherwise.
+
+### Getting a licence
+
+<p>
+  <a href="https://invardia.com/products/pim-manager/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="img/brand/invardia-reversed.svg">
+      <img src="img/brand/invardia.svg" alt="Invardia" width="240">
+    </picture>
+  </a>
+</p>
+
+PIM Manager Pro is sold and supported by **Invardia**.
+
+| | |
+|---|---|
+| **Product page** | [invardia.com/products/pim-manager](https://invardia.com/products/pim-manager/) |
+| **Prices** | [invardia.com/pricing](https://invardia.com/pricing/) |
+| **Try Pro free for 60 days** | [invardia.com/trial](https://invardia.com/trial/) |
+| **Buy** | [invardia.com/order](https://invardia.com/order/) — for the advanced single-tenant capabilities, or for the managing / managed tenant edition |
+| **Questions before you buy** | [info@invardia.com](mailto:info@invardia.com) or [invardia.com/contact](https://invardia.com/contact/) |
+| **Your licences and installations** | [portal.invardia.com](https://portal.invardia.com/) |
+
+You receive one signed licence file by mail and in the portal (and, for a Community installation, the Pro update feed
+used by [Upgrading to Pro](#upgrading-to-pro)). The terms that apply to this code are in **[LICENSE](LICENSE)**.
+
+A Pro or trial installation made through Invardia updates itself from the first night: the installation sets up the
+nightly update job with Invardia as its source on its update ring, and the install key is in place within minutes.
+Invardia support can run the installation for you with its own Support app, limited to your tenant and subscriptions;
+you name the PIM Manager administrators, and the Support app never becomes one.
+
+Invardia is a brand owned and operated by 2LINKIT, a company founded and owned by Morten Knudsen. All agreements,
+licences and invoices for SecurityInsight and PIM Manager are issued by 2LINKIT, Strandvejen 21A, 6000 Kolding, Denmark
+(VAT no. DK39208032).
+
+### Support
+
+| Edition | Where |
+|---|---|
+| **Community (free)** | Community support: GitHub issues on the public repository. |
+| **Pro and trial** | **[portal.invardia.com](https://portal.invardia.com/)** > Support, or mail **[support@invardia.com](mailto:support@invardia.com)** (every mail gets a ticket number) — with an agreed response time for licensed customers. |
+
+### What PIM sends to Invardia
+
+Two jobs talk to Invardia. Both are **on by default** in a new installation, and each has its own switch under
+**Settings > Features**, so you can turn either off at any time:
+
+- **Request the licence automatically** -- asks Invardia for this installation's licence when none is valid or yours ends
+  within 30 days, then installs the signed file only after checking it here. It sends the tenant, the version and an
+  installation id.
+- **Send status telemetry** -- every hour, which jobs ran and whether they succeeded, and every hour the version, edition
+  and licence state. Without a Pro install key it is **anonymous**: no tenant, no server name, no error text -- only a
+  failure class and rounded counts, under a random id of its own. With a Pro install key the reports also carry the error
+  text, with secrets removed, so support can see a failure before you call. Switch it off at any time.
+  With an install key the report also lists which guards hold something right now, and says when a
+  guard is clear again, so the status support sees follows your installation. It names the guard, its outcome, its
+  severity and since when — not the accounts, groups or policies that are held.
+
+Apart from these two jobs, a Pro installation pulls its updates from Invardia at the nightly update, and the **Get
+support** button sends a ticket — only when a person presses it, and only what that person saw and confirmed.
+---
+
+## Getting started — install the community edition
+
+The community edition installs **into your own Azure subscription** with one
+command. What you end up with:
+
+| Component | What it is | Why it is cheap |
+|---|---|---|
+| **PIM Manager** | an Azure Container App behind Microsoft Entra sign-in | scales to **zero** when nobody is using it |
+| **Engine** | one scheduled Container Apps job (every 5 minutes) | runs for seconds, then stops |
+| **Database** | Azure SQL (S0), passwordless (managed identities only) | the one always-on part |
+| **Registry + logs** | Azure Container Registry (Basic) and a Log Analytics workspace | builds the image from your clone |
+
+Everything is created in **one resource group** you name. To remove the
+installation, first run `.\tools\setup\Remove-PimContainerStack.ps1 -SubscriptionId
+<subscription-id> -ResourceGroup <rg> -Apply` — it removes the containers **and** the
+subscription-level role assignments their identities were given, which a
+resource-group delete alone leaves behind — then delete the resource group, and
+finally the two app registrations (the Manager sign-in and the deploy identity).
+
+### What you need
+
+- A **Windows** machine with **PowerShell 7**, run **as Administrator** (the deploy
+  identity's certificate is placed in the machine certificate store), plus
+  **git**. No Azure CLI and no PowerShell modules are needed: the scripts talk to
+  Azure and Microsoft Graph directly and sign you in through the browser.
+- An Azure **subscription** in the tenant you want to govern.
+- A sign-in that is **Global Administrator** (or Privileged Role Administrator +
+  Application Administrator) in the tenant **and Owner** of the subscription. It is
+  used once, in step 2, to create the deploy identity; everything after that runs
+  as that identity with a certificate.
+- The UPN of the person who should administer the Manager.
+
+### 1. Get the code
+
+```powershell
+git clone https://github.com/KnudsenMorten/PIM4EntraPS.git
+cd PIM4EntraPS
+```
+
+### 2. Create the deploy identity
+
+```powershell
+# A browser sign-in opens for the tenant; no Azure CLI login is needed.
+$id = .\tools\setup\New-PimDeployIdentity.ps1 -TenantId <tenant-id> -SubscriptionId <subscription-id> -GrantGraph -Apply
+```
+
+This creates an app registration with a **certificate** (never a secret), gives it
+Owner on the subscription, and — with `-GrantGraph` — the seven Microsoft Graph
+application permissions the deploy needs: to grant the Manager and engine their own
+permissions (`Directory.Read.All`, `AppRoleAssignment.ReadWrite.All`,
+`Application.Read.All`), to create the database administrators group
+(`Group.Create`, `GroupMember.ReadWrite.All`) and to consent the Manager's
+sign-in (`DelegatedPermissionGrant.ReadWrite.All`), and to give itself a short,
+time-bound Exchange Administrator role while it creates the notification mailbox
+(`RoleManagement.ReadWrite.Directory`). It proves the identity can sign in and read the directory
+before it returns. It is safe to run again.
+
+### 3. Deploy everything with one command
+
+```powershell
+.\tools\setup\Invoke-PimDeployAll.ps1 -Scenario S2 -Apply `
+    -TenantId <tenant-id> -SubscriptionId <subscription-id> -Location swedencentral `
+    -AdminAppId $id.AppId -AdminCertPem $id.PemPath `
+    -SqlAdminClientId $id.AppId -SqlAdminCertThumbprint $id.Thumbprint `
+    -PrereqToken <short-name> -PrereqVnetAddressPrefix 10.231.0.0/22 -PrereqSubnetAddressPrefix 10.231.0.0/23 `
+    -ResourceGroup rg-pim -VnetName vnet-pim -VnetResourceGroup rg-pim `
+    -AcrName <globally-unique-acr-name> -EnvName cae-pim -LogAnalyticsWorkspaceName law-pim `
+    -SqlServerFqdn <globally-unique-sql-name>.database.windows.net -SqlDatabase PimPlatform `
+    -SqlConnectionString 'Server=tcp:<globally-unique-sql-name>.database.windows.net,1433;Initial Catalog=PimPlatform;Encrypt=True;TrustServerCertificate=False;Connection Timeout=60;' `
+    -Exposure external -WorkerMode cron -ManagerMinReplicas 0 -AcrSku Basic `
+    -ManagerSuperAdmins <your-upn> -EasyAuthAllowedPrincipals <your-upn> -SkipAppReg
+```
+
+Run it **without `-Apply`** first to see the plan — nothing is changed. With
+`-Apply` it runs, in order and idempotently: hosting prerequisites (resource group,
+network, registry, logs, SQL server), the Manager image build from your clone, the
+Container Apps environment with the Manager and the engine job, database access
+and schema, the feature baseline, Entra sign-in in front of the Manager, and the
+Manager administrators. Any Azure region can be used; before anything is created
+the deploy checks that every service PIM Manager needs is available there and
+suggests the nearest region that has them.
+
+**Who may sign in is required.** `-EasyAuthAllowedPrincipals <upn-or-group>[,...]`
+admits exactly those accounts or groups (assignment required). A new Manager is
+never deployed open to the whole tenant: without this parameter (or
+`-EasyAuthAllowAllTenantUsers`, which admits every member account, never guests)
+the deploy refuses before it builds anything, and the plan says so.
+
+Optional additions:
+- `-Exposure internal` builds a **private-only** environment instead; decide this on
+  day one, because an environment's exposure cannot be changed after creation.
+- `-AzureRbacRoles 'User Access Administrator'` lets the engine manage Azure
+  resource PIM, not just read it.
+- `-MailSender <shared-mailbox-upn>` sends notification mail and access passes
+  (requires an Exchange Online plan).
+
+### 4. Sign in and verify
+
+The deploy prints the Manager's address. Open it, sign in with the administrator
+you named, and check that:
+
+- the header shows the **database (SQL) mode** and the version you deployed;
+- **Jobs › Engine logs & errors** shows the engine job's runs completing;
+- **Support › Run checks** is green for the database, Microsoft Graph and Azure.
+
+Then build your model in the Manager (or import an existing one) and commit — the
+engine applies it on its next run.
+
+### Keeping it up to date
+
+One command brings the installation to the latest release:
+
+```powershell
+.\tools\setup\Update-PimCommunity.ps1            # shows which version it would move to, and the plan
+.\tools\setup\Update-PimCommunity.ps1 -Apply     # updates
+```
+
+A successful step 3 saves the parameters it ran with (never a secret) on the machine
+that ran it, and prints where. The updater pulls the latest release from GitHub
+(fast-forward only; a clone with local changes is left alone and the update stops),
+then re-runs the deploy with those parameters. A re-run **is** the updater: every
+step that is already current is skipped, and only what changed is rebuilt and rolled.
+
+The database schema is upgraded additively before the new version rolls, and a
+failed health check rolls the Manager back to the previous version.
+
+**The re-run is what applies the new version's database changes.** The Manager and the
+engine have only the data rights they use (one database role each, no right to change the
+schema), so they never create or alter tables themselves. Every schema change of a release
+-- new tables, columns and views, the empty demo tables, and the database permissions -- is
+applied by the update's schema step, signed in as the deploy identity you set up in step 2.
+That identity is made a database administrator for the length of the run only and is
+removed again at the end. Until you run the update, a new version's objects are simply not
+there yet; nothing breaks, and the Manager says that the next update creates them. (The unattended
+in-cloud updater used by subscription environments needs a published release feed,
+so the community edition updates on your schedule, from GitHub.)
+
+### Upgrading to Pro
+
+Register the licence file you received under **Settings ▸ Licence** (pick the file or paste it). The Pro
+features switch on at once -- nothing is redeployed -- and a licence for another tenant, or one that is not a Pro
+licence, is refused without changing anything. The page then shows one last step: give the installation the
+in-cloud updater, so it receives Pro releases by itself through the customer ring, from the update feed you
+received with your licence:
+
+```powershell
+.\tools\setup\Upgrade-PimToPro.ps1 -SourceUrlTemplate '<the Pro update feed>'          # the plan
+.\tools\setup\Upgrade-PimToPro.ps1 -SourceUrlTemplate '<the Pro update feed>' -Apply   # upgrade
+```
+
+It re-runs the deploy with your saved parameters and installs the updater; nothing else changes. Until then
+`Update-PimCommunity.ps1` keeps working as before; after it, the installation updates itself -- stop using
+`Update-PimCommunity.ps1`.
+
+An environment that updates itself does so **only forward**: before it builds
+anything it compares the version its release ring approves with the highest version
+it is known to have reached, and refuses to move backward — naming both versions and
+the ring that proposed the older one. A deliberate rollback has to be switched on for
+that environment, and a run that uses it says so. And the release ring you configure
+is the one you get: it is carried through to the update job, an installation that
+names no ring is told which default it is getting, and the installation reads the
+ring back off the deployed job and fails if it did not take.
+
+### What it costs to run
+
+The on-demand shape is deliberately small: the Manager costs nothing while idle
+(scale to zero), and the five-minute engine job normally fits inside Azure Container
+Apps' monthly free grant. The recurring cost is essentially the **Azure SQL S0
+database** and the **Basic container registry** — a few tens of US dollars a month
+at list price, depending on region, plus Log Analytics ingestion. Check current
+prices for your region before you deploy.
+
+---
