@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.667 -- 2026-10-22
+
+- PIM Activator without Intune: Deploy-PimActivatorClient.ps1 (the install for PCs and servers without Intune) now takes the same settings as the Intune Remediation -- the auto-activation cap (e.g. at most 3 groups), the bulk confirm threshold and the group / Entra role / Azure role name filters -- and writes the limits for both the production and the test extension, so the two behave the same; the PIM Manager shows that command with the settings filled in, and the Edge for Business step tells admins that a new Edge profile gets the extension once it is signed in with the work account. The signed-request check (off by default) no longer fails to run when it is switched on (a closure could not see its own functions). Three outdated test checks were brought up to date.
+
 ## 2.4.666 -- 2026-10-22
 
 - Set-PimSigninFrontSqlState.ps1 (a private installation moved onto the sign-in front: the front's place in the database, run from inside the network) is now a published support script with its own documentation page, its line in the security pack and a -WhatIf preview, like every other published script.

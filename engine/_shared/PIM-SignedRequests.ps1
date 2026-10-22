@@ -764,7 +764,9 @@ function Test-PimEngineSignedRequest {
                     -ExpectedUser $user -AllowedRoles (Get-PimSignedRequestRolesFor -Position $position) -RoleMap $State.roleMap
             $State.tokenChecks[$ck] = $r
             return $r
-        }.GetNewClosure()
+        }   # PLAIN, never .GetNewClosure() (TEST-STALE-3 / Test-PimHybridWorker L19): a closure runs in a new module that
+            # cannot see this file's functions when the scheduler dot-sources it at script scope; $State resolves up the call
+            # stack (Get-PimSignedRequestCommitVerdict declares no $State of its own).
         $journal = ($Commit -and "$($Commit.CommitId)".Trim() -and "$($Commit.via)" -ne 'attribution')
         if ($journal) {
             $cid = "$($Commit.CommitId)".Trim()

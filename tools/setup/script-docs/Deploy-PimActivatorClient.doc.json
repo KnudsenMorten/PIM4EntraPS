@@ -16,7 +16,8 @@
     { "target": "this machine's registry", "action": "update", "object": "...\\ExtensionSettings: our entry (force_installed, runtime_allowed_hosts) merged into the organisation's dictionary -- their entries are kept", "why": "an extension update can never be silently disabled as a permission expansion", "undo": "-Uninstall (takes only our id out)" },
     { "target": "this machine's registry", "action": "update", "object": "...\\ExtensionInstallAllowlist: one row with our id -- only with -WriteAllowlist", "why": "for environments that block every extension ('*' blocklist)", "undo": "-Uninstall" },
     { "target": "this machine's registry", "action": "create", "object": "...\\3rdparty\\extensions\\<extension id>\\policy\\tenantCatalog (tenant name, tenant id, app client id, activation defaults; plus -AdditionalTenantsJson tenants)", "why": "the extension's 'Use centrally deployed' setup reads it", "undo": "-Uninstall (removes the whole 3rdparty\\extensions\\<extension id> key)" },
-    { "target": "this machine's registry", "action": "update", "object": "...\\3rdparty\\extensions\\<extension id>\\policy\\autoActivateMaxGroups (DWORD) -- only with -AutoActivateMaxGroups (-1 removes it)", "why": "per-device cap on auto-activation", "undo": "re-run with -AutoActivateMaxGroups -1, or -Uninstall" },
+    { "target": "this machine's registry", "action": "update", "object": "...\\3rdparty\\extensions\\<id>\\policy\\autoActivateMaxGroups (DWORD) for BOTH PIM Activator extensions (production and test) -- only with -AutoActivateMaxGroups (-1 removes it)", "why": "per-device cap on auto-activation, the same for production and test (as the Intune Remediation writes it)", "undo": "re-run with -AutoActivateMaxGroups -1" },
+    { "target": "this machine's registry", "action": "update", "object": "...\\3rdparty\\extensions\\<id>\\policy\\bulkActivateConfirmThreshold (DWORD) for BOTH PIM Activator extensions -- only with -BulkActivateConfirmThreshold (-1 removes it)", "why": "per-device 'click again to confirm' threshold for bulk activation (as the Intune Remediation writes it)", "undo": "re-run with -BulkActivateConfirmThreshold -1" },
     { "target": "this machine's registry", "action": "remove", "object": "with -Uninstall: our forcelist / allowlist / install-source rows, our ExtensionSettings entry and the 3rdparty\\extensions\\<extension id> key -- nothing of the organisation's", "why": "removes the PIM Activator from this machine (the browser uninstalls it on its next start)", "undo": "run the install again" }
   ],
   "parameters": [
@@ -30,6 +31,10 @@
     { "name": "DefaultJustification", "required": false, "default": "Change in infrastructure", "help": "The justification the extension pre-fills (overrides the catalog's)." },
     { "name": "DefaultDurationHours", "required": false, "default": 8, "help": "The activation length the extension pre-fills, 1-24 hours (overrides the catalog's)." },
     { "name": "AutoActivateMaxGroups", "required": false, "default": "not set (left alone)", "help": "Per-device cap on auto-activation: 0 = off, N = at most N groups, -1 = remove the cap." },
+    { "name": "BulkActivateConfirmThreshold", "required": false, "default": "not set (left alone)", "help": "Per-device 'click again to confirm' threshold for bulk activation: 1-100, -1 = remove it. Both extensions." },
+    { "name": "Prefix", "required": false, "default": "", "help": "With -TenantId and -ClientId: list only groups whose names start with this text." },
+    { "name": "EntraPrefix", "required": false, "default": "", "help": "With -TenantId and -ClientId: list only Entra roles whose names start with this text." },
+    { "name": "AzurePrefix", "required": false, "default": "", "help": "With -TenantId and -ClientId: list only Azure roles whose names start with this text." },
     { "name": "CatalogJsonPath", "required": false, "default": null, "help": "A tenant catalog JSON file to write instead of -TenantId/-ClientId or the live lookup." },
     { "name": "SkipTenantCatalog", "required": false, "default": false, "help": "Write only the install policies, no tenant catalog." },
     { "name": "WriteAllowlist", "required": false, "default": false, "help": "Also write ExtensionInstallAllowlist (only where every extension is blocked)." },
@@ -47,7 +52,7 @@
     "login.microsoftonline.com, graph.microsoft.com -- only for the live lookup",
     "knudsenmorten.github.io -- by the BROWSER afterwards, not by this script: the update manifest and the signed extension package (Chromium installs a package only when its signing key matches the extension id)"
   ],
-  "whatIf": "Reads this machine's policies and prints every registry value it would set or remove (forcelist slot, install source, ExtensionSettings entry, tenant catalog, per-device cap). Nothing is written. A preview of -Scope Machine runs without elevation.",
+  "whatIf": "Reads this machine's policies and prints every registry value it would set or remove (forcelist slot, install source, ExtensionSettings entry, tenant catalog, per-device limits). Nothing is written. A preview of -Scope Machine runs without elevation.",
   "undo": "Deploy-PimActivatorClient.ps1 -Uninstall (same -Scope, -Browser and -Channel): removes only this script's rows, entries and keys; the browser removes the extension on its next start.",
   "docUrl": "https://invardia.com/docs/pim/scripts/Deploy-PimActivatorClient/"
 }
