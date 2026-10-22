@@ -175,7 +175,17 @@ Both the extension id and the update URL are pre-baked into the script
 .\Deploy-PimActivatorClient.ps1 `
     -ExtensionId 'abcdefghijklmnopabcdefghijklmnop' `
     -UpdateUrl   'https://your-fork.example.com/updates.xml'
+
+# The same settings as the Intune Remediation (no Intune): at most 3 groups auto-activated, confirm bulk from 5,
+# only groups named PIM-* -- the command the PIM Manager's Operations > PIM Activator > Servers step shows:
+.\Deploy-PimActivatorClient.ps1 -TenantId <tenant id> -ClientId <app id> -TenantName 'Contoso' `
+    -AutoActivateMaxGroups 3 -BulkActivateConfirmThreshold 5 -Prefix 'PIM-'
 ```
+
+`-AutoActivateMaxGroups` and `-BulkActivateConfirmThreshold` are written for **both** PIM Activator extensions
+(production and test), exactly as the Intune Remediation does, so the two behave the same on that machine; -1 removes a
+limit, leaving the parameter out keeps what the machine has. `-Prefix` / `-EntraPrefix` / `-AzurePrefix` go into the
+tenant catalog built from `-TenantId` + `-ClientId`.
 
 Defaults wired into the script:
 

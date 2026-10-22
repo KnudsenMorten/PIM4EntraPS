@@ -17969,6 +17969,8 @@
     };
     body.innerHTML =
       '<div class="act-p">Edge for Business (the Edge management service) force-installs the extension. Microsoft offers <b>no API</b> for it, so this is a guide: the fields below are exactly what the Microsoft 365 admin center asks, and the two settings at the bottom can be pasted instead. Put <b>both</b> extensions in <b>one</b> policy when test users need both -- the service does not merge extension lists across policies.</div>' +
+      // owner 2026-10-21/22 ("Guide users only"): the service reaches only Edge profiles signed in with the work account
+      '<div class="act-p" id="actEdgeProfiles"><b>Tell your admins:</b> the extension arrives in every Edge profile that is <b>signed in with the work account</b>. A new profile without it? Sign in to that profile with the work account (profile picture &rarr; <i>Sign in</i>); PIM Activator installs by itself within a few minutes. Profiles with a personal account, InPrivate and Guest windows never run it.</div>' +
       // 100.90: deployment targeting (who the Edge policy is assigned to) -- worded so it is not read as sign-in.
       '<div class="act-h2">Deployment group (Edge for Business)</div>' +
       '<div class="act-dim">The group you assign the Edge policy to in the admin center (step 5 of the guide). It only decides who gets the extension installed -- not who may sign in to the PIM Activator.</div>' + actPicker('Released') + actPicker('Test') +
@@ -18016,7 +18018,7 @@
 
   function actStepServers(body, d) {
     body.innerHTML =
-      '<div class="act-p"><b>No Intune yet?</b> Onboard each admin PC (or server) with this script instead of the Intune remediation -- run it as administrator on the machine. It writes the install and the settings policies for Edge and Chrome, the same as Edge for Business + the Remediation do, for everyone who uses that machine.</div>' +
+      '<div class="act-p"><b>No Intune yet?</b> Onboard each admin PC (or server) with this script instead of the Intune remediation -- run it as administrator on the machine. It writes the install and the settings policies for Edge and Chrome, the same as Edge for Business + the Remediation do, for everyone who uses that machine -- with the same limits from step 2 (the auto-activation cap and the confirm threshold), for the production and the test extension alike.</div>' +
       '<div id="actServerOut" class="act-dim">Building&hellip;</div>' +
       '<div class="act-dim">What it needs: this one file, an elevated PowerShell. With the tenant and app filled in it signs in to nothing. Domain-joined estates without Intune: <code>Deploy-PimActivatorHybrid.ps1 -Target DomainGpo</code> writes the same through a GPO (' + pimScriptDocLink('Deploy-PimActivatorHybrid') + ').</div>';
     (async () => {

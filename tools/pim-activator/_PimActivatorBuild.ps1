@@ -341,9 +341,12 @@ function Get-PimActivatorCommands {
     $just = "$(& $get $Settings 'defaultJustification')".Trim(); if (-not $just) { $just = 'Change in infrastructure' }
     $hrs = "$(& $get $Settings 'defaultDurationHours')"; $hrs = if ($hrs -match '^\d+$' -and [int]$hrs -ge 1 -and [int]$hrs -le 24) { [int]$hrs } else { 8 }
     $br = @(@(& $get $Settings 'browsers') | Where-Object { "$_" -in @('Edge', 'Chrome') } | Select-Object -Unique); if (-not $br.Count) { $br = @('Edge', 'Chrome') }
-    $opt = ''
-    foreach ($k in 'Prefix', 'EntraPrefix', 'AzurePrefix') { $v = "$(& $get $Settings ($k.Substring(0,1).ToLower() + $k.Substring(1)))".Trim(); if ($v) { $opt += " -$k $(ConvertTo-PimActivatorPsLiteral $v)" } }
-    foreach ($k in 'AutoActivateMaxGroups', 'BulkActivateConfirmThreshold') { $v = "$(& $get $Settings ($k.Substring(0,1).ToLower() + $k.Substring(1)))".Trim(); if ($v -match '^\d+$') { $opt += " -$k $v" } }
+    # the filters ($pfx) and the limits ($lim): the Remediation AND the server install carry both (owner 2026-10-22: the
+    # install without Intune "must support the new features like max 3 activations")
+    $pfx = ''; $lim = ''
+    foreach ($k in 'Prefix', 'EntraPrefix', 'AzurePrefix') { $v = "$(& $get $Settings ($k.Substring(0,1).ToLower() + $k.Substring(1)))".Trim(); if ($v) { $pfx += " -$k $(ConvertTo-PimActivatorPsLiteral $v)" } }
+    foreach ($k in 'AutoActivateMaxGroups', 'BulkActivateConfirmThreshold') { $v = "$(& $get $Settings ($k.Substring(0,1).ToLower() + $k.Substring(1)))".Trim(); if ($v -match '^\d+$') { $lim += " -$k $v" } }
+    $opt = $pfx + $lim
     # the optional extra tenants (multi-tenant catalog), validated, compact, as one PowerShell literal
     $xt = @(ConvertTo-PimActivatorExtraTenants -Json "$(& $get $Settings 'additionalTenants')" -ExcludeTenantId $TenantId)
     $xtArg = if ($xt.Count) { ' -AdditionalTenantsJson ' + (ConvertTo-PimActivatorPsLiteral (ConvertTo-Json -InputObject $xt -Depth 4 -Compress)) } else { '' }
@@ -360,8 +363,8 @@ function Get-PimActivatorCommands {
         param($c)
         $cid = & $cidFor $c
         $line = ".\Deploy-PimActivatorClient.ps1 -Scope Machine -Browser Both -Channel $c"
-        if ($cid) { $line += " -TenantId $TenantId -ClientId $cid -TenantName $(ConvertTo-PimActivatorPsLiteral $name) -DefaultJustification $(ConvertTo-PimActivatorPsLiteral $just) -DefaultDurationHours $hrs$xtArg" }
-        $line
+        if ($cid) { $line += " -TenantId $TenantId -ClientId $cid -TenantName $(ConvertTo-PimActivatorPsLiteral $name) -DefaultJustification $(ConvertTo-PimActivatorPsLiteral $just) -DefaultDurationHours $hrs$pfx$xtArg" }
+        $line + $lim
     }
     [ordered]@{
         appProd = $appProd; appTest = $appTest

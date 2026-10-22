@@ -76,6 +76,20 @@
 
 .PARAMETER AutoActivateMaxGroups
     Per-device cap on auto-activation: 0 = off, N = at most N groups, -1 = remove the cap. Not passed = left alone.
+    Written for both PIM Activator extensions (production and test), the same as the Intune Remediation.
+
+.PARAMETER BulkActivateConfirmThreshold
+    Per-device "click again to confirm" threshold for bulk activation: 1-100, -1 = remove it. Not passed = left alone.
+    Both extensions, as above. A tenant's own bulkActivateConfirmThreshold in the catalog wins over it.
+
+.PARAMETER Prefix
+    With -TenantId and -ClientId: list only groups whose names start with this text (-EntraPrefix: Entra roles,
+    -AzurePrefix: Azure roles). The same settings as the Intune Remediation.
+
+.EXAMPLE
+    # Server without Intune, the same settings as the Intune Remediation (the command the PIM Manager page shows):
+    .\Deploy-PimActivatorClient.ps1 -Scope Machine -Browser Both -Channel Released -TenantId <tenant id> -ClientId <app id> `
+        -TenantName 'Contoso' -AutoActivateMaxGroups 3 -BulkActivateConfirmThreshold 5
 
 .EXAMPLE
     # Preview: every registry value it would set -- writes nothing:
@@ -111,7 +125,7 @@
         -DefaultDurationHours 4
 
 .EXAMPLE
-    # Server: cap auto-activation at 3 groups on THIS machine for the TEST extension, leaving the rest as is.
+    # Server: cap auto-activation at 3 groups on THIS machine (both extensions), leaving the rest as is.
     # 0 turns auto-activation off; -1 removes the cap again.
     .\Deploy-PimActivatorClient.ps1 -Channel Test -AutoActivateMaxGroups 3
 
@@ -214,9 +228,27 @@ param(
     # Per-DEVICE cap on auto-activation (2026-09-23): writes ...\3rdparty\extensions\<id>\policy\
     # autoActivateMaxGroups (REG_DWORD). 0 = auto-activation off on this machine; N = at most N groups;
     # -1 = remove the value (no limit). Not passed = the machine's current value is left alone.
+    # Written for BOTH PIM Activator extensions (production and test), like the Intune Remediation (owner 2026-10-22:
+    # "the script must support the new features like max 3 activations").
     [Parameter(ParameterSetName = 'Install')]
     [ValidateRange(-1, 100)]
     [int]$AutoActivateMaxGroups,
+
+    # Per-DEVICE "click again to confirm" threshold for bulk activation: ...\policy\bulkActivateConfirmThreshold
+    # (REG_DWORD). 1-100 = the threshold; -1 = remove the value (the extension's default). Not passed = left alone.
+    # A tenant's own bulkActivateConfirmThreshold in the catalog wins over it. Both extensions, as above.
+    [Parameter(ParameterSetName = 'Install')]
+    [ValidateRange(-1, 100)]
+    [int]$BulkActivateConfirmThreshold,
+
+    # Optional name filters for THIS tenant's catalog entry (with -TenantId / -ClientId), the same as the Remediation's:
+    # the popup lists only groups / Entra roles / Azure roles whose names start with them.
+    [Parameter(ParameterSetName = 'Install')]
+    [string]$Prefix = '',
+    [Parameter(ParameterSetName = 'Install')]
+    [string]$EntraPrefix = '',
+    [Parameter(ParameterSetName = 'Install')]
+    [string]$AzurePrefix = '',
 
     [Parameter(ParameterSetName = 'Install')]
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
@@ -258,6 +290,11 @@ if ($Channel -eq 'Test') {
     if (-not $PSBoundParameters.ContainsKey('ExtensionId')) { $ExtensionId = 'glldnbmjpdkjemcnficagdhgienfdpoo' }
     if (-not $PSBoundParameters.ContainsKey('UpdateUrl'))   { $UpdateUrl   = 'https://knudsenmorten.github.io/PIM4EntraPS/updates-test.xml' }
     Write-Host "Channel = TEST -> id $ExtensionId, $UpdateUrl" -ForegroundColor Yellow
+}
+# the limits go to BOTH PIM Activator extensions (production, test), whichever channel this run installs
+$limitExtensionIds = @('eheocihmlppcophaeakmdenhgcookkab', 'glldnbmjpdkjemcnficagdhgienfdpoo')
+if (("$Prefix$EntraPrefix$AzurePrefix".Trim()) -and -not ($TenantId -and $ClientId)) {
+    Write-Warning '-Prefix / -EntraPrefix / -AzurePrefix go into the tenant catalog built from -TenantId and -ClientId; without both they are not used.'
 }
 
 # Troubleshooting banner (script + solution + module + PS versions). Guarded:
@@ -547,6 +584,10 @@ foreach ($root in $policyRoots) {
                 defaultJustification = $(if ($PSBoundParameters.ContainsKey('DefaultJustification')) { $DefaultJustification } else { 'Change in infrastructure' })
                 defaultDurationHours = $(if ($PSBoundParameters.ContainsKey('DefaultDurationHours')) { $DefaultDurationHours } else { 8 })
             }
+            # the optional name filters, the same keys the Remediation's catalog carries
+            if ("$Prefix".Trim())      { $catalog | Add-Member -NotePropertyName prefix -NotePropertyValue "$Prefix".Trim() }
+            if ("$EntraPrefix".Trim()) { $catalog | Add-Member -NotePropertyName entraPrefix -NotePropertyValue "$EntraPrefix".Trim() }
+            if ("$AzurePrefix".Trim()) { $catalog | Add-Member -NotePropertyName azurePrefix -NotePropertyValue "$AzurePrefix".Trim() }
             # the defaults went into THIS tenant's entry; the extra tenants keep their own (no override below)
             $catFromParams = $true
             Write-Host ("    -> catalog source: -TenantId / -ClientId (tenant '{0}' / {1}  clientId {2})" -f $catalog.name, $catalog.tenantId, $catalog.clientId) -ForegroundColor Cyan
@@ -654,20 +695,31 @@ foreach ($root in $policyRoots) {
         }
     }
 
-    # Per-DEVICE auto-activate cap (2026-09-23). Written independently of the catalog, so it also applies
-    # with -SkipTenantCatalog. Not passed = this device's current value is left alone; 0..100 = written as
-    # REG_DWORD; -1 = removed (no limit).
+    # Per-DEVICE limits: the auto-activate cap (2026-09-23) and the bulk confirm threshold (2026-10-22). Written
+    # independently of the catalog, so they also apply with -SkipTenantCatalog, and for BOTH PIM Activator extensions
+    # (production and test behave the same -- the Intune Remediation does the same). Not passed = this device's current
+    # value is left alone; a number = written as REG_DWORD; -1 = removed.
+    $limits = @()
     if ($PSBoundParameters.ContainsKey('AutoActivateMaxGroups')) {
-        $amKey = Join-Path $root.Path "3rdparty\extensions\$ExtensionId\policy"
-        $amTxt = if ($AutoActivateMaxGroups -eq 0) { 'auto-activation OFF' } elseif ($AutoActivateMaxGroups -gt 0) { "at most $AutoActivateMaxGroups group(s)" } else { 'no limit' }
-        if (-not $PSCmdlet.ShouldProcess("$amKey\autoActivateMaxGroups", $(if ($AutoActivateMaxGroups -ge 0) { "Set registry value (DWord) = $AutoActivateMaxGroups ($amTxt)" } else { 'Remove registry value (no limit)' }))) {
-            Write-Host "    -> would $(if ($AutoActivateMaxGroups -ge 0) { "set autoActivateMaxGroups = $AutoActivateMaxGroups ($amTxt)" } else { 'remove autoActivateMaxGroups (no limit)' }) under 3rdparty\extensions\$ExtensionId\policy" -ForegroundColor Yellow
-        } elseif ($AutoActivateMaxGroups -ge 0) {
-            Set-Reg -Path $amKey -Name 'autoActivateMaxGroups' -Value $AutoActivateMaxGroups -Kind DWord
-            Write-Host "    -> autoActivateMaxGroups = $AutoActivateMaxGroups ($amTxt) under 3rdparty\extensions\$ExtensionId\policy" -ForegroundColor DarkGray
-        } else {
-            if (Test-Path -LiteralPath $amKey) { Remove-ItemProperty -LiteralPath $amKey -Name 'autoActivateMaxGroups' -ErrorAction SilentlyContinue -WhatIf:$false }
-            Write-Host "    -> autoActivateMaxGroups removed (no limit) under 3rdparty\extensions\$ExtensionId\policy" -ForegroundColor DarkGray
+        $limits += ,@('autoActivateMaxGroups', $AutoActivateMaxGroups, $(if ($AutoActivateMaxGroups -eq 0) { 'auto-activation OFF' } elseif ($AutoActivateMaxGroups -gt 0) { "at most $AutoActivateMaxGroups group(s)" } else { 'no limit' }))
+    }
+    if ($PSBoundParameters.ContainsKey('BulkActivateConfirmThreshold')) {
+        if ($BulkActivateConfirmThreshold -eq 0) { throw '-BulkActivateConfirmThreshold must be 1-100, or -1 to remove it.' }
+        $limits += ,@('bulkActivateConfirmThreshold', $BulkActivateConfirmThreshold, $(if ($BulkActivateConfirmThreshold -gt 0) { "confirm from $BulkActivateConfirmThreshold item(s)" } else { 'the extension default' }))
+    }
+    foreach ($limitId in @(@($ExtensionId) + $limitExtensionIds | Select-Object -Unique)) {
+        $lKey = Join-Path $root.Path "3rdparty\extensions\$limitId\policy"
+        foreach ($l in $limits) {
+            $lName = $l[0]; $lVal = [int]$l[1]; $lTxt = $l[2]
+            if (-not $PSCmdlet.ShouldProcess("$lKey\$lName", $(if ($lVal -ge 0) { "Set registry value (DWord) = $lVal ($lTxt)" } else { "Remove registry value ($lTxt)" }))) {
+                Write-Host "    -> would $(if ($lVal -ge 0) { "set $lName = $lVal ($lTxt)" } else { "remove $lName ($lTxt)" }) under 3rdparty\extensions\$limitId\policy" -ForegroundColor Yellow
+            } elseif ($lVal -ge 0) {
+                Set-Reg -Path $lKey -Name $lName -Value $lVal -Kind DWord
+                Write-Host "    -> $lName = $lVal ($lTxt) under 3rdparty\extensions\$limitId\policy" -ForegroundColor DarkGray
+            } else {
+                if (Test-Path -LiteralPath $lKey) { Remove-ItemProperty -LiteralPath $lKey -Name $lName -ErrorAction SilentlyContinue -WhatIf:$false }
+                Write-Host "    -> $lName removed ($lTxt) under 3rdparty\extensions\$limitId\policy" -ForegroundColor DarkGray
+            }
         }
     }
 }
