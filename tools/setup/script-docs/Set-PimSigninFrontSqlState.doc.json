@@ -1,0 +1,33 @@
+{
+  "script": "Set-PimSigninFrontSqlState.ps1",
+  "product": "pim",
+  "title": "Give the sign-in front its place in a private PIM database",
+  "purpose": "Gives the PIM Manager's sign-in front exactly what it needs in the PIM database: a database user for the front's managed identity, the schema 'signin' owned by it, and the right to create tables there. It never adds a role. -WhatIf shows it first; running it again changes nothing.",
+  "whenToRun": "Once, on a PRIVATE installation (the SQL server has no public endpoint) that is moved onto the sign-in front, when the move or support says the front's database place is missing. Run it from a machine inside the PIM network. Public installations get this from the installation by themselves.",
+  "standalone": true,
+  "sourcePath": "tools/setup/Set-PimSigninFrontSqlState.ps1",
+  "runAs": [
+    { "kind": "other", "name": "A database owner: a member of the SQL admin group (grp-pim-sql-admins) or the server's Microsoft Entra administrator", "scope": "the PIM database", "why": "Creates the database user and the schema and grants CREATE TABLE." },
+    { "kind": "other", "name": "browser sign-in (your own account; an Azure Arc / VM machine identity on this computer is ignored), or the Invardia Support app's session in this window", "scope": "the target tenant and subscription", "why": "No Azure CLI, no PowerShell module, no certificate, no secret on the command line." }
+  ],
+  "changes": [
+    { "target": "The PIM database", "action": "create", "object": "a database user for the sign-in front's managed identity, created from its client id (CREATE USER ... WITH SID, TYPE = E) when no user has that id", "permission": "", "scope": "the one PIM database (-SqlDatabase, default PimPlatform)", "why": "The front signs in to the database as its managed identity.", "undo": "DROP USER [<identity name>] in the PIM database (after DROP SCHEMA signin and its tables)." },
+    { "target": "The PIM database", "action": "create", "object": "the schema 'signin', owned by that user (or its owner moved to that user)", "permission": "owner of the schema signin only", "scope": "the schema signin", "why": "The front keeps its sessions, token cache and key ring in two tables it creates in this schema; it can read and change nothing else.", "undo": "Drop the tables in schema signin, then DROP SCHEMA signin." },
+    { "target": "The PIM database", "action": "grant", "object": "CREATE TABLE to that user", "permission": "CREATE TABLE (database level; usable only in the schema it owns)", "scope": "the PIM database", "why": "The front creates its two tables itself on first start.", "undo": "REVOKE CREATE TABLE FROM [<identity name>]." }
+  ],
+  "parameters": [
+    { "name": "TenantId", "required": true, "default": null, "help": "The tenant id. The sign-in is pinned to it." },
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The subscription of the PIM SQL server." },
+    { "name": "SqlServerName", "required": true, "default": null, "help": "The SQL server name or its FQDN (sql-x or sql-x.database.windows.net)." },
+    { "name": "SqlDatabase", "required": false, "default": "PimPlatform", "help": "The PIM database." },
+    { "name": "IdentityName", "required": true, "default": null, "help": "The sign-in front's managed identity name (the database user's name)." },
+    { "name": "IdentityClientId", "required": true, "default": null, "help": "The sign-in front's managed identity client id (the database user's SID)." }
+  ],
+  "readsOnly": [
+    "the database user with the identity's client id, the owner of schema signin and the CREATE TABLE grant, before and after the change"
+  ],
+  "network": [ "login.microsoftonline.com", "management.azure.com", "the PIM SQL server on port 1433 (from inside the PIM network)", "localhost (the browser returns the sign-in to a local port on this computer)" ],
+  "whatIf": "Signs in, connects, prints the user, the schema owner and the grant as they are now, and the statements it would run. Nothing is changed.",
+  "undo": "In the PIM database: drop the tables in schema signin, DROP SCHEMA signin, REVOKE CREATE TABLE and DROP USER for the front's identity. The front then cannot keep sign-ins.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Set-PimSigninFrontSqlState/"
+}
