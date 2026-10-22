@@ -35,7 +35,7 @@ $script:PimInstallVerifyLines = [ordered]@{
     'scheduler'          = 'Scheduled jobs on + the tick has run'
     'telemetry'          = 'Telemetry to Invardia delivered'
     'engine-size'        = 'Engine job sized for the tenant'
-    'easyauth'           = 'Sign-in (Easy Auth) + SuperAdmins allowed'
+    'easyauth'           = 'Sign-in (sign-in front or Easy Auth) + SuperAdmins allowed'
     'support-sql'        = 'Invardia support: database access'
     'sql-host-rule'      = 'SQL setup host rule closed'
     'msp-registered'     = 'Registered on the managing tenant'
@@ -143,6 +143,35 @@ function ConvertTo-PimAlertingValue {
         webhookUrl           = "$(Get-PimFactValue $cur 'webhookUrl')".Trim()
         webhookKind          = $kind
     }
+}
+
+function Get-PimManagerSignInRegistration {
+    <#
+      PURE. GUIDED-INSTALL-FRONT (2026-10-21): which sign-in protects the PIM Manager, and which application decides who may
+      sign in -- read from the RUNNING app (-App, the container app) and its auth config (-Auth = authConfigs/current .properties).
+        a 'signin-front' container            -> layer 'signin-front', appId = its SIGNIN_CLIENT_ID; missing[] = the front's
+                                                 state / access-token settings that are not set (SIGNIN_SQL_SERVER,
+                                                 SIGNIN_SQL_DATABASE, SIGNIN_KEYVAULT_KEY_ID, SIGNIN_UPSTREAM_SCOPE), and
+                                                 'Easy Auth still on' when both are on
+        else Easy Auth on                      -> layer 'easyauth', appId = its registration's client id
+        else                                   -> layer 'none' (the PIM Manager would answer without a sign-in)
+      @{ layer; appId; missing[]; reason }.
+    #>
+    param([AllowNull()][object]$App, [AllowNull()][object]$Auth)
+    $eaOn = $false; if ($Auth -and $Auth.platform -and $Auth.platform.PSObject.Properties['enabled']) { $eaOn = [bool]$Auth.platform.enabled }
+    $fr = $null
+    if ($App -and $App.properties -and $App.properties.template) { $fr = @(@($App.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -eq 'signin-front' }) | Select-Object -First 1 }
+    if ($fr) {
+        $envOf = { param($n) "$(@(@($fr.env) | Where-Object { $_ -and "$($_.name)" -eq $n } | ForEach-Object { $_.value }) | Select-Object -First 1)".Trim() }
+        $miss = @('SIGNIN_SQL_SERVER', 'SIGNIN_SQL_DATABASE', 'SIGNIN_KEYVAULT_KEY_ID', 'SIGNIN_UPSTREAM_SCOPE' | Where-Object { -not (& $envOf $_) })
+        if ($eaOn) { $miss += 'Easy Auth still on' }
+        return @{ layer = 'signin-front'; appId = (& $envOf 'SIGNIN_CLIENT_ID'); missing = @($miss); reason = $(if ($miss.Count) { "the sign-in front lacks: $($miss -join ', ')" } else { 'the sign-in front (state in the database, Key Vault-wrapped keys, access token)' }) }
+    }
+    if ($eaOn) {
+        $id = ''; if ($Auth.identityProviders -and $Auth.identityProviders.azureActiveDirectory -and $Auth.identityProviders.azureActiveDirectory.registration) { $id = "$($Auth.identityProviders.azureActiveDirectory.registration.clientId)".Trim() }
+        return @{ layer = 'easyauth'; appId = $id; missing = @(); reason = 'Easy Auth' }
+    }
+    return @{ layer = 'none'; appId = ''; missing = @(); reason = 'neither the sign-in front nor Easy Auth protects the PIM Manager -- it would answer without a sign-in' }
 }
 
 function Test-PimEasyAuthSignInAllowed {

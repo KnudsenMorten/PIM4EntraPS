@@ -447,16 +447,20 @@ function Get-PimEnvironmentReport {
                         $e.details['ingressExternal'] = [bool](Get-PimEnvReportField $ing 'external')
                         $e.details['allowInsecure'] = [bool](Get-PimEnvReportField $ing 'allowInsecure')
                         $e.details['ipRestrictions'] = @($ipr | ForEach-Object { "$(Get-PimEnvReportField $_ 'action') $(Get-PimEnvReportField $_ 'ipAddressRange') ($(Get-PimEnvReportField $_ 'name'))" })
-                        $e.details['image'] = "$(@(Get-PimEnvReportField (Get-PimEnvReportField $p 'template') 'containers')[0].image)"
+                        # never containers[0] -- behind the sign-in front that is the FRONT (0.25 CPU / 0.5Gi, signin-front:x):
+                        # the app's own container is the first one that is not 'signin-front' (2026-10-21, trial install 11a17b54)
+                        $erCons = @(Get-PimEnvReportField (Get-PimEnvReportField $p 'template') 'containers')
+                        $erMain = @($erCons | Where-Object { $_ -and "$(Get-PimEnvReportField $_ 'name')" -ne 'signin-front' })[0]; if (-not $erMain) { $erMain = $erCons[0] }
+                        $e.details['image'] = "$(Get-PimEnvReportField $erMain 'image')"
                         $e.details['environment'] = (("$(Get-PimEnvReportField $p 'managedEnvironmentId')" -split '/')[-1])
                         # PIM 100.114 / framework 12.15: each app's size; the MANAGER web app against the product size
                         # (4 CPU / 8 GiB, or the size the customer set -- Test-PimManagerAppUndersized, PIM-TenantSizing.ps1)
-                        $ares = Get-PimEnvReportField (@(Get-PimEnvReportField (Get-PimEnvReportField $p 'template') 'containers')[0]) 'resources'
+                        $ares = Get-PimEnvReportField $erMain 'resources'
                         $e.details['cpu'] = "$(Get-PimEnvReportField $ares 'cpu')"
                         $e.details['memory'] = "$(Get-PimEnvReportField $ares 'memory')"
                         $mgrName = "$(Get-PimEnvReportField $c 'containerAppName')".Trim(); if (-not $mgrName) { $mgrName = 'ca-pim-manager' }
                         if ("$($cd.name)" -ieq $mgrName -and "$($e.details['cpu'])".Trim() -and "$($e.details['memory'])".Trim()) {
-                            $mgU = Test-PimManagerAppUndersized -Cpu $e.details['cpu'] -Memory $e.details['memory'] -Tags (Get-PimEnvReportField $d 'tags') -AppName $cd.name
+                            $mgU = Test-PimManagerAppUndersized -Cpu $e.details['cpu'] -Memory $e.details['memory'] -Tags (Get-PimEnvReportField $d 'tags') -AppName $cd.name -App $d
                             $e.details['sizing'] = "$($mgU.reason)"
                             if ($mgU.undersized) { $e.details['sizingFix'] = "$($mgU.fix)" }
                         }

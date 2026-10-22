@@ -13,6 +13,18 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.664 -- 2026-10-22
+
+- A PIM Manager behind the sign-in front is no longer reported as undersized at the end of an installation and in the environment report -- the size check now leaves room for the sign-in front, as every resize already did, and the report reads the PIM Manager container instead of the sign-in front.
+
+## 2.4.663 -- 2026-10-21
+
+- A new installation no longer stops at building the PIM Manager image (Azure refused it: MissingApiVersionParameter) -- the registry API version is now fixed in the code, so it is sent whichever script loaded the build library first.
+
+## 2.4.662 -- 2026-10-21
+
+- A new installation from the website now ends on the shared sign-in front with its own Key Vault, its sign-in state in its own database and an access token to the PIM Manager -- never on Easy Auth. The installation can also run as the Invardia Support app: the administrators come from the answers and the database admin is a group, so no person has to sign in. Dates in the PIM Manager, the access-request portal and the Activator popup are shown as yyyy-MM-dd HH:mm in local time, never in the browser's US format.
+
 ## 2.4.661 -- 2026-10-21
 
 - Creating a direct group now asks Role-assignable after the permission groups are picked, and a group that reaches an Entra ID role is always role-assignable (No is no longer offered), so it can no longer fail at Commit. Telemetry no longer sends a token-like text in a cause detail, which made Invardia refuse the cause fields for 24 hours.

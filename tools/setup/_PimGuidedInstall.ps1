@@ -54,6 +54,12 @@ function Get-PimInstallStepCatalog { return [ordered]@{
     'verify'               = 'Deployment health check'
     'licence'              = 'Your licence'
     'support-app-access'   = 'Invardia support access'
+    # GUIDED-INSTALL-FRONT (2026-10-21): the PIM Manager ends on the sign-in front, never on Easy Auth
+    'signin-front-vault'   = 'Key Vault for the sign-in'
+    'signin-front-state'   = 'Sign-in state in the database'
+    'signin-front-app'     = 'Sign-in application scope'
+    'signin-front-image'   = 'Sign-in front image'
+    'signin-front'         = 'Sign-in front for the PIM Manager'
     'verify-install'       = 'End-of-install check'
     'health-check'         = 'Final health check'
     'completed'            = 'Installation complete'
@@ -243,6 +249,13 @@ function Test-PimInstallConfig {
         if ("$nn".Trim() -notmatch '^(?i)(true|false|1|0|yes|no|on|off)$') { $err.Add('newInstallNames must be true or false') }
         else { $c.newInstallNames = [bool]("$nn".Trim() -match '^(?i)(true|1|yes|on)$') }
     }
+    # GUIDED-INSTALL-FRONT (2026-10-21): the install's own Key Vault (the sign-in front's key). Optional, not a wizard question --
+    # the customer's own naming when given (hybrid naming rule: every name settable); else 'kv-pim-<token>'. Carried only when given.
+    $kvn = "$(& $get 'keyVaultName')".Trim()
+    if ($kvn) {
+        if ($kvn -notmatch '^[A-Za-z][A-Za-z0-9-]{1,22}[A-Za-z0-9]$' -or $kvn -match '--') { $err.Add("keyVaultName '$kvn' is not a valid Key Vault name (3-24 letters, digits and dashes; starts with a letter; no '--')") }
+        else { $c.keyVaultName = $kvn.ToLowerInvariant() }
+    }
     return @{ ok = ($err.Count -eq 0); errors = @($err); config = [pscustomobject]$c; enrollmentKey = $ek; enrollmentKeyIgnored = $ekIgnored }
 }
 
@@ -270,6 +283,8 @@ function Get-PimInstallNames {
         acr = "acrpim$t"; sqlServer = "sql-pim-$t"; sqlFqdn = "sql-pim-$t.database.windows.net"; sqlDatabase = 'PimPlatform'; managerApp = 'ca-pim-manager'
         # CR5 step 1 (PIM 100.149): the engine + updater jobs named HERE, once (today's names) -- the install never repeats a literal
         tickJob = 'ca-pim-tick'; updateJob = 'ca-pim-update'; newNames = $false
+        # GUIDED-INSTALL-FRONT: the install's own Key Vault -- the answers' keyVaultName, else kv-pim-<token> (globally unique)
+        keyVault = $(if ($Config.PSObject.Properties['keyVaultName'] -and "$($Config.keyVaultName)".Trim()) { "$($Config.keyVaultName)".Trim().ToLowerInvariant() } else { "kv-pim-$t" })
     }
     # CR5 step 2: config 'newInstallNames' (else $env:PIM_Setup_NewInstallNames) -> the new names (OFF by default). The
     # deploy still checks the resource group first (Azure cannot rename) and keeps what is there. A MANAGED tenant's install
@@ -398,6 +413,27 @@ function Test-PimInstallScopeAtOrAbove {
     return $s.StartsWith("$a/")
 }
 
+function Get-PimInstallAppRoleGaps {
+    <#
+      PURE. APP-IDENTITY INSTALL (owner via Invardia 2026-10-21): the Microsoft Graph APPLICATION permissions an application
+      that installs PIM Manager needs, minus what -AppRoles (its Graph token's 'roles') holds -- in this order. A broader
+      permission covers a narrower one: Group.ReadWrite.All -> Group.Create, GroupMember.ReadWrite.All;
+      Directory.ReadWrite.All -> Directory.Read.All.
+    #>
+    param([string[]]$AppRoles = @())
+    $have = @($AppRoles | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $need = [ordered]@{
+        'RoleManagement.ReadWrite.Directory'     = @('RoleManagement.ReadWrite.Directory')
+        'AppRoleAssignment.ReadWrite.All'        = @('AppRoleAssignment.ReadWrite.All')
+        'Application.ReadWrite.All'              = @('Application.ReadWrite.All')
+        'DelegatedPermissionGrant.ReadWrite.All' = @('DelegatedPermissionGrant.ReadWrite.All')
+        'Group.Create'                           = @('Group.Create', 'Group.ReadWrite.All', 'Directory.ReadWrite.All')
+        'GroupMember.ReadWrite.All'              = @('GroupMember.ReadWrite.All', 'Group.ReadWrite.All', 'Directory.ReadWrite.All')
+        'Directory.Read.All'                     = @('Directory.Read.All', 'Directory.ReadWrite.All')
+    }
+    return @($need.Keys | Where-Object { $k = $_; -not @($need[$k] | Where-Object { $have -contains $_ }).Count })
+}
+
 function Get-PimInstallRightsVerdict {
     <#
       PURE. Azure role names the signed-in user holds on the subscription (or above) + Entra directory role template ids.
@@ -409,7 +445,9 @@ function Get-PimInstallRightsVerdict {
     param([string[]]$AzureRoles = @(), [string[]]$DirectoryRoleTemplateIds = @(),
           # 2026-10-06 (install rehearsal): the Invardia Support app is an APPLICATION -- its Graph app permissions (the
           # token's 'roles') do what a person's directory role does. Empty for a person.
-          [string[]]$AppRoles = @())
+          [string[]]$AppRoles = @(),
+          # the signed-in principal is an APPLICATION (app-identity install): check -AppRoles, never a directory role
+          [switch]$IsApp)
     $r = @($AzureRoles | ForEach-Object { "$_".Trim().ToLowerInvariant() })
     $azureOk = ($r -contains 'owner') -or (($r -contains 'contributor') -and (($r -contains 'user access administrator') -or ($r -contains 'role based access control administrator')))
     $pra = 'e8611ab8-c189-46e8-94e1-60213ab1f814'; $ga = '62e90394-69f5-4237-9190-012177145e10'
@@ -418,9 +456,16 @@ function Get-PimInstallRightsVerdict {
     # The app permissions that carry the three directory steps: add the SQL admin group's members (a role-assignable
     # group) and grant the identities their Graph app roles, and consent the Manager's sign-in.
     $ar = @($AppRoles | ForEach-Object { "$_".Trim() })
-    if (-not $entraOk -and $ar.Count) {
-        $entraOk = (@('RoleManagement.ReadWrite.Directory', 'AppRoleAssignment.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All' | Where-Object { $ar -notcontains $_ }).Count -eq 0)
-        if (-not $entraOk) { return @{ azureOk = $azureOk; entraOk = $false; message = ((@($(if (-not $azureOk) { 'the Invardia Support app needs Owner (or Contributor + User Access Administrator) on the subscription' })) + @("the Invardia Support app lacks the Graph application permission(s) $((@('RoleManagement.ReadWrite.Directory', 'AppRoleAssignment.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All' | Where-Object { $ar -notcontains $_ })) -join ', ') -- the SQL admin group, the Graph permissions and the sign-in consent will end as hand-off actions")) | Where-Object { $_ }) -join '; ' } }
+    # APP-IDENTITY INSTALL (owner via Invardia 2026-10-21, Install-Invardia -ViaSupportApp): an application has no directory
+    # role to activate -- its Graph APPLICATION permissions are the check, and each missing one is named. Equivalents count
+    # (Group.ReadWrite.All covers Group.Create + GroupMember.ReadWrite.All; Directory.ReadWrite.All covers Directory.Read.All).
+    if ($IsApp -or ($ar.Count -and -not $entraOk)) {
+        $missing = @(Get-PimInstallAppRoleGaps -AppRoles $ar)
+        $entraOk = ($missing.Count -eq 0)
+        if (-not $entraOk -or -not $azureOk) {
+            return @{ azureOk = $azureOk; entraOk = $entraOk; missingAppRoles = @($missing); message = ((@($(if (-not $azureOk) { 'the Invardia Support app needs Owner (or Contributor + User Access Administrator) on the subscription' })) + @($(if ($missing.Count) { "the Invardia Support app lacks the Microsoft Graph application permission(s) $($missing -join ', ') -- the SQL admin group, the Graph permissions and the sign-in consent need them (they end as hand-off actions)" })) | Where-Object { $_ }) -join '; ') }
+        }
+        return @{ azureOk = $true; entraOk = $true; missingAppRoles = @(); message = '' }
     }
     $msg = @()
     if (-not $azureOk) { $msg += 'you need Owner (or Contributor + User Access Administrator) on the subscription' }

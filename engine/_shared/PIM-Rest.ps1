@@ -588,8 +588,12 @@ function Test-PimHandoffToken {
     PURE given -NowUtc. Check ONE handed-over access token (see the block above). Returns
     @{ ok; tenantMismatch; reason; expiresUtc; userName }. The reason never contains token text.
   #>
-  param([string]$Token, $ExpiresOn, [Parameter(Mandatory)][string]$TenantId, [datetime]$NowUtc = [datetime]::UtcNow, [int]$MinValidityMinutes = 5)
-  $no = { param($why, [bool]$mismatch = $false) @{ ok = $false; tenantMismatch = $mismatch; reason = $why; expiresUtc = $null; userName = '' } }
+  param([string]$Token, $ExpiresOn, [Parameter(Mandatory)][string]$TenantId, [datetime]$NowUtc = [datetime]::UtcNow, [int]$MinValidityMinutes = 5,
+        # APP-IDENTITY INSTALL (owner via Invardia 2026-10-21, Install-Invardia -ViaSupportApp): an APPLICATION token is
+        # accepted ONLY when its appid is exactly this app -- the Invardia Support app of the session open in this process.
+        # Empty (the default) = the user rule below, unchanged.
+        [string]$AllowedAppId = '')
+  $no = { param($why, [bool]$mismatch = $false) @{ ok = $false; tenantMismatch = $mismatch; reason = $why; expiresUtc = $null; userName = ''; kind = '' } }
   if (-not "$Token".Trim()) { return (& $no 'no access token was handed over') }
   $c = ConvertFrom-PimHandoffJwt -Token $Token
   if (-not $c) { return (& $no 'it is not a readable access token') }
@@ -598,8 +602,13 @@ function Test-PimHandoffToken {
   if (-not $tid) { return (& $no 'it names no tenant (no tid claim)') }
   if ($tid -ne $want) { return (& $no "it is for tenant $tid, not this installation's tenant $want" $true) }
   $idtyp = "$($c.idtyp)".Trim().ToLowerInvariant()
-  if ($idtyp -eq 'app' -or -not "$($c.scp)".Trim()) { return (& $no 'it is an application token, not a signed-in user''s (idtyp=app or no delegated scp claim)') }
-  if ("$($c.oid)".Trim() -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { return (& $no 'it carries no user object id (oid)') }
+  $kind = 'user'
+  if ($idtyp -eq 'app' -or -not "$($c.scp)".Trim()) {
+    $appid = "$(if ($c.appid) { $c.appid } else { $c.azp })".Trim().ToLowerInvariant()
+    if (-not "$AllowedAppId".Trim() -or $appid -ne "$AllowedAppId".Trim().ToLowerInvariant()) { return (& $no 'it is an application token, not a signed-in user''s (idtyp=app or no delegated scp claim)') }
+    $kind = 'app'
+  }
+  if ("$($c.oid)".Trim() -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { return (& $no $(if ($kind -eq 'app') { 'it carries no object id (oid) of the application' } else { 'it carries no user object id (oid)' })) }
   $given = ConvertTo-PimHandoffExpiry -Value $ExpiresOn
   $jwtExp = $null
   if ("$($c.exp)".Trim() -match '^\d+$') { try { $jwtExp = [DateTimeOffset]::FromUnixTimeSeconds([long]"$($c.exp)".Trim()).UtcDateTime } catch { $jwtExp = $null } }
@@ -608,8 +617,8 @@ function Test-PimHandoffToken {
   if ($eff -le $NowUtc.ToUniversalTime().AddMinutes($MinValidityMinutes)) {
     return (& $no ("it expires at {0:yyyy-MM-dd HH:mm} UTC -- less than {1} minutes left" -f $eff, $MinValidityMinutes))
   }
-  $upn = "$(if ($c.upn) { $c.upn } elseif ($c.unique_name) { $c.unique_name } elseif ($c.preferred_username) { $c.preferred_username } else { '' })".Trim()
-  return @{ ok = $true; tenantMismatch = $false; reason = ''; expiresUtc = $eff; userName = $upn }
+  $upn = if ($kind -eq 'app') { '' } else { "$(if ($c.upn) { $c.upn } elseif ($c.unique_name) { $c.unique_name } elseif ($c.preferred_username) { $c.preferred_username } else { '' })".Trim() }
+  return @{ ok = $true; tenantMismatch = $false; reason = ''; expiresUtc = $eff; userName = $upn; kind = $kind }
 }
 
 function Import-PimHandoffTokens {
@@ -620,8 +629,10 @@ function Import-PimHandoffTokens {
       fallback = audiences that were handed over but refused (each falls back to the browser sign-in when it is needed).
     The values in 'accepted' are the only place the tokens go; the caller keeps them in memory and never prints them.
   #>
-  param([string]$Json, [Parameter(Mandatory)][string]$TenantId, [datetime]$NowUtc = [datetime]::UtcNow)
-  $out = @{ present = $false; refused = $false; reason = ''; accepted = @{}; fallback = @() }
+  param([string]$Json, [Parameter(Mandatory)][string]$TenantId, [datetime]$NowUtc = [datetime]::UtcNow,
+        # APP-IDENTITY INSTALL: the Invardia Support app of the session open in this process ('' = users only, as before)
+        [string]$AllowedAppId = '')
+  $out = @{ present = $false; refused = $false; reason = ''; accepted = @{}; fallback = @(); kind = '' }
   if (-not "$Json".Trim()) { return $out }
   $out.present = $true
   $o = $null
@@ -636,12 +647,20 @@ function Import-PimHandoffTokens {
     $tok = ''; $exp = $null
     if ($v -is [string]) { $tok = $v }
     elseif ($null -ne $v -and $v.PSObject.Properties['access_token']) { $tok = "$($v.access_token)"; if ($v.PSObject.Properties['expires_on']) { $exp = $v.expires_on } }
-    $t = Test-PimHandoffToken -Token $tok -ExpiresOn $exp -TenantId $TenantId -NowUtc $NowUtc
+    $t = Test-PimHandoffToken -Token $tok -ExpiresOn $exp -TenantId $TenantId -NowUtc $NowUtc -AllowedAppId $AllowedAppId
     if ($t.tenantMismatch) { $mismatch += "$($p.Name): $($t.reason)" }
-    elseif ($t.ok) { $out.accepted[(Get-PimHandoffAudienceKey $p.Name)] = @{ token = $tok; expiresUtc = $t.expiresUtc; userName = $t.userName } }
+    elseif ($t.ok) { $out.accepted[(Get-PimHandoffAudienceKey $p.Name)] = @{ token = $tok; expiresUtc = $t.expiresUtc; userName = $t.userName; kind = $t.kind } }
     else { $out.fallback += @{ audience = "$($p.Name)"; reason = $t.reason } }
     $tok = $null
   }
+  # One principal per handoff: a person's tokens beside an application's would make "who did this" a guess -- refused whole.
+  $kinds = @($out.accepted.Values | ForEach-Object { "$($_.kind)" } | Select-Object -Unique)
+  if ($kinds.Count -gt 1) {
+    $out.refused = $true; $out.accepted = @{}
+    $out.reason = 'the sign-in handed over by Invardia''s installer is REFUSED as a whole -- it mixes a person''s tokens with an application''s; nothing from it is used.'
+    return $out
+  }
+  $out.kind = "$(@($kinds)[0])"
   if ($mismatch.Count) {
     $out.refused = $true
     $out.accepted = @{}

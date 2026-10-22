@@ -8143,7 +8143,7 @@
         if (g.nextSibling) right.insertBefore(gm, g.nextSibling); else right.appendChild(gm);
       }
       let until = '';
-      try { if (v.guardModeUntilUtc) until = new Date(v.guardModeUntilUtc).toLocaleString(); } catch (_) { until = ''; }
+      try { if (v.guardModeUntilUtc) until = fmtTime(v.guardModeUntilUtc); } catch (_) { until = ''; }   // BRAND-2.6/2.10: never the browser's US date
       gm.title = 'For 24 hours after the update' + (v.guardModeVersion ? ' to ' + v.guardModeVersion : '') +
         ' every guard with a number uses half its limit' + (until ? ', until ' + until : '') + '.' +
         '\nNothing else changes. Details, and ending it early, are on Operations > Guards.';
@@ -19794,7 +19794,7 @@
     const st = d.strict || null;
     let strictHtml = '';
     if (st && st.active) {
-      let until = ''; try { until = st.untilUtc ? new Date(st.untilUtc).toLocaleString() : ''; } catch (_) { until = ''; }
+      let until = ''; try { until = st.untilUtc ? fmtTime(st.untilUtc) : ''; } catch (_) { until = ''; }   // BRAND-2.6/2.10: never the browser's US date
       strictHtml = '<div id="gpStrict" class="gp-strict" style="background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:8px 10px;margin:0 0 10px;font-size:12.5px;">' +
         '<b>Guard mode: Strict</b> -- for ' + (Number(st.hours) || 24) + ' hours after the update' + (st.version ? ' to ' + escapeHtml(st.version) : '') +
         ' every guard with a number uses half its limit' + (until ? ', until ' + escapeHtml(until) : '') + '. Nothing else changes; approvals you give still apply.' +

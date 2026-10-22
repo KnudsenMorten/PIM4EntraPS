@@ -200,6 +200,15 @@ async function readMergedCatalog() {
   return merged
 }
 
+// Owner 2026-10-21 (BRAND-2.6 / 2.10): Danish formats, never US -- a date a person reads is 'yyyy-MM-dd HH:mm' in local
+// time, never toLocaleString (an English Edge prints "10/21/2026, 9:30 PM").
+function fmtLocalDateTime(v) {
+  const d = v instanceof Date ? v : new Date(v)
+  if (isNaN(d.getTime())) return String(v == null ? '' : v)
+  const p2 = (n) => String(n).padStart(2, '0')
+  return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes())
+}
+
 function isGuidStr(s) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s || '')
 }
@@ -3565,7 +3574,7 @@ function renderMyAccess(rows) {
 }
 
 function renderOneMyAccessRow(r) {
-  const fmt = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) : null
+  const fmt = (iso) => iso ? fmtLocalDateTime(iso) : null
   const start = fmt(r.startDateTime)
   const end   = fmt(r.endDateTime) || 'permanent'
   const times = start ? `${start} &rarr; ${end}` : `ends ${end}`
@@ -3914,7 +3923,7 @@ function render() {
     // thinking they were already activated.
     const endLabel = r.isActive
       ? (r.endDateTime
-          ? new Date(r.endDateTime).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
+          ? fmtLocalDateTime(r.endDateTime)
           : 'permanent')
       : null
     // Role preview: lines render once bulk pre-fetch attaches the data.
@@ -4629,7 +4638,7 @@ async function loaded(token) {
     const sample = (arr, nameFn, n = 8) =>
       (arr || []).slice(0, n).map(nameFn).filter(Boolean).join(', ') + ((arr || []).length > n ? ', ...' : '')
     const diag =
-      'Snapshot captured: ' + new Date().toLocaleString() + '\n' +
+      'Snapshot captured: ' + fmtLocalDateTime(new Date()) + '\n' +
       'principalId (filter): ' + (currentAccount && currentAccount.localAccountId || '(none)') + '\n' +
       'account: ' + (currentAccount && currentAccount.username || '(none)') + '\n' +
       'PIM-for-Groups eligible (raw): ' + (raw || []).length +

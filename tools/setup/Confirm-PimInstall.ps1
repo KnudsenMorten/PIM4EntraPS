@@ -392,7 +392,7 @@ function Get-CvFact([string]$Id) {
                 try {
                     $ma = Get-CvArm (Get-CvResId 'Microsoft.App/containerApps' $ManagerApp)
                     $mres = @(@($ma.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0].resources   # the Manager, never [0] = the sign-in front
-                    $mu = Test-PimManagerAppUndersized -Cpu "$($mres.cpu)" -Memory "$($mres.memory)" -Tags $ma.tags -AppName $ManagerApp
+                    $mu = Test-PimManagerAppUndersized -Cpu "$($mres.cpu)" -Memory "$($mres.memory)" -Tags $ma.tags -AppName $ManagerApp -App $ma
                     $sizeFact['manager'] = @{ readable = [bool]$mu.readable; undersized = [bool]$mu.undersized; reason = "$($mu.reason)"; fix = "$($mu.fix)" }
                 } catch { $sizeFact['manager'] = @{ readable = $false; undersized = $false; reason = "the Manager web app's size was not read: $((("$($_.Exception.Message)") -split "`n")[0])"; fix = '' } }
                 try {
@@ -407,9 +407,14 @@ function Get-CvFact([string]$Id) {
             'easyauth' {
                 # ARM's authConfigs/current carries platform / identityProviders under .properties (az flattened them)
                 $auth = (Get-CvArm (Get-CvResId 'Microsoft.App/containerApps' $ManagerApp 'authConfigs/current')).properties
-                $enabled = [bool]$auth.platform.enabled
-                $appId = "$($auth.identityProviders.azureActiveDirectory.registration.clientId)".Trim()
-                if (-not $enabled -or -not $appId) { return @{ readable = $true; ok = $false; reason = $(if (-not $enabled) { 'Easy Auth is NOT enabled on the PIM Manager' } else { 'Easy Auth has no Microsoft Entra registration' }) } }
+                # GUIDED-INSTALL-FRONT (2026-10-21): a PIM Manager behind the sign-in front has Easy Auth OFF by design -- the
+                # front's own registration (SIGNIN_CLIENT_ID) then decides who may sign in, and its settings must be complete.
+                $caApp = Get-CvArm (Get-CvResId 'Microsoft.App/containerApps' $ManagerApp)
+                $reg = Get-PimManagerSignInRegistration -App $caApp -Auth $auth
+                if ($reg.layer -eq 'none') { return @{ readable = $true; ok = $false; reason = "$($reg.reason)" } }
+                if (@($reg.missing).Count) { return @{ readable = $true; ok = $false; reason = "$($reg.reason)" } }
+                $appId = "$($reg.appId)".Trim()
+                if (-not $appId) { return @{ readable = $true; ok = $false; reason = $(if ($reg.layer -eq 'signin-front') { 'the sign-in front names no Microsoft Entra application (SIGNIN_CLIENT_ID)' } else { 'Easy Auth has no Microsoft Entra registration' }) } }
                 $sp = @(Invoke-CvGraph "servicePrincipals?`$filter=appId eq '$appId'&`$select=id,appRoleAssignmentRequired,displayName" -All) | Select-Object -First 1
                 if (-not $sp) { return @{ readable = $true; ok = $false; reason = "the Easy Auth application $appId has no service principal in this tenant" } }
                 $assigned = @(Invoke-CvGraph "servicePrincipals/$($sp.id)/appRoleAssignedTo?`$select=principalId" -All | ForEach-Object { "$($_.principalId)" })
@@ -421,7 +426,7 @@ function Get-CvFact([string]$Id) {
                     $sa += @{ upn = $u; id = $id; groupIds = $groups }
                 }
                 $v = Test-PimEasyAuthSignInAllowed -Enabled $true -AssignmentRequired ([bool]$sp.appRoleAssignmentRequired) -AssignedPrincipalIds $assigned -SuperAdmins $sa
-                return @{ readable = $true; ok = $v.ok; reason = $v.reason; appName = "$($sp.displayName)" }
+                return @{ readable = $true; ok = $v.ok; reason = "$(if ($reg.layer -eq 'signin-front') { 'sign-in front: ' } else { 'Easy Auth: ' })$($v.reason)"; appName = "$($sp.displayName)"; layer = "$($reg.layer)" }
             }
             'support-sql' {
                 # PIM 100.116 (framework 4.1b item 3). Evidence 1: a database user with the Support app's id (the client id

@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Build a container image IN a registry, over plain ARM REST -- no `az` CLI, no Docker,
@@ -33,7 +33,12 @@
 # listBuildSourceUploadUrl / scheduleRun / runs live under the preview tasks API and have been
 # stable there for years; pinned rather than floated, for the same reason PIM-ArmContainerApps
 # pins its own.
-$script:PimAcrTasksApi = '2019-06-01-preview'
+$script:PimAcrTasksApi = '2019-06-01-preview'   # kept for readers; every call uses Get-PimAcrTasksApi
+# 2026-10-21 (trial install 11a17b54, HTTP 400 MissingApiVersionParameter): Install-PimManager loads this file at ITS scope,
+# so the deploy's child script Build-PimManagerImage skipped loading it (the functions already existed) and $script:PimAcrTasksApi
+# was EMPTY in that script's scope -- $script: is the CALLER's script scope, not this file's. A literal in a function is the
+# same in every scope.
+function Get-PimAcrTasksApi { return '2019-06-01-preview' }
 
 function Get-PimAcrRegistryPath {
     param(
@@ -55,7 +60,7 @@ function Get-PimAcrBuildUploadSlot {
         [Parameter(Mandatory)][string]$RegistryName
     )
     $p = (Get-PimAcrRegistryPath -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -RegistryName $RegistryName) + '/listBuildSourceUploadUrl'
-    $r = Invoke-PimArm -Method POST -Path $p -ApiVersion $script:PimAcrTasksApi
+    $r = Invoke-PimArm -Method POST -Path $p -ApiVersion (Get-PimAcrTasksApi)
     if (-not $r -or -not "$($r.uploadUrl)".Trim()) {
         throw "Get-PimAcrBuildUploadSlot: registry '$RegistryName' returned no upload URL."
     }
@@ -126,7 +131,7 @@ function Start-PimAcrDockerBuild {
     if ("$AgentPoolName".Trim()) { $body['agentPoolName'] = "$AgentPoolName".Trim() }
 
     $p = (Get-PimAcrRegistryPath -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -RegistryName $RegistryName) + '/scheduleRun'
-    $run = Invoke-PimArm -Method POST -Path $p -Body $body -ApiVersion $script:PimAcrTasksApi
+    $run = Invoke-PimArm -Method POST -Path $p -Body $body -ApiVersion (Get-PimAcrTasksApi)
     if (-not $run -or -not "$($run.properties.runId)$($run.runId)".Trim()) {
         throw "Start-PimAcrDockerBuild: registry '$RegistryName' accepted no run for $($ImageNames -join ', ')."
     }
@@ -167,7 +172,7 @@ function Wait-PimAcrRun {
     $status   = 'Unknown'
     while ((Get-Date) -lt $deadline) {
         $r = $null
-        try { $r = Invoke-PimArm -Method GET -Path $base -ApiVersion $script:PimAcrTasksApi } catch { }
+        try { $r = Invoke-PimArm -Method GET -Path $base -ApiVersion (Get-PimAcrTasksApi) } catch { }
         if ($r) {
             $s = "$($r.properties.status)".Trim()
             if (-not $s) { $s = "$($r.status)".Trim() }

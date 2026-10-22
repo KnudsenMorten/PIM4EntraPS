@@ -108,7 +108,10 @@
     return j || {};
   }
   function say(id, text, cls) { const m = $(id); m.className = 'msg ' + (cls || ''); m.textContent = text; }
-  const when = v => { if (!v) return ''; const d = new Date(v); return isNaN(d) ? esc(v) : d.toLocaleString(); };
+  // BRAND-2.6 / 2.10 (owner 2026-10-21: Danish formats, never US): 'yyyy-MM-dd HH:mm' in the browser's local time, never
+  // toLocaleString (an English browser prints "10/21/2026, 9:30 PM").
+  const p2 = n => String(n).padStart(2, '0');
+  const when = v => { if (!v) return ''; const d = new Date(v); return isNaN(d) ? esc(v) : d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes()); };
 
   // the company name (pim.Settings CompanyName) and the support address (SupportEmail) -- empty = not shown
   async function info() {
