@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.665 -- 2026-10-22
+
+- A one-off network error on an Azure or Graph call (for example 'Cannot assign requested address') no longer fails the nightly update or a job -- the call is tried again up to three times (5, 10, 20 s); a request that may already have run is never sent twice.
+
 ## 2.4.664 -- 2026-10-22
 
 - A PIM Manager behind the sign-in front is no longer reported as undersized at the end of an installation and in the environment report -- the size check now leaves room for the sign-in front, as every resize already did, and the report reads the PIM Manager container instead of the sign-in front.

@@ -1014,6 +1014,31 @@ function Test-PimRestTimeoutError {
   }
   return ("$($ErrorRecord)" -match 'HttpClient\.Timeout|operation has timed out|request was canceled')
 }
+function Test-PimRestNetworkError {
+  # UPDATER-ARM-RETRY (2026-10-21, internal): a call that failed BELOW HTTP (no status code) on a one-off network fault --
+  # "Cannot assign requested address" (no free local port), connection refused / reset, a name that did not resolve. It failed
+  # the updater's PATCH of ca-pim-manager once and nothing retried. Connect-level faults never reached the service, so any method
+  # is safe to send again; a reset AFTER the request was sent is retried only for an idempotent method (never a POST).
+  param($ErrorRecord, [string]$Method = 'GET')
+  $connect = 'Cannot assign requested address|No connection could be made|actively refused|Connection refused|No such host is known|Name or service not known|nodename nor servname|Temporary failure in name resolution|Network is unreachable|NameResolutionFailure|ConnectFailure'
+  $reset   = 'forcibly closed|Connection reset|connection was closed|transport connection|Broken pipe|An error occurred while sending the request|ReceiveFailure|SendFailure'
+  $text = New-Object System.Collections.Generic.List[string]
+  $e = $null; try { $e = $ErrorRecord.Exception } catch { }
+  $isSock = $false
+  while ($e) {
+    $text.Add("$($e.Message)")
+    if ($e -is [System.Net.Sockets.SocketException]) { $isSock = $true }
+    if ($e -is [System.Net.WebException]) { $text.Add("$($e.Status)") }
+    $e = $e.InnerException
+  }
+  $text.Add("$ErrorRecord")
+  $all = $text -join ' | '
+  if ($all -match $connect) { return $true }
+  $idem = @('GET','HEAD','PUT','PATCH','DELETE','OPTIONS') -contains "$Method".ToUpperInvariant()
+  if ($idem -and ($isSock -or $all -match $reset)) { return $true }
+  return $false
+}
+function Get-PimRestNetworkRetryMax { <# PURE. Extra tries for a network fault (a literal). #> return 3 }
 # §33.0 MORE TELEMETRY round 2 (owner "add relevant. i want data"): RETRIES PER HTTP CODE. Every 429 / 5xx retry of a GRAPH
 # call (Invoke-PimRest's backoff loop and the $batch sub-requests) is counted in this process ($global: -- a dot-sourced
 # function's $script: follows the caller's scope); the scheduler persists the counts after every job run into hourly
@@ -1139,7 +1164,7 @@ function Invoke-PimRest {
   $agg = New-Object System.Collections.Generic.List[object]
   $next = $Url
   while ($next) {
-    $attempt = 0
+    $attempt = 0; $netTry = 0
     while ($true) {
       try {
         # 🔴 2026-10-02: NO -TimeoutSec = wait FOREVER on pwsh 7. One Graph call that never answered froze the hybrid worker's
@@ -1165,6 +1190,10 @@ function Invoke-PimRest {
         $isTimeout = (-not $code) -and (Test-PimRestTimeoutError -ErrorRecord $_)
         if ($isTimeout -and $attempt -lt 1) { $attempt++; continue }
         if ($isTimeout) { throw "$Method $next -> timed out after $(Get-PimRestTimeoutSec) s (twice) -- the service did not answer" }
+        # UPDATER-ARM-RETRY: a one-off network fault (no HTTP status) is tried again with a short backoff (5, 10, 20 s)
+        if ((-not $code) -and (Test-PimRestNetworkError -ErrorRecord $_ -Method $Method)) {
+          if ($netTry -lt (Get-PimRestNetworkRetryMax)) { Start-Sleep -Seconds ([int](5 * [Math]::Pow(2, $netTry))); $netTry++; continue }
+        }
         if (($code -eq 429 -or $code -ge 500 -or $isReplDelay) -and $attempt -lt $MaxRetry) {
           if ($code -eq 429 -or $code -ge 500) { Add-PimRestRetryCount -Code ([int]$code) -Resource $Resource }   # §33.0 round 2
           $wait = [Math]::Min(60, [Math]::Pow(2, $attempt + 1))
