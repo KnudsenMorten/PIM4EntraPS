@@ -109,6 +109,16 @@ $script:PimFailureRules = @(
        retryable = $true; severity = 'transient'
        fixes = @() }
 
+    # UPDATER-ACR-PUSH-RETRY (2026-10-23, SUP-2026-00290, filed as pim-gen-0001): the build succeeded and the push to the
+    # install's own registry failed ("connection refused"). The updater retries once; a second failure says so in these words.
+    @{ code = 'UPDATE-REGISTRY-PUSH-FAILED'
+       match = { param($m, $row) $m -match '(?i)the push to the registry failed' }
+       title = 'The new version was built, but the registry did not accept it'
+       cause = 'The update built the new version of PIM Manager in this installation''s container registry, but the registry refused or dropped the upload of the finished image (a network fault or a temporary error on Azure''s side). The updater tried a second time and that failed too. Nothing was rolled: PIM Manager keeps running on its current version.'
+       remedy = 'Nothing to do at first: the next update run builds again. If the same failure is reported on several runs in a row, contact Invardia support.'
+       retryable = $true; severity = 'transient'
+       fixes = @() }
+
     @{ code = 'UPDATE-NO-LICENCE'
        match = { param($m, $row) $m -match '(?i)no licence is installed -- Pro updates need' }
        title = 'No Pro licence is installed, so the Pro update was not fetched'
@@ -727,6 +737,7 @@ function Get-PimFailureCodeTable {
         ,@('AD-CLEANUP-RIGHT-MISSING',         'pim-ad-0101',    'permission',        'customer', '',      '2.4.638')
         ,@('UPDATE-ROLL-INCOMPLETE',           'pim-upd-0101',   'platform-timeout',  'nobody',   '',      '2.4.652')
         ,@('UPDATE-NO-LICENCE',                'pim-upd-0102',   'customer-config',   'support',  '',      '2.4.652')
+        ,@('UPDATE-REGISTRY-PUSH-FAILED',      'pim-upd-0103',   'upstream-error',    'nobody',   '',      '2.4.671')
         # the generic code of each CauseClass (framework 8.16: "an unknown failure gets the generic code of its CauseClass")
         ,@('UNCLASSIFIED',                     'pim-gen-0001',   'unclassified',      'product',  '',      '2.4.638')
         ,@('GENERIC:customer-config',          'pim-gen-0002',   'customer-config',   'customer', '',      '2.4.638')

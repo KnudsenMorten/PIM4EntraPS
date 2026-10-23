@@ -27,10 +27,12 @@
 
     TIER OF A REACHED TARGET -- a synthetic target node (entra-role / au-role /
     az-resource) carries no tier of its own, so its effective tier is inherited
-    from the GROUPS that grant it (a role/permission group carries Level/Tier
-    via the naming convention -- L0..L5 / T0..T5). The tier of a PATH = the most
-    privileged (lowest number) group level on that path, OR the target node's own
-    tier marker when it carries one. This mirrors how the Delegation Map risk
+    from the GROUPS that grant it (a role/permission group carries a LEVEL and a
+    TIER via the naming convention -- L0..L9 and T0..T2, two separate markers).
+    The tier of a PATH = the most privileged (lowest number) group TIER on that
+    path, OR the target node's own tier marker when it carries one. The LEVEL is
+    reported separately (highestLevel / highestLevelLabel) for display and never
+    decides who is flagged (TIER-IMPACT-LEVEL-VS-TIER, owner 2026-10-23). This mirrors how the Delegation Map risk
     overlay (PIM-MapRisk.ps1) treats a reached group's own T0/T1 tier as a
     high-privilege signal -- here we attribute it to the SPECIFIC target + path.
 
@@ -121,37 +123,73 @@ if (-not (Get-Command ConvertTo-PimMapReach -ErrorAction SilentlyContinue)) {
     }
 }
 
-# --- resolve a node's privilege LEVEL (0..5; 0 = most privileged) --------------
-# Reads the richest real signal: an explicit Level/Tier field, else the
-# -L<n>- / -T<n>- marker out of the GroupTag / label / id produced by the naming
-# convention. Returns an int 0..5 or $null (untiered). Same logic the Home tile
-# (Get-PimDelegationTierLevel) uses -- kept private here so the lib is standalone.
-function Get-PimTierImpactNodeLevel {
+# --- TIER vs LEVEL (TIER-IMPACT-LEVEL-VS-TIER, owner 2026-10-23 "Fix it, ring 0/1") --
+# The naming convention carries TWO separate markers: the LEVEL (-L<n>-, L0..L9, the
+# delegation layer; an Azure level follows the CAF management-group layer) and the
+# TIER (-T<n>-, T0..T2, the security tier). This report is about TIERS: who can reach
+# a Tier-0 / Tier-1 target. It used to read the LEVEL and treat that number as the
+# tier, so an L3-T1 group read as "T3" (not flagged) and an L0-T2 group read as "T0".
+# Now:
+#   * Get-PimTierImpactNodeTier  -- the TIER: an explicit tier field wins, then the
+#     -T<n>- marker. A level NEVER stands in for a tier: a node with no tier marker
+#     is untiered for tier purposes (never flagged).
+#   * Get-PimTierImpactNodeLevel -- the LEVEL (L0..L9), kept as a separate field for
+#     display only. A tier never stands in for a level either.
+function Get-PimTierImpactNodeCandidates {
     param($Node)
-    if ($null -eq $Node) { return $null }
     $cand = New-Object System.Collections.ArrayList
-    foreach ($k in 'level','tier') {
-        $v = Get-PimMapNodeField -Node $Node -Name $k
-        if ("$v".Trim()) { [void]$cand.Add("$v") }
-    }
     foreach ($k in 'groupTag','label','id') {
         $v = Get-PimMapNodeField -Node $Node -Name $k
         if ("$v".Trim()) { [void]$cand.Add("$v") }
     }
+    return ,$cand
+}
+
+# The node's TIER (0..2; 0 = most privileged) or $null (untiered).
+function Get-PimTierImpactNodeTier {
+    param($Node)
+    if ($null -eq $Node) { return $null }
+    # 1. an explicit tier field ('T1' or '1') wins.
+    $explicit = Get-PimMapNodeField -Node $Node -Name 'tier'
+    if ("$explicit" -match '(?i)^\s*T?([0-2])\s*$') { return [int]$Matches[1] }
+    $cand = Get-PimTierImpactNodeCandidates -Node $Node
+    # 2. the -L<n>-T<n>- pair the naming convention writes (the T right after an L marker), then
+    # 3. a lone -T<n>- marker. Checked across every candidate before falling to the lone marker,
+    #    so a group TAG that happens to end in -T<n> never outranks the full name's pair.
     foreach ($c in $cand) {
-        $s = "$c"
-        if ($s -match '(?i)(^|[-_.\s])L([0-5])([-_.\s]|$)') { return [int]$Matches[2] }
-        if ($s -match '(?i)(^|[-_.\s])T([0-5])([-_.\s]|$)') { return [int]$Matches[2] }
-        if ($s -match '^\s*([0-5])\s*$')                     { return [int]$Matches[1] }
+        if ("$c" -match '(?i)(^|[-_.\s])L[0-9]+[-_.\s]T([0-2])([-_.\s]|$)') { return [int]$Matches[2] }
+    }
+    foreach ($c in $cand) {
+        if ("$c" -match '(?i)(^|[-_.\s])T([0-2])([-_.\s]|$)') { return [int]$Matches[2] }
     }
     return $null
 }
 
-# A level int -> a "T<n>" label for display (T0 most privileged). $null -> ''.
+# The node's LEVEL (0..9) or $null -- display only, never used for flagging.
+function Get-PimTierImpactNodeLevel {
+    param($Node)
+    if ($null -eq $Node) { return $null }
+    $explicit = Get-PimMapNodeField -Node $Node -Name 'level'
+    if ("$explicit" -match '(?i)^\s*L?([0-9])\s*$') { return [int]$Matches[1] }
+    foreach ($c in (Get-PimTierImpactNodeCandidates -Node $Node)) {
+        if ("$c" -match '(?i)(^|[-_.\s])L([0-9])([-_.\s]|$)') { return [int]$Matches[2] }
+    }
+    return $null
+}
+
+# A tier int -> a "T<n>" label for display (T0 most privileged). $null -> ''.
+# (-Level kept as the parameter name for compatibility; the value is the TIER.)
 function Get-PimTierImpactTierLabel {
-    param($Level)
+    param([Alias('Tier')]$Level)
     if ($null -eq $Level) { return '' }
     return ("T{0}" -f [int]$Level)
+}
+
+# A level int -> an "L<n>" label for display. $null -> ''.
+function Get-PimTierImpactLevelLabel {
+    param($Level)
+    if ($null -eq $Level) { return '' }
+    return ("L{0}" -f [int]$Level)
 }
 
 function Get-PimTierImpactReport {
@@ -188,18 +226,20 @@ function Get-PimTierImpactReport {
         $scannedAdmins++
 
         # BFS forward from the admin. Each queue item carries the running path of
-        # node ids AND the most-privileged (minimum) group level seen ON that path
+        # node ids AND the most-privileged (minimum) group TIER seen ON that path
         # so far -- so when we hit a target we know the effective tier of the path
-        # WITHOUT re-walking, and we keep the chain to show HOW it is granted.
-        $bestLevel = $null            # the most privileged tier this admin reaches (min level)
+        # WITHOUT re-walking, and we keep the chain to show HOW it is granted. The
+        # minimum LEVEL on the path rides along separately, for display only.
+        $bestLevel = $null            # the most privileged TIER this admin reaches (min tier; name kept)
+        $bestLvl   = $null            # the most privileged LEVEL on the worst path (display only)
         $bestPath  = $null            # the path ids to the worst target
         $bestTarget = $null           # the worst target node id
         $bestNested = $false          # is the worst path through a nested (perm) group?
-        $highTargets = @{}            # distinct target ids at level <= HighTierMax
+        $highTargets = @{}            # distinct target ids at tier <= HighTierMax
 
         $q = New-Object System.Collections.Queue
-        # start: at the admin, no group level yet, path = [adminId]
-        $q.Enqueue([ordered]@{ id = "$aid"; minLevel = $null; path = @("$aid"); nested = $false; visited = @{ "$aid" = $true } })
+        # start: at the admin, no group tier/level yet, path = [adminId]
+        $q.Enqueue([ordered]@{ id = "$aid"; minLevel = $null; minLvl = $null; path = @("$aid"); nested = $false; visited = @{ "$aid" = $true } })
         $hops = 0
         while ($q.Count -gt 0 -and $hops -lt 20000) {
             $hops++
@@ -211,15 +251,20 @@ function Get-PimTierImpactReport {
                 $nxKind = Get-PimMapNodeField -Node $nxNode -Name 'kind'
                 $nxCol  = Get-PimMapColumn $nxKind
 
-                # Carry the running most-privileged group level. A GROUP node on the
-                # path (role-group col1 / permission-group col2) contributes its own
-                # level; the admin + targets do not.
+                # Carry the running most-privileged group TIER (and, separately, LEVEL).
+                # A GROUP node on the path (role-group col1 / permission-group col2)
+                # contributes its own tier/level; the admin + targets do not.
                 $runMin = $cur.minLevel
+                $runLvl = $cur.minLvl
                 $isGroup = ($nxKind -eq 'role-group' -or $nxKind -eq 'permission-group')
                 if ($isGroup) {
+                    $tr = Get-PimTierImpactNodeTier -Node $nxNode
+                    if ($null -ne $tr) {
+                        if ($null -eq $runMin -or $tr -lt $runMin) { $runMin = $tr }
+                    }
                     $lvl = Get-PimTierImpactNodeLevel -Node $nxNode
                     if ($null -ne $lvl) {
-                        if ($null -eq $runMin -or $lvl -lt $runMin) { $runMin = $lvl }
+                        if ($null -eq $runLvl -or $lvl -lt $runLvl) { $runLvl = $lvl }
                     }
                 }
                 # Did we step THROUGH a nested (permission) group to get here? Col 2
@@ -232,11 +277,16 @@ function Get-PimTierImpactReport {
                 if (& $isTarget $nxId) {
                     # Effective tier of THIS path to THIS target = the most privileged
                     # of (the running group min level) and (the target's own marker,
-                    # if any -- e.g. a target explicitly tagged T0).
-                    $tgtOwn = Get-PimTierImpactNodeLevel -Node $nxNode
+                    # if any -- e.g. a target explicitly tagged T0). $effLevel is the TIER.
+                    $tgtOwn = Get-PimTierImpactNodeTier -Node $nxNode
                     $effLevel = $runMin
                     if ($null -ne $tgtOwn) {
                         if ($null -eq $effLevel -or $tgtOwn -lt $effLevel) { $effLevel = $tgtOwn }
+                    }
+                    $tgtLvl = Get-PimTierImpactNodeLevel -Node $nxNode
+                    $effLvl = $runLvl
+                    if ($null -ne $tgtLvl) {
+                        if ($null -eq $effLvl -or $tgtLvl -lt $effLvl) { $effLvl = $tgtLvl }
                     }
                     if ($null -ne $effLevel) {
                         if ($effLevel -le $HighTierMax) {
@@ -251,6 +301,7 @@ function Get-PimTierImpactReport {
                         elseif ($effLevel -eq $bestLevel -and $stepNested -and -not $bestNested) { $take = $true }
                         if ($take) {
                             $bestLevel  = $effLevel
+                            $bestLvl    = $effLvl
                             $bestPath   = $newPath
                             $bestTarget = $nxId
                             $bestNested = $stepNested
@@ -261,7 +312,7 @@ function Get-PimTierImpactReport {
                     # Intermediate (group / AU) -- keep walking, cycle-safe.
                     if (-not $cur.visited.ContainsKey($nxId)) {
                         $nv = @{}; foreach ($k in $cur.visited.Keys) { $nv[$k] = $true }; $nv[$nxId] = $true
-                        $q.Enqueue([ordered]@{ id = $nxId; minLevel = $runMin; path = $newPath; nested = $stepNested; visited = $nv })
+                        $q.Enqueue([ordered]@{ id = $nxId; minLevel = $runMin; minLvl = $runLvl; path = $newPath; nested = $stepNested; visited = $nv })
                     }
                 }
             }
@@ -282,7 +333,11 @@ function Get-PimTierImpactReport {
                 displayName     = (Get-PimMapNodeLabel -Node $a -Id "$aid")
                 purpose         = (Get-PimMapNodeField -Node $a -Name 'purpose')
                 highestTier     = (Get-PimTierImpactTierLabel -Level $bestLevel)
+                # highestTierLevel = the TIER number (0..2; name kept for the consumers: T0 = 0).
                 highestTierLevel = [int]$bestLevel
+                # The LEVEL (L0..L9) on the worst path, separately -- display only, never flagging.
+                highestLevel      = $(if ($null -ne $bestLvl) { [int]$bestLvl } else { $null })
+                highestLevelLabel = (Get-PimTierImpactLevelLabel -Level $bestLvl)
                 highTargetCount = $highCount
                 worstTarget     = "$bestTarget"
                 worstTargetLabel = (Get-PimMapNodeLabel -Node $worstNode -Id "$bestTarget")

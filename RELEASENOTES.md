@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.671 -- 2026-10-23
+
+- Tier impact report: the tier comes from the tier marker and the level is shown in its own column. Support page: an About card with the Invardia legal line. Nightly update: a build whose upload to the registry failed on a network or registry fault is retried once, and a second failure is reported in plain words. SQL auditing: new and existing installations audit security events (sign-ins, schema and permission changes) to their own Log Analytics workspace, kept 90 days.
+
 ## 2.4.670 -- 2026-10-23
 
 - Plain screen texts: a held policy change set names each rule in words (for example Maximum activation duration, Approval to activate) instead of its Microsoft Graph rule id; the Guards page and the Features cards show names instead of internal ids; the Workload templates page no longer names an internal file path or says one-click, and says the packs come with PIM Manager; the Drift note says plainly what the read-only check script finds. No behavior changes.

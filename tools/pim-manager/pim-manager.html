@@ -5791,8 +5791,8 @@
   // ===================================================================
   // Support tab (§ GUI): static, no engine/server dependency. Gives admins a
   // direct "Report an issue on GitHub" path (pre-filled new-issue template with
-  // live Manager version + tenant context) and a "Developed by Morten Knudsen"
-  // credit/contact section. All context is read from the real app context, never
+  // live Manager version + tenant context) and an "About PIM Manager" card with
+  // the Invardia legal line (owner 2026-10-23). All context is read from the real app context, never
   // hard-coded: version from #versionBadge (__PIM_VERSION__), mode from PIM_MODE,
   // source/generated from PIM_DATA, identity/role from PIM_ROLE_BOOT, active
   // instance + tenant from PIM_INSTANCES_BOOT.
@@ -5926,23 +5926,20 @@
             : '<div style="color:#57606a; font-size:12px;">Diagnostics need the running Manager (server mode); they are not available in static view.</div>') +
         '</div>' +
 
-        '<div style="border:1px solid #d0d7de; border-radius:8px; padding:16px; background:#fff;">' +
-          '<div style="font-size:13px; font-weight:600; margin-bottom:6px;">Developed by Morten Knudsen</div>' +
+        // About card (owner 2026-10-23, wizard "Invardia legal line"): the Invardia legal line only -- no personal-site link,
+        // no developer bio. Links: invardia.com, the Invardia support portal and the Invardia mail addresses.
+        '<div id="supportAboutCard" style="border:1px solid #d0d7de; border-radius:8px; padding:16px; background:#fff;">' +
+          '<div style="font-size:13px; font-weight:600; margin-bottom:6px;">About PIM Manager</div>' +
           '<div style="font-size:12.5px; color:#1a1a1a; line-height:1.6;">' +
-            'PIM Manager is built and maintained by <b>Morten Knudsen</b> &mdash; Microsoft MVP &amp; Microsoft Security MVP, ' +
-            'independent cloud &amp; security architect.' +
-            '<div style="margin-top:8px;">' +
-              '<a href="https://github.com/KnudsenMorten" target="_blank" rel="noopener" style="color:#0969da; text-decoration:none;">github.com/KnudsenMorten</a>' +
-              ' &nbsp;&middot;&nbsp; ' +
-              '<a href="https://mortenknudsen.net" target="_blank" rel="noopener" style="color:#0969da; text-decoration:none;">mortenknudsen.net</a>' +
+            '<div id="supportLegalLine">' +
+              '<a href="https://invardia.com" target="_blank" rel="noopener" style="color:#0969da; text-decoration:none;">Invardia</a>' +
+              ' &ndash; a brand of 2LINKIT, founded and owned by Morten Knudsen.' +
+            '</div>' +
+            '<div style="margin-top:8px; color:#57606a;">PIM Manager Pro is sold and supported by Invardia. Support: ' +
+              '<a href="https://portal.invardia.com/" target="_blank" rel="noopener" style="color:#0969da; text-decoration:none;">portal.invardia.com</a>' +
+              ' or <a href="mailto:support@invardia.com" style="color:#0969da; text-decoration:none;">support@invardia.com</a>' +
               ' &nbsp;&middot;&nbsp; ' +
               '<a href="mailto:info@invardia.com" style="color:#0969da; text-decoration:none;">info@invardia.com</a>' +
-            '</div>' +
-            '<div style="margin-top:8px; color:#57606a;">PIM Manager Pro is sold and supported by ' +
-              '<a href="https://invardia.com/products/pim-manager/" target="_blank" rel="noopener" style="color:#0969da; text-decoration:none;">Invardia</a>' +
-              ' &ndash; a brand of 2LINKIT, founded and owned by Morten Knudsen. Support: ' +
-              '<a href="https://portal.invardia.com/" target="_blank" rel="noopener" style="color:#0969da; text-decoration:none;">portal.invardia.com</a>' +
-              ' or <a href="mailto:support@invardia.com" style="color:#0969da; text-decoration:none;">support@invardia.com</a>.' +
             '</div>' + pimSecurityPackLinkHtml() +
           '</div>' +
         '</div>' +
@@ -22734,15 +22731,17 @@
       const ceiling = (data.highTierMax === 0) ? 'Tier-0' : 'Tier-0 / Tier-1';
       h.push('<div style="font-size:12px;color:#24292f;margin-bottom:6px;"><b>' + rows.length + '</b> of <b>' + (data.scannedAdmins || 0) + '</b> user(s) can reach a ' + ceiling + ' target ' +
         '(<b>' + (data.tier0Count || 0) + '</b> reach Tier-0, <b>' + (data.tier1Count || 0) + '</b> top out at Tier-1).</div>');
-      h.push('<table class="grid" style="font-size:11.5px;"><thead><tr><th>Person</th><th>Purpose</th><th>Highest tier</th><th>High-tier targets</th><th>Worst target</th><th>Via</th><th>Path</th></tr></thead><tbody>');
+      h.push('<table class="grid" style="font-size:11.5px;"><thead><tr><th>Person</th><th>Purpose</th><th>Highest tier</th><th>Level</th><th>High-tier targets</th><th>Worst target</th><th>Via</th><th>Path</th></tr></thead><tbody>');
       if (!rows.length) {
-        h.push('<tr><td colspan="7" style="color:#57606a;padding:10px;">No user reaches a ' + ceiling + ' target in the model.</td></tr>');
+        h.push('<tr><td colspan="8" style="color:#57606a;padding:10px;">No user reaches a ' + ceiling + ' target in the model.</td></tr>');
       } else {
         for (const r of rows) {
           const tierColor = (r.highestTierLevel === 0) ? '#cf222e' : '#bf8700';
           const via = r.viaNested ? 'nested group (indirect)' : 'direct';
           h.push('<tr><td>' + esc(r.displayName || r.person) + '</td><td>' + esc(r.purpose || '') + '</td>' +
             '<td><span style="font-weight:600;color:' + tierColor + ';">' + esc(r.highestTier) + '</span></td>' +
+            // TIER-IMPACT-LEVEL-VS-TIER (owner 2026-10-23): the LEVEL (L0-L9) on the worst path, shown separately -- it never decides who is listed.
+            '<td style="color:#57606a;">' + esc(r.highestLevelLabel || '') + '</td>' +
             '<td>' + (r.highTargetCount || 0) + '</td><td>' + esc(r.worstTargetLabel || '') + '</td>' +
             '<td style="color:#57606a;">' + esc(via) + '</td><td style="color:#57606a;">' + esc(r.pathText || '') + '</td></tr>');
         }

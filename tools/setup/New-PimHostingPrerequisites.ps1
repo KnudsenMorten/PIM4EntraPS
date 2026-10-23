@@ -154,6 +154,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_PimSqlAdminGroup.ps1')     # the SQL admin group (plan + converge + read-back)
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-TenantSizing.ps1')   # Get-PimSqlTierPlan
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-SqlAudit.ps1')       # SECPACK-SQL-AUDIT the server's audit -> the workspace
 # PIM 100.114: the database tier this run creates. No -SqlServiceObjective = the product tier (Get-PimSqlDefaultTier).
 $sqlTierDefault = Get-PimSqlDefaultTier
 $sqlTierChosen = "$SqlServiceObjective".Trim()     # '' = nobody chose: the product tier
@@ -255,7 +256,8 @@ if ($WhatIfPreference) {
         "find or create the image-pull identity id-pim-$Token with AcrPull on $acr",
         "find or create SQL server and database $sqlPlan",
         $(if (-not $SkipSql -and $SqlPrivateEndpoint) { "find or create the SQL identity id-pim-sql-$Token (it administers the private database from inside the network)" }),
-        $(if (-not $SkipSql -and -not $SkipSqlAdminGroup) { "converge the SQL server's Entra admin on the group $SqlAdminGroupName$(if ("$SupportAppId".Trim()) { ' (with the Invardia Support app)' })" }))) {
+        $(if (-not $SkipSql -and -not $SkipSqlAdminGroup) { "converge the SQL server's Entra admin on the group $SqlAdminGroupName$(if ("$SupportAppId".Trim()) { ' (with the Invardia Support app)' })" }),
+        $(if (-not $SkipSql) { "switch on SQL auditing of $sqlSrv to $law (security events: sign-ins, schema and permission changes; kept 90 days)" }))) {
         if ("$w".Trim()) { Write-Host "What if: would $w" }
     }
     Write-Host 'RESULT: WHAT-IF -- nothing was signed in to and nothing was created.' -ForegroundColor Yellow
@@ -719,6 +721,12 @@ if ($SkipSql) {
         Write-Host "         Entra admin verified: $sqlUami (single-principal admin: $sqlAdminGroupSkipped)"
     }
     }   # end of the private-SQL branch
+    # SECPACK-SQL-AUDIT (owner 2026-10-23 "SQL auditing at install"): the server audits its security events to THIS install's
+    # workspace, kept 90 days -- what the security pack says. One converge (engine/_shared/PIM-SqlAudit.ps1), the updater runs
+    # the same on existing installs. Never fatal: a refusal is printed and the next update tries again.
+    Write-Host "    [6b] SQL auditing -> $law (security events, 90 days)" -ForegroundColor Yellow
+    $sqlAud = Invoke-PimSqlAuditConverge -SubscriptionId $SubscriptionId -ResourceGroup $rg -SqlServer $sqlSrv -Workspace $law -Arm $prereqArm
+    foreach ($l in @($sqlAud.lines)) { Write-Host "         $($l.text)" -ForegroundColor $(switch ($l.level) { 'changed' { 'Green' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
     # 100.37 (owner 2026-10-09): a Standard database is CREATED with a 250 GB max size (a tier raise later does not grow it
     # by itself -- an S2 with Basic's 2 GB limit filled up and every write failed "has reached its size quota").
     # Never Basic (owner 2026-10-09; the product tier is S3 since 2026-10-12): a -SqlServiceObjective Basic is created at the

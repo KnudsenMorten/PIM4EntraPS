@@ -75,6 +75,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAccess.ps1')        # framework 12.23 / PIM 100.156 least-privilege roles via the signed procedure
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAccessCutover.ps1')  # framework 12.23 P8 exception: a private-SQL install starts its own in-network cut-over
 . (Join-Path $solRoot 'engine\_shared\PIM-AsBuilt.ps1')          # 100.61 the as-built job + store + view an EXISTING install converges to
+. (Join-Path $solRoot 'engine\_shared\PIM-SqlAudit.ps1')         # SECPACK-SQL-AUDIT the SQL server's audit -> the install's workspace
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateNow.ps1')        # framework 8.18 UPDATE-NOW: the 15-minute signal check + the run kind + own cron
 . (Join-Path $solRoot 'engine\_shared\PIM-GuardLimits.ps1')      # framework 8.18: an update-now waits while guard Strict mode is on
 
@@ -246,6 +247,14 @@ function Invoke-PimUpdaterConvergeStep {
         $script:PimAsBuiltJobImageThisRun = "$($ab.jobImage)".Trim()
         foreach ($l in @($ab.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
     } catch { Say "  as-built converge skipped: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2e-bis. SECPACK-SQL-AUDIT (owner 2026-10-23 "SQL auditing at install") -- AN EXISTING INSTALL AUDITS ITS SQL TOO ----
+    # The same converge the installer runs (engine/_shared/PIM-SqlAudit.ps1): auditing on, security events to this install's
+    # workspace, 90 days. Contributor on the resource group is enough; a refusal is said, never fails the update.
+    try {
+        $saSrv = $(if ("$($env:PIM_SqlServer)".Trim()) { "$($env:PIM_SqlServer)".Trim() } else { "$($global:PIM_SqlServer)".Trim() })
+        $sa = Invoke-PimSqlAuditConverge -SubscriptionId $sub -ResourceGroup $rg -SqlServer $saSrv -Arm $armSeam
+        foreach ($l in @($sa.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+    } catch { Say "  SQL auditing not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2f. framework 12.23 P8 EXCEPTION (owner 2026-10-18) -- A PRIVATE-SQL INSTALL NEVER CUT OVER MOVES BY ITSELF -----------
     # The Support app has no route to a private database. This updater reads (as dbo, still in the SQL admin group), decides
     # (run 1, later run 2) and STARTS the in-network admin job; the job does the admin SQL and reads it back. No admin SQL
@@ -904,17 +913,26 @@ if ($plan.action -eq 'build') {
         # refused every nightly build ("client with IP ... is not allowed access") -- measured 2026-09-23.
         $pool = "$($env:PIM_ACR_AGENT_POOL)".Trim()
         Say ("building $imageRepo`:$($plan.version) in $($reg.registryName) (the registry builds; this job only asks)" + $(if ($pool) { " on agent pool '$pool'" } else { '' }))
-        $b = Invoke-PimAcrRestBuild -SubscriptionId $sub -ResourceGroup $rg -RegistryName $reg.registryName `
+        # UPDATER-ACR-PUSH-RETRY (owner 2026-10-23): a push that failed on the network / a registry 5xx is retried once.
+        $b = Invoke-PimAcrRestBuildWithRetry -SubscriptionId $sub -ResourceGroup $rg -RegistryName $reg.registryName `
                 -ContextPath $ctx -ImageNames @("$imageRepo`:$($plan.version)") -AgentPoolName $pool `
-                -OnPoll { param($s) Say "  build $s" 'DarkGray' }
+                -OnPoll { param($s) Say "  build $s" 'DarkGray' } `
+                -OnRetry { param($r, $why) Say "  build $($r.status) after $($r.seconds)s (run $($r.runId)): the push to the registry failed ($why) -- a registry-side fault; building once more in 60 s" 'Yellow' }
         if (-not $b.ok) {
             Say "  BUILD $($b.status) after $($b.seconds)s (run $($b.runId))" 'Red'
+            if ("$($b.detail)".Trim()) { Say "  $("$($b.detail)".Trim())" 'Red' }
             Say '  not rolling -- there is no new image to roll to.' 'Red'
             # 🔑 action='built' even though it FAILED: the fleet view needs to know WHICH PHASE broke.
             # "the build failed" and "the roll failed" point at completely different causes.
-            Send-PimUpdateOutcome -Action 'built' -Outcome 'failed' -ToVersion "$($plan.version)" -ErrorText "build $($b.status) after $($b.seconds)s"
+            # A push fault keeps its own words ("the push to the registry failed") -> UPDATE-REGISTRY-PUSH-FAILED pim-upd-0103,
+            # transient, never UNCLASSIFIED; any other build failure carries the run's error line for whoever reads it.
+            $bErr = "build $($b.status) after $($b.seconds)s"
+            if ("$($b.pushFault)".Trim()) { $bErr += ": the push to the registry failed ($($b.pushFault)) on both tries -- the next update run builds again" }
+            elseif ("$($b.detail)".Trim()) { $d = "$($b.detail)".Trim() -replace '\s+', ' '; if ($d.Length -gt 300) { $d = $d.Substring(0, 300) }; $bErr += ": $d" }
+            Send-PimUpdateOutcome -Action 'built' -Outcome 'failed' -ToVersion "$($plan.version)" -ErrorText $bErr
             exit 1
         }
+        if ([int]$b.attempts -gt 1) { Say "  the second build went through (the first, run $($b.firstRunId), failed on the push)" 'Green' }
         Say "  built in $($b.seconds)s (run $($b.runId))" 'Green'
         # Remember it, so tomorrow night is a roll and not another build. Takes effect on the NEXT
         # run by the same rule the self-stamp does -- this run already knows what it built.
