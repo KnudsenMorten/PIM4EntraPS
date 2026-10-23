@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.670 -- 2026-10-23
+
+- Plain screen texts: a held policy change set names each rule in words (for example Maximum activation duration, Approval to activate) instead of its Microsoft Graph rule id; the Guards page and the Features cards show names instead of internal ids; the Workload templates page no longer names an internal file path or says one-click, and says the packs come with PIM Manager; the Drift note says plainly what the read-only check script finds. No behavior changes.
+
 ## 2.4.669 -- 2026-10-23
 
 - Clearer, accurate screen texts: the Approvals page says a SuperAdmin can allow self-approval; the Approve all dialog says each held policy change set is approved for its exact plan only; the break-glass list says it exempts an account from every revoke, disable and offboard path; guard names no longer show internal reference numbers; the Drift note says what the stray-object sweep finds; Settings shows plain names instead of internal ids; the Community vs Pro page says permission templates are imported in the portal. The Entra roles reference template pack is named PIM Manager reference set. No behavior changes.

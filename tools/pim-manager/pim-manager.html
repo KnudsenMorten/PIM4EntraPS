@@ -2043,10 +2043,10 @@
       <!-- Permission templates: centrally maintained delegation packs
            (templates/*.template.json, distributed by repo sync). When the
            maintainer extends a template, subscribed tenants see the new
-           permissions here and import them into pending with one click. -->
+           permissions here and import them into Pending changes. -->
       <div id="tplSection" style="padding:18px 0 0 0;">
         <h3 style="font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:#0969da; margin:8px 0 4px 0;">Permission Templates</h3>
-        <div style="color:#57606a; font-size:11.5px; margin-bottom:10px;">Centrally maintained delegation packs. When a template gains new roles (e.g. Defender XDR grew from 3 to 7), the new rows show here for one-click import into pending.</div>
+        <div style="color:#57606a; font-size:11.5px; margin-bottom:10px;">Centrally maintained delegation packs. When a template gains new roles (e.g. Defender XDR grew from 3 to 7), the new rows show here to import into Pending changes.</div>
         <div id="tplCards"><div class="empty">Loading templates&hellip;</div></div>
       </div>
 
@@ -7426,7 +7426,9 @@
       const lockNote = lock ? ` <span style="font-size:10.5px;color:#57606a;">(always on)</span>`
                      : (na ? ` <span style="font-size:10.5px;color:#9a6700;">(not available here &mdash; ${esc(String(f.unavailableReason || 'this deployment cannot host it'))})</span>` : '');
       h += `<tr${na ? ' style="opacity:.6;"' : ''}>` +
-        `<td><b>${esc(f.label)}</b> <code style="color:#57606a;font-size:11px;">${esc(f.id)}</code>${lockNote}${settingInfoBtn('FeatureFlags.' + f.id)}</td>` +
+        // DOCS-2 go-public check: the label only -- the raw key (downlink, accessreview ...) stays on the checkbox (data-id /
+        // data-setting-key) and in the tooltip, the same way the Governance preview card shows it.
+        `<td><b title="${esc('Setting key: FeatureFlags.' + f.id)}">${esc(f.label)}</b>${lockNote}${settingInfoBtn('FeatureFlags.' + f.id)}</td>` +
         `<td style="text-align:center;"><input type="checkbox" class="setFeatToggle" data-setting-key="FeatureFlags.${esc(f.id)}" data-id="${esc(f.id)}"${on?' checked':''}${dis}${na?' data-unavailable="1"':''}></td>` +
         `<td style="color:#57606a;font-size:11.5px;">${f.default ? 'on' : 'off'}</td>` +
         `</tr>`;
@@ -8370,8 +8372,10 @@
         else if (off) status = `<span style="font-size:10.5px;color:#57606a;">Disabled</span>`;
         else status = `<span style="font-size:10.5px;color:#116329;">Enabled</span>`;
         h += `<tr${rowStyle} data-feat="${esc(f.key)}">` +
-          `<td${cellDim}><b>${esc(f.label)}</b> <code style="color:#57606a;font-size:11px;">${esc(f.key)}</code>` + (isCore ? '' : settingInfoBtn('FeatureGates.' + f.key)) +
-          ((f.dependsOn && f.dependsOn.length) ? `<div style="font-size:10.5px;color:#57606a;">needs: ${f.dependsOn.map(esc).join(', ')}</div>` : '') +
+          // DOCS-2 go-public check: the feature's LABEL only -- the raw key stays on the row (data-feat), the checkbox
+          // (data-key / data-setting-key) and the tooltip; "needs:" names the prerequisite features by label too.
+          `<td${cellDim}><b title="${esc('Setting key: FeatureGates.' + f.key)}">${esc(f.label)}</b>` + (isCore ? '' : settingInfoBtn('FeatureGates.' + f.key)) +
+          ((f.dependsOn && f.dependsOn.length) ? `<div style="font-size:10.5px;color:#57606a;">needs: ${f.dependsOn.map(k => esc((eff[k] && eff[k].label) || k)).join(', ')}</div>` : '') +
           `</td>` +
           `<td style="text-align:center;"><input type="checkbox" class="featGateToggle"${isCore ? '' : ' data-setting-key="FeatureGates.' + esc(f.key) + '"'} data-key="${esc(f.key)}"${checked}${toggleDis}></td>` +
           `<td class="featStatus"${cellDim}>${status}</td>` +
@@ -12501,7 +12505,9 @@
     // AUTHORED, so a privileged object PIM never created is outside the comparison entirely. Say so on the page, always.
     h.push('<div id="driftScopeNote" style="color:#57606a;font-size:11.5px;margin-bottom:10px;padding:6px 10px;border:1px solid #d0d7de;border-radius:6px;background:#f6f8fa;">' +
       'This compares what PIM manages. It does <b>not</b> see privileged objects PIM never created &mdash; those are outside the comparison, so they cannot show up here however privileged they are. ' +
-      'Groups and administrative units left behind by test runs (names that start with a test marker) are found separately by the read-only stray-object sweep (<code>Find-PimStrayTestObjects.ps1</code> from the release package, ' + pimScriptDocLink('Find-PimStrayTestObjects') + ').</div>');
+      // DOCS-2 go-public check: customer-plain -- what the separate check finds, by the name prefixes it looks for (the
+      // script's own -Marker default), and its documentation link; the script file name is in the link's tooltip.
+      'A separate read-only check script finds groups and administrative units that test runs left behind in a tenant (names that start with PIMTEST- or PIMCOREENGINE-), with the roles they hold and their members and owners. It changes nothing (' + pimScriptDocLink('Find-PimStrayTestObjects') + ').</div>');
 
     if (d.snapshotMissing) {
       h.push(stateEmpty('No drift check has run yet', d.hint || 'The scheduler job drift-snapshot runs it on its interval (every 4 hours by default -- see Job schedule).'));
@@ -14207,13 +14213,15 @@
     h.push('<div class="set-card" id="setTemplatePacks"><h3 style="margin:0 0 4px;font-size:14px;">Permission template packs</h3>');
     h.push('<div style="color:#57606a;font-size:11.5px;margin:2px 0 6px;">A <b>pack</b> is a ready-made set of delegation rows for one workload &mdash; Azure RBAC, Defender XDR, Entra roles, Exchange, Intune, Sentinel. ' +
       '<b>Rows</b> = how many rows the pack holds; <b>New to import</b> = rows not yet in your data (a pack that grows shows its new rows here); ' +
-      '<b>State</b> = whether the pack is offered on the Create access wizards. Importing happens from the <b>Create</b> access page; disabling a pack hides it there without deleting anything.</div>');
+      // DOCS-2 go-public check: true to today's page -- the pack cards (with Import) are below this table on the same page
+      // (moved from Create access 2026-10-05) and in Get Started's roles step.
+      '<b>State</b> = whether the pack is offered for import, in its card below and in Get Started. Importing happens in the pack&rsquo;s card below; disabling a pack hides it there without deleting anything.</div>');
     const tplList = (tpls && tpls.templates) || [];
     pimExportSet('workloadtemplates', 'Workload templates', () => [pimExportRows('Template packs', [   // 100.67
       ['Pack', t => t.name || t.id], ['Version', 'version'], ['Description', 'description'], ['Rows', t => Number(t.totalRows || 0)], ['New to import', t => Number(t.missingCount || 0)],
       ['State', t => t.error ? 'error: ' + t.error : (t.disabled ? 'disabled' : 'active')]], tplList)]);
     if (!tplList.length) {
-      h.push('<div style="color:#57606a;font-size:12px;">No templates shipped in <code>templates/*.template.json</code>.</div>');
+      h.push('<div style="color:#57606a;font-size:12px;">No permission template packs are installed.</div>');
     } else {
       const canTplEdit = roleAtLeast('Admin');
       h.push('<table class="grid" style="font-size:12px;"><thead><tr><th>Pack</th><th>Rows</th><th>New to import</th><th>State</th><th></th></tr></thead><tbody>');
@@ -14231,7 +14239,7 @@
           `<td>${(t.missingCount>0 && !t.disabled) ? `<button class="primary govTplImport" data-id="${esc(t.id)}" style="font-size:11.5px;white-space:nowrap;">Import&hellip;</button>` : ''}</td></tr>`);
       }
       h.push('</tbody></table>');
-      h.push('<div style="color:#57606a;font-size:11px;margin-top:4px;"><b>Import&hellip;</b> opens the pack on the <b>Create access</b> page: pick the rows and stage them into pending (active packs only). Editing a pack&rsquo;s rows is a maintainer action in <code>templates/*.template.json</code>.</div>');
+      h.push('<div style="color:#57606a;font-size:11px;margin-top:4px;"><b>Import&hellip;</b> opens the pack&rsquo;s card below: pick the rows and stage them into Pending changes (active packs only). The packs and their rows come with PIM Manager; they are not edited here.</div>');
     }
     h.push('</div>');
     host.innerHTML = h.join('');
@@ -19573,7 +19581,8 @@
       return '<tr class="guard-row" data-guard="' + esc0(g.guardId) + '">' +
         '<td style="padding:6px 8px;"><span style="display:inline-block;padding:0 7px;border-radius:9px;font-size:11px;font-weight:600;' +
           (crit ? 'background:#ffebe9;color:#cf222e;' : 'background:#fff8c5;color:#9a6700;') + '">' + (crit ? 'critical' : 'warning') + '</span></td>' +
-        '<td style="padding:6px 8px;"><b>' + esc0(g.title || g.guardId) + '</b><div style="color:#8c959f;font-size:11px;">' + esc0(g.guardId) + (g.area ? ' &middot; ' + esc0(g.area) : '') + ' &middot; ' + esc0(g.outcome) + '</div></td>' +
+        // DOCS-2 go-public check: the guard id is the row's data-guard and the name's tooltip, not visible text
+        '<td style="padding:6px 8px;"><b title="' + esc0('Guard id: ' + (g.guardId || '')) + '">' + esc0(g.title || g.guardId) + '</b><div style="color:#8c959f;font-size:11px;">' + (g.area ? esc0(g.area) + ' &middot; ' : '') + esc0(g.outcome) + '</div></td>' +
         '<td style="padding:6px 8px;white-space:nowrap;" title="first seen ' + esc0(fmtTime(g.firstSeenUtc)) + '">' + jobTimeAgo(g.lastSeenUtc) + '<div style="color:#8c959f;font-size:11px;">' + esc0(g.tripCount) + ' time(s)</div></td>' +
         '<td style="padding:6px 8px;font-size:11.5px;">' + (vals || '&mdash;') + (thr ? '<div style="color:#8c959f;">limit: ' + thr + '</div>' : '') + '</td>' +
         '<td style="padding:6px 8px;font-size:11.5px;max-width:360px;">' + esc0(g.actionText || '') + '</td></tr>';
@@ -19756,7 +19765,9 @@
     const rows = cat.map(g => {
       const holds = (g.holds || []).map(h => holdHtml(g, h)).join('');
       return '<tr class="gp-guard' + (g.never ? ' gp-guard-locked' : '') + '" data-guard="' + escapeHtml(g.guardId) + '" data-state="' + escapeHtml(g.state || '') + '" data-locked="' + (g.never ? '1' : '0') + '">' +
-        '<td style="padding:6px 8px;vertical-align:top;"><b>' + escapeHtml(g.title || g.guardId) + '</b><div style="color:#8c959f;font-size:11px;">' + escapeHtml(g.guardId) + '</div></td>' +
+        // DOCS-2 go-public check: the guard id (engine.break-glass ...) is not customer text -- it stays on the row
+        // (data-guard) and in the name's tooltip, never as visible text.
+        '<td style="padding:6px 8px;vertical-align:top;"><b class="gp-guard-name" title="' + escapeHtml('Guard id: ' + g.guardId) + '">' + escapeHtml(g.title || g.guardId) + '</b></td>' +
         '<td style="padding:6px 8px;vertical-align:top;white-space:nowrap;">' + stateOf(g) + stateLineHtml(g) + '</td>' +
         '<td style="padding:6px 8px;vertical-align:top;font-size:12px;">' +
           '<div class="gp-protects"><b>Protects:</b> ' + escapeHtml(g.protects || '') + '</div>' +
@@ -19764,6 +19775,9 @@
           limitHtml(g) + exemptionHtml(g) +
           (holds || (g.never || g.release !== 'release' ? '' : '<div style="color:#8c959f;font-size:11.5px;">Holds nothing right now.</div>')) + polNowHtml(g) + '</td></tr>';
     }).join('');
+    // the guard's NAME in the approvals and releases lists; its id only in data-guard-id + the tooltip
+    const guardNameHtml = (id) => { const gg = cat.find(x => x && x.guardId === id);
+      return '<span class="gp-guard-ref" data-guard-id="' + escapeHtml(id || '') + '" title="' + escapeHtml('Guard id: ' + (id || '')) + '">' + escapeHtml((gg && gg.title) || id || '') + '</span>'; };
     const apprRows = apprs.map(a => {
       const st = a.state || a.status || '';
       const mineA = String(a.approvedBy || '').toLowerCase() === me;
@@ -19772,7 +19786,7 @@
       const used = Number(a.usedCount) || 0, n = Number(a.count) || asList(a.items).length;
       const labels = asList(a.labels).map(l => '<li>' + escapeHtml(String(l)) + '</li>').join('');
       return '<tr class="gp-appr" data-id="' + escapeHtml(a.id) + '" data-state="' + escapeHtml(st) + '">' +
-        '<td style="padding:4px 8px;vertical-align:top;">' + escapeHtml(a.guardId) + '<div style="color:#8c959f;font-size:11px;">' + escapeHtml(a.scope || a.base || '') + '</div></td>' +
+        '<td style="padding:4px 8px;vertical-align:top;">' + guardNameHtml(a.guardId) + '<div style="color:#8c959f;font-size:11px;">' + escapeHtml(a.scope || a.base || '') + '</div></td>' +
         '<td style="padding:4px 8px;vertical-align:top;">' + n + ' item(s)' + (st === 'active' || st === 'consumed' ? '<div style="color:#8c959f;font-size:11px;">' + used + ' applied</div>' : '') +
           (labels ? '<details class="gp-appr-items"><summary style="cursor:pointer;font-size:11.5px;">Exactly what</summary><ul style="margin:4px 0 4px 18px;padding:0;font-size:11.5px;">' + labels + '</ul></details>' : '') + '</td>' +
         '<td style="padding:4px 8px;vertical-align:top;"><b>' + escapeHtml(st) + '</b>' +
@@ -19788,7 +19802,7 @@
       const acts = (can && st === 'pending' && !mine ? '<button type="button" class="gp-approve btn-sec" data-id="' + escapeHtml(r.id) + '" data-guard="' + escapeHtml(r.guardId) + '">Approve (second person)</button> ' : '') +
         (can && live ? '<button type="button" class="gp-revoke btn-sec" data-id="' + escapeHtml(r.id) + '" data-guard="' + escapeHtml(r.guardId) + '">Revoke</button>' : '');
       return '<tr class="gp-rel" data-id="' + escapeHtml(r.id) + '" data-state="' + escapeHtml(st) + '">' +
-        '<td style="padding:4px 8px;">' + escapeHtml(r.guardId) + '<div style="color:#8c959f;font-size:11px;">' + escapeHtml(r.scope || '') + ' &middot; plan <code title="' + escapeHtml(r.planHash || '') + '">' + escapeHtml(short(r.planHash)) + '</code></div></td>' +
+        '<td style="padding:4px 8px;">' + guardNameHtml(r.guardId) + '<div style="color:#8c959f;font-size:11px;">' + escapeHtml(r.scope || '') + ' &middot; plan <code title="' + escapeHtml(r.planHash || '') + '">' + escapeHtml(short(r.planHash)) + '</code></div></td>' +
         '<td style="padding:4px 8px;">' + escapeHtml(r.mode === 'until' ? 'until ' + fmtTime(r.expiresUtc) : 'one run') + '</td>' +
         '<td style="padding:4px 8px;"><b>' + escapeHtml(st) + '</b>' + (st === 'consumed' && r.consumedUtc ? '<div style="color:#8c959f;font-size:11px;">used ' + escapeHtml(fmtTime(r.consumedUtc)) + '</div>' : '') + '</td>' +
         '<td style="padding:4px 8px;">' + escapeHtml(r.createdBy || '') + (r.approvedBy ? '<div style="color:#8c959f;font-size:11px;">approved by ' + escapeHtml(r.approvedBy) + '</div>' : '') + '</td>' +
@@ -20651,6 +20665,46 @@
     n = String(n || ''); const i = n.indexOf(' @ ');
     return i < 0 ? n : n.slice(0, i) + ' @ ' + holdScopeWords(n.slice(i + 3));
   }
+  // DOCS-2 go-public check (2026-10-23): a policy RULE is shown by its plain name, never the raw Microsoft Graph rule id
+  // (Expiration_EndUser_Assignment ...). DISPLAY ONLY -- the id stays on the element (data-rule-id + tooltip) and every
+  // value the engine reads or the approve route sends is unchanged. Same words as engine/_shared/PIM-PolicyImpact.ps1.
+  const POLICY_RULE_NAMES = {
+    'Expiration_EndUser_Assignment': 'Maximum activation duration',
+    'Expiration_Admin_Eligibility':  'Eligible assignment: duration and expiry',
+    'Expiration_Admin_Assignment':   'Active assignment: duration and expiry',
+    'Enablement_EndUser_Assignment': 'Require on activation (MFA / justification / ticket)',
+    'Enablement_Admin_Eligibility':  'Require on eligible assignment',
+    'Enablement_Admin_Assignment':   'Require on active assignment (MFA / justification)',
+    'Approval_EndUser_Assignment':   'Approval to activate',
+    'AuthenticationContext_EndUser_Assignment': 'Authentication context on activation'
+  };
+  function policyRuleName(id) {
+    id = String(id || ''); let m;
+    if (POLICY_RULE_NAMES[id]) return POLICY_RULE_NAMES[id];
+    if ((m = id.match(/^Notification_(Admin|Approver|Requestor)_(Admin_Eligibility|Admin_Assignment|EndUser_Assignment)$/))) {
+      const who = { Admin: 'admins', Approver: 'approvers', Requestor: 'the member' }[m[1]];
+      const when = { Admin_Eligibility: 'someone is made eligible', Admin_Assignment: 'someone is assigned active', EndUser_Assignment: 'someone activates' }[m[2]];
+      return 'Notify ' + who + ' when ' + when;
+    }
+    return id;
+  }
+  function policyRuleHtml(id) {
+    const esc = escapeHtml;
+    return '<span class="policyRuleName" data-rule-id="' + esc(id || '') + '" title="' + esc('Rule id: ' + (id || '')) + '">' + esc(policyRuleName(id)) + '</span>';
+  }
+  // The weakening sentence (engine Get-PimAzResPolicyWeakening) in words; the engine's own text stays in data-change.
+  function policyChangeWords(s) {
+    s = String(s || ''); let m;
+    const claim = { MultiFactorAuthentication: 'MFA', Justification: 'justification', Ticketing: 'ticket' };
+    const dur = v => { const x = String(v || '').match(/^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$/i); if (!x) return v;
+      const p = []; if (x[1]) p.push(x[1] + ' day' + (x[1] === '1' ? '' : 's')); if (x[2]) p.push(x[2] + ' hour' + (x[2] === '1' ? '' : 's')); if (x[3]) p.push(x[3] + ' minute' + (x[3] === '1' ? '' : 's')); return p.join(' ') || v; };
+    if ((m = s.match(/^removes (MultiFactorAuthentication|Justification|Ticketing)$/))) return 'removes the ' + claim[m[1]] + ' requirement';
+    if (s === 'isExpirationRequired true -> false') return 'no longer requires an end date';
+    if ((m = s.match(/^removes maximumDuration (\S+)$/))) return 'removes the maximum duration (' + dur(m[1]) + ')';
+    if ((m = s.match(/^raises maximumDuration (\S+) -> (\S+)$/))) return 'raises the maximum duration from ' + dur(m[1]) + ' to ' + dur(m[2]);
+    if ((m = s.match(/^maximumDuration (\S+) -> (\S+) could not be compared/))) return 'changes the maximum duration from ' + dur(m[1]) + ' to ' + dur(m[2]) + ' (could not be compared, so it counts as weakening)';
+    return s;
+  }
   // The policies of one WhatIf group, ONE PER LINE. Open when short; folded when long; and when every one of them is
   // already in the weakening list above, it says so instead of listing them twice.
   function holdPolicyListHtml(names, count, weakNames) {
@@ -20707,7 +20761,7 @@
       ? esc(w.name || '')
       : esc(w.role || '') + ' @ ' + esc(holdScopeWords(w.scope || ''));
     h += weak.length
-      ? '<ul class="azresHoldWeakenings" style="margin:2px 0 0 18px;padding:0;">' + weak.map(w => '<li>' + weakWhere(w) + ' &mdash; ' + esc(w.ruleId || '') + ': <b>' + esc(w.change || '') + '</b></li>').join('') + '</ul>'
+      ? '<ul class="azresHoldWeakenings" style="margin:2px 0 0 18px;padding:0;">' + weak.map(w => '<li>' + weakWhere(w) + ' &mdash; ' + policyRuleHtml(w.ruleId || '') + ': <b class="policyChange" data-change="' + esc(w.change || '') + '">' + esc(policyChangeWords(w.change || '')) + '</b></li>').join('') + '</ul>'
       : '<div class="azresHoldWeakenings" style="color:#57606a;">none</div>';
     // REQ-WHATIF (77.1, operator 2026-09-21): the CURRENT policy compared with the NEW one, per setting, grouped by
     // identical change set -- so an approver sees the actual impact instead of rule ids.
@@ -20737,14 +20791,14 @@
       });
       h += '</div>';
     }
-    h += (imp ? '<details class="azresHoldTechnical" style="margin-top:6px;"><summary style="cursor:pointer;color:#57606a;">Rule ids (technical)</summary>' : '') +
-      '<div style="margin-top:6px;font-weight:600;">' + (imp ? 'Rule ids per policy' : 'Policies to change') + (hold.morePolicies ? ' (top ' + pols.length + ', and ' + esc(String(hold.morePolicies)) + ' more)' : '') + '</div>' +
+    h += (imp ? '<details class="azresHoldTechnical" style="margin-top:6px;"><summary style="cursor:pointer;color:#57606a;">Rules per policy (technical)</summary>' : '') +
+      '<div style="margin-top:6px;font-weight:600;">' + (imp ? 'Rules per policy' : 'Policies to change') + (hold.morePolicies ? ' (top ' + pols.length + ', and ' + esc(String(hold.morePolicies)) + ' more)' : '') + '</div>' +
       '<table class="set-table azresHoldPolicies" style="margin-top:2px;max-width:100%;">' +
       (spec.graph
         ? '<tr><th>Policy</th><th>Template</th><th>Rules</th></tr>' +
-          pols.map(p => '<tr><td>' + esc(p.name || '') + '</td><td>' + esc(p.template || '') + '</td><td style="font-size:11px;">' + asList(p.rules).map(r => esc(r.ruleId || '')).join(', ') + '</td></tr>').join('')
+          pols.map(p => '<tr><td>' + esc(p.name || '') + '</td><td>' + esc(p.template || '') + '</td><td style="font-size:11px;">' + asList(p.rules).map(r => policyRuleHtml(r.ruleId || '')).join(', ') + '</td></tr>').join('')
         : '<tr><th>Role</th><th>Scope</th><th>Template</th><th>Rules</th></tr>' +
-          pols.map(p => '<tr><td>' + esc(p.role || '') + '</td><td style="word-break:break-all;"><code>' + esc(p.scope || '') + '</code></td><td>' + esc(p.template || '') + '</td><td style="font-size:11px;">' + asList(p.rules).map(r => esc(r.ruleId || '')).join(', ') + '</td></tr>').join('')) +
+          pols.map(p => '<tr><td>' + esc(p.role || '') + '</td><td style="word-break:break-all;"><code>' + esc(p.scope || '') + '</code></td><td>' + esc(p.template || '') + '</td><td style="font-size:11px;">' + asList(p.rules).map(r => policyRuleHtml(r.ruleId || '')).join(', ') + '</td></tr>').join('')) +
       '</table>' + (imp ? '</details>' : '');
     if (hold.approvalNote) { h += '<div style="margin-top:6px;color:#57606a;">' + esc(hold.approvalNote) + '</div>'; }
     h += '</div>';
@@ -36269,7 +36323,7 @@
       // Disabled packs are managed in Governance > Permission templates; they are
       // hidden from one-click import here (active packs only).
       const tpls = ((r && r.templates) || []).filter(t => !t.disabled);
-      if (!tpls.length) { wrap.innerHTML = '<div class="empty">No active templates (manage packs under Governance &rsaquo; Permission templates).</div>'; return; }
+      if (!tpls.length) { wrap.innerHTML = '<div class="empty">No active template packs. Set a pack to active in the Permission template packs table above.</div>'; return; }
       wrap.innerHTML = '';
       // §80.4 (operator 2026-09-29: "quick get started with mine ... preselect from my select or import all button"). ONE
       // button stages every active pack's new permissions (each pack's own Import, all rows ticked, same unit rules);
