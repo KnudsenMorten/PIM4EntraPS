@@ -170,6 +170,7 @@ function Wait-PimAcrRun {
     $deadline = $started.AddSeconds($TimeoutSeconds)
     $terminal = @('Succeeded','Failed','Canceled','Error','Timeout')
     $status   = 'Unknown'
+    $runError = ''
     while ((Get-Date) -lt $deadline) {
         $r = $null
         try { $r = Invoke-PimArm -Method GET -Path $base -ApiVersion (Get-PimAcrTasksApi) } catch { }
@@ -177,13 +178,17 @@ function Wait-PimAcrRun {
             $s = "$($r.properties.status)".Trim()
             if (-not $s) { $s = "$($r.status)".Trim() }
             if ($s) { $status = $s }
+            # UPDATER-ACR-PUSH-RETRY: the run's own error line ("failed to push ...") -- the first thing that says WHY.
+            $e = "$($r.properties.runErrorMessage)".Trim()
+            if (-not $e) { $e = "$($r.runErrorMessage)".Trim() }
+            if ($e) { $runError = $e }
         }
         if ($OnPoll) { try { & $OnPoll $status } catch { } }
         if ($terminal -contains $status) { break }
         Start-Sleep -Seconds $PollSeconds
     }
     $secs = [int]((Get-Date) - $started).TotalSeconds
-    @{ ok = ($status -eq 'Succeeded'); status = $status; runId = $RunId; seconds = $secs }
+    @{ ok = ($status -eq 'Succeeded'); status = $status; runId = $RunId; seconds = $secs; error = $runError }
 }
 
 function Invoke-PimAcrRestBuild {
@@ -215,7 +220,119 @@ function Invoke-PimAcrRestBuild {
     if (-not $runId) { throw "Invoke-PimAcrRestBuild: no run id came back for $($ImageNames -join ', ')." }
     $w = Wait-PimAcrRun -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup `
             -RegistryName $RegistryName -RunId $runId -TimeoutSeconds $TimeoutSeconds -OnPoll $OnPoll
-    @{ ok = $w.ok; status = $w.status; runId = $runId; seconds = $w.seconds; bytes = $bytes; images = @($ImageNames) }
+    @{ ok = $w.ok; status = $w.status; runId = $runId; seconds = $w.seconds; bytes = $bytes; images = @($ImageNames); error = "$($w.error)" }
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# UPDATER-ACR-PUSH-RETRY (owner 2026-10-23 "Build + ring 0/1"; measured on a customer install, SUP-2026-00290): the 2.4.670
+# build SUCCEEDED, and the PUSH to the install's own registry failed 3 times with "dial tcp <ip>:443: connect: connection
+# refused" -- a registry-side fault. The updater only knew "build Failed after 95s", filed it UNCLASSIFIED, and the install
+# stayed behind until a person retried. Now the failed run's error line and log are read, a push that failed on the network
+# or a 5xx is retried ONCE after a short wait, and a second failure goes up as its own transient code (pim-upd-0103).
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimAcrRunLogTail {
+    <#
+      The last -MaxChars of a run's log, or '' when it cannot be read (never throws: the log only explains a failure).
+      POST .../runs/<id>/listLogSasUrl -> { logLink }; the link is a blob SAS -- a plain GET with NO bearer token, the same
+      rule as the build context upload (Send-PimAcrBuildContext).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [Parameter(Mandatory)][string]$ResourceGroup,
+        [Parameter(Mandatory)][string]$RegistryName,
+        [Parameter(Mandatory)][string]$RunId,
+        [int]$MaxChars = 4000
+    )
+    try {
+        $p = (Get-PimAcrRegistryPath -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -RegistryName $RegistryName) + "/runs/$RunId/listLogSasUrl"
+        $l = Invoke-PimArm -Method POST -Path $p -ApiVersion (Get-PimAcrTasksApi)
+        $link = "$($l.logLink)".Trim()
+        if (-not $link) { return '' }
+        $resp = Invoke-WebRequest -Method GET -Uri $link -UseBasicParsing -TimeoutSec 60
+        $txt = "$($resp.Content)"
+        if ($txt.Length -gt $MaxChars) { $txt = $txt.Substring($txt.Length - $MaxChars) }
+        return $txt
+    } catch { return '' }
+}
+
+function Test-PimAcrPushTransient {
+    <#
+      PURE. Did a failed run fail on PUSHING to the registry, for a reason that goes away by itself? @{ transient; reason }.
+      Transient = the text is about the push AND names a network fault or a server-side 5xx / 429. NOT transient: anything
+      about access (unauthorized / denied / forbidden / "is not allowed access" -- a firewall or a role, which a retry never
+      fixes), and every failure that is not about the push (a Dockerfile step, a timeout of the whole run).
+    #>
+    param([AllowEmptyString()][string]$Text)
+    $t = "$Text"
+    if (-not $t.Trim()) { return @{ transient = $false; reason = '' } }
+    if ($t -notmatch '(?i)\bpush(ing|ed)?\b') { return @{ transient = $false; reason = '' } }
+    if ($t -match '(?i)\bunauthori[sz]ed\b|\bdenied\b|\bforbidden\b|is not allowed access|authentication required') { return @{ transient = $false; reason = '' } }
+    $faults = [ordered]@{
+        'connection refused'   = '(?i)connection refused'
+        'connection reset'     = '(?i)connection reset'
+        'timeout'              = '(?i)i/o timeout|TLS handshake timeout|context deadline exceeded|\btimed out\b'
+        'unexpected EOF'       = '(?i)unexpected EOF'
+        'registry unreachable' = '(?i)no such host|network is unreachable'
+        'registry 5xx'         = '(?i)\b50[0234]\b|Service Unavailable|Bad Gateway|Gateway Timeout|Internal Server Error'
+        'registry busy (429)'  = '(?i)\b429\b|too many requests'
+    }
+    foreach ($k in $faults.Keys) { if ($t -match $faults[$k]) { return @{ transient = $true; reason = $k } } }
+    return @{ transient = $false; reason = '' }
+}
+
+function Invoke-PimAcrRestBuildWithRetry {
+    <#
+      Invoke-PimAcrRestBuild, and ONCE more after -RetryDelaySeconds when the first run failed on a transient push fault
+      (Test-PimAcrPushTransient over the run's error line + log tail). The retry is a whole new build (upload + run): the
+      layer cache makes it cheap, and the failed run's image never reached the registry.
+      Returns Invoke-PimAcrRestBuild's result plus: attempts; pushFault ('' | the fault, e.g. 'connection refused'); firstRunId;
+      detail (the error line, else the last log line that names the fault -- for the report).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [Parameter(Mandatory)][string]$ResourceGroup,
+        [Parameter(Mandatory)][string]$RegistryName,
+        [Parameter(Mandatory)][string]$ContextPath,
+        [Parameter(Mandatory)][string[]]$ImageNames,
+        [string]$DockerFilePath = 'SOLUTIONS/PIM4EntraPS/tools/pim-manager/Dockerfile',
+        [int]$TimeoutSeconds = 1800,
+        [hashtable]$Arguments = @{},
+        [scriptblock]$OnPoll,
+        [string]$AgentPoolName,
+        [int]$RetryDelaySeconds = 60,
+        [scriptblock]$OnRetry
+    )
+    $bp = @{ SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; RegistryName = $RegistryName; ContextPath = $ContextPath
+             ImageNames = $ImageNames; DockerFilePath = $DockerFilePath; TimeoutSeconds = $TimeoutSeconds; Arguments = $Arguments
+             OnPoll = $OnPoll; AgentPoolName = $AgentPoolName }
+    $first = $null
+    $fault = ''; $detail = ''
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $b = Invoke-PimAcrRestBuild @bp
+        if (-not $first) { $first = $b }
+        if ($b.ok) { break }
+        # Why did it fail? The error line first; the log only when the line does not say (it is a second ARM call + a download).
+        $why = "$($b.error)"
+        $tr = Test-PimAcrPushTransient -Text $why
+        if (-not $tr.transient) {
+            $log = Get-PimAcrRunLogTail -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -RegistryName $RegistryName -RunId "$($b.runId)"
+            if ($log) { $tr = Test-PimAcrPushTransient -Text ($why + "`n" + $log) }
+            if ($tr.transient -and -not $why.Trim()) {
+                $hit = @("$log" -split "`r?`n" | Where-Object { $_ -match '(?i)push' -and (Test-PimAcrPushTransient -Text $_).transient } | Select-Object -Last 1)
+                if ($hit.Count) { $why = "$($hit[0])".Trim() }
+            }
+        }
+        $fault = if ($tr.transient) { "$($tr.reason)" } else { '' }
+        $detail = $why
+        if (-not $tr.transient -or $attempt -ge 2) { break }
+        if ($OnRetry) { try { & $OnRetry $b $tr.reason } catch { } }
+        if ($RetryDelaySeconds -gt 0) { Start-Sleep -Seconds $RetryDelaySeconds }
+    }
+    $b['attempts']   = $attempt
+    $b['pushFault']  = $(if ($b.ok) { '' } else { $fault })
+    $b['firstRunId'] = "$($first.runId)"
+    $b['detail']     = $(if ($b.ok) { '' } else { $detail })
+    $b
 }
 
 function Split-PimImageReference {
