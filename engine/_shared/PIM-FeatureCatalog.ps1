@@ -294,7 +294,8 @@ function Resolve-PimFeatureGate {
         if ($isCore) {
             # Core is always on; an override can never turn it off.
             $ov = Get-PimFeatureCatalogValue -Object $overrideContainer -Key $key
-            if ($null -ne $ov -and -not [bool]$ov) { $warnings.Add("Feature '$key' is core and cannot be disabled; forced on.") }
+            # DOCS-2 go-public check: the warning names the feature by its label (as the Settings card shows it), not the key.
+            if ($null -ne $ov -and -not [bool]$ov) { $warnings.Add("$($f.label) is always on and cannot be switched off, so it stays on.") }
             $enabled = $true
         } else {
             $ov = Get-PimFeatureCatalogValue -Object $overrideContainer -Key $key

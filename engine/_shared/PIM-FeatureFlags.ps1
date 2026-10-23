@@ -183,7 +183,8 @@ function Resolve-PimFeatureFlags {
         if ($null -ne $ov) { $enabled = [bool]$ov }
         # Always-on guard: a protected surface can never be turned off (lock-out).
         if ([bool]$f.alwaysOn) {
-            if (-not $enabled) { $warnings.Add("Feature '$id' is always-on and cannot be disabled; forced on.") }
+            # DOCS-2 go-public check: the warning names the feature by its LABEL (shown on the Features card), never the key.
+            if (-not $enabled) { $warnings.Add("$($f.label) is always on and cannot be switched off, so it stays on.") }
             $enabled = $true
         }
         # Topology guard: a surface this deployment cannot host is locked OFF, whatever is stored.
@@ -193,7 +194,7 @@ function Resolve-PimFeatureFlags {
             $available = Test-PimFeatureFlagTopologyAllowed -Requires "$($f.requires)" -IsMspMaster $isMaster
             if (-not $available) {
                 $unavailableReason = "needs $(Get-PimFeatureFlagRequirementText -Requires "$($f.requires)")"
-                if ($enabled) { $warnings.Add("Feature '$id' $unavailableReason; forced off.") }
+                if ($enabled) { $warnings.Add("$($f.label) $unavailableReason, so it stays off.") }
                 $enabled = $false
             }
         }
