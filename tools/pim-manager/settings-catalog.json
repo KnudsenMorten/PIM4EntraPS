@@ -297,7 +297,7 @@
     },
     {
       "key": "FeatureGates.msp.downlink",
-      "label": "MSP downlink / fan-out",
+      "label": "MSP managed-tenant updates",
       "where": "Settings > Features & edition > Feature customization",
       "route": "/api/settings/feature-gates",
       "type": "boolean",

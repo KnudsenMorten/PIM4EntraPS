@@ -7478,7 +7478,9 @@
       const on = Object.prototype.hasOwnProperty.call(flags, f.id) ? !!flags[f.id] : !!f.default;
       const dis = canEdit ? '' : ' disabled';
       h += `<tr>` +
-        `<td><b>${esc(f.label)}</b> <code style="color:#57606a;font-size:11px;">${esc(f.id)}</code>${settingInfoBtn('GovernancePreview.' + f.id)}</td>` +
+        // Docs review: the raw flag id (approvalsPreview / conformancePreview) is a setting key, not a customer word --
+        // the plain label alone is shown; the key stays on the checkbox (data-setting-key / data-id).
+        `<td><b>${esc(f.label)}</b>${settingInfoBtn('GovernancePreview.' + f.id)}</td>` +
         `<td style="text-align:center;"><input type="checkbox" class="setGovPrevToggle" data-setting-key="GovernancePreview.${esc(f.id)}" data-id="${esc(f.id)}"${on?' checked':''}${dis}></td>` +
         `<td style="color:#57606a;font-size:11.5px;">${f.default ? 'on' : 'off (preview)'}</td>` +
         `</tr>`;
@@ -7641,7 +7643,7 @@
     "drift detection — what exists in the directory versus what your model says",
     "reports, including standing access and expiring access, and the current delegations list",
     "administrator accounts and first-time access passes, issued and tracked",
-    "permission templates imported by script (Import-PimPermissionTemplate.ps1) and tenant preparation from one configuration file (Invoke-PimTenantPrep.ps1)",
+    "permission templates imported in the portal (Templates > Workload templates)",
     "updated with one command from the public release",
     "community support (GitHub issues on the public repository)"];
   var PIM_EDITION_PRO_SINGLE = ["Discovery and gaps — what is and is not delegated through PIM across every workload, and the scheduled jobs that find new roles, groups and resources",
@@ -7729,9 +7731,9 @@
     let h = '<div id="proUpgradePage" style="max-width:980px;">';
     h += '<h2 style="margin:0 0 6px;">PIM Manager Pro <span class="pro-tag">PRO</span></h2>';
     if (wantedLabel) h += '<p style="margin:0 0 8px;font-size:14px;"><b>' + esc(wantedLabel) + '</b> is part of PIM Manager Pro. This installation runs the free Community edition.</p>';
-    h += '<p style="margin:0 0 12px;color:#57606a;">Everything in the free edition keeps working without a licence. Pro adds the features below for your tenant, and the MSP edition for managing customer tenants -- MSP is available in Pro only.</p>';
+    h += '<p style="margin:0 0 12px;color:#57606a;">Everything in the free edition keeps working without a license. Pro adds the features below for your tenant, and the MSP edition for managing customer tenants -- MSP is available in Pro only.</p>';
     h += '<p style="margin:0 0 16px;"><a class="btn" id="proBuyBtn" href="' + esc(buyHref) + '" target="_blank" rel="noopener">Buy Pro</a> ' +
-      '<a href="#" class="lic-go-settings" id="proRegisterLink" style="margin-left:10px;">I have a licence file &rsaquo; register it</a>' +
+      '<a href="#" class="lic-go-settings" id="proRegisterLink" style="margin-left:10px;">I have a license file &rsaquo; register it</a>' +
       ' <span style="color:#57606a;margin-left:10px;">Questions: ' + licenceMailtoHtml(d) + '</span></p>';
     h += '<table class="pro-cmp" id="proCmpTable"><thead><tr><th>Feature</th><th>Free</th><th>Pro</th></tr></thead><tbody>';
     h += '<tr><th colspan="3" style="background:#f6f8fa;">Free -- the community edition, for a single tenant</th></tr>';
@@ -10946,8 +10948,9 @@
   // errors). Independent of the offboarding preview below, which is a different feature and may be switched off.
   // 2026-09-21 (operator: "why is it that you cannot show me all changes and i can approve all in one go, that is what we
   // want"): EVERY held policy change set (PIM for Groups, Entra roles, Azure roles) on one page, one summary, and ONE
-  // "Approve all" button. The approval carries over to the next run as long as that run adds no new weakening (engine
-  // Test-PimPolicyBreaker), and the policy jobs are started straight away so nobody has to find "Run now".
+  // "Approve all" button. Since PIM 100.93 an approval covers EXACTLY the plan hash it was given (engine
+  // Test-PimPolicyBreaker): a run that plans anything different is held again for its own approval. The policy jobs are
+  // started straight away so nobody has to find "Run now".
   const POLICY_HOLD_JOBS = { 'GroupsPolicies': 'delta-policies', 'EntraRolePolicies': 'delta-policies', 'AzResPolicies': 'delta-pim-azure-policies' };
   // PIM 100.56: a guard record's Link opens Approvals on ONE held change set (?changeset=<provider>, lower-cased); used once.
   let APPR_FOCUS_CHANGESET = '';
@@ -10999,7 +11002,7 @@
     const btn = host.querySelector('#apprAllBtn');
     if (btn) btn.onclick = async () => {
       if (!confirm('Approve all ' + held.length + ' change set(s) -- ' + pol + ' policies' + (weak ? ', ' + weak + ' of the changes weaken a setting' : '') + '?\n\n' +
-          'The policy jobs start straight away and make these changes. A later run is only held again if it would weaken something you have not approved here.')) return;
+          'The policy jobs start straight away and make these changes. Each change set is approved for its exact plan only: if a later run plans anything different, that change set is held again for its own approval.')) return;
       const msg = host.querySelector('#apprAllMsg');
       btn.disabled = true; msg.textContent = 'Approving…'; msg.style.color = '#57606a';
       try {
@@ -11074,7 +11077,7 @@
 
     const h = [];
     h.push('<div style="margin-bottom:12px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Approvals &mdash; maker / checker queue</span>');
-    h.push(`<div style="color:#57606a;font-size:12px;margin-top:3px;">Destructive identity actions (offboard / revoke / disable) and sensitive pending changes (authoring) require an approval here before any controlled execution is possible. <b>Nothing runs automatically</b> &mdash; a different administrator must approve each request (approver &ne; requestor).</div></div>`);
+    h.push(`<div style="color:#57606a;font-size:12px;margin-top:3px;">Destructive identity actions (offboard / revoke / disable) and sensitive pending changes (authoring) require an approval here before any controlled execution is possible. <b>Nothing runs automatically</b> &mdash; a different administrator must approve each request (approver &ne; requestor), unless a SuperAdmin allowed self-approval.</div></div>`);
 
     // Toolbar: status filter + raise button (Admin+).
     h.push('<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">');
@@ -11234,7 +11237,7 @@
     if (msg) { msg.textContent = 'Submitting...'; msg.style.color = '#57606a'; }
     try {
       const r = await api('POST', '/api/approvals', { action, target, justification: just, ticket, items });
-      if (msg) { msg.textContent = 'Request raised (Pending). A different administrator must approve it.'; msg.style.color = '#1a7f37'; }
+      if (msg) { msg.textContent = 'Request raised (Pending). A different administrator must approve it, unless a SuperAdmin allowed self-approval.'; msg.style.color = '#1a7f37'; }
       await renderApprovals();
     } catch (e) {
       if (msg) { msg.textContent = 'Failed: ' + e.message; msg.style.color = '#cf222e'; }
@@ -12498,7 +12501,7 @@
     // AUTHORED, so a privileged object PIM never created is outside the comparison entirely. Say so on the page, always.
     h.push('<div id="driftScopeNote" style="color:#57606a;font-size:11.5px;margin-bottom:10px;padding:6px 10px;border:1px solid #d0d7de;border-radius:6px;background:#f6f8fa;">' +
       'This compares what PIM manages. It does <b>not</b> see privileged objects PIM never created &mdash; those are outside the comparison, so they cannot show up here however privileged they are. ' +
-      'Unmanaged objects are covered separately by the stray-object sweep (<code>tools/setup/Find-PimStrayTestObjects.ps1</code>, ' + pimScriptDocLink('Find-PimStrayTestObjects') + ').</div>');
+      'Groups and administrative units left behind by test runs (names that start with a test marker) are found separately by the read-only stray-object sweep (<code>Find-PimStrayTestObjects.ps1</code> from the release package, ' + pimScriptDocLink('Find-PimStrayTestObjects') + ').</div>');
 
     if (d.snapshotMissing) {
       h.push(stateEmpty('No drift check has run yet', d.hint || 'The scheduler job drift-snapshot runs it on its interval (every 4 hours by default -- see Job schedule).'));
@@ -13878,9 +13881,9 @@
       '<b>Both the Manager and the engine read this one list</b> (stored in the PIM database, audited on every change), so it no longer has to be set by hand on each container. ' +
       'Use the sign-in name (UPN) of each account.</div>');
     h.push('<div class="bgTwoPerson" style="font-size:11.5px;margin-bottom:8px;padding:6px 10px;border:1px solid #d0d7de;border-radius:6px;background:#f6f8fa;">' +
-      '<b>Two-person rule.</b> Because this list switches every other guard off for an account, a change is a <b>request</b>: one SuperAdmin raises it, ' +
+      '<b>Two-person rule.</b> Because an account on this list is exempt from every revoke, disable and offboard path, a change is a <b>request</b>: one SuperAdmin raises it, ' +
       'a <b>different SuperAdmin</b> approves it, and only then does the list change. A request expires after 72 hours. ' +
-      'With only one SuperAdmin, use the operator route on a host with database access: <code>tools/setup/Set-PimBreakGlassAccounts.ps1</code> (audited; ' + pimScriptDocLink('Set-PimBreakGlassAccounts') + ').</div>');
+      'With only one SuperAdmin, use the operator route on a host with database access: <code>Set-PimBreakGlassAccounts.ps1</code> from the release package (audited; ' + pimScriptDocLink('Set-PimBreakGlassAccounts') + ').</div>');
     if (loadErr) {
       h.push('<div class="bgErr" style="color:#cf222e;font-size:12px;margin-bottom:6px;">Could not read the list: ' + esc(loadErr) + '</div>');
     } else if (d && (d.storeOk === false || d.source === 'unreadable' || d.source === 'no-store')) {

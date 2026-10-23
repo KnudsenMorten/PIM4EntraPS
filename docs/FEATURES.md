@@ -2089,7 +2089,7 @@ licence state.
 and a complete audit trail; Entra ID roles, PIM for Groups, administrative units and Azure RBAC; Intune and
 Defender XDR role delegation, including Defender custom roles; delegation by group; policy templates (a Standard and
 a RequireApproval template per kind, renameable, with a default per kind); drift detection; reports (standing and expiring access)
-and the current delegations list; administrator accounts and first-time access passes; permission templates imported by script and tenant
+and the current delegations list; administrator accounts and first-time access passes; permission templates imported in the portal or by script and tenant
 preparation from one configuration file; self-updating from the public release; and community support.
 
 **Pro — licensed capabilities for a single tenant.** Discovery and gaps across every workload; the
@@ -2158,8 +2158,7 @@ Everything an organisation needs to govern its own tenant:
 - **drift detection** — what exists in the directory versus what your model says;
 - **reports**, including standing access and expiring access, and the **current delegations** list;
 - **administrator accounts and first-time access passes**, issued and tracked;
-- **permission templates imported by script** (`Import-PimPermissionTemplate.ps1`) and tenant preparation from one
-  configuration file (`Invoke-PimTenantPrep.ps1`);
+- **permission templates imported in the portal** (Templates > Workload templates);
 - **updated with one command from the public release**;
 - **community support** (GitHub issues on the public repository).
 
