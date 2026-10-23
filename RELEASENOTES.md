@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.669 -- 2026-10-23
+
+- Clearer, accurate screen texts: the Approvals page says a SuperAdmin can allow self-approval; the Approve all dialog says each held policy change set is approved for its exact plan only; the break-glass list says it exempts an account from every revoke, disable and offboard path; guard names no longer show internal reference numbers; the Drift note says what the stray-object sweep finds; Settings shows plain names instead of internal ids; the Community vs Pro page says permission templates are imported in the portal. The Entra roles reference template pack is named PIM Manager reference set. No behavior changes.
+
 ## 2.4.668 -- 2026-10-23
 
 - Offboarding by one administrator: an administrator can now delete an admin, remove an admin from PIM, or disable or offboard one at once directly; a second administrator approves only for a sensitive (privileged, tier 0) admin, a break-glass account, or when the Pro second approver is switched on. Deleting is always done by a person, never automatically, and every such action is in the audit trail. Levels L0-L9: the Home view and the per-level count now include levels L6-L9 (Azure levels follow the management-group layer); an L7 group was counted as L1 before. The GitHub README is now a short front door that links to the documentation on invardia.com; the long design and feature files stay as engineering notes.

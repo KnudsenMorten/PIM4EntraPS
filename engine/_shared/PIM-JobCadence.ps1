@@ -482,7 +482,7 @@ function Resolve-PimMspDownlinkSwitch {
     if ($null -eq $v) { return @{ run = $true; explicit = $false; reason = 'msp.downlink is not set (default ON)' } }
     $on = if ($v -is [bool]) { [bool]$v } elseif ("$v".Trim() -match '^(?i)(false|0|no|off)$') { $false } else { $true }
     if ($on) { return @{ run = $true; explicit = $true; reason = 'msp.downlink is ON' } }
-    return @{ run = $false; explicit = $true; reason = "msp.downlink is switched OFF (Settings > Features & edition: 'MSP downlink / fan-out') -- nothing is pulled or published until it is switched on" }
+    return @{ run = $false; explicit = $true; reason = "msp.downlink is switched OFF (Settings > Features & edition: 'MSP managed-tenant updates') --nothing is pulled or published until it is switched on" }
 }
 
 function Get-PimJobCadenceSkipFromLog {

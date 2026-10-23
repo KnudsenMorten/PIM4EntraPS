@@ -9571,7 +9571,7 @@ function Get-PimManagerHealthNotices {
         $mspRole = Get-PimManagerMspLicenseRole
         if ($mspRole -and (Get-Command Test-PimFeatureEnabled -ErrorAction SilentlyContinue) -and -not (Test-PimFeatureEnabled -Key 'msp.downlink')) {
             $what = if ($mspRole -eq 'Master') { 'nothing is published to the managed tenants' } else { 'nothing is pulled from the managing tenant' }
-            $out.Add([ordered]@{ id = 'msp-downlink-off'; sev = 'amber'; tab = 'settings'; text = "MSP downlink / fan-out is switched off in Settings > Features & edition -- $what until it is switched on." })
+            $out.Add([ordered]@{ id = 'msp-downlink-off'; sev = 'amber'; tab = 'settings'; text = "MSP managed-tenant updates is switched off in Settings > Features & edition -- $what until it is switched on." })
         }
     } catch { }
     try {
@@ -11638,8 +11638,8 @@ function ConvertTo-PimManagerBreakGlassRequestView {
     $onlyNote = ''
     if ($only) {
         $onlyNote = ('No other SuperAdmin is configured, so nobody can approve this request in the Manager. Grant a second SuperAdmin ' +
-                     '(tools/setup/Set-PimManagerAccess.ps1), or use the out-of-band operator route on a host with store access: ' +
-                     'tools/setup/Set-PimBreakGlassAccounts.ps1 (audited as setup). This request then expires unapproved.')
+                     '(Set-PimManagerAccess.ps1 from the release package), or use the out-of-band operator route on a host with store access: ' +
+                     'Set-PimBreakGlassAccounts.ps1 from the release package (audited as setup). This request then expires unapproved.')
     }
     return [ordered]@{
         id = $r.id; status = $r.status; open = $open
@@ -14846,7 +14846,7 @@ function Handle-Request {
                 $me  = (Get-PimManagerRole).identity
                 $rec = Add-PimApprovalRequest -Requestor "$me" -Action $action -Target $target -Justification $just -Ticket $ticket -Detail $detail
                 Write-PimManagerAuditEvent -Action 'approval.request.created' -Target $target -After @{ id = "$($rec.id)"; action = "$($rec.action)"; requestor = "$me" }
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; id = "$($rec.id)"; status = "$($rec.status)"; note = 'Approval request raised (Pending). A different administrator must approve it before any controlled execution is possible. Nothing executes automatically.' })
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; id = "$($rec.id)"; status = "$($rec.status)"; note = 'Approval request raised (Pending). A different administrator must approve it (unless a SuperAdmin allowed self-approval) before any controlled execution is possible. Nothing executes automatically.' })
                 return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }

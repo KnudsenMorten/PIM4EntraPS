@@ -115,9 +115,10 @@ function Get-PimGuardReleaseCatalog {
         [pscustomobject]@{ guardId = 'hybrid-ad.server-groups.approve'; title = 'Server groups approval'; release = 'approval'; locked = ''
             protects = 'Active Directory from getting server groups created for servers nobody approved.'
             what = 'New servers wait in a list; their server groups are created only after a SuperAdmin approves that exact list on Settings > Hybrid Active Directory. The approval is used once, within 72 hours (a fixed time, not a count).' }
+        # §96.5 (spec ids stay in comments only -- the visible title / what text is customer-facing, docs review 2026-10).
         [pscustomobject]@{ guardId = 'engine.reconcile-paused'; title = 'Daily reconcile paused'; release = 'info'; locked = ''
             protects = 'The tenant from the daily reconcile while somebody has paused it.'
-            what = 'Resumed on the Jobs page (s96.5).' }
+            what = 'Resumed on the Jobs page.' }
         [pscustomobject]@{ guardId = 'engine.break-glass'; title = 'Break-glass exclusion'; release = 'never'
             protects = 'The emergency accounts you reach for when everything else is locked out.'
             locked = 'Without a break-glass account a lockout cannot be repaired.'
@@ -126,15 +127,18 @@ function Get-PimGuardReleaseCatalog {
             protects = 'Admin accounts from being deleted by a clean-up run.'
             locked = 'A deleted account cannot be brought back by the next run.'
             what = 'A prune or reconcile never deletes an admin account; only the operator''s Delete account does.' }
-        [pscustomobject]@{ guardId = 'engine.shared-workload-assignment'; title = 'Shared workload assignments (SEC-83)'; release = 'never'
+        # SEC-83
+        [pscustomobject]@{ guardId = 'engine.shared-workload-assignment'; title = 'Shared workload assignments'; release = 'never'
             protects = 'The access of other principals that share a Defender XDR or Intune assignment with a PIM group.'
             locked = 'Removing the assignment would take away access PIM Manager does not manage.'
             what = 'A Defender XDR / Intune assignment that also holds another principal is never deleted.' }
-        [pscustomobject]@{ guardId = 'engine.unowned-group'; title = 'Groups PIM does not own (SEC-85)'; release = 'never'
+        # SEC-85
+        [pscustomobject]@{ guardId = 'engine.unowned-group'; title = 'Groups PIM does not own'; release = 'never'
             protects = 'The members of groups PIM Manager does not manage.'
             locked = 'PIM Manager only changes what it defines.'
             what = 'Memberships in groups PIM does not manage are never removed.' }
-        [pscustomobject]@{ guardId = 'engine.reconcile-unproven'; title = 'Removal rules of the reconcile (96.5)'; release = 'never'
+        # §96.5
+        [pscustomobject]@{ guardId = 'engine.reconcile-unproven'; title = 'Removal rules of the reconcile'; release = 'never'
             protects = 'Access PIM Manager cannot prove it created.'
             locked = 'An item nobody defined here is never PIM Manager''s to remove.'
             what = 'An item PIM did not define, did not make live, or did not remove is never removed.' }

@@ -1,8 +1,8 @@
 {
   "id": "entra-roles-reference",
-  "name": "Entra ID roles - PIM4EntraPS reference set (quick start)",
+  "name": "Entra ID roles - PIM Manager reference set (quick start)",
   "version": 3,
-  "description": "The complete role-linked permission-group set from the original PIM4EntraPS delegation model: one ROLE-ASSIGNABLE permission group per Entra ID directory role and level, plus the task groups (one permission group per administrative task, e.g. manage Conditional Access policies or revoke sessions), each given its role through a PIM-for-groups assignment. Import all for a fast start, or pick the groups you want. On import every group name is re-expressed under YOUR naming convention (prefix and pattern from your settings), never the reference names.",
+  "description": "The complete role-linked permission-group set from the original PIM Manager delegation model: one ROLE-ASSIGNABLE permission group per Entra ID directory role and level, plus the task groups (one permission group per administrative task, e.g. manage Conditional Access policies or revoke sessions), each given its role through a PIM-for-groups assignment. Import all for a fast start, or pick the groups you want. On import every group name is re-expressed under YOUR naming convention (prefix and pattern from your settings), never the reference names.",
   "rows": {
     "PIM-Definitions-Services": [
       {
