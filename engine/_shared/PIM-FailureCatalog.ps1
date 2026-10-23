@@ -247,6 +247,16 @@ $script:PimFailureRules = @(
        retryable = $true; severity = 'environment'
        fixes = @() }
 
+    # ADOPT-BY-NAME-SQUAT (owner 2026-10-23 "Hold for approval"): a group of a defined name that PIM Manager did not create
+    # and no administrator adopted is held -- never used, never given a role (PIM-EngineProviders Test-PimGroupAdoption).
+    @{ code = 'GROUP-ADOPT-HELD'
+       match = { param($m, $row) "$m" -match '(?i)(^|[^A-Za-z0-9-])GROUP-ADOPT-HELD([^A-Za-z0-9-]|$)' }
+       title = 'A group with a defined name exists, but PIM Manager did not create it -- it waits for an administrator'
+       cause = 'PIM Manager finds a group by the name its definition carries. A group of that name exists in Entra ID that PIM Manager did not create and that no administrator has adopted (or it is not the group PIM Manager manages under that name). Using it would give a group someone else made the roles of the definition, so it is held: nothing is given to it and nothing was changed on it.'
+       remedy = 'If it is the right group, adopt it in PIM Manager on Jobs > Engine logs & errors (Groups waiting for adoption). If it is not, rename or delete it in the Microsoft Entra admin center; PIM Manager then creates its own group on the next run.'
+       retryable = $true; severity = 'environment'
+       fixes = @() }
+
     @{ code = 'DUPLICATE-AU-NAME'
        match = { param($m, $row) "$m" -match '(?i)(^|[^A-Za-z0-9-])DUPLICATE-AU-NAME([^A-Za-z0-9-]|$)' }
        title = 'Two administrative units in Entra ID carry the same name -- PIM Manager touches neither'
@@ -716,6 +726,7 @@ function Get-PimFailureCodeTable {
         ,@('GROUP-POLICY-NOT-READY',           'pim-grp-0102',   'replication-delay', 'nobody',   '',      '2.4.638')
         ,@('GROUP-NOT-CREATED-YET',            'pim-grp-0103',   'replication-delay', 'nobody',   '',      '2.4.638')
         ,@('GROUP-POLICY-UNREADABLE',          'pim-grp-0104',   'upstream-error',    'product',  '',      '2.4.638')
+        ,@('GROUP-ADOPT-HELD',                 'pim-grp-0105',   'customer-config',   'customer', '',      '2.4.672')
         ,@('DEFENDER-ROLE-CREATE-PENDING',     'pim-def-0101',   'replication-delay', 'nobody',   '',      '2.4.638')
         ,@('DEFENDER-PERMISSION-PREREQUISITE', 'pim-def-0102',   'customer-config',   'customer', '',      '2.4.638')
         ,@('DEFENDER-ROLE-AMBIGUOUS',          'pim-def-0103',   'customer-config',   'customer', '',      '2.4.638')
@@ -837,7 +848,8 @@ function Get-PimFailureCustomerText {
 function Get-PimFailureSolutionPages {
     <# PURE. The Manager page names the solutions use -- exactly as the pages are called in pim-manager.html. #>
     return @('Engine logs & errors', 'Pending changes', 'Advanced View (grid)', 'Accounts & TAP', 'Departments & owners',
-             'Policy templates', 'Policy settings', 'Guards', 'Get Started', 'Workload templates', 'Custom workloads', 'Role Lookup', 'Jobs')
+             'Policy templates', 'Policy settings', 'Guards', 'Get Started', 'Workload templates', 'Custom workloads', 'Role Lookup', 'Jobs',
+             'Engine logs & errors')
 }
 
 function Get-PimFailureSolutionCatalog {
@@ -1030,6 +1042,12 @@ function Get-PimFailureSolutionCatalog {
             affected = 'Nothing was changed on either group. Every item that names the group waits; everything else is applied.'
             steps = @('In the Microsoft Entra admin center, rename or delete the group that is not the one PIM Manager should manage (Jobs > Engine logs & errors names both object ids).')
             after = 'The next run finds the group that is left, applies the waiting items, and the status turns OK by itself.' }
+        'GROUP-ADOPT-HELD' = @{ short = 'a group with a defined name exists that PIM Manager did not create'
+            what = 'A group with a name PIM Manager defines exists in Entra ID, but PIM Manager did not create it and no administrator has adopted it, so PIM Manager does not use it: {item}.'
+            affected = 'Nothing was given to that group and nothing was changed on it. Every item that names the group waits; everything else is applied.'
+            steps = @('If it is the right group, open Engine logs & errors and adopt it under Groups waiting for adoption.',
+                      'If it is not, rename or delete it in the Microsoft Entra admin center; PIM Manager then creates its own group on the next run.')
+            after = 'The next run uses the adopted group (or creates its own), applies the waiting items, and the status turns OK by itself.' }
         'DUPLICATE-AU-NAME' = @{ short = 'two administrative units in Entra ID have the same name, so PIM Manager touches neither'
             what = 'Two administrative units in Entra ID have the same name, so PIM Manager does not choose one and touches neither: {item}.'
             affected = 'Nothing was changed on either administrative unit. Every item that names it waits; everything else is applied.'

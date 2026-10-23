@@ -1839,7 +1839,18 @@ function Invoke-PimRenameInPlace {
         $oid = Test-PimNameAlreadyLive -Kind $Kind -DisplayName $old
         if (-not $oid) { continue }
         if ($Kind -eq 'group') {
+            # 🔴 ADOPT-BY-NAME-SQUAT: a rename takes over only PIM Manager's OWN group of the old name (pinned to this id, or
+            # found during the one-time migration). A group someone pre-created with the old name is never renamed into use.
+            $pst = Get-PimGroupPinState
+            if ($pst.available) {
+                $oldPin = "$($pst.pins["$old".Trim().ToLowerInvariant()])"
+                if (-not (($oldPin -and $oldPin -ieq "$oid") -or (-not $oldPin -and $pst.migrating))) {
+                    Write-Warning ("  [engine] Groups: '{0}' was NOT renamed from '{1}' -- the group of the old name (id {2}) is not the one PIM Manager manages{3}." -f $NewName, $old, $oid, $(if ($oldPin) { " (that is id $oldPin)" } else { '' }))
+                    continue
+                }
+            }
             [void](Invoke-PimGraph -Method PATCH -Path "/groups/$oid" -Body @{ displayName = $NewName; mailNickname = (Get-PimMailNickname $NewName) })
+            Move-PimGroupPin -OldName $old -NewName $NewName -Id "$oid"
         } else {
             [void](Invoke-PimGraph -Method PATCH -Path "/directory/administrativeUnits/$oid" -Body @{ displayName = $NewName })
         }
@@ -1883,10 +1894,15 @@ function Get-PimDuplicateLiveNames {
 }
 function Register-PimDuplicateLiveName {
     # Remember a duplicated name (with the tags that name it, for the failure class) and say so ONCE per name.
-    param([Parameter(Mandatory)][ValidateSet('group', 'administrativeUnit')][string]$Kind, [Parameter(Mandatory)][string]$Name, [string[]]$Ids = @())
+    # ADOPT-BY-NAME-SQUAT: -Code GROUP-ADOPT-HELD registers a name whose ONE live group is not the group PIM Manager made or
+    # an administrator adopted (Test-PimGroupAdoption). Same register, same filter, its own code and message. A real
+    # duplicate (no -Code) always wins over an adoption hold: it is never overwritten by one.
+    param([Parameter(Mandatory)][ValidateSet('group', 'administrativeUnit')][string]$Kind, [Parameter(Mandatory)][string]$Name, [string[]]$Ids = @(),
+          [string]$Code = '', [string]$PinnedId = '')
     $reg = Get-PimDuplicateLiveNames
     $k = "$Name".Trim().ToLowerInvariant(); if (-not $k) { return }
-    $first = -not $reg[$Kind].ContainsKey($k)
+    if ("$Code".Trim() -and $reg[$Kind].ContainsKey($k) -and -not "$($reg[$Kind][$k].code)".Trim()) { return }
+    $first = -not $reg[$Kind].ContainsKey($k) -or "$($reg[$Kind][$k].code)" -ne "$Code".Trim()
     $tags = @()
     try {
         $map = $null
@@ -1894,7 +1910,11 @@ function Register-PimDuplicateLiveName {
         elseif ($Kind -eq 'administrativeUnit' -and (Get-Command Get-PimTagToAuName -ErrorAction SilentlyContinue)) { $map = Get-PimTagToAuName }
         if ($map -is [System.Collections.IDictionary]) { $tags = @(@($map.Keys) | Where-Object { "$($map[$_])".Trim().ToLowerInvariant() -eq $k } | ForEach-Object { "$_".ToLowerInvariant() }) }
     } catch { $tags = @() }
-    $reg[$Kind][$k] = @{ name = "$Name".Trim(); ids = @(@($Ids) | Where-Object { "$_" } | Select-Object -Unique); tags = $tags }
+    $reg[$Kind][$k] = @{ name = "$Name".Trim(); ids = @(@($Ids) | Where-Object { "$_" } | Select-Object -Unique); tags = $tags; code = "$Code".Trim(); pinnedId = "$PinnedId".Trim() }
+    if ($first -and "$Code".Trim()) {
+        Write-Warning ("  [engine] {0}" -f (Get-PimGroupAdoptHeldText -Name "$Name".Trim() -LiveId "$(@($Ids)[0])" -PinnedId "$PinnedId".Trim()))
+        return
+    }
     if ($first) {
         $code = if ($Kind -eq 'group') { 'DUPLICATE-GROUP-NAME' } else { 'DUPLICATE-AU-NAME' }
         $what = if ($Kind -eq 'group') { 'groups' } else { 'administrative units' }
@@ -1909,6 +1929,159 @@ function Unregister-PimDuplicateLiveName {
     if (-not ($reg -is [hashtable]) -or -not ($reg[$Kind] -is [hashtable]) -or -not $reg[$Kind].Count) { return }
     $k = "$Name".Trim().ToLowerInvariant()
     if ($k -and $reg[$Kind].ContainsKey($k)) { $reg[$Kind].Remove($k) }
+}
+
+# ---------------------------------------------------------------------------
+# 🔴 ADOPT-BY-NAME-SQUAT (Invardia review round 2 item 1; owner 2026-10-23 wizard "Hold for approval"). The engine finds a
+# group by its DISPLAY NAME, and anyone allowed to create groups could PRE-CREATE a group with a future definition's name:
+# the engine then "found" it and gave it the roles (privilege escalation). Now a group of a defined name is used only when
+# its object id is PINNED -- pim.Settings 'GroupObjectPins' { version; migratedUtc; pins = { <lower name> = <object id> } }:
+#   * the engine pins every group it CREATES (the POST's id) and an administrator pins one by ADOPTING it (the Manager's
+#     Jobs > Engine logs & errors > Groups waiting for adoption, audited);
+#   * ONE-TIME MIGRATION: an install with no 'GroupObjectPins' yet pins, on its first run with this code, every defined name
+#     that resolves to exactly one live group -- the groups it manages today, so no install is cut off -- and the record is
+#     written at the END of that real run (Save-PimGroupPinState from Invoke-PimEngine; a plan never writes it);
+#   * any other group of a defined name is HELD (GROUP-ADOPT-HELD, customer-config): it resolves to nothing, nothing is
+#     granted to it, the Groups scope neither changes nor duplicates it, and pim.Settings 'GroupAdoptHeld' lists it for the
+#     Manager.
+# No store (a test, a tool without Get-PimSetting) or an unreadable record = today's behaviour, warned once: the check
+# never stops an engine whose store it cannot read (the engine's own store checks do that).
+# ---------------------------------------------------------------------------
+function Get-PimGroupAdoptHeldText {
+    # PURE. The one sentence for a held group (job log, failure item, the Manager).
+    param([string]$Name, [string]$LiveId, [string]$PinnedId = '')
+    if ("$PinnedId".Trim()) {
+        return ("GROUP-ADOPT-HELD: the group named '{0}' in Entra ID (id {1}) is NOT the group PIM Manager manages under that name (id {2}) -- PIM Manager does not use it: nothing is given to it and nothing was removed. If it is the right group, adopt it on Jobs > Engine logs & errors; if not, rename or delete it in Entra ID." -f $Name, $LiveId, $PinnedId)
+    }
+    return ("GROUP-ADOPT-HELD: a group named '{0}' exists in Entra ID (id {1}), but PIM Manager did not create it and no administrator has adopted it -- PIM Manager does not use it: nothing is given to it and nothing was removed. If it is the right group, adopt it on Jobs > Engine logs & errors; if not, rename or delete it in Entra ID." -f $Name, $LiveId)
+}
+function Get-PimGroupPinState {
+    <#
+      The run's pin state, read once per run (Invoke-PimEngine resets it): @{ available; migrating; pins (lower name -> id);
+      dirty; migratedUtc; held (lower name -> @{ name; liveId; pinnedId; tags }) }. available=$false = no store / unreadable.
+    #>
+    if ($global:PIM_GroupPinState -is [hashtable]) { return $global:PIM_GroupPinState }
+    # changes = what THIS run pinned / unpinned (lower name -> id, '' = removed): the save merges them into the record as it is
+    # THEN, so an adoption the Manager stored while the run was going is never overwritten.
+    $st = @{ available = $false; migrating = $false; pins = @{}; dirty = $false; migratedUtc = ''; held = @{}; heldDirty = $false; changes = @{} }
+    if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
+        try {
+            $raw = Get-PimSetting -Name 'GroupObjectPins'
+            if ($raw -is [string] -and "$raw".Trim()) { $raw = "$raw" | ConvertFrom-Json }
+            $st.available = $true
+            if ($null -eq $raw -or ($raw -is [string] -and -not "$raw".Trim())) { $st.migrating = $true }
+            else {
+                $p = $(if ($raw -is [System.Collections.IDictionary]) { $raw['pins'] } else { $raw.pins })
+                if ($p -is [System.Collections.IDictionary]) { foreach ($k in @($p.Keys)) { if ("$($p[$k])".Trim()) { $st.pins["$k".Trim().ToLowerInvariant()] = "$($p[$k])".Trim() } } }
+                elseif ($null -ne $p) { foreach ($pp in @($p.PSObject.Properties)) { if ("$($pp.Value)".Trim()) { $st.pins["$($pp.Name)".Trim().ToLowerInvariant()] = "$($pp.Value)".Trim() } } }
+                $st.migratedUtc = "$(if ($raw -is [System.Collections.IDictionary]) { $raw['migratedUtc'] } else { $raw.migratedUtc })"
+            }
+        } catch {
+            $st.available = $false
+            Write-Warning "  [engine] Groups: the adopted-group record (GroupObjectPins) could not be read ($($_.Exception.Message)) -- groups are found by name as before this run."
+        }
+    }
+    $global:PIM_GroupPinState = $st
+    return $st
+}
+function Set-PimGroupPin {
+    # Pin a name to an object id (the engine created it, or the migration found it). Clears a hold on that name.
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Id)
+    $st = Get-PimGroupPinState
+    if (-not $st.available) { return }
+    $k = "$Name".Trim().ToLowerInvariant(); $v = "$Id".Trim(); if (-not $k -or -not $v) { return }
+    if ("$($st.pins[$k])" -ne $v) { $st.pins[$k] = $v; $st.changes[$k] = $v; $st.dirty = $true }
+    if ($st.held.ContainsKey($k)) { $st.held.Remove($k); $st.heldDirty = $true }
+    $reg = $global:PIM_DuplicateLiveNames
+    if ($reg -is [hashtable] -and $reg['group'] -is [hashtable] -and $reg['group'].ContainsKey($k) -and "$($reg['group'][$k].code)" -eq 'GROUP-ADOPT-HELD') { $reg['group'].Remove($k) }
+}
+function Test-PimGroupAdoption {
+    <#
+      May the engine use the ONE live group $Id under the defined name $Name? @{ ok; reason = pinned | migrated | no-store |
+      held-other | held-new; pinnedId }. Pinned to $Id -> ok. Pinned to another id -> HELD. Not pinned: during the one-time
+      migration -> pinned now, ok; afterwards -> HELD. A hold is registered (GROUP-ADOPT-HELD) and remembered for the Manager.
+    #>
+    param([Parameter(Mandatory)][string]$Name, [AllowEmptyString()][string]$Id)
+    $st = Get-PimGroupPinState
+    if (-not $st.available) { return @{ ok = $true; reason = 'no-store'; pinnedId = '' } }
+    $k = "$Name".Trim().ToLowerInvariant(); $v = "$Id".Trim()
+    if (-not $k -or -not $v) { return @{ ok = $true; reason = 'no-name'; pinnedId = '' } }
+    # Only a DEFINED group name is PIM Manager's to guard: the resolver also serves names no definition carries (a group
+    # someone else manages, named in an assignment row) -- those are found by name as before and never pinned.
+    if (-not ($st.defined -is [hashtable])) {
+        $st.defined = @{}
+        try { foreach ($d in @(Get-PimGroupDefinitionRows -IncludeRetired)) { $n = "$($d.GroupName)".Trim().ToLowerInvariant(); if ($n) { $st.defined[$n] = $true } } }
+        catch { $st.defined = $null; return @{ ok = $true; reason = 'no-definitions'; pinnedId = '' } }
+    }
+    if (-not $st.defined.ContainsKey($k)) { return @{ ok = $true; reason = 'not-defined'; pinnedId = '' } }
+    $pin = "$($st.pins[$k])"
+    if ($pin -and $pin -ieq $v) {
+        if ($st.held.ContainsKey($k)) { $st.held.Remove($k); $st.heldDirty = $true }
+        return @{ ok = $true; reason = 'pinned'; pinnedId = $pin }
+    }
+    if (-not $pin -and $st.migrating) { Set-PimGroupPin -Name $Name -Id $v; return @{ ok = $true; reason = 'migrated'; pinnedId = $v } }
+    $why = if ($pin) { 'held-other' } else { 'held-new' }
+    $prev = $st.held[$k]
+    if (-not $prev -or "$($prev.liveId)" -ne $v -or "$($prev.pinnedId)" -ne $pin) {
+        $st.held[$k] = @{ name = "$Name".Trim(); liveId = $v; pinnedId = $pin; reason = $why; seenUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
+        $st.heldDirty = $true
+    }
+    Register-PimDuplicateLiveName -Kind group -Name "$Name".Trim() -Ids @($v) -Code 'GROUP-ADOPT-HELD' -PinnedId $pin
+    return @{ ok = $false; reason = $why; pinnedId = $pin }
+}
+function Move-PimGroupPin {
+    # A definition RENAME (Invoke-PimRenameInPlace) keeps the same object: its pin moves from the old name to the new one.
+    param([Parameter(Mandatory)][string]$OldName, [Parameter(Mandatory)][string]$NewName, [Parameter(Mandatory)][string]$Id)
+    $st = Get-PimGroupPinState
+    if (-not $st.available) { return }
+    $o = "$OldName".Trim().ToLowerInvariant()
+    if ($st.pins.ContainsKey($o) -and "$($st.pins[$o])" -ieq "$Id".Trim()) { $st.pins.Remove($o); $st.changes[$o] = ''; $st.dirty = $true }
+    Set-PimGroupPin -Name $NewName -Id $Id
+}
+function Save-PimGroupPinState {
+    <#
+      End of a REAL engine run: write the pins when they changed (and, on the migration run, ALWAYS -- the record's existence
+      ends the migration), and the held list for the Manager when it changed. A failed save never fails the run: the pins are
+      written on the next run (a migration simply runs again).
+    #>
+    # -EndMigration: this run walked every defined group (Invoke-PimEngine: the Groups scope, its whole diff). Without it a
+    # migrating install writes NOTHING (the next full run migrates; what this run created is live and gets pinned then).
+    param([switch]$EndMigration)
+    $st = $global:PIM_GroupPinState
+    if (-not ($st -is [hashtable]) -or -not $st.available -or -not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { return }
+    if ($st.migrating -and -not $EndMigration) { return }
+    if ($st.dirty -or $st.migrating) {
+        $mig = $(if ($st.migratedUtc) { $st.migratedUtc } else { (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') })
+        # MERGE, never overwrite: the record as stored NOW (an administrator may have adopted a group during this run) plus
+        # this run's own changes. The migration run has nothing stored yet and writes what it pinned.
+        $merged = @{}
+        if (-not $st.migrating) {
+            $now = Get-PimSetting -Name 'GroupObjectPins'
+            if ($now -is [string] -and "$now".Trim()) { $now = "$now" | ConvertFrom-Json }
+            $np = $(if ($now -is [System.Collections.IDictionary]) { $now['pins'] } elseif ($now) { $now.pins } else { $null })
+            if ($np -is [System.Collections.IDictionary]) { foreach ($k in @($np.Keys)) { $merged["$k".ToLowerInvariant()] = "$($np[$k])" } }
+            elseif ($null -ne $np) { foreach ($pp in @($np.PSObject.Properties)) { $merged["$($pp.Name)".ToLowerInvariant()] = "$($pp.Value)" } }
+            foreach ($k in @($st.changes.Keys)) { if ("$($st.changes[$k])") { $merged[$k] = "$($st.changes[$k])" } elseif ($merged.ContainsKey($k)) { $merged.Remove($k) } }
+        } else { foreach ($k in @($st.pins.Keys)) { $merged[$k] = $st.pins[$k] } }
+        $pins = [ordered]@{}; foreach ($k in @($merged.Keys | Sort-Object)) { if ("$($merged[$k])".Trim()) { $pins[$k] = $merged[$k] } }
+        Set-PimSetting -Name 'GroupObjectPins' -Value ([pscustomobject]@{ version = 1; migratedUtc = $mig; pins = [pscustomobject]$pins })
+        if ($st.migrating) { Write-Host ("[engine] Groups: {0} managed group(s) recorded by object id (one-time; from now on a group of a defined name that PIM Manager did not create waits for an administrator to adopt it)" -f $pins.Count) -ForegroundColor DarkCyan }
+        $st.migrating = $false; $st.migratedUtc = $mig; $st.dirty = $false; $st.changes = @{}
+        $st.pins = @{}; foreach ($k in @($pins.Keys)) { $st.pins[$k] = $pins[$k] }
+    }
+    # The held list is the WHOLE picture only after the full pass over every defined name (Update-PimDuplicateLiveNameRegister);
+    # it is then written whenever it differs from the stored one -- so a hold that went away (adopted, renamed, deleted) also
+    # leaves the Manager's list.
+    if ($st.fullPass) {
+        $items = @(foreach ($k in @($st.held.Keys | Sort-Object)) { $h = $st.held[$k]; [pscustomobject]@{ name = $h.name; liveId = $h.liveId; pinnedId = $h.pinnedId; reason = $h.reason; seenUtc = $h.seenUtc } })
+        $sig = (@($items | ForEach-Object { "$($_.name)|$($_.liveId)|$($_.pinnedId)".ToLowerInvariant() } | Sort-Object) -join ';')
+        $cur = $null; try { $cur = Get-PimSetting -Name 'GroupAdoptHeld'; if ($cur -is [string] -and "$cur".Trim()) { $cur = "$cur" | ConvertFrom-Json } } catch { $cur = $null }
+        $curSig = (@(@($cur.items) | Where-Object { $_ } | ForEach-Object { "$($_.name)|$($_.liveId)|$($_.pinnedId)".ToLowerInvariant() } | Sort-Object) -join ';')
+        if ($sig -ne $curSig -and ($items.Count -or $null -ne $cur)) {
+            Set-PimSetting -Name 'GroupAdoptHeld' -Value ([pscustomobject]@{ updatedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); items = $items })
+        }
+        $st.heldDirty = $false
+    }
 }
 function Update-PimDuplicateLiveNameRegister {
     <#
@@ -1932,7 +2105,19 @@ function Update-PimDuplicateLiveNameRegister {
             $by[$k][$id.ToLowerInvariant()] = $id
         }
         $dupKeys = @(@($by.Keys) | Where-Object { $by[$_].Count -gt 1 })
-        if (-not $dupKeys.Count -and -not $reg[$kind].Count) { continue }
+        # ADOPT-BY-NAME-SQUAT: the full adoption pass -- every DEFINED group name whose ONE live group is in the run's list is
+        # checked against its pin (the migration pins them; afterwards an unpinned / other-id group is held). A defined name
+        # with no live group, or two, holds nothing here (create / DUPLICATE-GROUP-NAME handle those). Done after the dup
+        # pass below, so an entry the dup pass clears is re-registered when it is an adoption hold.
+        $adoptNames = @()
+        if ($kind -eq 'group') {
+            $pst = Get-PimGroupPinState
+            if ($pst.available) {
+                $adoptNames = @(foreach ($d in @(Get-PimGroupDefinitionRows -IncludeRetired)) { $n = "$($d.GroupName)".Trim(); if ($n) { $n } })
+                $pst.fullPass = $true
+            }
+        }
+        if (-not $dupKeys.Count -and -not $reg[$kind].Count -and -not $adoptNames.Count) { continue }
         # the DEFINED names (and the tags that name them)
         $defined = @{}
         if ($kind -eq 'group') {
@@ -1956,6 +2141,21 @@ function Update-PimDuplicateLiveNameRegister {
         }
         foreach ($k in @($reg[$kind].Keys)) {
             if ($by.ContainsKey($k) -and $by[$k].Count -eq 1) { [void]$reg[$kind].Remove($k) }   # one object left: no longer a duplicate
+        }
+        if ($adoptNames.Count) {
+            $pst = Get-PimGroupPinState
+            $seen = @{}
+            foreach ($n in $adoptNames) {
+                $k = $n.ToLowerInvariant(); if ($seen.ContainsKey($k)) { continue }; $seen[$k] = $true
+                if ($by.ContainsKey($k) -and $by[$k].Count -eq 1) { [void](Test-PimGroupAdoption -Name $disp[$k] -Id "$(@($by[$k].Values)[0])") }
+                else {
+                    # no longer live (or now a duplicate): nothing to adopt -- the name is free for the engine to create (and pin)
+                    if ($pst.held.ContainsKey($k)) { $pst.held.Remove($k); $pst.heldDirty = $true }
+                    if ($reg[$kind].ContainsKey($k) -and "$($reg[$kind][$k].code)" -eq 'GROUP-ADOPT-HELD') { [void]$reg[$kind].Remove($k) }
+                }
+            }
+            # a held name that is no longer DEFINED leaves the list too
+            foreach ($k in @($pst.held.Keys)) { if (-not $seen.ContainsKey($k)) { $pst.held.Remove($k); $pst.heldDirty = $true } }
         }
     }
 }
@@ -1990,7 +2190,7 @@ function Get-PimDuplicateNameHit {
                     elseif ($tagCols -contains $col -and $tags -contains $v) { $hit = $true }
                     elseif ($ids -contains $v) { $hit = $true }
                     elseif ($v -match '/administrativeunits/([^/]+)/?$' -and $ids -contains $Matches[1]) { $hit = $true }
-                    if ($hit) { return @{ kind = $kind; name = "$($e.name)"; ids = @($e.ids) } }
+                    if ($hit) { return @{ kind = $kind; name = "$($e.name)"; ids = @($e.ids); code = "$($e.code)"; pinnedId = "$($e.pinnedId)" } }
                 }
             }
         }
@@ -2019,9 +2219,15 @@ function Split-PimDuplicateNameItems {
         if ($null -eq $d) { continue }
         $h = Get-PimDuplicateNameHit -Item $d -Register $reg
         if (-not $h) { $keepD.Add($d); continue }
-        $code = if ($h.kind -eq 'group') { 'DUPLICATE-GROUP-NAME' } else { 'DUPLICATE-AU-NAME' }
-        $what = if ($h.kind -eq 'group') { 'groups' } else { 'administrative units' }
-        $msg = ("{0}: {1} live {2} are named '{3}' (ids {4}) -- PIM Manager does not choose one and touches neither: this row was NOT applied and nothing was removed. Rename or delete the one PIM Manager should not use in Entra ID; the next run applies the row." -f $code, @($h.ids).Count, $what, $h.name, (@($h.ids) -join ', '))
+        if ("$($h.code)" -eq 'GROUP-ADOPT-HELD') {
+            # ADOPT-BY-NAME-SQUAT: the group of this name is not the one PIM Manager made or an administrator adopted.
+            $code = 'GROUP-ADOPT-HELD'
+            $msg = (Get-PimGroupAdoptHeldText -Name $h.name -LiveId "$(@($h.ids)[0])" -PinnedId "$($h.pinnedId)") + ' This row was NOT applied; the next run applies it once the group is adopted.'
+        } else {
+            $code = if ($h.kind -eq 'group') { 'DUPLICATE-GROUP-NAME' } else { 'DUPLICATE-AU-NAME' }
+            $what = if ($h.kind -eq 'group') { 'groups' } else { 'administrative units' }
+            $msg = ("{0}: {1} live {2} are named '{3}' (ids {4}) -- PIM Manager does not choose one and touches neither: this row was NOT applied and nothing was removed. Rename or delete the one PIM Manager should not use in Entra ID; the next run applies the row." -f $code, @($h.ids).Count, $what, $h.name, (@($h.ids) -join ', '))
+        }
         $held.Add([pscustomobject]@{ row = $d; kind = $h.kind; name = $h.name; ids = @($h.ids); code = $code; message = $msg })
     }
     foreach ($l in @($Live)) {
@@ -2050,9 +2256,15 @@ function Resolve-PimLiveGroupIdByName {
     # 100.122 F6: a name TWO live groups carry resolves to $null (and is registered as DUPLICATE-GROUP-NAME).
     param([string]$Name)
     if (-not $Name) { return $null }
+    # ADOPT-BY-NAME-SQUAT: the ONE group of the name is used only when it is the pinned one (Test-PimGroupAdoption) -- a
+    # pre-created group of a defined name resolves to nothing, so no assignment provider ever gives it a role.
     $ids = @(Get-PimLiveNameIds -Cache @($Global:Groups_All_ID) -Name "$Name")
     if ($ids.Count -gt 1) { Register-PimDuplicateLiveName -Kind group -Name "$Name" -Ids $ids; return $null }
-    if ($ids.Count -eq 1) { Unregister-PimDuplicateLiveName -Kind group -Name "$Name"; return "$($ids[0])" }
+    if ($ids.Count -eq 1) {
+        Unregister-PimDuplicateLiveName -Kind group -Name "$Name"
+        if (-not (Test-PimGroupAdoption -Name "$Name" -Id "$($ids[0])").ok) { return $null }
+        return "$($ids[0])"
+    }
     try {
         $esc = $Name -replace "'", "''"
         $r = @(Invoke-PimGraph -Headers @{ ConsistencyLevel = 'eventual' } -All -Path "/groups?`$filter=displayName eq '$esc'&`$count=true&`$select=id,displayName,securityEnabled,mailNickname")
@@ -2060,7 +2272,10 @@ function Resolve-PimLiveGroupIdByName {
         $rIds = @(@($r | Where-Object { $_ -and "$($_.id)" }) | ForEach-Object { "$($_.id)" } | Select-Object -Unique)
         if ($rIds.Count -gt 1) { Register-PimDuplicateLiveName -Kind group -Name "$Name" -Ids $rIds; return $null }
         Unregister-PimDuplicateLiveName -Kind group -Name "$Name"
-        if ($r.Count) { if (Get-Command Add-PimContextObject -ErrorAction SilentlyContinue) { Add-PimContextObject -Kind Group -Object $r[0] }; return "$($r[0].id)" }
+        if ($r.Count) {
+            if (-not (Test-PimGroupAdoption -Name "$Name" -Id "$($r[0].id)").ok) { return $null }
+            if (Get-Command Add-PimContextObject -ErrorAction SilentlyContinue) { Add-PimContextObject -Kind Group -Object $r[0] }; return "$($r[0].id)"
+        }
     } catch { Write-Verbose "group resolve ($Name): $($_.Exception.Message)" }
     return $null
 }
@@ -3018,6 +3233,11 @@ function New-PimGroupsProvider {
             # permanent ambiguity, not a tidy-up job.
             $existingGid = Test-PimNameAlreadyLive -Kind group -DisplayName $gn
             if ($existingGid) {
+                # 🔴 ADOPT-BY-NAME-SQUAT: "already exists" is NOT "ours". A group of this name that PIM Manager did not create
+                # (and no administrator adopted) is never taken over here -- the item fails GROUP-ADOPT-HELD, nothing is
+                # created beside it (that would be a duplicate name).
+                $adopt = Test-PimGroupAdoption -Name $gn -Id $existingGid
+                if (-not $adopt.ok) { throw (Get-PimGroupAdoptHeldText -Name $gn -LiveId $existingGid -PinnedId "$($adopt.pinnedId)") }
                 Write-Host ("    [=] {0} (already exists -- validated, skipped)" -f $gn) -ForegroundColor DarkGray
                 $g0 = [pscustomobject]@{ id = $existingGid; displayName = $gn }
                 if (Get-Command Add-PimContextObject -ErrorAction SilentlyContinue) { Add-PimContextObject -Kind Group -Object $g0 }
@@ -3079,6 +3299,8 @@ function New-PimGroupsProvider {
             }
             $g = Invoke-PimGraph -Method POST -Path '/groups' -Body $body
             if (Get-Command Add-PimContextObject -ErrorAction SilentlyContinue) { Add-PimContextObject -Kind Group -Object $g }   # incremental cache
+            # ADOPT-BY-NAME-SQUAT: the group PIM Manager just made is THE group of this name from now on (saved at run end).
+            if ($g -and "$($g.id)") { Set-PimGroupPin -Name $gn -Id "$($g.id)" }
             # Attach to its AU. This is an OPTIMISATION, not the guarantee: the
             # AdministrativeUnitMembers scope (order 22) reconciles AU membership on every
             # run and is what actually keeps it correct.
