@@ -20564,7 +20564,8 @@
       });
       h += '</table>';
     }
-    body.innerHTML = '<div id="engFailHost" style="margin-bottom:22px;"></div>' + h;
+    body.innerHTML = '<div id="engAdoptHost"></div><div id="engFailHost" style="margin-bottom:22px;"></div>' + h;
+    try { await renderGroupAdoptInto(document.getElementById('engAdoptHost')); } catch (e) { /* never break the run list */ }
     try { await renderEngineFailuresInto(document.getElementById('engFailHost'), { failedRuns: failed.length, unackedRuns: unacked }); } catch (e) { /* never break the run list */ }
     const fi = document.getElementById('engLogFilter');
     if (fi) fi.onchange = () => { engineLogsState.filter = fi.value; renderEngineLogs(); };
@@ -20572,6 +20573,48 @@
     if (fo) fo.onchange = () => { engineLogsState.failuresOnly = fo.checked; renderEngineLogs(); };
     const rf = document.getElementById('engLogRefresh'); if (rf) rf.onclick = () => renderEngineLogs();
     body.querySelectorAll('.engLogOpen').forEach(b => { b.onclick = () => openJobLog(b.dataset.runid, b.dataset.name, false); });
+  }
+
+  // ---------------------------------------------------------------------
+  // ADOPT-BY-NAME-SQUAT (owner 2026-10-23 "Hold for approval"): GROUPS WAITING FOR ADOPTION. A group with a name PIM Manager
+  // defines, that PIM Manager did not create, is HELD by the engine (GROUP-ADOPT-HELD): it is never used and never given a
+  // role. An Admin adopts it here (POST /api/groups/adopt, audited) when it is the right group; the next run uses it.
+  // Every edition (the hold is in every edition), so it lives on this free page, not on the Pro Discovery & gaps page.
+  // Shown only when something waits.
+  // ---------------------------------------------------------------------
+  async function renderGroupAdoptInto(host) {
+    if (!host) return;
+    const esc = escapeHtml;
+    let d;
+    try { d = await api('GET', '/api/groups/adopt-held'); } catch (e) { host.innerHTML = ''; return; }
+    const items = asList(d && d.items);
+    if (!items.length) { host.innerHTML = ''; return; }
+    const canAdopt = roleAtLeast('Admin');
+    let h = '<div id="engAdoptCard" style="border:1px solid #d4a72c;background:#fff8c5;border-radius:8px;padding:12px 14px;margin-bottom:16px;">' +
+      '<div style="font-size:13px;font-weight:600;margin-bottom:4px;">Groups waiting for adoption (' + items.length + ')</div>' +
+      '<div style="font-size:12px;color:#57606a;margin-bottom:8px;">A group with a name PIM Manager defines exists in Entra ID, but PIM Manager did not create it. ' +
+        'PIM Manager does not use it until an administrator adopts it. Adopt it only if it is the right group; otherwise rename or delete it in Entra ID and PIM Manager creates its own.</div>' +
+      '<table class="set-table" style="max-width:1180px;"><tr><th>Group name</th><th>Group in Entra ID</th><th>Why it waits</th><th></th></tr>';
+    items.forEach(it => {
+      const why = it.pinnedId ? ('PIM Manager manages another group under this name (' + esc(it.pinnedId) + ')') : 'PIM Manager did not create it';
+      h += '<tr><td style="font-weight:600;">' + esc(it.name || '') + '</td><td style="font-family:monospace;font-size:11.5px;">' + esc(it.liveId || '') + '</td>' +
+        '<td style="font-size:12px;">' + why + '</td><td>' +
+        (canAdopt ? '<button class="btn-sec engAdoptBtn" data-name="' + esc(it.name || '') + '" data-id="' + esc(it.liveId || '') + '" style="font-size:11px;">Adopt</button>'
+                  : '<span style="color:#57606a;font-size:11.5px;" title="An Admin or SuperAdmin adopts a group.">Admin adopts</span>') + '</td></tr>';
+    });
+    h += '</table></div>';
+    host.innerHTML = h;
+    host.querySelectorAll('.engAdoptBtn').forEach(b => {
+      b.onclick = async () => {
+        const go = await pimConfirm({ title: 'Adopt this group?', body: 'PIM Manager uses "' + b.dataset.name + '" from the next run and gives it what the definition grants.',
+          more: [{ label: 'Group', text: b.dataset.id }, { label: 'Before you adopt', text: 'Check its owners and members in Entra ID. Anyone who can change them gets what the definition grants.' }],
+          okLabel: 'Adopt', danger: true });
+        if (!go) return;
+        b.disabled = true;
+        try { await api('POST', '/api/groups/adopt', { name: b.dataset.name, objectId: b.dataset.id }); await renderGroupAdoptInto(host); }
+        catch (e) { b.disabled = false; await pimConfirm({ title: 'The group was not adopted', body: (e && e.body && e.body.error) || e.message || 'unknown error', okLabel: 'Close' }); }
+      };
+    });
   }
 
   // ---------------------------------------------------------------------

@@ -13,9 +13,13 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.672 -- 2026-10-24
+
+- Groups: a group that has a name defined in PIM Manager but was not created by it is no longer taken over silently -- it waits until an administrator adopts it on Jobs > Engine logs and errors (code pim-grp-0105); Engine logs page: the Copy button confirms reliably
+
 ## 2.4.671 -- 2026-10-23
 
-- Tier impact report: the tier comes from the tier marker and the level is shown in its own column. Support page: an About card with the Invardia legal line. Nightly update: a build whose upload to the registry failed on a network or registry fault is retried once, and a second failure is reported in plain words. SQL auditing: new and existing installations audit security events (sign-ins, schema and permission changes) to their own Log Analytics workspace, kept 90 days.
+- Tier impact report: the tier comes from the tier marker and the level is shown in its own column; Support page: an About card with the Invardia legal line; Nightly update: a build whose upload to the registry failed on a network or registry fault is retried once, and a second failure is reported in plain words; SQL auditing: new and existing installations audit security events (sign-ins, schema and permission changes) to their own Log Analytics workspace, kept 90 days.
 
 ## 2.4.670 -- 2026-10-23
 

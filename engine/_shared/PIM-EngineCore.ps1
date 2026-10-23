@@ -880,9 +880,10 @@ function Invoke-PimEngineScope {
                 # ledger update at the end of the pass read them as "no longer live" and erased their managed-key record,
                 # so after the duplicate went away a removal that should happen was never made again. The live read of
                 # this pass is therefore not complete for the ledger (the ledger then only learns, never forgets).
-                if ([int]$__dn.droppedLive -gt 0) { $Context['__pimLiveIncomplete'] = ("{0} live item(s) set aside: a defined name is carried by two live objects" -f [int]$__dn.droppedLive) }
+                if ([int]$__dn.droppedLive -gt 0) { $Context['__pimLiveIncomplete'] = ("{0} live item(s) set aside: a defined name is carried by two live objects, or by a group PIM Manager has not adopted" -f [int]$__dn.droppedLive) }
                 if ($__dupHeld.Count -or [int]$__dn.droppedLive) {
-                    Write-Warning ("[engine] {0}: a defined name is carried by TWO live objects -- {1} row(s) not applied and {2} live item(s) left exactly as they are (never removed, never changed)." -f $Scope, $__dupHeld.Count, [int]$__dn.droppedLive)
+                    # ADOPT-BY-NAME-SQUAT: the same filter also holds a group of a defined name that is not adopted (GROUP-ADOPT-HELD).
+                    Write-Warning ("[engine] {0}: a defined name is carried by TWO live objects, or by a group PIM Manager has not adopted -- {1} row(s) not applied and {2} live item(s) left exactly as they are (never removed, never changed)." -f $Scope, $__dupHeld.Count, [int]$__dn.droppedLive)
                 }
             }
         } catch {
@@ -1981,6 +1982,9 @@ function Invoke-PimEngine {
           [string]$ReconcileRemoval = '')
     # BUG-19: bound how stale the directory snapshot can be at the start of a run.
     [void](Update-PimEngineRunContext)
+    # ADOPT-BY-NAME-SQUAT: the adopted-group record is read fresh for every run (an administrator may have adopted a group
+    # in the Manager since the last one; the scheduler process lives across runs).
+    $global:PIM_GroupPinState = $null
     if ($FromQueue -and -not $PSBoundParameters.ContainsKey('Changes')) { $Changes = Get-PimEngineQueueChanges }
     $useChanges = ($FromQueue -or $PSBoundParameters.ContainsKey('Changes'))
     $common = @{ Mode = $Mode; WhatIf = $WhatIf; Prune = $Prune; Context = $Context }
@@ -2055,6 +2059,17 @@ function Invoke-PimEngine {
     # and the owner page read it). Best effort: a failed save never fails the run; the next run saves it.
     if (Get-Command Save-PimAutoExtendOutlook -ErrorAction SilentlyContinue) {
         try { [void](Save-PimAutoExtendOutlook) } catch { Write-Warning "[auto-extend] the upcoming-extension list was not saved: $($_.Exception.Message)" }
+    }
+    # ADOPT-BY-NAME-SQUAT: the pins this run made (the groups it created; on the one-time migration run, every managed group)
+    # and the list of groups waiting for adoption -> pim.Settings. Only a real run; a plan never writes them. A failed save
+    # never fails the run (the next run writes them; a migration simply runs again).
+    # The migration ENDS only on a run that walked every defined group: the Groups scope ran its whole diff (not a queue /
+    # change-list run) -- a group outside the run's group list is found (and pinned) only by that scope's create path.
+    if (-not $WhatIf -and (Get-Command Save-PimGroupPinState -ErrorAction SilentlyContinue)) {
+        $__gRun = @($out | Where-Object { $_ -and "$($_.scope)" -eq 'Groups' }) | Select-Object -First 1
+        # the diff RAN (a failed ITEM does not matter: every defined name was still walked); not checked / no result = not walked
+        $__pinEnd = (-not $useChanges) -and $__gRun -and -not ($__gRun.PSObject.Properties['notChecked'] -and $__gRun.notChecked) -and -not ($__gRun.PSObject.Properties['error'] -and "$($__gRun.error)".Trim())
+        try { Save-PimGroupPinState -EndMigration:$__pinEnd } catch { Write-Warning "[engine] Groups: the adopted-group record was not saved: $($_.Exception.Message)" }
     }
     # 96.5: the daily reconcile's removal report (would remove N, held by rule X) -> pim.TenantCache 'reconcile-removal', for
     # the Jobs page. Only a real run; a failed save never fails the run (the next run saves it).

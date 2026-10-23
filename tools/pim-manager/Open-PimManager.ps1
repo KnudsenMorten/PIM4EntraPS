@@ -4712,6 +4712,34 @@ function Get-PimNamingConventions {
 # Higher-level wrappers add the default-seeding + shape normalisation.
 # ---------------------------------------------------------------------------
 
+function Get-PimGroupAdoptPlan {
+    <#
+      PURE. ADOPT-BY-NAME-SQUAT (owner 2026-10-23 "Hold for approval"): may an administrator adopt group $ObjectId under the
+      defined name $Name? Given the stored pins (pim.Settings 'GroupObjectPins'), the engine's held list ('GroupAdoptHeld') and
+      the group's CURRENT display name in Entra ($LiveName, '' = it could not be read). Refused unless: the record exists (the
+      engine's one-time migration ran -- adopting before it would end the migration and cut every other group off), the held
+      list names exactly this name + id, and the group still carries that name. Returns @{ ok; status; error; pins; held }:
+      pins / held = the records to store (the pin set, the item taken off the list).
+    #>
+    param([object]$Pins, [object]$Held, [string]$Name, [string]$ObjectId, [AllowEmptyString()][string]$LiveName)
+    $n = "$Name".Trim(); $id = "$ObjectId".Trim()
+    if (-not $n -or $id -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { return @{ ok = $false; status = 400; error = 'body must be { name: <group name>, objectId: <the group''s object id> }' } }
+    if ($null -eq $Pins) { return @{ ok = $false; status = 409; error = 'the engine has not recorded its groups yet (its first full run with this version does that) -- nothing can be adopted before that' } }
+    $item = @(@($Held.items) | Where-Object { $_ -and "$($_.name)" -ieq $n -and "$($_.liveId)" -ieq $id }) | Select-Object -First 1
+    if (-not $item) { return @{ ok = $false; status = 404; error = "no group named '$n' with id $id waits for adoption -- the list may have changed; refresh the page" } }
+    if (-not "$LiveName".Trim()) { return @{ ok = $false; status = 503; error = "the group $id could not be read in Entra ID -- it was NOT adopted" } }
+    if ("$LiveName".Trim() -ne $n) { return @{ ok = $false; status = 409; error = "the group $id is now called '$("$LiveName".Trim())', not '$n' -- it was NOT adopted" } }
+    $pp = $(if ($Pins -is [System.Collections.IDictionary]) { $Pins['pins'] } else { $Pins.pins })
+    $map = [ordered]@{}
+    if ($pp -is [System.Collections.IDictionary]) { foreach ($k in @($pp.Keys)) { $map["$k"] = "$($pp[$k])" } } elseif ($null -ne $pp) { foreach ($p in @($pp.PSObject.Properties)) { $map["$($p.Name)"] = "$($p.Value)" } }
+    $map[$n.ToLowerInvariant()] = $id
+    $mig = "$(if ($Pins -is [System.Collections.IDictionary]) { $Pins['migratedUtc'] } else { $Pins.migratedUtc })"
+    $newPins = [pscustomobject]@{ version = 1; migratedUtc = $mig; pins = [pscustomobject]$map }
+    $rest = @(@($Held.items) | Where-Object { $_ -and -not ("$($_.name)" -ieq $n) })
+    $newHeld = [pscustomobject]@{ updatedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); items = $rest }
+    return @{ ok = $true; status = 200; error = ''; pins = $newPins; held = $newHeld; previousPin = "$($item.pinnedId)" }
+}
+
 function Get-PimManagerSetting {
     # Read a single named setting from the store (SQL pim.Settings). Returns the parsed object (or $null).
     # 🔒 SQL-ONLY: there is no settings file; a missing store is an error, never an empty answer.
@@ -23335,6 +23363,50 @@ function Handle-Request {
                 return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; error = "the decision was NOT saved: $($_.Exception.Message)" }
+                return 503
+            }
+        }
+
+        # -------------------------------------------------------------------
+        # ADOPT-BY-NAME-SQUAT (owner 2026-10-23 "Hold for approval") -- groups waiting for adoption. EVERY edition (the hold is).
+        #   GET  /api/groups/adopt-held                       -> { items: [ { name; liveId; pinnedId; reason; seenUtc } ] } (Reader+)
+        #   POST /api/groups/adopt { name; objectId }         -> pins the group (pim.Settings 'GroupObjectPins'), Admin+, audited
+        # The group is read in Entra first (it must still carry the name); nothing is written to the tenant.
+        if ($path -eq '/api/groups/adopt-held' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try {
+                $ah = Get-PimManagerSettingObject -Name 'GroupAdoptHeld'
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; items = @(@($ah.items) | Where-Object { $_ }); updatedUtc = "$($ah.updatedUtc)" }
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; items = @(); error = "the list of groups waiting for adoption could not be read: $($_.Exception.Message)" }
+                return 503
+            }
+        }
+        if ($path -eq '/api/groups/adopt' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to adopt a group. Roles are stored in SQL -- ask a SuperAdmin to grant you access.' }
+                return 403
+            }
+            $adBody = Read-RequestJson -Request $req
+            $adName = "$($adBody.name)".Trim(); $adId = "$($adBody.objectId)".Trim()
+            try {
+                $adLive = ''
+                if ($adId -match '^[0-9a-fA-F-]{36}$') { try { $adLive = "$((Invoke-PimGraph -Path "/groups/$adId`?`$select=id,displayName").displayName)" } catch { $adLive = '' } }
+                $adPlan = Get-PimGroupAdoptPlan -Pins (Get-PimManagerSettingObject -Name 'GroupObjectPins') -Held (Get-PimManagerSettingObject -Name 'GroupAdoptHeld') -Name $adName -ObjectId $adId -LiveName $adLive
+                if (-not $adPlan.ok) { Write-JsonResponse -Response $resp -Status $adPlan.status -Body @{ ok = $false; error = $adPlan.error }; return [int]$adPlan.status }
+                Set-PimManagerSettingObject -Name 'GroupObjectPins' -Value $adPlan.pins
+                Set-PimManagerSettingObject -Name 'GroupAdoptHeld' -Value $adPlan.held
+                $adWho = ''; try { $adWho = "$((Get-PimManagerRole).identity)" } catch { $adWho = '' }
+                try {
+                    Write-PimManagerAuditEvent -Action 'groups.adopt' -Target "'$adName' ($adId)" `
+                        -Before @{ pinnedId = "$($adPlan.previousPin)" } -After @{ pinnedId = $adId; by = $adWho; summary = "$adWho adopted the group '$adName' ($adId): PIM Manager uses it from the next run" } -Result 'ok'
+                } catch { Write-Warning "group adopt: the audit event could not be written: $($_.Exception.Message)" }
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; name = $adName; objectId = $adId; summary = "Adopted '$adName'. PIM Manager uses it from the next run." }
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; error = "the group was NOT adopted: $($_.Exception.Message)" }
                 return 503
             }
         }
