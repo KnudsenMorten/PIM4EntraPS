@@ -1426,6 +1426,12 @@ try {
             $discovered++
             continue
         }
+        # 2026-10-24 (SUP-2026-00307): a job already on the target is counted, never PATCHed again (Test-PimAcaRollNoop).
+        if (Test-PimAcaRollNoop -From "$($r.from)" -TargetImage "$targetImg") {
+            Say "  $($r.name): already on $targetImg -- nothing to roll" 'DarkGray'
+            $discovered++
+            continue
+        }
         try {
             Say "rolling $($r.name) (same image as the Manager)"
             # A job still provisioning a write from earlier in this run answers 409 OperationInProgress: wait it out (bounded,
@@ -1450,6 +1456,11 @@ try {
     $aplan = Get-PimAcaJobRollPlan -Jobs $apps -TargetImage $targetImg -Exclude @($managerApp)
     foreach ($s in @($aplan.skip | Where-Object { $_.reason -ne 'rolled separately' })) { Say "  skipping app $($s.name): $($s.reason)" 'DarkGray' }
     foreach ($r in @($aplan.roll)) {
+        if (Test-PimAcaRollNoop -From "$($r.from)" -TargetImage "$targetImg") {
+            Say "  app $($r.name): already on $targetImg -- nothing to roll" 'DarkGray'
+            $discovered++
+            continue
+        }
         try {
             Say "rolling app $($r.name) (same image as the Manager)"
             # 2.4.649 (live 2026-10-18, internal: "GET .../ca-pim-rfa -> HTTP 0 : Cannot assign requested address" made a healthy
