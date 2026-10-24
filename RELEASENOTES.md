@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.673 -- 2026-10-24
+
+- Nightly update: a part that is already on the new version is no longer written again, so a healthy installation is no longer reported as not fully updated
+
 ## 2.4.672 -- 2026-10-24
 
 - Groups: a group that has a name defined in PIM Manager but was not created by it is no longer taken over silently -- it waits until an administrator adopts it on Jobs > Engine logs and errors (code pim-grp-0105); Engine logs page: the Copy button confirms reliably

@@ -657,6 +657,20 @@ function Get-PimAcaJobRollPlan {
     [pscustomobject]@{ repo = $repo; roll = @($roll); skip = @($skip) }
 }
 
+function Test-PimAcaRollNoop {
+    <#
+      PURE. Is a roll-plan entry ALREADY on the target image (same string, case-insensitive)? Then the updater counts it and
+      does not PATCH it. Live 2026-10-24 03:00 (efif-aalborghs-prod + efif-at-prod, ticket SUP-2026-00307): the nightly run
+      re-PATCHed ca-pim-downlink-s6, which the 23:47 roll had already moved to 2.4.672, and ARM answered "HTTP 400
+      InvalidRequestContent -- Could not find member 'error' on object of type 'ResourceDefinition'"; the healthy install
+      was reported pim-upd-0101 "still on the previous build". The Manager already skips this case ("already on this
+      image -- nothing to roll"); the discovered jobs and apps now do the same. A digest target never matches a tag: rolled.
+    #>
+    param([AllowEmptyString()][string]$From, [AllowEmptyString()][string]$TargetImage)
+    $f = "$From".Trim(); $t = "$TargetImage".Trim()
+    return ([bool]($f -and $t -and $f -ieq $t))
+}
+
 function Get-PimAcaJobs {
     <#
       Every Container Apps Job in a resource group. 🪤 LIST, not a per-name GET: the updater does not
