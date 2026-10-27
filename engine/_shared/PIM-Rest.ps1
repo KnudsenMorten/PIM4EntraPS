@@ -204,6 +204,15 @@ function Get-PimArcManagedIdentityToken {
   return [pscustomobject]@{ token = "$($j.access_token)"; expiresUtc = (ConvertTo-PimTokenExpiry $j.expires_on) }
 }
 
+function Test-PimMiTokenRetryable {
+  <# PURE. MI-TOKEN-TRANSIENT: is a failed identity-endpoint call worth another try? No HTTP status (a timeout or a
+     connection fault), 429 or 5xx = yes; any other status (400 identity not found, 401, 403, 404) = no. #>
+  param([AllowNull()][object]$StatusCode)
+  if ($null -eq $StatusCode -or "$StatusCode" -eq '' -or [int]$StatusCode -eq 0) { return $true }
+  $s = [int]$StatusCode
+  return ($s -eq 429 -or ($s -ge 500 -and $s -le 599))
+}
+
 function Get-PimManagedIdentityToken {
   param([Parameter(Mandatory)][string]$Audience)
   $res = [uri]::EscapeDataString($Audience)
@@ -224,7 +233,22 @@ function Get-PimManagedIdentityToken {
     $miCid = if ($global:PIM_ManagedIdentityClientId) { "$($global:PIM_ManagedIdentityClientId)".Trim() }
              elseif ($env:PIM_ManagedIdentityClientId) { "$($env:PIM_ManagedIdentityClientId)".Trim() } else { '' }
     if ($miCid) { $u += "&client_id=$([uri]::EscapeDataString($miCid))" }
-    $r = Invoke-RestMethod -Method GET -Uri $u -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER } -TimeoutSec 60
+    # MI-TOKEN-TRANSIENT (SUP-2026-00323, internal rfa-sync 2026-10-27 02:16Z): ONE GET, no retry, so a single fault of the
+    # endpoint failed the whole run while every other token of that window was issued. Retry a timeout / connection fault /
+    # 429 / 5xx after a short wait; a 4xx (e.g. 400 "identity not found") is an answer, not a fault, and is thrown at once.
+    $delays = if ($null -ne $global:PIM_MiTokenRetryDelaysSec) { @($global:PIM_MiTokenRetryDelaysSec) } else { @(2, 5) }
+    $r = $null
+    for ($try = 0; ; $try++) {
+      try { $r = Invoke-RestMethod -Method GET -Uri $u -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER } -TimeoutSec 60; break }
+      catch {
+        $st = $null; try { if ($_.Exception.Response) { $st = [int]$_.Exception.Response.StatusCode } } catch {}
+        if ($try -ge $delays.Count -or -not (Test-PimMiTokenRetryable -StatusCode $st)) {
+          throw "the identity endpoint did not issue a token after $($try + 1) attempt(s): $($_.Exception.Message)"
+        }
+        try { [System.Console]::Out.WriteLine("  [mi] identity endpoint attempt $($try + 1) failed ($(if ($st) { "HTTP $st" } else { 'no answer' })) -- retrying in $($delays[$try]) s") } catch {}
+        Start-Sleep -Seconds ([int]$delays[$try])
+      }
+    }
     # §100.46: in the tick this is a start-up diagnostic (printed with the start-up block: on change / first of the day / PIM_LOG_VERBOSE=1)
     if ("$($r.access_token)") { $__mil = "  [mi] token via IDENTITY_ENDPOINT (len $($r.access_token.Length))"; if ($global:PIM_LogQuiet -and (Get-Command Write-PimStartupLine -ErrorAction SilentlyContinue)) { Write-PimStartupLine -Message $__mil } else { try { [System.Console]::Out.WriteLine($__mil) } catch {} } }  # Console.Out (not Write-Host): headless-safe from any scope (App Service has no console buffer; Write-Host throws there even from module scope)
     Set-PimManagedIdentityHomeTenant -Token "$($r.access_token)"; return [pscustomobject]@{ token = $r.access_token; expiresUtc = (ConvertTo-PimTokenExpiry $r.expires_on) }
@@ -866,7 +890,8 @@ function Get-PimRestToken {
     Write-Host "PIM-Rest: no MI/secret/cert token for '$Resource' -- falling back to interactive sign-in..." -ForegroundColor Yellow
     try { $res = Get-PimInteractiveToken -Audience $aud -TenantId $tenant } catch { Write-Verbose "PIM-Rest interactive fallback failed for ${Resource}: $($_.Exception.Message)" }
   }
-  if (-not $res) { throw "PIM-Rest: could not acquire a token for '$Resource'. Provide a managed identity, ClientId + certificate (+TenantId), the Invardia Support-app session, or -Interactive (browser sign-in)." }
+  # MI-TOKEN-TRANSIENT: carry the primary credential's own answer -- without it the record named no cause (SUP-2026-00323).
+  if (-not $res) { throw ("PIM-Rest: could not acquire a token for '$Resource'. Provide a managed identity, ClientId + certificate (+TenantId), the Invardia Support-app session, or -Interactive (browser sign-in)." + $(if ($primaryErr) { " ($primaryErr)" } else { '' })) }
 
   $script:PimTokenCache[$key] = $res
   return $res.token

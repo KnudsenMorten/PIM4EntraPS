@@ -99,6 +99,19 @@ $script:PimFailureRules = @(
        retryable = $true; severity = 'transient'
        fixes = @() }
 
+    # MI-TOKEN-TRANSIENT (SUP-2026-00323, internal rfa-sync 2026-10-27 02:16Z, filed as pim-gen-0001): the container's identity
+    # endpoint did not issue one token ("PIM-Rest: could not acquire a token for 'https://storage.azure.com'"); every other
+    # token of that window was issued and the next runs were green. PIM-Rest now retries the endpoint, so this text means it
+    # failed on every try. Ahead of SERVICE-ERROR / PERMISSION-DENIED: the endpoint's own answer is appended to the text and
+    # may carry a 5xx or a 400, but the cause is the token, not the call that needed it.
+    @{ code = 'MI-TOKEN-UNAVAILABLE'
+       match = { param($m, $row) $m -match '(?i)could not acquire a token for ' }
+       title = 'The job could not sign in this time'
+       cause = 'The job asks Azure for a sign-in token for its own managed identity before it reads or writes anything. Azure did not issue the token, also after a retry, so this job did nothing that needed it this time. Usually a short fault on Azure''s side.'
+       remedy = 'Nothing to do at first: the job runs again on its next turn. If it repeats on several turns in a row, check that the job still has its managed identity, or contact Invardia support.'
+       retryable = $true; severity = 'transient'
+       fixes = @() }
+
     # The updater's own outcomes (update-job-entry.ps1 Send-PimUpdateOutcome). Invardia fix request 4aa736f5 (2026-10-18):
     # both went up as UNCLASSIFIED and were merged under one request.
     @{ code = 'UPDATE-ROLL-INCOMPLETE'
@@ -699,6 +712,7 @@ function Get-PimFailureCodeTable {
         ,@('THROTTLED',                        'pim-eng-0104',   'throttled',         'nobody',   '',      '2.4.638')
         ,@('SERVICE-ERROR',                    'pim-eng-0105',   'upstream-error',    'nobody',   '',      '2.4.638')
         ,@('RUN-EXECUTION-FAILED',             'pim-eng-0106',   'platform-timeout',  'nobody',   '',      '2.4.653')
+        ,@('MI-TOKEN-UNAVAILABLE',             'pim-eng-0107',   'upstream-error',    'nobody',   '',      '2.4.674')
         ,@('CONVERGENCE',                      'pim-eng-0201',   'not-converged',     'product',  '',      '2.4.638')
         ,@('AZ-POLICY-MASS-HOLD',              'pim-grd-0101',   'held-for-approval', 'customer', '',      '2.4.638')
         ,@('GROUP-POLICY-MASS-HOLD',           'pim-grd-0102',   'held-for-approval', 'customer', '',      '2.4.638')

@@ -13,6 +13,22 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.677 -- 2026-10-27
+
+- Changes that are staged but not committed show as a red count on Pending changes in the menu, so nobody misses that nothing happens until they are committed
+
+## 2.4.676 -- 2026-10-27
+
+- Deleting a group while group deletion is switched off is refused with what to do (it used to commit and then nothing happened); the Administrator accounts grid has a Delete account button; Delete account on an on-premises AD admin says at once that PIM does not delete AD accounts and what to do instead (it failed with an empty reason)
+
+## 2.4.675 -- 2026-10-27
+
+- The Access map no longer shows deleted admins, retired groups or removed delegations: it draws only what is granted
+
+## 2.4.674 -- 2026-10-27
+
+- A one-off fault of the managed-identity sign-in endpoint no longer fails a job run: PIM tries again (after 2 s and 5 s), and when it still fails the run record names the endpoint answer and reads as a transient (pim-eng-0107), not a product defect.
+
 ## 2.4.673 -- 2026-10-24
 
 - Nightly update: a part that is already on the new version is no longer written again, so a healthy installation is no longer reported as not fully updated
