@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.679 -- 2026-10-27
+
+- When the engine has deleted a group marked for deletion, it also takes the row of that group out of PIM Manager, so the group no longer shows anywhere; the group-deletion counts and the removal-guard warning count only groups that still exist in Microsoft Entra ID
+
+## 2.4.678 -- 2026-10-27
+
+- Run now on the tenant-cache job runs in the engine, so it no longer fails with an Azure 403 or stores a shorter Azure scope list; a tenant list read that is partly refused keeps the fuller stored list; the managed-identity sign-in is retried after 2, 5 and 15 seconds; the coverage report is always saved, even when comparing it with the previous report fails; deleted admins, retired groups and removed delegations are hidden in the record grids, with a Show removed link; after Delete account the admin shows Marked for deletion until the engine has deleted it; an account delete waits until its group memberships are removed in the same run
+
 ## 2.4.677 -- 2026-10-27
 
 - Changes that are staged but not committed show as a red count on Pending changes in the menu, so nobody misses that nothing happens until they are committed

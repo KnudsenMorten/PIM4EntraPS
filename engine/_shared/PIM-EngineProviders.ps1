@@ -191,6 +191,53 @@ function Test-PimAdminDeleteEnabled {
     if ($e -match '^(?i)(0|false|off|no)$') { return $false }
     return $true
 }
+function Test-PimAdminDeleteDeferRun {
+    # PURE. ADMIN-DELETE-ORDER (SUP-2026-00328, owner decision 2026-10-27 "Memberships first"): does this run hold its account
+    # deletes until AdminMembers has applied? Yes when the run's scope list has Admins BEFORE AdminMembers (provider order 30
+    # vs 50) and it is a real run. Measured on internal 2026-10-27 03:59Z: the delete of x-admin-dd-id was refused (403
+    # Authorization_RequestDenied) while it still held 2 role-assignable memberships, which AdminMembers removed 14 s LATER in
+    # the same run; the next run deleted it. Nothing else changes: the same deletes, the same removals -- only the order.
+    param([AllowNull()][string[]]$Scopes = @(), [switch]$WhatIf)
+    if ($WhatIf) { return $false }
+    $list = @(@($Scopes) | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+    $ia = [array]::IndexOf($list, 'admins'); $im = [array]::IndexOf($list, 'adminmembers')
+    return ($ia -ge 0 -and $im -gt $ia)
+}
+function Invoke-PimAdminDeferredDeletes {
+    # ADMIN-DELETE-ORDER: carry out the account deletes the Admins scope held in $Context['adminDeleteDeferred'], once
+    # AdminMembers has run (or at the end of the run when it did not). Each goes through the SAME guarded delete
+    # (Remove-PimAdminAccountApproved: the pin, the breaker, break-glass, the per-run limit). Returns ONE outcome per held
+    # item -- { item; key; outcome = applied | reported | failed; error } -- and Add-PimAdminHeldDeleteResults (PIM-EngineCore)
+    # records them in the Admins scope's own result exactly as the scope records an item: applied counts as applied, a
+    # failure is an Admins item failure (classified, counted, in EngineItemFailures, in the change audit). A failed delete
+    # leaves its pin 'failed', which Get-PimAdminDeletePinDecision acts on again for the SAME object id on the next run; a
+    # pin that could not even be marked failed stays 'claimed' and never acts again (the operator confirms the delete again).
+    param([Parameter(Mandatory)][hashtable]$Context)
+    $Context['adminDeleteDefer'] = $false
+    # enumerated with foreach: @() over the generic List held in the hashtable throws "Argument types do not match"
+    # (PSToObjectArrayBinder, PowerShell 7.6, measured on the test VM 2026-10-27).
+    $held = New-Object System.Collections.ArrayList
+    $src = $Context['adminDeleteDeferred']
+    if ($null -ne $src) { foreach ($x in $src) { if ($null -ne $x) { [void]$held.Add($x) } } }
+    $Context['adminDeleteDeferred'] = $null
+    if ($held.Count -eq 0) { return @() }
+    Write-Host ('  [admins] ' + $held.Count + ' account delete(s) held until the membership removals of this run were applied -- deleting now') -ForegroundColor Cyan
+    $results = @(foreach ($it in $held) {
+        $k = "$($it.key)"
+        try {
+            $r = @(Remove-PimAdminAccountApproved -Item $it -Context $Context)
+            # the scope's own rule (BUG-35a): an object carrying pimApplied = $false is "reported only", anything else applied
+            $rep = $false
+            foreach ($o in $r) { if ($null -ne $o -and $o.PSObject -and ($o.PSObject.Properties.Name -contains 'pimApplied') -and (-not $o.pimApplied)) { $rep = $true } }
+            [pscustomobject]@{ item = $it; key = $k; outcome = $(if ($rep) { 'reported' } else { 'applied' }); error = '' }
+        }
+        catch {
+            $m = "$($_.Exception.Message)"
+            [pscustomobject]@{ item = $it; key = $k; outcome = 'failed'; error = $m }
+        }
+    })
+    return $results
+}
 function Remove-PimAdminAccountApproved {
     <#
       §96.5 D1 (operator 2026-10-06: "I will only allow deletion of admins in a operator controlled action (delete in gui or
@@ -936,6 +983,14 @@ function New-PimAdminsProvider {
             # central Deleted is a DISABLE (the normal path below); deleting stays each tenant's own, local decision.
             $__centralRow = (Get-Command Test-PimAdminRowIsCentral -ErrorAction SilentlyContinue) -and (Test-PimAdminRowIsCentral -Row $d)
             if ($dec.PSObject.Properties['delete'] -and $dec.delete -and -not $__centralRow) {
+                # ADMIN-DELETE-ORDER (owner "Memberships first"): in a run that also applies AdminMembers, the delete waits until
+                # this account's membership removals are applied (Invoke-PimEngine runs the held deletes after AdminMembers).
+                if ($ctx['adminDeleteDefer'] -eq $true) {
+                    if (-not ($ctx['adminDeleteDeferred'] -is [System.Collections.IList])) { $ctx['adminDeleteDeferred'] = New-Object System.Collections.Generic.List[object] }
+                    [void]$ctx['adminDeleteDeferred'].Add($item)
+                    Write-Host ("    [admins] {0}: the delete waits until its membership removals in this run are applied (AdminMembers first)" -f $item.key) -ForegroundColor DarkCyan
+                    return [pscustomobject]@{ pimApplied = $false; deferred = $true; reason = 'the delete waits until its membership removals in this run are applied (AdminMembers first)' }
+                }
                 return (Remove-PimAdminAccountApproved -Item $item -Context $ctx)
             }
             if ($dec.PSObject.Properties['delete'] -and $dec.delete -and $__centralRow) {
@@ -8932,10 +8987,62 @@ function Get-PimRetireGroupRows {
             # the row has none (no store key, a row the managing tenant sent) -- such a row can never be covered by an approval.
             $iid = ''
             if (Get-Command Get-PimGuardItemId -ErrorAction SilentlyContinue) { try { $iid = "$(Get-PimGuardItemId -Entity $e -Row $r -Kind delete-group)" } catch { $iid = '' } }
-            [void]$out.Add([pscustomobject]@{ GroupName = $gn; Entity = $e; ItemId = $iid })
+            # RETIRE-ROW-LEFT-INCONSISTENT: the stored row rides along, so the engine can take it out once the group is gone.
+            [void]$out.Add([pscustomobject]@{ GroupName = $gn; Entity = $e; ItemId = $iid; Row = $r })
         }
     }
     return $out.ToArray()
+}
+
+function Complete-PimRetiredGroupRow {
+    <#
+      RETIRE-ROW-LEFT-INCONSISTENT (owner 2026-10-27: "i deleted groups with delegations and they still show here" / "things
+      are NOT consistent ... it is a mesh !"): the engine FINISHES a retire. Once the group of a Lifecycle=Retire row is gone
+      -- deleted by this run, or a fresh read finds no group of that name -- the definition row is taken out of the store,
+      the same way an applied Action=Remove row is (Complete-PimRemoveRows). It used to stay until a person pressed "Take
+      these rows out", and every screen that counts rows showed the deleted groups as still waiting.
+      Never in a plan (-WhatIf); never for a row the managing tenant sent (Owner=MSP: the managing tenant owns it). The row is
+      re-read by its store key and taken out ONLY if it still says Retire for the same group -- a row someone changed back
+      since this run read it is kept. SQL store when active (audited 'row.retire.completed'), else the in-memory desired
+      rows used offline. Returns $true when the row was taken out. Never throws: a row that stays is re-checked next run.
+    #>
+    param([Parameter(Mandatory)][object]$Retire, [string]$Scope = 'GroupRetirement', [switch]$WhatIf, [string]$Why = '')
+    if ($WhatIf -or $null -eq $Retire) { return $false }
+    $row = if ($Retire.PSObject.Properties['Row']) { $Retire.Row } else { $null }
+    $ent = "$($Retire.Entity)".Trim()
+    $gn = "$($Retire.GroupName)".Trim()
+    if ($null -eq $row -or -not $ent -or -not $gn) { return $false }
+    if ((Get-PimRowProp -Row $row -Names @('Owner')).Trim() -ieq 'msp') { return $false }
+    $isSame = { param($r) $null -ne $r -and (Get-PimRowProp -Row $r -Names @('Lifecycle')).Trim() -match '(?i)^retire' -and (Get-PimRowProp -Row $r -Names @('GroupName')).Trim() -ieq $gn }
+    try {
+        $cs = $null
+        if ((Get-Command Get-PimSqlRow -ErrorAction SilentlyContinue) -and (Get-Command Remove-PimSqlRow -ErrorAction SilentlyContinue)) {
+            $cs = if ($global:PIM_EngineSqlCs) { $global:PIM_EngineSqlCs }
+                  elseif ($global:PIM_SqlConnectionString) { $global:PIM_SqlConnectionString }
+                  elseif ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and ($global:PIM_SqlServer -or $global:PIM_SqlConnStringVault)) { Get-PimSqlConnectionString }
+                  else { $null }
+        }
+        if ($cs) {
+            $key = if (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue) { "$(Get-PimStoreRowKey -Base $ent -Row $row)".Trim() } else { '' }
+            if (-not $key) { Write-Warning ("  [{0}] '{1}': the group is gone, but its row in '{2}' has no store key -- take it out by hand." -f $Scope, $gn, $ent); return $false }
+            $cur = Get-PimSqlRow -ConnectionString $cs -Entity $ent -Key $key
+            if (-not (& $isSame $cur)) { return $false }
+            Remove-PimSqlRow -ConnectionString $cs -Entity $ent -Key $key
+            if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+                try { [void](Write-PimAuditEvent -Action 'row.retire.completed' -Target "$ent|$key" -Before $cur -After ([ordered]@{ group = $gn; why = $Why })) } catch { Write-Warning ("  [{0}] row '{1}' taken out but NOT audited: {2}" -f $Scope, $key, $_.Exception.Message) }
+            }
+        } elseif ($global:PIM_DesiredRows -is [hashtable] -and $global:PIM_DesiredRows.ContainsKey($ent)) {
+            $kept = New-Object System.Collections.Generic.List[object]; $hit = $false
+            foreach ($x in @($global:PIM_DesiredRows[$ent])) { if (-not $hit -and (& $isSame $x)) { $hit = $true; continue }; $kept.Add($x) }
+            if (-not $hit) { return $false }
+            $global:PIM_DesiredRows[$ent] = $kept.ToArray()
+        } else { return $false }
+        Write-Host ("    [{0}] '{1}' is gone ({2}) -- its definition row is taken out of {3}: the retire is finished" -f $Scope, $gn, $(if ($Why) { $Why } else { 'deleted' }), $ent) -ForegroundColor DarkCyan
+        return $true
+    } catch {
+        Write-Warning ("  [{0}] '{1}': the group is gone, but its row could not be taken out of {2} (it stays and is re-checked next run): {3}" -f $Scope, $gn, $ent, $_.Exception.Message)
+        return $false
+    }
 }
 
 function New-PimGroupRetirementProvider {
@@ -8976,7 +9083,13 @@ function New-PimGroupRetirementProvider {
                     # "already gone -- remove the row" while both groups existed. Every live group of that name is asked
                     # for FIRST (a fresh read, never the cache); only a read that finds NONE says "already gone".
                     $__named = Get-PimLiveGroupIdsByName -Name "$($r.GroupName)"
-                    if ($null -ne $__named -and @($__named).Count -eq 0) { $x.complete = $true; $x.note = 'already gone -- remove the row (or its Retire flag) to finish'; [void]$live.Add($x); continue }
+                    if ($null -ne $__named -and @($__named).Count -eq 0) {
+                        # RETIRE-ROW-LEFT-INCONSISTENT: a FRESH read finds no group of that name -- the retire is finished; the
+                        # engine takes the row out itself (never on a read that failed: $null; never a name two groups carry).
+                        $__wi = [bool]$ctx['__pimWhatIf']
+                        $__out = Complete-PimRetiredGroupRow -Retire $r -Scope 'GroupRetirement' -WhatIf:$__wi -Why 'already gone'
+                        $x.complete = $true; $x.note = $(if ($__out) { 'already gone -- its row was taken out (retire finished)' } else { 'already gone -- remove the row (or its Retire flag) to finish' }); [void]$live.Add($x); continue
+                    }
                     if ($null -eq $__named) { $x.blocked = 'the groups of this name could not be read -- nothing deleted, and the row is NOT finished (never "already gone" on a read that failed); the next run reads again' }
                     elseif (@($__named).Count -gt 1) { $x.blocked = ("name not unique -- nothing deleted: {0} live groups are named '{1}' (ids {2}) -- PIM cannot prove which one it manages, so it retires none. Keep the definition row; rename or delete the extra group, then the next run retires the one left." -f @($__named).Count, $r.GroupName, (@($__named) -join ', ')) }
                     else { $x.blocked = ("the group '{0}' was not resolved by its name in this run, although one live group carries it (id {1}) -- nothing deleted on two reads that disagree; the next run reads again" -f $r.GroupName, "$(@($__named)[0])") }
@@ -9086,8 +9199,10 @@ function New-PimGroupRetirementProvider {
             foreach ($w in $warn) { Write-Warning "  [GroupRetirement] $gn -- $w" }
             # 3. the group itself (v1 11182-11195). Azure RBAC held by the group dies with the object.
             Invoke-PimGraph -Method DELETE -Path "/groups/$gid" | Out-Null
-            Write-Host "  [GroupRetirement] '$gn' DELETED. Remove the definition row to finish." -ForegroundColor Red
+            Write-Host "  [GroupRetirement] '$gn' DELETED." -ForegroundColor Red
             Write-PimAdminLifecycleAudit -Action 'group.retire' -Target $gn -After @{ groupId = $gid; deleted = $true; warnings = $warn.Count }
+            # RETIRE-ROW-LEFT-INCONSISTENT: the group is gone -- the engine finishes the retire and takes the row out itself.
+            [void](Complete-PimRetiredGroupRow -Retire $item.desired -Scope 'GroupRetirement' -Why 'deleted by this run')
             return [pscustomobject]@{ pimApplied = $true; groupId = $gid }
         }
     }

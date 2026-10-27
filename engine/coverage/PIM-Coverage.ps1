@@ -924,11 +924,29 @@ function Get-PimCoverageReport {
 
 function Get-PimCoverageNewFindings {
     # PURE. Rows of -Current whose key (workload|status|item) was not in -Previous and whose status is mailed.
-    param([AllowNull()][object]$Previous, [AllowNull()][object]$Current)
+    # COVERAGE-NULL-INDEX (SUP-2026-00330, efif-efif-prod 2026-10-27: "Cannot index into a null array" at
+    # Get-PimCoverageField <- here, the whole run failed and the report was NOT stored): every row is read on its own. A row
+    # that cannot be read is skipped and named in -Failures ("previous row 17 (System.Object[]): <message>") -- one bad row
+    # never costs the report. -Failures: a List[string] the caller passes in; without it the failures are only skipped.
+    param([AllowNull()][object]$Previous, [AllowNull()][object]$Current, [System.Collections.Generic.List[string]]$Failures)
+    $note = { param($side, $i, $r, $e) if ($null -ne $Failures) { $t = if ($null -eq $r) { 'null' } else { $r.GetType().FullName }; $Failures.Add(("{0} row {1} ({2}): {3}" -f $side, $i, $t, $e.Exception.Message)) } }
     $seen = @{}
-    foreach ($r in @(@(Get-PimCoverageField $Previous 'rows') | Where-Object { $null -ne $_ })) { $k = "$(Get-PimCoverageField $r 'key')"; if ($k) { $seen[$k] = $true } }
-    return @(@(Get-PimCoverageField $Current 'rows') | Where-Object {
-        $null -ne $_ -and ($script:PimCoverageAlertStatuses -contains "$(Get-PimCoverageField $_ 'status')") -and -not $seen.ContainsKey("$(Get-PimCoverageField $_ 'key')") })
+    $i = -1
+    foreach ($r in @(Get-PimCoverageField $Previous 'rows')) {
+        $i++
+        if ($null -eq $r) { continue }
+        try { $k = "$(Get-PimCoverageField $r 'key')"; if ($k) { $seen[$k] = $true } } catch { & $note 'previous' $i $r $_ }
+    }
+    $out = New-Object System.Collections.Generic.List[object]
+    $i = -1
+    foreach ($r in @(Get-PimCoverageField $Current 'rows')) {
+        $i++
+        if ($null -eq $r) { continue }
+        try {
+            if (($script:PimCoverageAlertStatuses -contains "$(Get-PimCoverageField $r 'status')") -and -not $seen.ContainsKey("$(Get-PimCoverageField $r 'key')")) { $out.Add($r) }
+        } catch { & $note 'current' $i $r $_ }
+    }
+    return @($out.ToArray())
 }
 
 # ===========================================================================
@@ -1125,9 +1143,23 @@ function Invoke-PimCoverageJob {
     $doc['durationSeconds'] = [math]::Round($sw.Elapsed.TotalSeconds, 1)
     $doc['source'] = 'scheduler'
     $doc['correlationId'] = "$($global:PIM_JobCorrelationId)"
-    $new = @()
-    if ($null -ne $previous -and "$(Get-PimCoverageField $previous 'computedUtc')".Trim()) { $new = @(Get-PimCoverageNewFindings -Previous $previous -Current $doc) }
+    # COVERAGE-NULL-INDEX (SUP-2026-00330; owner 2026-10-27 "Non-fatal compare"): the comparison with the previous report
+    # decides only which findings are NEW (the alert). It can no longer fail the run: a row it cannot read is skipped and
+    # named, and if the comparison itself breaks, the report is STILL stored with newSinceLast = @() and a note, and the run
+    # ends ok with a warning (no new-finding alert from this run; the next run compares again).
+    $new = @(); $cmpFail = New-Object System.Collections.Generic.List[string]; $cmpNote = ''
+    try {
+        if ($null -ne $previous -and "$(Get-PimCoverageField $previous 'computedUtc')".Trim()) { $new = @(Get-PimCoverageNewFindings -Previous $previous -Current $doc -Failures $cmpFail) }
+    } catch {
+        $new = @()
+        $cmpNote = "the comparison with the previous report failed ($($_.Exception.Message) at line $($_.InvocationInfo.ScriptLineNumber)) -- no new-finding alert from this run"
+    }
+    if (-not $cmpNote -and $cmpFail.Count) {
+        $cmpNote = "the comparison with the previous report skipped $($cmpFail.Count) row(s) it could not read: " + (@($cmpFail | Select-Object -First 3) -join '; ') + $(if ($cmpFail.Count -gt 3) { "; +$($cmpFail.Count - 3) more" } else { '' })
+    }
+    if ($cmpNote) { Write-Warning "[$type] $cmpNote" }
     $doc['newSinceLast'] = @($new | ForEach-Object { $_.key })
+    if ($cmpNote) { $doc['newSinceLastNote'] = $cmpNote }
     $doc['baseline'] = ($null -eq $previous)
     $where = Set-PimTenantCacheEntry -Kind $kind -Value $doc
 
@@ -1158,6 +1190,7 @@ function Invoke-PimCoverageJob {
     $nc = @($doc.sources | Where-Object { -not $_.read })
     $tail = if ($nc.Count) { " | NOT CHECKED: " + (@($nc | ForEach-Object { "$($_.workload) ($($_.reason))" }) -join '; ') } else { '' }
     $tail += $(if ($null -eq $previous) { ' | baseline run (nothing mailed)' } elseif ($new.Count) { " | $($new.Count) new finding(s) alerted" } else { ' | no new findings' })
+    if ($cmpNote) { $tail += " | WARNING: $cmpNote" }
     return [pscustomobject]@{ ran = $true; whatIf = $false; newFindings = $new.Count; notChecked = $nc.Count; detail = "$type`: $sum$tail" }
 }
 
