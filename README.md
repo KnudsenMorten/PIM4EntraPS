@@ -9,6 +9,13 @@
 
 **Privileged access for Microsoft Entra and Azure, governed as one model.**
 
+> ### ⬇️ Download / Install Community — free
+> **[Download the latest release](https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest)** &nbsp;·&nbsp;
+> **[Install guide](https://invardia.com/docs/pim-manager/setup/#community-edition)** &nbsp;·&nbsp;
+> [Quick start below](#community-quick-start)
+>
+> Installs into your own Azure subscription with one command. Pro adds more: [Free vs Pro](https://invardia.com/products/pim-manager/).
+
 Standing admin rights are the access an attacker wants most, and Microsoft Entra PIM gets hard to run by hand once
 you have more than a handful of admins: every person needs every role assigned one by one, nothing tells you when the
 tenant drifts from what you intended, and a leaver keeps access until someone remembers it.
