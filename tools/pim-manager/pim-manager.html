@@ -3896,7 +3896,8 @@
           '<button class="btn-sec acctRemoveFromPim" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
             ' title="REMOVE this admin FROM PIM: every delegation is removed and the account is DISABLED and KEPT in Entra ID (not deleted). The admin leaves this list; PIM keeps the account disabled. Staged in Pending changes; a second administrator approves only for a high-privilege or break-glass admin, or with maker-checker on." style="font-size:11px;color:#bc4c00;">Remove from PIM</button> ') +
           // §96.5 D1 (operator 2026-10-06: "i allow operators to delete an admin"): SuperAdmin only, typed confirmation.
-          ((roleAtLeast('Admin') || PIM_ROLE === 'Delegated') && !a.readOnly ? '<button class="btn-sec acctDelete" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' +
+          // 2026-10-27: not for an on-premises AD admin -- it has no Entra ID account to delete, and PIM never deletes an AD account.
+          ((roleAtLeast('Admin') || PIM_ROLE === 'Delegated') && !a.readOnly && acctFacets(a).platform !== 'ad' ? '<button class="btn-sec acctDelete" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' +
             ' title="DELETE the account in Entra ID and remove every delegation it has (SuperAdmin, Admin, or a delegated operator for admins at or below its level; you type DELETE to confirm -- your delete IS the approval; Entra keeps it restorable for 30 days)." style="font-size:11px;color:#cf222e;border-color:#cf222e;">Delete account</button> ' : '') +
           // REQ-ADM-UNMANAGE-1: out of PIM, Entra untouched (the account and its access stay; Import brings it back).
           '<button class="btn-sec acctUnmanage" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
@@ -5170,6 +5171,8 @@
   // page's own code (and a test) can still read how many there are.
   function pimMenuWaiting(src) {
     const s = src || {};
+    // PENDING-RED-BADGE: a red count whose number the page's own readers also take from data-menu-waiting says so (waiting).
+    if (s.waiting != null) return Math.max(0, Math.floor(Number(s.waiting) || 0));
     return s.blocking ? 0 : Math.max(0, Math.floor(Number(s.actions) || 0));
   }
   // Paint ONE menu badge by that rule. el: the element or its id. src: { errors, actions, blocking } plus
@@ -22945,7 +22948,12 @@
     // that is not blocking, so NO number in the menu. The Pending changes page and the All-records rail show the counts;
     // the hidden badge keeps the number as data-menu-waiting.
     pimMenuBadge('gridDirtyBadge', { actions: dirtyBases });
-    pimMenuBadge('saveDirtyBadge', { actions: rowCount });
+    // PENDING-RED-BADGE (owner 2026-10-27, reversing 100.94 for this one count: "i would prefer to be notified in red when
+    // something is pending, like commits or guards. people dont know"): changes nobody has committed are a red count on
+    // Pending changes -- nothing reaches Entra ID until someone commits, and people did not know they were there. The
+    // number is the same rows the Review & commit page lists; data-menu-waiting keeps the count for the page's own readers.
+    pimMenuBadge('saveDirtyBadge', { actions: rowCount, blocking: true, waiting: rowCount,
+      title: r => pimMenuWords(r.n, 'change is', 'changes are') + ' staged and not committed -- nothing happens in Microsoft Entra ID until it is committed under Pending changes > Review & commit' });
     // §70.12 -- every badge refresh follows a pendingChanges change, so this is where the draft is kept.
     if (typeof persistPendingDraft === 'function') persistPendingDraft();
     // §79.13: and to the SHARED store, so every administrator sees it (debounced; no-op without a SQL store).
@@ -24327,6 +24335,12 @@
             (base === 'Account-Definitions-Admins' && String(row.UserPrincipalName || '').trim()
               ? '<button data-act="acct-strip" class="row-acct-strip" title="REMOVE ALL DELEGATIONS of this admin, KEEP THE ACCOUNT as it is: every group delegation naming this admin is removed by the next engine run. Staged in Pending changes.">&#x1F9F9;</button> ' +
                 '<button data-act="acct-disable-strip" class="row-acct-disable-strip" title="DISABLE this admin and REMOVE ALL its delegations (the account stays in PIM, disabled; a second administrator approves only for a high-privilege or break-glass admin, or with maker-checker on). Staged in Pending changes.">&#x26D4;</button> ' +
+                // ADMIN-GRID-DELETE (owner 2026-10-27: "i am missing option to delete admins in this view" / "i can only take admin
+                // out of pim or remove delegations"): the bin DELETES THE ACCOUNT, like the group bin deletes the group -- the same
+                // Delete account as the Admin accounts page (acctStageDelete -> DELETE /api/admin-accounts/<upn>: typed DELETE, a
+                // reason, the server's delete rule; a sponsor's delete is proposed for approval).
+                ((String(row.AccountStatus || '').trim().toLowerCase() !== 'deleted' && (roleAtLeast('Admin') || PIM_ROLE === 'Delegated') && !(String(row.Owner || '').trim().toLowerCase() === 'msp') && !/^ad$/i.test(String(row.TargetPlatform || '').trim()))
+                  ? '<button data-act="acct-delete" class="row-retire row-acct-delete" title="DELETE this account in Microsoft Entra ID and remove every delegation it has. You type DELETE and give a reason; the next engine run deletes the exact account once (Entra keeps it restorable for 30 days). If you may not delete it yourself, the delete is proposed for approval.">&#x1F5D1;</button> ' : '') +
                 // §96.5 D1 (b): Remove from PIM -- delegations removed, account DISABLED and KEPT, row marked AccountStatus = Removed.
                 (String(row.AccountStatus || '').trim().toLowerCase() === 'removed' ? '' :
                 '<button data-act="acct-remove-from-pim" class="row-acct-remove-from-pim" title="REMOVE this admin FROM PIM: every delegation removed, the account DISABLED and KEPT in Entra ID (not deleted), the admin out of the active lists (AccountStatus = Removed). Staged in Pending changes; a second administrator approves only for a high-privilege or break-glass admin, or with maker-checker on.">&#x2B07;</button> ')
@@ -24520,6 +24534,11 @@
         if (b.dataset.act === 'acct-strip' || b.dataset.act === 'acct-disable-strip') {
           const ar = p.rows[idx] || {};
           await acctStageStatus([{ upn: String(ar.UserPrincipalName || '').trim(), userName: String(ar.UserName || '').trim() }], b.dataset.act === 'acct-strip' ? '' : 'Disabled', true);
+          return;
+        }
+        if (b.dataset.act === 'acct-delete') {
+          const ar = p.rows[idx] || {};
+          await acctStageDelete([{ upn: String(ar.UserPrincipalName || '').trim(), userName: String(ar.UserName || '').trim() }]);
           return;
         }
         if (b.dataset.act === 'acct-remove-from-pim') {
@@ -39060,10 +39079,16 @@
     const act = (it, c) => (it.g.actions && it.g.actions[c]) || { offered: false, why: 'The server did not say whether this is offered.' };
     const why = { stop: {}, keep: {}, delete: {} };
     const can = { stop: [], keep: [], delete: [] };
+    // GROUP-DELETE-BLOCK (owner 2026-10-27: "it should block that if i try to remove a group"): with group deletion switched
+    // OFF a delete is not offered -- the engine would skip the mark on every run. A group already marked Retire is not
+    // counted (it is not deleted again). The server refuses the same commit (409 group-deletion-off).
+    const retireOff = !!(retireSt && retireSt.effective === 'off');
+    const offWhy = 'Group deletion is switched off, so the group would not be deleted. A SuperAdmin switches it on under ' + pimGroupRetirePlace(retireSt) + '; then delete again. To keep the group and only take the access away, choose Remove the access.';
     items.forEach((it, n) => {
       ['stop', 'keep', 'delete'].forEach(c => {
         const a = act(it, c);
         let w = a.offered ? '' : String(a.why || 'not offered for this state');
+        if (!w && c === 'delete' && retireOff && !/^retire/i.test(String(it.row.Lifecycle || '').trim())) w = offWhy;
         if (!w && c !== 'stop' && !it.tag) w = 'The row has no GroupTag, so its delegations cannot be found.';
         if (!w && !it.depsKnown) w = 'The delegations that name it could not be read.';
         if (!w && c === 'stop' && it.blockers.length) w = it.blockers.length + ' delegation(s) still name it, e.g. ' + pimDependentLabel(it.blockers[0]) + '. Remove the access first.';
@@ -39135,6 +39160,7 @@
       choice('delete', 'Remove the access and delete the group in Microsoft Entra ID',
         '<b>Access:</b> removed by the next engine run. <b>Group:</b> DELETED in Microsoft Entra ID by the engine &mdash; this cannot be undone. <b>Row:</b> stays, marked Retire, until the group is gone; take it out then.',
         ' <span class="grp-choice-deps">' + depLine(can.delete) + '</span>' + retireNote + warnHtml) +
+      (retireOff ? '<div id="grpDeleteOff" style="font-size:12px;margin:-2px 0 6px 22px;color:#cf222e;">Group deletion is switched off. <a href="#" id="grpDeleteOffSwitch">Open the switch</a></div>' : '') +
       '<p style="color:#57606a;">Nothing is saved yet &mdash; review and commit under <b>Pending changes</b>.</p>';
     const okLabels = { stop: 'Take out of PIM Manager', keep: 'Remove the access', delete: 'Remove the access and delete' };
     const first = (can[want] && can[want].length) ? want : (['stop', 'keep', 'delete'].filter(c => can[c].length)[0] || '');
@@ -39152,6 +39178,8 @@
     };
     radios.forEach(r => { if (r.value === first) r.checked = true; r.onchange = sync; });
     if (warnTick) warnTick.onchange = sync;
+    const offLink = document.getElementById('grpDeleteOffSwitch');
+    if (offLink) offLink.onclick = ev => { if (ev) ev.preventDefault(); const cx = document.getElementById('modalCancel'); if (cx) cx.click(); pimGroupRetireGoSwitch(); };
     sync();
     let ok = false;
     try { ok = await pr; } finally { if (okBtn) okBtn.disabled = false; }

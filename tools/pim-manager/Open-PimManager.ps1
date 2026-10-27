@@ -1903,6 +1903,28 @@ function Get-PimManagerGuardRowFlag {
     if ((& $g 'Lifecycle') -match '(?i)^retire' -and (& $g 'GroupName')) { return 'retire' }
     return ''
 }
+function Get-PimManagerNewRetireMarks {
+    # PURE. GROUP-DELETE-BLOCK (owner 2026-10-27): the group names THIS commit newly marks Lifecycle = Retire (marked in
+    # -AfterRows, not in -BeforeRows; matched by GroupName). An unrelated commit of a list that already holds marks returns
+    # nothing, so it is never stopped for old marks.
+    param([AllowNull()][object[]]$BeforeRows = @(), [AllowNull()][object[]]$AfterRows = @())
+    $nameOf = { param($r) if ($r -is [System.Collections.IDictionary]) { "$($r['GroupName'])".Trim() } elseif ($r.PSObject.Properties['GroupName']) { "$($r.GroupName)".Trim() } else { '' } }
+    $was = @{}
+    foreach ($r in @($BeforeRows)) { if ($null -ne $r -and (Get-PimManagerGuardRowFlag -Row $r) -eq 'retire') { $was[(& $nameOf $r).ToLowerInvariant()] = $true } }
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @($AfterRows)) {
+        if ($null -eq $r -or (Get-PimManagerGuardRowFlag -Row $r) -ne 'retire') { continue }
+        $n = & $nameOf $r
+        if ($n -and -not $was.ContainsKey($n.ToLowerInvariant()) -and -not $out.Contains($n)) { $out.Add($n) }
+    }
+    return @($out.ToArray())
+}
+function Get-PimManagerGroupDeleteOffText {
+    # PURE. The one line a person reads when a group delete is refused because group deletion is switched off.
+    param([int]$Count = 1, [string]$Place = 'Settings > Approvals & policy > Group deletion')
+    $what = if ($Count -eq 1) { 'this group' } else { "these $Count groups" }
+    "Group deletion is switched off, so $what would not be deleted. A SuperAdmin switches it on under $Place; then delete again. To keep the group and only take the access away, choose Remove the access."
+}
 function Get-PimManagerCommitGuardAsks {
     <#
       PURE over what it is given. What ONE commit of -Base needs a SuperAdmin to approve, as a list of asks:
@@ -7663,6 +7685,23 @@ function Invoke-PimManagerCsvPut {
         Write-JsonResponse -Response $resp -Status 500 -Body ([ordered]@{ ok = $false; base = $base; code = 'guard-library-missing'; error = "the guard library is not loaded -- nothing was saved; repair the installation (engine\_shared\PIM-ManagerWriteGuards.ps1 is missing or did not load, so the removal check of this commit cannot run)" })
         return 500
     }
+    # GROUP-DELETE-BLOCK (owner 2026-10-27: "it should block that if i try to remove a group ... we need to tell users what to
+    # do instead of letting them to belive that they just removed groups and then nothing happens"): a commit that newly
+    # marks a group Retire while group deletion is switched OFF is refused with what to do. The engine would skip the
+    # marks on every run and the commit looked like a delete. 'unknown' (the switch could not be read) is not refused --
+    # the delete dialog says so -- and old marks never stop an unrelated commit.
+    if (@(@(Get-PimGuardGroupDeletionEntities) | Where-Object { $_ -ieq $base }).Count) {
+        $gdNew = @(Get-PimManagerNewRetireMarks -BeforeRows @($current.rows) -AfterRows @($rowsOrdered))
+        if ($gdNew.Count) {
+            $gdSt = $null; try { $gdSt = Get-PimManagerGroupRetirementState } catch { $gdSt = $null }
+            if ($gdSt -and "$($gdSt.effective)" -eq 'off') {
+                $gdText = Get-PimManagerGroupDeleteOffText -Count $gdNew.Count -Place (Get-PimManagerGroupRetirementPlace)
+                Write-PimManagerAuditEvent -Action 'commit.group-delete-off' -Target $base -Result 'denied' -After ([ordered]@{ groups = @($gdNew); effective = 'off'; source = "$($gdSt.source)" })
+                Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{ ok = $false; base = $base; code = 'group-deletion-off'; error = $gdText; groups = @($gdNew); place = (Get-PimManagerGroupRetirementPlace) })
+                return 409
+            }
+        }
+    }
     if (Get-Command Test-PimCommitDeltaGuard -ErrorAction SilentlyContinue) {
         $deltaGuard = Test-PimCommitDeltaGuard -BeforeCount (@($current.rows).Count) -AfterCount (@($rowsOrdered).Count) -RemoveCount (@($diff.removes).Count)
         # §97.1: the removal budget costs reads (the limit, the open approvals, the other group lists) -- made only when the
@@ -8633,6 +8672,22 @@ function Get-PimManagerTenantDomains {
     return [ordered]@{ known = $false; source = 'none'; domains = @(); refreshedUtc = ''; reason = $(if ($reason) { $reason } else { 'no source returned a verified domain' }) }
 }
 
+function Test-PimGraphRowLive {
+    # PURE. ACCESS-MAP-STALE: is this row still a grant the map should draw? A deleted admin (AccountStatus=Deleted), a
+    # retired definition (Lifecycle=Retire...) and a removed assignment (Action=Remove) are history, not access.
+    param([AllowNull()][object]$Row)
+    if ($null -eq $Row) { return $false }
+    $f = { param($n) if ($Row -is [System.Collections.IDictionary]) { "$($Row[$n])".Trim() } elseif ($Row.PSObject.Properties[$n]) { "$($Row.$n)".Trim() } else { '' } }
+    if ((& $f 'AccountStatus') -ieq 'Deleted') { return $false }
+    if ((& $f 'Lifecycle') -match '(?i)^retire') { return $false }
+    if ((& $f 'Action') -ieq 'Remove') { return $false }
+    return $true
+}
+function Select-PimGraphLiveRows {
+    param([AllowNull()][object[]]$Rows)
+    foreach ($r in @($Rows)) { if (Test-PimGraphRowLive -Row $r) { $r } }
+}
+
 function Build-PimGraphData {
     $admins        = (Read-PimRows 'Account-Definitions-Admins').rows
 
@@ -8653,6 +8708,29 @@ function Build-PimGraphData {
     $asgnRolesAU   = (Read-PimRows 'PIM-Assignments-Roles-AUs').rows
     $asgnAzRes     = (Read-PimRows 'PIM-Assignments-Azure-Resources').rows
     $asgnWorkloads = (Read-PimRows 'PIM-Assignments-Workloads').rows
+
+    # ACCESS-MAP-STALE (owner 2026-10-27, internal: "i have deleted delegations and admins but it still shows in the access
+    # mapper"): a delete keeps its row as history -- an admin as AccountStatus=Deleted, a definition as Lifecycle=Retire, an
+    # assignment as Action=Remove -- and the map drew every row. The map shows what IS granted, so those rows are left out,
+    # with the engine's own tests (PIM-EngineProviders: AccountStatus Deleted, Action Remove; Lifecycle ^retire). An edge to
+    # a node that is left out is dropped by the board itself (colOf -> -1).
+    $admins        = @(Select-PimGraphLiveRows -Rows $admins)
+    $defRoles      = @(Select-PimGraphLiveRows -Rows $defRoles)
+    $defTasks      = @(Select-PimGraphLiveRows -Rows $defTasks)
+    $defServices   = @(Select-PimGraphLiveRows -Rows $defServices)
+    $defProcesses  = @(Select-PimGraphLiveRows -Rows $defProcesses)
+    $defResources  = @(Select-PimGraphLiveRows -Rows $defResources)
+    $defDepts      = @(Select-PimGraphLiveRows -Rows $defDepts)
+    $defAUs        = @(Select-PimGraphLiveRows -Rows $defAUs)
+    $defOrg        = @(Select-PimGraphLiveRows -Rows $defOrg)
+    $defProjects   = @(Select-PimGraphLiveRows -Rows $defProjects)
+    $defCrossOrg   = @(Select-PimGraphLiveRows -Rows $defCrossOrg)
+    $asgnAdmins    = @(Select-PimGraphLiveRows -Rows $asgnAdmins)
+    $asgnGroups    = @(Select-PimGraphLiveRows -Rows $asgnGroups)
+    $asgnRolesGrp  = @(Select-PimGraphLiveRows -Rows $asgnRolesGrp)
+    $asgnRolesAU   = @(Select-PimGraphLiveRows -Rows $asgnRolesAU)
+    $asgnAzRes     = @(Select-PimGraphLiveRows -Rows $asgnAzRes)
+    $asgnWorkloads = @(Select-PimGraphLiveRows -Rows $asgnWorkloads)
 
     # Friendly workload names come from the connector catalog (id -> name), so the
     # map shows "Microsoft Defender XDR" not the bare "defender-xdr" connector id.
@@ -8712,7 +8790,7 @@ function Build-PimGraphData {
     $adminAlias = @{}   # login name / UPN local part (lower) -> UPN: the synced memberships name a central admin by login name
     $haveUpn = @{}; foreach ($n in $nodes) { if ($n.kind -eq 'admin') { $haveUpn["$($n.id)".ToLowerInvariant()] = $true } }
     $centralAdmins = @()
-    if (Get-Command Get-PimManagerCentralAdminRows -ErrorAction SilentlyContinue) { try { $centralAdmins = @(Get-PimManagerCentralAdminRows) } catch { $centralAdmins = @() } }
+    if (Get-Command Get-PimManagerCentralAdminRows -ErrorAction SilentlyContinue) { try { $centralAdmins = @(Select-PimGraphLiveRows -Rows @(Get-PimManagerCentralAdminRows)) } catch { $centralAdmins = @() } }
     foreach ($a in $centralAdmins) {
         $u = "$($a.UserPrincipalName)".Trim(); if (-not $u -or $haveUpn.ContainsKey($u.ToLowerInvariant())) { continue }
         $haveUpn[$u.ToLowerInvariant()] = $true
@@ -12527,6 +12605,13 @@ function Get-PimManagerAdminRemovalPlan {
     return [pscustomobject]$res
 }
 
+function Test-PimManagerAdminIsAdOnly {
+    # PURE. Is this admin row an on-premises AD account (TargetPlatform AD)? Those are never deleted by PIM Manager.
+    param([AllowNull()][object]$Row)
+    if ($null -eq $Row) { return $false }
+    $v = if ($Row -is [System.Collections.IDictionary]) { "$($Row['TargetPlatform'])" } elseif ($Row.PSObject.Properties['TargetPlatform']) { "$($Row.TargetPlatform)" } else { '' }
+    return ($v.Trim() -ieq 'AD')
+}
 function Resolve-PimManagerAdminObjectId {
     <#
       CODE REVIEW 1 FIXES 2026-10-13 (decision 54): the LIVE object id of the account the operator chose, read from Microsoft
@@ -12541,7 +12626,10 @@ function Resolve-PimManagerAdminObjectId {
         if ($script:PimAdminObjectIdResolver -is [scriptblock]) { $o.id = "$(& $script:PimAdminObjectIdResolver $u)".Trim().ToLowerInvariant() }
         elseif (Get-Command Invoke-PimGraphGetAll -ErrorAction SilentlyContinue) {
             $q = [uri]::EscapeDataString("userPrincipalName eq '$($u.Replace("'", "''"))'")
-            $hits = @(Invoke-PimGraphGetAll -Uri "https://graph.microsoft.com/v1.0/users?`$filter=$q&`$select=id,userPrincipalName")
+            # 2026-10-27 (owner, internal: "NOT deleted -- the account to delete could not be pinned: --" with no reason):
+            # Invoke-PimGraphGetAll returns its list WRAPPED (return ,@(...)), so @(...) held ONE item -- the list -- and an
+            # empty answer read as one hit with no id and no error. Unrolled here: 0 / 1 / many are counted for real.
+            $hits = @(@(Invoke-PimGraphGetAll -Uri "https://graph.microsoft.com/v1.0/users?`$filter=$q&`$select=id,userPrincipalName") | ForEach-Object { $_ } | Where-Object { $null -ne $_ })
             if ($hits.Count -eq 1) { $o.id = "$($hits[0].id)".Trim().ToLowerInvariant() }
             elseif ($hits.Count -gt 1) { $o.error = "$($hits.Count) accounts answer to '$u'" }
             else { $o.error = "no account '$u' was found in Microsoft Entra ID" }
@@ -12573,6 +12661,14 @@ function Get-PimManagerAdminDeletePlan {
     $res.upn = $(if ("$($row.UserPrincipalName)".Trim()) { "$($row.UserPrincipalName)".Trim() } else { $res.upn })
     $res.userName = "$($row.UserName)".Trim()
     if ("$($row.AccountStatus)".Trim() -ieq 'Deleted') { $res.status = 409; $res.error = "'$($res.upn)' is already AccountStatus=Deleted -- nothing to request."; return [pscustomobject]$res }
+    # 2026-10-27 (owner, internal: Delete account on Admin-PimTest-AD): an on-premises AD admin has no Microsoft Entra ID
+    # object to pin, and PIM Manager never deletes an AD account (the hybrid worker creates and disables, never deletes). Said
+    # at once, with what to do, instead of a failed pin.
+    if (Test-PimManagerAdminIsAdOnly -Row $row) {
+        $res.status = 409; $res.code = 'ad-account'
+        $res.error = "'$($res.upn)' is an on-premises Active Directory account. PIM Manager does not delete AD accounts. Use Remove from PIM (its delegations are removed and the account is disabled), then delete it in Active Directory."
+        return [pscustomobject]$res
+    }
     $res.delegations = @(Get-PimManagerAdminDelegationRows -Upn $res.upn -UserName $res.userName -Rows @($AssignmentRows))
     $v = Test-PimRevauditAdminTarget -Caller $Caller -AdminRow $row -Action delete
     if ($v.allowed) { $res.status = 202; $res.mode = 'delete'; $res.code = "$($v.code)"; return [pscustomobject]$res }
