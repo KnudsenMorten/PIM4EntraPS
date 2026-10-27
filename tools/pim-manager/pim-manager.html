@@ -3760,7 +3760,10 @@
     // the engine keeps the account disabled. "Show removed from PIM" lists them again (to Enable one, say).
     // 2026-10-07 (operator: "this is confusing, why are you showing deleted accounts here"): a DELETED account (AccountStatus
     // = Deleted) is hidden the same way -- its row stays only so the engine keeps the account gone.
-    const isRemoved = a => /^(removed|deleted)$/.test(String(a.accountStatus || '').toLowerCase());
+    // ADMIN-DELETE-FEEDBACK (owner 2026-10-27: "i just deleted this admin but it still shows ... it should state that i have
+    // staged it for deletion"): a delete whose pinned one-time delete has NOT run yet (deletePending, from the server) stays
+    // in view, marked, until the account is gone -- then it is hidden like every deleted account.
+    const isRemoved = a => /^(removed|deleted)$/.test(String(a.accountStatus || '').toLowerCase()) && !a.deletePending;
     const nRemoved = acctGridState.rows.filter(isRemoved).length;
     const active = acctGridState.showRemoved ? acctGridState.rows : acctGridState.rows.filter(a => !isRemoved(a));
     // 100.29: the text filter AND every ticked chip group (acctPasses); "N of M" counts what is left.
@@ -3850,7 +3853,9 @@
         '<td style="font-size:11.5px;">' + escapeHtml(a.adminType || '') +
           (a.environment ? '<div style="color:#57606a;font-size:10.5px;">' + escapeHtml(a.environment) + '</div>' : '') + '</td>' +
         '<td style="font-size:11.5px;" class="acctDeptCell">' + acctSponsorDeptCell(a) + '</td>' +
-        '<td style="font-size:11.5px;color:' + stColor + ';font-weight:600;">' + escapeHtml(st) +
+        '<td style="font-size:11.5px;color:' + stColor + ';font-weight:600;">' + (a.deletePending
+          ? '<span class="acctDeletePending" title="The delete is committed and the exact account is pinned. The next engine run deletes it in Microsoft Entra ID (it stays restorable there for 30 days); then it leaves this list.">Marked for deletion</span><div style="font-weight:400;color:#57606a;">the next engine run deletes it</div>'
+          : escapeHtml(st)) +
           // 71.21: never the word "deletion" -- PIM keeps the account, disabled, for ever.
           (flagged ? '<div style="color:#bc4c00;font-size:10.5px;font-weight:400;" title="Offboarding disables the account, revokes its sessions and removes its PIM access. Offboarding never deletes the account itself.">marked for manual removal</div>' : '') + '</td>' +
         '<td style="font-size:11.5px;" class="acctAutoDisableCell">' + acctAutoDisableCell(a) + '</td>' +
@@ -11660,7 +11665,10 @@
     const m = st && st.marked;
     if (!m || !m.known) return null;
     const by = m.byEntity || {};
-    const isRetire = r => !!String((r && r.GroupName) || '').trim() && /^retire/i.test(String((r && r.Lifecycle) || '').trim());
+    // RETIRE-ROW-LEFT-INCONSISTENT: a group a fresh read no longer finds is gone -- only its row is left; it is not counted
+    // (the server's byEntity already leaves it out; the staged rows of an open record type leave it out here too).
+    const gone = new Set((m.goneNames || []).map(x => String(x || '').trim().toLowerCase()));
+    const isRetire = r => !!String((r && r.GroupName) || '').trim() && /^retire/i.test(String((r && r.Lifecycle) || '').trim()) && !gone.has(String(r.GroupName).trim().toLowerCase());
     let n = 0; const open = {};
     Object.keys(pendingChanges || {}).forEach(b => {
       const p = pendingChanges[b];
@@ -11750,7 +11758,9 @@
       (st.envNote ? '<div id="groupRetireEnvNote" style="color:#57606a;font-size:11.5px;margin-top:2px;">' + esc(String(st.envNote)) + '</div>' : '') +
       '<div id="groupRetireMarked" style="font-size:12px;margin-top:6px;">' + (total === null
         ? 'Marked Retire right now: <b>not counted</b> -- the store could not be read (' + esc(String(m.error || '')) + ').'
-        : 'Marked Retire right now: <b>' + total + '</b> group' + (total === 1 ? '' : 's') + '.') + '</div>' +
+        : 'Marked Retire and still in Microsoft Entra ID: <b>' + total + '</b> group' + (total === 1 ? '' : 's') + '.' +
+          // RETIRE-ROW-LEFT-INCONSISTENT: a deleted group's leftover row is said apart, never counted as waiting
+          ((Number(m.gone) || 0) > 0 ? ' <span id="groupRetireGone" style="color:#57606a;">' + (Number(m.gone) || 0) + ' more ' + ((Number(m.gone) || 0) === 1 ? 'is' : 'are') + ' already deleted -- only ' + ((Number(m.gone) || 0) === 1 ? 'its row is' : 'their rows are') + ' left, and the next full run takes ' + ((Number(m.gone) || 0) === 1 ? 'it' : 'them') + ' out.</span>' : '')) + '</div>' +
       (total ? '<div id="groupRetireNext" style="font-size:12px;margin-top:2px;">' + esc(wait.text) + ' <a href="#" id="groupRetireJobs">Open Jobs</a> to start it with Run now.</div>' : '') +
       (limit ? '<div id="groupRetireLimit" style="color:#9a6700;font-size:12px;margin-top:2px;">' + esc(limit) + '</div>' : '') +
       (st.canWrite ? '' : '<div style="color:#8c959f;font-size:11px;margin-top:4px;">Only a SuperAdmin can change this.</div>') +
@@ -23634,7 +23644,13 @@
       }
     }
     await showConfirm('Delete account', '<ul>' + lines.map(l => '<li>' + escapeHtml(l) + '</li>').join('') + '</ul>', false);
-    try { if (typeof loadAccountGrid === 'function') loadAccountGrid(); } catch (_) { }
+    // ADMIN-DELETE-FEEDBACK: the list is read again at once (it called loadAccountGrid, which does not exist -- the deleted
+    // admin kept showing "Enabled" until the page was reloaded). The grid in All records reloads its admin rows too.
+    try { if (typeof renderAccounts === 'function' && document.getElementById('acctGridWrap')) await renderAccounts(); } catch (_) { }
+    try {
+      const gb = 'Account-Definitions-Admins';
+      if (typeof currentGridBase !== 'undefined' && currentGridBase === gb && !isDirty(gb)) { delete pendingChanges[gb]; const fresh = await loadCsv(gb, true); ensurePending(gb, fresh.header, fresh.rows); markBadges(); renderGrid(gb); }
+    } catch (_) { }
   }
   // §96.5 D1 (b) "Remove from PIM" (operator 2026-10-06, decision D1 = both): every delegation removed AND the account
   // DISABLED and KEPT in Entra ID. Admin + SuperAdmin, like Disable & remove delegations; held for the offboard approval on
@@ -24035,6 +24051,29 @@
   function gridColWidths(base) { try { return JSON.parse(localStorage.getItem('pimGridColW:' + base) || '{}') || {}; } catch (_) { return {}; } }
   function gridColWidth(base, col) { const n = Number(gridColWidths(base)[col]); return n > 0 ? Math.round(n) : 0; }
   function setGridColWidth(base, col, px) { try { const m = gridColWidths(base); m[col] = Math.round(px); localStorage.setItem('pimGridColW:' + base, JSON.stringify(m)); } catch (_) { } }
+  // REMOVED-HIDDEN-EVERYWHERE (owner 2026-10-27: "general rule. if people removed delegations or groups or admins, it should
+  // not show in the gui in any views. it is very confusing"; wizard: "Hidden, toggle to show"). PURE: is this row history --
+  // a deleted admin (AccountStatus = Deleted), a retired group (Lifecycle = Retire...), a removed delegation (Action = Remove)?
+  // The same rule as the server's Test-PimGraphRowLive and the engine.
+  function pimRowIsHistory(r) {
+    if (!r) return false;
+    const g = n => String(r[n] == null ? '' : r[n]).trim();
+    return /^deleted$/i.test(g('AccountStatus')) || /^retire/i.test(g('Lifecycle')) || /^remove$/i.test(g('Action'));
+  }
+  // PURE over what is staged: the indexes of the history rows that are COMMITTED -- the stored row (same row key) is history
+  // too. A row marked here and not committed yet stays in view, so the person sees what they just did. Rows taken out are
+  // left out.
+  function pimGridHistoryRows(base, p) {
+    const out = new Set();
+    if (!p || !p.rows) return out;
+    const was = new Set((p.baseline || []).filter(pimRowIsHistory).map(r => pendingRowKey(base, r)));
+    p.rows.forEach((r, i) => { if (!(p.deletes && p.deletes.has(i)) && pimRowIsHistory(r) && was.has(pendingRowKey(base, r))) out.add(i); });
+    return out;
+  }
+  // The per-browser choice (one for every grid): show the removed rows too. Storage may be unavailable -- then hidden.
+  var PIM_GRID_SHOW_REMOVED_KEY = 'pim.grid.showRemoved';
+  function pimGridShowRemoved() { try { return localStorage.getItem(PIM_GRID_SHOW_REMOVED_KEY) === '1'; } catch (_) { return false; } }
+  function pimGridSetShowRemoved(on) { try { if (on) localStorage.setItem(PIM_GRID_SHOW_REMOVED_KEY, '1'); else localStorage.removeItem(PIM_GRID_SHOW_REMOVED_KEY); } catch (_) { } }
   function gridViewOrder(base, p, cols) {
     const v = gridView(base);
     const f = String(v.filter || '').trim().toLowerCase();
@@ -24087,7 +24126,12 @@
     const mspRowCount = showProvenance
       ? p.rows.filter((r, i) => !p.deletes.has(i) && String((r && (r.Owner || r.owner)) || '').trim().toLowerCase() === 'msp').length
       : 0;
-    const __gridOrder = gridViewOrder(base, p, visHeader);
+    let __gridOrder = gridViewOrder(base, p, visHeader);
+    // REMOVED-HIDDEN-EVERYWHERE: committed history rows are out of view unless "Show removed" is on. View only -- the rows,
+    // their indexes, the selection and the commit are unchanged.
+    const __histRows = pimGridHistoryRows(base, p);
+    const __showRemoved = pimGridShowRemoved();
+    if (!__showRemoved && __histRows.size) __gridOrder = __gridOrder.filter(i => !__histRows.has(i));
     // 100.67: the rows in view order (filter box, problem filter, sort), the visible columns; rows marked for deletion left out.
     pimExportSet('grid', 'Advanced View -- ' + entityLabel(base), () => [{ heading: entityLabel(base), columns: visHeader.map(c => gridColLabel(base, c)),
       rows: __gridOrder.filter(i => !p.deletes.has(i)).map(i => visHeader.map(c => (p.rows[i] || {})[c] || '')) }]);
@@ -24120,6 +24164,7 @@
         <input id="gridFilter" type="search" placeholder="filter rows…" autocomplete="off" value="${escapeHtml(gridView(base).filter)}" style="padding:3px 8px;font-size:12px;border:1px solid #d0d7de;border-radius:6px;width:200px;" title="Show only rows whose cells contain this text">
         ${gridView(base).problem ? '<span id="gridProblemBar" style="font-size:11.5px;background:#ffebe9;border:1px solid #ff8182;border-radius:6px;padding:2px 8px;">Showing the <b>' + gridView(base).problem.rows.size + '</b> row(s) with problem <b>' + escapeHtml(gridView(base).problem.code) + '</b>' + (gridView(base).problem.message ? ' &mdash; ' + escapeHtml(gridView(base).problem.message) : '') + ' <a href="#" id="gridProblemClear">Show all rows</a></span>' : ''}
         ${__gridOrder.length !== p.rows.length ? '<span id="gridShown" style="font-size:11.5px;color:#9a6700;">' + fmtNum(__gridOrder.length) + ' of ' + fmtNum(p.rows.length) + ' shown</span>' : ''}
+        ${__histRows.size ? '<a href="#" id="gridShowRemoved" data-n="' + __histRows.size + '" data-on="' + (__showRemoved ? '1' : '0') + '" style="font-size:11.5px;" title="Deleted admins, groups marked for deletion and removed delegations. They are hidden because they are no longer access; their rows stay so PIM finishes the removal.">' + (__showRemoved ? 'Hide removed (' + fmtNum(__histRows.size) + ')' : 'Show removed (' + fmtNum(__histRows.size) + ')') + '</a>' : ''}
         <button id="btnAddRow">+ Add row</button>
         <button id="btnReloadGrid">&#x21bb; Reload</button>
       </div>
@@ -24886,6 +24931,7 @@
       markBadges();
       renderGrid(base);
     };
+    (document.getElementById('gridShowRemoved') || {}).onclick = (ev) => { if (ev) ev.preventDefault(); pimGridSetShowRemoved(!pimGridShowRemoved()); renderGrid(base); };
     (document.getElementById('btnReloadGrid') || {}).onclick = async () => {
       delete pendingChanges[base];
       const fresh = await loadCsv(base, true);

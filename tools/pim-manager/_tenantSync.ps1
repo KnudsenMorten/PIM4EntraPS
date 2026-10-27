@@ -441,7 +441,10 @@ function Get-PimAzureScopesFromTenant {
                 isRoot      = ("$($m.name)" -and "$($m.name)" -eq "$($m.properties.tenantId)")   # §79.17 the Tenant Root Group
             })
         }
-    } catch { Write-Warning ("  ARM managementGroups list failed: {0}" -f $_.Exception.Message) }
+    } catch {
+        Write-Warning ("  ARM managementGroups list failed: {0}" -f $_.Exception.Message)
+        if (Test-PimTenantSyncPermissionError -Message "$($_.Exception.Message)") { Add-PimTenantSyncDenied -What 'management groups: Microsoft.Management/managementGroups/read refused (403) for this identity' }
+    }
     # Subscriptions: GET /subscriptions
     try {
         foreach ($s in @(Invoke-PimArm -Path '/subscriptions' -ApiVersion '2020-01-01' -All)) {
@@ -452,7 +455,10 @@ function Get-PimAzureScopesFromTenant {
                 scopePath   = "/subscriptions/$($s.subscriptionId)"
             })
         }
-    } catch { Write-Warning ("  ARM subscriptions list failed: {0}" -f $_.Exception.Message) }
+    } catch {
+        Write-Warning ("  ARM subscriptions list failed: {0}" -f $_.Exception.Message)
+        if (Test-PimTenantSyncPermissionError -Message "$($_.Exception.Message)") { Add-PimTenantSyncDenied -What 'subscriptions: list refused (403) for this identity' }
+    }
     Add-PimAzureScopeParents -Items $items   # §79.17
     return ,@($items)
 }
@@ -518,7 +524,27 @@ function Get-PimTenantSyncRows {
 
 function Test-PimTenantSyncPermissionError {
     param([string]$Message)
-    return ("$Message" -match '(?i)\b403\b|Forbidden|Authorization_RequestDenied|Insufficient privileges|PermissionScopeNotGranted')
+    # + AuthorizationFailed: ARM's 403 code (MANAGER-REFRESH-DEGRADES-CACHE).
+    return ("$Message" -match '(?i)\b403\b|Forbidden|Authorization_RequestDenied|AuthorizationFailed|Insufficient privileges|PermissionScopeNotGranted')
+}
+
+# MANAGER-REFRESH-DEGRADES-CACHE (owner 2026-10-27, internal: "why are we suddenly getting perm error"): a refresh started in
+# the Manager read with the Manager's identity, which has no Azure Reader at the management-group root; the management-group
+# list was refused (403 AuthorizationFailed), the read went on with the subscriptions alone, and 1 Azure scope was STORED over
+# the 27 the engine's own run had. A reader that is refused part of a list records it here (Add-PimTenantSyncDenied), and
+# the refresh then keeps the previous, fuller list instead of writing the thinner one.
+function Add-PimTenantSyncDenied {
+    param([string]$What)
+    if (-not ($script:PimTenantSyncDenied -is [System.Collections.IList])) { $script:PimTenantSyncDenied = New-Object System.Collections.Generic.List[string] }
+    [void]$script:PimTenantSyncDenied.Add("$What")
+}
+function Get-PimTenantKeepPreviousReason {
+    # PURE. '' = write the new list; otherwise why the previous list is kept: part of the read was REFUSED (permission) and
+    # the new list is smaller than the one stored. A refused read that still found as much (or more) is written.
+    param([AllowNull()][string[]]$Denied = @(), [int]$NewCount = 0, [int]$PreviousCount = -1)
+    $d = @(@($Denied) | Where-Object { "$_".Trim() })
+    if (-not $d.Count -or $PreviousCount -lt 0 -or $NewCount -ge $PreviousCount) { return '' }
+    return ("kept previous ({0} item(s), not {1}): part of the read was refused -- {2}" -f $PreviousCount, $NewCount, ($d -join '; '))
 }
 
 function ConvertTo-PimAuthMethodName {
@@ -782,8 +808,21 @@ function Invoke-PimTenantListRefresh {
                 }
             }
             try {
+                $script:PimTenantSyncDenied = New-Object System.Collections.Generic.List[string]
                 $items = & $step.fn
                 if ($kind -eq 'pim-activity') { Set-PimActivityLastReadUtc -WhenUtc (Get-Date).ToUniversalTime() }
+                # MANAGER-REFRESH-DEGRADES-CACHE: part of the read was refused -> never store a thinner list over a fuller one.
+                if (-not $step.map -and @($script:PimTenantSyncDenied).Count) {
+                    $prevN = -1
+                    try { $prev = Get-PimTenantCacheEntry -Kind $kind; if ($null -ne $prev) { $prevN = @($prev.items).Count } } catch { $prevN = -1 }
+                    $keep = Get-PimTenantKeepPreviousReason -Denied @($script:PimTenantSyncDenied) -NewCount @($items).Count -PreviousCount $prevN
+                    if ($keep) {
+                        if (-not $Quiet) { Write-Host ("    {0,-22} KEPT -- {1}" -f $label, $keep) -ForegroundColor DarkYellow }
+                        Write-Warning ("  {0}: {1}" -f $label, $keep)
+                        $results[$kind] = @{ ok = $true; kept = $true; count = $prevN; reason = $keep }
+                        continue
+                    }
+                }
                 if ($step.map) {
                     $path  = Set-PimTenantCacheEntry -Kind $kind -Value $items
                     $count = @($items.PSObject.Properties).Count

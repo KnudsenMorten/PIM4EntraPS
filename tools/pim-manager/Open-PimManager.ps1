@@ -1831,11 +1831,20 @@ function Get-PimManagerRetireGroupCount {
     # rule: a GroupName and a Lifecycle that starts with "retire"). @{ known; total; byEntity; error }. known = $false
     # when the store could not be read -- a failed read is never a count of 0. -ReadRows { param($entities) -> @{ entity
     # = rows } } is the test seam.
-    param([scriptblock]$ReadRows)
-    $by = [ordered]@{}; $total = 0
+    #
+    # RETIRE-ROW-LEFT-INCONSISTENT (owner 2026-10-27: "things are NOT consistent ... it is a mesh !"): the 12 groups were
+    # already deleted, yet Settings said "Marked Retire right now: 12" and warned about the removal guard -- it counted ROWS.
+    # total now counts the groups STILL IN Microsoft Entra ID: a Retire row whose group a FRESH read of the tenant (the
+    # 'pim-groups' cache, the same fact the group-states panel uses) does not list is 'gone' -- only its row is left, the
+    # guard never applies to it. Fail safe: a read that is missing, unreadable, older than Get-PimGroupStateMaxReadAgeHours,
+    # or a name the read does not cover (no PIM prefix) counts the group as still there. rows = every Retire row.
+    # -ReadCache { -> the 'pim-groups' document or $null } is the test seam; -NowUtc for the age.
+    param([scriptblock]$ReadRows, [scriptblock]$ReadCache, [Nullable[datetime]]$NowUtc = $null, [AllowNull()][string]$Prefix = $null)
+    $by = [ordered]@{}; $total = 0; $rowsN = 0; $gone = 0; $goneNames = New-Object System.Collections.Generic.List[string]
     try {
         $ents = @(Get-PimManagerGroupRetirementEntities)
         $all = if ($ReadRows) { & $ReadRows $ents } else { Get-PimManagerEntityRowsBulk -Entities $ents }
+        $live = Get-PimManagerRetireLiveNames -ReadCache $ReadCache -NowUtc $NowUtc -Prefix $Prefix
         foreach ($e in $ents) {
             $n = 0
             foreach ($r in @($all[$e])) {
@@ -1848,14 +1857,48 @@ function Get-PimManagerRetireGroupCount {
                 }
                 if (-not $gn.Trim()) { continue }
                 if ($lc.Trim() -notmatch '(?i)^retire') { continue }
+                $rowsN++
+                $covered = $live.usable -and "$($live.prefix)" -and $gn.Trim().StartsWith("$($live.prefix)", [System.StringComparison]::OrdinalIgnoreCase)
+                if ($covered -and -not $live.names.ContainsKey($gn.Trim().ToLowerInvariant())) { $gone++; $goneNames.Add($gn.Trim().ToLowerInvariant()); continue }
                 $n++
             }
             if ($n -gt 0) { $by[$e] = $n; $total += $n }
         }
-        return [ordered]@{ known = $true; total = [int]$total; byEntity = $by; error = '' }
+        return [ordered]@{ known = $true; total = [int]$total; rows = [int]$rowsN; gone = [int]$gone; goneNames = @($goneNames.ToArray()); liveChecked = [bool]$live.usable; byEntity = $by; error = '' }
     } catch {
-        return [ordered]@{ known = $false; total = 0; byEntity = [ordered]@{}; error = "$($_.Exception.Message)" }
+        return [ordered]@{ known = $false; total = 0; rows = 0; gone = 0; goneNames = @(); liveChecked = $false; byEntity = [ordered]@{}; error = "$($_.Exception.Message)" }
     }
+}
+function Get-PimManagerRetireLiveNames {
+    # The group names a FRESH read of the tenant lists (the 'pim-groups' cache), lower-case -> $true, and the prefix that
+    # read covers. usable = $false when there is no read, it cannot be loaded, it has no time stamp, or it is older than
+    # Get-PimGroupStateMaxReadAgeHours (_states.ps1) -- then no group is ever counted as gone. Never throws.
+    param([scriptblock]$ReadCache, [Nullable[datetime]]$NowUtc = $null, [AllowNull()][string]$Prefix = $null)
+    $o = [ordered]@{ usable = $false; names = @{}; prefix = '' }
+    try {
+        $doc = if ($ReadCache) { & $ReadCache } elseif (Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue) { Get-PimTenantCacheEntry -Kind 'pim-groups' } else { $null }
+        if ($null -eq $doc) { return $o }
+        # assigned, never through an if-statement's output: that unrolls an EMPTY list to $null -- a read that found no group
+        # would then read as "no read" (measured, Test-PimGroupRetirementSwitch G9)
+        $items = $null
+        if ($doc -is [System.Collections.IDictionary]) { if ($doc.Contains('items')) { $items = @($doc['items']) } }
+        elseif ($doc.PSObject.Properties['items']) { $items = @($doc.items) }
+        $stamp = if ($doc -is [System.Collections.IDictionary]) { $doc['refreshedUtc'] } elseif ($doc.PSObject.Properties['refreshedUtc']) { $doc.refreshedUtc } else { $null }
+        if ($null -eq $items -or $null -eq $stamp -or "$stamp".Trim() -eq '') { return $o }
+        $read = if ($stamp -is [datetime]) { $stamp.ToUniversalTime() } else { [datetime]::Parse("$stamp", [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal) }
+        $now = if ($null -ne $NowUtc) { ([datetime]$NowUtc).ToUniversalTime() } else { [datetime]::UtcNow }
+        $maxAge = 24; if (Get-Command Get-PimGroupStateMaxReadAgeHours -ErrorAction SilentlyContinue) { try { $maxAge = [int](Get-PimGroupStateMaxReadAgeHours) } catch { $maxAge = 24 } }
+        if (($now - $read).TotalHours -gt $maxAge) { return $o }
+        foreach ($it in @($items)) {
+            if ($null -eq $it) { continue }
+            $dn = if ($it -is [System.Collections.IDictionary]) { "$($it['displayName'])" } elseif ($it.PSObject.Properties['displayName']) { "$($it.displayName)" } else { '' }
+            if ($dn.Trim()) { $o.names[$dn.Trim().ToLowerInvariant()] = $true }
+        }
+        $pfx = "$Prefix"
+        if ($null -eq $Prefix -and (Get-Command Get-PimTenantSyncGroupPrefix -ErrorAction SilentlyContinue)) { try { $pfx = "$(Get-PimTenantSyncGroupPrefix)" } catch { $pfx = '' } }
+        $o.prefix = $pfx.Trim(); $o.usable = $true
+    } catch { $o.usable = $false; $o.names = @{} }
+    return $o
 }
 function Get-PimManagerGroupRetirementLimits {
     # The number of the removal guard, read from the code that owns it (never copied): budget = Get-PimRemoveBudget
@@ -16063,7 +16106,11 @@ function Handle-Request {
             # handler in the web process to "make the button work" would turn the Manager into an
             # engine writer and put tenant writes on an HTTP request thread. The button is the
             # thing that is wrong, not the reporting.
-            $_engineTypes = @('engine-delta','engine-full','msp-pull') + @('active-assignments-snapshot') + @('drift-snapshot') + @('verify-convergence','discovery')
+            # 'tenant-cache' (owner 2026-10-27 21:45Z, internal: "tenant cache continues to fail" / "why the hell are things
+            # suddenly broken"): Run now ran it HERE, with the Manager's identity -- no Azure Reader at the management-group
+            # root -> 403, a thin Azure-scope list stored (1, not 27), and the request loop busy for minutes (/api/workloads
+            # timed out at the same time). The engine's identity reads it; it is queued like every engine read.
+            $_engineTypes = @('engine-delta','engine-full','msp-pull') + @('active-assignments-snapshot') + @('drift-snapshot') + @('verify-convergence','discovery') + @('tenant-cache')
             # 🔒 2026-09-14 (operator: Run now on verify-convergence recorded "not implemented" and turned the job red): every
             # type whose real handler only Start-PimScheduler registers is queued -- verify-convergence and discovery too.
             # The scheduler's own list (Get-PimTickOnlyJobTypes) wins when it names more, so the two cannot drift apart.
@@ -19239,6 +19286,9 @@ function Handle-Request {
 
             $out = New-Object System.Collections.Generic.List[object]
             $hidden = 0
+            # ADMIN-DELETE-FEEDBACK: the delete pins, read ONCE for the list ($null = not readable -> no row is marked pending).
+            $__delPins = $null
+            if (Get-Command Get-PimAdminDeletePins -ErrorAction SilentlyContinue) { try { $__delPins = Get-PimAdminDeletePins -ConnectionString "$(Get-PimManagerStoreCs)" } catch { $__delPins = $null } }
             # 71.24: read the department -> owners index ONCE for the whole list, not per admin.
             # $null means "could not be read" and is carried through as "not checked" rather than
             # silently becoming "this department has no owners".
@@ -19330,6 +19380,11 @@ function Handle-Request {
                     managerEmail      = "$($r.ManagerEmail)".Trim()
                     mailRecipient     = $mgr
                     accountStatus     = $(if ($status) { $status } else { 'Enabled' })
+                    # ADMIN-DELETE-FEEDBACK (owner 2026-10-27: "i just deleted this admin but it still shows ... it should state
+                    # that i have staged it for deletion"): AccountStatus = Deleted with a pinned delete that has NOT run yet --
+                    # the account still exists and the next engine run deletes it. The list keeps such a row in view and says so.
+                    deletePending     = [bool]("$status" -ieq 'Deleted' -and $null -ne $__delPins -and (Get-Command Find-PimAdminDeletePin -ErrorAction SilentlyContinue) -and
+                                               ($(try { $__p = Find-PimAdminDeletePin -Pins $__delPins -Key $upn; $null -ne $__p -and "$($__p.status)" -notmatch '^(?i)deleted$' } catch { $false })))
                     createTAP         = $tapWanted
                     # 🔴 §62 / 71.24 -- THE SPONSOR DEPARTMENT, ON THE OVERVIEW (operator 2026-09-16:
                     # "in the admin overview i need to see which sponsor dept an admin is linked to.

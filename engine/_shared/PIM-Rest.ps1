@@ -236,7 +236,9 @@ function Get-PimManagedIdentityToken {
     # MI-TOKEN-TRANSIENT (SUP-2026-00323, internal rfa-sync 2026-10-27 02:16Z): ONE GET, no retry, so a single fault of the
     # endpoint failed the whole run while every other token of that window was issued. Retry a timeout / connection fault /
     # 429 / 5xx after a short wait; a 4xx (e.g. 400 "identity not found") is an answer, not a fault, and is thrown at once.
-    $delays = if ($null -ne $global:PIM_MiTokenRetryDelaysSec) { @($global:PIM_MiTokenRetryDelaysSec) } else { @(2, 5) }
+    # MANAGER-REFRESH-DEGRADES-CACHE (2026-10-27): on internal the endpoint was out for ~7 s twice in one day (02:16Z,
+    # 20:00Z), longer than 2 s + 5 s -- a third try after 15 s covers that (22 s in all).
+    $delays = if ($null -ne $global:PIM_MiTokenRetryDelaysSec) { @($global:PIM_MiTokenRetryDelaysSec) } else { @(2, 5, 15) }
     $r = $null
     for ($try = 0; ; $try++) {
       try { $r = Invoke-RestMethod -Method GET -Uri $u -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER } -TimeoutSec 60; break }

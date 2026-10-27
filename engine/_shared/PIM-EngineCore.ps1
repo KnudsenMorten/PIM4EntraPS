@@ -1966,6 +1966,48 @@ function Get-PimStoreManagedRowCount {
     return $n
 }
 
+function Add-PimAdminHeldDeleteResults {
+    # ADMIN-DELETE-ORDER: record the held account deletes (Invoke-PimAdminDeferredDeletes) in the ADMINS scope's own result,
+    # exactly as Invoke-PimEngineScope records an item of that scope -- so the run reads the same as before the order changed:
+    #   applied  -> applied (it was counted skipped while held), the change audit 'ok'
+    #   failed   -> an Admins item failure: counted in errors, classified by the failure catalog (New-PimEngineItemFailure),
+    #               in the change audit 'error', and in the Admins slice of EngineItemFailures (rewritten with the WHOLE
+    #               Admins list of this run, so the first pass's failures stay)
+    #   reported -> unchanged: a guard refused it, reported only, as the scope already counted it
+    # -ScopeResult is the Admins result object Invoke-PimEngineScope returned (applied / skipped / errors / ok / failures).
+    param([AllowNull()][object]$ScopeResult, [AllowNull()][object[]]$Outcomes = @(), [switch]$WhatIf, [string]$Entity = 'Account-Definitions-Admins')
+    if ($null -eq $ScopeResult -or $WhatIf) { return }
+    $fails = New-Object System.Collections.ArrayList
+    if ($ScopeResult.PSObject.Properties['failures']) { foreach ($f in @($ScopeResult.failures)) { if ($null -ne $f) { [void]$fails.Add($f) } } }
+    $newFail = 0
+    foreach ($o in @($Outcomes)) {
+        if ($null -eq $o) { continue }
+        $item = $o.item
+        if ("$($o.outcome)" -eq 'applied') {
+            $ScopeResult.applied = [int]$ScopeResult.applied + 1; $ScopeResult.skipped = [Math]::Max(0, [int]$ScopeResult.skipped - 1)
+            Write-Host ("    [~] {0}" -f $o.key) -ForegroundColor Green
+            Write-PimEngineChangeAudit -Scope 'Admins' -Entity $Entity -Op 'Update' -Item $item -Result 'ok'
+        } elseif ("$($o.outcome)" -eq 'failed') {
+            $em = "$($o.error)"
+            $ScopeResult.errors = [int]$ScopeResult.errors + 1; $ScopeResult.skipped = [Math]::Max(0, [int]$ScopeResult.skipped - 1)
+            Write-Host ("    [x] Update {0} FAILED: {1}" -f $o.key, $em) -ForegroundColor Red
+            Write-PimEngineChangeAudit -Scope 'Admins' -Entity $Entity -Op 'Update' -Item $item -Result 'error' -ErrorMessage $em
+            if (Get-Command New-PimEngineItemFailure -ErrorAction SilentlyContinue) {
+                $row = if ($item.PSObject.Properties['desired']) { $item.desired } else { $null }
+                try { [void]$fails.Add((New-PimEngineItemFailure -Scope 'Admins' -Entity $Entity -Op 'Update' -Key "$($o.key)" -Message $em -Row $row)) }
+                catch { Write-Warning ("    [engine] could not classify the failure of {0}: {1}" -f $o.key, $_.Exception.Message) }
+            }
+            $newFail++
+        }
+    }
+    $ScopeResult.failures = $fails.ToArray()
+    $ScopeResult.ok = ([int]$ScopeResult.errors -eq 0)
+    if ($newFail -gt 0 -and (Get-Command Update-PimEngineItemFailures -ErrorAction SilentlyContinue)) {
+        try { [void](Update-PimEngineItemFailures -Scope 'Admins' -Failures $fails.ToArray()) }
+        catch { Write-Warning ("  [engine] Admins: the failing-items record was NOT updated: {0}" -f $_.Exception.Message) }
+    }
+}
+
 function Invoke-PimEngine {
     # Run one scope, or all registered scopes (Scope='All').
     #   -Mode Full           : whole-scope reconcile (create/update; prune ONLY with -Prune)
@@ -2032,6 +2074,11 @@ function Invoke-PimEngine {
         return $out.ToArray()
     }
     $__nScopes = @($res.scopes).Count; $__iScope = 0
+    # ADMIN-DELETE-ORDER (SUP-2026-00328, owner "Memberships first"): a run that applies Admins AND AdminMembers holds its
+    # account deletes until AdminMembers has removed the account's memberships, then deletes them (Invoke-PimAdminDeferredDeletes).
+    $__adDefer = [bool]((Get-Command Test-PimAdminDeleteDeferRun -ErrorAction SilentlyContinue) -and (Test-PimAdminDeleteDeferRun -Scopes @($res.scopes) -WhatIf:$WhatIf))
+    $Context['adminDeleteDefer'] = $__adDefer
+    $Context['adminDeleteDeferred'] = $null
     foreach ($s in @($res.scopes)) {
         # §95.2o: a scheduler run over several AREAS holds only the area of the scope it is on. The gate takes that area
         # (waiting while another run writes it) before the scope runs; a scope whose area stayed busy is reported NOT
@@ -2049,12 +2096,26 @@ function Invoke-PimEngine {
         }
         $out.Add((Invoke-PimEngineScope -Scope $s @common))
         $__iScope++
+        if ($__adDefer -and "$s" -ieq 'AdminMembers' -and (Get-Command Invoke-PimAdminDeferredDeletes -ErrorAction SilentlyContinue)) {
+            $__adOut = @(Invoke-PimAdminDeferredDeletes -Context $Context)
+            $__adRes = $null; foreach ($__o in $out) { if ($__o -and "$($__o.scope)" -ieq 'Admins') { $__adRes = $__o } }
+            Add-PimAdminHeldDeleteResults -ScopeResult $__adRes -Outcomes $__adOut -WhatIf:$WhatIf
+        }
         # §70.22: a scheduler tick sets this so committed queue actions (TAP re-issue, revoke) are applied between the
         # scopes of a long multi-scope run instead of after it. Never on the last scope, never in a plan; output discarded.
         if ($__iScope -lt $__nScopes -and -not $WhatIf -and $global:PIM_BetweenScopesHook -is [scriptblock]) {
             try { $null = @(& $global:PIM_BetweenScopesHook) } catch { Write-Verbose "between-scopes hook: $($_.Exception.Message)" }
         }
     }
+    # ADMIN-DELETE-ORDER: a delete still held here (AdminMembers was not checked / did not run) is made now -- never dropped.
+    if ($Context['adminDeleteDefer'] -eq $true -or ($Context['adminDeleteDeferred'] -is [System.Collections.IList] -and $Context['adminDeleteDeferred'].Count -gt 0)) {
+        if (Get-Command Invoke-PimAdminDeferredDeletes -ErrorAction SilentlyContinue) {
+            $__adOut = @(Invoke-PimAdminDeferredDeletes -Context $Context)
+            $__adRes = $null; foreach ($__o in $out) { if ($__o -and "$($__o.scope)" -ieq 'Admins') { $__adRes = $__o } }
+            Add-PimAdminHeldDeleteResults -ScopeResult $__adRes -Outcomes $__adOut -WhatIf:$WhatIf
+        }
+    }
+    $Context['adminDeleteDefer'] = $false
     # §83: the upcoming extensions the assignment scopes saw this run -> pim.Settings 'AutoExtendOutlook' (the monthly report
     # and the owner page read it). Best effort: a failed save never fails the run; the next run saves it.
     if (Get-Command Save-PimAutoExtendOutlook -ErrorAction SilentlyContinue) {
