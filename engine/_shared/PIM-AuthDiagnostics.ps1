@@ -50,7 +50,7 @@ Set-StrictMode -Off
 # ---------------------------------------------------------------------------
 
 # Map: a fragment of the Graph API PATH being called -> the app-role(s) the engine
-# SPN needs (granted by setup/Grant-PimGraphAppRoles.ps1) AND the directory role an
+# SPN needs (granted by tools/setup/Grant-PimGraphAppRoles.ps1) AND the directory role an
 # interactive operator should ACTIVATE in PIM. Ordered most-specific first.
 $script:PimRoleHintByPath = @(
     # --- Azure Resource Manager (ARM) scopes: an AuthorizationFailed at an ARM path is an
@@ -148,7 +148,7 @@ function Get-PimMissingRoleHint {
             $msg = "Access denied (AuthorizationFailed) calling '$Path'. Your token lacks an Azure RBAC role at this scope. Activate in PIM for Azure resources: $act -- then retry."
         }
     } elseif ($AppOnly) {
-        $grant = "setup/Grant-PimGraphAppRoles.ps1 (Permissions includes: $($appRoles -join ', ')) -- then re-consent."
+        $grant = "tools/setup/Grant-PimGraphAppRoles.ps1 (Permissions includes: $($appRoles -join ', ')) -- then re-consent."
         $msg   = "Access denied calling '$Path'. The engine app (SPN) is missing the Graph application role(s): $($appRoles -join ', '). Grant via $grant"
     } else {
         $act = if ($pimRoles.Count) { $pimRoles -join ' / ' } else { '(no directory role -- this is an app-only permission)' }

@@ -7,8 +7,7 @@
     modules. PS 5.1-safe.
 
 .DESCRIPTION
-    The pure-REST companion to the engine. The legacy setup/Install-PimEngineAppRegistration.ps1
-    drives the Microsoft.Graph PowerShell SDK; this one talks to Graph + ARM over REST
+    The pure-REST companion to the engine. It talks to Graph + ARM over REST
     (matching the module-free engine), so it runs on a bare PS 5.1 box -- no modules, no az CLI (100.41).
 
     The caller authenticates ONCE as a role-assigner (Global Administrator or

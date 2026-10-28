@@ -1,6 +1,6 @@
 # PIM Manager -- Security review pack
 
-**Product:** PIM Manager &nbsp;|&nbsp; **Version:** 3.0.1 &nbsp;|&nbsp; **Date:** 2026-10-28
+**Product:** PIM Manager &nbsp;|&nbsp; **Version:** 3.0.3 &nbsp;|&nbsp; **Date:** 2026-10-28
 
 This pack is for the CISO and the security team who must approve PIM Manager before it is installed. It describes the product and this version, not one customer's environment. It sets out PIM Manager's security design: architecture, identities and every permission, data, vendor access, supply chain, change control, the threat model, the compliance mapping, exit and the scripts a person runs.
 
@@ -289,7 +289,7 @@ The app's tenant rights are created by Invardia's own setup script (published at
 ### How code reaches your environment
 - Every update **builds the product from source inside your own container registry** and rolls the Manager and jobs. No pre-built vendor image is pulled. The updater job `ca-pim-update` does this on its schedule; an installation that turns it off updates by command (below).
 - **The signed Invardia update channel:** the update manifest is signed (RS256, RSA 4096) and verified against a public key embedded in the product -- never fetched at run time. The manifest must name your ring, a version, a SHA-256, a size and a sequence number (replays are refused); the download must be HTTPS; the archive's SHA-256 and size are checked before unpacking, and the version inside must match the manifest.
-- **Source-archive channel (default for self-hosted updates):** the archive is fetched from a storage container the update job is configured with. This path checks the archive's signature, SHA-256 and size before unpacking, and its ring file is signed.
+- **Source-archive channel (self-hosted updates):** the archive is fetched from a storage container the update job is configured with, then built in your registry, rolled and health-checked like any other update.
 - **No storage token in the updater:** Pro installations fetch the source archive from invardia.com for the version their signed manifest names; the update job no longer keeps a storage SAS URL in its settings. The container registry's admin user is off.
 - **Updating by command:** `Update-PimCommunity.ps1 -Apply` reads the same signed release and checks it the same way, downloads the archive, checks its SHA-256 and size, and deploys it with the parameters your last deploy saved. Without `-Apply` it shows the version it would move to and the deploy plan. The deploy upgrades the database first, runs a health check and rolls PIM Manager back when the check fails.
 - **Licences:** signed (RSA-SHA256) and verified offline against embedded public certificates, both before storing and after reading back.
@@ -401,7 +401,7 @@ How PIM Manager's controls can **support** your own controls. This is not a cert
 | ISO/IEC 27001:2022 Annex A | 5.19-5.22 Supplier relationships | No vendor access without the Support app, which is under your control; its standing database right is listed in chapters 3 and 5; this pack |
 | NIS2 (Article 21) | 21(2)(i) Access control policies and asset management | Least-privilege, just-in-time delegation managed as desired state |
 | NIS2 (Article 21) | 21(2)(j) Multi-factor authentication | PIM policies can require MFA on activation; the Manager relies on your Conditional Access |
-| NIS2 (Article 21) | 21(2)(d) Supply chain security | Builds from source in your registry; signed Pro updates; ring control; this pack |
+| NIS2 (Article 21) | 21(2)(d) Supply chain security | Builds from source in your registry; signed updates; ring control; this pack |
 | NIS2 (Article 21) | 21(2)(f) Effectiveness assessment | Access reviews, drift and coverage reports, audit export |
 | CIS Critical Security Controls v8 | 5.4 Restrict administrator privileges to dedicated admin accounts | Dedicated admin accounts per person |
 | CIS Critical Security Controls v8 | 6.1-6.2 Establish access granting and revoking processes | Commit-based grant and revoke with audit |
@@ -480,7 +480,7 @@ Optional, for whoever verifies before running (never part of the shown command):
 | Invoke-PimMspBuild.ps1 | MSP managing / managed tenant build | As Install-PimManager, per tenant | MSP components (chapter 3) | Plan by default; -Apply |
 | Set-PimManagerAccess.ps1, Set-PimBreakGlassAccounts.ps1, Set-PimEmergencyPassphrase.ps1, Copy-PimSettings.ps1, Import-PimPermissionTemplate.ps1, Register-PimManagedTenant.ps1, Deploy-PimUpdateJob.ps1 | Settings and component scripts the GUI names | SQL admin / Owner on the resource as each states | Product settings; the named component | -WhatIf (honoured) |
 | Set-PimManagerMcpAuth.ps1, Set-PimRfaBrokerApiAuth.ps1, Upgrade-PimToPro.ps1 | MCP sign-in, access-request API sign-in, edition upgrade | Application Administrator; Owner on the app | App registration settings; edition | -Apply switch (plan otherwise) |
-| Import-PimEnvironmentBackup.ps1, Update-PimCommunity.ps1, Initialize-PimTenantStore.ps1 | Restore a backup; Community update; store init | SQL admin; repository write | As named | Import plans first (-Apply); others -WhatIf |
+| Import-PimEnvironmentBackup.ps1, Update-PimCommunity.ps1, Initialize-PimTenantStore.ps1 | Restore a backup; manual update; store init | SQL admin; repository write | As named | Import plans first (-Apply); others -WhatIf |
 | Hybrid worker scripts (Initialize-PimHybridWorkerAd, Install-PimHybridWorker, New-PimHybridWorkerInfra, Grant-PimHybridWorkerAccess, Set-PimHybridWorkerEgress) | On-premises AD worker | Domain Admin (AD delegation, GPO); Owner on the worker resources | gMSAs, AD delegations, server GPO, VM, identity grants (chapter 3) | -WhatIf in all except Install-PimHybridWorker, which writes a transcript and verifies the PowerShell installer's signature |
 
 ---

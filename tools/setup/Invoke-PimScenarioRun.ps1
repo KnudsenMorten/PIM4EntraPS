@@ -111,7 +111,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$shared = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared'
+$shared = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared'
 . (Join-Path $shared 'PIM-ScenarioProfile.ps1')   # also dot-sources PIM-Downlink.ps1
 if (Test-Path -LiteralPath (Join-Path $shared '..\msp\PIM-Baseline.ps1')) { . (Join-Path $shared '..\msp\PIM-Baseline.ps1') }   # §84 Pro (MSP): loaded only when present
 # BUG-79: the vendored platform ring core, for the same reason Invoke-PimDownlinkSync.ps1 loads it.
@@ -226,7 +226,7 @@ if ($PSBoundParameters.ContainsKey('BlockedCapabilities')) {
         $(if (@($BlockedCapabilities).Count) { "blocks $(@($BlockedCapabilities) -join ', ')" } else { 'blocks nothing' })) -ForegroundColor Cyan
 } else {
     $srBlocked = Resolve-PimCustomerBlockedCapabilities -ManifestPath $LocalManifestPath `
-        -SolutionRoot (Split-Path -Parent $PSScriptRoot) -Solution 'PIM4EntraPS'
+        -SolutionRoot (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) -Solution 'PIM4EntraPS'
     if ($null -ne $srBlocked) { $srArgs['BlockedCapabilities'] = @($srBlocked) }
 }
 

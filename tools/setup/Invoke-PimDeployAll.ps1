@@ -1685,7 +1685,8 @@ function Get-PimDeployAllStepChanges {
         'easyauth'   { @("Entra ID: the Manager's sign-in app registration + a client secret held by the container app, delegated sign-in consent (openid, profile, email, User.Read) @ tenant",
                          "Entra ID: sign-in restricted (assignment required) to $(if (@($EasyAuthAllowedPrincipals).Count) { @($EasyAuthAllowedPrincipals) -join ', ' } elseif ($EasyAuthAllowAllTenantUsers) { 'a members-only dynamic group' } else { 'the principals already assigned' })") }
         'code'       { @("Azure: roll $ManagerApp (and the jobs) to image $(Get-EffectiveImageTag)") }
-        'updater'    { @("Azure: job $UpdateJobName ($UpdateCron, ring $UpdateRing) with Contributor -> its identity @ $rg (and the registry), AcrPull @ registry, membership of $SqlAdminGroupName") }
+        # the ring the step really writes: a Community install without an explicit ring goes on ring 3 (the step's own rule)
+        'updater'    { @("Azure: job $UpdateJobName ($UpdateCron, ring $(if (-not $script:PimDeployRingExplicit -and (Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater -UpdateSource ("$UpdateSource".Trim())) -eq 'install-community') { '3' } else { $UpdateRing })) with Contributor -> its identity @ $rg (and the registry), AcrPull @ registry, membership of $SqlAdminGroupName") }
         'access'     { @("Azure SQL: pim.Settings ManagerAccess SuperAdmin: $(if ("$ManagerSuperAdmins".Trim()) { $ManagerSuperAdmins } else { '(none named)' })") }
         'alerting'   { @("Azure SQL: pim.Settings Alerting recipients (only when the stored list is empty)") }
         'licence'    { @("Azure SQL: pim.Settings License + InvardiaInstallKey (from the enrollment)") }
@@ -3519,7 +3520,7 @@ if ($hosted -and -not $WhatIfPreference -and $summary.status -eq 'success') {
     if ("$SqlAdminCertThumbprint".Trim()) {
         Write-Host '      $global:PIM_SqlCertThumbprint = ''' -NoNewline -ForegroundColor White; Write-Host "$SqlAdminCertThumbprint'" -ForegroundColor White
     }
-    Write-Host "      $solRoot\setup\Migrate-PimToSql.ps1 ``" -ForegroundColor White
+    Write-Host "      $solRoot\tools\setup\Migrate-PimToSql.ps1 ``" -ForegroundColor White
     Write-Host '          -ConfigDir <folder with your CSV files> `' -ForegroundColor White
     Write-Host ("          -ConnectionString `"{0}`" -WhatIf" -f $(if ("$SqlConnectionString".Trim()) { $SqlConnectionString } else { "Server=tcp:$SqlServerFqdn,1433;Initial Catalog=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=60;" })) -ForegroundColor White
     Write-Host '      Run it with -WhatIf first: it prints the row count per entity, and it REPLACES' -ForegroundColor DarkGray

@@ -627,7 +627,7 @@ function Resolve-PimManagerDirectoryScope {
 function Get-PimActiveAssignmentSurfaceHint {
     # Map a failed active-assignments surface + its error text to an ACTIONABLE
     # remediation: which Graph app-role / Azure RBAC role is needed and the exact
-    # setup/Grant-PimGraphAppRoles.ps1 invocation. Returns '' when the failure is
+    # tools/setup/Grant-PimGraphAppRoles.ps1 invocation. Returns '' when the failure is
     # not a recognised auth/permission failure (transport/transient -> retry).
     param(
         [Parameter(Mandatory)][ValidateSet('entra-role','azure-rbac','pim-for-groups')][string]$Surface,

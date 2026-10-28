@@ -422,7 +422,7 @@ defeats the filter).
 > desired state **only in SQL** (`pim.Rows`, `pim.Settings`; §14). Neither falls back to a file,
 > and the Manager refuses to start without its database. No CSV files ship and none are read at
 > run time. CSV appears only as the *input* of the one-time import that brings a file-based
-> (v1-shaped) installation into SQL (`setup/Migrate-PimToSql.ps1`, §5.3), and as a download
+> (v1-shaped) installation into SQL (`tools/setup/Migrate-PimToSql.ps1`, §5.3), and as a download
 > (exports) or upload (administrator and approver imports) in the Manager.
 
 ```
@@ -898,7 +898,7 @@ so a wrong/empty store or a bad credential can never silently mass-create (or, i
 mass-delete) against a live tenant: (1) the desired store is reachable AND has at least one
 definition/admin row (an empty desired set against a live tenant is rejected), and (2) a Graph
 token is minted and the organization resolves (a wrong/missing identity fails here, not after a
-half-applied run). Bypass only deliberately with `$env:PIM_SkipPreflight=1`.
+half-applied run).
 
 **Desired store — two first-class shapes (`Get-PimSqlConnectionString`):**
 - **Azure SQL** — `PIM_SqlServer` is an FQDN (`…database.windows.net`); auth is a managed
@@ -919,7 +919,7 @@ half-applied run). Bypass only deliberately with `$env:PIM_SkipPreflight=1`.
 **SQL-only; the file store and its cutover ceremony are gone.** The Manager and engine have no
 file store to migrate from at run time, so the former in-Manager cutover ceremony (`/api/cutover`,
 `/api/cutover/abort`) was removed together with the file store. Moving a file-based (v1-shaped)
-installation onto SQL is a **one-time import run during migration**: `setup/Migrate-PimToSql.ps1`.
+installation onto SQL is a **one-time import run during migration**: `tools/setup/Migrate-PimToSql.ps1`.
 
 - It reads each `<base>.custom.csv` **read-only** (never written back), maps it to `pim.Rows`
   under the entity's natural key, and writes each file's rows over **one connection inside one
@@ -2435,7 +2435,7 @@ applies a review decision, never POSTs/PATCHes/DELETEs. It is REST-only via
 `Invoke-PimGraph` (cert app-only; honours the `$global:PIM_UseGraphSdk` opt-in inside
 PIM-Rest), and needs **`AccessReview.Read.All`** on the engine SPN — without it the
 LIVE call 403s and returns an **empty list with a warning** (graceful no-op, never a
-crash; the grant ships in `setup/Grant-PimGraphAppRoles.ps1`).
+crash; the grant ships in `tools/setup/Grant-PimGraphAppRoles.ps1`).
 
 - **Live wrapper** — `Get-PimAccessReviewOverview [-PimManagedOnly] [-IncludeDecisionCounts]`
   lists `identityGovernance/accessReviews/definitions`, fetches each definition's most
@@ -2502,7 +2502,7 @@ buttons (justification prompt). **Graceful degrade (the key design point):** rec
 decision needs **`AccessReview.ReadWrite.All`** on the Manager identity, which is **not yet
 granted**; the decision endpoint catches the 403 and returns HTTP 200 with
 `{ ok:false, permissionMissing:true, note }` so the UI shows an honest "permission not granted
-yet" message instead of a crash. The grant lives in `setup/Grant-PimGraphAppRoles.ps1`.
+yet" message instead of a crash. The grant lives in `tools/setup/Grant-PimGraphAppRoles.ps1`.
 
 **Superseded 2026-09-25 — the Manager is read-only, so review writes go through the engine
 queue.** The Manager's designed Graph set holds only `AccessReview.Read.All`. The decision and the reviewer
@@ -3628,7 +3628,7 @@ per-surface error ledger — it is **not** silently flattened to zero rows. The
 endpoint distinguishes *"fetch succeeded → genuinely no active assignments"*
 (`ok=true`, empty) from *"fetch failed → we could not read them"* (`ok=false` with
 `surfaceErrors` + an actionable `error`). When a Graph surface 403s, the error
-names the exact app-role to grant via `setup/Grant-PimGraphAppRoles.ps1`
+names the exact app-role to grant via `tools/setup/Grant-PimGraphAppRoles.ps1`
 (entra-role → `RoleManagement.Read.Directory`; pim-for-groups →
 `PrivilegedAccess.Read.AzureADGroup`); when Azure RBAC can't be read, it asks for
 **Reader** on the target subscription(s). The GUI's empty state renders that
@@ -4180,9 +4180,6 @@ requires one (the Easy Auth sign-in registration). The mode only changes *where 
      scope the engine manages instead when you can.
 
    The installer ends by stating which privilege it left behind, and until when.
-   *(A deprecated shim at `setup/Install-PimEngineAppRegistration.ps1`
-   forwards to this script for backward compatibility — use the `tools/setup/`
-   one for new work.)*
 3. **A SQL store for the model.** **Azure SQL** (Entra/managed-identity auth
    only — SQL logins disabled) is the single authoritative store in *every*
    mode and for break-glass. A file-based installation is brought in once with the
@@ -4654,8 +4651,8 @@ is decided by its **release ring**, never by "newest available":
   line in the step report). Finally, `Deploy-PimUpdateJob.ps1` **re-reads `PIM_UPDATE_RING` off the deployed
   job over ARM and fails the step** when it is not the ring the run decided, or is absent.
 - **Host-side tools obey the ring.** `Invoke-PimUpdate`, `Update-PimContainers` and the deploy roll step refuse
-  a version that a ring ≥ 2 environment's channel has not approved, unless an operator passes
-  `-OverrideRingGate -Reason`, which is audited. A verified host-side roll of a ring 0/1 environment advances
+  a version that a ring ≥ 2 environment's channel has not approved, unless an operator records an audited
+  override for that one version. A verified host-side roll of a ring 0/1 environment advances
   that ring in the channel, so the cloud job and the host task can never move an environment in opposite
   directions; ring ≥ 2 is never written automatically.
 - **No ring is not "no rules"**. `Test-PimRollRingGate` (`tools/setup/_PimUpdateRing.ps1`, called
@@ -4670,8 +4667,8 @@ is decided by its **release ring**, never by "newest available":
   | ring ≥ 2 | allowed only for the version the ring approves; no source, an unreadable channel or no entry is a refusal |
 
   An environment deployed before the ring existed therefore cannot be moved to an arbitrary version. The ways
-  past are named: give it a ring (`Deploy-PimUpdateJob.ps1 -UpdateRing <n>`), or roll exactly one version with
-  `-OverrideRingGate -Reason` **and** an explicit target version. An override never lets through "whatever
+  past are named: give it a ring (`Deploy-PimUpdateJob.ps1 -UpdateRing <n>`), or roll exactly one named target
+  version with an audited operator override. An override never lets through "whatever
   this run builds". Every reader of `PIM_UPDATE_RING` parses it through one function,
   `ConvertTo-PimUpdateRingNumber` (range 0–3).
 - **Drift is measured against the ring**. `Test-PimDeployedVersionDrift.ps1` expects each
@@ -5510,7 +5507,7 @@ state). Both Basic (~$5/mo each).
   `Get-PimBaselineBundlePayload`, signs it through Key Vault, uploads it and reads it back. A
   projection table that cannot be read (anything other than genuinely absent) **refuses the
   bundle**; it used to count as "absent" and project everything.
-- `setup/Invoke-PimMspFanout.ps1` — registry-driven multi-tenant account fan-out.
+- `tools/setup/Invoke-PimMspFanout.ps1` — registry-driven multi-tenant account fan-out.
 - `Manager (admin)` — a Container App, Easy Auth in front (§11.5.2).
 
 **Local plane (each customer tenant):**
@@ -5522,7 +5519,7 @@ state). Both Basic (~$5/mo each).
   identity cannot be used, registered **in the customer tenant** (Model B). The customer owns its
   CA, attribution and revocation.
 - **Consumer: the scheduled pull job** (`downlink-job-entry.ps1`, deployed by
-  `Deploy-PimDownlinkJob.ps1`) → `setup/Invoke-PimScenarioRun.ps1` → `Invoke-PimManagedDownlink`
+  `Deploy-PimDownlinkJob.ps1`) → `tools/setup/Invoke-PimScenarioRun.ps1` → `Invoke-PimManagedDownlink`
   (`engine/msp/PIM-Downlink.ps1`). It pulls and verifies the signed bundle
   (`engine/msp/PIM-Baseline.ps1`), plans with the tenant's own local ring, target and class
   vetoes, and applies the synced rows into the local store; the engine tick then creates the
@@ -6475,7 +6472,7 @@ README and `FEATURES.md` describe **two** of the three axes, deliberately:
 **Axis 2 (the template-version ring) is NOT in the public docs, on purpose.** It is implemented but
 **inert unless a ring map is supplied**, and the containerised scheduled downlink job carries no
 `-TemplateRingMap*` parameter at all — it is reachable only from the hand-run
-`setup/Invoke-PimDownlinkSync.ps1` / `Invoke-PimScenarioRun.ps1`. Documenting an opt-in gate that
+`tools/setup/Invoke-PimDownlinkSync.ps1` / `Invoke-PimScenarioRun.ps1`. Documenting an opt-in gate that
 the scheduled path cannot even reach would mislead. It goes in
 the public docs when the scheduled job can use it.
 
@@ -6581,7 +6578,7 @@ audit trail, §17.11) and `pim.Backups` (pre-commit snapshots, §5.4).
 switching between CSV and SQL) has ended: the Manager, engine, scheduler and validator read and
 write SQL only, the Manager refuses to start without its database, and no component falls back to
 files for settings, access, templates, audit, scheduler state or tenant caches. A file-based
-installation is brought in once with `setup/Migrate-PimToSql.ps1` (§5.3); its source files are read,
+installation is brought in once with `tools/setup/Migrate-PimToSql.ps1` (§5.3); its source files are read,
 never modified. Re-running it skips an entity whose store already holds rows, because after go-live
 the Manager owns those rows and the import is a full-set replace that would delete every row added
 or edited since; `-ReplaceExistingEntityRows` is the explicit override for a deliberate re-seed
@@ -7882,7 +7879,7 @@ network/host call so the whole layer is offline-testable. Four capabilities:
    ordered path→role table turns the failing API path into the precise Graph
    **application role** the engine SPN is missing (e.g. `roleManagementPolicies` →
    `RoleManagementPolicy.ReadWrite.AzureADGroup`, `/users` → `User.ReadWrite.All`,
-   `accessReviews` → `AccessReview.Read.All`) plus the `setup/Grant-PimGraphAppRoles.ps1`
+   `accessReviews` → `AccessReview.Read.All`) plus the `tools/setup/Grant-PimGraphAppRoles.ps1`
    command to add it; in **interactive** context it instead names the directory role to
    ACTIVATE in PIM (Privileged Role Administrator, etc.). A non-403 returns `$null` so the
    real error is never masked. `Invoke-PimRest` appends the hint (` >> …`) to the thrown
@@ -8153,7 +8150,7 @@ recomputes the node/edge model on every page render from the live store (SQL via
 **Rows come from SQL, not CSV.** The Map is built from `pim.Rows`, where every record is stored as
 JSON keyed by its column names, so there is no header line to parse and the quoted / BOM-prefixed /
 Excel-export header problem that once blanked the Map cannot occur in the Manager. Converting a v1
-(file-based) CSV installation is a one-time import (`setup/Migrate-PimToSql.ps1`).
+(file-based) CSV installation is a one-time import (`tools/setup/Migrate-PimToSql.ps1`).
 Columns 1–3 are *definition* nodes (admins, role/org groups, permission groups).
 Column 4 nodes are **synthetic targets** — they don't exist as definition rows;
 they are derived from the *assignment* rows that bind a group to a permission:
@@ -8219,7 +8216,7 @@ Exemptions are edited in **Settings → Workload exemptions** (`GET/PUT
 Admin+ adds and removes. A save sends the full list; an incomplete entry (no workload
 or role, no reason, no or unreadable expiry) refuses the whole save instead of being
 dropped, and a valid save is stored through `Save-PimWorkloadExemptions` and audited
-with before and after. A one-time import (`setup/Migrate-PimToSql.ps1`) takes a v1
+with before and after. A one-time import (`tools/setup/Migrate-PimToSql.ps1`) takes a v1
 exemptions file into the same setting when the store holds none. The **Feature
 customization** card shows the connector's *effective* state: with no stored value,
 `connectors.workload` is on while workload assignment rows exist

@@ -364,7 +364,7 @@ with the same name exists (its assignments are kept), and reads it back:
 | `-EveryHours` | no | with `-AssignToGroupId`: run every N hours (1–23), e.g. `1` = hourly |
 | `-DailyTime` | no | with `-AssignToGroupId` and no `-EveryHours`: run daily at `HH:mm` (default `09:00`) |
 
-It always uploads with *run as SYSTEM*, *64-bit*, *no signature check*.
+It always uploads with *run as SYSTEM* and *64-bit*.
 
 **Good to know.** To change a value later, edit the SETTINGS block in both scripts and upload again; a value set back
 to `$null` is removed from the devices. If an older Intune profile still pushes the **Tenant catalog** settings from the

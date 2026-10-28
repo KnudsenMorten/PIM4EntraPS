@@ -2050,6 +2050,34 @@ function Set-PimGroupPin {
     $reg = $global:PIM_DuplicateLiveNames
     if ($reg -is [hashtable] -and $reg['group'] -is [hashtable] -and $reg['group'].ContainsKey($k) -and "$($reg['group'][$k].code)" -eq 'GROUP-ADOPT-HELD') { $reg['group'].Remove($k) }
 }
+function Save-PimGroupPinNow {
+    <#
+      SUP-2026-00339 (2026-10-28): a group the engine CREATES is written to the record AT ONCE, not only at the end of the run.
+      A long run (a change-triggered engine-delta) kept its new group's pin in memory for 15+ minutes, and every scheduled run
+      that started meanwhile read the record without it and HELD the group PIM Manager had just made (a false
+      GROUP-ADOPT-HELD). Same MERGE as Save-PimGroupPinState: the record as stored NOW plus this one pin, so an adoption or
+      another run's pin is never overwritten. The migration run is left to its end-of-run save (nothing is held while it
+      migrates). A failed write never fails the create: the end-of-run save writes it again.
+    #>
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Id)
+    $st = Get-PimGroupPinState
+    if (-not $st.available -or $st.migrating -or -not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { return }
+    $k = "$Name".Trim().ToLowerInvariant(); $v = "$Id".Trim(); if (-not $k -or -not $v) { return }
+    try {
+        $now = Get-PimSetting -Name 'GroupObjectPins'
+        if ($now -is [string] -and "$now".Trim()) { $now = "$now" | ConvertFrom-Json }
+        $merged = @{}
+        $np = $(if ($now -is [System.Collections.IDictionary]) { $now['pins'] } elseif ($now) { $now.pins } else { $null })
+        if ($np -is [System.Collections.IDictionary]) { foreach ($x in @($np.Keys)) { $merged["$x".ToLowerInvariant()] = "$($np[$x])" } }
+        elseif ($null -ne $np) { foreach ($pp in @($np.PSObject.Properties)) { $merged["$($pp.Name)".ToLowerInvariant()] = "$($pp.Value)" } }
+        if ("$($merged[$k])" -eq $v) { return }
+        $merged[$k] = $v
+        $mig = "$(if ($now -is [System.Collections.IDictionary]) { $now['migratedUtc'] } elseif ($now) { $now.migratedUtc })"
+        if (-not $mig) { $mig = $(if ($st.migratedUtc) { $st.migratedUtc } else { (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }) }
+        $pins = [ordered]@{}; foreach ($x in @($merged.Keys | Sort-Object)) { if ("$($merged[$x])".Trim()) { $pins[$x] = $merged[$x] } }
+        Set-PimSetting -Name 'GroupObjectPins' -Value ([pscustomobject]@{ version = 1; migratedUtc = $mig; pins = [pscustomobject]$pins })
+    } catch { Write-Warning "  [engine] Groups: the new group '$Name' was not recorded at once ($($_.Exception.Message)) -- it is recorded at the end of this run." }
+}
 function Test-PimGroupAdoption {
     <#
       May the engine use the ONE live group $Id under the defined name $Name? @{ ok; reason = pinned | migrated | no-store |
@@ -3354,8 +3382,9 @@ function New-PimGroupsProvider {
             }
             $g = Invoke-PimGraph -Method POST -Path '/groups' -Body $body
             if (Get-Command Add-PimContextObject -ErrorAction SilentlyContinue) { Add-PimContextObject -Kind Group -Object $g }   # incremental cache
-            # ADOPT-BY-NAME-SQUAT: the group PIM Manager just made is THE group of this name from now on (saved at run end).
-            if ($g -and "$($g.id)") { Set-PimGroupPin -Name $gn -Id "$($g.id)" }
+            # ADOPT-BY-NAME-SQUAT: the group PIM Manager just made is THE group of this name from now on -- recorded AT ONCE
+            # (SUP-2026-00339: a run going at the same time must not hold it), and again at run end.
+            if ($g -and "$($g.id)") { Set-PimGroupPin -Name $gn -Id "$($g.id)"; Save-PimGroupPinNow -Name $gn -Id "$($g.id)" }
             # Attach to its AU. This is an OPTIMISATION, not the guarantee: the
             # AdministrativeUnitMembers scope (order 22) reconciles AU membership on every
             # run and is what actually keeps it correct.
@@ -4268,7 +4297,7 @@ function Get-PimGroupPolicyMissingMessage {
     param([string]$GroupName, [string]$GroupId, [string]$Role)
     $err = if ($script:PimGrpPolicyLookupErr -is [hashtable]) { "$($script:PimGrpPolicyLookupErr["$GroupId|$Role"])" } else { '' }
     if ($err -match '(?i)\b(401|403)\b|Forbidden|Authorization_RequestDenied|AccessDenied|insufficient privileges|Unauthorized') {
-        return ("GroupsPolicies: PERMISSION DENIED reading the {0} policy of '{1}' -- the engine identity is missing Graph application role RoleManagementPolicy.ReadWrite.AzureADGroup (grant it: setup/Grant-PimGraphAppRoles.ps1 / Grant-PimMiGraph). The policy itself is not missing. Graph said: {2}" -f $Role, $GroupName, $err)
+        return ("GroupsPolicies: PERMISSION DENIED reading the {0} policy of '{1}' -- the engine identity is missing Graph application role RoleManagementPolicy.ReadWrite.AzureADGroup (grant it: tools/setup/Grant-PimGraphAppRoles.ps1 / Grant-PimMiGraph). The policy itself is not missing. Graph said: {2}" -f $Role, $GroupName, $err)
     }
     if ($err) { return ("GroupsPolicies: the {0} policy of '{1}' could not be looked up: {2}" -f $Role, $GroupName, $err) }
     return ("GroupsPolicies: no {0} policy for '{1}' (Graph returned no policy assignment for this group)" -f $Role, $GroupName)

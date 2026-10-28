@@ -64,8 +64,16 @@ templates/mail/*.mailtemplate.custom.html
 templates/admin/*.admintemplate.custom.json
 templates/policy/*.policytemplate.custom.json
 config/*.custom.json
-config-local/*.custom.json
-config-msp/*.custom.json
+
+# config/msp/ (3.0.3 GITHUB-TIDY: was the root config-msp/). The repo-root rule
+# `SOLUTIONS/**/config/*` ignores every SUB-FOLDER of config/ as a whole, and git cannot
+# re-include a file inside an ignored folder -- so re-include the folder itself, then
+# apply the same rule as config/: only the samples and the README are tracked; the
+# customer's own managing-tenant.json / managed-tenant.json stay ignored.
+!config/msp/
+config/msp/*
+!config/msp/*.sample.*
+!config/msp/README.md
 
 # Customer license files -- delivered offline, never tracked anywhere
 *.pimlicense

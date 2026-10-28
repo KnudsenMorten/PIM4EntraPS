@@ -89,6 +89,18 @@ the subscription and Privileged Role Administrator in Entra ID.
 
 The full guide is **[Setup](https://invardia.com/docs/pim-manager/setup/)**.
 
+## What is in this repository
+
+| Folder | What it holds |
+|---|---|
+| `tools/` | Everything you run: `tools/setup/` (deploy, update and setup scripts), the PIM Manager app, the engine jobs, the PIM Activator browser extension |
+| `engine/` | The engine that applies your PIM model to Entra ID, Azure and the workloads |
+| `config/` | Sample configuration files; `config/msp/` holds the multi-tenant build samples |
+| `templates/` | Shipped PIM, policy, mail and admin templates |
+| `workloads/` | Workload connector definitions (Intune, Defender XDR, Azure RBAC and more) |
+| `sql/` | The database schema |
+| `docs/` | The feature catalog, the design notes, the security pack and images; the full documentation is at invardia.com |
+
 ## Pro editions and support
 
 <p align="center">

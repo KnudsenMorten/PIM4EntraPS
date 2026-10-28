@@ -168,7 +168,7 @@ function Select-PimDownlinkIntents {
     # 🔴 §79.6 live E2E 2026-09-25 (RIDE, 2.4.435): EVERY intent -- one recorded a minute earlier included -- was dropped as
     # "older than the intent lifetime". The limit came from $script:PimDownlinkIntentMaxAgeDays, and `$age -gt $null` is
     # TRUE for any age. Why $null: downlink-job-entry.ps1 dot-sources this file (setting the variable in ITS script scope),
-    # then runs setup/Invoke-PimScenarioRun.ps1 -- a child script, a NEW script scope -- whose PIM-ScenarioProfile.ps1 skips
+    # then runs tools/setup/Invoke-PimScenarioRun.ps1 -- a child script, a NEW script scope -- whose PIM-ScenarioProfile.ps1 skips
     # re-loading this file because the functions are already visible (Get-Command guard). Inside the function $script: is
     # then the CHILD's scope, where the variable was never set. The literal 30 is the floor now; a limit is never $null.
     if ($MaxAgeDays -le 0) { $MaxAgeDays = [int]$script:PimDownlinkIntentMaxAgeDays }

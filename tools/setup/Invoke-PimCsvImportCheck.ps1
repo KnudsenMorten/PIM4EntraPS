@@ -12,7 +12,7 @@
         would publish to its managed tenants, with and without -ForceLocal, and the exact values
         -ForceLocal would set.
     The row-level rules are the Manager's own validator (tools/pim-manager/_validator.ps1), called --
-    not copied. setup/Migrate-PimToSql.ps1 runs the same check before it writes anything.
+    not copied. tools/setup/Migrate-PimToSql.ps1 runs the same check before it writes anything.
 
     Exit code: 0 when there are no errors (warnings and infos are allowed), 1 otherwise.
 
@@ -53,7 +53,7 @@ param(
     [switch]$ShowAll
 )
 $ErrorActionPreference = 'Stop'
-. (Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared\PIM-CsvImportCheck.ps1')
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-CsvImportCheck.ps1')
 
 $result = Invoke-PimCsvImportCheck -Path $Path -ForceLocal:$ForceLocal -NotMspMaster:$NotMspMaster -DefaultDomain $DefaultDomain
 if ($AsJson) {

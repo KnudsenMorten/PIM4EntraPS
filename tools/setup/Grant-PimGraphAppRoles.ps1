@@ -52,9 +52,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $here   = Split-Path -Parent $MyInvocation.MyCommand.Path
-$shared = Resolve-Path "$here\..\engine\_shared"
+$shared = Resolve-Path "$here\..\..\engine\_shared"
 . "$shared\PIM-Rest.ps1"
-. (Join-Path $here '..\tools\setup\_PimSetupShared.ps1')   # Get-PimEngineSpnGraphRoles / Get-PimGraphAppRoleMap (BUG-181)
+. (Join-Path $here '_PimSetupShared.ps1')   # Get-PimEngineSpnGraphRoles / Get-PimGraphAppRoleMap (BUG-181)
 $engineRoles = @(Get-PimEngineSpnGraphRoles)
 $engineMap   = Get-PimGraphAppRoleMap -RoleSet Engine
 if ($PSBoundParameters.ContainsKey('Permissions') -and @($Permissions).Count) {

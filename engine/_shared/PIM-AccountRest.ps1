@@ -4,7 +4,7 @@
   This is the REST counterpart of the legacy engine function
   CreateUpdate-Accounts-From-file-CSV (PIM-Functions.psm1) for the Entra-ID
   ("TargetPlatform = ID") branch -- the only branch the MSP fan-out
-  (setup/Invoke-PimMspFanout.ps1, its one remaining caller; it calls the engine
+  (tools/setup/Invoke-PimMspFanout.ps1, its one remaining caller; it calls the engine
   with -OnlyID) drives. (The local-apply lab script that also used it was retired
   on 2026-09-18, IMP-45.) It creates / updates the
   cloud admin user object, links the manager, and (best-effort) sets mail

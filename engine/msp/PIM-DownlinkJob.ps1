@@ -5,7 +5,7 @@
 # compute, in one test"; "run it through the containers in the slave").
 #
 # WHAT this delivers
-#   The downlink (PIM-Downlink.ps1 / setup/Invoke-PimDownlinkSync.ps1) was a
+#   The downlink (PIM-Downlink.ps1 / tools/setup/Invoke-PimDownlinkSync.ps1) was a
 #   wrapper run by-hand or by a Windows scheduled task. THIS turns it into a
 #   first-class CLOUD scheduled JOB: an `az containerapp job` of trigger-type
 #   Schedule that, on its cron cadence, runs the SAME pim-manager image with a
@@ -40,7 +40,7 @@
 # REUSE (does not reinvent): the env/MI/registry/private pattern proven in
 #   tools/setup/Setup-PimContainers.ps1 (the worker matrix); the image built by
 #   tools/setup/Build-PimManagerImage.ps1; the downlink invoked by
-#   setup/Invoke-PimDownlinkSync.ps1 + setup/Invoke-PimScenarioRun.ps1; scenario
+#   tools/setup/Invoke-PimDownlinkSync.ps1 + tools/setup/Invoke-PimScenarioRun.ps1; scenario
 #   resolution in engine/_shared/PIM-ScenarioProfile.ps1.
 # =============================================================================
 
