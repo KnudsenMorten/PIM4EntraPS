@@ -699,17 +699,21 @@ function Get-PimUpdaterSelfRecordWrites {
       Returns @{ writes = [ordered]; lastGood = [bool]; sequence = [bool]; variable = 'PIM_UPDATE_INVARDIA_SEQ_R<n>' | '' }.
     #>
     param([AllowEmptyString()][AllowNull()][string]$SelfImageNow, [AllowEmptyString()][AllowNull()][string]$TargetImage,
-          [AllowEmptyString()][AllowNull()][string]$Ring, [int]$Sequence = 0, [int]$AppliedSequence = 0)
+          [AllowEmptyString()][AllowNull()][string]$Ring, [int]$Sequence = 0, [int]$AppliedSequence = 0,
+          # COMMUNITY-INCLOUD-UPDATER: the Community channel's counter is its own -> PIM_UPDATE_INVARDIA_CSEQ_R<n>, no legacy pair
+          [ValidateSet('code', 'community')][string]$Kind = 'code')
     $w = [ordered]@{}
     $lg = [bool]("$SelfImageNow".Trim() -and "$SelfImageNow".Trim() -ne "$TargetImage".Trim())
     if ($lg) { $w['PIM_UPDATE_LAST_GOOD'] = "$SelfImageNow".Trim() }
     $n = -1; $var = ''
-    if ([int]::TryParse("$Ring".Trim(), [ref]$n) -and $n -ge 0 -and $n -le 3) { $var = "PIM_UPDATE_INVARDIA_SEQ_R$n" }
+    if ([int]::TryParse("$Ring".Trim(), [ref]$n) -and $n -ge 0 -and $n -le 3) { $var = $(if ($Kind -eq 'community') { "PIM_UPDATE_INVARDIA_CSEQ_R$n" } else { "PIM_UPDATE_INVARDIA_SEQ_R$n" }) }
     $sq = [bool]($var -and $Sequence -gt 0 -and $Sequence -gt $AppliedSequence)
     if ($sq) {
         $w[$var] = "$Sequence"
-        $w['PIM_UPDATE_INVARDIA_SEQ'] = "$Sequence"
-        $w['PIM_UPDATE_INVARDIA_SEQ_RING'] = "$n"
+        if ($Kind -ne 'community') {
+            $w['PIM_UPDATE_INVARDIA_SEQ'] = "$Sequence"
+            $w['PIM_UPDATE_INVARDIA_SEQ_RING'] = "$n"
+        }
     }
     return @{ writes = $w; lastGood = $lg; sequence = $sq; variable = $var }
 }

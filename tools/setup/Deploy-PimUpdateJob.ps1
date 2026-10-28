@@ -67,7 +67,7 @@ param(
     # ring Invardia has set for this environment; needs the install key -- PIM_UPLINK_KEY or the 'install-key' job -- and an
     # Invardia-issued Pro licence). 'pim-src' = the source archives + channel.json (the default). Omitted on a redeploy =
     # the job keeps what it has.
-    [ValidateSet('pim-src', 'Invardia')][string]$UpdateSource,
+    [ValidateSet('pim-src', 'Invardia', 'InvardiaCommunity')][string]$UpdateSource,
     # 2026-09-13 -- THE UPDATE RING (operator: "nothing releases to ring 2 without my approve").
     # Every updater this installs ends with PIM_UPDATE_RING set. DEFAULT 2 = the safe customer ring;
     # internal and test environments pass 1 explicitly. NOT passing it on a redeploy KEEPS the ring the
@@ -286,9 +286,16 @@ foreach ($k in @($storePlan.writes.Keys)) { $envVars += "$k=$($storePlan.writes[
 # The Invardia job reads no archive URL, but the ring plan refuses a ring without a source template -- so an install with
 # none gets Invardia's archive address as an INFORMATIONAL template (update-job-entry ignores it in Invardia mode).
 if ($UpdateSource) {
-    $envVars += "PIM_UPDATE_SOURCE=$($UpdateSource.ToLowerInvariant())"
+    # COMMUNITY-INCLOUD-UPDATER: 'InvardiaCommunity' -> 'invardia-community' (the value update-job-entry reads), not a plain
+    # lower-casing ('invardiacommunity' would be no source at all).
+    $srcValue = $(if ($UpdateSource -eq 'InvardiaCommunity') { 'invardia-community' } else { $UpdateSource.ToLowerInvariant() })
+    $envVars += "PIM_UPDATE_SOURCE=$srcValue"
     if ($UpdateSource -eq 'Invardia' -and -not "$SourceUrlTemplate".Trim() -and -not "$($env:PIM_UPDATE_SOURCE_URL)".Trim() -and -not "$($existingEnv['PIM_UPDATE_SOURCE_URL'])".Trim()) {
         $SourceUrlTemplate = 'https://invardia.com/api/updates/pim-manager/code/{version}/archive'
+    }
+    # informational for the ring plan (which refuses a ring without a template); update-job-entry reads the channel itself
+    if ($UpdateSource -eq 'InvardiaCommunity' -and -not "$SourceUrlTemplate".Trim() -and -not "$($env:PIM_UPDATE_SOURCE_URL)".Trim() -and -not "$($existingEnv['PIM_UPDATE_SOURCE_URL'])".Trim()) {
+        $SourceUrlTemplate = 'https://invardia.com/api/updates/pim-manager/community/{version}'
     }
     Note "update source: $UpdateSource"
 }

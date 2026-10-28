@@ -451,12 +451,9 @@ function Get-PimUpdaterStepDecision {
     <#
       BUG-156 -- PURE. What the deploy's 'updater' step does.
         'skip-flag'      -SkipUpdater was passed.
-        'skip-community' a COMMUNITY scenario (S2/S4) with no published source feed: the in-cloud
-                         updater reads a maintainer-published source archive + release channel that a
-                         public GitHub install does not have, so installing it could only fail -- and
-                         a failed step used to HALT the deploy and roll back a working environment.
-                         Community installs update by `git pull` + re-running the deploy (the re-run
-                         is the updater) -- one command: tools/setup/Update-PimCommunity.ps1 -Apply.
+        'install-community' a COMMUNITY scenario (S2) with no feed of its own, or -UpdateSource InvardiaCommunity:
+                         the in-cloud updater on Invardia's signed Community channel (2026-10-28; it was
+                         'skip-community' -- no updater -- before Invardia's Community channel existed).
         'install'        everything else, including a community install that DOES supply a feed.
       A non-community scenario with no feed still returns 'install' on purpose: Deploy-PimUpdateJob
       refuses a ring without a source, loudly, and that refusal must stay visible there.
@@ -470,8 +467,14 @@ function Get-PimUpdaterStepDecision {
         # no feed it got NO updater at all. Pro updates arrive signed, through Invardia, so 'Invardia' is a source.
         [AllowEmptyString()][string]$UpdateSource = ''
     )
+    # COMMUNITY-INCLOUD-UPDATER (owner 2026-10-28: "we must have one way to do this: same for si and pim"): a Community
+    # install (S2) with no feed of its own now gets the SAME in-cloud updater, on Invardia's signed Community channel
+    # ('install-community'; the step passes -UpdateSource InvardiaCommunity, ring 3 unless one is given). 'skip-community'
+    # is gone. A customer who wants to update by hand only ("just in case that customers dont trust the update mechanism",
+    # owner) passes -SkipUpdater and runs Update-PimCommunity.ps1, which checks the same signed manifest.
     if ($SkipUpdater) { return 'skip-flag' }
+    if ("$UpdateSource".Trim() -ieq 'InvardiaCommunity') { return 'install-community' }
     if (("$Scenario".Trim().ToUpperInvariant() -in @('S2')) -and   # S4 (MSP on the free edition) is retired
-        -not "$SourceUrlTemplate".Trim() -and "$UpdateSource".Trim() -ine 'Invardia') { return 'skip-community' }
+        -not "$SourceUrlTemplate".Trim() -and "$UpdateSource".Trim() -ine 'Invardia') { return 'install-community' }
     return 'install'
 }

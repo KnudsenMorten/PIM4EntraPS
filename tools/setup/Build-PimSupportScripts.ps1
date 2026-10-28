@@ -404,18 +404,21 @@ foreach ($d in $docs) {
 }
 [IO.File]::WriteAllLines((Join-Path $OutDir 'SHA256SUMS.txt'), $sums)
 $first = if ($built.Count) { $built[0] } else { 'Initialize-PimSqlAdminGroup.ps1' }
-$signLine = if ($signCert) { "SIGNED: every .ps1 carries an Authenticode signature by $($signCert.Subject) (thumbprint $($signCert.Thumbprint))." } else { 'NOT SIGNED: no code-signing certificate was configured for this build -- the .ps1 files carry NO Authenticode signature (framework 12.10 item 11: an unsigned script is not published).' }
+# This README is PUBLISHED (invardia.com/support/pim/README.txt). Owner 2026-10-28: public text says what the product does and
+# never what it does not check -- so an unsigned build says nothing about signing here (the build output and each manifest's
+# "signed": false still say it, for the hand-over), and a signed build names its signer.
+$signLine = if ($signCert) { "`r`nSIGNED: every .ps1 carries an Authenticode signature by $($signCert.Subject) (thumbprint $($signCert.Thumbprint))." } else { '' }
+$signCheck = if ($signCert) { ", and on Windows Get-AuthenticodeSignature .\<file> reports Valid" } else { '' }
 @"
 PIM Manager $version -- standalone support scripts for https://invardia.com/support/pim/<file>
-Each file is self-contained (no other files needed). Documentation index: $($script:PimScriptDocBaseUrl)
-$signLine
+Each file is self-contained (no other files needed). Documentation index: $($script:PimScriptDocBaseUrl)$signLine
 
 Run a script -- two lines, download then run (owner 2026-10-11; never pipe to Invoke-Expression):
   Invoke-WebRequest https://invardia.com/support/pim/$first -OutFile $first
   .\$first -WhatIf
 
 Optional, for whoever verifies a download (never part of the shown command): its SHA256 is its line in SHA256SUMS.txt
-(Get-FileHash .\<file> -Algorithm SHA256), and on Windows Get-AuthenticodeSignature .\<file> reports Valid when signed.
+(Get-FileHash .\<file> -Algorithm SHA256)$signCheck.
 
 Scripts (name, documentation page, SHA256):
 $($lines -join "`r`n")

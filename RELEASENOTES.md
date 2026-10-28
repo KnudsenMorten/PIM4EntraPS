@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.2 -- 2026-10-28
+
+- Community: PIM Manager updates itself at night from the signed public release, or by hand with Update-PimCommunity, which checks the same signed release before anything changes; a single-tenant install no longer switches on MSP features; removed admins, groups and administrative units no longer show in reports, search or the Home counts; an update never jumps to a new major version on its own.
+
 ## 3.0.1 -- 2026-10-28
 
 - A Community install can take an update that changes the policy baseline: Update-PimCommunity.ps1 passes -AcceptBaselineChange on; the multi-tenant setup scripts say they need PIM Manager Pro instead of failing in a Community install; a backlog push to Invardia

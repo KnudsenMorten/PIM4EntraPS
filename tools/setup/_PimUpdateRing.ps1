@@ -72,7 +72,8 @@ function Test-PimInvardiaUpdateSource {
       Deploy-PimUpdateJob writes for -UpdateSource Invardia.
     #>
     param([AllowEmptyString()][string]$Source, [AllowEmptyString()][string]$SourceUrl)
-    if ("$Source".Trim() -ieq 'invardia') { return $true }
+    # 'invardia-community' / 'InvardiaCommunity' (COMMUNITY-INCLOUD-UPDATER): the Community channel is Invardia's too
+    if ("$Source".Trim() -in @('invardia', 'invardia-community', 'InvardiaCommunity')) { return $true }
     return [bool]("$SourceUrl".Trim() -match '^https://([a-z0-9-]+\.)*invardia\.com/api/updates/')
 }
 
@@ -412,6 +413,27 @@ function Get-PimUpdateSourceReport {
                               message = $rep.message; line = "ring ${Ring}: $($rep.message)" }
 }
 
+function Get-PimCommunityRingApproval {
+    <#
+      COMMUNITY-INCLOUD-UPDATER: the version Invardia's Community channel approves for -Ring, VERIFIED with the same verifier
+      the in-cloud updater uses (signature by an embedded key, product, kind community, ring). No replay watermark here: a
+      host-side roll compares a version, it records nothing. A held release (manual step / newer starting version) is not an
+      approval for a roll. -Http: test seam for Invoke-PimInvardiaCommunityPull. Returns @{ ok; approved; reason }. Never throws.
+    #>
+    param([Parameter(Mandatory)][int]$Ring, [scriptblock]$Http, [string]$BaseUrl = '')
+    try {
+        if (-not (Get-Command Invoke-PimInvardiaCommunityPull -ErrorAction SilentlyContinue)) {
+            . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-InvardiaUpdate.ps1')
+        }
+        $p = Invoke-PimInvardiaCommunityPull -Http $Http -BaseUrl $BaseUrl -Ring $Ring
+        if ($p.status -ne 200) { return @{ ok = $false; approved = ''; reason = $p.reason } }
+        $v = Test-PimInvardiaManifest -Response $p.body -Kind 'community' -Ring $Ring
+        if (-not $v.ok) { return @{ ok = $false; approved = ''; reason = "the signed release was refused: $($v.reason)" } }
+        if ($v.hold) { return @{ ok = $false; approved = ''; reason = "the release is held: $($v.reason)" } }
+        return @{ ok = $true; approved = "$($v.version)"; reason = $v.reason }
+    } catch { return @{ ok = $false; approved = ''; reason = "the Community channel could not be read: $($_.Exception.Message)" } }
+}
+
 function Test-PimRollRingGate {
     <#
       PURE (apart from the -Fetch seam). May a HOST-SIDE roll move this environment to -TargetVersion?
@@ -451,7 +473,9 @@ function Test-PimRollRingGate {
         # set from "-Source git-pull", so a PAID environment updating from git (the retired MSP-community S4) was ungated too.
         # A community environment that DOES carry a ring is gated by that ring.
         [ValidateSet('', 'community', 'pro', 'upgrade-pending')][string]$EnvironmentEdition = '',
-        [scriptblock]$Fetch
+        [scriptblock]$Fetch,
+        # test seam: { param($Ring) } -> @{ ok; approved; reason } (default Get-PimCommunityRingApproval)
+        [scriptblock]$CommunityFetch
     )
     $r = { param($allowed, $gated, $ring, $appr, $reason) [pscustomobject]@{ allowed = [bool]$allowed; gated = [bool]$gated; ring = $ring; approved = $appr; reason = $reason } }
     if ($UpdaterUnreadable) {
@@ -514,6 +538,18 @@ function Test-PimRollRingGate {
     if ("$env:PIM_GUIDED_INSTALL_RUN" -eq '1' -and $PendingRing -ge 0 -and $ring -eq $PendingRing -and (Test-PimInvardiaUpdateSource -SourceUrl "$PendingSourceUrl") -and
         (Test-PimInvardiaUpdateSource -Source $srcKind -SourceUrl $src)) {
         return (& $r $true $false $ring '' "the (resumed) install of a Pro environment updated through Invardia (ring $ring, re-installed by this run): it takes the version these setup scripts carry; from then on Invardia's signed manifest for ring $ring decides.")
+    }
+    # COMMUNITY-INCLOUD-UPDATER (2026-10-28): the Community channel is ANONYMOUS, so unlike the Pro feed the host CAN read and
+    # verify what the ring approves -- the manual command (Update-PimCommunity) rolls only to that signed version. Without
+    # this, a Community install with the in-cloud updater could no longer be updated by hand (the owner's backup path).
+    if ("$srcKind".Trim() -eq 'invardia-community' -or "$src" -match '/api/updates/[^/]+/community/') {
+        $c = if ($CommunityFetch) { & $CommunityFetch $ring } else { Get-PimCommunityRingApproval -Ring $ring }
+        if (-not $c.ok) { return (& $r $false $true $ring '' "REFUSING to roll: what Invardia's Community channel approves for ring $ring$how could not be verified -- $($c.reason)") }
+        if ($t -ne "$($c.approved)") {
+            return (& $r $false $true $ring "$($c.approved)" ("ring $ring$how approves $($c.approved) (Invardia's signed Community release); this roll targets '$t' -- REFUSED. " +
+                    "Update with tools\setup\Update-PimCommunity.ps1 -Apply, which downloads exactly that release."))
+        }
+        return (& $r $true $true $ring "$($c.approved)" "ring $ring$how approves $($c.approved) (Invardia's signed Community release, verified) -- the roll target; allowed.")
     }
     if (Test-PimInvardiaUpdateSource -Source $srcKind -SourceUrl $src) {
         return (& $r $false $true $ring '' ("ring $ring$how is updated through Invardia: its approved version is a signed manifest the in-cloud updater reads with this install's key, not something a host-side roll can prove -- REFUSING. " +
@@ -1012,8 +1048,10 @@ function Get-PimUpdateStateSeedSource {
       carries, else Invardia when the source address is Invardia's, else the default 'pim-src'.
     #>
     param([AllowEmptyString()][string]$UpdateSource, [System.Collections.IDictionary]$ExistingEnv = @{}, [AllowEmptyString()][string]$SourceUrl)
+    if ("$UpdateSource".Trim() -eq 'InvardiaCommunity') { return 'invardia-community' }
     if ("$UpdateSource".Trim()) { return "$UpdateSource".Trim().ToLowerInvariant() }
     if ($ExistingEnv -and $ExistingEnv.Contains('PIM_UPDATE_SOURCE') -and "$($ExistingEnv['PIM_UPDATE_SOURCE'])".Trim()) { return "$($ExistingEnv['PIM_UPDATE_SOURCE'])".Trim().ToLowerInvariant() }
+    if ("$SourceUrl".Trim() -match '^https://([a-z0-9-]+\.)*invardia\.com/api/updates/[^/]+/community/') { return 'invardia-community' }
     if (Test-PimInvardiaUpdateSource -Source '' -SourceUrl $SourceUrl) { return 'invardia' }
     return 'pim-src'
 }

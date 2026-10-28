@@ -57,9 +57,37 @@ git clone https://github.com/KnudsenMorten/PIM4EntraPS.git
 cd PIM4EntraPS
 ```
 
-Then follow **[Setup](https://invardia.com/docs/pim-manager/setup/)**: it creates the deploy identity (a
-certificate, never a secret) and deploys PIM Manager, the engine and the database with one command, which you run
-first without `-Apply` to see the plan. You need PowerShell 7 and git; no Azure CLI and no PowerShell modules.
+You need PowerShell 7 and git; no Azure CLI and no PowerShell modules. Sign in as an administrator who is Owner of
+the subscription and Privileged Role Administrator in Entra ID.
+
+1. **Create the deploy identity** (a certificate, never a secret). It prints the app id and the certificate file:
+
+   ```powershell
+   .\tools\setup\New-PimDeployIdentity.ps1 -TenantId <tenant id> -SubscriptionId <subscription id>
+   ```
+
+2. **See the plan**, then deploy. The same command without `-Apply` changes nothing and lists every step:
+
+   ```powershell
+   .\tools\setup\Invoke-PimDeployAll.ps1 -Scenario S2 -TenantId <tenant id> -SubscriptionId <subscription id> `
+       -Location <azure region> -PrereqToken <short name> -ResourceGroup rg-pim -VnetName vnet-pim -VnetResourceGroup rg-pim `
+       -AcrName acrpim<short name> -SqlServerFqdn sql-pim-<short name>.database.windows.net `
+       -AdminAppId <app id> -AdminCertPem <certificate file> -SqlAdminClientId <app id> -SqlAdminCertThumbprint <thumbprint> `
+       -ManagerSuperAdmins <your sign-in name> -EasyAuthAllowedPrincipals <your sign-in name> -Exposure external
+   ```
+
+   `<short name>` is a few lower-case letters or digits that make the Azure names unique.
+
+   Add `-Apply` to deploy. A successful deploy saves its parameters, so you never type them again.
+
+3. **Updates.** By default PIM Manager updates itself at night from the signed public release. To update by hand
+   instead, deploy with `-SkipUpdater` and run, whenever you choose:
+
+   ```powershell
+   .\tools\setup\Update-PimCommunity.ps1 -Apply
+   ```
+
+The full guide is **[Setup](https://invardia.com/docs/pim-manager/setup/)**.
 
 ## Pro editions and support
 

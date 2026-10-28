@@ -1,34 +1,42 @@
 {
   "script": "Update-PimCommunity.ps1",
   "product": "pim",
-  "title": "Update a Community installation to the latest release",
-  "purpose": "Keeps a Community (free) PIM Manager installation on the latest release: it fetches the public GitHub clone, says which version it would move to, and only with -Apply pulls it (fast-forward only) and re-runs the deploy with the parameters the last successful deploy saved.",
-  "whenToRun": "On your own schedule, for a Community installation (the Community edition has no in-cloud updater). It is part of the release, not a separate download: run it from the clone of the public GitHub repository you installed from (.\\tools\\setup\\Update-PimCommunity.ps1), as the person who ran the original deploy. A Pro installation updates itself in the cloud and does not use this script.",
+  "title": "Update an installation by hand (signed release)",
+  "purpose": "Updates a PIM Manager installation by hand: it reads Invardia's signed release for this edition and ring, verifies it exactly as the in-cloud updater does, and only with -Apply downloads the release, checks its size and SHA-256, and deploys it with the parameters the last successful deploy saved.",
+  "whenToRun": "When you keep the in-cloud updater off (deployed with -SkipUpdater) and update on your own schedule -- Community or Pro. The in-cloud updater is the default and checks the same signed release at night. Run it from the folder of the release you installed (.\\tools\\setup\\Update-PimCommunity.ps1), as the person who ran the original deploy.",
   "standalone": false,
   "sourcePath": "tools/setup/Update-PimCommunity.ps1",
   "runAs": [
-    { "kind": "other", "name": "The same rights as the original deploy (Invoke-PimDeployAll.ps1): Owner of the PIM resource group or subscription, signed in through the browser (no Azure CLI)", "scope": "the PIM resource group and subscription", "why": "The update re-runs the deploy with the saved parameters; every step that is already current is skipped, so in practice it rolls the new version and upgrades the schema. The deploy's own page lists each right." }
+    { "kind": "other", "name": "The same rights as the original deploy (Invoke-PimDeployAll.ps1): Owner of the PIM resource group or subscription, signed in through the browser (no Azure CLI)", "scope": "the PIM resource group and subscription", "why": "The update runs the release's deploy with the saved parameters; every step that is already current is skipped, so in practice it rolls the new version and upgrades the schema. The deploy's own page lists each right." }
   ],
   "changes": [
-    { "target": "Local clone", "action": "update", "object": "the GitHub clone (git pull --ff-only) -- only with -Apply and when the clone is behind; a clone with local changes to tracked files is refused", "scope": "this computer", "why": "Brings the code to the latest release. Never a merge.", "undo": "git -C <clone> reset to the previous release tag, then run the deploy again." },
-    { "target": "PIM resource group (via Invoke-PimDeployAll.ps1)", "action": "update", "object": "the PIM Manager / engine containers, the database schema (additive) and any step the deploy finds out of date -- only with -Apply", "scope": "this installation", "why": "Rolls the new version. The schema is upgraded additively before the new version starts, and a failed health check rolls the Manager back.", "undo": "Check out the previous release in the clone and run the update (or the deploy) again with -SkipPull." }
+    { "target": "This computer", "action": "create", "object": "a new folder PIM4EntraPS-<version> next to the current one, holding the verified release -- only with -Apply and when a newer release is approved for the ring", "scope": "this computer", "why": "The release is unpacked from the archive whose size and SHA-256 match the signed manifest, never from an unchecked download.", "undo": "Delete the folder; the previous release folder is untouched." },
+    { "target": "PIM resource group (via Invoke-PimDeployAll.ps1)", "action": "update", "object": "the PIM Manager / engine containers, the database schema (additive) and any step the deploy finds out of date -- only with -Apply", "scope": "this installation", "why": "Rolls the new version. The schema is upgraded additively before the new version starts, and a failed health check rolls the Manager back.", "undo": "Run the previous release folder's Update-PimCommunity.ps1 -SkipPull -Apply; the deploy rolls that version back in." }
   ],
   "parameters": [
     { "name": "TenantId", "required": false, "default": null, "help": "Which saved deploy profile to use when there is more than one on this machine." },
     { "name": "ProfilePath", "required": false, "default": null, "help": "A saved deploy profile to use directly (written by a successful Invoke-PimDeployAll.ps1 -Apply)." },
-    { "name": "SkipPull", "required": false, "default": false, "help": "Re-run the deploy on the code you already have (no fetch, no pull)." },
-    { "name": "Apply", "required": false, "default": false, "help": "Pull and deploy. Without it nothing changes: the target version is reported and the deploy plan printed." },
-    { "name": "AcceptBaselineChange", "required": false, "default": false, "help": "Accept a new version that changes the policy baseline. The update refuses such a version and names this switch; give it for that one run when the change is intended. It is never saved into the profile." }
+    { "name": "SkipPull", "required": false, "default": false, "help": "Re-run the deploy on the code you already have (no release is read or downloaded)." },
+    { "name": "Apply", "required": false, "default": false, "help": "Download the verified release and deploy it. Without it nothing changes: the target version is reported and the deploy plan printed." },
+    { "name": "AcceptBaselineChange", "required": false, "default": false, "help": "Accept a new version that changes the policy baseline. The update refuses such a version and names this switch; give it for that one run when the change is intended. It is never saved into the profile." },
+    { "name": "Edition", "required": false, "default": "Community", "help": "Community (Invardia's anonymous Community channel) or Pro (the licence feed: needs -InstallKey and -LicencePath)." },
+    { "name": "Ring", "required": false, "default": 3, "help": "The release ring to follow; 3 is the public release (the Community channel serves rings 2 and 3)." },
+    { "name": "InstallKey", "required": false, "default": null, "help": "Pro only: this installation's Invardia install key (Settings > Licence)." },
+    { "name": "LicencePath", "required": false, "default": null, "help": "Pro only: the Invardia-issued licence file." },
+    { "name": "BaseUrl", "required": false, "default": "https://invardia.com", "help": "Invardia's address." },
+    { "name": "AllowMajor", "required": false, "default": false, "help": "Take a MAJOR version jump on purpose; refused otherwise." },
+    { "name": "DeployArgs", "required": false, "default": null, "help": "Extra parameters for the release's deploy (a hashtable), for a parameter a newer release added. Never saved." }
   ],
   "readsOnly": [
-    "the saved deploy profile (%LOCALAPPDATA%\\pim\\deploy-profiles\\<tenant>-*.json, or -ProfilePath)",
-    "the clone's VERSION file and its upstream (git fetch, git rev-list) to report from -> to"
+    "the saved deploy profile (%LOCALAPPDATA%\\pim\\deploy-profiles\\<tenant>-*.json, or -ProfilePath) and the applied-release record next to it",
+    "Invardia's signed release for the edition and ring (read-only), to report from -> to"
   ],
   "network": [
-    "github.com (git fetch / pull of the public repository)",
-    "login.microsoftonline.com, management.azure.com, graph.microsoft.com and the PIM resources (the re-run deploy; see Invoke-PimDeployAll)"
+    "invardia.com (the signed release: GET /api/updates/pim-manager/community/<ring>, anonymous; Pro: the licence feed)",
+    "github.com (the release archive the signed manifest names -- only with -Apply)",
+    "login.microsoftonline.com, management.azure.com, graph.microsoft.com and the PIM resources (the deploy; see Invoke-PimDeployAll)"
   ],
-  "whatIf": "Reads the saved profile and reports the version; does not fetch or pull ('What if: would fetch the clone's upstream ... skipped'); runs the deploy as a -WhatIf plan ('DEPLOY-ALL PLAN (WHATIF ...', 'WHATIF / PLAN-ONLY -- no changes made'). -WhatIf wins over -Apply. Nothing is changed.",
-  "undo": "Check out the previous release in the clone (git checkout <previous tag>) and run the update again with -SkipPull -Apply; the deploy rolls that version back in.",
+  "whatIf": "Reads the saved profile and reports the version; with -SkipPull reads nothing else ('no pull -- -SkipPull'); runs the deploy as a -WhatIf plan ('DEPLOY-ALL PLAN (WHATIF ...', 'WHATIF / PLAN-ONLY -- no changes made'). -WhatIf wins over -Apply: nothing is downloaded. Nothing is changed.",
+  "undo": "Run the previous release folder's Update-PimCommunity.ps1 -SkipPull -Apply; the deploy rolls that version back in.",
   "docUrl": "https://invardia.com/docs/pim/scripts/Update-PimCommunity/"
 }

@@ -53,7 +53,7 @@ if (-not "$ProfilePath".Trim()) {
     $dir = Get-PimDeployProfileDir
     $all = @(if (Test-Path $dir) { Get-ChildItem -Path $dir -Filter '*.json' -File })
     if ("$TenantId".Trim()) { $all = @($all | Where-Object { $_.Name -like "$($TenantId.Trim())-*" }) }
-    if (-not $all.Count) { throw "no deploy profile found in $dir$(if ($TenantId) { " for tenant $TenantId" }). Run README step 3 (Invoke-PimDeployAll.ps1 ... -Apply) once; it saves the profile this upgrade re-uses." }
+    if (-not $all.Count) { throw "no deploy profile found in $dir$(if ($TenantId) { " for tenant $TenantId" }). Run the first install (toolssetupInvoke-PimDeployAll.ps1 ... -Apply) once; it saves the profile this upgrade re-uses." }
     if ($all.Count -gt 1) { throw "more than one deploy profile in ${dir}: $(@($all.Name) -join ', ') -- pick one with -TenantId or -ProfilePath" }
     $ProfilePath = $all[0].FullName
 }
