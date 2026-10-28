@@ -968,7 +968,7 @@
         "disabled": "The page is hidden from the menu and tab strip. Campaigns and results already stored are kept. A direct link shows \"this page is turned off\", and the server refuses the page's own requests while it is off. In the Free (Community) edition the entry is always listed, marked PRO, whatever this switch says, and opens the Free vs Pro page.",
         "risk": "Low: switching it on only adds a page. Switched off, open campaigns are harder for reviewers to reach (a direct link /?tab=accessreview shows \"this page is turned off\" instead). Reversible: switch it back and reload.",
         "requires": "SuperAdmin role to change. Running campaigns is a Pro feature.",
-        "recommended": "On when you run recertification campaigns (Pro); otherwise leave it off.",
+        "recommended": "On when you run recertification campaigns; otherwise leave it off.",
         "docUrl": "https://invardia.com/docs/pim/settings/FeatureFlags.accessreview/"
       }
     },
@@ -1150,7 +1150,7 @@
         "enabled": "When set: new admin names use the new suffix. The hybrid worker also uses the two suffixes to pair a cloud admin with its AD account (replace the cloud suffix with the AD suffix) for just-in-time AD group membership, and it only REMOVES AD group members whose name ends with the AD suffix. Group names whose pattern contains {Platform} use the suffix of your default environment.",
         "disabled": "When blank / at the default: -ID for Entra ID and -AD for Active Directory. If a suffix is missing the engine still falls back to -ID / -AD.",
         "risk": "This is not cosmetic on hybrid tenants: change the suffixes after admins exist and the hybrid worker can stop finding their AD accounts (no JIT AD membership), leave old -AD members standing in AD groups, or start treating other accounts with the new suffix as removable members. Existing account names never change. Reversible: restore the old values; the next hybrid run returns to the old pairing.",
-        "requires": "SuperAdmin in PIM Manager. Free (Community) for naming; the AD pairing applies only with on-premises Active Directory (Pro, hybrid worker). The hybrid Active Directory settings can override the cloud / AD suffix pair.",
+        "requires": "SuperAdmin in PIM Manager. Free (Community) for naming; the AD pairing applies only with on-premises Active Directory through the hybrid worker (Pro; Community has no hybrid worker). The hybrid Active Directory settings can override the cloud / AD suffix pair.",
         "recommended": "Keep -ID / -AD. If you must change them, do it before the first admin is created, and never on a tenant whose hybrid worker already manages AD group membership.",
         "docUrl": "https://invardia.com/docs/pim/settings/NamingConventions.EnvironmentSuffixes/"
       }

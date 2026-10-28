@@ -153,7 +153,7 @@
     { "name": "UpdateCron", "required": false, "default": "0 3 * * *", "help": "Updater schedule (UTC)." },
     { "name": "UpdateSourceUrlTemplate", "required": false, "default": "$env:PIM_UPDATE_SOURCE_URL", "help": "Where the updater fetches source ({version} template)." },
     { "name": "UpdateRing", "required": false, "default": 2, "help": "The update ring the updater follows." },
-    { "name": "UpdateSource", "required": false, "default": "unchanged", "help": "pim-src or Invardia (Pro updates)." },
+    { "name": "UpdateSource", "required": false, "default": "unchanged", "help": "pim-src, Invardia (Pro: the signed licence feed) or InvardiaCommunity (Community: the signed Community channel). Empty: a Community install (S2) gets InvardiaCommunity, ring 3." },
     { "name": "OverrideRingGate", "required": false, "default": false, "help": "Roll a version the ring does not approve (audited; needs -Reason)." },
     { "name": "Reason", "required": false, "default": null, "help": "Why the ring gate is overridden." },
     { "name": "SkipUpdater", "required": false, "default": false, "help": "Install no updater." },

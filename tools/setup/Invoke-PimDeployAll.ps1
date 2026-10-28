@@ -464,7 +464,7 @@ param(
     # §95.4 (2026-10-06) -- WHERE PRO UPDATES COME FROM. 'Invardia' = signed manifests + archives from Invardia for this
     # environment's ring (the install key is claimed by the engine once the Pro licence is in). Forwarded to
     # Deploy-PimUpdateJob; empty keeps whatever the job already carries.
-    [ValidateSet('', 'pim-src', 'Invardia')][string]$UpdateSource = '',
+    [ValidateSet('', 'pim-src', 'Invardia', 'InvardiaCommunity')][string]$UpdateSource = '',
     # The HOST-SIDE ring gate (Update-PimContainers / Setup-PimContainers) refuses to roll an
     # environment to a version its ring does not approve. This is the only way past it, and it is
     # printed and audited. -Reason is mandatory with it.
@@ -1016,6 +1016,15 @@ if ("$SqlAdminClientId".Trim() -and ("$SqlAdminCertThumbprint".Trim() -or "$SqlA
     else                                      { $storeAdminArgs['AdminSecret']         = $SqlAdminClientSecret }
 }
 if ($UseSignedInAccount) { $storeAdminArgs = @{ UseSignedInAccount = $true } }   # 71.33: the store-writing steps connect as the signed-in user
+# COMMUNITY-TEST-ENV G4 (2026-10-28, the Community install gp185; owner: "community does not have msp support, only pro"): a
+# SINGLE-tenant install (S2) has no managing tenant, so NO msp.* gate is switched on there -- not from the default list, not
+# from a list the caller passed -- and msp.downlink, which deploys before 3.0.2 switched on, is switched off again.
+if ("$Scenario".Trim().ToUpperInvariant() -eq 'S2') {
+    $mspAsked = @(@($FeatureGates) | Where-Object { "$_" -like 'msp.*' })
+    $FeatureGates = @(@($FeatureGates) | Where-Object { "$_" -notlike 'msp.*' })
+    if ($mspAsked.Count -and $PSBoundParameters.ContainsKey('FeatureGates')) { Write-Host "  feature gates: $($mspAsked -join ', ') left out -- a single-tenant install (S2) has no MSP" -ForegroundColor Yellow }
+    if (@($FeatureGatesDisable) -notcontains 'msp.downlink') { $FeatureGatesDisable = @(@($FeatureGatesDisable) + 'msp.downlink') }
+}
 if ($Scenario) {
     $sPlan = Get-PimScenarioEntryPlan -Scenario $Scenario
     $planSource = if ($sPlan.updateSource -eq 'from-master') { if ($sPlan.managedHosting -eq 'central') { 'sync-automateit' } else { 'git-pull' } }
@@ -2676,9 +2685,9 @@ function Invoke-DefaultStepRunner {
             if (-not (Test-Path $upj)) { return @{ ok=$false; ran=$true; detail="update-job deployer not found: $upj" } }
             # BUG-156: decided by the pure core, so a community install without a feed skips
             # cleanly instead of failing the step and rolling back a working environment.
-            switch (Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater -UpdateSource "$UpdateSource") {
-                'skip-flag'      { return @{ ok=$true; ran=$false; detail='skipped by -SkipUpdater -- this environment will NOT update itself' } }
-                'skip-community' { return @{ ok=$true; ran=$false; detail="community edition ($Scenario): no published update feed, so no in-cloud updater -- update with tools\setup\Update-PimCommunity.ps1 -Apply (it runs 'git pull' and re-runs this same command with the parameters saved by this deploy -- a re-run is the updater)" } }
+            $updDecision = Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater -UpdateSource "$UpdateSource"
+            switch ($updDecision) {
+                'skip-flag'      { return @{ ok=$true; ran=$false; detail='skipped by -SkipUpdater -- this environment will NOT update itself (manual updates only: tools\setup\Update-PimCommunity.ps1, which checks the same signed manifest)' } }
             }
             if (-not "$AcrName".Trim() -or -not "$EnvName".Trim()) {
                 return @{ ok=$true; ran=$false; detail='no -AcrName/-EnvName -- nightly updater not installed (environment will not update itself)' }
@@ -2712,6 +2721,12 @@ function Invoke-DefaultStepRunner {
                 # BUG-162: read the SCRIPT-scope answer. $PSBoundParameters here is this FUNCTION's, and
                 # it can never contain UpdateRing -- see the capture at the top of this file.
                 if ($script:PimDeployRingExplicit) { $upArgs['UpdateRing'] = $UpdateRing }
+                # COMMUNITY-INCLOUD-UPDATER: a Community install's updater reads Invardia's signed Community channel, ring 3
+                # unless one was given (the channel serves rings 2 and 3; ring 3 = the public release, as the mirror).
+                if ($updDecision -eq 'install-community') {
+                    $upArgs['UpdateSource'] = 'InvardiaCommunity'
+                    if (-not $script:PimDeployRingExplicit) { $upArgs['UpdateRing'] = '3' }
+                }
                 if ("$RegistryIdentityResourceId".Trim()) { $upArgs['RegistryIdentityResourceId'] = $RegistryIdentityResourceId }
                 # 2026-09-13 -- the updater copies the Manager's PIM_SqlServer / PIM_SqlDatabase, and its
                 # identity needs a contained database user for the schema step: the same SQL-admin SPN
@@ -2894,7 +2909,7 @@ function Invoke-DefaultStepRunner {
             if ("$AcrAgentPoolName".Trim()) { $cvArgs['AcrAgentPoolName'] = "$AcrAgentPoolName".Trim() }
             if ($script:PimDeployRingExplicit) { $cvArgs['UpdateRing'] = $UpdateRing }
             if ("$UpdateSource".Trim()) { $cvArgs['UpdateSource'] = "$UpdateSource".Trim() }
-            if ((Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater -UpdateSource ("$UpdateSource".Trim())) -ne 'install') { $cvArgs['NoUpdater'] = $true }
+            if ((Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater -UpdateSource ("$UpdateSource".Trim())) -notin @('install', 'install-community')) { $cvArgs['NoUpdater'] = $true }
             if ($LicenceExpected -or "$UpdateSource".Trim() -eq 'Invardia' -or $script:PimEnrollResult) { $cvArgs['LicenceExpected'] = $true }
             if ("$script:PimMailDeferredReason".Trim()) { $cvArgs['MailDeferredReason'] = "$script:PimMailDeferredReason" }
             if ($EngineAzureRootUserAccessAdmin) { $cvArgs['EngineAzureRootUserAccessAdmin'] = $true }
@@ -3261,13 +3276,17 @@ Open-PimSetupHostWindow
 # always wins inside the gate; without an explicit ring nothing is passed and the gate's refusal stands.
 $pendingRingArgs = @{}
 $updaterPlanned = @($plan.steps | Where-Object { "$($_.key)" -eq 'updater' -and $_.do }).Count -gt 0
-if ($script:PimDeployRingExplicit -and $updaterPlanned -and "$AcrName".Trim() -and "$EnvName".Trim() -and
-    (Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater -UpdateSource "$UpdateSource") -eq 'install') {
+$pendingDecision = Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater -UpdateSource "$UpdateSource"
+if ($script:PimDeployRingExplicit -and $updaterPlanned -and "$AcrName".Trim() -and "$EnvName".Trim() -and $pendingDecision -in @('install', 'install-community')) {
     $pendingRingArgs['PendingUpdateRing']      = $UpdateRing
     $pendingRingArgs['PendingUpdateSourceUrl'] = "$UpdateSourceUrlTemplate".Trim()
     # §95.4: an Invardia updater has no feed URL of its own -- the gate is told the Invardia archive template, which is also
     # what Deploy-PimUpdateJob writes on the job (_PimUpdateRing.ps1 Test-PimInvardiaUpdateSource recognises it).
     if ("$UpdateSource".Trim() -eq 'Invardia' -and -not "$UpdateSourceUrlTemplate".Trim()) { $pendingRingArgs['PendingUpdateSourceUrl'] = 'https://invardia.com/api/updates/pim-manager/code/{version}/archive' }
+    # COMMUNITY-INCLOUD-UPDATER: the Community channel's address (what Deploy-PimUpdateJob writes for InvardiaCommunity)
+    if (-not "$UpdateSourceUrlTemplate".Trim() -and $pendingDecision -eq 'install-community') {
+        $pendingRingArgs['PendingUpdateSourceUrl'] = 'https://invardia.com/api/updates/pim-manager/community/{version}'
+    }
     Info "ring gate: this run installs the updater on ring $UpdateRing -- infra/code are judged by that ring where the environment has none yet"
 }
 

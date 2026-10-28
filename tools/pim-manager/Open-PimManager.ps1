@@ -8730,6 +8730,27 @@ function Select-PimGraphLiveRows {
     param([AllowNull()][object[]]$Rows)
     foreach ($r in @($Rows)) { if (Test-PimGraphRowLive -Row $r) { $r } }
 }
+function Get-PimGraphRemovedIds {
+    # PURE. REMOVED-HIDDEN-EVERYWHERE (owner 2026-10-27: "if people removed delegations or groups or admins, it should not
+    # show in the gui in any views"): the node ids of the objects whose rows are history by Test-PimGraphRowLive -- a
+    # deleted admin, a retired group or AU -- that no live row still defines. An assignment row that names one is no grant
+    # either, even with Action=Assign: the reports (who can / who has / tier impact), the search and the Home counts walk
+    # the EDGES, and a walk through a node the map leaves out still reached the targets behind it. Keys are lower case:
+    # an admin's UPN, login name and UPN local part (the memberships name an admin by either), 'group:<tag>', 'au:<tag>'.
+    param([AllowNull()][object[]]$Admins, [AllowNull()][object[]]$Groups, [AllowNull()][object[]]$AUs)
+    $f = { param($r, $n) if ($r -is [System.Collections.IDictionary]) { "$($r[$n])".Trim() } elseif ($r.PSObject.Properties[$n]) { "$($r.$n)".Trim() } else { '' } }
+    $live = @{}; $gone = @{}
+    $note = { param($r, [string[]]$Keys) $to = if (Test-PimGraphRowLive -Row $r) { $live } else { $gone }; foreach ($k in $Keys) { if ("$k".Trim()) { $to["$k".Trim().ToLowerInvariant()] = $true } } }
+    foreach ($a in @($Admins)) { if ($null -eq $a) { continue }; $u = & $f $a 'UserPrincipalName'; & $note $a @($u, (& $f $a 'UserName'), $(if ($u) { ($u -split '@')[0] } else { '' })) }
+    foreach ($g in @($Groups)) { if ($null -eq $g) { continue }; $t = & $f $g 'GroupTag'; if ($t) { & $note $g @("group:$t") } }
+    foreach ($au in @($AUs)) {
+        if ($null -eq $au) { continue }
+        $t = & $f $au 'AdministrativeUnitTag'; if (-not $t) { $t = & $f $au 'AUTag' }; if (-not $t) { $t = & $f $au 'Tag' }
+        if ($t) { & $note $au @("au:$t") }
+    }
+    foreach ($k in @($live.Keys)) { if ($gone.ContainsKey($k)) { $gone.Remove($k) } }   # a live row of the same object wins
+    return $gone
+}
 
 function Build-PimGraphData {
     $admins        = (Read-PimRows 'Account-Definitions-Admins').rows
@@ -8757,6 +8778,15 @@ function Build-PimGraphData {
     # assignment as Action=Remove -- and the map drew every row. The map shows what IS granted, so those rows are left out,
     # with the engine's own tests (PIM-EngineProviders: AccountStatus Deleted, Action Remove; Lifecycle ^retire). An edge to
     # a node that is left out is dropped by the board itself (colOf -> -1).
+    # REMOVED-HIDDEN-EVERYWHERE: the reports, the search and the Home counts walk the edges, not the board -- so an edge to
+    # a removed admin / group / AU is not emitted at all (Get-PimGraphRemovedIds, from the rows BEFORE they are filtered),
+    # and a target only a removed group reached is no node. A removed group still in Entra ID (deletion off, a guard holds
+    # it) keeps its own surfaces -- the guard holds, the group-deletion warning -- which read their own sources, not this.
+    $centralRaw = @()
+    if (Get-Command Get-PimManagerCentralAdminRows -ErrorAction SilentlyContinue) { try { $centralRaw = @(Get-PimManagerCentralAdminRows) } catch { $centralRaw = @() } }
+    $removedIds = Get-PimGraphRemovedIds -Admins @(@($admins) + @($centralRaw)) -AUs @($defAUs) `
+        -Groups @(@($defRoles) + @($defTasks) + @($defServices) + @($defProcesses) + @($defResources) + @($defDepts) + @($defOrg) + @($defProjects) + @($defCrossOrg))
+    $isRemoved = { param([string[]]$Ids) foreach ($i in $Ids) { if ("$i".Trim() -and $removedIds.ContainsKey("$i".Trim().ToLowerInvariant())) { return $true } }; return $false }
     $admins        = @(Select-PimGraphLiveRows -Rows $admins)
     $defRoles      = @(Select-PimGraphLiveRows -Rows $defRoles)
     $defTasks      = @(Select-PimGraphLiveRows -Rows $defTasks)
@@ -8832,8 +8862,7 @@ function Build-PimGraphData {
     # A local row with the same UPN wins, as in the engine.
     $adminAlias = @{}   # login name / UPN local part (lower) -> UPN: the synced memberships name a central admin by login name
     $haveUpn = @{}; foreach ($n in $nodes) { if ($n.kind -eq 'admin') { $haveUpn["$($n.id)".ToLowerInvariant()] = $true } }
-    $centralAdmins = @()
-    if (Get-Command Get-PimManagerCentralAdminRows -ErrorAction SilentlyContinue) { try { $centralAdmins = @(Select-PimGraphLiveRows -Rows @(Get-PimManagerCentralAdminRows)) } catch { $centralAdmins = @() } }
+    $centralAdmins = @(Select-PimGraphLiveRows -Rows $centralRaw)
     foreach ($a in $centralAdmins) {
         $u = "$($a.UserPrincipalName)".Trim(); if (-not $u -or $haveUpn.ContainsKey($u.ToLowerInvariant())) { continue }
         $haveUpn[$u.ToLowerInvariant()] = $true
@@ -8964,6 +8993,7 @@ function Build-PimGraphData {
     $upOwned = { param($r) ("$($r.Owner)".Trim() -ieq 'msp') }
     foreach ($r in $asgnAdmins) {
         if (-not $r.Username -or -not $r.GroupTag) { continue }
+        if (& $isRemoved @("$($r.Username)", "group:$($r.GroupTag)")) { continue }   # REMOVED-HIDDEN-EVERYWHERE (above)
         [void]$edges.Add([ordered]@{
             source = $r.Username
             target = "group:$($r.GroupTag)"
@@ -8976,6 +9006,7 @@ function Build-PimGraphData {
     }
     foreach ($r in $asgnGroups) {
         if (-not $r.SourceGroupTag -or -not $r.TargetGroupTag) { continue }
+        if (& $isRemoved @("group:$($r.SourceGroupTag)", "group:$($r.TargetGroupTag)")) { continue }
         [void]$edges.Add([ordered]@{
             source = "group:$($r.TargetGroupTag)"
             target = "group:$($r.SourceGroupTag)"
@@ -8988,6 +9019,7 @@ function Build-PimGraphData {
     }
     foreach ($r in $asgnRolesGrp) {
         if (-not $r.GroupTag -or -not $r.RoleDefinitionName) { continue }
+        if (& $isRemoved @("group:$($r.GroupTag)")) { continue }
         $targetId = "entra-role:$($r.RoleDefinitionName)"
         & $addSyn $targetId $r.RoleDefinitionName 'entra-role' 'PIM-Assignments-Roles-Groups' @{ roleName = "$($r.RoleDefinitionName)" }
         [void]$edges.Add([ordered]@{
@@ -9002,6 +9034,7 @@ function Build-PimGraphData {
     }
     foreach ($r in $asgnRolesAU) {
         if (-not $r.GroupTag -or -not $r.RoleDefinitionName -or -not $r.AdministrativeUnitTag) { continue }
+        if (& $isRemoved @("group:$($r.GroupTag)", "au:$($r.AdministrativeUnitTag)")) { continue }
         $targetId = "au-role:$($r.AdministrativeUnitTag):$($r.RoleDefinitionName)"
         $label    = "$($r.RoleDefinitionName) @ AU:$($r.AdministrativeUnitTag)"
         & $addSyn $targetId $label 'au-role' 'PIM-Assignments-Roles-AUs' @{ roleName = "$($r.RoleDefinitionName)"; auTag = "$($r.AdministrativeUnitTag)" }
@@ -9027,6 +9060,7 @@ function Build-PimGraphData {
     }
     foreach ($r in $asgnAzRes) {
         if (-not $r.GroupTag -or -not $r.AzScope -or -not $r.AzScopePermission) { continue }
+        if (& $isRemoved @("group:$($r.GroupTag)")) { continue }
         $targetId = "az-res:$($r.AzScope):$($r.AzScopePermission)"
         $meta = & $azScopeMeta $r.AzScope
         $shortScope = if ("$($meta.scopeShort)".Trim()) { $meta.scopeShort } else { ($r.AzScope -split '/') | Select-Object -Last 1 }
@@ -9052,6 +9086,7 @@ function Build-PimGraphData {
     # present, each target is reconciled (mapped | missing | exempted) for a badge.
     foreach ($r in $asgnWorkloads) {
         if (-not $r.Workload -or -not $r.RoleName -or -not $r.GroupTag) { continue }
+        if (& $isRemoved @("group:$($r.GroupTag)")) { continue }
         $wid       = "$($r.Workload)".Trim()
         $widLc     = $wid.ToLowerInvariant()
         $wName     = if ($workloadNames.ContainsKey($widLc)) { $workloadNames[$widLc] } else { $wid }

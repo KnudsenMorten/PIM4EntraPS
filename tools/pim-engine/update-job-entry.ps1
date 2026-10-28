@@ -672,11 +672,14 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     # (Invoke-PimDeployAll / Confirm-PimInstall -> Deploy-PimUpdateJob -TargetVersion = the installed tag) and every ring
     # branch below replaces it -- but a HELD ring environment used to fall through to that stale install pin and try to
     # roll to it (measured: two ring-2 environments still carry 2.4.531 from their install while running 2.4.537).
-    if ($ring -or $updSource -eq 'invardia') {
+    if ($ring -or $updSource -in @('invardia', 'invardia-community')) {
         if ($targetVer) { Say "  PIM_UPDATE_TARGET_VERSION=$targetVer is ignored: a ring-managed environment moves only on its ring, and a held one not at all." 'DarkGray' }
         $targetVer = ''
     }
-} elseif ($updSource -eq 'invardia') {
+} elseif ($updSource -in @('invardia', 'invardia-community')) {
+    # COMMUNITY-INCLOUD-UPDATER (owner 2026-10-28): 'invardia-community' = the SAME path, the anonymous Community channel
+    # (no licence, no install key), kind community, its own replay watermark. Everything after the pull is shared.
+    $invCommunity = ($updSource -eq 'invardia-community')
     . (Join-Path $solRoot 'engine\_shared\PIM-LicenceRequest.ps1')   # Invoke-PimLicenceHttp (5.1 + 7, a non-2xx is a status)
     . (Join-Path $solRoot 'engine\_shared\PIM-InvardiaUpdate.ps1')
     $csInv = $null; try { $csInv = Get-PimSqlConnectionString } catch { $csInv = $null }
@@ -700,19 +703,22 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     # 2026-10-16 (internal, 2.4.639 roll): one licence READ failed and was reported as "no licence is installed" -- the
     # catch hid the real error, and the next run read it fine. A failed read is retried once and, if it still fails, SAID
     # (the Pro pull then stops as before, but the log names the store error, never a missing licence).
-    $licRaw = $null; $licErr = ''
-    foreach ($try in 1, 2) {
-        try { $licRaw = Get-PimSqlSetting -ConnectionString $csInv -Name 'License'; $licErr = ''; break }
-        catch { $licErr = (("$($_.Exception.Message)") -split "`n")[0]; if ($try -eq 1) { Start-Sleep -Seconds 5 } }
+    $licText = ''; $invKey = ''
+    if (-not $invCommunity) {   # the Community channel is anonymous: no licence, no install key
+        $licRaw = $null; $licErr = ''
+        foreach ($try in 1, 2) {
+            try { $licRaw = Get-PimSqlSetting -ConnectionString $csInv -Name 'License'; $licErr = ''; break }
+            catch { $licErr = (("$($_.Exception.Message)") -split "`n")[0]; if ($try -eq 1) { Start-Sleep -Seconds 5 } }
+        }
+        if ($licErr) { Say "Invardia: the licence could NOT be read from the store ($licErr) -- this is a store error, not a missing licence; the next run retries" 'Yellow' }
+        $licText = ConvertTo-PimInvardiaLicenceText -Value $licRaw
+        $invKey = Resolve-PimInvardiaInstallKey -GetSetting { param($n) Get-PimSqlSetting -ConnectionString $csInv -Name $n }
     }
-    if ($licErr) { Say "Invardia: the licence could NOT be read from the store ($licErr) -- this is a store error, not a missing licence; the next run retries" 'Yellow' }
-    $licText = ConvertTo-PimInvardiaLicenceText -Value $licRaw
-    $invKey = Resolve-PimInvardiaInstallKey -GetSetting { param($n) Get-PimSqlSetting -ConnectionString $csInv -Name $n }
     $invBase = ''; try { $invBase = "$(Get-PimSqlSetting -ConnectionString $csInv -Name 'LicenceRequestBaseUrl')".Trim() } catch { }
     # 2026-10-09 -- the replay watermark is PER RING (PIM_UPDATE_INVARDIA_SEQ_R<ring>): Invardia numbers sequences per ring,
     # so one value for the environment refused the home ring's lower sequence forever after a ring move. The legacy single
     # value is honoured only with evidence of its ring (Resolve-PimInvardiaAppliedSequence has the migration rules).
-    $seqRes = Resolve-PimInvardiaAppliedSequence -JobEnv ([Environment]::GetEnvironmentVariables()) -Ring $ring
+    $seqRes = Resolve-PimInvardiaAppliedSequence -JobEnv ([Environment]::GetEnvironmentVariables()) -Ring $ring -Kind $(if ($invCommunity) { 'community' } else { 'code' })
     $script:PimInvardiaApplied = [int]$seqRes.applied
     Say "Invardia replay watermark: $($seqRes.reason)" 'DarkGray'
     # The highest version this environment is known to have reached: a manifest below it is AHEAD (nothing fetched).
@@ -722,11 +728,18 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     # CR7: an OPTED-IN install whose sign-in front image is not built yet asks for the verified archive even when the Manager
     # is already built ($sfNeed) -- the front is built from it; the Manager plan below still compares PIM_UPDATE_LAST_BUILT
     # and does not rebuild. Every other install passes $lastBuilt exactly as before.
+    $allowMajor = ("$($env:PIM_UPDATE_ALLOW_MAJOR)".Trim() -eq '1')   # PUB-8: the owner's planned major, for one run
+    if ($invCommunity) {
+        $t = Get-PimInvardiaCommunityTarget -BaseUrl $invBase -AppliedSequence $script:PimInvardiaApplied `
+                -RunningVersion "$($script:PimRunningVersion)" -LastBuiltVersion $(if ($sfNeed) { '' } else { $lastBuilt }) -Ring $ring `
+                -HighestKnownVersion $highestKnown -AllowDowngrade:("$($env:PIM_UPDATE_ALLOW_DOWNGRADE)".Trim() -eq '1') -AllowMajor:$allowMajor
+    } else {
     $t = Get-PimInvardiaUpdateTarget -Http { param($m, $u, $b, $h) Invoke-PimLicenceHttp -Method $m -Url $u -Body $b -Headers $h } `
             -InstallKey $invKey -LicenceText $licText -BaseUrl $invBase -AppliedSequence $script:PimInvardiaApplied `
             -RunningVersion "$($script:PimRunningVersion)" -LastBuiltVersion $(if ($sfNeed) { '' } else { $lastBuilt }) -Ring $ring `
             -UnprovenLegacySequence ([int]$seqRes.unprovenLegacy) -HighestKnownVersion $highestKnown `
-            -AllowDowngrade:("$($env:PIM_UPDATE_ALLOW_DOWNGRADE)".Trim() -eq '1')   # UPDATE-1.7: this environment's own ring
+            -AllowDowngrade:("$($env:PIM_UPDATE_ALLOW_DOWNGRADE)".Trim() -eq '1') -AllowMajor:$allowMajor   # UPDATE-1.7: this environment's own ring
+    }
     Say "Invardia: $($t.reason)" $(if ($t.ok) { 'DarkGray' } elseif ($t.attention -or $t.noKey) { 'Yellow' } else { 'Red' })
     $script:PimRingApproved = "$($t.version)"; $script:PimRingApprovedReason = "Invardia: $($t.reason)"
     $script:PimInvardiaAhead = [bool]$t.ahead
@@ -1503,7 +1516,7 @@ if ($selfJob) {
         # watermark was never (fully) written: "could not record the applied Invardia sequence". Now ONE PATCH carries all
         # of them (Get-PimUpdaterSelfRecordWrites -> Set-PimAcaJobEnvValues, which waits out a busy job and reads back).
         $selfRec = Get-PimUpdaterSelfRecordWrites -SelfImageNow $selfNow -TargetImage $targetImg -Ring $ring `
-                       -Sequence $script:PimInvardiaSequence -AppliedSequence $script:PimInvardiaApplied
+                       -Sequence $script:PimInvardiaSequence -AppliedSequence $script:PimInvardiaApplied -Kind $(if ($updSource -eq 'invardia-community') { 'community' } else { 'code' })
         $seqVar = $selfRec.variable
         if ($selfRec.writes.Count) {
             try {

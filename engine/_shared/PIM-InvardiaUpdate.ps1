@@ -232,11 +232,169 @@ function Invoke-PimInstallKeyJob {
 # So the watermark is kept per ring -- PIM_UPDATE_INVARDIA_SEQ_R<ring> -- and only the CURRENT ring's is read and written.
 # Within a ring the replay rule is unchanged.
 function Get-PimInvardiaSequenceVariableName {
-    <# PURE. The job env variable holding the applied Invardia sequence for one ring ('' when the ring is not 0-3). #>
-    param([AllowEmptyString()][AllowNull()][string]$Ring)
+    <# PURE. The job env variable holding the applied Invardia sequence for one ring ('' when the ring is not 0-3).
+       -Kind community: Invardia numbers the Community channel on its OWN counter (per product / kind / ring), so its
+       watermark is a separate variable (PIM_UPDATE_INVARDIA_CSEQ_R<n>) -- one shared value would refuse a valid release
+       after an install moved between editions. #>
+    param([AllowEmptyString()][AllowNull()][string]$Ring, [ValidateSet('code', 'community')][string]$Kind = 'code')
     $n = -1
     if (-not [int]::TryParse("$Ring".Trim(), [ref]$n) -or $n -lt 0 -or $n -gt 3) { return '' }
+    if ($Kind -eq 'community') { return "PIM_UPDATE_INVARDIA_CSEQ_R$n" }
     return "PIM_UPDATE_INVARDIA_SEQ_R$n"
+}
+
+# ---- COMMUNITY-INCLOUD-UPDATER (owner 2026-10-28: "we must have one way to do this: same for si and pim") -------------
+# The Community edition takes its updates the SAME way as Pro -- the in-cloud updater, a signed manifest, the same verifier
+# -- from Invardia's Community channel. Contract (Invardia, apps/front/src/updates.ts, 2026-10-28):
+#   GET <base>/api/updates/pim-manager/community/<2|3>, ANONYMOUS (no install key, no licence). Rings 2 and 3 only.
+#   200 { manifest; manifestB64; signature; keyId; downloadUrl }   204 nothing released yet   404 other rings
+#   manifest { product pim-manager; kind community; ring; sequence; version; archive; sha256; size; minFromVersion;
+#              manualStep; releasedAt; url } -- the url is the public GitHub release zip (the mirror tree at its root).
+# Only the SIGNED bytes (manifestB64) are read; downloadUrl repeats manifest.url.
+function Get-PimCommunityChannelRings { <# PURE. LITERAL. The rings Invardia's Community channel serves. #> return @(2, 3) }
+
+function Invoke-PimInvardiaCommunityHttp {
+    <# The real seam: one anonymous GET, 30 s, @{ status; body; error }. A non-2xx is a status, never a throw. #>
+    param([Parameter(Mandatory)][string]$Url)
+    try {
+        $r = Invoke-WebRequest -Uri $Url -Method GET -TimeoutSec 30 -UseBasicParsing -ErrorAction Stop
+        $b = $null; if ("$($r.Content)".Trim()) { try { $b = "$($r.Content)" | ConvertFrom-Json } catch { $b = $null } }
+        return @{ status = [int]$r.StatusCode; body = $b; error = '' }
+    } catch {
+        $code = 0; try { if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode } } catch { $code = 0 }
+        return @{ status = $code; body = $null; error = ((("$($_.Exception.Message)") -split "`n")[0]) }
+    }
+}
+
+function Invoke-PimInvardiaCommunityPull {
+    <#
+      The Community pull: an anonymous GET of the channel for -Ring (2 or 3). -Http { param($Url) } -> @{ status; body; error }
+      (default Invoke-PimInvardiaCommunityHttp). Returns @{ status; body; reason }. Never throws.
+    #>
+    param([scriptblock]$Http, [string]$BaseUrl = '', [Parameter(Mandatory)][int]$Ring)
+    if ($Ring -notin (Get-PimCommunityChannelRings)) {
+        return @{ status = 0; body = $null; reason = "the Community channel serves rings 2 and 3 only (this environment is on ring $Ring)" }
+    }
+    $base = if ("$BaseUrl".Trim()) { "$BaseUrl".Trim().TrimEnd('/') } else { $script:PimInvardiaDefaultBase }
+    if ($base -notmatch '^(?i)https://') { return @{ status = 0; body = $null; reason = 'the update address is not https' } }
+    $url = "$base/api/updates/$($script:PimInvardiaProduct)/community/$Ring"
+    $r = $null
+    try { $r = if ($Http) { & $Http $url } else { Invoke-PimInvardiaCommunityHttp -Url $url } }
+    catch { $r = @{ status = 0; body = $null; error = ((("$($_.Exception.Message)") -split "`n")[0]) } }
+    $st = [int]$r.status
+    $why = switch ($st) {
+        200 { '' }
+        204 { 'nothing is released to the Community channel for this ring yet' }
+        404 { "Invardia's Community channel does not serve ring $Ring" }
+        429 { 'Invardia asked to wait (rate limit) -- the next run asks again' }
+        0   { "Invardia could not be reached: $($r.error)" }
+        default { "Invardia answered HTTP $st" }
+    }
+    return @{ status = $st; body = $r.body; reason = $why }
+}
+
+function Test-PimUpdateMajorJump {
+    <#
+      PURE. Framework PUB-8 ("update clients refuse a major jump"): may this environment move from -RunningVersion to -Target?
+      Returns @{ ok; reason }. Refused: a target whose MAJOR is higher than the running one, when the running major is 3 or
+      more. Allowed: 2.x -> 3.0 (the owner's renumbering of 2026-10-28 -- no breaking change, and every 2.x install must reach
+      3.x), any move inside one major, an unknown running version (a first install has nothing to compare), and -AllowMajor
+      (PIM_UPDATE_ALLOW_MAJOR=1: the owner's planned major, set on purpose for one environment).
+    #>
+    param([AllowEmptyString()][string]$RunningVersion = '', [Parameter(Mandatory)][string]$Target, [switch]$AllowMajor)
+    $rm = 0; $tm = 0
+    if ("$RunningVersion".Trim() -notmatch '^(\d+)\.') { return @{ ok = $true; reason = 'the running version is not known -- nothing to compare' } }
+    $rm = [int]$Matches[1]
+    if ("$Target".Trim() -notmatch '^(\d+)\.') { return @{ ok = $false; reason = "the target version '$Target' is not a release version" } }
+    $tm = [int]$Matches[1]
+    if ($tm -le $rm) { return @{ ok = $true; reason = '' } }
+    if ($rm -lt 3) { return @{ ok = $true; reason = "$RunningVersion -> ${Target}: the move from 2.x to 3.x is allowed (PUB-8)" } }
+    if ($AllowMajor) { return @{ ok = $true; reason = "$RunningVersion -> ${Target}: a major jump, allowed by PIM_UPDATE_ALLOW_MAJOR=1" } }
+    return @{ ok = $false; reason = ("$RunningVersion -> $Target is a MAJOR jump -- refused (framework PUB-8: a new major is a new generation that " +
+                                    'can break; only the owner plans it). Nothing moved. To take it on purpose, set PIM_UPDATE_ALLOW_MAJOR=1 on the update job for one run.') }
+}
+
+function ConvertTo-PimBuildContextFromCommunityZip {
+    <#
+      The public GitHub release zip (the mirror tree AT ITS ROOT: VERSION, tools/, engine/ ... -- no top folder, no
+      SOLUTIONS/PIM4EntraPS) -> the SAME tar.gz build context the Pro path makes (SOLUTIONS/PIM4EntraPS at its root, which is
+      what the Dockerfile's COPY reads). Refuses a zip whose VERSION is not the signed manifest's. @{ ok; path; reason }.
+    #>
+    param([Parameter(Mandatory)][string]$ZipPath, [Parameter(Mandatory)][string]$OutFile, [Parameter(Mandatory)][string]$Version)
+    $work = Join-Path ([IO.Path]::GetTempPath()) ("pim-cinv-{0}" -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+    try {
+        $sol = Join-Path $work 'SOLUTIONS/PIM4EntraPS'
+        New-Item -ItemType Directory -Force -Path $sol | Out-Null
+        Expand-Archive -LiteralPath $ZipPath -DestinationPath $sol -Force
+        # a zip with ONE top folder (a GitHub source zip) is taken from inside it
+        $vf = Join-Path $sol 'VERSION'
+        if (-not (Test-Path -LiteralPath $vf)) {
+            $tops = @(Get-ChildItem -LiteralPath $sol -Directory)
+            if ($tops.Count -eq 1 -and (Test-Path -LiteralPath (Join-Path $tops[0].FullName 'VERSION'))) {
+                $inner = $tops[0].FullName
+                Get-ChildItem -LiteralPath $inner -Force | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination $sol -Force }
+                Remove-Item -LiteralPath $inner -Recurse -Force
+            }
+        }
+        if (-not (Test-Path -LiteralPath $vf)) { return @{ ok = $false; path = ''; reason = 'the archive holds no VERSION at its root (not the PIM Manager release tree)' } }
+        if (-not (Test-Path -LiteralPath (Join-Path $sol 'tools/pim-manager/Dockerfile'))) { return @{ ok = $false; path = ''; reason = 'the archive holds no tools/pim-manager/Dockerfile' } }
+        $inside = "$(Get-Content -Raw -LiteralPath $vf)".Trim()
+        if ($inside -ne $Version) { return @{ ok = $false; path = ''; reason = "the archive holds version $inside, the signed manifest says $Version" } }
+        Push-Location -LiteralPath $work
+        try {
+            # A RELATIVE output name, then a move: GNU tar reads 'C:' in an absolute Windows path as a remote host.
+            & tar -czf 'context.tar.gz' 'SOLUTIONS'
+            if ($LASTEXITCODE -ne 0) { return @{ ok = $false; path = ''; reason = "tar failed (exit $LASTEXITCODE)" } }
+        } finally { Pop-Location }
+        Move-Item -LiteralPath (Join-Path $work 'context.tar.gz') -Destination $OutFile -Force
+        return @{ ok = $true; path = $OutFile; reason = '' }
+    } catch { return @{ ok = $false; path = ''; reason = "the archive could not be unpacked: $($_.Exception.Message)" } }
+    finally { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+function Get-PimInvardiaCommunityTarget {
+    <#
+      The update job's whole COMMUNITY step, seams injected: pull (anonymous), verify (the SAME verifier and keys as Pro, kind
+      community, this ring), and -- when a build is needed -- download, size + SHA-256 check, re-pack. Returns the SAME shape
+      as Get-PimInvardiaUpdateTarget (@{ ok; version; sequence; hold; reason; contextPath; ahead; attention; noKey; wave;
+      manifestVersion; served }), so the job handles both editions with one path. No install key and no licence: never noKey.
+    #>
+    param([scriptblock]$Http, [string]$BaseUrl = '', [int]$AppliedSequence = 0, [string]$RunningVersion = '', [string]$LastBuiltVersion = '',
+          [object[]]$TrustedKeys = $script:PimInvardiaUpdateTrustedKeys, [scriptblock]$Download, [string]$WorkDir = ([IO.Path]::GetTempPath()),
+          [string]$Ring = '', [string]$HighestKnownVersion = '', [switch]$AllowDowngrade, [switch]$AllowMajor)
+    $res = @{ ok = $false; version = ''; sequence = 0; hold = $false; reason = ''; contextPath = ''; ahead = $false; attention = $false; noKey = $false
+              wave = ''; manifestVersion = ''; served = $false }
+    $ringN = -1
+    if (-not [int]::TryParse("$Ring".Trim(), [ref]$ringN) -or $ringN -notin (Get-PimCommunityChannelRings)) {
+        $res.reason = "this Community environment has no Community ring (PIM_UPDATE_RING = '$Ring', expected 2 or 3) -- nothing is pulled"; return $res
+    }
+    $p = Invoke-PimInvardiaCommunityPull -Http $Http -BaseUrl $BaseUrl -Ring $ringN
+    if ($p.status -eq 204) { $res.ok = $true; $res.served = $true; $res.reason = $p.reason; return $res }
+    if ($p.status -ne 200) { $res.reason = $p.reason; return $res }
+    $v = Test-PimInvardiaManifest -Response $p.body -TrustedKeys $TrustedKeys -Kind 'community' -AppliedSequence $AppliedSequence -RunningVersion $RunningVersion -Ring $ringN
+    if (-not $v.ok) { $res.reason = $v.reason; return $res }
+    $res.served = $true; $res.manifestVersion = "$($v.version)"; $res.sequence = $v.sequence; $res.reason = $v.reason
+    if ($v.hold) { $res.ok = $true; $res.hold = $true; return $res }
+    $mj = Test-PimUpdateMajorJump -RunningVersion "$(if ("$RunningVersion".Trim()) { $RunningVersion } else { $HighestKnownVersion })" -Target $v.version -AllowMajor:$AllowMajor
+    if (-not $mj.ok) { $res.attention = $true; $res.reason = "$($v.reason) -- $($mj.reason)"; return $res }
+    $res.version = $v.version
+    $signedRollback = ($AppliedSequence -gt 0 -and $v.sequence -gt $AppliedSequence)
+    if ("$HighestKnownVersion".Trim() -and (Compare-PimReleaseVersion $v.version "$HighestKnownVersion".Trim()) -lt 0 -and -not $signedRollback -and -not $AllowDowngrade) {
+        $res.ok = $true; $res.ahead = $true
+        $res.reason = "$($v.reason) -- this environment already runs $("$HighestKnownVersion".Trim()), newer than the Community ring approves: nothing to fetch"
+        return $res
+    }
+    if ("$LastBuiltVersion".Trim() -eq $v.version) { $res.ok = $true; $res.reason = "$($v.reason) -- already built here"; return $res }
+    $zip = Join-Path $WorkDir ("$($script:PimInvardiaProduct)-community-$($v.version).zip")
+    $ctx = Join-Path $WorkDir ("pim-src-$($v.version).tar.gz")
+    try {
+        $d = if ($Download) { & $Download $v.downloadUrl $zip $v.sha256 $v.size } else { Save-PimInvardiaArchive -Url $v.downloadUrl -OutFile $zip -ExpectedSha256 $v.sha256 -ExpectedSize $v.size }
+        if (-not $d.ok) { $res.version = ''; $res.reason = "archive refused: $($d.reason)"; return $res }
+        $c = ConvertTo-PimBuildContextFromCommunityZip -ZipPath $zip -OutFile $ctx -Version $v.version
+        if (-not $c.ok) { $res.version = ''; $res.reason = "archive refused: $($c.reason)"; return $res }
+        $res.ok = $true; $res.contextPath = $ctx
+        return $res
+    } finally { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue }
 }
 
 function Resolve-PimInvardiaAppliedSequence {
@@ -253,17 +411,19 @@ function Resolve-PimInvardiaAppliedSequence {
       🔒 Never guesses a ring for a legacy value: without evidence, a lower sequence still does not pass.
     #>
     # Not named $Env: that is the environment-variable drive, and shadowing it is a trap for the next editor.
-    param([AllowNull()][object]$JobEnv, [AllowEmptyString()][AllowNull()][string]$Ring)
+    param([AllowNull()][object]$JobEnv, [AllowEmptyString()][AllowNull()][string]$Ring, [ValidateSet('code', 'community')][string]$Kind = 'code')
     $get = { param($n)
         if ($null -eq $JobEnv) { return '' }
         if ($JobEnv -is [System.Collections.IDictionary]) { if ($JobEnv.Contains($n)) { return "$($JobEnv[$n])".Trim() }; return '' }
         $p = $JobEnv.PSObject.Properties[$n]; if ($p) { return "$($p.Value)".Trim() }; return '' }
-    $res = @{ applied = 0; unprovenLegacy = 0; source = 'none'; variable = (Get-PimInvardiaSequenceVariableName -Ring $Ring); reason = '' }
+    $res = @{ applied = 0; unprovenLegacy = 0; source = 'none'; variable = (Get-PimInvardiaSequenceVariableName -Ring $Ring -Kind $Kind); reason = '' }
     $ringN = -1; [void][int]::TryParse("$Ring".Trim(), [ref]$ringN)
     $x = 0
     if ($res.variable -and [int]::TryParse((& $get $res.variable), [ref]$x) -and $x -ge 0) {
         $res.applied = $x; $res.source = 'ring'; $res.reason = "applied sequence for ring $ringN`: $x ($($res.variable))"; return $res
     }
+    # The Community channel has its own counter and no legacy single value (it started with the per-ring variables).
+    if ($Kind -eq 'community') { $res.reason = "no applied Community sequence recorded for ring $ringN yet"; return $res }
     $legacy = 0
     if (-not ([int]::TryParse((& $get 'PIM_UPDATE_INVARDIA_SEQ'), [ref]$legacy) -and $legacy -gt 0)) { $res.reason = "no applied sequence recorded for ring $ringN yet"; return $res }
     $lr = -1
@@ -361,7 +521,9 @@ function Get-PimInvardiaUpdateTarget {
           # 2026-10-09: the highest version this environment is known to have reached (running / last built / last good).
           # A manifest naming an OLDER version that is not a signed rollback is AHEAD: nothing is downloaded.
           [string]$HighestKnownVersion = '',
-          [switch]$AllowDowngrade)
+          [switch]$AllowDowngrade,
+          # PUB-8: PIM_UPDATE_ALLOW_MAJOR=1 -- the owner's planned major, for one run.
+          [switch]$AllowMajor)
     # PIM 100.158 / framework 12.11e CR3: wave = the wave name from the SIGNED manifest ('' = served outside any wave);
     # manifestVersion = the version that signed manifest names (also on a hold / ahead / already-built answer). served = a
     # manifest (or a 204 "nothing released") was VERIFIED this run -- only then is the wave recorded.
@@ -396,6 +558,9 @@ function Get-PimInvardiaUpdateTarget {
     }
     $res.sequence = $v.sequence; $res.reason = $v.reason
     if ($v.hold) { $res.ok = $true; $res.hold = $true; return $res }
+    # Framework PUB-8: a major jump (from 3.x on) is refused for Pro too -- 'attention', nothing moves.
+    $mj = Test-PimUpdateMajorJump -RunningVersion "$(if ("$RunningVersion".Trim()) { $RunningVersion } else { $HighestKnownVersion })" -Target $v.version -AllowMajor:$AllowMajor
+    if (-not $mj.ok) { $res.attention = $true; $res.reason = "$($v.reason) -- $($mj.reason)"; return $res }
     $res.version = $v.version
     # 2026-10-09 (BUG-162 kept): an environment rolled AHEAD of its ring is not moved back and nothing is fetched for it.
     # Only a SIGNED ROLLBACK (a higher sequence than this ring's applied one, which must exist) or the operator's
