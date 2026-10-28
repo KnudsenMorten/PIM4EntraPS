@@ -28,6 +28,9 @@
 .PARAMETER Apply
     Pull and deploy. Without it nothing changes: the target version is reported and the deploy plan printed.
     -WhatIf wins over -Apply: nothing is fetched or pulled and the deploy runs as a -WhatIf plan.
+.PARAMETER AcceptBaselineChange
+    Accept a new version that changes the policy baseline. The update refuses such a version and names this switch;
+    give it for that one run when the change is intended. It is never saved into the profile.
 .PARAMETER StepRunner
     Test seam only (tests\script-docs): handed to Invoke-PimDeployAll.ps1 -StepRunner.
 
@@ -44,6 +47,7 @@ param(
     [string]$ProfilePath,
     [switch]$SkipPull,
     [switch]$Apply,
+    [switch]$AcceptBaselineChange,
     # --- test seam (tests\script-docs\Update-PimCommunity.case.ps1) ---
     [scriptblock]$StepRunner
 )
@@ -112,6 +116,9 @@ $deployArgs = $prof.parameters
 if ($Apply) { $deployArgs['Apply'] = $true }
 if ($whatIfOnly) { $deployArgs['WhatIf'] = $true }
 if ($StepRunner) { $deployArgs['StepRunner'] = $StepRunner }
+# COMMUNITY-TEST-ENV G1: the update's refusal of a policy-baseline change names -AcceptBaselineChange -- passed on, one run only
+# (never saved into the profile).
+if ($AcceptBaselineChange) { $deployArgs['AcceptBaselineChange'] = $true }
 $global:LASTEXITCODE = 0
 & (Join-Path $PSScriptRoot 'Invoke-PimDeployAll.ps1') @deployArgs
 $script:updRc = $LASTEXITCODE

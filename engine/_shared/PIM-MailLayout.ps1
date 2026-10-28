@@ -179,21 +179,51 @@ function Get-PimMailBrandDir {
     return ''
 }
 
+function Get-PimMailLogoEdition {
+    # COMMUNITY-LOGO (owner 2026-10-28: "include the community logos in their community version"): the edition the logo
+    # shows -- the SAME rule as the portal header (pimBrandEdition): 'pro' when the licence is Valid or in Grace, 'community'
+    # when it is read and anything else, 'plain' when it cannot be read. -Status is the test seam. Cached 10 min per process.
+    param([AllowNull()][string]$Status = $null)
+    # a [string] parameter turns $null into '' -- so "was -Status passed" is asked, never "is it null" (that was always true)
+    $seam = $PSBoundParameters.ContainsKey('Status')
+    if ($seam) { $st = "$Status".Trim() }
+    else {
+        $c = $script:PimMailLogoEditionCache
+        if ($c -and ((Get-Date) - $c.at).TotalMinutes -lt 10) { return $c.ed }
+        $st = ''
+        try { if (Get-Command Get-PimLicense -ErrorAction SilentlyContinue) { $st = "$((Get-PimLicense).Status)".Trim() } } catch { $st = '' }
+    }
+    $ed = if (-not $st) { 'plain' } elseif ($st -in @('Valid', 'Grace')) { 'pro' } else { 'community' }
+    if (-not $seam) { $script:PimMailLogoEditionCache = @{ at = (Get-Date); ed = $ed } }
+    return $ed
+}
+function Get-PimMailLogoFile {
+    # PURE. The brand file of an edition; the plain logo when that edition's file is not shipped.
+    param([string]$Edition = 'plain', [ValidateSet('png', 'svg')][string]$Kind = 'png', [string]$Dir = '')
+    $name = switch ("$Edition") { 'pro' { 'pim-manager-pro' } 'community' { 'pim-manager-community' } default { 'pim-manager' } }
+    $file = if ($Kind -eq 'png') { "$name-512w.png" } else { "$name.svg" }
+    $plain = if ($Kind -eq 'png') { 'pim-manager-512w.png' } else { 'pim-manager.svg' }
+    if ($Dir -and -not (Test-Path -LiteralPath (Join-Path $Dir $file))) { return $plain }
+    return $file
+}
+
 function Get-PimMailLogoAttachment {
     <#
       The logo as an INLINE attachment for a mail (Content-ID 'pim-logo', referenced as <img src="cid:pim-logo">). The colour
-      logo PNG (BRAND-1, docs/img/brand/pim-manager-512w.png). PNG, not SVG: Outlook and most webmail do not draw SVG in mail.
-      $null when the file is not shipped -- the chokepoint then puts the text wordmark in its place. Cached per process.
+      logo PNG of the EDITION (BRAND-1, docs/img/brand: pim-manager-community-512w.png / pim-manager-pro-512w.png, the plain
+      pim-manager-512w.png when the licence cannot be read). PNG, not SVG: Outlook and most webmail do not draw SVG in mail.
+      $null when the file is not shipped -- the chokepoint then puts the text wordmark in its place. Cached per edition.
     #>
-    if ($script:PimMailLogoCache) { return $script:PimMailLogoCache }
     $dir = Get-PimMailBrandDir
     if (-not $dir) { return $null }
-    $p = Join-Path $dir 'pim-manager-512w.png'
+    $f = Get-PimMailLogoFile -Edition (Get-PimMailLogoEdition) -Kind png -Dir $dir
+    if ($script:PimMailLogoCache -and $script:PimMailLogoCache.file -eq $f) { return $script:PimMailLogoCache }
+    $p = Join-Path $dir $f
     if (-not (Test-Path -LiteralPath $p)) { return $null }
     try {
         $bytes = [System.IO.File]::ReadAllBytes($p)
         if ($bytes.Length -lt 8 -or $bytes[0] -ne 0x89 -or $bytes[1] -ne 0x50) { return $null }   # not a PNG -- never attach garbage
-        $script:PimMailLogoCache = @{ name = 'pim-manager.png'; contentType = 'image/png'; bytes = $bytes; contentId = 'pim-logo'; isInline = $true }
+        $script:PimMailLogoCache = @{ name = 'pim-manager.png'; contentType = 'image/png'; bytes = $bytes; contentId = 'pim-logo'; isInline = $true; file = $f }
         return $script:PimMailLogoCache
     } catch { return $null }
 }
@@ -202,7 +232,7 @@ function Get-PimMailLogoSvg {
     # The colour logo as inline SVG for a PRINTED report (a browser draws SVG; it stays sharp in a PDF). '' when missing.
     $dir = Get-PimMailBrandDir
     if (-not $dir) { return '' }
-    $p = Join-Path $dir 'pim-manager.svg'
+    $p = Join-Path $dir (Get-PimMailLogoFile -Edition (Get-PimMailLogoEdition) -Kind svg -Dir $dir)   # COMMUNITY-LOGO: the edition's logo
     if (-not (Test-Path -LiteralPath $p)) { return '' }
     try {
         $t = [System.IO.File]::ReadAllText($p)

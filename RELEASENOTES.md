@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.1 -- 2026-10-28
+
+- A Community install can take an update that changes the policy baseline: Update-PimCommunity.ps1 passes -AcceptBaselineChange on; the multi-tenant setup scripts say they need PIM Manager Pro instead of failing in a Community install; a backlog push to Invardia
+
+## 3.0.0 -- 2026-10-28
+
+- PIM Manager 3.0 -- a new generation, with short version numbers from now on; the Community edition shows the Community logo in mails and printed reports, as the portal header already does, and Pro keeps the Pro logo
+
 ## 2.4.679 -- 2026-10-27
 
 - When the engine has deleted a group marked for deletion, it also takes the row of that group out of PIM Manager, so the group no longer shows anywhere; the group-deletion counts and the removal-guard warning count only groups that still exist in Microsoft Entra ID

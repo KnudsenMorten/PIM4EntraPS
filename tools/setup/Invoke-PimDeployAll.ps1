@@ -65,6 +65,10 @@
 .PARAMETER ImageTag
     Image tag to build/deploy (default = the pulled VERSION file).
 
+.PARAMETER AcceptBaselineChange
+    Accept an image that changes the policy baseline, for this one run. The code step refuses such an image and names
+    this switch; give it when the change is intended.
+
 .PARAMETER EngineClientId / EngineCertThumbprint
     Engine SPN identity for the deploy-validation tests (cert-auth, unattended).
 
@@ -146,6 +150,9 @@ param(
     # re-opens the second configuration surface the descriptor exists to close.
     [string]$Descriptor,
     [switch]$Apply,
+    # Accept an image that changes the policy baseline (the code step refuses it otherwise). For ONE run, when the change
+    # is intended -- passed to Invoke-PimUpdate. COMMUNITY-TEST-ENV G1.
+    [switch]$AcceptBaselineChange,
     [switch]$ValidateOnly,
     # §100.41 (owner 2026-10-10): OUR dev / release gates from tests\live -- the hosted smoke (az-based) and the Pester
     # deploy-validation tests. OFF by default: a customer install never runs Pester or the az CLI; it gets the community
@@ -2645,6 +2652,10 @@ function Invoke-DefaultStepRunner {
                 # Invoke-PimUpdate expresses the gate opt-out as -SkipVerify (it maps it onto the
                 # roller's -SkipSmoke). Say it loudly here too: the deploy summary is what an
                 # operator reads, and a gate that did not run must not look like one that passed.
+                # COMMUNITY-TEST-ENV G1 (2026-10-28, measured on the Community install gp185): the update refused a policy
+                # baseline change and named -AcceptBaselineChange -- which neither this script nor Update-PimCommunity could
+                # pass, so a Community customer was stuck. Passed through to Invoke-PimUpdate (it exists there).
+                if ($AcceptBaselineChange) { $updPool['AcceptBaselineChange'] = $true }
                 if ($SkipHostedSmoke) {
                     $updPool['SkipVerify'] = $true
                     Warn '  -SkipHostedSmoke: the post-deploy GUI smoke gate will NOT run. This is NOT a pass --'

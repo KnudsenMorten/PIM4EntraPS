@@ -17,7 +17,8 @@
     { "name": "TenantId", "required": false, "default": null, "help": "Which saved deploy profile to use when there is more than one on this machine." },
     { "name": "ProfilePath", "required": false, "default": null, "help": "A saved deploy profile to use directly (written by a successful Invoke-PimDeployAll.ps1 -Apply)." },
     { "name": "SkipPull", "required": false, "default": false, "help": "Re-run the deploy on the code you already have (no fetch, no pull)." },
-    { "name": "Apply", "required": false, "default": false, "help": "Pull and deploy. Without it nothing changes: the target version is reported and the deploy plan printed." }
+    { "name": "Apply", "required": false, "default": false, "help": "Pull and deploy. Without it nothing changes: the target version is reported and the deploy plan printed." },
+    { "name": "AcceptBaselineChange", "required": false, "default": false, "help": "Accept a new version that changes the policy baseline. The update refuses such a version and names this switch; give it for that one run when the change is intended. It is never saved into the profile." }
   ],
   "readsOnly": [
     "the saved deploy profile (%LOCALAPPDATA%\\pim\\deploy-profiles\\<tenant>-*.json, or -ProfilePath)",
