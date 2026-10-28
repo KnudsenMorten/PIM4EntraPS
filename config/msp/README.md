@@ -1,4 +1,4 @@
-# config-msp/
+# config/msp/
 
 Build configs for a **managing tenant** (an MSP's own PIM Manager that publishes a signed baseline) and its
 **managed tenants** (each customer's own PIM Manager that pulls that baseline), for the one-command multi-tenant
@@ -28,11 +28,11 @@ credential (a secret, password, SAS URL, account key, connection string or PEM) 
 ## 1. Build the managing tenant
 
 ```powershell
-Copy-Item .\config-msp\managing-tenant.sample.json .\config-msp\managing-tenant.json
+Copy-Item .\config\msp\managing-tenant.sample.json .\config\msp\managing-tenant.json
 # edit: tenant + subscription ids, resource group, region, names, the bundle storage account, superadmins
 
-.\tools\setup\Invoke-PimMspBuild.ps1 -Role Master -ConfigPath .\config-msp\managing-tenant.json           # the plan only
-.\tools\setup\Invoke-PimMspBuild.ps1 -Role Master -ConfigPath .\config-msp\managing-tenant.json -Apply    # build
+.\tools\setup\Invoke-PimMspBuild.ps1 -Role Master -ConfigPath .\config\msp\managing-tenant.json           # the plan only
+.\tools\setup\Invoke-PimMspBuild.ps1 -Role Master -ConfigPath .\config\msp\managing-tenant.json -Apply    # build
 ```
 
 The build runs, in order and idempotently: the hosting step (network, registry, identities, database, container
@@ -64,11 +64,11 @@ every step to the tracked install at Invardia.
 **Or run the build yourself:**
 
 ```powershell
-Copy-Item .\config-msp\managed-tenant.sample.json .\config-msp\managed-tenant.json
+Copy-Item .\config\msp\managed-tenant.sample.json .\config\msp\managed-tenant.json
 # edit: tenant + subscription ids, resource group, region, names, superadmins, the address plan
 
-.\tools\setup\Invoke-PimMspBuild.ps1 -Role Slave -ConfigPath .\config-msp\managed-tenant.json -EnrollmentKey <key>          # the plan only
-.\tools\setup\Invoke-PimMspBuild.ps1 -Role Slave -ConfigPath .\config-msp\managed-tenant.json -EnrollmentKey <key> -Apply   # build
+.\tools\setup\Invoke-PimMspBuild.ps1 -Role Slave -ConfigPath .\config\msp\managed-tenant.json -EnrollmentKey <key>          # the plan only
+.\tools\setup\Invoke-PimMspBuild.ps1 -Role Slave -ConfigPath .\config\msp\managed-tenant.json -EnrollmentKey <key> -Apply   # build
 ```
 
 With the enrollment key the build first **claims** the tenant at Invardia (step `enroll`): Invardia creates the

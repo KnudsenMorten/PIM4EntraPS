@@ -19,7 +19,7 @@
          certificate when $env:PIM_ENGINE_CERT_THUMBPRINT is set). REST-only, no
          PowerShell Az/Graph modules, never a secret, never device-code.
       2. Composes the ring-gated downlink + the engine apply for the scenario by
-         INVOKING the existing live wrapper setup/Invoke-PimScenarioRun.ps1, which:
+         INVOKING the existing live wrapper tools/setup/Invoke-PimScenarioRun.ps1, which:
             * managed (S5/S6) -> downlink-sync (pull the SIGNED master baseline ->
               verify RSA-SHA256 -> ring-gate slave.Ring <= admin.Ring (§77.20) -> stage the
               per-tenant sync files -> APPLY into the managed tenant via its own SPN) THEN
@@ -240,7 +240,7 @@ else { JobLog 'trusted master signing keys: none pinned -- only bundles signed b
 # the downlink (pull -> verify -> ring-gate -> stage -> apply into the managed tenant) and
 # THEN the engine apply (admins + delegation groups/roles/AUs), in that order. We
 # INVOKE it (never edit it). It honours the mass-disable guard through the engine.
-$runner = Join-Path $solRoot 'setup\Invoke-PimScenarioRun.ps1'
+$runner = Join-Path $solRoot 'tools\setup\Invoke-PimScenarioRun.ps1'
 if (-not (Test-Path -LiteralPath $runner)) {
     JobLog "scenario runner not found: $runner" 'ERROR'
     Stop-DownlinkJob -Code 3 -State failed -Detail "scenario runner not found: $runner"

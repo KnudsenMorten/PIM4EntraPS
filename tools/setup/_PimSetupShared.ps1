@@ -402,7 +402,7 @@ $script:PimGraphAppRoles = @{
     # which also re-confirmed SEC-18's story: a2611786-80b3-417e-adaa-707d4261a5f0 really is
     # CallRecord-PstnCalls.Read.All. Guarded now by tests/Test-PimGraphRoleMap.ps1.
     'RoleManagementPolicy.ReadWrite.AzureADGroup' = 'b38dcc4d-a239-4ed6-aa84-6c65b284f97c'
-    # 🔴 BUG-147 -- TWO LISTS, ONE CONCEPT. setup/Grant-PimGraphAppRoles.ps1 lists
+    # 🔴 BUG-147 -- TWO LISTS, ONE CONCEPT. tools/setup/Grant-PimGraphAppRoles.ps1 lists
     # AccessReview.Read.All as required; this map (the one that grants the RUNTIME identity) omitted
     # it, so the AccessReviews provider 403s and is a permanent no-op in every hosted environment --
     # while the doc that calls it required points at the SPN list, which is not what executes.
@@ -499,7 +499,7 @@ function Get-PimGraphAppRoleMap {
 function Get-PimEngineSpnGraphRoles {
     <#
       BUG-181 -- THE ENGINE SPN'S Graph app-role list, DERIVED from the engine map above, never kept by hand.
-      setup/Grant-PimGraphAppRoles.ps1 and tools/setup/Install-PimEngineAppRegistration.ps1 each carried their
+      tools/setup/Grant-PimGraphAppRoles.ps1 and tools/setup/Install-PimEngineAppRegistration.ps1 each carried their
       own literal list, and both had drifted BEHIND the map: no RoleManagement.ReadWrite.Directory (creates
       role-assignable groups, 70.16), no UserAuthenticationMethod.ReadWrite.All (mints TAPs), no Domain.Read.All
       (the downlink's default domain), no AppRoleAssignment / Application.Read / Defender / DeviceManagementRBAC.

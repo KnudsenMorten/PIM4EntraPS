@@ -8,7 +8,7 @@
 
     REQ-G (2026-09-19) -- VALIDATE FIRST, THEN ADD BY KEY, NEVER DELETE:
       * Before ANYTHING is written (before SQL is even contacted) every file is checked by
-        engine/_shared/PIM-CsvImportCheck.ps1 -- the same check setup/Invoke-PimCsvImportCheck.ps1 runs:
+        engine/_shared/PIM-CsvImportCheck.ps1 -- the same check tools/setup/Invoke-PimCsvImportCheck.ps1 runs:
         encoding, delimiter, header vs the entity schema, keys, duplicate keys, the Manager's own
         validator rules over the rows, and the replication each row would get on a managing tenant.
         Any ERROR refuses the import unless -AllowValidationErrors is passed. -ValidateOnly runs the
@@ -109,7 +109,7 @@ param(
     [string]$DefaultDomain
 )
 $ErrorActionPreference = 'Stop'
-$shared = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared'
+$shared = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared'
 
 function Import-PimMigrateWorkloadExemptions {
     # Import a v1 PIM-WorkloadExemptions.custom.json into pim.Settings['WorkloadExemptions'] via
@@ -319,7 +319,7 @@ if ($global:PIM_MigrateStoreStub -is [hashtable] -and $global:PIM_MigrateStoreSt
 # Default only for the solution layout (<root>\config next to <root>\output): an arbitrary data folder
 # must not pick up whatever 'output' folder happens to sit beside it.
 if (-not "$OutputDir".Trim() -and (Split-Path -Leaf $ConfigDir) -like 'config*') { $OutputDir = Join-Path (Split-Path -Parent $ConfigDir) 'output' }
-if (-not "$MailTemplateDir".Trim()) { $MailTemplateDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'templates\mail' }
+if (-not "$MailTemplateDir".Trim()) { $MailTemplateDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'templates\mail' }
 # REQ-G: SQL is contacted only AFTER the files have been validated (below) -- a folder the check refuses
 # never opens a connection, and -ValidateOnly / -ListOnly never do.
 
@@ -558,7 +558,7 @@ if ($SeedSettings) {
     if ($PSCmdlet.ShouldProcess('pim.Settings', 'seed PolicyTemplates from the shipped templates')) {
         . (Join-Path $shared 'PIM-PolicyBaseline.ps1')
         . (Join-Path $shared 'PIM-PolicyTemplateStore.ps1')
-        $pt = Initialize-PimPolicyTemplateStore -ConnectionString $ConnectionString -TemplateDir (Join-Path (Split-Path -Parent $PSScriptRoot) 'templates\policy')
+        $pt = Initialize-PimPolicyTemplateStore -ConnectionString $ConnectionString -TemplateDir (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'templates\policy')
         Write-Host ("  [migrate] policy templates: {0} in SQL -- {1}" -f $pt.count, $pt.reason) -ForegroundColor Green
     }
     # Workload exemptions live in pim.Settings['WorkloadExemptions'] (2026-09-12). A v1 folder keeps them

@@ -12,7 +12,7 @@
 
     The canonical, cert-authenticated, module-free, NO-device-code equivalent is:
 
-        setup/Grant-PimGraphAppRoles.ps1
+        tools/setup/Grant-PimGraphAppRoles.ps1
 
     which idempotently grants the engine SPN its required Graph app-roles, authenticating
     as an ADMIN SPN by CERTIFICATE over Graph REST.
@@ -55,7 +55,7 @@ if (-not (Test-Path -LiteralPath $rest)) {
     throw "Pure-REST grant script not found at '$rest'. The legacy device-code/SDK script has been retired; restore Grant-PimGraphAppRoles.ps1."
 }
 
-Write-Host "[redirect] setup/Grant-PimEngineAdminConsent.ps1 (SDK + device-code) is deprecated -> Grant-PimGraphAppRoles.ps1 (REST, cert)." -ForegroundColor Yellow
+Write-Host "[redirect] tools/setup/Grant-PimEngineAdminConsent.ps1 (SDK + device-code) is deprecated -> Grant-PimGraphAppRoles.ps1 (REST, cert)." -ForegroundColor Yellow
 
 $fwd = @{
     TenantId            = $TenantId

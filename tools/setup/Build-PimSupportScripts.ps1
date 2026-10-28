@@ -64,8 +64,8 @@
         permissions it needs and the changes it makes (from the manifest), so Get-Help -Full / -Online show them.
       * Authenticode: with -SigningCertThumbprint (or $env:PIM_CODESIGN_THUMBPRINT) each built .ps1 is signed with that
         code-signing certificate from Cert:\CurrentUser\My or Cert:\LocalMachine\My (never a file, never in the repo)
-        BEFORE it is hashed. Without one the build says NOT SIGNED -- in its output, in each manifest ("signed": false)
-        and in README.txt. A configured thumbprint that cannot be used fails the build (never a silent unsigned file).
+        BEFORE it is hashed. Without one the build says NOT SIGNED in its output only; the published manifests and
+        README.txt then carry no signing text at all (owner 2026-10-28, "say nothing"). A configured thumbprint that cannot be used fails the build (never a silent unsigned file).
       * README.txt: one line per script -- name, documentation page, SHA256 -- and the two-line download + run form (verification described apart).
 
 .EXAMPLE
@@ -395,8 +395,9 @@ foreach ($d in $docs) {
     if ($d.Standalone) {
         $o['download'] = Get-PimSupportScriptUrl -Script $d.Name
         $o['sha256'] = $d.Sha
-        $o['signed'] = [bool]$d.Signer
-        $o['signer'] = $d.Signer
+        # The manifests are PUBLISHED next to the scripts (owner 2026-10-28, "say nothing"): an unsigned build carries no
+        # signing field at all; only a signed build names its signer.
+        if ($d.Signer) { $o['signed'] = $true; $o['signer'] = $d.Signer }
     }
     $mf = Join-Path $OutDir "$($d.Name).doc.json"
     [IO.File]::WriteAllText($mf, ($o | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
@@ -405,8 +406,8 @@ foreach ($d in $docs) {
 [IO.File]::WriteAllLines((Join-Path $OutDir 'SHA256SUMS.txt'), $sums)
 $first = if ($built.Count) { $built[0] } else { 'Initialize-PimSqlAdminGroup.ps1' }
 # This README is PUBLISHED (invardia.com/support/pim/README.txt). Owner 2026-10-28: public text says what the product does and
-# never what it does not check -- so an unsigned build says nothing about signing here (the build output and each manifest's
-# "signed": false still say it, for the hand-over), and a signed build names its signer.
+# never what it does not check -- so an unsigned build says nothing about signing here or in the manifests (only the build
+# output says it, for the hand-over), and a signed build names its signer.
 $signLine = if ($signCert) { "`r`nSIGNED: every .ps1 carries an Authenticode signature by $($signCert.Subject) (thumbprint $($signCert.Thumbprint))." } else { '' }
 $signCheck = if ($signCert) { ", and on Windows Get-AuthenticodeSignature .\<file> reports Valid" } else { '' }
 @"

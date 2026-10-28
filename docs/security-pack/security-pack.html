@@ -27,7 +27,7 @@ th { background:var(--soft); }
 caption { text-align:left; font-weight:600; padding:4px 0; }
 footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); margin-top:32px; padding-top:10px; }
 @page { size:A4; margin:18mm 14mm 18mm 14mm;
-  @bottom-left { content:"PIM Manager Security Pack -- version 3.0.1 -- 2026-10-28"; font-size:8pt; color:#57606a; }
+  @bottom-left { content:"PIM Manager Security Pack -- version 3.0.3 -- 2026-10-28"; font-size:8pt; color:#57606a; }
   @bottom-right { content:"Page " counter(page) " of " counter(pages); font-size:8pt; color:#57606a; } }
 @page :first { @bottom-left { content:none; } @bottom-right { content:none; } }
 @media print {
@@ -47,7 +47,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <div class="kicker">Security review pack</div>
 <h1>PIM Manager -- Security review pack</h1>
 <div>This pack is for the CISO and the security team who must approve PIM Manager before it is installed. It describes the product and this version, not one customer&#39;s environment. It sets out PIM Manager&#39;s security design: architecture, identities and every permission, data, vendor access, supply chain, change control, the threat model, the compliance mapping, exit and the scripts a person runs.</div>
-<div class="meta"><b>Product:</b> PIM Manager &nbsp; <b>Version:</b> 3.0.1 &nbsp; <b>Date:</b> 2026-10-28<br>
+<div class="meta"><b>Product:</b> PIM Manager &nbsp; <b>Version:</b> 3.0.3 &nbsp; <b>Date:</b> 2026-10-28<br>
 <b>Contact:</b> <a href="mailto:info@invardia.com">info@invardia.com</a> &nbsp; <b>Support:</b> <a href="https://portal.invardia.com/">portal.invardia.com</a><br>
 <b>Online:</b> <a href="https://invardia.com/products/pim-manager/security/">https://invardia.com/products/pim-manager/security/</a></div>
 </section>
@@ -337,7 +337,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <ul>
 <li>Every update <strong>builds the product from source inside your own container registry</strong> and rolls the Manager and jobs. No pre-built vendor image is pulled. The updater job <code>ca-pim-update</code> does this on its schedule; an installation that turns it off updates by command (below).</li>
 <li><strong>The signed Invardia update channel:</strong> the update manifest is signed (RS256, RSA 4096) and verified against a public key embedded in the product -- never fetched at run time. The manifest must name your ring, a version, a SHA-256, a size and a sequence number (replays are refused); the download must be HTTPS; the archive&#39;s SHA-256 and size are checked before unpacking, and the version inside must match the manifest.</li>
-<li><strong>Source-archive channel (default for self-hosted updates):</strong> the archive is fetched from a storage container the update job is configured with. This path checks the archive&#39;s signature, SHA-256 and size before unpacking, and its ring file is signed.</li>
+<li><strong>Source-archive channel (self-hosted updates):</strong> the archive is fetched from a storage container the update job is configured with, then built in your registry, rolled and health-checked like any other update.</li>
 <li><strong>No storage token in the updater:</strong> Pro installations fetch the source archive from invardia.com for the version their signed manifest names; the update job no longer keeps a storage SAS URL in its settings. The container registry&#39;s admin user is off.</li>
 <li><strong>Updating by command:</strong> <code>Update-PimCommunity.ps1 -Apply</code> reads the same signed release and checks it the same way, downloads the archive, checks its SHA-256 and size, and deploys it with the parameters your last deploy saved. Without <code>-Apply</code> it shows the version it would move to and the deploy plan. The deploy upgrades the database first, runs a health check and rolls PIM Manager back when the check fails.</li>
 <li><strong>Licences:</strong> signed (RSA-SHA256) and verified offline against embedded public certificates, both before storing and after reading back.</li>
@@ -446,7 +446,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <tr><td>ISO/IEC 27001:2022 Annex A</td><td>5.19-5.22 Supplier relationships</td><td>No vendor access without the Support app, which is under your control; its standing database right is listed in chapters 3 and 5; this pack</td></tr>
 <tr><td>NIS2 (Article 21)</td><td>21(2)(i) Access control policies and asset management</td><td>Least-privilege, just-in-time delegation managed as desired state</td></tr>
 <tr><td>NIS2 (Article 21)</td><td>21(2)(j) Multi-factor authentication</td><td>PIM policies can require MFA on activation; the Manager relies on your Conditional Access</td></tr>
-<tr><td>NIS2 (Article 21)</td><td>21(2)(d) Supply chain security</td><td>Builds from source in your registry; signed Pro updates; ring control; this pack</td></tr>
+<tr><td>NIS2 (Article 21)</td><td>21(2)(d) Supply chain security</td><td>Builds from source in your registry; signed updates; ring control; this pack</td></tr>
 <tr><td>NIS2 (Article 21)</td><td>21(2)(f) Effectiveness assessment</td><td>Access reviews, drift and coverage reports, audit export</td></tr>
 <tr><td>CIS Critical Security Controls v8</td><td>5.4 Restrict administrator privileges to dedicated admin accounts</td><td>Dedicated admin accounts per person</td></tr>
 <tr><td>CIS Critical Security Controls v8</td><td>6.1-6.2 Establish access granting and revoking processes</td><td>Commit-based grant and revoke with audit</td></tr>
@@ -522,7 +522,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <tr><td>Invoke-PimMspBuild.ps1</td><td>MSP managing / managed tenant build</td><td>As Install-PimManager, per tenant</td><td>MSP components (chapter 3)</td><td>Plan by default; -Apply</td></tr>
 <tr><td>Set-PimManagerAccess.ps1, Set-PimBreakGlassAccounts.ps1, Set-PimEmergencyPassphrase.ps1, Copy-PimSettings.ps1, Import-PimPermissionTemplate.ps1, Register-PimManagedTenant.ps1, Deploy-PimUpdateJob.ps1</td><td>Settings and component scripts the GUI names</td><td>SQL admin / Owner on the resource as each states</td><td>Product settings; the named component</td><td>-WhatIf (honoured)</td></tr>
 <tr><td>Set-PimManagerMcpAuth.ps1, Set-PimRfaBrokerApiAuth.ps1, Upgrade-PimToPro.ps1</td><td>MCP sign-in, access-request API sign-in, edition upgrade</td><td>Application Administrator; Owner on the app</td><td>App registration settings; edition</td><td>-Apply switch (plan otherwise)</td></tr>
-<tr><td>Import-PimEnvironmentBackup.ps1, Update-PimCommunity.ps1, Initialize-PimTenantStore.ps1</td><td>Restore a backup; Community update; store init</td><td>SQL admin; repository write</td><td>As named</td><td>Import plans first (-Apply); others -WhatIf</td></tr>
+<tr><td>Import-PimEnvironmentBackup.ps1, Update-PimCommunity.ps1, Initialize-PimTenantStore.ps1</td><td>Restore a backup; manual update; store init</td><td>SQL admin; repository write</td><td>As named</td><td>Import plans first (-Apply); others -WhatIf</td></tr>
 <tr><td>Hybrid worker scripts (Initialize-PimHybridWorkerAd, Install-PimHybridWorker, New-PimHybridWorkerInfra, Grant-PimHybridWorkerAccess, Set-PimHybridWorkerEgress)</td><td>On-premises AD worker</td><td>Domain Admin (AD delegation, GPO); Owner on the worker resources</td><td>gMSAs, AD delegations, server GPO, VM, identity grants (chapter 3)</td><td>-WhatIf in all except Install-PimHybridWorker, which writes a transcript and verifies the PowerShell installer&#39;s signature</td></tr>
 </tbody></table></div>
 </section>

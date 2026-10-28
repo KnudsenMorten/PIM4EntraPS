@@ -22840,7 +22840,7 @@ function Handle-Request {
 
         # (The one-time CSV -> SQL "cutover ceremony" endpoints -- /api/cutover, /api/cutover/abort --
         # were REMOVED with the file store, operator decision 2026-09-12. A v1 -> v2 import is
-        # setup/Migrate-PimToSql.ps1, run once by an operator; the Manager never reads files.)
+        # tools/setup/Migrate-PimToSql.ps1, run once by an operator; the Manager never reads files.)
         # BUG-106: POST /api/preflight validates the PENDING state -- the body carries
         # { pending: { '<entity>': [rows...] } } and the report describes what the store WOULD
         # look like after commit. The GET form (saved state only) is unchanged for callers that

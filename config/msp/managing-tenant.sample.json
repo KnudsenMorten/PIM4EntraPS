@@ -1,5 +1,5 @@
 {
-    "_comment": "Sample build config for a MANAGING tenant (the MSP's own PIM Manager that publishes the signed baseline). Copy it to managing-tenant.json, replace every value, then run tools/setup/Invoke-PimMspBuild.ps1 -Role Master -ConfigPath <file> (plan), and again with -Apply. Ids and names only -- never a secret. No 'deployIdentity' = the build runs as the administrator signed in in the browser. See config-msp/README.md.",
+    "_comment": "Sample build config for a MANAGING tenant (the MSP's own PIM Manager that publishes the signed baseline). Copy it to managing-tenant.json, replace every value, then run tools/setup/Invoke-PimMspBuild.ps1 -Role Master -ConfigPath <file> (plan), and again with -Apply. Ids and names only -- never a secret. No 'deployIdentity' = the build runs as the administrator signed in in the browser. See config/msp/README.md.",
     "role": "Master",
     "tenantId": "00000000-0000-0000-0000-000000000001",
     "subscriptionId": "00000000-0000-0000-0000-000000000002",

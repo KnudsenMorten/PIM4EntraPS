@@ -14,7 +14,7 @@
       .\tools\setup\Push-PimBacklog.ps1                     # dry run: counts + the body file, nothing sent
       .\tools\setup\Push-PimBacklog.ps1 -Apply              # send
 
-    VENDOR ONLY: nothing here runs at a customer. No modules: az (the Key Vault read) and Invoke-WebRequest. Never prints the token.
+    VENDOR ONLY: nothing here runs at a customer. No modules and no az: REST (Invoke-WebRequest) only. Never prints the token.
 #>
 [CmdletBinding()]
 param(
@@ -24,12 +24,12 @@ param(
     [string]$OutFile,
     [int]$MaxGroups = 0,
     [string]$BaseUrl = 'https://invardia.com',
-    # No real ids in shipped source (SEC-02): the vendor's tenant and Key Vault subscription are passed in -- the machine-local
-    # wrapper C:\ProgramData\pim\ops\push-backlog.ps1 does that. Needed only with -Apply; a dry run reads the local file alone.
+    # No real ids in shipped source (SEC-02) and no az (NO-AZ, 3.0.3): the vendor's tenant and PIM's publisher identity
+    # (client id + certificate thumbprint) are passed in -- the machine-local wrapper C:\ProgramData\pim\ops\push-backlog.ps1
+    # reads them from the vendor's Key Vault. Needed only with -Apply; a dry run reads the local file alone.
     [string]$TenantId = '',
-    [string]$KeyVault = 'kv-automatit-dev',
-    [string]$KeyVaultSubscription = '',
-    [string]$AzureConfigDir = 'C:\ProgramData\pim\az-mfn-mgmt',
+    [string]$ClientId = '',
+    [string]$CertThumbprint = '',
     [string]$ApiResource = 'api://a5a57537-c847-482b-8878-9a229cbca61b'
 )
 $ErrorActionPreference = 'Stop'
@@ -53,16 +53,9 @@ if (-not $Apply) {
     return [pscustomobject]@{ Ok = $true; Sent = $false; Text = "dry run: $summary"; Items = $b.Items; Counts = $b.Counts; TagCounts = $b.TagCounts; Groups = $b.Groups }
 }
 
-if (-not "$TenantId".Trim() -or -not "$KeyVaultSubscription".Trim()) { throw '-Apply needs -TenantId and -KeyVaultSubscription (the vendor wrapper C:\ProgramData\pim\ops\push-backlog.ps1 passes them)' }
-# PIM's publisher identity -- exactly as community-register.ps1 reads it (az with an explicit subscription, isolated profile)
-$prevCfg = $env:AZURE_CONFIG_DIR
-try {
-    $env:AZURE_CONFIG_DIR = $AzureConfigDir
-    $kv = @('keyvault', 'secret', 'show', '--vault-name', $KeyVault, '--subscription', $KeyVaultSubscription, '--query', 'value', '-o', 'tsv')
-    $cid = "$(& az @kv --name 'invardia-publisher-clientid-pim-manager' 2>$null | Select-Object -Last 1)".Trim()
-    $thumb = "$(& az @kv --name 'invardia-publisher-thumbprint-pim-manager' 2>$null | Select-Object -Last 1)".Trim()
-} finally { $env:AZURE_CONFIG_DIR = $prevCfg }
-if ($cid -notmatch '^[0-9a-fA-F-]{36}$' -or $thumb -notmatch '^[0-9a-fA-F]{40}$') { throw 'publisher client id / thumbprint not readable from kv-automatit-dev' }
+if (-not "$TenantId".Trim()) { throw '-Apply needs -TenantId, -ClientId and -CertThumbprint (the vendor wrapper C:\ProgramData\pim\ops\push-backlog.ps1 passes them)' }
+$cid = "$ClientId".Trim(); $thumb = "$CertThumbprint".Trim()
+if ($cid -notmatch '^[0-9a-fA-F-]{36}$' -or $thumb -notmatch '^[0-9a-fA-F]{40}$') { throw '-Apply needs the publisher -ClientId (a GUID) and -CertThumbprint (40 hex characters)' }
 . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1')
 $token = Get-PimRestToken -Resource $ApiResource -TenantId $TenantId -ClientId $cid -CertThumbprint $thumb -Force
 $r = Send-PimBacklogSnapshot -Snapshot $b.Snapshot -Token $token -BaseUrl $BaseUrl -ConfirmRemovals:$ConfirmRemovals

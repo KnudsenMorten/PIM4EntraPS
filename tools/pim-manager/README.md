@@ -26,7 +26,7 @@ The desired state lives in `pim.Rows`, one row per record, grouped by entity:
 
 Settings (naming conventions, filters, departments, approvers, alerting, feature flags, Manager
 access, portal admins, ...) live in `pim.Settings`. A one-time import from a v1 (file-based)
-installation is `setup/Migrate-PimToSql.ps1`, run by an operator -- the Manager itself never reads
+installation is `tools/setup/Migrate-PimToSql.ps1`, run by an operator -- the Manager itself never reads
 files.
 
 ## Quick start

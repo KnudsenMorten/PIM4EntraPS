@@ -42,7 +42,7 @@ if (-not (Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue
 # DESIGN TENETS (non-negotiable, mirror the rest of PIM4EntraPS):
 #   * PURE core here: NO az / Graph / SQL / HTTP / file I/O / global mutation in
 #     the decision functions -- they take FACTS, return PLANS/decisions. The thin
-#     live wrappers (setup/Invoke-PimDownlinkSync.ps1 + setup/Invoke-PimScenarioRun.ps1)
+#     live wrappers (tools/setup/Invoke-PimDownlinkSync.ps1 + tools/setup/Invoke-PimScenarioRun.ps1)
 #     gather the facts (pull the signed bundle, read the registry, write files, run
 #     the fan-out/engine) and ACT on these plans. That keeps every risky decision --
 #     "does this signature verify?", "which admins does this ring reach?", "where do
@@ -1868,7 +1868,7 @@ function Resolve-PimCustomerBlockedCapabilities {
         # Built with Combine rather than the old 'bootstrap\Sync-AutomateIT.json' literal.
         # 📌 To be accurate about why: PowerShell's FileSystem provider DOES normalise a backslash
         # to '/' on Linux -- measured in this same run, where a path built as 'setup\Invoke-...ps1'
-        # resolved and reported back as /app/PIM4EntraPS/setup/Invoke-PimScenarioRun.ps1. So the
+        # resolved and reported back as /app/PIM4EntraPS/tools/setup/Invoke-PimScenarioRun.ps1. So the
         # separator was NOT the failure here, and an earlier note claiming it would silently miss a
         # customer manifest was wrong. Combine is used because it states the intent platform-
         # independently, not because the old form was broken.
@@ -3231,7 +3231,7 @@ function Invoke-PimManagedDownlink {
     # with a test, not an inline string comparison against a variable from another scope.
     $isPushTopology = Test-PimDownlinkPushTopology -Scenario $Scenario
     if ($isPushTopology) {
-        $fanoutScript = Join-Path (Split-Path -Parent $PSScriptRoot) '..\setup\Invoke-PimMspFanout.ps1'
+        $fanoutScript = Join-Path (Split-Path -Parent $PSScriptRoot) '..\tools\setup\Invoke-PimMspFanout.ps1'
         $fanoutScript = (Resolve-Path -LiteralPath $fanoutScript -ErrorAction SilentlyContinue)
         if ($fanoutScript) {
             # 🔴 NO `.\SQLEXPRESS` FALLBACK (operator 2026-08-28: SQL Express is not used, anywhere).
@@ -3671,7 +3671,7 @@ function Get-PimDownlinkDefinitionEntities {
     # PURE. §100.6 MSP-COLLIDE gap A -- THE ONE LIST of entities a group definition can live in on a managed tenant: the
     # eight the engine reads (Get-PimGroupDefinitionRows) plus the legacy 'PIM-Definitions' an early sync wrote. Used by
     # BOTH the definition apply below (write + prune) and the pull's "customer already has this tag" read
-    # (setup/Invoke-PimDownlinkSync.ps1). Two copies drifted: the read covered 4 + legacy, so a customer's own
+    # (tools/setup/Invoke-PimDownlinkSync.ps1). Two copies drifted: the read covered 4 + legacy, so a customer's own
     # Processes / Projects / CrossOrg / Departments group looked absent and the apply overwrote it, stamped Owner=MSP.
     return @('PIM-Definitions-Roles', 'PIM-Definitions-Services', 'PIM-Definitions-Organization', 'PIM-Definitions-Tasks',
              'PIM-Definitions-Departments', 'PIM-Definitions-Processes', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg',

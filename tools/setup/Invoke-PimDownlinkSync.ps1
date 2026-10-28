@@ -169,7 +169,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$shared = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared'
+$shared = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared'
 # 🔴 PIM-Rest FIRST, and PIM-SqlStore right after it. This script reads and writes the
 # SLAVE's Azure SQL store, and that needs an access token -- but nothing in the chain below
 # dot-sources the token provider, so in THIS script's scope $script:PimRestResources and
@@ -274,7 +274,7 @@ if ($PSBoundParameters.ContainsKey('BlockedCapabilities')) {
     # put the refuse-on-unparseable rule in two places -- where they drift, silently, and the
     # security-relevant half is the one nobody re-reads.
     $blockedCaps = Resolve-PimCustomerBlockedCapabilities -ManifestPath $LocalManifestPath `
-        -SolutionRoot (Split-Path -Parent $PSScriptRoot) -Solution 'PIM4EntraPS'
+        -SolutionRoot (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) -Solution 'PIM4EntraPS'
 }
 
 # 2-5) verify + ring-filter + stage + apply via the orchestrator (prod cert path:

@@ -5,7 +5,7 @@
   Operator: "did you build the new import script that validate the csv files before importing them
   for issues ?" -- and, for EFIF: "import the efif definitions when validated".
 
-  setup/Migrate-PimToSql.ps1 imported v1 CSVs straight into pim.Rows. The Manager's validator
+  tools/setup/Migrate-PimToSql.ps1 imported v1 CSVs straight into pim.Rows. The Manager's validator
   (tools/pim-manager/_validator.ps1) only ever ran over data ALREADY in SQL, so a broken file was
   found after it had been written. This file checks a folder of v1 CSVs BEFORE anything is imported.
 

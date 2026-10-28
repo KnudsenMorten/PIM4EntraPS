@@ -17,7 +17,7 @@
 #   * Graceful   -- AccessReview.Read.All may not be granted yet; a 403/any error
 #                   on the LIVE call is swallowed and an empty list returned (with a
 #                   warning), never a crash. (The grant is in
-#                   setup/Grant-PimGraphAppRoles.ps1.)
+#                   tools/setup/Grant-PimGraphAppRoles.ps1.)
 #   * PS 5.1-safe-- no ?./??/ternary; @() wraps WHOLE pipelines; null-tolerant prop
 #                   reads; the NORMALIZER is PURE (offline-unit-testable, no network,
 #                   no clock dependency beyond what the caller injects).
@@ -241,7 +241,7 @@ function Get-PimAccessReviewOverview {
       .NOTES
         REST-only via Invoke-PimGraph (cert app-only). Needs AccessReview.Read.All
         on the engine SPN; without it the LIVE call 403s -> warning + empty list
-        (never a crash). The grant is in setup/Grant-PimGraphAppRoles.ps1.
+        (never a crash). The grant is in tools/setup/Grant-PimGraphAppRoles.ps1.
     #>
     [CmdletBinding()]
     param(
@@ -386,7 +386,7 @@ function Get-PimAccessReviewSeedRows {
 #   * WRITE SCOPE -- recording decisions needs **AccessReview.ReadWrite.All** on
 #                    the engine SPN (the read overview only needs
 #                    AccessReview.Read.All). This file does NOT grant it; the grant
-#                    is in setup/Grant-PimGraphAppRoles.ps1. Get-PimMissingRoleHint
+#                    is in tools/setup/Grant-PimGraphAppRoles.ps1. Get-PimMissingRoleHint
 #                    already maps a 403 on .../accessReviews → AccessReview.*.All.
 #   * REST-first  -- all Graph writes go through Invoke-PimGraph (cert app-only).
 #   * PS 5.1-safe -- no ?./??/ternary; @() wraps WHOLE pipelines; null-tolerant;

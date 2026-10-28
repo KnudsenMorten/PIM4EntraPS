@@ -1,5 +1,5 @@
 {
-  "_doc": "PIM MSP MASTER -- the TEMPLATE ring map (RING-1 plane 2). Copy to template-ring-map.custom.json (gitignored: it carries real managed-tenant ids) and edit. This is the master's answer to 'which signed baseline TEMPLATE VERSION may each managed tenant pull?'. Read by setup/Invoke-PimDownlinkSync.ps1, resolved by Get-PimTemplateRingPlan (engine/_shared/PIM-RingGate.ps1), and enforced by Get-PimDownlinkPlan's version gate.",
+  "_doc": "PIM MSP MASTER -- the TEMPLATE ring map (RING-1 plane 2). Copy to template-ring-map.custom.json (gitignored: it carries real managed-tenant ids) and edit. This is the master's answer to 'which signed baseline TEMPLATE VERSION may each managed tenant pull?'. Read by tools/setup/Invoke-PimDownlinkSync.ps1, resolved by Get-PimTemplateRingPlan (engine/_shared/PIM-RingGate.ps1), and enforced by Get-PimDownlinkPlan's version gate.",
 
   "schema": 1,
 

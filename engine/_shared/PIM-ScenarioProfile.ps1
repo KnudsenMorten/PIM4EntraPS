@@ -294,8 +294,8 @@ function Resolve-PimScenarioContext {
     return [pscustomobject]@{
         id                  = "$($s.id)"
         role                = "$($s.role)"
-        # ConfigVariant: 'msp' uses config-msp/ (central-authoritative admins);
-        # 'local' uses config-local/ (local-tenant-owned). $global:PIM_ConfigVariant.
+        # ConfigVariant: 'msp' = central-authoritative admins (the managing tenant's baseline);
+        # 'local' = local-tenant-owned. A label only (v2 is SQL-only; no config folder is read). $global:PIM_ConfigVariant.
         configVariant       = "$(Get-PimScenarioValue -Object $b -Key 'configVariant')"
         # Update source profile fed to Invoke-PimUpdate / Get-PimUpdateSourceProfile.
         # 'from-master' is the ring-gated MSP downlink (managed pulls from managing tenant).
@@ -538,7 +538,7 @@ function Set-PimScenarioContext {
         [switch]$Quiet
     )
     $ctx = Resolve-PimScenarioContext -Scenario $Scenario
-    # ConfigVariant drives config-msp/ vs config-local/ (existing engine knob).
+    # ConfigVariant: 'msp' vs 'local' (existing engine knob; a label, no folder).
     $global:PIM_ConfigVariant = $ctx.configVariant
     # The active scenario id (so subsequent Get-PimActiveScenario is stable in-process).
     $global:PIM_ActiveScenario = "$($ctx.id)"

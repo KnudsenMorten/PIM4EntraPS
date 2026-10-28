@@ -69,7 +69,7 @@ if (-not "$ServerInstance".Trim()) {
 # Pure-REST auth + directory reads + account write (no Microsoft.Graph module).
 # PIM-Rest gives us Get-PimRestToken / Invoke-PimGraph against a per-tenant SPN +
 # certificate; PIM-AccountRest gives us the REST account create/update writer.
-$shared = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared'
+$shared = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared'
 . (Join-Path $shared 'PIM-Rest.ps1')
 . (Join-Path $shared 'PIM-AccountRest.ps1')
 
@@ -92,7 +92,7 @@ Write-Host "====================================================================
 Write-Host "  registry: $ServerInstance / $Database"
 
 # MSP fan-out is a Pro feature (offline .pimlicense in config\; Core is free).
-. (Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared\PIM-License.ps1')
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-License.ps1')
 Write-Host "  license : $(Get-PimLicenseStatusText)"
 if (-not (Test-PimProFeature 'MspFanout')) { return }
 

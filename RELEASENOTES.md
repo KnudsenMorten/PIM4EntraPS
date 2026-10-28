@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.4 -- 2026-10-28
+
+- A group PIM Manager creates is recorded as its own straight away, so a scheduled run that starts while the creating run is still going no longer reports it as waiting for adoption (seen as failed jobs right after a new role is saved); the published support-script descriptions no longer carry a signing field; a check guards that every job start sends no container overrides (the Azure Container Apps change that needs extra rights for those)
+
+## 3.0.3 -- 2026-10-28
+
+- The public code has a short, clear folder layout: the setup scripts are all in tools\setup and the MSP samples in config\msp; the design notes no longer name internal switches; the security pack says exactly what the self-hosted update path checks; a Community install's deployment plan shows the update ring it really gets
+
 ## 3.0.2 -- 2026-10-28
 
 - Community: PIM Manager updates itself at night from the signed public release, or by hand with Update-PimCommunity, which checks the same signed release before anything changes; a single-tenant install no longer switches on MSP features; removed admins, groups and administrative units no longer show in reports, search or the Home counts; an update never jumps to a new major version on its own.
@@ -699,7 +707,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
   *included in Pro Business (limits apply)*, *included in Pro MSP*, *needs the MSP licence*, or the licence's own
   reason.
 - **A Pro environment is always recognised as Pro by the update and deployment scripts.** When one setup script ran
-  another, the inner script could check the stored licence without its trusted signing certificates, read a valid Pro
+  another, the inner script could check the stored licence without the certificates that verify it, read a valid Pro
   licence as invalid, and treat the environment as the free edition (or show its Pro features as locked). The licence
   check now always carries its certificates, whichever script runs it.
 - **The update ring travels with every status report.** The hourly status telemetry now always names the environment's

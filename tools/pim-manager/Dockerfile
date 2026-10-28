@@ -73,7 +73,7 @@ RUN rm -rf tests internal legacy launcher diagnostics output \
  && test -f tools/pim-manager/Open-PimManager.ps1 \
  && test -f tools/pim-engine/update-job-entry.ps1 \
  && test -f engine/_shared/PIM-Rest.ps1 \
- && test -f setup/Invoke-PimScenarioRun.ps1 \
+ && test -f tools/setup/Invoke-PimScenarioRun.ps1 \
  && test -f tools/setup/Set-PimAlertRecipients.ps1 \
  && test -f docs/img/brand/pim-manager-512w.png \
  && echo "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954  tools/pim-manager/third-party/fonts/DejaVuSans.ttf" | sha256sum -c - \
