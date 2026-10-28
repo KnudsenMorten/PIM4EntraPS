@@ -33,7 +33,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-. (Join-Path $solRoot 'engine\msp\PIM-MspBuild.ps1')
+if (Test-Path -LiteralPath ($__msp = Join-Path $solRoot 'engine\msp\PIM-MspBuild.ps1')) { . $__msp } else { throw 'This script is part of PIM Manager Pro (multi-tenant / MSP): engine\msp\PIM-MspBuild.ps1 is not in this installation.' }
 if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
 if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
