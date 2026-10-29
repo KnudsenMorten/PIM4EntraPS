@@ -147,8 +147,10 @@ function Test-PimInstallConfig {
     $rg = "$(& $get 'resourceGroup')".Trim(); if (-not $rg) { $rg = 'rg-pim' }
     if ($rg -notmatch '^[A-Za-z0-9._()-]{1,89}[A-Za-z0-9_()-]$') { $err.Add("resourceGroup '$rg' is not a valid resource group name") }
     $c.resourceGroup = $rg
+    # INSTALL-SAMPLES (owner 2026-10-29): 'community' = the free edition, installed without a licence or an enrollment key
+    # (Install-PimManager -Edition Community, or chosen by it when neither is given). Empty stays 'trial' (the wizard's files).
     $ed = "$(& $get 'edition')".Trim().ToLowerInvariant(); if (-not $ed) { $ed = 'trial' }
-    if ($ed -notin 'trial', 'pro') { $err.Add("edition must be trial or pro (got '$ed')") }
+    if ($ed -notin 'community', 'trial', 'pro') { $err.Add("edition must be community, trial or pro (got '$ed')") }
     $c.edition = $ed
     $ex = "$(& $get 'exposure')".Trim().ToLowerInvariant(); if (-not $ex) { $ex = 'external' }
     if ($ex -ne 'external') { $err.Add("exposure '$ex' is not supported by the guided install -- it installs the external (public, signed-in) shape; an internal install is a consultant-led setup") }
@@ -171,6 +173,8 @@ function Test-PimInstallConfig {
     # framework 8.6 (owner 2026-10-08): a MANAGED tenant installs itself with the enrollment key its managing company got from
     # Invardia (checked below: 'managed' needs 'enrollmentKey'). It then runs the managed-tenant build (Invoke-PimMspBuild).
     $c.mspRole = $role
+    # owner 2026-10-28: "community does not have msp support, only pro" -- a managed tenant is a Pro install.
+    if ($role -eq 'managed' -and $ed -eq 'community') { $err.Add("a managed tenant (mspRole managed) is PIM Manager Pro, not Community -- install it with the enrollment key its managing company got from Invardia") }
     if ($role -eq 'managed') {
         $ap = @(@(& $get 'adminPrefixes') | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
         # OPTIONAL since the owner 2026-10-10 ("remove the admin pattern question"): the prefixes are REPORT-ONLY since 2.4.412
@@ -259,6 +263,59 @@ function Test-PimInstallConfig {
     return @{ ok = ($err.Count -eq 0); errors = @($err); config = [pscustomobject]$c; enrollmentKey = $ek; enrollmentKeyIgnored = $ekIgnored }
 }
 
+function Get-PimInstallDerivedId {
+    <#
+      PURE. INSTALL-SAMPLES (owner 2026-10-29): the installation id of an install started with PARAMETERS only (no wizard
+      answers file): 'pim-' + 12 hex characters of the SHA-256 of tenant | subscription | resource group (lower case). The
+      same three answers give the same id -- so the same resource names and the same state folder, which is what -Resume
+      needs -- and another resource group in the same subscription gives another id (other globally unique names).
+    #>
+    param([Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$SubscriptionId, [string]$ResourceGroup = 'rg-pim')
+    $rg = if ("$ResourceGroup".Trim()) { "$ResourceGroup".Trim() } else { 'rg-pim' }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(("{0}|{1}|{2}" -f "$TenantId".Trim(), "$SubscriptionId".Trim(), $rg).ToLowerInvariant())) } finally { $sha.Dispose() }
+    return ('pim-' + (-join ($h[0..5] | ForEach-Object { $_.ToString('x2') })))
+}
+
+function ConvertTo-PimInstallAnswers {
+    <#
+      PURE. INSTALL-SAMPLES (owner 2026-10-29: "install commands take PARAMETERS, a config file is optional only"). Builds the
+      answers object Test-PimInstallConfig validates -- the SAME object config.json gives -- from:
+        -FileAnswers  the object read from -ConfigPath ($null when no file was given, or the file could not be read)
+        -FileGiven    a -ConfigPath was given (an unreadable file then stays $null: "config.json could not be read as JSON")
+        -Parameters   the command-line answers, keyed as in install-parameters.json (tenantId, subscriptionId, location,
+                      resourceGroup, superAdmins, alertRecipients, mailSender, vnetAddressPrefix, subnetAddressPrefix,
+                      exposure, edition, installId, supportAppId, supportAccess). Empty values are "not given".
+      A parameter WINS over the same answer in the file. No file: tenantId and subscriptionId are required (missing[] names
+      the ones not given), and the installation id is derived (Get-PimInstallDerivedId) unless one is given.
+      Returns @{ answers; missing[]; overridden[]; editionGiven; fromFile }.
+    #>
+    param([AllowNull()][object]$FileAnswers, [switch]$FileGiven, [hashtable]$Parameters = @{})
+    $given = [ordered]@{}
+    foreach ($k in @($Parameters.Keys | Sort-Object)) {
+        $v = $Parameters[$k]
+        if ($null -eq $v) { continue }
+        if ($v -is [array] -or $v -is [System.Collections.IList]) { $list = @(@($v) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }); if ($list.Count) { $given[$k] = @($list) }; continue }
+        if ("$v".Trim()) { $given[$k] = "$v".Trim() }
+    }
+    if ($given.Contains('edition')) { $given['edition'] = "$($given['edition'])".ToLowerInvariant() }
+    if ($FileGiven -and $null -eq $FileAnswers) { return @{ answers = $null; missing = @(); overridden = @(); editionGiven = $given.Contains('edition'); fromFile = $true } }
+    $o = [ordered]@{}
+    if ($null -ne $FileAnswers) { foreach ($p in $FileAnswers.PSObject.Properties) { $o[$p.Name] = $p.Value } }
+    $over = New-Object System.Collections.Generic.List[string]
+    foreach ($k in $given.Keys) {
+        if ($o.Contains($k) -and "$(@($o[$k]) -join ',')".Trim() -and "$(@($o[$k]) -join ',')" -ne "$(@($given[$k]) -join ',')") { $over.Add($k) }
+        $o[$k] = $given[$k]
+    }
+    $missing = @()
+    if (-not $FileGiven) { $missing = @(@('tenantId', 'subscriptionId') | Where-Object { -not "$($o[$_])".Trim() }) }
+    if (-not "$($o['installId'])".Trim() -and "$($o['tenantId'])".Trim() -and "$($o['subscriptionId'])".Trim() -and -not $FileGiven) {
+        $o['installId'] = Get-PimInstallDerivedId -TenantId "$($o['tenantId'])" -SubscriptionId "$($o['subscriptionId'])" -ResourceGroup "$($o['resourceGroup'])"
+    }
+    $edGiven = $given.Contains('edition') -or ($o.Contains('edition') -and "$($o['edition'])".Trim())
+    return @{ answers = [pscustomobject]$o; missing = @($missing); overridden = @($over); editionGiven = [bool]$edGiven; fromFile = [bool]$FileGiven }
+}
+
 function Remove-PimInstallConfigEnrollmentKey {
     <#
       framework 8.6: once the enrolled licence is registered, the enrollment key is taken OUT of config.json (the wizard's
@@ -339,6 +396,14 @@ function ConvertTo-PimInstallDeployArgs {
     if ("$($Config.edition)" -in 'pro', 'trial') {
         $a['UpdateSource'] = 'Invardia'
         $a['UpdateRing'] = [int]$(if ("$($Config.updateRing)".Trim()) { "$($Config.updateRing)".Trim() } else { '3' })
+    } elseif ("$($Config.edition)" -eq 'community') {
+        # INSTALL-SAMPLES (owner 2026-10-29): the COMMUNITY edition. Scenario S2 = the Core feature set (the scenario's
+        # activeEdition, PIM-ScenarioProfile.ps1); the updater is the deploy's own Community path (COMMUNITY-INCLOUD-UPDATER:
+        # Invardia's Community channel, ring 3 when no ring is given -- named here so the choice is explicit, the deploy would
+        # take it for S2 anyway); and the feature gates WITHOUT any msp.* gate ("community does not have msp support, only
+        # pro" -- the deploy also strips msp.* for S2 and switches msp.downlink off).
+        $a['UpdateSource'] = 'InvardiaCommunity'
+        $a['FeatureGates'] = @('scheduler.jobs', 'alerting.email')
     }
     return $a
 }

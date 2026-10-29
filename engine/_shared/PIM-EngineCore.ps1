@@ -909,6 +909,7 @@ function Invoke-PimEngineScope {
     # §96.6: what kind of run this is -- a hold is cleared only by the same kind of run that recorded it, and the releases
     # this run used are returned with the scope result.
     $__runKind = "$Mode$(if ($Prune) { '+Prune' })$(if ($PSBoundParameters.ContainsKey('Changes') -and $null -ne $Changes) { '+Queue' })"
+    $Context['__pimRunKind'] = $__runKind   # 95.2l: a provider that holds its own removals under G4 records the hold for this kind of run
     $__guardReleases = New-Object System.Collections.Generic.List[object]
     $__guardApprovals = New-Object System.Collections.Generic.List[object]   # PIM 100.119: approvals given at commit that this run used
     $__canRelease =[bool](Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue)
@@ -1668,6 +1669,7 @@ function Invoke-PimEngineScope {
         noDefinitions=[bool]$__emptyDesiredRead   # REQ-AU-DRIFT-1: extras listed from a scope with no rows (drift read only)
         overRemoveBudget=$__overBudget            # BUG-269: drift read only -- { toRemove; budget } when an apply would hold
         policyChoices=$Context["$Scope.choiceSummary"]   # PIM 100.93: a policy scope's { waiting; review; decided; keep; changes; held }; $null for other scopes
+        ownerMigration=$Context["$Scope.ownerMigration"] # 95.2l: GroupOwners' migration plan { eligibleOn; migrateOn; count; moves; held; moved; kept }; $null otherwise
         warnings=@($Context['__pimScopeWarnings'])
         # .ToArray(), never @(): pwsh 7 throws "Argument types do not match" on @() over a List[object] from a hashtable.
         findings=$(if ($Context['__pimLiveFindings'] -is [System.Collections.Generic.List[object]]) { $Context['__pimLiveFindings'].ToArray() } else { @() })

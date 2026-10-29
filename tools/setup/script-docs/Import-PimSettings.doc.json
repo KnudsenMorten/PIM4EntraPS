@@ -1,0 +1,40 @@
+{
+  "script": "Import-PimSettings.ps1",
+  "product": "pim",
+  "title": "Apply a settings document to a PIM Manager environment (settings as code)",
+  "purpose": "Applies a settings document (written by Export-PimSettings.ps1, or kept in source control) to a named PIM Manager environment's store: it shows the plan per setting (add / change / same), backs up what it would replace, and only with -Apply writes each setting and reads it back. A second -Apply changes nothing.",
+  "whenToRun": "When an environment should be set to settings kept as code -- a new environment baselined from a known-good one, or a reviewed change to settings applied by an operator or a pipeline. A document that carries a secret, or a setting that names an environment itself (who may use it, approvers, break-glass accounts, demo mode, environment name, licence and install keys, rings, the scenario, runtime state), is refused as a whole; so is a document from a newer format version.",
+  "standalone": false,
+  "sourcePath": "tools/setup/Import-PimSettings.ps1",
+  "runAs": [
+    { "kind": "other", "name": "Store writer (application with a certificate, member of the target SQL admin group)", "scope": "the target environment's SQL database (pim.Settings)", "why": "Reads the target's current values and, with -Apply, writes the document's values. Given with -ClientId / -CertThumbprint; the certificate must be in the local machine certificate store." }
+  ],
+  "changes": [
+    { "target": "Target environment SQL database", "action": "update", "object": "pim.Settings row for each setting of the document that is added or changed (one JSON document per setting)", "scope": "the target environment only", "why": "The point of the script: the target gets the document's value (with -MergeKeys, the document's top-level keys plus the keys only the target has). Settings the document does not name are not touched; nothing is deleted.", "undo": "Import the TARGET-BEFORE backup file the run wrote (Import-PimSettings.ps1 -Path <backup> -Apply); a setting the import added is listed in it as addedByImport." },
+    { "target": "Local temp folder", "action": "create", "object": "TARGET-BEFORE-<time>.settings.json in -BackupDir (default: <temp>\\pim-settings-import)", "scope": "this computer", "why": "The target's values before any change, as a settings document, so they can be restored; taken on every run that would change something, also a plan run.", "undo": "Delete the backup file." }
+  ],
+  "parameters": [
+    { "name": "Path", "required": true, "default": null, "help": "The settings document (.json) to apply." },
+    { "name": "Name", "required": false, "default": null, "help": "Apply only these settings of the document. Default: all of them." },
+    { "name": "Server", "required": true, "default": null, "help": "The target store's SQL server (FQDN)." },
+    { "name": "Database", "required": false, "default": "PimPlatform", "help": "The target database." },
+    { "name": "TenantId", "required": true, "default": null, "help": "The target tenant id." },
+    { "name": "ClientId", "required": true, "default": null, "help": "Application (client) id of the identity that writes the target store." },
+    { "name": "CertThumbprint", "required": true, "default": null, "help": "Thumbprint of that identity's certificate in the local machine store." },
+    { "name": "EnvironmentName", "required": false, "default": null, "help": "The target environment's name; when given, a store with a different environment name is refused." },
+    { "name": "BackupDir", "required": false, "default": "<temp>\\pim-settings-import", "help": "Where the target's current values are written before anything changes." },
+    { "name": "MergeKeys", "required": false, "default": false, "help": "For an object setting: keep the top-level keys only the target has (the document's keys win). Arrays and plain values are replaced whole." },
+    { "name": "Apply", "required": false, "default": false, "help": "Write. Without it the script only shows the plan." }
+  ],
+  "readsOnly": [
+    "the settings document at -Path",
+    "pim.Settings in the target store (the document's settings and the environment name, before and after the write)"
+  ],
+  "network": [
+    "login.microsoftonline.com (tokens for Azure SQL, certificate sign-in)",
+    "<target server>.database.windows.net:1433"
+  ],
+  "whatIf": "Reads the document and the target store, prints the plan (add / change / same per setting) and 'What if: Performing the operation \"<add|change> from the settings document\" on target \"pim.Settings['<Name>'] in <server>/<database> (tenant <id>)\"'. Nothing is written to the store; a backup in the temp folder is still taken, a backup elsewhere is only announced.",
+  "undo": "Import the TARGET-BEFORE backup file with -Apply (it restores the values that were replaced). The local backup can be deleted.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Import-PimSettings/"
+}

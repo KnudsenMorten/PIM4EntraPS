@@ -1,0 +1,36 @@
+{
+  "script": "Export-PimSettings.ps1",
+  "product": "pim",
+  "title": "Export PIM Manager settings to a settings document (settings as code)",
+  "purpose": "Exports PIM Manager settings (for example the naming conventions) from one environment's store to a settings document (a JSON file) that Import-PimSettings.ps1 applies to another environment: settings as code, never secrets, never identity or access settings.",
+  "whenToRun": "When an environment's settings should be kept as code (in source control, reviewed) or used as the baseline for a new environment. Settings that are secrets or that name the environment itself (who may use it, approvers, break-glass accounts, demo mode, environment name, licence and install keys, rings, the scenario, runtime state) are never exported: a -Name that asks for one is refused, -All leaves them out and lists them.",
+  "standalone": false,
+  "sourcePath": "tools/setup/Export-PimSettings.ps1",
+  "runAs": [
+    { "kind": "other", "name": "Store reader (application with a certificate, member of the environment's SQL admin group)", "scope": "the environment's SQL database (pim.Settings)", "why": "Reads the settings to export. The identity is given with -ClientId / -CertThumbprint and its certificate must be in the local machine certificate store." }
+  ],
+  "changes": [
+    { "target": "This computer", "action": "create", "object": "the settings document at -Path (one JSON file)", "scope": "this computer", "why": "The point of the script: the exported settings, ready for Import-PimSettings.ps1. An existing file is replaced only with -Force.", "undo": "Delete the file." }
+  ],
+  "parameters": [
+    { "name": "Name", "required": false, "default": null, "help": "The setting(s) to export, e.g. NamingConventions. Give -Name or -All." },
+    { "name": "All", "required": false, "default": false, "help": "Export every setting that may be exported; the others are listed as skipped." },
+    { "name": "Path", "required": true, "default": null, "help": "The settings document (.json) to write." },
+    { "name": "Server", "required": true, "default": null, "help": "The store's SQL server (FQDN)." },
+    { "name": "Database", "required": false, "default": "PimPlatform", "help": "The database." },
+    { "name": "TenantId", "required": true, "default": null, "help": "The environment's tenant id." },
+    { "name": "ClientId", "required": true, "default": null, "help": "Application (client) id of the identity that reads the store." },
+    { "name": "CertThumbprint", "required": true, "default": null, "help": "Thumbprint of that identity's certificate in the local machine store." },
+    { "name": "Force", "required": false, "default": false, "help": "Replace -Path when it already exists." }
+  ],
+  "readsOnly": [
+    "pim.Settings in the store (the named settings, or every name with -All, and the environment name)"
+  ],
+  "network": [
+    "login.microsoftonline.com (tokens for Azure SQL, certificate sign-in)",
+    "<server>.database.windows.net:1433"
+  ],
+  "whatIf": "Reads the store, lists each setting it would export (and each one it skips, with the reason) and prints 'What if: Performing the operation \"write the settings document (<n> setting(s))\" on target \"<Path>\"'. Nothing is written.",
+  "undo": "The script changes nothing in any environment. Delete the settings document it wrote.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Export-PimSettings/"
+}

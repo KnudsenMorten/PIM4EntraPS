@@ -189,8 +189,12 @@ function New-PimPermissionSnapshot {
       the engine identity (Get-PimManagerPermissionHealthBody) -- the job that sends the setup report cannot read another
       identity's grants itself. expected = the MANDATORY Graph permissions, missing = those not held (an altRole satisfies),
       extra = granted Graph roles PIM does not name at all. missingIds = permission values only (never a name of a person).
+      REQUIREMENTS 95.2i: granted (the Graph permission values held) + engineObjectId are kept too, so the in-cloud updater
+      -- which may not read another identity's grants -- can compare them against what a NEWER version needs after a roll.
+      They stay in this environment's store: the uplink report sends only expected / missing / extra / missingIds.
     #>
-    param([string[]]$Granted = @(), [object[]]$Required = @(), [bool]$Readable = $true, [AllowNull()][object]$RootReader, [datetime]$NowUtc = [datetime]::UtcNow)
+    param([string[]]$Granted = @(), [object[]]$Required = @(), [bool]$Readable = $true, [AllowNull()][object]$RootReader, [datetime]$NowUtc = [datetime]::UtcNow,
+          [string]$EngineObjectId = '')
     $have = @{}; foreach ($g in @($Granted)) { if ("$g".Trim()) { $have["$g".Trim()] = $true } }
     $named = @{}
     $mand = @($Required | Where-Object { $_ -and "$($_.tier)" -ne 'optional' })
@@ -201,7 +205,9 @@ function New-PimPermissionSnapshot {
     $rr = $null; if ($RootReader -is [bool]) { $rr = [bool]$RootReader }
     return [ordered]@{ checkedUtc = $NowUtc.ToUniversalTime().ToString('o'); readable = [bool]$Readable
         expected = $(if ($Readable) { $mand.Count } else { 0 }); missing = $(if ($Readable) { $miss.Count } else { 0 }); extra = $(if ($Readable) { $extra.Count } else { 0 })
-        missingIds = $(if ($Readable) { @($miss) } else { @() }); rootReader = $rr }
+        missingIds = $(if ($Readable) { @($miss) } else { @() }); rootReader = $rr
+        granted = $(if ($Readable) { @($have.Keys | Where-Object { $_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$' } | Sort-Object) } else { @() })
+        engineObjectId = "$EngineObjectId".Trim() }
 }
 
 function Get-PimSetupRunGroups {

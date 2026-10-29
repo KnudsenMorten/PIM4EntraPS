@@ -72,6 +72,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-TenantSizing.ps1')     # 100.31 the tick's size for this tenant + the SQL tier / max size (100.37)
 . (Join-Path $solRoot 'engine\_shared\PIM-JobSelfId.ps1')        # 100.166 (a) pull / publish learn their own id + Reader on themselves
 . (Join-Path $solRoot 'engine\_shared\PIM-ConvergeDefaults.ps1') # 100.40 / framework 12.16 the install defaults an EXISTING install converges to
+. (Join-Path $solRoot 'engine\_shared\PIM-UpdaterPermissionCheck.ps1') # 95.2i the engine's rights vs. what this version needs (report only, never a grant)
+. (Join-Path $solRoot 'engine\_shared\PIM-EngineAzureAccess.ps1') # 95.2k the engine's Azure rights vs the DEFINED scopes -- REPORT only here
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAccess.ps1')        # framework 12.23 / PIM 100.156 least-privilege roles via the signed procedure
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAccessCutover.ps1')  # framework 12.23 P8 exception: a private-SQL install starts its own in-network cut-over
 . (Join-Path $solRoot 'engine\_shared\PIM-AsBuilt.ps1')          # 100.61 the as-built job + store + view an EXISTING install converges to
@@ -177,12 +179,44 @@ function Invoke-PimUpdaterConvergeStep {
             }
         }
         $graphGet = { param($p) Invoke-PimGraph -Path ('/' + "$p".TrimStart('/')) }
+        # PIM 95.2k: the Azure scopes the store defines -> the engine's Azure rights are REPORTED (never granted here: the
+        # updater may not grant roles; Confirm-PimInstall's repair, run by a person, grants them).
+        $eaRows = @{ error = 'no store connection' }
+        if ("$csSize".Trim()) {
+            try { $eaRows = @{ assignments = @(Get-PimSqlRows -ConnectionString $csSize -Entity 'PIM-Assignments-Azure-Resources'); definitions = @(Get-PimSqlRows -ConnectionString $csSize -Entity 'PIM-Definitions-Resources') } }
+            catch { $eaRows = @{ error = ((("$($_.Exception.Message)") -split "`n")[0]).Trim() } }
+        }
         $cv = Invoke-PimUpdateConvergeDefaults -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -TickJob $tickJob `
                   -Arm $armSeam -Store $storeSeam -Graph $graphGet -SqlServer "$($global:PIM_SqlServer)" -TenantId "$($env:PIM_TenantId)" `
-                  -AlertRecipientsScript (Join-Path $solRoot 'tools/setup/Set-PimAlertRecipients.ps1')
+                  -AlertRecipientsScript (Join-Path $solRoot 'tools/setup/Set-PimAlertRecipients.ps1') -EngineAzureRows $eaRows
         foreach ($l in @($cv.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
         Say ("converge ($When): $($cv.changed) changed, $($cv.warnings) to fix by hand") $(if ($cv.warnings) { 'Yellow' } elseif ($cv.changed) { 'Cyan' } else { 'DarkGray' })
     } catch { Say "  converge skipped: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2d-perm. REQUIREMENTS 95.2i -- THE ENGINE'S RIGHTS vs. WHAT THIS VERSION NEEDS (report only) ---------------------
+    # A newer version can need a Graph permission (or an Azure right) the engine identity was never given: the roll went
+    # through and nothing said so (2.4.419 -> 2.4.519). Read the engine's Graph app roles (live, else the Manager's last real
+    # check) and its Azure rights at the tenant root; judge them with the SAME functions the Manager's banner uses; say what
+    # is missing with the exact Grant-PimEnginePermissions command, and record it in this run's record (Send-PimUpdateOutcome
+    # -> UpdateState.enginePermissions), which the Manager's update panel and permission banner read.
+    # RULE: the updater may not grant roles -- this step only READS (GET over ARM and Graph, a get from pim.Settings). A read that
+    # fails is a yellow line, never a stop; the step never fails the update. The list it judges against is the one in THIS
+    # updater's code -- after a roll the follow-up run on the new updater image (step 4) checks against the new release's.
+    try {
+        $epVer = ''; try { $epVer = "$(Get-Content -LiteralPath (Join-Path $solRoot 'VERSION') -Raw -ErrorAction Stop)".Trim() } catch { $epVer = '' }
+        $epAzDefs = -1
+        if ("$csSize".Trim() -and (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue)) {
+            try { $epAzDefs = @(Get-PimSqlRows -ConnectionString $csSize -Entity 'PIM-Assignments-Azure-Resources').Count } catch { $epAzDefs = -1 }
+        }
+        $epGraph = { param($p) Invoke-PimGraph -All -Path ('/' + "$p".TrimStart('/')) }
+        $epStore = $null
+        if ("$csSize".Trim()) { $epCs = "$csSize"; $epStore = { param($op, $name, $value) if ($op -eq 'get') { return (Get-PimSqlSetting -ConnectionString $epCs -Name $name) } } }
+        $ep = Invoke-PimUpdaterEnginePermissionCheck -SubscriptionId $sub -ResourceGroup $rg -TickJob $tickJob -TenantId ("$(if ("$($env:PIM_TenantId)".Trim()) { $env:PIM_TenantId } else { $global:PIM_TenantId })".Trim()) `
+                  -Version $epVer -Arm $armSeam -Graph $epGraph -Store $epStore -AzureDelegationCount $epAzDefs
+        foreach ($l in @($ep.lines)) { Say ("  " + $l.text) $(if ($l.level -eq 'warn') { 'Yellow' } else { 'DarkGray' }) }
+        if ("$($ep.fix)".Trim()) { foreach ($fl in @("$($ep.fix)" -split "`n")) { Say ("    " + $fl) 'Yellow' } }
+        Say ("engine permissions ($When): $($ep.headline)") $(switch ($ep.state) { 'missing' { 'Yellow' } 'unknown' { 'Yellow' } default { 'DarkGray' } })
+        $script:PimEnginePermissionCheck = $ep.record
+    } catch { Say "  engine permissions not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2d-bis. CR5 step 1 (framework §12.11c item 6, PIM 100.149) -- THE INSTALL RECORD ------------------------------------
     # pim.Settings 'InstallNames' = the names THIS install runs with, from what the updater was deployed with (its variables)
     # and the as-built job's name. Existing installs record TODAY's names -- nothing is renamed; every reader
@@ -313,6 +347,7 @@ $script:PimRingApprovedReason = ''
 $script:PimRunningVersion     = ''
 $script:PimSqlAccessVerdict   = $null   # §33.0 SqlAccess: set by the access converge (schema step); $null = carry the last one
 $script:PimSignInLayer        = $null   # framework 8.17 SignIn: read from the Manager app below; $null = carry the last one
+$script:PimEnginePermissionCheck = $null # 95.2i: the engine's rights for this version (converge step 2d-perm); $null = carry the last one
 function Send-PimUpdateOutcome {
     param(
         [ValidateSet('none','built','rolled','schema','failed')][string]$Action = 'none',
@@ -382,7 +417,7 @@ function Send-PimUpdateOutcome {
                         -RunningVersion $script:PimRunningVersion `
                         -LastBuiltVersion "$($env:PIM_UPDATE_LAST_BUILT)" -TargetVersion $ToVersion `
                         -Action $Action -Outcome $Outcome -ErrorText $ErrorText -Previous $prev `
-                        -Source "$($env:PIM_UPDATE_SOURCE)" -WaitingSinceUtc $WaitingSinceUtc -SqlAccess $script:PimSqlAccessVerdict -SignIn $script:PimSignInLayer `
+                        -Source "$($env:PIM_UPDATE_SOURCE)" -WaitingSinceUtc $WaitingSinceUtc -SqlAccess $script:PimSqlAccessVerdict -SignIn $script:PimSignInLayer -EnginePermissions $script:PimEnginePermissionCheck `
                         -DurationSeconds ([int]([datetime]::UtcNow - $script:PimUpdateStartedUtc).TotalSeconds)
         $saved = Save-PimUpdateState -ConnectionString $csState -Record $stateRec
         if ($saved.ok) { Say "update state: recorded ring '$($stateRec.ring)' / $Outcome in pim.Settings" 'DarkGray' }

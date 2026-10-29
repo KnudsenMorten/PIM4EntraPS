@@ -69,7 +69,8 @@ function Set-PimScopesMark { param([string]$Path) try { New-Item -ItemType Direc
 function Get-PimPreviousReleaseTag {
     # The highest PIM4EntraPS-v<x> tag below -Version ('' when none).
     param([string]$RepoRoot, [string]$Version)
-    $p = @(& git -C $RepoRoot tag -l 'PIM4EntraPS-v2.*' 2>$null | ForEach-Object { $v = "$_" -replace '^PIM4EntraPS-v', ''; try { [pscustomobject]@{ tag = "$_"; v = [version]$v } } catch { } } |
+    # BUG-PREVTAG-V3 (3.0.5): every major, not only v2.* -- a 3.0.x release compared itself with 2.4.679
+    $p = @(& git -C $RepoRoot tag -l 'PIM4EntraPS-v*' 2>$null | ForEach-Object { $v = "$_" -replace '^PIM4EntraPS-v', ''; try { [pscustomobject]@{ tag = "$_"; v = [version]$v } } catch { } } |
            Where-Object { $_.v -lt [version]$Version } | Sort-Object v -Descending | Select-Object -First 1)
     if ($p.Count) { return "$($p[0].tag)" }
     return ''

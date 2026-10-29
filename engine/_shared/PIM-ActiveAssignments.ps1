@@ -64,6 +64,20 @@ function Initialize-PimManagerTenantConnection {
     $script:PimManagerTenantConnected = $true
 }
 
+function Get-PimActiveGroupAccessLabel {
+    <#
+      PURE. 95.2l: the access word shown after a PIM-for-Groups row's group name on Review current delegations. A member
+      stays 'member'. An owner says which kind: 'eligible owner, activated' (an eligible owner who activated ownership),
+      'permanent owner' (an owner assignment with no end date), else 'owner' (a time-bound owner assignment), as before.
+    #>
+    param([string]$AccessId, [string]$AssignmentType = '', [string]$ExpirationType = '', [AllowNull()][object]$End = $null)
+    $a = "$AccessId".Trim(); if (-not $a) { $a = 'member' }
+    if ($a -ine 'owner') { return $a }
+    if ("$AssignmentType".Trim() -ieq 'activated') { return 'eligible owner, activated' }
+    if ("$ExpirationType".Trim() -ieq 'noExpiration' -or ("$AssignmentType".Trim() -ieq 'assigned' -and -not "$End".Trim() -and -not "$ExpirationType".Trim())) { return 'permanent owner' }
+    return $a
+}
+
 function Test-PimActiveAssignmentsRestOnly {
     # §100.42: REST is the only path. Kept as a function (callers ask it) -- true whenever the REST client is loaded.
     return [bool](Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)
@@ -1014,12 +1028,15 @@ function Invoke-PimActiveAssignmentsSnapshot {
         }
         $access = "$(& $pf $p @('AccessId','accessId'))"; if (-not $access) { $access = 'member' }
         $just   = "$(& $pf $p @('Justification','justification'))"
+        # 95.2l: an owner says WHICH kind -- an eligible owner who activated, or a permanent (no end date) owner assignment.
+        $__expT = ''; if ($si) { $__ex = & $pf $si @('Expiration','expiration'); if ($__ex) { $__expT = "$(& $pf $__ex @('Type','type'))" } }
+        $__accLbl = Get-PimActiveGroupAccessLabel -AccessId $access -AssignmentType "$(& $pf $p @('AssignmentType','assignmentType'))" -ExpirationType $__expT -End $end
         [void]$rows.Add([ordered]@{
             id               = "pim-for-groups:$itemId"
             type             = 'pim-for-groups'
             principal        = $principalLabel
             principalId      = $principalId
-            role             = "$groupLabel ($access)"
+            role             = "$groupLabel ($__accLbl)"
             roleDefinitionId = ''
             scope            = $groupLabel
             directoryScopeId = ''
@@ -1044,6 +1061,8 @@ function Invoke-PimActiveAssignmentsSnapshot {
                 if ($script:PimManager_GroupById -and $script:PimManager_GroupById.ContainsKey($cgid) -and "$($script:PimManager_GroupById[$cgid].DisplayName)") {
                     $cgl = [string]$script:PimManager_GroupById[$cgid].DisplayName
                     $cacc = "$($cr['accessId'])"; if (-not $cacc) { $cacc = 'member' }
+                    # 95.2l: a carried row keeps the owner kind it was stored with (the raw schedule is not carried)
+                    if ("$($cr['role'])" -match '\((eligible owner, activated|permanent owner)\)$') { $cacc = $Matches[1] }
                     $cr['role'] = "$cgl ($cacc)"; $cr['scope'] = $cgl
                 }
                 [void]$rows.Add($cr)

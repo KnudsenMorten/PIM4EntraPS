@@ -171,6 +171,7 @@ if (Test-Path -LiteralPath "$shared\..\discovery\PIM-Discovery.ps1") { . "$share
                                       # This process already had a mail path (PIM-Notify above) but
                                       # no alerting logic on top of it, so a 03:00 failure was silent.
 . "$shared\PIM-Scheduler.ps1"
+. "$shared\PIM-DeltaSkip.ps1"         # 70.17: skip a timer engine-delta whose scopes are unchanged (PIM-Scheduler also loads it)
 # §70.1b option 2: the active-assignments LIVE READ (Entra-role / Azure-RBAC / PIM-for-Groups) that used to freeze
 # the Manager's single request loop for 140-170 s. Job 'active-assignments-snapshot' runs it here and stores it in
 # pim.TenantCache; the Manager only reads that row. Needs _tenantSync.ps1 (below) for the store + connection helpers.
@@ -393,6 +394,13 @@ Register-PimJobHandler -Type 'config-backup' -Handler {
     param($job, $now, $whatIf)
     Invoke-PimConfigBackupJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
+# PIM s98.3: the REAL 'demo-baseline-restore' handler. Inert unless DemoMode is on and the demo-environment proof holds; a
+# mass-change hold is a HELD run (nothing written); a restore that fails part-way FAILS the run (it throws).
+. "$shared\PIM-DemoBaselineRestore.ps1"
+Register-PimJobHandler -Type 'demo-baseline-restore' -Handler {
+    param($job, $now, $whatIf)
+    Invoke-PimDemoBaselineRestoreJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
 # §95.4: the REAL 'install-key' handler. A refused or failed claim is reported in the result, never thrown.
 Register-PimJobHandler -Type 'install-key' -Handler {
     param($job, $now, $whatIf)
@@ -598,6 +606,12 @@ $engineHandler = {
     if (Get-Command Format-PimPolicyChoiceRunSummary -ErrorAction SilentlyContinue) {
         $pcNotes = @(@($res) | Where-Object { $_ -and $_.PSObject.Properties['policyChoices'] -and $null -ne $_.policyChoices } | ForEach-Object { "$($_.scope): $(Format-PimPolicyChoiceRunSummary -Summary $_.policyChoices)" })
         if ($pcNotes.Count) { $tail += ' | ' + ($pcNotes -join '; ') }
+    }
+    # 95.2l: the group-owner migration plan in plain words -- which permanent owners would become eligible owners, and what
+    # this run did with them. Information when the migration switch is off.
+    if (Get-Command Format-PimGroupOwnerMigrationRunSummary -ErrorAction SilentlyContinue) {
+        $omNotes = @(@($res) | Where-Object { $_ -and $_.PSObject.Properties['ownerMigration'] -and $null -ne $_.ownerMigration } | ForEach-Object { $t = Format-PimGroupOwnerMigrationRunSummary -Plan $_.ownerMigration; if ($t) { "$($_.scope): $t" } })
+        if ($omNotes.Count) { $tail += ' | ' + ($omNotes -join '; ') }
     }
     if ($notChk.Count) { $tail += ' | ' + ($notChk -join '; ') }
     if ($warns.Count) { $tail += " | $($warns.Count) warning(s): " + (@($warns | Select-Object -First 5) -join '; ') + $(if ($warns.Count -gt 5) { "; +$($warns.Count - 5) more (see the run's log)" } else { '' }) }

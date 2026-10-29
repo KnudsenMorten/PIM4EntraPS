@@ -48,6 +48,8 @@ $script:PimScriptDocScripts = @(
     @{ Path = 'setup/Invoke-PimDeployAll.ps1';                     Standalone = $false }
     @{ Path = 'setup/Invoke-PimMspBuild.ps1';                      Standalone = $false }
     @{ Path = 'setup/Copy-PimSettings.ps1';                        Standalone = $false }
+    @{ Path = 'setup/Export-PimSettings.ps1';                      Standalone = $false }   # 77.13 / 72.4 settings as code
+    @{ Path = 'setup/Import-PimSettings.ps1';                      Standalone = $false }
     @{ Path = 'setup/Set-PimManagerAccess.ps1';                    Standalone = $false }
     @{ Path = 'setup/Set-PimBreakGlassAccounts.ps1';               Standalone = $false }
     @{ Path = 'setup/Set-PimEmergencyPassphrase.ps1';              Standalone = $false }
@@ -78,6 +80,8 @@ $script:PimScriptDocScripts = @(
     # self-contained on the machine they run on (a domain controller; the worker itself): published as one file each
     @{ Path = 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1'; Standalone = $true }
     @{ Path = 'pim-hybrid-worker/Install-PimHybridWorker.ps1';     Standalone = $true }
+    # INSTALL-SAMPLES (owner 2026-10-29): the one-file launcher of the installation (downloads the release, runs its installer)
+    @{ Path = 'setup/Start-PimManagerInstall.ps1';                 Standalone = $true }
 )
 
 function Get-PimScriptDocName {

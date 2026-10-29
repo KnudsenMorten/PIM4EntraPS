@@ -19,6 +19,7 @@
     { "target": "PIM resource group", "action": "update", "object": "the updater job ca-pim-update (missing or wrong ring) -- repair, via Deploy-PimUpdateJob on the running image", "scope": "this installation", "why": "A Pro installation must keep itself updated.", "undo": "Delete or change the updater job (its ring is PIM_UPDATE_RING)." },
     { "target": "Azure RBAC", "action": "grant", "object": "the engine job's managed identity -- one attempt", "permission": "Reader (plus User Access Administrator with -EngineAzureRootUserAccessAdmin)", "scope": "the tenant root management group", "why": "So the engine sees every subscription. Refused = a warning with the command.", "undo": "Remove the role assignment at the tenant root." },
     { "target": "Azure RBAC", "action": "grant", "object": "the Manager's managed identity -- one attempt", "permission": "Reader", "scope": "the PIM resource group only", "why": "The Manager's Environment report reads its own resources.", "undo": "Remove the role assignment on the resource group." },
+    { "target": "Azure RBAC", "action": "grant", "object": "the engine job's managed identity -- only at a defined Azure scope it does not already hold it at (or above), read back", "permission": "User Access Administrator (never Owner)", "scope": "each Azure scope the store defines (Azure resource assignments and definitions: management groups, subscriptions, resource groups); the tenant root only with -EngineAzureRootUserAccessAdmin", "why": "The engine creates the Azure role assignments and role policies defined there. Refused = a warning with the command; nothing is ever removed.", "undo": "Remove the role assignment at that scope (its description says 'converge engine access')." },
     { "target": "SQL server firewall", "action": "remove", "object": "the 'AllowSetupHost' rule this run opened (only with -CloseSetupHostRule and -SetupHostRuleOwner this)", "scope": "the environment's SQL server", "why": "No setup-time firewall opening is left behind.", "undo": "None needed (an install opens it again when it needs it)." },
     { "target": "Local file (only with -OutFile)", "action": "create", "object": "the result as JSON (done, failed, warnings, rows)", "scope": "this computer", "why": "For a caller that reads the outcome.", "undo": "Delete the file." }
   ],
@@ -59,10 +60,12 @@
     { "name": "CertThumbprint", "required": false, "default": null, "help": "Automation: that application's certificate thumbprint (local machine store)." },
     { "name": "UseSignedInAccount", "required": false, "default": false, "help": "Read (and repair) as the signed-in person: the recommended way." },
     { "name": "NoRepair", "required": false, "default": false, "help": "Read and report only; no repair runs." },
-    { "name": "OutFile", "required": false, "default": null, "help": "Write the result as JSON to this file." }
+    { "name": "OutFile", "required": false, "default": null, "help": "Write the result as JSON to this file." },
+    { "name": "SkipEngineAzureAccess", "required": false, "default": false, "help": "Do not converge the engine's Azure rights to the Azure scopes the store defines (by default it does: User Access Administrator where missing, read back; -WhatIf / -NoRepair only plan it)." }
   ],
   "readsOnly": [
     "pim.Settings: ManagerAccess, License, the install key state, the mail sender, the alert recipients",
+    "pim.Rows: the Azure resource assignments and definitions (their Azure scopes only)",
     "the Manager app, the engine / updater / downlink jobs and their executions, their identities and role assignments (management.azure.com)",
     "the engine identity's Microsoft Graph application permissions (appRoleAssignments) and the Manager's sign-in app assignments",
     "Exchange Online Test-ServicePrincipalAuthorization for each sending identity (when Exchange is reachable)",

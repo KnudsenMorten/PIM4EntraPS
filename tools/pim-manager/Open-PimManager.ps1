@@ -286,6 +286,10 @@ if (Test-Path -LiteralPath $_govLib) { . $_govLib }
 # needs, so the portal can say so out loud. (REQUIREMENTS §63.6.)
 $_permLib = Join-Path $solutionRoot 'engine\_shared\PIM-PermissionHealth.ps1'
 if (Test-Path -LiteralPath $_permLib) { . $_permLib }
+# REQUIREMENTS 95.2i: the update run's check of the engine identity after a roll -- the banner shows what it recorded when this
+# Manager cannot read the engine identity itself (Merge-PimUpdaterPermissionRecord).
+$_updPermLib = Join-Path $solutionRoot 'engine\_shared\PIM-UpdaterPermissionCheck.ps1'
+if (Test-Path -LiteralPath $_updPermLib) { . $_updPermLib }
 # SCRIPT-DOC-1 (framework 12.7 + 12.10 item 11): THE constants of where a script's documentation page, download and
 # checksum list live -- handed to the page at boot (window.PIM_SCRIPT_DOCS) so every command it shows carries the doc link.
 . (Join-Path $solutionRoot 'tools\setup\_PimScriptDoc.ps1')
@@ -9665,13 +9669,16 @@ function Get-PimManagerAttention {
     if ($gh.Count) {
         $items.Add([ordered]@{ id = 'guard-holds'; tab = 'guards'; count = $gh.Count
             text = ("{0} holding a plan -- the engine skips it until it is released or the plan changes ({1})" -f (& $plural $gh.Count 'guard is' 'guards are'), ((@($gh | ForEach-Object { "$($_.guardId)$(if ("$($_.scope)".Trim()) { " / $($_.scope)" })" }) | Select-Object -First 4) -join ', '))
-            canAct = $isSuper; who = 'a SuperAdmin releases it (Operations > Guards)' })
+            canAct = $isSuper; who = 'a SuperAdmin releases it (Operations > Guards)'
+            # GUARDS-RED-COUNT (owner 2026-10-27): the guards that hold, once each -- the Guards menu counts GUARDS, not holds
+            guardIds = @(@($gh | ForEach-Object { "$($_.guardId)".Trim() } | Where-Object { $_ }) | Sort-Object -Unique) })
     }
     $gr = @($s.guardReleases)
     if ($gr.Count) {
         $items.Add([ordered]@{ id = 'guard-releases'; tab = 'guards'; count = $gr.Count
             text = ("{0} waiting for a second SuperAdmin" -f (& $plural $gr.Count 'guard release' 'guard releases'))
-            canAct = [bool]($isSuper -and @($gr | Where-Object { "$($_.createdBy)".Trim().ToLowerInvariant() -ne $me }).Count); who = 'a SuperAdmin other than the one who released it approves it' })
+            canAct = [bool]($isSuper -and @($gr | Where-Object { "$($_.createdBy)".Trim().ToLowerInvariant() -ne $me }).Count); who = 'a SuperAdmin other than the one who released it approves it'
+            guardIds = @(@($gr | ForEach-Object { "$($_.guardId)".Trim() } | Where-Object { $_ }) | Sort-Object -Unique) })   # GUARDS-RED-COUNT
     }
     $sa = $s.secondApprover
     if ($sa -and @($sa.stagers).Count) {
@@ -12063,6 +12070,19 @@ function Get-PimManagerPermissionHealthBody {
                    ". Grant the missing permission to the engine identity; a new grant can take up to ~30 minutes to reach its token. " +
                    "Jobs > Engine logs & errors lists every item. (Manager identity check: $($health.headline))"
     }
+    # REQUIREMENTS 95.2i: the update run checks the engine identity after every roll and records the verdict in its run record
+    # (UpdateState.enginePermissions). This Manager's own live check wins whenever it could read the engine identity; when it
+    # could not, a gap the update run found is shown here -- red, with its fix command (Merge-PimUpdaterPermissionRecord).
+    $updPerm = $null; $missReq = $null
+    if ((Get-Command Merge-PimUpdaterPermissionRecord -ErrorAction SilentlyContinue) -and (Get-Command Read-PimUpdateState -ErrorAction SilentlyContinue) -and "$($script:PimSqlCs)".Trim()) {
+        try {
+            $updRecP = Read-PimUpdateState -ConnectionString $script:PimSqlCs
+            if ($updRecP) { $updPerm = Get-PimUpdateStateField -Object $updRecP -Key 'enginePermissions' }
+            $mrg = Merge-PimUpdaterPermissionRecord -Live ([pscustomobject]@{ ok = $hOk; severity = $hSev; headline = $hHead; detail = $hDetail; readable = [bool]$readable; objectId = $oid; missingRequired = @(@($health.missingRequired) | Where-Object { $null -ne $_ }) }) -Record $updPerm
+            # the engine's own refusals (above) stay the headline: they are the ground truth of what failed
+            if ($mrg.fromUpdater -and -not @($engineDenied).Count) { $hOk = $mrg.ok; $hSev = $mrg.severity; $hHead = $mrg.headline; $hDetail = $mrg.detail; $missReq = @($mrg.missingRequired); if (-not $oid) { $oid = "$($mrg.objectId)" } }
+        } catch { $updPerm = $null }
+    }
     $permBody = ([ordered]@{
         ok         = $hOk
         severity   = $hSev
@@ -12077,6 +12097,8 @@ function Get-PimManagerPermissionHealthBody {
         # these lists and `@($null)` serialises as [null] -- the page then threw on m.role and the Home banner
         # stayed on "Checking permissions..." forever, hiding the very explanation it exists to show.
         missingRequired = @(@($health.missingRequired) | Where-Object { $null -ne $_ })
+        # 95.2i: the update run's own check of the engine identity after its last roll ($null = none recorded)
+        updaterCheck = $updPerm
         missingOptional = @(@($health.missingOptional) | Where-Object { $null -ne $_ })
         unavailableConnectors = @(@($health.unavailableConnectors) | Where-Object { $null -ne $_ -and "$_".Trim() })
         azureOk    = $health.azureOk
@@ -12092,11 +12114,13 @@ function Get-PimManagerPermissionHealthBody {
         checkedUtc = (Get-Date).ToUniversalTime().ToString('o')
         cached     = $false
     })
+    # 95.2i: the roles the update run found missing, in the shape the page's fix block takes (only when the merge above used them)
+    if ($null -ne $missReq) { $permBody['missingRequired'] = @($missReq); if (-not "$($permBody['objectId'])" -and $oid) { $permBody['objectId'] = "$oid" } }
     # PIM 100.10 (framework 8.7 UPLINK-SETUP): record the compact snapshot (expected / missing / extra + missing permission ids,
     # Reader at the tenant root) -- the uplink job runs as the engine and cannot read its own grants the way this check does.
     # Only a REAL check is recorded: an unreadable one never replaces it. A failed write never fails the check.
     if ([bool]$readable -and $script:PimSqlCs -and (Get-Command New-PimPermissionSnapshot -ErrorAction SilentlyContinue)) {
-        try { Set-PimManagerSetting -Name 'PermissionSnapshot' -Value (New-PimPermissionSnapshot -Granted @($granted) -Required @(Get-PimRequiredGraphCapabilities) -Readable $true -RootReader $rootReader) }
+        try { Set-PimManagerSetting -Name 'PermissionSnapshot' -Value (New-PimPermissionSnapshot -Granted @($granted) -Required @(Get-PimRequiredGraphCapabilities) -Readable $true -RootReader $rootReader -EngineObjectId $oid) }
         catch {
             if (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue) {
                 Write-PimSwallowed -Scope 'permission-snapshot-write' -ErrorRecord $_ `

@@ -1,0 +1,57 @@
+{
+  "script": "Start-PimManagerInstall.ps1",
+  "product": "pim",
+  "title": "Install PIM Manager (one command)",
+  "purpose": "Install PIM Manager with one command: download the public PIM Manager release into a new folder, check the download, and run its guided installer (Install-PimManager) with the parameters you give.",
+  "whenToRun": "Once, to install PIM Manager into your own Azure subscription: Community with only -TenantId and -SubscriptionId, a trial or Pro with -EnrollmentKey (from Invardia's portal or the trial mail) or -LicencePath as well. Run it with -WhatIf first to see the plan; run the same command with -Resume after fixing a stopped step.",
+  "standalone": true,
+  "sourcePath": "tools/setup/Start-PimManagerInstall.ps1",
+  "runAs": [
+    { "kind": "azureRbac", "name": "Owner", "scope": "the target subscription", "why": "The installer it runs (Install-PimManager) creates the resource group and its resources and assigns Azure roles to the identities it creates (Contributor + User Access Administrator is the equivalent); its check stops before anything is created without it." },
+    { "kind": "entraRole", "name": "Privileged Role Administrator", "scope": "tenant", "why": "For the installer: Microsoft Graph application permissions for PIM Manager's identities and the SQL admin group. Without it the installation continues and ends with the command for the right person." },
+    { "kind": "other", "name": "Signed in in the browser as yourself (no command-line tool, no PowerShell module, no secret, no certificate)", "scope": "the tenant and subscription you name", "why": "The installer signs you in in the browser when it first needs Azure or Microsoft Graph. This launcher itself reads only public release data and needs no sign-in." }
+  ],
+  "changes": [
+    { "target": "Local machine", "action": "create", "object": "a new folder in the temp folder (pim-manager-release-<version>-<random>) with the downloaded release zip and its unpacked files, and a small note (pim-manager-install-<id>.json in the temp folder) with that folder's path so -Resume uses it again", "why": "The installer runs from the release it was downloaded with; -Resume needs no new download.", "undo": "Delete the folder and the note." },
+    { "target": "Azure, Microsoft Entra ID, Azure SQL", "action": "create", "object": "the PIM Manager installation, made by Install-PimManager from the downloaded release (every object, permission and scope is listed on its page: https://invardia.com/docs/pim/scripts/Install-PimManager/)", "why": "This launcher only fetches the release and starts the installer with your parameters.", "undo": "As described for Install-PimManager (delete the resource group after exporting the database, and the Entra objects it created)." }
+  ],
+  "parameters": [
+    { "name": "TenantId", "required": true, "default": null, "help": "The Microsoft Entra tenant PIM Manager manages (passed to Install-PimManager)." },
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The Azure subscription that hosts PIM Manager (passed to Install-PimManager)." },
+    { "name": "Location", "required": false, "default": "swedencentral", "help": "Any Azure region (passed through)." },
+    { "name": "ResourceGroup", "required": false, "default": "rg-pim", "help": "The resource group (passed through)." },
+    { "name": "SuperAdmins", "required": false, "default": "you (the person installing)", "help": "The PIM Manager administrators (passed through)." },
+    { "name": "AlertRecipients", "required": false, "default": "the administrators' mailboxes", "help": "Who gets the alerts (passed through)." },
+    { "name": "MailSender", "required": false, "default": null, "help": "The mailbox PIM Manager sends from (passed through)." },
+    { "name": "VnetAddressPrefix", "required": false, "default": "10.220.0.0/22", "help": "The virtual network range (passed through)." },
+    { "name": "SubnetAddressPrefix", "required": false, "default": "10.220.0.0/23", "help": "The Container Apps subnet (passed through)." },
+    { "name": "Exposure", "required": false, "default": "external", "help": "The guided install builds the external shape (passed through)." },
+    { "name": "Edition", "required": false, "default": "Community without a licence or key", "help": "Community, Trial or Pro (passed through)." },
+    { "name": "InstallId", "required": false, "default": "derived from tenant, subscription and resource group", "help": "The installation id (passed through)." },
+    { "name": "SupportAppId", "required": false, "default": null, "help": "The Invardia Support app's client id -- only when you want Invardia support to have access (passed through)." },
+    { "name": "SupportAccess", "required": false, "default": "troubleshoot", "help": "The Support app's level (passed through)." },
+    { "name": "LicencePath", "required": false, "default": null, "help": "The licence file of a trial or Pro (passed through)." },
+    { "name": "EnrollmentKey", "required": false, "default": null, "help": "The Invardia enrollment key of a trial or Pro, from Invardia's portal or the trial mail (passed through; never printed)." },
+    { "name": "ConfigPath", "required": false, "default": null, "help": "Optional: the answers file from Invardia's installation wizard (passed through)." },
+    { "name": "Reporter", "required": false, "default": null, "help": "Callback that receives every step event (passed through)." },
+    { "name": "StatePath", "required": false, "default": "clouddrive/invardia/<install id> (Cloud Shell) or ~/invardia/<install id>", "help": "The installer's resume state folder (passed through)." },
+    { "name": "Resume", "required": false, "default": false, "help": "Continue a stopped installation: the release downloaded before is used again (passed through)." },
+    { "name": "PreflightOnly", "required": false, "default": false, "help": "Run only the installer's checks (passed through)." },
+    { "name": "InvardiaBaseUrl", "required": false, "default": "https://invardia.com", "help": "Invardia address for the enrollment (passed through)." },
+    { "name": "EnrollmentTimeoutSeconds", "required": false, "default": 900, "help": "How long the installer waits for Invardia to sign the licence (passed through)." },
+    { "name": "Version", "required": false, "default": "the latest public release", "help": "The PIM Manager release to install, for example 3.0.5." },
+    { "name": "ReleasePath", "required": false, "default": null, "help": "A folder that already holds the unpacked release: nothing is downloaded." }
+  ],
+  "readsOnly": [
+    "The public release metadata of the PIM Manager release on GitHub (latest, or -Version) and the release zip it names; the zip's SHA-256 is computed and compared with the one the release publishes, when it publishes one.",
+    "The note in the temp folder that names the release folder of a previous run (-Resume)."
+  ],
+  "network": [
+    "api.github.com (the release metadata)",
+    "github.com and objects.githubusercontent.com (the release zip)",
+    "and everything Install-PimManager reaches (management.azure.com, graph.microsoft.com, login.microsoftonline.com, the database and the registry it creates)"
+  ],
+  "whatIf": "Downloads and unpacks the release into a new folder in the temp folder (the plan is read from it), then runs Install-PimManager -WhatIf from it: its checks (reads only) and every step it would take. No note is written and nothing in Azure, Microsoft Entra ID or the database is changed.",
+  "undo": "Delete the release folder and the note in the temp folder; the installation itself is undone as described for Install-PimManager.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Start-PimManagerInstall/"
+}

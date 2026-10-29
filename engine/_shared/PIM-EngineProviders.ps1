@@ -1151,6 +1151,8 @@ function Get-PimEntraRoleKey {
 # and WHO decides an extension is Resolve-PimAutoExtendDecision (access review Keep > owner Deny > row > default ON).
 $script:PimAssignmentRenewWithinDays = 14   # the fallback only; the policy decides (Get-PimAutoExtendContext)
 if (-not (Get-Command Resolve-PimAutoExtendDecision -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-AutoExtend.ps1') }
+# 95.2l: group owners as PIM-eligible owners (the GroupOwners scope's switches, plan and migration).
+if (-not (Get-Command Invoke-PimGroupOwnerUpdate -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-GroupOwnerEligibility.ps1') }
 # 95.2c / 100.15: the ONE role-assignable rule (Resolve-PimRoleAssignableForCreate) the Groups provider creates with.
 if (-not (Get-Command Resolve-PimRoleAssignableForCreate -ErrorAction SilentlyContinue) -or
     -not (Get-Command Get-PimRoleAssignableFacts -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-RoleAssignable.ps1') }
@@ -2559,6 +2561,17 @@ function Resolve-PimGroupOwnerIds {
     # the group's Department contact (PIM-Definitions-Departments). UPN -> id; unresolved
     # owners are dropped. Returns @() when nothing resolves (caller enforces the rule).
     param([object]$Row, [hashtable]$Ctx = @{})
+    $upns = @(Get-PimGroupOwnerEntries -Row $Row)
+    $ids = New-Object System.Collections.Generic.List[object]
+    foreach ($u in ($upns | Select-Object -Unique)) { $id = Resolve-PimPrincipalId $u; if ($id) { [void]$ids.Add($id) } }
+    , $ids.ToArray()
+}
+
+function Get-PimGroupOwnerEntries {
+    # The owner ENTRIES (UPNs / object ids, as written) of a group definition row: Owners column -> SponsorUpn (Roles) ->
+    # the group's Department contact. The one list Resolve-PimGroupOwnerIds resolves (95.2l also needs the entry itself:
+    # a UPN entry is a person, an object id is checked).
+    param([object]$Row)
     $upns = @()
     $upns += Split-PimOwners (Get-PimRowProp -Row $Row -Names @('Owners'))
     if (-not $upns.Count) { $upns += Split-PimOwners (Get-PimRowProp -Row $Row -Names @('SponsorUpn')) }
@@ -2566,9 +2579,7 @@ function Resolve-PimGroupOwnerIds {
         $dept = Get-PimRowProp -Row $Row -Names @('Department', 'DepartmentTag')
         if ($dept) { $di = Get-PimDepartmentOwnerIndex; if ($di.ContainsKey($dept.ToLowerInvariant())) { $upns += Split-PimOwners $di[$dept.ToLowerInvariant()] } }
     }
-    $ids = New-Object System.Collections.Generic.List[object]
-    foreach ($u in ($upns | Select-Object -Unique)) { $id = Resolve-PimPrincipalId $u; if ($id) { [void]$ids.Add($id) } }
-    , $ids.ToArray()
+    return @($upns)
 }
 
 function New-PimGroupMembershipBody {
@@ -8268,19 +8279,36 @@ function New-PimGroupOwnersProvider {
             param($ctx)
             Ensure-PimContextLoaded
             $out = New-Object System.Collections.Generic.List[object]
+            # 95.2l: the plan / budget of an earlier pass in this run never carries over.
+            $ctx['GroupOwners.ownerMigration'] = $null; $ctx['GroupOwners.migrationBudget'] = $null
+            $__eligOn = Test-PimGroupOwnersEligibleEnabled
             # REQ-L: plus an Azure permission group's owners, from the PIM-Definitions-Resources row the Azure wizards stage
             # (only rows that name Owners -- see Get-PimResourceOwnerDefinitionRows).
             foreach ($g in @(@(Get-PimGroupDefinitionRows) + @(Get-PimResourceOwnerDefinitionRows))) {
                 if ($null -eq $g) { continue }
-                foreach ($oid in (Resolve-PimGroupOwnerIds -Row $g -Ctx $ctx)) {
-                    $out.Add([pscustomobject]@{ GroupName = $g.GroupName; OwnerId = "$oid" })
+                if (-not $__eligOn) {
+                    # GroupOwnersEligible OFF (the default): exactly what this scope always did.
+                    foreach ($oid in (Resolve-PimGroupOwnerIds -Row $g -Ctx $ctx)) {
+                        $out.Add([pscustomobject]@{ GroupName = $g.GroupName; OwnerId = "$oid" })
+                    }
+                    continue
+                }
+                # 95.2l ON: the same owners, each with the entry it came from and what it is (a person or not).
+                $__seen = @{}
+                foreach ($e in @(Get-PimGroupOwnerEntries -Row $g)) {
+                    $oid = Resolve-PimPrincipalId $e
+                    if (-not $oid -or $__seen.ContainsKey("$oid".ToLowerInvariant())) { continue }
+                    $__seen["$oid".ToLowerInvariant()] = $true
+                    $out.Add([pscustomobject]@{ GroupName = $g.GroupName; OwnerId = "$oid"; OwnerRef = "$e"; OwnerKind = (Resolve-PimGroupOwnerEntryKind -Entry "$e" -Id "$oid") })
                 }
             }
+            if ($__eligOn) { $ctx['GroupOwners.desired'] = $out.ToArray() }
             $out.ToArray()
         }
         GetLive = {
             param($ctx)
             Ensure-PimContextLoaded
+            if (Test-PimGroupOwnersEligibleEnabled) { return @(Get-PimGroupOwnersEligibleLive -Ctx $ctx) }
             $live = New-Object System.Collections.Generic.List[object]
             try {
                 foreach ($grp in @(Invoke-PimGraph -Path "/groups?`$select=id,displayName&`$expand=owners" -All)) {
@@ -8294,12 +8322,23 @@ function New-PimGroupOwnersProvider {
             $live.ToArray()
         }
         KeyOf = { param($r) ("$(Get-PimRowProp -Row $r -Names @('GroupName'))").ToLowerInvariant() + '|' + "$(Get-PimRowProp -Row $r -Names @('OwnerId'))" }
-        Equal = { param($d, $l) $true }
+        # GroupOwnersEligible OFF: existence is all (as always). ON: an owner eligibility that is missing or due (AutoExtend /
+        # expiry), or a permanent owner under migration, is an update (Get-PimGroupOwnerAction, PIM-GroupOwnerEligibility.ps1).
+        Equal = {
+            param($d, $l)
+            if (-not (Test-PimGroupOwnersEligibleEnabled)) { return $true }
+            (Get-PimGroupOwnerAction -Desired $d -Live $l -EligibleOn $true -MigrateOn (Test-PimGroupOwnerMigrationEnabled) -Days (Get-PimGroupOwnerEligibleDays)).none
+        }
+        ApplyUpdate = { param($item, $ctx) Invoke-PimGroupOwnerUpdate -Item $item -Ctx $ctx }
         ApplyCreate = {
             param($item, $ctx)
             $gn = Get-PimRowProp -Row $item.desired -Names @('GroupName'); $oid = Get-PimRowProp -Row $item.desired -Names @('OwnerId')
             $gid = Resolve-PimLiveGroupIdByName $gn
             if (-not $gid) { throw "GroupOwners: group '$gn' not found" }
+            # 95.2l: a PERSON with GroupOwnersEligible on becomes an owner ELIGIBILITY -- never a directory owner POST.
+            if ((Get-PimGroupOwnerMode -Desired $item.desired -Live $null -EligibleOn (Test-PimGroupOwnersEligibleEnabled)) -eq 'eligible') {
+                return (Invoke-PimGroupOwnerEligibleCreate -GroupId $gid -OwnerId $oid -Days (Get-PimGroupOwnerEligibleDays))
+            }
             $ok = $false
             for ($t = 0; $t -lt 4 -and -not $ok; $t++) {
                 try { Invoke-PimGraph -Method POST -Path "/groups/$gid/owners/`$ref" -Body @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$oid" } | Out-Null; $ok = $true }

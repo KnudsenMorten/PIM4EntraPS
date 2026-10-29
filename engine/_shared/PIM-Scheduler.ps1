@@ -92,6 +92,13 @@ $script:PimTickOnlyJobTypes += 'audit-retention'
 # "no change") and prunes past ConfigBackupRetentionDays (default 90; pinned kept) -- PIM-ConfigBackup.ps1. SQL only.
 $script:PimJobTypes += 'config-backup'
 $script:PimTickOnlyJobTypes += 'config-backup'
+# s98.3 (owner-approved 2026-10-29): 'demo-baseline-restore' puts the live demo environment back to the configuration backup
+# pinned + labelled 'demo-baseline', once a day at 02:00 UTC (PIM-DemoBaselineRestore.ps1). INERT unless pim.Settings
+# DemoMode is on AND the demo-environment proof holds; rows through the restore commit (journal Source 'restore', the
+# mass-change check in force), settings through the settings restore (never DemoMode / DemoGuestGroup / ManagerAccess /
+# EnvironmentName / the deny list).
+$script:PimJobTypes += 'demo-baseline-restore'
+$script:PimTickOnlyJobTypes += 'demo-baseline-restore'
 # 2026-10-05: 'licence-check' -- this managing / managed tenant's Pro licence no longer covers MSP (refused) or is in grace.
 # PIM 100.72 (4): telemetry, not a guard -- the run is a WARNING (Jobs page + run telemetry). A single tenant is not checked.
 $script:PimJobTypes += 'licence-check'
@@ -407,6 +414,9 @@ function Get-PimDefaultJobSchedule {
         [pscustomobject]@{ name='audit-retention'; type='audit-retention'; intervalMinutes=1440; enabled=$true }
         # CONFIG-1.3: daily (SCHED-1: the cadence counts from the job's finish); "Back up now" on Backups & restore runs one on demand.
         [pscustomobject]@{ name='config-backup'; type='config-backup'; intervalMinutes=1440; enabled=$true }
+        # s98.3: hourly CHECK, one ACT a day -- the first run at or after atHourUtc:00 UTC (02:00) that has not acted on that
+        # slot yet. Inert (one setting read) unless DemoMode is on; refused unless the environment is proven the demo one.
+        [pscustomobject]@{ name='demo-baseline-restore'; type='demo-baseline-restore'; intervalMinutes=60; enabled=$true; atHourUtc=2 }
         [pscustomobject]@{ name='licence-check'; type='licence-check'; intervalMinutes=60; enabled=$true }
         # REQ-AR-2: no-op until review rules are saved and enabled (Settings > Access reviews); Pro 'reviews.campaigns'.
         [pscustomobject]@{ name='access-review-cycle'; type='access-review-cycle'; intervalMinutes=360; enabled=$true }
@@ -1509,6 +1519,13 @@ function Initialize-PimDefaultJobHandlers {
         # CONFIG-1.3: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimConfigBackupJob).
         [pscustomobject]@{ ran=$false; unimplemented=$true
             detail='unimplemented:config-backup (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'demo-baseline-restore' -Handler {
+        param($job,$now,$whatIf)
+        # s98.3: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimDemoBaselineRestoreJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:demo-baseline-restore (wired by Start-PimScheduler)'
             whatIf=[bool]$whatIf }
     }
     Register-PimJobHandler -Type 'install-key' -Handler {
@@ -4265,7 +4282,21 @@ function Invoke-PimTickJobRun {
         $out.started = $started
         $jobStart = $TickNowUtc.Add($started - $WallStart)
         $coveredBy = if ($WhatIf -or $Kind -ne 'scheduled') { $null } else { Get-PimTickCoverage -Job $Job }   # §87 BUG-281
-        if ($coveredBy) {
+        # 70.17 (owner 2026-10-29 "Delta + skip if unchanged"): a SCHEDULED engine-delta whose scopes are unchanged since its
+        # last clean run, with nothing failing / waiting / date-due and the drift sweep not due, is skipped (PIM-DeltaSkip.ps1).
+        # Never a trigger, a WhatIf plan or the daily full-reconcile (engine-full). The verdict also carries the signature
+        # taken BEFORE the run, which the run records afterwards.
+        $dsv = $null
+        if (-not $coveredBy -and -not $WhatIf -and $Kind -eq 'scheduled' -and "$($Job.type)" -eq 'engine-delta' -and (Get-Command Get-PimDeltaSkipVerdict -ErrorAction SilentlyContinue)) {
+            try { $dsv = Get-PimDeltaSkipVerdict -Job $Job -NowUtc $jobStart } catch { $dsv = $null }
+        }
+        if ($dsv -and $dsv.skip) {
+            $res = [pscustomobject]@{ name = $name; type = "$($Job.type)"; ok = $true; ran = $false; cadenceSkipped = $true; skipCode = "$($dsv.code)"
+                detail = ("[cadence] SKIPPED: {0} -- {1}" -f $dsv.code, $dsv.reason); ranUtc = $jobStart.ToString('o'); correlationId = $runId }
+            # §100.46: a skip repeats every tick -- printed once per change of state (the run record carries the full text).
+            $__sm = ("[scheduler] {0}: [cadence] SKIPPED: {1} (desired state unchanged since its last clean run)" -f $name, $dsv.code)
+            if (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) { Write-PimLogOnce -Key "sched.deltaskip|$name" -Message $__sm -ForegroundColor DarkGray } else { Write-Host $res.detail -ForegroundColor DarkGray }
+        } elseif ($coveredBy) {
             $res = [pscustomobject]@{ name = $name; type = "$($Job.type)"; ok = $true; ran = $false; covered = $true
                 detail = ("covered -- its scopes were reconciled cleanly earlier in this tick by {0}; next run on its own cadence" -f (@($coveredBy) -join ', '))
                 ranUtc = $jobStart.ToString('o'); correlationId = $runId }
@@ -4294,6 +4325,8 @@ function Invoke-PimTickJobRun {
                 $res | Add-Member -NotePropertyName reason  -NotePropertyValue "$Reason" -Force
             }
             if (-not $WhatIf) { Add-PimTickReconciled -Job $Job -Result $res }   # §87
+            # 70.17: what this real run saw (signature from BEFORE it, clean or not) decides whether its next run may skip.
+            if ($dsv) { [void](Save-PimDeltaSkipRunState -Job $Job -Verdict $dsv -Result $res -StartedUtc $jobStart) }
         }
         $out.result = $res
         # (2) its record, the moment it ends. A record that cannot be built never takes the run's result with it.
@@ -4764,3 +4797,5 @@ function Start-PimScheduler {
 
 # §95.2o: the job lanes (per-area locks, the scope gate, the time limit, why a run was interrupted, the CAS state writes).
 . (Join-Path $PSScriptRoot 'PIM-JobLanes.ps1')
+# 70.17: skip a timer engine-delta whose scopes are unchanged since its last clean run (Invoke-PimTickJobRun).
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-DeltaSkip.ps1')) { . (Join-Path $PSScriptRoot 'PIM-DeltaSkip.ps1') }

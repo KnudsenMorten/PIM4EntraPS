@@ -234,7 +234,9 @@ $script:PimFailureRules = @(
     # §95.2o (a customer, 2026-10-07): Entra refuses an Entra ROLE on a group that is not role-assignable -- shown as
     # "Unrecognised failure". The flag is fixed when the group is created and cannot be changed afterwards.
     @{ code = 'ENTRA-GROUP-NOT-ROLE-ASSIGNABLE'
-       match = { param($m, $row) $m -match '(?i)InvalidRoleAssignment|not role[- ]assignable|isAssignableToRole' }
+       # AZRES-NOTRA-LABEL (SUP-2026-00250, 3.0.5): an Entra cause only. Azure's "InvalidRoleAssignmentRequest" (ARM) is not
+       # this -- an Azure role never needs a role-assignable group; that answer is ARM-REQUEST-REFUSED-ONCE below.
+       match = { param($m, $row) $m -notmatch '(?i)management\.azure\.com' -and $m -match '(?i)InvalidRoleAssignment\b|not role[- ]assignable|isAssignableToRole' }
        title = 'The group is not role-assignable, so Entra refuses the role'
        cause = 'An Entra role can be given to a group only when the group was CREATED as role-assignable. This group exists without that flag (it was created outside PIM Manager, or before IsRoleAssignable was set on its definition), and the flag cannot be added to an existing group.'
        remedy = 'Set IsRoleAssignable = TRUE on the group''s definition; the daily reconcile then recreates the group role-assignable and the role applies on the next run. Or give the role to another, role-assignable group.'
@@ -632,6 +634,19 @@ $script:PimFailureRules = @(
        remedy = 'Nothing to do when it happens once: the next run looks the role up again. If it repeats for the same scope, read the raw Azure error -- it names what Azure refused.'
        retryable = $true; severity = 'transient'
        fixes = @() }
+
+    # AZRES-NOTRA-LABEL (SUP-2026-00250, internal 21/23/27 Oct 2026, 3.0.5): re-creating an Azure role assignment that had been
+    # there for days answered "PUT .../providers/Microsoft.Authorization/roleAssignmentScheduleRequests/... -> HTTP 400 :
+    # InvalidRoleAssignmentRequest -- Request body is invalid" once, and the next run applied the same body. It was labelled
+    # ENTRA-GROUP-NOT-ROLE-ASSIGNABLE (wrong cause, wrong fix). Only on ARM's schedule-request PUTs; a body that is really
+    # invalid keeps failing and is escalated by the waiting-window rule, so it still surfaces.
+    @{ code = 'ARM-REQUEST-REFUSED-ONCE'
+       match = { param($m, $row) $m -match '(?i)management\.azure\.com\S*/role(Assignment|Eligibility)ScheduleRequests\S*\s*->\s*HTTP 400\b.{0,10}InvalidRoleAssignmentRequest' }
+       title = 'Azure refused the role assignment request once'
+       cause = 'Azure answered the request to give this Azure role with "Request body is invalid". The same request is normally accepted on the next run, so Azure was not ready for it yet (for example while it was still removing an earlier assignment at that scope). The group and the row are fine.'
+       remedy = 'Nothing to do when it happens once: the next run sends it again. If it repeats for the same scope for hours, read the raw Azure error and check the role and the scope in the row.'
+       retryable = $true; severity = 'transient'
+       fixes = @() }
 )
 
 # 100.34 UPLINK-ERRORCLASS: what a code means for Invardia's fix-request triage. customer-config = the customer's data,
@@ -728,6 +743,7 @@ function Get-PimFailureCodeTable {
         ,@('ARM-ROLE-NOT-FOUND',               'pim-az-0108',    'target-missing',    'customer', '',      '2.4.638')
         ,@('AZURE-NOT-VISIBLE',                'pim-az-0109',    'permission',        'customer', '',      '2.4.638')
         ,@('ARM-ROLE-LOOKUP-FAILED',           'pim-az-0110',    'upstream-error',    'nobody',   '',      '2.4.646')
+        ,@('ARM-REQUEST-REFUSED-ONCE',         'pim-az-0111',    'upstream-error',    'nobody',   '',      '3.0.5')
         ,@('ENTRA-ROLE-NOT-IN-TENANT',         'pim-entra-0101', 'target-missing',    'customer', '',      '2.4.638')
         ,@('ENTRA-GROUP-NOT-ROLE-ASSIGNABLE',  'pim-entra-0102', 'customer-config',   'customer', '',      '2.4.638')
         ,@('DUPLICATE-AU-NAME',                'pim-entra-0103', 'customer-config',   'customer', '',      '2.4.638')
