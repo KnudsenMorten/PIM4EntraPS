@@ -124,6 +124,9 @@ function New-PimUpdateStateRecord {
         [AllowNull()][object]$SqlAccess = $null,
         # framework 8.17 SignIn: the Manager's sign-in layer read THIS run (Get-PimSignInLayer); $null = not read -> carried.
         [AllowNull()][object]$SignIn = $null,
+        # REQUIREMENTS 95.2i: the updater's check of the engine identity's rights for the version it rolled to
+        # (Invoke-PimUpdaterEnginePermissionCheck .record); $null = not checked this run -> the previous record's carried.
+        [AllowNull()][object]$EnginePermissions = $null,
         [datetime]$NowUtc = [datetime]::UtcNow
     )
     $ts = $NowUtc.ToUniversalTime().ToString('o')
@@ -147,6 +150,8 @@ function New-PimUpdateStateRecord {
     if ($null -eq $sqlAcc -and $Previous) { $sqlAcc = Get-PimUpdateStateField -Object $Previous -Key 'sqlAccess' }
     $signIn = $SignIn
     if ($null -eq $signIn -and $Previous) { $signIn = Get-PimUpdateStateField -Object $Previous -Key 'signIn' }
+    $engPerm = $EnginePermissions
+    if ($null -eq $engPerm -and $Previous) { $engPerm = Get-PimUpdateStateField -Object $Previous -Key 'enginePermissions' }
     $rec = [ordered]@{
         schema             = (Get-PimUpdateStateSchema)
         # 'run' = written by an update run. The deployment writes kind 'deploy' (New-PimUpdateStateDeployRecord)
@@ -187,6 +192,7 @@ function New-PimUpdateStateRecord {
     }
     if ($null -ne $sqlAcc) { $rec['sqlAccess'] = $sqlAcc }
     if ($null -ne $signIn) { $rec['signIn'] = $signIn }
+    if ($null -ne $engPerm) { $rec['enginePermissions'] = $engPerm }
     return $rec
 }
 
@@ -430,6 +436,11 @@ function Get-PimUpdateStateVerdict {
         configuredUtc      = ''
         source             = ''
         installedVersion   = ''
+        # REQUIREMENTS 95.2i: the update run's check of the engine identity after its last roll (the recorded object, or
+        # $null), and whether it found a permission missing. The update itself is not coloured by it -- the roll succeeded;
+        # the Home permission banner is where a missing permission turns red.
+        enginePermissions  = $null
+        permissionsMissing = $false
     }
 
     if ($null -eq $Record -or ("$Record".Trim() -eq '' -and -not ($Record -is [System.Collections.IDictionary]))) {
@@ -625,6 +636,17 @@ function Get-PimUpdateStateVerdict {
         $bits.Add("Last update check needs a look -- $keeps. The details below name the one setting to change.")
     } elseif ($out.waiting) {
         $bits.Add("Waiting for the install key -- the engine claims it within about 5 minutes of install, and the next update run proceeds; $keeps.")
+    }
+    # 95.2i: the update run checked the engine identity's rights for the version it rolled to.
+    $ep = Get-PimUpdateStateField -Object $Record -Key 'enginePermissions'
+    if ($null -ne $ep) {
+        $out.enginePermissions = $ep
+        if ("$(Get-PimUpdateStateField -Object $ep -Key 'state')" -eq 'missing') {
+            $out.permissionsMissing = $true
+            $epMiss = @(@(Get-PimUpdateStateField -Object $ep -Key 'missingGraph') + @(Get-PimUpdateStateField -Object $ep -Key 'missingAzure') | Where-Object { "$_".Trim() })
+            $bits.Add("After the update the engine is missing $($epMiss.Count) permission(s) this version needs ($($epMiss -join ', ')) -- " +
+                      'Home > Permissions shows the command a Privileged Role Administrator runs to grant them.')
+        }
     }
     if ($out.stale) {
         $bits.Add('The values below are what was last RECORDED, not a live reading -- the update job has not reported recently.')

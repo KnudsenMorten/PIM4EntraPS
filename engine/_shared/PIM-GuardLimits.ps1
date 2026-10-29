@@ -38,8 +38,9 @@ function Get-PimGuardLimitCatalog {
             unit = 'rows of one list in one commit'
             why = 'Floor 5: lower and every routine clean-up of a few rows would need a SuperAdmin. Ceiling 200: higher and the check would never ask in a normal list; a commit that keeps none of a list''s rows, or only a few of them, always asks, whatever this number is.'
             bounds = @('rows taken out of one list in one commit (a commit, a restore from a backup, the departments save)') }
-        # PIM 100.119 B5: ONE number, SEVEN actions -- every caller of Get-PimRemoveBudget / Test-PimRemoveBudgetAllowed. The
-        # page, the confirmation and "More info" list them, so nobody raises it for one and gets the other six.
+        # PIM 100.119 B5: ONE number, EIGHT actions -- every caller of Get-PimRemoveBudget / Test-PimRemoveBudgetAllowed. The
+        # page, the confirmation and "More info" list them, so nobody raises it for one and gets the other seven.
+        # 95.2l (2026-10-29): the eighth is the owner migration (permanent group owners moved to eligible owners).
         [pscustomobject]@{ guardId = 'engine.remove-budget'; floor = 1; default = 5; ceiling = 25
             unit = 'removals per scope per run'
             why = 'Floor 1: 0 would stop every single removal, which is switching removal off and not a limit. Ceiling 25: more than that in one run is "many" (the commit check asks from 25); a larger removal goes through the approval of its exact list, which has no ceiling.'
@@ -50,7 +51,8 @@ function Get-PimGuardLimitCatalog {
                 'groups deleted because their definition is marked Retire'
                 'groups deleted from the change queue (a DELETE chosen on the Drift page)'
                 'admin accounts offboarded in one run (disabled, memberships removed)'
-                'in a managed tenant: central admins the managing tenant withdraws in one pull') }
+                'in a managed tenant: central admins the managing tenant withdraws in one pull'
+                'permanent group owners moved to eligible owners in one run (when the owner migration is switched on)') }
         [pscustomobject]@{ guardId = 'engine.disable-guard'; floor = 1; default = 3; ceiling = 25
             unit = 'accounts per run'
             why = 'Floor 1: 0 would stop every disable, including the one a row asks for. Ceiling 25: a real offboarding is a handful of accounts; a larger one is released for exactly its list of accounts, which has no ceiling.'

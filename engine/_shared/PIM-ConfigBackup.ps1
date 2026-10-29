@@ -1,4 +1,4 @@
-﻿<#
+<#
   CONFIG-1.3 / CONFIG-1.4 (framework DOCS/REQUIREMENTS.md) / PIM §96.3 + §96.4 -- CONFIGURATION BACKUP and PICK-WHAT-YOU-RESTORE.
 
   Operator 2026-10-06: "backup the configurations in pim (dept, external companies, delegations, admins, settings and other
@@ -81,8 +81,10 @@ function Get-PimConfigBackupSettingDenyList {
                      # PIM 100.123: the AD clean-up / server-group approvals and the worker's own records -- an old approval restored would be usable again
                      'HybridAdCleanupApproval', 'HybridAdServerAutoGroupsApproval', 'AdServerAutoGroups', 'AdServerAutoGroupsWaiting', 'AdServerAutoGroupsProgress', 'AdCleanupResult', 'AdCleanupLocalAdmin',
                      # SNAP-INC (owner 2026-10-20): the snapshot's group delta link + last full read -- runtime state of THIS store's rows
-                     'ActiveAssignmentsGroupDelta')
-        statePrefix = @('JobRunOutput:', 'SchedulerState', 'SchedulerLease', 'JobScope', 'HybridAdSyncMemory')   # 100.122 F1: the AD sync's memory (Entra ids of THIS tenant) is never restored
+                     'ActiveAssignmentsGroupDelta',
+                     # s98.3: the nightly demo baseline restore's own record of the slot it acted on
+                     'DemoBaselineRestoreState')
+        statePrefix = @('JobRunOutput:', 'SchedulerState', 'SchedulerLease', 'JobScope', 'HybridAdSyncMemory', 'DeltaSkipState:')   # 100.122 F1: the AD sync's memory (Entra ids of THIS tenant) is never restored; 70.17: a job's last-run skip state
         # ...Change (case-sensitive, PascalCase) = a PENDING change request (e.g. the break-glass maker/checker request) --
         # runtime state, never configuration. Named by pattern on purpose: the engine never names that request row
         # (Test-PimBreakGlassMakerChecker), and 'Exchange' never matches.
@@ -213,6 +215,54 @@ function ConvertFrom-PimConfigBackupJson {
     try { return (ConvertFrom-Json -InputObject $Json) } catch { return "$Json" }
 }
 
+function ConvertFrom-PimConfigBackupJsonValue {
+    <#
+      PURE. As ConvertFrom-PimConfigBackupJson, but a JSON LIST stays a list -- also a list of ONE item (BUG-BACKUP-LIST-KEY):
+      ConvertFrom-Json enumerates a top-level array on pwsh 7 and a plain `return` unrolls it on Windows PowerShell 5.1, so
+      '[{"key":"all"}]' came back as the object {key}. The list is read as the property of a wrapper object (never
+      enumerated on either edition) and returned with the unary comma. Callers ASSIGN the result ($v = ...), never pipe it.
+    #>
+    param([AllowNull()][string]$Json)
+    if ($null -eq $Json -or "$Json".Trim() -eq '') { return $null }
+    $t = "$Json".Trim()
+    try {
+        if ($t.StartsWith('[')) {
+            $w = ConvertFrom-Json -InputObject ('{"v":' + $t + '}')
+            $list = $w.v
+            if ($null -eq $list) { return $null }
+            return , ([object[]]@($list))
+        }
+        return (ConvertFrom-Json -InputObject $t)
+    } catch { return "$Json" }
+}
+
+function Copy-PimConfigBackupValue {
+    <#
+      Internal, PURE. A deep copy of a parsed setting value: an object (PSCustomObject or dictionary) becomes a new
+      PSCustomObject, a list a new object[] -- a list of ONE item stays a list (returned with the unary comma; callers
+      assign it, never pipe it). Strings and value types are returned as they are.
+    #>
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string] -or $Value -is [ValueType]) { return $Value }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $o = [ordered]@{}
+        foreach ($k in @($Value.Keys)) { $c = Copy-PimConfigBackupValue -Value $Value[$k]; $o["$k"] = $c }
+        return [pscustomobject]$o
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        $l = New-Object System.Collections.Generic.List[object]
+        foreach ($e in $Value) { $c = Copy-PimConfigBackupValue -Value $e; $l.Add($c) }
+        return , ($l.ToArray())
+    }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        $o = [ordered]@{}
+        foreach ($pr in @($Value.PSObject.Properties)) { $c = Copy-PimConfigBackupValue -Value $pr.Value; $o[$pr.Name] = $c }
+        return [pscustomobject]$o
+    }
+    return $Value
+}
+
 function Get-PimConfigBackupHash {
     <# PURE. Lower-case hex SHA-256 of a UTF-8 text. #>
     param([AllowNull()][string]$Text)
@@ -259,7 +309,9 @@ function New-PimConfigBackupSnapshot {
     $redactAll = New-Object System.Collections.Generic.List[string]
     $mkItem = {
         param($key, $json, $label)
-        $parsed = ConvertFrom-PimConfigBackupJson -Json $json
+        # a list stays a list, also with ONE item (BUG-BACKUP-LIST-KEY): its redacted paths are then "[0].key", which the
+        # restore puts back by index -- an unrolled one-item list was recorded as the object path "key" of a non-list
+        $parsed = ConvertFrom-PimConfigBackupJsonValue -Json $json
         if ($null -eq $parsed) { return @{ item = @{ key = "$key"; json = $null }; redacted = @(); dropAll = $false } }
         $rs = Remove-PimConfigBackupSecrets -Value $parsed
         if ($rs.dropAll) { return @{ item = $null; redacted = @("$label"); dropAll = $true } }
@@ -393,32 +445,117 @@ function Compare-PimConfigBackupSnapshot {
     return @($out.ToArray())
 }
 
-function Get-PimConfigBackupSettingRestoreValue {
+function ConvertTo-PimConfigBackupPathTokens {
     <#
-      PURE. The value a settings restore WRITES: the backup's value with every secret the backup could not hold taken from the
-      CURRENT value (the redacted paths of that setting), so a restore never blanks a key or a webhook. Paths are dotted
-      top-down names (array positions are not carried back -- an array element that was a secret stays out).
+      Internal, PURE. A redacted path ("[0].key", "a[2].b", "a.b") -> @(@{ name; index }) top-down; index -1 = a property
+      name, otherwise a list position. $null when the text is not a path this code reads (nothing is guessed).
+    #>
+    param([string]$Path)
+    $ms = [regex]::Matches("$Path", '\[(\d+)\]|([^.\[\]]+)')
+    $l = New-Object System.Collections.Generic.List[object]
+    $rebuilt = ''
+    foreach ($m in $ms) {
+        if ($m.Groups[1].Success) { $l.Add(@{ name = ''; index = [int]$m.Groups[1].Value }); $rebuilt += "[$($m.Groups[1].Value)]" }
+        else { $l.Add(@{ name = $m.Groups[2].Value; index = -1 }); $rebuilt += $(if ($rebuilt) { '.' } else { '' }) + $m.Groups[2].Value }
+    }
+    if (-not $l.Count -or $rebuilt -ne "$Path") { return $null }
+    return , ($l.ToArray())
+}
+
+function Get-PimConfigBackupSettingRestoreResult {
+    <#
+      PURE. The value a settings restore WRITES, and what could not be put back. The backup's value (a deep copy -- a list
+      stays a list, also with ONE item) with every secret the backup could not hold taken from the CURRENT value (the
+      redacted paths of that setting), so a restore never blanks a key or a webhook.
+        * an OBJECT path ("teams.webhookUrl") is put back as it always was: from the current value when it has it, nothing
+          when it does not (there is no secret to keep);
+        * a path INSIDE A LIST ("[0].key", "a[2].b" -- BUG-BACKUP-LIST-KEY) is put back from the current value BY INDEX, and
+          ONLY while the list still lines up: at every list on the way the backup and the current value hold the same
+          number of items, and the current item at that index has the field. Otherwise the path is NOT restored and is
+          listed in notRestored with the reason (inList = $true) -- no value is invented. A list item that was itself a
+          secret ("a[1]") is never put back (the backup holds the list without it): listed, inList = $false.
+      A current list PowerShell unrolled into its one item (a reader that returned [{..}] as {..}) counts as that one-item list.
+      Returns @{ value; restored = @(paths); notRestored = @(@{ path; reason; inList }) }.
     #>
     param([AllowNull()][object]$Backup, [AllowNull()][object]$Current, [string[]]$RedactedPaths = @())
-    if ($null -eq $Backup) { return $null }
-    $copy = ConvertFrom-PimConfigBackupJson -Json (ConvertTo-Json -InputObject $Backup -Depth 30 -Compress)
-    foreach ($p in @($RedactedPaths | Where-Object { "$_".Trim() -and "$_" -notmatch '\[' })) {
-        $parts = @("$p" -split '\.')
-        $src = $Current; $ok = $true
-        foreach ($seg in $parts) { if ($null -ne $src -and $src -is [System.Management.Automation.PSCustomObject] -and $src.PSObject.Properties[$seg]) { $src = $src.PSObject.Properties[$seg].Value } else { $ok = $false; break } }
-        if (-not $ok) { continue }
-        $dst = $copy
-        for ($i = 0; $i -lt $parts.Count - 1; $i++) {
-            $seg = $parts[$i]
-            if (-not ($dst -is [System.Management.Automation.PSCustomObject])) { $ok = $false; break }
-            if (-not $dst.PSObject.Properties[$seg]) { $dst | Add-Member -NotePropertyName $seg -NotePropertyValue ([pscustomobject]@{}) }
-            $dst = $dst.PSObject.Properties[$seg].Value
+    $restored = New-Object System.Collections.Generic.List[string]
+    $notRestored = New-Object System.Collections.Generic.List[object]
+    if ($null -eq $Backup) { return @{ value = $null; restored = @(); notRestored = @() } }
+    $copy = Copy-PimConfigBackupValue -Value $Backup
+    $isObj = { param($x) $null -ne $x -and -not ($x -is [string]) -and -not ($x -is [System.Collections.IEnumerable]) -and $x -is [System.Management.Automation.PSCustomObject] }
+    $isList = { param($x) $null -ne $x -and $x -is [System.Collections.IList] }
+    foreach ($p in @($RedactedPaths | Where-Object { "$_".Trim() })) {
+        if ("$p" -notmatch '\[') {
+            # OBJECT path -- unchanged behaviour
+            $parts = @("$p" -split '\.')
+            $src = $Current; $ok = $true
+            foreach ($seg in $parts) { if ($null -ne $src -and $src -is [System.Management.Automation.PSCustomObject] -and $src.PSObject.Properties[$seg]) { $src = $src.PSObject.Properties[$seg].Value } else { $ok = $false; break } }
+            if (-not $ok) { continue }
+            $dst = $copy
+            for ($i = 0; $i -lt $parts.Count - 1; $i++) {
+                $seg = $parts[$i]
+                if (-not ($dst -is [System.Management.Automation.PSCustomObject])) { $ok = $false; break }
+                if (-not $dst.PSObject.Properties[$seg]) { $dst | Add-Member -NotePropertyName $seg -NotePropertyValue ([pscustomobject]@{}) }
+                $dst = $dst.PSObject.Properties[$seg].Value
+            }
+            if (-not $ok -or -not ($dst -is [System.Management.Automation.PSCustomObject])) { continue }
+            $last = $parts[$parts.Count - 1]
+            if ($dst.PSObject.Properties[$last]) { $dst.PSObject.Properties[$last].Value = $src } else { $dst | Add-Member -NotePropertyName $last -NotePropertyValue $src }
+            $restored.Add("$p")
+            continue
         }
-        if (-not $ok -or -not ($dst -is [System.Management.Automation.PSCustomObject])) { continue }
-        $last = $parts[$parts.Count - 1]
-        if ($dst.PSObject.Properties[$last]) { $dst.PSObject.Properties[$last].Value = $src } else { $dst | Add-Member -NotePropertyName $last -NotePropertyValue $src }
+        # LIST path -- by index, only while the backup and the current value line up
+        $tok = ConvertTo-PimConfigBackupPathTokens -Path "$p"
+        if ($null -eq $tok) { $notRestored.Add(@{ path = "$p"; reason = 'the path could not be read'; inList = $true }); continue }
+        $last = $tok[$tok.Count - 1]
+        if ($last.index -ge 0) { $notRestored.Add(@{ path = "$p"; reason = 'a list item that was itself a secret is not put back (the backup holds the list without it)'; inList = $false }); continue }
+        $d = $copy; $s = $Current; $why = $null; $at = ''
+        for ($i = 0; $i -lt $tok.Count - 1; $i++) {
+            $t = $tok[$i]
+            if ($t.index -ge 0) {
+                $here = if ($at) { $at } else { 'the top' }
+                if (-not (& $isList $d)) { $why = "the backup holds no list at $here"; break }
+                $sl = $null
+                if (& $isList $s) { $sl = $s } elseif (& $isObj $s) { $sl = @($s) }
+                if ($null -eq $sl) { $why = "the current value holds no list at $here"; break }
+                if ($sl.Count -ne $d.Count) { $why = "the list at $here holds $($d.Count) item(s) in the backup and $($sl.Count) now -- its items no longer line up"; break }
+                if ($t.index -ge $d.Count) { $why = "the list at $here has no item [$($t.index)]"; break }
+                $d = $d[$t.index]; $s = $sl[$t.index]
+                $at += "[$($t.index)]"
+            } else {
+                $name = "$($t.name)"
+                $at += $(if ($at) { '.' } else { '' }) + $name
+                if (-not (& $isObj $d) -or -not $d.PSObject.Properties[$name]) { $why = "the backup holds no $at"; break }
+                if (-not (& $isObj $s) -or -not $s.PSObject.Properties[$name]) { $why = "the current value holds no $at"; break }
+                $d = $d.PSObject.Properties[$name].Value; $s = $s.PSObject.Properties[$name].Value
+            }
+        }
+        if (-not $why) {
+            $name = "$($last.name)"
+            if (-not (& $isObj $d)) { $why = "the backup holds no item at $at" }
+            elseif (-not (& $isObj $s)) { $why = "the current value holds no item at $at" }
+            elseif (-not $s.PSObject.Properties[$name]) { $why = "the current item at $at has no $name to put back" }
+        }
+        if ($why) { $notRestored.Add(@{ path = "$p"; reason = $why; inList = $true }); continue }
+        $v = $s.PSObject.Properties[$name].Value
+        if ($d.PSObject.Properties[$name]) { $d.PSObject.Properties[$name].Value = $v } else { $d | Add-Member -NotePropertyName $name -NotePropertyValue $v }
+        $restored.Add("$p")
     }
-    return $copy
+    return @{ value = $copy; restored = @($restored.ToArray()); notRestored = @($notRestored.ToArray()) }
+}
+
+function Get-PimConfigBackupSettingRestoreValue {
+    <#
+      PURE. The value a settings restore WRITES (Get-PimConfigBackupSettingRestoreResult .value): the backup's value with
+      the current secrets put back -- object paths, and paths inside a list by index while the list still lines up. A list
+      is returned AS a list, also with one item (unary comma); assign the result, never pipe it.
+    #>
+    param([AllowNull()][object]$Backup, [AllowNull()][object]$Current, [string[]]$RedactedPaths = @())
+    $r = Get-PimConfigBackupSettingRestoreResult -Backup $Backup -Current $Current -RedactedPaths $RedactedPaths
+    $v = $r.value
+    if ($null -eq $v) { return $null }
+    if ($v -is [System.Collections.IList]) { return , $v }
+    return $v
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -524,9 +661,13 @@ function Invoke-PimConfigBackupSettingsRestore {
       Restores the ticked SETTINGS of one backup (CONFIG-1.4: per setting, old -> new). -Backup: Get-PimConfigBackupContent
       output. -Reader { param($Name) <current stored value or $null> }; -Writer { param($Name, $ValueJson) } ($null = clear the
       setting); -Audit { param($Name, $Before, $After) }. A setting the backup holds is written with the CURRENT secrets put back
-      (Get-PimConfigBackupSettingRestoreValue); a setting added since the backup is cleared. Only route 'direct' is written --
-      the break-glass list (maker/checker), the emergency override and every deny-listed name are refused here.
-      Returns @{ written = @(names); skipped = @(@{ name; reason }); errors = @(@{ name; error }) }.
+      (Get-PimConfigBackupSettingRestoreResult -- also inside a list, by index); a setting added since the backup is cleared.
+      Only route 'direct' is written -- the break-glass list (maker/checker), the emergency override and every deny-listed
+      name are refused here. BUG-BACKUP-LIST-KEY: a setting with a redacted field inside a list that cannot be put back (the
+      list no longer lines up with the current one) is NOT written -- skipped with the paths; a list item that was itself a
+      secret stays out as before and is listed in notRestored.
+      Returns @{ written = @(names); skipped = @(@{ name; reason [; paths] }); errors = @(@{ name; error });
+                 notRestored = @(@{ name; path; reason }) }.
     #>
     param([Parameter(Mandatory)][hashtable]$Backup, [string[]]$Names = @(), [Parameter(Mandatory)][scriptblock]$Reader,
           [Parameter(Mandatory)][scriptblock]$Writer, [scriptblock]$Audit = $null)
@@ -534,6 +675,7 @@ function Invoke-PimConfigBackupSettingsRestore {
     $items = @{}; if ($ent) { foreach ($i in @($ent.items)) { $items["$($i.key)".ToLowerInvariant()] = $i } }
     $red = @(if ($ent) { @($ent.redacted) } else { @() })
     $written = New-Object System.Collections.Generic.List[string]; $skipped = New-Object System.Collections.Generic.List[object]; $errors = New-Object System.Collections.Generic.List[object]
+    $notRestored = New-Object System.Collections.Generic.List[object]
     foreach ($n in @($Names | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() } | Select-Object -Unique)) {
         $route = Get-PimConfigBackupSettingRestoreRoute -Name $n
         if ($route -ne 'direct') {
@@ -545,8 +687,20 @@ function Invoke-PimConfigBackupSettingsRestore {
             $it = $items[$n.ToLowerInvariant()]
             if ($it) {
                 $paths = @($red | Where-Object { "$_".StartsWith("${n}:", [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { "$_".Substring($n.Length + 1) })
-                $bv = ConvertFrom-PimConfigBackupJson -Json $it.json
-                $nv = Get-PimConfigBackupSettingRestoreValue -Backup $bv -Current $cur -RedactedPaths $paths
+                # a list stays a list, also with one item (BUG-BACKUP-LIST-KEY: Filters [{..}] was written back as {..})
+                $bv = ConvertFrom-PimConfigBackupJsonValue -Json $it.json
+                $rr = Get-PimConfigBackupSettingRestoreResult -Backup $bv -Current $cur -RedactedPaths $paths
+                # A field INSIDE A LIST the backup could not hold, and the current value no longer lines up to put it back:
+                # writing the setting would store list items WITHOUT that field. Not written -- skipped, with the paths.
+                $lost = @($rr.notRestored | Where-Object { $_.inList })
+                if ($lost.Count) {
+                    $skipped.Add(@{ name = $n; reason = ('not restored: the backup could not hold ' + (@($lost | ForEach-Object { "$($_.path) ($($_.reason))" }) -join '; ') +
+                                                          ' -- writing it would leave those list items without them. Change it on its own page.')
+                                    paths = @($lost | ForEach-Object { "$($_.path)" }) })
+                    continue
+                }
+                foreach ($x in @($rr.notRestored)) { $notRestored.Add(@{ name = $n; path = "$($x.path)"; reason = "$($x.reason)" }) }
+                $nv = $rr.value
                 $json = if ($null -eq $nv) { $null } else { ConvertTo-Json -InputObject $nv -Depth 30 -Compress }
                 & $Writer $n $json
                 if ($Audit) { & $Audit $n (Remove-PimConfigBackupSecrets -Value $cur).value $bv }
@@ -557,7 +711,69 @@ function Invoke-PimConfigBackupSettingsRestore {
             $written.Add($n)
         } catch { $errors.Add(@{ name = $n; error = "$($_.Exception.Message)" }) }
     }
-    return @{ written = @($written.ToArray()); skipped = @($skipped.ToArray()); errors = @($errors.ToArray()) }
+    return @{ written = @($written.ToArray()); skipped = @($skipped.ToArray()); errors = @($errors.ToArray()); notRestored = @($notRestored.ToArray()) }
+}
+
+function Test-PimConfigBackupItemRedacted {
+    <# PURE. True when the backup could not hold ROW <Entity>/<Key> whole: a property was redacted, or the row was dropped. #>
+    param([string]$Entity, [string]$Key, [string[]]$Redacted = @())
+    $label = "$Entity/$Key"
+    foreach ($p in @($Redacted)) {
+        $s = "$p"
+        if ($s.Equals($label, [StringComparison]::OrdinalIgnoreCase) -or $s.StartsWith("${label}:", [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function New-PimConfigBackupRestoreRowPlan {
+    <#
+      PURE. PIM s98.3 -- the FULL row set ONE pim.Rows entity holds after it is put back to a backup, for a full-set commit
+      (Invoke-PimConfigBackupRestoreCommit). -Diff: one entity of Compare-PimConfigBackupSnapshot (added / removed / changed
+      since the backup). -LiveItems: the rows as stored NOW (@{ key; json }, the stored text). -BackupItems /
+      -BackupRedacted: that entity of the backup (Get-PimConfigBackupContent).
+        * a row the diff does not name stays EXACTLY as stored (its live text -- a secret in it is kept);
+        * changed since    -> the backup's row;
+        * removed since    -> the backup's row is added back;
+        * added since      -> taken out.
+      A changed / removed / added row whose backup copy is REDACTED (a secret the backup could not hold) is never restored
+      by this path -- writing it would blank the secret -- and makes the plan refused (ok = $false, refused[] says which).
+      Returns @{ entity; ok; refused; items = @(@{ key; json; op = Keep|Modify|Add }); beforeCount; afterCount; adds;
+      modifies; removes; removedKeys }.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Diff, [object[]]$LiveItems = @(), [object[]]$BackupItems = @(), [string[]]$BackupRedacted = @())
+    $entity = "$($Diff.entity)"
+    $bk = @{}; foreach ($i in @($BackupItems | Where-Object { $_ })) { $bk["$($i.key)".ToLowerInvariant()] = $i }
+    $drop = @{}; foreach ($a in @($Diff.added | Where-Object { $_ })) { $drop["$($a.key)".ToLowerInvariant()] = $true }
+    $chg = @{}; foreach ($c in @($Diff.changed | Where-Object { $_ })) { $chg["$($c.key)".ToLowerInvariant()] = $true }
+    $refused = New-Object System.Collections.Generic.List[string]
+    $items = New-Object System.Collections.Generic.List[object]
+    $removedKeys = New-Object System.Collections.Generic.List[string]
+    $liveKeys = @{}; $adds = 0; $mods = 0
+    $live = @($LiveItems | Where-Object { $_ -and "$($_.key)".Trim() })
+    foreach ($li in $live) {
+        $k = "$($li.key)"; $lk = $k.ToLowerInvariant(); $liveKeys[$lk] = $true
+        if ($drop.ContainsKey($lk)) {
+            if (Test-PimConfigBackupItemRedacted -Entity $entity -Key $k -Redacted $BackupRedacted) { $refused.Add("$entity/$k is not in the backup because the backup could not hold it (a secret) -- it is never taken out by a restore") ; continue }
+            $removedKeys.Add($k); continue
+        }
+        if ($chg.ContainsKey($lk)) {
+            $b = $bk[$lk]
+            if (Test-PimConfigBackupItemRedacted -Entity $entity -Key $k -Redacted $BackupRedacted) { $refused.Add("$entity/$k holds a secret the backup could not keep -- restoring it would blank that secret"); continue }
+            if (-not $b -or $null -eq $b.json -or "$($b.json)".Trim() -eq '') { $refused.Add("$entity/$k has no stored value in the backup"); continue }
+            $items.Add(@{ key = $k; json = "$($b.json)"; op = 'Modify' }); $mods++; continue
+        }
+        $items.Add(@{ key = $k; json = "$($li.json)"; op = 'Keep' })
+    }
+    foreach ($r in @($Diff.removed | Where-Object { $_ })) {
+        $k = "$($r.key)"; $lk = $k.ToLowerInvariant()
+        if ($liveKeys.ContainsKey($lk)) { continue }   # stored again since the diff was taken: kept as it is
+        $b = $bk[$lk]
+        if (Test-PimConfigBackupItemRedacted -Entity $entity -Key $k -Redacted $BackupRedacted) { $refused.Add("$entity/$k holds a secret the backup could not keep -- adding it back would leave that secret blank"); continue }
+        if (-not $b -or $null -eq $b.json -or "$($b.json)".Trim() -eq '') { $refused.Add("$entity/$k has no stored value in the backup"); continue }
+        $items.Add(@{ key = $k; json = "$($b.json)"; op = 'Add' }); $adds++
+    }
+    return @{ entity = $entity; ok = ($refused.Count -eq 0); refused = @($refused.ToArray()); items = @($items.ToArray())
+              beforeCount = $live.Count; afterCount = $items.Count; adds = $adds; modifies = $mods; removes = $removedKeys.Count; removedKeys = @($removedKeys.ToArray()) }
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -821,4 +1037,92 @@ function Invoke-PimConfigBackupJob {
     $what = if ($b.noChange) { "no change since $($b.sameAs) (recorded, no copy)" } else { "backup $($b.backupId): $($b.entities) entities, $($b.items) items, $($b.bytes) bytes compressed" }
     return [pscustomobject]@{ ran = $true; whatIf = [bool]$WhatIf; backupId = "$($b.backupId)"; noChange = [bool]$b.noChange; pruned = @($p.pruned).Count
         detail = ("config backup{0}: {1}; retention {2} days: {3} pruned, {4} kept" -f $(if ($WhatIf) { ' (what-if)' } else { '' }), $what, $p.retentionDays, @($p.pruned).Count, $p.kept) }
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# PIM s98.3 -- the UNATTENDED entity restore: commit a restore plan as the SYSTEM actor
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimConfigBackupLiveRowItems {
+    <# The rows of one pim.Rows entity EXACTLY as stored: @(@{ key; json }) (the stored [Key] and DataJson text). #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Entity)
+    return @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Parameters @{ e = $Entity } -Sql 'SELECT [Key], DataJson FROM pim.Rows WHERE Entity = @e ORDER BY [Key]' |
+        ForEach-Object { @{ key = "$($_.Key)"; json = $(if ($null -eq $_.DataJson -or $_.DataJson -is [DBNull]) { $null } else { "$($_.DataJson)" }) } })
+}
+
+function Invoke-PimConfigBackupRestoreCommit {
+    <#
+      PIM s98.3 / CONFIG-1.4: COMMIT A RESTORE PLAN (New-PimConfigBackupRestoreRowPlan, one per entity) server-side, as -Actor
+      (default: the system actor of this process). The SAME store path the Manager's restore commit ends in: a full-set
+      replace per entity (Set-PimSqlEntityRowsTransactional, one transaction each), journaled in pim.CommitJournal with
+      Source 'restore' under ONE commit id for the whole restore, audited config.restore per entity, and the engine asked to
+      reconcile (Request-PimCommit) -- never a direct pim.Rows write. Shared by the demo-baseline-restore job and any
+      server-side caller (the GUI's restore commit can call it with the signed-in person as -Actor).
+      THE MASS-CHANGE BREAKER STAYS IN FORCE: the commit removal check (Test-PimCommitDeltaGuard -- the count limit, "keeps
+      none of the rows", "few left") is evaluated for EVERY entity BEFORE ANY write. One hold = NOTHING is written: the
+      result is held = $true with the holds, audited config.restore.held. There is no -Approved / -Confirm here: an
+      unattended caller has no SuperAdmin to approve exactly these rows, so it stops and reports -- it never forces.
+      A refused plan (a row whose secret the backup could not hold) = nothing is written either.
+      No guard library or no journal loaded = THROWS before any write (a restore that cannot be checked is not applied).
+      -WhatIf: the checks and the plan, nothing written. Returns @{ ok; held; holds; refused; whatIf; commitId; written =
+      @(@{ entity; adds; modifies; removes; rowCount }); errors = @(@{ entity; error }) }.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [object[]]$Plans = @(), [string]$BackupId = '', [string]$Actor = '',
+          [string]$ActorSource = 'scheduler', [string]$CommitId = '', [switch]$WhatIf)
+    if (-not (Get-Command Test-PimCommitDeltaGuard -ErrorAction SilentlyContinue)) { throw '[restore] the guard library (PIM-ManagerWriteGuards.ps1) is not loaded -- nothing was restored: the removal check of this restore cannot run' }
+    if (-not (Get-Command New-PimCommitJournalContext -ErrorAction SilentlyContinue)) { throw '[restore] the change journal (PIM-CommitJournal.ps1) is not loaded -- nothing was restored: a restore is always journaled' }
+    if (-not "$Actor".Trim()) { $Actor = Get-PimCommitJournalSystemActor }
+    $plans = @($Plans | Where-Object { $_ })
+    $res = [ordered]@{ ok = $false; held = $false; holds = @(); refused = @(); whatIf = [bool]$WhatIf; commitId = ''; written = @(); errors = @(); actor = "$Actor"; backupId = "$BackupId" }
+    $refused = @($plans | Where-Object { -not $_.ok } | ForEach-Object { @($_.refused) })
+    if ($refused.Count) { $res.refused = $refused; return [pscustomobject]$res }
+    # 1) the breaker, for every entity, before any write
+    $holds = New-Object System.Collections.Generic.List[object]
+    foreach ($p in $plans) {
+        $g = Test-PimCommitDeltaGuard -BeforeCount ([int]$p.beforeCount) -AfterCount ([int]$p.afterCount) -RemoveCount ([int]$p.removes)
+        if (-not $g.allowed) { $holds.Add([ordered]@{ entity = "$($p.entity)"; rule = "$($g.rule)"; reason = "$($g.reason)"; removeCount = [int]$g.removeCount; limit = [int]$g.limit; removedKeys = @($p.removedKeys) }) }
+    }
+    if ($holds.Count) {
+        $res.held = $true; $res.holds = @($holds.ToArray())
+        if (-not $WhatIf) {
+            Write-PimConfigBackupAudit -ConnectionString $ConnectionString -Actor $Actor -ActorSource $ActorSource -Action 'config.restore.held' -Target "pim.ConfigBackups:$BackupId" `
+                -After ([ordered]@{ backupId = "$BackupId"; holds = @($holds.ToArray() | ForEach-Object { [ordered]@{ entity = $_.entity; rule = $_.rule; removeCount = $_.removeCount; limit = $_.limit } }); note = 'nothing was restored -- a SuperAdmin restores it from Backups & restore (and approves the removal there)' }) -Result 'held'
+        }
+        return [pscustomobject]$res
+    }
+    $todo = @($plans | Where-Object { ([int]$_.adds + [int]$_.modifies + [int]$_.removes) -gt 0 })
+    if ($WhatIf) {
+        $res.ok = $true
+        $res.written = @($todo | ForEach-Object { [ordered]@{ entity = "$($_.entity)"; adds = [int]$_.adds; modifies = [int]$_.modifies; removes = [int]$_.removes; rowCount = [int]$_.afterCount } })
+        return [pscustomobject]$res
+    }
+    if (-not $todo.Count) { $res.ok = $true; return [pscustomobject]$res }
+    # 2) the writes: ONE commit id, Source 'restore', the actor named on every journal row
+    $cid = if ("$CommitId".Trim()) { "$CommitId".Trim() } else { [guid]::NewGuid().ToString('N') }
+    $res.commitId = $cid
+    $ctx = New-PimCommitJournalContext -CommitId $cid -Source 'restore' -InitiatedBy $Actor
+    $prev = Set-PimCommitJournalContext -Context $ctx
+    $written = New-Object System.Collections.Generic.List[object]; $errors = New-Object System.Collections.Generic.List[object]
+    try {
+        foreach ($p in $todo) {
+            $rows = @($p.items | ForEach-Object { ConvertFrom-PimConfigBackupJson -Json $_.json } | Where-Object { $null -ne $_ })
+            try {
+                $w = Set-PimSqlEntityRowsTransactional -ConnectionString $ConnectionString -Entity "$($p.entity)" -Base "$($p.entity)" -Rows $rows -AllowEmpty
+                $one = [ordered]@{ entity = "$($p.entity)"; adds = [int]$p.adds; modifies = [int]$p.modifies; removes = [int]$p.removes; rowCount = $(if ($w -and $null -ne $w.rowCount) { [int]$w.rowCount } else { $rows.Count }) }
+                $written.Add($one)
+                Write-PimConfigBackupAudit -ConnectionString $ConnectionString -Actor $Actor -ActorSource $ActorSource -Action 'config.restore' -Target "rows:$($p.entity)" `
+                    -Before ([ordered]@{ rows = [int]$p.beforeCount }) -After ([ordered]@{ backupId = "$BackupId"; commitId = $cid; rows = [int]$p.afterCount; adds = [int]$p.adds; modifies = [int]$p.modifies; removes = [int]$p.removes; removedKeys = @($p.removedKeys) })
+            } catch {
+                $errors.Add([ordered]@{ entity = "$($p.entity)"; error = "$($_.Exception.Message)" })
+                Write-PimConfigBackupAudit -ConnectionString $ConnectionString -Actor $Actor -ActorSource $ActorSource -Action 'config.restore' -Target "rows:$($p.entity)" `
+                    -After ([ordered]@{ backupId = "$BackupId"; commitId = $cid; error = "$($_.Exception.Message)" }) -Result 'error'
+                break   # the entities after it are not written: the run fails and the next run starts again from the diff
+            }
+        }
+    } finally { [void](Set-PimCommitJournalContext -Context $prev) }
+    # 3) like every commit: the engine reconciles what was put back
+    if ($written.Count -and (Get-Command Request-PimCommit -ErrorAction SilentlyContinue)) {
+        try { Request-PimCommit -Scope 'All' -Reason "restore:$BackupId" } catch { Write-Warning "[restore] the rows were restored, but the engine run could not be queued: $($_.Exception.Message) -- the next scheduled reconcile applies them" }
+    }
+    $res.written = @($written.ToArray()); $res.errors = @($errors.ToArray()); $res.ok = (-not $errors.Count)
+    return [pscustomobject]$res
 }

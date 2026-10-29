@@ -19,7 +19,7 @@
       * It never copies a setting that names the tenant it came from: ManagerAccess, the SQL/store
         pointers, the MSP registry, the emergency passphrase, the downlink trust pins. Those are the
         environment's own identity, and carrying them across is how a tenant ends up trusting
-        another tenant's administrators. The block list is in $script:PimSettingsNeverCopy and a
+        another tenant's administrators. The block list is $script:PimSettingsNeverCopy (_PimSettingsCopy.ps1) and a
         -Name that hits it is REFUSED, not warned about.
       * It never merges -- unless -MergeKeys asks for the one safe merge (below). A setting is one
         document; a half-merged document is a shape no reader expects. The target's current value is
@@ -85,60 +85,30 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path      # ...\tools\setup
 $sol  = Split-Path -Parent (Split-Path -Parent $here)        # ...\SOLUTIONS\PIM4EntraPS
 . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-SqlStore.ps1')
+. (Join-Path $sol 'engine\_shared\PIM-ConfigBackup.ps1')    # the canonical compare of the read-back (pure)
 . (Join-Path $here '_PimSettingsCopy.ps1')
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
 $null = Start-PimScriptRun -Script 'Copy-PimSettings'
 try {
 
-# 🔒 Settings that describe WHO this environment is, or WHO may act in it. Copying one of these
-# between tenants does not configure the target -- it points the target at the source's identities.
-$script:PimSettingsNeverCopy = @(
-    'ManagerAccess',            # who may use the Manager here
-    'PortalAdmins',
-    'EmergencyOverride',        # break-glass state
-    'EmergencyPassphrase',
-    'DownlinkTrust',            # which master signing keys this tenant trusts
-    'BaselineTrustedKeys',
-    'MspRegistry', 'MspTenants', 'CentralAdmins',
-    'SqlStore', 'StorePointer', 'Instances',
-    'Licence', 'License',
-    'EnvironmentName',          # this environment's own display name (operator 2026-10-04) -- names THIS one
-    'DemoMode', 'DemoGuestGroup', # s98: who may act here (a live demo); carried elsewhere it would cap that tenant's people
-    'AdminDeletePins',   # review 1 fixes 2026-10-13 (decision 54): another environment's pinned account deletes are never this one's
-    'GuardApprovals', 'GuardReleases', 'GuardHolds', 'GuardLimits', 'HybridAdCleanupApproval', 'HybridAdServerAutoGroupsApproval', 'AdServerAutoGroups', 'AdServerAutoGroupsWaiting', 'AdServerAutoGroupsProgress', 'AdCleanupResult', 'AdCleanupLocalAdmin',   # PIM 100.119 B1: who approved what HERE, and this tenant's guard limits (set by its SuperAdmin, audited)
-    'ReconcileRemovalMode', 'EnableAutomaticOffboarding'   # REVIEW FIXES 2026-10-13: this environment's own protection switches -- set on ITS Settings page (confirmation + the count shown), never carried in from another environment
-)
+# 🔒 Settings that describe WHO this environment is, or WHO may act in it, are never copied. The list
+# ($script:PimSettingsNeverCopy, Test-PimSettingNeverCopy) lives in _PimSettingsCopy.ps1 since 2026-10-29, so
+# Export-PimSettings.ps1 / Import-PimSettings.ps1 refuse the same names.
 
 function Confirm-Copyable {
     param([string]$SettingName)
-    foreach ($b in $script:PimSettingsNeverCopy) {
-        if ("$SettingName".Trim() -ieq $b) {
-            throw ("REFUSING to copy '$SettingName': it names the tenant it came from (identities, trust pins or " +
-                   "store pointers). Copying it would point '$ToTenantId' at '$FromTenantId'. Set it in the target " +
-                   'tenant on its own, with the tool that owns it.')
-        }
+    if (Test-PimSettingNeverCopy -Name $SettingName) {
+        throw ("REFUSING to copy '$SettingName': it names the tenant it came from (identities, trust pins or " +
+               "store pointers). Copying it would point '$ToTenantId' at '$FromTenantId'. Set it in the target " +
+               'tenant on its own, with the tool that owns it.')
     }
 }
 
-function Use-Tenant {
-    param([string]$TenantId, [string]$ClientId, [string]$Thumbprint, [string]$Server, [string]$Database)
-    $global:PIM_TenantId          = $TenantId
-    $global:PIM_SqlClientId       = $ClientId
-    $global:PIM_SqlCertThumbprint = $Thumbprint
-    return (Get-PimSqlConnectionString -Server $Server -Database $Database)
-}
-
-if (-not "$BackupDir".Trim()) { $BackupDir = Join-Path ([IO.Path]::GetTempPath()) 'pim-settings-copy' }
 # 12.7: -WhatIf writes nothing outside the temp folder. A backup in the temp folder (the default) is still taken -- it is
-# what makes the dry run's diff restorable -- and a backup anywhere else is only announced.
-$backupInTemp = ([IO.Path]::GetFullPath($BackupDir)).StartsWith(([IO.Path]::GetFullPath([IO.Path]::GetTempPath())), [StringComparison]::OrdinalIgnoreCase)
-$backupWrites = $backupInTemp -or -not $WhatIfPreference
-function Save-Backup {
-    param([string]$Path, [string]$Value)
-    if (-not $backupWrites) { Write-Host "  What if: would write the backup $Path" -ForegroundColor Yellow; return }
-    Set-Content -Path $Path -Value $Value -Encoding UTF8 -WhatIf:$false -Confirm:$false
-}
-if ($backupWrites -and -not (Test-Path -LiteralPath $BackupDir)) { New-Item -ItemType Directory -Force -Path $BackupDir -WhatIf:$false -Confirm:$false | Out-Null }
+# what makes the dry run's diff restorable -- and a backup anywhere else is only announced (Resolve-PimSettingsBackupDir).
+$bk = Resolve-PimSettingsBackupDir -BackupDir $BackupDir -DefaultLeaf 'pim-settings-copy' -DryRun ([bool]$WhatIfPreference)
+$BackupDir = $bk.dir; $backupWrites = $bk.writes
+function Save-Backup { param([string]$Path, [AllowEmptyString()][string]$Value) Save-PimSettingsBackup -Path $Path -Value $Value -Writes $backupWrites }
 $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
 
 foreach ($n in @($Name)) { Confirm-Copyable -SettingName $n }
@@ -151,15 +121,15 @@ if (-not $Apply) { Write-Host '  MODE     : dry run (nothing is written)' -Foreg
 $changed = 0
 foreach ($n in @($Name)) {
     Write-Host ("`n== {0} ==" -f $n) -ForegroundColor Cyan
-    $csFrom = Use-Tenant -TenantId $FromTenantId -ClientId $FromClientId -Thumbprint $FromCertThumbprint -Server $FromServer -Database $FromDatabase
+    $csFrom = Use-PimSettingsStore -TenantId $FromTenantId -ClientId $FromClientId -Thumbprint $FromCertThumbprint -Server $FromServer -Database $FromDatabase
     $src = $null
-    try { $src = Get-PimSqlSetting -ConnectionString $csFrom -Name $n } catch { throw ("could not read '$n' from the source: $($_.Exception.Message)") }
+    try { $src = Read-PimSettingValue -ConnectionString $csFrom -Name $n } catch { throw ("could not read '$n' from the source: $($_.Exception.Message)") }
     if ($null -eq $src) { Write-Host "  the SOURCE has no such setting -- skipped (nothing is cleared in the target)" -ForegroundColor Yellow; continue }
     Save-Backup -Path (Join-Path $BackupDir ("{0}-SOURCE-{1}.json" -f $n, $stamp)) -Value ($src | ConvertTo-Json -Depth 12)
 
-    $csTo = Use-Tenant -TenantId $ToTenantId -ClientId $ToClientId -Thumbprint $ToCertThumbprint -Server $ToServer -Database $ToDatabase
+    $csTo = Use-PimSettingsStore -TenantId $ToTenantId -ClientId $ToClientId -Thumbprint $ToCertThumbprint -Server $ToServer -Database $ToDatabase
     $dst = $null
-    try { $dst = Get-PimSqlSetting -ConnectionString $csTo -Name $n } catch { throw ("could not read '$n' from the target: $($_.Exception.Message)") }
+    try { $dst = Read-PimSettingValue -ConnectionString $csTo -Name $n } catch { throw ("could not read '$n' from the target: $($_.Exception.Message)") }
     $dstJson = $(if ($null -ne $dst) { ($dst | ConvertTo-Json -Depth 12) } else { '' })
     # -MergeKeys: the value to write is the source with the target's EXTRA top-level keys kept (objects only).
     if ($MergeKeys) {
@@ -183,13 +153,9 @@ foreach ($n in @($Name)) {
 
     if (-not $Apply) { Write-Host '  would be overwritten with SOURCE (re-run with -Apply)' -ForegroundColor Yellow; continue }
     if ($PSCmdlet.ShouldProcess("pim.Settings['$n'] in $ToServer/$ToDatabase (tenant $ToTenantId)", 'overwrite with the source value')) {
-        Set-PimSqlSetting -ConnectionString $csTo -Name $n -Value $src
-        $after = Get-PimSqlSetting -ConnectionString $csTo -Name $n
-        $afterJson = $(if ($null -ne $after) { ($after | ConvertTo-Json -Depth 12) } else { '' })
-        if (($afterJson -replace '\s', '') -ne ($srcJson -replace '\s', '')) {
-            throw ("read-back of '$n' does not match what was written -- the target may hold a partial value. " +
-                   "Restore from $backupFile before continuing.")
-        }
+        # Shared with Import-PimSettings.ps1: written as exact JSON text (a one-element array stays an array, IMP-39) and
+        # READ BACK; a read-back that differs throws, naming the backup to restore.
+        Write-PimSettingWithReadBack -ConnectionString $csTo -Name $n -Value $src -BackupFile $backupFile
         Write-Host '  written and read back OK.' -ForegroundColor Green
         $changed++
     }

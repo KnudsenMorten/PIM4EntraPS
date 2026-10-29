@@ -165,7 +165,12 @@ function Invoke-PimUpdateConvergeDefaults {
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup,
           [string]$ManagerApp = 'ca-pim-manager', [string]$TickJob = 'ca-pim-tick',
           [Parameter(Mandatory)][scriptblock]$Arm, [scriptblock]$Store, [scriptblock]$Graph,
-          [string]$AlertRecipientsScript = '', [string]$SqlServer = '', [string]$TenantId = '')
+          [string]$AlertRecipientsScript = '', [string]$SqlServer = '', [string]$TenantId = '',
+          # PIM 95.2k: the Azure rows the store defines -- @{ assignments = <PIM-Assignments-Azure-Resources rows>; definitions =
+          # <PIM-Definitions-Resources rows> } (or @{ error = '<why they could not be read>' }). $null = not passed: no line.
+          # REPORT ONLY (engine/_shared/PIM-EngineAzureAccess.ps1 Get-PimEngineAzureAccessReport, GET only): the updater may
+          # not grant roles; the grant is Confirm-PimInstall's repair, run by a person.
+          [object]$EngineAzureRows = $null)
     $lines = New-Object System.Collections.Generic.List[object]
     $add = { param($id, $level, $text) $lines.Add([pscustomobject]@{ id = $id; level = $level; text = $text }) }
     $rgScope = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
@@ -201,6 +206,17 @@ function Invoke-PimUpdateConvergeDefaults {
     $d = Get-PimRbacConvergeDecision -Id 'tick-self-reader' -What "Reader for $TickJob on itself (a stale engine lease is taken over at once)" -Assignments $tickSelf.list -ReadError $tickSelf.error `
             -Scope $tickScope -RoleIds @($ids.Reader, $ids.Contributor, $ids.Owner) -Fix $hostingFix
     & $add $d.id $(if ($d.action -eq 'noop') { 'info' } else { 'warn' }) $d.line
+
+    # ---- PIM 95.2k: the engine's Azure rights vs the DEFINED Azure scopes (report only) ------------------------------
+    if ($null -ne $EngineAzureRows) {
+        if (-not (Get-Command Get-PimEngineAzureAccessReport -ErrorAction SilentlyContinue)) { & $add 'engine-azure-scopes' 'warn' 'engine Azure access -- not checked (PIM-EngineAzureAccess.ps1 is not loaded)' }
+        elseif ($EngineAzureRows -is [System.Collections.IDictionary] -and $EngineAzureRows.Contains('error')) { & $add 'engine-azure-scopes' 'warn' "engine Azure access -- not checked (the Azure definitions could not be read: $($EngineAzureRows['error']))" }
+        else {
+            $eaRows = if ($EngineAzureRows -is [System.Collections.IDictionary]) { $EngineAzureRows } else { @{} }
+            $ea = Get-PimEngineAzureAccessReport -Arm $Arm -AssignmentRows @($eaRows['assignments']) -DefinitionRows @($eaRows['definitions']) -EngineObjectId $tickOid -TenantId $TenantId -Name $TickJob
+            & $add 'engine-azure-scopes' $(if ($ea.action -eq 'noop') { 'info' } else { 'warn' }) $ea.line
+        }
+    }
 
     # ---- SchedulerTickJobId ----------------------------------------------------------------------------------------
     if (-not $Store) { & $add 'tick-start' 'warn' 'immediate engine start (SchedulerTickJobId) -- not checked (no store)' }

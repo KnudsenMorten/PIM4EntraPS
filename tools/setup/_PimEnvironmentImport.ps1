@@ -45,7 +45,7 @@ $script:PimImportNeverCopyExact = @(
     'ReconcileRemovalMode', 'EnableAutomaticOffboarding',   # REVIEW FIXES 2026-10-13: the TARGET's own protection switches -- an import never changes whether THIS environment removes leftovers or offboards on its own; they are set on its Settings page (confirmation + the count shown)
     'WorkloadPrereqs'   # checks made against the SOURCE's engine identity (2026-10-04: r1-pro-ca showed mfnpr's green checks)
 )
-$script:PimImportNeverCopyPrefix = @('JobRunOutput:', 'SchedulerState', 'SchedulerLease', 'JobScope', 'HybridAdSyncMemory')   # 100.122 F1: the AD sync's memory belongs to one tenant
+$script:PimImportNeverCopyPrefix = @('JobRunOutput:', 'SchedulerState', 'SchedulerLease', 'JobScope', 'HybridAdSyncMemory', 'DeltaSkipState:')   # 100.122 F1: the AD sync's memory belongs to one tenant; 70.17: a job's skip state is this store's own
 $script:PimImportUnion = @{ ManagerAccess = 'managerAccess'; PortalAdmins = 'portalAdmins' }
 
 function Test-PimImportSettingNeverCopy {

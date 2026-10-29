@@ -432,7 +432,7 @@ How PIM Manager's controls can **support** your own controls. This is not a cert
 <a id="scripts"></a>
 ## 11. Scripts
 
-Scripts are run by highly privileged people, so they are listed here one by one with the rights needed and the changes made. Every published script is: listed in SHA256SUMS.txt; a shown command of two lines, download then run, with SHA256SUMS.txt published for whoever verifies (never pipe-to-execute); no second-stage downloads; -WhatIf preview; a transcript; browser sign-in, no secrets in or out.
+Scripts are run by highly privileged people, so they are listed here one by one with the rights needed and the changes made. Every published script is: listed in SHA256SUMS.txt; a shown command of two lines, download then run, with SHA256SUMS.txt published for whoever verifies (never pipe-to-execute); no second-stage downloads (one stated exception, the installation launcher, below); -WhatIf preview; a transcript; browser sign-in, no secrets in or out.
 
 ### How to run a script
 PIM Manager shows every script command as two lines -- line 1 downloads the file from Invardia, line 2 runs it (more run lines only when a flow needs them); the documentation page is the link next to the command:
@@ -444,7 +444,7 @@ Optional, for whoever verifies before running (never part of the shown command):
 ### Facts that hold for every published script
 - **Listed in SHA256SUMS.txt**, published next to the scripts.
 - **No PowerShell modules**; REST and .NET only; browser sign-in (no device code).
-- **No pipe-to-execute** anywhere in the product; scripts do not download and run further code.
+- **No pipe-to-execute** anywhere in the product; scripts do not download and run further code -- with one stated exception: Start-PimManagerInstall.ps1, whose job is to download the public PIM Manager release from GitHub into a new folder, compare its SHA-256 with the one the release publishes (when it publishes one), and run the installer of that release.
 - **A transcript** of every run is written; some scripts also write a result file with -OutFile.
 - Every script has its documentation page and an entry in the documentation manifest (framework 12.7).
 
@@ -452,6 +452,7 @@ Optional, for whoever verifies before running (never part of the shown command):
 
 | Script | Purpose | Rights needed to run it | Changes it makes | Preview |
 |---|---|---|---|---|
+| Start-PimManagerInstall.ps1 | Install PIM Manager with one command: download the public release into a new folder, compare its SHA-256 with the one the release publishes (when it does), and run its guided installer (Install-PimManager) with the same parameters | What Install-PimManager needs (below); the launcher itself reads only public release data and needs no sign-in | A new folder in the temp folder with the release, and a note with its path for -Resume; everything else is made by Install-PimManager (below) | -WhatIf (honoured; the release is unpacked in the temp folder and the installer runs with -WhatIf) |
 | Grant-PimEnginePermissions.ps1 | Give the engine identity its missing Graph permissions and Azure roles (the command the Manager shows) | Global Administrator or Privileged Role Administrator (app permissions); Owner or User Access Administrator at the scope (Azure roles) | Graph app-role assignments and Azure role assignments for the engine, exactly as listed in the command; only roles and scopes on the product's allow-list | -PlanOnly (no -WhatIf) |
 | Initialize-PimSqlAdminGroup.ps1 | Make grp-pim-sql-admins the SQL server's Entra admin with the product's identities as members | Privileged Role Administrator (role-assignable group) + Owner/Contributor on the SQL server | Creates the group; sets the SQL Entra admin; adds the product identities, the Invardia Support app (if present) and you | -PlanOnly (no -WhatIf) |
 | Initialize-PimWorkloadPrereqs.ps1 | Fix a workload prerequisite the product cannot fix itself (Power BI group, Fabric setting, Sentinel, Azure rights) | AppRoleAssignment.ReadWrite.All + Group.ReadWrite.All (delegated); Fabric administrator; User Access Administrator at the scope | Power BI security group + engine membership; Fabric tenant setting; engine Graph roles; optional Sentinel workspace (billed) and User Access Administrator; product settings | -WhatIf (honoured) |
@@ -473,7 +474,7 @@ Optional, for whoever verifies before running (never part of the shown command):
 
 | Script | Purpose | Rights needed to run it | Changes it makes | Preview |
 |---|---|---|---|---|
-| Install-PimManager.ps1 | The guided install (called by Invardia's bootstrap or run directly) | Azure Owner, or Contributor + User Access Administrator, on the subscription; Entra Privileged Role Administrator or Global Administrator (active) for the directory steps | Everything in chapters 1-3 for the chosen options; licence; optional Support app access | -PreflightOnly (rights + plan check) |
+| Install-PimManager.ps1 | The guided install (started by Start-PimManagerInstall.ps1, called by Invardia's bootstrap, or run directly); the answers are parameters (only the tenant and the subscription are needed), the wizard's answers file is optional; without a licence or an enrollment key it installs Community | Azure Owner, or Contributor + User Access Administrator, on the subscription; Entra Privileged Role Administrator or Global Administrator (active) for the directory steps | Everything in chapters 1-3 for the chosen options; licence; optional Support app access | -PreflightOnly (rights + plan check) |
 | Invoke-PimDeployAll.ps1 | Full deploy: identities, infrastructure, schema, image, verify, rollback | As Install-PimManager | As above | Plan by default; -Apply to run |
 | Confirm-PimInstall.ps1 | End-of-install check; also repairs some lines (access model, update job, root Reader, firewall rule) | Reader for the check; the repair's own rights | Repairs plan first (-WhatIf) | -WhatIf (honoured) |
 | Grant-PimSupportAccess.ps1 | Give or take back the Invardia Support app's access (troubleshoot / setup / asbuilt / -Remove); every level includes the standing database access | Privileged Role Administrator (role-assignable group); SQL admin | Chapter 5 | -WhatIf (honoured) |

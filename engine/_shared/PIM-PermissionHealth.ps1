@@ -233,6 +233,26 @@ function Get-PimRootAzureFixCommand {
     (Get-PimSupportScriptCommand -Script 'Grant-PimEnginePermissions' -Run @(".\Grant-PimEnginePermissions.ps1 -TenantId '$tid' -EngineObjectId '$oid' -AzureRoleAssignments $specs")) -join "`n"
 }
 
+function Get-PimEnginePermissionFixCommand {
+    <#
+      PURE. REQUIREMENTS 95.2i -- the ONE combined grant for the engine identity: the missing Microsoft Graph application
+      permissions and/or Reader / User Access Administrator at the tenant root, as the published Grant-PimEnginePermissions
+      script (download line + run line). The same command the Manager's fix block builds (pim-manager.html permFixScript)
+      -- for surfaces that leave the page as text (the updater's log and its run record). '' when there is nothing to grant.
+    #>
+    param([string]$TenantId, [string]$EngineObjectId, [string[]]$GraphPermissions = @(), [string[]]$AzureRootRoles = @())
+    $roles = @(@($GraphPermissions) | ForEach-Object { "$_" -replace '[^A-Za-z0-9._-]', '' } | Where-Object { $_ } | Select-Object -Unique)
+    $az = @(@($AzureRootRoles) | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    foreach ($r in $az) { if ($r -notin @('Reader', 'User Access Administrator')) { throw "Get-PimEnginePermissionFixCommand: role '$r' is refused -- only Reader and User Access Administrator are granted at the tenant root." } }
+    if (-not $roles.Count -and -not $az.Count) { return '' }
+    $tid = if ("$TenantId".Trim()) { "$TenantId".Trim() } else { '<tenant id>' }
+    $oid = if ("$EngineObjectId".Trim()) { "$EngineObjectId".Trim() } else { '<engine object id>' }
+    $run = ".\Grant-PimEnginePermissions.ps1 -TenantId '$tid' -EngineObjectId '$oid'"
+    if ($roles.Count) { $run += ' -GraphPermissions ' + (@($roles | ForEach-Object { "'$_'" }) -join ',') }
+    if ($az.Count) { $scope = Get-PimTenantRootScope -TenantId $tid; $run += ' -AzureRoleAssignments ' + (@($az | ForEach-Object { "'$_@$scope'" }) -join ',') }
+    (Get-PimSupportScriptCommand -Script 'Grant-PimEnginePermissions' -Run @($run)) -join "`n"
+}
+
 function Get-PimPermissionHealth {
     <#
       Compare what the RUNTIME identity holds against what the code needs.

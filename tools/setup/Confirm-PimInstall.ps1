@@ -44,6 +44,13 @@
     A failed line carries its fix: the published scripts (browser sign-in), the PIM Manager page, or the resume command of
     the install that ran -- never a certificate.
 
+    CONVERGE ENGINE ACCESS (PIM 95.2k), after the lines: the Azure scopes the store defines (PIM-Assignments-Azure-Resources,
+    PIM-Definitions-Resources) decide the engine's Azure rights. A defined scope the engine does not hold User Access
+    Administrator at (or above) is granted it -- read back -- when repairs run; -WhatIf / -NoRepair = plan only. A refusal
+    is a WARNING with the exact command for an Owner / User Access Administrator of that scope; it never changes the
+    verdict. The tenant root stays opt-in (-EngineAzureRootUserAccessAdmin); never a remove, never Owner
+    (engine\_shared\PIM-EngineAzureAccess.ps1).
+
     Exit codes: 0 done (warnings allowed); 1 a required line failed (the table says which, and how to fix it).
 
 .NOTES
@@ -109,13 +116,23 @@ param(
     # answers '<live>' for a line lets that line run its real code against -StoreRead. -TestLicenceCertB64: an ephemeral
     # licensing certificate for the licence line (never the real key).
     [scriptblock]$StoreRead,
-    [string]$TestLicenceCertB64
+    [string]$TestLicenceCertB64,
+    # PIM 95.2k CONVERGE ENGINE ACCESS (after the lines): the engine's Azure rights follow the Azure scopes the store
+    # defines -- User Access Administrator granted where missing (read back), a WARNING with the exact command when this
+    # identity may not grant it, never a stop. -SkipEngineAzureAccess turns it off. TEST seams: -EngineAzureArm
+    # param($method, $path, $body) replaces ARM; -EngineAzureRows @{ assignments = @(..); definitions = @(..) } replaces the
+    # store read. Under -Probe the step runs only when one of the two seams is given.
+    [switch]$SkipEngineAzureAccess,
+    [scriptblock]$EngineAzureArm,
+    [object]$EngineAzureRows
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 . (Join-Path $here '_PimInstallVerify.ps1')
 # the tenant-root helpers (Get-PimTenantRootScope / Get-PimRootAzureHoldings / Get-PimRootAzureFixCommand), pure
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-PermissionHealth.ps1')
+# PIM 95.2k: converge engine access -- the planner (pure), the read-back apply, the fix command
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-EngineAzureAccess.ps1')
 # 100.31: the engine job's size for the tenant (Test-PimJobUndersized / ConvertFrom-PimTenantSizingTags), pure
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-TenantSizing.ps1')
 # SCRIPT-DOC-1 (framework 12.7): every fix command this check prints carries the script's doc page + the checksum check
@@ -617,6 +634,53 @@ foreach ($r in @($rows0 | Where-Object { ($_.state -eq 'failed' -and $_.id -in '
         if ($f0 -is [System.Collections.IDictionary]) { $f0['refused'] = $true } elseif ($f0) { $f0 | Add-Member -NotePropertyName refused -NotePropertyValue $true -Force }
     }
 }
+# ============================================================================ PIM 95.2k: converge engine access
+# The engine's Azure rights follow the Azure scopes the store DEFINES (owner: "dont do any manual chg"). Plan first; grant
+# User Access Administrator only where a defined scope is not covered (at it or above it), only when repairs run
+# (-NoRepair / -WhatIf = plan only), read back. A refusal is a WARNING with the exact command for an Owner / User Access
+# Administrator of that scope -- the install continues (this never changes the verdict). Never a remove, never Owner.
+$script:cvEaa = $null
+if (-not $SkipEngineAzureAccess -and (-not $Probe -or $EngineAzureArm -or $null -ne $EngineAzureRows)) {
+    Write-Host "`n==> CONVERGE ENGINE ACCESS (95.2k) -- the engine's Azure rights follow the defined Azure scopes" -ForegroundColor Cyan
+    try {
+        $eaOid = $eoid
+        if (-not $eaOid -and -not $EngineAzureArm) { try { $eaOid = Get-CvMiOid 'job' $TickJobName } catch { $eaOid = '' } }
+        if (-not "$eaOid".Trim()) { throw "the engine job '$TickJobName' has no managed identity that could be read" }
+        if ($null -ne $EngineAzureRows) { $eaA = @(Get-PimFactValue $EngineAzureRows 'assignments'); $eaD = @(Get-PimFactValue $EngineAzureRows 'definitions') }
+        else {
+            $eaA = @(Invoke-CvStoreRead { param($cs) Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Assignments-Azure-Resources' })
+            $eaD = @(Invoke-CvStoreRead { param($cs) Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Definitions-Resources' })
+        }
+        $eaArm = $EngineAzureArm
+        if (-not $eaArm) {
+            Connect-CvRest
+            $eaArm = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimSetupArm -Method $m -Path $p -Body $b -ApiVersion '2022-04-01' } else { Invoke-PimSetupArm -Method $m -Path $p -ApiVersion '2022-04-01' } }
+        }
+        $eaArgs = @{ Arm = $eaArm; AssignmentRows = $eaA; DefinitionRows = $eaD; EngineObjectId = "$eaOid".Trim(); TenantId = $TenantId; Name = $TickJobName
+                     IncludeRootUserAccessAdministrator = [bool]$EngineAzureRootUserAccessAdmin }
+        if ($EngineAzureArm) { $eaArgs['ReadBackDelaySeconds'] = 0 }
+        $ea = Invoke-PimEngineAzureAccessConverge @eaArgs -Apply $false
+        if (@($ea.rows | Where-Object { $_.state -eq 'would grant' }).Count -and -not $NoRepair -and
+            $script:cvCmdlet.ShouldProcess("engine '$TickJobName' at $(@($ea.rows | Where-Object { $_.state -eq 'would grant' } | ForEach-Object { $_.scope }) -join ', ')", 'grant User Access Administrator (converge engine access)')) {
+            $ea = Invoke-PimEngineAzureAccessConverge @eaArgs -Apply $true
+        }
+        $script:cvEaa = $ea
+        Write-Host "    $($ea.summary)" -ForegroundColor $(if ($ea.ok) { 'DarkGray' } else { 'Yellow' })
+        foreach ($er in @($ea.rows)) {
+            Write-Host ("    {0,-12} {1} -- {2}" -f $er.state, $er.scope, $er.detail) -ForegroundColor $(switch ($er.state) { 'granted' { 'Green' } 'covered' { 'DarkGray' } 'would grant' { 'Cyan' } default { 'Yellow' } })
+        }
+        foreach ($nn in @($ea.notNeeded)) { Write-Host "    not needed  $($nn.scope) -- $($nn.reason)" -ForegroundColor DarkGray }
+        if (-not $ea.ok -and "$($ea.fix)".Trim()) {
+            Write-Warning ("  ENGINE AZURE ACCESS NOT CONVERGED: $TickJobName ($eaOid) still lacks User Access Administrator at " + (@($ea.refused) -join ', ') +
+                           ". The engine cannot create the Azure role assignments / policies defined there until it holds it. The install continues. " +
+                           "Fix -- an Owner or User Access Administrator of those scopes, browser sign-in, no modules:")
+            Write-Host ("      " + ((Add-PimSupportScriptDocLines -Text $ea.fix) -replace "`n", "`n      ")) -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Warning "  converge engine access: not checked -- $((("$($_.Exception.Message)") -split "`n")[0]). The install continues; re-run Confirm-PimInstall.ps1 as an Owner / User Access Administrator of the defined Azure scopes."
+    }
+}
+
 $rows = Get-PimInstallVerifyRows -Role $Role -Facts $facts -Fix $fix -LicenceExpected ([bool]$LicenceExpected) -EnrollmentWait ([bool]$EnrollmentWait)
 $verdict = Get-PimInstallVerifyVerdict -Rows $rows
 # PIM 100.74: a WAITING line is reported to the install's progress feed as state 'waiting' (the MSP build relays the marker
@@ -637,7 +701,7 @@ foreach ($l in (Format-PimInstallVerifyTable -Rows $rows)) {
 Write-Host ''
 Write-Host "    $($verdict.sentence)" -ForegroundColor $(if ($verdict.done) { 'Green' } else { 'Red' })
 if ("$OutFile".Trim()) { try { [ordered]@{ done = $verdict.done; failed = $verdict.failed; warnings = $verdict.warnings; sentence = $verdict.sentence; rows = $rows } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $OutFile -Encoding UTF8 } catch { } }
-[pscustomobject]@{ done = $verdict.done; failed = $verdict.failed; warnings = $verdict.warnings; sentence = $verdict.sentence; rows = $rows }
+[pscustomobject]@{ done = $verdict.done; failed = $verdict.failed; warnings = $verdict.warnings; sentence = $verdict.sentence; rows = $rows; engineAzureAccess = $script:cvEaa }
 if (-not $verdict.done) { $script:cvRc = 1 }
 } finally { Stop-PimScriptRun -Script 'Confirm-PimInstall' }
 exit $script:cvRc

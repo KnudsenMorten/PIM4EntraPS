@@ -53,6 +53,10 @@
       Invoke-PimSupportSqlAccessJob.ps1 -- 100.116, decision (31): the same database user on an install whose database is
                                           PRIVATE, given by a one-time job inside the install's own environment (created,
                                           run once, removed); nothing is opened. The customer runs it.
+      Start-PimManagerInstall.ps1      -- INSTALL-SAMPLES (owner 2026-10-29): install PIM Manager with one command --
+                                          download the public release, check its SHA-256 against the one the release
+                                          publishes (when it does), run its Install-PimManager with the same parameters.
+                                          Built with NO dot-source left (BUILD-NO-OPTIONAL-LOADS).
 
     SCRIPT-DOC-1 (framework 12.7) + framework 12.10 item 11 ("scripts are big concern"), 2026-10-09:
       * every script in $script:PimScriptDocScripts (tools\setup\_PimScriptDoc.ps1) must have its manifest
@@ -76,7 +80,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$OutDir,
-    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1', 'Set-PimSqlTier.ps1', 'New-PimHubPrepareScript.ps1', 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1', 'pim-hybrid-worker/Install-PimHybridWorker.ps1', 'Set-PimLicense.ps1', 'Grant-PimSupportSqlAccess.ps1', 'Invoke-PimSupportSqlAccessJob.ps1', 'Set-PimSigninFrontSqlState.ps1'),
+    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1', 'Set-PimSqlTier.ps1', 'New-PimHubPrepareScript.ps1', 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1', 'pim-hybrid-worker/Install-PimHybridWorker.ps1', 'Set-PimLicense.ps1', 'Grant-PimSupportSqlAccess.ps1', 'Invoke-PimSupportSqlAccessJob.ps1', 'Set-PimSigninFrontSqlState.ps1', 'Start-PimManagerInstall.ps1'),
     # 12.10 item 11: the code-signing certificate (thumbprint of a certificate WITH its private key in CurrentUser\My or
     # LocalMachine\My). Empty = not signed, said loudly.
     [string]$SigningCertThumbprint = "$env:PIM_CODESIGN_THUMBPRINT",

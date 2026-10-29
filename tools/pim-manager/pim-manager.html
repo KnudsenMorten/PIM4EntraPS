@@ -1443,7 +1443,7 @@
     <!-- REQ-L: read-only list of the activation policy templates, what each sets, and which delegations use it. -->
     <div class="tab" data-tab="policysettings" title="Every policy setting of your tenant: choose Microsoft default, PIM Manager recommendation or Keep current, per setting. Nothing changes until you choose, and a change waits for a SuperAdmin's approval.">Policy settings</div>
     <div class="tab" data-tab="policytemplates" title="Every activation policy template in this tenant, what it sets in plain words, and which delegations use it (read-only).">Policy templates</div>
-    <div class="tab" data-tab="guards" title="Every protective guard: clear or holding, what it holds right now, and its release (SuperAdmin: this plan, one run or until a time, at most 24 h).">Guards</div>
+    <div class="tab" data-tab="guards" title="Every protective guard: clear or holding, what it holds right now, and its release (SuperAdmin: this plan, one run or until a time, at most 24 h).">Guards <span id="guardsHoldBadge" class="badge" style="display:none"></span></div>
     <div class="tab" data-tab="workloadtemplates" title="The workload permission templates (Defender XDR, Intune, ...): which roles each grants, its version and approval, switch a pack on or off, and import it.">Workload templates</div>
     <!-- 100.17 CUSTOM-WORKLOAD: define your own (group-only) workloads, e.g. SAP -- they appear in the Resource delegation picker. -->
     <div class="tab" data-tab="customworkloads" title="Your own workloads (for example SAP): the roles, tiers and scope levels PIM delegates through Entra permission groups the application consumes. They appear in the Resource delegation wizard beside the connectors.">Custom workloads</div>
@@ -3322,6 +3322,8 @@
     return tab;
   }
   function applyAttentionBadges() {
+    // GUARDS-RED-COUNT: the Guards tab's own red count, from this same read (mirrored to its submenu entry + top-menu dot by pimMenuSync below)
+    try { pimGuardsBadge(pimGuardsHoldCount(PIM_ATTENTION && PIM_ATTENTION.items)); } catch (_) { }
     const byTab = {};
     attentionItems().forEach(i => { byTab[i.tab] = (byTab[i.tab] || 0) + (Number(i.count) || 0); });
     const whyOf = (tab) => attentionItems().filter(i => i.tab === tab).map(i => i.count + ' ' + String(i.text || '').replace(/^\d+\s+/, '') + (i.canAct ? '' : ' (read-only for you: ' + (i.who || '') + ')')).join('\n');
@@ -3348,6 +3350,7 @@
       }
       grp.classList.toggle('has-block', n > 0);
     });
+    pimMenuSync();   // GUARDS-RED-COUNT: the guards badge painted above reaches the grouped menu now
   }
   // Overview: one line per blocking item, linking to its page; a role that cannot act is told who can.
   function renderHomeBlockingLine() {
@@ -5210,6 +5213,25 @@
   function pimApprovalsBadge(pending) {
     pimMenuBadge('apprPendBadge', { actions: pending, blocking: true, title: r => pimMenuWords(r.n, 'approval request waits', 'approval requests wait') + ' for a decision' });
     pimMenuSync();
+  }
+  // GUARDS-RED-COUNT (owner 2026-10-27: "i would prefer to be notified in red when something is pending, like commits or
+  // guards. people dont know"): the Guards tab counts the GUARDS that hold a list / change set for a SuperAdmin release --
+  // an ACTION that blocks work (red). PURE: from the GET /api/attention items the page already reads (every page change
+  // and every 30 s -- no loop of its own): the server's 'guard-holds' (a hold no release covers yet) and 'guard-releases'
+  // (a release waiting for a second SuperAdmin) name their guards in guardIds; a guard in both is counted once. An item
+  // without guardIds (an older server) counts its own number. A clear guard, strict mode, a guard that is only configured
+  // or a warning item is never in that list, so it never adds a number.
+  function pimGuardsHoldCount(items) {
+    const ids = {}; let extra = 0;
+    (Array.isArray(items) ? items : []).forEach(i => {
+      if (!i || i.tab !== 'guards' || (i.id !== 'guard-holds' && i.id !== 'guard-releases') || i.blocking === false || i.kind === 'warning' || !((Number(i.count) || 0) > 0)) return;
+      const g = Array.isArray(i.guardIds) ? i.guardIds.map(x => String(x || '').trim().toLowerCase()).filter(Boolean) : [];
+      if (g.length) g.forEach(x => { ids[x] = true; }); else extra += Math.floor(Number(i.count) || 0);
+    });
+    return Object.keys(ids).length + extra;
+  }
+  function pimGuardsBadge(n) {
+    pimMenuBadge('guardsHoldBadge', { actions: n, blocking: true, title: r => pimMenuWords(r.n, 'guard holds', 'guards hold') + ' changes for a SuperAdmin release' });
   }
   // Access reviews: only OVERDUE reviews (the deadline passed without the decisions). Open reviews inside their period are a fact.
   function pimAccessReviewBadge(overdue) {
@@ -13593,6 +13615,7 @@
     'workload-prereqs':            'Checks the workload prerequisites (Defender XDR, Intune, Power BI, Azure RBAC, Entra roles) as PIM\'s own identity and shows the result on the templates and Discovery & gaps; a held role assignment is made once they are green. Read-only: it never grants or creates anything.',
     'target-check':                'Checks that the Azure resources, Azure roles and Entra roles your delegations point at still exist, and reports the ones that are gone (Discovery & gaps). It never removes anything -- you decide.',
     'config-backup':               'Backs up the configuration (departments, companies, admins, group definitions, delegations, settings without secrets, break-glass list, job schedule, MSP registry) once a day; an unchanged configuration is recorded as "no change". Old backups are removed after the retention (default 90 days); pinned ones are kept (Operations > Backups & restore).',
+    'demo-baseline-restore':       'Live demo only: once a day (02:00 UTC) puts the configuration back to the backup pinned with the note demo-baseline. Does nothing unless demo mode is on and this is the demo environment; a change the mass-change check holds is not restored.',
     // REQ-U wave 2: per-NAME entries (looked up before the type) -- two discovery jobs read the workload role catalogs.
     'discovery-defender':          'Reads the Defender XDR roles and their permissions, and reports roles and permission groups no template knows yet.',
     'discovery-intune':            'Reads the Intune roles (built-in and custom), and reports roles no template knows yet.'
@@ -19652,6 +19675,7 @@
     try { d = await api('GET', '/api/guards'); }
     catch (e) { body.innerHTML = '<div class="gp-error" style="color:#cf222e;">The guards could NOT be read: ' + escapeHtml(e.message) + '</div>'; return; }
     d = d || {};
+    try { refreshAttention(true); } catch (_) { }   // GUARDS-RED-COUNT: after a release / approve / revoke here the Guards menu count is read again at once
     const cat = Array.isArray(d.catalog) ? d.catalog : [];
     const rels = Array.isArray(d.releases) ? d.releases : [];
     // PIM 100.119 (6): the approvals given in the commit popup, newest first (every guard's, from its catalog row).
@@ -22113,13 +22137,14 @@
     return ['Initialize-PimSqlAdminGroup', 'Deploy-PimActivatorBackend', 'Publish-PimActivatorRemediation', 'Deploy-PimActivatorClient',
             'Grant-PimEnginePermissions', 'Initialize-PimWorkloadPrereqs', 'Initialize-PimMailSender', 'Set-PimSmtpRelayPassword', 'Set-PimSqlTier',
             'New-PimHubPrepareScript',
-            'Install-PimManager', 'Invoke-PimDeployAll', 'Invoke-PimMspBuild', 'Copy-PimSettings', 'Set-PimManagerAccess',
+            'Install-PimManager', 'Invoke-PimDeployAll', 'Invoke-PimMspBuild', 'Copy-PimSettings', 'Export-PimSettings', 'Import-PimSettings', 'Set-PimManagerAccess',
             'Set-PimBreakGlassAccounts', 'Set-PimEmergencyPassphrase', 'Find-PimStrayTestObjects', 'Set-PimLicense', 'Deploy-PimActivatorHybrid',
             'Update-PimCommunity', 'Grant-PimSupportAccess', 'Confirm-PimInstall', 'Set-PimManagerCustomHost', 'Deploy-PimRfaBroker',
             'Rebuild-PimEnvInternal', 'Rebuild-PimEnvExternal', 'Remove-PimContainerStack', 'New-PimHostingPrerequisites',
             'Convert-PimToPrivate', 'Set-PimSqlPublicAccess', 'Grant-PimSupportSqlAccess', 'Invoke-PimSupportSqlAccessJob', 'Set-PimSigninFrontSqlState',
             'Deploy-PimHybridWorker', 'New-PimHybridWorkerInfra', 'Set-PimHybridWorkerPeering', 'Set-PimHybridWorkerEgress',
-            'Grant-PimHybridWorkerAccess', 'Invoke-PimHybridWorkerRunCommand', 'Remove-PimHybridWorker', 'Initialize-PimHybridWorkerAd', 'Install-PimHybridWorker'];
+            'Grant-PimHybridWorkerAccess', 'Invoke-PimHybridWorkerRunCommand', 'Remove-PimHybridWorker', 'Initialize-PimHybridWorkerAd', 'Install-PimHybridWorker',
+            'Start-PimManagerInstall'];
   }
   function pimScriptDocName(script) { return String(script || '').replace(/^.*[\\/]/, '').replace(/\.ps1$/i, ''); }
   function pimScriptDocUrl(script) { return pimScriptDocBase() + pimScriptDocName(script) + '/'; }
@@ -24132,6 +24157,17 @@
     const __histRows = pimGridHistoryRows(base, p);
     const __showRemoved = pimGridShowRemoved();
     if (!__showRemoved && __histRows.size) __gridOrder = __gridOrder.filter(i => !__histRows.has(i));
+    // Owner 2026-10-28 ("what are these empty rows"): PIM-Definitions-Departments holds two kinds of row -- the department
+    // GROUPS (GroupName / GroupTag, edited here) and the DEPARTMENTS themselves (Department, Owners, Contact, Notes -- edited
+    // on Access > Departments). The second kind has none of this grid's columns and showed as blank rows. View only, like the
+    // removed rows above: the rows, their indexes, the selection and the commit are unchanged.
+    let __deptRecords = 0;
+    if (base === 'PIM-Definitions-Departments') {
+      const __isDeptRecord = r => !!r && !String(r.GroupName || '').trim() && !String(r.GroupTag || '').trim() && !!String(r.Department || '').trim();
+      const __before = __gridOrder.length;
+      __gridOrder = __gridOrder.filter(i => !__isDeptRecord(p.rows[i]));
+      __deptRecords = __before - __gridOrder.length;
+    }
     // 100.67: the rows in view order (filter box, problem filter, sort), the visible columns; rows marked for deletion left out.
     pimExportSet('grid', 'Advanced View -- ' + entityLabel(base), () => [{ heading: entityLabel(base), columns: visHeader.map(c => gridColLabel(base, c)),
       rows: __gridOrder.filter(i => !p.deletes.has(i)).map(i => visHeader.map(c => (p.rows[i] || {})[c] || '')) }]);
@@ -24158,7 +24194,7 @@
         <div class="grid-title">${escapeHtml(entityLabel(base))}</div>
         <div class="grid-sub"><code style="font-size:10.5px;color:#8c959f;" title="The storage key -- what this is called in the database and in the API">${escapeHtml(base)}</code>
           &nbsp;|&nbsp; ${p.rows.length - p.deletes.size} row(s) ${isDirty(base) ? '<span style="color:#9a6700">(pending changes)</span>' : ''}${showProvenance ? ('&nbsp;|&nbsp; <span style="color:#0550ae;" title="Rows the downlink put here (Owner = MSP). The rest are this tenant\'s own.">' + mspRowCount + ' from the managing tenant, ' + ((p.rows.length - p.deletes.size) - mspRowCount) + ' local</span>') : ''}
-          &nbsp;|&nbsp; <span style="color:#57606a;">click any cell to edit &middot; click a column header to sort</span></div>
+          &nbsp;|&nbsp; <span style="color:#57606a;">click any cell to edit &middot; click a column header to sort</span>${__deptRecords ? ('&nbsp;|&nbsp; <span style="color:#57606a;" title="The departments themselves (name, owners, contact) are kept on Access &gt; Departments; this list holds the department groups.">' + __deptRecords + ' department(s) and their owners are on Access &gt; Departments</span>') : ''}</div>
       </div>
       <div class="toolbar">
         <input id="gridFilter" type="search" placeholder="filter rows…" autocomplete="off" value="${escapeHtml(gridView(base).filter)}" style="padding:3px 8px;font-size:12px;border:1px solid #d0d7de;border-radius:6px;width:200px;" title="Show only rows whose cells contain this text">
