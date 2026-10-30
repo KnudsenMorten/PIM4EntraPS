@@ -575,7 +575,7 @@ function Invoke-PimDriftSnapshotJob {
             $detail += '<br><br>' + ($lines -join '<br>') + $(if ($all.Count -gt 15) { "<br>... and $($all.Count - 15) more on the Drift page." } else { '' })
         }
         # 🔴 2026-09-26 (operator: "i also see alerts / errors from emails"): the SAME drift was mailed every 4 hours -- 7
-        # identical mails in 30 h on EFIF, to three people, two of them the customer's staff. The drift job runs every 4 h
+        # identical mails in 30 h on a test tenant, to three people, two of them the customer's staff. The drift job runs every 4 h
         # and the debounce was the default 60 min, so it never held. Identical drift is now mailed once and then at most
         # once a day as a reminder; a CHANGE in the drift (the detail differs) is mailed at once.
         # SETTLING (operator 2026-09-26: "dont send ... alerts during a commit where things are not fully rolled out"): drift

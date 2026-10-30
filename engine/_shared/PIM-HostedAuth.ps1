@@ -287,7 +287,7 @@ function Get-PimPrincipalNamesFromBlob {
       an Entra v2 token that is routinely `name` -- the DISPLAY name. So a completely legitimate
       sign-in produced:
           X-MS-CLIENT-PRINCIPAL-NAME ('Morten Knudsen (Admin, Cloud, ID)')
-          disagrees with the principal blob ('x-Admin-MOK-ID@fjernvarmefyn.dk')
+          disagrees with the principal blob ('x-Admin-MOK-ID@contoso.example')
       and every human was locked out of a correctly-deployed Manager. Measured at a customer
       2026-09-12, on an environment whose sign-in had otherwise completed: "Login completed for
       'Mo**PII**'. Provider: 'aad'".
@@ -396,10 +396,10 @@ function Test-PimEdgeHeadersConsistent {
     # -- see Get-PimPrincipalNamesFromBlob for the measured case. A header that matches NONE of the
     # blob's names is still rejected, which is the property this check exists for.
     $blobNames = @(Get-PimPrincipalNamesFromBlob -Blob $decoded)
-    # 🔴 THE HEADER IS URL-ENCODED, THE BLOB IS NOT (live, EFIF, 2026-09-22). An HTTP header may only
+    # 🔴 THE HEADER IS URL-ENCODED, THE BLOB IS NOT (live, a test tenant, 2026-09-22). An HTTP header may only
     # carry ASCII, so the auth edge percent-encodes the name claim and writes spaces as '+':
-    #     header 'Kasper+Hjerrild+Rold+S%C3%B8rensen+(adm-e-khrs-t0-c)'
-    #     blob   'Kasper Hjerrild Rold Sørensen (adm-e-khrs-t0-c)'
+    #     header 'Avery+Jordan+Lind+S%C3%B8rensen+(adm-e-alin-t0-c)'
+    #     blob   'Avery Jordan Lind Sørensen (adm-e-alin-t0-c)'
     # Compared literally those never match, so THIS CHECK LOCKED OUT every user whose display name
     # carries a space or a non-ASCII letter -- the measured 401 was
     #     "no authenticated principal -- this app must be reached through its authentication edge",

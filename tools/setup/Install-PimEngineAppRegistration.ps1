@@ -434,7 +434,7 @@ if ($GrantConsent -and $sp) {
 
 # --- Exchange Administrator directory role (with -IncludeExchange) ----------------
 # 🔒 SEC-34 -- TIME-BOUND, THROUGH PIM, READ BACK. This POSTed roleManagement/directory/roleAssignments: a PERMANENT active
-# assignment made OUTSIDE PIM -- exactly the pattern IMP-31 removed from Initialize-PimMailSender.ps1 after EFIF and RIDE's
+# assignment made OUTSIDE PIM -- exactly the pattern IMP-31 removed from Initialize-PimMailSender.ps1 after both test tenants'
 # own alerting flagged it ("assigned outside of PIM") and the SPN holding it could not remove it again (Graph refuses a
 # self-removal). A privileged-access product must not leave the standing privilege it exists to prevent. Now: an ACTIVE
 # assignment through roleAssignmentScheduleRequests that EXPIRES by itself after -ExchangeAdminDuration, reusing IMP-31's

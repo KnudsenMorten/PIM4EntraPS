@@ -773,7 +773,7 @@ function Get-PimRestToken {
   # Import-PimHandoffTokens (this tenant, a USER, >5 min left) and held in memory only, answers FIRST for its audiences --
   # but never for a caller that named an explicit identity, and never for an explicit browser request (-Interactive, which
   # may need scopes the handed-over token does not carry). An audience it does not cover falls through to the sign-in below.
-  # 🔴 2026-10-11 (HOGYM managed install, live): NEVER for Azure SQL. The handed-over database token is minted by the bootstrap
+  # 🔴 2026-10-11 (a managed-tenant install, live): NEVER for Azure SQL. The handed-over database token is minted by the bootstrap
   # BEFORE this run creates the SQL server and makes the signed-in admin (or its group) the server's Entra admin -- that token
   # carries no such membership, and the schema step failed "Login failed for user '<token-identified principal>'". The
   # database audience always comes from a sign-in made now (after the assignment).
@@ -811,7 +811,7 @@ function Get-PimRestToken {
   # 🔴 SEC-12 -- AN EXPLICIT IDENTITY THAT CANNOT BE HONOURED IS AN ERROR, NOT A CUE TO
   # BECOME SOMEBODY ELSE.
   #
-  # MEASURED 2026-08-28: a caller asked for tenant f0fa27a0 (myfamilynetwork) + the PIM engine
+  # MEASURED 2026-08-28: a caller asked for the internal tenant + the PIM engine
   # client id + its certificate thumbprint, and got back a token for ANOTHER company's tenant
   # (A DIFFERENT COMPANY's tenant) with a different appid. Nothing in the return value
   # said so. The certificate had failed to resolve, the failure went to Write-Verbose, and the
@@ -1422,7 +1422,7 @@ function Invoke-PimGraphBatchGet {
   }
   $retryQueue = New-Object System.Collections.Generic.List[int]
   $maxRa = 0
-  # 🔑 SHRINK ON THROTTLE (2.4.457, measured on ig798 with 712 PIM-for-Groups schedule reads): every batch size took the same
+  # 🔑 SHRINK ON THROTTLE (2.4.457, measured on a test environment with 712 PIM-for-Groups schedule reads): every batch size took the same
   # 259-287 s -- the tenant's own Graph ceiling (~2.7 reads/s), which no pacing beats -- but 20 per round-trip drew 444
   # throttled answers and 49 single fallbacks, 10 drew 63 and none, 5 drew 20 and none. So a read starts at $BatchSize and
   # halves it (down to 5) after each throttled round-trip: an unthrottled read keeps full batches, a throttled one stops

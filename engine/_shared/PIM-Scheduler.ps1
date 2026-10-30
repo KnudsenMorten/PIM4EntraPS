@@ -284,7 +284,7 @@ function Get-PimDefaultJobSchedule {
         # nothing happened" symptom as the delegation bug, with a ceiling instead of forever.
         [pscustomobject]@{ name='delta-admins';       type='engine-delta'; scope='AdminAccounts';           intervalMinutes=5 ;   enabled=$true  }
         # AdminTap is its OWN provider (order 35), NOT part of the Admins scope -- so without a job
-        # here nothing ever ran it except the daily `full-reconcile` (scope All). Measured in EFIF:
+        # here nothing ever ran it except the daily `full-reconcile` (scope All). Measured in a test tenant:
         # four accounts created at 18:22 with CreateTAP=TRUE all had TAP=none, and would have kept
         # it until 06:05 the next morning. No error anywhere -- the TAP, and therefore the
         # tap-delivery mail, just silently did not happen for ~12 hours. Paired with delta-admins'
@@ -2277,7 +2277,7 @@ function Get-PimSchedulerStoreVerdict {
     <#
       BUG-45 -- decide whether an unreachable store is fatal. PURE: no SQL, no env, no output.
 
-      MEASURED on mfnpr 2026-08-09/10. The tick was given correct SQL coordinates, acquired a
+      MEASURED on the internal environment 2026-08-09/10. The tick was given correct SQL coordinates, acquired a
       managed-identity token, printed "[scheduler] SQL store wired -> ...", and then every single
       read failed with "Login failed for user '<token-identified principal>'" -- the contained DB
       user had never been created, because the deploy died before the grant (BUG-44). The tick
@@ -2554,7 +2554,7 @@ function Save-PimUnsavedRunRecords {
 
 # BUG-264 (remainder): the ring was PER NAME, and triggered runs carry one-off names ('trigger:engine-delta:<scope list>',
 # a live test's 'pime2e-<label>-<HHmmss>'), so every new name started a new ring that nothing ever evicted -- 887 KB on
-# internal, read whole on every Jobs/Home load; ig798 held 43 one-off names a day after its rebuild. Names that only ever
+# internal, read whole on every Jobs/Home load; a test environment held 43 one-off names a day after its rebuild. Names that only ever
 # ran as TRIGGERS now share ONE pooled ring; a name that has a scheduled run keeps its own ring of $script:PimRunHistoryMax.
 $script:PimRunHistoryAdHocMax = 30
 function Select-PimJobRunHistoryKept {
@@ -2958,7 +2958,7 @@ function Get-PimJobsStatus {
         # worker's scope is persisted by the runner (Save-PimJobScopeToStore), so the view can
         # answer "does this deployment run this job at all?" directly and stop inferring it
         # from history. Out of scope => never failing, never overdue, never needs attention.
-        # BUG-264: read ONCE per view (above the loop) -- it was one SQL read per job, ~0.9 s for 36 jobs on ig798.
+        # BUG-264: read ONCE per view (above the loop) -- it was one SQL read per job, ~0.9 s for 36 jobs on a test environment.
         if (-not $jobScopeRead) { $jobScopeOnce = Get-PimPersistedJobScope; $jobScopeRead = $true }
         $jobScope   = $jobScopeOnce
         $outOfScope = $false
@@ -3059,7 +3059,7 @@ function Get-PimJobsStatus {
             if ($hashes.Count) {
                 # A hash counts as dealt with when it is APPROVED, or when it is no longer ANY provider's current hold (it was
                 # approved and applied by another job's run -- operator 2026-09-21: "i stil have 2 jobs that needs approval":
-                # the pull job and delta-policies both named the same RIDE hold; one applied it and cleared the approval, the
+                # the pull job and delta-policies both named the same test-tenant hold; one applied it and cleared the approval, the
                 # other still showed "needs approval" until its own next run).
                 $approved = @{}; $stillHeld = @{}; $holdKnown = $true
                 if ($null -ne $PolicyHoldState) {
@@ -3639,7 +3639,7 @@ function Save-PimJobTriggers {
         catch { Write-Warning "[scheduler] SchedulerTriggers did NOT persist ($($_.Exception.Message)). A requested run will not fire." }
     }
 }
-# 🔴 BUG-275 (live GUI E2E on ig798, 2026-10-01): the trigger list was a plain read-modify-write. The tick's SQL change
+# 🔴 BUG-275 (live GUI E2E on a test environment, 2026-10-01): the trigger list was a plain read-modify-write. The tick's SQL change
 # detector read it at ~09:40:50, the live runner wrote its drift trigger at 09:40:52, and the detector's save at 09:40:54
 # ERASED it -- the requested run never happened and the runner waited 25 minutes. The Manager's "Run now", a commit and
 # every other writer race the same way. Every change now goes through ONE compare-and-set on the SQL row (retried), like
@@ -3912,7 +3912,7 @@ function New-PimSchedulerLease {
 }
 
 # ---- BUG-268: a lease held by an execution the PLATFORM already ended ------------------------------
-# Measured on ig798 2026-09-29: the first pod of a tick execution failed before it started, the platform created a retry,
+# Measured on a test environment 2026-09-29: the first pod of a tick execution failed before it started, the platform created a retry,
 # then counted the backoff limit and deleted the RUNNING retry ("ManuallyStopped" -- no ARM stop call, no person). That
 # retry had just taken the lease and a trigger, so the lease stayed held until its 15-minute TTL: three ticks skipped
 # behind a holder that no longer existed, and the trigger waited ~18 minutes. The TTL cannot simply be shortened (one
@@ -4128,7 +4128,7 @@ function Resolve-PimSchedulerDeadLease {
 
 # ---- one tick + the loop --------------------------------------------------
 # ---- §87 BUG-281: ONE CLEAN PASS PER SCOPE PER TICK --------------------------
-# Measured on RIDE 2026-10-01 19:20Z: a trigger reconciled Admins, Groups, the policies and the Entra roles, and two
+# Measured on a test tenant 2026-10-01 19:20Z: a trigger reconciled Admins, Groups, the policies and the Entra roles, and two
 # minutes later -- in the SAME tick -- the scheduled delta-admins, delta-groups-deploy, delta-policies and delta-pim-entra
 # ran exactly those scopes again (the policy pass alone ~60 s of throttled reads), every scope `nochange`. A scheduled
 # DELTA whose scopes ALL had a clean pass earlier in this tick is therefore recorded as covered and advanced to its next

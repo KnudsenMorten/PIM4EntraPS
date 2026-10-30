@@ -96,7 +96,7 @@ function Invoke-PimUpdaterConvergeStep {
     param([string]$When = 'update')
     $csSize = $null; try { $csSize = Get-PimSqlConnectionString } catch { $csSize = $null }
     if (-not "$csSize".Trim()) {
-        # the EFIF/RIDE shape (no PIM_SqlServer on this job): the Manager names the store -- same self-heal as the schema step.
+        # the test-tenant shape (no PIM_SqlServer on this job): the Manager names the store -- same self-heal as the schema step.
         try {
             $heal = Resolve-PimUpdaterStoreSettings -JobServer "$($global:PIM_SqlServer)" -JobDatabase "$($global:PIM_SqlDatabase)" `
                         -ManagerStore (Get-PimAcaStoreSettings -Resource $app) -ManagerApp $managerApp
@@ -392,7 +392,7 @@ function Send-PimUpdateOutcome {
         try { $csState = Get-PimSqlConnectionString } catch { $csState = $null }
         if (-not "$csState".Trim()) {
             # 🪤 UPD-15 AGAIN, ONE PHASE EARLIER. The store self-heal (Resolve-PimUpdaterStoreSettings)
-            # runs at the SCHEMA phase, so an updater that carries no PIM_SqlServer -- the EFIF/RIDE
+            # runs at the SCHEMA phase, so an updater that carries no PIM_SqlServer -- the test-tenant
             # shape -- would record nothing on any run that refuses BEFORE it, which is precisely the
             # run whose ring an operator wants to see. $app is the Manager this run already read; it
             # is $null on the earliest exits and that simply yields no store, as before.
@@ -587,7 +587,7 @@ $script:PimInvardiaContext = ''; $script:PimInvardiaSequence = 0; $script:PimInv
 # normal update below runs in this execution. No PIM_UPDATE_NIGHTLY_UTC (an install not converged yet) = 'legacy': a
 # full run, as before. Nothing here can fail the run: an unreadable signal, store or execution list = "no signal".
 function Get-PimUpdaterStoreCsHealed {
-    # The store's connection string (the job's own, else the Manager's -- the EFIF/RIDE shape, same self-heal as below).
+    # The store's connection string (the job's own, else the Manager's -- the test-tenant shape, same self-heal as below).
     $c = $null; try { $c = Get-PimSqlConnectionString } catch { $c = $null }
     if (-not "$c".Trim()) {
         try {
@@ -779,7 +779,7 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     $script:PimRingApproved = "$($t.version)"; $script:PimRingApprovedReason = "Invardia: $($t.reason)"
     $script:PimInvardiaAhead = [bool]$t.ahead
     if ($t.noKey) {
-        # 🔒 100.69 -- NO INSTALL KEY YET IS WAITING, NOT FAILED (trial ig798, 2026-10-11: a run ~5 min after install, before
+        # 🔒 100.69 -- NO INSTALL KEY YET IS WAITING, NOT FAILED (a trial environment, 2026-10-11: a run ~5 min after install, before
         # the tick's install-key job claimed the key, exited 1 -> execution Failed + failure telemetry, and nothing was wrong).
         # Exit 0, no failure telemetry ('skipped'); the next scheduled run proceeds. A day after install with still no key,
         # or a claim Invardia refused, IS a problem: 'attention' (a warning naming Settings > Licence) -- still exit 0, still
@@ -1049,7 +1049,7 @@ if (-not $targetImg) {
 . (Join-Path $solRoot 'engine/_shared/PIM-UpdateLifecycle.ps1')     # Get-PimSqlUpdatePlan
 
 # 🔑 DDL over the SAME connection path the rest of this container uses. The host-side deploy mints
-# an Entra token from a cert/SPN because it runs on mgmt1; in here the identity is the container's
+# an Entra token from a cert/SPN because it runs on the build host; in here the identity is the container's
 # MANAGED IDENTITY, which New-PimSqlConnection already handles. Reusing that -- rather than porting
 # the host's token minting -- is both less code and more correct: there is exactly one way this
 # process talks to SQL, so the schema step cannot authenticate differently from the app it is
@@ -1090,7 +1090,7 @@ function Get-PimJobDeployedColumns {
 [void](Use-PimUpdaterStoreEnv)   # SCHEMA-STEP STORE RESOLUTION
 
 # 🔴 2026-09-15 (UPD-15) -- SELF-HEAL THE STORE SETTINGS FROM THE MANAGER, DO NOT ASK A HUMAN.
-# EFIF and RIDE refused every release for two nights with "updater has no PIM_SqlServer ... re-run
+# both test tenants refused every release for two nights with "updater has no PIM_SqlServer ... re-run
 # Deploy-PimUpdateJob" while ca-pim-manager, which this run has ALREADY read ($app, above), named the
 # store. The job now takes the Manager's values for this run and records them on its own env for the
 # next one. Recording is best-effort: a failed note for tomorrow never fails tonight's update.
@@ -1139,7 +1139,7 @@ try {
         $locked  = Get-PimLockedSqlSchema
         # 🔴 2026-09-15 -- THE SHIPPED SCHEMA FILES RUN ON EVERY STORE, NOT ONLY WHEN A TABLE IS ABSENT.
         # They were gated on a LOCKED table being absent. pim.CentralAdmins is not locked, so 2.4.360's
-        # guarded `ADD Replicate` never reached EFIF or RIDE -- while this step logged "schema up to date"
+        # guarded `ADD Replicate` never reached either test tenant -- while this step logged "schema up to date"
         # and the release rolled. Every guarded addition in these files is now applied to every existing
         # store, BEFORE the conformance plan, all files checked BEFORE any runs (a refusal applies nothing).
         # 🔒 Store-aware destructive guard (Get-PimSchemaFileApplyPlan): no DROP TABLE / TRUNCATE / DELETE /
@@ -1368,7 +1368,7 @@ if (-not $roll.rolled -and $roll.reason -notmatch 'already on this image') {
 # that self-updates, the IMAGE moved while the TAG stayed frozen at whatever the last host-side
 # roll happened to record.
 # Measured 2026-09-20: internal ran 2.4.381 (templates `10b3bf2031bacf0c`) with the tag still at
-# `856bb5f1b9b009ec`; EFIF and RIDE both at `ff26419374c19ebb`. None of those three values matches
+# `856bb5f1b9b009ec`; both test tenants at `ff26419374c19ebb`. None of those three values matches
 # ANY released version -- the fingerprint is taken from the working tree at roll time, so a roll
 # from a mid-edit tree records a number no release ever had.
 # The consequence is not cosmetic: the host-side nightly then refuses every roll for the rest of
@@ -1570,7 +1570,7 @@ if ($selfJob) {
         #     NOT FULLY UPDATED -- these are still on the previous build: ca-pim-update
         # The Manager had already rolled and was healthy. Only this job's stamp of ITSELF lost a
         # race with another ARM operation on the same resource -- most often the roll we just did.
-        # 🪤 §53.4 gave the mgmt1-side pin advance exactly this bounded backoff and this reasoning.
+        # 🪤 §53.4 gave the build-host-side pin advance exactly this bounded backoff and this reasoning.
         # The cloud copy never got it: one defect, two implementations, one of them fixed. That is
         # the split-brain shape this audit keeps finding, so the wait lives here too rather than
         # being "the same idea" written once somewhere neither path loads.

@@ -517,17 +517,17 @@ function Resolve-PimAdminName {
         # Defaults to 'Admin', so every existing tenant renders byte-identical names.
         AdminWord         = $(if ("$($conv.AdminWord)".Trim()) { "$($conv.AdminWord)".Trim() } else { 'Admin' })
         # 🔑 {TenantCommonName} -- THE TENANT'S COMMON NAME (operator 2026-09-20: "add a name as
-        # variable per env that can be included also in naming like EFIF, RIDE").
-        # This is how EFIF's convention is expressed today, and it is hard-coded into the PATTERN:
-        # MSP-SETUP-GUIDE §5 ships '{AdminTypePrefix}Admin-efif-{Initial}{Platform}' in a per-deployment
-        # file, so 'efif' is baked into the template and the template cannot be shared between tenants.
+        # variable per env that can be included also in naming like CONTOSO, FABRIKAM").
+        # This is how one customer's convention is expressed today, and it is hard-coded into the PATTERN:
+        # MSP-SETUP-GUIDE §5 ships '{AdminTypePrefix}admin-contoso-{Initial}{Platform}' in a per-deployment
+        # file, so 'contoso' is baked into the template and the template cannot be shared between tenants.
         # With this token the SAME pattern serves every environment --
         # 🪤 NOT called EnvName/Environment*: in this convention 'Environment' already means the
         # PLATFORM -- EnvironmentSuffixes maps entra -> '-ID' and ad -> '-AD', and EnvironmentDefault
         # picks between them. A second meaning on the same word would be read wrong by whoever comes
         # next (operator: "envname is someting diferent in the naming" / "use tenant common name").
-        #     '{AdminTypePrefix}{AdminWord}-{TenantCommonName}-{Initial}{Platform}' + TenantCommonName='efif'
-        # renders 'admin-efif-khrs-id' -- and the per-customer part is ONE editable value, which is what
+        #     '{AdminTypePrefix}{AdminWord}-{TenantCommonName}-{Initial}{Platform}' + TenantCommonName='contoso'
+        # renders 'admin-contoso-alin-id' -- and the per-customer part is ONE editable value, which is what
         # makes a naming TEMPLATE reusable across tenants.
         # Empty by default, and the '--' collapse below removes the separator it leaves behind, so every
         # existing tenant renders byte-identical names.
@@ -937,7 +937,7 @@ function ConvertTo-PimAdminNameRegex {
                     $aw = if ("$($conv.AdminWord)".Trim()) { "$($conv.AdminWord)".Trim() } else { 'Admin' }
                     [void]$sb.Append([regex]::Escape($aw))
                 }
-                # {TenantCommonName} is a configured literal too ('efif', 'ride', ...). Same reasoning as
+                # {TenantCommonName} is a configured literal too ('contoso', 'fabrikam', ...). Same reasoning as
                 # {AdminWord}: the generic class accepts dashes, so it would swallow the next segment
                 # and stop the rule from catching a name built for the WRONG environment. Empty =
                 # matches nothing extra, which is right for a tenant that does not use the token.

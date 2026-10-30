@@ -37,7 +37,7 @@
 param(
     [Parameter(Mandatory)][string]$TenantId,
     [Parameter(Mandatory)][string]$SubscriptionId,
-    [Parameter(Mandatory)][string]$Token,          # estate token / short suffix, e.g. wa678
+    [Parameter(Mandatory)][string]$Token,          # estate token / short suffix, e.g. ab123
     # Stable index -> address space, for the ESTATE scheme only. No longer Mandatory: a customer
     # brings their own IP plan and must not be made to invent an index just to satisfy a parameter
     # whose value is then thrown away. Supply EITHER -Index (estate) OR the two explicit CIDRs
@@ -49,7 +49,7 @@ param(
     [switch]$UseSignedInAccount,
     # ONE of these two. The estate's throwaway tenants onboard with a secret; a REAL tenant must
     # not -- the repo-root rule is "authenticate as its SPN using a CERTIFICATE, never a client
-    # secret". Cert auth was added 2026-08-09 for the myfamilynetwork PRODUCTION build (PIM §34),
+    # secret". Cert auth was added 2026-08-09 for the internal PRODUCTION build (PIM §34),
     # because this script previously made secret auth structurally mandatory and so could not be
     # pointed at a production tenant at all without breaking that rule.
     [string]$AdminSecret,
@@ -321,7 +321,7 @@ Write-Host "[1] resource providers ..." -ForegroundColor Yellow
 # 🪤 THE FAILURE DOES NOT SAY "PROVIDER": creating a storage account against an unregistered
 # Microsoft.Storage answers `(SubscriptionNotFound) Subscription <id> was not found`. That reads as
 # a wrong-tenant or a permissions fault and sends you to check logins and RBAC -- both of which are
-# fine. Measured on EFIF's subscription, which had every OTHER provider registered by this very
+# fine. Measured on a test tenant's subscription, which had every OTHER provider registered by this very
 # list. Registering here costs nothing when it is already registered (the loop probes first).
 # Microsoft.KeyVault (2026-10-08, a production MSP build on an EMPTY subscription): the managing tenant's signing-key vault
 # failed with 409 MissingSubscriptionRegistration at step signingkey -- every provider the build uses is registered HERE.
@@ -359,7 +359,7 @@ Write-Host "    $rg"
 # 🪤 -l $Location is NOT optional here. Without it the VNet inherits the RESOURCE GROUP's
 # location -- which is the same region every OTHER resource below pins explicitly. That works
 # by coincidence wherever this script also created the RG, and fails wherever the RG predates
-# it: on test1mspmstintctrr2wa678 the RG is a westeurope remnant of hand-driven work, so the
+# it: on the managing test environment the RG is a westeurope remnant of hand-driven work, so the
 # VNet was attempted in westeurope and Azure refused it with "The selected region is currently
 # not accepting new customers" -- the exact constraint the -Location default exists to avoid.
 # An RG's location is metadata only, so a swedencentral VNet in a westeurope RG is fine.
@@ -602,7 +602,7 @@ if ($SkipSql) {
     # 🔑 A single-principal admin could administer the database alone; every other identity that must --
     # the unattended updater's schema step, the Invardia Support app -- needed a contained
     # user made by that one principal, and an environment whose admin could not be used unattended was
-    # stuck (EFIF/RIDE refused every release for two nights). A group holding all of them is the model on
+    # stuck (both test tenants refused every release for two nights). A group holding all of them is the model on
     # public AND private SQL. Converged AFTER the server exists (a group admin is not a create-time option
     # here) and read back; the previous admin is always kept as a member.
     # 🪤 Graph may refuse the deploy identity (a customer's least-privilege deploy identity holds no group

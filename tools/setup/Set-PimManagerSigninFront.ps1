@@ -536,7 +536,7 @@ if ($plan.steps -contains 'front-image') {
     if (-not $sfWait.ready) { throw "Set-PimManagerSigninFront: the front image is not there -- $($sfWait.reason). Nothing on the Manager changed; re-run when it is." }
     Step "front image ready: $($sfWait.reason)"
 }
-# 🔴 2026-10-20 fleet run (invardiademo, efif-rideakademiet-test): the updater run that builds the front image ALSO rolls the
+# 🔴 2026-10-20 fleet run (a demo environment, a managed test environment): the updater run that builds the front image ALSO rolls the
 # Manager when a newer version is released -- the image was ready while that roll was still provisioning, the revision PATCH
 # got 409 ContainerAppOperationInProgress and the move rolled back. Worse, $ca was read BEFORE that run: the two-container
 # template and the rollback record would have carried the OLD Manager image and silently undone the roll. So: wait until the

@@ -385,7 +385,7 @@ function Invoke-PimPreflightValidation {
             # must be matched optionally-escaped -- the old pattern ('\\\}') never matched, the
             # token survived as a literal, and EVERY legitimate UPN got a false warning then too.
             $reSrc = $reSrc -replace '\\\{[A-Za-z][A-Za-z0-9]*\\?\}', '.*'
-            # 2026-09-21 (operator, EFIF: "i dont see the problem here" -- 'adm-e-chau-t0-c' vs '...-T0-...'): a UPN is
+            # 2026-09-21 (operator, a test tenant: "i dont see the problem here" -- 'adm-e-jhol-t0-c' vs '...-T0-...'): a UPN is
             # case-INsensitive in Entra, so the convention is too. Case-sensitive, every lower-case 't0'/'t1' warned.
             [regex]::new('^' + $reSrc + '($|@)', 'IgnoreCase')
         } catch { $null }
@@ -564,7 +564,7 @@ function Invoke-PimPreflightValidation {
             # pim v1 used username and then used domain pairing when creating"). The admin's IDENTITY is its UserName -- the
             # store key (Get-PimStoreRowKey) and the engine's KeyOf -- and the UPN is only COMPOSED at create
             # (UserName@<Admin account domain>, Get-PimAdminUpnDomain). A v1 row carries NO UserPrincipalName, and in the
-            # hosted Manager no domain is pinned, so this index skipped every such admin: all 15 EFIF memberships were
+            # hosted Manager no domain is pinned, so this index skipped every such admin: all 15 memberships of a test tenant were
             # refused as PIM-FK-002 "not defined" while the 6 admins were in the store. Index them by UserName instead.
             $key = if ($upn) { $upn.ToLowerInvariant() } elseif ($un0) { $un0.Trim().ToLowerInvariant() } else { $null }
             if (-not $key) { continue }
@@ -583,7 +583,7 @@ function Invoke-PimPreflightValidation {
         }
     }
 
-    # 🔴 THE REPLICATED ADMINS ARE ADMINS TOO (RIDE, 2026-09-22: "tons of errors here" -- 11x PIM-FK-002
+    # 🔴 THE REPLICATED ADMINS ARE ADMINS TOO (a test tenant, 2026-09-22: "tons of errors here" -- 11x PIM-FK-002
     # on a managed tenant whose admins had just arrived from the managing tenant).
     # On a managed tenant the downlink writes the managing tenant's admins into their OWN entity,
     # 'Account-Definitions-Admins-Central' (PIM-Downlink.ps1 Invoke-PimDownlinkAdminApply), because they
@@ -592,7 +592,7 @@ function Invoke-PimPreflightValidation {
     # and name those central accounts -- so an index built from the local entity alone declares every
     # replicated membership an orphan, with a "Remove this assignment" button that would undo the
     # replication and a "Add ... to admins" button that would fork a local copy of a master-owned
-    # account. Measured on RIDE: 18 central admins, 3 local, 11 errors, all of them false.
+    # account. Measured on a test tenant: 18 central admins, 3 local, 11 errors, all of them false.
     # Kept as a SEPARATE set rather than merged into $adminIndex on purpose: every other admin rule
     # below reports by ROW INDEX into Account-Definitions-Admins, so a central row in that index would
     # point findings at the wrong row -- and these rows are read-only anyway, so none of those rules
@@ -1579,7 +1579,7 @@ function Invoke-PimPreflightValidation {
 
     # ------------------------------------------------------------------
     # PIM-UPN-001 -- AN ADMIN ROW MUST CARRY ITS UserPrincipalName (operator 2026-09-21: "we can not have a admin
-    # without a upn. that makes no sense, then it is not compatible"). Measured on EFIF: six rows imported with a
+    # without a upn. that makes no sense, then it is not compatible"). Measured on a test tenant: six rows imported with a
     # UserName only never showed on Admin accounts, and every UPN-keyed path (TAP, forwarding, sign-in) passed them
     # by. The UPN is this tenant's; a replicated admin gets its managed tenant's UPN built at staging (UserName@slave domain).
     if ($loaded.ContainsKey('Account-Definitions-Admins')) {

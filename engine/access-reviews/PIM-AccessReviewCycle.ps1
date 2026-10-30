@@ -11,7 +11,7 @@
     goes to the escalation mail/alert mail"; "a super admin [can] override pending access review and choose what to do";
     "run every 3 days as a test"; decision 2026-09-26: PIM's OWN review, not Microsoft Entra access reviews.
 
-    WHY NOT ENTRA (measured on ig798 2026-09-26): a review over "these users x these groups" (principalResourceMemberships)
+    WHY NOT ENTRA (measured on a test environment 2026-09-26): a review over "these users x these groups" (principalResourceMemberships)
     and over several groups are REFUSED; a group review filtered to one department's users needs the Entra ID Governance
     licence ("Tenant is not authorized for Custom Scoping Conditions Feature"); recurrence is weekly at the fastest.
 
@@ -146,8 +146,8 @@ function Get-PimDepartmentReviewPeople {
             $acc[$u].Add([pscustomobject]@{ groupTag = $gt; type = $t; label = $(if ($t) { "$gt ($t)" } else { $gt }); username = "$(Get-PimArField $a 'Username')".Trim() })
         }
     }
-    # The assignments name the account by its UPN; an admin row may carry only the short UserName (measured on EFIF
-    # 2026-09-26: 'adm-e-emaa-t1-c' vs 'adm-e-emaa-t1-c@<tenant>') -- so the access is also found by the UPN's local part.
+    # The assignments name the account by its UPN; an admin row may carry only the short UserName (measured on a test tenant
+    # 2026-09-26: 'adm-e-srey-t1-c' vs 'adm-e-srey-t1-c@<tenant>') -- so the access is also found by the UPN's local part.
     $byLocal = @{}
     foreach ($k in @($acc.Keys)) { $lp = ($k -split '@')[0]; if (-not $byLocal.ContainsKey($lp)) { $byLocal[$lp] = $acc[$k] } }
     $out = New-Object System.Collections.Generic.List[object]

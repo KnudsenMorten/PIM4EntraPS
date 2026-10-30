@@ -17,9 +17,9 @@
       PRIVATE ENDPOINT (the server has one):
         -Open   publicNetworkAccess Enabled + AllowSetupHost.
         -Close  publicNetworkAccess Disabled (firewall rules are then inert).
-        🪤 MEASURED 2026-09-17 on mgmt1: once a SQL server has a private endpoint, public DNS answers its name with a CNAME
-        to <server>.privatelink.database.windows.net, and mgmt1's DNS servers (10.100.1.5/.4) answer THAT name with
-        NXDOMAIN -- so from mgmt1 the server is unreachable even with public access Enabled ("No such host is known").
+        🪤 MEASURED 2026-09-17 on the build host: once a SQL server has a private endpoint, public DNS answers its name with a CNAME
+        to <server>.privatelink.database.windows.net, and the build host's DNS servers (10.100.1.5/.4) answer THAT name with
+        NXDOMAIN -- so from the build host the server is unreachable even with public access Enabled ("No such host is known").
         The private-endpoint shape therefore only works from a build host whose DNS resolves privatelink names publicly
         (or to the endpoint). This script says so when it opens a window on such a server.
 
@@ -76,7 +76,7 @@ if ($Mode -eq 'Open') {
         Note "this host's egress IP: $HostIp -- read from https://api.ipify.org (a third-party service; pass -HostIp to skip the lookup)"
     } else { Note "this host's egress IP: $HostIp (from -HostIp; no external lookup)" }
     if ("$HostIp" -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw "could not determine this host's egress IP ('$HostIp')" }
-    if ($shape -eq 'privateEndpoint') { Write-Warning "'$srv' has a private endpoint: this host can use the window only if its DNS resolves $srv.privatelink.database.windows.net (mgmt1's DNS does NOT -- measured 2026-09-17)." }
+    if ($shape -eq 'privateEndpoint') { Write-Warning "'$srv' has a private endpoint: this host can use the window only if its DNS resolves $srv.privatelink.database.windows.net (the build host's DNS does NOT -- measured 2026-09-17)." }
     if ($PSCmdlet.ShouldProcess($srv, "open build window for $HostIp")) {
         # BUG-246 (§73.9, a customer build 2026-09-23): the enable was not checked, so a policy refusal (Deny on public network
         # access) surfaced only as the firewall rule's 'DenyPublicEndpointEnabled' -- the real cause never shown.

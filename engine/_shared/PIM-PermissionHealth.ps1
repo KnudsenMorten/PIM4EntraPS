@@ -281,7 +281,7 @@ function Get-PimPermissionHealth {
         # does a send actually succeed. $null = not probed (unknown), which is never reported as OK.
         [string]$MailSender          = '',
         [object]$MailSendOk          = $null,
-        # Operator 2026-10-04 (RIDE: "Core functionality is BLOCKED -- no Azure role-management scope" on an environment
+        # Operator 2026-10-04 (a test tenant: "Core functionality is BLOCKED -- no Azure role-management scope" on an environment
         # that defines NO Azure delegation): Azure rights are needed only when the store defines Azure resource
         # delegations (PIM-Assignments-Azure-Resources rows). 0 = not needed, so their absence blocks nothing -- the engine
         # touches only what is defined, and asking for User Access Administrator at the root for nothing is standing Tier-0

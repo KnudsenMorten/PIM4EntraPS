@@ -226,7 +226,7 @@ function Invoke-PimSetupRest {
     $global:PimSetupRestLastError = ''
     $result = $null
     $failure = $null
-    # 2026-10-11 (HOGYM managed install, live): ONE dropped connection on an ARM GET ("HTTP 0 : Unable to read data from the
+    # 2026-10-11 (a managed-tenant install, live): ONE dropped connection on an ARM GET ("HTTP 0 : Unable to read data from the
     # transport connection: An existing connection was forcibly closed") stopped the whole deploy. A transport failure is
     # retried up to 3 times with a growing wait. Only idempotent verbs (GET / PUT / PATCH / DELETE / HEAD) -- a POST is an
     # action (start a job, list keys) and is not repeated. HTTP errors (4xx / 5xx answers) are NOT retried here.

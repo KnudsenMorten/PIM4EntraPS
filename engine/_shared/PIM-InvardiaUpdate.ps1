@@ -439,7 +439,7 @@ function Resolve-PimInvardiaAppliedSequence {
 }
 
 # ---- 100.69 -- AN UPDATE RUN BEFORE THE INSTALL KEY IS CLAIMED IS WAITING, NOT FAILED ----------------------------------
-# MEASURED (trial ig798, 2026-10-11): an updater run started ~5 minutes after install, before the tick's install-key job
+# MEASURED (a trial environment, 2026-10-11): an updater run started ~5 minutes after install, before the tick's install-key job
 # claimed the key, exited 1 with "this install has no install key" -> execution Failed, UpdateState 'failed', failure
 # telemetry. Nothing was wrong: the key is claimed by the engine within ~5 minutes of install, and the next run updated.
 # So: no key YET = 'waiting' (exit 0, no failure telemetry). No key a day after install, or a claim Invardia REFUSED, is a

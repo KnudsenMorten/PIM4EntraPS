@@ -7,7 +7,7 @@
     An environment's PIM store, restored from its backup (a BACPAC), is copied into ANOTHER environment that already
     runs: its definitions (pim.Rows), its settings (pim.Settings), its audit trail (pim.AuditEvents) and its commit undo
     snapshots (pim.Backups). Operator 2026-10-04, after the internal environment was deleted without an export: "everything
-    into r1-pro-ca, keep the audit trail too".
+    into the internal environment, keep the audit trail too".
 
     SETTINGS -- one action per name (Get-PimImportSettingAction):
       skip    the TARGET environment's own identity or runtime state; copying it would make the target pose as the source
@@ -37,13 +37,13 @@ $script:PimImportNeverCopyExact = @(
     'LicenceRequestToken', 'InstallId', 'EditionUpgrade', 'RfaSettings', 'UnmanagedAdmins', 'AzResPolicyMassHold',
     'AzResPolicyMassChangeApproval', 'GroupsPolicyMassHold', 'RemoveRowAbsentSeen', 'TenantCacheState', 'RingOrder',
     'GroupsPolicyMassChangeApproval', 'EntraRolePolicyMassHold', 'EntraRolePolicyMassChangeApproval',   # CODE REVIEW 2 (2026-10-13)
-    'EnvironmentName',  # this environment's own display name ("EFIF (test)") -- never carried to another one
+    'EnvironmentName',  # this environment's own display name ("Contoso (test)") -- never carried to another one
     'DemoMode', 'DemoGuestGroup',   # s98: a live demo's own switch -- an import never turns another environment into a demo
     'LogRepeatSeen',    # §100.46: which repeating log lines THIS environment already printed (runtime state)
     'AdminDeletePins',   # review 1 fixes 2026-10-13 (decision 54): another environment's pinned account deletes are never this one's
     'GuardApprovals', 'GuardReleases', 'GuardHolds', 'GuardLimits', 'HybridAdCleanupApproval', 'HybridAdServerAutoGroupsApproval', 'AdServerAutoGroups', 'AdServerAutoGroupsWaiting', 'AdServerAutoGroupsProgress', 'AdCleanupResult', 'AdCleanupLocalAdmin',   # PIM 100.119 B1: another environment's approvals / releases / holds are not this one's, and a guard's limit is set here by a SuperAdmin (audited), never carried in
     'ReconcileRemovalMode', 'EnableAutomaticOffboarding',   # REVIEW FIXES 2026-10-13: the TARGET's own protection switches -- an import never changes whether THIS environment removes leftovers or offboards on its own; they are set on its Settings page (confirmation + the count shown)
-    'WorkloadPrereqs'   # checks made against the SOURCE's engine identity (2026-10-04: r1-pro-ca showed mfnpr's green checks)
+    'WorkloadPrereqs'   # checks made against the SOURCE's engine identity (2026-10-04: the new internal environment showed the old one's green checks)
 )
 $script:PimImportNeverCopyPrefix = @('JobRunOutput:', 'SchedulerState', 'SchedulerLease', 'JobScope', 'HybridAdSyncMemory', 'DeltaSkipState:')   # 100.122 F1: the AD sync's memory belongs to one tenant; 70.17: a job's skip state is this store's own
 $script:PimImportUnion = @{ ManagerAccess = 'managerAccess'; PortalAdmins = 'portalAdmins' }

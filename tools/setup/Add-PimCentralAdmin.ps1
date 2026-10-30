@@ -9,7 +9,7 @@
     🔴 WHY THIS SCRIPT EXISTS. There was no shipped way to add a real MSP admin. `Set-PimPortalAdmins.ps1`
     seeds the PORTAL authorization model (who may use the Manager), which is a different thing, and
     `tests/live/Seed-PimScenarioDataset.ps1` creates SYNTHETIC `PIMSCEN-` admins for the offline
-    matrix. So the one step an MSP actually performs -- "add Thomas, Kasper and Morten, and have
+    matrix. So the one step an MSP actually performs -- "add Avery, Jordan and Sam, and have
     them appear in every customer tenant" -- was a hand-written SQL INSERT. That is the shape of
     step that quietly diverges between tenants and between people.
 
@@ -30,7 +30,7 @@
     admin a Department. Additive only, never destructive.
 
 .PARAMETER Initials
-    The owner token the convention renders (e.g. 'thpo'). The account name is derived from it.
+    The owner token the convention renders (e.g. 'alin'). The account name is derived from it.
 
 .PARAMETER ManagerEmail
     OPTIONAL, LEGACY FALLBACK. 📌 71.19: an admin's TAP and mail go to the OWNERS of its SPONSOR DEPARTMENT
@@ -48,8 +48,8 @@
     Render the L0/T0 high-privilege name instead of the day-to-day one.
 
 .EXAMPLE
-    ./Add-PimCentralAdmin.ps1 -SqlServer sql-ait-wa678.database.windows.net `
-        -FirstName Thomas -LastName Poulsen -Initials thpo -Ring 0 -ManagerEmail thomas@efif.dk
+    ./Add-PimCentralAdmin.ps1 -SqlServer sql-pim-contoso.database.windows.net `
+        -FirstName Avery -LastName Lind -Initials alin -Ring 0 -ManagerEmail avery@contoso.example
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -86,7 +86,7 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $here)
 # Resolve-PimAdminName renders from $global:PIM_NamingConventions, which the CONFIG files set --
 # not PIM-Naming.ps1 itself. Dot-sourcing only the resolver silently falls back to its built-in
 # defaults, and the defaults have no organisation token: MEASURED 2026-09-03, that produced
-# 'admin-khrs-id' where this deployment's convention is 'admin-efif-khrs-id'.
+# 'admin-alin-id' where this deployment's convention is 'admin-contoso-alin-id'.
 # 🪤 It fails in the worst direction: a plausible-looking name that is WRONG. The account is still
 # created, still syncs, and is still invisible to any provider scoped to the real convention --
 # which is IMP-13's silent tick-loop, introduced by the very script meant to prevent it.

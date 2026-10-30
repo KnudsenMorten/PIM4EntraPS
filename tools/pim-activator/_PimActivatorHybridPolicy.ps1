@@ -69,7 +69,7 @@
     the slot that ALREADY holds our id if there is one, else the LOWEST FREE numeric slot --
     never a hard-coded '1' (which replaced the org's first extension) and never a
     GetHashCode() slot (randomised per process on .NET Core, so re-runs piled up duplicates
-    and -Uninstall removed nothing; BUG-220 -- measured on mgmt1 2026-09-18: FOUR rows for
+    and -Uninstall removed nothing; BUG-220 -- measured on the build host 2026-09-18: FOUR rows for
     the released id at 1590 / 3077 / 5148 / 7772). Lowest-free also keeps the list in the
     documented contiguous '1','2',... form, and a removal refills the hole it leaves, so
     the list is valid whether or not a reader tolerates gaps (arbitrary value names do

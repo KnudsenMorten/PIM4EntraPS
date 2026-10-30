@@ -127,7 +127,7 @@ foreach ($a in @($plan.actions)) {
     Note "$($a.op) $($a.value)"
     $out = ''
     try { Invoke-PimBaselineStoreAction -Op $a.op -Value $a.value } catch { $out = "$($_.Exception.Message)" }
-    # 🪤 MEASURED on EFIF 2026-09-18: on an EXISTING account, the container call straight after 'allow-blob-public-access'
+    # 🪤 MEASURED on a test tenant 2026-09-18: on an EXISTING account, the container call straight after 'allow-blob-public-access'
     # answers PublicAccessNotPermitted because the account setting has not propagated yet (it read back True seconds
     # later). Retry only THAT error on only THAT step, bounded. A real policy refusal fails on the account update
     # above, not here.

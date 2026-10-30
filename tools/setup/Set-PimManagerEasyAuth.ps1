@@ -671,7 +671,7 @@ if ($PSCmdlet.ShouldProcess($App, 'ensure the Easy Auth client secret')) {
 # DIFFERENT PATHS, so 11/0 was true and unusable at the same time -- the same shape as the content
 # hash being read from a place nothing writes.
 # 🔴 BUG-169 (2026-09-18) -- AND THEN NOBODY COULD SIGN IN ANYWAY: "Need admin approval".
-# Measured on EFIF and RIDE: the Manager registration had NO consent grant at all, and those tenants
+# Measured on both test tenants: the Manager registration had NO consent grant at all, and those tenants
 # do not let users consent for themselves. Three defects, all in this block:
 #  1. it consented User.Read ONLY, while the v2 sign-in requests openid/profile/email too;
 #  2. the deploy identity was never given DelegatedPermissionGrant.ReadWrite.All, the one role the

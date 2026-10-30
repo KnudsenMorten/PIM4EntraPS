@@ -27,7 +27,7 @@
     authentication. Doing it in the obvious order -- recreate external, add auth after -- leaves
     exactly that window open, and the window is unattended.
 
-    🪤 MEASURED 2026-09-11: EFIF and RIDE had NO Easy Auth at all (`az containerapp auth show`
+    🪤 MEASURED 2026-09-11: both test tenants had NO Easy Auth at all (`az containerapp auth show`
     returned `{}`). Their internal-only environment WAS their access control. A rebuild that only
     changed the exposure would have published the Manager with nothing in front of it -- failing
     closed to Reader, which still READS every assignment and admin row. That is why -SkipEasyAuth
@@ -50,10 +50,10 @@
 
 .EXAMPLE
     # 1. plan (writes a capture, changes nothing)
-    ./Rebuild-PimEnvExternal.ps1 -Tag wa678 -SubscriptionId <sub> -ResourceGroup rg-automateit-wa678
+    ./Rebuild-PimEnvExternal.ps1 -Tag ab123 -SubscriptionId <sub> -ResourceGroup rg-pim-contoso
 
     # 2. do it
-    ./Rebuild-PimEnvExternal.ps1 -Tag wa678 -SubscriptionId <sub> -ResourceGroup rg-automateit-wa678 `
+    ./Rebuild-PimEnvExternal.ps1 -Tag ab123 -SubscriptionId <sub> -ResourceGroup rg-pim-contoso `
         -EasyAuthTenantId <tenant> -Apply
 
 .NOTES
@@ -65,7 +65,7 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    # Names the capture files. For the estate this is the naming token (wa678 / rj466); for a
+    # Names the capture files. For the estate this is the naming token (e.g. ab123); for a
     # customer it is any short label.
     [Parameter(Mandatory)][string]$Tag,
     [Parameter(Mandatory)][string]$SubscriptionId,
@@ -570,7 +570,7 @@ if ($staleZone -and -not $wantInternal) {
 # =================================================================================================
 # 0c. IDENTITY-KEYED STATE -- the thing this script verified nothing about, and broke every time.
 #
-# 🔴 MEASURED ON EFIF 2026-09-11. The restore diffed image, cpu, replicas, port, registry, secrets
+# 🔴 MEASURED ON a test tenant 2026-09-11. The restore diffed image, cpu, replicas, port, registry, secrets
 # and every env var, declared "restore matches the capture", exposed the app -- and the Manager then
 # crash-looped on:
 #     Login failed for user '<token-identified principal>'
@@ -629,7 +629,7 @@ if (-not $script:IdentBefore.Count) { Say '  nothing has a system-assigned ident
 elseif ($SkipIdentityRepair) { Warn '-SkipIdentityRepair: SQL users and role assignments will NOT be repaired.' }
 elseif (-not "$SqlServer".Trim() -or -not "$SqlAdminClientId".Trim()) {
     Warn 'NO SQL CREDENTIAL GIVEN -- the contained users CANNOT be remapped after the rebuild.'
-    Warn 'This is exactly what crash-looped EFIF: the Manager came up, passed every config diff, and'
+    Warn 'This is exactly what crash-looped a test tenant: the Manager came up, passed every config diff, and'
     Warn 'then died on "Login failed for user ''<token-identified principal>''" because its new MI had'
     Warn 'no user. Pass -SqlServer + -SqlAdminClientId + -SqlAdminClientSecret (any db_owner will do;'
     Warn 'the engine SPN in the environment''s own key vault is the usual one). Role assignments are'
@@ -849,7 +849,7 @@ if (-not $SkipIdentityRepair -and $script:IdentBefore.Count) {
 Step '6c. repair identity-keyed state (new system-assigned MIs)'
 
 # Resolve the NEW principal + appId for each thing that had one before. OBSERVATION ONLY -- what to
-# DO about it is Get-PimIdentityRepairPlan's decision, which is proven offline against the real EFIF
+# DO about it is Get-PimIdentityRepairPlan's decision, which is proven offline against the real test tenant
 # numbers in tests/Test-PimRebuildIdentityRepair.ps1.
 $identNow = @()
 foreach ($b in $script:IdentBefore) {

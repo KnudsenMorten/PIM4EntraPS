@@ -669,7 +669,7 @@ function Invoke-PimQueueAction {
             }
 
             'entra-role-revoke' {
-                # 🔴 REVOKE FIX (operator 2026-09-19, EFIF: "revoke is not working, remember to differ if delegated with pim or
+                # 🔴 REVOKE FIX (operator 2026-09-19, a test tenant: "revoke is not working, remember to differ if delegated with pim or
                 # permanent (legacy)"). This always POSTed a PIM adminRemove at the payload's scope (or '/'). That removes ONLY
                 # a PIM-managed assignment at exactly that scope; a PERMANENT assignment made outside PIM (v1 / portal / the
                 # legacy roleAssignments API) has no PIM schedule to remove, and Graph answers 404 RoleAssignmentDoesNotExist
@@ -754,7 +754,7 @@ function Invoke-PimQueueAction {
             'azure-rbac-revoke' {
                 $id = "$($p.roleAssignmentId)".Trim()
                 if (-not $id) { return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail='azure-rbac-revoke has no roleAssignmentId' } }
-                # 🔴 "ALREADY GONE" IS SUCCESS -- AND THE INVOKER THROWS IT (measured live on EFIF,
+                # 🔴 "ALREADY GONE" IS SUCCESS -- AND THE INVOKER THROWS IT (measured live on a test tenant,
                 # 2026-09-22: four Cleanup revokes recorded FAILED, each with
                 # "HTTP 404 : RoleAssignmentNotFound -- The role assignment '<id>' is not found").
                 # The read-back below was written for an invoker that returns $null on 404; the real

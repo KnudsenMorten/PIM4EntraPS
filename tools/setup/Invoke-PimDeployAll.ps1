@@ -334,7 +334,7 @@ param(
     # BUG-37. Setup-PimContainers only hands ACA an existing workspace when it is TOLD which one;
     # the parameter defaults to empty and the orchestrator never passed it, so ACA generated its own
     # and every log went there while law-pim-<token> sat empty and billed. The fix existed and was
-    # simply unreachable from the front door -- reproduced live on mfnpr 2026-08-09, which is the
+    # simply unreachable from the front door -- reproduced live on the internal environment 2026-08-09, which is the
     # confirmation §33.10 was waiting for.
     [string]$LogAnalyticsWorkspaceName,
     [string]$LogAnalyticsResourceGroup,
@@ -479,7 +479,7 @@ param(
     # --- verify knobs ---
     [switch]$SkipVerify,                     # opt out of step 5 entirely (NOT recommended)
     # The engine app-registration is frequently provisioned OUT OF BAND -- by a directory admin, or
-    # (myfamilynetwork) years before this orchestrator existed. The deploying identity then usually
+    # (the internal tenant) years before this orchestrator existed. The deploying identity then usually
     # has Azure rights but NO Graph rights, and Test-EngineAppRegPresent returns $null meaning
     # "cannot determine", which the plan fail-safes to NEEDED. The step then tries to CREATE an app
     # that already exists and dies with Authorization_RequestDenied -- taking the whole deploy with
@@ -1396,7 +1396,7 @@ function Test-AcaEnvPresent {
       "environment + Manager app" fixed the case that had just been seen and stopped one artefact
       short of the truth again. In `cron` mode the INFRA step also creates the **tick Job** and --
       the part that actually matters -- **grants its identity a SQL contained user and Graph
-      app-roles**. On mfnpr the environment existed, the Manager existed, and the tick Job existed,
+      app-roles**. On the internal environment the environment existed, the Manager existed, and the tick Job existed,
       so this returned "already current" and the step was skipped on every re-run. But BUG-44 had
       killed the previous run *between* creating the Job and granting it anything, so the grants
       were permanently missing and the only thing that could have created them was the step this
@@ -1907,7 +1907,7 @@ function Invoke-DefaultStepRunner {
             $prq = Join-Path $here 'New-PimHostingPrerequisites.ps1'
             if (-not (Test-Path $prq)) { return @{ ok=$false; ran=$true; detail="prereq script not found: $prq" } }
             if (-not "$PrereqToken".Trim()) {
-                return @{ ok=$false; ran=$true; detail='PREREQ needs -PrereqToken (the estate token, e.g. wa678): every prerequisite name is derived from it.' }
+                return @{ ok=$false; ran=$true; detail='PREREQ needs -PrereqToken (the estate token, e.g. ab123): every prerequisite name is derived from it.' }
             }
             # An address plan is required, but it can come from EITHER source. A customer with
             # their own IP range must not be made to invent an estate index whose value is then
@@ -2085,7 +2085,7 @@ function Invoke-DefaultStepRunner {
                 if ($pullName) { $derivedPull = "$((Get-PimArmIdentity -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $pullName -ErrorAsNull).id)" }
                 if ("$derivedPull".Trim() -notmatch '^/subscriptions/') {
                     $ids = @(Invoke-PimSetupArm -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.ManagedIdentity/userAssignedIdentities" -ApiVersion (Get-PimSetupApiVersion msi) -All -ErrorAsNull |
-                             Where-Object { $_ -and "$($_.name)" -match '^id-pim-' -and "$($_.name)" -notmatch '^id-pim-(sql-|asbuilt|web$|engine$|updater$|mcp$)' })   # never the as-built job's identity (HOGYM), nor a CR5 per-role identity
+                             Where-Object { $_ -and "$($_.name)" -match '^id-pim-' -and "$($_.name)" -notmatch '^id-pim-(sql-|asbuilt|web$|engine$|updater$|mcp$)' })   # never the as-built job's identity (a managed-tenant install), nor a CR5 per-role identity
                     if ($ids.Count -eq 1) { $derivedPull = "$($ids[0].id)"; $pullName = "$($ids[0].name)" }
                 }
                 if ("$derivedPull".Trim() -match '^/subscriptions/') {
@@ -2525,13 +2525,13 @@ function Invoke-DefaultStepRunner {
                 # mode five of those apps do not exist, so the step died with "requested app(s) not
                 # found: ca-pim-scheduler, ca-pim-engine, ..." AFTER building and pushing an image.
                 # The cron override at the top of this script had already narrowed $Apps correctly;
-                # it just never reached here. Measured on mfnpr 2026-08-10.
+                # it just never reached here. Measured on the internal environment 2026-08-10.
                 # 🔴 BUG-50 -- WITHOUT A CONNECTION STRING THIS STEP APPLIES NOTHING AND SAID IT DID.
                 # `Invoke-PimUpdate` degrades to "print the guarded DDL plan" when it has no
                 # -SqlConnectionString: it WARNS, sets its own $schemaUpgraded=$false, and still
                 # exits 0. This step then reported `ok=True ... 'schema upgrade applied'`, and the
                 # deploy summary said the environment was fine.
-                # MEASURED on mfnpr 2026-08-10: the store had **3 tables** and
+                # MEASURED on the internal environment 2026-08-10: the store had **3 tables** and
                 # RecalcSignature "rows=0|max=none" after repeated "successful" deploys. The
                 # Manager and the tick both came up healthy against a database with no schema --
                 # so nothing failed, it just could never do any work. At 25 tenants this is the
@@ -3403,7 +3403,7 @@ if ($verifyResult -or $halted) {
 $rolledBack = $false
 # BUG-216: only a verdict that FAILED rolls back. UNVERIFIED (the smoke exited 2 -- it skipped checks) is
 # not healthy and is reported as such, but nothing proved the deploy broken, so nothing is rolled back.
-# 100.73 (HOGYM 2026-10-11): a halted run rolls back ONLY when the halting step is the roll itself ('code'). A later
+# 100.73 (a managed-tenant install 2026-10-11): a halted run rolls back ONLY when the halting step is the roll itself ('code'). A later
 # step (updater, access, alerting, ...) failing on its own -- a transport drop -- must never take a healthy app back.
 $rbDecision = Test-PimDeployRollbackNeeded -HaltedStepKey $(if ($halted) { "$haltedKey" } else { '' }) -Verdict $verdict -CodeRan $codeRan
 $needRollback = [bool]$rbDecision.rollback

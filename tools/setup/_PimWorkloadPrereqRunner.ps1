@@ -183,7 +183,7 @@ function Invoke-PimPrereqGraphRoleCheck {
 
 function Get-PimPrereqSentinelWorkspaceId {
     # The workspace -EnableSentinel acts on: -SentinelWorkspaceId, else a DEDICATED one in the hosting resource group,
-    # named after it (rg-automateit-wa678 -> law-sentinel-wa678).
+    # named after it (rg-pim-contoso -> law-sentinel-contoso).
     param([hashtable]$Ctx)
     if ("$($Ctx.sentinelWorkspaceId)".Trim()) { return "$($Ctx.sentinelWorkspaceId)".Trim().TrimEnd('/') }
     if (-not "$($Ctx.hostingSubscriptionId)".Trim() -or -not "$($Ctx.hostingResourceGroup)".Trim()) { return '' }
@@ -224,8 +224,8 @@ function Enable-PimPrereqSentinel {
         if (-not $c.ok) { return (New-PimWorkloadPrereqCheck -Id 'defender.sentinelEnabled' -Status 'failed' -Detail "could not create workspace '$name': $($c.error)") }
         $done.Add("created workspace '$name' ($($rg.value.location))")
     }
-    # 2. The resource providers Sentinel needs, registered on the workspace's subscription. Measured 2026-09-19 on EFIF
-    #    and RIDE: Microsoft.SecurityInsights + Microsoft.OperationsManagement were NotRegistered and the tenant had no
+    # 2. The resource providers Sentinel needs, registered on the workspace's subscription. Measured 2026-09-19 on a test tenant
+    #    and a test tenant: Microsoft.SecurityInsights + Microsoft.OperationsManagement were NotRegistered and the tenant had no
     #    "Azure Security Insights" first-party service principal -- the onboarding PUT then answered 401 "Unauthorized
     #    access while trying to fetch workspace details", which reads like a permission problem and is not one.
     $subId = ($id -split '/')[2]

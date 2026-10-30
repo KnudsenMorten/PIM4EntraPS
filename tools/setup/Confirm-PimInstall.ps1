@@ -111,7 +111,7 @@ param(
     [string]$OutFile,
     [scriptblock]$Probe,
     [scriptblock]$Repair,
-    # TEST seams (INSTALL-FIX-EVIDA 100.25): -StoreRead param($kind, $name) -> the store's value for that setting, in place of
+    # TEST seams (INSTALL-FIX 100.25): -StoreRead param($kind, $name) -> the store's value for that setting, in place of
     # the SQL read ($kind 'raw' = the ValueJson column as stored; 'setting' = as Get-PimSqlSetting returns it). A -Probe that
     # answers '<live>' for a line lets that line run its real code against -StoreRead. -TestLicenceCertB64: an ephemeral
     # licensing certificate for the licence line (never the real key).
@@ -153,7 +153,7 @@ $here = $PSScriptRoot
 . (Join-Path $here '_PimSetupSql.ps1')
 # §100.41: the ARM / Graph REST layer for the live reads (no az) -- file scope, always (same 71.32 rule).
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-ArmSetup.ps1')
-# 🔴 INSTALL-FIX-EVIDA (100.25 item 1, 2026-10-09): the licence functions -- loaded HERE, AT FILE SCOPE, ALWAYS. The licence
+# 🔴 INSTALL-FIX (100.25 item 1, 2026-10-09): the licence functions -- loaded HERE, AT FILE SCOPE, ALWAYS. The licence
 # line loaded PIM-License.ps1 only "if Get-PimLicense is not loaded yet", INSIDE Get-CvFact. Install-PimManager (the caller)
 # has it loaded, so nothing was loaded here, and the caller's Get-PimLicense ran in THIS script, where its $script: trusted
 # signing certificates do not exist -- every licence read "Invalid", and a production install refused "done" while its licence
@@ -284,7 +284,7 @@ function Get-CvFact([string]$Id) {
                 $sender = "$(Get-CvSetting 'MailSender')".Trim().Trim('"')
                 $f = @{ readable = $true; sender = $sender; deferredReason = "$MailDeferredReason".Trim(); exoReachable = $false; identities = @(); exoError = '' }
                 if (-not $sender) { return $f }
-                # INSTALL-FIX-EVIDA (100.25 item 4): the PRIMARY SMTP address the customer chose. MailSender is the mailbox's UPN
+                # INSTALL-FIX (100.25 item 4): the PRIMARY SMTP address the customer chose. MailSender is the mailbox's UPN
                 # (BUG-296); the address is the record the mail-sender setup stored (pim.Settings 'MailSenderAddress', only while
                 # it belongs to THIS sender), else the directory's own 'mail' of that UPN (Microsoft Graph, no Exchange needed).
                 $rec = $null; try { $rec = Get-CvSetting 'MailSenderAddress' } catch { $rec = $null }

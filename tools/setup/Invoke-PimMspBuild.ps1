@@ -8,8 +8,8 @@
     run as managed identities. Plan by default; -Apply to build.
 
 .DESCRIPTION
-    Operator 2026-09-15: "on friday we must use it to build efif and ride in prod". Runs, in order and idempotently, every
-    step that made the EFIF -> RIDE test pair work (engine/msp/PIM-MspBuild.ps1 decides the plan):
+    Operator 2026-09-15: "on friday we must use it to build the test MSP pair in prod". Runs, in order and idempotently, every
+    step that made the test MSP pair (managing -> managed) work (engine/msp/PIM-MspBuild.ps1 decides the plan):
 
       both   keyvault (when keyVaultName + bootstrapAppId are set) -> hosting (Invoke-PimDeployAll -Scenario S3|S6: identity,
              prerequisites incl. SQL admin group, image, containers, schema, mail sender, Easy Auth, code, updater, access,
@@ -150,7 +150,7 @@ param(
     # THIS build and reports every step through its -Reporter: called with @{ key; name; state; detail } for each step
     # event (the same events the install tracking posts). A failing callback never fails the build.
     [scriptblock]$OnStep,
-    # 100.73 (HOGYM 2026-10-11): the ONE resume line the person is given when a step fails -- the guided install hands its
+    # 100.73 (a managed-tenant install 2026-10-11): the ONE resume line the person is given when a step fails -- the guided install hands its
     # own over (under Invardia's bootstrap: ". ./bootstrap.ps1; Install-Invardia -Resume -InstallId <id>"). Set (or
     # Install-Invardia present in the session), a failure prints three parts only -- what failed + cause, the fix when
     # known, this line -- with no internal -From line and no operator-steps block (those print at the end of a success).

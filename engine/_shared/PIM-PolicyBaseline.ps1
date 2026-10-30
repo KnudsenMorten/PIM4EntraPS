@@ -267,13 +267,13 @@ function Get-PimPolicyBaselineFromArchive {
     # 🪤 READ THE TAR WITH .NET, NOT THE `tar` BINARY. Two independent things bite the obvious
     # implementation, and both were measured 2026-09-20:
     #   1. GNU tar (the container image, powershell:7.4-ubuntu-22.04) needs `--wildcards` to match a
-    #      pattern; bsdtar (Windows, mgmt1) matches by default and REFUSES the flag. One code path
+    #      pattern; bsdtar (Windows, the build host) matches by default and REFUSES the flag. One code path
     #      cannot satisfy both without probing.
     #   2. PowerShell 7.3+ turns a NON-ZERO NATIVE EXIT into a TERMINATING error when
     #      $ErrorActionPreference is 'Stop' ($PSNativeCommandUseErrorActionPreference). So the probe
     #      for (1) THROWS, the catch returns empty, and a perfectly good archive fingerprints as
     #      "could not tell" -- which reads as UNKNOWN and silently waves a roll through.
-    # System.Formats.Tar (.NET 7+; the image has .NET 8, mgmt1 .NET 10) has no exit codes, no
+    # System.Formats.Tar (.NET 7+; the image has .NET 8, the build host .NET 10) has no exit codes, no
     # pattern dialects and no child process. Entry names in a tar are ALWAYS forward-slashed,
     # whatever the host, so one regex is correct everywhere.
     try {

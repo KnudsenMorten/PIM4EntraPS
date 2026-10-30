@@ -42,7 +42,7 @@ Set-StrictMode -Off
 # ---------------------------------------------------------------------------
 # The short, human name of a VNet, used to build the peering pair names.
 # Convention taken from what the tenant already had -- `vnet-platform` +
-# `vnet-pim-mfnpr` peered as `platform-to-pim-mfnpr` / `pim-mfnpr-to-platform`.
+# `vnet-pim-<env>` peered as `platform-to-pim-<env>` / `pim-<env>-to-platform`.
 # Following the existing convention matters: an operator scanning a portal blade
 # should not have to work out which of two naming schemes a peering came from.
 # ---------------------------------------------------------------------------

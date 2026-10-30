@@ -6,7 +6,7 @@
     site changes.
 
 .DESCRIPTION
-    🔴 WHY THIS EXISTS -- measured on mgmt1, 2026-09-05, on the live internal-prod update.
+    🔴 WHY THIS EXISTS -- measured on the build host, 2026-09-05, on the live internal-prod update.
 
     PowerShell 5.1 converts ANY write to a native command's stderr into a NativeCommandError
     ErrorRecord. The whole update path runs with `$ErrorActionPreference = 'Stop'`. So a mere
@@ -17,7 +17,7 @@
       * `... cryptography/hazmat/backends/openssl/backend.py:8: UserWarning: You are using
          cryptography on a 32-bit Python on a 64-bit Windows Operating System.`
 
-    That second one killed `PIM-Update-mfnpr-internal` at the container-app DISCOVERY step:
+    That second one killed `PIM-Update-<env>-internal` at the container-app DISCOVERY step:
         UPDATE FAILED: D:\a\_work\1\s\...\backend.py:8: UserWarning: ...
         outcome=failure (built=True deployed=False)
     The image had built perfectly. A Python performance hint stopped it being deployed.
@@ -35,7 +35,7 @@
     the guard has to wrap the invocation, and cannot be a flag on it.
 
     🪤 AND IT ONLY BITES SOME HOSTS, WHICH IS WHY IT LOOKED LIKE IT WORKED. Whether az warns
-    depends on the az CONFIG DIR: the two customer update tasks (wa678, rj466) run with an
+    depends on the az CONFIG DIR: the two customer update tasks run with an
     isolated `AZURE_CONFIG_DIR` holding no extensions, az stays silent, and they have gone
     green nightly. Internal prod ran on the shared default dir, which HAS extensions
     installed -- so the same code, same az, same command, on the same machine, failed. A pass

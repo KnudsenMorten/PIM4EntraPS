@@ -396,7 +396,7 @@ function Get-PimUpdaterFollowUpDecision {
 
       🔴 WHY. An update run is executed by the updater image that was installed BEFORE it, so anything a
       release changes in the updater takes effect one run LATE. Measured 2026-09-18: the 2.4.367 updater
-      rolled internal, EFIF and RIDE to 2.4.369, but the step that records the ring (§71.43) only exists
+      rolled internal and both test tenants to 2.4.369, but the step that records the ring (§71.43) only exists
       in 2.4.369 -- so all three Managers showed "update ring: not recorded" until the next 03:00. A
       follow-up run on the NEW image closes that gap for this and every future updater change: it finds
       the same version already running (a no-op roll) and does the new work -- recording, reporting.
@@ -660,7 +660,7 @@ function Get-PimAcaJobRollPlan {
 function Test-PimAcaRollNoop {
     <#
       PURE. Is a roll-plan entry ALREADY on the target image (same string, case-insensitive)? Then the updater counts it and
-      does not PATCH it. Live 2026-10-24 03:00 (efif-aalborghs-prod + efif-at-prod, ticket SUP-2026-00307): the nightly run
+      does not PATCH it. Live 2026-10-24 03:00 (two customer environments, ticket SUP-2026-00307): the nightly run
       re-PATCHed ca-pim-downlink-s6, which the 23:47 roll had already moved to 2.4.672, and ARM answered "HTTP 400
       InvalidRequestContent -- Could not find member 'error' on object of type 'ResourceDefinition'"; the healthy install
       was reported pim-upd-0101 "still on the previous build". The Manager already skips this case ("already on this

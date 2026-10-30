@@ -859,7 +859,7 @@ switch ($seedPlan.action) {
     default { Note $seedPlan.message }
 }
 
-# INSTALL-FIX-EVIDA (100.25 item 2): an Invardia-fed updater has no channel.json -- it is never read for one (the 404 read
+# INSTALL-FIX (100.25 item 2): an Invardia-fed updater has no channel.json -- it is never read for one (the 404 read
 # printed "this environment will NOT update" on an install that updates fine); the source decides, as the seed above records it.
 $chRep = Get-PimUpdateSourceReport -Source (Get-PimUpdateStateSeedSource -UpdateSource "$UpdateSource" -ExistingEnv $existingEnv -SourceUrl "$($ringPlan.sourceUrl)") `
              -SourceUrlTemplate $ringPlan.sourceUrl -Ring $ringPlan.ring -CurrentVersion $curVer

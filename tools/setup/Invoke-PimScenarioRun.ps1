@@ -152,7 +152,7 @@ foreach ($__dep in @('PIM-Rest.ps1','PIM-SqlStore.ps1','PIM-AccountRest.ps1')) {
 # makes -- including the default-domain lookup the local-slave path depends on -- authenticated as
 # the container's managed identity instead of the engine SPN.
 # MEASURED on the greenfield slave 2026-08-27, and the comparison is the proof: the SAME
-# /domains call, with the SAME grant, succeeded from mgmt1 as the engine SPN at 15:16:12 and
+# /domains call, with the SAME grant, succeeded from the build host as the engine SPN at 15:16:12 and
 # returned 403 from the container 35 seconds later. Not propagation -- a different identity. The
 # MI holds ZERO Graph app-roles; the engine SPN holds 100. The ENGINE, a separate process that
 # reads these from env, authenticates correctly and prints "Auth : SPN a399691f..." in the same run.

@@ -509,7 +509,7 @@ function New-PimMailSenderSetupCheck {
 
 function New-PimMailSenderAddressRecord {
     <#
-      PURE (INSTALL-FIX-EVIDA, REQUIREMENTS 100.25 item 4). The record Initialize-PimMailSender stores in pim.Settings
+      PURE (INSTALL-FIX, REQUIREMENTS 100.25 item 4). The record Initialize-PimMailSender stores in pim.Settings
       'MailSenderAddress': the mailbox's PRIMARY SMTP address -- what the customer chose (name@their domain) -- next to the
       MailSender it belongs to (the mailbox's UPN, BUG-296: what Microsoft Graph sends by, often on the initial domain).
       PIM Manager and the end-of-install check SHOW the address with the UPN as detail, and only while 'sender' is still

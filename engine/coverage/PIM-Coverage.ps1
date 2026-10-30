@@ -924,7 +924,7 @@ function Get-PimCoverageReport {
 
 function Get-PimCoverageNewFindings {
     # PURE. Rows of -Current whose key (workload|status|item) was not in -Previous and whose status is mailed.
-    # COVERAGE-NULL-INDEX (SUP-2026-00330, efif-efif-prod 2026-10-27: "Cannot index into a null array" at
+    # COVERAGE-NULL-INDEX (SUP-2026-00330, a customer environment 2026-10-27: "Cannot index into a null array" at
     # Get-PimCoverageField <- here, the whole run failed and the report was NOT stored): every row is read on its own. A row
     # that cannot be read is skipped and named in -Failures ("previous row 17 (System.Object[]): <message>") -- one bad row
     # never costs the report. -Failures: a List[string] the caller passes in; without it the failures are only skipped.

@@ -39,9 +39,9 @@
     List every warning and info (the default lists 5 examples per code).
 
 .EXAMPLE
-    .\Invoke-PimCsvImportCheck.ps1 -Path C:\tmp\efif\pimv1-definitions
+    .\Invoke-PimCsvImportCheck.ps1 -Path C:\tmp\contoso\pimv1-definitions
 .EXAMPLE
-    .\Invoke-PimCsvImportCheck.ps1 -Path C:\tmp\efif\pimv1-definitions -ForceLocal -AsJson > check.json
+    .\Invoke-PimCsvImportCheck.ps1 -Path C:\tmp\contoso\pimv1-definitions -ForceLocal -AsJson > check.json
 #>
 [CmdletBinding()]
 param(

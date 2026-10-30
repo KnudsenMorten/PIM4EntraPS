@@ -290,7 +290,7 @@ function Test-PimSharedPendingSatisfied {
     # Without -Base, or when the change's key is not the one its own row gives (an unknown entity), the content match
     # is used, still with the emptied-cell rule.
     param([AllowNull()][object]$Change, [AllowNull()][AllowEmptyCollection()][object[]]$StoredRows = @(), [string]$Base = '',
-          # 🔴 §97.1 (EFIF 2026-10-08, a 168-row commit took 132 s): New-PimSharedPendingRowIndex of the stored rows, built ONCE
+          # 🔴 §97.1 (a test tenant 2026-10-08, a 168-row commit took 132 s): New-PimSharedPendingRowIndex of the stored rows, built ONCE
           # by a caller that tests many changes. Without it every change re-derived the key of EVERY stored row -- changes x
           # rows key derivations, twice per commit (classification + clean-up). Same answer either way.
           [AllowNull()][object]$RowIndex = $null)

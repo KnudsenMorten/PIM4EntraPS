@@ -2593,6 +2593,54 @@
       }
     },
     {
+      "key": "ManagementReport.Monthly",
+      "label": "Monthly management report",
+      "where": "Reports > Management report",
+      "route": "/api/reports/management/settings",
+      "type": "boolean",
+      "default": "Off",
+      "feature": "",
+      "confirmOn": true,
+      "confirmOff": false,
+      "confirm": {
+        "on": {
+          "tone": "neutral",
+          "title": "Mail a management report every month?",
+          "body": "When on, PIM Manager builds last month's management report once a month and mails it to the recipients you list.",
+          "note": "Note: the report shows who holds privileged access, so list only people entitled to see that."
+        }
+      },
+      "info": {
+        "what": "Builds the full management report (key figures and trends, risk and exceptions, changes and audit, compliance evidence) for the last full month, once a month, keeps it for download under Reports > Management report and mails it as an attachment to the recipients you list.",
+        "enabled": "On the first scheduled run on or after the 1st of a month, last month's report is built and stored once, then mailed to each recipient. A report too large for a mail is sent as a link to PIM Manager instead. With no recipients it is stored but not mailed.",
+        "disabled": "No monthly report is built or mailed. You can still build a report for any period yourself under Reports > Management report. A report already stored stays available for download.",
+        "risk": "The report names privileged access, held changes and exceptions, and the recipients get the file by mail without signing in to PIM Manager. Reversible: switch it off and no further report is sent; reports already mailed stay with their recipients.",
+        "requires": "Admin role in PIM Manager to change it. Pro edition to switch it on. Working mail sending, and at least one recipient for the report to be mailed.",
+        "recommended": "Switch it on when management or an auditor wants a monthly view, and list a small, named group of recipients.",
+        "docUrl": "https://invardia.com/docs/pim/settings/ManagementReport.Monthly/"
+      }
+    },
+    {
+      "key": "ManagementReport.Recipients",
+      "label": "Monthly management report recipients",
+      "where": "Reports > Management report",
+      "route": "/api/reports/management/settings",
+      "type": "list",
+      "default": "Blank (the monthly report is stored but not mailed)",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "The mail addresses that receive the monthly management report as an attachment. One address per line; each must be a valid mail address and duplicates are dropped.",
+        "enabled": "When set: each address gets the next monthly report. Recipients are not made PIM Manager users and get no access to PIM Manager.",
+        "disabled": "When blank: the monthly report is still built and stored for download, but it is not mailed to anyone.",
+        "risk": "The report names privileged access and exceptions, so list only people entitled to that view; a wrong address sends it outside your organisation. Reversible at any time for the next report.",
+        "requires": "Admin role in PIM Manager. Pro edition (the management report is a Pro feature). Working mail sending.",
+        "recommended": "A small, named group, for example your security lead and the person who reports to management.",
+        "docUrl": "https://invardia.com/docs/pim/settings/ManagementReport.Recipients/"
+      }
+    },
+    {
       "key": "Alerting.TierReportRecipients",
       "label": "Tier report recipients",
       "where": "Settings > Mail & alerting > Alerting",

@@ -10,7 +10,7 @@
     catalog, READ BACK, audited ('settings.scenario.save', like the Manager). Certificate identity only.
 
 .EXAMPLE
-    .\Set-PimScenario.ps1 -SqlServerFqdn sql-ait-wa678.database.windows.net -Scenario S3 -TenantId <t> -ClientId <app> -CertThumbprint <thumb>
+    .\Set-PimScenario.ps1 -SqlServerFqdn sql-pim-contoso.database.windows.net -Scenario S3 -TenantId <t> -ClientId <app> -CertThumbprint <thumb>
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(

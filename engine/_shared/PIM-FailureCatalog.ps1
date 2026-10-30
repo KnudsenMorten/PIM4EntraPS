@@ -220,7 +220,7 @@ $script:PimFailureRules = @(
        retryable = $false; severity = 'data'
        fixes = @(@{ id = 'delete-row'; label = 'Remove this row'; kind = 'delete-row' }) }
 
-    # BUG-234 (77.3, EFIF 2026-09-21): a row names an Entra role this tenant does not have. It was UNCLASSIFIED in
+    # BUG-234 (77.3, a test tenant 2026-09-21): a row names an Entra role this tenant does not have. It was UNCLASSIFIED in
     # EntraRolePolicies and "unresolved group/role" in EntraRoles, and failed every run for two days. Ahead of the
     # generic rule below, which still covers a missing GROUP.
     @{ code = 'ENTRA-ROLE-NOT-IN-TENANT'
@@ -305,13 +305,13 @@ $script:PimFailureRules = @(
     # role service, which answers 404 SubjectNotFound. Measured: a DIRECT role on a user created seconds earlier in the
     # run -- UNCLASSIFIED, and the whole run recorded FAILED; the next run applied it. Replication lag, not data.
     @{ code = 'PRINCIPAL-NOT-REPLICATED-YET'
-       # 2026-09-26 (§78 live, ig798): the same lag also answers a plain 404 ResourceNotFound on the schedule-request POST
+       # 2026-09-26 (§78 live, a test environment): the same lag also answers a plain 404 ResourceNotFound on the schedule-request POST
        # ("POST .../roleEligibilityScheduleRequests -> HTTP 404 : ResourceNotFound"); the next run applied it. Only the
        # role SCHEDULE-REQUEST endpoints -- a ResourceNotFound anywhere else is not this.
-       # BUG-276 (§78 GUI live, ig798 2026-10-01): the PIM-for-Groups schedule-request POST answers the same 404 for a group
+       # BUG-276 (§78 GUI live, a test environment 2026-10-01): the PIM-for-Groups schedule-request POST answers the same 404 for a group
        # created seconds earlier ("POST .../privilegedAccess/group/eligibilityScheduleRequests -> HTTP 404 : ResourceNotFound");
        # the run was recorded FAILED and the next one, two minutes later, applied both items. Same lag, so the same code.
-       # BUG-279 (§78 live, ig798 2026-10-01 13:47; also internal 2026-09-29 13:06, §33.31): the FIRST eligibility of a
+       # BUG-279 (§78 live, a test environment 2026-10-01 13:47; also internal 2026-09-29 13:06, §33.31): the FIRST eligibility of a
        # role-assignable group created moments earlier answers "HTTP 400 : ArgumentNullException -- Value cannot be null.
        # Parameter name: action" -- the run was recorded FAILED and the next run applied it. Only on the schedule-request POSTs;
        # a body that is really malformed keeps failing and is escalated by the waiting-window rule hours later.
@@ -322,9 +322,9 @@ $script:PimFailureRules = @(
        retryable = $true; severity = 'transient'
        fixes = @() }
 
-    # 2026-09-26 (§78 MSP live, RIDE): a PIM-for-Groups policy rule PATCH on a group the engine created minutes earlier
+    # 2026-09-26 (§78 MSP live, a test tenant): a PIM-for-Groups policy rule PATCH on a group the engine created minutes earlier
     # answered 400 "InvalidPolicyRule -- The policy rule is invalid." and the pull recorded FAILED; the next run applied it.
-    # Recorded three times before (§68.4, RIDE 2026-09-15, EFIF 2.4.392) and it converged every time. A still-failing item
+    # Recorded three times before (§68.4, both test tenants: 2026-09-15 and 2.4.392) and it converged every time. A still-failing item
     # hours later is escalated back to a real failure by the waiting-window rule, so a genuinely invalid rule still surfaces.
     # §97.3 (Invardia fleet watch 2026-10-08, a freshly built MSP managing tenant on 2.4.532): the RE-READ of a new group's
     # owner policy answered "not found" before PIM had materialised it, and the item was "Unrecognised failure" beside a
@@ -340,7 +340,7 @@ $script:PimFailureRules = @(
        fixes = @() }
 
     # 2026-09-26: a Defender custom role whose create was answered (redirect) but is not listed yet -- the engine does NOT post
-    # it again (that is how RIDE got two roles of one name); the next run binds it once Defender lists it.
+    # it again (that is how a test tenant got two roles of one name); the next run binds it once Defender lists it.
     @{ code = 'DEFENDER-ROLE-CREATE-PENDING'
        match = { param($m, $row) $m -match '(?i)DEFENDER-ROLE-CREATE-PENDING' }
        title = 'The Defender XDR role was created and is not listed yet'
@@ -1310,7 +1310,7 @@ function Get-PimFailureItemLabel {
     $pRole = & $g 'PolicyRole'
     if ($gname -and $pRole) { return "PIM for Groups $pRole policy of group $gname$(if ($tplId) { " (template $tplId)" })" }
     if ($azPerm -or $azScope) {
-        # 2026-09-26 (EFIF drift mail, 7x): a LIVE Azure assignment the store does not define (a drift 'extra') carries no
+        # 2026-09-26 (a test tenant drift mail, 7x): a LIVE Azure assignment the store does not define (a drift 'extra') carries no
         # GroupTag and no AzScopePermission -- it read "group  -> Azure role '' at management group ...". Name what the live
         # row does carry (principal name / id, role definition id) instead of printing blanks.
         $whoAz = if ($gdisp) { "group $gdisp" } elseif ($pName) { $pName } elseif ($prin) { "principal $prin" } else { 'an unnamed principal' }
@@ -1438,7 +1438,7 @@ function Format-PimFailureSummary {
     param([object[]]$Failures)
     $all = @($Failures | Where-Object { $_ })
     if (-not $all.Count) { return '' }
-    # BUG-233 (77.2, EFIF 2026-09-21): a breaker HOLD is not a failure. It used to be counted as "1x ... HELD"
+    # BUG-233 (77.2, a test tenant 2026-09-21): a breaker HOLD is not a failure. It used to be counted as "1x ... HELD"
     # among the failures, so one unrelated error turned the whole job into "2 item(s) failed" and the approval the
     # run was waiting for was never stated. Holds are reported on their own, after the real failures.
     $holds = @($all | Where-Object { Test-PimEngineFailureIsApprovalHold $_ })
@@ -1554,7 +1554,7 @@ function Get-PimEngineItemFailures {
 # HELD FOR APPROVAL is its own outcome (REQUIREMENTS 71.13, operator 2026-09-15: "fix 1-3").
 #
 # A policy mass-change circuit breaker that HOLDS a plan is the safety net working: the engine wrote
-# nothing and recorded exactly what needs an operator's approval. Measured on RIDE 2026-09-15: every
+# nothing and recorded exactly what needs an operator's approval. Measured on a test tenant 2026-09-15: every
 # pull of a freshly onboarded tenant ended "downlink JOB FAILED", and the tick's delta-policies job
 # was red, while the only "error" was the hold itself. A red FAILED teaches operators to ignore red.
 # A green would hide the approval. So: its own outcome -- ok, ran, 'held', amber, needs attention --

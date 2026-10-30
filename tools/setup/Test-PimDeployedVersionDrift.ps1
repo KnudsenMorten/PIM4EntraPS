@@ -77,12 +77,12 @@ param(
     [string]$ResourceGroup = $(if ($env:PIM_HOSTED_RG) { $env:PIM_HOSTED_RG } else { '' }),
     [string[]]$Apps = @(),
     # 🔴 EVERY az CALL BELOW USED TO RUN AGAINST THE AMBIENT DEFAULT CONTEXT, and on a machine
-    # logged into more than one directory that is a coin flip. On mgmt1 it lands on a DIFFERENT
+    # logged into more than one directory that is a coin flip. On the build host it lands on a DIFFERENT
     # COMPANY'S subscription (CLAUDE.md: "often the DEFAULT context"), so this gate -- whose entire
     # job is to notice that nothing was deployed -- would query the wrong tenant, find none of the
     # apps, and report CANNOT CHECK. Right answer, wrong reason, and one `az account set` away from
     # being a confidently wrong answer instead. Measured 2026-08-30: it could not report on the
-    # myfamilynetwork fleet at all.
+    # the internal tenant fleet at all.
     # Same family as SEC-12: an ambient identity silently standing in for an explicit one.
     [string]$SubscriptionId = $(if ($env:PIM_SUBSCRIPTION_ID) { $env:PIM_SUBSCRIPTION_ID } else { '' }),
     # Container APP JOBS (the tick) are deployed alongside the apps and drift identically -- a
@@ -123,7 +123,7 @@ function Get-PimImageTag {
     # hex string printed where a version belongs -- and then compared against 2.4.252 and called
     # DRIFT. The verdict happened to be right, which is exactly why nobody noticed: a gate whose
     # output is unreadable is one nobody reads, and the next digest-pinned deploy could as easily
-    # have produced a confident nonsense answer. Measured on the myfamilynetwork fleet 2026-08-30.
+    # have produced a confident nonsense answer. Measured on the internal fleet 2026-08-30.
     # Returning '' here is what lets the caller's registry lookup resolve the real tag, and what
     # keeps `unknown` reachable when it cannot -- an admitted gap beats an invented version.
     if ($s -match '@sha256:') { return '' }

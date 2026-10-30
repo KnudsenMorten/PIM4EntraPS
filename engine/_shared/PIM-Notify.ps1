@@ -645,7 +645,7 @@ function Test-PimTapMailReady {
         $fix = "Fix: set the admin's Department and give that department Owners (PIM-Definitions-Departments), or set an alert recipient (Home > Alerting), or a per-admin MailForwardAddress."
         return @{ ok = $false; reason = ("nobody to send the TAP to -- " + $(if ($why) { ($why -replace "\s*--\s*an admin's mail goes to its SPONSOR DEPARTMENT's owners, so set the admin's Department and give that department Owners\s*$", '') } else { "this admin has no resolvable recipient" }) + ". " + $fix) }
     }
-    # 🔴 HYDRATE BEFORE JUDGING. Measured live on EFIF 2026-08-25: this guard refused ALL SIX admins
+    # 🔴 HYDRATE BEFORE JUDGING. Measured live on a test tenant 2026-08-25: this guard refused ALL SIX admins
     # with "no notification sender is configured" while pim.Settings held a perfectly good
     # 'MailSender' (PIM-Engine@<tenant>). The sender was never missing -- it had not been READ yet.
     # Send-PimNotifyMail hydrates at L169, but this guard runs BEFORE that call and reads the raw

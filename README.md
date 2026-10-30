@@ -195,6 +195,7 @@ PIM Manager, the engine and the database run in your subscription on managed ide
 | Second approver and delegated administration | | ✅ |
 | Access request portal and API | | ✅ |
 | Coverage, gaps and the discovery inbox | | ✅ |
+| Management report as a PowerPoint, on demand or mailed monthly | | ✅ |
 | More workloads: Power BI, enterprise-app roles, Azure DevOps, Dataverse, Business Central, Power Platform | | ✅ |
 | PIM for on-premises Active Directory | | ✅ |
 | Many tenants: definition sets, rollout waves, fleet conformance, central admin accounts | | Pro MSP |

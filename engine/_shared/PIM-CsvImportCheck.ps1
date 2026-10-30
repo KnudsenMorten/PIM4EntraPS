@@ -3,7 +3,7 @@
   PIM4EntraPS -- PRE-IMPORT CHECK FOR v1 CSV DEFINITION FILES (REQ-G, 2026-09-19).
 
   Operator: "did you build the new import script that validate the csv files before importing them
-  for issues ?" -- and, for EFIF: "import the efif definitions when validated".
+  for issues ?" -- and, for a test tenant: "import the customer's definitions when validated".
 
   tools/setup/Migrate-PimToSql.ps1 imported v1 CSVs straight into pim.Rows. The Manager's validator
   (tools/pim-manager/_validator.ps1) only ever ran over data ALREADY in SQL, so a broken file was
@@ -653,7 +653,7 @@ function Invoke-PimCsvImportCheck {
     }
 
     # --- admins: every row carries a UserPrincipalName (operator 2026-09-21: "we can not have a admin without a upn.
-    # that makes no sense, then it is not compatible"). EFIF measured: six rows imported with UserName only never
+    # that makes no sense, then it is not compatible"). Measured on a test tenant: six rows imported with UserName only never
     # appeared on Admin accounts, and every UPN-keyed path (TAP, forwarding, sign-in) skipped them. A row without one
     # gets UserName@<-DefaultDomain> written INTO the row; with no -DefaultDomain the import is REFUSED.
     if ($import.Contains('Account-Definitions-Admins')) {
@@ -691,7 +691,7 @@ function Invoke-PimCsvImportCheck {
         $global:PIM_ValidatorKnownTenantTags = @{ known = $false; tags = @() }
         # 🔴 NO PLACEHOLDER DOMAIN (2.4.377). This used to stand in 'default-domain.invalid' so a UserName-only v1 admin
         # resolved -- and that is exactly what HID the validator bug the hosted Manager then hit: there no domain is
-        # pinned, the validator indexed admins by UPN only, and all 15 EFIF memberships failed PIM-FK-002 after an
+        # pinned, the validator indexed admins by UPN only, and all 15 memberships of a test tenant failed PIM-FK-002 after an
         # import this check had passed. The validator now indexes an admin by its UserName (the identity; the UPN is
         # composed at create), so the check runs with the SAME domain state as the Manager: -DefaultDomain if given,
         # else none.

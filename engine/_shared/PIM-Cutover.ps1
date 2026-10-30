@@ -286,7 +286,7 @@ function Invoke-PimSqlChangeDetector {
         # recalc is safe (idempotent engine), a missed one is not". The reasoning is right and the
         # implementation inverted it: once the signature advanced, the change counted as HANDLED, so
         # a triggered run that FAILED left nothing to re-fire it.
-        # MEASURED ON HOGYM: a downlink write armed `trigger:engine-delta:All` at 12:10:22Z; that run
+        # MEASURED ON A MANAGED TENANT: a downlink write armed `trigger:engine-delta:All` at 12:10:22Z; that run
         # died on a 403. With the identity fixed the engine had NOTHING TO DO -- the trigger was long
         # consumed -- and the staged state would have sat until the daily full-reconcile ~21 hours
         # later. Re-running the sync (which bumps UpdatedUtc) re-armed it and the next tick applied

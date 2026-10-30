@@ -385,7 +385,7 @@ function Get-PimDeployRollbackPlan {
 # ---- may this run roll the code back? (pure) ------------------------------
 function Test-PimDeployRollbackNeeded {
     <#
-      100.73 (HOGYM managed install 2026-10-11) -- a rollback happens ONLY when the ROLLED APP ITSELF failed its
+      100.73 (a managed-tenant install 2026-10-11) -- a rollback happens ONLY when the ROLLED APP ITSELF failed its
       health: the 'code' step (the roll, with its own post-roll smoke gate) failed, or the verify step's smoke /
       validation verdict is 'failed'. A LATER or unrelated step that failed (updater, access, alerting, features,
       verify-install, ...) halts the run on its own and the resume re-runs it -- the healthy app stays on the new

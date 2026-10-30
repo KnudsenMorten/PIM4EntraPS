@@ -13,9 +13,13 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.7 -- 2026-10-30
+
+- the monthly management report switch explains itself under More info and asks before it is switched on; no customer, person or internal name is left in the published code comments and examples
+
 ## 3.0.6 -- 2026-10-29
 
-- Pro: a management report as a PowerPoint -- pick sections and period under Reports > Management report, or switch on a monthly report that is mailed to the people you choose (key figures and trends, risk and exceptions, changes and audit, compliance evidence; a figure that cannot be read says so, never 0); the standalone support scripts no longer carry a comment about published signatures.
+- Pro: a management report as a PowerPoint, built under Reports > Management report from the sections and period you pick; a monthly report mailed to the people you choose (off by default); a report figure that cannot be read says so, never 0; the standalone support scripts no longer carry a comment about published signatures.
 
 ## 3.0.5 -- 2026-10-29
 
@@ -414,7 +418,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 - Telemetry that does not reach Invardia is no longer shown green: the `uplink` job run is a WARNING (amber) with the reason -- Invardia's refused field list, the transport error, or "no install key stored -- telemetry is anonymous" on a licensed install -- and raises the job alert at most once a day. The end-of-install check now reads back that scheduled jobs are on, the tick has run, and telemetry was delivered (a warning, never a failed install). The scheduler's setup report names the tenant's managing / managed role again.
 ## 2.4.588 -- 2026-10-11
 
-- Managed-tenant install: the downlink job no longer refuses because the as-built job has its own identity (it never picks id-pim-asbuilt or id-pim-sql-*) (HOGYM).
+- Managed-tenant install: the downlink job no longer refuses because the as-built job has its own identity (it never picks id-pim-asbuilt or id-pim-sql-*) (a managed-tenant install).
 
 ## 2.4.587 -- 2026-10-11
 
@@ -424,7 +428,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 - Setup: a failed side step (updater, access, alerting, ...) no longer rolls a healthy Manager and engine job back to the previous version; a rollback happens only when the rolled app itself fails its health check.
 ## 2.4.586 -- 2026-10-11
 
-- Setup retries a dropped connection (HTTP 0 / transport error) on Azure reads and writes up to 3 times instead of stopping the install (HOGYM).
+- Setup retries a dropped connection (HTTP 0 / transport error) on Azure reads and writes up to 3 times instead of stopping the install (a managed-tenant install).
 
 ## 2.4.585 -- 2026-10-11
 
@@ -432,7 +436,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 2.4.584 -- 2026-10-11
 
-- Installer: Azure SQL always uses a sign-in made after the new SQL server's admin is set (the handed-over token predates it -- HOGYM install, Login failed).
+- Installer: Azure SQL always uses a sign-in made after the new SQL server's admin is set (the handed-over token predates it -- a managed-tenant install, Login failed).
 
 ## 2.4.583 -- 2026-10-11
 

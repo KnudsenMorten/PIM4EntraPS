@@ -85,7 +85,7 @@ $ErrorActionPreference = 'Stop'
 # 🔴 SCOPE THE BUILD, DO NOT MUTATE THE MACHINE. -SubscriptionId was only ever applied inside the
 # SPN-login path via `az account set`, so a caller that was already logged in (the normal case)
 # passed a subscription that was silently ignored -- and `az acr build` then ran against the
-# ambient default, which on mgmt1 is another company's. Measured: "the resource 'acrpimmfnpr'
+# ambient default, which on the build host is another company's. Measured: "the resource 'acrpimcontoso'
 # could not be found in subscription '<another company's subscription>'".
 # 🔒 Scoped PER CALL rather than by `az account set`, because this machine runs ~3 sessions at once
 # and flipping the shared default would break whichever of them is legitimately using the other
@@ -243,7 +243,7 @@ Info "pulled Manager content hash: $contentHash"
 # slave still hosts its OWN containers, out of its OWN registry -- and on a greenfield slave that
 # registry is empty. The git-pull path packages the Manager into a local output folder, pushes
 # NOTHING, and then the step reported
-#     -> ok=True ran=True built acrpimrj466/pim-manager:2.4.324
+#     -> ok=True ran=True built acrpimfabrikam/pim-manager:2.4.324
 # naming an ACR image that does not exist. Infra refused two lines later, correctly:
 #     ERROR: the specified tag does not exist
 # Measured rebuilding a managed tenant 2026-09-12.

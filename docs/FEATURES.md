@@ -1043,6 +1043,21 @@ deployment is a supported choice) and no credentials lying around.
   Exports are spreadsheet-safe — values that could be misread as formulas are neutralised, so a CSV opened in
   Excel can never execute injected content. Printing opens a clean, titled, tenant-stamped page (date + row
   count), not the whole application.
+- **Management report as a PowerPoint (Pro).** ✅ 2026-10-30 — under **Reports > Management report** you tick
+  the sections you want and pick a period (the last 7, 30 or 90 days, or a calendar month), and PIM Manager hands
+  you a ready PowerPoint deck in the PIM Manager look:
+  - **Key figures and trends** — changes, new and removed access, policy changes and offboardings, each compared
+    with the period before.
+  - **Risk and exceptions** — standing access, break-glass use, changes held by a guard, overdue access reviews,
+    open failures and Tier 0 exposure.
+  - **Changes and audit** — who approved, and the most recent changes.
+  - **Compliance evidence** — access review outcomes, how close the tenant is to its baseline, and whether
+    activations ask for MFA and approval.
+
+  A figure that cannot be read says so and why — it never shows as 0. A trend appears only where the history
+  reaches back far enough. You can also switch on a **monthly report** (off by default): on the first run of a
+  new month it builds the last month's deck and mails it to the people you choose. Community shows the menu entry
+  with a note that the report is part of Pro.
 - **Browser-based delegation editor — "PIM Manager".** Create, map, delete, bulk-edit,
   revoke and clone delegations through a browser grid with guided wizards.
 - **Role tiers with the right powers.** Reader, Admin, Super-Admin and Delegated roles.

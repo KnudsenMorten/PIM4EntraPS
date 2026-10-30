@@ -200,7 +200,7 @@ if ($LocalPull) {
 # The task registered fine, reported Ready, and its first real run returned LastTaskResult=1 with
 # NOTHING to say why. Triggering the identical command by hand produced the cause:
 #
-#   ERROR: The resource 'acrpimwa678' ... could not be found in subscription
+#   ERROR: The resource 'acrpimcontoso' ... could not be found in subscription
 #          '<operator-subscription>'
 #
 # 1. NO SUBSCRIPTION TARGETING. This script took -ResourceGroup and -AcrName but never a
@@ -229,7 +229,7 @@ if ("$Recipient".Trim())      { $arg += " -Recipient `"$Recipient`"" }
 # The first attempt built the wrapper as a nested `powershell -Command "..."` string. It has three
 # quoting levels (this script -> Task Scheduler -> powershell) and it broke in both of the ways
 # that are easy to miss and hard to read: the transcript path kept `$(Get-Date ...)` LITERALLY, so
-# the log was a file actually named "PIM-Update-wa678-$(Get-Date -Format yyyyMMdd-HHmmss).log";
+# the log was a file actually named "PIM-Update-<env>-$(Get-Date -Format yyyyMMdd-HHmmss).log";
 # and the escaped `Write-Host \"...\"` collapsed to `Write-Host \ABORT` with $ctx unexpanded.
 # A file has ONE quoting level. It is also inspectable after the fact, which an inline string in a
 # task definition is not.
