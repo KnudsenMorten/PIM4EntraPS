@@ -165,7 +165,7 @@ function Select-PimDownlinkIntents {
       Returns @{ intents; dropped } -- dropped is REPORTED, never silently discarded.
     #>
     param([object[]]$Intents = @(), [datetime]$NowUtc = [datetime]::UtcNow, [int]$MaxAgeDays = 0)
-    # 🔴 §79.6 live E2E 2026-09-25 (RIDE, 2.4.435): EVERY intent -- one recorded a minute earlier included -- was dropped as
+    # 🔴 §79.6 live E2E 2026-09-25 (a test tenant, 2.4.435): EVERY intent -- one recorded a minute earlier included -- was dropped as
     # "older than the intent lifetime". The limit came from $script:PimDownlinkIntentMaxAgeDays, and `$age -gt $null` is
     # TRUE for any age. Why $null: downlink-job-entry.ps1 dot-sources this file (setting the variable in ITS script scope),
     # then runs tools/setup/Invoke-PimScenarioRun.ps1 -- a child script, a NEW script scope -- whose PIM-ScenarioProfile.ps1 skips

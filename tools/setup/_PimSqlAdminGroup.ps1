@@ -5,7 +5,7 @@
   tests/Test-PimSqlAdminGroup.ps1.
 
   Operator, 2026-09-15: "remember we have a sql admin group where the managed identity + the
-  troubleshooting spn must be member, same as in internal. efif and ride must be similar, and the
+  troubleshooting spn must be member, same as in internal. the managing and the managed test tenant must be similar, and the
   updater logic must handle this so we are ready to roll this out to ring 2 very soon".
 
   THE MODEL
@@ -13,7 +13,7 @@
     SQL user-assigned identity on private SQL) meant every other identity that must administer the
     database -- the unattended updater's schema step, the Invardia Support app -- needed a
     contained user created by that one principal, and an environment whose admin was a secret-only app
-    could not be fixed unattended at all (EFIF/RIDE, UPD-15). The admin is therefore a SECURITY GROUP,
+    could not be fixed unattended at all (both test tenants, UPD-15). The admin is therefore a SECURITY GROUP,
     default 'grp-pim-sql-admins'. FRAMEWORK 12.23 P5 (PIM 100.156 B, 2026-10-16): its STANDING member is the Invardia
     Support app ONLY (by appId or object id: -SupportAppId / -SupportObjectId), when given. For the length of an install:
       * the setup identity (the signed-in person or the SQL admin application) -- released again at the end of the
@@ -25,7 +25,7 @@
     updater (Get-PimSqlAdminGroupKeepsUpdater, the ONE switch below; still $true until then).
     Contained users that exist keep working; nothing here drops one.
 
-  GRAPH / ARM FACTS THIS HANDLES, EACH MEASURED LIVE ON EFIF + RIDE 2026-09-15
+  GRAPH / ARM FACTS THIS HANDLES, EACH MEASURED LIVE ON both test tenants 2026-09-15
     1. GET /groups/{id}/members returned 0 items for SERVICE-PRINCIPAL members with an app-only token,
        while /groups/{id}/members/microsoft.graph.servicePrincipal listed them. Membership is read
        through the TYPED casts (servicePrincipal, user, group), unioned with the untyped list.
@@ -488,7 +488,7 @@ function Invoke-PimSqlAdminGroup {
     }
     if ($gid) {
         try {
-            # TRAP: a member ADDED seconds ago is not listed yet (Graph replication). Measured on RIDE 2026-09-15: the
+            # TRAP: a member ADDED seconds ago is not listed yet (Graph replication). Measured on a test tenant 2026-09-15: the
             # POST succeeded, the immediate read-back missed it, the deploy reported "is NOT a member" and fell
             # through to the contained-user step -- while a read a minute later listed it. So when this run added
             # members, the read-back polls (same bound as the admin read-back) before calling anything missing.

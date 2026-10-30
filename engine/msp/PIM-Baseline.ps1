@@ -47,7 +47,7 @@ $script:PimBaselinePublicCertB64 = 'MIID+TCCAmGgAwIBAgIQNSAUfKUEGLRHFcG6VRAUzjAN
 # config value given by the managed tenant build -- never fetched from the bundle store). Several
 # keys may be pinned at once, so a key roll is: pin the new id everywhere, then switch.
 # A bundle WITHOUT signingKey is verified exactly as before, against the embedded
-# CN=PIM4EntraPS-Baseline certificate (legacy, still live on EFIF -> RIDE).
+# CN=PIM4EntraPS-Baseline certificate (legacy, still live on the test MSP pair).
 # PS 5.1-safe: RSAParameters import, no ImportFromPem / ImportSubjectPublicKeyInfo.
 # -----------------------------------------------------------------------------
 function ConvertFrom-PimBaselineB64 {

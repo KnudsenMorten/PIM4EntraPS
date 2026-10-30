@@ -50,7 +50,7 @@ function Get-PimInstallVerifyNetworkWaitText {
 
 function Get-PimInstallVerifyLineIds {
     <# PURE. The line ids a role checks, in order. Single + Master: the common lines. Slave (managed tenant): + the three MSP lines.
-       PIM 100.75 (HOGYM 2026-10-11): + 'scheduler' and 'telemetry' for EVERY role -- never required (a warning at most).
+       PIM 100.75 (a managed-tenant install 2026-10-11): + 'scheduler' and 'telemetry' for EVERY role -- never required (a warning at most).
        PIM 100.116 (framework 4.1b): + 'support-sql' for EVERY role, BEFORE 'sql-host-rule' (it reads the database, and the
        rule's own line closes the window) -- never required: "in place" only on evidence, else a warning or "not named". #>
     param([ValidateSet('Single', 'Master', 'Slave')][string]$Role = 'Single')
@@ -267,7 +267,7 @@ function Get-PimInstallVerifyRows {
                     else { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'no mail sender is set -- TAPs and alerts are rendered and delivered nowhere' (& $fx $id))) }
                     break
                 }
-                # INSTALL-FIX-EVIDA (100.25 item 4): MailSender is the mailbox's UPN on purpose (BUG-296: Graph sends by UPN), often on the
+                # INSTALL-FIX (100.25 item 4): MailSender is the mailbox's UPN on purpose (BUG-296: Graph sends by UPN), often on the
                 # initial domain -- but the customer chose the PRIMARY SMTP address (name@their domain). Show that one, the UPN as detail.
                 $addr = "$(Get-PimFactValue $f 'address')".Trim()
                 if ($addr -and $addr -ine $sender) { $sender = "$addr (mailbox UPN $sender)" }
@@ -322,7 +322,7 @@ function Get-PimInstallVerifyRows {
                 else { $rows.Add((New-PimInstallVerifyRow $id 'warning' "the engine job's latest run: $st -- open the PIM Manager Home page for the reason" (& $fx $id) $false)) }
             }
             'scheduler' {
-                # PIM 100.75 (HOGYM managed install 2026-10-11): the scheduler is what runs EVERY job (engine, telemetry, licence
+                # PIM 100.75 (a managed-tenant install 2026-10-11): the scheduler is what runs EVERY job (engine, telemetry, licence
                 # request, install key) -- an install that ends with 'scheduler.jobs' off, or a tick that never ran, looks "done"
                 # and does nothing. Never a stop: a WARNING with the next step (right after an install the tick may not have run).
                 # Fact: { readable; schedulerOn; lastTickUtc; tickStatus; tickAt }.
@@ -335,7 +335,7 @@ function Get-PimInstallVerifyRows {
                 $rows.Add((New-PimInstallVerifyRow $id 'warning' 'scheduled jobs on; the tick has not run since the install yet -- it starts within 5 minutes' (& $fx $id) $false))
             }
             'telemetry' {
-                # PIM 100.75: the HOGYM install sent NO telemetry and nobody could see why. Read back what the uplink job recorded
+                # PIM 100.75: a managed-tenant install sent NO telemetry and nobody could see why. Read back what the uplink job recorded
                 # (pim.Settings 'UplinkState': mode, lastResult, lastFailed) and the switch. NEVER a failed install (framework
                 # 12.18 / 12.21): every problem is a WARNING with its reason; "not run yet" is a warning naming when it is due.
                 # Fact: { readable; uplinkOn; schedulerOn; mode; lastResult; lastCycleUtc; lastFailed; keyStored; keyValid }.

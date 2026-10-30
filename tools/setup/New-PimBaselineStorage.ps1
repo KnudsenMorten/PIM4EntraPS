@@ -9,7 +9,7 @@
     🔴 WHY THIS SCRIPT EXISTS. internal/DEPLOY-SCENARIOS.md documents this as a four-step
     chain and says, in its own words, that it "needs four things that nothing sets up for
     you". That was true: measured 2026-09-03, NOTHING in tools/, setup/ or the platform
-    provisioner creates a storage account at all. EFIF's `stpimbaselinewa678` was made by
+    provisioner creates a storage account at all. a test tenant's `stpimbaselinecontoso` was made by
     hand in session 30 and never written down as code, so a GREENFIELD master could not
     publish a baseline -- which means it could not onboard a managed tenant. An onboarding
     step that exists only as prose in a runbook is not an onboarding step.

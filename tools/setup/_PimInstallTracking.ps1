@@ -96,7 +96,7 @@ function Complete-PimInstallTracker {
 # ================================================================== hosting SUB-STEP progress (2026-10-11, setup-polish lane)
 # The multi-tenant build (Invoke-PimMspBuild) runs its 'hosting' step -- Invoke-PimDeployAll, 10-40 minutes -- in a CHILD
 # process, so the deploy's own step events (-OnStep / its tracker) never reached the build's reporter: the tracked install
-# showed 'hosting started' and then minutes of silence (EFIF managed install 2026-10-10). The child now writes ONE marker
+# showed 'hosting started' and then minutes of silence (a test tenant managed install 2026-10-10). The child now writes ONE marker
 # line per deploy step event on its console when the build asks for it ($env:PIM_SUBSTEP_EVENTS = '1', set by the build for
 # the step process only); the build reads its step's output as it streams, turns each marker into a step event with the
 # id '<parent>.<sub-step>' and relays it exactly like its own steps (Invardia install tracking + -OnStep -> the guided

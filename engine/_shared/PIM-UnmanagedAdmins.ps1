@@ -50,7 +50,7 @@ function New-PimUnmanagedAdminRecord {
       🔴 IMP-33 (2026-09-18) -- PURE. The stored form of "privileged accounts that exist in the directory
       but have NO desired-state row", per account-disable scope.
 
-      Measured on EFIF: the Admins scope ran `desired=5 live=14` every five minutes and NOTHING reported the
+      Measured on a test tenant: the Admins scope ran `desired=5 live=14` every five minutes and NOTHING reported the
       nine accounts in between -- the unmanaged report above only ran when the diff proposed removals,
       which a Delta pass never does. So six real admin accounts had no TAP healing, no reminders and no
       review, and the Manager's admin-tap reset answered 404 for them, with no surface saying why.

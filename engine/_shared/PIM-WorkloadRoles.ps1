@@ -361,7 +361,7 @@ function New-PimDefenderAssignmentBody {
       PURE. The POST body of /beta/roleManagement/defender/roleAssignments (a unifiedRoleAssignmentMultiple).
       🔴 NO '@odata.type'. PROVEN LIVE 2026-09-19 ~20:40Z on internal (operator-approved probe, one group): the SAME body
       WITH "@odata.type": "#microsoft.graph.unifiedRoleAssignmentMultiple" -> 400 "The input was not valid.
-      roleAssignment: The roleAssignment field is required." (every Defender create on RIDE / EFIF / internal, 2.4.379 and
+      roleAssignment: The roleAssignment field is required." (every Defender create on both test tenants and internal, 2.4.379 and
       2.4.380); WITHOUT it -> the assignment is created (then the insecure redirect, see
       Invoke-PimDefenderAssignmentCreate). The Graph beta example carries the annotation; the service refuses it.
       The shipped connector body (workloads\connectors\defender-xdr.connector.json 'assign') never had one.
@@ -445,7 +445,7 @@ function Get-PimDefenderDuplicateRolePlan {
       PIM's description) and at most ONE carries an assignment: keep that one (or the first when none is assigned), delete
       the rest. Anything else returns $null and stays DEFENDER-ROLE-AMBIGUOUS -- PIM never deletes a role it did not make or
       one somebody assigned.
-      Measured 2026-09-26 on RIDE: 2x 'PIM-Defender-XDR-DataOperations-Operator-L3-T1-MP-ID' and 2x '...-Reader-L4-T1-MP-ID',
+      Measured 2026-09-26 on a test tenant: 2x 'PIM-Defender-XDR-DataOperations-Operator-L3-T1-MP-ID' and 2x '...-Reader-L4-T1-MP-ID',
       mailed as a drift warning every 4 hours -- the create was redirected, not read back in time, and POSTed again.
     #>
     param([Parameter(Mandatory)][object[]]$Hits, [AllowEmptyCollection()][string[]]$AssignedRoleIds = @())
@@ -468,7 +468,7 @@ function Repair-PimDefenderDuplicateRoles {
       catalog holds more than once, Get-PimDefenderDuplicateRolePlan decides; a healable name keeps its assigned copy and the
       other PIM-made copies are DELETEd. Returns the names healed ('' list = nothing changed). Never throws: a failed read or
       delete leaves the duplicate for the ambiguous-role warning, as before.
-      2026-09-26 (RIDE): the heal inside Resolve-PimDefenderSpecRole never ran there -- an ambiguous binding is reported as a
+      2026-09-26 (a test tenant): the heal inside Resolve-PimDefenderSpecRole never ran there -- an ambiguous binding is reported as a
       warning at READ time and no create/update item is planned, so the heal has to happen here.
     #>
     param([Parameter(Mandatory)]$Catalog, [string[]]$Names = @())
@@ -556,7 +556,7 @@ function Resolve-PimDefenderSpecRole {
         return "$($role.id)"
     }
     # PREVENT (2026-09-26): a create that was redirected and not yet listed is NOT posted again for 30 minutes -- the second
-    # POST is exactly how RIDE got two roles of one name.
+    # POST is exactly how a test tenant got two roles of one name.
     $pend = Get-PimDefenderCreatePending
     $pk = $Name.ToLowerInvariant()
     if ($pend.ContainsKey($pk)) {
@@ -574,7 +574,7 @@ function Resolve-PimDefenderSpecRole {
     try { $new = Invoke-PimGraph -Beta -Method POST -Path '/roleManagement/defender/roleDefinitions' -Body $body }
     catch {
         $m = "$($_.Exception.Message)$(if ($_.ErrorDetails) { ' ' + $_.ErrorDetails.Message })"
-        # 🔴 LIVE 2026-09-19 (RIDE / EFIF / internal): Graph answers this POST with a redirect to an http:// location, and
+        # 🔴 LIVE 2026-09-19 (both test tenants and internal): Graph answers this POST with a redirect to an http:// location, and
         # PowerShell 7 refuses to follow HTTPS -> HTTP ("Cannot follow an insecure redirection"). The role IS created (the
         # next run found it and went on to assign). So: never follow the insecure hop -- READ THE ROLE BACK by name.
         if ($m -match '(?i)insecure redirection') { $redirected = $true }

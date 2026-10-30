@@ -114,7 +114,7 @@ function New-PimSqlConnection {
             # 1) MANAGED IDENTITY IS PLAN A (operator directive 2026-08-08: "use MI as plan A
             #    to connect with managed identity"), but ONLY when no SPN is explicitly
             #    configured. MI was previously gated on $env:IDENTITY_ENDPOINT -- an App
-            #    Service/Functions variable NEVER set on an Azure VM -- so on a VM (mgmt1
+            #    Service/Functions variable NEVER set on an Azure VM -- so on a VM (the build host
             #    included) MI was silently skipped even though Get-PimManagedIdentityToken had
             #    handled IMDS all along. The gate, not the capability, was missing.
             #
@@ -849,7 +849,7 @@ function Initialize-PimNamingConventionSeed {
         # Absent is not the same as new. An environment that already holds admins and groups was named by
         # SOME convention; if its setting is missing, writing the SHIPPED default here would declare the
         # wrong convention and the engine would then happily run on it. MSP-SETUP-GUIDE §5 / IMP-13:
-        # EFIF's admins are 'admin-efif-{Initial}', so the shipped 'Admin-{Initial}' would make every one
+        # a test tenant's admins are 'admin-contoso-{Initial}', so the shipped 'Admin-{Initial}' would make every one
         # of them invisible to the Admins provider's prefix match -- re-created every tick, accumulating
         # unmanaged privileged accounts. Seeding the wrong convention is WORSE than not seeding: on a
         # populated store we leave it absent so the engine's preflight REFUSES and a human decides.
@@ -2475,7 +2475,7 @@ function Set-PimSqlEntityRowsTransactional {
         # the Manager submits the whole entity, so one changed admin on internal (659 rows) was 659 round trips to Azure
         # SQL inside the commit. A row whose JSON is byte-identical to what is stored is skipped: same data, and its
         # UpdatedUtc stays honest (the change detector still sees the rows that did change).
-        # 🔴 §97.1 (EFIF 2026-10-08, 168 template rows, 132 s): every CHANGED row was still TWO round trips (its MERGE +
+        # 🔴 §97.1 (a test tenant 2026-10-08, 168 template rows, 132 s): every CHANGED row was still TWO round trips (its MERGE +
         # its journal INSERT) inside the transaction. The plan is now built in memory and written in ONE statement batch
         # per <= $script:PimSqlRowBatchSize rows (Invoke-PimSqlEntityRowBatchTx): same rows, same journal rows, same
         # single transaction, a constant number of round trips. Two rows with one key: the LAST wins (as before).

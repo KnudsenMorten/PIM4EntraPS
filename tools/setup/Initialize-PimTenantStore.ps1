@@ -36,7 +36,7 @@
       {AdminWord}         the word that marks an admin account -- setting `AdminWord`, default
                           'Admin'; a customer may use any acronym ('adm', ...).
       {TenantCommonName}  this tenant's short common name -- setting `TenantCommonName`, e.g.
-                          'EFIF' / 'RIDE'. Blank = the token vanishes with no double separator,
+                          'CONTOSO' / 'FABRIKAM'. Blank = the token vanishes with no double separator,
                           so ONE template serves every tenant instead of baking the name in.
       {AdminTypePrefix}   by admin-type (internal = none, external-adminuser = 'x-').
       {Initial}           the owner's initials. {Owner} is the back-compat synonym.
@@ -47,7 +47,7 @@
       {Workload} {Scope} {Permission} {Level} {Tier} {Plane} {Platform}
 
     e.g. '{AdminTypePrefix}{AdminWord}-{TenantCommonName}-{Initial}{Platform}' with AdminWord='Admin'
-         and TenantCommonName='EFIF'  ->  admin-efif-mok-id
+         and TenantCommonName='CONTOSO'  ->  admin-contoso-mok-id
   🪤 'Environment' in this convention means the PLATFORM (entra/ad), NOT the customer -- that is why
   the per-tenant token is {TenantCommonName} and not {EnvName}.
   🔴 AD OU placement (PathAdmins / PathAdminsL0T0) is OPTIONAL: on-premises AD only, blank for a

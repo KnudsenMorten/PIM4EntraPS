@@ -207,7 +207,7 @@ param(
     # PIM 100.156 B (framework 12.23 P8): after the schema, run the ADMIN half of the least-privilege model on the same
     # admin identity (Invoke-PimSqlAccessInstall -WithPrerequisites -- the product code the Support-app cut-over runs).
     # Invoke-PimDeployAll's schema step passes it, so the object grants (views the schema just created) are converged
-    # before the Manager is restarted onto the new store. Off by default: the mgmt1 / estate updater never does it.
+    # before the Manager is restarted onto the new store. Off by default: the build-host / estate updater never does it.
     [switch]$InstallSqlAccessModel
 )
 $ErrorActionPreference = 'Stop'
@@ -704,7 +704,7 @@ try {
             # 🔴 BUG-227 (measured 2026-09-20 rolling internal to 2.4.382): -SubscriptionId reached the ring
             # gate, the smoke, the rollback and the pin -- and NOT the build. `az acr build` therefore ran
             # against whatever subscription was ambient and failed as
-            #     ERROR: The resource with name 'acrpimmfnpr' ... could not be found in subscription
+            #     ERROR: The resource with name 'acrpimcontoso' ... could not be found in subscription
             #            'sg-visualstudio 2 (DEMO) (7e867037-...)'
             # which names a missing REGISTRY and reads as "the registry is gone", when the registry was fine
             # and the context was wrong -- the exact misreading an explicit, asserted subscription prevents.
@@ -974,7 +974,7 @@ try {
             # could obtain neither a live nor a boot-log reading, SKIPPED all three checks, and
             # exited 0 -- which Get-PimVerifyVerdict reads as Healthy. Every nightly run therefore
             # reported `verifyHealthy=True` off a gate that asserted NOTHING, and mailed that word
-            # to the operator. Measured identically on mfnpr, EFIF and RIDE, 2026-09-07:
+            # to the operator. Measured identically on the internal environment, both test tenants, 2026-09-07:
             #     RESULT: 0 pass, 0 fail, 3 skip, 0 n/a  ->  verify healthy=True (smoke exit 0)
             #
             # 🪤 The deploys were NOT unverified -- Update-PimContainers runs the SAME gate properly
@@ -987,7 +987,7 @@ try {
             # making a skip fatal at this point would auto-roll-back a HEALTHY deploy whenever the
             # gate could not run for an environmental reason -- the BUG-102 failure, in reverse.
             # BUG-172: -SubscriptionId IS passed now -- the parameter exists (BUG-102, declared above), and
-            # an unscoped smoke on mgmt1 reads another company's subscription. So is the version this
+            # an unscoped smoke on the build host reads another company's subscription. So is the version this
             # run rolled: the gate checks the app serves THAT, not whatever the working tree says.
             # 🔑 The smoke now exits 2 for "skipped -- NOT a pass" (it used to exit 0, which read as
             # Healthy). Still no -AsReleaseGate here, for the reason above: a skip is reported as
@@ -1068,7 +1068,7 @@ catch {
 # 🔴 WITHOUT THIS, THIS SCRIPT AND THE IN-CLOUD UPDATER FIGHT EACH OTHER EVERY NIGHT, AN HOUR APART.
 # `ca-pim-update` (§53) rolls its environment to a PINNED image -- a ring decision, deliberately not
 # "whatever is newest". This script is the other half: it PULLS, BUILDS a new tag, and rolls forward.
-# Both were armed on internal/EFIF/RIDE on 2026-09-10, at 03:00-03:40 and 04:00-04:40 respectively,
+# Both were armed on internal and both test tenants on 2026-09-10, at 03:00-03:40 and 04:00-04:40 respectively,
 # which produces this, starting the first night after any release:
 #     04:00  this script builds 2.4.31x and rolls the environment forward
 #     03:00  next day, the cloud job rolls it BACK to the pinned 2.4.302
@@ -1151,7 +1151,7 @@ if ($Apply -and $profile.isHosted -and $deployed -and $outcome -eq 'success' -an
 
     # ---- 4b (ring). ADVANCE THE RING, FOR RINGS 0 AND 1 ONLY -------------------------------------
     # 🔴 THE PIN IS NOT ENOUGH ANY MORE. An updater with PIM_UPDATE_RING takes its target from
-    # channel.json, NOT from the pin -- the ring wins (update-job-entry.ps1). EFIF and RIDE carry ring 1
+    # channel.json, NOT from the pin -- the ring wins (update-job-entry.ps1). both test tenants carry ring 1
     # since 2026-09-13, so without this the cloud job would roll them BACK to ring1.version the night
     # after this script built something newer: the exact oscillation 2.4.303 removed, reintroduced by
     # the ring. Ring 0/1 get every build by design, so the builder that just VERIFIED a version is the

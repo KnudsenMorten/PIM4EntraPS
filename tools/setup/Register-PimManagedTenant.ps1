@@ -26,8 +26,8 @@
     Print the registered tenants and exit.
 
 .EXAMPLE
-    .\Register-PimManagedTenant.ps1 -SqlServerFqdn sql-ait-wa678.database.windows.net -ManagedTenantId <managed tenant> `
-        -DisplayName RIDE -Ring 2 -Tags 'region:eu','wave:pilot' -TenantId <managing tenant> -ClientId <app> -CertThumbprint <thumb>
+    .\Register-PimManagedTenant.ps1 -SqlServerFqdn sql-pim-contoso.database.windows.net -ManagedTenantId <managed tenant> `
+        -DisplayName FABRIKAM -Ring 2 -Tags 'region:eu','wave:pilot' -TenantId <managing tenant> -ClientId <app> -CertThumbprint <thumb>
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(

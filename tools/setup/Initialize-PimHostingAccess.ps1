@@ -12,7 +12,7 @@
 .DESCRIPTION
     Before this script those four were done ONLY inside Setup-PimContainers.ps1 (the infra step) -- or not at all (the
     Jobs Operator role and SchedulerTickJobId had no script). Invoke-PimDeployAll SKIPS infra on an environment whose probe
-    says current, so a rebuilt or existing environment never got them: measured 2026-09-15, EFIF and RIDE's ca-pim-tick
+    says current, so a rebuilt or existing environment never got them: measured 2026-09-15, both test tenants' ca-pim-tick
     held 12 Graph roles and ca-pim-manager 9, both without the five required ones (AccessReview.Read.All,
     AppRoleAssignment.ReadWrite.All, Application.Read.All, RoleManagement.ReadWrite.Defender,
     DeviceManagementRBAC.ReadWrite.All), and "Run now" could only wait for the next cron start.

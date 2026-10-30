@@ -54,10 +54,39 @@ function Test-PimErrorTextCustomerSafe {
     if ($t -match '\[[A-Z][A-Z0-9]*(-[A-Z0-9]+)+\]') { $why.Add('a class id in brackets') }
     if ($t -match '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}') { $why.Add('a mail address') }
     foreach ($m in [regex]::Matches($t, '(?i)https?://[^\s)]+')) { if ($m.Value -notmatch '(?i)^https://(portal\.)?invardia\.com(/|$)') { $why.Add("a URL ($($m.Value))") } }
-    # internal handles only: customer names are never written in shipped source (SEC-19) -- Test-PimSourceSanitization's
-    # denylist scan catches those across the whole shipped tree, this file included
-    if ($t -match '(?i)\b(mgmt1|kv-automatit)\b') { $why.Add('an internal handle') }
+    # DOC-18: internal handles, customer and person names come from the internal denylist -- no name is written in this
+    # file (it ships); Test-PimSourceSanitization scans the whole shipped tree for them, this file included
+    foreach ($rx in @(Get-PimErrorPrivateNamePatterns)) { if ([regex]::IsMatch($t, $rx)) { $why.Add('an internal handle'); break } }
     return [pscustomobject]@{ ok = ($why.Count -eq 0); reasons = @($why.ToArray()) }
+}
+
+function Get-PimErrorPrivateNamePatterns {
+    <#
+      DOC-18: the private names (internal/REAL-IDENTIFIERS.md denylist: `word:` any case, `case:` exact case, `value:` a
+      substring) as regexes, read once. FAILS CLOSED: without the list no text is judged safe, so nothing is written.
+    #>
+    if ($script:PimErrPrivateNames) { return $script:PimErrPrivateNames }
+    $p = Join-Path "$script:PimErrSol" 'internal\REAL-IDENTIFIERS.md'
+    if (-not "$script:PimErrSol" -or -not (Test-Path -LiteralPath $p)) { throw "cannot judge the error texts without the private name list (internal\REAL-IDENTIFIERS.md not found: $p)" }
+    $out = New-Object System.Collections.Generic.List[string]
+    $in = $false
+    foreach ($line in [IO.File]::ReadAllLines($p)) {
+        if ($line -match '^##\s*DENYLIST-BEGIN') { $in = $true; continue }
+        if ($line -match '^##\s*DENYLIST-END') { $in = $false; continue }
+        if (-not $in) { continue }
+        $m = [regex]::Match($line, '^\s*(?<k>word|case|value):\s*(?<v>[^#]+?)\s*(?:#.*)?$')
+        if (-not $m.Success) { continue }
+        $k = $m.Groups['k'].Value; $v = $m.Groups['v'].Value.Trim().Trim('"', "'")
+        if ($k -ne 'value' -and $v -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { continue }
+        $out.Add($(switch ($k) {
+            'word'  { '(?i)(?<![A-Za-z0-9])' + [regex]::Escape($v) + '(?![A-Za-z0-9])' }
+            'case'  { '(?<![A-Za-z0-9])' + [regex]::Escape($v) + '(?![A-Za-z0-9])' }
+            default { '(?i)' + [regex]::Escape($v) }
+        }))
+    }
+    if (-not $out.Count) { throw "cannot judge the error texts: the private name list ($p) has no entries" }
+    $script:PimErrPrivateNames = @($out.ToArray())
+    return $script:PimErrPrivateNames
 }
 
 function Get-PimErrorCustomerScripts {

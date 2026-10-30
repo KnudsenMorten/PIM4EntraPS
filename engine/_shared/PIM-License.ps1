@@ -42,7 +42,7 @@
 #
 # 🔴 WHY THE MIGRATION IS URGENT, not cosmetic: the legacy CN=PIM4EntraPS-Licensing key is marked
 # NON-EXPORTABLE, so backup-job-certificates-automation SKIPS it on every run -- verified absent
-# from all recent backups. If mgmt1 were lost, no further PIM licence could EVER be issued (already
+# from all recent backups. If the build host were lost, no further PIM licence could EVER be issued (already
 # issued ones keep verifying, since only the public half ships). The cert is valid to 2041, which
 # makes it look safe; exportability is the thing that actually matters and is invisible unless
 # checked. This key IS backed up.
@@ -163,7 +163,7 @@ Function Test-PimLicenseSignature {
     .DESCRIPTION
         Isolated so the verification path can be unit-tested with valid /
         invalid / tampered fixtures using an ephemeral test keypair, without
-        the maintainer's private key (which only ever exists on mgmt1).
+        the maintainer's private key (which only ever exists on the build host).
         PS 5.1-safe: X509Certificate2 from raw bytes + RSACertificateExtensions
         -- NO RSA.ImportFromPem (PS 7 / .NET Core 3.0+ only).
     #>

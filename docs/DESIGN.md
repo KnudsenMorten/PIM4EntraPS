@@ -3450,6 +3450,17 @@ on delegation/assignment lifecycle only and **never** sends an activation email.
    of users holding T0/T1 (tier from an explicit field or a `T#` name marker), keeping
    each user's highest tier + the privilege levels seen. `ConvertTo-PimTierReportTokens`
    feeds the `tier-report` template. Scheduler job `tier-report` (daily).
+2a. **Management report (Pro, feature `reports.management`)** — `PIM-MgmtReport.ps1` builds a pure model of four
+   sections (key figures + trends, risk + exceptions, changes + audit, compliance evidence) for a period from what the
+   store already holds: audit counts per period, admin and definition rows, the scheduler snapshots (active
+   assignments, drift, coverage), guard holds, job run history, the tier report, the operational policy and overdue
+   access reviews. Each source is read on its own; one that fails becomes "not available" with its reason, never 0.
+   `PIM-Pptx.ps1` writes the .pptx with System.IO.Compression only (no module, PowerShell 5.1 and 7): title slide,
+   KPI tiles with trend arrows, tables split over slides, bar charts drawn as shapes, a footer on every slide.
+   The Manager serves it at Reports > Management report (every signed-in role, Pro gate first, audited). The
+   scheduler job `mgmt-report` stays inert until the monthly switch is on (default off); then the first run in a new
+   month builds last month's report once, keeps it with up to 36 figure snapshots (the history the trends use) and
+   mails it to the chosen recipients.
 3. **Approval escalation / reminders** — `Get-PimApprovalEscalationTargets` decides who
    to notify NOW for a pending *delegation* approval: **serial** steps one owner at a
    time (`owners[floor(elapsed/escalationHours)]`, clamped, `isEscalated` once past
@@ -4418,8 +4429,8 @@ header** (`engine/_shared/PIM-HostedAuth.ps1`, added 2026-08-05). Two layers:
     **display name** — while the blob's preferred value is the **UPN**; the check therefore matches the
     header against **every** name the blob carries, not just the preferred one. (b) An HTTP header may carry
     only ASCII, so the edge **URL-encodes** the name and writes spaces as `+`: the header reads
-    `Kasper+Hjerrild+Rold+S%C3%B8rensen+(adm-e-khrs-t0-c)` where the blob holds
-    `Kasper Hjerrild Rold Sørensen (adm-e-khrs-t0-c)`. `ConvertFrom-PimEdgeHeaderValue` offers the decoded
+    `Avery+Jordan+Lind+S%C3%B8rensen+(adm-e-alin-t0-c)` where the blob holds
+    `Avery Jordan Lind Sørensen (adm-e-alin-t0-c)`. `ConvertFrom-PimEdgeHeaderValue` offers the decoded
     forms (percent-decoded, and `+`→space), and each is compared **in addition to** the raw value.
     Decoding widens what counts as *the same identity*, never **which** identities are accepted: a header
     naming somebody else, encoded or not, is still rejected, as is a name header with no blob. The

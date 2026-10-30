@@ -560,7 +560,7 @@ function Test-PimDownlinkRingGate {
 
 # ---------------------------------------------------------------------------
 # SIGNATURE / VALIDITY VERIFY (pure). Verify a signed baseline document with a
-# CALLER-SUPPLIED public key (the real key never leaves mgmt1; tests pass an
+# CALLER-SUPPLIED public key (the real key never leaves the build host; tests pass an
 # EPHEMERAL test key). Mirrors Test-PimBaselineDoc but lets a test inject the
 # verifying RSA so we can prove valid / tampered / wrong-key WITHOUT the prod key
 # and WITHOUT RSA.ImportFromPem (PS 5.1).
@@ -1854,7 +1854,7 @@ function Resolve-PimCustomerBlockedCapabilities {
         # SOLUTIONS level -- so two levels up walks off the top of the filesystem, Split-Path
         # returns EMPTY, and Join-Path threw
         #     Cannot bind argument to parameter 'Path' because it is an empty string
-        # MEASURED 2026-09-03: this killed RIDE's downlink Job on every run, before a single line
+        # MEASURED 2026-09-03: this killed a test tenant's downlink Job on every run, before a single line
         # of downlink work, and the message named neither this function nor a manifest -- the same
         # code plans correctly on Windows, which is why it survived every offline test.
         # Running out of parents is not an error: it means there is no customer manifest root here,
@@ -2028,7 +2028,7 @@ function Select-PimProjectedAssignments {
 #
 # THE PROBLEM THIS SOLVES. A projected membership grants nothing in a tenant that has
 # no group carrying that tag, and a managed tenant is EMPTY on day one (measured: both
-# RIDE and HOGYM have zero rows). Memberships-only would therefore be a correct
+# both managed test tenants have zero rows). Memberships-only would therefore be a correct
 # projection that delivers nothing. So the baseline can STAND UP its own model.
 #
 # THE RULE, and it is a yielding one:
@@ -2576,7 +2576,7 @@ function Get-PimDownlinkPlan {
         foreach ($u in @($adminRecog.unrecognised)) { [void]$unrec.Add("$u".Trim().ToLowerInvariant()) }
         # 🔴 A NAME NEVER DECIDES WHAT REPLICATES (operator, 2026-09-22: "you can not block admins due
         # to different name pattern" / "but name pattern is not used to control replication").
-        # This used to WITHHOLD such an admin. Measured on RIDE the same day: the job carried
+        # This used to WITHHOLD such an admin. Measured on a test tenant the same day: the job carried
         # PIM_SlaveAdminPrefixes='Admin-,admin-', so nine `adm-e-*` accounts the managing tenant had published
         # were dropped -- a deployment string deciding who gets access in a customer tenant, which is
         # not what that setting is for.
@@ -2979,7 +2979,7 @@ function Get-PimCentralKillSource {
         $code = 0
         try { $resp = $_.Exception.Response; if ($resp) { $code = [int]$resp.StatusCode } } catch { $code = 0 }
         if ($code -eq 404) { return @{ checked = $true; doc = $null; error = ''; url = $u } }
-        # 🪤 MEASURED LIVE on RIDE, 2026-09-18 (2.4.370): the DERIVED sibling of a bundle URL on a store that is NOT
+        # 🪤 MEASURED LIVE on a test tenant, 2026-09-18 (2.4.370): the DERIVED sibling of a bundle URL on a store that is NOT
         # publicly readable answers 401/403. That is not "a kill might be standing". It is "nobody configured a
         # kill location this identity can read", and it refused every pull. A location the operator did not
         # configure is reported NOT CHECKED, loudly, with the way to enforce it. An EXPLICIT -CentralKillUrl
@@ -4007,7 +4007,7 @@ function Invoke-PimDownlinkAdminApply {
         [int]$TapLifetimeHoursDefault = 8,
         [switch]$AllowFullPrune,
         # §71 / framework MSP-4 SURFACE item 8 -- retraction is REPORT-FIRST for admins too (§71.11, found LIVE
-        # on RIDE 2026-09-15): an admin that stops reaching this tenant is reported as 'would remove' and its
+        # on a test tenant 2026-09-15): an admin that stops reaching this tenant is reported as 'would remove' and its
         # central row withdrawn only with this opt-in, inside the removal budget. -AllowFullPrune still wins.
         [switch]$AllowRetraction,
         # §79.5 (operator 2026-09-25, "Prompt on remove only"): the central admins the managing tenant REMOVED and named in a signed
@@ -4138,7 +4138,7 @@ function Invoke-PimDownlinkAdminApply {
     $removed = 0; $wouldPrune = @(); $retractHeld = @(); $wouldRetract = @()
     # Row 35: an admin the managing tenant stops marking msp (or narrows away) is a cross-tenant retraction.
     # 🔴 §71.11 -- IT USED TO BE WITHDRAWN AT ONCE (inside the budget), while the group and membership applies
-    # beside it were already report-first. Measured on RIDE 2026-09-15: re-targeting one SAMPLE admin away
+    # beside it were already report-first. Measured on a test tenant 2026-09-15: re-targeting one SAMPLE admin away
     # from the tenant removed its central row on the next pull while its membership stayed "WOULD REMOVE".
     # Framework MSP-4 SURFACE item 8 is one rule for every row: reported, and removed only under the removal
     # opt-in (-AllowRetraction) + the budget, or the decouple (-AllowFullPrune).
@@ -4424,7 +4424,7 @@ function Invoke-PimScenarioDeploy {
             $engineHeld = [bool]($summary -and $summary.PSObject.Properties['outcome'] -and "$($summary.outcome)" -eq 'held')
             $okEngine = if ($summary) { ($eu -eq 0) -or $engineHeld } else { $true }
             # WAITING IS NOT FAILING -- the scheduler's rule (Start-PimScheduler, operator 2026-09-22), now also here.
-            # Measured on RIDE 2026-09-26 (MSP live E2E): the FIRST pull created the replicated group and its eligible
+            # Measured on a test tenant 2026-09-26 (MSP live E2E): the FIRST pull created the replicated group and its eligible
             # membership in one run; the membership waited for the group (transient + retryable), errors=1, and the
             # whole pull was recorded FAILED although the next run applied it unattended. A run whose only failures
             # are transient + retryable (and have not outlived their cause) is OK and says how many items wait.

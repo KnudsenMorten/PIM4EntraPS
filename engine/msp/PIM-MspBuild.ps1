@@ -5,12 +5,12 @@ if (-not (Get-Command Test-PimSetupRegion -ErrorAction SilentlyContinue)) { $__p
 <#
 .SYNOPSIS
     71.18 -- THE ONE-SHOT MSP BUILD (pure core). Decides, for a managing tenant (S3) or a MANAGED tenant (S6, locally hosted
-    pull), every step that made the EFIF -> RIDE test pair work, in order, with the exact script and arguments. The runner
+    pull), every step that made the test MSP pair (managing -> managed) work, in order, with the exact script and arguments. The runner
     is tools/setup/Invoke-PimMspBuild.ps1; offline-tested by tests/Test-PimMspBuild.ps1.
 
 .DESCRIPTION
     Operator 2026-09-15: "did you update the setup scripts so it includes all additions/fixes. on friday we must use it to
-    build efif and ride in prod". The audit that day found the build spread over four entry points, none end to end:
+    build the test MSP pair in prod". The audit that day found the build spread over four entry points, none end to end:
     Invoke-PimDeployAll.ps1 (hosting only), the phased onboarding script (three phases broken; deleted 2026-09-18, SEC-27),
     the framework estate build (test tenants only), and hand steps -- the scenario setting, registering the managed tenant
     on the managing tenant (SQL), publishing and scheduling the signed bundle, the pull job, the weekly read-link rotation, the tick
@@ -602,7 +602,7 @@ function Get-PimMspBuildAuthMode {
       PURE. 71.33 -- WHO the build runs as, decided by the config and nothing else (one source, no second switch to
       disagree with it):
         Certificate -- 'deployIdentity' is present: az logs in as that application by certificate (the MSP management
-                       host's automation pattern; mgmt1 and the EFIF/RIDE build).
+                       host's automation pattern; the build host and the test MSP pair build).
         SignedIn    -- no 'deployIdentity': the administrator signed in to az (az login) IS the deploy identity. The
                        customer's pattern. No certificate, no secret, nothing credential-shaped written anywhere.
     #>
@@ -682,7 +682,7 @@ function Test-PimMspBuildConfig {
     $ring = & $V 'updater.ring'
     if ($null -eq $ring -or "$ring" -notmatch '^[0-3]$') { $errors.Add("'updater.ring' must be 0..3") }
     # §95.4 / 95.2a (2026-10-06, MSP rehearsal through the Invardia Support app): Pro updates from Invardia, the licence
-    # and the support app's access are build steps -- on EFIF/RIDE all three were hand work after the build.
+    # and the support app's access are build steps -- on both test tenants all three were hand work after the build.
     $usrc = "$(& $V 'updater.source')".Trim()
     if ($usrc -and $usrc -notin @('invardia', 'pim-src')) { $errors.Add("'updater.source' must be invardia (Pro updates, signed, through Invardia) or pim-src") }
     $lic = "$(& $V 'licence.path')".Trim()
@@ -717,7 +717,7 @@ function Test-PimMspBuildConfig {
         if ($acrSku -and $acrSku -ne 'Premium') { $errors.Add("'acr.publicAccess' false needs 'acr.sku' Premium (Basic/Standard have no network controls)") }
         if (-not $acrPool) { $errors.Add("'acr.publicAccess' false needs 'acr.agentPoolName': az acr build cannot reach a private registry from ACR's own agents, and the nightly updater builds into it") }
     }
-    if ([bool](& $V 'sql.privateEndpoint')) { $warnings.Add("'sql.privateEndpoint' true: the build host must resolve <server>.privatelink.database.windows.net (to the endpoint, or publicly) -- mgmt1's DNS answers NXDOMAIN and every store step then fails with 'No such host is known' (measured 2026-09-17)") }
+    if ([bool](& $V 'sql.privateEndpoint')) { $warnings.Add("'sql.privateEndpoint' true: the build host must resolve <server>.privatelink.database.windows.net (to the endpoint, or publicly) -- the build host's DNS answers NXDOMAIN and every store step then fails with 'No such host is known' (measured 2026-09-17)") }
     if ($expo -eq 'internal') {
         if (-not $peCidr) { $warnings.Add("exposure internal: 'network.privateEndpointSubnetAddressPrefix' not set -- the hosting step REFUSES if the private-endpoint subnet '$(if ("$(& $V 'network.privateEndpointSubnetName')".Trim()) { "$(& $V 'network.privateEndpointSubnetName')".Trim() } else { 'pim-endpoints' })' does not already exist") }
         if (-not "$(& $V 'hub.vnetName')".Trim()) { $warnings.Add("exposure internal with no 'hub.vnetName': the Manager is reachable ONLY from inside its own VNet or a network the operator peers to it (plus DNS for its private zone). The hosted smoke gate cannot run from this host and is skipped -- verify from inside.") }
@@ -982,7 +982,7 @@ function Get-PimMspBuildPlan {
     # one ("PREREQ needs an address plan ... Refusing to guess: two environments sharing a CIDR cannot be un-peered"),
     # and the plan had no way to express one and never forwarded anything. So the one-shot build could NOT stand up a
     # greenfield environment at all: it failed at step 2 of 10, on BOTH sides of the rehearsal pair, after the keyvault
-    # step had already made changes. Warm environments (EFIF/RIDE) hid it, because their VNets already existed.
+    # step had already made changes. Warm environments (both test tenants) hid it, because their VNets already existed.
     # Either source is accepted, exactly as the prereq step accepts them -- a customer with their own range is not made
     # to invent an estate index, and our estate is not made to hand-write a CIDR it derives from the index.
     $netCidr = "$(& $V 'network.vnetAddressPrefix')".Trim(); $netSub = "$(& $V 'network.subnetAddressPrefix')".Trim()
@@ -1003,8 +1003,8 @@ function Get-PimMspBuildPlan {
     if ("$(& $V 'hub.subscriptionId')".Trim())    { $hosting['HubVnetSubscriptionId'] = "$(& $V 'hub.subscriptionId')".Trim() }
     if ("$(& $V 'hub.privateDnsResourceGroup')".Trim()) { $hosting['PrivateDnsResourceGroup'] = "$(& $V 'hub.privateDnsResourceGroup')".Trim() }
     # 🔴 71.36 (rehearsal 2026-09-17) -- NO SQL PRIVATE ENDPOINT BY DEFAULT. Invoke-PimDeployAll turns one on for
-    # -Exposure internal, and from mgmt1 that made the store unreachable: once the endpoint exists the server's public
-    # name is a CNAME to <server>.privatelink.database.windows.net, which mgmt1's DNS answers NXDOMAIN ("No such host is
+    # -Exposure internal, and from the build host that made the store unreachable: once the endpoint exists the server's public
+    # name is a CNAME to <server>.privatelink.database.windows.net, which the build host's DNS answers NXDOMAIN ("No such host is
     # known") -- so the hosting step's own code/update checks and every store step below failed. The store instead admits
     # ONLY the environment's subnet (VNet rule over the Microsoft.Sql service endpoint); the build window (sqlopen/sqlclose)
     # adds and removes this host. 'sql.privateEndpoint': true restores the endpoint for a build host whose DNS resolves it.
@@ -1099,7 +1099,7 @@ function Get-PimMspBuildPlan {
     $steps.Add((New-PimMspBuildStep -Id 'access' -Title ("tick Graph (Engine set), Manager Graph (read-only set), Manager may start the tick, SchedulerTickJobId, tick Reader at the tenant root" + $(if ($rootUaa) { ' + User Access Administrator (opted in)' } else { '' }) + ', Manager Reader on the resource group only (Environment report)') `
         -Script 'tools\setup\Initialize-PimHostingAccess.ps1' -HostExe 'powershell' `
         -Arguments $accessArgs -Switches $accessSwitches `
-        -Why 'the infra step (the only place these were granted) is SKIPPED on an existing environment; EFIF and RIDE held 12 and 9 roles and lacked the 5 required ones'))
+        -Why 'the infra step (the only place these were granted) is SKIPPED on an existing environment; both test tenants held 12 and 9 roles and lacked the 5 required ones'))
 
     $steps.Add((New-PimMspBuildStep -Id 'scenario' -Title "deployment scenario $scenario in pim.Settings" -Script 'tools\setup\Set-PimScenario.ps1' -HostExe 'powershell' `
         -Arguments (@{ SqlServerFqdn = $sqlFqdn; SqlDatabase = $db; Scenario = $scenario } + $storeArgs) -Switches $storeSwitches `
@@ -1226,7 +1226,7 @@ function Get-PimMspBuildPlan {
             $i++
         }
         # 71.35 -- the publish leaves the host (the host publisher + its SYSTEM task were deleted with the SAS cluster, SEC-27,
-        # 2026-09-18; EFIF publishes from ca-pim-publish). Same steps in certificate and signed-in mode: every one runs on the az
+        # 2026-09-18; a test tenant publishes from ca-pim-publish). Same steps in certificate and signed-in mode: every one runs on the az
         # context the build established, and nothing unattended depends on a person's sign-in afterwards.
         $keyArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; Location = $loc; KeyVaultName = $signVault; KeyName = $keyName }
         # §71.40 -- the managing tenant's OWN Manager pins the key the moment it exists (merged into PIM_BaselineTrustedKeys, read
@@ -1490,7 +1490,7 @@ function Get-PimMspOperatorSteps {
             command = "az containerapp show -g $rg -n $mgrApp --subscription $sub --query ""properties.template.containers[?name!='signin-front'] | [0].env[?name=='PIM_BaselineTrustedKeys'].value"" -o tsv   -- must list the id the signingkey step printed. A managing tenant built BEFORE this was automated: re-run -From signingkey (idempotent; it merges the pin). Until pinned the Downlink banner says 'signed by Key Vault key <id>, which this Manager does not pin' -- the managed tenants are unaffected: they decide with their OWN pins." })
     }
     if (Test-PimMspPrivateStore -Config $Config) {
-        $out.Add([pscustomobject]@{ id = 'sql-window'; title = 'PRIVATE store: any later host-side store command needs the build window (mgmt1 is not an allowed network after the build)'; when = 'policy approval, pair test, troubleshooting from the build host'
+        $out.Add([pscustomobject]@{ id = 'sql-window'; title = 'PRIVATE store: any later host-side store command needs the build window (the build host is not an allowed network after the build)'; when = 'policy approval, pair test, troubleshooting from the build host'
             command = "Set-PimSqlBuildWindow.ps1 -SubscriptionId $sub -ResourceGroup $rg -SqlServerName $sql -Mode Open ... run the command ... Set-PimSqlBuildWindow.ps1 -SubscriptionId $sub -ResourceGroup $rg -SqlServerName $sql -Mode Close  (Close removes this host's AllowSetupHost and AllowAzureServices and refuses when no VNet rule would remain; on a private-endpoint server it disables public access)." })
     }
     if ((Get-PimMspBuildAuthMode -Config $Config) -eq 'SignedIn') {
@@ -1504,7 +1504,7 @@ function Get-PimMspOperatorSteps {
 
 function Get-PimMspGuidedFailure {
     <#
-      100.73 (HOGYM managed install 2026-10-11, owner: "make this professional and user friendly"). PURE. Under Invardia's
+      100.73 (a managed-tenant install 2026-10-11, owner: "make this professional and user friendly"). PURE. Under Invardia's
       bootstrap (or the guided install, which hands its resume command over) a failed build step is told in THREE parts and
       nothing else: (a) one sentence -- the step title and the cause line, (b) the fix when one is known, (c) the ONE resume
       line (the bootstrap's / the installer's, never the internal "Invoke-PimMspBuild.ps1 ... -From <step>"). The operator

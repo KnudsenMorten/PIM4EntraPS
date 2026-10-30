@@ -1130,7 +1130,7 @@ function Invoke-PimEngineScope {
     }
 
     # --- 🔴 IMP-33 (2026-09-18): THE UNMANAGED-ADMIN REPORT RUNS ON EVERY PASS, AND IS STORED ---------
-    # The block above only runs when the diff proposes removals, which a Delta pass never does -- so on EFIF
+    # The block above only runs when the diff proposes removals, which a Delta pass never does -- so on a test tenant
     # `Admins desired=5 live=14` ran every 5 minutes and nothing ever named the nine accounts in between (six
     # of them real admins with no TAP healing, no reminders, no review). Classify the WHOLE live set with the
     # same pure classifier (desired identities fall out as attributable, break-glass is excluded) and store
@@ -1542,7 +1542,7 @@ function Invoke-PimEngineScope {
             $__absentRows = @()
         }
         # 🔴 BUG-267 (2.4.464) -- a COMPLETE read can still LAG: PIM's schedule list does not show a request made seconds
-        # earlier, so "absent" on one read deleted a Remove row whose delegation was about to appear (ig798 E2E run 1).
+        # earlier, so "absent" on one read deleted a Remove row whose delegation was about to appear (a test environment E2E run 1).
         # An absent row is now deleted only when a second read at least 10 min after the first still finds it absent.
         # BUG-284 (2026-10-04): the directory work of this run is DONE at this point. A bookkeeping fault here failed the
         # whole run -- every admin delta read "failed" while the removal had landed. It is now a warning that says WHERE it
@@ -2061,7 +2061,7 @@ function Invoke-PimEngine {
         $__cg = ("[engine] CRITICAL GATE: {0} -- the engine touches NOTHING (no admins, no groups, no policies, no assignments). Define what PIM manages first." -f $why)
         if (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) { Write-PimLogOnce -Key 'engine.critical-gate' -Message $__cg -ForegroundColor Red } else { Write-Host $__cg -ForegroundColor Red }
         foreach ($s in @($res.scopes)) {
-            # BUG-286 (ig798, 2026-10-04): a store that defines nothing has NOTHING failing. The scopes never run under this
+            # BUG-286 (a test environment, 2026-10-04): a store that defines nothing has NOTHING failing. The scopes never run under this
             # gate, so their failure slice was never replaced and the last failures (deleted E2E rows) kept the banner red
             # for days. Clear each skipped scope's slice -- only on a real run, never a plan; never fatal.
             if (-not $WhatIf -and (Get-Command Update-PimEngineItemFailures -ErrorAction SilentlyContinue)) {

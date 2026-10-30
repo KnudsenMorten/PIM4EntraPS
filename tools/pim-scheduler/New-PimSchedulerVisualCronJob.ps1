@@ -7,7 +7,7 @@
     🔴 MUST RUN UNDER WINDOWS POWERSHELL 5.1, NOT pwsh 7. VisualCronAPI.dll is a .NET
     FRAMEWORK assembly and its transport needs WCF. Under PowerShell 7 the connect fails with
         Could not load type 'System.ServiceModel.ServiceBehaviorAttribute'
-    which reads like a broken install and is only the wrong host. Verified both ways on mgmt1.
+    which reads like a broken install and is only the wrong host. Verified both ways on the build host.
 
     🔒 WHY CLONE INSTEAD OF BUILDING A JOB FROM SCRATCH. The existing
     'PIM for Entra ID (v2) - Delta change' job already carries the credentials, the run-as

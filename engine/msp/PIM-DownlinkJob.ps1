@@ -238,7 +238,7 @@ function Get-PimDownlinkJobEnv {
 }
 
 # ---------------------------------------------------------------------------
-# PURE. Which ACA secrets a redeploy must REMOVE from the job (lead 2026-09-18, measured on RIDE: after a redeploy with the
+# PURE. Which ACA secrets a redeploy must REMOVE from the job (lead 2026-09-18, measured on a test tenant: after a redeploy with the
 # PLAIN -BaselineUrl, the retired SAS transport's secret 'pim-baseline-url' -- a SAS link, i.e. a standing credential to
 # the managing tenant's bundle store -- stayed attached to the job, referenced by nothing). A `job update --yaml` leaves secrets it
 # does not list in place, so they have to be removed explicitly. Rule: every existing secret that the deployed definition
@@ -658,7 +658,7 @@ function Get-PimDownlinkJobDeployPlan {
         # IMP-13: forwarded to the env builder so the recognisability guard is armed on every
         # scheduled run. Without this hop the parameter stops here and the Job never learns it.
         [AllowEmptyCollection()][string[]]$SlaveAdminPrefixes = @(),
-        # §71.10 (2026-09-15, found live on RIDE) -- THE ENGINE RUNS AS THE JOB'S OWN SYSTEM IDENTITY, like
+        # §71.10 (2026-09-15, found live on a test tenant) -- THE ENGINE RUNS AS THE JOB'S OWN SYSTEM IDENTITY, like
         # ca-pim-tick. The user-assigned MI stays attached ONLY to pull the first image (BUG-71); the
         # SYSTEM identity is what gets the Graph app-roles and the SQL admin group membership. That is
         # the tick's proven shape, and the only no-secret shape: a user-assigned MI named by
@@ -769,7 +769,7 @@ function Get-PimDownlinkJobExecutionVerdict {
 
 # ---------------------------------------------------------------------------
 # §87 BUG-281 -- COMPARE FIRST: AN UNCHANGED BUNDLE IS NOT RE-APPLIED (operator 2026-10-01: "can the pull not do a
-# compare and run delta only"). Measured on RIDE: every 5-minute pull re-projected an unchanged bundle (admins ~15,
+# compare and run delta only"). Measured on a test tenant: every 5-minute pull re-projected an unchanged bundle (admins ~15,
 # groups ~39 rewritten) and ran a full engine pass in which every scope was `nochange` -- ~200 s at 0.5 vCPU, every
 # trigger, and the rewritten rows then queued a second engine pass in the tick. The pull now fingerprints what decides
 # the outcome and skips the projection + engine pass when nothing in it changed since the last CLEAN apply.

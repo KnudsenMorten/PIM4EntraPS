@@ -15,7 +15,7 @@
         Cannot find the object "pim.CentralAdmins" because it does not exist or you do not have
         permissions.
 
-    -- measured on EFIF 2026-09-03, immediately after a clean rebuild. A prerequisite that only a
+    -- measured on a test tenant 2026-09-03, immediately after a clean rebuild. A prerequisite that only a
     test script installs is not installed.
 
     🪤 THE ERROR IS ACTIVELY MISLEADING. SQL words a missing object and a permissions problem the
@@ -36,7 +36,7 @@
     first batch, which is the worst possible partial state: some tables present, some absent.
 
 .EXAMPLE
-    ./Initialize-PimMasterRegistry.ps1 -SqlServer sql-ait-wa678.database.windows.net
+    ./Initialize-PimMasterRegistry.ps1 -SqlServer sql-pim-contoso.database.windows.net
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(

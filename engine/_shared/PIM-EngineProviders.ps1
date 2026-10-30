@@ -789,7 +789,7 @@ function New-PimAdminsProvider {
             $addedByRow = New-Object System.Collections.Generic.List[string]
             # 🪤 BUG-138: NOT `@($rows)` -- the array subexpression over a List[object] throws
             # "Argument types do not match" at runtime (tests/Test-PimListWrapTrap.ps1). That is
-            # exactly how 2.4.412 broke RIDE's delta-admins job: the scope threw before it read a
+            # exactly how 2.4.412 broke a test tenant's delta-admins job: the scope threw before it read a
             # single account, so nine replicated admins were never created, and delta-admin-tap then
             # failed nine times with "user not found". Index the UPNs once instead -- correct AND O(1).
             $liveUpnSeen = @{}
@@ -1640,7 +1640,7 @@ function Get-PimEntraRoleNameMap {
 function Get-PimEntraRoleSuggestion {
     <#
       PURE. BUG-234 (77.3): the closest Entra role display name for a name the tenant does not have, or ''.
-      Display names are not stable across tenants: measured 2026-09-21, EFIF calls template
+      Display names are not stable across tenants: measured 2026-09-21, one tenant calls template
       2af84b1e-32c8-42b7-82a3-daa748c1ce1b "Office Apps Administrator" while a row named it "Microsoft 365 Apps
       Administrator", and every run failed for two days as "Unrecognised failure". Known renames first, then the
       catalog name sharing the most words (ignoring 'administrator'/'admin', which every other role shares).
@@ -2947,7 +2947,7 @@ function Get-PimDirRoleSchedulePreload {
     #
     # 🔴 INSTANCES, NOT SCHEDULES -- and this is a correctness fix, not a preference.
     # This used to read /roleEligibilitySchedules + /roleAssignmentSchedules. An UNFILTERED
-    # enumeration of those collections is INCOMPLETE: measured on myfamilynetwork 2026-08-10,
+    # enumeration of those collections is INCOMPLETE: measured on the internal tenant 2026-08-10,
     #     roleAssignmentSchedules          total=613  AU-scoped=359  -> row ABSENT
     #     roleAssignmentScheduleInstances  total=602  AU-scoped=346  -> row PRESENT
     # for an assignment that a per-principal `$filter=principalId eq '<id>'` query on the SAME
@@ -3374,7 +3374,7 @@ function New-PimGroupsProvider {
             # It used to THROW, and that default was untenable in the real estate: 239 of the 259
             # authored service definitions carry a BLANK Owners column, so a strict engine would
             # refuse to (re)create the overwhelming majority of the estate's own groups -- measured
-            # on myfamilynetwork while creating 4 legitimately-authored groups, all four refused.
+            # on the internal tenant while creating 4 legitimately-authored groups, all four refused.
             #
             # The purpose is kept, just not as a blocker: an ownerless create is WARNED about every
             # run, so the gap stays visible instead of silent, and OWNERSHIP IS ADDED LATER BY
@@ -7210,7 +7210,7 @@ function Test-PimPolicyApprovalClearDue {
     <#
       PURE (BUG-263). Is it time to CLEAR the provider's standing approval, after one planned policy was visited?
       TRUE once every planned policy of a run that APPLIED (not held) was visited, when the run was approved by the
-      breaker OR an approval record was standing. Measured on ig798 2026-09-26: an approval set at 17:54 was applied at
+      breaker OR an approval record was standing. Measured on a test environment 2026-09-26: an approval set at 17:54 was applied at
       17:55 by a run that was within the thresholds (so decision.approved was FALSE) -- the old rule cleared only on
       decision.approved, the record stayed, and at 20:20 it silently covered a NEW change set nobody had seen. An applied
       run applied the whole current change set, which contains whatever was approved: the approval has been used.
@@ -8032,7 +8032,7 @@ function New-PimAdminTapProvider {
                 # TAP collection -- and @(wrapper).Count is 1 even when the user has NO TAP.
                 # Every resolvable account was therefore classified as "already has a TAP", Equal
                 # returned $true, and the scope reported c0/u0/r0 while minting nothing.
-                # MEASURED in EFIF: four accounts with CreateTAP=TRUE sat at TAP=none across
+                # MEASURED in a test tenant: four accounts with CreateTAP=TRUE sat at TAP=none across
                 # repeated runs, each reporting AdminTap:c0/u0/r0 with no error. The only TAP that
                 # ever appeared did so by ACCIDENT -- a freshly-created account is briefly
                 # unresolvable, so it fell out of the live set and became a create candidate.
@@ -8131,7 +8131,7 @@ function New-PimAdminTapProvider {
                     # loudly, and NOTHING is created -- the existing (dead) pass is left untouched,
                     # which is strictly better than a live credential nobody received.
                     Write-Warning "  [AdminTap] $upn -- no TAP issued (nothing changed): $($mailChk.reason)"
-                    # 🔴 `return $null` HERE WAS COUNTED AS APPLIED. Measured live on EFIF 2026-08-25:
+                    # 🔴 `return $null` HERE WAS COUNTED AS APPLIED. Measured live on a test tenant 2026-08-25:
                     # the guard refused all six admins, printed "Nothing was changed" six times, and
                     # the run still summarised `applied=6 errors=0 ok=True`. Six dead accounts, a
                     # perfect green, on a 15-minute job -- the failure would never have surfaced.

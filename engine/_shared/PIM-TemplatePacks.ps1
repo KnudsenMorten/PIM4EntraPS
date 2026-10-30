@@ -288,7 +288,7 @@ function Get-PimTemplatePackPlan {
         if ($known -notcontains $base) { continue }
         if (-not $CurrentRowsByBase.ContainsKey($base)) { throw "Get-PimTemplatePackPlan: no current rows were given for '$base' (pack '$($tpl.id)') -- read the entity first; an unread entity is not an empty one." }
         $existing = @{}
-        # 🔴 §77.24 (EFIF 2026-09-21: "14 store key(s) of PIM-Assignments-Workloads are used by more than one row"): the
+        # 🔴 §77.24 (a test tenant 2026-09-21: "14 store key(s) of PIM-Assignments-Workloads are used by more than one row"): the
         # pack is diffed on its own finer key (Workloads: Workload|GroupTag|RoleName) but the STORE keeps one row per
         # Get-PimStoreRowKey (Workloads: GroupTag alone). A pack row whose store key an existing row already holds can
         # never be added -- offering it staged a second row for the group and the commit was refused. Such rows are

@@ -255,21 +255,49 @@ function Remove-PimSupportScriptOptionalLoads {
 function Get-PimPublicScriptForbiddenNames {
     # MAIL-NAMING 100.14 item 3 (owner 2026-10-09): a published script never names a customer, a test environment or an
     # internal tool. Regexes (case as written; (?i) where any case counts). tests/Test-PimMailNaming.ps1 keeps its OWN copy
-    # of this list on purpose -- a test must not trust the build's list. Real CUSTOMER names are never written here (this
-    # file ships): they come from the internal denylist (Get-PimPublicScriptCustomerWords).
-    @('(?i)\bEFIF', '\bRIDE\b', '(?i)\bmgmt1\b', '(?i)myfamilynetwork', '(?i)\bmfnpr\b',
-      '(?i)\bf0fa27a0', '(?i)\b4ff34194', '(?i)\b9927fa1f', '(?i)\b7825c48b', '(?i)\big798\b', '(?i)automatit', '(?i)automateit',
-      '(?i)ExpertsLive', '(?i)\bELDK', '(?i)2linkit', 'Setup-PimContainers', 'Initialize-PlatformEnvironment') +
-    @(Get-PimPublicScriptCustomerWords | ForEach-Object { '(?i)\b' + [regex]::Escape($_) + '\b' })
+    # of this list on purpose -- a test must not trust the build's list. DOC-18 (2026-10-30): no real name is written here
+    # (this file ships) -- every customer, person, tenant and internal environment comes from the internal denylist
+    # (Get-PimPublicScriptDenyEntries); only the generic platform / tool words stay.
+    @('(?i)automatit', '(?i)automateit', '(?i)2linkit', 'Setup-PimContainers', 'Initialize-PlatformEnvironment') +
+    @(Get-PimPublicScriptDenyEntries | ForEach-Object { $_.rx })
 }
 
-function Get-PimPublicScriptCustomerWords {
-    # The real customer names, from the internal denylist's `word:` entries (internal/REAL-IDENTIFIERS.md, SEC-19) -- the
-    # same list Test-PimSourceSanitization scans shipped source for. No file (a public copy) = none.
-    if (-not "$PSScriptRoot") { return @() }   # lifted out of this file (a test): no solution folder to read from
-    $p = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'internal\REAL-IDENTIFIERS.md'
-    if (-not (Test-Path -LiteralPath $p)) { return @() }
-    return @([IO.File]::ReadAllLines($p) | ForEach-Object { $m = [regex]::Match($_, '^\s*word:\s*(?<v>[A-Za-z0-9][A-Za-z0-9._-]*)'); if ($m.Success) { $m.Groups['v'].Value } })
+function Get-PimPublicScriptDenyEntries {
+    <#
+      DOC-18: the private names, from the internal denylist (internal/REAL-IDENTIFIERS.md, the block Test-PimSourceSanitization
+      scans shipped source for): a GUID, `value:` (a substring), `word:` (a whole word, any case), `case:` (a whole word, exact
+      case). A label ending in "=> <text>" names the generic words a published comment gets instead. FAILS CLOSED: without the
+      list the support scripts are not built at all -- an unscrubbed build is never the fallback. A test that lifts this
+      function sets $script:PimPublicScriptDenyFile (no $PSScriptRoot there).
+    #>
+    $p = "$script:PimPublicScriptDenyFile"
+    if (-not $p -and "$PSScriptRoot") { $p = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'internal\REAL-IDENTIFIERS.md' }
+    if (-not $p -or -not (Test-Path -LiteralPath $p)) { throw "cannot build the support scripts without the private name list (internal\REAL-IDENTIFIERS.md not found$(if ($p) { ": $p" }))" }
+    $out = New-Object System.Collections.Generic.List[object]
+    $in = $false
+    foreach ($line in [IO.File]::ReadAllLines($p)) {
+        if ($line -match '^##\s*DENYLIST-BEGIN') { $in = $true; continue }
+        if ($line -match '^##\s*DENYLIST-END') { $in = $false; continue }
+        if (-not $in -or $line -match '^\s*<!--') { continue }
+        $pub = [regex]::Match($line, '=>\s*(?<p>.+?)\s*$')
+        $m = [regex]::Match($line, '^\s*(?<k>word|case|value):\s*(?<v>[^#]+?)\s*(?:#.*)?$')
+        if ($m.Success) {
+            $k = $m.Groups['k'].Value; $v = $m.Groups['v'].Value.Trim().Trim('"', "'")
+            if ($k -ne 'value' -and $v -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { continue }   # the format note's own <name>
+            $rx = switch ($k) {
+                'word'  { '(?i)(?<![A-Za-z0-9])' + [regex]::Escape($v) + '(?![A-Za-z0-9])' }
+                'case'  { '(?<![A-Za-z0-9])' + [regex]::Escape($v) + '(?![A-Za-z0-9])' }
+                default { '(?i)' + [regex]::Escape($v) }
+            }
+            $def = if ($k -eq 'value') { 'an internal name' } else { 'a customer' }
+            $out.Add([pscustomobject]@{ rx = $rx; public = $(if ($pub.Success) { $pub.Groups['p'].Value } else { $def }) })
+            continue
+        }
+        $g = [regex]::Match($line, '\b(?<g>[0-9a-fA-F]{8})-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b')
+        if ($g.Success) { $out.Add([pscustomobject]@{ rx = '(?i)\b' + $g.Groups['g'].Value + '[0-9a-f-]*'; public = '<tenant>' }) }
+    }
+    if (-not $out.Count) { throw "cannot build the support scripts: the private name list ($p) has no entries" }
+    return @($out.ToArray())
 }
 
 function ConvertTo-PimPublicScriptText {
@@ -280,17 +308,16 @@ function ConvertTo-PimPublicScriptText {
       naming the line, so it is fixed in the source rather than shipped.
     #>
     param([Parameter(Mandatory)][string]$Text, [string]$Name = 'script')
-    $rules = @(
-        @('(?i)\b(?:EFIF|RIDE)\s*(?:/|\+|and|&)\s*(?:EFIF|RIDE)\b', 'two test tenants'),
-        @("\bEFIF's\b", "a test tenant's"), @('(?i)admin-efif-', 'admin-<tenant>-'),
-        @('\b(?:EFIF|RIDE)\b', 'a test tenant'), @('(?i)\befif\b', 'a test tenant'),
-        @('(?i)\bmgmt1\b', 'a build machine'), @('(?i)\bmfnpr\b', 'an internal environment'),
-        @('(?i)\bmyfamilynetwork\b', 'an internal tenant'), @('(?i)\b(?:f0fa27a0|4ff34194|9927fa1f|7825c48b)[0-9a-f-]*', '<tenant>'),
-        @('(?i)\big798\b', 'a test environment'), @('(?i)kv-automatit-dev', 'the build key vault'), @('(?i)rg-automateit-', 'rg-pim-'),
-        @('(?i)\bautomateit\b', 'the platform'), @('(?i)\bExpertsLive\w*', 'another tenant'), @('(?i)\bELDK\w*', 'another tenant'),
+    # DOC-18: the names come from the internal denylist (each with its own generic words); a name inside a hyphenated
+    # account name becomes <tenant>; two names joined ("X and Y") read as "two test tenants".
+    $rules = New-Object System.Collections.Generic.List[object]
+    $deny = @(Get-PimPublicScriptDenyEntries)
+    foreach ($d in $deny) { $rules.Add(@(('(?<=-)' + $d.rx + '(?=-)'), '<tenant>')) }
+    foreach ($d in $deny) { $rules.Add(@($d.rx, $d.public)) }
+    $rules.Add(@('\ba test tenant\s*(?:/|\+|and|&)\s*a test tenant\b', 'two test tenants'))
+    foreach ($r in @(@('(?i)rg-automateit-', 'rg-pim-'), @('(?i)\bautomateit\b', 'the platform'),
         @("(?i)\b2linkit's\b", "the vendor's"), @('(?i)\b2linkit\b', 'the vendor'),
-        @('\bSetup-PimContainers(?:\.ps1)?', 'the deploy'), @('\bInitialize-PlatformEnvironment(?:\.ps1)?', 'the deploy'))
-    foreach ($w in @(Get-PimPublicScriptCustomerWords)) { $rules += , @(('(?i)\b' + [regex]::Escape($w) + '\b'), 'a customer') }
+        @('\bSetup-PimContainers(?:\.ps1)?', 'the deploy'), @('\bInitialize-PlatformEnvironment(?:\.ps1)?', 'the deploy'))) { $rules.Add($r) }
     $tokens = $null; $perr = $null
     [void][System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$perr)
     $sb = New-Object System.Text.StringBuilder $Text

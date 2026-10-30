@@ -1232,7 +1232,7 @@ if (-not "$SqlServerFqdn".Trim()) {
         $st = "$($all['MailSender'])".Trim()
         if ($st -ne $storeSender) { throw "read-back mismatch: store holds '$st', expected '$storeSender'" }
         $script:PimMailStoredAll = $all
-        # INSTALL-FIX-EVIDA (100.25 item 4): MailSender is the UPN (above); the PRIMARY SMTP address the customer chose ($sender)
+        # INSTALL-FIX (100.25 item 4): MailSender is the UPN (above); the PRIMARY SMTP address the customer chose ($sender)
         # is stored beside it, so PIM Manager and the end-of-install check show that address (with the UPN as detail).
         $addrRec = New-PimMailSenderAddressRecord -Sender $storeSender -Address $sender
         if ($addrRec) {

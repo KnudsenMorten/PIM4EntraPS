@@ -207,7 +207,7 @@ function Get-PimMailTestFingerprint {
 
 function Get-PimMailSenderShown {
     <#
-      PURE (INSTALL-FIX-EVIDA, REQUIREMENTS 100.25 item 4). What a person SEES as the mail sender. MailSender stays the mailbox's
+      PURE (INSTALL-FIX, REQUIREMENTS 100.25 item 4). What a person SEES as the mail sender. MailSender stays the mailbox's
       UPN -- the key Microsoft Graph sends by (BUG-296), often on the tenant's initial domain -- but the customer chose the PRIMARY
       SMTP address (name@their domain). -Record = pim.Settings 'MailSenderAddress' { sender; address } as the mail-sender setup
       (Initialize-PimMailSender, Get Started > Mail sender step 2) stored it; it counts only while its 'sender' is still -Sender.

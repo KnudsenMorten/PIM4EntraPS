@@ -402,7 +402,7 @@ if ($check.errors -gt 0) {
 # still refuse the whole import cleanly instead of after half of it has landed.
 # 🔴 BUG-201 still holds: a re-run must never delete what the Manager owns, nor silently revert its edits.
 # BUG-201's guard kept a whole ENTITY out once the store held rows for it; that also imported NOTHING into a
-# store holding sample rows (EFIF). Adding BY KEY keeps both promises: new keys are added, identical keys are
+# store holding sample rows (a test tenant). Adding BY KEY keeps both promises: new keys are added, identical keys are
 # left alone, a key with DIFFERENT content is a collision (reported; refused by default), nothing is deleted.
 # A read that fails is a failed entity, never "assume empty".
 # =====================================================================================================

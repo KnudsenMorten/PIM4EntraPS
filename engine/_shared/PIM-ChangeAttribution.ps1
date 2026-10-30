@@ -99,7 +99,7 @@ WHEN NOT MATCHED THEN INSERT (Entity, [Key], Op, InitiatedBy, ApprovedBy, Commit
         }
         return $n
     }
-    # 🔴 §97.1 (EFIF 2026-10-08): this was one CONNECTION + one MERGE per entry -- 168 of each for a 168-row commit, every one
+    # 🔴 §97.1 (a test tenant 2026-10-08): this was one CONNECTION + one MERGE per entry -- 168 of each for a 168-row commit, every one
     # its own transaction (a log flush each) on an S0 database. Now ONE statement per <= 500 entries (OPENJSON), the same
     # upsert per (Entity, Key), the latest entry of a key winning as before.
     $byKey = New-Object 'System.Collections.Specialized.OrderedDictionary' ([StringComparer]::OrdinalIgnoreCase)

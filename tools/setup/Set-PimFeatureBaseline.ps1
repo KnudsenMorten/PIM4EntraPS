@@ -13,7 +13,7 @@
 
       delta-admins   ok=True   feature 'scheduler.jobs' disabled -- skipped
 
-  ...every job, every 15 minutes, all day. Measured in EFIF, where the engine had never reconciled
+  ...every job, every 15 minutes, all day. Measured in a test tenant, where the engine had never reconciled
   once since the environment was built.
 
   🪤 THE REASON NOBODY NOTICED, and the reason this script exists rather than a runbook note:
@@ -84,7 +84,7 @@ Write-Host ("=" * 78) -ForegroundColor Cyan
 Write-Host " PIM FEATURE BASELINE  $SqlServerFqdn/$SqlDatabase" -ForegroundColor Cyan
 Write-Host ("=" * 78) -ForegroundColor Cyan
 
-# An EXPLICIT credential must beat ambient managed identity: mgmt1 has an MI of its own, and an MI
+# An EXPLICIT credential must beat ambient managed identity: the build host has an MI of its own, and an MI
 # can only mint tokens for ITS OWN tenant, so an ambient token authenticates successfully against
 # the WRONG directory (BUG-34) and Azure SQL then reports it as a permissions problem.
 $global:PIM_SqlServer   = $SqlServerFqdn

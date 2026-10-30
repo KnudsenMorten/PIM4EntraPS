@@ -59,7 +59,7 @@ function Get-PimLicenceRequestDecision {
         if ($next -and $NowUtc -lt $next) { return @{ action = 'none'; reason = "waiting for Invardia (next check $($next.ToString('u')))"; clearHint = $clear } }
         return @{ action = 'pull'; reason = 'a request is pending at Invardia'; clearHint = $clear }
     }
-    # 2026-10-16 (owner via Invardia: "i chose community edt to ig798" / "but get license req mail"): a COMMUNITY install
+    # 2026-10-16 (owner via Invardia: "i chose community edt to a test environment" / "but get license req mail"): a COMMUNITY install
     # never asks for a Pro licence. Only an install meant to be Pro knocks -- one that holds a licence file (any status), an
     # Invardia install key, or a superseded-licence hint (-ProIntended, from Invoke-PimLicenceRequestCycle). A request that
     # is already pending is still pulled above, so an enrollment / trial in flight completes.

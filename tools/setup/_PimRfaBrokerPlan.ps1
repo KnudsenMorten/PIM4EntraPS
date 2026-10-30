@@ -32,7 +32,7 @@ function Get-PimRfaBrokerDeployPlan {
         [string[]]$EngineIdentityPrincipalIds = @(),
         [string[]]$ApiAllowedIps = @(),
         [int]$MinReplicas = 0,
-        # Join a Container Apps environment that is ALREADY public (internal / EFIF / RIDE are, by design): no new
+        # Join a Container Apps environment that is ALREADY public (internal and both test tenants are, by design): no new
         # subnet, NSG, environment or load balancer (~125 kr./month saved). The broker then shares that environment's
         # subnet with the PIM apps -- acceptable where the environment is public anyway; customers get their own.
         [string]$ExistingEnvironmentName = ''

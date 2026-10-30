@@ -178,7 +178,7 @@ $shared = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'eng
 # answered TRUE (the caller had it) while every token attempt threw "You cannot call a
 # method on a null-valued expression" -- and New-PimSqlConnection then handed SQL no
 # credential at all. The visible symptom is Azure SQL's `Login failed for user ''`, which
-# reads like a permissions problem and is not one. Measured against HOGYM 2026-08-13.
+# reads like a permissions problem and is not one. Measured against a managed tenant 2026-08-13.
 . (Join-Path $shared 'PIM-Rest.ps1')
 . (Join-Path $shared 'PIM-SqlStore.ps1')
 . (Join-Path $shared 'PIM-ScenarioProfile.ps1')   # also dot-sources PIM-Downlink.ps1
@@ -364,7 +364,7 @@ if ("$SlaveSqlServer".Trim()) {
         # to "a group with this tag already exists -- the customer owns it", create dropped to 0,
         # the nestings and role bindings were withheld as writes-into-a-customer-group, and the
         # apply then offered to PRUNE the 7 rows it had just been told the managing tenant no longer
-        # publishes. Measured live against HOGYM on the second run, minutes after the first.
+        # publishes. Measured live against a managed tenant on the second run, minutes after the first.
         # An UNSTAMPED row still counts as the customer's -- absent provenance fails safe to Local,
         # exactly as the apply's prune scoping does.
         # 🔴 §100.6 MSP-COLLIDE gap A: EVERY definition entity -- the same list the definition apply writes
@@ -376,7 +376,7 @@ if ("$SlaveSqlServer".Trim()) {
             $dlArgs['SlaveGroupTags'] = $tags
             Write-Host "  slave store: $SlaveSqlServer/$SlaveSqlDatabase ($($tags.Count) group tag(s) available)" -ForegroundColor DarkGray
         } else {
-            # Loud: this is the state EFIF/RIDE are in today, and it means control #2
+            # Loud: this is the state both test tenants are in today, and it means control #2
             # can create desired rows that the engine can never resolve.
             Write-Host "  [warn] the managed tenant store has NO PIM-Definitions groups -- every projected role will be UNRESOLVED until its delegation model exists." -ForegroundColor Yellow
         }

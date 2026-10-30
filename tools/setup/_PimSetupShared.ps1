@@ -705,7 +705,7 @@ function Grant-PimMiGraph {
       This used to swallow every POST failure into Write-Warning. An identity that silently
       failed to get Directory.Read.All still produced a "successful" deploy, and the breakage
       only surfaced later as 403s inside the container -- where it reads like an engine bug,
-      not a grant that never happened. Measured on mfnpr's tick Job: zero app-role assignments,
+      not a grant that never happened. Measured on the internal environment's tick Job: zero app-role assignments,
       four green executions, no work done.
 
       'Already exists' remains the ONE tolerated outcome, because re-running the deploy is
@@ -828,7 +828,7 @@ function Resolve-PimMiAppId {
     <#
       BUG-44 -- a managed identity's service principal is EVENTUALLY consistent in the directory.
 
-      MEASURED on mfnpr 2026-08-09: `az containerapp job create` returned, the Job's
+      MEASURED on the internal environment 2026-08-09: `az containerapp job create` returned, the Job's
       system-assigned SP was stamped at 22:59:27, and `az ad sp show` seconds later returned
       NOTHING -- so the deploy threw "could not resolve an appId" and stopped before the SQL and
       Graph grants. The identical lookup on the identical objectId succeeds now. The manager app
@@ -1222,7 +1222,7 @@ function Set-PimPrivateDnsZone {
     }
 
     # 🔴 MATCH ON THE VNET, NOT ON THE LINK NAME. MEASURED against the live production zone
-    # 2026-08-10: the existing link is named `cae-pim-mfnpr-dnslink`, this looked for
+    # 2026-08-10: the existing link is named `cae-pim-<env>-dnslink`, this looked for
     # `link-vnet-platform`, concluded "missing", tried to create it, and Azure refused with
     # `Conflict: Private zone ... is already linked to the virtual network ...` -- failing the
     # whole deploy over a desired state that was ALREADY SATISFIED. Any environment whose link

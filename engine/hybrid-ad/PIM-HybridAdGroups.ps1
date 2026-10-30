@@ -2427,7 +2427,7 @@ function Invoke-PimHybridAdServersJob {
           [scriptblock]$SaveCache, [string]$Netbios = '', [object]$AdModulePresent = $null, [scriptblock]$SecretReader)
     # 2.4.463: a tenant with NO defined AD-marked group has nothing for server onboarding to do -- answer that, like
     # hybrid-ad-groups / -sync do, instead of "hybrid worker required" (which is 'not implemented' = a red job every hour for
-    # every cloud-only customer; seen on ig798, EFIF and RIDE after 2.4.461). With a worker present the listing still runs.
+    # every cloud-only customer; seen on a test environment, both test tenants after 2.4.461). With a worker present the listing still runs.
     if (-not $Adapter -or -not $GroupAdapter) {
         $pre = Get-PimHybridAdMirroredDefinitions -Rows $Rows
         if ($pre.ok -and -not @($pre.rows).Count) {

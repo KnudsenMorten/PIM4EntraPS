@@ -185,7 +185,7 @@ Step "Downlink cron Job: $JobName  ($($placement.scenarioId) $($placement.placem
 Note $placement.reason
 
 # --- §71.10: WHICH IDENTITY THE ENGINE RUNS AS -------------------------------------------------------
-# 🔴 FOUND LIVE ON RIDE 2026-09-15. Without an engine SPN secret this job used to run as the user-assigned
+# 🔴 FOUND LIVE ON a test tenant 2026-09-15. Without an engine SPN secret this job used to run as the user-assigned
 # MI it names in PIM_ManagedIdentityClientId -- an identity that holds NO Graph app-roles (it exists to
 # pull the first image). The pull therefore could not read the managed tenant's own default domain, so no admin was
 # staged, and the engine apply had no directory rights: the only way to a working job was a client SECRET,
@@ -356,7 +356,7 @@ if ($Scenario -eq 'S6' -and -not $WhatIfPreference) {
 # it is REMOVED.
 if (-not "$IdentityResourceId".Trim() -and -not $WhatIfPreference) {
     $uamis = @(Get-PimArmIdentities -SubscriptionId $script:sub -ResourceGroup $ResourceGroup | ForEach-Object { [pscustomobject]@{ id = "$($_.id)"; name = "$($_.name)" } })
-    # 2026-10-11 (HOGYM, live): the as-built job's own identity (id-pim-asbuilt, §100.61) and the SQL identity are never the
+    # 2026-10-11 (a managed-tenant install, live): the as-built job's own identity (id-pim-asbuilt, §100.61) and the SQL identity are never the
     # runtime identity -- picking among them refused "2 user-assigned identities" on every managed install with the as-built job.
     # CR5 (framework §12.11c item 3): a per-role identity id-pim-<role> (web / engine / updater / mcp) is never the pull identity either
     $pick = @($uamis | Where-Object { "$($_.name)" -like 'id-pim*' -and "$($_.name)" -notmatch '^id-pim-(asbuilt|sql-|web$|engine$|updater$|mcp$)' })
@@ -490,7 +490,7 @@ function New-PimDownlinkJobResource {
 # the run dies as
 #     Preflight FAILED: cannot reach the desired store (.\SQLEXPRESS/PimPlatform): no SELECT 1
 # which points at SQL Express -- a thing that cannot exist in this container -- instead of at the
-# parameter nobody passed. MEASURED 2026-09-03 onboarding RIDE: the downlink itself succeeded
+# parameter nobody passed. MEASURED 2026-09-03 onboarding a test tenant: the downlink itself succeeded
 # (plan, stage and uplink acceptance all OK) and only the engine apply failed, so the run looked
 # like a store problem rather than a deploy-argument problem.
 # 🪤 It also silently skipped the contained-user grant below, which is guarded on the same value:
@@ -618,7 +618,7 @@ if (-not $WhatIfPreference) {
     Note "provisioningState verified: $prov"
 }
 
-# --- NO LEFTOVER SECRETS (lead 2026-09-18, measured on RIDE: "legacy leftovers are not allowed") -----------------------
+# --- NO LEFTOVER SECRETS (lead 2026-09-18, measured on a test tenant: "legacy leftovers are not allowed") -----------------------
 # An update leaves every secret the definition does not list IN PLACE. So after a redeploy with the PLAIN -BaselineUrl,
 # the retired SAS transport's 'pim-baseline-url' (a SAS link -- a standing credential to the managing tenant's bundle store)
 # stayed on the job, referenced by nothing. Every secret the deployed definition does not reference is removed here, and

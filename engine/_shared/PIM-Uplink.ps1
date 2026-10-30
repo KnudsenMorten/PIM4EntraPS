@@ -39,7 +39,7 @@
   🔒 Gated by the feature 'telemetry.uplink', which is ON by default (defaultEnabled=$true in PIM-FeatureCatalog.ps1;
      owner decision 2026-10-04, framework UPDATE-1.4) and depends on 'scheduler.jobs'. Switching it off sends ONE opt-out.
   🔒 A failed send never fails anything else: the job keeps its watermark (the runs are sent on the next cycle) and the
-     next heartbeat is not skipped. PIM 100.75 (HOGYM 2026-10-11: a managed install sent NOTHING and the Jobs page was
+     next heartbeat is not skipped. PIM 100.75 (a managed-tenant install 2026-10-11: a managed install sent NOTHING and the Jobs page was
      green): a send that failed, or an install that should be identified but sends anonymously (no / a malformed install
      key on a licensed install), is a WARNING run (amber on the Jobs page, one alert mail a day at most) -- never a failed
      run (framework 12.18 / 12.21: a telemetry problem is not an engine failure). Get-PimUplinkDeliveryWarning decides.
@@ -3174,7 +3174,7 @@ function Invoke-PimUplinkCycle {
 
 function Get-PimUplinkDeliveryWarning {
     <#
-      PURE. PIM 100.75 (HOGYM managed install 2026-10-11: NO telemetry arrived at Invardia and nobody could see why -- the
+      PURE. PIM 100.75 (a managed-tenant install 2026-10-11: NO telemetry arrived at Invardia and nobody could see why -- the
       uplink job never threw, so every run was recorded green). Is this uplink run a WARNING, and what does it say?
         -Enabled         the feature 'telemetry.uplink'                 (off -> never a warning; the opt-out is its own report)
         -Cycle           Invoke-PimUplinkCycle's result                 (mode, failed, reasons)

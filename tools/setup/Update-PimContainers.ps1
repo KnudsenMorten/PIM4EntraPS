@@ -112,7 +112,7 @@ param(
 
     # 🔴 EVERY az CALL IN THIS SCRIPT USED TO RUN AGAINST THE AMBIENT DEFAULT CONTEXT, and this is
     # the script that WRITES. On a machine logged into more than one directory the default is a
-    # coin flip -- on mgmt1 it is frequently a DIFFERENT COMPANY'S subscription (CLAUDE.md: "often
+    # coin flip -- on the build host it is frequently a DIFFERENT COMPANY'S subscription (CLAUDE.md: "often
     # the DEFAULT context"), which is how `az containerapp update` could be aimed at somebody
     # else's tenant by an operator who passed exactly the right -ResourceGroup and -AcrName.
     # Same family as SEC-12 and the TEST-09 drift gate: an ambient identity standing in for an
@@ -784,8 +784,8 @@ if (-not $SkipBuild) {
         # + 2.4.228, 2026-06-18). Build-PimManagerImage builds from a clean `git archive`
         # subtree and throws on failure.
         # 🔴 -SubscriptionId FORWARDED. The builder has DECLARED it all along and this caller never
-        # passed it, so `az acr build` ran against the ambient default context -- which on mgmt1 is
-        # another company's subscription, and the build died with "the resource 'acrpimmfnpr' could
+        # passed it, so `az acr build` ran against the ambient default context -- which on the build host is
+        # another company's subscription, and the build died with "the resource 'acrpimcontoso' could
         # not be found in subscription '<another company's subscription>'". Declared-but-not-forwarded: the exact
         # shape of BUG-29 / SEC-10b / BUG-78 / BUG-79, and the reason scoping this script's OWN az
         # calls was not enough -- the one call it delegates was still unscoped.

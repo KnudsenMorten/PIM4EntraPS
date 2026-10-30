@@ -110,7 +110,7 @@ param(
     # The engine authenticates to Graph as ITS OWN SPN -- never as the container's managed
     # identity. Passing nothing here is what caused the hosted 403s: with no PIM_ClientId the
     # engine took Get-PimRestToken's "MI is plan A" branch and ran as the container identity,
-    # which exists for SQL and holds ZERO Graph app-roles. Measured in EFIF: engine SPN 100
+    # which exists for SQL and holds ZERO Graph app-roles. Measured in a test tenant: engine SPN 100
     # app-roles, pim-tick and pim-manager 0, every hosted Graph call 403
     # Authorization_RequestDenied. MI remains the identity for SQL only.
     # CREDENTIAL ORDER (operator, 2026-08-12): CERTIFICATE preferred, client secret as fallback.
@@ -135,7 +135,7 @@ param(
     # a workspace, and if it is not given one it silently GENERATES its own
     # (`workspace-<rg-ish><random>`) -- so the environment ends up with two: the intended one,
     # empty and paid for, and an auto-created one holding every log. Measured twice on
-    # test1intr2ig798, and it is why the first log queries of a fresh deploy come back empty:
+    # a test environment, and it is why the first log queries of a fresh deploy come back empty:
     # they run against the workspace we created, not the one ACA is writing to.
     # Blank = do not pass one, which means ACA generates it -- WARNED about loudly below rather
     # than left to be discovered later.
@@ -333,7 +333,7 @@ function Note($m){ Write-Host "    $m" -ForegroundColor DarkGray }
 # to say "a container has no cert store, pass -EngineClientSecret instead", so passing the
 # cert-only credential the machine rules mandate killed the deploy with
 # "The term 'Warn' is not recognized" -- the message that would have told you what to do IS the
-# thing that crashed. Measured 2026-09-03 on the EFIF master: steps 1-5 green, step 6 FAILED(1).
+# thing that crashed. Measured 2026-09-03 on the managing test tenant: steps 1-5 green, step 6 FAILED(1).
 function Warn($m){ Write-Host "    $m" -ForegroundColor Yellow }
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\PIM4EntraPS
@@ -610,7 +610,7 @@ if (-not $WhatIfPreference -and "$LogAnalyticsWorkspaceName".Trim()) {
         # dangerously so: deleting an ACA environment takes the Manager app and the tick Job with
         # it, and the advice was aimed at a PRODUCTION environment. It was never tested; it was
         # inferred from the create-time behaviour (a create with no workspace generates one).
-        # MEASURED 2026-08-10 on mfnpr: `az containerapp env update --logs-destination log-analytics
+        # MEASURED 2026-08-10 on the internal environment: `az containerapp env update --logs-destination log-analytics
         # --logs-workspace-id/--logs-workspace-key` moves an EXISTING environment's workspace in
         # place, 8565d575… -> 9b0ed93b…, with no recreate and no downtime.
         # So this now REPAIRS the environment instead of telling the operator to destroy it.
@@ -761,8 +761,8 @@ if ($UseInCloudDbInit) {
 
 $acrId = "$((Get-PimArmAcr -SubscriptionId $SubscriptionId -Name $AcrName -ErrorAsNull).id)"
 # 🪤 A RESOURCE ID THAT ARRIVES LOOKING LIKE A LOCAL PATH WAS MANGLED BY THE CALLER'S SHELL.
-# Measured rebuilding mfnpr 2026-09-10: the value reached here as
-#     C:/Program Files/Git/subscriptions/<sub>/resourceGroups/.../id-pim-mfnpr
+# Measured rebuilding the internal environment 2026-09-10: the value reached here as
+#     C:/Program Files/Git/subscriptions/<sub>/resourceGroups/.../id-pim-<env>
 # because MSYS (Git Bash) rewrites any argument that looks like an absolute Unix path into a
 # Windows one -- and an Azure resource id looks exactly like one. az then answered
 #     --registry-identity must be an identity resource ID or 'system' or 'system-environment'
@@ -1084,7 +1084,7 @@ if ("$EngineClientId".Trim()) {
     # there is NO client id. So a cert-only container gets neither SPN auth (no cert store) nor MI
     # (suppressed by the client id) -- it authenticates as nothing at all, and still deploys green.
     # THIS SCRIPT ONLY EVER DEPLOYS CONTAINERS, so the secret is not a fallback here: it is the
-    # only credential that can work. The cert stays correct for mgmt1/VM runs (Setup-PimVM).
+    # only credential that can work. The cert stays correct for build-host/VM runs (Setup-PimVM).
     if ("$EngineClientSecret".Trim()) {
         $commonEnv += "PIM_ClientId=$("$EngineClientId".Trim())"
         $useEngineSecret = $true
@@ -1473,9 +1473,9 @@ if ($WorkerMode -eq 'cron') {
     if ($PSCmdlet.ShouldProcess($TickJobName, "$jobAction scheduled job")) {
         # 🔴 THE DEFINITION IS BUILT IN MEMORY, PER RUN -- NEVER A SHARED FILE. In the YAML era the document went through
         # "pim-$TickJobName.yaml", the SAME file for every tenant ($TickJobName is 'ca-pim-tick' everywhere), while
-        # Invoke-PlatformEstateDeployment runs 6 environments CONCURRENTLY by default. MEASURED 2026-09-03: EFIF (wa678) and
-        # RIDE (rj466) deployed in parallel; EFIF's file won the write, RIDE then created its job FROM IT and Azure refused
-        # with "The environment 'cae-pim' in resource group 'rg-automateit-wa678' was not found". In ONE subscription it
+        # Invoke-PlatformEstateDeployment runs 6 environments CONCURRENTLY by default. MEASURED 2026-09-03: the managing test tenant and
+        # the managed test tenant deployed in parallel; the managing one's file won the write, the managed one then created its job FROM IT and Azure refused
+        # with "The environment 'cae-pim' in resource group 'rg-pim-contoso' was not found". In ONE subscription it
         # would have SUCCEEDED and written one tenant's job definition into the other's resource group.
         # 🪤 THE SERVICE'S OWN ERROR IS KEPT. A bare "failed (exit 1)" is not a diagnosis, and this runs unattended.
         try {

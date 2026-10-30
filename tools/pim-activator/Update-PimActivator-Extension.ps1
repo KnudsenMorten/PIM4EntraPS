@@ -123,7 +123,7 @@ param(
     # so the two channels are fully independent: point your internal-env Intune/GPO
     # ExtensionInstallForcelist at <test-id>;.../updates-test.xml, leave the fleet on
     # the released id;.../updates.xml, and you can run BOTH at once. The test signing
-    # key is generated on first use at ~\.pim-activator\signing-key-test.pem (mgmt1).
+    # key is generated on first use at ~\.pim-activator\signing-key-test.pem (the build host).
     [ValidateSet('Released','Test')]
     [string]$Channel = 'Released',
     [string]$Version,                # set exact manifest version (e.g. 1.0.0) instead of patch bump
@@ -242,7 +242,7 @@ function Get-TestPackId {
         throw "The TEST channel needs .NET Core (PowerShell 7). Re-run with pwsh: ``pwsh -File Update-PimActivator-Extension.ps1 -Channel Test -PackOnly``."
     }
     if (-not (Test-Path $KeyPath)) {
-        Write-Step "Generating TEST signing key (one-time, mgmt1-only): $KeyPath"
+        Write-Step "Generating TEST signing key (one-time, build-host-only): $KeyPath"
         $dir = Split-Path -Parent $KeyPath
         if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         $rsaNew = [System.Security.Cryptography.RSA]::Create(2048)
@@ -251,7 +251,7 @@ function Get-TestPackId {
         $pem = "-----BEGIN PRIVATE KEY-----`n$b64`n-----END PRIVATE KEY-----`n"
         Set-Content -LiteralPath $KeyPath -Value $pem -Encoding ascii -NoNewline
         if (-not (Test-Path $KeyPath)) { throw "Failed to create TEST signing key at $KeyPath." }
-        Write-Ok "TEST signing key created. This is the ONLY key that produces the test extension id; keep it on mgmt1."
+        Write-Ok "TEST signing key created. This is the ONLY key that produces the test extension id; keep it on the build host."
     }
     $rsa = [System.Security.Cryptography.RSA]::Create()
     $rsa.ImportFromPem([System.IO.File]::ReadAllText($KeyPath))

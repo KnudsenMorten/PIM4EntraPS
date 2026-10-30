@@ -403,7 +403,7 @@ foreach ($pn in 'TenantId', 'SubscriptionId', 'Location', 'ResourceGroup', 'Supe
     $pv = @(@($pimCli[$pn]) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     if ($pv.Count) { $cliResume += " -$pn " + (@($pv | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ',') }
 }
-# 2026-10-11 (HOGYM): the printed resume command must work in a FRESH window. Under Invardia's bootstrap the customer resumes
+# 2026-10-11 (a managed-tenant install): the printed resume command must work in a FRESH window. Under Invardia's bootstrap the customer resumes
 # through it (it re-downloads the release and re-signs in); otherwise the installer is called by its full path, so a new
 # PowerShell window does not need the function defined.
 # REQ 98.4 (a): it is COMPLETE -- full paths for the answers and the state folder, and the licence file whenever this
@@ -714,7 +714,7 @@ if ($enrolling -and -not $managedInstall) {
 # licence + install key -> link to the managing tenant from the claim's managing block -> pull subnet reported -> pull job.
 # Nothing is re-implemented here; every step of that build reaches -Reporter with its own id and title.
 $mspCode = $null
-# 2026-10-11 (HOGYM): this run IS the install (or its resume) -- the ring gate lets the install deploy the release it fetched
+# 2026-10-11 (a managed-tenant install): this run IS the install (or its resume) -- the ring gate lets the install deploy the release it fetched
 # even when a previous attempt already created the Invardia updater. Step processes inherit it; Finish removes it.
 if (-not $WhatIfPreference -and -not $PreflightOnly) { $env:PIM_GUIDED_INSTALL_RUN = '1' }
 if ($managedInstall) {

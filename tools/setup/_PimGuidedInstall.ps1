@@ -22,7 +22,7 @@ $script:PimInstallGuid = '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
 
 # The stable step ids (the status page and support tickets refer to them) and their titles in customer language.
 # Order = run order. DeployAll's 'appreg' step is never shown: a guided install runs on managed identities only.
-# 🔴 INSTALL-FIX-EVIDA (REQUIREMENTS 100.25 item 3, 2026-10-09): the functions below read the catalog through
+# 🔴 INSTALL-FIX (REQUIREMENTS 100.25 item 3, 2026-10-09): the functions below read the catalog through
 # Get-PimInstallStepCatalog, NEVER as $script:PimInstallSteps. Install-PimManager hands its -OnStep scriptblock to
 # Invoke-PimDeployAll.ps1 -- a CHILD script, where $script: is the deploy's own script scope and this catalog does not
 # exist: ConvertTo-PimInstallStepEvent threw on $null.Contains(), the deploy's Send-PimDeployStepEvent swallowed it
@@ -465,7 +465,7 @@ function Test-PimInstallScopeAtOrAbove {
     <#
       PURE. Does a role assignment at -AssignmentScope apply AT -Scope (equal or above it)? A management group ('/providers/
       Microsoft.Management/managementGroups/<id>') or the root ('/') is above every subscription -- ARM's assignedTo() list at
-      a subscription only returns the ones in its own hierarchy. 2026-10-11 (invardiademo): the old test was a string prefix
+      a subscription only returns the ones in its own hierarchy. 2026-10-11 (a demo environment): the old test was a string prefix
       ("/subscriptions/x".StartsWith(<mg scope>)), so Contributor inherited from the tenant root management group was DROPPED
       and the installer said "you need Owner" to an app that had Contributor + User Access Administrator. Below (a resource
       group of -Scope) does not count; '/subscriptions/ab' is not above '/subscriptions/abc'.

@@ -895,7 +895,7 @@ function Get-PimManagerLocalIdentity {
       🔴 BUG-186 -- WHO a LOCAL (loopback) Manager acts as. The break-glass console (Start-PimEmergency.ps1)
       signs the operator in INTERACTIVELY and connects to SQL with that token; ManagerAccess, PIM_SuperAdmins
       and the audit trail are all keyed on the Entra UPN. Resolving the WINDOWS account name here
-      ('MGMT1\mok') matched none of them, so the operator landed as a Reader in the one console meant for
+      ('BUILDHOST\operator') matched none of them, so the operator landed as a Reader in the one console meant for
       emergencies. When the process runs with an interactive SQL sign-in, the identity is the UPN in THAT
       token (the SQL connection authenticates as exactly this principal); otherwise the Windows account.
       The token is decoded, not trusted from a free-form setting, so nothing but the sign-in decides it.
@@ -918,7 +918,7 @@ function Get-PimManagerLocalIdentity {
 function Get-PimManagerRecordedActor {
     <#
       🔴 BUG-262 -- the name a RECORD carries (audit, approvals, queue, commit history). Equal to the identity, except on a
-      LOCAL (loopback) Manager started with $env:PIM_LOCAL_ACTOR_TAG: then "<tag> (as <identity>)". Measured on ig798
+      LOCAL (loopback) Manager started with $env:PIM_LOCAL_ACTOR_TAG: then "<tag> (as <identity>)". Measured on a test environment
       2026-09-26: the live E2E's own Approve click was audited as the operator's Windows account, and the operator saw an
       approval they never made. ONLY the record changes -- roles, ownership and reviewer checks keep the plain identity.
       A HOSTED Manager ignores the tag: it cannot relabel a real signed-in person.
@@ -1517,7 +1517,7 @@ function Get-PimManagerAuditEvents {
       work unchanged. Moving the store is not a licence to rewrite the query layer.
     #>
     # -NoChange (BUG-264, 2.4.454): skip the before/after change summary -- the Audit tab needs it only for the page it shows
-    # (or for every event when it SEARCHES, since the search reads it). Measured on ig798: 1,669 events in the 3-month
+    # (or for every event when it SEARCHES, since the search reads it). Measured on a test environment: 1,669 events in the 3-month
     # window, the summaries alone 2.5 s on pwsh 7 and several times that on the 5.1 Manager -- all on the ONE request loop.
     # -Actions (BUG-264, 2.4.457): exact action names, filtered IN SQL. -NoPayload: before/after are not read at all (implies
     # -NoChange); the caller fills them for the events it returns with Read-PimManagerAuditPayloads.
@@ -3268,7 +3268,7 @@ function Get-PimManagerDiffTouchedRows {
     return $out.ToArray()
 }
 function Test-PimManagerUplinkRowGate {
-    # PURE. §91.23 (operator 2026-10-04, RIDE: "any uplink replicated admins assignments should be shown special, as they are
+    # PURE. §91.23 (operator 2026-10-04, a test tenant: "any uplink replicated admins assignments should be shown special, as they are
     # read-only and of course cannot be modified downlink ... but of course we cannot modify something from uplink").
     # A row the MSP downlink put here carries Owner='MSP'; the managing tenant decides it, and the next pull puts it back.
     # So a managed tenant's commit may not CHANGE or REMOVE such a row, and a new row may not CLAIM that owner (a clone
@@ -4996,7 +4996,7 @@ function Get-PimAlertingConfig {
     # Alerting is "enabled" only when there is at least one DELIVERY channel: a
     # configured sender mailbox (with a recipient) OR a valid outbound webhook --
     # otherwise it is a render-only "configure to enable" state.
-    # 🔴 BUG-237 (2026-09-21, EFIF): the SENDER is hydrated from the store lazily -- Send-PimNotifyMail calls
+    # 🔴 BUG-237 (2026-09-21, a test tenant): the SENDER is hydrated from the store lazily -- Send-PimNotifyMail calls
     # Initialize-PimEmailControlsFromStore before it reads $global:PIM_MailSender, this status did not. So the page
     # said "No sender mailbox is configured" while "Send test alert" delivered to 3 recipients (the send hydrated
     # it). Read it the SAME way the send path does, so the status and the delivery can never disagree.
@@ -6087,7 +6087,7 @@ function Get-PimManagerMailState {
     try { $relayRaw = Get-PimManagerSetting -Name 'SmtpRelay' } catch { }
     try { $last = Get-PimManagerSetting -Name 'MailLastTest' } catch { }
     $relay = ConvertTo-PimSmtpRelayConfig -Value $relayRaw
-    # INSTALL-FIX-EVIDA (100.25 item 4): MailSender stays the UPN (BUG-296); the page names the PRIMARY SMTP address the customer
+    # INSTALL-FIX (100.25 item 4): MailSender stays the UPN (BUG-296); the page names the PRIMARY SMTP address the customer
     # chose (pim.Settings 'MailSenderAddress', stored by the mail-sender setup) with the UPN as the detail.
     $addrRec = $null; try { $addrRec = Get-PimManagerSetting -Name 'MailSenderAddress' } catch { }
     $checks = if ($NoChecks) { $null } else { Get-PimManagerMailChecks -Refresh:$RefreshChecks }
@@ -7081,7 +7081,7 @@ function Invoke-PimManagerCommitHistoryGet {
 }
 
 # ---------------------------------------------------------------------------
-# §97.1 COMMIT OUTCOMES (EFIF 2026-10-08). A commit PUT carries the page's own id (clientCommitId, 8-64 of
+# §97.1 COMMIT OUTCOMES (a test tenant 2026-10-08). A commit PUT carries the page's own id (clientCommitId, 8-64 of
 # [A-Za-z0-9_-]). Its answer is remembered here (newest $script:PimCommitOutcomeKeep, per process) and its journal rows
 # carry the same id, so after a browser timeout GET /api/commit-status/<id> says what REALLY happened -- saved, refused
 # (with the refusal), or unknown -- and a retry of the same id is answered, never applied a second time.
@@ -7228,7 +7228,7 @@ function Invoke-PimManagerCsvPut {
     param([Parameter(Mandatory)][string]$base, [Parameter(Mandatory)]$spec, [Parameter(Mandatory)]$resp, [AllowNull()]$PutBody,
           # §97.1: internal -- the outer call already recorded this commit's outcome under its clientCommitId (below).
           [switch]$OutcomeRecorded)
-    # 🔴 §97.1 (EFIF 2026-10-08: "Commit FAILED ... Not saved" for a commit the server DID save, 132 s): the page sends its
+    # 🔴 §97.1 (a test tenant 2026-10-08: "Commit FAILED ... Not saved" for a commit the server DID save, 132 s): the page sends its
     # own commit id (clientCommitId). The answer to that commit is remembered, so the page can ask after a timeout what
     # REALLY happened (GET /api/commit-status/<id>) instead of reporting "not saved" by assumption, and a retry of the
     # same commit is answered from the record instead of being applied twice.
@@ -7277,7 +7277,7 @@ function Invoke-PimManagerCsvPut {
         return 403
     }
     $body = $PutBody
-    # 🔴 §77.24 (EFIF 2026-09-21: "409: This commit would EMPTY the entity (was 67 row(s), would be 0)"): a body
+    # 🔴 §77.24 (a test tenant 2026-09-21: "409: This commit would EMPTY the entity (was 67 row(s), would be 0)"): a body
     # WITHOUT a rows array (absent / null -- a second, overlapping commit sent pendingFinalRows() = null) was read
     # as "replace the entity with nothing" and answered with the mass-disable warning. It is a malformed request:
     # refuse it as one. An explicit `rows: []` is still an empty set, and still meets the empty-set guard below.
@@ -8902,7 +8902,7 @@ function Build-PimGraphData {
             source   = 'Account-Definitions-Admins'
         })
     }
-    # §91.4 (operator 2026-10-02, RIDE: "the central admins dont show up ... in access map. Remember that it must combine
+    # §91.4 (operator 2026-10-02, a test tenant: "the central admins dont show up ... in access map. Remember that it must combine
     # central synced admins with slave/local accounts"). On a managed tenant the downlink keeps the managing tenant's admins
     # in their OWN entity (Account-Definitions-Admins-Central); the engine merges them (Get-PimDesiredRows), the map did not.
     # A local row with the same UPN wins, as in the engine.
@@ -9767,7 +9767,7 @@ function Get-PimManagerAttention {
 function Get-PimHomeGraphData {
     <#
       BUG-264 (remainder): the Home overview's delegation tiles rebuilt the whole map model (Build-PimGraphData, ~0.7 s on
-      ig798) on EVERY Home load, on the Manager's single request loop. Served from a cache when the store has not changed
+      a test environment) on EVERY Home load, on the Manager's single request loop. Served from a cache when the store has not changed
       (the preflight stamp: row count + newest UpdatedUtc) for the SAME caller view (role + identity -- a Delegated reader
       sees a scoped model), and never older than -MaxAgeSeconds, because the model also reads non-row inputs. A stamp read
       that fails is unique, so nothing is served from the cache then (fail open). Only the Home tiles use this; the Map and
@@ -9918,7 +9918,7 @@ function Get-PimHomeOverview {
     $hT['tiers'] = $hsw.ElapsedMilliseconds; $hsw.Reset(); $hsw.Start()
 
     # ---- 1b. 🔴 IMP-33 -- privileged accounts in the directory with NO desired-state row --------
-    # Measured on EFIF 2026-09-18: six real admin accounts were unmanaged (no TAP healing, reminders or review)
+    # Measured on a test tenant 2026-09-18: six real admin accounts were unmanaged (no TAP healing, reminders or review)
     # and nothing in the Manager said so. The ENGINE classifies them on every Admins pass and stores the result
     # (pim.Settings 'UnmanagedAdmins'); this tile only reads it -- no Graph call on the overview (§67).
     try {
@@ -10026,7 +10026,7 @@ function Get-PimHomeOverview {
     # ---- 3. Validation errors/warnings (preflight) ---------------------------
     try {
         if (Get-Command Invoke-PimPreflightValidation -ErrorAction SilentlyContinue) {
-            # BUG-264: the SAME cache as GET /api/preflight -- the validator ran on every Home load (~1.4 s on ig798) whenever
+            # BUG-264: the SAME cache as GET /api/preflight -- the validator ran on every Home load (~1.4 s on a test environment) whenever
             # the Validate page had not been opened since start; a cached report of unchanged rows is served, and a fresh run fills it.
             $pfStamp = $homeStamp
             if ($script:PimPreflightCacheReport -and $script:PimPreflightCacheStamp -eq $pfStamp) { $report = $script:PimPreflightCacheReport }
@@ -12039,7 +12039,7 @@ function Get-PimManagerPermissionHealthBody {
             if ($lastReal) { $mailProof = ([int]$lastReal.sent -gt 0) }
         } catch { $mailProof = $null }
     }
-    # Operator 2026-10-04 (RIDE): Azure rights are needed only when Azure resource delegations are DEFINED. -1 = the
+    # Operator 2026-10-04 (a test tenant): Azure rights are needed only when Azure resource delegations are DEFINED. -1 = the
     # store could not be counted -> the strict rule stays (a gap is never hidden by a failed read).
     $azDefs = -1
     if ($script:PimSqlCs -and (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue)) {
@@ -13549,7 +13549,7 @@ function Handle-Request {
                     # changed since is refused with 409 instead of silently replacing the other admin's rows.
                     rowsHash = (Get-PimRowsHash -Rows $storedRows)
                 }
-                # §91.4 (operator 2026-10-02, RIDE): on a managed tenant the managing tenant's admins live in their own entity.
+                # §91.4 (operator 2026-10-02, a test tenant): on a managed tenant the managing tenant's admins live in their own entity.
                 # The grid lists them READ-ONLY beside the local rows -- never part of the editable set (a commit is a
                 # full-set replace of the LOCAL entity; central rows are governed by the managing tenant).
                 if ($base -eq 'Account-Definitions-Admins') {
@@ -13754,7 +13754,7 @@ function Handle-Request {
             return 200
         }
 
-        # Operator 2026-10-04: the ENVIRONMENT's own name ("EFIF (test)"), shown in the header left of Mode and in the browser
+        # Operator 2026-10-04: the ENVIRONMENT's own name ("Contoso (test)"), shown in the header left of Mode and in the browser
         # tab, so several open Managers are told apart. pim.Settings 'EnvironmentName' (a plain string). Read: every signed-in
         # role (it is on every page). Change: SuperAdmin, audited. Never copied to another environment (it names THIS one).
         # §98 DEMO MODE: GET (every signed-in role; a demo viewer is told only that it is on) / PUT { on; group } (SuperAdmin,
@@ -14866,7 +14866,7 @@ function Handle-Request {
             }
 
             # BUG-264 (2.4.457): ?action=a,b = exact action names, filtered in SQL (the commit page's "latest config saves" was a
-            # free-text SEARCH over every event's change summary, 7 s on ig798); without it the whole window is read.
+            # free-text SEARCH over every event's change summary, 7 s on a test environment); without it the whole window is read.
             $actions = @(if ($q.ContainsKey('action')) { "$($q['action'])" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
             # BUG-264: the change summary only where it is read -- every event when searching (the search reads it), else the page;
             # and when not searching, before/after themselves are read only for the page (-NoPayload + Read-PimManagerAuditPayloads).
@@ -18410,7 +18410,7 @@ function Handle-Request {
         if ($path -eq '/api/permissions-health' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             # 🔴 BUG-264 (live GUI E2E 2026-09-27): this check makes several Graph reads, an ARM read per subscription (up to
-            # 10) and SQL reads -- 1.8-3.7 s measured on ig798, longer cold -- on the Manager's ONE request loop, on EVERY
+            # 10) and SQL reads -- 1.8-3.7 s measured on a test environment, longer cold -- on the Manager's ONE request loop, on EVERY
             # Home load. Every request behind it waited (a wizard's data loads timed out the E2E). The answer is kept for
             # 5 minutes; ?refresh=1 (the "Verify permissions" button) checks again at once.
             $permRefresh = $false; try { $permRefresh = ("$($req.Url.Query)" -match '(?:^|[?&])refresh=1') } catch { }
@@ -19484,7 +19484,7 @@ function Handle-Request {
                 $upn = "$($r.UserPrincipalName)".Trim()
                 # 🔴 An admin row WITHOUT a UPN is not a valid admin (operator 2026-09-21: "we can not have a admin
                 # without a upn. that makes no sense, then it is not compatible"). It used to be skipped here without
-                # a word -- EFIF held six such rows and the screen showed 5 of 5. It is shown, flagged, with every
+                # a word -- a test tenant held six such rows and the screen showed 5 of 5. It is shown, flagged, with every
                 # verb off, so it can be seen and fixed; the importer and the validator no longer let one in.
                 $__un = "$($r.UserName)".Trim()
                 if (-not $upn -and -not $__un) { continue }
@@ -20015,7 +20015,7 @@ function Handle-Request {
             }
             # 🔴 §36.3 phase 3 -- write where the ENGINE can read it. This used to write a file
             # into the Manager's own config dir; on a hosted deployment the engine runs elsewhere
-            # (VisualCron on mgmt1, ca-pim-tick) and would never see it -- so break-glass silently
+            # (VisualCron on the build host, ca-pim-tick) and would never see it -- so break-glass silently
             # did nothing at the one moment somebody was relying on it.
             $ovWhere = ''
             try { $ovWhere = Set-PimManagerEmergencyOverride -Override $ov }

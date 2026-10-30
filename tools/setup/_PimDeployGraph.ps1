@@ -68,7 +68,7 @@ function Get-PimDeployIdentityGraphRoles {
     # Ids read from the live Microsoft Graph service principal 2026-09-15.
     # 🔴 BUG-169 (2026-09-18): + DelegatedPermissionGrant.ReadWrite.All. Set-PimManagerEasyAuth consents the Manager's
     # sign-in scopes as a tenant-wide oauth2PermissionGrant, and that POST needs exactly this role. Without it the consent
-    # failed in EFIF and RIDE, the script WARNED and exited 0, and no human could open either Manager ("Need admin
+    # failed in both test tenants, the script WARNED and exited 0, and no human could open either Manager ("Need admin
     # approval") while the build reported success. Id read from the live Graph service principal 2026-09-18.
     [ordered]@{
         'Directory.Read.All'                     = '7ab1d382-f21e-4acd-a863-ba3e13f7da61'

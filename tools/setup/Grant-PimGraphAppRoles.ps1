@@ -31,7 +31,7 @@ param(
     [Parameter(Mandatory)][string]$AdminCertThumbprint,
     [Parameter(Mandatory)][string]$EngineAppId,
     # 🔒 'Mail.Send' IS DELIBERATELY ABSENT (operator, 2026-08-12). Granting it here re-broke the
-    # mail scoping every time this script ran. Measured in EFIF, both directions, with a real
+    # mail scoping every time this script ran. Measured in a test tenant, both directions, with a real
     # out-of-scope decoy mailbox:
     #     WITH tenant-wide Mail.Send     in-scope send ACCEPTED, out-of-scope send ACCEPTED  <- unscoped
     #     WITHOUT it (Exchange RBAC only) in-scope send ACCEPTED, out-of-scope send DENIED    <- scoped

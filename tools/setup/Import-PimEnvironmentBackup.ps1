@@ -6,7 +6,7 @@
 
 .DESCRIPTION
     Use it when an environment is replaced, rebuilt or lost and its configuration must continue in another one. Operator
-    2026-10-04, after the internal environment was deleted without an export: "everything into r1-pro-ca, keep the audit
+    2026-10-04, after the internal environment was deleted without an export: "everything into the internal environment, keep the audit
     trail too".
 
     1. Restore the backup's BACPAC into a scratch database the operator can read, e.g.
@@ -32,9 +32,9 @@
     that tenant (no az, no module -- REQUIREMENTS 100.41, framework 12.17): -ClientId + -CertThumbprint = a certificate
     identity in the store's SQL admin group; without them the Invardia Support app's session, else the person signs in
     in the browser (a member of the store's SQL admin group). Windows PowerShell 5.1 is recommended for the SQL login:
-    pwsh 7 dropped the same login twice on mgmt1.
+    pwsh 7 dropped the same login twice on the build host.
 .PARAMETER SourceLabel
-    Names the source in the audit marker (e.g. 'mfnpr 2026-10-02 19:01 BACPAC').
+    Names the source in the audit marker (e.g. 'the internal environment 2026-10-02 19:01 BACPAC').
 .PARAMETER Apply / -ResumeEngine
     -Apply writes (and pauses the engine). -ResumeEngine only switches the scheduled jobs back on.
 .EXAMPLE

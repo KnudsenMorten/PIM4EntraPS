@@ -20,7 +20,7 @@
        redeploy. The plan captures them first and puts them back.
     6. HOST-SIDE ROLLS (Update-PimContainers / Setup-PimContainers / Invoke-PimUpdate, and everything
        that calls them) read the target environment's ring. Ring 0 and ring 1 get every verified build
-       by design (the mgmt1 scheduled tasks ARE the ring-1 path). Ring 2 and above: REFUSE to roll to any
+       by design (the build-host scheduled tasks ARE the ring-1 path). Ring 2 and above: REFUSE to roll to any
        version the ring does not approve, and refuse when the channel cannot be read. The only way past
        is -OverrideRingGate -Reason '<why>', which is printed and audited.
        BUG-170 (2026-09-18): NO RING IS NOT "NO RULES". An environment that is deployed but carries no
@@ -117,7 +117,7 @@ function ConvertTo-PimJobEnvMap {
     if (-not $c) { return $map }
     # 🪤 pwsh 7's ConvertFrom-Json turns an ISO-8601 string VALUE into [datetime], and "$dt" prints it culture-formatted
     # ("09/18/2026 20:58:28"), so a read-back of an env var holding a timestamp never matched what was written.
-    # Measured on EFIF 2026-09-18 (PIM_CadenceDeployedUtc). Render a parsed date back in the invariant ISO UTC form.
+    # Measured on a test tenant 2026-09-18 (PIM_CadenceDeployedUtc). Render a parsed date back in the invariant ISO UTC form.
     foreach ($e in @($c.env)) {
         if (-not ($e -and "$($e.name)")) { continue }
         $v = $e.value
@@ -235,7 +235,7 @@ function New-PimSubscriptionArmInvoker {
     <#
       A deploy host's ARM caller, bound to ONE subscription's tenant. The token is requested with
       --subscription and its tenant claim is checked against that subscription before it is used:
-      on mgmt1 the default az context is frequently another company's tenant.
+      on the build host the default az context is frequently another company's tenant.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId)
     # 100.41 (no az): the subscription's tenant is resolved WITHOUT a token (ARM's 401 challenge names it --
@@ -392,7 +392,7 @@ function Get-PimUpdateRingChannelReport {
 
 function Get-PimUpdateSourceReport {
     <#
-      INSTALL-FIX-EVIDA (REQUIREMENTS 100.25 item 2, 2026-10-09): what the updater install prints about the version source.
+      INSTALL-FIX (REQUIREMENTS 100.25 item 2, 2026-10-09): what the updater install prints about the version source.
       An updater fed by INVARDIA (PIM_UPDATE_SOURCE=invardia, or Invardia's archive address -- Test-PimInvardiaUpdateSource)
       has NO channel.json: Invardia's signed manifest per ring decides. Reading one anyway printed "ring 2: channel.json could
       NOT be read (404) -- ring 2 approves NOTHING ... this environment will NOT update" in red on a production install that
@@ -443,7 +443,7 @@ function Test-PimRollRingGate {
                                        deploy run installs, which is then gated exactly like a real one
         updater unreadable          -> REFUSED (a roll that cannot prove it is approved does not happen)
         ring 0 or 1                 -> allowed: those rings get EVERY build by design (dev / internal +
-                                       the operator's test estate). The mgmt1 Invoke-PimUpdate tasks
+                                       the operator's test estate). The build-host Invoke-PimUpdate tasks
                                        build, roll, verify and then advance ringN in channel.json
                                        (Update-PimRingChannelVersion) so the cloud job does not roll
                                        them back the next night.
@@ -529,7 +529,7 @@ function Test-PimRollRingGate {
         return (& $r $true $false $ring '' "ring $ring$how gets every build by design -- a host-side roll is allowed (Invoke-PimUpdate advances ring$ring in channel.json after it verifies the roll).")
     }
     $srcKind = if ($haveEnv -and $UpdaterEnv.Contains('PIM_UPDATE_SOURCE')) { "$($UpdaterEnv['PIM_UPDATE_SOURCE'])" } else { '' }
-    # 2026-10-11 (HOGYM, live): a RESUMED install. The first run already created the Invardia updater (so a ring exists),
+    # 2026-10-11 (a managed-tenant install, live): a RESUMED install. The first run already created the Invardia updater (so a ring exists),
     # then a later sub-step failed; the resume re-runs the install and was refused here as if it were an update. When THIS
     # run installs the same Invardia updater for the same ring ($PendingRing), it is still the install: it takes the version
     # these setup scripts carry (the version Invardia distributed for that ring), exactly like the first-install branch above.

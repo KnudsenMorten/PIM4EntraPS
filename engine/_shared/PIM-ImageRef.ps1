@@ -60,7 +60,7 @@ function New-PimImageReference {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string]$Registry,     # e.g. acrpimig798.azurecr.io
+        [Parameter(Mandatory)][string]$Registry,     # e.g. acrpimcontoso.azurecr.io
         [Parameter(Mandatory)][string]$Repository,   # e.g. pim-manager
         [string]$Tag,
         [string]$Digest

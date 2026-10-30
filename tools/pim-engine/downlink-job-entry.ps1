@@ -67,7 +67,7 @@ param(
     [Parameter(Mandatory)][ValidateSet('S5','S6')][string]$Scenario,
     [Parameter(Mandatory)][string]$TenantId,
     # 🔑 A RING IS A SLAVE-LOCAL SETTING, so it must be settable WITHOUT rewriting the container's
-    # command line (operator, 2026-09-22: "ride must be ring 1 as today"). It was `-SlaveRing` only,
+    # command line (operator, 2026-09-22: "the managed test tenant must be ring 1 as today"). It was `-SlaveRing` only,
     # so changing a tenant's ring meant editing the job's args -- a riskier edit than setting an
     # environment variable, for the one value an operator is most likely to change.
     # 🪤 An env-provided ring is ALWAYS in the dev-first order (0 dev, 1 test, 2 broad): the variable
@@ -193,7 +193,7 @@ if ("$dlSwitchErr".Trim()) { JobLog $dlSwitch.reason 'WARN' }
 . (Join-Path $shared 'PIM-ScenarioProfile.ps1')   # also dot-sources PIM-Downlink.ps1
 . (Join-Path $shared '..\msp\PIM-DownlinkJob.ps1')
 # The engine runs as a CHILD script, so its failure catalog is gone when the downlink judges the run: loaded here so a
-# run whose only failures are transient waits is WAITING, not FAILED (Invoke-PimScenarioRun, measured on RIDE 2026-09-26).
+# run whose only failures are transient waits is WAITING, not FAILED (Invoke-PimScenarioRun, measured on a test tenant 2026-09-26).
 . (Join-Path $shared 'PIM-FailureCatalog.ps1')
 # §79.6: a central session revoke (signed intent) is QUEUED here as this tenant's own committed action -- New-PimChange.
 . (Join-Path $shared 'PIM-ChangeQueue.ps1')
@@ -221,7 +221,7 @@ if ($engineThumb) {
 # --- baseline source resolution (private transport: a private-endpoint URL OR a mounted/pulled file). The refusal when
 #     neither is present runs BEFORE the cadence gate, above. ------------------------------------------------------
 # 🔴 REDACT THE QUERY STRING. This line used to log $BaselineUrl whole -- and when the cross-tenant
-# path carried a SAS, its `sig=` landed in Log Analytics in cleartext (MEASURED 2026-09-03 on RIDE's
+# path carried a SAS, its `sig=` landed in Log Analytics in cleartext (MEASURED 2026-09-03 on a test tenant's
 # first run). The SAS transport is retired (SEC-27: public-but-signed per DESIGN 13.7, no query string
 # at all), and Deploy-PimDownlinkJob now refuses a URL that carries one -- the redaction stays so an
 # older job definition still cannot print a credential.
@@ -369,7 +369,7 @@ try {
     $result = & $runner @runArgs
 } catch {
     # 🔴 LOG WHERE IT THREW, NOT JUST WHAT IT SAID. This handler used to emit the message alone,
-    # and for a generic PowerShell binding error that is not a diagnosis -- RIDE's first run
+    # and for a generic PowerShell binding error that is not a diagnosis -- a test tenant's first run
     # reported only "Cannot bind argument to parameter 'Path' because it is an empty string",
     # which names neither the script, the line, nor the call. This runs UNATTENDED in a container
     # nobody can attach a debugger to, so the one place the stack could have been captured is

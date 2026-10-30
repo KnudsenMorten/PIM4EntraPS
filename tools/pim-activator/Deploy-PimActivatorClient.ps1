@@ -188,7 +188,7 @@ param(
     # sibling-file default ('discovered-tenant-catalog.json' next to this
     # script) after a customer-tenant incident where that file -- left over
     # in a working dir from a different tenant -- got picked up silently and
-    # written 2linkIT's tenant id + client id into the customer's registry.
+    # written the vendor's own tenant id + client id into the customer's registry.
     # Now: when omitted (the common case), the script auto-discovers the
     # tenant + PIM Activator app registration from the LIVE Microsoft Graph
     # tenant you sign in to (a browser sign-in opens, plain REST, no module, if not already
@@ -356,7 +356,7 @@ function Set-Reg {
 # The slot USED to be ([Math]::Abs($ExtensionId.GetHashCode()) % 9000) + 1000.
 # String.GetHashCode() is randomised per PROCESS on .NET Core (pwsh 7), so every
 # run picked a different slot: re-runs piled up duplicate rows and -Uninstall
-# looked in the wrong slot and removed nothing (mgmt1, 2026-09-18: four rows for
+# looked in the wrong slot and removed nothing (the build host, 2026-09-18: four rows for
 # the released id at 1590 / 3077 / 5148 / 7772).
 # Now: our row goes in the lowest slot nobody else uses (reusing ours if it is
 # already there); every other row carrying our id is removed.

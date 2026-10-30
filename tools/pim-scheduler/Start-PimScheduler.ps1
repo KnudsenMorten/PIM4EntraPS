@@ -205,7 +205,7 @@ if (Test-Path -LiteralPath "$shared\..\coverage\PIM-Coverage.ps1") { . "$shared\
 # PIM 100.75: the scenario profile (Get-PimActiveScenario -- the MSP role) at FILE scope. It was loaded only INSIDE a few
 # functions (Test-PimSchedulerManagingTenant, the licence-check guard, the enrolment job), and a dot-source inside a function
 # is gone when it returns -- so the uplink's setup report found no Get-PimActiveScenario and sent MspRole '' on EVERY install
-# (HOGYM managed tenant 2026-10-11). Its tail also loads the downlink core (engine\msp, when present); no function name of
+# (a managed tenant 2026-10-11). Its tail also loads the downlink core (engine\msp, when present); no function name of
 # those files is defined by any library above (checked by AST scan), and nothing in the tick runs a pull because it exists.
 . "$shared\PIM-ScenarioProfile.ps1"
 # UPLINK-ENROL (PIM 99): job 'enrolled-tenants' -- the managing tenant allows its enrolled managed tenants' subnets by itself.
@@ -271,7 +271,7 @@ if ("$env:PIM_TenantId".Trim()    -and -not "$($global:PIM_TenantId)".Trim())   
 # the explicit SPN never gets a turn and the connection falls through to the machine's ambient
 # MANAGED IDENTITY.
 #
-# MEASURED on mgmt1 2026-08-10, and note how quiet the failure is: the VM's MI authenticates
+# MEASURED on the build host 2026-08-10, and note how quiet the failure is: the VM's MI authenticates
 # FINE (it has a contained DB user for the VisualCron trigger, with SELECT on two objects), so
 # the `SELECT 1` login probe SUCCEEDS and the scheduler reports "SQL store reachable". The wrong
 # principal is only revealed later, on the first WRITE:
@@ -308,7 +308,7 @@ if ($_schedSqlConfigured) {
         Write-PimStartupLine -Message "[scheduler] SQL store wired -> $($global:PIM_SqlServer)/$($global:PIM_SqlDatabase) (state + lease persist in pim.Settings)" -ForegroundColor Cyan
         # BUG-45: PROVE the store opens. "Wired" only means a connection string was built -- the
         # token is minted locally and the string is a string, so both succeed against a database
-        # this identity cannot log into. On mfnpr that gap produced four green Job executions in
+        # this identity cannot log into. On the internal environment that gap produced four green Job executions in
         # a row that read nothing, gated every job off and exited 0. One read settles it.
         # `SELECT 1`, deliberately NOT a read of pim.Settings. The schema step runs AFTER infra,
         # so a table-dependent probe would make every fresh deploy fatal for the minutes between
@@ -338,7 +338,7 @@ $_schedVerdict = Get-PimSchedulerStoreVerdict -Hosted $_schedHosted -SqlConfigur
 switch ($_schedVerdict.level) {
     'fatal' {
         # Non-zero exit is the ONLY signal a scheduled ACA Job gives an operator. Exiting 0 from
-        # a tick that cannot reach its store is what let mfnpr look healthy while doing nothing.
+        # a tick that cannot reach its store is what let the internal environment look healthy while doing nothing.
         # §100.46: a refused start shows everything it wired
         [void](Complete-PimStartupLog -Force)
         throw "[scheduler] REFUSING to run ($($_schedVerdict.reason)): $($_schedVerdict.detail)"

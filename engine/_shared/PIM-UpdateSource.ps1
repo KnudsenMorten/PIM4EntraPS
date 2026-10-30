@@ -430,7 +430,7 @@ function Get-PimUpdateSchemaStoreDecision {
 }
 
 # ---- 2026-09-15 (UPD-15) -- THE UPDATER HEALS ITS OWN STORE SETTINGS ----------------------------
-# MEASURED on EFIF and RIDE: both updaters failed every night from 2026-09-13 with
+# MEASURED on both test tenants: both updaters failed every night from 2026-09-13 with
 #     updater has no PIM_SqlServer -- schema NOT checked; re-run Deploy-PimUpdateJob ... NOT rolling
 # The Manager app in the same resource group named the store the whole time. "Re-run the deploy" is an
 # instruction to a human, at 03:00, for a value this job can read itself with the identity it already
@@ -569,7 +569,7 @@ function Save-PimUpdaterStoreSettings {
 }
 
 # ---- 2026-09-15 -- THE SHIPPED SCHEMA FILES REACH EVERY EXISTING STORE ---------------------------
-# MEASURED on EFIF + RIDE after 2.4.360: the updater logged "schema up to date" and rolled, and
+# MEASURED on both test tenants after 2.4.360: the updater logged "schema up to date" and rolled, and
 # pim.CentralAdmins.Replicate -- added by a guarded ALTER in sql/platform-schema.sql -- was MISSING on
 # both stores. The updater applied the shipped files only when a LOCKED table was absent, and
 # pim.CentralAdmins is not in the locked conformance schema, so every guarded addition in those files

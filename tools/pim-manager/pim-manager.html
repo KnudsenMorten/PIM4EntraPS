@@ -2872,7 +2872,7 @@
       title: 'Privileged-estate health at a glance',
       // 100.68 (owner 2026-10-10): the Counters overview -- the impact counters with how each is counted.
       items: ['home', { tab: 'impact', label: 'Counters overview', desc: 'What PIM Manager has done here, cumulative: activations, eligible instead of standing, standing hours removed, engine changes, approvals, reviews, guard holds, tenants -- each with how it is counted' }] },
-    // 97.1 (operator 2026-10-07: "I want to have an Get Started in the menu, similar to how i have made it in ELDK ...
+    // 97.1 (operator 2026-10-07: "I want to have an Get Started in the menu, similar to how i have made it in another product ...
     // it should show the incompleted steps"): the guided steps, each done / open from the data; a red ! while one is open.
     { id: 'getstarted', label: 'Get Started',
       title: 'The steps that make this environment work -- each one marked done or still open',
@@ -9244,7 +9244,7 @@
          `<b><code>{Initial}</code> (preferred) = the owning person's <u>initials</u></b> (e.g. <code>ABC</code>) — it is the admin account's owner identifier, <b>not</b> a list of approver UPNs. ` +
          `<code>{Owner}</code> is the backward-compat synonym for <code>{Initial}</code>. See the full token list below; click a token to insert it into the focused Value field.</div>`;
     // 🔴 SAY HOW TO COPY THIS TO ANOTHER TENANT (operator, 2026-09-22: "can you copy over the naming
-    // convention from managing tenant to managed tenant - export/import on slave" -> "so from efif to ride using the
+    // convention from managing tenant to managed tenant - export/import on slave" -> "so from the managing to the managed test tenant using the
     // script" -> "make info on the settings on how to export/import between tenants (script)").
     // tools/setup/Copy-PimSettings.ps1 shipped in 2.4.412 and NOTHING in the product pointed at it,
     // so the answer to "how do I copy this" lived only in a release note. The command is spelled out
@@ -11137,7 +11137,7 @@
       // The field is required for the same reason the justification is: an approver cannot consent
       // to a target string. For an `authoring` request it pre-fills from the staged change set.
       h.push(`<label style="font-size:12px;display:block;margin-top:8px;">What this authorises (required) &mdash; one per line, in words the approver can check<br>` +
-             `<textarea id="apprNewItems" rows="4" style="width:100%;max-width:560px;padding:4px 8px;" placeholder="e.g. adm-e-khrs-t1-c is in ROLE-Security-Administrator"></textarea></label>`);
+             `<textarea id="apprNewItems" rows="4" style="width:100%;max-width:560px;padding:4px 8px;" placeholder="e.g. adm-e-alin-t1-c is in ROLE-Security-Administrator"></textarea></label>`);
       h.push(`<div id="apprNewItemsHint" style="font-size:11.5px;color:#57606a;margin-top:4px;"></div>`);
       h.push(`<div id="apprNewPlan" style="font-size:11.5px;color:#57606a;margin-top:6px;"></div>`);
       h.push(`<div style="margin-top:8px;display:flex;gap:8px;"><button id="apprNewSubmit" style="background:#1f883d;color:#fff;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;">Submit request</button><button id="apprNewCancel">Cancel</button><span id="apprNewMsg" style="font-size:12px;align-self:center;"></span></div>`);
@@ -15759,7 +15759,7 @@
   // 97.1 GET STARTED -- a WIZARD of real forms (framework WIZARD-1; owner 2026-10-07: "show options in the wizard, dont
   // link to things" / "all fields must be in the get started, writing to the same setting" / "people and groups found by
   // name (search + dropdown), never by pasting an object id").
-  // The ELDK /Forms/Wizard pattern: "N of M steps done" + a bar + one chip per step (green check = done, red ! = a
+  // A step-wizard pattern: "N of M steps done" + a bar + one chip per step (green check = done, red ! = a
   // required step still open, grey = optional); ONE card per step with "STEP X OF N", the title, one sentence, the
   // status ("! Not done yet -- <why>"), then the step's REAL FIELDS in ONE form; Previous (saves nothing) / Save & exit /
   // Save & next (Save & finish on the last). A step writes through the SAME route the normal page uses (same validation,
@@ -15790,7 +15790,7 @@
       what: 'The engine needs its Microsoft Graph and Azure rights for the workloads you use. This step checks them and shows the exact grant for anything missing.',
       check: c => {
         // Permissions ONLY: the health's overall severity also covers MAIL (no sender = 'error'), which is its own step --
-        // reading it here kept this step red while it said "all required permissions held" (EFIFMGMT 2026-10-08).
+        // reading it here kept this step red while it said "all required permissions held" (a managing test tenant 2026-10-08).
         const p = c.perm || {}; const miss = (p.missingRequired || []).filter(Boolean).length; const az = p.azureOk !== false;
         // §97: Reader at the tenant root is required (Discovery); User Access Administrator there only when Azure delegations exist.
         const rdr = !permRootReaderMissing(p), uaa = !permRootUaaNeededMissing(p);
@@ -22854,11 +22854,14 @@
     h.push('<div class="set-card" id="mgmtMonthly" style="max-width:860px;margin-top:12px;"><h3 style="margin:0 0 6px;font-size:14px;">Monthly management report</h3>' +
       '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">Every month, after the 1st, the full report for the last month is built once, kept here for download and mailed (attached) to the recipients below. Off until you switch it on.</div>');
     if (d && d.canEdit) {
-      h.push('<label style="font-size:12.5px;"><input type="checkbox" id="mgmtMonthlyOn"' + (mo.enabled ? ' checked' : '') + (locked && !mo.enabled ? ' disabled' : '') + '> Send the monthly management report</label>' +
-        '<div style="margin-top:6px;"><textarea id="mgmtRecips" rows="2" style="width:420px;font-size:12px;font-family:inherit;" placeholder="board@example.com">' + esc((mo.recipients || []).join('\n')) + '</textarea></div>' +
+      // More info + the switch-on question come from the settings catalog (framework 12.9 SETTING-INFO-1): data-setting-key
+      // makes the capture-phase listener ask before the box is ticked.
+      h.push('<label style="font-size:12.5px;"><input type="checkbox" id="mgmtMonthlyOn" data-setting-key="ManagementReport.Monthly"' + (mo.enabled ? ' checked' : '') + (locked && !mo.enabled ? ' disabled' : '') + '> Send the monthly management report</label>' + settingInfoBtn('ManagementReport.Monthly') +
+        '<div style="margin-top:6px;font-size:12px;color:#57606a;">Recipients, one per line' + settingInfoBtn('ManagementReport.Recipients') + '</div>' +
+        '<div style="margin-top:4px;"><textarea id="mgmtRecips" rows="2" style="width:420px;font-size:12px;font-family:inherit;" placeholder="board@example.com">' + esc((mo.recipients || []).join('\n')) + '</textarea></div>' +
         '<div style="margin-top:6px;"><button id="mgmtSave" class="btn-sec">Save</button> <span id="mgmtSaveMsg" style="margin-left:6px;font-size:12px;"></span></div>');
     } else {
-      h.push('<div style="font-size:12.5px;">' + (mo.enabled ? 'On' : 'Off') + ((mo.recipients || []).length ? ' &mdash; to ' + esc(mo.recipients.join(', ')) : '') + '</div>' +
+      h.push('<div style="font-size:12.5px;">' + (mo.enabled ? 'On' : 'Off') + ((mo.recipients || []).length ? ' &mdash; to ' + esc(mo.recipients.join(', ')) : '') + settingInfoBtn('ManagementReport.Monthly') + settingInfoBtn('ManagementReport.Recipients') + '</div>' +
         '<div style="margin-top:4px;font-size:11.5px;color:#57606a;">(read-only &mdash; Admin role required to change the monthly report)</div>');
     }
     h.push('<div id="mgmtLatestLine" style="margin-top:10px;font-size:12.5px;">' +
@@ -28841,7 +28844,7 @@
       if (r === false) return;
       if (typeof r === 'string' && r.length) { _wizErr(r); return; }
     }
-    // BUG-264 (live GUI E2E ig798): Finish awaited a load that never answered, and the dialog just sat there -- no sign it
+    // BUG-264 (live GUI E2E on a test environment): Finish awaited a load that never answered, and the dialog just sat there -- no sign it
     // was waiting, the button still live. Now: the button is busy while it works, a line says so after a few seconds, and a
     // failure (api() gives up after 2 minutes) stays on screen.
     const fb = document.getElementById('wizFinish');
