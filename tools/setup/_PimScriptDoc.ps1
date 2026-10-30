@@ -108,8 +108,8 @@ function Get-PimSupportScriptCommand {
       PURE. The lines every surface shows for a published script (owner 2026-10-11, framework 12.10 item 11):
         Invoke-WebRequest <url> -OutFile <Script>.ps1        line 1: download the file from Invardia
         <-Run lines>                                          line 2 (and more if a flow needs them): the cmdlet(s)
-      Never a checksum / signature / comment line in the shown block, never pipe-to-execute: the documentation page is
-      the link shown NEXT to the command; SHA256SUMS.txt and the signatures stay published for whoever verifies.
+      Never a checksum / comment line in the shown block, never pipe-to-execute: the documentation page is the link
+      shown NEXT to the command; SHA256SUMS.txt stays published for whoever verifies.
       The run line is LAST on purpose: callers that append parameters to the returned text extend the run line.
       -Run: the command line(s) that run the saved file, e.g. ".\Grant-PimEnginePermissions.ps1 -TenantId '...'";
       none = ".\<Script>.ps1". Returns string[] (join with a newline to show / send).

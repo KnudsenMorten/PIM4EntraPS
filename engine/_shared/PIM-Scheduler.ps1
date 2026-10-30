@@ -123,6 +123,11 @@ $script:PimTickOnlyJobTypes += 'owner-review'# §83 (operator 2026-10-01: "i nee
 # the coming month (Deny on the owner page lets one end), and the administrators the whole list (Alerting 'expiring-access').
 $script:PimJobTypes += 'autoextend-report'
 $script:PimTickOnlyJobTypes += 'autoextend-report'
+# MGMT-REPORT (owner 2026-10-29, Pro): 'mgmt-report' builds the monthly management report (PowerPoint) for the last full month
+# once, stores it (pim.TenantCache 'mgmt-report') and mails it to its recipients (engine/_shared/PIM-MgmtReport.ps1). INERT until
+# pim.Settings 'ManagementReport' monthly.enabled is on (owner: default OFF, a setting turns it on). Pro 'reports.management'.
+$script:PimJobTypes += 'mgmt-report'
+$script:PimTickOnlyJobTypes += 'mgmt-report'
 # §80.2 PIMHYBRIDWRK (operator 2026-09-29): the PIM-for-AD replacement -- 'hybrid-ad-groups' mirrors the AD-marked PIM
 # groups to AD, 'hybrid-ad-sync' puts their ACTIVE PIM members into the AD groups (PIM-HybridAdGroups.ps1). Like
 # 'hybrid-ad-apply' they only act on a hybrid worker; everywhere else they report that one is required.
@@ -430,6 +435,9 @@ function Get-PimDefaultJobSchedule {
         # §83: every 30 days -- the auto-extensions of the coming month to each department's owners (+ the administrators).
         # ON by default (operator: "i need to have a monthly report"); no answer = extended, so it never takes access away.
         [pscustomobject]@{ name='autoextend-report'; type='autoextend-report'; intervalMinutes=43200; enabled=$true }
+        # MGMT-REPORT: every 6 h a CHECK (one setting read while the monthly report is off); on, the first run on or after the
+        # 1st builds the last month's report once (the stored month decides), so a missed tick only delays it.
+        [pscustomobject]@{ name='mgmt-report'; type='mgmt-report'; intervalMinutes=360; enabled=$true }
         # 🔑 THE TRUST JOB (operator, 2026-09-12: "it is critical that we can trust that the
         # delegation is actual deployed into the platform"). Every other job makes a FAILURE
         # visible; this one makes SUCCESS provable. It re-reads LIVE from the tenant and diffs it
@@ -1479,6 +1487,13 @@ function Initialize-PimDefaultJobHandlers {
             detail='unimplemented:autoextend-report (wired by Start-PimScheduler)'
             whatIf=[bool]$whatIf }
     }
+    Register-PimJobHandler -Type 'mgmt-report' -Handler {
+        param($job,$now,$whatIf)
+        # MGMT-REPORT: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimMgmtReportMonthlyJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:mgmt-report (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
     Register-PimJobHandler -Type 'rfa-sync' -Handler {
         param($job,$now,$whatIf)
         # §82: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimRfaSyncJob).
@@ -2018,6 +2033,7 @@ function Get-PimJobProFeatureKeys {
         'discovery'     { return @('discovery.sweep') }
         'coverage'      { return @('coverage.gaps') }
         'tier-report'   { return @('reports.tier') }
+        'mgmt-report'   { return @('reports.management') }   # MGMT-REPORT: the monthly management report
         # §75.4 / §80.2: every job that writes on-premises AD.
         'hybrid-ad-apply'  { return @('hybrid.ad') }
         'hybrid-ad-groups' { return @('hybrid.ad') }

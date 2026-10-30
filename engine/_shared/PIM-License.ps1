@@ -72,7 +72,8 @@ $script:PimProEditionName       = 'Pro'
 # the second approver, delegated administration ceilings, the tier-impact report and the evidence export. Dropped then
 # (free, and never gated by production code): Intake, SelfService, ContactsRouting, Conformance, Rings, ApproverMatrix,
 # PawPolicy, Lifecycle, AzureDiscovery (now 'Discovery'), DefinitionImport, PermissionWizard.
-$script:PimProFeatureCatalog = @('AccessReviews', 'BrokerApi', 'ConsultantLifecycle', 'Coverage', 'Discovery', 'EvidenceExport', 'HybridAd', 'MakerChecker', 'McpServer', 'MspFanout',
+# MGMT-REPORT (owner 2026-10-29): 'ManagementReport' -- the management report (PowerPoint), single tenant.
+$script:PimProFeatureCatalog = @('AccessReviews', 'BrokerApi', 'ConsultantLifecycle', 'Coverage', 'Discovery', 'EvidenceExport', 'HybridAd', 'MakerChecker', 'ManagementReport', 'McpServer', 'MspFanout',
     'PortalAdmins', 'Revoke', 'Rfa', 'TierReport', 'WorkloadConnectors')
 # PRO-FEATURES-MISSING (PIM REQUIREMENTS §100.32, owner 2026-10-09: "i cannot use any of the features" on a Pro licence issued
 # before ConsultantLifecycle / Rfa / BrokerApi / McpServer existed). The SINGLE-TENANT Pro features: the catalog's scope='single'
@@ -82,7 +83,7 @@ $script:PimProFeatureCatalog = @('AccessReviews', 'BrokerApi', 'ConsultantLifecy
 # future, whatever its features[] list says. MSP (scope='multi', MspFanout) is never in this list: it is the Pro MSP edition
 # (sku Pro-MSP, or a licence naming MspFanout / '*' as every MSP licence issued so far does). Must equal the catalog's
 # single-tenant list (tests/Test-PimProEnterpriseFeatures.ps1).
-$script:PimProSingleTenantFeatures = @('AccessReviews', 'BrokerApi', 'ConsultantLifecycle', 'Coverage', 'Discovery', 'EvidenceExport', 'HybridAd', 'MakerChecker', 'McpServer',
+$script:PimProSingleTenantFeatures = @('AccessReviews', 'BrokerApi', 'ConsultantLifecycle', 'Coverage', 'Discovery', 'EvidenceExport', 'HybridAd', 'MakerChecker', 'ManagementReport', 'McpServer',
     'PortalAdmins', 'Revoke', 'Rfa', 'TierReport', 'WorkloadConnectors')
 
 $script:PimLicenseCache = $null

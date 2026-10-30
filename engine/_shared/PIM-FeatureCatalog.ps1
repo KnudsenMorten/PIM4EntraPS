@@ -152,6 +152,9 @@ $script:PimFeatureCatalog = @(
     # rule is unchanged (license='pro'). No upgrade step switches an existing install on or off: a stored value decides.
     [ordered]@{ key='hybrid.ad';         label='On-premises Active Directory (hybrid worker)'; group='Governance'; tier='advanced'; license='pro'; scope='single'; defaultEnabled=$false; dependsOn=@(); proFeature='HybridAd'; description='Admin accounts in on-premises AD, PIM groups mirrored to AD groups and just-in-time AD membership for activated PIM groups -- applied by the hybrid worker. Off = the hybrid worker jobs do not run and are shown as switched off. Switch it on when the hybrid worker is installed.' }
     [ordered]@{ key='reports.evidence';  label='Evidence / audit export';             group='Governance';   tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='EvidenceExport'; description='Who may hold what, who held it and who approved it -- the evidence report and its export.' }
+    # MGMT-REPORT (owner 2026-10-29: "Pro, PIM Manager brand"): the management report as a PowerPoint -- the wizard (Reports >
+    # Management report) and the monthly report (job 'mgmt-report', off until switched on). Hard Pro, like the tier report.
+    [ordered]@{ key='reports.management'; label='Management report (PowerPoint)';     group='Governance';   tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='ManagementReport'; description='Key figures with trends, risk and exceptions, changes and audit, compliance evidence -- as a PowerPoint, on demand or every month by mail.' }
 
     # §82 (operator 2026-10-02, wizard: "Both Pro"). The company review is inert until a Company is defined; RFA needs the
     # public portal deployed (§82.6), so it is an ADVANCED switch, off until the operator turns it on.

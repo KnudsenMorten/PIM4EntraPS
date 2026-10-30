@@ -13616,6 +13616,7 @@
     'target-check':                'Checks that the Azure resources, Azure roles and Entra roles your delegations point at still exist, and reports the ones that are gone (Discovery & gaps). It never removes anything -- you decide.',
     'config-backup':               'Backs up the configuration (departments, companies, admins, group definitions, delegations, settings without secrets, break-glass list, job schedule, MSP registry) once a day; an unchanged configuration is recorded as "no change". Old backups are removed after the retention (default 90 days); pinned ones are kept (Operations > Backups & restore).',
     'demo-baseline-restore':       'Live demo only: once a day (02:00 UTC) puts the configuration back to the backup pinned with the note demo-baseline. Does nothing unless demo mode is on and this is the demo environment; a change the mass-change check holds is not restored.',
+    'mgmt-report':                 'Pro: builds the monthly management report (PowerPoint) for the last month once, keeps it for download (Reports > Management report) and mails it to its recipients. Does nothing until the monthly report is switched on there.',
     // REQ-U wave 2: per-NAME entries (looked up before the type) -- two discovery jobs read the workload role catalogs.
     'discovery-defender':          'Reads the Defender XDR roles and their permissions, and reports roles and permission groups no template knows yet.',
     'discovery-intune':            'Reads the Intune roles (built-in and custom), and reports roles no template knows yet.'
@@ -22713,7 +22714,16 @@
       '<button id="rptModeWhoCan" class="' + (reportState.mode === 'who-can' ? '' : 'ghost') + '" style="font-size:12px;">Person &rarr; what they can reach</button>' +
       '<button id="rptModeWhoHas" class="' + (reportState.mode === 'who-has' ? '' : 'ghost') + '" style="font-size:12px;">Role &rarr; who can activate it</button>' +
       '<button id="rptModeTierImpact" class="' + (reportState.mode === 'tier-impact' ? '' : 'ghost') + '" style="font-size:12px;">Tier impact &mdash; who can reach T0/T1</button>' +
+      // MGMT-REPORT (owner 2026-10-29, Pro): the management report as a PowerPoint
+      '<button id="rptModeMgmt" class="' + (reportState.mode === 'management' ? '' : 'ghost') + '" style="font-size:12px;">Management report (PowerPoint)' + (pimProFeatureOk('reports.management') ? '' : ' <span class="pro-tag" style="font-size:10px;font-weight:700;opacity:.75;">PRO</span>') + '</button>' +
       '</div>');
+    if (reportState.mode === 'management') {
+      h.push('<div id="mgmtReportPanel"><div style="color:#57606a;font-size:12px;">Loading the management report&hellip;</div></div>');
+      body.innerHTML = h.join('');
+      wireReportModeButtons();
+      renderMgmtReportPanel();
+      return;
+    }
     // Tier-impact is an estate-wide report with no subject picker -- it lists
     // EVERY user with any path (incl. indirect via nested groups) to a
     // Tier-0/Tier-1 target. Render its own controls and bail out of the
@@ -22731,9 +22741,7 @@
         '</div>');
       h.push('<div id="rptResults"><div style="color:#57606a;font-size:12px;">Run the report to list every user who can reach a Tier-0/Tier-1 target &mdash; including reach inherited through nested groups, which a flat role list misses.</div></div>');
       body.innerHTML = h.join('');
-      (document.getElementById('rptModeWhoCan') || {}).onclick = () => { reportState.mode = 'who-can'; reportState.subject = ''; reportState.result = null; renderReports(); };
-      (document.getElementById('rptModeWhoHas') || {}).onclick = () => { reportState.mode = 'who-has'; reportState.subject = ''; reportState.result = null; renderReports(); };
-      (document.getElementById('rptModeTierImpact') || {}).onclick = () => { reportState.mode = 'tier-impact'; reportState.subject = ''; reportState.result = null; renderReports(); };
+      wireReportModeButtons();
       const tmSel = document.getElementById('rptTierMax');
       if (tmSel) tmSel.onchange = () => { reportState.tierMax = parseInt(tmSel.value, 10); };
       (document.getElementById('rptRun') || {}).onclick = () => runReport('tier-impact', '');
@@ -22761,15 +22769,137 @@
     h.push('<div id="rptResults"><div style="color:#57606a;font-size:12px;">Pick a ' + (isWhoCan ? 'person' : 'role') + ' and run the report.</div></div>');
     body.innerHTML = h.join('');
 
-    (document.getElementById('rptModeWhoCan') || {}).onclick = () => { reportState.mode = 'who-can'; reportState.subject = ''; reportState.result = null; renderReports(); };
-    (document.getElementById('rptModeWhoHas') || {}).onclick = () => { reportState.mode = 'who-has'; reportState.subject = ''; reportState.result = null; renderReports(); };
-    (document.getElementById('rptModeTierImpact') || {}).onclick = () => { reportState.mode = 'tier-impact'; reportState.subject = ''; reportState.result = null; renderReports(); };
+    wireReportModeButtons();
     const subj = document.getElementById('rptSubject');
     (document.getElementById('rptRun') || {}).onclick = () => runReport(reportState.mode, (subj.value || '').trim());
     subj.onkeydown = (e) => { if (e.key === 'Enter') runReport(reportState.mode, (subj.value || '').trim()); };
     wireExportBar('rpt', reportExportData);
     // Re-render last result (mode switch / tab revisit).
     if (reportState.result) renderReportResult(reportState.result);
+  }
+  function wireReportModeButtons() {
+    const go = (m) => () => { reportState.mode = m; reportState.subject = ''; reportState.result = null; renderReports(); };
+    (document.getElementById('rptModeWhoCan') || {}).onclick = go('who-can');
+    (document.getElementById('rptModeWhoHas') || {}).onclick = go('who-has');
+    (document.getElementById('rptModeTierImpact') || {}).onclick = go('tier-impact');
+    (document.getElementById('rptModeMgmt') || {}).onclick = go('management');
+  }
+  // ===================================================================
+  // MGMT-REPORT (owner 2026-10-29: "a wizard for mgmt. reporting, where i can select what i want to export and then get a
+  // powerpoint with the exported data"; Pro, PIM Manager brand). Reports > Management report: tick the sections, choose the
+  // period, Generate -> GET /api/reports/management (the .pptx, built on the server). The monthly report (job 'mgmt-report',
+  // off until switched on here) and its recipients: GET / PUT /api/reports/management/settings; the latest stored one:
+  // GET /api/reports/management/latest. On Community the panel says Pro, Generate is disabled and the server refuses.
+  // ===================================================================
+  // The calls are literal fetch('/api/...') so the GUI <-> engine alignment scan sees the page reach both routes.
+  function pimReportAuthHeaders() { return { 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN }; }
+  async function pimSaveReportResponse(resp, fallbackName) {
+    if (!resp.ok) {
+      let t = ''; try { const j = await resp.json(); t = j && j.error; } catch (_) { }
+      throw new Error(t || ('HTTP ' + resp.status));
+    }
+    const cd = (resp.headers && resp.headers.get && resp.headers.get('Content-Disposition')) || '';
+    const m = /filename="([^"]+)"/.exec(cd);
+    const name = m ? m[1] : fallbackName;
+    const blob = await resp.blob();
+    try {
+      const u = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = u; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => { try { URL.revokeObjectURL(u); } catch (_) { } }, 5000);
+    } catch (_) { }
+    return name;
+  }
+  function mgmtReportQuery() {
+    const secs = Array.from(document.querySelectorAll('#mgmtReportPanel .mgmtSec')).filter(c => c.checked).map(c => c.value);
+    const period = (document.getElementById('mgmtPeriod') || {}).value || 'last30';
+    const month = (document.getElementById('mgmtMonth') || {}).value || '';
+    const qs = 'sections=' + encodeURIComponent(secs.join(',')) + '&period=' + encodeURIComponent(period) + (period === 'month' && month ? '&month=' + encodeURIComponent(month) : '');
+    return { secs, period, month, qs };
+  }
+  async function renderMgmtReportPanel() {
+    const host = document.getElementById('mgmtReportPanel');
+    if (!host) return;
+    const esc = escapeHtml;
+    if (!isServer) { host.innerHTML = '<div style="color:#57606a;font-size:12px;">Static mode &mdash; the management report needs the server.</div>'; return; }
+    let d;
+    try { d = await api('GET', '/api/reports/management/settings'); }
+    catch (e) { host.innerHTML = '<div style="color:#cf222e;font-size:12px;">The management report settings could not be read: ' + esc(e.message) + '</div>'; return; }
+    let lic = null; try { lic = await fetchLicence(); } catch (_) { lic = null; }
+    const locked = !(d && d.pro) || !pimProFeatureOk('reports.management');
+    const sections = (d && Array.isArray(d.sections)) ? d.sections : [];
+    const now = new Date();
+    const prevMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+    const prevMonthVal = prevMonth.getUTCFullYear() + '-' + String(prevMonth.getUTCMonth() + 1).padStart(2, '0');
+    const h = [];
+    h.push('<div style="margin-bottom:10px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Management report</span> ' +
+      '<span style="color:#57606a;font-size:11px;">&mdash; a PowerPoint for management: key figures with trends, risk &amp; exceptions, changes &amp; audit, compliance evidence. Built from the data PIM Manager already holds; a figure it cannot read says &ldquo;not available&rdquo;, never 0.</span></div>');
+    if (locked) {
+      const note = (lic && proFeatureNoticeHtml(lic, 'reports.management')) || ('<div class="pro-lic-note" data-state="locked" data-feature="reports.management" style="border-radius:8px;padding:8px 12px;font-size:12.5px;background:#fff1e5;border:1px solid #bc4c00;color:#762c00;">&#x1F512; <b>Pro -- Management report requires a PIM Manager Pro licence</b>' + (d && d.proMessage ? ' -- ' + esc(d.proMessage) : '') + '</div>');
+      h.push('<div id="mgmtProNote" style="margin-bottom:10px;">' + note + '</div>');
+    }
+    h.push('<div class="set-card" id="mgmtWizard" style="max-width:860px;"><h3 style="margin:0 0 6px;font-size:14px;">1. What goes in</h3>');
+    sections.forEach(s => {
+      h.push('<label style="display:block;margin:4px 0;font-size:12.5px;"><input type="checkbox" class="mgmtSec" value="' + esc(s.id) + '" checked> <b>' + esc(s.title) + '</b> <span style="color:#57606a;">&mdash; ' + esc(s.description || '') + '</span></label>');
+    });
+    h.push('<h3 style="margin:12px 0 6px;font-size:14px;">2. Period</h3>' +
+      '<select id="mgmtPeriod" style="font-size:12px;padding:4px 8px;">' +
+        '<option value="last7">Last 7 days</option><option value="last30" selected>Last 30 days</option><option value="last90">Last 90 days</option><option value="month">A calendar month</option>' +
+      '</select> <input type="month" id="mgmtMonth" value="' + prevMonthVal + '" style="font-size:12px;padding:3px 6px;display:none;">' +
+      '<div style="color:#57606a;font-size:11px;margin-top:4px;">Each figure is compared with the period before it, where PIM Manager holds data from then; otherwise the tile says &ldquo;no earlier data&rdquo;.</div>');
+    h.push('<h3 style="margin:12px 0 6px;font-size:14px;">3. Generate</h3>' +
+      '<button id="mgmtGenerate" class="btn"' + (locked ? ' disabled title="Requires a PIM Manager Pro licence"' : '') + '>Generate PowerPoint</button> <span id="mgmtMsg" style="margin-left:6px;font-size:12px;"></span></div>');
+    // the monthly report
+    const mo = (d && d.monthly) || { enabled: false, recipients: [] };
+    const latest = d && d.latest;
+    h.push('<div class="set-card" id="mgmtMonthly" style="max-width:860px;margin-top:12px;"><h3 style="margin:0 0 6px;font-size:14px;">Monthly management report</h3>' +
+      '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">Every month, after the 1st, the full report for the last month is built once, kept here for download and mailed (attached) to the recipients below. Off until you switch it on.</div>');
+    if (d && d.canEdit) {
+      h.push('<label style="font-size:12.5px;"><input type="checkbox" id="mgmtMonthlyOn"' + (mo.enabled ? ' checked' : '') + (locked && !mo.enabled ? ' disabled' : '') + '> Send the monthly management report</label>' +
+        '<div style="margin-top:6px;"><textarea id="mgmtRecips" rows="2" style="width:420px;font-size:12px;font-family:inherit;" placeholder="board@example.com">' + esc((mo.recipients || []).join('\n')) + '</textarea></div>' +
+        '<div style="margin-top:6px;"><button id="mgmtSave" class="btn-sec">Save</button> <span id="mgmtSaveMsg" style="margin-left:6px;font-size:12px;"></span></div>');
+    } else {
+      h.push('<div style="font-size:12.5px;">' + (mo.enabled ? 'On' : 'Off') + ((mo.recipients || []).length ? ' &mdash; to ' + esc(mo.recipients.join(', ')) : '') + '</div>' +
+        '<div style="margin-top:4px;font-size:11.5px;color:#57606a;">(read-only &mdash; Admin role required to change the monthly report)</div>');
+    }
+    h.push('<div id="mgmtLatestLine" style="margin-top:10px;font-size:12.5px;">' +
+      (latest ? 'Latest: <b>' + esc(latest.periodLabel) + '</b>, built ' + esc((function () { try { return fmtTime(new Date(latest.generatedUtc), { zone: true }); } catch (_) { return latest.generatedUtc; } })()) +
+         ' <button id="mgmtLatest" class="ghost" style="font-size:12px;"' + (locked ? ' disabled' : '') + '>Download</button> <span id="mgmtLatestMsg" style="font-size:12px;"></span>'
+        : '<span style="color:#57606a;">' + (d && d.latestError ? 'The stored report could not be read: ' + esc(d.latestError) : 'No monthly report is stored yet.') + '</span>') + '</div></div>');
+    host.innerHTML = h.join('');
+    wireLicenceLinks(host);
+    const per = document.getElementById('mgmtPeriod'), mon = document.getElementById('mgmtMonth');
+    if (per && mon) per.onchange = () => { mon.style.display = per.value === 'month' ? '' : 'none'; };
+    const gen = document.getElementById('mgmtGenerate');
+    if (gen) gen.onclick = async () => {
+      const msg = document.getElementById('mgmtMsg');
+      const q = mgmtReportQuery();
+      if (!q.secs.length) { msg.textContent = 'Tick at least one section.'; msg.style.color = '#9a6700'; return; }
+      msg.textContent = 'Building the PowerPoint…'; msg.style.color = '#57606a'; gen.disabled = true;
+      try {
+        const name = await pimSaveReportResponse(await fetch('/api/reports/management?' + q.qs, { headers: pimReportAuthHeaders() }), 'PIM-Manager-management-report.pptx');
+        msg.textContent = 'Downloaded ' + name; msg.style.color = '#116329';
+      } catch (e) { msg.textContent = 'The report could not be made: ' + e.message; msg.style.color = '#cf222e'; }
+      finally { gen.disabled = locked; }
+    };
+    const dl = document.getElementById('mgmtLatest');
+    if (dl) dl.onclick = async () => {
+      const msg = document.getElementById('mgmtLatestMsg');
+      msg.textContent = 'Downloading…'; msg.style.color = '#57606a';
+      try { const name = await pimSaveReportResponse(await fetch('/api/reports/management/latest', { headers: pimReportAuthHeaders() }), (latest && latest.fileName) || 'PIM-Manager-management-report.pptx'); msg.textContent = 'Downloaded ' + name; msg.style.color = '#116329'; }
+      catch (e) { msg.textContent = 'Not downloaded: ' + e.message; msg.style.color = '#cf222e'; }
+    };
+    const sv = document.getElementById('mgmtSave');
+    if (sv) sv.onclick = async () => {
+      const msg = document.getElementById('mgmtSaveMsg');
+      const on = !!(document.getElementById('mgmtMonthlyOn') || {}).checked;
+      const recips = ((document.getElementById('mgmtRecips') || {}).value || '').split(/[\r\n,;]+/).map(x => x.trim()).filter(Boolean);
+      msg.textContent = 'Saving…'; msg.style.color = '#57606a';
+      try {
+        await api('PUT', '/api/reports/management/settings', { monthly: { enabled: on, recipients: recips } });
+        await renderMgmtReportPanel();
+        const m2 = document.getElementById('mgmtSaveMsg'); if (m2) { m2.textContent = 'Saved ✓'; m2.style.color = '#116329'; }
+      } catch (e) { msg.textContent = 'Not saved: ' + e.message; msg.style.color = '#cf222e'; }
+    };
   }
   async function runReport(mode, subject) {
     reportState.mode = mode;
