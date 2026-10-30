@@ -225,6 +225,9 @@ if (Test-Path -LiteralPath "$shared\..\consultant-lifecycle\PIM-CompanyReviewJob
 . "$shared\PIM-OwnerPortal.ps1"
 # §83: auto-extend governance (lead time, review Keep, owner Deny, default ON) + the monthly 'autoextend-report'.
 . "$shared\PIM-AutoExtend.ps1"
+# MGMT-REPORT (Pro): the monthly management report -- the .pptx writer (no module, no Office) and the report model.
+. "$shared\PIM-Pptx.ps1"
+. "$shared\PIM-MgmtReport.ps1"
 
 # Scheduler state + run history + acknowledgements live in SQL pim.Settings (SchedulerState /
 # JobRunHistory / JobAcknowledgements) -- the SAME store the Manager's Jobs tab reads. The old
@@ -440,6 +443,14 @@ Register-PimJobHandler -Type 'autoextend-report' -Handler {
     param($job, $now, $whatIf)
     $r = Invoke-PimAutoExtendReportJob -Job $job -NowUtc $now -WhatIf:$whatIf
     if ($r.failed) { throw "[autoextend-report] $($r.detail)" }
+    $r
+}
+# MGMT-REPORT: the REAL 'mgmt-report' handler. Off (the setting) = a one-read no-op; a report that could not be stored, or a mail
+# that reached nobody, FAILS the run.
+Register-PimJobHandler -Type 'mgmt-report' -Handler {
+    param($job, $now, $whatIf)
+    $r = Invoke-PimMgmtReportMonthlyJob -Job $job -NowUtc $now -WhatIf:$whatIf -ConnectionString "$($global:PIM_SqlConnectionString)"
+    if ($r.failed) { throw "[mgmt-report] $($r.detail)" }
     $r
 }
 # §79.7: the REAL 'owner-review' handler. A mail that could not be sent (not a deliberate hold) FAILS the run.

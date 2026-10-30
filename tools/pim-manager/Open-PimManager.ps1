@@ -310,6 +310,10 @@ if (Test-Path -LiteralPath $_setupLib) { . $_setupLib }
 . (Join-Path $solutionRoot 'engine\_shared\PIM-CommitWatch.ps1')
 # 100.67 EXPORT: every view to Excel (.xlsx, .NET packaging) or PDF (the bundled MigraDoc of 100.61) -- POST /api/export.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-TableExport.ps1')
+# MGMT-REPORT (owner 2026-10-29, Pro): the management report as a PowerPoint -- the .pptx writer (no module, no Office) and the
+# report model (GET /api/reports/management, Reports > Management report). The monthly job runs the same model in the tick.
+. (Join-Path $solutionRoot 'engine\_shared\PIM-Pptx.ps1')
+. (Join-Path $solutionRoot 'engine\_shared\PIM-MgmtReport.ps1')
 # 100.91 GET SUPPORT: a support ticket at Invardia, opened by the SERVER with the install key (never handed to the page) --
 # GET /api/support/ticket, POST /api/support/ticket/draft, POST /api/support/ticket, GET /api/support/tickets.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-SupportTicket.ps1')
@@ -8018,6 +8022,44 @@ function Test-PimManagerProFeature {
     Write-JsonResponse -Response $Response -Status 403 -Body ([ordered]@{ ok = $false; pro = $true; feature = $Key; error = $msg
         contact = 'info@invardia.com'; command = $(if ($pl) { "$($pl.command)" } else { '' }) })
     return $false
+}
+
+function Get-PimManagerMgmtReportReaders {
+    <#
+      MGMT-REPORT: the report's non-SQL sources in THIS process -- the shared readers (engine/_shared/PIM-MgmtReport.ps1), with
+      the access-review read made the Manager's way (its tenant connection first, like GET /api/access-reviews/overdue).
+    #>
+    $r = Get-PimMgmtReportDefaultReaders
+    $r['reviewsOverdue'] = {
+        param($period)
+        if (-not (Get-Command Get-PimAccessReviewOverdue -ErrorAction SilentlyContinue)) { throw 'the access review reader is not loaded in this Manager' }
+        Initialize-PimManagerTenantConnection
+        $rows = @(Get-PimAccessReviewOverdue)
+        [pscustomobject]@{ overdue = [long]@($rows | Where-Object { $_.IsOverdue }).Count; dueSoon = [long]@($rows | Where-Object { $_.IsDueSoon }).Count }
+    }
+    # Tier 0 exposure: the Manager's own tier-impact report (the Reports page's Tier impact -- nested groups included)
+    if (Get-Command Get-PimTierImpactReportLive -ErrorAction SilentlyContinue) {
+        $r['tier'] = {
+            param($period)
+            $t = Get-PimTierImpactReportLive -HighTierMax 1
+            if ($null -eq $t -or $null -eq $t.tier0Count) { throw 'the tier-impact report returned no counts' }
+            [pscustomobject]@{ tier0 = [long]$t.tier0Count; tier1 = [long]$t.tier1Count }
+        }
+    }
+    return $r
+}
+
+function Write-PimManagerFileResponse {
+    # A file download (the management report): 200, its content type, attachment; filename. A client that went away is logged.
+    param([Parameter(Mandatory)]$Response, [Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][string]$ContentType, [Parameter(Mandatory)][string]$FileName)
+    try {
+        $Response.StatusCode = 200
+        $Response.ContentType = $ContentType
+        $Response.AddHeader('Content-Disposition', "attachment; filename=""$FileName""")
+        $Response.ContentLength64 = $Bytes.Length
+        $Response.OutputStream.Write($Bytes, 0, $Bytes.Length)
+        $Response.OutputStream.Close()
+    } catch { Write-Host ("  [net] {0} client gone before the response was written: {1}" -f $FileName, $_.Exception.Message) -ForegroundColor DarkGray }
 }
 
 function Get-PimManagerCadenceJob {
@@ -16919,6 +16961,83 @@ function Handle-Request {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }
                 return 500
             }
+        }
+
+        # ----- MGMT-REPORT (owner 2026-10-29, Pro): the management report as a PowerPoint ------------------------------------
+        #   GET /api/reports/management?sections=kpi,risk,changes,compliance&period=last7|last30|last90|month[&month=yyyy-MM]
+        #        (every signed-in role, like the other reports; Pro) -> the .pptx (engine/_shared/PIM-MgmtReport.ps1). Read-only.
+        #   GET /api/reports/management/latest    (every role; Pro) -> the stored monthly report, 404 when none is stored yet
+        #   GET /api/reports/management/settings  (every role) -> { monthly { enabled; recipients }; latest; sections; periods; canEdit; pro }
+        #   PUT /api/reports/management/settings  (Admin; switching the monthly report ON needs Pro) { monthly { enabled; recipients } }
+        if ($path -eq '/api/reports/management' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerProFeature -Key 'reports.management' -Response $resp)) { return 403 }
+            try {
+                $mrStore = $null; try { $mrStore = Get-PimTenantCacheEntry -Kind 'mgmt-report' } catch { $mrStore = $null }
+                $mr = Invoke-PimMgmtReportRequest -QueryString "$($req.Url.Query)" -ProGate { param($k) [pscustomobject]@{ ok = $true } } `
+                        -ConnectionString "$(Get-PimManagerStoreCs)" -Readers (Get-PimManagerMgmtReportReaders) -History @(Get-PimMgmtReportField $mrStore 'history') `
+                        -Environment (Resolve-PimMgmtReportEnvironment) -LogoPng (Get-PimMgmtReportLogoPng)
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "the management report could not be built: $($_.Exception.Message)" }
+                return 500
+            }
+            if ($mr.status -ne 200) { Write-JsonResponse -Response $resp -Status $mr.status -Body $mr.body; return [int]$mr.status }
+            try { Write-PimManagerAuditEvent -Action 'reports.management.download' -Target "report:$($mr.model.period.key)" -After ([ordered]@{ sections = @($mr.model.sections | ForEach-Object { $_.id }); period = "$($mr.model.period.label)"; notAvailable = @($mr.model.notAvailable); size = $mr.bytes.Length }) -Result 'ok' }
+            catch { Write-Host ("  [audit] could not record the management report download: {0}" -f $_.Exception.Message) -ForegroundColor Yellow }
+            Write-PimManagerFileResponse -Response $resp -Bytes $mr.bytes -ContentType $mr.contentType -FileName $mr.fileName
+            return 200
+        }
+        if ($path -eq '/api/reports/management/latest' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerProFeature -Key 'reports.management' -Response $resp)) { return 403 }
+            $mrStore = $null; $mrErr = ''
+            try { $mrStore = Get-PimTenantCacheEntry -Kind 'mgmt-report'; if ($null -eq $mrStore) { $mrErr = "$(Get-PimTenantCacheReadError -Kind 'mgmt-report')" } } catch { $mrErr = "$($_.Exception.Message)" }
+            $mrLatest = Get-PimMgmtReportField $mrStore 'latest'
+            $mrB64 = "$(Get-PimMgmtReportField $mrLatest 'contentB64')"
+            if (-not $mrB64.Trim()) { Write-JsonResponse -Response $resp -Status 404 -Body @{ ok = $false; error = $(if ($mrErr) { "the stored report could not be read: $mrErr" } else { 'No monthly management report is stored yet: it is built on the first run after the 1st of a month once the monthly report is switched on.' }) }; return 404 }
+            $mrBytes = $null
+            try { $mrBytes = [Convert]::FromBase64String($mrB64) } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = 'the stored report is damaged; it is built again next month' }; return 500 }
+            try { Write-PimManagerAuditEvent -Action 'reports.management.download' -Target "report:$(Get-PimMgmtReportField $mrLatest 'periodKey')" -After ([ordered]@{ stored = $true; size = $mrBytes.Length }) -Result 'ok' } catch { }
+            Write-PimManagerFileResponse -Response $resp -Bytes $mrBytes -ContentType 'application/vnd.openxmlformats-officedocument.presentationml.presentation' -FileName "$(Get-PimMgmtReportField $mrLatest 'fileName')"
+            return 200
+        }
+        if ($path -eq '/api/reports/management/settings' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try {
+                $mrCfg = ConvertTo-PimMgmtReportConfig -Value (Get-PimManagerSetting -Name 'ManagementReport')
+                $mrStore = $null; $mrErr = ''
+                try { $mrStore = Get-PimTenantCacheEntry -Kind 'mgmt-report'; if ($null -eq $mrStore) { $mrErr = "$(Get-PimTenantCacheReadError -Kind 'mgmt-report')" } } catch { $mrErr = "$($_.Exception.Message)" }
+                $mrPro = $false; $mrProMsg = ''
+                try { $pl = Test-PimFeatureProLicence -Key 'reports.management'; $mrPro = [bool]$pl.ok; $mrProMsg = "$($pl.message)" } catch { $mrPro = $false; $mrProMsg = "$($_.Exception.Message)" }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true
+                    monthly = [ordered]@{ enabled = [bool]$mrCfg.monthlyEnabled; recipients = @($mrCfg.recipients) }
+                    latest = (Get-PimMgmtReportLatestView -Store $mrStore); latestError = $mrErr
+                    sections = @(Get-PimMgmtReportSectionCatalog); periods = @(Get-PimMgmtReportPeriodCatalog)
+                    canEdit = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin'); pro = $mrPro; proMessage = $mrProMsg })
+                return 200
+            } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 500 }
+        }
+        if ($path -eq '/api/reports/management/settings' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to change the monthly management report.' }; return 403 }
+            $mb = Read-RequestJson -Request $req
+            $mm = if ($mb -and $mb.PSObject.Properties['monthly']) { $mb.monthly } else { $null }
+            if ($null -eq $mm) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'Nothing to save: send { monthly: { enabled, recipients } }.' }; return 400 }
+            $mrList = @(@($mm.recipients) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+            $mrBad = @($mrList | Where-Object { $_ -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$' })
+            if ($mrBad.Count) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "Not a mail address: $($mrBad -join ', '). Nothing was saved." }; return 400 }
+            $mrOn = [bool]$mm.enabled
+            if ($mrOn -and -not (Test-PimManagerProFeature -Key 'reports.management' -Response $resp)) { return 403 }
+            try {
+                $before = ConvertTo-PimMgmtReportConfig -Value (Get-PimManagerSetting -Name 'ManagementReport')
+                $val = [ordered]@{ monthly = [ordered]@{ enabled = $mrOn; recipients = @($mrList | Select-Object -Unique) } }
+                Set-PimManagerSettingObject -Name 'ManagementReport' -Value $val
+                Write-PimManagerAuditEvent -Action 'reports.management.settings' -Target 'settings:ManagementReport' -Before ([ordered]@{ enabled = $before.monthlyEnabled; recipients = @($before.recipients) }) -After $val.monthly -Result 'ok'
+                # the recipients get the file attached -- they are NOT made Manager users (no access is widened by a mail list)
+                $after = ConvertTo-PimMgmtReportConfig -Value (Get-PimManagerSetting -Name 'ManagementReport')
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; monthly = [ordered]@{ enabled = [bool]$after.monthlyEnabled; recipients = @($after.recipients) } })
+                return 200
+            } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "Not saved: $($_.Exception.Message)" }; return 500 }
         }
 
         # Global search across people / groups / roles / scopes / tags. ?q=<text>

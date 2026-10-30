@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.6 -- 2026-10-29
+
+- Pro: a management report as a PowerPoint -- pick sections and period under Reports > Management report, or switch on a monthly report that is mailed to the people you choose (key figures and trends, risk and exceptions, changes and audit, compliance evidence; a figure that cannot be read says so, never 0); the standalone support scripts no longer carry a comment about published signatures.
+
 ## 3.0.5 -- 2026-10-29
 
 - PIM Manager installs in two lines with a browser sign-in, Community and Pro alike (Start-PimManagerInstall.ps1 -TenantId -SubscriptionId; Pro adds -EnrollmentKey); the Guards menu shows a red count when a guard holds changes for a SuperAdmin; the Departments grid no longer shows departments as blank rows; an Azure refusal that heals on the next run is no longer labelled group not role-assignable; after an update PIM Manager reports any engine permission the new version needs; the engine's Azure rights follow the scopes you define (granted at install and repair, never Owner); engine runs are skipped when nothing changed (a full check still runs every 4 hours); settings can be exported to and imported from a file; restoring a list setting keeps its keys; eligible group owners and a nightly demo reset are built in, both off by default.

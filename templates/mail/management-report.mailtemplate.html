@@ -1,0 +1,12 @@
+<!-- subject: Monthly management report ({{Date}}) -->
+<!-- tokens: ReportHtml, Date, PeriodLabel -->
+<!-- MONTHLY MANAGEMENT REPORT (MGMT-REPORT, Pro): sent by the 'mgmt-report' job once a month, when the monthly report is
+     switched on (Reports > Management report), to the recipients set there. {{ReportHtml}} carries the period and the
+     headline figures as "Topic: text" lines; the PowerPoint itself is attached. To customize: edit it in the Manager
+     (Settings > Mail templates); the edited copy is kept in SQL. -->
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f6f8fa;">
+{{ReportHtml}}
+</body>
+</html>
