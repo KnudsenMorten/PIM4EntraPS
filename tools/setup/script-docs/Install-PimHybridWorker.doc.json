@@ -17,7 +17,7 @@
     { "target": "the worker machine (-Phase Remove)", "action": "remove", "object": "the six scheduled tasks, the gMSA(s) from 'Hybrid agent extension applications' (Arc) and from 'log on as a batch job', C:\\PIM\\app and C:\\PIM\\bin (logs kept); the machine, its agent, PowerShell 7 and the domain membership stay", "why": "retiring the worker (Remove-PimHybridWorker.ps1)", "undo": "-Phase Configure" }
   ],
   "parameters": [
-    { "name": "Phase", "required": true, "default": null, "help": "Join (Azure VM), Configure, Update, Layout, or Remove (unregister the worker's tasks and rights on this machine; Remove-PimHybridWorker.ps1 -Target Arc runs it)." },
+    { "name": "Phase", "required": true, "default": null, "help": "Join (Azure VM), Configure, Update, Layout, Remove (unregister the worker's tasks and rights on this machine; Remove-PimHybridWorker.ps1 -Target Arc runs it), or Guests (read only: lists the other products registered on this machine; Remove-PimHybridWorker.ps1 runs it before it removes a VM)." },
     { "name": "OdjBlob", "required": false, "default": null, "help": "-Phase Join: the offline domain-join blob (gz:...)." },
     { "name": "GmsaName", "required": false, "default": null, "help": "-Phase Configure (required): DOMAIN\\gMSA-PIM-L1-T0." },
     { "name": "ServerGmsaName", "required": false, "default": null, "help": "DOMAIN\\gMSA-PIM-L2-T1 for server onboarding in its own task." },

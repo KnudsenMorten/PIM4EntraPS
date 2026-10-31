@@ -35,6 +35,7 @@
     { "name": "PublicIpName", "required": false, "default": "pip-<vmname>", "help": "Azure: the NAT gateway's public IP." },
     { "name": "PrivateSqlDnsZoneId", "required": false, "default": null, "help": "The privatelink.database.windows.net zone the build linked; its link to the worker VNet is deleted." },
     { "name": "IncludeUntagged", "required": false, "default": "false", "help": "A worker built before the tags: also accept untagged resources carrying exactly the scripts' names in -ResourceGroup. Check the plan first." },
+    { "name": "NoGuestCheck", "required": false, "default": "false", "help": "Azure: do not read the products registered on the VM (C:\\ProgramData\\HybridWorkerHost\\guests) before removing it. Only when the VM cannot run commands and you know no other product's worker is on it; without it, a VM whose registry cannot be read is kept." },
     { "name": "ArcMachineResourceId", "required": false, "default": null, "help": "Arc: the machine's resource id (required for -Target Arc). The machine is never removed." },
     { "name": "ArcApiVersion", "required": false, "default": "2024-07-10", "help": "Microsoft.HybridCompute api-version." },
     { "name": "PrintOnly", "required": false, "default": "false", "help": "Arc: write the self-contained removal script for the server's administrator instead of using run-command." },

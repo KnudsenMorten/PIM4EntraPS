@@ -44,7 +44,7 @@ const KNOWN_BAD_LEGACY_CLIENTIDS = []
 // Pure config helpers (bulk-activate confirm threshold resolution + bounds).
 // Kept in a separate, DOM/chrome-free module so they are unit-testable under
 // Node; the render path is unchanged.
-import { resolveBulkActivateConfirmThreshold, BULK_ACTIVATE_CONFIRM_THRESHOLD_DEFAULT, resolveAutoActivateMaxFromRead, selectAutoActivateTargets, canTickAutoActivateNow, pickAutoActivateCandidates, tickedGroupIdsNotListed, countAutoActivateInUse, graphRetryDelayMs, GRAPH_RETRY_MAX, classifyActivationAnswer, activationAnswerText, isApprovalPendingStatus, APPROVAL_PENDING_TEXT } from './popup-config.js'
+import { resolveBulkActivateConfirmThreshold, BULK_ACTIVATE_CONFIRM_THRESHOLD_DEFAULT, resolveAutoActivateMaxFromRead, selectAutoActivateTargets, canTickAutoActivateNow, pickAutoActivateCandidates, tickedGroupIdsNotListed, countAutoActivateInUse, graphRetryDelayMs, GRAPH_RETRY_MAX, classifyActivationAnswer, activationAnswerText, isApprovalPendingStatus, APPROVAL_PENDING_TEXT, normalizeEndTime, effectiveEndTime, capHoursToEndTime, markEndedToday, isEndedToday, pruneEndedMarkers, AUTO_ACTIVATE_ENDED_TEXT } from './popup-config.js'
 
 // Network resilience primitives (timeout + watchdog). Kept in a separate
 // DOM/chrome-free module so they are unit-testable under Node. A bare fetch()
@@ -1978,6 +1978,7 @@ function isDurationPolicyError(e) {
 
 async function activateGroup(token, groupId, justification, durationHours) {
   // POST assignmentScheduleRequest -- selfActivate, member access, after-MFA per CA policy.
+  durationHours = await applyActivationEndTime(durationHours)   // ACT-ENDTIME: no later than the end-of-day time
   const totalMin = Math.round(durationHours * 60)
   const h = Math.floor(totalMin / 60)
   const m = totalMin % 60
@@ -2146,6 +2147,7 @@ async function classifyWatchedGroup(token, gid) {
 }
 
 async function activateDirectEntraRole(token, roleDefinitionId, directoryScopeId, justification, durationHours) {
+  durationHours = await applyActivationEndTime(durationHours)   // ACT-ENDTIME: no later than the end-of-day time
   const totalMin = Math.round(durationHours * 60)
   const h = Math.floor(totalMin / 60)
   const m = totalMin % 60
@@ -2245,6 +2247,7 @@ async function armPutWithRetry(url, armToken, body) {
 async function activateDirectAzureRbac(armToken, scope, roleDefinitionId, principalId, justification, durationHours) {
   // ARM uses PUT with a client-generated GUID for the request id (the
   // server side dedups via that id; resending the same GUID is a retry).
+  durationHours = await applyActivationEndTime(durationHours)   // ACT-ENDTIME: no later than the end-of-day time
   const guid = ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
     (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c/4).toString(16))
   const totalMin = Math.round(durationHours * 60)
@@ -2463,6 +2466,81 @@ function toggleAutoActivate(rowKey) {
   if (autoActivate[rowKey]) delete autoActivate[rowKey]
   else autoActivate[rowKey] = true
   setStored({ autoActivate }).catch(() => {})
+}
+
+// ACT-REAUTO (customer bug, owner 2026-10-31): a group the user ENDED BY HAND is not auto-activated again until the next
+// local day. Persisted per device in 'autoActivateEndedToday' ({ groupIdLower: 'YYYY-MM-DD' }), pruned on every read/write.
+let autoActivateEnded = {}
+const autoActivateEndedReady = (async () => {
+  try { const s = await getStored(['autoActivateEndedToday']); if (s && s.autoActivateEndedToday && typeof s.autoActivateEndedToday === 'object') autoActivateEnded = pruneEndedMarkers(s.autoActivateEndedToday, new Date()) } catch (_) {}
+})()
+function isAutoActivateEndedToday(groupId) { return isEndedToday(autoActivateEnded, groupId, new Date()) }
+async function rememberManualEnd(groupId) {
+  await autoActivateEndedReady
+  autoActivateEnded = pruneEndedMarkers(markEndedToday(autoActivateEnded, groupId, new Date()), new Date())
+  try { await setStored({ autoActivateEndedToday: autoActivateEnded }) } catch (_) {}
+}
+async function clearManualEnd(groupId) {
+  if (!groupId) return
+  await autoActivateEndedReady
+  const k = String(groupId).toLowerCase()
+  if (!Object.prototype.hasOwnProperty.call(autoActivateEnded, k)) return
+  const next = Object.assign({}, autoActivateEnded); delete next[k]
+  autoActivateEnded = pruneEndedMarkers(next, new Date())
+  try { await setStored({ autoActivateEndedToday: autoActivateEnded }) } catch (_) {}
+}
+
+// ACT-ENDTIME (customer request, owner 2026-10-31): every activation ends no later than the end-of-day time -- the admin's
+// managed 'activationEndTime' ('HH:MM', device policy), or the user's own EARLIER 'userActivationEndTime'. After that time the
+// normal length applies. Read like autoActivateMaxGroups (a slow managed provider's late answer still lands).
+let adminActivationEndTime = ''
+let userActivationEndTime = ''
+let lastEndTimeCap = ''   // 'HH:MM' when the last activation was shortened by it (one calm line in the status)
+const activationEndTimeReady = (async () => {
+  try { const s = await getStored(['userActivationEndTime']); userActivationEndTime = normalizeEndTime(s && s.userActivationEndTime) } catch (_) {}
+  let m = null
+  try { m = await storageGet('managed', ['activationEndTime']) } catch (_) { m = null }
+  if (m && !m.__timedOut) adminActivationEndTime = normalizeEndTime(m.activationEndTime)
+  else storageGet('managed', ['activationEndTime'], 60000).then(late => { if (late && !late.__timedOut) adminActivationEndTime = normalizeEndTime(late.activationEndTime) }).catch(() => {})
+})()
+function currentActivationEndTime() { return effectiveEndTime(adminActivationEndTime, userActivationEndTime) }
+// Every activate* function starts here: the requested hours, capped to the end-of-day time.
+async function applyActivationEndTime(durationHours) {
+  await activationEndTimeReady
+  const end = currentActivationEndTime()
+  const capped = capHoursToEndTime(durationHours, new Date(), end)
+  if (capped !== durationHours) lastEndTimeCap = end
+  return capped
+}
+function endTimeCapText() { return lastEndTimeCap ? ('Ends ' + lastEndTimeCap + ' (end-of-day time).') : '' }
+// The optional 'End by' input next to Duration: the user's own end time, never later than the admin's (refused in one line).
+let endByWired = false
+async function wireEndByInput() {
+  const inp = document.getElementById('end-by'), note = document.getElementById('end-by-note')
+  if (!inp) return
+  await activationEndTimeReady
+  const say = (t) => { if (note) { note.textContent = t || ''; note.style.display = t ? '' : 'none' } }
+  const show = () => {
+    inp.value = userActivationEndTime || adminActivationEndTime || ''
+    if (adminActivationEndTime) inp.max = adminActivationEndTime; else inp.removeAttribute('max')
+    const end = currentActivationEndTime()
+    say(end ? ('Activations end no later than ' + end + ' today' + (adminActivationEndTime && end === adminActivationEndTime ? ' (your organisation).' : '.')) : '')
+  }
+  show()
+  if (endByWired) return
+  endByWired = true
+  inp.addEventListener('change', async () => {
+    const v = normalizeEndTime(inp.value)
+    if (v && adminActivationEndTime && v > adminActivationEndTime) {
+      say('Your organisation ends activations at ' + adminActivationEndTime + ' -- choose that time or earlier.')
+      inp.value = userActivationEndTime || adminActivationEndTime
+      return
+    }
+    // the admin's own time typed back in = no personal time of its own
+    userActivationEndTime = (v && v !== adminActivationEndTime) ? v : ''
+    try { await setStored({ userActivationEndTime }) } catch (_) {}
+    show()
+  })
 }
 
 function recordActivation(groupId) {
@@ -3653,6 +3731,7 @@ function renderOneMyAccessRow(r) {
           await deactivateDirectAzureRbac(arm, r.armScope, r.roleDefinitionId, r.principalId, 'User-initiated deactivation from PIM Activator')
         } else {
           await deactivateGroup(tk, r.groupId, 'User-initiated deactivation from PIM Activator')
+          await rememberManualEnd(r.groupId)   // ACT-REAUTO: not auto-activated again until tomorrow
         }
         logDiag('Deactivated: ' + (r.displayName || r.groupName || r.groupId || r.rowKey || '(row)'))
         btn.textContent = 'Deactivated'
@@ -4073,6 +4152,7 @@ function render() {
         }
       }
       toggleAutoActivate(idAttr)   // persist the auto-on-open preference (OFF by default)
+      if (autoCb.checked && r.groupId) await clearManualEnd(r.groupId)   // ACT-REAUTO: a fresh tick is the user asking again
       // Ticking 'auto' STARTS the activation now (operator expectation) -- this group
       // ONLY, no chain. Unticking just stops auto-on-open; it never deactivates.
       if (autoCb.checked && !r.isActive && r.groupId) {
@@ -4477,7 +4557,14 @@ function scheduleAutoActivateWait(token) {
 }
 
 async function runAutoActivationsOnce(token) {
-  const marked = pickAutoActivateCandidates(eligibleRows || [], isAutoActivate, autoActivateAttempted)
+  // ACT-REAUTO: groups the user ended by hand today are skipped (until the next local day) and say why on their row
+  await autoActivateEndedReady
+  for (const r of (eligibleRows || [])) {
+    if (r && r.kind === 'group' && !r.depth && !r.isActive && r.groupId && isAutoActivate(r.rowKey || ('group:' + r.groupId)) && isAutoActivateEndedToday(r.groupId)) {
+      try { setStatus(r.rowKey || ('group:' + r.groupId), AUTO_ACTIVATE_ENDED_TEXT, '') } catch (_) {}
+    }
+  }
+  const marked = pickAutoActivateCandidates(eligibleRows || [], isAutoActivate, autoActivateAttempted, isAutoActivateEndedToday)
   if (!marked.length) return
   // Per-device cap (autoActivateMaxGroups). Ticks made before the cap was lowered are kept, but only
   // the first N run; the rest are named on their rows after the reload, never activated.
@@ -4822,6 +4909,7 @@ async function loaded(token) {
 
   els.just.value = stored.lastJustification ?? (cfg.defaultJustification || '')
   els.dur.value  = stored.lastDurationHours ?? (cfg.defaultDurationHours || 8)
+  wireEndByInput()   // ACT-ENDTIME
 
   const readyCount  = eligibleRows.filter(r => !r.isActive).length
   const activeCount = eligibleRows.filter(r =>  r.isActive).length
@@ -5001,6 +5089,7 @@ async function loaded(token) {
             await deactivateDirectAzureRbac(arm, r.armScope, r.roleDefinitionId, r.principalId, 'User-initiated bulk deactivation from PIM Activator')
           } else {
             await deactivateGroup(tk, r.groupId, 'User-initiated bulk deactivation from PIM Activator')
+            await rememberManualEnd(r.groupId)   // ACT-REAUTO: not auto-activated again until tomorrow
           }
           ok2++
           logDiag('Deactivated (bulk): ' + (r.displayName || r.groupName || r.groupId || r.rowKey || '(row)'))
@@ -5191,6 +5280,7 @@ async function loaded(token) {
 
         let usedHours = dur
         let out
+        lastEndTimeCap = ''   // ACT-ENDTIME: set by applyActivationEndTime when this activation is shortened
         try {
           out = await attempt(dur)
         } catch (e) {
@@ -5213,7 +5303,9 @@ async function loaded(token) {
 
         if (statusOk) {
           setStatus(rk,
-            usedHours === dur
+            lastEndTimeCap
+              ? `active - ${endTimeCapText()} See My Access tab`
+              : usedHours === dur
               ? `active for ${dur}h - see My Access tab`
               : `active for ${usedHours}h (policy maximum; you asked for ${dur}h) - see My Access tab`,
             'ok')

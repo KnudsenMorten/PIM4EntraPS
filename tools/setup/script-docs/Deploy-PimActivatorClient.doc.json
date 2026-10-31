@@ -32,6 +32,7 @@
     { "name": "DefaultDurationHours", "required": false, "default": 8, "help": "The activation length the extension pre-fills, 1-24 hours (overrides the catalog's)." },
     { "name": "AutoActivateMaxGroups", "required": false, "default": "not set (left alone)", "help": "Per-device cap on auto-activation: 0 = off, N = at most N groups, -1 = remove the cap." },
     { "name": "BulkActivateConfirmThreshold", "required": false, "default": "not set (left alone)", "help": "Per-device 'click again to confirm' threshold for bulk activation: 1-100, -1 = remove it. Both extensions." },
+    { "name": "ActivationEndTime", "required": false, "default": "not set (left alone)", "help": "Per-device end-of-day time 'HH:MM' (local time): every activation ends no later than this today; 'none' = remove it. Both extensions." },
     { "name": "Prefix", "required": false, "default": "", "help": "With -TenantId and -ClientId: list only groups whose names start with this text." },
     { "name": "EntraPrefix", "required": false, "default": "", "help": "With -TenantId and -ClientId: list only Entra roles whose names start with this text." },
     { "name": "AzurePrefix", "required": false, "default": "", "help": "With -TenantId and -ClientId: list only Azure roles whose names start with this text." },

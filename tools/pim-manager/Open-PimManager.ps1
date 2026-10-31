@@ -16807,12 +16807,15 @@ function Handle-Request {
                 $auto = if ("$($b.autoActivateMaxGroups)" -match '^\d+$') { [int]$b.autoActivateMaxGroups } else { $null }
                 $bulk = if ("$($b.bulkActivateConfirmThreshold)" -match '^\d+$') { [int]$b.bulkActivateConfirmThreshold } else { $null }
                 $browsers = @(@($b.browsers) | Where-Object { $_ }); if (-not $browsers.Count) { $browsers = @('Edge', 'Chrome') }
+                # ACT-ENDTIME (owner 2026-10-31): 'HH:MM' 00:00-23:59 or empty; a time input may send 'HH:MM:SS' -- keep HH:MM
+                $endT = "$($b.activationEndTime)".Trim(); if ($endT -match '^(\d{2}:\d{2}):\d{2}$') { $endT = $Matches[1] }
+                if ($endT -and $endT -notmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') { throw "Activations end by must be a time HH:MM between 00:00 and 23:59 (got '$endT')." }
                 $xtText = ''; try { $xtText = "$(Get-PimSetting -Name 'ActivatorAdditionalTenants')".Trim() } catch { }
                 $pair = New-PimActivatorRemediationPair -TenantId $tid -ClientId "$($b.clientId)" -Name "$($b.name)" -Channel $channel -Browsers $browsers -DefaultJustification $just `
-                    -DefaultDurationHours $hrs -Prefix "$($b.prefix)" -EntraPrefix "$($b.entraPrefix)" -AzurePrefix "$($b.azurePrefix)" -AutoActivateMaxGroups $auto -BulkActivateConfirmThreshold $bulk -AdditionalTenantsJson $xtText
+                    -DefaultDurationHours $hrs -Prefix "$($b.prefix)" -EntraPrefix "$($b.entraPrefix)" -AzurePrefix "$($b.azurePrefix)" -AutoActivateMaxGroups $auto -BulkActivateConfirmThreshold $bulk -AdditionalTenantsJson $xtText -ActivationEndTime $endT
                 $targets = ConvertTo-PimActivatorTargets $null; try { $targets = ConvertTo-PimActivatorTargets (Get-PimSetting -Name 'ActivatorTargets') } catch { }
                 $settings = @{ name = "$($b.name)"; additionalTenants = $xtText; defaultJustification = $just; defaultDurationHours = $hrs; prefix = "$($b.prefix)"; entraPrefix = "$($b.entraPrefix)"; azurePrefix = "$($b.azurePrefix)"
-                               autoActivateMaxGroups = $(if ($null -ne $auto) { "$auto" } else { '' }); bulkActivateConfirmThreshold = $(if ($null -ne $bulk) { "$bulk" } else { '' }); browsers = $browsers }
+                               autoActivateMaxGroups = $(if ($null -ne $auto) { "$auto" } else { '' }); bulkActivateConfirmThreshold = $(if ($null -ne $bulk) { "$bulk" } else { '' }); activationEndTime = $endT; browsers = $browsers }
                 $every = if ("$($b.everyHours)" -match '^\d+$') { [int]$b.everyHours } else { 0 }
                 $cmd = Get-PimActivatorCommands -TenantId $tid -Channel $channel -Targets $targets -Settings $settings -ClientId "$($b.clientId)" -TestClientId "$($b.clientId)" -DailyTime "$($b.dailyTime)" -EveryHours $every
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; channel = $channel; catalog = $pair.catalog; detect = $pair.detect; remediate = $pair.remediate; commands = $cmd })

@@ -13,6 +13,7 @@
 #            tenantCatalog                  REG_SZ     the tenants (JSON)                       always written
 #            autoActivateMaxGroups          REG_DWORD  the auto-activate cap                    written, or removed when $null
 #            bulkActivateConfirmThreshold   REG_DWORD  the "click again to confirm" threshold   written, or removed when $null
+#            activationEndTime              REG_SZ     the end-of-day time 'HH:MM'              written, or removed when $null
 #
 #      PRODUCTION AND TEST BEHAVE THE SAME. The tenant catalog goes to the extension of $Channel (it names the app that
 #      extension signs in with). The two LIMITS go to BOTH PIM Activator extensions (production and test) with the same
@@ -135,6 +136,12 @@ $AutoActivateMaxGroups = $null
 #   1-100  = your threshold. A tenant's own "bulkActivateConfirmThreshold" in the catalog wins over this.
 $BulkActivateConfirmThreshold = $null
 
+# End-of-day time: every activation ends no later than this local time today, e.g. '16:00' (24-hour 'HH:MM').
+#   $null   = no end time (the value is removed from the device)
+#   'HH:MM' = activations end at this time, or after their normal duration if that is sooner. One started after this
+#             time gets its normal duration. A user may choose an earlier time for themselves, never a later one.
+$ActivationEndTime = $null
+
 # Repair on request: what to do when the RepairStuck flag is set but the browser (Edge / Chrome) is open.
 #   $false = wait -- change nothing, keep the flag, try again on the next run (recommended)
 #   $true  = close the browsers and repair now
@@ -154,6 +161,7 @@ $BrowserInfo  = @{
 $Selected     = @($Browsers | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
 $unknown      = @($Selected | Where-Object { -not $BrowserInfo.ContainsKey($_) })
 if (-not $Selected.Count -or $unknown.Count) { Write-Output "FAILED: `$Browsers must be 'Edge', 'Chrome' or both (got '$($Browsers -join "', '")')."; exit 1 }
+if ($null -ne $ActivationEndTime -and "$ActivationEndTime" -notmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') { Write-Output "FAILED: `$ActivationEndTime must be 'HH:MM' between 00:00 and 23:59 (got '$ActivationEndTime')."; exit 1 }
 # The catalog is stored compact and always as a list [ ... ]. The "| ForEach-Object { $_ }" keeps it a plain list on
 # Windows PowerShell 5.1 (which Intune uses) -- without it 5.1 stores {"value":[...],"Count":1} and sign-in breaks.
 $Catalog      = ConvertTo-Json -InputObject @($TenantCatalog | ConvertFrom-Json | ForEach-Object { $_ }) -Depth 10 -Compress
@@ -181,15 +189,18 @@ try {
             else                                         { $key.DeleteValue('autoActivateMaxGroups', $false) }
             if ($null -ne $BulkActivateConfirmThreshold) { $key.SetValue('bulkActivateConfirmThreshold', [int]$BulkActivateConfirmThreshold, 'DWord') }
             else                                         { $key.DeleteValue('bulkActivateConfirmThreshold', $false) }
+            if ($null -ne $ActivationEndTime)            { $key.SetValue('activationEndTime', [string]$ActivationEndTime, 'String') }
+            else                                         { $key.DeleteValue('activationEndTime', $false) }
             $key.Close()
         }
         $hklm.Close()
     }
-    Write-Output ("Settings written ({0}; {4}): {1} tenant(s), cap = {2}, confirm threshold = {3} (the limits for production AND test)." -f $Channel,
+    Write-Output ("Settings written ({0}; {4}): {1} tenant(s), cap = {2}, confirm threshold = {3}, end time = {5} (the limits for production AND test)." -f $Channel,
         @($TenantCatalog | ConvertFrom-Json | ForEach-Object { $_ }).Count,
         $(if ($null -eq $AutoActivateMaxGroups) { 'none' } else { $AutoActivateMaxGroups }),
         $(if ($null -eq $BulkActivateConfirmThreshold) { 'default' } else { $BulkActivateConfirmThreshold }),
-        ($Selected -join ' + '))
+        ($Selected -join ' + '),
+        $(if ($null -eq $ActivationEndTime) { 'none' } else { $ActivationEndTime }))
 } catch {
     Write-Output "FAILED to write the PIM Activator settings: $($_.Exception.Message)"
     exit 1

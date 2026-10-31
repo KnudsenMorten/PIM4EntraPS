@@ -7,7 +7,7 @@
 #      1. the PIM Activator settings are exactly as in the SETTINGS block below, for every browser in $Browsers
 #            Edge:    HKLM\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\<extension id>\policy
 #            Chrome:  HKLM\SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\<extension id>\policy
-#            (tenantCatalog for the extension of $Channel; autoActivateMaxGroups + bulkActivateConfirmThreshold with the
+#            (tenantCatalog for the extension of $Channel; autoActivateMaxGroups + bulkActivateConfirmThreshold + activationEndTime with the
 #             SAME values for BOTH PIM Activator extensions -- production and test behave the same)
 #      2. nobody has asked for a repair -- the RepairStuck flag is not set, neither by a user
 #            HKCU\Software\PIM4EntraPS\PimActivator  RepairStuck = 1   (any signed-in user)
@@ -48,6 +48,9 @@ $AutoActivateMaxGroups = $null
 # Confirm threshold:   $null = default (5) | 1-100 = the Activate button asks for a 2nd click at this many roles
 $BulkActivateConfirmThreshold = $null
 
+# End-of-day time:     $null = none | 'HH:MM' = activations end no later than this local time today
+$ActivationEndTime = $null
+
 # Repair on request, when the browser is open:   $false = wait until it is closed | $true = close Edge/Chrome   (used by Remediate)
 $CloseEdge = $false
 
@@ -70,6 +73,7 @@ try {
     $problems = @()
     $unknown = @($Selected | Where-Object { -not $PolicyRoots.ContainsKey($_) })
     if (-not $Selected.Count -or $unknown.Count) { $problems += "`$Browsers must be 'Edge', 'Chrome' or both (got '$($Browsers -join "', '")')" }
+    if ($null -ne $ActivationEndTime -and "$ActivationEndTime" -notmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') { $problems += "`$ActivationEndTime must be 'HH:MM' between 00:00 and 23:59 (got '$ActivationEndTime')" }
     # 1. the settings, per browser (64-bit registry, as the browsers read it)
     foreach ($b in @($Selected | Where-Object { $PolicyRoots.ContainsKey($_) })) {
         $hklm = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry64')
@@ -86,6 +90,7 @@ try {
             if (-not $key) { if ($id -ne $ExtensionId) { $problems += "$b`: the limits are not set$which" }; continue }
             if ("$($key.GetValue('autoActivateMaxGroups'))" -ne "$AutoActivateMaxGroups") { $problems += "$b`: the auto-activate cap differs (device '$($key.GetValue('autoActivateMaxGroups'))', wanted '$AutoActivateMaxGroups')$which" }
             if ("$($key.GetValue('bulkActivateConfirmThreshold'))" -ne "$BulkActivateConfirmThreshold") { $problems += "$b`: the confirm threshold differs (device '$($key.GetValue('bulkActivateConfirmThreshold'))', wanted '$BulkActivateConfirmThreshold')$which" }
+            if ("$($key.GetValue('activationEndTime'))" -ne "$ActivationEndTime") { $problems += "$b`: the end-of-day time differs (device '$($key.GetValue('activationEndTime'))', wanted '$ActivationEndTime')$which" }
             $key.Close()
         }
         $hklm.Close()

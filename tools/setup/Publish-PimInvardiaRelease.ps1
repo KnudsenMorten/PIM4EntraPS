@@ -256,7 +256,9 @@ function Get-PimEngineHashAtTag([string]$RepoRoot, [string]$Ref) {
     try { return ([BitConverter]::ToString($s.ComputeHash([Text.Encoding]::UTF8.GetBytes(($norm -join "`n"))))).Replace('-', '').ToLowerInvariant() } finally { $s.Dispose() }
 }
 $engineHash = Get-PimEngineHashAtTag $repo $tag
-$prevTag = @(& git -C $repo tag -l 'PIM4EntraPS-v2.*' 2>$null | ForEach-Object { $v = "$_" -replace '^PIM4EntraPS-v', ''; try { [pscustomobject]@{ tag = "$_"; v = [version]$v } } catch { } } |
+# BUG-PREVTAG-V3b (2026-10-31): was 'PIM4EntraPS-v2.*' -- every 3.x release compared its engine with the last 2.4.x tag, so
+# engineChanged was always true (the safe side, but wrong). Every major, compared as [version] (as Get-PimPreviousReleaseTag).
+$prevTag = @(& git -C $repo tag -l 'PIM4EntraPS-v*' 2>$null | ForEach-Object { $v = "$_" -replace '^PIM4EntraPS-v', ''; try { [pscustomobject]@{ tag = "$_"; v = [version]$v } } catch { } } |
              Where-Object { $_.v -lt [version]$Version } | Sort-Object v -Descending | Select-Object -First 1)
 $prevHash = if ($prevTag) { Get-PimEngineHashAtTag $repo $prevTag[0].tag } else { '' }
 $engineChanged = (-not $engineHash -or -not $prevHash -or $engineHash -ne $prevHash)

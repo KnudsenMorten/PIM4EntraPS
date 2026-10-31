@@ -24,7 +24,9 @@
                      sits in its subnet), the NAT gateway + its public IP, the NSG, and the resource group when PIM created
                      it and it is empty
         SHARED HOST: when the VM also hosts another product's worker (it carries a user-assigned managed identity, which
-        PIM's worker never attaches), only PIM's own part goes: the grants above, and PIM's tasks, rights and C:\PIM\app +
+        PIM's worker never attaches, or the product is registered on the box in
+        C:\ProgramData\HybridWorkerHost\guests\<product>.json -- read first through a read-only run-command; when that
+        cannot be read the VM is kept, -NoGuestCheck skips the read), only PIM's own part goes: the grants above, and PIM's tasks, rights and C:\PIM\app +
         bin on the VM through run-command. The VM, its disk and NIC, the worker VNet with its peerings, private DNS link,
         NAT gateway and NSG all stay, so the other product keeps running. Remove that product's worker first to remove the VM.
     -Target Arc: 1 grants and 2 the SQL firewall rules 'pimhybridwrk-arc-<server>-<n>' as above, then 3 the worker's tasks
@@ -71,6 +73,8 @@ param(
     [string]$PublicIpName = '',
     [string]$PrivateSqlDnsZoneId = '',
     [switch]$IncludeUntagged,
+    # 80.2a: skip reading the on-box guest registry (only when the VM cannot run commands and no other product is on it)
+    [switch]$NoGuestCheck,
     # Arc
     [string]$ArcMachineResourceId = '',
     [string]$ArcApiVersion = '2024-07-10',
@@ -172,6 +176,19 @@ function Get-PimHwGuestIdentities {
     $ids | Where-Object { "$_".Trim() } | ForEach-Object { ("$_" -split '/')[-1] }
 }
 
+function Get-PimHwGuestFiles {
+    <#
+      PURE. PIM 80.2a: the output of Install-PimHybridWorker.ps1 -Phase Guests (read on the box through run-command) ->
+      @{ read = $true|$false; guests = @('<product> (guests\<file>)', ...) }. read = $false when the count line is missing
+      (the phase did not run to its end), so the caller never takes "no answer" for "no guest".
+    #>
+    param([string]$Output)
+    $lines = @("$Output" -split "`r?`n" | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $count = @($lines | Where-Object { $_ -match '^PIM-HW-GUESTS (\d+)$' })
+    $names = @($lines | Where-Object { $_ -match '^PIM-HW-GUEST (\S+) (\S+) (\S+)$' } | ForEach-Object { $null = $_ -match '^PIM-HW-GUEST (\S+) (\S+) (\S+)$'; "$($Matches[2]) (guests\$($Matches[1]))" })
+    return @{ read = [bool]$count.Count; guests = $names }
+}
+
 # ---------------------------------------------------------------------------------------------------- the plan
 $plan = New-Object System.Collections.Generic.List[object]
 $kept = New-Object System.Collections.Generic.List[string]
@@ -204,11 +221,37 @@ if ($Target -eq 'Azure') {
     $vm = Invoke-PimSetupArm -Path $vmId -ApiVersion $computeApi -NotFoundOk
     $own = Get-PimHwOwnership -Resource $vm -Worker $worker -ExpectedName $VmName -AllowName ([bool]$IncludeUntagged)
     $guests = @(Get-PimHwGuestIdentities -Vm $vm)
+    # 80.2a / framework 12.26 item 5: a guest also REGISTERS on the box (C:\ProgramData\HybridWorkerHost\guests\<product>.json),
+    # e.g. one without a user-assigned identity. Read it (Install-PimHybridWorker.ps1 -Phase Guests: read only, through a
+    # run-command that is deleted again) before the VM is taken for PIM's alone. No answer = the VM is KEPT, never deleted on
+    # a doubt; -NoGuestCheck skips the read when the VM cannot run commands and you know no other product is on it.
+    # The read is a run-command (a PUT), so a PLAN (no -Apply, or -WhatIf) does not make it: it only says so. With -Apply it
+    # runs HERE, before the plan is built -- so before anything at all is deleted.
+    if ($vm -and $own -and -not $guests.Count -and -not $NoGuestCheck -and -not ($Apply -and -not $WhatIfPreference)) {
+        Info "VM ${VmName}: the on-box guest registry (C:\ProgramData\HybridWorkerHost\guests) is read at -Apply, before anything is deleted; a registered product keeps the VM"
+    }
+    if ($vm -and $own -and -not $guests.Count -and -not $NoGuestCheck -and $Apply -and -not $WhatIfPreference) {
+        $gRead = @{ read = $false; guests = @() }; $gWhy = ''
+        if ($PrintOnly) { $gWhy = '-PrintOnly: run-command is not used' }
+        else {
+            try {
+                $gr = @(& (Join-Path $PSScriptRoot 'Invoke-PimHybridWorkerRunCommand.ps1') -SubscriptionId $SubscriptionId -TenantId $TenantId -MachineResourceId "$($vm.id)" -Phase Guests -InstallParameters @{ HostType = 'AzureVm' } -TimeoutMinutes 10 -PollSeconds $PollSeconds -WhatIf:$false)
+                $go = @($gr | Where-Object { $_ -and $_.PSObject.Properties['delivered'] })[-1]
+                if ("$($go.delivered)" -eq 'run-command' -and $go.ok) { $gRead = Get-PimHwGuestFiles -Output "$($go.output)" }
+                if (-not $gRead.read) { $gWhy = "the guest registry could not be read ($(if ($go) { "$($go.delivered) $($go.state) $($go.error)".Trim() } else { 'no answer' }))" }
+            } catch { $gWhy = "the guest registry could not be read ($($_.Exception.Message))" }
+        }
+        if ($gRead.read -and $gRead.guests.Count) { $guests = @($gRead.guests); Info "VM $VmName hosts another product (registered on the box): $($guests -join ', ')" }
+        elseif (-not $gRead.read) {
+            $guests = @('(unknown -- not read)')
+            Add-Kept "VM $VmName and everything it needs -- $gWhy; start the VM and run this again, or add -NoGuestCheck when you know no other product's worker is on it"
+        }
+    }
     if ($vm -and $own -and $guests.Count) {
         # 80.2a: another product's worker lives here -- PIM removes only its OWN part (grants, its tasks and folder on the VM
         # through run-command); the VM, its disk, NIC and network stay until that product has removed its worker.
         $principalId = "$($vm.identity.principalId)"
-        Add-Kept "VM $VmName, its NIC, disk and network -- it also hosts another product's worker (user-assigned identity: $($guests -join ', ')). Remove that product's worker first; then run this again to remove the VM"
+        Add-Kept "VM $VmName, its NIC, disk and network -- it also hosts another product's worker ($($guests -join ', ')). Remove that product's worker first; then run this again to remove the VM"
     } elseif ($vm -and $own) {
         $vmOwned = $true
         $principalId = "$($vm.identity.principalId)"

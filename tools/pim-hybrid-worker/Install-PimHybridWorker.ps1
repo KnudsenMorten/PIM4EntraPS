@@ -64,7 +64,8 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [Parameter(Mandatory)][ValidateSet('Join', 'Configure', 'Update', 'Layout', 'Remove')][string]$Phase,
+    # Guests (PIM 80.2a, framework 12.26): READ ONLY -- lists the other products registered on this host
+    [Parameter(Mandatory)][ValidateSet('Join', 'Configure', 'Update', 'Layout', 'Remove', 'Guests')][string]$Phase,
     [string]$OdjBlob,
     [string]$GmsaName,
     # 2.4.467 tier split (operator 2026-09-30): server onboarding runs as its OWN gMSA (DOMAIN\gMSA-PIM-L2-T1), in its own
@@ -125,7 +126,7 @@ function Get-PimSelfContainedText([string]$Text) {
 }
 
 # ------------------------------------------------------------------ -WhatIf: the plan, nothing changed
-if ($WhatIfPreference) {
+if ($WhatIfPreference -and $Phase -ne 'Guests') {   # Guests only reads: it runs under -WhatIf too
     $ht = Resolve-PimHostType $HostType
     Step "PLAN (-WhatIf) -- nothing is changed: -Phase $Phase on this $(if ($ht -eq 'Arc') { 'Azure Arc-enabled server' } else { 'Azure VM' }) ($ht)"
     switch ($Phase) {
@@ -164,6 +165,23 @@ if ($Phase -eq 'Join') {
     } finally { if (Test-Path $f) { Remove-Item -LiteralPath $f -Force } }
     Step 'offline domain join staged -- rebooting to complete it'
     if (-not $NoReboot) { & shutdown.exe /r /t 15 /c 'PIM hybrid worker: completing the domain join' | Out-Null }
+    return
+}
+
+# ------------------------------------------------------------------ Guests (PIM 80.2a, framework 12.26 SHARED-WORKER)
+if ($Phase -eq 'Guests') {
+    # READ ONLY. Another product hosted on this machine registers in C:\ProgramData\HybridWorkerHost\guests\<product>.json
+    # (written on its install, deleted on its remove). One line per file: "PIM-HW-GUEST <file> <product> <taskPath>", then
+    # "PIM-HW-GUESTS <count>". An unreadable file still counts as a guest (the host must not delete the machine on a doubt).
+    $gDir = Join-Path $env:ProgramData 'HybridWorkerHost\guests'
+    $gFiles = @(if (Test-Path -LiteralPath $gDir) { Get-ChildItem -LiteralPath $gDir -Filter '*.json' -File -ErrorAction SilentlyContinue })
+    foreach ($gf in $gFiles) {
+        $gp = ''; $gt = ''
+        try { $gj = Get-Content -LiteralPath $gf.FullName -Raw | ConvertFrom-Json; $gp = "$($gj.product)".Trim(); $gt = "$($gj.taskPath)".Trim() } catch { $gp = '(unreadable)' }
+        if (-not $gp) { $gp = $gf.BaseName }
+        Write-Output ("PIM-HW-GUEST {0} {1} {2}" -f $gf.Name, ($gp -replace '\s', '_'), $(if ($gt) { $gt -replace '\s', '_' } else { '-' }))
+    }
+    Write-Output "PIM-HW-GUESTS $($gFiles.Count)"
     return
 }
 

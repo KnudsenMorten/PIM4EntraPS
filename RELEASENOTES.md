@@ -13,13 +13,17 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.10 -- 2026-10-31
+
+- PIM Activator: your organisation can set a time of day that every activation ends by, on the Client onboarding page; A mail send right is never removed when Exchange does not report a scope's filter; A managed-tenant build no longer sets up the mail sender (your Exchange administrator does, under Get Started > Mail sender); Removing the hybrid worker keeps the server when another product is registered on it, and keeps it when that cannot be checked; The release record now says correctly whether the engine changed since the previous release
+
 ## 3.0.9 -- 2026-10-31
 
 - Browser sign-ins in the setup and PIM Activator scripts no longer end with "This site can't be reached": the sign-in page answers every request from the browser until the sign-in is done, and for a few seconds after
 
 ## 3.0.8 -- 2026-10-31
 
-- The installation no longer sets up the mail sender by default: no mailbox is created and the installing account gets no Exchange role; your Exchange administrator sets it up afterwards (Get Started > Mail sender) Removing the hybrid worker leaves the server standing when another product's worker runs on it, and removes only PIM Manager's own part
+- The installation no longer sets up the mail sender by default: no mailbox is created and the installing account gets no Exchange role -- your Exchange administrator sets it up afterwards (Get Started > Mail sender); Removing the hybrid worker leaves the server standing when another product's worker runs on it, and removes only PIM Manager's own part
 
 ## 3.0.7 -- 2026-10-30
 

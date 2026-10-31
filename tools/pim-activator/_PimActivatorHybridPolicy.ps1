@@ -769,7 +769,9 @@ function Get-PaHybridRegistryPlan {
         [ValidateRange(0, 100)][int]$BulkThreshold = 0,
         # Per-DEVICE auto-activate cap (2026-09-23): autoActivateMaxGroups DWORD next to tenantCatalog.
         # -1 = not written (no limit); 0 = auto-activation off; N = at most N groups.
-        [ValidateRange(-1, 100)][int]$AutoActivateMaxGroups = -1
+        [ValidateRange(-1, 100)][int]$AutoActivateMaxGroups = -1,
+        # ACT-ENDTIME (owner 2026-10-31): activationEndTime REG_SZ 'HH:MM' next to tenantCatalog. '' = not written.
+        [ValidatePattern('^(([01][0-9]|2[0-3]):[0-5][0-9])?$')][string]$ActivationEndTime = ''
     )
 
     $WhatIfPreference = $false   # pure builder -- never a confirmable op
@@ -842,6 +844,15 @@ function Get-PaHybridRegistryPlan {
             })
         }
 
+        # 4d. End-of-day time (ACT-ENDTIME) -- device policy only, never inside tenantCatalog.
+        if ("$ActivationEndTime".Trim()) {
+            $entries.Add([pscustomobject]@{
+                Browser = $b; Policy = 'ActivationEndTime'; Hive = 'HKLM'
+                Key = $thirdKey; ValueName = 'activationEndTime'
+                ValueKind = 'String'; Value = "$ActivationEndTime".Trim(); Action = 'Set'
+            })
+        }
+
         $slots[$b] = [pscustomobject]@{ Forcelist = $fl.Slot; ForcelistReused = $fl.Reused; Sources = $sr.Slot; SettingsLayout = $es.Layout }
     }
 
@@ -877,6 +888,8 @@ function ConvertTo-PaHybridManagedConfigObject {
         if ($bulk.Count -gt 0) { $managed['bulkActivateConfirmThreshold'] = [int]$bulk[0].Value }
         $amx = @($Plan.Entries | Where-Object { $_.Browser -eq $b -and $_.Policy -eq 'AutoActivateMax' } | Select-Object -First 1)
         if ($amx.Count -gt 0) { $managed['autoActivateMaxGroups'] = [int]$amx[0].Value }
+        $aet = @($Plan.Entries | Where-Object { $_.Browser -eq $b -and $_.Policy -eq 'ActivationEndTime' } | Select-Object -First 1)
+        if ($aet.Count -gt 0) { $managed['activationEndTime'] = [string]$aet[0].Value }
         $out[$b] = [ordered]@{
             ExtensionInstallForcelist = @($Plan.ForcelistValue)
             ExtensionInstallSources   = @(($Plan.Entries | Where-Object { $_.Browser -eq $b -and $_.Policy -eq 'Sources' } | Select-Object -First 1).Value)
