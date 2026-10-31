@@ -197,6 +197,13 @@ function Test-PimInstallConfig {
     $ms = "$(& $get 'mailSender')".Trim()
     if ($ms -and $ms -notmatch $upn) { $err.Add("mailSender '$ms' is not an e-mail address") }
     $c.mailSender = $ms
+    # MAIL-SKIP (owner 2026-10-31, Pingala): the install leaves the mail sender to the tenant's own Exchange admin
+    # (Initialize-PimMailSender, browser sign-in) -- the installing identity is given no Exchange role at all.
+    # DEFAULT ON (owner 2026-10-31, both products: "mail is skipped in setup"): not given = skipped, unless a mailSender is
+    # named (the explicit ask for the install to create it).
+    $skRaw = & $get 'skipMailSender'
+    $c.skipMailSender = if ($null -eq $skRaw -or "$skRaw".Trim() -eq '') { -not $ms } else { "$skRaw".Trim() -notin 'false', '0', 'no' }
+    if ($c.skipMailSender -and $ms) { $err.Add("mailSender '$ms' and skipMailSender exclude each other -- the install either creates the sender or leaves it to the Exchange admin") }
     # INSTALL-HARDEN-1 item 5 (owner 2026-10-08): who gets the alerts. Invardia's wizard pre-fills it (and superAdmins) with
     # the requester's address; empty = the SuperAdmins' mailboxes. A stored list is never overwritten by an install.
     $ar = @(@(& $get 'alertRecipients') | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
@@ -382,6 +389,7 @@ function ConvertTo-PimInstallDeployArgs {
     if ($Config.allowAllMembers) { $a['EasyAuthAllowAllTenantUsers'] = $true }
     if ($Config.engineAzureRootUserAccessAdmin) { $a['EngineAzureRootUserAccessAdmin'] = $true }   # §97 opt-in
     if ("$($Config.mailSender)".Trim()) { $a['MailSender'] = "$($Config.mailSender)".Trim() }
+    if ($Config.skipMailSender) { $a['SkipMailSender'] = $true }   # MAIL-SKIP: no Exchange role for the installing identity
     # INSTALL-HARDEN-1: the alert recipients (else the SuperAdmins' mailboxes); the deploy's own end-of-install verify is
     # skipped -- Install-PimManager runs it after the licence and the support access; and the deploy never posts to Invardia
     # itself (the bootstrap's -Reporter does), so its tracking token is explicitly empty.

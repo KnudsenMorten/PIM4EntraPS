@@ -369,20 +369,12 @@ function Get-HubAuthCode([string]$Tenant) {
     }
     $query = $null
     try {
-        $deadline = (Get-Date).AddMinutes(5)
-        while (-not $query) {
-            if ((Get-Date) -gt $deadline) { throw 'Timed out (5 min) waiting for the sign-in.' }
-            $tcpReady = @($tcps | Where-Object { $_.Pending() })[0]; if (-not $tcpReady) { Start-Sleep -Milliseconds 200; continue }
-            $client = $tcpReady.AcceptTcpClient()
-            try {
-                $stream = $client.GetStream()
-                $line = (New-Object System.IO.StreamReader($stream)).ReadLine()
-                $html = '<html><body style="font-family:sans-serif"><h3>Sign-in complete.</h3>You can close this tab and return to PowerShell.</body></html>'
-                $w = New-Object System.IO.StreamWriter($stream)
-                $w.Write("HTTP/1.1 200 OK`r`nContent-Type: text/html`r`nContent-Length: $($html.Length)`r`nConnection: close`r`n`r`n$html"); $w.Flush()
-                if ($line -match '^GET /\?(\S+) HTTP') { $query = $Matches[1] }
-            } finally { $client.Close() }
+        # SIGNIN-PAGE (owner 2026-10-31, Invardia's Wait-AuthCode fix): only the answer (code / error) ends the wait, every
+        # request gets a page, and the page keeps answering 10 s after it (engine/_shared/PIM-LoopbackAnswer.ps1).
+        if (-not (Get-Command Wait-PimLoopbackAnswer -ErrorAction SilentlyContinue)) {
+        . (Join-Path $PSScriptRoot 'PIM-LoopbackAnswer.ps1')
         }
+        $query = Wait-PimLoopbackAnswer -Listeners $tcps -Seconds 300 -TimeoutMessage 'Timed out (5 min) waiting for the sign-in.'
     } finally { foreach ($tcpL in $tcps) { try { $tcpL.Stop() } catch { } } }
     $kv = @{}
     foreach ($pair in ($query -split '&')) { $k, $v = $pair -split '=', 2; $kv[$k] = if ($null -ne $v) { [uri]::UnescapeDataString(($v -replace '\+', ' ')) } else { '' } }
