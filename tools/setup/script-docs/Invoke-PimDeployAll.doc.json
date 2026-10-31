@@ -157,6 +157,7 @@
     { "name": "OverrideRingGate", "required": false, "default": false, "help": "Roll a version the ring does not approve (audited; needs -Reason)." },
     { "name": "Reason", "required": false, "default": null, "help": "Why the ring gate is overridden." },
     { "name": "SkipUpdater", "required": false, "default": false, "help": "Install no updater." },
+    { "name": "SkipMailSender", "required": false, "default": false, "help": "Create no sender mailbox and use no Exchange role. Your Exchange administrator sets up the mail sender afterwards (Get Started > Mail sender)." },
     { "name": "DeployMarker", "required": false, "default": "PIMCOREENGINE-", "help": "Marker for the deploy-validation test objects." },
     { "name": "EngineAppDisplayName", "required": false, "default": "PIM4EntraPS Engine", "help": "Display name of the engine app registration." },
     { "name": "SkipVerify", "required": false, "default": false, "help": "Skip the verification (not recommended)." },

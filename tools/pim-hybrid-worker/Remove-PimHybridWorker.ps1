@@ -23,6 +23,10 @@
         5 the VM     the VM, then its NIC(s) and OS disk (created with it), the worker VNet (refused while anything else
                      sits in its subnet), the NAT gateway + its public IP, the NSG, and the resource group when PIM created
                      it and it is empty
+        SHARED HOST: when the VM also hosts another product's worker (it carries a user-assigned managed identity, which
+        PIM's worker never attaches), only PIM's own part goes: the grants above, and PIM's tasks, rights and C:\PIM\app +
+        bin on the VM through run-command. The VM, its disk and NIC, the worker VNet with its peerings, private DNS link,
+        NAT gateway and NSG all stay, so the other product keeps running. Remove that product's worker first to remove the VM.
     -Target Arc: 1 grants and 2 the SQL firewall rules 'pimhybridwrk-arc-<server>-<n>' as above, then 3 the worker's tasks
         and rights ON the server through run-command (Install-PimHybridWorker.ps1 -Phase Remove; the self-contained
         script for the server's administrator when run-command cannot be used). The Arc machine, its agent and its
@@ -154,6 +158,20 @@ function Get-PimHwOwnership {
     return ''
 }
 
+function Get-PimHwGuestIdentities {
+    <#
+      PURE. Framework 12.26 SHARED-WORKER / PIM 80.2a: another product hosted on this worker VM brings its OWN user-assigned
+      managed identity (PIM's worker never attaches one), so any user-assigned identity on the VM means a guest is there.
+      Returns the identities' names (the last segment of each resource id); empty = no guest.
+    #>
+    param($Vm)
+    # emits one name per identity (the caller wraps it in @()); nothing = no guest
+    if (-not $Vm -or -not $Vm.identity -or -not $Vm.identity.userAssignedIdentities) { return }
+    $u = $Vm.identity.userAssignedIdentities
+    $ids = if ($u -is [System.Collections.IDictionary]) { @($u.Keys) } else { @($u.PSObject.Properties | ForEach-Object { $_.Name }) }
+    $ids | Where-Object { "$_".Trim() } | ForEach-Object { ("$_" -split '/')[-1] }
+}
+
 # ---------------------------------------------------------------------------------------------------- the plan
 $plan = New-Object System.Collections.Generic.List[object]
 $kept = New-Object System.Collections.Generic.List[string]
@@ -179,12 +197,19 @@ $vmOwned = $false
 $vnetId = Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Network/virtualNetworks' $VnetName
 $subnetId = "$vnetId/subnets/snet-worker"
 $vm = $null; $nicIds = @(); $diskId = ''
+$guests = @()
 
 if ($Target -eq 'Azure') {
     $vmId = Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Compute/virtualMachines' $VmName
     $vm = Invoke-PimSetupArm -Path $vmId -ApiVersion $computeApi -NotFoundOk
     $own = Get-PimHwOwnership -Resource $vm -Worker $worker -ExpectedName $VmName -AllowName ([bool]$IncludeUntagged)
-    if ($vm -and $own) {
+    $guests = @(Get-PimHwGuestIdentities -Vm $vm)
+    if ($vm -and $own -and $guests.Count) {
+        # 80.2a: another product's worker lives here -- PIM removes only its OWN part (grants, its tasks and folder on the VM
+        # through run-command); the VM, its disk, NIC and network stay until that product has removed its worker.
+        $principalId = "$($vm.identity.principalId)"
+        Add-Kept "VM $VmName, its NIC, disk and network -- it also hosts another product's worker (user-assigned identity: $($guests -join ', ')). Remove that product's worker first; then run this again to remove the VM"
+    } elseif ($vm -and $own) {
         $vmOwned = $true
         $principalId = "$($vm.identity.principalId)"
         $nicIds = @(@($vm.properties.networkProfile.networkInterfaces) | Where-Object { $_ } | ForEach-Object { "$($_.id)" })
@@ -245,7 +270,8 @@ if ($PrivateSqlDnsZoneId) {
         $lv = "$($l.properties.virtualNetwork.id)"
         $own = Get-PimHwOwnership -Resource $l -Worker $worker -ExpectedName "link-pimhybridwrk-$($VnetName.ToLowerInvariant())" -AllowName ([bool]$IncludeUntagged)
         if (-not $own) { continue }
-        if ($Target -eq 'Azure' -and $lv -ieq $vnetId) {
+        if ($Target -eq 'Azure' -and $lv -ieq $vnetId -and $guests.Count) { Add-Kept "private DNS link $($l.name) -- the worker VNet stays for the other product's worker, which may resolve through it" }
+        elseif ($Target -eq 'Azure' -and $lv -ieq $vnetId) {
             Add-Action 'dns' "private DNS link $($l.name) (privatelink.database.windows.net -> $VnetName)" 'created by New-PimHybridWorkerInfra.ps1' 'arm-wait' @{ id = "$PrivateSqlDnsZoneId/virtualNetworkLinks/$($l.name)"; api = (Get-PimSetupApiVersion privateDns) }
         } else { Add-Kept "private DNS link $($l.name) -> $(($lv -split '/')[-1]) (created for this worker, but other workloads may resolve through it -- delete it yourself if not)" }
     }
@@ -254,7 +280,9 @@ if ($PrivateSqlDnsZoneId) {
 
 # ---- Arc: the worker on the server, through run-command
 if ($Target -eq 'Arc') {
-    Add-Action 'server' "on $worker`: the worker's scheduled tasks, its gMSA rights, C:\PIM\app + bin (Install-PimHybridWorker.ps1 -Phase Remove, run-command)" 'installed by Install-PimHybridWorker.ps1' 'arc-remove' @{}
+    Add-Action 'server' "on $worker`: the worker's scheduled tasks, its gMSA rights, C:\PIM\app + bin (Install-PimHybridWorker.ps1 -Phase Remove, run-command)" 'installed by Install-PimHybridWorker.ps1' 'arc-remove' @{ id = $ArcMachineResourceId; hostType = 'Arc' }
+} elseif ($guests.Count -and $vm) {
+    Add-Action 'server' "on $VmName`: PIM's scheduled tasks, its gMSA rights, C:\PIM\app + bin (Install-PimHybridWorker.ps1 -Phase Remove, run-command; the other product's tasks and folder are not touched)" 'installed by Install-PimHybridWorker.ps1' 'arc-remove' @{ id = "$($vm.id)"; hostType = 'AzureVm' }
 }
 
 # ---- 4 + 5 Azure network and the VM
@@ -262,7 +290,8 @@ if ($Target -eq 'Azure') {
     $vnet = Invoke-PimSetupArm -Path $vnetId -ApiVersion $net -NotFoundOk
     $vnetOwn = Get-PimHwOwnership -Resource $vnet -Worker $worker -ExpectedName $VnetName -AllowName ([bool]$IncludeUntagged)
     if ($vnet -and -not $vnetOwn) { Add-Kept "VNet $VnetName -- not tagged pim-hybrid-worker=$worker; its peerings are not touched either" }
-    if ($vnet -and $vnetOwn) {
+    if ($vnet -and $vnetOwn -and $guests.Count) { Add-Kept "VNet $VnetName and its peerings -- the other product's worker on $VmName reaches its domain controllers and SQL through them" }
+    elseif ($vnet -and $vnetOwn) {
         foreach ($p in @(Invoke-PimSetupArm -Path "$vnetId/virtualNetworkPeerings" -ApiVersion $net -All -ErrorAsNull | Where-Object { $_ -and $_.name })) {
             $remote = "$($p.properties.remoteVirtualNetwork.id)"
             if ($remote -match '^/subscriptions/([^/]+)/resourceGroups/([^/]+)/providers/Microsoft\.Network/virtualNetworks/([^/]+)$') {
@@ -316,7 +345,8 @@ if ($Target -eq 'Azure') {
         else { Add-Kept "NSG nsg-$lower -- not tagged pim-hybrid-worker=$worker" }
     }
     $rg = Get-PimArmResourceGroup -SubscriptionId $SubscriptionId -Name $ResourceGroup
-    if ($rg) {
+    if ($rg -and $guests.Count) { Add-Kept "resource group $ResourceGroup -- the VM it holds also hosts another product's worker" }
+    elseif ($rg) {
         if (Get-PimHwOwnership -Resource $rg -Worker $worker -ExpectedName '' -AllowName $false) {
             Add-Action 'network' "resource group $ResourceGroup -- only if it is EMPTY by then" 'created by New-PimHybridWorkerInfra.ps1' 'rg-if-empty' @{ id = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup" }
         } else { Add-Kept "resource group $ResourceGroup -- not created by PIM (no pim-hybrid-worker tag): kept even when empty" }
@@ -336,7 +366,7 @@ function Invoke-PimHwRemoveAction($Action) {
             Info "SQL user ${SqlUserName}: $($r[-1])"
         }
         'arc-remove' {
-            $r = & (Join-Path $PSScriptRoot 'Invoke-PimHybridWorkerRunCommand.ps1') -SubscriptionId $SubscriptionId -TenantId $TenantId -MachineResourceId $ArcMachineResourceId -Phase Remove -InstallParameters @{ HostType = 'Arc' } -PrintOnly:$PrintOnly
+            $r = & (Join-Path $PSScriptRoot 'Invoke-PimHybridWorkerRunCommand.ps1') -SubscriptionId $SubscriptionId -TenantId $TenantId -MachineResourceId $a.id -Phase Remove -InstallParameters @{ HostType = $a.hostType } -PrintOnly:$PrintOnly
             $o = @($r | Where-Object { $_ -and $_.PSObject.Properties['delivered'] })[-1]
             if ("$($o.delivered)" -eq 'local-script') { $script:LocalScript = "$($o.script)" }
             elseif (-not $o.ok) { throw "the Remove phase failed on the server ($($o.state), exit $($o.exitCode))" }
@@ -375,7 +405,8 @@ function Get-PimHwAdCleanupLines {
     foreach ($g in $ids) {
         foreach ($o in @($g, "$g-PermissionGroup", "$g-PrincipalsAllowedAccess")) { $l.Add("dsrm `"CN=$o,$gou`" -noprompt") }
     }
-    if ($Target -eq 'Azure') {
+    if ($Target -eq 'Azure' -and $guests.Count) { $l.Add("# 4. the worker VM's computer account STAYS -- the VM still hosts another product's worker") }
+    elseif ($Target -eq 'Azure') {
         $cou = if ("$ComputerOu".Trim()) { "$ComputerOu".Trim() } else { '<ComputerOu>' }
         $l.Add("# 4. the worker VM's computer account (created by -ProvisionOdj)")
         $l.Add("dsrm `"CN=$VmName,$cou`" -noprompt")

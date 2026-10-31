@@ -471,6 +471,9 @@ param(
     [switch]$OverrideRingGate,
     [string]$Reason,
     [switch]$SkipUpdater,                    # leaves the environment with NO unattended update path
+    # MAIL-SKIP (owner 2026-10-31, Pingala): the 'mailsender' step does nothing -- no mailbox, no Exchange role activated for
+    # the deploying identity. The tenant's Exchange admin runs Initialize-PimMailSender (browser sign-in) afterwards.
+    [switch]$SkipMailSender,
     [string]$DeployMarker   = 'PIMCOREENGINE-',
 
     # --- app-registration installer passthrough ---
@@ -2251,6 +2254,12 @@ function Invoke-DefaultStepRunner {
             # SCOPED send right, and persists MailSender into pim.Settings so a cold-booted
             # scheduled job finds it -- the deploy-time -MailSender passthrough only reaches the
             # container's env, which is why an environment could look configured and still be mute.
+            if ($SkipMailSender) {
+                Warn 'mail sender: SKIPPED by -SkipMailSender -- no mailbox is created and no Exchange role is used. The tenant''s Exchange admin runs Initialize-PimMailSender (PIM Manager > Get Started > Mail sender); until then no mail is sent.'
+                # 'DEGRADED' = a WARNING event: Install-PimManager hands it to the end-of-install verify as the deferred mail
+                # sender (a follow-up for the Exchange admin, never a failed required line).
+                return @{ ok=$true; ran=$false; detail='DEGRADED: mail sender skipped by -SkipMailSender -- the Exchange admin sets it up (Get Started > Mail sender)' }
+            }
             $init = Join-Path $here 'Initialize-PimMailSender.ps1'
             if (-not (Test-Path $init)) { return @{ ok=$false; ran=$true; detail="mail-sender setup not found: $init" } }
             if ($PSCmdlet.ShouldProcess($TenantId, 'ensure the notification sender mailbox + send right')) {

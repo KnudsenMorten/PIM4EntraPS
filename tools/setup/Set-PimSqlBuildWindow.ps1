@@ -18,7 +18,7 @@
         -Open   publicNetworkAccess Enabled + AllowSetupHost.
         -Close  publicNetworkAccess Disabled (firewall rules are then inert).
         🪤 MEASURED 2026-09-17 on the build host: once a SQL server has a private endpoint, public DNS answers its name with a CNAME
-        to <server>.privatelink.database.windows.net, and the build host's DNS servers (10.100.1.5/.4) answer THAT name with
+        to <server>.privatelink.database.windows.net, and the build host's own DNS servers (domain DNS) answer THAT name with
         NXDOMAIN -- so from the build host the server is unreachable even with public access Enabled ("No such host is known").
         The private-endpoint shape therefore only works from a build host whose DNS resolves privatelink names publicly
         (or to the endpoint). This script says so when it opens a window on such a server.

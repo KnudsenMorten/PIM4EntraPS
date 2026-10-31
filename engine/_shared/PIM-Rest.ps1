@@ -506,23 +506,12 @@ function Get-PimInteractiveToken {
 
   $query = $null
   try {
-    $deadline = (Get-Date).AddMinutes(5)
-    while (-not $query) {
-      if ((Get-Date) -gt $deadline) { throw 'Timed out (5 min) waiting for the sign-in to come back to this window -- nothing was changed. Run the same command again and finish the sign-in within 5 minutes.' }
-      $tcp = @($tcps | Where-Object { $_.Pending() })[0]
-      if (-not $tcp) { Start-Sleep -Milliseconds 200; continue }
-      $client = $tcp.AcceptTcpClient()
-      try {
-        $stream = $client.GetStream()
-        $reader = New-Object System.IO.StreamReader($stream)
-        $requestLine = $reader.ReadLine()
-        $html = '<html><body style="font-family:sans-serif"><h3>Sign-in complete.</h3>You can close this tab and return to the PIM emergency console.</body></html>'
-        $writer = New-Object System.IO.StreamWriter($stream)
-        $writer.Write("HTTP/1.1 200 OK`r`nContent-Type: text/html`r`nContent-Length: $($html.Length)`r`nConnection: close`r`n`r`n$html")
-        $writer.Flush()
-        if ($requestLine -match '^GET /\?(\S+) HTTP') { $query = $Matches[1] }
-      } finally { $client.Close() }
+    # SIGNIN-PAGE (owner 2026-10-31, Invardia's Wait-AuthCode fix): only the answer (code / error) ends the wait, every
+    # request gets a page, and the page keeps answering 10 s after it (engine/_shared/PIM-LoopbackAnswer.ps1).
+    if (-not (Get-Command Wait-PimLoopbackAnswer -ErrorAction SilentlyContinue)) {
+    . (Join-Path $PSScriptRoot 'PIM-LoopbackAnswer.ps1')
     }
+    $query = Wait-PimLoopbackAnswer -Listeners $tcps -Seconds 300 -TimeoutMessage 'Timed out (5 min) waiting for the sign-in to come back to this window -- nothing was changed. Run the same command again and finish the sign-in within 5 minutes.'
   } finally { foreach ($t in $tcps) { try { $t.Stop() } catch { } } }
 
   $kv = @{}

@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.9 -- 2026-10-31
+
+- Browser sign-ins in the setup and PIM Activator scripts no longer end with "This site can't be reached": the sign-in page answers every request from the browser until the sign-in is done, and for a few seconds after
+
+## 3.0.8 -- 2026-10-31
+
+- The installation no longer sets up the mail sender by default: no mailbox is created and the installing account gets no Exchange role; your Exchange administrator sets it up afterwards (Get Started > Mail sender) Removing the hybrid worker leaves the server standing when another product's worker runs on it, and removes only PIM Manager's own part
+
 ## 3.0.7 -- 2026-10-30
 
 - the monthly management report switch explains itself under More info and asks before it is switched on; no customer, person or internal name is left in the published code comments and examples

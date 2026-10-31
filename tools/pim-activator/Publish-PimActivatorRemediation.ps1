@@ -150,18 +150,12 @@ function Get-PaGraphToken {
     if ($edge) { Start-Process -FilePath $edge -ArgumentList @('--new-window', $url) -WhatIf:$false } else { Start-Process $url -WhatIf:$false }   # -WhatIf still signs in
     $query = $null
     try {
-        $deadline = (Get-Date).AddMinutes(5)
-        while (-not $query) {
-            if ((Get-Date) -gt $deadline) { throw 'Timed out (5 min) waiting for the sign-in.' }
-            $tcpReady = @($tcps | Where-Object { $_.Pending() })[0]; if (-not $tcpReady) { Start-Sleep -Milliseconds 200; continue }
-            $c = $tcpReady.AcceptTcpClient()
-            try {
-                $s = $c.GetStream(); $line = (New-Object IO.StreamReader($s)).ReadLine()
-                $html = '<html><body style="font-family:sans-serif"><h3>Signed in.</h3>You can close this tab.</body></html>'
-                $w = New-Object IO.StreamWriter($s); $w.Write("HTTP/1.1 200 OK`r`nContent-Type: text/html`r`nContent-Length: $($html.Length)`r`nConnection: close`r`n`r`n$html"); $w.Flush()
-                if ($line -match '^GET /\?(\S+) HTTP') { $query = $Matches[1] }
-            } finally { $c.Close() }
+        # SIGNIN-PAGE (owner 2026-10-31, Invardia's Wait-AuthCode fix): only the answer (code / error) ends the wait, every
+        # request gets a page, and the page keeps answering 10 s after it (PIM-LoopbackAnswer.ps1; tools/setup/_PimLoopbackAnswer.ps1 is its identical copy for the tools).
+        if (-not (Get-Command Wait-PimLoopbackAnswer -ErrorAction SilentlyContinue)) {
+        . (Join-Path $PSScriptRoot '..\setup\_PimLoopbackAnswer.ps1')
         }
+        $query = Wait-PimLoopbackAnswer -Listeners $tcps -Seconds 300 -TimeoutMessage 'Timed out (5 min) waiting for the sign-in.'
     } finally { foreach ($tcpL in $tcps) { try { $tcpL.Stop() } catch { } } }
     $kv = @{}; foreach ($p in ($query -split '&')) { $k, $v = $p -split '=', 2; $kv[$k] = [uri]::UnescapeDataString(("$v" -replace '\+', ' ')) }   # (( )): inside a method call the -replace comma is an argument separator
     if ($kv['error']) { throw "Sign-in failed: $($kv['error']) -- $($kv['error_description'])" }
