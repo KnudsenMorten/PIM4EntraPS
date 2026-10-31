@@ -217,7 +217,13 @@ param(
     # N = at most N groups. Not passed = not written (no limit).
     [Parameter()]
     [ValidateRange(0, 100)]
-    [int]$AutoActivateMaxGroups
+    [int]$AutoActivateMaxGroups,
+
+    # End-of-day time (ACT-ENDTIME, 2026-10-31): activationEndTime REG_SZ 'HH:MM' (device local time). Every activation
+    # ends no later than this today; one started after it gets its normal duration. Not passed = not written.
+    [Parameter()]
+    [ValidatePattern('^([01][0-9]|2[0-3]):[0-5][0-9]$')]
+    [string]$ActivationEndTime
 )
 
 $ErrorActionPreference = 'Stop'
@@ -323,6 +329,7 @@ $planArgs = @{
 }
 if ($PSBoundParameters.ContainsKey('BulkThreshold')) { $planArgs['BulkThreshold'] = $BulkThreshold }
 if ($PSBoundParameters.ContainsKey('AutoActivateMaxGroups')) { $planArgs['AutoActivateMaxGroups'] = $AutoActivateMaxGroups }
+if ($PSBoundParameters.ContainsKey('ActivationEndTime')) { $planArgs['ActivationEndTime'] = $ActivationEndTime }
 $plan = Get-PaHybridRegistryPlan @planArgs
 Write-Host ("Plan built   : {0} registry value(s) across {1}" -f $plan.Entries.Count, ($plan.Browsers -join ' + ')) -ForegroundColor Green
 Write-Host ("Forcelist    : {0}" -f $plan.ForcelistValue) -ForegroundColor Gray

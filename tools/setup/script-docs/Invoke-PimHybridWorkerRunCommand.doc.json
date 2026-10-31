@@ -18,7 +18,7 @@
     { "name": "SubscriptionId", "required": true, "default": null, "help": "The machine's subscription; another one is refused." },
     { "name": "TenantId", "required": true, "default": null, "help": "The tenant." },
     { "name": "MachineResourceId", "required": true, "default": null, "help": "The worker: .../Microsoft.Compute/virtualMachines/<vm> or .../Microsoft.HybridCompute/machines/<server>." },
-    { "name": "Phase", "required": true, "default": null, "help": "Join (Azure VM only), Configure, Update, Layout or Remove (the worker's tasks and rights on the machine; used by Remove-PimHybridWorker.ps1)." },
+    { "name": "Phase", "required": true, "default": null, "help": "Join (Azure VM only), Configure, Update, Layout, Remove (the worker's tasks and rights on the machine; used by Remove-PimHybridWorker.ps1) or Guests (read only: the other products registered on the machine; used by Remove-PimHybridWorker.ps1)." },
     { "name": "InstallParameters", "required": false, "default": "@{}", "help": "Install-PimHybridWorker.ps1's parameters (GmsaName, SqlServer, TenantId, SourceContainerUrl, Ring, ...); HostType Arc is added for an Arc machine." },
     { "name": "ProtectedParameterNames", "required": false, "default": "OdjBlob", "help": "Arguments sent only as protected (write-only) parameters, never in the script text." },
     { "name": "PrintOnly", "required": false, "default": false, "help": "Do not use run-command: write the self-contained script." },

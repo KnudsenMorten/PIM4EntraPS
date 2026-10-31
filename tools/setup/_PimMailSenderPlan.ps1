@@ -256,8 +256,15 @@ function New-PimMailSenderExoPlan {
         $ids = Get-PimExoAssigneeIds -ExoServicePrincipals $ExoServicePrincipals -AppId $p.appId -ObjectId $p.objectId
         # §94: the same identity's send right on ANOTHER of our sender scopes is the wrong-mailbox grant above -- remove it
         # first (assignment names are tenant-unique, so the right one could not be created beside it).
+        # 2026-10-31 (EntraPolicySuite, internal): Exchange's REST Get-ManagementScope can answer an EMPTY
+        # RecipientRestrictionFilter for every scope. Removed only when that scope's filter is READ and names ANOTHER
+        # mailbox -- an unread filter may be this sender's own scope under an older name (Exchange then refuses the
+        # create and the run adopts it), and removing a working send right on a guess is never the fix.
+        $otherMailbox = { param($n) $sc = @(@($Scopes) | Where-Object { $null -ne $_ -and "$($_.Name)" -eq "$n" })[0]
+            $f = "$(if ($sc) { $sc.RecipientRestrictionFilter })"; ($f.Trim() -and $f.IndexOf("'$Sender'", [StringComparison]::OrdinalIgnoreCase) -lt 0) }
         foreach ($wrong in @(@($Assignments) | Where-Object { $null -ne $_ -and "$($_.Role)" -eq 'Application Mail.Send' -and
-                    "$($_.CustomResourceScope)" -ne $ScopeName -and ((Test-PimLegacyMailSenderScopeName -Name "$($_.CustomResourceScope)") -or "$($_.CustomResourceScope)" -like '*-SendScope') } |
+                    "$($_.CustomResourceScope)" -ne $ScopeName -and ((Test-PimLegacyMailSenderScopeName -Name "$($_.CustomResourceScope)") -or "$($_.CustomResourceScope)" -like '*-SendScope') -and
+                    (& $otherMailbox "$($_.CustomResourceScope)") } |
                     Where-Object { @(Select-PimExoMailSendAssignment -Assignments @($_) -ScopeName "$($_.CustomResourceScope)" -AssigneeIds $ids -AssignmentName $p.assignmentName -AlternateNames @($p.legacyAssignmentNames)).Count })) {
             $idn = if ("$($wrong.Identity)".Trim()) { "$($wrong.Identity)".Trim() } else { "$($wrong.Name)".Trim() }
             $plan.Add([pscustomobject]@{ cmdlet = 'Remove-ManagementRoleAssignment'; what = "remove $($p.kind) $($p.appId)'s send right on the OTHER scope $($wrong.CustomResourceScope) ($idn)"

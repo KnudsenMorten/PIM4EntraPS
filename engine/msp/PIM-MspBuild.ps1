@@ -1050,6 +1050,11 @@ function Get-PimMspBuildPlan {
     # INSTALL-HARDEN-1 (owner 2026-10-08): the build runs ITS OWN end-of-install verify as its last step ('verify-install',
     # after the licence, the support access and the managing tenant's steps), so the hosting step skips DeployAll's.
     $hostingSwitches += 'SkipInstallVerify'
+    # 100.169 (b) MAIL-SKIP (owner 2026-10-30/31: the Support app gets NO Exchange rights; "mail is skipped in setup" for both
+    # products): the hosting step leaves the mail sender to the tenant's Exchange admin (Initialize-PimMailSender afterwards),
+    # exactly like the guided install's skipMailSender. DEFAULT = skip; only 'skipMailSender': false in the config creates it here.
+    $mailSkip = -not ("$(& $V 'skipMailSender')".Trim() -match '^(?i)(false|0|no)$')
+    if ($mailSkip) { $hostingSwitches += 'SkipMailSender' }
     # Who gets the alerts: 'alertRecipients' (addresses), else the managerSuperAdmins' mailboxes (DeployAll 'alerting').
     $alertTo = @(@(& $V 'alertRecipients') | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     if ($alertTo.Count) { $hosting['AlertRecipients'] = $alertTo }
@@ -1070,7 +1075,7 @@ function Get-PimMspBuildPlan {
             -Script 'tools\setup\Set-PimSqlBuildWindow.ps1' -Arguments ($sqlWindowArgs + @{ Mode = 'Open' }) `
             -Why 'the hosting step (code/update checks) and the store steps connect from the build host, which is not in the VNet; on a re-run a previous sqlclose removed this host. Entra-only auth, grp-pim-sql-admins members only'))
     }
-    $steps.Add((New-PimMspBuildStep -Id 'hosting' -Title "hosting ($scenario): prerequisites, image, containers, schema, mail sender, Easy Auth ($eaChoice), code, updater, access, smoke gate" `
+    $steps.Add((New-PimMspBuildStep -Id 'hosting' -Title "hosting ($scenario): prerequisites, image, containers, schema, $(if ($mailSkip) { 'mail sender SKIPPED (the Exchange admin sets it up)' } else { 'mail sender' }), Easy Auth ($eaChoice), code, updater, access, smoke gate" `
         -Script 'tools\setup\Invoke-PimDeployAll.ps1' -Arguments $hosting -Switches $hostingSwitches `
         -Why "managed-identity only (no engine app registration, no secret); the smoke gate runs inside; $($updRing.message)"))
 

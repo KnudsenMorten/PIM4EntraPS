@@ -195,7 +195,11 @@ function Set-PimActivatorRemediationSettings {
     #>
     param([Parameter(Mandatory)][string]$Text, [Parameter(Mandatory)][ValidateSet('Released', 'Test')][string]$Channel,
           [string[]]$Browsers = @('Edge', 'Chrome'), [Parameter(Mandatory)][string]$CatalogJson,
-          [Nullable[int]]$AutoActivateMaxGroups = $null, [Nullable[int]]$BulkActivateConfirmThreshold = $null)
+          [Nullable[int]]$AutoActivateMaxGroups = $null, [Nullable[int]]$BulkActivateConfirmThreshold = $null,
+          [string]$ActivationEndTime = '')
+    # ACT-ENDTIME (owner 2026-10-31): '' = no end time; else 'HH:MM' 00:00-23:59
+    $endT = "$ActivationEndTime".Trim()
+    if ($endT -and $endT -notmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') { throw "ActivationEndTime must be 'HH:MM' between 00:00 and 23:59 (got '$endT')." }
     $b = @($Browsers | Where-Object { $_ -in @('Edge', 'Chrome') } | Select-Object -Unique)
     if (-not $b.Count) { throw 'Browsers must hold Edge and/or Chrome.' }
     try { $cat = $CatalogJson | ConvertFrom-Json } catch { throw "The tenant catalog is not valid JSON: $($_.Exception.Message)" }
@@ -208,6 +212,7 @@ function Set-PimActivatorRemediationSettings {
         Catalog   = @("(?s)^\`$TenantCatalog = @'\r?\n.*?\r?\n'@", ("`$TenantCatalog = @'" + $nl + (($CatalogJson.Trim()) -replace "`r?`n", $nl) + $nl + "'@"))
         AutoMax   = @('(?m)^\$AutoActivateMaxGroups = .*$', ('$AutoActivateMaxGroups = {0}' -f $(if ($null -ne $AutoActivateMaxGroups) { [int]$AutoActivateMaxGroups } else { '$null' })))
         BulkConf  = @('(?m)^\$BulkActivateConfirmThreshold = .*$', ('$BulkActivateConfirmThreshold = {0}' -f $(if ($null -ne $BulkActivateConfirmThreshold) { [int]$BulkActivateConfirmThreshold } else { '$null' })))
+        EndTime   = @('(?m)^\$ActivationEndTime = .*$', ('$ActivationEndTime = {0}' -f $(if ($endT) { "'$endT'" } else { '$null' })))
     }
     $out = $Text
     foreach ($k in $rules.Keys) {
@@ -268,11 +273,11 @@ function New-PimActivatorRemediationPair {
           [string]$DefaultJustification = 'Change in infrastructure', [int]$DefaultDurationHours = 8,
           [string]$Prefix = '', [string]$EntraPrefix = '', [string]$AzurePrefix = '',
           [Nullable[int]]$AutoActivateMaxGroups = $null, [Nullable[int]]$BulkActivateConfirmThreshold = $null,
-          [string]$AdditionalTenantsJson = '')
+          [string]$AdditionalTenantsJson = '', [string]$ActivationEndTime = '')
     $cat = New-PimActivatorCatalog -Name $(if ("$Name".Trim()) { $Name } else { 'PIM' }) -TenantId $TenantId -ClientId $ClientId -DefaultJustification $DefaultJustification `
         -DefaultDurationHours $DefaultDurationHours -Prefix $Prefix -EntraPrefix $EntraPrefix -AzurePrefix $AzurePrefix -AdditionalTenantsJson $AdditionalTenantsJson
-    $det = Set-PimActivatorRemediationSettings -Text (Get-PimActivatorRemediationTemplate -Name 'Detect-PimActivator.ps1') -Channel $Channel -Browsers $Browsers -CatalogJson $cat -AutoActivateMaxGroups $AutoActivateMaxGroups -BulkActivateConfirmThreshold $BulkActivateConfirmThreshold
-    $rem = Set-PimActivatorRemediationSettings -Text (Get-PimActivatorRemediationTemplate -Name 'Remediate-PimActivator.ps1') -Channel $Channel -Browsers $Browsers -CatalogJson $cat -AutoActivateMaxGroups $AutoActivateMaxGroups -BulkActivateConfirmThreshold $BulkActivateConfirmThreshold
+    $det = Set-PimActivatorRemediationSettings -Text (Get-PimActivatorRemediationTemplate -Name 'Detect-PimActivator.ps1') -Channel $Channel -Browsers $Browsers -CatalogJson $cat -AutoActivateMaxGroups $AutoActivateMaxGroups -BulkActivateConfirmThreshold $BulkActivateConfirmThreshold -ActivationEndTime $ActivationEndTime
+    $rem = Set-PimActivatorRemediationSettings -Text (Get-PimActivatorRemediationTemplate -Name 'Remediate-PimActivator.ps1') -Channel $Channel -Browsers $Browsers -CatalogJson $cat -AutoActivateMaxGroups $AutoActivateMaxGroups -BulkActivateConfirmThreshold $BulkActivateConfirmThreshold -ActivationEndTime $ActivationEndTime
     [ordered]@{ channel = $Channel; catalog = $cat; detect = $det; remediate = $rem }
 }
 
@@ -346,6 +351,8 @@ function Get-PimActivatorCommands {
     $pfx = ''; $lim = ''
     foreach ($k in 'Prefix', 'EntraPrefix', 'AzurePrefix') { $v = "$(& $get $Settings ($k.Substring(0,1).ToLower() + $k.Substring(1)))".Trim(); if ($v) { $pfx += " -$k $(ConvertTo-PimActivatorPsLiteral $v)" } }
     foreach ($k in 'AutoActivateMaxGroups', 'BulkActivateConfirmThreshold') { $v = "$(& $get $Settings ($k.Substring(0,1).ToLower() + $k.Substring(1)))".Trim(); if ($v -match '^\d+$') { $lim += " -$k $v" } }
+    # ACT-ENDTIME (owner 2026-10-31): the end-of-day time travels the same way ('HH:MM', 00:00-23:59)
+    $endV = "$(& $get $Settings 'activationEndTime')".Trim(); if ($endV -match '^([01][0-9]|2[0-3]):[0-5][0-9]$') { $lim += " -ActivationEndTime $endV" }
     $opt = $pfx + $lim
     # the optional extra tenants (multi-tenant catalog), validated, compact, as one PowerShell literal
     $xt = @(ConvertTo-PimActivatorExtraTenants -Json "$(& $get $Settings 'additionalTenants')" -ExcludeTenantId $TenantId)

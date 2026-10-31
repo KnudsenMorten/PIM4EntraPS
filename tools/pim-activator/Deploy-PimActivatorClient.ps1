@@ -82,6 +82,10 @@
     Per-device "click again to confirm" threshold for bulk activation: 1-100, -1 = remove it. Not passed = left alone.
     Both extensions, as above. A tenant's own bulkActivateConfirmThreshold in the catalog wins over it.
 
+.PARAMETER ActivationEndTime
+    Per-device end-of-day time 'HH:MM' (local time): every activation ends no later than this today; one started after it
+    gets its normal duration. 'none' = remove it. Not passed = left alone. Both extensions, as above.
+
 .PARAMETER Prefix
     With -TenantId and -ClientId: list only groups whose names start with this text (-EntraPrefix: Entra roles,
     -AzurePrefix: Azure roles). The same settings as the Intune Remediation.
@@ -233,6 +237,12 @@ param(
     [Parameter(ParameterSetName = 'Install')]
     [ValidateRange(-1, 100)]
     [int]$AutoActivateMaxGroups,
+
+    # ACT-ENDTIME (owner 2026-10-31): per-DEVICE end-of-day time, ...\policy\activationEndTime (REG_SZ 'HH:MM').
+    # 'none' = remove the value. Not passed = left alone. Both extensions, as above.
+    [Parameter(ParameterSetName = 'Install')]
+    [ValidatePattern('^(([01][0-9]|2[0-3]):[0-5][0-9]|none)$')]
+    [string]$ActivationEndTime,
 
     # Per-DEVICE "click again to confirm" threshold for bulk activation: ...\policy\bulkActivateConfirmThreshold
     # (REG_DWORD). 1-100 = the threshold; -1 = remove the value (the extension's default). Not passed = left alone.
@@ -719,6 +729,19 @@ foreach ($root in $policyRoots) {
             } else {
                 if (Test-Path -LiteralPath $lKey) { Remove-ItemProperty -LiteralPath $lKey -Name $lName -ErrorAction SilentlyContinue -WhatIf:$false }
                 Write-Host "    -> $lName removed ($lTxt) under 3rdparty\extensions\$limitId\policy" -ForegroundColor DarkGray
+            }
+        }
+        # ACT-ENDTIME: the end-of-day time (REG_SZ), same keys as the limits above
+        if ($PSBoundParameters.ContainsKey('ActivationEndTime')) {
+            $eVal = "$ActivationEndTime".Trim()
+            if (-not $PSCmdlet.ShouldProcess("$lKey\activationEndTime", $(if ($eVal -ne 'none') { "Set registry value (String) = $eVal (activations end no later than $eVal)" } else { 'Remove registry value (no end time)' }))) {
+                Write-Host "    -> would $(if ($eVal -ne 'none') { "set activationEndTime = $eVal" } else { 'remove activationEndTime' }) under 3rdparty\extensions\$limitId\policy" -ForegroundColor Yellow
+            } elseif ($eVal -ne 'none') {
+                Set-Reg -Path $lKey -Name 'activationEndTime' -Value $eVal -Kind String
+                Write-Host "    -> activationEndTime = $eVal under 3rdparty\extensions\$limitId\policy" -ForegroundColor DarkGray
+            } else {
+                if (Test-Path -LiteralPath $lKey) { Remove-ItemProperty -LiteralPath $lKey -Name 'activationEndTime' -ErrorAction SilentlyContinue -WhatIf:$false }
+                Write-Host "    -> activationEndTime removed (no end time) under 3rdparty\extensions\$limitId\policy" -ForegroundColor DarkGray
             }
         }
     }

@@ -47,12 +47,14 @@ export function selectAutoActivateTargets(candidates, max) {
 // activation"): a sub-group (a permission group nested in a role group) is only LISTED once its parent is active, so the
 // old once-per-session sweep had always run before it appeared -- a ticked sub-group could never auto-activate. The
 // sweep now runs on every list load and skips only what it already tried.
-export function pickAutoActivateCandidates(rows, isTicked, attempted) {
+// ACT-REAUTO (owner 2026-10-31): -endedToday(groupId) true = the user ended this group by hand today -- not auto-activated again.
+export function pickAutoActivateCandidates(rows, isTicked, attempted, endedToday) {
   const list = Array.isArray(rows) ? rows : []
   const tried = attempted instanceof Set ? attempted : new Set()
   const ticked = (typeof isTicked === 'function') ? isTicked : (() => false)
+  const ended = (typeof endedToday === 'function') ? endedToday : (() => false)
   return list.filter(r => r && r.kind === 'group' && !r.depth && !r.isActive && r.groupId &&
-    ticked(r.rowKey || ('group:' + r.groupId)) && !tried.has(r.groupId))
+    ticked(r.rowKey || ('group:' + r.groupId)) && !tried.has(r.groupId) && !ended(r.groupId))
 }
 // How many auto-activate slots of the per-device cap are IN USE: ticked groups that are active, plus groups this session
 // already activated (or found pending) that do not show as active yet. Without the second half, a later sweep pass -- which
@@ -176,3 +178,56 @@ export function resolveBulkActivateConfirmThreshold(raw) {
     Math.min(BULK_ACTIVATE_CONFIRM_THRESHOLD_MAX, Math.floor(n))
   )
 }
+
+// ---------- ACT-ENDTIME (customer request, owner 2026-10-31) ----------
+// An activation ends no later than a local end-of-day time (e.g. '16:00'): set by the admin (managed 'activationEndTime');
+// a user may choose an EARLIER time for themselves, never a later one. After that time the normal length applies.
+export function normalizeEndTime(s) {
+  const m = /^\s*(\d{1,2}):(\d{2})\s*$/.exec(String(s == null ? '' : s))
+  if (!m) return ''
+  const h = Number(m[1]), mi = Number(m[2])
+  if (h > 23 || mi > 59) return ''
+  return String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0')
+}
+// The end time that applies: the earlier of the admin's and the user's. A user time later than the admin's is ignored.
+export function effectiveEndTime(adminHHMM, userHHMM) {
+  const a = normalizeEndTime(adminHHMM), u = normalizeEndTime(userHHMM)
+  if (a && u) return (u < a) ? u : a
+  return a || u
+}
+// Hours to request: unchanged when there is no end time or it has passed today (local time); else no longer than the
+// minutes left until it, in whole minutes, never below 1 minute.
+export function capHoursToEndTime(hours, now, endHHMM) {
+  const end = normalizeEndTime(endHHMM)
+  const h = Number(hours)
+  if (!end || !(h > 0)) return hours
+  const d = (now instanceof Date) ? now : new Date()
+  const [eh, em] = end.split(':').map(Number)
+  const endAt = new Date(d.getFullYear(), d.getMonth(), d.getDate(), eh, em, 0, 0)
+  const leftMin = Math.floor((endAt.getTime() - d.getTime()) / 60000)
+  if (leftMin <= 0) return hours
+  if (Math.round(h * 60) <= leftMin) return hours
+  return Math.max(1, leftMin) / 60
+}
+
+// ---------- ACT-REAUTO (customer bug, owner 2026-10-31) ----------
+// A group the user ended by hand is not auto-activated again until the next local day. Markers: { groupIdLower: 'YYYY-MM-DD' }.
+export function localDateKey(now) {
+  const d = (now instanceof Date) ? now : new Date()
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
+}
+export function markEndedToday(markers, groupId, now) {
+  const out = Object.assign({}, (markers && typeof markers === 'object') ? markers : {})
+  if (groupId) out[String(groupId).toLowerCase()] = localDateKey(now)
+  return out
+}
+export function isEndedToday(markers, groupId, now) {
+  if (!groupId || !markers || typeof markers !== 'object') return false
+  return markers[String(groupId).toLowerCase()] === localDateKey(now)
+}
+export function pruneEndedMarkers(markers, now) {
+  const today = localDateKey(now), out = {}
+  for (const [k, v] of Object.entries((markers && typeof markers === 'object') ? markers : {})) { if (v === today) out[k] = v }
+  return out
+}
+export const AUTO_ACTIVATE_ENDED_TEXT = 'Auto-activation paused until tomorrow (you ended it)'

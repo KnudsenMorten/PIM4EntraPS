@@ -60,6 +60,8 @@ param(
     [string]$AzurePrefix = '',
     [ValidateRange(0, 100)][int]$AutoActivateMaxGroups = -1,
     [ValidateRange(0, 100)][int]$BulkActivateConfirmThreshold = -1,
+    # Optional end-of-day time 'HH:MM' (device local time): every activation ends no later than this today.
+    [ValidatePattern('^(([01][0-9]|2[0-3]):[0-5][0-9])?$')][string]$ActivationEndTime = '',
     [string[]]$Browsers = @('Edge', 'Chrome'),
     # Optional: more tenants for the popup's tenant switcher (multi-tenant), a JSON array of
     # { name, tenantId, clientId, ... } -- this tenant stays the first entry. Empty = this tenant only.
@@ -112,7 +114,7 @@ if ($DetectScript -or $RemediateScript) {
     $pair = New-PimActivatorRemediationPair -TenantId $TenantId -ClientId $ClientId -Name $CatalogName -Channel $Channel -Browsers $br `
         -DefaultJustification $DefaultJustification -DefaultDurationHours $DefaultDurationHours -Prefix $Prefix -EntraPrefix $EntraPrefix -AzurePrefix $AzurePrefix `
         -AutoActivateMaxGroups $(if ($AutoActivateMaxGroups -ge 0) { $AutoActivateMaxGroups } else { $null }) -BulkActivateConfirmThreshold $(if ($BulkActivateConfirmThreshold -ge 0) { $BulkActivateConfirmThreshold } else { $null }) `
-        -AdditionalTenantsJson $AdditionalTenantsJson
+        -AdditionalTenantsJson $AdditionalTenantsJson -ActivationEndTime $ActivationEndTime
     $writeDir = $OutDir
     if (-not $PSCmdlet.ShouldProcess($OutDir, 'Write Detect-PimActivator.ps1 + Remediate-PimActivator.ps1 (the pair it uploads)')) {
         # preview: the pair goes to the temp folder instead, so it can still be read (and is what would be uploaded)

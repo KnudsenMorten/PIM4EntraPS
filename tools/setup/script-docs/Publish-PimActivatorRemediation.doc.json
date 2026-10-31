@@ -27,6 +27,7 @@
     { "name": "AzurePrefix", "required": false, "default": "", "help": "Optional prefix of the groups that carry Azure roles." },
     { "name": "AutoActivateMaxGroups", "required": false, "default": -1, "help": "Optional per-device cap on auto-activation (0 = off). -1 = not set." },
     { "name": "BulkActivateConfirmThreshold", "required": false, "default": -1, "help": "Optional: ask for confirmation above this many groups. -1 = not set." },
+    { "name": "ActivationEndTime", "required": false, "default": "", "help": "Optional end-of-day time 'HH:MM' (device local time): every activation ends no later than this today. Empty = not set." },
     { "name": "Browsers", "required": false, "default": "Edge, Chrome", "help": "Which browsers the Remediation configures." },
     { "name": "AdditionalTenantsJson", "required": false, "default": "", "help": "Optional: more tenants for the extension's tenant switcher (JSON array of name, tenantId, clientId)." },
     { "name": "Name", "required": false, "default": "PIM Activator settings (PROD) / (TEST)", "help": "The Remediation's name in Intune (an existing one with exactly this name is updated)." },

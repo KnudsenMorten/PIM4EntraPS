@@ -30,6 +30,7 @@
     { "name": "MinimumVersion", "required": false, "default": null, "help": "Optional minimum extension version; an older install is disabled until it updates." },
     { "name": "BulkThreshold", "required": false, "default": null, "help": "Optional tenant-wide bulk-activate confirmation threshold (1-100)." },
     { "name": "AutoActivateMaxGroups", "required": false, "default": null, "help": "Optional per-device cap on auto-activation (0 = off)." },
+    { "name": "ActivationEndTime", "required": false, "default": null, "help": "Optional end-of-day time 'HH:MM' (device local time): every activation ends no later than this today." },
     { "name": "MaxTenants", "required": false, "default": 25, "help": "The most tenants the config may hold." },
     { "name": "ExtensionId", "required": false, "default": "eheocihmlppcophaeakmdenhgcookkab", "help": "The extension id; change it only for a fork." },
     { "name": "UpdateUrl", "required": false, "default": "https://knudsenmorten.github.io/PIM4EntraPS/updates.xml", "help": "The update manifest the browsers install the extension from." },

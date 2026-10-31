@@ -17883,7 +17883,7 @@
     const v = id => (document.getElementById(id) || {}).value;
     const ch = v('actChannel') || (ACT.form && ACT.form.channel) || 'Released';
     return { channel: ch, name: v('actName'), clientId: String(v('actClientId') || '').trim(), defaultJustification: v('actJust'), defaultDurationHours: v('actHours'),
-      prefix: v('actPrefix'), autoActivateMaxGroups: v('actAuto'), bulkActivateConfirmThreshold: v('actBulk'),
+      prefix: v('actPrefix'), autoActivateMaxGroups: v('actAuto'), bulkActivateConfirmThreshold: v('actBulk'), activationEndTime: String(v('actEnd') || '').trim(),
       browsers: [(document.getElementById('actEdgeB') || {}).checked ? 'Edge' : '', (document.getElementById('actChromeB') || {}).checked ? 'Chrome' : ''].filter(Boolean) };
   }
   function actStepCatalog(body, d) {
@@ -17900,6 +17900,9 @@
         '<label>Group prefix</label><input id="actPrefix" value="' + val('prefix', '') + '" placeholder="optional, e.g. PIM- (only groups starting with this are listed)">' +
         '<label>Auto-activate at most</label><input id="actAuto" type="number" min="0" max="100" value="' + val('autoActivateMaxGroups', '') + '" placeholder="no limit" class="act-num">' +
         '<label>Confirm when selecting</label><input id="actBulk" type="number" min="1" max="100" value="' + val('bulkActivateConfirmThreshold', '') + '" placeholder="no confirm" class="act-num">' +
+        // ACT-ENDTIME (owner 2026-10-31): every activation ends no later than this local time today; after it, the normal
+        // duration. Users may pick an earlier time in the Activator, never a later one. Empty = no end time.
+        '<label>Activations end by</label><span class="act-row"><input id="actEnd" type="time" value="' + val('activationEndTime', '') + '" style="width:110px;"> <span class="act-dim">optional, device local time (e.g. 16:00). Empty = no end time.</span></span>' +
         '<label>Browsers</label><span><label><input type="checkbox" id="actEdgeB"' + (f.browsers && f.browsers.indexOf('Edge') < 0 ? '' : ' checked') + '> Edge</label> &nbsp; <label><input type="checkbox" id="actChromeB"' + (f.browsers && f.browsers.indexOf('Chrome') < 0 ? '' : ' checked') + '> Chrome</label></span>' +
       '</div>' +
       // 97.2 (owner 2026-10-08: "i am missing the option to add the custom json structure for multi-tenant (optional). so the
