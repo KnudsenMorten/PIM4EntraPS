@@ -29,6 +29,9 @@
 
 $script:PimSupportEndpoint   = 'https://invardia.com/api/mcp/v1'
 $script:PimSupportKeyHeader  = 'X-Invardia-Install-Key'
+# INV-S16: the install's lasting id travels next to the key (same value on every call kind); never in a body or a log
+$script:PimSupportIdHeader   = 'X-Invardia-Install-Id'
+$script:PimSupportInstallIdPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 $script:PimSupportCategories = @('install', 'update', 'sign-in', 'data', 'performance', 'other')
 $script:PimSupportPriorities = @('P1', 'P2', 'P3')
 $script:PimSupportLogMax     = 20000      # contract: logExcerpt <= 20000 chars
@@ -329,14 +332,34 @@ function Invoke-PimSupportTool {
       Returns ConvertFrom-PimSupportReply's shape. The install key is in the header and nowhere else. Never throws.
     #>
     param([Parameter(Mandatory)][scriptblock]$Http, [Parameter(Mandatory)][string]$InstallKey, [Parameter(Mandatory)][string]$Tool,
-          [AllowNull()][System.Collections.IDictionary]$Arguments)
+          [AllowNull()][System.Collections.IDictionary]$Arguments,
+          # INV-S16: the install's lasting id (Get-PimSupportInstallId) -> X-Invardia-Install-Id; '' = no header
+          [AllowEmptyString()][AllowNull()][string]$InstallId = '')
     $script:PimSupportRpcId = [int]$script:PimSupportRpcId + 1
     $json = ConvertTo-Json -InputObject (New-PimSupportRpcBody -Tool $Tool -Arguments $Arguments -Id $script:PimSupportRpcId) -Depth 8 -Compress
     # MCP Streamable HTTP: the client names both types; this server answers plain JSON
     $headers = @{ $script:PimSupportKeyHeader = $InstallKey; 'Accept' = 'application/json, text/event-stream' }
+    $iid = "$InstallId".Trim().ToLowerInvariant()
+    if ($iid -match $script:PimSupportInstallIdPattern) { $headers[$script:PimSupportIdHeader] = $iid }
     $reply = $null
     try { $reply = & $Http $script:PimSupportEndpoint $headers $json } catch { $reply = @{ status = 0; text = ''; error = "$($_.Exception.Message)" } }
     return (ConvertFrom-PimSupportReply -Reply $reply)
+}
+
+function Get-PimSupportInstallId {
+    <#
+      INV-S16: this install's lasting id for the support call, READ ONLY (the Manager never creates it): Resolve-PimInvardiaInstallId
+      (PIM-LicenceRequest.ps1) when it is loaded; else the same rule here, because the Manager does not load that library:
+      pim.Settings 'InstallId' when it is a GUID (lower-cased). Unreadable / none / not a GUID = '' (no header).
+    #>
+    param([scriptblock]$GetSetting)
+    if (-not $GetSetting) { return '' }
+    if (Get-Command Resolve-PimInvardiaInstallId -ErrorAction SilentlyContinue) { try { return "$(Resolve-PimInvardiaInstallId -GetSetting $GetSetting)" } catch { return '' } }
+    $v = $null; try { $v = & $GetSetting 'InstallId' } catch { return '' }
+    if ($v -isnot [string]) { return '' }
+    $t = $v.Trim().ToLowerInvariant()
+    if ($t -match $script:PimSupportInstallIdPattern) { return $t }
+    return ''
 }
 
 function ConvertTo-PimSupportSafeUrl {
@@ -437,7 +460,7 @@ function Invoke-PimSupportApi {
     if (-not $Http) { return (& $done 500 ([ordered]@{ ok = $false; error = 'The support call is not available in this build.'; supportUrl = $link.supportUrl; contact = $link.contact }) $null) }
 
     if ($Action -eq 'list') {
-        $r = Invoke-PimSupportTool -Http $Http -InstallKey $key -Tool 'ticket_list' -Arguments ([ordered]@{})
+        $r = Invoke-PimSupportTool -Http $Http -InstallKey $key -InstallId (Get-PimSupportInstallId -GetSetting $GetSetting) -Tool 'ticket_list' -Arguments ([ordered]@{})
         if (-not $r.ok) { return (& $done 502 ([ordered]@{ ok = $false; code = "$($r.error.code)"; error = "The tickets could not be read: $($r.error.message)"; supportUrl = $link.supportUrl; contact = $link.contact }) $null) }
         return (& $done 200 ([ordered]@{ ok = $true; tickets = (ConvertTo-PimSupportTicketRows -Data $r.data) }) $null)
     }
@@ -452,7 +475,7 @@ function Invoke-PimSupportApi {
     }
     $a = New-PimSupportTicketArguments -Fields $Body -Context $ctx -Version $Version -Ring $Ring -UserName $UserName -InstallKey $key
     if (-not $a.ok) { return (& $done 400 ([ordered]@{ ok = $false; error = 'The ticket was not sent: some fields need your attention.'; fields = $a.fields }) $null) }
-    $r = Invoke-PimSupportTool -Http $Http -InstallKey $key -Tool 'ticket_create' -Arguments $a.arguments
+    $r = Invoke-PimSupportTool -Http $Http -InstallKey $key -InstallId (Get-PimSupportInstallId -GetSetting $GetSetting) -Tool 'ticket_create' -Arguments $a.arguments
     if (-not $r.ok) {
         $msg = "The ticket was not created: $($r.error.message)"
         if ("$($r.error.code)" -eq 'unreachable') { $msg = "$msg $unreachable" }

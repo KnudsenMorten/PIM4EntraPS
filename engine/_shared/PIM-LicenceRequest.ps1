@@ -102,11 +102,81 @@ function New-PimLicenceKnockHeaders {
     <#
       PURE. Framework §12.11f CR8 B2 (PIM 100.148): the knock's proof of possession in a header -- X-Invardia-Install-Key
       when this install has a usable key (Resolve-PimInvardiaInstallKey: 'inv-...'); no header otherwise.
+      INV-S16: X-Invardia-Install-Id = this install's lasting id (Resolve-PimInvardiaInstallId) when it has one; no header
+      otherwise (never a fresh id per call).
     #>
-    param([AllowNull()][string]$InstallKey)
+    param([AllowNull()][string]$InstallKey, [AllowNull()][string]$InstallId = '')
+    $h = @{}
     $k = "$InstallKey".Trim()
-    if ($k -match '^inv-[A-Za-z0-9_-]{20,100}$') { return @{ 'X-Invardia-Install-Key' = $k } }
-    return @{}
+    if ($k -match '^inv-[A-Za-z0-9_-]{20,100}$') { $h['X-Invardia-Install-Key'] = $k }
+    return (Add-PimInvardiaInstallIdHeader -Headers $h -InstallId $InstallId)
+}
+
+# ---- INV-S16 (Invardia 2026-11-01) -- THE INSTALL'S OWN LASTING ID ------------------------------------------------------
+# ONE id per install: pim.Settings 'InstallId' (SQL, so an update or a restart never replaces it; an environment import
+# carries it). It is the id the licence knock has always sent in its body. It is created ONCE, by a component that may
+# write the store (the licence-request and uplink jobs), and an existing value is KEPT -- never regenerated, never
+# rewritten. Every call to Invardia that carries the install key sends it as X-Invardia-Install-Id, and the identified
+# uplink reports carry it as InstallId; Invardia binds the key to it (a different id with the same key is refused).
+# A component that cannot read the store sends NO header -- never a made-up id (a wrong id would lock the key).
+# 🔒 Not the anonymous telemetry id (TelemetryInstallId): the two must stay apart. Never logged next to the install key.
+function ConvertTo-PimInvardiaInstallId {
+    <# PURE. A GUID (any case, trimmed) -> its lower-case 8-4-4-4-12 text; anything else -> ''. #>
+    param([AllowNull()][object]$Value)
+    if ($Value -isnot [string]) { return '' }
+    $t = $Value.Trim().ToLowerInvariant()
+    if ($t -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { return $t }
+    return ''
+}
+
+function Add-PimInvardiaInstallIdHeader {
+    <# PURE. -Headers with X-Invardia-Install-Id added when -InstallId is a GUID (lower-case); unchanged otherwise. #>
+    param([AllowNull()][hashtable]$Headers, [AllowNull()][string]$InstallId = '')
+    $h = if ($Headers) { $Headers } else { @{} }
+    $iid = ConvertTo-PimInvardiaInstallId "$InstallId"
+    if ($iid) { $h['X-Invardia-Install-Id'] = $iid }
+    return $h
+}
+
+function Add-PimSqlSettingIfAbsent {
+    <#
+      INV-S16: write a pim.Settings value ONLY when it holds none yet (no row, or NULL / empty / "" / null), in ONE statement
+      (MERGE ... WITH (HOLDLOCK)), so two jobs creating the install's lasting id at once keep ONE of them. A value that is
+      there is never touched. Returns $true when this call wrote it. THROWS on a store error. Needs PIM-SqlStore.ps1
+      (Invoke-PimSqlNonQuery). Lives here, next to the one value it is for.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][object]$Value)
+    $json = $Value | ConvertTo-Json -Depth 12 -Compress
+    $n = Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql @"
+MERGE pim.Settings WITH (HOLDLOCK) AS t USING (SELECT @n AS Name, @v AS V) AS s ON t.Name = s.Name
+WHEN MATCHED AND (t.ValueJson IS NULL OR LTRIM(RTRIM(t.ValueJson)) IN (N'', N'""', N'null'))
+    THEN UPDATE SET ValueJson=s.V, UpdatedUtc=SYSUTCDATETIME()
+WHEN NOT MATCHED THEN INSERT (Name, ValueJson, UpdatedUtc) VALUES (@n, @v, SYSUTCDATETIME());
+"@ -Parameters @{ n = $Name; v = $json }
+    return ([int]$n -gt 0)
+}
+
+function Resolve-PimInvardiaInstallId {
+    <#
+      This install's lasting id, lower-case, or '' when there is none to send. Seams: -GetSetting { param($Name) }, and --
+      only for a component that may create it -- -CreateSetting { param($Name, $Value) } (an insert that never replaces a
+      value: Add-PimSqlSettingIfAbsent) or -SetSetting { param($Name, $Value) }.
+        * a stored value is KEPT: a GUID is returned lower-cased; anything else returns '' and is left as it is
+        * none stored + a create seam: a new GUID is written ONCE, then READ BACK -- the value the store holds is returned
+          (two components creating at once both send the one that was kept); a failed write / read back -> ''
+        * none stored and no create seam (the Manager, the updater, the hybrid worker), or the store unreadable -> ''
+    #>
+    param([scriptblock]$GetSetting, [scriptblock]$SetSetting, [scriptblock]$CreateSetting)
+    if (-not $GetSetting) { return '' }
+    $v = $null
+    try { $v = & $GetSetting 'InstallId' } catch { return '' }
+    if ($null -ne $v -and "$v".Trim()) { return (ConvertTo-PimInvardiaInstallId $v) }
+    if (-not $CreateSetting -and -not $SetSetting) { return '' }
+    $new = [guid]::NewGuid().ToString('D').ToLowerInvariant()
+    try { if ($CreateSetting) { [void](& $CreateSetting 'InstallId' $new) } else { [void](& $SetSetting 'InstallId' $new) } } catch { return '' }
+    $back = $null
+    try { $back = & $GetSetting 'InstallId' } catch { return '' }
+    return (ConvertTo-PimInvardiaInstallId $back)
 }
 
 function New-PimLicenceKnockBody {
@@ -155,7 +225,9 @@ function Invoke-PimLicenceRequestCycle {
     #>
     param([Parameter(Mandatory)][scriptblock]$Http, [Parameter(Mandatory)][scriptblock]$GetSetting, [Parameter(Mandatory)][scriptblock]$SetSetting,
           [Parameter(Mandatory)][scriptblock]$StoreLicence, [Parameter(Mandatory)][string]$Version, [string]$TenantId = '',
-          [bool]$Enabled = $false, [datetime]$NowUtc = [datetime]::UtcNow, [string]$BaseUrl = '', [string]$PublicCertB64 = '')
+          [bool]$Enabled = $false, [datetime]$NowUtc = [datetime]::UtcNow, [string]$BaseUrl = '', [string]$PublicCertB64 = '',
+          # INV-S16: { param($Name, $Value) } an insert that never replaces a value (Add-PimSqlSettingIfAbsent); $null = -SetSetting
+          [scriptblock]$CreateSetting = $null)
     $NowUtc = $NowUtc.ToUniversalTime()
     $base = if ("$BaseUrl".Trim()) { "$BaseUrl".TrimEnd('/') } else { $script:PimLicenceRequestDefaultBase }
     $tid = Resolve-PimLicenseTenantId -TenantId $TenantId
@@ -181,15 +253,20 @@ function Invoke-PimLicenceRequestCycle {
     if (-not $tid) { return @{ action = $d.action; ok = $false; state = $state; message = "this environment's tenant is not known -- no request is sent" } }
 
     if ($d.action -eq 'knock') {
-        $installId = "$(& $GetSetting 'InstallId')".Trim()
-        if (-not $installId) { $installId = [guid]::NewGuid().ToString(); & $SetSetting 'InstallId' $installId }
+        # INV-S16: the install's lasting id (created once, kept) -- the body's installId AND the X-Invardia-Install-Id header.
+        # A stored value that is not a GUID is still sent in the body as before, never as the header; when the store could
+        # not keep a new id the body carries a fresh one (as before) and NO header is sent.
+        $lastingId = Resolve-PimInvardiaInstallId -GetSetting $GetSetting -SetSetting $SetSetting -CreateSetting $CreateSetting
+        $installId = $lastingId
+        if (-not $installId) { $installId = "$(& $GetSetting 'InstallId')".Trim() }
+        if (-not $installId) { $installId = [guid]::NewGuid().ToString() }
         # CR8 B2 (PIM 100.148): the proof of possession -- the held licence file's SHA-256 in the body, the install key (when
         # this install has one) in the header. Without either, Invardia keeps a renewal Pending for the owner.
         $licText = ''; try { $lt = & $GetSetting 'License'; if ($lt -is [string]) { $licText = $lt } } catch { $licText = '' }
         $body = New-PimLicenceKnockBody -Version $Version -TenantId $tid -InstallId $installId -CurrentLicenceId "$(if ($lic) { $lic.LicenseId })" -CurrentValidTo $(if ($lic) { $lic.ValidTo }) `
                     -CurrentLicenceSha256 (Get-PimLicenceFileSha256 -LicenceText $licText)
         $ikey = if (Get-Command Resolve-PimInvardiaInstallKey -ErrorAction SilentlyContinue) { Resolve-PimInvardiaInstallKey -GetSetting $GetSetting } else { '' }
-        $r = $null; try { $r = & $Http 'POST' "$base/api/licence-requests" $body (New-PimLicenceKnockHeaders -InstallKey $ikey) } catch { $r = @{ status = 0; body = $null; error = $_.Exception.Message } }
+        $r = $null; try { $r = & $Http 'POST' "$base/api/licence-requests" $body (New-PimLicenceKnockHeaders -InstallKey $ikey -InstallId $lastingId) } catch { $r = @{ status = 0; body = $null; error = $_.Exception.Message } }
         if ("$($r.status)" -notin '200', '201', '202' -or -not "$($r.body.pullToken)") {
             $st = & $save 'Error' "the licence request could not be sent ($($r.status) $($r.error))" $null
             return @{ action = 'knock'; ok = $false; state = $st; message = $st.message }
@@ -270,11 +347,14 @@ function Invoke-PimLicenceRequestJob {
     $get = { param($n) Get-PimSqlSetting -ConnectionString $cs -Name $n }
     $set = { param($n, $v) if (-not $WhatIf) { Set-PimSqlSetting -ConnectionString $cs -Name $n -Value $v } }
     $store = { param($t) if (-not $WhatIf) { Set-PimSqlSetting -ConnectionString $cs -Name 'License' -Value $t; $script:PimLicenseCache = $null } }
+    # INV-S16: the lasting install id is created with an insert that never replaces a value (two jobs at once keep ONE id)
+    # (Invoke-PimSqlNonQuery missing = a host without the SQL layer's raw statements: the plain write, then the read back)
+    $create = { param($n, $v) if (-not $WhatIf) { if (Get-Command Invoke-PimSqlNonQuery -ErrorAction SilentlyContinue) { [void](Add-PimSqlSettingIfAbsent -ConnectionString $cs -Name $n -Value $v) } else { Set-PimSqlSetting -ConnectionString $cs -Name $n -Value $v } } }
     $sol = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $verFile = Join-Path $sol 'VERSION'
     $ver = if (Test-Path -LiteralPath $verFile) { "$(Get-Content -Raw -LiteralPath $verFile)".Trim() } elseif ($env:PIM_VERSION) { "$env:PIM_VERSION" } else { '0.0.0' }
     $base = "$(& $get 'LicenceRequestBaseUrl')".Trim()
     $r = Invoke-PimLicenceRequestCycle -Http { param($m, $u, $b, $h) Invoke-PimLicenceHttp -Method $m -Url $u -Body $b -Headers $h } -GetSetting $get -SetSetting $set -StoreLicence $store `
-            -Version $ver -Enabled $true -NowUtc $NowUtc -BaseUrl $base
+            -Version $ver -Enabled $true -NowUtc $NowUtc -BaseUrl $base -CreateSetting $create
     [pscustomobject]@{ ran = ($r.action -ne 'none'); whatIf = [bool]$WhatIf; detail = "licence-request: $($r.action) -- $($r.message)" }
 }

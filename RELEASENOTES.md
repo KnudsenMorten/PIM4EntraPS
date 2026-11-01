@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.14 -- 2026-11-01
+
+- Each installation now identifies itself to the Invardia update and licence service with its own lasting installation id, so its update key works only for that installation. The id is created once, kept across updates, and is separate from the anonymous telemetry id. Plus test and reference-generator fixes.
+
 ## 3.0.13 -- 2026-11-01
 
 - Editions. The API and MCP reference page and API applications (scripts and services using the Manager API) are now part of PIM Manager Pro, like the AI assistant. The Free vs Pro page and the licence page list them. The PIM Manager page itself works the same in both editions.

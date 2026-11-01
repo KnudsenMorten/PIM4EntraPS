@@ -43,11 +43,16 @@ $desc = Get-PimApiRefDescriptions -SolutionRoot $sol
 # ---------------------------------------------------------------------------------------------------------- the MCP tools
 $mgrSrc = [IO.File]::ReadAllText((Join-Path $sol 'tools\pim-manager\Open-PimManager.ps1'))
 $ast = [System.Management.Automation.Language.Parser]::ParseInput($mgrSrc, [ref]$null, [ref]$null)
-. (Join-Path $sol 'engine\mcp\PIM-Mcp.ps1')
-$toolsFn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-PimManagerMcpTools' }, $true)
-function Test-PimManagerIsMspMaster { $true }   # the managing-tenant tools are documented too (listed only there)
-. ([scriptblock]::Create($toolsFn.Extent.Text))
-$tools = @(Get-PimManagerMcpTools)
+# The MCP library is a Pro file (absent from the community payload): guarded, and without it there are no MCP tools to list.
+$mcpLib = Join-Path $sol 'engine\mcp\PIM-Mcp.ps1'
+$tools = @()
+if (Test-Path -LiteralPath $mcpLib) {
+    . $mcpLib
+    $toolsFn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-PimManagerMcpTools' }, $true)
+    function Test-PimManagerIsMspMaster { $true }   # the managing-tenant tools are documented too (listed only there)
+    . ([scriptblock]::Create($toolsFn.Extent.Text))
+    $tools = @(Get-PimManagerMcpTools)
+}
 
 $pub = New-PimApiReferenceDocument -Routes $routes -Tools $tools -Version $Version -Descriptions $desc -Profile Public
 $full = New-PimApiReferenceDocument -Routes $routes -Tools $tools -Version $Version -Descriptions $desc -Profile Full

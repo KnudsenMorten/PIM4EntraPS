@@ -57,9 +57,11 @@ function Get-PimInvardiaPullReason {
     $r
 }
 function Invoke-PimInvardiaManifestPull {
+    # -InstallId (INV-S16): the install's lasting id (Resolve-PimInvardiaInstallId, PIM-LicenceRequest.ps1) -> header
+    # X-Invardia-Install-Id; '' = no header.
     param([Parameter(Mandatory)][scriptblock]$Http, [string]$BaseUrl = '', [Parameter(Mandatory)][string]$InstallKey, [Parameter(Mandatory)][string]$LicenceText, [string]$Kind = 'code',
-          [Parameter(Mandatory)][ValidateRange(0, 3)][int]$Ring)
-    $p = Invoke-InvardiaManifestPull -Product $script:PimInvardiaProduct -Http $Http -BaseUrl $BaseUrl -InstallKey $InstallKey -LicenceText $LicenceText -Kind $Kind -Ring $Ring
+          [Parameter(Mandatory)][ValidateRange(0, 3)][int]$Ring, [AllowEmptyString()][AllowNull()][string]$InstallId = '')
+    $p = Invoke-InvardiaManifestPull -Product $script:PimInvardiaProduct -Http $Http -BaseUrl $BaseUrl -InstallKey $InstallKey -LicenceText $LicenceText -Kind $Kind -Ring $Ring -InstallId $InstallId
     if ($p.status -eq 401) { $p.reason = Get-PimInvardiaPullReason -Status 401 -Body $p.body }
     $p
 }
@@ -414,11 +416,13 @@ function Get-PimHybridWorkerUpdateTarget {
     $read = { param($n) try { & $GetSetting $n } catch { $null } }
     $lic = ConvertTo-PimInvardiaLicenceText -Value (& $read 'License')
     $key = Resolve-PimInvardiaInstallKey -GetSetting $GetSetting
+    # INV-S16: the SAME install's lasting id, READ from the store (the worker never creates one); unreadable / none = no header
+    $iid = ''; if (Get-Command Resolve-PimInvardiaInstallId -ErrorAction SilentlyContinue) { $iid = Resolve-PimInvardiaInstallId -GetSetting $GetSetting }
     $base = "$(& $read 'LicenceRequestBaseUrl')".Trim()
     $applied = 0
     if ($State -and "$($State.ring)".Trim() -eq "$Ring".Trim()) { [void][int]::TryParse("$($State.sequence)", [ref]$applied) }
     $run = "$RunningVersion".Trim()
-    $a = @{ Http = $Http; InstallKey = $key; LicenceText = $lic; BaseUrl = $base; AppliedSequence = $applied; RunningVersion = $run
+    $a = @{ Http = $Http; InstallKey = $key; InstallId = $iid; LicenceText = $lic; BaseUrl = $base; AppliedSequence = $applied; RunningVersion = $run
             LastBuiltVersion = $run; HighestKnownVersion = $run; Ring = "$Ring".Trim(); TrustedKeys = $TrustedKeys; WorkDir = $WorkDir; AllowMajor = $AllowMajor }
     if ($Download) { $a['Download'] = $Download }
     return (Get-PimInvardiaUpdateTarget @a)
@@ -550,7 +554,9 @@ function Get-PimInvardiaUpdateTarget {
           [string]$HighestKnownVersion = '',
           [switch]$AllowDowngrade,
           # PUB-8: PIM_UPDATE_ALLOW_MAJOR=1 -- the owner's planned major, for one run.
-          [switch]$AllowMajor)
+          [switch]$AllowMajor,
+          # INV-S16: the install's lasting id -> X-Invardia-Install-Id on the pull; '' = no header.
+          [AllowEmptyString()][AllowNull()][string]$InstallId = '')
     # PIM 100.158 / framework 12.11e CR3: wave = the wave name from the SIGNED manifest ('' = served outside any wave);
     # manifestVersion = the version that signed manifest names (also on a hold / ahead / already-built answer). served = a
     # manifest (or a 204 "nothing released") was VERIFIED this run -- only then is the wave recorded.
@@ -564,7 +570,7 @@ function Get-PimInvardiaUpdateTarget {
     if (-not [int]::TryParse("$Ring".Trim(), [ref]$ringN) -or $ringN -lt 0 -or $ringN -gt 3) {
         $res.reason = "this environment has no update ring (PIM_UPDATE_RING = '$Ring', expected 0-3) -- PIM decides the ring, so a Pro pull without one is not made"; return $res
     }
-    $p = Invoke-PimInvardiaManifestPull -Http $Http -BaseUrl $BaseUrl -InstallKey $InstallKey -LicenceText $LicenceText -Ring $ringN
+    $p = Invoke-PimInvardiaManifestPull -Http $Http -BaseUrl $BaseUrl -InstallKey $InstallKey -LicenceText $LicenceText -Ring $ringN -InstallId $InstallId
     if ($p.status -eq 204) { $res.ok = $true; $res.served = $true; $res.reason = $p.reason; return $res }
     if ($p.status -ne 200) { $res.reason = $p.reason; return $res }
     $v = Test-PimInvardiaManifest -Response $p.body -TrustedKeys $TrustedKeys -AppliedSequence $AppliedSequence -RunningVersion $RunningVersion -Ring $ringN

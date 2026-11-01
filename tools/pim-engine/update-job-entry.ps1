@@ -614,8 +614,10 @@ function Get-PimUpdateNowRingApproval {
             $ringN = -1; if (-not [int]::TryParse($ring, [ref]$ringN) -or $ringN -lt 0 -or $ringN -gt 3) { return @{ version = ''; reason = "no update ring ('$ring')" } }
             if (-not "$lic".Trim()) { return @{ version = ''; reason = 'no licence in the store' } }
             $seq = Resolve-PimInvardiaAppliedSequence -JobEnv ([Environment]::GetEnvironmentVariables()) -Ring $ring
+            # INV-S16: the install's lasting id, READ from the store (the updater never creates one); none = no header
+            $iid = ''; if (Get-Command Resolve-PimInvardiaInstallId -ErrorAction SilentlyContinue) { $iid = Resolve-PimInvardiaInstallId -GetSetting { param($n) Get-PimSqlSetting -ConnectionString $Cs -Name $n } }
             $p = Invoke-PimInvardiaManifestPull -Http { param($m, $u, $bd, $h) Invoke-PimLicenceHttp -Method $m -Url $u -Body $bd -Headers $h } `
-                     -BaseUrl $b -InstallKey $k -LicenceText $lic -Ring $ringN
+                     -BaseUrl $b -InstallKey $k -LicenceText $lic -Ring $ringN -InstallId $iid
             if ($p.status -eq 204) { return @{ version = ''; reason = 'Invardia has nothing released for this ring' } }
             if ($p.status -ne 200) { return @{ version = ''; reason = "the ring's manifest could not be read ($($p.reason))" } }
             $v = Test-PimInvardiaManifest -Response $p.body -AppliedSequence ([int]$seq.applied) -RunningVersion "$($script:PimRunningVersion)" -Ring $ringN
@@ -738,7 +740,7 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     # 2026-10-16 (internal, 2.4.639 roll): one licence READ failed and was reported as "no licence is installed" -- the
     # catch hid the real error, and the next run read it fine. A failed read is retried once and, if it still fails, SAID
     # (the Pro pull then stops as before, but the log names the store error, never a missing licence).
-    $licText = ''; $invKey = ''
+    $licText = ''; $invKey = ''; $invId = ''
     if (-not $invCommunity) {   # the Community channel is anonymous: no licence, no install key
         $licRaw = $null; $licErr = ''
         foreach ($try in 1, 2) {
@@ -748,6 +750,8 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
         if ($licErr) { Say "Invardia: the licence could NOT be read from the store ($licErr) -- this is a store error, not a missing licence; the next run retries" 'Yellow' }
         $licText = ConvertTo-PimInvardiaLicenceText -Value $licRaw
         $invKey = Resolve-PimInvardiaInstallKey -GetSetting { param($n) Get-PimSqlSetting -ConnectionString $csInv -Name $n }
+        # INV-S16: the install's lasting id, READ from the store (the updater never creates one); none = no header
+        if (Get-Command Resolve-PimInvardiaInstallId -ErrorAction SilentlyContinue) { $invId = Resolve-PimInvardiaInstallId -GetSetting { param($n) Get-PimSqlSetting -ConnectionString $csInv -Name $n } }
     }
     $invBase = ''; try { $invBase = "$(Get-PimSqlSetting -ConnectionString $csInv -Name 'LicenceRequestBaseUrl')".Trim() } catch { }
     # 2026-10-09 -- the replay watermark is PER RING (PIM_UPDATE_INVARDIA_SEQ_R<ring>): Invardia numbers sequences per ring,
@@ -770,7 +774,7 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
                 -HighestKnownVersion $highestKnown -AllowDowngrade:("$($env:PIM_UPDATE_ALLOW_DOWNGRADE)".Trim() -eq '1') -AllowMajor:$allowMajor
     } else {
     $t = Get-PimInvardiaUpdateTarget -Http { param($m, $u, $b, $h) Invoke-PimLicenceHttp -Method $m -Url $u -Body $b -Headers $h } `
-            -InstallKey $invKey -LicenceText $licText -BaseUrl $invBase -AppliedSequence $script:PimInvardiaApplied `
+            -InstallKey $invKey -InstallId $invId -LicenceText $licText -BaseUrl $invBase -AppliedSequence $script:PimInvardiaApplied `
             -RunningVersion "$($script:PimRunningVersion)" -LastBuiltVersion $(if ($sfNeed) { '' } else { $lastBuilt }) -Ring $ring `
             -UnprovenLegacySequence ([int]$seqRes.unprovenLegacy) -HighestKnownVersion $highestKnown `
             -AllowDowngrade:("$($env:PIM_UPDATE_ALLOW_DOWNGRADE)".Trim() -eq '1') -AllowMajor:$allowMajor   # UPDATE-1.7: this environment's own ring

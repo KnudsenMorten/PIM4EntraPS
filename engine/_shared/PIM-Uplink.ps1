@@ -747,6 +747,36 @@ function New-PimUplinkConsentReport {
     return [pscustomobject]$o
 }
 
+# ---- INV-S16 (Invardia 2026-11-01) -- the install's LASTING id on every IDENTIFIED record -------------------------------
+# pim.Settings 'InstallId' (Resolve-PimInvardiaInstallId, PIM-LicenceRequest.ps1): the same id the manifest pull, the licence
+# knock and the support (MCP) call send as X-Invardia-Install-Id. NEVER on an anonymous record (that one keeps its own
+# TelemetryInstallId, so the two cannot be joined), and not on the Kind 'setup' report, whose field list Invardia keeps closed.
+function Get-PimUplinkLastingInstallId {
+    <# The lasting id for the identified records ('' = none / not readable -> left out). Creates it once when it may write. #>
+    param([scriptblock]$GetSetting, [scriptblock]$SetSetting, [scriptblock]$CreateSetting)
+    if (-not (Get-Command Resolve-PimInvardiaInstallId -ErrorAction SilentlyContinue)) { return '' }
+    try { return "$(Resolve-PimInvardiaInstallId -GetSetting $GetSetting -SetSetting $SetSetting -CreateSetting $CreateSetting)" } catch { return '' }
+}
+
+function Add-PimUplinkInstallId {
+    <#
+      PURE (sets one field). -Record with InstallId = -InstallId (a GUID, lower-cased), for an identified record. Unchanged
+      when the id is not a GUID, when the record is a Kind 'setup' report, or when it is $null.
+    #>
+    param([AllowNull()][object]$Record, [AllowNull()][string]$InstallId = '')
+    if ($null -eq $Record) { return $Record }
+    $iid = "$InstallId".Trim().ToLowerInvariant()
+    if ($iid -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { return $Record }
+    if ($Record -is [System.Collections.IDictionary]) {
+        if ("$($Record['Kind'])" -eq 'setup') { return $Record }
+        $Record['InstallId'] = $iid; return $Record
+    }
+    $kp = $Record.PSObject.Properties['Kind']
+    if ($kp -and "$($kp.Value)" -eq 'setup') { return $Record }
+    $Record | Add-Member -NotePropertyName InstallId -NotePropertyValue $iid -Force
+    return $Record
+}
+
 # PIM 100.36 (owner via Invardia 2026-10-09: "telemetry must collect available sql db space remaining in health telemetry"):
 # allocated data pages (ROWS files) and the database's max size, both MB. Azure SQL; on a server without a max size
 # (MaxSizeInBytes NULL / -1) nothing is reported.
@@ -1453,11 +1483,22 @@ function Send-PimUplinkRecord {
       { Status; Reason; Sent } + Body (the parsed JSON response, or $null). Never throws.
       -Transport is a test seam: { <Invoke-RestMethod's arguments> } -> the response. Default = the real cmdlet.
     #>
-    param([Parameter(Mandatory)][object]$Record, [AllowNull()][string]$Endpoint, [AllowNull()][string]$AccessCode, [scriptblock]$Transport = $null)
+    # -InstallId (INV-S16): the install's LASTING id for an IDENTIFIED record -> header X-Invardia-Install-Id, the same value the
+    # record carries; only a GUID is sent, '' / anything else = no header (sync/_AitUplink.ps1 stays unchanged: the header is
+    # added here, in the function-local Invoke-RestMethod, to the headers Send-AitUplink built).
+    param([Parameter(Mandatory)][object]$Record, [AllowNull()][string]$Endpoint, [AllowNull()][string]$AccessCode, [scriptblock]$Transport = $null,
+          [AllowNull()][string]$InstallId = '')
     $box = @{ body = $null; err = '' }
     $xport = if ($Transport) { $Transport } else { { Microsoft.PowerShell.Utility\Invoke-RestMethod @args } }
+    $s16 = "$InstallId".Trim().ToLowerInvariant()
+    if ($s16 -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { $s16 = '' }
     # 2.4.551: keep the ERROR body too -- Invardia's 422 is {error:'invalid', fields:[...]} and names the refused field; it was lost.
-    function Invoke-RestMethod { try { $resp = & $xport @args; $box.body = $resp; $resp } catch { try { $box.err = "$($_.ErrorDetails.Message)" } catch { }; throw } }
+    function Invoke-RestMethod {
+        # the only dictionary Send-AitUplink passes is its own per-call -Headers table (the body is a JSON string): the key is
+        # added to THAT table in place, so $args (and its parameter names) are splatted exactly as before
+        if ($s16) { foreach ($x in $args) { if ($x -is [System.Collections.IDictionary]) { $x['X-Invardia-Install-Id'] = $s16 } } }
+        try { $resp = & $xport @args; $box.body = $resp; $resp } catch { try { $box.err = "$($_.ErrorDetails.Message)" } catch { }; throw }
+    }
     $r = $null
     try { $r = Send-AitUplink -Record $Record -Endpoint $Endpoint -AccessCode $AccessCode } catch { $r = [pscustomobject]@{ Status = 'failed'; Reason = "uplink POST failed: $($_.Exception.Message)"; Sent = $false } }
     $reason = "$($r.Reason)"
@@ -2562,7 +2603,10 @@ function Invoke-PimUplinkCycle {
           [AllowNull()][scriptblock]$SupportSqlAccess = $null,
           # §33.0 MORE TELEMETRY: { } -> the switched-on structured fields (Get-PimUplinkStateFields: field -> value). INVOKED
           # ONLY when the IDENTIFIED heartbeat is due and the additive fields are on; $null = none.
-          [AllowNull()][scriptblock]$StateFields = $null)
+          [AllowNull()][scriptblock]$StateFields = $null,
+          # INV-S16: { param($Name, $Value) } an insert that never replaces a value (Add-PimSqlSettingIfAbsent), used ONCE to
+          # create the install's lasting id; $null = -SetSetting. The id rides on every IDENTIFIED record (Add-PimUplinkInstallId).
+          [AllowNull()][scriptblock]$CreateSetting = $null)
     $NowUtc = $NowUtc.ToUniversalTime()
     $endpoint = "$(& $GetSetting 'UplinkEndpoint')".Trim()
     $sender = Resolve-AitUplinkSender -Enabled $Enabled -InstallKey $InstallKey -Endpoint $endpoint
@@ -2572,8 +2616,11 @@ function Invoke-PimUplinkCycle {
         if ((Get-PimUplinkConsentAction -State $st0 -Enabled $false) -ne 'optout') { return @{ ran = $false; mode = 'disabled'; sent = 0; failed = 0; heartbeat = $false; message = "telemetry is off (feature 'telemetry.uplink')" } }
         $cred = Resolve-AitUplinkSender -Enabled $true -InstallKey $InstallKey -Endpoint $endpoint
         $rec = New-PimUplinkConsentReport -Kind optout -Mode $cred.Mode -Version $Version -Ring $Ring -InstallId "$(& $GetSetting 'TelemetryInstallId')" -TenantId $TenantId -Now $NowUtc
+        $optId = ''
+        if ($rec -and $cred.Mode -eq 'identified') { $optId = Get-PimUplinkLastingInstallId -GetSetting $GetSetting -SetSetting $SetSetting -CreateSetting $CreateSetting; $rec = Add-PimUplinkInstallId -Record $rec -InstallId $optId }
         $ok = $true; $why = ''
-        if ($rec) { $r = & $Send $rec $cred.Endpoint $cred.AccessCode; $ok = ("$($r.Status)" -eq 'ok'); $why = "$($r.Reason)" }
+        # INV-S16: the same lasting id as X-Invardia-Install-Id on the identified call ('' = no header)
+        if ($rec) { $r = & $Send $rec $cred.Endpoint $cred.AccessCode $optId; $ok = ("$($r.Status)" -eq 'ok'); $why = "$($r.Reason)" }
         $msg = if ($ok) { "telemetry is off -- the opt-out was reported to Invardia; nothing else is sent" } else { "telemetry is off -- the opt-out report was NOT delivered ($why); it is retried next cycle, nothing else is sent" }
         $ns = [ordered]@{}; if ($st0) { foreach ($pp in $st0.PSObject.Properties) { $ns[$pp.Name] = $pp.Value } }
         if ($ok) { $ns['consent'] = 'off'; $ns['consentUtc'] = $NowUtc.ToString('o') }
@@ -2626,7 +2673,11 @@ function Invoke-PimUplinkCycle {
     }
     $common = @{ Mode = $sender.Mode; Product = $script:PimUplinkProduct; Version = $Version; Ring = $Ring; InstallId = $iid; TenantId = $TenantId; Now = $NowUtc }
     $sent = 0; $failed = 0; $why = @(); $supNote = ''; $hbSent = $false; $stopped = $false; $budget = [Math]::Max(1, $MaxPerCycle)
-    $post = { param($rec) if ($sent -gt 0 -and $PauseMs -gt 0) { Start-Sleep -Milliseconds $PauseMs }; & $Send $rec $sender.Endpoint $sender.AccessCode }
+    # INV-S16: the install's LASTING id (pim.Settings 'InstallId', created once, kept) on every IDENTIFIED record -- never the
+    # anonymous TelemetryInstallId, and nothing at all in anonymous mode. '' (the store could not give one) = left out.
+    $lastingId = ''
+    if ($sender.Mode -eq 'identified') { $lastingId = Get-PimUplinkLastingInstallId -GetSetting $GetSetting -SetSetting $SetSetting -CreateSetting $CreateSetting }
+    $post = { param($rec) if ($sent -gt 0 -and $PauseMs -gt 0) { Start-Sleep -Milliseconds $PauseMs }; & $Send (Add-PimUplinkInstallId -Record $rec -InstallId $lastingId) $sender.Endpoint $sender.AccessCode $lastingId }
     # Lane repfix: the additive fields. $postAdd sends a record that carries some (-names); when Invardia refuses its CONTENT
     # (400 / 422) the same record goes ONCE more in its old form (-legacy: the old value of a field that existed before; a
     # field that did not exist is removed) and, when that lands, the additive fields are off for the rest of this cycle and
@@ -3262,8 +3313,12 @@ function Invoke-PimUplinkJob {
     # PLAIN scriptblocks, never .GetNewClosure() (Test-PimHybridWorker L19): they read $cs / $WhatIf through dynamic scope.
     $get = { param($n) Get-PimSqlSetting -ConnectionString $cs -Name $n }
     $set = { param($n, $v) if (-not $WhatIf) { Set-PimSqlSetting -ConnectionString $cs -Name $n -Value $v } }
+    # INV-S16: the install's lasting id (Resolve-PimInvardiaInstallId lives in PIM-LicenceRequest.ps1), created with an insert
+    # that never replaces a value, so the uplink and the licence-request job can never keep two different ids.
+    if (-not (Get-Command Resolve-PimInvardiaInstallId -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-LicenceRequest.ps1') }
+    $create = { param($n, $v) if (-not $WhatIf) { if (Get-Command Invoke-PimSqlNonQuery -ErrorAction SilentlyContinue) { [void](Add-PimSqlSettingIfAbsent -ConnectionString $cs -Name $n -Value $v) } else { Set-PimSqlSetting -ConnectionString $cs -Name $n -Value $v } } }
     # §100.39: Send-PimUplinkRecord = the framework's Send-AitUplink, unchanged, plus the response body (supersededBy).
-    $send = { param($rec, $ep, $code) if ($WhatIf) { @{ Status = 'ok'; Reason = 'what-if' } } else { Send-PimUplinkRecord -Record $rec -Endpoint $ep -AccessCode $code } }
+    $send = { param($rec, $ep, $code, $iid = '') if ($WhatIf) { @{ Status = 'ok'; Reason = 'what-if' } } else { Send-PimUplinkRecord -Record $rec -Endpoint $ep -AccessCode $code -InstallId "$iid" } }
     $sol = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $verFile = Join-Path $sol 'VERSION'
     $ver = if (Test-Path -LiteralPath $verFile) { "$(Get-Content -Raw -LiteralPath $verFile)".Trim() } elseif ($env:PIM_VERSION) { "$env:PIM_VERSION" } else { '' }
@@ -3431,7 +3486,7 @@ function Invoke-PimUplinkJob {
             } finally { $global:PIM_RestTimeoutSec = $ssaJobPrevTo }
         }
     }
-    $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
+    $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -CreateSetting $create -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
             -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $pause @cyc `
             -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints -AdoptionCounts $adoption `
             -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun -Causes $causesOn -LicenceProbe $licProbe -HybridAd $hyAd `
