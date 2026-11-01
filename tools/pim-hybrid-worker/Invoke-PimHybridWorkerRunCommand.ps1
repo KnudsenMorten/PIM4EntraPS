@@ -40,7 +40,7 @@ param(
     [Parameter(Mandatory)][string]$SubscriptionId,
     [Parameter(Mandatory)][string]$TenantId,
     [Parameter(Mandatory)][string]$MachineResourceId,
-    [Parameter(Mandatory)][ValidateSet('Join', 'Configure', 'Update', 'Layout', 'Remove', 'Guests')][string]$Phase,
+    [Parameter(Mandatory)][ValidateSet('Join', 'Configure', 'Update', 'Layout', 'Remove', 'Guests', 'MetadataAccess')][string]$Phase,
     [hashtable]$InstallParameters = @{},
     [string[]]$ProtectedParameterNames = @('OdjBlob'),
     [switch]$PrintOnly,

@@ -33,7 +33,15 @@
     -Phase Remove     (§100.63, Remove-PimHybridWorker.ps1 -Target Arc runs it through run-command) Unregister the six
                       tasks, take the gMSA(s) out of 'Hybrid agent extension applications' and 'log on as a batch job',
                       delete <Root>\app + <Root>\bin (the logs stay). The machine, its Arc agent, PowerShell 7 and the
-                      domain membership are NOT touched.
+                      domain membership are NOT touched. Also removes the metadata-service firewall rule below.
+    -Phase MetadataAccess  (Azure VM) Re-applies only the outbound firewall rule 'PIM Hybrid Worker - metadata
+                      service access': the instance metadata service (169.254.169.254, TCP 80) answers only SYSTEM
+                      (the Azure VM agent and its extensions), PIM's gMSAs and the gMSA of each product registered in
+                      C:\ProgramData\HybridWorkerHost\guests\<product>.json; every other account is blocked. Configure, Layout
+                      and every daily Update apply it too; a product that registers or unregisters as a guest runs
+                      C:\PIM\bin\Install-PimHybridWorker.ps1 -Phase MetadataAccess (as SYSTEM) right after. The step prints
+                      each account with its SID and warns when one cannot be resolved. Not on an Azure Arc server (its local
+                      Arc agent already limits who gets a token).
 
     The scheduled tasks (each runs Start-PimScheduler -UseManagedIdentity as the account named):
        'PIM Hybrid Worker'           every 5 min AS THE gMSA, instance hybrid: hybrid-ad-apply + hybrid-ad-groups (the
@@ -65,7 +73,8 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     # Guests (PIM 80.2a, framework 12.26): READ ONLY -- lists the other products registered on this host
-    [Parameter(Mandatory)][ValidateSet('Join', 'Configure', 'Update', 'Layout', 'Remove', 'Guests')][string]$Phase,
+    # MetadataAccess: re-applies only the metadata-service rule -- a guest runs it after it registers / unregisters
+    [Parameter(Mandatory)][ValidateSet('Join', 'Configure', 'Update', 'Layout', 'Remove', 'Guests', 'MetadataAccess')][string]$Phase,
     [string]$OdjBlob,
     [string]$GmsaName,
     # 2.4.467 tier split (operator 2026-09-30): server onboarding runs as its OWN gMSA (DOMAIN\gMSA-PIM-L2-T1), in its own
@@ -129,6 +138,140 @@ function Get-PimSelfContainedText([string]$Text) {
     return ($Text.Substring(0, $m.Index) + [IO.File]::ReadAllText($h) + $Text.Substring($m.Index + $m.Length))
 }
 
+# ------------------------------------------------------------------ SEC-87: who may reach the metadata service (Azure VM)
+# On an Azure VM any local process can ask the instance metadata service (169.254.169.254, TCP 80) for a token of the VM's
+# managed identities -- PIM's system identity and a guest's user-assigned one. ONE outbound BLOCK rule closes it for every
+# account except: SYSTEM (the Azure VM agent and its extensions run as SYSTEM), PIM's own gMSAs (worker.json) and each
+# registered guest's gMSA (C:\ProgramData\HybridWorkerHost\guests\*.json, its `gmsa`).
+# The rule's LocalUser is a security descriptor that Windows checks against the token of the process that opens the
+# connection: the rule MATCHES (blocks) when the token is granted CC. A DENY ACE per exempt SID, in canonical order before
+# the one ALLOW ACE for Everyone (WD), means: a token that carries an exempt SID is denied -> the rule does not match -> the
+# connection is not blocked; every other token is granted through Everyone -> blocked. (A separate ALLOW rule would not
+# help: a block rule always wins over an allow rule.)
+# Fail-open on doubt: if any account that must keep access cannot be resolved to a SID (or a guest file cannot be read),
+# no new rule is written -- the previous rule stays only when it already names every unresolved account, otherwise it is
+# taken away. Locking a guest out of its own identity is worse than leaving one host as it was before SEC-87.
+# Azure Arc servers are left alone: their identity comes from the local Arc agent, whose key-file challenge already limits it.
+function Get-PimImdsRuleSpec {
+    [pscustomobject]@{ name = 'PIM-HybridWorker-MetadataAccess'; displayName = 'PIM Hybrid Worker - metadata service access'; group = 'PIM Hybrid Worker'
+        remoteAddress = '169.254.169.254'; protocol = 'TCP'; remotePort = '80' }
+}
+function Resolve-PimImdsSid([string]$Name) {
+    # an account name -> its SID on this host, or $null. A gMSA resolves with its '$'; the name is tried as given first.
+    $n = "$Name".Trim(); if (-not $n) { return $null }
+    if ($n -match '^S-1-\d+(-\d+)+$') { return $n }
+    foreach ($c in @($n, $(if ($n.EndsWith('$')) { $n.TrimEnd('$') } else { "$n`$" }))) {
+        try { $s = (New-Object System.Security.Principal.NTAccount($c)).Translate([System.Security.Principal.SecurityIdentifier]).Value; if ($s) { return $s } } catch { }
+    }
+    return $null
+}
+function Get-PimImdsPimGmsaNames($Cfg) {
+    # every gMSA PIM's worker.json names: gmsa, serverGmsa and any later lane gMSA (a property whose name holds 'gmsa')
+    $props = if ($Cfg -is [System.Collections.IDictionary]) { @($Cfg.Keys | ForEach-Object { [pscustomobject]@{ Name = "$_"; Value = $Cfg[$_] } }) } else { @($Cfg.PSObject.Properties | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Value = $_.Value } }) }
+    foreach ($p in $props) {
+        if ($p.Name -notmatch '(?i)gmsa') { continue }
+        foreach ($v in @($p.Value)) { if ("$v".Trim()) { [pscustomobject]@{ name = "$v".Trim(); source = "PIM (worker.json $($p.Name))" } } }
+    }
+}
+function ConvertTo-PimImdsSddl([string[]]$Sids) {
+    # owner LocalService (as Windows writes it), then one DENY per exempt SID, then ALLOW Everyone: "everyone except these"
+    'O:LSD:' + (($Sids | ForEach-Object { "(D;;CC;;;$_)" }) -join '') + '(A;;CC;;;WD)'
+}
+function Get-PimImdsSddlSids([string]$Sddl) {
+    # the exempt (deny) and the matched (allow) SIDs of a LocalUser string, aliases (SY, WD) resolved; $null when unreadable
+    try { $sd = New-Object System.Security.AccessControl.RawSecurityDescriptor($Sddl) } catch { return $null }
+    $deny = @(); $allow = @()
+    foreach ($a in $sd.DiscretionaryAcl) { if ("$($a.AceQualifier)" -eq 'AccessDenied') { $deny += $a.SecurityIdentifier.Value } elseif ("$($a.AceQualifier)" -eq 'AccessAllowed') { $allow += $a.SecurityIdentifier.Value } }
+    return [pscustomobject]@{ deny = @($deny | Sort-Object -Unique); allow = @($allow | Sort-Object -Unique) }
+}
+function Get-PimImdsRulePlan($Cfg, [string]$GuestDir = (Join-Path $env:ProgramData 'HybridWorkerHost\guests')) {
+    $want = New-Object System.Collections.Generic.List[object]
+    $problems = New-Object System.Collections.Generic.List[object]
+    $want.Add([pscustomobject]@{ name = 'NT AUTHORITY\SYSTEM'; source = 'the Azure VM agent and its extensions'; sid = 'S-1-5-18' })
+    foreach ($g in @(Get-PimImdsPimGmsaNames $Cfg)) { $want.Add([pscustomobject]@{ name = $g.name; source = $g.source; sid = '' }) }
+    $gFiles = @(if ($GuestDir -and (Test-Path -LiteralPath $GuestDir)) { Get-ChildItem -LiteralPath $GuestDir -Filter '*.json' -File -ErrorAction SilentlyContinue | Sort-Object Name })
+    $ignored = New-Object System.Collections.Generic.List[string]
+    foreach ($gf in $gFiles) {
+        # a guest is installed by SYSTEM / an administrator: a file anyone else wrote (ProgramData lets users create files)
+        # neither adds an account nor changes the rule -- it is ignored and reported
+        $own = Get-PimImdsGuestFileOwner $gf.FullName
+        if ($own -notin @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')) { $ignored.Add("guests\$($gf.Name) (owner $(if ($own) { $own } else { 'unknown' }))"); continue }
+        $gj = $null; try { $gj = Get-Content -LiteralPath $gf.FullName -Raw | ConvertFrom-Json } catch { }
+        if (-not $gj) { $problems.Add([pscustomobject]@{ name = ''; why = "the guest file guests\$($gf.Name) cannot be read -- its account is unknown" }); continue }
+        $gp = "$($gj.product)".Trim(); if (-not $gp) { $gp = $gf.BaseName }
+        $gm = @(@($gj.gmsa) | Where-Object { "$_".Trim() })
+        if (-not $gm.Count) { $problems.Add([pscustomobject]@{ name = ''; why = "the guest $gp (guests\$($gf.Name)) names no gMSA (field 'gmsa') -- its account is unknown" }); continue }
+        foreach ($n in $gm) { $want.Add([pscustomobject]@{ name = "$n".Trim(); source = "guest $gp (guests\$($gf.Name))"; sid = '' }) }
+    }
+    $allowed = New-Object System.Collections.Generic.List[object]
+    foreach ($w in $want) {
+        $sid = if ($w.sid) { $w.sid } else { Resolve-PimImdsSid $w.name }
+        if (-not $sid -or $sid -notmatch '^S-1-\d+(-\d+)+$') { $problems.Add([pscustomobject]@{ name = $w.name; why = "$($w.name) ($($w.source)) does not resolve to a SID on this host" }); continue }
+        if (@($allowed | Where-Object { $_.sid -ieq $sid }).Count) { continue }
+        $allowed.Add([pscustomobject]@{ name = $w.name; source = $w.source; sid = $sid })
+    }
+    # plain arrays (Windows PowerShell 5.1 refuses @(<generic List>) inside a hashtable literal: "Argument types do not match")
+    $aArr = $allowed.ToArray(); $pArr = $problems.ToArray(); $iArr = $ignored.ToArray()
+    [string[]]$sidList = @(foreach ($a in $aArr) { $a.sid })
+    $sddl = ConvertTo-PimImdsSddl $sidList
+    return [pscustomobject]@{ ok = ($pArr.Count -eq 0); allowed = $aArr; problems = $pArr; ignored = $iArr; sddl = $sddl }
+}
+function Get-PimImdsGuestFileOwner([string]$Path) {
+    try { return (Get-Acl -LiteralPath $Path).GetOwner([System.Security.Principal.SecurityIdentifier]).Value } catch { return '' }
+}
+function Get-PimImdsRuleExisting {
+    $spec = Get-PimImdsRuleSpec
+    $found = @(@(Get-NetFirewallRule -Name $spec.name -ErrorAction SilentlyContinue) + @(Get-NetFirewallRule -DisplayName $spec.displayName -ErrorAction SilentlyContinue) | Where-Object { $_ })
+    $seen = @{}; foreach ($r in $found) { if (-not $seen.ContainsKey("$($r.Name)")) { $seen["$($r.Name)"] = $r } }
+    return @($seen.Values)
+}
+function Remove-PimImdsRule {
+    $n = 0
+    foreach ($r in @(Get-PimImdsRuleExisting)) { Remove-NetFirewallRule -Name "$($r.Name)" -ErrorAction SilentlyContinue; $n++ }
+    return $n
+}
+function Set-PimImdsRule {
+    # Configure / Update / Layout / MetadataAccess. Prints the allowed list, then applies (or, -PlanOnlyRule, only prints) it.
+    param($Cfg, [string]$HostType, [string]$GuestDir = (Join-Path $env:ProgramData 'HybridWorkerHost\guests'), [switch]$PlanOnlyRule)
+    $spec = Get-PimImdsRuleSpec
+    if ("$HostType" -eq 'Arc') { Step "metadata service: no rule on an Azure Arc server -- its identity comes from the local Arc agent (localhost:40342), whose key-file challenge already limits who gets a token"; return }
+    $plan = Get-PimImdsRulePlan -Cfg $Cfg -GuestDir $GuestDir
+    Step "metadata service ($($spec.remoteAddress) TCP $($spec.remotePort)): only these accounts may reach it --"
+    foreach ($a in $plan.allowed) { Step ("  {0}  {1}  ({2})" -f $a.name, $a.sid, $a.source) }
+    foreach ($i in $plan.ignored) { Write-Warning "metadata service: ignored $i -- not written by SYSTEM or an administrator"; Step "  IGNORED: $i -- not written by SYSTEM or an administrator" }
+    Step "  rule '$($spec.displayName)': outbound BLOCK for every other account; LocalUser $($plan.sddl)"
+    if (-not $plan.ok) {
+        foreach ($p in $plan.problems) { Write-Warning "metadata service: $($p.why)"; Step "  NOT RESOLVED: $($p.why)" }
+        if ($PlanOnlyRule) { Step '  would NOT apply a new rule (an account that must keep access is not resolved -- no account is ever locked out on a doubt)'; return }
+        $old = @(Get-PimImdsRuleExisting)
+        $named = @(foreach ($r in $old) { $d = "$($r.Description)"; $ix = $d.IndexOf('Allowed: '); if ($ix -ge 0) { $d.Substring($ix + 9) -split '; ' | ForEach-Object { $_.Trim().ToLowerInvariant() } } })
+        $covered = $old.Count -and -not @($plan.problems | Where-Object { -not $_.name -or ($named -notcontains $_.name.ToLowerInvariant()) }).Count
+        if ($covered) { Step '  NOT applied: the previous rule stays as it was (it already lets every unresolved account through)'; return }
+        if ($old.Count) { [void](Remove-PimImdsRule); Step '  NOT applied, and the previous rule is REMOVED (it would block an account that must keep access): the metadata service is open on this host until the account resolves -- re-run -Phase MetadataAccess then'; return }
+        Step '  NOT applied: no rule on this host (the metadata service stays as it was) -- re-run -Phase MetadataAccess once the account resolves'
+        return
+    }
+    if ($PlanOnlyRule) { Step '  would replace the rule (one rule, this name)'; return }
+    $removed = Remove-PimImdsRule
+    $desc = 'Created by Install-PimHybridWorker.ps1: only these accounts may reach the metadata service. Allowed: ' + (($plan.allowed | ForEach-Object { $_.name }) -join '; ')
+    New-NetFirewallRule -Name $spec.name -DisplayName $spec.displayName -Group $spec.group -Description $desc -Direction Outbound -Action Block -Profile Any -Enabled True `
+        -RemoteAddress $spec.remoteAddress -Protocol $spec.protocol -RemotePort $spec.remotePort -LocalUser $plan.sddl | Out-Null
+    Step "  applied ($(if ($removed) { 'replaced the previous rule' } else { 'new' }))"
+    # read back: the rule, its LocalUser (the same SIDs), that it is in force (a domain policy can keep local rules out), the profiles
+    $rb = @(Get-NetFirewallRule -Name $spec.name -ErrorAction SilentlyContinue)
+    $lu = if ($rb.Count) { "$((Get-NetFirewallSecurityFilter -AssociatedNetFirewallRule $rb[0]).LocalUser)" } else { '' }
+    $got = Get-PimImdsSddlSids $lu; $exp = Get-PimImdsSddlSids $plan.sddl
+    if ($rb.Count -eq 1 -and $got -and (($got.deny -join ',') -eq ($exp.deny -join ',')) -and (($got.allow -join ',') -eq 'S-1-1-0')) { Step "  read back: one rule, $($got.deny.Count) account(s) exempt" }
+    else { Write-Warning "metadata service: the rule did not read back as written ($($rb.Count) rule(s), LocalUser '$lu')"; Step '  read back: NOT as written -- check the rule' }
+    if (-not @(Get-NetFirewallRule -Name $spec.name -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count) { Write-Warning 'metadata service: the rule is not in force (ActiveStore) -- a Group Policy setting may keep local firewall rules from applying'; Step '  NOT in force: a Group Policy setting may keep local firewall rules from applying' }
+    foreach ($pf in @(Get-NetFirewallProfile -ErrorAction SilentlyContinue)) { if ("$($pf.Enabled)" -eq 'False') { Write-Warning "metadata service: Windows Firewall is OFF for the $($pf.Name) profile -- the rule has no effect there"; Step "  Windows Firewall is OFF for the $($pf.Name) profile -- the rule has no effect there" } }
+}
+function Invoke-PimImdsRuleStep($Cfg) {
+    # the rule never stops the phase that refreshes it: a failure is a warning, the worker's own steps go on
+    try { Set-PimImdsRule -Cfg $Cfg -HostType "$($Cfg.hostType)" }
+    catch { Write-Warning "metadata service: the metadata-service rule could not be applied: $($_.Exception.Message)"; Step "metadata service: NOT applied -- $($_.Exception.Message)" }
+}
+
 # ------------------------------------------------------------------ -WhatIf: the plan, nothing changed
 if ($WhatIfPreference -and $Phase -ne 'Guests') {   # Guests only reads: it runs under -WhatIf too
     $ht = Resolve-PimHostType $HostType
@@ -143,7 +286,15 @@ if ($WhatIfPreference -and $Phase -ne 'Guests') {   # Guests only reads: it runs
         }
         'Update'    { Step 'would ask Invardia for the SIGNED manifest of the ring (verified by the installed version: signature, sequence, archive SHA-256) and move C:\PIM\app\current to the approved version (never backwards), then apply its layout -- with -UpdateSource Blob: channel.json from the source container (unsigned)' }
         'Layout'    { Step 'would write the run wrapper and re-register the scheduled tasks of this version' }
-        'Remove'    { Step "would unregister the worker's scheduled tasks ($($script:PimWorkerTaskNames -join ', ')), take the gMSA(s) out of '$ArcKeyReaderGroup' and 'log on as a batch job', delete $Root\app + $Root\bin (logs kept); the machine itself stays" }
+        'MetadataAccess' { Step 'would refresh the metadata-service rule from worker.json and the registered guests' }
+        'Remove'    { Step "would unregister the worker's scheduled tasks ($($script:PimWorkerTaskNames -join ', ')), take the gMSA(s) out of '$ArcKeyReaderGroup' and 'log on as a batch job', delete $Root\app + $Root\bin (logs kept), remove the firewall rule '$((Get-PimImdsRuleSpec).displayName)'; the machine itself stays" }
+    }
+    # SEC-87: the metadata-service rule these phases (re)apply -- printed, never applied, under -WhatIf
+    if ($Phase -in @('Configure', 'Update', 'Layout', 'MetadataAccess')) {
+        $wcfg = if ($Phase -eq 'Configure') { [ordered]@{ gmsa = "$GmsaName".TrimEnd('$'); serverGmsa = "$ServerGmsaName".Trim().TrimEnd('$') } }
+                elseif (Test-Path -LiteralPath $cfgPath) { Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json } else { $null }
+        if ($null -ne $wcfg) { Set-PimImdsRule -Cfg $wcfg -HostType $(if ($Phase -ne 'Configure' -and "$($wcfg.hostType)".Trim()) { "$($wcfg.hostType)" } else { $ht }) -PlanOnlyRule }
+        else { Step "metadata service: no $cfgPath -- the rule is planned by -Phase Configure" }
     }
     Step 'preview only (-WhatIf) -- nothing was changed'
     return
@@ -225,6 +376,8 @@ if ($Phase -eq 'Remove') {
         Remove-Item $inf, $db -Force -ErrorAction SilentlyContinue
         Step "'log on as a batch job' taken back from the worker gMSA(s)"
     }
+    # SEC-87: PIM owns the metadata-service rule; with PIM gone it goes too (a guest that stays keeps its own protection)
+    if ((Remove-PimImdsRule) -gt 0) { Step "firewall rule '$((Get-PimImdsRuleSpec).displayName)' removed" }
     foreach ($d in 'app', 'bin') { $p = Join-Path $Root $d; if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force; Step "$p deleted" } }
     Step "removed: the worker's tasks and rights on this machine ($Root\logs kept; the machine itself is untouched)"
     return
@@ -463,11 +616,22 @@ function Test-WorkerLayoutCurrent {
 if ($Phase -eq 'Layout') {
     Register-WorkerLayout
     Set-Content -LiteralPath (Join-Path $Root 'bin\Install-PimHybridWorker.ps1') -Value (Get-PimSelfContainedText $selfText) -Encoding UTF8   # the daily updater runs this copy
+    Invoke-PimImdsRuleStep $cfg
+    return
+}
+
+# ------------------------------------------------------------------ MetadataAccess: only the metadata-service rule
+# A guest product runs this after it writes / deletes its guests\<product>.json, so its gMSA is let through (or taken out)
+# at once: C:\PIM\bin\Install-PimHybridWorker.ps1 -Phase MetadataAccess (as SYSTEM). The daily update refreshes it too.
+if ($Phase -eq 'MetadataAccess') {
+    Invoke-PimImdsRuleStep $cfg
     return
 }
 
 # ------------------------------------------------------------------ Update
 if ($Phase -eq 'Update') {
+    # SEC-87: the metadata-service rule is refreshed on EVERY daily run (finally: also when nothing moves or the update fails)
+    try {
     $signed = ("$($cfg.updateSource)".Trim().ToLowerInvariant() -ne 'blob')
     $t = if ($signed) { Resolve-SignedTargetVersion } else { Resolve-TargetVersion }; $c = Get-CurrentVersion
     Step "source: $(if ($signed) { 'Invardia (signed)' } else { 'source container (UNSIGNED -- -UpdateSource Blob)' }); ring: $($t.reason); running: $(if ($c) { $c } else { 'none' })"
@@ -479,12 +643,17 @@ if ($Phase -eq 'Update') {
     Invoke-CurrentLayout
     Sync-WorkerTaskState
     return
+    } finally { Invoke-PimImdsRuleStep $cfg }
 }
 
 # ------------------------------------------------------------------ Configure
 $join = Get-PimJoinState
 if (-not $join.joined) { throw $(if ("$($cfg.hostType)" -eq 'Arc') { 'this Arc server is not domain-joined -- join it to the domain first (it is your own server; no offline-join blob)' } else { 'this machine is not domain-joined -- run -Phase Join first' }) }
 Step "host: $($cfg.hostType), domain $($join.domain)"
+if ("$($cfg.hostType)" -ne 'Arc' -and [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18' -and @(Get-PimImdsRuleExisting).Count) {
+    # SEC-87: once the rule is in place only SYSTEM (and the gMSAs) reach the metadata service -- this run's code fetch needs it
+    Write-Warning "metadata service: this run is not SYSTEM and the metadata-service rule is in place -- the code fetch below will be refused; run Configure through run-command (Invoke-PimHybridWorkerRunCommand.ps1), which runs as SYSTEM"
+}
 if ("$($cfg.hostType)" -ne 'Arc') {
     # The join blob carried the machine's INITIAL password, and run-command leaves the script it ran on disk. Rotate the
     # machine password now -- the blob is worthless from here. (Reset-ComputerMachinePassword needs RESET rights on the
@@ -610,5 +779,6 @@ Install-Version -V $t.version -ContextPath "$($t.contextPath)"
 if ($signedHere) { Save-UpdateState $t }
 
 Register-WorkerLayout
+Invoke-PimImdsRuleStep $cfg
 
 } finally { Stop-PimScriptRun -Script 'Install-PimHybridWorker' }

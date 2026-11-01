@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.15 -- 2026-11-01
+
+- Hybrid worker on an Azure VM: only the system account, the worker's own service accounts and the service accounts of products registered on the same server can obtain a managed-identity token on that server; every other account is refused. The rule is applied by the worker's setup and its daily update, and removed when the worker is removed.
+
 ## 3.0.14 -- 2026-11-01
 
 - Each installation now identifies itself to the Invardia update and licence service with its own lasting installation id, so its update key works only for that installation. The id is created once, kept across updates, and is separate from the anonymous telemetry id. Plus test and reference-generator fixes.
