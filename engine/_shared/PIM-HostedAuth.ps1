@@ -658,9 +658,11 @@ function Test-PimManagerFrontBearerPath {
       /mcp,/.well-known -- segment-exact)? There the Authorization header is the caller's own access token (or none),
       not the front's ID token: /mcp verifies it itself (Resolve-PimMcpBearer) and /.well-known is public metadata.
     #>
+    # PIM 93.4: /api/app is one too WHEN the setup added it to the front's list (Set-PimManagerApiAuth.ps1): there the
+    # caller is an application with its own token, verified by the Manager itself (Invoke-PimManagerAppSignIn), never a page.
     [CmdletBinding()] param([string]$Path = '')
     $p = "$Path"
-    return ($p -eq '/mcp' -or $p -like '/mcp/*' -or $p -eq '/.well-known' -or $p -like '/.well-known/*')
+    return ($p -eq '/mcp' -or $p -like '/mcp/*' -or $p -eq '/.well-known' -or $p -like '/.well-known/*' -or $p -eq '/api/app' -or $p -like '/api/app/*')
 }
 
 function Test-PimManagerPageToken {

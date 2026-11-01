@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.12 -- 2026-11-01
+
+- API and MCP. The API and MCP reference is now in the PIM Manager (Settings > API and MCP reference), shown for your own role, with a plain description for each route. New MCP tools: deciding and ending access requests, and the remaining read views (conformance, role permissions, commit history, permissions health, the config backup list). Scripts and services can now use the Manager API with an application your SuperAdmins add to a list, off by default: they can read, prepare changes and run jobs, and a person saves every change.
+
 ## 3.0.11 -- 2026-11-01
 
 - Security hardening. Group requests made through the self-service API must be on the requestable-groups list, and Tier 0/1 requests always go to a person for approval. Baselines must be signed (set PIM_BaselineAcceptLegacyCert=1 to keep accepting an older unsigned baseline during a move). The hybrid worker daily update comes through the signed update service. Self-service broker sign-in and PIN handling hardened.

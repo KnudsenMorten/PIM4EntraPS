@@ -322,6 +322,8 @@ if (Test-Path -LiteralPath $_setupLib) { . $_setupLib }
 . (Join-Path $solutionRoot 'engine\_shared\PIM-ImpactCounters.ps1')
 . (Join-Path $solutionRoot 'engine\_shared\PIM-DemoData.ps1')
 . (Join-Path $solutionRoot 'engine\_shared\PIM-Docs.ps1')   # PIM 100.157: the documentation shipped with this version
+# APIDOC-1: Settings > API and MCP reference (GET /api/api-reference) -- read from this process's own code (same library as the release hand-over)
+if (Test-Path -LiteralPath (Join-Path $solutionRoot 'tools\setup\_PimApiReference.ps1')) { . (Join-Path $solutionRoot 'tools\setup\_PimApiReference.ps1') }
 function Test-PimManagerDemoDataOn {
     # 100.68 (b): the SQL flag pimdemo.Meta DemoEnvironment (written only by tools/setup/Set-PimDemoMode.ps1, which refuses
     # anything but the internal demo environment) AND PIM_DEMO_MODE not off. Cached 60 s; no store = off. Never throws.
@@ -411,7 +413,12 @@ $_reviewOwnLib = Join-Path $solutionRoot 'engine\_shared\PIM-ReviewOwnPrincipals
 if (Test-Path -LiteralPath $_reviewOwnLib) { . $_reviewOwnLib }
 $_breakGlassChangeLib = Join-Path $solutionRoot 'engine\_shared\PIM-BreakGlassChange.ps1'
 . $_breakGlassChangeLib
-$_approvalGateLib = Join-Path $solutionRoot 'engine\_shared\PIM-ApprovalGate.ps1'
+# PIM 93.4 (owner 2026-10-31 + 2026-11-01): SCRIPT / SERVICE SIGN-IN for the API -- the listed applications (pim.Settings
+# 'ManagerApiApps', changed through a second-SuperAdmin request), the in-process token check and the route ALLOW-LIST for
+# /api/app/*. Loaded unconditionally: without it no application is ever accepted (Invoke-PimManagerAppSignIn fails closed).
+$_managerApiAppsLib = Join-Path $solutionRoot 'engine\_shared\PIM-ManagerApiApps.ps1'
+. $_managerApiAppsLib
+$_approvalGateLib =Join-Path $solutionRoot 'engine\_shared\PIM-ApprovalGate.ps1'
 if (Test-Path -LiteralPath $_approvalGateLib) { . $_approvalGateLib }
 
 # Maker/checker SECOND-PERSON approval on SENSITIVE authoring/onboarding
@@ -640,6 +647,7 @@ $global:PIM_Hosted = $script:PimHosted
 $script:PimSigninFront = $false
 if ($script:PimHosted -and (Get-Command Get-PimHostedAuthLayer -ErrorAction SilentlyContinue)) { $script:PimSigninFront = ((Get-PimHostedAuthLayer) -eq 'signin-front') }
 $script:CurrentRequestPrincipal = $null
+$script:CurrentRequestApp = $null      # PIM 93.4: the verified APPLICATION of THIS request (/api/app/* only), else $null
 
 function Get-PimEntraJwks {
     # Fetch + cache the tenant's signing keys for LAYER 2 (signed-token verification).
@@ -778,6 +786,93 @@ function Test-PimManagerApiPageToken {
         return (Test-PimManagerPageToken -Authorization "$ah" -PageTokenHeader "$($Request.Headers['X-PIM-Token'])" -ExpectedToken "$ExpectedToken" -Front $true)
     }
     return [bool]($ah -and $ah -eq "Bearer $ExpectedToken")
+}
+
+# ---------------------------------------------------------------------------
+# PIM 93.4 -- SCRIPT / SERVICE SIGN-IN (owner 2026-10-31 "script / service sign-in mapped to a Manager role"; 2026-11-01
+# "dont expose ways a hacker can gain access to customer"). engine\_shared\PIM-ManagerApiApps.ps1 holds the decision; this
+# binds it to THIS request. Only /api/app/* is ever looked at here; the page's own /api/* is untouched.
+# ---------------------------------------------------------------------------
+function Get-PimManagerApiAppsListed {
+    # The saved application list, read live (cached 15 s like Manager access). THROWS when it cannot be read -- the caller
+    # refuses; an unreadable list is never "no list" and never "the last list".
+    if (-not "$($script:PimSqlCs)".Trim()) { return @() }
+    $now = [datetime]::UtcNow
+    if ($script:PimManagerApiAppsCache -and ($now - $script:PimManagerApiAppsCache.at).TotalSeconds -lt 15) { return @($script:PimManagerApiAppsCache.apps) }
+    $st = Get-PimManagerApiAppState -ConnectionString "$($script:PimSqlCs)"
+    $script:PimManagerApiAppsCache = @{ at = $now; apps = @($st.apps) }
+    return @($st.apps)
+}
+
+function Get-PimManagerApiAppAuthConfig {
+    # What an application token is pinned to: the audience(s) PIM_API_APP_AUDIENCE (written by Set-PimManagerApiAuth.ps1
+    # -Apply) and THIS tenant's issuers. Not set = no application is accepted (503).
+    $aud = @("$env:PIM_API_APP_AUDIENCE" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $tid = "$env:PIM_HOSTED_AUTH_TENANT".Trim(); if (-not $tid) { $tid = "$($global:PIM_TenantId)".Trim() }; if (-not $tid) { $tid = "$env:PIM_TenantId".Trim() }
+    $iss = @(if ($tid -and (Get-Command Get-PimHostedDefaultIssuers -ErrorAction SilentlyContinue)) { Get-PimHostedDefaultIssuers -TenantId $tid })
+    return @{ audiences = $aud; issuers = $iss }
+}
+
+function Invoke-PimManagerAppSignIn {
+    <#
+      Called FIRST in the /api/* block. Not under /api/app/ -> @{ handled = $false } at once (the page path, unchanged).
+      Under it: the Manager is hosted, an application is listed, the bearer is a verified application token of a listed
+      application, and the route is on the allow-list for its role -- else the response is WRITTEN here (401 / 403 / 404 /
+      503, plain words only) and @{ handled = $true; ok = $false; status }. Allowed: this request's principal becomes the
+      application (never an edge header -- they are not read on this path), and @{ handled; ok = $true; path = the page
+      route } -- the caller then runs the page's own handler, with its own role gate, for that route.
+    #>
+    param([Parameter(Mandatory)][System.Net.HttpListenerRequest]$Request, [Parameter(Mandatory)][object]$Response,
+          [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Method)
+    $pre = '/api/app'
+    if (-not ($Path -eq $pre -or $Path.StartsWith("$pre/", [System.StringComparison]::Ordinal))) { return [pscustomobject]@{ handled = $false; ok = $false; status = 0; path = $Path } }
+    # from here on THIS request is an application request or nothing: whatever the edge said about it is dropped
+    $script:CurrentRequestPrincipal = $null; $script:CurrentRequestApp = $null
+    $script:CurrentRequestNames = @(); $script:CurrentRequestGroupIds = @()
+    $global:PIM_SignedRequestCapture = $null
+    $refuse = {
+        param([int]$st, [string]$why)
+        $b = switch ($st) { 401 { @{ error = 'unauthorized' } } 403 { @{ error = 'forbidden'; detail = 'this request is not open to this application' } } 404 { @{ error = 'not found' } } default { @{ error = 'unavailable' } } }
+        if ($st -eq 401) { try { $Response.AddHeader('WWW-Authenticate', 'Bearer realm="pim-manager"') } catch { } }
+        Write-JsonResponse -Response $Response -Status $st -Body $b
+        return [pscustomobject]@{ handled = $true; ok = $false; status = $st; path = $Path }
+    }
+    if (-not $script:PimHosted) { return (& $refuse 404 'application sign-in is for a hosted Manager only') }
+    if (-not (Get-Command Resolve-PimManagerAppRequest -ErrorAction SilentlyContinue)) { Write-Host '  [api-app] REFUSED -- PIM-ManagerApiApps.ps1 not loaded' -ForegroundColor Red; return (& $refuse 503 'library missing') }
+    $apps = @()
+    try { $apps = @(Get-PimManagerApiAppsListed) } catch {
+        Write-Host ("  [api-app] REFUSED -- the application list could not be read: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        return (& $refuse 503 'list unreadable')
+    }
+    $ah = "$($Request.Headers['Authorization'])"
+    $cfg = Get-PimManagerApiAppAuthConfig
+    # the signing keys are fetched only when there is something to check: no list = refused before any token is read
+    $jw = $null
+    if ($apps.Count -and $ah -match '^\s*Bearer\s+\S' -and $cfg.audiences.Count -and $cfg.issuers.Count) { $jw = Get-PimEntraJwks }
+    $d = Resolve-PimManagerAppRequest -Method $Method -Path $Path -Authorization $ah -Apps $apps -Jwks $jw -ExpectedIssuers $cfg.issuers -ExpectedAudiences $cfg.audiences
+    if (-not $d.ok) {
+        Write-Host ("  [api-app] REFUSED {0} {1} ({2}){3} -- {4}" -f $Method, $Path, $d.status, $(if ($d.appId) { " app $($d.appId)" } else { '' }), $d.reason) -ForegroundColor Red
+        if ($d.audit -and $d.appId) {
+            # a VERIFIED application was refused: the trail names it (role None while it is refused -- never a person)
+            $script:CurrentRequestApp = @{ appId = "$($d.appId)"; name = "$($d.name)"; role = 'None' }
+            try { Write-PimManagerAuditEvent -Action 'api.app.refused' -Target ("{0} {1}" -f $Method, $d.path) -Result 'denied' -After ([ordered]@{ appId = "$($d.appId)"; name = "$($d.name)"; role = "$($d.role)"; method = $Method; route = "$($d.path)"; status = [int]$d.status; reason = "$($d.reason)" }) } catch { Write-Warning "[api-app] audit not written: $($_.Exception.Message)" }
+            $script:CurrentRequestApp = $null
+        }
+        return (& $refuse ([int]$d.status) "$($d.reason)")
+    }
+    $script:CurrentRequestApp = @{ appId = "$($d.appId)"; name = "$($d.name)"; role = "$($d.role)"; method = $Method; route = "$($d.path)" }
+    $script:CurrentRequestPrincipal = "app:$($d.appId)"
+    return [pscustomobject]@{ handled = $true; ok = $true; status = 200; path = "$($d.path)" }
+}
+
+function Write-PimManagerAppCallAudit {
+    # Every application call that was let in is audited after it ran: the app id, its listed role, the route and the answer.
+    param([int]$Status = 0)
+    $a = $script:CurrentRequestApp
+    if (-not $a -or "$($a.role)" -notin @('Reader', 'Admin')) { return }
+    $res = if ($Status -ge 200 -and $Status -lt 400) { 'ok' } elseif ($Status -in @(401, 403)) { 'denied' } else { 'failed' }
+    try { Write-PimManagerAuditEvent -Action 'api.app.call' -Target ("{0} {1}" -f $a.method, $a.route) -Result $res -After ([ordered]@{ appId = "$($a.appId)"; name = "$($a.name)"; role = "$($a.role)"; method = "$($a.method)"; route = "$($a.route)"; status = $Status; via = 'api-app' }) }
+    catch { Write-Warning "[api-app] audit not written: $($_.Exception.Message)" }
 }
 
 function Get-PimEasyAuthPrincipalExtras {
@@ -1131,7 +1226,15 @@ function Invoke-PimManagerDemoGate {
 function Get-PimManagerRole {
     # Hosted: the Easy Auth principal captured for THIS request. Local: the interactive sign-in's UPN
     # (break-glass console) or the Windows user -- Get-PimManagerLocalIdentity.
-    $who = if ($script:PimHosted -and "$script:CurrentRequestPrincipal".Trim()) { "$script:CurrentRequestPrincipal" }
+    # PIM 93.4: an APPLICATION call (/api/app/*, verified by Invoke-PimManagerAppSignIn for THIS request) has exactly the
+    # role its list entry names -- decided here, BEFORE every person source, so no ManagerAccess / env entry can ever give
+    # an application more. Capped again: anything but Reader / Admin is no role at all (an application is never SuperAdmin).
+    if ($script:CurrentRequestApp) {
+        $ar = "$($script:CurrentRequestApp.role)"
+        if ($ar -notin @('Reader', 'Admin')) { return @{ role = 'None'; identity = "app:$($script:CurrentRequestApp.appId)"; source = 'api application without a valid role (refused)'; app = $true } }
+        return @{ role = $ar; identity = "app:$($script:CurrentRequestApp.appId)"; source = 'api application (Settings > API applications)'; app = $true }
+    }
+    $who =if ($script:PimHosted -and "$script:CurrentRequestPrincipal".Trim()) { "$script:CurrentRequestPrincipal" }
            elseif ($script:PimHosted) { '' }
            else { Get-PimManagerLocalIdentity }
     if ($script:PimHosted -and -not "$who".Trim()) {
@@ -6870,8 +6973,10 @@ function Invoke-PimManagerMcpGetRoute {
       its Pro gate and its answer. Before it, the same Settings > Features gate as /api (a page switched off refuses its
       reads here too). The request is synthetic: GET, the path, the query -- no body, no headers. -> the parsed JSON answer,
       or throws with the route's own error on 4xx/5xx (the model reads it as isError).
+      -Context names the function that gives a route body the router's own values (the conformance block: template folder,
+      instance, template-catalog ring, exemption reader) -- run AFTER the feature-flag gate, passed in as the body's parameters.
     #>
-    param([Parameter(Mandatory)][string]$Function, [Parameter(Mandatory)][string]$Path, [hashtable]$Query = @{}, [int]$MaxChars = 400000)
+    param([Parameter(Mandatory)][string]$Function, [Parameter(Mandatory)][string]$Path, [hashtable]$Query = @{}, [int]$MaxChars = 400000, [string]$Context = '')
     $qs = New-Object System.Collections.Specialized.NameValueCollection
     $parts = New-Object System.Collections.Generic.List[string]
     foreach ($k in @($Query.Keys)) {
@@ -6888,7 +6993,8 @@ function Invoke-PimManagerMcpGetRoute {
         $fl = Invoke-PimManagerFeatureFlagGate -Path $Path -Response $cap
         if ($null -ne $fl) { $ft = [System.Text.Encoding]::UTF8.GetString($cap.OutputStream.ToArray()); $fb = $null; try { $fb = $ft | ConvertFrom-Json } catch { }; throw "switched off ($fl): $(if ($fb -and $fb.error) { $fb.error } else { $ft })" }
     }
-    $st = & $Function -path $Path -req $req -resp $cap -method 'GET'
+    $routeArgs = @{}; if ($Context) { $routeArgs = & $Context }
+    $st = & $Function -path $Path -req $req -resp $cap -method 'GET' @routeArgs
     $st = @($st | Where-Object { $_ -is [int] -or "$_" -match '^\d{3}$' })[-1]
     $txt = [System.Text.Encoding]::UTF8.GetString($cap.OutputStream.ToArray())
     $code = if ($null -ne $st) { [int]$st } elseif ([int]$cap.StatusCode) { [int]$cap.StatusCode } else { 404 }
@@ -6910,7 +7016,9 @@ function Invoke-PimManagerMcpPostRoute {
       parser as an HTTP body, via Read-RequestJson's internal path). Before it: the same caches the router drops on every
       write, and the /api Settings > Features gate. -> the parsed answer, or throws with the route's own error.
     #>
-    param([Parameter(Mandatory)][string]$Function, [Parameter(Mandatory)][string]$Path, [hashtable]$Body = @{})
+    # -Context rfa: the route body lives inside the /api/rfa/* block and needs that block's values for the caller -- they are
+    # built by Invoke-PimManagerMcpRfaPostRoute with the block's own lines, then the SAME route function runs
+    param([Parameter(Mandatory)][string]$Function, [Parameter(Mandatory)][string]$Path, [hashtable]$Body = @{}, [ValidateSet('', 'rfa')][string]$Context = '')
     # the router does this for every /api write (Handle-Request): the attention badges + the kept active-assignments answer
     $script:PimAttentionCache = $null; $script:PimPolicyHoldStateCache = $null
     if ((Get-Command Test-PimActiveAssignmentsResponseCacheClearingRequest -ErrorAction SilentlyContinue) -and (Test-PimActiveAssignmentsResponseCacheClearingRequest -Method 'POST' -Path $Path)) { Clear-PimActiveAssignmentsResponseCache }
@@ -6922,7 +7030,7 @@ function Invoke-PimManagerMcpPostRoute {
         $fl = Invoke-PimManagerFeatureFlagGate -Path $Path -Response $cap
         if ($null -ne $fl) { $ft = [System.Text.Encoding]::UTF8.GetString($cap.OutputStream.ToArray()); $fb = $null; try { $fb = $ft | ConvertFrom-Json } catch { }; throw "switched off ($fl): $(if ($fb -and $fb.error) { $fb.error } else { $ft })" }
     }
-    $st = & $Function -path $Path -req $req -resp $cap -method 'POST'
+    $st = if ($Context -eq 'rfa') { Invoke-PimManagerMcpRfaPostRoute -Function $Function -path $Path -req $req -resp $cap -method 'POST' } else { & $Function -path $Path -req $req -resp $cap -method 'POST' }
     $st = @($st | Where-Object { $_ -is [int] -or "$_" -match '^\d{3}$' })[-1]
     $txt = [System.Text.Encoding]::UTF8.GetString($cap.OutputStream.ToArray())
     $code = if ($null -ne $st) { [int]$st } elseif ([int]$cap.StatusCode) { [int]$cap.StatusCode } else { 404 }
@@ -7154,21 +7262,48 @@ function Get-PimManagerMcpTools {
            s = @{ tier = @{ type = 'string'; description = '0, 1 or 2' } } }
         @{ n = 'role_lookup'; fn = 'RoleLookupReverse'; p = '/api/role-lookup/reverse'; r = 'Reader'; d = 'Reverse role lookup: everything that grants ONE role (definitions, groups, nesting).'
            s = @{ role = @{ type = 'string' }; kind = @{ type = 'string' } }; q = @('role') }
+        # 93.4 MCP-GAP-2 (the rest): conformance (c = the conformance block's own values, passed in), config backups (the LIST
+        # only), role permissions / compare, commit history (pa = the id is part of the path), permissions health
+        @{ n = 'conformance_templates'; fn = 'ConformanceTemplates'; p = '/api/conformance/templates'; r = 'Reader'; c = 'Conformance'; d = 'Template rollout: the configuration templates, their version, whether each is approved, and how far this environment is behind.'; s = @{} }
+        @{ n = 'conformance'; fn = 'Conformance'; p = '/api/conformance'; r = 'Reader'; c = 'Conformance'; d = 'Conformance of ONE template: each entry''s status in this environment, its rollout ring, and the counts.'
+           s = @{ template = @{ type = 'string'; description = 'the template id (conformance_templates lists them)' } }; q = @('template') }
+        @{ n = 'conformance_exemptions'; fn = 'ConformanceExemptions'; p = '/api/conformance/exemptions'; r = 'Reader'; c = 'Conformance'; d = 'The conformance exemptions recorded for this environment: what is exempt, why, who approved it, until when, and its state.'
+           s = @{ template = @{ type = 'string'; description = 'only this template (optional)' } } }
+        @{ n = 'conformance_fleet'; fn = 'ConformanceFleet'; p = '/api/conformance/fleet'; r = 'Reader'; c = 'Conformance'; d = 'Fleet conformance: environments x templates, how far behind each is.'; s = @{} }
+        @{ n = 'conformance_ring_plan'; fn = 'ConformanceRingPlan'; p = '/api/conformance/ring-plan'; r = 'Reader'; c = 'Conformance'; d = 'The rollout plan of ONE template by ring: which environments each ring reaches and where each stands.'
+           s = @{ template = @{ type = 'string'; description = 'the template id' } }; q = @('template') }
+        @{ n = 'config_backups'; fn = 'ConfigBackups'; p = '/api/config-backups'; r = 'Admin'; d = 'The list of configuration backups: when each was taken, by whom, why, its size and whether it is pinned. The list only -- never the content of a backup.'; s = @{} }
+        @{ n = 'role_permissions'; fn = 'RolePermissions'; p = '/api/role-permissions'; r = 'Reader'; d = 'The permissions ONE directory role grants, grouped (Role lookup > permissions).'
+           s = @{ role = @{ type = 'string'; description = 'the directory role name' } }; q = @('role') }
+        @{ n = 'role_permissions_by_action'; fn = 'RolePermissionsByAction'; p = '/api/role-permissions/by-action'; r = 'Reader'; d = 'Which directory roles grant ONE action, the narrowest role first (Role lookup > find roles by action).'
+           s = @{ action = @{ type = 'string'; description = 'e.g. microsoft.directory/users/basic/update' } }; q = @('action') }
+        @{ n = 'role_compare'; fn = 'RoleLookupCompare'; p = '/api/role-lookup/compare'; r = 'Reader'; d = 'Compare two roles: who reaches each, who reaches both (Role lookup > compare).'
+           s = @{ roleA = @{ type = 'string' }; roleB = @{ type = 'string' } }; q = @('roleA', 'roleB') }
+        @{ n = 'commit_history'; fn = 'CommitHistory'; p = '/api/commit-history'; r = 'Admin'; d = 'Commit history: the saved commits (who, when, approved by, how many rows), as on the Commit history page for your role.'
+           s = @{ days = @{ type = 'integer'; description = 'how many days back (default 90)' } } }
+        @{ n = 'commit_history_detail'; fn = 'CommitHistory'; p = '/api/commit-history'; pa = 'commitId'; r = 'Admin'; d = 'ONE saved commit: its rows (before and after) and what an undo would do, as on the Commit history page for your role.'
+           s = @{ commitId = @{ type = 'string'; description = 'the commit id (commit_history lists them)' } }; q = @('commitId') }
+        @{ n = 'permissions_health'; fn = 'PermissionsHealth'; p = '/api/permissions-health'; r = 'Reader'; d = 'The permission check of Home (Verify permissions): which permissions PIM Manager needs and whether each is in place.'; s = @{} }
     )
     foreach ($g in $gr) {
         $props = @{ query = $qx }; foreach ($k in @($g.s.Keys)) { $props[$k] = $g.s[$k] }
         $schema = @{ type = 'object'; properties = $props }; if ($g.q) { $schema['required'] = @($g.q) }
         # The handler is built from text with its values as LITERALS (no GetNewClosure: a closure's dynamic module does not see
         # this script's functions). Names and paths come from the fixed table above, never from a caller.
-        $keyLit = (@($g.s.Keys) | ForEach-Object { "'$_'" }) -join ', '
+        # pa: that argument is the last path segment (the router's own pattern for it), not a query parameter.
+        $keyLit = (@($g.s.Keys | Where-Object { $_ -ne $g.pa }) | ForEach-Object { "'$_'" }) -join ', '
+        $ctxLit = if ($g.c) { " -Context 'Get-PimManager$($g.c)RouteContext'" } else { '' }
+        $pathLit = if ($g.pa) { "('$($g.p)/' + `$pv)" } else { "'$($g.p)'" }
+        $paLine = if ($g.pa) { "`$pv = `"`$(if (`$a -and `$a.PSObject.Properties['$($g.pa)']) { `$a.$($g.pa) })`".Trim(); if (`$pv -notmatch '^[A-Za-z0-9_\-]+$') { throw '$($g.pa) must be letters, digits, - or _' }" } else { '' }
         $h = [scriptblock]::Create(@"
 param(`$a, `$ctx)
+$paLine
 `$qq = @{}
 foreach (`$k in @($keyLit)) { if (`$a -and `$a.PSObject.Properties[`$k]) { `$qq[`$k] = `$a.`$k } }
 if (`$a -and `$a.PSObject.Properties['query'] -and `$a.query) { foreach (`$p in `$a.query.PSObject.Properties) { if (-not `$qq.ContainsKey(`$p.Name)) { `$qq[`$p.Name] = `$p.Value } } }
-Invoke-PimManagerMcpGetRoute -Function 'Invoke-PimManagerGetRoute$($g.fn)' -Path '$($g.p)' -Query `$qq
+Invoke-PimManagerMcpGetRoute -Function 'Invoke-PimManagerGetRoute$($g.fn)' -Path $pathLit -Query `$qq$ctxLit
 "@)
-        $tools.Add((New-PimMcpTool -Name $g.n -Kind read -MinRole $g.r -Description "$($g.d) (Same answer as $($g.p) for your role.)" -InputSchema $schema -Handler $h -Route "GET $($g.p)"))
+        $tools.Add((New-PimMcpTool -Name $g.n -Kind read -MinRole $g.r -Description "$($g.d) (Same answer as $($g.p)$(if ($g.pa) { '/<' + $g.pa + '>' }) for your role.)" -InputSchema $schema -Handler $h -Route "GET $($g.p)$(if ($g.pa) { '/{' + $g.pa + '}' })"))
     }
     # 93.4 MCP-GAP-3a / 4a (owner 2026-10-31): ROUTINE decisions + operations, each through the SAME moved POST route body as
     # the page (Invoke-PimManagerMcpPostRoute) -- its role gate, maker-checker (a second person, not yourself), validation
@@ -7196,6 +7331,12 @@ Invoke-PimManagerMcpGetRoute -Function 'Invoke-PimManagerGetRoute$($g.fn)' -Path
         @{ n = 'reconcile_pause'; fn = 'ReconcilePauseResume'; p = '/api/reconcile/pause'; r = 'SuperAdmin'; d = 'PAUSE the engine''s changes to the tenant (reads go on), with a reason and optionally an end time.'
            s = (& $s @{ reason = @{ type = 'string' }; untilUtc = @{ type = 'string'; description = 'ISO time, optional' } } @('reason')) }
         @{ n = 'reconcile_resume'; fn = 'ReconcilePauseResume'; p = '/api/reconcile/resume'; r = 'SuperAdmin'; d = 'RESUME the engine''s changes after a pause.'; s = (& $s @{ reason = @{ type = 'string' } } @()) }
+        # the two RFA routes sit inside the /api/rfa/* block (ctx = 'rfa': its values for the caller come first); who may decide
+        # is the route's own rule -- an Owner of the request's department or a Manager Admin, never the requester
+        @{ n = 'access_request_decide'; fn = 'RfaDecide'; ctx = 'rfa'; p = '/api/rfa/decide'; r = 'Reader'; d = 'Approve or deny ONE waiting access request, as a department Owner or Admin on the Access requests page (never your own request).'
+           s = (& $s @{ id = @{ type = 'string'; description = 'the request id (access_requests lists them)' }; decision = @{ type = 'string'; enum = @('approve', 'deny') }; note = @{ type = 'string' } } @('id', 'decision')) }
+        @{ n = 'access_request_end'; fn = 'RfaEnd'; ctx = 'rfa'; p = '/api/rfa/end'; r = 'Reader'; d = 'END one approved or active access request now, as a department Owner or Admin on the Access requests page.'
+           s = (& $s @{ id = @{ type = 'string'; description = 'the request id' } } @('id')) }
     )
     foreach ($w in $wr) {
         # handler built from text with LITERALS (see the read views above); names / paths from this fixed table only
@@ -7204,25 +7345,27 @@ Invoke-PimManagerMcpGetRoute -Function 'Invoke-PimManagerGetRoute$($g.fn)' -Path
 param(`$a, `$ctx)
 `$bb = @{}
 foreach (`$k in @($keyLit)) { if (`$a -and `$a.PSObject.Properties[`$k] -and `$null -ne `$a.`$k) { `$bb[`$k] = `$a.`$k } }
-Invoke-PimManagerMcpPostRoute -Function 'Invoke-PimManagerPostRoute$($w.fn)' -Path '$($w.p)' -Body `$bb
+Invoke-PimManagerMcpPostRoute -Function 'Invoke-PimManagerPostRoute$($w.fn)' -Path '$($w.p)' -Body `$bb -Context '$("$($w.ctx)")'
 "@)
         $tools.Add((New-PimMcpTool -Name $w.n -Kind commit -MinRole $w.r -Description "$($w.d) (Same checks as POST $($w.p).)" -InputSchema $w.s -Handler $h -Route "POST $($w.p)"))
     }
     return @($tools.ToArray())
 }
 
-function Invoke-PimManagerCommitHistoryGet {
+function Invoke-PimManagerGetRouteCommitHistory {
     <#
       CONFIG-1.2 / §96.2: GET /api/commit-history (the list) and GET /api/commit-history/<id> (one commit's rows + the undo
       plan with conflict flags), from the change journal. ROLE-FILTERED HERE (D3): SuperAdmin = every commit; Admin = only
       commits they initiated (and only their own rows are undoable); Delegated / Reader = 403. Read-only: the undo is staged
       in the page and committed through PUT /api/csv/<base> with undoOf, so every commit gate applies.
+      93.4 MCP-GAP-2: named Invoke-PimManagerGetRoute* (was Invoke-PimManagerCommitHistoryGet) -- the route and the MCP
+      commit_history / commit_history_detail tools run it; -method is the shared route-function shape (GET only here).
     #>
-    param([Parameter(Mandatory)][string]$path, $req, [Parameter(Mandatory)]$resp)
+    param([Parameter(Mandatory)][string]$path, $req, [Parameter(Mandatory)]$resp, $method = 'GET')
     $script:lastHeartbeat = Get-Date
     $chRole = Get-PimManagerRole
-    $chIsSuper = Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin'
     $chIsAdmin = Test-PimManagerRoleAtLeast -Minimum 'Admin'
+    $chIsSuper = Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin'
     if (-not $chIsAdmin) {
         Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "Commit history and undo are for an Admin (own commits) or a SuperAdmin (every commit); your role is '$($chRole.role)'." }
         return 403
@@ -12102,6 +12245,40 @@ function Get-PimManagerBreakGlassRequestView {
     return (ConvertTo-PimManagerBreakGlassRequestView -Request $g.request)
 }
 
+# PIM 93.4 -- the API-applications change request as the Settings card shows it (the same two-person rule as above).
+function ConvertTo-PimManagerApiAppRequestView {
+    param([AllowNull()][object]$Request)
+    if ($null -eq $Request) { return $null }
+    $r = ConvertTo-PimManagerApiAppChangeRecord -Value $Request
+    $role = Get-PimManagerRole
+    $isSuper = ("$($role.role)" -eq 'SuperAdmin')
+    $open = [bool](Test-PimManagerApiAppChangeOpen -Request $r)
+    $isMaker = ("$($role.identity)".Trim().ToLowerInvariant() -eq "$($r.maker)".Trim().ToLowerInvariant())
+    $selfOn = [bool](Get-PimManagerBreakGlassSelfApprove)
+    $others = @(); if ($open) { $others = @(Get-PimManagerBreakGlassCheckers -Maker $r.maker) }
+    return [ordered]@{
+        id = $r.id; status = $r.status; open = $open; maker = $r.maker; justification = $r.justification
+        createdUtc = $r.createdUtc; expiresUtc = $r.expiresUtc; added = @($r.added); removed = @($r.removed); changed = @($r.changed)
+        proposed = @($r.proposed); checker = $r.checker; closedBy = $r.closedBy; closedUtc = $r.closedUtc; closeNote = $r.closeNote; selfApproved = [bool]$r.selfApproved
+        isMaker = [bool]$isMaker; selfApprove = $selfOn
+        canApprove = [bool]($open -and $isSuper -and (-not $isMaker -or $selfOn)); canReject = [bool]($open -and $isSuper -and -not $isMaker); canCancel = [bool]($open -and $isSuper -and $isMaker)
+        onlySuperAdmin = [bool]($open -and $others.Count -eq 0 -and -not $selfOn)
+    }
+}
+
+function Get-PimManagerApiAppRequestView {
+    # The current request with a lazy expiry (recorded + audited once). THROWS on a store failure.
+    $rec = Get-PimManagerApiAppChangeRaw -ConnectionString "$($script:PimSqlCs)"
+    $r = $rec.request
+    if ($r -and $r.status -eq 'pending' -and -not (Test-PimManagerApiAppChangeOpen -Request $r)) {
+        $r.status = 'expired'; $r.closedUtc = [datetime]::UtcNow.ToString('o'); $r.closeNote = 'expired before a second SuperAdmin approved it'
+        if (Save-PimManagerApiAppChange -ConnectionString "$($script:PimSqlCs)" -Request $r -ExpectedRaw $rec.raw) {
+            Write-PimManagerAuditEvent -Action 'settings.api-applications.expired' -Target 'settings:api-applications' -After @{ requestId = "$($r.id)"; maker = "$($r.maker)" } -Result 'ok'
+        }
+    }
+    return (ConvertTo-PimManagerApiAppRequestView -Request $r)
+}
+
 # Break-glass / emergency principals to NEVER auto-revoke. Identifiers may be
 # UPNs and/or object (principal) ids; matching is case-insensitive. Returns a
 # lowercase string[] (possibly empty).
@@ -13341,6 +13518,7 @@ function Invoke-Server {
             # hangs names itself; the completion line below is written only when it ends.
             if ("$($env:PIM_MANAGER_TRACE_REQUESTS)" -eq '1') { Write-Host ("  [{0}] {1,-6} {2} ... started" -f $started.ToString('HH:mm:ss'), $ctx.Request.HttpMethod, $ctx.Request.Url.AbsolutePath) -ForegroundColor DarkGray }
             # Hosted: capture THIS request's Easy Auth principal for role resolution.
+            $script:CurrentRequestApp = $null
             if ($script:PimHosted) { try { $script:CurrentRequestPrincipal = Get-PimEasyAuthPrincipal -Request $ctx.Request } catch { $script:CurrentRequestPrincipal = $null } }
             # §98: the other names + group claim of THIS request's (already trusted) principal, for the demo-group check only.
             $script:CurrentRequestNames = @(); $script:CurrentRequestGroupIds = @()
@@ -13365,6 +13543,9 @@ function Invoke-Server {
                 } catch { }
                 $status = 500
             }
+            # PIM 93.4: every application call that was let in is audited with its app id, role, route and answer
+            if ($script:CurrentRequestApp) { Write-PimManagerAppCallAudit -Status ([int]$status) }
+            $script:CurrentRequestApp = $null
             $global:PIM_SignedRequestCapture = $null
             $ts = $started.ToString('HH:mm:ss')
             # BUG-264: the loop is single-threaded, so a slow request holds every request behind it -- name its duration.
@@ -13995,6 +14176,377 @@ function Invoke-PimManagerGetRouteRoleLookupReverse {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 500
             }
 }
+function Get-PimManagerConformanceRouteContext {
+    # 93.4 MCP-GAP-2 (owner 2026-10-31): the values every /api/conformance* route reads, MOVED here unchanged from the router's
+    # conformance block, so the page's routes and the MCP conformance reads use the SAME template folder, instance, ring and
+    # exemption reader. -> a hashtable whose keys are the moved GET bodies' parameter names. Read-only.
+            $confTplDir = Join-Path $solutionRoot 'workloads\templates'
+            # Applied-version stamps: SQL pim.Settings['ConformanceTemplateState'] (Get-/Set-PimTemplateState) -- no state file.
+            $confTenant = "$script:PimInstanceName"
+            # 🔴 BUG-179 (operator decision 2026-09-18): the template-catalog ring is this environment's PLATFORM
+            # UPDATE RING itself (§77.20: one ring order, no inversion; not recorded / invalid -> 2, most restrictive). It
+            # used to be Get-PimTenantRing -- $global:PIM_TenantRing / pim.Settings['TenantRing'] -- which nothing
+            # hosted sets, so every hosted Manager ran the catalog at ring 0 without saying why. Get-PimTenantRing is
+            # left alone: it also drives the admin<->tenant ring filter, a different axis.
+            $confRingInfo = $null
+            if (Get-Command Get-PimTemplateCatalogRing -ErrorAction SilentlyContinue) {
+                $updRec = $null
+                if ((Get-Command Read-PimUpdateState -ErrorAction SilentlyContinue) -and "$($script:PimSqlCs)".Trim()) { $updRec = Read-PimUpdateState -ConnectionString $script:PimSqlCs }
+                $confRingInfo = Get-PimTemplateCatalogRing -ConnectionString "$($script:PimSqlCs)" -UpdateStateRecord $updRec
+            } else {
+                $confRingInfo = [pscustomobject]@{ ring = 0; source = 'not recorded'; updateRing = ''; reason = 'the template-ring resolver is not loaded -- most restrictive template ring 0' }
+            }
+            $confRing = [int]$confRingInfo.ring
+            $confRingSource = "$($confRingInfo.source)"
+            $confRingReason = "$($confRingInfo.reason)"
+            # SEC-17: reads SQL pim.Settings['ConformanceExemptions'] only, and NEVER the
+            # shipped sample. See Get-PimManagerConformanceExemptions for why the
+            # sample fallback was a live waiver rather than a convenience.
+            $readEx = { @(Get-PimManagerConformanceExemptions) }
+            return @{ confTplDir = $confTplDir; confTenant = $confTenant; confRing = $confRing; confRingSource = $confRingSource; confRingReason = $confRingReason; readEx = $readEx }
+}
+function Invoke-PimManagerGetRouteConformanceTemplates {
+    # 93.4 MCP-GAP-2 (owner 2026-10-31): the body of GET /api/conformance/templates, MOVED here unchanged -- the route and the MCP read tool
+    # run this same code (role gates, Pro gates, answer). Returns the HTTP status (or nothing = the route falls through).
+    # The conformance block's own values come in as parameters (Get-PimManagerConformanceRouteContext -- the router and MCP).
+    param($path, $req, $resp, $method = 'GET', $confTplDir, $confTenant, $confRing, $confRingSource, $confRingReason, $readEx)
+
+                $all = @(Read-PimApprovedTemplates -SourceDir $confTplDir -IncludeDrafts -WarningAction SilentlyContinue)
+                $rows = New-Object System.Collections.ArrayList
+                foreach ($t in $all) {
+                    $st = Get-PimTemplateState -TenantId $confTenant -TemplateId "$($t.templateId)"
+                    $applied = if ($st) { [int]("$($st.LastAppliedVersion)" -as [int]) } else { 0 }
+                    [void]$rows.Add([ordered]@{
+                        templateId = "$($t.templateId)"; workload = "$($t.workload)"
+                        templateVersion = [int]("$($t.templateVersion)" -as [int]); status = "$($t.status)"
+                        approved = [bool](Test-PimTemplateApproved -Template $t); entries = @($t.entries).Count
+                        appliedVersion = $applied; behind = [math]::Max(0, [int]("$($t.templateVersion)" -as [int]) - $applied)
+                    })
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ instance = $confTenant; tenantRing = $confRing; tenantRingSource = $confRingSource; tenantRingReason = $confRingReason; templates = $rows.ToArray() })
+                return 200
+}
+function Invoke-PimManagerGetRouteConformance {
+    # 93.4 MCP-GAP-2 (owner 2026-10-31): the body of GET /api/conformance, MOVED here unchanged -- the route and the MCP read tool
+    # run this same code (role gates, Pro gates, answer). Returns the HTTP status (or nothing = the route falls through).
+    # The conformance block's own values come in as parameters (Get-PimManagerConformanceRouteContext -- the router and MCP).
+    param($path, $req, $resp, $method = 'GET', $confTplDir, $confTenant, $confRing, $confRingSource, $confRingReason, $readEx)
+
+                $tid = ''
+                if ($req.Url.Query -match '(\?|&)template=([^&]+)') { $tid = [uri]::UnescapeDataString($Matches[2]) }
+                $tpl = @(Read-PimApprovedTemplates -SourceDir $confTplDir -IncludeDrafts -WarningAction SilentlyContinue | Where-Object { "$($_.templateId)" -eq "$tid" })
+                if (-not $tid -or -not $tpl) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'unknown template' }; return 400 }
+                $tpl = $tpl[0]
+                $now = [datetime]::UtcNow
+                $exKeys = Get-PimActiveExemptionKeys -Exemptions (& $readEx) -TenantId $confTenant -TemplateId "$tid" -NowUtc $now
+                $st = Get-PimTemplateState -TenantId $confTenant -TemplateId "$tid"
+                $applied = if ($st) { [int]("$($st.LastAppliedVersion)" -as [int]) } else { 0 }
+                # Best-effort live catalog (the connector's live roles); skip if no connection.
+                $liveCat = @()
+                try {
+                    $dir = Join-Path $solutionRoot 'workloads\connectors'
+                    $conn = @(Read-PimWorkloadConnectors -ConnectorsDir $dir) | Where-Object { "$($_.id)" -ieq "$($tpl.workload)" } | Select-Object -First 1
+                    if ($conn) { Initialize-PimManagerTenantConnection; $liveCat = @(Get-PimWorkloadConnectorRoles -Connector $conn | ForEach-Object { "$($_.name)" }) }
+                } catch { $liveCat = @() }
+                $c = Get-PimConformance -Template $tpl -TenantRing $confRing -TenantId $confTenant -ActiveExemptionKeys $exKeys -LiveCatalog $liveCat -AppliedVersion $applied
+                $statusMap = [ordered]@{}
+                foreach ($r in $c.Rows) { $statusMap["$($r.Key)"] = "$($r.Status)" }
+                # Per-entry rollout ring (default 2) so the Template Rollout tab can render a
+                # per-entry ring selector that drives POST /api/conformance/promote (no more
+                # orphaned promote endpoint). Read straight from each template entry.
+                $ringMap = [ordered]@{}
+                foreach ($e in @($tpl.entries)) { $ringMap["$($e.key)"] = (Get-PimTemplateEntryRing -Entry $e) }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    templateId = "$($tpl.templateId)"; workload = "$($tpl.workload)"; templateVersion = $c.TemplateVersion
+                    status = "$($tpl.status)"; tenantRing = $confRing; tenantRingSource = $confRingSource; tenantRingReason = $confRingReason; appliedVersion = $applied; behind = $c.Behind
+                    keys = @(@($tpl.entries) | ForEach-Object { "$($_.key)" }); statuses = $statusMap; rings = $ringMap
+                    counts = $c.Counts; catalogAhead = @($c.CatalogAhead | ForEach-Object { "$($_.Capability)" })
+                })
+                return 200
+}
+function Invoke-PimManagerGetRouteConformanceExemptions {
+    # 93.4 MCP-GAP-2 (owner 2026-10-31): the body of GET /api/conformance/exemptions, MOVED here unchanged -- the route and the MCP read tool
+    # run this same code (role gates, Pro gates, answer). Returns the HTTP status (or nothing = the route falls through).
+    # The conformance block's own values come in as parameters (Get-PimManagerConformanceRouteContext -- the router and MCP).
+    param($path, $req, $resp, $method = 'GET', $confTplDir, $confTenant, $confRing, $confRingSource, $confRingReason, $readEx)
+
+                $tidF = ''
+                if ($req.Url.Query -match '(\?|&)template=([^&]+)') { $tidF = [uri]::UnescapeDataString($Matches[2]) }
+                $now = [datetime]::UtcNow
+                $list = @(Get-PimExemptionList -Exemptions (& $readEx) -TenantId $confTenant -TemplateId $tidF -NowUtc $now -WarningAction SilentlyContinue)
+                $sum  = Get-PimExemptionSummary -List $list
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    instance = $confTenant; tenantRing = $confRing; tenantRingSource = $confRingSource; tenantRingReason = $confRingReason; template = $tidF
+                    summary = $sum; exemptions = @($list)
+                })
+                return 200
+}
+function Invoke-PimManagerGetRouteConformanceFleet {
+    # 93.4 MCP-GAP-2 (owner 2026-10-31): the body of GET /api/conformance/fleet, MOVED here unchanged -- the route and the MCP read tool
+    # run this same code (role gates, Pro gates, answer). Returns the HTTP status (or nothing = the route falls through).
+    # The conformance block's own values come in as parameters (Get-PimManagerConformanceRouteContext -- the router and MCP).
+    param($path, $req, $resp, $method = 'GET', $confTplDir, $confTenant, $confRing, $confRingSource, $confRingReason, $readEx)
+
+                $approved = @(Read-PimApprovedTemplates -SourceDir $confTplDir -WarningAction SilentlyContinue)
+                # Build a tenant descriptor per managed instance.
+                $fleetTenants = New-Object System.Collections.Generic.List[object]
+                foreach ($inst in (Get-PimManagerInstances | Where-Object { "$($_.name)" -eq "$script:PimInstanceName" })) {
+                    # SQL-only: the tenant is the ACTIVE SQL instance. Other 'sql:<db>' names share this
+                    # host's output folder, so counting them would duplicate one state stamp as N tenants.
+                    $iname = "$($inst.name)"
+
+
+                    $st = Get-PimFleetStateForInstance -TenantId $iname   # SQL pim.Settings['ConformanceTemplateState']
+                    $iring = $st.ring
+                    if ($iname -eq "$script:PimInstanceName") { $iring = $confRing }   # active = live ring
+                    if ($null -eq $iring) { $iring = 0 }
+                    $fleetTenants.Add(@{ tenantId = $iname; ring = $iring; appliedVersions = $st.appliedVersions })
+                }
+                $fleet = Get-PimFleetConformance -Templates $approved -Tenants $fleetTenants.ToArray()
+                # Serialise to plain ordered objects (Cells nested per tenant).
+                $tenantRows = New-Object System.Collections.ArrayList
+                foreach ($tr in $fleet.Tenants) {
+                    $cellList = New-Object System.Collections.ArrayList
+                    foreach ($c in $tr.Cells) {
+                        [void]$cellList.Add([ordered]@{ templateId = "$($c.TemplateId)"; templateVersion = $c.TemplateVersion; appliedVersion = $c.AppliedVersion; behind = $c.Behind; status = "$($c.Status)" })
+                    }
+                    [void]$tenantRows.Add([ordered]@{
+                        tenantId = "$($tr.TenantId)"; ring = $tr.Ring; current = [bool]$tr.Current
+                        maxBehind = $tr.MaxBehind; behindCount = $tr.BehindCount; neverCount = $tr.NeverCount
+                        upToDate = $tr.UpToDate; aheadCount = $tr.AheadCount; cells = $cellList.ToArray()
+                    })
+                }
+                $colList = New-Object System.Collections.ArrayList
+                foreach ($col in $fleet.Templates) { [void]$colList.Add([ordered]@{ templateId = "$($col.TemplateId)"; workload = "$($col.Workload)"; templateVersion = $col.TemplateVersion }) }
+                $ptList = New-Object System.Collections.ArrayList
+                foreach ($pt in $fleet.PerTemplate) {
+                    [void]$ptList.Add([ordered]@{ templateId = "$($pt.TemplateId)"; workload = "$($pt.Workload)"; templateVersion = $pt.TemplateVersion; upToDate = $pt.UpToDate; behindCount = $pt.BehindCount; neverCount = $pt.NeverCount; aheadCount = $pt.AheadCount; maxBehind = $pt.MaxBehind; needsRollout = [bool]$pt.NeedsRollout })
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    activeInstance = $confTenant; activeRing = $confRing; activeRingSource = $confRingSource; activeRingReason = $confRingReason
+                    totalTenants   = $fleet.TotalTenants; currentTenants = $fleet.CurrentTenants; behindTenants = $fleet.BehindTenants
+                    templates      = $colList.ToArray(); perTemplate = $ptList.ToArray(); tenants = $tenantRows.ToArray()
+                })
+                return 200
+}
+function Invoke-PimManagerGetRouteConformanceRingPlan {
+    # 93.4 MCP-GAP-2 (owner 2026-10-31): the body of GET /api/conformance/ring-plan, MOVED here unchanged -- the route and the MCP read tool
+    # run this same code (role gates, Pro gates, answer). Returns the HTTP status (or nothing = the route falls through).
+    # The conformance block's own values come in as parameters (Get-PimManagerConformanceRouteContext -- the router and MCP).
+    param($path, $req, $resp, $method = 'GET', $confTplDir, $confTenant, $confRing, $confRingSource, $confRingReason, $readEx)
+
+                $tid = ''
+                if ($req.Url.Query -match '(\?|&)template=([^&]+)') { $tid = [uri]::UnescapeDataString($Matches[2]) }
+                $tpl = @(Read-PimApprovedTemplates -SourceDir $confTplDir -IncludeDrafts -WarningAction SilentlyContinue | Where-Object { "$($_.templateId)" -eq "$tid" })
+                if (-not $tid -or -not $tpl) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'unknown template' }; return 400 }
+                $tpl = $tpl[0]
+                $fleetTenants = New-Object System.Collections.Generic.List[object]
+                foreach ($inst in (Get-PimManagerInstances | Where-Object { "$($_.name)" -eq "$script:PimInstanceName" })) {
+                    # SQL-only: the tenant is the ACTIVE SQL instance. Other 'sql:<db>' names share this
+                    # host's output folder, so counting them would duplicate one state stamp as N tenants.
+                    $iname = "$($inst.name)"
+
+                    $st = Get-PimFleetStateForInstance -TenantId $iname   # SQL pim.Settings['ConformanceTemplateState']
+                    $iring = $st.ring
+                    if ($iname -eq "$script:PimInstanceName") { $iring = $confRing }
+                    if ($null -eq $iring) { $iring = 0 }
+                    $fleetTenants.Add(@{ tenantId = $iname; ring = $iring; appliedVersions = $st.appliedVersions })
+                }
+                $plan = Get-PimRingRolloutPlan -Template $tpl -Tenants $fleetTenants.ToArray()
+                $bandList = New-Object System.Collections.ArrayList
+                foreach ($b in $plan.Bands) {
+                    $tl = New-Object System.Collections.ArrayList
+                    foreach ($t in $b.Tenants) { [void]$tl.Add([ordered]@{ tenantId = "$($t.TenantId)"; ring = $t.Ring; appliedVersion = $t.AppliedVersion; behind = $t.Behind; status = "$($t.Status)" }) }
+                    [void]$bandList.Add([ordered]@{ ring = $b.Ring; tenantCount = $b.TenantCount; behindCount = $b.BehindCount; neverCount = $b.NeverCount; needsRollout = [bool]$b.NeedsRollout; tenants = $tl.ToArray() })
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    templateId = "$($plan.TemplateId)"; workload = "$($plan.Workload)"; templateVersion = $plan.TemplateVersion
+                    approved = [bool]$plan.Approved; totalTenants = $plan.TotalTenants; needsRolloutCount = $plan.NeedsRolloutCount
+                    activeRing = $confRing; activeRingSource = $confRingSource; activeRingReason = $confRingReason
+                    bands = $bandList.ToArray()
+                })
+                return 200
+}
+function Invoke-PimManagerGetRouteConfigBackups {
+    # 93.4 MCP-GAP-2 (owner 2026-10-31): the body of GET /api/config-backups (the route also serves POST = Back up now; the MCP sends GET only), MOVED here unchanged -- the route and the MCP read tool
+    # run this same code (role gates, Pro gates, answer). Returns the HTTP status (or nothing = the route falls through).
+    param($path, $req, $resp, $method = 'GET')
+
+            $script:lastHeartbeat = Get-Date
+            $cbRole = Get-PimManagerRole
+            $acc = Get-PimConfigBackupAccess -Role "$($cbRole.role)"
+            if (-not $acc.list) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required for configuration backups.' }; return 403 }
+            if (-not (Get-Command New-PimConfigBackup -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'the configuration backup library (PIM-ConfigBackup.ps1) is not loaded in this Manager' }; return 501 }
+            $cs = Get-PimManagerSettingCs
+            # framework 12.23 run 2: a read-only check; the schema step creates the tables
+            [void](Confirm-PimConfigBackupStoreReady -ConnectionString $cs)
+            if ($method -eq 'POST') {
+                $sb = Read-RequestJson -Request $req
+                $note = if ($sb -and $sb.PSObject.Properties['note']) { "$($sb.note)".Trim() } else { '' }
+                if ($note.Length -gt 400) { $note = $note.Substring(0, 400) }
+                $me = Get-PimManagerRecordedActor -Who "$($cbRole.identity)"
+                try {
+                    $r = New-PimConfigBackup -ConnectionString $cs -TakenBy $me -Trigger 'manual' -Version "$(Get-PimSolutionVersion)" -Note $note
+                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; backup = $r })
+                    return 200
+                } catch {
+                    Write-PimManagerAuditEvent -Action 'config.backup' -Target 'pim.ConfigBackups' -After @{ trigger = 'manual'; error = "$($_.Exception.Message)" } -Result 'error'
+                    Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "the backup was NOT taken: $($_.Exception.Message)" }
+                    return 500
+                }
+            }
+            $fmt = { param($t) if ($t -is [datetime]) { ([datetime]::SpecifyKind($t, [DateTimeKind]::Utc)).ToString('yyyy-MM-ddTHH:mm:ssZ') } elseif ($null -eq $t) { '' } else { "$t" } }
+            $list = @(Get-PimConfigBackupList -ConnectionString $cs | ForEach-Object {
+                $mf = $null; if ("$($_.ManifestJson)".Trim()) { try { $mf = $_.ManifestJson | ConvertFrom-Json } catch { $mf = $null } }
+                [ordered]@{ backupId = "$($_.BackupId)"; takenUtc = (& $fmt $_.TakenUtc); takenBy = "$($_.TakenBy)"; trigger = "$($_.Trigger)"; version = "$($_.Version)"
+                            pinned = [bool]$_.Pinned; pinnedBy = "$($_.PinnedBy)"; noChange = [bool]$_.NoChange; sameAs = "$($_.SameAs)"
+                            entities = [int]$_.Entities; items = [int]$_.Items; bytes = [int]$_.Bytes; note = "$($_.Note)"
+                            excludedSettings = @($(if ($mf) { @($mf.excludedSettings) } else { @() })); redactedCount = $(if ($mf) { @($mf.redacted).Count } else { 0 }) }
+            })
+            $days = Get-PimConfigBackupRetentionDays -ConnectionString $cs
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ backups = $list; retentionDays = $days; access = $acc; role = "$($cbRole.role)" })
+            return 200
+}
+function Invoke-PimManagerGetRoutePermissionsHealth {
+    # 93.4 MCP-GAP-2 (owner 2026-10-31): the body of GET /api/permissions-health, MOVED here unchanged -- the route and the MCP read tool
+    # run this same code (role gates, Pro gates, answer). Returns the HTTP status (or nothing = the route falls through).
+    param($path, $req, $resp, $method = 'GET')
+
+            $script:lastHeartbeat = Get-Date
+            # 🔴 BUG-264 (live GUI E2E 2026-09-27): this check makes several Graph reads, an ARM read per subscription (up to
+            # 10) and SQL reads -- 1.8-3.7 s measured on a test environment, longer cold -- on the Manager's ONE request loop, on EVERY
+            # Home load. Every request behind it waited (a wizard's data loads timed out the E2E). The answer is kept for
+            # 5 minutes; ?refresh=1 (the "Verify permissions" button) checks again at once.
+            $permRefresh = $false; try { $permRefresh = ("$($req.Url.Query)" -match '(?:^|[?&])refresh=1') } catch { }
+            # 97.1: "Verify permissions" is what an admin presses after a grant -- it also queues PIM's own workload
+            # prerequisite check (job workload-prereqs, read-only), so a held Intune / Defender assignment follows the grant.
+            if ($permRefresh -and (Test-PimManagerRoleAtLeast -Minimum 'Admin') -and (Get-Command Add-PimJobTrigger -ErrorAction SilentlyContinue)) {
+                try { [void](Add-PimJobTrigger -Type 'workload-prereqs' -Scope 'All' -Reason 'verify-permissions' -JobName 'workload-prereqs') } catch { Write-Verbose "workload-prereqs not queued: $($_.Exception.Message)" }
+            }
+            $permBody = Get-PimManagerPermissionHealthBody -Refresh:$permRefresh
+            if ($null -eq $permBody) {
+                Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'permission-health module not loaded'; hint = 'engine/_shared/PIM-PermissionHealth.ps1 is missing from this build' }
+                return 501
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body $permBody
+            return 200
+}
+function Invoke-PimManagerGetRouteRolePermissions {
+    # 93.4 MCP-GAP-2 (owner 2026-10-31): the body of GET /api/role-permissions, MOVED here unchanged -- the route and the MCP read tool
+    # run this same code (role gates, Pro gates, answer). Returns the HTTP status (or nothing = the route falls through).
+    param($path, $req, $resp, $method = 'GET')
+
+            $script:lastHeartbeat = Get-Date
+            $roleName = "$($req.QueryString['role'])".Trim()
+            if (-not $roleName) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "role query parameter is required" }; return 400 }
+            try {
+                $def = $null
+                # 🔴 §70.20 (operator 2026-09-13: Role lookup said "No role matches 'Exchange Administrator'"). This read
+                # ran ONLY through the Graph PowerShell SDK (Invoke-MgGraphRequest), which the hosted container does not
+                # ship (REST-only) -- so on every hosted Manager the live read was skipped and every role "did not match".
+                # REST only (Invoke-PimGraph, the Manager's own app-only token) -- §100.42 removed the SDK fallback.
+                $esc = [uri]::EscapeDataString($roleName.Replace("'", "''"))
+                $u = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$filter=displayName eq '$esc'"
+                if (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) {
+                    Initialize-PimManagerTenantConnection
+                    $r = Invoke-PimGraph -Method GET -Path $u
+                    if ($r.value -and @($r.value).Count -gt 0) { $def = @($r.value)[0] }
+                }   # §100.42: REST only (no Invoke-MgGraphRequest fallback)
+                if ($def) {
+                    $fmt = Format-PimRolePermissions -RoleDefinition $def
+                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; matched = $true; role = $roleName; permissions = $fmt }); return 200
+                }
+                # Exact name didn't resolve (typo, or no Graph read available). Resolve
+                # against the known role catalog and offer ranked candidates. 200, never 503.
+                $catalog = @(Get-PimRoleCatalogNames)
+                $res = Resolve-PimRoleQuery -Query $roleName -RoleNames $catalog
+                $hasGraph = [bool](Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)
+                $hint = if (@($res.candidates).Count -gt 0) {
+                    "No directory role is named exactly '$roleName'. Pick one of the suggestions, or correct the spelling."
+                } elseif (-not $hasGraph -and @($catalog).Count -eq 0) {
+                    "Role names aren't available yet -- connect the Manager to the tenant (or refresh tenant lists), then retry."
+                } else {
+                    "No role matches '$roleName'."
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    ok = $true; matched = $false; role = $roleName
+                    permissions = $null; candidates = @($res.candidates)
+                    catalogSize = @($catalog).Count; graphConnected = $hasGraph; hint = $hint
+                }); return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 500
+            }
+}
+function Invoke-PimManagerGetRouteRolePermissionsByAction {
+    # 93.4 MCP-GAP-2 (owner 2026-10-31): the body of GET /api/role-permissions/by-action, MOVED here unchanged -- the route and the MCP read tool
+    # run this same code (role gates, Pro gates, answer). Returns the HTTP status (or nothing = the route falls through).
+    param($path, $req, $resp, $method = 'GET')
+
+            $script:lastHeartbeat = Get-Date
+            $action = "$($req.QueryString['action'])".Trim()
+            if (-not $action) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "action query parameter is required" }; return 400 }
+            try {
+                $defs = New-Object System.Collections.ArrayList
+                # §70.20: REST first -- the SDK-only read never ran on the hosted Manager (see /api/role-permissions).
+                $hasRest = [bool](Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)
+                $hasGraph = $hasRest   # §100.42: REST only
+                if ($hasGraph) {
+                    # Page through every directory role definition WITH its permissions.
+                    $u = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$select=id,displayName,isBuiltIn,rolePermissions&`$top=200"
+                    if ($hasRest) { Initialize-PimManagerTenantConnection }
+                    $guard = 0
+                    while ($u -and $guard -lt 50) {
+                        $guard++
+                        $r = Invoke-PimGraph -Method GET -Path $u
+                        foreach ($d in @($r.value)) { [void]$defs.Add($d) }
+                        $u = if ($r.'@odata.nextLink') { "$($r.'@odata.nextLink')" } else { $null }
+                    }
+                }
+                $res = Find-PimRolesByAction -Action $action -RoleDefinitions @($defs.ToArray())
+                $hint = if (@($res.matches).Count -gt 0) {
+                    "{0} role(s) grant '{1}'. The list is ranked least-privilege first -- prefer the narrowest role." -f @($res.matches).Count, $action
+                } elseif (-not $hasGraph -or $defs.Count -eq 0) {
+                    "Role permissions aren't available yet -- connect the Manager to the tenant (the engine SPN needs RoleManagement.Read.Directory), then retry."
+                } else {
+                    "No directory role grants '$action'. Check the action spelling (e.g. microsoft.directory/users/basic/update), or try a 'namespace/*' wildcard."
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    ok = $true; action = $action
+                    matched = [bool]$res.matched
+                    matches = @($res.matches)
+                    matchCount = [int]$res.matchCount
+                    rolesSearched = [int]$res.rolesSearched
+                    graphConnected = $hasGraph
+                    hint = $hint
+                }); return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 500
+            }
+}
+function Invoke-PimManagerGetRouteRoleLookupCompare {
+    # 93.4 MCP-GAP-2 (owner 2026-10-31): the body of GET /api/role-lookup/compare, MOVED here unchanged -- the route and the MCP read tool
+    # run this same code (role gates, Pro gates, answer). Returns the HTTP status (or nothing = the route falls through).
+    param($path, $req, $resp, $method = 'GET')
+
+            $script:lastHeartbeat = Get-Date
+            $roleA = "$($req.QueryString['roleA'])".Trim()
+            $roleB = "$($req.QueryString['roleB'])".Trim()
+            if (-not $roleA -or -not $roleB) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "roleA and roleB query parameters are required" }; return 400 }
+            try {
+                $model = Get-PimAccessGraphModel
+                $revA = Get-PimRoleReachers -Role $roleA -Model $model
+                $revB = Get-PimRoleReachers -Role $roleB -Model $model
+                $cmp = Compare-PimReachSets -ReachersA @($revA.reachers) -ReachersB @($revB.reachers) -LabelA $roleA -LabelB $roleB
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    ok = $true
+                    roleA = $roleA; roleB = $roleB
+                    resolvedA = [int]$revA.resolved; resolvedB = [int]$revB.resolved
+                    comparison = $cmp
+                }); return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 500
+            }
+}
 
 # ---- 93.4 MCP-GAP-3a/4a: POST route bodies shared by the route and the MCP write tools (moved unchanged) ----
 function Invoke-PimManagerPostRouteApprovalsDecide {
@@ -14603,6 +15155,85 @@ function Invoke-PimManagerPostRouteReconcilePauseResume {
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; paused = [bool]$after.paused; pause = $after; banner = "$($after.banner)" })
             return 200
 }
+function Invoke-PimManagerPostRouteRfaDecide {
+    # 93.4 MCP-GAP-3a (owner 2026-10-31): the body of POST /api/rfa/decide, MOVED here unchanged -- the route and the MCP tool
+    # run this same code (Pro gate, the department-owner / Admin rule, never your own request, audit, answer). The values
+    # the /api/rfa/* block computes for the signed-in caller come in as parameters: isAdmin, me, mutate (the compare-and-swap
+    # write of the request list), ownersOf (the department's owners). Returns the HTTP status.
+    param($path, $req, $resp, $method = 'POST', $isAdmin, $me, $mutate, $ownersOf)
+
+                if (-not (Test-PimManagerProFeature -Key 'rfa.portal' -Response $resp)) { return 403 }
+                $body = Read-RequestJson -Request $req
+                $id = "$($body.id)".Trim(); $dec = "$($body.decision)".Trim().ToLowerInvariant(); $note = "$($body.note)".Trim()
+                if (-not $id -or $dec -notin @('approve', 'deny')) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'id and decision (approve | deny) are required' }; return 400 }
+                $res = & $mutate {
+                    param($list)
+                    $r = @($list | Where-Object { "$($_.id)" -eq $id })[0]
+                    if (-not $r) { return [pscustomobject]@{ ok = $false; status = 404; error = 'no such request' } }
+                    $d = Set-PimRfaDecision -Request $r -Decision $dec -By $me -DepartmentOwners (& $ownersOf "$($r.department)") -IsAdmin:$isAdmin -Note $note
+                    if (-not $d.ok) { return [pscustomobject]@{ ok = $false; status = 403; error = $d.reason } }
+                    [pscustomobject]@{ ok = $true; list = @($list | ForEach-Object { if ("$($_.id)" -eq $id) { $d.request } else { $_ } }); request = $d.request }
+                }
+                if (-not $res.ok) { Write-JsonResponse -Response $resp -Status $res.status -Body @{ error = $res.error }; return $res.status }
+                Write-PimManagerAuditEvent -Action "rfa.$dec" -Target "$($res.request.upn)" -Result 'ok' -After ([ordered]@{ id = $id; by = $me; note = $note })
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; state = "$($res.request.state)"; note = $(if ($dec -eq 'approve') { 'Approved. The engine enables the account on its next run (within a few minutes) and mails the person.' } else { 'Denied. The person is told by mail.' }) })
+                return 200
+}
+function Invoke-PimManagerPostRouteRfaEnd {
+    # 93.4 MCP-GAP-3a (owner 2026-10-31): the body of POST /api/rfa/end, MOVED here unchanged -- the route and the MCP tool run
+    # this same code. The /api/rfa/* block's values come in as parameters (see Invoke-PimManagerPostRouteRfaDecide).
+    # Returns the HTTP status.
+    param($path, $req, $resp, $method = 'POST', $isAdmin, $me, $mutate, $ownersOf)
+
+                if (-not (Test-PimManagerProFeature -Key 'rfa.portal' -Response $resp)) { return 403 }
+                $body = Read-RequestJson -Request $req; $id = "$($body.id)".Trim()
+                $res = & $mutate {
+                    param($list)
+                    $r = @($list | Where-Object { "$($_.id)" -eq $id })[0]
+                    if (-not $r) { return [pscustomobject]@{ ok = $false; status = 404; error = 'no such request' } }
+                    if (-not ($isAdmin -or (& $ownersOf "$($r.department)") -contains $me)) { return [pscustomobject]@{ ok = $false; status = 403; error = 'only a Manager Admin or an Owner of the department can end it' } }
+                    if ("$($r.state)" -notin @('approved', 'active', 'pending-approval')) { return [pscustomobject]@{ ok = $false; status = 409; error = "the request is '$($r.state)'" } }
+                    $n = $r.PSObject.Copy(); $n.state = 'cancel-requested'
+                    [pscustomobject]@{ ok = $true; list = @($list | ForEach-Object { if ("$($_.id)" -eq $id) { $n } else { $_ } }); request = $n }
+                }
+                if (-not $res.ok) { Write-JsonResponse -Response $resp -Status $res.status -Body @{ error = $res.error }; return $res.status }
+                Write-PimManagerAuditEvent -Action 'rfa.end' -Target "$($res.request.upn)" -Result 'ok' -After ([ordered]@{ id = $id; by = $me })
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; note = 'Ending. The engine disables the account on its next run.' }
+                return 200
+}
+function Invoke-PimManagerMcpRfaPostRoute {
+    # 93.4 MCP-GAP-3a: the MCP's way into the two RFA decision bodies above. The lines between the markers are the /api/rfa/*
+    # block's own opening lines in Handle-Request, VERBATIM (Test-PimMcp holds them equal): the store check, the caller's
+    # identity and role, the department-owner index and the compare-and-swap write. Then the SAME route function runs with
+    # those values. -Function is one of the two names above (the MCP tool table's fixed value, never a caller's).
+    param([Parameter(Mandatory)][ValidateSet('Invoke-PimManagerPostRouteRfaDecide', 'Invoke-PimManagerPostRouteRfaEnd')][string]$Function, $path, $req, $resp, $method = 'POST')
+            # ---- rfa-block-open (verbatim from Handle-Request) ----
+            $script:lastHeartbeat = Get-Date
+            $cs = (Get-PimManagerStoreCs)
+            if (-not $cs -or -not (Get-Command New-PimRfaRequest -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'access requests need the SQL store and the Pro RFA library -- neither is available in this host'; readable = $false }
+                return 503
+            }
+            $role = Get-PimManagerRole
+            $me = "$($role.identity)".Trim().ToLowerInvariant()
+            $isAdmin = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
+            $isSuper = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
+            $ownIdx = Get-PimManagerDepartmentOwnerIndex
+            $ownersOf = { param($dept) @("$($ownIdx["$dept".Trim().ToLowerInvariant()])" -split '[|,;\s]+' | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ }) }
+            $readMirror = { $raw = Get-PimSqlSettingRaw -ConnectionString $cs -Name 'RfaRequests'; [pscustomobject]@{ raw = $raw; list = @(if ("$raw".Trim()) { @(($raw | ConvertFrom-Json).requests) }) } }
+            # CAS: the rfa-sync job writes the same document every few minutes
+            $mutate = { param([scriptblock]$Fn)
+                for ($try = 0; $try -lt 5; $try++) {
+                    $m = & $readMirror
+                    $res = & $Fn @($m.list)
+                    if (-not $res.ok) { return $res }
+                    $json = [pscustomobject]@{ requests = @($res.list) } | ConvertTo-Json -Depth 8 -Compress
+                    if ([int](Set-PimSqlSettingIfUnchanged -ConnectionString $cs -Name 'RfaRequests' -NewValueJson $json -ExpectedValueJson $m.raw) -eq 1) { return $res }
+                }
+                return [pscustomobject]@{ ok = $false; status = 409; error = 'the request list kept changing (the engine was writing it) -- try again' } }
+            # ---- rfa-block-open end ----
+    return (& $Function -path $path -req $req -resp $resp -method $method -isAdmin $isAdmin -me $me -mutate $mutate -ownersOf $ownersOf)
+}
 
 function Handle-Request {
     param(
@@ -14613,6 +15244,7 @@ function Handle-Request {
     $resp = $Context.Response
     $path = $req.Url.AbsolutePath
     $method = $req.HttpMethod
+    $script:CurrentRequestApp = $null    # PIM 93.4: set ONLY by Invoke-PimManagerAppSignIn for a verified, allowed application
     # PIM §97.3: any write may decide something that waits for a person -- the next GET /api/attention reads fresh.
     if ($method -ne 'GET' -and $path -like '/api/*') { $script:PimAttentionCache = $null; $script:PimPolicyHoldStateCache = $null }
     # REQ 100.112 (D): a revoke or a change of the break-glass list drops the kept active-assignments answer.
@@ -14868,7 +15500,15 @@ function Handle-Request {
 
     # All /api/* paths require Authorization: Bearer <token>.
     if ($path -like '/api/*') {
-        if (-not (Test-PimManagerApiPageToken -Request $req -ExpectedToken $ExpectedToken)) {
+        # PIM 93.4 -- SCRIPT / SERVICE SIGN-IN, /api/app/* ONLY (Invoke-PimManagerAppSignIn): a listed application with a
+        # verified token reaches the page route it maps to IF that route is on the application allow-list; everything else
+        # under /api/app/ is answered (refused) there. Anything not under /api/app/ goes on exactly as before, and the page
+        # token never opens /api/app/* (the page token is not looked at on that path at all).
+        $appCall = $false
+        $appGate = Invoke-PimManagerAppSignIn -Request $req -Response $resp -Path $path -Method $method
+        if ($appGate.handled -and -not $appGate.ok) { return [int]$appGate.status }
+        if ($appGate.handled -and $appGate.ok) { $appCall = $true; $path = "$($appGate.path)" }
+        if (-not $appCall -and -not (Test-PimManagerApiPageToken -Request $req -ExpectedToken $ExpectedToken)) {
             # BRAND-2.11 (2026-10-05): the running version rides with the 401, so a page older than a deploy says "updated to vX" instead of "expired".
             Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized'; version = (Get-PimSolutionVersion) }
             return 401
@@ -15408,40 +16048,8 @@ function Handle-Request {
             return 200
         }
         if ($path -eq '/api/config-backups' -and ($method -eq 'GET' -or $method -eq 'POST')) {
-            $script:lastHeartbeat = Get-Date
-            $cbRole = Get-PimManagerRole
-            $acc = Get-PimConfigBackupAccess -Role "$($cbRole.role)"
-            if (-not $acc.list) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required for configuration backups.' }; return 403 }
-            if (-not (Get-Command New-PimConfigBackup -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'the configuration backup library (PIM-ConfigBackup.ps1) is not loaded in this Manager' }; return 501 }
-            $cs = Get-PimManagerSettingCs
-            # framework 12.23 run 2: a read-only check; the schema step creates the tables
-            [void](Confirm-PimConfigBackupStoreReady -ConnectionString $cs)
-            if ($method -eq 'POST') {
-                $sb = Read-RequestJson -Request $req
-                $note = if ($sb -and $sb.PSObject.Properties['note']) { "$($sb.note)".Trim() } else { '' }
-                if ($note.Length -gt 400) { $note = $note.Substring(0, 400) }
-                $me = Get-PimManagerRecordedActor -Who "$($cbRole.identity)"
-                try {
-                    $r = New-PimConfigBackup -ConnectionString $cs -TakenBy $me -Trigger 'manual' -Version "$(Get-PimSolutionVersion)" -Note $note
-                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; backup = $r })
-                    return 200
-                } catch {
-                    Write-PimManagerAuditEvent -Action 'config.backup' -Target 'pim.ConfigBackups' -After @{ trigger = 'manual'; error = "$($_.Exception.Message)" } -Result 'error'
-                    Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "the backup was NOT taken: $($_.Exception.Message)" }
-                    return 500
-                }
-            }
-            $fmt = { param($t) if ($t -is [datetime]) { ([datetime]::SpecifyKind($t, [DateTimeKind]::Utc)).ToString('yyyy-MM-ddTHH:mm:ssZ') } elseif ($null -eq $t) { '' } else { "$t" } }
-            $list = @(Get-PimConfigBackupList -ConnectionString $cs | ForEach-Object {
-                $mf = $null; if ("$($_.ManifestJson)".Trim()) { try { $mf = $_.ManifestJson | ConvertFrom-Json } catch { $mf = $null } }
-                [ordered]@{ backupId = "$($_.BackupId)"; takenUtc = (& $fmt $_.TakenUtc); takenBy = "$($_.TakenBy)"; trigger = "$($_.Trigger)"; version = "$($_.Version)"
-                            pinned = [bool]$_.Pinned; pinnedBy = "$($_.PinnedBy)"; noChange = [bool]$_.NoChange; sameAs = "$($_.SameAs)"
-                            entities = [int]$_.Entities; items = [int]$_.Items; bytes = [int]$_.Bytes; note = "$($_.Note)"
-                            excludedSettings = @($(if ($mf) { @($mf.excludedSettings) } else { @() })); redactedCount = $(if ($mf) { @($mf.redacted).Count } else { 0 }) }
-            })
-            $days = Get-PimConfigBackupRetentionDays -ConnectionString $cs
-            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ backups = $list; retentionDays = $days; access = $acc; role = "$($cbRole.role)" })
-            return 200
+            $__getSt = Invoke-PimManagerGetRouteConfigBackups -path $path -req $req -resp $resp -method $method
+            if ($null -ne $__getSt) { return $__getSt }
         }
         if ($path -match '^/api/config-backups/([\w\.-]+)/pin$' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
@@ -17780,6 +18388,19 @@ function Handle-Request {
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; page = $dpg.page; title = $dpg.title; html = $dpg.html })
             return 200
         }
+        # APIDOC-1 (owner 2026-10-31: "all apis and mcp must be fully documented in gui and on invardia.com"; 2026-11-01: "dont
+        # expose ways a hacker can gain access to customer"): Settings > API and MCP reference -- the COMPLETE reference of the
+        # RUNNING version (tools\setup\_PimApiReference.ps1 reads this process's own code once, in the background: 202 until
+        # ready), filtered to the signed-in person's role -- they see what they may call. Every signed-in role. Only the
+        # routine public profile is handed to invardia.com.
+        if ($path -eq '/api/api-reference' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Get-Command Get-PimApiReferenceAnswer -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 404 -Body @{ ok = $false; error = 'the API and MCP reference is not part of this edition' }; return 404 }
+            $arTools = if (Get-Command New-PimMcpTool -ErrorAction SilentlyContinue) { { Get-PimManagerMcpTools } } else { $null }
+            $ar = Get-PimApiReferenceAnswer -SolutionRoot $solutionRoot -Version "$(Get-PimSolutionVersion)" -Role "$((Get-PimManagerRole).role)" -Tools $arTools
+            Write-JsonResponse -Response $resp -Status ([int]$ar.status) -Body $ar.body
+            return [int]$ar.status
+        }
         if ($path -eq '/api/impact' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             try {
@@ -18520,6 +19141,94 @@ function Handle-Request {
             return $bgCode
         }
         # END BREAK-GLASS MAKER/CHECKER
+
+        # -------------------------------------------------------------------
+        # PIM 93.4 -- API APPLICATIONS (script / service sign-in), the SAME two-person gate as the break-glass list: the PUT
+        # raises a REQUEST that a different SuperAdmin approves (the maker too only when ApprovalSelfApprove is on). Nothing
+        # here is open to an application (SuperAdmin only, and not on the application allow-list). Every step is audited
+        # (settings.api-applications.*).
+        #   GET  /api/settings/api-applications                       (SuperAdmin) the list, its hash, the open request
+        #   PUT  /api/settings/api-applications                       (SuperAdmin) { apps:[{appId,role,name}], justification, baseHash } -> 202
+        #   POST /api/settings/api-applications/request/approve|reject|cancel (SuperAdmin) { requestId, note? }
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/settings/api-applications' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required.' }; return 403 }
+            if (-not "$($script:PimSqlCs)".Trim()) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no SQL store is bound' }; return 503 }
+            try {
+                $aaSt = Get-PimManagerApiAppState -ConnectionString "$($script:PimSqlCs)"
+                $aaReq = Get-PimManagerApiAppRequestView
+            } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "the API applications could not be read: $($_.Exception.Message)" }; return 500 }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                apps = @($aaSt.apps); listHash = "$($aaSt.hash)"; roles = @(Get-PimManagerApiAppRoles)
+                request = $aaReq; selfApprove = [bool](Get-PimManagerBreakGlassSelfApprove)
+                ready = [bool]("$env:PIM_API_APP_AUDIENCE".Trim())
+                canRaise = [bool](-not ($aaReq -and $aaReq.open))
+            })
+            return 200
+        }
+        if ($path -eq '/api/settings/api-applications' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to request a change to the API applications.' }; return 403 }
+            if (-not "$($script:PimSqlCs)".Trim()) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no SQL store is bound -- nothing was requested' }; return 503 }
+            $body = Read-RequestJson -Request $req
+            $aaNew = @(); if ($body -and $body.PSObject.Properties['apps']) { $aaNew = @(@($body.apps) | Where-Object { $null -ne $_ }) }
+            $aaJust = if ($body -and $body.PSObject.Properties['justification']) { "$($body.justification)".Trim() } else { '' }
+            $aaBase = if ($body -and $body.PSObject.Properties['baseHash']) { "$($body.baseHash)".Trim() } else { '' }
+            $aaMaker = "$((Get-PimManagerRole).identity)"
+            try { $aaRes = New-PimManagerApiAppChangeRequest -ConnectionString "$($script:PimSqlCs)" -Proposed $aaNew -Maker $aaMaker -Justification $aaJust -BaseHash $aaBase }
+            catch {
+                Write-PimManagerAuditEvent -Action 'settings.api-applications.request' -Target 'settings:api-applications' -After @{ justification = $aaJust; error = "$($_.Exception.Message)" } -Result 'error'
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "the change request was NOT raised: $($_.Exception.Message)" }; return 500
+            }
+            if ($aaRes.expiredPrevious) { Write-PimManagerAuditEvent -Action 'settings.api-applications.expired' -Target 'settings:api-applications' -After @{ requestId = "$($aaRes.expiredPrevious.id)"; maker = "$($aaRes.expiredPrevious.maker)" } -Result 'ok' }
+            if (-not $aaRes.ok) {
+                $aaCode = switch ("$($aaRes.code)") { 'invalid' { 400 } 'no-justification' { 400 } 'no-maker' { 400 } 'no-change' { 400 } default { 409 } }
+                Write-PimManagerAuditEvent -Action 'settings.api-applications.request' -Target 'settings:api-applications' -After @{ justification = $aaJust; refused = "$($aaRes.code)"; reason = "$($aaRes.reason)" } -Result 'refused'
+                Write-JsonResponse -Response $resp -Status $aaCode -Body ([ordered]@{ ok = $false; code = "$($aaRes.code)"; error = "$($aaRes.reason)" }); return $aaCode
+            }
+            $aaR = $aaRes.request
+            Write-PimManagerAuditEvent -Action 'settings.api-applications.request' -Target 'settings:api-applications' -Before @{ apps = @($aaR.snapshot) } `
+                -After @{ requestId = "$($aaR.id)"; added = @($aaR.added); removed = @($aaR.removed); changed = @($aaR.changed); maker = "$($aaR.maker)"; justification = "$($aaR.justification)"; expiresUtc = "$($aaR.expiresUtc)" } -Result 'ok'
+            $aaView = ConvertTo-PimManagerApiAppRequestView -Request $aaR
+            Write-JsonResponse -Response $resp -Status 202 -Body ([ordered]@{ ok = $true; pending = $true; requestId = "$($aaR.id)"; expiresUtc = "$($aaR.expiresUtc)"; request = $aaView; selfApprove = [bool]$aaView.selfApprove
+                note = $(if ($aaView.selfApprove) { 'Request raised -- NOT applied yet. Self-approval is on, so you can approve your own request.' } else { 'Request raised -- NOT applied. Another SuperAdmin must approve it before the list changes.' }) })
+            return 202
+        }
+        if ($path -match '^/api/settings/api-applications/request/(approve|reject|cancel)$' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            $aaAct = $Matches[1]
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "SuperAdmin role required to $aaAct a change to the API applications." }; return 403 }
+            if (-not "$($script:PimSqlCs)".Trim()) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no SQL store is bound -- nothing was decided' }; return 503 }
+            $body = Read-RequestJson -Request $req
+            $aaId = if ($body -and $body.PSObject.Properties['requestId']) { "$($body.requestId)".Trim() } else { '' }
+            $aaNote = if ($body -and $body.PSObject.Properties['note']) { "$($body.note)".Trim() } else { '' }
+            if (-not $aaId) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'requestId is required' }; return 400 }
+            $aaWho = "$((Get-PimManagerRole).identity)"
+            try {
+                if ($aaAct -eq 'approve') { $aaRes = Invoke-PimManagerApiAppChangeApproval -ConnectionString "$($script:PimSqlCs)" -RequestId $aaId -Checker $aaWho -Note $aaNote -AllowSelfApprove:([bool](Get-PimManagerBreakGlassSelfApprove)) }
+                else { $aaRes = Close-PimManagerApiAppChangeRequest -ConnectionString "$($script:PimSqlCs)" -RequestId $aaId -Actor $aaWho -Decision $aaAct -Note $aaNote }
+            } catch {
+                Write-PimManagerAuditEvent -Action "settings.api-applications.$aaAct" -Target 'settings:api-applications' -After @{ requestId = $aaId; error = "$($_.Exception.Message)" } -Result 'error'
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "nothing was decided: $($_.Exception.Message)" }; return 500
+            }
+            $aaR = $aaRes.request
+            $aaAudit = [ordered]@{ requestId = $aaId; maker = "$($aaR.maker)"; checker = $aaWho; added = @($aaR.added); removed = @($aaR.removed); changed = @($aaR.changed); justification = "$($aaR.justification)"; note = $aaNote; outcome = "$($aaRes.code)"; reason = "$($aaRes.reason)" }
+            if ($aaRes.ok) {
+                $script:PimManagerApiAppsCache = $null    # the very next application call reads the new list
+                $aaEvt = switch ($aaAct) { 'approve' { $(if ($aaR.selfApproved) { 'settings.api-applications.self-approved' } else { 'settings.api-applications.applied' }) } 'reject' { 'settings.api-applications.rejected' } default { 'settings.api-applications.cancelled' } }
+                if ($aaAct -eq 'approve') { $aaAudit['apps'] = @($aaRes.apps); $aaAudit['selfApproved'] = [bool]$aaR.selfApproved }
+                Write-PimManagerAuditEvent -Action $aaEvt -Target 'settings:api-applications' -Before @{ apps = @($aaR.snapshot) } -After $aaAudit -Result 'ok'
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; status = "$($aaR.status)"; reason = "$($aaRes.reason)"; request = (ConvertTo-PimManagerApiAppRequestView -Request $aaR) })
+                return 200
+            }
+            $aaEvt = switch ("$($aaRes.code)") { 'stale' { 'settings.api-applications.stale' } 'expired' { 'settings.api-applications.expired' } 'failed' { 'settings.api-applications.apply-failed' } default { "settings.api-applications.$aaAct" } }
+            Write-PimManagerAuditEvent -Action $aaEvt -Target 'settings:api-applications' -After $aaAudit -Result $(if ("$($aaRes.code)" -eq 'failed') { 'error' } else { 'refused' })
+            $aaCode = switch ("$($aaRes.code)") { 'same-person' { 403 } 'not-maker' { 403 } 'not-found' { 404 } 'failed' { 500 } default { 409 } }
+            Write-JsonResponse -Response $resp -Status $aaCode -Body ([ordered]@{ ok = $false; code = "$($aaRes.code)"; error = "$($aaRes.reason)"; request = $(if ($aaR) { ConvertTo-PimManagerApiAppRequestView -Request $aaR } else { $null }) })
+            return $aaCode
+        }
+        # END API APPLICATIONS
 
         # -------------------------------------------------------------------
         # Operational-policy config (REQUIREMENTS [M7]): expiry-policy defaults,
@@ -19295,24 +20004,8 @@ function Handle-Request {
         # Reader-gated: it discloses no secret, only which permissions are absent -- and an operator
         # who cannot see that is the person this whole feature exists to help.
         if ($path -eq '/api/permissions-health' -and $method -eq 'GET') {
-            $script:lastHeartbeat = Get-Date
-            # 🔴 BUG-264 (live GUI E2E 2026-09-27): this check makes several Graph reads, an ARM read per subscription (up to
-            # 10) and SQL reads -- 1.8-3.7 s measured on a test environment, longer cold -- on the Manager's ONE request loop, on EVERY
-            # Home load. Every request behind it waited (a wizard's data loads timed out the E2E). The answer is kept for
-            # 5 minutes; ?refresh=1 (the "Verify permissions" button) checks again at once.
-            $permRefresh = $false; try { $permRefresh = ("$($req.Url.Query)" -match '(?:^|[?&])refresh=1') } catch { }
-            # 97.1: "Verify permissions" is what an admin presses after a grant -- it also queues PIM's own workload
-            # prerequisite check (job workload-prereqs, read-only), so a held Intune / Defender assignment follows the grant.
-            if ($permRefresh -and (Test-PimManagerRoleAtLeast -Minimum 'Admin') -and (Get-Command Add-PimJobTrigger -ErrorAction SilentlyContinue)) {
-                try { [void](Add-PimJobTrigger -Type 'workload-prereqs' -Scope 'All' -Reason 'verify-permissions' -JobName 'workload-prereqs') } catch { Write-Verbose "workload-prereqs not queued: $($_.Exception.Message)" }
-            }
-            $permBody = Get-PimManagerPermissionHealthBody -Refresh:$permRefresh
-            if ($null -eq $permBody) {
-                Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'permission-health module not loaded'; hint = 'engine/_shared/PIM-PermissionHealth.ps1 is missing from this build' }
-                return 501
-            }
-            Write-JsonResponse -Response $resp -Status 200 -Body $permBody
-            return 200
+            $__getSt = Invoke-PimManagerGetRoutePermissionsHealth -path $path -req $req -resp $resp -method $method
+            if ($null -ne $__getSt) { return $__getSt }
         }
 
         if ($path -eq '/api/admin-tap' -and $method -eq 'GET') {
@@ -19979,39 +20672,12 @@ function Handle-Request {
                 return 200
             }
             if ($path -eq '/api/rfa/decide' -and $method -eq 'POST') {
-                if (-not (Test-PimManagerProFeature -Key 'rfa.portal' -Response $resp)) { return 403 }
-                $body = Read-RequestJson -Request $req
-                $id = "$($body.id)".Trim(); $dec = "$($body.decision)".Trim().ToLowerInvariant(); $note = "$($body.note)".Trim()
-                if (-not $id -or $dec -notin @('approve', 'deny')) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'id and decision (approve | deny) are required' }; return 400 }
-                $res = & $mutate {
-                    param($list)
-                    $r = @($list | Where-Object { "$($_.id)" -eq $id })[0]
-                    if (-not $r) { return [pscustomobject]@{ ok = $false; status = 404; error = 'no such request' } }
-                    $d = Set-PimRfaDecision -Request $r -Decision $dec -By $me -DepartmentOwners (& $ownersOf "$($r.department)") -IsAdmin:$isAdmin -Note $note
-                    if (-not $d.ok) { return [pscustomobject]@{ ok = $false; status = 403; error = $d.reason } }
-                    [pscustomobject]@{ ok = $true; list = @($list | ForEach-Object { if ("$($_.id)" -eq $id) { $d.request } else { $_ } }); request = $d.request }
-                }
-                if (-not $res.ok) { Write-JsonResponse -Response $resp -Status $res.status -Body @{ error = $res.error }; return $res.status }
-                Write-PimManagerAuditEvent -Action "rfa.$dec" -Target "$($res.request.upn)" -Result 'ok' -After ([ordered]@{ id = $id; by = $me; note = $note })
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; state = "$($res.request.state)"; note = $(if ($dec -eq 'approve') { 'Approved. The engine enables the account on its next run (within a few minutes) and mails the person.' } else { 'Denied. The person is told by mail.' }) })
-                return 200
+                $__postSt = Invoke-PimManagerPostRouteRfaDecide -path $path -req $req -resp $resp -method $method -isAdmin $isAdmin -me $me -mutate $mutate -ownersOf $ownersOf
+                if ($null -ne $__postSt) { return $__postSt }
             }
             if ($path -eq '/api/rfa/end' -and $method -eq 'POST') {
-                if (-not (Test-PimManagerProFeature -Key 'rfa.portal' -Response $resp)) { return 403 }
-                $body = Read-RequestJson -Request $req; $id = "$($body.id)".Trim()
-                $res = & $mutate {
-                    param($list)
-                    $r = @($list | Where-Object { "$($_.id)" -eq $id })[0]
-                    if (-not $r) { return [pscustomobject]@{ ok = $false; status = 404; error = 'no such request' } }
-                    if (-not ($isAdmin -or (& $ownersOf "$($r.department)") -contains $me)) { return [pscustomobject]@{ ok = $false; status = 403; error = 'only a Manager Admin or an Owner of the department can end it' } }
-                    if ("$($r.state)" -notin @('approved', 'active', 'pending-approval')) { return [pscustomobject]@{ ok = $false; status = 409; error = "the request is '$($r.state)'" } }
-                    $n = $r.PSObject.Copy(); $n.state = 'cancel-requested'
-                    [pscustomobject]@{ ok = $true; list = @($list | ForEach-Object { if ("$($_.id)" -eq $id) { $n } else { $_ } }); request = $n }
-                }
-                if (-not $res.ok) { Write-JsonResponse -Response $resp -Status $res.status -Body @{ error = $res.error }; return $res.status }
-                Write-PimManagerAuditEvent -Action 'rfa.end' -Target "$($res.request.upn)" -Result 'ok' -After ([ordered]@{ id = $id; by = $me })
-                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; note = 'Ending. The engine disables the account on its next run.' }
-                return 200
+                $__postSt = Invoke-PimManagerPostRouteRfaEnd -path $path -req $req -resp $resp -method $method -isAdmin $isAdmin -me $me -mutate $mutate -ownersOf $ownersOf
+                if ($null -ne $__postSt) { return $__postSt }
             }
             if ($path -eq '/api/rfa/override' -and $method -eq 'POST') {
                 # §82.5 Q16: a Manager Admin may grant a long window (up to 31 days)
@@ -22183,8 +22849,8 @@ function Handle-Request {
         # initiated (and only their own rows are undoable); Delegated / Reader = 403. The undo itself is staged in the
         # page and committed through PUT /api/csv/<base> with undoOf -- every commit gate applies; nothing is written here.
         # (/api/commits is the §88 commit WATCHER; this is the journal history.)
-        if ($path -eq '/api/commit-history' -and $method -eq 'GET') { return (Invoke-PimManagerCommitHistoryGet -path $path -req $req -resp $resp) }
-        if ($path -match '^/api/commit-history/[A-Za-z0-9_\-]+$' -and $method -eq 'GET') { return (Invoke-PimManagerCommitHistoryGet -path $path -req $req -resp $resp) }
+        if ($path -eq '/api/commit-history' -and $method -eq 'GET') { return (Invoke-PimManagerGetRouteCommitHistory -path $path -req $req -resp $resp -method $method) }
+        if ($path -match '^/api/commit-history/[A-Za-z0-9_\-]+$' -and $method -eq 'GET') { return (Invoke-PimManagerGetRouteCommitHistory -path $path -req $req -resp $resp -method $method) }
         # §97.1: what REALLY happened to the commit the page sent with clientCommitId <id> -- asked after a timeout, so the
         # page reports saved / refused / not saved from the record, never "not saved" by assumption (Get-PimManagerCommitStatus).
         if ($path -match '^/api/commit-status/[A-Za-z0-9_\-]{8,64}$' -and $method -eq 'GET') {
@@ -22923,46 +23589,8 @@ function Handle-Request {
         # catalog), so a typo helps instead of erroring. A genuinely empty
         # catalog yields an empty candidate list, never a 5xx.
         if ($path -eq '/api/role-permissions' -and $method -eq 'GET') {
-            $script:lastHeartbeat = Get-Date
-            $roleName = "$($req.QueryString['role'])".Trim()
-            if (-not $roleName) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "role query parameter is required" }; return 400 }
-            try {
-                $def = $null
-                # 🔴 §70.20 (operator 2026-09-13: Role lookup said "No role matches 'Exchange Administrator'"). This read
-                # ran ONLY through the Graph PowerShell SDK (Invoke-MgGraphRequest), which the hosted container does not
-                # ship (REST-only) -- so on every hosted Manager the live read was skipped and every role "did not match".
-                # REST only (Invoke-PimGraph, the Manager's own app-only token) -- §100.42 removed the SDK fallback.
-                $esc = [uri]::EscapeDataString($roleName.Replace("'", "''"))
-                $u = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$filter=displayName eq '$esc'"
-                if (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) {
-                    Initialize-PimManagerTenantConnection
-                    $r = Invoke-PimGraph -Method GET -Path $u
-                    if ($r.value -and @($r.value).Count -gt 0) { $def = @($r.value)[0] }
-                }   # §100.42: REST only (no Invoke-MgGraphRequest fallback)
-                if ($def) {
-                    $fmt = Format-PimRolePermissions -RoleDefinition $def
-                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; matched = $true; role = $roleName; permissions = $fmt }); return 200
-                }
-                # Exact name didn't resolve (typo, or no Graph read available). Resolve
-                # against the known role catalog and offer ranked candidates. 200, never 503.
-                $catalog = @(Get-PimRoleCatalogNames)
-                $res = Resolve-PimRoleQuery -Query $roleName -RoleNames $catalog
-                $hasGraph = [bool](Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)
-                $hint = if (@($res.candidates).Count -gt 0) {
-                    "No directory role is named exactly '$roleName'. Pick one of the suggestions, or correct the spelling."
-                } elseif (-not $hasGraph -and @($catalog).Count -eq 0) {
-                    "Role names aren't available yet -- connect the Manager to the tenant (or refresh tenant lists), then retry."
-                } else {
-                    "No role matches '$roleName'."
-                }
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
-                    ok = $true; matched = $false; role = $roleName
-                    permissions = $null; candidates = @($res.candidates)
-                    catalogSize = @($catalog).Count; graphConnected = $hasGraph; hint = $hint
-                }); return 200
-            } catch {
-                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 500
-            }
+            $__getSt = Invoke-PimManagerGetRouteRolePermissions -path $path -req $req -resp $resp -method $method
+            if ($null -ne $__getSt) { return $__getSt }
         }
 
         # Search-by-action (§28 [H9a]): the INVERSE of the drill-down -- "which
@@ -22973,46 +23601,8 @@ function Handle-Request {
         # blank action -> 400; no live Graph / no match -> 200 with an empty list +
         # an honest hint (never a 5xx for a legitimate "nothing grants this").
         if ($path -eq '/api/role-permissions/by-action' -and $method -eq 'GET') {
-            $script:lastHeartbeat = Get-Date
-            $action = "$($req.QueryString['action'])".Trim()
-            if (-not $action) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "action query parameter is required" }; return 400 }
-            try {
-                $defs = New-Object System.Collections.ArrayList
-                # §70.20: REST first -- the SDK-only read never ran on the hosted Manager (see /api/role-permissions).
-                $hasRest = [bool](Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)
-                $hasGraph = $hasRest   # §100.42: REST only
-                if ($hasGraph) {
-                    # Page through every directory role definition WITH its permissions.
-                    $u = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$select=id,displayName,isBuiltIn,rolePermissions&`$top=200"
-                    if ($hasRest) { Initialize-PimManagerTenantConnection }
-                    $guard = 0
-                    while ($u -and $guard -lt 50) {
-                        $guard++
-                        $r = Invoke-PimGraph -Method GET -Path $u
-                        foreach ($d in @($r.value)) { [void]$defs.Add($d) }
-                        $u = if ($r.'@odata.nextLink') { "$($r.'@odata.nextLink')" } else { $null }
-                    }
-                }
-                $res = Find-PimRolesByAction -Action $action -RoleDefinitions @($defs.ToArray())
-                $hint = if (@($res.matches).Count -gt 0) {
-                    "{0} role(s) grant '{1}'. The list is ranked least-privilege first -- prefer the narrowest role." -f @($res.matches).Count, $action
-                } elseif (-not $hasGraph -or $defs.Count -eq 0) {
-                    "Role permissions aren't available yet -- connect the Manager to the tenant (the engine SPN needs RoleManagement.Read.Directory), then retry."
-                } else {
-                    "No directory role grants '$action'. Check the action spelling (e.g. microsoft.directory/users/basic/update), or try a 'namespace/*' wildcard."
-                }
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
-                    ok = $true; action = $action
-                    matched = [bool]$res.matched
-                    matches = @($res.matches)
-                    matchCount = [int]$res.matchCount
-                    rolesSearched = [int]$res.rolesSearched
-                    graphConnected = $hasGraph
-                    hint = $hint
-                }); return 200
-            } catch {
-                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 500
-            }
+            $__getSt = Invoke-PimManagerGetRouteRolePermissionsByAction -path $path -req $req -resp $resp -method $method
+            if ($null -ne $__getSt) { return $__getSt }
         }
 
         # Reverse Role Lookup (§28 [H9]): "who has / who can activate this role" +
@@ -23026,24 +23616,8 @@ function Handle-Request {
         # Role compare (§28 [H9]): pick two roles, return who/what each reaches --
         # overlap + each-only sets. Built on Get-PimRoleReachers + Compare-PimReachSets.
         if ($path -eq '/api/role-lookup/compare' -and $method -eq 'GET') {
-            $script:lastHeartbeat = Get-Date
-            $roleA = "$($req.QueryString['roleA'])".Trim()
-            $roleB = "$($req.QueryString['roleB'])".Trim()
-            if (-not $roleA -or -not $roleB) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "roleA and roleB query parameters are required" }; return 400 }
-            try {
-                $model = Get-PimAccessGraphModel
-                $revA = Get-PimRoleReachers -Role $roleA -Model $model
-                $revB = Get-PimRoleReachers -Role $roleB -Model $model
-                $cmp = Compare-PimReachSets -ReachersA @($revA.reachers) -ReachersB @($revB.reachers) -LabelA $roleA -LabelB $roleB
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
-                    ok = $true
-                    roleA = $roleA; roleB = $roleB
-                    resolvedA = [int]$revA.resolved; resolvedB = [int]$revB.resolved
-                    comparison = $cmp
-                }); return 200
-            } catch {
-                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 500
-            }
+            $__getSt = Invoke-PimManagerGetRouteRoleLookupCompare -path $path -req $req -resp $resp -method $method
+            if ($null -ne $__getSt) { return $__getSt }
         }
 
         # -------------------------------------------------------------------
@@ -23054,29 +23628,11 @@ function Handle-Request {
         # -------------------------------------------------------------------
         if ($path -like '/api/conformance*') {
             $script:lastHeartbeat = Get-Date
-            $confTplDir = Join-Path $solutionRoot 'workloads\templates'
-            # Applied-version stamps: SQL pim.Settings['ConformanceTemplateState'] (Get-/Set-PimTemplateState) -- no state file.
-            $confTenant = "$script:PimInstanceName"
-            # 🔴 BUG-179 (operator decision 2026-09-18): the template-catalog ring is this environment's PLATFORM
-            # UPDATE RING itself (§77.20: one ring order, no inversion; not recorded / invalid -> 2, most restrictive). It
-            # used to be Get-PimTenantRing -- $global:PIM_TenantRing / pim.Settings['TenantRing'] -- which nothing
-            # hosted sets, so every hosted Manager ran the catalog at ring 0 without saying why. Get-PimTenantRing is
-            # left alone: it also drives the admin<->tenant ring filter, a different axis.
-            $confRingInfo = $null
-            if (Get-Command Get-PimTemplateCatalogRing -ErrorAction SilentlyContinue) {
-                $updRec = $null
-                if ((Get-Command Read-PimUpdateState -ErrorAction SilentlyContinue) -and "$($script:PimSqlCs)".Trim()) { $updRec = Read-PimUpdateState -ConnectionString $script:PimSqlCs }
-                $confRingInfo = Get-PimTemplateCatalogRing -ConnectionString "$($script:PimSqlCs)" -UpdateStateRecord $updRec
-            } else {
-                $confRingInfo = [pscustomobject]@{ ring = 0; source = 'not recorded'; updateRing = ''; reason = 'the template-ring resolver is not loaded -- most restrictive template ring 0' }
-            }
-            $confRing = [int]$confRingInfo.ring
-            $confRingSource = "$($confRingInfo.source)"
-            $confRingReason = "$($confRingInfo.reason)"
-            # SEC-17: reads SQL pim.Settings['ConformanceExemptions'] only, and NEVER the
-            # shipped sample. See Get-PimManagerConformanceExemptions for why the
-            # sample fallback was a live waiver rather than a convenience.
-            $readEx = { @(Get-PimManagerConformanceExemptions) }
+            # 93.4 MCP-GAP-2: the template folder, instance, template-catalog ring and exemption reader (moved unchanged into
+            # Get-PimManagerConformanceRouteContext) -- the MCP conformance reads pass the SAME values to the moved GET bodies.
+            $confCtx = Get-PimManagerConformanceRouteContext
+            $confTplDir = $confCtx.confTplDir; $confTenant = $confCtx.confTenant; $confRing = $confCtx.confRing
+            $confRingSource = $confCtx.confRingSource; $confRingReason = $confCtx.confRingReason; $readEx = $confCtx.readEx
             # BUG-180 / IMP-37: the shipped template FILES are read-only (they ship with the image and are
             # replaced by every update). This finds one SHIPPED template by id -- approvals and ring promotions
             # are recorded over it in SQL (pim.Settings 'ConformanceTemplateOverlay'), never written back.
@@ -23088,54 +23644,13 @@ function Handle-Request {
             }
 
             if ($path -eq '/api/conformance/templates' -and $method -eq 'GET') {
-                $all = @(Read-PimApprovedTemplates -SourceDir $confTplDir -IncludeDrafts -WarningAction SilentlyContinue)
-                $rows = New-Object System.Collections.ArrayList
-                foreach ($t in $all) {
-                    $st = Get-PimTemplateState -TenantId $confTenant -TemplateId "$($t.templateId)"
-                    $applied = if ($st) { [int]("$($st.LastAppliedVersion)" -as [int]) } else { 0 }
-                    [void]$rows.Add([ordered]@{
-                        templateId = "$($t.templateId)"; workload = "$($t.workload)"
-                        templateVersion = [int]("$($t.templateVersion)" -as [int]); status = "$($t.status)"
-                        approved = [bool](Test-PimTemplateApproved -Template $t); entries = @($t.entries).Count
-                        appliedVersion = $applied; behind = [math]::Max(0, [int]("$($t.templateVersion)" -as [int]) - $applied)
-                    })
-                }
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ instance = $confTenant; tenantRing = $confRing; tenantRingSource = $confRingSource; tenantRingReason = $confRingReason; templates = $rows.ToArray() })
-                return 200
+                $__getSt = Invoke-PimManagerGetRouteConformanceTemplates -path $path -req $req -resp $resp -method $method @confCtx
+                if ($null -ne $__getSt) { return $__getSt }
             }
 
             if ($path -eq '/api/conformance' -and $method -eq 'GET') {
-                $tid = ''
-                if ($req.Url.Query -match '(\?|&)template=([^&]+)') { $tid = [uri]::UnescapeDataString($Matches[2]) }
-                $tpl = @(Read-PimApprovedTemplates -SourceDir $confTplDir -IncludeDrafts -WarningAction SilentlyContinue | Where-Object { "$($_.templateId)" -eq "$tid" })
-                if (-not $tid -or -not $tpl) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'unknown template' }; return 400 }
-                $tpl = $tpl[0]
-                $now = [datetime]::UtcNow
-                $exKeys = Get-PimActiveExemptionKeys -Exemptions (& $readEx) -TenantId $confTenant -TemplateId "$tid" -NowUtc $now
-                $st = Get-PimTemplateState -TenantId $confTenant -TemplateId "$tid"
-                $applied = if ($st) { [int]("$($st.LastAppliedVersion)" -as [int]) } else { 0 }
-                # Best-effort live catalog (the connector's live roles); skip if no connection.
-                $liveCat = @()
-                try {
-                    $dir = Join-Path $solutionRoot 'workloads\connectors'
-                    $conn = @(Read-PimWorkloadConnectors -ConnectorsDir $dir) | Where-Object { "$($_.id)" -ieq "$($tpl.workload)" } | Select-Object -First 1
-                    if ($conn) { Initialize-PimManagerTenantConnection; $liveCat = @(Get-PimWorkloadConnectorRoles -Connector $conn | ForEach-Object { "$($_.name)" }) }
-                } catch { $liveCat = @() }
-                $c = Get-PimConformance -Template $tpl -TenantRing $confRing -TenantId $confTenant -ActiveExemptionKeys $exKeys -LiveCatalog $liveCat -AppliedVersion $applied
-                $statusMap = [ordered]@{}
-                foreach ($r in $c.Rows) { $statusMap["$($r.Key)"] = "$($r.Status)" }
-                # Per-entry rollout ring (default 2) so the Template Rollout tab can render a
-                # per-entry ring selector that drives POST /api/conformance/promote (no more
-                # orphaned promote endpoint). Read straight from each template entry.
-                $ringMap = [ordered]@{}
-                foreach ($e in @($tpl.entries)) { $ringMap["$($e.key)"] = (Get-PimTemplateEntryRing -Entry $e) }
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
-                    templateId = "$($tpl.templateId)"; workload = "$($tpl.workload)"; templateVersion = $c.TemplateVersion
-                    status = "$($tpl.status)"; tenantRing = $confRing; tenantRingSource = $confRingSource; tenantRingReason = $confRingReason; appliedVersion = $applied; behind = $c.Behind
-                    keys = @(@($tpl.entries) | ForEach-Object { "$($_.key)" }); statuses = $statusMap; rings = $ringMap
-                    counts = $c.Counts; catalogAhead = @($c.CatalogAhead | ForEach-Object { "$($_.Capability)" })
-                })
-                return 200
+                $__getSt = Invoke-PimManagerGetRouteConformance -path $path -req $req -resp $resp -method $method @confCtx
+                if ($null -ne $__getSt) { return $__getSt }
             }
 
             if ($path -eq '/api/conformance/exemptions' -and $method -eq 'POST') {
@@ -23168,16 +23683,8 @@ function Handle-Request {
             # its per-row state (Active/Expiring/Expired/Invalid), days-left and a stable
             # revoke key (Get-PimExemptionList). Optional ?template= scopes to one template.
             if ($path -eq '/api/conformance/exemptions' -and $method -eq 'GET') {
-                $tidF = ''
-                if ($req.Url.Query -match '(\?|&)template=([^&]+)') { $tidF = [uri]::UnescapeDataString($Matches[2]) }
-                $now = [datetime]::UtcNow
-                $list = @(Get-PimExemptionList -Exemptions (& $readEx) -TenantId $confTenant -TemplateId $tidF -NowUtc $now -WarningAction SilentlyContinue)
-                $sum  = Get-PimExemptionSummary -List $list
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
-                    instance = $confTenant; tenantRing = $confRing; tenantRingSource = $confRingSource; tenantRingReason = $confRingReason; template = $tidF
-                    summary = $sum; exemptions = @($list)
-                })
-                return 200
+                $__getSt = Invoke-PimManagerGetRouteConformanceExemptions -path $path -req $req -resp $resp -method $method @confCtx
+                if ($null -ne $__getSt) { return $__getSt }
             }
 
             # Revoke ONE exemption by its stable RevokeKey (no auto-expire wait). SuperAdmin
@@ -23316,47 +23823,8 @@ function Handle-Request {
             # (update ring inverted); other instances use the ring stamped in the state document
             # (falling back to 0 / production when unstamped). No tenant write, read-only.
             if ($path -eq '/api/conformance/fleet' -and $method -eq 'GET') {
-                $approved = @(Read-PimApprovedTemplates -SourceDir $confTplDir -WarningAction SilentlyContinue)
-                # Build a tenant descriptor per managed instance.
-                $fleetTenants = New-Object System.Collections.Generic.List[object]
-                foreach ($inst in (Get-PimManagerInstances | Where-Object { "$($_.name)" -eq "$script:PimInstanceName" })) {
-                    # SQL-only: the tenant is the ACTIVE SQL instance. Other 'sql:<db>' names share this
-                    # host's output folder, so counting them would duplicate one state stamp as N tenants.
-                    $iname = "$($inst.name)"
-
-
-                    $st = Get-PimFleetStateForInstance -TenantId $iname   # SQL pim.Settings['ConformanceTemplateState']
-                    $iring = $st.ring
-                    if ($iname -eq "$script:PimInstanceName") { $iring = $confRing }   # active = live ring
-                    if ($null -eq $iring) { $iring = 0 }
-                    $fleetTenants.Add(@{ tenantId = $iname; ring = $iring; appliedVersions = $st.appliedVersions })
-                }
-                $fleet = Get-PimFleetConformance -Templates $approved -Tenants $fleetTenants.ToArray()
-                # Serialise to plain ordered objects (Cells nested per tenant).
-                $tenantRows = New-Object System.Collections.ArrayList
-                foreach ($tr in $fleet.Tenants) {
-                    $cellList = New-Object System.Collections.ArrayList
-                    foreach ($c in $tr.Cells) {
-                        [void]$cellList.Add([ordered]@{ templateId = "$($c.TemplateId)"; templateVersion = $c.TemplateVersion; appliedVersion = $c.AppliedVersion; behind = $c.Behind; status = "$($c.Status)" })
-                    }
-                    [void]$tenantRows.Add([ordered]@{
-                        tenantId = "$($tr.TenantId)"; ring = $tr.Ring; current = [bool]$tr.Current
-                        maxBehind = $tr.MaxBehind; behindCount = $tr.BehindCount; neverCount = $tr.NeverCount
-                        upToDate = $tr.UpToDate; aheadCount = $tr.AheadCount; cells = $cellList.ToArray()
-                    })
-                }
-                $colList = New-Object System.Collections.ArrayList
-                foreach ($col in $fleet.Templates) { [void]$colList.Add([ordered]@{ templateId = "$($col.TemplateId)"; workload = "$($col.Workload)"; templateVersion = $col.TemplateVersion }) }
-                $ptList = New-Object System.Collections.ArrayList
-                foreach ($pt in $fleet.PerTemplate) {
-                    [void]$ptList.Add([ordered]@{ templateId = "$($pt.TemplateId)"; workload = "$($pt.Workload)"; templateVersion = $pt.TemplateVersion; upToDate = $pt.UpToDate; behindCount = $pt.BehindCount; neverCount = $pt.NeverCount; aheadCount = $pt.AheadCount; maxBehind = $pt.MaxBehind; needsRollout = [bool]$pt.NeedsRollout })
-                }
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
-                    activeInstance = $confTenant; activeRing = $confRing; activeRingSource = $confRingSource; activeRingReason = $confRingReason
-                    totalTenants   = $fleet.TotalTenants; currentTenants = $fleet.CurrentTenants; behindTenants = $fleet.BehindTenants
-                    templates      = $colList.ToArray(); perTemplate = $ptList.ToArray(); tenants = $tenantRows.ToArray()
-                })
-                return 200
+                $__getSt = Invoke-PimManagerGetRouteConformanceFleet -path $path -req $req -resp $resp -method $method @confCtx
+                if ($null -ne $__getSt) { return $__getSt }
             }
 
             # --- RING-WIDE rollout plan for ONE template (REQUIREMENTS.md s28 [H8]) --
@@ -23365,37 +23833,8 @@ function Handle-Request {
             # planning rollup (the actual per-tenant deploy still goes through the proven
             # ring-gated deploy path); ?template= selects the template.
             if ($path -eq '/api/conformance/ring-plan' -and $method -eq 'GET') {
-                $tid = ''
-                if ($req.Url.Query -match '(\?|&)template=([^&]+)') { $tid = [uri]::UnescapeDataString($Matches[2]) }
-                $tpl = @(Read-PimApprovedTemplates -SourceDir $confTplDir -IncludeDrafts -WarningAction SilentlyContinue | Where-Object { "$($_.templateId)" -eq "$tid" })
-                if (-not $tid -or -not $tpl) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'unknown template' }; return 400 }
-                $tpl = $tpl[0]
-                $fleetTenants = New-Object System.Collections.Generic.List[object]
-                foreach ($inst in (Get-PimManagerInstances | Where-Object { "$($_.name)" -eq "$script:PimInstanceName" })) {
-                    # SQL-only: the tenant is the ACTIVE SQL instance. Other 'sql:<db>' names share this
-                    # host's output folder, so counting them would duplicate one state stamp as N tenants.
-                    $iname = "$($inst.name)"
-
-                    $st = Get-PimFleetStateForInstance -TenantId $iname   # SQL pim.Settings['ConformanceTemplateState']
-                    $iring = $st.ring
-                    if ($iname -eq "$script:PimInstanceName") { $iring = $confRing }
-                    if ($null -eq $iring) { $iring = 0 }
-                    $fleetTenants.Add(@{ tenantId = $iname; ring = $iring; appliedVersions = $st.appliedVersions })
-                }
-                $plan = Get-PimRingRolloutPlan -Template $tpl -Tenants $fleetTenants.ToArray()
-                $bandList = New-Object System.Collections.ArrayList
-                foreach ($b in $plan.Bands) {
-                    $tl = New-Object System.Collections.ArrayList
-                    foreach ($t in $b.Tenants) { [void]$tl.Add([ordered]@{ tenantId = "$($t.TenantId)"; ring = $t.Ring; appliedVersion = $t.AppliedVersion; behind = $t.Behind; status = "$($t.Status)" }) }
-                    [void]$bandList.Add([ordered]@{ ring = $b.Ring; tenantCount = $b.TenantCount; behindCount = $b.BehindCount; neverCount = $b.NeverCount; needsRollout = [bool]$b.NeedsRollout; tenants = $tl.ToArray() })
-                }
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
-                    templateId = "$($plan.TemplateId)"; workload = "$($plan.Workload)"; templateVersion = $plan.TemplateVersion
-                    approved = [bool]$plan.Approved; totalTenants = $plan.TotalTenants; needsRolloutCount = $plan.NeedsRolloutCount
-                    activeRing = $confRing; activeRingSource = $confRingSource; activeRingReason = $confRingReason
-                    bands = $bandList.ToArray()
-                })
-                return 200
+                $__getSt = Invoke-PimManagerGetRouteConformanceRingPlan -path $path -req $req -resp $resp -method $method @confCtx
+                if ($null -ne $__getSt) { return $__getSt }
             }
 
             Write-JsonResponse -Response $resp -Status 404 -Body @{ error = ("not found: {0} {1}" -f $method, $path) }

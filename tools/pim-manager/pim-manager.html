@@ -1418,6 +1418,7 @@
   <div id="tabs">
     <div class="tab active" data-tab="home" title="Your privileged-estate health at a glance — per-tier counts, gaps, orphans, engine/job status, and a &quot;what needs my attention&quot; call-out.">Home <span id="homeAttnBadge" class="badge" style="display:none;background:#cf222e"></span></div>
     <div class="tab" data-tab="docs" title="Documentation: the pages shipped with this version -- architecture, security design, guards, SQL access, releases and every setting.">Documentation</div>
+    <div class="tab" data-tab="apiref" title="API and MCP reference: every API route and MCP tool of this version that your role may call.">API and MCP reference</div>
     <div class="tab" data-tab="impact" title="Counters overview: what PIM Manager has done in this environment, cumulative -- each counter with how it is counted.">Counters overview</div>
     <div class="tab" data-tab="new" title="Create a new admin or delegation with the target-first wizard — pick what to grant and the name, level, tier and plane are derived for you.">Create</div>
     <div class="tab" data-tab="map" title="Visualise who can reach what — the live delegation graph (admins → {{DIMS}} → nested groups → targets), with a risk overlay and per-grant removal.">Delegation Map</div>
@@ -1498,6 +1499,7 @@
   <div id="activatorTab" class="tab-panel"><div id="activatorScrollBody"><div id="activatorBody"></div></div></div>
   <!-- PIM 100.157: Documentation (Settings menu) -- the pages shipped with this version, rendered by the Manager. -->
   <div id="docsTab" class="tab-panel"><div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="docsBody"></div></div>
+<div id="apirefTab" class="tab-panel"><div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="apirefBody"></div></div>
   <!-- 100.68: Counters overview (Overview menu) -- the impact counters, each with how it is counted. -->
   <div id="impactTab" class="tab-panel"><div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="impactBody"></div></div>
   <div id="homeTab" class="tab-panel active">
@@ -2000,6 +2002,7 @@
     <div class="pro-lic-banner" data-feature="access.delegated" style="display:none; flex:0 0 auto; margin:10px 18px 0;"></div>
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="manageraccessBody">
       <div id="setAccessHost"><div style="color:#57606a;font-size:12px;">Loading access &amp; roles&hellip;</div></div>
+      <div id="setApiAppsHost" style="margin-top:12px;"></div>
     </div>
   </div>
   <div id="emergencyTab" class="tab-panel">
@@ -3067,6 +3070,8 @@
         // ... and SHIPPED inside each release (owner: "pim must also ship docs inside the gui"), so a private-network install
         // reads them too; the published set stays one link away inside the page.
         { tab: 'docs', label: 'Documentation', desc: 'Architecture, security design, guards, SQL access, releases and every setting -- the pages shipped with this version' },
+        // APIDOC-1 (owner 2026-10-31): the API + MCP reference of the running version, filtered to the signed-in role.
+        { tab: 'apiref', label: 'API and MCP reference', desc: 'Every API route and MCP tool of this version that your role may call' },
       ] },
   ];
   // Normalise an item entry to { tab, label, desc } -- a bare string keeps the flat-strip label.
@@ -3493,6 +3498,7 @@
     jobs:        { title: 'What this is & how to use it', what: 'The scheduler job registry and recent runs.', how: ['In-progress jobs sort to the top; open Logs on any row.', '<b>Run now</b> (Admin) starts a job on demand: an engine job is queued for the scheduler and its tick job is started, so it runs in about a minute &mdash; the Manager never runs the engine itself.'] },
     settings:    { title: 'What this is & how to use it', what: 'Admin settings &mdash; naming conventions, imports, AD OU placement and platform options.', how: ['Edit a card and Save; imports pull from Entra or a CSV. Changes persist to the store the engine reads.'] },
     envreport:   { title: 'What this is & how to use it', what: 'Environment report &mdash; the architecture and security report of THIS environment, read live: every identity by name and id, its permissions marked expected / missing / extra against what PIM Manager declares, the Azure resources and their network exposure, features, data flows, change history and findings with the fix.', how: ['Export PDF prints the report (choose Save as PDF, A4, background graphics on); Export JSON downloads the same data for an audit or a diff.', 'Whatever this Manager may not read is marked not readable, with the reason -- grant it read access and press Read again.', 'Confidential: names and ids only, never a secret value. Admin and SuperAdmin only.'] },
+    apiref:      { title: 'What this is & how to use it', what: 'The API and MCP reference of the version that runs here &mdash; every API route and MCP tool your PIM Manager role may call, read from this version&rsquo;s own code.', how: ['Type in the filter to find a route or a tool; the role column says what each needs.', 'A route with no role check of its own is open to every signed-in role; the route still checks the item you ask about.', 'The routine part of this reference is published on invardia.com.'] },
     support:     { title: 'What this is & how to use it', what: 'Support &mdash; version and tenant context, plus a pre-filled issue template.', how: ['No tenant connection needed; use it to file an issue with the context already filled in.'] },
     // PIM 100.93
     policysettings: { title: 'What this is & how to use it', what: 'Policy settings &mdash; every policy setting of your tenant, per policy type. PIM Manager never changes a policy on its own: you choose per setting between Microsoft default, PIM Manager recommendation and Keep current.', how: ['Each button shows its own value. Choose, then press <b>Save choices</b> (SuperAdmin) &mdash; nothing is sent before that.', 'Saving changes nothing in your tenant yet: the next policy run plans the change and holds it until a SuperAdmin approves it on Approvals. The same person may approve, as a second step.', 'The quick-selection buttons set every setting at once, after you type the word <b>confirm</b>.'] }
@@ -3566,6 +3572,7 @@
     try { pimExportRefresh(); pimApplyNameMask(name); } catch (_) { }   // 100.67: the Export menu + hidden names follow the page
     if (name === 'home') renderHome();
     if (name === 'docs') renderDocsPage();   // PIM 100.157
+    if (name === 'apiref') renderApiRefPage();   // APIDOC-1
     if (name === 'impact') renderImpactPage();   // 100.68
     if (name === 'getstarted') renderGetStarted();
     try { refreshAttention(false); } catch (_) { }   // §97.3: a page change re-reads the blocking counts (at most every 5 s)
@@ -3588,7 +3595,7 @@
     if (name === 'adminimport') renderAdminImportPage();   // operator 2026-10-06: under Admin accounts, SuperAdmin only
     if (name === 'commithistory') renderCommitHistoryPage();   // CONFIG-1.2 / §96.2: commit history + undo
     if (name === 'envreport') renderEnvReportPage(false);   // §12.8 ENV-REPORT-1: the environment report
-    if (name === 'manageraccess') renderSettingsAccessSection(document.getElementById('setAccessHost'));
+    if (name === 'manageraccess') { renderSettingsAccessSection(document.getElementById('setAccessHost')); renderSettingsApiAppsSection(document.getElementById('setApiAppsHost')); }
     if (name === 'emergency') { renderSettingsBreakGlassSection(document.getElementById('setBreakGlassHost')); renderSettingsEmergencySection(document.getElementById('setEmergencyHost')); }
     if (name === 'mailtemplates') renderMailTemplatesSection(document.getElementById('setMailTemplatesHost'));
     if (name === 'policytemplates') renderPolicyTemplatesPage();   // REQ-L
@@ -13884,6 +13891,95 @@
     };
   }
 
+  // ----- Manager access: API APPLICATIONS (PIM 93.4, script / service sign-in) ---------------------------------------------
+  // SuperAdmin only. Empty = no application can use the API. A change is a REQUEST a second SuperAdmin approves (the same
+  // two-person rule as the break-glass list); the server decides every step and its words are shown verbatim.
+  async function renderSettingsApiAppsSection(host) {
+    if (!host) return;
+    if (PIM_ROLE !== 'SuperAdmin') { host.innerHTML = ''; return; }
+    const esc = escapeHtml;
+    host.innerHTML = '<div class="set-card"><div style="color:#57606a;font-size:12px;">Loading API applications&hellip;</div></div>';
+    let d = null, loadErr = '';
+    try { d = await api('GET', '/api/settings/api-applications'); } catch (e) { loadErr = String((e && e.body && e.body.error) || (e && e.message) || e); }
+    const cur = (d && Array.isArray(d.apps)) ? d.apps.map(a => ({ appId: String(a.appId || ''), role: String(a.role || 'Reader'), name: String(a.name || '') })) : [];
+    const rq = (d && d.request) ? d.request : null;
+    const pending = !!(rq && rq.open);
+    const canEdit = !loadErr && !pending;
+    const draft = cur.map(a => Object.assign({}, a));
+    const h = [];
+    h.push('<div class="set-card" id="setApiAppsCard"><h3 style="margin:0 0 4px;font-size:14px;">API applications' + settingInfoBtn('ManagerApiApps') + '</h3>');
+    h.push('<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Scripts and services that may use the PIM Manager API with their own application identity, each with the role it gets here (Reader or Admin). ' +
+      '<b>Empty = no application can use the API.</b> A change is a request that a different SuperAdmin approves; every step and every call is in the audit trail.</div>');
+    if (loadErr) h.push('<div style="color:#cf222e;font-size:12px;margin-bottom:6px;">Could not read the list: ' + esc(loadErr) + '</div>');
+    if (d && d.ready === false) h.push('<div style="color:#9a6700;font-size:11.5px;margin-bottom:6px;">This Manager is not prepared for application sign-in yet &mdash; your administrator does that once with <code>Set-PimManagerApiAuth.ps1</code> from the release package.</div>');
+    if (pending) {
+      h.push('<div id="aaPending" style="margin:6px 0 10px;padding:8px 10px;border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;font-size:12px;">');
+      h.push('<div style="font-weight:700;color:#9a6700;">Change requested by ' + (rq.isMaker ? 'you' : esc(String(rq.maker || ''))) + ' &mdash; awaiting approval</div>');
+      h.push('<div style="margin-top:4px;">Expires ' + esc(homeFmtWhen(rq.expiresUtc)) + ' &middot; Justification: <i>' + esc(String(rq.justification || '')) + '</i></div>');
+      const lines = [].concat((rq.added || []).map(x => '+ ' + x), (rq.removed || []).map(x => '− ' + x), (rq.changed || []).map(x => '~ ' + x));
+      h.push('<ul style="margin:4px 0 6px 0;padding-left:18px;">' + (lines.map(x => '<li><code>' + esc(x) + '</code></li>').join('') || '<li>(no change)</li>') + '</ul>');
+      const btns = [];
+      if (rq.canApprove) btns.push('<button class="btn" id="aaApprove">Approve and apply</button>');
+      if (rq.canReject) btns.push('<button class="btn-sec" id="aaReject">Reject</button>');
+      if (rq.canCancel) btns.push('<button class="btn-sec" id="aaCancel">Cancel my request</button>');
+      h.push('<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">' + (btns.join(' ') || '<span style="color:#57606a;">A SuperAdmin other than the requester approves or rejects this change.</span>') + ' <span class="setMsg" id="aaDecMsg"></span></div>');
+      h.push('</div>');
+    }
+    h.push('<table class="set-table" id="aaTbl"></table>');
+    if (canEdit) {
+      h.push('<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">' +
+        '<input id="aaId" type="text" placeholder="Application (client) id" style="min-width:280px;"> ' +
+        '<input id="aaName" type="text" placeholder="Name (optional)" style="min-width:160px;"> ' +
+        '<select id="aaRole"><option>Reader</option><option>Admin</option></select> <button class="btn-sec" id="aaAddBtn">+ Add</button></div>');
+      h.push('<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">' +
+        '<input id="aaJust" type="text" placeholder="Justification (required, audited)" style="min-width:320px;"> ' +
+        '<button class="btn" id="aaSave">Request change</button> <span class="setMsg" id="aaMsg"></span></div>');
+    }
+    h.push('</div>');
+    host.innerHTML = h.join('');
+    const tbl = host.querySelector('#aaTbl');
+    const paint = () => {
+      tbl.innerHTML = '<tr><th>Application (client) id</th><th>Name</th><th>Role</th>' + (canEdit ? '<th></th>' : '') + '</tr>' +
+        (draft.length ? draft.map((a, i) => '<tr><td><code>' + esc(a.appId) + '</code></td><td>' + esc(a.name) + '</td><td>' + esc(a.role) + '</td>' +
+          (canEdit ? '<td><button class="btn-sec aaDel" data-i="' + i + '" title="remove">&#x2715;</button></td>' : '') + '</tr>').join('')
+          : '<tr><td colspan="4" style="color:#57606a;">No application is allowed to use the API.</td></tr>');
+      tbl.querySelectorAll('.aaDel').forEach(b => { b.onclick = () => { draft.splice(parseInt(b.dataset.i, 10), 1); paint(); }; });
+    };
+    paint();
+    const decide = async (action) => {
+      const m = host.querySelector('#aaDecMsg');
+      if (m) { m.textContent = 'Working…'; m.style.color = '#57606a'; }
+      try {
+        const r = await api('POST', '/api/settings/api-applications/request/' + action, { requestId: rq.id });
+        if (m) { m.textContent = (r && r.reason) ? String(r.reason) : 'Done.'; m.style.color = '#1a7f37'; }
+        setTimeout(() => renderSettingsApiAppsSection(host), 1200);
+      } catch (e) { if (m) { m.textContent = (e && e.body && e.body.error) ? String(e.body.error) : String((e && e.message) || e); m.style.color = '#cf222e'; } }
+    };
+    const ab = host.querySelector('#aaApprove'); if (ab) ab.onclick = () => { if (confirm('Approve this change to the API applications? It applies immediately.')) decide('approve'); };
+    const rb = host.querySelector('#aaReject'); if (rb) rb.onclick = () => decide('reject');
+    const cb = host.querySelector('#aaCancel'); if (cb) cb.onclick = () => decide('cancel');
+    if (!canEdit) return;
+    const msg = host.querySelector('#aaMsg');
+    const say = (t, bad) => { msg.textContent = t; msg.style.color = bad ? '#cf222e' : '#1a7f37'; };
+    host.querySelector('#aaAddBtn').onclick = () => {
+      const id = String(host.querySelector('#aaId').value || '').trim().toLowerCase();
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) { say('That is not an application (client) id.', true); return; }
+      if (draft.some(a => a.appId === id)) { say('That application is already on the list.', true); return; }
+      draft.push({ appId: id, name: String(host.querySelector('#aaName').value || '').trim(), role: host.querySelector('#aaRole').value === 'Admin' ? 'Admin' : 'Reader' });
+      host.querySelector('#aaId').value = ''; host.querySelector('#aaName').value = ''; say('', false); paint();
+    };
+    host.querySelector('#aaSave').onclick = async () => {
+      const just = String(host.querySelector('#aaJust').value || '').trim();
+      if (!just) { say('A justification is required.', true); return; }
+      say('Raising the request…', false); msg.style.color = '#57606a';
+      try {
+        const r = await api('PUT', '/api/settings/api-applications', { apps: draft, justification: just, baseHash: (d && d.listHash) ? String(d.listHash) : '' });
+        say((r && r.note) ? String(r.note) : 'Request raised. Nothing has changed yet.', false);
+        setTimeout(() => renderSettingsApiAppsSection(host), 1500);
+      } catch (e) { say((e && e.body && e.body.error) ? String(e.body.error) : String((e && e.message) || e), true); }
+    };
+  }
+
   // ----- Settings: Break-glass ACCOUNTS (the protected list) -------------------------------------------------------------
   // 🔴 IMP-39 -- BREAK-GLASS ACCOUNTS, defined HERE (SQL, pim.Settings) instead of an environment
   // variable that had to be set by hand on two containers and was never audited. GET is any role
@@ -22601,6 +22697,89 @@
         else if (/^https?:/i.test(h)) { a.target = '_blank'; a.rel = 'noopener'; }
       });
     } catch (e) { art.innerHTML = '<div style="color:#cf222e;font-size:12px;">This page could not be read: ' + esc((e && e.message) || e) + '</div>'; }
+  }
+  // APIDOC-1 (owner 2026-10-31: "all apis and mcp must be fully documented in gui and on invardia.com"; 2026-11-01: "dont expose
+  // ways a hacker can gain access to customer"): Settings > API and MCP reference -- the COMPLETE reference of the version that
+  // runs here (GET /api/api-reference: the Manager reads its own code, once per start, in the background -- "preparing" until
+  // then), FILTERED BY THE SERVER to the signed-in person's role: they see what they may call. invardia.com carries only the
+  // routine public profile. Every text below is escaped.
+  var PIM_APIREF_PUBLISHED = 'https://invardia.com/docs/pim-manager/api/';
+  var PIM_APIREF = null, PIM_APIREF_TRIES = 0;
+  function pimApiRefRoleText(role, basis) {
+    if (basis === 'unresolved') return 'checked by the route';
+    if (basis === 'none' || basis === 'conditional') return 'any signed-in role';
+    return (role || 'Reader') + ' or higher';
+  }
+  function pimApiRefView(d, q, showInternal) {
+    const esc = escapeHtml;
+    const needle = String(q || '').trim().toLowerCase();
+    const hit = (s) => !needle || String(s || '').toLowerCase().indexOf(needle) >= 0;
+    const routes = ((d && d.routes) || []).filter(r => (showInternal || !r.internal) && (hit(r.method + ' ' + r.path) || hit(r.summary)));
+    const tools = ((d && d.tools) || []).filter(t => hit(t.name) || hit(t.description) || hit(t.route));
+    const rRows = routes.map(r => '<tr data-route="' + esc(r.method + ' ' + r.path) + '">' +
+      '<td style="white-space:nowrap;"><code>' + esc(r.method) + '</code></td><td><code>' + esc(r.path) + '</code></td>' +
+      '<td>' + esc(r.summary && r.summary !== (r.method + ' ' + r.path) ? r.summary : '') + (r.internal ? ' <span style="color:#9a6700;font-size:11px;">page mechanics</span>' : '') +
+      (r.roleBasis === 'conditional' ? ' <span style="color:#57606a;font-size:11px;">(checks more for some requests)</span>' : '') + '</td>' +
+      '<td style="white-space:nowrap;">' + esc(pimApiRefRoleText(r.role, r.roleBasis)) + '</td>' +
+      '<td>' + esc(r.pro || '') + '</td></tr>').join('');
+    const tRows = tools.map(t => '<tr data-tool="' + esc(t.name) + '">' +
+      '<td><code>' + esc(t.name) + '</code></td><td>' + esc(t.kind) + '</td><td style="white-space:nowrap;">' + esc((t.requires || 'Reader') + ' or higher') + '</td>' +
+      '<td>' + (t.route ? '<code>' + esc(t.route) + '</code>' : '') + '</td>' +
+      '<td>' + esc(t.description) + '<details style="margin-top:4px;"><summary style="font-size:11.5px;color:#0969da;cursor:pointer;">Input</summary>' +
+      '<pre style="font-size:11px;white-space:pre-wrap;margin:4px 0 0;">' + esc(JSON.stringify(t.inputSchema || {}, null, 2)) + '</pre></details></td></tr>').join('');
+    const th = (s) => '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #d0d7de;font-size:12px;">' + s + '</th>';
+    return '<h3 style="font-size:15px;margin:14px 0 6px;">API routes (' + routes.length + ')</h3>' +
+      (routes.length ? '<table class="pim-apiref-routes" style="border-collapse:collapse;width:100%;font-size:12.5px;"><thead><tr>' + th('Method') + th('Path') + th('What it does') + th('Role') + th('Pro') + '</tr></thead><tbody>' + rRows + '</tbody></table>'
+                     : stateEmpty('No route matches', needle ? 'Clear the filter to see every route.' : '')) +
+      '<h3 style="font-size:15px;margin:18px 0 6px;">MCP tools (' + tools.length + ')</h3>' +
+      '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">Endpoint: <code>' + esc((d && d.endpoint) || '') + '</code>. A person signs in to call them; your role decides which tools you see.</div>' +
+      (tools.length ? '<table class="pim-apiref-tools" style="border-collapse:collapse;width:100%;font-size:12.5px;"><thead><tr>' + th('Tool') + th('Kind') + th('Role') + th('Runs') + th('What it does') + '</tr></thead><tbody>' + tRows + '</tbody></table>'
+                    : stateEmpty('No MCP tool matches', needle ? 'Clear the filter to see every tool.' : 'This edition has no MCP server.'));
+  }
+  async function renderApiRefPage() {
+    const body = document.getElementById('apirefBody');
+    if (!body) return;
+    const esc = escapeHtml;
+    const head = '<div style="display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px;">' +
+      '<div><h2 style="margin:0;font-size:18px;">API and MCP reference</h2><div style="color:#57606a;font-size:12px;margin-top:2px;">Every API route and MCP tool of this version that your role may call.</div></div>' +
+      '<a href="' + PIM_APIREF_PUBLISHED + '" target="_blank" rel="noopener" style="font-size:12px;">Routine reference on invardia.com &#8599;</a></div>';
+    if (!isServer) { body.innerHTML = head + '<div style="color:#57606a;font-size:13px;">Static (read-only) mode &mdash; the reference needs the live Manager server. The routine reference is published on invardia.com.</div>'; return; }
+    let d;
+    try { d = await api('GET', '/api/api-reference'); }
+    catch (e) { body.innerHTML = head + stateError('The API and MCP reference could not be read', (e && e.message) || String(e)); return; }
+    if (d && d.preparing) {
+      body.innerHTML = head + stateLoading('Preparing the reference for this version…', 'PIM Manager reads it from its own code once after a start. This takes a few seconds.');
+      if (PIM_APIREF_TRIES++ < 20) setTimeout(() => { const p = document.getElementById('apirefTab'); if (p && p.classList.contains('active')) renderApiRefPage(); }, 2000);
+      return;
+    }
+    PIM_APIREF_TRIES = 0;
+    if (!d || !d.ok) { body.innerHTML = head + stateError('The API and MCP reference could not be read', String((d && d.error) || '')); return; }
+    PIM_APIREF = d;
+    const more = (Number(d.hiddenRoutes) || 0) + (Number(d.hiddenTools) || 0);
+    body.innerHTML = head +
+      '<div style="color:#57606a;font-size:12.5px;margin-bottom:8px;">Version ' + esc(d.version || '') + ' &middot; signed in as <b>' + esc(d.role || '') + '</b>: ' +
+      esc(String((d.routes || []).length)) + ' routes and ' + esc(String((d.tools || []).length)) + ' MCP tools' +
+      (more ? ' (' + esc(String(more)) + ' more need a higher role)' : '') + '.</div>' +
+      '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">' +
+      '<input id="apirefFilter" type="search" placeholder="Filter routes and tools" style="font-size:12.5px;padding:4px 8px;min-width:260px;">' +
+      '<label style="font-size:12px;"><input id="apirefInternal" type="checkbox"> show page mechanics</label>' +
+      '<button id="apirefDownload" style="font-size:12px;">Download (JSON)</button></div>' +
+      '<div id="apirefList"></div>';
+    const list = document.getElementById('apirefList');
+    const box = document.getElementById('apirefFilter');
+    const intl = document.getElementById('apirefInternal');
+    const paint = () => { list.innerHTML = pimApiRefView(PIM_APIREF, box ? box.value : '', !!(intl && intl.checked)); };
+    if (box) box.oninput = paint;
+    if (intl) intl.onchange = paint;
+    const dl = document.getElementById('apirefDownload');
+    if (dl) dl.onclick = () => {
+      try {
+        const blob = new Blob([JSON.stringify({ version: d.version, role: d.role, endpoint: d.endpoint, routes: d.routes, tools: d.tools }, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'pim-manager-api-reference-' + String(d.version || 'version').replace(/[^\w.-]/g, '') + '.json';
+        document.body.appendChild(a); a.click(); setTimeout(() => { try { URL.revokeObjectURL(a.href); a.remove(); } catch (_) { } }, 0);
+      } catch (e) { alert('The download could not be made: ' + ((e && e.message) || e)); }
+    };
+    paint();
   }
   // The Counters overview page (Overview > Counters overview): every counter with how it is counted, the names toggle.
   async function renderImpactPage() {
