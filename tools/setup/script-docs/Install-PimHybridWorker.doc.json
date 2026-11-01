@@ -25,6 +25,7 @@
     { "name": "SqlDatabase", "required": false, "default": "PimPlatform", "help": "The PIM database." },
     { "name": "TenantId", "required": false, "default": null, "help": "-Phase Configure (required): the tenant." },
     { "name": "SourceContainerUrl", "required": false, "default": null, "help": "-Phase Configure (required): https://<store>.blob.core.windows.net/<container> with the PIM code and channel.json." },
+    { "name": "UpdateSource", "required": false, "default": "Invardia", "help": "-Phase Configure: where the worker's daily update comes from. Invardia (the default): the Invardia update service, for the worker's own release ring. Blob: the source container above, for an installation that does not use Invardia." },
     { "name": "Ring", "required": false, "default": null, "help": "The update ring the worker follows (the environment's)." },
     { "name": "Version", "required": false, "default": null, "help": "Pin a version instead of a ring." },
     { "name": "AdServer", "required": false, "default": null, "help": "A specific domain controller for the worker's AD calls." },

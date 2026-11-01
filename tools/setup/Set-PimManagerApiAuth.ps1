@@ -19,6 +19,9 @@
     (Settings > API applications) with the role it gets there -- Reader or Admin -- and a second SuperAdmin approves that
     change. Until then every call from it is refused.
 
+    API applications are a PIM Manager Pro feature: without a Pro licence the Manager refuses every application call and
+    the API applications list. This script still plans (and applies) the preparation either way, and its plan says so.
+
     How a script signs in (REST only -- no PowerShell module, no Azure CLI): the script's own application requests a
     token from Microsoft Entra ID with the client-credentials grant and a certificate, for the scope
     api://<app id>/.default, and sends it as 'Authorization: Bearer <token>' to https://<manager>/api/app/<route>
@@ -39,6 +42,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $script:PimApiRoleValue = 'PimManager.Api'
+# EDITION-API (owner 2026-11-01): the plan always says the feature needs Pro (it still plans without one)
+$script:PimApiProNote = 'API applications need a PIM Manager Pro licence -- without one, PIM Manager refuses every application call and the API applications list. Contact info@invardia.com for a licence.'
 
 function Get-PimManagerApiAuthPlan {
     <#
@@ -86,6 +91,7 @@ function Get-PimManagerApiAuthPlan {
     elseif ($frontId -and $frontId -ne $appId) { $ok = $false; $why = "the sign-in front is bound to $frontId, not $appId -- refusing" }
     elseif ($steps.Count) { $why = "to do: $($steps -join ', ')" } else { $why = 'nothing to do -- the Manager is ready for application sign-in' }
     return [pscustomobject]@{ steps = @($steps); ok = $ok; reason = $why; roleId = $roleId; audiences = $aud; envValue = $envValue; frontBearerPaths = $bp
+        licence = $script:PimApiProNote
         patch = [ordered]@{ identifierUris = @($uris); appRoles = @($roles) } }
 }
 
@@ -150,6 +156,7 @@ if (-not $app) { throw "the Manager's application $appId was not found in tenant
 $mc = Get-PimManagerApiManagerContainer $ca
 $plan = Get-PimManagerApiAuthPlan -App $app -Auth $auth -NewRoleId ([guid]::NewGuid().ToString()) -EnvVars @($mc.env) -FrontEnv $front
 Write-Host "==> $ManagerApp / application $appId : $($plan.reason)" -ForegroundColor Cyan
+Write-Host "    PRO: $($plan.licence)" -ForegroundColor Yellow
 if (-not $plan.ok) { throw $plan.reason }
 $needGrant = [bool]"$ClientAppId".Trim()
 if (-not $Apply) {

@@ -7653,6 +7653,16 @@
       '&#x1F512; <b>Pro -- ' + escapeHtml(s.label || key) + ' requires a PIM Manager Pro licence</b> -- ' + escapeHtml(s.reason || 'no Pro licence is installed') +
       '. Everything free keeps working. Contact ' + licenceMailtoHtml(d) + ' for a licence.' + go + '</div>';
   }
+  // PURE (exported for the harness). EDITION-API: the LOCKED notice for a Pro-only card or page -- the licence's own notice
+  // when /api/license names the feature, else the server's refusal line (msg), else the plain "requires Pro" line. Never ''.
+  function proFeatureLockedNoticeHtml(d, key, label, msg) {
+    const own = proFeatureNoticeHtml(d, key);
+    if (own && own.indexOf('data-state="locked"') >= 0) return own;
+    const go = ' <a href="#" class="lic-go-settings" style="color:inherit;font-weight:600;">Settings &rsaquo; Licence</a>';
+    return '<div class="pro-lic-note" data-state="locked" data-feature="' + escapeHtml(key) + '" style="border-radius:8px;padding:8px 12px;font-size:12.5px;background:#fff1e5;border:1px solid #bc4c00;color:#762c00;">' +
+      (msg ? '&#x1F512; <b>Pro -- ' + escapeHtml(label || key) + '</b> -- ' + escapeHtml(msg) + go + '</div>'
+           : '&#x1F512; <b>Pro -- ' + escapeHtml(label || key) + ' requires a PIM Manager Pro licence</b>. Everything free keeps working. Contact ' + licenceMailtoHtml(d) + ' for a licence.' + go + '</div>');
+  }
   // ===================================================================
   // FREE EDITION: PRO IN THE MENU (operator 2026-09-26: "Free edition must show all the features, that require a
   // pro-license with the word PRO dimmed on the menu item. if a user clicks a PRO item and they only have a free
@@ -7666,7 +7676,8 @@
   // ===================================================================
   // Operator 2026-09-26 (wizard): Access reviews = the WHOLE page is Pro; Delegation overview (All privileged permissions) = a free page whose
   // Revoke action is Pro (its in-page notice), so it is NOT listed here.
-  var PIM_PRO_PAGES = { coverage: 'coverage.gaps', accessreview: 'reviews.campaigns',
+  // EDITION-API (owner 2026-11-01): Settings > API and MCP reference is a whole-page Pro feature.
+  var PIM_PRO_PAGES = { coverage: 'coverage.gaps', accessreview: 'reviews.campaigns', apiref: 'api.reference',
                         downlink: 'msp', msptenants: 'msp', replication: 'msp' };
   // The Free vs Pro page MIRRORS README.md 'Editions -- what is free and what is paid' word for word (operator 2026-09-26:
   // "free vs pro is already documented ... what goes where"). tests/Test-PimEditionPage.ps1 fails when they drift apart.
@@ -7691,6 +7702,9 @@
     "the tier-impact report — everyone who can reach tier 0, including through nested groups",
     "the evidence export — who may hold what, who held it, and who approved",
     "the access request API — a ticketing system such as ServiceNow switches a disabled admin account on for a set time, reads the request's status or cancels it, and PIM switches the account off again when the time is up",
+    "the AI assistant (MCP) — an assistant reads every view of the portal and does routine work under the person's own role",
+    "API applications — scripts and services use the PIM Manager API with their own application, as Reader or Admin, and a person saves every change they prepare",
+    "the API and MCP reference in the portal — every route and assistant tool of the version you run, for your role",
     "PIM for on-premises Active Directory — admin accounts in on-premises AD, PIM groups mirrored to AD groups and just-in-time AD membership for activated PIM groups, applied by a small hybrid worker"];
   var PIM_EDITION_PRO_MULTI = ["define once, target many — target tenants by tag and by rollout wave rather than editing each tenant",
     "signed definition sets, verified on arrival — a tenant applies a definition set only if it verifies against a key that tenant trusts",
@@ -13899,8 +13913,20 @@
     if (PIM_ROLE !== 'SuperAdmin') { host.innerHTML = ''; return; }
     const esc = escapeHtml;
     host.innerHTML = '<div class="set-card"><div style="color:#57606a;font-size:12px;">Loading API applications&hellip;</div></div>';
+    // EDITION-API (owner 2026-11-01): API applications are Pro. Without the licence the card shows the Pro notice, not the list
+    // (the server refuses the list and every application call too).
+    let aaLic = null; try { aaLic = await fetchLicence(); } catch (_) { aaLic = null; }
+    const aaProCard = (msg) => {
+      host.innerHTML = '<div class="set-card" id="setApiAppsCard"><h3 style="margin:0 0 4px;font-size:14px;">API applications <span class="pro-tag">PRO</span>' + settingInfoBtn('ManagerApiApps') + '</h3>' +
+        '<div id="aaProNote">' + proFeatureLockedNoticeHtml(aaLic, 'api.applications', 'API applications', msg) + '</div></div>';
+      wireLicenceLinks(host);
+    };
+    if (!pimProFeatureOk('api.applications')) { aaProCard(''); return; }
     let d = null, loadErr = '';
-    try { d = await api('GET', '/api/settings/api-applications'); } catch (e) { loadErr = String((e && e.body && e.body.error) || (e && e.message) || e); }
+    try { d = await api('GET', '/api/settings/api-applications'); } catch (e) {
+      if (e && e.status === 403 && e.body && e.body.pro === true) { aaProCard(String(e.body.error || '')); return; }
+      loadErr = String((e && e.body && e.body.error) || (e && e.message) || e);
+    }
     const cur = (d && Array.isArray(d.apps)) ? d.apps.map(a => ({ appId: String(a.appId || ''), role: String(a.role || 'Reader'), name: String(a.name || '') })) : [];
     const rq = (d && d.request) ? d.request : null;
     const pending = !!(rq && rq.open);
@@ -22744,9 +22770,16 @@
       '<div><h2 style="margin:0;font-size:18px;">API and MCP reference</h2><div style="color:#57606a;font-size:12px;margin-top:2px;">Every API route and MCP tool of this version that your role may call.</div></div>' +
       '<a href="' + PIM_APIREF_PUBLISHED + '" target="_blank" rel="noopener" style="font-size:12px;">Routine reference on invardia.com &#8599;</a></div>';
     if (!isServer) { body.innerHTML = head + '<div style="color:#57606a;font-size:13px;">Static (read-only) mode &mdash; the reference needs the live Manager server. The routine reference is published on invardia.com.</div>'; return; }
+    // EDITION-API (owner 2026-11-01): the reference is Pro -- without the licence the page shows the Pro notice and asks nothing
+    let arLic = null; try { arLic = await fetchLicence(); } catch (_) { arLic = null; }
+    const arPro = (msg) => { body.innerHTML = head + '<div id="apirefProNote">' + proFeatureLockedNoticeHtml(arLic, 'api.reference', 'API and MCP reference', msg) + '</div>'; wireLicenceLinks(body); };
+    if (!pimProFeatureOk('api.reference')) { arPro(''); return; }
     let d;
     try { d = await api('GET', '/api/api-reference'); }
-    catch (e) { body.innerHTML = head + stateError('The API and MCP reference could not be read', (e && e.message) || String(e)); return; }
+    catch (e) {
+      if (e && e.status === 403 && e.body && e.body.pro === true) { arPro(String(e.body.error || '')); return; }
+      body.innerHTML = head + stateError('The API and MCP reference could not be read', (e && e.message) || String(e)); return;
+    }
     if (d && d.preparing) {
       body.innerHTML = head + stateLoading('Preparing the reference for this version…', 'PIM Manager reads it from its own code once after a start. This takes a few seconds.');
       if (PIM_APIREF_TRIES++ < 20) setTimeout(() => { const p = document.getElementById('apirefTab'); if (p && p.classList.contains('active')) renderApiRefPage(); }, 2000);

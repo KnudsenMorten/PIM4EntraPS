@@ -9823,6 +9823,32 @@ Both are shaped from the same answers as the Managed tenants and Replication ove
 reach into a managed tenant. A managed tenant's own drift and conformance are not reported back to the managing tenant,
 and both tools say so rather than leave it unsaid.
 
+**One code path for the page and the assistant (2026-11-01, 3.0.12).** The read views and routine actions the MCP
+offers do not have a second implementation. Each page route's body lives in one function
+(`Invoke-PimManagerGetRoute<View>` for a read, `Invoke-PimManagerPostRoute<Name>` for an action); the page's route and
+the MCP tool of the same name both call it, with the route's own role check, Pro check, second approver, validation
+and audit. A tool's arguments become the request body through the same JSON reader the page uses. What the MCP covers:
+every read view of the page, plus routine work (staged changes and their status, approvals, access reviews and
+campaigns, owner reviews, auto-extend, access-request decide / end, jobs, reconcile pause / resume). Emergency access,
+break-glass, restore, revocation, deletions, guard release, and settings / licence / tenant changes are read-only or
+absent in the MCP and stay in the page.
+
+**The API and MCP reference (Pro; 2026-11-01, 3.0.12, Pro only from 3.0.13).** The reference is generated from the code of the running version,
+never kept by hand: every route with its method, path, the role its body checks first and its Pro feature, and every
+MCP tool with its kind, role and input schema. The one-line descriptions come only from a curated file, never from code
+comments. The Manager builds it once per process in the background and shows it on **Settings › API and MCP
+reference**, filtered to the signed-in person's role. A separate PUBLIC profile — the everyday routes and tools, on an
+explicit list, with nothing about security settings, emergency or recovery, credentials, support or destructive actions
+— is handed to Invardia with each release for invardia.com/docs/pim-manager/api/ and /mcp/. A route or tool added to the
+product stays out of the public profile until it is put on that list.
+
+**Applications on the Manager API (Pro; 2026-11-01, 3.0.12, Pro only from 3.0.13).** A script or service calls the page's own routes under
+`/api/app/` with a token for its own Entra application. The Manager accepts only applications a SuperAdmin has listed
+(with a second SuperAdmin's approval), each with the Reader or Admin role, and only on the routes and lists opened to
+applications; everything else is refused. An application reads, stages changes and runs jobs; committing a change is a
+person's step, so the commit audit names the application that staged it and the person who committed it. Every
+application call is audited. The page's own sign-in for people, and the MCP (people only), are unchanged.
+
 ### 18.12 Export every view, hidden names on the Dashboard, impact counters, demo dataset
 
 **Export (PDF / Excel).** The header carries one Export menu (PDF, Excel (.xlsx)) that acts on the page in view. Each page

@@ -751,6 +751,12 @@ deployment is a supported choice) and no credentials lying around.
   multi-factor sign-in before it opens, so a copied script can't be replayed without you
   passing MFA. When the console runs centrally behind Entra sign-in, that gateway already
   enforces MFA, so the local gate stays out of the way. *(✅ 2026-06-14)*
+- **Scripts and services use the Manager API — only the applications you list (Pro).** ✅ 2026-11-01 — A script or a
+  service works with the PIM Manager through its own Entra application. No application is accepted until a SuperAdmin
+  adds it on **Manager access & roles › API applications** and a second SuperAdmin approves. Each application gets the
+  Reader or Admin role. An application reads, prepares changes and runs jobs; a person always saves the change, and
+  the audit trail shows the application that prepared it and the person who saved it. Changes that create accounts or
+  grant access are never open to an application. Setup: `Set-PimManagerApiAuth.ps1` (it shows its plan first).
 
 ## 10. Delegation model
 - **Two-tier group nesting at the core.** Admins are added to direct groups (by role, task,
@@ -1680,6 +1686,17 @@ deployment is a supported choice) and no credentials lying around.
   email and the Entra portal. (Recording decisions and assigning reviewers require the Access Review read-write
   permission on the Manager identity; until it is granted the tool shows an honest "permission not granted yet"
   message rather than failing, and renders sample data so the surface is never blank.)
+- **The API and MCP reference, inside the Manager (Pro).** ✅ 2026-11-01 — **Settings › API and MCP reference** lists the
+  API routes and the AI-assistant (MCP) tools of the version you run, filtered to what your own role may call, with a
+  plain description of each route. Search it, show or hide the page's own helper routes, or download it as JSON. The
+  public reference for the everyday routes is at invardia.com/docs/pim-manager/api/ and /mcp/.
+- **More of the Manager through your AI assistant (Pro).** ✅ 2026-11-01 — An assistant connected to the Manager's MCP
+  server reads the same views as the page: conformance (templates, exemptions, ring plan, fleet), role permissions and
+  role compare, commit history, permissions health, the config backup list, drift, coverage, approvals, access reviews,
+  guards, job history and more. It also does routine work: deciding and ending access requests, approvals,
+  access-review decisions, owner reviews, auto-extend, running and cancelling jobs, and staging and committing your own
+  changes. Every tool runs the page's own code under the signed-in person's own role. Emergency access, break-glass,
+  revocations, deletions and settings changes stay in the Manager.
 
 ## 12. Notifications / Email
 - **One reminder when something waits on you.** ✅ 2026-10-10 — PIM Manager mails your SuperAdmins a single reminder
@@ -1745,6 +1762,8 @@ deployment is a supported choice) and no credentials lying around.
     server's own administrator group is added to that server's local Administrators (added only,
     never removed). The worker uses one managed service account per privilege tier, with every right
     granted to that account's permission group, and no password or secret is stored on the server.
+    *(Changed 2026-11-01, 3.0.11: the worker's daily update installs only a version the Invardia update service has
+    signed and the worker has verified, on the worker's own release ring.)*
     ![Settings — Hybrid Active Directory: your own naming for PIM for AD](img/manager-settings-hybrid-ad.png)
   - **Workload roles** listed in your data (Defender, Intune, enterprise applications, Power BI, Power
     Platform, Dataverse, Business Central, Azure DevOps, Azure RBAC) are applied, with exemptions, and
@@ -1819,6 +1838,9 @@ deployment is a supported choice) and no credentials lying around.
   period ends or the request is cancelled, and sending the same ticket twice never opens a second window. The caller
   signs in with its own Entra application, and only the applications you list are accepted. A system can also
   *propose* a change, which waits for an administrator instead of being applied.
+  *(Changed 2026-11-01, 3.0.11: a ticketing system can ask only for groups on the list of groups you offer. A request
+  for a Tier 0 or Tier 1 group, or for a group with no tier set, waits for a person to approve it; requests for lower
+  tiers are approved at once as before.)*
 
 - **An admin requests their own account back, for a set time (Pro).** ✅ 2026-10-03 — A disabled admin, typically a
   consultant who is only switched on when needed, opens the access request portal, signs in with a one-time PIN sent to
@@ -2193,6 +2215,10 @@ On top of the free edition, a Pro licence adds:
 - the **evidence export** — who may hold what, who held it, and who approved;
 - the **access request API** — a ticketing system such as ServiceNow switches a disabled admin account on for a set
   time, reads the request's status or cancels it, and PIM switches the account off again when the time is up;
+- the **AI assistant (MCP)** — an assistant reads every view of the portal and does routine work under the person's own role;
+- **API applications** — scripts and services use the PIM Manager API with their own application, as Reader or Admin, and a
+  person saves every change they prepare;
+- the **API and MCP reference** in the portal — every route and assistant tool of the version you run, for your role;
 - **PIM for on-premises Active Directory** — admin accounts in on-premises AD, PIM groups mirrored to AD groups and
   just-in-time AD membership for activated PIM groups, applied by a small hybrid worker.
 

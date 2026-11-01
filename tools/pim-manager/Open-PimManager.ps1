@@ -830,6 +830,9 @@ function Invoke-PimManagerAppSignIn {
     $script:CurrentRequestPrincipal = $null; $script:CurrentRequestApp = $null
     $script:CurrentRequestNames = @(); $script:CurrentRequestGroupIds = @()
     $global:PIM_SignedRequestCapture = $null
+    # EDITION-API (owner 2026-11-01): script / service access is Pro ('api.applications'). Without the licence EVERY call
+    # here is refused (403, the Pro answer, audited license.refused) before the list, the signing keys or any token is read.
+    if (-not (Test-PimManagerProFeature -Key 'api.applications' -Response $Response)) { return [pscustomobject]@{ handled = $true; ok = $false; status = 403; path = $Path } }
     $refuse = {
         param([int]$st, [string]$why)
         $b = switch ($st) { 401 { @{ error = 'unauthorized' } } 403 { @{ error = 'forbidden'; detail = 'this request is not open to this application' } } 404 { @{ error = 'not found' } } default { @{ error = 'unavailable' } } }
@@ -18396,6 +18399,9 @@ function Handle-Request {
         if ($path -eq '/api/api-reference' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             if (-not (Get-Command Get-PimApiReferenceAnswer -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 404 -Body @{ ok = $false; error = 'the API and MCP reference is not part of this edition' }; return 404 }
+            # EDITION-API (owner 2026-11-01): the reference is Pro. Refused BEFORE Get-PimApiReferenceAnswer, so without the
+            # licence the background read of the code never starts.
+            if (-not (Test-PimManagerProFeature -Key 'api.reference' -Response $resp)) { return 403 }
             $arTools = if (Get-Command New-PimMcpTool -ErrorAction SilentlyContinue) { { Get-PimManagerMcpTools } } else { $null }
             $ar = Get-PimApiReferenceAnswer -SolutionRoot $solutionRoot -Version "$(Get-PimSolutionVersion)" -Role "$((Get-PimManagerRole).role)" -Tools $arTools
             Write-JsonResponse -Response $resp -Status ([int]$ar.status) -Body $ar.body
@@ -19154,6 +19160,7 @@ function Handle-Request {
         if ($path -eq '/api/settings/api-applications' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required.' }; return 403 }
+            if (-not (Test-PimManagerProFeature -Key 'api.applications' -Response $resp)) { return 403 }   # EDITION-API: Pro, reads too
             if (-not "$($script:PimSqlCs)".Trim()) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no SQL store is bound' }; return 503 }
             try {
                 $aaSt = Get-PimManagerApiAppState -ConnectionString "$($script:PimSqlCs)"
@@ -19170,6 +19177,7 @@ function Handle-Request {
         if ($path -eq '/api/settings/api-applications' -and $method -eq 'PUT') {
             $script:lastHeartbeat = Get-Date
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to request a change to the API applications.' }; return 403 }
+            if (-not (Test-PimManagerProFeature -Key 'api.applications' -Response $resp)) { return 403 }   # EDITION-API: Pro
             if (-not "$($script:PimSqlCs)".Trim()) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no SQL store is bound -- nothing was requested' }; return 503 }
             $body = Read-RequestJson -Request $req
             $aaNew = @(); if ($body -and $body.PSObject.Properties['apps']) { $aaNew = @(@($body.apps) | Where-Object { $null -ne $_ }) }
@@ -19199,6 +19207,7 @@ function Handle-Request {
             $script:lastHeartbeat = Get-Date
             $aaAct = $Matches[1]
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "SuperAdmin role required to $aaAct a change to the API applications." }; return 403 }
+            if (-not (Test-PimManagerProFeature -Key 'api.applications' -Response $resp)) { return 403 }   # EDITION-API: Pro
             if (-not "$($script:PimSqlCs)".Trim()) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no SQL store is bound -- nothing was decided' }; return 503 }
             $body = Read-RequestJson -Request $req
             $aaId = if ($body -and $body.PSObject.Properties['requestId']) { "$($body.requestId)".Trim() } else { '' }

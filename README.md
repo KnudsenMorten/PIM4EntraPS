@@ -171,6 +171,13 @@ definition set rolled out to many customer tenants in waves, with fleet conforma
 
 ![MSP rollout rings (Pro MSP)](docs/img/features/msp-rollout-rings-1.png)
 
+### API, AI assistant and scripts
+
+Pro adds three ways to work with the PIM Manager from outside the page. An AI assistant reads every view of the page and
+does routine work under your own role; emergency access, revocations and deletions stay in the page. Scripts and services
+use the API only with an application your SuperAdmins list; a person saves every change they prepare. And the Manager
+shows the API and MCP reference for the version you run, filtered to your role.
+
 ### Runs in your own Azure
 
 PIM Manager, the engine and the database run in your subscription on managed identities. You sign in with Entra ID.

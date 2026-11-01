@@ -3163,11 +3163,11 @@
       "confirmOn": false,
       "confirmOff": false,
       "info": {
-        "what": "The scripts and services that may use the PIM Manager API with their own application identity, each with the role it gets: Reader or Admin. A change is not applied directly: it becomes a request that a different SuperAdmin approves within 72 hours, and every step is written to the audit trail.",
+        "what": "The scripts and services that may use the PIM Manager API with their own application identity, each with the role it gets: Reader or Admin. Part of PIM Manager Pro. A change is not applied directly: it becomes a request that a different SuperAdmin approves within 72 hours, and every step is written to the audit trail.",
         "enabled": "When an application is on the list, it can call the parts of the API that are open to applications, with the role it is given here. Every call is written to the audit trail with the application and its role. An application can prepare a change but never save it: a person signed in to PIM Manager reviews and saves it, and the audit trail shows both. Emergency access, settings, approval decisions and other sensitive actions are never open to an application, whatever its role: they stay with people signed in to PIM Manager.",
         "disabled": "When the list is empty (the default), no application can use the API. People signed in to PIM Manager are not affected.",
         "risk": "An application on the list acts without a person. Whoever holds its credential can do what its role allows, so give it the lowest role that does the job, keep its certificate safe, and take it off the list when it is no longer used. Reversible through a new approved request.",
-        "requires": "SuperAdmin to request a change, and a second, different SuperAdmin to approve it (the same SuperAdmin only when self-approval is on). The PIM Manager is prepared once for application sign-in by your administrator. An application can never be SuperAdmin. Free (Community) and Pro.",
+        "requires": "SuperAdmin to request a change, and a second, different SuperAdmin to approve it (the same SuperAdmin only when self-approval is on). The PIM Manager is prepared once for application sign-in by your administrator. An application can never be SuperAdmin. A Pro licence: without one, no application can use the API and this list cannot be read or changed. People signed in to PIM Manager are not affected.",
         "recommended": "Leave the list empty unless a script or a service really needs the API. Prefer Reader; give Admin only to an application that must prepare changes or start a job.",
         "docUrl": "https://invardia.com/docs/pim/settings/ManagerApiApps/"
       }

@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.13 -- 2026-11-01
+
+- Editions. The API and MCP reference page and API applications (scripts and services using the Manager API) are now part of PIM Manager Pro, like the AI assistant. The Free vs Pro page and the licence page list them. The PIM Manager page itself works the same in both editions.
+
 ## 3.0.12 -- 2026-11-01
 
 - API and MCP. The API and MCP reference is now in the PIM Manager (Settings > API and MCP reference), shown for your own role, with a plain description for each route. New MCP tools: deciding and ending access requests, and the remaining read views (conformance, role permissions, commit history, permissions health, the config backup list). Scripts and services can now use the Manager API with an application your SuperAdmins add to a list, off by default: they can read, prepare changes and run jobs, and a person saves every change.
