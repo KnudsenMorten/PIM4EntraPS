@@ -260,7 +260,8 @@ function Invoke-PimRfaSyncJob {
                   New-PimRfaRequest -Admin $admin -Department (& $deptOf $admin) -Hours $hours -Source portal -Kind group -GroupName "$($sr.groupName)" -Reason "$($sr.reason)" -NowUtc $now -IsConsultant:$isC -Id $sid `
                       -RequestableGroups @(Get-PimRfaRequestableGroups -Settings $settings -Admin $admin -Assignments $assign -Definitions $defs) -GroupHours @(Get-PimRfaAdHocHours -Settings $settings -Department (& $deptOf $admin)) }
               elseif ($src -eq 'portal') { New-PimRfaRequest -Admin $admin -Department (& $deptOf $admin) -Hours $hours -Source portal -Reason "$($sr.reason)" -NowUtc $now -IsConsultant:$isC -Id $sid }
-              else { New-PimRfaRequest -Admin $admin -Department (& $deptOf $admin) -Hours $hours -Source api -Kind $kind -GroupName "$($sr.groupName)" -ExternalRef "$($sr.externalRef)" -RequestedBy "api:$($sr.callerAppId)" -Reason "$($sr.reason)" -NowUtc $now -IsConsultant:$isC }
+              else { New-PimRfaRequest -Admin $admin -Department (& $deptOf $admin) -Hours $hours -Source api -Kind $kind -GroupName "$($sr.groupName)" -ExternalRef "$($sr.externalRef)" -RequestedBy "api:$($sr.callerAppId)" -Reason "$($sr.reason)" -NowUtc $now -IsConsultant:$isC `
+                         -RequestableGroups @(if ($kind -eq 'group') { Get-PimRfaRequestableGroups -Settings $settings -Admin $admin -Assignments $assign -Definitions $defs }) }   # SEC-96: the same list as the portal
         if (-not $nr.ok) { $reject[$sid] = $nr.reason; continue }
         $existing = & $find $nr.request.id
         if ($existing) { $existing | Add-Member -NotePropertyName storeIds -NotePropertyValue @(@($existing.storeIds) + $sid | Where-Object { $_ } | Select-Object -Unique) -Force; $log.Add("$sid = $($existing.id) (same ticket, idempotent)"); continue }

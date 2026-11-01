@@ -27,11 +27,13 @@
     GET  /api/v1/requests/{id}   the caller's own request
     POST /api/v1/requests/{id}/cancel
     GET  /api/v1/openapi.json    the API description
-  API auth: an Entra APPLICATION token (Easy Auth validates it; the app id must be allow-listed) or an API key
+  API auth: an Entra APPLICATION token, VERIFIED HERE (SEC-98: signature against the tenant keys, issuer + audience
+  pinned by PIM_RFA_API_TENANT / PIM_RFA_API_AUDIENCES, app-only; the app id must be allow-listed) or an API key
   (X-Api-Key; hash-matched against the keys the engine publishes). Portal POSTs need the header X-Rfa: 1 (CSRF).
 
   Environment: PIM_RFA_STORE (storage account), PIM_RFA_SENDER (the mailbox mail is sent as), PIM_RFA_TENANT_NAME,
-  PORT (default 8080).
+  PIM_RFA_API_TENANT + PIM_RFA_API_AUDIENCES (comma-separated; written by Set-PimRfaBrokerApiAuth.ps1 -- without them
+  application tokens are refused, API keys still work), PORT (default 8080).
 #>
 [CmdletBinding()]
 param([switch]$NoListen)
@@ -39,6 +41,7 @@ param([switch]$NoListen)
 $ErrorActionPreference = 'Stop'
 $sol = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
+. (Join-Path $sol 'engine\_shared\PIM-HostedAuth.ps1')   # SEC-98: the JWT signature + claims checks (pure)
 . (Join-Path $sol 'engine\rfa\PIM-Rfa.ps1')
 . (Join-Path $sol 'engine\rfa\PIM-RfaStore.ps1')
 . (Join-Path $sol 'engine\rfa\PIM-RfaBroker.ps1')
@@ -47,6 +50,24 @@ $sol = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
 $script:RfaPageFile = Join-Path $PSScriptRoot 'rfa-portal.html'
 $script:RfaMailTemplate = Join-Path $sol 'templates\mail\rfa-notice.mailtemplate.html'
+
+function Get-PimRfaBrokerApiAuth {
+    # SEC-98: the pins for application tokens (environment) + the tenant's signing keys, cached for an hour (a failed fetch
+    # keeps the cached copy; none at all = $null -> every application token is refused, fail closed).
+    $tid = "$env:PIM_RFA_API_TENANT".Trim()
+    $aud = @("$env:PIM_RFA_API_AUDIENCES" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $iss = @(Get-PimHostedDefaultIssuers -TenantId $tid)
+    $jwks = $null
+    if ($iss.Count) {
+        $now = [datetime]::UtcNow
+        if ($script:RfaJwks -and $script:RfaJwksUtc -and $now -lt $script:RfaJwksUtc.AddHours(1)) { $jwks = $script:RfaJwks }
+        else {
+            try { $k = Invoke-RestMethod -Method GET -Uri "https://login.microsoftonline.com/$tid/discovery/v2.0/keys" -TimeoutSec 15; if ($k -and $k.keys) { $script:RfaJwks = $k; $script:RfaJwksUtc = $now } } catch { }
+            $jwks = $script:RfaJwks
+        }
+    }
+    return @{ issuers = $iss; audiences = $aud; jwks = $jwks }
+}
 
 function Read-PimRfaBrokerConfig {
     param([Parameter(Mandatory)][hashtable]$Store)
@@ -111,7 +132,9 @@ function Invoke-PimRfaBrokerRequest {
       (tests inject one; the listener passes Send-PimRfaBrokerMail). Never throws: an internal error is a 500 with no detail.
     #>
     param([Parameter(Mandatory)][string]$Method, [Parameter(Mandatory)][string]$Path, [hashtable]$Headers = @{}, [string]$BodyText = '',
-          [string]$ClientIp = '', [Parameter(Mandatory)][hashtable]$Store, [datetime]$NowUtc = [datetime]::UtcNow, [scriptblock]$Mailer)
+          [string]$ClientIp = '', [Parameter(Mandatory)][hashtable]$Store, [datetime]$NowUtc = [datetime]::UtcNow, [scriptblock]$Mailer,
+          # SEC-98: @{ issuers; audiences; jwks } -- tests inject it; the listener reads the environment (Get-PimRfaBrokerApiAuth)
+          [hashtable]$ApiAuth)
     $json = { param($s, $o) [pscustomobject]@{ status = $s; body = $o; contentType = 'application/json'; headers = @{} } }
     try {
         $now = $NowUtc.ToUniversalTime()
@@ -149,13 +172,20 @@ function Invoke-PimRfaBrokerRequest {
                     return (& $json 200 @{ ok = $true; message = $same })
                 }
                 $ch = New-PimRfaPinChallenge -AccountKey $t.subject -NowUtc $now
-                Set-PimRfaStoreEntity -Store $Store -Table 'RfaPins' -PartitionKey 'pin' -RowKey $t.subject -Entity $ch.record
+                # SEC-105: a new PIN keeps the previous one's lockout and wrong-try count (asking again is not a reset)
+                $prevPin = @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaPins' -PartitionKey 'pin' | Where-Object { $_.RowKey -eq $t.subject })[0]
+                $mg = Merge-PimRfaPinRecord -Previous $prevPin -New $ch.record -NowUtc $now
+                if (-not $mg.issue) { return (& $json 200 @{ ok = $true; message = $same }) }
+                Set-PimRfaStoreEntity -Store $Store -Table 'RfaPins' -PartitionKey 'pin' -RowKey $t.subject -Entity $mg.record
                 if ($Mailer) { & $Mailer $t.email @{ Title = 'Your PIN'; Headline = "Your PIN is $($ch.code)"; Detail = 'Enter it in the access request portal. It is valid for 15 minutes and works once.'; Action = 'If you did not ask for it, ignore this mail -- nobody can use the PIN without your mailbox.'; PortalUrl = ''; TenantName = "$env:PIM_RFA_TENANT_NAME"; WhenUtc = $now.ToString('yyyy-MM-dd HH:mm') + ' UTC' } }
                 return (& $json 200 @{ ok = $true; message = $same })
             }
             if ($Method -eq 'POST' -and $Path -eq '/portal/verify') {
                 $ipv = Test-PimRfaBrokerRate -Store $Store -Bucket "verify-ip|$ClientIp" -Max 30 -WindowMinutes 15 -NowUtc $now
                 if (-not $ipv.allowed) { return (& $json 429 @{ error = 'too many attempts -- try again later' }) }
+                # SEC-105: ONE budget for the whole broker too -- many addresses guessing PINs together stay bounded
+                $gv = Test-PimRfaBrokerRate -Store $Store -Bucket 'verify-all' -Max 300 -WindowMinutes 15 -NowUtc $now
+                if (-not $gv.allowed) { return (& $json 429 @{ error = 'too many attempts -- try again later' }) }
                 $t = Get-PimRfaPinTarget -Name "$($b.name)" -Salt $cfg.salt -Eligibility @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaEligibility' -PartitionKey 'acct') -Reviews @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaReviews' -PartitionKey 'review')
                 $bad = 'the PIN is wrong, expired or already used'
                 if (-not $t -or $t.kind -eq 'ambiguous') { return (& $json 401 @{ error = $bad }) }
@@ -241,8 +271,10 @@ function Invoke-PimRfaBrokerRequest {
                 if (-not $kv.ok) { return (& $json $(if ($kr) { 403 } else { 401 }) @{ error = $kv.reason }) }
                 $caller = [pscustomobject]@{ kind = 'key'; id = "$($kr.id)" }
             } else {
-                $pr = ConvertFrom-PimRfaPrincipalHeader -Header "$($Headers['X-MS-CLIENT-PRINCIPAL'])"
-                if (-not $pr.ok) { return (& $json 401 @{ error = $pr.reason }) }
+                # SEC-98: the bearer itself, verified here -- the X-MS-CLIENT-PRINCIPAL header is never read
+                $aa = if ($ApiAuth) { $ApiAuth } else { Get-PimRfaBrokerApiAuth }
+                $pr = Resolve-PimRfaApiBearer -Authorization "$($Headers['Authorization'])" -Jwks $aa.jwks -ExpectedIssuers $aa.issuers -ExpectedAudiences $aa.audiences -NowUtc $now
+                if (-not $pr.ok) { return (& $json $pr.status @{ error = $pr.reason }) }
                 if ($cfg.apiAppIds -notcontains $pr.appId) { return (& $json 403 @{ error = 'this application is not allowed to use the API' }) }
                 $caller = [pscustomobject]@{ kind = 'app'; id = $pr.appId }
             }
@@ -319,7 +351,7 @@ while ($listener.IsListening) {
         $hdr = @{}; foreach ($k in $req.Headers.AllKeys) { $hdr[$k] = $req.Headers[$k] }
         $bodyText = ''; if ($req.HasEntityBody) { $sr = [IO.StreamReader]::new($req.InputStream, [Text.Encoding]::UTF8); try { $bodyText = $sr.ReadToEnd() } finally { $sr.Dispose() } }
         if ($bodyText.Length -gt 16384) { $bodyText = '' }
-        $ip = "$(("$($hdr['X-Forwarded-For'])" -split ',')[0])".Trim(); if (-not $ip) { $ip = "$($req.RemoteEndPoint.Address)" }
+        $ip = Get-PimRfaClientIp -ForwardedFor "$($hdr['X-Forwarded-For'])" -RemoteAddress "$($req.RemoteEndPoint.Address)"   # SEC-105: the ingress-added hop
         $r = Invoke-PimRfaBrokerRequest -Method $req.HttpMethod -Path $req.Url.AbsolutePath -Headers $hdr -BodyText $bodyText -ClientIp $ip -Store $store -Mailer $mailer
         $resp.StatusCode = [int]$r.status
         $resp.ContentType = $r.contentType

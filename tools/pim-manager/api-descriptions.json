@@ -1,0 +1,10 @@
+{
+  "_comment": "APIDOC-1: the CURATED one-line summary per API route for the generated reference (tools/setup/New-PimApiReference.ps1), keyed 'METHOD /path' exactly as the reference prints it. Public text: plain language, what the route does for its caller -- no internal names, no customer names, never how a check works or what it does not check (no attack hints). A route without an entry is published as its method + path.",
+  "GET /api/active-assignments": "The active and eligible PIM assignments right now, paged and filterable.",
+  "GET /api/drift": "Where the tenant differs from the configuration (the last drift snapshot).",
+  "GET /api/approvals": "The changes waiting for a second person.",
+  "POST /api/approvals/decide": "Approve or deny one waiting change (never your own).",
+  "GET /api/search": "Search admins, groups, roles and definitions.",
+  "POST /api/jobs/run": "Run one engine job now.",
+  "GET /api/commit-status/{p1}": "What happened to a commit, by its id."
+}

@@ -135,6 +135,37 @@ function ConvertFrom-PimRfaPrincipalHeader {
     return [pscustomobject]@{ ok = $true; appId = $app; appOnly = $true; reason = '' }
 }
 
+function Resolve-PimRfaApiBearer {
+    <#
+      PURE given its inputs. SEC-98 (SECAUDIT-1, 2026-11-01): the API caller is proven by the BEARER TOKEN itself, verified
+      HERE -- signature against the tenant's keys, issuer + audience pinned, exp -- never by the X-MS-CLIENT-PRINCIPAL header,
+      which is only the platform's word when its auth step really ran (and the caller's own word when it did not). Only an
+      APP-ONLY token (client credentials: idtyp=app, no delegated scope, no user) is an API caller.
+      -> @{ ok; status (401 bad / no token, 403 not app-only, 503 not configured); appId; reason }.
+    #>
+    param([string]$Authorization = '', [AllowNull()][object]$Jwks, [string[]]$ExpectedIssuers = @(), [string[]]$ExpectedAudiences = @(),
+          [datetime]$NowUtc = ([datetime]::UtcNow))
+    $no = { param($s, $r, $a = '') @{ ok = $false; status = $s; appId = $a; reason = $r } }
+    $iss = @($ExpectedIssuers | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $aud = @($ExpectedAudiences | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if (-not $iss.Count -or -not $aud.Count) { return (& $no 503 'API sign-in is not configured on this broker (no pinned tenant / audience) -- run Set-PimRfaBrokerApiAuth.ps1 -Apply') }
+    if ("$Authorization" -notmatch '^\s*Bearer\s+(\S+)\s*$') { return (& $no 401 'no Entra token (Authorization: Bearer <application token>)') }
+    $jwt = Get-PimJwtParts -Token $Matches[1]
+    if ($null -eq $jwt) { return (& $no 401 'the bearer token is not a well-formed JWT') }
+    if ($null -eq $Jwks) { return (& $no 503 'the tenant signing keys could not be fetched -- no token can be verified (refused)') }
+    $sig = Test-PimJwtSignature -Jwt $jwt -Jwks $Jwks
+    if (-not $sig.valid) { return (& $no 401 "token signature: $($sig.reason)") }
+    $cl = Test-PimJwtClaims -Payload $jwt.payload -ExpectedIssuers $iss -ExpectedAudiences $aud -NowUtc $NowUtc
+    if (-not $cl.valid) { return (& $no 401 "token claims: $($cl.reason)") }
+    $p = $jwt.payload
+    $app = "$(if ("$($p.appid)".Trim()) { $p.appid } else { $p.azp })".Trim().ToLowerInvariant()
+    if (-not $app) { return (& $no 401 'the token names no application') }
+    $isUser = [bool]("$($p.scp)".Trim() -or "$($p.upn)".Trim() -or "$($p.preferred_username)".Trim())
+    if ("$($p.idtyp)" -ne 'app' -and $isUser) { return (& $no 403 'a user token is not an API caller -- use client credentials (an application token)' $app) }
+    if ($isUser) { return (& $no 403 'the token carries user claims -- an API caller is an application token only' $app) }
+    return @{ ok = $true; status = 200; appId = $app; reason = 'application token verified' }
+}
+
 function New-PimApiKey {
     # A new API key: shown ONCE; only its hash is ever stored. Returns { key; id; hash; prefix }.
     $k = $script:PimApiKeyPrefix + (ConvertTo-PimBase64UrlText -Bytes (New-PimRandomBytes -Count 32))

@@ -172,6 +172,12 @@ function Test-PimBaselineDoc {
         $tk = @{}; if ($PSBoundParameters.ContainsKey('TrustedKeyIds')) { $tk['TrustedKeyIds'] = @($TrustedKeyIds) }
         $null = Test-PimBaselineKeySignature -SigningKey $signingKey -PayloadBytes $payloadBytes -SignatureBytes $sigBytes -TrustedKeyIds @(Get-PimBaselineTrustedKeyIds @tk)
     } else {
+    # SEC-102 (SECAUDIT-1, 2026-11-01): a document WITHOUT signingKey used to fall back to the embedded legacy certificate on
+    # EVERY tenant, so the pinned keys (PIM_BaselineTrustedKeys) could never retire it. Nothing in the product signs that way
+    # any more (the publish job + the central kill sign with a Key Vault key). The certificate path now needs this tenant's
+    # explicit opt-in: PIM_BaselineAcceptLegacyCert = 1 / true (global or environment).
+    $legacyOn = "$($global:PIM_BaselineAcceptLegacyCert)$($env:PIM_BaselineAcceptLegacyCert)".Trim() -match '^(?i)(1|true|yes|on)'
+    if (-not $legacyOn) { throw "REFUSED -- the document carries no signingKey (the legacy certificate path); this tenant accepts only its pinned Key Vault keys. Set PIM_BaselineAcceptLegacyCert only if the managing tenant still signs with the legacy certificate." }
     $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new([Convert]::FromBase64String($script:PimBaselinePublicCertB64))
     $rsa  = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($cert)
     $ok   = $rsa.VerifyData($payloadBytes, $sigBytes, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)

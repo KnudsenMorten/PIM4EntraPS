@@ -30,8 +30,10 @@ function New-PimMcpTool {
           [ValidateSet('Reader', 'Admin', 'SuperAdmin')][string]$MinRole = 'Reader',
           [ValidateSet('read', 'propose', 'commit')][string]$Kind = 'read',
           [hashtable]$InputSchema = @{ type = 'object'; properties = @{} },
-          [Parameter(Mandatory)][scriptblock]$Handler)
-    return [pscustomobject]@{ name = $Name; description = $Description; minRole = $MinRole; kind = $Kind; inputSchema = $InputSchema; handler = $Handler }
+          [Parameter(Mandatory)][scriptblock]$Handler,
+          # APIDOC-1 (owner 2026-10-31): the API route this tool runs ('GET /api/...'), or '' -- for the generated reference only
+          [string]$Route = '')
+    return [pscustomobject]@{ name = $Name; description = $Description; minRole = $MinRole; kind = $Kind; inputSchema = $InputSchema; handler = $Handler; route = $Route }
 }
 
 function New-PimMcpError {

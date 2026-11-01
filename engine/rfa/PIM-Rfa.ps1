@@ -63,7 +63,8 @@ function Get-PimRfaRequestableGroups {
         $k = $t.ToLowerInvariant()
         if (-not $defs.ContainsKey($k) -or $held.ContainsKey($k)) { continue }
         $nm = "$($defs[$k].GroupName)".Trim()
-        $out += [pscustomobject]@{ tag = "$($defs[$k].GroupTag)".Trim(); name = $(if ($nm) { $nm } else { $t }) }
+        # SEC-96: the tier rides along (an API request for a Tier 0/1 group goes to a human)
+        $out += [pscustomobject]@{ tag = "$($defs[$k].GroupTag)".Trim(); name = $(if ($nm) { $nm } else { $t }); tierLevel = "$($defs[$k].TierLevel)".Trim() }
     }
     return @($out)
 }
@@ -259,6 +260,39 @@ function New-PimRfaPinChallenge {
     }
 }
 
+function Merge-PimRfaPinRecord {
+    <#
+      PURE. SEC-105 (SECAUDIT-1, 2026-11-01): asking for a NEW PIN must not wipe the lockout or the wrong-try count of the
+      previous one -- that turned "5 tries then 30 minutes" into a fresh 5 tries per request. -> @{ issue; record; reason }:
+        * the previous record is LOCKED (lockedUntilUtc in the future) -> issue = $false, the previous record unchanged;
+        * the previous record is recent (created within the lockout window) -> the new record carries its attempts;
+        * otherwise the new record as made.
+    #>
+    param([AllowNull()][object]$Previous, [Parameter(Mandatory)][object]$New, [datetime]$NowUtc = [datetime]::UtcNow)
+    $now = $NowUtc.ToUniversalTime()
+    if ($null -eq $Previous) { return @{ issue = $true; record = $New; reason = 'no previous PIN' } }
+    $lock = ConvertFrom-PimRfaUtc -Value $Previous.lockedUntilUtc
+    if ($lock -and $lock -gt $now) { return @{ issue = $false; record = $Previous; reason = 'locked' } }
+    $made = ConvertFrom-PimRfaUtc -Value $Previous.createdUtc
+    $carry = 0; try { $carry = [int]"$($Previous.attempts)" } catch { $carry = 0 }
+    if ($made -and $made -gt $now.AddMinutes(-30) -and $carry -gt 0) {
+        $rec = $New.PSObject.Copy(); $rec.attempts = $carry
+        return @{ issue = $true; record = $rec; reason = "carries $carry wrong tries" }
+    }
+    return @{ issue = $true; record = $New; reason = 'the previous PIN is old' }
+}
+
+function Get-PimRfaClientIp {
+    <#
+      PURE. SEC-105: the client address for the rate limits. The FIRST X-Forwarded-For entry is whatever the caller sent; the
+      LAST is the one the platform's ingress appended (the connection it actually saw). No header = the socket's address.
+    #>
+    param([AllowEmptyString()][string]$ForwardedFor = '', [AllowEmptyString()][string]$RemoteAddress = '')
+    $parts = @("$ForwardedFor" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($parts.Count) { return $parts[-1] }
+    return "$RemoteAddress".Trim()
+}
+
 function ConvertFrom-PimRfaUtc {
     # PURE. ISO text -> UTC [datetime], or $null.
     param([AllowNull()][object]$Value)
@@ -361,6 +395,17 @@ function New-PimRfaRequest {
             if ($Hours -lt 1 -or $Hours -gt $script:PimRfaOverrideMaxHours) { return (& $no ("hours must be 1..{0}" -f $script:PimRfaOverrideMaxHours)) }
             if ((Get-PimRfaRowValue -Row $Admin -Name 'AccountStatus') -ieq 'Revoked') { return (& $no 'AccountStatus=Revoked -- a revoked account cannot be re-enabled by request') }
             $state = 'approved'; $mode = 'External'
+            if ($Kind -eq 'group') {
+                # SEC-96 (SECAUDIT-1, 2026-11-01): an API group request is held to the SAME list as the portal (the groups the
+                # operator offers for ad-hoc access, defined, not already held) -- it used to accept ANY group, Tier 0 included,
+                # approved by the caller alone. A Tier 0 / Tier 1 group (or one whose tier is not recorded) goes to a PERSON
+                # (the department owners, as a portal request) -- the same "Tier 0/1 always to a human" rule as a proposal.
+                $g = @(@($RequestableGroups) | Where-Object { "$($_.tag)" -ieq "$GroupName".Trim() })[0]
+                if (-not $g) { return (& $no "'$GroupName' cannot be requested through the API (it is not offered for ad-hoc access, or the account already holds it)") }
+                $GroupName = "$($g.tag)"
+                $tierL = "$($g.tierLevel)".Trim().ToUpperInvariant()
+                if ($tierL -notmatch '^T[2-9]$') { $state = 'pending-approval'; $mode = 'Approval' }
+            }
         }
         'override' {
             if ($Hours -lt 1 -or $Hours -gt $script:PimRfaOverrideMaxHours) { return (& $no ("an IT override is at most {0} days" -f ($script:PimRfaOverrideMaxHours / 24))) }

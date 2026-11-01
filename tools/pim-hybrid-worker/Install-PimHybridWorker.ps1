@@ -84,7 +84,11 @@ param(
     # Every tick runs -WhatIf: the jobs PLAN and log (<Root>\logs) and change nothing in AD. Re-run -Phase Configure without it to go live.
     [switch]$PlanOnly,
     # §100.63(b): where the managed identity comes from. Auto = Arc when the Connected Machine agent (himds) is installed.
-    [ValidateSet('Auto', 'AzureVm', 'Arc')][string]$HostType = 'Auto'
+    [ValidateSet('Auto', 'AzureVm', 'Arc')][string]$HostType = 'Auto',
+    # SEC-95 (SECAUDIT-1): where the DAILY update takes its code. Invardia (default) = the signed manifest, verified by the
+    # installed version (Resolve-PimHybridWorkerUpdate.ps1); Blob = the source container's channel.json + archive, which
+    # carry NO signature -- a lab choice only. A worker configured before this setting existed counts as Invardia.
+    [ValidateSet('Invardia', 'Blob')][string]$UpdateSource = 'Invardia'
 )
 $ErrorActionPreference = 'Stop'
 
@@ -137,7 +141,7 @@ if ($WhatIfPreference -and $Phase -ne 'Guests') {   # Guests only reads: it runs
             Step "would grant 'log on as a batch job' to the gMSA(s) only, lock $Root down, fetch the PIM code for ring '$Ring'$(if ("$Version".Trim()) { " / version $Version" }) from $SourceContainerUrl with the machine identity"
             Step "would register: 'PIM Hybrid Worker' (every $IntervalMinutes min), 'PIM Hybrid AD Sync', 'PIM Hybrid AD Sync Servers', 'PIM Hybrid AD Changes' (continuous)$(if ("$ServerGmsaName".Trim()) { ", 'PIM Hybrid Servers'" }), 'PIM Hybrid Worker Update' (daily 04:30)$(if ($PlanOnly) { ' -- every run PLAN ONLY' })"
         }
-        'Update'    { Step 'would read channel.json for the ring and move C:\PIM\app\current to the approved version (never backwards), then apply its layout' }
+        'Update'    { Step 'would ask Invardia for the SIGNED manifest of the ring (verified by the installed version: signature, sequence, archive SHA-256) and move C:\PIM\app\current to the approved version (never backwards), then apply its layout -- with -UpdateSource Blob: channel.json from the source container (unsigned)' }
         'Layout'    { Step 'would write the run wrapper and re-register the scheduled tasks of this version' }
         'Remove'    { Step "would unregister the worker's scheduled tasks ($($script:PimWorkerTaskNames -join ', ')), take the gMSA(s) out of '$ArcKeyReaderGroup' and 'log on as a batch job', delete $Root\app + $Root\bin (logs kept); the machine itself stays" }
     }
@@ -235,12 +239,15 @@ if ($Phase -eq 'Configure') {
     if ("$ServerGmsaName".Trim() -and $ServerGmsaName.TrimEnd('$') -ieq $GmsaName.TrimEnd('$')) { throw '-ServerGmsaName must differ from -GmsaName (server onboarding is a separate tier)' }
     $cfg = [ordered]@{ gmsa = $GmsaName.TrimEnd('$'); serverGmsa = "$ServerGmsaName".Trim().TrimEnd('$'); sqlServer = $SqlServer; sqlDatabase = $SqlDatabase; tenantId = $TenantId
         source = $SourceContainerUrl.TrimEnd('/'); ring = "$Ring".Trim(); version = "$Version".Trim(); adServer = $AdServer; intervalMinutes = $IntervalMinutes; syncPauseSeconds = 5; planOnly = [bool]$PlanOnly
-        hostType = (Resolve-PimHostType $HostType) }
+        hostType = (Resolve-PimHostType $HostType); updateSource = $UpdateSource.ToLowerInvariant() }
 } else {
     if (-not (Test-Path $cfgPath)) { throw "no $cfgPath -- run -Phase Configure first" }
     $cfg = Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json
     if (-not "$($cfg.hostType)".Trim()) { $cfg | Add-Member -NotePropertyName hostType -NotePropertyValue (Resolve-PimHostType $HostType) -Force }   # a worker configured before 100.63(b)
+    # SEC-95: a worker configured before the setting existed takes the SIGNED path (the unsigned blob path is never the default)
+    if (-not "$($cfg.updateSource)".Trim()) { $cfg | Add-Member -NotePropertyName updateSource -NotePropertyValue 'invardia' -Force }
 }
+$updStatePath = Join-Path $Root 'bin\update-state.json'
 
 # The local Arc agent: one GET that never throws on an HTTP status, no proxy (localhost must never go through one).
 function Invoke-PimArcHttp([string]$Uri, [hashtable]$Headers) {
@@ -291,6 +298,26 @@ function Resolve-TargetVersion {
     if (-not $e -or -not "$($e.Value.version)".Trim()) { return @{ version = ''; reason = "the channel approves nothing for '$r'" } }
     return @{ version = "$($e.Value.version)".Trim(); reason = "$r approves $($e.Value.version)" }
 }
+function Resolve-SignedTargetVersion {
+    # SEC-95: the signed path, run by the INSTALLED version's resolver (its embedded keys verify the manifest). Never falls
+    # back to the unsigned blob path: a failure keeps the running version and says why.
+    if ("$($cfg.version)".Trim()) { return @{ version = "$($cfg.version)".Trim(); reason = 'pinned by -Version'; contextPath = '' } }
+    $res = Join-Path $Root 'app\current\SOLUTIONS\PIM4EntraPS\tools\pim-hybrid-worker\Resolve-PimHybridWorkerUpdate.ps1'
+    if (-not (Test-Path -LiteralPath $res)) { return @{ version = ''; contextPath = ''; reason = "the installed version $(Get-CurrentVersion) has no signed update resolver (it predates SEC-95) -- nothing moves; install a current version once with -Phase Configure" } }
+    $px = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'; if (-not (Test-Path $px)) { $px = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" }
+    $out = @(& $px -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $res -SqlServer $cfg.sqlServer -SqlDatabase $cfg.sqlDatabase -Ring "$($cfg.ring)" -StateFile $updStatePath -RunningVersion (Get-CurrentVersion) -WorkDir $env:TEMP 2>&1 | ForEach-Object { "$_" })
+    $line = @($out | Where-Object { $_ -like 'PIM-HW-UPDATE *' } | Select-Object -Last 1)
+    if (-not $line.Count) { return @{ version = ''; contextPath = ''; reason = "the signed update resolver gave no answer (exit $LASTEXITCODE): $((@($out | Select-Object -Last 2)) -join ' ')" } }
+    $a = $line[0].Substring(14) | ConvertFrom-Json
+    if (-not $a.ok) { return @{ version = ''; contextPath = ''; reason = "signed update refused: $($a.reason)" } }
+    return @{ version = "$($a.version)".Trim(); contextPath = "$($a.contextPath)".Trim(); sequence = [int]$a.sequence; reason = "signed manifest: $($a.reason)" }
+}
+function Save-UpdateState([hashtable]$T) {
+    # the worker's own replay watermark (per ring): a lower, validly signed manifest is never applied again
+    if (-not $T.sequence) { return }
+    ([pscustomobject]@{ ring = "$($cfg.ring)".Trim(); sequence = [int]$T.sequence; version = "$($T.version)"; savedUtc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json) |
+        Set-Content -LiteralPath $updStatePath -Encoding UTF8
+}
 function Test-HybridCapable {
     # Does the installed PIM version carry the hybrid worker (§80.2)? Its scheduler must accept -Instance and -UseManagedIdentity;
     # an older version would fail every 5 minutes on "parameter not found". Read from the script's AST, nothing is run.
@@ -315,13 +342,15 @@ function Get-CurrentVersion {
     $t = (Get-Item $cur).Target; if ($t -is [array]) { $t = $t[0] }
     return (Split-Path "$t" -Leaf)
 }
-function Install-Version([string]$V) {
+function Install-Version([string]$V, [string]$ContextPath = '') {
     if ($V -notmatch '^\d+\.\d+\.\d+$') { throw "refusing version '$V' (not N.N.N)" }
     $dest = Join-Path $Root "app\$V"
     $start = Join-Path $dest 'SOLUTIONS\PIM4EntraPS\tools\pim-scheduler\Start-PimScheduler.ps1'
     if (-not (Test-Path $start)) {
         $arc = Join-Path $env:TEMP "pim-src-$V.tar.gz"
-        Get-Blob -Name "pim-src-$V.tar.gz" -OutFile $arc
+        # SEC-95: the signed path hands over the VERIFIED archive (SHA-256 + VERSION checked); only the Blob path downloads here
+        if ("$ContextPath".Trim()) { if (-not (Test-Path -LiteralPath $ContextPath)) { throw "the verified archive $ContextPath is missing" }; Move-Item -LiteralPath $ContextPath -Destination $arc -Force }
+        else { Get-Blob -Name "pim-src-$V.tar.gz" -OutFile $arc }
         $b = [IO.File]::ReadAllBytes($arc)
         if ($b.Length -lt 1024 -or $b[0] -ne 0x1f -or $b[1] -ne 0x8b) { Remove-Item $arc -Force; throw "pim-src-$V.tar.gz is not a gzip archive ($($b.Length) bytes) -- refusing" }
         New-Item -ItemType Directory -Force $dest | Out-Null
@@ -439,12 +468,14 @@ if ($Phase -eq 'Layout') {
 
 # ------------------------------------------------------------------ Update
 if ($Phase -eq 'Update') {
-    $t = Resolve-TargetVersion; $c = Get-CurrentVersion
-    Step "ring: $($t.reason); running: $(if ($c) { $c } else { 'none' })"
+    $signed = ("$($cfg.updateSource)".Trim().ToLowerInvariant() -ne 'blob')
+    $t = if ($signed) { Resolve-SignedTargetVersion } else { Resolve-TargetVersion }; $c = Get-CurrentVersion
+    Step "source: $(if ($signed) { 'Invardia (signed)' } else { 'source container (UNSIGNED -- -UpdateSource Blob)' }); ring: $($t.reason); running: $(if ($c) { $c } else { 'none' })"
     if (-not $t.version) { Step 'no approved version -- nothing moves'; return }
     if ($c -and ([version]$t.version -lt [version]$c)) { Step "the ring approves $($t.version), older than the running $c -- NOT rolling back unattended"; return }
-    if ($t.version -eq $c) { Step 'up to date'; if (-not (Test-WorkerLayoutCurrent)) { Invoke-CurrentLayout }; Sync-WorkerTaskState; return }
-    Install-Version -V $t.version
+    if ($t.version -eq $c) { Step 'up to date'; if ($signed) { Save-UpdateState $t }; if (-not (Test-WorkerLayoutCurrent)) { Invoke-CurrentLayout }; Sync-WorkerTaskState; return }
+    Install-Version -V $t.version -ContextPath "$($t.contextPath)"
+    if ($signed) { Save-UpdateState $t }
     Invoke-CurrentLayout
     Sync-WorkerTaskState
     return
@@ -564,9 +595,19 @@ $cfg | ConvertTo-Json | Set-Content -LiteralPath $cfgPath -Encoding UTF8
 Set-Content -LiteralPath (Join-Path $Root 'bin\Install-PimHybridWorker.ps1') -Value (Get-PimSelfContainedText $selfText) -Encoding UTF8   # the daily updater runs this copy
 
 Step 'PIM code for this ring'
-$t = Resolve-TargetVersion
+# SEC-95: the FIRST install has no installed version to verify a manifest with, so this one fetch -- run by the person who
+# configures the worker -- comes from the source container. Every unattended daily update after it takes the signed path
+# (unless -UpdateSource Blob). A re-run of Configure on a worker that already runs a version with the resolver takes the
+# signed path too.
+$signedHere = ("$($cfg.updateSource)" -ne 'blob' -and (Test-Path -LiteralPath (Join-Path $Root 'app\current\SOLUTIONS\PIM4EntraPS\tools\pim-hybrid-worker\Resolve-PimHybridWorkerUpdate.ps1')))
+if ($signedHere) {
+    # a REFUSED signed answer stops here -- it never falls back to the unsigned source (choose -UpdateSource Blob deliberately)
+    $t = Resolve-SignedTargetVersion
+    if (-not $t.version) { throw "cannot install: $($t.reason)" }
+} else { $t = Resolve-TargetVersion }
 if (-not $t.version) { throw "cannot install: $($t.reason)" }
-Install-Version -V $t.version
+Install-Version -V $t.version -ContextPath "$($t.contextPath)"
+if ($signedHere) { Save-UpdateState $t }
 
 Register-WorkerLayout
 

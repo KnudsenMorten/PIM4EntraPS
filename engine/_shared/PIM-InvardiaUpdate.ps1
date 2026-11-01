@@ -397,6 +397,33 @@ function Get-PimInvardiaCommunityTarget {
     } finally { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue }
 }
 
+function Get-PimHybridWorkerUpdateTarget {
+    <#
+      SEC-95 (SECAUDIT-1, 2026-11-01): the hybrid worker's daily update through the SAME signed path as the cloud updater.
+      The worker used to take channel.json + pim-src-<v>.tar.gz from a blob container with no signature at all -- one blob
+      write reached a Tier 0 machine that writes AD. Now: the install's own licence + install key (pim.Settings, which the
+      worker identity may read), the signed manifest for the worker's ring, verified by the keys EMBEDDED in the code already
+      installed on the machine, then the archive's SHA-256 / size, then the re-pack with its VERSION check
+      (Get-PimInvardiaUpdateTarget does all of it). Seams: -GetSetting { param($name) }, -Http, -Download.
+      -State: the worker's own watermark @{ ring; sequence } (bin\update-state.json) -- a sequence recorded for another ring
+      does not guard this one. Returns Get-PimInvardiaUpdateTarget's answer: version '' = nothing moves.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$GetSetting, [Parameter(Mandatory)][scriptblock]$Http, [Parameter(Mandatory)][string]$Ring,
+          [AllowNull()][object]$State, [AllowEmptyString()][string]$RunningVersion = '', [scriptblock]$Download,
+          [string]$WorkDir = ([IO.Path]::GetTempPath()), [object[]]$TrustedKeys = $script:PimInvardiaUpdateTrustedKeys, [switch]$AllowMajor)
+    $read = { param($n) try { & $GetSetting $n } catch { $null } }
+    $lic = ConvertTo-PimInvardiaLicenceText -Value (& $read 'License')
+    $key = Resolve-PimInvardiaInstallKey -GetSetting $GetSetting
+    $base = "$(& $read 'LicenceRequestBaseUrl')".Trim()
+    $applied = 0
+    if ($State -and "$($State.ring)".Trim() -eq "$Ring".Trim()) { [void][int]::TryParse("$($State.sequence)", [ref]$applied) }
+    $run = "$RunningVersion".Trim()
+    $a = @{ Http = $Http; InstallKey = $key; LicenceText = $lic; BaseUrl = $base; AppliedSequence = $applied; RunningVersion = $run
+            LastBuiltVersion = $run; HighestKnownVersion = $run; Ring = "$Ring".Trim(); TrustedKeys = $TrustedKeys; WorkDir = $WorkDir; AllowMajor = $AllowMajor }
+    if ($Download) { $a['Download'] = $Download }
+    return (Get-PimInvardiaUpdateTarget @a)
+}
+
 function Resolve-PimInvardiaAppliedSequence {
     <#
       PURE. Which applied sequence guards THIS ring's pull. -JobEnv is the update job's environment (any IDictionary, or

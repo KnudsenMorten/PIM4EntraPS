@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.11 -- 2026-11-01
+
+- Security hardening. Group requests made through the self-service API must be on the requestable-groups list, and Tier 0/1 requests always go to a person for approval. Baselines must be signed (set PIM_BaselineAcceptLegacyCert=1 to keep accepting an older unsigned baseline during a move). The hybrid worker daily update comes through the signed update service. Self-service broker sign-in and PIN handling hardened.
+
 ## 3.0.10 -- 2026-10-31
 
 - PIM Activator: your organisation can set a time of day that every activation ends by, on the Client onboarding page; A mail send right is never removed when Exchange does not report a scope's filter; A managed-tenant build no longer sets up the mail sender (your Exchange administrator does, under Get Started > Mail sender); Removing the hybrid worker keeps the server when another product is registered on it, and keeps it when that cannot be checked; The release record now says correctly whether the engine changed since the previous release

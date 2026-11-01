@@ -42,7 +42,9 @@ function Get-PimRfaApiAuthPlan {
       Easy Auth (containerapp auth show). Returns @{ steps = @('create-app'|'set-uri'|'create-sp'|'register-provider');
       audience; reason }.
     #>
-    param([AllowNull()][object]$App, [AllowNull()][object]$Sp, [AllowNull()][object]$Auth, [Parameter(Mandatory)][string]$TenantId)
+    # -AppEnv (SEC-98): the broker container's env as read (@{ name = value }) -- the broker verifies application tokens
+    # ITSELF and needs the same pins: PIM_RFA_API_TENANT = -TenantId, PIM_RFA_API_AUDIENCES = "<uri>,<appId>".
+    param([AllowNull()][object]$App, [AllowNull()][object]$Sp, [AllowNull()][object]$Auth, [Parameter(Mandatory)][string]$TenantId, [hashtable]$AppEnv)
     $steps = New-Object System.Collections.Generic.List[string]
     $appId = if ($App) { "$($App.appId)" } else { '' }
     if (-not $appId) { $steps.Add('create-app') | Out-Null }
@@ -55,6 +57,9 @@ function Get-PimRfaApiAuthPlan {
     $issuer = if ($aad -and $aad.registration) { "$($aad.registration.openIdIssuer)" } else { '' }
     $wantIssuer = "https://login.microsoftonline.com/$TenantId/v2.0"
     if (-not $appId -or $boundId -ne $appId -or $aud -notcontains $uri -or $issuer -ne $wantIssuer) { $steps.Add('register-provider') | Out-Null }
+    # SEC-98: the broker's own pins (it verifies the token itself; Easy Auth's header is never read)
+    $wantAud = if ($appId) { "$uri,$appId" } else { '' }
+    if ($null -ne $AppEnv -and (-not $appId -or "$($AppEnv['PIM_RFA_API_TENANT'])".Trim() -ine "$TenantId".Trim() -or "$($AppEnv['PIM_RFA_API_AUDIENCES'])".Trim() -ne $wantAud)) { $steps.Add('set-app-pins') | Out-Null }
     $unauth = if ($Auth -and $Auth.PSObject.Properties['globalValidation'] -and $Auth.globalValidation) { "$($Auth.globalValidation.unauthenticatedClientAction)" } else { '' }
     $why = if ($steps.Count) { "to do: $($steps -join ', ')" } else { 'nothing to do -- the broker accepts Entra tokens for this API' }
     if ($unauth -and $unauth -ne 'AllowAnonymous') { $why += " (NOTE: unauthenticated callers are '$unauth' -- the PIN portal and API keys need AllowAnonymous)" }
@@ -90,7 +95,12 @@ if ("$($global:PIM_TenantId)".Trim().ToLowerInvariant() -ne "$TenantId".Trim().T
 $app = @(Find-PimGraphApplications -DisplayName $ApiAppDisplayName) | Where-Object { $_ } | Select-Object -First 1
 $sp = if ($app) { Get-PimGraphServicePrincipal -Id "$($app.appId)" } else { $null }
 $auth = ConvertTo-PimRfaAuthView (Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $BrokerApp)
-$plan = Get-PimRfaApiAuthPlan -App $app -Sp $sp -Auth $auth -TenantId $TenantId
+function Get-PimRfaBrokerAppEnv {
+    $a = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $BrokerApp
+    $h = @{}; foreach ($e in @(@(@($a.properties.template.containers)[0]).env)) { if ($e -and "$($e.name)") { $h["$($e.name)"] = "$($e.value)" } }
+    return $h
+}
+$plan = Get-PimRfaApiAuthPlan -App $app -Sp $sp -Auth $auth -TenantId $TenantId -AppEnv (Get-PimRfaBrokerAppEnv)
 Write-Host "==> broker '$BrokerApp' / API application '$ApiAppDisplayName': $($plan.reason)" -ForegroundColor Cyan
 if (-not $plan.steps.Count) { return $plan }
 if (-not $Apply) { Write-Host '    PLAN ONLY -- re-run with -Apply.' -ForegroundColor Yellow; return $plan }
@@ -106,6 +116,17 @@ if (-not $sp) { $newAppId = "$($app.appId)"; $sp = Invoke-PimRfaRetry { New-PimG
 # --unauthenticated-client-action AllowAnonymous --enabled true: ONE read-modify-write of authConfigs/current (token VALIDATION
 # only -- no client secret).
 $apiAppId = "$($app.appId)"; $issuer = $plan.issuer
+if ($plan.steps -contains 'set-app-pins' -or $plan.steps -contains 'create-app') {
+    # SEC-98: the broker verifies application tokens itself -- the same tenant + audiences as Easy Auth (a new revision)
+    [void](Set-PimArmAcaAppEnvVars -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $BrokerApp -Env @{ PIM_RFA_API_TENANT = "$TenantId".Trim(); PIM_RFA_API_AUDIENCES = "$uri,$apiAppId" })
+    Write-Host "    broker pins PIM_RFA_API_TENANT / PIM_RFA_API_AUDIENCES set (the broker verifies the token itself)"
+}
+if (-not ($plan.steps | Where-Object { $_ -ne 'set-app-pins' })) {
+    $after = Get-PimRfaApiAuthPlan -App $app -Sp $sp -Auth $auth -TenantId $TenantId -AppEnv (Get-PimRfaBrokerAppEnv)
+    if ($after.steps.Count) { throw "read-back: still $($after.reason)" }
+    Write-Host "==> done. Callers request a token with scope '$uri/.default' and their client id is allow-listed in the PIM Manager." -ForegroundColor Green
+    return $after
+}
 [void](Invoke-PimRfaRetry { Set-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $BrokerApp -Mutate {
     param($p)
     $ip = if ($p.PSObject.Properties['identityProviders'] -and $p.identityProviders) { $p.identityProviders } else { [pscustomobject]@{} }
@@ -131,7 +152,7 @@ $apiAppId = "$($app.appId)"; $issuer = $plan.issuer
 # read back
 $app2 = Get-PimGraphApplication -Id "$($app.appId)"
 $auth2 = ConvertTo-PimRfaAuthView (Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $BrokerApp)
-$after = Get-PimRfaApiAuthPlan -App $app2 -Sp $sp -Auth $auth2 -TenantId $TenantId
+$after = Get-PimRfaApiAuthPlan -App $app2 -Sp $sp -Auth $auth2 -TenantId $TenantId -AppEnv (Get-PimRfaBrokerAppEnv)
 if ($after.steps.Count) { throw "read-back: still $($after.reason)" }
 Write-Host "==> done. Callers request a token with scope '$uri/.default' and their client id is allow-listed in the PIM Manager." -ForegroundColor Green
 return $after

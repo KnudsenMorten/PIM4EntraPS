@@ -204,7 +204,9 @@ foreach ($s in $plan.steps) {
                     $p | Add-Member -NotePropertyName globalValidation -NotePropertyValue $gv -Force
                 })
             }
-            catch { Write-Warning "   Easy Auth could not be switched on yet ($($_.Exception.Message)) -- Entra application tokens are refused until it is; API keys and the portal work." }
+            # SEC-98: the broker verifies application tokens ITSELF (signature + its own tenant / audience pins) and never reads
+            # the Easy Auth header -- so this step failing opens nothing; tokens are refused until Set-PimRfaBrokerApiAuth sets the pins.
+            catch { Write-Warning "   Easy Auth could not be switched on yet ($($_.Exception.Message)) -- the broker refuses Entra application tokens until Set-PimRfaBrokerApiAuth.ps1 -Apply has set its token pins; API keys and the portal work." }
             if ("$TenantId".Trim()) {
                 $aa = @{ SubscriptionId = $s.sub; ResourceGroup = $s.rg; BrokerApp = $a.app; TenantId = $TenantId; ApiAppDisplayName = $ApiAppDisplayName; Apply = $true }
                 try { & (Join-Path $PSScriptRoot 'Set-PimRfaBrokerApiAuth.ps1') @aa | Out-Host; $followUps.Add('api audience: registered') }

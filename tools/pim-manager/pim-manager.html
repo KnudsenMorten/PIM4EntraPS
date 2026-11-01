@@ -10818,7 +10818,7 @@
       const pat = esc(s.deptImportPattern || 'ORG-*');
       h += `<div class="set-card"><h3 style="margin:0 0 4px;font-size:14px;">Import departments from Entra</h3>`;
       h += `<div style="color:#57606a;font-size:11.5px;margin-bottom:6px;">Import departments from Entra groups whose name matches a pattern (e.g. <code>ORG-*</code>). Each matched group becomes a department; owners are pulled from the group. Re-import updates existing imported departments and never removes ones you added manually.</div>`;
-      h += `<label style="font-size:12px;">Pattern <input id="setDeptImportPat" value="${pat}" style="width:140px"></label> `;
+      h += `<label style="font-size:12px;">Pattern <input id="setDeptImportPat" value="${escapeHtml(pat)}" style="width:140px"></label> `;   // SEC-103: a saved value in an attribute
       h += `<button class="btn" id="setDeptsImport">Import departments from Entra</button> <span class="setMsg" id="setDeptsImportMsg"></span>`;
       h += `</div>`;
       // Owners/approvers PER DEPARTMENT from a CSV (Import-PimApproversFromCsv): Department;GroupName;approver1,approver2,...
@@ -22116,7 +22116,8 @@
     const label = other.length ? other.data('label') : otherId;
     const t = edge.data('type') || '';
     const pill = t === 'Active' ? '<span class="pill A">A</span>' : (t === 'Eligible' ? '<span class="pill E">E</span>' : '');
-    return `<div class="neighbor" data-id="${otherId}">${pill}${escapeHtml(label)}<span class="edge-type">${escapeHtml(edge.data('kind') || '')}</span></div>`;
+    // SEC-103 (SECAUDIT-1): the id goes into an attribute -- escaped like every other value (dataset.id decodes it back)
+    return `<div class="neighbor" data-id="${escapeHtml(otherId)}">${pill}${escapeHtml(label)}<span class="edge-type">${escapeHtml(edge.data('kind') || '')}</span></div>`;
   }
   function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
