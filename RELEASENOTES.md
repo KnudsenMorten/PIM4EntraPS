@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.18 -- 2026-11-02
+
+- one installer file for Community (GitHub) and Pro/Trial (invardia.com): one built-in line tells them apart, no -Edition in the command; the update ring defaults to 3; the Support app gets Troubleshoot access by default when it is named by its id (never found by name); -ViaSupportApp for an install run through the Invardia Support app; the GitHub installer is the built, self-contained file
+
 ## 3.0.17 -- 2026-11-02
 
 - Trial and Pro installs ask Invardia for their licence by themselves right after the install (no approval needed for a trial); install with two lines, every setting a parameter, no answer file; the public release carries the sign-in front source; time-limited support database access with the customer's consent (SEC-92); the support job shows its end time in UTC on PowerShell 7

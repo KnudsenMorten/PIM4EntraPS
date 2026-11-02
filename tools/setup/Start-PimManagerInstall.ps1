@@ -22,9 +22,14 @@
 
   Browser sign-in (your own administrator account): no Azure CLI, no PowerShell modules, no secret, no certificate, no
   key and no licence in the command. PowerShell 7 (Azure Cloud Shell, or PowerShell 7 on Windows, macOS or Linux). Only
-  -TenantId and -SubscriptionId are needed; that installs PIM Manager Community (free). -Edition Pro installs the same
-  way with the Pro updater, without a licence: afterwards you sign in to PIM Manager and add your licence in Settings >
-  Licence. Several tenants (MSP) are set up with the managing-tenant build, not this command.
+  -TenantId and -SubscriptionId are needed. The edition comes with the file, never with a parameter: the copy of the
+  public GitHub release installs PIM Manager Community (free); the copy Invardia gives Pro and trial customers installs
+  PIM Manager Pro, without a licence -- the installation asks Invardia for its licence by itself right after the
+  install. Updates follow ring 3 (broad) unless -UpdateRing 2 is given. The Invardia Support app is named by its id with
+  -SupportAppId, never found by name: it then gets 'troubleshoot' access unless -SupportAccess names another level;
+  without -SupportAppId nothing is granted. -ViaSupportApp runs the install as the Invardia Support app: it needs a
+  Connect-InvardiaSupport session for the same tenant in this PowerShell window. Several tenants (MSP) are set up with
+  the managing-tenant build, not this command.
 
   Exit codes: those of Install-PimManager (0 done, 1 a step failed -- fix it and -Resume, 2 a check failed -- nothing was
   changed, 3 bad answers -- nothing was changed); 3 also when the release cannot be read or a check of the download fails.
@@ -43,8 +48,8 @@
   When you choose the region and the resource group yourself, and name the PIM Manager administrators and who gets the alerts.
 .EXAMPLE
   Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
-  .\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -Edition Pro
-  Pro or a trial: the same installation with the Pro updater; afterwards sign in to PIM Manager and add your licence in Settings > Licence.
+  .\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -SuperAdmins 'admin1@contoso.com' -ViaSupportApp
+  Through the Invardia Support app, after Connect-InvardiaSupport for this tenant: the installation runs as that app, so name the PIM Manager administrators.
 .EXAMPLE
   Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
   .\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -Resume
@@ -81,8 +86,10 @@ param(
     [string]$VnetAddressPrefix = '',
     [string]$SubnetAddressPrefix = '',
     [string]$Exposure = '',
+    # INSTALL-1 ALIGN: not documented any more (the copy decides the edition, $script:PimInstallChannel below). Accepted for
+    # ONE release so the 3.0.17 command lines keep working; when given it wins. Drop it in the next release.
     [ValidateSet('', 'Community', 'Trial', 'Pro')][string]$Edition = '',
-    [ValidateSet('', '2', '3')][string]$UpdateRing = '',
+    [ValidateSet('', '2', '3')][string]$UpdateRing = '3',
     [string]$KeyVaultName = '',
     [switch]$EngineAzureRootUserAccessAdmin,
     [string]$InstallId = '',
@@ -92,6 +99,8 @@ param(
     [string]$StatePath = '',
     [switch]$Resume,
     [switch]$PreflightOnly,
+    # run as the Invardia Support app: requires a Connect-InvardiaSupport session for -TenantId in this PowerShell window
+    [switch]$ViaSupportApp,
     # --- this launcher's own ---
     # the release to install (e.g. 3.0.5); default: the latest public release
     [string]$Version = '',
@@ -104,6 +113,10 @@ param(
     [string]$TestSelfVersion = ''
 )
 $ErrorActionPreference = 'Stop'
+# INSTALL-1 ALIGN (owner 2026-11-02: "trial and pro are th same functionality. license is different in time (backend)"):
+# the ONE line that differs between the two copies. The repository and the GitHub release say 'community'; the copy built
+# for Invardia (Build-PimSupportScripts) says 'pro'. Trial and Pro are the same install -- Invardia decides by the licence.
+$script:PimInstallChannel = 'community'   # INSTALL-CHANNEL: 'community' (the GitHub release copy) | 'pro' (the copy handed to Invardia)
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')     # framework 12.7: the version line + the transcript (inlined in the published file)
 $null = Start-PimScriptRun -Script 'Start-PimManagerInstall'
 $launchCode = 0
@@ -145,11 +158,20 @@ try {
 
     # one pass; a stop on the way sets $launchCode and leaves it with 'break' (the exit code is set after the transcript closes)
     do {
+    # ---------------------------------------------------------------- INSTALL-1 ALIGN (6): -ViaSupportApp needs the session
+    # Without the switch nothing changes (a Support-app session is still used when there is one). With it, the run stops
+    # here -- before anything is downloaded -- unless Connect-InvardiaSupport connected THIS tenant in this window.
+    $isa = $global:InvardiaSupportState
+    if ($ViaSupportApp -and -not ($isa -is [hashtable] -and "$TenantId".Trim() -and "$($isa.TenantId)".Trim() -ieq "$TenantId".Trim())) {
+        Write-Host "-ViaSupportApp: this PowerShell window has no Invardia Support session for tenant '$TenantId' -- run Connect-InvardiaSupport.ps1 -Environment <handle> for that tenant first, then this command again. Nothing was installed." -ForegroundColor Red
+        $launchCode = 2; break
+    }
     # ---------------------------------------------------------------- 0. this file is the one its release publishes
     # A downloaded copy carries the release version it was published with; a copy run from a release folder or the source
     # tree carries none and is already part of that tree. -ReleasePath downloads nothing, so it is not checked here.
+    # The Pro copy is not a GitHub release file (Invardia hands it out with its own SHA256SUMS), so it is not checked here.
     $selfVer = if ("$TestSelfVersion".Trim()) { "$TestSelfVersion".Trim() } else { "$($script:PimScriptDocVersion)".Trim() }
-    if ($selfVer -and -not "$ReleasePath".Trim()) {
+    if ($selfVer -and -not "$ReleasePath".Trim() -and "$script:PimInstallChannel" -ne 'pro') {
         $selfRel = $null
         try { $selfRel = & $GetRelease (& $releaseUrl $selfVer) } catch { $selfRel = $null; Write-Verbose "$($_.Exception.Message)" }
         if (-not $selfRel) { Write-Host "The PIM Manager release $selfVer could not be read from GitHub. Check the network and run the command again." -ForegroundColor Red; $launchCode = 3; break }
@@ -215,9 +237,12 @@ try {
 
     # ---------------------------------------------------------------- 2. run the installer from the release, same parameters
     $pass = @{}
-    foreach ($k in @('TenantId', 'SubscriptionId', 'Location', 'ResourceGroup', 'SuperAdmins', 'AlertRecipients', 'MailSender', 'PortalUsers', 'AllowAllMembers', 'VnetAddressPrefix', 'SubnetAddressPrefix', 'Exposure', 'Edition', 'UpdateRing', 'KeyVaultName', 'EngineAzureRootUserAccessAdmin', 'InstallId', 'SupportAppId', 'SupportAccess', 'Reporter', 'StatePath', 'Resume', 'PreflightOnly')) {
+    foreach ($k in @('TenantId', 'SubscriptionId', 'Location', 'ResourceGroup', 'SuperAdmins', 'AlertRecipients', 'MailSender', 'PortalUsers', 'AllowAllMembers', 'VnetAddressPrefix', 'SubnetAddressPrefix', 'Exposure', 'Edition', 'UpdateRing', 'KeyVaultName', 'EngineAzureRootUserAccessAdmin', 'InstallId', 'SupportAppId', 'SupportAccess', 'Reporter', 'StatePath', 'Resume', 'PreflightOnly', 'ViaSupportApp')) {
         if ($PSBoundParameters.ContainsKey($k)) { $pass[$k] = $PSBoundParameters[$k] }
     }
+    # INSTALL-1 ALIGN: the edition comes from this copy (a given -Edition still wins for one release); the ring defaults to 3
+    if (-not "$($pass['Edition'])".Trim()) { $pass['Edition'] = $(if ("$script:PimInstallChannel" -eq 'pro') { 'Pro' } else { 'Community' }) }
+    if (-not "$($pass['UpdateRing'])".Trim()) { $pass['UpdateRing'] = $UpdateRing }
     if ($WhatIfPreference) { $pass['WhatIf'] = $true }
     $installer = Join-Path $tree 'tools/setup/Install-PimManager.ps1'
     $launchCode = [int](@(& $RunInstaller $installer $pass) | Select-Object -Last 1)

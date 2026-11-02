@@ -53,12 +53,13 @@
     { "name": "KeyVaultName", "required": false, "default": "kv-pim-<token>", "help": "The installation's own Key Vault name (3-24 letters, digits and dashes)." },
     { "name": "EngineAzureRootUserAccessAdmin", "required": false, "default": false, "help": "Also give the PIM engine User Access Administrator at the tenant root management group (off by default: the engine always gets Reader there)." },
     { "name": "InstallId", "required": false, "default": "derived from tenant, subscription and resource group", "help": "The installation id: the resource names and the state folder come from it, so the same answers give the same ones (that is how -Resume finds them)." },
-    { "name": "SupportAppId", "required": false, "default": null, "help": "The Invardia Support app's client id -- only when you want Invardia support to have access; nothing is granted without it." },
-    { "name": "SupportAccess", "required": false, "default": "troubleshoot", "help": "The Support app's level: troubleshoot, setup or asbuilt." },
+    { "name": "SupportAppId", "required": false, "default": null, "help": "The Invardia Support app's client id -- only when you want Invardia support to have access. The Support app is named by its id, never found by name; nothing is granted without it." },
+    { "name": "SupportAccess", "required": false, "default": "troubleshoot", "help": "The Support app's level: troubleshoot, setup or asbuilt (used only with -SupportAppId)." },
     { "name": "Reporter", "required": false, "default": null, "help": "Callback that receives every step event (Invardia's installer uses it to report progress)." },
     { "name": "StatePath", "required": false, "default": "clouddrive/invardia/<install id> (Cloud Shell) or ~/invardia/<install id>", "help": "Folder for the resume state." },
     { "name": "Resume", "required": false, "default": false, "help": "Continue a stopped installation with the same parameters; completed checks and steps are skipped." },
-    { "name": "PreflightOnly", "required": false, "default": false, "help": "Run only the checks." }
+    { "name": "PreflightOnly", "required": false, "default": false, "help": "Run only the checks." },
+    { "name": "ViaSupportApp", "required": false, "default": false, "help": "Run the installation as the Invardia Support app. It needs a Connect-InvardiaSupport session for the same tenant in this PowerShell window; without one the installation stops before anything is read or changed." }
   ],
   "readsOnly": [
     "Checks: az account show / get-access-token (who you are, tenant, subscription), your Azure role assignments on the subscription, your directory roles (transitiveMemberOf: Global Administrator, Privileged Role Administrator, Application Administrator), the resource providers, the resource group, the SQL server and registry names, and the chosen region (any Azure region): the subscription's regions, where every service PIM Manager creates is offered (Container Apps, Azure SQL, Container Registry, Key Vault, Storage, Log Analytics, managed identities) and Azure SQL's capabilities there (Standard S0) -- names what is missing and the nearest region that has everything.",

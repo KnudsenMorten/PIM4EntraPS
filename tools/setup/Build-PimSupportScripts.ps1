@@ -59,6 +59,11 @@
                                           the built file is ALSO a release asset of the public GitHub release, under this
                                           stable name (line 1 downloads it from .../releases/latest/download/).
                                           Built with NO dot-source left (BUILD-NO-OPTIONAL-LOADS).
+                                          INSTALL-1 ALIGN (2026-11-02): this hand-over copy is Invardia's PRO copy -- its
+                                          one INSTALL-CHANNEL line says 'pro' (Set-PimInstallChannelStamp), its manifest's
+                                          download link is invardia.com/support/pim/. The same build also writes
+                                          community\Start-PimManagerInstall.ps1 (+ community\SHA256SUMS.txt): the
+                                          self-contained COMMUNITY copy for the GitHub release. Only that line differs.
 
     SCRIPT-DOC-1 (framework 12.7) + framework 12.10 item 11 ("scripts are big concern"), 2026-10-09:
       * every script in $script:PimScriptDocScripts (tools\setup\_PimScriptDoc.ps1) must have its manifest
@@ -186,6 +191,22 @@ function Set-PimScriptBuildVersion {
     if ($Version -notmatch '^[0-9A-Za-z.+-]+$') { throw "VERSION '$Version' is not a version string" }
     $rx = [regex]("(?m)^(?<indent>[ \t]*)\`$script:PimScriptDocVersion = ''[ \t]*# BUILD-VERSION[ \t]*(?=\r?$)")
     return $rx.Replace($Text, { param($m) "$($m.Groups['indent'].Value)`$script:PimScriptDocVersion = '$Version'   # BUILD-VERSION stamped by Build-PimSupportScripts" })
+}
+
+function Set-PimInstallChannelStamp {
+    <#
+      PURE. INSTALL-1 ALIGN (owner 2026-11-02: "trial and pro are th same functionality. license is different in time
+      (backend)"): Start-PimManagerInstall.ps1 carries ONE line
+          $script:PimInstallChannel = 'community'   # INSTALL-CHANNEL: ...
+      The copy handed to Invardia (invardia.com/support/pim/) says 'pro'; the GitHub release copy (the committed file) says
+      'community'. Only the quoted value changes -- the rest of the text, the line's comment included, stays byte for byte.
+      Exactly one such line, or it throws (never a hand-over copy that silently installs the wrong edition).
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][ValidateSet('community', 'pro')][string]$Channel)
+    $rx = [regex]("(?m)^(?<pre>\`$script:PimInstallChannel = ')(?:community|pro)(?<post>'[ \t]*# INSTALL-CHANNEL\b)")
+    $n = $rx.Matches($Text).Count
+    if ($n -ne 1) { throw "Start-PimManagerInstall.ps1 must have exactly one INSTALL-CHANNEL line (found $n) -- nothing handed over" }
+    return $rx.Replace($Text, { param($m) "$($m.Groups['pre'].Value)$Channel$($m.Groups['post'].Value)" })
 }
 
 function Test-PimScriptBuildVersionStamped {
@@ -421,6 +442,31 @@ foreach ($s in $Scripts) {
     $body = ConvertTo-PimPublicScriptText -Text $body -Name $name   # public: no customer / internal names (100.14)
     # keep '#Requires' first if the script starts with it
     if ($body -match '^(#Requires[^\r\n]*\r?\n)') { $body = $Matches[1] + $hdr + $body.Substring($Matches[1].Length) } else { $body = $hdr + $body }
+    # INSTALL-1 ALIGN: the launcher is built TWICE from the same text. <OutDir>\community\ gets the COMMUNITY copy (the file
+    # attached to the public GitHub release: self-contained, its own SHA256SUMS.txt -- the raw repository file loads a helper
+    # from its folder and does not run on its own); <OutDir> itself gets Invardia's PRO copy. The two differ in the one
+    # INSTALL-CHANNEL line only. Each is stamped before it is written, signed and hashed, so its checksum is of its own bytes.
+    if ($name -eq 'Start-PimManagerInstall.ps1') {
+        $comDir = Join-Path $OutDir 'community'
+        New-Item -ItemType Directory -Force -Path $comDir | Out-Null
+        $comOut = Join-Path $comDir $name
+        [IO.File]::WriteAllText($comOut, (Set-PimInstallChannelStamp -Text $body -Channel 'community'), (New-Object System.Text.UTF8Encoding($true)))
+        $comErr = $null; $comAst = [System.Management.Automation.Language.Parser]::ParseFile($comOut, [ref]$null, [ref]$comErr)
+        if (@($comErr).Count) { throw "community\$name does not parse after inlining: $($comErr[0].Message)" }
+        $comDots = @($comAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot }, $true))
+        if ($comDots.Count) { throw "community\$name still dot-sources after inlining (line $($comDots[0].Extent.StartLineNumber): $($comDots[0].Extent.Text))" }
+        if ($signCert) {
+            $csa = @{ FilePath = $comOut; Certificate = $signCert; HashAlgorithm = 'SHA256' }
+            if ("$TimestampServer".Trim()) { $csa['TimestampServer'] = "$TimestampServer".Trim() }
+            [void](Set-AuthenticodeSignature @csa)
+            $cchk = Get-AuthenticodeSignature -FilePath $comOut
+            if (-not $cchk.SignerCertificate -or $cchk.SignerCertificate.Thumbprint -ne $signCert.Thumbprint -or "$($cchk.Status)" -in @('NotSigned', 'HashMismatch')) { throw "community\$name could not be signed -- nothing handed over unsigned in its place" }
+        }
+        $comHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $comOut).Hash.ToLowerInvariant()
+        [IO.File]::WriteAllLines((Join-Path $comDir 'SHA256SUMS.txt'), @("$comHash  $name"))
+        Write-Host "built community\$name (the GitHub release copy, sha256 $comHash)"
+        $body = Set-PimInstallChannelStamp -Text $body -Channel 'pro'
+    }
     $out = Join-Path $OutDir $name
     [IO.File]::WriteAllText($out, $body, (New-Object System.Text.UTF8Encoding($true)))
     # must still parse
@@ -479,7 +525,8 @@ foreach ($d in $docs) {
     $o['docUrl'] = Get-PimScriptDocUrl -Script $d.Name
     $o['standalone'] = [bool]$d.Standalone
     if ($d.Standalone) {
-        $o['download'] = Get-PimSupportScriptUrl -Script $d.Name
+        # INSTALL-1 ALIGN: the hand-over's launcher is the PRO copy, hosted by Invardia -- never the GitHub release link
+        $o['download'] = if ($d.Name -eq 'Start-PimManagerInstall') { "$($script:PimSupportScriptBaseUrl)Start-PimManagerInstall.ps1" } else { Get-PimSupportScriptUrl -Script $d.Name }
         $o['sha256'] = $d.Sha
         # The manifests are PUBLISHED next to the scripts (owner 2026-10-28, "say nothing"): an unsigned build carries no
         # signing field at all; only a signed build names its signer.

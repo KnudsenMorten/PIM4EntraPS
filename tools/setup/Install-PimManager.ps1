@@ -15,7 +15,12 @@
       [-VnetAddressPrefix <cidr>] [-SubnetAddressPrefix <cidr>] [-Exposure external] [-Edition Community|Trial|Pro]
       [-UpdateRing 2|3] [-KeyVaultName <name>] [-EngineAzureRootUserAccessAdmin] [-InstallId <id>]
       [-SupportAppId <client id> [-SupportAccess troubleshoot|setup|asbuilt]] [-Reporter <scriptblock>] [-StatePath <dir>]
-      [-Resume] [-PreflightOnly] [-WhatIf]
+      [-Resume] [-PreflightOnly] [-ViaSupportApp] [-WhatIf]
+
+  INVARDIA SUPPORT ACCESS (INSTALL-1 ALIGN). The Invardia Support app gets 'troubleshoot' access (or the -SupportAccess
+  level) only when -SupportAppId names it: the Support app is named by its id, never found by name. Without -SupportAppId
+  nothing is granted. -ViaSupportApp: the installation runs as the Invardia Support app and needs a Connect-InvardiaSupport
+  session for -TenantId in this PowerShell window (refused otherwise).
 
   EVERY ANSWER IS A PARAMETER, WITH ITS REAL VALUE (owner 2026-11-02). There is no answers file, no key and no licence in the
   command. Only -TenantId and -SubscriptionId are needed; everything else has a default (install-parameters.json:
@@ -128,6 +133,8 @@ param(
     [string]$StatePath = '',
     [switch]$Resume,
     [switch]$PreflightOnly,
+    # INSTALL-1 ALIGN (6): run as the Invardia Support app -- requires a Connect-InvardiaSupport session for -TenantId
+    [switch]$ViaSupportApp,
     # --- test seams (offline tests/Test-PimGuidedInstall.ps1); omit them for a real install ---
     [scriptblock]$Az,
     [scriptblock]$Deploy,
@@ -365,7 +372,7 @@ foreach ($pn in 'TenantId', 'SubscriptionId', 'Location', 'ResourceGroup', 'Supe
     $pv = @(@($pimCli[$pn]) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     if ($pv.Count) { $cliResume += " -$pn " + (@($pv | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ',') }
 }
-foreach ($sw in 'AllowAllMembers', 'EngineAzureRootUserAccessAdmin') { if ($pimCli.ContainsKey($sw) -and [bool]$pimCli[$sw]) { $cliResume += " -$sw" } }
+foreach ($sw in 'AllowAllMembers', 'EngineAzureRootUserAccessAdmin', 'ViaSupportApp') { if ($pimCli.ContainsKey($sw) -and [bool]$pimCli[$sw]) { $cliResume += " -$sw" } }
 $stateFull = & $fullPath $StatePath
 $resumeCmd = "& '$PSCommandPath'$cliResume -StatePath '$stateFull' -Resume"
 $editionText = if ($community) { 'Community (no licence needed)' } else { "$((Get-Culture).TextInfo.ToTitleCase("$($cfg.edition)")) -- installed without a licence; afterwards $licenceHint" }
@@ -386,6 +393,12 @@ if ($state.installId -eq $installId -and (Test-PimInstallSetupHostRuleRecord -Re
 # session the handoff carries the Invardia Support APP's tokens -- accepted for exactly that app of THIS tenant, never another.
 $script:handoffAppId = ''
 $isa = $global:InvardiaSupportState
+# INSTALL-1 ALIGN (6): -ViaSupportApp makes the Support-app install explicit -- without a Connect-InvardiaSupport session for
+# THIS tenant it stops here, before any sign-in or change. Without the switch nothing changes.
+if ($ViaSupportApp -and -not ($isa -is [hashtable] -and "$($isa.TenantId)".Trim() -ieq "$($cfg.tenantId)".Trim())) {
+    Emit 'preflight-signin' 'failed' "-ViaSupportApp: this PowerShell window has no Invardia Support session for tenant $($cfg.tenantId) -- nothing was changed" 'Connect the Invardia Support app for this tenant first, then run the command again:' 'Connect-InvardiaSupport.ps1 -Environment <handle>'
+    Finish 2
+}
 if ($isa -is [hashtable] -and "$($isa.TenantId)".Trim() -ieq "$($cfg.tenantId)".Trim() -and "$($isa.AppId)" -match '^[0-9a-fA-F-]{36}$') { $script:handoffAppId = "$($isa.AppId)".Trim().ToLowerInvariant() }
 $script:handoff = Import-PimHandoffTokens -Json $script:PimHandoffRaw -TenantId $cfg.tenantId -AllowedAppId $script:handoffAppId
 $script:PimHandoffRaw = $null
