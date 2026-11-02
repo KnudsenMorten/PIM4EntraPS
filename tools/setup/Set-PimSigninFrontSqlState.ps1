@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 
 <#
 .SYNOPSIS
@@ -17,6 +17,14 @@
 .EXAMPLE
   .\Set-PimSigninFrontSqlState.ps1 -TenantId <tenant id> -SubscriptionId <subscription id> -SqlServerName sql-pim-contoso -IdentityName id-pim-contoso -IdentityClientId <client id> -WhatIf
   Preview: connects, reads and prints the statements it would run. Then the same command without -WhatIf.
+
+.NOTES
+  Requirements:
+    PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
+    Role: a database owner of the PIM database -- a member of the SQL admin group (grp-pim-sql-admins) or the server's
+          Microsoft Entra administrator.
+    Hosts: login.microsoftonline.com, management.azure.com, *.database.windows.net (port 1433, from inside the PIM
+           network)
 
 .LINK
   https://invardia.com/docs/pim/scripts/Set-PimSigninFrontSqlState/

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 
 <#
 .SYNOPSIS
@@ -43,6 +43,12 @@
 .EXAMPLE
   .\Set-PimSqlTier.ps1 -SubscriptionId <subscription id> -ResourceGroup <resource group> -Server <sql server> -TenantId <tenant id> -Tier S3 -Pin
   S3 with 250 GB, pinned so updates keep it on S3 (also how a database pinned at a lower tier is moved to S3).
+
+.NOTES
+  Requirements:
+    PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
+    Role: SQL DB Contributor (or Contributor / Owner) on the PIM SQL server or its resource group (Azure).
+    Hosts: login.microsoftonline.com, management.azure.com
 
 .LINK
   https://invardia.com/docs/pim/scripts/Set-PimSqlTier/

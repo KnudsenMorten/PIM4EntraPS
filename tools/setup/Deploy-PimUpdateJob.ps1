@@ -282,6 +282,25 @@ foreach ($m in @($storePlan.messages)) {
 # then reads every value back byte-for-byte.
 foreach ($k in @($storePlan.writes.Keys)) { $envVars += "$k=$($storePlan.writes[$k])" }
 
+# SEC-95 (SECAUDIT-1): INVARDIA IS THE DEFAULT SOURCE. A job that carries no PIM_UPDATE_SOURCE of its own, deployed without
+# -UpdateSource, gets Invardia's signed releases (the Community channel when the address given is the Community one). A
+# storage-container address given without -UpdateSource pim-src is NOT used -- the updater would refuse it (no source named),
+# and an updater that silently took unsigned archives is exactly what this closes. A redeploy of a job that already names
+# its source keeps it, unchanged.
+if (-not "$UpdateSource".Trim() -and -not "$($existingEnv['PIM_UPDATE_SOURCE'])".Trim()) {
+    $givenSrc = @("$SourceUrlTemplate".Trim(), "$($env:PIM_UPDATE_SOURCE_URL)".Trim(), "$($existingEnv['PIM_UPDATE_SOURCE_URL'])".Trim()) | Where-Object { $_ } | Select-Object -First 1
+    $UpdateSource = $(if ("$givenSrc" -match '^https://([a-z0-9-]+\.)*invardia\.com/api/updates/[^/]+/community/') { 'InvardiaCommunity' } else { 'Invardia' })
+    if ($givenSrc -and -not (Test-PimInvardiaUpdateSource -SourceUrl "$givenSrc")) {
+        Warn 'update source: the storage-container address given is NOT used -- this updater takes signed releases from Invardia (the default).'
+        Warn '  A storage container is used only when it is chosen as the update source for this environment.'
+        $SourceUrlTemplate = ''
+        if ("$($existingEnv['PIM_UPDATE_SOURCE_URL'])".Trim() -or "$($env:PIM_UPDATE_SOURCE_URL)".Trim()) {
+            # the ring plan prefers the explicit template: point it at Invardia's address so the container link is not kept
+            $SourceUrlTemplate = $(if ($UpdateSource -eq 'InvardiaCommunity') { 'https://invardia.com/api/updates/pim-manager/community/{version}' } else { 'https://invardia.com/api/updates/pim-manager/code/{version}/archive' })
+        }
+    }
+    Note "update source: none named -- $UpdateSource (signed releases, the default)"
+}
 # §95.4: the update source. Written only when passed (a redeploy without it keeps PIM_UPDATE_SOURCE, preserved below).
 # The Invardia job reads no archive URL, but the ring plan refuses a ring without a source template -- so an install with
 # none gets Invardia's archive address as an INFORMATIONAL template (update-job-entry ignores it in Invardia mode).

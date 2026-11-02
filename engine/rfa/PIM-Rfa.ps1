@@ -64,9 +64,62 @@ function Get-PimRfaRequestableGroups {
         if (-not $defs.ContainsKey($k) -or $held.ContainsKey($k)) { continue }
         $nm = "$($defs[$k].GroupName)".Trim()
         # SEC-96: the tier rides along (an API request for a Tier 0/1 group goes to a human)
-        $out += [pscustomobject]@{ tag = "$($defs[$k].GroupTag)".Trim(); name = $(if ($nm) { $nm } else { $t }); tierLevel = "$($defs[$k].TierLevel)".Trim() }
+        $out += [pscustomobject]@{ tag = "$($defs[$k].GroupTag)".Trim(); name = $(if ($nm) { $nm } else { $t }); tierLevel = "$($defs[$k].TierLevel)".Trim(); id = "$($defs[$k].GroupId)".Trim() }
     }
     return @($out)
+}
+
+function Get-PimRfaCallerGroups {
+    <#
+      PURE. SEC-96 (per-key / per-app group binding): the groups ONE API caller may request -- its own list, by group tag or
+      group id. An API key carries it on its record (pim.Settings 'ApiKeys'.keys[].groups); an allow-listed application in
+      RfaSettings.apiAppGroups = { "<client id>": [ ... ] }. Empty = no binding (the requestable list alone decides, as before).
+    #>
+    param([ValidateSet('key', 'app')][string]$Kind = 'key', [string]$Id = '', [object[]]$ApiKeys = @(), [AllowNull()][object]$Settings = $null)
+    $one = { param($o, $n) if ($null -eq $o) { return $null }; if ($o -is [System.Collections.IDictionary]) { if ($o.Contains($n)) { return $o[$n] }; return $null }; $p = $o.PSObject.Properties[$n]; if ($p) { return $p.Value }; return $null }
+    $want = "$Id".Trim()
+    $raw = @()
+    if (-not $want) { return @() }
+    if ($Kind -eq 'key') {
+        $k = @(@($ApiKeys) | Where-Object { $_ -and "$(& $one $_ 'id')".Trim() -eq $want })[0]
+        if ($k) { $raw = @(& $one $k 'groups') }
+    } else {
+        $map = & $one $Settings 'apiAppGroups'
+        if ($null -ne $map) {
+            $pairs = if ($map -is [System.Collections.IDictionary]) { @($map.Keys | ForEach-Object { @{ n = "$_"; v = $map[$_] } }) } else { @($map.PSObject.Properties | ForEach-Object { @{ n = "$($_.Name)"; v = $_.Value } }) }
+            foreach ($p in $pairs) { if ($p.n.Trim().ToLowerInvariant() -eq $want.ToLowerInvariant()) { $raw = @($p.v) } }
+        }
+    }
+    $seen = @{}; $out = @()
+    foreach ($g in @(@($raw) | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })) {
+        if (-not $seen.ContainsKey($g.ToLowerInvariant())) { $seen[$g.ToLowerInvariant()] = $true; $out += $g }
+    }
+    return @($out)
+}
+
+function ConvertTo-PimRfaGroupList {
+    <#
+      PURE. SEC-96: a caller's group list as the Manager receives it (an array, or one comma / semicolon / newline separated
+      string) -> @{ ok; groups; error }. Each entry is a group tag or a group id; at most 200; duplicates dropped (case-blind).
+      Empty = no binding.
+    #>
+    param([AllowNull()][object]$Value)
+    $items = @(@($Value) | ForEach-Object { "$_" -split '[,;\r\n]+' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $seen = @{}; $out = @()
+    foreach ($i in $items) { $k = $i.ToLowerInvariant(); if (-not $seen.ContainsKey($k)) { $seen[$k] = $true; $out += $i } }
+    $bad = @($out | Where-Object { $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$' })
+    if ($bad.Count) { return @{ ok = $false; groups = @(); error = "not a group tag or group id: $(($bad | Select-Object -First 5) -join ', ')" } }
+    if ($out.Count -gt 200) { return @{ ok = $false; groups = @(); error = 'at most 200 groups per key or application' } }
+    return @{ ok = $true; groups = @($out); error = '' }
+}
+
+function Test-PimRfaGroupAllowedFor {
+    <# PURE. SEC-96: is this group (tag and / or id) in the caller's own list? An empty list = no binding = $true. #>
+    param([string[]]$AllowedGroups = @(), [string]$GroupTag = '', [string]$GroupId = '')
+    $list = @(@($AllowedGroups) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
+    if (-not $list.Count) { return $true }
+    $t = "$GroupTag".Trim().ToLowerInvariant(); $i = "$GroupId".Trim().ToLowerInvariant()
+    return [bool](($t -and $list -contains $t) -or ($i -and $list -contains $i))
 }
 
 function Get-PimRfaRowValue {
@@ -356,6 +409,7 @@ function New-PimRfaRequest {
         -Source portal : the account must be eligible; -Hours must be in the department's list.
         -Source api    : ServiceNow owns the approval -- the request is created APPROVED; Kind enable or group
                          (group needs -GroupName); hours 1..744; -ExternalRef (the ticket) is required (idempotency).
+                         A group must be requestable, and -- when the caller has its own list (-AllowedGroups) -- on it.
         -Override      : a Manager Admin's long window (<= 744 h), created APPROVED by that admin.
     #>
     param(
@@ -366,7 +420,9 @@ function New-PimRfaRequest {
         [string]$GroupName = '', [string]$ExternalRef = '', [string]$RequestedBy = '', [string]$Reason = '',
         [datetime]$NowUtc = [datetime]::UtcNow, [string]$Id = '', [switch]$IsConsultant,
         # §91.7: a PORTAL group request may name only a group of this list (Get-PimRfaRequestableGroups), for one of -GroupHours
-        [object[]]$RequestableGroups = @(), [int[]]$GroupHours = @()
+        [object[]]$RequestableGroups = @(), [int[]]$GroupHours = @(),
+        # SEC-96: an API caller's OWN group list (Get-PimRfaCallerGroups) -- empty = no binding; -CallerKind names it in the refusal
+        [string[]]$AllowedGroups = @(), [string]$CallerKind = ''
     )
     $upn = Get-PimRfaRowValue -Row $Admin -Name 'UserPrincipalName'
     $no = { param($r) [pscustomobject]@{ ok = $false; reason = $r; request = $null } }
@@ -401,6 +457,12 @@ function New-PimRfaRequest {
                 # approved by the caller alone. A Tier 0 / Tier 1 group (or one whose tier is not recorded) goes to a PERSON
                 # (the department owners, as a portal request) -- the same "Tier 0/1 always to a human" rule as a proposal.
                 $g = @(@($RequestableGroups) | Where-Object { "$($_.tag)" -ieq "$GroupName".Trim() })[0]
+                # SEC-96 (per-key / per-app binding): a caller with its own group list may request only those groups --
+                # checked first, on top of the requestable list and the Tier 0/1 rule below.
+                if (-not (Test-PimRfaGroupAllowedFor -AllowedGroups $AllowedGroups -GroupTag "$GroupName".Trim() -GroupId $(if ($g) { "$($g.id)" } else { '' }))) {
+                    $who = if ($CallerKind -eq 'app') { 'application' } else { 'API key' }
+                    return (& $no "'$("$GroupName".Trim())' is not one of the groups this $who may request")
+                }
                 if (-not $g) { return (& $no "'$GroupName' cannot be requested through the API (it is not offered for ad-hoc access, or the account already holds it)") }
                 $GroupName = "$($g.tag)"
                 $tierL = "$($g.tierLevel)".Trim().ToUpperInvariant()

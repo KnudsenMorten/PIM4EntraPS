@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 
 <#
 .SYNOPSIS
@@ -29,6 +29,13 @@
   .\Set-PimSmtpRelayPassword.ps1 -TenantId <tenant id> -SubscriptionId <subscription id> -VaultName <vault> `
       -ManagedIdentityObjectId <manager identity object id>,<engine job identity object id> -WhatIf
   Preview; then the same command without -WhatIf (it asks for the password twice).
+
+.NOTES
+  Requirements:
+    PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
+    Role: Key Vault Secrets Officer and User Access Administrator (or Owner) on the environment's Key Vault; Reader on the
+          subscription; Contributor on the resource group only with -CreateVault (Azure).
+    Hosts: login.microsoftonline.com, management.azure.com, *.vault.azure.net
 
 .LINK
   https://invardia.com/docs/pim/scripts/Set-PimSmtpRelayPassword/

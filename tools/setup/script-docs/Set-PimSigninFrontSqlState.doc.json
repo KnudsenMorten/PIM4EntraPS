@@ -26,7 +26,7 @@
   "readsOnly": [
     "the database user with the identity's client id, the owner of schema signin and the CREATE TABLE grant, before and after the change"
   ],
-  "network": [ "login.microsoftonline.com", "management.azure.com", "the PIM SQL server on port 1433 (from inside the PIM network)", "localhost (the browser returns the sign-in to a local port on this computer)" ],
+  "network": [ "login.microsoftonline.com", "management.azure.com", "<server>.database.windows.net:1433 (the PIM SQL server, from inside the PIM network)", "localhost (the browser returns the sign-in to a local port on this computer)" ],
   "whatIf": "Signs in, connects, prints the user, the schema owner and the grant as they are now, and the statements it would run. Nothing is changed.",
   "undo": "In the PIM database: drop the tables in schema signin, DROP SCHEMA signin, REVOKE CREATE TABLE and DROP USER for the front's identity. The front then cannot keep sign-ins.",
   "docUrl": "https://invardia.com/docs/pim/scripts/Set-PimSigninFrontSqlState/"

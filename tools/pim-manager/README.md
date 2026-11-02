@@ -39,7 +39,8 @@ cd C:\path\to\AutomateIT\SOLUTIONS\PIM4EntraPS\tools\pim-manager
 .\Open-PimManager.ps1
 ```
 
-Starts a loopback HTTP server on a random free port and opens your default browser. Closing the
+Starts a loopback HTTP server on a random free port and opens your default browser with a one-time link:
+the link opens the Manager once, in that browser, within 2 minutes. Closing the
 browser tab self-terminates the server after the heartbeat timeout. Without a store it exits with
 `[store] PIM Manager refused to start: ...` naming the settings above.
 
@@ -59,7 +60,7 @@ mapping" (written to the same SQL setting). Delegated portal admins: `pim.Settin
 |---|---|
 | *(none)* / `-Server` | Read + edit mode on the SQL store. |
 | `-Hosted` | 24/7 hosted mode (Easy Auth principal, all interfaces, never self-exits). Also `PIM_HOSTED=1`. |
-| `-NoLaunch` | Don't open the browser; print URL + session token to stdout. |
+| `-NoLaunch` | Don't open the browser; print the one-time link to stdout (it opens the Manager once, within 2 minutes). |
 | `-Port <n>` | Force a port (default: random free). |
 | `-Instance sql:<db>` | Bind a specific SQL database at startup (see Instances). |
 | `-RefreshTenantLists` | CLI-only cache refresh via the engine SPN, then exit. |
@@ -85,7 +86,9 @@ entries can be **discarded** with a reason (kept for history, never applied).
 ## Security model (server mode)
 
 - **Localhost-only bind** locally; hosted binds all interfaces behind Easy Auth + private inbound.
-- **Per-session bearer token** — fresh GUID per server start, required on every `/api/*` call.
+- **One-time link + browser session** — locally, the Manager opens only in the browser that used the one-time
+  link it gave at start; every `/api/*` call needs that browser's session and the page's own request header.
+  The page token is never printed. Hosted: the sign-in at the edge plus the page token, as before.
 - **Heartbeat lifecycle** locally — silence self-terminates the server.
 - **Fail-closed RBAC** — see Access.
 

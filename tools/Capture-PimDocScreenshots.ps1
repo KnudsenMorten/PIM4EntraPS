@@ -104,9 +104,10 @@ try {
     if (-not $ctx.Token -or $ctx.Port -le 0) {
         $o = if (Test-Path $serverLog) { Get-Content $serverLog -Raw } else { '' }
         $e = if (Test-Path "$serverLog.err") { Get-Content "$serverLog.err" -Raw } else { '' }
-        throw "The Manager did not report a session token within 90s.`nSTDOUT:`n$o`nSTDERR:`n$e"
+        throw "The Manager did not open a session within 90s (its one-time link was not seen, or was refused: $($ctx.SessionError)).`nSTDOUT:`n$o`nSTDERR:`n$e"
     }
-    $url = "$($ctx.BaseUrl)/?token=$($ctx.Token)"
+    # the harness used the Manager's one-time link; every browser context gets its session cookie (support/manager-session.ts)
+    $url = "$($ctx.BaseUrl)/"
     Ok "  Manager live on $($ctx.BaseUrl)"
 
     Push-Location $pwDir
@@ -121,6 +122,8 @@ try {
             & npx playwright install chromium | Out-Null
         }
         $env:PIM_MGR_URL          = $url
+        $env:PIM_MGR_COOKIE_NAME  = $ctx.CookieName
+        $env:PIM_MGR_COOKIE_VALUE = $ctx.CookieValue
         $env:PIM_DOC_IMG_DIR      = $OutDir
         $env:PIM_DOC_ONLY         = (@($Only | ForEach-Object { "$_" -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }) -join ',')
         $env:PIM_DOC_MASK_IDENTITY = (Get-PimTestIdentity)
@@ -130,13 +133,13 @@ try {
         $exit = $LASTEXITCODE
     } finally {
         Pop-Location
-        foreach ($v in 'PIM_MGR_URL', 'PIM_DOC_IMG_DIR', 'PIM_DOC_ONLY', 'PIM_DOC_MASK_IDENTITY', 'PIM_DOC_MASK_DATABASE') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
+        foreach ($v in 'PIM_MGR_URL', 'PIM_MGR_COOKIE_NAME', 'PIM_MGR_COOKIE_VALUE', 'PIM_DOC_IMG_DIR', 'PIM_DOC_ONLY', 'PIM_DOC_MASK_IDENTITY', 'PIM_DOC_MASK_DATABASE') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
     }
     if ($exit -eq 0) { Ok "`nDOC SCREENSHOTS: captured." } else { Warn "`nDOC SCREENSHOTS: the capture reported a failure (exit $exit) -- see the list above." }
 }
 finally {
     if ($KeepServer -and $ctx -and $ctx.Process -and -not $ctx.Process.HasExited) {
-        Warn "  -KeepServer: Manager left running at $($ctx.BaseUrl)/?token=$($ctx.Token) (PID $($ctx.Process.Id)); database $($store.Database). Stop the process and drop the database when done."
+        Warn "  -KeepServer: Manager left running at $($ctx.BaseUrl)/ (PID $($ctx.Process.Id)); database $($store.Database). Stop the process and drop the database when done."
     } else {
         if ($ctx) { Info "  stopping the Manager ..."; Stop-PimManagerForTest -Context $ctx }
         if ($store) { Info "  dropping $($store.Database) ..."; Remove-PimTestSqlStore -Store $store }

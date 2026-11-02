@@ -160,7 +160,16 @@ function Set-PimScriptDocHelp {
     $nl = [regex]::Match($body, '(?m)^[ \t]*\.NOTES[ \t]*\r?$')
     if ($nl.Success) {
         $at = $nl.Index + $nl.Length
-        $body = $body.Substring(0, $at) + "`r`n" + $Notes + $body.Substring($at)
+        # PS7-REQ (owner 2026-11-01, framework HOST-2): a .NOTES that starts with the script's "Requirements:" paragraph
+        # keeps it FIRST (Invardia's import reads it there); the permissions go after that paragraph.
+        $rq = [regex]::Match($body.Substring($at), '^\r?\n[ \t]*Requirements:')
+        if ($rq.Success) {
+            $end = [regex]::Match($body.Substring($at + $rq.Length), '\r?\n[ \t]*(\r?\n|\.[A-Z]+\b)')
+            $at = if ($end.Success) { $at + $rq.Length + $end.Index } else { $body.Length }
+            $body = $body.Substring(0, $at) + "`r`n`r`n" + $Notes + $body.Substring($at)
+        } else {
+            $body = $body.Substring(0, $at) + "`r`n" + $Notes + $body.Substring($at)
+        }
     } else {
         $body = $body.TrimEnd() + "`r`n`r`n.NOTES`r`n" + $Notes + "`r`n"
     }
@@ -181,6 +190,45 @@ function Test-PimScriptBuildVersionStamped {
     # PURE. True when the text carries the stamped version line for -Version.
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Version)
     return ($Text -match ("(?m)^[ \t]*\`$script:PimScriptDocVersion = '" + [regex]::Escape($Version) + "'[ \t]*# BUILD-VERSION stamped"))
+}
+
+# PS7-REQ (owner 2026-11-01, framework HOST-2: "we are now in ps7 everywhere" + "make sure they state req in scripts").
+# The ONLY published scripts that keep Windows PowerShell 5.1, agreed with Invardia, each saying why in its Requirements:
+# Install-PimHybridWorker.ps1 (Azure run-command runs it as SYSTEM in Windows PowerShell on a fresh server; it installs
+# PowerShell 7 for the worker's tasks), Initialize-PimHybridWorkerAd.ps1 (Windows GroupPolicy module, Add-KdsRootKey) and
+# (agreed with Invardia 2026-11-02) Deploy-PimActivatorClient.ps1 (customers push it through Group Policy startup scripts /
+# Configuration Manager, which run Windows PowerShell 5.1 on machines without PowerShell 7).
+$script:PimSupportScriptPs51Exceptions = @('Install-PimHybridWorker.ps1', 'Initialize-PimHybridWorkerAd.ps1', 'Deploy-PimActivatorClient.ps1')
+
+function Get-PimSupportScriptRequirementProblems {
+    <#
+      PURE. PS7-REQ: what is wrong with a PUBLISHED script's requirements -- the same rule Invardia's import enforces from
+      the 3.0.16 hand-over: (1) its FIRST line is "#Requires -Version 7.0" (5.1 for the two named exceptions), and (2) its
+      comment-based help has a .NOTES section that STARTS with "Requirements:" and has a "PowerShell:", a "Role:" and a
+      "Hosts:" line (an exception's PowerShell line says "Why:"). Empty result = handed over; anything else = refused.
+      -Text is the file as published (a UTF-8 BOM before line 1 is allowed), -Name its file name.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Name)
+    $out = New-Object System.Collections.Generic.List[string]
+    $is51 = @($script:PimSupportScriptPs51Exceptions) -contains $Name
+    $want = if ($is51) { '5.1' } else { '7.0' }
+    $clean = "$Text" -replace '^﻿', ''   # a UTF-8 BOM read as text: not part of line 1, and not for the parser
+    $first = ($clean -split "`r?`n", 2)[0]
+    if ($first -notmatch ('^#Requires -Version ' + [regex]::Escape($want) + '[ \t]*$')) { $out.Add("line 1 is not '#Requires -Version $want' (it is: '$first')") }
+    $perr = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($clean, [ref]$null, [ref]$perr)
+    $help = if (-not @($perr).Count) { $ast.GetHelpContent() } else { $null }
+    $notes = if ($help) { "$($help.Notes)" } else { '' }
+    if (-not $help) { $out.Add('no comment-based help that Get-Help reads') }
+    elseif ($notes -notmatch '^\s*Requirements:') { $out.Add('the help has no .NOTES section that starts with "Requirements:"') }
+    else {
+        $req = ([regex]::Split($notes.Trim(), '\r?\n[ \t]*\r?\n'))[0]   # the Requirements paragraph (up to the first blank line)
+        foreach ($k in 'PowerShell', 'Role', 'Hosts') { if ($req -notmatch ('(?m)^[ \t]*' + $k + ':[ \t]*\S')) { $out.Add("the Requirements section has no '$($k):' line") } }
+        $ps = [regex]::Match($req, '(?ms)^[ \t]*PowerShell:(?<v>.*?)(?=^[ \t]*(?:Role|Hosts):|\z)')   # the PowerShell line + its continuation lines
+        if ($is51 -and ($ps.Groups['v'].Value -notmatch '5\.1' -or $ps.Groups['v'].Value -notmatch 'Why:')) { $out.Add("the Requirements section of a Windows PowerShell 5.1 exception must say '5.1' and 'Why:'") }
+        if (-not $is51 -and $ps.Groups['v'].Value -notmatch '\b7\.0\b') { $out.Add("the Requirements section's PowerShell line does not say 7.0") }
+    }
+    return @($out.ToArray())
 }
 
 function Expand-PimSupportScript {
@@ -376,6 +424,11 @@ foreach ($s in $Scripts) {
     # must still parse
     $errs = $null; $ast = [System.Management.Automation.Language.Parser]::ParseFile($out, [ref]$null, [ref]$errs)
     if (@($errs).Count) { throw "$name does not parse after inlining: $($errs[0].Message)" }
+    # PS7-REQ: the same rule Invardia's import enforces -- '#Requires -Version 7.0' as the FIRST line of the published
+    # file (5.1 for the two named exceptions) and a "Requirements:" section first in the help's .NOTES. Refused here, so a
+    # script without them is never handed over.
+    $reqBad = @(Get-PimSupportScriptRequirementProblems -Text ([IO.File]::ReadAllText($out)) -Name $name)
+    if ($reqBad.Count) { Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue; throw "$name is not handed over (PS7-REQ): $($reqBad -join '; ') -- fix the source script's first line / help .NOTES" }
     if ($manifest) {
         $help = $ast.GetHelpContent()
         if (-not $help -or -not @($help.Links | Where-Object { "$_".Trim() -eq $docUrl }).Count) { throw "$name`: the built help has no .LINK $docUrl (Get-Help would not find it)" }

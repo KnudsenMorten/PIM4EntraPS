@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 
 <#
 .SYNOPSIS
@@ -54,6 +54,13 @@
     .\Initialize-PimSqlAdminGroup.ps1 -SubscriptionId <subscription id> -ResourceGroup <resource group> -SqlServerName <sql server> `
         -TenantId <tenant id> -SupportAppId <Invardia Support app id> -WhatIf
     Preview, then run the same command without -WhatIf.
+
+.NOTES
+    Requirements:
+      PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
+      Role: Privileged Role Administrator (Microsoft Entra; the group is role-assignable); Contributor or Owner on the
+            SQL server and Reader on the environment's resource group (Azure).
+      Hosts: login.microsoftonline.com, graph.microsoft.com, management.azure.com
 
 .LINK
     https://invardia.com/docs/pim/scripts/Initialize-PimSqlAdminGroup/

@@ -39,6 +39,13 @@
 
 Set-StrictMode -Off
 
+# The browser sign-in's answer page (Wait-PimLoopbackAnswer and the two functions it calls). Loaded HERE, by the
+# generator, so New-PimHubPrepareScript can copy their source INTO the written hub script: the hub owner runs that file
+# alone, with no other PIM file next to it.
+if (-not (Get-Command Wait-PimLoopbackAnswer -ErrorAction SilentlyContinue)) {
+. (Join-Path $PSScriptRoot 'PIM-LoopbackAnswer.ps1')
+}
+
 # ---------------------------------------------------------------------------
 # The short, human name of a VNet, used to build the peering pair names.
 # Convention taken from what the tenant already had -- `vnet-platform` +
@@ -183,7 +190,10 @@ function Get-PimPeeringPlan {
 # PKCE on a loopback port, the Microsoft Azure CLI public client APP ID used over REST -- not the az
 # program; the tenant is baked in or found from the hub subscription's sign-in hint; a token from another
 # tenant is refused before any call), then Azure Resource Manager REST with Invoke-RestMethod. Plan-first:
-# without -Apply it only prints what it would do. PowerShell 7 and Windows PowerShell 5.1.
+# without -Apply it only prints what it would do. The written script needs PowerShell 7 (framework HOST-2: customer-run
+# scripts are PowerShell 7); the code in it still parses on 5.1, so the 5.1 test host can scan and sandbox-run it.
+# Self-contained: the sign-in's answer page (Wait-PimLoopbackAnswer + the functions it calls) is COPIED into the text from
+# the loaded library at generation time (Get-PimHubPrepareLoopbackSource) -- one source of truth, never a dot-source.
 # The generator stays PURE (it returns text). Returns @{ ok; reason; fileName; text; hubPeeringName; spokePeeringName }.
 # ---------------------------------------------------------------------------
 function New-PimHubPrepareScript {
@@ -226,16 +236,17 @@ function New-PimHubPrepareScript {
     }
     if ($zones.Count -and -not $dnsRg) { return (& $fail '-PrivateDnsZoneName needs -DnsResourceGroup (the resource group of the zones, in the hub subscription)') }
     $label = if ("$EnvironmentLabel".Trim()) { "$EnvironmentLabel".Trim() } else { $SpokeVnetName }
+    $loopback = Get-PimHubPrepareLoopbackSource
+    if (-not $loopback) { return (& $fail 'the sign-in helper (Wait-PimLoopbackAnswer) is not loaded -- the written script would not be complete') }
 
     $L = New-Object System.Collections.Generic.List[string]
-    [void]$L.Add('#Requires -Version 5.1')
     [void]$L.Add('<#')
     [void]$L.Add('.SYNOPSIS')
     [void]$L.Add("    PIM Manager -- PREPARE THE HUB NETWORK for '$label'. Generated $($NowUtc.ToUniversalTime().ToString('yyyy-MM-dd HH:mm')) UTC by PIM setup.")
     [void]$L.Add('.DESCRIPTION')
     [void]$L.Add('    Run it as someone who may change the hub VNet (Network Contributor on it; Owner or User Access Administrator for the')
-    [void]$L.Add('    rights below). PowerShell 7 (or Windows PowerShell 5.1) on any machine, a browser sign-in as the hub owner -- no Azure')
-    [void]$L.Add('    CLI, no PowerShell modules, nothing to install. Without -Apply it only shows what it would do.')
+    [void]$L.Add('    rights below). PowerShell 7 on any machine, a browser sign-in as the hub owner -- no Azure CLI, no PowerShell')
+    [void]$L.Add('    modules, nothing to install, no other file. Without -Apply it only shows what it would do.')
     [void]$L.Add('    What it does -- and nothing else (it never deletes anything; running it twice is safe):')
     [void]$L.Add("      1. the hub side of the peering: '$($hub.name)' on '$HubVnetName' -> the PIM network '$SpokeVnetName'")
     if ($oid) {
@@ -246,10 +257,19 @@ function New-PimHubPrepareScript {
     [void]$L.Add('      3. shows the state of both sides. "Connected" on both = done; "Initiated" = PIM setup still has to make its side.')
     [void]$L.Add('.PARAMETER Apply')
     [void]$L.Add('    Make the changes. Without it the script only prints its plan and changes nothing.')
+    [void]$L.Add('.NOTES')
+    [void]$L.Add('    Requirements:')
+    [void]$L.Add('      - PowerShell 7 (pwsh) and a browser on the machine that runs it. This one file is all it needs.')
+    [void]$L.Add("      - An account of the hub's tenant with Network Contributor (or Owner) on the hub VNet '$HubVnetName'.")
+    if ($oid) { [void]$L.Add("      - To grant the deploy identity its rights: Owner or User Access Administrator on '$HubVnetName'$(if ($dnsRg) { " and on the resource group '$dnsRg'" }).") }
+    if ($zones.Count) { [void]$L.Add("      - To link the private DNS zones: Private DNS Zone Contributor on the resource group '$dnsRg'.") }
+    [void]$L.Add('      - Outbound HTTPS to login.microsoftonline.com (sign-in) and management.azure.com (Azure Resource Manager).')
     [void]$L.Add('.EXAMPLE')
     [void]$L.Add("    ./prepare-hub-<name>.ps1          # the plan only")
     [void]$L.Add("    ./prepare-hub-<name>.ps1 -Apply   # sign in as the hub owner and make the changes")
     [void]$L.Add('#>')
+    # AFTER the help block: a #Requires line above it hides the help from Get-Help (the first comment must be the help).
+    [void]$L.Add('#Requires -Version 7.0')
     [void]$L.Add('[CmdletBinding()] param([switch]$Apply)')
     [void]$L.Add('$ErrorActionPreference = ''Stop''')
     [void]$L.Add("`$Label        = '$label'")
@@ -268,9 +288,29 @@ function New-PimHubPrepareScript {
     [void]$L.Add("`$WhoType      = '$DeployPrincipalType'")
     [void]$L.Add("`$DnsRg        = '$dnsRg'")
     [void]$L.Add("`$Zones        = @($((@($zones | ForEach-Object { "'$_'" })) -join ', '))")
+    [void]$L.Add('')
+    [void]$L.Add('# ---- the browser sign-in''s answer page (part of this script; nothing else is loaded) --------------------------------')
+    [void]$L.Add($loopback)
     [void]$L.Add(((Get-PimHubPrepareBody) -replace "`r`n", "`n"))   # the file may be checked out CRLF; the written script is LF throughout
     $file = "prepare-hub-$((Get-PimVnetShortName -VnetName $SpokeVnetName) -replace '[^A-Za-z0-9-]', '-').ps1"
     return @{ ok = $true; reason = $plan.reason; fileName = $file; text = (($L -join "`n").TrimEnd("`n") + "`n"); hubPeeringName = $hub.name; spokePeeringName = $spoke.name }
+}
+
+# The source of the sign-in's answer page, copied into the written file: Wait-PimLoopbackAnswer and the two functions it
+# calls, exactly as the LOADED library defines them (PIM-LoopbackAnswer.ps1, loaded at the top of this file; inlined there
+# by the support-script build). One source of truth -- the hub owner's file carries a copy, never a reference to a file.
+# '' when any of them is not loaded (the generator then refuses rather than write a script that cannot sign in).
+function Get-PimHubPrepareLoopbackSource {
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($n in @('Test-PimLoopbackAnswerQuery', 'Get-PimLoopbackPage', 'Wait-PimLoopbackAnswer')) {
+        $c = Get-Command -Name $n -CommandType Function -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $c) { return '' }
+        # A function's ScriptBlock.Ast IS its FunctionDefinitionAst (older hosts: its body, whose parent is).
+        $fd = $null; try { $fd = $c.ScriptBlock.Ast; if ($fd -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $fd = $fd.Parent } } catch { $fd = $null }
+        $src = if ($fd -is [System.Management.Automation.Language.FunctionDefinitionAst]) { $fd.Extent.Text } else { "function $n {`n$($c.Definition)`n}" }
+        [void]$parts.Add(($src -replace "`r`n", "`n"))
+    }
+    return ($parts -join "`n`n")
 }
 
 # The constant part of the written file (everything after the values). Single-quoted: nothing here is expanded by the generator.
@@ -305,7 +345,7 @@ function Get-HubJwtTenant([string]$Jwt) {
 }
 
 function Get-HubHttpFailure($ErrorRecord) {
-    # The status, ARM error code / message, Retry-After and sign-in hint of a failed call -- PowerShell 7 and 5.1.
+    # The status, ARM error code / message, Retry-After and sign-in hint of a failed call (either shape of response headers).
     $status = 0; $retry = 0; $code = ''; $message = "$($ErrorRecord.Exception.Message)"; $auth = ''
     $resp = $null; try { $resp = $ErrorRecord.Exception.Response } catch { $resp = $null }
     if ($resp) {
@@ -369,11 +409,8 @@ function Get-HubAuthCode([string]$Tenant) {
     }
     $query = $null
     try {
-        # SIGNIN-PAGE (owner 2026-10-31, Invardia's Wait-AuthCode fix): only the answer (code / error) ends the wait, every
-        # request gets a page, and the page keeps answering 10 s after it (engine/_shared/PIM-LoopbackAnswer.ps1).
-        if (-not (Get-Command Wait-PimLoopbackAnswer -ErrorAction SilentlyContinue)) {
-        . (Join-Path $PSScriptRoot 'PIM-LoopbackAnswer.ps1')
-        }
+        # Only the answer (code / error) ends the wait, every request gets a page, and the page keeps answering 10 s after it
+        # (Wait-PimLoopbackAnswer, above in this file).
         $query = Wait-PimLoopbackAnswer -Listeners $tcps -Seconds 300 -TimeoutMessage 'Timed out (5 min) waiting for the sign-in.'
     } finally { foreach ($tcpL in $tcps) { try { $tcpL.Stop() } catch { } } }
     $kv = @{}

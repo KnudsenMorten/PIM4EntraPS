@@ -26,24 +26,34 @@
 #   tests/Test-PimContainerImage.ps1 fails on any FROM that is not pinned this way.
 #   Pinned 2026-09-18.
 
+# 🔒 SEC-106 (as the sign-in front 1.4.3) -- EVERY NuGet RESTORE IS LOCKED. Each .NET stage restores a committed carrier
+# project (tools/pim-manager/nuget/<x>/*.csproj: one pinned PackageReference, RestorePackagesWithLockFile=true) against
+# its committed packages.lock.json with `dotnet restore --locked-mode`: the whole dependency closure AND each package's
+# content hash are frozen, so a transitive dependency can never move under the same top-level version and a re-published
+# package is refused. It used to be `dotnet new classlib` + `dotnet add package` (no lock file: the closure was resolved
+# fresh on every build). Same project shape, so the published DLLs are the same versions as before.
+# Move a version on purpose only: edit the .csproj, `dotnet restore` it (the lock file is rewritten), commit both.
+# tests/Test-PimContainerImage.ps1 fails on an unlocked restore or a lock file that disagrees with the .csproj.
+
 # ---- stage 1: fetch the pinned SQL driver assembly (no PS module) ----
+# PINNED: Microsoft.Data.SqlClient 5.2.2 (tools/pim-manager/nuget/sqlclient/shim.csproj + its packages.lock.json)
 FROM mcr.microsoft.com/dotnet/sdk:8.0@sha256:5ef85cc12cb25be6ec319a7392d1e9efd53c3bc8abb971c53d8058a473f09053 AS sqldriver
-WORKDIR /drv
-RUN dotnet new classlib -n shim -o shim \
- && cd shim \
- && dotnet add package Microsoft.Data.SqlClient --version 5.2.2 \
- && dotnet publish -c Release -o /drv/out
+WORKDIR /drv/shim
+COPY SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/sqlclient/shim.csproj SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/sqlclient/packages.lock.json ./
+RUN dotnet restore shim.csproj --locked-mode \
+ && dotnet publish shim.csproj -c Release -o /drv/out --no-restore \
+ && test -f /drv/out/Microsoft.Data.SqlClient.dll
 
 # ---- stage 1b: the pinned PDF library for the as-built document (PIM §100.61, owner 2026-10-10) ----
 # PDFsharp + MigraDoc (MIT, empira; NOT QuestPDF) -- .NET ASSEMBLIES, no PowerShell module, version frozen here. The same
 # SDK image as stage 1 (no new base image). engine/_shared/PIM-AsBuilt.ps1 Add-Types them from $env:PIM_PDF_DLL_DIR.
 # The build FAILS if an assembly the renderer loads is missing. Licence: tools/pim-manager/third-party/ (copied below).
+# PINNED: PDFsharp-MigraDoc 6.2.4 (tools/pim-manager/nuget/pdf/pdfshim.csproj + its packages.lock.json)
 FROM mcr.microsoft.com/dotnet/sdk:8.0@sha256:5ef85cc12cb25be6ec319a7392d1e9efd53c3bc8abb971c53d8058a473f09053 AS pdflib
-WORKDIR /pdf
-RUN dotnet new classlib -n pdfshim -o pdfshim \
- && cd pdfshim \
- && dotnet add package PDFsharp-MigraDoc --version 6.2.4 \
- && dotnet publish -c Release -o /pdf/out \
+WORKDIR /pdf/pdfshim
+COPY SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/pdf/pdfshim.csproj SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/pdf/packages.lock.json ./
+RUN dotnet restore pdfshim.csproj --locked-mode \
+ && dotnet publish pdfshim.csproj -c Release -o /pdf/out --no-restore \
  && rm -f /pdf/out/pdfshim.* \
  && test -f /pdf/out/MigraDoc.Rendering.dll \
  && test -f /pdf/out/MigraDoc.DocumentObjectModel.dll \
@@ -63,10 +73,11 @@ RUN dotnet new classlib -n pdfshim -o pdfshim \
 # The same pinned PowerShell image as the runtime (already pulled for stage 3: no new base image, no new digest).
 # tests/Test-PimImageNoAzNoModules.ps1 proves no in-container code path reads a pruned folder, and the last RUN
 # below fails the BUILD (never a running container) if a file the runtime needs went missing.
+# tools/pim-manager/nuget (SEC-106: the carrier projects stages 1 / 1b restore) is build input only -- pruned as well.
 FROM mcr.microsoft.com/powershell:7.4-ubuntu-22.04@sha256:62300a213a9293916333df2b014cd3a8f22fb0b0b65f2bb446aaf436bcf8c868 AS src
 COPY SOLUTIONS/PIM4EntraPS /src/PIM4EntraPS
 WORKDIR /src/PIM4EntraPS
-RUN rm -rf tests internal legacy launcher diagnostics output \
+RUN rm -rf tests internal legacy launcher diagnostics output tools/pim-manager/nuget \
  && find . -type d -name node_modules -prune -exec rm -rf {} + \
  && if [ -d docs ]; then find docs -mindepth 1 -maxdepth 1 ! -name img -exec rm -rf {} + ; fi \
  && if [ -d docs/img ]; then find docs/img -mindepth 1 -maxdepth 1 ! -name brand -exec rm -rf {} + ; fi \

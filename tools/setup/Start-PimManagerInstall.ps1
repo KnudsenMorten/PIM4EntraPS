@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 # BUILD-NO-OPTIONAL-LOADS
 
 <#
@@ -50,6 +50,14 @@
   After a stop: run the same command with -Resume; the downloaded release is used again and finished steps are skipped.
 
 .NOTES
+  Requirements:
+    PowerShell: 7.0 or later (pwsh; Azure Cloud Shell has it). Windows PowerShell 5.1 is not supported.
+    Role: Owner on the target subscription (Azure); Privileged Role Administrator and Application Administrator
+          (Microsoft Entra); Exchange Administrator only for the mail sender (optional).
+    Hosts: api.github.com, github.com, objects.githubusercontent.com (the release); then the installer's:
+           login.microsoftonline.com, management.azure.com, graph.microsoft.com, *.database.windows.net (port 1433),
+           *.azurecr.io, outlook.office365.com (mail sender), invardia.com (only with an enrollment key)
+
   Reads: the release metadata at api.github.com (public, no sign-in) and the release zip it names. Writes: a new folder
   in the temp folder (the zip and its unpacked files) and a small note there with that folder's path; everything else is
   the installer's (see Install-PimManager).

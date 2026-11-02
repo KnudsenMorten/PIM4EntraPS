@@ -161,11 +161,16 @@ function Invoke-PimRfaSyncJob {
     $companies = @(Get-PimSqlRows -ConnectionString $cs -Entity 'Account-Definitions-Companies')
     $assign = @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Assignments-Admins')
     # §91.7: the defined groups, read only when ad-hoc groups are offered (RfaSettings.adHocGroups)
-    $defs = @()
-    if ($settings -and $settings.PSObject.Properties['adHocGroups'] -and @(@($settings.adHocGroups) | Where-Object { "$_".Trim() }).Count) {
+    $defs = @(); $defsRead = $false
+    $readDefs = {
+        $out = @()
         foreach ($de in 'PIM-Definitions-Roles', 'PIM-Definitions-Organization', 'PIM-Definitions-Departments', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg', 'PIM-Definitions-Processes', 'PIM-Definitions-Tasks', 'PIM-Definitions-Services') {
-            try { $defs += @(Get-PimSqlRows -ConnectionString $cs -Entity $de) } catch { }
+            try { $out += @(Get-PimSqlRows -ConnectionString $cs -Entity $de) } catch { }
         }
+        return @($out)
+    }
+    if ($settings -and $settings.PSObject.Properties['adHocGroups'] -and @(@($settings.adHocGroups) | Where-Object { "$_".Trim() }).Count) {
+        $defs = @(& $readDefs); $defsRead = $true
     }
     # the portal page's company name + support address (plain-string settings; a read that fails = not shown)
     $companyName = ''; try { $companyName = "$(Get-PimSqlSetting -ConnectionString $cs -Name 'CompanyName')" } catch { $companyName = '' }
@@ -214,7 +219,7 @@ function Invoke-PimRfaSyncJob {
         $sid = "$($sr.RowKey)"
         if (& $find $sid) { continue }   # already taken in (the status push below brings the store row up to date)
         $src = "$($sr.source)"
-        $admin = $null
+        $admin = $null; $callerKind = ''; $callerGroups = @()   # SEC-96: per row, never carried over from the previous one
         if ($src -eq 'portal') { $admin = $byKey["$($sr.accountKey)"] }
         elseif ($src -eq 'api') {
             # §90: the API is its own Pro feature (api.broker)
@@ -227,6 +232,10 @@ function Invoke-PimRfaSyncJob {
                 $kv = Test-PimApiKeyRecord -Record $kr -Scope 'requests.write' -NowUtc $now
                 if (-not $kv.ok) { $reject[$sid] = "API key: $($kv.reason)"; continue }
             } elseif ($apiApps -notcontains "$($sr.callerAppId)".Trim().ToLowerInvariant()) { $reject[$sid] = 'the calling application is not allowed to use the RFA API'; continue }
+            # SEC-96 (per-key / per-app binding): the caller's OWN group list, read from PIM's own store (the key record /
+            # RfaSettings.apiAppGroups) -- empty = no binding, the requestable list alone decides as before
+            $callerKind = if ($kid) { 'key' } else { 'app' }
+            $callerGroups = @(Get-PimRfaCallerGroups -Kind $callerKind -Id $(if ($kid) { $kid } else { "$($sr.callerAppId)" }) -ApiKeys $apiKeys -Settings $settings)
             $admin = $byUpn["$($sr.upn)".Trim().ToLowerInvariant()]
         } else { $reject[$sid] = "unknown source '$src'"; continue }
         if (-not $admin) { $reject[$sid] = 'no such account here'; continue }
@@ -236,6 +245,14 @@ function Invoke-PimRfaSyncJob {
         if ($src -eq 'api' -and "$($sr.kind)" -eq 'proposal') {
             $intakeOn = $false; if (Get-Command Test-PimIntakeConfigured -ErrorAction SilentlyContinue) { try { $intakeOn = [bool](Test-PimIntakeConfigured) } catch { $intakeOn = $false } }
             if (-not $intakeOn) { $reject[$sid] = 'proposals are not accepted here -- the intake (IntakeEnabled) is switched off'; continue }
+            # SEC-96: a caller bound to its own groups may propose only those groups too
+            if ($callerGroups.Count) {
+                if (-not $defsRead) { $defs = @(& $readDefs); $defsRead = $true }   # a group id in the list needs the definitions
+                $pDef = @($defs | Where-Object { "$($_.GroupTag)".Trim() -ieq "$($sr.groupName)".Trim() })[0]
+                if (-not (Test-PimRfaGroupAllowedFor -AllowedGroups $callerGroups -GroupTag "$($sr.groupName)" -GroupId $(if ($pDef) { "$($pDef.GroupId)" } else { '' }))) {
+                    $reject[$sid] = "proposal refused: '$("$($sr.groupName)".Trim())' is not one of the groups this $(if ($callerKind -eq 'app') { 'application' } else { 'API key' }) may request"; continue
+                }
+            }
             $rec = [ordered]@{ externalId = "$($sr.externalRef)"; requestType = "$($sr.requestType)"; requestor = "$($sr.requestor)"; targetAdmin = (Get-PimRfaRowValue -Row $admin -Name 'UserName')
                                groupTag = "$($sr.groupName)"; justification = "$($sr.reason)"; source = "api:$(if ("$($sr.callerKeyId)".Trim()) { "key:$($sr.callerKeyId)" } else { "app:$($sr.callerAppId)" })" }
             $gate = Test-PimIntakeAccepted -Record ([pscustomobject]$rec)
@@ -261,7 +278,8 @@ function Invoke-PimRfaSyncJob {
                       -RequestableGroups @(Get-PimRfaRequestableGroups -Settings $settings -Admin $admin -Assignments $assign -Definitions $defs) -GroupHours @(Get-PimRfaAdHocHours -Settings $settings -Department (& $deptOf $admin)) }
               elseif ($src -eq 'portal') { New-PimRfaRequest -Admin $admin -Department (& $deptOf $admin) -Hours $hours -Source portal -Reason "$($sr.reason)" -NowUtc $now -IsConsultant:$isC -Id $sid }
               else { New-PimRfaRequest -Admin $admin -Department (& $deptOf $admin) -Hours $hours -Source api -Kind $kind -GroupName "$($sr.groupName)" -ExternalRef "$($sr.externalRef)" -RequestedBy "api:$($sr.callerAppId)" -Reason "$($sr.reason)" -NowUtc $now -IsConsultant:$isC `
-                         -RequestableGroups @(if ($kind -eq 'group') { Get-PimRfaRequestableGroups -Settings $settings -Admin $admin -Assignments $assign -Definitions $defs }) }   # SEC-96: the same list as the portal
+                         -RequestableGroups @(if ($kind -eq 'group') { Get-PimRfaRequestableGroups -Settings $settings -Admin $admin -Assignments $assign -Definitions $defs }) `
+                         -AllowedGroups $callerGroups -CallerKind $callerKind }   # SEC-96: the same list as the portal, and the caller's own groups
         if (-not $nr.ok) { $reject[$sid] = $nr.reason; continue }
         $existing = & $find $nr.request.id
         if ($existing) { $existing | Add-Member -NotePropertyName storeIds -NotePropertyValue @(@($existing.storeIds) + $sid | Where-Object { $_ } | Select-Object -Unique) -Force; $log.Add("$sid = $($existing.id) (same ticket, idempotent)"); continue }

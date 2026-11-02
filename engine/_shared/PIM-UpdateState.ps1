@@ -371,6 +371,16 @@ function Invoke-PimUpdateStateDeploySeed {
     }
 }
 
+function Test-PimUpdateStateUnsignedSource {
+    <# PURE. SEC-95: is the recorded update source a storage container (no signature) rather than Invardia's signed releases? #>
+    param([AllowEmptyString()][AllowNull()][string]$Source)
+    return ("$Source".Trim().ToLowerInvariant() -in @('pim-src', 'blob'))
+}
+function Get-PimUpdateStateUnsignedSourceText {
+    # PURE. The one sentence every view of the update status carries for an unsigned source (plain words, no setting named).
+    'Unsigned update source: this environment takes its updates from a storage container chosen for it, not from the signed release service -- what is installed is not checked against a signature.'
+}
+
 function Get-PimUpdateStateVerdict {
     <#
       PURE. Everything the GUI shows about this environment's ring, from the recorded document plus the
@@ -435,6 +445,9 @@ function Get-PimUpdateStateVerdict {
         configuredRing     = ''
         configuredUtc      = ''
         source             = ''
+        # SEC-95: the recorded source is a storage container chosen for this environment (PIM_UPDATE_SOURCE pim-src / blob):
+        # its archives carry no signature. Shown on every view of the update status, never only in the job log.
+        unsignedSource     = $false
         installedVersion   = ''
         # REQUIREMENTS 95.2i: the update run's check of the engine identity after its last roll (the recorded object, or
         # $null), and whether it found a permission missing. The update itself is not coloured by it -- the roll succeeded;
@@ -498,6 +511,8 @@ function Get-PimUpdateStateVerdict {
         $dBits = New-Object System.Collections.Generic.List[string]
         $dBits.Add("$($out.ringLabel) was set on the update job when this environment was deployed. The update job has not run yet, " +
                    'so no approved version or update outcome is known here; its first scheduled run records them.')
+        $out.unsignedSource = (Test-PimUpdateStateUnsignedSource -Source $out.source)
+        if ($out.unsignedSource) { $dBits.Add((Get-PimUpdateStateUnsignedSourceText)) }
         if ($out.held) { $dBits.Add('This environment is HELD (PIM_UPDATE_HOLD=1): its ring is not consulted and it does not move.') }
         if ($out.stale) { $dBits.Add('The update job has not reported since this environment was deployed -- check its executions.') }
         $out.message = ($dBits -join ' ')
@@ -648,6 +663,8 @@ function Get-PimUpdateStateVerdict {
                       'Home > Permissions shows the command a Privileged Role Administrator runs to grant them.')
         }
     }
+    $out.unsignedSource = (Test-PimUpdateStateUnsignedSource -Source $out.source)
+    if ($out.unsignedSource) { $bits.Add((Get-PimUpdateStateUnsignedSourceText)) }
     if ($out.stale) {
         $bits.Add('The values below are what was last RECORDED, not a live reading -- the update job has not reported recently.')
     }

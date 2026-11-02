@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 
 <#
 .SYNOPSIS
@@ -41,7 +41,7 @@
   would make (the License setting, the install key or its claim), and writes nothing.
 
   Published as ONE self-contained file at https://invardia.com/support/pim/Set-PimLicense.ps1 (REQUIREMENTS 100.81): it
-  runs in Windows PowerShell 5.1 and PowerShell 7 with nothing next to it.
+  runs in PowerShell 7 with nothing next to it.
 
 .EXAMPLE
   .\Set-PimLicense.ps1 -LicensePath .\licence.pimlicense -SqlServer <server>.database.windows.net -TenantId <tenant id> -UseSignedInAccount -WhatIf
@@ -49,6 +49,12 @@
 .EXAMPLE
   .\Set-PimLicense.ps1 -LicensePath .\licence.pimlicense -SqlServer <server>.database.windows.net -TenantId <tenant id> -UseSignedInAccount
   Verifies the licence, stores it, reads it back and verifies it again.
+
+.NOTES
+  Requirements:
+    PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
+    Role: member of the environment's SQL admin group (grp-pim-sql-admins); no Microsoft Entra or Azure role.
+    Hosts: login.microsoftonline.com, *.database.windows.net (port 1433)
 
 .LINK
   https://invardia.com/docs/pim/scripts/Set-PimLicense/

@@ -29,15 +29,19 @@
     Delete the policy instead of extending it. Every URL signed against it stops working.
 
 .EXAMPLE
-    .\Update-PimSourceAccess.ps1 -StorageAccount <acct> -Days 400
-    Push the shared feed's expiry out by 400 days. No customer is touched.
+    .\Update-PimSourceAccess.ps1 -StorageAccount <acct> -Days 7
+    Push the shared feed's expiry out by 7 days (at most 31: no long-lived read link). No customer is touched.
 
 .EXAMPLE
     .\Update-PimSourceAccess.ps1 -StorageAccount <acct> -CustomerId contoso -Revoke
     Cut off ONE customer, immediately, leaving every other customer working.
 
 .EXAMPLE
-    .\Update-PimSourceAccess.ps1 -StorageAccount <acct> -All -Days 400
+    .\Update-PimSourceAccess.ps1 -StorageAccount <acct> -PolicyName srcread -Revoke
+    Retire the old long-lived shared link (policy 'srcread') once no reader uses it any more.
+
+.EXAMPLE
+    .\Update-PimSourceAccess.ps1 -StorageAccount <acct> -All -Days 7
     Extend every per-customer feed in the account in one pass.
 #>
 [CmdletBinding(SupportsShouldProcess)]
@@ -47,7 +51,8 @@ param(
     [string]$Container = 'pim-src',
     [string]$CustomerId,
     [string]$PolicyName = 'srcread',
-    [int]$Days = 400,
+    # SEC-107: a read link is short-lived -- an extension is at most 31 days (it was 400 by default)
+    [ValidateRange(1, 31)][int]$Days = 7,
     [switch]$Revoke,
     [switch]$All
 )

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 
 <#
 .SYNOPSIS
@@ -12,7 +12,7 @@
     Started step "Engine permissions"): the page itself is read-only on purpose -- an identity that can grant
     permissions could give itself anything.
 
-    No PowerShell modules: plain REST + .NET, Windows PowerShell 5.1 or PowerShell 7. You sign in in the browser
+    No PowerShell modules: plain REST + .NET, PowerShell 7. You sign in in the browser
     (Microsoft Edge is opened; the default browser when Edge is not installed). Azure role assignments ask for a second,
     quick sign-in to Azure.
 
@@ -61,6 +61,13 @@
 .EXAMPLE
     .\Grant-PimEnginePermissions.ps1 -TenantId '<tenant id>' -EngineObjectId '<object id>' -GraphPermissions 'Group.ReadWrite.All' -WhatIf
     Signs in and reads, then prints what it would grant ("What if: ...") -- nothing is changed.
+
+.NOTES
+    Requirements:
+      PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
+      Role: Privileged Role Administrator (Microsoft Entra) for the application permissions; for an Azure role, User
+            Access Administrator or Owner at that role's scope (only with -AzureRoleAssignments).
+      Hosts: login.microsoftonline.com, graph.microsoft.com, management.azure.com
 
 .LINK
     https://invardia.com/docs/pim/scripts/Grant-PimEnginePermissions/

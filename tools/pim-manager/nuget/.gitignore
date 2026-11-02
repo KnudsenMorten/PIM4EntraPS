@@ -1,0 +1,3 @@
+# SEC-106: only each carrier .csproj and its packages.lock.json are source. A restore / IDE leaves obj/ and bin/ here.
+obj/
+bin/

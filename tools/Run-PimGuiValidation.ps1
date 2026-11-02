@@ -23,14 +23,15 @@
                                   tears it down and drops the database. No files,
                                   no tenant. SQL-only since 2026-09-12.
       -Target <url>            -- points the spec at an already-running Manager
-                                  (e.g. a hosted deploy). The URL must include the
-                                  ?token=... handshake. The server is NOT managed.
+                                  (e.g. a hosted deploy). The server is NOT managed.
+                                  A LOCAL Manager opens only with its one-time link,
+                                  so -Target suits a hosted one (signed in its own way).
 
     Headless on purpose: never pops a visible window. It is still a real browser.
 
 .PARAMETER Target
-    'local' (default) to serve + drive a local server, or a full tokenised URL
-    of an already-running Manager.
+    'local' (default) to serve + drive a local server, or the full URL of an
+    already-running Manager.
 
 .PARAMETER Port
     Ignored (kept for command-line compatibility): the local server binds a free
@@ -50,7 +51,7 @@
 .EXAMPLE
     .\tools\Run-PimGuiValidation.ps1 -Project all
 .EXAMPLE
-    .\tools\Run-PimGuiValidation.ps1 -Target "http://127.0.0.1:8080/?token=abc..."
+    .\tools\Run-PimGuiValidation.ps1 -Target "https://pim-manager.example.test/"
 #>
 [CmdletBinding()]
 param(
@@ -102,14 +103,15 @@ if ($Target -ieq 'local') {
         $outTxt = if (Test-Path $serverLog) { Get-Content $serverLog -Raw } else { '' }
         $errTxt = if (Test-Path "$serverLog.err") { Get-Content "$serverLog.err" -Raw } else { '' }
         Remove-PimTestSqlStore -Store $testStore
-        throw "Did not see a session token from the Manager within 90s.`nSTDOUT:`n$outTxt`nSTDERR:`n$errTxt"
+        throw "The Manager did not open a session within 90s (its one-time link was not seen, or was refused: $($serverCtx.SessionError)).`nSTDOUT:`n$outTxt`nSTDERR:`n$errTxt"
     }
-    $mgrUrl = "$($serverCtx.BaseUrl)/?token=$($serverCtx.Token)"
+    # the harness used the one-time link; the browser contexts get its session cookie (support/manager-session.ts)
+    $mgrUrl = "$($serverCtx.BaseUrl)/"
+    $env:PIM_MGR_COOKIE_NAME = $serverCtx.CookieName; $env:PIM_MGR_COOKIE_VALUE = $serverCtx.CookieValue
     Ok "  Manager live at $mgrUrl"
 }
 else {
     if ($Target -notmatch '^https?://') { throw "-Target must be 'local' or a full http(s) URL (got '$Target')." }
-    if ($Target -notmatch 'token=')     { Warn "  -Target URL has no token= -- /api calls will 401 and tabs will show errors." }
     $mgrUrl = $Target
     Info "Using already-running Manager at $mgrUrl"
 }
@@ -140,6 +142,7 @@ try {
 }
 finally {
     Pop-Location
+    Remove-Item Env:\PIM_MGR_COOKIE_NAME, Env:\PIM_MGR_COOKIE_VALUE -ErrorAction SilentlyContinue
     if ($serverProc -and -not $serverProc.HasExited) {
         if ($KeepServer) {
             Warn "  -KeepServer set: Manager left running at $mgrUrl (PID $($serverProc.Id)) on SQL database $($testStore.Database). Stop it and drop the database manually."

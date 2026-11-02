@@ -133,6 +133,52 @@ function Get-PimUpdateSourcePlan {
     @{ action = 'build'; version = $v; image = $img; reason = "building $v from source" }
 }
 
+function Test-PimInvardiaSourceAddress {
+    <# PURE. Is this source address Invardia's update service (the signed path), rather than a storage container? #>
+    param([AllowEmptyString()][AllowNull()][string]$SourceUrl)
+    $u = "$SourceUrl".Trim()
+    return [bool]($u -match '^(?i)invardia://' -or $u -match '^(?i)https://([a-z0-9-]+\.)*invardia\.com/api/updates/')
+}
+
+function Resolve-PimUpdateSourceMode {
+    <#
+      PURE. SEC-95 (SECAUDIT-1, cloud-updater half): WHERE this update run may take its code, from the job's
+      PIM_UPDATE_SOURCE and PIM_UPDATE_SOURCE_URL. Returns @{ mode; signed; unsigned; refused; reason; line }:
+        mode 'invardia'            the signed Pro manifest (PIM_UPDATE_SOURCE=invardia, or no source + Invardia's address)
+             'invardia-community'  the signed Community channel (same rule, the Community address)
+             'pim-src'             a storage container's channel.json + archives -- ONLY when the job names it
+                                   (PIM_UPDATE_SOURCE=pim-src, or its alias 'blob'). Not signed: unsigned = $true, and
+                                   the run + the Manager say so on every run.
+             'roll-only'           no source at all: nothing is fetched (the registry's own images are rolled, as before)
+             'refused'             a storage-container address with NO source named, or a source this version does not
+                                   know -- nothing is fetched, nothing moves, and the reason says what to set.
+      🔒 There is no fallback between them: a job set to Invardia never reads the container, and a container address is
+      never used because Invardia could not be reached. Default = Invardia.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Source, [AllowEmptyString()][AllowNull()][string]$SourceUrlTemplate)
+    $s = "$Source".Trim().ToLowerInvariant()
+    $t = "$SourceUrlTemplate".Trim()
+    $isInv = Test-PimInvardiaSourceAddress -SourceUrl $t
+    $mk = { param($mode, $signed, $reason, $line)
+        @{ mode = $mode; signed = [bool]$signed; unsigned = ($mode -eq 'pim-src'); refused = ($mode -eq 'refused'); reason = $reason; line = $line } }
+    switch ($s) {
+        'invardia'           { return (& $mk 'invardia' $true 'signed Pro release (Invardia)' 'update source: Invardia -- signed releases') }
+        'invardia-community' { return (& $mk 'invardia-community' $true 'signed Community release (Invardia)' 'update source: Invardia Community channel -- signed releases') }
+        { $_ -in @('pim-src', 'blob') } {
+            if ($t -and $isInv) { return (& $mk 'refused' $false "PIM_UPDATE_SOURCE=$s names a storage container, but the source address is Invardia's update service -- nothing is fetched (set the source to invardia)" 'update source: REFUSED -- the source setting and the source address disagree') }
+            return (& $mk 'pim-src' $false 'UNSIGNED source: a storage container chosen for this environment (its archives and channel file carry no signature)' 'update source: storage container (UNSIGNED -- chosen for this environment; the archives carry no signature)')
+        }
+        '' {
+            if (-not $t) { return (& $mk 'roll-only' $false 'no update source -- only images already in the registry are rolled' 'update source: none (roll only)') }
+            if ($isInv -and $t -match '(?i)/api/updates/[^/]+/community/') { return (& $mk 'invardia-community' $true 'signed Community release (Invardia)' 'update source: Invardia Community channel -- signed releases') }
+            if ($isInv) { return (& $mk 'invardia' $true 'signed Pro release (Invardia)' 'update source: Invardia -- signed releases') }
+            return (& $mk 'refused' $false ('this updater has a storage-container address but no update source -- it takes updates only from the signed release service unless a storage container is chosen as its source; nothing is fetched. ' +
+                                            'Re-run tools/setup/Deploy-PimUpdateJob.ps1 with -UpdateSource Invardia (Pro) or InvardiaCommunity (Community).') 'update source: REFUSED -- a storage-container address without an update source')
+        }
+        default { return (& $mk 'refused' $false "unknown update source '$s' -- nothing is fetched (expected invardia or invardia-community)" "update source: REFUSED -- unknown source '$s'") }
+    }
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # §60 -- RING RELEASE, PULLED RATHER THAN PUSHED.
 # The pin is the ring enforcement point and always has been: an environment moves only to the

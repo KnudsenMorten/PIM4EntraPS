@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 
 <#
 .SYNOPSIS
@@ -40,6 +40,15 @@
 .EXAMPLE
   .\Grant-PimSupportSqlAccess.ps1 -TenantId <tenant id> -SubscriptionId <subscription id> -ResourceGroup rg-pim -SqlServerName sql-pim-contoso -SupportAppId <Invardia Support app client id> -WhatIf
   Preview: reads everything and prints what it would do. Then the same command without -WhatIf.
+
+.NOTES
+  Requirements:
+    PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
+    Role: SQL Server Contributor (or Contributor / Owner) on the PIM SQL server or its resource group (Azure); a
+          database owner -- a member of the SQL admin group or the server's Microsoft Entra administrator; Privileged
+          Role Administrator (Microsoft Entra) only to add the Support app to the SQL admin group.
+    Hosts: login.microsoftonline.com, management.azure.com, graph.microsoft.com, *.database.windows.net (port 1433),
+           api.ipify.org (this machine's public address, unless -SetupHostIp is given)
 
 .LINK
   https://invardia.com/docs/pim/scripts/Grant-PimSupportSqlAccess/

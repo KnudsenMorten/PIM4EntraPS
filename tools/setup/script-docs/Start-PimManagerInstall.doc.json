@@ -9,6 +9,8 @@
   "runAs": [
     { "kind": "azureRbac", "name": "Owner", "scope": "the target subscription", "why": "The installer it runs (Install-PimManager) creates the resource group and its resources and assigns Azure roles to the identities it creates (Contributor + User Access Administrator is the equivalent); its check stops before anything is created without it." },
     { "kind": "entraRole", "name": "Privileged Role Administrator", "scope": "tenant", "why": "For the installer: Microsoft Graph application permissions for PIM Manager's identities and the SQL admin group. Without it the installation continues and ends with the command for the right person." },
+    { "kind": "entraRole", "name": "Application Administrator", "scope": "tenant", "why": "For the installer: the Manager's sign-in app registration (the same as Install-PimManager)." },
+    { "kind": "exchange", "name": "Exchange Administrator (optional)", "scope": "Exchange Online", "why": "For the installer: only for the mail sender (a shared mailbox and its scoped send right). Without it the step is a warning with the command for an Exchange Administrator." },
     { "kind": "other", "name": "Signed in in the browser as yourself (no command-line tool, no PowerShell module, no secret, no certificate)", "scope": "the tenant and subscription you name", "why": "The installer signs you in in the browser when it first needs Azure or Microsoft Graph. This launcher itself reads only public release data and needs no sign-in." }
   ],
   "changes": [
@@ -49,7 +51,7 @@
   "network": [
     "api.github.com (the release metadata)",
     "github.com and objects.githubusercontent.com (the release zip)",
-    "and everything Install-PimManager reaches (management.azure.com, graph.microsoft.com, login.microsoftonline.com, the database and the registry it creates)"
+    "and everything Install-PimManager reaches (management.azure.com, graph.microsoft.com, login.microsoftonline.com, the database it creates <server>.database.windows.net:1433, the registry it creates <registry>.azurecr.io, outlook.office365.com for the mail sender, invardia.com only with an enrollment key)"
   ],
   "whatIf": "Downloads and unpacks the release into a new folder in the temp folder (the plan is read from it), then runs Install-PimManager -WhatIf from it: its checks (reads only) and every step it would take. No note is written and nothing in Azure, Microsoft Entra ID or the database is changed.",
   "undo": "Delete the release folder and the note in the temp folder; the installation itself is undone as described for Install-PimManager.",

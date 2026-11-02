@@ -2154,15 +2154,15 @@
         "on": {
           "tone": "neutral",
           "title": "Let these applications ask for access?",
-          "body": "Each listed application can ask PIM Manager for admin access for a limited time, and the request is approved on arrival.",
+          "body": "Each listed application can ask PIM Manager for admin access for a limited time. The request is approved on arrival, except access to a Tier 0 or Tier 1 group (or a group with no tier set), which waits for a person to approve it.",
           "note": "Note: the approval must happen in that system, because PIM Manager does not ask a second person."
         }
       },
       "info": {
         "what": "The Entra application (client) ids allowed to call the access request REST API, typically your ticketing system. The engine publishes the list to the portal for a fast answer and re-checks every API request itself.",
-        "enabled": "When set: a listed application can request, through the API, that an admin account is enabled for 1-744 hours or that an account gets a timed group membership. API requests are approved on arrival -- no department owner decision -- and the engine applies them on its next run, within a few minutes. It can also send proposals, which only become pending changes for an administrator.",
+        "enabled": "When set: a listed application can request, through the API, that an admin account is enabled for 1-744 hours or that an account gets a timed group membership. API requests are approved on arrival -- no department owner decision -- and the engine applies them on its next run, within a few minutes; a group request is limited to the groups offered (and to the groups set for that key or application), and a Tier 0 or Tier 1 group, or a group with no tier set, waits for a person to approve it. It can also send proposals, which only become pending changes for an administrator.",
         "disabled": "When empty / at the default: every API call made with an Entra application token is refused. API keys still work if you create them.",
-        "risk": "Each listed application can grant timed privileged access without a second person in PIM Manager, so the approval must happen in that system. API group requests are not limited to the ad-hoc group list. Reversible: remove the id; the engine refuses its new requests on the next run, but access already granted runs until its end time.",
+        "risk": "Each listed application can grant timed privileged access without a second person in PIM Manager, so the approval must happen in that system. API group requests are held to the groups offered for ad-hoc access, and each application can be limited to its own groups (Groups each application may request). Reversible: remove the id; the engine refuses its new requests on the next run, but access already granted runs until its end time.",
         "requires": "Pro (Request for authorization portal and the access request API). SuperAdmin to change. Values must be application (client) ids (GUIDs).",
         "recommended": "List only the one application of your ticketing system, and make sure its own workflow requires approval before it calls the API.",
         "docUrl": "https://invardia.com/docs/pim/settings/RfaBroker.ApiAppIds/"
@@ -2235,8 +2235,8 @@
         }
       },
       "info": {
-        "what": "Keys for systems that cannot use an Entra application token to call the access request API. Each key has a name, scopes (requests.write to submit, requests.read to read status) and a lifetime of 1-3650 days. The key is shown once; only its hash is stored. It is sent as the X-Api-Key header.",
-        "enabled": "When a key is created: the next request-portal sync (within a minute or two) publishes its hash to the portal, and a caller with requests.write can then ask for admin accounts to be enabled or timed group memberships to be added -- approved on arrival and applied by the engine on its next run.",
+        "what": "Keys for systems that cannot use an Entra application token to call the access request API. Each key has a name, scopes (requests.write to submit, requests.read to read status) and a lifetime of 1-3650 days. The key is shown once; only its hash is stored. It is sent as the X-Api-Key header. A key can be limited to the groups it may request (Groups); without a list it may request every group offered for ad-hoc access.",
+        "enabled": "When a key is created: the next request-portal sync (within a minute or two) publishes its hash to the portal, and a caller with requests.write can then ask for admin accounts to be enabled or timed group memberships to be added -- approved on arrival (a Tier 0 or Tier 1 group, or one with no tier set, waits for a person) and applied by the engine on its next run.",
         "disabled": "When no key exists (the default) or a key is revoked: calls with it are refused. The engine refuses a revoked key at once; the portal stops accepting it within a few minutes.",
         "risk": "Anyone holding a write key can grant timed privileged access without an approver in PIM Manager. A key cannot be shown again; if it leaks, revoke it. Expired keys stop working by themselves. Revoking does not end access already granted -- it runs until its end time.",
         "requires": "Pro (access request API). SuperAdmin to create, list and revoke keys. The request portal must be deployed.",

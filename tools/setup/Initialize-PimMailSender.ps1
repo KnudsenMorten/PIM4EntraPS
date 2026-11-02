@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 
 <#
 .SYNOPSIS
@@ -116,6 +116,16 @@
        -SqlServerFqdn <server>.database.windows.net
 
 .NOTES
+  Requirements:
+    PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
+    Role: Exchange Administrator or Global Administrator (Microsoft Entra, active), and Privileged Role Administrator
+          or Cloud Application Administrator for the grants on the sending identities. To store the sender
+          (-SqlServerFqdn): member of the environment's SQL admin group. With -TickJobName / -ManagerAppName: Reader on
+          those container apps (Azure).
+    Hosts: login.microsoftonline.com, graph.microsoft.com, outlook.office365.com, management.azure.com (only with
+           -TickJobName / -ManagerAppName / -AllowThisIpTemporarily), *.database.windows.net (only with -SqlServerFqdn),
+           *.vault.azure.net (only with -KeyVaultName)
+
   RE-RUNNING IS SAFE. Every step reads first and treats "already there" as success; a read that
   FAILS (as opposed to finding nothing) stops the run instead of guessing that the object is absent.
   A re-run on a fully configured tenant changes nothing in Exchange -- it only re-activates the

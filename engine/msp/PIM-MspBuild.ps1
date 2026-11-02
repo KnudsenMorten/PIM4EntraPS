@@ -977,7 +977,10 @@ function Get-PimMspBuildPlan {
     }
     if ("$(& $V 'logAnalyticsName')".Trim()) { $hosting['LogAnalyticsWorkspaceName'] = "$(& $V 'logAnalyticsName')".Trim() }
     if ("$(& $V 'imageTag')".Trim())        { $hosting['ImageTag'] = "$(& $V 'imageTag')".Trim() }
+    # SEC-95: a storage-container source is used only when it is named -- so a config that names it passes it on explicitly
+    # (with no source named, the updater deploy now defaults to Invardia's signed releases)
     if ("$(& $V 'updater.source')".Trim() -eq 'invardia') { $hosting['UpdateSource'] = 'Invardia' }
+    elseif ("$(& $V 'updater.source')".Trim() -eq 'pim-src') { $hosting['UpdateSource'] = 'pim-src' }
     # 🔴 71.29 (rehearsal 2026-09-17) -- THE ADDRESS PLAN. The hosting step's FIRST action, `prereq`, refuses without
     # one ("PREREQ needs an address plan ... Refusing to guess: two environments sharing a CIDR cannot be un-peered"),
     # and the plan had no way to express one and never forwarded anything. So the one-shot build could NOT stand up a
@@ -1089,8 +1092,10 @@ function Get-PimMspBuildPlan {
         $sqlGroupArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; SqlServerName = $sqlName; TenantId = $tid
                            ExtraMemberObjectIds = @(('{{signed-in-user}}')) }
     }
+    # PS7-REQ (owner 2026-11-01, framework HOST-2): Initialize-PimSqlAdminGroup.ps1 is a published script and declares
+    # '#Requires -Version 7.0' (Graph + ARM only, no SqlClient), so its step runs under pwsh, never Windows PowerShell.
     $steps.Add((New-PimMspBuildStep -Id 'sqlgroup' -Title 'SQL admin group grp-pim-sql-admins: the Invardia Support app (the tick + Manager use their own least-privilege database users)' `
-        -Script 'tools\setup\Initialize-PimSqlAdminGroup.ps1' -HostExe 'powershell' `
+        -Script 'tools\setup\Initialize-PimSqlAdminGroup.ps1' -HostExe 'pwsh' `
         -Arguments $sqlGroupArgs `
         -Why 'framework 12.23 P5: the SQL admin group is the Invardia Support app only; runtime identities get a contained user in their own pim_* role, never admin'))
 
@@ -1343,6 +1348,7 @@ function Get-PimMspBuildPlan {
     if ($alertTo.Count) { $vArgs['AlertRecipients'] = $alertTo }
     if ("$($updRing.ring)" -match "^[0-3]$") { $vArgs["UpdateRing"] = [int]$updRing.ring }
     if ("$(& $V 'updater.source')".Trim() -eq 'invardia') { $vArgs['UpdateSource'] = 'Invardia' }
+    elseif ("$(& $V 'updater.source')".Trim() -eq 'pim-src') { $vArgs['UpdateSource'] = 'pim-src' }   # SEC-95: named = passed on
     if ("$(& $V 'acr.agentPoolName')".Trim()) { $vArgs['AcrAgentPoolName'] = "$(& $V 'acr.agentPoolName')".Trim() }
     # PIM 100.116 (framework 4.1b): the check's 'support-sql' line proves the Support app's standing database access
     if ("$(& $V 'support.appId')".Trim()) { $vArgs['SupportAppId'] = "$(& $V 'support.appId')".Trim() }

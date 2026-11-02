@@ -147,6 +147,16 @@
     # -> Add: eheocihmlppcophaeakmdenhgcookkab;https://knudsenmorten.github.io/PIM4EntraPS/updates.xml
 
 .NOTES
+    Requirements:
+      PowerShell: Windows PowerShell 5.1 (powershell.exe) or PowerShell 7 on Windows -- one of PIM's three exceptions
+                  to PowerShell 7. Why: Group Policy startup scripts and Configuration Manager run it in Windows
+                  PowerShell on machines that have no PowerShell 7.
+      Role: local Administrator (elevated PowerShell) for -Scope Machine, the default; none for -Scope User. No
+            Microsoft Entra role: only the tenant lookup (without -TenantId and -ClientId) signs in, to read the
+            organisation and the PIM Activator app.
+      Hosts: none when -TenantId and -ClientId are given; otherwise login.microsoftonline.com, graph.microsoft.com.
+             The browser, not this script, then fetches the extension from its update address (-UpdateUrl).
+
     Existing policies: the org's own extension policies are never overwritten: our rows go
     into the slot already holding our id, else the lowest free slot, and our
     ExtensionSettings entry is MERGED into the org's dictionary. Same layout and the

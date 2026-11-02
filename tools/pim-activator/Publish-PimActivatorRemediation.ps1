@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 
 <#
 .SYNOPSIS
@@ -39,6 +39,12 @@
     # Preview: what it would upload and assign -- changes nothing:
     .\Publish-PimActivatorRemediation.ps1 -TenantId <tenant id> -ClientId <PIM Activator app id> -AssignToGroupId <group object id> -WhatIf
 .NOTES
+    Requirements:
+      PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported. (The Detect / Remediate pair it builds
+                  runs in Windows PowerShell 5.1 on the devices, where Intune runs it.)
+      Role: Intune Administrator (Microsoft Entra).
+      Hosts: login.microsoftonline.com, graph.microsoft.com
+
     A transcript of the run is written to <temp>\pim-manager-logs\ (its path is printed).
 .LINK
     https://invardia.com/docs/pim/scripts/Publish-PimActivatorRemediation/

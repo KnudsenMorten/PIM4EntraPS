@@ -25,11 +25,26 @@
     Where to write <Repo>-<Version>.tar.gz. Defaults to the system temp folder.
 
 .PARAMETER StorageAccount / -Container / -SubscriptionId
-    Upload the archive and mint a read-only link. Omit to produce the file only.
+    Upload the archive. Omit to produce the file only.
+
+.PARAMETER ReadAccess
+    How a reader gets at the container. Identity (the default): no link is minted at all -- a reader uses its own managed
+    identity with the 'Storage Blob Data Reader' role on the container (a hybrid worker in this tenant does). Sas: a
+    read-only link for a reader that has no identity in this tenant, short-lived (-SasDays) and signed against a stored
+    access policy of its own (see -PolicyName), so it can be revoked centrally and is replaced, not extended.
 
 .PARAMETER SasDays
-    Lifetime of the read link (default 400). It must outlive the release, because an environment
-    that has been offline for a month must still be able to fetch what it was approved for.
+    -ReadAccess Sas only: lifetime of the read link (default 7, at most 31). The reader is handed a new link before it
+    expires (re-run with -ReadAccess Sas); the old link simply runs out.
+
+.PARAMETER PolicyName
+    -ReadAccess Sas only: the stored access policy the link is signed against. Default: a new policy per day,
+    'srcread-<yyyyMMdd>' (UTC) -- that is the rotation: each run mints a link on a fresh policy, policies of this kind that
+    have expired are removed, and revoking one link is deleting its policy (Update-PimSourceAccess.ps1 -Revoke).
+
+.PARAMETER CustomerId
+    Publish into a container of that customer's own ('pim-src-<customer>'), so one customer's access can be cut off without
+    touching anyone else's.
 
 .EXAMPLE
     .\Publish-PimSourceArchive.ps1 -Verify
@@ -37,7 +52,11 @@
 
 .EXAMPLE
     .\Publish-PimSourceArchive.ps1 -StorageAccount <account> -Container pim-src -SubscriptionId <sub>
-    Pack, upload, and print the URL template to configure environments with.
+    Pack and upload; readers read with their managed identity (no link is minted).
+
+.EXAMPLE
+    $src = .\Publish-PimSourceArchive.ps1 -StorageAccount <account> -CustomerId <customer> -SubscriptionId <sub> -ReadAccess Sas -PassThru
+    Pack, upload into that customer's own container and hand back a 7-day read link template (in $src, never printed).
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -47,14 +66,20 @@ param(
     [string]$StorageAccount,
     [string]$Container = 'pim-src',
     [string]$SubscriptionId,
-    [int]$SasDays = 400,
+    # SEC-107 (SECAUDIT-1): NO long-lived read link by default. 'Identity' = upload only; readers use their managed identity
+    # (Storage Blob Data Reader on the container) -- nothing to leak, expire or rotate. 'Sas' = a short-lived, policy-backed
+    # link for a reader with no identity here. The old default (a 400-day link on ONE shared policy, its expiry pushed
+    # forward on every publish) meant one leaked link read every version for over a year.
+    [ValidateSet('Identity', 'Sas')][string]$ReadAccess = 'Identity',
+    [ValidateRange(1, 31)][int]$SasDays = 7,
     # 🔑 PER-CUSTOMER ISOLATION. Azure allows only FIVE stored access policies per container, so
     # "a policy per customer" needs a CONTAINER per customer -- containers are free and unlimited.
     # With one, revoking a single customer is deleting one policy; without one, the only lever is
     # fleet-wide. Costs an upload of the archive per customer (a few MB), which is the price of
     # being able to cut off one tenant without cutting off the rest.
     [string]$CustomerId,
-    [string]$PolicyName = 'srcread',
+    # '' = a fresh policy per day, 'srcread-<yyyyMMdd>' (the rotation, -ReadAccess Sas). An explicit name is used as given.
+    [string]$PolicyName = '',
     # Community editions (S2/S4) already publish their source publicly, so a credential here
     # protects nothing and is one more thing to rotate. Anonymous blob read removes it entirely.
     [switch]$PublicRead,
@@ -144,6 +169,34 @@ function Hide-PimSourceUrlQuery {
     param([AllowEmptyString()][string]$Text)
     $t = "$Text" -replace '(https://[^\s?"'']+)\?[^\s"'']*', '$1?<read-sas withheld>'
     return ($t -replace '(?i)(sig=)[^&\s"'']+', '$1<withheld>')
+}
+
+function Get-PimSourcePolicyPlan {
+    <#
+      PURE. SEC-107: the container's stored access policies after a -ReadAccess Sas publish. -Existing = name -> @{ start;
+      expiry; permission } (Get-PimContainerAclState .ids). -PolicyName '' = the day's rotating policy 'srcread-<yyyyMMdd>'.
+      The chosen policy gets read-only permission and expiry = now + -SasDays (never later); rotating policies
+      ('srcread-<yyyyMMdd>') that have EXPIRED are removed; every other policy -- an explicitly named one, the legacy
+      'srcread' -- is kept exactly as it is. Azure allows five policies per container: a sixth is refused (error), never made
+      room for by removing a live one. Returns @{ name; expiry; ids; pruned; error }.
+    #>
+    param([System.Collections.IDictionary]$Existing = @{}, [AllowEmptyString()][string]$PolicyName = '', [int]$SasDays = 7, [datetime]$NowUtc = [datetime]::UtcNow)
+    $now = $NowUtc.ToUniversalTime()
+    $name = if ("$PolicyName".Trim()) { "$PolicyName".Trim() } else { 'srcread-' + $now.ToString('yyyyMMdd') }
+    $expiry = $now.AddDays($SasDays).ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $ids = [ordered]@{}; $pruned = New-Object System.Collections.Generic.List[string]
+    $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+    foreach ($n in @($Existing.Keys)) {
+        if ("$n" -eq $name) { continue }
+        $e = [datetime]::MinValue
+        $exp = "$($Existing[$n].expiry)".Trim()
+        $isRotating = ("$n" -match '^srcread-\d{8}$')
+        if ($isRotating -and $exp -and [datetime]::TryParse($exp, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$e) -and $e -le $now) { $pruned.Add("$n"); continue }
+        $ids["$n"] = $Existing[$n]
+    }
+    $ids[$name] = @{ start = ''; expiry = $expiry; permission = 'r' }
+    $err = if ($ids.Count -gt 5) { "the container already holds $($ids.Count - 1) stored access policies (Azure allows 5) -- revoke one first (Update-PimSourceAccess.ps1 -PolicyName <name> -Revoke); no live policy is removed to make room" } else { '' }
+    return @{ name = $name; expiry = $expiry; ids = $ids; pruned = @($pruned); error = $err }
 }
 
 function Get-PimTarGzEntryNames {
@@ -365,15 +418,37 @@ if ($StorageAccount -and -not $WhatIfPreference) {
         exit 0
     }
 
-    Step "stored access policy '$PolicyName' on $Container (central expiry + revocation)"
-    $expiry = (Get-Date).ToUniversalTime().AddDays($SasDays).ToString('yyyy-MM-ddTHH:mm:ssZ')
-    # Idempotent: create, and if it is already there just move its expiry forward. The container ACL is written WHOLE
-    # (Set Container ACL replaces every policy AND the public-access level), so it is read first and written back with
-    # only this policy changed -- the other policies (up to five) and the access level survive, as `az storage
-    # container policy create/update` kept them.
+    # SEC-107: THE DEFAULT MINTS NO LINK. A reader with an identity in this tenant (a hybrid worker on -UpdateSource Blob)
+    # reads with that identity and the 'Storage Blob Data Reader' role on the container; there is nothing to hand out,
+    # leak, expire or rotate. The stored access policies already on the container are left exactly as they are.
+    if ($ReadAccess -eq 'Identity') {
+        $key = $null
+        $plainTpl = "https://$StorageAccount.blob.core.windows.net/$Container/pim-src-{version}.tar.gz"
+        Write-Host ''
+        Write-Host "  Read access: by IDENTITY -- no link was minted. A reader needs 'Storage Blob Data Reader' on $Container." -ForegroundColor DarkGray
+        Write-Host "    container: https://$StorageAccount.blob.core.windows.net/$Container" -ForegroundColor White
+        Write-Host '  (a reader with no identity in this tenant needs a short-lived link: re-run with -ReadAccess Sas -PassThru)' -ForegroundColor DarkGray
+        Write-Host "==> Source archive ready for $Version." -ForegroundColor Green
+        if ($PassThru) { [pscustomobject]@{ Version = $Version; SourceUrlTemplate = $plainTpl; Credential = "identity (Storage Blob Data Reader on $Container)" } }
+        exit 0
+    }
+
+    # -ReadAccess Sas: a SHORT-LIVED link on a policy of its own (the day's 'srcread-<yyyyMMdd>' unless named), never an
+    # extension of an older one -- rotation is the next run's new link; the old one simply runs out.
+    $polPlan = $null
+    try { $polPlan = Get-PimSourcePolicyPlan -Existing (Get-PimContainerAclState -Account $StorageAccount -Key $key -Container $Container).ids -PolicyName $PolicyName -SasDays $SasDays }
+    catch { throw "Publish-PimSourceArchive: the stored access policies on '$Container' could not be read: $(Hide-PimSourceUrlQuery "$($_.Exception.Message)")" }
+    if ($polPlan.error) { throw "Publish-PimSourceArchive: $($polPlan.error)" }
+    $PolicyName = $polPlan.name
+    Step "stored access policy '$PolicyName' on $Container ($SasDays day(s), central revocation)"
+    foreach ($pn in @($polPlan.pruned)) { Note "expired rotating policy '$pn' removed" }
+    $expiry = $polPlan.expiry
+    # The container ACL is written WHOLE (Set Container ACL replaces every policy AND the public-access level), so it is
+    # read first and written back with only this policy added / set (and expired rotating ones dropped) -- the other
+    # policies (up to five) and the access level survive, as `az storage container policy create/update` kept them.
     try {
         $acl = Get-PimContainerAclState -Account $StorageAccount -Key $key -Container $Container
-        $acl.ids[$PolicyName] = @{ start = ''; expiry = $expiry; permission = 'r' }
+        $acl.ids = $polPlan.ids
         $xmlIds = foreach ($n in $acl.ids.Keys) {
             $p = $acl.ids[$n]
             '<SignedIdentifier><Id>' + [Security.SecurityElement]::Escape("$n") + '</Id><AccessPolicy>' +
@@ -428,9 +503,8 @@ if ($StorageAccount -and -not $WhatIfPreference) {
         # 🔴 SEC-23 -- NEVER PRINT THE SAS. It is a read credential for every published source archive,
         # valid for $SasDays days, and this output is exactly what ends up in a transcript or a CI log.
         # Print the template with its query WITHHELD; hand the full value over as an OBJECT (-PassThru),
-        # which a caller captures into a variable without it ever reaching the console. Environments that
-        # already carry PIM_UPDATE_SOURCE_URL keep it across redeploys (Deploy-PimUpdateJob), so this is
-        # needed once per new environment, not per release.
+        # which a caller captures into a variable without it ever reaching the console. SEC-107: the link
+        # runs out after -SasDays (7 by default) -- the reader gets the next run's new link before then.
         $tpl = ($url -replace [regex]::Escape("pim-src-$Version.tar.gz"), 'pim-src-{version}.tar.gz')
         Write-Host ''
         Write-Host '  Configure an environment with the TEMPLATE (the version is substituted at run time):' -ForegroundColor DarkGray
@@ -442,8 +516,9 @@ if ($StorageAccount -and -not $WhatIfPreference) {
         }
         Write-Host ("    PIM_UPDATE_TARGET_VERSION = $Version") -ForegroundColor White
         Write-Host ''
+        Write-Host "  The link expires $expiry ($SasDays day(s)): hand the reader a new one before then (re-run with -ReadAccess Sas). Revoke it at once with Update-PimSourceAccess.ps1 -PolicyName $PolicyName -Revoke." -ForegroundColor DarkGray
         Write-Host '  ...and publish every version to the same container, so a ring that is behind can still fetch what it was approved for.' -ForegroundColor DarkGray
-        if ($PassThru) { [pscustomobject]@{ Version = $Version; SourceUrlTemplate = $tpl; Credential = "stored access policy '$PolicyName' on $Container" } }
+        if ($PassThru) { [pscustomobject]@{ Version = $Version; SourceUrlTemplate = $tpl; Credential = "stored access policy '$PolicyName' on $Container"; ExpiresUtc = $expiry } }
     }
 }
 

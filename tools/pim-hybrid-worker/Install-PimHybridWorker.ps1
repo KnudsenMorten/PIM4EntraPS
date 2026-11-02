@@ -25,10 +25,14 @@
                       installed and TESTED -- a worker that cannot use its gMSA fails HERE, not at 03:00; "log on as a batch
                       job" for the gMSA only; C:\PIM locked down (only SYSTEM / Administrators write the code the gMSA runs
                       -- the default C:\ ACL lets any signed-in user modify files below it, which on a Tier-0 box is an
-                      escalation path); the PIM code for this environment's RING fetched with the machine's managed
-                      identity (no SAS, no PAT); then the six scheduled tasks below (-Phase Layout).
-    -Phase Update     Read channel.json, fetch the version the ring approves when it differs, switch C:\PIM\app\current,
-                      apply the NEW version's -Phase Layout. Never moves without a ring answer; never moves backwards.
+                      escalation path); the SIGNED release of this environment's RING from the Invardia update service --
+                      its signature, ring and the archive's SHA-256 + size are checked before anything is unpacked, and
+                      nothing is installed when a check fails (the installation's licence + install key are read from the
+                      PIM database with the machine's managed identity: no SAS, no PAT); then the six scheduled tasks below
+                      (-Phase Layout).
+    -Phase Update     Ask for the signed release of the ring (checked the same way, by the installed version), install it
+                      when it differs, switch C:\PIM\app\current, apply the NEW version's -Phase Layout. Never moves without
+                      a ring answer; never moves backwards.
     -Phase Layout     The run wrapper (C:\PIM\bin\Run-PimHybridWorker.ps1) + the scheduled tasks of THIS version.
     -Phase Remove     (§100.63, Remove-PimHybridWorker.ps1 -Target Arc runs it through run-command) Unregister the six
                       tasks, take the gMSA(s) out of 'Hybrid agent extension applications' and 'log on as a batch job',
@@ -56,8 +60,8 @@
        'PIM Hybrid Worker Update'    daily 04:30 as SYSTEM: this script -Phase Update
 
     Identity model: AD writes = the gMSA (the scheduled task's run-as account; PIM-HybridAd.ps1 verifies it and refuses
-    SYSTEM). SQL + Graph + the source store = the machine's managed identity (VM: IMDS; Arc: the Arc agent). No password,
-    secret or certificate is stored.
+    SYSTEM). SQL + Graph (+ the source store with -UpdateSource Blob) = the machine's managed identity (VM: IMDS; Arc: the
+    Arc agent). No password, secret or certificate is stored.
 
 .EXAMPLE
     .\Install-PimHybridWorker.ps1 -Phase Join -OdjBlob <base64>
@@ -66,6 +70,17 @@
     # an Azure Arc-enabled on-premises server (already domain-joined): no Join phase
     .\Install-PimHybridWorker.ps1 -Phase Configure -HostType Arc -GmsaName 'CORP\gMSA-PIM-L1-T0' -ServerGmsaName 'CORP\gMSA-PIM-L2-T1' `
         -SqlServer <server>.database.windows.net -TenantId <tenant> -SourceContainerUrl https://<store>.blob.core.windows.net/pim-src -Ring 2
+
+.NOTES
+    Requirements:
+      PowerShell: Windows PowerShell 5.1 (powershell.exe) -- one of PIM's three exceptions to PowerShell 7. Why: Azure
+                  run-command runs it as SYSTEM in Windows PowerShell on a fresh server, before PowerShell 7 is there;
+                  it installs PowerShell 7 itself, and the worker's scheduled tasks run in PowerShell 7.
+      Role: local Administrator on the worker (run-command runs it as SYSTEM). No Microsoft Entra or Azure role for the
+            person; the worker's machine identity reads the PIM code from the source store.
+      Hosts: <store>.blob.core.windows.net (the source store), github.com / api.github.com /
+             objects.githubusercontent.com (PowerShell 7, once), the machine identity endpoint on the machine itself
+             (Azure VM metadata service, or the Azure Arc agent on localhost).
 
 .LINK
     https://invardia.com/docs/pim/scripts/Install-PimHybridWorker/
@@ -94,15 +109,20 @@ param(
     [switch]$PlanOnly,
     # §100.63(b): where the managed identity comes from. Auto = Arc when the Connected Machine agent (himds) is installed.
     [ValidateSet('Auto', 'AzureVm', 'Arc')][string]$HostType = 'Auto',
-    # SEC-95 (SECAUDIT-1): where the DAILY update takes its code. Invardia (default) = the signed manifest, verified by the
-    # installed version (Resolve-PimHybridWorkerUpdate.ps1); Blob = the source container's channel.json + archive, which
-    # carry NO signature -- a lab choice only. A worker configured before this setting existed counts as Invardia.
+    # SEC-95 (SECAUDIT-1): where the worker takes its code -- the FIRST install and every daily update. Invardia (default) =
+    # the signed manifest, verified by the installed version (Resolve-PimHybridWorkerUpdate.ps1) or, on a first install, by
+    # this installer (Resolve-FirstInstallSignedTarget); Blob = the source container's channel.json + archive, which carry
+    # NO signature -- a lab choice only. A worker configured before this setting existed counts as Invardia.
     [ValidateSet('Invardia', 'Blob')][string]$UpdateSource = 'Invardia'
 )
 $ErrorActionPreference = 'Stop'
 
 # 12.7 run frame: "<Script> version <x.y.z> - documentation: <page>" as the first line + a transcript in the temp folder.
 . (Join-Path $PSScriptRoot '..\setup\_PimScriptDoc.ps1')
+# SEC-95: the signed-release checks -- the update-signing public keys and the manifest / archive checks the engine uses --
+# for a FIRST install, which has no installed version to verify with. Inlined in every copy that runs on the worker
+# (run-command, the published standalone, the daily updater's copy in bin), exactly like the run-frame helper above.
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\InvardiaUpdate.verify.ps1')
 $null = Start-PimScriptRun -Script 'Install-PimHybridWorker'
 try {
 
@@ -128,14 +148,18 @@ function Resolve-PimHostType([string]$Requested) {
     return 'AzureVm'
 }
 function Get-PimSelfContainedText([string]$Text) {
-    # The daily updater runs bin\Install-PimHybridWorker.ps1 ALONE: when this copy dot-sources the 12.7 run-frame helper
-    # (the package / source tree), the helper is inlined into the copy. The published standalone and the run-command
-    # wrapper carry it inlined already.
-    $m = [regex]::Match($Text, "(?m)^\. \(Join-Path \`$PSScriptRoot '\.\.\\setup\\_PimScriptDoc\.ps1'\)[ \t]*\r?$")
-    if (-not $m.Success) { return $Text }
-    $h = if ("$PSScriptRoot".Trim()) { Join-Path $PSScriptRoot '..\setup\_PimScriptDoc.ps1' } else { '' }
-    if (-not $h -or -not (Test-Path -LiteralPath $h)) { throw "cannot make the installer self-contained: _PimScriptDoc.ps1 not found next to it ($h)" }
-    return ($Text.Substring(0, $m.Index) + [IO.File]::ReadAllText($h) + $Text.Substring($m.Index + $m.Length))
+    # The daily updater runs bin\Install-PimHybridWorker.ps1 ALONE: when this copy dot-sources its helpers -- the 12.7
+    # run-frame helper and (SEC-95) the signed-release checks -- from the package / source tree, each is inlined into the
+    # copy. The published standalone and the run-command wrapper carry them inlined already.
+    foreach ($rel in @('..\setup\_PimScriptDoc.ps1', '..\..\engine\_shared\InvardiaUpdate.verify.ps1')) {
+        $m = [regex]::Match($Text, ("(?m)^\. \(Join-Path \`$PSScriptRoot '" + [regex]::Escape($rel) + "'\)[ \t]*\r?$"))
+        if (-not $m.Success) { continue }
+        $h = if ("$PSScriptRoot".Trim()) { Join-Path $PSScriptRoot $rel } else { '' }
+        if (-not $h -or -not (Test-Path -LiteralPath $h)) { throw "cannot make the installer self-contained: $(Split-Path $rel -Leaf) not found next to it ($h)" }
+        $body = [regex]::Replace([IO.File]::ReadAllText($h), '(?m)^#Requires[^\r\n]*\r?\n', '')
+        $Text = $Text.Substring(0, $m.Index) + $body + $Text.Substring($m.Index + $m.Length)
+    }
+    return $Text
 }
 
 # ------------------------------------------------------------------ SEC-87: who may reach the metadata service (Azure VM)
@@ -281,7 +305,7 @@ if ($WhatIfPreference -and $Phase -ne 'Guests') {   # Guests only reads: it runs
         'Configure' {
             Step "would install PowerShell 7 (github.com, Microsoft signature checked), install + TEST gMSA $GmsaName$(if ("$ServerGmsaName".Trim()) { " and $ServerGmsaName" })"
             if ($ht -eq 'Arc') { Step "would add the gMSA(s) to the local group '$ArcKeyReaderGroup' and check that the Arc identity answers" } else { Step 'would rotate the machine password (the offline-join blob becomes worthless)' }
-            Step "would grant 'log on as a batch job' to the gMSA(s) only, lock $Root down, fetch the PIM code for ring '$Ring'$(if ("$Version".Trim()) { " / version $Version" }) from $SourceContainerUrl with the machine identity"
+            Step ("would grant 'log on as a batch job' to the gMSA(s) only, lock $Root down, " + $(if ($UpdateSource -eq 'Blob') { "fetch the PIM code for ring '$Ring'$(if ("$Version".Trim()) { " / version $Version" }) from $SourceContainerUrl with the machine identity (source container: no signature)" } else { "install the SIGNED release of ring '$Ring' from the Invardia update service (this installer checks the signature, the ring and the archive's SHA-256 + size before anything is unpacked; the store's licence + install key are read with the machine identity)" }))
             Step "would register: 'PIM Hybrid Worker' (every $IntervalMinutes min), 'PIM Hybrid AD Sync', 'PIM Hybrid AD Sync Servers', 'PIM Hybrid AD Changes' (continuous)$(if ("$ServerGmsaName".Trim()) { ", 'PIM Hybrid Servers'" }), 'PIM Hybrid Worker Update' (daily 04:30)$(if ($PlanOnly) { ' -- every run PLAN ONLY' })"
         }
         'Update'    { Step 'would ask Invardia for the SIGNED manifest of the ring (verified by the installed version: signature, sequence, archive SHA-256) and move C:\PIM\app\current to the approved version (never backwards), then apply its layout -- with -UpdateSource Blob: channel.json from the source container (unsigned)' }
@@ -385,13 +409,16 @@ if ($Phase -eq 'Remove') {
 
 # ------------------------------------------------------------------ shared: config, MI token, fetch
 if ($Phase -eq 'Configure') {
-    foreach ($p in 'GmsaName', 'SqlServer', 'TenantId', 'SourceContainerUrl') { if (-not "$((Get-Variable $p -ValueOnly))".Trim()) { throw "-$p is required for -Phase Configure" } }
+    # SEC-95: the source container is read only by a Blob worker; a signed (Invardia) worker needs its RING (the signed
+    # release is chosen per ring; a -Version pin must then be that ring's signed version)
+    foreach ($p in @('GmsaName', 'SqlServer', 'TenantId') + $(if ($UpdateSource -eq 'Blob') { @('SourceContainerUrl') } else { @() })) { if (-not "$((Get-Variable $p -ValueOnly))".Trim()) { throw "-$p is required for -Phase Configure" } }
     if (-not "$Ring".Trim() -and -not "$Version".Trim()) { throw '-Ring (the update ring this environment follows) or -Version is required' }
+    if ($UpdateSource -ne 'Blob' -and -not "$Ring".Trim()) { throw '-Ring is required: the worker installs the signed release of its update ring' }
     if ($GmsaName -notmatch '^[^\\]+\\[^\\]+$') { throw "-GmsaName must be DOMAIN\name (got '$GmsaName')" }
     if ("$ServerGmsaName".Trim() -and $ServerGmsaName -notmatch '^[^\\]+\\[^\\]+$') { throw "-ServerGmsaName must be DOMAIN\name (got '$ServerGmsaName')" }
     if ("$ServerGmsaName".Trim() -and $ServerGmsaName.TrimEnd('$') -ieq $GmsaName.TrimEnd('$')) { throw '-ServerGmsaName must differ from -GmsaName (server onboarding is a separate tier)' }
     $cfg = [ordered]@{ gmsa = $GmsaName.TrimEnd('$'); serverGmsa = "$ServerGmsaName".Trim().TrimEnd('$'); sqlServer = $SqlServer; sqlDatabase = $SqlDatabase; tenantId = $TenantId
-        source = $SourceContainerUrl.TrimEnd('/'); ring = "$Ring".Trim(); version = "$Version".Trim(); adServer = $AdServer; intervalMinutes = $IntervalMinutes; syncPauseSeconds = 5; planOnly = [bool]$PlanOnly
+        source = "$SourceContainerUrl".Trim().TrimEnd('/'); ring = "$Ring".Trim(); version = "$Version".Trim(); adServer = $AdServer; intervalMinutes = $IntervalMinutes; syncPauseSeconds = 5; planOnly = [bool]$PlanOnly
         hostType = (Resolve-PimHostType $HostType); updateSource = $UpdateSource.ToLowerInvariant() }
 } else {
     if (-not (Test-Path $cfgPath)) { throw "no $cfgPath -- run -Phase Configure first" }
@@ -456,7 +483,7 @@ function Resolve-SignedTargetVersion {
     # back to the unsigned blob path: a failure keeps the running version and says why.
     if ("$($cfg.version)".Trim()) { return @{ version = "$($cfg.version)".Trim(); reason = 'pinned by -Version'; contextPath = '' } }
     $res = Join-Path $Root 'app\current\SOLUTIONS\PIM4EntraPS\tools\pim-hybrid-worker\Resolve-PimHybridWorkerUpdate.ps1'
-    if (-not (Test-Path -LiteralPath $res)) { return @{ version = ''; contextPath = ''; reason = "the installed version $(Get-CurrentVersion) has no signed update resolver (it predates SEC-95) -- nothing moves; install a current version once with -Phase Configure" } }
+    if (-not (Test-Path -LiteralPath $res)) { return @{ version = ''; contextPath = ''; reason = "the installed version $(Get-CurrentVersion) has no signed update resolver (it predates the signed update) -- nothing moves; install a current version once with -Phase Configure" } }
     $px = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'; if (-not (Test-Path $px)) { $px = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" }
     $out = @(& $px -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $res -SqlServer $cfg.sqlServer -SqlDatabase $cfg.sqlDatabase -Ring "$($cfg.ring)" -StateFile $updStatePath -RunningVersion (Get-CurrentVersion) -WorkDir $env:TEMP 2>&1 | ForEach-Object { "$_" })
     $line = @($out | Where-Object { $_ -like 'PIM-HW-UPDATE *' } | Select-Object -Last 1)
@@ -470,6 +497,116 @@ function Save-UpdateState([hashtable]$T) {
     if (-not $T.sequence) { return }
     ([pscustomobject]@{ ring = "$($cfg.ring)".Trim(); sequence = [int]$T.sequence; version = "$($T.version)"; savedUtc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json) |
         Set-Content -LiteralPath $updStatePath -Encoding UTF8
+}
+
+# ------------------------------------------------------------------ SEC-95: the FIRST install takes the signed release too
+# A machine with nothing installed has no installed version whose keys could verify a manifest, so THIS installer does it:
+# it was delivered from a trusted release tree (run-command, or the signed standalone) and carries the update-signing keys
+# and checks inlined above (InvardiaUpdate.verify.ps1 -- the same file the engine uses). The install's own licence and
+# install key are read from the PIM store with the machine identity; the manifest for the worker's ring is pulled and its
+# signature, product, kind, ring and holds checked; the archive's size + SHA-256 must be the signed ones; the unpacked
+# tree's VERSION must be the signed version. Any refusal installs NOTHING -- there is no fallback to the source container.
+function Read-PimWorkerStoreSettings([string[]]$Names) {
+    # pim.Settings values by name (ValueJson parsed like Get-PimSqlSetting), read with the machine identity over TLS.
+    # .NET's in-box SQL client only (no module); one connection for all names.
+    $t = ('System.Data.SqlClient.SqlConnection' -as [type]); if (-not $t) { $t = ('Microsoft.Data.SqlClient.SqlConnection' -as [type]) }
+    if (-not $t) { throw 'no .NET SQL client on this machine' }
+    $c = New-Object $t.FullName ("Server=tcp:$($cfg.sqlServer),1433;Database=$($cfg.sqlDatabase);Encrypt=True;TrustServerCertificate=False;Connection Timeout=30")
+    $c.AccessToken = Get-MiToken 'https://database.windows.net/'
+    $out = @{}
+    try {
+        $c.Open()
+        foreach ($n in $Names) {
+            $cmd = $c.CreateCommand(); $cmd.CommandText = 'SELECT ValueJson FROM pim.Settings WHERE Name=@n'; [void]$cmd.Parameters.AddWithValue('@n', $n)
+            $j = $cmd.ExecuteScalar()
+            if ($null -eq $j -or $j -is [DBNull] -or "$j".Trim() -eq '') { $out[$n] = $null; continue }
+            try { $out[$n] = ($j | ConvertFrom-Json) } catch { $out[$n] = "$j" }
+        }
+    } finally { $c.Dispose() }
+    return $out
+}
+function Invoke-PimWorkerHttp([string]$Method, [string]$Url, $Body, [hashtable]$Headers) {
+    # One JSON call that never throws on an HTTP status: @{ status; body; error } (the shape the manifest pull takes).
+    $a = @{ Method = $Method; Uri = $Url; Headers = $(if ($Headers) { $Headers } else { @{} }); ContentType = 'application/json'; TimeoutSec = 60; UseBasicParsing = $true }
+    if ($null -ne $Body) { $a['Body'] = ($Body | ConvertTo-Json -Depth 6 -Compress) }
+    try {
+        $r = Invoke-WebRequest @a -ErrorAction Stop
+        $b = $null; if ("$($r.Content)".Trim()) { try { $b = "$($r.Content)" | ConvertFrom-Json } catch { } }
+        return @{ status = [int]$r.StatusCode; body = $b }
+    } catch {
+        $code = 0; try { if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode } } catch { }
+        return @{ status = $code; body = $null; error = ((("$($_.Exception.Message)") -split "`n")[0]) }
+    }
+}
+function Resolve-FirstInstallSignedTarget {
+    <#
+      SEC-95: the signed release for the worker's ring, verified by THIS installer. Returns @{ ok; version; sequence; treePath;
+      workPath; reason } -- treePath = the unpacked, verified release (repo-root shaped: SOLUTIONS\PIM4EntraPS\...), ready to be
+      moved into <Root>\app\<version>; workPath = the folder to delete afterwards. ok=$false = NOTHING is installed.
+      Seams (tests): -GetSetting { param($Name) }, -Http { param($Method, $Url, $Body, $Headers) }, -Download { param($Url,
+      $OutFile, $Sha256, $Size) }, -TrustedKeys. The archive is checked again here whatever -Download did.
+    #>
+    param([scriptblock]$GetSetting, [scriptblock]$Http = { param($m, $u, $b, $h) Invoke-PimWorkerHttp -Method $m -Url $u -Body $b -Headers $h },
+          [scriptblock]$Download = { param($u, $o, $s, $z) Save-InvardiaArchive -Url $u -OutFile $o -ExpectedSha256 $s -ExpectedSize $z },
+          [AllowEmptyString()][string]$Ring = "$($cfg.ring)", [AllowEmptyString()][string]$PinnedVersion = "$($cfg.version)",
+          [object[]]$TrustedKeys = $script:InvardiaUpdateTrustedKeys, [string]$WorkDir = (Join-Path $Root 'app'),
+          # the worker's own replay watermark for this ring (bin\update-state.json; a first install has none) and the version
+          # it runs ('' = nothing installed): the same version again = nothing downloaded
+          [int]$AppliedSequence = -1, [AllowEmptyString()][string]$RunningVersion = '')
+    $no = { param($why) @{ ok = $false; version = ''; sequence = 0; treePath = ''; workPath = ''; reason = $why } }
+    if ($AppliedSequence -lt 0) {
+        $AppliedSequence = 0
+        try {
+            if ($updStatePath -and (Test-Path -LiteralPath $updStatePath)) {
+                $st = Get-Content -LiteralPath $updStatePath -Raw | ConvertFrom-Json
+                if ("$($st.ring)".Trim() -eq "$Ring".Trim()) { [void][int]::TryParse("$($st.sequence)", [ref]$AppliedSequence) }
+            }
+        } catch { $AppliedSequence = 0 }
+    }
+    $ringN = -1
+    if (-not [int]::TryParse(("$Ring".Trim() -replace '^(?i)ring', ''), [ref]$ringN) -or $ringN -lt 0 -or $ringN -gt 3) { return (& $no "no update ring 0-3 ('$Ring') -- the signed release is chosen per ring") }
+    $names = @('License', 'InvardiaInstallKey', 'InstallId', 'LicenceRequestBaseUrl')
+    $all = @{}
+    try {
+        if ($GetSetting) { foreach ($n in $names) { $all[$n] = & $GetSetting $n } }
+        else { $all = Read-PimWorkerStoreSettings -Names $names }
+    } catch { return (& $no "the PIM store could not be read with the machine identity: $((("$($_.Exception.Message)") -split "`n")[0])") }
+    $licRaw = $all['License']
+    $lic = if ($null -eq $licRaw) { '' } elseif ($licRaw -is [string]) { $licRaw } else { ConvertTo-Json -InputObject $licRaw -Depth 6 -Compress }
+    $key = "$($all['InvardiaInstallKey'])".Trim()
+    $iid = "$($all['InstallId'])".Trim().ToLowerInvariant()
+    $base = "$($all['LicenceRequestBaseUrl'])".Trim()
+    if (-not "$lic".Trim()) { return (& $no 'no Pro licence in the PIM store -- the hybrid worker installs only a signed Pro release') }
+    if ($key -notmatch '^inv-[A-Za-z0-9_-]{20,100}$') { return (& $no 'no install key in the PIM store yet (the engine claims it once the Pro licence is in) -- run Configure again after that') }
+    if ($base -and $base -notmatch '^(?i)https://') { return (& $no 'the update address in the PIM store is not https') }
+    $p = Invoke-InvardiaManifestPull -Product 'pim-manager' -Http $Http -BaseUrl $base -InstallKey $key -LicenceText $lic -Kind 'code' -Ring $ringN -InstallId $iid
+    if ($p.status -ne 200) { return (& $no "the signed release could not be read: $($p.reason)") }
+    $v = Test-InvardiaManifest -Response $p.body -TrustedKeys $TrustedKeys -Kind 'code' -Product 'pim-manager' -Ring $ringN -AppliedSequence $AppliedSequence -RunningVersion $RunningVersion
+    if (-not $v.ok) { return (& $no "the signed release was refused: $($v.reason)") }
+    if ($v.hold) { return (& $no "the signed release is held: $($v.reason)") }
+    if ("$PinnedVersion".Trim() -and "$PinnedVersion".Trim() -ne "$($v.version)") { return (& $no "pinned to $("$PinnedVersion".Trim()), but the signed release of ring $ringN is $($v.version) -- the worker installs only the signed release of its ring") }
+    if ("$RunningVersion".Trim() -and "$RunningVersion".Trim() -eq "$($v.version)") { return @{ ok = $true; version = "$($v.version)"; sequence = [int]$v.sequence; treePath = ''; workPath = ''; contextPath = ''; reason = "$($v.reason) -- already running it" } }
+    $work = Join-Path $WorkDir (".first-{0}" -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+    New-Item -ItemType Directory -Force -Path $work | Out-Null
+    $ok = $false
+    try {
+        $zip = Join-Path $work "pim-manager-src-$($v.version).zip"
+        $d = & $Download $v.downloadUrl $zip $v.sha256 $v.size
+        if ($d -and -not $d.ok) { return (& $no "the release archive was refused: $($d.reason)") }
+        $chk = Test-InvardiaArchiveFile -Path $zip -ExpectedSha256 $v.sha256 -ExpectedSize $v.size
+        if (-not $chk.ok) { return (& $no "the release archive was refused: $($chk.reason)") }
+        $x = Join-Path $work 'x'
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        try { [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $x) } catch { return (& $no "the release archive could not be unpacked: $($_.Exception.Message)") }
+        Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+        $top = Join-Path $x "pim-manager-src-$($v.version)"
+        $vf = Join-Path $top 'SOLUTIONS\PIM4EntraPS\VERSION'
+        if (-not (Test-Path -LiteralPath $vf)) { return (& $no "the release archive has no pim-manager-src-$($v.version)\SOLUTIONS\PIM4EntraPS (not the release layout)") }
+        $inside = "$(Get-Content -Raw -LiteralPath $vf)".Trim()
+        if ($inside -ne "$($v.version)") { return (& $no "the release archive holds version $inside, the signed manifest says $($v.version)") }
+        $ok = $true
+        return @{ ok = $true; version = "$($v.version)"; sequence = [int]$v.sequence; treePath = $top; workPath = $work; contextPath = ''; reason = $v.reason }
+    } finally { if (-not $ok) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue } }
 }
 function Test-HybridCapable {
     # Does the installed PIM version carry the hybrid worker (§80.2)? Its scheduler must accept -Instance and -UseManagedIdentity;
@@ -495,14 +632,22 @@ function Get-CurrentVersion {
     $t = (Get-Item $cur).Target; if ($t -is [array]) { $t = $t[0] }
     return (Split-Path "$t" -Leaf)
 }
-function Install-Version([string]$V, [string]$ContextPath = '') {
+function Install-Version([string]$V, [string]$ContextPath = '', [string]$TreePath = '') {
     if ($V -notmatch '^\d+\.\d+\.\d+$') { throw "refusing version '$V' (not N.N.N)" }
     $dest = Join-Path $Root "app\$V"
     $start = Join-Path $dest 'SOLUTIONS\PIM4EntraPS\tools\pim-scheduler\Start-PimScheduler.ps1'
+    if (-not (Test-Path $start) -and "$TreePath".Trim()) {
+        # SEC-95 first install: the release this installer verified (signature, SHA-256 + size, VERSION), already unpacked
+        if (-not (Test-Path -LiteralPath (Join-Path $TreePath 'SOLUTIONS\PIM4EntraPS\tools\pim-scheduler\Start-PimScheduler.ps1'))) { throw "the verified release at $TreePath holds no PIM tree -- refusing" }
+        if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force }
+        Move-Item -LiteralPath $TreePath -Destination $dest
+    }
     if (-not (Test-Path $start)) {
         $arc = Join-Path $env:TEMP "pim-src-$V.tar.gz"
-        # SEC-95: the signed path hands over the VERIFIED archive (SHA-256 + VERSION checked); only the Blob path downloads here
+        # SEC-95: the signed path hands over the VERIFIED archive (SHA-256 + VERSION checked); only the Blob path downloads here.
+        # A signed worker never downloads an archive it has not verified (a -Version pin included): it refuses instead.
         if ("$ContextPath".Trim()) { if (-not (Test-Path -LiteralPath $ContextPath)) { throw "the verified archive $ContextPath is missing" }; Move-Item -LiteralPath $ContextPath -Destination $arc -Force }
+        elseif ("$($cfg.updateSource)".Trim().ToLowerInvariant() -ne 'blob') { throw "refusing to install $V`: it is not a verified signed release (this worker installs only the signed release of its ring)" }
         else { Get-Blob -Name "pim-src-$V.tar.gz" -OutFile $arc }
         $b = [IO.File]::ReadAllBytes($arc)
         if ($b.Length -lt 1024 -or $b[0] -ne 0x1f -or $b[1] -ne 0x8b) { Remove-Item $arc -Force; throw "pim-src-$V.tar.gz is not a gzip archive ($($b.Length) bytes) -- refusing" }
@@ -633,12 +778,16 @@ if ($Phase -eq 'Update') {
     # SEC-87: the metadata-service rule is refreshed on EVERY daily run (finally: also when nothing moves or the update fails)
     try {
     $signed = ("$($cfg.updateSource)".Trim().ToLowerInvariant() -ne 'blob')
-    $t = if ($signed) { Resolve-SignedTargetVersion } else { Resolve-TargetVersion }; $c = Get-CurrentVersion
-    Step "source: $(if ($signed) { 'Invardia (signed)' } else { 'source container (UNSIGNED -- -UpdateSource Blob)' }); ring: $($t.reason); running: $(if ($c) { $c } else { 'none' })"
+    # SEC-95: an installed version without the signed resolver (it predates it) is moved by THIS installer's own check
+    $ownCheck = ($signed -and -not (Test-Path -LiteralPath (Join-Path $Root 'app\current\SOLUTIONS\PIM4EntraPS\tools\pim-hybrid-worker\Resolve-PimHybridWorkerUpdate.ps1')))
+    $t = if ($ownCheck) { Resolve-FirstInstallSignedTarget -RunningVersion (Get-CurrentVersion) } elseif ($signed) { Resolve-SignedTargetVersion } else { Resolve-TargetVersion }; $c = Get-CurrentVersion
+    try {
+    Step "source: $(if ($signed) { 'Invardia (signed)' } else { 'source container (UNSIGNED: no signature on its archives)' }); ring: $($t.reason); running: $(if ($c) { $c } else { 'none' })"
     if (-not $t.version) { Step 'no approved version -- nothing moves'; return }
     if ($c -and ([version]$t.version -lt [version]$c)) { Step "the ring approves $($t.version), older than the running $c -- NOT rolling back unattended"; return }
     if ($t.version -eq $c) { Step 'up to date'; if ($signed) { Save-UpdateState $t }; if (-not (Test-WorkerLayoutCurrent)) { Invoke-CurrentLayout }; Sync-WorkerTaskState; return }
-    Install-Version -V $t.version -ContextPath "$($t.contextPath)"
+    Install-Version -V $t.version -ContextPath "$($t.contextPath)" -TreePath "$($t.treePath)"
+    } finally { if ("$($t.workPath)".Trim()) { Remove-Item -LiteralPath "$($t.workPath)" -Recurse -Force -ErrorAction SilentlyContinue } }
     if ($signed) { Save-UpdateState $t }
     Invoke-CurrentLayout
     Sync-WorkerTaskState
@@ -764,19 +913,28 @@ $cfg | ConvertTo-Json | Set-Content -LiteralPath $cfgPath -Encoding UTF8
 Set-Content -LiteralPath (Join-Path $Root 'bin\Install-PimHybridWorker.ps1') -Value (Get-PimSelfContainedText $selfText) -Encoding UTF8   # the daily updater runs this copy
 
 Step 'PIM code for this ring'
-# SEC-95: the FIRST install has no installed version to verify a manifest with, so this one fetch -- run by the person who
-# configures the worker -- comes from the source container. Every unattended daily update after it takes the signed path
-# (unless -UpdateSource Blob). A re-run of Configure on a worker that already runs a version with the resolver takes the
-# signed path too.
-$signedHere = ("$($cfg.updateSource)" -ne 'blob' -and (Test-Path -LiteralPath (Join-Path $Root 'app\current\SOLUTIONS\PIM4EntraPS\tools\pim-hybrid-worker\Resolve-PimHybridWorkerUpdate.ps1')))
+# SEC-95: every install takes the SIGNED release of its ring (unless the worker was configured with -UpdateSource Blob).
+# A worker that already runs a version with the signed resolver is checked by that version (its embedded keys); a FIRST
+# install -- nothing installed to verify with -- is checked by THIS installer (Resolve-FirstInstallSignedTarget: the same
+# keys and checks, inlined). Either way a refusal stops here and installs nothing: there is no fallback to the container.
+$signedCfg = ("$($cfg.updateSource)" -ne 'blob')
+$signedHere = ($signedCfg -and (Test-Path -LiteralPath (Join-Path $Root 'app\current\SOLUTIONS\PIM4EntraPS\tools\pim-hybrid-worker\Resolve-PimHybridWorkerUpdate.ps1')))
 if ($signedHere) {
-    # a REFUSED signed answer stops here -- it never falls back to the unsigned source (choose -UpdateSource Blob deliberately)
+    # a REFUSED signed answer stops here -- it never falls back to the unsigned source
     $t = Resolve-SignedTargetVersion
     if (-not $t.version) { throw "cannot install: $($t.reason)" }
-} else { $t = Resolve-TargetVersion }
+} elseif ($signedCfg) {
+    Step 'source: Invardia (signed) -- the first install is checked by this installer: signature, ring, archive SHA-256 + size, VERSION'
+    $t = Resolve-FirstInstallSignedTarget
+    if (-not $t.ok -or -not $t.version) { throw "cannot install: $($t.reason)" }
+} else {
+    Step 'source: the source container (UNSIGNED: channel.json and the archive carry no signature)'
+    $t = Resolve-TargetVersion
+}
 if (-not $t.version) { throw "cannot install: $($t.reason)" }
-Install-Version -V $t.version -ContextPath "$($t.contextPath)"
-if ($signedHere) { Save-UpdateState $t }
+try { Install-Version -V $t.version -ContextPath "$($t.contextPath)" -TreePath "$($t.treePath)" }
+finally { if ("$($t.workPath)".Trim()) { Remove-Item -LiteralPath "$($t.workPath)" -Recurse -Force -ErrorAction SilentlyContinue } }
+if ($signedCfg) { Save-UpdateState $t }
 
 Register-WorkerLayout
 Invoke-PimImdsRuleStep $cfg

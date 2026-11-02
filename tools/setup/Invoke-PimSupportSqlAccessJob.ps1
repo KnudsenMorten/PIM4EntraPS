@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 
 <#
 .SYNOPSIS
@@ -42,6 +42,14 @@
 .EXAMPLE
   .\Invoke-PimSupportSqlAccessJob.ps1 -TenantId <tenant id> -SubscriptionId <subscription id> -ResourceGroup rg-pim -SupportAppId <Invardia Support app client id> -WhatIf
   Preview: reads everything, prints what it would do and the script the job would run. Then the same command without -WhatIf.
+
+.NOTES
+  Requirements:
+    PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
+    Role: Contributor (or Owner) on the resource group of the PIM Manager installation (Azure); Log Analytics Reader on
+          the installation's Log Analytics workspace to show the job's log lines (optional).
+    Hosts: login.microsoftonline.com, management.azure.com, graph.microsoft.com, api.loganalytics.io. Nothing to the
+           SQL server from this computer: only the job, inside the installation's network, reaches the database.
 
 .LINK
   https://invardia.com/docs/pim/scripts/Invoke-PimSupportSqlAccessJob/

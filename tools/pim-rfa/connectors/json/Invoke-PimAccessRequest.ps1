@@ -16,7 +16,8 @@
       3. GET /api/v1/requests/{id} until the state is final (active, ended, denied, rejected, expired, cancelled).
       4. POST /api/v1/requests/{id}/cancel to end a window early.
 
-    The caller's own workflow is the approval: a request created through the API is approved on arrival (the ticket IS the
+    The caller's own workflow is the approval: a request created through the API is approved on arrival -- except a group
+    request for a Tier 0 or Tier 1 group (or one with no tier set), which waits for a person to approve it (the ticket IS the
     approval), and PIM applies it within a few minutes. The API never reveals anything about accounts the caller did not
     ask about.
 

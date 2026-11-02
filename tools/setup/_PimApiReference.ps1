@@ -32,18 +32,21 @@ $script:PimApiRefRank = @{ None = -1; Reader = 0; Delegated = 0; Demo = 0; Admin
 $script:PimApiRefLeftOutClasses = [ordered]@{
     'page-internal'      = @('* /api/heartbeat', '* /api/instance*', '* /api/list-layouts*', '* /api/get-started*', '* /api/wizard/*', '* /api/diff*',
                              '* /api/reports-overview*', '* /api/refresh-tenant-lists', '* /api/authoring*', '* /api/onboarding*', '* /api/demo-data*',
-                             '* /api/resolve-date', '* /api/config', '* /api/csv/*', '* /api/data/*', '* /api/export*', '* /api/*{path}*')
+                             '* /api/resolve-date', '* /api/config', '* /api/csv/*', '* /api/data/*', '* /api/export*', '* /api/*{path}*',
+                             '* /api/api-reference', 'POST /api/scheduler/kick')
     'emergency'          = @('* /api/emergency*', '* *break-glass*', '* *breakglass*', '* *restore*', '* /api/revoke', '* /api/admin-sessions*',
                              '* /api/admin-tap*', '* /api/reconcile/pause', '* /api/reconcile/resume')
     'backup'             = @('* *backup*', '* /api/settings/export', '* /api/settings/import')
-    'support-diagnostics'= @('* /api/support*', '* *diagnostic*', '* *bundle*', '* *ticket*')
+    'support-diagnostics'= @('* /api/support*', '* *diagnostic*', '* *bundle*', '* *ticket*', '* /api/permissions-health*')   # what the engine identity can / cannot do = a map; signed-in only
     'credentials'        = @('* *api-key*', '* *apikey*', '* *token*', '* *secret*', '* *passphrase*', '* *certificate*', '* *credential*',
                              '* *sign-in*', '* *signin*', '* *login*', '* *auth*', '* /api/signed-requests*', '* /api/settings/mail*', '* /api/activator*')
     'security-settings'  = @('* /api/access', '* /api/access-map*', '* /api/portal-access*', '* /api/settings*', '* /api/license*', '* /api/rfa/settings',
                              '* /api/msp*', '* /api/downlink*', '* /api/update-ring*', '* /api/alerting*', '* /api/mail-notifications*', '* /api/mail-template*',
                              'PUT /api/job-schedule', '* /api/jobs/state', '* /api/drift/settings', 'PUT /api/discovery-policy', 'PUT /api/access-review-rules',
                              'PUT /api/policy-choices', '* /api/policy-templates/*', 'PUT /api/workload-exemptions', 'PUT /api/template-state',
-                             'POST /api/warning-overrides', '* /api/reports/management/settings', '* /api/feature*', '* /api/security*')
+                             'POST /api/warning-overrides', '* /api/reports/management/settings', '* /api/feature*', '* /api/security*',
+                             'POST /api/access-reviews/reviewers', 'POST /api/coverage/ignore', 'PUT /api/drift/ignore', 'POST /api/custom-workloads',
+                             'POST /api/hybrid-ad/discovery/preview')
     'destructive-tier0'  = @('DELETE *', '* /api/drift/remediate', '* /api/drift/group-delete', '* /api/hybrid-ad/cleanup*', '* /api/guards/*/release*',
                              '* /api/guards/*/approval*', '* /api/guards/strict/*', '* /api/guards/*/limit', '* /api/admin-accounts/*', 'POST /api/unmanaged-admins/*',
                              '* /api/unmanaged-admins/import', '* /api/custom-workloads/delete', '* /api/custom-workloads/import', '* /api/engine/*', '* /api/rfa/override',
@@ -58,14 +61,14 @@ $script:PimApiRefPublicRoutes = @(
     'GET /api/access-reviews', 'POST /api/access-reviews/decision', 'GET /api/access-reviews/evidence', 'GET /api/access-reviews/overdue',
     'POST /api/access-reviews/reminders',
     'GET /api/account-states', 'GET /api/active-assignments', 'GET /api/admin-accounts', 'GET /api/admin-templates', 'GET /api/alerts',
-    'GET /api/approvals', 'POST /api/approvals/decide',
+    'GET /api/approvals', 'POST /api/approvals', 'POST /api/approvals/decide',
     'GET /api/asbuilt', 'GET /api/asbuilt/pdf', 'GET /api/attention', 'GET /api/audit', 'GET /api/audit/export',
     'POST /api/autoextend/decide', 'GET /api/autoextend/upcoming',
     'GET /api/commit-history', 'GET /api/commit-history/{p1}', 'GET /api/commit-status/{p1}', 'GET /api/commits',
     'GET /api/company-reviews', 'POST /api/company-review/answer',
     'GET /api/conformance', 'GET /api/conformance/exemptions', 'GET /api/conformance/fleet', 'GET /api/conformance/ring-plan', 'GET /api/conformance/templates',
     'GET /api/coverage', 'POST /api/coverage/check',
-    'GET /api/custom-workloads', 'GET /api/directory/groups', 'GET /api/directory/people',
+    'GET /api/custom-workloads', 'GET /api/custom-workloads/export', 'GET /api/directory/groups', 'GET /api/directory/people',
     'GET /api/discovered-resources', 'GET /api/discovery-inbox', 'POST /api/discovery-decisions', 'GET /api/discovery-policy',
     'GET /api/docs', 'GET /api/docs/page', 'GET /api/drift', 'GET /api/engine-failures', 'GET /api/environment-report',
     'GET /api/group-states', 'GET /api/guards', 'GET /api/home', 'GET /api/hybrid-ad/live', 'GET /api/hybrid-ad/server-groups/waiting', 'GET /api/hybrid-ad/waiting',
@@ -74,13 +77,14 @@ $script:PimApiRefPublicRoutes = @(
     'GET /api/map-risk', 'GET /api/map-search', 'GET /api/naming-conventions',
     'POST /api/owner/extend', 'POST /api/owner/keep', 'POST /api/owner/remove', 'GET /api/owner/people',
     'GET /api/pending', 'PUT /api/pending/{p1}', 'POST /api/pending-discard', 'POST /api/pending-discard-all',
-    'GET /api/permissions-health', 'GET /api/policy-choices', 'GET /api/policy-templates', 'GET /api/preflight', 'POST /api/preflight',
+    'GET /api/policy-choices', 'GET /api/policy-templates', 'GET /api/preflight', 'POST /api/preflight',
     'GET /api/queue', 'POST /api/queue/commit', 'POST /api/queue/discard', 'GET /api/reconcile/state',
     'GET /api/reports/management', 'GET /api/reports/management/latest',
     'GET /api/rfa/requests', 'POST /api/rfa/decide', 'POST /api/rfa/end',
     'GET /api/role-lookup/compare', 'GET /api/role-lookup/reverse', 'GET /api/role-permissions', 'GET /api/role-permissions/by-action',
     'GET /api/search', 'GET /api/template-state', 'GET /api/templates', 'GET /api/tenant-lists', 'GET /api/tier-impact', 'GET /api/unmanaged-admins',
-    'GET /api/warning-overrides', 'GET /api/workload-crawl', 'GET /api/workload-exemptions', 'GET /api/workload-prereqs', 'GET /api/workload-recon',
+    'GET /api/warning-overrides', 'GET /api/workload-crawl', 'POST /api/workload-crawl', 'GET /api/workload-exemptions', 'GET /api/workload-prereqs',
+    'POST /api/workload-prereqs/confirm', 'GET /api/workload-recon',
     'GET /api/workload-roles', 'GET /api/workloads'
 )
 # MCP tools the public reference carries (by name). Their route, when they name one, must be a public route too.
@@ -90,7 +94,13 @@ $script:PimApiRefPublicMcpTools = @(
     'autoextend_upcoming', 'autoextend_decide', 'owner_reviews', 'owner_review_extend', 'owner_review_keep', 'owner_review_remove',
     'jobs_status', 'job_history', 'job_log', 'job_run', 'job_cancel', 'job_run_now_scheduled',
     'active_assignments', 'environment_report', 'unmanaged_admins', 'access_requests', 'audit_search',
-    'list_rows', 'pending_changes', 'stage_change', 'discard_staged', 'commit_staged', 'commit_status'
+    'list_rows', 'pending_changes', 'stage_change', 'discard_staged', 'commit_staged', 'commit_status',
+    # routine reads + the two access-request decisions (2026-11-01 review); NOT here on purpose: config_backups (backup),
+    # permissions_health (the install's own permissions), managed_tenants / managed_tenant_reach (MSP), reconcile_pause /
+    # reconcile_resume (engine control)
+    'conformance_templates', 'conformance', 'conformance_exemptions', 'conformance_fleet', 'conformance_ring_plan',
+    'role_permissions', 'role_permissions_by_action', 'role_compare', 'commit_history', 'commit_history_detail',
+    'access_request_decide', 'access_request_end'
 )
 # Invardia's import guard (2026-11-01): a hand-over whose public path, summary, description, tool name or tool text carries
 # one of these is refused. Applied on top of the classification: an operation or tool whose text matches is left out.
@@ -739,8 +749,12 @@ function New-PimApiReferenceDocument {
     $toolRows = New-Object System.Collections.Generic.List[object]; $toolsOut = 0
     $toolNames = @($Tools | ForEach-Object { "$($_.name)" })
     if ($pub) { foreach ($n in $script:PimApiRefPublicMcpTools) { if ($Tools.Count -and $toolNames -notcontains $n) { $conflicts.Add("public MCP tool '$n' is not a tool of this version") } } }
+    # A tool names a path parameter by its own argument ('/{commitId}'); the router's form is positional ('/{p1}'). The row
+    # carries the reference's OWN key for that route, so a tool always names an operation of api.json exactly.
+    $routeByShape = @{}; foreach ($k in $have.Keys) { $routeByShape[($k -replace '\{\w+\}', '{}')] = $k }
     foreach ($t in @($Tools | Sort-Object name)) {
         $row = ConvertTo-PimApiRefToolRow -Tool $t
+        if ($row.route -and -not $have.ContainsKey($row.route)) { $shape = $row.route -replace '\{\w+\}', '{}'; if ($routeByShape.ContainsKey($shape)) { $row.route = $routeByShape[$shape] } }
         if ($pub) {
             $schemaTxt = ($row.inputSchema | ConvertTo-Json -Depth 20 -Compress)
             $ok = $pubTools.ContainsKey($row.name) -and -not (Test-PimApiRefForbiddenText -Text $row.name) -and -not (Test-PimApiRefForbiddenText -Text $row.description) -and -not (Test-PimApiRefForbiddenText -Text $schemaTxt)

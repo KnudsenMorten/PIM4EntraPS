@@ -35,7 +35,7 @@ the account already holds through delegation is refused.
    (the reason is in `status`), `expired`, `cancelled`, `forwarded` (a proposal handed to PIM's review queue).
 4. **`POST /api/v1/requests/{id}/cancel`** ends a window early.
 
-The caller's own workflow **is** the approval: a request made through the API is approved on arrival and applied within
+The caller's own workflow **is** the approval: a request made through the API is approved on arrival (a group request for a Tier 0 or Tier 1 group, or one with no tier set, waits for a person to approve it) and applied within
 a few minutes. The API only ever returns requests the same caller made.
 
 ## Before the first call (PIM Manager, SuperAdmin)

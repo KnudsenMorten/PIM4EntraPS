@@ -56,6 +56,15 @@
         -AdminAccountsOu 'OU=Admin Accounts,DC=corp,DC=local' -GrantProtectedGroupMembership `
         -ServerGmsaName gMSA-PIM-L2-T1 -ServerOu 'OU=Servers,DC=corp,DC=local' -WhatIf
 
+.NOTES
+    Requirements:
+      PowerShell: Windows PowerShell 5.1 (powershell.exe) on a domain controller or a domain-joined Windows server --
+                  one of PIM's three exceptions to PowerShell 7. Why: it uses the Windows GroupPolicy module (to create
+                  the servers GPO) and Add-KdsRootKey (with -CreateKdsRootKey), which are Windows PowerShell modules.
+      Role: Domain Admins (Active Directory); Enterprise Admins only with -CreateKdsRootKey. No Microsoft Entra or
+            Azure role.
+      Hosts: the domain controllers only (LDAP, SYSVOL); no internet.
+
 .LINK
     https://invardia.com/docs/pim/scripts/Initialize-PimHybridWorkerAd/
 #>

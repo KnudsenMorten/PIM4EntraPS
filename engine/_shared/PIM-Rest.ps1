@@ -1097,11 +1097,11 @@ function Merge-PimRestRetryBuckets {
       if ($null -ne $o -and $o.PSObject.Properties['hours']) {
         $sv = $o.sinceUtc
         if ($sv -is [datetime]) { $since = $sv.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', $inv) }
-        elseif ("$sv".Trim()) { $d0 = [datetime]::MinValue; if ([datetime]::TryParse("$sv", $inv, $styles, [ref]$d0)) { $since = $d0.ToString('yyyy-MM-ddTHH:mm:ssZ', $inv) } }
+        elseif ("$sv".Trim()) { $d0 = [datetime]::MinValue; if ([datetime]::TryParse("$sv", [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$d0)) { $since = $d0.ToString('yyyy-MM-ddTHH:mm:ssZ', $inv) } }
         if ($null -ne $o.hours) {
           foreach ($p in @($o.hours.PSObject.Properties)) {
             $d = [datetime]::MinValue
-            if (-not [datetime]::TryParse("$($p.Name)", $inv, $styles, [ref]$d)) { continue }
+            if (-not [datetime]::TryParse("$($p.Name)", [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$d)) { continue }
             if ($d -lt $cut) { continue }
             $a = 0L; $b = 0L
             [void][long]::TryParse("$($p.Value.r429)", [ref]$a); [void][long]::TryParse("$($p.Value.r5xx)", [ref]$b)

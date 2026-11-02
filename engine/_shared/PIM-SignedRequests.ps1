@@ -506,6 +506,11 @@ function Test-PimSignedRequestToken {
     if ($cap -gt $exp.AddSeconds($ClockSkewSeconds)) { return (& $no ("captured {0:o}, after the token expired ({1:o})" -f $cap, $exp) '' $kid) }
     $cl = Test-PimJwtClaims -Payload $jwt.payload -ExpectedIssuers $iss -ExpectedAudiences $aud -NowUtc $cap -ClockSkewSeconds $ClockSkewSeconds
     if (-not $cl.valid) { return (& $no "claims: $($cl.reason)" '' $kid) }
+    # SEC-89: a signed change is a PERSON's -- an application's token is refused for what it is.
+    if (Get-Command Get-PimJwtAppOnlyReason -ErrorAction SilentlyContinue) {
+        $appOnly = Get-PimJwtAppOnlyReason -Payload $jwt.payload
+        if ($appOnly) { return (& $no $appOnly '' $kid) }
+    }
     $user = Get-PimSignedRequestTokenUser -Payload $jwt.payload
     if (-not $user) { return (& $no 'the token names no user' '' $kid) }
     if ("$ExpectedUser".Trim() -and $user.ToLowerInvariant() -ne "$ExpectedUser".Trim().ToLowerInvariant()) {

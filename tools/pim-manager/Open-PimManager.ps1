@@ -785,7 +785,93 @@ function Test-PimManagerApiPageToken {
         if (-not (Get-Command Test-PimManagerPageToken -ErrorAction SilentlyContinue)) { return $false }
         return (Test-PimManagerPageToken -Authorization "$ah" -PageTokenHeader "$($Request.Headers['X-PIM-Token'])" -ExpectedToken "$ExpectedToken" -Front $true)
     }
+    # LOCAL (break-glass) Manager: the call must ALSO carry the session cookie that only the browser which opened the one-time
+    # link holds. The header stays required too -- a cookie alone is sent by the browser on any request, so it never counts on
+    # its own. Hosted Managers never enter here (their principal comes from the edge).
+    if (-not $script:PimHosted -and -not (Test-PimManagerLocalSessionCookie -Session $script:PimLocalSession -CookieHeader "$($Request.Headers['Cookie'])")) { return $false }
     return [bool]($ah -and $ah -eq "Bearer $ExpectedToken")
+}
+
+# ---------------------------------------------------------------------------
+# LOCAL (break-glass) Manager sign-in. The Manager prints (or opens the browser with) a ONE-TIME link; the first request
+# with it gets an HttpOnly, SameSite=Strict session cookie and is sent on to the page. The link works once, for a short
+# time, and is then useless. The page token is never printed and never on a command line. Hosted Managers never use this.
+# PURE functions (the state is the hashtable New-PimManagerLocalSession returns) so the suites test them directly.
+# ---------------------------------------------------------------------------
+function New-PimManagerRandomHex {
+    param([int]$Bytes = 32)
+    $b = New-Object byte[] $Bytes
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($b) } finally { $rng.Dispose() }
+    return (-join ($b | ForEach-Object { $_.ToString('x2') }))
+}
+
+function New-PimManagerLocalSession {
+    param([int]$Port = 0, [int]$LaunchSeconds = 120, [datetime]$NowUtc = [datetime]::UtcNow)
+    return @{
+        # one cookie name per port: two local Managers on one machine never overwrite each other's session
+        cookieName       = "pim_mgr_$Port"
+        secret           = (New-PimManagerRandomHex 32)
+        launchToken      = (New-PimManagerRandomHex 32)
+        launchExpiresUtc = $NowUtc.AddSeconds([Math]::Max(1, $LaunchSeconds))
+        launchUsed       = $false
+    }
+}
+
+function Test-PimManagerSecretEqual {
+    # Constant-time comparison of two strings (no early exit on the first differing character).
+    param([string]$A, [string]$B)
+    if (-not $A -or -not $B -or $A.Length -ne $B.Length) { return $false }
+    $d = 0
+    for ($i = 0; $i -lt $A.Length; $i++) { $d = $d -bor ([int][char]$A[$i] -bxor [int][char]$B[$i]) }
+    return ($d -eq 0)
+}
+
+function Use-PimManagerLaunchToken {
+    # TRUE exactly once: the right link, not used before, not expired. The first success consumes it for good.
+    param($Session, [string]$Presented, [datetime]$NowUtc = [datetime]::UtcNow)
+    if (-not $Session -or $Session.launchUsed -or -not "$Presented" -or -not "$($Session.launchToken)") { return $false }
+    if ($NowUtc -ge [datetime]$Session.launchExpiresUtc) { return $false }
+    if (-not (Test-PimManagerSecretEqual "$Presented" "$($Session.launchToken)")) { return $false }
+    $Session.launchUsed = $true
+    $Session.launchToken = ''
+    return $true
+}
+
+function Test-PimManagerLocalSessionCookie {
+    # TRUE when the Cookie header carries this Manager's session cookie with the right value.
+    param($Session, [string]$CookieHeader)
+    if (-not $Session -or -not "$($Session.secret)" -or -not "$CookieHeader") { return $false }
+    foreach ($part in ("$CookieHeader" -split ';')) {
+        $kv = $part.Trim(); $i = $kv.IndexOf('=')
+        if ($i -le 0) { continue }
+        if ($kv.Substring(0, $i).Trim() -cne "$($Session.cookieName)") { continue }
+        if (Test-PimManagerSecretEqual $kv.Substring($i + 1).Trim() "$($Session.secret)") { return $true }
+    }
+    return $false
+}
+
+function Get-PimManagerLocalSessionSetCookie {
+    param($Session, [bool]$Secure = $false)
+    $c = "$($Session.cookieName)=$($Session.secret); Path=/; HttpOnly; SameSite=Strict"
+    if ($Secure) { $c += '; Secure' }
+    return $c
+}
+
+function Get-PimManagerLocalPageAnswer {
+    # What GET / answers on a LOCAL Manager: 'serve' (the session cookie is there), 'redirect' (the one-time link was just
+    # used -- setCookie carries the new session; or a browser that already holds it re-opened the link), or 'refuse'.
+    param($Session, [string]$CookieHeader, [string]$LaunchToken, [bool]$Secure = $false, [datetime]$NowUtc = [datetime]::UtcNow)
+    $hasCookie = Test-PimManagerLocalSessionCookie -Session $Session -CookieHeader $CookieHeader
+    if ("$LaunchToken") {
+        if ($hasCookie) { return @{ action = 'redirect'; setCookie = '' } }
+        if (Use-PimManagerLaunchToken -Session $Session -Presented $LaunchToken -NowUtc $NowUtc) {
+            return @{ action = 'redirect'; setCookie = (Get-PimManagerLocalSessionSetCookie -Session $Session -Secure $Secure) }
+        }
+        return @{ action = 'refuse'; setCookie = '' }
+    }
+    if ($hasCookie) { return @{ action = 'serve'; setCookie = '' } }
+    return @{ action = 'refuse'; setCookie = '' }
 }
 
 # ---------------------------------------------------------------------------
@@ -7161,7 +7247,7 @@ function Get-PimManagerMcpTools {
         }
         Write-PimManagerAuditEvent -Action 'pending.stage' -Target $base -Result 'ok' -After ([ordered]@{ by = $who; via = 'mcp'; op = $op; key = $key })
         [ordered]@{ staged = $true; entity = $base; op = $op; key = $key; next = 'Commit it with commit_staged, or in the PIM Manager: Pending changes > Review & commit.' } }))
-    $tools.Add((New-PimMcpTool -Name 'commit_staged' -Kind commit -MinRole Admin -Description 'COMMIT the changes YOU staged on one entity, through exactly the same commit as the Manager''s Review & commit: validation, the second-approver rule, Tier 0/1 approval, the offboarding hold and concurrency checks all apply, and a refusal says why. The engine then applies the committed rows; follow it with the commit id in the Manager''s commit watcher.' `
+    $tools.Add((New-PimMcpTool -Name 'commit_staged' -Kind commit -MinRole Admin -Description 'COMMIT the changes YOU staged on one entity, through exactly the same commit as the Manager''s Review & commit: validation, the second-approver rule, the approval for the two most privileged tiers, the offboarding hold and concurrency checks all apply, and a refusal says why. The engine then applies the committed rows; follow it with the commit id in the Manager''s commit watcher.' `
         -InputSchema @{ type = 'object'; required = @('entity'); properties = @{ entity = @{ type = 'string' }; justification = @{ type = 'string'; description = 'why -- recorded with the commit' }; ticket = @{ type = 'string' } } } -Handler {
         param($a, $ctx)
         $base = "$($a.entity)".Trim(); $spec = Get-PimCsvSpec -BaseName $base
@@ -7261,7 +7347,7 @@ function Get-PimManagerMcpTools {
         @{ n = 'environment_report'; fn = 'EnvironmentReport'; p = '/api/environment-report'; r = 'Admin'; d = 'The environment report: identities, permissions, hosting and settings of this install, as the page builds it.'; s = @{} }
         @{ n = 'owner_reviews'; fn = 'OwnerPeople'; p = '/api/owner/people'; r = 'Reader'; d = 'Owner reviews: the people a department owner is asked to keep, extend or remove.'; s = @{} }
         @{ n = 'autoextend_upcoming'; fn = 'AutoextendUpcoming'; p = '/api/autoextend/upcoming'; r = 'Reader'; d = 'Assignments that run out soon and what auto-extend will do with each.'; s = @{} }
-        @{ n = 'tier_impact'; fn = 'TierImpact'; p = '/api/tier-impact'; r = 'Reader'; d = 'Tier impact (Pro): what each Tier 0 / 1 / 2 role reaches and who holds it.'
+        @{ n = 'tier_impact'; fn = 'TierImpact'; p = '/api/tier-impact'; r = 'Reader'; d = 'Tier impact (Pro): for each role tier (0, 1 or 2), what its roles reach and who holds them.'
            s = @{ tier = @{ type = 'string'; description = '0, 1 or 2' } } }
         @{ n = 'role_lookup'; fn = 'RoleLookupReverse'; p = '/api/role-lookup/reverse'; r = 'Reader'; d = 'Reverse role lookup: everything that grants ONE role (definitions, groups, nesting).'
            s = @{ role = @{ type = 'string' }; kind = @{ type = 'string' } }; q = @('role') }
@@ -13477,16 +13563,24 @@ function Invoke-Server {
             }
         }
         Write-Host ("  [LOCAL/emergency] loopback listening on http://127.0.0.1:{0}/" -f $port) -ForegroundColor Green
-        Write-Host ("  session token: {0}" -f $token) -ForegroundColor DarkGray
         Write-Host "  press Ctrl-C to stop (or close the browser tab; server self-exits after 30s of silence)." -ForegroundColor DarkGray
     }
 
-    $url = if ($script:PimHosted) { "http://localhost:$port/?token=$token" } else { "http://127.0.0.1:$port/?token=$token" }
-    if (-not $NoLaunch -and -not $script:PimHosted) {
-        Write-Host "  launching default browser ..." -ForegroundColor Cyan
-        Start-Process $url | Out-Null
-    } elseif (-not $script:PimHosted) {
-        Write-Host ("  URL: {0}" -f $url) -ForegroundColor Yellow
+    # LOCAL: the browser is opened with a ONE-TIME link (works once, for 2 minutes); the page token itself is never printed
+    # and never on a command line. The first request with the link gets the session cookie the page then works with.
+    if (-not $script:PimHosted) {
+        $script:PimLocalSession = New-PimManagerLocalSession -Port $port -LaunchSeconds 120
+        $url = "http://127.0.0.1:$port/?launch=$($script:PimLocalSession.launchToken)"
+        $launched = $false
+        if (-not $NoLaunch) {
+            Write-Host "  launching default browser ..." -ForegroundColor Cyan
+            try { Start-Process $url | Out-Null; $launched = $true }
+            catch { Write-Host ("  the browser could not be opened ({0}) -- open the link below yourself." -f $_.Exception.Message) -ForegroundColor Yellow }
+        }
+        if (-not $launched) {
+            Write-Host ("  one-time link: {0}" -f $url) -ForegroundColor Yellow
+            Write-Host "  (opens the Manager once, in one browser, within 2 minutes; start the Manager again for a new link)" -ForegroundColor DarkGray
+        }
     }
 
     # Heartbeat tracker -- updated by /api/heartbeat, watched by the dispatch loop.
@@ -13557,7 +13651,9 @@ function Invoke-Server {
             # Analytics and every page poll / probe wrote a line. A request that FAILED (>= 400) or was SLOW (>= 1 s) is
             # always logged; a fast success only locally, or with PIM_MANAGER_TRACE_REQUESTS=1 / PIM_LOG_VERBOSE=1.
             if (Test-PimManagerRequestLogged -Hosted ([bool]$script:PimHosted) -Status $status -Seconds $took) {
-            Write-Host ("  [{0}] {1,-6} {2,-40} -> {3}{4}" -f $ts, $ctx.Request.HttpMethod, $ctx.Request.Url.PathAndQuery, $status, $(if ($took -ge 1) { " ({0:N1}s{1})" -f $took, $(if ($took -ge 5) { ' SLOW -- every request behind it waited' } else { '' }) } else { '' })) -ForegroundColor $(if ($took -ge 5) { 'Yellow' } else { 'DarkGray' })
+            # local: the one-time link's value is never written to the log (only that one was presented)
+            $logPath = "$($ctx.Request.Url.PathAndQuery)"; if (-not $script:PimHosted) { $logPath = $logPath -replace '(?i)([?&]launch=)[^&]*', '$1***' }
+            Write-Host ("  [{0}] {1,-6} {2,-40} -> {3}{4}" -f $ts, $ctx.Request.HttpMethod, $logPath, $status, $(if ($took -ge 1) { " ({0:N1}s{1})" -f $took, $(if ($took -ge 5) { ' SLOW -- every request behind it waited' } else { '' }) } else { '' })) -ForegroundColor $(if ($took -ge 5) { 'Yellow' } else { 'DarkGray' })
             }
             # A served request IS client activity. Long-running endpoints
             # (active-assignments took 90s on a real tenant) block the
@@ -15260,8 +15356,8 @@ function Handle-Request {
         # unauthenticated made that token public -- two requests (GET / for the token,
         # then any /api call with a forged principal header) reached SuperAdmin. In
         # HOSTED mode the caller must therefore be a positively-trusted principal
-        # before the page (and with it the token) is handed over. LOCAL mode is
-        # unchanged: the listener binds to loopback and identity is the Windows user.
+        # before the page (and with it the token) is handed over. LOCAL mode (loopback,
+        # identity = the Windows user) is gated just below by the one-time link + session cookie.
         if ($script:PimHosted -and -not "$script:CurrentRequestPrincipal".Trim()) {
             Write-Host "  [auth] DENIED GET / -- no trusted principal (hosted)" -ForegroundColor Red
             Write-JsonResponse -Response $resp -Status 401 -Body @{
@@ -15269,6 +15365,44 @@ function Handle-Request {
                 detail = 'no authenticated principal -- this app must be reached through its authentication edge'
             }
             return 401
+        }
+        # LOCAL (break-glass) Manager: the page opens only in the browser that used the one-time link the Manager gave when it
+        # started (that browser then holds the session cookie). Anything else on this machine that reaches the loopback port
+        # gets no page and no page token.
+        if (-not $script:PimHosted) {
+            $la = Get-PimManagerLocalPageAnswer -Session $script:PimLocalSession -CookieHeader "$($req.Headers['Cookie'])" `
+                    -LaunchToken "$($req.QueryString['launch'])" -Secure ([bool]$req.IsSecureConnection)
+            if ($la.action -eq 'redirect') {
+                try {
+                    $resp.StatusCode = 303
+                    $resp.Headers['Cache-Control'] = 'no-store'
+                    if ($la.setCookie) {
+                        $resp.AppendHeader('Set-Cookie', "$($la.setCookie)")
+                        # the one caller that just used the link also gets the page token, so a script driving this Manager
+                        # needs no page render to learn it (a browser simply follows the redirect to the page)
+                        $resp.Headers['X-PIM-Token'] = "$ExpectedToken"
+                    }
+                    $resp.RedirectLocation = '/'
+                    $resp.OutputStream.Close()
+                } catch { Write-Host ("  [net] client gone before the redirect was written: {0}" -f $_.Exception.Message) -ForegroundColor DarkGray }
+                return 303
+            }
+            if ($la.action -ne 'serve') {
+                Write-Host "  [auth] DENIED GET / -- no session (local: open the Manager with the one-time link it gave when it started)" -ForegroundColor Red
+                try {
+                    $msgHtml = '<!doctype html><html><head><meta charset="utf-8"><title>PIM Manager</title></head><body style="font-family:Segoe UI,Arial,sans-serif;margin:40px;">' +
+                               '<h2>PIM Manager</h2><p>This link has already been used, has expired, or is not the link the PIM Manager gave when it started.</p>' +
+                               '<p>Start the PIM Manager again to open it. Each link opens the Manager once, in one browser.</p></body></html>'
+                    $hb = [System.Text.Encoding]::UTF8.GetBytes($msgHtml)
+                    $resp.StatusCode = 401
+                    $resp.ContentType = 'text/html; charset=utf-8'
+                    $resp.Headers['Cache-Control'] = 'no-store'
+                    $resp.ContentLength64 = $hb.LongLength
+                    $resp.OutputStream.Write($hb, 0, $hb.Length)
+                    $resp.OutputStream.Close()
+                } catch { Write-Host ("  [net] client gone before the answer was written: {0}" -f $_.Exception.Message) -ForegroundColor DarkGray }
+                return 401
+            }
         }
         # §79.3 (operator 2026-09-25: "verify all emails include links to the portal"): a signed-in person just reached this
         # page through the auth edge, so this address works from outside. Record it once as pim.Settings['ManagerUrl'] when
@@ -15473,9 +15607,10 @@ function Handle-Request {
                 Write-JsonResponse -Response $resp -Status ([int]$bv.status) -Body @{ error = $(if ([int]$bv.status -eq 403) { 'forbidden' } else { 'unavailable' }); detail = "$($bv.reason)" }
                 return [int]$bv.status
             }
-        } elseif ($ah -ne "Bearer $ExpectedToken") {
+        } elseif (-not (Test-PimManagerApiPageToken -Request $req -ExpectedToken $ExpectedToken)) {
+            # local: exactly the page's own /api check (the page token AND the session of the browser that opened the Manager)
             try { $resp.AddHeader('WWW-Authenticate', 'Bearer realm="pim-manager"') } catch { }
-            Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized'; detail = 'send Authorization: Bearer <the page token>' }
+            Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized'; detail = 'a local Manager answers only the browser session that opened it' }
             return 401
         }
         # §98: a demo viewer never drives the MCP server (its commit tools would bypass the page) -- refused like any write.
@@ -20675,7 +20810,9 @@ function Handle-Request {
                 $settingsOut = [ordered]@{ storeAccount = "$(if ($st) { $st.storeAccount })"; portalUrl = "$(if ($st) { $st.portalUrl })"; apiAppIds = @(if ($st -and $st.PSObject.Properties['apiAppIds']) { $st.apiAppIds })
                     # §91.7: ad-hoc group access -- the groups offered and the default length (24 h unless set)
                     adHocGroups = @(if ($st -and $st.PSObject.Properties['adHocGroups']) { @($st.adHocGroups) | Where-Object { "$_".Trim() } })
-                    adHocHours = $(if ($st -and $st.PSObject.Properties['adHocHours'] -and "$($st.adHocHours)".Trim()) { [int]$st.adHocHours } else { 24 }) }
+                    adHocHours = $(if ($st -and $st.PSObject.Properties['adHocHours'] -and "$($st.adHocHours)".Trim()) { [int]$st.adHocHours } else { 24 })
+                    # SEC-96: each allow-listed application's own groups (absent = every group offered for ad-hoc access)
+                    apiAppGroups = $(if ($st -and $st.PSObject.Properties['apiAppGroups'] -and $st.apiAppGroups) { $st.apiAppGroups } else { [ordered]@{} }) }
                 $feature = $true; if (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) { $feature = [bool](Test-PimFeatureAvailable -Key 'rfa.portal' -Quiet) }
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ requests = $out; settings = $settingsOut; enabled = $feature; deployed = [bool]"$($settingsOut.storeAccount)"; isAdmin = $isAdmin; isSuperAdmin = $isSuper })
                 return 200
@@ -20729,8 +20866,31 @@ function Handle-Request {
                     if (-not [int]::TryParse("$($body.adHocHours)", [ref]$ah) -or $ah -lt 1 -or $ah -gt 744) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'the default ad-hoc length is 1 to 744 hours (31 days)' }; return 400 }
                     $new | Add-Member -NotePropertyName adHocHours -NotePropertyValue $ah -Force
                 }
+                # SEC-96: which groups EACH allow-listed application may request ({ "<client id>": [tags / ids] }; an empty list
+                # or no entry = every group offered for ad-hoc access). Only written when the form sends it; an entry for an
+                # application that is no longer allow-listed is dropped. Same SuperAdmin gate as the allow list itself.
+                $appGroupsBefore = $(if ($cur -and $cur.PSObject.Properties['apiAppGroups']) { $cur.apiAppGroups } else { $null })
+                $appGroupsChanged = $false
+                if ($body.PSObject.Properties['apiAppGroups']) {
+                    $ag = [ordered]@{}
+                    $src = $body.apiAppGroups
+                    $pairs = if ($null -eq $src) { @() } elseif ($src -is [System.Collections.IDictionary]) { @($src.Keys | ForEach-Object { @{ n = "$_"; v = $src[$_] } }) } else { @($src.PSObject.Properties | ForEach-Object { @{ n = "$($_.Name)"; v = $_.Value } }) }
+                    foreach ($p in $pairs) {
+                        $aid = $p.n.Trim().ToLowerInvariant()
+                        if ($aid -notmatch '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "not an application (client) id: $($p.n)" }; return 400 }
+                        $gl = ConvertTo-PimRfaGroupList -Value $p.v
+                        if (-not $gl.ok) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "$aid -- $($gl.error)" }; return 400 }
+                        if ($apps -contains $aid -and @($gl.groups).Count) { $ag[$aid] = @($gl.groups) }
+                    }
+                    $new | Add-Member -NotePropertyName apiAppGroups -NotePropertyValue ([pscustomobject]$ag) -Force
+                    $bj = if ($null -eq $appGroupsBefore) { '{}' } else { "$($appGroupsBefore | ConvertTo-Json -Depth 5 -Compress)" }
+                    $appGroupsChanged = ($bj -ne "$([pscustomobject]$ag | ConvertTo-Json -Depth 5 -Compress)")
+                }
                 Set-PimSqlSetting -ConnectionString $cs -Name 'RfaSettings' -Value $new
-                Write-PimManagerAuditEvent -Action 'rfa.settings' -Target 'RfaSettings' -Result 'ok' -After ([ordered]@{ storeAccount = $acct; portalUrl = $url; apiAppIds = @($apps); adHocGroups = @($new.adHocGroups); adHocHours = $new.adHocHours; by = $me })
+                Write-PimManagerAuditEvent -Action 'rfa.settings' -Target 'RfaSettings' -Result 'ok' -After ([ordered]@{ storeAccount = $acct; portalUrl = $url; apiAppIds = @($apps); adHocGroups = @($new.adHocGroups); adHocHours = $new.adHocHours; apiAppGroups = $(if ($new.PSObject.Properties['apiAppGroups']) { $new.apiAppGroups } else { $null }); by = $me })
+                if ($appGroupsChanged) {
+                    Write-PimManagerAuditEvent -Action 'rfa.api-app-groups' -Target 'RfaSettings' -Result 'ok' -Before ([ordered]@{ apiAppGroups = $appGroupsBefore }) -After ([ordered]@{ apiAppGroups = $new.apiAppGroups; by = $me })
+                }
                 Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true }
                 return 200
             }
@@ -20740,9 +20900,33 @@ function Handle-Request {
                 if (-not $isSuper) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'API keys need the SuperAdmin role' }; return 403 }
                 $readKeys = { $raw = Get-PimSqlSettingRaw -ConnectionString $cs -Name 'ApiKeys'; [pscustomobject]@{ raw = $raw; keys = @(if ("$raw".Trim()) { @(($raw | ConvertFrom-Json).keys) }) } }
                 $saveKeys = { param($cur, $keys) [int](Set-PimSqlSettingIfUnchanged -ConnectionString $cs -Name 'ApiKeys' -NewValueJson ([pscustomobject]@{ keys = @($keys) } | ConvertTo-Json -Depth 5 -Compress) -ExpectedValueJson $cur.raw) -eq 1 }
+                # SEC-96: a key's OWN group list (group tags or group ids; empty = every group offered for ad-hoc access)
+                $readGroups = { param($v) ConvertTo-PimRfaGroupList -Value $v }
                 if ($path -eq '/api/rfa/api-keys' -and $method -eq 'GET') {
                     $k = & $readKeys
-                    Write-JsonResponse -Response $resp -Status 200 -Body @{ keys = @($k.keys | ForEach-Object { [ordered]@{ id = "$($_.id)"; name = "$($_.name)"; prefix = "$($_.prefix)"; scopes = "$($_.scopes)"; expiresUtc = "$($_.expiresUtc)"; revoked = [bool]("$($_.revoked)" -match '^(?i)true|1$'); createdBy = "$($_.createdBy)"; createdUtc = "$($_.createdUtc)" } }) }
+                    Write-JsonResponse -Response $resp -Status 200 -Body @{ keys = @($k.keys | ForEach-Object { [ordered]@{ id = "$($_.id)"; name = "$($_.name)"; prefix = "$($_.prefix)"; scopes = "$($_.scopes)"; expiresUtc = "$($_.expiresUtc)"; revoked = [bool]("$($_.revoked)" -match '^(?i)true|1$'); createdBy = "$($_.createdBy)"; createdUtc = "$($_.createdUtc)"
+                                                                                                             groups = @(if ($_.PSObject.Properties['groups']) { @($_.groups) | ForEach-Object { "$_".Trim() } | Where-Object { $_ } }) } }) }
+                    return 200
+                }
+                if ($path -eq '/api/rfa/api-keys/groups' -and $method -eq 'POST') {
+                    # SEC-96: which groups ONE key may request -- the same SuperAdmin gate as creating / revoking keys (above)
+                    $body = Read-RequestJson -Request $req; $kid = "$($body.id)".Trim()
+                    $gl = & $readGroups $body.groups
+                    if (-not $gl.ok) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = $gl.error }; return 400 }
+                    $done = $false; $found = $false; $before = @(); $kname = ''
+                    for ($try = 0; $try -lt 5 -and -not $done; $try++) {
+                        $cur = & $readKeys
+                        $hit = @($cur.keys | Where-Object { "$($_.id)" -eq $kid })[0]
+                        $found = [bool]$hit
+                        if (-not $found) { break }
+                        $before = @(if ($hit.PSObject.Properties['groups']) { @($hit.groups) | ForEach-Object { "$_".Trim() } | Where-Object { $_ } }); $kname = "$($hit.name)"
+                        $new = @($cur.keys | ForEach-Object { if ("$($_.id)" -eq $kid) { $n = $_.PSObject.Copy(); $n | Add-Member -NotePropertyName groups -NotePropertyValue @($gl.groups) -Force; $n } else { $_ } })
+                        $done = & $saveKeys $cur $new
+                    }
+                    if (-not $found) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = 'no such key' }; return 404 }
+                    if (-not $done) { Write-JsonResponse -Response $resp -Status 409 -Body @{ error = 'the key list kept changing -- try again' }; return 409 }
+                    Write-PimManagerAuditEvent -Action 'api-key.groups' -Target $kid -Result 'ok' -Before ([ordered]@{ name = $kname; groups = @($before) }) -After ([ordered]@{ name = $kname; groups = @($gl.groups); by = $me })
+                    Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; groups = @($gl.groups); note = $(if (@($gl.groups).Count) { 'Saved. From the next request on, this key may request only these groups.' } else { 'Saved. This key may request every group offered for ad-hoc access.' }) }
                     return 200
                 }
                 if ($path -eq '/api/rfa/api-keys' -and $method -eq 'POST') {
@@ -20753,12 +20937,14 @@ function Handle-Request {
                     if (-not $name -or $name.Length -gt 60) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'a name (who uses the key, at most 60 characters) is required' }; return 400 }
                     if ($days -lt 1 -or $days -gt 3650) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'a key lives 1 to 3650 days (10 years)' }; return 400 }   # operator 2026-10-02: "dont limit me if i want to set 10 year"
                     if (-not $scopes.Count) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'pick at least one scope: requests.write, requests.read' }; return 400 }
+                    $gl = & $readGroups $(if ($body.PSObject.Properties['groups']) { $body.groups } else { $null })
+                    if (-not $gl.ok) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = $gl.error }; return 400 }
                     $nk = New-PimApiKey
-                    $rec = [pscustomobject][ordered]@{ id = $nk.id; name = $name; hash = $nk.hash; prefix = $nk.prefix; scopes = ($scopes -join '|'); expiresUtc = [datetime]::UtcNow.AddDays($days).ToString('o'); revoked = 'false'; createdBy = $me; createdUtc = [datetime]::UtcNow.ToString('o') }
+                    $rec = [pscustomobject][ordered]@{ id = $nk.id; name = $name; hash = $nk.hash; prefix = $nk.prefix; scopes = ($scopes -join '|'); expiresUtc = [datetime]::UtcNow.AddDays($days).ToString('o'); revoked = 'false'; createdBy = $me; createdUtc = [datetime]::UtcNow.ToString('o'); groups = @($gl.groups) }
                     $saved = $false
                     for ($try = 0; $try -lt 5 -and -not $saved; $try++) { $cur = & $readKeys; $saved = & $saveKeys $cur (@($cur.keys) + $rec) }
                     if (-not $saved) { Write-JsonResponse -Response $resp -Status 409 -Body @{ error = 'the key list kept changing -- try again' }; return 409 }
-                    Write-PimManagerAuditEvent -Action 'api-key.create' -Target $name -Result 'ok' -After ([ordered]@{ id = $nk.id; prefix = $nk.prefix; scopes = ($scopes -join '|'); days = $days; by = $me })
+                    Write-PimManagerAuditEvent -Action 'api-key.create' -Target $name -Result 'ok' -After ([ordered]@{ id = $nk.id; prefix = $nk.prefix; scopes = ($scopes -join '|'); days = $days; groups = @($gl.groups); by = $me })
                     Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; id = $nk.id; key = $nk.key; note = 'Copy the key NOW -- it is shown only once. It works on the broker within a few minutes (the next rfa-sync run publishes it).' })
                     return 200
                 }

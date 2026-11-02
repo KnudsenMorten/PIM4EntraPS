@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 
 <#
 .SYNOPSIS
@@ -88,6 +88,18 @@
 .EXAMPLE
     .\Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -TenantId <tenant-id> -EngineObjectId <engine-object-id> -WhatIf
     Preview: every check runs, every fix is printed as "What if: ..." and nothing is changed or recorded.
+
+.NOTES
+    Requirements:
+      PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
+      Role: Privileged Role Administrator (Microsoft Entra) for the engine's application permissions, plus what the
+            chosen workload's fix needs: Power BI -- Groups Administrator and Fabric Administrator (or Admin of each
+            workspace for -AddEngineToWorkspaces); Defender XDR -- Security Administrator for the portal step, Contributor
+            on the subscription of the dedicated Sentinel workspace (-EnableSentinel only); Azure roles -- User Access
+            Administrator or Owner at each scope (-GrantAzureUserAccessAdministrator only); Reader on the hosting
+            resource group. To record the result (-SqlServerFqdn): member of the environment's SQL admin group.
+      Hosts: login.microsoftonline.com, graph.microsoft.com, management.azure.com, api.fabric.microsoft.com,
+             api.powerbi.com, *.database.windows.net (only with -SqlServerFqdn)
 
 .LINK
     https://invardia.com/docs/pim/scripts/Initialize-PimWorkloadPrereqs/

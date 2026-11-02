@@ -531,7 +531,8 @@ function Invoke-PimUpdaterSigninFrontStep {
     $fetched = ''
     try {
         $arch = "$ArchivePath".Trim()
-        if (-not $arch -and $sfNeed -and "$Version".Trim() -and $srcUrlTpl -and $srcUrlTpl -notmatch '^invardia://') {
+        # SEC-95: only an updater whose CHOSEN source is the storage container fetches from it (never as a fallback)
+        if (-not $arch -and $sfNeed -and "$Version".Trim() -and $srcUrlTpl -and $srcUrlTpl -notmatch '^invardia://' -and $srcMode.mode -eq 'pim-src') {
             $fetched = Join-Path ([IO.Path]::GetTempPath()) ("pim-src-front-{0}.tar.gz" -f "$Version".Trim())
             Say "sign-in front: fetching the source of $Version to build signin-front:$sfWanted" 'DarkGray'
             $gotF = Get-PimUpdateSourceArchive -Url (Resolve-PimUpdateSourceUrl -Template $srcUrlTpl -Version "$Version".Trim()) -OutFile $fetched
@@ -579,6 +580,18 @@ $ring = "$($env:PIM_UPDATE_RING)".Trim()
 # unchanged. PIM-InvardiaUpdate.ps1 has the rules.
 $updSource = "$($env:PIM_UPDATE_SOURCE)".Trim().ToLowerInvariant()
 $script:PimInvardiaContext = ''; $script:PimInvardiaSequence = 0; $script:PimInvardiaApplied = 0; $script:PimInvardiaAhead = $false
+# SEC-95 (SECAUDIT-1, the cloud updater's half): WHICH source this run may read (PIM-UpdateSource.ps1 Resolve-PimUpdateSourceMode).
+# Invardia (signed) is the default; a storage container (channel.json + archives, NO signature) is read only when the job
+# names it as its source, and then every run says so -- here, in the outcome and in the Manager's update status. A
+# container ADDRESS without that choice is refused (no fallback from Invardia to a container, ever).
+$srcMode = Resolve-PimUpdateSourceMode -Source $updSource -SourceUrlTemplate $srcUrlTpl
+if ($srcMode.mode -eq 'invardia-community' -and -not $updSource) { $updSource = 'invardia-community' }
+elseif ($srcMode.mode -eq 'invardia' -and -not $updSource) { $updSource = 'invardia' }
+if ($srcMode.unsigned) {
+    Say '!! UNSIGNED UPDATE SOURCE: this environment takes its code from a storage container chosen for it (channel.json +' 'Red'
+    Say '!! source archives). They carry NO signature -- only whoever can write that container decides what is installed here.' 'Red'
+    Say '!! Updates from the signed release service: re-run tools/setup/Deploy-PimUpdateJob.ps1 with -UpdateSource Invardia.' 'Red'
+} else { Say $srcMode.line 'DarkGray' }
 
 # ---- framework 8.18 UPDATE-NOW -- WHICH KIND OF EXECUTION IS THIS? (engine/_shared/PIM-UpdateNow.ps1 has the rules) ------
 # The cron is every 15 minutes once UPDATE NOW is on (PIM_UPDATE_NIGHTLY_UTC keeps the nightly time). The nightly slot and
@@ -626,7 +639,7 @@ function Get-PimUpdateNowRingApproval {
             if ([int]$seq.unprovenLegacy -gt 0 -and $v.sequence -lt [int]$seq.unprovenLegacy) { return @{ version = ''; reason = 'the replay watermark needs a decision (see the nightly run)' } }
             return @{ version = "$($v.version)"; reason = "the signed manifest for ring $ringN" }
         }
-        if ($ring -and $srcUrlTpl) {
+        if ($ring -and $srcUrlTpl -and $srcMode.mode -eq 'pim-src') {   # SEC-95: only the CHOSEN (unsigned) container source
             $chUrl = Get-PimUpdateChannelUrl -SourceTemplate $srcUrlTpl
             $chFile = Join-Path ([IO.Path]::GetTempPath()) ("pim-channel-un-{0}.json" -f ([guid]::NewGuid().ToString('N').Substring(0, 6)))
             try {
@@ -713,6 +726,13 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
         if ($targetVer) { Say "  PIM_UPDATE_TARGET_VERSION=$targetVer is ignored: a ring-managed environment moves only on its ring, and a held one not at all." 'DarkGray' }
         $targetVer = ''
     }
+} elseif ($srcMode.refused) {
+    # SEC-95: nothing is fetched and nothing moves. NEEDS ATTENTION, not a failure: PIM keeps running, the reason names the
+    # one setting to change, and a Failed execution would only feed the watchdog (which cannot fix a source setting).
+    Say "  REFUSED: $($srcMode.reason)" 'Yellow'
+    $script:PimRingApproved = ''; $script:PimRingApprovedReason = "update source refused: $($srcMode.reason)"
+    Send-PimUpdateOutcome -Action 'none' -Outcome 'attention' -ErrorText "update source refused: $($srcMode.reason)"
+    exit 0
 } elseif ($updSource -in @('invardia', 'invardia-community')) {
     # COMMUNITY-INCLOUD-UPDATER (owner 2026-10-28): 'invardia-community' = the SAME path, the anonymous Community channel
     # (no licence, no install key), kind community, its own replay watermark. Everything after the pull is shared.
@@ -837,7 +857,8 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     $script:PimRingApprovedReason = 'this environment has a ring but no update source, so the ring channel cannot be read'
     Send-PimUpdateOutcome -Action 'none' -Outcome 'failed' -ErrorText "PIM_UPDATE_RING=$ring without PIM_UPDATE_SOURCE_URL -- ring not readable, nothing rolled"
     exit 1
-} elseif ($ring -and $srcUrlTpl) {
+} elseif ($ring -and $srcUrlTpl -and $srcMode.mode -eq 'pim-src') {
+    # SEC-95: reached ONLY when the job names the storage container as its source (said in red above, recorded below)
     $chUrl = Get-PimUpdateChannelUrl -SourceTemplate $srcUrlTpl
     $chFile = Join-Path ([IO.Path]::GetTempPath()) ("pim-channel-{0}.json" -f ([guid]::NewGuid().ToString('N').Substring(0,6)))
     try {
@@ -939,7 +960,7 @@ if ($plan.action -eq 'build') {
         Say "source for $($plan.version): the verified Invardia release archive"
     } else {
         $srcUrl = Resolve-PimUpdateSourceUrl -Template $srcUrlTpl -Version $plan.version
-        Say "fetching source for $($plan.version)"
+        Say "fetching source for $($plan.version)$(if ($srcMode.unsigned) { ' from the storage container -- UNSIGNED (only its gzip header is checked)' })" $(if ($srcMode.unsigned) { 'Red' } else { 'Gray' })
         $got = Get-PimUpdateSourceArchive -Url $srcUrl -OutFile $ctx
     }
     if (-not $got.ok) {

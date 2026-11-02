@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+﻿#Requires -Version 7.0
 
 <#
 .SYNOPSIS
@@ -143,13 +143,18 @@
     .\Deploy-PimActivatorBackend.ps1 -TenantId <tenant-id> -WhatIf
 
 .NOTES
+    Requirements:
+      PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
+      Role: Application Administrator and Privileged Role Administrator (Microsoft Entra), both active.
+      Hosts: login.microsoftonline.com, graph.microsoft.com
+
     Re-runnable: if an app with the same DisplayName already exists in the
     tenant, the script updates its redirect URI + required permissions in
     place rather than creating a duplicate.
     A transcript of the run is written to <temp>\pim-manager-logs\ (its path is printed).
     NO MODULES (owner 2026-10-07: "neither pim, si or invardia must have dependencies"): plain Microsoft Graph REST
-    (Invoke-RestMethod + .NET) in every mode -- browser sign-in, app-only certificate, or a token you pass. Windows
-    PowerShell 5.1 and PowerShell 7. Published standalone as https://invardia.com/support/pim/Deploy-PimActivatorBackend.ps1
+    (Invoke-RestMethod + .NET) in every mode -- browser sign-in, app-only certificate, or a token you pass. PowerShell 7
+    (owner 2026-11-01, HOST-2). Published standalone as https://invardia.com/support/pim/Deploy-PimActivatorBackend.ps1
     (one file: tools/setup/Build-PimSupportScripts.ps1 inlines the helpers).
 
 .LINK

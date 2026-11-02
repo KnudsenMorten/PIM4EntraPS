@@ -135,6 +135,37 @@ function Get-PimJwtParts {
     }
 }
 
+function Get-PimJwtAppOnlyReason {
+    <#
+      PURE. SEC-89: is this (already parsed) token an APPLICATION's token rather than a person's? Every path that
+      expects a PERSON calls it explicitly, so an app-only token is refused for what it is -- never only because it
+      happens to lack a username claim. Returns '' for a person's token, else the refusal reason:
+        * idtyp = app                                   -> an application token
+        * application roles (roles) and no user claim   -> a token with application roles and no user
+          (user claims: preferred_username, upn, unique_name, email, name)
+      /api/app and the RFA broker accept applications on purpose and do NOT call this.
+    #>
+    [CmdletBinding()] param([AllowNull()][object]$Payload)
+    if ($null -eq $Payload) { return '' }
+    $get = {
+        param($n)
+        if ($Payload -is [System.Collections.IDictionary]) { if ($Payload.Contains($n)) { return $Payload[$n] }; return $null }
+        $p = $Payload.PSObject.Properties[$n]; if ($p) { return $p.Value }; return $null
+    }
+    if ("$(& $get 'idtyp')".Trim().ToLowerInvariant() -eq 'app') {
+        return 'an application token (idtyp = app) was presented where a person must sign in -- refused'
+    }
+    $roles = @(@(& $get 'roles') | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if ($roles.Count) {
+        $user = ''
+        # 'name' counts too: a person's token carries it even where a tenant drops the optional username claims; an
+        # app-only token has none. (It never rescues idtyp = app, refused above.)
+        foreach ($c in @('preferred_username', 'upn', 'unique_name', 'email', 'name')) { $v = "$(& $get $c)".Trim(); if ($v) { $user = $v; break } }
+        if (-not $user) { return 'a token with application roles and no user was presented where a person must sign in -- refused' }
+    }
+    return ''
+}
+
 # ---- claim validation (pure) --------------------------------------------------
 
 function Test-PimJwtClaims {
@@ -465,6 +496,9 @@ function Resolve-PimMcpBearer {
     if (-not $sig.valid) { return @{ ok = $false; status = 401; identity = ''; reason = "token signature: $($sig.reason)" } }
     $cl = Test-PimJwtClaims -Payload $jwt.payload -ExpectedIssuers $iss -ExpectedAudiences $aud -NowUtc $NowUtc
     if (-not $cl.valid) { return @{ ok = $false; status = 401; identity = ''; reason = "token claims: $($cl.reason)" } }
+    # SEC-89: an application's token is refused for what it is, before any scope / user reasoning.
+    $appOnly = Get-PimJwtAppOnlyReason -Payload $jwt.payload
+    if ($appOnly) { return @{ ok = $false; status = 403; identity = ''; reason = "MCP: $appOnly" } }
     $scopes = @("$($jwt.payload.scp)" -split '\s+' | Where-Object { $_ })
     if ($scopes.Count -eq 0) { return @{ ok = $false; status = 403; identity = ''; reason = "an application token (no delegated scope) -- MCP needs a person signed in for '$Scope'" } }
     if ($scopes -notcontains $Scope) { return @{ ok = $false; status = 403; identity = ''; reason = ("the token's scope (" + ($scopes -join ' ') + ") is not '$Scope' -- request a token for api://<this Manager>/$Scope") } }
@@ -623,6 +657,9 @@ function Resolve-PimHostedPrincipal {
     if (-not $cl.valid) {
         return @{ trusted = $false; identity = ''; layer = 'signed-token'; reason = ("token claims rejected: " + $cl.reason) }
     }
+    # SEC-89: an application's token is refused explicitly -- not only because it carries no username claim.
+    $appOnly = Get-PimJwtAppOnlyReason -Payload $jwt.payload
+    if ($appOnly) { return @{ trusted = $false; identity = ''; layer = 'signed-token'; reason = $appOnly } }
     # Identity comes from the VERIFIED token, never from the headers.
     $tokenName = ''
     foreach ($p in @('preferred_username', 'upn', 'email', 'unique_name')) {
@@ -687,7 +724,8 @@ function Resolve-PimSigninFrontPrincipal {
       Same verification primitives as layer 2 (Test-PimJwtSignature + Test-PimJwtClaims) -- no new crypto.
       Fails CLOSED on: issuer or audience not pinned (any tenant's token would verify), no token, a malformed
       token, no key set, a bad signature, bad iss / aud / exp / nbf, an access token without -AccessScope in its scp,
-      an ID token when -RequireAccessToken, and a token that names no user.
+      an ID token when -RequireAccessToken, an application's token (SEC-89: idtyp = app, or roles with no user --
+      each its own reason), and a token that names no user.
       Returns @{ trusted; identity; layer = 'signin-front'; reason } -- the Resolve-PimHostedPrincipal shape.
     #>
     [CmdletBinding()]
@@ -715,6 +753,10 @@ function Resolve-PimSigninFrontPrincipal {
     if ($null -eq $Jwks) { return (& $no 'sign-in front: no JWKS available to verify the token (failing closed)') }
     $sig = Test-PimJwtSignature -Jwt $jwt -Jwks $Jwks
     if (-not $sig.valid) { return (& $no ('sign-in front: token signature rejected: ' + $sig.reason)) }
+    # SEC-89: a token without `scp` is NOT automatically an ID token -- an application's access token has none either.
+    # Refuse it for what it is, before the ID-token / access-token reasoning below.
+    $appOnly = Get-PimJwtAppOnlyReason -Payload $jwt.payload
+    if ($appOnly) { return (& $no ('sign-in front: ' + $appOnly)) }
     $scp = @("$($jwt.payload.scp)".Trim() -split '\s+' | Where-Object { $_ })
     $kind = 'ID token'
     if ($scp.Count) {

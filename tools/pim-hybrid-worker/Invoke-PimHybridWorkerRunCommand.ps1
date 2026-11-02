@@ -114,11 +114,14 @@ if ($target.subscriptionId -ne $SubscriptionId) { throw "the machine is in subsc
 $args2 = @{} + $InstallParameters; $args2['Phase'] = $Phase
 if ($target.kind -eq 'arc' -and -not $args2.ContainsKey('HostType')) { $args2['HostType'] = 'Arc' }
 if ($target.kind -eq 'arc' -and $Phase -eq 'Join') { throw 'an Arc server is the customer''s own, already domain-joined: there is no Join phase' }
-# the installer dot-sources the 12.7 run-frame helper in the package; on the worker nothing is next to it -- inline it
+# the installer dot-sources the 12.7 run-frame helper and (SEC-95) the signed-release checks in the package; on the worker
+# nothing is next to it -- inline both (the checks are what verify a first install's release before anything is unpacked)
 $installText = [IO.File]::ReadAllText($installPath)
-$sdLine = [regex]::Match($installText, "(?m)^\. \(Join-Path \`$PSScriptRoot '\.\.\\setup\\_PimScriptDoc\.ps1'\)[ \t]*\r?$")
-if ($sdLine.Success) {
-    $installText = $installText.Substring(0, $sdLine.Index) + [IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\setup\_PimScriptDoc.ps1')) + $installText.Substring($sdLine.Index + $sdLine.Length)
+foreach ($helperRel in @('..\setup\_PimScriptDoc.ps1', '..\..\engine\_shared\InvardiaUpdate.verify.ps1')) {
+    $sdLine = [regex]::Match($installText, ("(?m)^\. \(Join-Path \`$PSScriptRoot '" + [regex]::Escape($helperRel) + "'\)[ \t]*\r?$"))
+    if (-not $sdLine.Success) { continue }
+    $helperText = [regex]::Replace([IO.File]::ReadAllText((Join-Path $PSScriptRoot $helperRel)), '(?m)^#Requires[^\r\n]*\r?\n', '')
+    $installText = $installText.Substring(0, $sdLine.Index) + $helperText + $installText.Substring($sdLine.Index + $sdLine.Length)
 }
 $wrap = New-PimHybridWorkerRunScript -InstallText $installText -Arguments $args2 -ProtectedNames $ProtectedParameterNames
 if (-not "$OutScript".Trim()) { $OutScript = Join-Path (Get-Location) ("pim-hybrid-worker-{0}-{1}.ps1" -f $Phase.ToLowerInvariant(), $target.name.ToLowerInvariant()) }

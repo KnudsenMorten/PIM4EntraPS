@@ -91,7 +91,14 @@ function ConvertFrom-PimReleaseReviewThread {
        field from its usual names. Not JSON = ok $false. #>
     param([AllowNull()][object]$Content)
     $j = $Content
-    if ($j -is [string]) { if (-not "$j".Trim()) { return @{ ok = $true; entries = @() } }; try { $j = $j | ConvertFrom-Json } catch { return @{ ok = $false; entries = @() } } }
+    if ($j -is [string]) {
+        if (-not "$j".Trim()) { return @{ ok = $true; entries = @() } }
+        # PowerShell 7's ConvertFrom-Json ENUMERATES a root array (one element comes back as the bare object, none as
+        # nothing); Windows PowerShell 5.1 returns the array itself. A root array stays an array on both.
+        $rootArray = "$j".TrimStart().StartsWith('[')
+        try { $j = $j | ConvertFrom-Json } catch { return @{ ok = $false; entries = @() } }
+        if ($rootArray) { $j = [object[]]@($j | Where-Object { $null -ne $_ }) }
+    }
     if ($null -eq $j) { return @{ ok = $true; entries = @() } }
     $f = { param($o, [string[]]$names) foreach ($n in $names) { if ($null -ne $o -and $o.PSObject.Properties[$n] -and $null -ne $o.$n -and "$($o.$n)".Trim()) { return $o.$n } }; return $null }
     $list = $null

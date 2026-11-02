@@ -8223,6 +8223,10 @@
     }
     const st = ringStyle(v.state);
     const val = (x) => (x == null || x === '') ? '<span style="color:#8c959f;">not recorded</span>' : '<b>' + esc(String(x)) + '</b>';
+    // An unsigned source (a storage container chosen for this environment) is said on the row itself, in red.
+    const updSourceHtml = (x) => x.unsignedSource
+      ? '<b class="updRingUnsigned" style="color:' + PIM_RING_STATE_STYLE.failing.fg + ';">' + esc(String(x.source)) + ' &mdash; unsigned source</b>'
+      : val(x.source === 'invardia' || x.source === 'invardia-community' ? x.source + ' (signed)' : x.source);
     const row = (label, html, cls) => '<tr class="' + (cls || '') + '"><td style="color:#57606a;padding:3px 14px 3px 0;white-space:nowrap;vertical-align:top;">' + esc(label) + '</td><td style="vertical-align:top;">' + html + '</td></tr>';
 
     let h = '<div class="updRingPanel" style="border:1px solid ' + st.bd + ';background:' + st.bg + ';border-radius:6px;padding:10px 12px;margin-bottom:14px;">';
@@ -8249,7 +8253,7 @@
       if (v.message) h += '<div class="updRingMessage updRingNoRunYet" style="font-size:12px;color:' + st.fg + ';margin-bottom:8px;">' + esc(v.message) + '</div>';
       h += '<table class="updRingTable" style="font-size:12px;border-collapse:collapse;">';
       h += row('Update ring', val(v.ringLabel) + ' <span class="updRingSource" style="color:#8c959f;font-size:11px;">(' + esc(ringSourceWords(v)) + ')</span>');
-      if (v.source) h += row('Update source', val(v.source));
+      if (v.source) h += row('Update source', updSourceHtml(v));
       h += row('Version running now', val(v.runningVersion) + ' <span style="color:#8c959f;font-size:11px;">(this Manager process)</span>');
       if (v.installedVersion) h += row('Version installed by the deployment', val(v.installedVersion));
       h += row('Recorded', (v.configuredUtc ? '<b>' + pimUtcHtml(v.configuredUtc) + '</b>' : '<span style="color:#8c959f;">not recorded</span>') +
@@ -8270,6 +8274,7 @@
                ? ' <span class="updRingSource' + (v.ringPending ? ' updRingPending' : '') + '" style="color:#8c959f;font-size:11px;">(' + esc(ringSourceWords(v)) +
                  (v.ringPending ? ', after the last update run &mdash; not run on it yet' : '') + ')</span>'
                : ''));
+      if (v.source) h += row('Update source', updSourceHtml(v));
       h += row('Version running now', val(v.runningVersion) + ' <span style="color:#8c959f;font-size:11px;">(this Manager process)</span>');
       h += row('Version this ring approves', (v.approvedVersion ? val(v.approvedVersion) : '<span style="color:#8c959f;">not recorded</span>') +
                (v.approvedReason ? ' <span style="color:#8c959f;font-size:11px;">' + esc(v.approvedReason) + '</span>' : ''), 'updRingApproved');
@@ -11854,6 +11859,9 @@
          '<label>RFA store account' + settingInfoBtn('RfaBroker.StoreAccount') + '</label><input id="rfaSetAcct" value="' + escapeHtml(s.storeAccount || '') + '" placeholder="set by the RFA deploy">' +
          '<label>Public portal URL' + settingInfoBtn('RfaBroker.PortalUrl') + '</label><input id="rfaSetUrl" value="' + escapeHtml(s.portalUrl || '') + '" placeholder="https://...">' +
          '<label>API applications (client ids)' + settingInfoBtn('RfaBroker.ApiAppIds') + '</label><input id="rfaSetApps" value="' + escapeHtml((s.apiAppIds || []).join(', ')) + '" placeholder="ServiceNow\'s Entra app id, comma separated">' +
+         // SEC-96: each application's OWN groups (one line per application; none = every group offered for ad-hoc access)
+         '<label for="rfaSetAppGroups" title="Optional. One line per application: its client id, a colon, then the groups it may request (group tags or group ids, comma separated). An application without a line may request every group offered for ad-hoc access.">Groups each application may request</label>' +
+         '<textarea id="rfaSetAppGroups" rows="3" placeholder="client id: group, group (optional, one line per application)">' + escapeHtml(rfaAppGroupsText(s.apiAppGroups)) + '</textarea>' +
          // §91.7 (operator 2026-10-02): AD-HOC access to other permission groups -- which groups may be asked for, and for how long by default
          '<label title="A consultant may ask for short-term membership of these groups in the portal. The department approves; the membership is removed automatically when the time is up. None selected = nothing is offered.">Ad-hoc groups consultants may request' + settingInfoBtn('RfaBroker.AdHocGroups') + '</label>' +
          '<select id="rfaSetAdHoc" multiple size="6" style="min-height:110px;">' + Array.from(new Set(collectKnownGroupTags().concat(asList(s.adHocGroups)))).sort().map(t => '<option value="' + escapeHtml(t) + '"' + (asList(s.adHocGroups).indexOf(t) >= 0 ? ' selected' : '') + '>' + escapeHtml(t) + '</option>').join('') + '</select>' +
@@ -11866,7 +11874,8 @@
          '<input id="rfaKeyName" placeholder="who uses it (e.g. ServiceNow test)" style="width:240px;"> ' +
          '<label style="display:inline;font-weight:normal;"><input type="checkbox" id="rfaKeyW" checked> requests.write</label> ' +
          '<label style="display:inline;font-weight:normal;"><input type="checkbox" id="rfaKeyR" checked> requests.read</label> ' +
-         '<input id="rfaKeyDays" type="number" min="1" max="3650" value="365" style="width:80px;" title="1 to 3650 days (10 years)"> days <button id="rfaKeyNew">Create key</button>' +
+         '<input id="rfaKeyDays" type="number" min="1" max="3650" value="365" style="width:80px;" title="1 to 3650 days (10 years)"> days ' +
+         '<input id="rfaKeyGroups" placeholder="groups it may request (optional)" title="Optional: group tags or group ids, comma separated. Empty = every group offered for ad-hoc access." style="width:220px;"> <button id="rfaKeyNew">Create key</button>' +
          '<div id="rfaKeyOnce" style="display:none;margin-top:8px;padding:8px 10px;border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;"></div>';
     h += '<div id="rfaSetMsg" style="margin-top:8px;"></div></div>';
     host.innerHTML = h;
@@ -11879,12 +11888,21 @@
       try {
         const k = await api('GET', '/api/rfa/api-keys');
         const ks = (k && k.keys) || [];
-        keysHost.innerHTML = ks.length ? '<table class="grid"><thead><tr><th>Name</th><th>Key</th><th>Scopes</th><th>Expires</th><th>By</th><th></th></tr></thead><tbody>' + ks.map(x =>
-          '<tr><td>' + escapeHtml(x.name) + '</td><td><code>' + escapeHtml(x.prefix) + '&hellip;</code></td><td>' + escapeHtml(String(x.scopes || '').replace(/\|/g, ', ')) + '</td><td>' + escapeHtml(fmtTime(x.expiresUtc, { dateOnly: true })) + '</td><td>' + escapeHtml(x.createdBy || '') + '</td>' +
-          '<td>' + (x.revoked ? '<span style="color:#cf222e;">revoked</span>' : '<button class="rfaKeyRev" data-id="' + escapeHtml(x.id) + '">Revoke</button>') + '</td></tr>').join('') + '</tbody></table>' : 'No API keys.';
+        keysHost.innerHTML = ks.length ? '<table class="grid"><thead><tr><th>Name</th><th>Key</th><th>Scopes</th><th>Groups</th><th>Expires</th><th>By</th><th></th></tr></thead><tbody>' + ks.map(x =>
+          '<tr><td>' + escapeHtml(x.name) + '</td><td><code>' + escapeHtml(x.prefix) + '&hellip;</code></td><td>' + escapeHtml(String(x.scopes || '').replace(/\|/g, ', ')) + '</td>' +
+          '<td>' + (asList(x.groups).length ? escapeHtml(asList(x.groups).join(', ')) : '<span style="color:#57606a;">any offered group</span>') + '</td>' +
+          '<td>' + escapeHtml(fmtTime(x.expiresUtc, { dateOnly: true })) + '</td><td>' + escapeHtml(x.createdBy || '') + '</td>' +
+          '<td>' + (x.revoked ? '<span style="color:#cf222e;">revoked</span>' : '<button class="rfaKeyGrp" data-id="' + escapeHtml(x.id) + '" data-groups="' + escapeHtml(asList(x.groups).join(', ')) + '">Groups</button> <button class="rfaKeyRev" data-id="' + escapeHtml(x.id) + '">Revoke</button>') + '</td></tr>').join('') + '</tbody></table>' : 'No API keys.';
         keysHost.querySelectorAll('.rfaKeyRev').forEach(b => b.onclick = async function () {
           if (!confirm('Revoke this API key? Calls with it are refused from now on.')) return;
           try { const r = await api('POST', '/api/rfa/api-keys/revoke', { id: b.dataset.id }); msg(r.note || 'Revoked.'); loadKeys(); } catch (e) { msg(e.message || String(e), true); }
+        });
+        // SEC-96: the groups ONE key may request (group tags or ids; empty = every group offered for ad-hoc access)
+        keysHost.querySelectorAll('.rfaKeyGrp').forEach(b => b.onclick = async function () {
+          const v = prompt('Groups this key may request (group tags or group ids, comma separated). Leave empty for every group offered for ad-hoc access.', b.dataset.groups || '');
+          if (v === null) return;
+          const groups = String(v).split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
+          try { const r = await api('POST', '/api/rfa/api-keys/groups', { id: b.dataset.id, groups: groups }); msg(r.note || 'Saved.'); loadKeys(); } catch (e) { msg(e.message || String(e), true); }
         });
       } catch (e) { keysHost.textContent = 'The keys could not be read: ' + (e.message || e); }
     };
@@ -11895,7 +11913,8 @@
       // §12.9: a new key is a new way into the request API -- ask with the catalog text.
       if (!(await pimSettingInfoConfirm('RfaApiKeys', true))) return;
       try {
-        const r = await api('POST', '/api/rfa/api-keys', { name: document.getElementById('rfaKeyName').value, scopes: scopes, days: document.getElementById('rfaKeyDays').value });
+        const keyGroups = String((document.getElementById('rfaKeyGroups') || {}).value || '').split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
+        const r = await api('POST', '/api/rfa/api-keys', { name: document.getElementById('rfaKeyName').value, scopes: scopes, days: document.getElementById('rfaKeyDays').value, groups: keyGroups });
         const once = document.getElementById('rfaKeyOnce');
         once.style.display = 'block';
         once.innerHTML = '<b>Copy this key now -- it is shown only once:</b><br><code style="user-select:all;word-break:break-all;">' + escapeHtml(r.key) + '</code><div style="color:#57606a;font-size:11px;margin-top:4px;">' + escapeHtml(r.note || '') + ' Send it as the header <code>X-Api-Key</code>.</div>';
@@ -11913,8 +11932,28 @@
       if (grew(adHoc, s.adHocGroups) && !(await pimSettingInfoConfirm('RfaBroker.AdHocGroups', true))) return;
       const acctNow = String(document.getElementById('rfaSetAcct').value || '').trim(), acctWas = String(s.storeAccount || '').trim();
       if (acctNow.toLowerCase() !== acctWas.toLowerCase() && !(await pimSettingInfoConfirm('RfaBroker.StoreAccount', !!acctNow))) return;
-      try { await api('PUT', '/api/rfa/settings', { storeAccount: document.getElementById('rfaSetAcct').value, portalUrl: document.getElementById('rfaSetUrl').value, apiAppIds: apps, adHocGroups: adHoc, adHocHours: adHocHours }); msg('Settings saved.'); } catch (e) { msg(e.message || String(e), true); }
+      const appGroups = rfaAppGroupsParse((document.getElementById('rfaSetAppGroups') || {}).value || '');
+      if (appGroups.error) { msg(appGroups.error, true); return; }
+      try { await api('PUT', '/api/rfa/settings', { storeAccount: document.getElementById('rfaSetAcct').value, portalUrl: document.getElementById('rfaSetUrl').value, apiAppIds: apps, adHocGroups: adHoc, adHocHours: adHocHours, apiAppGroups: appGroups.map }); msg('Settings saved.'); } catch (e) { msg(e.message || String(e), true); }
     };
+  }
+
+  // SEC-96: each allow-listed application's own groups, as text -- one line per application: "<client id>: group, group"
+  function rfaAppGroupsText(map) {
+    const m = (map && typeof map === 'object') ? map : {};
+    return Object.keys(m).filter(k => asList(m[k]).length).map(k => k + ': ' + asList(m[k]).join(', ')).join('\n');
+  }
+  function rfaAppGroupsParse(text) {
+    const map = {};
+    const lines = String(text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    for (const l of lines) {
+      const i = l.indexOf(':');
+      if (i < 1) return { map: map, error: 'Each line needs a client id, a colon, then the groups: ' + l };
+      const id = l.slice(0, i).trim().toLowerCase();
+      const groups = l.slice(i + 1).split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
+      if (groups.length) map[id] = groups;
+    }
+    return { map: map, error: '' };
   }
 
   async function renderOwnerPage() {

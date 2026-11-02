@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.16 -- 2026-11-02
+
+- Security and scripts. Every script published for customers now needs PowerShell 7 and lists its requirements: the role you need and the addresses it reaches (three named scripts that run in Windows PowerShell say why). The hybrid worker checks the signature and checksum of the PIM release on its first install too. The cloud updater takes its updates from the signed update service unless another source is chosen on purpose. The local PIM Manager opens with a one-time link. Access-request API keys and applications can be limited to named groups. Where a person must sign in, an application token is refused. The script PIM writes for a hub owner runs on its own again. More AI-assistant tools are listed in the public reference. The sign-in component is version 1.4.4.
+
 ## 3.0.15 -- 2026-11-01
 
 - Hybrid worker on an Azure VM: only the system account, the worker's own service accounts and the service accounts of products registered on the same server can obtain a managed-identity token on that server; every other account is refused. The rule is applied by the worker's setup and its daily update, and removed when the worker is removed.
