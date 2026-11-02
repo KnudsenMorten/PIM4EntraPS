@@ -84,6 +84,8 @@ param(
     # community install without a feed: there is no in-cloud updater by design (Update-PimCommunity.ps1 is the updater)
     [switch]$NoUpdater,
     [switch]$LicenceExpected,
+    # a trial / Pro install deployed WITHOUT a licence (ONE-LINE-INSTALL): the licence line is a reminder (warning), never a stop
+    [switch]$LicenceLater,
     # why the install could not set the mail sender itself (a signed-in PERSON without an Exchange role): the line is then a
     # WARNING with the Get Started follow-up instead of a failure
     [string]$MailDeferredReason,
@@ -617,7 +619,7 @@ if ($moid) { $fix['manager-rg-reader'] = $fix['manager-rg-reader'].Replace('<Man
 foreach ($fk in @($fix.Keys)) { $fix[$fk] = Add-PimSupportScriptDocLines -Text $fix[$fk] }
 
 # Repair pass: a line that FAILS and has a repair is repaired once, then read again.
-$rows0 = Get-PimInstallVerifyRows -Role $Role -Facts $facts -Fix $fix -LicenceExpected ([bool]$LicenceExpected)
+$rows0 = Get-PimInstallVerifyRows -Role $Role -Facts $facts -Fix $fix -LicenceExpected ([bool]$LicenceExpected) -LicenceLater ([bool]$LicenceLater)
 foreach ($r in @($rows0 | Where-Object { ($_.state -eq 'failed' -and $_.id -in 'superadmins', 'updater', 'alerting', 'engine-root-reader', 'sql-host-rule') -or ($_.state -eq 'warning' -and $_.id -eq 'engine-root-reader') -or
                                     ($_.state -eq 'warning' -and $_.id -eq 'manager-rg-reader' -and [bool](Get-PimFactValue $facts[$_.id] 'readable')) })) {
     if ($r.id -eq 'sql-host-rule' -and -not [bool](Get-PimFactValue $facts[$r.id] 'readable')) { continue }
@@ -681,7 +683,7 @@ if (-not $SkipEngineAzureAccess -and (-not $Probe -or $EngineAzureArm -or $null 
     }
 }
 
-$rows = Get-PimInstallVerifyRows -Role $Role -Facts $facts -Fix $fix -LicenceExpected ([bool]$LicenceExpected) -EnrollmentWait ([bool]$EnrollmentWait)
+$rows = Get-PimInstallVerifyRows -Role $Role -Facts $facts -Fix $fix -LicenceExpected ([bool]$LicenceExpected) -EnrollmentWait ([bool]$EnrollmentWait) -LicenceLater ([bool]$LicenceLater)
 $verdict = Get-PimInstallVerifyVerdict -Rows $rows
 # PIM 100.74: a WAITING line is reported to the install's progress feed as state 'waiting' (the MSP build relays the marker
 # as 'verify-install.<line>' when it asked for markers) -- the install completes with this follow-up instead of failing.

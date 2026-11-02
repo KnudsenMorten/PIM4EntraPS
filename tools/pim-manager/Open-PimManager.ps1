@@ -234,6 +234,9 @@ if (Test-Path -LiteralPath $_sqlLib) { . $_sqlLib }
 # and the names stored on a queued action at enqueue time.
 $_queueDisplayLib = Join-Path $solutionRoot 'engine\_shared\PIM-QueueDisplay.ps1'
 if (Test-Path -LiteralPath $_queueDisplayLib) { . $_queueDisplayLib }
+# SEC-92 ALIGN (framework SECAUDIT-1a): the hosted Manager sweeps ended time-limited support grants (Invoke-PimManagerSupportJitSweep).
+$_supportJitLib = Join-Path $solutionRoot 'engine\_shared\PIM-SupportJit.ps1'
+if (Test-Path -LiteralPath $_supportJitLib) { . $_supportJitLib }
 # REQ-REV-DOWN-1 / REQ-REN-1 (2026-09-22): the authorised withdrawals + renames the managing tenant records
 # here and the publish job carries in the signed bundle (/api/downlink-intents).
 $_dlIntentLib = Join-Path $solutionRoot 'engine\msp\PIM-DownlinkIntents.ps1'
@@ -1683,6 +1686,43 @@ function Write-PimManagerAuditEvent {
     Write-Error ("AUDIT NOT RECORDED for '$Action' on '$Target' by '$who'. " +
                  "PIM v2 records the audit trail in SQL only (pim.AuditEvents) and has no filesystem fallback. " +
                  "SQL audit error: " + $(if ($sqlErr) { $sqlErr } else { 'no SQL store resolved' }))
+}
+
+# ---------------------------------------------------------------------------
+# SEC-92 ALIGN (framework SECAUDIT-1a, the marker / sweep model shared with SecurityInsight): the hosted Manager runs
+# regularly, so it SWEEPS ended time-limited support grants -- the same Invoke-PimSupportJitSweep the grant job and the
+# heartbeat run (engine/_shared/PIM-SupportJit.ps1): the SIGNED revoke procedure (the web app needs EXECUTE only, never
+# db_owner) closes every marker past its end -- only roles the grant added; the read-only access and the user never. At most once per Get-PimManagerSupportJitSweepMinutes,
+# between requests; idempotent (nothing ended = one read); every revoke audited (pim.AuditEvents); a revoke this
+# identity cannot make is LOUD (a warning line, each time it is tried) -- never silent. Never throws.
+# ---------------------------------------------------------------------------
+function Get-PimManagerSupportJitSweepMinutes { <# PURE. How often the hosted Manager sweeps (a literal). #> return 15 }
+function Invoke-PimManagerSupportJitSweep {
+    param([datetime]$NowUtc = [datetime]::UtcNow, [switch]$Force)
+    try {
+        if (-not (Get-Command Invoke-PimSupportJitSweep -ErrorAction SilentlyContinue)) { return $null }
+        $cs = "$($script:PimSqlCs)".Trim()
+        if (-not $cs -or -not (Get-Command Invoke-PimSqlScalar -ErrorAction SilentlyContinue)) { return $null }
+        $last = $script:PimSupportJitSweepAt
+        if (-not $Force -and $last -is [datetime] -and ($NowUtc - $last).TotalMinutes -lt (Get-PimManagerSupportJitSweepMinutes)) { return $null }
+        $script:PimSupportJitSweepAt = $NowUtc
+        # a PLAIN scriptblock (never a bound closure: that runs in its own module scope and may not see this script's functions)
+        $q = { param($x) Invoke-PimSqlScalar -ConnectionString "$($script:PimSqlCs)" -Sql $x }
+        $aud = { param($a) Write-PimManagerAuditEvent -Action "$($a.action)" -Target "$($a.target)" -After $a -Result "$($a.result)" }
+        $r = Invoke-PimSupportJitSweep -Sql $q -Source 'manager' -Audit $aud -Quiet
+        $script:PimSupportJitSweepLast = $r
+        if ($r -and $r.installed -eq $false) {
+            # not set up on this install: a plain state, said once per process -- never a warning
+            if (-not $script:PimSupportJitNotSetUpSaid) { Write-Host "  [support-access] $(Get-PimSupportJitNotSetUpText)" -ForegroundColor DarkGray; $script:PimSupportJitNotSetUpSaid = $true }
+            return $r
+        }
+        foreach ($m in @($r.problems)) { Write-Host "  [support-access] $m" -ForegroundColor Yellow }
+        foreach ($v in @($r.revoked)) { Write-Host "  [support-access] closed by the Manager: $($v.role) of database user [$($v.userName)] (ended $($v.expiresUtc))$(if ($v.preExisting) { ' -- held before the grant, kept' } else { ' -- taken back' })" -ForegroundColor Green }
+        return $r
+    } catch {
+        Write-Host "  [support-access] the Manager's sweep stopped: $((("$($_.Exception.Message)" -split "`n")[0]).Trim())" -ForegroundColor Yellow
+        return $null
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -7022,6 +7062,27 @@ function Get-PimManagerMspLicenseRole {
     if ("$($sc.role)" -eq 'msp-managed') { return 'Slave' }
     return ''
 }
+function Request-PimManagerInstallKeyClaim {
+    <#
+      ONE-LINE-INSTALL (owner 2026-11-02: "license will come automatically when env is deployed. then i login and add"): a
+      trial / Pro environment is installed WITHOUT a licence; the administrator adds it in Settings > Licence (PUT
+      /api/license). Right after the licence is stored, this queues the engine's 'install-key' job (a trigger the next tick
+      drains) and starts the tick, so the install key is claimed within minutes instead of at the job's next 6-hour run. The
+      job itself decides and claims ONCE (no key yet, a Pro licence for this tenant). Never throws.
+      Seams (tests): -GetKey -> the stored install key ('' = none); -AddTrigger / -KickTick in place of Add-PimJobTrigger /
+      Start-PimManagerTickNow. Returns @{ queued; detail }.
+    #>
+    param([scriptblock]$GetKey, [scriptblock]$AddTrigger, [scriptblock]$KickTick)
+    if (-not $GetKey) { $GetKey = { if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { "$(Get-PimSetting -Name 'InvardiaInstallKey')".Trim() } else { '' } } }
+    if (-not $AddTrigger) { $AddTrigger = { if (-not (Get-Command Add-PimJobTrigger -ErrorAction SilentlyContinue)) { throw 'the scheduler trigger queue is not loaded' }; [void](Add-PimJobTrigger -Type 'install-key' -Scope 'All' -Reason 'licence registered' -JobName 'install-key') } }
+    if (-not $KickTick) { $KickTick = { Start-PimManagerTickNow -Reason 'licence registered' } }
+    $key = ''; try { $key = "$(& $GetKey)".Trim() } catch { $key = '' }
+    if ($key) { return [ordered]@{ queued = $false; detail = 'this installation already has its install key' } }
+    try { & $AddTrigger } catch { return [ordered]@{ queued = $false; detail = "the install key is claimed by the engine's next install-key run (within 6 hours): $($_.Exception.Message)" } }
+    $kick = $null; try { $kick = & $KickTick } catch { $kick = $null }
+    return [ordered]@{ queued = $true; detail = $(if ($kick -and $kick.started) { 'the install key is being claimed now (within a few minutes)' } else { 'the install key is claimed at the engine''s next run (within about 5 minutes)' }) }
+}
+
 function Get-PimManagerLicenseBody {
     # REQ-Y. The GET /api/license body (Get-PimLicenseApiBody, engine/_shared/PIM-License.ps1) for this environment: its
     # tenant ($global:PIM_TenantId) and store server fill the register command. Never throws: a failure is a body with
@@ -13663,6 +13724,10 @@ function Invoke-Server {
             $script:lastHeartbeat = Get-Date
         }
 
+        # SEC-92 ALIGN (framework SECAUDIT-1a): the hosted Manager runs regularly, so it SWEEPS too -- at most once per
+        # Get-PimManagerSupportJitSweepMinutes, between requests, never throwing.
+        if ($script:PimHosted) { Invoke-PimManagerSupportJitSweep }
+
         # Heartbeat self-exit -- LOCAL/emergency only. Hosted runs 24/7 (never self-exits).
         if (-not $script:PimHosted) {
             $idleSeconds = (Get-Date) - $script:lastHeartbeat
@@ -16964,10 +17029,13 @@ function Handle-Request {
                 accepted = $true; customer = "$($chk.Customer)"; sku = "$($chk.Sku)"; status = "$($chk.Status)"
                 validTo = $(if ($chk.ValidTo) { $chk.ValidTo.ToString('yyyy-MM-dd') } else { '' })
             }) -Result 'ok'
+            # ONE-LINE-INSTALL: the licence is in -- claim this installation's install key now (updates and the uplink use it)
+            $claim = Request-PimManagerInstallKeyClaim
             $after = if (Get-Command Get-PimManagerLicenseBody -ErrorAction SilentlyContinue) { Get-PimManagerLicenseBody } else { $null }
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                 ok = $true; stored = $true
-                detail = "Registered the licence for '$($chk.Customer)' ($($chk.Sku)) -- status $($chk.Status)."
+                detail = "Registered the licence for '$($chk.Customer)' ($($chk.Sku)) -- status $($chk.Status); $($claim.detail)."
+                installKeyClaim = $claim
                 license = $after
             })
             return 200

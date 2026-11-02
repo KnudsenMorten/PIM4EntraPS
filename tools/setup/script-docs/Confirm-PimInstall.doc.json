@@ -45,6 +45,7 @@
     { "name": "UpdateSource", "required": false, "default": null, "help": "The update source of the updater repair (e.g. Invardia)." },
     { "name": "NoUpdater", "required": false, "default": false, "help": "A Community installation without a feed: there is no in-cloud updater by design (Update-PimCommunity.ps1 is its updater)." },
     { "name": "LicenceExpected", "required": false, "default": false, "help": "Pro, trial or multi-tenant: a registered licence is required." },
+    { "name": "LicenceLater", "required": false, "default": false, "help": "A trial or Pro installed without a licence: the licence line reminds you to add it in PIM Manager > Settings > Licence, never a stop." },
     { "name": "MailDeferredReason", "required": false, "default": null, "help": "Why the install could not set the mail sender (the line is then a warning with the Get Started follow-up)." },
     { "name": "SetupHostRuleOwner", "required": false, "default": "this", "help": "Who owns the 'AllowSetupHost' SQL firewall rule: this run, the caller (the multi-tenant build closes it in its last step) or none." },
     { "name": "ClosingStep", "required": false, "default": "sqlhostclose", "help": "The caller's step that closes the rule (shown in the line)." },

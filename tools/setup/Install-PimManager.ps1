@@ -2,67 +2,61 @@
 
 <#
 .SYNOPSIS
-  Install PIM Manager into your own Azure subscription in one guided run: check the answers and the licence, check your sign-in, rights and subscription, deploy PIM Manager, register the licence, give the Invardia Support app its access when you named one, and verify the installation.
-  §95.2 -- the GUIDED INSTALL of the PIM Manager: the one command Invardia's bootstrap calls (GUIDED-INSTALL §4.2).
+  Install PIM Manager into your own Azure subscription in one guided run: check the answers, check your sign-in, rights and subscription, deploy PIM Manager, give the Invardia Support app its access when you named one, and verify the installation.
+  §95.2 -- the GUIDED INSTALL of the PIM Manager. ONE-LINE-INSTALL (owner 2026-11-02): one line, every value a parameter.
 
 .DESCRIPTION
   -WhatIf: runs the checks (sign-in, subscription, rights, resource providers, names, every service PIM Manager needs in the chosen region -- reads only),
   then prints what the installation WOULD do -- the deploy's own plan included -- and stops before the first change
-  (no Invardia enrollment claim, no Azure / Entra / SQL change, no state file outside the temp folder).
+  (no Azure / Entra / SQL change, no state file outside the temp folder).
 
   Install-PimManager -TenantId <tenant id> -SubscriptionId <subscription id> [-Location <region>] [-ResourceGroup <name>]
-      [-SuperAdmins <upn,...>] [-AlertRecipients <mail,...>] [-MailSender <mail>] [-VnetAddressPrefix <cidr>]
-      [-SubnetAddressPrefix <cidr>] [-Exposure external] [-Edition Community|Trial|Pro] [-InstallId <id>]
-      [-SupportAppId <client id> [-SupportAccess troubleshoot|setup|asbuilt]] [-LicencePath <file> | -EnrollmentKey <ek-...>]
-      [-ConfigPath <config.json>] [-Reporter <scriptblock>] [-StatePath <dir>] [-Resume] [-PreflightOnly] [-WhatIf]
+      [-SuperAdmins <upn,...>] [-AlertRecipients <mail,...>] [-MailSender <mail>] [-PortalUsers <upn,...>] [-AllowAllMembers]
+      [-VnetAddressPrefix <cidr>] [-SubnetAddressPrefix <cidr>] [-Exposure external] [-Edition Community|Trial|Pro]
+      [-UpdateRing 2|3] [-KeyVaultName <name>] [-EngineAzureRootUserAccessAdmin] [-InstallId <id>]
+      [-SupportAppId <client id> [-SupportAccess troubleshoot|setup|asbuilt]] [-Reporter <scriptblock>] [-StatePath <dir>]
+      [-Resume] [-PreflightOnly] [-WhatIf]
 
-  THE ANSWERS ARE PARAMETERS (owner 2026-10-29). Only -TenantId and -SubscriptionId are needed; everything else has a
-  default (install-parameters.json: swedencentral, resource group rg-pim, 10.220.0.0/22 + /23, you as the administrator,
-  the administrators' mailboxes for alerts) or is derived (the installation id, and from it every resource name and the
-  state folder -- the same tenant, subscription and resource group give the same ones, so -Resume finds them). The
-  wizard's answers file (-ConfigPath) is optional: when both are given, a parameter WINS over the same answer in the file.
-  -Reporter is optional: without it every step is printed as one readable line.
+  EVERY ANSWER IS A PARAMETER, WITH ITS REAL VALUE (owner 2026-11-02). There is no answers file, no key and no licence in the
+  command. Only -TenantId and -SubscriptionId are needed; everything else has a default (install-parameters.json:
+  swedencentral, resource group rg-pim, 10.220.0.0/22 + /23, you as the administrator, the administrators' mailboxes for
+  alerts) or is derived (the installation id, and from it every resource name and the state folder -- the same tenant,
+  subscription and resource group give the same ones, so -Resume finds them). -Reporter is optional: without it every step
+  is printed as one readable line.
 
-  EDITION. No licence file and no enrollment key = PIM Manager COMMUNITY (free): one line says so, the enroll and licence
-  steps are skipped, the Core features are installed, no multi-tenant (MSP) gate is switched on (that is Pro), and the
-  updater follows the Community channel of the public release. Pro can be added later with Set-PimLicense.ps1. A trial or
-  Pro install gives -LicencePath, or -EnrollmentKey (the key from the trial mail). Several tenants (MSP) are PIM Manager
-  Pro through Invardia's managed-tenant installation, not this command.
+  EDITION. No -Edition = PIM Manager COMMUNITY (free): one line says so, the Core features are installed, no multi-tenant
+  (MSP) gate is switched on (that is Pro), and the updater follows the Community channel of the public release.
+  -Edition Pro (or Trial) deploys exactly the same way, with the Pro updater: the environment is installed WITHOUT a
+  licence, and the end of the installation says what to do next -- sign in to PIM Manager and add your licence in
+  Settings > Licence. The Pro features switch on with the licence, and PIM Manager then registers itself with Invardia
+  for its updates. Several tenants (MSP) are set up with the managing-tenant build, not this command.
 
-  Start it from the published launcher (Start-PimManagerInstall.ps1 at https://invardia.com/support/pim/: it downloads
-  the public release and runs this script from it with the same parameters), or from a copy of the release.
+  Start it from the launcher (Start-PimManagerInstall.ps1, a release file of the public release: it downloads that
+  release and runs this script from it with the same parameters), or from a copy of the release.
 
   Runs in PowerShell 7 on the administrator's own machine, signed in in the browser as that administrator -- never a
   secret, no Azure CLI, no PowerShell modules (2.4.554+). It:
-    1. checks the answers (config.json, keys as in install-parameters.json) and the licence file      -> exit 3 when bad
+    1. checks the answers (the parameters)                                                              -> exit 3 when bad
     2. preflight: sign-in, tenant + subscription, rights, providers, names, services in the region     -> exit 2 when failed
        (-PreflightOnly stops here, exit 0)
     3. deploys with Invoke-PimDeployAll (the external, signed-in Container Apps shape; the public release), reporting
        every step                                                                                        -> exit 1 when failed
-    4. registers the licence (the Pro features switch on at once), grants the Invardia Support app its access when
-       config.json names one, runs the END-OF-INSTALL CHECK ('verify-install', Confirm-PimInstall.ps1: SuperAdmins, updater +
-       ring, licence + install key, mail sender + both sending identities in scope, alert recipients, the engine's Graph
-       rights + Reader at the tenant root, sign-in, the SQL window; repairs what it can; a failed required line = exit 1
-       with that line's fix), checks health, and reports 'completed' with the outputs Invardia's support needs -> exit 0
+    4. grants the Invardia Support app its access when -SupportAppId names one, runs the END-OF-INSTALL CHECK
+       ('verify-install', Confirm-PimInstall.ps1: SuperAdmins, updater + ring, licence (Pro: a reminder until it is added),
+       mail sender + both sending identities in scope, alert recipients, the engine's Graph rights + Reader at the tenant
+       root, sign-in, the SQL window; repairs what it can; a failed required line = exit 1 with that line's fix), checks
+       health, and reports 'completed' with the outputs Invardia's support needs                       -> exit 0
   A step that needs a higher role than the installer holds ends as a WARNING with the command for the right person; the
-  install continues. -Resume re-runs from where it stopped: completed preflight / licence / support steps are skipped,
-  and the deploy itself is idempotent (each of its steps checks what exists first). The state file (state.json in
-  -StatePath) also remembers the PATH of the licence file -- a resume needs no -LicencePath; the file's content, a key or a
-  token is never written there -- and that THIS install opened the SQL firewall rule 'AllowSetupHost': the install closes
-  that rule on every way out (the end, a failed step, the next run), and never removes a rule it did not open itself.
-  The preflight also checks the PIM Manager administrators: a sign-in name that is not in the tenant, or administrators
-  without a mailbox and no alert recipients, stops the install there (exit 2), before anything is created.
-
-  ENROLLMENT KEY instead of a licence file (framework 8.6 "SINGLE-TENANT enrollment too", owner 2026-10-08): with
-  'enrollmentKey' in config.json (or -EnrollmentKey) -LicencePath is not needed. After the preflight, step 'enroll' claims
-  this tenant at Invardia FIRST (the environment is created under the customer, the licence signed -- asked again until
-  ready -- and an install key issued); step 'licence' registers that licence and stores the install key (from files in a
-  restricted per-run folder). A managed-tenant key, a refused key, or Invardia not issuing single-tenant enrollment yet =
-  exit 3 with one plain sentence, nothing deployed. The key is never printed (masked) and is removed from config.json once
-  the licence is registered.
+  install continues. -Resume re-runs from where it stopped with the SAME parameters: completed preflight / support steps
+  are skipped, and the deploy itself is idempotent (each of its steps checks what exists first). The installation keeps
+  its own state (state.json in -StatePath; no key or token is ever written there), including that THIS install opened
+  the SQL firewall rule 'AllowSetupHost': the install closes that rule on every way out (the end, a failed step, the next
+  run), and never removes a rule it did not open itself. The preflight also checks the PIM Manager administrators: a
+  sign-in name that is not in the tenant, or administrators without a mailbox and no alert recipients, stops the install
+  there (exit 2), before anything is created.
 
   Reporter events: @{ installId; step = @{ id; title }; state = started|ok|warning|failed|skipped|completed; message;
-  action = @{ text; command }; detail; outputs }. The bootstrap adds seq and at. This script never calls invardia.com.
+  action = @{ text; command }; detail; outputs }. This script never calls invardia.com.
 
 .EXAMPLE
   ./tools/setup/Install-PimManager.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>'
@@ -74,8 +68,8 @@
   ./tools/setup/Install-PimManager.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -Location westeurope -ResourceGroup rg-pim-manager -SuperAdmins 'admin1@contoso.com','admin2@contoso.com' -AlertRecipients 'pim-alerts@contoso.com'
   When you choose the region and the resource group yourself, and name the PIM Manager administrators and who gets the alerts.
 .EXAMPLE
-  ./tools/setup/Install-PimManager.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -EnrollmentKey '<enrollment key>'
-  Pro or a trial: the same, plus the enrollment key from Invardia's portal or your trial mail (or -LicencePath <your licence file> instead).
+  ./tools/setup/Install-PimManager.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -Edition Pro
+  Pro or a trial: the same installation with the Pro updater; afterwards sign in to PIM Manager and add your licence in Settings > Licence.
 .EXAMPLE
   ./tools/setup/Install-PimManager.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -Resume
   After a stop: run the same command with -Resume; finished steps are skipped and the installation goes on where it stopped.
@@ -101,9 +95,8 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    # INSTALL-SAMPLES (owner 2026-10-29): the answers come as PARAMETERS; the wizard's answers file is optional. With both, a
-    # parameter wins over the same answer in the file. Without -ConfigPath, -TenantId and -SubscriptionId are required.
-    [string]$ConfigPath = '',
+    # ONE-LINE-INSTALL (owner 2026-11-02): every answer is a PARAMETER with its real value -- no answers file, no key, no
+    # licence. -TenantId and -SubscriptionId are required; everything else has a default.
     [string]$TenantId = '',
     [string]$SubscriptionId = '',
     [string]$Location = '',
@@ -111,20 +104,26 @@ param(
     [string[]]$SuperAdmins = @(),
     [string[]]$AlertRecipients = @(),
     [string]$MailSender = '',
+    # who may sign in to the PIM Manager (default: the SuperAdmins); -AllowAllMembers = every member account of the tenant
+    [string[]]$PortalUsers = @(),
+    [switch]$AllowAllMembers,
     [string]$VnetAddressPrefix = '',
     [string]$SubnetAddressPrefix = '',
     [string]$Exposure = '',
-    # Community = the free edition: no licence, no enrollment key, the Core features. Chosen by itself when neither a
-    # licence file nor an enrollment key is given (and the answers name no edition). Trial / Pro need one of the two.
+    # Community = the free edition, the Core features (the default when no edition is given). Trial / Pro install the same
+    # way with the Pro updater and NO licence: the licence is added afterwards in PIM Manager > Settings > Licence.
     [ValidateSet('', 'Community', 'Trial', 'Pro')][string]$Edition = '',
+    # Pro / trial: the update ring (2 = design partners, 3 = broad, the default)
+    [ValidateSet('', '2', '3')][string]$UpdateRing = '',
+    # the install's own Key Vault name (the sign-in front's keys); default kv-pim-<token>
+    [string]$KeyVaultName = '',
+    # §97: also give the engine User Access Administrator at the tenant root (off by default; Reader there is always given)
+    [switch]$EngineAzureRootUserAccessAdmin,
     # the installation id (resource names + the state folder); default: derived from tenant, subscription and resource group
     [string]$InstallId = '',
     # the Invardia Support app's client id -- only when you want Invardia support to have access (nothing is granted otherwise)
     [string]$SupportAppId = '',
     [ValidateSet('', 'troubleshoot', 'setup', 'asbuilt')][string]$SupportAccess = '',
-    # The licence file -- required unless the answers carry an Invardia enrollment key (config 'enrollmentKey', or
-    # -EnrollmentKey): then the licence comes from the enrollment (framework 8.6 "SINGLE-TENANT enrollment too").
-    [string]$LicencePath = '',
     [scriptblock]$Reporter,
     [string]$StatePath = '',
     [switch]$Resume,
@@ -132,22 +131,11 @@ param(
     # --- test seams (offline tests/Test-PimGuidedInstall.ps1); omit them for a real install ---
     [scriptblock]$Az,
     [scriptblock]$Deploy,
-    [scriptblock]$InstallLicence,
     [scriptblock]$GrantSupport,
     [scriptblock]$ResolveHost,
-    [string]$TestLicenceCertB64,
     [scriptblock]$Http,
     # INSTALL-HARDEN-1: param([hashtable]$VerifyArgs) -> @{ done; failed[]; warnings[]; sentence; rows[] } (Confirm-PimInstall.ps1)
     [scriptblock]$VerifyInstall,
-    # framework 8.6: the enrollment key on the command line (else config.json 'enrollmentKey'). Never printed (masked).
-    [string]$EnrollmentKey = '',
-    [string]$InvardiaBaseUrl = "$($env:PIM_INVARDIA_BASE_URL)",
-    # --- test seams: Invardia (param($method, $url, $body, $headers) -> @{ status; body }) and the licence-poll wait ---
-    [scriptblock]$EnrollmentHttp,
-    [scriptblock]$EnrollmentSleep,
-    [int]$EnrollmentTimeoutSeconds = 900,
-    # test seam: param([hashtable]$MspArgs, [scriptblock]$OnStep) -> exit code, in place of Invoke-PimMspBuild (mspRole managed)
-    [scriptblock]$MspBuild,
     # test seam (REQ 98.4 b): param([string]$Op, $Target) -- 'get' answers the address of the SQL firewall rule 'AllowSetupHost'
     # ('' = not there; throws = not readable), 'remove' deletes it. A real install uses ARM REST (below).
     [scriptblock]$SetupHostRule,
@@ -156,6 +144,9 @@ param(
     # install: Invoke-PimSqlAdminGroupSetupRelease (_PimSqlAdminGroup.ps1). Not run for an Invardia Support-app session
     # (the Support app is the group's standing member) or a managed-tenant install.
     [scriptblock]$ReleaseSqlAdmin,
+    # test seam (INSTALL-1 GAP): param([string]$Sql) -> one scalar from the PIM database, as the installer -- records the trial /
+    # Pro install edition (Set-PimInstallEditionSetting). A real install: the sign-in front step's database I/O.
+    [scriptblock]$StoreSql,
     # --- test seam (GUIDED-INSTALL-FRONT, offline tests/Test-PimGuidedInstall.ps1): param([hashtable]$A, [scriptblock]$OnStep)
     # -> @{ ok; failedStep; reason; completed[]; keyVaultId } in place of Invoke-PimInstallSigninFront -- omit it for a real install ---
     [scriptblock]$SigninFront
@@ -298,14 +289,13 @@ function Get-InstallRest([string]$Url, [string]$Resource) {
     if (-not "$($t.accessToken)") { return $null }
     try { return (& $Http $Url "$($t.accessToken)") } catch { return $null }
 }
-$script:enrolDir = ''
-# REQ 98.4 (a) + (b): what this install remembers for its next run, written to the state file with the completed steps:
-# the PATH of the licence file (never its content) and the SQL firewall rule this install opened. Read as a plain variable
-# (never $script:): the state is also saved from the deploy's -OnStep, a CHILD script, where $script: is the deploy's own.
-$pimInstallMem = @{ licencePath = ''; hostRule = $null; signedIn = $false }
+# REQ 98.4 (b): what this install remembers for its next run, written to the state file with the completed steps: the SQL
+# firewall rule this install opened. Read as a plain variable (never $script:): the state is also saved from the deploy's
+# -OnStep, a CHILD script, where $script: is the deploy's own.
+$pimInstallMem = @{ hostRule = $null; signedIn = $false }
 function Save-InstallState {
     # -WhatIf: the state file lives outside the temp folder (clouddrive / home), so a preview never writes it.
-    if (-not $WhatIfPreference) { Save-PimInstallState -StatePath $StatePath -InstallId $installId -Completed @($done) -LicencePath "$($pimInstallMem.licencePath)" -SetupHostRule $pimInstallMem.hostRule }
+    if (-not $WhatIfPreference) { Save-PimInstallState -StatePath $StatePath -InstallId $installId -Completed @($done) -SetupHostRule $pimInstallMem.hostRule }
 }
 function Close-InstallHostRule {
     # REQ 98.4 (b): close the SQL firewall rule THIS install opened -- on every way out (the normal end, a failed step, a
@@ -324,49 +314,39 @@ function Close-InstallHostRule {
 }
 function Finish([int]$Code) {
     try { Close-InstallHostRule } catch { Write-Verbose "setup-host rule close failed: $($_.Exception.Message)" }
-    # framework 8.6: the per-run directory with the claimed licence + install key never outlives the run.
-    if ($script:enrolDir) { Remove-PimEnrollmentRunDirectory -Path $script:enrolDir; $script:enrolDir = '' }
     Remove-Item Env:\PIM_GUIDED_INSTALL_RUN -ErrorAction SilentlyContinue
     $global:LASTEXITCODE = $Code; exit $Code
 }
 
-# ================================================================== 1. config + licence
+# ================================================================== 1. the answers (the parameters)
 Emit 'config' 'started'
-# INSTALL-SAMPLES (owner 2026-10-29): the answers = the parameters, over the wizard's answers file when one is given. Both
-# build the SAME answers object (ConvertTo-PimInstallAnswers), so every check, name and step below runs unchanged.
-$raw = $null
-$cfgFileGiven = [bool]"$ConfigPath".Trim()
-if ($cfgFileGiven) { try { $raw = Get-Content -Raw -LiteralPath $ConfigPath -ErrorAction Stop | ConvertFrom-Json } catch { $raw = $null } }
+# ONE-LINE-INSTALL (owner 2026-11-02): the answers = the parameters, nothing else (ConvertTo-PimInstallAnswers builds the
+# answers object Test-PimInstallConfig validates; every check, name and step below runs on it).
 $cliAnswers = @{ tenantId = $TenantId; subscriptionId = $SubscriptionId; location = $Location; resourceGroup = $ResourceGroup
-                 superAdmins = @($SuperAdmins); alertRecipients = @($AlertRecipients); mailSender = $MailSender
+                 superAdmins = @($SuperAdmins); alertRecipients = @($AlertRecipients); mailSender = $MailSender; portalUsers = @($PortalUsers)
                  vnetAddressPrefix = $VnetAddressPrefix; subnetAddressPrefix = $SubnetAddressPrefix; exposure = $Exposure
-                 edition = $Edition; installId = "$($pimCli['InstallId'])"; supportAppId = $SupportAppId; supportAccess = $SupportAccess }
-$ans = ConvertTo-PimInstallAnswers -FileAnswers $raw -FileGiven:$cfgFileGiven -Parameters $cliAnswers
-$fixAnswers = if ($cfgFileGiven) { 'Correct the answers in the wizard and download the command again.' } else { 'Correct the parameters, then run the command again.' }
+                 edition = $Edition; updateRing = $UpdateRing; keyVaultName = $KeyVaultName
+                 installId = "$($pimCli['InstallId'])"; supportAppId = $SupportAppId; supportAccess = $SupportAccess }
+# a switch is an answer only when it is GIVEN (a "False" text would read as true)
+if ($AllowAllMembers) { $cliAnswers['allowAllMembers'] = $true }
+if ($EngineAzureRootUserAccessAdmin) { $cliAnswers['engineAzureRootUserAccessAdmin'] = $true }
+$ans = ConvertTo-PimInstallAnswers -Parameters $cliAnswers
 if (@($ans.missing).Count) {
-    Emit 'config' 'failed' ("missing: " + (@($ans.missing | ForEach-Object { '-' + $_.Substring(0, 1).ToUpperInvariant() + $_.Substring(1) }) -join ' and ') + " -- the Microsoft Entra tenant and the Azure subscription to install PIM Manager into (or -ConfigPath with the answers file)") 'Run the command again with them:' "-TenantId '<tenant id>' -SubscriptionId '<subscription id>'"
+    Emit 'config' 'failed' ("missing: " + (@($ans.missing | ForEach-Object { '-' + $_.Substring(0, 1).ToUpperInvariant() + $_.Substring(1) }) -join ' and ') + " -- the Microsoft Entra tenant and the Azure subscription to install PIM Manager into") 'Run the command again with them:' "-TenantId '<tenant id>' -SubscriptionId '<subscription id>'"
     Finish 3
 }
-if (@($ans.overridden).Count) { Write-Host "    from the parameters, over the answers file: $(@($ans.overridden) -join ', ')" -ForegroundColor DarkGray }
-$chk = Test-PimInstallConfig -Config $ans.answers -HasEnrollmentKey:([bool]"$EnrollmentKey".Trim())
-if (-not $chk.ok) { Emit 'config' 'failed' ("the answers cannot be used: " + (@($chk.errors) -join '; ')) $fixAnswers; Finish 3 }
+$chk = Test-PimInstallConfig -Config $ans.answers
+if (-not $chk.ok) { Emit 'config' 'failed' ("the answers cannot be used: " + (@($chk.errors) -join '; ')) 'Correct the parameters, then run the command again.'; Finish 3 }
 $cfg = $chk.config
 $installId = $cfg.installId
-# framework 8.6 "SINGLE-TENANT enrollment too": the enrollment key lives in THIS variable only (never in $cfg).
-$enrolKey = if ("$EnrollmentKey".Trim()) { "$EnrollmentKey".Trim() } else { "$($chk.enrollmentKey)" }
-$enrolKeyInConfig = [bool]"$($chk.enrollmentKey)"
-$EnrollmentKey = ''; $chk.enrollmentKey = ''
-# ONE CLAIMANT PER INSTALL (Invardia 2026-10-08): every claim kills the previous install key. Answers that already carry
-# installKey were claimed by Invardia's bootstrap (Install-Invardia -EnrollmentKey) -- this install then NEVER claims; an
-# enrollment key beside it is informational only and is never sent.
-if ($enrolKey -and "$($cfg.installKey)".Trim()) { $enrolKey = ''; $enrolKeyInConfig = $false }
-if ($chk.enrollmentKeyIgnored -or (-not $enrolKey -and "$($cfg.installKey)".Trim() -and "$($raw.enrollmentKey)".Trim())) { Write-Host '    the enrollment key is not used: Invardia''s installer already claimed this installation (installKey is in the answers) -- nothing is claimed again' -ForegroundColor DarkGray }
-$enrolling = [bool]$enrolKey
-# INSTALL-SAMPLES: Community is installed without a licence or a key -- a key beside an explicit Community is a contradiction
+# No edition given = the free COMMUNITY edition, said in one calm line. Trial / Pro install the same way with the Pro updater
+# and no licence: the licence is added in PIM Manager > Settings > Licence after the installation (ConvertTo-PimInstallDeployArgs).
+$autoCommunity = $false
+if (-not $ans.editionGiven) { $cfg.edition = 'community'; $autoCommunity = $true }
 $community = ("$($cfg.edition)" -eq 'community')
-if ($community -and $enrolling) { Emit 'config' 'failed' 'an enrollment key is for a trial or Pro installation, and the Community edition installs without one' 'Leave out -Edition Community to install the trial or Pro with the key, or leave out the key to install Community.'; Finish 3 }
-if ($enrolling -or "$($cfg.mspRole)" -eq 'managed') { $enrolLib = Join-Path $sol 'engine\msp\PIM-InvardiaEnrollment.ps1'; if (Test-Path -LiteralPath $enrolLib) { . $enrolLib } else { Emit 'config' 'failed' 'enrollment keys and managed tenants come with PIM Manager Pro; this copy is the Community edition' 'Install with the licence file, or download PIM Manager Pro from invardia.com.'; Finish 3 } }
-if ($enrolling -and -not (Test-PimEnrollmentKeyFormat -Key $enrolKey)) { Emit 'config' 'failed' 'the enrollment key is not an Invardia enrollment key (ek- followed by 43 letters, digits, - or _)' 'Copy the key again from invardia.com and download the command again.'; Finish 3 }
+$licenceLater = -not $community
+$licenceHint = 'sign in to PIM Manager and add your licence in Settings > Licence -- the Pro features switch on with it'
+if ($autoCommunity) { Write-Host '    This installs PIM Manager Community (free). For Pro, run the same command with -Edition Pro; you can also add a licence later in PIM Manager > Settings > Licence.' -ForegroundColor Cyan }
 if (-not "$StatePath".Trim()) {
     $homeDir = if ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
     $base = if (Test-Path -LiteralPath (Join-Path $homeDir 'clouddrive')) { Join-Path $homeDir 'clouddrive' } else { $homeDir }
@@ -376,91 +356,25 @@ $state = Read-PimInstallState -StatePath $StatePath
 $done = New-Object System.Collections.Generic.List[string]
 if ($Resume -and $state.installId -eq $installId) { foreach ($c in $state.completed) { $done.Add("$c") | Out-Null } }
 function Mark([string]$Id) { if (-not $done.Contains($Id)) { $done.Add($Id) | Out-Null }; Save-InstallState }
-# REQ 98.4 (a): the licence file is remembered BY PATH in the state file of this installation. A later run without
-# -LicencePath (a resume) reads the same file again; a path given now is made a full path first, so it is still right in
-# another window or folder. A state file written before this (no licencePath) changes nothing here.
 $fullPath = { param([string]$p) if (-not "$p".Trim()) { return '' }; try { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath("$p".Trim()) } catch { "$p".Trim() } }
-$licenceFromState = $false
-if ("$LicencePath".Trim()) { $LicencePath = & $fullPath $LicencePath }
-elseif (-not $enrolling -and $state.installId -eq $installId -and "$($state.licencePath)".Trim()) { $LicencePath = "$($state.licencePath)".Trim(); $licenceFromState = $true }
-if ($state.installId -eq $installId) { $pimInstallMem.licencePath = "$($state.licencePath)".Trim() }
-# INSTALL-SAMPLES (owner 2026-10-29: "samples to install interactive is missing"): no licence file, no enrollment key, no
-# install key and no edition named = the COMMUNITY edition, said in one calm line. Community skips the enroll and licence
-# steps, installs the Core features with the Community updater and no msp.* gate (ConvertTo-PimInstallDeployArgs).
-$autoCommunity = $false
-if (-not $community -and -not $ans.editionGiven -and -not $enrolling -and -not "$LicencePath".Trim() -and -not "$($cfg.installKey)".Trim() -and "$($cfg.mspRole)" -ne 'managed' -and -not $done.Contains('licence')) {
-    $community = $true; $autoCommunity = $true; $cfg.edition = 'community'
-    Write-Host '    No licence file and no enrollment key were given, so this installs PIM Manager Community (free). You can add Pro later with Set-PimLicense.ps1 and your licence file (PIM Manager > Settings > Licence shows the command).' -ForegroundColor Cyan
-}
-if ($community -and "$LicencePath".Trim()) {
-    if (-not $licenceFromState) { Write-Host "    the licence file '$LicencePath' is not used: the Community edition installs without a licence (add it later with Set-PimLicense.ps1)" -ForegroundColor Yellow }
-    $LicencePath = ''; $licenceFromState = $false
-}
-# the command-line answers this run was given, for the printed resume command (the same answers again, in a fresh window)
+# The printed resume command: the installer by its full path (a new PowerShell window needs no function defined), the SAME
+# parameters this run was given, the installation's own state folder, -Resume. Parameters only -- never a file to write.
 $cliResume = ''
-foreach ($pn in 'TenantId', 'SubscriptionId', 'Location', 'ResourceGroup', 'SuperAdmins', 'AlertRecipients', 'MailSender', 'VnetAddressPrefix', 'SubnetAddressPrefix', 'Exposure', 'Edition', 'InstallId', 'SupportAppId', 'SupportAccess') {
-    if (-not $pimCli.ContainsKey($pn)) { continue }   # only what was GIVEN (file mode with no parameters prints exactly what it did before)
+foreach ($pn in 'TenantId', 'SubscriptionId', 'Location', 'ResourceGroup', 'SuperAdmins', 'AlertRecipients', 'MailSender', 'PortalUsers', 'VnetAddressPrefix', 'SubnetAddressPrefix', 'Exposure', 'Edition', 'UpdateRing', 'KeyVaultName', 'InstallId', 'SupportAppId', 'SupportAccess') {
+    if (-not $pimCli.ContainsKey($pn)) { continue }   # only what was GIVEN
     $pv = @(@($pimCli[$pn]) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     if ($pv.Count) { $cliResume += " -$pn " + (@($pv | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ',') }
 }
-# 2026-10-11 (a managed-tenant install): the printed resume command must work in a FRESH window. Under Invardia's bootstrap the customer resumes
-# through it (it re-downloads the release and re-signs in); otherwise the installer is called by its full path, so a new
-# PowerShell window does not need the function defined.
-# REQ 98.4 (a): it is COMPLETE -- full paths for the answers and the state folder, and the licence file whenever this
-# installation has one (given now or remembered); never an empty -LicencePath ''.
-$configFull = & $fullPath $ConfigPath; $stateFull = & $fullPath $StatePath
-# INSTALL-SAMPLES: an install started with parameters only resumes with the same parameters (no answers file)
-$answersArg = if ($cfgFileGiven) { " -ConfigPath '$configFull'$cliResume" } else { "$cliResume" }
-$resumeCmd = if (Get-Command Install-Invardia -ErrorAction SilentlyContinue) {
-    ". ./bootstrap.ps1; Install-Invardia -Resume -InstallId $installId"
-} elseif (-not $cfgFileGiven) { "& '$PSCommandPath'$answersArg$(if ("$LicencePath".Trim()) { " -LicencePath '$LicencePath'" }) -StatePath '$stateFull' -Resume" }
-  elseif (-not "$LicencePath".Trim()) { "& '$PSCommandPath' -ConfigPath '$configFull'$cliResume -StatePath '$stateFull' -Resume" }
-  else { "& '$PSCommandPath' -ConfigPath '$configFull'$cliResume -LicencePath '$LicencePath' -StatePath '$stateFull' -Resume" }
-
-# the licence: a Pro licence for THIS tenant, verifiable offline. Anything else is a bad bundle (exit 3).
-function Get-InstallLicenceProblem([string]$Text, [string]$What) {
-    $l = $null
-    try { if ("$Text".Trim()) { $l = if ($TestLicenceCertB64) { Get-PimLicense -LicenseText $Text -PublicCertB64 $TestLicenceCertB64 } else { Get-PimLicense -LicenseText $Text } } } catch { $l = $null }
-    $why = if (-not $l) { "$What could not be read" }
-           elseif ("$($l.Status)" -notin 'Valid', 'Grace') { "the licence is $($l.Status): $($l.Reason)" }
-           elseif ("$($l.Sku)" -notmatch '^(?i)pro(-.+)?$') { "the licence is a '$($l.Sku)' licence, not Pro" }
-           elseif (-not ($b = Test-PimLicenseTenantBinding -License $l -TenantId $cfg.tenantId).ok) { $b.reason }   # LIC anti-copy: bound, and to THIS tenant
-           else { '' }
-    return @{ lic = $l; why = $why }
-}
-$lic = $null; $licText = ''
-$licenceDone = $done.Contains('licence')
-if ($community) {
-    Emit 'config' 'ok' ("PIM Manager $($script:PimInstallVersion): installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); edition: Community (no licence needed)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
-} elseif ($enrolling) {
-    # framework 8.6: the licence comes from the enrollment (claimed after the preflight, step 'enroll'); a licence file is not used.
-    if ("$LicencePath".Trim()) { Write-Host "    the licence file '$LicencePath' is not used: the enrollment returns this tenant's licence" -ForegroundColor Yellow }
-    Write-Host ("    enrollment key: {0} -- sent only in the claim to Invardia, never written to a log, the state file or the support outputs" -f (Get-PimEnrollmentKeyMask -Key $enrolKey)) -ForegroundColor DarkGray
-    Emit 'config' 'ok' ("PIM Manager $($script:PimInstallVersion): installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: from your Invardia enrollment (after the checks)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
-} elseif ($licenceDone -and (-not "$LicencePath".Trim() -or ($licenceFromState -and -not (Test-Path -LiteralPath $LicencePath -PathType Leaf)))) {
-    # (a remembered licence file that is gone does not matter once the licence is registered)
-    Emit 'config' 'ok' ("PIM Manager $($script:PimInstallVersion): installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: already registered (resume)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
-} else {
-    if (-not "$LicencePath".Trim()) { Emit 'config' 'failed' "no licence: give the licence file (-LicencePath) or an Invardia enrollment key (-EnrollmentKey, or enrollmentKey in the answers) for the $($cfg.edition) installation -- or leave out the edition to install Community, which needs neither" 'Download the installation bundle again from invardia.com, or contact support.'; Finish 3 }
-    # REQ 98.4 (a): the remembered file is gone -- said in plain words, with the one command that gives it again
-    if ($licenceFromState -and -not (Test-Path -LiteralPath $LicencePath -PathType Leaf)) {
-        if (Get-Command Install-Invardia -ErrorAction SilentlyContinue) { Emit 'config' 'failed' "the licence file this installation was started with is not there any more: $LicencePath" 'Download the installation bundle again from invardia.com (it carries the licence file), then resume the installation:' $resumeCmd }
-        else { Emit 'config' 'failed' "the licence file this installation was started with is not there any more: $LicencePath" 'Put the file back in that place, or resume the installation with the licence file:' $(if ($cfgFileGiven) { "& '$PSCommandPath' -ConfigPath '$configFull'$cliResume -LicencePath '<the licence file>' -StatePath '$stateFull' -Resume" } else { "& '$PSCommandPath'$answersArg -LicencePath '<the licence file>' -StatePath '$stateFull' -Resume" }) }
-        Finish 3
-    }
-    if ($licenceFromState) { Write-Host "    the licence file is the one this installation was started with: $LicencePath" -ForegroundColor DarkGray }
-    try { $licText = Get-Content -Raw -LiteralPath $LicencePath -ErrorAction Stop } catch { $licText = '' }
-    $lp = Get-InstallLicenceProblem -Text $licText -What "the licence file '$LicencePath'"
-    $lic = $lp.lic
-    if ($lp.why) { Emit 'config' 'failed' $lp.why 'Download the installation bundle again from invardia.com, or contact support.'; Finish 3 }
-    $pimInstallMem.licencePath = $LicencePath   # REQ 98.4 (a): the PATH of a licence file that was read and accepted -- saved with the first completed step
-    Emit 'config' 'ok' ("PIM Manager $($script:PimInstallVersion): installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: $($lic.Customer), valid until $($lic.ValidTo)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
-}
+foreach ($sw in 'AllowAllMembers', 'EngineAzureRootUserAccessAdmin') { if ($pimCli.ContainsKey($sw) -and [bool]$pimCli[$sw]) { $cliResume += " -$sw" } }
+$stateFull = & $fullPath $StatePath
+$resumeCmd = "& '$PSCommandPath'$cliResume -StatePath '$stateFull' -Resume"
+$editionText = if ($community) { 'Community (no licence needed)' } else { "$((Get-Culture).TextInfo.ToTitleCase("$($cfg.edition)")) -- installed without a licence; afterwards $licenceHint" }
+Emit 'config' 'ok' ("PIM Manager $($script:PimInstallVersion): installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); edition: $editionText") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
 $names = Get-PimInstallNames -Config $cfg
 # REQ 98.4 (b): the SQL firewall rule of THIS install (a single-tenant install; a managed tenant's build owns its own window
 # and closes it in its last step). A record in the state file counts only when it names exactly this install's rule.
 $hostRuleTarget = [ordered]@{ name = 'AllowSetupHost'; server = "$($names.sqlServer)"; resourceGroup = "$($names.resourceGroup)"; subscriptionId = "$($cfg.subscriptionId)" }
-if ("$($cfg.mspRole)" -ne 'managed' -and $state.installId -eq $installId -and (Test-PimInstallSetupHostRuleRecord -Record $state.setupHostRule -Target $hostRuleTarget)) { $pimInstallMem.hostRule = $state.setupHostRule }
+if ($state.installId -eq $installId -and (Test-PimInstallSetupHostRuleRecord -Record $state.setupHostRule -Target $hostRuleTarget)) { $pimInstallMem.hostRule = $state.setupHostRule }
 
 # ================================================================== 1b. framework 8.13: the handed-over sign-in
 # Each audience is checked on its own claims (Import-PimHandoffTokens, PIM-Rest.ps1): this installation's tenant, a signed-in
@@ -478,7 +392,7 @@ $script:PimHandoffRaw = $null
 $script:handoffBrowserFor = @()
 if ($script:handoff.present) {
     if ($script:handoff.refused) {
-        Emit 'signin' 'failed' "$($script:handoff.reason)" 'Start the installation again from invardia.com and sign in with an account of the tenant the answers name (or correct the tenant in the wizard):' ''
+        Emit 'signin' 'failed' "$($script:handoff.reason)" 'Start the installation again and sign in with an account of the tenant -TenantId names (or correct -TenantId):' ''
         Finish 2
     }
     foreach ($f in @($script:handoff.fallback)) {
@@ -516,7 +430,7 @@ Pre 'preflight-signin' {
     # application is never "the signed-in admin". A bad ANSWER, so exit 3 (nothing was touched), with the line to add.
     if ("$($script:who.supportAppId)".Trim() -and -not @($cfg.superAdmins | Where-Object { "$_".Trim() }).Count) {
         $script:appNoAdmins = $true
-        return @{ state = 'failed'; message = 'the installation runs as an application (the Invardia Support app), so it cannot make the installer the PIM Manager administrator -- name at least one person in superAdmins'; actionText = $(if ($cfgFileGiven) { 'Add the administrator''s sign-in name to config.json, then start the installation again:' } else { 'Name the administrator with -SuperAdmins, then start the installation again:' }); actionCommand = $(if ($cfgFileGiven) { '"superAdmins": ["admin@contoso.com"]' } else { '-SuperAdmins admin@contoso.com' }) }
+        return @{ state = 'failed'; message = 'the installation runs as an application (the Invardia Support app), so it cannot make the installer the PIM Manager administrator -- name at least one person in superAdmins'; actionText = 'Name the administrator with -SuperAdmins, then start the installation again:'; actionCommand = '-SuperAdmins admin@contoso.com' }
     }
     @{ state = 'ok'; message = "signed in as $($script:who.userName)" }
 }
@@ -579,11 +493,11 @@ Pre 'preflight-names' {
     $grp = Az-Json @('group', 'show', '-n', $names.resourceGroup, '--subscription', $cfg.subscriptionId)
     if ($grp) { $msgs += "resource group '$($names.resourceGroup)' exists and is used" ; if ("$($grp.location)" -and "$($grp.location)" -ne $cfg.location) { $msgs += "(it is in $($grp.location); the new resources go to $($cfg.location))" } }
     $ours = if ($grp) { Az-Json @('sql', 'server', 'show', '-g', $names.resourceGroup, '-n', $names.sqlServer, '--subscription', $cfg.subscriptionId) } else { $null }
-    if (-not $ours -and (& $ResolveHost $names.sqlFqdn)) { return @{ state = 'failed'; message = "the database server name '$($names.sqlServer)' is already taken in Azure -- start a new installation from the wizard (a new installation id gives new names)" } }
+    if (-not $ours -and (& $ResolveHost $names.sqlFqdn)) { return @{ state = 'failed'; message = "the database server name '$($names.sqlServer)' is already taken in Azure -- run the command again with another -InstallId (a new installation id gives new names)" } }
     $acrFree = Az-Text @('acr', 'check-name', '-n', $names.acr, '--subscription', $cfg.subscriptionId, '--query', 'nameAvailable', '-o', 'tsv')
     if ($acrFree -eq 'false') {
         $acrOurs = if ($grp) { Az-Json @('acr', 'show', '-g', $names.resourceGroup, '-n', $names.acr, '--subscription', $cfg.subscriptionId) } else { $null }
-        if (-not $acrOurs) { return @{ state = 'failed'; message = "the registry name '$($names.acr)' is already taken in Azure -- start a new installation from the wizard" } }
+        if (-not $acrOurs) { return @{ state = 'failed'; message = "the registry name '$($names.acr)' is already taken in Azure -- run the command again with another -InstallId" } }
     }
     $msgs += "names: $($names.sqlServer), $($names.acr), $($names.environment)"
     @{ state = 'ok'; message = ($msgs -join ' ') }
@@ -596,8 +510,8 @@ Pre 'preflight-names' {
 Pre 'preflight-sql-region' {
     $rv = Invoke-PimRegionPreflight -SubscriptionId $cfg.subscriptionId -Location $cfg.location -Get { param($u) Get-InstallRest $u 'https://management.azure.com/' }
     if (-not $rv.ok) {
-        return @{ state = 'failed'; message = $rv.message; actionText = 'Choose another region in the wizard, then start the installation again:'
-                  actionCommand = $(if (-not $rv.suggestion) { '' } elseif ($cfgFileGiven) { "`"location`": `"$($rv.suggestion)`"" } else { "-Location $($rv.suggestion)" }) }
+        return @{ state = 'failed'; message = $rv.message; actionText = 'Choose another region with -Location, then start the installation again:'
+                  actionCommand = $(if (-not $rv.suggestion) { '' } else { "-Location $($rv.suggestion)" }) }
     }
     if (@($rv.unknown).Count) { return @{ state = 'warning'; message = "$($rv.message) -- the deploy steps will tell" } }
     @{ state = 'ok'; message = $rv.message }
@@ -640,125 +554,33 @@ if ($preflightFailed) { Finish 2 }
 if ($PreflightOnly) { Write-Host 'preflight passed -- nothing was changed (-PreflightOnly)' -ForegroundColor Green; Finish 0 }
 
 # ================================================================== framework 12.7: -WhatIf = the checks above + this preview
-# Everything after this point writes (Invardia, Azure, Entra ID, SQL, the state file), so a preview stops HERE and only
-# describes it. The deploy's own plan is read with Invoke-PimDeployAll in its plan-only mode (reads only).
+# Everything after this point writes (Azure, Entra ID, SQL, the state file), so a preview stops HERE and only describes
+# it. The deploy's own plan is read with Invoke-PimDeployAll in its plan-only mode (reads only).
 if ($WhatIfPreference) {
-    $wiManaged = ("$($cfg.mspRole)" -eq 'managed')
     Write-Host ''
     Write-Host 'WHAT IF -- the checks passed. The installation WOULD now do this (nothing below is done under -WhatIf):' -ForegroundColor Cyan
-    if ($enrolling -and -not $wiManaged) {
-        Write-Host "  What if: claim tenant $($cfg.tenantId) at Invardia with the enrollment key (Invardia creates the environment under your account, signs the licence and issues an install key) -- a change at Invardia, not previewed" -ForegroundColor Yellow
+    $wiArgs = @{}
+    $wiDeploy = ConvertTo-PimInstallDeployArgs -Config $cfg -SignedInUpn $who.userName
+    foreach ($k in @($wiDeploy.Keys)) { if ("$k" -ne 'Apply') { $wiArgs[$k] = $wiDeploy[$k] } }
+    $wiArgs['WhatIf'] = $true
+    Write-Host "  What if: deploy PIM Manager into resource group '$($names.resourceGroup)' ($($cfg.location)) -- the deploy's plan, read now:" -ForegroundColor Yellow
+    try { $null = @(& $Deploy $wiArgs { param($ev) }) }
+    catch { Write-Host "    the deploy plan could not be read: $($_.Exception.Message)" -ForegroundColor Yellow }
+    if ($community) { Write-Host '  What if: no licence step -- the Community edition (the Core features, updates from the Community channel); a licence can be added later in PIM Manager > Settings > Licence' -ForegroundColor Yellow }
+    else { Write-Host "  What if: no licence step -- the $($cfg.edition) installation is deployed without a licence (the Pro updater included); afterwards $licenceHint" -ForegroundColor Yellow }
+    if ("$($cfg.supportAppId)".Trim()) {
+        Write-Host "  What if: give the Invardia Support app $($cfg.supportAppId) '$($cfg.supportAccess)' access (Grant-PimSupportAccess.ps1: at 'asbuilt' ONLY start the as-built job + read its PDF container; at 'troubleshoot' also a contained SQL user with db_datareader + VIEW DEFINITION; at 'setup' also ownership of PIM's own app registrations and groups; at EVERY level its standing access to the PIM database: membership of the SQL admin group and its own database user with the database owner role, which stays after the installation until you switch the Support app off)" -ForegroundColor Yellow
     }
-    if ($wiManaged) {
-        Write-Host "  What if: run the MANAGED-TENANT build (Invoke-PimMspBuild.ps1 -Role Slave -Apply) in subscription $($cfg.subscriptionId): enrollment claim, hosting, SQL admin group, the engine and Manager identities' Graph app roles, the pull network rule and the signed-bundle pull job." -ForegroundColor Yellow
-        Write-Host '  That build cannot be previewed from here: its plan depends on the enrollment claim''s answer (the managing tenant''s bundle address). Run without -WhatIf to apply.' -ForegroundColor Yellow
-    } else {
-        $wiArgs = @{}
-        $wiDeploy = ConvertTo-PimInstallDeployArgs -Config $cfg -SignedInUpn $who.userName
-        foreach ($k in @($wiDeploy.Keys)) { if ("$k" -ne 'Apply') { $wiArgs[$k] = $wiDeploy[$k] } }
-        $wiArgs['WhatIf'] = $true
-        Write-Host "  What if: deploy PIM Manager into resource group '$($names.resourceGroup)' ($($cfg.location)) -- the deploy's plan, read now:" -ForegroundColor Yellow
-        try { $null = @(& $Deploy $wiArgs { param($ev) }) }
-        catch { Write-Host "    the deploy plan could not be read: $($_.Exception.Message)" -ForegroundColor Yellow }
-        if ($community) { Write-Host '  What if: no licence step -- the Community edition (the Core features, updates from the Community channel); Pro can be added later with Set-PimLicense.ps1' -ForegroundColor Yellow }
-        else { Write-Host "  What if: register the $($cfg.edition) licence in the PIM database (pim.Settings License + the install key; Set-PimLicense.ps1)" -ForegroundColor Yellow }
-        if ("$($cfg.supportAppId)".Trim()) {
-            Write-Host "  What if: give the Invardia Support app $($cfg.supportAppId) '$($cfg.supportAccess)' access (Grant-PimSupportAccess.ps1: at 'asbuilt' ONLY start the as-built job + read its PDF container; at 'troubleshoot' also a contained SQL user with db_datareader + VIEW DEFINITION; at 'setup' also ownership of PIM's own app registrations and groups; at EVERY level its standing access to the PIM database: membership of the SQL admin group and its own database user with the database owner role, which stays after the installation until you switch the Support app off)" -ForegroundColor Yellow
-        }
-        Write-Host '  What if: run the end-of-install check (Confirm-PimInstall.ps1). It REPAIRS what it can, so it is not run under -WhatIf -- run without -WhatIf to apply.' -ForegroundColor Yellow
-    }
+    Write-Host '  What if: run the end-of-install check (Confirm-PimInstall.ps1). It REPAIRS what it can, so it is not run under -WhatIf -- run without -WhatIf to apply.' -ForegroundColor Yellow
     Write-Host 'WHAT IF -- nothing was changed.' -ForegroundColor Green
     Finish 0
 }
 
-# ================================================================== 2b. framework 8.6: the ENROLLMENT (single tenant)
-# Claimed FIRST -- before anything is deployed: Invardia creates this environment under the customer, signs its licence
-# (asynchronously; asked again until ready) and issues the install key. A managed-tenant key (the answer carries a managing
-# block), a refused key, or Invardia not issuing single-tenant enrollment yet = exit 3 with one plain sentence; nothing is
-# deployed. Every claim issues a NEW install key, so once the licence step has stored one a resume does not claim again.
-$enrolLicPath = ''; $enrolKeyPath = ''; $alreadyInstalled = $false
-$managedInstall = ("$($cfg.mspRole)" -eq 'managed')
-if ($enrolling -and -not $managedInstall) {
-    if ($licenceDone) { Emit 'enroll' 'skipped' 'already linked and licensed (resume) -- not claimed again, so the stored install key stays valid' }
-    else {
-        Emit 'enroll' 'started'
-        $script:enrolDir = New-PimEnrollmentRunDirectory
-        $eh = if ($EnrollmentHttp) { $EnrollmentHttp } else { { param($m, $u, $b, $h) Invoke-PimEnrollmentHttp -Method $m -Url $u -Body $b -Headers $h } }
-        $es = if ($EnrollmentSleep) { $EnrollmentSleep } else { { param($sec) Start-Sleep -Seconds $sec } }
-        $eb = ''; try { $eb = Resolve-PimEnrollmentBaseUrl -BaseUrl $InvardiaBaseUrl } catch { Emit 'enroll' 'failed' "$($_.Exception.Message)"; Finish 3 }
-        $sc = Invoke-PimEnrollmentSingleClaim -Http $eh -BaseUrl $eb -EnrollmentKey $enrolKey -TenantId $cfg.tenantId -SubscriptionId $cfg.subscriptionId -Directory $script:enrolDir `
-                -TimeoutSeconds $EnrollmentTimeoutSeconds -Sleep $es -Progress { param($msg) Emit 'enroll' 'waiting' "$msg" }
-        $enrolKey = ''   # used once
-        if (-not $sc.ok -and $sc.alreadyInstalled) {
-            # Owner 2026-10-08: the install already succeeded with this key -- no new key; the stored licence + key are kept and
-            # the install goes on as a re-run of the existing one (the deploy is idempotent; the licence step is skipped).
-            $alreadyInstalled = $true
-            Emit 'enroll' 'warning' "$($sc.reason)"
-        } elseif (-not $sc.ok) {
-            Emit 'enroll' 'failed' "$($sc.reason)" $(if ($sc.refused) { 'Nothing was installed. Check the key, or install with the licence file:' } else { 'Nothing was installed yet. Resume when Invardia answers:' }) $(if ($sc.refused) { "& '$PSCommandPath' -ConfigPath '$ConfigPath' -LicencePath <licence file>" } else { $resumeCmd })
-            Finish $(if ($sc.refused) { 3 } else { 1 })
-        }
-        if (-not $alreadyInstalled) {
-        $lp = Get-InstallLicenceProblem -Text $sc.licenceText -What 'the licence Invardia returned'
-        if ($lp.why) { Emit 'enroll' 'failed' "the enrollment's licence cannot be used: $($lp.why)" 'Contact Invardia support (support@invardia.com); nothing was installed.'; Finish 3 }
-        $lic = $lp.lic
-        $enrolLicPath = $sc.licencePath; $enrolKeyPath = $sc.installKeyPath
-        Emit 'enroll' 'ok' "linked to your Invardia account as environment '$($sc.environmentHandle)'; licence: $($lic.Customer), valid until $($lic.ValidTo)"
-        }
-    }
-}
+# 2026-10-11: this run IS the install (or its resume) -- the ring gate lets the install deploy the release it fetched even
+# when a previous attempt already created the updater. Step processes inherit it; Finish removes it.
+$env:PIM_GUIDED_INSTALL_RUN = '1'
 
-# ================================================================== 2c. framework 8.6: a MANAGED tenant of an MSP
-# Owner 2026-10-08: the customer receives ONE command when the managing company issues an enrollment key. With mspRole
-# 'managed' this install IS the managed-tenant build (Invoke-PimMspBuild -Role Slave, signed-in, -EnrollmentKey): claim ->
-# licence + install key -> link to the managing tenant from the claim's managing block -> pull subnet reported -> pull job.
-# Nothing is re-implemented here; every step of that build reaches -Reporter with its own id and title.
-$mspCode = $null
-# 2026-10-11 (a managed-tenant install): this run IS the install (or its resume) -- the ring gate lets the install deploy the release it fetched
-# even when a previous attempt already created the Invardia updater. Step processes inherit it; Finish removes it.
-if (-not $WhatIfPreference -and -not $PreflightOnly) { $env:PIM_GUIDED_INSTALL_RUN = '1' }
-if ($managedInstall) {
-    $script:enrolDir = New-PimEnrollmentRunDirectory
-    $bootLic = ''; $bootKey = ''
-    if (-not $enrolling) {
-        # Invardia's bootstrap claimed: its licence file + the install key (written to a FILE here; the build reads the file)
-        # go to the build's licence step, the handed-over managing block is the master{} block, and NOTHING claims again.
-        $bootLic = Join-Path $script:enrolDir 'bootstrap.pimlicense'; [IO.File]::WriteAllText($bootLic, "$licText", (New-Object Text.UTF8Encoding($false)))
-        $bootKey = Join-Path $script:enrolDir 'bootstrap.installkey'; [IO.File]::WriteAllText($bootKey, "$($cfg.installKey)", (New-Object Text.UTF8Encoding($false)))
-    }
-    $mspCfg = ConvertTo-PimInstallMspSlaveConfig -Config $cfg -SignedInUpn $who.userName -LicencePath $bootLic -InstallKeyPath $bootKey
-    $mspCfgPath = Join-Path $script:enrolDir 'managed-tenant.json'   # ids, names and file PATHS only -- never a key
-    [IO.File]::WriteAllText($mspCfgPath, ($mspCfg | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
-    # 100.73: -ResumeCommand -- a failed build step is told in three parts (what + cause, the fix, THIS install's one resume
-    # line); no internal "-From <step>" line and no operator-steps block on a failure.
-    $mspArgs = @{ Role = 'Slave'; ConfigPath = $mspCfgPath; Apply = $true; InvardiaInstallToken = ''; EnrollmentTimeoutSeconds = $EnrollmentTimeoutSeconds; ResumeCommand = $resumeCmd }
-    if ($enrolling) { $mspArgs['EnrollmentKey'] = $enrolKey }
-    if ("$InvardiaBaseUrl".Trim()) { $mspArgs['InvardiaBaseUrl'] = "$InvardiaBaseUrl".Trim() }
-    if ($EnrollmentHttp) { $mspArgs['EnrollmentHttp'] = $EnrollmentHttp }
-    if ($EnrollmentSleep) { $mspArgs['EnrollmentSleep'] = $EnrollmentSleep }
-    $enrolKey = ''
-    $mspOnStep = { param($ev)
-        $st = "$($ev.state)"; if ($st -notin 'started', 'ok', 'warning', 'failed', 'skipped', 'waiting') { return }
-        $a = @{ StepId = "$($ev.key)"; State = $st; Message = "$($ev.detail)"; Title = "$($ev.name)"; InstallId = $installId }
-        # 100.73: the ONE resume line goes on the failed STEP only -- a failed sub-step ('hosting.updater') is its cause, not a second resume
-        if ($st -eq 'failed' -and "$($ev.key)" -notmatch '\.') { $a['ActionText'] = 'Fix the cause above, then resume the installation:'; $a['ActionCommand'] = $resumeCmd }
-        Send-Event (New-PimInstallEvent @a)
-    }
-    if (-not $MspBuild) { $MspBuild = { param([hashtable]$A, [scriptblock]$OnStep) $global:LASTEXITCODE = 0; & (Join-Path $here 'Invoke-PimMspBuild.ps1') @A -OnStep $OnStep | Out-Host; [int]$LASTEXITCODE } }
-    try { $mspCode = @(& $MspBuild $mspArgs $mspOnStep) | Select-Object -Last 1 } catch {
-        # 100.73: a step that already reported its failure (with the resume line) is not reported a second time
-        if (-not @($events | Where-Object { $_.state -eq 'failed' -and "$($_.step.id)" -notmatch '\.' }).Count) { Emit 'verify' 'failed' "the managed-tenant build stopped: $($_.Exception.Message)" 'Fix the cause above, then resume the installation:' $resumeCmd }
-        Finish 1 }
-    $mspArgs = $null
-    if ([int]$mspCode -notin 0, 2) {
-        if (-not @($events | Where-Object { $_.state -eq 'failed' }).Count) { Emit 'verify' 'failed' "the managed-tenant build did not complete (exit $mspCode)" 'Fix the cause above, then resume the installation:' $resumeCmd }
-        Finish $(if (@($events | Where-Object { $_.state -eq 'failed' -and "$($_.step.id)" -eq 'enroll' }).Count) { 3 } else { 1 })
-    }
-    Mark 'licence'
-    if ("$($raw.enrollmentKey)".Trim()) { try { if (Remove-PimInstallConfigEnrollmentKey -ConfigPath $ConfigPath) { Write-Host '    the enrollment key was removed from config.json (it is no longer needed)' -ForegroundColor DarkGray } } catch { Write-Host '    could not remove the enrollment key from config.json -- delete that line yourself' -ForegroundColor Yellow } }
-}
-
-if (-not $managedInstall) {# ================================================================== 3. deploy
+# ================================================================== 3. deploy
 # APP-IDENTITY INSTALL (2026-10-21): an application is never the default SuperAdmin / portal user -- only the answers name them.
 $deployArgs = ConvertTo-PimInstallDeployArgs -Config $cfg -SignedInUpn $(if ("$($who.supportAppId)".Trim()) { '' } else { $who.userName })
 # REQ 98.4 (b) (install finding 2026-10-11): a run that DIED left 'AllowSetupHost' on the SQL server, the next run took it
@@ -791,24 +613,30 @@ if (-not $summary -or "$($summary.status)" -notin 'success', 'unverified') {
 }
 
 # ================================================================== 4. licence, support access, health, outputs
-if ($community) { Emit 'licence' 'skipped' 'the Community edition has no licence -- add Pro later with Set-PimLicense.ps1 (PIM Manager > Settings > Licence shows the command)' }
-elseif ($done.Contains('licence')) { Emit 'licence' 'skipped' 'already registered (resume)' }
-elseif ($alreadyInstalled) { Emit 'licence' 'skipped' 'already installed with this enrollment key: the stored licence and install key are kept'; Mark 'licence' }
-else {
-    Emit 'licence' 'started'
-    # framework 8.6: an enrolled install hands the install key over as a FILE (-InstallKeyPath), never as an argument.
-    if (-not $InstallLicence) { $InstallLicence = { param($Path, $SqlFqdn, $TenantId, $Key, $KeyPath)
-        if ("$KeyPath".Trim()) { & (Join-Path $here 'Set-PimLicense.ps1') -LicensePath $Path -SqlServer $SqlFqdn -TenantId $TenantId -UseSignedInAccount -InstallKeyPath "$KeyPath" | Out-Host }
-        else { & (Join-Path $here 'Set-PimLicense.ps1') -LicensePath $Path -SqlServer $SqlFqdn -TenantId $TenantId -UseSignedInAccount -InstallKey "$Key" -QueueInstallKeyClaim:(-not "$Key".Trim()) | Out-Host }
-        @{ ok = (-not $LASTEXITCODE) } } }
-    $lr = if ($enrolling) { & $InstallLicence $enrolLicPath $names.sqlFqdn $cfg.tenantId '' $enrolKeyPath } else { & $InstallLicence $LicencePath $names.sqlFqdn $cfg.tenantId "$($cfg.installKey)" }
-    if ($lr -and $lr.ok) {
-        Emit 'licence' 'ok' "the $($cfg.edition) licence is registered -- the Pro features are on"; Mark 'licence'
-        # framework 8.6: the key has done its job -- no copy of it stays in the answers on disk (a resume no longer needs it).
-        if ("$($raw.enrollmentKey)".Trim()) { try { if (Remove-PimInstallConfigEnrollmentKey -ConfigPath $ConfigPath) { Write-Host '    the enrollment key was removed from config.json (it is no longer needed)' -ForegroundColor DarkGray } } catch { Write-Host "    could not remove the enrollment key from config.json -- delete that line yourself" -ForegroundColor Yellow } }
+# ONE-LINE-INSTALL (owner 2026-11-02: "license will come automatically when env is deployed. then i login and add"): the
+# install never registers a licence. Community needs none; a trial / Pro environment is deployed WITHOUT one, and the
+# administrator adds it in PIM Manager > Settings > Licence -- then the Pro features switch on and the engine claims the
+# install key itself (the Manager queues that claim when the licence is stored). A warning, never a failed install.
+# INSTALL-1 GAP (2026-11-02, owner: "make sure anyone can make a trial without me having to approve it"): a trial / Pro
+# install records the edition it was installed as (pim.Settings 'InstallEdition'), so the engine's licence-request job knows
+# it is meant to be Pro and asks Invardia for its licence on its first tick (Invardia auto-approves a tenant on the 60-day
+# trial). Community records nothing and never asks. Every run, -Resume too (idempotent, read back); never a failed install.
+$editionNote = ''
+if (-not $community) {
+    if (-not $StoreSql -and -not $azSeam) {
+        $StoreSql = { param([string]$Sql)
+            $Io = New-PimInstallSigninFrontIo -SubscriptionId $cfg.subscriptionId -ResourceGroup $names.resourceGroup -TenantId $cfg.tenantId -AcrName $names.acr `
+                    -SqlServerFqdn $names.sqlFqdn -SqlDatabase $names.sqlDatabase -SetupDir $here
+            & $Io.Sql $Sql }
     }
-    else { Emit 'licence' 'failed' 'the licence could not be stored in the PIM database' 'Fix the cause above, then resume the installation:' $resumeCmd; Finish 1 }
+    if ($StoreSql) {
+        $edR = Set-PimInstallEditionSetting -Edition "$($cfg.edition)" -Sql $StoreSql
+        Write-Host "    install edition: $($edR.reason)" -ForegroundColor $(if ($edR.ok) { 'DarkGray' } else { 'Yellow' })
+        if (-not $edR.ok) { $editionNote = " (the install edition was not recorded, so the licence is not requested by itself: $($edR.reason) -- run the installation again with -Resume)" }
+    }
 }
+if ($community) { Emit 'licence' 'skipped' 'the Community edition has no licence -- a licence can be added later in PIM Manager > Settings > Licence' }
+else { Emit 'licence' 'warning' "no licence yet: $licenceHint$editionNote" 'After the installation:' 'PIM Manager > Settings > Licence' }
 
 # PIM REQUIREMENTS 100.116 (framework 4.1b): a named Support app also gets its STANDING database access here -- member of
 # the SQL admin group + its own database user (from its client id) in db_owner -- while this install can still reach the
@@ -840,7 +668,7 @@ if ($SigninFront -or -not $azSeam) {
     $sfOnStep = { param($Id, $State, $Message) Emit $Id $State $Message; if ("$State" -in 'ok', 'skipped') { Mark $Id } }
     $sfArgs = @{ SubscriptionId = $cfg.subscriptionId; ResourceGroup = $names.resourceGroup; TenantId = $cfg.tenantId; Location = $cfg.location
                  ManagerApp = $names.managerApp; AcrName = $names.acr; SqlDatabase = $names.sqlDatabase; KeyVaultName = $names.keyVault
-                 RepoRoot = (Split-Path -Parent (Split-Path -Parent $sol)); UpdateJob = $names.updateJob; Done = @($sfDone)
+                 RepoRoot = (Split-Path -Parent (Split-Path -Parent $sol)); SolutionRoot = $sol; UpdateJob = $names.updateJob; Done = @($sfDone)
                  StateFile = (Join-Path $StatePath 'signin-front-rollback.json') }
     if (-not $SigninFront) {
         $SigninFront = { param([hashtable]$A, [scriptblock]$OnStep)
@@ -871,7 +699,7 @@ $vArgs = @{ Role = 'Single'; TenantId = $cfg.tenantId; SubscriptionId = $cfg.sub
             SqlDatabase = $names.sqlDatabase; ManagerApp = $names.managerApp; EnvName = $names.environment; AcrName = $names.acr
             TickJobName = $names.tickJob; UpdateJobName = $names.updateJob   # CR5: the names this install was made with
             SuperAdmins = @("$($deployArgs['ManagerSuperAdmins'])" -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-            AlertRecipients = @($cfg.alertRecipients); LicenceExpected = (-not $community); SetupHostRuleOwner = 'this'; UseSignedInAccount = $true; ResumeCommand = $resumeCmd
+            AlertRecipients = @($cfg.alertRecipients); LicenceExpected = $false; LicenceLater = $licenceLater; SetupHostRuleOwner = 'this'; UseSignedInAccount = $true; ResumeCommand = $resumeCmd
             OutFile = (Join-Path $StatePath 'verify-install.json') }
 if ($deployArgs.Contains('UpdateRing')) { $vArgs['UpdateRing'] = [int]$deployArgs['UpdateRing'] }
 if ($deployArgs.Contains('UpdateSource')) { $vArgs['UpdateSource'] = "$($deployArgs['UpdateSource'])" }
@@ -919,10 +747,8 @@ if ("$($script:who.objectId)".Trim() -and -not "$($script:who.supportAppId)".Tri
     if ($relR) { Write-Host "    SQL admin group: $($relR.reason)" -ForegroundColor $(if ($relR.ok) { 'DarkGray' } else { 'Yellow' }) }
 }
 
-}   # end: not a managed-tenant install (2c ran the managed-tenant build instead of 3 - 4b)
-
 Emit 'health-check' 'started'
-$healthy = if ($managedInstall) { [int]$mspCode -eq 0 } else { ("$($summary.status)" -eq 'success') -and [bool]$summary.healthy }
+$healthy = ("$($summary.status)" -eq 'success') -and [bool]$summary.healthy
 $warnings = @($events | Where-Object { $_.state -eq 'warning' } | ForEach-Object { $_.step.id } | Select-Object -Unique)
 if ($healthy -and -not $warnings.Count) { Emit 'health-check' 'ok' 'the PIM Manager is deployed and healthy' }
 elseif ($healthy) { Emit 'health-check' 'warning' "deployed and healthy; still waiting for: $($warnings -join ', ')" }
@@ -943,7 +769,11 @@ $outputs = [ordered]@{
     portalUrl               = $(if ($fqdn) { "https://$fqdn" } else { '' })
 }
 Mark 'completed'
-Emit 'completed' 'completed' $(if ($outputs.portalUrl) { "open the PIM Manager: $($outputs.portalUrl)" } else { 'installation complete' }) -Outputs $outputs
+# the end-of-install summary: a Pro / trial environment says what to do next, in the completed line and on the screen
+$doneMsg = $(if ($outputs.portalUrl) { "open the PIM Manager: $($outputs.portalUrl)" } else { 'installation complete' })
+if ($licenceLater) { $doneMsg += " -- next: $licenceHint" }
+Emit 'completed' 'completed' $doneMsg -Outputs $outputs
+if ($licenceLater) { Write-Host "    Next: $licenceHint. PIM Manager then registers itself with Invardia for its updates." -ForegroundColor Cyan }
 Finish 0
 } finally {
     # REQ 98.4 (b): a way out that did not pass Finish (a throw, an interrupted run) still closes this install's own SQL

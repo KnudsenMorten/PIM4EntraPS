@@ -2990,9 +2990,11 @@ See §17.7 for the full template/approval mechanics.
     application; never create a new one per run, and remove stale duplicate certificates.
   - **Across tenants.** A managed identity lives in one directory, so a managing tenant acting *into*
     a managed tenant (S5) uses a multi-tenant application with a credential (§27.4).
-  - Certificates or managed identity are the default everywhere. A **client secret** is accepted
-    only where a platform requires one — the Manager's Easy Auth sign-in registration (it grants
-    sign-in only), or a container engine deliberately configured to act as a named application.
+  - Certificates or managed identity are the default everywhere. The Manager's web sign-in has **no
+    client secret**: the sign-in front (§11, "Web sign-in") proves itself with its managed identity's
+    federated credential. A client secret is accepted only where a platform requires one — an
+    installation set up earlier with Easy Auth (until it is moved to the sign-in front), or a container
+    engine deliberately configured to act as a named application.
 - **Two permission sets, granted by setup, never widened by a re-run**
   (`tools/setup/_PimSetupShared.ps1`: `Get-PimGraphAppRoleMap -RoleSet Engine|Manager`, applied by
   `Grant-PimMiGraph`, which **throws** on a refused assignment rather than warning).
@@ -3489,9 +3491,9 @@ chosen at deploy time (`Invoke-PimDeployAll -Exposure external|internal`, defaul
 new deployments; §11.4):
 
 - **External (default)** — the Manager is reachable over the internet, always behind Entra sign-in
-  (Easy Auth), which the installation creates, enables and reads back before it completes. An
-  optional allow-list (`-EasyAuthAllowedPrincipals`) assigns named people/groups and switches the
-  app to *assignment required*. The container registry defaults to Basic.
+  through the sign-in front (below), which the installation creates, enables and reads back before
+  it completes. An optional allow-list assigns named people/groups and switches the app to
+  *assignment required*. The container registry defaults to Basic.
 - **Internal (private-only)** — the Manager is reachable only from the VNet and peered/GSA clients;
   SQL gets a private endpoint by default and the registry defaults to Premium (Basic has no network
   controls). Sign-in is still required.
@@ -3500,16 +3502,32 @@ An environment's exposure cannot be changed in place (it is a property of the Co
 environment); moving between them is a rebuild (`Rebuild-PimEnvExternal.ps1`, §27.7). The diagram
 below is the **private-only** reference topology.
 
+**Web sign-in: the sign-in front.** The Manager's web app runs two containers. The **sign-in front**
+is the only one the platform's ingress reaches; the Manager itself listens on the loopback address
+only, so nothing reaches it except through the front. The front signs the person in with Microsoft
+Entra (authorization-code flow with PKCE) and redeems the code with its **managed identity's federated
+credential** — there is no client secret and no certificate, and the front refuses to start if one is
+configured. The session is pinned to a fixed length (8 hours by default), never extended by activity.
+Each request reaches the Manager with the person's signed token (on a new installation an access
+token for the Manager's own API), and the Manager verifies that token itself (signature, issuer, audience, expiry) before it maps the person to a role;
+a token that belongs to an application rather than a person is refused. Sessions, the token cache and
+the encryption keys live in the installation's own SQL database, the keys wrapped by a key in the
+installation's Key Vault, so a restart or an update signs nobody out. The same security headers
+(content security policy, HSTS, no framing) are set on every response. The front is one shared,
+reviewed component used by every product of the family; PIM Manager builds it from source at the
+version it pins, and the public release carries that source (`vendor/signin-front`, kept identical
+to the shared original and scanned so that it holds no secret, identifier or host name).
+
 ### 11.1 Single-tenant topology
 
 ```
    INTERNET ─────────────► ✖  private-only variant: no public endpoint (publicNetworkAccess = Disabled)
 
  ┌──────────────────────── Entra ID  (customer tenant) ───────────────────────────┐
- │  • Easy Auth (interactive sign-in)   • App reg / SPN (app-only, cert in KV)      │
+ │  • sign-in front (interactive sign-in) • App reg / SPN (app-only, cert in KV)    │
  │  • the PIM roles, groups, AUs this manager governs                               │
  └────────────────▲───────────────────────────────────────────▲────────────────────┘
-        user sign-in │ (Easy Auth)              Graph/ARM REST  │ (app-only, PIM-Rest, no modules)
+        user sign-in │ (sign-in front)          Graph/ARM REST  │ (app-only, PIM-Rest, no modules)
                      │                                          │
  ┌───────────────────┴──── VNet  <platform-vnet> <address>   ───┴────────────────────┐
  │   ADMIN ACCESS BY LEVEL (private, from trusted subnets only)                        │
@@ -3522,7 +3540,7 @@ below is the **private-only** reference topology.
  │     remote admin ─ VPN / Bastion into the VNet ──────┘                       internal│
  │                                                          App identity:        env)      │
  │                                                          • system MI (passwordless)   │
- │                                                          • Easy Auth principal → RBAC  │
+ │                                                          • signed-in person → RBAC     │
  │                                                            SuperAdmin/Admin/Reader     │
  │                                                            + portal-admins scoped      │
  │                                                                 │ VNet integration     │
@@ -3537,15 +3555,15 @@ below is the **private-only** reference topology.
  └────────────────────────────────────────────────────────────────────────────────────┘
         ACR (container image, MI pull)        (no Key Vault: the identities are managed identities)
 ```
-> A container install has **no Key Vault** (verified in code 2026-10-04). The `vaultcore.azure.net` private
-> DNS zone in the diagram is a leftover of an earlier design. The one Key Vault in the product is the MSP
-> managing tenant's, for its non-exportable baseline-signing key.
+> A container install has **one Key Vault**, for the sign-in front: it holds only the key that wraps the
+> front's session encryption keys (the identities are managed identities, so no credential is stored).
+> The MSP managing tenant's Key Vault additionally holds its non-exportable baseline-signing key.
 
 **Access levels (defense in depth, all private):**
 1. **Network** — only the mgmt / PAW-tier0 / SAW-tier1 subnets (or VPN/Bastion)
    can reach the app's private endpoint; the internet cannot.
-2. **Identity** — Easy Auth (Entra) forces sign-in; unauthenticated → redirect to
-   login.
+2. **Identity** — the sign-in front (Entra) forces sign-in; unauthenticated → redirect
+   to login; the Manager verifies the token it receives itself.
 3. **Authorization** — the manager maps the signed-in principal to SuperAdmin /
    Admin / Reader, and **portal-admins** are delegated managers scoped by tier,
    level, service and scope (helpdesk L2 sees only its AU-scoped groups).
@@ -4134,8 +4152,8 @@ customer values are baked into the scripts — every environment value is a para
 PIM Manager deploys in one of **two modes**. They share one engine (REST-only,
 no PowerShell modules), one SQL data model, and one identity model: **managed identity**
 where the engine is hosted in Azure, an **engine application authenticating with a
-certificate** elsewhere (§7, §27) — never device-code; a client secret only where a platform
-requires one (the Easy Auth sign-in registration). The mode only changes *where it runs* and
+certificate** elsewhere (§7, §27) — never device-code; no client secret for the web sign-in (the
+sign-in front uses its managed identity's federated credential). The mode only changes *where it runs* and
 *how it is wired up*.
 
 | | Community mode (S2, this edition) | Subscription mode |

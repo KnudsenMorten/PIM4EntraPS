@@ -4,48 +4,49 @@
 <#
 .SYNOPSIS
   Install PIM Manager with one command: download the public PIM Manager release into a new folder, check the download, and run its guided installer (Install-PimManager) with the parameters you give.
-  INSTALL-SAMPLES (owner 2026-10-29: "samples to install interactive is missing ... so i am loosing business").
+  Two short lines: line 1 downloads this file from the public release, line 2 runs the install with your values.
 
 .DESCRIPTION
-  The ONE file a person downloads to install PIM Manager (https://invardia.com/support/pim/Start-PimManagerInstall.ps1).
-  Line 1 downloads it, line 2 runs it (see the examples). It:
-    1. reads the public release from GitHub (the latest, or -Version), and downloads its zip into a NEW, empty folder in
+  The ONE file a person downloads to install PIM Manager. It is a file of the public PIM Manager release on GitHub:
+  line 1 downloads it, line 2 runs it with your values (see the examples). It:
+    1. checks that this file is the one published with its release -- a difference stops here, nothing is installed;
+    2. reads the public release from GitHub (the latest, or -Version), and downloads its zip into a NEW, empty folder in
        the temp folder;
-    2. computes the SHA-256 of the download and, when the release publishes one for the zip, compares the two -- a
-       difference stops here, the folder is removed and nothing is installed;
-    3. unpacks it and runs tools/setup/Install-PimManager.ps1 FROM that folder with exactly the parameters you gave (the
+    3. checks the download against the release -- a difference stops here, the folder is removed and nothing is installed;
+    4. unpacks it and runs tools/setup/Install-PimManager.ps1 FROM that folder with exactly the parameters you gave (the
        same parameters as Install-PimManager; its help has the details), and ends with its exit code;
-    4. prints where the files are. -Resume uses that folder again (no new download); the folder is remembered per tenant
+    5. prints where the files are. -Resume uses that folder again (no new download); the folder is remembered per tenant
        and subscription in the temp folder. When it is gone (a new Cloud Shell session), -Resume downloads the release
        again -- the installation's own progress is kept in its state folder, so it still continues where it stopped.
   -ReleasePath <folder> runs the installer from a release you already have (nothing is downloaded).
 
-  Browser sign-in (your own administrator account): no Azure CLI, no PowerShell modules, no secret, no certificate.
-  PowerShell 7 (Azure Cloud Shell, or PowerShell 7 on Windows, macOS or Linux). Only -TenantId and -SubscriptionId are
-  needed; without a licence file or an enrollment key it installs PIM Manager Community (free). Several tenants (MSP)
-  are PIM Manager Pro through Invardia's managed-tenant installation, not this command.
+  Browser sign-in (your own administrator account): no Azure CLI, no PowerShell modules, no secret, no certificate, no
+  key and no licence in the command. PowerShell 7 (Azure Cloud Shell, or PowerShell 7 on Windows, macOS or Linux). Only
+  -TenantId and -SubscriptionId are needed; that installs PIM Manager Community (free). -Edition Pro installs the same
+  way with the Pro updater, without a licence: afterwards you sign in to PIM Manager and add your licence in Settings >
+  Licence. Several tenants (MSP) are set up with the managing-tenant build, not this command.
 
   Exit codes: those of Install-PimManager (0 done, 1 a step failed -- fix it and -Resume, 2 a check failed -- nothing was
-  changed, 3 bad answers -- nothing was changed); 3 also when the release cannot be read or the download does not match.
+  changed, 3 bad answers -- nothing was changed); 3 also when the release cannot be read or a check of the download fails.
 
 .EXAMPLE
-  Invoke-WebRequest https://invardia.com/support/pim/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
+  Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
   .\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>'
   The most common: PIM Manager Community in your own subscription, signed in in the browser, every other answer a default.
 .EXAMPLE
-  Invoke-WebRequest https://invardia.com/support/pim/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
+  Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
   .\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -WhatIf
   To see the plan first: the checks run, then every step the installation would take is printed, and nothing is changed.
 .EXAMPLE
-  Invoke-WebRequest https://invardia.com/support/pim/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
+  Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
   .\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -Location westeurope -ResourceGroup rg-pim-manager -SuperAdmins 'admin1@contoso.com','admin2@contoso.com' -AlertRecipients 'pim-alerts@contoso.com'
   When you choose the region and the resource group yourself, and name the PIM Manager administrators and who gets the alerts.
 .EXAMPLE
-  Invoke-WebRequest https://invardia.com/support/pim/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
-  .\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -EnrollmentKey '<enrollment key>'
-  Pro or a trial: the same, plus the enrollment key from Invardia's portal or your trial mail (or -LicencePath <your licence file> instead).
+  Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
+  .\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -Edition Pro
+  Pro or a trial: the same installation with the Pro updater; afterwards sign in to PIM Manager and add your licence in Settings > Licence.
 .EXAMPLE
-  Invoke-WebRequest https://invardia.com/support/pim/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
+  Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
   .\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -Resume
   After a stop: run the same command with -Resume; the downloaded release is used again and finished steps are skipped.
 
@@ -54,9 +55,9 @@
     PowerShell: 7.0 or later (pwsh; Azure Cloud Shell has it). Windows PowerShell 5.1 is not supported.
     Role: Owner on the target subscription (Azure); Privileged Role Administrator and Application Administrator
           (Microsoft Entra); Exchange Administrator only for the mail sender (optional).
-    Hosts: api.github.com, github.com, objects.githubusercontent.com (the release); then the installer's:
-           login.microsoftonline.com, management.azure.com, graph.microsoft.com, *.database.windows.net (port 1433),
-           *.azurecr.io, outlook.office365.com (mail sender), invardia.com (only with an enrollment key)
+    Hosts: github.com, api.github.com, objects.githubusercontent.com, release-assets.githubusercontent.com (the release);
+           then the installer's: login.microsoftonline.com, management.azure.com, graph.microsoft.com,
+           *.database.windows.net (port 1433), *.azurecr.io, outlook.office365.com (mail sender)
 
   Reads: the release metadata at api.github.com (public, no sign-in) and the release zip it names. Writes: a new folder
   in the temp folder (the zip and its unpacked files) and a small note there with that folder's path; everything else is
@@ -75,22 +76,22 @@ param(
     [string[]]$SuperAdmins = @(),
     [string[]]$AlertRecipients = @(),
     [string]$MailSender = '',
+    [string[]]$PortalUsers = @(),
+    [switch]$AllowAllMembers,
     [string]$VnetAddressPrefix = '',
     [string]$SubnetAddressPrefix = '',
     [string]$Exposure = '',
     [ValidateSet('', 'Community', 'Trial', 'Pro')][string]$Edition = '',
+    [ValidateSet('', '2', '3')][string]$UpdateRing = '',
+    [string]$KeyVaultName = '',
+    [switch]$EngineAzureRootUserAccessAdmin,
     [string]$InstallId = '',
     [string]$SupportAppId = '',
     [ValidateSet('', 'troubleshoot', 'setup', 'asbuilt')][string]$SupportAccess = '',
-    [string]$LicencePath = '',
-    [string]$EnrollmentKey = '',
-    [string]$ConfigPath = '',
     [scriptblock]$Reporter,
     [string]$StatePath = '',
     [switch]$Resume,
     [switch]$PreflightOnly,
-    [string]$InvardiaBaseUrl = '',
-    [int]$EnrollmentTimeoutSeconds = 0,
     # --- this launcher's own ---
     # the release to install (e.g. 3.0.5); default: the latest public release
     [string]$Version = '',
@@ -99,7 +100,8 @@ param(
     # --- test seams (offline tests/Test-PimGuidedInstall.ps1 + the -WhatIf case); omit them for a real install ---
     [scriptblock]$GetRelease,
     [scriptblock]$Download,
-    [scriptblock]$RunInstaller
+    [scriptblock]$RunInstaller,
+    [string]$TestSelfVersion = ''
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')     # framework 12.7: the version line + the transcript (inlined in the published file)
@@ -107,6 +109,7 @@ $null = Start-PimScriptRun -Script 'Start-PimManagerInstall'
 $launchCode = 0
 try {
     $pimRepo = 'KnudsenMorten/PIM4EntraPS'
+    $selfAsset = 'Start-PimManagerInstall.ps1'
     if ($PSVersionTable.PSVersion.Major -lt 7) { Write-Host 'This runs best in PowerShell 7 (Azure Cloud Shell, or pwsh on your machine).' -ForegroundColor Yellow }
     if (-not $GetRelease) {
         $GetRelease = { param([string]$Url) Invoke-RestMethod -Method GET -Uri $Url -Headers @{ Accept = 'application/vnd.github+json'; 'User-Agent' = 'PIM-Manager-Installer' } -TimeoutSec 60 }
@@ -124,8 +127,10 @@ try {
         $fs = [IO.File]::OpenRead($Path)
         try { return (-join ($sha.ComputeHash($fs) | ForEach-Object { $_.ToString('x2') })) } finally { $fs.Dispose(); $sha.Dispose() }
     }
-    # the folder note: one per tenant + subscription (or answers file), so -Resume finds the release it downloaded
-    $noteKeySrc = if ("$TenantId".Trim() -and "$SubscriptionId".Trim()) { ("{0}|{1}" -f "$TenantId".Trim(), "$SubscriptionId".Trim()).ToLowerInvariant() } elseif ("$ConfigPath".Trim()) { "$ConfigPath".Trim().ToLowerInvariant() } else { 'default' }
+    $publishedSha = { param($Asset) if ("$($Asset.digest)" -match '^(?i)sha256:([0-9a-f]{64})$') { $Matches[1].ToLowerInvariant() } else { '' } }
+    $releaseUrl = { param([string]$Ver) if ("$Ver".Trim()) { "https://api.github.com/repos/$pimRepo/releases/tags/v$("$Ver".Trim().TrimStart('v'))" } else { "https://api.github.com/repos/$pimRepo/releases/latest" } }
+    # the folder note: one per tenant + subscription, so -Resume finds the release it downloaded
+    $noteKeySrc = if ("$TenantId".Trim() -and "$SubscriptionId".Trim()) { ("{0}|{1}" -f "$TenantId".Trim(), "$SubscriptionId".Trim()).ToLowerInvariant() } else { 'default' }
     $sha0 = [System.Security.Cryptography.SHA256]::Create()
     try { $noteKey = -join ($sha0.ComputeHash([Text.Encoding]::UTF8.GetBytes($noteKeySrc))[0..5] | ForEach-Object { $_.ToString('x2') }) } finally { $sha0.Dispose() }
     $notePath = Join-Path $tempRoot "pim-manager-install-$noteKey.json"
@@ -140,6 +145,22 @@ try {
 
     # one pass; a stop on the way sets $launchCode and leaves it with 'break' (the exit code is set after the transcript closes)
     do {
+    # ---------------------------------------------------------------- 0. this file is the one its release publishes
+    # A downloaded copy carries the release version it was published with; a copy run from a release folder or the source
+    # tree carries none and is already part of that tree. -ReleasePath downloads nothing, so it is not checked here.
+    $selfVer = if ("$TestSelfVersion".Trim()) { "$TestSelfVersion".Trim() } else { "$($script:PimScriptDocVersion)".Trim() }
+    if ($selfVer -and -not "$ReleasePath".Trim()) {
+        $selfRel = $null
+        try { $selfRel = & $GetRelease (& $releaseUrl $selfVer) } catch { $selfRel = $null; Write-Verbose "$($_.Exception.Message)" }
+        if (-not $selfRel) { Write-Host "The PIM Manager release $selfVer could not be read from GitHub. Check the network and run the command again." -ForegroundColor Red; $launchCode = 3; break }
+        $selfPub = & $publishedSha (@(@($selfRel.assets) | Where-Object { "$($_.name)" -eq $selfAsset }) | Select-Object -First 1)
+        if (-not $selfPub -or (& $sha256Hex $PSCommandPath) -ne $selfPub) {
+            Write-Host "This copy of $selfAsset is not the one published with PIM Manager release $selfVer. Nothing was installed. Download it again with the first line of the command, then run it again." -ForegroundColor Red
+            $launchCode = 3; break
+        }
+        Write-Host "$selfAsset matches the one published with release $selfVer"
+    }
+
     # ---------------------------------------------------------------- 1. the release folder: given, remembered, or new
     $tree = ''
     if ("$ReleasePath".Trim()) {
@@ -155,14 +176,15 @@ try {
         if (-not $tree) { Write-Host 'Resume: the release folder of the first run is not there any more, so the release is downloaded again. The installation keeps its own progress, so it still continues where it stopped.' -ForegroundColor Yellow }
     }
     if (-not $tree) {
-        $relUrl = if ("$Version".Trim()) { "https://api.github.com/repos/$pimRepo/releases/tags/v$("$Version".Trim().TrimStart('v'))" } else { "https://api.github.com/repos/$pimRepo/releases/latest" }
+        $relUrl = & $releaseUrl $Version
         $rel = $null
         try { $rel = & $GetRelease $relUrl } catch { $rel = $null; Write-Verbose "$($_.Exception.Message)" }
         if (-not $rel) { Write-Host "The PIM Manager release could not be read from GitHub ($relUrl). Check the network and run the command again." -ForegroundColor Red; $launchCode = 3; break }
         $relVer = "$($rel.tag_name)".Trim().TrimStart('v')
         $asset = @(@($rel.assets) | Where-Object { "$($_.name)" -match '^PIM4EntraPS-v[0-9][0-9A-Za-z.+-]*\.zip$' }) | Select-Object -First 1
         if (-not $asset -or -not "$($asset.browser_download_url)".Trim()) { Write-Host "The release $relVer has no PIM Manager zip to download." -ForegroundColor Red; $launchCode = 3; break }
-        $published = if ("$($asset.digest)" -match '^(?i)sha256:([0-9a-f]{64})$') { $Matches[1].ToLowerInvariant() } else { '' }
+        $published = & $publishedSha $asset
+        if (-not $published) { Write-Host "The release $relVer does not publish the checksum of its zip, so it cannot be checked. Nothing was installed." -ForegroundColor Red; $launchCode = 3; break }
         $dir = Join-Path $tempRoot ("pim-manager-release-{0}-{1}" -f $relVer, [guid]::NewGuid().ToString('N').Substring(0, 6))
         [void][IO.Directory]::CreateDirectory($dir)
         $zip = Join-Path $dir 'release.zip'
@@ -170,12 +192,12 @@ try {
         try { & $Download "$($asset.browser_download_url)" $zip } catch { Write-Verbose "$($_.Exception.Message)" }
         if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { Write-Host 'The download did not complete. Check the network and run the command again.' -ForegroundColor Red; try { [IO.Directory]::Delete($dir, $true) } catch { }; $launchCode = 3; break }
         $got = & $sha256Hex $zip
-        if ($published -and $got -ne $published) {
+        if ($got -ne $published) {
             Write-Host "The download does not match the SHA-256 the release publishes ($published; the download has $got). Nothing was installed; the folder is removed. Run the command again." -ForegroundColor Red
             try { [IO.Directory]::Delete($dir, $true) } catch { }
             $launchCode = 3; break
         }
-        Write-Host $(if ($published) { "SHA-256 $got -- matches the SHA-256 the release publishes" } else { "SHA-256 $got" })
+        Write-Host "SHA-256 $got -- matches the SHA-256 the release publishes"
         $unpack = Join-Path $dir 'release'
         if (-not ('System.IO.Compression.ZipFile' -as [type])) { Add-Type -AssemblyName System.IO.Compression.FileSystem }
         [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $unpack)
@@ -193,7 +215,7 @@ try {
 
     # ---------------------------------------------------------------- 2. run the installer from the release, same parameters
     $pass = @{}
-    foreach ($k in @('TenantId', 'SubscriptionId', 'Location', 'ResourceGroup', 'SuperAdmins', 'AlertRecipients', 'MailSender', 'VnetAddressPrefix', 'SubnetAddressPrefix', 'Exposure', 'Edition', 'InstallId', 'SupportAppId', 'SupportAccess', 'LicencePath', 'EnrollmentKey', 'ConfigPath', 'Reporter', 'StatePath', 'Resume', 'PreflightOnly', 'InvardiaBaseUrl', 'EnrollmentTimeoutSeconds')) {
+    foreach ($k in @('TenantId', 'SubscriptionId', 'Location', 'ResourceGroup', 'SuperAdmins', 'AlertRecipients', 'MailSender', 'PortalUsers', 'AllowAllMembers', 'VnetAddressPrefix', 'SubnetAddressPrefix', 'Exposure', 'Edition', 'UpdateRing', 'KeyVaultName', 'EngineAzureRootUserAccessAdmin', 'InstallId', 'SupportAppId', 'SupportAccess', 'Reporter', 'StatePath', 'Resume', 'PreflightOnly')) {
         if ($PSBoundParameters.ContainsKey($k)) { $pass[$k] = $PSBoundParameters[$k] }
     }
     if ($WhatIfPreference) { $pass['WhatIf'] = $true }

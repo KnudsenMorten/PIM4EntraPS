@@ -34,7 +34,7 @@ $script:PimImportNeverCopyExact = @(
     'ConvergenceState', 'EngineItemFailures', 'HybridWorkerHeartbeat', 'HybridAdSyncLive', 'HybridAdSyncLiveWatch',
     'RecalcSignature', 'RecalcEntitySignatures', 'CommitWatch', 'CommitOutcomes', 'AlertFeed', 'DriftAlertState', 'ApiKeys',
     'UplinkState', 'TelemetryInstallId', 'InvardiaInstallKey', 'InstallKeyClaimState', 'LicenceRequestState',
-    'LicenceRequestToken', 'InstallId', 'EditionUpgrade', 'RfaSettings', 'UnmanagedAdmins', 'AzResPolicyMassHold',
+    'LicenceRequestToken', 'InstallId', 'InstallEdition', 'EditionUpgrade', 'RfaSettings', 'UnmanagedAdmins', 'AzResPolicyMassHold',
     'AzResPolicyMassChangeApproval', 'GroupsPolicyMassHold', 'RemoveRowAbsentSeen', 'TenantCacheState', 'RingOrder',
     'GroupsPolicyMassChangeApproval', 'EntraRolePolicyMassHold', 'EntraRolePolicyMassChangeApproval',   # CODE REVIEW 2 (2026-10-13)
     'EnvironmentName',  # this environment's own display name ("Contoso (test)") -- never carried to another one

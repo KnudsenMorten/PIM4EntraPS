@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.17 -- 2026-11-02
+
+- Trial and Pro installs ask Invardia for their licence by themselves right after the install (no approval needed for a trial); install with two lines, every setting a parameter, no answer file; the public release carries the sign-in front source; time-limited support database access with the customer's consent (SEC-92); the support job shows its end time in UTC on PowerShell 7
+
 ## 3.0.16 -- 2026-11-02
 
 - Security and scripts. Every script published for customers now needs PowerShell 7 and lists its requirements: the role you need and the addresses it reaches (three named scripts that run in Windows PowerShell say why). The hybrid worker checks the signature and checksum of the PIM release on its first install too. The cloud updater takes its updates from the signed update service unless another source is chosen on purpose. The local PIM Manager opens with a one-time link. Access-request API keys and applications can be limited to named groups. Where a person must sign in, an application token is refused. The script PIM writes for a hub owner runs on its own again. More AI-assistant tools are listed in the public reference. The sign-in component is version 1.4.4.

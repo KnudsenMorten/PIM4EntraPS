@@ -54,8 +54,10 @@
                                           PRIVATE, given by a one-time job inside the install's own environment (created,
                                           run once, removed); nothing is opened. The customer runs it.
       Start-PimManagerInstall.ps1      -- INSTALL-SAMPLES (owner 2026-10-29): install PIM Manager with one command --
-                                          download the public release, check its SHA-256 against the one the release
-                                          publishes (when it does), run its Install-PimManager with the same parameters.
+                                          check itself and the release zip against the public release, download it, run
+                                          its Install-PimManager with the same parameters. ONE-LINE-INSTALL (2026-11-02):
+                                          the built file is ALSO a release asset of the public GitHub release, under this
+                                          stable name (line 1 downloads it from .../releases/latest/download/).
                                           Built with NO dot-source left (BUILD-NO-OPTIONAL-LOADS).
 
     SCRIPT-DOC-1 (framework 12.7) + framework 12.10 item 11 ("scripts are big concern"), 2026-10-09:

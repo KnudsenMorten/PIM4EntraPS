@@ -43,19 +43,20 @@ PIM Manager gives you **one governed model in your own tenant**:
 
 You need **PowerShell 7** and an account that is **Owner of the Azure subscription** and **Privileged Role
 Administrator** in Entra ID. You sign in in your browser: no app secret, no certificate, no Azure CLI and no PowerShell
-modules. Line 1 downloads the installer, line 2 runs it. Open a new PowerShell 7 window for each.
+modules. Line 1 downloads the installer from the public release on GitHub, line 2 runs it with your values -- there is
+no key, licence or settings file in the command. Open a new PowerShell 7 window for each.
 
 **1. The most common: Community, browser sign-in, everything else defaulted.** Start here.
 
 ```powershell
-Invoke-WebRequest https://invardia.com/support/pim/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
+Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
 .\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>'
 ```
 
 **2. See the plan first.** Checks your sign-in, rights, subscription and region and lists every step. Changes nothing.
 
 ```powershell
-Invoke-WebRequest https://invardia.com/support/pim/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
+Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
 .\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -WhatIf
 ```
 
@@ -63,17 +64,18 @@ Invoke-WebRequest https://invardia.com/support/pim/Start-PimManagerInstall.ps1 -
 mailbox.
 
 ```powershell
-Invoke-WebRequest https://invardia.com/support/pim/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
+Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
 .\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -Location westeurope `
     -ResourceGroup rg-pim-manager -SuperAdmins 'admin1@contoso.com','admin2@contoso.com' -AlertRecipients 'pim-alerts@contoso.com'
 ```
 
-**4. Pro, or a free 60-day Pro trial.** The same command plus the enrollment key from your Invardia portal or trial
-mail ([start a trial](https://invardia.com/trial/)); with a licence file, use `-LicencePath <file>` instead.
+**4. Pro, or a free 60-day Pro trial.** The same command plus `-Edition Pro`. When the installation is done, sign in to
+PIM Manager and add your licence in **Settings > Licence** ([start a trial](https://invardia.com/trial/)); the Pro
+features switch on with it.
 
 ```powershell
-Invoke-WebRequest https://invardia.com/support/pim/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
-.\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -EnrollmentKey '<enrollment key>'
+Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
+.\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -Edition Pro
 ```
 
 **5. It stopped -- carry on.** Fix what the installer named, then run the same command with `-Resume`: finished steps

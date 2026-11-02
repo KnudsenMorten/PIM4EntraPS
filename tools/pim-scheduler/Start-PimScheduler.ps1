@@ -196,6 +196,8 @@ if (Test-Path -LiteralPath "$shared\..\coverage\PIM-Coverage.ps1") { . "$shared\
 # §95.3: job 'uplink' -- status telemetry to Invardia (OFF unless 'telemetry.uplink'); the framework client is a pinned copy.
 . "$shared\AitUplink.framework.ps1"
 . "$shared\PIM-Uplink.ps1"
+# SEC-92 ALIGN (framework SECAUDIT-1a): the uplink cycle sweeps ended time-limited support grants (the marker on the Support app's database user).
+. "$shared\PIM-SupportJit.ps1"
 # PIM 100.10 (framework 8.7 UPLINK-SETUP): the setup report + the control list (one source with Home) + the ring resolver.
 . "$shared\PIM-UplinkSetup.ps1"
 # Framework 12.1 Phase C: the 15-minute expedite check the tick calls (inert while Invardia has no such route).

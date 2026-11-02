@@ -23,6 +23,8 @@
 # --- the constants (Invardia confirmed 2026-10-09: page = <base><Script>/ with a trailing slash; index = <base>) -------
 $script:PimScriptDocBaseUrl     = 'https://invardia.com/docs/pim/scripts/'
 $script:PimSupportScriptBaseUrl = 'https://invardia.com/support/pim/'
+# ONE-LINE-INSTALL (owner 2026-11-02): the installer launcher is a file of the public release (a release asset)
+$script:PimInstallReleaseDownloadBase = 'https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/'
 $script:PimSupportScriptSumsUrl = 'https://invardia.com/support/pim/SHA256SUMS.txt'
 
 # --- the version the banner names (REQUIREMENTS 100.52, owner 2026-10-10: "do you provide the version in all scripts, so i
@@ -98,9 +100,13 @@ function Get-PimScriptDocUrl {
 }
 
 function Get-PimSupportScriptUrl {
-    # PURE. The published standalone copy: <support base><Script>.ps1.
+    # PURE. The published standalone copy: <support base><Script>.ps1 -- except the installer launcher, which is a file of
+    # the public GitHub release itself (ONE-LINE-INSTALL, owner 2026-11-02: line 1 downloads it from the release, never
+    # from invardia.com), under a stable name so .../releases/latest/download/<name> always answers.
     param([Parameter(Mandatory)][string]$Script)
-    return ($script:PimSupportScriptBaseUrl + (Get-PimScriptDocName -Script $Script) + '.ps1')
+    $name = Get-PimScriptDocName -Script $Script
+    if ($name -eq 'Start-PimManagerInstall') { return "$script:PimInstallReleaseDownloadBase$name.ps1" }
+    return ($script:PimSupportScriptBaseUrl + $name + '.ps1')
 }
 
 function Get-PimSupportScriptCommand {

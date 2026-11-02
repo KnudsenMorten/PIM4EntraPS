@@ -2303,6 +2303,9 @@ function Add-PimUplinkStateFields {
 #           member list hides the service principals the caller cannot read -- that produced a false alarm on 2026-10-18.
 #   dbUser  a database principal whose SID is the Support app's client id (SID form), in db_owner.
 # DETECT + ALERT ONLY (owner decision): nothing here adds or removes anything; healedUtc is ALWAYS null (Invardia repairs).
+# SEC-92 ALIGN (framework SECAUDIT-1a 4c): the ONE exception is the job's separate SWEEP (Invoke-PimSupportJitSweep, through the
+# SIGNED procedure): it takes back only roles a time-limited grant ADDED whose marker has passed its end -- never the standing
+# access, never the user.
 # null = not determined (a read error, no right to see it) -- never a guess, never false on doubt.
 # Every read is the engine's own identity, already granted: Graph reads, one ARM read, one SQL scalar. No new right.
 # ---------------------------------------------------------------------------------------------------------------------
@@ -2416,17 +2419,32 @@ function Resolve-PimUplinkSupportGroupMember {
 }
 
 function New-PimUplinkSupportSqlAccessField {
-    <# PURE. The field: { group; dbUser; checkedUtc; healedUtc = null } -- only $true / $false / $null go through; healedUtc is ALWAYS null. #>
-    param([AllowNull()][object]$Group, [AllowNull()][object]$DbUser, [datetime]$CheckedUtc = [datetime]::UtcNow)
+    <#
+      PURE. The field: { group; dbUser; [readOnly]; [jitOpen]; [jitUntil]; checkedUtc; healedUtc = null } -- only $true / $false /
+      $null go through for group / dbUser; healedUtc is ALWAYS null. SEC-92 ALIGN (framework SECAUDIT-1a, Invardia accepts them):
+      the OPTIONAL fields go on ONLY when known, after dbUser, in this order --
+        readOnly  the Support app's database user is in the standing read-only role (db_datareader)
+        jitOpen   a time-limited admin grant is still recorded on a database user after this cycle's sweep (open, or past its
+                  end and NOT taken back -- jitUntil then lies before checkedUtc, which is how Invardia sees a stuck revoke)
+        jitUntil  the latest end among them (yyyy-MM-ddTHH:mm:ssZ); only with jitOpen = true
+    #>
+    param([AllowNull()][object]$Group, [AllowNull()][object]$DbUser, [datetime]$CheckedUtc = [datetime]::UtcNow,
+          [AllowNull()][object]$ReadOnly = $null, [AllowNull()][object]$JitOpen = $null, [AllowNull()][string]$JitUntil = '')
     $b = { param($v) if ($v -is [bool]) { [bool]$v } else { $null } }
-    return [pscustomobject][ordered]@{ group = (& $b $Group); dbUser = (& $b $DbUser)
-                                       checkedUtc = $CheckedUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); healedUtc = $null }
+    $o = [ordered]@{ group = (& $b $Group); dbUser = (& $b $DbUser) }
+    if ($ReadOnly -is [bool]) { $o['readOnly'] = [bool]$ReadOnly }
+    if ($JitOpen -is [bool]) {
+        $o['jitOpen'] = [bool]$JitOpen
+        if ($JitOpen -and "$JitUntil" -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$') { $o['jitUntil'] = "$JitUntil" }
+    }
+    $o['checkedUtc'] = $CheckedUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); $o['healedUtc'] = $null
+    return [pscustomobject]$o
 }
 
 function Test-PimUplinkSupportSqlAccessJson {
-    <# PURE. Is the record's JSON text carrying supportSqlAccess EXACTLY in the agreed shape? #>
+    <# PURE. Is the record's JSON text carrying supportSqlAccess EXACTLY in the agreed shape (the optional fields only in their place)? #>
     param([AllowNull()][string]$Text)
-    return [bool]("$Text" -match '"supportSqlAccess":\{"group":(true|false|null),"dbUser":(true|false|null),"checkedUtc":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z","healedUtc":null\}')
+    return [bool]("$Text" -match '"supportSqlAccess":\{"group":(true|false|null),"dbUser":(true|false|null)(,"readOnly":(true|false))?(,"jitOpen":(true|false)(,"jitUntil":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")?)?,"checkedUtc":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z","healedUtc":null\}')
 }
 
 function Add-PimUplinkSupportSqlAccessField {
@@ -2455,15 +2473,25 @@ function Get-PimUplinkSupportSqlAccess {
         -Sql   { param($Query) }                  ONE scalar from the PIM database; $null = not read
         -ServerPath   /subscriptions/../providers/Microsoft.Sql/servers/<name> ('' = the administrator is not read)
         -GroupName    the install's SQL admin group (customer-settable; default grp-pim-sql-admins)
+        -JitState     SEC-92 ALIGN: the support access state after this run's sweep (Get-PimSupportJitState through the SIGNED
+                      read procedure, engine/_shared/PIM-SupportJit.ps1) -> readOnly / jitOpen / jitUntil. Not read / not
+                      installed / $null =
+                      the optional fields stay off the heartbeat (not known).
     #>
     param([AllowNull()][scriptblock]$Graph, [AllowNull()][scriptblock]$Arm, [AllowNull()][scriptblock]$Sql,
           [string]$ServerPath = '', [string]$GroupName = 'grp-pim-sql-admins', [string]$DbUserName = (Get-PimUplinkSupportDbUserDefaultName),
-          [datetime]$NowUtc = [datetime]::UtcNow, [int]$BudgetSec = (Get-PimUplinkSupportSqlAccessBudgetSec))
+          [datetime]$NowUtc = [datetime]::UtcNow, [int]$BudgetSec = (Get-PimUplinkSupportSqlAccessBudgetSec), [AllowNull()][object]$JitState = $null)
     $reasons = New-Object System.Collections.Generic.List[string]
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $inTime = { $sw.Elapsed.TotalSeconds -lt $BudgetSec }
     $first = { param($e) (("$($e.Exception.Message)" -split "`n")[0]).Trim() }
     $group = $null; $dbUser = $null
+    $readOnly = $null; $jitOpen = $null; $jitUntil = ''
+    if ($JitState -and $JitState.installed -eq $false) { $jitOpen = $false }   # not set up on this install: nothing can be open (readOnly / jitUntil not sent)
+    elseif ($JitState -and $JitState.read -and $JitState.installed) {
+        if ($JitState.readOnly -is [bool]) { $readOnly = [bool]$JitState.readOnly }
+        if ($JitState.jitOpen -is [bool]) { $jitOpen = [bool]$JitState.jitOpen; $jitUntil = "$($JitState.jitUntil)" }
+    }
     try {
         # 1. the Support app's service principal(s): by its tag, else by its name (apps made before the tag)
         $sps = @(); $spsKnown = $false
@@ -2528,7 +2556,7 @@ function Get-PimUplinkSupportSqlAccess {
         $group = $gr.value; if ($null -eq $group -or -not $group) { $reasons.Add("group: $($gr.reason)") }
     } catch { $reasons.Add("the check stopped: $(& $first $_)") }
     if (-not (& $inTime)) { $reasons.Add("the check took longer than $BudgetSec s -- what was not read is null") }
-    return @{ field = (New-PimUplinkSupportSqlAccessField -Group $group -DbUser $dbUser -CheckedUtc $NowUtc); reasons = @($reasons.ToArray()) }
+    return @{ field = (New-PimUplinkSupportSqlAccessField -Group $group -DbUser $dbUser -CheckedUtc $NowUtc -ReadOnly $readOnly -JitOpen $jitOpen -JitUntil $jitUntil); reasons = @($reasons.ToArray()) }
 }
 
 function Get-PimUplinkSqlServerPath {
@@ -3466,9 +3494,23 @@ function Invoke-PimUplinkJob {
     # invoked by the cycle ONLY when the identified heartbeat is due. The engine's OWN identity (Invoke-PimRest: the managed
     # identity in a container), the PIM database connection this job already uses -- no new right. Time-bounded: no retry on
     # 429 / 5xx, each call at most 15 s (twice on a timeout), the whole check at most Get-PimUplinkSupportSqlAccessBudgetSec.
+    # SEC-92 ALIGN (framework SECAUDIT-1a 4c): EVERY run of this job SWEEPS -- every time-limited support grant past its end
+    # is taken back through the SIGNED procedure (the engine needs EXECUTE only, never db_owner), audited (pim.AuditEvents,
+    # actor engine:uplink), LOUD when it cannot (a warning line + a WARNING run: the run report carries it to Invardia). The
+    # state after it (read-only access, open grants, opened / closed in 24 h, half-done grants) goes into this run's report
+    # and, on the identified heartbeat, into supportSqlAccess. An install without the support-session step: 'not installed'.
+    $jitSweep = $null; $jitState = $null
+    if ("$cs".Trim() -and (Get-Command Invoke-PimSupportJitSweep -ErrorAction SilentlyContinue) -and (Get-Command Invoke-PimSqlScalar -ErrorAction SilentlyContinue)) {
+        $jitQ = { param($q) Invoke-PimSqlScalar -ConnectionString $cs -Sql $q }
+        $jitAud = $null
+        if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) { $jitAud = { param($a) Write-PimAuditEvent -Action "$($a.action)" -Target "$($a.target)" -After $a -Result "$($a.result)" -Actor 'engine:uplink' } }
+        try { $jitSweep = Invoke-PimSupportJitSweep -Sql $jitQ -Source 'heartbeat' -Audit $jitAud -Quiet } catch { $jitSweep = $null; Write-Warning "[uplink] support access sweep stopped: $($_.Exception.Message)" }
+        try { $jitState = Get-PimSupportJitState -Sql $jitQ } catch { $jitState = $null }
+        if ($jitSweep) { foreach ($jw in @($jitSweep.problems)) { Write-Host "  [uplink] support access: $jw" -ForegroundColor Yellow } }
+    }
     $ssaSb = $null
     if ($on -and "$key".Trim() -and (Test-PimUplinkSupportSqlAccessOn) -and (Get-Command Invoke-PimRest -ErrorAction SilentlyContinue)) {
-        $ssaJobCs = $cs; $ssaJobNow = $NowUtc
+        $ssaJobCs = $cs; $ssaJobNow = $NowUtc; $ssaJobJit = $jitState
         $ssaJobGroup = 'grp-pim-sql-admins'
         try { if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { $ssaJobGroup = "$(Get-PimInstallName -Role sqlAdminGroup)".Trim() } elseif ("$($env:PIM_SQL_ADMIN_GROUP)".Trim()) { $ssaJobGroup = "$($env:PIM_SQL_ADMIN_GROUP)".Trim() } } catch { }
         if (-not $ssaJobGroup) { $ssaJobGroup = 'grp-pim-sql-admins' }
@@ -3480,7 +3522,7 @@ function Invoke-PimUplinkJob {
                 $global:PIM_RestTimeoutSec = 15
                 $ssaG = { param($M, $P, $B) Invoke-PimRest -Method $M -Url "https://graph.microsoft.com/v1.0$P" -Body $B -Resource 'graph' -MaxRetry 0 }
                 $ssaQ = $null; if (Get-Command Invoke-PimSqlScalar -ErrorAction SilentlyContinue) { $ssaQ = { param($q) Invoke-PimSqlScalar -ConnectionString $ssaJobCs -Sql $q } }
-                $ssaR = Get-PimUplinkSupportSqlAccess -Graph $ssaG -Arm $null -Sql $ssaQ -ServerPath '' -GroupName $ssaJobGroup -NowUtc $ssaJobNow
+                $ssaR = Get-PimUplinkSupportSqlAccess -Graph $ssaG -Arm $null -Sql $ssaQ -ServerPath '' -GroupName $ssaJobGroup -NowUtc $ssaJobNow -JitState $ssaJobJit
                 foreach ($ssaWhy in @($ssaR.reasons)) { Write-Host "  [uplink] supportSqlAccess: $ssaWhy" -ForegroundColor DarkGray }
                 $ssaR.field
             } finally { $global:PIM_RestTimeoutSec = $ssaJobPrevTo }
@@ -3499,6 +3541,14 @@ function Invoke-PimUplinkJob {
     $w = Get-PimUplinkDeliveryWarning -Enabled $on -Cycle $r -StoredKeyRaw $rawKey -ResolvedKey "$key" -LicenceRegistered $licReg -ClaimState $claimSt
     $detail = "uplink: $($r.message)"
     if ($w.warning) { $detail += " -- WARNING: $($w.reason)" }
+    # SEC-92 ALIGN: every open / close / sweep reaches Invardia in this run's report; one that needs a look is a WARNING run
+    if ($jitSweep -or $jitState) {
+        $detail += " -- $(Get-PimSupportJitStateSummary -Sweep $jitSweep -State $jitState)"
+        if (Test-PimSupportJitNeedsLook -Sweep $jitSweep -State $jitState) {
+            $w = [pscustomobject]@{ warning = $true; kind = $(if ($w.warning) { "$($w.kind)+support-access" } else { 'support-access' }); summary = $(if ($w.warning) { "$($w.summary); support access needs a look" } else { 'support access needs a look' }); reason = "$($w.reason)" }
+            $detail += ' -- WARNING: support access needs a look'
+        }
+    }
     [pscustomobject]@{ ran = [bool]$r.ran; whatIf = [bool]$WhatIf; detail = $detail
                        warning = [bool]$w.warning; warningKind = "$($w.kind)"; warningSummary = "$($w.summary)" }
 }

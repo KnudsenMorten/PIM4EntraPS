@@ -29,7 +29,14 @@
     -Logs  { param([string]$WorkspaceId, [string]$Execution) } the console lines of one execution (Log Analytics); may return none
   Defaults are functions that return a literal (a $script: variable is $null in a child script scope).
   Needs _PimScriptDoc.ps1 and _PimSupportSqlAccess.ps1 loaded first.
+
+  TIME-LIMITED ACCESS (framework SECAUDIT-1a 4b / 4c, PIM SEC-92): in mode grant the job gives the admin role only until
+  that time, records the end on the database user (the marker of engine/_shared/PIM-SupportJit.ps1), keeps running, and
+  takes the admin role back at that time ON ITS OWN -- no answer from Invardia, no person and no other job is needed for
+  the access to end. Every run of the job first SWEEPS: any grant whose end has passed is taken back before anything is
+  given. In mode standing the job gives the standing access exactly as before (SECAUDIT-1a item 4).
 #>
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-SupportJit.ps1')    # the marker, the grant, the revoke and the sweep
 
 function Get-PimSupportSqlJobDefaultName { return 'caj-pim-supportsql' }
 function Get-PimSupportSqlJobTemplateName { return 'ca-pim-dbinit' }
@@ -39,11 +46,20 @@ function Get-PimSupportSqlJobTagValue { return 'support-sql-access' }
 function Get-PimSupportSqlJobScriptName { return 'Invoke-PimSupportSqlAccessJob' }
 function Get-PimSupportSqlJobDefaultAppRoot { return '/app/PIM4EntraPS' }
 function Get-PimSupportSqlJobIdentitySetting { return 'PIM_DBINIT_MI_CLIENT_ID' }
+function Get-PimSupportSqlJobUntilTagName { return 'pim-support-until' }
 
 function Get-PimSupportSqlJobFunctionNames {
-    # PURE. The functions of _PimSupportSqlAccess.ps1 the job carries, in load order. Nothing else of that file runs inside.
+    # PURE. The functions the job carries, in load order: those of _PimSupportSqlAccess.ps1 (the standing grant) and those
+    # of engine/_shared/PIM-SupportJit.ps1 (the time-limited grant, the revoke and the sweep). Nothing else runs inside.
     return @('Get-PimSupportSqlUserDefaultName', 'Get-PimSupportSqlRoleName', 'ConvertTo-PimSupportSqlSid', 'Test-PimSupportSqlNames',
-             'Get-PimSupportSqlUserSql', 'Get-PimSupportSqlUserReadSql', 'ConvertFrom-PimSupportSqlUserRead', 'Invoke-PimSupportSqlUser')
+             'Get-PimSupportSqlUserSql', 'Get-PimSupportSqlUserReadSql', 'ConvertFrom-PimSupportSqlUserRead', 'Invoke-PimSupportSqlUser',
+             'Get-PimSupportJitSchemaName', 'Get-PimSupportJitVersionMark', 'Get-PimSupportJitSignerPrefix', 'Get-PimSupportJitProcedureNames',
+             'Get-PimSupportJitAdminRole', 'Get-PimSupportJitReadOnlyRole', 'Get-PimSupportJitDefaultHours', 'Get-PimSupportJitMaxHours',
+             'Get-PimSupportJitNotSetUpText', 'Get-PimSupportJitLevels', 'Get-PimSupportJitLowerLevel', 'Test-PimSupportJitUserName', 'ConvertTo-PimSupportJitText',
+             'Format-PimSupportJitUtc', 'ConvertFrom-PimSupportJitUtc', 'ConvertTo-PimSupportJitSqlText', 'Get-PimSupportJitTableSql',
+             'Get-PimSupportJitProcedureText', 'Get-PimSupportJitInstallBatches', 'Get-PimSupportJitInstallFactsSql', 'ConvertFrom-PimSupportJitAnswer',
+             'Get-PimSupportJitFirstLine', 'Test-PimSupportJitNotInstalled', 'Invoke-PimSupportJitGrant', 'Invoke-PimSupportJitRevoke',
+             'Invoke-PimSupportJitSweep', 'Get-PimSupportJitState', 'Get-PimSupportJitStateSummary', 'Test-PimSupportJitNeedsLook', 'Invoke-PimSupportJitInstall')
 }
 
 function ConvertTo-PimSupportSqlJobMap {
@@ -63,6 +79,16 @@ function Get-PimSupportSqlJobScript {
       Invoke-PimSupportSqlUser as the identity named in PIM_SUPPORTSQL_MI_CLIENT_ID, and ONE result line
       "[supportsql] RESULT {json}". Exit 0 only when the user and its role were READ BACK.
       state: created | role-added | unchanged (one read, no statement sent) | failed.
+      PIM_SUPPORTSQL_MODE (framework SECAUDIT-1a 4b / 4c; engine/_shared/PIM-SupportJit.ps1):
+        standing (default)  the standing access exactly as before
+        install             THE SUPPORT-SESSION STEP: consent (PIM_SUPPORTSQL_CONSENT_LEVEL), the read-only user, the
+                            signed procedures; read back. Needs an owner-level identity (the database setup job's).
+        grant               4b: usp_SupportGrant (PIM_SUPPORTSQL_JIT_LEVEL / _HOURS / _REASON / _TICKET / _OPENED_BY); for an
+                            owner grant the job stays, follows the end (a re-open moves it later) and at the end SWEEPS
+                            ("[supportsql] REVOKE {json}") -- never before the end. Exit 0 only when that sweep is clean.
+        close               support closed: every open marker closed now (only roles the grant added), sessions ended
+      Every mode but install first SWEEPS ("[supportsql] SWEEP {json}"); every open / close / revoke is audited
+      ("[supportsql] AUDIT {json}" + a row in the audit table when the image has the writer).
     #>
     param([string]$AppRoot = (Get-PimSupportSqlJobDefaultAppRoot))
     $root = "$AppRoot".Trim().TrimEnd('/')
@@ -101,13 +127,96 @@ try {
         $c.Open()
         try { $cmd = $c.CreateCommand(); $cmd.CommandText = $Query; $cmd.CommandTimeout = 120; return $cmd.ExecuteScalar() } finally { $c.Close() }
     }
-    $u = Invoke-PimSupportSqlUser -Sql $sql -AppId $appId -DbUserName $userName
-    $state = 'failed'
-    if ($u.ok) { if ($u.created) { $state = 'created' } elseif ($supportSql.calls -gt 1) { $state = 'role-added' } else { $state = 'unchanged' } }
-    $result = [ordered]@{ ok = [bool]$u.ok; state = $state; userName = "$($u.userName)"; role = "$($u.role)"; inRole = [bool]$u.inRole
-                          sid = (ConvertTo-PimSupportSqlSid -AppId $appId); statements = [int]$supportSql.calls; problem = "$($u.problem)" }
-    Write-SupportSqlLine ('RESULT ' + ($result | ConvertTo-Json -Compress))
-    if ($u.ok) { $rc = 0 }
+    # every grant and every revoke is audited: a log line always, and a row in the audit table when the image has the writer
+    $jobAudit = {
+        param($Record)
+        Write-SupportSqlLine ('AUDIT ' + ($Record | ConvertTo-Json -Compress))
+        if (Get-Command Write-PimSqlAuditEvent -ErrorAction SilentlyContinue) {
+            Write-PimSqlAuditEvent -ConnectionString $supportSql.conn -Actor 'job:support-access' -ActorSource 'job' -Action "$($Record.action)" -Target "$($Record.target)" -After $Record -Result "$($Record.result)"
+        }
+    }
+    $sweepLine = {
+        param($S)
+        [ordered]@{ ok = [bool]$S.ok; installed = $S.installed; found = [int]$S.found; revoked = @($S.revoked).Count; failed = @($S.failed).Count
+                    sessionsEnded = [int]$S.sessionsEnded; jitOpen = $S.jitOpen; jitUntil = "$($S.jitUntil)"; problems = @($S.problems) }
+    }
+    $mode = "$($env:PIM_SUPPORTSQL_MODE)".Trim().ToLowerInvariant()
+    if (-not $mode) { $mode = 'standing' }
+    if ($mode -notin @('standing', 'install', 'grant', 'close')) { throw "PIM_SUPPORTSQL_MODE '$mode' is not standing, install, grant or close -- nothing was changed" }
+    $sweepBad = $false; $sw0Line = $null
+    if ($mode -ne 'install') {
+        # ---- the sweep FIRST (framework SECAUDIT-1a 4c): every marker past its end is taken back before anything is given
+        $sw0 = Invoke-PimSupportJitSweep -Sql $sql -Source 'job' -Audit $jobAudit -Quiet
+        $sw0Line = & $sweepLine $sw0
+        Write-SupportSqlLine ('SWEEP ' + ($sw0Line | ConvertTo-Json -Compress))
+        if ($sw0.installed -eq $false) { Write-SupportSqlLine (Get-PimSupportJitNotSetUpText) }
+        $sweepBad = [bool](-not $sw0.ok)
+        $supportSql.calls = 0
+    }
+    if ($mode -eq 'install') {
+        # ---- THE SUPPORT-SESSION STEP (4c): consent, the standing read-only user, the signed procedures. Owner-level identity.
+        $consent = "$($env:PIM_SUPPORTSQL_CONSENT_LEVEL)".Trim().ToLowerInvariant()
+        $i = Invoke-PimSupportJitInstall -Sql $sql -SupportAppId $appId -ConsentLevel $consent -UserName $userName -SetBy "$($env:PIM_SUPPORTSQL_JIT_OPENED_BY)"
+        try { & $jobAudit ([pscustomobject][ordered]@{ action = 'support.access.install'; target = 'the support access procedures'; source = 'job'; consented = "$($i.consented)"; result = $(if ($i.ok) { 'ok' } else { 'failed' }); detail = (@($i.problems) -join '; ') }) }
+        catch { Write-SupportSqlLine ('WARNING the audit record of the installation could not be written: ' + ((("$($_.Exception.Message)" -split "`n")[0]).Trim())) }
+        $result = [ordered]@{ ok = [bool]$i.ok; state = $(if ($i.ok) { 'installed' } else { 'failed' }); mode = 'install'; consented = "$($i.consented)"; userName = $userName
+                              procedures = @($i.procedures); problem = (@($i.problems) -join '; ') }
+        Write-SupportSqlLine ('RESULT ' + ($result | ConvertTo-Json -Compress -Depth 4))
+        if ($i.ok) { $rc = 0 }
+    } elseif ($mode -eq 'close') {
+        # ---- support closed: every open marker is closed now (only roles the grant added), then the sessions end
+        $cl = Invoke-PimSupportJitRevoke -Sql $sql -Mode 'all' -Source 'job' -Audit $jobAudit -Quiet
+        $result = [ordered]@{ ok = [bool]($cl.ok -and -not $sweepBad); state = $(if ($cl.installed -eq $false) { 'not-installed' } elseif ($cl.ok) { 'closed' } else { 'failed' }); mode = 'close'
+                              closed = @($cl.revoked).Count; failed = @($cl.failed).Count; sessionsEnded = [int]$cl.sessionsEnded; problem = (@(@($sw0.problems) + @($cl.problems)) -join '; '); sweep = $sw0Line }
+        Write-SupportSqlLine ('RESULT ' + ($result | ConvertTo-Json -Compress -Depth 4))
+        if ($result.ok) { $rc = 0 }
+    } elseif ($mode -eq 'grant') {
+        # ---- 4b: the grant through the SIGNED procedure (the level = the LOWER of requested and consented), read back
+        $hours = 0; [void][int]::TryParse("$($env:PIM_SUPPORTSQL_JIT_HOURS)".Trim(), [ref]$hours)
+        $level = "$($env:PIM_SUPPORTSQL_JIT_LEVEL)".Trim().ToLowerInvariant(); if (-not $level) { $level = 'owner' }
+        if ($level -notin @('read', 'owner')) { throw "PIM_SUPPORTSQL_JIT_LEVEL '$level' is not read or owner -- nothing was given" }
+        $g = Invoke-PimSupportJitGrant -Sql $sql -Level $level -Hours $hours -Reason "$($env:PIM_SUPPORTSQL_JIT_REASON)" -Ticket "$($env:PIM_SUPPORTSQL_JIT_TICKET)" -OpenedBy "$($env:PIM_SUPPORTSQL_JIT_OPENED_BY)"
+        try { & $jobAudit ([pscustomobject][ordered]@{ action = 'support.access.open'; target = 'the Support app''s database user'; source = 'job'; level = "$($g.level)"; requested = "$($g.requested)"; consented = "$($g.consented)"
+                                                         grantId = "$($g.grantId)"; untilUtc = "$($g.untilUtc)"; result = $(if ($g.ok) { 'ok' } else { 'failed' }); detail = "$($g.problem)" }) }
+        catch { Write-SupportSqlLine ('WARNING the audit record of the grant could not be written: ' + ((("$($_.Exception.Message)" -split "`n")[0]).Trim())) }
+        $problem = "$($g.problem)"; if (-not $problem -and $sweepBad) { $problem = "the sweep before the grant: $(@($sw0.problems) -join '; ')" }
+        $result = [ordered]@{ ok = [bool]($g.ok -and -not $sweepBad); state = $(if (-not $g.ok) { 'failed' } elseif ($g.extended) { 'extended' } elseif ($g.level -eq 'owner' -and $g.preExisting) { 'pre-existing' } elseif ($g.level -eq 'owner') { 'granted' } else { 'read-only' })
+                              mode = 'grant'; level = "$($g.level)"; requested = "$($g.requested)"; consented = "$($g.consented)"; grantId = "$($g.grantId)"; untilUtc = "$($g.untilUtc)"
+                              role = (Get-PimSupportJitAdminRole); inRole = [bool]$g.inOwner; readOnly = [bool]$g.readOnly; installed = [bool]$g.installed; problem = $problem; sweep = $sw0Line }
+        Write-SupportSqlLine ('RESULT ' + ($result | ConvertTo-Json -Compress -Depth 4))
+        if ($g.ok -and $g.level -eq 'owner' -and $g.untilUtc) {
+            # ---- hold until the end, then SWEEP on this job's OWN schedule: no answer from Invardia, no person and no other
+            # job is needed for the access to end. Never before the end; a later end (a re-open) is followed.
+            $end = ConvertFrom-PimSupportJitUtc "$($g.untilUtc)"
+            Write-SupportSqlLine "WAIT the admin access ends at $(Format-PimSupportJitUtc -Utc $end); this job takes it back then"
+            while ($true) {
+                $nowW = [datetime]::UtcNow
+                $st = Get-PimSupportJitState -Sql $sql
+                if ($st.read) {
+                    if (-not $st.jitOpen) { Write-SupportSqlLine 'WAIT the admin access was already closed'; break }
+                    $u2 = ConvertFrom-PimSupportJitUtc "$($st.jitUntil)"
+                    if ($u2 -and $u2 -gt $end) { $end = $u2; Write-SupportSqlLine "WAIT the end was moved to $(Format-PimSupportJitUtc -Utc $end) (the support access was opened again)" }
+                } else { Write-SupportSqlLine "WAIT the support access could not be read ($($st.problem)) -- read again" }
+                # one second past the end: the stored end has whole seconds, the clock does not -- the sweep must find it due
+                if ($nowW -ge $end.AddSeconds(1)) { break }
+                Start-Sleep -Seconds ([int][Math]::Max(1, [Math]::Min(300, [Math]::Ceiling(($end.AddSeconds(1) - $nowW).TotalSeconds))))
+            }
+            $sw1 = Invoke-PimSupportJitSweep -Sql $sql -Source 'job' -Audit $jobAudit -Quiet
+            $sw1Line = & $sweepLine $sw1
+            Write-SupportSqlLine ('REVOKE ' + ($sw1Line | ConvertTo-Json -Compress))
+            if ($sw1.ok) { $rc = 0 }
+        } elseif ($result.ok) { $rc = 0 }
+    } else {
+        # ---- the standing access, exactly as before (framework SECAUDIT-1a item 4: today's access stays)
+        $u = Invoke-PimSupportSqlUser -Sql $sql -AppId $appId -DbUserName $userName
+        $state = 'failed'
+        if ($u.ok) { if ($u.created) { $state = 'created' } elseif ($supportSql.calls -gt 1) { $state = 'role-added' } else { $state = 'unchanged' } }
+        $problem = "$($u.problem)"; if (-not $problem -and $sweepBad) { $problem = "the sweep before the grant: $(@($sw0.problems) -join '; ')" }
+        $result = [ordered]@{ ok = [bool]($u.ok -and -not $sweepBad); state = $state; userName = "$($u.userName)"; role = "$($u.role)"; inRole = [bool]$u.inRole
+                              sid = (ConvertTo-PimSupportSqlSid -AppId $appId); statements = [int]$supportSql.calls; problem = $problem; sweep = $sw0Line }
+        Write-SupportSqlLine ('RESULT ' + ($result | ConvertTo-Json -Compress -Depth 4))
+        if ($result.ok) { $rc = 0 }
+    }
 } catch {
     $m = (("$($_.Exception.Message)" -split "`n")[0]).Trim()
     $failed = [ordered]@{ ok = $false; state = 'failed'; userName = ''; role = ''; inRole = $false; sid = ''; statements = 0; problem = $m }
@@ -119,6 +228,36 @@ exit $rc
     return ($l -join "`n")
 }
 
+function ConvertTo-PimSupportSqlJobCommand {
+    <#
+      PURE. The job's -EncodedCommand: a SMALL bootstrap that un-gzips the script and runs it. The script itself (the
+      standing grant, the signed-procedure install and the time-limited functions, word for word) is larger than one
+      container argument may be once it is UTF-16 + base64 (Linux: 131072 bytes per argument); gzipped it is a fraction.
+      The script still ends with "exit $rc", which ends the process with that code.
+    #>
+    param([Parameter(Mandatory)][string]$Script)
+    $raw = [Text.Encoding]::UTF8.GetBytes($Script)
+    $ms = New-Object System.IO.MemoryStream
+    $gz = New-Object System.IO.Compression.GZipStream($ms, [System.IO.Compression.CompressionMode]::Compress)
+    $gz.Write($raw, 0, $raw.Length); $gz.Close()
+    $packed = [Convert]::ToBase64String($ms.ToArray())
+    $boot = "`$b = [Convert]::FromBase64String('$packed'); `$m = New-Object System.IO.MemoryStream(,`$b); `$z = New-Object System.IO.Compression.GZipStream(`$m, [System.IO.Compression.CompressionMode]::Decompress); `$r = New-Object System.IO.StreamReader(`$z, [Text.Encoding]::UTF8); `$s = `$r.ReadToEnd(); `$r.Close(); . ([scriptblock]::Create(`$s))"
+    return [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($boot))
+}
+
+function ConvertFrom-PimSupportSqlJobCommand {
+    # PURE. The script inside a job's -EncodedCommand (the bootstrap of ConvertTo-PimSupportSqlJobCommand), or '' when it is not one.
+    param([AllowNull()][string]$Encoded)
+    try {
+        $boot = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String("$Encoded"))
+        if ($boot -notmatch "FromBase64String\('([A-Za-z0-9+/=]+)'\)") { return '' }
+        $ms = New-Object System.IO.MemoryStream(, [Convert]::FromBase64String($Matches[1]))
+        $gz = New-Object System.IO.Compression.GZipStream($ms, [System.IO.Compression.CompressionMode]::Decompress)
+        $sr = New-Object System.IO.StreamReader($gz, [Text.Encoding]::UTF8)
+        $s = $sr.ReadToEnd(); $sr.Close()
+        return $s
+    } catch { return '' }
+}
 function ConvertFrom-PimSupportSqlJobLog {
     # PURE. The console lines of the execution -> @{ lines (no blanks, no colour codes); result (the LAST RESULT line as an object, or $null) }.
     param([AllowNull()][string[]]$Lines)
@@ -129,6 +268,13 @@ function ConvertFrom-PimSupportSqlJobLog {
         if (-not $t.Trim()) { continue }
         $out.Add($t)
         if ($t -match '^\s*\[supportsql\] RESULT (\{.*\})\s*$') { try { $res = $Matches[1] | ConvertFrom-Json } catch { $res = $null } }
+    }
+    # PowerShell 7's ConvertFrom-Json turns an ISO date string into a [datetime], which then prints in the LOCAL format
+    # ("11/01/2026 18:00:00") -- the end time must stay the exact UTC text the job wrote (2026-11-02, release 3.0.17 gate).
+    if ($res) {
+        foreach ($p in @($res.PSObject.Properties)) {
+            if ($p.Value -is [datetime]) { $p.Value = $p.Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture) }
+        }
     }
     return @{ lines = @($out.ToArray()); result = $res }
 }
@@ -172,11 +318,26 @@ function Get-PimSupportSqlJobPlan {
         [Parameter(Mandatory)][string]$JobName,
         [Parameter(Mandatory)][string]$SupportAppId,
         [string]$DbUserName = (Get-PimSupportSqlUserDefaultName),
-        [string]$SqlIdentityClientId = ''
+        [string]$SqlIdentityClientId = '',
+        # framework SECAUDIT-1a 4b / 4c: standing (as before) | install (the support-session step) | grant | close
+        [ValidateSet('standing', 'install', 'grant', 'close')][string]$Mode = 'standing',
+        [int]$SupportHours = 0,
+        [string]$Level = 'owner',
+        [string]$ConsentLevel = '',
+        [string]$Reason = '',
+        [string]$TicketNumber = '',
+        [string]$OpenedBy = '',
+        [datetime]$NowUtc = [datetime]::UtcNow
     )
     $p = [ordered]@{ ok = $false; problem = ''; identityResourceId = ''; identityName = ''; identityClientId = ''; identitySource = ''; pullIdentities = @()
-                     sqlServer = ''; sqlDatabase = ''; image = ''; environmentId = ''; location = ''; appRoot = ''; script = ''; resource = $null }
+                     sqlServer = ''; sqlDatabase = ''; image = ''; environmentId = ''; location = ''; appRoot = ''; script = ''; resource = $null; untilUtc = '' }
     try {
+        if ($Mode -eq 'grant') {
+            if ($SupportHours -lt 1 -or $SupportHours -gt (Get-PimSupportJitMaxHours)) { $p.problem = "the support access may last 1 to $(Get-PimSupportJitMaxHours) hours (asked: $SupportHours)"; return [pscustomobject]$p }
+            if ("$Level" -notin @('read', 'owner')) { $p.problem = "the level '$Level' is not read or owner"; return [pscustomobject]$p }
+            $p.untilUtc = Format-PimSupportJitUtc -Utc $NowUtc.ToUniversalTime().AddHours($SupportHours)
+        }
+        if ($Mode -eq 'install' -and "$ConsentLevel" -notin @('none', 'read', 'owner')) { $p.problem = "the consent level '$ConsentLevel' is not none, read or owner"; return [pscustomobject]$p }
         if ("$JobName" -cnotmatch '^[a-z][a-z0-9-]{0,30}[a-z0-9]$') { $p.problem = "'$JobName' is not a job name (lower-case letters, digits and '-', at most 32 characters)"; return [pscustomobject]$p }
         if ("$JobName" -ieq "$TemplateJobName") { $p.problem = "the one-time job cannot have the name of the job it is copied from ('$TemplateJobName')"; return [pscustomobject]$p }
         [void](ConvertTo-PimSupportSqlSid -AppId $SupportAppId)
@@ -203,6 +364,11 @@ function Get-PimSupportSqlJobPlan {
         $setting = Get-PimSupportSqlJobIdentitySetting
         $cid = "$SqlIdentityClientId".Trim().ToLowerInvariant(); $src = 'named with -SqlIdentityClientId'
         if (-not $cid) { $cid = "$($envMap[$setting])".Trim().ToLowerInvariant(); $src = "the identity $TemplateJobName signs in to the database with (its setting $setting)" }
+        if (-not $cid -and $Mode -in @('grant', 'close')) {
+            # 4b: the grant job may run as the ENGINE identity (-TemplateJobName <the engine job>): the signed procedures need
+            # no owner right, only EXECUTE. Its identity is the one the engine job names for itself.
+            foreach ($es in @('AZURE_CLIENT_ID', 'PIM_ManagedIdentityClientId')) { if ("$($envMap[$es])".Trim()) { $cid = "$($envMap[$es])".Trim().ToLowerInvariant(); $src = "the identity $TemplateJobName runs as (its setting $es)"; break } }
+        }
         $ua = ConvertTo-PimSupportSqlJobMap $(if ($Template.identity) { $Template.identity.userAssignedIdentities } else { $null })
         if ($cid -notmatch '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$') {
             $carried = @(@($ua.Keys) | ForEach-Object { "$(("$_" -split '/')[-1]) (client id $("$($ua[$_].clientId)".Trim()))" })
@@ -246,7 +412,7 @@ function Get-PimSupportSqlJobPlan {
         foreach ($a in @($c.args)) { if ("$a" -match '^(?<root>[A-Za-z0-9_./:~ -]+)/tools/pim-engine/[A-Za-z0-9_.-]+\.ps1$') { $root = $Matches['root']; break } }
         $p.appRoot = $root
         $p.script = Get-PimSupportSqlJobScript -AppRoot $root
-        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($p.script))
+        $encoded = ConvertTo-PimSupportSqlJobCommand -Script $p.script
 
         $envList = @(
             @{ name = 'PIM_SqlServer'; value = $p.sqlServer }
@@ -255,7 +421,25 @@ function Get-PimSupportSqlJobPlan {
             @{ name = 'PIM_SUPPORTSQL_DB_USER'; value = "$DbUserName" }
             @{ name = 'PIM_SUPPORTSQL_MI_CLIENT_ID'; value = $cid }
         )
-        $cfg = [ordered]@{ triggerType = 'Manual'; replicaTimeout = 604800; replicaRetryLimit = 0; manualTriggerConfig = @{ parallelism = 1; replicaCompletionCount = 1 } }
+        $timeout = 604800
+        if ($Mode -ne 'standing') {
+            $envList += @(
+                @{ name = 'PIM_SUPPORTSQL_MODE'; value = $Mode }
+                @{ name = 'PIM_SUPPORTSQL_JIT_OPENED_BY'; value = (ConvertTo-PimSupportJitText -Text $OpenedBy -Max 120) }
+            )
+        }
+        if ($Mode -eq 'install') { $envList += @(@{ name = 'PIM_SUPPORTSQL_CONSENT_LEVEL'; value = "$ConsentLevel" }) }
+        if ($Mode -eq 'grant') {
+            # the job holds until the end and then takes the access back; the platform ends it at the latest an hour after
+            $envList += @(
+                @{ name = 'PIM_SUPPORTSQL_JIT_LEVEL'; value = "$Level" }
+                @{ name = 'PIM_SUPPORTSQL_JIT_HOURS'; value = "$([int]$SupportHours)" }
+                @{ name = 'PIM_SUPPORTSQL_JIT_REASON'; value = (ConvertTo-PimSupportJitText -Text $Reason -Max 120) }
+                @{ name = 'PIM_SUPPORTSQL_JIT_TICKET'; value = (ConvertTo-PimSupportJitText -Text $TicketNumber -Max 40) }
+            )
+            $timeout = ([int]$SupportHours * 3600) + 3600
+        }
+        $cfg = [ordered]@{ triggerType = 'Manual'; replicaTimeout = $timeout; replicaRetryLimit = 0; manualTriggerConfig = @{ parallelism = 1; replicaCompletionCount = 1 } }
         if ($regs.Count) { $cfg['registries'] = @($regs.ToArray()) }
         $props = [ordered]@{ environmentId = $p.environmentId }
         if ("$($Template.properties.workloadProfileName)".Trim()) { $props['workloadProfileName'] = "$($Template.properties.workloadProfileName)".Trim() }
@@ -269,6 +453,7 @@ function Get-PimSupportSqlJobPlan {
             resources = @{ cpu = 0.5; memory = '1.0Gi' }
         }) }
         $tags = @{}; $tags[(Get-PimSupportSqlJobTagName)] = (Get-PimSupportSqlJobTagValue)
+        if ($p.untilUtc) { $tags[(Get-PimSupportSqlJobUntilTagName)] = $p.untilUtc }
         $p.resource = [ordered]@{ location = $p.location; tags = $tags; identity = [ordered]@{ type = 'UserAssigned'; userAssignedIdentities = $uaBody }; properties = $props }
         $p.ok = $true
     } catch { $p.ok = $false; $p.problem = (("$($_.Exception.Message)" -split "`n")[0]).Trim() }
@@ -288,8 +473,13 @@ function Invoke-PimSupportSqlJobGrant {
         6. finally: remove the job and read back that it is gone -- also after a failed step
       PASS needs: the execution Succeeded (the job exits 0 only after it READ BACK the user and its role) and no result
       line that says otherwise. -WhatIfOnly: steps 1 and 2 are READ, the rest is printed. Nothing is written.
-      Never throws. Returns { ok; exit (0 done, 1 not done); whatIf; plan; leftover; jobCreated; jobRemoved; execution;
-      status; logLines; result; warnings; problems }.
+      TIME-LIMITED (-Mode grant -SupportHours, SECAUDIT-1a): the job keeps running until that end and takes the access back by
+      itself, so this run waits only for the job's RESULT line (the grant, read back by the job) and then LEAVES the job
+      running until it has done that. A leftover that still holds a time-limited access (its tag
+      pim-support-until is in the future) is removed only by another time-limited run, whose job then takes over the
+      later of the two ends; a standing run stops instead.
+      Never throws. Returns { ok; exit (0 done, 1 not done); whatIf; plan; leftover; jobCreated; jobRemoved; jobKept;
+      execution; status; logLines; result; warnings; problems }.
     #>
     param(
         [Parameter(Mandatory)][scriptblock]$Arm,
@@ -307,9 +497,18 @@ function Invoke-PimSupportSqlJobGrant {
         [int]$LogWaitSeconds = 180,
         [int]$ReadBackTries = 30,
         [scriptblock]$Sleep = { param([int]$Seconds) Start-Sleep -Seconds $Seconds },
+        [ValidateSet('standing', 'install', 'grant', 'close')][string]$Mode = 'standing',
+        [int]$SupportHours = 0,
+        [string]$Level = 'owner',
+        [string]$ConsentLevel = '',
+        [string]$Reason = '',
+        [string]$TicketNumber = '',
+        [string]$OpenedBy = '',
+        [datetime]$NowUtc = [datetime]::UtcNow,
         [switch]$WhatIfOnly
     )
     $api = Get-PimSupportSqlJobAcaApi
+    $jit = ($Mode -eq 'grant')
     $role = Get-PimSupportSqlRoleName
     $tagName = Get-PimSupportSqlJobTagName; $tagValue = Get-PimSupportSqlJobTagValue
     $rgPath = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
@@ -318,7 +517,7 @@ function Invoke-PimSupportSqlJobGrant {
     $notFound = '(?i)HTTP 404\b|ResourceNotFound|was not found|NotFound'
     $warnings = New-Object System.Collections.Generic.List[string]
     $problems = New-Object System.Collections.Generic.List[string]
-    $res = [ordered]@{ ok = $false; exit = 1; whatIf = [bool]$WhatIfOnly; plan = $null; leftover = $false; jobCreated = $false; jobRemoved = $false
+    $res = [ordered]@{ ok = $false; exit = 1; whatIf = [bool]$WhatIfOnly; plan = $null; leftover = $false; jobCreated = $false; jobRemoved = $false; jobKept = $false
                        execution = ''; status = ''; logLines = @(); result = $null; warnings = @(); problems = @() }
     $say = { param([string]$m, [string]$c = 'Gray') Write-Host "  $m" -ForegroundColor $c }
     $first = { param($e) (("$($e.Exception.Message)" -split "`n")[0]).Trim() }
@@ -357,7 +556,8 @@ function Invoke-PimSupportSqlJobGrant {
         $problems.Add("this installation has no job '$TemplateJobName' in resource group '$ResourceGroup' (subscription $SubscriptionId). That job is where an installation with a private database keeps the identity that may create a database user from inside; without it this script has no identity it may use, and it gives no identity a new right. Nothing was changed.`n  $options")
         return (& $finish)
     }
-    $plan = Get-PimSupportSqlJobPlan -Template $tpl -TemplateJobName $TemplateJobName -JobName $JobName -SupportAppId $SupportAppId -DbUserName $DbUserName -SqlIdentityClientId $SqlIdentityClientId
+    $plan = Get-PimSupportSqlJobPlan -Template $tpl -TemplateJobName $TemplateJobName -JobName $JobName -SupportAppId $SupportAppId -DbUserName $DbUserName -SqlIdentityClientId $SqlIdentityClientId `
+                -Mode $Mode -SupportHours $SupportHours -Level $Level -ConsentLevel $ConsentLevel -Reason $Reason -TicketNumber $TicketNumber -OpenedBy $OpenedBy -NowUtc $NowUtc
     $res.plan = $plan
     if (-not $plan.ok) { $problems.Add("$($plan.problem). Nothing was changed.`n  $options"); return (& $finish) }
     $sid = ConvertTo-PimSupportSqlSid -AppId $SupportAppId
@@ -373,6 +573,13 @@ function Invoke-PimSupportSqlJobGrant {
             $tags = ConvertTo-PimSupportSqlJobMap $old.tags
             if ("$($tags[$tagName])" -ne $tagValue) {
                 $problems.Add("a job named '$JobName' is already in resource group '$ResourceGroup' and was not made by this script (it does not carry the tag $tagName = $tagValue) -- it is not touched. Run again with -JobName <another name>. Nothing was changed.")
+                return (& $finish)
+            }
+            # a leftover that still holds a time-limited access is the job that takes it back: only a time-limited run may
+            # replace it (its job takes over the later end); a standing run leaves it as it is and stops
+            $oldUntil = ConvertFrom-PimSupportJitUtc -Value "$($tags[(Get-PimSupportSqlJobUntilTagName)])"
+            if ($oldUntil -and $oldUntil -gt $NowUtc.ToUniversalTime() -and -not $jit) {
+                $problems.Add("the job '$JobName' is running a time-limited support access that ends at $(Format-PimSupportJitUtc -Utc $oldUntil) and takes it back then -- it is not touched. Run again after that time. Nothing was changed.")
                 return (& $finish)
             }
             $res.leftover = $true
@@ -393,8 +600,22 @@ function Invoke-PimSupportSqlJobGrant {
     if ($WhatIfOnly) {
         if ($res.leftover) { Write-Host "What if: remove the job '$JobName' a killed run of this script left behind (it carries the tag $tagName = $tagValue)" }
         Write-Host "What if: create the one-time job '$JobName' in the environment $(($plan.environmentId -split '/')[-1]), running as $($plan.identityName), with the tag $tagName = $tagValue"
-        Write-Host "What if: start it once. In the database $($plan.sqlDatabase) it creates the user [$DbUserName] from the Support app's client id (SID $sid) when no user has that id, and adds it to $role; an existing user of the Support app is reused whatever its name, and nothing is sent when it is already in $role"
-        Write-Host "What if: read the execution's result and its log lines, then remove the job '$JobName' and read back that it is gone"
+        if ($Mode -eq 'install') {
+            Write-Host "What if: start it once. In the database $($plan.sqlDatabase) it records the customer's consent level '$ConsentLevel' for the Support app (SID $sid), gives the Support app's user [$DbUserName] read-only access, and installs the signed support access procedures (they take no user as a parameter); then it reads all of it back"
+            Write-Host "What if: read the execution's result and its log lines, then remove the job '$JobName' and read back that it is gone"
+        } elseif ($Mode -eq 'close') {
+            Write-Host "What if: start it once. It first takes back any time-limited support access whose end has passed"
+            Write-Host "What if: in the database $($plan.sqlDatabase) it closes every open time-limited support access now: the roles the grant added are taken back, the Support app's open sessions end, the read-only access stays"
+            Write-Host "What if: read the execution's result and its log lines, then remove the job '$JobName' and read back that it is gone"
+        } elseif ($jit) {
+            Write-Host "What if: start it once. It first takes back any time-limited support access whose end has passed"
+            Write-Host "What if: in the database $($plan.sqlDatabase) it asks for level '$Level' for $SupportHours hour(s); the level given is the lower of that and the customer's consent; for $role the end ($($plan.untilUtc)) is recorded with the role; a role the user held before is never taken away"
+            Write-Host "What if: read the job's result, then leave the job running: at $($plan.untilUtc) it takes $role back by itself (the read-only access stays) and ends"
+        } else {
+            Write-Host "What if: start it once. It first takes back any time-limited support access whose end has passed"
+            Write-Host "What if: in the database $($plan.sqlDatabase) it creates the user [$DbUserName] from the Support app's client id (SID $sid) when no user has that id, and adds it to $role; an existing user of the Support app is reused whatever its name, and nothing is sent when it is already in $role"
+            Write-Host "What if: read the execution's result and its log lines, then remove the job '$JobName' and read back that it is gone"
+        }
         Write-Host 'What if: the script the job would run (built from the same functions Grant-PimSupportSqlAccess.ps1 uses):'
         foreach ($line in @($plan.script -split "`n")) { Write-Host "    | $($line.TrimEnd())" }
         return (& $finish)
@@ -422,7 +643,7 @@ function Invoke-PimSupportSqlJobGrant {
                 & $Sleep $PollSeconds
             }
             if ($state -ne 'Succeeded') { throw "the job '$JobName' was not created (state: $state)" }
-            & $say "created: the one-time job '$JobName' (running as $($plan.identityName); removed again at the end)" 'Yellow'
+            & $say "created: the one-time job '$JobName' (running as $($plan.identityName); $(if ($jit) { "it ends after it has taken the access back at $($plan.untilUtc)" } else { 'removed again at the end' }))" 'Yellow'
 
             # ---- 4. start it once and wait
             $started = & $Arm 'POST' "${jobPath}/start?api-version=$api" @{}
@@ -432,18 +653,25 @@ function Invoke-PimSupportSqlJobGrant {
             & $say "started: execution $exec -- waiting (at most $TimeoutSeconds seconds)"
             $tries = [Math]::Max(1, [int][Math]::Ceiling($TimeoutSeconds / [double][Math]::Max(1, $PollSeconds)))
             $status = ''; $lastErr = ''
+            # time-limited: the job keeps running until the end, so the wait is for its RESULT line, read while it runs
+            $ws = ''; $jitLines = @(); $jitRefused = 0
+            if ($jit -and $Logs) { try { $envObj = & $get $plan.environmentId; if ($envObj) { $ws = "$($envObj.properties.appLogsConfiguration.logAnalyticsConfiguration.customerId)".Trim() } } catch { $ws = '' } }
             for ($i = 0; $i -lt $tries; $i++) {
                 & $Sleep $PollSeconds
                 try { $x = & $get "$jobPath/executions/$exec"; $status = if ($x) { "$($x.properties.status)".Trim() } else { '' } } catch { $lastErr = & $first $_ }
                 if ($status -in $final) { break }
+                if ($jit -and $ws -and $jitRefused -lt 2) {
+                    try { $jitLines = @(& $Logs $ws $exec | ForEach-Object { "$_" }); $jitRefused = 0 } catch { $jitLines = @(); $jitRefused++ }
+                    if (@($jitLines | Where-Object { $_ -match '\[supportsql\] RESULT ' }).Count) { break }
+                }
             }
             $res.status = $status
 
             # ---- 5. the console lines (they reach the workspace late; a missing log never turns a result around)
             $lines = @()
-            if ($Logs -and $status -in $final) {
-                $ws = ''
-                try { $envObj = & $get $plan.environmentId; if ($envObj) { $ws = "$($envObj.properties.appLogsConfiguration.logAnalyticsConfiguration.customerId)".Trim() } } catch { $ws = '' }
+            if ($jit -and $status -notin $final) { $lines = @($jitLines) }
+            elseif ($Logs -and $status -in $final) {
+                if (-not $ws) { try { $envObj = & $get $plan.environmentId; if ($envObj) { $ws = "$($envObj.properties.appLogsConfiguration.logAnalyticsConfiguration.customerId)".Trim() } } catch { $ws = '' } }
                 if ($ws) {
                     $ltries = [Math]::Max(1, [int][Math]::Ceiling($LogWaitSeconds / 20.0))
                     $refused = 0
@@ -462,7 +690,30 @@ function Invoke-PimSupportSqlJobGrant {
 
             # ---- the verdict
             $r = $log.result
-            if ($status -eq 'Succeeded' -and $r -and -not [bool]$r.ok) {
+            $revokeLine = @($log.lines | Where-Object { $_ -match '\[supportsql\] REVOKE \{' }) | Select-Object -Last 1
+            if ($jit -and $status -notin $final) {
+                # the job holds the time-limited access and takes it back at the end by itself: it is NOT stopped or removed
+                $res.jobKept = $true
+                if ($r -and [bool]$r.ok) {
+                    if ("$($r.state)" -eq 'read-only') {
+                        & $say "the level given is read-only (asked '$($r.requested)', consented '$($r.consented)'): nothing was added; the job ends by itself" 'Green'
+                    } elseif ("$($r.state)" -eq 'pre-existing') {
+                        & $say "the Support app's database user already held $role before this grant -- it is recorded until $($r.untilUtc) and is NOT taken away then" 'Green'
+                    } else {
+                        & $say "the Support app's database user (SID $sid): $role until $($r.untilUtc) (asked '$($r.requested)', consented '$($r.consented)')$(if ("$($r.state)" -eq 'extended') { ' -- an open access was extended to the later end' }); read-only access kept (read back by the job)" 'Green'
+                        & $say "the job '$JobName' keeps running and takes $role back at $($r.untilUtc) by itself; the read-only access stays" 'Green'
+                    }
+                } elseif ($r) {
+                    $problems.Add("the job's result line says the time-limited access was not put in place ($($r.problem)) -- treated as NOT done")
+                } else {
+                    $problems.Add("the job is running (execution $exec) but its result line could not be read within $TimeoutSeconds seconds, so the time-limited access is NOT confirmed. The job is left running: it takes back whatever it gave at $($plan.untilUtc) by itself.")
+                }
+            } elseif ($Mode -in @('install', 'close') -and $status -eq 'Succeeded' -and $r -and [bool]$r.ok) {
+                if ($Mode -eq 'install') { & $say "installed: the signed support access procedures (read back by the job: current, signed, private key removed, ALTER denied); consent '$($r.consented)'" 'Green' }
+                else { & $say "closed: $($r.closed) open support access grant(s) (only roles the grant added were taken back; $($r.sessionsEnded) session(s) ended)$(if ("$($r.state)" -eq 'not-installed') { ' -- the time-limited access is not installed here' })" 'Green' }
+            } elseif ($jit -and $status -eq 'Succeeded' -and $revokeLine) {
+                & $say "the job gave the time-limited access and has already taken it back (its end has passed): $($revokeLine.Trim())" 'Green'
+            } elseif ($status -eq 'Succeeded' -and $r -and -not [bool]$r.ok) {
                 $problems.Add("the execution $exec ended Succeeded but its result line says it did not put the user in place ($($r.problem)) -- treated as NOT done")
             } elseif ($status -eq 'Succeeded') {
                 if ($r) {
@@ -479,8 +730,11 @@ function Invoke-PimSupportSqlJobGrant {
             }
         } catch { $problems.Add("the step stopped: $(& $first $_)") }
     } finally {
-        # ---- 6. the job is removed and read back -- also after a failed step
-        if ($res.jobCreated) {
+        # ---- 6. the job is removed and read back -- also after a failed step. NOT while it holds a time-limited access:
+        # it takes that back at the end by itself and then ends.
+        if ($res.jobKept) {
+            $warnings.Add("the one-time job '$JobName' stays in resource group $ResourceGroup until $($plan.untilUtc): it takes the time-limited access back then and ends. The next run of this script removes it.")
+        } elseif ($res.jobCreated) {
             $left = & $remove
             if (-not $left) { $res.jobRemoved = $true; & $say "removed: the one-time job '$JobName' (read back: it is gone)" 'Green' }
             else { $problems.Add("the one-time job '$JobName' is STILL in resource group $ResourceGroup ($left). It carries the SQL admin identity and does nothing until it is started; remove it: Azure portal > resource group $ResourceGroup > $JobName > Delete -- or run this script again, which removes it first.") }

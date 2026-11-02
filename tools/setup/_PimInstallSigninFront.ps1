@@ -216,7 +216,10 @@ function Invoke-PimInstallSigninFront {
           [Parameter(Mandatory)][string]$Location, [Parameter(Mandatory)][string]$ManagerApp, [Parameter(Mandatory)][string]$AcrName,
           [Parameter(Mandatory)][string]$SqlDatabase, [Parameter(Mandatory)][string]$KeyVaultName, [Parameter(Mandatory)][string]$RepoRoot,
           [string]$UpdateJob = 'ca-pim-update', [string]$StateFile = '', [string[]]$Done = @(),
-          [scriptblock]$OnStep, [Parameter(Mandatory)][hashtable]$Io, [string]$WorkDir = ([IO.Path]::GetTempPath()))
+          [scriptblock]$OnStep, [Parameter(Mandatory)][hashtable]$Io, [string]$WorkDir = ([IO.Path]::GetTempPath()),
+          # PUB-FRONT (owner 2026-11-02): the solution folder itself -- a public release unpacks it as its root (no SOLUTIONS/)
+          [string]$SolutionRoot = '')
+    if (-not "$SolutionRoot".Trim()) { $SolutionRoot = Join-Path $RepoRoot 'SOLUTIONS\PIM4EntraPS' }
     $res = @{ ok = $false; failedStep = ''; reason = ''; completed = (New-Object System.Collections.Generic.List[string]); keyVaultId = ''; keyId = ''; upstreamScope = ''; frontImage = '' }
     $say = { param($id, $st, $msg) if ($OnStep) { try { & $OnStep $id $st $msg } catch { } } }
     $sleep = if ($Io.Sleep) { $Io.Sleep } else { { param($s) Start-Sleep -Seconds $s } }
@@ -327,7 +330,7 @@ function Invoke-PimInstallSigninFront {
 
         # ---- 4. the front image ------------------------------------------------------------------------------------------
         $step = 'signin-front-image'
-        $pin = "$(Get-PimSigninFrontPinnedVersion -SolutionRoot (Join-Path $RepoRoot 'SOLUTIONS\PIM4EntraPS'))".Trim()
+        $pin = "$(Get-PimSigninFrontPinnedVersion -SolutionRoot $SolutionRoot)".Trim()
         if (-not $pin) { throw 'this release pins no sign-in front version (tools/pim-manager/signin-front.version)' }
         $loginServer = "$("$AcrName".ToLowerInvariant()).azurecr.io"
         $frontImage = Get-PimSigninFrontImageRef -LoginServer $loginServer -Version $pin
@@ -340,7 +343,7 @@ function Invoke-PimInstallSigninFront {
             else {
                 $ctxFile = Join-Path $WorkDir ("signin-front-ctx-{0}.tar.gz" -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
                 try {
-                    $ctx = New-PimSigninFrontBuildContextFromFolder -RepoRoot $RepoRoot -OutFile $ctxFile
+                    $ctx = New-PimSigninFrontBuildContextFromFolder -RepoRoot $RepoRoot -SolutionRoot $SolutionRoot -OutFile $ctxFile
                     if (-not $ctx.ok) {
                         # a copy without the front's source: the move asks the install's updater to build it (one run)
                         $res.frontImage = ''

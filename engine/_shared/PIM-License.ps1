@@ -946,8 +946,17 @@ Function Get-PimLicenseApiBody {
     if ($PublicCertB64) { $ma['PublicCertB64'] = $PublicCertB64 }
     $m = Test-PimMspLicense @ma
     $pro = [bool](Test-PimLicenseIsProForTenant -License $lic -TenantId $TenantId).pro   # BUG-278: sku + tenant, as the gate
+    # ONE-LINE-INSTALL (owner 2026-11-02): a trial / Pro install is deployed WITHOUT a licence, with the Pro updater. Until the
+    # licence is added the card says so in one line (the update source the deploy / the updater recorded is Invardia's Pro feed).
+    $awaitingLicence = $false
+    if ("$($lic.Status)" -eq 'Missing' -and (Get-Command Get-PimSetting -ErrorAction SilentlyContinue)) {
+        try {
+            $usA = Get-PimSetting -Name 'UpdateState'; if ($usA -is [string]) { $usA = $usA | ConvertFrom-Json }
+            $awaitingLicence = [bool]($usA -and (@("$($usA.source)", "$($usA.configuredSource)") | Where-Object { "$_".Trim() -ieq 'invardia' }))
+        } catch { $awaitingLicence = $false }
+    }
     $statusText = switch ("$($lic.Status)") {
-        'Missing' { 'Community (free) -- no Pro licence installed' }
+        'Missing' { if ($awaitingLicence) { 'Pro installation -- no licence yet: add your licence here to switch on the Pro features' } else { 'Community (free) -- no Pro licence installed' } }
         'Valid'   { "Pro -- $($lic.Customer) -- valid until $($m.validTo)" }
         'Grace'   { "Pro (grace) -- $($lic.Customer) -- expired $($m.validTo), grace until $($m.graceUntil)" }
         default   { "Community (free) -- licence $($lic.Status): $($lic.Reason)" }
@@ -957,6 +966,7 @@ Function Get-PimLicenseApiBody {
     return [ordered]@{
         status       = "$($lic.Status)"
         statusText   = $statusText
+        awaitingLicence = $awaitingLicence
         edition      = $(if ($pro) { $script:PimProEditionName } else { $script:PimCommunityEditionName })
         # Framework §12.6: Pro Business (signed `limits`) | Pro Enterprise | Community; the limits as signed; the admin usage.
         dimension     = "$($usage.dimension)"

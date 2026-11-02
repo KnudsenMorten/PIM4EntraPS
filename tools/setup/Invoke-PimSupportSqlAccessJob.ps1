@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-  Gives the Invardia Support app its database user on a PIM Manager installation whose database is private (public network access off), from inside: a one-time job in the installation's own environment creates the user from the application's client id and adds it to the database owner role, the result is read back, and the job is removed. Nothing is opened; -WhatIf shows it first.
+  Gives the Invardia Support app its database user on a PIM Manager installation whose database is private (public network access off), from inside: a one-time job in the installation's own environment creates the user from the application's client id and adds it to the database owner role, the result is read back, and the job is removed. Nothing is opened; -WhatIf shows it first. With -SupportHours the database owner role is given for that many hours only (never above the level you consented to): the job stays, takes the role back at the end by itself, and the read-only access stays.
 
 .DESCRIPTION
   PIM REQUIREMENTS 100.116 (framework 4.1b). On an installation with a public database, Grant-PimSupportSqlAccess.ps1
@@ -27,6 +27,21 @@
     5. Waits for the execution, reads its result and its log lines, and prints PASS or FAIL with them.
     6. ALWAYS, also after a failed step: removes the one-time job and reads back that it is gone.
 
+  Time-limited access, in three steps:
+    -InstallSupportAccess -ConsentLevel none|read|owner  ONCE per installation (an owner-level step): records the level
+        you consent to, gives the Support app's database user read-only access, and installs the signed procedures that
+        give and take back the time-limited access. They take no user as a parameter: the Support app and your consent
+        level are read from a table only a database owner can change.
+    -SupportHours 1-24 [-Level owner|read]  opens it: the level given is the LOWER of the level asked and the level you
+        consented to; for the database owner role the end is recorded with the role. The job stays and takes the role
+        back at the end by itself, then ends the Support app's open database sessions; the read-only access stays.
+        Nothing is taken back before the end, and nothing else has to happen for the access to end. A role the Support
+        app held before is never taken away.
+    -CloseSupportAccess  ends every open time-limited access now.
+  Every run of the job first takes back any time-limited access whose end has passed, and so do the background jobs of
+  PIM Manager on their own schedule; each of them reports what it took back. When the access is opened, the script waits
+  for the job's result (read from its log lines) and leaves the job running; the next run of this script removes it.
+
   The statement the job runs is the one Grant-PimSupportSqlAccess.ps1 runs: the job's script is built from the same
   functions. The membership of the SQL admin group is not part of this script (it is given from outside the network).
 
@@ -42,6 +57,14 @@
 .EXAMPLE
   .\Invoke-PimSupportSqlAccessJob.ps1 -TenantId <tenant id> -SubscriptionId <subscription id> -ResourceGroup rg-pim -SupportAppId <Invardia Support app client id> -WhatIf
   Preview: reads everything, prints what it would do and the script the job would run. Then the same command without -WhatIf.
+
+.EXAMPLE
+  .\Invoke-PimSupportSqlAccessJob.ps1 -TenantId <tenant id> -SubscriptionId <subscription id> -ResourceGroup rg-pim -SupportAppId <Invardia Support app client id> -SupportHours 8 -TicketNumber 12345 -Reason 'database repair'
+  Time-limited: the database owner role for 8 hours, taken back by the job at the end.
+
+.EXAMPLE
+  .\Invoke-PimSupportSqlAccessJob.ps1 -TenantId <tenant id> -SubscriptionId <subscription id> -ResourceGroup rg-pim -SupportAppId <Invardia Support app client id> -InstallSupportAccess -ConsentLevel owner
+  Once per installation: records the consent level and installs the time-limited support access.
 
 .NOTES
   Requirements:
@@ -70,6 +93,18 @@ param(
     # only when the template job does not name its database identity itself: the client id of a user-assigned identity it already carries
     [ValidatePattern('^$|^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$SqlIdentityClientId = '',
     [ValidateRange(60, 3600)][int]$TimeoutSeconds = 600,
+    # time-limited access: the database owner role for this many hours (1-24), taken back by the job at the end; 0 = the standing access
+    [ValidateRange(0, 24)][int]$SupportHours = 0,
+    # with -SupportHours: the level asked (the level given is the lower of this and the consented level)
+    [ValidateSet('owner', 'read')][string]$Level = 'owner',
+    # with -SupportHours: why the access is opened, and the support ticket it belongs to (recorded with the end)
+    [ValidatePattern('^[A-Za-z0-9 ._@:#/()+,-]{0,120}$')][string]$Reason = '',
+    [ValidatePattern('^[A-Za-z0-9._#-]{0,40}$')][string]$TicketNumber = '',
+    # once per installation: record the consent level and install the time-limited support access
+    [switch]$InstallSupportAccess,
+    [ValidateSet('', 'none', 'read', 'owner')][string]$ConsentLevel = '',
+    # end every open time-limited support access now
+    [switch]$CloseSupportAccess,
     # --- test seams (tests/Test-PimSupportSqlJob.ps1); omit them for a real run ---
     [scriptblock]$Arm,
     [scriptblock]$Graph,
@@ -144,9 +179,23 @@ if (-not $Arm) { $Arm = { param([string]$Method = 'GET', [string]$Path, $Body) I
 if (-not $Graph) { $Graph = { param([string]$Method = 'GET', [string]$Path, $Body) Invoke-SsjRest -Base 'https://graph.microsoft.com/v1.0' -Resource 'https://graph.microsoft.com' -Method $Method -Path $Path -Body $Body } }
 if (-not $Logs) { $Logs = { param([string]$WorkspaceId, [string]$Execution) Get-SsjLogLines -WorkspaceId $WorkspaceId -Execution $Execution } }
 
-$whatIfOnly = -not $PSCmdlet.ShouldProcess("resource group $ResourceGroup", "create, run once and remove the job '$JobName', which gives the Invardia Support app $app its database user in db_owner from inside the installation")
+# ---- which step: the standing access (as before), the support-session install, open, or close ------------------------
+$steps = @(@($InstallSupportAccess, $CloseSupportAccess, ($SupportHours -gt 0)) | Where-Object { $_ })
+if ($steps.Count -gt 1) { throw 'Invoke-PimSupportSqlAccessJob: -InstallSupportAccess, -SupportHours and -CloseSupportAccess are separate steps -- pass one. Nothing was touched.' }
+$mode = if ($InstallSupportAccess) { 'install' } elseif ($CloseSupportAccess) { 'close' } elseif ($SupportHours -gt 0) { 'grant' } else { 'standing' }
+if ($mode -eq 'install' -and -not $ConsentLevel) { throw 'Invoke-PimSupportSqlAccessJob: -InstallSupportAccess needs -ConsentLevel none, read or owner (the level the customer consents to). Nothing was touched.' }
+if ($mode -eq 'grant') { Write-Host "  time-limited: level '$Level' for $SupportHours hour(s) (never above the consented level), taken back by the job at the end" -ForegroundColor DarkGray }
+$openedBy = if ($sessionApp) { "Invardia Support app $sessionApp" } elseif ($who -and "$($who.userName)".Trim()) { "$($who.userName)".Trim() } else { '' }
+$what = switch ($mode) {
+    'install' { "create, run once and remove the job '$JobName', which records the consent level '$ConsentLevel' for the Invardia Support app $app and installs the time-limited support access" }
+    'close'   { "create, run once and remove the job '$JobName', which ends every open time-limited support access" }
+    'grant'   { "create and start the job '$JobName', which gives the Invardia Support app $app level '$Level' (at most the consented level) for $SupportHours hour(s) and takes it back then" }
+    default   { "create, run once and remove the job '$JobName', which gives the Invardia Support app $app its database user in db_owner from inside the installation" }
+}
+$whatIfOnly = -not $PSCmdlet.ShouldProcess("resource group $ResourceGroup", $what)
 $ja = @{ Arm = $Arm; Graph = $Graph; Logs = $Logs; SubscriptionId = $sub; ResourceGroup = $ResourceGroup; SupportAppId = $app; TemplateJobName = $TemplateJobName; JobName = $JobName
-         DbUserName = $DbUserName; SqlIdentityClientId = $SqlIdentityClientId; TimeoutSeconds = $TimeoutSeconds; PollSeconds = $PollSeconds; LogWaitSeconds = $LogWaitSeconds; WhatIfOnly = $whatIfOnly }
+         DbUserName = $DbUserName; SqlIdentityClientId = $SqlIdentityClientId; TimeoutSeconds = $TimeoutSeconds; PollSeconds = $PollSeconds; LogWaitSeconds = $LogWaitSeconds; WhatIfOnly = $whatIfOnly
+         Mode = $mode; SupportHours = $SupportHours; Level = $Level; ConsentLevel = $ConsentLevel; Reason = $Reason; TicketNumber = $TicketNumber; OpenedBy = $openedBy }
 if ($Sleep) { $ja['Sleep'] = $Sleep }
 $r = Invoke-PimSupportSqlJobGrant @ja
 
@@ -158,6 +207,16 @@ elseif ($r.exit -ne 0) {
     $tail = if ($r.jobCreated -and $r.jobRemoved) { ' The one-time job was removed.' } elseif ($r.jobCreated) { ' THE ONE-TIME JOB IS STILL THERE (see above).' } else { ' No job was created.' }
     $done = if ("$($r.status)" -eq 'Succeeded' -and -not ($r.result -and -not [bool]$r.result.ok)) { ' The database user is in place (the job read it back); what failed is above.' } else { '' }
     Write-Host "RESULT: FAIL.$done$tail" -ForegroundColor Red
+} elseif ($mode -eq 'grant' -and $r.jobKept) {
+    $what = switch ("$($r.result.state)") {
+        'read-only'    { "the level given is read-only (asked '$($r.result.requested)', consented '$($r.result.consented)') -- nothing was added" }
+        'pre-existing' { "the Support app's database user already held db_owner before -- recorded until $($r.result.untilUtc) (UTC) and NOT taken away then" }
+        default        { "the Support app's database user in db_owner until $($r.result.untilUtc) (UTC) (asked '$($r.result.requested)', consented '$($r.result.consented)'), read back by the job; the job takes db_owner back then by itself and the read-only access stays" }
+    }
+    Write-Host "RESULT: PASS$(if (@($r.warnings).Count) { " with $(@($r.warnings).Count) warning(s)" }) -- $what. No firewall rule and no network path was opened." -ForegroundColor Green
+} elseif ($mode -in @('install', 'close')) {
+    $what = if ($mode -eq 'install') { "the time-limited support access is installed (consent '$($r.result.consented)'), read back by the job" } else { "$($r.result.closed) open time-limited support access grant(s) closed, $($r.result.sessionsEnded) session(s) ended; the read-only access stays" }
+    Write-Host "RESULT: PASS$(if (@($r.warnings).Count) { " with $(@($r.warnings).Count) warning(s)" }) -- $what. The one-time job was removed; no firewall rule and no network path was opened." -ForegroundColor Green
 } else {
     $what = if ($r.result) { "database user [$($r.result.userName)] in db_owner ($(switch ("$($r.result.state)") { 'created' { 'created' } 'role-added' { 'was there, added to db_owner' } 'unchanged' { 'was already there, nothing was changed' } default { 'in place' } })), read back by the job" }
             else { 'the job ended Succeeded, which it does only after reading the user and its role back' }

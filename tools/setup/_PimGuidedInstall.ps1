@@ -4,8 +4,8 @@
   §95.2 -- the PURE parts of the guided install (Install-PimManager.ps1), offline-tested in tests/Test-PimGuidedInstall.ps1.
 
 .DESCRIPTION
-  The contract is Invardia's GUIDED-INSTALL §4.2-4.4 (the bootstrap calls ONE command, Install-PimManager):
-    config.json  = the wizard's answers, keyed as in tools/setup/install-parameters.json, plus installId
+  The contract (ONE-LINE-INSTALL, owner 2026-11-02): ONE command, Install-PimManager, every answer a parameter:
+    answers      = the parameters, keyed as in tools/setup/install-parameters.json, plus installId (derived when not given)
     events       = @{ installId; step = @{ id; title }; state; message; action = @{ text; command }; detail; outputs }
                    state: started | ok | warning | failed | skipped | completed
     exit codes   = 0 succeeded (warnings allowed) | 1 a step failed | 2 preflight failed | 3 bad config
@@ -38,7 +38,6 @@ function Get-PimInstallStepCatalog { return [ordered]@{
     'preflight-names'      = 'Resource names'
     'preflight-sql-region' = 'Azure services in the chosen region'
     'preflight-admins'     = 'PIM Manager administrators'
-    'enroll'               = 'Link to your Invardia account'
     'prereq'             = 'Network, registry, identity and database'
     'image'                = 'Container image'
     'infra'                = 'Container Apps environment and apps'
@@ -121,15 +120,14 @@ function Get-PimInstallToken {
 
 function Test-PimInstallConfig {
     <#
-      PURE. Validate the wizard's answers (an object from config.json). Returns @{ ok; errors[]; config (normalised) }.
-      Refuses: a missing / malformed required value, an unknown enum value, internal exposure (the guided install is
-      external only -- Invardia refuses it too), an MSP role (managing / managed tenants are not a guided install yet),
-      a bad CIDR / UPN / e-mail.
+      PURE. Validate the answers (the object ConvertTo-PimInstallAnswers builds from the parameters). Returns
+      @{ ok; errors[]; config (normalised) }. Refuses: a missing / malformed required value, an unknown enum value, internal
+      exposure (the guided install is external only), an MSP role (managing / managed tenants are set up with the
+      managing-tenant build, not this install), a bad CIDR / UPN / e-mail.
     #>
-    # -HasEnrollmentKey: the key came on the command line (Install-PimManager -EnrollmentKey), not in the answers.
-    param([AllowNull()][object]$Config, [switch]$HasEnrollmentKey)
+    param([AllowNull()][object]$Config)
     $err = New-Object System.Collections.Generic.List[string]
-    if ($null -eq $Config) { return @{ ok = $false; errors = @('config.json could not be read as JSON'); config = $null } }
+    if ($null -eq $Config) { return @{ ok = $false; errors = @('no answers were given'); config = $null } }
     $get = { param($k) $p = $Config.PSObject.Properties[$k]; if ($p) { $p.Value } else { $null } }
     $c = [ordered]@{}
     foreach ($k in 'installId', 'tenantId', 'subscriptionId') {
@@ -147,8 +145,8 @@ function Test-PimInstallConfig {
     $rg = "$(& $get 'resourceGroup')".Trim(); if (-not $rg) { $rg = 'rg-pim' }
     if ($rg -notmatch '^[A-Za-z0-9._()-]{1,89}[A-Za-z0-9_()-]$') { $err.Add("resourceGroup '$rg' is not a valid resource group name") }
     $c.resourceGroup = $rg
-    # INSTALL-SAMPLES (owner 2026-10-29): 'community' = the free edition, installed without a licence or an enrollment key
-    # (Install-PimManager -Edition Community, or chosen by it when neither is given). Empty stays 'trial' (the wizard's files).
+    # 'community' = the free edition (Install-PimManager chooses it when no -Edition is given). trial / pro = the same install
+    # with the Pro updater and no licence (the licence is added in PIM Manager > Settings > Licence). Empty stays 'trial'.
     $ed = "$(& $get 'edition')".Trim().ToLowerInvariant(); if (-not $ed) { $ed = 'trial' }
     if ($ed -notin 'community', 'trial', 'pro') { $err.Add("edition must be community, trial or pro (got '$ed')") }
     $c.edition = $ed
@@ -168,23 +166,10 @@ function Test-PimInstallConfig {
     if ($snm.Success -and $vnm.Success -and [int]$snm.Groups[5].Value -lt [int]$vnm.Groups[5].Value) { $err.Add("subnetAddressPrefix '$sn' is larger than the VNet '$vn'") }
     $c.vnetAddressPrefix = $vn; $c.subnetAddressPrefix = $sn
     $role = "$(& $get 'mspRole')".Trim().ToLowerInvariant(); if (-not $role) { $role = 'single' }
-    if ($role -notin 'single', 'managing', 'managed') { $err.Add("mspRole must be single, managing or managed (got '$role')") }
-    elseif ($role -eq 'managing') { $err.Add("mspRole 'managing': a managing tenant is not a guided install yet -- install as single and contact support for the multi-tenant setup") }
-    # framework 8.6 (owner 2026-10-08): a MANAGED tenant installs itself with the enrollment key its managing company got from
-    # Invardia (checked below: 'managed' needs 'enrollmentKey'). It then runs the managed-tenant build (Invoke-PimMspBuild).
+    # ONE-LINE-INSTALL (owner 2026-11-02): this install is a single tenant. A managing or managed tenant (MSP) is set up with the
+    # managing-tenant build (Invoke-PimMspBuild), never with an answers file or an enrollment key here.
+    if ($role -ne 'single') { $err.Add("mspRole '$role': a managing or managed tenant is set up with the managing-tenant build, not this install -- install as a single tenant") }
     $c.mspRole = $role
-    # owner 2026-10-28: "community does not have msp support, only pro" -- a managed tenant is a Pro install.
-    if ($role -eq 'managed' -and $ed -eq 'community') { $err.Add("a managed tenant (mspRole managed) is PIM Manager Pro, not Community -- install it with the enrollment key its managing company got from Invardia") }
-    if ($role -eq 'managed') {
-        $ap = @(@(& $get 'adminPrefixes') | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-        # OPTIONAL since the owner 2026-10-10 ("remove the admin pattern question"): the prefixes are REPORT-ONLY since 2.4.412
-        # and the pull job prefers the tenant's own AdminAccountPatterns setting. Absent = accepted; a given entry is still checked.
-        foreach ($p in $ap) { if ($p -notmatch '^[A-Za-z0-9._-]{1,20}$') { $err.Add("adminPrefixes entry '$p' is not a name prefix") } }
-        $c.adminPrefixes = @($ap)
-        $sr = "$(& $get 'slaveRing')".Trim(); if (-not $sr) { $sr = '2' }
-        if ($sr -notin '0', '1', '2') { $err.Add("slaveRing must be 0, 1 or 2 (got '$sr')") }
-        $c.slaveRing = $sr
-    }
     $upn = '^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$'
     foreach ($k in 'portalUsers', 'superAdmins') {
         $list = @(@(& $get $k) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
@@ -216,58 +201,25 @@ function Test-PimInstallConfig {
     if ($lvl -notin 'troubleshoot', 'setup', 'asbuilt') { $err.Add("supportAccess must be troubleshoot, setup or asbuilt (got '$lvl')") }   # 100.61: asbuilt = only the as-built job + its container
     $c.supportAccess = $lvl
     # §95.4 (2026-10-06): the update ring a PRO install follows -- 2 = design partners, 3 = broad (default). Ring 0/1 are
-    # Invardia's own and never a customer's. Not on the wizard page: an operator-run production install sets it in config.
+    # Invardia's own and never a customer's. Install-PimManager -UpdateRing.
     $ur = "$(& $get 'updateRing')".Trim(); if (-not $ur) { $ur = '3' }
     if ($ur -notin '2', '3') { $err.Add("updateRing must be 2 (design partners) or 3 (broad) (got '$ur')") }
     $c.updateRing = $ur
-    # Invardia's bootstrap writes the install key it issued (2026-10-06): stored with the licence, so the engine never claims (409).
-    $ik = "$(& $get 'installKey')".Trim()
-    if ($ik -and $ik -notmatch '^inv-[A-Za-z0-9_-]{20,100}$') { $err.Add('installKey is not an Invardia install key (inv-...)') }
-    $c.installKey = $ik
-    # framework 8.6 "SINGLE-TENANT enrollment too" (owner 2026-10-08): an Invardia ENROLLMENT KEY (ek-...) instead of a
-    # licence file -- the install claims this tenant at Invardia and gets the licence + install key from it. A bearer secret:
-    # it is returned BESIDE the normalised config (never inside it, so nothing that shows or saves the config can carry it),
-    # and no error text ever contains it.
-    $ek = "$(& $get 'enrollmentKey')".Trim()
-    if ($ek -and $ek -cnotmatch '^ek-[A-Za-z0-9_-]{43}$') { $err.Add('enrollmentKey is not an Invardia enrollment key (ek- followed by 43 letters, digits, - or _)') }
-    # ONE CLAIMANT PER INSTALL (Invardia 2026-10-08): every claim issues a new install key and kills the previous one. When the
-    # answers already carry installKey, Invardia's bootstrap (Install-Invardia -EnrollmentKey) has claimed: the enrollment key
-    # is then informational only -- never sent, never returned (enrollmentKeyIgnored says so).
-    $ekIgnored = $false
-    if ($ek -and $ik) { $ek = ''; $ekIgnored = $true }
-    # A MANAGED tenant: the claim's managing block. Either this install claims (enrollmentKey, the claim returns it) or the
-    # bootstrap claimed and hands it over as 'managing': { bundleStorage, container, signingKeyIds[], tenantId? }.
-    $mg = & $get 'managing'
-    if ($mg) {
-        $ms = "$($mg.bundleStorage)".Trim().ToLowerInvariant()
-        $mc = "$($mg.container)".Trim().ToLowerInvariant(); if (-not $mc) { $mc = 'baselines' }
-        $mp = @(@($mg.signingKeyIds) | Where-Object { $null -ne $_ -and "$_".Trim() } | ForEach-Object { "$_".Trim() })
-        $mt = "$($mg.tenantId)".Trim()
-        if ($ms -notmatch '^[a-z0-9]{3,24}$') { $err.Add('managing.bundleStorage is not a storage account name') }
-        if ($mc -notmatch '^[a-z0-9](?!.*--)[a-z0-9-]{1,61}[a-z0-9]$') { $err.Add('managing.container is not a container name') }
-        if (-not $mp.Count -or @($mp | Where-Object { $_ -cnotmatch '^[A-Za-z0-9_-]{43}$' }).Count) { $err.Add('managing.signingKeyIds must name the managing tenant''s signing key id(s) (43 characters each)') }
-        if ($mt -and $mt -notmatch $script:PimInstallGuid) { $err.Add('managing.tenantId must be a GUID') }
-        $mo = [ordered]@{ bundleStorage = $ms; container = $mc; signingKeyIds = @($mp) }; if ($mt) { $mo['tenantId'] = $mt.ToLowerInvariant() }
-        $c.managing = [pscustomobject]$mo
-    }
-    if ($role -eq 'managed' -and -not $ek -and -not $ik -and -not $HasEnrollmentKey) { $err.Add("mspRole 'managed' needs enrollmentKey (or, from Invardia's installer, installKey + managing): a managed tenant is linked to its managing company by the enrollment key that company got from Invardia") }
-    if ($role -eq 'managed' -and $ik -and -not $mg) { $err.Add("mspRole 'managed' with installKey needs 'managing' (the claim's managing block: bundleStorage, container, signingKeyIds) -- Invardia's installer claimed, so it hands it over") }
-    if ($mg -and $role -ne 'managed') { $err.Add("'managing' belongs to a managed tenant (mspRole managed)") }
-    # CR5 step 2 (PIM 100.149): optional, NOT a wizard question (Invardia's contract is unchanged) -- an operator / Invardia
-    # may set it in config.json; carried only when given, so an install without it is exactly as before.
+    # CR5 step 2 (PIM 100.149): optional, NOT an install parameter -- an operator sets $env:PIM_Setup_NewInstallNames instead;
+    # carried only when given, so an install without it is exactly as before.
     $nn = & $get 'newInstallNames'
     if ($null -ne $nn -and "$nn".Trim()) {
         if ("$nn".Trim() -notmatch '^(?i)(true|false|1|0|yes|no|on|off)$') { $err.Add('newInstallNames must be true or false') }
         else { $c.newInstallNames = [bool]("$nn".Trim() -match '^(?i)(true|1|yes|on)$') }
     }
-    # GUIDED-INSTALL-FRONT (2026-10-21): the install's own Key Vault (the sign-in front's key). Optional, not a wizard question --
-    # the customer's own naming when given (hybrid naming rule: every name settable); else 'kv-pim-<token>'. Carried only when given.
+    # GUIDED-INSTALL-FRONT (2026-10-21): the install's own Key Vault (the sign-in front's key). Optional (-KeyVaultName) --
+    # the customer's own naming when given (-KeyVaultName; hybrid naming rule: every name settable); else 'kv-pim-<token>'.
     $kvn = "$(& $get 'keyVaultName')".Trim()
     if ($kvn) {
         if ($kvn -notmatch '^[A-Za-z][A-Za-z0-9-]{1,22}[A-Za-z0-9]$' -or $kvn -match '--') { $err.Add("keyVaultName '$kvn' is not a valid Key Vault name (3-24 letters, digits and dashes; starts with a letter; no '--')") }
         else { $c.keyVaultName = $kvn.ToLowerInvariant() }
     }
-    return @{ ok = ($err.Count -eq 0); errors = @($err); config = [pscustomobject]$c; enrollmentKey = $ek; enrollmentKeyIgnored = $ekIgnored }
+    return @{ ok = ($err.Count -eq 0); errors = @($err); config = [pscustomobject]$c }
 }
 
 function Get-PimInstallDerivedId {
@@ -286,58 +238,29 @@ function Get-PimInstallDerivedId {
 
 function ConvertTo-PimInstallAnswers {
     <#
-      PURE. INSTALL-SAMPLES (owner 2026-10-29: "install commands take PARAMETERS, a config file is optional only"). Builds the
-      answers object Test-PimInstallConfig validates -- the SAME object config.json gives -- from:
-        -FileAnswers  the object read from -ConfigPath ($null when no file was given, or the file could not be read)
-        -FileGiven    a -ConfigPath was given (an unreadable file then stays $null: "config.json could not be read as JSON")
-        -Parameters   the command-line answers, keyed as in install-parameters.json (tenantId, subscriptionId, location,
-                      resourceGroup, superAdmins, alertRecipients, mailSender, vnetAddressPrefix, subnetAddressPrefix,
-                      exposure, edition, installId, supportAppId, supportAccess). Empty values are "not given".
-      A parameter WINS over the same answer in the file. No file: tenantId and subscriptionId are required (missing[] names
-      the ones not given), and the installation id is derived (Get-PimInstallDerivedId) unless one is given.
-      Returns @{ answers; missing[]; overridden[]; editionGiven; fromFile }.
+      PURE. ONE-LINE-INSTALL (owner 2026-11-02: "i only support one method where i get cmdlets with all parameters"). Builds
+      the answers object Test-PimInstallConfig validates from -Parameters: the command-line answers, keyed as in
+      install-parameters.json (tenantId, subscriptionId, location, resourceGroup, superAdmins, alertRecipients, mailSender,
+      portalUsers, allowAllMembers, vnetAddressPrefix, subnetAddressPrefix, exposure, edition, updateRing, keyVaultName,
+      engineAzureRootUserAccessAdmin, installId, supportAppId, supportAccess). Empty values are "not given". tenantId and
+      subscriptionId are required (missing[] names the ones not given), and the installation id is derived
+      (Get-PimInstallDerivedId) unless one is given. There is no answers file. Returns @{ answers; missing[]; editionGiven }.
     #>
-    param([AllowNull()][object]$FileAnswers, [switch]$FileGiven, [hashtable]$Parameters = @{})
-    $given = [ordered]@{}
+    param([hashtable]$Parameters = @{})
+    $o = [ordered]@{}
     foreach ($k in @($Parameters.Keys | Sort-Object)) {
         $v = $Parameters[$k]
         if ($null -eq $v) { continue }
-        if ($v -is [array] -or $v -is [System.Collections.IList]) { $list = @(@($v) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }); if ($list.Count) { $given[$k] = @($list) }; continue }
-        if ("$v".Trim()) { $given[$k] = "$v".Trim() }
+        if ($v -is [array] -or $v -is [System.Collections.IList]) { $list = @(@($v) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }); if ($list.Count) { $o[$k] = @($list) }; continue }
+        if ("$v".Trim()) { $o[$k] = "$v".Trim() }
     }
-    if ($given.Contains('edition')) { $given['edition'] = "$($given['edition'])".ToLowerInvariant() }
-    if ($FileGiven -and $null -eq $FileAnswers) { return @{ answers = $null; missing = @(); overridden = @(); editionGiven = $given.Contains('edition'); fromFile = $true } }
-    $o = [ordered]@{}
-    if ($null -ne $FileAnswers) { foreach ($p in $FileAnswers.PSObject.Properties) { $o[$p.Name] = $p.Value } }
-    $over = New-Object System.Collections.Generic.List[string]
-    foreach ($k in $given.Keys) {
-        if ($o.Contains($k) -and "$(@($o[$k]) -join ',')".Trim() -and "$(@($o[$k]) -join ',')" -ne "$(@($given[$k]) -join ',')") { $over.Add($k) }
-        $o[$k] = $given[$k]
-    }
-    $missing = @()
-    if (-not $FileGiven) { $missing = @(@('tenantId', 'subscriptionId') | Where-Object { -not "$($o[$_])".Trim() }) }
-    if (-not "$($o['installId'])".Trim() -and "$($o['tenantId'])".Trim() -and "$($o['subscriptionId'])".Trim() -and -not $FileGiven) {
+    if ($o.Contains('edition')) { $o['edition'] = "$($o['edition'])".ToLowerInvariant() }
+    $missing = @(@('tenantId', 'subscriptionId') | Where-Object { -not "$($o[$_])".Trim() })
+    if (-not "$($o['installId'])".Trim() -and "$($o['tenantId'])".Trim() -and "$($o['subscriptionId'])".Trim()) {
         $o['installId'] = Get-PimInstallDerivedId -TenantId "$($o['tenantId'])" -SubscriptionId "$($o['subscriptionId'])" -ResourceGroup "$($o['resourceGroup'])"
     }
-    $edGiven = $given.Contains('edition') -or ($o.Contains('edition') -and "$($o['edition'])".Trim())
-    return @{ answers = [pscustomobject]$o; missing = @($missing); overridden = @($over); editionGiven = [bool]$edGiven; fromFile = [bool]$FileGiven }
+    return @{ answers = [pscustomobject]$o; missing = @($missing); editionGiven = [bool]$o.Contains('edition') }
 }
-
-function Remove-PimInstallConfigEnrollmentKey {
-    <#
-      framework 8.6: once the enrolled licence is registered, the enrollment key is taken OUT of config.json (the wizard's
-      answers on disk), so no copy of the bearer secret is left behind -- a resume no longer needs it (the licence step is
-      done). Every other answer is kept as it was. Returns $true when a key was removed.
-    #>
-    param([Parameter(Mandatory)][string]$ConfigPath)
-    if (-not (Test-Path -LiteralPath $ConfigPath)) { return $false }
-    $o = $null; try { $o = Get-Content -Raw -LiteralPath $ConfigPath | ConvertFrom-Json } catch { return $false }
-    if (-not $o -or -not $o.PSObject.Properties['enrollmentKey']) { return $false }
-    $o.PSObject.Properties.Remove('enrollmentKey')
-    [IO.File]::WriteAllText($ConfigPath, ($o | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
-    return $true
-}
-
 function Get-PimInstallNames {
     <# PURE. The resource names of a guided install (framework §5.5: purpose words; globally unique names carry the token). #>
     param([Parameter(Mandatory)][object]$Config)
@@ -368,9 +291,7 @@ function ConvertTo-PimInstallDeployArgs {
       -- never a secret), no deploy application (-SkipAppReg: the runtime is managed identity only), scenario S2 (the
       public release, updated with Update-PimCommunity.ps1; the licence switches the Pro features on), -Apply.
     #>
-    # -LicencePath / -InstallKeyPath: Invardia's bootstrap claimed -- its licence file and the install key in a FILE (a path,
-    # never the key) go to the build's licence step, and nothing claims again.
-    param([Parameter(Mandatory)][object]$Config, [string]$SignedInUpn = '', [string]$LicencePath = '', [string]$InstallKeyPath = '')
+    param([Parameter(Mandatory)][object]$Config, [string]$SignedInUpn = '')
     $n = Get-PimInstallNames -Config $Config
     $admins = @($Config.superAdmins); if (-not $admins.Count -and "$SignedInUpn".Trim()) { $admins = @("$SignedInUpn".Trim()) }
     $portal = @($Config.portalUsers); if (-not $portal.Count -and -not $Config.allowAllMembers) { $portal = @($admins) }
@@ -400,7 +321,8 @@ function ConvertTo-PimInstallDeployArgs {
     # 2026-10-06 (install rehearsal): a PRO install deployed as S2 with no feed got NO updater. Pro updates arrive signed,
     # through Invardia, on this install's ring; the engine claims the install key once the licence is registered.
     # Trials too (Invardia 2026-10-06: a trial licence claims an install key and pulls updates like Pro until it expires; a
-    # customer who buys keeps the same install).
+    # customer who buys keeps the same install). ONE-LINE-INSTALL (owner 2026-11-02): deployed WITHOUT a licence -- the
+    # administrator adds it in PIM Manager > Settings > Licence; until then the updater waits (never a failed run).
     if ("$($Config.edition)" -in 'pro', 'trial') {
         $a['UpdateSource'] = 'Invardia'
         $a['UpdateRing'] = [int]$(if ("$($Config.updateRing)".Trim()) { "$($Config.updateRing)".Trim() } else { '3' })
@@ -416,38 +338,27 @@ function ConvertTo-PimInstallDeployArgs {
     return $a
 }
 
-function ConvertTo-PimInstallMspSlaveConfig {
+function Set-PimInstallEditionSetting {
     <#
-      PURE. framework 8.6 -- a MANAGED tenant's guided install = the managed-tenant build (Invoke-PimMspBuild -Role Slave,
-      signed-in, with the enrollment key): this is its config, made from the wizard's answers and the guided install's
-      names. master{} only from a handed-over 'managing' block (else the claim returns it), NO deployIdentity (signed-in), NO secret (the key goes to the build
-      as -EnrollmentKey, never into this file). Pro updates from Invardia on updateRing; the pull job on slaveRing.
+      INSTALL-1 GAP (2026-11-02): record the edition this environment was INSTALLED as in pim.Settings 'InstallEdition'
+      ("trial" | "pro", a JSON string) so the licence-request job knows a fresh, still unlicensed trial / Pro install is meant
+      to be Pro and knocks at Invardia on its first tick (Invoke-PimLicenceRequestCycle). Community writes NOTHING -- a
+      Community install never knocks (owner 2026-10-16). Idempotent (one MERGE; a -Resume writes the same value again),
+      read back. -Sql = param([string]$Sql) -> one scalar, as the installer (New-PimInstallSigninFrontIo's Sql).
+      Returns @{ ok; written; value; reason }. Never throws.
     #>
-    # -LicencePath / -InstallKeyPath: Invardia's bootstrap claimed -- its licence file and the install key in a FILE (a path,
-    # never the key) go to the build's licence step, and nothing claims again.
-    param([Parameter(Mandatory)][object]$Config, [string]$SignedInUpn = '', [string]$LicencePath = '', [string]$InstallKeyPath = '')
-    $n = Get-PimInstallNames -Config $Config
-    $admins = @($Config.superAdmins); if (-not $admins.Count -and "$SignedInUpn".Trim()) { $admins = @("$SignedInUpn".Trim()) }
-    $portal = @($Config.portalUsers); if (-not $portal.Count -and -not $Config.allowAllMembers) { $portal = @($admins) }
-    $c = [ordered]@{
-        role = 'Slave'; tenantId = $Config.tenantId; subscriptionId = $Config.subscriptionId; resourceGroup = $n.resourceGroup; location = $Config.location
-        token = $n.token; sqlServerName = $n.sqlServer; sqlDatabase = $n.sqlDatabase; acrName = $n.acr; envName = $n.environment; logAnalyticsName = $n.logAnalytics
-        managerApp = $n.managerApp; exposure = 'external'; managerSuperAdmins = (@($admins) -join ',')
-        updater = [ordered]@{ ring = [int]$(if ("$($Config.updateRing)".Trim()) { "$($Config.updateRing)".Trim() } else { '3' }); source = 'invardia' }
-        network = [ordered]@{ vnetName = $n.vnet; vnetAddressPrefix = $Config.vnetAddressPrefix; subnetAddressPrefix = $Config.subnetAddressPrefix }
-        adminPrefixes = @($Config.adminPrefixes); slaveRing = [int]$(if ("$($Config.slaveRing)".Trim()) { "$($Config.slaveRing)".Trim() } else { '2' })
-        easyAuth = [ordered]@{ allowedPrincipals = @($portal); allowAllTenantUsers = [bool]$Config.allowAllMembers }
-    }
-    if (@($Config.alertRecipients).Count) { $c['alertRecipients'] = @($Config.alertRecipients) }
-    if ($Config.engineAzureRootUserAccessAdmin) { $c['engineAzure'] = [ordered]@{ rootUserAccessAdmin = $true } }
-    if ("$($Config.supportAppId)".Trim()) { $c['support'] = [ordered]@{ appId = "$($Config.supportAppId)".Trim(); access = "$($Config.supportAccess)" } }
-    if ($Config.PSObject.Properties['managing'] -and $Config.managing) {
-        $m = [ordered]@{ storageAccount = "$($Config.managing.bundleStorage)"; container = "$($Config.managing.container)"; signingKeyIds = @($Config.managing.signingKeyIds) }
-        if ("$($Config.managing.tenantId)".Trim()) { $m['tenantId'] = "$($Config.managing.tenantId)".Trim() }
-        $c['master'] = [pscustomobject]$m
-    }
-    if ("$LicencePath".Trim()) { $l = [ordered]@{ path = "$LicencePath".Trim() }; if ("$InstallKeyPath".Trim()) { $l['installKeyPath'] = "$InstallKeyPath".Trim() }; $c['licence'] = [pscustomobject]$l }
-    return [pscustomobject]$c
+    param([AllowNull()][string]$Edition, [Parameter(Mandatory)][scriptblock]$Sql)
+    $e = "$Edition".Trim().ToLowerInvariant()
+    if ($e -notin 'trial', 'pro') { return @{ ok = $true; written = $false; value = ''; reason = 'the Community edition records no install edition (it never requests a licence)' } }
+    $json = '"' + $e + '"'   # a fixed literal from the two names above -- never caller text in the statement
+    try {
+        [void](& $Sql ("MERGE pim.Settings WITH (HOLDLOCK) AS t USING (SELECT N'InstallEdition' AS Name, N'$json' AS V) AS s ON t.Name = s.Name " +
+                       "WHEN MATCHED AND (t.ValueJson IS NULL OR t.ValueJson <> s.V) THEN UPDATE SET ValueJson = s.V, UpdatedUtc = SYSUTCDATETIME() " +
+                       "WHEN NOT MATCHED THEN INSERT (Name, ValueJson, UpdatedUtc) VALUES (s.Name, s.V, SYSUTCDATETIME());"))
+        $back = "$(& $Sql "SELECT ValueJson FROM pim.Settings WHERE Name = N'InstallEdition'")".Trim()
+    } catch { return @{ ok = $false; written = $false; value = $e; reason = "the install edition could not be recorded: $((("$($_.Exception.Message)") -split "`n")[0])" } }
+    if ($back -ne $json) { return @{ ok = $false; written = $false; value = $e; reason = "the install edition was not read back (found '$back')" } }
+    return @{ ok = $true; written = $true; value = $e; reason = "recorded as a $e installation -- it asks Invardia for its licence by itself" }
 }
 
 function ConvertTo-PimInstallStepEvent {
@@ -548,10 +459,10 @@ function Get-PimInstallRightsVerdict {
 
 function Read-PimInstallState {
     <#
-      The state file (state.json in -StatePath): @{ installId; completed[]; updatedUtc; licencePath; setupHostRule }.
-      Missing or unreadable = empty. REQ 98.4 (a) + (b): licencePath (the PATH of the licence file the install was given --
-      never its content) and setupHostRule (@{ name; server; resourceGroup; subscriptionId; openedUtc }: the SQL firewall
-      rule THIS install opened) are optional -- a state file written before them reads as '' / $null and still resumes.
+      The installation's OWN state file (state.json in -StatePath): @{ installId; completed[]; updatedUtc; setupHostRule }.
+      Missing or unreadable = empty. REQ 98.4 (b): setupHostRule (@{ name; server; resourceGroup; subscriptionId; openedUtc }:
+      the SQL firewall rule THIS install opened) is optional -- a state file written before it reads as $null and still resumes.
+      An older file's licencePath is ignored (ONE-LINE-INSTALL: the install never takes a licence).
     #>
     param([Parameter(Mandatory)][string]$StatePath)
     $f = Join-Path $StatePath 'state.json'
@@ -566,19 +477,18 @@ function Read-PimInstallState {
                                   subscriptionId = "$($s.setupHostRule.subscriptionId)"; openedUtc = $at }
             }
             return [pscustomobject]@{ installId = "$($s.installId)"; completed = @($s.completed | Where-Object { $_ }); updatedUtc = "$($s.updatedUtc)"
-                                      licencePath = "$($s.licencePath)".Trim(); setupHostRule = $hr }
+                                      setupHostRule = $hr }
         } catch { }
     }
-    return [pscustomobject]@{ installId = ''; completed = @(); updatedUtc = ''; licencePath = ''; setupHostRule = $null }
+    return [pscustomobject]@{ installId = ''; completed = @(); updatedUtc = ''; setupHostRule = $null }
 }
 
 function Save-PimInstallState {
-    # -LicencePath: a PATH only. Never the licence text, a key or a token -- nothing secret is written to this file.
+    # Never a licence, a key or a token -- nothing secret is written to this file.
     param([Parameter(Mandatory)][string]$StatePath, [Parameter(Mandatory)][string]$InstallId, [string[]]$Completed = @(),
-          [string]$LicencePath = '', [System.Collections.IDictionary]$SetupHostRule)
+          [System.Collections.IDictionary]$SetupHostRule)
     if (-not (Test-Path -LiteralPath $StatePath)) { New-Item -ItemType Directory -Force -Path $StatePath | Out-Null }
     $doc = [ordered]@{ schema = 1; installId = $InstallId; completed = @($Completed | Select-Object -Unique); updatedUtc = [datetime]::UtcNow.ToString('o') }
-    if ("$LicencePath".Trim()) { $doc['licencePath'] = "$LicencePath".Trim() }
     if ($SetupHostRule) {
         $doc['setupHostRule'] = [ordered]@{ name = "$($SetupHostRule['name'])"; server = "$($SetupHostRule['server'])"; resourceGroup = "$($SetupHostRule['resourceGroup'])"
                                             subscriptionId = "$($SetupHostRule['subscriptionId'])"; openedUtc = "$($SetupHostRule['openedUtc'])" }
@@ -637,7 +547,7 @@ function Get-PimInstallAdminVerdict {
     $missing = @($list | Where-Object { $_.found -eq $false } | ForEach-Object { "$($_.upn)".Trim() })
     if ($missing.Count) {
         return @{ state = 'failed'; message = "$(if ($missing.Count -eq 1) { 'this sign-in name does' } else { 'these sign-in names do' }) not exist in the tenant: $($missing -join ', ') -- a PIM Manager administrator must be an account of this tenant; nothing was created"
-                  actionText = 'Correct the administrator''s sign-in name in the answers (superAdmins in config.json), then run the installation again:'; actionCommand = '"superAdmins": ["admin@contoso.com"]' }
+                  actionText = 'Correct the administrator''s sign-in name (-SuperAdmins), then run the installation again:'; actionCommand = '-SuperAdmins admin@contoso.com' }
     }
     $unknown = @($list | Where-Object { $null -eq $_.found } | ForEach-Object { "$($_.upn)".Trim() })
     if ($unknown.Count) { return @{ state = 'warning'; message = "could not be checked in the tenant: $($unknown -join ', ') -- the sign-in step will tell" } }
@@ -647,7 +557,7 @@ function Get-PimInstallAdminVerdict {
         # kind 'no-mailbox': the caller makes this a reminder (not a stop) for an installation that completed before -- its
         # recipients may have been set in the PIM Manager since, which a preflight cannot read
         return @{ state = 'failed'; kind = 'no-mailbox'; message = "no PIM Manager administrator has a mailbox ($(@($list | ForEach-Object { "$($_.upn)".Trim() }) -join ', ')) and no alert recipients were given -- the alerts would reach nobody; nothing was created"
-                  actionText = 'Add the address that receives the alerts to the answers (alertRecipients in config.json), then run the installation again:'; actionCommand = '"alertRecipients": ["alerts@contoso.com"]' }
+                  actionText = 'Add the address that receives the alerts (-AlertRecipients), then run the installation again:'; actionCommand = '-AlertRecipients alerts@contoso.com' }
     }
     return @{ state = 'ok'; message = "found in the tenant: $(@($list | ForEach-Object { "$($_.upn)".Trim() }) -join ', '); the alerts go to $(if ($rec.Count) { $rec -join ', ' } else { $withMail -join ', ' })" }
 }

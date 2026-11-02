@@ -242,7 +242,12 @@ function Invoke-PimLicenceRequestCycle {
     # hint. A Community install has none of them and never knocks (Get-PimLicenceRequestDecision -ProIntended).
     $hasLicFile = $false; try { $lt0 = & $GetSetting 'License'; $hasLicFile = [bool]("$lt0".Trim()) } catch { $hasLicFile = $false }
     $hasKey = $false; if (Get-Command Resolve-PimInvardiaInstallKey -ErrorAction SilentlyContinue) { try { $hasKey = [bool](Resolve-PimInvardiaInstallKey -GetSetting $GetSetting) } catch { $hasKey = $false } }
-    $proIntended = [bool]($hasLicFile -or $hasKey -or $hint)
+    # INSTALL-1 GAP (2026-11-02): ...or the edition the install was deployed as (pim.Settings 'InstallEdition', written by
+    # Install-PimManager for -Edition Trial / Pro). A fresh trial / Pro install holds none of the three above, yet must knock on
+    # its first tick (Invardia auto-approves a tenant on the 60-day trial). Community writes none -> never knocks. The knock
+    # body is unchanged: no edition field (Invardia accepts only its paid edition ids there; a trial is known by its licence).
+    $instEd = ''; try { $ie = & $GetSetting 'InstallEdition'; if ($ie -is [string]) { $instEd = $ie.Trim().ToLowerInvariant() } } catch { $instEd = '' }
+    $proIntended = [bool]($hasLicFile -or $hasKey -or $hint -or ($instEd -in @('trial', 'pro')))
     $d = Get-PimLicenceRequestDecision -Enabled $Enabled -License $lic -ProHere $proHere -State $state -HasToken ([bool]$token) -NowUtc $NowUtc -SupersededBy $hint -ProIntended $proIntended
     if ($d.clearHint) { & $SetSetting 'LicenceSupersededBy' ''; $hint = '' }   # the successor IS installed
     $save = { param($Status, $Msg, $Extra) $o = [ordered]@{ status = $Status; message = $Msg; updatedUtc = $NowUtc.ToString('o') }

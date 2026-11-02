@@ -204,12 +204,14 @@ function Get-PimInstallVerifyRows {
       PURE. One row per line of -Role, from the gathered -Facts (keyed by line id; a missing fact = could not be read).
       -Fix: a hashtable of line id -> the exact fix command (built by the gatherer with this environment's values).
       -LicenceExpected: Pro / trial / MSP (the licence line is REQUIRED); otherwise it is 'info' (free edition).
+      -LicenceLater: a trial / Pro install deployed WITHOUT a licence (ONE-LINE-INSTALL, owner 2026-11-02): the administrator
+       adds it in PIM Manager > Settings > Licence after the install, so every licence problem is a WARNING (never a stop).
       -EnrollmentWait: an ENROLLED managed tenant (PIM 100.74, framework 8.15 ENROLL-SIGNAL). Its managing tenant allows the
        pull subnet BY ITSELF within minutes of the install, so a subnet not allowed yet and a first pull refused (403) are
        'waiting' (a follow-up, never a failure). The pull job retries on its own 5-minute trigger.
     #>
     param([ValidateSet('Single', 'Master', 'Slave')][string]$Role = 'Single', [hashtable]$Facts = @{}, [hashtable]$Fix = @{}, [bool]$LicenceExpected = $false,
-          [bool]$EnrollmentWait = $false)
+          [bool]$EnrollmentWait = $false, [bool]$LicenceLater = $false)
     $waitText = Get-PimInstallVerifyNetworkWaitText
     $rows = New-Object System.Collections.Generic.List[object]
     $fx = { param($id) if ($Fix.ContainsKey($id)) { "$($Fix[$id])" } else { '' } }
@@ -246,15 +248,20 @@ function Get-PimInstallVerifyRows {
                 $rows.Add((New-PimInstallVerifyRow $id $okState "job exists, ring $ring read back$(if ([bool](Get-PimFactValue $f 'seedSupported')) { '; update-state record present' })$(if ($repaired) { ' (re-installed by the verify)' })"))
             }
             'licence' {
-                if (-not $LicenceExpected) { $rows.Add((New-PimInstallVerifyRow $id 'info' 'free edition -- no licence expected' '' $false)); break }
-                if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'failed' $unread (& $fx $id))); break }
-                if (-not [bool](Get-PimFactValue $f 'present')) { $rows.Add((New-PimInstallVerifyRow $id 'failed' 'no licence is registered -- the Pro features are off' (& $fx $id))); break }
+                if (-not $LicenceExpected -and -not $LicenceLater) { $rows.Add((New-PimInstallVerifyRow $id 'info' 'free edition -- no licence expected' '' $false)); break }
+                # LicenceLater: the licence is added after the install -- each problem below is a reminder, never a stop
+                $bad = if ($LicenceLater) { 'warning' } else { 'failed' }; $req = -not $LicenceLater
+                if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id $bad $unread (& $fx $id) $req)); break }
+                if (-not [bool](Get-PimFactValue $f 'present')) {
+                    if ($LicenceLater) { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'no licence yet -- sign in to PIM Manager and add your licence in Settings > Licence; the Pro features switch on with it' (& $fx $id) $false)); break }
+                    $rows.Add((New-PimInstallVerifyRow $id 'failed' 'no licence is registered -- the Pro features are off' (& $fx $id))); break
+                }
                 $st = "$(Get-PimFactValue $f 'status')".Trim()
                 $why = "$(Get-PimFactValue $f 'reason')".Trim()
-                if ($st -and $st -notin 'Valid', 'Grace') { $rows.Add((New-PimInstallVerifyRow $id 'failed' "the licence is $st$(if ($why) { " ($why)" })" (& $fx $id))); break }
+                if ($st -and $st -notin 'Valid', 'Grace') { $rows.Add((New-PimInstallVerifyRow $id $bad "the licence is $st$(if ($why) { " ($why)" })" (& $fx $id) $req)); break }
                 if ([bool](Get-PimFactValue $f 'installKey')) { $rows.Add((New-PimInstallVerifyRow $id 'ok' 'registered; install key stored')); break }
                 if ([bool](Get-PimFactValue $f 'claimQueued')) { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'registered; the install key claim is queued -- the engine claims it on its next run (about 5 minutes)' (& $fx $id))); break }
-                $rows.Add((New-PimInstallVerifyRow $id 'failed' 'registered, but no install key is stored or queued -- Pro updates cannot be pulled' (& $fx $id)))
+                $rows.Add((New-PimInstallVerifyRow $id $bad 'registered, but no install key is stored or queued -- Pro updates cannot be pulled' (& $fx $id) $req))
             }
             'mailsender' {
                 # Owner 2026-10-08: "mail is optional" -- an incomplete mail setup is ALWAYS a warning with the exact fix (Get Started >

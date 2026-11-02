@@ -380,15 +380,21 @@ function New-PimSigninFrontBuildContextFromFolder {
       installer runs from (repo-root shaped: <RepoRoot>/FRAMEWORK/signin-front/src + VERSION, and the solution's pin) -- so a
       NEW install builds its front itself, before its updater has ever reached Invardia. Same rules as the archive form:
       src/** re-rooted (bin/ obj/ left out), built ONLY when VERSION is the version the solution pins. Never throws.
-      @{ ok; path; version; pinned; component; files; reason }.
+      PUB-FRONT (framework, owner 2026-11-02): the solution's OWN vendored copy (<SolutionRoot>/vendor/signin-front, kept
+      byte-equal to FRAMEWORK at the pin by Test-PimVendorSigninFront) is used first -- a public release unpacks the solution
+      folder as its root and carries no FRAMEWORK/; <RepoRoot>/FRAMEWORK/signin-front is the fallback.
+      @{ ok; path; version; pinned; component; files; reason; source }.
     #>
-    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$OutFile)
-    $res = @{ ok = $false; path = ''; version = ''; pinned = ''; component = ''; files = 0; reason = '' }
+    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$OutFile, [string]$SolutionRoot = '')
+    $res = @{ ok = $false; path = ''; version = ''; pinned = ''; component = ''; files = 0; reason = ''; source = '' }
     try {
-        $src = Join-Path $RepoRoot 'FRAMEWORK\signin-front\src'
-        if (-not (Test-Path -LiteralPath (Join-Path $src 'Dockerfile'))) { $res.reason = 'this copy of PIM Manager carries no FRAMEWORK/signin-front/src -- nothing to build here'; return $res }
-        $vf = Join-Path $RepoRoot 'FRAMEWORK\signin-front\VERSION'
-        $pf = Join-Path $RepoRoot 'SOLUTIONS\PIM4EntraPS\tools\pim-manager\signin-front.version'
+        if (-not "$SolutionRoot".Trim()) { $SolutionRoot = Join-Path $RepoRoot 'SOLUTIONS\PIM4EntraPS' }
+        $front = Join-Path $SolutionRoot 'vendor\signin-front'; $res.source = 'vendor'
+        if (-not (Test-Path -LiteralPath (Join-Path $front 'src\Dockerfile'))) { $front = Join-Path $RepoRoot 'FRAMEWORK\signin-front'; $res.source = 'framework' }
+        $src = Join-Path $front 'src'
+        if (-not (Test-Path -LiteralPath (Join-Path $src 'Dockerfile'))) { $res.source = ''; $res.reason = 'this copy of PIM Manager carries no FRAMEWORK/signin-front/src -- nothing to build here'; return $res }
+        $vf = Join-Path $front 'VERSION'
+        $pf = Join-Path $SolutionRoot 'tools\pim-manager\signin-front.version'
         $comp = if (Test-Path -LiteralPath $vf) { "$(Get-Content -LiteralPath $vf -Raw)".Trim([char]0xFEFF).Trim() } else { '' }
         $pin = if (Test-Path -LiteralPath $pf) { "$(Get-Content -LiteralPath $pf -Raw)".Trim([char]0xFEFF).Trim() } else { '' }
         $res.component = $comp; $res.pinned = $pin
