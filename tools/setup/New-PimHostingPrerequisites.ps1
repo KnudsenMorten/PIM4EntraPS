@@ -101,6 +101,22 @@ param(
     # hangs. The dns-zone-group below registers both, which is why it is used instead of hand-built
     # A records.
     [string]$PrivateDnsResourceGroup,
+    # PRIVATE NETWORK (framework INSTALL-1 item 5, EPS DESIGN §2b): the customer's CENTRAL privatelink zones, as a resource group
+    # id (any subscription). USED, never created or written: a zone that is not there stops this step (nothing is made in its
+    # place) and no virtual network link is written -- the zone must already answer inside the VNet. Only the private
+    # endpoint's own DNS zone group points at it. Empty = today's behaviour (-PrivateDnsResourceGroup, created when missing).
+    [string]$PrivateDnsZonesResourceGroupId,
+    # PRIVATE NETWORK (INSTALL-1 item 5, Invardia 2026-11-02): the VNet's OWN resource group when it is not the install's (a
+    # customer's network resource group, same subscription). The VNet, its subnets and the private endpoints' subnet are read
+    # and created there; everything else stays in -ResourceGroupName. Empty = the install's resource group (as before).
+    [string]$VnetResourceGroup,
+    # PRIVATE STAYS PRIVATE (INSTALL-1 item 5 / Invardia DESIGN ch 12): with -SqlPrivateEndpoint, the SQL server is created
+    # with public network access DISABLED (an existing one is switched off once its private endpoint exists), and NO
+    # firewall rule is written (no AllowAzureServices, no AllowSetupHost). Off = today's behaviour.
+    [switch]$SqlPublicAccessDisabled,
+    # -LinkZonesToHub (INSTALL-1 item 5): the install's OWN privatelink zones are also linked to these VNets (the hub). Never
+    # used for the customer's central zones (-PrivateDnsZonesResourceGroupId: read only).
+    [string[]]$PrivateDnsZoneLinkVnetIds = @(),
     # 🔑 ACR TASKS RUN IN ACR'S OWN INFRASTRUCTURE, so `az acr build` cannot reach a registry whose
     # public access is off -- from anywhere outside the VNet. A dedicated agent pool runs those
     # tasks INSIDE the VNet instead, which is what makes an internal-only build reproducible from a
@@ -170,9 +186,37 @@ try {
 function Get-PimEffective { param([string]$Override,[string]$Derived)
     if ("$Override".Trim()) { "$Override".Trim() } else { $Derived }
 }
+function Resolve-PrereqPrivatelinkZone {
+    # INSTALL-1 item 5: the privatelink zone a private endpoint registers in -> @{ id; sub; rg }. With
+    # -PrivateDnsZonesResourceGroupId: the customer's central zone, READ only (missing = a stop; no zone and no link is
+    # written there). Without it: today's behaviour -- created when missing in -OwnResourceGroup and linked to the spoke.
+    param([Parameter(Mandatory)][string]$Zone, [Parameter(Mandatory)][string]$OwnResourceGroup)
+    $cz = [regex]::Match("$PrivateDnsZonesResourceGroupId".Trim(), '(?i)^/subscriptions/([^/]+)/resourceGroups/([^/]+?)/?$')
+    if ("$PrivateDnsZonesResourceGroupId".Trim()) {
+        if (-not $cz.Success) { throw "-PrivateDnsZonesResourceGroupId '$PrivateDnsZonesResourceGroupId' is not a resource group id (/subscriptions/<id>/resourceGroups/<name>)." }
+        $czId = "$((Get-PimArmPrivateDnsZone -SubscriptionId $cz.Groups[1].Value -ResourceGroup $cz.Groups[2].Value -Name $Zone -ErrorAsNull).id)"
+        if (-not "$czId".Trim()) { throw "the zone '$Zone' is not in $PrivateDnsZonesResourceGroupId -- your central zones are used and never created: create it there, or leave -PrivateDnsZonesResourceGroupId out." }
+        Write-Host "    $Zone -- your central zone in $PrivateDnsZonesResourceGroupId (used; no zone or link is written there -- it must answer inside $vnet)"
+        return @{ id = $czId; sub = $cz.Groups[1].Value; rg = $cz.Groups[2].Value }
+    }
+    try { [void](New-PimArmPrivateDnsZone -SubscriptionId $SubscriptionId -ResourceGroup $OwnResourceGroup -Name $Zone) } catch { Write-Verbose "zone create: $($_.Exception.Message)" }
+    $zid = "$((Get-PimArmPrivateDnsZone -SubscriptionId $SubscriptionId -ResourceGroup $OwnResourceGroup -Name $Zone -ErrorAsNull).id)"
+    if (-not "$zid".Trim()) { throw "could not create the '$Zone' zone in '$OwnResourceGroup' -- the name will not resolve." }
+    try { New-PimArmPrivateDnsLink -SubscriptionId $SubscriptionId -ResourceGroup $OwnResourceGroup -ZoneName $Zone -Name "link-$vnet" -VnetId $vnetId -RegistrationEnabled $false } catch { Write-Verbose "zone link: $($_.Exception.Message)" }
+    # -LinkZonesToHub: the install's OWN zone is linked to the hub too (read back; a refusal is a stop, never half done silently)
+    foreach ($lv in @($PrivateDnsZoneLinkVnetIds | ForEach-Object { "$_".Trim() } | Where-Object { $_ })) {
+        $ln = "link-$(($lv -split '/')[-1])"
+        try { New-PimArmPrivateDnsLink -SubscriptionId $SubscriptionId -ResourceGroup $OwnResourceGroup -ZoneName $Zone -Name $ln -VnetId $lv -RegistrationEnabled $false }
+        catch { throw "the zone '$Zone' could not be linked to $lv ($($_.Exception.Message)) -- the right to join that network is needed (or leave -LinkZonesToHub out: the link is then on the network hand-off)." }
+        Write-Host "    $Zone linked to $(($lv -split '/')[-1])"
+    }
+    return @{ id = $zid; sub = $SubscriptionId; rg = $OwnResourceGroup }
+}
 
 $rg      = Get-PimEffective $ResourceGroupName "rg-automateit-$Token"
 $vnet    = Get-PimEffective $VnetName          "vnet-pim-$Token"
+$vnetRg  = Get-PimEffective $VnetResourceGroup $rg                  # INSTALL-1 item 5: the VNet's own resource group
+if ($SqlPublicAccessDisabled -and -not $SqlPrivateEndpoint -and -not $SkipSql) { throw '-SqlPublicAccessDisabled needs -SqlPrivateEndpoint: a SQL server with no public endpoint and no private one is reachable from nowhere.' }
 $subnet  = Get-PimEffective $SubnetName        'snet-pim-aca'
 $law     = Get-PimEffective $LogAnalyticsName  "law-pim-$Token"
 # ACR: alphanumeric only. An OVERRIDE is sanitised the same way a derived name is -- silently
@@ -252,7 +296,7 @@ if ($WhatIfPreference) {
         "find or create VNet $vnet ($vnetCidr) with subnet $subnet ($subnetCidr) delegated to Microsoft.App/environments",
         "find or create Log Analytics workspace $law",
         "find or create container registry $acrPlan",
-        $(if ($AcrPublicAccess -eq 'false' -or $SqlPrivateEndpoint) { "find or create private-endpoint subnet $PrivateEndpointSubnetName ($PrivateEndpointSubnetAddressPrefix) and the privatelink DNS zone(s)$(if ("$PrivateDnsResourceGroup".Trim()) { " in $PrivateDnsResourceGroup" })" }),
+        $(if ($AcrPublicAccess -eq 'false' -or $SqlPrivateEndpoint) { "find or create private-endpoint subnet $PrivateEndpointSubnetName ($PrivateEndpointSubnetAddressPrefix) and the privatelink DNS zone(s)$(if ("$PrivateDnsZonesResourceGroupId".Trim()) { " -- your central zones in $PrivateDnsZonesResourceGroupId, used only (nothing created or written there)" } elseif ("$PrivateDnsResourceGroup".Trim()) { " in $PrivateDnsResourceGroup" })" }),
         "find or create the image-pull identity id-pim-$Token with AcrPull on $acr",
         "find or create SQL server and database $sqlPlan",
         $(if (-not $SkipSql -and $SqlPrivateEndpoint) { "find or create the SQL identity id-pim-sql-$Token (it administers the private database from inside the network)" }),
@@ -364,9 +408,9 @@ Write-Host "    $rg"
 # not accepting new customers" -- the exact constraint the -Location default exists to avoid.
 # An RG's location is metadata only, so a swedencentral VNet in a westeurope RG is fine.
 Write-Host "[3] vnet + delegated subnet ..." -ForegroundColor Yellow
-$vnetId = "$((Get-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $vnet -ErrorAsNull).id)"
+$vnetId = "$((Get-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -Name $vnet -ErrorAsNull).id)"
 if (-not $vnetId) {
-    try { [void](New-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $vnet -Location $Location -AddressPrefixes $vnetCidr -SubnetName $subnet -SubnetPrefix $subnetCidr) }
+    try { [void](New-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -Name $vnet -Location $Location -AddressPrefixes $vnetCidr -SubnetName $subnet -SubnetPrefix $subnetCidr) }
     catch { Write-PrereqRestNote $_.Exception.Message }
     # 🔴 STOP HERE IF THE CREATE DID NOT HAPPEN. Measured at a customer 2026-09-11: Azure Policy
     # denied the VNet, the denial was printed -- and the script carried on to `subnet update` and
@@ -375,16 +419,19 @@ if (-not $vnetId) {
     # useful line on screen and the crash was the first thing the operator read, so the real cause
     # was above the noise rather than at the point of failure.
     # A create whose result is never read is the unverified-write class this repo keeps finding.
-    $vnetId = "$((Get-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $vnet -ErrorAsNull).id)"
+    $vnetId = "$((Get-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -Name $vnet -ErrorAsNull).id)"
     if (-not $vnetId) {
         throw ("the VNet '$vnet' was NOT created in '$rg' -- see the failure printed immediately above " +
                "(an Azure Policy denial names its assignment and the field it evaluated). Nothing further " +
                "can be built on it, so this stops here rather than failing further down on a null.")
     }
 }
-try { [void](Set-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $subnet -Delegation 'Microsoft.App/environments') }
+# INSTALL-1 item 5 (-VnetId: a network that already exists): a MISSING Container Apps subnet is created with its range
+# (the update below carried only the delegation, which Azure refuses for a subnet that is not there yet)
+$snPre = Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $subnet -ErrorAsNull
+try { [void](Set-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $subnet -AddressPrefix $(if ($snPre) { '' } else { $subnetCidr }) -Delegation 'Microsoft.App/environments') }
 catch { Write-PrereqRestNote $_.Exception.Message }
-$snObj = Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $subnet -ErrorAsNull
+$snObj = Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $subnet -ErrorAsNull
 $sn = if ($snObj) { "$($snObj.properties.addressPrefix)`t$(@($snObj.properties.delegations)[0].properties.serviceName)" } else { '' }
 if (-not "$sn".Trim()) {
     throw ("subnet '$subnet' is missing or not readable in '$vnet'. The ACA environment cannot be " +
@@ -457,7 +504,7 @@ if (-not "$acrId".Trim()) {
 if ($AcrPublicAccess -eq 'false') {
     Write-Host "[5a] private endpoint for $acr ..." -ForegroundColor Yellow
     $peSubnet = $PrivateEndpointSubnetName
-    $peSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $peSubnet -ErrorAsNull).id)"
+    $peSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $peSubnet -ErrorAsNull).id)"
     if (-not "$peSubnetId".Trim()) {
         if (-not "$PrivateEndpointSubnetAddressPrefix".Trim()) {
             throw ("-AcrPublicAccess false needs a subnet for the private endpoint, and '$peSubnet' does " +
@@ -466,9 +513,9 @@ if ($AcrPublicAccess -eq 'false') {
                    "-PrivateEndpointSubnetAddressPrefix <cidr inside $vnetCidr> (a /26 is plenty; each " +
                    "endpoint takes one address). Refusing to pick a range inside the customer's VNet.")
         }
-        try { [void](Set-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $peSubnet -AddressPrefix $PrivateEndpointSubnetAddressPrefix) }
+        try { [void](Set-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $peSubnet -AddressPrefix $PrivateEndpointSubnetAddressPrefix) }
         catch { Write-PrereqRestNote $_.Exception.Message }
-        $peSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $peSubnet -ErrorAsNull).id)"
+        $peSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $peSubnet -ErrorAsNull).id)"
         if (-not "$peSubnetId".Trim()) { throw "could not create the private-endpoint subnet '$peSubnet' ($PrivateEndpointSubnetAddressPrefix) -- see the failure above." }
         Write-Host "    subnet $peSubnet $PrivateEndpointSubnetAddressPrefix"
     } else { Write-Host "    subnet $peSubnet (exists)" }
@@ -477,7 +524,7 @@ if ($AcrPublicAccess -eq 'false') {
     $peId = "$((Get-PimArmPrivateEndpoint -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $peName -ErrorAsNull).id)"
     if (-not "$peId".Trim()) {
         # A private endpoint lives in its VNet's region (the VNet is pinned to -Location in step 3).
-        $peLoc = "$((Get-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $vnet -ErrorAsNull).location)"; if (-not $peLoc) { $peLoc = $Location }
+        $peLoc = "$((Get-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -Name $vnet -ErrorAsNull).location)"; if (-not $peLoc) { $peLoc = $Location }
         try { [void](New-PimArmPrivateEndpoint -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $peName -Location $peLoc -SubnetId $peSubnetId -TargetResourceId $acrId -GroupId registry -ConnectionName acr) }
         catch { Write-PrereqRestNote $_.Exception.Message }
         $peId = "$((Get-PimArmPrivateEndpoint -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $peName -ErrorAsNull).id)"
@@ -488,16 +535,16 @@ if ($AcrPublicAccess -eq 'false') {
     # The zone lives in the customer's OWN resource group by default -- never in a shared hub RG,
     # which an operator may have no mandate to write into.
     $dnsRg = $(if ("$PrivateDnsResourceGroup".Trim()) { $PrivateDnsResourceGroup } else { $rg })
-    try { [void](New-PimArmPrivateDnsZone -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg -Name 'privatelink.azurecr.io') } catch { Write-Verbose "zone create: $($_.Exception.Message)" }
-    $zoneId = "$((Get-PimArmPrivateDnsZone -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg -Name 'privatelink.azurecr.io' -ErrorAsNull).id)"
-    if (-not "$zoneId".Trim()) { throw "could not create the 'privatelink.azurecr.io' zone in '$dnsRg' -- the registry name will not resolve." }
-    try { New-PimArmPrivateDnsLink -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg -ZoneName 'privatelink.azurecr.io' -Name "link-$vnet" -VnetId $vnetId -RegistrationEnabled $false } catch { Write-Verbose "zone link: $($_.Exception.Message)" }
+    # INSTALL-1 item 5: the zone is found or made (and linked) here -- or, with -PrivateDnsZonesResourceGroupId, the customer's
+    # central zone is only read (Resolve-PrereqPrivatelinkZone)
+    $zr = Resolve-PrereqPrivatelinkZone -Zone 'privatelink.azurecr.io' -OwnResourceGroup $dnsRg
+    $zoneId = $zr.id
     # 🪤 BOTH records come from the zone group. Hand-built A records routinely miss
     # <name>.<region>.data.azurecr.io, which is where layers move -- giving a login that works and a
     # pull that hangs.
     try { Set-PimArmPrivateDnsZoneGroup -SubscriptionId $SubscriptionId -ResourceGroup $rg -EndpointName $peName -Name zg -ZoneId $zoneId -ConfigName acr } catch { Write-Verbose "zone group: $($_.Exception.Message)" }
-    $recs = @(Get-PimArmPrivateDnsARecords -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg -ZoneName 'privatelink.azurecr.io' -ErrorAsNull | ForEach-Object { "$($_.name)" } | Where-Object { $_ })
-    Write-Host ("    privatelink.azurecr.io in $dnsRg -- {0} record(s): {1}" -f $recs.Count, ($recs -join ', '))
+    $recs = @(Get-PimArmPrivateDnsARecords -SubscriptionId $zr.sub -ResourceGroup $zr.rg -ZoneName 'privatelink.azurecr.io' -ErrorAsNull | ForEach-Object { "$($_.name)" } | Where-Object { $_ })
+    Write-Host ("    privatelink.azurecr.io in $($zr.rg) -- {0} record(s): {1}" -f $recs.Count, ($recs -join ', '))
     if ($recs.Count -lt 2) {
         Write-Warning ("    expected TWO records (the registry and its .data endpoint). Only $($recs.Count) " +
                        "present -- a pull will authenticate and then hang. Give the zone group a moment and re-run.")
@@ -512,7 +559,7 @@ if ("$AcrAgentPoolName".Trim()) {
     if ($AcrSku -ne 'Premium') { throw "-AcrAgentPoolName needs a Premium registry (this one is $AcrSku): agent pools are a Premium feature." }
     $poolState = "$((Get-PimArmAcrAgentPool -SubscriptionId $SubscriptionId -ResourceGroup $rg -Registry $acr -Name $AcrAgentPoolName -ErrorAsNull).properties.provisioningState)"
     if (-not "$poolState".Trim()) {
-        $poolSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $PrivateEndpointSubnetName -ErrorAsNull).id)"
+        $poolSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $PrivateEndpointSubnetName -ErrorAsNull).id)"
         # The pool lives in the registry's region (as `acr agentpool create` placed it).
         $poolLoc = "$($acrObj.location)"; if (-not $poolLoc) { $poolLoc = $Location }
         try { [void](New-PimArmAcrAgentPool -SubscriptionId $SubscriptionId -ResourceGroup $rg -Registry $acr -Name $AcrAgentPoolName -Location $poolLoc -Tier $AcrAgentPoolTier -Count $AcrAgentPoolCount -SubnetId $poolSubnetId) }
@@ -687,6 +734,8 @@ if ($SkipSql) {
         $sqlProps = @{ minimalTlsVersion = '1.2'
                        administrators = @{ administratorType = 'ActiveDirectory'; azureADOnlyAuthentication = $true
                                            principalType = 'Application'; login = "$sqlUami"; sid = "$sqlUamiOid"; tenantId = "$TenantId" } }
+        # PRIVATE STAYS PRIVATE (INSTALL-1 item 5): created with no public endpoint at all -- never public for a moment
+        if ($SqlPublicAccessDisabled) { $sqlProps['publicNetworkAccess'] = 'Disabled' }
         try { [void](New-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlSrv -Location $Location -Properties $sqlProps) }
         catch { throw ("could NOT create the SQL server '$sqlSrv' in '$Location' ($($_.Exception.Message); " +
                                     "'RegionDoesNotAllowProvisioning' means the region refuses new SQL servers for this subscription: deploy with another -Location).") }
@@ -779,6 +828,9 @@ if ($SkipSql) {
     } else { Write-Host "    SQL database ${sqlDb}: $($tier.reason)" -ForegroundColor DarkGray }
     $global:LASTEXITCODE = 0
     # ACA reaches SQL from inside the VNet; allow Azure services + this host for setup/tests.
+    # PRIVATE STAYS PRIVATE (INSTALL-1 item 5): -SqlPublicAccessDisabled writes NO firewall rule at all.
+    if ($SqlPublicAccessDisabled) { Write-Host "    firewall: none -- the server has no public endpoint (-SqlPublicAccessDisabled); the route is the private endpoint" -ForegroundColor DarkGray }
+    if (-not $SqlPublicAccessDisabled) {
     try { [void](Set-PimArmSqlFirewallRule -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv -Name AllowAzureServices -StartIp '0.0.0.0' -EndIp '0.0.0.0') } catch { Write-Verbose "firewall AllowAzureServices: $($_.Exception.Message)" }
     try {
         # IMP-49 t: say WHERE the address comes from. It used to ask a third-party web service
@@ -795,6 +847,7 @@ if ($SkipSql) {
                     "removes it at the end of its run. Standalone, remove it when done: az sql server firewall-rule delete " +
                     "--subscription $SubscriptionId -g $rg -s $sqlSrv -n AllowSetupHost") -ForegroundColor DarkGray
     } catch { Write-Warning "    could not add a setup-host firewall rule: $($_.Exception.Message)" }
+    }   # end: firewall rules only for a server with a public endpoint
     # Applied on EVERY run, not just at create: the policy is a property of an existing server, and
     # an environment that was built before this parameter existed must be able to acquire it by
     # re-running the (idempotent) prereq step rather than by a remembered manual command.
@@ -820,36 +873,46 @@ if ($SkipSql) {
     if ($SqlPrivateEndpoint) {
         Write-Host "    [6b] private endpoint for $sqlSrv ..." -ForegroundColor Yellow
         $peSubnet = $PrivateEndpointSubnetName
-        $peSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $peSubnet -ErrorAsNull).id)"
+        $peSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $peSubnet -ErrorAsNull).id)"
         if (-not "$peSubnetId".Trim()) {
             if (-not "$PrivateEndpointSubnetAddressPrefix".Trim()) {
                 throw ("-SqlPrivateEndpoint needs a subnet for it, and '$peSubnet' does not exist. The ACA " +
                        "subnet cannot be used (delegated to Microsoft.App/environments). Pass " +
                        "-PrivateEndpointSubnetAddressPrefix <cidr inside $vnetCidr>.")
             }
-            try { [void](Set-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $peSubnet -AddressPrefix $PrivateEndpointSubnetAddressPrefix) } catch { Write-Verbose "pe subnet: $($_.Exception.Message)" }
-            $peSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $peSubnet -ErrorAsNull).id)"
+            try { [void](Set-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $peSubnet -AddressPrefix $PrivateEndpointSubnetAddressPrefix) } catch { Write-Verbose "pe subnet: $($_.Exception.Message)" }
+            $peSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $peSubnet -ErrorAsNull).id)"
             if (-not "$peSubnetId".Trim()) { throw "could not create the private-endpoint subnet '$peSubnet'." }
         }
         $sqlSrvId = "$((Get-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlSrv -ErrorAsNull).id)"
         $peName = "pe-$sqlSrv"
         $peId = "$((Get-PimArmPrivateEndpoint -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $peName -ErrorAsNull).id)"
         if (-not "$peId".Trim()) {
-            $peLoc = "$((Get-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $vnet -ErrorAsNull).location)"; if (-not $peLoc) { $peLoc = $Location }
+            $peLoc = "$((Get-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -Name $vnet -ErrorAsNull).location)"; if (-not $peLoc) { $peLoc = $Location }
             try { [void](New-PimArmPrivateEndpoint -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $peName -Location $peLoc -SubnetId $peSubnetId -TargetResourceId $sqlSrvId -GroupId sqlServer -ConnectionName sql) }
             catch { Write-PrereqRestNote $_.Exception.Message }
             $peId = "$((Get-PimArmPrivateEndpoint -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $peName -ErrorAsNull).id)"
             if (-not "$peId".Trim()) { throw "the private endpoint '$peName' was NOT created -- see the failure above. Without it '$sqlSrv' is reachable from nowhere." }
         }
         $dnsRg2 = $(if ("$PrivateDnsResourceGroup".Trim()) { $PrivateDnsResourceGroup } else { $rg })
-        try { [void](New-PimArmPrivateDnsZone -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg2 -Name 'privatelink.database.windows.net') } catch { Write-Verbose "zone create: $($_.Exception.Message)" }
-        $zoneId2 = "$((Get-PimArmPrivateDnsZone -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg2 -Name 'privatelink.database.windows.net' -ErrorAsNull).id)"
-        if (-not "$zoneId2".Trim()) { throw "could not create the 'privatelink.database.windows.net' zone in '$dnsRg2' -- the server name will not resolve." }
-        try { New-PimArmPrivateDnsLink -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg2 -ZoneName 'privatelink.database.windows.net' -Name "link-$vnet" -VnetId $vnetId -RegistrationEnabled $false } catch { Write-Verbose "zone link: $($_.Exception.Message)" }
+        # INSTALL-1 item 5: found or made (and linked) here -- or the customer's central zone, only read
+        $zr2 = Resolve-PrereqPrivatelinkZone -Zone 'privatelink.database.windows.net' -OwnResourceGroup $dnsRg2
+        $zoneId2 = $zr2.id
         try { Set-PimArmPrivateDnsZoneGroup -SubscriptionId $SubscriptionId -ResourceGroup $rg -EndpointName $peName -Name zg -ZoneId $zoneId2 -ConfigName sql } catch { Write-Verbose "zone group: $($_.Exception.Message)" }
-        $recs2 = @(Get-PimArmPrivateDnsARecords -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg2 -ZoneName 'privatelink.database.windows.net' -ErrorAsNull | ForEach-Object { "$($_.name)" } | Where-Object { $_ })
-        Write-Host ("         privatelink.database.windows.net in $dnsRg2 -- {0} record(s): {1}" -f $recs2.Count, ($recs2 -join ', '))
+        $recs2 = @(Get-PimArmPrivateDnsARecords -SubscriptionId $zr2.sub -ResourceGroup $zr2.rg -ZoneName 'privatelink.database.windows.net' -ErrorAsNull | ForEach-Object { "$($_.name)" } | Where-Object { $_ })
+        Write-Host ("         privatelink.database.windows.net in $($zr2.rg) -- {0} record(s): {1}" -f $recs2.Count, ($recs2 -join ', '))
         if (-not $recs2.Count) { Write-Warning "         no A record yet -- the zone group may still be settling; re-run to confirm." }
+        # PRIVATE STAYS PRIVATE (INSTALL-1 item 5): an EXISTING server (created before, public) loses its public endpoint here,
+        # only now that its private endpoint exists -- read back.
+        if ($SqlPublicAccessDisabled) {
+            $pnaNow = "$((Get-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlSrv -ErrorAsNull).properties.publicNetworkAccess)".Trim()
+            if ($pnaNow -ne 'Disabled') {
+                try { [void](Update-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlSrv -Properties @{ publicNetworkAccess = 'Disabled' }) } catch { Write-PrereqRestNote $_.Exception.Message }
+                $pnaNow = "$((Get-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlSrv -ErrorAsNull).properties.publicNetworkAccess)".Trim()
+                if ($pnaNow -ne 'Disabled') { throw "the SQL server '$sqlSrv' still has public network access '$pnaNow' -- a private install stays private: an Azure Policy may govern Microsoft.Sql/servers/publicNetworkAccess." }
+            }
+            Write-Host "         public network access: Disabled (read back)"
+        }
     }
 
     $fqdn = "$((Get-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlSrv -ErrorAsNull).properties.fullyQualifiedDomainName)"
@@ -873,8 +936,8 @@ function Chk($label, $cond, $detail) {
     if ($cond) { Write-Host ("  {0,-22}: {1}" -f $label, $detail) }
     else { Write-Host ("  {0,-22}: MISSING" -f $label) -ForegroundColor Red; $script:ok = $false }
 }
-$vnetOk   = "$(@((Get-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $vnet -ErrorAsNull).properties.addressSpace.addressPrefixes)[0])"
-$snOk     = "$(@((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $subnet -ErrorAsNull).properties.delegations)[0].properties.serviceName)"
+$vnetOk   = "$(@((Get-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -Name $vnet -ErrorAsNull).properties.addressSpace.addressPrefixes)[0])"
+$snOk     = "$(@((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $subnet -ErrorAsNull).properties.delegations)[0].properties.serviceName)"
 $lawOk    = "$((Get-PimArmLogAnalytics -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $law -ErrorAsNull).properties.customerId)"
 $acrOk    = "$((Get-PimArmAcr -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $acr -ErrorAsNull).properties.loginServer)"
 Chk 'vnet'          ([bool]$vnetOk) $vnetOk
@@ -909,7 +972,11 @@ if (-not $SkipSql) {
     # BUG-215: both reads are scoped to -SubscriptionId explicitly (REST paths carry it; there is no default context).
     $pna     = "$((Get-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlSrv -ErrorAsNull).properties.publicNetworkAccess)".Trim()
     $fwSetup = "$((Get-PimArmSqlFirewallRule -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv -Name AllowSetupHost -ErrorAsNull).name)".Trim()
-    if ($pna -eq 'Disabled') {
+    if ($pna -eq 'Disabled' -and $SqlPublicAccessDisabled) {
+        # INSTALL-1 item 5: the intended state of a private install -- its SQL steps run from inside the network
+        Write-Host ("  {0,-22}: public access Disabled by design (private install: the route is the private endpoint)" -f 'sql reachability')
+    }
+    elseif ($pna -eq 'Disabled') {
         Write-Host ("  {0,-22}: PUBLIC ACCESS DISABLED" -f 'sql reachability') -ForegroundColor Yellow
         Write-Warning ("SQL server '$sqlSrv' has publicNetworkAccess=Disabled, so THIS host cannot reach it. " +
                        "The next steps (contained users, schema) will fail with 'Deny Public Network Access is set to Yes'. " +

@@ -189,6 +189,11 @@ param(
     # itself is left alone. The reachability check still reports the peering honestly -- an absent
     # peering is reported as absent, never assumed to be fine because it was skipped on purpose.
     [switch]$SkipPeering,
+    # PRIVATE NETWORK (framework INSTALL-1 item 5: -LinkZonesToHub is OFF by default): the hub stays named, but the
+    # environment's private zone is linked to the spoke only -- the hub link goes on the install's network hand-off.
+    [switch]$SkipZoneLinkToHub,
+    # INSTALL-1 item 5 (-PeerToHub): rights on BOTH VNets first, never half a peering (Set-PimVnetPeering -AllOrNothing)
+    [switch]$PeeringAllOrNothing,
     # §52.1. The deploy grants this environment network access to the SQL server (subnet service
     # endpoint + VNet rule, with the Azure-services firewall rule verified as a belt). Skip it
     # ONLY when the store is reached over a private endpoint -- without one of those paths the
@@ -668,7 +673,7 @@ if ("$HubVnetName".Trim() -and "$HubVnetResourceGroup".Trim() -and $SkipPeering)
     Step "Peering: $VnetName <-> $HubVnetName (the spoke is created isolated)"
     Set-PimVnetPeering -SpokeVnetName $VnetName -SpokeResourceGroup $VnetResourceGroup `
         -SpokeSubscriptionId $SubscriptionId -HubVnetName $HubVnetName `
-        -HubResourceGroup $HubVnetResourceGroup -HubSubscriptionId $hubSubForPeering
+        -HubResourceGroup $HubVnetResourceGroup -HubSubscriptionId $hubSubForPeering -AllOrNothing:$PeeringAllOrNothing
 } elseif ($Exposure -eq 'internal') {
     # Not a Note. A skipped reachability step that prints quietly is indistinguishable from one
     # that ran, and that is exactly how an unreachable environment gets called deployed.
@@ -712,8 +717,10 @@ if ($SkipPrivateDns) {
     # the PIM VNet (the tick Job calling the Manager) resolves the same name to the same IP.
     $linkVnets = New-Object System.Collections.Generic.List[string]
     $linkVnets.Add((New-PimVnetResourceId -SubscriptionId $SubscriptionId -ResourceGroup $VnetResourceGroup -VnetName $VnetName)) | Out-Null
-    if ("$HubVnetName".Trim() -and "$HubVnetResourceGroup".Trim()) {
+    if ("$HubVnetName".Trim() -and "$HubVnetResourceGroup".Trim() -and -not $SkipZoneLinkToHub) {
         $linkVnets.Add((New-PimVnetResourceId -SubscriptionId $hubSubForPeering -ResourceGroup $HubVnetResourceGroup -VnetName $HubVnetName)) | Out-Null
+    } elseif ("$HubVnetName".Trim() -and $SkipZoneLinkToHub) {
+        Note "private DNS: the zone '$envDomain' is linked to the spoke only (-SkipZoneLinkToHub) -- linking it to '$HubVnetName' is on the network hand-off"
     }
     Step "Private DNS: zone '$envDomain' -> $envStatic (in $dnsRg)"
     Set-PimPrivateDnsZone -EnvDomain $envDomain -StaticIp $envStatic -ResourceGroup $dnsRg `

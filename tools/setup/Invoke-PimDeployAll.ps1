@@ -371,6 +371,23 @@ param(
     # their own naming standard. The hub is still named, so the private DNS zone is created and
     # linked -- omitting the hub entirely would lose that too. See Setup-PimContainers -SkipPeering.
     [switch]$SkipPeering,
+    # PRIVATE NETWORK (framework INSTALL-1 item 5, EPS DESIGN §2b; both inert unless given): the customer's CENTRAL
+    # privatelink zones (a resource group id, any subscription) -- USED by the prereq step, never created or written (no zone,
+    # no virtual network link); and -SkipZoneLinkToHub: the hub stays named (the peering hand-off) but the environment's
+    # private zone is linked to the spoke only (the install's -LinkZonesToHub is off by default).
+    [string]$PrivateDnsZonesResourceGroupId,
+    [switch]$SkipZoneLinkToHub,
+    # PRIVATE NETWORK, Invardia's decisions 2026-11-02 (all inert unless given):
+    #   -SqlPublicAccessDisabled  with the SQL private endpoint: the server is created with NO public endpoint and no firewall
+    #                             rule is written (prereq); the setup-host window never applies to it (already true for a
+    #                             private endpoint)
+    #   -LinkZonesToHub           the install's own privatelink zones are linked to the hub too (prereq), not only the
+    #                             Container Apps environment's zone (infra) -- never the customer's central zones
+    #   -PeeringAllOrNothing      the peering checks the rights on BOTH VNets before any write and never leaves half a
+    #                             peering (Set-PimVnetPeering -AllOrNothing)
+    [switch]$SqlPublicAccessDisabled,
+    [switch]$LinkZonesToHub,
+    [switch]$PeeringAllOrNothing,
     # §52.1. Forwarded to INFRA, which grants this environment network access to the SQL server
     # (subnet service endpoint + VNet rule, Azure-services firewall rule verified). Skip ONLY for
     # a private-endpoint store: without one of those paths the Manager starts, is refused by SQL,
@@ -1946,14 +1963,13 @@ function Invoke-DefaultStepRunner {
                 AcrName       = $(if ("$AcrName".Trim())       { "$AcrName".Trim() }       else { $derived.AcrName })
                 VnetName      = $(if ("$VnetName".Trim())      { "$VnetName".Trim() }      else { $derived.VnetName })
             }
-            # The VNet may live in its own RG (an existing customer hub/spoke); prereq is told
-            # which RG to build the VNet in, so a -VnetResourceGroup that points elsewhere means
-            # prereq would create a VNet the deploy never uses. That IS still a split brain.
-            if ("$VnetResourceGroup".Trim() -and "$VnetResourceGroup".Trim() -ne $eff.ResourceGroup) {
-                return @{ ok=$false; ran=$true; detail=("PREREQ would create the VNet in '$($eff.ResourceGroup)' but this deploy reads it from " +
-                    "'$VnetResourceGroup'. Refusing -- provisioning under names INFRA never reads is a silent half-deploy. " +
-                    "Either point -VnetResourceGroup at the deploy RG, or pre-create the VNet and skip the prereq step.") }
-            }
+            # The VNet may live in its own RG (an existing customer hub/spoke). INSTALL-1 item 5 (Invardia 2026-11-02): the
+            # split-brain guard is now met by FORWARDING it -- prereq reads / creates the VNet, its subnets and the private
+            # endpoints' subnet in the SAME -VnetResourceGroup infra reads (New-PimHostingPrerequisites -VnetResourceGroup),
+            # instead of refusing a network in its own resource group. The purpose is unchanged: never a silent half-deploy
+            # (prereq building a VNet that INFRA never reads) -- both halves now name the same resource group.
+            $prqVnetRg = @{}
+            if ("$VnetResourceGroup".Trim() -and "$VnetResourceGroup".Trim() -ne $eff.ResourceGroup) { $prqVnetRg['VnetResourceGroup'] = "$VnetResourceGroup".Trim() }
             if ($PSCmdlet.ShouldProcess($eff.ResourceGroup, 'create hosting prerequisites (RG, VNet, ACR, Log Analytics, SQL, AcrPull identity)')) {
                 $prqId = @{}
                 if ($UseSignedInAccount)              { $prqId['UseSignedInAccount'] = $true }
@@ -1982,9 +1998,15 @@ function Invoke-DefaultStepRunner {
                 if ("$SqlAdminGroupName".Trim())          { $prqShape['SqlAdminGroupName']   = "$SqlAdminGroupName".Trim() }
                 if ("$SupportAppId".Trim())               { $prqShape['SupportAppId']        = "$SupportAppId".Trim() }
                 if ("$SetupHostIp".Trim())                { $prqShape['SetupHostIp']         = "$SetupHostIp".Trim() }   # IMP-49 t: no external lookup
+                if ("$PrivateDnsZonesResourceGroupId".Trim()) { $prqShape['PrivateDnsZonesResourceGroupId'] = "$PrivateDnsZonesResourceGroupId".Trim() }   # INSTALL-1 item 5: central zones, used only
+                # INSTALL-1 item 5 (Invardia 2026-11-02): private stays private; the own zones linked to the hub when asked
+                if ($SqlPublicAccessDisabled)             { $prqShape['SqlPublicAccessDisabled'] = $true }
+                if ($LinkZonesToHub -and "$HubVnetName".Trim() -and "$HubVnetResourceGroup".Trim()) {
+                    $prqShape['PrivateDnsZoneLinkVnetIds'] = @("/subscriptions/$(if ("$HubVnetSubscriptionId".Trim()) { "$HubVnetSubscriptionId".Trim() } else { $SubscriptionId })/resourceGroups/$HubVnetResourceGroup/providers/Microsoft.Network/virtualNetworks/$HubVnetName")
+                }
                 $global:LASTEXITCODE = 0
                 try {
-                & $prq @prqId @prqShape -TenantId $TenantId -SubscriptionId $SubscriptionId -Token $PrereqToken `
+                & $prq @prqId @prqShape @prqVnetRg -TenantId $TenantId -SubscriptionId $SubscriptionId -Token $PrereqToken `
                     -Index $PrereqIndex -Location $Location -AddressBase $PrereqAddressBase `
                     -SkipSql:$PrereqSkipSql -SqlConnectionPolicy $SqlConnectionPolicy `
                     -AcrSku $AcrSku -AcrPublicAccess $AcrPublicAccess `
@@ -2111,6 +2133,8 @@ function Invoke-DefaultStepRunner {
             if ($PrivateDnsResourceGroup)    { $reach['PrivateDnsResourceGroup']    = $PrivateDnsResourceGroup }
             if ($SkipPrivateDns)             { $reach['SkipPrivateDns']             = $true }
             if ($SkipPeering)                { $reach['SkipPeering']                = $true }
+            if ($SkipZoneLinkToHub)          { $reach['SkipZoneLinkToHub']          = $true }   # INSTALL-1 item 5
+            if ($PeeringAllOrNothing)        { $reach['PeeringAllOrNothing']        = $true }   # INSTALL-1 item 5: rights first, never half
             if ($SkipSqlNetworkAccess)       { $reach['SkipSqlNetworkAccess']       = $true }
             if ($DnsServer)                  { $reach['DnsServer']                  = $DnsServer }
             if ($AzureRbacRoles)             { $reach['AzureRbacRoles']             = $AzureRbacRoles }

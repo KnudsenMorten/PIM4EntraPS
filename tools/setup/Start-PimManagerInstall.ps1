@@ -30,6 +30,10 @@
   without -SupportAppId nothing is granted. -ViaSupportApp runs the install as the Invardia Support app: it needs a
   Connect-InvardiaSupport session for the same tenant in this PowerShell window. Several tenants (MSP) are set up with
   the managing-tenant build, not this command.
+  Public network by default; -PrivateNetwork installs the private shape (no public address) with the same two lines, with
+  SI's network parameters (-VnetId, -VnetAddressPrefix, -VnetName, -AppsSubnetName / -AppsSubnetPrefix,
+  -EndpointsSubnetName / -EndpointsSubnetPrefix, -PrivateDnsZonesResourceGroupId, -HubVnetId with -PeerToHub /
+  -LinkZonesToHub, -WebAppAccess); Install-PimManager's help has the details.
 
   Exit codes: those of Install-PimManager (0 done, 1 a step failed -- fix it and -Resume, 2 a check failed -- nothing was
   changed, 3 bad answers -- nothing was changed); 3 also when the release cannot be read or a check of the download fails.
@@ -84,8 +88,21 @@ param(
     [string[]]$PortalUsers = @(),
     [switch]$AllowAllMembers,
     [string]$VnetAddressPrefix = '',
-    [string]$SubnetAddressPrefix = '',
-    [string]$Exposure = '',
+    [Parameter(DontShow)][string]$SubnetAddressPrefix = '',   # old name of -AppsSubnetPrefix (one release)
+    [Parameter(DontShow)][string]$Exposure = '',              # old name: -Exposure internal = -PrivateNetwork (one release)
+    # --- PRIVATE NETWORK (framework INSTALL-1 item 5): SI's names, passed through unchanged; public without -PrivateNetwork ---
+    [switch]$PrivateNetwork,
+    [string]$VnetId = '',
+    [string]$VnetName = '',
+    [string]$AppsSubnetName = '',
+    [string]$AppsSubnetPrefix = '',
+    [string]$EndpointsSubnetName = '',
+    [string]$EndpointsSubnetPrefix = '',
+    [string]$PrivateDnsZonesResourceGroupId = '',
+    [string]$HubVnetId = '',
+    [switch]$LinkZonesToHub,
+    [switch]$PeerToHub,
+    [ValidateSet('', 'external', 'internal')][string]$WebAppAccess = '',
     # INSTALL-1 ALIGN: not documented any more (the copy decides the edition, $script:PimInstallChannel below). Accepted for
     # ONE release so the 3.0.17 command lines keep working; when given it wins. Drop it in the next release.
     [ValidateSet('', 'Community', 'Trial', 'Pro')][string]$Edition = '',
@@ -238,6 +255,10 @@ try {
     # ---------------------------------------------------------------- 2. run the installer from the release, same parameters
     $pass = @{}
     foreach ($k in @('TenantId', 'SubscriptionId', 'Location', 'ResourceGroup', 'SuperAdmins', 'AlertRecipients', 'MailSender', 'PortalUsers', 'AllowAllMembers', 'VnetAddressPrefix', 'SubnetAddressPrefix', 'Exposure', 'Edition', 'UpdateRing', 'KeyVaultName', 'EngineAzureRootUserAccessAdmin', 'InstallId', 'SupportAppId', 'SupportAccess', 'Reporter', 'StatePath', 'Resume', 'PreflightOnly', 'ViaSupportApp')) {
+        if ($PSBoundParameters.ContainsKey($k)) { $pass[$k] = $PSBoundParameters[$k] }
+    }
+    # PRIVATE NETWORK (INSTALL-1 item 5): the network parameters, passed through unchanged
+    foreach ($k in @('PrivateNetwork', 'VnetId', 'VnetName', 'AppsSubnetName', 'AppsSubnetPrefix', 'EndpointsSubnetName', 'EndpointsSubnetPrefix', 'PrivateDnsZonesResourceGroupId', 'HubVnetId', 'LinkZonesToHub', 'PeerToHub', 'WebAppAccess')) {
         if ($PSBoundParameters.ContainsKey($k)) { $pass[$k] = $PSBoundParameters[$k] }
     }
     # INSTALL-1 ALIGN: the edition comes from this copy (a given -Edition still wins for one release); the ring defaults to 3

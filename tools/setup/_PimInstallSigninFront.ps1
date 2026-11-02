@@ -394,9 +394,11 @@ function New-PimInstallSigninFrontIo {
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$TenantId,
           [Parameter(Mandatory)][string]$AcrName, [Parameter(Mandatory)][string]$SqlServerFqdn, [Parameter(Mandatory)][string]$SqlDatabase,
-          [Parameter(Mandatory)][string]$SetupDir)
+          [Parameter(Mandatory)][string]$SetupDir,
+          # INSTALL-1 item 5: a private install's registry has public access off -- its image builds run on this agent pool
+          [string]$AgentPoolName = '')
     return @{
-        Ctx = @{ sub = $SubscriptionId; rg = $ResourceGroup; acr = $AcrName; fqdn = $SqlServerFqdn; db = $SqlDatabase; tid = $TenantId; sd = $SetupDir }
+        Ctx = @{ sub = $SubscriptionId; rg = $ResourceGroup; acr = $AcrName; fqdn = $SqlServerFqdn; db = $SqlDatabase; tid = $TenantId; sd = $SetupDir; pool = "$AgentPoolName".Trim() }
         Arm = {
             param($Method, $Path, $Body, $ApiVersion)
             if ($Method -eq 'PATCHENV') { return (Set-PimArmAcaJobEnvVars -SubscriptionId $Io.Ctx.sub -ResourceGroup $Io.Ctx.rg -Name (($Path -split '/')[-1]) -Env $Body) }
@@ -419,7 +421,8 @@ function New-PimInstallSigninFrontIo {
         }
         Build = {
             param($ContextPath, $ImageName)
-            Invoke-PimAcrRestBuild -SubscriptionId $Io.Ctx.sub -ResourceGroup $Io.Ctx.rg -RegistryName $Io.Ctx.acr -ContextPath $ContextPath -ImageNames @($ImageName) -DockerFilePath 'Dockerfile'
+            $poolArg = @{}; if ("$($Io.Ctx.pool)".Trim()) { $poolArg['AgentPoolName'] = "$($Io.Ctx.pool)".Trim() }
+            Invoke-PimAcrRestBuild -SubscriptionId $Io.Ctx.sub -ResourceGroup $Io.Ctx.rg -RegistryName $Io.Ctx.acr -ContextPath $ContextPath -ImageNames @($ImageName) -DockerFilePath 'Dockerfile' @poolArg
         }
         TagCheck = { param($LoginServer, $Tag) Test-PimSigninFrontImagePresent -LoginServer $LoginServer -Tag $Tag }
         Move = { param([hashtable]$MoveArgs) & (Join-Path $Io.Ctx.sd 'Set-PimManagerSigninFront.ps1') @MoveArgs }

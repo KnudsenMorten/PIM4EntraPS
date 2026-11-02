@@ -43,7 +43,8 @@ PIM Manager gives you **one governed model in your own tenant**:
 
 You need **PowerShell 7** and an account that is **Owner of the Azure subscription** and **Privileged Role
 Administrator** in Entra ID. You sign in in your browser: no app secret, no certificate, no Azure CLI and no PowerShell
-modules. Line 1 downloads the installer from the public release on GitHub, line 2 runs it with your values -- there is
+modules. Line 1 downloads the installer (Community: from the public release on GitHub; Pro and trial: from Invardia),
+line 2 runs it with your values -- there is
 no key, licence or settings file in the command. Open a new PowerShell 7 window for each.
 
 **1. The most common: Community, browser sign-in, everything else defaulted.** Start here.
@@ -69,13 +70,14 @@ Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/d
     -ResourceGroup rg-pim-manager -SuperAdmins 'admin1@contoso.com','admin2@contoso.com' -AlertRecipients 'pim-alerts@contoso.com'
 ```
 
-**4. Pro, or a free 60-day Pro trial.** The same command plus `-Edition Pro`. When the installation is done, sign in to
-PIM Manager and add your licence in **Settings > Licence** ([start a trial](https://invardia.com/trial/)); the Pro
-features switch on with it.
+**4. Pro, or a free 60-day Pro trial.** The same two lines, with the installer from Invardia instead of GitHub
+([start a trial](https://invardia.com/trial/) first). The installation then asks Invardia for its licence by itself: a
+trial arrives within minutes, a Pro licence once Invardia has confirmed your order. Nothing to paste; the Pro features
+switch on with the licence.
 
 ```powershell
-Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
-.\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -Edition Pro
+Invoke-WebRequest https://invardia.com/support/pim/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
+.\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>'
 ```
 
 **5. It stopped -- carry on.** Fix what the installer named, then run the same command with `-Resume`: finished steps

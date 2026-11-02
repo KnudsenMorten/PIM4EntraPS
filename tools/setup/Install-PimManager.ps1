@@ -12,8 +12,10 @@
 
   Install-PimManager -TenantId <tenant id> -SubscriptionId <subscription id> [-Location <region>] [-ResourceGroup <name>]
       [-SuperAdmins <upn,...>] [-AlertRecipients <mail,...>] [-MailSender <mail>] [-PortalUsers <upn,...>] [-AllowAllMembers]
-      [-VnetAddressPrefix <cidr>] [-SubnetAddressPrefix <cidr>] [-Exposure external] [-Edition Community|Trial|Pro]
-      [-UpdateRing 2|3] [-KeyVaultName <name>] [-EngineAzureRootUserAccessAdmin] [-InstallId <id>]
+      [-VnetAddressPrefix <cidr>] [-VnetName <name>] [-AppsSubnetName <name>] [-AppsSubnetPrefix <cidr>]
+      [-PrivateNetwork [-VnetId <id>] [-EndpointsSubnetName <name>] [-EndpointsSubnetPrefix <cidr>]
+       [-PrivateDnsZonesResourceGroupId <id>] [-HubVnetId <id> [-PeerToHub] [-LinkZonesToHub]] [-WebAppAccess internal]]
+      [-Edition Community|Trial|Pro] [-UpdateRing 2|3] [-KeyVaultName <name>] [-EngineAzureRootUserAccessAdmin] [-InstallId <id>]
       [-SupportAppId <client id> [-SupportAccess troubleshoot|setup|asbuilt]] [-Reporter <scriptblock>] [-StatePath <dir>]
       [-Resume] [-PreflightOnly] [-ViaSupportApp] [-WhatIf]
 
@@ -36,6 +38,23 @@
   Settings > Licence. The Pro features switch on with the licence, and PIM Manager then registers itself with Invardia
   for its updates. Several tenants (MSP) are set up with the managing-tenant build, not this command.
 
+  NETWORK. Public by default: the PIM Manager is reachable on the internet behind Microsoft Entra sign-in, in its own
+  virtual network vnet-pim (-VnetAddressPrefix, default 10.220.0.0/22; the Container Apps subnet -AppsSubnetName /
+  -AppsSubnetPrefix, default snet-pim-aca 10.220.0.0/23). -PrivateNetwork installs the PRIVATE shape with the same
+  command: the Container Apps environment is internal (no public address; -WebAppAccess is then internal), the database and
+  the registry are reached only over private endpoints in -EndpointsSubnetName / -EndpointsSubnetPrefix (default
+  pim-endpoints, the /26 right after the apps subnet): SQL is created with public network access disabled and no firewall
+  rule, the registry is Premium with public access disabled and builds its images on its agent pool (pimpool) inside the
+  network. -VnetId uses a network you already have instead of making one (any resource group of the installation's
+  subscription). -PrivateDnsZonesResourceGroupId names your central privatelink zones: they are used, never created or
+  written. -HubVnetId names your hub; -PeerToHub peers it (your rights on both networks are checked first, and a peering is
+  never left half made) and -LinkZonesToHub links all of PIM Manager's own private zones to it (both off). The same command
+  with -PrivateNetwork on an existing PUBLIC installation converts it (Convert-PimToPrivate.ps1 runs underneath, data kept).
+  Before anything is created the step 'preflight-network' reads the network, the hub's range and the central zones; at the
+  end the network hand-off (peering, DNS for the PIM Manager, the database and the registry) is printed and written to
+  network-hand-off.txt in the state folder. A private install runs from a machine inside that network or one peered to
+  it (its SQL steps reach the database over the private endpoint), and so do its later setup scripts and a -Resume.
+
   Start it from the launcher (Start-PimManagerInstall.ps1, a release file of the public release: it downloads that
   release and runs this script from it with the same parameters), or from a copy of the release.
 
@@ -44,8 +63,8 @@
     1. checks the answers (the parameters)                                                              -> exit 3 when bad
     2. preflight: sign-in, tenant + subscription, rights, providers, names, services in the region     -> exit 2 when failed
        (-PreflightOnly stops here, exit 0)
-    3. deploys with Invoke-PimDeployAll (the external, signed-in Container Apps shape; the public release), reporting
-       every step                                                                                        -> exit 1 when failed
+    3. deploys with Invoke-PimDeployAll (the signed-in Container Apps shape, public or -PrivateNetwork; the public
+       release), reporting every step                                                                    -> exit 1 when failed
     4. grants the Invardia Support app its access when -SupportAppId names one, runs the END-OF-INSTALL CHECK
        ('verify-install', Confirm-PimInstall.ps1: SuperAdmins, updater + ring, licence (Pro: a reminder until it is added),
        mail sender + both sending identities in scope, alert recipients, the engine's Graph rights + Reader at the tenant
@@ -80,6 +99,14 @@
   After a stop: run the same command with -Resume; finished steps are skipped and the installation goes on where it stopped.
 
 .NOTES
+  Requirements:
+    PowerShell: 7.0 or later (pwsh; Azure Cloud Shell has it). Windows PowerShell 5.1 is not supported.
+    Role: Owner on the target subscription (Azure); Privileged Role Administrator and Application Administrator
+          (Microsoft Entra); Exchange Administrator only for the mail sender (optional). A -PrivateNetwork install with
+          -PeerToHub / -LinkZonesToHub also needs the right to write the peering / the zone link on the hub network.
+    Hosts: login.microsoftonline.com, management.azure.com, graph.microsoft.com, *.database.windows.net (port 1433),
+           *.azurecr.io, outlook.office365.com (mail sender)
+
   PERMISSIONS (the full list, with scope, reason and undo, is on the documentation page and in Install-PimManager.doc.json):
   The person running it needs: Owner (or Contributor + User Access Administrator) on the subscription; in Entra ID
   Privileged Role Administrator (Graph app roles for the managed identities, the role-assignable SQL admin group) and
@@ -113,8 +140,22 @@ param(
     [string[]]$PortalUsers = @(),
     [switch]$AllowAllMembers,
     [string]$VnetAddressPrefix = '',
-    [string]$SubnetAddressPrefix = '',
-    [string]$Exposure = '',
+    # the old names of -AppsSubnetPrefix / -PrivateNetwork, kept one release for a printed -Resume command of an earlier run
+    [Parameter(DontShow)][string]$SubnetAddressPrefix = '',
+    [Parameter(DontShow)][string]$Exposure = '',
+    # --- PRIVATE NETWORK (framework INSTALL-1 item 5): SI's names, name for name; public when -PrivateNetwork is not given ---
+    [switch]$PrivateNetwork,
+    [string]$VnetId = '',
+    [string]$VnetName = '',
+    [string]$AppsSubnetName = '',
+    [string]$AppsSubnetPrefix = '',
+    [string]$EndpointsSubnetName = '',
+    [string]$EndpointsSubnetPrefix = '',
+    [string]$PrivateDnsZonesResourceGroupId = '',
+    [string]$HubVnetId = '',
+    [switch]$LinkZonesToHub,
+    [switch]$PeerToHub,
+    [ValidateSet('', 'external', 'internal')][string]$WebAppAccess = '',
     # Community = the free edition, the Core features (the default when no edition is given). Trial / Pro install the same
     # way with the Pro updater and NO licence: the licence is added afterwards in PIM Manager > Settings > Licence.
     [ValidateSet('', 'Community', 'Trial', 'Pro')][string]$Edition = '',
@@ -156,7 +197,9 @@ param(
     [scriptblock]$StoreSql,
     # --- test seam (GUIDED-INSTALL-FRONT, offline tests/Test-PimGuidedInstall.ps1): param([hashtable]$A, [scriptblock]$OnStep)
     # -> @{ ok; failedStep; reason; completed[]; keyVaultId } in place of Invoke-PimInstallSigninFront -- omit it for a real install ---
-    [scriptblock]$SigninFront
+    [scriptblock]$SigninFront,
+    # --- test seam (INSTALL-1 item 5, public -> private): param([hashtable]$A) -> the exit code of Convert-PimToPrivate.ps1 ---
+    [scriptblock]$ConvertToPrivate
 )
 $ErrorActionPreference = 'Stop'
 # INSTALL-SAMPLES: the command-line answers, captured FIRST -- PowerShell variables are case-insensitive, and this script's own
@@ -337,6 +380,11 @@ $cliAnswers = @{ tenantId = $TenantId; subscriptionId = $SubscriptionId; locatio
 # a switch is an answer only when it is GIVEN (a "False" text would read as true)
 if ($AllowAllMembers) { $cliAnswers['allowAllMembers'] = $true }
 if ($EngineAzureRootUserAccessAdmin) { $cliAnswers['engineAzureRootUserAccessAdmin'] = $true }
+# PRIVATE NETWORK (INSTALL-1 item 5): SI's names, only what was GIVEN (Test-PimInstallNetworkAnswers checks them)
+foreach ($nk in 'VnetId', 'VnetName', 'AppsSubnetName', 'AppsSubnetPrefix', 'EndpointsSubnetName', 'EndpointsSubnetPrefix', 'PrivateDnsZonesResourceGroupId', 'HubVnetId', 'WebAppAccess') {
+    if ($pimCli.ContainsKey($nk)) { $cliAnswers[$nk.Substring(0, 1).ToLowerInvariant() + $nk.Substring(1)] = "$($pimCli[$nk])" }
+}
+foreach ($nk in 'PrivateNetwork', 'LinkZonesToHub', 'PeerToHub') { if ($pimCli.ContainsKey($nk) -and [bool]$pimCli[$nk]) { $cliAnswers[$nk.Substring(0, 1).ToLowerInvariant() + $nk.Substring(1)] = $true } }
 $ans = ConvertTo-PimInstallAnswers -Parameters $cliAnswers
 if (@($ans.missing).Count) {
     Emit 'config' 'failed' ("missing: " + (@($ans.missing | ForEach-Object { '-' + $_.Substring(0, 1).ToUpperInvariant() + $_.Substring(1) }) -join ' and ') + " -- the Microsoft Entra tenant and the Azure subscription to install PIM Manager into") 'Run the command again with them:' "-TenantId '<tenant id>' -SubscriptionId '<subscription id>'"
@@ -373,6 +421,11 @@ foreach ($pn in 'TenantId', 'SubscriptionId', 'Location', 'ResourceGroup', 'Supe
     if ($pv.Count) { $cliResume += " -$pn " + (@($pv | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ',') }
 }
 foreach ($sw in 'AllowAllMembers', 'EngineAzureRootUserAccessAdmin', 'ViaSupportApp') { if ($pimCli.ContainsKey($sw) -and [bool]$pimCli[$sw]) { $cliResume += " -$sw" } }
+# PRIVATE NETWORK (INSTALL-1 item 5): the network parameters ride along the same way
+foreach ($pn in 'VnetId', 'VnetName', 'AppsSubnetName', 'AppsSubnetPrefix', 'EndpointsSubnetName', 'EndpointsSubnetPrefix', 'PrivateDnsZonesResourceGroupId', 'HubVnetId', 'WebAppAccess') {
+    if ($pimCli.ContainsKey($pn) -and "$($pimCli[$pn])".Trim()) { $cliResume += " -$pn '" + ("$($pimCli[$pn])".Trim() -replace "'", "''") + "'" }
+}
+foreach ($sw in 'PrivateNetwork', 'LinkZonesToHub', 'PeerToHub') { if ($pimCli.ContainsKey($sw) -and [bool]$pimCli[$sw]) { $cliResume += " -$sw" } }
 $stateFull = & $fullPath $StatePath
 $resumeCmd = "& '$PSCommandPath'$cliResume -StatePath '$stateFull' -Resume"
 $editionText = if ($community) { 'Community (no licence needed)' } else { "$((Get-Culture).TextInfo.ToTitleCase("$($cfg.edition)")) -- installed without a licence; afterwards $licenceHint" }
@@ -516,6 +569,22 @@ Pre 'preflight-names' {
     @{ state = 'ok'; message = ($msgs -join ' ') }
 }
 
+# PRIVATE NETWORK (INSTALL-1 item 5): a -PrivateNetwork install reads, before anything is created, the network it is given
+# (-VnetId: there, same region, subnets usable / free), the hub's range (no overlap) and the central zones (there -- they are
+# never created). Reads only; the verdict is Get-PimInstallNetworkVerdict (pure, _PimGuidedInstall.ps1). A public install
+# has no such step.
+if ($cfg.privateNetwork) {
+    Write-Host "    network: PRIVATE -- PIM Manager has no public address (Container Apps environment internal, database over a private endpoint)" -ForegroundColor Cyan
+    Pre 'preflight-network' {
+        $armGet = { param([string]$Id, [string]$Api) if (-not "$Id".Trim()) { return $null }; Get-InstallRest "https://management.azure.com$("$Id".Trim())?api-version=$Api" 'https://management.azure.com/' }
+        $vn = if ("$($cfg.vnetId)".Trim()) { & $armGet $cfg.vnetId '2023-09-01' } else { $null }
+        $hb = if ("$($cfg.hubVnetId)".Trim()) { & $armGet $cfg.hubVnetId '2023-09-01' } else { $null }
+        $zs = @{}
+        if ("$($cfg.privateDnsZonesResourceGroupId)".Trim()) { foreach ($z in @(Get-PimInstallPrivateZoneNames)) { $zs[$z] = [bool](& $armGet "$($cfg.privateDnsZonesResourceGroupId)/providers/Microsoft.Network/privateDnsZones/$z" '2020-06-01') } }
+        Get-PimInstallNetworkVerdict -Config $cfg -Vnet $vn -Hub $hb -Zones $zs
+    }
+}
+
 # 100.62 THE CUSTOMER DECIDES THE REGION: no region list -- this step reads, for THIS subscription, whether every service PIM
 # Manager creates is offered in the chosen region (ARM provider locations + Azure SQL's capabilities: region open, Standard S0),
 # names exactly what is missing and suggests the nearest region that has all of it. Reads only; the step id is kept (the
@@ -584,6 +653,7 @@ if ($WhatIfPreference) {
     if ("$($cfg.supportAppId)".Trim()) {
         Write-Host "  What if: give the Invardia Support app $($cfg.supportAppId) '$($cfg.supportAccess)' access (Grant-PimSupportAccess.ps1: at 'asbuilt' ONLY start the as-built job + read its PDF container; at 'troubleshoot' also a contained SQL user with db_datareader + VIEW DEFINITION; at 'setup' also ownership of PIM's own app registrations and groups; at EVERY level its standing access to the PIM database: membership of the SQL admin group and its own database user with the database owner role, which stays after the installation until you switch the Support app off)" -ForegroundColor Yellow
     }
+    if ($cfg.privateNetwork) { Write-Host '  What if: private network -- when this resource group already holds a PUBLIC PIM Manager, it is first converted to the private network (Convert-PimToPrivate.ps1 underneath, data kept); SQL and the registry get NO public access and no firewall rule; the network hand-off is printed at the end' -ForegroundColor Yellow }
     Write-Host '  What if: run the end-of-install check (Confirm-PimInstall.ps1). It REPAIRS what it can, so it is not run under -WhatIf -- run without -WhatIf to apply.' -ForegroundColor Yellow
     Write-Host 'WHAT IF -- nothing was changed.' -ForegroundColor Green
     Finish 0
@@ -596,6 +666,28 @@ $env:PIM_GUIDED_INSTALL_RUN = '1'
 # ================================================================== 3. deploy
 # APP-IDENTITY INSTALL (2026-10-21): an application is never the default SuperAdmin / portal user -- only the answers name them.
 $deployArgs = ConvertTo-PimInstallDeployArgs -Config $cfg -SignedInUpn $(if ("$($who.supportAppId)".Trim()) { '' } else { $who.userName })
+# ================================================================== 3a. PUBLIC -> PRIVATE (INSTALL-1 item 5, Invardia 2026-11-02)
+# "the SAME two lines + -PrivateNetwork on an existing PUBLIC PIM install converts it": the install reads its own Container
+# Apps environment; when it is EXTERNAL, Convert-PimToPrivate.ps1 runs underneath with the mapped values (the customer never
+# runs it by hand), then the deploy below continues on the private shape (idempotent). A stop where the network team must
+# act (its exit 10) ends this run with the -Resume command; the conversion then continues where it stopped.
+if ($cfg.privateNetwork -and -not $done.Contains('convert-private')) {
+    $cvEnv = Get-InstallRest "https://management.azure.com/subscriptions/$($cfg.subscriptionId)/resourceGroups/$($names.resourceGroup)/providers/Microsoft.App/managedEnvironments/$($names.environment)?api-version=2024-03-01" 'https://management.azure.com/'
+    $cvd = Get-PimInstallConvertDecision -Config $cfg -Environment $cvEnv
+    if ($cvd.refuse) { Emit 'prereq' 'failed' "$($cvd.reason) -- nothing was changed" 'Run the same command without -VnetId.'; Finish 2 }
+    if ($cvd.convert -or $done.Contains('convert-started')) {
+        Emit 'prereq' 'started' "$(if ($cvd.reason) { $cvd.reason } else { 'continuing the conversion to the private network' })"
+        $cvArgs = ConvertTo-PimInstallConvertArgs -Config $cfg -Names $names -PortalUsers @($deployArgs['EasyAuthAllowedPrincipals']) -AllMembers:([bool]$cfg.allowAllMembers) -Resume:($done.Contains('convert-started'))
+        if (-not $ConvertToPrivate) { $ConvertToPrivate = { param([hashtable]$A) $global:LASTEXITCODE = 0; & (Join-Path $here 'Convert-PimToPrivate.ps1') @A | Out-Host; [int]$LASTEXITCODE } }
+        Mark 'convert-started'
+        $cvCode = 1
+        try { $cvCode = [int](@(& $ConvertToPrivate ([hashtable]$cvArgs)) | Select-Object -Last 1) } catch { Write-Host "    the conversion stopped: $($_.Exception.Message)" -ForegroundColor Red; $cvCode = 1 }
+        if ($cvCode -eq 10) { Emit 'prereq' 'failed' 'the conversion to the private network stopped where your network team must act (printed above: the hub side of the peering, or the check from inside the network)' 'When that is done, run the same command again with -Resume:' $resumeCmd; Finish 1 }
+        if ($cvCode -ne 0) { Emit 'prereq' 'failed' "the conversion to the private network did not complete (exit $cvCode) -- its rollback is printed above; the data is kept" 'Fix the cause above, then resume the installation:' $resumeCmd; Finish 1 }
+        Mark 'convert-private'
+        Write-Host '    converted to the private network (Convert-PimToPrivate.ps1) -- the installation continues on the private shape' -ForegroundColor Cyan
+    }
+}
 # REQ 98.4 (b) (install finding 2026-10-11): a run that DIED left 'AllowSetupHost' on the SQL server, the next run took it
 # for somebody else's and the end-of-install check failed with a fix only possible in the portal. Now THIS install owns its
 # window: before the deploy starts it reads the rule and -- when it is not there -- writes into the state file that the rule
@@ -603,7 +695,9 @@ $deployArgs = ConvertTo-PimInstallDeployArgs -Config $cfg -SignedInUpn $(if ("$(
 # told the caller owns the window (-KeepSetupHostRule: it opens / moves the rule and leaves it open for the licence step
 # and the check), and the install closes it: the end-of-install check removes it and reads it back, and every way out
 # (Finish, the finally below) closes what is left. A rule that was there BEFORE this install has no record: never removed.
-if ($SetupHostRule) {
+# PRIVATE STAYS PRIVATE (INSTALL-1 item 5): a private install opens NO firewall window -- its SQL has no public endpoint and
+# its SQL steps run from inside the network.
+if ($SetupHostRule -and -not $cfg.privateNetwork) {
     $ruleNow = $null
     try { $ruleNow = "$(& $SetupHostRule 'get' $hostRuleTarget)".Trim() } catch { $ruleNow = $null; Write-Verbose "setup-host rule read failed: $($_.Exception.Message)" }
     $hostPlan = Get-PimInstallSetupHostRulePlan -Recorded $pimInstallMem.hostRule -Target $hostRuleTarget -RuleIp $ruleNow
@@ -686,7 +780,7 @@ if ($SigninFront -or -not $azSeam) {
     if (-not $SigninFront) {
         $SigninFront = { param([hashtable]$A, [scriptblock]$OnStep)
             $io = New-PimInstallSigninFrontIo -SubscriptionId $A.SubscriptionId -ResourceGroup $A.ResourceGroup -TenantId $A.TenantId -AcrName $A.AcrName `
-                    -SqlServerFqdn $names.sqlFqdn -SqlDatabase $A.SqlDatabase -SetupDir $here
+                    -SqlServerFqdn $names.sqlFqdn -SqlDatabase $A.SqlDatabase -SetupDir $here -AgentPoolName "$($deployArgs['AcrAgentPoolName'])"   # INSTALL-1 item 5: '' on a public install
             Invoke-PimInstallSigninFront @A -OnStep $OnStep -Io $io }
     }
     $sfR = $null
@@ -785,7 +879,22 @@ Mark 'completed'
 # the end-of-install summary: a Pro / trial environment says what to do next, in the completed line and on the screen
 $doneMsg = $(if ($outputs.portalUrl) { "open the PIM Manager: $($outputs.portalUrl)" } else { 'installation complete' })
 if ($licenceLater) { $doneMsg += " -- next: $licenceHint" }
-Emit 'completed' 'completed' $doneMsg -Outputs $outputs
+# PRIVATE NETWORK (INSTALL-1 item 5, EPS DESIGN §2b): the network hand-off -- peering, DNS for the PIM Manager and the
+# database, where later scripts run -- on the screen, in the completed event and in network-hand-off.txt in the state folder
+# (named "network notes" in code: the word handoff is reserved for the sign-in tokens, which are never written -- Test-PimInstallHandoff D2)
+$netNotes = @(Get-PimInstallNetworkHandoff -Config $cfg -Names $names -PortalFqdn $fqdn)
+$doneDetail = $null
+if ($netNotes.Count) {
+    $doneMsg += ' -- next: your network team makes it reachable (network hand-off below)'
+    $doneDetail = [ordered]@{}
+    $doneDetail['networkHandoff'] = @($netNotes)
+    try { Set-Content -LiteralPath (Join-Path $StatePath 'network-hand-off.txt') -Value $netNotes -Encoding utf8 } catch { Write-Verbose "network notes file: $($_.Exception.Message)" }
+}
+Emit 'completed' 'completed' $doneMsg -Outputs $outputs -Detail $doneDetail
+if ($netNotes.Count) {
+    Write-Host '    Network hand-off (also in network-hand-off.txt in the state folder):' -ForegroundColor Cyan
+    foreach ($hl in $netNotes) { Write-Host "      - $hl" -ForegroundColor Cyan }
+}
 if ($licenceLater) { Write-Host "    Next: $licenceHint. PIM Manager then registers itself with Invardia for its updates." -ForegroundColor Cyan }
 Finish 0
 } finally {

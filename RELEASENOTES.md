@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.19 -- 2026-11-02
+
+- private network on the same two install lines: -PrivateNetwork with the same option names as SI and EPS (an existing VNet in another resource group, hub peering with the rights checked first, all private DNS zones linked to the hub when asked); the database and the registry are created with public access off and no firewall rule; the same two lines + -PrivateNetwork turn an existing public installation private
+
 ## 3.0.18 -- 2026-11-02
 
 - one installer file for Community (GitHub) and Pro/Trial (invardia.com): one built-in line tells them apart, no -Edition in the command; the update ring defaults to 3; the Support app gets Troubleshoot access by default when it is named by its id (never found by name); -ViaSupportApp for an install run through the Invardia Support app; the GitHub installer is the built, self-contained file

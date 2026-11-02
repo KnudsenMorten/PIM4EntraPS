@@ -186,6 +186,13 @@ deployment is a supported choice) and no credentials lying around.
   app either read-only access to the PIM database (troubleshoot) or setup access (it may repair and upgrade: database
   administration and ownership of PIM's own app registrations and groups). The same command with a remove switch
   takes everything back. Nothing is granted twice, and every change is read back.
+- **Support's database access is time-limited and needs your consent.** ✅ 2026-11-02 — You decide, once, how far
+  Invardia support may go in the PIM database (none, read, or owner); only you can change that setting. When support
+  needs more than read access, it asks for a number of hours (at most 24) with a ticket and a reason, within your
+  consent. The access ends at that time by itself: the job that gave it takes it back, and the PIM heartbeat, the job
+  and PIM Manager each also remove any access whose end has passed, so it never outlives its window. Access that was
+  already there before is recorded and left alone. Every grant, extension and removal is recorded. Proven on a real
+  SQL Server and on the internal environment (PIM Manager 3.0.17).
 - **Pro updates arrive signed, through Invardia.** ✅ 2026-10-06 — A Pro installation claims its install key with its
   licence, then takes each new version from Invardia for its own update ring: the release is signed, checked against a
   key built into PIM, checked for its sequence (no replay, no step back) and its archive fingerprint, built in your own

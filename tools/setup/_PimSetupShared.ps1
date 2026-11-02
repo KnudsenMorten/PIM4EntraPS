@@ -1068,6 +1068,20 @@ function Show-PimAdDnsRecord {
     foreach ($l in $plan.lines) { Write-Host "    $l" -ForegroundColor White }
 }
 
+function Get-PimPeeringRightsGaps {
+    <#
+      PURE (INSTALL-1 item 5; EntraPolicySuite's Test-EpsArmActions, copied): the actions a peering needs on ONE VNet that
+      -Permissions (the Microsoft.Authorization/permissions entries at that VNet: actions / notActions, wildcards) do NOT
+      allow. @() = allowed.
+    #>
+    param([object[]]$Permissions = @())
+    $need = @('Microsoft.Network/virtualNetworks/virtualNetworkPeerings/write', 'Microsoft.Network/virtualNetworks/peer/action')
+    return @(foreach ($a in $need) {
+        $ok = @(@($Permissions) | Where-Object { $p = $_; $p -and @(@($p.actions) | Where-Object { $a -like "$_" }).Count -and -not @(@($p.notActions) | Where-Object { $a -like "$_" }).Count }).Count
+        if (-not $ok) { $a }
+    })
+}
+
 function Set-PimVnetPeering {
     <#
       BUG-49 -- THE DEPLOY BUILT AN ISLAND.
@@ -1091,7 +1105,13 @@ function Set-PimVnetPeering {
         [Parameter(Mandatory)][string]$SpokeSubscriptionId,
         [Parameter(Mandatory)][string]$HubVnetName,
         [Parameter(Mandatory)][string]$HubResourceGroup,
-        [string]$HubSubscriptionId
+        [string]$HubSubscriptionId,
+        # INSTALL-1 item 5 (Invardia 2026-11-02, EPS's model): check the rights on BOTH VNets before any write (one plain
+        # line naming what is missing), and never leave half a peering -- when the second side fails, the side this run
+        # created is removed again and that is said. Off = today's behaviour.
+        [switch]$AllOrNothing,
+        # test seam: param([string]$VnetId) -> the Microsoft.Authorization/permissions entries at that VNet (default ARM)
+        [scriptblock]$ReadPermissions
     )
     # Read the address spaces so the PURE planner can refuse an overlap by name rather than
     # letting az refuse it with a message that names neither range. Unreadable => $null =>
@@ -1110,6 +1130,22 @@ function Set-PimVnetPeering {
     if (-not $plan.ok) { throw "VNet peering refused: $($plan.reason)" }
     Write-Host "    $($plan.reason)" -ForegroundColor DarkGray
 
+    $createdThisRun = New-Object System.Collections.Generic.List[object]
+    if ($AllOrNothing -and -not $WhatIfPreference) {
+        # RIGHTS FIRST, on BOTH VNets -- Azure's own answer, read before anything is written
+        if (-not $ReadPermissions) { $ReadPermissions = { param([string]$VnetId) @(Invoke-PimSetupArm -Path "$VnetId/providers/Microsoft.Authorization/permissions" -ApiVersion (Get-PimSetupApiVersion authorization) -All) } }
+        $gaps = New-Object System.Collections.Generic.List[string]
+        foreach ($side in @(@{ label = "the hub $HubVnetName"; id = $plan.hubVnetId }, @{ label = "the PIM network $SpokeVnetName"; id = $plan.spokeVnetId })) {
+            $perms = $null; try { $perms = @(& $ReadPermissions $side.id) } catch { $perms = $null }
+            $miss = if ($null -eq $perms) { @('(your rights there could not be read)') } else { @(Get-PimPeeringRightsGaps -Permissions $perms) }
+            if ($miss.Count) { $gaps.Add("$($side.label): $($miss -join ', ')") | Out-Null }
+        }
+        if ($gaps.Count) {
+            throw ("VNet peering NOT started -- the rights it needs are missing on $($gaps -join '; '). Nothing was created. Ask the " +
+                   "network's owner for them (Network Contributor on both VNets is enough), or leave -PeerToHub out: the peering is then on the network hand-off.")
+        }
+    }
+
     foreach ($p in $plan.pairs) {
         $peer = Get-PimArmVnetPeering -SubscriptionId $p.subscriptionId -ResourceGroup $p.resourceGroup -VnetName $p.vnetName -Name $p.name -ErrorAsNull
         $existing = if ($peer) { "$($peer.properties.remoteVirtualNetwork.id)" } else { '' }
@@ -1127,6 +1163,16 @@ function Set-PimVnetPeering {
             $peerErr = ''
             try { [void](New-PimArmVnetPeering -SubscriptionId $p.subscriptionId -ResourceGroup $p.resourceGroup -VnetName $p.vnetName -Name $p.name -RemoteVnetId $p.remoteVnetId -AllowVnetAccess $true) }
             catch { $peerErr = "$($_.Exception.Message)" }
+            if ($peerErr -and $AllOrNothing) {
+                # NEVER HALF A PEERING: what this run created is removed again, read back, and said
+                $undone = @(foreach ($c in $createdThisRun) {
+                    $cPath = Get-PimArmResourceId $c.subscriptionId $c.resourceGroup 'Microsoft.Network/virtualNetworks' $c.vnetName "virtualNetworkPeerings/$($c.name)"
+                    try { [void](Invoke-PimSetupArm -Method DELETE -Path $cPath -ApiVersion (Get-PimSetupApiVersion network)) } catch { Write-Verbose "peering undo: $($_.Exception.Message)" }
+                    $left = Get-PimArmVnetPeering -SubscriptionId $c.subscriptionId -ResourceGroup $c.resourceGroup -VnetName $c.vnetName -Name $c.name -ErrorAsNull
+                    if ($left) { "$($c.name) on $($c.vnetName) could NOT be removed -- delete it by hand" } else { "$($c.name) on $($c.vnetName) was removed again" } })
+                throw ("VNet peering create failed for '$($p.name)' on $($p.vnetName) ($peerErr) -- no half peering is left: " +
+                       $(if ($undone.Count) { $undone -join '; ' } else { 'nothing else had been created' }) + '.')
+            }
             if ($peerErr) {
                 $code = $peerErr
                 # §95.2 item 9: the hub usually belongs to another team -- write THEIR script, with the exact names, instead
@@ -1143,6 +1189,7 @@ function Set-PimVnetPeering {
                        $(if ($prep) { " The owner of '$HubVnetName' can create the hub side with the script written to $prep -- then run setup again." } else { '' }))
             }
             Write-Host "    peering $($p.name): created" -ForegroundColor Green
+            $createdThisRun.Add($p) | Out-Null
         }
     }
 

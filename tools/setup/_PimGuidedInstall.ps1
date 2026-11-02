@@ -36,6 +36,7 @@ function Get-PimInstallStepCatalog { return [ordered]@{
     'preflight-rights'     = 'Your Azure and Entra rights'
     'preflight-providers'  = 'Azure resource providers'
     'preflight-names'      = 'Resource names'
+    'preflight-network'    = 'Your private network'   # a -PrivateNetwork install only
     'preflight-sql-region' = 'Azure services in the chosen region'
     'preflight-admins'     = 'PIM Manager administrators'
     'prereq'             = 'Network, registry, identity and database'
@@ -121,8 +122,8 @@ function Get-PimInstallToken {
 function Test-PimInstallConfig {
     <#
       PURE. Validate the answers (the object ConvertTo-PimInstallAnswers builds from the parameters). Returns
-      @{ ok; errors[]; config (normalised) }. Refuses: a missing / malformed required value, an unknown enum value, internal
-      exposure (the guided install is external only), an MSP role (managing / managed tenants are set up with the
+      @{ ok; errors[]; config (normalised) }. Refuses: a missing / malformed required value, an unknown enum value, a network
+      answer that does not fit (Test-PimInstallNetworkAnswers), an MSP role (managing / managed tenants are set up with the
       managing-tenant build, not this install), a bad CIDR / UPN / e-mail.
     #>
     param([AllowNull()][object]$Config)
@@ -150,21 +151,11 @@ function Test-PimInstallConfig {
     $ed = "$(& $get 'edition')".Trim().ToLowerInvariant(); if (-not $ed) { $ed = 'trial' }
     if ($ed -notin 'community', 'trial', 'pro') { $err.Add("edition must be community, trial or pro (got '$ed')") }
     $c.edition = $ed
-    $ex = "$(& $get 'exposure')".Trim().ToLowerInvariant(); if (-not $ex) { $ex = 'external' }
-    if ($ex -ne 'external') { $err.Add("exposure '$ex' is not supported by the guided install -- it installs the external (public, signed-in) shape; an internal install is a consultant-led setup") }
-    $c.exposure = $ex
-    $cidr = '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})$'
-    $vn = "$(& $get 'vnetAddressPrefix')".Trim(); if (-not $vn) { $vn = '10.220.0.0/22' }
-    $sn = "$(& $get 'subnetAddressPrefix')".Trim(); if (-not $sn) { $sn = '10.220.0.0/23' }
-    foreach ($pair in @(@('vnetAddressPrefix', $vn), @('subnetAddressPrefix', $sn))) {
-        $m = [regex]::Match($pair[1], $cidr)
-        if (-not $m.Success -or @(1..4 | Where-Object { [int]$m.Groups[$_].Value -gt 255 }).Count -or [int]$m.Groups[5].Value -gt 32) { $err.Add("$($pair[0]) '$($pair[1])' is not an IPv4 CIDR") }
-    }
-    $snm = [regex]::Match($sn, $cidr)
-    if ($snm.Success -and [int]$snm.Groups[5].Value -gt 23) { $err.Add("subnetAddressPrefix '$sn' is smaller than /23 -- Container Apps needs a /23 or larger") }
-    $vnm = [regex]::Match($vn, $cidr)
-    if ($snm.Success -and $vnm.Success -and [int]$snm.Groups[5].Value -lt [int]$vnm.Groups[5].Value) { $err.Add("subnetAddressPrefix '$sn' is larger than the VNet '$vn'") }
-    $c.vnetAddressPrefix = $vn; $c.subnetAddressPrefix = $sn
+    # PRIVATE NETWORK (framework INSTALL-1 item 5): public by default, -PrivateNetwork = the private shape. The network answers
+    # (SI's names; the old -Exposure / -SubnetAddressPrefix mapped for one release) are checked in ONE place below.
+    $net = Test-PimInstallNetworkAnswers -Get $get -SubscriptionId $c.subscriptionId -ResourceGroup $rg
+    foreach ($e in @($net.errors)) { $err.Add($e) }
+    foreach ($k in @($net.values.Keys)) { $c[$k] = $net.values[$k] }
     $role = "$(& $get 'mspRole')".Trim().ToLowerInvariant(); if (-not $role) { $role = 'single' }
     # ONE-LINE-INSTALL (owner 2026-11-02): this install is a single tenant. A managing or managed tenant (MSP) is set up with the
     # managing-tenant build (Invoke-PimMspBuild), never with an answers file or an enrollment key here.
@@ -304,6 +295,8 @@ function ConvertTo-PimInstallDeployArgs {
         PrereqToken = $n.token; PrereqVnetAddressPrefix = $Config.vnetAddressPrefix; PrereqSubnetAddressPrefix = $Config.subnetAddressPrefix
         ManagerSuperAdmins = (@($admins) -join ','); UseSignedInAccount = $true; SkipAppReg = $true; Apply = $true
     }
+    # PRIVATE NETWORK (INSTALL-1 item 5): SI's names onto the engine's own parameters (public: the values above, unchanged)
+    Add-PimInstallNetworkDeployArgs -DeployArgs $a -Config $Config -ResourceGroup $n.resourceGroup
     # CR5 step 2: the new names -- the deploy decides them from the resource group (a new one: the new names)
     if ($n.newNames) { $a['NewInstallNames'] = $true }
     if (@($portal).Count) { $a['EasyAuthAllowedPrincipals'] = @($portal) }
@@ -336,6 +329,320 @@ function ConvertTo-PimInstallDeployArgs {
         $a['FeatureGates'] = @('scheduler.jobs', 'alerting.email')
     }
     return $a
+}
+
+# ==== PRIVATE NETWORK ON THE TWO LINES (framework INSTALL-1 item 5; owner 2026-11-02: "must support public + private network.
+# simple 2 line cmdlets" / "dont overcomplicate it") ====================================================================
+# NOT a new capability: SI's parameter names, name for name (their meaning: EntraPolicySuite DESIGN §2b), mapped onto the
+# private shape Invoke-PimDeployAll ALREADY builds with -Exposure internal (own VNet, SQL private endpoint, Premium registry,
+# private DNS, optional hub). Public stays the default and is unchanged. The address helpers are EPS's, copied (isolation
+# over sharing). Everything here is PURE; the one Azure read is Install-PimManager's 'preflight-network' step.
+function ConvertFrom-PimInstallCidr {
+    # 'a.b.c.d/n' -> @{ Start; End; Length; Text } (IPv4, the network address itself -- host bits set is refused); $null when not
+    param([string]$Cidr)
+    if ("$Cidr" -notmatch '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})$') { return $null }
+    $m = $Matches; $o = @([int]$m[1], [int]$m[2], [int]$m[3], [int]$m[4]); $len = [int]$m[5]
+    if (@($o | Where-Object { $_ -gt 255 }).Count -or $len -lt 8 -or $len -gt 29) { return $null }
+    [uint64]$ip = ([uint64]$o[0] * 16777216) + ([uint64]$o[1] * 65536) + ([uint64]$o[2] * 256) + [uint64]$o[3]
+    [uint64]$size = [uint64][math]::Pow(2, 32 - $len)
+    if ($ip % $size) { return $null }
+    return @{ Start = $ip; End = $ip + $size - 1; Length = $len; Text = "$Cidr" }
+}
+function ConvertTo-PimInstallCidrText([uint64]$Start, [int]$Length) {
+    '{0}.{1}.{2}.{3}/{4}' -f ([math]::Floor($Start / 16777216) % 256), ([math]::Floor($Start / 65536) % 256), ([math]::Floor($Start / 256) % 256), ($Start % 256), $Length
+}
+function Test-PimInstallCidrOverlap($A, $B) { [bool]($A -and $B -and $A.Start -le $B.End -and $B.Start -le $A.End) }
+function Test-PimInstallCidrInside($Inner, $Outer) { [bool]($Inner -and $Outer -and $Inner.Start -ge $Outer.Start -and $Inner.End -le $Outer.End) }
+# the privatelink zones the private shape uses: the SQL private endpoint's and the registry's (public access off, Invardia
+# 2026-11-02: "private stays private")
+function Get-PimInstallPrivateZoneNames { @('privatelink.database.windows.net', 'privatelink.azurecr.io') }
+# the registry's agent pool of a private install: the image builds run on it, inside the network (billed while it exists)
+function Get-PimInstallAgentPoolName { 'pimpool' }
+
+function Test-PimInstallNetworkAnswers {
+    <#
+      PURE. The network answers of the install -> @{ errors[]; values } (values = the normalised config keys). -Get reads an
+      answer by its key (Test-PimInstallConfig's reader). Public (the default): exposure external, the VNet range + the apps
+      subnet as before. -PrivateNetwork: exposure internal (= the engine's private shape). Refused with one plain line each:
+      a private-only answer without -PrivateNetwork, -WebAppAccess that contradicts the shape, a bad id / name / range, two
+      ranges that overlap or a subnet outside its network, a -VnetId in another subscription (another resource group of
+      the same subscription is fine: carried as VnetResourceGroup, Invardia 2026-11-02), -PeerToHub /
+      -LinkZonesToHub without -HubVnetId. Old names, one release: -Exposure internal = -PrivateNetwork, -SubnetAddressPrefix =
+      -AppsSubnetPrefix (an earlier run's printed -Resume command may carry them).
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Get, [string]$SubscriptionId = '', [string]$ResourceGroup = '')
+    $vnetRx = '(?i)^/subscriptions/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/resourceGroups/([^/]+)/providers/Microsoft\.Network/virtualNetworks/([^/]+)$'
+    $rgRx = '(?i)^/subscriptions/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/resourceGroups/([^/]+?)/?$'
+    $snRx = '^[A-Za-z0-9][A-Za-z0-9_.-]{0,78}[A-Za-z0-9_]$'
+    $err = New-Object System.Collections.Generic.List[string]
+    $s = { param($k) "$(& $Get $k)".Trim() }
+    $on = { param($k) "$(& $Get $k)".Trim() -match '^(?i)(true|1|yes|on)$' }
+    $pn = { param($k) '-' + $k.Substring(0, 1).ToUpperInvariant() + $k.Substring(1) }
+    $v = [ordered]@{}
+    $ex = (& $s 'exposure').ToLowerInvariant()
+    if ($ex -and $ex -notin 'external', 'internal') { $err.Add("exposure must be external or internal (got '$ex') -- -PrivateNetwork is the private network install") }
+    $private = [bool]((& $on 'privateNetwork') -or $ex -eq 'internal')
+    if ($ex -eq 'external' -and (& $on 'privateNetwork')) { $err.Add('-Exposure external and -PrivateNetwork contradict each other -- leave -Exposure out') }
+    $v.privateNetwork = $private
+    $v.exposure = $(if ($private) { 'internal' } else { 'external' })
+    $wa = (& $s 'webAppAccess').ToLowerInvariant()
+    if ($wa -and $wa -notin 'external', 'internal') { $err.Add("webAppAccess must be external or internal (got '$wa')") }
+    elseif ($wa -eq 'internal' -and -not $private) { $err.Add('-WebAppAccess internal needs -PrivateNetwork (the PIM Manager is then reachable from your network only)') }
+    elseif ($wa -eq 'external' -and $private) { $err.Add('-PrivateNetwork means -WebAppAccess internal: the Container Apps environment has no public address -- leave -WebAppAccess out or say internal') }
+    $v.webAppAccess = $v.exposure
+    $privOnly = @(@(@('vnetId', 'endpointsSubnetName', 'endpointsSubnetPrefix', 'privateDnsZonesResourceGroupId', 'hubVnetId') | Where-Object { & $s $_ }) + @(@('linkZonesToHub', 'peerToHub') | Where-Object { & $on $_ }))
+    if (-not $private -and $privOnly.Count) { $err.Add("$(@($privOnly | ForEach-Object { & $pn $_ }) -join ', ') belong to a private network install: add -PrivateNetwork (or leave them out for the public install)") }
+    # the network: an existing one (-VnetId) or one the install makes (-VnetName + -VnetAddressPrefix)
+    $vid = & $s 'vnetId'; $vnetName = & $s 'vnetName'; $vnetPfx = & $s 'vnetAddressPrefix'
+    $v.vnetId = ''; $v.vnetResourceGroup = "$ResourceGroup".Trim()
+    if ($vid -and $private) {
+        $m = [regex]::Match($vid, $vnetRx)
+        if (-not $m.Success) { $err.Add("-VnetId '$vid' is not a virtual network resource id (/subscriptions/<id>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<name>)") }
+        else {
+            $v.vnetId = $vid.TrimEnd('/')
+            # Invardia 2026-11-02: a network in ANOTHER RESOURCE GROUP of the same subscription is fine (the customer's network
+            # resource group; the deploy carries it as VnetResourceGroup). Another SUBSCRIPTION stays refused.
+            if ($SubscriptionId -and $m.Groups[1].Value -ine "$SubscriptionId".Trim()) { $err.Add("-VnetId is in subscription $($m.Groups[1].Value): PIM Manager uses a network in the subscription it is installed in ($("$SubscriptionId".Trim())) -- give a network of that subscription, or leave -VnetId out and the installation makes its own") }
+            $v.vnetResourceGroup = $m.Groups[2].Value
+            if ($vnetPfx) { $err.Add('-VnetAddressPrefix is only for a network the installation makes -- not with -VnetId (your network keeps its own range)') }
+            if ($vnetName -and $vnetName -ine $m.Groups[3].Value) { $err.Add('-VnetName is only for a network the installation makes -- with -VnetId the name is in the id') }
+            $vnetName = $m.Groups[3].Value
+        }
+    }
+    if (-not $vnetName) { $vnetName = 'vnet-pim' }
+    if ($vnetName -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}[A-Za-z0-9_]$') { $err.Add("-VnetName '$vnetName' is not a virtual network name") }
+    if (-not $vnetPfx) { $vnetPfx = '10.220.0.0/22' }
+    $v.vnetName = $vnetName; $v.vnetAddressPrefix = $vnetPfx
+    $vn = ConvertFrom-PimInstallCidr $vnetPfx
+    if (-not $vn) { $err.Add("vnetAddressPrefix '$vnetPfx' is not an IPv4 CIDR (a.b.c.d/n, the network address itself)") }
+    # the Container Apps subnet: -AppsSubnetName / -AppsSubnetPrefix (old name -SubnetAddressPrefix)
+    $an = & $s 'appsSubnetName'; $ap = & $s 'appsSubnetPrefix'; $old = & $s 'subnetAddressPrefix'
+    if ($ap -and $old -and $ap -ne $old) { $err.Add('-SubnetAddressPrefix is the old name of -AppsSubnetPrefix -- give one of them') }
+    if (-not $ap) { $ap = $old }; if (-not $ap) { $ap = '10.220.0.0/23' }
+    if ($an -and $an -notmatch $snRx) { $err.Add("-AppsSubnetName '$an' is not a subnet name") }
+    $v.appsSubnetName = $an; $v.appsSubnetPrefix = $ap; $v.subnetAddressPrefix = $ap
+    $as = ConvertFrom-PimInstallCidr $ap
+    if (-not $as) { $err.Add("appsSubnetPrefix '$ap' is not an IPv4 CIDR (a.b.c.d/n, the network address itself)") }
+    elseif ($as.Length -gt 23) { $err.Add("appsSubnetPrefix '$ap' is smaller than /23 -- Container Apps needs a /23 or larger") }
+    elseif ($vn -and -not $v.vnetId -and -not (Test-PimInstallCidrInside $as $vn)) { $err.Add("appsSubnetPrefix '$ap' is not inside the VNet '$vnetPfx'") }
+    # the private endpoints subnet (private only): default = the /26 right after the apps subnet
+    $en = & $s 'endpointsSubnetName'; $ep = & $s 'endpointsSubnetPrefix'
+    $v.endpointsSubnetName = ''; $v.endpointsSubnetPrefix = ''
+    if ($private) {
+        if ($en -and $en -notmatch $snRx) { $err.Add("-EndpointsSubnetName '$en' is not a subnet name") }
+        if ($en -and $en -ieq $(if ($an) { $an } else { 'snet-pim-aca' })) { $err.Add('-AppsSubnetName and -EndpointsSubnetName must be two different subnets') }
+        if (-not $ep -and $as) {
+            $next = ConvertFrom-PimInstallCidr (ConvertTo-PimInstallCidrText ($as.End + 1) 26)
+            if ($next -and ($v.vnetId -or (Test-PimInstallCidrInside $next $vn))) { $ep = $next.Text }
+            elseif (-not $v.vnetId -and $vn) { $err.Add("there is no room for the private endpoints subnet after '$ap' in the VNet '$vnetPfx' -- give -EndpointsSubnetPrefix (a /28 or larger inside the VNet)") }
+        }
+        if ($ep) {
+            $es = ConvertFrom-PimInstallCidr $ep
+            if (-not $es) { $err.Add("endpointsSubnetPrefix '$ep' is not an IPv4 CIDR (a.b.c.d/n, the network address itself)") }
+            elseif ($es.Length -gt 28) { $err.Add("endpointsSubnetPrefix '$ep' is too small: at least a /28") }
+            elseif (Test-PimInstallCidrOverlap $es $as) { $err.Add("-AppsSubnetPrefix $ap and -EndpointsSubnetPrefix $ep overlap") }
+            elseif ($vn -and -not $v.vnetId -and -not (Test-PimInstallCidrInside $es $vn)) { $err.Add("endpointsSubnetPrefix '$ep' is not inside the VNet '$vnetPfx'") }
+        }
+        $v.endpointsSubnetName = $en; $v.endpointsSubnetPrefix = $ep
+    }
+    # the customer's central privatelink zones: used, never created or written
+    $zr = & $s 'privateDnsZonesResourceGroupId'
+    $v.privateDnsZonesResourceGroupId = ''
+    if ($zr -and $private) {
+        if ($zr -notmatch $rgRx) { $err.Add("-PrivateDnsZonesResourceGroupId '$zr' is not a resource group id (/subscriptions/<id>/resourceGroups/<name>)") }
+        else { $v.privateDnsZonesResourceGroupId = $zr.TrimEnd('/') }
+    }
+    # the hub: peering and zone links are both OFF unless asked
+    $hid = & $s 'hubVnetId'
+    $v.hubVnetId = ''; $v.linkZonesToHub = [bool]($private -and (& $on 'linkZonesToHub')); $v.peerToHub = [bool]($private -and (& $on 'peerToHub'))
+    if ($hid -and $private) {
+        $hm = [regex]::Match($hid, $vnetRx)
+        if (-not $hm.Success) { $err.Add("-HubVnetId '$hid' is not a virtual network resource id") }
+        else {
+            $v.hubVnetId = $hid.TrimEnd('/')
+            $spokeId = if ($v.vnetId) { $v.vnetId } else { "/subscriptions/$("$SubscriptionId".Trim())/resourceGroups/$("$ResourceGroup".Trim())/providers/Microsoft.Network/virtualNetworks/$vnetName" }
+            if ($v.hubVnetId -ieq $spokeId) { $err.Add('-HubVnetId is the same network as the PIM network -- the hub is the network your clients reach Azure through; PIM Manager runs in its own (spoke) network') }
+        }
+    } elseif ($v.linkZonesToHub -or $v.peerToHub) { $err.Add('-PeerToHub and -LinkZonesToHub need -HubVnetId') }
+    return @{ errors = @($err); values = $v }
+}
+
+function Add-PimInstallNetworkDeployArgs {
+    <#
+      PURE. The network answers onto Invoke-PimDeployAll's EXISTING parameters (-DeployArgs is changed in place). Public: only a
+      given -VnetName / -AppsSubnetName / -AppsSubnetPrefix replaces the default, so a public install's arguments are exactly
+      what they were. -PrivateNetwork:
+        Exposure internal (the engine then turns on the SQL private endpoint and a Premium registry by itself)
+        VnetName / VnetResourceGroup             <- -VnetId (parsed; its own resource group) or -VnetName (the install's)
+        SqlPublicAccessDisabled, AcrPublicAccess false, AcrAgentPoolName pimpool   <- private stays private (INSTALL-1 item 5)
+        PeeringAllOrNothing / LinkZonesToHub     <- -PeerToHub / -LinkZonesToHub given
+        PrereqVnetAddressPrefix                  <- -VnetAddressPrefix
+        PrereqSubnetName / PrereqSubnetAddressPrefix <- -AppsSubnetName / -AppsSubnetPrefix (the Container Apps subnet)
+        PrivateEndpointSubnetName / ...AddressPrefix <- -EndpointsSubnetName / -EndpointsSubnetPrefix
+        PrivateDnsResourceGroup                  <- the install's resource group (PIM's own zones, never the hub's)
+        PrivateDnsZonesResourceGroupId           <- -PrivateDnsZonesResourceGroupId (central zones: used, never created or written)
+        HubVnetName / -ResourceGroup / -SubscriptionId <- -HubVnetId (parsed)
+        SkipPeering                              <- NOT -PeerToHub      SkipZoneLinkToHub <- NOT -LinkZonesToHub
+    #>
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$DeployArgs, [Parameter(Mandatory)][object]$Config, [string]$ResourceGroup = '')
+    $p = { param($k) if ($Config.PSObject.Properties[$k]) { $Config.$k } else { $null } }
+    if ("$(& $p 'vnetName')".Trim()) { $DeployArgs['VnetName'] = "$(& $p 'vnetName')".Trim() }
+    if ("$(& $p 'appsSubnetPrefix')".Trim()) { $DeployArgs['PrereqSubnetAddressPrefix'] = "$(& $p 'appsSubnetPrefix')".Trim() }
+    if ("$(& $p 'appsSubnetName')".Trim()) { $DeployArgs['PrereqSubnetName'] = "$(& $p 'appsSubnetName')".Trim() }
+    if (-not [bool](& $p 'privateNetwork')) { return }
+    $DeployArgs['Exposure'] = 'internal'
+    if ("$ResourceGroup".Trim()) { $DeployArgs['VnetResourceGroup'] = "$ResourceGroup".Trim(); $DeployArgs['PrivateDnsResourceGroup'] = "$ResourceGroup".Trim() }
+    # Invardia 2026-11-02: a -VnetId in another resource group of the subscription -- the VNet's own resource group
+    if ("$(& $p 'vnetResourceGroup')".Trim()) { $DeployArgs['VnetResourceGroup'] = "$(& $p 'vnetResourceGroup')".Trim() }
+    # PRIVATE STAYS PRIVATE (INSTALL-1 item 5 / Invardia DESIGN ch 12): SQL with no public endpoint and no firewall rule;
+    # the registry Premium (the engine's internal default) with public access off, its images built on its agent pool
+    # inside the network (the engine's private-registry path, as the managing-tenant build uses: acr.agentPoolName)
+    $DeployArgs['SqlPublicAccessDisabled'] = $true
+    $DeployArgs['AcrPublicAccess'] = 'false'
+    $DeployArgs['AcrAgentPoolName'] = (Get-PimInstallAgentPoolName)
+    if ("$(& $p 'endpointsSubnetName')".Trim()) { $DeployArgs['PrivateEndpointSubnetName'] = "$(& $p 'endpointsSubnetName')".Trim() }
+    if ("$(& $p 'endpointsSubnetPrefix')".Trim()) { $DeployArgs['PrivateEndpointSubnetAddressPrefix'] = "$(& $p 'endpointsSubnetPrefix')".Trim() }
+    if ("$(& $p 'privateDnsZonesResourceGroupId')".Trim()) { $DeployArgs['PrivateDnsZonesResourceGroupId'] = "$(& $p 'privateDnsZonesResourceGroupId')".Trim() }
+    $hub = "$(& $p 'hubVnetId')".Trim()
+    if ($hub -match '(?i)^/subscriptions/([^/]+)/resourceGroups/([^/]+)/providers/Microsoft\.Network/virtualNetworks/([^/]+)$') {
+        $DeployArgs['HubVnetSubscriptionId'] = $Matches[1]; $DeployArgs['HubVnetResourceGroup'] = $Matches[2]; $DeployArgs['HubVnetName'] = $Matches[3]
+        if (-not [bool](& $p 'peerToHub')) { $DeployArgs['SkipPeering'] = $true } else { $DeployArgs['PeeringAllOrNothing'] = $true }
+        if (-not [bool](& $p 'linkZonesToHub')) { $DeployArgs['SkipZoneLinkToHub'] = $true } else { $DeployArgs['LinkZonesToHub'] = $true }
+    }
+}
+
+function Get-PimInstallNetworkVerdict {
+    <#
+      PURE. The 'preflight-network' verdict of a -PrivateNetwork install, from what Azure answered (reads only, nothing is
+      created yet). Returns @{ state; message; actionText; actionCommand }.
+        -Vnet   the -VnetId network ($null = not there or not readable); not used when the installation makes its own
+        -Hub    the -HubVnetId network ($null = not readable: a warning, the overlap is then not checked)
+        -Zones  zone name -> $true / $false: is it in -PrivateDnsZonesResourceGroupId (central zones are never created)
+      Failed: the network missing, in another region, a named subnet delegated to something else, a new subnet outside the
+      network or overlapping one of its subnets, the PIM range overlapping the hub's, a central zone that is not there.
+    #>
+    param([Parameter(Mandatory)][object]$Config, [AllowNull()][object]$Vnet, [AllowNull()][object]$Hub, [hashtable]$Zones = @{})
+    $fail = { param($m, $t = '', $c = '') @{ state = 'failed'; message = "$m -- nothing was created"; actionText = $t; actionCommand = $c } }
+    $vid = "$($Config.vnetId)".Trim()
+    $appsName = if ("$($Config.appsSubnetName)".Trim()) { "$($Config.appsSubnetName)".Trim() } else { 'snet-pim-aca' }
+    $endName = if ("$($Config.endpointsSubnetName)".Trim()) { "$($Config.endpointsSubnetName)".Trim() } else { 'pim-endpoints' }
+    $ranges = @()
+    $notes = New-Object System.Collections.Generic.List[string]
+    if ($vid) {
+        if (-not $Vnet) { return (& $fail "the network $vid does not exist, or you cannot read it" 'Correct -VnetId (or leave it out: the installation then makes its own network):' '-VnetId /subscriptions/<id>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<name>') }
+        $loc = "$($Vnet.location)".Replace(' ', '').ToLowerInvariant()
+        if ($loc -and $loc -ne "$($Config.location)".ToLowerInvariant()) { return (& $fail "the network $($Vnet.name) is in '$($Vnet.location)' and PIM Manager is installed in '$($Config.location)' -- a private install needs its network in the same region" 'Install in the network''s region:' "-Location $loc") }
+        $ranges = @(@($Vnet.properties.addressSpace.addressPrefixes) | ForEach-Object { ConvertFrom-PimInstallCidr "$_" } | Where-Object { $_ })
+        $subs = @(@($Vnet.properties.subnets) | Where-Object { $_ })
+        foreach ($role in @(@{ n = $appsName; p = "$($Config.appsSubnetPrefix)"; apps = $true; arg = 'AppsSubnetPrefix' }, @{ n = $endName; p = "$($Config.endpointsSubnetPrefix)"; apps = $false; arg = 'EndpointsSubnetPrefix' })) {
+            $sub = @($subs | Where-Object { "$($_.name)" -ieq $role.n }) | Select-Object -First 1
+            $dl = @(@($sub.properties.delegations) | ForEach-Object { "$($_.properties.serviceName)" } | Where-Object { $_ })
+            if ($sub) {
+                if ($role.apps -and $dl.Count -and $dl -notcontains 'Microsoft.App/environments') { return (& $fail "the subnet $($role.n) is delegated to $($dl -join ', ') -- the Container Apps environment needs a subnet delegated to Microsoft.App/environments, or an empty one") }
+                if (-not $role.apps -and $dl.Count) { return (& $fail "the subnet $($role.n) is delegated to $($dl -join ', ') -- private endpoints need a subnet without a delegation") }
+                $notes.Add("subnet $($role.n) is used as it is"); continue
+            }
+            $c = ConvertFrom-PimInstallCidr $role.p
+            if (-not $c) { return (& $fail "the subnet $($role.n) is not in $($Vnet.name) and has no range to create it" "Give the range for it (a free range inside the network):" "-$($role.arg) <a.b.c.d/n>") }
+            if (-not @($ranges | Where-Object { Test-PimInstallCidrInside $c $_ }).Count) { return (& $fail "-$($role.arg) $($role.p) is not inside the range of $($Vnet.name) ($(@($Vnet.properties.addressSpace.addressPrefixes) -join ', '))" "Give a free range inside the network:" "-$($role.arg) <a.b.c.d/n>") }
+            foreach ($o in $subs) {
+                foreach ($op in @(@($o.properties.addressPrefix) + @($o.properties.addressPrefixes) | Where-Object { $_ })) {
+                    if (Test-PimInstallCidrOverlap $c (ConvertFrom-PimInstallCidr "$op")) { return (& $fail "-$($role.arg) $($role.p) overlaps the subnet $($o.name) ($op)" "Give a free range inside the network:" "-$($role.arg) <a.b.c.d/n>") }
+                }
+            }
+            $notes.Add("subnet $($role.n) $($role.p) is created")
+        }
+    } else {
+        $ranges = @(ConvertFrom-PimInstallCidr "$($Config.vnetAddressPrefix)" | Where-Object { $_ })
+        $notes.Add("network $($Config.vnetName) $($Config.vnetAddressPrefix) is created")
+    }
+    $warn = ''
+    if ("$($Config.hubVnetId)".Trim()) {
+        if (-not $Hub) { $warn = "the hub $("$($Config.hubVnetId)" -replace '^.*/', '') could not be read, so its range was not compared with PIM's -- the peering is on the hand-off list" }
+        else {
+            foreach ($h in @($Hub.properties.addressSpace.addressPrefixes)) {
+                foreach ($r in $ranges) { if (Test-PimInstallCidrOverlap (ConvertFrom-PimInstallCidr "$h") $r) { return (& $fail "the PIM network range $($r.Text) overlaps the hub's $h -- the two cannot be peered" 'Choose a range that is free in your network plan:' '-VnetAddressPrefix <a.b.c.d/n>') } }
+            }
+            $notes.Add("hub $($Hub.name): no overlap")
+        }
+    }
+    if ("$($Config.privateDnsZonesResourceGroupId)".Trim()) {
+        $missing = @(Get-PimInstallPrivateZoneNames | Where-Object { -not $Zones[$_] })
+        if ($missing.Count) { return (& $fail "the zone $($missing -join ', ') is not in $($Config.privateDnsZonesResourceGroupId) -- the installation uses your central zones and never creates them" 'Create it there first, or leave -PrivateDnsZonesResourceGroupId out (the installation then makes its own zone):' "privatelink zone: $($missing -join ', ')") }
+        $notes.Add("central zone(s) $(@(Get-PimInstallPrivateZoneNames) -join ', ') found (used, never changed)")
+    }
+    if ($warn) { return @{ state = 'warning'; message = "$warn; $($notes -join '; ')"; actionText = ''; actionCommand = '' } }
+    return @{ state = 'ok'; message = "private network: $($notes -join '; ')"; actionText = ''; actionCommand = '' }
+}
+
+function Get-PimInstallConvertDecision {
+    <#
+      PURE. Public -> private (Invardia 2026-11-02: "the SAME two lines + -PrivateNetwork on an existing PUBLIC PIM install
+      converts it"). -Environment = this install's Container Apps environment as ARM answered ($null = not there).
+      Returns @{ convert; refuse; reason }:
+        public run, or no environment yet, or already internal  -> nothing to convert (the deploy builds / keeps it)
+        -PrivateNetwork + an EXTERNAL environment                -> convert (Convert-PimToPrivate.ps1 underneath)
+        ...with -VnetId                                          -> refused: an existing install keeps its own network
+    #>
+    param([Parameter(Mandatory)][object]$Config, [AllowNull()][object]$Environment)
+    if (-not [bool]$Config.privateNetwork -or -not $Environment) { return @{ convert = $false; refuse = $false; reason = '' } }
+    $internal = "$($Environment.properties.vnetConfiguration.internal)" -eq 'True'
+    if ($internal) { return @{ convert = $false; refuse = $false; reason = 'the Container Apps environment is already internal' } }
+    if ("$($Config.vnetId)".Trim()) { return @{ convert = $true; refuse = $true; reason = "this installation is PUBLIC today in its own network; converting it keeps that network -- leave -VnetId out (the conversion cannot move it to $(("$($Config.vnetId)" -split '/')[-1]))" } }
+    return @{ convert = $true; refuse = $false; reason = 'this installation is PUBLIC today: it is converted to the private network first (Convert-PimToPrivate.ps1, run by the installation), data kept' }
+}
+
+function ConvertTo-PimInstallConvertArgs {
+    <#
+      PURE. The Convert-PimToPrivate.ps1 parameters for a public -> private conversion, from the same answers and names the
+      install uses (the customer never runs it by hand). Route Redeploy, the registry private on its agent pool, the SQL
+      private endpoint with its public access off at the end (-SqlPrivate), the hub as given. -Resume continues a
+      conversion that stopped (and says the hub side is done -- the customer re-runs after the network team acted).
+    #>
+    param([Parameter(Mandatory)][object]$Config, [Parameter(Mandatory)][object]$Names, [string[]]$PortalUsers = @(), [switch]$AllMembers, [switch]$Resume)
+    $a = @{ TenantId = $Config.tenantId; SubscriptionId = $Config.subscriptionId; ResourceGroup = $Names.resourceGroup; Route = 'Redeploy'
+                     Tag = $Names.token; Location = $Config.location; VnetName = $Config.vnetName; VnetResourceGroup = $Names.resourceGroup
+                     VnetAddressPrefix = $Config.vnetAddressPrefix; SubnetAddressPrefix = $Config.appsSubnetPrefix; AcrName = $Names.acr
+                     LogAnalyticsName = $Names.logAnalytics; SqlServerFqdn = $Names.sqlFqdn; SqlDatabase = $Names.sqlDatabase
+                     EnvName = $Names.environment; ManagerApp = $Names.managerApp; AcrAgentPoolName = (Get-PimInstallAgentPoolName)
+                     PrivateDnsResourceGroup = $Names.resourceGroup; SqlPrivate = $true; Apply = $true }
+    if ("$($Config.appsSubnetName)".Trim()) { $a['SubnetName'] = "$($Config.appsSubnetName)".Trim() }
+    if ("$($Config.endpointsSubnetName)".Trim()) { $a['PrivateEndpointSubnetName'] = "$($Config.endpointsSubnetName)".Trim() }
+    if ("$($Config.endpointsSubnetPrefix)".Trim()) { $a['PrivateEndpointSubnetAddressPrefix'] = "$($Config.endpointsSubnetPrefix)".Trim() }
+    if ("$($Config.hubVnetId)".Trim()) {
+        $a['HubVnetId'] = @("$($Config.hubVnetId)".Trim())
+        if (-not [bool]$Config.peerToHub) { $a['SkipPeering'] = $true }
+    }
+    if ($AllMembers) { $a['EasyAuthAllowAllTenantUsers'] = $true } elseif (@($PortalUsers).Count) { $a['EasyAuthAllowedPrincipals'] = @($PortalUsers) }
+    if ($Resume) { $a['Resume'] = $true; if ($a.Contains('SkipPeering')) { $a['HubSideDone'] = $true } }
+    return $a
+}
+
+function Get-PimInstallNetworkHandoff {
+    <#
+      PURE. The network hand-off of a -PrivateNetwork install (EPS DESIGN §2b: "the network hand-off list is printed"): what
+      the customer's network team does so people reach the PIM Manager -- peering, DNS for the PIM Manager's name, DNS for
+      the database's private endpoint, and where later setup scripts must run. @() for a public install.
+    #>
+    param([Parameter(Mandatory)][object]$Config, [Parameter(Mandatory)][object]$Names, [string]$PortalFqdn = '')
+    if (-not [bool]$Config.privateNetwork) { return @() }
+    $rg = "$($Names.resourceGroup)"
+    $spoke = if ("$($Config.vnetId)".Trim()) { "$($Config.vnetId)".Trim() } else { "/subscriptions/$($Config.subscriptionId)/resourceGroups/$rg/providers/Microsoft.Network/virtualNetworks/$($Config.vnetName)" }
+    $hub = "$($Config.hubVnetId)".Trim(); $hubName = $hub -replace '^.*/', ''
+    $who = if ("$PortalFqdn".Trim()) { "$PortalFqdn".Trim() } else { 'the PIM Manager' }
+    $l = New-Object System.Collections.Generic.List[string]
+    $l.Add("PIM Manager runs in a private network ($spoke): $who has no public address -- it answers only inside that network and the networks peered to it.")
+    if ($hub -and $Config.peerToHub) { $l.Add("Peering: made with the hub $hubName by the installation (both sides) -- check that it shows Connected.") }
+    elseif ($hub) { $l.Add("Peering: peer $spoke with the hub $hub, both directions (allow virtual network access). New-PimHubPrepareScript.ps1 writes the script the hub owner runs for the hub side.") }
+    else { $l.Add("Peering: peer $spoke with the network your users reach Azure from, both directions -- no -HubVnetId was given, so nothing was peered.") }
+    $central = "$($Config.privateDnsZonesResourceGroupId)".Trim()
+    $own = if ($central) { "the Container Apps environment's default domain" } else { "the Container Apps environment's default domain, privatelink.database.windows.net and privatelink.azurecr.io" }
+    if ($hub -and $Config.linkZonesToHub) { $l.Add("DNS for $($who): PIM Manager's own private zones ($own; resource group $rg) are linked to the hub $hubName by the installation.") }
+    else { $l.Add("DNS for $($who): link PIM Manager's own private zones ($own; resource group $rg) to the network your clients resolve names in, or forward those names from your DNS servers to 168.63.129.16 inside a linked network.") }
+    if ($central) { $l.Add("DNS for the database and the registry: $($Names.sqlFqdn) and $($Names.acr).azurecr.io are registered by their private endpoints in your zones privatelink.database.windows.net and privatelink.azurecr.io ($central); those zones must answer inside $($Config.vnetName) (a link to it, or your DNS servers). The installation created and changed nothing in that resource group.") }
+    else { $l.Add("DNS for the database and the registry: the zones privatelink.database.windows.net and privatelink.azurecr.io in resource group $rg answer inside $($Config.vnetName); outside it $($Names.sqlFqdn) resolves to the private address only through your DNS. Both have NO public access -- the database and the registry are reached only through their private endpoints.") }
+    $l.Add('Run later PIM Manager setup scripts that reach the database (and a -Resume of this installation) from a machine inside that network or one peered to it.')
+    return @($l)
 }
 
 function Set-PimInstallEditionSetting {
