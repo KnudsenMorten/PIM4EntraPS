@@ -60,10 +60,33 @@ function Invoke-PimInvardiaManifestPull {
     # -InstallId (INV-S16): the install's lasting id (Resolve-PimInvardiaInstallId, PIM-LicenceRequest.ps1) -> header
     # X-Invardia-Install-Id; '' = no header.
     param([Parameter(Mandatory)][scriptblock]$Http, [string]$BaseUrl = '', [Parameter(Mandatory)][string]$InstallKey, [Parameter(Mandatory)][string]$LicenceText, [string]$Kind = 'code',
-          [Parameter(Mandatory)][ValidateRange(0, 3)][int]$Ring, [AllowEmptyString()][AllowNull()][string]$InstallId = '')
-    $p = Invoke-InvardiaManifestPull -Product $script:PimInvardiaProduct -Http $Http -BaseUrl $BaseUrl -InstallKey $InstallKey -LicenceText $LicenceText -Kind $Kind -Ring $Ring -InstallId $InstallId
+          [Parameter(Mandatory)][ValidateRange(0, 3)][int]$Ring, [AllowEmptyString()][AllowNull()][string]$InstallId = '',
+          [int[]]$RetryDelaysSec = $script:PimInvardiaPullRetryDelaysSec)
+    # UPD-RETRY (2026-11-03, two ring-2 production installs): ONE 30 s timeout while Invardia swapped a deploy slot marked a whole
+    # nightly run failed, although the update itself had gone through. A pull that got NO answer (status 0) or a gateway
+    # answer (502/503/504) is asked again after each delay in -RetryDelaysSec; every other answer (200, 204, 401, 403, 404,
+    # 422, 429, ...) is final at once. The PIM wrapper only -- the verifier stays byte-identical across products (UPDATE-1).
+    $delays = @($RetryDelaysSec | Where-Object { $null -ne $_ })
+    $attempt = 0
+    while ($true) {
+        $p = Invoke-InvardiaManifestPull -Product $script:PimInvardiaProduct -Http $Http -BaseUrl $BaseUrl -InstallKey $InstallKey -LicenceText $LicenceText -Kind $Kind -Ring $Ring -InstallId $InstallId
+        if (-not (Test-PimInvardiaPullRetryable -Status ([int]$p.status)) -or $attempt -ge $delays.Count) { break }
+        $wait = [Math]::Max(0, [int]$delays[$attempt]); $attempt++
+        Write-Verbose "Invardia pull: no usable answer ($($p.reason)) -- asking again in $wait s (attempt $($attempt + 1) of $($delays.Count + 1))"
+        if ($wait -gt 0) { Start-Sleep -Seconds $wait }
+    }
+    $p['attempts'] = $attempt + 1
+    if ($attempt -gt 0 -and [int]$p.status -ne 200 -and [int]$p.status -ne 204 -and "$($p.reason)") { $p.reason = "$($p.reason) (asked $($attempt + 1) times)" }
     if ($p.status -eq 401) { $p.reason = Get-PimInvardiaPullReason -Status 401 -Body $p.body }
     $p
+}
+# Waits between the manifest pull's attempts (UPD-RETRY): 30 s, 60 s, 120 s -- with the 30 s request timeout a run gives
+# Invardia about 6 minutes before it records a failure. The nightly updater has hours; nobody waits on it.
+$script:PimInvardiaPullRetryDelaysSec = @(30, 60, 120)
+function Test-PimInvardiaPullRetryable {
+    <# PURE. A pull answer worth asking again: no answer at all (0 -- timeout, connection refused/reset) or a gateway status. #>
+    param([int]$Status)
+    return ($Status -eq 0 -or $Status -eq 502 -or $Status -eq 503 -or $Status -eq 504)
 }
 # ---- framework 8.18 UPDATE-NOW -- the signal (PIM-UpdateNow.ps1 decides what it means) ------------------------------
 # GET <base>/api/updates/pim-manager/signal?ring=N, the SAME install key header as the manifest pull, If-None-Match with
@@ -273,16 +296,26 @@ function Invoke-PimInvardiaCommunityPull {
       The Community pull: an anonymous GET of the channel for -Ring (2 or 3). -Http { param($Url) } -> @{ status; body; error }
       (default Invoke-PimInvardiaCommunityHttp). Returns @{ status; body; reason }. Never throws.
     #>
-    param([scriptblock]$Http, [string]$BaseUrl = '', [Parameter(Mandatory)][int]$Ring)
+    # -RetryDelaysSec (UPD-RETRY): waits before asking again after no answer / 502-504. Default NONE here (an admin's
+    # interactive check answers at once); the update job's step (Get-PimInvardiaCommunityTarget) passes the shipped waits.
+    param([scriptblock]$Http, [string]$BaseUrl = '', [Parameter(Mandatory)][int]$Ring, [int[]]$RetryDelaysSec = @())
     if ($Ring -notin (Get-PimCommunityChannelRings)) {
         return @{ status = 0; body = $null; reason = "the Community channel serves rings 2 and 3 only (this environment is on ring $Ring)" }
     }
     $base = if ("$BaseUrl".Trim()) { "$BaseUrl".Trim().TrimEnd('/') } else { $script:PimInvardiaDefaultBase }
     if ($base -notmatch '^(?i)https://') { return @{ status = 0; body = $null; reason = 'the update address is not https' } }
     $url = "$base/api/updates/$($script:PimInvardiaProduct)/community/$Ring"
-    $r = $null
-    try { $r = if ($Http) { & $Http $url } else { Invoke-PimInvardiaCommunityHttp -Url $url } }
-    catch { $r = @{ status = 0; body = $null; error = ((("$($_.Exception.Message)") -split "`n")[0]) } }
+    $delays = @($RetryDelaysSec | Where-Object { $null -ne $_ })
+    $attempt = 0
+    while ($true) {
+        $r = $null
+        try { $r = if ($Http) { & $Http $url } else { Invoke-PimInvardiaCommunityHttp -Url $url } }
+        catch { $r = @{ status = 0; body = $null; error = ((("$($_.Exception.Message)") -split "`n")[0]) } }
+        if (-not (Test-PimInvardiaPullRetryable -Status ([int]$r.status)) -or $attempt -ge $delays.Count) { break }
+        $wait = [Math]::Max(0, [int]$delays[$attempt]); $attempt++
+        Write-Verbose "Invardia Community pull: no usable answer (HTTP $([int]$r.status)) -- asking again in $wait s"
+        if ($wait -gt 0) { Start-Sleep -Seconds $wait }
+    }
     $st = [int]$r.status
     $why = switch ($st) {
         200 { '' }
@@ -292,7 +325,8 @@ function Invoke-PimInvardiaCommunityPull {
         0   { "Invardia could not be reached: $($r.error)" }
         default { "Invardia answered HTTP $st" }
     }
-    return @{ status = $st; body = $r.body; reason = $why }
+    if ($attempt -gt 0 -and $st -ne 200 -and $st -ne 204) { $why = "$why (asked $($attempt + 1) times)" }
+    return @{ status = $st; body = $r.body; reason = $why; attempts = $attempt + 1 }
 }
 
 function Test-PimUpdateMajorJump {
@@ -363,14 +397,15 @@ function Get-PimInvardiaCommunityTarget {
     #>
     param([scriptblock]$Http, [string]$BaseUrl = '', [int]$AppliedSequence = 0, [string]$RunningVersion = '', [string]$LastBuiltVersion = '',
           [object[]]$TrustedKeys = $script:PimInvardiaUpdateTrustedKeys, [scriptblock]$Download, [string]$WorkDir = ([IO.Path]::GetTempPath()),
-          [string]$Ring = '', [string]$HighestKnownVersion = '', [switch]$AllowDowngrade, [switch]$AllowMajor)
+          [string]$Ring = '', [string]$HighestKnownVersion = '', [switch]$AllowDowngrade, [switch]$AllowMajor,
+          [int[]]$RetryDelaysSec = $script:PimInvardiaPullRetryDelaysSec)
     $res = @{ ok = $false; version = ''; sequence = 0; hold = $false; reason = ''; contextPath = ''; ahead = $false; attention = $false; noKey = $false
               wave = ''; manifestVersion = ''; served = $false }
     $ringN = -1
     if (-not [int]::TryParse("$Ring".Trim(), [ref]$ringN) -or $ringN -notin (Get-PimCommunityChannelRings)) {
         $res.reason = "this Community environment has no Community ring (PIM_UPDATE_RING = '$Ring', expected 2 or 3) -- nothing is pulled"; return $res
     }
-    $p = Invoke-PimInvardiaCommunityPull -Http $Http -BaseUrl $BaseUrl -Ring $ringN
+    $p = Invoke-PimInvardiaCommunityPull -Http $Http -BaseUrl $BaseUrl -Ring $ringN -RetryDelaysSec $RetryDelaysSec
     if ($p.status -eq 204) { $res.ok = $true; $res.served = $true; $res.reason = $p.reason; return $res }
     if ($p.status -ne 200) { $res.reason = $p.reason; return $res }
     $v = Test-PimInvardiaManifest -Response $p.body -TrustedKeys $TrustedKeys -Kind 'community' -AppliedSequence $AppliedSequence -RunningVersion $RunningVersion -Ring $ringN

@@ -355,6 +355,32 @@ function Get-PimPrincipalNamesFromBlob {
     return @($out | Select-Object -Unique)
 }
 
+function Get-PimPrincipalObjectIdFromBlob {
+    # SEC-90: the Entra object id (oid) in a decoded X-MS-CLIENT-PRINCIPAL claims blob, lower-case, or '' when the blob
+    # carries none (or a value that is not a GUID). Read only AFTER the blob passed the edge-consistency check.
+    [CmdletBinding()]
+    param([object]$Blob)
+    if ($null -eq $Blob -or -not $Blob.claims) { return '' }
+    foreach ($typ in @('http://schemas.microsoft.com/identity/claims/objectidentifier', 'oid')) {
+        foreach ($c in @($Blob.claims)) {
+            if ($null -eq $c) { continue }
+            $v = "$($c.val)".Trim()
+            if ("$($c.typ)".Trim() -eq $typ -and $v -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') { return $v.ToLowerInvariant() }
+        }
+    }
+    return ''
+}
+
+function Get-PimJwtObjectId {
+    # SEC-90: the oid claim of a VERIFIED token payload, lower-case, or '' (none / not a GUID).
+    [CmdletBinding()]
+    param([object]$Payload)
+    if ($null -eq $Payload) { return '' }
+    $v = "$($Payload.oid)".Trim()
+    if ($v -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') { return $v.ToLowerInvariant() }
+    return ''
+}
+
 function ConvertFrom-PimEdgeHeaderValue {
     <#
       PURE. Every spelling an auth edge may have written a name claim into an ASCII-only HTTP header:
@@ -460,7 +486,7 @@ function Test-PimEdgeHeadersConsistent {
     # so prefer IT and keep the header only as the fallback for an edge that sends no blob claims.
     $identity = $blobName
     if (-not $identity) { $identity = $name }
-    return @{ trusted = $true; identity = $identity; reason = 'auth-edge headers consistent' }
+    return @{ trusted = $true; identity = $identity; oid = (Get-PimPrincipalObjectIdFromBlob -Blob $decoded); reason = 'auth-edge headers consistent' }
 }
 
 function Resolve-PimMcpBearer {
@@ -505,7 +531,7 @@ function Resolve-PimMcpBearer {
     $who = ''
     foreach ($c in @('upn', 'preferred_username', 'unique_name')) { $v = "$($jwt.payload.$c)".Trim(); if ($v) { $who = $v; break } }
     if (-not $who) { return @{ ok = $false; status = 403; identity = ''; reason = 'the token names no user (no upn / preferred_username)' } }
-    return @{ ok = $true; status = 200; identity = $who; reason = "delegated token with '$Scope'" }
+    return @{ ok = $true; status = 200; identity = $who; oid = (Get-PimJwtObjectId -Payload $jwt.payload); reason = "delegated token with '$Scope'" }
 }
 
 # ---- the composite decision ---------------------------------------------------
@@ -625,7 +651,7 @@ function Resolve-PimHostedPrincipal {
             return @{ trusted = $false; identity = ''; layer = 'signed-token'
                       reason = 'token-only sign-in needs BOTH the issuer (PIM_HOSTED_AUTH_ISSUERS or the tenant id) and the audience (PIM_HOSTED_EASYAUTH_AUD) pinned -- failing closed' }
         }
-        $edge = @{ trusted = $true; identity = ''; reason = 'no edge headers (signed-token layer)' }
+        $edge = @{ trusted = $true; identity = ''; oid = ''; reason = 'no edge headers (signed-token layer)' }
     } else {
         # LAYER 1 -- always when an edge is expected.
         $edge = Test-PimEdgeHeadersConsistent -PrincipalName $PrincipalName -PrincipalBlob $PrincipalBlob
@@ -634,7 +660,7 @@ function Resolve-PimHostedPrincipal {
         return @{ trusted = $false; identity = ''; layer = 'edge-consistency'; reason = $edge.reason }
     }
     if (-not $strict) {
-        return @{ trusted = $true; identity = $edge.identity; layer = 'edge-consistency'; reason = $edge.reason }
+        return @{ trusted = $true; identity = $edge.identity; oid = "$($edge.oid)"; layer = 'edge-consistency'; reason = $edge.reason }
     }
 
     # LAYER 2 -- signed token required.
@@ -673,7 +699,12 @@ function Resolve-PimHostedPrincipal {
     if ($edge.identity -and ($edge.identity.ToLowerInvariant() -ne $tokenName.ToLowerInvariant())) {
         return @{ trusted = $false; identity = ''; layer = 'signed-token'; reason = ("header identity ('$($edge.identity)') disagrees with the VERIFIED token identity ('$tokenName') -- rejected") }
     }
-    return @{ trusted = $true; identity = $tokenName; layer = 'signed-token'; reason = 'signed token verified (signature + claims)' }
+    # SEC-90: the oid of the VERIFIED token. An edge blob that names a different oid is lying, exactly as a different name.
+    $tokenOid = Get-PimJwtObjectId -Payload $jwt.payload
+    if ("$($edge.oid)" -and $tokenOid -and "$($edge.oid)" -ne $tokenOid) {
+        return @{ trusted = $false; identity = ''; layer = 'signed-token'; reason = ("header object id ('$($edge.oid)') disagrees with the VERIFIED token object id ('$tokenOid') -- rejected") }
+    }
+    return @{ trusted = $true; identity = $tokenName; oid = $tokenOid; layer = 'signed-token'; reason = 'signed token verified (signature + claims)' }
 }
 
 # ---- CR7: the shared sign-in front (framework §12.11g) -------------------------
@@ -775,7 +806,7 @@ function Resolve-PimSigninFrontPrincipal {
     $who = ''
     foreach ($c in @('preferred_username', 'upn', 'email', 'unique_name')) { $v = "$($jwt.payload.$c)".Trim(); if ($v) { $who = $v; break } }
     if (-not $who) { return (& $no 'sign-in front: the verified token carries no username claim') }
-    return @{ trusted = $true; identity = $who; layer = 'signin-front'; reason = "sign-in front $kind verified (signature + claims)" }
+    return @{ trusted = $true; identity = $who; oid = (Get-PimJwtObjectId -Payload $jwt.payload); layer = 'signin-front'; reason = "sign-in front $kind verified (signature + claims)" }
 }
 
 function Get-PimHostedListenerPrefix {

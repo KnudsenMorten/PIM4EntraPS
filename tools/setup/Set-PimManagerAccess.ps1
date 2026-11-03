@@ -135,10 +135,15 @@ Note ("already stored: " + $(if (@($stored).Count) { (@($stored) | ForEach-Objec
 # --- merge / replace --------------------------------------------------------
 $byId = [ordered]@{}
 if (-not $Replace) { foreach ($s in @($stored)) { $byId["$($s.identity)".ToLowerInvariant()] = $s } }
+# SEC-90: the Entra object id the Manager bound to an identity stays with it when its role is re-written here (also with
+# -Replace). Never taken from -AccessJson: the Manager binds ids from the directory itself.
+$storedOid = @{}
+foreach ($s in @($stored)) { $so = "$($s.objectId)".Trim(); if ($so -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') { $storedOid["$($s.identity)".Trim().ToLowerInvariant()] = $so.ToLowerInvariant() } }
 foreach ($i in $incoming) {
     $k = "$($i.identity)".ToLowerInvariant()
     if ($byId.Contains($k)) { $result.replaced += "$($i.identity)" } else { $result.installed += "$($i.identity)" }
     $byId[$k] = [ordered]@{ identity = "$($i.identity)".Trim(); role = "$($i.role)".Trim() }
+    if ($storedOid.ContainsKey($k.Trim())) { $byId[$k]['objectId'] = $storedOid[$k.Trim()] }
 }
 if ($Replace) {
     $dropped = @(@($stored) | Where-Object { -not $byId.Contains("$($_.identity)".ToLowerInvariant()) } | ForEach-Object { "$($_.identity)" })

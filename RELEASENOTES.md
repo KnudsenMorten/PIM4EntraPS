@@ -13,6 +13,18 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.22 -- 2026-11-03
+
+- Community installs get the same update retry: when the nightly updater gets no answer from Invardia (a timeout or a gateway error), it asks again after 30 s, 1 minute and 2 minutes before it records a failure; an admin's own update check still answers at once
+
+## 3.0.21 -- 2026-11-03
+
+- Updates no longer fail on a short Invardia hiccup: when the nightly updater gets no answer from Invardia (a timeout or a gateway error), it asks again after 30 s, 1 minute and 2 minutes before it records a failure; every other answer is final at once
+
+## 3.0.20 -- 2026-11-03
+
+- Manager access follows the person, not only the sign-in name: each access entry is linked to the person's Entra object id, so someone who later gets a re-used or renamed sign-in name never inherits another person's role, and a renamed person keeps theirs; entries are linked automatically from the directory, and nobody loses access while that happens
+
 ## 3.0.19 -- 2026-11-02
 
 - private network on the same two install lines: -PrivateNetwork with the same option names as SI and EPS (an existing VNet in another resource group, hub peering with the rights checked first, all private DNS zones linked to the hub when asked); the database and the registry are created with public access off and no firewall rule; the same two lines + -PrivateNetwork turn an existing public installation private

@@ -48,6 +48,22 @@ $script:PimImportNeverCopyExact = @(
 $script:PimImportNeverCopyPrefix = @('JobRunOutput:', 'SchedulerState', 'SchedulerLease', 'JobScope', 'HybridAdSyncMemory', 'DeltaSkipState:')   # 100.122 F1: the AD sync's memory belongs to one tenant; 70.17: a job's skip state is this store's own
 $script:PimImportUnion = @{ ManagerAccess = 'managerAccess'; PortalAdmins = 'portalAdmins' }
 
+function Remove-PimImportAccessObjectIds {
+    <# PURE. SEC-90: the ManagerAccess JSON ({"managerAccess":[...]} or a bare list) with every entry's 'objectId' removed.
+       Text that does not parse, or holds no objectId, is returned unchanged. #>
+    param([AllowNull()][AllowEmptyString()][string]$Json)
+    if (-not "$Json".Trim() -or "$Json" -notmatch '"objectId"') { return $Json }
+    $v = $null; try { $v = "$Json" | ConvertFrom-Json } catch { return $Json }
+    $strip = { param($list) @(foreach ($e in @($list)) { if ($null -eq $e) { continue }; $o = [ordered]@{}; foreach ($p in $e.PSObject.Properties) { if ($p.Name -ne 'objectId') { $o[$p.Name] = $p.Value } }; [pscustomobject]$o }) }
+    if ("$Json".TrimStart().StartsWith('{') -and $v.PSObject.Properties['managerAccess']) {
+        $o = [ordered]@{}; foreach ($p in $v.PSObject.Properties) { $o[$p.Name] = $p.Value }
+        $o['managerAccess'] = @(& $strip $v.managerAccess)
+        return ([pscustomobject]$o | ConvertTo-Json -Depth 20 -Compress)
+    }
+    if ("$Json".TrimStart().StartsWith('[')) { return (ConvertTo-Json -InputObject @(& $strip $v) -Depth 20 -Compress) }
+    return $Json
+}
+
 function Test-PimImportSettingNeverCopy {
     <# PURE. True for a setting that is the TARGET environment's own identity / runtime state. #>
     param([Parameter(Mandatory)][string]$Name)
@@ -94,6 +110,10 @@ function Get-PimImportSettingAction {
     $r = @{ name = $Name; action = 'same'; valueJson = ''; note = '' }
     if (Test-PimImportSettingNeverCopy -Name $Name) { $r.action = 'skip'; $r.note = 'the target environment''s own identity / runtime state'; return $r }
     if (-not "$SourceJson".Trim()) { $r.note = 'absent in the source'; return $r }
+    # SEC-90: an Entra object id in the SOURCE's Manager access names a user of the source's directory (another tenant can
+    # hold a different person -- or nobody -- under it). Imported entries arrive WITHOUT it; the target's Manager binds its
+    # own from its directory.
+    if ($Name -eq 'ManagerAccess') { $SourceJson = Remove-PimImportAccessObjectIds -Json $SourceJson }
     if (-not "$TargetJson".Trim()) { $r.action = 'copy'; $r.valueJson = $SourceJson; return $r }
     if ("$SourceJson" -ceq "$TargetJson") { return $r }
     $s = ConvertFrom-PimImportJson $SourceJson; $t = ConvertFrom-PimImportJson $TargetJson

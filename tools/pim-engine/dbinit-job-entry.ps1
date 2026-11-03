@@ -399,7 +399,14 @@ try {
             }
             $byId = [ordered]@{}
             foreach ($s in @($stored))   { if ("$($s.identity)".Trim()) { $byId["$($s.identity)".ToLowerInvariant()] = $s } }
-            foreach ($i in @($incoming)) { if ("$($i.identity)".Trim()) { $byId["$($i.identity)".ToLowerInvariant()] = [ordered]@{ identity = "$($i.identity)".Trim(); role = "$($i.role)".Trim() } } }
+            foreach ($i in @($incoming)) {
+                if (-not "$($i.identity)".Trim()) { continue }
+                $ik = "$($i.identity)".ToLowerInvariant()
+                $ne = [ordered]@{ identity = "$($i.identity)".Trim(); role = "$($i.role)".Trim() }
+                # SEC-90: keep the Entra object id the Manager bound to this identity (never one from the deploy input)
+                if ($byId.Contains($ik)) { $so = "$($byId[$ik].objectId)".Trim(); if ($so -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') { $ne['objectId'] = $so.ToLowerInvariant() } }
+                $byId[$ik] = $ne
+            }
             $final = @($byId.Values)
 
             # 🔴 NEVER LEAVE THE MODEL WITH NO SUPERADMIN -- the same refusal the host-side script

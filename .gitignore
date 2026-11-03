@@ -104,3 +104,8 @@ tests/playwright/feature-suite/test-results/
 tests/playwright/feature-suite/harness/.manager.json
 tests/playwright/feature-suite/harness/.manager.json.*
 tests/playwright/feature-suite/harness/.*.json
+
+# .NET restore output of the vendored sign-in front (an editor or a local restore writes it; never shipped, and
+# Test-PimVendorSigninFront V2b fails on it in a working copy)
+vendor/signin-front/src/bin/
+vendor/signin-front/src/obj/

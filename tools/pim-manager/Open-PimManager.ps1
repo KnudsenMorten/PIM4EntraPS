@@ -530,6 +530,9 @@ $_guardLib = Join-Path $solutionRoot 'engine\_shared\PIM-Guard.ps1'
 if (Test-Path -LiteralPath $_guardLib) { . $_guardLib }
 $_lastPrivLib = Join-Path $solutionRoot 'engine\_shared\PIM-LastPrivileged.ps1'
 if (Test-Path -LiteralPath $_lastPrivLib) { . $_lastPrivLib }
+# SEC-90: a ManagerAccess entry bound to an Entra object id matches that person only (Get-PimManagerRole). Loaded
+# unconditionally: the role decision depends on it.
+. (Join-Path $solutionRoot 'engine\_shared\PIM-ManagerAccessIdentity.ps1')
 # §96.6 / GUARD-1.6: releasing a guard (Operations > Guards; /api/guards/<id>/release)
 $_guardRelLib = Join-Path $solutionRoot 'engine\_shared\PIM-GuardRelease.ps1'
 if (Test-Path -LiteralPath $_guardRelLib) { . $_guardRelLib }
@@ -650,6 +653,7 @@ $global:PIM_Hosted = $script:PimHosted
 $script:PimSigninFront = $false
 if ($script:PimHosted -and (Get-Command Get-PimHostedAuthLayer -ErrorAction SilentlyContinue)) { $script:PimSigninFront = ((Get-PimHostedAuthLayer) -eq 'signin-front') }
 $script:CurrentRequestPrincipal = $null
+$script:CurrentRequestOid = ''   # SEC-90: the verified Entra object id of THIS request ('' = none / local console)
 $script:CurrentRequestApp = $null      # PIM 93.4: the verified APPLICATION of THIS request (/api/app/* only), else $null
 
 function Get-PimEntraJwks {
@@ -759,7 +763,7 @@ function Get-PimEasyAuthPrincipal {
         $d = Resolve-PimHostedPrincipal -SignedToken (Get-PimAuthorizationBearer -Authorization "$($Request.Headers['Authorization'])") `
                 -Jwks $jwks -ExpectedIssuers $issuers -ExpectedAudiences $auds -AuthLayer $authLayer `
                 -RequireFrontAccessToken ("$env:PIM_SIGNIN_FRONT_REQUIRE_ACCESS_TOKEN".Trim() -match '^(1|true|yes|on)$')
-        if ($d.trusted) { return "$($d.identity)" }
+        if ($d.trusted) { $script:CurrentRequestOid = "$($d.oid)"; return "$($d.identity)" }
         Write-Host ("  [auth] REJECTED principal [{0}] -- {1}" -f $d.layer, $d.reason) -ForegroundColor Red
         return ''
     }
@@ -768,7 +772,8 @@ function Get-PimEasyAuthPrincipal {
             -PrincipalBlob "$($Request.Headers['X-MS-CLIENT-PRINCIPAL'])" `
             -SignedToken   "$($Request.Headers['X-MS-TOKEN-AAD-ID-TOKEN'])" `
             -Jwks $jwks -ExpectedIssuers $issuers -ExpectedAudiences $auds -AuthLayer $authLayer
-    if ($d.trusted) { return "$($d.identity)" }
+    # SEC-90: the verified object id of THIS request, for Get-PimManagerRole ('' when the edge sent none)
+    if ($d.trusted) { $script:CurrentRequestOid = "$($d.oid)"; return "$($d.identity)" }
     # Rejections are security events -- never silent (BUG-01 lesson: a guard that trips
     # without telling anyone reads as a clean run).
     Write-Host ("  [auth] REJECTED principal [{0}] -- {1}" -f $d.layer, $d.reason) -ForegroundColor Red
@@ -916,7 +921,7 @@ function Invoke-PimManagerAppSignIn {
     $pre = '/api/app'
     if (-not ($Path -eq $pre -or $Path.StartsWith("$pre/", [System.StringComparison]::Ordinal))) { return [pscustomobject]@{ handled = $false; ok = $false; status = 0; path = $Path } }
     # from here on THIS request is an application request or nothing: whatever the edge said about it is dropped
-    $script:CurrentRequestPrincipal = $null; $script:CurrentRequestApp = $null
+    $script:CurrentRequestPrincipal = $null; $script:CurrentRequestApp = $null; $script:CurrentRequestOid = ''
     $script:CurrentRequestNames = @(); $script:CurrentRequestGroupIds = @()
     $global:PIM_SignedRequestCapture = $null
     # EDITION-API (owner 2026-11-01): script / service access is Pro ('api.applications'). Without the licence EVERY call
@@ -1389,14 +1394,24 @@ function Get-PimManagerRole {
             Write-Host '  [rbac] SQL ManagerAccess is absent/empty -- falling through to env vars.' -ForegroundColor DarkYellow
         } else {
             $entries = @(if ($ma.PSObject.Properties['managerAccess']) { $ma.managerAccess } else { $ma })
+            # 🔴 SEC-90: an entry bound to an Entra object id matches THAT person only (a renamed / re-used UPN inherits
+            # nothing); unbound entries, and a request with no verified oid (the local console), match on the name as before.
+            $reqOid = if ($script:PimHosted) { "$script:CurrentRequestOid" } else { '' }
             foreach ($e in $entries) {
                 if (-not "$($e.identity)".Trim()) { continue }
-                if ("$($e.identity)".Trim().ToLowerInvariant() -eq $whoLc) {
+                $mt = Test-PimManagerAccessEntryMatch -Entry $e -Identity $whoLc -ObjectId $reqOid
+                if ($mt.conflict) {
+                    Write-Warning ("  [rbac] '{0}' matches a ManagerAccess entry by name, but that entry belongs to a different Entra object -- NOT granted (a renamed or re-used sign-in name)." -f $who)
+                    continue
+                }
+                if ($mt.match) {
                     $r = "$($e.role)".Trim()
                     if ($r -notin @('Reader','Admin','SuperAdmin','Delegated')) { $r = 'Reader' }
                     # REQ-Y: a STORED Delegated entry is capped at Reader without a Pro licence, exactly as the env
                     # var below is -- the write gate on POST /api/manager-access cannot reach a row written earlier.
-                    return (Limit-PimManagerRoleByLicence @{ role = $r; identity = $who; source = 'sql ManagerAccess' })
+                    $__rr = Limit-PimManagerRoleByLicence @{ role = $r; identity = $who; source = 'sql ManagerAccess' }
+                    if ($__rr -is [System.Collections.IDictionary]) { $__rr['matchedBy'] = "$($mt.via)" }
+                    return $__rr
                 }
             }
             Write-Host ("  [rbac] SQL ManagerAccess holds {0} entr(y/ies); '{1}' is not one of them -- trying env vars." -f @($entries).Count, $who) -ForegroundColor DarkYellow
@@ -5338,6 +5353,63 @@ function Get-PimManagerAccessEntries {
     if ($raw -is [string] -and "$raw".Trim()) { $raw = "$raw" | ConvertFrom-Json }
     if ($null -eq $raw) { return @() }
     return @(if ($raw.PSObject.Properties['managerAccess']) { $raw.managerAccess } else { $raw })
+}
+
+function Invoke-PimManagerAccessObjectIdBackfill {
+    <#
+      SEC-90: bind every ManagerAccess entry that has no Entra object id yet to the one directory user whose
+      userPrincipalName IS that identity (Set-PimManagerAccessObjectIds decides; pure). Only ADDS 'objectId' -- never a
+      role, never an entry, never a different id. Hosted + SQL only; at most once an hour unless -Force (after a save).
+      The map is re-read right before the write so a change made meanwhile is kept. Never throws; @{ ran; bound; error }.
+    #>
+    param([switch]$Force)
+    $out = [ordered]@{ ran = $false; bound = @(); error = '' }
+    if (-not $script:PimHosted -or -not "$($script:PimSqlCs)".Trim() -or -not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { return $out }
+    $now = [datetime]::UtcNow
+    if (-not $Force -and $script:PimAccessOidBackfillAt -and ($now - $script:PimAccessOidBackfillAt).TotalMinutes -lt 60) { return $out }
+    $script:PimAccessOidBackfillAt = $now
+    try {
+        # identities the directory did not resolve are not asked again for a day (a mail alias, a removed user)
+        if (-not ($script:PimAccessOidMiss -is [hashtable])) { $script:PimAccessOidMiss = @{} }
+        $targets = @(Get-PimManagerAccessBackfillTargets -Entries @(Get-PimManagerAccessEntries) |
+            Where-Object { -not $script:PimAccessOidMiss.ContainsKey($_) -or ($now - $script:PimAccessOidMiss[$_]).TotalHours -ge 24 })
+        if (-not $targets.Count) { return $out }
+        $out.ran = $true
+        # the request loop is single-threaded: 15 names per directory call, at most 4 calls per run (the rest next hour)
+        $targets = @($targets | Select-Object -First 60)
+        $found = @{}
+        for ($i = 0; $i -lt $targets.Count; $i += 15) {
+            $chunk = @($targets[$i..([Math]::Min($i + 14, $targets.Count - 1))])
+            $inList = ($chunk | ForEach-Object { "'" + "$_".Replace("'", "''") + "'" }) -join ','
+            try {
+                $f = [uri]::EscapeDataString("userPrincipalName in ($inList)")
+                foreach ($u in @((Invoke-PimGraph -Path "/users?`$filter=$f&`$select=id,userPrincipalName&`$top=999").value | Where-Object { $_ })) {
+                    $k = "$($u.userPrincipalName)".Trim().ToLowerInvariant()
+                    if ($k -and "$($u.id)".Trim()) { $found[$k] = @{ id = "$($u.id)".Trim(); upn = "$($u.userPrincipalName)".Trim() } }
+                }
+                # a name the directory answered for but did not return = a miss (a failed call is retried next hour)
+                foreach ($t in $chunk) { if (-not $found.ContainsKey($t)) { $script:PimAccessOidMiss[$t] = $now } }
+            } catch { Write-Verbose "object id lookup: $($_.Exception.Message)" }
+        }
+        if (-not $found.Count) { return $out }
+        $fresh = @(Get-PimManagerAccessEntries)
+        $r = Set-PimManagerAccessObjectIds -Entries $fresh -Found $found
+        if (-not @($r.bound).Count) { return $out }
+        $value = [pscustomobject]@{ managerAccess = @($r.entries | ForEach-Object { [pscustomobject]$_ }) }
+        Set-PimManagerSetting -Name 'ManagerAccess' -Value $value
+        $back = @(Get-PimManagerAccessEntries)
+        if ($back.Count -ne @($r.entries).Count) { throw "read-back mismatch: wrote $(@($r.entries).Count) entr(y/ies), store holds $($back.Count)" }
+        $script:PimManagerAccessCache = $null
+        if (-not ($global:PIM_NamingConventions -is [hashtable])) { $global:PIM_NamingConventions = @{} }
+        $global:PIM_NamingConventions['ManagerAccess'] = $value
+        $out.bound = @($r.bound)
+        Write-Host ("  [rbac] bound {0} Manager access entr(y/ies) to their Entra object id: {1}" -f @($r.bound).Count, (@($r.bound) -join ', ')) -ForegroundColor DarkGray
+        try { Write-PimManagerAuditEvent -Action 'access.objectid.bind' -Target ("entries:{0}" -f @($r.bound).Count) -After ([ordered]@{ bound = @($r.bound) }) -Result 'ok' } catch { }
+    } catch {
+        $out.error = "$($_.Exception.Message)"
+        Write-Warning "  [rbac] binding Manager access entries to their Entra object id skipped: $($out.error)"
+    }
+    return $out
 }
 
 function Resolve-PimManagerRecipientUpns {
@@ -13676,8 +13748,8 @@ function Invoke-Server {
             # hangs names itself; the completion line below is written only when it ends.
             if ("$($env:PIM_MANAGER_TRACE_REQUESTS)" -eq '1') { Write-Host ("  [{0}] {1,-6} {2} ... started" -f $started.ToString('HH:mm:ss'), $ctx.Request.HttpMethod, $ctx.Request.Url.AbsolutePath) -ForegroundColor DarkGray }
             # Hosted: capture THIS request's Easy Auth principal for role resolution.
-            $script:CurrentRequestApp = $null
-            if ($script:PimHosted) { try { $script:CurrentRequestPrincipal = Get-PimEasyAuthPrincipal -Request $ctx.Request } catch { $script:CurrentRequestPrincipal = $null } }
+            $script:CurrentRequestApp = $null; $script:CurrentRequestOid = ''
+            if ($script:PimHosted) { try { $script:CurrentRequestPrincipal = Get-PimEasyAuthPrincipal -Request $ctx.Request } catch { $script:CurrentRequestPrincipal = $null; $script:CurrentRequestOid = '' } }
             # §98: the other names + group claim of THIS request's (already trusted) principal, for the demo-group check only.
             $script:CurrentRequestNames = @(); $script:CurrentRequestGroupIds = @()
             if ($script:PimHosted -and "$script:CurrentRequestPrincipal".Trim()) {
@@ -13703,8 +13775,10 @@ function Invoke-Server {
             }
             # PIM 93.4: every application call that was let in is audited with its app id, role, route and answer
             if ($script:CurrentRequestApp) { Write-PimManagerAppCallAudit -Status ([int]$status) }
-            $script:CurrentRequestApp = $null
+            $script:CurrentRequestApp = $null; $script:CurrentRequestOid = ''
             $global:PIM_SignedRequestCapture = $null
+            # SEC-90: bind Manager access entries to their Entra object id (self-throttled to once an hour; never throws)
+            try { [void](Invoke-PimManagerAccessObjectIdBackfill) } catch { }
             $ts = $started.ToString('HH:mm:ss')
             # BUG-264: the loop is single-threaded, so a slow request holds every request behind it -- name its duration.
             $took = ((Get-Date) - $started).TotalSeconds
@@ -15652,6 +15726,7 @@ function Handle-Request {
             } else { @{ ok = $false; status = 503; identity = ''; reason = 'PIM-HostedAuth.ps1 not loaded (refused)' } }
             # never the edge headers on this path: from here on the request's principal is the VERIFIED token's user, or nobody
             $script:CurrentRequestPrincipal = if ($bv.ok) { "$($bv.identity)" } else { $null }
+            $script:CurrentRequestOid = if ($bv.ok) { "$($bv.oid)" } else { '' }
             # framework §12.11f item 2 / PIM 100.144a: on /mcp the signed token IS the verified bearer (an access token for
             # this Manager's API) -- kept with any change a tool commits. Mode off = nothing.
             $global:PIM_SignedRequestCapture = $null
@@ -22005,15 +22080,20 @@ function Handle-Request {
             # grant is refused without a licence: every Reader / Admin / SuperAdmin edit, removing a Delegated user, and
             # re-saving an existing one unchanged all stay free -- nobody is locked out of their own access.
             $prevDelegated = @{}
+            $prevEntries = @()
             try {
                 $prevMap = Get-PimManagerSetting -Name 'ManagerAccess'
-                foreach ($pe in @(if ($prevMap -and $prevMap.PSObject.Properties['managerAccess']) { $prevMap.managerAccess } else { @() })) {
+                if ($prevMap -is [string] -and "$prevMap".Trim()) { $prevMap = "$prevMap" | ConvertFrom-Json }
+                $prevEntries = @(if ($prevMap -and $prevMap.PSObject.Properties['managerAccess']) { $prevMap.managerAccess } else { @() })
+                foreach ($pe in $prevEntries) {
                     if ("$($pe.role)".Trim() -eq 'Delegated') { $prevDelegated["$($pe.identity)".Trim().ToLowerInvariant()] = $true }
                 }
             } catch { }
             $newDelegated = @($clean | Where-Object { $_.role -eq 'Delegated' -and -not $prevDelegated.ContainsKey("$($_.identity)".ToLowerInvariant()) })
             if ($newDelegated.Count -and -not (Test-PimManagerProFeature -Key 'access.delegated' -Response $resp)) { return 403 }
-            $arr = @($clean.ToArray())
+            # SEC-90: the page sends { identity, role } only -- keep the object id the Manager bound to each identity (never one
+            # from the browser); new identities are bound from the directory right after the save.
+            $arr = @(Copy-PimManagerAccessObjectIds -Before $prevEntries -After @($clean.ToArray()) -DropUnknown | ForEach-Object { [pscustomobject]$_ })
             $value = [pscustomobject]@{ managerAccess = @($arr) }
             try {
                 Set-PimManagerSetting -Name 'ManagerAccess' -Value $value
@@ -22031,7 +22111,10 @@ function Handle-Request {
             if (-not ($global:PIM_NamingConventions -is [hashtable])) { $global:PIM_NamingConventions = @{} }
             $global:PIM_NamingConventions['ManagerAccess'] = $value
             Write-PimManagerAuditEvent -Action 'access.map.save' -Target "entries:$($arr.Count)" -After @{ count = $arr.Count; store = 'sql' } -Result 'ok'
-            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; store = 'sql'; entries = @($arr); you = (Get-PimManagerRole) })
+            # SEC-90: bind the new identities to their Entra object id now (best effort; never fails the save)
+            try { [void](Invoke-PimManagerAccessObjectIdBackfill -Force) } catch { }
+            $__pubEntries = @($arr | ForEach-Object { @{ identity = "$($_.identity)"; role = "$($_.role)" } })
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; store = 'sql'; entries = @($__pubEntries); you = (Get-PimManagerRole) })
             return 200
         }
 
