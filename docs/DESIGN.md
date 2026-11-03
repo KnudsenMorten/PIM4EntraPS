@@ -10820,6 +10820,37 @@ access at once. `Grant-PimSupportAccess.ps1 -Remove` drops the user -- by the Su
 name -- and takes back the membership. The security review pack lists the right as a standing right of the
 vendor's support identity.
 
+### 27.12 A permission decision applies to every install (owner decision 2026-11-03)
+
+> **The rule:** *"once we make decisions on permissions, it goes out to any, either through the support app or via the
+> updater. It must be consistent across all."* (product owner, 2026-11-03)
+
+A permission decision is any role, grant, scope, consent or removed right that PIM Manager's own identities hold or hand
+out. Such a decision is never applied only at the install where the question came up. It reaches **every** install,
+by the first of these three routes that is allowed there:
+
+| Route | When | Proof |
+|---|---|---|
+| **The updater** (`ca-pim-update`, every run) | The updater's own rights allow the change (Contributor-level resources, its converge steps) | The run log, and the install's setup-step state on the next heartbeat |
+| **The Invardia Support app** | The change needs a right the updater does not hold (for example a role assignment, which needs Owner or User Access Administrator) and the customer has granted that right to the Support app | Each change is read back per install, and the call is recorded in the customer's audit log |
+| **A tracked customer step** | Neither of the above may make the change | The exact command for that install is handed to the customer; the step stays "missing" until a later check finds it done |
+
+A new permission in a release follows the same rule. The release says which route each install takes, and the setup-step
+check shows which installs have it.
+
+**Setup steps on the heartbeat.** Each one-time step an install needs (mail sender, private network, Support-app rights,
+as-built storage and rights, the sign-in front, SQL least privilege, engine Graph permissions, the job-start right, the
+licence, the update ring, and so on) is reported on the heartbeat to Invardia as one `setupSteps` entry. Each entry has:
+
+- a stable key;
+- a state: `ok`, `missing`, `n/a` or `unknown`;
+- the version the step has been needed since;
+- who can fix it: the updater, the Support app or the customer;
+- the time of the check.
+
+The state comes from a real check on each updater run. When the check cannot read the state, the answer is `unknown`,
+never `ok`. Invardia shows every install's steps side by side and flags any step that is missing.
+
 ---
 
 ## 28. Change control, ownership and daily checks (2026-09)

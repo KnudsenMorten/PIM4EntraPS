@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.23 -- 2026-11-03
+
+- Every install now reports its one-time setup steps to Invardia (mail sender, private network, Support app rights, as-built storage and rights, sign-in front, SQL least privilege, engine permissions, the engine-start right, licence, update ring and more), each from a real check on every update run, so all installs can be kept the same; the as-built report storage is created private where a tenant policy forbids public access (instead of stopping the whole as-built setup every night), and a refusal there no longer stops the rest; the updater no longer says it could not check the engine permissions -- it uses the Manager's own recent check or says unknown; Update now: the 15-minute check asks Invardia once (with the licence) and updates at once on internal and test installs, and at a customer only inside the agreed update hours when the owner raised it
+
 ## 3.0.22 -- 2026-11-03
 
 - Community installs get the same update retry: when the nightly updater gets no answer from Invardia (a timeout or a gateway error), it asks again after 30 s, 1 minute and 2 minutes before it records a failure; an admin's own update check still answers at once

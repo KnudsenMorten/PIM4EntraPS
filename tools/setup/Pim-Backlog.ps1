@@ -110,7 +110,8 @@ function ConvertFrom-PimBacklogLine {
     $item.missing = ConvertTo-PimBacklogText $plain 600
     $vm = [regex]::Match($plain, '\b2\.4\.\d{2,4}\b|\b3\.\d+\.\d+\b')
     if ($stage -ne 'not-built' -and $vm.Success) { $item.version = $vm.Value }
-    if ($plain -match "(?i)owner (decides|decision|approves|approval|to decide|'s (ok|decision|approval|words))|awaits? the owner|needs? (an? )?(owner )?decision|ask(ed)? (the )?owner") { $item.waitingOn = 'owner' }
+    # "the owner's decision" (apostrophe, no space) counts too -- the reconcile of 2026-11-03 writes "waits for the owner's decision"
+    if ($plain -match "(?i)owner(?:'s| 's)? (decides|decision|approves|approval|to decide|ok|words)|(?:a)?waits? (for )?the owner|needs? (an? )?(owner )?decision|ask(ed)? (the )?owner") { $item.waitingOn = 'owner' }
     $qm = [regex]::Match($rest, '\*"([^"]{2,600})"\*')
     if ($qm.Success) { $q = ConvertTo-PimBacklogText $qm.Groups[1].Value $script:PimBacklog.Len.ownerQuote; if ($q) { $item.ownerQuote = $q } }
     [pscustomobject]@{ IdToken = $idTok; Chapter = "$Chapter"; Item = $item }

@@ -25,10 +25,26 @@
     * at most ONE update per raisedAt (marked BEFORE the update starts); a failed update is not retried by the signal (the
       nightly run retries); none while another execution of the updater is running; a signal older than 24 h is ignored.
 
+  UPDATE-NOW-HEAD (Invardia 2026-11-03, Invardia DESIGN 12 "Quicker updates"; owner rule 2026-10-12) -- the quick check
+  now asks first:
+      POST <base>/api/updates/pim-manager/head   headers X-Invardia-Install-Key [+ X-Invardia-Install-Id]
+           body { kind: 'code'; licence: <the licence text, as the manifest pull sends it>; ring }   (writes nothing)
+      -> 200 { version; sequence; wave?; expedite?: { apply: now|window; until; reason } }
+         401 key / 403 licence|installKeyBound|ring / 422 invalid = do nothing, ONE line naming the refusal.
+      * expedite.apply 'now' + a version newer than installed -> the update runs in this slot (the existing path).
+      * 'window' -> only inside the install's update window (PIM_UPDATE_WINDOW 'HH:MM-HH:MM' UTC on the updater job; the
+        default is the hour of the nightly slot, Get-PimUpdateWindowDefault), and never after 'until'.
+      * no expedite / not newer -> nothing (the nightly run covers it).
+      * 404 = an older Invardia without /head -> the old GET /signal (below) ONCE in this run, so the deploy order does not
+        matter. 0 / 429 / 5xx = no answer, quietly; NO retry here -- the next 15-minute slot is the retry.
+      * "at most once": a head expedite has no raisedAt -- the first time THIS updater saw it (version + sequence + apply)
+        stands in for it, so the once-per-raisedAt rule below is unchanged.
+      * the licence text and the install key are never written to a line, the store or the heartbeat.
+
   [!] OFF by default behind a per-ring switch (framework 8.18 "built OFF behind a per-ring switch, ring 0 first"):
      Get-PimUpdateNowDefaultRings (a literal: ring 0) unless PIM_UPDATE_NOW on the updater job says 1/0.
-  [!] The heartbeat's UpdatePending { signal; raisedAt; startedUtc } is behind its own switch PIM_UPLINK_UPDATENOWFIELDS,
-     OFF by default (Invardia's validator does not accept the three fields yet).
+  [!] The heartbeat's UpdatePending { signal; raisedAt; startedUtc }: ON by default since UPDATE-NOW-HEAD;
+     PIM_UPLINK_UPDATENOWFIELDS = 0/false/off/no switches the three fields off.
 
   State: pim.Settings 'UpdateNowState' { etag; signal { updateNow; version; raisedAt; scope }; handledRaisedAt;
   handledVersion; startedUtc; lastResult; changedUtc } -- written only when something in it changes.
@@ -57,9 +73,54 @@ function Test-PimUpdateNowEnabled {
 }
 
 function Test-PimUpdateNowFieldsOn {
-    <# PURE. PIM_UPLINK_UPDATENOWFIELDS: OFF by default -- only 1/true/on/yes switches the three UpdatePending fields on. #>
+    <# PURE. PIM_UPLINK_UPDATENOWFIELDS: ON by default (UPDATE-NOW-HEAD) -- an off-switch: only 0/false/off/no switches the
+       three UpdatePending fields off; unset or anything else = on. #>
     param([AllowNull()][AllowEmptyString()][string]$Value)
-    return [bool]("$Value".Trim() -match '^(?i)(1|true|on|yes)$')
+    return (-not [bool]("$Value".Trim() -match '^(?i)(0|false|off|no)$'))
+}
+
+# ---- UPDATE-NOW-HEAD: the install's update window ----------------------------------------------------------------------
+function Get-PimUpdateWindowDefault {
+    <#
+      PURE. LITERAL default (child-scope safe) of the update window when PIM_UPDATE_WINDOW is unset or unreadable: the HOUR
+      of the nightly slot, 'HH:00-HH+1:00' UTC (nightly '03:40' -> '03:00-04:00'). No readable nightly time = the setup
+      default ('0 3 * * *') -> '03:00-04:00'.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$NightlyUtc)
+    $n = ConvertFrom-PimUpdateNowNightly -Text $NightlyUtc
+    $h = 3; if ($n.ok) { $h = $n.hour }
+    return ('{0:D2}:00-{1:D2}:00' -f $h, (($h + 1) % 24))
+}
+
+function ConvertFrom-PimUpdateWindow {
+    <# PURE. 'HH:MM-HH:MM' (UTC; may cross midnight, '24:00' allowed as an end) -> @{ ok; startMin; endMin; text }. #>
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+    $bad = @{ ok = $false; startMin = -1; endMin = -1; text = '' }
+    $t = ("$Text".Trim() -replace '\s+', '')
+    if ($t -notmatch '^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$') { return $bad }
+    $a = [int]$Matches[1]; $b = [int]$Matches[2]; $c = [int]$Matches[3]; $d = [int]$Matches[4]
+    if ($a -gt 23 -or $b -gt 59 -or $c -gt 24 -or $d -gt 59 -or ($c -eq 24 -and $d -ne 0)) { return $bad }
+    $s = $a * 60 + $b; $e = $c * 60 + $d
+    if ($s -eq ($e % 1440)) { return $bad }
+    return @{ ok = $true; startMin = $s; endMin = $e; text = ('{0:D2}:{1:D2}-{2:D2}:{3:D2}' -f $a, $b, $c, $d) }
+}
+
+function Get-PimUpdateWindowState {
+    <#
+      PURE. Is -NowUtc inside the install's update window? -Window = PIM_UPDATE_WINDOW on the updater job ('' = the default,
+      Get-PimUpdateWindowDefault from -NightlyUtc). Returns @{ open; text; source = setting|default; note }.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Window, [AllowNull()][AllowEmptyString()][string]$NightlyUtc, [datetime]$NowUtc = [datetime]::UtcNow)
+    $src = 'setting'; $note = ''
+    $w = ConvertFrom-PimUpdateWindow -Text $Window
+    if (-not $w.ok) {
+        $raw = "$Window".Trim(); if ($raw.Length -gt 40) { $raw = $raw.Substring(0, 40) }
+        if ($raw) { $note = "PIM_UPDATE_WINDOW '$raw' is not 'HH:MM-HH:MM' -- the default is used" }
+        $src = 'default'; $w = ConvertFrom-PimUpdateWindow -Text (Get-PimUpdateWindowDefault -NightlyUtc $NightlyUtc)
+    }
+    $n = $NowUtc.ToUniversalTime(); $m = $n.Hour * 60 + $n.Minute
+    $open = if ($w.startMin -lt $w.endMin) { ($m -ge $w.startMin -and $m -lt $w.endMin) } else { ($m -ge $w.startMin -or $m -lt $w.endMin) }
+    return @{ open = [bool]$open; text = $w.text; source = $src; note = $note }
 }
 
 function Compare-PimUpdateNowVersion {
@@ -283,15 +344,105 @@ function ConvertFrom-PimUpdateNowSignal {
     $res.scope = $(if ($sc -in @('ring', 'environment')) { $sc } else { 'ring' })
     $by = ("$(Get-PimUpdateNowField $b 'by')" -replace '\s+', ' ').Trim(); if ($by.Length -gt 80) { $by = $by.Substring(0, 80) }
     $res.by = $by
+    # UPDATE-NOW-HEAD: a STORED record of a /head expedite carries its source + apply / until / sequence / key
+    $res.source = 'signal'; $res.apply = ''; $res.until = $null; $res.sequence = 0; $res.key = ''
+    if ("$(Get-PimUpdateNowField $b 'source')".Trim() -eq 'head') {
+        $res.source = 'head'
+        $ap = "$(Get-PimUpdateNowField $b 'apply')".Trim().ToLowerInvariant(); if ($ap -in @('now', 'window')) { $res.apply = $ap }
+        $res.until = ConvertTo-PimUpdateNowUtc (Get-PimUpdateNowField $b 'until')
+        $sq = [int64]0; if ([int64]::TryParse("$(Get-PimUpdateNowField $b 'sequence')".Trim(), [ref]$sq) -and $sq -gt 0) { $res.sequence = $sq }
+        $res.key = "$(Get-PimUpdateNowField $b 'key')".Trim()
+    }
     return $res
 }
 
 function ConvertTo-PimUpdateNowSignalRecord {
     # PURE. A parsed signal as the object kept in the state (no 'by': a name stays out of the store and the heartbeat).
+    # A /head expedite (source 'head') also keeps apply / until / sequence / key -- never the expedite's reason text.
     param([AllowNull()][hashtable]$Signal)
     if ($null -eq $Signal) { return $null }
-    return [pscustomobject][ordered]@{ updateNow = [bool]$Signal.updateNow; version = "$($Signal.version)"
-                                       raisedAt = $(if ($Signal.raisedAt) { ([datetime]$Signal.raisedAt).ToString('o') } else { '' }); scope = "$($Signal.scope)" }
+    $o = [ordered]@{ updateNow = [bool]$Signal.updateNow; version = "$($Signal.version)"
+                     raisedAt = $(if ($Signal.raisedAt) { ([datetime]$Signal.raisedAt).ToString('o') } else { '' }); scope = "$($Signal.scope)" }
+    if ("$($Signal.source)" -eq 'head') {
+        $o['source'] = 'head'; $o['apply'] = "$($Signal.apply)"
+        $o['until'] = $(if ($Signal.until) { ([datetime]$Signal.until).ToString('o') } else { '' })
+        $o['sequence'] = [int64]$(if ($Signal.sequence) { $Signal.sequence } else { 0 }); $o['key'] = "$($Signal.key)"
+    }
+    return [pscustomobject]$o
+}
+
+function ConvertFrom-PimUpdateNowHead {
+    <#
+      PURE. The POST /head 200 body -> @{ ok; version; sequence; wave; apply (now|window|''); until (UTC or $null); reason }.
+      version null / not a release version = ''. An expedite whose apply is neither 'now' nor 'window' is no expedite.
+    #>
+    param([AllowNull()][object]$Body)
+    $b = ConvertFrom-PimUpdateNowStored $Body
+    $res = @{ ok = $false; version = ''; sequence = [int64]0; wave = ''; apply = ''; until = $null; reason = '' }
+    if ($null -eq $b -or $b -is [string] -or $b -is [ValueType]) { return $res }
+    $res.ok = $true
+    $v = "$(Get-PimUpdateNowField $b 'version')".Trim(); if ($v -match '^\d+(\.\d+){1,5}$') { $res.version = $v }
+    $sq = [int64]0; if ([int64]::TryParse("$(Get-PimUpdateNowField $b 'sequence')".Trim(), [ref]$sq) -and $sq -gt 0) { $res.sequence = $sq }
+    $w = "$(Get-PimUpdateNowField $b 'wave')".Trim(); if ($w -match '^[A-Za-z0-9._-]{1,40}$') { $res.wave = $w }
+    $x = Get-PimUpdateNowField $b 'expedite'
+    if ($null -ne $x -and -not ($x -is [string]) -and -not ($x -is [ValueType])) {
+        $ap = "$(Get-PimUpdateNowField $x 'apply')".Trim().ToLowerInvariant()
+        if ($ap -in @('now', 'window')) { $res.apply = $ap }
+        $res.until = ConvertTo-PimUpdateNowUtc (Get-PimUpdateNowField $x 'until')
+        $r = ("$(Get-PimUpdateNowField $x 'reason')" -replace '\s+', ' ').Trim(); if ($r.Length -gt 120) { $r = $r.Substring(0, 120) }
+        $res.reason = $r
+    }
+    return $res
+}
+
+function ConvertTo-PimUpdateNowHeadSignal {
+    <#
+      PURE. A parsed /head answer as the quick check's signal (the shape ConvertFrom-PimUpdateNowSignal returns, source
+      'head'). updateNow = an expedite (now|window) for a named version. raisedAt = the first time THIS updater saw this
+      expedite (key = version#sequence#apply): taken from -Previous (the stored signal) when the key is the same, else
+      -NowUtc -- so "at most once per raisedAt" holds for /head too, and an unchanged answer writes nothing.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Head, [AllowNull()][object]$Previous, [datetime]$NowUtc = [datetime]::UtcNow)
+    $upd = [bool]($Head.apply -and $Head.version)
+    $key = $(if ($upd) { "$($Head.version)#$($Head.sequence)#$($Head.apply)" } else { '' })
+    $raised = $null
+    if ($upd) {
+        $pp = $null; if ($null -ne $Previous) { $pp = ConvertFrom-PimUpdateNowSignal -Body $Previous }
+        if ($pp -and $pp.ok -and $pp.source -eq 'head' -and $pp.key -eq $key -and $null -ne $pp.raisedAt) { $raised = $pp.raisedAt }
+        else { $n = $NowUtc.ToUniversalTime(); $raised = New-Object datetime ($n.Year, $n.Month, $n.Day, $n.Hour, $n.Minute, $n.Second, [DateTimeKind]::Utc) }
+    }
+    return @{ ok = $true; updateNow = $upd; version = "$($Head.version)"; raisedAt = $raised; scope = 'ring'; by = ''
+              source = 'head'; apply = $(if ($upd) { "$($Head.apply)" } else { '' }); until = $(if ($upd) { $Head.until } else { $null })
+              sequence = [int64]$Head.sequence; key = $key }
+}
+
+function Get-PimUpdateNowRefusalLine {
+    <#
+      PURE. The ONE line for a refused /head (401 / 403 / 422). The code comes from the answer's 'error' (else a one-word
+      'reason'); a 403 licence is said as a licence refusal -- never as "no route". Never echoes the key or the licence.
+    #>
+    param([int]$Status, [AllowNull()][object]$Body)
+    $b = ConvertFrom-PimUpdateNowStored $Body
+    $code = ''
+    foreach ($f in 'error', 'code', 'reason') {
+        $c = "$(Get-PimUpdateNowField $b $f)".Trim()
+        if ($c -match '^[A-Za-z][A-Za-z0-9_.-]{0,39}$') { $code = $c; break }
+    }
+    $tail = '-- nothing checked; the nightly run reports it'
+    switch ($Status) {
+        401 { return "update now: Invardia refused the install key (401) $tail" }
+        403 {
+            switch -Regex ($code) {
+                '^(?i)licen[cs]e' { return "update now: Invardia refused the licence (403 licence) $tail" }
+                '^(?i)installKeyBound$' { return "update now: Invardia refused the install key as bound to another install (403 installKeyBound) $tail" }
+                '^(?i)ring$' { return "update now: Invardia refused this environment's ring (403 ring) $tail" }
+            }
+            if ($code) { return "update now: Invardia refused the quick check (403 $code) $tail" }
+            return "update now: Invardia refused the quick check (403: the licence, the install key's binding or the ring) $tail"
+        }
+        422 { return "update now: Invardia refused the quick check as invalid (422$(if ($code) { " $code" })) $tail" }
+    }
+    return "update now: Invardia answered HTTP $Status $tail"
 }
 
 function Invoke-PimUpdateNowQuickCheck {
@@ -305,13 +456,19 @@ function Invoke-PimUpdateNowQuickCheck {
         no signal, quietly; 304 = the stored one) -> updateNow false -> older than 24 h -> already acted on (raisedAt) ->
         not newer than the installed version -> PIM_UPDATE_HOLD -> Strict -> another updater execution running
         (unreadable = not started).
-      Seams: -Signal { param($ETag) } -> @{ status; body; etag }   -GetState { } -> the stored state   -SetState { param($o) }
-             -IsRunning { } -> $true | $false | $null
+      Seams: -Head { } -> @{ status; body; error }  (UPDATE-NOW-HEAD: POST /head; the seam holds the key + licence, this
+                                                       function never sees the licence)
+             -Signal { param($ETag) } -> @{ status; body; etag }   (the old GET /signal: only when -Head is not given, or
+                                                       /head answered 404 -- an older Invardia; once per run)
+             -GetState { } -> the stored state   -SetState { param($o) }   -IsRunning { } -> $true | $false | $null
+      -UpdateWindow (PIM_UPDATE_WINDOW) / -NightlyUtc: the window an apply='window' expedite waits for (Get-PimUpdateWindowState).
+      No retry inside one execution: the next 15-minute slot is the retry.
     #>
     param([bool]$Enabled = $false, [AllowEmptyString()][string]$InstallKey = '', [AllowEmptyString()][string]$Ring = '',
           [AllowEmptyString()][string]$RunningVersion = '', [bool]$Hold = $false, [bool]$StrictActive = $false, [AllowEmptyString()][string]$StrictUntil = '',
-          [scriptblock]$Signal, [scriptblock]$GetState, [scriptblock]$SetState, [scriptblock]$IsRunning, [datetime]$NowUtc = [datetime]::UtcNow)
-    $res = @{ run = $false; line = ''; signal = $null; stateSaved = $false }
+          [scriptblock]$Head, [scriptblock]$Signal, [scriptblock]$GetState, [scriptblock]$SetState, [scriptblock]$IsRunning,
+          [AllowEmptyString()][string]$UpdateWindow = '', [AllowEmptyString()][string]$NightlyUtc = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    $res = @{ run = $false; line = ''; signal = $null; stateSaved = $false; source = '' }
     try {
         $now = $NowUtc.ToUniversalTime()
         $ringN = -1; [void][int]::TryParse("$Ring".Trim(), [ref]$ringN)
@@ -323,16 +480,6 @@ function Invoke-PimUpdateNowQuickCheck {
         $prevEtag = "$(Get-PimUpdateNowField $st 'etag')"
         $prevSig = Get-PimUpdateNowField $st 'signal'
         $newEtag = $prevEtag; $sig = $null; $sigNote = ''
-        $ans = $null; try { if ($Signal) { $ans = & $Signal $prevEtag } } catch { $ans = $null }
-        $code = 0; try { $code = [int](Get-PimUpdateNowField $ans 'status') } catch { $code = 0 }
-        if ($code -eq 200) {
-            $p = ConvertFrom-PimUpdateNowSignal -Body (Get-PimUpdateNowField $ans 'body')
-            if ($p.ok) { $sig = $p; $newEtag = "$(Get-PimUpdateNowField $ans 'etag')".Trim() } else { $sigNote = 'the signal answer could not be read' }
-        } elseif ($code -eq 304) {
-            if ($null -ne $prevSig) { $sig = ConvertFrom-PimUpdateNowSignal -Body $prevSig }
-            else { $sigNote = 'unchanged (304) and nothing stored' }
-        } elseif ($code -eq 204) { $sig = @{ ok = $true; updateNow = $false; version = ''; raisedAt = $null; scope = ''; by = '' }; $newEtag = '' }
-        else { $sigNote = $(if ($code -eq 404) { 'Invardia has no signal route yet (404)' } elseif ($code -eq 0) { 'Invardia could not be reached' } else { "Invardia answered HTTP $code" }) }
 
         $save = {
             param($line)
@@ -348,20 +495,74 @@ function Invoke-PimUpdateNowQuickCheck {
             if ($a -ne $b -and $SetState) { try { & $SetState ([pscustomobject]$o); $res.stateSaved = $true } catch { } }
         }
 
+        # ---- UPDATE-NOW-HEAD: POST /head first; only a 404 (an older Invardia) falls back to GET /signal, once ----------
+        $useSignal = (-not $Head)
+        if ($Head) {
+            $hAns = $null; try { $hAns = & $Head } catch { $hAns = $null }
+            $hCode = 0; try { $hCode = [int](Get-PimUpdateNowField $hAns 'status') } catch { $hCode = 0 }
+            if ($hCode -eq 404) { $useSignal = $true; $res.source = 'signal-fallback' }
+            else {
+                $res.source = 'head'
+                if ($hCode -eq 200 -or $hCode -eq 204) {
+                    $hp = $(if ($hCode -eq 200) { ConvertFrom-PimUpdateNowHead -Body (Get-PimUpdateNowField $hAns 'body') } else { @{ ok = $true; version = ''; sequence = [int64]0; wave = ''; apply = ''; until = $null; reason = '' } })
+                    if ($hp.ok) { $sig = ConvertTo-PimUpdateNowHeadSignal -Head $hp -Previous $prevSig -NowUtc $now }
+                    else { $sigNote = 'the quick-check answer could not be read' }
+                } elseif ($hCode -in @(401, 403, 422)) {
+                    & $save (Get-PimUpdateNowRefusalLine -Status $hCode -Body (Get-PimUpdateNowField $hAns 'body')); return $res
+                } else {
+                    $hErr = "$(Get-PimUpdateNowField $hAns 'error')".Trim()
+                    $sigNote = $(if ($hCode -eq 0 -and $hErr -eq 'no licence') { 'no licence in the store -- the quick check needs it, so it was not asked' }
+                                 elseif ($hCode -eq 0) { 'Invardia could not be reached' }
+                                 elseif ($hCode -eq 429) { 'Invardia asked to wait (429)' }
+                                 else { "Invardia answered HTTP $hCode" })
+                }
+            }
+        }
+        if ($useSignal) {
+            if (-not $res.source) { $res.source = 'signal' }
+            $ans = $null; try { if ($Signal) { $ans = & $Signal $prevEtag } } catch { $ans = $null }
+            $code = 0; try { $code = [int](Get-PimUpdateNowField $ans 'status') } catch { $code = 0 }
+            if ($code -eq 200) {
+                $p = ConvertFrom-PimUpdateNowSignal -Body (Get-PimUpdateNowField $ans 'body')
+                if ($p.ok) { $sig = $p; $newEtag = "$(Get-PimUpdateNowField $ans 'etag')".Trim() } else { $sigNote = 'the signal answer could not be read' }
+            } elseif ($code -eq 304) {
+                if ($null -ne $prevSig) { $sig = ConvertFrom-PimUpdateNowSignal -Body $prevSig }
+                else { $sigNote = 'unchanged (304) and nothing stored' }
+            } elseif ($code -eq 204) { $sig = @{ ok = $true; updateNow = $false; version = ''; raisedAt = $null; scope = ''; by = '' }; $newEtag = '' }
+            else { $sigNote = $(if ($code -eq 404) { 'Invardia has no signal route yet (404)' } elseif ($code -eq 0) { 'Invardia could not be reached' } else { "Invardia answered HTTP $code" }) }
+        }
+        $isHead = [bool]($null -ne $sig -and "$($sig.source)" -eq 'head')
+
         if ($null -eq $sig) { & $save "update now: no signal ($sigNote) -- nothing to do"; return $res }
         $res.signal = $sig
-        if (-not $sig.updateNow) { & $save 'update now: no update-now signal for this environment -- nothing to do'; return $res }
+        if (-not $sig.updateNow) {
+            if ($isHead) {
+                $hv = "$($sig.version)"
+                & $save $(if ($hv) { "update now: Invardia's head for ring $ringN is $hv with no expedite -- nothing to do (the nightly run covers it)" } else { "update now: Invardia's head for ring $ringN names no version -- nothing to do" })
+            } else { & $save 'update now: no update-now signal for this environment -- nothing to do' }
+            return $res
+        }
         $raised = $sig.raisedAt
         if ($null -eq $raised) { & $save 'update now: a signal without raisedAt -- ignored'; return $res }
         if (($now - $raised).TotalHours -ge (Get-PimUpdateNowMaxAgeHours)) { & $save ("update now: the signal raised {0:u} is older than 24 h -- ignored (the nightly run takes it)" -f $raised); return $res }
+        if ($isHead -and $null -ne $sig.until -and $now -ge $sig.until) {
+            & $save ("update now: the expedite ($($sig.apply)) for $($sig.version) ran out at {0:u} -- nothing to do (the nightly run covers it)" -f $sig.until); return $res
+        }
         $handled = ConvertTo-PimUpdateNowUtc (Get-PimUpdateNowField $st 'handledRaisedAt')
         if ($null -ne $handled -and $handled -eq $raised) {
             & $save ("update now: this signal (raised {0:u}) was acted on at {1} -- not again (a failed update is retried by the nightly run)" -f $raised, "$(Get-PimUpdateNowField $st 'startedUtc')"); return $res
         }
-        $who = $(if ($sig.scope -eq 'environment') { 'this environment' } else { "ring $ringN" })
+        $who = $(if ($isHead) { "ring $ringN (expedite $($sig.apply))" } elseif ($sig.scope -eq 'environment') { 'this environment' } else { "ring $ringN" })
         $cmp = Compare-PimUpdateNowVersion -A $sig.version -B $RunningVersion
         if ($null -eq $cmp) { & $save "update now: signal for $who, but the version ('$($sig.version)') or the installed version ('$RunningVersion') cannot be read -- not started"; return $res }
         if ($cmp -le 0) { & $save "update now: signal for $who names $($sig.version); this environment already runs $RunningVersion -- nothing to do"; return $res }
+        if ($isHead -and $sig.apply -eq 'window') {
+            $ws = Get-PimUpdateWindowState -Window $UpdateWindow -NightlyUtc $NightlyUtc -NowUtc $now
+            $wn = $(if ($ws.note) { " ($($ws.note))" } else { '' })
+            if (-not $ws.open) {
+                & $save ("update now: signal for $who names $($sig.version), but {0:HH:mm} UTC is outside this install's update window $($ws.text) UTC ($($ws.source))$wn -- not started (checked again next slot)" -f $now); return $res
+            }
+        }
         if ($Hold) { & $save "update now: signal for $who ($($sig.version)), but this environment is HELD (PIM_UPDATE_HOLD=1) -- not started"; return $res }
         if ($StrictActive) { & $save "update now: signal for $who ($($sig.version)), but guard Strict mode is on until $StrictUntil -- not started (the nightly run, or a SuperAdmin ending Strict, lets it through)"; return $res }
         $running = $null; if ($IsRunning) { try { $running = & $IsRunning } catch { $running = $null } }
@@ -414,7 +615,7 @@ function Set-PimUpdateNowHandled {
 
 function New-PimUpdateNowPendingFields {
     <#
-      PURE. The three UpdatePending fields (behind PIM_UPLINK_UPDATENOWFIELDS, OFF by default):
+      PURE. The three UpdatePending fields (ON by default; PIM_UPLINK_UPDATENOWFIELDS=0 switches them off):
         signal      'none' | 'ring' | 'environment'  -- an update-now signal that is set and younger than 24 h, by its scope
         raisedAt    when it was raised (ISO UTC), or $null
         startedUtc  when the updater started the update for THAT signal (ISO UTC), or $null

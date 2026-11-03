@@ -52,6 +52,17 @@ function Get-PimUpdPermFirstLine {
     return $t
 }
 
+function Get-PimUpdPermSnapshotMaxDays { <# PURE. The Manager's check is used when it is this many days old or newer (= Controls[identity-permissions]). #> return 7 }
+
+function ConvertTo-PimUpdPermUtc {
+    # PURE. A time (text / [datetime]) -> UTC [datetime], or $null.
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { return $Value.ToUniversalTime() }
+    $s = "$Value".Trim(); if (-not $s) { return $null }
+    try { return ([datetime]::Parse($s, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)) } catch { return $null }
+}
+
 function Get-PimUpdPermItems {
     # PURE. A Graph / ARM answer as a list: an array (Invoke-PimGraph -All) or an object with .value.
     param([AllowNull()][object]$Answer)
@@ -181,9 +192,18 @@ function Get-PimUpdaterEnginePermissionVerdict {
     if ($state -eq 'missing') { & $add 'warn' 'engine permissions: the updater may not grant roles -- a Privileged Role Administrator runs the command below (browser sign-in, no modules); a new grant reaches the engine within ~30 minutes' }
 
     $nMiss = $missingGraph.Count + $missingAzure.Count
+    # FLEET-ENGINE-PERM-CHECK (2026-11-03): never a bare "could not check" -- the headline says WHICH part is unknown and why.
+    $short = { param($t) $x = "$t".Trim(); if ($x.Length -gt 160) { $x = $x.Substring(0, 157) + '...' }; $x }
     $headline = switch ($state) {
         'missing' { "The engine is missing $nMiss permission(s) $forVer needs" }
-        'unknown' { 'The updater could not check every engine permission' }
+        'unknown' {
+            $parts = @()
+            if ($graphState -eq 'unknown') { $parts += "Microsoft Graph permissions unknown ($(& $short $(if ("$GraphReason".Trim()) { $GraphReason } else { 'not readable' })))" }
+            elseif ($graphState -eq 'ok') { $parts += 'Microsoft Graph permissions held' }
+            if ($azureState -eq 'unknown') { $parts += "Azure rights at the tenant root unknown ($(& $short $(if ("$AzureReason".Trim()) { $AzureReason } else { 'not readable' })))" }
+            elseif ($azureState -eq 'ok') { $parts += 'Azure rights held' }
+            "Engine permissions for $forVer -- " + ($parts -join '; ')
+        }
         default   { "The engine holds every permission $forVer needs" }
     }
     $record = [ordered]@{
@@ -193,6 +213,7 @@ function Get-PimUpdaterEnginePermissionVerdict {
         graphState   = $graphState
         azureState   = $azureState
         source       = "$GraphSource"
+        graphCheckedUtc = "$GraphCheckedUtc".Trim()
         identity     = "$EngineName"
         objectId     = "$EngineObjectId"
         missingGraph = @($missingGraph)
@@ -219,7 +240,9 @@ function Invoke-PimUpdaterEnginePermissionCheck {
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup,
           [string]$TickJob = 'ca-pim-tick', [string]$TenantId = '', [string]$Version = '',
           [Parameter(Mandatory)][scriptblock]$Arm, [scriptblock]$Graph, [scriptblock]$Store,
-          [int]$AzureDelegationCount = -1, [datetime]$NowUtc = [datetime]::UtcNow)
+          [int]$AzureDelegationCount = -1, [datetime]$NowUtc = [datetime]::UtcNow,
+          # FLEET-ENGINE-PERM-CHECK: the identity this check runs as, named in the line when Graph refuses it
+          [string]$UpdaterName = 'ca-pim-update')
     try {
         $rgScope = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
         # ---- who is the engine -------------------------------------------------------------------------------------
@@ -240,20 +263,40 @@ function Invoke-PimUpdaterEnginePermissionCheck {
                 $asg = @(Get-PimUpdPermItems (& $Graph "servicePrincipals/$oid/appRoleAssignments"))
                 $granted = @(ConvertTo-PimUpdaterGraphRoleNames -Assignments $asg -GraphSpId "$($gsp.id)" -AppRoles @($gsp.appRoles))
                 $graphOk = $true; $src = 'live'
-            } catch { $gWhy = "this updater may not read it ($(Get-PimUpdPermFirstLine $_.Exception.Message))" }
+            } catch {
+                # FLEET-ENGINE-PERM-CHECK (2026-11-03): at every install Graph answers 403 to the updater's identity (by design it
+                # holds no Graph read right). Say WHICH identity was refused, in one plain clause -- never a bare "could not check".
+                $gMsg = Get-PimUpdPermFirstLine $_.Exception.Message
+                if ($gMsg -match '(?i)\b403\b|Forbidden|Authorization_RequestDenied') { $gWhy = "$UpdaterName (the updater's identity) got HTTP 403 from Microsoft Graph reading the permissions of $TickJob -- by design it holds no Graph read right ($gMsg)" }
+                else { $gWhy = "$UpdaterName (the updater's identity) could not read the permissions of $TickJob from Microsoft Graph ($gMsg)" }
+            }
         } else { $gWhy = 'no Microsoft Graph access here' }
         if (-not $graphOk) {
+            # The Manager's latest REAL check (pim.Settings 'PermissionSnapshot' -- the same source as Controls[identity-permissions]),
+            # used only when it is 7 days old or newer (Get-PimUpdPermSnapshotMaxDays); older = unknown, never a stale ok.
             $snap = $null
             if ($Store) { try { $snap = & $Store 'get' 'PermissionSnapshot' $null } catch { $snap = $null } }
             if ($snap -is [string]) { try { $snap = $snap | ConvertFrom-Json } catch { $snap = $null } }
             if ($snap -is [System.Collections.IDictionary]) { $snap = [pscustomobject]$snap }
             if ($snap -and $snap.PSObject) {
                 $sOid = "$($snap.engineObjectId)".Trim()
-                $sAt = $snap.checkedUtc; if ($sAt -is [datetime]) { $sAt = $sAt.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
+                $sAtDt = ConvertTo-PimUpdPermUtc $snap.checkedUtc
+                $sAt = $(if ($sAtDt) { $sAtDt.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture) } else { '' })
+                $fresh = [bool]($sAtDt -and ($NowUtc.ToUniversalTime() - $sAtDt).TotalDays -le (Get-PimUpdPermSnapshotMaxDays) -and ($NowUtc.ToUniversalTime() - $sAtDt).TotalDays -ge -1)
                 if ($sOid -and $sOid -ine $oid) { $gWhy += '; the PIM Manager''s last check was of another identity' }
-                elseif ([bool]$snap.readable -and $snap.PSObject.Properties['granted']) {
+                elseif (-not [bool]$snap.readable) { $gWhy += '; the PIM Manager''s last check could not read the engine identity either' }
+                elseif (-not $fresh) { $gWhy += "; the PIM Manager's last check$(if ($sAt) { " ($sAt)" }) is older than $(Get-PimUpdPermSnapshotMaxDays) days -- open PIM Manager > Home > Verify permissions to refresh it" }
+                elseif ($snap.PSObject.Properties['granted']) {
                     $granted = @(@($snap.granted) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }); $graphOk = $true; $src = 'snapshot'; $at = "$sAt"
-                } elseif ([bool]$snap.readable) { $oldMissing = @(@($snap.missingIds) | Where-Object { "$_".Trim() }); $at = "$sAt"; if (-not $oldMissing.Count) { $gWhy += '; the PIM Manager''s last check is from a version that did not record the granted list' } }
+                } else {
+                    $oldMissing = @(@($snap.missingIds) | Where-Object { "$_".Trim() }); $at = "$sAt"
+                    if (-not $oldMissing.Count) {
+                        # a fresh check from a version that recorded counts only: missing = 0 there -> ok (from that check)
+                        $mCnt = 0; [void][int]::TryParse("$($snap.missing)", [ref]$mCnt)
+                        if ($mCnt -eq 0) { $granted = @(Get-PimRequiredGraphCapabilities | ForEach-Object { "$($_.role)" }); $graphOk = $true; $src = 'snapshot' }
+                        else { $gWhy += '; the PIM Manager''s last check counted missing permissions but did not name them' }
+                    }
+                }
             } else { $gWhy += '; the PIM Manager has not recorded a check of the engine identity yet' }
         }
 

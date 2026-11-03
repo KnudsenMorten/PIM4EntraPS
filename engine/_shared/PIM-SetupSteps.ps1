@@ -1,0 +1,541 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    REQUIREMENTS FLEET-SETUPSTEPS (framework contract, agreed with Invardia 2026-11-03; the same field from SI, PIM and EPS):
+    the heartbeat field `setupSteps` -- one entry per ONE-TIME install step, with its state from a REAL check.
+
+.DESCRIPTION
+    Shape (Invardia ignores unknown keys; at most 50 entries):
+        setupSteps: [ { key; title; state = ok | missing | n/a | unknown; since; how = updater | support-app | customer;
+                        checkedAt = <ISO UTC>; detail = <= 200 chars, no secrets } ]
+    RULES
+      * one entry per one-time step (the step list below is THE list -- install-steps S1-S16);
+      * the state comes from a REAL check: the updater reads its facts on every run (Get-PimSetupStepUpdaterFacts) and
+        stores them in pim.Settings 'UpdateState'.setupFacts; the heartbeat adds what it reads itself (the setup Controls,
+        supportSqlAccess). A fact that could not be read is 'unknown' -- NEVER a guessed ok;
+      * `how` = who can fix it.
+    WHERE THE FACTS COME FROM
+      updater (UpdateState.setupFacts)  private network (the Container Apps environment's internal flag), the Jobs Operator role
+                                        + SchedulerTickJobId (converge-defaults lines), CR8 (ACR admin user, Key Vault purge
+                                        protection, no SAS in PIM_UPDATE_SOURCE_URL, SQL auditing), the front state (Key Vault
+                                        key 'signin-front' + SQL schema 'signin'), the front's private Key Vault, the pull /
+                                        publish jobs' Reader on themselves, the as-built storage + rights
+      updater (UpdateState, own keys)   sqlAccess (run 1 / run 2 / updater in the admin group), signIn (the layer),
+                                        enginePermissions (the 95.2i check: Graph + the Reader at the tenant root)
+      heartbeat                         Controls (mail-sender, licence-valid, uplink-key, update-ring, identity-permissions),
+                                        supportSqlAccess { group; dbUser }, the Manager's PermissionSnapshot
+    PURE first (New-PimSetupSteps and every mapper -- offline-tested in tests/Test-PimSetupSteps.ps1), then the one reader
+    the updater calls (Get-PimSetupStepUpdaterFacts; ARM GET + one SQL scalar through seams; never throws, never writes).
+    PS 5.1 + 7, no modules, no az, ASCII only.
+#>
+Set-StrictMode -Off
+
+# ---------------------------------------------------------------------------------------------------------------------
+# THE STEP LIST (install-steps S1-S16). Literal-returning function: child-scope safe ($script: defaults are $null there).
+# since = the release that first needs the step; how = who can fix it.
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimSetupStepCatalog {
+    return @(
+        [ordered]@{ key = 'mail-sender';              title = 'Mail sender set up';                                  since = '2.4.0';   how = 'customer' }
+        [ordered]@{ key = 'private-network';          title = 'Private network (opt-in)';                            since = '3.0.19';  how = 'support-app' }
+        [ordered]@{ key = 'support-arm';              title = 'Support app: subscription rights';                    since = '2.4.649'; how = 'customer' }
+        [ordered]@{ key = 'support-sql';              title = 'Support app: database access';                        since = '2.4.649'; how = 'support-app' }
+        [ordered]@{ key = 'asbuilt-storage';          title = 'As-built storage, identity and job';                  since = '2.4.581'; how = 'updater' }
+        [ordered]@{ key = 'asbuilt-rights';           title = 'As-built write right and support role';               since = '2.4.581'; how = 'customer' }
+        [ordered]@{ key = 'signin-front';             title = 'Sign-in front in place of Easy Auth';                 since = '2.4.655'; how = 'support-app' }
+        [ordered]@{ key = 'front-state';              title = 'Sign-in front key and database schema';               since = '2.4.656'; how = 'support-app' }
+        [ordered]@{ key = 'cr8-hardening';            title = 'Registry, Key Vault, update source and SQL audit hardening'; since = '2.4.632'; how = 'support-app' }
+        [ordered]@{ key = 'sql-least-privilege';      title = 'Database least privilege (run 1 and run 2)';         since = '2.4.644'; how = 'support-app' }
+        [ordered]@{ key = 'updater-not-sql-admin';    title = 'Updater out of the SQL admin group';                  since = '2.4.645'; how = 'support-app' }
+        [ordered]@{ key = 'engine-graph-permissions'; title = 'Engine Microsoft Graph permissions';                  since = '2.4.0';   how = 'customer' }
+        [ordered]@{ key = 'jobs-operator';            title = 'Manager may start the engine after a change';         since = '2.4.547'; how = 'support-app' }
+        [ordered]@{ key = 'licence';                  title = 'Licence and install key';                             since = '2.4.500'; how = 'support-app' }
+        [ordered]@{ key = 'update-ring';              title = 'Update ring set';                                     since = '2.4.323'; how = 'support-app' }
+        [ordered]@{ key = 'engine-root-reader';       title = 'Engine Reader at the tenant root';                    since = '2.4.529'; how = 'customer' }
+        [ordered]@{ key = 'front-private-kv';         title = 'Private Key Vault for the sign-in front';             since = '2.4.656'; how = 'support-app' }
+        [ordered]@{ key = 'job-self-reader';          title = 'Pull / publish jobs read their own runs';             since = '2.4.636'; how = 'updater' }
+    )
+}
+function Get-PimSetupStepMax { return 50 }
+function Get-PimSetupStepDetailMax { return 200 }
+function Get-PimSetupStepStateList { return @('ok', 'missing', 'n/a', 'unknown') }
+function Get-PimSetupStepHowList { return @('updater', 'support-app', 'customer') }
+function Get-PimSetupStepFreshDays { return 7 }
+
+# ---------------------------------------------------------------------------------------------------------------------
+# PURE helpers
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimSetupStepField {
+    # PURE. A property of a PSCustomObject or a dictionary; $null when absent.
+    param([AllowNull()][object]$Object, [string]$Name)
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary]) { if ($Object.Contains($Name)) { return $Object[$Name] }; return $null }
+    if ($Object -is [string]) { return $null }
+    $p = $Object.PSObject.Properties[$Name]; if ($p) { return $p.Value }
+    return $null
+}
+
+function ConvertTo-PimSetupStepObject {
+    # PURE. A stored value as an object: JSON text (also double-encoded) is parsed; unparsable = $null.
+    param([AllowNull()][object]$Value)
+    $v = $Value
+    for ($i = 0; $i -lt 2 -and $v -is [string]; $i++) {
+        $s = "$v".Trim(); if (-not $s) { return $null }
+        try { $v = $s | ConvertFrom-Json } catch { return $null }
+    }
+    return $v
+}
+
+function ConvertTo-PimSetupStepUtc {
+    # PURE. A time (text / [datetime] / [datetimeoffset]) -> UTC [datetime], or $null.
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { return $Value.ToUniversalTime() }
+    if ($Value -is [datetimeoffset]) { return $Value.UtcDateTime }
+    $s = "$Value".Trim(); if (-not $s) { return $null }
+    try { return ([datetime]::Parse($s, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)) } catch { return $null }
+}
+
+function ConvertTo-PimSetupStepBool {
+    # PURE. $true / $false / 'true' / 'false' / 1 / 0 -> [bool]; anything else (incl. $null) -> $null (= not known).
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [bool]) { return [bool]$Value }
+    $s = "$Value".Trim().ToLowerInvariant()
+    if ($s -in @('true', '1', 'yes')) { return $true }
+    if ($s -in @('false', '0', 'no')) { return $false }
+    return $null
+}
+
+function Test-PimSetupStepSecretText {
+    # PURE. Does the text look like it carries a secret? (SAS, account key, password, bearer / JWT, a private key, an install key.)
+    param([AllowNull()][string]$Text)
+    $t = "$Text"
+    if (-not $t) { return $false }
+    return [bool]($t -match '(?i)(\bsig=|\bsv=\d|SharedAccessSignature|AccountKey=|password\s*[=:]|pwd\s*=|client_secret|secret\s*[=:]|\bBearer\s+[A-Za-z0-9._-]{8,}|\beyJ[A-Za-z0-9_-]{10,}|-----BEGIN|\binv-[A-Za-z0-9_-]{20,})')
+}
+
+function ConvertTo-PimSetupStepDetail {
+    # PURE. The detail as it may leave: one line, no secret (a secret-looking text is replaced), at most 200 characters.
+    param([AllowNull()][string]$Text)
+    $t = ("$Text" -replace '[\r\n\t]+', ' ' -replace '\s{2,}', ' ').Trim()
+    if (Test-PimSetupStepSecretText -Text $t) { $t = 'detail withheld (it looked like it carried a secret)' }
+    $max = Get-PimSetupStepDetailMax
+    if ($t.Length -gt $max) { $t = $t.Substring(0, $max - 3) + '...' }
+    return $t
+}
+
+function Test-PimSetupStepEntry {
+    # PURE. Is one entry valid in the agreed shape? (kebab key, known state / how, a version since, ISO checkedAt, a safe detail)
+    param([AllowNull()][object]$Entry)
+    if ($null -eq $Entry) { return $false }
+    $k = "$(Get-PimSetupStepField $Entry 'key')"
+    if ($k -notmatch '^[a-z0-9]+(-[a-z0-9]+)*$' -or $k.Length -gt 60) { return $false }
+    if ("$(Get-PimSetupStepField $Entry 'state')" -cnotin (Get-PimSetupStepStateList)) { return $false }
+    if ("$(Get-PimSetupStepField $Entry 'how')" -cnotin (Get-PimSetupStepHowList)) { return $false }
+    if ("$(Get-PimSetupStepField $Entry 'since')" -notmatch '^\d{1,4}\.\d{1,6}\.\d{1,6}$') { return $false }
+    if ("$(Get-PimSetupStepField $Entry 'checkedAt')" -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$') { return $false }
+    $t = "$(Get-PimSetupStepField $Entry 'title')"; if (-not $t.Trim() -or $t.Length -gt 100) { return $false }
+    $d = "$(Get-PimSetupStepField $Entry 'detail')"
+    if ($d.Length -gt (Get-PimSetupStepDetailMax) -or (Test-PimSetupStepSecretText -Text $d)) { return $false }
+    return $true
+}
+
+function Get-PimSetupStepControl {
+    # PURE. The state of one setup Control (Get-PimSetupControlStates output) by id; $null when absent.
+    param([object[]]$Controls = @(), [string]$Id)
+    foreach ($c in @($Controls | Where-Object { $null -ne $_ })) { if ("$(Get-PimSetupStepField $c 'id')" -eq $Id) { return $c } }
+    return $null
+}
+
+function Test-PimUpdateSourceUrlNoSas {
+    # PURE. CR8 step 5: PIM_UPDATE_SOURCE_URL carries no SAS (no query string with sig= / sv= / se=). Empty = no SAS ($true).
+    param([AllowNull()][string]$Url)
+    $u = "$Url".Trim()
+    if (-not $u) { return $true }
+    $q = ''; $i = $u.IndexOf('?'); if ($i -ge 0) { $q = $u.Substring($i + 1) }
+    return -not [bool]($q -match '(?i)(^|&)(sig|sv|se|sp|st|skoid)=')
+}
+
+function ConvertFrom-PimSetupConvergeLines {
+    <#
+      PURE. The converge-defaults lines (Invoke-PimUpdateConvergeDefaults .lines: id; level; text) -> the Jobs Operator facts:
+        jobsOperator  'manager-tick-operator': '-- present' = $true, 'MISSING' = $false, 'not checked' = $null
+        tickJobIdSet  'tick-start': already set / set / kept = $true, 'not set' = $false, 'not checked' = $null
+    #>
+    param([object[]]$Lines = @())
+    $o = [ordered]@{ jobsOperator = $null; tickJobIdSet = $null }
+    foreach ($l in @($Lines | Where-Object { $null -ne $_ })) {
+        $id = "$(Get-PimSetupStepField $l 'id')"; $tx = "$(Get-PimSetupStepField $l 'text')"; $lv = "$(Get-PimSetupStepField $l 'level')"
+        if ($id -eq 'manager-tick-operator') {
+            if ($tx -match '-- present') { $o.jobsOperator = $true } elseif ($tx -match 'MISSING') { $o.jobsOperator = $false } else { $o.jobsOperator = $null }
+        } elseif ($id -eq 'tick-start') {
+            if ($tx -match 'not checked|not converged') { $o.tickJobIdSet = $null }
+            elseif ($tx -match 'not set') { $o.tickJobIdSet = $false }
+            elseif ($lv -eq 'changed' -or $tx -match 'already set|-- kept|-- set') { $o.tickJobIdSet = $true }
+        }
+    }
+    return $o
+}
+
+function ConvertFrom-PimSetupJobSelfIdResult {
+    <#
+      PURE. The pull / publish jobs' Reader on themselves (Invoke-PimJobSelfIdUpdate: ok; log[]; notes[]) -> ok | missing | n/a | $null.
+      No such job at this install = n/a; a refusal note = missing; the jobs could not be listed = $null (unknown).
+    #>
+    param([AllowNull()][object]$Result)
+    if ($null -eq $Result) { return $null }
+    $log = @(@(Get-PimSetupStepField $Result 'log') | Where-Object { $_ })
+    $notes = @(@(Get-PimSetupStepField $Result 'notes') | Where-Object { $_ })
+    if (@($notes | Where-Object { "$_" -match "'Reader' on itself is not assigned|no identity to grant" }).Count) { return 'missing' }
+    if (@($log | Where-Object { "$_" -match "'Reader' on itself (ensured|already assigned)" }).Count) { return 'ok' }
+    if ("$(Get-PimSetupStepField $Result 'detail')" -match 'could not be listed') { return $null }
+    if (-not $log.Count -and -not $notes.Count) { return 'n/a' }
+    return $null
+}
+
+function ConvertFrom-PimSetupSqlAuditResult {
+    # PURE. SQL auditing (Invoke-PimSqlAuditConverge: ok; lines[]) -> $true (on) / $false (refused, still off) / $null (not checked).
+    param([AllowNull()][object]$Result)
+    if ($null -eq $Result) { return $null }
+    $lines = @(@(Get-PimSetupStepField $Result 'lines') | Where-Object { $_ })
+    if (@($lines | Where-Object { "$(Get-PimSetupStepField $_ 'text')" -match 'not checked' }).Count) { return $null }
+    $ok = ConvertTo-PimSetupStepBool (Get-PimSetupStepField $Result 'ok')
+    return $ok
+}
+
+function Get-PimSetupStepAsBuiltFacts {
+    <#
+      The as-built entries. Get-PimAsBuiltSetupState (engine/_shared/PIM-AsBuilt.ps1, PURE; storage = ok|missing|denied|unknown,
+      rights = ok|missing|unknown, detail) is called when it exists -- with whatever of -Result / -Converge / -Lines it declares;
+      absent (an older build) = both 'unknown', detail 'not checked by this version'. Never throws.
+    #>
+    param([AllowNull()][object]$AsBuiltResult)
+    $cmd = Get-Command Get-PimAsBuiltSetupState -ErrorAction SilentlyContinue
+    if (-not $cmd) { return [ordered]@{ asBuiltStorage = 'unknown'; asBuiltRights = 'unknown'; asBuiltDetail = 'not checked by this version' } }
+    try {
+        $args2 = @{}
+        foreach ($n in @('Result', 'Converge', 'ConvergeResult', 'AsBuilt')) { if ($cmd.Parameters.ContainsKey($n)) { $args2[$n] = $AsBuiltResult } }
+        if ($cmd.Parameters.ContainsKey('Lines')) { $args2['Lines'] = @(Get-PimSetupStepField $AsBuiltResult 'lines') }
+        $r = Get-PimAsBuiltSetupState @args2
+        $st = "$(Get-PimSetupStepField $r 'storage')".Trim().ToLowerInvariant()
+        $rt = "$(Get-PimSetupStepField $r 'rights')".Trim().ToLowerInvariant()
+        if ($st -notin @('ok', 'missing', 'denied', 'unknown')) { $st = 'unknown' }
+        if ($rt -notin @('ok', 'missing', 'unknown')) { $rt = 'unknown' }
+        return [ordered]@{ asBuiltStorage = $st; asBuiltRights = $rt; asBuiltDetail = "$(Get-PimSetupStepField $r 'detail')" }
+    } catch {
+        return [ordered]@{ asBuiltStorage = 'unknown'; asBuiltRights = 'unknown'; asBuiltDetail = "the as-built state could not be read: $(((("$($_.Exception.Message)") -split "`n")[0]).Trim())" }
+    }
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# THE BUILDER (PURE)
+# ---------------------------------------------------------------------------------------------------------------------
+function New-PimSetupSteps {
+    <#
+      PURE. The setupSteps array from the facts. -Facts (dictionary or object, every part optional):
+        Updater           UpdateState.setupFacts (Get-PimSetupStepUpdaterFacts) -- incl. checkedUtc
+        UpdateState       pim.Settings 'UpdateState' (sqlAccess, signIn, enginePermissions, tsUtc)
+        Controls          Get-PimSetupControlStates output (id; state; value)
+        SupportSqlAccess  { group; dbUser } (the heartbeat's own read)
+        Permissions       pim.Settings 'PermissionSnapshot' (the Manager's last check)
+        NowUtc            the heartbeat's time
+      A missing fact = 'unknown' with a detail saying what was not read. Every entry validated (Test-PimSetupStepEntry);
+      at most 50. Returns @( [ordered]@{ key; title; state; since; how; checkedAt; detail } ).
+    #>
+    param([AllowNull()][object]$Facts)
+    $now = ConvertTo-PimSetupStepUtc (Get-PimSetupStepField $Facts 'NowUtc'); if (-not $now) { $now = [datetime]::UtcNow }
+    $iso = { param($t) $u = ConvertTo-PimSetupStepUtc $t; if (-not $u) { $u = $now }; $u.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture) }
+    $up = ConvertTo-PimSetupStepObject (Get-PimSetupStepField $Facts 'Updater')
+    $us = ConvertTo-PimSetupStepObject (Get-PimSetupStepField $Facts 'UpdateState')
+    $ctl = @(Get-PimSetupStepField $Facts 'Controls')
+    $ssa = ConvertTo-PimSetupStepObject (Get-PimSetupStepField $Facts 'SupportSqlAccess')
+    $perm = ConvertTo-PimSetupStepObject (Get-PimSetupStepField $Facts 'Permissions')
+    $upAt = Get-PimSetupStepField $up 'checkedUtc'
+    $usAt = Get-PimSetupStepField $us 'tsUtc'
+    $noUp = 'not read: no updater run has recorded this check yet'
+    $uf = { param($n) if ($null -eq $up) { return $null }; return (Get-PimSetupStepField $up $n) }
+    $ub = { param($n) ConvertTo-PimSetupStepBool (& $uf $n) }
+
+    $res = @{}
+    $set = { param($key, $state, $detail, $at) $res[$key] = @{ state = $state; detail = "$detail"; at = $at } }
+
+    # ---- S1 mail-sender (heartbeat Control) ------------------------------------------------------------------------
+    $c = Get-PimSetupStepControl -Controls $ctl -Id 'mail-sender'
+    switch ("$(Get-PimSetupStepField $c 'state')") {
+        'ok'      { & $set 'mail-sender' 'ok' 'the mail sender is set up' (Get-PimSetupStepField $c 'checkedUtc') }
+        'missing' { & $set 'mail-sender' 'missing' 'no mail sender is set up (Get Started > Mail sender; the customer''s Exchange admin)' (Get-PimSetupStepField $c 'checkedUtc') }
+        'wrong'   { & $set 'mail-sender' 'missing' 'the last test mail failed: the mail sender does not work' (Get-PimSetupStepField $c 'checkedUtc') }
+        default   { & $set 'mail-sender' 'unknown' 'not read: the mail settings could not be read' $null }
+    }
+
+    # ---- S2 private-network (updater: the Container Apps environment's internal flag) --------------------------------
+    $pn = & $ub 'privateNetwork'
+    if ($null -eq $up) { & $set 'private-network' 'unknown' $noUp $null }
+    elseif ($pn -eq $true) { & $set 'private-network' 'ok' 'the Container Apps environment is on an internal virtual network' $upAt }
+    elseif ($pn -eq $false) { & $set 'private-network' 'n/a' 'public environment (a private network is opt-in)' $upAt }
+    else { & $set 'private-network' 'unknown' 'not read: the Container Apps environment could not be read' $upAt }
+
+    # ---- S3a support-arm (Invardia's own app; PIM has no read of it) -----------------------------------------------
+    & $set 'support-arm' 'unknown' 'not checked by PIM: Invardia reads its own Support app''s rights' $null
+
+    # ---- S3b support-sql (heartbeat supportSqlAccess) --------------------------------------------------------------
+    if ($null -eq $ssa) { & $set 'support-sql' 'unknown' 'not read: the Support app''s database access was not checked this heartbeat' $null }
+    else {
+        $g = ConvertTo-PimSetupStepBool (Get-PimSetupStepField $ssa 'group'); $d = ConvertTo-PimSetupStepBool (Get-PimSetupStepField $ssa 'dbUser')
+        $at = Get-PimSetupStepField $ssa 'checkedUtc'
+        if ($g -eq $true -and $d -eq $true) { & $set 'support-sql' 'ok' 'the Support app is in the SQL admin group and has its database user' $at }
+        elseif ($g -eq $false -or $d -eq $false) { & $set 'support-sql' 'missing' ("missing: " + ((@($(if ($g -eq $false) { 'SQL admin group membership' }), $(if ($d -eq $false) { 'database user in db_owner' })) | Where-Object { $_ }) -join ', ')) $at }
+        else { & $set 'support-sql' 'unknown' 'not determined: the group or the database user could not be read' $at }
+    }
+
+    # ---- S4a / S4b as-built (updater, Get-PimAsBuiltSetupState) ------------------------------------------------------
+    if ($null -eq $up) { & $set 'asbuilt-storage' 'unknown' $noUp $null; & $set 'asbuilt-rights' 'unknown' $noUp $null }
+    else {
+        $abs = "$(& $uf 'asBuiltStorage')".Trim().ToLowerInvariant(); $abr = "$(& $uf 'asBuiltRights')".Trim().ToLowerInvariant()
+        $abd = "$(& $uf 'asBuiltDetail')".Trim()
+        switch ($abs) {
+            'ok'      { & $set 'asbuilt-storage' 'ok' $(if ($abd) { $abd } else { 'the as-built storage, identity and job are in place' }) $upAt }
+            'missing' { & $set 'asbuilt-storage' 'missing' $(if ($abd) { $abd } else { 'the as-built storage, identity or job is missing' }) $upAt }
+            'denied'  { & $set 'asbuilt-storage' 'missing' $(if ($abd) { $abd } else { 'the as-built storage was refused (a tenant policy)' }) $upAt }
+            default   { & $set 'asbuilt-storage' 'unknown' $(if ($abd) { $abd } else { 'not checked by this version' }) $upAt }
+        }
+        switch ($abr) {
+            'ok'      { & $set 'asbuilt-rights' 'ok' 'the as-built job may write its PDF and the support role exists' $upAt }
+            'missing' { & $set 'asbuilt-rights' 'missing' $(if ($abd) { $abd } else { 'the as-built write right or the support role is missing (an Owner grants them)' }) $upAt }
+            default   { & $set 'asbuilt-rights' 'unknown' $(if ($abd) { $abd } else { 'not checked by this version' }) $upAt }
+        }
+    }
+
+    # ---- S5 signin-front (UpdateState.signIn) ------------------------------------------------------------------------
+    $si = Get-PimSetupStepField $us 'signIn'; $layer = "$(Get-PimSetupStepField $si 'layer')".Trim().ToLowerInvariant()
+    switch ($layer) {
+        'signin-front' { & $set 'signin-front' 'ok' "the Manager signs in through the sign-in front$(if ("$(Get-PimSetupStepField $si 'version')".Trim() -match '^\d+(\.\d+){1,3}$') { " $("$(Get-PimSetupStepField $si 'version')".Trim())" })" $usAt }
+        'easyauth'     { & $set 'signin-front' 'missing' 'the Manager still signs in through Easy Auth (the front move is not done)' $usAt }
+        'none'         { & $set 'signin-front' 'missing' 'the Manager has no sign-in layer in front of it' $usAt }
+        default        { & $set 'signin-front' 'unknown' 'not read: the updater has not recorded the Manager''s sign-in layer' $usAt }
+    }
+
+    # ---- S5b front-state (updater: Key Vault key + SQL schema; only behind the front) ------------------------------
+    if ($layer -in @('easyauth', 'none')) { & $set 'front-state' 'n/a' 'the sign-in front is not in use' $usAt }
+    elseif ($null -eq $up) { & $set 'front-state' 'unknown' $noUp $null }
+    else {
+        $fk = & $ub 'frontKey'; $fs = & $ub 'frontSqlSchema'
+        if ($fk -eq $true -and $fs -eq $true) { & $set 'front-state' 'ok' 'the front''s Key Vault key and database schema exist' $upAt }
+        elseif ($fk -eq $false -or $fs -eq $false) { & $set 'front-state' 'missing' ("missing: " + ((@($(if ($fk -eq $false) { "Key Vault key 'signin-front'" }), $(if ($fs -eq $false) { "database schema 'signin'" })) | Where-Object { $_ }) -join ', ')) $upAt }
+        else { & $set 'front-state' 'unknown' 'not read: the front''s Key Vault key or database schema could not be read' $upAt }
+    }
+
+    # ---- S6 cr8-hardening (updater) ----------------------------------------------------------------------------------
+    if ($null -eq $up) { & $set 'cr8-hardening' 'unknown' $noUp $null }
+    else {
+        $items = [ordered]@{ 'registry admin user off' = (& $ub 'acrAdminOff'); 'Key Vault purge protection' = (& $ub 'kvPurgeProtection')
+                             'update source without SAS' = (& $ub 'sourceUrlNoSas'); 'SQL auditing on' = (& $ub 'sqlAudit') }
+        $bad = @($items.Keys | Where-Object { $items[$_] -eq $false }); $unk = @($items.Keys | Where-Object { $null -eq $items[$_] })
+        if ($bad.Count) { & $set 'cr8-hardening' 'missing' ("not done: $($bad -join ', ')$(if ($unk.Count) { "; not read: $($unk -join ', ')" })") $upAt }
+        elseif ($unk.Count) { & $set 'cr8-hardening' 'unknown' ("not read: $($unk -join ', ')") $upAt }
+        else { & $set 'cr8-hardening' 'ok' 'registry admin user off, Key Vault purge protection on, no SAS in the update source, SQL auditing on' $upAt }
+    }
+
+    # ---- S7/S8 sql-least-privilege, S9 updater-not-sql-admin (UpdateState.sqlAccess) --------------------------------
+    $sa = Get-PimSetupStepField $us 'sqlAccess'; $saAt = Get-PimSetupStepField $sa 'checkedUtc'; if (-not $saAt) { $saAt = $usAt }
+    if ($null -eq $sa) { & $set 'sql-least-privilege' 'unknown' 'not read: the updater has not recorded the database access model' $null; & $set 'updater-not-sql-admin' 'unknown' 'not read: the updater has not recorded the database access model' $null }
+    else {
+        $model = "$(Get-PimSetupStepField $sa 'model')"; $r1 = ConvertTo-PimSetupStepBool (Get-PimSetupStepField $sa 'run1'); $r2 = ConvertTo-PimSetupStepBool (Get-PimSetupStepField $sa 'run2')
+        if ($model -eq 'least-privilege' -and $r1 -eq $true -and $r2 -eq $true) { & $set 'sql-least-privilege' 'ok' 'least privilege: run 1 and run 2 are done' $saAt }
+        elseif ($model -eq 'broad' -or $r1 -eq $false -or $r2 -eq $false) { & $set 'sql-least-privilege' 'missing' ("not done: " + ((@($(if ($r1 -ne $true) { 'run 1' }), $(if ($r2 -ne $true) { 'run 2' })) | Where-Object { $_ }) -join ', ')) $saAt }
+        else { & $set 'sql-least-privilege' 'unknown' 'not determined: the access model could not be read' $saAt }
+        $ia = ConvertTo-PimSetupStepBool (Get-PimSetupStepField $sa 'updaterInAdminGroup')
+        if ($ia -eq $false) { & $set 'updater-not-sql-admin' 'ok' 'the updater is not in the SQL admin group' $saAt }
+        elseif ($ia -eq $true) { & $set 'updater-not-sql-admin' 'missing' 'the updater is still in the SQL admin group' $saAt }
+        else { & $set 'updater-not-sql-admin' 'unknown' 'not determined: the SQL admin group could not be read' $saAt }
+    }
+
+    # ---- S10 engine-graph-permissions + S14 engine-root-reader (UpdateState.enginePermissions, else the Manager) -------
+    $ep = Get-PimSetupStepField $us 'enginePermissions'; $epAt = Get-PimSetupStepField $ep 'checkedUtc'
+    $gs = "$(Get-PimSetupStepField $ep 'graphState')"
+    $psAt = ConvertTo-PimSetupStepUtc (Get-PimSetupStepField $perm 'checkedUtc')
+    $psFresh = ($perm -and $psAt -and ($now - $psAt).TotalDays -le (Get-PimSetupStepFreshDays) -and (ConvertTo-PimSetupStepBool (Get-PimSetupStepField $perm 'readable')) -eq $true)
+    if ($gs -eq 'ok') { & $set 'engine-graph-permissions' 'ok' 'the engine holds every Microsoft Graph permission this version needs' $epAt }
+    elseif ($gs -eq 'missing') {
+        $mg = @(@(Get-PimSetupStepField $ep 'missingGraph') | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$' })
+        & $set 'engine-graph-permissions' 'missing' ("missing: $($mg -join ', ')") $epAt
+    } else {
+        $ic = Get-PimSetupStepControl -Controls $ctl -Id 'identity-permissions'
+        switch ("$(Get-PimSetupStepField $ic 'state')") {
+            'ok'      { & $set 'engine-graph-permissions' 'ok' 'from the PIM Manager''s permission check (7 days or newer)' (Get-PimSetupStepField $ic 'checkedUtc') }
+            'missing' { & $set 'engine-graph-permissions' 'missing' 'the PIM Manager''s permission check found missing permissions (Home > Permissions)' (Get-PimSetupStepField $ic 'checkedUtc') }
+            default   {
+                $why = "$(Get-PimSetupStepField $ep 'reason')".Trim()
+                & $set 'engine-graph-permissions' 'unknown' $(if ($why) { "not checked: $why" } else { 'not checked: no readable permission check from the last 7 days' }) $epAt
+            }
+        }
+    }
+    $as = "$(Get-PimSetupStepField $ep 'azureState')"
+    $ma = @(@(Get-PimSetupStepField $ep 'missingAzure') | ForEach-Object { "$_" })
+    if ($as -in @('ok', 'missing')) {
+        if (@($ma | Where-Object { $_ -match '^Reader at the tenant root' }).Count) { & $set 'engine-root-reader' 'missing' 'the engine has no Reader at the tenant root management group' $epAt }
+        else { & $set 'engine-root-reader' 'ok' 'the engine holds Reader at the tenant root management group' $epAt }
+    } elseif ($psFresh -and (ConvertTo-PimSetupStepBool (Get-PimSetupStepField $perm 'rootReader')) -is [bool]) {
+        if ([bool](ConvertTo-PimSetupStepBool (Get-PimSetupStepField $perm 'rootReader'))) { & $set 'engine-root-reader' 'ok' 'from the PIM Manager''s permission check' $psAt }
+        else { & $set 'engine-root-reader' 'missing' 'the PIM Manager''s permission check found no Reader at the tenant root' $psAt }
+    } else { & $set 'engine-root-reader' 'unknown' 'not read: the engine''s Azure role assignments could not be read' $epAt }
+
+    # ---- S11 jobs-operator (updater: converge-defaults) ------------------------------------------------------------
+    if ($null -eq $up) { & $set 'jobs-operator' 'unknown' $noUp $null }
+    else {
+        $jo = & $ub 'jobsOperator'; $tj = & $ub 'tickJobIdSet'
+        if ($jo -eq $true -and $tj -eq $true) { & $set 'jobs-operator' 'ok' 'the Manager holds Container Apps Jobs Operator on the engine job and SchedulerTickJobId is set' $upAt }
+        elseif ($jo -eq $false -or $tj -eq $false) { & $set 'jobs-operator' 'missing' ("missing: " + ((@($(if ($jo -eq $false) { "the Manager's Container Apps Jobs Operator role on the engine job" }), $(if ($tj -eq $false) { 'SchedulerTickJobId' })) | Where-Object { $_ }) -join ', ')) $upAt }
+        else { & $set 'jobs-operator' 'unknown' 'not read: the Manager''s role assignments could not be read' $upAt }
+    }
+
+    # ---- S12 licence (heartbeat Controls licence-valid + uplink-key) -----------------------------------------------
+    $lv = "$(Get-PimSetupStepField (Get-PimSetupStepControl -Controls $ctl -Id 'licence-valid') 'state')"; $uk = "$(Get-PimSetupStepField (Get-PimSetupStepControl -Controls $ctl -Id 'uplink-key') 'state')"
+    if ($lv -eq 'ok' -and $uk -eq 'ok') { & $set 'licence' 'ok' 'a valid licence for this tenant and the Invardia install key are in place' $null }
+    elseif ($lv -in @('missing', 'wrong') -or $uk -eq 'missing') { & $set 'licence' 'missing' ("not done: " + ((@($(if ($lv -eq 'missing') { 'no licence' } elseif ($lv -eq 'wrong') { 'the licence is expired or for another tenant' }), $(if ($uk -eq 'missing') { 'no install key' })) | Where-Object { $_ }) -join ', ')) $null }
+    else { & $set 'licence' 'unknown' 'not read: the licence could not be read' $null }
+
+    # ---- S13 update-ring (heartbeat Control) ---------------------------------------------------------------------
+    $rc = Get-PimSetupStepControl -Controls $ctl -Id 'update-ring'
+    switch ("$(Get-PimSetupStepField $rc 'state')") {
+        'ok'      { & $set 'update-ring' 'ok' $(if ("$(Get-PimSetupStepField $rc 'value')" -match '^[0-3]$') { "ring $(Get-PimSetupStepField $rc 'value')" } else { 'the ring is set' }) (Get-PimSetupStepField $rc 'checkedUtc') }
+        'missing' { & $set 'update-ring' 'missing' 'no update ring is set on the updater' (Get-PimSetupStepField $rc 'checkedUtc') }
+        default   { & $set 'update-ring' 'unknown' 'not read: the update state could not be read' $null }
+    }
+
+    # ---- S15 front-private-kv (updater: the vaults in the resource group) --------------------------------------------
+    if ($null -eq $up) { & $set 'front-private-kv' 'unknown' $noUp $null }
+    else {
+        switch ("$(& $uf 'frontKvPrivate')") {
+            'private'            { & $set 'front-private-kv' 'ok' 'the Key Vault is private and reached through a private endpoint' $upAt }
+            'private-no-endpoint'{ & $set 'front-private-kv' 'missing' 'the Key Vault denies public access but has no private endpoint' $upAt }
+            'public'             { & $set 'front-private-kv' 'n/a' 'the Key Vault allows public access (a private vault is needed only where a policy denies it)' $upAt }
+            'none'               { & $set 'front-private-kv' 'n/a' 'no Key Vault in the resource group' $upAt }
+            default              { & $set 'front-private-kv' 'unknown' 'not read: the Key Vaults could not be read' $upAt }
+        }
+    }
+
+    # ---- S16 job-self-reader (updater: Invoke-PimJobSelfIdUpdate) ---------------------------------------------------
+    if ($null -eq $up) { & $set 'job-self-reader' 'unknown' $noUp $null }
+    else {
+        switch ("$(& $uf 'jobSelfReader')") {
+            'ok'      { & $set 'job-self-reader' 'ok' 'every pull / publish job holds Reader on itself' $upAt }
+            'missing' { & $set 'job-self-reader' 'missing' 'a pull / publish job has no Reader on itself (a redeploy of the job grants it)' $upAt }
+            'n/a'     { & $set 'job-self-reader' 'n/a' 'no pull or publish job at this install' $upAt }
+            default   { & $set 'job-self-reader' 'unknown' 'not read: the jobs could not be listed' $upAt }
+        }
+    }
+
+    # ---- assemble, in the catalog's order; validate; cap -------------------------------------------------------------
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($c in (Get-PimSetupStepCatalog)) {
+        $r = $res[$c.key]
+        if (-not $r) { $r = @{ state = 'unknown'; detail = 'not read'; at = $null } }
+        $e = [ordered]@{ key = $c.key; title = $c.title; state = "$($r.state)"; since = $c.since; how = $c.how
+                         checkedAt = (& $iso $r.at); detail = (ConvertTo-PimSetupStepDetail -Text $r.detail) }
+        if (Test-PimSetupStepEntry -Entry $e) { $out.Add($e) }
+        if ($out.Count -ge (Get-PimSetupStepMax)) { break }
+    }
+    return @($out.ToArray())
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# THE HEARTBEAT SIDE
+# ---------------------------------------------------------------------------------------------------------------------
+function Test-PimUplinkSetupStepsOn {
+    # PURE. PIM_UPLINK_SETUPSTEPS: ON by default (Invardia ignores what it does not know); 0 / false / off / no = off.
+    param([AllowNull()][string]$Value = $env:PIM_UPLINK_SETUPSTEPS)
+    return -not [bool]("$Value".Trim() -match '^(?i)(0|false|off|no)$')
+}
+
+function Add-PimUplinkSetupStepsField {
+    <#
+      Puts setupSteps on the heartbeat -Record and PROVES the record's JSON text (a JSON array of objects, under Windows
+      PowerShell 5.1 too -- the Controls lesson): not an array = the field is removed with one warning. Never throws.
+      Returns $true when it went on.
+    #>
+    param([Parameter(Mandatory)][object]$Record, [AllowNull()][object[]]$Steps)
+    $s = @(@($Steps) | Where-Object { Test-PimSetupStepEntry -Entry $_ })
+    if (-not $s.Count) { return $false }
+    try {
+        $Record | Add-Member -NotePropertyName 'setupSteps' -NotePropertyValue ([object[]]$s) -Force
+        $t = ''; try { $t = "$($Record | ConvertTo-Json -Depth 6 -Compress)" } catch { $t = '' }
+        if ($t.Contains('"setupSteps":[{')) { return $true }
+        $Record.PSObject.Properties.Remove('setupSteps')
+        Write-Warning '[uplink] setupSteps could not be written as a JSON array -- the heartbeat goes without it.'
+    } catch { try { $Record.PSObject.Properties.Remove('setupSteps') } catch { } }
+    return $false
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# THE UPDATER SIDE (I/O through seams; READ ONLY; never throws)
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimSetupStepUpdaterFacts {
+    <#
+      The updater's facts for setupSteps, gathered during its converge (update-job-entry step 2g) and stored in
+      pim.Settings 'UpdateState'.setupFacts. READ ONLY: ARM GET + one SQL scalar; every read that fails leaves its fact $null
+      (= unknown), never a guess. Never throws.
+        -Arm       { param($method, $path, $body) } -- called with 'GET' only
+        -SqlScalar { param($sql) }                   -- one read-only scalar ($null = no store)
+        -ConvergeLines   Invoke-PimUpdateConvergeDefaults .lines
+        -JobSelfId       Invoke-PimJobSelfIdUpdate result
+        -SqlAudit        Invoke-PimSqlAuditConverge result
+        -AsBuilt         Invoke-PimAsBuiltConverge result
+        -SourceUrl       PIM_UPDATE_SOURCE_URL
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup,
+          [string]$ManagerApp = 'ca-pim-manager', [Parameter(Mandatory)][scriptblock]$Arm, [scriptblock]$SqlScalar,
+          [object[]]$ConvergeLines = @(), [AllowNull()][object]$JobSelfId, [AllowNull()][object]$SqlAudit, [AllowNull()][object]$AsBuilt,
+          [AllowNull()][string]$SourceUrl = $env:PIM_UPDATE_SOURCE_URL, [datetime]$NowUtc = [datetime]::UtcNow)
+    $f = [ordered]@{ checkedUtc = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
+                     privateNetwork = $null; jobsOperator = $null; tickJobIdSet = $null
+                     acrAdminOff = $null; kvPurgeProtection = $null; sourceUrlNoSas = $null; sqlAudit = $null
+                     frontKey = $null; frontSqlSchema = $null; frontKvPrivate = $null; jobSelfReader = $null
+                     asBuiltStorage = 'unknown'; asBuiltRights = 'unknown'; asBuiltDetail = '' }
+    $rg = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
+    $items = { param($a) if ($null -eq $a) { @() } elseif ($a.PSObject.Properties['value']) { @(@($a.value) | Where-Object { $_ }) } else { @($a) } }
+    try { $cl = ConvertFrom-PimSetupConvergeLines -Lines $ConvergeLines; $f.jobsOperator = $cl.jobsOperator; $f.tickJobIdSet = $cl.tickJobIdSet } catch { }
+    try { $f.jobSelfReader = ConvertFrom-PimSetupJobSelfIdResult -Result $JobSelfId } catch { }
+    try { $f.sqlAudit = ConvertFrom-PimSetupSqlAuditResult -Result $SqlAudit } catch { }
+    try { $f.sourceUrlNoSas = [bool](Test-PimUpdateSourceUrlNoSas -Url $SourceUrl) } catch { }
+    try { $ab = Get-PimSetupStepAsBuiltFacts -AsBuiltResult $AsBuilt; $f.asBuiltStorage = $ab.asBuiltStorage; $f.asBuiltRights = $ab.asBuiltRights; $f.asBuiltDetail = (ConvertTo-PimSetupStepDetail -Text $ab.asBuiltDetail) } catch { }
+    # private network: the Manager app -> its environment -> vnetConfiguration.internal
+    try {
+        $app = & $Arm 'GET' "$rg/providers/Microsoft.App/containerApps/$ManagerApp`?api-version=2024-03-01" $null
+        $envId = "$($app.properties.managedEnvironmentId)".Trim(); if (-not $envId) { $envId = "$($app.properties.environmentId)".Trim() }
+        if ($envId) {
+            $env1 = & $Arm 'GET' "$envId`?api-version=2024-03-01" $null
+            $int = ConvertTo-PimSetupStepBool $env1.properties.vnetConfiguration.internal
+            $f.privateNetwork = $(if ($int -eq $true) { $true } else { $false })
+        }
+    } catch { }
+    # CR8: the registries in the resource group -- every one with the admin user off
+    try {
+        $regs = @(& $items (& $Arm 'GET' "$rg/providers/Microsoft.ContainerRegistry/registries?api-version=2023-07-01" $null))
+        if ($regs.Count) { $f.acrAdminOff = -not [bool](@($regs | Where-Object { (ConvertTo-PimSetupStepBool $_.properties.adminUserEnabled) -eq $true }).Count) }
+    } catch { }
+    # CR8 purge protection, the front's private vault, the front key: the vaults in the resource group
+    try {
+        $kvs = @(& $items (& $Arm 'GET' "$rg/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01" $null))
+        if (-not $kvs.Count) { $f.frontKvPrivate = 'none' }
+        else {
+            $f.kvPurgeProtection = -not [bool](@($kvs | Where-Object { (ConvertTo-PimSetupStepBool $_.properties.enablePurgeProtection) -ne $true }).Count)
+            $priv = @($kvs | Where-Object { "$($_.properties.publicNetworkAccess)" -ieq 'Disabled' })
+            if (-not $priv.Count) { $f.frontKvPrivate = 'public' }
+            elseif (@($priv | Where-Object { @($_.properties.privateEndpointConnections | Where-Object { $_ }).Count -eq 0 }).Count) { $f.frontKvPrivate = 'private-no-endpoint' }
+            else { $f.frontKvPrivate = 'private' }
+            $found = $false; $unread = $false
+            foreach ($kv in $kvs) {
+                try { $k = & $Arm 'GET' "$rg/providers/Microsoft.KeyVault/vaults/$($kv.name)/keys/signin-front?api-version=2023-07-01" $null; if ($k) { $found = $true; break } }
+                catch { if ("$($_.Exception.Message)" -notmatch '(?i)\b404\b|NotFound|KeyNotFound') { $unread = $true } }
+            }
+            $f.frontKey = $(if ($found) { $true } elseif ($unread) { $null } else { $false })
+        }
+    } catch { }
+    # the front's database schema
+    if ($SqlScalar) {
+        try { $v = & $SqlScalar "SELECT CASE WHEN SCHEMA_ID(N'signin') IS NULL THEN 0 ELSE 1 END"; $b = ConvertTo-PimSetupStepBool $v; if ($b -is [bool]) { $f.frontSqlSchema = $b } } catch { }
+    }
+    return $f
+}

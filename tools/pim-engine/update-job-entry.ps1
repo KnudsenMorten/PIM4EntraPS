@@ -79,6 +79,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-AsBuilt.ps1')          # 100.61 the as-built job + store + view an EXISTING install converges to
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAudit.ps1')         # SECPACK-SQL-AUDIT the SQL server's audit -> the install's workspace
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateNow.ps1')        # framework 8.18 UPDATE-NOW: the 15-minute signal check + the run kind + own cron
+. (Join-Path $solRoot 'engine\_shared\PIM-SetupSteps.ps1')        # FLEET-SETUPSTEPS the one-time install steps' facts (read only) for the heartbeat
 . (Join-Path $solRoot 'engine\_shared\PIM-GuardLimits.ps1')      # framework 8.18: an update-now waits while guard Strict mode is on
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
@@ -94,6 +95,8 @@ $script:PimAsBuiltJobImageThisRun = ''
 # healthy and must still converge; it used to exit before any of this ran. Never throws, never fails the update.
 function Invoke-PimUpdaterConvergeStep {
     param([string]$When = 'update')
+    # FLEET-SETUPSTEPS: the results the setup-step facts (2g) are read from; $null = that step did not run this time.
+    $cv = $null; $si = $null; $ab = $null; $sa = $null
     $csSize = $null; try { $csSize = Get-PimSqlConnectionString } catch { $csSize = $null }
     if (-not "$csSize".Trim()) {
         # the test-tenant shape (no PIM_SqlServer on this job): the Manager names the store -- same self-heal as the schema step.
@@ -108,6 +111,9 @@ function Invoke-PimUpdaterConvergeStep {
         } catch { }
     }
     $armSeam = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
+    $cvChanged = 0; $cvWarnings = 0; $abChanged = 0; $abWarnings = 0
+    # FLEET-ASBUILT-REPORT: the as-built state of this run, for the heartbeat setupSteps (Get-PimAsBuiltSetupState's shape)
+    $script:PimAsBuiltSetupState = [ordered]@{ storage = 'unknown'; rights = 'unknown'; detail = 'as-built: not converged this run' }
     # ---- 2a. 100.31 / framework 12.15 -- THE TICK'S SIZE FOR THIS TENANT, ON EVERY UPDATE -------------------------------
     # Same rule as the install (engine/_shared/PIM-TenantSizing.ps1): users + groups + service principals by Graph $count,
     # else the counts recorded on the job; raise only; PIM_Bootstrap_*_Tick on this job wins. SELF-CORRECT: a run that ran
@@ -190,7 +196,8 @@ function Invoke-PimUpdaterConvergeStep {
                   -Arm $armSeam -Store $storeSeam -Graph $graphGet -SqlServer "$($global:PIM_SqlServer)" -TenantId "$($env:PIM_TenantId)" `
                   -AlertRecipientsScript (Join-Path $solRoot 'tools/setup/Set-PimAlertRecipients.ps1') -EngineAzureRows $eaRows
         foreach ($l in @($cv.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
-        Say ("converge ($When): $($cv.changed) changed, $($cv.warnings) to fix by hand") $(if ($cv.warnings) { 'Yellow' } elseif ($cv.changed) { 'Cyan' } else { 'DarkGray' })
+        # FLEET-ASBUILT-REPORT: the "to fix by hand" summary is said after step 2e, so the as-built warnings are counted too.
+        $cvChanged = [int]$cv.changed; $cvWarnings = [int]$cv.warnings
     } catch { Say "  converge skipped: $($_.Exception.Message)" 'Yellow' }
     # ---- 2d-perm. REQUIREMENTS 95.2i -- THE ENGINE'S RIGHTS vs. WHAT THIS VERSION NEEDS (report only) ---------------------
     # A newer version can need a Graph permission (or an Azure right) the engine identity was never given: the roll went
@@ -211,7 +218,7 @@ function Invoke-PimUpdaterConvergeStep {
         $epStore = $null
         if ("$csSize".Trim()) { $epCs = "$csSize"; $epStore = { param($op, $name, $value) if ($op -eq 'get') { return (Get-PimSqlSetting -ConnectionString $epCs -Name $name) } } }
         $ep = Invoke-PimUpdaterEnginePermissionCheck -SubscriptionId $sub -ResourceGroup $rg -TickJob $tickJob -TenantId ("$(if ("$($env:PIM_TenantId)".Trim()) { $env:PIM_TenantId } else { $global:PIM_TenantId })".Trim()) `
-                  -Version $epVer -Arm $armSeam -Graph $epGraph -Store $epStore -AzureDelegationCount $epAzDefs
+                  -Version $epVer -Arm $armSeam -Graph $epGraph -Store $epStore -AzureDelegationCount $epAzDefs -UpdaterName $selfJob
         foreach ($l in @($ep.lines)) { Say ("  " + $l.text) $(if ($l.level -eq 'warn') { 'Yellow' } else { 'DarkGray' }) }
         if ("$($ep.fix)".Trim()) { foreach ($fl in @("$($ep.fix)" -split "`n")) { Say ("    " + $fl) 'Yellow' } }
         Say ("engine permissions ($When): $($ep.headline)") $(switch ($ep.state) { 'missing' { 'Yellow' } 'unknown' { 'Yellow' } default { 'DarkGray' } })
@@ -280,7 +287,12 @@ function Invoke-PimUpdaterConvergeStep {
         # seconds after the converge's was refused "HTTP 409 ContainerAppsJobOperationInProgress" -- NOT FULLY UPDATED).
         $script:PimAsBuiltJobImageThisRun = "$($ab.jobImage)".Trim()
         foreach ($l in @($ab.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
-    } catch { Say "  as-built converge skipped: $($_.Exception.Message)" 'Yellow' }
+        $abChanged = [int]$ab.changed; $abWarnings = [int]$ab.warnings
+        $script:PimAsBuiltSetupState = Get-PimAsBuiltSetupState -Result $ab
+    } catch { Say "  as-built converge skipped: $($_.Exception.Message)" 'Yellow'; $abWarnings = 1 }
+    # FLEET-ASBUILT-REPORT: ONE summary, the as-built warnings counted in "to fix by hand" (a policy-denied store said "0" before)
+    $fixByHand = $cvWarnings + $abWarnings
+    Say ("converge ($When): $($cvChanged + $abChanged) changed, $fixByHand to fix by hand$(if ($abWarnings) { " (as-built: $abWarnings)" })") $(if ($fixByHand) { 'Yellow' } elseif ($cvChanged + $abChanged) { 'Cyan' } else { 'DarkGray' })
     # ---- 2e-bis. SECPACK-SQL-AUDIT (owner 2026-10-23 "SQL auditing at install") -- AN EXISTING INSTALL AUDITS ITS SQL TOO ----
     # The same converge the installer runs (engine/_shared/PIM-SqlAudit.ps1): auditing on, security events to this install's
     # workspace, 90 days. Contributor on the resource group is enough; a refusal is said, never fails the update.
@@ -303,6 +315,20 @@ function Invoke-PimUpdaterConvergeStep {
             Say ("database access cut-over: $($co.step) -- $($co.reason)$(if ($co.started) { " -> $($co.status)" })") $(if ($co.started -and "$($co.status)" -ne 'Succeeded') { 'Yellow' } elseif ($co.started) { 'Cyan' } else { 'DarkGray' })
         }
     } catch { Say "  database access cut-over not checked: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2g. FLEET-SETUPSTEPS (framework contract with Invardia, 2026-11-03) -- THE ONE-TIME STEPS, CHECKED ON EVERY RUN ----
+    # READ ONLY (ARM GET + one SQL scalar): private network, the Jobs Operator role + SchedulerTickJobId, CR8 (registry admin
+    # user, Key Vault purge protection, no SAS in the update source, SQL auditing), the front's key + schema + private vault,
+    # the pull / publish jobs' Reader on themselves, the as-built state. Kept for the run record (UpdateState.setupFacts);
+    # the heartbeat turns them into setupSteps (engine/_shared/PIM-SetupSteps.ps1). Never fails the update.
+    try {
+        $ssSql = $null
+        if ("$csSize".Trim()) { $ssCs = "$csSize"; $ssSql = { param($q) Invoke-PimSqlScalar -ConnectionString $ssCs -Sql $q } }
+        $ssF = Get-PimSetupStepUpdaterFacts -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -Arm $armSeam -SqlScalar $ssSql `
+                   -ConvergeLines @(if ($cv) { @($cv.lines) }) -JobSelfId $si -SqlAudit $sa -AsBuilt $ab -SourceUrl "$($env:PIM_UPDATE_SOURCE_URL)"
+        $script:PimSetupFacts = $ssF
+        $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
+        Say ("setup steps: facts recorded for the heartbeat$(if ($ssUnk.Count) { " (not readable: $($ssUnk -join ', '))" })") 'DarkGray'
+    } catch { Say "  setup steps not checked: $($_.Exception.Message)" 'Yellow' }
 }
 
 # 🔴 2026-09-18 (§71.43) -- THE STORE IS NEEDED BEFORE THE FIRST EXIT PATH, NOT ONLY AT THE SCHEMA STEP.
@@ -347,6 +373,7 @@ $script:PimRingApprovedReason = ''
 $script:PimRunningVersion     = ''
 $script:PimSqlAccessVerdict   = $null   # §33.0 SqlAccess: set by the access converge (schema step); $null = carry the last one
 $script:PimSignInLayer        = $null   # framework 8.17 SignIn: read from the Manager app below; $null = carry the last one
+$script:PimSetupFacts = $null           # FLEET-SETUPSTEPS: the one-time steps' facts (converge step 2g); $null = carry the last one
 $script:PimEnginePermissionCheck = $null # 95.2i: the engine's rights for this version (converge step 2d-perm); $null = carry the last one
 function Send-PimUpdateOutcome {
     param(
@@ -417,7 +444,7 @@ function Send-PimUpdateOutcome {
                         -RunningVersion $script:PimRunningVersion `
                         -LastBuiltVersion "$($env:PIM_UPDATE_LAST_BUILT)" -TargetVersion $ToVersion `
                         -Action $Action -Outcome $Outcome -ErrorText $ErrorText -Previous $prev `
-                        -Source "$($env:PIM_UPDATE_SOURCE)" -WaitingSinceUtc $WaitingSinceUtc -SqlAccess $script:PimSqlAccessVerdict -SignIn $script:PimSignInLayer -EnginePermissions $script:PimEnginePermissionCheck `
+                        -Source "$($env:PIM_UPDATE_SOURCE)" -WaitingSinceUtc $WaitingSinceUtc -SqlAccess $script:PimSqlAccessVerdict -SignIn $script:PimSignInLayer -EnginePermissions $script:PimEnginePermissionCheck -SetupFacts $script:PimSetupFacts `
                         -DurationSeconds ([int]([datetime]::UtcNow - $script:PimUpdateStartedUtc).TotalSeconds)
         $saved = Save-PimUpdateState -ConnectionString $csState -Record $stateRec
         if ($saved.ok) { Say "update state: recorded ring '$($stateRec.ring)' / $Outcome in pim.Settings" 'DarkGray' }
@@ -679,12 +706,21 @@ if ($unKind.kind -eq 'quick') {
     } else { $unKey = Resolve-PimInvardiaInstallKey -GetSetting $null }
     $unBase = ''; if ("$unCs".Trim()) { try { $unBase = "$(Get-PimSqlSetting -ConnectionString $unCs -Name 'LicenceRequestBaseUrl')".Trim() } catch { } }
     $unRingN = -1; [void][int]::TryParse($ring, [ref]$unRingN)
+    # UPDATE-NOW-HEAD: the quick check is POST /head with the licence text exactly as the manifest pull sends it, and the
+    # install's lasting id (READ only, never created here). Neither is ever written to a line.
+    $unLic = ''; $unIid = ''
+    if ("$unCs".Trim()) {
+        try { $unLic = ConvertTo-PimInvardiaLicenceText -Value (Get-PimSqlSetting -ConnectionString $unCs -Name 'License') } catch { $unLic = '' }
+        if (Get-Command Resolve-PimInvardiaInstallId -ErrorAction SilentlyContinue) { try { $unIid = Resolve-PimInvardiaInstallId -GetSetting { param($n) Get-PimSqlSetting -ConnectionString $unCs -Name $n } } catch { $unIid = '' } }
+    }
     # 🔒 No store = no state = "at most once per raisedAt" cannot be promised: the signal is not acted on (said in the line).
     $unGet = $(if ("$unCs".Trim()) { { Get-PimSqlSetting -ConnectionString $unCs -Name (Get-PimUpdateNowStateName) } } else { $null })
     $unSet = $(if ("$unCs".Trim()) { { param($o) Set-PimSqlSetting -ConnectionString $unCs -Name (Get-PimUpdateNowStateName) -ValueJson (ConvertTo-Json -InputObject $o -Depth 5 -Compress) } } else { $null })
     $unQ = Invoke-PimUpdateNowQuickCheck -Enabled $unEnabled -InstallKey $unKey -Ring $ring -RunningVersion "$($script:PimRunningVersion)" `
                -Hold ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') -StrictActive $unStrict -StrictUntil $unStrictUntil `
+               -Head { if ($unRingN -lt 0 -or $unRingN -gt 3) { @{ status = 0 } } else { Invoke-PimInvardiaUpdateHead -BaseUrl $unBase -InstallKey $unKey -LicenceText $unLic -Ring $unRingN -InstallId $unIid } } `
                -Signal { param($et) if ($unRingN -lt 0 -or $unRingN -gt 3) { @{ status = 0 } } else { Invoke-PimInvardiaUpdateSignal -BaseUrl $unBase -InstallKey $unKey -Ring $unRingN -ETag $et } } `
+               -UpdateWindow "$($env:PIM_UPDATE_WINDOW)" -NightlyUtc $unNightly `
                -GetState $unGet -SetState $unSet `
                -IsRunning { Get-PimUpdateNowOtherRunning -Executions $unExecs -OwnExecution $unOwnExec }
     if (-not $unQ.run) { Say $unQ.line 'DarkGray'; exit 0 }

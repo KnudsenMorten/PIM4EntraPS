@@ -127,6 +127,8 @@ function New-PimUpdateStateRecord {
         # REQUIREMENTS 95.2i: the updater's check of the engine identity's rights for the version it rolled to
         # (Invoke-PimUpdaterEnginePermissionCheck .record); $null = not checked this run -> the previous record's carried.
         [AllowNull()][object]$EnginePermissions = $null,
+        # FLEET-SETUPSTEPS: the one-time steps' facts read THIS run (Get-PimSetupStepUpdaterFacts); $null = not read -> carried.
+        [AllowNull()][object]$SetupFacts = $null,
         [datetime]$NowUtc = [datetime]::UtcNow
     )
     $ts = $NowUtc.ToUniversalTime().ToString('o')
@@ -152,6 +154,8 @@ function New-PimUpdateStateRecord {
     if ($null -eq $signIn -and $Previous) { $signIn = Get-PimUpdateStateField -Object $Previous -Key 'signIn' }
     $engPerm = $EnginePermissions
     if ($null -eq $engPerm -and $Previous) { $engPerm = Get-PimUpdateStateField -Object $Previous -Key 'enginePermissions' }
+    $setupF = $SetupFacts
+    if ($null -eq $setupF -and $Previous) { $setupF = Get-PimUpdateStateField -Object $Previous -Key 'setupFacts' }
     $rec = [ordered]@{
         schema             = (Get-PimUpdateStateSchema)
         # 'run' = written by an update run. The deployment writes kind 'deploy' (New-PimUpdateStateDeployRecord)
@@ -193,6 +197,7 @@ function New-PimUpdateStateRecord {
     if ($null -ne $sqlAcc) { $rec['sqlAccess'] = $sqlAcc }
     if ($null -ne $signIn) { $rec['signIn'] = $signIn }
     if ($null -ne $engPerm) { $rec['enginePermissions'] = $engPerm }
+    if ($null -ne $setupF) { $rec['setupFacts'] = $setupF }
     return $rec
 }
 

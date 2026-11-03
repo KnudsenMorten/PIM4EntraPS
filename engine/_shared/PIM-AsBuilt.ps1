@@ -1133,7 +1133,12 @@ function Invoke-PimAsBuiltConverge {
       Seams: -Arm { param($method, $path, $body) } (path WITH api-version; a GET of an absent resource may throw or return
       $null), -Sql { param($sql, $parameters) } (one batch; $null = no store), -Sleep { param($seconds) } (busy waits),
       -BusyWaits (seconds between the attempts of a busy job write).
-      Returns @{ lines = @(@{ id; level = info | changed | warn; text }); changed; warnings; jobImage; identity }. NEVER throws.
+      FLEET-ASBUILT-PRIVATE / -REPORT (2026-11-03): the store is created PRIVATE (+ blob private endpoint) on a private install
+      or when a tenant policy denies the public create; Disabled is never forced back to Enabled; a refusal of the store step
+      is contained (only the store-dependent parts are skipped, each with its own warn line); the write right is read with
+      principalId eq. Get-PimAsBuiltSetupState turns the result into the heartbeat setup state.
+      Returns @{ lines = @(@{ id; level = info | changed | warn; text }); changed; warnings; jobImage; identity;
+                 storage = ok | missing | denied | unknown; storageDetail; rights = ok | missing | unknown }. NEVER throws.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup,
           [string]$ManagerApp = 'ca-pim-manager', [string]$JobName = (Get-PimAsBuiltJobName),
@@ -1164,7 +1169,7 @@ function Invoke-PimAsBuiltConverge {
     $ownerFix = "run tools/setup/Initialize-PimHostingAccess.ps1 -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup (an Owner / User Access Administrator of the resource group) -- or Deploy-PimAsBuiltJob.ps1"
     try {
         $mgr = & $get "$rg/providers/Microsoft.App/containerApps/$ManagerApp`?$aca"
-        if (-not $mgr) { & $add 'asbuilt' 'warn' "as-built: the Manager app '$ManagerApp' could not be read -- nothing converged"; return (& { [pscustomobject]@{ lines = @($lines.ToArray()); changed = 0; warnings = 1; jobImage = ''; identity = $idOut } }) }
+        if (-not $mgr) { & $add 'asbuilt' 'warn' "as-built: the Manager app '$ManagerApp' could not be read -- nothing converged"; return (& { [pscustomobject]@{ lines = @($lines.ToArray()); changed = 0; warnings = 1; jobImage = ''; identity = $idOut; storage = 'unknown'; storageDetail = 'the Manager app could not be read'; rights = 'unknown' } }) }
         # the Manager's container, never [0]: on a sign-in front install [0] is 'signin-front' (2026-10-21)
         $mc = @(@($mgr.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0]
         $image = "$($mc.image)".Trim()
@@ -1180,33 +1185,83 @@ function Invoke-PimAsBuiltConverge {
         $saPath = "$rg/providers/Microsoft.Storage/storageAccounts/$acct"
 
         # ---- storage account -------------------------------------------------------------------------------------------
-        $sa = & $get "$saPath`?$st"
-        if (-not $sa) {
-            [void](& $Arm 'PUT' "$saPath`?$st" @{ location = $location; sku = @{ name = 'Standard_LRS' }; kind = 'StorageV2'
-                properties = @{ allowBlobPublicAccess = $false; allowSharedKeyAccess = $false; minimumTlsVersion = 'TLS1_2'; supportsHttpsTrafficOnly = $true; publicNetworkAccess = 'Enabled' } })
-            & $add 'asbuilt-storage' 'changed' "as-built: storage account $acct created (Entra-only)"
+        # FLEET-ASBUILT-PRIVATE (2026-11-03): public (Entra-only) stays the default (owner 2026-10-10: the Support app fetches
+        # the PDF). The account is created PRIVATE (publicNetworkAccess Disabled) when the install is private (its SQL server
+        # has public network access Disabled -- the -PrivateNetwork install) or when a tenant policy DENIES the public create
+        # (RequestDisallowedByPolicy). An existing account is never switched: Disabled stays Disabled, never forced Enabled.
+        # A private account gets a blob private endpoint + the privatelink.blob zone in the install's network (no firewall IP
+        # rule, no SAS). A refusal here is CONTAINED: only the store-dependent parts (container + rule, endpoint, write-right
+        # check) are skipped, each with its own warn line; the identity, the job, the SQL view, the reader user and the
+        # install facts still converge.
+        $envObj = if ($envId) { & $get "$envId`?$aca" } else { $null }
+        $sqlName = ("$sqlSrv" -split '\.')[0]
+        $sqlObj = if ($sqlName -match '^[a-z0-9][a-z0-9-]{0,62}$') { & $get "$rg/providers/Microsoft.Sql/servers/$sqlName`?api-version=2021-11-01" } else { $null }
+        $installPrivate = ($sqlObj -and "$($sqlObj.properties.publicNetworkAccess)" -eq 'Disabled')
+        $storeState = 'unknown'; $storeWhy = ''; $storeAbsent = $false
+        try {
             $sa = & $get "$saPath`?$st"
-        }
-        if (-not $sa -or "$($sa.properties.provisioningState)" -notmatch '^(?i)Succeeded$') {
-            & $add 'asbuilt-storage' 'info' "as-built: storage account $acct is still being created -- the next update run continues"
-        } else {
-            $fix = @{}
-            if ($sa.properties.allowSharedKeyAccess -ne $false) { $fix['allowSharedKeyAccess'] = $false }
-            if ($sa.properties.allowBlobPublicAccess -ne $false) { $fix['allowBlobPublicAccess'] = $false }
-            if ("$($sa.properties.minimumTlsVersion)" -ne 'TLS1_2') { $fix['minimumTlsVersion'] = 'TLS1_2' }
-            if ("$($sa.properties.publicNetworkAccess)" -notin @('', 'Enabled')) { $fix['publicNetworkAccess'] = 'Enabled' }
-            if ($fix.Count) { [void](& $Arm 'PATCH' "$saPath`?$st" @{ properties = $fix }); & $add 'asbuilt-storage' 'changed' "as-built: $acct hardened ($(@($fix.Keys) -join ', '))" }
-            # ---- container + lifecycle rule (both idempotent PUTs) ------------------------------------------------------
-            [void](& $Arm 'PUT' "$saPath/blobServices/default/containers/$cont`?$st" @{ properties = @{ publicAccess = 'None' } })
-            $pol = Get-PimAsBuiltLifecyclePolicy -Container $cont
-            $cur = & $get "$saPath/managementPolicies/default`?$st"
-            $keep = @(@($cur.properties.policy.rules) | Where-Object { $_ -and "$($_.name)" -ne 'pim-asbuilt-delete-after-1-day' })
-            $mine = @(@($cur.properties.policy.rules) | Where-Object { $_ -and "$($_.name)" -eq 'pim-asbuilt-delete-after-1-day' })
-            if (-not $mine.Count -or [int]$mine[0].definition.actions.baseBlob.delete.daysAfterModificationGreaterThan -ne 1) {
-                $pol.properties.policy.rules = @($keep) + @($pol.properties.policy.rules)
-                [void](& $Arm 'PUT' "$saPath/managementPolicies/default`?$st" $pol)
-                & $add 'asbuilt-lifecycle' 'changed' "as-built: container '$cont' + the 1-day delete rule in place"
+            if (-not $sa) {
+                $pna = $(if ($installPrivate) { 'Disabled' } else { 'Enabled' })
+                $saBody = { param($v) @{ location = $location; sku = @{ name = 'Standard_LRS' }; kind = 'StorageV2'
+                    properties = @{ allowBlobPublicAccess = $false; allowSharedKeyAccess = $false; minimumTlsVersion = 'TLS1_2'; supportsHttpsTrafficOnly = $true; publicNetworkAccess = $v } } }
+                try { [void](& $Arm 'PUT' "$saPath`?$st" (& $saBody $pna)) }
+                catch {
+                    if ($pna -ne 'Enabled' -or -not (Test-PimAsBuiltPolicyDenial -Message "$($_.Exception.Message)")) { throw }
+                    & $add 'asbuilt-storage' 'info' "as-built: a tenant policy refuses a public storage account ($((("$($_.Exception.Message)") -split "`n")[0])) -- $acct is created private instead"
+                    $pna = 'Disabled'
+                    [void](& $Arm 'PUT' "$saPath`?$st" (& $saBody $pna))
+                }
+                & $add 'asbuilt-storage' 'changed' "as-built: storage account $acct created ($(if ($pna -eq 'Disabled') { 'private: public network access Disabled, Entra-only' } else { 'Entra-only' }))"
+                $sa = & $get "$saPath`?$st"
             }
+            if (-not $sa -or "$($sa.properties.provisioningState)" -notmatch '^(?i)Succeeded$') {
+                $storeState = 'missing'; $storeWhy = "storage account $acct is still being created"
+                & $add 'asbuilt-storage' 'info' "as-built: storage account $acct is still being created -- the next update run continues"
+            } else {
+                $storeState = 'ok'
+                $fix = @{}
+                if ($sa.properties.allowSharedKeyAccess -ne $false) { $fix['allowSharedKeyAccess'] = $false }
+                if ($sa.properties.allowBlobPublicAccess -ne $false) { $fix['allowBlobPublicAccess'] = $false }
+                if ("$($sa.properties.minimumTlsVersion)" -ne 'TLS1_2') { $fix['minimumTlsVersion'] = 'TLS1_2' }
+                # publicNetworkAccess is NEVER written here: Disabled stays Disabled (FLEET-ASBUILT-PRIVATE).
+                if ($fix.Count) {
+                    try { [void](& $Arm 'PATCH' "$saPath`?$st" @{ properties = $fix }); & $add 'asbuilt-storage' 'changed' "as-built: $acct hardened ($(@($fix.Keys) -join ', '))" }
+                    catch { & $add 'asbuilt-storage' 'warn' "as-built: $acct could not be hardened ($(@($fix.Keys) -join ', ')): $((("$($_.Exception.Message)") -split "`n")[0])" }
+                }
+                # ---- the private path: a private account is reachable only through a blob private endpoint ---------------
+                if ("$($sa.properties.publicNetworkAccess)" -eq 'Disabled') {
+                    $pe = Invoke-PimAsBuiltBlobEndpointConverge -Arm $Arm -ResourceGroupId $rg -StorageAccount $acct -Location $location -Environment $envObj -SqlServerName $sqlName
+                    foreach ($pl in @($pe.lines)) { $lines.Add($pl) }
+                    if (-not $pe.ok) { $storeState = 'missing'; $storeWhy = "$($pe.reason)" }
+                }
+                # ---- container + lifecycle rule (both idempotent PUTs; control plane, so a private account works too) ----
+                try {
+                    [void](& $Arm 'PUT' "$saPath/blobServices/default/containers/$cont`?$st" @{ properties = @{ publicAccess = 'None' } })
+                    $pol = Get-PimAsBuiltLifecyclePolicy -Container $cont
+                    $cur = & $get "$saPath/managementPolicies/default`?$st"
+                    $keep = @(@($cur.properties.policy.rules) | Where-Object { $_ -and "$($_.name)" -ne 'pim-asbuilt-delete-after-1-day' })
+                    $mine = @(@($cur.properties.policy.rules) | Where-Object { $_ -and "$($_.name)" -eq 'pim-asbuilt-delete-after-1-day' })
+                    if (-not $mine.Count -or [int]$mine[0].definition.actions.baseBlob.delete.daysAfterModificationGreaterThan -ne 1) {
+                        $pol.properties.policy.rules = @($keep) + @($pol.properties.policy.rules)
+                        [void](& $Arm 'PUT' "$saPath/managementPolicies/default`?$st" $pol)
+                        & $add 'asbuilt-lifecycle' 'changed' "as-built: container '$cont' + the 1-day delete rule in place"
+                    }
+                } catch {
+                    $storeState = 'missing'; $storeWhy = "container '$cont' not in place"
+                    & $add 'asbuilt-container' 'warn' "as-built: container '$cont' / the 1-day rule on $acct not converged: $((("$($_.Exception.Message)") -split "`n")[0]) -- the next update retries"
+                }
+            }
+        } catch {
+            $sm = (("$($_.Exception.Message)") -split "`n")[0]
+            if (Test-PimAsBuiltPolicyDenial -Message $sm) {
+                $storeState = 'denied'; $storeWhy = "a tenant policy refuses storage account $acct"
+                & $add 'asbuilt-storage' 'warn' "as-built: a tenant policy refuses storage account $acct, also private ($sm) -- the job cannot write the PDF until the policy allows a private storage account in $ResourceGroup"
+            } else {
+                $storeState = 'missing'; $storeWhy = "storage account $acct not converged"
+                & $add 'asbuilt-storage' 'warn' "as-built: storage account $acct not converged: $sm -- the next update retries"
+            }
+            $storeAbsent = $true
+            & $add 'asbuilt-container' 'warn' "as-built: container '$cont' + the 1-day rule skipped -- there is no store yet"
         }
 
         # ---- the job's user-assigned identity id-pim-asbuilt (clientId = app id, principalId = object id; both over ARM) ----
@@ -1258,20 +1313,33 @@ function Invoke-PimAsBuiltConverge {
 
         # ---- report only: the rights an Owner gives (the updater's Contributor cannot write them) ----------------------
         # The principal that writes the PDF is id-pim-asbuilt; the job's own (former system) identity only until it is switched.
-        $oid = $uamiOid
-        if (-not $oid) { $job2 = & $get "$rg/providers/Microsoft.App/jobs/$JobName`?$aca"; $oid = "$((Get-PimAsBuiltJobIdentity -Job $job2 -Name $uamiName).principalId)".Trim() }
-        $contScope = "$saPath/blobServices/default/containers/$cont"
-        if ($oid) {
-            $ra = & $get ("$contScope/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{0}')&{1}" -f $oid, $az)
-            $has = @(@($ra.value) | Where-Object { $_ -and ("$($_.properties.roleDefinitionId)" -split '/')[-1] -eq 'ba92f5b4-2d11-453d-a403-e96b0029c9fe' }).Count -gt 0
-            if (-not $has) { & $add 'asbuilt-write-right' 'warn' "as-built: the job's identity$(if ($uamiOid) { " $uamiName" }) has no Storage Blob Data Contributor on $acct/$cont -- the job cannot write the PDF until $ownerFix" }
-        } else { & $add 'asbuilt-write-right' 'info' 'as-built: the job identity is not readable yet (just created) -- checked on the next run' }
-        $rdef = Get-PimAsBuiltRoleDefinition -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup
-        if (-not (& $get "$($rdef.path)?$az")) { & $add 'asbuilt-support-role' 'warn' "as-built: the support custom role '$($rdef.body.properties.roleName)' does not exist -- Grant-PimSupportAccess.ps1 -Level asbuilt (or $ownerFix) creates it" }
+        $writeRight = 'unknown'; $supportRole = 'unknown'
+        try {
+            $oid = $uamiOid
+            if (-not $oid) { $job2 = & $get "$rg/providers/Microsoft.App/jobs/$JobName`?$aca"; $oid = "$((Get-PimAsBuiltJobIdentity -Job $job2 -Name $uamiName).principalId)".Trim() }
+            $contScope = "$saPath/blobServices/default/containers/$cont"
+            if ($storeAbsent) {
+                & $add 'asbuilt-write-right' 'warn' "as-built: the job's write right on $acct/$cont was not checked -- there is no store yet"
+            } elseif ($oid) {
+                # FLEET-ASBUILT-REPORT: principalId eq, never assignedTo() -- live 2026-11-03 assignedTo() returned nothing for a
+                # fresh service-principal grant that principalId eq found. (At a scope it also returns inherited assignments.)
+                # encoded by hand: [uri]::EscapeDataString leaves the quote as-is on Windows PowerShell 5.1 and encodes it on 7
+                $ra = & $get ("$contScope/providers/Microsoft.Authorization/roleAssignments?`$filter=principalId%20eq%20%27{0}%27&{1}" -f [uri]::EscapeDataString($oid), $az)
+                $has = @(@($ra.value) | Where-Object { $_ -and ("$($_.properties.roleDefinitionId)" -split '/')[-1] -eq 'ba92f5b4-2d11-453d-a403-e96b0029c9fe' }).Count -gt 0
+                if ($has) { $writeRight = 'ok' }
+                else { $writeRight = 'missing'; & $add 'asbuilt-write-right' 'warn' "as-built: the job's identity$(if ($uamiOid) { " $uamiName" }) has no Storage Blob Data Contributor on $acct/$cont -- the job cannot write the PDF until $ownerFix" }
+            } else { & $add 'asbuilt-write-right' 'info' 'as-built: the job identity is not readable yet (just created) -- checked on the next run' }
+        } catch { & $add 'asbuilt-write-right' 'warn' "as-built: the job's write right was not checked: $((("$($_.Exception.Message)") -split "`n")[0])" }
+        try {
+            $rdef = Get-PimAsBuiltRoleDefinition -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup
+            if (-not (& $get "$($rdef.path)?$az")) { $supportRole = 'missing'; & $add 'asbuilt-support-role' 'warn' "as-built: the support custom role '$($rdef.body.properties.roleName)' does not exist -- Grant-PimSupportAccess.ps1 -Level asbuilt (or $ownerFix) creates it" }
+            else { $supportRole = 'ok' }
+        } catch { & $add 'asbuilt-support-role' 'warn' "as-built: the support custom role was not checked: $((("$($_.Exception.Message)") -split "`n")[0])" }
 
         # ---- SQL: the view, the reader user, the install facts --------------------------------------------------------
         if ($Sql) {
-            [void](& $Sql (Get-PimAsBuiltViewSql) @{})
+            try { [void](& $Sql (Get-PimAsBuiltViewSql) @{}) }
+            catch { & $add 'asbuilt-sql-view' 'warn' "as-built: the view pim.vw_AsBuiltSettings was not converged: $((("$($_.Exception.Message)") -split "`n")[0]) -- the next update retries" }
             # The reader user's SID is id-pim-asbuilt's clientId (= its app id), read over ARM above -- no Graph.
             $appId = $uamiCid
             if ($appId) {
@@ -1283,15 +1351,153 @@ function Invoke-PimAsBuiltConverge {
                 catch { & $add 'asbuilt-sql-user' 'warn' "as-built: $JobName's database user / its read right was not converged: $(("$($_.Exception.Message)" -split "`n")[0]) -- the next update retries; a name held by another principal needs an admin (the Support-app cut-over)" }
             }
             else { & $add 'asbuilt-sql-user' 'warn' "as-built: the user-assigned identity $uamiName (the job's identity) is not readable -- $JobName's database user was not made this run; the next update retries, or run tools/setup/Deploy-PimAsBuiltJob.ps1 once" }
-            $envObj = if ($envId) { & $get "$envId`?$aca" } else { $null }
             $facts = [ordered]@{ region = ("$location" -replace '\s', '').ToLowerInvariant(); resourceGroup = $ResourceGroup; recordedUtc = [datetime]::UtcNow.ToString('o') }
             if ($envObj) { $facts['network'] = $(if ([bool]$envObj.properties.vnetConfiguration.internal) { 'internal' } else { 'external' }) }
-            [void](& $Sql "MERGE pim.Settings AS t USING (SELECT N'AsBuiltInstallFacts' AS Name, @v AS V) AS s ON t.Name = s.Name WHEN MATCHED AND ISNULL(JSON_VALUE(t.ValueJson, '$.region'), N'') + N'|' + ISNULL(JSON_VALUE(t.ValueJson, '$.network'), N'') <> ISNULL(JSON_VALUE(s.V, '$.region'), N'') + N'|' + ISNULL(JSON_VALUE(s.V, '$.network'), N'') THEN UPDATE SET ValueJson = s.V, UpdatedUtc = SYSUTCDATETIME() WHEN NOT MATCHED THEN INSERT (Name, ValueJson, UpdatedUtc) VALUES (s.Name, s.V, SYSUTCDATETIME());" @{ v = ($facts | ConvertTo-Json -Compress) })
-            & $add 'asbuilt-sql' 'info' "as-built: view pim.vw_AsBuiltSettings$(if ($appId) { ', the job''s reader user' }) and the install facts converged"
+            try {
+                [void](& $Sql "MERGE pim.Settings AS t USING (SELECT N'AsBuiltInstallFacts' AS Name, @v AS V) AS s ON t.Name = s.Name WHEN MATCHED AND ISNULL(JSON_VALUE(t.ValueJson, '$.region'), N'') + N'|' + ISNULL(JSON_VALUE(t.ValueJson, '$.network'), N'') <> ISNULL(JSON_VALUE(s.V, '$.region'), N'') + N'|' + ISNULL(JSON_VALUE(s.V, '$.network'), N'') THEN UPDATE SET ValueJson = s.V, UpdatedUtc = SYSUTCDATETIME() WHEN NOT MATCHED THEN INSERT (Name, ValueJson, UpdatedUtc) VALUES (s.Name, s.V, SYSUTCDATETIME());" @{ v = ($facts | ConvertTo-Json -Compress) })
+                if (-not @($lines | Where-Object { $_.id -eq 'asbuilt-sql-view' }).Count) { & $add 'asbuilt-sql' 'info' "as-built: view pim.vw_AsBuiltSettings$(if ($appId) { ', the job''s reader user' }) and the install facts converged" }
+            } catch { & $add 'asbuilt-sql-facts' 'warn' "as-built: the install facts (AsBuiltInstallFacts) were not written: $((("$($_.Exception.Message)") -split "`n")[0]) -- the next update retries" }
         } else { & $add 'asbuilt-sql' 'warn' 'as-built: no SQL store in this run -- the view and the job''s reader user were not converged' }
     } catch { & $add 'asbuilt' 'warn' "as-built: converge stopped: $(("$($_.Exception.Message)" -split "`n")[0])" }
     $arr = @($lines.ToArray())
-    return [pscustomobject]@{ lines = $arr; changed = @($arr | Where-Object { $_.level -eq 'changed' }).Count; warnings = @($arr | Where-Object { $_.level -eq 'warn' }).Count; jobImage = $jobImage; identity = $idOut }
+    $rights = $(if ($writeRight -eq 'missing' -or $supportRole -eq 'missing') { 'missing' } elseif ($writeRight -eq 'ok' -and $supportRole -eq 'ok') { 'ok' } else { 'unknown' })
+    return [pscustomobject]@{ lines = $arr; changed = @($arr | Where-Object { $_.level -eq 'changed' }).Count; warnings = @($arr | Where-Object { $_.level -eq 'warn' }).Count; jobImage = $jobImage; identity = $idOut
+                              storage = $storeState; storageDetail = $storeWhy; rights = $rights }
+}
+
+function Test-PimAsBuiltPolicyDenial {
+    <# PURE. Is this ARM refusal a tenant policy DENY (HTTP 403 RequestDisallowedByPolicy)? FLEET-ASBUILT-PRIVATE. #>
+    param([AllowEmptyString()][string]$Message)
+    return [bool]("$Message" -match '(?i)RequestDisallowedByPolicy')
+}
+
+function Get-PimAsBuiltSetupState {
+    <#
+      PURE. FLEET-ASBUILT-REPORT: the as-built state of THIS install, from Invoke-PimAsBuiltConverge's result, for the heartbeat
+      setupSteps (another lane calls it; agreed: this name and this shape).
+        storage = ok | missing | denied | unknown   (denied = a tenant policy refuses the store; missing = no store yet, or a
+                                                      private store the job cannot reach; unknown = not converged this run)
+        rights  = ok | missing | unknown            (the job's Storage Blob Data Contributor + the support custom role)
+        detail  = <= 200 characters: the first as-built warning(s), else 'ready'
+      A result without the storage / rights fields (an older converge) is read from its lines. $null -> all unknown.
+    #>
+    param([AllowNull()][object]$Result)
+    $out = [ordered]@{ storage = 'unknown'; rights = 'unknown'; detail = '' }
+    if (-not $Result) { $out.detail = 'as-built: not converged this run'; return $out }
+    $ls = @(@($Result.lines) | Where-Object { $_ })
+    $warns = @($ls | Where-Object { "$($_.level)" -eq 'warn' })
+    $st = "$($Result.storage)".Trim().ToLowerInvariant()
+    if ($st -notin @('ok', 'missing', 'denied', 'unknown')) {
+        $sw = @($warns | Where-Object { "$($_.id)" -eq 'asbuilt-storage' })
+        $st = $(if (@($sw | Where-Object { "$($_.text)" -match '(?i)policy' }).Count) { 'denied' } elseif ($sw.Count) { 'missing' } else { 'unknown' })
+    }
+    $rt = "$($Result.rights)".Trim().ToLowerInvariant()
+    if ($rt -notin @('ok', 'missing', 'unknown')) {
+        $rt = $(if (@($warns | Where-Object { "$($_.id)" -in @('asbuilt-write-right', 'asbuilt-support-role') -and "$($_.text)" -notmatch 'not checked' }).Count) { 'missing' } else { 'unknown' })
+    }
+    $out.storage = $st; $out.rights = $rt
+    $d = if ($warns.Count) { (@($warns | ForEach-Object { ("$($_.text)" -replace '^as-built:\s*', '').Trim() }) -join ' | ') } elseif ($st -eq 'ok' -and $rt -eq 'ok') { 'ready' } else { "storage $st, rights $rt" }
+    if ($d.Length -gt 200) { $d = $d.Substring(0, 197) + '...' }
+    $out.detail = $d
+    return $out
+}
+
+function Invoke-PimAsBuiltBlobEndpointConverge {
+    <#
+      FLEET-ASBUILT-PRIVATE. A PRIVATE as-built store (publicNetworkAccess Disabled) is reachable only through a blob private
+      endpoint in the install's network. The same shape as the -PrivateNetwork install's SQL / registry endpoints
+      (New-PimHostingPrerequisites 6b): the endpoint in the PIM resource group on the endpoint subnet, a zone group on the
+      privatelink.blob.core.windows.net zone, the zone linked to the install's VNet. All as the updater (Contributor on the
+      resource group); no firewall IP rule, no SAS (MSP transport rule).
+        * the subnet: the one the SQL server's endpoint pe-<sql> uses; else 'pim-endpoints' in the VNet of the Container Apps
+          environment (never the delegated Container Apps subnet). No VNet at all -> one clear warning.
+        * the zone: where the SQL endpoint's zone group points. The install's OWN resource group -> found or made, and linked
+          to the VNet. A central zone (another resource group) is only READ -- never created or linked there.
+      Seam: -Arm { param($method, $path, $body) }. Returns @{ ok; reason; lines }. Never throws.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Arm, [Parameter(Mandatory)][string]$ResourceGroupId, [Parameter(Mandatory)][string]$StorageAccount,
+          [string]$Location = '', [object]$Environment = $null, [string]$SqlServerName = '')
+    $net = 'api-version=2023-09-01'; $dnsApi = 'api-version=2020-06-01'; $zone = 'privatelink.blob.core.windows.net'
+    $lines = New-Object System.Collections.Generic.List[object]
+    $add = { param($id, $level, $text) $lines.Add([pscustomobject]@{ id = $id; level = $level; text = $text }) }
+    $get = { param($p) try { & $Arm 'GET' $p $null } catch { $null } }
+    $rg = "$ResourceGroupId".TrimEnd('/')
+    $saId = "$rg/providers/Microsoft.Storage/storageAccounts/$StorageAccount"
+    $peName = "pe-$StorageAccount-blob"; $pePath = "$rg/providers/Microsoft.Network/privateEndpoints/$peName"
+    $ok = $false; $reason = ''
+    try {
+        # ---- where: the SQL endpoint's subnet, else pim-endpoints in the environment's VNet ----------------------------
+        $sqlPe = if ("$SqlServerName".Trim()) { & $get "$rg/providers/Microsoft.Network/privateEndpoints/pe-$("$SqlServerName".Trim())`?$net" } else { $null }
+        $subnetId = "$($sqlPe.properties.subnet.id)".Trim()
+        $infra = ''; if ($Environment) { $infra = "$($Environment.properties.vnetConfiguration.infrastructureSubnetId)".Trim() }
+        $infraVnet = $(if ($infra -match '(?i)^(.+/virtualNetworks/[^/]+)/subnets/[^/]+$') { $Matches[1] } else { '' })
+        if (-not $subnetId -and $infraVnet) {
+            $sn = & $get "$infraVnet/subnets/pim-endpoints`?$net"
+            if ($sn -and -not @($sn.properties.delegations | Where-Object { $_ }).Count) { $subnetId = "$($sn.id)".Trim(); if (-not $subnetId) { $subnetId = "$infraVnet/subnets/pim-endpoints" } }
+        }
+        $pe = & $get "$pePath`?$net"
+        $stop = $false
+        if (-not $pe -and -not $subnetId) {
+            $stop = $true
+            if (-not $infraVnet) {
+                $reason = 'the install has no network for a private endpoint'
+                & $add 'asbuilt-endpoint' 'warn' "as-built: storage is private but the install has no network for a private endpoint -- the job cannot write until the install runs in a private network (tools/setup/Convert-PimToPrivate.ps1) or a tenant policy allows public network access for $StorageAccount"
+            } else {
+                $reason = 'no private-endpoint subnet in the install network'
+                & $add 'asbuilt-endpoint' 'warn' "as-built: storage is private but the install's network has no private-endpoint subnet 'pim-endpoints' -- the job cannot write until it exists (tools/setup/Convert-PimToPrivate.ps1 makes it)"
+            }
+        }
+        $vnetId = $(if ($subnetId) { $subnetId -replace '(?i)/subnets/[^/]+$', '' } else { $infraVnet })
+        if (-not $stop -and -not $pe) {
+            $peLoc = "$($sqlPe.location)".Trim()
+            if (-not $peLoc) { $peLoc = "$((& $get "$vnetId`?$net").location)".Trim() }
+            if (-not $peLoc) { $peLoc = $Location }
+            [void](& $Arm 'PUT' "$pePath`?$net" @{ location = $peLoc; properties = @{ subnet = @{ id = $subnetId }
+                privateLinkServiceConnections = @(@{ name = 'blob'; properties = @{ privateLinkServiceId = $saId; groupIds = @('blob') } }) } })
+            & $add 'asbuilt-endpoint' 'changed' "as-built: private endpoint $peName for $StorageAccount (blob) created"
+        }
+        # ---- the zone: the SQL endpoint's zone resource group (central = read only), else this resource group --------------
+        $sqlZoneId = ''; $own = $true; $zonePath = ''
+        if (-not $stop -and $sqlPe) { $zg = & $get "$rg/providers/Microsoft.Network/privateEndpoints/pe-$("$SqlServerName".Trim())/privateDnsZoneGroups`?$net"; $sqlZoneId = "$(@(@($zg.value)[0].properties.privateDnsZoneConfigs)[0].properties.privateDnsZoneId)".Trim() }
+        $zoneRg = $(if ($sqlZoneId -match '(?i)^(/subscriptions/[^/]+/resourceGroups/[^/]+)/') { $Matches[1] } else { $rg })
+        $zonePath = "$zoneRg/providers/Microsoft.Network/privateDnsZones/$zone"
+        $own = ($zoneRg -ieq $rg)
+        $z = if ($stop) { $null } else { & $get "$zonePath`?$dnsApi" }
+        if (-not $stop -and -not $z) {
+            if (-not $own) {
+                $stop = $true
+                $reason = "the central zone $zone is missing"
+                & $add 'asbuilt-endpoint' 'warn' "as-built: the private endpoint for $StorageAccount needs the zone $zone in your central DNS resource group ($(($zoneRg -split '/')[-1])) -- it is used, never created there: the job cannot write until it exists"
+            } else {
+                [void](& $Arm 'PUT' "$zonePath`?$dnsApi" @{ location = 'global' })
+                & $add 'asbuilt-endpoint' 'changed' "as-built: private DNS zone $zone created"
+            }
+        }
+        if (-not $stop -and $own -and $vnetId) {
+            $links = & $get "$zonePath/virtualNetworkLinks`?$dnsApi"
+            if (-not @(@($links.value) | Where-Object { $_ -and "$($_.properties.virtualNetwork.id)" -ieq $vnetId }).Count) {
+                $ln = "link-$(($vnetId -split '/')[-1])"
+                [void](& $Arm 'PUT' "$zonePath/virtualNetworkLinks/$ln`?$dnsApi" @{ location = 'global'; properties = @{ virtualNetwork = @{ id = $vnetId }; registrationEnabled = $false } })
+                & $add 'asbuilt-endpoint' 'changed' "as-built: $zone linked to $(($vnetId -split '/')[-1])"
+            }
+        }
+        $zgMine = if ($stop) { $null } else { & $get "$pePath/privateDnsZoneGroups/zg`?$net" }
+        if (-not $stop -and -not $zgMine) {
+            try {
+                [void](& $Arm 'PUT' "$pePath/privateDnsZoneGroups/zg`?$net" @{ properties = @{ privateDnsZoneConfigs = @(@{ name = 'blob'; properties = @{ privateDnsZoneId = $zonePath } }) } })
+                & $add 'asbuilt-endpoint' 'changed' "as-built: $peName registered in $zone"
+            } catch {
+                $stop = $true
+                $reason = 'the endpoint is not in the DNS zone yet'
+                & $add 'asbuilt-endpoint' 'info' "as-built: $peName is not in $zone yet ($((("$($_.Exception.Message)") -split "`n")[0])) -- the next update run continues"
+            }
+        }
+        $ok = (-not $stop)
+    } catch {
+        $reason = 'the private endpoint could not be made'
+        & $add 'asbuilt-endpoint' 'warn' "as-built: the private endpoint for $StorageAccount could not be made: $((("$($_.Exception.Message)") -split "`n")[0]) -- the job cannot write until it exists; the next update retries"
+    }
+    return [pscustomobject]@{ ok = $ok; reason = $reason; lines = @($lines.ToArray()) }
 }
 
 function Get-PimAsBuiltLifecyclePolicy {

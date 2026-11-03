@@ -54,6 +54,8 @@ $script:PimUplinkProduct = 'pim-manager'
 $script:PimUplinkMaxRunsPerCycle = 20
 # PIM 100.158 (CR3): the release-control library (pure) -- loaded here, at file level, so its functions outlive any one call.
 if (-not (Get-Command Get-PimReleaseModeWindow -ErrorAction SilentlyContinue)) { $__pimRcLib = Join-Path $PSScriptRoot 'PIM-ReleaseControl.ps1'; if (Test-Path -LiteralPath $__pimRcLib) { . $__pimRcLib } }
+# FLEET-SETUPSTEPS (framework contract with Invardia, 2026-11-03): the setupSteps builder (pure) -- loaded at file level too.
+if (-not (Get-Command New-PimSetupSteps -ErrorAction SilentlyContinue)) { $__pimSsLib = Join-Path $PSScriptRoot 'PIM-SetupSteps.ps1'; if (Test-Path -LiteralPath $__pimSsLib) { . $__pimSsLib } }
 
 function Get-PimUplinkJobId {
     <# PURE. The stable Job id Invardia stores: 'pim-' + the job TYPE (one-off trigger names collapse onto their type). #>
@@ -1722,8 +1724,8 @@ function Get-PimUplinkTenantCapabilities {
 #   Convergence     { unconverged; persistent; oldestFirstSeenUtc }
 #   Mail            { mode; engine: { ok; atUtc }; manager: { ok; atUtc } }
 #   UpdatePending   { approvedVersion; lastBuiltVersion; hold; waitingSinceUtc }   -- from UpdateState
-#                   + { signal; raisedAt; startedUtc } (framework 8.18 UPDATE-NOW, pim.Settings 'UpdateNowState') ONLY with
-#                   PIM_UPLINK_UPDATENOWFIELDS=1 -- OFF by default until Invardia's validator accepts them
+#                   + { signal; raisedAt; startedUtc } (framework 8.18 UPDATE-NOW, pim.Settings 'UpdateNowState') -- ON by
+#                   default since UPDATE-NOW-HEAD; PIM_UPLINK_UPDATENOWFIELDS = 0/false/off/no switches them off
 #   SqlAccess       { model; run1; run2; updaterInAdminGroup; checkedUtc }        -- the updater's verdict in UpdateState
 #   FeaturesChanged [ '<area>.<name>:<on|off>' ]  -- at most 40, only features that differ from their catalog default
 # ONE switch per field, ON by default (2.4.644): PIM_UPLINK_<FIELD> (PIM_UPLINK_SECURITY, ..._COLLECTIONS, ..._JOBS,
@@ -2209,8 +2211,9 @@ function Get-PimUplinkStateFields {
           [AllowNull()][object[]]$StateJobs = @(), [AllowNull()][object]$UpdateState = $null, [bool]$UpdateStateRead = $false,
           [AllowNull()][System.Collections.IDictionary]$Gates = $null, [AllowNull()][object[]]$Catalog = $null,
           [bool]$HybridAdOn = $false, [AllowNull()][object]$HybridWorkerState = $null, [datetime]$NowUtc = [datetime]::UtcNow,
-          # framework 8.18: UpdatePending's { signal; raisedAt; startedUtc } -- OFF by default (PIM_UPLINK_UPDATENOWFIELDS=1 = on)
-          [bool]$UpdateNowFields = [bool]("$env:PIM_UPLINK_UPDATENOWFIELDS".Trim() -match '^(?i)(1|true|on|yes)$'))
+          # framework 8.18: UpdatePending's { signal; raisedAt; startedUtc } -- ON by default (UPDATE-NOW-HEAD);
+          # PIM_UPLINK_UPDATENOWFIELDS = 0/false/off/no is the off-switch (the same rule as Test-PimUpdateNowFieldsOn)
+          [bool]$UpdateNowFields = (-not [bool]("$env:PIM_UPLINK_UPDATENOWFIELDS".Trim() -match '^(?i)(0|false|off|no)$')))
     # every local here starts with __sf (or is $out): a caller's seam scriptblock reads ITS variables through dynamic
     # scope, and a local named like one of them would shadow it (a test stub returned $null that way)
     $out = [ordered]@{}
@@ -2243,8 +2246,8 @@ function Get-PimUplinkStateFields {
         try {
             $__sfV = New-PimUplinkUpdatePendingField -UpdateState $UpdateState
             # framework 8.18 UPDATE-NOW: { signal; raisedAt; startedUtc } from pim.Settings 'UpdateNowState' (written by the
-            # updater's 15-minute check) -- behind PIM_UPLINK_UPDATENOWFIELDS, OFF by default (Invardia's validator does not
-            # accept the three fields yet). Unreadable = the three are left out, UpdatePending goes as before.
+            # updater's 15-minute check) -- ON by default, PIM_UPLINK_UPDATENOWFIELDS=0 switches them off. Unreadable = the
+            # three are left out, UpdatePending goes as before.
             if ($null -ne $__sfV -and $UpdateNowFields -and $GetSetting) {
                 try {
                     # loaded HERE, in this function's scope, when the caller has not (the tick does not load the updater's files)
@@ -2982,6 +2985,21 @@ function Invoke-PimUplinkCycle {
                 $ssaVal = $null; try { $ssaVal = & $SupportSqlAccess } catch { $ssaVal = $null; Write-Warning "[uplink] supportSqlAccess could not be built: $($_.Exception.Message)" }
                 $ssaVal = @($ssaVal | Where-Object { $null -ne $_ -and $_.PSObject.Properties['healedUtc'] }) | Select-Object -First 1
                 if ($ssaVal) { try { if (Add-PimUplinkSupportSqlAccessField -Record $hb -Value $ssaVal) { $hbAdd += 'supportSqlAccess' } } catch { } }
+            }
+            # FLEET-SETUPSTEPS (framework contract, agreed with Invardia 2026-11-03; the same field from SI, PIM and EPS):
+            # setupSteps [ { key; title; state; since; how; checkedAt; detail } ] -- one entry per one-time install step, from the
+            # updater's facts (UpdateState.setupFacts / sqlAccess / signIn / enginePermissions) + this heartbeat's own reads
+            # (Controls, supportSqlAccess). ON by default (PIM_UPLINK_SETUPSTEPS=0 = off); additive (a refusal naming it holds
+            # just it 24 h); PROVEN as a JSON array before it leaves (Add-PimUplinkSetupStepsField).
+            if ($null -ne $SetupFacts -and (Get-Command New-PimSetupSteps -ErrorAction SilentlyContinue) -and (Test-PimUplinkSetupStepsOn)) {
+                try {
+                    $stCtl = @(); try { $stCtl = @(Get-PimSetupControlStates -Facts $SetupFacts) } catch { $stCtl = @() }
+                    $stUs = ConvertFrom-PimUplinkStoredValue (Get-PimUplinkField $SetupFacts 'UpdateState')
+                    $stSsa = $(if ($SupportSqlAccess) { $ssaVal } else { $null })
+                    $stSteps = @(New-PimSetupSteps -Facts @{ Updater = (Get-PimUplinkField $stUs 'setupFacts'); UpdateState = $stUs; Controls = $stCtl
+                                                             SupportSqlAccess = $stSsa; Permissions = (Get-PimUplinkField $SetupFacts 'Permissions'); NowUtc = $NowUtc })
+                    if (Add-PimUplinkSetupStepsField -Record $hb -Steps $stSteps) { $hbAdd += 'setupSteps' }
+                } catch { Write-Warning "[uplink] setupSteps could not be built: $($_.Exception.Message)" }
             }
         }
         # PIM 100.167 / framework 8.16: Capabilities + Licences -- identified only, the cause switch on, ONE probe per heartbeat.

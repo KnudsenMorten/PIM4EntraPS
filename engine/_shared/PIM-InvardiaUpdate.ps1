@@ -124,6 +124,61 @@ function Invoke-PimInvardiaUpdateSignal {
     } catch { return @{ status = 0; body = $null; etag = ''; error = ((("$($_.Exception.Message)") -split "`n")[0]) } }
 }
 
+# ---- UPDATE-NOW-HEAD (Invardia 2026-11-03, Invardia DESIGN 12 "Quicker updates") -- the quick check ------------------
+# POST <base>/api/updates/pim-manager/head, the SAME install key header (+ X-Invardia-Install-Id) and the SAME licence text as
+# the manifest pull, body { kind; licence; ring }. 200 { version; sequence; wave?; expedite? }; refusals as the manifest pull
+# (401 / 403 / 422); 404 = an older Invardia without /head (PIM-UpdateNow.ps1 then asks GET /signal). Writes nothing at
+# Invardia. NO retry here (unlike the nightly pull, UPD-RETRY): the updater's next 15-minute slot is the retry.
+function Invoke-PimInvardiaHeadHttp {
+    <#
+      The real seam: one JSON POST, 15 s, @{ status; body; error }. Unlike the manifest pull's helper it also reads the BODY
+      of a refusal (401 / 403 / 422 -- ErrorDetails on PowerShell 7 and Windows PowerShell 5.1), so a 403 licence is told
+      from a 403 installKeyBound / ring. A non-2xx is a status, never a throw.
+    #>
+    param([string]$Method = 'POST', [Parameter(Mandatory)][string]$Url, $Body, [hashtable]$Headers = @{})
+    $a = @{ Method = $Method; Uri = $Url; Headers = $Headers; ContentType = 'application/json'; TimeoutSec = 15; UseBasicParsing = $true }
+    if ($null -ne $Body) { $a['Body'] = ($Body | ConvertTo-Json -Depth 6 -Compress) }
+    try {
+        $r = Invoke-WebRequest @a -ErrorAction Stop
+        $b = $null; if ("$($r.Content)".Trim()) { try { $b = "$($r.Content)" | ConvertFrom-Json } catch { $b = $null } }
+        return @{ status = [int]$r.StatusCode; body = $b; error = '' }
+    } catch {
+        $code = 0; try { if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode } } catch { $code = 0 }
+        $b = $null
+        try { $t = "$($_.ErrorDetails.Message)".Trim(); if ($t.StartsWith('{')) { $b = $t | ConvertFrom-Json } } catch { $b = $null }
+        return @{ status = $code; body = $b; error = ((("$($_.Exception.Message)") -split "`n")[0]) }
+    }
+}
+
+function Invoke-PimInvardiaUpdateHead {
+    <#
+      One POST, never throws: @{ status; body; error }. -Http { param($Method, $Url, $Body, $Headers) } (default
+      Invoke-PimInvardiaHeadHttp). No install key / no licence = NO call (status 0, error 'no install key' / 'no licence').
+      Neither the key nor the licence is ever put in 'error' or any other returned text.
+    #>
+    param([scriptblock]$Http, [string]$BaseUrl = '', [AllowEmptyString()][string]$InstallKey = '', [AllowEmptyString()][AllowNull()][string]$LicenceText = '',
+          [Parameter(Mandatory)][ValidateRange(0, 3)][int]$Ring, [AllowEmptyString()][AllowNull()][string]$InstallId = '', [string]$Kind = 'code')
+    if (-not "$InstallKey".Trim()) { return @{ status = 0; body = $null; error = 'no install key' } }
+    if (-not "$LicenceText".Trim()) { return @{ status = 0; body = $null; error = 'no licence' } }
+    $base = if ("$BaseUrl".Trim()) { "$BaseUrl".Trim().TrimEnd('/') } else { $script:PimInvardiaDefaultBase }
+    if ($base -notmatch '^(?i)https://') { return @{ status = 0; body = $null; error = 'the update address is not https' } }
+    $url = "$base/api/updates/$($script:PimInvardiaProduct)/head"
+    $h = @{ 'X-Invardia-Install-Key' = "$InstallKey".Trim() }
+    $iid = "$InstallId".Trim().ToLowerInvariant()
+    if ($iid -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { $h['X-Invardia-Install-Id'] = $iid }
+    $body = [ordered]@{ kind = $Kind; licence = "$LicenceText"; ring = $Ring }
+    $r = $null
+    try {
+        if ($Http) { $r = & $Http 'POST' $url $body $h }
+        else { $r = Invoke-PimInvardiaHeadHttp -Method 'POST' -Url $url -Body $body -Headers $h }
+    } catch { return @{ status = 0; body = $null; error = 'the request failed' } }
+    $code = 0; try { $code = [int]$r.status } catch { $code = 0 }
+    # the error text is a transport message; scrub anything that could carry the key or the licence before it goes anywhere
+    $err = ((("$($r.error)") -split "`n")[0])
+    if ($err -and ($err.Contains("$InstallKey".Trim()) -or $err.Contains("$LicenceText"))) { $err = 'the request failed' }
+    return @{ status = $code; body = $r.body; error = $err }
+}
+
 function Save-PimInvardiaArchive {
     param([Parameter(Mandatory)][string]$Url, [Parameter(Mandatory)][string]$OutFile, [Parameter(Mandatory)][string]$ExpectedSha256, [int64]$ExpectedSize = 0, [int]$TimeoutSeconds = 300)
     Save-InvardiaArchive -Url $Url -OutFile $OutFile -ExpectedSha256 $ExpectedSha256 -ExpectedSize $ExpectedSize -TimeoutSeconds $TimeoutSeconds
