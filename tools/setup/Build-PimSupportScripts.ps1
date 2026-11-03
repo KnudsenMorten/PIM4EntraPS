@@ -64,6 +64,11 @@
                                           download link is invardia.com/support/pim/. The same build also writes
                                           community\Start-PimManagerInstall.ps1 (+ community\SHA256SUMS.txt): the
                                           self-contained COMMUNITY copy for the GitHub release. Only that line differs.
+      Import-PimV1Data.ps1             -- V1-IMPORT-PUBLISHED (2026-11-03): import a PIM version 1 data folder into an
+                                          installation -- check + preview by default, -Apply adds by key, never deletes.
+                                          The importer (Migrate-PimToSql.ps1) and the libraries it loads travel inside the
+                                          file (BUILD-EMBED), PIM Manager's entity schema as one statement
+                                          (BUILD-EMBED-ASSIGNMENT); the script writes them to a private temp folder per run.
 
     SCRIPT-DOC-1 (framework 12.7) + framework 12.10 item 11 ("scripts are big concern"), 2026-10-09:
       * every script in $script:PimScriptDocScripts (tools\setup\_PimScriptDoc.ps1) must have its manifest
@@ -87,7 +92,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$OutDir,
-    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1', 'Set-PimSqlTier.ps1', 'New-PimHubPrepareScript.ps1', 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1', 'pim-hybrid-worker/Install-PimHybridWorker.ps1', 'Set-PimLicense.ps1', 'Grant-PimSupportSqlAccess.ps1', 'Invoke-PimSupportSqlAccessJob.ps1', 'Set-PimSigninFrontSqlState.ps1', 'Start-PimManagerInstall.ps1'),
+    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1', 'Set-PimSqlTier.ps1', 'New-PimHubPrepareScript.ps1', 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1', 'pim-hybrid-worker/Install-PimHybridWorker.ps1', 'Set-PimLicense.ps1', 'Grant-PimSupportSqlAccess.ps1', 'Invoke-PimSupportSqlAccessJob.ps1', 'Set-PimSigninFrontSqlState.ps1', 'Start-PimManagerInstall.ps1', 'Import-PimV1Data.ps1'),
     # 12.10 item 11: the code-signing certificate (thumbprint of a certificate WITH its private key in CurrentUser\My or
     # LocalMachine\My). Empty = not signed, said loudly.
     [string]$SigningCertThumbprint = "$env:PIM_CODESIGN_THUMBPRINT",
@@ -209,6 +214,25 @@ function Set-PimInstallChannelStamp {
     return $rx.Replace($Text, { param($m) "$($m.Groups['pre'].Value)$Channel$($m.Groups['post'].Value)" })
 }
 
+function Set-PimInstallProExamples {
+    <#
+      PURE. INSTALL-LINES-EVERYWHERE (owner 2026-11-03: "make sure that cmdlets and docs are updated so trial, github,
+      community knows what to write to install"). The Pro copy of Start-PimManagerInstall.ps1 must SHOW the Pro line 1:
+      inside the comment help only (up to the end of the first comment block), the GitHub download URL of the launcher becomes
+      https://invardia.com/support/pim/Start-PimManagerInstall.ps1 and the first example's "PIM Manager Community" becomes
+      "PIM Manager Pro (or trial)". Code after the help is never touched. The Community copy is left as committed.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $end = $Text.IndexOf('#>')
+    if ($end -lt 0) { throw 'Start-PimManagerInstall.ps1 has no comment help -- nothing handed over' }
+    $help = $Text.Substring(0, $end)
+    $gh = 'https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1'
+    if (-not $help.Contains($gh)) { throw 'Start-PimManagerInstall.ps1 help shows no GitHub line 1 to turn into the Pro line 1 -- nothing handed over' }
+    $help = $help.Replace($gh, 'https://invardia.com/support/pim/Start-PimManagerInstall.ps1')
+    $help = $help.Replace('The most common: PIM Manager Community in your own subscription', 'The most common: PIM Manager Pro (or trial) in your own subscription')
+    return $help + $Text.Substring($end)
+}
+
 function Test-PimScriptBuildVersionStamped {
     # PURE. True when the text carries the stamped version line for -Version.
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Version)
@@ -272,6 +296,21 @@ function Expand-PimSupportScript {
             "'$(Split-Path $p -Leaf)' = '$([Convert]::ToBase64String([IO.File]::ReadAllBytes($p)))'"
         }
         "$($m.Groups['lhs'].Value) = @{ $($pairs -join '; ') }   # embedded by Build-PimSupportScripts: $($m.Groups['list'].Value)"
+    })
+    # V1-IMPORT-PUBLISHED: ONE statement of a large file, not the whole file. A line
+    #   $script:<Var> = ''   # BUILD-EMBED-ASSIGNMENT: <file> $script:<Name>
+    # becomes the base64 of that file's assignment to $script:<Name> (found by the parser, never run). Import-PimV1Data.ps1
+    # carries PIM Manager's entity schema ($script:PimCsvBases) this way instead of the whole Manager.
+    $arx = [regex]('(?m)^(?<lhs>[ \t]*\$script:[A-Za-z0-9_]+) = ''''[ \t]*# BUILD-EMBED-ASSIGNMENT: (?<file>\S+)[ \t]+\$(?<var>[A-Za-z0-9_:]+)[ \t]*(?=\r?$)')
+    $Text = $arx.Replace($Text, {
+        param($m)
+        $p = [IO.Path]::GetFullPath((Join-Path $BaseDir ($m.Groups['file'].Value -replace '/', '\')))
+        if (-not (Test-Path -LiteralPath $p)) { throw "embedded file not found: $($m.Groups['file'].Value) (looked in $BaseDir)" }
+        $want = $m.Groups['var'].Value
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$null)
+        $a = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and "$($n.Left.VariablePath.UserPath)" -ieq $want }, $true)
+        if (-not $a) { throw "BUILD-EMBED-ASSIGNMENT: no assignment to `$$want in $($m.Groups['file'].Value)" }
+        "$($m.Groups['lhs'].Value) = '$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($a.Extent.Text)))'   # embedded by Build-PimSupportScripts: assignment `$$want from $(Split-Path $p -Leaf)"
     })
     $rx =[regex]('(?m)^(?<indent>[ \t]*)\.\s*\(Join-Path\s+\$PSScriptRoot\s+''(?<file>[^'']+\.ps1)''\)[^\r\n]*(?=\r?$)')
     return $rx.Replace($Text, {
@@ -465,7 +504,7 @@ foreach ($s in $Scripts) {
         $comHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $comOut).Hash.ToLowerInvariant()
         [IO.File]::WriteAllLines((Join-Path $comDir 'SHA256SUMS.txt'), @("$comHash  $name"))
         Write-Host "built community\$name (the GitHub release copy, sha256 $comHash)"
-        $body = Set-PimInstallChannelStamp -Text $body -Channel 'pro'
+        $body = Set-PimInstallProExamples -Text (Set-PimInstallChannelStamp -Text $body -Channel 'pro')
     }
     $out = Join-Path $OutDir $name
     [IO.File]::WriteAllText($out, $body, (New-Object System.Text.UTF8Encoding($true)))

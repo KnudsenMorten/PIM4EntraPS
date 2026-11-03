@@ -314,7 +314,8 @@ if ($global:PIM_MigrateStoreStub -is [hashtable] -and $global:PIM_MigrateStoreSt
         throw "Migrate-PimToSql TEST SEAM: 'Invoke-PimMigrateUpsertRows' no longer exists -- stub 'Merge-PimSqlEntityRows' (the store's upsert-only writer) instead. Refusing to run with the real writer unstubbed."
     }
     Write-Warning ("  [migrate] TEST SEAM ACTIVE -- store function(s) stubbed: {0}" -f (@($global:PIM_MigrateStoreStub.Keys) -join ', '))
-    foreach ($__n in @($global:PIM_MigrateStoreStub.Keys)) { Set-Item -Path "function:script:$__n" -Value $global:PIM_MigrateStoreStub[$__n] }
+    # -WhatIf:$false: under -WhatIf (Import-PimV1Data's preview) Set-Item would only SAY it replaced them, and the real store would run
+    foreach ($__n in @($global:PIM_MigrateStoreStub.Keys)) { Set-Item -Path "function:script:$__n" -Value $global:PIM_MigrateStoreStub[$__n] -WhatIf:$false }
 }
 # Default only for the solution layout (<root>\config next to <root>\output): an arbitrary data folder
 # must not pick up whatever 'output' folder happens to sit beside it.
@@ -386,6 +387,11 @@ if ($ListOnly) {
 $check = Invoke-PimCsvImportCheck -Path $ConfigDir -Entities $PimEntityBases -ForceLocal:$ForceLocal -NotMspMaster:$NotMspMaster -DefaultDomain $DefaultDomain
 Write-PimCsvImportReport -Result $check
 $script:PimMigrateValidation = $check
+# V1-IMPORT-PUBLISHED: a caller that hands a hashtable in $global:PIM_MigrateResultSink (Import-PimV1Data.ps1, the person-facing
+# wrapper) gets what this run DECIDED -- the check, the per-entity plan, the collisions, the report. Copies only: nothing in
+# how the import runs depends on it.
+$__sink = if ($global:PIM_MigrateResultSink -is [hashtable]) { $global:PIM_MigrateResultSink } else { $null }
+if ($__sink) { $__sink['check'] = $check }
 if ($ValidateOnly) {
     Write-Host ("VALIDATE ONLY -- {0}. SQL was not contacted and nothing was written." -f $(if ($check.errors) { "$($check.errors) error(s): an import would be REFUSED" } else { 'no errors: an import would proceed' })) -ForegroundColor Cyan
     return $check
@@ -471,6 +477,7 @@ if ($plans.Contains('Account-Definitions-Admins') -and $plans['Account-Definitio
     }
 }
 $script:PimMigrateCollisions = $collisions.ToArray()
+if ($__sink) { $__sink['plans'] = $plans; $__sink['collisions'] = $collisions.ToArray(); $__sink['failed'] = $failedEntities.ToArray(); $__sink['protectedAdmins'] = @($script:PimMigrateProtectedAdmins) }
 if ($collisions.Count) {
     Write-Host ''
     Write-Host ("KEY COLLISIONS ({0}) -- the store already holds these keys with DIFFERENT content:" -f $collisions.Count) -ForegroundColor $(if ($OnKeyConflict -eq 'Refuse' -and -not $ReplaceExistingEntityRows) { 'Red' } else { 'Yellow' })
@@ -586,6 +593,7 @@ if ($SeedSettings) {
     }
 }
 
+if ($__sink) { $__sink['report'] = $report.ToArray(); $__sink['failed'] = $failedEntities.ToArray() }
 if ($failedEntities.Count) {
     # 🔴 THE LAST LINE MUST AGREE WITH WHAT HAPPENED. This used to print "Migration complete: 12
     # entities" and exit 0 after an entity had been rejected by the database -- so the operator's

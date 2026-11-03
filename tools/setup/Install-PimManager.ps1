@@ -402,32 +402,21 @@ $community = ("$($cfg.edition)" -eq 'community')
 $licenceLater = -not $community
 $licenceHint = 'sign in to PIM Manager and add your licence in Settings > Licence -- the Pro features switch on with it'
 if ($autoCommunity) { Write-Host '    This installs PIM Manager Community (free). For Pro, run the same command with -Edition Pro; you can also add a licence later in PIM Manager > Settings > Licence.' -ForegroundColor Cyan }
-if (-not "$StatePath".Trim()) {
-    $homeDir = if ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
-    $base = if (Test-Path -LiteralPath (Join-Path $homeDir 'clouddrive')) { Join-Path $homeDir 'clouddrive' } else { $homeDir }
-    $StatePath = Join-Path (Join-Path $base 'invardia') $installId
-}
+$defaultStatePath = Get-PimInstallDefaultStatePath -InstallId $installId
+if (-not "$StatePath".Trim()) { $StatePath = $defaultStatePath }
 $state = Read-PimInstallState -StatePath $StatePath
 $done = New-Object System.Collections.Generic.List[string]
 if ($Resume -and $state.installId -eq $installId) { foreach ($c in $state.completed) { $done.Add("$c") | Out-Null } }
 function Mark([string]$Id) { if (-not $done.Contains($Id)) { $done.Add($Id) | Out-Null }; Save-InstallState }
 $fullPath = { param([string]$p) if (-not "$p".Trim()) { return '' }; try { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath("$p".Trim()) } catch { "$p".Trim() } }
 # The printed resume command: the installer by its full path (a new PowerShell window needs no function defined), the SAME
-# parameters this run was given, the installation's own state folder, -Resume. Parameters only -- never a file to write.
-$cliResume = ''
-foreach ($pn in 'TenantId', 'SubscriptionId', 'Location', 'ResourceGroup', 'SuperAdmins', 'AlertRecipients', 'MailSender', 'PortalUsers', 'VnetAddressPrefix', 'SubnetAddressPrefix', 'Exposure', 'Edition', 'UpdateRing', 'KeyVaultName', 'InstallId', 'SupportAppId', 'SupportAccess') {
-    if (-not $pimCli.ContainsKey($pn)) { continue }   # only what was GIVEN
-    $pv = @(@($pimCli[$pn]) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-    if ($pv.Count) { $cliResume += " -$pn " + (@($pv | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ',') }
-}
-foreach ($sw in 'AllowAllMembers', 'EngineAzureRootUserAccessAdmin', 'ViaSupportApp') { if ($pimCli.ContainsKey($sw) -and [bool]$pimCli[$sw]) { $cliResume += " -$sw" } }
-# PRIVATE NETWORK (INSTALL-1 item 5): the network parameters ride along the same way
-foreach ($pn in 'VnetId', 'VnetName', 'AppsSubnetName', 'AppsSubnetPrefix', 'EndpointsSubnetName', 'EndpointsSubnetPrefix', 'PrivateDnsZonesResourceGroupId', 'HubVnetId', 'WebAppAccess') {
-    if ($pimCli.ContainsKey($pn) -and "$($pimCli[$pn])".Trim()) { $cliResume += " -$pn '" + ("$($pimCli[$pn])".Trim() -replace "'", "''") + "'" }
-}
-foreach ($sw in 'PrivateNetwork', 'LinkZonesToHub', 'PeerToHub') { if ($pimCli.ContainsKey($sw) -and [bool]$pimCli[$sw]) { $cliResume += " -$sw" } }
+# choices this run was given, -Resume. Parameters only -- never a file to write. INSTALL-LINE-MINIMAL (owner 2026-11-03):
+# the line carries only the tenant, the subscription, the region and the choices that differ from the default --
+# Get-PimInstallLineArgs leaves out a default restated (the launcher passes -Edition Community / -UpdateRing 3), an empty
+# value, a parameter of an option not chosen, and the state folder when it is the one the installation derives by itself.
 $stateFull = & $fullPath $StatePath
-$resumeCmd = "& '$PSCommandPath'$cliResume -StatePath '$stateFull' -Resume"
+$cliResume = Get-PimInstallLineArgs -Given $pimCli -StatePath $stateFull -DefaultStatePath (& $fullPath $defaultStatePath)
+$resumeCmd = "& '$PSCommandPath'$cliResume -Resume"
 $editionText = if ($community) { 'Community (no licence needed)' } else { "$((Get-Culture).TextInfo.ToTitleCase("$($cfg.edition)")) -- installed without a licence; afterwards $licenceHint" }
 Emit 'config' 'ok' ("PIM Manager $($script:PimInstallVersion): installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); edition: $editionText") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
 $names = Get-PimInstallNames -Config $cfg
@@ -753,7 +742,8 @@ if (-not "$($cfg.supportAppId)".Trim()) { Emit 'support-app-access' 'skipped' 'n
 elseif ($done.Contains('support-app-access')) { Emit 'support-app-access' 'skipped' 'already granted (resume)' }
 else {
     Emit 'support-app-access' 'started'
-    $grantCmd = "Grant-PimSupportAccess -AppId $($cfg.supportAppId) -Level $($cfg.supportAccess) -TenantId $($cfg.tenantId) -SubscriptionId $($cfg.subscriptionId) -ResourceGroup $($names.resourceGroup) -SqlServer $($names.sqlFqdn)"
+    # INSTALL-LINE-MINIMAL: -Level only when it is not Grant-PimSupportAccess's own default (troubleshoot)
+    $grantCmd = "Grant-PimSupportAccess -AppId $($cfg.supportAppId)$(if ("$($cfg.supportAccess)" -ne 'troubleshoot') { " -Level $($cfg.supportAccess)" }) -TenantId $($cfg.tenantId) -SubscriptionId $($cfg.subscriptionId) -ResourceGroup $($names.resourceGroup) -SqlServer $($names.sqlFqdn)"
     if (-not $GrantSupport) { $GrantSupport = { param([hashtable]$A) & (Join-Path $here 'Grant-PimSupportAccess.ps1') @A | Out-Host; @{ ok = (-not $LASTEXITCODE) } } }
     $gr = $null
     try { $gr = & $GrantSupport @{ AppId = $cfg.supportAppId; Level = $cfg.supportAccess; TenantId = $cfg.tenantId; SubscriptionId = $cfg.subscriptionId; ResourceGroup = $names.resourceGroup; SqlServer = $names.sqlFqdn } } catch { $gr = $null }

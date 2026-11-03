@@ -11,7 +11,7 @@
     { "kind": "entraRole", "name": "Privileged Role Administrator", "scope": "tenant", "why": "For the installer: Microsoft Graph application permissions for PIM Manager's identities and the SQL admin group. Without it the installation continues and ends with the command for the right person." },
     { "kind": "entraRole", "name": "Application Administrator", "scope": "tenant", "why": "For the installer: the Manager's sign-in app registration (the same as Install-PimManager)." },
     { "kind": "exchange", "name": "Exchange Administrator (optional)", "scope": "Exchange Online", "why": "For the installer: only for the mail sender (a shared mailbox and its scoped send right). Without it the step is a warning with the command for an Exchange Administrator." },
-    { "kind": "other", "name": "Signed in in the browser as yourself (no command-line tool, no PowerShell module, no secret, no certificate)", "scope": "the tenant and subscription you name", "why": "The installer signs you in in the browser when it first needs Azure or Microsoft Graph. This launcher itself reads only public release data and needs no sign-in." }
+    { "kind": "other", "name": "Signed in in the browser as yourself (no command-line tool, no PowerShell module, no secret, no certificate)", "scope": "the tenant and subscription you name", "why": "The installer signs you in in the browser when it first needs Azure or Microsoft Graph. The Community copy itself reads only public release data and needs no sign-in; the Pro copy signs you in in the browser first (an administrator of -TenantId) to download the PIM Manager Pro package from Invardia for that tenant, and hands that sign-in to the installer." }
   ],
   "changes": [
     { "target": "Local machine", "action": "create", "object": "a new folder in the temp folder (pim-manager-release-<version>-<random>) with the downloaded release zip and its unpacked files, and a small note (pim-manager-install-<id>.json in the temp folder) with that folder's path so -Resume uses it again", "why": "The installer runs from the release it was downloaded with; -Resume needs no new download.", "undo": "Delete the folder and the note." },
@@ -58,11 +58,13 @@
   ],
   "readsOnly": [
     "The public release metadata of the PIM Manager release on GitHub (latest, or -Version) and the release files it names; this file and the release zip are checked against the release before anything runs.",
+    "The Pro copy instead: the PIM Manager Pro package of your update ring for your tenant from Invardia (after your browser sign-in) -- Invardia's sealed manifest and the zip it names; that Invardia issued it, the size and the SHA-256 are checked before anything runs. It never falls back to GitHub.",
     "The note in the temp folder that names the release folder of a previous run (-Resume)."
   ],
   "network": [
     "api.github.com (the release metadata)",
     "github.com, objects.githubusercontent.com and release-assets.githubusercontent.com (the release files)",
+    "the Pro copy instead: login.microsoftonline.com (the browser sign-in) and invardia.com (the Pro package and the short-lived download link it names)",
     "and everything Install-PimManager reaches (management.azure.com, graph.microsoft.com, login.microsoftonline.com, the database it creates <server>.database.windows.net:1433, the registry it creates <registry>.azurecr.io, outlook.office365.com for the mail sender)"
   ],
   "whatIf": "Downloads and unpacks the release into a new folder in the temp folder (the plan is read from it), then runs Install-PimManager -WhatIf from it: its checks (reads only) and every step it would take. No note is written and nothing in Azure, Microsoft Entra ID or the database is changed.",

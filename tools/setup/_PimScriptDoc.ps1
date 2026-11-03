@@ -84,6 +84,8 @@ $script:PimScriptDocScripts = @(
     @{ Path = 'pim-hybrid-worker/Install-PimHybridWorker.ps1';     Standalone = $true }
     # INSTALL-SAMPLES (owner 2026-10-29): the one-file launcher of the installation (downloads the release, runs its installer)
     @{ Path = 'setup/Start-PimManagerInstall.ps1';                 Standalone = $true }
+    # V1-IMPORT-PUBLISHED (Invardia per 0.1 B, 2026-11-03): import a PIM version 1 data folder (check + preview by default)
+    @{ Path = 'setup/Import-PimV1Data.ps1';                        Standalone = $true }
 )
 
 function Get-PimScriptDocName {

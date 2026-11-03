@@ -10,8 +10,9 @@
     loosing business ... it is a disater". Target: a one-line fix released to ring 1 in <= 15 min, the gate <= 10 min.
 
       1 preconditions  on main, origin/main not ahead (git fetch), the tree holds only this fix (+ the bump files)
-      2 gate           tests\Get-PimAffectedSuites.ps1 (the GATE answer: core set + the fix's own suites + the GUI harnesses
-                       of the touched page sections) -> run-pim-suite-vm.ps1 -Tests 'gate=...' -Lane gate on the test VM:
+      2 gate           tests\Get-PimAffectedSuites.ps1 (the GATE answer, ONLY-THE-NEEDED: only the suites related to the
+                       changed files + the GUI harnesses of the touched page sections; no fixed core set; no related suite
+                       = no VM run) -> run-pim-suite-vm.ps1 -Tests 'gate=...' -Lane gate on the test VM:
                        parallel, PowerShell 7 only, a time per suite. RED stops the release. -FullGate runs the full suite
                        instead (a feature release). Never on this machine.
       3 bump           VERSION, tools\setup\install-parameters.json "version", sync\release-map.json PIM internal.1 AND .2,
@@ -149,10 +150,11 @@ if ($From -le 2) {
         $gateList = "$($sel.GateList)"
         foreach ($f in @($sel.Files)) { Write-Host ("      {0} [{1}] -> {2}" -f $f.Path, $f.Class, (@($f.Suites) -join ', ')) }
         Write-Host ("    {0} suite(s){1}: {2}" -f @($sel.Suites).Count, $(if (@($sel.GuiHarnesses).Count) { " (GUI harnesses: $(@($sel.GuiHarnesses) -join ', '))" } else { '' }), $sel.List)
-        if (-not $gateList -or $gateList -eq 'gate=') { Red 'the selector returned no gate' }
-        Show "pwsh -NoProfile -File $VmRunner -Tests '$gateList' -Lane $Lane -Hours 1 -Repo $Repo -OutDir $vmOut   (waits; reads $vmOut\suite.done)"
+        # ONLY-THE-NEEDED (owner 2026-11-03): a change no suite is related to (a document no guard reads) runs NO VM gate
+        if (-not $gateList -or $gateList -eq 'gate=') { Write-Host '    no suite is related to this change -- no VM run (ONLY-THE-NEEDED)' -ForegroundColor Yellow; $script:NoGate = $true }
+        else { Show "pwsh -NoProfile -File $VmRunner -Tests '$gateList' -Lane $Lane -Hours 1 -Repo $Repo -OutDir $vmOut   (waits; reads $vmOut\suite.done)" }
     }
-    if (-not $plan) {
+    if (-not $plan -and -not $script:NoGate) {
         if (-not (Test-Path -LiteralPath $VmRunner)) { Red "no VM runner at $VmRunner (offline tests never run on this machine)" }
         New-Item -ItemType Directory -Force -Path $vmOut | Out-Null
         $t0 = [Diagnostics.Stopwatch]::StartNew()

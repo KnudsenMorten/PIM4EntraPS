@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.24 -- 2026-11-03
+
+- Invardia's install view now shows the true state of every one-time setup step: the support database access and the database least-privilege steps are read through a new read-only database check (no extra rights), the engine refreshes its own permission check once a day, and the updater finds the tenant on its own -- so these no longer show "unknown"; install commands are shorter: the second line carries only the tenant, subscription, region and what you actually chose (no defaults, no empty values, no settings of options you did not pick); the release package that Invardia serves no longer carries internal files, and every package is checked for them (paths and content) before it is published; a private-network install now checks every private DNS zone it needs (including storage for the as-built report) before it creates anything, and names all missing ones at once; running the installer twice in the same PowerShell window no longer fails on an expired support session -- it signs in again; the Pro installer is ready to download its package from Invardia (it is handed out only once rings 2 and 3 carry this clean release).
+
 ## 3.0.23 -- 2026-11-03
 
 - Every install now reports its one-time setup steps to Invardia (mail sender, private network, Support app rights, as-built storage and rights, sign-in front, SQL least privilege, engine permissions, the engine-start right, licence, update ring and more), each from a real check on every update run, so all installs can be kept the same; the as-built report storage is created private where a tenant policy forbids public access (instead of stopping the whole as-built setup every night), and a refusal there no longer stops the rest; the updater no longer says it could not check the engine permissions -- it uses the Manager's own recent check or says unknown; Update now: the 15-minute check asks Invardia once (with the licence) and updates at once on internal and test installs, and at a customer only inside the agreed update hours when the owner raised it

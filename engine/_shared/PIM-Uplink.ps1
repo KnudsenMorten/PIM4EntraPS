@@ -2512,8 +2512,16 @@ function Get-PimUplinkSupportSqlAccess {
         }
         $appIds = @($sps | ForEach-Object { "$($_.appId)".Trim() } | Where-Object { $_ })
         # 2. dbUser: ONE scalar from the PIM database
+        # SETUPSTEPS-TRUTH (a): FIRST through the read-only SIGNED procedure [pim].[usp_AccessFacts] (EXECUTE only -- its
+        # signature sees the other users, the engine's own user does not). Not installed / unsigned / not answered = today's
+        # direct read below (which answers null = not determined on a least-privilege install). Never a guess.
         $read = $null
-        if ($Sql -and (& $inTime)) {
+        if ($Sql -and (& $inTime) -and (Get-Command Read-PimAccessFacts -ErrorAction SilentlyContinue)) {
+            $af = Read-PimAccessFacts -Scalar $Sql -AppIds $appIds -DbUserName $DbUserName
+            if ($af.present -eq $true -and $af.facts -and $af.facts.visible) { $read = $af.facts }
+            elseif ($af.present -ne $false -and "$($af.reason)") { $reasons.Add("dbUser: $($af.reason) -- the direct read is used") }
+        }
+        if ($null -eq $read -and $Sql -and (& $inTime)) {
             try { $read = ConvertFrom-PimUplinkSupportDbUserRead (& $Sql (Get-PimUplinkSupportDbUserSql -AppIds $appIds -DbUserName $DbUserName)) }
             catch { $read = $null; $reasons.Add("the database read: $(& $first $_)") }
         }
@@ -3381,6 +3389,25 @@ function Invoke-PimUplinkJob {
     $key = if (Get-Command Resolve-PimInvardiaInstallKey -ErrorAction SilentlyContinue) { Resolve-PimInvardiaInstallKey -GetSetting $get } else { "$env:PIM_UPLINK_KEY" }
     # 100.10: the setup report -- its own switch (feature 'telemetry.setup', ON by default; it only ever sends with an install key).
     $setupOn = [bool]((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and (Test-PimFeatureAvailable -Key 'telemetry.setup' -Quiet))
+    # SETUPSTEPS-TRUTH (b): the ENGINE refreshes pim.Settings 'PermissionSnapshot' when it is older than 24 h (Microsoft Graph
+    # reads of its OWN app roles -- it holds Application.Read.All -- and the Manager's builder; NO ARM: rootReader is carried
+    # from the last real check, see Update-PimEnginePermissionSnapshot). BEFORE the setup facts, so this heartbeat sends it.
+    # PIM_UPLINK_PERMSNAPSHOT=0 = off. Time-bounded (15 s a call, no retry, 30 s in all); never throws, never fails the run.
+    if ($on -and -not $WhatIf -and (Get-Command Update-PimEnginePermissionSnapshot -ErrorAction SilentlyContinue) -and (Test-PimEnginePermissionSnapshotOn) -and (Get-Command Invoke-PimRest -ErrorAction SilentlyContinue)) {
+        $psPrevTo = $global:PIM_RestTimeoutSec
+        try {
+            $psAppId = "$($global:PIM_RuntimeAppId)".Trim(); if (-not $psAppId) { $psAppId = "$($env:AZURE_CLIENT_ID)".Trim() }
+            if (-not $psAppId -and (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue) -and (Get-Command Get-PimTokenAppId -ErrorAction SilentlyContinue)) { try { $psAppId = "$(Get-PimTokenAppId -Token "$(Get-PimRestToken -Resource graph)")" } catch { $psAppId = '' } }
+            # the ONE permission map (the Manager's and the updater's); the scheduler does not load it for the tick otherwise
+            if (-not (Get-Command Get-PimRequiredGraphCapabilities -ErrorAction SilentlyContinue)) { $psLib = Join-Path $PSScriptRoot 'PIM-PermissionHealth.ps1'; if (Test-Path -LiteralPath $psLib) { . $psLib } }
+            $psReq = @(); if (Get-Command Get-PimRequiredGraphCapabilities -ErrorAction SilentlyContinue) { try { $psReq = @(Get-PimRequiredGraphCapabilities) } catch { $psReq = @() } }
+            $global:PIM_RestTimeoutSec = 15
+            $psGraph = { param($P) Invoke-PimRest -Method GET -Url "https://graph.microsoft.com/v1.0$P" -Resource 'graph' -MaxRetry 0 -All }
+            $psR = Update-PimEnginePermissionSnapshot -GetSetting $get -SetSetting $set -Graph $psGraph -AppId $psAppId -Required $psReq -NowUtc $NowUtc
+            if ($psR.due) { Write-Host "  [uplink] permission snapshot: $($psR.reason)" -ForegroundColor $(if ($psR.refreshed) { 'DarkGray' } else { 'Yellow' }) }
+        } catch { Write-Warning "[uplink] the permission snapshot was not refreshed: $($_.Exception.Message)" }
+        finally { $global:PIM_RestTimeoutSec = $psPrevTo }
+    }
     $facts = $null
     if ($on -and $setupOn -and "$key".Trim()) {
         $msp = ''; $down = $null

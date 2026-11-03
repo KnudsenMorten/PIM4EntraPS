@@ -50,10 +50,12 @@ function Get-PimSqlAccessCatalog {
         pim_engine = @(
             & $g $crud 'SCHEMA::pim'
             & $g @('SELECT') 'SCHEMA::platform'
+            & $g @('EXECUTE') 'pim.usp_AccessFacts'               # SETUPSTEPS-TRUTH (a): the heartbeat's supportSqlAccess dbUser
         )
         pim_updater = @(
             & $g $crud 'SCHEMA::pim'
             & $g @('SELECT', 'INSERT', 'UPDATE') 'SCHEMA::platform'   # Initialize-PimSqlStore ring-order migration
+            & $g @('EXECUTE') 'pim.usp_AccessFacts'               # SETUPSTEPS-TRUTH (a): UpdateState.sqlAccess run2
         )
         pim_asbuilt = @(
             & $g @('SELECT') 'pim.vw_AsBuiltSettings'
@@ -301,6 +303,172 @@ IF IS_ROLEMEMBER('db_ddladmin', N'$n') = 0 ALTER ROLE [db_ddladmin] ADD MEMBER $
 "@)
     }
     return @($b.ToArray())
+}
+
+# ---- SETUPSTEPS-TRUTH (a) (Invardia grid check 2026-11-03): THE ACCESS FACTS -- a READ-ONLY signed procedure ------------------
+# The engine's and the updater's least-privilege users may not see OTHER database users (no VIEW DEFINITION, by design), so
+# the heartbeat's supportSqlAccess dbUser and the updater's run2 read null on every least-privilege install. [pim].[usp_AccessFacts]
+# answers the FACTS only -- the Support app's user (exists, in db_owner) and how many named runtime users still hold
+# db_datareader / db_datawriter -- as ONE scalar. It is signed by its OWN certificate (pim_facts_signer_*), whose user holds
+# VIEW DEFINITION and nothing else (no role, no write right); the private key is removed after signing. Callers hold EXECUTE
+# on it (catalog: pim_engine, pim_updater) -- never VIEW DEFINITION or any broader right. No dynamic SQL, no write: the three
+# parameters are only COMPARED. Installed by an ADMIN run (Invoke-PimSqlAccessInstall: setup, the Support-app cut-over, the
+# in-network admin job; or Invoke-PimSqlAccessFactsInstall alone through the Support app). Absent = the callers keep today's
+# read (null = unknown). The caller's half lives in PIM-SetupSteps.ps1 (Read-PimAccessFacts).
+$script:PimSqlAccessFactsMarker = 'pim-access-facts v1'
+$script:PimSqlAccessFactsSignerPrefix = 'pim_facts_signer'
+
+function Get-PimSqlAccessFactsProcedureText {
+    <# PURE. The read-only procedure. One scalar: 'v1|visible|sidUsers|sidInRole|namedSid|namedInRole|runtimeFound|broadUsers'. #>
+    [CmdletBinding()] param()
+    $m = $script:PimSqlAccessFactsMarker
+    return @"
+CREATE OR ALTER PROCEDURE [pim].[usp_AccessFacts]
+    @AppIds       NVARCHAR(4000) = NULL,
+    @DbUserName   SYSNAME = NULL,
+    @RuntimeUsers NVARCHAR(4000) = NULL
+AS
+BEGIN
+    -- $m -- SETUPSTEPS-TRUTH. READ ONLY: no dynamic SQL, no write. The parameters are only COMPARED (comma lists), never run.
+    -- Signed by a certificate whose user holds VIEW DEFINITION only: a caller with EXECUTE gets these counts, never the principals.
+    SET NOCOUNT ON;
+    DECLARE @ids NVARCHAR(4000) = N',' + LOWER(REPLACE(ISNULL(@AppIds, N''), N' ', N'')) + N',';
+    DECLARE @rt NVARCHAR(4000) = N',' + ISNULL(@RuntimeUsers, N'') + N',';
+    -- visible: may this execution see OTHER database users? (an UNSIGNED -- re-created, tampered -- procedure cannot: 0 = not determined).
+    -- The signer's own certificate user is visible only to a context that may see other principals: the signature's proof.
+    DECLARE @visible INT = CASE WHEN EXISTS (SELECT 1 FROM fn_my_permissions(NULL, N'DATABASE') WHERE permission_name IN (N'VIEW DEFINITION', N'ALTER ANY USER', N'CONTROL'))
+                                  OR HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION') = 1
+                                  OR EXISTS (SELECT 1 FROM sys.database_principals WHERE type = 'C' AND name LIKE N'pim[_]facts[_]signer%') THEN 1 ELSE 0 END;
+    DECLARE @app TABLE (principal_id INT PRIMARY KEY);
+    INSERT INTO @app (principal_id)
+        SELECT p.principal_id FROM sys.database_principals p
+         WHERE p.type IN ('E', 'X') AND DATALENGTH(p.sid) = 16 AND LEN(@ids) > 2
+           AND CHARINDEX(N',' + LOWER(CONVERT(NVARCHAR(36), CAST(p.sid AS UNIQUEIDENTIFIER))) + N',', @ids) > 0;
+    DECLARE @rtu TABLE (principal_id INT PRIMARY KEY);
+    INSERT INTO @rtu (principal_id)
+        SELECT p.principal_id FROM sys.database_principals p
+         WHERE p.type NOT IN ('R', 'A', 'C', 'K') AND LEN(@rt) > 2 AND CHARINDEX(N',' + p.name + N',', @rt) > 0;
+    SELECT N'v1'
+      + N'|' + CAST(@visible AS NVARCHAR(10))
+      + N'|' + CAST((SELECT COUNT(*) FROM @app) AS NVARCHAR(10))
+      + N'|' + CAST((SELECT COUNT(*) FROM sys.database_role_members m JOIN @app a ON a.principal_id = m.member_principal_id
+                      WHERE m.role_principal_id = DATABASE_PRINCIPAL_ID(N'db_owner')) AS NVARCHAR(10))
+      + N'|' + ISNULL((SELECT TOP 1 CONVERT(NVARCHAR(100), p.sid, 1) FROM sys.database_principals p WHERE p.name = @DbUserName AND p.type IN ('E', 'X')), N'')
+      + N'|' + CAST((SELECT COUNT(*) FROM sys.database_role_members m JOIN sys.database_principals p ON p.principal_id = m.member_principal_id
+                      WHERE m.role_principal_id = DATABASE_PRINCIPAL_ID(N'db_owner') AND p.name = @DbUserName AND p.type IN ('E', 'X')) AS NVARCHAR(10))
+      + N'|' + CAST((SELECT COUNT(*) FROM @rtu) AS NVARCHAR(10))
+      + N'|' + CAST((SELECT COUNT(DISTINCT m.member_principal_id) FROM sys.database_role_members m JOIN @rtu u ON u.principal_id = m.member_principal_id
+                      WHERE m.role_principal_id IN (DATABASE_PRINCIPAL_ID(N'db_datareader'), DATABASE_PRINCIPAL_ID(N'db_datawriter'))) AS NVARCHAR(10))
+      AS facts;
+END
+"@
+}
+
+function Get-PimSqlAccessFactsInstallBatches {
+    <#
+      PURE. ADMIN ONLY (setup, the Support-app cut-over, the in-network admin job). Idempotent. Batches, in order:
+        1 the procedure (only when missing or another version -- re-creating it drops its signature)
+        2 SIGN when it is not signed by a pim_facts_signer certificate: earlier facts signers (their users and certificates)
+          dropped, a NEW certificate (EXPIRY 2099, random password made inside SQL, never returned), its user granted
+          VIEW DEFINITION -- nothing else, no role --, ADD SIGNATURE, the private key REMOVED
+        3 EXECUTE for the engine and the updater roles (the catalog grants the same, so the updater's converge keeps it)
+    #>
+    [CmdletBinding()] param()
+    $m = $script:PimSqlAccessFactsMarker; $pfx = $script:PimSqlAccessFactsSignerPrefix
+    $proc = (Get-PimSqlAccessFactsProcedureText).Replace("'", "''")
+    $b = New-Object System.Collections.Generic.List[string]
+    [void]$b.Add(@"
+IF OBJECT_ID(N'pim.usp_AccessFacts') IS NULL
+   OR ISNULL(OBJECT_DEFINITION(OBJECT_ID(N'pim.usp_AccessFacts')), N'') NOT LIKE N'%$m%'
+    EXEC sys.sp_executesql N'$proc';
+"@)
+    [void]$b.Add(@"
+IF NOT EXISTS (SELECT 1 FROM sys.crypt_properties cp JOIN sys.certificates c ON c.thumbprint = cp.thumbprint
+               WHERE cp.major_id = OBJECT_ID(N'pim.usp_AccessFacts') AND c.name LIKE N'$pfx%')
+BEGIN
+    DECLARE @old SYSNAME, @s NVARCHAR(MAX);
+    -- an EARLIER signer of THIS procedure only (its certificate name): its certificate user goes with its certificate
+    DECLARE oldc CURSOR LOCAL FAST_FORWARD FOR SELECT name FROM sys.certificates WHERE name LIKE N'$pfx%';
+    OPEN oldc; FETCH NEXT FROM oldc INTO @old;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        IF DATABASE_PRINCIPAL_ID(@old) IS NOT NULL BEGIN SET @s = N'DROP USER ' + QUOTENAME(@old) + N';'; EXEC sys.sp_executesql @s; END
+        SET @s = N'DROP CERTIFICATE ' + QUOTENAME(@old) + N';'; EXEC sys.sp_executesql @s;
+        FETCH NEXT FROM oldc INTO @old;
+    END
+    CLOSE oldc; DEALLOCATE oldc;
+    DECLARE @cert SYSNAME = N'${pfx}_' + FORMAT(SYSUTCDATETIME(), 'yyyyMMddHHmmss');
+    DECLARE @pw NVARCHAR(200) = CONVERT(NVARCHAR(36), NEWID()) + N'Pa1!' + CONVERT(NVARCHAR(36), NEWID());
+    SET @s = N'CREATE CERTIFICATE ' + QUOTENAME(@cert) + N' ENCRYPTION BY PASSWORD = ' + QUOTENAME(@pw, '''')
+           + N' WITH SUBJECT = ''PIM Manager access facts signer (read only)'', EXPIRY_DATE = ''20991231'';';
+    EXEC sys.sp_executesql @s;
+    SET @s = N'CREATE USER ' + QUOTENAME(@cert) + N' FROM CERTIFICATE ' + QUOTENAME(@cert) + N';'; EXEC sys.sp_executesql @s;
+    SET @s = N'GRANT VIEW DEFINITION TO ' + QUOTENAME(@cert) + N';'; EXEC sys.sp_executesql @s;
+    SET @s = N'ADD SIGNATURE TO [pim].[usp_AccessFacts] BY CERTIFICATE ' + QUOTENAME(@cert) + N' WITH PASSWORD = ' + QUOTENAME(@pw, '''') + N';';
+    EXEC sys.sp_executesql @s;
+    SET @s = N'ALTER CERTIFICATE ' + QUOTENAME(@cert) + N' REMOVE PRIVATE KEY;'; EXEC sys.sp_executesql @s;
+END
+"@)
+    [void]$b.Add((@('pim_engine', 'pim_updater' | ForEach-Object { "IF DATABASE_PRINCIPAL_ID(N'$_') IS NOT NULL GRANT EXECUTE ON OBJECT::[pim].[usp_AccessFacts] TO [$_];" }) -join "`n"))
+    return @($b.ToArray())
+}
+
+function Get-PimSqlAccessFactsStateSql {
+    <# PURE. READ-ONLY, for the admin run's read-back: one row -- the procedure, its version, its signer, the key, the signer's rights. #>
+    [CmdletBinding()] param()
+    $m = $script:PimSqlAccessFactsMarker; $pfx = $script:PimSqlAccessFactsSignerPrefix
+    $sig = "FROM sys.crypt_properties cp JOIN sys.certificates c ON c.thumbprint = cp.thumbprint WHERE cp.major_id = OBJECT_ID(N'pim.usp_AccessFacts') AND c.name LIKE N'$pfx%'"
+    return @"
+DECLARE @sg SYSNAME = (SELECT TOP 1 c.name $sig);
+DECLARE @sgId INT = DATABASE_PRINCIPAL_ID(@sg);
+SELECT
+  CASE WHEN OBJECT_ID(N'pim.usp_AccessFacts') IS NULL THEN 0 ELSE 1 END AS procExists,
+  CASE WHEN ISNULL(OBJECT_DEFINITION(OBJECT_ID(N'pim.usp_AccessFacts')), N'') LIKE N'%$m%' THEN 1 ELSE 0 END AS procCurrent,
+  @sg AS signer,
+  (SELECT TOP 1 c.expiry_date $sig) AS signerExpiry,
+  (SELECT TOP 1 CASE WHEN c.pvt_key_encryption_type = 'NA' THEN 1 ELSE 0 END $sig) AS privateKeyRemoved,
+  (SELECT COUNT(*) FROM sys.database_permissions dp WHERE dp.grantee_principal_id = @sgId
+      AND dp.class = 0 AND dp.state = 'G' AND dp.permission_name = 'VIEW DEFINITION') AS signerViewDefinition,
+  (SELECT COUNT(*) FROM sys.database_permissions dp WHERE dp.grantee_principal_id = @sgId
+      AND dp.state IN ('G', 'W') AND NOT (dp.class = 0 AND dp.permission_name IN ('VIEW DEFINITION', 'CONNECT'))) AS signerOtherRights,
+  (SELECT COUNT(*) FROM sys.database_role_members rm WHERE rm.member_principal_id = @sgId) AS signerRoles;
+"@
+}
+
+function Test-PimSqlAccessFactsInstalledState {
+    <#
+      PURE. Judge the facts procedure's read-back: exists, THIS version, signed by a pim_facts_signer certificate (2099, no
+      private key) whose user holds VIEW DEFINITION and NOTHING else (no other right, no role). Returns { ok; problems[] }.
+    #>
+    [CmdletBinding()] param([AllowNull()][object]$Facts)
+    $p = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $Facts) { return [pscustomobject]@{ ok = $false; problems = @('the read-back returned no row -- nothing is proven') } }
+    if ("$($Facts.procExists)" -ne '1') { [void]$p.Add('the access facts procedure does not exist') }
+    if ("$($Facts.procCurrent)" -ne '1') { [void]$p.Add('the access facts procedure is not this version') }
+    if ("$($Facts.signer)" -notlike "$($script:PimSqlAccessFactsSignerPrefix)*") { [void]$p.Add('the access facts procedure is not signed') }
+    if (-not $Facts.signerExpiry -or ([datetime]$Facts.signerExpiry).Year -lt 2099) { [void]$p.Add("the signer certificate expires before 2099 ($($Facts.signerExpiry))") }
+    if ("$($Facts.privateKeyRemoved)" -ne '1') { [void]$p.Add('the signer certificate still holds its private key') }
+    if ("$($Facts.signerViewDefinition)" -ne '1') { [void]$p.Add('the signer does not hold VIEW DEFINITION') }
+    if ("$($Facts.signerOtherRights)" -ne '0' -or "$($Facts.signerRoles)" -ne '0') { [void]$p.Add("the signer holds more than VIEW DEFINITION ($($Facts.signerOtherRights) other right(s), $($Facts.signerRoles) role(s))") }
+    return [pscustomobject]@{ ok = ($p.Count -eq 0); problems = @($p.ToArray()) }
+}
+
+function Invoke-PimSqlAccessFactsInstall {
+    <#
+      ADMIN ONLY. The facts procedure's batches (Get-PimSqlAccessFactsInstallBatches), then the read-back
+      (Test-PimSqlAccessFactsInstalledState). NEVER throws -- it is telemetry: a failure is returned, the caller's admin run
+      goes on. -Query / -Exec: scriptblocks (cs, sql) on the caller's own admin connection. Returns { ok; signer; problems[] }.
+    #>
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$ConnectionString = '', [Parameter(Mandatory)][scriptblock]$Query, [Parameter(Mandatory)][scriptblock]$Exec)
+    try {
+        foreach ($b in @(Get-PimSqlAccessFactsInstallBatches)) { & $Exec $ConnectionString $b }
+        $f = @(& $Query $ConnectionString (Get-PimSqlAccessFactsStateSql))[0]
+        $v = Test-PimSqlAccessFactsInstalledState -Facts $f
+        return [pscustomobject]@{ ok = [bool]$v.ok; signer = "$(if ($f) { $f.signer })"; problems = @($v.problems) }
+    } catch {
+        return [pscustomobject]@{ ok = $false; signer = ''; problems = @("the access facts procedure was not installed: $(((("$($_.Exception.Message)") -split "`n")[0]).Trim())") }
+    }
 }
 
 function Get-PimSqlAccessApplyBatches {
@@ -628,12 +796,15 @@ function New-PimSqlAccessVerdict {
         run2                  $true when no RUNTIME user (web / engine) holds db_datareader / db_datawriter any more (the
                               cut-over's second run, framework 12.23 P8); $false when one does; $null when the updater cannot
                               see it (-BroadUsers $null: a least-privilege updater does not see the other users' roles)
+                              SETUPSTEPS-TRUTH (a): -FactsRun2 -- the same answer read through the signed access facts
+                              procedure (Get-PimAccessFactsRun2: $true / $false / $null) -- is used when -BroadUsers is not
+                              known; absent / not determined = $null, never a guess
         updaterInAdminGroup   the converge ran as dbo / db_owner (the updater is still in the SQL admin group)
         checkedUtc            when
       -Converge: what Invoke-PimSqlAccessConverge returned; -ErrorText: what it threw instead. Anything else = $null (no verdict).
     #>
     [CmdletBinding()] param([AllowNull()][object]$Converge = $null, [AllowEmptyString()][string]$ErrorText = '', [AllowNull()][object]$BroadUsers = $null,
-                            [datetime]$NowUtc = [datetime]::UtcNow)
+                            [AllowNull()][object]$FactsRun2 = $null, [datetime]$NowUtc = [datetime]::UtcNow)
     $model = $null; $admin = $null
     if ($null -ne $Converge -and $Converge.PSObject.Properties['applied']) {
         $model = if ([bool]$Converge.applied) { 'least-privilege' } else { 'broad' }
@@ -647,6 +818,7 @@ function New-PimSqlAccessVerdict {
     if (-not $model) { return $null }
     $run2 = $null; $bn = 0
     if ($null -ne $BroadUsers -and [int]::TryParse("$BroadUsers", [ref]$bn)) { $run2 = ($bn -eq 0) }
+    elseif ($FactsRun2 -is [bool]) { $run2 = [bool]$FactsRun2 }
     return [ordered]@{ model = $model; run1 = ($model -eq 'least-privilege'); run2 = $run2; updaterInAdminGroup = $admin; checkedUtc = $NowUtc.ToUniversalTime().ToString('o') }
 }
 
@@ -692,8 +864,11 @@ function Invoke-PimSqlAccessInstall {
     $facts = (Get-PimSqlAccessState -ConnectionString $ConnectionString -Query $Query).facts
     $v = Test-PimSqlAccessInstalledState -Facts $facts
     if (-not $v.ok) { throw "the access model did not install: $($v.problems -join '; ')" }
+    # SETUPSTEPS-TRUTH (a): the read-only facts procedure, on the same admin connection, BEFORE the converge (so the converge
+    # finds it and keeps its catalog EXECUTE grants). Telemetry: never throws, never fails the admin run (returned as accessFacts).
+    $af = Invoke-PimSqlAccessFactsInstall -ConnectionString $ConnectionString -Query $Query -Exec $Exec
     $conv = Invoke-PimSqlAccessConverge -ConnectionString $ConnectionString -Query $Query -Exec $Exec -NameMap $NameMap
-    return [pscustomobject]@{ ok = $true; skipped = $false; reason = ''; signer = "$($facts.signer)"; signerExpiry = $facts.signerExpiry; converge = $conv }
+    return [pscustomobject]@{ ok = $true; skipped = $false; reason = ''; signer = "$($facts.signer)"; signerExpiry = $facts.signerExpiry; converge = $conv; accessFacts = $af }
 }
 
 function Get-PimSqlAccessState {

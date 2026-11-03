@@ -45,7 +45,9 @@ You need **PowerShell 7** and an account that is **Owner of the Azure subscripti
 Administrator** in Entra ID. You sign in in your browser: no app secret, no certificate, no Azure CLI and no PowerShell
 modules. Line 1 downloads the installer (Community: from the public release on GitHub; Pro and trial: from Invardia),
 line 2 runs it with your values -- there is
-no key, licence or settings file in the command. Open a new PowerShell 7 window for each.
+no key, licence or settings file in the command. Line 2 carries only your tenant, your subscription, the region and what
+you change from the defaults: a default is never repeated, and an option you do not use (for example the private network
+values) is not in the line. Open a new PowerShell 7 window for each.
 
 **1. The most common: Community, browser sign-in, everything else defaulted.** Start here.
 

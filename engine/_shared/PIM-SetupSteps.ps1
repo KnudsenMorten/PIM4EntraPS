@@ -23,7 +23,10 @@
       updater (UpdateState, own keys)   sqlAccess (run 1 / run 2 / updater in the admin group), signIn (the layer),
                                         enginePermissions (the 95.2i check: Graph + the Reader at the tenant root)
       heartbeat                         Controls (mail-sender, licence-valid, uplink-key, update-ring, identity-permissions),
-                                        supportSqlAccess { group; dbUser }, the Manager's PermissionSnapshot
+                                        supportSqlAccess { group; dbUser }, PermissionSnapshot (the Manager's check, or the
+                                        engine's own refresh when it is older than 24 h -- SETUPSTEPS-TRUTH (b))
+      both (SETUPSTEPS-TRUTH (a))       the read-only SIGNED procedure [pim].[usp_AccessFacts] (Read-PimAccessFacts below): the
+                                        Support app's database user + run 2, seen with EXECUTE only (absent = today's read)
     PURE first (New-PimSetupSteps and every mapper -- offline-tested in tests/Test-PimSetupSteps.ps1), then the one reader
     the updater calls (Get-PimSetupStepUpdaterFacts; ARM GET + one SQL scalar through seams; never throws, never writes).
     PS 5.1 + 7, no modules, no az, ASCII only.
@@ -53,7 +56,9 @@ function Get-PimSetupStepCatalog {
         [ordered]@{ key = 'update-ring';              title = 'Update ring set';                                     since = '2.4.323'; how = 'support-app' }
         [ordered]@{ key = 'engine-root-reader';       title = 'Engine Reader at the tenant root';                    since = '2.4.529'; how = 'customer' }
         [ordered]@{ key = 'front-private-kv';         title = 'Private Key Vault for the sign-in front';             since = '2.4.656'; how = 'support-app' }
-        [ordered]@{ key = 'job-self-reader';          title = 'Pull / publish jobs read their own runs';             since = '2.4.636'; how = 'updater' }
+        # SETUPSTEPS-TRUTH (e): the updater may NOT assign roles (P9) -- it only notes the refusal; the Support app grants it
+        # (ops grant-job-self-reader.ps1).
+        [ordered]@{ key = 'job-self-reader';          title = 'Pull / publish jobs read their own runs';             since = '2.4.636'; how = 'support-app' }
     )
 }
 function Get-PimSetupStepMax { return 50 }
@@ -229,6 +234,96 @@ function Get-PimSetupStepAsBuiltFacts {
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
+# SETUPSTEPS-TRUTH (a): THE ACCESS FACTS, read through the read-only SIGNED procedure [pim].[usp_AccessFacts]
+# (engine/_shared/PIM-SqlAccess.ps1 Get-PimSqlAccessFactsProcedureText; installed by an admin run). The engine's and the
+# updater's least-privilege database users may not see OTHER database users (no VIEW DEFINITION, by design); the procedure
+# is signed by a certificate whose user holds VIEW DEFINITION only, so a caller with EXECUTE alone gets the FACTS (counts
+# and one SID), never the principals. Absent / unsigned / not answered = $null (unknown) -- the caller keeps today's read.
+# Here: the caller's half (PURE text + parser, and one reader that never throws), loaded by the heartbeat AND the updater.
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimAccessFactsProcedureName { <# PURE. The procedure (a literal; PIM-SqlAccess.ps1 creates it under this name). #> return '[pim].[usp_AccessFacts]' }
+
+function Get-PimAccessFactsCallSql {
+    <#
+      PURE. The ONE call: EXEC [pim].[usp_AccessFacts] with three COMPARED values (the procedure never executes them):
+        -AppIds        the Support app ids Microsoft Graph named (GUIDs only; anything else is dropped)
+        -DbUserName    the Support app's database user name (Grant-PimSupportAccess default 'invardia-support')
+        -RuntimeUsers  the web app's and the engine's database user names (run 2: do they still hold db_datareader / db_datawriter?)
+      A name that is not a safe database user name (no comma, no quote) is dropped, never sent.
+    #>
+    param([string[]]$AppIds = @(), [string]$DbUserName = 'invardia-support', [string[]]$RuntimeUsers = @())
+    $safe = '^[A-Za-z0-9][A-Za-z0-9 ._@-]{0,127}$'
+    $ids = @(@($AppIds) | ForEach-Object { $g = [guid]::Empty; if ([guid]::TryParse("$_".Trim(), [ref]$g) -and $g -ne [guid]::Empty) { $g.ToString() } } | Select-Object -Unique)
+    $rt = @(@($RuntimeUsers) | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match $safe } | Select-Object -Unique)
+    $du = $(if ("$DbUserName".Trim() -match $safe) { "N'$("$DbUserName".Trim())'" } else { 'NULL' })
+    return ("EXEC $(Get-PimAccessFactsProcedureName) @AppIds = N'$($ids -join ',')', @DbUserName = $du, @RuntimeUsers = N'$($rt -join ',')';")
+}
+
+function ConvertFrom-PimSetupStepSid {
+    # PURE. A SID as SQL returns it from CONVERT(NVARCHAR, sid, 1) ('0x' + 32 hex, Guid.ToByteArray order) -> the app id; else ''.
+    param([AllowNull()][string]$Sid)
+    if ("$Sid".Trim() -notmatch '^(0x)?([0-9a-fA-F]{32})$') { return '' }
+    $hex = $Matches[2]; $b = New-Object byte[] 16
+    for ($i = 0; $i -lt 16; $i++) { $b[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16) }
+    return ([guid]::new([byte[]]$b)).ToString()
+}
+
+function ConvertFrom-PimAccessFactsAnswer {
+    <#
+      PURE. The procedure's ONE scalar 'v1|visible|sidUsers|sidInRole|namedSid|namedInRole|runtimeFound|broadUsers' ->
+      @{ visible; sidUsers; sidInRole; namedExists; namedAppId; namedInRole; runtimeFound; broadUsers } (the same keys the
+      heartbeat's own read gives, so Resolve-PimUplinkSupportDbUser judges both alike). Anything else THROWS.
+    #>
+    param([AllowNull()]$Raw)
+    if ("$Raw".Trim() -notmatch '^v1\|([01])\|(\d+)\|(\d+)\|((0x)?[0-9A-Fa-f]*)\|(\d+)\|(\d+)\|(\d+)$') { throw 'the access facts procedure did not answer in its agreed form' }
+    $sid = "$($Matches[4])"
+    return @{ visible = ($Matches[1] -eq '1'); sidUsers = [int]$Matches[2]; sidInRole = [int]$Matches[3]
+              namedExists = [bool]$sid; namedAppId = (ConvertFrom-PimSetupStepSid $sid); namedInRole = [int]$Matches[6]
+              runtimeFound = [int]$Matches[7]; broadUsers = [int]$Matches[8] }
+}
+
+function Test-PimAccessFactsAbsent {
+    # PURE. Is this error the procedure missing on this install (no admin run has installed it yet)?
+    param([AllowNull()][string]$Message)
+    return [bool]("$Message" -match '(?i)Could not find stored procedure|Msg 2812|usp_AccessFacts.{0,40}(not found|does not exist)')
+}
+
+function Read-PimAccessFacts {
+    <#
+      ONE read through the signed procedure. NEVER throws. -Scalar { param($sql) } = one scalar from the PIM database.
+      Returns @{ present = $true | $false | $null; facts = <ConvertFrom-PimAccessFactsAnswer> | $null; reason }:
+        present $true   it answered; facts.visible says whether its signature let it see the other users (an UNSIGNED --
+                        tampered / re-created -- procedure answers visible = 0: the caller treats that as not determined)
+        present $false  not installed on this install (today's behaviour: the caller keeps its own read / unknown)
+        present $null   it could not be called (no EXECUTE, a timeout, a bad answer) -- unknown
+    #>
+    param([AllowNull()][scriptblock]$Scalar, [string[]]$AppIds = @(), [string]$DbUserName = 'invardia-support', [string[]]$RuntimeUsers = @())
+    if (-not $Scalar) { return @{ present = $null; facts = $null; reason = 'no database session' } }
+    try {
+        $raw = & $Scalar (Get-PimAccessFactsCallSql -AppIds $AppIds -DbUserName $DbUserName -RuntimeUsers $RuntimeUsers)
+        $f = ConvertFrom-PimAccessFactsAnswer $raw
+        if (-not $f.visible) { return @{ present = $true; facts = $f; reason = 'the access facts procedure is not signed (it sees only itself) -- not determined' } }
+        return @{ present = $true; facts = $f; reason = '' }
+    } catch {
+        $m = ((("$($_.Exception.Message)") -split "`n")[0]).Trim()
+        if (Test-PimAccessFactsAbsent $m) { return @{ present = $false; facts = $null; reason = 'the access facts procedure is not installed here (an admin run installs it)' } }
+        return @{ present = $null; facts = $null; reason = "the access facts procedure could not be read: $m" }
+    }
+}
+
+function Get-PimAccessFactsRun2 {
+    <#
+      PURE. Run 2 (framework 12.23 P8: no runtime user -- web / engine -- holds db_datareader / db_datawriter any more) from a
+      Read-PimAccessFacts result: $true / $false, or $null when not determined (absent, unsigned, or none of the named runtime
+      users exists -- 0 of 0 is never "done").
+    #>
+    param([AllowNull()][object]$Read)
+    if ($null -eq $Read -or $Read.present -ne $true -or $null -eq $Read.facts -or -not $Read.facts.visible) { return $null }
+    if ([int]$Read.facts.runtimeFound -lt 1) { return $null }
+    return ([int]$Read.facts.broadUsers -eq 0)
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
 # THE BUILDER (PURE)
 # ---------------------------------------------------------------------------------------------------------------------
 function New-PimSetupSteps {
@@ -356,6 +451,7 @@ function New-PimSetupSteps {
     $gs = "$(Get-PimSetupStepField $ep 'graphState')"
     $psAt = ConvertTo-PimSetupStepUtc (Get-PimSetupStepField $perm 'checkedUtc')
     $psFresh = ($perm -and $psAt -and ($now - $psAt).TotalDays -le (Get-PimSetupStepFreshDays) -and (ConvertTo-PimSetupStepBool (Get-PimSetupStepField $perm 'readable')) -eq $true)
+    $psWho = { if ("$(Get-PimSetupStepField $perm 'source')" -eq 'engine') { "engine's own" } else { "PIM Manager's" } }
     if ($gs -eq 'ok') { & $set 'engine-graph-permissions' 'ok' 'the engine holds every Microsoft Graph permission this version needs' $epAt }
     elseif ($gs -eq 'missing') {
         $mg = @(@(Get-PimSetupStepField $ep 'missingGraph') | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$' })
@@ -363,8 +459,9 @@ function New-PimSetupSteps {
     } else {
         $ic = Get-PimSetupStepControl -Controls $ctl -Id 'identity-permissions'
         switch ("$(Get-PimSetupStepField $ic 'state')") {
-            'ok'      { & $set 'engine-graph-permissions' 'ok' 'from the PIM Manager''s permission check (7 days or newer)' (Get-PimSetupStepField $ic 'checkedUtc') }
-            'missing' { & $set 'engine-graph-permissions' 'missing' 'the PIM Manager''s permission check found missing permissions (Home > Permissions)' (Get-PimSetupStepField $ic 'checkedUtc') }
+            # SETUPSTEPS-TRUTH (b): the snapshot is the PIM Manager's check OR the engine's own daily refresh (source = engine)
+            'ok'      { & $set 'engine-graph-permissions' 'ok' "from the $(& $psWho) permission check (7 days or newer)" (Get-PimSetupStepField $ic 'checkedUtc') }
+            'missing' { & $set 'engine-graph-permissions' 'missing' "the $(& $psWho) permission check found missing permissions (Home > Permissions)" (Get-PimSetupStepField $ic 'checkedUtc') }
             default   {
                 $why = "$(Get-PimSetupStepField $ep 'reason')".Trim()
                 & $set 'engine-graph-permissions' 'unknown' $(if ($why) { "not checked: $why" } else { 'not checked: no readable permission check from the last 7 days' }) $epAt
@@ -377,8 +474,10 @@ function New-PimSetupSteps {
         if (@($ma | Where-Object { $_ -match '^Reader at the tenant root' }).Count) { & $set 'engine-root-reader' 'missing' 'the engine has no Reader at the tenant root management group' $epAt }
         else { & $set 'engine-root-reader' 'ok' 'the engine holds Reader at the tenant root management group' $epAt }
     } elseif ($psFresh -and (ConvertTo-PimSetupStepBool (Get-PimSetupStepField $perm 'rootReader')) -is [bool]) {
-        if ([bool](ConvertTo-PimSetupStepBool (Get-PimSetupStepField $perm 'rootReader'))) { & $set 'engine-root-reader' 'ok' 'from the PIM Manager''s permission check' $psAt }
-        else { & $set 'engine-root-reader' 'missing' 'the PIM Manager''s permission check found no Reader at the tenant root' $psAt }
+        # an engine-made snapshot CARRIES rootReader from the last check that read it (the tick reads no ARM): that time counts
+        $rrAt = ConvertTo-PimSetupStepUtc (Get-PimSetupStepField $perm 'rootReaderCheckedUtc'); if (-not $rrAt) { $rrAt = $psAt }
+        if ([bool](ConvertTo-PimSetupStepBool (Get-PimSetupStepField $perm 'rootReader'))) { & $set 'engine-root-reader' 'ok' 'from the PIM Manager''s permission check' $rrAt }
+        else { & $set 'engine-root-reader' 'missing' 'the PIM Manager''s permission check found no Reader at the tenant root' $rrAt }
     } else { & $set 'engine-root-reader' 'unknown' 'not read: the engine''s Azure role assignments could not be read' $epAt }
 
     # ---- S11 jobs-operator (updater: converge-defaults) ------------------------------------------------------------
@@ -421,7 +520,7 @@ function New-PimSetupSteps {
     else {
         switch ("$(& $uf 'jobSelfReader')") {
             'ok'      { & $set 'job-self-reader' 'ok' 'every pull / publish job holds Reader on itself' $upAt }
-            'missing' { & $set 'job-self-reader' 'missing' 'a pull / publish job has no Reader on itself (a redeploy of the job grants it)' $upAt }
+            'missing' { & $set 'job-self-reader' 'missing' 'a pull / publish job has no Reader on itself (the updater may not assign roles -- the Support app grants it)' $upAt }
             'n/a'     { & $set 'job-self-reader' 'n/a' 'no pull or publish job at this install' $upAt }
             default   { & $set 'job-self-reader' 'unknown' 'not read: the jobs could not be listed' $upAt }
         }

@@ -1271,13 +1271,21 @@ try {
             # §33.0 MORE TELEMETRY (SqlAccess): the verdict goes into UpdateState, so the heartbeat only reads it. run 2 (the
             # runtime users lost their broad roles) is visible only to an updater that is still db_owner -- else unknown.
             try {
-                $accBroad = $null
+                $accBroad = $null; $accFactsRun2 = $null
                 if ($acc.dbOwner -and (Get-Command Get-PimSqlAccessSetupGateSql -ErrorAction SilentlyContinue)) {
                     $accNm = Get-PimSqlAccessInstallNameMap
                     $accRow = @(Invoke-PimSqlQuery -ConnectionString $csUpd -Sql (Get-PimSqlAccessSetupGateSql -UserNames (@($accNm['pim_web']) + @($accNm['pim_engine']))))[0]
                     if ($accRow) { $accBroad = $accRow.broadUsers }
+                } elseif ($acc.applied -and (Get-Command Read-PimAccessFacts -ErrorAction SilentlyContinue)) {
+                    # SETUPSTEPS-TRUTH (a): a least-privilege updater does not see the other users' roles -- it asks the
+                    # read-only SIGNED procedure (EXECUTE only). Absent / unsigned = $null (unknown), never a guess.
+                    $accNm = Get-PimSqlAccessInstallNameMap
+                    $accCs = $csUpd
+                    $accFacts = Read-PimAccessFacts -Scalar { param($q) Invoke-PimSqlScalar -ConnectionString $accCs -Sql $q } -RuntimeUsers (@($accNm['pim_web']) + @($accNm['pim_engine']))
+                    $accFactsRun2 = Get-PimAccessFactsRun2 -Read $accFacts
+                    Say ("  database access run 2: $(if ($accFactsRun2 -eq $true) { 'done' } elseif ($accFactsRun2 -eq $false) { 'NOT done (a runtime user still holds a broad role)' } else { "not determined -- $(if ($accFacts.reason) { $accFacts.reason } else { 'none of the runtime users was found' })" }) (through the signed access facts procedure)") 'DarkGray'
                 }
-                $script:PimSqlAccessVerdict = New-PimSqlAccessVerdict -Converge $acc -BroadUsers $accBroad
+                $script:PimSqlAccessVerdict = New-PimSqlAccessVerdict -Converge $acc -BroadUsers $accBroad -FactsRun2 $accFactsRun2
             } catch { Say "  database access verdict not recorded (telemetry only; the update is unaffected): $($_.Exception.Message)" 'DarkGray' }
         } catch {
             Say "  database access NOT converged (the update continues; the broad roles still apply): $($_.Exception.Message)" 'Yellow'

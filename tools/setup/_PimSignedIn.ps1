@@ -195,12 +195,56 @@ function Get-PimSignedInToken {
         * otherwise the signed-in person -> Get-PimInteractiveToken (browser, auth-code + PKCE; never device code).
       Returns the token string (Support app) or PIM-Rest's @{ token; expiresUtc } (interactive). PIM-Rest verifies the tid.
     #>
+    # STALE SUPPORT SESSION (framework 0 "Installer rules", item 2; 2026-11-03): Get-InvardiaSupportToken
+    # stays DEFINED in a PowerShell window after an earlier run's support session, also when its token can no longer be minted
+    # (the session expired, or it was for another tenant). The install then failed with "could not sign in" instead of signing
+    # the person in. Now: when the support-token call THROWS and there is no live session for this tenant (+ subscription)
+    # (Test-PimSupportSessionCovers -- the same test Use-PimSupportAppRestSession makes) and a person can sign in here
+    # ($global:PIM_InteractiveFallback), the run falls back to the browser
+    # sign-in, says so in one line, and stays there. NEVER two identities in one run: a run that got a support token keeps
+    # it (a later failure is an error, never a quiet switch to the person), and a run that fell back never asks the support
+    # session again. Set-PimSignedInGlobals starts each run afresh.
     param([Parameter(Mandatory)][string]$Audience, [string]$TenantId)
-    if (Get-Command Get-InvardiaSupportToken -ErrorAction SilentlyContinue) {
-        return (Get-InvardiaSupportToken -Resource ("$Audience".TrimEnd('/')))
+    if ("$script:PimSignedInSource" -ne 'browser' -and (Get-Command Get-InvardiaSupportToken -ErrorAction SilentlyContinue)) {
+        try {
+            $st = Get-InvardiaSupportToken -Resource ("$Audience".TrimEnd('/'))
+            $script:PimSignedInSource = 'support'
+            return $st
+        } catch {
+            $tenantNow = if ("$TenantId".Trim()) { "$TenantId".Trim() } else { "$global:PIM_TenantId".Trim() }
+            # the same test as Test-PimSupportSessionCovers, written out here: this function is also registered on its own as
+            # PIM-Rest's token source ($global:PIM_TokenProvider) and must not depend on another function of this file
+            $ss = $global:InvardiaSupportState; $live = $false
+            if ($ss -is [hashtable] -and $ss.Secret -and "$($ss.AppId)" -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' -and
+                $tenantNow -and "$($ss.TenantId)".Trim().ToLowerInvariant() -eq $tenantNow.ToLowerInvariant()) {
+                $ssSubs = @(@($ss.Subscriptions) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
+                $live = (-not "$script:PimSignedInSubscriptionId".Trim()) -or ($ssSubs -contains "$script:PimSignedInSubscriptionId".Trim().ToLowerInvariant())
+            }
+            # ...and only where a person can sign in (PIM-Rest's own flag, set by Get-PimSignedInIdentityRest): an unattended
+            # run keeps the error instead of waiting on a browser nobody sees
+            if ("$script:PimSignedInSource" -eq 'support' -or $live -or -not $global:PIM_InteractiveFallback) { throw }
+            Write-Host 'The Invardia Support session left in this PowerShell window can no longer sign in -- signing you in in the browser instead.' -ForegroundColor Yellow
+            $script:PimSignedInSource = 'browser'
+        }
     }
     if (-not (Get-Command Get-PimInteractiveToken -ErrorAction SilentlyContinue)) { throw 'Get-PimSignedInToken: engine\_shared\PIM-Rest.ps1 is not loaded.' }
+    if (-not "$script:PimSignedInSource") { $script:PimSignedInSource = 'browser' }
     return (Get-PimInteractiveToken -Audience $Audience -TenantId $TenantId)
+}
+
+function Test-PimSupportSessionCovers {
+    <#
+      PURE given -State (default: $global:InvardiaSupportState). Is a LIVE Invardia Support session open for -TenantId (and
+      -SubscriptionId when given)? The conditions Use-PimSupportAppRestSession requires: a session hashtable with its secret,
+      a GUID app id, the same tenant, the subscription among its subscriptions.
+    #>
+    param([string]$TenantId, [string]$SubscriptionId = '', [object]$State)
+    $s = if ($PSBoundParameters.ContainsKey('State')) { $State } else { $global:InvardiaSupportState }
+    if (-not ($s -is [hashtable]) -or -not $s.Secret -or "$($s.AppId)" -notmatch $script:PimSignedInGuid) { return $false }
+    if (-not "$TenantId".Trim() -or "$($s.TenantId)".Trim().ToLowerInvariant() -ne "$TenantId".Trim().ToLowerInvariant()) { return $false }
+    $subs = @(@($s.Subscriptions) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
+    if ("$SubscriptionId".Trim() -and -not ($subs -contains "$SubscriptionId".Trim().ToLowerInvariant())) { return $false }
+    return $true
 }
 
 function Get-PimSignedInIdentityRest {
@@ -217,6 +261,7 @@ function Get-PimSignedInIdentityRest {
         return @{ ok = $false; reason = 'the tenant id and the subscription id must both be given explicitly (GUIDs) -- a signed-in build never relies on a default context' }
     }
     $supportApp = ''
+    $script:PimSignedInSubscriptionId = $sub   # the stale-session fallback checks a live session for THIS subscription
     if (-not $Token) {
         if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) {
             $rest = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-Rest.ps1'
@@ -277,6 +322,8 @@ function Set-PimSignedInGlobals {
     $global:PIM_NoManagedIdentity = $true
     $global:PIM_UseGraphSdk = $false
     $global:PIM_SignedInAccount = $true
+    # STALE SUPPORT SESSION: a new run decides its identity afresh (Get-PimSignedInToken) -- never an earlier run's choice
+    $script:PimSignedInSource = ''
     # REQ 100.42: register the signed-in token source (Support app / browser) -- PIM-Rest has no other fallback.
     $global:PIM_TokenProvider = ${function:Get-PimSignedInToken}
 }

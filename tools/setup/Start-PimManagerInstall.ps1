@@ -19,6 +19,10 @@
        and subscription in the temp folder. When it is gone (a new Cloud Shell session), -Resume downloads the release
        again -- the installation's own progress is kept in its state folder, so it still continues where it stopped.
   -ReleasePath <folder> runs the installer from a release you already have (nothing is downloaded).
+  The copy Invardia gives Pro and trial customers does steps 2-3 with Invardia instead of GitHub: you sign in in the browser
+  (an administrator of -TenantId), it asks Invardia for the PIM Manager Pro package of your update ring for that tenant, checks
+  that Invardia sealed it (its signed manifest) and the download's size and SHA-256 against it, and then runs the installer from it the same
+  way. If Invardia cannot be reached or refuses, it says so in one line and installs nothing -- it never falls back to GitHub.
 
   Browser sign-in (your own administrator account): no Azure CLI, no PowerShell modules, no secret, no certificate, no
   key and no licence in the command. PowerShell 7 (Azure Cloud Shell, or PowerShell 7 on Windows, macOS or Linux). Only
@@ -65,10 +69,13 @@
     Role: Owner on the target subscription (Azure); Privileged Role Administrator and Application Administrator
           (Microsoft Entra); Exchange Administrator only for the mail sender (optional).
     Hosts: github.com, api.github.com, objects.githubusercontent.com, release-assets.githubusercontent.com (the release);
+           the Pro copy instead: login.microsoftonline.com (your browser sign-in) and invardia.com (the Pro package and the
+           short-lived download link it names);
            then the installer's: login.microsoftonline.com, management.azure.com, graph.microsoft.com,
            *.database.windows.net (port 1433), *.azurecr.io, outlook.office365.com (mail sender)
 
-  Reads: the release metadata at api.github.com (public, no sign-in) and the release zip it names. Writes: a new folder
+  Reads: the release metadata at api.github.com (public, no sign-in) and the release zip it names (the Pro copy: the signed
+  package answer from invardia.com, with your sign-in, and the zip it names). Writes: a new folder
   in the temp folder (the zip and its unpacked files) and a small note there with that folder's path; everything else is
   the installer's (see Install-PimManager).
 
@@ -127,7 +134,10 @@ param(
     [scriptblock]$GetRelease,
     [scriptblock]$Download,
     [scriptblock]$RunInstaller,
-    [string]$TestSelfVersion = ''
+    [string]$TestSelfVersion = '',
+    # --- the Pro copy's seams (PRO-PACKAGE-FROM-INVARDIA): the sign-in { param($TenantId) } and Invardia's answer { param($Url, $Token) }
+    [scriptblock]$GetInstallToken,
+    [scriptblock]$InvardiaHttp
 )
 $ErrorActionPreference = 'Stop'
 # INSTALL-1 ALIGN (owner 2026-11-02: "trial and pro are th same functionality. license is different in time (backend)"):
@@ -135,6 +145,7 @@ $ErrorActionPreference = 'Stop'
 # for Invardia (Build-PimSupportScripts) says 'pro'. Trial and Pro are the same install -- Invardia decides by the licence.
 $script:PimInstallChannel = 'community'   # INSTALL-CHANNEL: 'community' (the GitHub release copy) | 'pro' (the copy handed to Invardia)
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')     # framework 12.7: the version line + the transcript (inlined in the published file)
+. (Join-Path $PSScriptRoot '_PimInstallProPackage.ps1')   # PRO-PACKAGE-FROM-INVARDIA: the Pro copy's download (inlined; only 'pro' calls it)
 $null = Start-PimScriptRun -Script 'Start-PimManagerInstall'
 $launchCode = 0
 try {
@@ -165,11 +176,18 @@ try {
     try { $noteKey = -join ($sha0.ComputeHash([Text.Encoding]::UTF8.GetBytes($noteKeySrc))[0..5] | ForEach-Object { $_.ToString('x2') }) } finally { $sha0.Dispose() }
     $notePath = Join-Path $tempRoot "pim-manager-install-$noteKey.json"
     $findTree = {
-        # the release tree inside an unpacked folder: VERSION at the top, or in its one sub-folder
+        # the release tree inside an unpacked folder: VERSION at the top, or in its one sub-folder -- and the REPO-SHAPED Pro
+        # package from Invardia (pim-manager-src-<v>/SOLUTIONS/PIM4EntraPS/...: the tree is its SOLUTIONS/PIM4EntraPS, the
+        # layout the installer runs from in the repository)
         param([string]$Dir)
-        if (Test-Path -LiteralPath (Join-Path $Dir 'tools/setup/Install-PimManager.ps1')) { return $Dir }
+        $cands = @($Dir)
         $tops = @(Get-ChildItem -LiteralPath $Dir -Directory -ErrorAction SilentlyContinue)
-        if ($tops.Count -eq 1 -and (Test-Path -LiteralPath (Join-Path $tops[0].FullName 'tools/setup/Install-PimManager.ps1'))) { return $tops[0].FullName }
+        if ($tops.Count -eq 1) { $cands += $tops[0].FullName }
+        foreach ($c in $cands) {
+            if (Test-Path -LiteralPath (Join-Path $c 'tools/setup/Install-PimManager.ps1')) { return $c }
+            $sol = Join-Path (Join-Path $c 'SOLUTIONS') 'PIM4EntraPS'
+            if (Test-Path -LiteralPath (Join-Path $sol 'tools/setup/Install-PimManager.ps1')) { return $sol }
+        }
         return ''
     }
 
@@ -214,7 +232,37 @@ try {
         }
         if (-not $tree) { Write-Host 'Resume: the release folder of the first run is not there any more, so the release is downloaded again. The installation keeps its own progress, so it still continues where it stopped.' -ForegroundColor Yellow }
     }
-    if (-not $tree) {
+    $proHandoff = $null
+    if (-not $tree -and "$script:PimInstallChannel" -eq 'pro') {
+        # PRO-PACKAGE-FROM-INVARDIA (framework INSTALL-1: "github should be for community only"): the Pro copy downloads the
+        # Pro package from Invardia after a browser sign-in -- the SAME signed manifest + zip its ring serves the updater,
+        # verified the same way. NO GitHub fallback: a failure is one calm line and exit 3.
+        $proRing = if ("$UpdateRing".Trim()) { [int]"$UpdateRing".Trim() } else { 3 }
+        if (-not $GetInstallToken) {
+            $GetInstallToken = if ($ViaSupportApp -and (Get-Command Get-InvardiaSupportToken -ErrorAction SilentlyContinue)) { { param($t) Get-InvardiaSupportToken -Resource 'https://management.azure.com' } }
+                               else { { param($t) Get-PimInstallSignInToken -TenantId $t } }
+        }
+        $pro = Get-PimInstallProPackage -TenantId "$TenantId" -Ring $proRing -Version "$Version" -GetToken $GetInstallToken -Http $InvardiaHttp -Download $Download -TempRoot $tempRoot
+        if (-not $pro.ok) { Write-Host "PIM Manager Pro could not be downloaded from Invardia: $($pro.reason). Nothing was installed." -ForegroundColor Red; $launchCode = 3; break }
+        Write-Host "SHA-256 $($pro.sha256) -- matches the SHA-256 Invardia signed"
+        $unpack = Join-Path $pro.dir 'release'
+        if (-not ('System.IO.Compression.ZipFile' -as [type])) { Add-Type -AssemblyName System.IO.Compression.FileSystem }
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($pro.zip, $unpack)
+        $tree = & $findTree $unpack
+        if (-not $tree) { Write-Host "The PIM Manager Pro package $($pro.version) does not hold tools/setup/Install-PimManager.ps1. Nothing was installed." -ForegroundColor Red; $launchCode = 3; break }
+        $treeVer = $(try { "$([IO.File]::ReadAllText((Join-Path $tree 'VERSION')))".Trim() } catch { '' })
+        if ($treeVer -and $treeVer -ne $pro.version) { Write-Host "The package holds version $treeVer, not the signed $($pro.version). Nothing was installed." -ForegroundColor Red; $launchCode = 3; break }
+        if (-not $WhatIfPreference) {
+            try { [IO.File]::WriteAllText($notePath, ([ordered]@{ path = $tree; version = $pro.version; savedUtc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json), (New-Object Text.UTF8Encoding($false))) } catch { Write-Verbose "$($_.Exception.Message)" }
+        }
+        # framework 8.13 INSTALL-HANDOFF: the person signed in once here -- the installer (same process) takes that ARM ACCESS
+        # token from PIM_HANDOFF_TOKENS (checked on its own claims there, removed from the environment at once). Never with
+        # -ViaSupportApp (the installer uses the Support session itself); never a refresh token.
+        if (-not $ViaSupportApp -and "$($pro.token)".Trim() -and [long]$pro.expiresOn -gt 0) {
+            $proHandoff = ([ordered]@{ 'https://management.azure.com/' = [ordered]@{ access_token = "$($pro.token)"; expires_on = [long]$pro.expiresOn } } | ConvertTo-Json -Compress)
+        }
+        $pro.token = ''
+    } elseif (-not $tree) {
         $relUrl = & $releaseUrl $Version
         $rel = $null
         try { $rel = & $GetRelease $relUrl } catch { $rel = $null; Write-Verbose "$($_.Exception.Message)" }
@@ -266,7 +314,9 @@ try {
     if (-not "$($pass['UpdateRing'])".Trim()) { $pass['UpdateRing'] = $UpdateRing }
     if ($WhatIfPreference) { $pass['WhatIf'] = $true }
     $installer = Join-Path $tree 'tools/setup/Install-PimManager.ps1'
-    $launchCode = [int](@(& $RunInstaller $installer $pass) | Select-Object -Last 1)
+    if ($proHandoff -and -not "$env:PIM_HANDOFF_TOKENS".Trim()) { $env:PIM_HANDOFF_TOKENS = $proHandoff }
+    try { $launchCode = [int](@(& $RunInstaller $installer $pass) | Select-Object -Last 1) }
+    finally { if ($proHandoff) { $env:PIM_HANDOFF_TOKENS = $null; $proHandoff = $null } }
     if ($launchCode -ne 0) { Write-Host "Release files: $tree -- the same command with -Resume continues from here." -ForegroundColor Yellow }
     } while ($false)
 } finally {

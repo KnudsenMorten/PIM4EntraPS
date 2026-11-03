@@ -252,6 +252,124 @@ function ConvertTo-PimInstallAnswers {
     }
     return @{ answers = [pscustomobject]$o; missing = @($missing); editionGiven = [bool]$o.Contains('edition') }
 }
+
+# ==== INSTALL-LINE-MINIMAL (owner 2026-11-03, all products; Invardia DESIGN ch 8 "Install lines carry only what the install
+# uses"): "why mention cmdlet that are not used during setup ... simplify the cmdlet and strip out what is not used during
+# initial setup" / "if it is a shared mailbox in m365, why tell fx port". Every install line PIM generates carries ONLY the
+# tenant, the subscription, the region, the choices that differ from the default and the values of the chosen options --
+# never an empty value, never a parameter of an option not chosen, never a default restated. The PARAMETERS stay on the
+# scripts (existing callers keep working); only what is shown / generated changes. =======================================
+function Get-PimInstallLineDefaults {
+    <# PURE. The defaults an install line never restates (the same values as install-parameters.json -- Test-PimGuidedInstall ILM keeps them in step). #>
+    return [ordered]@{
+        ResourceGroup = 'rg-pim'; Edition = 'Community'; UpdateRing = '3'; SupportAccess = 'troubleshoot'
+        VnetAddressPrefix = '10.220.0.0/22'; VnetName = 'vnet-pim'; AppsSubnetName = 'snet-pim-aca'; AppsSubnetPrefix = '10.220.0.0/23'
+        EndpointsSubnetName = 'pim-endpoints'; WebAppAccess = 'external'; Exposure = 'external'
+    }
+}
+
+function Get-PimInstallLineArgs {
+    <#
+      PURE. INSTALL-LINE-MINIMAL: the parameter text of an install line (Install-PimManager / Start-PimManagerInstall) from
+      -Given (the parameters as given, keyed by parameter name: a hashtable of PSBoundParameters). Returns ' -Name ''value'' ...'
+      (each part with a leading space; '' when nothing is carried). Rules:
+        always (when given)      -TenantId, -SubscriptionId, -Location (the region)
+        a default                left out (Get-PimInstallLineDefaults; -InstallId = the derived id; -KeyVaultName =
+                                 kv-pim-<token>; -EndpointsSubnetPrefix = the /26 after the apps subnet; -PortalUsers = the
+                                 -SuperAdmins; -StatePath = -DefaultStatePath)
+        an option not chosen     its parameters left out: the network values of a private install without -PrivateNetwork,
+                                 -VnetAddressPrefix / -VnetName with -VnetId, -PeerToHub / -LinkZonesToHub without
+                                 -HubVnetId, -UpdateRing outside Pro / Trial, -SupportAccess without -SupportAppId
+        empty / false            left out (an empty value, an empty list, a switch that is off)
+        never                    -WebAppAccess (external is the default; internal is what -PrivateNetwork already means);
+                                 any parameter the installer does not take (an SMTP host or port, -SqlAdminGroupId, ...):
+                                 only the parameters named here are ever written
+      -Edition: give -Edition '' for the launcher (its copy decides the edition) -- UpdateRing is then judged by -Channel.
+    #>
+    param([System.Collections.IDictionary]$Given = @{}, [string]$StatePath = '', [string]$DefaultStatePath = '',
+          # the launcher's channel (its copy decides the edition): 'pro' = the Pro copy; '' = judge by -Edition
+          [ValidateSet('', 'community', 'pro')][string]$Channel = '')
+    $d = Get-PimInstallLineDefaults
+    $has = { param($k) $Given.Contains($k) -and $null -ne $Given[$k] }
+    $str = { param($k) if (& $has $k) { "$(@($Given[$k]) -join ',')".Trim() } else { '' } }
+    $list = { param($k) if (& $has $k) { @(@($Given[$k]) | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) } else { @() } }
+    $on = { param($k) (& $has $k) -and ("$($Given[$k])".Trim() -match '^(?i)(true|1|yes|on)$') }
+    $q = { param($v) "'" + ("$v" -replace "'", "''") + "'" }
+    $isDef = { param($k, $v) $d.Contains($k) -and "$v".Trim() -ieq "$($d[$k])" }
+    $out = New-Object System.Collections.Generic.List[string]
+    $one = { param($n, $v) if ("$v".Trim()) { $out.Add(" -$n " + (& $q "$v".Trim())) } }
+    $sw = { param($n) $out.Add(" -$n") }
+
+    $tid = & $str 'TenantId'; $sub = & $str 'SubscriptionId'; $rg = & $str 'ResourceGroup'
+    $ed = (& $str 'Edition').ToLowerInvariant()
+    $paid = if ($ed) { $ed -in 'pro', 'trial' } else { $Channel -eq 'pro' }
+    $exp = (& $str 'Exposure').ToLowerInvariant()
+    $private = (& $on 'PrivateNetwork') -or $exp -eq 'internal'
+    $vnetId = if ($private) { & $str 'VnetId' } else { '' }
+    $hub = if ($private) { & $str 'HubVnetId' } else { '' }
+    $supportApp = & $str 'SupportAppId'
+
+    # the target: tenant, subscription, the region -- always; the resource group when it is not rg-pim
+    & $one 'TenantId' $tid; & $one 'SubscriptionId' $sub; & $one 'Location' (& $str 'Location')
+    if ($rg -and -not (& $isDef 'ResourceGroup' $rg)) { & $one 'ResourceGroup' $rg }
+    # the people (lists: each value quoted, comma-joined); -PortalUsers equal to -SuperAdmins is the default
+    $admins = @(& $list 'SuperAdmins')
+    foreach ($n in 'SuperAdmins', 'AlertRecipients') { $l = @(& $list $n); if ($l.Count) { $out.Add(" -$n " + (@($l | ForEach-Object { & $q $_ }) -join ',')) } }
+    & $one 'MailSender' (& $str 'MailSender')
+    $pu = @(& $list 'PortalUsers')
+    # (with -AllowAllMembers a named list is NOT the default: the list then still decides the sign-in app's assignments)
+    $puIsAdmins = -not (& $on 'AllowAllMembers') -and $admins.Count -and $pu.Count -eq $admins.Count -and -not @($pu | Where-Object { $p = $_; -not @($admins | Where-Object { $_ -ieq $p }).Count }).Count
+    if ($pu.Count -and -not $puIsAdmins) { $out.Add(' -PortalUsers ' + (@($pu | ForEach-Object { & $q $_ }) -join ',')) }
+    # the network the installation makes (not with -VnetId): range + the old subnet name (one release)
+    $appsPfx = & $str 'AppsSubnetPrefix'; $oldPfx = & $str 'SubnetAddressPrefix'
+    if (-not $vnetId) { $v = & $str 'VnetAddressPrefix'; if ($v -and -not (& $isDef 'VnetAddressPrefix' $v)) { & $one 'VnetAddressPrefix' $v } }
+    if ($oldPfx -and -not $appsPfx -and -not (& $isDef 'AppsSubnetPrefix' $oldPfx)) { & $one 'SubnetAddressPrefix' $oldPfx }
+    # the old -Exposure (one release) is never written: internal = -PrivateNetwork (written below), external = the default
+    # the edition and its ring (the ring only for Pro / Trial; 3 is the default)
+    if ($ed -and -not (& $isDef 'Edition' $ed)) { & $one 'Edition' (& $str 'Edition') }
+    $ur = & $str 'UpdateRing'; if ($paid -and $ur -and -not (& $isDef 'UpdateRing' $ur)) { & $one 'UpdateRing' $ur }
+    # the derived names: the installation id and the Key Vault name are left out when they are what the install derives
+    $derivedId = if ($tid -and $sub) { Get-PimInstallDerivedId -TenantId $tid -SubscriptionId $sub -ResourceGroup $rg } else { '' }
+    $iid = & $str 'InstallId'
+    $kv = & $str 'KeyVaultName'
+    $tokenOf = if ($iid) { $iid } else { $derivedId }
+    if ($kv -and -not ($tokenOf -and $kv -ieq ('kv-pim-' + (Get-PimInstallToken -InstallId $tokenOf)))) { & $one 'KeyVaultName' $kv }
+    if ($iid -and $iid -ine $derivedId) { & $one 'InstallId' $iid }
+    # the Invardia Support app: its level only with the app, and only when it is not troubleshoot
+    & $one 'SupportAppId' $supportApp
+    $lvl = & $str 'SupportAccess'; if ($supportApp -and $lvl -and -not (& $isDef 'SupportAccess' $lvl)) { & $one 'SupportAccess' $lvl }
+    foreach ($n in 'AllowAllMembers', 'EngineAzureRootUserAccessAdmin', 'ViaSupportApp') { if (& $on $n) { & $sw $n } }
+    # PRIVATE NETWORK: only the values of a private install that differ from their defaults
+    if ($private) { & $one 'VnetId' $vnetId }
+    if (-not $vnetId) { $v = & $str 'VnetName'; if ($v -and -not (& $isDef 'VnetName' $v)) { & $one 'VnetName' $v } }
+    $v = & $str 'AppsSubnetName'; if ($v -and -not (& $isDef 'AppsSubnetName' $v)) { & $one 'AppsSubnetName' $v }
+    if ($appsPfx -and -not (& $isDef 'AppsSubnetPrefix' $appsPfx)) { & $one 'AppsSubnetPrefix' $appsPfx }
+    if ($private) {
+        $v = & $str 'EndpointsSubnetName'; if ($v -and -not (& $isDef 'EndpointsSubnetName' $v)) { & $one 'EndpointsSubnetName' $v }
+        $ep = & $str 'EndpointsSubnetPrefix'
+        if ($ep) {
+            $epDefault = ''
+            $as = ConvertFrom-PimInstallCidr $(if ($appsPfx) { $appsPfx } elseif ($oldPfx) { $oldPfx } else { $d.AppsSubnetPrefix })
+            if ($as) { $epDefault = ConvertTo-PimInstallCidrText ($as.End + 1) 26 }
+            if ($ep -ne $epDefault) { & $one 'EndpointsSubnetPrefix' $ep }
+        }
+        & $one 'PrivateDnsZonesResourceGroupId' (& $str 'PrivateDnsZonesResourceGroupId')
+        & $one 'HubVnetId' $hub
+        & $sw 'PrivateNetwork'
+        if ($hub) { foreach ($n in 'LinkZonesToHub', 'PeerToHub') { if (& $on $n) { & $sw $n } } }
+    }
+    # the state folder: only when it is not the one the installation derives by itself
+    if ("$StatePath".Trim() -and "$StatePath".Trim().TrimEnd('\', '/') -ine "$DefaultStatePath".Trim().TrimEnd('\', '/')) { & $one 'StatePath' "$StatePath".Trim() }
+    return (-join $out)
+}
+
+function Get-PimInstallDefaultStatePath {
+    <# PURE. The state folder an installation uses when -StatePath is not given: <clouddrive or home>/invardia/<install id>. #>
+    param([Parameter(Mandatory)][string]$InstallId, [string]$HomeDir = '')
+    $h = if ("$HomeDir".Trim()) { "$HomeDir".Trim() } elseif ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
+    $base = if (Test-Path -LiteralPath (Join-Path $h 'clouddrive')) { Join-Path $h 'clouddrive' } else { $h }
+    return (Join-Path (Join-Path $base 'invardia') $InstallId)
+}
 function Get-PimInstallNames {
     <# PURE. The resource names of a guided install (framework §5.5: purpose words; globally unique names carry the token). #>
     param([Parameter(Mandatory)][object]$Config)
@@ -353,9 +471,14 @@ function ConvertTo-PimInstallCidrText([uint64]$Start, [int]$Length) {
 }
 function Test-PimInstallCidrOverlap($A, $B) { [bool]($A -and $B -and $A.Start -le $B.End -and $B.Start -le $A.End) }
 function Test-PimInstallCidrInside($Inner, $Outer) { [bool]($Inner -and $Outer -and $Inner.Start -ge $Outer.Start -and $Inner.End -le $Outer.End) }
-# the privatelink zones the private shape uses: the SQL private endpoint's and the registry's (public access off, Invardia
-# 2026-11-02: "private stays private")
-function Get-PimInstallPrivateZoneNames { @('privatelink.database.windows.net', 'privatelink.azurecr.io') }
+# EVERY privatelink zone a private install AND its updater need (framework installer rule 8, 2026-11-03: the preflight
+# checks them all, names every missing one at once, and stops before the first resource): the SQL private endpoint's and the
+# registry's (public access off, Invardia 2026-11-02: "private stays private"), and the blob zone of the as-built store,
+# which the updater makes private with a blob private endpoint after the install (PIM-AsBuilt.ps1
+# Invoke-PimAsBuiltBlobEndpointConverge: with central zones it READS privatelink.blob.core.windows.net in the same group as
+# the SQL zone and never creates it there). No other private endpoint is made on a private install (checked 2026-11-03:
+# the sign-in front's Key Vault keeps its network; the hybrid worker and the MSP baseline are separate deploys).
+function Get-PimInstallPrivateZoneNames { @('privatelink.database.windows.net', 'privatelink.azurecr.io', 'privatelink.blob.core.windows.net') }
 # the registry's agent pool of a private install: the image builds run on it, inside the network (billed while it exists)
 function Get-PimInstallAgentPoolName { 'pimpool' }
 
@@ -568,7 +691,12 @@ function Get-PimInstallNetworkVerdict {
     }
     if ("$($Config.privateDnsZonesResourceGroupId)".Trim()) {
         $missing = @(Get-PimInstallPrivateZoneNames | Where-Object { -not $Zones[$_] })
-        if ($missing.Count) { return (& $fail "the zone $($missing -join ', ') is not in $($Config.privateDnsZonesResourceGroupId) -- the installation uses your central zones and never creates them" 'Create it there first, or leave -PrivateDnsZonesResourceGroupId out (the installation then makes its own zone):' "privatelink zone: $($missing -join ', ')") }
+        # ALL missing zones in ONE message (framework installer rule 8): never one at a time across reruns
+        if ($missing.Count) {
+            $zg = "$($Config.privateDnsZonesResourceGroupId)".Trim()
+            return (& $fail ("$(if ($missing.Count -eq 1) { 'the zone' } else { "$($missing.Count) zones" }) $($missing -join ', ') $(if ($missing.Count -eq 1) { 'is' } else { 'are' }) not in $zg -- the installation and its updater use your central zones and never create them") `
+                ("Create these zones in $zg, or leave -PrivateDnsZonesResourceGroupId out and PIM makes its own:") "privatelink zone(s): $($missing -join ', ')")
+        }
         $notes.Add("central zone(s) $(@(Get-PimInstallPrivateZoneNames) -join ', ') found (used, never changed)")
     }
     if ($warn) { return @{ state = 'warning'; message = "$warn; $($notes -join '; ')"; actionText = ''; actionCommand = '' } }
@@ -639,7 +767,7 @@ function Get-PimInstallNetworkHandoff {
     $own = if ($central) { "the Container Apps environment's default domain" } else { "the Container Apps environment's default domain, privatelink.database.windows.net and privatelink.azurecr.io" }
     if ($hub -and $Config.linkZonesToHub) { $l.Add("DNS for $($who): PIM Manager's own private zones ($own; resource group $rg) are linked to the hub $hubName by the installation.") }
     else { $l.Add("DNS for $($who): link PIM Manager's own private zones ($own; resource group $rg) to the network your clients resolve names in, or forward those names from your DNS servers to 168.63.129.16 inside a linked network.") }
-    if ($central) { $l.Add("DNS for the database and the registry: $($Names.sqlFqdn) and $($Names.acr).azurecr.io are registered by their private endpoints in your zones privatelink.database.windows.net and privatelink.azurecr.io ($central); those zones must answer inside $($Config.vnetName) (a link to it, or your DNS servers). The installation created and changed nothing in that resource group.") }
+    if ($central) { $l.Add("DNS for the database and the registry: $($Names.sqlFqdn) and $($Names.acr).azurecr.io are registered by their private endpoints in your zones privatelink.database.windows.net and privatelink.azurecr.io ($central); those zones must answer inside $($Config.vnetName) (a link to it, or your DNS servers). The installation created and changed nothing in that resource group. The as-built report's storage is made private by the updater later, with its private endpoint registered in your zone privatelink.blob.core.windows.net there too (used, never created).") }
     else { $l.Add("DNS for the database and the registry: the zones privatelink.database.windows.net and privatelink.azurecr.io in resource group $rg answer inside $($Config.vnetName); outside it $($Names.sqlFqdn) resolves to the private address only through your DNS. Both have NO public access -- the database and the registry are reached only through their private endpoints.") }
     $l.Add('Run later PIM Manager setup scripts that reach the database (and a -Resume of this installation) from a machine inside that network or one peered to it.')
     return @($l)

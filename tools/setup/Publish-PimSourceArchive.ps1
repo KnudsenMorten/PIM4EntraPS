@@ -104,6 +104,7 @@ $solRootPsa = Split-Path -Parent (Split-Path -Parent $here)
 if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRootPsa 'engine\_shared\PIM-Rest.ps1') }
 if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRootPsa 'engine\_shared\PIM-ArmSetup.ps1') }
 . (Join-Path $solRootPsa 'engine\_shared\PIM-SigninFrontImage.ps1')   # CR7: -Verify checks the sign-in front the archive carries
+. (Join-Path $here '_PimReleasePackage.ps1')   # SEC-PKG-INTERNAL: what the archive must never carry (packed out + refused below)
 
 function Invoke-PimSharedKeyBlob {
     <#
@@ -212,6 +213,7 @@ function Get-PimTarGzEntryNames {
         $gz = New-Object System.IO.Compression.GZipStream($fs, [System.IO.Compression.CompressionMode]::Decompress)
         try {
             $hdr = New-Object byte[] 512
+            $paxPath = $null
             while ($names.Count -lt $MaxEntries) {
                 $read = 0
                 while ($read -lt 512) {
@@ -222,11 +224,31 @@ function Get-PimTarGzEntryNames {
                 if ($read -lt 512) { break }
                 if ($hdr[0] -eq 0) { break }                       # the two zero blocks that end a tar
                 $name = [System.Text.Encoding]::ASCII.GetString($hdr, 0, 100).TrimEnd([char]0, ' ')
-                if ($name) { [void]$names.Add($name) }
+                # SEC-PKG-INTERNAL: the FULL path, so the internal-only check cannot be outrun by a long name -- the ustar
+                # prefix (offset 345) in front of the name, and a pax 'x' header's path= for the entry after it (git archive
+                # writes one for a path longer than 100 characters).
+                $type = [char]$hdr[156]
+                # POSIX ustar only ("ustar" + NUL): the old GNU format ("ustar  ") keeps other fields at offset 345
+                if ([System.Text.Encoding]::ASCII.GetString($hdr, 257, 6) -eq "ustar$([char]0)") {
+                    $pre = [System.Text.Encoding]::ASCII.GetString($hdr, 345, 155).TrimEnd([char]0, ' ')
+                    if ($pre) { $name = "$pre/$name" }
+                }
                 $oct = [System.Text.Encoding]::ASCII.GetString($hdr, 124, 12).Trim([char]0, ' ')
                 $size = 0
                 if ($oct -match '^[0-7]+$') { $size = [Convert]::ToInt64($oct, 8) }
                 $skip = [int64]([Math]::Ceiling($size / 512.0) * 512)
+                if (($type -eq 'x' -or $type -eq 'L') -and $size -gt 0 -and $size -lt 1048576) {
+                    # 'x' = a pax header (path=...), 'L' = GNU tar's long name (the name itself): both name the NEXT entry
+                    $pax = New-Object byte[] $skip; $pr = 0
+                    while ($pr -lt $skip) { $n = $gz.Read($pax, $pr, [int]($skip - $pr)); if ($n -le 0) { break }; $pr += $n }
+                    $ptxt = [System.Text.Encoding]::UTF8.GetString($pax, 0, [int]$size)
+                    if ($type -eq 'L') { $paxPath = $ptxt.TrimEnd([char]0) }
+                    else { $pm = [regex]::Match($ptxt, '(?m)^\d+ path=(?<p>[^\n]*)$'); if ($pm.Success) { $paxPath = $pm.Groups['p'].Value } }
+                    continue
+                }
+                if ($type -eq 'g') { }                                # the global header (git's commit id): not an entry
+                elseif ($paxPath) { [void]$names.Add($paxPath); $paxPath = $null }
+                elseif ($name) { [void]$names.Add($name) }
                 $buf = New-Object byte[] 8192
                 while ($skip -gt 0) {
                     $want = [int][Math]::Min([int64]8192, $skip)
@@ -281,7 +303,9 @@ if ($isRepo) {
         $packPaths = @('.dockerignore', 'SOLUTIONS/PIM4EntraPS')
         # ls-tree, not an existence probe with cat-file: a missing path prints nothing (cat-file's stderr "fatal" is a terminating error on PS 5.1).
         foreach ($sfp in $sfPaths) { if (@(& git -C $RepoRoot ls-tree --name-only HEAD -- $sfp).Count) { $packPaths += $sfp } }
-        & git -C $RepoRoot archive --format=tar.gz -o $archive HEAD -- @packPaths
+        # SEC-PKG-INTERNAL: internal/, CLAUDE.md, REQUIREMENTS.md, TESTS.md, tests/ ... packed out (_PimReleasePackage.ps1)
+        $packExcludes = @(Get-PimReleaseExcludePathspecs)
+        & git -C $RepoRoot archive --format=tar.gz -o $archive HEAD -- @packPaths @packExcludes
         if ($LASTEXITCODE -ne 0) { throw "Publish-PimSourceArchive: git archive failed (exit $LASTEXITCODE)." }
     }
 } else {
@@ -294,7 +318,21 @@ if ($isRepo) {
         try {
             $tmpName = "pim-src-$Version.tar.gz"
             $tarPaths = @('.dockerignore', 'SOLUTIONS/PIM4EntraPS') + @($sfPaths | Where-Object { Test-Path -LiteralPath (Join-Path $RepoRoot $_) })
-            & tar -czf $tmpName @tarPaths
+            # SEC-PKG-INTERNAL: a synced tree carries internal/, CLAUDE.md, tests/ ... too. tar is handed a FILE LIST (-T, the
+            # same in GNU tar and the bsdtar of Windows) with every internal-only path left out -- never an --exclude pattern,
+            # whose matching differs between the two.
+            $listName = "pim-src-$Version.files.txt"
+            $tarFiles = New-Object System.Collections.Generic.List[string]
+            foreach ($tp in $tarPaths) {
+                $full = Join-Path $RepoRoot $tp
+                if (Test-Path -LiteralPath $full -PathType Leaf) { $tarFiles.Add($tp.Replace('\', '/')); continue }
+                foreach ($f in @(Get-ChildItem -LiteralPath $full -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+                    $rel = $f.FullName.Substring(([IO.Path]::GetFullPath($RepoRoot)).TrimEnd('\', '/').Length).TrimStart('\', '/').Replace('\', '/')
+                    if (-not (Test-PimReleaseInternalPath -Path $rel)) { $tarFiles.Add($rel) }
+                }
+            }
+            [IO.File]::WriteAllLines((Join-Path $RepoRoot $listName), $tarFiles.ToArray())
+            try { & tar -czf $tmpName -T $listName } finally { Remove-Item -LiteralPath (Join-Path $RepoRoot $listName) -Force -ErrorAction SilentlyContinue }
             if ($LASTEXITCODE -ne 0) { throw "Publish-PimSourceArchive: tar failed (exit $LASTEXITCODE)." }
             Move-Item -LiteralPath (Join-Path $RepoRoot $tmpName) -Destination $archive -Force
         } finally { Pop-Location }
@@ -325,7 +363,24 @@ if ((-not $WhatIfPreference) -and ($Verify -or $StorageAccount)) {
                "'SOLUTIONS/PIM4EntraPS/tools/pim-manager/Dockerfile' is not at its root (top entries: $sample). " +
                "The Dockerfile does COPY SOLUTIONS/PIM4EntraPS, so a wrapping folder fails the build.")
     }
-    Note "verified: $($listing.Count) entries, Dockerfile at the expected path"
+    # SEC-PKG-INTERNAL: REFUSED when any internal-only path is in it -- nothing is uploaded, the archive is removed
+    $leak = @(Get-PimReleaseInternalEntries -Names $listing)
+    if ($leak.Count) {
+        Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+        throw ("Publish-PimSourceArchive: REFUSED -- the archive carries {0} internal-only path(s) (e.g. {1}); the internal notes, the backlog, the test document and the test suite never leave the repository. Nothing was uploaded." -f $leak.Count, (@($leak | Select-Object -First 3) -join ', '))
+    }
+    # Framework 0 item 7: the CONTENT too -- every text file against PIM's private identifier list (THIS script's own
+    # internal\REAL-IDENTIFIERS.md, never the packed tree's) + the secret shapes; a hit names file and line, never the value
+    $pkgDeny = @(); try { $pkgDeny = @(Read-PimReleaseDenylist -Path (Join-Path $solRootPsa 'internal\REAL-IDENTIFIERS.md')) } catch {
+        Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+        throw "Publish-PimSourceArchive: REFUSED -- $($_.Exception.Message). Nothing was uploaded."
+    }
+    $contentHits = @(Get-PimReleaseTarGzContentHits -Path $archive -Deny $pkgDeny)
+    if ($contentHits.Count) {
+        Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+        throw ("Publish-PimSourceArchive: REFUSED -- {0} file line(s) carry a real identifier or a secret: {1}{2}. Nothing was uploaded." -f $contentHits.Count, (@($contentHits | Select-Object -First 5) -join '; '), $(if ($contentHits.Count -gt 5) { "; and $($contentHits.Count - 5) more" } else { '' }))
+    }
+    Note "verified: $($listing.Count) entries, Dockerfile at the expected path, no internal-only path, no real identifier in the content"
     # CR7: the sign-in front an opted-in install builds from this archive. NOT a refusal -- the Manager ships either way and
     # an install not behind the front never reads it -- but said loudly, because an opted-in install cannot build its front
     # from an archive without it (or with a component other than the one pinned).

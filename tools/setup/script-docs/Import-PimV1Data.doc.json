@@ -1,0 +1,54 @@
+{
+  "script": "Import-PimV1Data.ps1",
+  "product": "pim",
+  "title": "Import the data of a PIM version 1 installation into PIM Manager",
+  "purpose": "Imports the data of a PIM version 1 installation (its CSV files and naming conventions) into an existing PIM Manager installation. By default it only checks and previews -- it writes nothing; -Apply adds the new rows by key, never deletes, and stops before writing anything when a row conflicts.",
+  "whenToRun": "Once, when you move from PIM version 1 to PIM Manager: after PIM Manager is installed, point it at the version 1 data folder (the folder with the *.custom.csv files). Run it first without -Apply and read the preview; then run the same command with -Apply. Running it again is safe: rows already there are left alone. For a private installation (the SQL server has no public endpoint), run it from a machine inside the installation's network, or ask Invardia support.",
+  "standalone": true,
+  "sourcePath": "tools/setup/Import-PimV1Data.ps1",
+  "runAs": [
+    { "kind": "other", "name": "A member of the installation's SQL admin group (grp-pim-sql-admins), or a database user in the PIM database", "scope": "the PIM database", "why": "Reads what PIM Manager already holds (the preview) and, with -Apply, adds the rows. -Apply needs the database owner role (db_owner), which the SQL admin group gives. The run checks this first and says plainly what is missing; a Privileged Role Administrator can add you to the group (it is role-assignable)." },
+    { "kind": "azureRbac", "name": "Reader", "scope": "the installation's subscription or resource group", "why": "Finds the installation: the SQL server that holds the PIM database, its network setting, its administrator and its firewall rules." },
+    { "kind": "azureRbac", "name": "SQL Server Contributor (or Contributor / Owner)", "scope": "the PIM SQL server (or its resource group) -- only when this machine is not allowed through its firewall", "why": "Adds the temporary firewall rule for this machine's public address and removes it at the end of the run." },
+    { "kind": "other", "name": "Your own browser sign-in, or the Invardia Support app's session in this window", "scope": "the target tenant and subscription", "why": "A session of another tenant or subscription is refused. No Azure CLI, no PowerShell modules, no secret on the command line." }
+  ],
+  "changes": [
+    { "target": "The PIM database", "action": "create", "object": "the rows of the version 1 files that PIM Manager does not have yet (pim.Rows, added by their natural key, one transaction per file) -- only with -Apply", "scope": "the one PIM database (-Database, default PimPlatform)", "why": "That is the import. A row whose key is already there with the same content is left alone; nothing is ever deleted.", "undo": "Delete the added rows in PIM Manager (each imported row shows there like any other), or restore the database from its point-in-time backup to before the run." },
+    { "target": "The PIM database", "action": "update", "object": "a row whose key is already in PIM Manager with different content -- only with -Apply -OnKeyConflict Overwrite; without it a conflict stops the run before anything is written (KeepExisting keeps PIM Manager's row). Manager super admins and break-glass admins are never overwritten.", "scope": "the one PIM database", "why": "Lets you choose the file's version of a conflicting row explicitly, after the preview has listed every conflict.", "undo": "Restore the database from its point-in-time backup to before the run, or edit the rows back in PIM Manager." },
+    { "target": "The PIM database", "action": "create", "object": "settings from the version 1 folder, each only when PIM Manager does not have it yet: the naming conventions you changed from the defaults (a value already changed in PIM Manager is kept), warning overrides, exemptions and workload exemptions -- only with -Apply; the PIM tables are made sure to exist first (an existing table is not changed)", "scope": "the one PIM database (pim.Settings)", "why": "The naming conventions are part of the version 1 data: the names your existing groups were built with.", "undo": "Change the settings back in PIM Manager (Settings)." },
+    { "target": "Azure SQL server", "action": "create", "object": "a temporary firewall rule 'PimV1Import-<time>' for this machine's public address, only when no rule allows it; removed again at the end of the run and read back, also after a failed step (also in the preview without -Apply; never with -WhatIf)", "scope": "the PIM SQL server", "why": "The run reads (and with -Apply writes) the database from this machine.", "undo": "None needed: the run removes it. If the run is killed: Azure portal > the SQL server > Networking > Firewall rules: delete 'PimV1Import-<time>'." }
+  ],
+  "parameters": [
+    { "name": "SourcePath", "required": true, "default": null, "help": "The PIM version 1 data folder (the *.custom.csv files and PIM4EntraPS.NamingConventions.custom.ps1). The files are read, never changed; *_Delta.csv and *_LastApplied.csv are skipped." },
+    { "name": "TenantId", "required": true, "default": null, "help": "The tenant of the PIM Manager installation. Every sign-in is pinned to it." },
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The subscription of the PIM Manager installation." },
+    { "name": "ResourceGroup", "required": false, "default": "searched in the whole subscription", "help": "The installation's resource group. Needed only when the subscription holds more than one PIM installation (the run lists them)." },
+    { "name": "SqlServerName", "required": false, "default": "found", "help": "The installation's SQL server. Needed only when one resource group holds more than one PIM installation." },
+    { "name": "Database", "required": false, "default": "PimPlatform", "help": "The PIM database." },
+    { "name": "Apply", "required": false, "default": "off (check + preview only)", "help": "Write: add the new rows by key, never delete. Without it nothing is written." },
+    { "name": "OnKeyConflict", "required": false, "default": "Refuse", "help": "With -Apply, a row whose key is already in PIM Manager with different content: Refuse (nothing is written), KeepExisting (PIM Manager's row stays, the rest is imported) or Overwrite (the file's row replaces it)." },
+    { "name": "ForceLocal", "required": false, "default": "off", "help": "Imported rows stay on this tenant (Replicate=No; admins ManagementMode=local) unless the file sets the value." },
+    { "name": "MspMaster", "required": false, "default": "off", "help": "Give it only when the installation is an MSP managing tenant: the check then also shows what each row would send to the managed tenants. Without it the installation is treated as a single tenant." },
+      { "name": "NotMspMaster", "required": false, "default": "off", "help": "Not needed any more (single tenant is the default); still accepted so older command lines keep working." },
+    { "name": "DefaultDomain", "required": false, "default": null, "help": "The tenant's default sign-in domain, for admin rows that have a user name but no user principal name." },
+    { "name": "AllowValidationErrors", "required": false, "default": "off", "help": "Import even though the check found errors in the files (they are listed). Without it -Apply refuses such files." },
+    { "name": "ClientIp", "required": false, "default": "read from api.ipify.org (said on screen)", "help": "This machine's public address for the temporary firewall rule." }
+  ],
+  "readsOnly": [
+    "the files in -SourcePath (the naming conventions file is parsed first and refused when it contains commands; the importer then loads it to read its values, as PIM version 1 did)",
+    "the subscription (visible, and in -TenantId)",
+    "the SQL servers of the subscription (or -ResourceGroup) and whether each holds the PIM database",
+    "the SQL server: its public network access, its Microsoft Entra administrator, its firewall rules",
+    "in the PIM database: your user, whether you are database owner, the rows PIM Manager holds for each imported file, and who the Manager super admins and break-glass admins are"
+  ],
+  "network": [
+    "login.microsoftonline.com (sign-in)",
+    "management.azure.com (Azure Resource Manager)",
+    "<server>.database.windows.net:1433",
+    "api.ipify.org (this machine's public address, unless -ClientIp is given)",
+    "localhost (the browser returns the sign-in to a local port on this computer)"
+  ],
+  "whatIf": "Without -Apply the run only checks and previews: it prints, per file, the rows to add, the rows already there, the conflicts and the problems the check found, and writes nothing to the database (it may add the temporary firewall rule, and removes it again). With -WhatIf it also adds no firewall rule: when this machine is not allowed through the firewall it prints the 'What if:' line for the rule and reads no rows.",
+  "undo": "Nothing is ever deleted. Rows that were added can be deleted in PIM Manager, or the database restored from its point-in-time backup to before the run. The temporary firewall rule is removed by the run itself.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Import-PimV1Data/"
+}

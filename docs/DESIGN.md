@@ -932,6 +932,26 @@ installation onto SQL is a **one-time import run during migration**: `tools/setu
 - `-WhatIf` reports what would migrate; `-ListOnly` reports which files would be imported or
   ignored without touching SQL. Re-running is safe (full-set replace per entity).
 
+**The person-facing import: `Import-PimV1Data.ps1` (one published file).** A customer admin moving
+from version 1 runs one downloaded script against the installation, signed in through the browser
+(auth code + PKCE; or the Invardia Support app's session) -- no PowerShell module, no Azure CLI.
+It is a wrapper, not a second importer: the importer above (`Migrate-PimToSql.ps1`, with its
+pre-import check and the store's add-by-key writer) and the libraries it loads travel inside the
+published file and are written to a private temporary folder for the run (removed afterwards);
+PIM Manager's entity schema travels as its one statement. The wrapper finds the installation over
+Azure Resource Manager (the SQL server holding the PIM database; more than one = it asks for the
+resource group), refuses a private server (run it from inside the network), adds a temporary
+firewall rule for the machine only when none allows it and always removes it (read back, also on
+failure), and checks the person's database access before the importer runs (the SQL admin group;
+the database owner role for `-Apply`). **The default is check + preview and writes nothing**: per
+file the rows to add, the rows already there, the conflicts (same key, different content) and the
+check's problems. `-Apply` adds new rows by key and never deletes; any conflict stops it before the
+first write unless `-OnKeyConflict KeepExisting|Overwrite` is given; afterwards it runs the preview
+again as the read-back. The naming conventions file is parsed first and refused when it contains
+commands, because the importer loads it to read its values. The importer hands its decisions to the
+wrapper through a result hashtable (`$global:PIM_MigrateResultSink`); nothing in how it imports
+depends on it.
+
 **On-demand recalc on SQL change — scoped to the entities that changed.** A cheap
 change-detector (`Invoke-PimSqlChangeDetector`, wired into `Invoke-PimSchedulerTick`) reads a SQL
 **data signature** — `COUNT(*)` + `MAX(UpdatedUtc)` over `pim.Rows` (`Get-PimSqlDataSignature`) —
@@ -6104,6 +6124,22 @@ PowerShell 7 (the installer's own process). If no PowerShell executable can be f
 reason instead of being started. Each step's script path is written with the host's own path separator, and the other
 child PowerShell launches on the install path (the hosted health check, the monitor deployment) follow the same rule.
 
+**Central private DNS zones are all checked first (built, not yet released).** A private install that uses the
+customer's central private DNS zones (-PrivateDnsZonesResourceGroupId) uses them and never creates them. Its check before
+the first resource now covers every zone the install AND its updater will need: the database's, the registry's, and the
+blob zone of the as-built report's storage (the updater makes that storage private after the install, with a private
+endpoint registered in the same central group). All missing zones are named in one message ("create these zones in
+<group>, or leave -PrivateDnsZonesResourceGroupId out and PIM makes its own"), and nothing is created. Without a central
+group there is nothing to check: the install makes its own zones.
+
+**A support session left over from an earlier run (built, not yet released).** A PowerShell window can still hold the
+Invardia Support session of an earlier run after that session can no longer sign in (it expired, or it was for another
+tenant). A setup run in that window used to stop with "could not sign in". Now, when the support session cannot give a
+token and no live support session covers this tenant and subscription, a run with a person at the console says so in one
+line and signs the person in in the browser instead; an unattended run keeps the error. One run never uses two
+identities: a run that got its first token from the support session keeps that identity (a later failure is an error),
+and a run that moved to the browser never asks the old session again. Each new run decides afresh.
+
 **One sign-in across Invardia's installer and the guided install (built, not yet released).** Invardia's installer signs
 the person in once (in the browser, or with the Cloud Shell user's own token) and, in the same PowerShell process, hands
 the guided installer short-lived access tokens for Azure Resource Manager, Microsoft Graph and Azure SQL in one
@@ -6120,6 +6156,21 @@ progress feed. The progress feed carries one step, "How you signed in", that say
 Invardia or in the browser. Build steps that run in their own processes keep getting their tokens from the build itself,
 as before; with a handover, optional audiences such as Key Vault are fetched for them only when that needs no new browser
 window.
+
+**Install lines carry only what the install uses (built, not yet released).** Every install line PIM Manager prints or
+documents -- the guided installer's resume command, the command it hands to a Privileged Role Administrator for the
+Invardia support access, the help examples of the installer and its launcher, and the README -- carries only the tenant,
+the subscription, the region, the choices that differ from the default and the values of the options chosen. A default is
+never repeated (resource group rg-pim, the Community edition, update ring 3, the troubleshoot support level, the default
+network ranges and names, the installation id and Key Vault name the installation derives, its own state folder); an
+empty value or a switch that is off is never written; and the parameters of an option that was not chosen are left out
+(the network values without the private network, the update ring outside Pro and trial, the support level without a
+support app, the hub peering and zone link without a hub, the range and name of a network the installation does not make
+when an existing network is named). The web access setting is never written: a private installation is always internal.
+Only parameters the installer takes can appear, so no SMTP setting or SQL admin group id ever reaches an install line.
+The parameters themselves stay on the scripts, so an older command still runs. One function builds the line, and the
+parameter contract Invardia renders its own install lines from carries the same rule: which answers are always in the
+line, each answer's default, the answer an option depends on, and the one answer never written.
 
 #### Implementation note (2026-09-17) — the provider's Manager verifies the bundle the way a managed tenant does
 
@@ -9843,7 +9894,7 @@ and both tools say so rather than leave it unsaid.
 
 **One code path for the page and the assistant (2026-11-01, 3.0.12).** The read views and routine actions the MCP
 offers do not have a second implementation. Each page route's body lives in one function
-(`Invoke-PimManagerGetRoute<View>` for a read, `Invoke-PimManagerPostRoute<Name>` for an action); the page's route and
+(one per read, for example `Invoke-PimManagerGetRouteDrift`; one per action, for example `Invoke-PimManagerPostRouteApprovalsDecide`); the page's route and
 the MCP tool of the same name both call it, with the route's own role check, Pro check, second approver, validation
 and audit. A tool's arguments become the request body through the same JSON reader the page uses. What the MCP covers:
 every read view of the page, plus routine work (staged changes and their status, approvals, access reviews and
@@ -10520,6 +10571,23 @@ procedures and the suite inventory are kept with the internal test documentation
 A feature is marked "done" only after a real live test (engine run / API check),
 never a parse-check.
 
+**Fix releases test only what the change touches (2026-11-03).** The test map is read
+from the code: for every changed file it finds the suites that name it, load it or
+reach it through what they load. A fix release runs only the suites related to its
+changed files -- there is no fixed set of suites that rides along on every fix:
+- a suite counts when its own source names the file; suites that only reach it
+  indirectly count while few do, otherwise only when they name a function of the
+  change (read from the diff); pattern scanners that sweep every script are left to
+  the full run;
+- the two red-line checks (PIM never deletes a user account; absence never disables
+  an account) run whenever code that acts on a tenant changes;
+- one fast syntax check (the Manager page compiles, its PowerShell parses) runs on
+  every code change; a documentation change runs only the checks that read it.
+The suites run on a separate test machine, in parallel, and each lane keeps its
+source tree between runs so only the changed files are uploaded. After a release
+rolls, a hosted smoke check with automatic rollback is the safety net; the full
+suite remains the gate of a feature release.
+
 ---
 
 ## 26. Where to read next
@@ -10851,6 +10919,32 @@ licence, the update ring, and so on) is reported on the heartbeat to Invardia as
 The state comes from a real check on each updater run. When the check cannot read the state, the answer is `unknown`,
 never `ok`. Invardia shows every install's steps side by side and flags any step that is missing.
 
+**Reading the steps that least privilege hides (3.0.24).** PIM's own identities hold only what they need, so some steps
+could not be seen by them and read `unknown` on every install. Each is now read through a narrow path that adds no broad
+right:
+
+- **The Support app's database user, and SQL least privilege run 2.** The engine's and the updater's database users may
+  not see other database users. A read-only procedure, `pim.usp_AccessFacts`, answers the facts only: whether the Support
+  app's database user exists and is in `db_owner`, and how many of the named runtime users (the web app and the engine)
+  still hold `db_datareader` or `db_datawriter`. It runs no dynamic SQL and writes nothing; its three inputs are only
+  compared. It is signed by its own in-database certificate (expiry 2099, private key removed after signing) whose user
+  holds `VIEW DEFINITION` and nothing else. The engine and the updater roles hold `EXECUTE` on it, nothing more; the
+  access catalog lists that grant, so the updater's access converge keeps it. An admin run installs it (setup, the
+  Support-app cut-over, or the in-network admin job), in the same run as the signed grant procedure. Where it is not
+  installed, or has lost its signature, the readers keep the read they had before and the step stays `unknown`.
+- **The engine's Graph permissions.** The permission snapshot was written only when someone opened Verify permissions in
+  the Manager, so on an install nobody looks at it went stale. The engine now refreshes it when it is older than 24 hours:
+  it reads its own Graph app-role assignments (three Graph reads) and records them with the Manager's own snapshot
+  builder. The engine reads no Azure Resource Manager data. Reader at the tenant root is therefore carried over from the
+  last check that read it, with that check's time, and only while that check is 7 days old or newer; otherwise it is left
+  out. A failed read leaves the stored snapshot as it was. The refresh never fails a heartbeat. The updater's own check
+  and the heartbeat both use the refreshed snapshot.
+- **The engine's Reader at the tenant root.** The updater's permission check needs the tenant id to judge the root
+  management group. When the updater has none configured, it reads it from the subscription it runs in. If that read
+  fails, the Azure half stays `unknown`.
+- **The pull and publish jobs' Reader on themselves** is granted through the Support app (the updater may not assign
+  roles), and the step says so.
+
 ---
 
 ## 28. Change control, ownership and daily checks (2026-09)
@@ -11121,6 +11215,24 @@ with the pull. PIM also keeps HOW: build in its own registry, schema, roll, heal
   step stores the install key Invardia issued with the installation. When no key was issued, it queues the
   `install-key` job, so the engine claims the key at its next run (within five minutes) rather than up to six hours
   later. A Community installation has no in-cloud updater: it updates with `git pull` and a re-run of the deploy.
+- **The Pro installer downloads from Invardia (built, not yet released).** The one-command installer comes in two copies
+  that differ in one line. The Community copy (attached to the public GitHub release) downloads the public release from
+  GitHub, as before. The Pro copy (handed out by Invardia) never uses GitHub: it signs the person in in the browser (an
+  administrator of the target tenant; no module, never a device code), asks Invardia for the PIM Manager package of the
+  update ring (3 unless the command names 2) for that tenant, with that sign-in's Azure Resource Manager token, and gets the
+  SAME signed manifest and package the ring serves the in-cloud updater. It checks them the way the updater does -- the
+  signature against the update-signing keys built into the script, this product, this ring, then the download's size and
+  SHA-256 -- and then runs the guided installer from the package (it is laid out as the repository, so the installer runs
+  from the same place as in a source tree). The same sign-in is handed to the installer, so there is no second sign-in for
+  Azure. If Invardia cannot be reached or refuses, the command says so in one line and installs nothing. The exact shape of
+  Invardia's answer is read in one place, so a change on Invardia's side is a one-place change.
+- **What a release package carries (built, not yet released).** The package PIM publishes to Invardia, and the source
+  archive for self-building installs, are packed without anything internal: the same files the public publish strips
+  (internal notes, the backlog, the test document, the test suite and its fixtures, the agent instructions) are left out
+  when the archive is built, and the check before anything is sent refuses an archive that still carries one. The same
+  check also reads every text file in the archive and refuses it when it finds a real customer name, a real tenant or
+  subscription id, or a private key; the refusal names the file and line, never the value. The images were already clean
+  (the image build removes those folders); this closes the archive itself.
 - **Host-side rolls.** The install itself is allowed to roll its own version, because the host cannot read a signed
   manifest before the key exists. Afterwards, a host-side roll of an environment on ring 2 or 3 that updates through
   Invardia is refused. The environment updates itself with its update job.
@@ -11583,6 +11695,12 @@ after an update, and how releases travel. Parts marked **(in build)** are design
   security. After the schema step of every update it converges the access model through the procedure
   (`Invoke-PimSqlAccessConverge`): every catalog role and grant, every existing component user into its role, extra
   grants revoked. Not installed yet = nothing changes; a failure never blocks the update.
+- **One signed READ procedure (3.0.24),** `pim.usp_AccessFacts`, lets the engine and the updater see facts about OTHER
+  database users without seeing the users: the Support app's user (exists, in `db_owner`) and how many named runtime
+  users still hold `db_datareader` / `db_datawriter` (SQL least privilege run 2). It is read-only, signed by its own
+  certificate (2099, private key removed) whose user holds only `VIEW DEFINITION`, and the engine and updater roles hold
+  only `EXECUTE` on it (a catalog grant). The admin run installs it right after the grant procedure; see "Reading the
+  steps that least privilege hides".
 - **Proven on a live installation (ring 0, 2026-10-14):** the SID built from a client id finds the user; the updater
   grants through the procedure and is refused directly; the engine cannot run the procedure; a fixed role and a dbo
   object are refused; the certificate expires 2099 with no private key.

@@ -62,6 +62,8 @@ function Step([string]$m) { Write-Host "==> $m" -ForegroundColor Cyan }
 # (2026-10-16, 1.0.480); off / 0 / false / no = off (it was AUTO = ring 0 only until then). Invardia refusing the FIELD (400 / 422 naming it) -> the call goes ONCE more without it, and the
 # field is held for 24 h (a mark file). A 409 notApproved is never that: it is shown plainly and never retried.
 . (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'engine\_shared\PIM-ReleaseControl.ps1')
+# SEC-PKG-INTERNAL (2026-11-03): what the release zip must never carry (the public publish's strip), packed out + refused below
+. (Join-Path $PSScriptRoot '_PimReleasePackage.ps1')
 if (-not "$StateDir".Trim()) { $StateDir = Join-Path ([IO.Path]::GetTempPath()) 'pim-invardia-release' }
 $scopesMark = Join-Path $StateDir 'changedscopes-refused.json'
 function Get-PimScopesMark { param([string]$Path) try { if (Test-Path -LiteralPath $Path) { return ((Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json).refusedUtc) } } catch { }; return $null }
@@ -222,21 +224,22 @@ $zipPaths = @('.dockerignore', 'SOLUTIONS/PIM4EntraPS')
 # ls-tree, not an existence probe with cat-file: a missing path prints NOTHING (cat-file writes "fatal: ..." to stderr, which PS 5.1 with
 # ErrorActionPreference Stop turns into a terminating error -- measured on the test VM, 2026-10-18).
 foreach ($sfp in @('FRAMEWORK/signin-front/src', 'FRAMEWORK/signin-front/VERSION')) { if (@(& git -C $repo ls-tree --name-only $tag -- $sfp).Count) { $zipPaths += $sfp } }
-& git -C $repo archive --format=zip "--prefix=pim-manager-src-$Version/" -o $zip $tag -- @zipPaths
+# SEC-PKG-INTERNAL: the zip reaches every install's updater (and, with PRO-PACKAGE-FROM-INVARDIA, a customer admin's PC) --
+# internal/, CLAUDE.md, docs/REQUIREMENTS.md, docs/TESTS.md, tests/ ... are packed OUT here (_PimReleasePackage.ps1) and the
+# check below refuses a zip that still carries any of them. The images never had them (the Dockerfile deletes them).
+$zipExcludes = @(Get-PimReleaseExcludePathspecs)
+& git -C $repo archive --format=zip "--prefix=pim-manager-src-$Version/" -o $zip $tag -- @zipPaths @zipExcludes
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $zip)) { throw "git archive failed (exit $LASTEXITCODE)" }
 
 Step 'check the zip'
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-$z = [IO.Compression.ZipFile]::OpenRead($zip)
-try {
-    $bad = @($z.Entries | Where-Object { -not $_.FullName.StartsWith("pim-manager-src-$Version/") })
-    if ($bad.Count) { throw "the zip has entries outside pim-manager-src-$Version/ (e.g. $($bad[0].FullName))" }
-    $ve = $z.Entries | Where-Object { $_.FullName -eq "pim-manager-src-$Version/SOLUTIONS/PIM4EntraPS/VERSION" } | Select-Object -First 1
-    if (-not $ve) { throw 'the zip carries no SOLUTIONS/PIM4EntraPS/VERSION' }
-    $sr = New-Object IO.StreamReader($ve.Open()); try { $inner = $sr.ReadToEnd().Trim() } finally { $sr.Dispose() }
-    if ($inner -ne $Version) { throw "VERSION inside the zip is '$inner', not $Version" }
-    $count = $z.Entries.Count
-} finally { $z.Dispose() }
+# The shape (one top folder, VERSION inside = -Version) AND SEC-PKG-INTERNAL: REFUSED when any internal-only path is in it --
+# nothing is sent and the zip is removed (Test-PimReleaseZip, _PimReleasePackage.ps1; tests/Test-PimInvardiaPublish.ps1 SP*).
+# Framework 0 item 7: the CONTENT too -- every text file against PIM's private identifier list (internal\REAL-IDENTIFIERS.md,
+# in this repository, never in the package) + the secret shapes. A hit names the file and line, never the identifier.
+$pkgDeny = @(); try { $pkgDeny = @(Read-PimReleaseDenylist -Path (Join-Path $sol 'internal\REAL-IDENTIFIERS.md')) } catch { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue; throw "REFUSED: $($_.Exception.Message) -- nothing was sent" }
+$zc = Test-PimReleaseZip -ZipPath $zip -Version $Version -Deny $pkgDeny
+if (-not $zc.ok) { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue; throw "$($zc.reason) -- nothing was sent" }
+$count = $zc.count
 $bytes = [IO.File]::ReadAllBytes($zip)
 if ($bytes.Length -lt 4 -or $bytes[0] -ne 0x50 -or $bytes[1] -ne 0x4B) { throw 'not a zip' }
 $sha = [System.Security.Cryptography.SHA256]::Create(); try { $hash = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }

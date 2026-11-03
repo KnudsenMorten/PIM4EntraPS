@@ -210,6 +210,111 @@ function New-PimPermissionSnapshot {
         engineObjectId = "$EngineObjectId".Trim() }
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# SETUPSTEPS-TRUTH (b) (Invardia grid check 2026-11-03): THE ENGINE REFRESHES 'PermissionSnapshot' when it is older than 24 h.
+# The snapshot was written ONLY when a person opened the Manager's Verify permissions, so on an install nobody looks at it
+# went stale (the MSP master: 2026-10-21) and engine-graph-permissions / the updater's 95.2i check read unknown. The engine
+# identity (the tick, which runs the uplink job) holds Application.Read.All, so it reads ITS OWN Graph app roles -- the same
+# three Graph reads the Manager makes -- and records them with the Manager's own builder (New-PimPermissionSnapshot).
+# rootReader (Reader at the tenant root) needs ARM, and the tick reads NO ARM (Test-PimUplink EP18): it is CARRIED from the
+# last real check that read it (the Manager's), with that check's own time (rootReaderCheckedUtc), and only while that is 7
+# days old or newer -- older = $null (not known). Never a guess. The updater's check (95.2i) reads the root over ARM itself.
+# Time-bounded (-BudgetSec), never throws, never fails a heartbeat; a failed read leaves the stored snapshot UNCHANGED.
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimPermissionSnapshotRefreshHours { <# PURE. Refresh when the snapshot is older than this (a literal). #> return 24 }
+function Get-PimPermissionSnapshotRootReaderMaxDays { <# PURE. A carried rootReader is kept while its own check is this young (a literal). #> return 7 }
+
+function Test-PimEnginePermissionSnapshotOn {
+    <# PURE. PIM_UPLINK_PERMSNAPSHOT: ON by default (it only reads Graph and writes one pim.Settings row); 0 / false / off / no = off. #>
+    param([AllowNull()][string]$Value = $env:PIM_UPLINK_PERMSNAPSHOT)
+    return -not [bool]("$Value".Trim() -match '^(?i)(0|false|off|no)$')
+}
+
+function Test-PimPermissionSnapshotRefreshDue {
+    <#
+      PURE. Is the stored snapshot due a refresh? none / unparsable / no time / older than 24 h -> yes; a time more than a day
+      in the FUTURE (a clock or a bad write) -> yes; else no. Returns @{ due; reason }.
+    #>
+    param([AllowNull()][object]$Snapshot, [datetime]$NowUtc = [datetime]::UtcNow)
+    $s = $Snapshot
+    for ($i = 0; $i -lt 2 -and $s -is [string]; $i++) { $t = "$s".Trim(); if (-not $t) { $s = $null; break }; try { $s = $t | ConvertFrom-Json } catch { $s = $null } }
+    if ($null -eq $s) { return @{ due = $true; reason = 'no permission snapshot is stored' } }
+    $at = ConvertTo-PimSetupUtc (Get-PimSetupField $s 'checkedUtc')
+    if (-not $at) { return @{ due = $true; reason = 'the stored permission snapshot has no time' } }
+    $h = ($NowUtc.ToUniversalTime() - $at).TotalHours
+    if ($h -lt -24) { return @{ due = $true; reason = 'the stored permission snapshot is dated in the future' } }
+    if ($h -gt (Get-PimPermissionSnapshotRefreshHours)) { return @{ due = $true; reason = ("the stored permission snapshot is {0:N0} h old" -f $h) } }
+    return @{ due = $false; reason = ("the stored permission snapshot is fresh ({0:N1} h old)" -f [Math]::Max(0, $h)) }
+}
+
+function Get-PimPermissionSnapshotCarriedRootReader {
+    <#
+      PURE. The rootReader to carry into an engine-made snapshot from the PREVIOUS one: its value only when it is a bool and
+      the check that READ it (rootReaderCheckedUtc, else that snapshot's checkedUtc) is 7 days old or newer. Returns
+      @{ value = $true | $false | $null; checkedUtc = <ISO> | '' }.
+    #>
+    param([AllowNull()][object]$Previous, [datetime]$NowUtc = [datetime]::UtcNow)
+    $rr = Get-PimSetupField $Previous 'rootReader'
+    if (-not ($rr -is [bool])) { return @{ value = $null; checkedUtc = '' } }
+    $at = ConvertTo-PimSetupUtc (Get-PimSetupField $Previous 'rootReaderCheckedUtc')
+    if (-not $at) { $at = ConvertTo-PimSetupUtc (Get-PimSetupField $Previous 'checkedUtc') }
+    if (-not $at) { return @{ value = $null; checkedUtc = '' } }
+    $d = ($NowUtc.ToUniversalTime() - $at).TotalDays
+    if ($d -gt (Get-PimPermissionSnapshotRootReaderMaxDays) -or $d -lt -1) { return @{ value = $null; checkedUtc = '' } }
+    return @{ value = [bool]$rr; checkedUtc = $at.ToString('o') }
+}
+
+function Update-PimEnginePermissionSnapshot {
+    <#
+      The engine's refresh. NEVER throws. READ: Microsoft Graph GET only (-Graph); WRITE: one pim.Settings row (-SetSetting),
+      and only after every read succeeded.
+        -GetSetting { param($name) }  -SetSetting { param($name, $value) }
+        -Graph { param($path) }        Microsoft Graph v1.0 GET (path from '/'); an array (all pages) or an object with .value
+        -AppId                         the engine identity's application (client) id (its own token's appid)
+        -Required                      Get-PimRequiredGraphCapabilities (the ONE permission map)
+        -BudgetSec                     no read starts after it (default 30)
+      Returns @{ refreshed = $bool; due = $bool; reason; snapshot }.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$GetSetting, [Parameter(Mandatory)][scriptblock]$SetSetting, [AllowNull()][scriptblock]$Graph,
+          [AllowEmptyString()][string]$AppId = '', [object[]]$Required = @(), [datetime]$NowUtc = [datetime]::UtcNow, [int]$BudgetSec = 30)
+    $first = { param($e) $m = ((("$($e.Exception.Message)") -split "`n")[0]).Trim(); if ($m.Length -gt 200) { $m = $m.Substring(0, 197) + '...' }; $m }
+    $items = { param($a) if ($null -eq $a) { @() } elseif ($a -is [array]) { @($a | Where-Object { $null -ne $_ }) } elseif ($a.PSObject.Properties['value']) { @(@($a.value) | Where-Object { $null -ne $_ }) } else { @($a) } }
+    try {
+        $prev = $null; try { $prev = & $GetSetting $script:PimSetupPermissionSnapshotSetting } catch { return @{ refreshed = $false; due = $false; reason = "the stored permission snapshot could not be read: $(& $first $_) -- unchanged"; snapshot = $null } }
+        for ($i = 0; $i -lt 2 -and $prev -is [string]; $i++) { $t = "$prev".Trim(); if (-not $t) { $prev = $null; break }; try { $prev = $t | ConvertFrom-Json } catch { $prev = $null } }
+        $due = Test-PimPermissionSnapshotRefreshDue -Snapshot $prev -NowUtc $NowUtc
+        if (-not $due.due) { return @{ refreshed = $false; due = $false; reason = $due.reason; snapshot = $null } }
+        if (-not $Graph) { return @{ refreshed = $false; due = $true; reason = "$($due.reason); no Microsoft Graph access here -- unchanged"; snapshot = $null } }
+        $g = [guid]::Empty
+        if (-not [guid]::TryParse("$AppId".Trim(), [ref]$g) -or $g -eq [guid]::Empty) { return @{ refreshed = $false; due = $true; reason = "$($due.reason); the engine identity's application id is not known -- unchanged"; snapshot = $null } }
+        if (-not @($Required).Count) { return @{ refreshed = $false; due = $true; reason = "$($due.reason); the permission map is not loaded -- unchanged"; snapshot = $null } }
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $step = { param($what) if ($sw.Elapsed.TotalSeconds -ge $BudgetSec) { throw "the refresh took longer than $BudgetSec s (before $what)" } }
+        # 1. who am I: the engine identity's service principal (by its own application id)
+        & $step 'its own service principal'
+        $self = @(& $items (& $Graph ("/servicePrincipals?`$filter=appId eq '{0}'&`$select=id,displayName" -f $g.ToString()))) | Select-Object -First 1
+        $oid = "$($self.id)".Trim()
+        if (-not $oid) { throw "no service principal was found for the engine's application id $($g.ToString())" }
+        # 2. Microsoft Graph's own service principal (its app roles: id -> value)
+        & $step 'the Microsoft Graph app roles'
+        $gsp = @(& $items (& $Graph "/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'&`$select=id,appRoles")) | Select-Object -First 1
+        if (-not $gsp -or -not "$($gsp.id)".Trim()) { throw 'Microsoft Graph''s service principal was not found' }
+        $roleById = @{}; foreach ($r in @($gsp.appRoles)) { if ("$($r.id)".Trim()) { $roleById["$($r.id)".Trim().ToLowerInvariant()] = "$($r.value)".Trim() } }
+        # 3. the engine's own app role assignments, on Microsoft Graph only
+        & $step 'its app role assignments'
+        $asg = @(& $items (& $Graph "/servicePrincipals/$oid/appRoleAssignments"))
+        $granted = @($asg | Where-Object { "$($_.resourceId)".Trim() -ieq "$($gsp.id)".Trim() } | ForEach-Object { $roleById["$($_.appRoleId)".Trim().ToLowerInvariant()] } | Where-Object { $_ } | Select-Object -Unique)
+        $rr = Get-PimPermissionSnapshotCarriedRootReader -Previous $prev -NowUtc $NowUtc
+        $snap = New-PimPermissionSnapshot -Granted @($granted) -Required @($Required) -Readable $true -RootReader $rr.value -NowUtc $NowUtc -EngineObjectId $oid
+        $snap['rootReaderCheckedUtc'] = "$($rr.checkedUtc)"
+        $snap['source'] = 'engine'
+        & $SetSetting $script:PimSetupPermissionSnapshotSetting ([pscustomobject]$snap)
+        return @{ refreshed = $true; due = $true; reason = ("$($due.reason); refreshed by the engine identity from Microsoft Graph ({0} Graph permission(s) held, {1} missing{2})" -f @($granted).Count, $snap.missing, $(if ($null -eq $rr.value) { '; Reader at the tenant root not known here' } else { '' })); snapshot = $snap }
+    } catch {
+        return @{ refreshed = $false; due = $true; reason = "the permission snapshot was not refreshed: $(& $first $_) -- unchanged"; snapshot = $null }
+    }
+}
+
 function Get-PimSetupRunGroups {
     # PURE. The newest finished run per job TYPE (uplink excluded): @{ '<type>' = run }.
     param([object[]]$Runs = @())

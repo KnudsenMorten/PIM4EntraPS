@@ -229,6 +229,22 @@ function Get-PimUpdaterEnginePermissionVerdict {
     }
 }
 
+function Resolve-PimUpdaterTenantId {
+    <#
+      SETUPSTEPS-TRUTH (c). The tenant id of -SubscriptionId from ARM (GET /subscriptions/{sub} -> tenantId) through -Arm
+      { param($method, $path, $body) } -- called with 'GET' only. NEVER throws: a failed read, or an answer that is not a GUID,
+      returns '' (= not known; the caller's Azure half stays unknown).
+    #>
+    param([AllowEmptyString()][string]$SubscriptionId = '', [AllowNull()][scriptblock]$Arm)
+    if (-not $Arm -or "$SubscriptionId".Trim() -notmatch '^[0-9A-Fa-f-]{36}$') { return '' }
+    try {
+        $s = & $Arm 'GET' "/subscriptions/$("$SubscriptionId".Trim())?api-version=2022-12-01" $null
+        $g = [guid]::Empty
+        if ($s -and [guid]::TryParse("$($s.tenantId)".Trim(), [ref]$g) -and $g -ne [guid]::Empty) { return $g.ToString() }
+    } catch { }
+    return ''
+}
+
 function Invoke-PimUpdaterEnginePermissionCheck {
     <#
       The updater's step (update-job-entry, after the roll and on the 'ahead' exit). READ ONLY. NEVER throws.
@@ -245,6 +261,11 @@ function Invoke-PimUpdaterEnginePermissionCheck {
           [string]$UpdaterName = 'ca-pim-update')
     try {
         $rgScope = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
+        # ---- SETUPSTEPS-TRUTH (c): the tenant id. The updater job carries no PIM_TenantId, and without it the Azure half read
+        # "the tenant id is not known here" (Invardia grid 2026-11-03). The subscription this install runs in names its tenant:
+        # ARM GET /subscriptions/{sub} -> tenantId (a read every identity with any role in the subscription may make). A read
+        # that fails or answers no GUID leaves it empty = the Azure half stays unknown, as before -- never a guessed tenant.
+        if (-not "$TenantId".Trim()) { $TenantId = Resolve-PimUpdaterTenantId -SubscriptionId $SubscriptionId -Arm $Arm }
         # ---- who is the engine -------------------------------------------------------------------------------------
         $oid = ''; $oidWhy = ''
         try { $j = & $Arm 'GET' "$rgScope/providers/Microsoft.App/jobs/$TickJob`?api-version=$($script:PimUpdPermAcaApi)" $null; $oid = "$($j.identity.principalId)".Trim() }
