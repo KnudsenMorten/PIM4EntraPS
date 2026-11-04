@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.26 -- 2026-11-04
+
+- Get Started: with self-approval on, the SuperAdmin who raised the break-glass list can approve it right in the step (it no longer says it waits for another SuperAdmin); the Templates preview banner names exactly where its switch is (Settings > Features & edition > Governance preview).
+
 ## 3.0.25 -- 2026-11-04
 
 - Alignment fixes: the installer checks that the chosen Azure region accepts new resources before creating anything; a private install keeps its Key Vault private (also after a deleted vault is recovered); the PIM Manager address is reported to Invardia from the first update; every hand-over file is in the checksum list; the release check also uses Invardia's private word list; no script-signing text is left.

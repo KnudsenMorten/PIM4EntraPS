@@ -2854,7 +2854,10 @@
       '<b>&#128274; Preview &mdash; disabled in Settings.</b> ' +
       escapeHtml(what) + ' This surface is shown for review only. It is <b>turned off by default</b> and ' +
       'takes <b>no action</b> while disabled &mdash; all safety gates stay enforced. ' +
-      'An administrator can enable it under <b>Settings &rarr; Governance preview</b>; the change takes effect on reload.' +
+      // BUG-TEMPLATES-PREVIEW-GATE (owner 2026-11-04: "i dont see this" -- the card sits BELOW the long Features list):
+      // say exactly where the switch is, and that it is NOT the "Governance & Drift" feature switch.
+      'A SuperAdmin can enable it under <b>Settings &rsaquo; Features &amp; edition &rsaquo; Governance preview</b> (the card below the Features list -- ' +
+      'not the &ldquo;Governance &amp; Drift&rdquo; feature switch); the change takes effect on reload.' +
       '</div>';
   }
 
@@ -17678,10 +17681,19 @@
         const eff = (b.effectiveAccounts || b.accounts || []).map(String);
         const req = b.request && b.request.open ? b.request : null;
         return (eff.length ? '<div class="gs-facts">Protected now:</div><ul class="gs-list">' + eff.map(x => '<li><code>' + escapeHtml(x) + '</code></li>').join('') + '</ul>' : '<div class="gs-facts">No break-glass account is protected yet.</div>') +
-          (req ? '<div class="gs-hint" style="color:#9a6700;">A change raised by ' + escapeHtml(String(req.maker || 'a SuperAdmin')) + ' waits for another SuperAdmin to approve it (Audit &amp; Settings &gt; Emergency access).</div>' : '') +
+          // BUG-BREAKGLASS-SELF-APPROVE (owner 2026-11-04): the step follows the SERVER's rule (canApprove: a SuperAdmin; the
+          // maker only when self-approval is on) -- never "waits for another SuperAdmin" when you may approve it yourself.
+          (req ? (req.canApprove
+              ? '<div class="gs-hint" style="color:#9a6700;">A change raised by ' + escapeHtml(String(req.maker || 'a SuperAdmin')) + ' is waiting' +
+                ((req.proposed && req.proposed.length) ? ' (the list becomes: <code>' + req.proposed.map(x => escapeHtml(String(x))).join('</code>, <code>') + '</code>)' : '') +
+                '. ' + (req.isMaker ? 'Self-approval is on, so you can approve it yourself -- recorded as self-approved in the audit.' : 'You can approve it.') + '</div>' +
+                '<div class="gs-actions"><button type="button" class="gsAction primary" data-act="approve">Approve</button>' +
+                (req.canCancel ? ' <button type="button" class="gsAction btn-sec" data-act="cancel">Withdraw</button>' : '') + ' <span class="gsActMsg"></span></div>'
+              : '<div class="gs-hint" style="color:#9a6700;">A change raised by ' + escapeHtml(String(req.maker || 'a SuperAdmin')) + ' waits for another SuperAdmin to approve it (Audit &amp; Settings &gt; Emergency access).' +
+                (req.onlySuperAdmin && req.onlySuperAdminNote ? ' ' + escapeHtml(String(req.onlySuperAdminNote)) : '') + '</div>') : '') +
           '<label class="gs-l" for="gsBgAdd">Add accounts (search by name)' + settingInfoBtn('BreakGlassAccounts') + '</label><input type="text" id="gsBgAdd" name="bgAdd">' + gsErr('bgAdd') +
           '<label class="gs-l" for="gsBgWhy">Why (kept with the request)</label><input type="text" id="gsBgWhy" name="bgWhy" placeholder="the two cloud-only emergency accounts">' + gsErr('bgWhy') +
-          '<div class="gs-hint">These accounts are exempt from every disable, revoke and offboard. The change is a request: another SuperAdmin approves it before the list changes.</div>' +
+          '<div class="gs-hint">These accounts are exempt from every disable, revoke and offboard. The change is a request: ' + (b.selfApprove ? 'a SuperAdmin approves it before the list changes (self-approval is on, so you may approve your own).' : 'another SuperAdmin approves it before the list changes.') + '</div>' +
           (eff.length ? '' : '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="later"' + ((c.confirm && c.confirm['breakglass-later']) ? ' disabled' : '') + '>Skip for now</button> <span class="gsActMsg"></span></div>' +
             '<div class="gs-hint">' + ((c.confirm && c.confirm['breakglass-later']) ? 'Skipped for now by ' + escapeHtml(String(c.confirm['breakglass-later'].by || '')) + '. ' : '') + 'Skipped, this step does not count as open -- but every SuperAdmin is reminded when they sign in until a break-glass account is protected.</div>');
       },
@@ -17690,6 +17702,24 @@
           x.say('Saving...');
           try { await api('PUT', '/api/get-started/confirm', { step: 'breakglass-later', confirmed: true }); GET_STARTED_LAST = null; await x.rerender(); }
           catch (e) { x.say('Not saved: ' + gsErrText(e), true); }
+        },
+        // BUG-BREAKGLASS-SELF-APPROVE: decide the open request here (the server enforces who may: Invoke-PimManagerBreakGlassApprove)
+        approve: async (x) => {
+          const req = x.c && x.c.breakglass && x.c.breakglass.request;
+          if (!req || !req.id) { x.say('No open request.', true); return; }
+          x.say('Approving...');
+          try {
+            const r = await api('POST', '/api/settings/breakglass-accounts/request/approve', { requestId: String(req.id), note: 'approved in Get Started' });
+            if (r && r.ok === false) { x.say('Not approved: ' + String(r.reason || r.error || ''), true); return; }
+            GET_STARTED_LAST = null; await x.rerender();
+          } catch (e) { x.say('Not approved: ' + gsErrText(e), true); }
+        },
+        cancel: async (x) => {
+          const req = x.c && x.c.breakglass && x.c.breakglass.request;
+          if (!req || !req.id) { x.say('No open request.', true); return; }
+          x.say('Withdrawing...');
+          try { await api('POST', '/api/settings/breakglass-accounts/request/cancel', { requestId: String(req.id), note: 'withdrawn in Get Started' }); GET_STARTED_LAST = null; await x.rerender(); }
+          catch (e) { x.say('Not withdrawn: ' + gsErrText(e), true); }
         }
       },
       wire: (card) => { try { pimAttachChips(card.querySelector('[name="bgAdd"]'), pimAttachPeopleCombo); } catch (_) { } },
@@ -17709,7 +17739,7 @@
         if (!(await pimSettingInfoConfirm('BreakGlassAccounts', true))) return { errors: { bgAdd: 'Not requested -- nothing changed.' } };
         try {
           await api('PUT', '/api/settings/breakglass-accounts', { accounts: cur.concat(fresh), justification: why, baseHash: b.listHash ? String(b.listHash) : '' });
-          return { wrote: true, note: 'Request raised -- another SuperAdmin must approve it before the list changes. Nothing has changed yet.' };
+          return { wrote: true, note: b.selfApprove ? 'Request raised -- self-approval is on: approve it here to protect the accounts. Nothing has changed yet.' : 'Request raised -- another SuperAdmin must approve it before the list changes. Nothing has changed yet.' };
         } catch (e) { return { errors: { bgAdd: 'Not requested: ' + gsErrText(e) } }; }
       }
     },
