@@ -71,6 +71,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-FailureCatalog.ps1')   # 100.31 the OOM code the sizing self-correct reads
 . (Join-Path $solRoot 'engine\_shared\PIM-TenantSizing.ps1')     # 100.31 the tick's size for this tenant + the SQL tier / max size (100.37)
 . (Join-Path $solRoot 'engine\_shared\PIM-JobSelfId.ps1')        # 100.166 (a) pull / publish learn their own id + Reader on themselves
+. (Join-Path $solRoot 'engine\_shared\PIM-KeyVaultPrivate.ps1')  # rule 11: a private install's Key Vault is private (step 2g-bis)
 . (Join-Path $solRoot 'engine\_shared\PIM-ConvergeDefaults.ps1') # 100.40 / framework 12.16 the install defaults an EXISTING install converges to
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdaterPermissionCheck.ps1') # 95.2i the engine's rights vs. what this version needs (report only, never a grant)
 . (Join-Path $solRoot 'engine\_shared\PIM-EngineAzureAccess.ps1') # 95.2k the engine's Azure rights vs the DEFINED scopes -- REPORT only here
@@ -241,6 +242,22 @@ function Invoke-PimUpdaterConvergeStep {
             } else { Say 'install record: InstallNames unchanged' 'DarkGray' }
         }
     } catch { Say "  install record not written: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2d-quater. MANAGER-URL-FROM-UPDATER (owner 2026-11-03 via Invardia; framework 8.9) -- THE MANAGER'S ADDRESS --------
+    # pim.Settings 'ManagerUrl' was written only by the hosted Manager on its first SIGNED-IN request, so an install nobody had
+    # opened yet reported no Manager address in its heartbeat (Invardia's back office showed none). The updater reads ARM on
+    # every run: it records the address the same way (Resolve-PimUpdaterManagerUrl: empty -> written; platform FQDN -> the
+    # custom hostname once; anything someone set -> kept). Written only on change; the heartbeat sends it. Never fails the update.
+    try {
+        if ($storeSeam -and (Get-Command Resolve-PimUpdaterManagerUrl -ErrorAction SilentlyContinue)) {
+            $muApp = Get-PimAcaApp -SubscriptionId $sub -ResourceGroup $rg -Name $managerApp
+            $muCur = "$(& $storeSeam 'get' 'ManagerUrl' $null)"
+            $mu = Resolve-PimUpdaterManagerUrl -App $muApp -Current $muCur
+            if ($mu.write) {
+                & $storeSeam 'set' 'ManagerUrl' $mu.url | Out-Null
+                Say "manager address: $($mu.url) stored ($($mu.reason))" 'Cyan'
+            } else { Say "manager address: $(if ($mu.url) { $mu.url } else { '(none)' }) -- $($mu.reason)" 'DarkGray' }
+        }
+    } catch { Say "  manager address not recorded: $($_.Exception.Message)" 'Yellow' }
     # ---- 2d-ter. CR5 item 5 (framework §12.11c item 5, PIM 100.149) -- THE DISPLAY NAMES PEOPLE READ ------------------------
     # "PIM Manager", never "PIM4EntraPS", at EXISTING installs too. OFF until the owner switches it on: pim.Settings
     # 'PIM_Update_RenameDisplayNames' (true), else this job's variable of the same name. Only objects that carry exactly the
@@ -329,6 +346,26 @@ function Invoke-PimUpdaterConvergeStep {
         $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
         Say ("setup steps: facts recorded for the heartbeat$(if ($ssUnk.Count) { " (not readable: $($ssUnk -join ', '))" })") 'DarkGray'
     } catch { Say "  setup steps not checked: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2g-bis. KV-POLICY-DENIED-PRIVATE / framework installer rule 11 -- A PRIVATE INSTALL'S KEY VAULT IS PRIVATE ------------
+    # Only where the install IS private (its environment is internal, step 2g's fact). Every Key Vault in the install's resource
+    # group is PATCHED to the rule-11 shape and READ BACK, then given its private endpoint (beside the SQL endpoint) in
+    # privatelink.vaultcore.azure.net (Invoke-PimKeyVaultRule11, the installer's own routine). A public install: nothing.
+    # Reported, never fails the update; what the updater may not do (e.g. a central zone it cannot write) is said in yellow.
+    try {
+        if ($script:PimSetupFacts -and $script:PimSetupFacts['privateNetwork'] -eq $true -and (Get-Command Invoke-PimKeyVaultRule11 -ErrorAction SilentlyContinue)) {
+            $kvRgPath = "/subscriptions/$sub/resourceGroups/$rg"
+            $kvArm = { param($m, $p, $b)
+                try { if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
+                catch { if ($m -eq 'GET' -and "$($_.Exception.Message)" -match '(?i)\b404\b|NotFound|ResourceNotFound') { $null } else { throw } } }
+            $kvList = @(@((& $kvArm 'GET' "$kvRgPath/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01" $null).value) | Where-Object { $_ })
+            $kvSql = ("$(if ("$($env:PIM_SqlServer)".Trim()) { $env:PIM_SqlServer } else { $global:PIM_SqlServer })".Trim() -split '\.')[0]
+            foreach ($kvItem in $kvList) {
+                $kv11 = Invoke-PimKeyVaultRule11 -Arm $kvArm -VaultId "$kvRgPath/providers/Microsoft.KeyVault/vaults/$($kvItem.name)" -SqlServerName $kvSql
+                foreach ($l in @($kv11.lines)) { Say ("private vault: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+            }
+            if (-not $kvList.Count) { Say 'private vault: no Key Vault in the resource group' 'DarkGray' }
+        }
+    } catch { Say "  private vault not checked: $($_.Exception.Message)" 'Yellow' }
 }
 
 # 🔴 2026-09-18 (§71.43) -- THE STORE IS NEEDED BEFORE THE FIRST EXIT PATH, NOT ONLY AT THE SCHEMA STEP.

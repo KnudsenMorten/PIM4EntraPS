@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.25 -- 2026-11-04
+
+- Alignment fixes: the installer checks that the chosen Azure region accepts new resources before creating anything; a private install keeps its Key Vault private (also after a deleted vault is recovered); the PIM Manager address is reported to Invardia from the first update; every hand-over file is in the checksum list; the release check also uses Invardia's private word list; no script-signing text is left.
+
 ## 3.0.24 -- 2026-11-03
 
 - Invardia's install view now shows the true state of every one-time setup step: the support database access and the database least-privilege steps are read through a new read-only database check (no extra rights), the engine refreshes its own permission check once a day, and the updater finds the tenant on its own -- so these no longer show "unknown"; install commands are shorter: the second line carries only the tenant, subscription, region and what you actually chose (no defaults, no empty values, no settings of options you did not pick); the release package that Invardia serves no longer carries internal files, and every package is checked for them (paths and content) before it is published; a private-network install now checks every private DNS zone it needs (including storage for the as-built report) before it creates anything, and names all missing ones at once; running the installer twice in the same PowerShell window no longer fails on an expired support session -- it signs in again; the Pro installer is ready to download its package from Invardia (it is handed out only once rings 2 and 3 carry this clean release).

@@ -88,7 +88,9 @@ param(
     # transcripts, CI logs and screenshots). -PassThru returns it as an OBJECT on the pipeline instead:
     #     $src = .\Publish-PimSourceArchive.ps1 ... -PassThru;  $src.SourceUrlTemplate
     # Captured into a variable it never reaches the console.
-    [switch]$PassThru
+    [switch]$PassThru,
+    # PACKAGE-CLEAN-WORDLIST: Invardia's machine-local word list the content scan reads too (unreadable = REFUSED)
+    [string]$WordListPath = 'C:\ProgramData\Invardia\package-clean\words.txt'
 )
 if ("$CustomerId".Trim()) {
     # Container names: lowercase alphanumerics and dashes only.
@@ -370,8 +372,9 @@ if ((-not $WhatIfPreference) -and ($Verify -or $StorageAccount)) {
         throw ("Publish-PimSourceArchive: REFUSED -- the archive carries {0} internal-only path(s) (e.g. {1}); the internal notes, the backlog, the test document and the test suite never leave the repository. Nothing was uploaded." -f $leak.Count, (@($leak | Select-Object -First 3) -join ', '))
     }
     # Framework 0 item 7: the CONTENT too -- every text file against PIM's private identifier list (THIS script's own
-    # internal\REAL-IDENTIFIERS.md, never the packed tree's) + the secret shapes; a hit names file and line, never the value
-    $pkgDeny = @(); try { $pkgDeny = @(Read-PimReleaseDenylist -Path (Join-Path $solRootPsa 'internal\REAL-IDENTIFIERS.md')) } catch {
+    # internal\REAL-IDENTIFIERS.md, never the packed tree's) + Invardia's word list (PACKAGE-CLEAN-WORDLIST, machine-local)
+    # + the secret shapes; a hit names file and line, never the value. Either list unreadable = REFUSED.
+    $pkgDeny = @(); try { $pkgDeny = @(Get-PimReleaseDeny -SolutionRoot $solRootPsa -WordListPath $WordListPath) } catch {
         Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
         throw "Publish-PimSourceArchive: REFUSED -- $($_.Exception.Message). Nothing was uploaded."
     }

@@ -288,6 +288,153 @@ function Test-PimRegionCapability {
     }
 }
 
+# ---- REGION-ACCEPTS-NEW (framework installer rule 9, 2026-11-03) -------------------------------------------------------------
+# A region can OFFER a service and still refuse NEW resources for this subscription ("the selected region is currently not
+# accepting new customers", RequestDisallowedByAzure -- westeurope, proven live 2026-11-03). Provider locations do not show it;
+# only an ARM deployment VALIDATE does (it creates nothing). The form is the one SI proved (duplicated here on purpose:
+# solution isolation): the install's resource group exists -> validate in it; it does not -> a SUBSCRIPTION-scope validate whose
+# template makes the group and a NESTED deployment holding the resources (a group alone answers 200 even in a refused region).
+# The probe resources carry the REAL resources' settings (a customer's policy must judge what the install will create).
+# RequestDisallowedByAzure stops; a policy refusal (RequestDisallowedByPolicy) or a 403 is NOT KNOWN -- said, never a stop; a
+# mix (one Azure + one policy) stops.
+
+function Get-PimRegionProbeResources {
+    <#
+      PURE. One minimal resource per Azure service PIM Manager creates, in -Region, with the install's own names (-Names:
+      Get-PimInstallNames) and settings. The SQL server needs an Entra administrator: -AdminObjectId (else left out, checked
+      when created). -> @{ Resources = @(); Covered = @(<label>); Left = @(<label>) }
+    #>
+    param([Parameter(Mandatory)][string]$Region, [Parameter(Mandatory)][object]$Names, [string]$TenantId = '', [string]$AdminObjectId = '',
+          [string]$AdminType = 'User', [bool]$PrivateNetwork = $false, [switch]$NoSql)
+    $tok = "$($Names.token)"
+    $pna = $(if ($PrivateNetwork) { 'Disabled' } else { 'Enabled' })
+    $res = New-Object System.Collections.Generic.List[object]; $covered = New-Object System.Collections.Generic.List[string]; $left = New-Object System.Collections.Generic.List[string]
+    $res.Add([ordered]@{ type = 'Microsoft.ManagedIdentity/userAssignedIdentities'; apiVersion = '2023-01-31'; name = "id-pim-sql-$tok"; location = $Region }); $covered.Add('user-assigned managed identities')
+    $st = [ordered]@{ supportsHttpsTrafficOnly = $true; allowBlobPublicAccess = $false; minimumTlsVersion = 'TLS1_2' }
+    if ($PrivateNetwork) { $st['publicNetworkAccess'] = 'Disabled' }
+    $res.Add([ordered]@{ type = 'Microsoft.Storage/storageAccounts'; apiVersion = '2023-01-01'; name = ("stpim$tok" -replace '[^a-z0-9]', '').ToLowerInvariant(); location = $Region; kind = 'StorageV2'; sku = [ordered]@{ name = 'Standard_LRS' }; properties = $st }); $covered.Add('Azure Storage accounts')
+    $res.Add([ordered]@{ type = 'Microsoft.OperationalInsights/workspaces'; apiVersion = '2022-10-01'; name = "$($Names.logAnalytics)"; location = $Region; properties = [ordered]@{ sku = [ordered]@{ name = 'PerGB2018' } } }); $covered.Add('Log Analytics workspaces')
+    $res.Add([ordered]@{ type = 'Microsoft.App/managedEnvironments'; apiVersion = '2024-03-01'; name = "$($Names.environment)"; location = $Region; properties = [ordered]@{} }); $covered.Add('Azure Container Apps environments')
+    $acr = [ordered]@{ adminUserEnabled = $false }; if ($PrivateNetwork) { $acr['publicNetworkAccess'] = 'Disabled' }
+    $res.Add([ordered]@{ type = 'Microsoft.ContainerRegistry/registries'; apiVersion = '2023-07-01'; name = "$($Names.acr)"; location = $Region; sku = [ordered]@{ name = $(if ($PrivateNetwork) { 'Premium' } else { 'Basic' }) }; properties = $acr }); $covered.Add('Azure Container Registry')
+    if ($TenantId) {
+        $kv = [ordered]@{ tenantId = $TenantId; sku = [ordered]@{ family = 'A'; name = 'standard' }; enableRbacAuthorization = $true; accessPolicies = @(); enableSoftDelete = $true; softDeleteRetentionInDays = 90; enablePurgeProtection = $true }
+        # framework installer rule 11: a private install's vault is private from birth
+        if ($PrivateNetwork) { $kv['publicNetworkAccess'] = 'Disabled'; $kv['networkAcls'] = [ordered]@{ defaultAction = 'Deny'; bypass = 'AzureServices'; ipRules = @(); virtualNetworkRules = @() } }
+        $res.Add([ordered]@{ type = 'Microsoft.KeyVault/vaults'; apiVersion = '2023-07-01'; name = "$($Names.keyVault)"; location = $Region; properties = $kv }); $covered.Add('Azure Key Vault')
+    } else { $left.Add('Azure Key Vault') }
+    if (-not $NoSql) {
+        if ($TenantId -and $AdminObjectId) {
+            $res.Add([ordered]@{ type = 'Microsoft.Sql/servers'; apiVersion = '2021-11-01'; name = "$($Names.sqlServer)"; location = $Region
+                properties = [ordered]@{ version = '12.0'; minimalTlsVersion = '1.2'; publicNetworkAccess = $pna
+                    administrators = [ordered]@{ administratorType = 'ActiveDirectory'; azureADOnlyAuthentication = $true; login = 'PIM Manager installer'; sid = $AdminObjectId; tenantId = $TenantId
+                        principalType = $(if ($AdminType -eq 'User') { 'User' } else { 'Application' }) } } }); $covered.Add('Azure SQL Database servers')
+        } else { $left.Add('Azure SQL Database servers') }
+    }
+    return @{ Resources = $res.ToArray(); Covered = $covered.ToArray(); Left = $left.ToArray() }
+}
+
+function Get-PimRegionProbeRequest {
+    <#
+      PURE. The ARM deployment VALIDATE request (creates nothing, not even the group): -ResourceGroupExists -> POST in the group;
+      else at SUBSCRIPTION scope, a template that makes the group and a NESTED deployment into it holding -Resources.
+      -> @{ Path; Body (JSON string) }
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Region,
+          [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Resources, [bool]$ResourceGroupExists, [string]$DeploymentName = 'pim-preflight-region')
+    $inner = [ordered]@{ '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#'; contentVersion = '1.0.0.0'; resources = @($Resources) }
+    if ($ResourceGroupExists) {
+        $path = '/subscriptions/{0}/resourcegroups/{1}/providers/Microsoft.Resources/deployments/{2}/validate?api-version=2021-04-01' -f $SubscriptionId, $ResourceGroup, $DeploymentName
+        $body = [ordered]@{ properties = [ordered]@{ mode = 'Incremental'; template = $inner } }
+    } else {
+        $path = '/subscriptions/{0}/providers/Microsoft.Resources/deployments/{1}/validate?api-version=2021-04-01' -f $SubscriptionId, $DeploymentName
+        $tpl = [ordered]@{ '$schema' = 'https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#'; contentVersion = '1.0.0.0'
+            resources = @(
+                [ordered]@{ type = 'Microsoft.Resources/resourceGroups'; apiVersion = '2021-04-01'; name = $ResourceGroup; location = $Region; properties = [ordered]@{} },
+                [ordered]@{ type = 'Microsoft.Resources/deployments'; apiVersion = '2021-04-01'; name = ($DeploymentName + '-rg'); resourceGroup = $ResourceGroup
+                    dependsOn = @(("[resourceId('Microsoft.Resources/resourceGroups', '{0}')]" -f $ResourceGroup))
+                    properties = [ordered]@{ mode = 'Incremental'; template = $inner } }) }
+        $body = [ordered]@{ location = $Region; properties = [ordered]@{ mode = 'Incremental'; template = $tpl } }
+    }
+    return @{ Path = $path; Body = (ConvertTo-Json -InputObject $body -Depth 30 -Compress) }
+}
+
+function ConvertFrom-PimRegionValidateAnswer {
+    <#
+      PURE. What the VALIDATE answered (-StatusCode, -Content = the body text): @{ State = ok | refused | unknown | other; Text }.
+      200/201 ok. RequestDisallowedByAzure anywhere in error / details (nested deployments too) = refused -- also when another
+      resource of the same answer is refused by a policy. RequestDisallowedByPolicy only, or 403 = unknown (named policy).
+      Anything else (another error, 202, no answer) = other: never a stop, the create-time catch decides.
+    #>
+    param([int]$StatusCode, [AllowEmptyString()][AllowNull()][string]$Content)
+    if ($StatusCode -in 200, 201) { return @{ State = 'ok'; Text = '' } }
+    $c = "$Content"
+    $obj = $null; try { if ($c.Trim()) { $obj = $c | ConvertFrom-Json } } catch { $obj = $null }
+    $codes = New-Object System.Collections.Generic.List[string]; $msgs = New-Object System.Collections.Generic.List[string]; $policies = New-Object System.Collections.Generic.List[string]
+    $get = { param($o, $n) if ($null -eq $o) { return $null }; if ($o -is [System.Collections.IDictionary]) { return $o[$n] }; $p = $o.PSObject.Properties[$n]; if ($p) { $p.Value } else { $null } }
+    $walk = $null
+    $walk = {
+        param($e, $depth)
+        if ($null -eq $e -or $depth -gt 12) { return }
+        foreach ($x in @($e)) {
+            if ($null -eq $x -or $x -is [string]) { continue }
+            $cd = "$(& $get $x 'code')"; if ($cd) { $codes.Add($cd) }
+            $mg = "$(& $get $x 'message')"; if ($mg) { $msgs.Add($mg) }
+            foreach ($src in @($x) + @(@(& $get $x 'additionalInfo') | Where-Object { $_ } | ForEach-Object { & $get $_ 'info' })) {
+                foreach ($pn in 'policyAssignmentDisplayName', 'policyDefinitionDisplayName') { $pv = "$(& $get $src $pn)"; if ($pv -and -not $policies.Contains($pv)) { $policies.Add($pv) } }
+            }
+            & $walk (& $get $x 'error') ($depth + 1)
+            & $walk (& $get $x 'details') ($depth + 1)
+        }
+    }
+    if ($obj) { & $walk $obj 0 }
+    if ($codes -contains 'RequestDisallowedByAzure' -or $c -match 'RequestDisallowedByAzure') {
+        $types = @([regex]::Matches(($msgs -join ' '), "(?i)type '([A-Za-z.]+/[A-Za-z/]+)'") | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+        return @{ State = 'refused'; Text = $(if ($types.Count) { "Azure is not accepting new resources there for this subscription ($($types -join ', '))" } else { 'Azure is not accepting new resources there for this subscription' }) }
+    }
+    if ($codes -contains 'RequestDisallowedByPolicy' -or $c -match 'RequestDisallowedByPolicy') {
+        return @{ State = 'unknown'; Text = ('an Azure Policy in your subscription refuses the check''s test resources{0} -- the region could not be checked' -f $(if ($policies.Count) { ' (' + ($policies -join ', ') + ')' } else { '' })) }
+    }
+    if ($StatusCode -eq 403) { return @{ State = 'unknown'; Text = 'you may not run Azure''s deployment check in this subscription -- the region could not be checked' } }
+    if ($StatusCode -eq 202) { return @{ State = 'other'; Text = 'Azure took the check but did not answer at once' } }
+    $first = @($msgs | Select-Object -Last 1) | Select-Object -First 1
+    return @{ State = 'other'; Text = $(if ($first) { "$first ($(@($codes | Select-Object -Unique) -join ', '))" } elseif ($c.Trim()) { $c.Trim() } else { "HTTP $StatusCode" }) }
+}
+
+function Test-PimRegionAcceptsNew {
+    <#
+      THIN. One VALIDATE in -Location; refused -> the same validate in the -Candidates (nearest first) until -Want accept, at most
+      -MaxTries. -Post is param([string]$Path, [string]$Body) -> @{ StatusCode; Content } over the CALLER's ARM client (never
+      throws here). -> @{ State = ok | refused | unknown | other; Text; Alternatives = @(); Left = @() }. Creates nothing.
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$Location, [Parameter(Mandatory)][string]$ResourceGroup,
+          [bool]$ResourceGroupExists, [Parameter(Mandatory)][object]$Names, [Parameter(Mandatory)][scriptblock]$Post, [string]$TenantId = '',
+          [string]$AdminObjectId = '', [string]$AdminType = 'User', [bool]$PrivateNetwork = $false, [switch]$NoSql, [string[]]$Candidates = @(),
+          [int]$Want = 1, [int]$MaxTries = 4)
+    $probe = {
+        param([string]$Region)
+        $p = Get-PimRegionProbeResources -Region $Region -Names $Names -TenantId $TenantId -AdminObjectId $AdminObjectId -AdminType $AdminType -PrivateNetwork $PrivateNetwork -NoSql:$NoSql
+        $q = Get-PimRegionProbeRequest -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Region $Region -Resources $p.Resources -ResourceGroupExists $ResourceGroupExists
+        $r = $null; try { $r = & $Post $q.Path $q.Body } catch { $r = @{ StatusCode = 0; Content = "$($_.Exception.Message)" } }
+        $sc = 0; $ct = ''
+        if ($r) { if ($r -is [System.Collections.IDictionary]) { $sc = [int]$r['StatusCode']; $ct = "$($r['Content'])" } else { $sc = [int]$r.StatusCode; $ct = "$($r.Content)" } }
+        $a = ConvertFrom-PimRegionValidateAnswer -StatusCode $sc -Content $ct
+        $a['Left'] = @($p.Left)
+        $a
+    }
+    $a = & $probe $Location
+    $a['Alternatives'] = @()
+    if ($a.State -ne 'refused') { return $a }
+    $alt = New-Object System.Collections.Generic.List[string]; $tries = 0
+    foreach ($c in @($Candidates)) {
+        if ($alt.Count -ge $Want -or $tries -ge $MaxTries) { break }
+        $tries++
+        if ((& $probe $c).State -eq 'ok') { $alt.Add($c) }
+    }
+    $a['Alternatives'] = $alt.ToArray()
+    return $a
+}
+
 function Invoke-PimRegionPreflight {
     <#
       THIN. Reads the ARM answers Test-PimRegionCapability needs and returns its verdict. Makes NO network call itself:
@@ -300,7 +447,18 @@ function Invoke-PimRegionPreflight {
         [Parameter(Mandatory)][string]$Location,
         [Parameter(Mandatory)][scriptblock]$Get,
         [switch]$NoSql,
-        [int]$MaxSuggestionProbes = 6
+        [int]$MaxSuggestionProbes = 6,
+        # REGION-ACCEPTS-NEW (installer rule 9): with -Post (param([string]$Path, [string]$Body) -> @{ StatusCode; Content }) and
+        # -ProbeNames (Get-PimInstallNames), a region whose services are offered is ALSO asked, by an ARM deployment VALIDATE,
+        # whether it accepts NEW resources for this subscription. Without -Post: the reads only (unchanged).
+        [scriptblock]$Post,
+        [object]$ProbeNames,
+        [string]$ResourceGroup = '',
+        [bool]$ResourceGroupExists = $false,
+        [string]$TenantId = '',
+        [string]$AdminObjectId = '',
+        [string]$AdminType = 'User',
+        [bool]$PrivateNetwork = $false
     )
     $arm = "https://management.azure.com/subscriptions/$SubscriptionId"
     $read = { param($u) try { & $Get $u } catch { $null } }
@@ -321,5 +479,37 @@ function Invoke-PimRegionPreflight {
         }
         $v = Test-PimRegionCapability -Location $Location -Providers $providers -Locations $locations -SqlCapabilities $sqlCap -CandidateSqlCapabilities $cand -NoSql:$NoSql
     }
+    if ($v.ok -and $Post -and $null -ne $ProbeNames -and "$ResourceGroup".Trim()) {
+        $cands = @(Get-PimRegionCandidateOrder -Location $name -Providers $providers -Locations $locations -NoSql:$NoSql)
+        $an = Test-PimRegionAcceptsNew -SubscriptionId $SubscriptionId -Location $name -ResourceGroup "$ResourceGroup".Trim() -ResourceGroupExists $ResourceGroupExists `
+            -Names $ProbeNames -Post $Post -TenantId $TenantId -AdminObjectId $AdminObjectId -AdminType $AdminType -PrivateNetwork $PrivateNetwork -NoSql:$NoSql -Candidates $cands
+        $v = Merge-PimRegionAcceptsNew -Verdict $v -Answer $an -Locations $locations
+    }
     return $v
+}
+
+function Merge-PimRegionAcceptsNew {
+    <#
+      PURE. The capability verdict (Test-PimRegionCapability) + the VALIDATE answer (Test-PimRegionAcceptsNew):
+        refused -> ok = $false, the refusal named, the first alternative that validated is the suggestion;
+        unknown -> the policy / 403 sentence joins unknown[] (a warning, never a stop);
+        other   -> a note in unknown[] (the create-time catch decides); ok -> unchanged.
+    #>
+    param([Parameter(Mandatory)][object]$Verdict, [Parameter(Mandatory)][object]$Answer, [object]$Locations)
+    $st = "$($Answer.State)"
+    if ($st -eq 'ok') { return $Verdict }
+    $unknown = @($Verdict.unknown)
+    if ($st -in 'unknown', 'other') {
+        $note = if ($st -eq 'unknown') { "$($Answer.Text)" } else { "Azure's deployment check could not confirm the region ($($Answer.Text)) -- each resource is checked when it is created" }
+        $unknown += $note
+        $msg = "$($Verdict.message)" + $(if (@($Verdict.unknown).Count) { "; $note" } else { " -- could not check: $note" })
+        return [pscustomobject]@{ ok = $Verdict.ok; location = $Verdict.location; displayName = $Verdict.displayName; missing = @($Verdict.missing); unknown = $unknown
+            deferred = @($Verdict.deferred); suggestion = $Verdict.suggestion; suggestionDisplayName = $Verdict.suggestionDisplayName; candidates = @($Verdict.candidates); message = $msg }
+    }
+    $sug = @($Answer.Alternatives | Where-Object { $_ }) | Select-Object -First 1
+    $sugDisp = if ($sug) { Get-PimRegionDisplayName -Name $sug -Locations $Locations } else { '' }
+    $msg = "PIM Manager cannot be installed in $($Verdict.displayName) ('$($Verdict.location)') for this subscription -- $($Answer.Text)." +
+        $(if ($sug) { " Nearest region that accepts them: $sugDisp ('$sug') -- choose it, or another region." } else { ' Choose another region.' })
+    return [pscustomobject]@{ ok = $false; location = $Verdict.location; displayName = $Verdict.displayName; missing = @(@($Verdict.missing) + "new resources ($($Answer.Text))"); unknown = $unknown
+        deferred = @($Verdict.deferred); suggestion = "$sug"; suggestionDisplayName = $sugDisp; candidates = @($Answer.Alternatives); message = $msg }
 }

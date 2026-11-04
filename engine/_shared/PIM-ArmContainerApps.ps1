@@ -53,6 +53,33 @@ function Get-PimAcaApp {
     Invoke-PimArm -Method GET -Path (Get-PimAcaAppId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name) -ApiVersion $script:PimAcaApi
 }
 
+function Resolve-PimUpdaterManagerUrl {
+    <#
+      PURE. MANAGER-URL-FROM-UPDATER (owner 2026-11-03 via Invardia; framework 8.9 "endpoints reported by the install"): the
+      Manager's address from what ARM says the app IS -- its custom hostname first, else the ingress FQDN -- and whether the
+      updater writes it to pim.Settings 'ManagerUrl'. The SAME rule as the Manager's own first-sign-in write (Open-PimManager
+      §79.3 / §80.1): written when empty; an address that was only the platform FQDN is upgraded once to the custom hostname; a
+      value someone set to anything else is NEVER overwritten. An internal-only ingress is the internal address (said as
+      such, never guessed); no ingress = nothing written.
+      -> @{ url; write; internal; reason }
+    #>
+    param([AllowNull()][object]$App, [AllowEmptyString()][AllowNull()][string]$Current = '')
+    $ing = $null
+    try { $ing = $App.properties.configuration.ingress } catch { $ing = $null }
+    $fqdn = if ($ing) { "$($ing.fqdn)".Trim().ToLowerInvariant() } else { '' }
+    if (-not $fqdn) { return @{ url = ''; write = $false; internal = $false; reason = 'the Manager app has no ingress address -- nothing recorded' } }
+    $internal = ($ing.PSObject.Properties['external'] -and $ing.external -eq $false)
+    $custom = @(@($ing.customDomains) | Where-Object { $_ -and "$($_.name)".Trim() } | ForEach-Object { "$($_.name)".Trim().ToLowerInvariant() }) | Select-Object -First 1
+    $platform = "https://$fqdn"
+    $url = if ($custom) { "https://$custom" } else { $platform }
+    $cur = "$Current".Trim().Trim('"').TrimEnd('/').ToLowerInvariant()
+    $kind = if ($internal) { 'the internal address (the ingress is internal only)' } elseif ($custom) { 'the custom hostname' } else { 'the ingress address' }
+    if (-not $cur) { return @{ url = $url; write = $true; internal = $internal; reason = "recorded: $kind" } }
+    if ($cur -eq $url) { return @{ url = $url; write = $false; internal = $internal; reason = 'unchanged' } }
+    if ($custom -and $cur -eq $platform) { return @{ url = $url; write = $true; internal = $internal; reason = 'upgraded from the platform address to the custom hostname' } }
+    return @{ url = $url; write = $false; internal = $internal; reason = 'an address set by someone else is kept' }
+}
+
 function Get-PimAcaAuthConfig {
     <# The app's authConfigs/current (Easy Auth). Read-only. Throws like Get-PimAcaApp (a 404 = the app has none). #>
     param(

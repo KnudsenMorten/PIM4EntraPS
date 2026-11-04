@@ -66,12 +66,16 @@ function Get-PimInstallKeyVaultName {
 
 function New-PimInstallKeyVaultBody {
     <# PURE. The vault: Standard (no monthly fee), RBAC, soft delete 90 days, purge protection (owner 2026-10-21: "A vault per install"). #>
-    param([Parameter(Mandatory)][string]$Location, [Parameter(Mandatory)][string]$TenantId)
-    return [ordered]@{
-        location = $Location; tags = [ordered]@{ product = 'pim-manager'; purpose = 'signin-front' }
-        properties = [ordered]@{ tenantId = $TenantId; sku = [ordered]@{ family = 'A'; name = 'standard' }; enableRbacAuthorization = $true
-                                 enableSoftDelete = $true; softDeleteRetentionInDays = 90; enablePurgeProtection = $true; publicNetworkAccess = 'Enabled' }
+    # KV-POLICY-DENIED-PRIVATE / framework installer rule 11: a PRIVATE install's vault is private FROM BIRTH (Disabled + Deny +
+    # bypass AzureServices -- never None -- + no rules); Invoke-PimKeyVaultRule11 then adds the endpoint and reads it back.
+    param([Parameter(Mandatory)][string]$Location, [Parameter(Mandatory)][string]$TenantId, [switch]$Private)
+    $p = [ordered]@{ tenantId = $TenantId; sku = [ordered]@{ family = 'A'; name = 'standard' }; enableRbacAuthorization = $true
+                     enableSoftDelete = $true; softDeleteRetentionInDays = 90; enablePurgeProtection = $true; publicNetworkAccess = 'Enabled' }
+    if ($Private) {
+        $p['publicNetworkAccess'] = 'Disabled'
+        $p['networkAcls'] = [ordered]@{ defaultAction = 'Deny'; bypass = 'AzureServices'; ipRules = @(); virtualNetworkRules = @() }
     }
+    return [ordered]@{ location = $Location; tags = [ordered]@{ product = 'pim-manager'; purpose = 'signin-front' }; properties = $p }
 }
 
 function Get-PimInstallKeyRoleAssignmentName {
@@ -218,7 +222,10 @@ function Invoke-PimInstallSigninFront {
           [string]$UpdateJob = 'ca-pim-update', [string]$StateFile = '', [string[]]$Done = @(),
           [scriptblock]$OnStep, [Parameter(Mandatory)][hashtable]$Io, [string]$WorkDir = ([IO.Path]::GetTempPath()),
           # PUB-FRONT (owner 2026-11-02): the solution folder itself -- a public release unpacks it as its root (no SOLUTIONS/)
-          [string]$SolutionRoot = '')
+          [string]$SolutionRoot = '',
+          # KV-POLICY-DENIED-PRIVATE (framework installer rule 11): a private install's vault is made private and READ BACK
+          # private (with its endpoint) before any key step -- made, recovered or found
+          [bool]$PrivateNetwork = $false)
     if (-not "$SolutionRoot".Trim()) { $SolutionRoot = Join-Path $RepoRoot 'SOLUTIONS\PIM4EntraPS' }
     $res = @{ ok = $false; failedStep = ''; reason = ''; completed = (New-Object System.Collections.Generic.List[string]); keyVaultId = ''; keyId = ''; upstreamScope = ''; frontImage = '' }
     $say = { param($id, $st, $msg) if ($OnStep) { try { & $OnStep $id $st $msg } catch { } } }
@@ -256,11 +263,21 @@ function Invoke-PimInstallSigninFront {
                     throw ("the Key Vault name '$KeyVaultName' is taken ($($avail.reason)) -- a deleted vault keeps its name for 90 days. " +
                            "Set another name in the answers (keyVaultName) and resume the installation")
                 }
-                $vault = & $Io.Arm 'PUT' $vaultPath (New-PimInstallKeyVaultBody -Location $Location -TenantId $TenantId) $kvApi
+                $vault = & $Io.Arm 'PUT' $vaultPath (New-PimInstallKeyVaultBody -Location $Location -TenantId $TenantId -Private:$PrivateNetwork) $kvApi
                 for ($i = 0; $i -lt 36 -and "$($vault.properties.provisioningState)" -notin 'Succeeded', ''; $i++) { & $sleep 5; $vault = & $Io.Arm 'GET' $vaultPath $null $kvApi }
                 if (-not $vault) { throw "the Key Vault $KeyVaultName was not created" }
             }
             if (-not [bool]$vault.properties.enableRbacAuthorization) { throw "the Key Vault $KeyVaultName does not use Azure RBAC -- the install's vault must (it was not made by this install)" }
+            if ($PrivateNetwork) {
+                # rule 11: PATCH to the shape + READ BACK + the endpoint in the zone, BEFORE the key (a recovered vault ignores
+                # networkAcls and comes back with bypass None -> the ARM key calls answer 400 ForbiddenByConnection)
+                if (-not (Get-Command Invoke-PimKeyVaultRule11 -ErrorAction SilentlyContinue)) { . (Join-Path $SolutionRoot 'engine\_shared\PIM-KeyVaultPrivate.ps1') }
+                # no GetNewClosure() (see New-PimInstallSigninFrontIo): $Io / $kvApi are found through the call chain
+                $kvArm = { param($m, $p, $b) $pp, $q = "$p" -split '\?api-version=', 2; & $Io.Arm $m $pp $b $(if ($q) { $q } else { $kvApi }) }
+                $kv11 = Invoke-PimKeyVaultRule11 -Arm $kvArm -VaultId $vaultPath -SqlServerName (("$sqlServer" -split '\.')[0]) -Sleep $sleep
+                foreach ($l in @($kv11.lines)) { & $say $step 'waiting' "$($l.text)" }
+                if (-not $kv11.ok) { throw "the install is private, so its Key Vault must be too -- $($kv11.reason). Nothing was stored in the vault; resume the installation once it is fixed" }
+            }
             $key = & $Io.Arm 'GET' $keyPath $null $kvApi
             if (-not $key) { $key = & $Io.Arm 'PUT' $keyPath @{ properties = @{ kty = 'RSA'; keySize = 2048; keyOps = @('wrapKey', 'unwrapKey') } } $kvApi }
             if (-not $key) { throw "the key '$($script:PimSfiKeyName)' could not be created in $KeyVaultName" }

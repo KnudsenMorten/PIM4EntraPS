@@ -52,7 +52,9 @@ param(
     # only (never the ring / promote call): [uri]::EscapeDataString of the points joined with a line feed (%0A between
     # points), at most 8000 characters raw, never refused by Invardia. Not given = no header (no behaviour change).
     # PIM_PUBLISH_RELEASENOTES = 0 / off / false / no turns the header off without a release (framework 12.22 3(b)).
-    [string[]]$ReleaseNotes = @()
+    [string[]]$ReleaseNotes = @(),
+    # PACKAGE-CLEAN-WORDLIST: Invardia's machine-local word list the content scan reads too (unreadable = REFUSED)
+    [string]$WordListPath = 'C:\ProgramData\Invardia\package-clean\words.txt'
 )
 $ErrorActionPreference = 'Stop'
 function Step([string]$m) { Write-Host "==> $m" -ForegroundColor Cyan }
@@ -235,8 +237,9 @@ Step 'check the zip'
 # The shape (one top folder, VERSION inside = -Version) AND SEC-PKG-INTERNAL: REFUSED when any internal-only path is in it --
 # nothing is sent and the zip is removed (Test-PimReleaseZip, _PimReleasePackage.ps1; tests/Test-PimInvardiaPublish.ps1 SP*).
 # Framework 0 item 7: the CONTENT too -- every text file against PIM's private identifier list (internal\REAL-IDENTIFIERS.md,
-# in this repository, never in the package) + the secret shapes. A hit names the file and line, never the identifier.
-$pkgDeny = @(); try { $pkgDeny = @(Read-PimReleaseDenylist -Path (Join-Path $sol 'internal\REAL-IDENTIFIERS.md')) } catch { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue; throw "REFUSED: $($_.Exception.Message) -- nothing was sent" }
+# in this repository, never in the package) + Invardia's word list (PACKAGE-CLEAN-WORDLIST, machine-local, never in the
+# repository) + the secret shapes. A hit names the file and line, never the identifier. Either list unreadable = REFUSED.
+$pkgDeny = @(); try { $pkgDeny = @(Get-PimReleaseDeny -SolutionRoot $sol -WordListPath $WordListPath) } catch { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue; throw "REFUSED: $($_.Exception.Message) -- nothing was sent" }
 $zc = Test-PimReleaseZip -ZipPath $zip -Version $Version -Deny $pkgDeny
 if (-not $zc.ok) { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue; throw "$($zc.reason) -- nothing was sent" }
 $count = $zc.count

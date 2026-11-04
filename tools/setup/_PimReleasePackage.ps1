@@ -193,6 +193,47 @@ function Read-PimReleaseDenylist {
     return $out.ToArray()
 }
 
+# PACKAGE-CLEAN-WORDLIST (framework installer rule 7, Invardia 2026-11-03): the scan ALSO reads Invardia's machine-local word
+# list -- one word per line, '#' comments (environment handles and their parts, former handles, customer names, tenant ids, our
+# hosts). Whole word, any case. It never enters the repository or a package; a finding names the list's entry NUMBER, never
+# the word. FAILS CLOSED: an unreadable or empty list stops the release. A word right after "brand of" / "operated by" /
+# "issued by" is the licensor / legal line and is allowed there only.
+$script:PimReleaseWordListPath = 'C:\ProgramData\Invardia\package-clean\words.txt'
+$script:PimReleaseLegalLead = '(?i)\b(?:brand of|operated by|issued by)\s+'
+
+function Read-PimReleaseWordList {
+    <#
+      Invardia's word list -> @( @{ n = 'W<k>'; kind = 'word'; value; legal = $true } ). Throws when the file is missing or carries
+      no word (fail closed). -Text: the file's text (test seam).
+    #>
+    param([string]$Path = $script:PimReleaseWordListPath, [string]$Text = '')
+    if (-not "$Text") {
+        if (-not "$Path".Trim() -or -not (Test-Path -LiteralPath $Path)) { throw "Invardia's package word list is not there ($Path) -- the package cannot be checked, so it is refused" }
+        $Text = [IO.File]::ReadAllText($Path)
+    }
+    $out = New-Object System.Collections.Generic.List[object]
+    $k = 0
+    foreach ($line in ("$Text" -split "`r?`n")) {
+        $v = ($line -replace '#.*$', '').Trim()
+        if ($v.Length -lt 3) { continue }
+        $k++
+        $out.Add(@{ n = "W$k"; kind = 'word'; value = $v.ToLowerInvariant(); legal = $true })
+    }
+    if (-not $out.Count) { throw "Invardia's package word list carries no word -- the package cannot be checked, so it is refused" }
+    return $out.ToArray()
+}
+
+function Get-PimReleaseDeny {
+    <#
+      The whole content-scan list for a release package: PIM's own denylist (internal\REAL-IDENTIFIERS.md under -SolutionRoot)
+      PLUS Invardia's word list. Either one missing = throws (the release stops).
+    #>
+    param([Parameter(Mandatory)][string]$SolutionRoot, [string]$WordListPath = $script:PimReleaseWordListPath)
+    $own = @(Read-PimReleaseDenylist -Path (Join-Path $SolutionRoot 'internal\REAL-IDENTIFIERS.md'))
+    $words = @(Read-PimReleaseWordList -Path $WordListPath)
+    return @($own + $words)
+}
+
 function Find-PimReleaseContentHits {
     <#
       PURE. -Text of one package file (-Name, for the finding) against -Deny (Read-PimReleaseDenylist) and the secret shapes.
@@ -213,13 +254,22 @@ function Find-PimReleaseContentHits {
             default {
                 # word (any case) / case (exact) / guidhead (the first 8 hex of a real id, as a word): whole word only
                 $rx = $(if ($d.kind -eq 'case') { '' } else { '(?i)' }) + '(?<![A-Za-z0-9])' + [regex]::Escape($d.value) + '(?![A-Za-z0-9])'
-                $m = [regex]::Match($Text, $rx); if ($m.Success) { $idx = $m.Index }
+                foreach ($m in [regex]::Matches($Text, $rx)) {
+                    if ($d.legal) {
+                        # the licensor / legal line ("a brand of X", "issued by X") may name it; nowhere else
+                        $ls = $Text.LastIndexOf("`n", [Math]::Max(0, $m.Index - 1)) + 1
+                        if ($m.Index -eq 0) { $ls = 0 }
+                        if ([regex]::IsMatch($Text.Substring($ls, $m.Index - $ls), $script:PimReleaseLegalLead + '$')) { continue }
+                    }
+                    $idx = $m.Index; break
+                }
             }
         }
         if ($idx -ge 0) {
             $seen["$($d.n)"] = $true
             $what = switch ($d.kind) { 'guid' { 'a real tenant / subscription id' } 'guidhead' { 'the start of a real tenant / subscription id' } 'literal' { 'a real identifier' } default { 'a real customer / environment name' } }
-            $hits.Add(("{0}:{1} -- {2} (denylist entry {3})" -f $Name, (& $lineOf $idx), $what, $d.n))
+            $src = if ("$($d.n)".StartsWith('W')) { "Invardia's word list entry $($d.n.Substring(1))" } else { "denylist entry $($d.n)" }
+            $hits.Add(("{0}:{1} -- {2} ({3})" -f $Name, (& $lineOf $idx), $what, $src))
         }
     }
     foreach ($s in $script:PimReleaseSecretShapes) {

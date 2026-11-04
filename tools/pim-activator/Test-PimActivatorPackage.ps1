@@ -217,8 +217,18 @@ function Test-PimActivatorPackage {
         $fp = Join-Path $Path $f
         if (-not (Test-Path -LiteralPath $fp)) { continue }
         $txt = (Get-Content -LiteralPath $fp -Raw) -replace 'https://knudsenmorten\.github\.io/PIM4EntraPS/', '<update-feed>/'
-        foreach ($rx in @('PIM4EntraPS', 'Morten', 'KnudsenMorten', 'github\.com/KnudsenMorten', '2linkit', 'aka\.ms/morten')) {
+        foreach ($rx in @('PIM4EntraPS', 'Morten', 'KnudsenMorten', 'github\.com/KnudsenMorten', 'aka\.ms/morten')) {
             if ($txt -match $rx) { $legacyHits.Add("$f ($($rx -replace '\\', ''))") }
+        }
+        # PACKAGE-CLEAN-WORDLIST (Invardia 2026-11-03): the vendor's company name and every internal name come from Invardia's
+        # machine-local word list (never written here); a hit names the list's entry number, never the word
+        $wlFile = 'C:\ProgramData\Invardia\package-clean\words.txt'
+        if (Test-Path -LiteralPath $wlFile) {
+            $wk = 0
+            foreach ($wl in [IO.File]::ReadAllLines($wlFile)) {
+                $wv = ($wl -replace '#.*$', '').Trim(); if ($wv.Length -lt 3) { continue }; $wk++
+                if ([regex]::IsMatch($txt, '(?i)(?<![A-Za-z0-9])' + [regex]::Escape($wv) + '(?![A-Za-z0-9])')) { $legacyHits.Add("$f (word list entry $wk)") }
+            }
         }
     }
     $legacyOk = $legacyHits.Count -eq 0

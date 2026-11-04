@@ -488,7 +488,7 @@ param(
     [switch]$OverrideRingGate,
     [string]$Reason,
     [switch]$SkipUpdater,                    # leaves the environment with NO unattended update path
-    # MAIL-SKIP (owner 2026-10-31, Pingala): the 'mailsender' step does nothing -- no mailbox, no Exchange role activated for
+    # MAIL-SKIP (owner 2026-10-31, a customer install): the 'mailsender' step does nothing -- no mailbox, no Exchange role activated for
     # the deploying identity. The tenant's Exchange admin runs Initialize-PimMailSender (browser sign-in) afterwards.
     [switch]$SkipMailSender,
     [string]$DeployMarker   = 'PIMCOREENGINE-',

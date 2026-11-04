@@ -182,6 +182,9 @@ param(
     [scriptblock]$GrantSupport,
     [scriptblock]$ResolveHost,
     [scriptblock]$Http,
+    # REGION-ACCEPTS-NEW test seam: param([string]$Url, [string]$Body) -> @{ StatusCode; Content } (the ARM deployment VALIDATE
+    # POST). A real install (no -Http seam) posts over REST; a test that passes -Http without this one runs no validate.
+    [scriptblock]$HttpPost,
     # INSTALL-HARDEN-1: param([hashtable]$VerifyArgs) -> @{ done; failed[]; warnings[]; sentence; rows[] } (Confirm-PimInstall.ps1)
     [scriptblock]$VerifyInstall,
     # test seam (REQ 98.4 b): param([string]$Op, $Target) -- 'get' answers the address of the SQL firewall rule 'AllowSetupHost'
@@ -333,6 +336,7 @@ function Az-Text([string[]]$AzArgs) { "$(@(& $Az $AzArgs) -join "`n")".Trim() }
 function Az-Json([string[]]$AzArgs) { $t = Az-Text ($AzArgs + @('-o', 'json')); if ($t) { try { return ($t | ConvertFrom-Json) } catch { } }; return $null }
 # A REST read with a token taken FOR THE TARGET SUBSCRIPTION (its tenant). Never `az rest`: it has no --subscription and
 # uses the default account's tenant -- on a machine holding several logins that is another directory.
+$pimHttpSeamGiven = [bool]$Http   # REGION-ACCEPTS-NEW: a test that hands -Http (and no -HttpPost) runs no live validate
 if (-not $Http) { $Http = { param([string]$Url, [string]$Token) Invoke-RestMethod -Method GET -Uri $Url -Headers @{ Authorization = "Bearer $Token" } -TimeoutSec 60 } }
 function Get-InstallRest([string]$Url, [string]$Resource) {
     $t = Az-Json @('account', 'get-access-token', '--subscription', $cfg.subscriptionId, '--resource', $Resource)
@@ -579,7 +583,35 @@ if ($cfg.privateNetwork) {
 # names exactly what is missing and suggests the nearest region that has all of it. Reads only; the step id is kept (the
 # progress feed and Invardia's wizard know it).
 Pre 'preflight-sql-region' {
-    $rv = Invoke-PimRegionPreflight -SubscriptionId $cfg.subscriptionId -Location $cfg.location -Get { param($u) Get-InstallRest $u 'https://management.azure.com/' }
+    # REGION-ACCEPTS-NEW (framework installer rule 9): also an ARM deployment VALIDATE of the install's own resources (creates
+    # nothing) -- a region can offer every service and still refuse NEW resources for this subscription. A policy refusal or a
+    # 403 is a warning ("could not be checked"), never a stop.
+    $rgPost = $HttpPost
+    if (-not $rgPost -and -not $pimHttpSeamGiven -and -not $azSeam) {
+        $rgPost = {
+            param([string]$Url, [string]$Body)
+            $t = Az-Json @('account', 'get-access-token', '--subscription', $cfg.subscriptionId, '--resource', 'https://management.azure.com/')
+            if (-not "$($t.accessToken)") { return @{ StatusCode = 0; Content = 'no ARM token' } }
+            # 5.1 and 7: a 4xx answer throws -- its status from the response, its body from ErrorDetails
+            try {
+                $r = Invoke-WebRequest -Method POST -Uri $Url -Headers @{ Authorization = "Bearer $($t.accessToken)" } -ContentType 'application/json' -Body $Body -TimeoutSec 120 -UseBasicParsing
+                @{ StatusCode = [int]$r.StatusCode; Content = "$($r.Content)" }
+            } catch {
+                $resp = $_.Exception.Response
+                @{ StatusCode = $(if ($resp) { [int]$resp.StatusCode } else { 0 }); Content = $(if ("$($_.ErrorDetails.Message)") { "$($_.ErrorDetails.Message)" } else { "$($_.Exception.Message)" }) }
+            }
+        }
+    }
+    $rgArgs = @{}
+    if ($rgPost) {
+        $rgNames = Get-PimInstallNames -Config $cfg
+        $rgUrlPost = { param([string]$Path, [string]$Body) & $rgPost ("https://management.azure.com$Path") $Body }.GetNewClosure()
+        $rgExists = $null -ne (Get-InstallRest "https://management.azure.com/subscriptions/$($cfg.subscriptionId)/resourcegroups/$($rgNames.resourceGroup)?api-version=2021-04-01" 'https://management.azure.com/')
+        $rgIsApp = [bool]"$($who.supportAppId)".Trim()
+        $rgArgs = @{ Post = $rgUrlPost; ProbeNames = $rgNames; ResourceGroup = "$($rgNames.resourceGroup)"; ResourceGroupExists = $rgExists; TenantId = "$($cfg.tenantId)"
+                     AdminObjectId = $(if ($rgIsApp) { "$($who.supportAppId)" } else { "$($who.objectId)" }); AdminType = $(if ($rgIsApp) { 'Application' } else { 'User' }); PrivateNetwork = [bool]$cfg.privateNetwork }
+    }
+    $rv = Invoke-PimRegionPreflight -SubscriptionId $cfg.subscriptionId -Location $cfg.location -Get { param($u) Get-InstallRest $u 'https://management.azure.com/' } @rgArgs
     if (-not $rv.ok) {
         return @{ state = 'failed'; message = $rv.message; actionText = 'Choose another region with -Location, then start the installation again:'
                   actionCommand = $(if (-not $rv.suggestion) { '' } else { "-Location $($rv.suggestion)" }) }
@@ -766,7 +798,8 @@ if ($SigninFront -or -not $azSeam) {
     $sfArgs = @{ SubscriptionId = $cfg.subscriptionId; ResourceGroup = $names.resourceGroup; TenantId = $cfg.tenantId; Location = $cfg.location
                  ManagerApp = $names.managerApp; AcrName = $names.acr; SqlDatabase = $names.sqlDatabase; KeyVaultName = $names.keyVault
                  RepoRoot = (Split-Path -Parent (Split-Path -Parent $sol)); SolutionRoot = $sol; UpdateJob = $names.updateJob; Done = @($sfDone)
-                 StateFile = (Join-Path $StatePath 'signin-front-rollback.json') }
+                 StateFile = (Join-Path $StatePath 'signin-front-rollback.json')
+                 PrivateNetwork = [bool]$cfg.privateNetwork }   # rule 11: a private install's vault is private (made / recovered / found)
     if (-not $SigninFront) {
         $SigninFront = { param([hashtable]$A, [scriptblock]$OnStep)
             $io = New-PimInstallSigninFrontIo -SubscriptionId $A.SubscriptionId -ResourceGroup $A.ResourceGroup -TenantId $A.TenantId -AcrName $A.AcrName `

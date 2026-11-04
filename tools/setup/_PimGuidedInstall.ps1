@@ -173,7 +173,7 @@ function Test-PimInstallConfig {
     $ms = "$(& $get 'mailSender')".Trim()
     if ($ms -and $ms -notmatch $upn) { $err.Add("mailSender '$ms' is not an e-mail address") }
     $c.mailSender = $ms
-    # MAIL-SKIP (owner 2026-10-31, Pingala): the install leaves the mail sender to the tenant's own Exchange admin
+    # MAIL-SKIP (owner 2026-10-31, a customer install): the install leaves the mail sender to the tenant's own Exchange admin
     # (Initialize-PimMailSender, browser sign-in) -- the installing identity is given no Exchange role at all.
     # DEFAULT ON (owner 2026-10-31, both products: "mail is skipped in setup"): not given = skipped, unless a mailSender is
     # named (the explicit ask for the install to create it).
@@ -478,7 +478,8 @@ function Test-PimInstallCidrInside($Inner, $Outer) { [bool]($Inner -and $Outer -
 # Invoke-PimAsBuiltBlobEndpointConverge: with central zones it READS privatelink.blob.core.windows.net in the same group as
 # the SQL zone and never creates it there). No other private endpoint is made on a private install (checked 2026-11-03:
 # the sign-in front's Key Vault keeps its network; the hybrid worker and the MSP baseline are separate deploys).
-function Get-PimInstallPrivateZoneNames { @('privatelink.database.windows.net', 'privatelink.azurecr.io', 'privatelink.blob.core.windows.net') }
+# + privatelink.vaultcore.azure.net (framework installer rule 11: a private install's Key Vault has its endpoint in that zone)
+function Get-PimInstallPrivateZoneNames { @('privatelink.database.windows.net', 'privatelink.azurecr.io', 'privatelink.blob.core.windows.net', 'privatelink.vaultcore.azure.net') }
 # the registry's agent pool of a private install: the image builds run on it, inside the network (billed while it exists)
 function Get-PimInstallAgentPoolName { 'pimpool' }
 

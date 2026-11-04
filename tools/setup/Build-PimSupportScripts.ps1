@@ -72,35 +72,32 @@
 
     SCRIPT-DOC-1 (framework 12.7) + framework 12.10 item 11 ("scripts are big concern"), 2026-10-09:
       * every script in $script:PimScriptDocScripts (tools\setup\_PimScriptDoc.ps1) must have its manifest
-        tools\setup\script-docs\<Script>.doc.json; the build stamps version, docUrl, sha256 and the signature state into a
+        tools\setup\script-docs\<Script>.doc.json; the build stamps version, docUrl and sha256 into a
         copy next to the built script (<Script>.doc.json -- Invardia's renderer reads it from this folder) and lists it in
         SHA256SUMS.txt. A default-list build also hands over the manifests of the in-scope scripts that are part of the
         package rather than standalone (installers, operator routes), so every script has its page.
       * the built script's comment-based help gets .LINK <doc page> (from the ONE constant) and a .NOTES block with the
         permissions it needs and the changes it makes (from the manifest), so Get-Help -Full / -Online show them.
-      * Authenticode: with -SigningCertThumbprint (or $env:PIM_CODESIGN_THUMBPRINT) each built .ps1 is signed with that
-        code-signing certificate from Cert:\CurrentUser\My or Cert:\LocalMachine\My (never a file, never in the repo)
-        BEFORE it is hashed. Without one the build says NOT SIGNED in its output only; the published manifests and
-        README.txt then carry no signing text at all (owner 2026-10-28, "say nothing"). A configured thumbprint that cannot be used fails the build (never a silent unsigned file).
+      * NOT-SIGNED-WARNING-STALE (2026-11-03; owner: "we will newer sign a script", Invardia DESIGN ch 7): scripts are never
+        signed -- integrity is SHA256SUMS.txt. The build has no signing path, prints no signing warning, and the manifests
+        and README.txt carry no signing text.
       * README.txt: one line per script -- name, documentation page, SHA256 -- and the two-line download + run form (verification described apart).
 
 .EXAMPLE
     .\tools\setup\Build-PimSupportScripts.ps1 -OutDir C:\ProgramData\Invardia\handover\support-scripts\pim-manager\2.4.522
-.EXAMPLE
-    .\tools\setup\Build-PimSupportScripts.ps1 -OutDir <handover folder> -SigningCertThumbprint <thumbprint> -TimestampServer http://timestamp.digicert.com
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$OutDir,
     [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1', 'Set-PimSqlTier.ps1', 'New-PimHubPrepareScript.ps1', 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1', 'pim-hybrid-worker/Install-PimHybridWorker.ps1', 'Set-PimLicense.ps1', 'Grant-PimSupportSqlAccess.ps1', 'Invoke-PimSupportSqlAccessJob.ps1', 'Set-PimSigninFrontSqlState.ps1', 'Start-PimManagerInstall.ps1', 'Import-PimV1Data.ps1'),
-    # 12.10 item 11: the code-signing certificate (thumbprint of a certificate WITH its private key in CurrentUser\My or
-    # LocalMachine\My). Empty = not signed, said loudly.
-    [string]$SigningCertThumbprint = "$env:PIM_CODESIGN_THUMBPRINT",
-    [string]$TimestampServer = "$env:PIM_CODESIGN_TIMESTAMP_URL",
     # Also hand over the manifests of the in-scope package scripts (default: only when -Scripts is the default list).
-    [switch]$IncludePackageManifests
+    [switch]$IncludePackageManifests,
+    # PACKAGE-CLEAN-WORDLIST (Invardia 2026-11-03): Invardia's machine-local word list (never in the repository). Every word
+    # in it is a forbidden name in a published script, like the internal denylist's. Not on this machine = a warning.
+    [string]$WordListPath = 'C:\ProgramData\Invardia\package-clean\words.txt'
 )
 $ErrorActionPreference = 'Stop'
+$script:PimPublicScriptWordFile = $WordListPath
 $setup = $PSScriptRoot
 $tools = Split-Path $setup -Parent
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
@@ -110,23 +107,6 @@ $docDir = Join-Path $setup 'script-docs'
 if (-not $PSBoundParameters.ContainsKey('Scripts')) { $IncludePackageManifests = $true }
 $inScope = @{}
 foreach ($e in $script:PimScriptDocScripts) { $inScope[(Get-PimScriptDocName -Script $e.Path).ToLowerInvariant()] = $e }
-
-# ---- signing (12.10 item 11) -------------------------------------------------------------------------------------------
-$signCert = $null
-$tp = ("$SigningCertThumbprint" -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
-if ($tp) {
-    foreach ($store in 'Cert:\CurrentUser\My', 'Cert:\LocalMachine\My') {
-        $c = Get-ChildItem -LiteralPath $store -ErrorAction SilentlyContinue | Where-Object { $_.Thumbprint -eq $tp } | Select-Object -First 1
-        if ($c) { $signCert = $c; break }
-    }
-    if (-not $signCert) { throw "code-signing certificate $tp was not found in CurrentUser\My or LocalMachine\My -- nothing built (an unsigned file is never handed over in its place)" }
-    if (-not $signCert.HasPrivateKey) { throw "code-signing certificate $tp has no private key here -- nothing built" }
-    $eku = @($signCert.EnhancedKeyUsageList | ForEach-Object { "$($_.ObjectId)" })
-    if ($eku -notcontains '1.3.6.1.5.5.7.3.3') { throw "certificate $tp is not a code-signing certificate (no Code Signing EKU) -- nothing built" }
-    Write-Host "signing with: $($signCert.Subject) (thumbprint $tp, expires $($signCert.NotAfter.ToString('yyyy-MM-dd')))"
-} else {
-    Write-Warning 'NOT SIGNED: no code-signing certificate configured (-SigningCertThumbprint / PIM_CODESIGN_THUMBPRINT). The files are built and checksummed but carry no Authenticode signature; framework 12.10 item 11 says an unsigned script is not published.'
-}
 
 function Read-PimScriptDocManifest {
     # The source manifest for one in-scope script, or $null when the script is not in scope. In scope + missing = throw.
@@ -368,7 +348,8 @@ function Get-PimPublicScriptForbiddenNames {
     # of this list on purpose -- a test must not trust the build's list. DOC-18 (2026-10-30): no real name is written here
     # (this file ships) -- every customer, person, tenant and internal environment comes from the internal denylist
     # (Get-PimPublicScriptDenyEntries); only the generic platform / tool words stay.
-    @('(?i)automatit', '(?i)automateit', '(?i)2linkit', 'Setup-PimContainers', 'Initialize-PlatformEnvironment') +
+    # PACKAGE-CLEAN-WORDLIST: the vendor's company name is on Invardia's word list (Get-PimPublicScriptDenyEntries), not here
+    @('(?i)automatit', '(?i)automateit', 'Setup-PimContainers', 'Initialize-PlatformEnvironment') +
     @(Get-PimPublicScriptDenyEntries | ForEach-Object { $_.rx })
 }
 
@@ -407,6 +388,25 @@ function Get-PimPublicScriptDenyEntries {
         if ($g.Success) { $out.Add([pscustomobject]@{ rx = '(?i)\b' + $g.Groups['g'].Value + '[0-9a-f-]*'; public = '<tenant>' }) }
     }
     if (-not $out.Count) { throw "cannot build the support scripts: the private name list ($p) has no entries" }
+    # PACKAGE-CLEAN-WORDLIST: plus Invardia's word list (one word per line, '#' comments; whole word, any case). Set by the build
+    # (-WordListPath); a test that lifts this function without setting it reads the internal denylist only. Not on this machine
+    # (a test VM) = said once, the internal denylist still applies; the STOPPING scan is the release package's
+    # (_PimReleasePackage.ps1 Get-PimReleaseDeny, fails closed), which every hand-over build machine runs.
+    $wl = "$script:PimPublicScriptWordFile"
+    if ($wl -and -not (Test-Path -LiteralPath $wl)) {
+        if (-not $script:PimPublicScriptWordWarned) { Write-Warning "Invardia's package word list is not on this machine ($wl) -- the published scripts are checked against the internal name list only"; $script:PimPublicScriptWordWarned = $true }
+        $wl = ''
+    }
+    if ($wl) {
+        $nw = 0
+        foreach ($line in [IO.File]::ReadAllLines($wl)) {
+            $v = ($line -replace '#.*$', '').Trim()
+            if ($v.Length -lt 3) { continue }
+            $nw++
+            $out.Add([pscustomobject]@{ rx = '(?i)(?<![A-Za-z0-9])' + [regex]::Escape($v) + '(?![A-Za-z0-9])'; public = 'an internal name' })
+        }
+        if (-not $nw) { throw "cannot build the support scripts: Invardia's package word list ($wl) has no words" }
+    }
     return @($out.ToArray())
 }
 
@@ -426,7 +426,6 @@ function ConvertTo-PimPublicScriptText {
     foreach ($d in $deny) { $rules.Add(@($d.rx, $d.public)) }
     $rules.Add(@('\ba test tenant\s*(?:/|\+|and|&)\s*a test tenant\b', 'two test tenants'))
     foreach ($r in @(@('(?i)rg-automateit-', 'rg-pim-'), @('(?i)\bautomateit\b', 'the platform'),
-        @("(?i)\b2linkit's\b", "the vendor's"), @('(?i)\b2linkit\b', 'the vendor'),
         @('\bSetup-PimContainers(?:\.ps1)?', 'the deploy'), @('\bInitialize-PlatformEnvironment(?:\.ps1)?', 'the deploy'))) { $rules.Add($r) }
     $tokens = $null; $perr = $null
     [void][System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$perr)
@@ -494,13 +493,6 @@ foreach ($s in $Scripts) {
         if (@($comErr).Count) { throw "community\$name does not parse after inlining: $($comErr[0].Message)" }
         $comDots = @($comAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot }, $true))
         if ($comDots.Count) { throw "community\$name still dot-sources after inlining (line $($comDots[0].Extent.StartLineNumber): $($comDots[0].Extent.Text))" }
-        if ($signCert) {
-            $csa = @{ FilePath = $comOut; Certificate = $signCert; HashAlgorithm = 'SHA256' }
-            if ("$TimestampServer".Trim()) { $csa['TimestampServer'] = "$TimestampServer".Trim() }
-            [void](Set-AuthenticodeSignature @csa)
-            $cchk = Get-AuthenticodeSignature -FilePath $comOut
-            if (-not $cchk.SignerCertificate -or $cchk.SignerCertificate.Thumbprint -ne $signCert.Thumbprint -or "$($cchk.Status)" -in @('NotSigned', 'HashMismatch')) { throw "community\$name could not be signed -- nothing handed over unsigned in its place" }
-        }
         $comHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $comOut).Hash.ToLowerInvariant()
         [IO.File]::WriteAllLines((Join-Path $comDir 'SHA256SUMS.txt'), @("$comHash  $name"))
         Write-Host "built community\$name (the GitHub release copy, sha256 $comHash)"
@@ -528,31 +520,19 @@ foreach ($s in $Scripts) {
         $dots = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot }, $true))
         if ($dots.Count) { throw "$name still dot-sources after inlining (line $($dots[0].Extent.StartLineNumber): $($dots[0].Extent.Text))" }
     }
-    # 12.10 item 11: sign BEFORE hashing, then prove the signature is there and is ours
-    $signer = ''
-    if ($signCert) {
-        $sa = @{ FilePath = $out; Certificate = $signCert; HashAlgorithm = 'SHA256' }
-        if ("$TimestampServer".Trim()) { $sa['TimestampServer'] = "$TimestampServer".Trim() }
-        $sig = Set-AuthenticodeSignature @sa
-        $chk = Get-AuthenticodeSignature -FilePath $out
-        if (-not $chk.SignerCertificate -or $chk.SignerCertificate.Thumbprint -ne $signCert.Thumbprint -or "$($chk.Status)" -in @('NotSigned', 'HashMismatch')) {
-            throw "$name could not be signed ($($sig.Status): $($sig.StatusMessage)) -- nothing handed over unsigned in its place"
-        }
-        $signer = "$($signCert.Subject)"
-    }
     $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $out).Hash.ToLowerInvariant()
     $sums.Add("$h  $name")
     $built.Add($name)
     $lines.Add(('{0}  {1}  sha256 {2}' -f $name, $docUrl, $h))
-    Write-Host "built $name ($((Get-Item $out).Length) bytes, sha256 $h, $(if ($signer) { 'signed' } else { 'NOT SIGNED' }))"
-    if ($manifest) { $docs.Add(@{ Manifest = $manifest; Name = $docName; Sha = $h; Signer = $signer; Standalone = $true }) }
+    Write-Host "built $name ($((Get-Item $out).Length) bytes, sha256 $h)"
+    if ($manifest) { $docs.Add(@{ Manifest = $manifest; Name = $docName; Sha = $h; Standalone = $true }) }
 }
 # 12.7: the package scripts' manifests (installers, operator routes) -- they have a page too, no download
 if ($IncludePackageManifests) {
     foreach ($e in $script:PimScriptDocScripts) {
         $n = Get-PimScriptDocName -Script $e.Path
         if (@($docs | Where-Object { $_.Name -eq $n }).Count) { continue }
-        $docs.Add(@{ Manifest = (Read-PimScriptDocManifest -Name $n); Name = $n; Sha = ''; Signer = ''; Standalone = $false })
+        $docs.Add(@{ Manifest = (Read-PimScriptDocManifest -Name $n); Name = $n; Sha = ''; Standalone = $false })
         $lines.Add(('{0}.ps1  {1}  (part of the PIM Manager package: tools/{2})' -f $n, (Get-PimScriptDocUrl -Script $n), $e.Path))
     }
 }
@@ -567,35 +547,37 @@ foreach ($d in $docs) {
         # INSTALL-1 ALIGN: the hand-over's launcher is the PRO copy, hosted by Invardia -- never the GitHub release link
         $o['download'] = if ($d.Name -eq 'Start-PimManagerInstall') { "$($script:PimSupportScriptBaseUrl)Start-PimManagerInstall.ps1" } else { Get-PimSupportScriptUrl -Script $d.Name }
         $o['sha256'] = $d.Sha
-        # The manifests are PUBLISHED next to the scripts (owner 2026-10-28, "say nothing"): an unsigned build carries no
-        # signing field at all; only a signed build names its signer.
-        if ($d.Signer) { $o['signed'] = $true; $o['signer'] = $d.Signer }
+        # scripts are never signed: no signing field (a source manifest that still carries one loses it here)
+        foreach ($k in 'signed', 'signer') { if ($o.Contains($k)) { $o.Remove($k) } }
     }
     $mf = Join-Path $OutDir "$($d.Name).doc.json"
     [IO.File]::WriteAllText($mf, ($o | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
     $sums.Add("$((Get-FileHash -Algorithm SHA256 -LiteralPath $mf).Hash.ToLowerInvariant())  $($d.Name).doc.json")
 }
-[IO.File]::WriteAllLines((Join-Path $OutDir 'SHA256SUMS.txt'), $sums)
 $first = if ($built.Count) { $built[0] } else { 'Initialize-PimSqlAdminGroup.ps1' }
 # This README is PUBLISHED (invardia.com/support/pim/README.txt). Owner 2026-10-28: public text says what the product does and
-# never what it does not check -- so an unsigned build says nothing about signing here or in the manifests (only the build
-# output says it, for the hand-over), and a signed build names its signer.
-$signLine = if ($signCert) { "`r`nSIGNED: every .ps1 carries an Authenticode signature by $($signCert.Subject) (thumbprint $($signCert.Thumbprint))." } else { '' }
-$signCheck = if ($signCert) { ", and on Windows Get-AuthenticodeSignature .\<file> reports Valid" } else { '' }
+# never what it does not check; scripts are never signed (owner 2026-11-03), so it says nothing about signing.
 @"
 PIM Manager $version -- standalone support scripts for https://invardia.com/support/pim/<file>
-Each file is self-contained (no other files needed). Documentation index: $($script:PimScriptDocBaseUrl)$signLine
+Each file is self-contained (no other files needed). Documentation index: $($script:PimScriptDocBaseUrl)
 
 Run a script -- two lines, download then run (owner 2026-10-11; never pipe to Invoke-Expression):
   Invoke-WebRequest https://invardia.com/support/pim/$first -OutFile $first
   .\$first -WhatIf
 
 Optional, for whoever verifies a download (never part of the shown command): its SHA256 is its line in SHA256SUMS.txt
-(Get-FileHash .\<file> -Algorithm SHA256)$signCheck.
+(Get-FileHash .\<file> -Algorithm SHA256).
 
 Scripts (name, documentation page, SHA256):
 $($lines -join "`r`n")
 
 Manifests: <Script>.doc.json next to each script (framework 12.7) -- the source of each documentation page.
-Checksums: SHA256SUMS.txt (scripts + manifests). Rebuilt with every PIM release that changes them (tools/setup/Build-PimSupportScripts.ps1).
+Checksums: SHA256SUMS.txt (every file of this folder). Rebuilt with every PIM release that changes them (tools/setup/Build-PimSupportScripts.ps1).
 "@ | Set-Content -LiteralPath (Join-Path $OutDir 'README.txt') -Encoding utf8
+# DLV-04 (framework 0.1 B (3), Invardia's alignment checklist 2026-11-03): SHA256SUMS.txt covers EVERY file of the hand-over --
+# the scripts, the manifests, README.txt and the community launcher copy (community/<name>; community\SHA256SUMS.txt keeps its
+# own one line for the GitHub release). Written last, so README.txt is hashed as handed over.
+$comCopy = Join-Path $OutDir 'community\Start-PimManagerInstall.ps1'
+if (Test-Path -LiteralPath $comCopy) { $sums.Add("$((Get-FileHash -Algorithm SHA256 -LiteralPath $comCopy).Hash.ToLowerInvariant())  community/Start-PimManagerInstall.ps1") }
+$sums.Add("$((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $OutDir 'README.txt')).Hash.ToLowerInvariant())  README.txt")
+[IO.File]::WriteAllLines((Join-Path $OutDir 'SHA256SUMS.txt'), $sums)
