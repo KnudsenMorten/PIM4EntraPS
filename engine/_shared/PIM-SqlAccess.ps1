@@ -547,6 +547,12 @@ function Get-PimSqlAccessRevokeList {
     foreach ($h in @($Held | Where-Object { $_ })) {
         if (-not $Catalog.Contains("$($h.role)")) { continue }
         if ("$($h.on)" -eq 'pim.usp_ApplyAccess') { continue }
+        # ALIGN 2026-11-04 (internal's updater: "revoke pim_engine EXECUTE pimsupport.usp_SupportGrant: schema 'pimsupport' is
+        # not a product schema" -> the whole converge threw, the sqlAccess verdict was never refreshed = "unknown"): a grant on a
+        # schema OUTSIDE the product schemas belongs to another signed module (the support JIT, PIM-SupportJit.ps1, grants its
+        # own procedures) -- the converge neither owns nor may revoke it, so it is left alone.
+        $hs = if ("$($h.on)" -match '^SCHEMA::([A-Za-z_]+)$') { $Matches[1] } elseif ("$($h.on)" -match '^([A-Za-z_]+)\.') { $Matches[1] } else { '' }
+        if ($hs -and $hs -notin $script:PimSqlAccessSchemas) { continue }
         if (-not $want.ContainsKey("$($h.role)|$($h.perm)|$($h.on)".ToLowerInvariant())) {
             [void]$out.Add([pscustomobject]@{ role = "$($h.role)"; perm = "$($h.perm)"; on = "$($h.on)" })
         }

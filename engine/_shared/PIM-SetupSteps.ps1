@@ -379,9 +379,16 @@ function New-PimSetupSteps {
     else {
         $g = ConvertTo-PimSetupStepBool (Get-PimSetupStepField $ssa 'group'); $d = ConvertTo-PimSetupStepBool (Get-PimSetupStepField $ssa 'dbUser')
         $at = Get-PimSetupStepField $ssa 'checkedUtc'
-        if ($g -eq $true -and $d -eq $true) { & $set 'support-sql' 'ok' 'the Support app is in the SQL admin group and has its database user' $at }
-        elseif ($g -eq $false -or $d -eq $false) { & $set 'support-sql' 'missing' ("missing: " + ((@($(if ($g -eq $false) { 'SQL admin group membership' }), $(if ($d -eq $false) { 'database user in db_owner' })) | Where-Object { $_ }) -join ', ')) $at }
-        else { & $set 'support-sql' 'unknown' 'not determined: the group or the database user could not be read' $at }
+        # ALIGN 2026-11-04 (framework "setupSteps on the heartbeat", Invardia commit 45ea65b; SECAUDIT-1a / OPEN-01): ok = the
+        # standing READ-ONLY role + the just-in-time grant path (the signed pimsupport procedures) are in place. The SQL admin
+        # group / db_owner no longer make this ok -- standing admin access is what SECAUDIT-1a removes. Read, never inferred:
+        # readOnly is sent only when the JIT procedures answered; jitOpen false WITHOUT readOnly = the JIT path is not set up.
+        $ro = ConvertTo-PimSetupStepBool (Get-PimSetupStepField $ssa 'readOnly'); $jo = ConvertTo-PimSetupStepBool (Get-PimSetupStepField $ssa 'jitOpen')
+        $standing = (@($(if ($g -eq $true) { 'SQL admin group' }), $(if ($d -eq $true) { 'db_owner' })) | Where-Object { $_ }) -join ' + '
+        if ($ro -eq $true) { & $set 'support-sql' 'ok' 'the standing read-only access and the just-in-time grant path are in place' $at }
+        elseif ($ro -eq $false) { & $set 'support-sql' 'missing' 'the just-in-time grant path is in place, the standing read-only access is missing' $at }
+        elseif ($jo -eq $false) { & $set 'support-sql' 'missing' ("the just-in-time grant path is not set up on this install$(if ($standing) { " (standing access meanwhile: $standing)" })") $at }
+        else { & $set 'support-sql' 'unknown' 'not determined: the just-in-time access state could not be read' $at }
     }
 
     # ---- S4a / S4b as-built (updater, Get-PimAsBuiltSetupState) ------------------------------------------------------

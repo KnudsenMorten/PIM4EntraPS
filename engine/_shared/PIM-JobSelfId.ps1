@@ -71,8 +71,22 @@ function Invoke-PimJobSelfIdUpdate {
         }
         if (-not $oid) { $oid = "$($j.identity.principalId)".Trim() }
         if (-not $oid) { $notes.Add("${name}: no identity to grant 'Reader' on itself"); continue }
+        # ALIGN 2026-11-04 (Invardia code check, job-self-reader "missing" at 12 installs where the Support app HAD granted it):
+        # READ first. A grant made by the Support app (another assignment name) or inherited from the group / subscription makes
+        # our PUT a 403 (the updater may not assign roles), which used to be reported as "not assigned". Any Reader, Contributor
+        # or Owner assignment for this identity at the job or above it = the job can read its own runs = done.
+        $have = ''
+        try {
+            $flt = [uri]::EscapeDataString("principalId eq '$oid'")
+            $ra = & $Arm 'GET' "$id/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&`$filter=$flt" $null
+            foreach ($a in @($ra.value)) {
+                $rd = "$($a.properties.roleDefinitionId)"
+                if ("$($a.properties.principalId)" -ieq $oid -and $rd -match '(?i)/(acdd72a7-3385-48ef-bd42-f606fba81ae7|b24988ac-6180-42a0-ab88-20f7382dd24c|8e3af657-a8ff-443c-a75c-2fe8c4bcb635)$') { $have = "$($a.properties.scope)"; break }
+            }
+        } catch { }   # cannot read the assignments: fall through to the PUT, as before
+        if ($have) { $log.Add("${name}: 'Reader' on itself already assigned (read back at $(if ($have -ieq $id) { 'the job' } else { $have }))"); continue }
         $an = Get-PimJobSelfReaderAssignmentName -Scope $id -PrincipalId $oid
-        $body = @{ properties = @{ roleDefinitionId = "/subscriptions/$SubscriptionId/providers/Microsoft.Authorization/roleDefinitions/acdd72a7-3385-48ef-bd42-f606fba81ae7"; principalId = $oid; principalType = 'ServicePrincipal' } }
+        $body =@{ properties = @{ roleDefinitionId = "/subscriptions/$SubscriptionId/providers/Microsoft.Authorization/roleDefinitions/acdd72a7-3385-48ef-bd42-f606fba81ae7"; principalId = $oid; principalType = 'ServicePrincipal' } }
         try {
             [void](& $Arm 'PUT' "$id/providers/Microsoft.Authorization/roleAssignments/$an`?api-version=2022-04-01" $body)
             $granted.Add($name); $log.Add("${name}: 'Reader' on itself ensured")

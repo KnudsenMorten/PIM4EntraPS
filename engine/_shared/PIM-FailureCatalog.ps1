@@ -132,6 +132,16 @@ $script:PimFailureRules = @(
        retryable = $true; severity = 'transient'
        fixes = @() }
 
+    # Invardia fix request dba9cbd6 (2026-11-04, 3 installs, 3.0.19, filed as pim-gen-0001 UNCLASSIFIED): the updater's
+    # signed-manifest call to Invardia got no answer ("Invardia could not be reached: ... HttpClient.Timeout of 30 seconds").
+    @{ code = 'UPDATE-INVARDIA-UNREACHABLE'
+       match = { param($m, $row) $m -match '(?i)Invardia could not be reached' }
+       title = 'The update could not ask Invardia which version to run'
+       cause = 'The updater asks Invardia for the version this installation''s ring may run. Invardia did not answer in time this run (a timeout or a network fault between this installation and Invardia). Nothing was fetched or changed: PIM Manager keeps running on its current version.'
+       remedy = 'Nothing to do at first: the next update run asks again. If it repeats on several runs in a row, check that the installation can reach https://invardia.com (outbound HTTPS), or contact Invardia support.'
+       retryable = $true; severity = 'transient'
+       fixes = @() }
+
     @{ code = 'UPDATE-NO-LICENCE'
        match = { param($m, $row) $m -match '(?i)no licence is installed -- Pro updates need' }
        title = 'No Pro licence is installed, so the Pro update was not fetched'
@@ -779,6 +789,7 @@ function Get-PimFailureCodeTable {
         ,@('UPDATE-ROLL-INCOMPLETE',           'pim-upd-0101',   'platform-timeout',  'nobody',   '',      '2.4.652')
         ,@('UPDATE-NO-LICENCE',                'pim-upd-0102',   'customer-config',   'support',  '',      '2.4.652')
         ,@('UPDATE-REGISTRY-PUSH-FAILED',      'pim-upd-0103',   'upstream-error',    'nobody',   '',      '2.4.671')
+        ,@('UPDATE-INVARDIA-UNREACHABLE',      'pim-upd-0104',   'upstream-error',    'nobody',   '',      '3.0.35')
         # the generic code of each CauseClass (framework 8.16: "an unknown failure gets the generic code of its CauseClass")
         ,@('UNCLASSIFIED',                     'pim-gen-0001',   'unclassified',      'product',  '',      '2.4.638')
         ,@('GENERIC:customer-config',          'pim-gen-0002',   'customer-config',   'customer', '',      '2.4.638')

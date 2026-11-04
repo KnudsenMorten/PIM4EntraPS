@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.35 -- 2026-11-04
+
+- When the update cannot reach Invardia in time, the status now says so plainly (the next update run asks again; nothing changed) instead of an unclassified error.
+
+## 3.0.34 -- 2026-11-04
+
+- The setup checks report what is really in place: a job that can already read its own runs (granted by support, or inherited) is no longer listed as missing; the database access check no longer stops on the time-limited support access objects, so its result is current again; support database access counts as done when the read-only access and the time-limited admin path are in place (standing admin access no longer counts).
+
 ## 3.0.33 -- 2026-11-04
 
 - Drift, alerts and pages never list a group PIM Manager does not define (a tenant's own groups and their owners were shown as drift); a private install can get a return route for your internal ranges through your hub firewall (made on a network PIM creates, named on the hand-off otherwise); a private install is never opened -- the build window and the mail sender's temporary firewall rule are refused on a private store.
