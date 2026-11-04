@@ -462,10 +462,25 @@ if ($DeleteSecret) {
     if (-not $sp.remove.Count) { Step 'no Easy Auth client secret left on the registration'; return $sp }
     foreach ($r in $sp.remove) {
         Step "remove the Easy Auth client secret '$($r.name)' ($($r.keyId)) from $appId"
-        [void](Invoke-PimSetupGraph -Method POST -Path "/applications/$($reg.id)/removePassword" -Body @{ keyId = "$($r.keyId)" })
+        # OPEN-02 (2026-11-04, a test install with TWO secrets): back-to-back removals answered 409 Directory_ConcurrencyViolation
+        # ("concurrent requests ... retry") -- space them out and retry that one answer once
+        try { [void](Invoke-PimSetupGraph -Method POST -Path "/applications/$($reg.id)/removePassword" -Body @{ keyId = "$($r.keyId)" }) }
+        catch {
+            if ("$($_.Exception.Message)" -notmatch '(?i)\b409\b|ConcurrencyViolation') { throw }
+            Start-Sleep -Seconds 10
+            [void](Invoke-PimSetupGraph -Method POST -Path "/applications/$($reg.id)/removePassword" -Body @{ keyId = "$($r.keyId)" })
+        }
+        Start-Sleep -Seconds 3
     }
-    $reg2 = Get-PimGraphApplication -Id $appId
-    $left = @((Get-PimSigninFrontSecretPlan -PasswordCredentials @($reg2.passwordCredentials)).remove)
+    # OPEN-02 (2026-11-04, internal): Graph answers the removal at once but its read can lag -- read back for up to ~30 s
+    # before calling it a failure (the first read right after removePassword still listed the secret; a re-run found none)
+    $left = @()
+    for ($rb = 0; $rb -lt 6; $rb++) {
+        $reg2 = Get-PimGraphApplication -Id $appId
+        $left = @((Get-PimSigninFrontSecretPlan -PasswordCredentials @($reg2.passwordCredentials)).remove)
+        if (-not $left.Count) { break }
+        Start-Sleep -Seconds 5
+    }
     if ($left.Count) { throw "read-back: $($left.Count) Easy Auth secret(s) still on the registration" }
     Step 'done: no Easy Auth client secret on the registration. The Container App secret that held it is now a dead value.'
     return $sp

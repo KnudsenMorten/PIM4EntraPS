@@ -117,6 +117,15 @@ param(
     # -LinkZonesToHub (INSTALL-1 item 5): the install's OWN privatelink zones are also linked to these VNets (the hub). Never
     # used for the customer's central zones (-PrivateDnsZonesResourceGroupId: read only).
     [string[]]$PrivateDnsZoneLinkVnetIds = @(),
+    # framework installer rule 11d (2026-11-04) -- THE RETURN ROUTE (found live at a customer install: the private web app timed
+    # out from the LAN because replies to the on-premises range left by Azure's default route instead of the hub firewall).
+    # -InternalRanges + -FirewallIp (both or neither): route table rt-pim in -ResourceGroupName, one route per range ->
+    # -FirewallIp (VirtualAppliance), BGP route propagation off, attached to the apps subnet, read back. A 401 / 403 is a
+    # warning + the network hand-off line, never a stop (rule 16). -ReturnRouteHandOffOnly: the VNet is the customer's own
+    # (-VnetId at install) -- nothing is written to it, the route is on the hand-off. Empty = nothing (as before).
+    [string[]]$InternalRanges = @(),
+    [string]$FirewallIp = '',
+    [switch]$ReturnRouteHandOffOnly,
     # 🔑 ACR TASKS RUN IN ACR'S OWN INFRASTRUCTURE, so `az acr build` cannot reach a registry whose
     # public access is off -- from anywhere outside the VNet. A dedicated agent pool runs those
     # tasks INSIDE the VNet instead, which is what makes an internal-only build reproducible from a
@@ -178,6 +187,7 @@ if (-not $sqlTierChosen) { $SqlServiceObjective = $sqlTierDefault }
 # 100.41 NO-AZ (framework 12.17): every Azure call below is ARM / Graph REST through PIM-Rest's ONE token client.
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-ArmSetup.ps1')
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-ReturnRoute.ps1')   # rule 11d: the return route
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
 . (Join-Path $PSScriptRoot '_PimRegions.ps1')            # BUG-300: the SQL region check after Microsoft.Sql is registered
 $null = Start-PimScriptRun -Script 'New-PimHostingPrerequisites'
@@ -194,7 +204,18 @@ function Resolve-PrereqPrivatelinkZone {
     $cz = [regex]::Match("$PrivateDnsZonesResourceGroupId".Trim(), '(?i)^/subscriptions/([^/]+)/resourceGroups/([^/]+?)/?$')
     if ("$PrivateDnsZonesResourceGroupId".Trim()) {
         if (-not $cz.Success) { throw "-PrivateDnsZonesResourceGroupId '$PrivateDnsZonesResourceGroupId' is not a resource group id (/subscriptions/<id>/resourceGroups/<name>)." }
-        $czId = "$((Get-PimArmPrivateDnsZone -SubscriptionId $cz.Groups[1].Value -ResourceGroup $cz.Groups[2].Value -Name $Zone -ErrorAsNull).id)"
+        # framework installer rule 16 (2026-11-04): the central zone is OUTSIDE the install's resource group -- a REFUSED read
+        # (401 / 403) is a customer task with a warning, never a stop (a missing zone was already listed by the preflight)
+        $czObj = $null
+        try { $czObj = Get-PimArmPrivateDnsZone -SubscriptionId $cz.Groups[1].Value -ResourceGroup $cz.Groups[2].Value -Name $Zone }
+        catch {
+            if ("$($_.Exception.Message)" -match '\b(401|403)\b|Forbidden|AuthorizationFailed') {
+                Write-Warning "    $Zone in $PrivateDnsZonesResourceGroupId may not be READ by this sign-in (refused) -- CUSTOMER TASK: the network team confirms the zone and registers this install's endpoint in it. The install goes on."
+                return @{ id = "$PrivateDnsZonesResourceGroupId/providers/Microsoft.Network/privateDnsZones/$Zone"; sub = $cz.Groups[1].Value; rg = $cz.Groups[2].Value; refused = $true }
+            }
+            $czObj = $null
+        }
+        $czId = "$($czObj.id)"
         if (-not "$czId".Trim()) { throw "the zone '$Zone' is not in $PrivateDnsZonesResourceGroupId -- your central zones are used and never created: create it there, or leave -PrivateDnsZonesResourceGroupId out." }
         Write-Host "    $Zone -- your central zone in $PrivateDnsZonesResourceGroupId (used; no zone or link is written there -- it must answer inside $vnet)"
         return @{ id = $czId; sub = $cz.Groups[1].Value; rg = $cz.Groups[2].Value }
@@ -207,7 +228,14 @@ function Resolve-PrereqPrivatelinkZone {
     foreach ($lv in @($PrivateDnsZoneLinkVnetIds | ForEach-Object { "$_".Trim() } | Where-Object { $_ })) {
         $ln = "link-$(($lv -split '/')[-1])"
         try { New-PimArmPrivateDnsLink -SubscriptionId $SubscriptionId -ResourceGroup $OwnResourceGroup -ZoneName $Zone -Name $ln -VnetId $lv -RegistrationEnabled $false }
-        catch { throw "the zone '$Zone' could not be linked to $lv ($($_.Exception.Message)) -- the right to join that network is needed (or leave -LinkZonesToHub out: the link is then on the network hand-off)." }
+        catch {
+            # framework installer rule 16: the hub network is OUTSIDE the install's resource group -- a refusal is a customer task
+            if ("$($_.Exception.Message)" -match '\b(401|403)\b|Forbidden|AuthorizationFailed|LinkedAuthorizationFailed') {
+                Write-Warning "    the zone '$Zone' may not be linked to $(($lv -split '/')[-1]) by this sign-in (refused) -- CUSTOMER TASK on the network hand-off: link $Zone to that network. The install goes on."
+                continue
+            }
+            throw "the zone '$Zone' could not be linked to $lv ($($_.Exception.Message)) -- leave -LinkZonesToHub out and the link is on the network hand-off."
+        }
         Write-Host "    $Zone linked to $(($lv -split '/')[-1])"
     }
     return @{ id = $zid; sub = $SubscriptionId; rg = $OwnResourceGroup }
@@ -217,6 +245,11 @@ $rg      = Get-PimEffective $ResourceGroupName "rg-automateit-$Token"
 $vnet    = Get-PimEffective $VnetName          "vnet-pim-$Token"
 $vnetRg  = Get-PimEffective $VnetResourceGroup $rg                  # INSTALL-1 item 5: the VNet's own resource group
 if ($SqlPublicAccessDisabled -and -not $SqlPrivateEndpoint -and -not $SkipSql) { throw '-SqlPublicAccessDisabled needs -SqlPrivateEndpoint: a SQL server with no public endpoint and no private one is reachable from nowhere.' }
+# rule 11d: the return route's answers are checked BEFORE anything is created (a parameter error, never half a route)
+$rrRanges = @(ConvertTo-PimReturnRouteRangeList $InternalRanges)
+if ([bool]$rrRanges.Count -ne [bool]"$FirewallIp".Trim()) { throw '-InternalRanges and -FirewallIp go together: the return route sends your internal ranges to your hub firewall -- give both, or neither.' }
+foreach ($rrR in $rrRanges) { $rrWhy = Test-PimReturnRouteRange -Cidr $rrR; if ($rrWhy) { throw "-InternalRanges: $rrWhy" } }
+if ("$FirewallIp".Trim()) { $rrWhy = Test-PimReturnRouteFirewallIp -Ip $FirewallIp; if ($rrWhy) { throw "-FirewallIp: $rrWhy" } }
 $subnet  = Get-PimEffective $SubnetName        'snet-pim-aca'
 $law     = Get-PimEffective $LogAnalyticsName  "law-pim-$Token"
 # ACR: alphanumeric only. An OVERRIDE is sanitised the same way a derived name is -- silently
@@ -294,6 +327,7 @@ if ($WhatIfPreference) {
         "register the resource providers Microsoft.App, Microsoft.ContainerRegistry, Microsoft.OperationalInsights, Microsoft.Network, Microsoft.Sql, Microsoft.Storage, Microsoft.KeyVault, Microsoft.ManagedIdentity, Microsoft.Insights in $SubscriptionId",
         "find or create resource group $rg in $Location",
         "find or create VNet $vnet ($vnetCidr) with subnet $subnet ($subnetCidr) delegated to Microsoft.App/environments",
+        $(if ($rrRanges.Count) { $(if ($ReturnRouteHandOffOnly) { "NOT write your network: the return route is on the network hand-off ($(Get-PimReturnRouteHandoffLine -InternalRanges $rrRanges -FirewallIp $FirewallIp -SubnetName $subnet))" } else { "find or create route table $(Get-PimReturnRouteTableName) ($(@($rrRanges | ForEach-Object { "$_ -> $("$FirewallIp".Trim())" }) -join ', '), VirtualAppliance, BGP route propagation off) and attach it to $subnet" }) }),
         "find or create Log Analytics workspace $law",
         "find or create container registry $acrPlan",
         $(if ($AcrPublicAccess -eq 'false' -or $SqlPrivateEndpoint) { "find or create private-endpoint subnet $PrivateEndpointSubnetName ($PrivateEndpointSubnetAddressPrefix) and the privatelink DNS zone(s)$(if ("$PrivateDnsZonesResourceGroupId".Trim()) { " -- your central zones in $PrivateDnsZonesResourceGroupId, used only (nothing created or written there)" } elseif ("$PrivateDnsResourceGroup".Trim()) { " in $PrivateDnsResourceGroup" })" }),
@@ -439,6 +473,41 @@ if (-not "$sn".Trim()) {
 }
 Write-Host "    $vnet / $subnet -> $sn"
 
+# ---- 3b. THE RETURN ROUTE (framework installer rule 11d, 2026-11-04) ------------------------------------------------
+# Found live at a customer install: DNS right, hub peering Connected, and the private PIM Manager still timed out from the
+# LAN -- the apps subnet had no route table, so the REPLIES to the on-premises range took Azure's default route instead of
+# going back through the hub firewall the request came in by, and the firewall dropped the asymmetric flow. Only when the
+# install was given -InternalRanges + -FirewallIp. A network PIM made: rt-pim (this resource group), one route per range ->
+# the firewall (VirtualAppliance), BGP propagation off, attached to the apps subnet (read-modify-write), READ BACK. The
+# customer's own network (-ReturnRouteHandOffOnly): nothing is written there -- the route is on the network hand-off. A 401 /
+# 403 (rule 16) or any other failure: a warning + the hand-off line; the install goes on (everything else still works).
+# The answers are also recorded as tags on THIS resource group: the nightly updater reports a missing route from them (it
+# never writes one). $global:PimReturnRouteState tells the guided install which hand-off line to print.
+$global:PimReturnRouteState = ''
+if ($rrRanges.Count) {
+    Write-Host "[3b] return route ..." -ForegroundColor Yellow
+    $rrApi = Get-PimSetupApiVersion network
+    $rrArm = {
+        param([string]$Method, [string]$Path, [object]$Body)
+        if ($Method -eq 'GET') { return (Invoke-PimSetupArm -Path $Path -ApiVersion $rrApi -NotFoundOk) }
+        $r = Invoke-PimSetupArm -Method $Method -Path $Path -Body $Body -ApiVersion $rrApi
+        # a route table / subnet PUT is accepted before it is done: wait, so the next write (the subnet) is not refused
+        # AnotherOperationInProgress and the read-back reads the finished state
+        [void](Wait-PimArmProvisioned -Path ($Path -replace '\?.*$', '') -ApiVersion $rrApi)
+        return $r
+    }
+    $rrRes = Invoke-PimReturnRouteConverge -InternalRanges $rrRanges -FirewallIp $FirewallIp -Location $Location -CustomerNetwork:$ReturnRouteHandOffOnly `
+                 -SubnetId (Get-PimArmResourceId $SubscriptionId $vnetRg 'Microsoft.Network/virtualNetworks' $vnet "subnets/$subnet") `
+                 -ResourceGroupId "/subscriptions/$SubscriptionId/resourceGroups/$rg" -Arm $rrArm
+    foreach ($l in @($rrRes.lines)) {
+        if ($l.level -eq 'warn') { Write-Warning "    $($l.text)" } else { Write-Host "    $($l.text)" -ForegroundColor $(if ($l.level -eq 'changed') { 'Cyan' } else { 'Gray' }) }
+    }
+    $global:PimReturnRouteState = "$($rrRes.state)"
+    # the updater's memory of the answers: a MERGE onto this install's OWN resource group (never the customer's network group)
+    try { [void](Merge-PimArmTags -ResourceId "/subscriptions/$SubscriptionId/resourceGroups/$rg" -Tags (Get-PimReturnRouteTags -InternalRanges $rrRanges -FirewallIp $FirewallIp)) }
+    catch { Write-Warning "    the return route's answers could not be recorded on $rg ($((("$($_.Exception.Message)") -split "`n")[0])) -- the nightly updater then cannot report a missing return route" }
+}
+
 # ---- 4. Log Analytics (ACA requires a workspace) ----------------------------
 Write-Host "[4] log analytics ..." -ForegroundColor Yellow
 try { [void](New-PimArmLogAnalytics -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $law -Location $Location) } catch { Write-PrereqRestNote $_.Exception.Message }
@@ -484,8 +553,7 @@ if (-not "$acrId".Trim()) {
         "You created a BASIC registry. Basic and Standard registries have NO network controls at " +
         "all -- no private endpoint, no firewall rules -- so a 'Disable public network access - " +
         "Container registries' policy cannot be satisfied by one at any setting: it is asking for a " +
-        "SKU, not a flag. Re-run with -AcrSku Premium -AcrPublicAccess false, or exempt that " +
-        "assignment (a standing waiver -- the registry stays publicly reachable)."
+        "SKU, not a flag. Re-run with -AcrSku Premium -AcrPublicAccess false."   # framework installer rule 17: only a safe change is advised
     } else {
         "Re-read the denial above: the assignment names the field it evaluated, which may not match " +
         "its display name."
@@ -513,11 +581,13 @@ if ($AcrPublicAccess -eq 'false') {
                    "-PrivateEndpointSubnetAddressPrefix <cidr inside $vnetCidr> (a /26 is plenty; each " +
                    "endpoint takes one address). Refusing to pick a range inside the customer's VNet.")
         }
-        try { [void](Set-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $peSubnet -AddressPrefix $PrivateEndpointSubnetAddressPrefix) }
+        # framework rule 11b: a subnet PIM creates keeps an outbound path for the build pool (new subnets are private by default)
+        $doaArg = @{}; if ("$AcrAgentPoolName".Trim()) { $doaArg['DefaultOutboundAccess'] = $true }
+        try { [void](Set-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $peSubnet -AddressPrefix $PrivateEndpointSubnetAddressPrefix @doaArg) }
         catch { Write-PrereqRestNote $_.Exception.Message }
         $peSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $peSubnet -ErrorAsNull).id)"
         if (-not "$peSubnetId".Trim()) { throw "could not create the private-endpoint subnet '$peSubnet' ($PrivateEndpointSubnetAddressPrefix) -- see the failure above." }
-        Write-Host "    subnet $peSubnet $PrivateEndpointSubnetAddressPrefix"
+        Write-Host "    subnet $peSubnet $PrivateEndpointSubnetAddressPrefix$(if ($doaArg.Count) { ' (default outbound access on, for the build pool)' })"
     } else { Write-Host "    subnet $peSubnet (exists)" }
 
     $peName = "pe-$acr"
@@ -558,14 +628,35 @@ if ("$AcrAgentPoolName".Trim()) {
     Write-Host "[5c] acr agent pool $AcrAgentPoolName ..." -ForegroundColor Yellow
     if ($AcrSku -ne 'Premium') { throw "-AcrAgentPoolName needs a Premium registry (this one is $AcrSku): agent pools are a Premium feature." }
     $poolState = "$((Get-PimArmAcrAgentPool -SubscriptionId $SubscriptionId -ResourceGroup $rg -Registry $acr -Name $AcrAgentPoolName -ErrorAsNull).properties.provisioningState)"
+    # framework installer rule 15 (2026-11-04): a pool whose create ended Failed / Canceled is NOT an existing pool -- it is
+    # removed and made again on this run (a resume), never printed as if it were there
+    if ("$poolState".Trim() -in 'Failed', 'Canceled') {
+        Write-Warning "    the build pool '$AcrAgentPoolName' is '$poolState' from an earlier run -- removing it and creating it again"
+        $poolPath = Get-PimArmResourceId $SubscriptionId $rg 'Microsoft.ContainerRegistry/registries' $acr "agentPools/$AcrAgentPoolName"
+        try { [void](Invoke-PimSetupArm -Method DELETE -Path $poolPath -ApiVersion (Get-PimSetupApiVersion acrPool)) } catch { Write-PrereqRestNote $_.Exception.Message }
+        for ($pw = 0; $pw -lt 60 -and "$((Get-PimArmAcrAgentPool -SubscriptionId $SubscriptionId -ResourceGroup $rg -Registry $acr -Name $AcrAgentPoolName -ErrorAsNull).properties.provisioningState)".Trim(); $pw++) { Start-Sleep -Seconds 10 }
+        $poolState = ''
+    }
     if (-not "$poolState".Trim()) {
-        $poolSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $PrivateEndpointSubnetName -ErrorAsNull).id)"
+        $poolSubnet = Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $vnetRg -VnetName $vnet -Name $PrivateEndpointSubnetName -ErrorAsNull
+        $poolSubnetId = "$($poolSubnet.id)"
+        # framework rule 11b: READ the outbound path BEFORE the pool -- a pool in a subnet with no way out fails inside
+        # Microsoft's deployment ("Deployment failed", found live 2026-11-04); never create a pool that must fail
+        $poolRt = $null
+        if ($poolSubnet -and $poolSubnet.properties.routeTable -and "$($poolSubnet.properties.routeTable.id)".Trim()) {
+            $poolRt = Invoke-PimSetupArm -Path "$($poolSubnet.properties.routeTable.id)" -ApiVersion (Get-PimSetupApiVersion network) -NotFoundOk -ErrorAsNull
+        }
+        $ob = Get-PimAcrPoolOutboundVerdict -Subnet $poolSubnet -RouteTable $poolRt
+        if (-not $ob.ok) { throw "the ACR agent pool '$AcrAgentPoolName' is NOT created: $($ob.reason)" }
+        Write-Host "    outbound path for the build pool: $($ob.how)"
         # The pool lives in the registry's region (as `acr agentpool create` placed it).
         $poolLoc = "$($acrObj.location)"; if (-not $poolLoc) { $poolLoc = $Location }
         try { [void](New-PimArmAcrAgentPool -SubscriptionId $SubscriptionId -ResourceGroup $rg -Registry $acr -Name $AcrAgentPoolName -Location $poolLoc -Tier $AcrAgentPoolTier -Count $AcrAgentPoolCount -SubnetId $poolSubnetId) }
         catch { Write-PrereqRestNote $_.Exception.Message }
         $poolState = "$((Get-PimArmAcrAgentPool -SubscriptionId $SubscriptionId -ResourceGroup $rg -Registry $acr -Name $AcrAgentPoolName -ErrorAsNull).properties.provisioningState)"
         if (-not "$poolState".Trim()) { throw "the ACR agent pool '$AcrAgentPoolName' was NOT created -- see the failure above. Without it 'az acr build' cannot reach a private registry." }
+        # rule 15: awaited to Succeeded (New-PimArmAcrAgentPool waits up to 1800 s); anything else is said, and the next run makes it again
+        if ("$poolState".Trim() -ne 'Succeeded') { throw "the ACR agent pool '$AcrAgentPoolName' ended '$poolState', not Succeeded (waited up to 30 minutes) -- run the install again: a Failed pool is removed and made again." }
     }
     Write-Host "    $AcrAgentPoolName ($poolState) -- pass -AcrAgentPool $AcrAgentPoolName to the build"
 }
@@ -980,10 +1071,7 @@ if (-not $SkipSql) {
         Write-Host ("  {0,-22}: PUBLIC ACCESS DISABLED" -f 'sql reachability') -ForegroundColor Yellow
         Write-Warning ("SQL server '$sqlSrv' has publicNetworkAccess=Disabled, so THIS host cannot reach it. " +
                        "The next steps (contained users, schema) will fail with 'Deny Public Network Access is set to Yes'. " +
-                       "Either run the deploy from inside the VNet, or enable it: " +
-                       "az sql server update --subscription $SubscriptionId -g $rg -n $sqlSrv --enable-public-network true " +
-                       "(a Deny policy on Microsoft.Sql/servers/publicNetworkAccess must be exempted first -- and note the " +
-                       "assignment governing it may be DISPLAYED as a 'SQL Databases' policy).")
+                       "Run the deploy from a machine inside the VNet (a host that reaches the SQL private endpoint).")   # framework installer rule 17: never advise opening public access
     }
     elseif (-not $fwSetup) {
         Write-Host ("  {0,-22}: NO AllowSetupHost RULE" -f 'sql reachability') -ForegroundColor Yellow

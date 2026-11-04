@@ -14,7 +14,8 @@
       [-SuperAdmins <upn,...>] [-AlertRecipients <mail,...>] [-MailSender <mail>] [-PortalUsers <upn,...>] [-AllowAllMembers]
       [-VnetAddressPrefix <cidr>] [-VnetName <name>] [-AppsSubnetName <name>] [-AppsSubnetPrefix <cidr>]
       [-PrivateNetwork [-VnetId <id>] [-EndpointsSubnetName <name>] [-EndpointsSubnetPrefix <cidr>]
-       [-PrivateDnsZonesResourceGroupId <id>] [-HubVnetId <id> [-PeerToHub] [-LinkZonesToHub]] [-WebAppAccess internal]]
+       [-PrivateDnsZonesResourceGroupId <id>] [-HubVnetId <id> [-PeerToHub] [-LinkZonesToHub]]
+       [-InternalRanges <cidr,...> -FirewallIp <ip>] [-WebAppAccess internal]]
       [-Edition Community|Trial|Pro] [-UpdateRing 2|3] [-KeyVaultName <name>] [-EngineAzureRootUserAccessAdmin] [-InstallId <id>]
       [-SupportAppId <client id> [-SupportAccess troubleshoot|setup|asbuilt]] [-Reporter <scriptblock>] [-StatePath <dir>]
       [-Resume] [-PreflightOnly] [-ViaSupportApp] [-WhatIf]
@@ -48,7 +49,11 @@
   network. -VnetId uses a network you already have instead of making one (any resource group of the installation's
   subscription). -PrivateDnsZonesResourceGroupId names your central privatelink zones: they are used, never created or
   written. -HubVnetId names your hub; -PeerToHub peers it (your rights on both networks are checked first, and a peering is
-  never left half made) and -LinkZonesToHub links all of PIM Manager's own private zones to it (both off). The same command
+  never left half made) and -LinkZonesToHub links all of PIM Manager's own private zones to it (both off). Behind a hub
+  firewall, -InternalRanges (the ranges your users connect from) with -FirewallIp (the firewall's private IP) give the app
+  subnet its return route: in a network the installation makes, route table rt-pim (one route per range -> the firewall,
+  next hop VirtualAppliance, BGP route propagation off), read back; with -VnetId your network is not written and the
+  route is on the network hand-off (as it is when the installation may not write it). The same command
   with -PrivateNetwork on an existing PUBLIC installation converts it (Convert-PimToPrivate.ps1 runs underneath, data kept).
   Before anything is created the step 'preflight-network' reads the network, the hub's range and the central zones; at the
   end the network hand-off (peering, DNS for the PIM Manager, the database and the registry) is printed and written to
@@ -155,6 +160,10 @@ param(
     [string]$HubVnetId = '',
     [switch]$LinkZonesToHub,
     [switch]$PeerToHub,
+    # framework installer rule 11d (2026-11-04), private only, both or neither: your internal ranges (the networks your users
+    # connect from) and your hub firewall's private IP -- the return route on the app subnet (rt-pim, VirtualAppliance, BGP off)
+    [string[]]$InternalRanges = @(),
+    [string]$FirewallIp = '',
     [ValidateSet('', 'external', 'internal')][string]$WebAppAccess = '',
     # Community = the free edition, the Core features (the default when no edition is given). Trial / Pro install the same
     # way with the Pro updater and NO licence: the licence is added afterwards in PIM Manager > Settings > Licence.
@@ -343,6 +352,20 @@ function Get-InstallRest([string]$Url, [string]$Resource) {
     if (-not "$($t.accessToken)") { return $null }
     try { return (& $Http $Url "$($t.accessToken)") } catch { return $null }
 }
+function Get-InstallRestRefused([string]$Url, [string]$Resource) {
+    # framework installer rule 16 (2026-11-04): a read OUTSIDE the install's own resource group tells REFUSED (401 / 403) from
+    # NOT FOUND -- a refusal becomes a customer task with a warning, never "missing" and never a stop. 'found' | 'missing' |
+    # 'refused' | 'unknown'.
+    $t = Az-Json @('account', 'get-access-token', '--subscription', $cfg.subscriptionId, '--resource', $Resource)
+    if (-not "$($t.accessToken)") { return 'unknown' }
+    try { $o = & $Http $Url "$($t.accessToken)"; if ($null -ne $o) { return 'found' } else { return 'missing' } }
+    catch {
+        $m = "$($_.Exception.Message) $(try { [int]$_.Exception.Response.StatusCode } catch { '' })"
+        if ($m -match '\b(401|403)\b|Forbidden|Unauthorized|AuthorizationFailed') { return 'refused' }
+        if ($m -match '\b404\b|NotFound|ResourceNotFound') { return 'missing' }
+        return 'unknown'
+    }
+}
 # REQ 98.4 (b): what this install remembers for its next run, written to the state file with the completed steps: the SQL
 # firewall rule this install opened. Read as a plain variable (never $script:): the state is also saved from the deploy's
 # -OnStep, a CHILD script, where $script: is the deploy's own.
@@ -389,6 +412,9 @@ foreach ($nk in 'VnetId', 'VnetName', 'AppsSubnetName', 'AppsSubnetPrefix', 'End
     if ($pimCli.ContainsKey($nk)) { $cliAnswers[$nk.Substring(0, 1).ToLowerInvariant() + $nk.Substring(1)] = "$($pimCli[$nk])" }
 }
 foreach ($nk in 'PrivateNetwork', 'LinkZonesToHub', 'PeerToHub') { if ($pimCli.ContainsKey($nk) -and [bool]$pimCli[$nk]) { $cliAnswers[$nk.Substring(0, 1).ToLowerInvariant() + $nk.Substring(1)] = $true } }
+# rule 11d: the return route's answers (a list + one address), only what was GIVEN (Test-PimInstallNetworkAnswers checks them)
+if ($pimCli.ContainsKey('InternalRanges')) { $cliAnswers['internalRanges'] = @(@($pimCli['InternalRanges']) | ForEach-Object { "$_" -split '[,;\s]+' } | Where-Object { "$_".Trim() }) }
+if ($pimCli.ContainsKey('FirewallIp')) { $cliAnswers['firewallIp'] = "$($pimCli['FirewallIp'])" }
 $ans = ConvertTo-PimInstallAnswers -Parameters $cliAnswers
 if (@($ans.missing).Count) {
     Emit 'config' 'failed' ("missing: " + (@($ans.missing | ForEach-Object { '-' + $_.Substring(0, 1).ToUpperInvariant() + $_.Substring(1) }) -join ' and ') + " -- the Microsoft Entra tenant and the Azure subscription to install PIM Manager into") 'Run the command again with them:' "-TenantId '<tenant id>' -SubscriptionId '<subscription id>'"
@@ -573,7 +599,7 @@ if ($cfg.privateNetwork) {
         $vn = if ("$($cfg.vnetId)".Trim()) { & $armGet $cfg.vnetId '2023-09-01' } else { $null }
         $hb = if ("$($cfg.hubVnetId)".Trim()) { & $armGet $cfg.hubVnetId '2023-09-01' } else { $null }
         $zs = @{}
-        if ("$($cfg.privateDnsZonesResourceGroupId)".Trim()) { foreach ($z in @(Get-PimInstallPrivateZoneNames)) { $zs[$z] = [bool](& $armGet "$($cfg.privateDnsZonesResourceGroupId)/providers/Microsoft.Network/privateDnsZones/$z" '2020-06-01') } }
+        if ("$($cfg.privateDnsZonesResourceGroupId)".Trim()) { foreach ($z in @(Get-PimInstallPrivateZoneNames)) { $zs[$z] = Get-InstallRestRefused "https://management.azure.com$("$($cfg.privateDnsZonesResourceGroupId)".Trim())/providers/Microsoft.Network/privateDnsZones/$z`?api-version=2020-06-01" 'https://management.azure.com/' } }   # rule 16: found | missing | refused
         Get-PimInstallNetworkVerdict -Config $cfg -Vnet $vn -Hub $hb -Zones $zs
     }
 }
@@ -732,12 +758,45 @@ if ($SetupHostRule -and -not $cfg.privateNetwork) {
 $onStep = { param($ev) $e = ConvertTo-PimInstallStepEvent -DeployEvent $ev -InstallId $installId -ResumeCommand $resumeCmd; if ($e) { Send-Event $e; if ("$($e.state)" -in 'ok', 'warning', 'skipped') { Mark "$($e.step.id)" } } }
 if (-not $Deploy) { $Deploy = { param([hashtable]$DeployArgs, [scriptblock]$OnStep) & (Join-Path $here 'Invoke-PimDeployAll.ps1') @DeployArgs -OnStep $OnStep } }
 $summary = $null
+$global:PimReturnRouteState = ''   # rule 11d: the prereq step sets it ('done' / 'handoff' / 'refused' / 'failed'); read for the hand-off
 try { $summary = @(& $Deploy $deployArgs $onStep) | Where-Object { $_ -and $_.PSObject.Properties['status'] } | Select-Object -Last 1 }
 catch { Emit 'verify' 'failed' "the deployment stopped: $($_.Exception.Message)" 'Fix the cause above, then resume the installation:' $resumeCmd; Finish 1 }
 if (-not $summary -or "$($summary.status)" -notin 'success', 'unverified') {
     $failed = @($summary.failedSteps | Where-Object { $_ }) -join ', '
     if (-not @($events | Where-Object { $_.state -eq 'failed' }).Count) { Emit 'verify' 'failed' "the deployment did not complete$(if ($failed) { " (failed: $failed)" })" 'Fix the cause above, then resume the installation:' $resumeCmd }
     Finish 1
+}
+
+# Framework §5.5 THE AGREED LIST (owner 2026-11-04, the new names ON by default): the deploy decided the names from what the
+# resource group already holds (Resolve-PimSetupInstallNameChoice) -- an install made before keeps today's names. Every
+# later step here follows what the deploy really used: read back; ca-pim-web absent but ca-pim-manager there = today's names.
+if ($names.newNames -and -not $azSeam) {
+    $nnBase = "/subscriptions/$($cfg.subscriptionId)/resourceGroups/$($names.resourceGroup)/providers/Microsoft.App/containerApps"
+    $nnWeb = $null; $nnOld = $null
+    try { $nnWeb = Invoke-PimSetupArm -Path "$nnBase/$($names.managerApp)" -ApiVersion '2024-03-01' -NotFoundOk -ErrorAsNull } catch { $nnWeb = $null }
+    if (-not $nnWeb) {
+        $nnDef = Get-PimInstallNameDefaults
+        try { $nnOld = Invoke-PimSetupArm -Path "$nnBase/$($nnDef.web)" -ApiVersion '2024-03-01' -NotFoundOk -ErrorAsNull } catch { $nnOld = $null }
+        if ($nnOld) {
+            $names.managerApp = $nnDef.web; $names.tickJob = $nnDef.engine; $names.updateJob = $nnDef.updater; $names.newNames = $false
+            Write-Host "    names: this resource group already runs PIM Manager as $($nnDef.web) -- today's names kept (Azure cannot rename)" -ForegroundColor DarkGray
+        }
+    }
+}
+
+# Framework §5.5 / OPEN-30 (owner 2026-11-04): the resource group carries the 7 tags (product, ring, edition, hosting,
+# tenant, owner, purpose) -- the names carry no edition / ring. Merged: the customer's own tags are kept. Read back; a
+# refusal is a warning, never a failed install. Every run, -Resume too (idempotent).
+if (-not $azSeam) {
+    try {
+        $rgCur = Get-PimArmResourceGroup -SubscriptionId $cfg.subscriptionId -Name $names.resourceGroup
+        $rgTags = Get-PimInstallResourceGroupTags -Config $cfg -Owner "$($who.userName)" -Existing $rgCur.tags
+        [void](Set-PimArmResourceGroup -SubscriptionId $cfg.subscriptionId -Name $names.resourceGroup -Location "$($rgCur.location)" -Tags ([hashtable]$rgTags))
+        $rgBack = (Get-PimArmResourceGroup -SubscriptionId $cfg.subscriptionId -Name $names.resourceGroup).tags
+        $rgMiss = @('product', 'ring', 'edition', 'hosting', 'tenant', 'owner', 'purpose' | Where-Object { -not "$($rgBack.$_)".Trim() })
+        if ($rgMiss.Count) { Write-Host "    resource group tags: read back WITHOUT $($rgMiss -join ', ')" -ForegroundColor Yellow }
+        else { Write-Host "    resource group $($names.resourceGroup): the 7 tags set (product, ring, edition, hosting, tenant, owner, purpose), read back" -ForegroundColor DarkGray }
+    } catch { Write-Host "    resource group tags not set: $((("$($_.Exception.Message)") -split "`n")[0]) -- the install goes on" -ForegroundColor Yellow }
 }
 
 # ================================================================== 4. licence, support access, health, outputs
@@ -905,7 +964,7 @@ if ($licenceLater) { $doneMsg += " -- next: $licenceHint" }
 # PRIVATE NETWORK (INSTALL-1 item 5, EPS DESIGN §2b): the network hand-off -- peering, DNS for the PIM Manager and the
 # database, where later scripts run -- on the screen, in the completed event and in network-hand-off.txt in the state folder
 # (named "network notes" in code: the word handoff is reserved for the sign-in tokens, which are never written -- Test-PimInstallHandoff D2)
-$netNotes = @(Get-PimInstallNetworkHandoff -Config $cfg -Names $names -PortalFqdn $fqdn)
+$netNotes = @(Get-PimInstallNetworkHandoff -Config $cfg -Names $names -PortalFqdn $fqdn -ReturnRouteState "$global:PimReturnRouteState")
 $doneDetail = $null
 if ($netNotes.Count) {
     $doneMsg += ' -- next: your network team makes it reachable (network hand-off below)'

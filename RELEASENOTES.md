@@ -13,6 +13,34 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.33 -- 2026-11-04
+
+- Drift, alerts and pages never list a group PIM Manager does not define (a tenant's own groups and their owners were shown as drift); a private install can get a return route for your internal ranges through your hub firewall (made on a network PIM creates, named on the hand-off otherwise); a private install is never opened -- the build window and the mail sender's temporary firewall rule are refused on a private store.
+
+## 3.0.32 -- 2026-11-04
+
+- A new install uses the agreed names (ca-pim-web, ca-pim-engine, caj-pim-updater) and tags its resource group with product, ring, edition, hosting, tenant, owner and purpose; an existing install keeps its names.
+
+## 3.0.31 -- 2026-11-04
+
+- A private install no longer stops when it may not read or link a central DNS zone outside its own resource group: it warns and names the task for your network team, and goes on; a build pool left Failed by an earlier run is removed and made again; installer messages advise only safe changes.
+
+## 3.0.30 -- 2026-11-04
+
+- A private install checks that its image-build pool has a way out to the internet (a NAT gateway, a route through the customer's firewall, or Azure default outbound access) before it creates the pool, switches outbound access on for a subnet it creates itself, and names the customer step instead of creating a pool that would fail.
+
+## 3.0.29 -- 2026-11-04
+
+- The second approver (four-eyes) and the evidence / audit export are now part of both editions, Community and Pro -- core security is the same in both; the dialog for letting applications ask for access is shorter, with the tier rule under More info.
+
+## 3.0.28 -- 2026-11-04
+
+- A Community install's updater now builds the sign-in front image like a Pro one (the same core security in both editions), so an existing Community install can move off Easy Auth; the public release is checked to carry the sign-in front source at the pinned version; the private-network notes no longer say Community has no updater.
+
+## 3.0.27 -- 2026-11-04
+
+- Azure role assignments that a scope's PIM policy limits in duration now apply at the longest duration the policy allows (they failed with ExpirationRule before); with Power BI switched off and no Power BI rows, its prerequisites are no longer checked or shown; a workload prerequisite that only the portal can show now says first that Confirm (or Not used) closes it; a new install removes the old Easy Auth client secret once the sign-in front is live, and the secret clean-up waits for Graph and retries a busy answer once.
+
 ## 3.0.26 -- 2026-11-04
 
 - Get Started: with self-approval on, the SuperAdmin who raised the break-glass list can approve it right in the step (it no longer says it waits for another SuperAdmin); the Templates preview banner names exactly where its switch is (Settings > Features & edition > Governance preview).

@@ -275,7 +275,8 @@ function Invoke-PimInstallSigninFront {
                 # no GetNewClosure() (see New-PimInstallSigninFrontIo): $Io / $kvApi are found through the call chain
                 $kvArm = { param($m, $p, $b) $pp, $q = "$p" -split '\?api-version=', 2; & $Io.Arm $m $pp $b $(if ($q) { $q } else { $kvApi }) }
                 $kv11 = Invoke-PimKeyVaultRule11 -Arm $kvArm -VaultId $vaultPath -SqlServerName (("$sqlServer" -split '\.')[0]) -Sleep $sleep
-                foreach ($l in @($kv11.lines)) { & $say $step 'waiting' "$($l.text)" }
+                foreach ($l in @($kv11.lines)) { & $say $step $(if ("$($l.level)" -eq 'warn') { 'warning' } else { 'waiting' }) "$($l.text)" }
+                if ($kv11.ok -and "$($kv11.customerTask)".Trim()) { $res.customerTasks = @(@($res.customerTasks) + "$($kv11.customerTask)" | Where-Object { $_ }) }   # rules 14/16: the install goes on
                 if (-not $kv11.ok) { throw "the install is private, so its Key Vault must be too -- $($kv11.reason). Nothing was stored in the vault; resume the installation once it is fixed" }
             }
             $key = & $Io.Arm 'GET' $keyPath $null $kvApi
@@ -388,7 +389,18 @@ function Invoke-PimInstallSigninFront {
         $auth2 = $null; try { $a2 = & $Io.Arm 'GET' "$appPath/authConfigs/current" $null $acaApi; if ($a2) { $auth2 = $a2.properties } } catch { }
         $chk = Test-PimInstallSigninFrontLive -App $app2 -Auth $auth2
         if (-not ($chk.live -and $chk.complete)) { throw "read-back after the switch: $($chk.missing -join ', ')" }
-        & $say $step 'ok' 'the PIM Manager signs people in through the sign-in front (state in the database, keys wrapped by the install''s Key Vault, access token to the Manager); Easy Auth is off'
+        # OPEN-02 (owner 2026-11-04 "Delete now, everywhere"): the deploy's 'easyauth' step minted a client secret for the
+        # registration; with the front live nothing uses it -- remove it now (the product's own -DeleteSecret: only 'easyauth*'
+        # secrets, read back). A failure here does not fail the install (sign-in works); it is said, and the updater's
+        # sweep / a re-run removes it.
+        $res.secretRemoved = $false; $secretNote = ''
+        try {
+            [void](& $Io.Move @{ SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; TenantId = $TenantId; ManagerApp = $ManagerApp; DeleteSecret = $true })
+            $res.secretRemoved = $true; $secretNote = '; the old Easy Auth client secret is removed (nothing uses it now)'
+        } catch {
+            $secretNote = "; NOTE the old Easy Auth client secret could not be removed yet ($((("$($_.Exception.Message)") -split "`n")[0])) -- sign-in is not affected"
+        }
+        & $say $step 'ok' ('the PIM Manager signs people in through the sign-in front (state in the database, keys wrapped by the install''s Key Vault, access token to the Manager); Easy Auth is off' + $secretNote)
         $res.completed.Add($step) | Out-Null
         $res.ok = $true; $res.reason = 'on the sign-in front'
     } catch {

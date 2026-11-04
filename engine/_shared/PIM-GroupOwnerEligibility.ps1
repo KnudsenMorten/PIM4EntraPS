@@ -229,6 +229,23 @@ function Format-PimGroupOwnerMigrationRunSummary {
     return ("owner migration: {0} permanent owner(s) planned, {1} moved to eligible, {2} kept: {3}" -f $n, [int]$Plan.moved, [int]$Plan.kept, $list)
 }
 
+function Get-PimGroupOwnersDefinedGroupNames {
+    <#
+      OWNER 2026-11-04 (a customer's drift alert listed the owners of EVERY group in the tenant -- "All Company", department
+      and project groups -- as "in the tenant, not in PIM": "we must never include or mention these groups in pim ... never
+      touch non-pim groups - or never mention them"). The GroupOwners scope reads ONLY the groups PIM's own definitions name
+      (PIM-Definitions groups + the Azure permission groups that name owners). A group PIM does not define is never read,
+      compared, reported, alerted or shown. Returns a case-blind set (hashtable name -> $true); empty = no group defined.
+    #>
+    $set = @{}
+    foreach ($g in @(@(Get-PimGroupDefinitionRows) + @(if (Get-Command Get-PimResourceOwnerDefinitionRows -ErrorAction SilentlyContinue) { Get-PimResourceOwnerDefinitionRows }))) {
+        if ($null -eq $g) { continue }
+        $n = "$($g.GroupName)".Trim()
+        if ($n) { $set[$n.ToLowerInvariant()] = $true }
+    }
+    return $set
+}
+
 function Get-PimGroupOwnersEligibleLive {
     <#
       GetLive of the GroupOwners scope with GroupOwnersEligible ON. The SAME directory-owner read as before (every group,
@@ -239,9 +256,11 @@ function Get-PimGroupOwnersEligibleLive {
     #>
     param([Parameter(Mandatory)][hashtable]$Ctx)
     $dir = New-Object System.Collections.Generic.List[object]
+    $definedNames = Get-PimGroupOwnersDefinedGroupNames   # owner 2026-11-04: never a group PIM does not define
     try {
         foreach ($grp in @(Invoke-PimGraph -Path "/groups?`$select=id,displayName&`$expand=owners" -All)) {
             $gn = "$($grp.displayName)"; if (-not $gn) { continue }
+            if (-not $definedNames.ContainsKey($gn.ToLowerInvariant())) { continue }
             foreach ($o in @($grp.owners)) {
                 if ($o -and $o.id) {
                     $t = if ($o.PSObject.Properties['@odata.type']) { "$($o.'@odata.type')" } else { '' }

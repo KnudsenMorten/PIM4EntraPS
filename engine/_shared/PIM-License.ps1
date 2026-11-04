@@ -75,7 +75,10 @@ $script:PimProEditionName       = 'Pro'
 # MGMT-REPORT (owner 2026-10-29): 'ManagementReport' -- the management report (PowerPoint), single tenant.
 # EDITION-API (owner 2026-11-01): 'ApiApplications' (script / service access to the Manager API) and 'ApiReference'
 # (Settings > API and MCP reference), single tenant.
-$script:PimProFeatureCatalog = @('AccessReviews', 'ApiApplications', 'ApiReference', 'BrokerApi', 'ConsultantLifecycle', 'Coverage', 'Discovery', 'EvidenceExport', 'HybridAd', 'MakerChecker', 'ManagementReport', 'McpServer', 'MspFanout',
+# CORE SECURITY (framework §0 "CORE SECURITY IS THE SAME IN PRO AND COMMUNITY", owner 2026-11-04): FOUR-EYES (the second
+# approver, 'MakerChecker') and AUDIT (the evidence / audit export, 'EvidenceExport') are core in BOTH editions -- no longer
+# Pro names. A licence that still lists them is harmless (a free feature needs no licence).
+$script:PimProFeatureCatalog = @('AccessReviews', 'ApiApplications', 'ApiReference', 'BrokerApi', 'ConsultantLifecycle', 'Coverage', 'Discovery', 'HybridAd', 'ManagementReport', 'McpServer', 'MspFanout',
     'PortalAdmins', 'Revoke', 'Rfa', 'TierReport', 'WorkloadConnectors')
 # PRO-FEATURES-MISSING (PIM REQUIREMENTS §100.32, owner 2026-10-09: "i cannot use any of the features" on a Pro licence issued
 # before ConsultantLifecycle / Rfa / BrokerApi / McpServer existed). The SINGLE-TENANT Pro features: the catalog's scope='single'
@@ -85,7 +88,7 @@ $script:PimProFeatureCatalog = @('AccessReviews', 'ApiApplications', 'ApiReferen
 # future, whatever its features[] list says. MSP (scope='multi', MspFanout) is never in this list: it is the Pro MSP edition
 # (sku Pro-MSP, or a licence naming MspFanout / '*' as every MSP licence issued so far does). Must equal the catalog's
 # single-tenant list (tests/Test-PimProEnterpriseFeatures.ps1).
-$script:PimProSingleTenantFeatures = @('AccessReviews', 'ApiApplications', 'ApiReference', 'BrokerApi', 'ConsultantLifecycle', 'Coverage', 'Discovery', 'EvidenceExport', 'HybridAd', 'MakerChecker', 'ManagementReport', 'McpServer',
+$script:PimProSingleTenantFeatures = @('AccessReviews', 'ApiApplications', 'ApiReference', 'BrokerApi', 'ConsultantLifecycle', 'Coverage', 'Discovery', 'HybridAd', 'ManagementReport', 'McpServer',
     'PortalAdmins', 'Revoke', 'Rfa', 'TierReport', 'WorkloadConnectors')
 
 $script:PimLicenseCache = $null

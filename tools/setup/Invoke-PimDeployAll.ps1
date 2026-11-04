@@ -388,6 +388,12 @@ param(
     [switch]$SqlPublicAccessDisabled,
     [switch]$LinkZonesToHub,
     [switch]$PeeringAllOrNothing,
+    # framework installer rule 11d (2026-11-04), forwarded to the prereq step (inert unless given): the customer's internal
+    # ranges + the hub firewall's private IP -> the return route rt-pim on the apps subnet (VirtualAppliance, BGP off, read
+    # back). -ReturnRouteHandOffOnly: the VNet is the customer's own -- nothing is written there, the route is on the hand-off.
+    [string[]]$InternalRanges = @(),
+    [string]$FirewallIp = '',
+    [switch]$ReturnRouteHandOffOnly,
     # §52.1. Forwarded to INFRA, which grants this environment network access to the SQL server
     # (subnet service endpoint + VNet rule, Azure-services firewall rule verified). Skip ONLY for
     # a private-endpoint store: without one of those paths the Manager starts, is refused by SQL,
@@ -2001,6 +2007,11 @@ function Invoke-DefaultStepRunner {
                 if ("$PrivateDnsZonesResourceGroupId".Trim()) { $prqShape['PrivateDnsZonesResourceGroupId'] = "$PrivateDnsZonesResourceGroupId".Trim() }   # INSTALL-1 item 5: central zones, used only
                 # INSTALL-1 item 5 (Invardia 2026-11-02): private stays private; the own zones linked to the hub when asked
                 if ($SqlPublicAccessDisabled)             { $prqShape['SqlPublicAccessDisabled'] = $true }
+                # rule 11d: the return route (both or neither -- the prereq refuses half of it before anything is created)
+                if (@($InternalRanges | Where-Object { "$_".Trim() }).Count -or "$FirewallIp".Trim()) {
+                    $prqShape['InternalRanges'] = [string[]]@($InternalRanges | Where-Object { "$_".Trim() }); $prqShape['FirewallIp'] = "$FirewallIp".Trim()
+                    if ($ReturnRouteHandOffOnly) { $prqShape['ReturnRouteHandOffOnly'] = $true }
+                }
                 if ($LinkZonesToHub -and "$HubVnetName".Trim() -and "$HubVnetResourceGroup".Trim()) {
                     $prqShape['PrivateDnsZoneLinkVnetIds'] = @("/subscriptions/$(if ("$HubVnetSubscriptionId".Trim()) { "$HubVnetSubscriptionId".Trim() } else { $SubscriptionId })/resourceGroups/$HubVnetResourceGroup/providers/Microsoft.Network/virtualNetworks/$HubVnetName")
                 }

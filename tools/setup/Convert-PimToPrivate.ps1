@@ -276,7 +276,7 @@ function Get-PimConvertRegistryLockDecision {
     if ($Job) {
         $envVal = @(@($Job.properties.template.containers) | ForEach-Object { @($_.env) } | Where-Object { $_ -and "$($_.name)" -eq 'PIM_ACR_AGENT_POOL' } | ForEach-Object { "$($_.value)".Trim() }) | Select-Object -First 1
         if ("$envVal" -ne $PoolName) { $why.Add("the updater job '$JobName' carries PIM_ACR_AGENT_POOL='$envVal', not '$PoolName' -- its nightly build would be refused (re-run Invoke-PimDeployAll.ps1 -AcrAgentPoolName $PoolName -Apply)") }
-    } else { $r.notes = @("no updater job '$JobName' (Community: Update-PimCommunity.ps1 builds with the deploy profile's -AcrAgentPoolName)") }
+    } else { $r.notes = @("no updater job '$JobName' -- every install, Pro and Community, should have one (Deploy-PimUpdateJob.ps1; Community: -UpdateSource InvardiaCommunity); until then Update-PimCommunity.ps1 builds with the deploy profile's -AcrAgentPoolName") }
     if ($why.Count) { $r.refuse = $true; $r.reasons = @($why); return $r }
     $r.lock = $true
     return $r
@@ -719,7 +719,7 @@ Write-Host '  CONVERSION COMPLETE -- left for you (the scripts cannot see these)
 Say "- remove the old reply addresses (*.<old domain>) on the PIM Manager's sign-in app registration in Entra ID, and any DNS record you made for the old address"
 if (-not $SqlPrivate) { Say '- make SQL private later: run again with -Resume -Apply -SqlPrivate (adds the SQL private endpoint, then turns the server''s public network access off)' }
 else { Say '- SQL is reached through its private endpoint only (public network access off): deploys and Update-PimCommunity.ps1 run from inside the network' }
-Say '- updates: outbound invardia.com must be allowed (Pro); the updater job carries PIM_ACR_AGENT_POOL. Community: Update-PimCommunity.ps1 -Apply from the deploy host.'
+Say '- updates: outbound invardia.com must be allowed (Pro and Community: both updater jobs ask Invardia; Community also fetches the public GitHub release zip, so github.com too); the updater job carries PIM_ACR_AGENT_POOL.'
 Say "- from now on Confirm-PimInstall.ps1 and Set-PimLicense.ps1 run from inside the network. State: $statePath"
 exit 0
 } finally { Stop-PimScriptRun -Script 'Convert-PimToPrivate' }

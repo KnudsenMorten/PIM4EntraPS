@@ -2613,6 +2613,30 @@ function Invoke-PimScheduleCreate {
     throw "schedule create still rejected after duration ladder ($Path)"
 }
 
+function Invoke-PimArmScheduleCreate {
+    <#
+      BUG-AZRES-EXPIRATION-RULE (owner 2026-11-04, a customer install: 13 Azure Reader rows from Discovery failed "HTTP 400
+      RoleAssignmentRequestPolicyValidationFailed -- ExpirationRule - The duration in the request is greater than maximum allowed
+      duration"). The Azure (ARM) twin of Invoke-PimScheduleCreate's DURATION LADDER: the role's PIM policy at that scope caps
+      the eligible / active duration (Azure's own default: no permanent assignments), so a permanent or too-long request is
+      refused. On THAT error only, the same request is sent again with AfterDuration 365 / 180 / 90 / 30 days -- it lands at the
+      longest the scope's policy allows instead of failing. Any other error is thrown at once (never papered over).
+      -Arm { param($Path, $Body) } is the test seam (default Invoke-PimArm PUT, api 2020-10-01-preview).
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][hashtable]$Body, [scriptblock]$Arm)
+    if (-not $Arm) { $Arm = { param($p, $b) Invoke-PimArm -Method PUT -Path $p -ApiVersion '2020-10-01-preview' -Body $b } }
+    $sched = if ($Body.properties) { $Body.properties.scheduleInfo } else { $null }
+    $isDur = { param($m) "$m" -match '(?i)greater than (the )?maximum allowed duration|ExpirationRule' }
+    try { return (& $Arm $Path $Body) } catch { if (-not (& $isDur "$($_.Exception.Message)")) { throw } }
+    foreach ($d in @(365, 180, 90, 30)) {
+        if ($sched) { $sched.expiration = @{ type = 'AfterDuration'; duration = "P$d" + 'D' } }
+        # a fresh request id per try (a refused request's id is not reused)
+        $p = ("$Path" -replace '/[0-9a-fA-F-]{36}$', ('/' + [guid]::NewGuid().ToString()))
+        try { return (& $Arm $p $Body) } catch { if (-not (& $isDur "$($_.Exception.Message)")) { throw } }
+    }
+    throw "Azure role assignment still refused by the scope's PIM expiration policy after 365 / 180 / 90 / 30 days ($Path)"
+}
+
 # §100.45: a tenant-wide schedule preload that Microsoft THROTTLED (or answered 5xx / timed out) is tried ONCE more, after a
 # bounded pause (the Retry-After the error names, else 15 s; never more than 30 s), before it is declared INCOMPLETE. The
 # whole list is read again (no half-collected page is kept). Any other error is not retried. Sleep is injectable for tests.
@@ -4211,7 +4235,8 @@ function New-PimAzResProvider {
             $body=@{ properties=@{ principalId=$gid; roleDefinitionId="$scope/providers/Microsoft.Authorization/roleDefinitions/$rid"; requestType='AdminAssign'; justification='PIM4EntraPS engine'; scheduleInfo=@{ startDateTime=$start; expiration=$exp } } }
             $guid=[guid]::NewGuid().ToString()
             $ep = if ($type -eq 'Active') { 'roleAssignmentScheduleRequests' } else { 'roleEligibilityScheduleRequests' }
-            Invoke-PimArm -Method PUT -Path "$scope/providers/Microsoft.Authorization/$ep/$guid" -ApiVersion '2020-10-01-preview' -Body $body
+            # BUG-AZRES-EXPIRATION-RULE: the scope's PIM policy may refuse a permanent / too-long assignment -> the duration ladder
+            Invoke-PimArmScheduleCreate -Path "$scope/providers/Microsoft.Authorization/$ep/$guid" -Body $body
         }
     }
 }
@@ -8310,9 +8335,13 @@ function New-PimGroupOwnersProvider {
             Ensure-PimContextLoaded
             if (Test-PimGroupOwnersEligibleEnabled) { return @(Get-PimGroupOwnersEligibleLive -Ctx $ctx) }
             $live = New-Object System.Collections.Generic.List[object]
+            # OWNER 2026-11-04 ("never touch non-pim groups - or never mention them"): ONLY the groups PIM's definitions name are
+            # read -- the owners of any other group in the tenant are never compared, reported, alerted or shown
+            $definedNames = Get-PimGroupOwnersDefinedGroupNames
             try {
                 foreach ($grp in @(Invoke-PimGraph -Path "/groups?`$select=id,displayName&`$expand=owners" -All)) {
                     $gn = "$($grp.displayName)"; if (-not $gn) { continue }
+                    if (-not $definedNames.ContainsKey($gn.ToLowerInvariant())) { continue }
                     foreach ($o in @($grp.owners)) { if ($o.id) { $live.Add([pscustomobject]@{ GroupName = $gn; OwnerId = "$($o.id)" }) } }
                 }
             } catch {

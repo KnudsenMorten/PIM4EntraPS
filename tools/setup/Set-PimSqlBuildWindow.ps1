@@ -70,6 +70,13 @@ $shape = if (@($cur.privateEndpoints).Count) { 'privateEndpoint' } else { 'vnetO
 Note "now: shape=$shape publicNetworkAccess=$($cur.publicNetworkAccess) firewall=[$($cur.firewallRules -join ', ')] vnetRules=[$($cur.vnetRules -join ', ')] privateEndpoints=[$($cur.privateEndpoints -join ', ')]"
 if ($Mode -eq 'Show') { $v = Test-PimSqlBuildWindowState -State $cur -Want 'Closed'; Note "closed: $($v.ok) $($v.reasons -join '; ')"; return }
 if ($Mode -eq 'Open') {
+    # framework rule 11e (owner 2026-11-04): a PRIVATE store is NEVER opened -- no public access, no firewall / IP rule, not
+    # even for minutes. This window existed to do exactly that for the MSP build's store steps, so -Open is REFUSED (both
+    # shapes); the store steps run inside the network (an in-network job) or are a customer step. -Close / -Show still work,
+    # so a window an older version left open can be closed.
+    throw ("REFUSED (framework rule 11e): '$srv' is a private store -- the build window would turn its public access on and add a " +
+           "host firewall rule, which a private install never gets, not even temporarily. Run the store steps inside the network " +
+           "(an in-network job), or as a customer step. -Mode Close still closes a window an earlier version opened.")
     # IMP-49 t: SAY where the address comes from -- a third-party web service, unless -HostIp was given.
     if (-not "$HostIp".Trim()) {
         $HostIp = "$((Invoke-RestMethod -Uri 'https://api.ipify.org?format=json' -TimeoutSec 20).ip)".Trim()

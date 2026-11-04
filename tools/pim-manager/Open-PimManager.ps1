@@ -9909,6 +9909,31 @@ function Get-PimManagerPreflightStamp {
 # jobs / validation errors (alarms), access-review campaigns, the paused daily reconcile (a decision already taken),
 # Get Started steps. The viewer-independent reads are cached 15 s; any write request clears the cache.
 # =====================================================================================================================
+function Select-PimManagerWorkloadPrereqInUse {
+    <#
+      BUG-WORKLOAD-OFF-STILL-CHECKED (owner 2026-11-04: "i turned off power bi integration ..., but it still shows this"). -View = Get-PimWorkloadPrereqView. Power BI is dropped from the view (not checked, not counted, not shown) when
+      its integration switch (feature gate connectors.powerbi) is OFF **and** no binding row in PIM-Assignments-Workloads needs
+      it (Get-PimWorkloadPrereqForBinding = 'PowerBI') -- a Power BI role row still applies with the switch off, so its
+      prerequisites still matter then. FAIL-SAFE: any read that fails keeps the workload shown (never hides a real need).
+    #>
+    param([AllowEmptyCollection()][object[]]$View = @(), [scriptblock]$GateOn, [scriptblock]$Rows)
+    if (-not $GateOn) {
+        $GateOn = {
+            $g = Resolve-PimFeatureGate -Raw (Get-PimManagerSetting -Name 'FeatureGates')
+            $e = $g.effective['connectors.powerbi']
+            return [bool]($e -and [bool]$e.enabled)
+        }
+    }
+    if (-not $Rows) { $Rows = { @((Read-PimRows 'PIM-Assignments-Workloads').rows) } }
+    $pbOn = $true
+    try { $pbOn = [bool](& $GateOn) } catch { $pbOn = $true }
+    if ($pbOn) { return @($View) }
+    $need = 1
+    try { $need = @(@(& $Rows) | Where-Object { $_ -and (Get-PimWorkloadPrereqForBinding -Entity 'PIM-Assignments-Workloads' -Row $_) -eq 'PowerBI' }).Count } catch { $need = 1 }
+    if ($need -gt 0) { return @($View) }
+    return @(@($View) | Where-Object { "$($_.workload)" -ne 'PowerBI' })
+}
+
 # REQ-U / REQ-W: the judged workload-prerequisite view, shared by /api/workload-prereqs, /api/templates and /api/attention.
 function Get-PimManagerWorkloadPrereqState {
     # The judged per-workload view + the store error; shared by /api/workload-prereqs and the /api/templates
@@ -9925,6 +9950,9 @@ function Get-PimManagerWorkloadPrereqState {
     }
     if ($tj) { $envVals.subscriptionId = $tj.subscriptionId; $envVals.resourceGroup = $tj.resourceGroup; $envVals.tickJobName = $tj.jobName }
     $view = @(Get-PimWorkloadPrereqView -Stored $stored -Env $envVals -NowUtc ([datetime]::UtcNow) -StaleDays (Get-PimWorkloadPrereqStaleDays))
+    # BUG-WORKLOAD-OFF-STILL-CHECKED (owner 2026-11-04, a customer install): a workload that is NOT IN USE is not checked, counted or
+    # shown. Power BI is in use while its integration switch (connectors.powerbi) is on OR any binding row needs it.
+    $view = @(Select-PimManagerWorkloadPrereqInUse -View $view)
     if ($storeErr) { foreach ($v in $view) { $v.state = 'unreadable'; $v.chip = 'amber'; $v.command = ''; $v.next = (Get-PimWorkloadPrereqNextStep -State 'unreadable') } }
     return @{ view = $view; storeErr = $storeErr; stored = $stored; env = $envVals }
 }
@@ -22753,6 +22781,8 @@ function Handle-Request {
             $script:lastHeartbeat = Get-Date
             $__ps = Get-PimManagerWorkloadPrereqState
             $view = @($__ps.view); $storeErr = "$($__ps.storeErr)"
+            # BUG-WORKLOAD-OFF-STILL-CHECKED: Power BI not in use (dropped from the view) -> no Power BI notices either
+            $__pbInUse = [bool](@($view | Where-Object { "$($_.workload)" -eq 'PowerBI' }).Count)
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                 ok = (-not $storeErr); storeError = $storeErr; staleDays = (Get-PimWorkloadPrereqStaleDays)
                 script = 'Initialize-PimWorkloadPrereqs.ps1'
@@ -22764,9 +22794,9 @@ function Handle-Request {
                 # REQ-W: workloads whose assignment is never held (Entra), so the GUI's held note follows the server rule.
                 ungatedWorkloads = @(Get-PimWorkloadPrereqUngated)
                 # PIM 100.142 (4): Power BI cannot be reached through the admin API yet -> one calm line + the two-line command.
-                powerBiAdmin = (Get-PimManagerPowerBiAdminNotice -State $__ps)
+                powerBiAdmin = $(if ($__pbInUse) { Get-PimManagerPowerBiAdminNotice -State $__ps } else { $null })
                 # PIM 100.142b (3): PIM Manager is not in some Power BI workspaces yet -> the workspaces + the two-line command.
-                powerBiWorkspace = (Get-PimManagerPowerBiWorkspaceNotice -State $__ps)
+                powerBiWorkspace = $(if ($__pbInUse) { Get-PimManagerPowerBiWorkspaceNotice -State $__ps } else { $null })
             })
             return 200
         }

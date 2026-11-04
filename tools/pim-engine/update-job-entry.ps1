@@ -72,6 +72,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-TenantSizing.ps1')     # 100.31 the tick's size for this tenant + the SQL tier / max size (100.37)
 . (Join-Path $solRoot 'engine\_shared\PIM-JobSelfId.ps1')        # 100.166 (a) pull / publish learn their own id + Reader on themselves
 . (Join-Path $solRoot 'engine\_shared\PIM-KeyVaultPrivate.ps1')  # rule 11: a private install's Key Vault is private (step 2g-bis)
+. (Join-Path $solRoot 'engine\_shared\PIM-ReturnRoute.ps1')      # rule 11d: a private install's return route -- REPORTED only (step 2g-ter)
 . (Join-Path $solRoot 'engine\_shared\PIM-ConvergeDefaults.ps1') # 100.40 / framework 12.16 the install defaults an EXISTING install converges to
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdaterPermissionCheck.ps1') # 95.2i the engine's rights vs. what this version needs (report only, never a grant)
 . (Join-Path $solRoot 'engine\_shared\PIM-EngineAzureAccess.ps1') # 95.2k the engine's Azure rights vs the DEFINED scopes -- REPORT only here
@@ -366,6 +367,21 @@ function Invoke-PimUpdaterConvergeStep {
             if (-not $kvList.Count) { Say 'private vault: no Key Vault in the resource group' 'DarkGray' }
         }
     } catch { Say "  private vault not checked: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2g-ter. framework installer rule 11d (2026-11-04) -- THE RETURN ROUTE, REPORTED ONLY -----------------------------
+    # Found live at a customer install: without a route for the customer's internal ranges -> the hub firewall on the app
+    # subnet, the replies to the LAN leave by Azure's default route and the private web app times out. Only where the install
+    # IS private and was given -InternalRanges / -FirewallIp (recorded as tags on its resource group). READ ONLY: GET only --
+    # the updater NEVER creates or changes a route (a wrong next hop would cut the LAN off; the network is the customer's
+    # decision). A missing route is a yellow line with the network hand-off text. Never fails the update.
+    try {
+        if ($script:PimSetupFacts -and $script:PimSetupFacts['privateNetwork'] -eq $true -and (Get-Command Get-PimReturnRouteReport -ErrorAction SilentlyContinue)) {
+            $rrGet = { param($m, $p, $b)
+                if ($m -ne 'GET') { throw "the return-route check is read only (refused $m)" }
+                try { Invoke-PimArm -Method GET -Path $p } catch { if ("$($_.Exception.Message)" -match '(?i)\b404\b|NotFound|ResourceNotFound') { $null } else { throw } } }
+            $rrRep = Get-PimReturnRouteReport -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -Arm $rrGet
+            Say $rrRep.text $(switch ($rrRep.state) { 'missing' { 'Yellow' } 'unknown' { 'Yellow' } default { 'DarkGray' } })
+        }
+    } catch { Say "  return route not checked: $($_.Exception.Message)" 'Yellow' }
 }
 
 # 🔴 2026-09-18 (§71.43) -- THE STORE IS NEEDED BEFORE THE FIRST EXIT PATH, NOT ONLY AT THE SCHEMA STEP.

@@ -37,7 +37,8 @@
   Public network by default; -PrivateNetwork installs the private shape (no public address) with the same two lines, with
   SI's network parameters (-VnetId, -VnetAddressPrefix, -VnetName, -AppsSubnetName / -AppsSubnetPrefix,
   -EndpointsSubnetName / -EndpointsSubnetPrefix, -PrivateDnsZonesResourceGroupId, -HubVnetId with -PeerToHub /
-  -LinkZonesToHub, -WebAppAccess); Install-PimManager's help has the details.
+  -LinkZonesToHub, -InternalRanges with -FirewallIp for the return route behind a hub firewall, -WebAppAccess);
+  Install-PimManager's help has the details.
 
   Exit codes: those of Install-PimManager (0 done, 1 a step failed -- fix it and -Resume, 2 a check failed -- nothing was
   changed, 3 bad answers -- nothing was changed); 3 also when the release cannot be read or a check of the download fails.
@@ -109,6 +110,9 @@ param(
     [string]$HubVnetId = '',
     [switch]$LinkZonesToHub,
     [switch]$PeerToHub,
+    # framework installer rule 11d (2026-11-04): the return route behind a hub firewall (private only, both or neither)
+    [string[]]$InternalRanges = @(),
+    [string]$FirewallIp = '',
     [ValidateSet('', 'external', 'internal')][string]$WebAppAccess = '',
     # INSTALL-1 ALIGN: not documented any more (the copy decides the edition, $script:PimInstallChannel below). Accepted for
     # ONE release so the 3.0.17 command lines keep working; when given it wins. Drop it in the next release.
@@ -306,7 +310,7 @@ try {
         if ($PSBoundParameters.ContainsKey($k)) { $pass[$k] = $PSBoundParameters[$k] }
     }
     # PRIVATE NETWORK (INSTALL-1 item 5): the network parameters, passed through unchanged
-    foreach ($k in @('PrivateNetwork', 'VnetId', 'VnetName', 'AppsSubnetName', 'AppsSubnetPrefix', 'EndpointsSubnetName', 'EndpointsSubnetPrefix', 'PrivateDnsZonesResourceGroupId', 'HubVnetId', 'LinkZonesToHub', 'PeerToHub', 'WebAppAccess')) {
+    foreach ($k in @('PrivateNetwork', 'VnetId', 'VnetName', 'AppsSubnetName', 'AppsSubnetPrefix', 'EndpointsSubnetName', 'EndpointsSubnetPrefix', 'PrivateDnsZonesResourceGroupId', 'HubVnetId', 'LinkZonesToHub', 'PeerToHub', 'InternalRanges', 'FirewallIp', 'WebAppAccess')) {
         if ($PSBoundParameters.ContainsKey($k)) { $pass[$k] = $PSBoundParameters[$k] }
     }
     # INSTALL-1 ALIGN: the edition comes from this copy (a given -Edition still wins for one release); the ring defaults to 3

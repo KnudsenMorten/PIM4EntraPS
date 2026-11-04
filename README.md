@@ -204,8 +204,9 @@ PIM Manager, the engine and the database run in your subscription on managed ide
 | Admin accounts with Temporary Access Passes and auto-disable | ✅ | ✅ |
 | PIM Activator browser extension | ✅ | ✅ |
 | Updates | From the public release | Approved releases through Invardia |
-| Access reviews enforced by the engine, with evidence export | | ✅ |
-| Second approver and delegated administration | | ✅ |
+| Second approver (four-eyes) and the evidence / audit export | ✅ | ✅ |
+| Access reviews enforced by the engine | | ✅ |
+| Delegated administration | | ✅ |
 | Access request portal and API | | ✅ |
 | Coverage, gaps and the discovery inbox | | ✅ |
 | Management report as a PowerPoint, on demand or mailed monthly | | ✅ |

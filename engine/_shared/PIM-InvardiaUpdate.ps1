@@ -431,10 +431,24 @@ function ConvertTo-PimBuildContextFromCommunityZip {
         if (-not (Test-Path -LiteralPath (Join-Path $sol 'tools/pim-manager/Dockerfile'))) { return @{ ok = $false; path = ''; reason = 'the archive holds no tools/pim-manager/Dockerfile' } }
         $inside = "$(Get-Content -Raw -LiteralPath $vf)".Trim()
         if ($inside -ne $Version) { return @{ ok = $false; path = ''; reason = "the archive holds version $inside, the signed manifest says $Version" } }
+        # OPEN-26 / BUG-COMMUNITY-ARCHIVE-NO-SIGNIN-FRONT (2026-11-04; owner: "no diff in the core security between pro and
+        # community"): the mirror tree carries the sign-in front's source as vendor/signin-front (src + VERSION), never as
+        # FRAMEWORK/ -- so the Community context had no front and a Community install could never build signin-front (gp185:
+        # "the source archive carries no FRAMEWORK/signin-front/src"). Place that copy where the front step reads it, exactly as
+        # the Pro context carries it; the Manager build never sees it (.dockerignore / the Dockerfile COPY read the solution).
+        $items = @('SOLUTIONS')
+        $vsf = Join-Path $sol 'vendor/signin-front'
+        if ((Test-Path -LiteralPath (Join-Path $vsf 'src/Dockerfile')) -and (Test-Path -LiteralPath (Join-Path $vsf 'VERSION'))) {
+            $fw = Join-Path $work 'FRAMEWORK/signin-front'
+            New-Item -ItemType Directory -Force -Path $fw | Out-Null
+            Copy-Item -LiteralPath (Join-Path $vsf 'src') -Destination $fw -Recurse -Force
+            Copy-Item -LiteralPath (Join-Path $vsf 'VERSION') -Destination $fw -Force
+            $items += 'FRAMEWORK'
+        }
         Push-Location -LiteralPath $work
         try {
             # A RELATIVE output name, then a move: GNU tar reads 'C:' in an absolute Windows path as a remote host.
-            & tar -czf 'context.tar.gz' 'SOLUTIONS'
+            & tar -czf 'context.tar.gz' @items
             if ($LASTEXITCODE -ne 0) { return @{ ok = $false; path = ''; reason = "tar failed (exit $LASTEXITCODE)" } }
         } finally { Pop-Location }
         Move-Item -LiteralPath (Join-Path $work 'context.tar.gz') -Destination $OutFile -Force

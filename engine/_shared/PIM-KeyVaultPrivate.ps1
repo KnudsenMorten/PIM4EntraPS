@@ -61,7 +61,7 @@ function Invoke-PimKeyVaultRule11 {
     param([Parameter(Mandatory)][scriptblock]$Arm, [Parameter(Mandatory)][string]$VaultId, [string]$SqlServerName = '',
           [scriptblock]$Sleep, [int]$ReadBackTries = 6)
     if (-not $Sleep) { $Sleep = { param($s) Start-Sleep -Seconds $s } }
-    $res = @{ ok = $false; changed = $false; reason = ''; lines = (New-Object System.Collections.Generic.List[object]) }
+    $res = @{ ok = $false; changed = $false; reason = ''; customerTask = ''; lines = (New-Object System.Collections.Generic.List[object]) }
     $add = { param($lvl, $t) $res.lines.Add(@{ level = $lvl; text = $t }) | Out-Null; if ($lvl -eq 'changed') { $res.changed = $true } }
     $vid = "$VaultId".Trim().TrimEnd('/')
     $vName = ($vid -split '/')[-1]
@@ -117,9 +117,20 @@ function Invoke-PimKeyVaultRule11 {
         }
         $own = ($zoneRg -ieq $rg)
         $zonePath = "$zoneRg/providers/Microsoft.Network/privateDnsZones/$script:PimKvRule11Zone"
-        $z = & $Arm 'GET' "$zonePath`?$script:PimKvDnsApi" $null
+        # framework installer rules 14 + 16 (2026-11-04): the customer's CENTRAL zone (outside the install's resource group) that
+        # is missing, or that the caller may not read (401 / 403), is a CUSTOMER TASK with a warning -- the vault is already in
+        # the private shape and has its endpoint, so ok = $true with .customerTask set; never a stop
+        $z = $null; $zRefused = $false
+        try { $z = & $Arm 'GET' "$zonePath`?$script:PimKvDnsApi" $null }
+        catch { if (-not $own -and "$($_.Exception.Message)" -match '\b(401|403)\b|Forbidden|AuthorizationFailed') { $zRefused = $true } else { throw } }
         if (-not $z) {
-            if (-not $own) { $res.reason = "the central zone $script:PimKvRule11Zone is missing in $(($zoneRg -split '/')[-1]) -- it is used, never created there"; & $add 'warn' $res.reason; return $res }
+            if (-not $own) {
+                $res.customerTask = $(if ($zRefused) { "the central zone $script:PimKvRule11Zone in $(($zoneRg -split '/')[-1]) may not be read by this sign-in (refused)" } else { "the central zone $script:PimKvRule11Zone is not in $(($zoneRg -split '/')[-1])" }) +
+                    " -- CUSTOMER TASK: the network team creates / links it and registers $peName in it (PIM never writes a central zone)"
+                & $add 'warn' $res.customerTask
+                $res.ok = $true
+                return $res
+            }
             [void](& $Arm 'PUT' "$zonePath`?$script:PimKvDnsApi" @{ location = 'global' })
             & $add 'changed' "private DNS zone $script:PimKvRule11Zone created"
         }

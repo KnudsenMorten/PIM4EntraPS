@@ -470,7 +470,10 @@ function Set-PimArmSubnet {
           [Parameter(Mandatory)][string]$Name, [string]$AddressPrefix, [string]$Delegation, [string]$PrivateEndpointNetworkPolicies,
           # az network vnet subnet update --service-endpoints A B : the list is written AS GIVEN (REPLACES it, as the flag
           # did) -- a caller that only means to add reads the current list and passes the union.
-          [string[]]$ServiceEndpoints)
+          [string[]]$ServiceEndpoints,
+          # framework rule 11b (2026-11-04): Azure creates new subnets PRIVATE (defaultOutboundAccess = false); a subnet PIM
+          # creates for the build pool passes $true so the pool has a way out (outbound only -- nothing becomes reachable)
+          [Nullable[bool]]$DefaultOutboundAccess = $null)
     $id = Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Network/virtualNetworks' $VnetName "subnets/$Name"
     $cur = Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -VnetName $VnetName -Name $Name
     $props = @{}
@@ -479,6 +482,7 @@ function Set-PimArmSubnet {
     if ("$Delegation".Trim()) { $props.delegations = @(@{ name = 'delegation'; properties = @{ serviceName = "$Delegation".Trim() } }) }
     if ("$PrivateEndpointNetworkPolicies".Trim()) { $props.privateEndpointNetworkPolicies = "$PrivateEndpointNetworkPolicies".Trim() }
     if ($PSBoundParameters.ContainsKey('ServiceEndpoints')) { $props.serviceEndpoints = @(@($ServiceEndpoints) | Where-Object { "$_".Trim() } | ForEach-Object { @{ service = "$_".Trim() } }) }
+    if ($null -ne $DefaultOutboundAccess) { $props.defaultOutboundAccess = [bool]$DefaultOutboundAccess }
     [void](Invoke-PimSetupArm -Method PUT -Path $id -Body @{ properties = $props } -ApiVersion (Get-PimSetupApiVersion network))
     [void](Wait-PimArmProvisioned -Path $id -ApiVersion (Get-PimSetupApiVersion network))
     Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -VnetName $VnetName -Name $Name
@@ -689,6 +693,33 @@ function Get-PimArmAcrCredential {
     $c = Invoke-PimSetupArm -Method POST -Path ("$ResourceId".TrimEnd('/') + '/listCredentials') -Body @{} -ApiVersion (Get-PimSetupApiVersion acr) -ErrorAsNull
     if (-not $c) { return $null }
     return @{ username = "$($c.username)"; password = "$(@($c.passwords)[0].value)" }
+}
+
+function Get-PimAcrPoolOutboundVerdict {
+    <#
+      PURE. Framework rule 11b (Invardia 2026-11-04, found live by SI at a customer: an ACR agent pool in a subnet with no way
+      out fails inside Microsoft's own deployment). Does this subnet give a build pool an OUTBOUND path?
+        -Subnet       the subnet object (ARM GET)
+        -RouteTable   its route table object when it has one (ARM GET), else $null
+      @{ ok; how; reason }. Outbound only -- nothing here makes anything reachable from outside.
+        a NAT gateway on the subnet                         -> ok, 'the subnet''s NAT gateway'
+        a route table with a 0.0.0.0/0 route                -> ok, 'the default route to <next hop>' (the customer's firewall)
+        defaultOutboundAccess not false (unset or true)     -> ok, 'Azure default outbound access'
+        anything else (a private subnet, no NAT, no route)  -> NOT ok, with the customer step
+    #>
+    param([AllowNull()]$Subnet, [AllowNull()]$RouteTable)
+    if (-not $Subnet) { return @{ ok = $false; how = ''; reason = 'the subnet could not be read' } }
+    $p = $Subnet.properties
+    if ($p -and $p.natGateway -and "$($p.natGateway.id)".Trim()) { return @{ ok = $true; how = 'the subnet''s NAT gateway'; reason = '' } }
+    if ($RouteTable) {
+        $def = @(@($RouteTable.properties.routes) | Where-Object { $_ -and "$($_.properties.addressPrefix)".Trim() -eq '0.0.0.0/0' }) | Select-Object -First 1
+        if ($def) { return @{ ok = $true; how = "the default route to $("$($def.properties.nextHopType)".Trim()) $("$($def.properties.nextHopIpAddress)".Trim())".Trim(); reason = '' } }
+    }
+    $doa = $null; if ($p -and $p.PSObject.Properties['defaultOutboundAccess']) { $doa = $p.defaultOutboundAccess }
+    if ($null -eq $doa -or [bool]$doa) { return @{ ok = $true; how = 'Azure default outbound access'; reason = '' } }
+    return @{ ok = $false; how = ''; reason = ("the subnet '$("$($Subnet.name)")' has no outbound path (defaultOutboundAccess is off, no NAT gateway, no 0.0.0.0/0 route) " +
+                                               '-- an ACR build pool there cannot reach Azure and its deployment fails. Customer step: give the subnet a NAT gateway, ' +
+                                               'or a route 0.0.0.0/0 through your firewall, or turn its default outbound access on; then run the install again.') }
 }
 
 function Get-PimArmAcrAgentPool {

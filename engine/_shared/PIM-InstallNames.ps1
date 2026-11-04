@@ -100,15 +100,18 @@ function Get-PimInstallIdentityNames {
 
 function Test-PimNewInstallNamesSwitch {
     <#
-      The setup switch for CR5 step 2 (OFF by default). -Explicit (a bound -NewInstallNames / a config value) wins; else
-      $env:PIM_Setup_NewInstallNames, else $global:PIM_Setup_NewInstallNames: 1 / true / yes / on = on. Anything else = off.
+      The setup switch for CR5 step 2 -- ON BY DEFAULT since 2026-11-04 (framework §5.5 "THE AGREED LIST", owner: "fx tick ...
+      we dont use that"; wizard "On now"): a NEW install gets ca-pim-web / ca-pim-engine / caj-pim-updater. An EXISTING install
+      keeps its names whatever this says (Resolve-PimSetupInstallNameChoice reads the resource group). -Explicit (a bound
+      -NewInstallNames / a config value) wins; else $env:PIM_Setup_NewInstallNames, else $global:PIM_Setup_NewInstallNames:
+      1 / true / yes / on = on, anything else given = off. Nothing given = ON.
     #>
     param([AllowNull()][object]$Explicit = $null)
     $on = { param($v) return ("$v".Trim() -match '^(?i)(1|true|yes|on)$') }
     if ($null -ne $Explicit -and "$Explicit".Trim() -ne '') { return [bool](& $on $Explicit) }
     if ("$($env:PIM_Setup_NewInstallNames)".Trim()) { return [bool](& $on $env:PIM_Setup_NewInstallNames) }
     if ($null -ne $global:PIM_Setup_NewInstallNames) { return [bool](& $on $global:PIM_Setup_NewInstallNames) }
-    return $false
+    return $true
 }
 
 function Resolve-PimSetupInstallNameChoice {

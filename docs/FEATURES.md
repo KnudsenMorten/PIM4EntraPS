@@ -2194,6 +2194,8 @@ Everything an organisation needs to govern its own tenant:
 
 - the full **portal** — model, review, commit, and see what changed;
 - **eligible, time-boxed access** with approval and a complete audit trail;
+- a **second approver** for sensitive changes (separation of duties);
+- the **evidence export** — who may hold what, who held it, and who approved;
 - **Entra ID roles, PIM for Groups, administrative units and Azure RBAC**;
 - **Intune and Defender XDR** role delegation, including Defender custom roles;
 - **delegation by group** — permission groups and tiering, so access is granted by
@@ -2216,10 +2218,8 @@ On top of the free edition, a Pro licence adds:
   Business Central and Power Platform;
 - **revoking current delegations** from the portal (the list itself is free);
 - **access reviews** — campaigns with decisions recorded and enforced;
-- a **second approver** for sensitive changes (separation of duties);
 - **delegated administration** — portal users limited to a tier, level, service or scope;
 - the **tier-impact report** — everyone who can reach tier 0, including through nested groups;
-- the **evidence export** — who may hold what, who held it, and who approved;
 - the **access request API** — a ticketing system such as ServiceNow switches a disabled admin account on for a set
   time, reads the request's status or cancels it, and PIM switches the account off again when the time is up;
 - the **AI assistant (MCP)** — an assistant reads every view of the portal and does routine work under the person's own role;
@@ -2296,9 +2296,9 @@ What an environment does before anyone changes a setting (the full table is in
   hosted deploy.
 - **Switch themselves on when you have rows for them:** the Intune + Defender XDR connectors (free) and the
   app-role / Azure DevOps / Dataverse / Business Central / Power Platform connectors (Pro).
-- **Pro, on when licensed:** Discovery and gaps, revoke, access review campaigns, delegated administration, the
-  tier-impact report and the evidence export. **Pro, off until switched on:** the second approver, discovery,
-  Power BI and MSP.
+- **Pro, on when licensed:** Discovery and gaps, revoke, access review campaigns, delegated administration and the
+  tier-impact report. **Pro, off until switched on:** discovery, Power BI and MSP.
+- **In both editions:** the evidence export (on), and the second approver (off until switched on).
 - **Policy templates:** `Groups_Standard`, `EntraIDRoles_Standard` and `AzureRoles_Standard` are the defaults per kind.
 - **Policy settings:** no policy setting is changed until you chose a value for it (Microsoft default,
   PIM Manager recommendation or Keep current), and every change that follows waits for a SuperAdmin's approval.

@@ -41,6 +41,8 @@
     { "name": "HubVnetId", "required": false, "default": null, "help": "A private install: your hub network, for the peering and the zone link (passed through)." },
     { "name": "LinkZonesToHub", "required": false, "default": false, "help": "A private install: link PIM Manager's own private zone to the hub (passed through)." },
     { "name": "PeerToHub", "required": false, "default": false, "help": "A private install: peer the PIM network with the hub, both sides (passed through)." },
+    { "name": "InternalRanges", "required": false, "default": [], "help": "A private install behind a hub firewall: the ranges your users connect from, for the app subnet's return route (passed through, with -FirewallIp)." },
+    { "name": "FirewallIp", "required": false, "default": null, "help": "A private install: your hub firewall's private IP, the return route's next hop (passed through, with -InternalRanges)." },
     { "name": "WebAppAccess", "required": false, "default": "external (internal with -PrivateNetwork)", "help": "How the PIM Manager is reached; internal only with -PrivateNetwork, and a private install is always internal (passed through)." },
     { "name": "UpdateRing", "required": false, "default": "3", "help": "Pro: the update ring, 2 (design partners) or 3 (broad, the default) (passed through)." },
     { "name": "KeyVaultName", "required": false, "default": "kv-pim-<token>", "help": "The installation's own Key Vault name (passed through)." },

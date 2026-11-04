@@ -2154,7 +2154,8 @@
         "on": {
           "tone": "neutral",
           "title": "Let these applications ask for access?",
-          "body": "Each listed application can ask PIM Manager for admin access for a limited time. The request is approved on arrival, except access to a Tier 0 or Tier 1 group (or a group with no tier set), which waits for a person to approve it.",
+          "body": "Each listed application can ask for time-limited admin access, approved on arrival unless the group is Tier 0, Tier 1 or has no tier.",
+        "more": ["A request for a Tier 0 or Tier 1 group, or for a group with no tier set, waits for a person to approve it."],
           "note": "Note: the approval must happen in that system, because PIM Manager does not ask a second person."
         }
       },

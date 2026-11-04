@@ -7671,8 +7671,8 @@
   // pro-license with the word PRO dimmed on the menu item. if a user clicks a PRO item and they only have a free
   // license, it should show a page where people can see the differences between free and pro and they can buy pro").
   //   * PIM_PRO_PAGES -- the menu pages that ARE a Pro feature (the server gates their endpoints on that key). A page
-  //     that is free with ONE Pro function (Audit: evidence export, Approvals: second approver, Manager access:
-  //     delegated profiles, Reports: tier impact) is not listed -- it keeps its in-page notice.
+  //     that is free with ONE Pro function (Manager access: delegated profiles, Reports: tier impact) is not listed -- it
+  //     keeps its in-page notice. (The evidence export and the second approver are core in both editions since 2026-11-04.)
   //   * MSP ('msp') is Pro only -- there is no free MSP (operator 2026-09-26: "msp is always a paid solution").
   //   * Locked = /api/license says so. Unknown (not loaded yet, unreadable, the static build) = NOT locked: the page
   //     opens with its own notice and the server still refuses. The menu is rebuilt once the licence is read.
@@ -7686,6 +7686,8 @@
   // "free vs pro is already documented ... what goes where"). tests/Test-PimEditionPage.ps1 fails when they drift apart.
   var PIM_EDITION_FREE = ["the full portal — model, review, commit, and see what changed",
     "eligible, time-boxed access with approval and a complete audit trail",
+    "a second approver for sensitive changes (separation of duties)",
+    "the evidence export — who may hold what, who held it, and who approved",
     "Entra ID roles, PIM for Groups, administrative units and Azure RBAC",
     "Intune and Defender XDR role delegation, including Defender custom roles",
     "delegation by group — permission groups and tiering, so access is granted by membership rather than by hand",
@@ -7700,10 +7702,8 @@
     "the other workload connectors — Power BI, enterprise-app roles, Azure DevOps, Dataverse, Business Central and Power Platform",
     "revoking current delegations from the portal (the list itself is free)",
     "access reviews — campaigns with decisions recorded and enforced",
-    "a second approver for sensitive changes (separation of duties)",
     "delegated administration — portal users limited to a tier, level, service or scope",
     "the tier-impact report — everyone who can reach tier 0, including through nested groups",
-    "the evidence export — who may hold what, who held it, and who approved",
     "the access request API — a ticketing system such as ServiceNow switches a disabled admin account on for a set time, reads the request's status or cancels it, and PIM switches the account off again when the time is up",
     "the AI assistant (MCP) — an assistant reads every view of the portal and does routine work under the person's own role",
     "API applications — scripts and services use the PIM Manager API with their own application, as Reader or Admin, and a person saves every change they prepare",
@@ -36433,9 +36433,17 @@
         (c.manualStep && !c.ok ? '<div style="overflow-wrap:anywhere;"><i>To do:</i> ' + esc(c.manualStep) + (c.learn ? ' <a href="' + esc(c.learn) + '" target="_blank" rel="noopener">Learn</a>' : '') + '</div>' : '') +
         (btns.trim() ? '<div style="margin-top:2px;">' + btns + '</div>' : '') + '</li>';
     }).join('');
+    // UX-PORTAL-STEP-CONFIRM (owner 2026-11-04: "these steps are completed. dont know what is missing"): a portal-only step
+    // (no API shows it) closes ONLY with a person's Confirm -- say that FIRST, in one calm line, never only at the end.
+    const portalOpen = canAct ? open.filter(c => c && String(c.status) === 'manual' && c.canConfirm) : [];   // a Reader has no Confirm button
+    const portalLead = portalOpen.length
+      ? '<div class="prereq-portal-lead" style="margin:2px 0 4px;color:#24292f;"><b>PIM cannot check ' + (portalOpen.length === 1 ? 'this portal step' : 'these ' + portalOpen.length + ' portal steps') +
+        ' itself.</b> When you have done ' + (portalOpen.length === 1 ? 'it' : 'them') + ', press <b>Confirm</b> on each' +
+        (portalOpen.some(c => c.canSkip) ? ' (or <b>Not used</b> if you do not use it)' : '') + ' -- <i>Check again</i> does not change a portal step.</div>'
+      : '';
     return '<details class="prereq-details"' + (open.length && w.chip !== 'green' ? ' open' : '') + ' style="margin-top:3px;"><summary style="cursor:pointer;">' +
       (open.length ? open.length + ' check' + (open.length === 1 ? '' : 's') + ' to look at' : 'confirmed by a person') + '</summary>' +
-      '<ul style="margin:2px 0 0 16px;padding:0;color:#24292f;">' + items + '</ul></details>';
+      portalLead + '<ul style="margin:2px 0 0 16px;padding:0;color:#24292f;">' + items + '</ul></details>';
   }
   // PIM 100.108 (e) (owner 2026-10-12: "5 of 5 workloads ready" stood green under "Power BI was not read (HTTP 401)"): a
   // workload is READY when the server says so (ready -- its state is ok AND, where the workload has a confirmation call,

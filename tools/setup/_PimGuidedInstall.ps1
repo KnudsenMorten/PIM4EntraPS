@@ -19,6 +19,8 @@ $script:PimInstallGuid = '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
 . (Join-Path $PSScriptRoot '_PimRegions.ps1')
 # CR5 step 2 (PIM 100.149): the name sets (today's / new) and the setup switch -- pure, no side effects.
 . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-InstallNames.ps1')
+# framework installer rule 11d (2026-11-04): the return route's checks and its hand-off line -- pure, no side effects.
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-ReturnRoute.ps1')
 
 # The stable step ids (the status page and support tickets refer to them) and their titles in customer language.
 # Order = run order. DeployAll's 'appreg' step is never shown: a guided install runs on managed identities only.
@@ -259,6 +261,30 @@ function ConvertTo-PimInstallAnswers {
 # tenant, the subscription, the region, the choices that differ from the default and the values of the chosen options --
 # never an empty value, never a parameter of an option not chosen, never a default restated. The PARAMETERS stay on the
 # scripts (existing callers keep working); only what is shown / generated changes. =======================================
+function Get-PimInstallResourceGroupTags {
+    <#
+      PURE. Framework §5.5 / OPEN-30 (owner 2026-11-04: PIM's naming is the rule; the names carry no edition / ring, so the
+      resource group's 7 TAGS carry them): product, ring, edition, hosting, tenant, owner, purpose. -Existing = the group's
+      current tags: every key of the customer's own is KEPT, PIM's 7 are set. Returns the merged ordered table.
+    #>
+    param([Parameter(Mandatory)][object]$Config, [AllowEmptyString()][string]$Owner = '', $Existing = $null)
+    $t = [ordered]@{}
+    if ($Existing) {
+        if ($Existing -is [System.Collections.IDictionary]) { foreach ($k in @($Existing.Keys)) { $t["$k"] = "$($Existing[$k])" } }
+        else { foreach ($p in @($Existing.PSObject.Properties)) { $t["$($p.Name)"] = "$($p.Value)" } }
+    }
+    $ring = "$($Config.updateRing)".Trim(); if (-not $ring) { $ring = '3' }
+    $ed = "$($Config.edition)".Trim().ToLowerInvariant(); if (-not $ed) { $ed = 'community' }
+    $t['product'] = 'pim'
+    $t['ring'] = "r$ring"
+    $t['edition'] = $ed
+    $t['hosting'] = 'ca'
+    $t['tenant'] = "$($Config.tenantId)".Trim()
+    if ("$Owner".Trim()) { $t['owner'] = "$Owner".Trim() } elseif (-not $t.Contains('owner')) { $t['owner'] = 'unknown' }
+    $t['purpose'] = 'PIM Manager'
+    return $t
+}
+
 function Get-PimInstallLineDefaults {
     <# PURE. The defaults an install line never restates (the same values as install-parameters.json -- Test-PimGuidedInstall ILM keeps them in step). #>
     return [ordered]@{
@@ -355,6 +381,9 @@ function Get-PimInstallLineArgs {
         }
         & $one 'PrivateDnsZonesResourceGroupId' (& $str 'PrivateDnsZonesResourceGroupId')
         & $one 'HubVnetId' $hub
+        # rule 11d: the return route's answers (a list: each range quoted, comma-joined)
+        $irl = @(& $list 'InternalRanges'); if ($irl.Count) { $out.Add(' -InternalRanges ' + (@($irl | ForEach-Object { & $q $_ }) -join ',')) }
+        & $one 'FirewallIp' (& $str 'FirewallIp')
         & $sw 'PrivateNetwork'
         if ($hub) { foreach ($n in 'LinkZonesToHub', 'PeerToHub') { if (& $on $n) { & $sw $n } } }
     }
@@ -514,7 +543,8 @@ function Test-PimInstallNetworkAnswers {
     elseif ($wa -eq 'internal' -and -not $private) { $err.Add('-WebAppAccess internal needs -PrivateNetwork (the PIM Manager is then reachable from your network only)') }
     elseif ($wa -eq 'external' -and $private) { $err.Add('-PrivateNetwork means -WebAppAccess internal: the Container Apps environment has no public address -- leave -WebAppAccess out or say internal') }
     $v.webAppAccess = $v.exposure
-    $privOnly = @(@(@('vnetId', 'endpointsSubnetName', 'endpointsSubnetPrefix', 'privateDnsZonesResourceGroupId', 'hubVnetId') | Where-Object { & $s $_ }) + @(@('linkZonesToHub', 'peerToHub') | Where-Object { & $on $_ }))
+    # rule 11d (2026-11-04): -InternalRanges / -FirewallIp are private-only answers too (a public install has no return path to fix)
+    $privOnly = @(@(@('vnetId', 'endpointsSubnetName', 'endpointsSubnetPrefix', 'privateDnsZonesResourceGroupId', 'hubVnetId', 'internalRanges', 'firewallIp') | Where-Object { & $s $_ }) + @(@('linkZonesToHub', 'peerToHub') | Where-Object { & $on $_ }))
     if (-not $private -and $privOnly.Count) { $err.Add("$(@($privOnly | ForEach-Object { & $pn $_ }) -join ', ') belong to a private network install: add -PrivateNetwork (or leave them out for the public install)") }
     # the network: an existing one (-VnetId) or one the install makes (-VnetName + -VnetAddressPrefix)
     $vid = & $s 'vnetId'; $vnetName = & $s 'vnetName'; $vnetPfx = & $s 'vnetAddressPrefix'
@@ -588,6 +618,25 @@ function Test-PimInstallNetworkAnswers {
             if ($v.hubVnetId -ieq $spokeId) { $err.Add('-HubVnetId is the same network as the PIM network -- the hub is the network your clients reach Azure through; PIM Manager runs in its own (spoke) network') }
         }
     } elseif ($v.linkZonesToHub -or $v.peerToHub) { $err.Add('-PeerToHub and -LinkZonesToHub need -HubVnetId') }
+    # THE RETURN ROUTE (framework installer rule 11d, 2026-11-04; found live at a customer install: replies to the LAN left by
+    # Azure's default route instead of the hub firewall and the private web app timed out). Optional, private only, BOTH or
+    # NEITHER (a range with no next hop, or a next hop with no range, is no route). A range that is PIM's own network (or inside
+    # it) is refused: a more specific route would pull PIM's own traffic out to the firewall.
+    $v.internalRanges = @(); $v.firewallIp = ''
+    $irs = @(ConvertTo-PimReturnRouteRangeList (& $Get 'internalRanges')); $fip = & $s 'firewallIp'
+    if ($private -and ($irs.Count -or $fip)) {
+        if (-not $irs.Count -or -not $fip) { $err.Add('-InternalRanges and -FirewallIp go together: the return route sends your internal ranges to your hub firewall -- give both, or leave both out') }
+        $rangeErr = $false
+        foreach ($ir in $irs) {
+            $why = Test-PimReturnRouteRange -Cidr $ir
+            if ($why) { $err.Add("-InternalRanges: $why"); $rangeErr = $true; continue }
+            $irc = ConvertFrom-PimReturnRouteCidr $ir
+            if ($vn -and -not $v.vnetId -and $irc.Start -ge $vn.Start -and $irc.End -le $vn.End) { $err.Add("-InternalRanges $ir is inside PIM's own network $vnetPfx -- give the ranges your users connect from"); $rangeErr = $true }
+        }
+        if ($fip) { $why = Test-PimReturnRouteFirewallIp -Ip $fip; if ($why) { $err.Add("-FirewallIp: $why") } }
+        if (-not $rangeErr) { $v.internalRanges = @($irs) }
+        $v.firewallIp = $fip
+    }
     return @{ errors = @($err); values = $v }
 }
 
@@ -607,6 +656,8 @@ function Add-PimInstallNetworkDeployArgs {
         PrivateDnsZonesResourceGroupId           <- -PrivateDnsZonesResourceGroupId (central zones: used, never created or written)
         HubVnetName / -ResourceGroup / -SubscriptionId <- -HubVnetId (parsed)
         SkipPeering                              <- NOT -PeerToHub      SkipZoneLinkToHub <- NOT -LinkZonesToHub
+        InternalRanges / FirewallIp              <- -InternalRanges / -FirewallIp (rule 11d, both given)
+        ReturnRouteHandOffOnly                   <- -VnetId with them (the customer's network is never written)
     #>
     param([Parameter(Mandatory)][System.Collections.IDictionary]$DeployArgs, [Parameter(Mandatory)][object]$Config, [string]$ResourceGroup = '')
     $p = { param($k) if ($Config.PSObject.Properties[$k]) { $Config.$k } else { $null } }
@@ -632,6 +683,13 @@ function Add-PimInstallNetworkDeployArgs {
         $DeployArgs['HubVnetSubscriptionId'] = $Matches[1]; $DeployArgs['HubVnetResourceGroup'] = $Matches[2]; $DeployArgs['HubVnetName'] = $Matches[3]
         if (-not [bool](& $p 'peerToHub')) { $DeployArgs['SkipPeering'] = $true } else { $DeployArgs['PeeringAllOrNothing'] = $true }
         if (-not [bool](& $p 'linkZonesToHub')) { $DeployArgs['SkipZoneLinkToHub'] = $true } else { $DeployArgs['LinkZonesToHub'] = $true }
+    }
+    # framework installer rule 11d (2026-11-04): the return route. A network the customer GAVE (-VnetId) is never written by
+    # PIM -- the prereq step then only says the route (the network hand-off); a network PIM makes gets rt-pim.
+    $irs = @(@(& $p 'internalRanges') | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if ($irs.Count -and "$(& $p 'firewallIp')".Trim()) {
+        $DeployArgs['InternalRanges'] = [string[]]$irs; $DeployArgs['FirewallIp'] = "$(& $p 'firewallIp')".Trim()
+        if ("$(& $p 'vnetId')".Trim()) { $DeployArgs['ReturnRouteHandOffOnly'] = $true }
     }
 }
 
@@ -691,14 +749,25 @@ function Get-PimInstallNetworkVerdict {
         }
     }
     if ("$($Config.privateDnsZonesResourceGroupId)".Trim()) {
-        $missing = @(Get-PimInstallPrivateZoneNames | Where-Object { -not $Zones[$_] })
+        # framework installer rule 16 (2026-11-04): a zone the installer may not READ (401 / 403, outside its own resource group)
+        # is a customer task with a warning, never "missing" and never a stop. Values: $true / 'found', $false / 'missing',
+        # 'refused', 'unknown' (an older caller passes a bool).
+        $zState = { param($v) if ($v -is [bool]) { if ($v) { 'found' } else { 'missing' } } elseif ("$v".Trim()) { "$v".Trim().ToLowerInvariant() } else { 'missing' } }
+        $refused = @(Get-PimInstallPrivateZoneNames | Where-Object { (& $zState $Zones[$_]) -in 'refused', 'unknown' })
+        if ($refused.Count) {
+            $warn = $(if ($warn) { "$warn; " } else { '' }) + ("the installer may not read $(if ($refused.Count -eq 1) { 'the zone' } else { "$($refused.Count) zones" }) $($refused -join ', ') in " +
+                     "$("$($Config.privateDnsZonesResourceGroupId)".Trim()) (refused) -- CUSTOMER TASK: the network team confirms $(if ($refused.Count -eq 1) { 'it exists' } else { 'they exist' }) " +
+                     'and gives the installer Reader there (or links them to the PIM network itself); the install goes on')
+        }
+        $missing = @(Get-PimInstallPrivateZoneNames | Where-Object { (& $zState $Zones[$_]) -eq 'missing' })
         # ALL missing zones in ONE message (framework installer rule 8): never one at a time across reruns
         if ($missing.Count) {
             $zg = "$($Config.privateDnsZonesResourceGroupId)".Trim()
             return (& $fail ("$(if ($missing.Count -eq 1) { 'the zone' } else { "$($missing.Count) zones" }) $($missing -join ', ') $(if ($missing.Count -eq 1) { 'is' } else { 'are' }) not in $zg -- the installation and its updater use your central zones and never create them") `
                 ("Create these zones in $zg, or leave -PrivateDnsZonesResourceGroupId out and PIM makes its own:") "privatelink zone(s): $($missing -join ', ')")
         }
-        $notes.Add("central zone(s) $(@(Get-PimInstallPrivateZoneNames) -join ', ') found (used, never changed)")
+        $foundZ = @(Get-PimInstallPrivateZoneNames | Where-Object { (& $zState $Zones[$_]) -eq 'found' })
+        if ($foundZ.Count) { $notes.Add("central zone(s) $($foundZ -join ', ') found (used, never changed)") }
     }
     if ($warn) { return @{ state = 'warning'; message = "$warn; $($notes -join '; ')"; actionText = ''; actionCommand = '' } }
     return @{ state = 'ok'; message = "private network: $($notes -join '; ')"; actionText = ''; actionCommand = '' }
@@ -752,8 +821,11 @@ function Get-PimInstallNetworkHandoff {
       PURE. The network hand-off of a -PrivateNetwork install (EPS DESIGN §2b: "the network hand-off list is printed"): what
       the customer's network team does so people reach the PIM Manager -- peering, DNS for the PIM Manager's name, DNS for
       the database's private endpoint, and where later setup scripts must run. @() for a public install.
+      -ReturnRouteState (framework installer rule 11d): what the prereq step did with -InternalRanges / -FirewallIp --
+      'done' (rt-pim made and read back: said as done), anything else ('handoff' = the customer's own network, 'refused',
+      'failed', '' = not known, e.g. a -Resume that did not run the step) = the route on the hand-off.
     #>
-    param([Parameter(Mandatory)][object]$Config, [Parameter(Mandatory)][object]$Names, [string]$PortalFqdn = '')
+    param([Parameter(Mandatory)][object]$Config, [Parameter(Mandatory)][object]$Names, [string]$PortalFqdn = '', [string]$ReturnRouteState = '')
     if (-not [bool]$Config.privateNetwork) { return @() }
     $rg = "$($Names.resourceGroup)"
     $spoke = if ("$($Config.vnetId)".Trim()) { "$($Config.vnetId)".Trim() } else { "/subscriptions/$($Config.subscriptionId)/resourceGroups/$rg/providers/Microsoft.Network/virtualNetworks/$($Config.vnetName)" }
@@ -764,6 +836,13 @@ function Get-PimInstallNetworkHandoff {
     if ($hub -and $Config.peerToHub) { $l.Add("Peering: made with the hub $hubName by the installation (both sides) -- check that it shows Connected.") }
     elseif ($hub) { $l.Add("Peering: peer $spoke with the hub $hub, both directions (allow virtual network access). New-PimHubPrepareScript.ps1 writes the script the hub owner runs for the hub side.") }
     else { $l.Add("Peering: peer $spoke with the network your users reach Azure from, both directions -- no -HubVnetId was given, so nothing was peered.") }
+    # rule 11d: the return route -- said as done only when the prereq step read it back
+    $rrRanges = @(@($Config.internalRanges) | Where-Object { "$_".Trim() })
+    if ($rrRanges.Count -and "$($Config.firewallIp)".Trim()) {
+        $appsSn = if ("$($Config.appsSubnetName)".Trim()) { "$($Config.appsSubnetName)".Trim() } else { 'snet-pim-aca' }
+        if ("$ReturnRouteState" -eq 'done' -and -not "$($Config.vnetId)".Trim()) { $l.Add("Return route: made by the installation -- route table $(Get-PimReturnRouteTableName) on the app subnet $appsSn sends $($rrRanges -join ', ') to $("$($Config.firewallIp)".Trim()) (VirtualAppliance), BGP route propagation off.") }
+        else { $l.Add((Get-PimReturnRouteHandoffLine -InternalRanges $rrRanges -FirewallIp "$($Config.firewallIp)" -SubnetName $appsSn) + '.') }
+    }
     $central = "$($Config.privateDnsZonesResourceGroupId)".Trim()
     $own = if ($central) { "the Container Apps environment's default domain" } else { "the Container Apps environment's default domain, privatelink.database.windows.net and privatelink.azurecr.io" }
     if ($hub -and $Config.linkZonesToHub) { $l.Add("DNS for $($who): PIM Manager's own private zones ($own; resource group $rg) are linked to the hub $hubName by the installation.") }

@@ -1279,6 +1279,12 @@ if (-not "$SqlServerFqdn".Trim()) {
     $addRule = {
         param($ip)
         $sid = & $findSqlServer
+        # framework rule 11e (owner 2026-11-04): a PRIVATE store (public access not Enabled) never gets a firewall / IP rule,
+        # not even for the seconds of this write -- refused; the write runs inside the network or is a customer step
+        $srvObj = Invoke-RestMethod -Uri "https://management.azure.com$sid`?api-version=$armApi" -Headers @{ Authorization = "Bearer $(Get-PimMailAdminToken -Resource 'arm')" }
+        if ("$($srvObj.properties.publicNetworkAccess)" -ne 'Enabled') {
+            throw "REFUSED (framework rule 11e): the SQL server '$sqlServerName' is private (publicNetworkAccess=$("$($srvObj.properties.publicNetworkAccess)")) -- no temporary firewall rule is added to a private install; run this from a machine inside its network"
+        }
         $rn = New-PimSqlTempFirewallRuleName -Ip $ip
         $u = "https://management.azure.com$sid/firewallRules/$rn`?api-version=$armApi"
         [void](Invoke-RestMethod -Method PUT -Uri $u -Headers @{ Authorization = "Bearer $(Get-PimMailAdminToken -Resource 'arm')"; 'Content-Type' = 'application/json' } `
