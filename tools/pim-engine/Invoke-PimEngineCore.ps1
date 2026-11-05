@@ -252,6 +252,11 @@ $__outcome = if (Get-Command Get-PimEngineRunOutcome -ErrorAction SilentlyContin
 $__heldItems = 0
 foreach ($r in @($res)) { if ($r.PSObject.Properties['failures'] -and (Get-Command Test-PimEngineFailureIsApprovalHold -ErrorAction SilentlyContinue)) { $__heldItems += @(@($r.failures) | Where-Object { Test-PimEngineFailureIsApprovalHold $_ }).Count } }
 $tot | Add-Member -NotePropertyName held -NotePropertyValue ([int]$__heldItems)
+# Framework 12.27 SQL-STATS: same rule as the scheduler's engine job -- a Full run, or a run that wrote, refreshes the stale
+# pim.* statistics. Best effort: never throws, one warning line.
+if (-not $WhatIf -and ($Mode -eq 'Full' -or ($tot.create + $tot.update + $tot.remove + $tot.applied) -gt 0)) {
+    [void](Invoke-PimSqlStatisticsRefresh -ConnectionString $global:PIM_EngineSqlCs -Reason "engine $Mode run")
+}
 $tot | Add-Member -NotePropertyName outcome -NotePropertyValue $(if ($__outcome) { "$($__outcome.outcome)" } elseif ($tot.errors) { 'failed' } else { 'ok' })
 $tot | Add-Member -NotePropertyName heldDetail -NotePropertyValue $(if ($__outcome) { "$($__outcome.detail)" } else { '' })
 Write-Host ("==> Done. create={0} update={1} remove={2} applied={3} skipped={4} errors={5}{6}" -f $tot.create,$tot.update,$tot.remove,$tot.applied,$tot.skipped,$tot.errors,$(if ($tot.held) { " (held for approval=$($tot.held))" } else { '' })) -ForegroundColor $(if ($tot.errors) {'Yellow'} else {'Green'})

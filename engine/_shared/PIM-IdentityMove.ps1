@@ -54,6 +54,11 @@ if (-not (Get-Command Get-PimIdentityRoleOf -ErrorAction SilentlyContinue)) {
     $__pimIdSplit = Join-Path $PSScriptRoot 'PIM-IdentitySplit.ps1'
     if (Test-Path -LiteralPath $__pimIdSplit) { . $__pimIdSplit }
 }
+# the shared, override-free job start (ACA-START-OVERRIDE): every job start the mover makes goes through it
+if (-not (Get-Command Start-PimAcaJobExecution -ErrorAction SilentlyContinue)) {
+    $__pimAca = Join-Path $PSScriptRoot 'PIM-ArmContainerApps.ps1'
+    if (Test-Path -LiteralPath $__pimAca) { . $__pimAca }
+}
 
 function Get-PimIdentityMoveApi {
     <# PURE. The ARM api-versions the mover uses (a literal: child-scope safe). #>
@@ -528,31 +533,114 @@ function Set-PimIdentityMoveSwitch {
 }
 
 # ---------------------------------------------------------------------------------------------------------- default seams
+function Merge-PimIdentityMoveDbInitPrincipals {
+    <#
+      PURE. Add one principal to the database job's PIM_DBINIT_PRINCIPALS JSON array without dropping any that are there (the
+      same rule as the updater's Merge-PimDbInitPrincipals, duplicated here so the engine library does not load setup code).
+      Same name + same appId + same roles = unchanged; same name otherwise = replaced (a rebuilt identity). Always an ARRAY.
+      Returns @{ json; changed }.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Json, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$AppId, [string[]]$Roles = @())
+    $list = New-Object System.Collections.Generic.List[object]
+    if ("$Json".Trim()) {
+        $parsed = $null
+        try { $parsed = ("$Json" | ConvertFrom-Json) } catch { throw "PIM_DBINIT_PRINCIPALS of the database job is not valid JSON -- refusing to overwrite it: $($_.Exception.Message)" }
+        foreach ($p in @($parsed)) {
+            if ($p -and "$($p.name)".Trim()) {
+                $e = [ordered]@{ name = "$($p.name)"; appId = "$($p.appId)" }
+                $pr = @($p.roles | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
+                if ($pr.Count) { $e['roles'] = $pr }
+                [void]$list.Add($e)
+            }
+        }
+    }
+    $want = @($Roles | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
+    $changed = $true
+    $hit = @($list | Where-Object { "$($_.name)" -ieq $Name })
+    $sameRoles = { param($e) $have = @(if ($e.Contains('roles')) { $e['roles'] }); (@($have | Sort-Object) -join ',') -eq (@($want | Sort-Object) -join ',') }
+    if ($hit.Count -and "$($hit[0].appId)" -ieq $AppId -and (& $sameRoles $hit[0])) { $changed = $false }
+    elseif ($hit.Count) { $hit[0].appId = $AppId; if ($want.Count) { $hit[0]['roles'] = $want } elseif ($hit[0].Contains('roles')) { $hit[0].Remove('roles') } }
+    else { $e = [ordered]@{ name = $Name; appId = $AppId }; if ($want.Count) { $e['roles'] = $want }; [void]$list.Add($e) }
+    $out = ConvertTo-Json -Compress -Depth 5 -InputObject @($list.ToArray())
+    if ($out -notmatch '^\s*\[') { $out = "[$out]" }
+    return @{ json = $out; changed = $changed }
+}
+
+function Start-PimIdentityMoveJob {
+    <#
+      ACA-START-OVERRIDE: ONE execution of a job through the shared, override-free start (Start-PimAcaJobExecution: the empty
+      body, a bounded wait on a 409 while the job is still provisioning). Per-run work never travels in the start call: it is
+      in the job definition the caller wrote and read back first. Returns @{ ok; execution; reason }.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Arm, [Parameter(Mandatory)][string]$JobId, [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s })
+    $idm = [regex]::Match("$JobId", '^/subscriptions/(?<s>[^/]+)/resourceGroups/(?<g>[^/]+)/providers/Microsoft\.App/jobs/(?<n>[^/]+)$', 'IgnoreCase')
+    if (-not $idm.Success) { return @{ ok = $false; execution = ''; reason = "not a Container Apps job id: $JobId" } }
+    $mvApiVer = (Get-PimIdentityMoveApi).aca
+    $mvArm = $Arm
+    $inv = { param($p) & $mvArm 'POST' "$p`?api-version=$mvApiVer" @{} }.GetNewClosure()
+    return (Start-PimAcaJobExecution -SubscriptionId $idm.Groups['s'].Value -ResourceGroup $idm.Groups['g'].Value -Name $idm.Groups['n'].Value -Invoke $inv -Sleep $Sleep)
+}
+
 function Invoke-PimIdentityMoveDefaultDbInit {
     <#
-      The SQL step through the in-network database job: ONE execution with PIM_DBINIT_PRINCIPALS = the one user, every other
-      setting of the job as defined. The job exits 0 only when the user was READ BACK with the right SID and roles.
-      Returns @{ ok; detail; execution }.
+      The SQL step through the in-network database job. The job is started with the EMPTY body (ACA-START-OVERRIDE: a start
+      with a container override needs Microsoft.App/jobs/write and is refused), so the one user travels where the job reads its
+      work: it is MERGED into the job definition's PIM_DBINIT_PRINCIPALS (the list the job converges on every run; every
+      principal already there is kept, as the updater does), the definition is READ BACK, then ONE execution is started through
+      the shared start. The job exits 0 only when every listed user -- the moved one included -- was READ BACK with the right
+      SID and roles. Returns @{ ok; detail; execution }.
     #>
     param([Parameter(Mandatory)][scriptblock]$Arm, [Parameter(Mandatory)][string]$JobId, [Parameter(Mandatory)][string]$UserName,
           [Parameter(Mandatory)][string]$AppId, [string[]]$Roles = @(), [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }, [int]$MaxPolls = 60)
     $api = Get-PimIdentityMoveApi
-    $job = Invoke-PimIdentityMoveGet -Seam $Arm -Path "$JobId`?api-version=$($api.aca)"
-    if (-not $job) { return @{ ok = $false; detail = "the database job $(@($JobId -split '/')[-1]) is not there" } }
-    $prin = ConvertTo-Json -Compress -InputObject @(@{ name = $UserName; appId = $AppId; roles = @($Roles) }) -Depth 5
-    $cs = New-Object System.Collections.Generic.List[object]
-    foreach ($c in @(Get-PimIdentityMoveField (Get-PimIdentityMoveField (Get-PimIdentityMoveField $job 'properties') 'template') 'containers')) {
+    $jobPath = "$JobId`?api-version=$($api.aca)"
+    $jobName = @($JobId -split '/')[-1]
+    $job = Invoke-PimIdentityMoveGet -Seam $Arm -Path $jobPath
+    if (-not $job) { return @{ ok = $false; detail = "the database job $jobName is not there" } }
+    $tpl = Get-PimIdentityMoveField (Get-PimIdentityMoveField $job 'properties') 'template'
+    $conts = New-Object System.Collections.Generic.List[object]; $changed = $false
+    foreach ($c in @(Get-PimIdentityMoveField $tpl 'containers')) {
         if (-not $c) { continue }
-        $env = New-Object System.Collections.Generic.List[object]; $set = $false
-        foreach ($e in @(Get-PimIdentityMoveField $c 'env')) { if (-not $e) { continue }; if ("$(Get-PimIdentityMoveField $e 'name')" -eq 'PIM_DBINIT_PRINCIPALS') { $env.Add(@{ name = 'PIM_DBINIT_PRINCIPALS'; value = $prin }); $set = $true } else { $env.Add($e) } }
-        if (-not $set) { $env.Add(@{ name = 'PIM_DBINIT_PRINCIPALS'; value = $prin }) }
-        $one = @{ name = "$(Get-PimIdentityMoveField $c 'name')"; image = "$(Get-PimIdentityMoveField $c 'image')"; env = @($env.ToArray()) }
-        $res = Get-PimIdentityMoveField $c 'resources'; if ($null -ne $res) { $one.resources = $res }
-        $cs.Add($one)
+        $envL = New-Object System.Collections.Generic.List[object]; $had = $false
+        foreach ($e in @(Get-PimIdentityMoveField $c 'env')) {
+            if (-not $e) { continue }
+            if ("$(Get-PimIdentityMoveField $e 'name')" -ne 'PIM_DBINIT_PRINCIPALS') { $envL.Add($e); continue }
+            $had = $true
+            $m = Merge-PimIdentityMoveDbInitPrincipals -Json "$(Get-PimIdentityMoveField $e 'value')" -Name $UserName -AppId $AppId -Roles $Roles
+            if ($m.changed) { $changed = $true }
+            $envL.Add([pscustomobject]@{ name = 'PIM_DBINIT_PRINCIPALS'; value = $m.json })
+        }
+        if (-not $had) { $changed = $true; $envL.Add([pscustomobject]@{ name = 'PIM_DBINIT_PRINCIPALS'; value = (Merge-PimIdentityMoveDbInitPrincipals -Json '' -Name $UserName -AppId $AppId -Roles $Roles).json }) }
+        $h = [ordered]@{}
+        if ($c -is [System.Collections.IDictionary]) { foreach ($k in $c.Keys) { $h[$k] = $c[$k] } } else { foreach ($pp in $c.PSObject.Properties) { $h[$pp.Name] = $pp.Value } }
+        $h['env'] = @($envL.ToArray())
+        $conts.Add([pscustomobject]$h)
     }
-    $st = & $Arm 'POST' "$JobId/start?api-version=$($api.aca)" @{ containers = @($cs.ToArray()) }
-    $exe = "$(Get-PimIdentityMoveField $st 'name')"
-    if (-not $exe) { return @{ ok = $false; detail = 'the database job did not start (no execution name returned)' } }
+    if (-not $conts.Count) { return @{ ok = $false; detail = "the database job $jobName has no container" } }
+    if ($changed) {
+        # the job DEFINITION (Microsoft.App/jobs/write, which the mover already uses for the switch), never the start call
+        $tplH = [ordered]@{}
+        if ($tpl -is [System.Collections.IDictionary]) { foreach ($k in $tpl.Keys) { $tplH[$k] = $tpl[$k] } } else { foreach ($pp in $tpl.PSObject.Properties) { $tplH[$pp.Name] = $pp.Value } }
+        $tplH['containers'] = @($conts.ToArray())
+        [void](& $Arm 'PATCH' $jobPath @{ properties = @{ template = [pscustomobject]$tplH } })
+    }
+    # READ BACK: every container of the job lists the user with this app id before the job is started
+    $back = Invoke-PimIdentityMoveGet -Seam $Arm -Path $jobPath
+    foreach ($c in @(Get-PimIdentityMoveField (Get-PimIdentityMoveField (Get-PimIdentityMoveField $back 'properties') 'template') 'containers')) {
+        if (-not $c) { continue }
+        $v = @(@(Get-PimIdentityMoveField $c 'env') | Where-Object { $_ -and "$(Get-PimIdentityMoveField $_ 'name')" -eq 'PIM_DBINIT_PRINCIPALS' } | ForEach-Object { "$(Get-PimIdentityMoveField $_ 'value')" })
+        $okList = $false
+        if ($v.Count) {
+            try {
+                $listed = ($v[0] | ConvertFrom-Json)   # PS 5.1 emits a JSON array as ONE object: assign, then enumerate
+                foreach ($x in @($listed)) { if ($x -and "$($x.name)" -ieq $UserName -and "$($x.appId)" -ieq $AppId) { $okList = $true } }
+            } catch { $okList = $false }
+        }
+        if (-not $okList) { return @{ ok = $false; detail = "the database job $jobName does not list $UserName ($AppId) in PIM_DBINIT_PRINCIPALS on read-back -- not started" } }
+    }
+    $st = Start-PimIdentityMoveJob -Arm $Arm -JobId $JobId -Sleep $Sleep
+    $exe = "$($st.execution)"
+    if (-not $st.ok -or -not $exe) { return @{ ok = $false; detail = "the database job did not start$(if ($st.reason -and $st.reason -ne 'started') { ': ' + $st.reason } else { ' (no execution name returned)' })" } }
     $r = Wait-PimIdentityMoveJobExecution -Arm $Arm -JobId $JobId -Execution $exe -Sleep $Sleep -MaxPolls $MaxPolls
     return @{ ok = $r.ok; detail = "database job execution $exe : $($r.status)"; execution = $exe }
 }
@@ -602,9 +690,9 @@ function Invoke-PimIdentityMoveDefaultProve {
     $job = Invoke-PimIdentityMoveGet -Seam $Arm -Path "$($Row.resourceId)`?api-version=$($api.aca)"
     if (-not (& $envOk (Get-PimIdentityMoveField (Get-PimIdentityMoveField $job 'properties') 'template'))) { return @{ ok = $false; pending = $false; detail = "the job definition does not sign in as $ClientId" } }
     if ($StartJobRoles -contains $Row.role) {
-        $st = & $Arm 'POST' "$($Row.resourceId)/start?api-version=$($api.aca)" @{}
-        $exe = "$(Get-PimIdentityMoveField $st 'name')"
-        if (-not $exe) { return @{ ok = $false; pending = $false; detail = 'the job did not start' } }
+        $st = Start-PimIdentityMoveJob -Arm $Arm -JobId "$($Row.resourceId)" -Sleep $Sleep
+        $exe = "$($st.execution)"
+        if (-not $st.ok -or -not $exe) { return @{ ok = $false; pending = $false; detail = "the job did not start$(if ($st.reason -and $st.reason -ne 'started') { ': ' + $st.reason })" } }
         $r = Wait-PimIdentityMoveJobExecution -Arm $Arm -JobId $Row.resourceId -Execution $exe -Sleep $Sleep -MaxPolls $MaxPolls
         return @{ ok = $r.ok; pending = $false; detail = "execution $exe $($r.status)" }
     }

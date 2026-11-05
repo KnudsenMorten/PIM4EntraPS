@@ -52,7 +52,12 @@
 #>
 Set-StrictMode -Off
 
-function Get-PimUpdateNowDefaultRings { <# PURE. LITERAL (child-scope safe). The rings UPDATE NOW is on for by default. #> return @(0) }
+function Get-PimUpdateNowDefaultRings {
+    <# PURE. LITERAL (child-scope safe). The rings UPDATE NOW is on for by default. UPDATE-NOW-ALL-RINGS (Invardia 2026-11-05,
+       binding; 13 ring-2 installs sat on 3.0.40 all day because their updater looked only at 03:00Z): EVERY ring -- the
+       15-minute signal check is PIM's default in setup AND the updater; PIM_UPDATE_NOW=0 on a job still switches it off. #>
+    return @(0, 1, 2, 3)
+}
 function Get-PimUpdateNowMaxAgeHours  { <# PURE. LITERAL. A signal older than this is ignored (Invardia clears it after 24 h). #> return 24 }
 function Get-PimUpdateNowStaleRunHours { <# PURE. LITERAL. A 'Running' updater execution older than this is presumed hung. #> return 6 }
 function Get-PimUpdateNowSlotMinutes  { <# PURE. LITERAL. The cadence of the updater's cron when UPDATE NOW is on. #> return 15 }

@@ -478,6 +478,14 @@ if ($reachable) {
         if ($ap.error) { Stop-V1 "the import did not complete: $(("$($ap.error)" -replace '\s+', ' ').Trim()). Each entity is written in one transaction, so a failed one wrote nothing; running it again is safe." }
         $added = 0; $updated = 0
         foreach ($r in @($ap.sink['report'])) { if ($null -ne $r.added) { $added += [int]$r.added }; if ($null -ne $r.updated) { $updated += [int]$r.updated } }
+        # Framework 12.27 SQL-STATS: a bulk import -> refresh the stale pim.* statistics (pim.usp_RefreshStatistics: sampled,
+        # bounded, statistics only -- no data change). Best effort: one warning line, the import result stands.
+        if (($added + $updated) -gt 0) {
+            try {
+                $st = & $Sql 'EXEC pim.usp_RefreshStatistics'
+                if ($st -and $st.PSObject.Properties['refreshed']) { Say ("statistics: {0} refreshed of {1} stale" -f $st.refreshed, $st.stale) 'DarkGray' }
+            } catch { Write-Warning "statistics refresh after the import skipped: $((("$($_.Exception.Message)") -split "`n")[0]) -- the import is not affected; the next PIM job refreshes them" }
+        }
         # read back: the same preview again -- every row added must now be "already there"
         $rb = Invoke-V1Migrate @{ WhatIf = $true; OnKeyConflict = 'KeepExisting'; AllowValidationErrors = $true } 'READ BACK (the importer, -WhatIf)'
         $left = 0

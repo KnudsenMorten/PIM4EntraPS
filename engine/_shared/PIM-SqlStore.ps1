@@ -463,6 +463,229 @@ function Initialize-PimSqlDatabase {
     [void](Invoke-PimSqlNonQuery -ConnectionString $masterCs -Sql "IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = N'$Database') CREATE DATABASE [$Database];")
 }
 
+# ---- framework 12.27 SQL-STATS (PIM SQL-STATS-ASYNC) -------------------------------------------------------------------
+# SI 2026-11-05: views took 1-2 min WITH the right indexes -- statistics were never refreshed and AUTO_UPDATE_STATISTICS_ASYNC
+# was OFF, so the first read after a big write rebuilt statistics SYNCHRONOUSLY inside the user's request, timed out, was
+# cancelled, and the next read waited again. Two halves:
+#   (1) AUTO_UPDATE_STATISTICS_ASYNC ON (Set-PimSqlStatisticsAsync): idempotent, outside any transaction (ALTER DATABASE is
+#       refused inside one), read back, and a refusal is a WARNING -- never a failed install or update.
+#   (2) pim.usp_RefreshStatistics (WITH EXECUTE AS OWNER): after a bulk write the job refreshes
+#   WHO SETS THEM (Initialize-PimSqlStatistics), measured on real SQL (Test-PimSqlAccessRealSql P3/P4, 2026-11-05): the
+#   least-privilege updater (pim_updater + db_ddladmin) may NOT alter the database ("User does not have permission to alter
+#   database") and may NOT create an EXECUTE AS OWNER module ("Cannot execute as the user 'dbo'"). So both belong to the ADMIN
+#   run (Invoke-PimSqlAccessInstall: setup, the Support-app cut-over, ca-pim-dbinit -- and dbinit's own statistics step); the
+#   schema step (Initialize-PimSqlStore, inside the updater's SCHEMA-QUIESCE-818 path) does each ONLY when the probe says
+#   this identity holds the right (an updater still in the admin group, the community setup identity), and otherwise leaves
+#   it to the admin run without a warning -- it never sends a statement it has no right for.
+#       the pim.* statistics whose modification counter is above 20 % of the rows + 500 -- SAMPLED, never FULLSCAN, at most
+#       a bounded number per call (most-changed first, and a time budget), never inside a transaction, never a data change.
+#       The job identities hold EXECUTE on this ONE procedure (PIM-SqlAccess.ps1 catalog) -- never ALTER, never db_ddladmin.
+#       Callers use Invoke-PimSqlStatisticsRefresh, which never throws (one warning line).
+function Get-PimSqlStatisticsAsyncSql {
+    <# PURE. The ONE statement for half (1). Guarded: it changes the database only while the setting is still off. #>
+    return "IF EXISTS (SELECT 1 FROM sys.databases WHERE database_id = DB_ID() AND is_auto_update_stats_async_on = 0)`n    ALTER DATABASE CURRENT SET AUTO_UPDATE_STATISTICS_ASYNC ON;"
+}
+
+function Get-PimSqlStatisticsAsyncReadSql {
+    <# PURE. The read-back: 1 = on, 0 = off. #>
+    return 'SELECT CAST(is_auto_update_stats_async_on AS int) AS asyncOn FROM sys.databases WHERE database_id = DB_ID()'
+}
+
+function Set-PimSqlStatisticsAsync {
+    <#
+      Half (1). NEVER throws: @{ ok; on; changed; message }. Reads the setting first (already on = nothing sent), sends the
+      guarded ALTER DATABASE on its own (no transaction: Invoke-PimSqlNonQuery opens none), then READS IT BACK -- ok only
+      when the read-back says on. A refusal (no ALTER DATABASE right, a lock) is one warning; the caller carries on.
+      -Query: param($cs, $sql) -> rows; -Exec: param($cs, $sql) (test seams; default Invoke-PimSqlQuery / Invoke-PimSqlNonQuery).
+    #>
+    param([string]$ConnectionString = '', [scriptblock]$Query, [scriptblock]$Exec, [switch]$Quiet)
+    if (-not $Query) { $Query = { param($cs, $sql) Invoke-PimSqlQuery -ConnectionString $cs -Sql $sql } }
+    if (-not $Exec)  { $Exec  = { param($cs, $sql) [void](Invoke-PimSqlNonQuery -ConnectionString $cs -Sql $sql) } }
+    $read = {
+        try { $r = @(& $Query $ConnectionString (Get-PimSqlStatisticsAsyncReadSql)); if ($r.Count -and $null -ne $r[0].asyncOn -and "$($r[0].asyncOn)" -ne '') { return [int]"$($r[0].asyncOn)" } }
+        catch { Write-Verbose "[store] statistics: the async setting could not be read: $($_.Exception.Message)" }
+        return $null
+    }
+    $before = & $read
+    if ($before -eq 1) { return [pscustomobject]@{ ok = $true; on = $true; changed = $false; message = 'auto update statistics async: already on' } }
+    $err = ''
+    try { & $Exec $ConnectionString (Get-PimSqlStatisticsAsyncSql) } catch { $err = (("$($_.Exception.Message)" -split "`n")[0]).Trim() }
+    $after = & $read
+    if ($after -eq 1) {
+        if (-not $Quiet) { Write-Host '  statistics: auto update async turned ON (read back)' -ForegroundColor DarkGray }
+        return [pscustomobject]@{ ok = $true; on = $true; changed = $true; message = 'auto update statistics async: turned on (read back)' }
+    }
+    $why = if ($err) { $err } elseif ($null -eq $after) { 'the setting could not be read back' } else { 'the read-back still says off' }
+    $msg = "auto update statistics async is NOT on: $why -- the install / update carries on; the next schema step (or the admin job) tries again"
+    Write-Warning "[store] $msg"
+    return [pscustomobject]@{ ok = $false; on = $false; changed = $false; message = $msg }
+}
+
+function Get-PimSqlStatisticsMaxPerCall      { <# PURE. LITERAL. The most statistics one refresh call updates (most-changed first). #> return 50 }
+function Get-PimSqlStatisticsBudgetSeconds   { <# PURE. LITERAL. One call stops starting new statistics after this. #> return 45 }
+
+function Get-PimSqlRefreshStatisticsProcedureSql {
+    <#
+      PURE. Half (2): pim.usp_RefreshStatistics. WITH EXECUTE AS OWNER -- the owner of the pim schema (which owns the tables)
+      runs the UPDATE STATISTICS, so a caller needs EXECUTE on this procedure and nothing else. Only user tables of the pim
+      schema; only a statistic whose modification counter is above 20 % of its rows + 500; SAMPLED (never FULLSCAN); at most
+      @MaxStats (1-200) per call, most-changed first, and no new statistic once @BudgetSeconds (1-600) have passed; refuses
+      to run inside a caller's transaction. Changes no data. Returns ONE row: stale, selected, refreshed, failed, deferred,
+      elapsedMs, inTransaction, lastError.
+    #>
+    $mx = Get-PimSqlStatisticsMaxPerCall; $bs = Get-PimSqlStatisticsBudgetSeconds
+    return @"
+CREATE OR ALTER PROCEDURE pim.usp_RefreshStatistics
+    @MaxStats      INT = $mx,
+    @BudgetSeconds INT = $bs
+WITH EXECUTE AS OWNER
+AS
+BEGIN
+    -- pim-stats v1 -- framework 12.27 SQL-STATS. Statistics only: never a data change, always sampled.
+    SET NOCOUNT ON; SET XACT_ABORT OFF; SET LOCK_TIMEOUT 5000;
+    DECLARE @start DATETIME2 = SYSUTCDATETIME();
+    IF @@TRANCOUNT > 0
+    BEGIN
+        SELECT 0 AS stale, 0 AS selected, 0 AS refreshed, 0 AS failed, 0 AS deferred, 0 AS elapsedMs, 1 AS inTransaction,
+               CAST(N'not run inside a transaction' AS NVARCHAR(400)) AS lastError;
+        RETURN;
+    END
+    IF @MaxStats IS NULL OR @MaxStats < 1 SET @MaxStats = 1;
+    IF @MaxStats > 200 SET @MaxStats = 200;
+    IF @BudgetSeconds IS NULL OR @BudgetSeconds < 1 SET @BudgetSeconds = 1;
+    IF @BudgetSeconds > 600 SET @BudgetSeconds = 600;
+    DECLARE @todo TABLE (n INT IDENTITY(1,1) PRIMARY KEY, tbl SYSNAME NOT NULL, st SYSNAME NOT NULL, mods BIGINT NOT NULL);
+    DECLARE @stale INT = (
+        SELECT COUNT(*) FROM sys.stats s
+        JOIN sys.tables t ON t.object_id = s.object_id
+        CROSS APPLY sys.dm_db_stats_properties(s.object_id, s.stats_id) sp
+        WHERE t.schema_id = SCHEMA_ID(N'pim') AND t.is_ms_shipped = 0
+          AND sp.modification_counter > (sp.rows * 20 / 100) + 500);
+    INSERT @todo (tbl, st, mods)
+    SELECT TOP (@MaxStats) t.name, s.name, sp.modification_counter
+    FROM sys.stats s
+    JOIN sys.tables t ON t.object_id = s.object_id
+    CROSS APPLY sys.dm_db_stats_properties(s.object_id, s.stats_id) sp
+    WHERE t.schema_id = SCHEMA_ID(N'pim') AND t.is_ms_shipped = 0
+      AND sp.modification_counter > (sp.rows * 20 / 100) + 500
+    ORDER BY sp.modification_counter DESC;
+    DECLARE @i INT = 1, @n INT = (SELECT COUNT(*) FROM @todo), @done INT = 0, @failed INT = 0, @deferred INT = 0,
+            @q NVARCHAR(1000), @lastError NVARCHAR(400) = NULL;
+    WHILE @i <= @n
+    BEGIN
+        IF DATEDIFF(SECOND, @start, SYSUTCDATETIME()) >= @BudgetSeconds BEGIN SET @deferred = @n - @i + 1; BREAK; END
+        SELECT @q = N'UPDATE STATISTICS [pim].' + QUOTENAME(tbl) + N' ' + QUOTENAME(st) + N' WITH SAMPLE 20 PERCENT;' FROM @todo WHERE n = @i;
+        BEGIN TRY EXEC sys.sp_executesql @q; SET @done = @done + 1; END TRY
+        BEGIN CATCH SET @failed = @failed + 1; SET @lastError = LEFT(ERROR_MESSAGE(), 400); END CATCH
+        SET @i = @i + 1;
+    END
+    SELECT @stale AS stale, @n AS selected, @done AS refreshed, @failed AS failed, @deferred AS deferred,
+           DATEDIFF(MILLISECOND, @start, SYSUTCDATETIME()) AS elapsedMs, 0 AS inTransaction, @lastError AS lastError;
+END
+"@
+}
+
+$script:PimSqlStatsWarned = @{}
+function Invoke-PimSqlStatisticsRefresh {
+    <#
+      Half (2), the CALL after a bulk write (engine run, tenant-cache refresh, active-assignments snapshot, v1 import).
+      BEST EFFORT: NEVER throws; a failure is ONE warning line (once per process for the same reason, so a 5-minute job does
+      not repeat it) and the job carries on. Cheap when nothing is stale: the procedure reads sys.stats and returns.
+      Returns @{ ok; skipped; refreshed; stale; failed; deferred; elapsedMs; message }.
+      -Query: param($cs, $sql, $timeoutSec) -> rows (test seam; default: its own connection with a timeout above the budget).
+    #>
+    param([string]$ConnectionString = '', [string]$Reason = '', [scriptblock]$Query)
+    $res = { param($ok, $skip, $msg, $row)
+        $g = { param($n) if ($row -and $row.PSObject.Properties[$n] -and $null -ne $row.$n -and "$($row.$n)" -ne '') { [int]"$($row.$n)" } else { 0 } }
+        [pscustomobject]@{ ok = [bool]$ok; skipped = [bool]$skip; refreshed = (& $g 'refreshed'); stale = (& $g 'stale'); failed = (& $g 'failed')
+                           deferred = (& $g 'deferred'); elapsedMs = (& $g 'elapsedMs'); message = "$msg" } }
+    try {
+        $cs = "$ConnectionString".Trim()
+        if (-not $cs -and (Get-Command Get-PimTenantCacheStoreCs -ErrorAction SilentlyContinue)) { try { $cs = "$(Get-PimTenantCacheStoreCs)".Trim() } catch { $cs = '' } }
+        if (-not $cs -and "$($global:PIM_EngineSqlCs)".Trim()) { $cs = "$($global:PIM_EngineSqlCs)".Trim() }
+        if (-not $cs) { return (& $res $true $true 'no SQL store in this process' $null) }
+        $budget = Get-PimSqlStatisticsBudgetSeconds
+        if (-not $Query) {
+            $Query = { param($c0, $sql, $timeoutSec)
+                $c = New-PimSqlConnection -ConnectionString $c0
+                try {
+                    $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $sql; $cmd.CommandTimeout = $timeoutSec
+                    $rd = $cmd.ExecuteReader(); $rows = New-Object System.Collections.Generic.List[object]
+                    while ($rd.Read()) { $o = [ordered]@{}; for ($i = 0; $i -lt $rd.FieldCount; $i++) { $o[$rd.GetName($i)] = $(if ($rd.IsDBNull($i)) { $null } else { $rd.GetValue($i) }) }; $rows.Add([pscustomobject]$o) }
+                    $rd.Close(); return $rows.ToArray()
+                } finally { if ($c) { $c.Close(); $c.Dispose() } }
+            }
+        }
+        $rows = @(& $Query $cs "EXEC pim.usp_RefreshStatistics @MaxStats = $(Get-PimSqlStatisticsMaxPerCall), @BudgetSeconds = $budget;" ($budget + 90))
+        $row = if ($rows.Count) { $rows[0] } else { $null }
+        $r = & $res $true $false '' $row
+        $why = if ("$Reason".Trim()) { " after the $("$Reason".Trim())" } else { '' }
+        $r.message = "statistics$why`: $($r.refreshed) refreshed of $($r.stale) stale$(if ($r.deferred) { ", $($r.deferred) left for the next call" })$(if ($r.failed) { ", $($r.failed) failed ($($row.lastError))" }) in $($r.elapsedMs) ms"
+        if ($r.refreshed -or $r.failed -or $r.deferred) { Write-Host "  $($r.message)" -ForegroundColor DarkGray } else { Write-Verbose "  $($r.message)" }
+        return $r
+    } catch {
+        $m = (("$($_.Exception.Message)" -split "`n")[0]).Trim()
+        $key = if ($m.Length -gt 80) { $m.Substring(0, 80) } else { $m }
+        $msg = "statistics refresh$(if ("$Reason".Trim()) { " after the $("$Reason".Trim())" }) skipped: $m -- the job carries on (best effort; the next admin run installs the procedure, the next update converges its grant)"
+        # NOT INSTALLED YET is an expected state (an install whose admin run has not created the procedure): said quietly.
+        # Anything else (EXECUTE denied, a timeout) is one warning per reason per process.
+        if ($m -match '(?i)Could not find stored procedure') { Write-Verbose "[store] $msg" }
+        elseif (-not $script:PimSqlStatsWarned.ContainsKey($key)) { $script:PimSqlStatsWarned[$key] = $true; Write-Warning "[store] $msg" } else { Write-Verbose "[store] $msg" }
+        return (& $res $false $false $msg $null)
+    }
+}
+
+function Get-PimSqlStatisticsProbeSql {
+    <#
+      PURE. READ-ONLY. One row: asyncOn (1/0), canAlterDb (ALTER on this database), canOwner (may impersonate the schema owner
+      dbo -- what CREATE ... WITH EXECUTE AS OWNER needs), procState (0 = no procedure, 1 = another version, 2 = this version).
+    #>
+    return @"
+SELECT CAST(d.is_auto_update_stats_async_on AS int) AS asyncOn,
+       ISNULL(HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'ALTER'), 0) AS canAlterDb,
+       ISNULL(HAS_PERMS_BY_NAME(N'dbo', N'USER', N'IMPERSONATE'), 0) AS canOwner,
+       CASE WHEN OBJECT_ID(N'pim.usp_RefreshStatistics') IS NULL THEN 0
+            WHEN ISNULL(OBJECT_DEFINITION(OBJECT_ID(N'pim.usp_RefreshStatistics')), N'') LIKE N'%pim-stats v1%' THEN 2 ELSE 1 END AS procState
+FROM sys.databases d WHERE d.database_id = DB_ID()
+"@
+}
+
+function Initialize-PimSqlStatistics {
+    <#
+      Framework 12.27, both halves for one database. NEVER throws. Returns @{ async; procedure; procedureError; left[] }.
+        -Admin   the ADMIN run (Invoke-PimSqlAccessInstall, ca-pim-dbinit): does whatever is not done yet.
+        default  the SCHEMA STEP (Initialize-PimSqlStore, the updater / setup): does a half ONLY when the probe says this
+                 identity holds the right; otherwise that half is LEFT to the admin run (in .left, a quiet line, no warning) --
+                 the least-privilege updater never sends ALTER DATABASE or an EXECUTE AS OWNER module (real SQL refuses both).
+      A refused statement is ONE warning, never a throw. The procedure is (re)created only when missing or another version
+      (CREATE OR ALTER keeps its grants); the async setting only while off (Set-PimSqlStatisticsAsync reads it back).
+    #>
+    # -ConnectionString may be EMPTY: the admin run (Invoke-PimSqlAccessInstall) passes its caller's own connection in -Query / -Exec.
+    param([AllowEmptyString()][string]$ConnectionString = '', [scriptblock]$Query, [scriptblock]$Exec, [switch]$Admin)
+    if (-not $Query) { $Query = { param($cs, $sql) Invoke-PimSqlQuery -ConnectionString $cs -Sql $sql } }
+    if (-not $Exec)  { $Exec  = { param($cs, $sql) [void](Invoke-PimSqlNonQuery -ConnectionString $cs -Sql $sql) } }
+    $pr = $null
+    try { $pr = @(& $Query $ConnectionString (Get-PimSqlStatisticsProbeSql))[0] } catch { $pr = $null; Write-Verbose "[store] statistics: the probe could not be read: $($_.Exception.Message)" }
+    $num = { param($n) if ($pr -and $pr.PSObject.Properties[$n] -and $null -ne $pr.$n -and "$($pr.$n)" -ne '') { [int]"$($pr.$n)" } else { -1 } }
+    $asyncOn = & $num 'asyncOn'; $canDb = & $num 'canAlterDb'; $canOwn = & $num 'canOwner'; $pState = & $num 'procState'
+    $left = New-Object System.Collections.Generic.List[string]
+    # (1) async
+    $a = $null
+    if ($asyncOn -eq 1) { $a = [pscustomobject]@{ ok = $true; on = $true; changed = $false; message = 'auto update statistics async: already on' } }
+    elseif ($Admin -or $canDb -eq 1) { $a = Set-PimSqlStatisticsAsync -ConnectionString $ConnectionString -Query $Query -Exec $Exec -Quiet }
+    else { $left.Add('async'); $a = [pscustomobject]@{ ok = $false; on = $false; changed = $false; message = 'auto update statistics async is off and this identity may not change the database -- left to the admin run' } }
+    # (2) the procedure
+    $pOk = ($pState -eq 2); $pErr = ''
+    if (-not $pOk) {
+        if ($Admin -or $canOwn -eq 1) {
+            try { & $Exec $ConnectionString (Get-PimSqlRefreshStatisticsProcedureSql); $pOk = $true }
+            catch { $pErr = (("$($_.Exception.Message)" -split "`n")[0]).Trim(); Write-Warning "[store] pim.usp_RefreshStatistics could not be created: $pErr -- statistics are not refreshed after bulk writes until it is; nothing else is affected" }
+        } else { $left.Add('procedure'); $pErr = 'this identity may not create an EXECUTE AS OWNER procedure -- left to the admin run' }
+    }
+    if ($left.Count) { Write-Host "  statistics: $($left -join ' + ') left to the admin run (this identity holds no right for it; framework 12.27)" -ForegroundColor DarkGray }
+    return [pscustomobject]@{ async = $a; procedure = $pOk; procedureError = $pErr; left = @($left.ToArray()) }
+}
+
 function Initialize-PimSqlStore {
     # Create the pim schema + tables (pim.Rows + pim.ChangeQueue). Idempotent.
     param([Parameter(Mandatory)][string]$ConnectionString)
@@ -583,6 +806,10 @@ IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCach
         # updater's schema step (which has the module) creates the tables. Verbose only.
         Write-Verbose '[store] the demo module (PIM-DemoData.ps1) is not in this payload -- the demo tables are left to the updater'
     }
+    # Framework 12.27 SQL-STATS (PIM SQL-STATS-ASYNC): AUTO_UPDATE_STATISTICS_ASYNC ON (read back) + pim.usp_RefreshStatistics.
+    # LAST, on its own statements (ALTER DATABASE is refused inside a transaction), and never fails the open: a refusal is a
+    # warning. The updater reaches this only inside its SCHEMA-QUIESCE-818 path (update-job-entry.ps1).
+    [void](Initialize-PimSqlStatistics -ConnectionString $ConnectionString)
 }
 
 # ---- Framework §12.23 run 2 prerequisite (PIM 100.156): the RUNTIME never needs a DDL right ----------------------------

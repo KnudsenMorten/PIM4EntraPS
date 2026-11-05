@@ -515,6 +515,13 @@ $engineHandler = {
     $res = if ($__rrMode) { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf -ReconcileRemoval $__rrMode }
            elseif ($__sel.Count) { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf -Changes $__sel }
            else { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf }
+    # Framework 12.27 SQL-STATS: after a run that WROTE (the daily full reconcile always; a delta only when it created / updated /
+    # removed / applied something), refresh the stale pim.* statistics -- ahead of the held / waiting / failed exits below,
+    # so a held or partly failed run that wrote rows refreshes too. Best effort: Invoke-PimSqlStatisticsRefresh never throws (one warning).
+    if (-not $whatIf) {
+        $__wrote = 0; foreach ($__x in @($res)) { if ($__x) { foreach ($__p in 'create', 'update', 'remove', 'applied') { if ($__x.PSObject.Properties[$__p]) { $__wrote += [int]$__x.$__p } } } }
+        if ($mode -eq 'Full' -or $__wrote -gt 0) { [void](Invoke-PimSqlStatisticsRefresh -ConnectionString "$($global:PIM_EngineSqlCs)" -Reason "engine $mode run") }
+    }
     # PIM 100.72 (4): an unreadable managed-key ledger is TELEMETRY (not a guard): the prune removed nothing (fail closed) and
     # the run is a WARNING -- amber on the Jobs page, a Kind 'run' warning to Invardia.
     $__ledgerWarn = @(@($res) | Where-Object { $_ -and $_.PSObject.Properties['ledgerUnreadable'] -and $_.ledgerUnreadable } | ForEach-Object { "$($_.scope)" })

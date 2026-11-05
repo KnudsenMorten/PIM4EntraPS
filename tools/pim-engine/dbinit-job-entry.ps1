@@ -264,6 +264,23 @@ try {
             }
         }
     }
+    # ---- STATISTICS (framework 12.27 SQL-STATS) ----------------------------------------------------
+    # AUTO_UPDATE_STATISTICS_ASYNC ON + pim.usp_RefreshStatistics (WITH EXECUTE AS OWNER), as the server's admin: real SQL
+    # refuses both to the least-privilege updater, so this admin job sets them (and the access install below does too, the
+    # same idempotent call). BEFORE the access block, so its converge grants the job roles EXECUTE on the procedure. Own
+    # statements on this connection, no transaction; the async setting is read back. A refusal is a WARNING, never a failed
+    # job ($failed is not touched).
+    if (-not $failed) {
+        Step 'statistics'
+        $sq = { param($csx, $sql) $c3 = $conn.CreateCommand(); $c3.CommandText = $sql; $c3.CommandTimeout = 60
+                $rd3 = $c3.ExecuteReader(); $rows3 = New-Object System.Collections.Generic.List[object]
+                while ($rd3.Read()) { $o3 = [ordered]@{}; for ($i3 = 0; $i3 -lt $rd3.FieldCount; $i3++) { $o3[$rd3.GetName($i3)] = $(if ($rd3.IsDBNull($i3)) { $null } else { $rd3.GetValue($i3) }) }; $rows3.Add([pscustomobject]$o3) }
+                $rd3.Close(); $rows3.ToArray() }
+        $sx = { param($csx, $sql) $c3 = $conn.CreateCommand(); $c3.CommandText = $sql; $c3.CommandTimeout = 60; [void]$c3.ExecuteNonQuery() }
+        $st2 = Initialize-PimSqlStatistics -ConnectionString 'dbinit' -Query $sq -Exec $sx -Admin
+        Say $st2.async.message $(if ($st2.async.ok) { 'Green' } else { 'Yellow' })
+        Say $(if ($st2.procedure) { 'statistics: pim.usp_RefreshStatistics is in place' } else { "statistics: pim.usp_RefreshStatistics NOT in place: $($st2.procedureError)" }) $(if ($st2.procedure) { 'Green' } else { 'Yellow' })
+    }
     # ---- LEAST-PRIVILEGE ACCESS (framework §12.23 P4/P9, PIM 100.156) ------------------------------
     # The ADMIN half of the access model, from inside, as the server's Entra admin: the signed procedure, its 2099
     # in-database certificate (private key removed), pim_updater + EXECUTE, the updater's own DDL user, then one

@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.46 -- 2026-11-05
+
+- Updates are checked every 15 minutes on every ring by default, so an approved version reaches an installation within minutes instead of at the next nightly window. The database's statistics are kept fresh: asynchronous statistics updates are switched on and the tables PIM changes in bulk get a sampled statistics refresh, so pages stay fast after large writes. The identity move starts the database job without overriding its definition.
+
 ## 3.0.45 -- 2026-11-05
 
 - An update that is undone after its health check now says why (the check could not read the app, or the new version did not start) instead of an unclassified error. The tenant's enabled-user count is read a second time when it cannot be right against the total (for example while an on-premises sync is still writing).
@@ -24,6 +28,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ## 3.0.43 -- 2026-11-05
 
 - Status reports to Invardia catch up within one cycle: after the heartbeat the uplink sends up to 5 rounds of 20 reports, at least 65 seconds apart (committed changes are still applied during the wait), and the heartbeat now says how many finished runs are still waiting to be reported.
+- Released to the vendor's own and test environments only. Customer rings receive these changes with 3.0.44.
 
 ## 3.0.42 -- 2026-11-05
 

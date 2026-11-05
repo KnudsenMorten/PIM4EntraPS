@@ -380,6 +380,9 @@ function Save-PimActiveAssignmentsSnapshotRows {
     $table.Dispose()
     $header = ConvertTo-PimActiveAssignmentsHeaderJson -Entry $Entry -SnapshotId $sid -RowCount $seq
     Complete-PimSqlActiveAssignmentSnapshot -ConnectionString $ConnectionString -SnapshotId $sid -ExpectedRows $seq -HeaderJson $header
+    # Framework 12.27 SQL-STATS: a whole generation of rows was just written (and the previous ones deleted) -> refresh the
+    # stale pim.* statistics, AFTER the switch committed. Best effort: never throws, one warning line; the snapshot stands.
+    if (Get-Command Invoke-PimSqlStatisticsRefresh -ErrorAction SilentlyContinue) { [void](Invoke-PimSqlStatisticsRefresh -ConnectionString $ConnectionString -Reason 'active-assignments snapshot') }
     $sw.Stop()
     return [pscustomobject]@{ stored = $true; reason = ''; said = $false; where = "sql:pim.ActiveAssignmentRows/$sid + pim.TenantCache/active-assignments"
         rows = $written; batches = $batches; retries = $retries; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 2); snapshotId = $sid }

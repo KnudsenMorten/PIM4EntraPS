@@ -3520,6 +3520,22 @@ new deployments; §11.4):
   (framework rule 11g): tier S2 with no instances between builds -- each build scales it to two instances, and sets it back
   to none afterwards (also after a failed build), read back; the nightly update moves an older S1 pool to S2 only while no
   build is running, and the heartbeat reports the pool's tier, instance count and whether it is building.
+  **The pool's lifecycle, as built (3.0.42, 3.0.44):**
+  - *Idle shape.* S2 with 0 instances between builds. A build scales it to 2, waits for it, builds, and sets it back to 0
+    in a `finally`, then reads it back. A failed scale-down is one warning that names the pool and its cost; it never
+    replaces the build's own result.
+  - *Create at 1, then 0.* Azure refuses to create a pool with 0 instances (it accepts a change of an existing pool to
+    0). Every create therefore puts the pool at 1 instance, waits for it to succeed, changes it to 0 and reads it back. If
+    the change to 0 fails, the run says that the pool is up with one billed instance, and the next run sets it to 0.
+  - *Tier move.* An older S1 pool is moved to S2 by deleting it and making it again with the same subnet, location, OS
+    and tags -- only while no build is queued or running on the registry (an unreadable run list counts as busy).
+  - *The recreate record.* Before the delete, the updater saves a record of the pool it is about to make again (pool
+    path, the S2 / 0 body, the time) in the installation's settings table. If the record cannot be saved, nothing is
+    deleted. A later run that finds the pool missing and a record for it makes the pool from the record, reads it back
+    (S2, 0, same subnet) and clears the record; a pool still in Azure's *Deleting* state is left alone and the record kept.
+    A missing pool with no record is reported, never made from guesses.
+  - *The delete wait.* The delete has its own wait of 30 minutes (Azure has been measured at about 14 minutes); the
+    scale wait stays 20 minutes. A delete that outlasts the wait is carried to the next run by the record.
 
 An environment's exposure cannot be changed in place (it is a property of the Container Apps
 environment); moving between them is a rebuild (`Rebuild-PimEnvExternal.ps1`, §27.7). The diagram
@@ -4941,6 +4957,43 @@ following night. A run that skips **says so in its log**; it never proceeds quie
 > **one** deployment's infrastructure. On a host that updates several, the hook can only ever
 > be right for one of them, so the scheduled task — which carries its own target, credential
 > profile and subscription assertion per deployment — is the correct mechanism there.
+
+#### 11.6.6 The in-cloud updater: no schema change under a running job, the health check, and why a roll was undone
+
+These apply to the in-cloud updater (§11.6.0), which runs inside the installation.
+
+**Schema quiesce and hold (3.0.42).** Before any database change of an update (the store initialisation, the shipped
+schema file, the conformance changes and the access converge), the updater reads the executions of the installation's
+other PIM jobs: the scheduled tick, the requests, publish, pull and as-built jobs, the database job and the support-consent
+job, plus every managed-tenant pull job in the resource group (a job that does not exist there is skipped). It uses only
+read calls; nothing is ever stopped or cancelled.
+- *The hold.* Before it waits, the updater writes a hold row (`UpdateSchemaHold`: set time, end time, by whom, reason) in
+  the installation's settings table. The main scheduled tick and the managed-tenant pull read it when they start (the pull
+  before its cadence gate, so a due pull is not used up) and step aside while it is active. The hold ends by itself after
+  90 minutes, and the updater lifts it on every exit path and right after the last database change of the run. A hold
+  that cannot be read lets the job run as always; the updater's own read of running jobs still protects the change.
+- *The decision.* No job running: the update goes first. A job running: the updater polls every 30 seconds for up to 20
+  minutes; if a job is still running then, the run is deferred -- no schema step, no roll, outcome *waiting*, the reason
+  naming the job and its execution -- and the next full updater run tries again. Executions that cannot be read count as
+  running. A run older than 24 hours is treated as hung and does not block.
+- *Which jobs are held.* The main tick and the managed-tenant pull read the hold. The publish and as-built jobs read views
+  only, so the updater protects the change from them by waiting for their running executions. Where the requests broker
+  runs as an app rather than a job, it has no executions to wait for.
+- The Manager shows a deferred run as "waiting for a running PIM job".
+
+**The health check reads the latest ready revision (3.0.44).** After a roll, the health check reads the app's
+`latestReadyRevisionName` with one GET. Listing every revision is only a fallback, and an expired paging token restarts
+that list once; any other error still fails the check. Before this, an app with a long revision history could make
+Azure's listing time out (`PaginationTokenExpired`), the check threw, and a healthy roll was rolled back.
+
+**Why a roll was undone (3.0.45).** When a roll is rolled back, the updater sends the roll's reason with the failure, and
+the failure catalog tells the two cases apart:
+- `UPDATE-HEALTH-UNREAD` (`pim-upd-0105`): the health check could not read the app, so the updater put the previous version
+  back to be safe. This is not evidence that the new version was unhealthy; the next run rolls again.
+- `UPDATE-ROLLED-BACK` (`pim-upd-0106`): the health check read the app and the new version was not running (failed or
+  degraded); the previous version was put back at once.
+
+Before 3.0.45 both reached Invardia as an unclassified failure.
 
 ### 11.7 One-shot "deploy everything" + validation
 
@@ -11112,6 +11165,21 @@ The record format and the sending rules are the framework's uplink client (one s
 ships a byte-identical copy of it, checked by a test. A report that fails to send is sent again on the next cycle, and a
 failure to send never affects any other job. An endpoint other than Invardia's can be configured, but it must be https.
 
+**Rounds (3.0.43).** The framework's "about 20 posts per cycle" is a rate guard, not a cap. The hourly job therefore sends
+in rounds: round 1 carries the opt-in, the heartbeat, the setup report and run reports up to 20 posts. When reports are
+really left, the job waits 65 seconds and opens the next round, at most 5 rounds per cycle (both are fixed values). The
+order stays the same across rounds: failed jobs first, then the oldest unsent job. A refused post (for example a 429) or
+any other failure stops the whole cycle, and every job not sent keeps its watermark for the next cycle. During the wait the
+job first lets the tick pick up committed changes from the queue and sleeps only for the rest, so the gap stays at least 65
+seconds and changes are still applied. The worst case (100 posts and 4 waits) takes about 8.5 minutes, inside the job's
+lock time. A flush before an alert mail and a dry run stay one round. The Jobs page says "in N rounds".
+
+**Backlog on the heartbeat (`UplinkBacklog`, 3.0.43).** With an install key, the heartbeat carries
+`UplinkBacklog { pending, oldestUtc, checkedUtc }`: *pending* is the number of reportable runs that finished before the
+previous cycle started and are still beyond their job's watermark, counted before this cycle sends; *oldestUtc* is the
+oldest of them (null when there are none). It is computed from the run history only, carries no job content, and has its
+own switch (`PIM_UPLINK_UPLINKBACKLOG`, on by default). The anonymous heartbeat never carries it.
+
 **Telemetry that is not delivered is visible (2026-10-11).** The `uplink` run is a *warning* -- its own run status, amber
 on the Jobs page, never *failed* (a telemetry problem is not an engine failure) and never a green *ok* -- when telemetry is
 on and:
@@ -11158,6 +11226,13 @@ anonymous heartbeat carries none of them.
 | `hybridServers` | servers the hybrid worker lists -- with the hybrid AD feature, once the worker ran |
 
 With the database space and the tenant object counts this is 21 counts, within the framework's limit of 40.
+
+**The enabled-member count is checked against the total (3.0.45).** The tenant's count of enabled member users comes from
+Graph's eventually consistent index, which can read far too low while an on-premises sync is still writing. When the tick
+refreshes the tenant cache, it reads that count once and compares it with the unfiltered user total. If the count is above
+the total, or the total is at least 100 and at least three times the count, it reads the count once more and keeps the
+second answer (a count that is really low simply reads the same again). A count that is still above the total is left out,
+never recorded.
 
 **Endpoints and guard links (with an install key only).** The heartbeat names the environment's addresses, so support can
 open them from the customer record and from every mail about the environment (framework contract §8.9):

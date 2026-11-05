@@ -46,11 +46,13 @@ function Get-PimSqlAccessCatalog {
             & $g @('SELECT') 'SCHEMA::platform'
             & $g @('INSERT', 'UPDATE') 'platform.Tenants'      # /api/msp/tenants (PIM-MspBuild)
             & $g $crud 'SCHEMA::pimdemo'                         # demo mode only (PIM-DemoData)
+            & $g @('EXECUTE') 'pim.usp_RefreshStatistics'         # framework 12.27 SQL-STATS: after the Manager's tenant-list refresh (EXECUTE only, never ALTER)
         )
         pim_engine = @(
             & $g $crud 'SCHEMA::pim'
             & $g @('SELECT') 'SCHEMA::platform'
             & $g @('EXECUTE') 'pim.usp_AccessFacts'               # SETUPSTEPS-TRUTH (a): the heartbeat's supportSqlAccess dbUser
+            & $g @('EXECUTE') 'pim.usp_RefreshStatistics'         # framework 12.27 SQL-STATS: after the engine run / tenant cache / snapshot (EXECUTE only, never ALTER)
         )
         pim_updater = @(
             & $g $crud 'SCHEMA::pim'
@@ -874,8 +876,16 @@ function Invoke-PimSqlAccessInstall {
     # SETUPSTEPS-TRUTH (a): the read-only facts procedure, on the same admin connection, BEFORE the converge (so the converge
     # finds it and keeps its catalog EXECUTE grants). Telemetry: never throws, never fails the admin run (returned as accessFacts).
     $af = Invoke-PimSqlAccessFactsInstall -ConnectionString $ConnectionString -Query $Query -Exec $Exec
+    # Framework 12.27 SQL-STATS: AUTO_UPDATE_STATISTICS_ASYNC ON + pim.usp_RefreshStatistics (WITH EXECUTE AS OWNER) -- both need
+    # an admin (real SQL: the least-privilege updater may do neither), so the ADMIN run sets them, BEFORE the converge (which then
+    # grants the job roles EXECUTE on the procedure). Telemetry: never throws, never fails the admin run (returned as statistics).
+    $stats = $null
+    if (Get-Command Initialize-PimSqlStatistics -ErrorAction SilentlyContinue) {
+        try { $stats = Initialize-PimSqlStatistics -ConnectionString $ConnectionString -Query $Query -Exec $Exec -Admin }
+        catch { Write-Warning "[access] statistics (framework 12.27) not set by the admin run: $($_.Exception.Message)" }
+    }
     $conv = Invoke-PimSqlAccessConverge -ConnectionString $ConnectionString -Query $Query -Exec $Exec -NameMap $NameMap
-    return [pscustomobject]@{ ok = $true; skipped = $false; reason = ''; signer = "$($facts.signer)"; signerExpiry = $facts.signerExpiry; converge = $conv; accessFacts = $af }
+    return [pscustomobject]@{ ok = $true; skipped = $false; reason = ''; signer = "$($facts.signer)"; signerExpiry = $facts.signerExpiry; converge = $conv; accessFacts = $af; statistics = $stats }
 }
 
 function Get-PimSqlAccessState {

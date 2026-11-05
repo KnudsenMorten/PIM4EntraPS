@@ -886,6 +886,13 @@ function Invoke-PimTenantListRefresh {
             }
         } catch { if (-not $Quiet) { Write-Host "    tenant object counts not recorded: $($_.Exception.Message)" -ForegroundColor DarkYellow } }
 
+        # Framework 12.27 SQL-STATS: the refresh rewrote pim.TenantCache rows -> refresh the stale pim.* statistics. Only when a
+        # list was really written (not all kept / skipped); best effort -- never throws, one warning line.
+        if (@($results.Keys | Where-Object { $results[$_].ok -and $results[$_].Contains('path') }).Count -and (Get-Command Invoke-PimSqlStatisticsRefresh -ErrorAction SilentlyContinue)) {
+            $csSt = Get-PimTenantCacheStoreCs
+            if ($csSt) { [void](Invoke-PimSqlStatisticsRefresh -ConnectionString $csSt -Reason 'tenant-cache refresh') }
+        }
+
         # IMP-49 b (ss33.28): this returned ok=$true even when EVERY step had failed, so the tenant-cache job read green
         # over an empty refresh. ok is now true only when no REQUIRED step failed; an optional step that is skipped
         # (permission not granted) is reported, not failed.

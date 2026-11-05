@@ -214,11 +214,25 @@ deployment is a supported choice) and no credentials lying around.
   ring only when the release owner decides to release it to that ring. Nothing is pushed into your environment: at the
   nightly update, your installation's own updater asks which version its ring has, pulls that version, checks it and
   rolls it. If nothing was released to your ring, nothing moves.
+- **An update does not change the database while a PIM job runs.** ✅ 2026-11-05 — Before an update makes any change to
+  the PIM database, it checks whether any of the installation's PIM jobs is running, and it holds the scheduled jobs so
+  that none starts during the change. When nothing is running, the update goes first and lifts the hold as soon as its
+  database work is done. Nothing is ever stopped or cancelled. Proven on the vendor's own environment over four update
+  runs (the check, the hold and its release). When a job is still running, the update waits for it for up to 20
+  minutes and otherwise postpones itself to its next run; that path is built but has not yet been needed in a live run.
+- **A healthy update is not undone by a slow Azure listing.** ✅ 2026-11-05 — After an update, the health check reads the
+  app's current ready version directly in one request, instead of listing the app's whole version history. A long history
+  could make Azure's listing time out, and the check then treated a healthy update as failed and undid it. Proven on the
+  vendor's own environment, which rolled two updates cleanly after the change.
 - **Support sees what the guards hold right now.** ✅ 2026-10-12 — With an install key, the regular status report to
   Invardia lists the guards that hold something at that moment, and reports a guard as cleared once it holds nothing.
   So the status support sees follows your installation, also after you released or approved something. The list
   names the guard, its outcome, its severity and since when. It does not name the accounts, groups or policies that
   are held, and an installation without an install key does not send the list.
+- **Support sees whether status reports are behind.** ✅ 2026-11-05 — With an install key, each status heartbeat to
+  Invardia also carries a backlog figure: how many finished job runs are still waiting to be reported, and since when.
+  When everything is reported, it says zero. It is a count and a time only; it carries no job content. Accepted by
+  Invardia on every heartbeat from three installations.
 - **The access request broker deploys completely in one run.** ✅ 2026-10-04 — Deploying the access request broker
   now also registers its API, gives the broker its send right on your notification mailbox only, and tells PIM where
   the broker is. All three are read back and reported. If a step lacks what it needs, it prints the exact command
@@ -2376,6 +2390,7 @@ Two jobs talk to Invardia. Both are **on by default** in a new installation, and
   With an install key the report also lists which guards hold something right now, and says when a
   guard is clear again, so the status support sees follows your installation. It names the guard, its outcome, its
   severity and since when — not the accounts, groups or policies that are held.
+  With an install key the heartbeat also says how many finished runs are still waiting to be reported, and since when.
 
 Apart from these two jobs, a Pro installation pulls its updates from Invardia at the nightly update, and the **Get
 support** button sends a ticket — only when a person presses it, and only what that person saw and confirmed.
