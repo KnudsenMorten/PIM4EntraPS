@@ -407,8 +407,12 @@ function Get-PimInstallVerifyRows {
                 if ($null -eq $f) { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'could not be checked: this check was not told whether an Invardia Support app was named' (& $fx $id) $false)); break }
                 if ([bool](Get-PimFactValue $f 'notApplicable')) { $rows.Add((New-PimInstallVerifyRow $id 'info' "$(Get-PimFactValue $f 'reason')" '' $false)); break }
                 if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "could not be checked: $(if ("$(Get-PimFactValue $f 'error')".Trim()) { "$(Get-PimFactValue $f 'error')".Trim() } else { 'the database could not be read' })" (& $fx $id) $false)); break }
-                $sqlUser = "$(Get-PimFactValue $f 'userName')".Trim(); $sqlRole = "$(Get-PimFactValue $f 'role')".Trim(); if (-not $sqlRole) { $sqlRole = 'db_owner' }
-                if ($sqlUser -and (Get-PimFactValue $f 'inRole') -eq $true) {
+                # OPEN-01 (framework SECAUDIT-1a): the role is the READ role pim_support_read; the same user ALSO in db_owner
+                # (a standing administrator right from an earlier grant) is never "in place" -- a WARNING that says so
+                $sqlUser = "$(Get-PimFactValue $f 'userName')".Trim(); $sqlRole = "$(Get-PimFactValue $f 'role')".Trim(); if (-not $sqlRole) { $sqlRole = 'pim_support_read' }
+                if ($sqlUser -and (Get-PimFactValue $f 'inRole') -eq $true -and (Get-PimFactValue $f 'standingOwner') -eq $true) {
+                    $rows.Add((New-PimInstallVerifyRow $id 'warning' "the database user [$sqlUser] has the Support app's id and is in $sqlRole, and ALSO in db_owner as a standing right (an earlier grant) -- read-only is the agreed standing access; the command below with -Remove takes it all back, the same command without -Remove gives the read-only access again" (& $fx $id) $false))
+                } elseif ($sqlUser -and (Get-PimFactValue $f 'inRole') -eq $true) {
                     $asSup = Get-PimFactValue $f 'signedInAsSupport'
                     $proof = if ($asSup -eq $true) { 'and this check read it in a database sign-in AS the Support app' }
                              elseif ($asSup -eq $false) { 'a sign-in as the Support app was not tried (this check ran as another identity)' }

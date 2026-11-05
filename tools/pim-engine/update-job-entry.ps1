@@ -79,6 +79,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAccess.ps1')        # framework 12.23 / PIM 100.156 least-privilege roles via the signed procedure
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAccessCutover.ps1')  # framework 12.23 P8 exception: a private-SQL install starts its own in-network cut-over
 . (Join-Path $solRoot 'engine\_shared\PIM-AsBuilt.ps1')          # 100.61 the as-built job + store + view an EXISTING install converges to
+. (Join-Path $solRoot 'engine\_shared\PIM-DbInitJob.ps1')        # OPEN-06 the in-network database job on every install (created, NEVER started)
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAudit.ps1')         # SECPACK-SQL-AUDIT the SQL server's audit -> the install's workspace
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateNow.ps1')        # framework 8.18 UPDATE-NOW: the 15-minute signal check + the run kind + own cron
 . (Join-Path $solRoot 'engine\_shared\PIM-SetupSteps.ps1')        # FLEET-SETUPSTEPS the one-time install steps' facts (read only) for the heartbeat
@@ -88,6 +89,8 @@ function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $
 # 100.61: the image the as-built converge (2e) left caj-pim-asbuilt on THIS run ('' = it did not converge the job) -- the job
 # roll (2b) skips that job when this equals the target image, instead of PATCHing it a second time (409 OperationInProgress).
 $script:PimAsBuiltJobImageThisRun = ''
+# OPEN-06: the database job converge of THIS run (step 2e-ter); after the job roll (2b) its image is READ BACK into it.
+$script:PimDbInitResult = $null
 
 # ---- 100.40 / framework 12.16 CONVERGE-DEFAULTS -- one step, two call sites -----------------------------------------
 # 🔴 A changed install default reaches only NEW installs unless the updater brings the existing ones there (owner
@@ -98,7 +101,7 @@ $script:PimAsBuiltJobImageThisRun = ''
 function Invoke-PimUpdaterConvergeStep {
     param([string]$When = 'update')
     # FLEET-SETUPSTEPS: the results the setup-step facts (2g) are read from; $null = that step did not run this time.
-    $cv = $null; $si = $null; $ab = $null; $sa = $null
+    $cv = $null; $si = $null; $ab = $null; $sa = $null; $db = $null
     $csSize = $null; try { $csSize = Get-PimSqlConnectionString } catch { $csSize = $null }
     if (-not "$csSize".Trim()) {
         # the test-tenant shape (no PIM_SqlServer on this job): the Manager names the store -- same self-heal as the schema step.
@@ -235,7 +238,9 @@ function Invoke-PimUpdaterConvergeStep {
             $inCur = & $storeSeam 'get' 'InstallNames' $null
             $inNames = @{ web = $managerApp; engine = $tickJob; updater = $selfJob
                           sqlAdminGroup = $(if ("$($env:PIM_SqlAdminGroupName)".Trim()) { "$($env:PIM_SqlAdminGroupName)".Trim() } else { Get-PimInstallName -Role sqlAdminGroup -NoRecord })
-                          asbuilt = (Get-PimInstallName -Role asbuilt -Record $inCur); asbuiltIdentity = (Get-PimInstallName -Role asbuiltIdentity -Record $inCur) }
+                          asbuilt = (Get-PimInstallName -Role asbuilt -Record $inCur); asbuiltIdentity = (Get-PimInstallName -Role asbuiltIdentity -Record $inCur)
+                          # OPEN-06: the database job + its dedicated identity (a new-name install: caj-pim-dbinit)
+                          dbinit = (Get-PimDbInitJobName -ManagerApp $managerApp -Record $inCur); dbinitIdentity = (Get-PimInstallName -Role dbinitIdentity -Record $inCur) }
             $inRec = New-PimInstallNamesRecord -Names $inNames -Current $inCur
             if ($inRec.changed) {
                 & $storeSeam 'set' 'InstallNames' ([pscustomobject]$inRec.record) | Out-Null
@@ -319,12 +324,32 @@ function Invoke-PimUpdaterConvergeStep {
         $sa = Invoke-PimSqlAuditConverge -SubscriptionId $sub -ResourceGroup $rg -SqlServer $saSrv -Arm $armSeam
         foreach ($l in @($sa.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
     } catch { Say "  SQL auditing not checked: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2e-ter. OPEN-06 / NO-PERSON-DB-ADMIN (owner 2026-11-04) -- THE DATABASE JOB ON EVERY INSTALL, PUBLIC ONES TOO ------
+    # The in-network database job (ca-pim-dbinit, manual trigger) with a DEDICATED identity (id-pim-dbinit; an existing job
+    # keeps its own; the one id-pim-sql identity is reused; an identity an app carries is never chosen). Created ONLY when
+    # missing, on the Manager's image; an existing job gets no write here (step 2b rolls its image). This step NEVER starts
+    # the job -- the Support app does, when a database change needs an admin. The identity's SQL admin group membership is
+    # READ (never written). Warnings count in "to fix by hand". Never fails the update.
+    try {
+        $dbGraph = { param($p) Invoke-PimGraph -Path $p }
+        $db = Invoke-PimDbInitJobConverge -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -Arm $armSeam -Graph $dbGraph
+        $script:PimDbInitResult = $db
+        foreach ($l in @($db.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+        $fixByHand += [int]$db.warnings
+        Say ("database job ($When): $($db.state) -- $($db.detail)") $(if ($db.state -eq 'ok') { 'DarkGray' } else { 'Yellow' })
+        if ([int]$db.warnings) { Say ("converge ($When): $fixByHand to fix by hand in all (database job: $([int]$db.warnings))") 'Yellow' }
+    } catch { Say "  db job converge skipped: $($_.Exception.Message)" 'Yellow' }
     # ---- 2f. framework 12.23 P8 EXCEPTION (owner 2026-10-18) -- A PRIVATE-SQL INSTALL NEVER CUT OVER MOVES BY ITSELF -----------
     # The Support app has no route to a private database. This updater reads (as dbo, still in the SQL admin group), decides
     # (run 1, later run 2) and STARTS the in-network admin job; the job does the admin SQL and reads it back. No admin SQL
     # here (Test-PimSqlAccess L4). Public SQL: nothing (the Support-app cut-over). Never fails the update.
     try {
-        if ("$csSize".Trim()) {
+        # OPEN-06: a database job on its OWN new identity (id-pim-dbinit) whose SQL admin group membership is not READ as
+        # true cannot run the admin cut-over -- it is not started on it (before OPEN-06 such an install had no job at all,
+        # and this step did nothing either). A job with its existing identity (e.g. id-pim-sql) is unchanged.
+        if ($db -and [bool]$db.dedicated -and $db.inAdminGroup -ne $true) {
+            Say "database access cut-over: not started -- the database job's identity $($db.identityName) is not read as a member of the SQL admin group yet" 'DarkGray'
+        } elseif ("$csSize".Trim()) {
             $coCs = "$csSize"
             $coApp = "$((Get-PimJwtPrincipal -Token $global:PIM_SqlAccessToken).appid)".Trim()
             $co = Invoke-PimSqlAccessCutoverStep -SubscriptionId $sub -ResourceGroup $rg -SqlServer "$($global:PIM_SqlServer)" -ConnectionString $coCs `
@@ -342,9 +367,9 @@ function Invoke-PimUpdaterConvergeStep {
         $ssSql = $null
         if ("$csSize".Trim()) { $ssCs = "$csSize"; $ssSql = { param($q) Invoke-PimSqlScalar -ConnectionString $ssCs -Sql $q } }
         $ssF = Get-PimSetupStepUpdaterFacts -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -Arm $armSeam -SqlScalar $ssSql `
-                   -ConvergeLines @(if ($cv) { @($cv.lines) }) -JobSelfId $si -SqlAudit $sa -AsBuilt $ab -SourceUrl "$($env:PIM_UPDATE_SOURCE_URL)"
+                   -ConvergeLines @(if ($cv) { @($cv.lines) }) -JobSelfId $si -SqlAudit $sa -AsBuilt $ab -DbInit $db -SourceUrl "$($env:PIM_UPDATE_SOURCE_URL)"
         $script:PimSetupFacts = $ssF
-        $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
+        $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail', 'dbJobDetail') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
         Say ("setup steps: facts recorded for the heartbeat$(if ($ssUnk.Count) { " (not readable: $($ssUnk -join ', '))" })") 'DarkGray'
     } catch { Say "  setup steps not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2g-bis. KV-POLICY-DENIED-PRIVATE / framework installer rule 11 -- A PRIVATE INSTALL'S KEY VAULT IS PRIVATE ------------
@@ -669,7 +694,7 @@ if ($srcMode.mode -eq 'invardia-community' -and -not $updSource) { $updSource = 
 elseif ($srcMode.mode -eq 'invardia' -and -not $updSource) { $updSource = 'invardia' }
 if ($srcMode.unsigned) {
     Say '!! UNSIGNED UPDATE SOURCE: this environment takes its code from a storage container chosen for it (channel.json +' 'Red'
-    Say '!! source archives). They carry NO signature -- only whoever can write that container decides what is installed here.' 'Red'
+    Say '!! source archives), not from the signed release service.' 'Red'
     Say '!! Updates from the signed release service: re-run tools/setup/Deploy-PimUpdateJob.ps1 with -UpdateSource Invardia.' 'Red'
 } else { Say $srcMode.line 'DarkGray' }
 
@@ -731,6 +756,40 @@ function Get-PimUpdateNowRingApproval {
         return @{ version = ''; reason = 'this environment has no ring source to approve a version' }
     } catch { return @{ version = ''; reason = "the ring's approval could not be read ($((("$($_.Exception.Message)") -split "`n")[0]))" } }
 }
+# ---- OPEN-01 (framework "SUPPORT ACCESS" points 1 + 2) -- INVARDIA'S CONSENT CHANNEL, ON EVERY RUN ----------------------
+# EVERY execution -- the nightly run, a hand-started one and each 15-minute "update now" check (it exits just below) -- asks
+# Invardia for this install's support consent + session, decides (engine/_shared/PIM-SupportConsent.ps1, PURE) and ONLY when
+# an action is due starts ONE run of the in-network support SQL job (mode consent, copied from ca-pim-dbinit), waits for it
+# and reads the state back. One line; recorded in pim.Settings SupportConsentState for the heartbeat. Doubt changes nothing.
+# NEVER the engine. NEVER fails the update: no key / no store / no answer = one line. The SQL that gives or takes a right is
+# in the job's script (tools/setup/_PimSupportSqlJob.ps1), run by the database job's identity -- this updater sends only
+# the read of the signed state procedure (Test-PimSupportConsent U-tests).
+try {
+    . (Join-Path $solRoot 'engine\_shared\PIM-SupportConsent.ps1')
+    . (Join-Path $solRoot 'engine\_shared\PIM-LicenceRequest.ps1')   # Invoke-PimLicenceHttp (PIM-InvardiaUpdate uses it)
+    . (Join-Path $solRoot 'engine\_shared\PIM-InvardiaUpdate.ps1')   # the install key + the 15 s GET seam
+    $scCs = Get-PimUpdaterStoreCsHealed
+    $scKey = ''; $scBase = ''; $scSql = $null; $scGet = $null; $scSet = $null
+    if ("$scCs".Trim()) {
+        $scKey = Resolve-PimInvardiaInstallKey -GetSetting { param($n) Get-PimSqlSetting -ConnectionString $scCs -Name $n }
+        try { $scBase = "$(Get-PimSqlSetting -ConnectionString $scCs -Name 'LicenceRequestBaseUrl')".Trim() } catch { $scBase = '' }
+        $scSql = { param($q) Invoke-PimSqlScalar -ConnectionString $scCs -Sql $q }
+        $scGet = { Get-PimSqlSetting -ConnectionString $scCs -Name (Get-PimSupportConsentStateSetting) }
+        $scSet = { param($o) Set-PimSqlSetting -ConnectionString $scCs -Name (Get-PimSupportConsentStateSetting) -ValueJson (ConvertTo-Json -InputObject $o -Depth 5 -Compress) }
+    } else { $scKey = Resolve-PimInvardiaInstallKey -GetSetting $null }
+    $scStart = {
+        param($Decision, $Answer)
+        # the job builder (tools/setup, in the image): loaded only when an action is due
+        . (Join-Path $solRoot 'tools\setup\_PimScriptDoc.ps1'); . (Join-Path $solRoot 'tools\setup\_PimSupportSqlAccess.ps1'); . (Join-Path $solRoot 'tools\setup\_PimSupportSqlJob.ps1')
+        $scArm = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
+        Invoke-PimSupportConsentJob -Decision $Decision -Answer $Answer -Arm $scArm -SubscriptionId $sub -ResourceGroup $rg
+    }
+    $scRun = Invoke-PimSupportConsentStep -BaseUrl $scBase -InstallKey $scKey -Sql $scSql -StartJob $scStart -GetLast $scGet -SetLast $scSet
+    # merge review 2026-11-04 (Test-PimUpdateNow I4: the 15-minute check is ONE line): a 'nothing' decision is recorded for the
+    # heartbeat and NOT printed; only an action taken or a failed one is a line.
+    if (-not $scRun.ok -or "$($scRun.action)" -ne 'nothing') { Say $scRun.line $(if (-not $scRun.ok) { 'Yellow' } else { 'Cyan' }) }
+} catch { Say "support consent: not checked ($($_.Exception.Message)) -- the update continues" 'Yellow' }
+
 $script:PimUpdateNowSignal = $null
 $unEnabled = Test-PimUpdateNowEnabled -Ring $ring -Value "$($env:PIM_UPDATE_NOW)"
 $unNightly = "$($env:PIM_UPDATE_NIGHTLY_UTC)".Trim()
@@ -1616,6 +1675,19 @@ try {
     $jobFailed += '<job enumeration>'
     Say "  could not enumerate the jobs in $rg -- only the NAMED jobs were rolled: $($_.Exception.Message)" 'Yellow'
 }
+# OPEN-06: the database job's version for setupSteps 'db-job' is READ BACK after the roll above (the converge step read it
+# before the roll). An ARM GET only; nothing is written or started. Never fails the update.
+try {
+    if ($script:PimDbInitResult -and [bool]$script:PimDbInitResult.present -and -not [bool]$script:PimDbInitResult.onVersion -and "$($script:PimDbInitResult.jobName)".Trim()) {
+        $dbBack = Invoke-PimArm -Method GET -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs/$($script:PimDbInitResult.jobName)?api-version=2024-03-01"
+        $script:PimDbInitResult = Update-PimDbInitResultImage -Result $script:PimDbInitResult -Job $dbBack
+        if ($script:PimSetupFacts) {
+            $dbF = Get-PimSetupStepDbJobFacts -DbInitResult $script:PimDbInitResult
+            $script:PimSetupFacts['dbJob'] = $dbF.dbJob; $script:PimSetupFacts['dbJobDetail'] = (ConvertTo-PimSetupStepDetail -Text $dbF.dbJobDetail)
+        }
+        Say "database job after the roll: $($script:PimDbInitResult.state) -- $($script:PimDbInitResult.detail)" 'DarkGray'
+    }
+} catch { Say "  database job version not read back after the roll: $($_.Exception.Message)" 'Yellow' }
 
 # ---- 2c. 2026-10-02 -- every other CONTAINER APP that runs the same image ------------------------
 # The access request broker (ca-pim-rfa) is an app on the Manager's image; only the Manager was rolled by name, so the

@@ -2,38 +2,42 @@
 
 <#
 .SYNOPSIS
-  Gives (or with -Remove takes back) the customer's Invardia Support app its access to this PIM Manager installation: troubleshoot = a read-only contained SQL user; setup = member of the SQL admin group and owner of PIM's own app registrations and groups; asbuilt = start the as-built job (caj-pim-asbuilt) and read the PDFs it writes, nothing else (troubleshoot and setup include it). Every change is read back. Every level also gives the Support app its standing database access: membership of the SQL admin group and its own database user in the database owner role.
+  Gives (or with -Remove takes back) the customer's Invardia Support app its access to this PIM Manager installation: its own read-only database user (the read role pim_support_read) and the time-limited support access module with the level as the consent (troubleshoot = read only; setup = admin rights only inside an open support session, at most 8 hours); asbuilt = start the as-built job (caj-pim-asbuilt) and read the PDFs it writes (troubleshoot and setup include it). The Support app is never made a member of the SQL admin group, never a database owner and never an owner of PIM's app registrations or groups. Every change is read back.
 
 .DESCRIPTION
-  §95.2 / GUIDED-INSTALL §4.6.
-  Grant-PimSupportAccess -AppId <support app client id> -Level troubleshoot|setup [-Remove]
+  §95.2 / GUIDED-INSTALL §4.6; framework SECAUDIT-1a / OPEN-01 (the Support app's standing access is read-only).
+  Grant-PimSupportAccess -AppId <support app client id> -Level troubleshoot|setup|asbuilt [-Remove]
       -TenantId <t> -SubscriptionId <s> -ResourceGroup <rg> -SqlServer <server>.database.windows.net [-EnvLabel <label>]
 
-  troubleshoot  a contained SQL user created FROM THE APP'S SID (never FROM EXTERNAL PROVIDER) with db_datareader +
-                VIEW DEFINITION -- it can read the store and its schema, nothing else.
-  setup         member of the SQL admin group (grp-pim-sql-admins: create users, deploy schema, repair) AND owner of PIM's
-                own app registrations and groups -- the Manager's sign-in app, the access request API app, the members
-                group and the SQL admin group -- so the support app's Application.ReadWrite.OwnedBy is enough later.
-  asbuilt       (PIM 100.61, framework 8.12) ONLY the as-built document: the custom role 'PIM Manager as-built runner (<rg>)'
-                (Microsoft.App/jobs/start/action + Microsoft.App/jobs/executions/read) on the ONE job caj-pim-asbuilt, and
-                Storage Blob Data Reader on the ONE container 'asbuilt' of the PIM storage account (the account the job names in
-                PIM_ASBUILT_STORAGE). troubleshoot and setup include it when -SubscriptionId and -ResourceGroup are given; there a
-                failure is reported and the rest of the access stands. Needs Owner / User Access Administrator (or Role Based
-                Access Control Administrator once the role exists) on the PIM resource group.
-  -Remove       takes back every level: the membership, the ownerships, the contained user and the as-built assignments.
+  EVERY level gives the Support app ONE standing right: its own database user -- created from the application's client
+  id as a SID (never FROM EXTERNAL PROVIDER), found by that id whatever its name -- in the read role pim_support_read
+  (SELECT on the product schemas pim and platform, nothing else). It is made by the time-limited support access module,
+  installed in the same run (the consent table, the read role, the signed procedures), with this level as the consent:
+  troubleshoot  the read-only user, and nothing more.
+  setup         the read-only user; admin rights (db_owner) exist only inside an open support session (at most 8 hours),
+                opened and closed by the installation's own support job -- never a standing right.
+  asbuilt       (PIM 100.61, framework 8.12) the read-only user (with -SqlServer; consent troubleshoot), and the as-built
+                document: the custom role 'PIM Manager as-built runner (<rg>)' (Microsoft.App/jobs/start/action +
+                Microsoft.App/jobs/executions/read) on the ONE job caj-pim-asbuilt, and Storage Blob Data Reader on the ONE
+                container 'asbuilt' of the PIM storage account (the account the job names in PIM_ASBUILT_STORAGE).
+                troubleshoot and setup include it when -SubscriptionId and -ResourceGroup are given; there a failure is
+                reported and the rest of the access stands. Needs Owner / User Access Administrator (or Role Based Access
+                Control Administrator once the role exists) on the PIM resource group.
+  -Remove       takes back everything a grant of this or an earlier version gave: the database user (by the Support app's
+                id, with every role it holds), a membership of the SQL admin group, owner entries on PIM's app
+                registrations and groups, and the as-built assignments.
 
-  EVERY level (PIM REQUIREMENTS 100.116, framework 4.1b) also gives the Support app its STANDING database access: it is
-  made a member of the SQL admin group, and it gets its own database user -- created from the application's client id,
-  found by that id whatever its name -- in db_owner (database owner: what PIM Manager's setup and repair scripts need to
-  create database users, add them to fixed database roles and apply the schema). It stays until -Remove, or until the
-  customer switches the Support app off in Microsoft Entra ID. With -Level asbuilt it needs -SqlServer (the installer
-  passes it); without a SQL server it is said in one line and nothing is created.
+  No level adds the Support app to the SQL admin group, puts it in db_owner or db_datareader, grants it VIEW DEFINITION
+  or makes it an owner of PIM's app registrations or groups. A re-run on an installation where an earlier version gave
+  any of these says so in one line and leaves it as found; -Remove takes it back.
+  Without -SqlServer no database user is made: said in one line (a problem at troubleshoot and setup).
 
   The support app's Azure roles and API permissions are granted by Invardia's New-InvardiaSupportApp.ps1, not here.
   Runs as the signed-in account (PIM-Rest: the Invardia Support app's REST session, else the browser sign-in; no az CLI);
-  never a stored secret. Every change is read back.
-  Adding a member to the role-assignable SQL admin group needs Privileged Role Administrator; without it that part is
-  reported and the rest continues (exit 1). Container installs have no Key Vault, so there is no vault grant.
+  never a stored secret. Every change is read back. The database part needs a database owner sign-in (a member of the
+  SQL admin group or the server's Entra admin -- the installer during an installation). Removing a member from the
+  role-assignable SQL admin group (-Remove) needs Privileged Role Administrator; without it that part is reported and the
+  rest continues (exit 1). Container installs have no Key Vault, so there is no vault grant.
 
 .EXAMPLE
   ./Grant-PimSupportAccess.ps1 -AppId 00000000-0000-0000-0000-000000000000 -Level setup -TenantId <t> -SubscriptionId <s> `
@@ -66,7 +70,10 @@ $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 . (Join-Path $here '_PimSetupShared.ps1')
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
-. (Join-Path $PSScriptRoot '_PimSupportSqlAccess.ps1')   # 100.116: the standing database access (the user by SID + db_owner)
+. (Join-Path $PSScriptRoot '_PimSupportSqlAccess.ps1')   # 100.116: the Support app's database user, found by SID (the read)
+# OPEN-01 (framework SECAUDIT-1a): the time-limited support access module -- the read role pim_support_read, the consent, the
+# signed procedures (Invoke-PimSupportJitInstall). The Support app's ONLY standing database right is that read role.
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-SupportJit.ps1')
 $null = Start-PimScriptRun -Script 'Grant-PimSupportAccess'
 $script:grantRc = 0
 try {
@@ -85,7 +92,7 @@ $abScoped = [bool]("$SubscriptionId".Trim() -and "$ResourceGroup".Trim())
 # A failure is a PROBLEM (exit 1) when the as-built access is the point of the run (-Level asbuilt) or when it is taken back
 # (-Remove); with troubleshoot / setup it is REPORTED and the rest of the access stands.
 $abHard = ($Level -eq 'asbuilt') -or $Remove
-# 100.116: the standing database access is given at EVERY level, so -Level asbuilt reaches the database too when -SqlServer
+# OPEN-01: the read-only database user is given at EVERY level, so -Level asbuilt reaches the database too when -SqlServer
 # is given (asbuilt never goes looking for the server itself).
 $needRest = (-not $Graph) -or (-not $Sql -and ("$SqlServer".Trim() -or ($Level -ne 'asbuilt' -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim()))) -or ($abWanted -and $abScoped -and -not $Arm)
 if ($needRest -and -not $global:PIM_SetupRestMode -and -not "$($global:PIM_ClientId)".Trim()) {
@@ -157,7 +164,6 @@ function Get-Ids([string]$Path) { @((& $Graph 'GET' $Path $null).value | ForEach
 $sp = @((& $Graph 'GET' "/servicePrincipals?`$select=id,appId,displayName&`$filter=$([uri]::EscapeDataString("appId eq '$AppId'"))" $null).value) | Select-Object -First 1
 if (-not $sp) { throw "the support app $AppId has no service principal in tenant $TenantId -- run Invardia's New-InvardiaSupportApp.ps1 (admin consent) first" }
 Write-Host "Invardia Support app: $($sp.displayName) ($AppId) -- $(if ($Remove) { 'REMOVE all access' } else { "grant '$Level'" })" -ForegroundColor Cyan
-$ref = @{ '@odata.id' = "$G/directoryObjects/$($sp.id)" }
 
 # ---- PIM's own objects (a label = the per-environment names of Invoke-PimDeployAll -EnvLabel)
 $suffix = if ("$EnvLabel".Trim()) { " ($EnvLabel)" } else { '' }
@@ -168,72 +174,80 @@ $objects = @(
     @{ kind = 'groups';       name = $(if ($suffix) { "PIM4EntraPS Manager users$suffix (members, no guests)" } else { 'PIM4EntraPS Manager users (members, no guests)' }); what = 'Manager members group' }
 )
 
-# ---- ownerships: granted only at setup. SQL admin group MEMBERSHIP: at every level (100.116 / framework 4.1b: the Support
-# app is a member of the SQL admin group of every install and stays one). Both are taken back by -Remove.
-$ownerLevel = ($Level -eq 'setup' -or $Remove)
+# ---- PIM's own objects. OPEN-01 (framework SECAUDIT-1a): a grant ADDS nothing here -- the Support app is never made a
+# member of the SQL admin group (a standing database administrator) and never an owner of PIM's app registrations or
+# groups. A grant only READS whether an earlier version left a membership, and says so; -Remove takes back the membership
+# and every owner entry an earlier grant gave.
+$earlier = New-Object System.Collections.Generic.List[string]
 foreach ($o in $objects) {
-    if (-not $ownerLevel -and $o.what -ne 'SQL admin group') { continue }
+    if (-not $Remove -and $o.what -ne 'SQL admin group') { continue }
     $obj = Find-One $o.kind $o.name $(if ($o.what -eq 'SQL admin group') { $script:gsaSqlAdminGroupId } else { '' })
     if (-not $obj) { Say "($($o.what) '$($o.name)' does not exist here -- nothing to do)" 'DarkGray'; continue }
-    if ($ownerLevel) {
+    if ($Remove) {
         $owners = Get-Ids "/$($o.kind)/$($obj.id)/owners?`$select=id"
         $isOwner = $owners -contains "$($sp.id)"
         if ($Remove -and $isOwner -and $PSCmdlet.ShouldProcess($o.name, 'remove owner')) {
             try { [void](& $Graph 'DELETE' "/$($o.kind)/$($obj.id)/owners/$($sp.id)/`$ref" $null); Say "owner removed: $($o.what) '$($o.name)'" 'Green' } catch { $problems.Add("remove owner of '$($o.name)': $($_.Exception.Message)") }
-        } elseif (-not $Remove -and -not $isOwner -and $PSCmdlet.ShouldProcess($o.name, 'add owner')) {
-            try { [void](& $Graph 'POST' "/$($o.kind)/$($obj.id)/owners/`$ref" $ref); Say "owner added: $($o.what) '$($o.name)'" 'Green' }
-            catch { if ("$_" -match 'already exist') { Say "owner (already): $($o.what) '$($o.name)'" } else { $problems.Add("add owner of '$($o.name)': $($_.Exception.Message)") } }
-        } elseif (-not $Remove) { Say "owner (already): $($o.what) '$($o.name)'" }
+        }
     }
     if ($o.what -ne 'SQL admin group') { continue }
     $members = Get-Ids "/groups/$($obj.id)/members?`$select=id"
     $isMember = $members -contains "$($sp.id)"
     if ($Remove -and $isMember -and $PSCmdlet.ShouldProcess($o.name, 'remove member')) {
         try { [void](& $Graph 'DELETE' "/groups/$($obj.id)/members/$($sp.id)/`$ref" $null); Say "member removed: SQL admin group '$($o.name)'" 'Green' } catch { $problems.Add("remove member of '$($o.name)': $($_.Exception.Message) (a role-assignable group needs Privileged Role Administrator)") }
-    } elseif (-not $Remove -and -not $isMember -and $PSCmdlet.ShouldProcess($o.name, 'add member')) {
-        try { [void](& $Graph 'POST' "/groups/$($obj.id)/members/`$ref" $ref); Say "member added: SQL admin group '$($o.name)' (it stays a member; SQL picks it up with the app's next token)" 'Green' }
-        catch { if ("$_" -match 'already exist') { Say "member (already): SQL admin group '$($o.name)'" } else { $problems.Add("add member to '$($o.name)': $($_.Exception.Message) (a role-assignable group needs Privileged Role Administrator)") } }
-    } elseif (-not $Remove) { Say "member (already): SQL admin group '$($o.name)'" }
+    } elseif (-not $Remove -and $isMember) {
+        $earlier.Add("a member of the SQL admin group '$($o.name)'")
+    } elseif (-not $Remove) { Say "SQL admin group '$($o.name)': the Support app is not a member (no standing administrator right)" 'DarkGray' }
 }
 
-# ---- 100.116 (framework 4.1b): the STANDING database access, at every level -- the Support app's own database user,
-# looked up BY ITS ID (the client id as a SID, never by name, never FROM EXTERNAL PROVIDER), in the database owner role.
-# Why a user and not only the group: membership alone has not given an APPLICATION a database sign-in on the servers this
-# was measured on. Why db_owner: PIM's setup scripts add identities to fixed database roles, which needs db_owner.
+# ---- OPEN-01 (framework SECAUDIT-1a, Invardia audit item 3): the Support app's ONE standing database right -- its own
+# database user, looked up BY ITS ID (the client id as a SID, never by name, never FROM EXTERNAL PROVIDER), in the read
+# role pim_support_read. Made by the time-limited support access module (Invoke-PimSupportJitInstall), installed in this
+# run with the level as the consent: troubleshoot and asbuilt = read only; setup = admin rights ONLY inside an open support
+# session (at most 8 h). No db_owner, no db_datareader, no VIEW DEFINITION from here.
 if (-not $Remove) {
-    $stRole = Get-PimSupportSqlRoleName
+    $readRole = Get-PimSupportJitReadOnlyRole
+    $consent = if ($Level -eq 'setup') { 'setup' } else { 'troubleshoot' }
     if (-not $Sql) {
-        Write-Host '  standing database access NOT set: no -SqlServer given -- no database user was created for the Support app' -ForegroundColor Yellow
-    } elseif ($PSCmdlet.ShouldProcess("$SqlServer/$SqlDatabase", "standing database access: the Support app's own database user (from its client id) in $stRole")) {
-        $st = Invoke-PimSupportSqlUser -Sql $Sql -AppId $AppId -DbUserName $DbUserName -Role $stRole
-        if ($st.ok) {
-            Say "standing database access: database user [$($st.userName)] ($(if ($st.created) { 'created from the client id' } else { 'already there' })) is in $stRole (read back). It ends when the Support app is switched off in Microsoft Entra ID, or with -Remove." 'Green'
-            # a user of the Support app that already exists under another name is the one every later statement uses
-            if ("$($st.userName)".Trim()) { $DbUserName = "$($st.userName)" }
-        } else { $problems.Add("standing database access: $($st.problem) (the signed-in account must be a member of '$SqlAdminGroupName' or the server's Entra admin)") }
+        Write-Host '  read-only database access NOT set: no -SqlServer given -- no database user was created for the Support app' -ForegroundColor Yellow
+        if ($Level -ne 'asbuilt') { $problems.Add('no -SqlServer given -- the database part was not done') }
+    } elseif ($PSCmdlet.ShouldProcess("$SqlServer/$SqlDatabase", "the Support app's own database user (from its client id) in $readRole only, and the support access module with consent '$consent'")) {
+        try {
+            # a user of the Support app that already exists under another name is the one every statement uses
+            $pre = Invoke-PimSupportSqlUser -Sql $Sql -AppId $AppId -DbUserName $DbUserName -Role $readRole -ReadOnly
+            if ("$($pre.userName)".Trim()) { $DbUserName = "$($pre.userName)" }
+            elseif ("$($pre.problem)" -ne 'the Support app has no database user') { throw "$($pre.problem)" }   # the database did not answer the read
+            $ji = Invoke-PimSupportJitInstall -Sql $Sql -SupportAppId $AppId -ConsentLevel $consent -UserName $DbUserName -SetBy 'Grant-PimSupportAccess (installation)'
+            $st = Invoke-PimSupportSqlUser -Sql $Sql -AppId $AppId -DbUserName $DbUserName -Role $readRole -ReadOnly
+            if ($ji.ok -and $st.ok) {
+                Say "read-only database access: database user [$($st.userName)] ($(if ($pre.userName) { 'already there' } else { 'created from the client id' })) is in $readRole only (read back); support access consent '$consent'$(if ($consent -eq 'setup') { ' -- admin rights only inside an open support session, at most 8 hours' }). It ends when the Support app is switched off in Microsoft Entra ID, or with -Remove." 'Green'
+                # what an EARLIER version of this script gave is said, never added again and never widened
+                foreach ($legacyRole in @('db_owner', (Get-PimSupportJitLegacyReadOnlyRole))) {
+                    $lr = Invoke-PimSupportSqlUser -Sql $Sql -AppId $AppId -DbUserName $DbUserName -Role $legacyRole -ReadOnly
+                    if ($lr.inRole) { $earlier.Add("in $legacyRole") }
+                }
+            } else {
+                $why = @(@($ji.problems) + @($(if (-not $st.ok) { "$($st.problem)" })) | Where-Object { "$_".Trim() }) -join '; '
+                $problems.Add("read-only database access: $why (the signed-in account must be a member of '$SqlAdminGroupName' or the server's Entra admin)")
+            }
+        } catch { $problems.Add("read-only database access: $((("$($_.Exception.Message)") -split "`n")[0]) (the signed-in account must be a member of '$SqlAdminGroupName' or the server's Entra admin)") }
+    }
+    if ($earlier.Count) {
+        Write-Host "  from an earlier grant the Support app is still $($earlier -join ', ') -- this run did not add it and left it as found; -Remove takes it back" -ForegroundColor Yellow
     }
 }
 
-# ---- troubleshoot: read access + VIEW DEFINITION on the same user (and the user is dropped by -Remove)
-if (($Level -eq 'troubleshoot' -or $Remove) -and $Sql) {
+# ---- -Remove: the user of the Support app's id whatever its name (with every role it holds), then the one of this name
+if ($Remove -and $Sql) {
     $u = $DbUserName.Replace(']', ']]')
     try {
-        if ($Remove) {
-            if ($PSCmdlet.ShouldProcess("$SqlServer/$SqlDatabase", "DROP USER [$DbUserName]")) {
-                # the user of the Support app's id whatever its name (100.116), then the one of this name
-                [void](& $Sql (Get-PimSupportSqlUserDropSql -AppId $AppId))
-                [void](& $Sql "IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$($DbUserName.Replace("'", "''"))') DROP USER [$u];")
-                Say "SQL user [$DbUserName] removed" 'Green'
-            }
-        } elseif ($PSCmdlet.ShouldProcess("$SqlServer/$SqlDatabase", "contained user [$DbUserName] (db_datareader + VIEW DEFINITION)")) {
-            # 100.116: db_owner is no longer taken back here -- it is the standing right given above
-            $t = Get-PimSqlContainedUserSql -DbUserName $DbUserName -AppId $AppId -Roles @('db_datareader') -RevokeRoles @('db_datawriter', 'db_ddladmin')
-            [void](& $Sql ($t + "`nGRANT VIEW DEFINITION TO [$u];"))
-            $back = & $Sql "SELECT COUNT(*) FROM sys.database_role_members m JOIN sys.database_principals r ON r.principal_id = m.role_principal_id JOIN sys.database_principals p ON p.principal_id = m.member_principal_id WHERE r.name = N'db_datareader' AND p.name = N'$($DbUserName.Replace("'", "''"))'"
-            if ([int]"$back" -ge 1) { Say "SQL user [$DbUserName]: db_datareader + VIEW DEFINITION (read back)" 'Green' } else { $problems.Add("SQL user [$DbUserName] was not read back in db_datareader") }
+        if ($PSCmdlet.ShouldProcess("$SqlServer/$SqlDatabase", "DROP USER [$DbUserName]")) {
+            [void](& $Sql (Get-PimSupportSqlUserDropSql -AppId $AppId))
+            [void](& $Sql "IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$($DbUserName.Replace("'", "''"))') DROP USER [$u];")
+            Say "SQL user [$DbUserName] removed" 'Green'
         }
     } catch { $problems.Add("SQL on $SqlServer : $($_.Exception.Message) (the signed-in account must be a member of '$SqlAdminGroupName' or the server's Entra admin)") }
-} elseif (($Level -eq 'troubleshoot' -or $Remove) -and -not $Sql) { $problems.Add('no -SqlServer given -- the SQL part was not done') }
+} elseif ($Remove -and -not $Sql) { $problems.Add('no -SqlServer given -- the SQL part was not done') }
 
 # ---- 100.61 as-built: start + read executions on the job caj-pim-asbuilt, Storage Blob Data Reader on the container 'asbuilt'
 $abNotes = New-Object System.Collections.Generic.List[string]

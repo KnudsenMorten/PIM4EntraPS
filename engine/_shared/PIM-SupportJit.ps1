@@ -2,18 +2,23 @@
 #
 # THE MODEL (4c, SI's #1021 design -- one text for every product):
 #   * CONSENT, write-protected: [pimsupport].[Consent] holds the Support app's id (its SID is derived from it) and the level
-#     the customer consented to (none | read | owner). Only an owner-level principal writes it: the schema is dbo's, no
-#     product role has DML on it, ALTER on the schema is DENIED to public. Never from the request, never from a table the
+#     the customer consented to (none | troubleshoot | setup -- OPEN-01 v2, from Invardia's consent channel; v1's read /
+#     owner are mapped to troubleshoot / setup, never widened). Only an owner-level principal writes it: the schema is dbo's,
+#     no product role has DML on it, ALTER on the schema is DENIED to public. Never from the request, never from a table the
 #     engine identity can update. The level granted = the LOWER of the requested and the consented level.
+#     troubleshoot / setup = the STANDING read-only user in pim_support_read (SELECT on the schemas pim + platform only);
+#     setup also = db_owner while a support session is open (at most 8 h); none = no Support database user at all.
+#     WHO DECIDES (framework "SUPPORT ACCESS" point 2): the UPDATER, from Invardia's consent channel, and the in-network
+#     database job applies it -- never the engine (it only sweeps an ended grant).
 #   * MARKERS: [pimsupport].[GrantMarker], ONE row per database per ROLE ADDED, written in the SAME transaction as the role
-#     add: role, added, expires (maxUntil, at most 24 h ahead), pre-existing (the role was already held), the grant id.
+#     add: role, added, expires (maxUntil, at most 8 h after the open), pre-existing (the role was already held), the grant id.
 #     One OPEN marker per user + role (a filtered unique index); a new open moves its end later, never earlier. A table,
 #     not an extended property: one row per role, a history that stays after the revoke (RevokedUtc / RevokedBy /
 #     LastError / Attempts), and readable by a signed procedure without any right on the user itself.
 #   * REVOKE = the markers: ONLY roles whose marker says the grant added them (not pre-existing), THEN the Support app's
 #     open sessions in this database are ended. Never a DROP of the user; never the read-only user, the engines' / web /
 #     updater users or the admin group.
-#   * SIGNED PROCEDURES that take NO principal parameter: usp_SupportGrant (@Level, @Hours, @Reason, @Ticket, @OpenedBy),
+#   * SIGNED PROCEDURES that take NO principal parameter: usp_SupportGrant (@Level, @Hours, @Reason, @Ticket, @OpenedBy, @UntilUtc),
 #     usp_SupportRevoke (@Mode expired | all, @Source) and usp_SupportState (none). Signed by an in-database certificate
 #     whose user is a db_owner member, private key removed after signing, ALTER on the procedures and the schema DENIED to
 #     public (altering a signed procedure drops its signature anyway). So the engine and the web app -- never db_owner --
@@ -33,21 +38,39 @@
 Set-StrictMode -Off
 
 function Get-PimSupportJitSchemaName { <# PURE. The schema of the support-access objects (a literal). #> return 'pimsupport' }
-function Get-PimSupportJitVersionMark { <# PURE. The version line every procedure carries (a literal). #> return 'pim-support-jit v1' }
+# v2 (OPEN-01, Invardia consent channel 2026-11-04): levels none | troubleshoot | setup, the read-only role pim_support_read,
+# at most 8 hours, an exact end (@UntilUtc). A new mark re-creates (and re-signs) every procedure of an install on v1.
+function Get-PimSupportJitVersionMark { <# PURE. The version line every procedure carries (a literal). #> return 'pim-support-jit v2' }
 function Get-PimSupportJitSignerPrefix { <# PURE. The name prefix of the signing certificate (a literal). #> return 'pimsupport_signer' }
 function Get-PimSupportJitProcedureNames { <# PURE. The three signed procedures (literals). #> return @('usp_SupportGrant', 'usp_SupportRevoke', 'usp_SupportState') }
-function Get-PimSupportJitAdminRole { <# PURE. The role an owner-level grant adds (a literal). #> return 'db_owner' }
-function Get-PimSupportJitReadOnlyRole { <# PURE. The standing read-only role (a literal). #> return 'db_datareader' }
+function Get-PimSupportJitAdminRole { <# PURE. The role a setup-level grant adds inside an open support session (a literal). #> return 'db_owner' }
+# framework "SUPPORT ACCESS" point 1: the standing read role is <product>_support_read -- SELECT on the product schemas only
+function Get-PimSupportJitReadOnlyRole { <# PURE. The standing read-only role (a literal). #> return 'pim_support_read' }
+function Get-PimSupportJitReadSchemas { <# PURE. The ONLY schemas the read role may SELECT from (literals). #> return @('pim', 'platform') }
+function Get-PimSupportJitLegacyReadOnlyRole { <# PURE. The read-only role of v1, taken away by the migration (a literal). #> return 'db_datareader' }
 function Get-PimSupportJitDefaultHours { <# PURE. The default length of a grant (a literal). #> return 8 }
-function Get-PimSupportJitMaxHours { <# PURE. The longest a grant may run (a literal). #> return 24 }
+function Get-PimSupportJitMaxHours { <# PURE. The longest a grant may run: 8 h from its open (framework point 1, a literal). #> return 8 }
 function Get-PimSupportJitNotSetUpText { <# PURE. The plain state of an install without the support-session step (a literal). #> return 'time-limited support access is not set up on this install' }
-function Get-PimSupportJitLevels { <# PURE. The consent / request levels, lowest first (literals). #> return @('none', 'read', 'owner') }
+function Get-PimSupportJitLevels { <# PURE. The consent / request levels, lowest first (literals; Invardia's consent channel). #> return @('none', 'troubleshoot', 'setup') }
+
+function ConvertTo-PimSupportJitLevel {
+    <#
+      PURE. A level as this module uses it: none | troubleshoot | setup. The v1 words are MAPPED, never widened:
+      read -> troubleshoot (read-only), owner -> setup (admin only inside an open support session). Anything else -> ''.
+    #>
+    param([AllowNull()][string]$Level)
+    $l = "$Level".Trim().ToLowerInvariant()
+    switch ($l) { 'read' { return 'troubleshoot' } 'owner' { return 'setup' } }
+    if ($l -in @(Get-PimSupportJitLevels)) { return $l }
+    return ''
+}
 
 function Get-PimSupportJitLowerLevel {
-    # PURE. The LOWER of two levels (none < read < owner); anything unknown counts as none. The procedure decides the same.
+    # PURE. The LOWER of two levels (none < troubleshoot < setup; v1 words mapped); anything unknown counts as none. The
+    # procedure decides the same.
     param([AllowNull()][string]$Requested, [AllowNull()][string]$Consented)
     $lv = @(Get-PimSupportJitLevels)
-    $a = [Array]::IndexOf($lv, "$Requested".Trim().ToLowerInvariant()); $b = [Array]::IndexOf($lv, "$Consented".Trim().ToLowerInvariant())
+    $a = [Array]::IndexOf($lv, (ConvertTo-PimSupportJitLevel $Requested)); $b = [Array]::IndexOf($lv, (ConvertTo-PimSupportJitLevel $Consented))
     if ($a -lt 0 -or $b -lt 0) { return 'none' }
     return $lv[[Math]::Min($a, $b)]
 }
@@ -102,7 +125,7 @@ IF OBJECT_ID(N'[$s].[Consent]') IS NULL
         Id           TINYINT          NOT NULL CONSTRAINT PK_PimSupportConsent PRIMARY KEY CONSTRAINT CK_PimSupportConsent_One CHECK (Id = 1),
         SupportAppId UNIQUEIDENTIFIER NOT NULL,
         UserName     SYSNAME          NOT NULL,
-        ConsentLevel NVARCHAR(10)     NOT NULL CONSTRAINT CK_PimSupportConsent_Level CHECK (ConsentLevel IN (N'none', N'read', N'owner')),
+        ConsentLevel NVARCHAR(20)     NOT NULL CONSTRAINT CK_PimSupportConsent_Level CHECK (ConsentLevel IN (N'none', N'troubleshoot', N'setup')),
         SetUtc       DATETIME2(0)     NOT NULL,
         SetBy        NVARCHAR(120)    NOT NULL);
 IF OBJECT_ID(N'[$s].[GrantMarker]') IS NULL
@@ -124,7 +147,49 @@ BEGIN
         LastError   NVARCHAR(400)      NULL);
     CREATE UNIQUE INDEX UX_PimSupportGrantMarker_Open ON [$s].[GrantMarker] (UserSid, RoleName) WHERE RevokedUtc IS NULL;
 END
+-- MIGRATION v1 -> v2 (OPEN-01): the consent words none | read | owner become none | troubleshoot | setup, MAPPED, never
+-- widened (read -> troubleshoot, owner -> setup). The column grows to hold them. Dynamic SQL: the batch compiles on either shape.
+IF COL_LENGTH(N'[$s].[Consent]', N'ConsentLevel') < 40
+BEGIN
+    IF OBJECT_ID(N'[$s].[CK_PimSupportConsent_Level]', N'C') IS NOT NULL EXEC(N'ALTER TABLE [$s].[Consent] DROP CONSTRAINT [CK_PimSupportConsent_Level];');
+    EXEC(N'ALTER TABLE [$s].[Consent] ALTER COLUMN ConsentLevel NVARCHAR(20) NOT NULL;');
+    EXEC(N'UPDATE [$s].[Consent] SET ConsentLevel = CASE ConsentLevel WHEN N''read'' THEN N''troubleshoot'' WHEN N''owner'' THEN N''setup'' WHEN N''troubleshoot'' THEN N''troubleshoot'' WHEN N''setup'' THEN N''setup'' ELSE N''none'' END;');
+    EXEC(N'ALTER TABLE [$s].[Consent] ADD CONSTRAINT [CK_PimSupportConsent_Level] CHECK (ConsentLevel IN (N''none'', N''troubleshoot'', N''setup''));');
+END
 "@
+}
+
+function Get-PimSupportJitReadRoleSql {
+    <#
+      PURE. The standing read role (framework "SUPPORT ACCESS" point 1): pim_support_read, owned by dbo, SELECT on the
+      product schemas pim + platform and NOTHING else (a right it holds on anything else is taken back). Idempotent; run
+      only by the support-session step (an owner-level sign-in) -- never by the engine or the updater.
+    #>
+    $r = Get-PimSupportJitReadOnlyRole
+    $l = New-Object System.Collections.Generic.List[string]
+    $l.Add("IF DATABASE_PRINCIPAL_ID(N'$r') IS NULL EXEC(N'CREATE ROLE [$r] AUTHORIZATION [dbo];');")
+    foreach ($sc in @(Get-PimSupportJitReadSchemas)) {
+        $l.Add("IF SCHEMA_ID(N'$sc') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sys.database_permissions WHERE class = 3 AND major_id = SCHEMA_ID(N'$sc') AND grantee_principal_id = DATABASE_PRINCIPAL_ID(N'$r') AND permission_name = N'SELECT' AND state = 'G') EXEC(N'GRANT SELECT ON SCHEMA::[$sc] TO [$r];');")
+    }
+    $in = (@(Get-PimSupportJitReadSchemas) | ForEach-Object { "N'$_'" }) -join ', '
+    $l.Add(@"
+-- nothing else: any other right the role holds is taken back (class 0 database, 1 object, 3 schema)
+DECLARE @x NVARCHAR(400), @t NVARCHAR(400);
+DECLARE p CURSOR LOCAL FAST_FORWARD FOR
+    SELECT CASE dp.class WHEN 0 THEN N'' WHEN 1 THEN N' ON OBJECT::' + QUOTENAME(OBJECT_SCHEMA_NAME(dp.major_id)) + N'.' + QUOTENAME(OBJECT_NAME(dp.major_id))
+                         WHEN 3 THEN N' ON SCHEMA::' + QUOTENAME(SCHEMA_NAME(dp.major_id)) END, dp.permission_name
+      FROM sys.database_permissions dp
+     WHERE dp.grantee_principal_id = DATABASE_PRINCIPAL_ID(N'$r') AND dp.class IN (0, 1, 3) AND dp.permission_name <> N'CONNECT'
+       AND NOT (dp.class = 3 AND dp.permission_name = N'SELECT' AND dp.state = 'G' AND SCHEMA_NAME(dp.major_id) IN ($in));
+OPEN p; FETCH NEXT FROM p INTO @t, @x;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    SET @x = N'REVOKE ' + @x + @t + N' FROM [$r];'; EXEC sys.sp_executesql @x;
+    FETCH NEXT FROM p INTO @t, @x;
+END
+CLOSE p; DEALLOCATE p;
+"@)
+    return ($l -join "`n")
 }
 
 function Get-PimSupportJitProcedureText {
@@ -137,26 +202,36 @@ function Get-PimSupportJitProcedureText {
     $t = @{}
     $t['usp_SupportGrant'] = @"
 CREATE OR ALTER PROCEDURE [$s].[usp_SupportGrant]
-    @Level    NVARCHAR(10),
+    @Level    NVARCHAR(20),
     @Hours    INT,
     @Reason   NVARCHAR(120) = NULL,
     @Ticket   NVARCHAR(40)  = NULL,
-    @OpenedBy NVARCHAR(120) = NULL
+    @OpenedBy NVARCHAR(120) = NULL,
+    @UntilUtc DATETIME2(0)  = NULL
 AS
 BEGIN
-    -- $m -- framework SECAUDIT-1a 4c. NO principal parameter: the Support app and its consented level come from [$s].[Consent].
+    -- $m -- framework SECAUDIT-1a 4c + "SUPPORT ACCESS" points 1-2. NO principal parameter: the Support app and its
+    -- consented level come from [$s].[Consent] (written only by the support-session step, from Invardia's answer).
+    -- troubleshoot = the STANDING read-only user (pim_support_read) only; setup = that + db_owner until the end, at most
+    -- 8 h after the open -- never longer, also when an open grant is extended.
     SET NOCOUNT ON; SET XACT_ABORT ON;
-    DECLARE @app UNIQUEIDENTIFIER, @user SYSNAME, @consent NVARCHAR(10), @sid VARBINARY(16), @granted NVARCHAR(10),
+    DECLARE @app UNIQUEIDENTIFIER, @user SYSNAME, @consent NVARCHAR(20), @sid VARBINARY(16), @granted NVARCHAR(20),
             @now DATETIME2(0) = SYSUTCDATETIME(), @until DATETIME2(0), @grant UNIQUEIDENTIFIER = NEWID(), @s NVARCHAR(400),
             @pre BIT, @added INT = 0, @extended INT = 0;
     SELECT @app = SupportAppId, @user = UserName, @consent = ConsentLevel FROM [$s].[Consent] WHERE Id = 1;
-    IF @app IS NULL OR @consent IS NULL OR @consent = N'none'
+    IF @app IS NULL OR @consent IS NULL OR @consent NOT IN (N'troubleshoot', N'setup')
         THROW 51101, N'usp_SupportGrant: no consent to support access is recorded in this database.', 1;
-    IF @Level IS NULL OR @Level NOT IN (N'read', N'owner') THROW 51102, N'usp_SupportGrant: the level must be read or owner.', 1;
-    IF @Hours IS NULL OR @Hours < 1 OR @Hours > 24 THROW 51103, N'usp_SupportGrant: the hours must be 1 to 24.', 1;
+    IF @Level IS NULL OR @Level NOT IN (N'troubleshoot', N'setup') THROW 51102, N'usp_SupportGrant: the level must be troubleshoot or setup.', 1;
+    IF @Hours IS NULL OR @Hours < 1 OR @Hours > 8 THROW 51103, N'usp_SupportGrant: the hours must be 1 to 8.', 1;
+    IF DATABASE_PRINCIPAL_ID(N'pim_support_read') IS NULL THROW 51105, N'usp_SupportGrant: the read role pim_support_read is missing -- run the support-session step.', 1;
     -- the LOWER of the requested and the consented level
-    SET @granted = CASE WHEN @Level = N'owner' AND @consent = N'owner' THEN N'owner' ELSE N'read' END;
+    SET @granted = CASE WHEN @Level = N'setup' AND @consent = N'setup' THEN N'setup' ELSE N'troubleshoot' END;
     SET @until = DATEADD(HOUR, @Hours, @now);
+    IF @UntilUtc IS NOT NULL
+    BEGIN
+        IF @UntilUtc <= @now THROW 51106, N'usp_SupportGrant: the end lies in the past.', 1;
+        IF @UntilUtc < @until SET @until = @UntilUtc;
+    END
     SET @sid = CAST(@app AS VARBINARY(16));
     -- the STANDING read-only user first (4a: it exists before any admin right is given)
     IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE sid = @sid)
@@ -167,16 +242,19 @@ BEGIN
         EXEC sys.sp_executesql @s;
     END
     SELECT @user = name FROM sys.database_principals WHERE sid = @sid;
-    IF IS_ROLEMEMBER(N'db_datareader', @user) = 0
-    BEGIN SET @s = N'ALTER ROLE [db_datareader] ADD MEMBER ' + QUOTENAME(@user) + N';'; EXEC sys.sp_executesql @s; END
-    IF @granted = N'owner'
+    IF ISNULL(IS_ROLEMEMBER(N'pim_support_read', @user), 0) = 0
+    BEGIN SET @s = N'ALTER ROLE [pim_support_read] ADD MEMBER ' + QUOTENAME(@user) + N';'; EXEC sys.sp_executesql @s; END
+    IF @granted = N'setup'
     BEGIN
-        -- ONE marker per role added, in the SAME transaction as the role add; a new open extends the open marker
+        -- ONE marker per role added, in the SAME transaction as the role add; a new open extends the open marker -- to at
+        -- most 8 h after that marker was opened
         BEGIN TRANSACTION;
         IF EXISTS (SELECT 1 FROM [$s].[GrantMarker] WITH (UPDLOCK, HOLDLOCK) WHERE UserSid = @sid AND RoleName = N'db_owner' AND RevokedUtc IS NULL)
         BEGIN
             SELECT @grant = GrantId, @pre = PreExisting FROM [$s].[GrantMarker] WHERE UserSid = @sid AND RoleName = N'db_owner' AND RevokedUtc IS NULL;
-            UPDATE [$s].[GrantMarker] SET ExpiresUtc = CASE WHEN ExpiresUtc > @until THEN ExpiresUtc ELSE @until END
+            UPDATE [$s].[GrantMarker]
+               SET ExpiresUtc = CASE WHEN (CASE WHEN ExpiresUtc > @until THEN ExpiresUtc ELSE @until END) > DATEADD(HOUR, 8, AddedUtc)
+                                     THEN DATEADD(HOUR, 8, AddedUtc) ELSE (CASE WHEN ExpiresUtc > @until THEN ExpiresUtc ELSE @until END) END
              WHERE UserSid = @sid AND RoleName = N'db_owner' AND RevokedUtc IS NULL;
             IF @pre = 0 AND IS_ROLEMEMBER(N'db_owner', @user) = 0
             BEGIN SET @s = N'ALTER ROLE [db_owner] ADD MEMBER ' + QUOTENAME(@user) + N';'; EXEC sys.sp_executesql @s; SET @added = 1; END
@@ -192,10 +270,10 @@ BEGIN
         END
         COMMIT TRANSACTION;
     END
-    SELECT (SELECT CASE WHEN @granted = N'owner' THEN @grant END AS grantId, @granted AS level, @Level AS requested, @consent AS consented,
+    SELECT (SELECT CASE WHEN @granted = N'setup' THEN @grant END AS grantId, @granted AS level, @Level AS requested, @consent AS consented,
                    @user AS userName, @added AS rolesAdded, @extended AS extended, ISNULL(@pre, 0) AS preExisting,
                    CONVERT(NVARCHAR(20), (SELECT MAX(ExpiresUtc) FROM [$s].[GrantMarker] WHERE UserSid = @sid AND RevokedUtc IS NULL), 126) + N'Z' AS untilUtc,
-                   CASE WHEN IS_ROLEMEMBER(N'db_datareader', @user) = 1 THEN 1 ELSE 0 END AS readOnly,
+                   CASE WHEN IS_ROLEMEMBER(N'pim_support_read', @user) = 1 THEN 1 ELSE 0 END AS readOnly,
                    CASE WHEN IS_ROLEMEMBER(N'db_owner', @user) = 1 THEN 1 ELSE 0 END AS inOwner
             FOR JSON PATH, WITHOUT_ARRAY_WRAPPER) AS result;
 END
@@ -281,11 +359,16 @@ AS
 BEGIN
     -- $m -- framework SECAUDIT-1a 4c. Read-only. NO parameter at all.
     SET NOCOUNT ON;
-    DECLARE @app UNIQUEIDENTIFIER, @consent NVARCHAR(10), @sid VARBINARY(16), @user SYSNAME;
+    DECLARE @app UNIQUEIDENTIFIER, @consent NVARCHAR(20), @sid VARBINARY(16), @user SYSNAME;
     SELECT @app = SupportAppId, @consent = ConsentLevel FROM [$s].[Consent] WHERE Id = 1;
     IF @app IS NOT NULL BEGIN SET @sid = CAST(@app AS VARBINARY(16)); SELECT @user = name FROM sys.database_principals WHERE sid = @sid; END
+    -- v2: readOnly = the standing read role pim_support_read; appId + userExists (does the Support user exist at all) and
+    -- legacyReader (still in v1's db_datareader) let the updater decide from facts, never from a guess.
     SELECT (SELECT ISNULL(@consent, N'none') AS consented,
-                   CASE WHEN @user IS NOT NULL AND IS_ROLEMEMBER(N'db_datareader', @user) = 1 THEN 1 ELSE 0 END AS readOnly,
+                   CONVERT(NVARCHAR(36), @app) AS appId,
+                   CASE WHEN @user IS NOT NULL THEN 1 ELSE 0 END AS userExists,
+                   CASE WHEN @user IS NOT NULL AND IS_ROLEMEMBER(N'pim_support_read', @user) = 1 THEN 1 ELSE 0 END AS readOnly,
+                   CASE WHEN @user IS NOT NULL AND IS_ROLEMEMBER(N'db_datareader', @user) = 1 THEN 1 ELSE 0 END AS legacyReader,
                    CASE WHEN @user IS NOT NULL AND IS_ROLEMEMBER(N'db_owner', @user) = 1 THEN 1 ELSE 0 END AS inOwner,
                    (SELECT COUNT(*) FROM [$s].[GrantMarker] WHERE RevokedUtc IS NULL) AS openMarkers,
                    (SELECT COUNT(*) FROM [$s].[GrantMarker] WHERE RevokedUtc IS NULL AND ExpiresUtc <= SYSUTCDATETIME()) AS expiredOpen,
@@ -293,6 +376,7 @@ BEGIN
                        AND NOT EXISTS (SELECT 1 FROM sys.database_role_members rm JOIN sys.database_principals r ON r.principal_id = rm.role_principal_id
                                        JOIN sys.database_principals p ON p.principal_id = rm.member_principal_id WHERE r.name = mk.RoleName AND p.sid = mk.UserSid)) AS halfDone,
                    CONVERT(NVARCHAR(20), (SELECT MAX(ExpiresUtc) FROM [$s].[GrantMarker] WHERE RevokedUtc IS NULL), 126) + N'Z' AS jitUntil,
+                   CONVERT(NVARCHAR(20), (SELECT MIN(AddedUtc) FROM [$s].[GrantMarker] WHERE RevokedUtc IS NULL), 126) + N'Z' AS jitOpenedUtc,
                    (SELECT COUNT(*) FROM [$s].[GrantMarker] WHERE AddedUtc >= DATEADD(HOUR, -24, SYSUTCDATETIME())) AS opened24h,
                    (SELECT COUNT(*) FROM [$s].[GrantMarker] WHERE RevokedUtc >= DATEADD(HOUR, -24, SYSUTCDATETIME())) AS closed24h,
                    -- real SQL (test VM 2026-11-02): the schema deny does not stop a DDL-admin member from making a NEW object in this
@@ -315,18 +399,26 @@ function Get-PimSupportJitInstallBatches {
         4 the three procedures (only when missing or another version -- re-creating one drops its signature)
         5 SIGN when any is unsigned: earlier signers out, a NEW certificate (random password made inside SQL, never
           returned), its user a db_owner member, ADD SIGNATURE to all three, the private key REMOVED
-        6 ALTER on the procedures and on the schema DENIED to public; EXECUTE for the engine role (grant, revoke, state:
-          4b's grant job runs as the engine) and the web role (revoke, state: the Manager sweeps)
+        6 ALTER on the procedures and on the schema DENIED to public; EXECUTE for the engine role (revoke, state: the
+          heartbeat sweeps), the web role (revoke, state: the Manager sweeps) and the updater role (state: it decides from
+          Invardia's consent channel). v2 (OPEN-01): the ENGINE no longer opens anything -- its EXECUTE on the grant
+          procedure is taken back; only this owner-level job path opens (framework "SUPPORT ACCESS" point 2).
+      v2 (OPEN-01): the read role pim_support_read (SELECT on pim + platform, nothing else) is made in batch 1; a v1 consent
+      (read / owner) is MAPPED to troubleshoot / setup, never widened, and the v1 read-only role db_datareader is taken away
+      from the Support user once it is in pim_support_read. Consent none: every open grant is closed (the signed revoke)
+      and the Support user is REMOVED (no Support database user at all).
     #>
-    param([Parameter(Mandatory)][string]$SupportAppId, [Parameter(Mandatory)][ValidateSet('none', 'read', 'owner')][string]$ConsentLevel,
+    param([Parameter(Mandatory)][string]$SupportAppId, [Parameter(Mandatory)][ValidateSet('none', 'troubleshoot', 'setup', 'read', 'owner')][string]$ConsentLevel,
           [string]$UserName = 'invardia-support', [string]$SetBy = '')
     $g = [guid]::Empty
     if (-not [guid]::TryParse("$SupportAppId".Trim(), [ref]$g) -or $g -eq [guid]::Empty) { throw "Get-PimSupportJitInstallBatches: '$SupportAppId' is not an application (client) id." }
     if (-not (Test-PimSupportJitUserName -Name $UserName)) { throw "Get-PimSupportJitInstallBatches: '$UserName' is not a safe database user name." }
+    $ConsentLevel = ConvertTo-PimSupportJitLevel $ConsentLevel
     $s = Get-PimSupportJitSchemaName; $m = Get-PimSupportJitVersionMark; $pfx = Get-PimSupportJitSignerPrefix
+    $ro = Get-PimSupportJitReadOnlyRole; $legacy = Get-PimSupportJitLegacyReadOnlyRole
     $procs = @(Get-PimSupportJitProcedureNames)
     $b = New-Object System.Collections.Generic.List[string]
-    [void]$b.Add((Get-PimSupportJitTableSql))
+    [void]$b.Add((Get-PimSupportJitTableSql) + "`n" + (Get-PimSupportJitReadRoleSql))
     $by = ConvertTo-PimSupportJitSqlText -Text (ConvertTo-PimSupportJitText -Text $SetBy -Max 120)
     if ($by -eq 'NULL') { $by = "N'support-session step'" }
     [void]$b.Add(@"
@@ -343,7 +435,9 @@ DECLARE @sid VARBINARY(16) = CAST(CAST('$g' AS UNIQUEIDENTIFIER) AS VARBINARY(16
 IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE sid = @sid)
     CREATE USER $q WITH SID = 0x$((@($g.ToByteArray()) | ForEach-Object { $_.ToString('X2') }) -join ''), TYPE = E;
 SELECT @n = name FROM sys.database_principals WHERE sid = @sid;
-IF @n IS NOT NULL AND IS_ROLEMEMBER(N'db_datareader', @n) = 0 BEGIN SET @q = N'ALTER ROLE [db_datareader] ADD MEMBER ' + QUOTENAME(@n) + N';'; EXEC sys.sp_executesql @q; END
+IF @n IS NOT NULL AND ISNULL(IS_ROLEMEMBER(N'$ro', @n), 0) = 0 BEGIN SET @q = N'ALTER ROLE [$ro] ADD MEMBER ' + QUOTENAME(@n) + N';'; EXEC sys.sp_executesql @q; END
+-- MIGRATION v1 -> v2: the broad v1 read role goes once the narrow one is in place (never widened)
+IF @n IS NOT NULL AND IS_ROLEMEMBER(N'$ro', @n) = 1 AND IS_ROLEMEMBER(N'$legacy', @n) = 1 BEGIN SET @q = N'ALTER ROLE [$legacy] DROP MEMBER ' + QUOTENAME(@n) + N';'; EXEC sys.sp_executesql @q; END
 "@)
     }
     foreach ($p in $procs) {
@@ -386,10 +480,24 @@ END
 "@)
     $deny = @($procs + @('Consent', 'GrantMarker') | ForEach-Object { "DENY ALTER ON OBJECT::[$s].[$_] TO [public];" }) + @("DENY ALTER ON SCHEMA::[$s] TO [public];")
     $exec = @(
-        @('pim_engine', 'usp_SupportGrant'), @('pim_engine', 'usp_SupportRevoke'), @('pim_engine', 'usp_SupportState'),
-        @('pim_web', 'usp_SupportRevoke'), @('pim_web', 'usp_SupportState')
+        @('pim_engine', 'usp_SupportRevoke'), @('pim_engine', 'usp_SupportState'),
+        @('pim_web', 'usp_SupportRevoke'), @('pim_web', 'usp_SupportState'),
+        @('pim_updater', 'usp_SupportState')
     ) | ForEach-Object { "IF DATABASE_PRINCIPAL_ID(N'$($_[0])') IS NOT NULL GRANT EXECUTE ON OBJECT::[$s].[$($_[1])] TO [$($_[0])];" }
-    [void]$b.Add((@($deny) + @($exec)) -join "`n")
+    # v2: the engine never opens anything (framework "SUPPORT ACCESS" point 2) -- a v1 grant of EXECUTE on the open is taken back
+    $unexec = @("IF DATABASE_PRINCIPAL_ID(N'pim_engine') IS NOT NULL AND EXISTS (SELECT 1 FROM sys.database_permissions WHERE class = 1 AND major_id = OBJECT_ID(N'[$s].[usp_SupportGrant]') AND grantee_principal_id = DATABASE_PRINCIPAL_ID(N'pim_engine')) REVOKE EXECUTE ON OBJECT::[$s].[usp_SupportGrant] FROM [pim_engine];")
+    [void]$b.Add((@($deny) + @($exec) + @($unexec)) -join "`n")
+    if ($ConsentLevel -eq 'none') {
+        # consent none: NO Support database user at all -- every open grant closed through the signed revoke (only roles a
+        # grant added; the Support app's sessions ended), then the user removed (its role memberships go with it)
+        [void]$b.Add("EXEC [$s].[usp_SupportRevoke] @Mode = N'all', @Source = N'consent-none';")
+        [void]$b.Add(@"
+-- [pimsupport] consent none: the Support app's database user is removed
+DECLARE @sid VARBINARY(16) = CAST(CAST('$g' AS UNIQUEIDENTIFIER) AS VARBINARY(16)), @n SYSNAME, @q NVARCHAR(400);
+SELECT @n = name FROM sys.database_principals WHERE sid = @sid AND type IN ('E', 'X', 'S', 'U');
+IF @n IS NOT NULL BEGIN SET @q = N'DROP USER ' + QUOTENAME(@n) + N';'; EXEC sys.sp_executesql @q; END
+"@)
+    }
     return @($b.ToArray())
 }
 
@@ -456,7 +564,18 @@ function Get-PimSupportJitInstallFactsSql {
         " CASE WHEN EXISTS (SELECT 1 FROM sys.database_permissions dp WHERE dp.class = 1 AND dp.major_id = OBJECT_ID(N'[$s].[$_]') AND dp.permission_name = N'ALTER' AND dp.state = 'D' AND dp.grantee_principal_id = 0) THEN 1 ELSE 0 END AS alterDenied" +
         " FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)"
     })
+    $r = Get-PimSupportJitReadOnlyRole
+    $in = (@(Get-PimSupportJitReadSchemas) | ForEach-Object { "N'$_'" }) -join ', '
+    $sidOf = "(SELECT TOP 1 CAST(SupportAppId AS VARBINARY(16)) FROM [$s].[Consent] WHERE Id = 1)"
     return ("SELECT (SELECT ISNULL((SELECT ConsentLevel FROM [$s].[Consent] WHERE Id = 1), N'none') AS consented," +
+            " CASE WHEN DATABASE_PRINCIPAL_ID(N'$r') IS NULL THEN 0 ELSE 1 END AS readRole," +
+            " (SELECT COUNT(*) FROM sys.database_permissions dp WHERE dp.grantee_principal_id = DATABASE_PRINCIPAL_ID(N'$r') AND dp.class = 3 AND dp.permission_name = N'SELECT' AND dp.state = 'G' AND SCHEMA_NAME(dp.major_id) IN ($in)) AS readRoleSchemas," +
+            " (SELECT COUNT(*) FROM sys.database_permissions dp WHERE dp.grantee_principal_id = DATABASE_PRINCIPAL_ID(N'$r') AND NOT (dp.class = 3 AND dp.permission_name = N'SELECT' AND dp.state = 'G' AND SCHEMA_NAME(dp.major_id) IN ($in))) AS readRoleOther," +
+            " (SELECT COUNT(*) FROM sys.schemas WHERE name IN ($in)) AS productSchemas," +
+            " CASE WHEN EXISTS (SELECT 1 FROM sys.database_principals WHERE sid = $sidOf) THEN 1 ELSE 0 END AS userExists," +
+            " CASE WHEN EXISTS (SELECT 1 FROM sys.database_principals p WHERE p.sid = $sidOf AND IS_ROLEMEMBER(N'$r', p.name) = 1) THEN 1 ELSE 0 END AS readOnly," +
+            " CASE WHEN EXISTS (SELECT 1 FROM sys.database_principals p WHERE p.sid = $sidOf AND IS_ROLEMEMBER(N'$(Get-PimSupportJitLegacyReadOnlyRole)', p.name) = 1) THEN 1 ELSE 0 END AS legacyReader," +
+            " CASE WHEN EXISTS (SELECT 1 FROM sys.database_permissions dp WHERE dp.class = 1 AND dp.major_id = OBJECT_ID(N'[$s].[usp_SupportGrant]') AND dp.grantee_principal_id = DATABASE_PRINCIPAL_ID(N'pim_engine') AND dp.state IN ('G', 'W')) THEN 1 ELSE 0 END AS engineMayOpen," +
             " (SELECT COUNT(*) FROM sys.objects o WHERE o.schema_id = SCHEMA_ID(N'$s') AND o.type IN ('U', 'V', 'P', 'PC', 'FN', 'IF', 'TF', 'TR', 'SN') AND o.name NOT IN (N'Consent', N'GrantMarker', N'usp_SupportGrant', N'usp_SupportRevoke', N'usp_SupportState')) AS foreignObjects," +
             " JSON_QUERY(N'[' + " + ($per -join " + N',' + ") + " + N']') AS procedures FOR JSON PATH, WITHOUT_ARRAY_WRAPPER) AS result")
 }
@@ -480,18 +599,26 @@ function Test-PimSupportJitNotInstalled {
 
 function Invoke-PimSupportJitGrant {
     <#
-      Open (or extend) the support access through the SIGNED procedure. Never throws. -Level read | owner, -Hours 1-24.
+      Open (or extend) the support access through the SIGNED procedure. Never throws. -Level troubleshoot | setup (v1 read /
+      owner are mapped), -Hours 1-8; -UntilUtc: an exact end (the earlier of it and -Hours wins, inside the procedure too).
       Returns { ok; level; requested; consented; grantId; untilUtc; rolesAdded; extended; preExisting; readOnly; inOwner;
       installed; problem }. The procedure decides the level (the LOWER of requested and consented); nothing here can widen it.
     #>
-    param([Parameter(Mandatory)][scriptblock]$Sql, [ValidateSet('read', 'owner')][string]$Level = 'owner', [int]$Hours = (Get-PimSupportJitDefaultHours),
-          [string]$Reason = '', [string]$Ticket = '', [string]$OpenedBy = '')
+    param([Parameter(Mandatory)][scriptblock]$Sql, [ValidateSet('troubleshoot', 'setup', 'read', 'owner')][string]$Level = 'setup', [int]$Hours = (Get-PimSupportJitDefaultHours),
+          [string]$Reason = '', [string]$Ticket = '', [string]$OpenedBy = '', [AllowNull()][object]$UntilUtc = $null)
+    $Level = ConvertTo-PimSupportJitLevel $Level
     $o = [ordered]@{ ok = $false; level = ''; requested = $Level; consented = ''; grantId = ''; untilUtc = ''; rolesAdded = 0; extended = $false; preExisting = $false
                      readOnly = $false; inOwner = $false; installed = $true; problem = '' }
     try {
         if ($Hours -lt 1 -or $Hours -gt (Get-PimSupportJitMaxHours)) { $o.problem = "the support access may last 1 to $(Get-PimSupportJitMaxHours) hours -- nothing was changed"; return [pscustomobject]$o }
+        $untilSql = 'NULL'
+        if ($null -ne $UntilUtc -and "$UntilUtc".Trim()) {
+            $uu = ConvertFrom-PimSupportJitUtc $UntilUtc
+            if (-not $uu) { $o.problem = "the end '$UntilUtc' is not a UTC time -- nothing was changed"; return [pscustomobject]$o }
+            $untilSql = "'" + $uu.ToString('yyyy-MM-ddTHH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) + "'"
+        }
         $s = Get-PimSupportJitSchemaName
-        $q = "EXEC [$s].[usp_SupportGrant] @Level = N'$Level', @Hours = $([int]$Hours), @Reason = $(ConvertTo-PimSupportJitSqlText (ConvertTo-PimSupportJitText $Reason 120)), @Ticket = $(ConvertTo-PimSupportJitSqlText (ConvertTo-PimSupportJitText $Ticket 40)), @OpenedBy = $(ConvertTo-PimSupportJitSqlText (ConvertTo-PimSupportJitText $OpenedBy 120));"
+        $q = "EXEC [$s].[usp_SupportGrant] @Level = N'$Level', @Hours = $([int]$Hours), @Reason = $(ConvertTo-PimSupportJitSqlText (ConvertTo-PimSupportJitText $Reason 120)), @Ticket = $(ConvertTo-PimSupportJitSqlText (ConvertTo-PimSupportJitText $Ticket 40)), @OpenedBy = $(ConvertTo-PimSupportJitSqlText (ConvertTo-PimSupportJitText $OpenedBy 120)), @UntilUtc = $untilSql;"
         $a = ConvertFrom-PimSupportJitAnswer (& $Sql $q)
         $o.level = "$($a.level)"; $o.consented = "$($a.consented)"; $o.grantId = "$($a.grantId)"
         $u = ConvertFrom-PimSupportJitUtc $a.untilUtc; $o.untilUtc = if ($u) { Format-PimSupportJitUtc -Utc $u } else { '' }
@@ -499,8 +626,8 @@ function Invoke-PimSupportJitGrant {
         $o.readOnly = ([int]$a.readOnly -eq 1); $o.inOwner = ([int]$a.inOwner -eq 1)
         $why = @()
         if (-not $o.readOnly) { $why += "the Support app's user is not in $(Get-PimSupportJitReadOnlyRole)" }
-        if ($o.level -eq 'owner' -and -not $o.inOwner) { $why += "the Support app's user is not in $(Get-PimSupportJitAdminRole)" }
-        if ($o.level -eq 'owner' -and -not $o.untilUtc) { $why += 'no end is recorded for the admin access' }
+        if ($o.level -eq 'setup' -and -not $o.inOwner) { $why += "the Support app's user is not in $(Get-PimSupportJitAdminRole)" }
+        if ($o.level -eq 'setup' -and -not $o.untilUtc) { $why += 'no end is recorded for the admin access' }
         if ($why.Count) { $o.problem = "read-back: $($why -join '; ')" } else { $o.ok = $true }
     } catch {
         $o.problem = Get-PimSupportJitFirstLine $_
@@ -586,13 +713,18 @@ function Get-PimSupportJitState {
       opened24h; closed24h; problem }. read = $false + problem: not determined (never a guess).
     #>
     param([AllowNull()][scriptblock]$Sql)
-    $o = [ordered]@{ installed = $null; read = $false; consented = ''; readOnly = $null; inOwner = $null; jitOpen = $null; jitUntil = ''; openMarkers = 0; expiredOpen = 0
+    $o = [ordered]@{ installed = $null; read = $false; consented = ''; appId = ''; userExists = $null; readOnly = $null; legacyReader = $null; inOwner = $null; jitOpen = $null; jitUntil = ''; openMarkers = 0; expiredOpen = 0
                      halfDone = 0; opened24h = 0; closed24h = 0; foreignObjects = 0; problem = '' }
     if (-not $Sql) { $o.problem = 'no database session'; return [pscustomobject]$o }
     try {
         $a = ConvertFrom-PimSupportJitAnswer (& $Sql "EXEC [$(Get-PimSupportJitSchemaName)].[usp_SupportState];")
         $o.installed = $true; $o.read = $true; $o.consented = "$($a.consented)"
         $o.readOnly = ([int]$a.readOnly -eq 1); $o.inOwner = ([int]$a.inOwner -eq 1)
+        # v2 fields; a v1 procedure (not yet re-installed) does not send them -> not determined ($null), never a guess
+        if ($a.PSObject.Properties['appId']) { $o.appId = "$($a.appId)".Trim().ToLowerInvariant() }
+        if ($a.PSObject.Properties['userExists']) { $o.userExists = ([int]$a.userExists -eq 1) }
+        if ($a.PSObject.Properties['legacyReader']) { $o.legacyReader = ([int]$a.legacyReader -eq 1) }
+        if ($a.PSObject.Properties['jitOpenedUtc']) { $ou = ConvertFrom-PimSupportJitUtc $a.jitOpenedUtc; $o['jitOpenedUtc'] = if ($ou) { Format-PimSupportJitUtc -Utc $ou } else { '' } }
         $o.openMarkers = [int]$a.openMarkers; $o.expiredOpen = [int]$a.expiredOpen; $o.halfDone = [int]$a.halfDone
         $o.opened24h = [int]$a.opened24h; $o.closed24h = [int]$a.closed24h
         if ($a.PSObject.Properties['foreignObjects']) { $o.foreignObjects = [int]$a.foreignObjects }
@@ -637,10 +769,11 @@ function Invoke-PimSupportJitInstall {
       (Get-PimSupportJitInstallFactsSql). Never throws. Returns { ok; consented; procedures; problems }. ok only when every
       procedure is current, signed by the signer, its private key removed, the signer a db_owner member and ALTER denied.
     #>
-    param([Parameter(Mandatory)][scriptblock]$Sql, [Parameter(Mandatory)][string]$SupportAppId, [Parameter(Mandatory)][ValidateSet('none', 'read', 'owner')][string]$ConsentLevel,
+    param([Parameter(Mandatory)][scriptblock]$Sql, [Parameter(Mandatory)][string]$SupportAppId, [Parameter(Mandatory)][ValidateSet('none', 'troubleshoot', 'setup', 'read', 'owner')][string]$ConsentLevel,
           [string]$UserName = 'invardia-support', [string]$SetBy = '')
+    $ConsentLevel = ConvertTo-PimSupportJitLevel $ConsentLevel     # v1 words mapped (read -> troubleshoot, owner -> setup), never widened
     $problems = New-Object System.Collections.Generic.List[string]
-    $o = [ordered]@{ ok = $false; consented = ''; procedures = @(); problems = @() }
+    $o = [ordered]@{ ok = $false; consented = ''; procedures = @(); readOnly = $false; userExists = $false; problems = @() }
     try {
         $i = 0
         foreach ($bt in @(Get-PimSupportJitInstallBatches -SupportAppId $SupportAppId -ConsentLevel $ConsentLevel -UserName $UserName -SetBy $SetBy)) {
@@ -660,6 +793,18 @@ function Invoke-PimSupportJitInstall {
             if ([int]$p.alterDenied -ne 1) { $problems.Add("ALTER on $n is not denied") }
         }
         if ($o.consented -ne $ConsentLevel) { $problems.Add("the consent reads back as '$($o.consented)', not '$ConsentLevel'") }
+        # v2 (OPEN-01): the read role exactly as agreed, and the Support user as the consent says
+        if ($f.PSObject.Properties['readRole']) {
+            $ro = Get-PimSupportJitReadOnlyRole
+            $o.readOnly = ([int]$f.readOnly -eq 1); $o.userExists = ([int]$f.userExists -eq 1)
+            if ([int]$f.readRole -ne 1) { $problems.Add("the read role $ro is not there") }
+            elseif ([int]$f.readRoleSchemas -ne [int]$f.productSchemas) { $problems.Add("the read role $ro does not hold SELECT on every product schema ($([int]$f.readRoleSchemas) of $([int]$f.productSchemas))") }
+            if ([int]$f.readRoleOther -gt 0) { $problems.Add("the read role $ro holds $([int]$f.readRoleOther) right(s) beyond SELECT on the product schemas") }
+            if ([int]$f.engineMayOpen -eq 1) { $problems.Add('the engine may still open the support access (EXECUTE on usp_SupportGrant)') }
+            if ($ConsentLevel -eq 'none' -and $o.userExists) { $problems.Add('consent none, but the Support app''s database user is still there') }
+            if ($ConsentLevel -ne 'none' -and -not $o.readOnly) { $problems.Add("the Support app's database user is not in $ro") }
+            if ($ConsentLevel -ne 'none' -and [int]$f.legacyReader -eq 1) { $problems.Add("the Support app's database user is still in $(Get-PimSupportJitLegacyReadOnlyRole) (v1)") }
+        }
         if ($f.PSObject.Properties['foreignObjects'] -and [int]$f.foreignObjects -gt 0) { $problems.Add("$([int]$f.foreignObjects) object(s) in the support schema that this step did not make -- an owner must look at and remove them") }
     } catch { $problems.Add((Get-PimSupportJitFirstLine $_)) }
     $o.problems = @($problems.ToArray()); $o.ok = ($problems.Count -eq 0)

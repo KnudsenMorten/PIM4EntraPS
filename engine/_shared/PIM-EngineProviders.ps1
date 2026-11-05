@@ -2623,18 +2623,52 @@ function Invoke-PimArmScheduleCreate {
       longest the scope's policy allows instead of failing. Any other error is thrown at once (never papered over).
       -Arm { param($Path, $Body) } is the test seam (default Invoke-PimArm PUT, api 2020-10-01-preview).
     #>
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][hashtable]$Body, [scriptblock]$Arm)
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][hashtable]$Body, [scriptblock]$Arm, [scriptblock]$ReadPolicy)
     if (-not $Arm) { $Arm = { param($p, $b) Invoke-PimArm -Method PUT -Path $p -ApiVersion '2020-10-01-preview' -Body $b } }
     $sched = if ($Body.properties) { $Body.properties.scheduleInfo } else { $null }
     $isDur = { param($m) "$m" -match '(?i)greater than (the )?maximum allowed duration|ExpirationRule' }
     try { return (& $Arm $Path $Body) } catch { if (-not (& $isDur "$($_.Exception.Message)")) { throw } }
-    foreach ($d in @(365, 180, 90, 30)) {
-        if ($sched) { $sched.expiration = @{ type = 'AfterDuration'; duration = "P$d" + 'D' } }
+    # AZ-POLICY-MAX-DURATION (Invardia 2026-11-04, a customer install, 8 hits): READ the role's policy at this scope first
+    # and ask for exactly its maximum -- a policy shorter than 30 days never landed on the ladder. The ladder stays as the fallback.
+    $tries = New-Object System.Collections.Generic.List[string]
+    if ($sched) {
+        $max = ''
+        try { $max = Get-PimArmPolicyMaxDuration -Path $Path -Body $Body -Read $ReadPolicy } catch { $max = '' }
+        if ($max) { $tries.Add($max) }
+    }
+    foreach ($d in @(365, 180, 90, 30, 14, 7, 1)) { $iso = "P$d" + 'D'; if (-not $tries.Contains($iso)) { $tries.Add($iso) } }
+    foreach ($iso in $tries) {
+        if ($sched) { $sched.expiration = @{ type = 'AfterDuration'; duration = $iso } }
         # a fresh request id per try (a refused request's id is not reused)
         $p = ("$Path" -replace '/[0-9a-fA-F-]{36}$', ('/' + [guid]::NewGuid().ToString()))
         try { return (& $Arm $p $Body) } catch { if (-not (& $isDur "$($_.Exception.Message)")) { throw } }
     }
-    throw "Azure role assignment still refused by the scope's PIM expiration policy after 365 / 180 / 90 / 30 days ($Path)"
+    throw "Azure role assignment still refused by the scope's PIM expiration policy (tried the policy maximum and 365 down to 1 day) ($Path)"
+}
+
+function Get-PimArmPolicyMaxDuration {
+    <#
+      AZ-POLICY-MAX-DURATION: the maximum duration (ISO 8601, e.g. P15D / PT8H) the role's PIM policy at this scope allows for an
+      ADMIN eligibility (roleEligibilityScheduleRequests) or ADMIN assignment (roleAssignmentScheduleRequests) -- read from the
+      policy assignment's effectiveRules (Expiration_Admin_Eligibility / Expiration_Admin_Assignment). '' when it cannot be read
+      or the rule allows no maximum. READ ONLY. -Read { param($path) } is the test seam (default Invoke-PimArm GET).
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][hashtable]$Body, [scriptblock]$Read)
+    if (-not $Read) { $Read = { param($p) Invoke-PimArm -Method GET -Path $p -ApiVersion '2020-10-01' } }
+    $rdef = "$($Body.properties.roleDefinitionId)"
+    if (-not $rdef -or "$Path" -notmatch '^(?<scope>.+?)/providers/Microsoft\.Authorization/(?<ep>roleEligibilityScheduleRequests|roleAssignmentScheduleRequests)/') { return '' }
+    $scope = $Matches['scope']; $ruleId = if ($Matches['ep'] -eq 'roleEligibilityScheduleRequests') { 'Expiration_Admin_Eligibility' } else { 'Expiration_Admin_Assignment' }
+    $res = & $Read ("$scope/providers/Microsoft.Authorization/roleManagementPolicyAssignments?`$filter=" + [uri]::EscapeDataString("roleDefinitionId eq '$rdef'"))
+    $items = if ($res -and $res.PSObject.Properties['value']) { @($res.value) } else { @($res) }
+    foreach ($pa in @($items | Where-Object { $_ })) {
+        foreach ($r in @($pa.properties.effectiveRules)) {
+            if ("$($r.id)" -eq $ruleId) {
+                $m = "$($r.maximumDuration)".Trim()
+                if ($m -match '^P(T?\d+[DHM]|\d+D(T\d+H)?)$') { return $m }
+            }
+        }
+    }
+    return ''
 }
 
 # §100.45: a tenant-wide schedule preload that Microsoft THROTTLED (or answered 5xx / timed out) is tried ONCE more, after a

@@ -54,9 +54,9 @@ function Get-PimSupportSqlJobFunctionNames {
     return @('Get-PimSupportSqlUserDefaultName', 'Get-PimSupportSqlRoleName', 'ConvertTo-PimSupportSqlSid', 'Test-PimSupportSqlNames',
              'Get-PimSupportSqlUserSql', 'Get-PimSupportSqlUserReadSql', 'ConvertFrom-PimSupportSqlUserRead', 'Invoke-PimSupportSqlUser',
              'Get-PimSupportJitSchemaName', 'Get-PimSupportJitVersionMark', 'Get-PimSupportJitSignerPrefix', 'Get-PimSupportJitProcedureNames',
-             'Get-PimSupportJitAdminRole', 'Get-PimSupportJitReadOnlyRole', 'Get-PimSupportJitDefaultHours', 'Get-PimSupportJitMaxHours',
-             'Get-PimSupportJitNotSetUpText', 'Get-PimSupportJitLevels', 'Get-PimSupportJitLowerLevel', 'Test-PimSupportJitUserName', 'ConvertTo-PimSupportJitText',
-             'Format-PimSupportJitUtc', 'ConvertFrom-PimSupportJitUtc', 'ConvertTo-PimSupportJitSqlText', 'Get-PimSupportJitTableSql',
+             'Get-PimSupportJitAdminRole', 'Get-PimSupportJitReadOnlyRole', 'Get-PimSupportJitReadSchemas', 'Get-PimSupportJitLegacyReadOnlyRole', 'Get-PimSupportJitDefaultHours', 'Get-PimSupportJitMaxHours',
+             'Get-PimSupportJitNotSetUpText', 'Get-PimSupportJitLevels', 'ConvertTo-PimSupportJitLevel', 'Get-PimSupportJitLowerLevel', 'Test-PimSupportJitUserName', 'ConvertTo-PimSupportJitText',
+             'Format-PimSupportJitUtc', 'ConvertFrom-PimSupportJitUtc', 'ConvertTo-PimSupportJitSqlText', 'Get-PimSupportJitTableSql', 'Get-PimSupportJitReadRoleSql',
              'Get-PimSupportJitProcedureText', 'Get-PimSupportJitInstallBatches', 'Get-PimSupportJitInstallFactsSql', 'ConvertFrom-PimSupportJitAnswer',
              'Get-PimSupportJitFirstLine', 'Test-PimSupportJitNotInstalled', 'Invoke-PimSupportJitGrant', 'Invoke-PimSupportJitRevoke',
              'Invoke-PimSupportJitSweep', 'Get-PimSupportJitState', 'Get-PimSupportJitStateSummary', 'Test-PimSupportJitNeedsLook', 'Invoke-PimSupportJitInstall')
@@ -87,6 +87,12 @@ function Get-PimSupportSqlJobScript {
                             owner grant the job stays, follows the end (a re-open moves it later) and at the end SWEEPS
                             ("[supportsql] REVOKE {json}") -- never before the end. Exit 0 only when that sweep is clean.
         close               support closed: every open marker closed now (only roles the grant added), sessions ended
+        consent             OPEN-01: ONE action the UPDATER decided from Invardia's consent channel
+                            (PIM_SUPPORTSQL_CONSENT_ACTION ensure-read-user | remove-user | open-admin | close-admin,
+                            PIM_SUPPORTSQL_CONSENT_LEVEL troubleshoot | setup | none, PIM_SUPPORTSQL_JIT_UNTIL for open-admin).
+                            The support-session step with Invardia's consent first (idempotent: objects current + signed,
+                            the read role, the consent row, the read user -- or for none every grant closed and the user
+                            removed), then the open / close, then the state READ BACK. Exit 0 only when it reads back as asked.
       Every mode but install first SWEEPS ("[supportsql] SWEEP {json}"); every open / close / revoke is audited
       ("[supportsql] AUDIT {json}" + a row in the audit table when the image has the writer).
     #>
@@ -142,7 +148,7 @@ try {
     }
     $mode = "$($env:PIM_SUPPORTSQL_MODE)".Trim().ToLowerInvariant()
     if (-not $mode) { $mode = 'standing' }
-    if ($mode -notin @('standing', 'install', 'grant', 'close')) { throw "PIM_SUPPORTSQL_MODE '$mode' is not standing, install, grant or close -- nothing was changed" }
+    if ($mode -notin @('standing', 'install', 'grant', 'close', 'consent')) { throw "PIM_SUPPORTSQL_MODE '$mode' is not standing, install, grant, close or consent -- nothing was changed" }
     $sweepBad = $false; $sw0Line = $null
     if ($mode -ne 'install') {
         # ---- the sweep FIRST (framework SECAUDIT-1a 4c): every marker past its end is taken back before anything is given
@@ -163,6 +169,49 @@ try {
                               procedures = @($i.procedures); problem = (@($i.problems) -join '; ') }
         Write-SupportSqlLine ('RESULT ' + ($result | ConvertTo-Json -Compress -Depth 4))
         if ($i.ok) { $rc = 0 }
+    } elseif ($mode -eq 'consent') {
+        # ---- OPEN-01: ONE action the UPDATER decided from Invardia's consent channel (framework "SUPPORT ACCESS" point 2)
+        $action = "$($env:PIM_SUPPORTSQL_CONSENT_ACTION)".Trim().ToLowerInvariant()
+        $consent = ConvertTo-PimSupportJitLevel "$($env:PIM_SUPPORTSQL_CONSENT_LEVEL)"
+        if ($action -notin @('ensure-read-user', 'remove-user', 'open-admin', 'close-admin')) { throw "PIM_SUPPORTSQL_CONSENT_ACTION '$action' is not ensure-read-user, remove-user, open-admin or close-admin -- nothing was changed" }
+        if (-not $consent) { throw "PIM_SUPPORTSQL_CONSENT_LEVEL '$($env:PIM_SUPPORTSQL_CONSENT_LEVEL)' is not troubleshoot, setup or none -- nothing was changed" }
+        if ($action -eq 'remove-user') { $consent = 'none' }
+        if ($action -eq 'open-admin' -and $consent -ne 'setup') { throw "open-admin needs the consent level setup (Invardia says '$consent') -- nothing was given" }
+        $cp = New-Object System.Collections.Generic.List[string]
+        # 1. the support-session step with Invardia's consent (idempotent; for none: every grant closed, the user removed)
+        $i = Invoke-PimSupportJitInstall -Sql $sql -SupportAppId $appId -ConsentLevel $consent -UserName $userName -SetBy "$($env:PIM_SUPPORTSQL_JIT_OPENED_BY)"
+        foreach ($ip in @($i.problems)) { $cp.Add("$ip") }
+        $g = $null; $cl = $null
+        # 2. the open (setup inside an open support session) or the close
+        if ($action -eq 'open-admin' -and $i.ok) {
+            $g = Invoke-PimSupportJitGrant -Sql $sql -Level 'setup' -Hours (Get-PimSupportJitMaxHours) -UntilUtc "$($env:PIM_SUPPORTSQL_JIT_UNTIL)" -Reason "$($env:PIM_SUPPORTSQL_JIT_REASON)" -Ticket "$($env:PIM_SUPPORTSQL_JIT_TICKET)" -OpenedBy "$($env:PIM_SUPPORTSQL_JIT_OPENED_BY)"
+            if (-not $g.ok) { $cp.Add("the open: $($g.problem)") }
+            try { & $jobAudit ([pscustomobject][ordered]@{ action = 'support.access.open'; target = 'the Support app''s database user'; source = 'job:consent'; level = "$($g.level)"; requested = 'setup'; consented = "$($g.consented)"
+                                                             grantId = "$($g.grantId)"; untilUtc = "$($g.untilUtc)"; result = $(if ($g.ok) { 'ok' } else { 'failed' }); detail = "$($g.problem)" }) }
+            catch { Write-SupportSqlLine ('WARNING the audit record of the open could not be written: ' + ((("$($_.Exception.Message)" -split "`n")[0]).Trim())) }
+        } elseif ($action -eq 'close-admin') {
+            $cl = Invoke-PimSupportJitRevoke -Sql $sql -Mode 'all' -Source 'job' -Audit $jobAudit -Quiet
+            foreach ($cq in @($cl.problems)) { $cp.Add("the close: $cq") }
+        }
+        try { & $jobAudit ([pscustomobject][ordered]@{ action = 'support.consent.apply'; target = 'the Support app''s database access'; source = 'job:consent'; consentAction = $action; consented = $consent
+                                                         result = $(if ($cp.Count) { 'failed' } else { 'ok' }); detail = (@($cp.ToArray()) -join '; ') }) }
+        catch { Write-SupportSqlLine ('WARNING the audit record of the consent could not be written: ' + ((("$($_.Exception.Message)" -split "`n")[0]).Trim())) }
+        # 3. READ BACK: the state as the action asked for it
+        $st = Get-PimSupportJitState -Sql $sql
+        if (-not $st.read) { $cp.Add("the state could not be read back ($($st.problem))") }
+        else {
+            switch ($action) {
+                'ensure-read-user' { if (-not $st.readOnly) { $cp.Add('read-back: the Support app''s user is not in the read role') } }
+                'remove-user'      { if ($st.userExists -ne $false) { $cp.Add('read-back: the Support app''s database user is still there') } }
+                'open-admin'       { if (-not ($st.inOwner -and $st.jitOpen)) { $cp.Add('read-back: no open admin access') } }
+                'close-admin'      { if ($st.jitOpen) { $cp.Add('read-back: an admin access is still open') } }
+            }
+        }
+        if ($sweepBad) { $cp.Add("the sweep before the action: $(@($sw0.problems) -join '; ')") }
+        $result = [ordered]@{ ok = [bool](-not $cp.Count); state = $action; mode = 'consent'; action = $action; consented = "$($st.consented)"; userExists = $st.userExists; readOnly = $st.readOnly
+                              inOwner = $st.inOwner; jitOpen = $st.jitOpen; jitUntil = "$($st.jitUntil)"; userName = $userName; problem = (@($cp.ToArray()) -join '; '); sweep = $sw0Line }
+        Write-SupportSqlLine ('RESULT ' + ($result | ConvertTo-Json -Compress -Depth 4))
+        if ($result.ok) { $rc = 0 }
     } elseif ($mode -eq 'close') {
         # ---- support closed: every open marker is closed now (only roles the grant added), then the sessions end
         $cl = Invoke-PimSupportJitRevoke -Sql $sql -Mode 'all' -Source 'job' -Audit $jobAudit -Quiet
@@ -173,18 +222,19 @@ try {
     } elseif ($mode -eq 'grant') {
         # ---- 4b: the grant through the SIGNED procedure (the level = the LOWER of requested and consented), read back
         $hours = 0; [void][int]::TryParse("$($env:PIM_SUPPORTSQL_JIT_HOURS)".Trim(), [ref]$hours)
-        $level = "$($env:PIM_SUPPORTSQL_JIT_LEVEL)".Trim().ToLowerInvariant(); if (-not $level) { $level = 'owner' }
-        if ($level -notin @('read', 'owner')) { throw "PIM_SUPPORTSQL_JIT_LEVEL '$level' is not read or owner -- nothing was given" }
+        $level = "$($env:PIM_SUPPORTSQL_JIT_LEVEL)".Trim().ToLowerInvariant(); if (-not $level) { $level = 'setup' }
+        $level = ConvertTo-PimSupportJitLevel $level     # v1 read / owner -> troubleshoot / setup (never widened)
+        if ($level -notin @('troubleshoot', 'setup')) { throw "PIM_SUPPORTSQL_JIT_LEVEL '$($env:PIM_SUPPORTSQL_JIT_LEVEL)' is not troubleshoot or setup -- nothing was given" }
         $g = Invoke-PimSupportJitGrant -Sql $sql -Level $level -Hours $hours -Reason "$($env:PIM_SUPPORTSQL_JIT_REASON)" -Ticket "$($env:PIM_SUPPORTSQL_JIT_TICKET)" -OpenedBy "$($env:PIM_SUPPORTSQL_JIT_OPENED_BY)"
         try { & $jobAudit ([pscustomobject][ordered]@{ action = 'support.access.open'; target = 'the Support app''s database user'; source = 'job'; level = "$($g.level)"; requested = "$($g.requested)"; consented = "$($g.consented)"
                                                          grantId = "$($g.grantId)"; untilUtc = "$($g.untilUtc)"; result = $(if ($g.ok) { 'ok' } else { 'failed' }); detail = "$($g.problem)" }) }
         catch { Write-SupportSqlLine ('WARNING the audit record of the grant could not be written: ' + ((("$($_.Exception.Message)" -split "`n")[0]).Trim())) }
         $problem = "$($g.problem)"; if (-not $problem -and $sweepBad) { $problem = "the sweep before the grant: $(@($sw0.problems) -join '; ')" }
-        $result = [ordered]@{ ok = [bool]($g.ok -and -not $sweepBad); state = $(if (-not $g.ok) { 'failed' } elseif ($g.extended) { 'extended' } elseif ($g.level -eq 'owner' -and $g.preExisting) { 'pre-existing' } elseif ($g.level -eq 'owner') { 'granted' } else { 'read-only' })
+        $result = [ordered]@{ ok = [bool]($g.ok -and -not $sweepBad); state = $(if (-not $g.ok) { 'failed' } elseif ($g.extended) { 'extended' } elseif ($g.level -eq 'setup' -and $g.preExisting) { 'pre-existing' } elseif ($g.level -eq 'setup') { 'granted' } else { 'read-only' })
                               mode = 'grant'; level = "$($g.level)"; requested = "$($g.requested)"; consented = "$($g.consented)"; grantId = "$($g.grantId)"; untilUtc = "$($g.untilUtc)"
                               role = (Get-PimSupportJitAdminRole); inRole = [bool]$g.inOwner; readOnly = [bool]$g.readOnly; installed = [bool]$g.installed; problem = $problem; sweep = $sw0Line }
         Write-SupportSqlLine ('RESULT ' + ($result | ConvertTo-Json -Compress -Depth 4))
-        if ($g.ok -and $g.level -eq 'owner' -and $g.untilUtc) {
+        if ($g.ok -and $g.level -eq 'setup' -and $g.untilUtc) {
             # ---- hold until the end, then SWEEP on this job's OWN schedule: no answer from Invardia, no person and no other
             # job is needed for the access to end. Never before the end; a later end (a re-open) is followed.
             $end = ConvertFrom-PimSupportJitUtc "$($g.untilUtc)"
@@ -320,13 +370,17 @@ function Get-PimSupportSqlJobPlan {
         [string]$DbUserName = (Get-PimSupportSqlUserDefaultName),
         [string]$SqlIdentityClientId = '',
         # framework SECAUDIT-1a 4b / 4c: standing (as before) | install (the support-session step) | grant | close
-        [ValidateSet('standing', 'install', 'grant', 'close')][string]$Mode = 'standing',
+        # | consent (OPEN-01: one action the updater decided from Invardia's consent channel)
+        [ValidateSet('standing', 'install', 'grant', 'close', 'consent')][string]$Mode = 'standing',
         [int]$SupportHours = 0,
-        [string]$Level = 'owner',
+        [string]$Level = 'setup',
         [string]$ConsentLevel = '',
         [string]$Reason = '',
         [string]$TicketNumber = '',
         [string]$OpenedBy = '',
+        # mode consent: ensure-read-user | remove-user | open-admin | close-admin; -UntilUtc the end of an open-admin
+        [string]$ConsentAction = '',
+        [string]$UntilUtc = '',
         [datetime]$NowUtc = [datetime]::UtcNow
     )
     $p = [ordered]@{ ok = $false; problem = ''; identityResourceId = ''; identityName = ''; identityClientId = ''; identitySource = ''; pullIdentities = @()
@@ -334,10 +388,26 @@ function Get-PimSupportSqlJobPlan {
     try {
         if ($Mode -eq 'grant') {
             if ($SupportHours -lt 1 -or $SupportHours -gt (Get-PimSupportJitMaxHours)) { $p.problem = "the support access may last 1 to $(Get-PimSupportJitMaxHours) hours (asked: $SupportHours)"; return [pscustomobject]$p }
-            if ("$Level" -notin @('read', 'owner')) { $p.problem = "the level '$Level' is not read or owner"; return [pscustomobject]$p }
+            if ((ConvertTo-PimSupportJitLevel "$Level") -notin @('troubleshoot', 'setup')) { $p.problem = "the level '$Level' is not troubleshoot or setup"; return [pscustomobject]$p }
+            $Level = ConvertTo-PimSupportJitLevel "$Level"
             $p.untilUtc = Format-PimSupportJitUtc -Utc $NowUtc.ToUniversalTime().AddHours($SupportHours)
         }
-        if ($Mode -eq 'install' -and "$ConsentLevel" -notin @('none', 'read', 'owner')) { $p.problem = "the consent level '$ConsentLevel' is not none, read or owner"; return [pscustomobject]$p }
+        if ($Mode -eq 'install' -and -not (ConvertTo-PimSupportJitLevel "$ConsentLevel")) { $p.problem = "the consent level '$ConsentLevel' is not none, troubleshoot or setup"; return [pscustomobject]$p }
+        if ($Mode -eq 'install') { $ConsentLevel = ConvertTo-PimSupportJitLevel "$ConsentLevel" }
+        if ($Mode -eq 'consent') {
+            if ("$ConsentAction" -notin @('ensure-read-user', 'remove-user', 'open-admin', 'close-admin')) { $p.problem = "the consent action '$ConsentAction' is not ensure-read-user, remove-user, open-admin or close-admin"; return [pscustomobject]$p }
+            $ConsentLevel = ConvertTo-PimSupportJitLevel "$ConsentLevel"
+            if (-not $ConsentLevel) { $p.problem = 'the consent level is not none, troubleshoot or setup'; return [pscustomobject]$p }
+            if ($ConsentAction -eq 'open-admin') {
+                # the admin access only with consent setup, and only until an end that lies ahead -- at most 8 h (the procedure checks it again)
+                if ($ConsentLevel -ne 'setup') { $p.problem = "an admin access needs the consent level setup (it is '$ConsentLevel')"; return [pscustomobject]$p }
+                $uu = ConvertFrom-PimSupportJitUtc "$UntilUtc"
+                if (-not $uu -or $uu -le $NowUtc.ToUniversalTime()) { $p.problem = "the end of the admin access ('$UntilUtc') is not a UTC time ahead"; return [pscustomobject]$p }
+                $cap = $NowUtc.ToUniversalTime().AddHours((Get-PimSupportJitMaxHours))
+                if ($uu -gt $cap) { $uu = $cap }
+                $p.untilUtc = Format-PimSupportJitUtc -Utc $uu
+            }
+        }
         if ("$JobName" -cnotmatch '^[a-z][a-z0-9-]{0,30}[a-z0-9]$') { $p.problem = "'$JobName' is not a job name (lower-case letters, digits and '-', at most 32 characters)"; return [pscustomobject]$p }
         if ("$JobName" -ieq "$TemplateJobName") { $p.problem = "the one-time job cannot have the name of the job it is copied from ('$TemplateJobName')"; return [pscustomobject]$p }
         [void](ConvertTo-PimSupportSqlSid -AppId $SupportAppId)
@@ -364,9 +434,9 @@ function Get-PimSupportSqlJobPlan {
         $setting = Get-PimSupportSqlJobIdentitySetting
         $cid = "$SqlIdentityClientId".Trim().ToLowerInvariant(); $src = 'named with -SqlIdentityClientId'
         if (-not $cid) { $cid = "$($envMap[$setting])".Trim().ToLowerInvariant(); $src = "the identity $TemplateJobName signs in to the database with (its setting $setting)" }
-        if (-not $cid -and $Mode -in @('grant', 'close')) {
-            # 4b: the grant job may run as the ENGINE identity (-TemplateJobName <the engine job>): the signed procedures need
-            # no owner right, only EXECUTE. Its identity is the one the engine job names for itself.
+        if (-not $cid -and $Mode -eq 'close') {
+            # 4b: the CLOSE may run as the ENGINE identity (-TemplateJobName <the engine job>): the signed revoke needs no owner
+            # right, only EXECUTE. v2 (OPEN-01): the engine no longer opens anything -- a grant runs as the database job only.
             foreach ($es in @('AZURE_CLIENT_ID', 'PIM_ManagedIdentityClientId')) { if ("$($envMap[$es])".Trim()) { $cid = "$($envMap[$es])".Trim().ToLowerInvariant(); $src = "the identity $TemplateJobName runs as (its setting $es)"; break } }
         }
         $ua = ConvertTo-PimSupportSqlJobMap $(if ($Template.identity) { $Template.identity.userAssignedIdentities } else { $null })
@@ -429,6 +499,17 @@ function Get-PimSupportSqlJobPlan {
             )
         }
         if ($Mode -eq 'install') { $envList += @(@{ name = 'PIM_SUPPORTSQL_CONSENT_LEVEL'; value = "$ConsentLevel" }) }
+        if ($Mode -eq 'consent') {
+            # OPEN-01: one short run -- the action, Invardia's consent level, the end of an admin access; the job ends itself
+            $envList += @(
+                @{ name = 'PIM_SUPPORTSQL_CONSENT_ACTION'; value = "$ConsentAction" }
+                @{ name = 'PIM_SUPPORTSQL_CONSENT_LEVEL'; value = "$ConsentLevel" }
+                @{ name = 'PIM_SUPPORTSQL_JIT_UNTIL'; value = "$($p.untilUtc)" }
+                @{ name = 'PIM_SUPPORTSQL_JIT_REASON'; value = (ConvertTo-PimSupportJitText -Text $Reason -Max 120) }
+                @{ name = 'PIM_SUPPORTSQL_JIT_TICKET'; value = (ConvertTo-PimSupportJitText -Text $TicketNumber -Max 40) }
+            )
+            $timeout = 1800
+        }
         if ($Mode -eq 'grant') {
             # the job holds until the end and then takes the access back; the platform ends it at the latest an hour after
             $envList += @(
@@ -453,7 +534,7 @@ function Get-PimSupportSqlJobPlan {
             resources = @{ cpu = 0.5; memory = '1.0Gi' }
         }) }
         $tags = @{}; $tags[(Get-PimSupportSqlJobTagName)] = (Get-PimSupportSqlJobTagValue)
-        if ($p.untilUtc) { $tags[(Get-PimSupportSqlJobUntilTagName)] = $p.untilUtc }
+        if ($p.untilUtc -and $Mode -eq 'grant') { $tags[(Get-PimSupportSqlJobUntilTagName)] = $p.untilUtc }   # a consent run never holds: it ends itself
         $p.resource = [ordered]@{ location = $p.location; tags = $tags; identity = [ordered]@{ type = 'UserAssigned'; userAssignedIdentities = $uaBody }; properties = $props }
         $p.ok = $true
     } catch { $p.ok = $false; $p.problem = (("$($_.Exception.Message)" -split "`n")[0]).Trim() }
@@ -497,13 +578,15 @@ function Invoke-PimSupportSqlJobGrant {
         [int]$LogWaitSeconds = 180,
         [int]$ReadBackTries = 30,
         [scriptblock]$Sleep = { param([int]$Seconds) Start-Sleep -Seconds $Seconds },
-        [ValidateSet('standing', 'install', 'grant', 'close')][string]$Mode = 'standing',
+        [ValidateSet('standing', 'install', 'grant', 'close', 'consent')][string]$Mode = 'standing',
         [int]$SupportHours = 0,
-        [string]$Level = 'owner',
+        [string]$Level = 'setup',
         [string]$ConsentLevel = '',
         [string]$Reason = '',
         [string]$TicketNumber = '',
         [string]$OpenedBy = '',
+        [string]$ConsentAction = '',
+        [string]$UntilUtc = '',
         [datetime]$NowUtc = [datetime]::UtcNow,
         [switch]$WhatIfOnly
     )
@@ -557,7 +640,8 @@ function Invoke-PimSupportSqlJobGrant {
         return (& $finish)
     }
     $plan = Get-PimSupportSqlJobPlan -Template $tpl -TemplateJobName $TemplateJobName -JobName $JobName -SupportAppId $SupportAppId -DbUserName $DbUserName -SqlIdentityClientId $SqlIdentityClientId `
-                -Mode $Mode -SupportHours $SupportHours -Level $Level -ConsentLevel $ConsentLevel -Reason $Reason -TicketNumber $TicketNumber -OpenedBy $OpenedBy -NowUtc $NowUtc
+                -Mode $Mode -SupportHours $SupportHours -Level $Level -ConsentLevel $ConsentLevel -Reason $Reason -TicketNumber $TicketNumber -OpenedBy $OpenedBy -NowUtc $NowUtc `
+                -ConsentAction $ConsentAction -UntilUtc $UntilUtc
     $res.plan = $plan
     if (-not $plan.ok) { $problems.Add("$($plan.problem). Nothing was changed.`n  $options"); return (& $finish) }
     $sid = ConvertTo-PimSupportSqlSid -AppId $SupportAppId
@@ -603,6 +687,10 @@ function Invoke-PimSupportSqlJobGrant {
         if ($Mode -eq 'install') {
             Write-Host "What if: start it once. In the database $($plan.sqlDatabase) it records the customer's consent level '$ConsentLevel' for the Support app (SID $sid), gives the Support app's user [$DbUserName] read-only access, and installs the signed support access procedures (they take no user as a parameter); then it reads all of it back"
             Write-Host "What if: read the execution's result and its log lines, then remove the job '$JobName' and read back that it is gone"
+        } elseif ($Mode -eq 'consent') {
+            Write-Host "What if: start it once. It first takes back any time-limited support access whose end has passed"
+            Write-Host "What if: in the database $($plan.sqlDatabase) it applies '$ConsentAction' for the consent level '$ConsentLevel' Invardia gave$(if ($plan.untilUtc) { " (admin until $($plan.untilUtc))" }), then reads the support access state back"
+            Write-Host "What if: read the execution's result, then remove the job '$JobName' and read back that it is gone"
         } elseif ($Mode -eq 'close') {
             Write-Host "What if: start it once. It first takes back any time-limited support access whose end has passed"
             Write-Host "What if: in the database $($plan.sqlDatabase) it closes every open time-limited support access now: the roles the grant added are taken back, the Support app's open sessions end, the read-only access stays"
@@ -708,8 +796,9 @@ function Invoke-PimSupportSqlJobGrant {
                 } else {
                     $problems.Add("the job is running (execution $exec) but its result line could not be read within $TimeoutSeconds seconds, so the time-limited access is NOT confirmed. The job is left running: it takes back whatever it gave at $($plan.untilUtc) by itself.")
                 }
-            } elseif ($Mode -in @('install', 'close') -and $status -eq 'Succeeded' -and $r -and [bool]$r.ok) {
-                if ($Mode -eq 'install') { & $say "installed: the signed support access procedures (read back by the job: current, signed, private key removed, ALTER denied); consent '$($r.consented)'" 'Green' }
+            } elseif ($Mode -in @('install', 'close', 'consent') -and $status -eq 'Succeeded' -and $r -and [bool]$r.ok) {
+                if ($Mode -eq 'consent') { & $say "consent: '$($r.action)' applied and read back by the job (consent '$($r.consented)', read-only $($r.readOnly), admin open $($r.jitOpen)$(if ("$($r.jitUntil)") { " until $($r.jitUntil)" }))" 'Green' }
+                elseif ($Mode -eq 'install') { & $say "installed: the signed support access procedures (read back by the job: current, signed, private key removed, ALTER denied); consent '$($r.consented)'" 'Green' }
                 else { & $say "closed: $($r.closed) open support access grant(s) (only roles the grant added were taken back; $($r.sessionsEnded) session(s) ended)$(if ("$($r.state)" -eq 'not-installed') { ' -- the time-limited access is not installed here' })" 'Green' }
             } elseif ($jit -and $status -eq 'Succeeded' -and $revokeLine) {
                 & $say "the job gave the time-limited access and has already taken it back (its end has passed): $($revokeLine.Trim())" 'Green'

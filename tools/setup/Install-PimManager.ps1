@@ -123,8 +123,9 @@
   Contributor (updater, on the resource group) and Reader at the tenant root to the engine; the least-privilege SQL
   model (one database role per component: pim_web, pim_engine, pim_updater + db_ddladmin; a signed access procedure),
   the installer leaving the SQL admin group again at the end; the Invardia Support app's access when named -- at
-  every level that includes its standing access to the PIM database (member of the SQL admin group, its own database
-  user with db_owner), which stays until you switch the Support app off.
+  every level its own READ-ONLY database user (the read role pim_support_read) and the time-limited support access
+  module (admin rights only inside an open support session, at most 8 hours, at level setup). The Support app is not
+  made a member of the SQL admin group, a database owner or an owner of PIM's app registrations or groups.
   Logs: a transcript of the run in the temp folder (pim-manager-logs); its path is printed.
 
 .LINK
@@ -202,7 +203,7 @@ param(
     # test seam (PIM 100.156 B, framework 12.23 P5): param([string]$ObjectId, [string]$SqlServer, [string]$ResourceGroup) ->
     # @{ ok; released; reason } -- the signed-in installer leaves the SQL admin group at the end of the install. A real
     # install: Invoke-PimSqlAdminGroupSetupRelease (_PimSqlAdminGroup.ps1). Not run for an Invardia Support-app session
-    # (the Support app is the group's standing member) or a managed-tenant install.
+    # (PIM never removes the Support app from the group, 100.116) or a managed-tenant install.
     [scriptblock]$ReleaseSqlAdmin,
     # test seam (INSTALL-1 GAP): param([string]$Sql) -> one scalar from the PIM database, as the installer -- records the trial /
     # Pro install edition (Set-PimInstallEditionSetting). A real install: the sign-in front step's database I/O.
@@ -698,7 +699,7 @@ if ($WhatIfPreference) {
     if ($community) { Write-Host '  What if: no licence step -- the Community edition (the Core features, updates from the Community channel); a licence can be added later in PIM Manager > Settings > Licence' -ForegroundColor Yellow }
     else { Write-Host "  What if: no licence step -- the $($cfg.edition) installation is deployed without a licence (the Pro updater included); afterwards $licenceHint" -ForegroundColor Yellow }
     if ("$($cfg.supportAppId)".Trim()) {
-        Write-Host "  What if: give the Invardia Support app $($cfg.supportAppId) '$($cfg.supportAccess)' access (Grant-PimSupportAccess.ps1: at 'asbuilt' ONLY start the as-built job + read its PDF container; at 'troubleshoot' also a contained SQL user with db_datareader + VIEW DEFINITION; at 'setup' also ownership of PIM's own app registrations and groups; at EVERY level its standing access to the PIM database: membership of the SQL admin group and its own database user with the database owner role, which stays after the installation until you switch the Support app off)" -ForegroundColor Yellow
+        Write-Host "  What if: give the Invardia Support app $($cfg.supportAppId) '$($cfg.supportAccess)' access (Grant-PimSupportAccess.ps1: at EVERY level its own read-only database user in the read role pim_support_read and the time-limited support access module, with the level as the consent; 'troubleshoot' and 'asbuilt' read only, 'setup' admin rights only inside an open support session of at most 8 hours; every level also lets it start the as-built job and read its PDF container. It is not made a member of the SQL admin group, a database owner or an owner of PIM's app registrations or groups)" -ForegroundColor Yellow
     }
     if ($cfg.privateNetwork) { Write-Host '  What if: private network -- when this resource group already holds a PUBLIC PIM Manager, it is first converted to the private network (Convert-PimToPrivate.ps1 underneath, data kept); SQL and the registry get NO public access and no firewall rule; the network hand-off is printed at the end' -ForegroundColor Yellow }
     Write-Host '  What if: run the end-of-install check (Confirm-PimInstall.ps1). It REPAIRS what it can, so it is not run under -WhatIf -- run without -WhatIf to apply.' -ForegroundColor Yellow
@@ -825,10 +826,11 @@ if (-not $community) {
 if ($community) { Emit 'licence' 'skipped' 'the Community edition has no licence -- a licence can be added later in PIM Manager > Settings > Licence' }
 else { Emit 'licence' 'warning' "no licence yet: $licenceHint$editionNote" 'After the installation:' 'PIM Manager > Settings > Licence' }
 
-# PIM REQUIREMENTS 100.116 (framework 4.1b): a named Support app also gets its STANDING database access here -- member of
-# the SQL admin group + its own database user (from its client id) in db_owner -- while this install can still reach the
-# database (the setup firewall rule is closed by the check below). Grant-PimSupportAccess does it at every level; the
-# check's line 'support-sql' then proves it. No Support app named: nothing is created, and this one line says so.
+# OPEN-01 (framework SECAUDIT-1a, Invardia audit item 3): a named Support app gets its READ-ONLY database access here --
+# its own database user (from its client id) in pim_support_read, made by the time-limited support access module with
+# -SupportAccess as the consent -- while this install can still reach the database (the setup firewall rule is closed by
+# the check below). Never a membership of the SQL admin group, never db_owner, never an owner entry. The check's line
+# 'support-sql' then proves it. No Support app named: nothing is created, and this one line says so.
 if (-not "$($cfg.supportAppId)".Trim()) { Emit 'support-app-access' 'skipped' 'no Invardia Support app was named -- no support access and no database user for Invardia support were created' }
 elseif ($done.Contains('support-app-access')) { Emit 'support-app-access' 'skipped' 'already granted (resume)' }
 else {
@@ -838,8 +840,8 @@ else {
     if (-not $GrantSupport) { $GrantSupport = { param([hashtable]$A) & (Join-Path $here 'Grant-PimSupportAccess.ps1') @A | Out-Host; @{ ok = (-not $LASTEXITCODE) } } }
     $gr = $null
     try { $gr = & $GrantSupport @{ AppId = $cfg.supportAppId; Level = $cfg.supportAccess; TenantId = $cfg.tenantId; SubscriptionId = $cfg.subscriptionId; ResourceGroup = $names.resourceGroup; SqlServer = $names.sqlFqdn } } catch { $gr = $null }
-    if ($gr -and $gr.ok) { Emit 'support-app-access' 'ok' "the Invardia Support app has '$($cfg.supportAccess)' access, and standing access to the PIM database: it is a member of the SQL admin group and has its own database user with the database owner role. This stays after the installation; you end it by switching the Invardia Support app off in Microsoft Entra ID"; Mark 'support-app-access' }
-    else { Emit 'support-app-access' 'warning' 'the Invardia Support app could not be given its access with your rights' 'Ask a Privileged Role Administrator to run:' $grantCmd }
+    if ($gr -and $gr.ok) { Emit 'support-app-access' 'ok' "the Invardia Support app has '$($cfg.supportAccess)' access: its own read-only database user$(if ("$($cfg.supportAccess)" -eq 'setup') { ', and admin rights only inside an open support session of at most 8 hours' }). It is not a member of the SQL admin group and not a database owner. You end it by switching the Invardia Support app off in Microsoft Entra ID"; Mark 'support-app-access' }
+    else { Emit 'support-app-access' 'warning' 'the Invardia Support app could not be given its access with your rights' 'Ask a member of the SQL admin group (a database owner) to run, from the release folder:' $grantCmd }
 }
 
 # ================================================================== 4a. GUIDED-INSTALL-FRONT: the sign-in front
@@ -920,8 +922,9 @@ else { Emit 'verify-install' 'ok' "$($vr.sentence)" -Detail ([ordered]@{ lines =
 
 # PIM 100.156 B (framework 12.23 P5): the installer was a member of the SQL admin group only for the length of the install
 # (the deploy keeps it -- -SkipInstallVerify -- because the licence, support and verify steps above still needed SQL). Now
-# it leaves the group again, read back; the standing member is the Invardia Support app. Never fatal, never an event of its
-# own (the install is complete either way); not for a Support-app session, which IS that standing member.
+# it leaves the group again, read back. Never fatal, never an event of its own (the install is complete either way); not
+# for a Support-app session (-ViaSupportApp): PIM never removes the Support app from the group (100.116) -- recorded as an
+# OPEN-01 follow-up in docs/REQUIREMENTS.md, unchanged here.
 if ("$($script:who.objectId)".Trim() -and -not "$($script:who.supportAppId)".Trim()) {
     $relR = $null
     try {

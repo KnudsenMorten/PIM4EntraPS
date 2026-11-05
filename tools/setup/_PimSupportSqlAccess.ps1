@@ -6,6 +6,12 @@
   the SQL admin group. Shared by the install (Grant-PimSupportAccess.ps1), the one-time script for existing installs
   (Grant-PimSupportSqlAccess.ps1) and the end-of-install check (Confirm-PimInstall.ps1).
 
+  OPEN-01 (framework SECAUDIT-1a, 2026-11-05): a NEW install no longer uses Get-PimSupportSqlRoleName -- the install
+  (Grant-PimSupportAccess.ps1) and its check (Confirm-PimInstall.ps1) use the read role pim_support_read
+  (PIM-SupportJit.ps1 Get-PimSupportJitReadOnlyRole) and never add the SQL admin group membership. db_owner below is the
+  role of the pre-OPEN-01 standing grant, still used ONLY by the one-time script for an existing install and the job's
+  'standing' mode, until OPEN-01 replaces it per install.
+
 .DESCRIPTION
   Why a database user and not only the group: membership of the SQL admin group has not given an APPLICATION a database
   sign-in on the servers this was measured on ("Login failed for user '<token-identified principal>'" with the group in
@@ -42,10 +48,11 @@ function ConvertTo-PimSupportSqlSid {
 }
 
 function Test-PimSupportSqlNames {
-    # PURE. Throws on a user or role name that is not safe to put into a statement.
+    # PURE. Throws on a user or role name that is not safe to put into a statement: a fixed database role, or the support
+    # read role pim_support_read (OPEN-01) -- nothing else.
     param([string]$DbUserName, [string]$Role)
     if ("$DbUserName" -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._@-]{0,127}$') { throw "'$DbUserName' is not a safe database user name." }
-    if ("$Role" -cnotmatch '^db_[a-z]{3,30}$') { throw "'$Role' is not a fixed database role." }
+    if ("$Role" -cnotmatch '^(db_[a-z]{3,30}|pim_support_read)$') { throw "'$Role' is not a fixed database role or the support read role." }
 }
 
 function Get-PimSupportSqlUserSql {

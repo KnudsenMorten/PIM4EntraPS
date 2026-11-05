@@ -193,6 +193,8 @@
   "PUT /api/settings/policy-template-defaults": "Set the default policy template for each kind of policy.",
   "GET /api/settings/portal-branding": "The company name and contact address the access request portal shows.",
   "PUT /api/settings/portal-branding": "Set the company name and contact address the access request portal shows.",
+  "GET /api/template-file/export": "This installation's departments, groups, delegations, admin accounts and policy-template links as one template file.",
+  "POST /api/template-file/import": "Check a template file, show what it would create and change, and stage its rows for review.",
   "GET /api/template-state": "Which permission templates are switched off.",
   "PUT /api/template-state": "Switch a permission template on or off.",
   "GET /api/templates": "The permission templates and what importing each would add.",

@@ -622,10 +622,13 @@ function Get-PimSetupFacts {
     $perm = & $rd $script:PimSetupPermissionSnapshotSetting
     $gs = & $rd 'GetStartedStatus'
     $readOk = $readOk -and -not $script:PimSetupReadFailed
+    # OPEN-01: the UPDATER's last consent decision (information only here -- the engine never applies consent)
+    $sc = $null; try { $sc = & $GetSetting 'SupportConsentState'; if ($sc -is [string] -and "$sc".Trim().StartsWith('{')) { $sc = "$sc" | ConvertFrom-Json } } catch { $sc = $null }
     return [pscustomobject]@{
         NowUtc = $NowUtc.ToUniversalTime(); StoreReadable = $readOk; UpdateState = $us; EnvRing = "$EnvRing"; EnvHold = "$EnvHold"
         KeyPresent = [bool]("$InstallKey".Trim()); License = $License; ProHere = $ProHere; Mail = $mail; AlertRecipients = $recips
         Permissions = $perm; Runs = @($Runs); GetStarted = $gs
         EngineFailures = @($fails | Where-Object { $_ }); MspRole = "$MspRole"; DownlinkOn = $DownlinkOn
+        SupportConsentState = $sc
     }
 }

@@ -11,7 +11,7 @@
   you -- the customer -- start it.
 
   What it does, in order:
-    1. Reads the installation's own database setup job (ca-pim-dbinit): its environment, its image, the SQL server and
+    1. Reads the installation's own database setup job (ca-pim-dbinit, else caj-pim-dbinit): its environment, its image, the SQL server and
        database it names, and the user-assigned identity it signs in to the database with. That identity is the SQL
        server's administrator (or a member of the SQL admin group); it is used as it is. No role, no group membership
        and no permission is given to any identity. When the installation has no such job or identity, the script
@@ -28,11 +28,11 @@
     6. ALWAYS, also after a failed step: removes the one-time job and reads back that it is gone.
 
   Time-limited access, in three steps:
-    -InstallSupportAccess -ConsentLevel none|read|owner  ONCE per installation (an owner-level step): records the level
+    -InstallSupportAccess -ConsentLevel none|troubleshoot|setup  ONCE per installation (an owner-level step): records the level
         you consent to, gives the Support app's database user read-only access, and installs the signed procedures that
         give and take back the time-limited access. They take no user as a parameter: the Support app and your consent
         level are read from a table only a database owner can change.
-    -SupportHours 1-24 [-Level owner|read]  opens it: the level given is the LOWER of the level asked and the level you
+    -SupportHours 1-8 [-Level setup|troubleshoot]  opens it: the level given is the LOWER of the level asked and the level you
         consented to; for the database owner role the end is recorded with the role. The job stays and takes the role
         back at the end by itself, then ends the Support app's open database sessions; the read-only access stays.
         Nothing is taken back before the end, and nothing else has to happen for the access to end. A role the Support
@@ -93,16 +93,16 @@ param(
     # only when the template job does not name its database identity itself: the client id of a user-assigned identity it already carries
     [ValidatePattern('^$|^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$SqlIdentityClientId = '',
     [ValidateRange(60, 3600)][int]$TimeoutSeconds = 600,
-    # time-limited access: the database owner role for this many hours (1-24), taken back by the job at the end; 0 = the standing access
-    [ValidateRange(0, 24)][int]$SupportHours = 0,
-    # with -SupportHours: the level asked (the level given is the lower of this and the consented level)
-    [ValidateSet('owner', 'read')][string]$Level = 'owner',
+    # time-limited access: the database owner role for this many hours (1-8), taken back by the job at the end; 0 = the standing access
+    [ValidateRange(0, 8)][int]$SupportHours = 0,
+    # with -SupportHours: the level asked (the level given is the lower of this and the consented level); v1 owner / read = setup / troubleshoot
+    [ValidateSet('setup', 'troubleshoot', 'owner', 'read')][string]$Level = 'setup',
     # with -SupportHours: why the access is opened, and the support ticket it belongs to (recorded with the end)
     [ValidatePattern('^[A-Za-z0-9 ._@:#/()+,-]{0,120}$')][string]$Reason = '',
     [ValidatePattern('^[A-Za-z0-9._#-]{0,40}$')][string]$TicketNumber = '',
     # once per installation: record the consent level and install the time-limited support access
     [switch]$InstallSupportAccess,
-    [ValidateSet('', 'none', 'read', 'owner')][string]$ConsentLevel = '',
+    [ValidateSet('', 'none', 'troubleshoot', 'setup', 'read', 'owner')][string]$ConsentLevel = '',   # v1 read / owner = troubleshoot / setup
     # end every open time-limited support access now
     [switch]$CloseSupportAccess,
     # --- test seams (tests/Test-PimSupportSqlJob.ps1); omit them for a real run ---
@@ -183,7 +183,7 @@ if (-not $Logs) { $Logs = { param([string]$WorkspaceId, [string]$Execution) Get-
 $steps = @(@($InstallSupportAccess, $CloseSupportAccess, ($SupportHours -gt 0)) | Where-Object { $_ })
 if ($steps.Count -gt 1) { throw 'Invoke-PimSupportSqlAccessJob: -InstallSupportAccess, -SupportHours and -CloseSupportAccess are separate steps -- pass one. Nothing was touched.' }
 $mode = if ($InstallSupportAccess) { 'install' } elseif ($CloseSupportAccess) { 'close' } elseif ($SupportHours -gt 0) { 'grant' } else { 'standing' }
-if ($mode -eq 'install' -and -not $ConsentLevel) { throw 'Invoke-PimSupportSqlAccessJob: -InstallSupportAccess needs -ConsentLevel none, read or owner (the level the customer consents to). Nothing was touched.' }
+if ($mode -eq 'install' -and -not $ConsentLevel) { throw 'Invoke-PimSupportSqlAccessJob: -InstallSupportAccess needs -ConsentLevel none, troubleshoot or setup (the level the customer consents to). Nothing was touched.' }
 if ($mode -eq 'grant') { Write-Host "  time-limited: level '$Level' for $SupportHours hour(s) (never above the consented level), taken back by the job at the end" -ForegroundColor DarkGray }
 $openedBy = if ($sessionApp) { "Invardia Support app $sessionApp" } elseif ($who -and "$($who.userName)".Trim()) { "$($who.userName)".Trim() } else { '' }
 $what = switch ($mode) {
@@ -193,6 +193,17 @@ $what = switch ($mode) {
     default   { "create, run once and remove the job '$JobName', which gives the Invardia Support app $app its database user in db_owner from inside the installation" }
 }
 $whatIfOnly = -not $PSCmdlet.ShouldProcess("resource group $ResourceGroup", $what)
+# OPEN-06: the installation's database job is ca-pim-dbinit (today's name) or caj-pim-dbinit (an installation made with the
+# new names, or created by the updater there). Not named with -TemplateJobName: the first of the two that exists is read.
+if (-not $PSBoundParameters.ContainsKey('TemplateJobName')) {
+    foreach ($tn in @('ca-pim-dbinit', 'caj-pim-dbinit')) {
+        $tFound = $null
+        try { $tFound = & $Arm 'GET' "/subscriptions/$sub/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/${tn}?api-version=2024-03-01" $null } catch { $tFound = $null }
+        if ($tFound) { $TemplateJobName = $tn; break }
+    }
+    if ($JobName -ieq $TemplateJobName) { throw "Invoke-PimSupportSqlAccessJob: -JobName and -TemplateJobName are the same ('$JobName') -- the one-time job is created and removed, the installation's own job is only read. Nothing was touched." }
+    Write-Host "  the installation's database job: $TemplateJobName" -ForegroundColor DarkGray
+}
 $ja = @{ Arm = $Arm; Graph = $Graph; Logs = $Logs; SubscriptionId = $sub; ResourceGroup = $ResourceGroup; SupportAppId = $app; TemplateJobName = $TemplateJobName; JobName = $JobName
          DbUserName = $DbUserName; SqlIdentityClientId = $SqlIdentityClientId; TimeoutSeconds = $TimeoutSeconds; PollSeconds = $PollSeconds; LogWaitSeconds = $LogWaitSeconds; WhatIfOnly = $whatIfOnly
          Mode = $mode; SupportHours = $SupportHours; Level = $Level; ConsentLevel = $ConsentLevel; Reason = $Reason; TicketNumber = $TicketNumber; OpenedBy = $openedBy }

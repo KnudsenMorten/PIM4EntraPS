@@ -691,9 +691,9 @@ function Get-PimProFeatureStates {
 
 function Test-PimFeatureAvailable {
     # The combined gate side-effecting code calls: ENABLED *and* LICENSED. Core
-    # features are always available. -SuperAdmin bypasses the LICENSE gate only
-    # (never the kill switch -- a deliberately-off feature stays off even for an
-    # admin, so a disabled integration performs no writes). -Quiet suppresses the
+    # features are always available. -SuperAdmin: a SuperAdmin's own action counts as
+    # licensed; the kill switch always applies -- a feature switched off stays off for
+    # every role, so a disabled integration performs no writes. -Quiet suppresses the
     # one-line "skipped" log. Returns $true = the feature may run.
     # REQ-Y: a license='pro' entry ALSO needs a Pro licence (Test-PimFeatureProLicence) -- checked FIRST, for every tier,
     # with no SuperAdmin bypass. So every engine scope, job and sweep that already asks this gate is inert without one.

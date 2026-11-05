@@ -72,7 +72,7 @@ function ConvertFrom-PaB64Url {
     [Convert]::FromBase64String($s)
 }
 
-# The claims of a JWT (no signature check -- Graph checks it; we only read tid/upn/wids/scp/roles/exp). $null when the
+# The claims of a JWT (claims read only -- Graph validates the token; tid/upn/wids/scp/roles/exp are read). $null when the
 # string is not a readable JWT (an opaque token, or garbage).
 function ConvertFrom-PaJwtClaims {
     param([AllowEmptyString()][string]$Token)

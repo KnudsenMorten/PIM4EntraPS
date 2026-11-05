@@ -36,6 +36,9 @@ if ($PSScriptRoot) {
     # their customer-ready solutions). Loaded only when this process does not have it yet.
     $__pimFailCat = Join-Path $PSScriptRoot 'PIM-FailureCatalog.ps1'
     if ((Test-Path -LiteralPath $__pimFailCat) -and -not (Get-Command Get-PimFailureClassification -ErrorAction SilentlyContinue)) { . $__pimFailCat }
+    # PIM 100.70 / framework 8.14: the name a mail SHOWS (Invardia's cached name, else the configured one) -- display only.
+    $__pimEnvName = Join-Path $PSScriptRoot 'PIM-EnvironmentName.ps1'
+    if ((Test-Path -LiteralPath $__pimEnvName) -and -not (Get-Command Get-PimEnvironmentDisplayName -ErrorAction SilentlyContinue)) { . $__pimEnvName }
 }
 
 # --- EMAIL CONTROLS authority (the GUI-state == actual-behavior fix) -----------
@@ -250,14 +253,24 @@ function Get-PimMailSendDenialMessage {
 function Get-PimMailEnvironmentInfo {
     <#
       MAIL-1: what names THIS environment in a mail -- @{ name; tenantName; tenantId; version; portal }. name = the
-      environment name the Manager header shows (pim.Settings 'EnvironmentName', or $global:PIM_EnvironmentName), else the
+      environment name ($global:PIM_EnvironmentName, else Get-PimEnvironmentDisplayName: Invardia's cached name, else
+      pim.Settings 'EnvironmentName' -- PIM 100.70), else the
       tenant name, else the tenant id -- never "this tenant". Read once per process; never throws (a mail is never blocked).
     #>
     param([string]$PortalBase = '')
     if (-not $script:PimMailEnvInfo) {
         $name = "$($global:PIM_EnvironmentName)".Trim()
         if (-not $name -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) {
-            try { $cs = Get-PimSqlSettingsConnectionString; if ($cs) { $v = Get-PimSqlSetting -ConnectionString $cs -Name 'EnvironmentName'; if ($v -is [string]) { $name = $v.Trim() } elseif ($v -and $v.PSObject.Properties['name']) { $name = "$($v.name)".Trim() } } } catch { }
+            # PIM 100.70 / framework 8.14: Invardia's cached name (pim.Settings 'InvardiaEnvironment') first, else the configured
+            # 'EnvironmentName' -- Get-PimEnvironmentDisplayName; DISPLAY only (the subject), never a key.
+            try {
+                $cs = Get-PimSqlSettingsConnectionString
+                if ($cs) {
+                    $envGet = { param($n) Get-PimSqlSetting -ConnectionString $cs -Name $n }
+                    if (Get-Command Get-PimEnvironmentDisplayName -ErrorAction SilentlyContinue) { $name = "$(Get-PimEnvironmentDisplayName -GetSetting $envGet)".Trim() }
+                    else { $v = & $envGet 'EnvironmentName'; if ($v -is [string]) { $name = $v.Trim() } elseif ($v -and $v.PSObject.Properties['name']) { $name = "$($v.name)".Trim() } }
+                }
+            } catch { }
         }
         $tn = "$($global:PIM_TenantName)".Trim(); $tid = "$($global:PIM_TenantId)".Trim()
         $ver = ''

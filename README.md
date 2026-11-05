@@ -43,51 +43,16 @@ PIM Manager gives you **one governed model in your own tenant**:
 
 You need **PowerShell 7** and an account that is **Owner of the Azure subscription** and **Privileged Role
 Administrator** in Entra ID. You sign in in your browser: no app secret, no certificate, no Azure CLI and no PowerShell
-modules. Line 1 downloads the installer (Community: from the public release on GitHub; Pro and trial: from Invardia),
-line 2 runs it with your values -- there is
-no key, licence or settings file in the command. Line 2 carries only your tenant, your subscription, the region and what
-you change from the defaults: a default is never repeated, and an option you do not use (for example the private network
-values) is not in the line. Open a new PowerShell 7 window for each.
-
-**1. The most common: Community, browser sign-in, everything else defaulted.** Start here.
+modules. Open a new PowerShell 7 window and run the two lines: line 1 downloads the installer from the public release on
+GitHub, line 2 runs it with your tenant and subscription. There is no key, licence or settings file in the command.
 
 ```powershell
 Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
 .\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>'
 ```
 
-**2. See the plan first.** Checks your sign-in, rights, subscription and region and lists every step. Changes nothing.
-
-```powershell
-Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
-.\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -WhatIf
-```
-
-**3. Your own region, resource group and admins.** When you have a naming standard or want the alerts to go to a team
-mailbox.
-
-```powershell
-Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
-.\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -Location westeurope `
-    -ResourceGroup rg-pim-manager -SuperAdmins 'admin1@contoso.com','admin2@contoso.com' -AlertRecipients 'pim-alerts@contoso.com'
-```
-
-**4. Pro, or a free 60-day Pro trial.** The same two lines, with the installer from Invardia instead of GitHub
-([start a trial](https://invardia.com/trial/) first). The installation then asks Invardia for its licence by itself: a
-trial arrives within minutes, a Pro licence once Invardia has confirmed your order. Nothing to paste; the Pro features
-switch on with the licence.
-
-```powershell
-Invoke-WebRequest https://invardia.com/support/pim/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
-.\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>'
-```
-
-**5. It stopped -- carry on.** Fix what the installer named, then run the same command with `-Resume`: finished steps
-are skipped.
-
-```powershell
-.\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -Resume
-```
+If the installer stops, fix what it names and run line 2 again with `-Resume`: finished steps are skipped. Pro and the
+free 60-day Pro trial install from Invardia: take the two lines from [invardia.com](https://invardia.com/products/pim-manager/).
 
 Several tenants (MSP) is Pro MSP: see [Pro MSP](https://invardia.com/products/pim-manager/). Every parameter, what the
 installer creates and the rights it grants: **[Setup](https://invardia.com/docs/pim-manager/setup/)**.

@@ -219,6 +219,9 @@ deployment is a supported choice) and no credentials lying around.
   now also registers its API, gives the broker its send right on your notification mailbox only, and tells PIM where
   the broker is. All three are read back and reported. If a step lacks what it needs, it prints the exact command
   instead.
+- **No leftover sign-in secret.** ✅ 2026-11-04 — Once the sign-in front is live, the installation removes the old Easy
+  Auth client secret from the PIM Manager app registration and reads the result back. An installation still on Easy
+  Auth keeps its secret until it moves.
 
 ## 4. MSP
 - **Support sees where your environment lives.** ✅ 2026-10-10 — With an install key, the heartbeat names the
@@ -610,6 +613,9 @@ deployment is a supported choice) and no credentials lying around.
 - **Import roles, don't type them.** The Manager reads the live list of available roles for
   a service so you pick from real roles instead of risking typos, diffs them against what
   you already have, and lets a super-admin confirm before importing.
+- **Only your PIM groups, nowhere else.** ✅ 2026-11-04 — PIM Manager compares, reports, alerts on and changes only the
+  groups its definitions name. Your tenant's other groups and their owners never appear in drift, alerts or pages.
+  The one place PIM-enabled groups outside PIM Manager show is the tenant-wide delegations view.
 
 ## 8. Discovery
 - **New Power BI workspaces become ready-to-delegate access groups.** As workspaces appear,

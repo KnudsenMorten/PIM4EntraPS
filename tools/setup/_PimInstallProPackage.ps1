@@ -99,7 +99,7 @@ function Invoke-PimInstallProHttp {
 }
 
 function Get-PimInstallJwtClaims {
-    # PURE. The payload claims of a JWT (no signature check -- only to ASSERT the tenant before it is used), or $null.
+    # PURE. The payload claims of a JWT (claims read only, to ASSERT the tenant before it is used; the resource validates the token), or $null.
     param([string]$Token)
     try { $p = "$Token".Split('.')[1].Replace('-', '+').Replace('_', '/'); while ($p.Length % 4) { $p += '=' }; return ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json) } catch { return $null }
 }

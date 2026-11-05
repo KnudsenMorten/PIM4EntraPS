@@ -351,6 +351,7 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\PIM4EntraPS
 . "$solRoot\engine\_shared\PIM-ArmContainerApps.ps1"
 . "$solRoot\engine\_shared\PIM-SqlStore.ps1"
 . "$solRoot\engine\_shared\PIM-TenantSizing.ps1"   # 100.31 the tick's size for this tenant (pure; Get-PimContainerJobResources)
+. "$solRoot\engine\_shared\PIM-DbInitJob.ps1"      # OPEN-06 the database job's ONE definition (Get-PimDbInitJobSpec), shared with the updater
 # §84 P1: the cron check is Test-PimJobCron (_PimSetupShared.ps1) -- this used to dot-source PIM-DownlinkJob.ps1, an MSP
 # (Pro) file, for one 5-field check, so a Community copy without the MSP code could not run setup.
 
@@ -943,42 +944,19 @@ function Invoke-PimDbInitJob {
     if ($useRegistryIdentity -and "$RegistryIdentityResourceId".Trim() -and ("$RegistryIdentityResourceId".Trim() -ne "$SqlAdminIdentityResourceId".Trim())) {
         $uaIds += "$RegistryIdentityResourceId".Trim()
     }
-    $dbIdentity = @{ type = 'SystemAssigned' }
-    if ($uaIds.Count) {
-        # 🪤 'SystemAssigned,UserAssigned' is ONE value (the YAML era lost the second half to flow-mapping syntax and ARM
-        # refused the identity ids with InvalidResourceIdentityType). As a hashtable value it cannot split.
-        $uaMap = [ordered]@{}; foreach ($u in $uaIds) { $uaMap[$u] = @{} }
-        $dbIdentity = @{ type = 'SystemAssigned,UserAssigned'; userAssignedIdentities = $uaMap }
-    }
     $regIdent = $(if ($useRegistryIdentity -and "$RegistryIdentityResourceId".Trim()) { "$RegistryIdentityResourceId".Trim() } else { 'system' })
     # Values travel as JSON strings in the ARM body -- PIM_DBINIT_PRINCIPALS is a JSON array, and it stays one string
     # value (the YAML era had to quote + escape it so the document did not parse it as flow syntax).
-    $dbEnvList = @($envVars | ForEach-Object { $kv = "$_" -split '=', 2; @{ name = $kv[0]; value = "$($kv[1])" } })
-
-    $dbProps = @{
-        environmentId = $envId
-        configuration = @{
-            triggerType         = 'Manual'
-            replicaTimeout      = 604800   # framework 12.24 JOB-RUN-LIMIT: 7 days
-            replicaRetryLimit   = 0
-            manualTriggerConfig = @{ parallelism = 1; replicaCompletionCount = 1 }
-            registries          = @(@{ server = "$AcrName.azurecr.io"; identity = $regIdent })
-        }
-        template = @{
-            containers = @(@{
-                name      = $DbInitJobName
-                image     = $image
-                command   = @('pwsh')
-                args      = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $entry)
-                env       = @($dbEnvList)
-                resources = @{ cpu = 0.5; memory = '1.0Gi' }
-            })
-        }
-    }
-    $dbResource = @{ location = $location; properties = $dbProps }
-    # The identity block belongs to CREATE only -- an update carrying an identity block failed as
-    # "Request requires identities to be assigned" (Deploy-PimUpdateJob, third install).
-    if (-not "$exists".Trim()) { $dbResource.identity = $dbIdentity }
+    $dbEnvMap = [ordered]@{}
+    foreach ($ev in @($envVars)) { $kv = "$ev" -split '=', 2; $dbEnvMap[$kv[0]] = "$($kv[1])" }
+    # OPEN-06: the ONE definition of the database job (engine/_shared/PIM-DbInitJob.ps1), shared with the in-cloud updater
+    # that creates the job on installs that do not have it: command + args as ARM arrays, manual trigger, 7 days, the
+    # identity as ONE 'SystemAssigned,UserAssigned' value on CREATE only (an update carrying an identity block failed as
+    # "Request requires identities to be assigned"). -SetupManagerAccess: only setup may name SuperAdmins on it.
+    $dbSpec = Get-PimDbInitJobSpec -JobName $DbInitJobName -Image $image -EnvironmentId $envId -Location $location -RegistryServer "$AcrName.azurecr.io" `
+                  -RegistryIdentity $regIdent -Env $dbEnvMap -Exists:([bool]"$exists".Trim()) -IdentityResourceIds $uaIds -EntryPath $entry -SetupManagerAccess
+    if (-not $dbSpec.ok) { throw "the bootstrap job '$DbInitJobName' definition was refused: $($dbSpec.reason)" }
+    $dbResource = $dbSpec.resource
     try {
         if ("$exists".Trim()) { [void](Set-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName -Resource $dbResource) }
         else                  { [void](Set-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName -Resource $dbResource -Create) }

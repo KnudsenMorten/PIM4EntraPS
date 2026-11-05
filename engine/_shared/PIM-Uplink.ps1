@@ -1555,6 +1555,132 @@ function Get-PimUplinkEnvironmentId {
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
+# PIM 100.70 / framework 8.14 ENV-NAME-MASTER: Invardia is the master of the environment name a product SHOWS. The uplink
+# job reads it with the install key once per due IDENTIFIED heartbeat and caches it in pim.Settings 'InvardiaEnvironment';
+# Get-PimEnvironmentDisplayName (PIM-EnvironmentName.ps1) prefers it for display. A name is never a key.
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimInvardiaEnvironmentRoute { <# PURE. The route on the uplink host (a literal). #> return '/api/enrollments/environment' }
+function Get-PimInvardiaEnvironmentKeyHeader { <# PURE. The header this route reads the install key from (NOT X-Ait-Uplink-Code: that answered 401). #> return 'X-Invardia-Install-Key' }
+function Get-PimInvardiaEnvironmentSetting { <# PURE. The pim.Settings name of the cache (a literal). #> return 'InvardiaEnvironment' }
+
+function Test-PimUplinkEnvironmentNameOn {
+    # PURE. PIM_UPLINK_ENVNAME: ON by default (an additive read, nothing is sent); 0 / false / off / no = off.
+    param([AllowNull()][string]$Value = $env:PIM_UPLINK_ENVNAME)
+    return -not [bool]("$Value".Trim() -match '^(?i)(0|false|off|no)$')
+}
+
+function Get-PimInvardiaEnvironmentUrl {
+    <# PURE. https://<the uplink endpoint's host>/api/enrollments/environment; '' when the endpoint is not https. #>
+    param([AllowNull()][string]$Endpoint)
+    $ep = "$Endpoint".Trim()
+    if ($ep -notmatch '^https://') { return '' }
+    try { $u = [uri]$ep; if (-not $u.IsAbsoluteUri -or $u.Scheme -ne 'https' -or -not $u.Authority) { return '' }; return "https://$($u.Authority)$(Get-PimInvardiaEnvironmentRoute)" } catch { return '' }
+}
+
+function ConvertTo-PimInvardiaEnvironmentText {
+    <# PURE. One value from Invardia's answer: the key never in it, control characters / angle brackets out, at most -Max. #>
+    param([AllowNull()][object]$Value, [AllowNull()][string]$Key = '', [int]$Max = 120)
+    if ($null -eq $Value) { return '' }
+    if ($Value -isnot [string]) {
+        # customer / managedBy may come as { name } (the framework shape) or as plain text
+        $nm = $null; try { if ($Value -is [System.Collections.IDictionary]) { if ($Value.Contains('name')) { $nm = $Value['name'] } } elseif ($Value.PSObject.Properties['name']) { $nm = $Value.name } } catch { }
+        if ($nm -isnot [string]) { if ($Value -is [ValueType]) { $Value = "$Value" } else { return '' } } else { $Value = $nm }
+    }
+    $s = "$Value"
+    $k = "$Key".Trim(); if ($k) { $s = $s.Replace($k, '[redacted]') }
+    $s = ($s -replace '[\x00-\x1F\x7F<>]', ' ' -replace '\s+', ' ').Trim()
+    if ($Max -gt 0 -and $s.Length -gt $Max) { $s = $s.Substring(0, $Max).Trim() }
+    return $s
+}
+
+function Invoke-PimInvardiaEnvironmentHttp {
+    <#
+      The real GET (the default transport): one Invoke-WebRequest, no retry, no redirect, -TimeoutSec. @{ Status; Body };
+      an HTTP error answer = its status with an empty body; no answer at all (timeout, DNS) = throws (the caller catches).
+    #>
+    param([Parameter(Mandatory)][string]$Uri, [Parameter(Mandatory)][hashtable]$Headers, [int]$TimeoutSec = 15)
+    if ($Uri -notmatch '^https://') { throw 'refused: https only' }
+    try {
+        $w = Microsoft.PowerShell.Utility\Invoke-WebRequest -Method GET -Uri $Uri -Headers $Headers -TimeoutSec $TimeoutSec -UseBasicParsing -MaximumRedirection 0 -ErrorAction Stop
+        return @{ Status = [int]$w.StatusCode; Body = "$($w.Content)" }
+    } catch {
+        $sc = 0; try { if ($_.Exception.Response) { $sc = [int]$_.Exception.Response.StatusCode } } catch { $sc = 0 }
+        if ($sc -gt 0) { return @{ Status = $sc; Body = '' } }
+        throw
+    }
+}
+
+function Get-PimInvardiaEnvironment {
+    <#
+      PIM 100.70 / framework 8.14: GET https://<uplink host>/api/enrollments/environment with the install key in the header
+      X-Invardia-Install-Key -> { environmentId, environmentName, kind, handle, tenantId, customer, managedBy, displayName }.
+      Returns @{ Ok; Status; Value (displayName, environmentName, customer, managedBy, kind, handle -- capped + stripped);
+      Reason (one line; the key is never in it) }. https only; no key = no call. Never throws.
+      -Transport: { param($Uri, $Headers, $TimeoutSec) } -> @{ Status = <int>; Body = <text> } (a test seam; default = one
+      Invoke-WebRequest, 15 s, no retry).
+    #>
+    param([AllowNull()][string]$Key, [AllowNull()][string]$Endpoint, [AllowNull()][scriptblock]$Transport = $null, [int]$TimeoutSec = 15)
+    $k = "$Key".Trim()
+    if (-not $k) { return @{ Ok = $false; Status = 0; Value = $null; Reason = 'no install key -- not read' } }
+    $url = Get-PimInvardiaEnvironmentUrl -Endpoint $Endpoint
+    if (-not $url) { return @{ Ok = $false; Status = 0; Value = $null; Reason = 'refused: the uplink endpoint must be https' } }
+    $hdr = @{ (Get-PimInvardiaEnvironmentKeyHeader) = $k; Accept = 'application/json' }
+    $xport = if ($Transport) { $Transport } else { { param($Uri, $Headers, $TimeoutSec) Invoke-PimInvardiaEnvironmentHttp -Uri $Uri -Headers $Headers -TimeoutSec $TimeoutSec } }
+    $r = $null
+    try { $r = & $xport $url $hdr $TimeoutSec }
+    catch { return @{ Ok = $false; Status = 0; Value = $null; Reason = "failed: $(ConvertTo-PimInvardiaEnvironmentText -Value "$($_.Exception.Message)" -Key $k -Max 200)" } }
+    $status = 0; try { $status = [int]$(if ($r -is [System.Collections.IDictionary]) { $r['Status'] } else { $r.Status }) } catch { $status = 0 }
+    if ($status -lt 200 -or $status -ge 300) { return @{ Ok = $false; Status = $status; Value = $null; Reason = "HTTP $status" } }
+    $raw = $(if ($r -is [System.Collections.IDictionary]) { $r['Body'] } else { $r.Body })
+    $b = $null
+    try { if ($raw -is [string]) { if ($raw.Trim().StartsWith('{')) { $b = $raw | ConvertFrom-Json -ErrorAction Stop } } elseif ($null -ne $raw) { $b = $raw } } catch { $b = $null }
+    if ($null -eq $b) { return @{ Ok = $false; Status = $status; Value = $null; Reason = "HTTP $status without a JSON answer" } }
+    $f = { param($n) $v = $null; try { $v = Get-PimUplinkField $b $n } catch { $v = $null }; $v }
+    $dn = ConvertTo-PimInvardiaEnvironmentText -Value (& $f 'displayName') -Key $k -Max 120
+    $en = ConvertTo-PimInvardiaEnvironmentText -Value (& $f 'environmentName') -Key $k -Max 120
+    if (-not $dn) { $dn = $en }
+    if (-not $dn) { return @{ Ok = $false; Status = $status; Value = $null; Reason = "HTTP $status without a displayName" } }
+    $val = [ordered]@{ displayName = $dn; environmentName = $en
+                       customer = (ConvertTo-PimInvardiaEnvironmentText -Value (& $f 'customer') -Key $k -Max 120)
+                       managedBy = (ConvertTo-PimInvardiaEnvironmentText -Value (& $f 'managedBy') -Key $k -Max 120)
+                       kind = (ConvertTo-PimInvardiaEnvironmentText -Value (& $f 'kind') -Key $k -Max 40)
+                       handle = (ConvertTo-PimInvardiaEnvironmentText -Value (& $f 'handle') -Key $k -Max 80) }
+    return @{ Ok = $true; Status = $status; Value = $val; Reason = "HTTP $status" }
+}
+
+function Update-PimInvardiaEnvironmentCache {
+    <#
+      PIM 100.70: read Invardia's environment name and cache it in pim.Settings 'InvardiaEnvironment' = { displayName,
+      environmentName, customer, managedBy, kind, handle, readUtc }. A good answer replaces the cache -- written only when a
+      field changed or the cached readUtc is older than 24 h (an unchanged hourly read writes nothing). ANY failure KEEPS
+      the last good value (never cleared). No key / the switch off = no call. Returns @{ called; ok; changed; line } --
+      one quiet line; never throws, never fails the caller.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$GetSetting, [Parameter(Mandatory)][scriptblock]$SetSetting, [AllowNull()][string]$Key,
+          [AllowNull()][string]$Endpoint, [AllowNull()][scriptblock]$Transport = $null, [bool]$Enabled = (Test-PimUplinkEnvironmentNameOn),
+          [datetime]$NowUtc = [datetime]::UtcNow)
+    try {
+        if (-not $Enabled) { return @{ called = $false; ok = $false; changed = $false; line = 'environment name: off (PIM_UPLINK_ENVNAME)' } }
+        if (-not "$Key".Trim()) { return @{ called = $false; ok = $false; changed = $false; line = 'environment name: no install key -- the configured name stays' } }
+        $g = Get-PimInvardiaEnvironment -Key $Key -Endpoint $Endpoint -Transport $Transport
+        if (-not $g.Ok) { return @{ called = ($g.Status -ne 0 -or "$($g.Reason)" -like 'failed:*'); ok = $false; changed = $false; line = "environment name not read from Invardia ($($g.Reason)) -- the last one kept" } }
+        $name = Get-PimInvardiaEnvironmentSetting
+        $prev = $null; try { $prev = & $GetSetting $name; if ($prev -is [string] -and $prev.Trim().StartsWith('{')) { $prev = $prev | ConvertFrom-Json } } catch { $prev = $null }
+        $same = $false; $fresh = $false
+        if ($prev -and $prev -isnot [string]) {
+            $same = $true
+            foreach ($fn in @($g.Value.Keys)) { if ("$(Get-PimUplinkField $prev $fn)" -cne "$($g.Value[$fn])") { $same = $false; break } }
+            $pr = ConvertTo-PimUplinkUtc (Get-PimUplinkField $prev 'readUtc')
+            $fresh = [bool]($pr -and ($NowUtc.ToUniversalTime() - $pr).TotalHours -lt 24)
+        }
+        if ($same -and $fresh) { return @{ called = $true; ok = $true; changed = $false; line = "environment name from Invardia: $($g.Value.displayName) (unchanged)" } }
+        $rec = [ordered]@{}; foreach ($fn in @($g.Value.Keys)) { $rec[$fn] = $g.Value[$fn] }; $rec['readUtc'] = $NowUtc.ToUniversalTime().ToString('o')
+        & $SetSetting $name ([pscustomobject]$rec)
+        return @{ called = $true; ok = $true; changed = (-not $same); line = "environment name from Invardia: $($g.Value.displayName)" }
+    } catch { return @{ called = $false; ok = $false; changed = $false; line = "environment name not read ($(ConvertTo-PimInvardiaEnvironmentText -Value "$($_.Exception.Message)" -Key $Key -Max 200)) -- the last one kept" } }
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
 # PIM 100.167 / framework DOCS/REQUIREMENTS.md 8.16 UPLINK-CAUSES (owner 2026-10-15: "across all solutions" / "each solution
 # cause drop cause at least" / "or define errorcodes" / "but more context in free text is needed"). Behind the feature
 # 'telemetry.causes' -- OFF until Invardia says its side is live; OFF = every record exactly as before (Test-PimErrorCodes D).
@@ -2426,7 +2552,8 @@ function New-PimUplinkSupportSqlAccessField {
       PURE. The field: { group; dbUser; [readOnly]; [jitOpen]; [jitUntil]; checkedUtc; healedUtc = null } -- only $true / $false /
       $null go through for group / dbUser; healedUtc is ALWAYS null. SEC-92 ALIGN (framework SECAUDIT-1a, Invardia accepts them):
       the OPTIONAL fields go on ONLY when known, after dbUser, in this order --
-        readOnly  the Support app's database user is in the standing read-only role (db_datareader)
+        readOnly  the Support app's database user is in the standing read-only role (pim_support_read since OPEN-01 v2:
+                  SELECT on the schemas pim + platform only; a v1 install reports db_datareader until its updater migrates it)
         jitOpen   a time-limited admin grant is still recorded on a database user after this cycle's sweep (open, or past its
                   end and NOT taken back -- jitUntil then lies before checkedUtc, which is how Invardia sees a stuck revoke)
         jitUntil  the latest end among them (yyyy-MM-ddTHH:mm:ssZ); only with jitOpen = true
@@ -2645,8 +2772,15 @@ function Invoke-PimUplinkCycle {
           [AllowNull()][scriptblock]$StateFields = $null,
           # INV-S16: { param($Name, $Value) } an insert that never replaces a value (Add-PimSqlSettingIfAbsent), used ONCE to
           # create the install's lasting id; $null = -SetSetting. The id rides on every IDENTIFIED record (Add-PimUplinkInstallId).
-          [AllowNull()][scriptblock]$CreateSetting = $null)
+          [AllowNull()][scriptblock]$CreateSetting = $null,
+          # PIM 100.70 / framework 8.14 ENV-NAME-MASTER: after a landed IDENTIFIED heartbeat, Invardia's environment name is
+          # read with the install key and cached in pim.Settings 'InvardiaEnvironment' (Update-PimInvardiaEnvironmentCache).
+          # Its own switch (PIM_UPLINK_ENVNAME, ON by default). -EnvironmentTransport: the GET (Get-PimInvardiaEnvironment
+          # -Transport); $null = NO read at all (the job passes the real one; an offline test passes a stub or nothing).
+          [bool]$EnvironmentName = (Test-PimUplinkEnvironmentNameOn),
+          [AllowNull()][scriptblock]$EnvironmentTransport = $null)
     $NowUtc = $NowUtc.ToUniversalTime()
+    $envNameRead = $null
     $endpoint = "$(& $GetSetting 'UplinkEndpoint')".Trim()
     $sender = Resolve-AitUplinkSender -Enabled $Enabled -InstallKey $InstallKey -Endpoint $endpoint
     if ($sender.Mode -eq 'disabled') {
@@ -3005,7 +3139,8 @@ function Invoke-PimUplinkCycle {
                     $stUs = ConvertFrom-PimUplinkStoredValue (Get-PimUplinkField $SetupFacts 'UpdateState')
                     $stSsa = $(if ($SupportSqlAccess) { $ssaVal } else { $null })
                     $stSteps = @(New-PimSetupSteps -Facts @{ Updater = (Get-PimUplinkField $stUs 'setupFacts'); UpdateState = $stUs; Controls = $stCtl
-                                                             SupportSqlAccess = $stSsa; Permissions = (Get-PimUplinkField $SetupFacts 'Permissions'); NowUtc = $NowUtc })
+                                                             SupportSqlAccess = $stSsa; Permissions = (Get-PimUplinkField $SetupFacts 'Permissions'); NowUtc = $NowUtc
+                                                             SupportConsent = (Get-PimUplinkField $SetupFacts 'SupportConsentState') })
                     if (Add-PimUplinkSetupStepsField -Record $hb -Steps $stSteps) { $hbAdd += 'setupSteps' }
                 } catch { Write-Warning "[uplink] setupSteps could not be built: $($_.Exception.Message)" }
             }
@@ -3064,6 +3199,12 @@ function Invoke-PimUplinkCycle {
                     if ($prevEnv -ne $envId) { & $SetSetting 'InvardiaEnvironmentId' $envId }
                 }
             } catch { }
+            # PIM 100.70 / framework 8.14: Invardia's environment NAME (display only), read once per landed identified
+            # heartbeat with the install key; a failure keeps the last good value and never fails the cycle.
+            if ($isId -and $EnvironmentName -and $EnvironmentTransport) {
+                try { $envNameRead = Update-PimInvardiaEnvironmentCache -GetSetting $GetSetting -SetSetting $SetSetting -Key $InstallKey -Endpoint $sender.Endpoint -Transport $EnvironmentTransport -Enabled $true -NowUtc $NowUtc } catch { $envNameRead = $null }
+                if ($envNameRead) { Write-Host "  [uplink] $($envNameRead.line)" -ForegroundColor DarkGray }
+            }
         }
     }
     # PIM 100.10 (framework 8.7): the SETUP report -- identified only (anonymous Community sends nothing of this), its own
@@ -3274,7 +3415,8 @@ function Invoke-PimUplinkCycle {
               additive = [bool]$addState.on; additiveRefused = [bool]$addState.refusedNow; additiveHeldFields = @($addFieldsOut)
               causes = [bool]$causeState.on; causesRefused = [bool]$causeState.refusedNow
               releaseControl = [bool]$rcState.on; releaseControlRefused = [bool]$rcState.refusedNow
-              guardsCleared = $clearedSent; activeGuards = $(if ($guardsKnown) { $activeNow.Count } else { -1 }) }
+              guardsCleared = $clearedSent; activeGuards = $(if ($guardsKnown) { $activeNow.Count } else { -1 })
+              environmentName = $envNameRead }
 }
 
 function Get-PimUplinkDeliveryWarning {
@@ -3573,11 +3715,16 @@ function Invoke-PimUplinkJob {
             } finally { $global:PIM_RestTimeoutSec = $ssaJobPrevTo }
         }
     }
+    # PIM 100.70 / framework 8.14: the real GET for Invardia's environment name (one call per landed identified heartbeat,
+    # 15 s, no retry); -WhatIf = no read at all.
+    $envNameXport = $null
+    if (-not $WhatIf) { $envNameXport = { param($Uri, $Headers, $TimeoutSec) Invoke-PimInvardiaEnvironmentHttp -Uri $Uri -Headers $Headers -TimeoutSec $TimeoutSec } }
     $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -CreateSetting $create -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
             -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $pause @cyc `
             -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints -AdoptionCounts $adoption `
             -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun -Causes $causesOn -LicenceProbe $licProbe -HybridAd $hyAd `
-            -ReleaseControl $rcOn -ReleaseControlFields $rcFields -ScopeStability $ssField -StateFields $stateSb -SupportSqlAccess $ssaSb
+            -ReleaseControl $rcOn -ReleaseControlFields $rcFields -ScopeStability $ssField -StateFields $stateSb -SupportSqlAccess $ssaSb `
+            -EnvironmentName (Test-PimUplinkEnvironmentNameOn) -EnvironmentTransport $envNameXport
     # PIM 100.75: a failed send / an install that should be identified but is anonymous = a WARNING run (never a failure).
     $rawKey = ''; try { $rawKey = "$(& $get 'InvardiaInstallKey')".Trim() } catch { $rawKey = '' }
     $claimSt = $null; try { $claimSt = & $get 'InstallKeyClaimState'; if ($claimSt -is [string]) { $claimSt = $claimSt | ConvertFrom-Json } } catch { $claimSt = $null }
@@ -3594,6 +3741,15 @@ function Invoke-PimUplinkJob {
             $detail += ' -- WARNING: support access needs a look'
         }
     }
+    # OPEN-01: the UPDATER's last decision from Invardia's consent channel (pim.Settings SupportConsentState) reaches Invardia
+    # in this run's report. Information only: the engine reads it, it never applies consent (framework "SUPPORT ACCESS" point 2).
+    try {
+        $scRec = & $get 'SupportConsentState'; if ($scRec -is [string] -and "$scRec".Trim().StartsWith('{')) { $scRec = "$scRec" | ConvertFrom-Json }
+        if ($scRec -and "$($scRec.action)") {
+            $detail += " -- support consent ($($scRec.atUtc)): $($scRec.consent), session $($scRec.session) -> $($scRec.action)$(if ("$($scRec.action)" -ne 'nothing') { " $($scRec.result)" })"
+            if ("$($scRec.result)" -eq 'failed') { $detail += " ($("$($scRec.detail)".Trim()))" }
+        }
+    } catch { }
     [pscustomobject]@{ ran = [bool]$r.ran; whatIf = [bool]$WhatIf; detail = $detail
                        warning = [bool]$w.warning; warningKind = "$($w.kind)"; warningSummary = "$($w.summary)" }
 }

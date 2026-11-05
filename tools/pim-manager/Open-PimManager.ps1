@@ -313,6 +313,9 @@ if (Test-Path -LiteralPath $_setupLib) { . $_setupLib }
 . (Join-Path $solutionRoot 'engine\_shared\PIM-CommitWatch.ps1')
 # 100.67 EXPORT: every view to Excel (.xlsx, .NET packaging) or PDF (the bundled MigraDoc of 100.61) -- POST /api/export.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-TableExport.ps1')
+# PIM 100.70 / framework 8.14 ENV-NAME-MASTER: the name SHOWN for this environment (Invardia's cached name, else the configured
+# 'EnvironmentName') -- Get-PimEnvironmentDisplayName, display only (never a key). The Settings card still edits the configured name.
+. (Join-Path $solutionRoot 'engine\_shared\PIM-EnvironmentName.ps1')
 # MGMT-REPORT (owner 2026-10-29, Pro): the management report as a PowerPoint -- the .pptx writer (no module, no Office) and the
 # report model (GET /api/reports/management, Reports > Management report). The monthly job runs the same model in the tick.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-Pptx.ps1')
@@ -386,6 +389,10 @@ $_workloadPrereqLib = Join-Path $solutionRoot 'engine\_shared\PIM-WorkloadPrereq
 # offer the same rows and both ADOPT a group the store already defines.
 $_templatePacksLib = Join-Path $solutionRoot 'engine\_shared\PIM-TemplatePacks.ps1'
 . $_templatePacksLib
+# PIM-TEMPLATE-IMPORT -- Settings > Export template / Import template (engine/_shared/PIM-TemplateFile.ps1): one file in the
+# pack shape, checked, planned with the pack planner above and STAGED into the shared pending changes.
+$_templateFileLib = Join-Path $solutionRoot 'engine\_shared\PIM-TemplateFile.ps1'
+. $_templateFileLib
 # 100.17 CUSTOM-WORKLOAD -- custom (group-only) workloads (engine/_shared/PIM-CustomWorkloads.ps1): Templates > Custom
 # workloads, the Workload picker's custom entries + "+ Custom (quick)", the wizard derivation and the template export/import.
 $_customWorkloadsLib = Join-Path $solutionRoot 'engine\_shared\PIM-CustomWorkloads.ps1'
@@ -12825,7 +12832,7 @@ function Get-PimManagerEnvironmentReport {
     $envRepSources = @{
         tenant          = { $t = Get-PimManagerTenantContext; [ordered]@{ tenantId = "$($t.tenantId)"; tenantName = "$($t.tenantName)" } }
         version         = { Get-PimSolutionVersion }
-        environmentName = { $v = Get-PimSetting -Name 'EnvironmentName'; if ($v -is [string]) { $v.Trim() } elseif ($v -and $v.PSObject.Properties['name']) { "$($v.name)".Trim() } else { '' } }
+        environmentName = { Get-PimEnvironmentDisplayName -GetSetting { param($n) Get-PimSetting -Name $n } }
         mode            = { "$(Get-PimManagerMspLicenseRole)" }
         edition         = { Get-PimEditionConfig }
         license         = { Get-PimManagerLicenseBody }
@@ -15519,9 +15526,7 @@ function Handle-Request {
     # GET / -- serve the SPA. The token is embedded in a <meta> tag so the
     # JS can read it without exposing it on the URL after the first hop.
     if ($path -eq '/' -and $method -eq 'GET') {
-        # SEC-01: this page bakes the /api bearer token into its HTML, so serving it
-        # unauthenticated made that token public -- two requests (GET / for the token,
-        # then any /api call with a forged principal header) reached SuperAdmin. In
+        # SEC-01: this page carries the /api bearer token in its HTML. In
         # HOSTED mode the caller must therefore be a positively-trusted principal
         # before the page (and with it the token) is handed over. LOCAL mode (loopback,
         # identity = the Windows user) is gated just below by the one-time link + session cookie.
@@ -16167,7 +16172,10 @@ function Handle-Request {
         if ($path -eq '/api/settings/environment-name' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             $v = ''; try { $v = "$(Get-PimSetting -Name 'EnvironmentName')".Trim() } catch { $v = '' }
-            Write-JsonResponse -Response $resp -Status 200 -Body @{ value = $v; maxLength = 40; canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') }
+            # PIM 100.70 / framework 8.14: 'value' stays the CONFIGURED name (the card edits it); 'displayName' is the name to SHOW
+            # (Invardia's cached name when the heartbeat has one, else the configured name) -- the header shows it.
+            $dn = $v; try { $dn = "$(Get-PimEnvironmentDisplayName -GetSetting { param($n) Get-PimSetting -Name $n })".Trim(); if (-not $dn) { $dn = $v } } catch { $dn = $v }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ value = $v; displayName = $dn; maxLength = 40; canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') }
             return 200
         }
         if ($path -eq '/api/settings/environment-name' -and $method -eq 'PUT') {
@@ -16185,7 +16193,8 @@ function Handle-Request {
                 if (Get-Command Update-PimManagerSettingMirror -ErrorAction SilentlyContinue) { try { Update-PimManagerSettingMirror -Name 'EnvironmentName' -Value ' ' } catch { } }
             }
             Write-PimManagerAuditEvent -Action 'settings.environment-name.save' -Target 'EnvironmentName' -Result 'ok' -Before @{ value = $before } -After @{ value = $want }
-            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; value = $want }
+            $dnS = $want; try { $dnS = "$(Get-PimEnvironmentDisplayName -GetSetting { param($n) Get-PimSetting -Name $n })".Trim(); if (-not $dnS) { $dnS = $want } } catch { $dnS = $want }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; value = $want; displayName = $dnS }
             return 200
         }
         # 100.124 (owner 2026-10-13: "this is a mistake and should not be shown at customers ... it must always shown company
@@ -16240,7 +16249,7 @@ function Handle-Request {
             $xHide = $false   # 100.124: the hide option is retired -- an export always names the environment
             $xEnv = ''; $xTen = ''
             if (-not $xHide) {
-                try { $xEnv = "$(Get-PimSetting -Name 'EnvironmentName')".Trim() } catch { }
+                try { $xEnv = "$(Get-PimEnvironmentDisplayName -GetSetting { param($n) Get-PimSetting -Name $n })".Trim() } catch { }
                 try { $xTen = "$((Get-PimManagerTenantContext).tenantName)".Trim() } catch { }
             }
             $xDemo = $false; try { if (Get-Command Test-PimManagerDemoDataOn -ErrorAction SilentlyContinue) { $xDemo = [bool](Test-PimManagerDemoDataOn) } } catch { $xDemo = $false }
@@ -18480,7 +18489,8 @@ function Handle-Request {
             $script:lastHeartbeat = Get-Date
             if (-not (Get-Command Get-PimActivatorChannel -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'the PIM Activator builder (tools/pim-activator/_PimActivatorBuild.ps1) is not loaded in this Manager' }; return 503 }
             $tid = "$env:PIM_HOSTED_AUTH_TENANT".Trim(); if (-not $tid) { $tid = "$($global:PIM_TenantId)".Trim() }; if (-not $tid) { $tid = "$env:PIM_TenantId".Trim() }
-            $envName = ''; try { $en = Get-PimSetting -Name 'EnvironmentName'; if ($en -is [string]) { $envName = $en.Trim() } elseif ($en -and $en.PSObject.Properties['name']) { $envName = "$($en.name)".Trim() } } catch { }
+            # PIM 100.70: the DEFAULT name shown to admins in the Activator (display only; the admin can type another one)
+            $envName = ''; try { $envName = "$(Get-PimEnvironmentDisplayName -GetSetting { param($n) Get-PimSetting -Name $n })".Trim() } catch { }
             $targets = ConvertTo-PimActivatorTargets $null; $targetsError = ''
             try { $targets = ConvertTo-PimActivatorTargets (Get-PimSetting -Name 'ActivatorTargets') } catch { $targetsError = "$($_.Exception.Message)" }
             $xtText = ''; try { $xtText = "$(Get-PimSetting -Name 'ActivatorAdditionalTenants')".Trim() } catch { $targetsError = "$($_.Exception.Message)" }
@@ -22857,6 +22867,148 @@ function Handle-Request {
                 }
             }
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ templates = $outList.ToArray() })
+            return 200
+        }
+
+        # -------------------------------------------------------------------
+        # PIM-TEMPLATE-IMPORT (TEMPLATE-IMPORT-GUI, owner 2026-11-03): Settings > Export template / Import template.
+        # ONE file (the shipped permission-pack shape, engine\_shared\PIM-TemplateFile.ps1) with departments, groups,
+        # delegations, admin accounts and policy-template links.
+        #   GET  /api/template-file/export            (Admin+) this installation's definitions as that file: no secrets,
+        #                                             no tenant or subscription ids, no runtime columns, no MSP rows.
+        #   POST /api/template-file/import            (SuperAdmin) { text; dryRun } -> the file checks, the Manager's
+        #                                             validator over the state the import would produce, the plan
+        #                                             (create / change / left), and -- not a dry run, nothing refused --
+        #                                             EVERY row STAGED into the shared Pending changes as the caller.
+        # Nothing here writes a definition: the staged rows are committed by Review & Save (with the second approver when
+        # it is on), and the engine applies them. A refusal at any step stages NOTHING.
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/template-file/export' -and $method -eq 'GET') {
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = "Exporting a template requires Admin. $(Get-PimAccessFixHint)" }; return 403 }
+            $script:lastHeartbeat = Get-Date
+            try {
+                $tfSchema = [ordered]@{}; foreach ($s in $script:PimCsvBases) { $tfSchema["$($s.base)"] = @($s.defaultHeader) }
+                $tfRows = @{}
+                foreach ($b in @(Get-PimTemplateFileBases | Where-Object { $tfSchema.Contains($_) })) { $tfRows[$b] = @((Read-PimRows -BaseName $b -NoScope).rows) }
+                $tfPat = ''; try { $__nc = Get-PimNamingConventions; if ($__nc) { $tfPat = "$($__nc['PimGroupPattern'])" } } catch { $tfPat = '' }
+                $tfName = "$($req.QueryString['name'])".Trim(); if (-not $tfName) { $tfName = 'Exported template' }
+                if ($tfName.Length -gt 120) { $tfName = $tfName.Substring(0, 120) }
+                $doc = ConvertTo-PimTemplateFileExport -RowsByBase $tfRows -Schema $tfSchema -TenantId "$($global:PIM_TenantId)" -GroupNamePattern $tfPat -Name $tfName
+                Write-PimManagerAuditEvent -Action 'template.export' -Target 'template-file' -Result 'ok' -After ([ordered]@{ rows = [int]$doc.rowCount; entities = @($doc.rows.Keys) })
+                Write-JsonResponse -Response $resp -Status 200 -Body $doc
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "The template could not be exported: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+        if ($path -eq '/api/template-file/import' -and $method -eq 'POST') {
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = "Importing a template requires SuperAdmin. Nothing was staged. $(Get-PimAccessFixHint)" }; return 403 }
+            $script:lastHeartbeat = Get-Date
+            if (-not $script:PimSqlCs) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; gate = 'no-store'; error = 'There is no SQL store, so the rows cannot be staged for review. Nothing was staged.' }; return 409 }
+            $tiBody = Read-RequestJson -Request $req
+            $tiText = ''
+            if ($tiBody -and $tiBody.PSObject.Properties['text']) { $tiText = "$($tiBody.text)" }
+            elseif ($tiBody -and $tiBody.PSObject.Properties['document'] -and $null -ne $tiBody.document) { $tiText = ($tiBody.document | ConvertTo-Json -Depth 12) }
+            $tiDry = [bool]($tiBody -and $tiBody.PSObject.Properties['dryRun'] -and $tiBody.dryRun)
+            $tiWho = "$((Get-PimManagerRole).identity)"
+            $tfSchema = [ordered]@{}; foreach ($s in $script:PimCsvBases) { $tfSchema["$($s.base)"] = @($s.defaultHeader) }
+            # 1. the file
+            $tiParsed = ConvertFrom-PimTemplateFileText -Text $tiText -Schema $tfSchema
+            if (-not $tiParsed.ok) {
+                Write-PimManagerAuditEvent -Action 'template.import' -Target 'template-file' -Result 'denied' -After ([ordered]@{ stage = 'file'; errors = @($tiParsed.errors).Count; dryRun = $tiDry })
+                Write-JsonResponse -Response $resp -Status 400 -Body ([ordered]@{ ok = $false; stage = 'file'; staged = 0; errors = @($tiParsed.errors); error = "The file has $(@($tiParsed.errors).Count) error(s). Nothing was staged." })
+                return 400
+            }
+            # 2. the plan, against the rows stored now
+            try {
+                $tiCur = @{}
+                foreach ($b in @(Get-PimTemplateFileBases | Where-Object { $tfSchema.Contains($_) })) { $tiCur[$b] = @((Read-PimRows -BaseName $b -NoScope).rows) }
+                $tiPat = ''; try { $__nc = Get-PimNamingConventions; if ($__nc) { $tiPat = "$($__nc['PimGroupPattern'])" } } catch { $tiPat = '' }
+                $tiPlan = Get-PimTemplateFilePlan -Parsed $tiParsed -CurrentRowsByBase $tiCur -TenantGroupPattern $tiPat -TenantId "$($global:PIM_TenantId)" -KnownBases @(Get-PimTemplateFileBases | Where-Object { $tfSchema.Contains($_) })
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; stage = 'plan'; staged = 0; error = "The import could not be planned: $($_.Exception.Message). Nothing was staged." }
+                return 500
+            }
+            $tiPlanOut = [ordered]@{}
+            foreach ($b in @($tiPlan.bases.Keys)) {
+                $e = $tiPlan.bases[$b]
+                $tiPlanOut[$b] = [ordered]@{ create = @($e.create).Count; change = @($e.change).Count; unchanged = [int]$e.unchanged; left = @($e.left).Count
+                    createKeys = @(@($tiPlan.changes[$b]) | Where-Object { $_ -and $_.op -eq 'add' } | ForEach-Object { "$($_.key)" } | Select-Object -First 200)
+                    changes = @(@($e.change) | Select-Object -First 200 | ForEach-Object { [ordered]@{ key = "$($_.key)"; columns = @($_.columns) } })
+                    leftRows = @(@($e.left) | Select-Object -First 200) }
+            }
+            # 3. the Manager's validator, over the state the import would produce
+            $tiView = Get-PimTemplateFileValidationView -Plan $tiPlan -CurrentRowsByBase $tiCur
+            $tiVal = [ordered]@{ errors = @(); warnings = @(); elsewhere = 0 }
+            if (@($tiPlan.changes.Keys).Count) {
+                if (-not (Get-Command Invoke-PimPreflightValidation -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; stage = 'validate'; staged = 0; error = 'The validator is not loaded. Nothing was staged.' }; return 500 }
+                try { $tiRep = Invoke-PimPreflightValidation -PendingRows $tiView.pendingRows }
+                catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; stage = 'validate'; staged = 0; error = "The validator could not run: $($_.Exception.Message). Nothing was staged." }; return 500 }
+                $tiVal = Select-PimTemplateFileValidationErrors -Violations @($tiRep.violations) -View $tiView
+            }
+            $tiAnswer = [ordered]@{ name = "$($tiParsed.name)"; rows = [int]$tiParsed.rowCount; counts = $tiPlan.counts; plan = $tiPlanOut
+                warnings = @($tiVal.warnings); elsewhere = [int]$tiVal.elsewhere; adopted = @($tiPlan.adopted); renamed = [bool]$tiPlan.renamed }
+            if (@($tiVal.errors).Count) {
+                Write-PimManagerAuditEvent -Action 'template.import' -Target 'template-file' -Result 'denied' -After ([ordered]@{ stage = 'validate'; errors = @($tiVal.errors).Count; dryRun = $tiDry })
+                $tiAnswer['ok'] = $false; $tiAnswer['stage'] = 'validate'; $tiAnswer['staged'] = 0; $tiAnswer['errors'] = @($tiVal.errors)
+                $tiAnswer['error'] = "The validator found $(@($tiVal.errors).Count) error(s) in the file's rows. Nothing was staged."
+                Write-JsonResponse -Response $resp -Status 422 -Body $tiAnswer
+                return 422
+            }
+            $tiTotal = [int]$tiPlan.counts.create + [int]$tiPlan.counts.change
+            if ($tiDry -or $tiTotal -eq 0) {
+                $tiAnswer['ok'] = $true; $tiAnswer['dryRun'] = $tiDry; $tiAnswer['staged'] = 0; $tiAnswer['errors'] = @()
+                if ($tiTotal -eq 0) { $tiAnswer['note'] = 'Everything in this file is already here. Nothing to stage.' }
+                Write-JsonResponse -Response $resp -Status 200 -Body $tiAnswer
+                return 200
+            }
+            # 4. stage EVERY row, in one compare-and-swap of the shared pending changes: all entities or none.
+            $tiAdminsStored = $null
+            if ($tiPlan.changes.Contains('Account-Definitions-Admins')) { $tiAdminsStored = @($tiCur['Account-Definitions-Admins']) }
+            $u = Update-PimSharedPendingStore -ConnectionString $script:PimSqlCs -Mutate {
+                param($doc)
+                $res = @{ gate = 'ok'; bases = [ordered]@{} }
+                $next = @{}
+                foreach ($b in @($tiPlan.changes.Keys)) {
+                    $cur = if ($doc.bases.ContainsKey($b)) { $doc.bases[$b] } else { @{ version = 0; changes = @() } }
+                    $m = Merge-PimSharedPendingChanges -Current @($cur.changes) -Submitted (@($cur.changes) + @($tiPlan.changes[$b])) -By $tiWho
+                    if (-not $m.ok) { $doc['__result'] = @{ gate = 'locked'; base = $b; locked = @($m.locked) }; return $false }
+                    if ($b -eq 'Account-Definitions-Admins' -and $null -ne $tiAdminsStored) {
+                        $lc = Get-PimManagerAdminLicenceCheck -Before @(Get-PimManagerPendingAppliedRows -Base $b -Rows @($tiAdminsStored) -Changes @($cur.changes)) -After @(Get-PimManagerPendingAppliedRows -Base $b -Rows @($tiAdminsStored) -Changes @($m.changes))
+                        if ($lc.refused) { $doc['__result'] = @{ gate = 'licence-limit'; base = $b; check = $lc }; return $false }
+                    }
+                    if ($m.added -or $m.replaced) { $next[$b] = @{ version = [int]$cur.version + 1; changes = @($m.changes) } }
+                    $res.bases[$b] = [ordered]@{ added = [int]$m.added; replaced = [int]$m.replaced }
+                }
+                if (-not $next.Count) { $doc['__result'] = $res; return $false }
+                foreach ($b in @($next.Keys)) { $doc.bases[$b] = $next[$b] }
+                $doc['__result'] = $res
+                return $true
+            }
+            if (-not $u.ok) { Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; gate = 'busy'; staged = 0; error = "The pending changes are busy: $($u.reason). Nothing was staged -- try again." }; return 503 }
+            $r = $u.result
+            if ($r.gate -eq 'locked') {
+                $names = @(@($r.locked) | Select-Object -First 10 | ForEach-Object { "$($_.key) (staged by $($_.by))" }) -join '; '
+                Write-PimManagerAuditEvent -Action 'template.import' -Target 'template-file' -Result 'denied' -After ([ordered]@{ stage = 'stage'; gate = 'locked'; base = "$($r.base)" })
+                Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{ ok = $false; stage = 'stage'; gate = 'locked'; staged = 0; base = "$($r.base)"; locked = @($r.locked)
+                    error = "Another administrator has a staged change on row(s) this template changes in $($r.base): $names. Nothing was staged. Commit or discard theirs first." })
+                return 409
+            }
+            if ($r.gate -eq 'licence-limit') {
+                $lc = $r.check
+                Write-PimManagerAuditEvent -Action 'licence.limit.refused' -Target 'Account-Definitions-Admins' -Result 'denied' -After ([ordered]@{ via = 'template-import'; by = $tiWho; cap = $lc.cap; count = $lc.count; added = @($lc.added) })
+                Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{ ok = $false; stage = 'stage'; gate = 'licence-limit'; staged = 0; error = "$($lc.message) Nothing was staged."; cap = $lc.cap; count = $lc.count })
+                return 409
+            }
+            $tiStaged = 0; foreach ($b in @($r.bases.Keys)) { $tiStaged += [int]$r.bases[$b].added + [int]$r.bases[$b].replaced }
+            if ($u.written) {
+                Write-PimManagerAuditEvent -Action 'template.import' -Target "template:$("$($tiParsed.name)".Trim())" -Result 'ok' -After ([ordered]@{ stage = 'staged'; by = $tiWho; staged = $tiStaged; counts = $tiPlan.counts; bases = $r.bases })
+                foreach ($b in @($r.bases.Keys)) { Save-PimManagerSignedRequest -CommitId "stage:$b" -Role requester }
+            }
+            $tiAnswer['ok'] = $true; $tiAnswer['dryRun'] = $false; $tiAnswer['staged'] = $tiStaged; $tiAnswer['stagedBases'] = $r.bases; $tiAnswer['errors'] = @()
+            $tiAnswer['note'] = "Staged $tiStaged change(s) for review. Nothing is saved until they are committed under Pending changes."
+            Write-JsonResponse -Response $resp -Status 200 -Body $tiAnswer
             return 200
         }
 

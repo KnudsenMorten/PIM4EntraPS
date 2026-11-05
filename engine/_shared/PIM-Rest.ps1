@@ -550,7 +550,7 @@ function Get-PimInteractiveToken {
 # ACCESS tokens only (no refresh token crosses the boundary); an audience it could not get is simply absent; it removes
 # the variable in a finally block. Install-PimManager reads it ONCE (Import-PimHandoffTokens), clears it, and keeps only
 # the tokens that pass the checks below in $global:PimHandoffTokens -- memory only, never a file, log, transcript or event.
-# Every check is on the token's OWN claims (no signature check: this is our own process boundary, and the resource still
+# Every check is on the token's OWN claims (claims read only: this is our own process boundary, and the resource still
 # validates the signature on every call).
 #   tid       == the installation's tenant (config.tenantId). A mismatch on ANY audience refuses the WHOLE handoff: the
 #                bootstrap signed in to a different tenant than the answers name, so none of it is trusted.

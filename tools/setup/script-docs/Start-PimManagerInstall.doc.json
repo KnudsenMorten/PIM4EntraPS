@@ -71,5 +71,6 @@
   ],
   "whatIf": "Downloads and unpacks the release into a new folder in the temp folder (the plan is read from it), then runs Install-PimManager -WhatIf from it: its checks (reads only) and every step it would take. No note is written and nothing in Azure, Microsoft Entra ID or the database is changed.",
   "undo": "Delete the release folder and the note in the temp folder; the installation itself is undone as described for Install-PimManager.",
-  "docUrl": "https://invardia.com/docs/pim/scripts/Start-PimManagerInstall/"
+  "docUrl": "https://invardia.com/docs/pim/scripts/Start-PimManagerInstall/",
+  "installLines": {"pro":["Invoke-WebRequest https://invardia.com/support/pim/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1",".\\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>'"],"community":["Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1",".\\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>'"],"resume":["Invoke-WebRequest https://invardia.com/support/pim/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1",".\\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>' -Resume"]}
 }

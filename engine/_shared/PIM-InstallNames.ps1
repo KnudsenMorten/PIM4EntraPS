@@ -10,7 +10,7 @@
 
   Resolution, per role (first that answers):
     1. the install record: pim.Settings 'InstallNames' { web; engine; updater; asbuilt; asbuiltIdentity; sqlAdminGroup;
-       publish; downlink; requests; recordedUtc } -- written by the updater (New-PimInstallNamesRecord) from what it was
+       publish; downlink; requests; dbinit; dbinitIdentity; recordedUtc } -- written by the updater (New-PimInstallNamesRecord) from what it was
        deployed with, and by setup at a new install (CR5 step 2)
     2. the environment variables an install already carries (PIM_ManagerApp, PIM_TickJobName, PIM_UpdateJobName,
        PIM_SqlAdminGroupName, PIM_ENGINE_JOB_NAME, PIM_SQL_ADMIN_GROUP, the tick's id PIM_TickJobId)
@@ -34,6 +34,8 @@ function Get-PimInstallNameDefaults {
         publish         = 'ca-pim-publish'
         downlink        = 'ca-pim-downlink-s6'
         requests        = 'ca-pim-rfa'
+        dbinit          = 'ca-pim-dbinit'      # OPEN-06: the in-network database job (manual trigger), every install
+        dbinitIdentity  = 'id-pim-dbinit'      # OPEN-06: its dedicated identity (created by the updater with the job)
     }
 }
 
@@ -56,6 +58,8 @@ function Get-PimInstallNameNewDefaults {
         publish         = 'caj-pim-publish'
         downlink        = 'caj-pim-downlink'
         requests        = 'ca-pim-requests'
+        dbinit          = 'caj-pim-dbinit'
+        dbinitIdentity  = 'id-pim-dbinit'
     }
 }
 
@@ -262,7 +266,7 @@ function Get-PimInstallNamesRecord {
 function Get-PimInstallName {
     <#
       THE name of one part of this installation. -Role: web | engine | updater | asbuilt | asbuiltIdentity | sqlAdminGroup |
-      publish | downlink. Record -> environment -> today's name (see the header). -Record overrides the stored record
+      publish | downlink | requests | dbinit | dbinitIdentity. Record -> environment -> today's name (see the header). -Record overrides the stored record
       (a caller that already holds it; tests). Never throws for a known role; an unknown role throws (a typo must not
       silently become someone else's resource).
     #>

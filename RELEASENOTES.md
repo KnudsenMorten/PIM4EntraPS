@@ -13,6 +13,26 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.40 -- 2026-11-05
+
+- PIM Manager shows the environment name you keep in Invardia (mail subjects, exports, the environment report, the header and the browser tab), and keeps the last name it read when Invardia cannot be reached; a new installation gives Invardia support read-only database access only -- admin rights only during an open support session, never as a standing member of the SQL admin group or an owner of PIM's app registrations.
+
+## 3.0.39 -- 2026-11-05
+
+- The published documentation and code comments describe what is enforced, never how a protection could be got around (a past security fix is no longer told step by step), and a test keeps it that way; the database job counts as in place when its last run succeeded, also where the update may not read group memberships; the sign-in front is version 1.4.5 (wording only, no behaviour change).
+
+## 3.0.38 -- 2026-11-05
+
+- An installation that still runs the earlier support access module is brought to the current one first; time-limited admin access for support opens only on the current module.
+
+## 3.0.37 -- 2026-11-04
+
+- Every installation gets its own in-network database job, kept by the update, so no person needs database admin rights (the setup checks report it); Invardia support's database access follows your consent: read-only standing access, admin rights only during an open support session and for at most 8 hours; Settings > Copy & tools > Export and import a template (every row waits for review in Pending changes); an Azure role assignment asks for the longest duration the role's PIM policy allows at that scope; the README shows the Community install lines and points Pro to Invardia.
+
+## 3.0.36 -- 2026-11-04
+
+- Every installation gets its own in-network database job, kept by the update, so no person needs database admin rights (the setup checks report it); Invardia support's database access follows your consent: read-only standing access, admin rights only during an open support session and for at most 8 hours; Settings > Copy & tools > Export and import a template (every row waits for review in Pending changes); an Azure role assignment asks for the longest duration the role's PIM policy allows at that scope; the README shows the Community install lines and points Pro to Invardia.
+
 ## 3.0.35 -- 2026-11-04
 
 - When the update cannot reach Invardia in time, the status now says so plainly (the next update run asks again; nothing changed) instead of an unclassified error.

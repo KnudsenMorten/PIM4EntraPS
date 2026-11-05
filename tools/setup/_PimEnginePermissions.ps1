@@ -176,7 +176,7 @@ function ConvertTo-PimEpB64Url {
     [Convert]::ToBase64String($Bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 }
 
-# The claims of a JWT (no signature check; only tid / upn / exp are read). $null when not a readable JWT.
+# The claims of a JWT (claims read only, the resource validates the token; tid / upn / exp are read). $null when not a readable JWT.
 function ConvertFrom-PimEpJwtClaims {
     param([AllowEmptyString()][string]$Token)
     if (-not $Token) { return $null }

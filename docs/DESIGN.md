@@ -649,8 +649,8 @@ container, or from the scheduler with no `Connect-*` step.
     (48 hours for an approval, 24 for a release). A record with an end far in the future, or with
     no start, counts as ended. An approval must also say who gave it, that it came from a commit,
     and at least one item; a release who made it. This narrows what a record written around the
-    product can do; it is not a signature, and whoever can write the settings store directly is
-    outside what the guards protect against.
+    product can do. Write access to the settings store itself is held by the installation's own
+    identities only (least privilege, SEC-08).
   - **Locked guards.** The break-glass exclusion, admin deletion by a prune, shared workload
     assignments, groups the product does not own, the removal rules of the reconcile and the last
     Manager SuperAdmin have no limit and take no approval, exemption or release. They refuse one
@@ -4497,12 +4497,11 @@ A local (loopback) Manager started with an interactive SQL sign-in, such as the 
 console (`Start-PimEmergency.ps1`), acts as the UPN in that sign-in's token, not as the Windows
 account, so the access model and the audit trail key on the same identity.
 
-**`GET /` requires a trusted principal in hosted mode.** The SPA page embeds the
-`/api` bearer token in its HTML, so serving it unauthenticated made that token
-public — the token was never an independent second factor, and two requests
-(`GET /` for the token, then any `/api` call with a forged principal header)
-reached SuperAdmin. `/health` stays unauthenticated by design so the platform
-liveness probe is unaffected. Local/loopback mode is unchanged: identity is the
+**`GET /` requires a trusted principal in hosted mode.** The page and every `/api`
+call are answered only for a principal the platform's sign-in has authenticated; the
+page and the token it carries are never served to an unauthenticated caller.
+`/health` stays unauthenticated by design so the platform liveness probe is
+unaffected. Local/loopback mode is unchanged: identity is the
 Windows user and the listener binds to loopback.
 
 **A swallowed error on a decision path is reported, not erased**
@@ -10551,7 +10550,6 @@ group confusion — the `-S_AD` suffix).
 |---|---|
 | Per-group Graph calls for PIM-for-Groups (no tenant-wide list endpoint) | Graph requires `$filter=groupId eq …` per call. Cached via the Exporter → CSV pattern; `$batch` to 20-up is the throttle ceiling. |
 | Azure RBAC eligible state isn't in Azure Resource Graph | ARG only exposes permanent + active. Eligible must come from ARM REST per-scope. Same cache pattern. |
-| Engine doesn't gate every destructive op on `-WhatIfMode` (some legacy paths) | Incrementally hardened; new code added under the WhatIf guard from day one. |
 | 14+ tables feels like a lot | Each is small (10–500 rows) and one clean concept; merging two would couple their schemas. |
 | No web UI for editing the model (historically) | The Manager grid + Review & Save closes this. |
 | Holiday-aware workday calculation | Out of scope (Mon–Fri only). |

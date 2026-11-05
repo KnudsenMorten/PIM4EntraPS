@@ -14,7 +14,8 @@
 
 Set-StrictMode -Off
 
-function Get-PimSqlCutoverAdminJobName { return 'ca-pim-dbinit' }
+# OPEN-06: the install's database job name comes from the one resolver (record -> environment -> today's 'ca-pim-dbinit').
+function Get-PimSqlCutoverAdminJobName { if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { return (Get-PimInstallName -Role dbinit) }; return 'ca-pim-dbinit' }
 
 function Get-PimAcaImageTag {
     <# PURE. The tag of a Container Apps job / app's first container image ('' when unreadable). #>

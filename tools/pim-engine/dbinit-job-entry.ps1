@@ -75,9 +75,17 @@ if (@($plan.problems).Count) {
     Say 'refusing to create a PARTIAL set of database users.' 'Red'
     exit 1
 }
-if (-not @($plan.users).Count) { Say 'no principals to create.' 'Yellow'; exit 0 }
+# OPEN-06: the updater writes this job on EVERY install with PIM_DBINIT_PRINCIPALS = [] (no user to create). An EMPTY list
+# skips only the user step; the schema, the access model, the feature gates, the Manager access and the update record still
+# run when they are asked for. Nothing at all asked for = exit 0. (An UNSET list is still a configuration error, exit 2.)
+$otherWork = @('PIM_DBINIT_SCHEMA', 'PIM_DBINIT_SQL_ACCESS', 'PIM_DBINIT_FEATURE_GATES', 'PIM_DBINIT_FEATURE_DISABLE', 'PIM_DBINIT_MANAGER_ACCESS', 'PIM_DBINIT_UPDATE_SEED') |
+             Where-Object { $v = "$([Environment]::GetEnvironmentVariable($_))".Trim(); $v -and ($_ -ne 'PIM_DBINIT_SCHEMA' -or $v -in @('1', 'true', 'yes', 'TRUE', 'Yes')) }
+if (-not @($plan.users).Count) {
+    if (-not @($otherWork).Count) { Say 'no principals to create and nothing else asked for.' 'Yellow'; exit 0 }
+    Say "no principals to create -- the user step is skipped; continuing with: $(@($otherWork) -join ', ')" 'DarkGray'
+}
 
-Step ("plan: " + (@($plan.users) | ForEach-Object { $_.name }) -join ', ')
+Step ("plan: " + $(if (@($plan.users).Count) { (@($plan.users) | ForEach-Object { $_.name }) -join ', ' } else { '(no users)' }))
 
 # 🔴 BLAST-RADIUS GUARD, BEFORE ANY CONNECTION IS OPENED.
 # This runs unattended, as a database admin, against a customer's production store. Its legitimate
@@ -174,13 +182,15 @@ try {
     # ---- VERIFY, never assume. Read every user back: SID and role membership both. -------------
     # A user that authenticates and can read nothing is harder to diagnose than one that cannot log
     # in at all, so the roles are checked too.
+    $seen = @{}
+    if (@($plan.users).Count) {   # OPEN-06: an empty principal list has no user to read back
     Step 'verify'
     $q = Get-PimSqlBootstrapVerifyQuery -Names (@($plan.users) | ForEach-Object { $_.name })
-    $seen = @{}
     $cmd = $conn.CreateCommand(); $cmd.CommandText = $q
     $r = $cmd.ExecuteReader()
     while ($r.Read()) { $seen[[string]$r['name']] = @{ sid = [string]$r['sid']; roles = [string]$r['roles'] } }
     $r.Close()
+    }
 
     foreach ($u in @($plan.users)) {
         $got = $seen[$u.name]

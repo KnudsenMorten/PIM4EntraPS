@@ -1,16 +1,12 @@
 ﻿<#
   PIM4EntraPS -- HOSTED Manager principal authentication (SEC-01).
 
-  WHY THIS EXISTS (audit finding SEC-01, REQUIREMENTS §33.3)
-  ---------------------------------------------------------
-  The hosted Manager used to resolve the calling identity from ONE plaintext request
-  header -- X-MS-CLIENT-PRINCIPAL-NAME -- and hand that identity straight to
-  Get-PimManagerRole, which grants SuperAdmin to any UPN listed in PIM_SuperAdmins.
-  Nothing in the solution verified that the header actually came from the platform's
-  authentication edge. Worse, GET / served the /api bearer token to ANY caller, so the
-  token was not a second factor: two requests (GET / for the token, then any /api call
-  with a forged principal header) reached SuperAdmin on the privileged-access control
-  plane.
+  WHAT THIS FILE ENFORCES (SEC-01, REQUIREMENTS §33.3)
+  ----------------------------------------------------
+  The hosted Manager accepts a calling identity only when the platform's authentication
+  edge vouches for it (the rules below), before Get-PimManagerRole maps it to a role.
+  GET / and every /api call require that positively-trusted principal; the page and the
+  token it carries are never served to an unauthenticated caller.
 
   WHAT AUTHENTICITY IS ACTUALLY AVAILABLE TO US
   ---------------------------------------------

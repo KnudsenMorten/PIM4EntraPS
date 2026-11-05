@@ -737,9 +737,8 @@ function Get-PimCentralKillState {
         if ("$($v.code)" -eq 'expired') {
             return @{ state = 'expired'; blocks = $false; kills = @(); signer = "$($v.signer)"; reason = "central kill manifest present but EXPIRED -- not in force ($($v.reason))" }
         }
-        # A manifest we cannot verify is refused -- and so is the pull. Whoever can write a bad manifest to the
-        # master's container can equally corrupt the bundle, so this costs no availability the bundle does not
-        # already cost, and it keeps "a kill we could not verify" from ever reading as "no kill".
+        # A manifest that does not verify is refused -- and so is the pull: it keeps "a kill that did not verify"
+        # from ever reading as "no kill".
         return @{ state = 'invalid'; blocks = $true; kills = @(); signer = "$($v.signer)"; reason = "CENTRAL KILL MANIFEST INVALID -- $($v.reason); refusing to pull until it verifies or is withdrawn" }
     }
     $kills = @(@(Get-PimDownlinkValue -Object $v.payload -Key 'kills') | Where-Object { $null -ne $_ })

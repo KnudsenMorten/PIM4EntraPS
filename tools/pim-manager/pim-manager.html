@@ -8045,7 +8045,7 @@
     const g = document.getElementById('envNameGroup'); const b = document.getElementById('envNameBadge');
     if (!g || !b) return;
     let v = (known !== undefined) ? known : null;
-    if (v === null) { try { const d = await api('GET', '/api/settings/environment-name'); v = (d && d.value) || ''; } catch (_) { v = ''; } }
+    if (v === null) { try { const d = await api('GET', '/api/settings/environment-name'); v = (d && (d.displayName || d.value)) || ''; } catch (_) { v = ''; } }
     v = String(v || '').trim();
     b.dataset.maskOn = ''; delete b.dataset.realText;   // 100.67: a new name is the real one; the mask re-applies below
     b.textContent = v;
@@ -9068,7 +9068,7 @@
     { key: 'reports',   label: 'Reports',                match: ['setReportsCard'] },   // MAIL-2 item 6: every report + alert in one view
     { key: 'access',    label: 'Access requests (RFA)',  match: ['setRfaBrandingHost', 'setRfaBrokerHost'] },
     { key: 'hybrid',    label: 'Hybrid AD & workloads',  match: ['setHybridAdHost', /AD OU placement/i, 'setWorkloadExemptCard', 'setTemplatePacksHost'] },
-    { key: 'tools',     label: 'Copy & tools',           match: ['setCopyHost', 'setConfigBackupHost', 'setAsBuiltCard'] },   // §100.61: As-built document
+    { key: 'tools',     label: 'Copy & tools',           match: ['setCopyHost', 'setTemplateFileHost', 'setConfigBackupHost', 'setAsBuiltCard'] },   // §100.61: As-built document; PIM-TEMPLATE-IMPORT
   ];
   function settingsCategoryOf(el) {
     const id = el.id || '';
@@ -9509,6 +9509,8 @@
     // default"; "this should also go into settings"). The job schedule went to its own page under Jobs.
     // The permission template packs moved to their own page, Templates > Workload templates (operator 2026-10-05).
     h += `<div id="setCopyHost" style="margin-top:18px;"></div>`;
+    // PIM-TEMPLATE-IMPORT (owner 2026-11-03): Export template / Import template -- one file of definitions, staged for review.
+    h += `<div id="setTemplateFileHost" class="set-card" style="margin-top:18px;"></div>`;
     // CONFIG-1.3: how long configuration backups are kept (ConfigBackupRetentionDays, default 90; SuperAdmin changes it).
     h += `<div id="setConfigBackupHost" class="set-card" style="margin-top:18px;"></div>`;
     // §100.61: the as-built document -- a PDF of how THIS installation is configured, rendered inside the environment. Admin+.
@@ -9524,6 +9526,7 @@
     // inside each renderer, unchanged: role mapping + break-glass SuperAdmin, template toggles + mail edit Admin+.
     // Verified by tests/gui-headless/config-zone-wiring.js (every control present AND wired in its new home).
     renderSettingsCopySection(document.getElementById('setCopyHost'));
+    renderTemplateFileSection(document.getElementById('setTemplateFileHost'));
     renderConfigBackupRetentionCard(document.getElementById('setConfigBackupHost'));
     renderEnvironmentNameSection(document.getElementById('setEnvNameHost'));
     renderDemoModeSection(document.getElementById('setDemoModeHost'));
@@ -14398,6 +14401,140 @@
     };
   }
 
+  // ----- Settings: Export template / Import template (PIM-TEMPLATE-IMPORT, owner 2026-11-03) ------------------------------
+  // ONE file (the permission-pack shape) with departments, groups, delegations, admin accounts and policy-template links.
+  // Export (Admin+): GET /api/template-file/export -> a download. Import (SuperAdmin): the file goes to
+  // POST /api/template-file/import { text, dryRun: true } -> every error with its part, row and reason (nothing staged), or
+  // the plan (create / change / left); "Stage ... for review" sends dryRun: false -> EVERY row lands in Pending changes,
+  // committed only by Review & Save (with the second approver when it is on). Nothing on this card saves a definition.
+  const TF_STATE = { text: '', fileName: '' };
+  function tfPartLabel(base) {
+    const m = { 'Account-Definitions-Admins': 'Admin accounts', 'Account-Definitions-Companies': 'Companies', 'PIM-Definitions-Departments': 'Departments',
+      'PIM-Definitions-AU': 'Administrative units', 'PIM-Assignments-Admins': 'Admin memberships', 'PIM-Assignments-Groups': 'Group nestings',
+      'PIM-Assignments-Roles-Groups': 'Entra role delegations', 'PIM-Assignments-Roles-AUs': 'Entra role delegations (administrative units)',
+      'PIM-Assignments-Azure-Resources': 'Azure delegations', 'PIM-Assignments-Workloads': 'Workload delegations' };
+    if (m[base]) return m[base];
+    const g = /^PIM-Definitions-(.+)$/.exec(String(base || ''));
+    return g ? 'Groups (' + g[1] + ')' : String(base || '');
+  }
+  function tfErrorsHtml(errs, title) {
+    const esc = escapeHtml;
+    return '<div id="tfErrors" style="margin-top:8px;"><div style="color:#cf222e;font-size:12.5px;font-weight:600;">' + esc(title) + '</div>' +
+      '<table class="set-table" id="tfErrTbl" style="width:100%;font-size:12px;margin-top:4px;"><thead><tr><th>Part</th><th>Row</th><th>Column</th><th>What is wrong</th></tr></thead><tbody>' +
+      (errs || []).map(e => '<tr data-code="' + esc(e.code || '') + '"><td>' + esc(e.entity ? tfPartLabel(e.entity) : '(the file)') + '</td><td>' + esc(e.row == null ? '' : String(e.row)) + '</td><td>' + esc(e.column || '') + '</td>' +
+        '<td>' + esc(e.message || '') + (e.suggestion ? '<div style="color:#57606a;">' + esc(e.suggestion) + '</div>' : '') + '</td></tr>').join('') +
+      '</tbody></table></div>';
+  }
+  function tfPlanHtml(r) {
+    const esc = escapeHtml;
+    const c = (r && r.counts) || {};
+    const plan = (r && r.plan) || {};
+    let h = '<div id="tfPlan" style="margin-top:8px;"><div style="font-size:12.5px;margin-bottom:6px;">' +
+      (r.name ? '<b>' + esc(r.name) + '</b>: ' : '') +
+      '<b class="tfCreate">' + fmtNum(c.create || 0) + '</b> to create &middot; <b class="tfChange">' + fmtNum(c.change || 0) + '</b> to change &middot; ' +
+      '<b>' + fmtNum(c.unchanged || 0) + '</b> already the same &middot; <b>' + fmtNum(c.left || 0) + '</b> left as they are</div>' +
+      '<table class="set-table" id="tfPlanTbl" style="width:100%;font-size:12px;"><thead><tr><th>Part</th><th>Create</th><th>Change</th><th>Same</th><th>Left</th></tr></thead><tbody>' +
+      Object.keys(plan).map(b => { const p = plan[b] || {}; return '<tr data-base="' + esc(b) + '"><td>' + esc(tfPartLabel(b)) + '</td><td>' + fmtNum(p.create || 0) + '</td><td>' + fmtNum(p.change || 0) + '</td><td>' + fmtNum(p.unchanged || 0) + '</td><td>' + fmtNum(p.left || 0) + '</td></tr>'; }).join('') +
+      '</tbody></table>';
+    const chg = [];
+    Object.keys(plan).forEach(b => (plan[b].changes || []).forEach(x => chg.push('<li>' + esc(tfPartLabel(b)) + ' &middot; <code>' + esc(x.key) + '</code>: ' + esc((x.columns || []).join(', ')) + '</li>')));
+    if (chg.length) h += '<details style="margin-top:6px;font-size:12px;"><summary>What changes (' + chg.length + ')</summary><ul style="margin:4px 0 0 18px;padding:0;">' + chg.join('') + '</ul></details>';
+    const left = [];
+    Object.keys(plan).forEach(b => (plan[b].leftRows || []).forEach(x => left.push('<li>' + esc(tfPartLabel(b)) + ' &middot; <code>' + esc(x.key || '') + '</code>: ' + esc(x.reason || '') + '</li>')));
+    if (left.length) h += '<details style="margin-top:6px;font-size:12px;"><summary>Left as they are (' + left.length + ')</summary><ul style="margin:4px 0 0 18px;padding:0;">' + left.join('') + '</ul></details>';
+    if ((r.warnings || []).length) h += '<details style="margin-top:6px;font-size:12px;color:#9a6700;"><summary>Warnings (' + r.warnings.length + ')</summary><ul style="margin:4px 0 0 18px;padding:0;">' +
+      r.warnings.map(w => '<li>' + esc(tfPartLabel(w.entity)) + ' row ' + esc(String(w.row == null ? '' : w.row)) + ': ' + esc(w.message || '') + '</li>').join('') + '</ul></details>';
+    return h + '</div>';
+  }
+  async function renderTemplateFileSection(host) {
+    if (!host) return;
+    const esc = escapeHtml;
+    const canImport = roleAtLeast('SuperAdmin');
+    let h = '<h3 style="margin:0 0 4px;font-size:14px;">Export and import a template</h3>' +
+      '<div style="color:#57606a;font-size:11.5px;margin:2px 0 8px;">A template is one file with your departments, groups, delegations, admin accounts and the policy templates the groups use. ' +
+      'Export it here to set up another installation the same way. When you import a template, PIM Manager checks every row first and shows what it creates and changes. ' +
+      'The rows then wait under <b>Pending changes</b> until you review and commit them; nothing changes in your tenant before that. ' +
+      'An export never contains secrets, tenant ids or subscription ids.</div>' +
+      '<div><input type="text" id="tfName" aria-label="Template name" placeholder="Template name" maxlength="120" style="width:220px;font-size:12px;"> ' +
+      '<button type="button" class="btn-sec" id="tfExport">Export template</button> <span id="tfExpMsg" style="font-size:12px;"></span></div>';
+    if (canImport) {
+      h += '<div style="margin-top:12px;border-top:1px solid #eaeef2;padding-top:10px;"><b style="font-size:12.5px;">Import template</b> ' +
+        '<input type="file" id="tfFile" aria-label="Template file to import" accept=".json,application/json" style="font-size:12px;"> <span id="tfImpMsg" style="font-size:12px;"></span>' +
+        '<div id="tfResult"></div></div>';
+    } else {
+      h += '<div id="tfImportRole" style="margin-top:8px;color:#57606a;font-size:11.5px;">Importing a template needs the SuperAdmin role.</div>';
+    }
+    host.innerHTML = h;
+    const exp = document.getElementById('tfExport');
+    if (exp) exp.onclick = async () => {
+      const msg = document.getElementById('tfExpMsg');
+      const name = String((document.getElementById('tfName') || {}).value || '').trim();
+      try {
+        const doc = await api('GET', '/api/template-file/export' + (name ? '?name=' + encodeURIComponent(name) : ''));
+        const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'pim-template-' + String(name || 'export').replace(/[^A-Za-z0-9_-]+/g, '-') + '-' + String(doc.exportedUtc || '').slice(0, 10) + '.json';
+        document.body.appendChild(a); a.click(); a.remove();
+        msg.textContent = 'Exported ' + fmtNum(doc.rowCount || 0) + ' row(s).'; msg.style.color = '#116329';
+      } catch (e) { msg.textContent = 'Export failed: ' + ((e && e.body && e.body.error) || e.message); msg.style.color = '#cf222e'; }
+    };
+    const fileIn = document.getElementById('tfFile');
+    if (fileIn) fileIn.onchange = async () => {
+      const f = fileIn.files && fileIn.files[0];
+      const msg = document.getElementById('tfImpMsg');
+      document.getElementById('tfResult').innerHTML = '';
+      if (!f) return;
+      let text = '';
+      try { text = await f.text(); } catch (e) { msg.textContent = 'The file could not be read.'; msg.style.color = '#cf222e'; return; }
+      TF_STATE.text = text; TF_STATE.fileName = f.name || '';
+      await tfCheck();
+    };
+  }
+  // Check the chosen file (dry run) and show the errors or the plan with "Stage ... for review".
+  async function tfCheck() {
+    const msg = document.getElementById('tfImpMsg'); const out = document.getElementById('tfResult');
+    if (!msg || !out) return;
+    msg.textContent = 'Checking the file...'; msg.style.color = '#57606a';
+    let r = null;
+    try { r = await api('POST', '/api/template-file/import', { text: TF_STATE.text, dryRun: true }); }
+    catch (e) {
+      const b = e && e.body;
+      if (b && (b.errors || []).length) {
+        msg.textContent = '';
+        out.innerHTML = tfErrorsHtml(b.errors, b.stage === 'validate' ? (b.errors.length + ' row(s) of the file do not pass the check. Nothing was staged. Correct the file and choose it again.')
+          : ('The file has ' + b.errors.length + ' error(s). Nothing was staged. Correct the file and choose it again.')) + (b.plan ? tfPlanHtml(b) : '');
+        return;
+      }
+      msg.textContent = 'Cannot import: ' + ((b && b.error) || e.message); msg.style.color = '#cf222e';
+      return;
+    }
+    msg.textContent = (TF_STATE.fileName ? TF_STATE.fileName + ': ' : '') + 'every row passes the check.'; msg.style.color = '#116329';
+    const total = Number((r.counts || {}).create || 0) + Number((r.counts || {}).change || 0);
+    out.innerHTML = tfPlanHtml(r) + (total
+      ? '<div style="margin-top:10px;"><button type="button" class="btn" id="tfStage">Stage ' + fmtNum(total) + ' change(s) for review</button> <span id="tfStageMsg" style="font-size:12px;"></span>' +
+        '<div style="font-size:11.5px;color:#57606a;margin-top:4px;">Nothing is saved until the changes are committed under Pending changes' + (SHARED && SHARED.mode && SHARED.mode !== 'off' ? ', by a second administrator' : '') + '.</div></div>'
+      : '<div id="tfNothing" style="margin-top:8px;color:#116329;font-size:12px;">Everything in this file is already here. There is nothing to stage.</div>');
+    const st = document.getElementById('tfStage');
+    if (st) st.onclick = async () => {
+      const sm = document.getElementById('tfStageMsg');
+      st.disabled = true;
+      try {
+        const s = await api('POST', '/api/template-file/import', { text: TF_STATE.text, dryRun: false });
+        out.innerHTML = '<div id="tfStaged" style="font-size:12.5px;color:#1a7f37;margin-top:8px;"><b>Staged ' + fmtNum(s.staged || 0) + ' change(s).</b> Nothing is saved yet. ' +
+          '<a id="tfGoSave" style="cursor:pointer;color:#0969da;font-weight:600;">Review and commit under Pending changes &rarr;</a></div>';
+        try { await sharedPull(); } catch (_) { }
+        try { markBadges(); } catch (_) { }
+        const g = document.getElementById('tfGoSave'); if (g) g.onclick = () => switchTab('save');
+      } catch (e) {
+        const b = e && e.body;
+        st.disabled = false;
+        if (b && (b.errors || []).length) { out.innerHTML = tfErrorsHtml(b.errors, 'Nothing was staged: ' + (b.error || 'the file did not pass the check.')); return; }
+        sm.textContent = 'Nothing was staged: ' + ((b && b.error) || e.message); sm.style.color = '#cf222e';
+      }
+    };
+  }
+
   // ----- Settings: Permission template packs -----------------------------------------------------------------------------
   async function renderTemplatePacksSection(host) {
     if (!host) return;
@@ -14484,7 +14621,7 @@
       btn.disabled = true;
       try {
         const r = await api('PUT', '/api/settings/environment-name', { value: v });
-        await renderEnvironmentName((r && r.value) || '');
+        await renderEnvironmentName((r && (r.displayName || r.value)) || '');
         if (msg) { msg.style.color = '#1a7f37'; msg.textContent = (r && r.value) ? 'Saved -- shown at the top as "' + r.value + '".' : 'Saved -- no environment name is shown.'; }
       } catch (e) { if (msg) { msg.style.color = '#cf222e'; msg.textContent = String((e && e.message) || e); } }
       btn.disabled = false;
@@ -17326,7 +17463,7 @@
         if (v.length > max) return { errors: { envName: 'The environment name can be at most ' + max + ' characters -- nothing was saved.' } };
         try {
           const r = await api('PUT', '/api/settings/environment-name', { value: v });
-          try { await renderEnvironmentName((r && r.value) || ''); } catch (_) { }
+          try { await renderEnvironmentName((r && (r.displayName || r.value)) || ''); } catch (_) { }
           return { wrote: true, note: (r && r.value) ? 'Saved -- shown at the top as "' + r.value + '".' : 'Saved -- no environment name is shown.' };
         } catch (e) { return { errors: { envName: 'Not saved: ' + gsErrText(e) } }; }
       }

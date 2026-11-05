@@ -19,7 +19,8 @@
                                         + SchedulerTickJobId (converge-defaults lines), CR8 (ACR admin user, Key Vault purge
                                         protection, no SAS in PIM_UPDATE_SOURCE_URL, SQL auditing), the front state (Key Vault
                                         key 'signin-front' + SQL schema 'signin'), the front's private Key Vault, the pull /
-                                        publish jobs' Reader on themselves, the as-built storage + rights
+                                        publish jobs' Reader on themselves, the as-built storage + rights, the database
+                                        job (OPEN-06: present, on version, its identity in the SQL admin group)
       updater (UpdateState, own keys)   sqlAccess (run 1 / run 2 / updater in the admin group), signIn (the layer),
                                         enginePermissions (the 95.2i check: Graph + the Reader at the tenant root)
       heartbeat                         Controls (mail-sender, licence-valid, uplink-key, update-ring, identity-permissions),
@@ -59,6 +60,9 @@ function Get-PimSetupStepCatalog {
         # SETUPSTEPS-TRUTH (e): the updater may NOT assign roles (P9) -- it only notes the refusal; the Support app grants it
         # (ops grant-job-self-reader.ps1).
         [ordered]@{ key = 'job-self-reader';          title = 'Pull / publish jobs read their own runs';             since = '2.4.636'; how = 'support-app' }
+        # OPEN-06 / NO-PERSON-DB-ADMIN: the in-network database job, its version and its identity in the SQL admin group (the
+        # updater creates the job; the Support app adds the identity to the group -- the updater never writes a membership).
+        [ordered]@{ key = 'db-job';                   title = 'Database job (no person needs database admin)';       since = '3.0.36';  how = 'support-app' }
     )
 }
 function Get-PimSetupStepMax { return 50 }
@@ -233,6 +237,24 @@ function Get-PimSetupStepAsBuiltFacts {
     }
 }
 
+function Get-PimSetupStepDbJobFacts {
+    <#
+      OPEN-06: the 'db-job' facts. Get-PimDbInitSetupState (engine/_shared/PIM-DbInitJob.ps1, PURE; dbJob = ok|missing|unknown,
+      dbJobDetail) is called when it exists; absent (a build without it) = 'unknown', detail 'not checked by this version'.
+      Never throws.
+    #>
+    param([AllowNull()][object]$DbInitResult)
+    if (-not (Get-Command Get-PimDbInitSetupState -ErrorAction SilentlyContinue)) { return [ordered]@{ dbJob = 'unknown'; dbJobDetail = 'not checked by this version' } }
+    try {
+        $r = Get-PimDbInitSetupState -Result $DbInitResult
+        $st = "$(Get-PimSetupStepField $r 'dbJob')".Trim().ToLowerInvariant()
+        if ($st -notin @('ok', 'missing', 'unknown')) { $st = 'unknown' }
+        return [ordered]@{ dbJob = $st; dbJobDetail = "$(Get-PimSetupStepField $r 'dbJobDetail')" }
+    } catch {
+        return [ordered]@{ dbJob = 'unknown'; dbJobDetail = "the database job state could not be read: $(((("$($_.Exception.Message)") -split "`n")[0]).Trim())" }
+    }
+}
+
 # ---------------------------------------------------------------------------------------------------------------------
 # SETUPSTEPS-TRUTH (a): THE ACCESS FACTS, read through the read-only SIGNED procedure [pim].[usp_AccessFacts]
 # (engine/_shared/PIM-SqlAccess.ps1 Get-PimSqlAccessFactsProcedureText; installed by an admin run). The engine's and the
@@ -333,6 +355,7 @@ function New-PimSetupSteps {
         UpdateState       pim.Settings 'UpdateState' (sqlAccess, signIn, enginePermissions, tsUtc)
         Controls          Get-PimSetupControlStates output (id; state; value)
         SupportSqlAccess  { group; dbUser } (the heartbeat's own read)
+        SupportConsent    pim.Settings 'SupportConsentState' (OPEN-01: the updater's last consent decision; consent none -> n/a)
         Permissions       pim.Settings 'PermissionSnapshot' (the Manager's last check)
         NowUtc            the heartbeat's time
       A missing fact = 'unknown' with a detail saying what was not read. Every entry validated (Test-PimSetupStepEntry);
@@ -385,8 +408,14 @@ function New-PimSetupSteps {
         # readOnly is sent only when the JIT procedures answered; jitOpen false WITHOUT readOnly = the JIT path is not set up.
         $ro = ConvertTo-PimSetupStepBool (Get-PimSetupStepField $ssa 'readOnly'); $jo = ConvertTo-PimSetupStepBool (Get-PimSetupStepField $ssa 'jitOpen')
         $standing = (@($(if ($g -eq $true) { 'SQL admin group' }), $(if ($d -eq $true) { 'db_owner' })) | Where-Object { $_ }) -join ' + '
-        if ($ro -eq $true) { & $set 'support-sql' 'ok' 'the standing read-only access and the just-in-time grant path are in place' $at }
-        elseif ($ro -eq $false) { & $set 'support-sql' 'missing' 'the just-in-time grant path is in place, the standing read-only access is missing' $at }
+        # OPEN-01 (framework "SUPPORT ACCESS" point 1): the standing read-only access = the role pim_support_read (SELECT on the
+        # product schemas only). Consent none (Invardia's answer, as the UPDATER last applied it -- pim.Settings
+        # SupportConsentState) = NO Support database user, as agreed: n/a, never 'missing'.
+        $scRec = ConvertTo-PimSetupStepObject (Get-PimSetupStepField $Facts 'SupportConsent')
+        $scLevel = "$(Get-PimSetupStepField $scRec 'consent')".Trim().ToLowerInvariant()
+        if ($scLevel -eq 'none' -and $ro -ne $true -and $jo -ne $true) { & $set 'support-sql' 'n/a' 'the customer gave no consent to support database access (none): no Support database user, as agreed' $at }
+        elseif ($ro -eq $true) { & $set 'support-sql' 'ok' 'the standing read-only access (pim_support_read) and the just-in-time grant path are in place' $at }
+        elseif ($ro -eq $false) { & $set 'support-sql' 'missing' 'the just-in-time grant path is in place, the standing read-only access is missing (role pim_support_read)' $at }
         elseif ($jo -eq $false) { & $set 'support-sql' 'missing' ("the just-in-time grant path is not set up on this install$(if ($standing) { " (standing access meanwhile: $standing)" })") $at }
         else { & $set 'support-sql' 'unknown' 'not determined: the just-in-time access state could not be read' $at }
     }
@@ -533,6 +562,19 @@ function New-PimSetupSteps {
         }
     }
 
+    # ---- S17 db-job (updater: Invoke-PimDbInitJobConverge -> Get-PimDbInitSetupState) --------------------------------
+    # A state is READ, never inferred: ok only when the updater read the job present, on the Manager's version AND its
+    # identity in the SQL admin group (dbJob = 'ok'); anything else it read is missing (with WHICH); not read = unknown.
+    if ($null -eq $up) { & $set 'db-job' 'unknown' $noUp $null }
+    else {
+        $dj = "$(& $uf 'dbJob')".Trim().ToLowerInvariant(); $djd = "$(& $uf 'dbJobDetail')".Trim()
+        switch ($dj) {
+            'ok'      { & $set 'db-job' 'ok' $(if ($djd) { $djd } else { 'the database job is in place, on this version, its identity in the SQL admin group' }) $upAt }
+            'missing' { & $set 'db-job' 'missing' $(if ($djd) { $djd } else { 'the database job, its version or its identity in the SQL admin group is missing' }) $upAt }
+            default   { & $set 'db-job' 'unknown' $(if ($djd) { "not determined: $djd" } else { 'not checked by this version' }) $upAt }
+        }
+    }
+
     # ---- assemble, in the catalog's order; validate; cap -------------------------------------------------------------
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($c in (Get-PimSetupStepCatalog)) {
@@ -588,17 +630,21 @@ function Get-PimSetupStepUpdaterFacts {
         -JobSelfId       Invoke-PimJobSelfIdUpdate result
         -SqlAudit        Invoke-PimSqlAuditConverge result
         -AsBuilt         Invoke-PimAsBuiltConverge result
+        -DbInit          Invoke-PimDbInitJobConverge result (OPEN-06; $null = not converged this run -> db-job unknown)
         -SourceUrl       PIM_UPDATE_SOURCE_URL
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup,
           [string]$ManagerApp = 'ca-pim-manager', [Parameter(Mandatory)][scriptblock]$Arm, [scriptblock]$SqlScalar,
           [object[]]$ConvergeLines = @(), [AllowNull()][object]$JobSelfId, [AllowNull()][object]$SqlAudit, [AllowNull()][object]$AsBuilt,
+          [AllowNull()][object]$DbInit,
           [AllowNull()][string]$SourceUrl = $env:PIM_UPDATE_SOURCE_URL, [datetime]$NowUtc = [datetime]::UtcNow)
     $f = [ordered]@{ checkedUtc = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
                      privateNetwork = $null; jobsOperator = $null; tickJobIdSet = $null
                      acrAdminOff = $null; kvPurgeProtection = $null; sourceUrlNoSas = $null; sqlAudit = $null
                      frontKey = $null; frontSqlSchema = $null; frontKvPrivate = $null; jobSelfReader = $null
-                     asBuiltStorage = 'unknown'; asBuiltRights = 'unknown'; asBuiltDetail = '' }
+                     asBuiltStorage = 'unknown'; asBuiltRights = 'unknown'; asBuiltDetail = ''
+                     dbJob = 'unknown'; dbJobDetail = '' }
+    try { $dj = Get-PimSetupStepDbJobFacts -DbInitResult $DbInit; $f.dbJob = $dj.dbJob; $f.dbJobDetail = (ConvertTo-PimSetupStepDetail -Text $dj.dbJobDetail) } catch { }
     $rg = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
     $items = { param($a) if ($null -eq $a) { @() } elseif ($a.PSObject.Properties['value']) { @(@($a.value) | Where-Object { $_ }) } else { @($a) } }
     try { $cl = ConvertFrom-PimSetupConvergeLines -Lines $ConvergeLines; $f.jobsOperator = $cl.jobsOperator; $f.tickJobIdSet = $cl.tickJobIdSet } catch { }
