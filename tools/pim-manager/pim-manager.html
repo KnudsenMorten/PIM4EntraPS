@@ -8225,6 +8225,9 @@
       return;
     }
     const st = ringStyle(v.state);
+    // SCHEMA-QUIESCE-818: an update that waited for a running PIM job (the database is never changed under a run) is 'waiting'
+    // too -- said in its own words, never as the install key.
+    const waitWord = (v.waiting && v.lastAction === 'schema') ? 'waiting for a running PIM job' : '';
     const val = (x) => (x == null || x === '') ? '<span style="color:#8c959f;">not recorded</span>' : '<b>' + esc(String(x)) + '</b>';
     // An unsigned source (a storage container chosen for this environment) is said on the row itself, in red.
     const updSourceHtml = (x) => x.unsignedSource
@@ -8236,7 +8239,7 @@
     h += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">' +
          '<span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Updates &amp; ring</span>' +
          '<span class="updRingLabel" style="font-weight:600;color:' + st.fg + ';">' + esc(v.ringLabel || 'not recorded') + '</span>' +
-         '<span class="updRingState updRingState-' + esc(v.state) + '" style="font-size:10.5px;font-weight:600;padding:1px 8px;border-radius:10px;color:' + st.fg + ';background:#ffffff;border:1px solid ' + st.bd + ';">' + esc(st.word) + '</span>' +
+         '<span class="updRingState updRingState-' + esc(v.state) + '" style="font-size:10.5px;font-weight:600;padding:1px 8px;border-radius:10px;color:' + st.fg + ';background:#ffffff;border:1px solid ' + st.bd + ';">' + esc(waitWord || st.word) + '</span>' +
          '<span style="flex:1 1 auto;"></span>' +
          '<button id="updRingRefresh" class="ghost" style="font-size:12px;">Refresh</button>' +
          '</div>';
@@ -8284,7 +8287,7 @@
       h += row('Last version built here', val(v.lastBuiltVersion));
       h += row('Last update run', (v.lastRunUtc ? '<b>' + pimUtcHtml(v.lastRunUtc) + '</b>' : '<span style="color:#8c959f;">not recorded</span>') +
                ' <span style="color:#8c959f;font-size:11px;">' + esc(ringRecordedAgo(v)) + '</span>' +
-               (v.lastOutcome ? ' &middot; outcome <b style="color:' + ((v.failing || v.attention) ? PIM_RING_STATE_STYLE.failing.fg : (v.waiting ? PIM_RING_STATE_STYLE.waiting.fg : '#1a7f37')) + ';">' + esc(PIM_RING_OUTCOME_WORD[v.lastOutcome] || v.lastOutcome) + '</b>' : '') +
+               (v.lastOutcome ? ' &middot; outcome <b style="color:' + ((v.failing || v.attention) ? PIM_RING_STATE_STYLE.failing.fg : (v.waiting ? PIM_RING_STATE_STYLE.waiting.fg : '#1a7f37')) + ';">' + esc(waitWord || PIM_RING_OUTCOME_WORD[v.lastOutcome] || v.lastOutcome) + '</b>' : '') +
                (v.lastAction ? ' <span style="color:#57606a;">(' + esc(PIM_RING_ACTION_WORD[v.lastAction] || v.lastAction) + ')</span>' : ''), 'updRingLastRun');
       h += row('Last SUCCESSFUL update', (v.lastSuccessUtc ? '<b>' + pimUtcHtml(v.lastSuccessUtc) + '</b>' : '<span style="color:#8c959f;">none recorded</span>') +
                (v.lastSuccessVersion ? ' &rarr; <b>' + esc(v.lastSuccessVersion) + '</b>' : ''), 'updRingLastSuccess');

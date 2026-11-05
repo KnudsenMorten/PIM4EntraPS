@@ -129,6 +129,10 @@ function New-PimUpdateStateRecord {
         [AllowNull()][object]$EnginePermissions = $null,
         # FLEET-SETUPSTEPS: the one-time steps' facts read THIS run (Get-PimSetupStepUpdaterFacts); $null = not read -> carried.
         [AllowNull()][object]$SetupFacts = $null,
+        # BUILDPOOL-11G: the build pool read THIS run (New-PimAcrBuildPoolState); $null = not read -> carried.
+        # -NoBuildPool = this install has no pool (a public install): the key is never written, nothing is carried.
+        [AllowNull()][object]$BuildPool = $null,
+        [switch]$NoBuildPool,
         [datetime]$NowUtc = [datetime]::UtcNow
     )
     $ts = $NowUtc.ToUniversalTime().ToString('o')
@@ -156,6 +160,11 @@ function New-PimUpdateStateRecord {
     if ($null -eq $engPerm -and $Previous) { $engPerm = Get-PimUpdateStateField -Object $Previous -Key 'enginePermissions' }
     $setupF = $SetupFacts
     if ($null -eq $setupF -and $Previous) { $setupF = Get-PimUpdateStateField -Object $Previous -Key 'setupFacts' }
+    $bPool = $null
+    if (-not $NoBuildPool) {
+        $bPool = $BuildPool
+        if ($null -eq $bPool -and $Previous) { $bPool = Get-PimUpdateStateField -Object $Previous -Key 'buildPool' }
+    }
     $rec = [ordered]@{
         schema             = (Get-PimUpdateStateSchema)
         # 'run' = written by an update run. The deployment writes kind 'deploy' (New-PimUpdateStateDeployRecord)
@@ -198,6 +207,7 @@ function New-PimUpdateStateRecord {
     if ($null -ne $signIn) { $rec['signIn'] = $signIn }
     if ($null -ne $engPerm) { $rec['enginePermissions'] = $engPerm }
     if ($null -ne $setupF) { $rec['setupFacts'] = $setupF }
+    if ($null -ne $bPool) { $rec['buildPool'] = $bPool }
     return $rec
 }
 
@@ -654,6 +664,9 @@ function Get-PimUpdateStateVerdict {
         $bits.Add("Last update check did not complete (at the '$($out.lastAction)' step) -- $keeps; nothing to do.")
     } elseif ($out.attention) {
         $bits.Add("Last update check needs a look -- $keeps. The details below name the one setting to change.")
+    } elseif ($out.waiting -and $out.lastAction -eq 'schema') {
+        # SCHEMA-QUIESCE-818: the update waited for a running PIM job and deferred -- the database is never changed under a run.
+        $bits.Add("Waiting for a running PIM job to finish -- the database is never changed under a run, and the next update run tries again; $keeps.")
     } elseif ($out.waiting) {
         $bits.Add("Waiting for the install key -- the engine claims it within about 5 minutes of install, and the next update run proceeds; $keeps.")
     }

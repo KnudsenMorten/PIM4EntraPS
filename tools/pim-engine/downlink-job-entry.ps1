@@ -139,6 +139,14 @@ try {
     if ($env:PIM_ClientId -and -not $global:PIM_ClientId) { $global:PIM_ClientId = "$($env:PIM_ClientId)".Trim() }
     $cadenceCs = Get-PimSqlConnectionString -Server "$env:PIM_SqlServer".Trim() -Database $(if ("$env:PIM_SqlDatabase".Trim()) { "$env:PIM_SqlDatabase".Trim() } else { 'PimPlatform' })
 } catch { $cadenceErr = "$($_.Exception.Message)" }
+# SCHEMA-QUIESCE-818 (framework 8.18): while the updater waits to change the database (pim.Settings UpdateSchemaHold, expires
+# by itself) the pull starts no run on top -- BEFORE the cadence gate, so a due pull / Run pull now is not used up; it runs on
+# the next trigger. An unreadable hold = the pull runs as always.
+if ("$cadenceCs".Trim()) {
+    $__hold = $null
+    try { . (Join-Path $shared 'PIM-SchemaQuiesce.ps1'); $__hold = Test-PimSchemaHoldActive -Record (Get-PimSqlSetting -ConnectionString $cadenceCs -Name (Get-PimSchemaHoldSettingName)) } catch { $__hold = $null }
+    if ($__hold -and $__hold.active) { JobLog "==== downlink JOB: $($__hold.line) ===="; exit 0 }
+}
 $cadenceLog = { param($m, $l) JobLog $m $l }
 # framework 12.24 / PIM 100.166 (a): a 'running' record of another execution is judged by that execution's platform status
 # (this job's own runs, read with its managed identity); unreadable = one plain line, and the 6 h fallback decides.

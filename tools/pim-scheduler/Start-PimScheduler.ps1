@@ -94,6 +94,7 @@ if ($PSBoundParameters.ContainsKey('Verbose') -and $PSBoundParameters['Verbose']
 trap { if (Get-Command Complete-PimStartupLog -ErrorAction SilentlyContinue) { try { [void](Complete-PimStartupLog -Force) } catch { } }; break }
 . "$shared\PIM-Rest.ps1"
 . "$shared\PIM-InstallNames.ps1"      # CR5 step 1 (PIM 100.149): every resource name of this install from one resolver
+. "$shared\PIM-SchemaQuiesce.ps1"     # SCHEMA-QUIESCE-818: the tick skips while the updater holds it for a database update
 . "$shared\PIM-PortalAccess.ps1"      # Get-PimPolicySetting (config-driven schedule)
 . "$shared\PIM-ChangeQueue.ps1"       # Get-PimQueueApplyPlan (queue-apply handler)
 # 🔴 §65 -- WITHOUT THIS THE QUEUE IS A BLACK HOLE. queue-apply gates on
@@ -928,6 +929,14 @@ if ($ContinuousJob) {
     return
 }
 if ($Once) {
+    # SCHEMA-QUIESCE-818 (framework 8.18): while the updater waits to change the database (pim.Settings UpdateSchemaHold, set by
+    # ca-pim-update, expires by itself), the MAIN tick starts no run on top -- one line, exit 0; the update goes first. A hybrid
+    # worker instance is not held (it is not one of the install's jobs). An unreadable hold = the tick runs as always.
+    if (-not "$Instance".Trim() -and -not "$($env:PIM_SCHED_INSTANCE)".Trim() -and "$($global:PIM_SqlConnectionString)".Trim()) {
+        $_hold = $null
+        try { $_hold = Test-PimSchemaHoldActive -Record (Get-PimSqlSetting -ConnectionString $global:PIM_SqlConnectionString -Name (Get-PimSchemaHoldSettingName)) } catch { $_hold = $null }
+        if ($_hold -and $_hold.active) { Write-Host "[scheduler] $($_hold.line)" -ForegroundColor Yellow; [void](Save-PimLogOnceState); return }
+    }
     # Self-healing layer 2 (operator 2026-10-02: "it must be running 24x7x365"): the 5-minute hybrid tick runs as the SAME gMSA as
     # the continuous sync loop, so it may end a loop that stopped making progress; the sync task restarts it within a minute.
     # (Instance 'hybridsrv' runs as another gMSA and could not -- it does not try.)

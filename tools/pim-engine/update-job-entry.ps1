@@ -84,6 +84,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateNow.ps1')        # framework 8.18 UPDATE-NOW: the 15-minute signal check + the run kind + own cron
 . (Join-Path $solRoot 'engine\_shared\PIM-SetupSteps.ps1')        # FLEET-SETUPSTEPS the one-time install steps' facts (read only) for the heartbeat
 . (Join-Path $solRoot 'engine\_shared\PIM-GuardLimits.ps1')      # framework 8.18: an update-now waits while guard Strict mode is on
+. (Join-Path $solRoot 'engine\_shared\PIM-SchemaQuiesce.ps1')    # SCHEMA-QUIESCE-818 (framework 8.18): no database change under a running PIM job
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
 # 100.61: the image the as-built converge (2e) left caj-pim-asbuilt on THIS run ('' = it did not converge the job) -- the job
@@ -289,8 +290,15 @@ function Invoke-PimUpdaterConvergeStep {
     # connection, so a PRIVATE SQL server works too -- the view, the job's reader user and the install facts. What needs an
     # Owner (the job's write right, the support custom role) is reported, never failed. Never fails the update.
     try {
-        $abSql = $null
-        if ("$csSize".Trim()) {
+        $abSql = $null; $abSqlSkip = ''
+        # SCHEMA-QUIESCE-818: the as-built view + procedure are DDL (CREATE OR ALTER). A run that waited for quiet and holds
+        # the scheduled jobs goes on; any other run (ahead of its ring, or no hold) reads the executions ONCE and skips the
+        # SQL part while a PIM job runs -- it is idempotent, the next update converges it.
+        if ("$csSize".Trim() -and -not $script:PimSchemaQuiet) {
+            $abQ = Invoke-PimUpdaterSchemaQuiesce -Cs "$csSize" -Once
+            if (-not $abQ.go) { $abSqlSkip = "as-built: the view and the job's reader user were not converged this run -- $($abQ.line -replace '^schema quiesce: ', '')" }
+        }
+        if ("$csSize".Trim() -and -not $abSqlSkip) {
             $abCs = "$csSize"
             $abSql = {
                 param($q, $prm)
@@ -305,7 +313,7 @@ function Invoke-PimUpdaterConvergeStep {
         }
         # Live 2026-10-11: no Graph here any more -- the job runs as the user-assigned identity id-pim-asbuilt, whose clientId
         # (= the database user's SID) this identity reads over ARM; the Graph app-id lookup was refused on every run.
-        $ab = Invoke-PimAsBuiltConverge -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -Arm $armSeam -Sql $abSql
+        $ab = Invoke-PimAsBuiltConverge -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -Arm $armSeam -Sql $abSql -SqlSkipReason $abSqlSkip
         # The image the converge left caj-pim-asbuilt on THIS run: the job roll (2b) does not PATCH it again (a second write
         # seconds after the converge's was refused "HTTP 409 ContainerAppsJobOperationInProgress" -- NOT FULLY UPDATED).
         $script:PimAsBuiltJobImageThisRun = "$($ab.jobImage)".Trim()
@@ -453,6 +461,8 @@ $script:PimSqlAccessVerdict   = $null   # §33.0 SqlAccess: set by the access co
 $script:PimSignInLayer        = $null   # framework 8.17 SignIn: read from the Manager app below; $null = carry the last one
 $script:PimSetupFacts = $null           # FLEET-SETUPSTEPS: the one-time steps' facts (converge step 2g); $null = carry the last one
 $script:PimEnginePermissionCheck = $null # 95.2i: the engine's rights for this version (converge step 2d-perm); $null = carry the last one
+$script:PimBuildPoolState = $null        # BUILDPOOL-11G: the build pool as read this run; $null = carry the last one
+$script:PimBuildPoolNone  = -not "$($env:PIM_ACR_AGENT_POOL)".Trim()   # no pool (a public install): no BuildPool recorded at all
 function Send-PimUpdateOutcome {
     param(
         [ValidateSet('none','built','rolled','schema','failed')][string]$Action = 'none',
@@ -467,6 +477,8 @@ function Send-PimUpdateOutcome {
         [ValidateSet('','ok','failed','skipped')][string]$TelemetryOutcome = '',
         [AllowEmptyString()][string]$WaitingSinceUtc = ''
     )
+    # SCHEMA-QUIESCE-818: every exit path records its outcome HERE, so the hold on the scheduled jobs is lifted here too.
+    Clear-PimUpdaterSchemaHold
     if ($script:PimTelemetrySent) { return }        # one record per run, never two
     $script:PimTelemetrySent = $true
     # The vendor telemetry keeps its closed vocabulary: ahead = a good run with nothing to do ('ok'); attention is still
@@ -523,6 +535,7 @@ function Send-PimUpdateOutcome {
                         -LastBuiltVersion "$($env:PIM_UPDATE_LAST_BUILT)" -TargetVersion $ToVersion `
                         -Action $Action -Outcome $Outcome -ErrorText $ErrorText -Previous $prev `
                         -Source "$($env:PIM_UPDATE_SOURCE)" -WaitingSinceUtc $WaitingSinceUtc -SqlAccess $script:PimSqlAccessVerdict -SignIn $script:PimSignInLayer -EnginePermissions $script:PimEnginePermissionCheck -SetupFacts $script:PimSetupFacts `
+                        -BuildPool $script:PimBuildPoolState -NoBuildPool:([bool]$script:PimBuildPoolNone) `
                         -DurationSeconds ([int]([datetime]::UtcNow - $script:PimUpdateStartedUtc).TotalSeconds)
         $saved = Save-PimUpdateState -ConnectionString $csState -Record $stateRec
         if ($saved.ok) { Say "update state: recorded ring '$($stateRec.ring)' / $Outcome in pim.Settings" 'DarkGray' }
@@ -548,6 +561,41 @@ function Send-PimUpdateOutcome {
             } catch { Say "after the update: the cache refresh could not be queued ($($_.Exception.Message)) -- it runs on its own schedule" 'DarkGray' }
         }
     } catch { }                                      # recording can never break the update
+}
+
+# ---- SCHEMA-QUIESCE-818 (framework 8.18; owner 2026-11-05 "it can destroy schema") -- NO DATABASE CHANGE UNDER A RUN -------
+# An update never cancels a running run and never changes the database schema under one: before ANY DDL this run makes it
+# reads the executions of the install's PIM jobs (the same ARM read as its own, engine/_shared/PIM-SchemaQuiesce.ps1), holds
+# the scheduled jobs (pim.Settings UpdateSchemaHold, read by the tick and the pull at their start), waits while one runs
+# (bounded) and DEFERS -- outcome 'waiting', no schema step, no roll -- when one is still running at the bound. Unreadable
+# executions count as running. Nothing is ever stopped. The hold is lifted when this run records its outcome.
+$script:PimSchemaHoldCs   = ''      # the store this run's hold was written to ('' = no hold set by this run)
+$script:PimSchemaQuiet    = $false  # this run waited until no PIM job ran AND holds the scheduled jobs
+$script:PimSchemaDeferred = $null   # the quiesce result when the schema step was deferred
+function Clear-PimUpdaterSchemaHold {
+    if (-not "$($script:PimSchemaHoldCs)".Trim()) { return }
+    $sqClearCs = "$($script:PimSchemaHoldCs)"; $script:PimSchemaHoldCs = ''; $script:PimSchemaQuiet = $false
+    try {
+        Set-PimSqlSetting -ConnectionString $sqClearCs -Name (Get-PimSchemaHoldSettingName) -ValueJson (ConvertTo-Json -InputObject (New-PimSchemaHoldClearRecord -By $selfJob) -Compress)
+        Say 'schema quiesce: the hold on the scheduled jobs is lifted' 'DarkGray'
+    } catch { Say "schema quiesce: the hold could not be lifted ($((("$($_.Exception.Message)") -split "`n")[0])) -- it expires by itself" 'Yellow' }
+}
+function Invoke-PimUpdaterSchemaQuiesce {
+    <# -Once: ONE read, no wait, no hold (the as-built converge on a run that did not quiesce): go only when nothing runs. #>
+    param([AllowEmptyString()][string]$Cs = '', [switch]$Once)
+    $sqRec = $null; if ("$Cs".Trim()) { try { $sqRec = Get-PimSqlSetting -ConnectionString $Cs -Name 'InstallNames' } catch { $sqRec = $null } }
+    $sqExisting = $null
+    try { $sqList = Invoke-PimArm -Method GET -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs" -ApiVersion $script:PimAcaApi; $sqExisting = @(@($sqList.value) | Where-Object { $_ } | ForEach-Object { "$($_.name)" }) } catch { $sqExisting = $null }
+    $sqJobs = @(Get-PimSchemaQuiesceJobNames -Record $sqRec -ManagerApp $managerApp -Existing $sqExisting -Self $selfJob)
+    $sqRead = { param($j) Invoke-PimArm -Method GET -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs/$j/executions" -ApiVersion $script:PimAcaApi }
+    $sqHold = $null
+    if (-not $Once -and "$Cs".Trim()) { $sqHoldCs = "$Cs"; $sqHold = { param($r) Set-PimSqlSetting -ConnectionString $sqHoldCs -Name (Get-PimSchemaHoldSettingName) -ValueJson (ConvertTo-Json -InputObject $r -Compress) } }
+    $sqMax = $(if ($Once) { 0 } else { (Get-PimSchemaQuiesceWaitMinutes) * 60 })
+    $q = Invoke-PimSchemaQuiesce -Jobs $sqJobs -ReadExecutions $sqRead -SetHold $sqHold -By $selfJob -NoHold:$Once -MaxWaitSeconds $sqMax -Log { param($l) Say $l 'DarkGray' }
+    if ($q.held) { $script:PimSchemaHoldCs = "$Cs" }
+    if ($q.go -and -not $Once) { $script:PimSchemaQuiet = $true }
+    if (-not $Once) { Say "$($q.line) [$($sqJobs.Count) job(s) read$(if ($null -eq $sqExisting) { ', the job list was not readable: every resolved name read' })]" $(if ($q.go) { 'DarkGray' } else { 'Yellow' }) }
+    return $q
 }
 
 if (-not $sub -or -not $rg) {
@@ -782,7 +830,11 @@ try {
         # the job builder (tools/setup, in the image): loaded only when an action is due
         . (Join-Path $solRoot 'tools\setup\_PimScriptDoc.ps1'); . (Join-Path $solRoot 'tools\setup\_PimSupportSqlAccess.ps1'); . (Join-Path $solRoot 'tools\setup\_PimSupportSqlJob.ps1')
         $scArm = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
-        Invoke-PimSupportConsentJob -Decision $Decision -Answer $Answer -Arm $scArm -SubscriptionId $sub -ResourceGroup $rg
+        # CONSENT-AFTER-CONVERGE: the database job by the install resolver (ca-pim-dbinit, or caj-pim-dbinit at a new-name
+        # install); when it does not exist YET (the converge creates it later in this run) the job starter says 'not ready'.
+        $scTpl = 'ca-pim-dbinit'
+        try { $scRec = $null; if ("$scCs".Trim()) { $scRec = Get-PimSqlSetting -ConnectionString $scCs -Name 'InstallNames' }; $scTpl = Get-PimDbInitJobName -ManagerApp $managerApp -Record $scRec } catch { $scTpl = 'ca-pim-dbinit' }
+        Invoke-PimSupportConsentJob -Decision $Decision -Answer $Answer -Arm $scArm -SubscriptionId $sub -ResourceGroup $rg -TemplateJobName $scTpl
     }
     $scRun = Invoke-PimSupportConsentStep -BaseUrl $scBase -InstallKey $scKey -Sql $scSql -StartJob $scStart -GetLast $scGet -SetLast $scSet
     # merge review 2026-11-04 (Test-PimUpdateNow I4: the 15-minute check is ONE line): a 'nothing' decision is recorded for the
@@ -859,6 +911,26 @@ if ($unKind.kind -eq 'quick') {
         $unCron = Invoke-PimUpdateNowSelfCronUpdate -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob -Arm $unArm -Enabled $unEnabled -ApiVersion $script:PimAcaApi
         Say $unCron.detail $(if (-not $unCron.ok) { 'Yellow' } elseif ($unCron.changed) { 'Cyan' } else { 'DarkGray' })
     } catch { Say "update now: the updater's cron was not checked: $($_.Exception.Message)" 'Yellow' }
+}
+
+# ---- BUILDPOOL-11G (framework rule 11g) -- A PRIVATE INSTALL'S BUILD POOL: S2, 0 instances between builds ----------------
+# Only an install whose job carries PIM_ACR_AGENT_POOL (a private registry) has a pool: every other install makes no call
+# here and its heartbeat carries no BuildPool. An older S1 pool is made again at S2 only while no run is queued or running;
+# a pool left running with no build on is set back to 0. The state goes into UpdateState for the heartbeat (BuildPool).
+# Never fails or stops the update.
+$script:PimBuildPoolState = $null
+$script:PimBuildPoolNone = -not "$($env:PIM_ACR_AGENT_POOL)".Trim()
+if (-not $script:PimBuildPoolNone) {
+    try {
+        $bpName = "$($env:PIM_ACR_AGENT_POOL)".Trim()
+        $bpReg = $(if ($loginServer) { Split-PimImageReference -Image "$loginServer/x:y" } else { $null })
+        if (-not $bpReg -or -not "$($bpReg.registryName)".Trim()) { Say "build pool '$bpName': not checked (this environment's registry is not known)" 'Yellow' }
+        else {
+            $bpCv = Invoke-PimAcrBuildPoolConverge -SubscriptionId $sub -ResourceGroup $rg -RegistryName "$($bpReg.registryName)" -PoolName $bpName
+            $script:PimBuildPoolState = $bpCv.state
+            Say $bpCv.line $(if (-not $bpCv.ok) { 'Yellow' } elseif ($bpCv.action -in 'recreated', 'scaled-down') { 'Cyan' } else { 'DarkGray' })
+        }
+    } catch { Say "build pool: not checked ($($_.Exception.Message)) -- the update continues" 'Yellow' }
 }
 
 if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
@@ -1306,7 +1378,12 @@ try {
         Say "  $($storeDecision.detail)" 'Red'
         $schemaRefused = $storeDecision
         $schemaOk = $false
+    } elseif (-not ($script:PimSchemaDeferred = Invoke-PimUpdaterSchemaQuiesce -Cs "$csUpd").go) {
+        # SCHEMA-QUIESCE-818: a PIM job is still running at the bound (or its executions could not be read) -- NO DDL here,
+        # and the run ends 'waiting' just below, before anything rolls. Nothing was stopped.
+        Say '  schema step deferred: a PIM job is running -- the database is not changed under it' 'Yellow'
     } else {
+        $script:PimSchemaDeferred = $null
         Say 'applying schema updates BEFORE rolling any container (additive-only)'
         Initialize-PimSqlStore -ConnectionString $csUpd
         $locked  = Get-PimLockedSqlSchema
@@ -1425,6 +1502,12 @@ try {
         Say "  $($schemaLoginRefusal.message)" 'Red'
         Say "  $($schemaLoginRefusal.detail)" 'Red'
     }
+}
+if ($schemaOk -and $script:PimSchemaDeferred -and -not $script:PimSchemaDeferred.go) {
+    # SCHEMA-QUIESCE-818: WAITING, not failed -- PIM keeps running its current version; the next update run tries again.
+    Say 'NOT ROLLING: a PIM job is still running, and the database is never changed under a run (framework 8.18).' 'Yellow'
+    Send-PimUpdateOutcome -Action 'schema' -Outcome 'waiting' -ToVersion "$($plan.version)" -ErrorText "$($script:PimSchemaDeferred.line)"
+    exit 0
 }
 if ($schemaRefused) {
     Say 'NOT ROLLING: this release may need schema changes, and this updater cannot reach the store to' 'Red'
@@ -1631,6 +1714,8 @@ if ($tickJob) {
 # size (Invoke-PimSqlTierUpdate), then the other install defaults (Invoke-PimUpdateConvergeDefaults). ONE function
 # (Invoke-PimUpdaterConvergeStep, top of this file), also run on the 'ahead' exit. Never fails the update.
 Invoke-PimUpdaterConvergeStep -When 'after the roll'
+# SCHEMA-QUIESCE-818: the last database change of this run is done (schema, access, as-built) -- the scheduled jobs go on.
+Clear-PimUpdaterSchemaHold
 
 # ---- 2b. §53.5 -- EVERY OTHER JOB IN THIS ENVIRONMENT THAT RUNS THE SAME IMAGE -----------------
 # 🔴 The hardcoded three (Manager, tick, self) left everything else to drift FOREVER. Measured at an

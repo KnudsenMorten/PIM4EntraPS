@@ -3516,7 +3516,10 @@ new deployments; §11.4):
   *assignment required*. The container registry defaults to Basic.
 - **Internal (private-only)** — the Manager is reachable only from the VNet and peered/GSA clients;
   SQL gets a private endpoint by default and the registry defaults to Premium (Basic has no network
-  controls). Sign-in is still required.
+  controls). Sign-in is still required. The private registry builds its images on its own build pool inside the network
+  (framework rule 11g): tier S2 with no instances between builds -- each build scales it to two instances, and sets it back
+  to none afterwards (also after a failed build), read back; the nightly update moves an older S1 pool to S2 only while no
+  build is running, and the heartbeat reports the pool's tier, instance count and whether it is building.
 
 An environment's exposure cannot be changed in place (it is a property of the Container Apps
 environment); moving between them is a rebuild (`Rebuild-PimEnvExternal.ps1`, §27.7). The diagram

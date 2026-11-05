@@ -191,6 +191,250 @@ function Wait-PimAcrRun {
     @{ ok = ($status -eq 'Succeeded'); status = $status; runId = $RunId; seconds = $secs; error = $runError }
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# BUILDPOOL-11G (framework rule 11g, owner 2026-11-05): a private install's registry build pool is tier S2 with 0 instances
+# between builds. A build on it scales the pool to 2 instances first (read back), builds, and sets it back to 0 in a finally
+# -- after a failed build too -- and reads the 0 back. A build on the pool is waited for at least 90 minutes; the run's own
+# task timeout is above that wait. A pool of another tier is made again at S2 (the tier cannot be changed in place), only
+# while no run is queued or running on the registry. A registry with no pool (a public install) makes none of these calls.
+# Every ARM call here goes through an injected -Arm { param($Method, $Path, $Body, $ApiVersion) } (default: Invoke-PimArm,
+# a 404 on a GET = $null), so each rule is provable offline.
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimAcrBuildPoolPolicy {
+    # A literal in a function: the same in every scope (see Get-PimAcrTasksApi).
+    return @{
+        Tier                  = 'S2'
+        IdleCount             = 0
+        BuildCount            = 2
+        MinWaitSeconds        = 5400      # 90 minutes: the least a build on the pool is waited for
+        TaskTimeoutSeconds    = 6000      # 100 minutes: the run's own timeout, above the wait
+        MaxTaskTimeoutSeconds = 28800     # ACR's largest task timeout
+        ApiVersion            = '2019-06-01-preview'
+        ScaleWaitSeconds      = 1200      # a count change is waited for up to 20 minutes
+        CostNote              = 'S2 x 2 is billed for every hour it runs'
+    }
+}
+
+function Get-PimAcrBuildPoolTimeouts {
+    <# PURE. @{ wait; task } for a build: on a pool the wait is at least 90 minutes and the task timeout above it. #>
+    param([int]$TimeoutSeconds = 1800, [bool]$OnPool = $false)
+    if (-not $OnPool) { return @{ wait = $TimeoutSeconds; task = $TimeoutSeconds } }
+    $pol  = Get-PimAcrBuildPoolPolicy
+    $wait = [Math]::Max($TimeoutSeconds, $pol.MinWaitSeconds)
+    $task = [Math]::Min($pol.MaxTaskTimeoutSeconds, [Math]::Max($pol.TaskTimeoutSeconds, $wait + 600))
+    if ($wait -ge $task) { $wait = $task - 600 }
+    return @{ wait = $wait; task = $task }
+}
+
+function Get-PimAcrPoolArm {
+    <# The default -Arm: Invoke-PimArm, a 404 on a GET read as $null (the pool / registry is not there). #>
+    return {
+        param([string]$Method, [string]$Path, $Body, [string]$ApiVersion)
+        try {
+            if ($null -ne $Body) { Invoke-PimArm -Method $Method -Path $Path -Body $Body -ApiVersion $ApiVersion }
+            else { Invoke-PimArm -Method $Method -Path $Path -ApiVersion $ApiVersion }
+        } catch {
+            if ($Method -eq 'GET' -and "$($_.Exception.Message)" -match '(?i)\b404\b|NotFound|ResourceNotFound') { return $null }
+            throw
+        }
+    }
+}
+
+function Get-PimAcrAgentPoolPath {
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup,
+          [Parameter(Mandatory)][string]$RegistryName, [Parameter(Mandatory)][string]$PoolName)
+    (Get-PimAcrRegistryPath -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -RegistryName $RegistryName) + "/agentPools/$PoolName"
+}
+
+function ConvertTo-PimAcrPoolCount {
+    # the pool's properties.count, or $null -- read as a NAMED member: PowerShell's own .Count is 1 on any object without one
+    param($Pool)
+    if ($null -eq $Pool -or $null -eq $Pool.properties) { return $null }
+    $pr = $Pool.properties; $v = $null
+    if ($pr -is [System.Collections.IDictionary]) { if ($pr.Contains('count')) { $v = $pr['count'] } }
+    else { $m = $pr.PSObject.Properties['count']; if ($m) { $v = $m.Value } }
+    if ($null -eq $v) { return $null }
+    $n = 0; if ([int]::TryParse("$v", [ref]$n)) { return $n }
+    return $null
+}
+
+function Set-PimAcrBuildPoolCount {
+    <#
+      PATCH the pool's instance count, wait until it reads back Succeeded with that count. NEVER throws (it runs in a
+      finally, where a throw would hide the build's own result): @{ ok; count; state; tier; reason }.
+    #>
+    param([Parameter(Mandatory)][string]$PoolPath, [Parameter(Mandatory)][int]$Count, [int]$PollSeconds = 10,
+          [int]$WaitSeconds = -1, [scriptblock]$Arm)
+    if (-not $Arm) { $Arm = Get-PimAcrPoolArm }
+    $pol = Get-PimAcrBuildPoolPolicy
+    if ($WaitSeconds -lt 0) { $WaitSeconds = $pol.ScaleWaitSeconds }
+    $p = $null
+    try {
+        [void](& $Arm 'PATCH' $PoolPath @{ properties = @{ count = $Count } } $pol.ApiVersion)
+        $max = [Math]::Max(1, [int]($WaitSeconds / [Math]::Max(1, $PollSeconds)))
+        $p = & $Arm 'GET' $PoolPath $null $pol.ApiVersion
+        for ($i = 0; $i -lt $max; $i++) {
+            $st = "$($p.properties.provisioningState)"
+            if ($st -in 'Failed', 'Canceled') { break }
+            if ($st -eq 'Succeeded' -and (ConvertTo-PimAcrPoolCount $p) -eq $Count) { break }
+            if ($PollSeconds -gt 0) { Start-Sleep -Seconds $PollSeconds }
+            $p = & $Arm 'GET' $PoolPath $null $pol.ApiVersion
+        }
+        $st = "$($p.properties.provisioningState)"; $c = ConvertTo-PimAcrPoolCount $p
+        if (-not $p) { return @{ ok = $false; count = $null; state = ''; tier = ''; reason = 'the pool could not be read back' } }
+        if ($st -eq 'Succeeded' -and $c -eq $Count) { return @{ ok = $true; count = $c; state = $st; tier = "$($p.properties.tier)"; reason = '' } }
+        return @{ ok = $false; count = $c; state = $st; tier = "$($p.properties.tier)"; reason = "the pool reads back '$st' with $c instance(s), not $Count" }
+    } catch {
+        return @{ ok = $false; count = (ConvertTo-PimAcrPoolCount $p); state = "$($p.properties.provisioningState)"; tier = "$($p.properties.tier)"; reason = "$($_.Exception.Message)" }
+    }
+}
+
+function Get-PimAcrBuildPoolDownWarning {
+    <# PURE. The one WARN line when the pool could not be set back to 0: it names the pool and the cost. #>
+    param([string]$PoolName, [string]$Reason)
+    $pol = Get-PimAcrBuildPoolPolicy
+    "WARN the build pool '$PoolName' could NOT be set back to $($pol.IdleCount) instances ($Reason) -- $($pol.CostNote); set its count to $($pol.IdleCount). The build's own result stands."
+}
+
+function Get-PimAcrActiveRuns {
+    <#
+      The registry's runs that are Queued, Started or Running: @{ ok; active; reason }. ok = $false when the list could
+      not be read -- a caller treats that as "a build may be running" (never acts on doubt).
+    #>
+    param([Parameter(Mandatory)][string]$RegistryPath, [scriptblock]$Arm)
+    if (-not $Arm) { $Arm = Get-PimAcrPoolArm }
+    $pol = Get-PimAcrBuildPoolPolicy
+    $f = [uri]::EscapeDataString("status eq 'Queued' or status eq 'Started' or status eq 'Running'")
+    $r = $null
+    try { $r = & $Arm 'GET' "$RegistryPath/runs?`$filter=$f&`$top=50" $null $pol.ApiVersion }
+    catch { return @{ ok = $false; active = @(); reason = "$($_.Exception.Message)" } }
+    if ($null -eq $r) { return @{ ok = $false; active = @(); reason = 'the registry runs could not be read' } }
+    # the status is checked here too: a filter the service ignored never turns a finished run into a running one
+    $act = @(@($r.value) | Where-Object { $_ -and "$($_.properties.status)" -in 'Queued', 'Started', 'Running' })
+    return @{ ok = $true; active = $act; reason = '' }
+}
+
+function New-PimAcrBuildPoolState {
+    <# PURE. The heartbeat's BuildPool { tier; count; building; checkedUtc } from a pool read and the run check. #>
+    param($Pool, [bool]$Building, [datetime]$NowUtc = [datetime]::UtcNow)
+    if ($null -eq $Pool) { return $null }
+    $c = ConvertTo-PimAcrPoolCount $Pool
+    [ordered]@{ tier = "$($Pool.properties.tier)"; count = $(if ($null -eq $c) { 0 } else { [int]$c }); building = [bool]$Building
+                checkedUtc = $NowUtc.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") }
+}
+
+function Invoke-PimAcrBuildPoolScope {
+    <#
+      Runs -Build with the pool up: scale to 2 (read back), & $Build, then -- in a finally, whatever happened -- scale back
+      to 0 and read it back. A pool that does not come up stops before the build (status 'PoolNotReady'; a build queued on
+      a pool with no instance would only time out). A pool that does not go back down is ONE warning line; the build's
+      result (or its exception) is what the caller gets. The result carries poolUp / poolDown.
+    #>
+    param([Parameter(Mandatory)][string]$PoolPath, [Parameter(Mandatory)][string]$PoolName, [Parameter(Mandatory)][scriptblock]$Build,
+          [int]$PollSeconds = 10, [scriptblock]$Arm)
+    if (-not $Arm) { $Arm = Get-PimAcrPoolArm }
+    $pol = Get-PimAcrBuildPoolPolicy
+    $up = $null; $down = $null; $res = $null
+    try {
+        $up = Set-PimAcrBuildPoolCount -PoolPath $PoolPath -Count $pol.BuildCount -PollSeconds $PollSeconds -Arm $Arm
+        if (-not $up.ok) {
+            $why = "the build pool '$PoolName' did not reach $($pol.BuildCount) instances: $($up.reason)"
+            $res = @{ ok = $false; status = 'PoolNotReady'; runId = ''; seconds = 0; bytes = 0; images = @(); error = $why
+                      attempts = 0; pushFault = ''; firstRunId = ''; detail = $why }
+        } else { $res = & $Build }
+    } finally {
+        $down = Set-PimAcrBuildPoolCount -PoolPath $PoolPath -Count $pol.IdleCount -PollSeconds $PollSeconds -Arm $Arm
+        if (-not $down.ok) { Write-Warning (Get-PimAcrBuildPoolDownWarning -PoolName $PoolName -Reason $down.reason) }
+    }
+    if ($res -is [System.Collections.IDictionary]) { $res['poolUp'] = $up; $res['poolDown'] = $down }
+    $res
+}
+
+function Invoke-PimAcrBuildPoolConverge {
+    <#
+      The updater's (and a re-run install's) check of an EXISTING pool. Returns @{ ok; action; line; state } where state is
+      New-PimAcrBuildPoolState of the pool as last read ($null when it could not be read).
+        tier not S2, nothing queued/running  -> deleted and made again at S2, count 0, same location / os / subnet / tags,
+                                                read back                                         action 'recreated'
+        tier not S2, a run queued/running, or the run list unreadable -> nothing changed       action 'refused-building'
+        S2 with instances, nothing running   -> set back to 0, read back (a pool left up)        action 'scaled-down'
+        S2 with instances while a run is on  -> left alone                                       action 'in-use'
+        S2 at 0                              -> nothing                                          action 'ok'
+        no pool                              -> nothing (the install makes it)                  action 'missing'
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup,
+          [Parameter(Mandatory)][string]$RegistryName, [Parameter(Mandatory)][string]$PoolName,
+          [int]$PollSeconds = 10, [scriptblock]$Arm, [datetime]$NowUtc = [datetime]::UtcNow)
+    if (-not $Arm) { $Arm = Get-PimAcrPoolArm }
+    $pol = Get-PimAcrBuildPoolPolicy; $api = $pol.ApiVersion
+    $regPath  = Get-PimAcrRegistryPath -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -RegistryName $RegistryName
+    $poolPath = "$regPath/agentPools/$PoolName"
+    $pool = $null
+    try { $pool = & $Arm 'GET' $poolPath $null $api }
+    catch { return @{ ok = $false; action = 'unreadable'; state = $null; line = "build pool '$PoolName': not read ($($_.Exception.Message)) -- nothing changed" } }
+    if (-not $pool) { return @{ ok = $false; action = 'missing'; state = $null; line = "build pool '$PoolName': not found in registry $RegistryName -- a private registry builds only on it; run the install again to make it" } }
+    $runs = Get-PimAcrActiveRuns -RegistryPath $regPath -Arm $Arm
+    $building = (-not $runs.ok) -or (@($runs.active).Count -gt 0)
+    $busyWhy = $(if (-not $runs.ok) { "the registry's runs could not be read ($($runs.reason))" } else { "$(@($runs.active).Count) build run(s) queued or running" })
+    $tier = "$($pool.properties.tier)"; $count = ConvertTo-PimAcrPoolCount $pool
+    if ($tier -ne $pol.Tier) {
+        if ($building) {
+            return @{ ok = $true; action = 'refused-building'; state = (New-PimAcrBuildPoolState -Pool $pool -Building $true -NowUtc $NowUtc)
+                      line = "build pool '$PoolName' is $tier, not $($pol.Tier): not made again now -- $busyWhy; the next update run tries again" }
+        }
+        $subnet = "$($pool.properties.virtualNetworkSubnetResourceId)".Trim()
+        $os = "$($pool.properties.os)".Trim(); if (-not $os) { $os = 'Linux' }
+        $props = [ordered]@{ tier = $pol.Tier; count = $pol.IdleCount; os = $os }
+        if ($subnet) { $props['virtualNetworkSubnetResourceId'] = $subnet }
+        $body = [ordered]@{ location = "$($pool.location)"; properties = $props }
+        if ($null -ne $pool.tags) { $body['tags'] = $pool.tags }
+        $gone = $false; $made = $null
+        try {
+            [void](& $Arm 'DELETE' $poolPath $null $api)
+            $max = [Math]::Max(1, [int]($pol.ScaleWaitSeconds / [Math]::Max(1, $PollSeconds)))
+            for ($i = 0; $i -lt $max; $i++) {
+                if (-not (& $Arm 'GET' $poolPath $null $api)) { $gone = $true; break }
+                if ($PollSeconds -gt 0) { Start-Sleep -Seconds $PollSeconds }
+            }
+            if (-not $gone) { return @{ ok = $false; action = 'failed'; state = $null; line = "build pool '$PoolName': the $tier pool was asked to go and is still there -- the next update run tries again" } }
+            try { [void](& $Arm 'PUT' $poolPath $body $api) } catch { [void](& $Arm 'PUT' $poolPath $body $api) }   # one more try: the pool is gone now
+            $made = & $Arm 'GET' $poolPath $null $api
+            for ($i = 0; $i -lt $max -and "$($made.properties.provisioningState)" -notin 'Succeeded', 'Failed', 'Canceled'; $i++) {
+                if ($PollSeconds -gt 0) { Start-Sleep -Seconds $PollSeconds }
+                $made = & $Arm 'GET' $poolPath $null $api
+            }
+        } catch {
+            return @{ ok = $false; action = 'failed'; state = $null
+                      line = "build pool '$PoolName': moving it from $tier to $($pol.Tier) failed ($($_.Exception.Message))$(if ($gone) { ' -- the old pool is removed; run the install again to make it' })" }
+        }
+        $okBack = $made -and "$($made.properties.provisioningState)" -eq 'Succeeded' -and "$($made.properties.tier)" -eq $pol.Tier -and
+                  (ConvertTo-PimAcrPoolCount $made) -eq $pol.IdleCount -and "$($made.properties.virtualNetworkSubnetResourceId)".Trim() -eq $subnet
+        if (-not $okBack) {
+            return @{ ok = $false; action = 'failed'; state = (New-PimAcrBuildPoolState -Pool $made -Building $false -NowUtc $NowUtc)
+                      line = "build pool '$PoolName': made again but reads back '$($made.properties.provisioningState)', $($made.properties.tier) x $(ConvertTo-PimAcrPoolCount $made) -- not $($pol.Tier) x $($pol.IdleCount) in the same subnet" }
+        }
+        return @{ ok = $true; action = 'recreated'; state = (New-PimAcrBuildPoolState -Pool $made -Building $false -NowUtc $NowUtc)
+                  line = "build pool '$PoolName': made again at $($pol.Tier) (was $tier), 0 instances between builds, same subnet -- read back" }
+    }
+    if ($null -ne $count -and $count -ne $pol.IdleCount) {
+        if ($building) {
+            return @{ ok = $true; action = 'in-use'; state = (New-PimAcrBuildPoolState -Pool $pool -Building $true -NowUtc $NowUtc)
+                      line = "build pool '$PoolName': $count instance(s) while a build is on ($busyWhy) -- left as it is" }
+        }
+        $d = Set-PimAcrBuildPoolCount -PoolPath $poolPath -Count $pol.IdleCount -PollSeconds $PollSeconds -Arm $Arm
+        if (-not $d.ok) {
+            return @{ ok = $false; action = 'failed'; state = (New-PimAcrBuildPoolState -Pool $pool -Building $false -NowUtc $NowUtc)
+                      line = (Get-PimAcrBuildPoolDownWarning -PoolName $PoolName -Reason $d.reason) }
+        }
+        $after = $null; try { $after = & $Arm 'GET' $poolPath $null $api } catch { $after = $null }
+        if (-not $after) { $after = $pool; $after.properties.count = $pol.IdleCount }
+        return @{ ok = $true; action = 'scaled-down'; state = (New-PimAcrBuildPoolState -Pool $after -Building $false -NowUtc $NowUtc)
+                  line = "build pool '$PoolName': was left at $count instance(s) with no build on -- set back to $($pol.IdleCount), read back" }
+    }
+    return @{ ok = $true; action = 'ok'; state = (New-PimAcrBuildPoolState -Pool $pool -Building $building -NowUtc $NowUtc)
+              line = "build pool '$PoolName': $tier, $(if ($null -eq $count) { '?' } else { $count }) instances between builds" }
+}
+
 function Invoke-PimAcrRestBuild {
     <#
       The whole thing: upload a context, schedule a build, wait for it.
@@ -198,6 +442,10 @@ function Invoke-PimAcrRestBuild {
 
       Idempotent from the caller's point of view -- building a tag that already exists simply
       replaces it with an identical image; the caller decides whether it is worth doing at all.
+
+      BUILDPOOL-11G: with -AgentPoolName the pool is scaled up for this build and back to 0 after it
+      (Invoke-PimAcrBuildPoolScope), the wait is at least 90 minutes and the task timeout above it.
+      -PoolScaled = the caller already holds the pool up (Invoke-PimAcrRestBuildWithRetry: once for both tries).
     #>
     param(
         [Parameter(Mandatory)][string]$SubscriptionId,
@@ -209,18 +457,29 @@ function Invoke-PimAcrRestBuild {
         [int]$TimeoutSeconds = 1800,
         [hashtable]$Arguments = @{},
         [scriptblock]$OnPoll,
-        [string]$AgentPoolName    # see Start-PimAcrDockerBuild: required for a registry with public access Disabled
+        [string]$AgentPoolName,   # see Start-PimAcrDockerBuild: required for a registry with public access Disabled
+        [switch]$PoolScaled,
+        [int]$PoolPollSeconds = 10
     )
-    $slot  = Get-PimAcrBuildUploadSlot -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -RegistryName $RegistryName
-    $bytes = Send-PimAcrBuildContext -UploadUrl $slot.uploadUrl -Path $ContextPath
-    $run   = Start-PimAcrDockerBuild -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup `
-                -RegistryName $RegistryName -RelativePath $slot.relativePath -ImageNames $ImageNames `
-                -DockerFilePath $DockerFilePath -TimeoutSeconds $TimeoutSeconds -Arguments $Arguments -AgentPoolName $AgentPoolName
-    $runId = Get-PimAcrRunId -Run $run
-    if (-not $runId) { throw "Invoke-PimAcrRestBuild: no run id came back for $($ImageNames -join ', ')." }
-    $w = Wait-PimAcrRun -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup `
-            -RegistryName $RegistryName -RunId $runId -TimeoutSeconds $TimeoutSeconds -OnPoll $OnPoll
-    @{ ok = $w.ok; status = $w.status; runId = $runId; seconds = $w.seconds; bytes = $bytes; images = @($ImageNames); error = "$($w.error)" }
+    $poolName = "$AgentPoolName".Trim()
+    $to = Get-PimAcrBuildPoolTimeouts -TimeoutSeconds $TimeoutSeconds -OnPool ([bool]$poolName)
+    # run by Invoke-PimAcrBuildPoolScope through dynamic scope: these locals are named so no callee variable shadows them
+    $__rbPool = $poolName; $__rbTo = $to
+    $one = {
+        $slot  = Get-PimAcrBuildUploadSlot -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -RegistryName $RegistryName
+        $bytes = Send-PimAcrBuildContext -UploadUrl $slot.uploadUrl -Path $ContextPath
+        $run   = Start-PimAcrDockerBuild -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup `
+                    -RegistryName $RegistryName -RelativePath $slot.relativePath -ImageNames $ImageNames `
+                    -DockerFilePath $DockerFilePath -TimeoutSeconds $__rbTo.task -Arguments $Arguments -AgentPoolName $__rbPool
+        $runId = Get-PimAcrRunId -Run $run
+        if (-not $runId) { throw "Invoke-PimAcrRestBuild: no run id came back for $($ImageNames -join ', ')." }
+        $w = Wait-PimAcrRun -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup `
+                -RegistryName $RegistryName -RunId $runId -TimeoutSeconds $__rbTo.wait -OnPoll $OnPoll
+        @{ ok = $w.ok; status = $w.status; runId = $runId; seconds = $w.seconds; bytes = $bytes; images = @($ImageNames); error = "$($w.error)" }
+    }
+    if (-not $poolName -or $PoolScaled) { return (& $one) }
+    Invoke-PimAcrBuildPoolScope -PoolPath (Get-PimAcrAgentPoolPath -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -RegistryName $RegistryName -PoolName $poolName) `
+        -PoolName $poolName -Build $one -PollSeconds $PoolPollSeconds
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -300,11 +559,22 @@ function Invoke-PimAcrRestBuildWithRetry {
         [scriptblock]$OnPoll,
         [string]$AgentPoolName,
         [int]$RetryDelaySeconds = 60,
-        [scriptblock]$OnRetry
+        [scriptblock]$OnRetry,
+        [int]$PoolPollSeconds = 10,
+        [switch]$PoolScaled
     )
+    # BUILDPOOL-11G: on a pool, the pool is held up ONCE for both tries (one scale-up, one scale-down in a finally); the
+    # call inside the scope carries -PoolScaled, and so does every build it makes
+    $__wrPool = "$AgentPoolName".Trim()
+    if ($__wrPool -and -not $PoolScaled) {
+        $__wrArgs = @{}; foreach ($__k in $PSBoundParameters.Keys) { $__wrArgs[$__k] = $PSBoundParameters[$__k] }
+        $__wrBody = { Invoke-PimAcrRestBuildWithRetry @__wrArgs -PoolScaled }
+        return (Invoke-PimAcrBuildPoolScope -PoolPath (Get-PimAcrAgentPoolPath -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -RegistryName $RegistryName -PoolName $__wrPool) `
+                    -PoolName $__wrPool -Build $__wrBody -PollSeconds $PoolPollSeconds)
+    }
     $bp = @{ SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; RegistryName = $RegistryName; ContextPath = $ContextPath
              ImageNames = $ImageNames; DockerFilePath = $DockerFilePath; TimeoutSeconds = $TimeoutSeconds; Arguments = $Arguments
-             OnPoll = $OnPoll; AgentPoolName = $AgentPoolName }
+             OnPoll = $OnPoll; AgentPoolName = $AgentPoolName; PoolScaled = [bool]$__wrPool }
     $first = $null
     $fault = ''; $detail = ''
     for ($attempt = 1; $attempt -le 2; $attempt++) {

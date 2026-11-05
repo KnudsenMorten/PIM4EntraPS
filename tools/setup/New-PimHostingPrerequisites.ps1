@@ -135,8 +135,9 @@ param(
     # inside the VNet, and no deploy host ever needs a path to it.
     [switch]$SqlPrivateEndpoint,
     [string]$AcrAgentPoolName,
-    [int]$AcrAgentPoolCount = 1,
-    [ValidateSet('S1','S2','S3')][string]$AcrAgentPoolTier = 'S1',
+    # BUILDPOOL-11G (framework rule 11g): S2 with 0 instances between builds -- each build scales it to 2 and back to 0
+    [int]$AcrAgentPoolCount = 0,
+    [ValidateSet('S1','S2','S3')][string]$AcrAgentPoolTier = 'S2',
     [string]$AddressBase = '10.220',
 
     # ---- §38.1a PER-CUSTOMER OVERRIDES -------------------------------------------------
@@ -657,6 +658,13 @@ if ("$AcrAgentPoolName".Trim()) {
         if (-not "$poolState".Trim()) { throw "the ACR agent pool '$AcrAgentPoolName' was NOT created -- see the failure above. Without it 'az acr build' cannot reach a private registry." }
         # rule 15: awaited to Succeeded (New-PimArmAcrAgentPool waits up to 1800 s); anything else is said, and the next run makes it again
         if ("$poolState".Trim() -ne 'Succeeded') { throw "the ACR agent pool '$AcrAgentPoolName' ended '$poolState', not Succeeded (waited up to 30 minutes) -- run the install again: a Failed pool is removed and made again." }
+    } else {
+        # BUILDPOOL-11G: a pool made before rule 11g (S1, always on) is made again at S2 / 0 (same subnet), only while no
+        # build is queued or running; one left running is set back to 0 -- the same converge the nightly updater runs
+        if (-not (Get-Command Invoke-PimAcrBuildPoolConverge -ErrorAction SilentlyContinue)) { . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-AcrBuild.ps1') }
+        $poolArm = { param($m, $p, $b, $api) if ($null -ne $b) { Invoke-PimSetupArm -Method $m -Path $p -Body $b -ApiVersion $api } else { Invoke-PimSetupArm -Method $m -Path $p -ApiVersion $api -NotFoundOk } }
+        $poolCv = Invoke-PimAcrBuildPoolConverge -SubscriptionId $SubscriptionId -ResourceGroup $rg -RegistryName $acr -PoolName $AcrAgentPoolName -Arm $poolArm
+        if (-not $poolCv.ok) { Write-Warning "    $($poolCv.line)" } else { Write-Host "    $($poolCv.line)" }
     }
     Write-Host "    $AcrAgentPoolName ($poolState) -- pass -AcrAgentPool $AcrAgentPoolName to the build"
 }

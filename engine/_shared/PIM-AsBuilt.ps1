@@ -1295,7 +1295,9 @@ function Invoke-PimAsBuiltConverge {
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup,
           [string]$ManagerApp = 'ca-pim-manager', [string]$JobName = (Get-PimAsBuiltJobName),
           [Parameter(Mandatory)][scriptblock]$Arm, [scriptblock]$Sql = $null,
-          [scriptblock]$Sleep = $null, [int[]]$BusyWaits = @(10, 20, 30, 30, 30))
+          [scriptblock]$Sleep = $null, [int[]]$BusyWaits = @(10, 20, 30, 30, 30),
+          # SCHEMA-QUIESCE-818: the updater skipped the SQL part (a PIM job runs) -- said as INFO with this reason, not as 'no store'
+          [AllowEmptyString()][string]$SqlSkipReason = '')
     if (-not $Sleep) { $Sleep = { param($s) Start-Sleep -Seconds $s } }
     $lines = New-Object System.Collections.Generic.List[object]
     $add = { param($id, $level, $text) $lines.Add([pscustomobject]@{ id = $id; level = $level; text = $text }) }
@@ -1512,7 +1514,8 @@ function Invoke-PimAsBuiltConverge {
                 [void](& $Sql "MERGE pim.Settings AS t USING (SELECT N'AsBuiltInstallFacts' AS Name, @v AS V) AS s ON t.Name = s.Name WHEN MATCHED AND ISNULL(JSON_VALUE(t.ValueJson, '$.region'), N'') + N'|' + ISNULL(JSON_VALUE(t.ValueJson, '$.network'), N'') <> ISNULL(JSON_VALUE(s.V, '$.region'), N'') + N'|' + ISNULL(JSON_VALUE(s.V, '$.network'), N'') THEN UPDATE SET ValueJson = s.V, UpdatedUtc = SYSUTCDATETIME() WHEN NOT MATCHED THEN INSERT (Name, ValueJson, UpdatedUtc) VALUES (s.Name, s.V, SYSUTCDATETIME());" @{ v = ($facts | ConvertTo-Json -Compress) })
                 if (-not @($lines | Where-Object { $_.id -eq 'asbuilt-sql-view' }).Count) { & $add 'asbuilt-sql' 'info' "as-built: view pim.vw_AsBuiltSettings$(if ($appId) { ', the job''s reader user' }) and the install facts converged" }
             } catch { & $add 'asbuilt-sql-facts' 'warn' "as-built: the install facts (AsBuiltInstallFacts) were not written: $((("$($_.Exception.Message)") -split "`n")[0]) -- the next update retries" }
-        } else { & $add 'asbuilt-sql' 'warn' 'as-built: no SQL store in this run -- the view and the job''s reader user were not converged' }
+        } elseif ("$SqlSkipReason".Trim()) { & $add 'asbuilt-sql' 'info' "$SqlSkipReason".Trim() }
+        else { & $add 'asbuilt-sql' 'warn' 'as-built: no SQL store in this run -- the view and the job''s reader user were not converged' }
     } catch { & $add 'asbuilt' 'warn' "as-built: converge stopped: $(("$($_.Exception.Message)" -split "`n")[0])" }
     $arr = @($lines.ToArray())
     $rights = $(if ($writeRight -eq 'missing' -or $supportRole -eq 'missing') { 'missing' } elseif ($writeRight -eq 'ok' -and $supportRole -eq 'ok') { 'ok' } else { 'unknown' })

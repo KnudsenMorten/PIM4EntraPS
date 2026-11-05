@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.42 -- 2026-11-05
+
+- Updates never change the database under a running PIM job: the updater waits up to 20 minutes for running jobs (holding the scheduled tick and pull), and otherwise defers as 'waiting' with nothing rolled; the support consent waits until the database job exists. A private install's build pool sits at 0 instances between builds and is scaled up only for a build (heartbeat reports it). A managing build releases its own build membership by default.
+
 ## 3.0.41 -- 2026-11-05
 
 - The as-built document also reaches Invardia support directly from the installation (checked by size and SHA-256), so a private installation's document no longer needs outside access to its storage; Invardia support keeps read-only database access only, with admin rights only inside an open support session; a managing-tenant build removes its own temporary database admin membership when it finishes; the hybrid worker deploy script is one self-contained, hash-checked file; a new script moves each PIM component to its own identity, proving the new identity before any old right is removed.

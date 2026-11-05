@@ -745,7 +745,7 @@ function New-PimUplinkConsentReport {
     $ver = "$Version".Trim(); if ($ver -match '^[0-9A-Za-z.+-]{1,50}$') { $o['Version'] = $ver }
     $rp = 0; if ($null -ne $Ring -and "$Ring" -ne '' -and [int]::TryParse("$Ring", [ref]$rp) -and $rp -ge 0 -and $rp -le 10) { $o['Ring'] = $rp }
     if ($Mode -eq 'anonymous') { $o['InstallId'] = $iid } elseif ("$TenantId".Trim()) { $o['ClaimedTenantId'] = "$TenantId".Trim() }
-    $o['LastSeenUtc'] = $Now.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $o['LastSeenUtc'] = $Now.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
     return [pscustomobject]$o
 }
 
@@ -1854,6 +1854,8 @@ function Get-PimUplinkTenantCapabilities {
 #                   default since UPDATE-NOW-HEAD; PIM_UPLINK_UPDATENOWFIELDS = 0/false/off/no switches them off
 #   SqlAccess       { model; run1; run2; updaterInAdminGroup; checkedUtc }        -- the updater's verdict in UpdateState
 #   FeaturesChanged [ '<area>.<name>:<on|off>' ]  -- at most 40, only features that differ from their catalog default
+#   BuildPool       { tier; count; building; checkedUtc }  -- BUILDPOOL-11G, the updater's read in UpdateState; left out
+#                   entirely on an install with no build pool (a public install)
 # ONE switch per field, ON by default (2.4.644): PIM_UPLINK_<FIELD> (PIM_UPLINK_SECURITY, ..._COLLECTIONS, ..._JOBS,
 # ..._CONVERGENCE, ..._MAIL, ..._UPDATEPENDING, ..._SQLACCESS, ..._FEATURESCHANGED) = 0 / false / off / no switches it off.
 # IDENTIFIED heartbeat only; additive (Invardia refuses its content -> the heartbeat goes once more without the field(s)
@@ -1864,7 +1866,7 @@ function Get-PimUplinkTenantCapabilities {
 # =====================================================================================================================
 function Get-PimUplinkStateFieldNames {
     <# PURE. The structured fields, in the order the heartbeat adds them (a literal: child-scope safe). #>
-    return @('Security', 'Collections', 'Jobs', 'Convergence', 'Mail', 'UpdatePending', 'SqlAccess', 'FeaturesChanged', 'SignIn')
+    return @('Security', 'Collections', 'Jobs', 'Convergence', 'Mail', 'UpdatePending', 'SqlAccess', 'FeaturesChanged', 'SignIn', 'BuildPool')
 }
 
 function Get-PimUplinkStateFieldSwitch {
@@ -2301,6 +2303,29 @@ function New-PimUplinkSignInField {
     return [pscustomobject][ordered]@{ layer = $layer; version = $ver }
 }
 
+function New-PimUplinkBuildPoolField {
+    <#
+      PURE. BUILDPOOL-11G (framework rule 11g) BuildPool { tier; count; building; checkedUtc } from UpdateState.buildPool --
+      what the UPDATER read of the registry build pool (Invoke-PimAcrBuildPoolConverge). The heartbeat only reads it (the
+      tick reads no ARM). tier 'S1'..'S3' (a string), count a whole number >= 0, building a bool, checkedUtc ISO-8601 UTC.
+      Not recorded (an install with no pool) or not in that shape = $null: the field is left out.
+    #>
+    param([AllowNull()][object]$UpdateState)
+    $us = ConvertFrom-PimUplinkStoredValue $UpdateState
+    $bp = Get-PimUplinkField $us 'buildPool'
+    if ($null -eq $bp) { return $null }
+    $tier = "$(Get-PimUplinkField $bp 'tier')".Trim().ToUpperInvariant()
+    if ($tier -notmatch '^S[1-3]$') { return $null }
+    $cnt = ConvertTo-PimUplinkCount (Get-PimUplinkField $bp 'count')
+    if ($null -eq $cnt) { return $null }
+    $bv = Get-PimUplinkField $bp 'building'
+    $bld = $(if ($bv -is [bool]) { $bv } elseif ("$bv" -match '^(?i)(true|1)$') { $true } elseif ("$bv" -match '^(?i)(false|0)$') { $false } else { $null })
+    if ($null -eq $bld) { return $null }
+    $at = ConvertTo-PimUplinkUtc (Get-PimUplinkField $bp 'checkedUtc')
+    if (-not $at) { return $null }
+    return [pscustomobject][ordered]@{ tier = $tier; count = [int]$cnt; building = [bool]$bld; checkedUtc = $at.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") }
+}
+
 function Get-PimUplinkFeaturesChangedMax { <# PURE. At most 40 ids (Invardia). #> return 40 }
 
 function New-PimUplinkFeaturesChangedField {
@@ -2394,6 +2419,10 @@ function Get-PimUplinkStateFields {
     if ((& $__sfOn 'SignIn') -and $UpdateStateRead) {
         # framework 8.17 (Invardia validator live 2026-10-20 22:30Z, soft); PIM_UPLINK_SIGNIN=0 switches it off
         try { $__sfV = New-PimUplinkSignInField -UpdateState $UpdateState; if ($null -ne $__sfV) { $out['SignIn'] = $__sfV } } catch { Write-Warning "[uplink] SignIn could not be built: $($_.Exception.Message)" }
+    }
+    if ((& $__sfOn 'BuildPool') -and $UpdateStateRead) {
+        # BUILDPOOL-11G (framework rule 11g); PIM_UPLINK_BUILDPOOL=0 switches it off; no pool recorded = left out
+        try { $__sfV = New-PimUplinkBuildPoolField -UpdateState $UpdateState; if ($null -ne $__sfV) { $out['BuildPool'] = $__sfV } } catch { Write-Warning "[uplink] BuildPool could not be built: $($_.Exception.Message)" }
     }
     return $out
 }
@@ -2567,7 +2596,7 @@ function New-PimUplinkSupportSqlAccessField {
         $o['jitOpen'] = [bool]$JitOpen
         if ($JitOpen -and "$JitUntil" -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$') { $o['jitUntil'] = "$JitUntil" }
     }
-    $o['checkedUtc'] = $CheckedUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); $o['healedUtc'] = $null
+    $o['checkedUtc'] = $CheckedUtc.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"); $o['healedUtc'] = $null
     return [pscustomobject]$o
 }
 

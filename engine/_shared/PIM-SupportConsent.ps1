@@ -127,7 +127,9 @@ function Invoke-PimSupportConsentRead {
     #>
     param([scriptblock]$Http, [string]$BaseUrl = '', [AllowEmptyString()][AllowNull()][string]$InstallKey = '', [int]$RetryDelaySec = 5, [scriptblock]$Sleep)
     $key = "$InstallKey".Trim()
-    $no = { param($e) @{ status = 0; attempts = 0; answer = (ConvertFrom-PimSupportConsentAnswer $null); error = $e } }
+    # 2026-11-05 (a Community test install): the recorded reason must name the REAL cause (no key / not https), not the
+    # empty answer's generic 'the answer is not an object'.
+    $no = { param($e) $a0 = ConvertFrom-PimSupportConsentAnswer $null; $a0.problem = $e; @{ status = 0; attempts = 0; answer = $a0; error = $e } }
     if (-not $key) { return (& $no 'no install key -- the consent channel was not asked') }
     $base = if ("$BaseUrl".Trim()) { "$BaseUrl".Trim().TrimEnd('/') } else { 'https://invardia.com' }
     if ($base -notmatch '^(?i)https://') { return (& $no 'the Invardia address is not https -- the consent channel was not asked') }
@@ -408,6 +410,16 @@ function Invoke-PimSupportConsentJob {
             if (-not $made -or $made -gt $NowUtc.ToUniversalTime().AddMinutes(-$BusyMinutes)) {
                 return @{ ok = $true; skipped = $true; reason = "the job $jn is there$(if ($made) { " (made $(Format-PimSupportConsentUtc $made))" }) -- another updater run is applying the consent"; status = ''; problems = @() }
             }
+        }
+        # CONSENT-AFTER-CONVERGE (seen live 2026-11-05): the consent step runs at the TOP of every updater run, the database job
+        # it copies is created by the converge later in the run (OPEN-06). On the first run after an upgrade that job is not
+        # there YET: NOT READY -- nothing started, skipped (never 'failed', so no retry pause); the next run applies it. Only a
+        # confirmed 404 is 'not ready'; any other read error goes on to the builder, which reports it as before.
+        $tplMissing = $false
+        try { [void](& $Arm 'GET' "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/${TemplateJobName}?api-version=2024-03-01" $null) }
+        catch { if ("$($_.Exception.Message)" -match '(?i)HTTP 404\b|ResourceNotFound|NotFound') { $tplMissing = $true } }
+        if ($tplMissing) {
+            return @{ ok = $true; skipped = $true; notReady = $true; reason = "not ready yet: this installation has no job '$TemplateJobName' yet -- the updater's full run creates it (OPEN-06), and the next run after that applies the consent"; status = ''; problems = @() }
         }
         $sess = if ($Answer) { $Answer.session } else { $null }
         $by = if ($sess -and "$($sess.openedBy)") { "Invardia: $($sess.openedBy)" } else { 'Invardia consent channel' }
