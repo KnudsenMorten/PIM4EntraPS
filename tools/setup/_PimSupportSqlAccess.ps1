@@ -2,15 +2,18 @@
 <#
 .SYNOPSIS
   PIM REQUIREMENTS 100.116 (framework 4.1b) -- the Invardia Support app's STANDING access to the PIM database: its own
-  database user, created from the application's CLIENT id in SID form, in the database owner role; and its membership of
-  the SQL admin group. Shared by the install (Grant-PimSupportAccess.ps1), the one-time script for existing installs
+  database user, created from the application's CLIENT id in SID form, in the READ role pim_support_read (OPEN-01; before
+  OPEN-01 this was the database owner role plus the SQL admin group membership -- both are now only read). Shared by the install (Grant-PimSupportAccess.ps1), the one-time script for existing installs
   (Grant-PimSupportSqlAccess.ps1) and the end-of-install check (Confirm-PimInstall.ps1).
 
-  OPEN-01 (framework SECAUDIT-1a, 2026-11-05): a NEW install no longer uses Get-PimSupportSqlRoleName -- the install
-  (Grant-PimSupportAccess.ps1) and its check (Confirm-PimInstall.ps1) use the read role pim_support_read
-  (PIM-SupportJit.ps1 Get-PimSupportJitReadOnlyRole) and never add the SQL admin group membership. db_owner below is the
-  role of the pre-OPEN-01 standing grant, still used ONLY by the one-time script for an existing install and the job's
-  'standing' mode, until OPEN-01 replaces it per install.
+  OPEN-01 (framework SECAUDIT-1a, 2026-11-05): the Support app's ONLY standing database right is its own user in the
+  read role pim_support_read (PIM-SupportJit.ps1 Get-PimSupportJitReadOnlyRole); admin rights exist only inside an open
+  support session. A NEW install (Grant-PimSupportAccess.ps1) and its check (Confirm-PimInstall.ps1) use that role, and
+  so do the one-time script for an existing install (Grant-PimSupportSqlAccess.ps1, Invoke-PimSupportSqlReadOnlyUser
+  below) and the job's 'standing' mode. Nothing here adds the Support app to db_owner or to the SQL admin group: the
+  write statement takes the read role only (Get-PimSupportSqlUserSql refuses any other), and the group is only READ
+  (Get-PimSupportSqlAdminGroupMember). A db_owner or a membership an earlier version gave is REPORTED, never kept as
+  "in place" and never removed here (its removal is a separate, owner-approved step).
 
 .DESCRIPTION
   Why a database user and not only the group: membership of the SQL admin group has not given an APPLICATION a database
@@ -32,7 +35,11 @@
 #>
 
 function Get-PimSupportSqlUserDefaultName { return 'invardia-support' }
-function Get-PimSupportSqlRoleName { return 'db_owner' }
+# OPEN-01: the ONE role this file ever adds the Support app's user to -- the read role (the literal of
+# PIM-SupportJit.ps1 Get-PimSupportJitReadOnlyRole; a literal here, so the job carries it without that file's order)
+function Get-PimSupportSqlRoleName { return 'pim_support_read' }
+# OPEN-01: the roles an EARLIER version gave the Support app's user -- read and reported, never added, never removed here
+function Get-PimSupportSqlLegacyRoleNames { return @('db_owner', 'db_datareader') }
 function Get-PimSupportSqlArmApi { return '2021-11-01' }
 function Get-PimSupportSqlHostRuleName { return 'AllowSetupHost' }
 function Get-PimSupportSqlScriptName { return 'Grant-PimSupportSqlAccess' }
@@ -60,9 +67,11 @@ function Get-PimSupportSqlUserSql {
       PURE. The statement that puts the Support app's database user in place. Idempotent:
         no principal has the SID -> CREATE USER [<name>] WITH SID = <sid>, TYPE = E
         the principal with that SID (whatever its name) is not in the role -> ALTER ROLE ... ADD MEMBER
+      OPEN-01: the role is the read role and nothing else -- a write statement for db_owner (or any other role) is REFUSED.
     #>
     param([Parameter(Mandatory)][string]$AppId, [string]$DbUserName = (Get-PimSupportSqlUserDefaultName), [string]$Role = (Get-PimSupportSqlRoleName))
     Test-PimSupportSqlNames -DbUserName $DbUserName -Role $Role
+    if ("$Role" -cne (Get-PimSupportSqlRoleName)) { throw "the Support app's database user is only ever added to $(Get-PimSupportSqlRoleName) -- not to '$Role'." }
     $sid = ConvertTo-PimSupportSqlSid -AppId $AppId
     $q = '[' + "$DbUserName".Replace(']', ']]') + ']'
     $l = New-Object System.Collections.Generic.List[string]
@@ -146,20 +155,94 @@ function Invoke-PimSupportSqlUser {
     return [pscustomobject]$o
 }
 
-function Add-PimSupportSqlAdminGroupMember {
+function Invoke-PimSupportSqlReadOnlyUser {
     <#
-      Make the Support app's service principal a member of the SQL admin group, and say what happened. Never throws.
+      OPEN-01 (framework SECAUDIT-1a): the Support app's ONE standing database right on an EXISTING install -- the same step
+      a new install takes (Grant-PimSupportAccess.ps1): the support access module (PIM-SupportJit.ps1
+      Invoke-PimSupportJitInstall) with a consent level, which makes the user from the client id (by SID; an existing user
+      of the Support app is reused whatever its name) in the read role only; then READ BACK by SID. Never db_owner, never
+      db_datareader, never the SQL admin group. What an EARLIER version gave (db_owner, db_datareader) is read and REPORTED
+      (legacy; legacyOwner = db_owner held while no support session is open) -- never "in place", never removed here.
+      -ConsentLevel troubleshoot | setup; '' = the level already recorded on this install (troubleshoot or setup), else
+      troubleshoot -- a re-run keeps the level the customer recorded. Needs an owner-level -Sql sign-in.
+      -ReadOnly: reads only (a preview, a check).
+      Needs PIM-SupportJit.ps1 loaded. Never throws.
+      Returns { ok; existed; created; userName; inRole; role; consented; legacy; legacyOwner; sessionOpen; problem }.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Sql, [Parameter(Mandatory)][string]$AppId, [string]$DbUserName = (Get-PimSupportSqlUserDefaultName),
+          [ValidateSet('', 'troubleshoot', 'setup')][string]$ConsentLevel = '', [string]$SetBy = '', [switch]$ReadOnly)
+    $role = Get-PimSupportSqlRoleName
+    $o = [ordered]@{ ok = $false; existed = $false; created = $false; userName = ''; inRole = $false; role = $role; consented = ''; legacy = @(); legacyOwner = $false; sessionOpen = $false; problem = '' }
+    try {
+        # the user of the Support app's id, whatever its name: the one every statement below uses. A user of the wanted NAME
+        # that belongs to ANOTHER id is never dropped or reused: reported, nothing changed.
+        $pre = ConvertFrom-PimSupportSqlUserRead (& $Sql (Get-PimSupportSqlUserReadSql -AppId $AppId -DbUserName $DbUserName -Role $role))
+        if ("$($pre.userName)".Trim()) { $o.existed = $true; $DbUserName = "$($pre.userName)" }
+        elseif ($pre.nameTaken) {
+            $o.problem = "a database user named [$DbUserName] exists but belongs to ANOTHER id (an earlier Support app) -- nothing was changed. Run again with -DbUserName <another name>, or drop the old user first."
+            return [pscustomobject]$o
+        }
+        $st = Get-PimSupportJitState -Sql $Sql
+        if (-not $st.read -and $st.installed -ne $false) { throw "the support access state could not be read ($($st.problem))" }
+        $consent = "$ConsentLevel".Trim().ToLowerInvariant()
+        if (-not $consent) {
+            $cur = ConvertTo-PimSupportJitLevel "$($st.consented)"
+            $consent = if ($st.read -and $cur -in @('troubleshoot', 'setup')) { $cur } else { 'troubleshoot' }
+        }
+        $o.consented = $consent
+        if (-not $ReadOnly) {
+            $ji = Invoke-PimSupportJitInstall -Sql $Sql -SupportAppId $AppId -ConsentLevel $consent -UserName $DbUserName -SetBy $SetBy
+            if (-not $ji.ok) { $o.problem = "the support access step: $(@($ji.problems) -join '; ')" }
+            $st = Get-PimSupportJitState -Sql $Sql
+        }
+        $o.sessionOpen = [bool]($st.read -and $st.jitOpen)
+        $a = Invoke-PimSupportSqlUser -Sql $Sql -AppId $AppId -DbUserName $DbUserName -Role $role -ReadOnly
+        $o.userName = "$($a.userName)"; $o.inRole = [bool]$a.inRole
+        $o.created = ([bool]$o.userName -and -not $o.existed)
+        foreach ($lr in @(Get-PimSupportSqlLegacyRoleNames)) {
+            $l = Invoke-PimSupportSqlUser -Sql $Sql -AppId $AppId -DbUserName $DbUserName -Role $lr -ReadOnly
+            if ($l.inRole) { $o.legacy = @($o.legacy) + @($lr) }
+        }
+        $o.legacyOwner = [bool]((@($o.legacy) -contains 'db_owner') -and -not $o.sessionOpen)
+        if (-not $o.problem -and -not $o.inRole) {
+            $o.problem = if ($ReadOnly) { "$(if ($o.userName) { "the database user [$($o.userName)] of the Support app is not in $role" } else { 'the Support app has no database user' })" }
+                         else { "read-back: $(if ($o.userName) { "the database user [$($o.userName)] is not in $role" } else { 'no database user has the Support app''s id' }) after the support access step ran" }
+        }
+        $o.ok = [bool](-not $o.problem -and $o.inRole)
+    } catch { $o.problem = (("$($_.Exception.Message)" -split "`n")[0]).Trim() }
+    return [pscustomobject]$o
+}
+
+function Get-PimSupportSqlLegacyText {
+    # PURE. One plain line for what an EARLIER version left the Support app (-Legacy roles, -Member of the SQL admin group);
+    # '' when nothing. Said, never added again, never removed by this step.
+    param([string[]]$Legacy = @(), [bool]$Member = $false, [string]$GroupName = 'grp-pim-sql-admins', [bool]$SessionOpen = $false)
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @($Legacy | Where-Object { "$_".Trim() })) {
+        if ($r -eq 'db_owner' -and $SessionOpen) { continue }   # inside an open support session db_owner is the session's
+        $parts.Add("in $r")
+    }
+    if ($Member) { $parts.Add("a member of the SQL admin group '$GroupName'") }
+    if (-not $parts.Count) { return '' }
+    return "from an earlier grant the Invardia Support app is still $($parts -join ', ') -- this run did not add it and left it as found. Removing it is a separate step the owner approves."
+}
+
+function Get-PimSupportSqlAdminGroupMember {
+    <#
+      OPEN-01 (framework SECAUDIT-1a): READ whether the Support app's service principal is a member of the SQL admin group.
+      Never writes, never throws. (Before OPEN-01 this added the membership; no code path adds it any more.)
       Returns { state; detail; spObjectId; spName; groupId }:
-        member    already a member            added     added now
-        would-add -ReadOnly, not a member     no-group  the group does not exist in this tenant
-        no-sp     the application has no service principal here
-        refused   Microsoft Graph refused (a role-assignable group needs Privileged Role Administrator)
+        member      a member (from an earlier version: reported by the caller, left as found)
+        not-member  not a member (no standing administrator right)
+        no-group    the group does not exist in this tenant
+        no-sp       the application has no service principal here
+        refused     the membership could not be read
       -GroupId (33.0 item 5, 2026-10-20): the group's object id when the caller knows it (the SQL server's Entra
       administrator, principalType Group: its sid IS the group's object id). The group is then read BY ID and its name
       may be anything (a renamed group is still found); the display-name filter is only the fallback when no id is
       given or the id does not read.
     #>
-    param([Parameter(Mandatory)][scriptblock]$Graph, [Parameter(Mandatory)][string]$SupportAppId, [string]$GroupName = 'grp-pim-sql-admins', [string]$GroupId = '', [switch]$ReadOnly)
+    param([Parameter(Mandatory)][scriptblock]$Graph, [Parameter(Mandatory)][string]$SupportAppId, [string]$GroupName = 'grp-pim-sql-admins', [string]$GroupId = '')
     $o = [ordered]@{ state = ''; detail = ''; spObjectId = ''; spName = ''; groupId = '' }
     try {
         $f = [uri]::EscapeDataString("appId eq '$("$SupportAppId".Trim())'")
@@ -197,15 +280,7 @@ function Add-PimSupportSqlAdminGroupMember {
             $next = "$($page.'@odata.nextLink')".Trim()
         }
         if ($ids.Contains($o.spObjectId.ToLowerInvariant())) { $o.state = 'member'; $o.detail = "already a member of '$GroupName'"; return [pscustomobject]$o }
-        if ($ReadOnly) { $o.state = 'would-add'; $o.detail = "not a member of '$GroupName' yet"; return [pscustomobject]$o }
-        try {
-            [void](& $Graph 'POST' "/groups/$gid/members/`$ref" @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$($o.spObjectId)" })
-            $o.state = 'added'; $o.detail = "added to '$GroupName'"
-        } catch {
-            $m = (("$($_.Exception.Message)" -split "`n")[0]).Trim()
-            if ($m -match '(?i)already exist') { $o.state = 'member'; $o.detail = "already a member of '$GroupName'" }
-            else { $o.state = 'refused'; $o.detail = "Microsoft Graph refused the membership of '$GroupName': $m" }
-        }
+        $o.state = 'not-member'; $o.detail = "not a member of '$GroupName'"
     } catch { $o.state = 'refused'; $o.detail = "the group membership could not be read: $((("$($_.Exception.Message)" -split "`n")[0]).Trim())" }
     return [pscustomobject]$o
 }
@@ -247,14 +322,17 @@ function Get-PimSupportSqlFixCommand {
 
 function Invoke-PimSupportSqlAccessGrant {
     <#
-      The one-time step for an EXISTING install (PIM REQUIREMENTS 100.116, the method measured at a customer):
+      The one-time step for an EXISTING install (PIM REQUIREMENTS 100.116, the method measured at a customer; OPEN-01
+      read-only model, framework SECAUDIT-1a):
         1. read and keep the server's Entra administrator and the Entra-only setting; read the setup-host firewall rule
-        2. the Support app joins the SQL admin group (a refusal is a WARNING with the next step)
+        2. READ whether the Support app is a member of the SQL admin group -- never added; a membership an earlier version
+           gave is a WARNING (reported, left as found)
         3. open the install's own setup-host firewall rule (only when it is not there; a rule of another address stops the run)
         4. try a database sign-in as this session. Refused, and this session IS the Support app: make the Support app the
            server's administrator FOR THE STEP (PATCH of the server, the Entra-only setting sent back as read) and wait
            until a database sign-in answers
-        5. create the database user from the client id + the role; read it back
+        5. the support access step (Invoke-PimSupportSqlReadOnlyUser): the user from the client id in pim_support_read
+           only; read back. An earlier db_owner / db_datareader is a WARNING (reported, never kept as "in place")
         6. finally: put the administrator back EXACTLY as read and read it back; remove the firewall rule this run opened
            and read that back -- also after a failed step
         7. proof: a new database sign-in as the Support app (a Support session only; otherwise "not checked")
@@ -286,6 +364,8 @@ function Invoke-PimSupportSqlAccessGrant {
             $c = New-Object System.Net.Sockets.TcpClient
             try { $t = $c.ConnectAsync($HostName, $Port); return ($t.Wait(8000) -and $c.Connected) } catch { return $false } finally { $c.Close() } },
         [string[]]$FixCommand = @(),
+        # OPEN-01: the consent level recorded with the read-only user ('' = the level already recorded, else troubleshoot)
+        [ValidateSet('', 'troubleshoot', 'setup')][string]$ConsentLevel = '',
         [switch]$WhatIfOnly
     )
     $role = Get-PimSupportSqlRoleName
@@ -360,22 +440,18 @@ function Invoke-PimSupportSqlAccessGrant {
         if (-not $private -and -not $ruleBefore -and $ip -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { $problems.Add("this machine's public address is not known ('$ip') -- pass -SetupHostIp <address>. Nothing was changed."); return (& $finish) }
     }
 
-    # ---- 2. the SQL admin group -----------------------------------------------------------------------------------
+    # ---- 2. the SQL admin group: READ only (OPEN-01 -- the Support app is never made a standing administrator) ------
     if ($Graph) {
         # 33.0 item 5 (2026-10-20): the administrator read in step 1 IS the group when it is one -- found by its id, not its name
         $admGid = if ($before -and "$($before['principalType'])" -ieq 'Group' -and "$($before['sid'])".Trim()) { "$($before['sid'])".Trim() } else { '' }
-        $g = Add-PimSupportSqlAdminGroupMember -Graph $Graph -SupportAppId $SupportAppId -GroupName $SqlAdminGroupName -GroupId $admGid -ReadOnly:$WhatIfOnly
+        $g = Get-PimSupportSqlAdminGroupMember -Graph $Graph -SupportAppId $SupportAppId -GroupName $SqlAdminGroupName -GroupId $admGid
         $res.group = $g
         switch ("$($g.state)") {
-            'member'    { & $say "SQL admin group: the Invardia Support app is $($g.detail)" 'Green' }
-            'added'     { & $say "SQL admin group: the Invardia Support app was $($g.detail) (it stays a member)" 'Green' }
-            'would-add' { Write-Host "What if: add the Invardia Support app ($($g.spObjectId)) as a member of the group '$SqlAdminGroupName'" }
-            'no-sp'     { $problems.Add("$($g.detail) -- create the Invardia Support app in this tenant first (Invardia's New-InvardiaSupportApp.ps1); nothing was changed"); return (& $finish) }
-            'no-group'  {
-                $mk = @(Get-PimSupportScriptCommand -Script 'Initialize-PimSqlAdminGroup' -Run @(".\Initialize-PimSqlAdminGroup.ps1 -TenantId '$TenantId' -SubscriptionId '$SubscriptionId' -ResourceGroup '$ResourceGroup' -SqlServerName '$srv' -SupportAppId '$SupportAppId'")) -join "`n"
-                $warnings.Add("SQL admin group: $($g.detail), so the Invardia Support app is not a member of it. The database user below is what gives the access. To create the group with the Support app in it, a Privileged Role Administrator runs:`n$mk")
-            }
-            default     { $warnings.Add("SQL admin group: $($g.detail). The database user below is what gives the access; to add the membership, a Privileged Role Administrator adds the Invardia Support app to '$SqlAdminGroupName' (Microsoft Entra admin center > Groups > $SqlAdminGroupName > Members > Add members).") }
+            'member'     { $warnings.Add((Get-PimSupportSqlLegacyText -Member $true -GroupName $SqlAdminGroupName)) }
+            'not-member' { & $say "SQL admin group: the Invardia Support app is $($g.detail) (no standing administrator right; this run does not add it)" 'Green' }
+            'no-group'   { & $say "SQL admin group: $($g.detail) -- nothing to read (this run never adds the Support app to it)" 'DarkGray' }
+            'no-sp'      { $problems.Add("$($g.detail) -- create the Invardia Support app in this tenant first (Invardia's New-InvardiaSupportApp.ps1); nothing was changed"); return (& $finish) }
+            default      { $warnings.Add("SQL admin group: $($g.detail). This run never adds the Support app to it; the database user below is its only standing database right.") }
         }
     } else { $warnings.Add('SQL admin group: not checked (no Microsoft Graph session in this run)') }
 
@@ -384,7 +460,7 @@ function Invoke-PimSupportSqlAccessGrant {
         if ($private) { Write-Host "What if: no firewall rule -- the private server is reached from this machine through its private endpoint" }
         else { Write-Host "What if: open the firewall rule '$rule' on $srv for this machine's public address$(if ("$HostIp".Trim()) { " ($("$HostIp".Trim()))" })$(if ($ruleBefore) { " -- it is already there ($ruleBefore) and would be left as found" }), and remove it at the end" }
         Write-Host "What if: when the database refuses this sign-in and this run is the Invardia Support app's session: make the Invardia Support app the administrator of $srv for the step, then put $(if ($before) { "'$($before['login'])'" } else { 'the administrator' }) back exactly as read"
-        Write-Host "What if: in the database $SqlDatabase, create the user [$DbUserName] from the Support app's client id (SID $sid) when no user has that id, and add it to $role"
+        Write-Host "What if: in the database $SqlDatabase, install the support access step with consent '$(if ($ConsentLevel) { $ConsentLevel } else { 'as recorded, else troubleshoot' })': the user [$DbUserName] from the Support app's client id (SID $sid) when no user has that id, in $role only (read-only); no database owner role and no SQL admin group membership is given"
         return (& $finish)
     }
 
@@ -400,7 +476,8 @@ function Invoke-PimSupportSqlAccessGrant {
         } catch { $problems.Add("the firewall rule '$rule' could not be opened: $(& $first $_)") }
     } else { & $say "firewall rule '$rule' ($ruleBefore) was already there -- used and left exactly as found" 'DarkGray' }
 
-    $ownerSql = "SELECT CASE WHEN IS_ROLEMEMBER(N'$role') = 1 OR USER_NAME() = N'dbo' THEN 1 ELSE 0 END"
+    # the support access step needs a database OWNER sign-in (it creates a role, signs procedures): this session's own right
+    $ownerSql = "SELECT CASE WHEN IS_ROLEMEMBER(N'db_owner') = 1 OR USER_NAME() = N'dbo' THEN 1 ELSE 0 END"
     try {
         if (-not $problems.Count) {
             try {
@@ -429,12 +506,14 @@ function Invoke-PimSupportSqlAccessGrant {
                     if ($in) { & $say 'database sign-in as the Invardia Support app: accepted' 'Green' }
                     else { $problems.Add("the database did not accept the Invardia Support app's sign-in within $SignInWaitSeconds seconds ($last) -- the user was not created. Run the script again in a few minutes.") }
                 }
-                # ---- 5. the user + the role
+                # ---- 5. the read-only user (OPEN-01): the support access step, read back; an earlier db_owner is REPORTED
                 if (-not $problems.Count) {
-                    $u = Invoke-PimSupportSqlUser -Sql $Sql -AppId $SupportAppId -DbUserName $DbUserName -Role $role
+                    $u = Invoke-PimSupportSqlReadOnlyUser -Sql $Sql -AppId $SupportAppId -DbUserName $DbUserName -ConsentLevel $ConsentLevel -SetBy 'Grant-PimSupportSqlAccess (existing installation)'
                     $res.user = $u
-                    if ($u.ok) { & $say "database user [$($u.userName)] (the Support app's client id, SID $sid): $(if ($u.created) { 'created' } elseif ($u.existed) { 'was already there' } else { 'in place' }), member of $role (read back)" 'Green' }
+                    if ($u.ok) { & $say "database user [$($u.userName)] (the Support app's client id, SID $sid): $(if ($u.created) { 'created' } elseif ($u.existed) { 'was already there' } else { 'in place' }), in $role only (read back); support access consent '$($u.consented)'$(if ($u.consented -eq 'setup') { ' -- admin rights only inside an open support session, at most 8 hours' })" 'Green' }
                     else { $problems.Add("the database user was not put in place: $($u.problem)") }
+                    $lt = Get-PimSupportSqlLegacyText -Legacy @($u.legacy) -SessionOpen ([bool]$u.sessionOpen)
+                    if ($lt) { $warnings.Add($lt) }
                 }
             } catch { $problems.Add("the step stopped: $(& $first $_)") }
             finally {

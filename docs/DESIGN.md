@@ -10802,9 +10802,12 @@ database sign-in on the servers this was measured on: the sign-in was refused wi
 database user of its own works at once. The user is created from the application's **client id** written as
 a SID (the id's bytes), so the database never has to look the application up in the directory.
 
-**Why database owner.** The product's setup and repair scripts create database users for the product's
-identities and add them to fixed database roles, apply the schema and write settings. Adding a member to a
-fixed database role needs the database owner role; no smaller fixed role covers it.
+**Read-only, admin only in a support session.** The Support app's one standing database right is its own user
+in the read role `pim_support_read` (SELECT on the product schemas only). The database owner role exists for it only
+inside an open support session, at most 8 hours, when the customer's consent is *setup*; it is taken back at the end
+by itself. No script adds the Support app to the database owner role or to the SQL admin group as a standing right. On
+an installation where an earlier version gave it those rights, the scripts say so and leave them as found; their
+removal is a separate, approved step.
 
 **Found by id, never by name.** One id can exist once in a database, so every statement looks the user up by
 its id: a user the Support app already has under another name is reused and gets the role, and is never
@@ -10823,13 +10826,15 @@ idempotent: one read says the user is there with the role, and nothing is sent.
 **The one-time script, step by step.** (1) It reads and keeps the SQL server's Entra administrator and the
 Entra-only setting, and reads the setup firewall rule; it prints them. It stops here, before any change, when
 the server is private, when the firewall rule is already there for another address (another setup may be using
-it), or when the application does not exist in the tenant. (2) It adds the Support app to the SQL admin group;
-a refusal is a warning with the next step. (3) It opens the setup firewall rule for the machine it runs on,
+it), or when the application does not exist in the tenant. (2) It reads whether the Support app is a member of
+the SQL admin group; it never adds it, and a membership an earlier version gave is a warning. (3) It opens the setup firewall rule for the machine it runs on,
 unless the rule is already there for that address, in which case it uses it and leaves it. (4) It signs in to
 the database. Only when the database refuses **and** the run is the Support app's own session, the Support app
 is made the server's administrator *for the step* -- with the Entra-only setting sent back as it was read -- and
 the script waits, for a bounded time, until a database sign-in answers. A person's session never changes the
-administrator. (5) It creates the user and gives the role, and reads both back. (6) In a `finally` -- so also
+administrator. (5) It runs the support access step with the consent level (the one already recorded, unless
+another is named): the user in the read role only, read back; a database owner role an earlier version gave is a
+warning, never kept as "in place" and never added. (6) In a `finally` -- so also
 after a failed statement, a refused sign-in or a failed request -- it puts the administrator back exactly as it
 was read and reads it back, then removes the firewall rule it opened and reads that back. If the administrator
 does not read back as it was, the script ends with its own exit code and prints the values to set by hand.
@@ -11413,7 +11418,8 @@ removes a tenant-wide permission), the SMTP password script, or the PIM Manager 
 PIM Manager can describe its own installation as a plain, table-style A4 PDF -- the answer to each question of the PIM
 Manager design configurator (the questions' ids are a stable contract) plus the environment facts: version, update ring,
 edition, MSP role, network mode, region, the endpoints the heartbeat reports, the administration model, reviews and
-alerting. It is rendered **inside the customer's environment**; nothing is sent anywhere for it.
+alerting. It is rendered **inside the customer's environment**; the support job sends the finished PDF to Invardia
+support only (see "Upload to Invardia" below).
 
 **One generator, two callers.** `engine/_shared/PIM-AsBuilt.ps1` reads the facts, builds a model and renders the PDF.
 * **Admins** download it from Settings > Copy & tools > As-built document (`GET /api/asbuilt/pdf`; `GET /api/asbuilt`
@@ -11443,6 +11449,14 @@ image pull keeps the registry identity it already used.
 that hold people or secrets in SQL (to a count, a kind or a yes/no), so they never leave the database. The Manager reduces
 the same rows in PowerShell to the same shapes, so both callers produce the same document. The job's only Azure right is
 Storage Blob Data Contributor on the `asbuilt` container; the storage account allows no shared key and no anonymous access.
+
+**Upload to Invardia.** When the installation has an install key, the job also sends the same PDF to Invardia support
+over HTTPS (`POST /api/uplink/v1/asbuilt`, at most 20 MB), authenticated by that key. It counts the upload as delivered
+only when Invardia's answer gives back the same byte count and the same SHA-256 the job computed. The blob is still
+written as before. The job succeeds when either the blob or a confirmed upload delivered the document, so an installation
+whose storage is private still delivers it. The job reads the key through one stored procedure that returns the key and
+nothing else; only the job's database user may run it, and the view above still reduces the key to a yes/no. The key is
+never written to the job's log.
 
 **Who can read the PDF the job writes.** On every installation, internal ones included, the storage account keeps a public
 endpoint that accepts only Entra tokens -- no shared key, no anonymous access. The blob is readable **only by the

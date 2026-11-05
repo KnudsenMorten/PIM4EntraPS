@@ -229,6 +229,8 @@ if (-not $SkipSqlGrant) {
     try {
         $conn.Open()
         $cmd = $conn.CreateCommand(); $cmd.CommandText = (Get-PimAsBuiltViewSql); [void]$cmd.ExecuteNonQuery()
+        # ASBUILT-UPLOAD: the install-key procedure; the in-cloud updater's converge grants pim_asbuilt EXECUTE on it.
+        $cmd = $conn.CreateCommand(); $cmd.CommandText = (Get-PimAsBuiltUploadKeyProcSql); [void]$cmd.ExecuteNonQuery()
         $cmd = $conn.CreateCommand(); $cmd.CommandText = $grantSql; [void]$cmd.ExecuteNonQuery()
         $cmd = $conn.CreateCommand(); $cmd.CommandText = $factsSql; [void]$cmd.Parameters.AddWithValue('@v', $factsJson); [void]$cmd.ExecuteNonQuery()
         $cmd = $conn.CreateCommand(); $cmd.CommandText = $readSql

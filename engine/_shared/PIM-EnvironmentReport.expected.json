@@ -127,10 +127,10 @@
       "role": "support",
       "label": "Invardia Support app (application)",
       "declared": false,
-      "purpose": "Invardia's support and setup application, created at the customer's request. Its Graph grants are set by Invardia. It is the SQL admin group's only standing member (framework 12.23 P5) -- setup, repair and the audited security cut-overs -- and has its own database user in the database owner role; both end when the customer switches the app off.",
-      "sql": [ { "role": "db_owner", "required": false, "why": "Standing database access the customer grants the Support app (PIM 100.116, framework 4.1b): setup, repair and the audited security cut-overs; ends with Grant-PimSupportAccess -Remove or by switching the app off" },
-               { "role": "db_datareader", "required": false, "why": "The 'troubleshoot' access level's read access to the store (also covered by the database owner role)" } ],
-      "sqlForbidden": []
+      "purpose": "Invardia's support and setup application, created at the customer's request. Its Graph grants are set by Invardia. Its one standing database right is its own read-only database user (framework SECAUDIT-1a); admin rights only inside an open support session, at most 8 hours. It is not a standing member of the SQL admin group. The access ends when the customer switches the app off.",
+      "sql": [ { "role": "pim_support_read", "required": false, "why": "The Support app's read-only access to the store (SELECT on the product schemas only), made by the support access step; ends with Grant-PimSupportAccess -Remove or by switching the app off" } ],
+      "sqlForbidden": [ { "role": "db_owner", "why": "A standing database owner right for the Invardia Support app is a finding (framework SECAUDIT-1a): admin rights only inside an open support session; outside one this is an earlier version's grant, removed by the owner-approved step" },
+                        { "role": "db_datareader", "why": "An earlier version's read access; the support access step replaces it with pim_support_read" } ]
     },
     {
       "role": "activator",

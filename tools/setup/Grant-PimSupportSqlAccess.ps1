@@ -2,34 +2,35 @@
 
 <#
 .SYNOPSIS
-  Gives the Invardia Support app its standing access to the database of an existing PIM Manager installation: membership of the SQL admin group, and its own database user (created from the application's client id) in the database owner role. Run once per installation; -WhatIf shows it first.
+  Gives the Invardia Support app its read-only access to the database of an existing PIM Manager installation: its own database user (created from the application's client id) in the read role pim_support_read, and the support access step that gives admin rights only inside an open support session. Run once per installation; -WhatIf shows it first.
 
 .DESCRIPTION
-  PIM REQUIREMENTS 100.116 (framework 4.1b). A new installation does this by itself when a Support app is named. This
-  script brings an EXISTING installation to the same state. It changes nothing else, and it leaves the SQL server's
-  administrator and its firewall exactly as it found them.
+  PIM REQUIREMENTS 100.116 (framework 4.1b, SECAUDIT-1a). A new installation does this by itself when a Support app is
+  named. This script brings an EXISTING installation to the same state. It changes nothing else, and it leaves the SQL
+  server's administrator and its firewall exactly as it found them.
 
   What it does, in order:
     1. Reads and keeps the SQL server's Microsoft Entra administrator and its Entra-only setting, and reads the
        setup firewall rule 'AllowSetupHost'. Prints them ("before").
-    2. Adds the Invardia Support app to the SQL admin group (grp-pim-sql-admins). A refusal -- the group is
-       role-assignable, so this needs a Privileged Role Administrator -- is a WARNING with the next step, not a stop.
+    2. Reads whether the Invardia Support app is a member of the SQL admin group (grp-pim-sql-admins). It never adds
+       it. A membership an earlier version gave is shown as a WARNING and left as found.
     3. Opens the firewall rule 'AllowSetupHost' for this machine's public address, when it is not there. A rule that
        is already there for another address stops the run (another setup may be using it); nothing is changed.
     4. Signs in to the database as you. When the database refuses AND this window is the Invardia Support app's
        session, the Support app is made the server's administrator FOR THIS STEP, and the script waits until a
        database sign-in answers.
-    5. Creates the database user from the Support app's client id when no user has that id (an existing user of the
-       Support app is reused whatever its name) and adds it to db_owner. Reads it back.
+    5. Installs the support access step with the consent level (-ConsentLevel; without it the level already recorded,
+       else troubleshoot): the database user from the Support app's client id when no user has that id (an existing
+       user of the Support app is reused whatever its name), in pim_support_read only. Reads it back. A database owner
+       role an earlier version gave is shown as a WARNING and left as found; it is never added.
     6. ALWAYS, also after a failed step: puts the server's administrator back exactly as read and reads it back;
        removes the firewall rule it opened and reads that back.
     7. Proof: in a Support session, a new database sign-in as the Support app. Otherwise it says "not checked" and
        why; the evidence is then the user and its role, read back.
   Prints "before" and "after", and what it restored.
 
-  Why db_owner: PIM Manager's own setup scripts create database users for the product's identities and add them to
-  fixed database roles, apply the schema and write settings. Adding a member to a fixed database role needs db_owner;
-  no smaller fixed role covers it.
+  Admin rights: consent 'setup' lets Invardia support open a support session (at most 8 hours) that adds the database
+  owner role until its end; consent 'troubleshoot' is read-only. Outside a session the Support app reads only.
 
   Sign-in: the Invardia Support app's session open in this window, otherwise your own browser sign-in. No Azure CLI,
   no PowerShell module, no secret on the command line. Every token is pinned to -TenantId.
@@ -45,8 +46,7 @@
   Requirements:
     PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
     Role: SQL Server Contributor (or Contributor / Owner) on the PIM SQL server or its resource group (Azure); a
-          database owner -- a member of the SQL admin group or the server's Microsoft Entra administrator; Privileged
-          Role Administrator (Microsoft Entra) only to add the Support app to the SQL admin group.
+          database owner -- a member of the SQL admin group or the server's Microsoft Entra administrator.
     Hosts: login.microsoftonline.com, management.azure.com, graph.microsoft.com, *.database.windows.net (port 1433),
            api.ipify.org (this machine's public address, unless -SetupHostIp is given)
 
@@ -69,6 +69,9 @@ param(
     # this machine's public address for the firewall rule; without it the address is read from api.ipify.org
     [ValidatePattern('^$|^\d{1,3}(\.\d{1,3}){3}$')][string]$SetupHostIp = '',
     [ValidateRange(20, 1800)][int]$SignInWaitSeconds = 300,
+    # the consent level recorded with the read-only user: troubleshoot (read only) or setup (admin only inside an open
+    # support session); without it the level already recorded on this installation, else troubleshoot
+    [ValidateSet('', 'troubleshoot', 'setup')][string]$ConsentLevel = '',
     # --- test seams (tests/Test-PimSupportSqlAccess.ps1); omit them for a real run ---
     [scriptblock]$Arm,
     [scriptblock]$Graph,
@@ -85,6 +88,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-SqlStore.ps1')   # Resolve-PimSqlClientType (.NET SqlClient, no module)
 . (Join-Path $PSScriptRoot '_PimSignedIn.ps1')                        # the sign-in rule: the Support session, else the browser
 . (Join-Path $PSScriptRoot '_PimSupportSqlAccess.ps1')
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-SupportJit.ps1')   # OPEN-01: the support access step (the read role, the consent)
 $null = Start-PimScriptRun -Script 'Grant-PimSupportSqlAccess'
 $script:gssRc = 1
 try {
@@ -94,7 +98,7 @@ if ($SqlDatabase -notmatch '^[^<>*%&:\\/?\[\]'';]{1,128}$') { throw "Grant-PimSu
 $tid = "$TenantId".Trim().ToLowerInvariant(); $sub = "$SubscriptionId".Trim().ToLowerInvariant()
 
 Write-Host ('=' * 78) -ForegroundColor Cyan
-Write-Host " PIM MANAGER -- INVARDIA SUPPORT: STANDING DATABASE ACCESS  ($srv / $SqlDatabase)$(if ($WhatIfPreference) { '   PREVIEW' })" -ForegroundColor Cyan
+Write-Host " PIM MANAGER -- INVARDIA SUPPORT: READ-ONLY DATABASE ACCESS  ($srv / $SqlDatabase)$(if ($WhatIfPreference) { '   PREVIEW' })" -ForegroundColor Cyan
 Write-Host ('=' * 78) -ForegroundColor Cyan
 
 # ---- sign-in: the Support app's session in this window, else the person's browser (asserted: this tenant, this subscription)
@@ -143,7 +147,7 @@ if (-not $Arm) { $Arm = { param([string]$Method = 'GET', [string]$Path, $Body) I
 if (-not $Graph) { $Graph = { param([string]$Method = 'GET', [string]$Path, $Body) Invoke-GssRest -Base 'https://graph.microsoft.com/v1.0' -Resource 'https://graph.microsoft.com' -Method $Method -Path $Path -Body $Body } }
 if (-not $Sql) { $Sql = { param([string]$Query) Invoke-GssSqlScalar -Query $Query } }
 
-$whatIfOnly = -not $PSCmdlet.ShouldProcess("SQL server $srv, database $SqlDatabase", "give the Invardia Support app $app its standing database access (database user in db_owner, member of '$SqlAdminGroupName')")
+$whatIfOnly = -not $PSCmdlet.ShouldProcess("SQL server $srv, database $SqlDatabase", "give the Invardia Support app $app its read-only database access (database user in pim_support_read only; no database owner role, no SQL admin group membership)")
 $ip = "$SetupHostIp".Trim()
 if (-not $ip -and -not $whatIfOnly) {
     try { $ip = "$(Invoke-RestMethod -Uri 'https://api.ipify.org' -TimeoutSec 20)".Trim(); Write-Host "  this machine's public address (read from api.ipify.org): $ip" -ForegroundColor DarkGray }
@@ -151,7 +155,7 @@ if (-not $ip -and -not $whatIfOnly) {
 }
 $ga = @{ Arm = $Arm; Graph = $Graph; Sql = $Sql; TenantId = $tid; SubscriptionId = $sub; ResourceGroup = $ResourceGroup; SqlServerName = $srv; SqlDatabase = $SqlDatabase
          SupportAppId = $app; SessionIsSupportApp = $isSupportSession; DbUserName = $DbUserName; SqlAdminGroupName = $SqlAdminGroupName; HostIp = $ip
-         SignInWaitSeconds = $SignInWaitSeconds; WhatIfOnly = $whatIfOnly }
+         SignInWaitSeconds = $SignInWaitSeconds; ConsentLevel = $ConsentLevel; WhatIfOnly = $whatIfOnly }
 if ($Sleep) { $ga['Sleep'] = $Sleep }
 $r = Invoke-PimSupportSqlAccessGrant @ga
 
@@ -163,7 +167,7 @@ elseif ($r.exit -eq 2) { Write-Host 'RESULT: THE ADMINISTRATOR WAS NOT PUT BACK 
 elseif ($r.exit -ne 0) { Write-Host "RESULT: NOT DONE$(if ($r.swapped) { ' -- the administrator is back exactly as read' })." -ForegroundColor Red }
 else {
     $proof = if ("$($r.proof.state)" -eq 'proven') { 'proven by a database sign-in as the Support app' } else { "the user and its role were read back; a sign-in as the Support app was not checked ($($r.proof.detail))" }
-    Write-Host "RESULT: done$(if (@($r.warnings).Count) { " with $(@($r.warnings).Count) warning(s)" }) -- database user [$($r.user.userName)] in db_owner; $proof.$(if ($r.swapped) { ' The administrator is back exactly as read.' })" -ForegroundColor Green
+    Write-Host "RESULT: done$(if (@($r.warnings).Count) { " with $(@($r.warnings).Count) warning(s)" }) -- database user [$($r.user.userName)] in pim_support_read (read-only), consent '$($r.user.consented)'; $proof.$(if ($r.swapped) { ' The administrator is back exactly as read.' })" -ForegroundColor Green
     Write-Host '  The customer ends this access by switching the Invardia Support app off in Microsoft Entra ID (or Grant-PimSupportAccess.ps1 -Remove).' -ForegroundColor DarkGray
 }
 $script:gssRc = [int]$r.exit

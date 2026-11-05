@@ -56,6 +56,7 @@ $script:PimScriptDocScripts = @(
     @{ Path = 'setup/Set-PimBreakGlassAccounts.ps1';               Standalone = $false }
     @{ Path = 'setup/Set-PimEmergencyPassphrase.ps1';              Standalone = $false }
     @{ Path = 'setup/Find-PimStrayTestObjects.ps1';                Standalone = $false }
+    @{ Path = 'setup/Move-PimIdentities.ps1';                      Standalone = $false }   # NAM-03 identity mover
     @{ Path = 'setup/Set-PimLicense.ps1';                          Standalone = $true }
     @{ Path = 'pim-activator/Deploy-PimActivatorHybrid.ps1';       Standalone = $false }
     @{ Path = 'setup/Update-PimCommunity.ps1';                     Standalone = $false }
@@ -72,7 +73,8 @@ $script:PimScriptDocScripts = @(
     @{ Path = 'setup/Grant-PimSupportSqlAccess.ps1';               Standalone = $true }
     @{ Path = 'setup/Invoke-PimSupportSqlAccessJob.ps1';           Standalone = $true }
     @{ Path = 'setup/Set-PimSigninFrontSqlState.ps1';              Standalone = $true }
-    @{ Path = 'pim-hybrid-worker/Deploy-PimHybridWorker.ps1';      Standalone = $false }
+    # HYBRID-DEPLOY-STANDALONE: one published file that carries the worker's other scripts (BUILD-CARRY) and runs them from a temp folder
+    @{ Path = 'pim-hybrid-worker/Deploy-PimHybridWorker.ps1';      Standalone = $true }
     @{ Path = 'pim-hybrid-worker/New-PimHybridWorkerInfra.ps1';    Standalone = $false }
     @{ Path = 'pim-hybrid-worker/Set-PimHybridWorkerPeering.ps1';  Standalone = $false }
     @{ Path = 'pim-hybrid-worker/Set-PimHybridWorkerEgress.ps1';   Standalone = $false }

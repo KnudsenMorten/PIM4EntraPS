@@ -2,8 +2,8 @@
   "script": "Initialize-PimSqlAdminGroup.ps1",
   "product": "pim",
   "title": "Make the SQL admin group the Entra admin of the PIM Manager database server",
-  "purpose": "Make a role-assignable security group (default grp-pim-sql-admins) the Microsoft Entra admin of a PIM Manager environment's Azure SQL server, with the environment's managed identities, the nightly updater and the Invardia Support app as its members.",
-  "whenToRun": "Once per environment when the install could not set up the SQL admin group itself (the installing identity did not hold the rights to create a role-assignable group), when PIM Manager or the updater reports that its identity cannot log in to the database, or when Invardia support needs access to the store. Safe to run again: a second run reports no changes.",
+  "purpose": "Make a role-assignable security group (default grp-pim-sql-admins) the Microsoft Entra admin of a PIM Manager environment's Azure SQL server, with the environment's managed identities and the nightly updater as its members. The Invardia Support app is never added.",
+  "whenToRun": "Once per environment when the install could not set up the SQL admin group itself (the installing identity did not hold the rights to create a role-assignable group), or when PIM Manager or the updater reports that its identity cannot log in to the database. Invardia support's database access is its read-only user (Grant-PimSupportAccess.ps1), not this group. Safe to run again: a second run reports no changes.",
   "standalone": true,
   "sourcePath": "tools/setup/Initialize-PimSqlAdminGroup.ps1",
   "runAs": [
@@ -45,11 +45,20 @@
     {
       "target": "Microsoft Graph",
       "action": "grant",
-      "object": "member of grp-pim-sql-admins: the environment identity (id-pim-<token>), the SQL identity (id-pim-sql-<token>, private SQL only), the nightly updater's identity (ca-pim-update), the Invardia Support app (-SupportAppId / -SupportObjectId), every -ExtraMemberObjectIds, and the previous SQL admin (kept, so nobody loses access)",
+      "object": "member of grp-pim-sql-admins: the environment identity (id-pim-<token>), the SQL identity (id-pim-sql-<token>, private SQL only), the nightly updater's identity (ca-pim-update), a build's own application (-SetupIdentityAppId) for the length of that build, every -ExtraMemberObjectIds, and the previous SQL admin (kept, so nobody loses access). Never the Invardia Support app: named with -SupportAppId / -SupportObjectId it is not added, and the run says so.",
       "permission": "group member of the SQL server's Microsoft Entra admin group = administrator of the SQL server and every database on it",
       "scope": "the environment's Azure SQL server",
-      "why": "The updater checks the database schema before it rolls a release, the Manager and engine read and write the store, and Invardia support needs access to the store to help.",
+      "why": "The updater checks the database schema before it rolls a release, and a setup or build administers the store while it runs.",
       "undo": "Remove the member from the group (Entra admin center > Groups > grp-pim-sql-admins > Members). Removing the PIM identities stops PIM Manager."
+    },
+    {
+      "target": "Microsoft Graph",
+      "action": "remove",
+      "object": "with -ReleaseOwnMembership: the application this run signs in as (-ClientId with -CertThumbprint, or the Invardia Support session) leaves grp-pim-sql-admins; read back. No other member is touched, and nothing else is changed.",
+      "permission": "",
+      "scope": "the environment's Azure SQL server",
+      "why": "A build's identity is a member for the length of the build only.",
+      "undo": "Run the script again with -SetupIdentityAppId <that application id>."
     },
     {
       "target": "Azure Resource Manager",
@@ -72,8 +81,10 @@
     { "name": "EnvironmentIdentityName", "required": false, "default": "the one id-pim-* identity in the resource group", "help": "The environment's user-assigned identity, when there is more than one candidate." },
     { "name": "SqlAdminIdentityName", "required": false, "default": "the one id-pim-sql-* identity in the resource group", "help": "The in-network SQL identity (private SQL)." },
     { "name": "UpdateJobName", "required": false, "default": "ca-pim-update", "help": "The nightly updater job whose system-assigned identity becomes a member." },
-    { "name": "SupportAppId", "required": false, "default": null, "help": "The Invardia Support app's application id; its service principal becomes a member. The old name -TroubleshootingAppId still works." },
-    { "name": "SupportObjectId", "required": false, "default": null, "help": "The Invardia Support app's service principal object id, instead of -SupportAppId. The old name -TroubleshootingObjectId still works." },
+    { "name": "SupportAppId", "required": false, "default": null, "help": "The Invardia Support app's application id. It is not added as a member (no standing database administrator); the run says so. The old name -TroubleshootingAppId still works." },
+    { "name": "SupportObjectId", "required": false, "default": null, "help": "The Invardia Support app's service principal object id, instead of -SupportAppId (also not added). The old name -TroubleshootingObjectId still works." },
+    { "name": "SetupIdentityAppId", "required": false, "default": null, "help": "The application id a build runs as: a member for the length of that build." },
+    { "name": "ReleaseOwnMembership", "required": false, "default": "off", "help": "Take the application this run signs in as out of the group and read it back; nothing else is changed." },
     { "name": "ExtraMemberObjectIds", "required": false, "default": null, "help": "More object ids to make members." },
     { "name": "ClientId", "required": false, "default": null, "help": "Automation from the repository only: with -CertThumbprint, a certificate identity instead of the browser sign-in." },
     { "name": "CertThumbprint", "required": false, "default": null, "help": "Automation from the repository only: the certificate (local store) of -ClientId." },
@@ -85,7 +96,7 @@
     "the group (by name or id), whether it is a security group and role-assignable, and its members",
     "the SQL server's current Microsoft Entra admin and its Entra-only authentication setting",
     "the user-assigned identities in the resource group and the updater job's identity",
-    "the Invardia Support app's service principal (by application id)"
+    "the service principal of -SetupIdentityAppId, or with -ReleaseOwnMembership of the application this run signs in as (by application id)"
   ],
   "network": [ "graph.microsoft.com", "management.azure.com", "login.microsoftonline.com (browser sign-in)", "localhost (the browser returns the sign-in to a local port on this computer)" ],
   "whatIf": "Signs in and reads everything, prints the plan, then one \"What if:\" line per change it would make: create the role-assignable group, add each member (by name and object id), make the group the SQL server's Microsoft Entra admin (and who the admin was). Nothing is created or changed.",

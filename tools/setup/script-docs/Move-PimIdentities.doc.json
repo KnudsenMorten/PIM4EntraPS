@@ -1,0 +1,53 @@
+{
+  "script": "Move-PimIdentities.ps1",
+  "product": "pim",
+  "title": "Move each PIM Manager app and job to its own identity",
+  "purpose": "Moves each PIM Manager app and job of one install from its current identity (system-assigned, or a shared user-assigned identity) to its own user-assigned identity id-pim-<role>, with the same rights, proven, and only then removes the old identity's copied rights.",
+  "whenToRun": "Once per install for the identity naming standard (one user-assigned identity per role, named id-pim-<role>). First without -Apply (the plan, read-only), then -Apply -Role <role> one role at a time. A role whose proof is still pending (a job that has not run since the switch) is finished by running the same command again after that run.",
+  "standalone": false,
+  "sourcePath": "tools/setup/Move-PimIdentities.ps1",
+  "runAs": [
+    { "kind": "other", "name": "The Invardia Support app's session in this window (PIM's REST context) with AppRoleAssignment.ReadWrite.All, RoleManagement.ReadWrite.Directory and GroupMember.ReadWrite.All", "scope": "the tenant of the install", "why": "Reads the old identity's application permission grants, PIM group memberships and directory role assignments, and gives the same to the new identity; removes them from the old one after the proof." },
+    { "kind": "azureRbac", "name": "Contributor + User Access Administrator", "scope": "the PIM subscription", "why": "Creates the user-assigned identity, attaches it to the container apps and jobs, writes Azure role assignments (Key Vault, AcrPull, the resource group) and Key Vault access policies, starts the database job and the proof run." },
+    { "kind": "azureRbac", "name": "User Access Administrator (only with -SupportHasRootAccess)", "scope": "the tenant root", "why": "Copies a right the old identity holds at the tenant root (the engine's Reader). Without it that right is a customer step with the exact command." }
+  ],
+  "changes": [
+    { "target": "Azure (the install's resource group)", "action": "create", "object": "the user-assigned managed identity id-pim-<role>, tagged pim-component=<role>", "scope": "the PIM resource group", "why": "One identity per role, named by the standard.", "undo": "Invoke-PimArm -Method DELETE on the identity (the command is in the run record)." },
+    { "target": "Microsoft Entra ID", "action": "grant", "object": "every application permission (appRoleAssignments) the old identity holds, given to id-pim-<role>", "permission": "the same application permissions as the old identity (application permission)", "scope": "the tenant", "why": "The same rights on the new identity before anything switches.", "undo": "DELETE the assignment on the new identity (the command is in the run record)." },
+    { "target": "Microsoft Entra ID", "action": "grant", "object": "membership of PIM's own groups (grp-pim-*, members/$ref) the old identity is in", "permission": "member of the same PIM groups", "scope": "PIM's groups only", "why": "The SQL admin group and the other PIM groups the role needs.", "undo": "Remove the member (the command is in the run record)." },
+    { "target": "Microsoft Entra ID", "action": "grant", "object": "the directory role assignments of the old identity, given to the new one", "permission": "the same directory role", "scope": "the same directory scope", "why": "No regression in the move.", "undo": "DELETE the directory role assignment (the command is in the run record)." },
+    { "target": "Azure", "action": "grant", "object": "every Azure role assignment held directly by the old identity (Key Vault RBAC, AcrPull, the resource group, the tenant root with -SupportHasRootAccess)", "permission": "the same Azure role", "scope": "the same scope", "why": "The same rights on the new identity before anything switches.", "undo": "DELETE the role assignment (the command is in the run record)." },
+    { "target": "Azure Key Vault", "action": "grant", "object": "the old identity's access policy permissions, given to the new identity", "permission": "the same key / secret / certificate permissions", "scope": "the vaults of the PIM resource group", "why": "Vaults on access policies (not RBAC).", "undo": "accessPolicies/remove for the new identity (the command is in the run record)." },
+    { "target": "The PIM database", "action": "grant", "object": "the contained database user id-pim-<role>, made by one run of the in-network database job (ca-pim-dbinit)", "permission": "the role's database roles from the access catalog (for example pim_engine; the updater also db_ddladmin)", "scope": "the PIM database", "why": "The new identity signs in to the database with its own user.", "undo": "The user stays harmless until the switch; remove it with the database job if wanted." },
+    { "target": "Azure Container Apps", "action": "update", "object": "each app / job of the role: the new identity attached, the registry pull identity, Key Vault secret references and PIM_ManagedIdentityClientId (and every setting equal to the old client id) switched to it", "scope": "the PIM apps and jobs of the role", "why": "The app / job signs in as its own identity.", "undo": "Set-PimIdentityMoveSwitch with the old identity (the command is in the run record)." },
+    { "target": "Azure Container Apps", "action": "update", "object": "one run of the engine job (and of each job in -StartJobRoles) for the proof", "scope": "the job", "why": "Proves the role works as the new identity before any old right is removed.", "undo": "Nothing to undo: a normal run." },
+    { "target": "Microsoft Entra ID and Azure", "action": "remove", "object": "ONLY after the proof: the old identity's copied rights (application permissions, PIM group memberships, directory roles, Azure role assignments, access policies); a shared user-assigned identity is detached from the app and keeps its rights while anything else uses it; a system-assigned identity stays enabled", "scope": "the old identity", "why": "One identity per role; no right left on the identity that no longer runs the role.", "undo": "Each removal has its exact re-grant command in the run record." }
+  ],
+  "parameters": [
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The subscription of the PIM install." },
+    { "name": "ResourceGroup", "required": true, "default": null, "help": "The resource group of the PIM install." },
+    { "name": "TenantId", "required": false, "default": "the session's", "help": "The tenant id (names the tenant root management group)." },
+    { "name": "Apply", "required": false, "default": false, "help": "Move the roles in -Role. Without it the script only plans." },
+    { "name": "Role", "required": false, "default": null, "help": "The roles to move with -Apply: web, engine, updater, downlink, publish, requests, mcp, dbinit, asbuilt." },
+    { "name": "SupportHasRootAccess", "required": false, "default": false, "help": "The Support app holds User Access Administrator at the tenant root of this install. Without it every root right is a customer step." },
+    { "name": "ExtraScopes", "required": false, "default": null, "help": "More scopes to read the old identity's Azure roles at (for example a registry outside the subscription)." },
+    { "name": "PimGroupNames", "required": false, "default": null, "help": "More PIM group names whose membership moves (grp-pim-* always does)." },
+    { "name": "StartJobRoles", "required": false, "default": "engine", "help": "The roles whose job is started once for the proof." },
+    { "name": "NoCleanup", "required": false, "default": false, "help": "Stop after the proof; the old rights stay." },
+    { "name": "LogDir", "required": false, "default": "the temp folder\\pim-identity-move", "help": "Where the plan and the per-role records are written as JSON." }
+  ],
+  "readsOnly": [
+    "the container apps, jobs, user-assigned identities, key vaults, SQL servers and storage accounts of the resource group",
+    "the Azure role assignments of the old and the new identity (at the subscription and every scope above and below it)",
+    "the application permission grants, PIM group memberships and directory role assignments of the old and the new identity",
+    "the new revision / the job runs after the switch (the proof)"
+  ],
+  "network": [
+    "login.microsoftonline.com (token)",
+    "management.azure.com",
+    "graph.microsoft.com"
+  ],
+  "whatIf": "Without -Apply the script is read-only either way. With -Apply -WhatIf it reads everything, prints the plan and, per role, one line for each step it would take (create, grant, switch, prove, remove) -- nothing is written.",
+  "undo": "Every run writes a record to -LogDir with each change in order and its exact undo command; a failed run prints them newest first. Nothing old is removed before the proof.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Move-PimIdentities/"
+}

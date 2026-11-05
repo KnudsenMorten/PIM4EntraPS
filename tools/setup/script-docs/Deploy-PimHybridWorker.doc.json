@@ -4,7 +4,7 @@
   "title": "PIM for Active Directory: deploy the hybrid worker (Azure VM or on-premises with Azure Arc)",
   "purpose": "Deploys the PIM for Active Directory hybrid worker in the right order, step by step, and remembers where it got to so it can stop for the Active Directory step and continue later.",
   "whenToRun": "Once per hybrid worker, when you start using PIM for Active Directory: -Target Azure builds a new Azure VM for it, -Target Arc uses your own on-premises Windows server that is already Azure Arc-enabled and domain-joined. Run it first without -Apply to see the plan, then with -Apply; it stops for the Active Directory step (and, when a new KDS root key was created, for the ~10 hours that key needs) and continues with -Resume -Apply.",
-  "standalone": false,
+  "standalone": true,
   "sourcePath": "tools/pim-hybrid-worker/Deploy-PimHybridWorker.ps1",
   "runAs": [
     { "kind": "azureRbac", "name": "Contributor (or Owner)", "scope": "-Target Azure: the subscription or the worker's resource group, and Network Contributor on the networks it peers with; -Target Arc: Reader on the Arc machine and the Azure Connected Machine Resource Administrator role (run-command) on it", "why": "creates the worker's network and VM (Azure), reads the Arc machine and runs the install on it through run-command" },

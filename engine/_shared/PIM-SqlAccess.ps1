@@ -59,6 +59,7 @@ function Get-PimSqlAccessCatalog {
         )
         pim_asbuilt = @(
             & $g @('SELECT') 'pim.vw_AsBuiltSettings'
+            & $g @('EXECUTE') 'pim.usp_AsBuiltUploadKey'          # ASBUILT-UPLOAD: the install key only, for the PDF push to Invardia
         )
         pim_publish = @(
             & $g @('SELECT') 'pim.CentralAdmins'

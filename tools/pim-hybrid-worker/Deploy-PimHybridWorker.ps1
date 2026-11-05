@@ -37,6 +37,12 @@
     One REST session, pinned to -TenantId (the Invardia Support app's session, or the person signed in in the browser),
     shared by every step. No az, no PowerShell module.
 
+    ONE FILE: the copy published at https://invardia.com/support/pim/Deploy-PimHybridWorker.ps1 carries the worker's other
+    scripts inside it, each with its SHA-256. It checks every one before it starts (a changed copy refuses to run), and with
+    -Apply writes them to a new private folder in your temp folder for the run and removes that folder when it ends. The
+    Active Directory step's script is published on its own (Initialize-PimHybridWorkerAd.ps1); the STOP message shows the
+    download line.
+
 .EXAMPLE
     # on-premises (Azure Arc): plan, then apply
     .\Deploy-PimHybridWorker.ps1 -Target Arc -SubscriptionId <sub> -TenantId <tenant> `
@@ -46,6 +52,15 @@
         -GroupsOu 'OU=PIM Groups,DC=corp,DC=local' -AdminAccountsOu 'OU=Admin Accounts,DC=corp,DC=local'
     .\Deploy-PimHybridWorker.ps1 ...same... -Apply              # stops at the AD step (exit 10)
     .\Deploy-PimHybridWorker.ps1 -Resume -Apply                  # after the AD administrator ran the printed command
+
+.NOTES
+    Requirements:
+      PowerShell: 7.0 or later (pwsh) for the published copy. The copy inside the PIM Manager package also runs in
+                  Windows PowerShell 5.1.
+      Role: Contributor (or Owner) for the worker's Azure resources, User Access Administrator on the source container,
+            Privileged Role Administrator for the worker identity's Graph read roles, and the Microsoft Entra admin of the
+            PIM SQL server; the Active Directory step is run by the AD administrator.
+      Hosts: management.azure.com, graph.microsoft.com, login.microsoftonline.com and the PIM SQL server (port 1433).
 
 .LINK
     https://invardia.com/docs/pim/scripts/Deploy-PimHybridWorker/
@@ -114,16 +129,66 @@ param(
     [string]$ScriptRoot = ''
 )
 $ErrorActionPreference = 'Stop'
+# HYBRID-DEPLOY-STANDALONE: this file keeps '#Requires -Version 5.1' for the package; the PUBLISHED copy is for PowerShell 7
+# BUILD-PUBLISH-REQUIRES-7
 
 # 12.7 run frame: "<Script> version <x.y.z> - documentation: <page>" as the first line + a transcript in the temp folder.
 . (Join-Path $PSScriptRoot '..\setup\_PimScriptDoc.ps1')
 $null = Start-PimScriptRun -Script 'Deploy-PimHybridWorker'
 $exitCode = 0
+$script:PimHwCarryRoot = ''
 try {
 
 function Step($m) { Write-Host "[deploy] $m" -ForegroundColor Cyan }
 function Info($m) { Write-Host "         $m" -ForegroundColor Gray }
 function Warn($m) { Write-Host "         $m" -ForegroundColor Yellow }
+
+# ---------------------------------------------------------------------------------------------------------- carried files
+# HYBRID-DEPLOY-STANDALONE (owner rule: every script a person runs is ONE published file). The published copy carries the
+# files it runs -- the worker's child scripts and the libraries they load, solution-relative, each '<sha256>:<base64>' --
+# in the table below (tools/setup/Build-PimSupportScripts.ps1 fills it from the BUILD-CARRY list and refuses a build where
+# a child the code calls or loads is not in the list). In the repository the table stays EMPTY and every child runs from
+# this folder exactly as before.
+$script:PimHwDeployCarried = @{}   # BUILD-CARRY: tools/pim-hybrid-worker/New-PimHybridWorkerInfra.ps1, tools/pim-hybrid-worker/Set-PimHybridWorkerPeering.ps1, tools/pim-hybrid-worker/Set-PimHybridWorkerEgress.ps1, tools/pim-hybrid-worker/Grant-PimHybridWorkerAccess.ps1, tools/pim-hybrid-worker/_PimHybridWorkerSql.ps1, tools/pim-hybrid-worker/Invoke-PimHybridWorkerRunCommand.ps1, tools/pim-hybrid-worker/Install-PimHybridWorker.ps1, tools/setup/_PimScriptDoc.ps1, engine/_shared/PIM-Rest.ps1, engine/_shared/PIM-LoopbackAnswer.ps1, engine/_shared/PIM-ArmSetup.ps1, engine/_shared/PIM-SqlStore.ps1, engine/_shared/InvardiaUpdate.verify.ps1
+function Test-PimHwCarriedTable {
+    # PURE (no file, no network). Every carried file: a relative path inside the bundle, base64 that decodes, and bytes whose
+    # SHA-256 is the one the build wrote. Returns @{ <relative path> = <bytes> }, or THROWS naming the first file that fails --
+    # a copy changed after it was built never starts.
+    param([Parameter(Mandatory)][hashtable]$Table)
+    $out = @{}
+    foreach ($k in @($Table.Keys | Sort-Object)) {
+        $rel = "$k"
+        if (-not $rel.Trim() -or $rel -match '(^|[\\/])\.\.?([\\/]|$)' -or $rel -match '^[\\/]' -or $rel.Contains(':')) { throw "carried file '$rel' is not a relative path inside this script -- refusing to start" }
+        $v = "$($Table[$k])"
+        if ($v.Length -lt 66 -or $v[64] -ne ':' -or $v.Substring(0, 64) -notmatch '^[0-9a-fA-F]{64}$') { throw "carried file '$rel' has no checksum -- refusing to start" }
+        $want = $v.Substring(0, 64).ToLowerInvariant()
+        $bytes = $null
+        try { $bytes = [Convert]::FromBase64String($v.Substring(65)) } catch { throw "carried file '$rel' is damaged (not base64) -- refusing to start; download the script again" }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $got = (@($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join '') } finally { $sha.Dispose() }
+        if ($got -ne $want) { throw "carried file '$rel' does not match its checksum (built $want, found $got) -- this copy was changed after it was built; download it again. Refusing to start" }
+        $out[$rel] = $bytes
+    }
+    return $out
+}
+function Expand-PimHwCarriedFiles {
+    # Writes the VERIFIED files (Test-PimHwCarriedTable) into a NEW folder of its own under -TempRoot (the user's temp
+    # folder: only this user and administrators can read it) and returns that folder. Nothing is written anywhere else.
+    param([Parameter(Mandatory)][hashtable]$Files, [string]$TempRoot = [IO.Path]::GetTempPath())
+    $sep = [IO.Path]::DirectorySeparatorChar
+    $dir = [IO.Path]::GetFullPath((Join-Path $TempRoot ('pim-hybrid-deploy-' + [guid]::NewGuid().ToString('N'))))
+    [void][IO.Directory]::CreateDirectory($dir)
+    foreach ($rel in @($Files.Keys)) {
+        $p = [IO.Path]::GetFullPath((Join-Path $dir ("$rel" -replace '[\\/]', $sep)))
+        if (-not $p.StartsWith($dir + $sep, [StringComparison]::OrdinalIgnoreCase)) { throw "carried file '$rel' would land outside $dir -- refusing" }
+        [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($p))
+        [IO.File]::WriteAllBytes($p, [byte[]]$Files[$rel])
+    }
+    return $dir
+}
+$carriedFiles = $null
+if ($script:PimHwDeployCarried.Count) { $carriedFiles = Test-PimHwCarriedTable -Table $script:PimHwDeployCarried }   # checked BEFORE anything else, plan included
+
 $here = if ("$ScriptRoot".Trim()) { "$ScriptRoot".Trim() } else { $PSScriptRoot }   # test seam: the child scripts' folder
 function Child([string]$Name) { Join-Path $here $Name }
 
@@ -255,11 +320,19 @@ if (-not $Apply -or $WhatIfPreference) {
     $i = 0
     foreach ($s in $steps) { $i++; $st = Get-StepStatus $s; Info ("{0}. {1,-9} {2}{3}" -f $i, $s, $describe[$s], $(if ($st) { "  [$st]" } else { '' })) }
     Info "state file: $StatePath"
+    if ($carriedFiles) { Info "this one file carries the worker's $($carriedFiles.Count) scripts (checksums verified); with -Apply they run from a private temp folder that is removed afterwards" }
     return
 }
 
+# HYBRID-DEPLOY-STANDALONE: the published copy runs its children from a private temp folder (removed in finally)
+if ($carriedFiles) {
+    $script:PimHwCarryRoot = Expand-PimHwCarriedFiles -Files $carriedFiles
+    if (-not "$ScriptRoot".Trim()) { $here = Join-Path $script:PimHwCarryRoot 'tools\pim-hybrid-worker' }
+    Info "the worker's scripts ($($carriedFiles.Count) files, checksums verified) run from $($script:PimHwCarryRoot) (removed when this run ends)"
+}
+
 # one REST session, pinned to -TenantId, shared by every child script (they reuse it: PIM_SetupRestMode is set)
-$solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$solRoot = if ($script:PimHwCarryRoot) { $script:PimHwCarryRoot } else { Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
 if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
 if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
 if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId) }
@@ -301,6 +374,8 @@ foreach ($s in $steps) {
             Set-StepStatus 'ad' 'waiting'
             Write-Host ''
             Write-Host '[deploy] STOP -- the Active Directory step. On a domain controller (or a domain-joined admin host), as an account that may create gMSAs, groups and OU rights, run:' -ForegroundColor Yellow
+            # the published copy has no folder around it: the AD step's own published file, two lines (download, then run)
+            if ($carriedFiles) { Write-Host "         Invoke-WebRequest $(Get-PimSupportScriptUrl -Script 'Initialize-PimHybridWorkerAd') -OutFile Initialize-PimHybridWorkerAd.ps1" -ForegroundColor White }
             Write-Host "         $(Get-AdCommand)" -ForegroundColor White
             Write-Host "         then continue here:  .\Deploy-PimHybridWorker.ps1 -Resume -Apply$(if ($CreateKdsRootKey) { " -KdsRootKeyCreatedUtc '<the time it printed>'" })$(if ($Target -eq 'Azure') { ' -OdjBlobFile <file with the ODJ blob it printed>' })" -ForegroundColor Yellow
             $exitCode = 10; $stopped = $true
@@ -359,5 +434,8 @@ Info "state file: $StatePath"
 } catch {
     Write-Host "[deploy] FAILED: $($_.Exception.Message)" -ForegroundColor Red
     $exitCode = 1
-} finally { Stop-PimScriptRun -Script 'Deploy-PimHybridWorker' }
+} finally {
+    if ("$($script:PimHwCarryRoot)".Trim()) { try { [IO.Directory]::Delete($script:PimHwCarryRoot, $true) } catch { Write-Host "[deploy] could not remove $($script:PimHwCarryRoot): $($_.Exception.Message)" -ForegroundColor Yellow } }
+    Stop-PimScriptRun -Script 'Deploy-PimHybridWorker'
+}
 if ($exitCode) { exit $exitCode }

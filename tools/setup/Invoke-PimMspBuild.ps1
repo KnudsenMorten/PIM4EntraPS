@@ -13,7 +13,7 @@
 
       both   keyvault (when keyVaultName + bootstrapAppId are set) -> hosting (Invoke-PimDeployAll -Scenario S3|S6: identity,
              prerequisites incl. SQL admin group, image, containers, schema, mail sender, Easy Auth, code, updater, access,
-             smoke gate) -> sqlgroup (tick + Manager + Invardia Support app) -> access (tick Engine Graph set, Manager
+             smoke gate) -> sqlgroup (the build's own identity for its store steps; never the Invardia Support app as such) -> access (tick Engine Graph set, Manager
              read-only set, Container Apps Jobs Operator on the tick, SchedulerTickJobId) -> scenario
       master registry -> publishnetwork (storage service endpoint on the managing tenant's own subnet) -> storage (public-but-signed:
              anonymous blob read; the managing tenant's subnet allowed, THEN firewall Deny) -> register-<n> + network-<n> (each managed
@@ -103,6 +103,12 @@
     a failure is told in three parts only -- what failed and why, the fix when known, this line -- with no internal -From
     line and no operator-steps block. Run directly without it, the detailed output is unchanged.
 
+.PARAMETER ReleaseOwnBuildMembership
+    Certificate mode: at the end of the build, the build's own identity leaves the SQL admin group again (step
+    'sqlgrouprelease'; only that one membership, read back). ON by default: the switch only states it. To keep the
+    membership, set the config key 'releaseOwnBuildMembership' to false. A later resume that needs the store then starts
+    at -From sqlgroup.
+
 .PARAMETER WhatIf
     The plan and the operator steps only, exactly as without -Apply -- and it wins over -Apply: nothing is claimed at
     Invardia, signed in, created or granted. Each step's script can be previewed on its own with its own -WhatIf.
@@ -112,8 +118,8 @@
     The person running it needs (signed-in mode): Owner (or Contributor + User Access Administrator) on the subscription;
     in Entra ID Privileged Role Administrator, Application Administrator and Groups Administrator; Exchange Administrator
     only for the mail sender. Certificate mode: the deploy identity named in the config with the same rights.
-    It creates and grants everything Invoke-PimDeployAll does (the 'hosting' step), plus: the SQL admin group members
-    (tick, Manager, Invardia Support app); the engine Graph set to the tick identity and the read-only set to the Manager
+    It creates and grants everything Invoke-PimDeployAll does (the 'hosting' step), plus: the SQL admin group member
+    (the build's own identity, only for the length of the build in certificate mode -- item 11, on by default); the engine Graph set to the tick identity and the read-only set to the Manager
     identity; Container Apps Jobs Operator for the Manager on the tick job; Reader at the tenant root for the tick; on a
     managing tenant the signed-baseline storage (Storage Blob Data Contributor for the publish job), the Key Vault signing
     key (Key Vault Crypto User for the publish job), the publish job and its SQL reader user, the managed-tenant network
@@ -154,7 +160,11 @@ param(
     # own over (under Invardia's bootstrap: ". ./bootstrap.ps1; Install-Invardia -Resume -InstallId <id>"). Set (or
     # Install-Invardia present in the session), a failure prints three parts only -- what failed + cause, the fix when
     # known, this line -- with no internal -From line and no operator-steps block (those print at the end of a success).
-    [string]$ResumeCommand = ''
+    [string]$ResumeCommand = '',
+    # OPEN-01 item 4, owner's item 11 (2026-11-05: ON by default): a certificate-mode build takes its OWN identity out of
+    # the SQL admin group at its end (step 'sqlgrouprelease'). The switch only states the default; the config's
+    # 'releaseOwnBuildMembership': false keeps the membership.
+    [switch]$ReleaseOwnBuildMembership
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -172,6 +182,8 @@ if ($WhatIfPreference -and $Apply) { Write-Host '    -WhatIf: plan only -- it wi
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "config not found: $ConfigPath" }
 $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+# OPEN-01 item 4: the switch only ever turns the release ON (the config may also say so); it never turns it off
+if ($ReleaseOwnBuildMembership) { $config | Add-Member -NotePropertyName 'releaseOwnBuildMembership' -NotePropertyValue $true -Force }
 # UPLINK-ENROL: the enrollment key is taken OUT of the config object at once, so nothing below (config check, plan, step
 # arguments, printed output) can ever see it. It lives in this one variable until the claim, and is cleared after it.
 $enrolKey = "$EnrollmentKey".Trim()

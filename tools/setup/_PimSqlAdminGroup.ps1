@@ -14,10 +14,12 @@
     database -- the unattended updater's schema step, the Invardia Support app -- needed a
     contained user created by that one principal, and an environment whose admin was a secret-only app
     could not be fixed unattended at all (both test tenants, UPD-15). The admin is therefore a SECURITY GROUP,
-    default 'grp-pim-sql-admins'. FRAMEWORK 12.23 P5 (PIM 100.156 B, 2026-10-16): its STANDING member is the Invardia
-    Support app ONLY (by appId or object id: -SupportAppId / -SupportObjectId), when given. For the length of an install:
-      * the setup identity (the signed-in person or the SQL admin application) -- released again at the end of the
-        install (Invoke-PimSqlAdminGroupSetupRelease)
+    default 'grp-pim-sql-admins'. FRAMEWORK 12.23 P5 (PIM 100.156 B, 2026-10-16) made the Invardia Support app its only
+    standing member; OPEN-01 (framework SECAUDIT-1a, 2026-11-05) takes that back: nothing here ADDS the Support app any
+    more (-SupportAppId / -SupportObjectId only produce a note), and its one standing database right is the read-only user.
+    A membership an earlier version gave is not removed here (100.116). For the length of an install:
+      * the setup identity (the signed-in person or the SQL admin application; a build's certificate application with
+        -SetupIdentityAppId) -- released again at the end of the install (Invoke-PimSqlAdminGroupSetupRelease)
       * the in-VNet SQL identity id-pim-sql-<token> on private SQL, so the in-cloud bootstrap still works
       * the previous admin, so converging never takes access away from whoever had it
     NOT members any more: the environment's user-assigned identity id-pim-<token> (it only pulls the image; added only
@@ -527,6 +529,8 @@ function Invoke-PimSqlAdminGroupStep {
         updater identity     : -UpdateJobName's system-assigned identity, when the job exists AND
                                Get-PimSqlAdminGroupKeepsUpdater (the one switch) says so
         Invardia Support app : -SupportAppId / -SupportObjectId (old names -TroubleshootingAppId / -TroubleshootingObjectId still bind)
+                               OPEN-01: NEVER added -- a note says so (no standing database administrator)
+        setup identity       : -SetupIdentityAppId -- the application THIS setup runs as (a build), added for the setup
         extras               : -ExtraMembers @{ objectId; label } and -ExtraMemberObjectIds
       -NoDiscovery skips the two identity look-ups (a caller that knows exactly whom to add).
       Returns the Invoke-PimSqlAdminGroup result plus { members (resolved) }.
@@ -546,6 +550,7 @@ function Invoke-PimSqlAdminGroupStep {
         [string]$UpdateJobName = 'ca-pim-update',
         [Alias('TroubleshootingAppId')][string]$SupportAppId,
         [Alias('TroubleshootingObjectId')][string]$SupportObjectId,
+        [string]$SetupIdentityAppId,
         [AllowEmptyCollection()][object[]]$ExtraMembers = @(),
         [AllowEmptyCollection()][string[]]$ExtraMemberObjectIds = @(),
         [ValidateSet('converge', 'membersOnly')][string]$Mode = 'converge',
@@ -610,11 +615,18 @@ function Invoke-PimSqlAdminGroupStep {
             }
         }
     }
-    if ("$SupportObjectId".Trim()) {
-        [void]$members.Add([pscustomobject]@{ objectId = "$SupportObjectId".Trim(); label = 'Invardia Support app' })
-    } elseif ("$SupportAppId".Trim()) {
-        try { [void]$members.Add([pscustomobject]@{ objectId = (Resolve-PimServicePrincipalObjectId -Graph $Graph -AppId $SupportAppId); label = "Invardia Support app (app $("$SupportAppId".Trim()))" }) }
-        catch { [void]$resolveProblems.Add("resolve the Invardia Support app (app $SupportAppId): $($_.Exception.Message)") }
+    # OPEN-01 (framework SECAUDIT-1a): the Invardia Support app is NEVER added -- not a standing SQL administrator. Its one
+    # standing database right is the read-only user (Grant-PimSupportAccess / Grant-PimSupportSqlAccess); admin rights only
+    # inside an open support session. Named here, it is said and left out (a membership an earlier version gave is not
+    # removed here either: 100.116 -- PIM never removes the Support app).
+    if ("$SupportObjectId".Trim() -or "$SupportAppId".Trim()) {
+        [void]$resolveNotes.Add('the Invardia Support app is not added to the SQL admin group (no standing database administrator; its read-only database user comes from Grant-PimSupportAccess.ps1)')
+    }
+    # The identity THIS setup runs as (a build's certificate application): a member for the length of the setup, like the
+    # deploy identity of an install. Named by its application id; the caller decides whether it is released at the end.
+    if ("$SetupIdentityAppId".Trim()) {
+        try { [void]$members.Add([pscustomobject]@{ objectId = (Resolve-PimServicePrincipalObjectId -Graph $Graph -AppId $SetupIdentityAppId); label = "setup identity (app $("$SetupIdentityAppId".Trim()))" }) }
+        catch { [void]$resolveProblems.Add("resolve the setup identity (app $SetupIdentityAppId): $($_.Exception.Message)") }
     }
     foreach ($x in @($ExtraMembers)) { if ($x) { [void]$members.Add($x) } }
     foreach ($x in @($ExtraMemberObjectIds)) { if ("$x".Trim()) { [void]$members.Add([pscustomobject]@{ objectId = "$x".Trim(); label = 'extra member' }) } }
@@ -656,10 +668,15 @@ function Remove-PimSqlAdminGroupMember {
       the group is full server administration. The caller creates and VERIFIES the replacement access first.
       Never throws for a Graph refusal. Returns { ok; wasMember; removed; groupId; problem }.
         absent group / not a member -> ok, nothing written
+      -OwnObjectId (OPEN-01 item 4, waits for the owner's decision; only Initialize-PimSqlAdminGroup -ReleaseOwnMembership
+      passes it): the object id of the identity RUNNING this. Only when it EQUALS -MemberObjectId may a member that is the
+      Invardia Support app be removed -- a build releasing its OWN temporary membership. Any other Support-app member is
+      never removed (100.116), with or without it.
     #>
     param(
         [Parameter(Mandatory)][scriptblock]$Graph,
         [Parameter(Mandatory)][string]$MemberObjectId,
+        [string]$OwnObjectId = '',
         [string]$GroupName = 'grp-pim-sql-admins',
         [string]$GroupObjectId,
         [string]$Label = 'member',
@@ -687,7 +704,8 @@ function Remove-PimSqlAdminGroupMember {
         # removes it (only the customer's Grant-PimSupportAccess.ps1 -Remove does). A member that is not a service principal
         # (a person) answers 404 here; anything that cannot be PROVEN not to be the Support app is left a member.
         $isSupport = Test-PimSqlAdminMemberIsSupportApp -Graph $Graph -ObjectId $oid
-        if ($isSupport -ne $false) {
+        $ownMembership = [bool]((Test-PimSqlAdminGuid "$OwnObjectId".Trim()) -and "$OwnObjectId".Trim() -ieq $oid)
+        if ($isSupport -ne $false -and -not $ownMembership) {
             $out.problem = $(if ($isSupport) { "$Label ($oid) is the Invardia Support app -- PIM never removes it from '$GroupName' (the customer ends that access with Grant-PimSupportAccess.ps1 -Remove)" }
                              else { "$Label ($oid) could not be proven NOT to be the Invardia Support app -- it was not removed from '$GroupName'" })
             return [pscustomobject]$out
@@ -737,7 +755,7 @@ function Invoke-PimSqlAdminGroupSetupRelease {
     #>
     param([Parameter(Mandatory)][scriptblock]$Graph, [Parameter(Mandatory)][scriptblock]$Arm, [Parameter(Mandatory)][string]$SubscriptionId,
           [Parameter(Mandatory)][string]$SqlResourceGroup, [Parameter(Mandatory)][string]$SqlServerName, [AllowEmptyString()][string]$MemberObjectId,
-          [string]$GroupName = 'grp-pim-sql-admins', [string]$Label = 'the setup identity',
+          [string]$GroupName = 'grp-pim-sql-admins', [string]$Label = 'the setup identity', [string]$OwnObjectId = '',
           [int]$PollSeconds = 5, [int]$PollCount = 24, [scriptblock]$Sleep = { param([int]$Seconds) Start-Sleep -Seconds $Seconds })
     $out = [ordered]@{ ok = $true; released = $false; skipped = $true; reason = '' }
     try {
@@ -760,7 +778,7 @@ function Invoke-PimSqlAdminGroupSetupRelease {
         if (-not $plan.release) { return [pscustomobject]$out }
         $out.skipped = $false
         $rm = Remove-PimSqlAdminGroupMember -Graph $Graph -MemberObjectId $MemberObjectId -GroupObjectId "$($grp.id)" -GroupName $GroupName -Label $Label `
-                 -PollSeconds $PollSeconds -PollCount $PollCount -Sleep $Sleep
+                 -OwnObjectId $OwnObjectId -PollSeconds $PollSeconds -PollCount $PollCount -Sleep $Sleep
         if ($rm.ok) {
             $out.released = [bool]$rm.removed
             $out.reason = $(if ($rm.removed) { "$Label left '$GroupName' (read back)" } else { "$Label was not a member of '$GroupName' -- nothing to release" })

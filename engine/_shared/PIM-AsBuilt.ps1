@@ -907,6 +907,20 @@ CASE Name
             "EXEC (N'$v');")
 }
 
+function Get-PimAsBuiltUploadKeyProcSql {
+    <#
+      PURE. ASBUILT-UPLOAD: idempotent DDL for pim.usp_AsBuiltUploadKey, run right after Get-PimAsBuiltViewSql (the updater's
+      converge, Deploy-PimAsBuiltJob). It returns ONE value -- the stored InvardiaInstallKey row's ValueJson -- and nothing
+      else: no parameter, no other row, no other column. The view keeps the key reduced to { present }; this procedure is
+      the job's only way to the key, for the push of the as-built PDF to Invardia. Owned like the view (ownership chain), so
+      EXECUTE on it is the only right the reader needs; pim_asbuilt holds that EXECUTE (Get-PimSqlAccessCatalog), and
+      the pre-procedure path grants it to the reader user only (Get-PimAsBuiltReaderUserSql). No right on pim.Settings.
+    #>
+    $p = "CREATE OR ALTER PROCEDURE pim.usp_AsBuiltUploadKey AS BEGIN SET NOCOUNT ON; SELECT TOP (1) ValueJson AS InstallKey FROM pim.Settings WHERE Name = N''InvardiaInstallKey''; END"
+    return ("IF OBJECT_ID(N'pim.Settings') IS NULL THROW 50001, 'pim.Settings does not exist in this store -- the Manager has not initialised it', 1;`n" +
+            "EXEC (N'$p');")
+}
+
 function Get-PimAsBuiltJobSpec {
     <#
       PURE. The Container Apps job caj-pim-asbuilt (framework 8.12): MANUAL trigger (started on demand -- by Invardia support
@@ -1004,7 +1018,8 @@ function Get-PimAsBuiltStorageAccountName {
 function Get-PimAsBuiltReaderUserSql {
     <#
       PURE. The job identity's contained database user, created from its APP ID as a SID (never FROM EXTERNAL PROVIDER),
-      with SELECT on pim.vw_AsBuiltSettings ONLY (no fixed role; any a former run left is dropped). Idempotent; a user of
+      with SELECT on pim.vw_AsBuiltSettings and EXECUTE on pim.usp_AsBuiltUploadKey (ASBUILT-UPLOAD: the install key, nothing
+      else) ONLY (no fixed role; any a former run left is dropped). Idempotent; a user of
       that name with another SID (a rebuilt identity) is dropped and recreated. The same shape as tools/setup's
       Get-PimSqlContainedUserSql, kept here so the in-cloud updater needs nothing from tools/setup.
     #>
@@ -1024,7 +1039,8 @@ function Get-PimAsBuiltReaderUserSql {
         "IF IS_ROLEMEMBER('db_datawriter', N'$n') = 1 ALTER ROLE [db_datawriter] DROP MEMBER $q;",
         "IF IS_ROLEMEMBER('db_ddladmin', N'$n') = 1 ALTER ROLE [db_ddladmin] DROP MEMBER $q;",
         "IF IS_ROLEMEMBER('db_owner', N'$n') = 1 ALTER ROLE [db_owner] DROP MEMBER $q;",
-        "IF OBJECT_ID(N'pim.vw_AsBuiltSettings') IS NOT NULL GRANT SELECT ON OBJECT::[pim].[vw_AsBuiltSettings] TO $q;"
+        "IF OBJECT_ID(N'pim.vw_AsBuiltSettings') IS NOT NULL GRANT SELECT ON OBJECT::[pim].[vw_AsBuiltSettings] TO $q;",
+        "IF OBJECT_ID(N'pim.usp_AsBuiltUploadKey') IS NOT NULL GRANT EXECUTE ON OBJECT::[pim].[usp_AsBuiltUploadKey] TO $q;"
     ) -join "`n")
 }
 
@@ -1060,7 +1076,7 @@ function Get-PimAsBuiltReaderAccessSql {
     $direct = Get-PimAsBuiltReaderUserSql -DbUserName $DbUserName -AppId $AppId
     if (-not $Grants) {
         if (Get-Command Get-PimSqlAccessCatalog -ErrorAction SilentlyContinue) { $Grants = @((Get-PimSqlAccessCatalog)['pim_asbuilt']) }
-        else { $Grants = @([pscustomobject]@{ perm = 'SELECT'; on = 'pim.vw_AsBuiltSettings' }) }
+        else { $Grants = @([pscustomobject]@{ perm = 'SELECT'; on = 'pim.vw_AsBuiltSettings' }, [pscustomobject]@{ perm = 'EXECUTE'; on = 'pim.usp_AsBuiltUploadKey' }) }
     }
     $lines = New-Object System.Collections.Generic.List[string]
     [void]$lines.Add("    EXEC [pim].[usp_ApplyAccess] @Action = N'role', @Role = N'pim_asbuilt';")
@@ -1079,6 +1095,142 @@ function Get-PimAsBuiltReaderAccessSql {
         $direct,
         'END'
     ) -join "`n")
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# ASBUILT-UPLOAD: the job also PUSHES the PDF to Invardia (POST <base>/api/uplink/v1/asbuilt, header x-invardia-install-key,
+# body = the PDF bytes, application/pdf, at most 20 MB). A private install's storage cannot be reached from outside, so the
+# push is how the document reaches support there. The blob is still written exactly as before. Everything below is PURE
+# except the default HTTP seam; the key is never put in any returned or logged text.
+# ---------------------------------------------------------------------------------------------------------------------
+$script:PimAsBuiltUploadPath     = '/api/uplink/v1/asbuilt'
+$script:PimAsBuiltUploadMaxBytes = 20MB
+
+function Invoke-PimAsBuiltUploadHttp {
+    <#
+      The real seam: ONE POST of raw bytes, 60 s -> @{ status; body; error }. A non-2xx is a status, never a throw; the body
+      of a refusal is read when it is JSON (PowerShell 7 ErrorDetails).
+    #>
+    param([string]$Method = 'POST', [Parameter(Mandatory)][string]$Url, [byte[]]$Body, [hashtable]$Headers = @{})
+    try {
+        $r = Invoke-WebRequest -Method $Method -Uri $Url -Headers $Headers -Body $Body -ContentType 'application/pdf' -TimeoutSec 60 -UseBasicParsing -ErrorAction Stop
+        $b = $null; if ("$($r.Content)".Trim()) { try { $b = "$($r.Content)" | ConvertFrom-Json } catch { $b = $null } }
+        return @{ status = [int]$r.StatusCode; body = $b; error = '' }
+    } catch {
+        $code = 0; try { if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode } } catch { $code = 0 }
+        $b = $null
+        try { $t = "$($_.ErrorDetails.Message)".Trim(); if ($t.StartsWith('{')) { $b = $t | ConvertFrom-Json } } catch { $b = $null }
+        return @{ status = $code; body = $b; error = ((("$($_.Exception.Message)") -split "`n")[0]) }
+    }
+}
+
+function Resolve-PimAsBuiltUploadKey {
+    <#
+      The install key for the push -> @{ key; source = secret|store|''; note }. The Container Apps secret PIM_UPLINK_KEY wins
+      (Resolve-PimInvardiaInstallKey, PIM-InvardiaUpdate.ps1 -- the same rule as the updater); else -ReadKey, which runs
+      pim.usp_AsBuiltUploadKey and returns its one value (the stored ValueJson, a JSON string). A refused / missing procedure
+      (an install whose update has not converged it yet) or no key = no push, said in 'note' -- never a failure.
+    #>
+    param([scriptblock]$ReadKey)
+    $envKey = "$env:PIM_UPLINK_KEY".Trim()
+    if ($envKey) { return @{ key = $envKey; source = 'secret'; note = 'the install key comes from the Container Apps secret' } }
+    $raw = $null
+    if ($ReadKey) {
+        try { $raw = & $ReadKey }
+        catch { return @{ key = ''; source = ''; note = 'the install key is not readable by this job yet (pim.usp_AsBuiltUploadKey is missing or not granted -- the next PIM update converges it); the upload to Invardia was skipped' } }
+    }
+    $val = ''
+    if ($null -ne $raw -and -not ($raw -is [DBNull])) {
+        $t = "$raw".Trim()
+        if ($t.StartsWith('"')) { try { $val = "$($t | ConvertFrom-Json)".Trim() } catch { $val = '' } } else { $val = $t }
+    }
+    $captured = $val
+    $k = ''
+    if (Get-Command Resolve-PimInvardiaInstallKey -ErrorAction SilentlyContinue) { $k = Resolve-PimInvardiaInstallKey -GetSetting { param($n) $captured } }
+    elseif ($val -match '^inv-[A-Za-z0-9_-]{20,100}$') { $k = $val }
+    if ($k) { return @{ key = $k; source = 'store'; note = 'the install key comes from the store' } }
+    return @{ key = ''; source = ''; note = 'this install has no install key -- the upload to Invardia was skipped' }
+}
+
+function Get-PimAsBuiltUploadReason {
+    <# PURE. The one-line reason for an upload answer that is not a verified 201. Never carries the key (the caller scrubs). #>
+    param([int]$Status, [string]$ErrorText = '', [int64]$Bytes = 0)
+    switch ($Status) {
+        0   { return "no answer from Invardia ($(if ("$ErrorText".Trim()) { $ErrorText } else { 'the request failed' }))" }
+        401 { return 'Invardia refused the install key (401)' }
+        403 { return 'Invardia refused the upload (403)' }
+        404 { return 'Invardia has no as-built upload route yet (404)' }
+        413 { return "Invardia refused the size (413, $Bytes bytes)" }
+        415 { return 'Invardia did not accept the document as a PDF (415)' }
+        default { return "Invardia answered HTTP $Status" }
+    }
+}
+
+function Send-PimAsBuiltUpload {
+    <#
+      PURE with the HTTP call injected. Pushes -Bytes (the as-built PDF) to <base>/api/uplink/v1/asbuilt and checks the answer.
+      -Http { param($Method, $Url, $Body, $Headers) } -> @{ status; body; error } (default Invoke-PimAsBuiltUploadHttp).
+      Returns [pscustomobject]@{ sent; status; verified; id; skipped; reason }:
+        * no key -> skipped (nothing sent); not a PDF / empty / over 20 MB / base not https -> not sent;
+        * 201 { id; sha256; bytes } -> verified only when bytes = the bytes sent AND sha256 = the SHA-256 computed here
+          (hex, case-insensitive);
+        * anything else (404 before the route is live, 401, 413, 415, no answer) -> a reason, never a throw.
+      The key is never in reason / id: an exception text or transport error that carries it becomes 'the request failed'.
+    #>
+    param([byte[]]$Bytes, [AllowEmptyString()][AllowNull()][string]$InstallKey = '', [AllowEmptyString()][AllowNull()][string]$BaseUrl = '',
+          [scriptblock]$Http, [AllowNull()][object]$GeneratedUtc = $null, [int64]$MaxBytes = $script:PimAsBuiltUploadMaxBytes)
+    $key = "$InstallKey".Trim()
+    $res = { param($sent, $st, $ver, $id, $skip, $why)
+        $w = "$why"; $i = "$id"
+        if ($key) { if ($w.Contains($key)) { $w = $w.Replace($key, '[key removed]') }; if ($i.Contains($key)) { $i = '' } }
+        [pscustomobject]@{ sent = [bool]$sent; status = [int]$st; verified = [bool]$ver; id = $i; skipped = [bool]$skip; reason = $w } }
+    if (-not $key) { return (& $res $false 0 $false '' $true 'this install has no install key -- the upload to Invardia was skipped') }
+    $n = 0; if ($Bytes) { $n = [int64]$Bytes.Length }
+    if ($n -lt 5) { return (& $res $false 0 $false '' $false 'the PDF is empty -- nothing was uploaded') }
+    if ([Text.Encoding]::ASCII.GetString($Bytes, 0, 5) -ne '%PDF-') { return (& $res $false 0 $false '' $false 'the document is not a PDF -- nothing was uploaded') }
+    if ($n -gt $MaxBytes) { return (& $res $false 0 $false '' $false "the PDF is $n bytes, over the upload limit of $MaxBytes -- nothing was uploaded") }
+    $base = "$BaseUrl".Trim().TrimEnd('/')
+    if (-not $base) { if ("$($script:PimInvardiaDefaultBase)".Trim()) { $base = "$($script:PimInvardiaDefaultBase)".Trim().TrimEnd('/') } elseif ("$($script:InvardiaUpdateDefaultBase)".Trim()) { $base = "$($script:InvardiaUpdateDefaultBase)".Trim().TrimEnd('/') } }
+    if ($base -notmatch '^(?i)https://') { return (& $res $false 0 $false '' $false 'the Invardia address is not https -- nothing was uploaded') }
+    $url = "$base$($script:PimAsBuiltUploadPath)"
+    $h = @{ 'x-invardia-install-key' = $key }
+    if ($null -ne $GeneratedUtc -and "$GeneratedUtc".Trim()) {
+        try { $h['x-invardia-asbuilt-generated'] = ([datetime]$GeneratedUtc).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture) } catch { }
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $local = ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
+    $r = $null
+    try {
+        if ($Http) { $r = & $Http 'POST' $url $Bytes $h }
+        else { $r = Invoke-PimAsBuiltUploadHttp -Method 'POST' -Url $url -Body $Bytes -Headers $h }
+    } catch {
+        $e = ((("$($_.Exception.Message)") -split "`n")[0]); if ($e.Contains($key)) { $e = 'the request failed' }
+        return (& $res $true 0 $false '' $false (Get-PimAsBuiltUploadReason -Status 0 -ErrorText $e -Bytes $n))
+    }
+    $code = 0; try { $code = [int]$r.status } catch { $code = 0 }
+    $err = ((("$($r.error)") -split "`n")[0]); if ($err.Contains($key)) { $err = 'the request failed' }
+    if ($code -ne 201) { return (& $res $true $code $false '' $false (Get-PimAsBuiltUploadReason -Status $code -ErrorText $err -Bytes $n)) }
+    $b = $r.body
+    if ($b -is [string] -and "$b".Trim().StartsWith('{')) { try { $b = "$b" | ConvertFrom-Json } catch { $b = $null } }
+    $rid = ''; $rsha = ''; $rbytes = -1
+    if ($b) {
+        $rid = "$($b.id)".Trim(); $rsha = "$($b.sha256)".Trim().ToLowerInvariant()
+        $tmpN = [int64]0; if ([int64]::TryParse("$($b.bytes)", [ref]$tmpN)) { $rbytes = $tmpN }
+    }
+    if ($rbytes -ne $n) { return (& $res $true 201 $false $rid $false "Invardia stored $rbytes bytes, $n were sent -- the upload is not verified") }
+    if ($rsha -ne $local) { return (& $res $true 201 $false $rid $false 'Invardia''s SHA-256 differs from the PDF''s -- the upload is not verified') }
+    return (& $res $true 201 $true $rid $false "delivered to Invardia (id $rid, $n bytes, SHA-256 verified)")
+}
+
+function Get-PimAsBuiltJobExitCode {
+    <#
+      PURE. ASBUILT-UPLOAD exit rule: 0 when the blob was written and read back, OR when the upload was verified (a private
+      install: the push is the delivery); 6 when neither path delivered.
+    #>
+    param([bool]$BlobOk, [AllowNull()][object]$Upload)
+    if ($BlobOk) { return 0 }
+    if ($Upload -and [bool]$Upload.verified) { return 0 }
+    return 6
 }
 
 function Test-PimAsBuiltRollSkip {
@@ -1340,6 +1492,9 @@ function Invoke-PimAsBuiltConverge {
         if ($Sql) {
             try { [void](& $Sql (Get-PimAsBuiltViewSql) @{}) }
             catch { & $add 'asbuilt-sql-view' 'warn' "as-built: the view pim.vw_AsBuiltSettings was not converged: $((("$($_.Exception.Message)") -split "`n")[0]) -- the next update retries" }
+            # ASBUILT-UPLOAD: the install-key procedure, BEFORE the reader batch below grants EXECUTE on it (a missing object is skipped there).
+            try { [void](& $Sql (Get-PimAsBuiltUploadKeyProcSql) @{}) }
+            catch { & $add 'asbuilt-sql-keyproc' 'warn' "as-built: the procedure pim.usp_AsBuiltUploadKey was not converged: $((("$($_.Exception.Message)") -split "`n")[0]) -- the job skips the upload to Invardia until the next update retries" }
             # The reader user's SID is id-pim-asbuilt's clientId (= its app id), read over ARM above -- no Graph.
             $appId = $uamiCid
             if ($appId) {

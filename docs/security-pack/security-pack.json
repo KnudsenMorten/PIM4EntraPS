@@ -1252,7 +1252,7 @@
               "Initialize-PimSqlAdminGroup.ps1",
               "Make grp-pim-sql-admins the SQL server's Entra admin with the product's identities as members",
               "Privileged Role Administrator (role-assignable group) + Owner/Contributor on the SQL server",
-              "Creates the group; sets the SQL Entra admin; adds the product identities, the Invardia Support app (if present) and you",
+              "Creates the group; sets the SQL Entra admin; adds the product identities and you (never the Invardia Support app)",
               "-PlanOnly (no -WhatIf)"
             ],
             [
@@ -1326,6 +1326,13 @@
               "-WhatIf (prints the plan)"
             ],
             [
+              "Deploy-PimHybridWorker.ps1",
+              "PIM for Active Directory: deploy the hybrid worker end to end (Azure VM or Azure Arc-enabled server), step by step, and continue later with -Resume",
+              "Contributor (or Owner) for the worker's Azure resources; User Access Administrator on the source container; Privileged Role Administrator for the worker identity's Graph read roles; the Microsoft Entra admin of the PIM SQL server. The Active Directory step is printed for the AD administrator",
+              "The worker's network and VM (Azure) or nothing in Azure (Arc); the worker identity's Graph read roles, Storage Blob Data Reader on the source container and its database user; the install on the worker through run-command; a state file without secrets. One file: the worker's other scripts travel inside it, each checked against its SHA-256 before anything runs, and run from a private temp folder that is removed afterwards",
+              "Plan first (without -Apply nothing is changed)"
+            ],
+            [
               "Set-PimLicense.ps1",
               "Register an issued licence file in the environment's store (the two lines Settings > Licence shows); optionally store the install key or queue its claim",
               "Member of the environment's SQL admin group, signed in through the browser (no command-line tool, no PowerShell module, no certificate, no secret)",
@@ -1334,16 +1341,16 @@
             ],
             [
               "Grant-PimSupportSqlAccess.ps1",
-              "For an installation made before the read-only support access only: the earlier standing database access of the Invardia Support app (chapter 5). A new installation gives a read-only user instead (Grant-PimSupportAccess.ps1)",
-              "A member of the environment's SQL admin group (or Invardia support in the Support app's session) with SQL Server Contributor on the SQL server; Privileged Role Administrator only for the group membership (a refusal is a warning, not a stop). Browser sign-in or the Support session; no command-line tool, no PowerShell module, no secret",
-              "The Support app's database user in db_owner; its membership of the SQL admin group. For the run only: the firewall rule AllowSetupHost (removed again and read back), and -- only in the Support app's own session when the database refuses it -- the SQL server's administrator, put back exactly as it was read and read back, also after a failed step",
+              "For an installation made before the read-only support access only: gives the Invardia Support app the same read-only database user a new installation gives (chapter 5)",
+              "A member of the environment's SQL admin group (or Invardia support in the Support app's session) with SQL Server Contributor on the SQL server. Browser sign-in or the Support session; no command-line tool, no PowerShell module, no secret",
+              "The support access step: the Support app's database user in the read role pim_support_read only, the consent level and the signed procedures of the support session. No database owner role and no SQL admin group membership is given; one an earlier version gave is shown as a warning and left as found. For the run only: the firewall rule AllowSetupHost (removed again and read back), and -- only in the Support app's own session when the database refuses it -- the SQL server's administrator, put back exactly as it was read and read back, also after a failed step",
               "-WhatIf (honoured; reads only, no database connection)"
             ],
             [
               "Invoke-PimSupportSqlAccessJob.ps1",
-              "Give the Invardia Support app its database user on an installation whose database is private (public network access off), from inside: a one-time job in the installation's own environment creates the user from the application's client id, the result is read back, and the job is removed; run once, by the customer",
+              "Give the Invardia Support app its read-only database user on an installation whose database is private (public network access off), from inside: a one-time job in the installation's own environment runs the support access step, the result is read back, and the job is removed; run once, by the customer",
               "Contributor (or Owner) on the installation's resource group; optionally Log Analytics Reader on the environment's workspace to show the job's log lines. Browser sign-in or the Support session; no command-line tool, no PowerShell module, no secret",
-              "The Support app's database user in db_owner (nothing when it is already there). For the run only: the one-time job, running as the identity the installation's own database setup job already uses -- removed again and read back, also after a failed step. It never gives any identity a role, a group membership or a permission, never opens a firewall rule or a network path, and never changes the SQL server or the installation's own jobs; when no existing identity can be used it stops and changes nothing",
+              "The Support app's database user in the read role pim_support_read only (never db_owner; with -SupportHours a support session adds db_owner until its end, at most 8 hours). For the run only: the one-time job, running as the identity the installation's own database setup job already uses -- removed again and read back, also after a failed step. It never gives any identity a role, a group membership or a permission, never opens a firewall rule or a network path, and never changes the SQL server or the installation's own jobs; when no existing identity can be used it stops and changes nothing",
               "-WhatIf (honoured; reads only, creates no job)"
             ],
             [

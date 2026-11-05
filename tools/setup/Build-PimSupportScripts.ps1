@@ -69,6 +69,11 @@
                                           The importer (Migrate-PimToSql.ps1) and the libraries it loads travel inside the
                                           file (BUILD-EMBED), PIM Manager's entity schema as one statement
                                           (BUILD-EMBED-ASSIGNMENT); the script writes them to a private temp folder per run.
+      Deploy-PimHybridWorker.ps1       -- HYBRID-DEPLOY-STANDALONE (2026-11-05): deploy the hybrid worker end to end. Its child
+                                          scripts and the libraries they load travel inside the file (BUILD-CARRY: a table
+                                          <file> -> <sha256>:<base64>, each vetted like a published script); the script checks
+                                          every hash before it starts and, with -Apply, runs them from a private temp folder.
+                                          A child it calls but does not carry FAILS the build.
 
     SCRIPT-DOC-1 (framework 12.7) + framework 12.10 item 11 ("scripts are big concern"), 2026-10-09:
       * every script in $script:PimScriptDocScripts (tools\setup\_PimScriptDoc.ps1) must have its manifest
@@ -89,7 +94,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$OutDir,
-    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1', 'Set-PimSqlTier.ps1', 'New-PimHubPrepareScript.ps1', 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1', 'pim-hybrid-worker/Install-PimHybridWorker.ps1', 'Set-PimLicense.ps1', 'Grant-PimSupportSqlAccess.ps1', 'Invoke-PimSupportSqlAccessJob.ps1', 'Set-PimSigninFrontSqlState.ps1', 'Start-PimManagerInstall.ps1', 'Import-PimV1Data.ps1'),
+    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1', 'Set-PimSqlTier.ps1', 'New-PimHubPrepareScript.ps1', 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1', 'pim-hybrid-worker/Install-PimHybridWorker.ps1', 'pim-hybrid-worker/Deploy-PimHybridWorker.ps1', 'Set-PimLicense.ps1', 'Grant-PimSupportSqlAccess.ps1', 'Invoke-PimSupportSqlAccessJob.ps1', 'Set-PimSigninFrontSqlState.ps1', 'Start-PimManagerInstall.ps1', 'Import-PimV1Data.ps1'),
     # Also hand over the manifests of the in-scope package scripts (default: only when -Scripts is the default list).
     [switch]$IncludePackageManifests,
     # PACKAGE-CLEAN-WORDLIST (Invardia 2026-11-03): Invardia's machine-local word list (never in the repository). Every word
@@ -306,6 +311,126 @@ function Expand-PimSupportScript {
     })
 }
 
+function Resolve-PimCarriedPath {
+    # PURE. '<dir>' + '<relative path>' -> a solution-relative path with forward slashes ('..' and '.' folded). A path that
+    # climbs above the solution root keeps its leading '../' (it can then never be in a carry list -- the build fails on it).
+    param([AllowEmptyString()][string]$Dir, [Parameter(Mandatory)][string]$Path)
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($seg in @(("$Dir/$Path") -split '[\\/]+')) {
+        if (-not $seg -or $seg -eq '.') { continue }
+        if ($seg -eq '..') { if ($parts.Count -and $parts[$parts.Count - 1] -ne '..') { $parts.RemoveAt($parts.Count - 1) } else { $parts.Add('..') }; continue }
+        $parts.Add($seg)
+    }
+    return ($parts -join '/')
+}
+
+function Get-PimCarriedFileReferences {
+    <#
+      PURE. HYBRID-DEPLOY-STANDALONE: the files a script text RUNS or LOADS from the tree around it, as solution-relative
+      paths ('tools/pim-hybrid-worker/X.ps1'). -RelDir is the text's own folder, relative to the solution root. The forms:
+        Child '<f>.ps1'                                   an orchestrator's child script (its own folder)
+        Join-Path $PSScriptRoot '<f>.ps1'                 its own folder -- except an OPTIONAL load (assigned to a variable
+                                                          the text guards with Test-Path -LiteralPath: skipped when absent)
+        Join-Path $solRoot / $sol / $script:PimHwSqlRoot '<f>.ps1'   the solution root
+        '..\<f>.ps1' as a string literal                  its own folder (helper lists such as the run-command's)
+      A text that names a file only in a message is not a reference.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][AllowEmptyString()][string]$RelDir)
+    $out = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($m in [regex]::Matches($Text, "\bChild\s+'(?<f>[^']+\.ps1)'")) { [void]$out.Add((Resolve-PimCarriedPath -Dir $RelDir -Path $m.Groups['f'].Value)) }
+    foreach ($m in [regex]::Matches($Text, "(?:\`$(?<v>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*)?Join-Path\s+\`$PSScriptRoot\s+'(?<f>[^']+\.ps1)'")) {
+        $v = $m.Groups['v'].Value
+        if ($v -and [regex]::IsMatch($Text, ('Test-Path\s+-LiteralPath\s+\$' + [regex]::Escape($v) + '\b'))) { continue }
+        [void]$out.Add((Resolve-PimCarriedPath -Dir $RelDir -Path $m.Groups['f'].Value))
+    }
+    foreach ($m in [regex]::Matches($Text, "Join-Path\s+\`$(?:solRoot|sol|script:PimHwSqlRoot)\s+'(?<f>[^']+\.ps1)'")) { [void]$out.Add((Resolve-PimCarriedPath -Dir '' -Path $m.Groups['f'].Value)) }
+    foreach ($m in [regex]::Matches($Text, "'(?<f>\.\.[\\/][^'\r\n]+\.ps1)'")) { [void]$out.Add((Resolve-PimCarriedPath -Dir $RelDir -Path $m.Groups['f'].Value)) }
+    return @($out | Sort-Object)
+}
+
+function Add-PimSupportScriptCarriedFiles {
+    <#
+      HYBRID-DEPLOY-STANDALONE (owner rule: every script a person runs is ONE published file). A script whose children run
+      from the tree around it in the repository opts in with ONE line
+          $script:<Var> = @{}   # BUILD-CARRY: <solution-relative file>, <file>, ...
+      The build replaces it with @{ '<file>' = '<sha256>:<base64>'; ... } -- each file VETTED as a published script is
+      (.ps1: the version stamped into _PimScriptDoc.ps1, comments made public and every forbidden name refused
+      (ConvertTo-PimPublicScriptText), it parses, it runs no az) -- so the script can verify and unpack them at run time.
+      FAILS THE BUILD, naming the file: a listed file that does not exist, and a file the script or any carried file runs or
+      loads (Get-PimCarriedFileReferences) that is NOT in the list. -SourceText is the script's own text before inlining.
+      No BUILD-CARRY line = the text comes back unchanged.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][AllowEmptyString()][string]$SourceText,
+          [Parameter(Mandatory)][AllowEmptyString()][string]$SourceRelDir, [Parameter(Mandatory)][string]$SolutionRoot,
+          [Parameter(Mandatory)][string]$Version, [string]$Name = 'script')
+    $rx = [regex]('(?m)^(?<lhs>[ \t]*\$script:[A-Za-z0-9_]+) = @\{\}[ \t]*# BUILD-CARRY: (?<list>[^\r\n]+?)[ \t]*(?=\r?$)')
+    $ms = $rx.Matches($Text)
+    if ($ms.Count -eq 0) { return $Text }
+    if ($ms.Count -gt 1) { throw "$Name has $($ms.Count) BUILD-CARRY lines -- exactly one" }
+    $list = @($ms[0].Groups['list'].Value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | ForEach-Object { Resolve-PimCarriedPath -Dir '' -Path $_ })
+    if (-not $list.Count) { throw "$Name`: the BUILD-CARRY list is empty" }
+    $bad = @($list | Where-Object { $_ -like '../*' -or $_ -eq '..' })
+    if ($bad.Count) { throw "$Name`: BUILD-CARRY names a file outside the solution: $($bad -join ', ')" }
+    $carried = @{}
+    foreach ($rel in $list) {
+        $p = Join-Path $SolutionRoot ($rel -replace '/', '\')
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "$Name`: carried file not found: $rel ($p)" }
+        $carried[$rel] = $p
+    }
+    # the closure: what the script and every carried script run or load must itself be carried
+    $need = @{}
+    foreach ($r in @(Get-PimCarriedFileReferences -Text $SourceText -RelDir $SourceRelDir)) { $need[$r] = "$Name" }
+    foreach ($rel in $list) {
+        if ($rel -notmatch '(?i)\.ps1$') { continue }
+        $dir = if ($rel.Contains('/')) { $rel.Substring(0, $rel.LastIndexOf('/')) } else { '' }
+        foreach ($r in @(Get-PimCarriedFileReferences -Text ([IO.File]::ReadAllText($carried[$rel])) -RelDir $dir)) { if (-not $need.ContainsKey($r)) { $need[$r] = $rel } }
+    }
+    $missing = @($need.Keys | Where-Object { -not $carried.ContainsKey($_) } | Sort-Object)
+    if ($missing.Count) { throw "$Name is not self-contained: it runs or loads a file that is not carried -- add it to its BUILD-CARRY list: $(@($missing | ForEach-Object { "$_ (used by $($need[$_]))" }) -join '; ')" }
+    $pairs = foreach ($rel in $list) {
+        $bytes = [IO.File]::ReadAllBytes($carried[$rel])
+        if ($rel -match '(?i)\.ps1$') {
+            $bom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+            $t = [IO.File]::ReadAllText($carried[$rel])
+            $t = Set-PimScriptBuildVersion -Text $t -Version $Version
+            $t = ConvertTo-PimPublicScriptText -Text $t -Name "$Name (carried $rel)"
+            $perr = $null
+            $cast = [System.Management.Automation.Language.Parser]::ParseInput($t, [ref]$null, [ref]$perr)
+            if (@($perr).Count) { throw "$Name`: carried $rel does not parse: $($perr[0].Message)" }
+            $az = @($cast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and "$($n.GetCommandName())" -match '^az(\.cmd|\.exe)?$' }, $true))
+            if ($az.Count) { throw "$Name`: carried $rel runs az (line $($az[0].Extent.StartLineNumber)) -- a published script never does" }
+            $bytes = (New-Object System.Text.UTF8Encoding($bom)).GetPreamble() + [Text.Encoding]::UTF8.GetBytes($t)
+        }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $h = (@($sha.ComputeHash([byte[]]$bytes) | ForEach-Object { $_.ToString('x2') }) -join '') } finally { $sha.Dispose() }
+        "'$rel' = '$($h):$([Convert]::ToBase64String([byte[]]$bytes))'"
+    }
+    $line = "$($ms[0].Groups['lhs'].Value) = @{ $($pairs -join '; ') }   # embedded by Build-PimSupportScripts: carried files ($($list.Count)): $($list -join ', ')"
+    return $Text.Substring(0, $ms[0].Index) + $line + $Text.Substring($ms[0].Index + $ms[0].Length)
+}
+
+function Get-PimSupportScriptCarriedPaths {
+    # PURE. The solution-relative paths of a BUILT script's carried-file table ('' when it carries none).
+    param([AllowEmptyString()][string]$Text)
+    $m = [regex]::Match("$Text", '(?m)^[ \t]*\$script:[A-Za-z0-9_]+ = @\{ (?<t>[^\r\n]*?) \}[ \t]*# embedded by Build-PimSupportScripts: carried files')
+    if (-not $m.Success) { return @() }
+    return @([regex]::Matches($m.Groups['t'].Value, "'(?<k>[^']+)' = '[0-9a-f]{64}:") | ForEach-Object { $_.Groups['k'].Value })
+}
+
+function Set-PimSupportScriptPublishRequires {
+    <#
+      PURE. HYBRID-DEPLOY-STANDALONE + PS7-REQ: a script whose SOURCE keeps '#Requires -Version 5.1' for the package (it runs
+      there in Windows PowerShell 5.1 too) but is PUBLISHED for PowerShell 7 opts in with its own line
+      "# BUILD-PUBLISH-REQUIRES-7": line 1 of the published copy becomes '#Requires -Version 7.0'. Nothing else changes.
+      Opted in with any other line 1 = throws (never a copy that silently keeps 5.1). Not opted in = unchanged.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    if (-not [regex]::IsMatch($Text, '(?m)^[ \t]*#[ \t]*BUILD-PUBLISH-REQUIRES-7[ \t]*\r?$')) { return $Text }
+    $m = [regex]::Match($Text, '^#Requires -Version 5\.1[ \t]*(?=\r?\n)')
+    if (-not $m.Success) { throw 'BUILD-PUBLISH-REQUIRES-7: line 1 is not "#Requires -Version 5.1" -- nothing handed over' }
+    return '#Requires -Version 7.0' + $Text.Substring($m.Length)
+}
+
 function Test-PimSupportScriptNoOptionalLoads {
     # PURE. REQUIREMENTS 100.81: a script opts in with a line "# BUILD-NO-OPTIONAL-LOADS" (its OWN text, not a helper's).
     param([AllowNull()][AllowEmptyString()][string]$Text)
@@ -464,9 +589,16 @@ foreach ($s in $Scripts) {
     # 100.81: a script that says "# BUILD-NO-OPTIONAL-LOADS" is published with NO dot-source at all (checked below).
     $noLoads = Test-PimSupportScriptNoOptionalLoads -Text $srcText
     if ($noLoads) { $body = Remove-PimSupportScriptOptionalLoads -Text $body }
+    # HYBRID-DEPLOY-STANDALONE: the files a BUILD-CARRY script runs from the tree travel inside it (vetted, hashed); the
+    # published copy of a "# BUILD-PUBLISH-REQUIRES-7" script gets '#Requires -Version 7.0' as line 1 (PS7-REQ)
+    $solDir = Split-Path $tools -Parent
+    $srcRelDir = ([IO.Path]::GetFullPath((Split-Path $src -Parent))).Substring(([IO.Path]::GetFullPath($solDir)).TrimEnd('\').Length).Trim('\').Replace('\', '/')
+    $body = Add-PimSupportScriptCarriedFiles -Text $body -SourceText $srcText -SourceRelDir $srcRelDir -SolutionRoot $solDir -Version $version -Name $name
+    $carriedPaths = @(Get-PimSupportScriptCarriedPaths -Text $body)
+    $body = Set-PimSupportScriptPublishRequires -Text $body
     # the blank line after the header matters: a line comment directly above the help block makes PowerShell treat them
     # as one comment group, and the help is lost (Get-Help shows only the syntax).
-    $hdr = "# PIM Manager $version -- $name, standalone (built by tools/setup/Build-PimSupportScripts.ps1; helpers inlined: $(@($seen) -join ', '))`r`n`r`n"
+    $hdr = "# PIM Manager $version -- $name, standalone (built by tools/setup/Build-PimSupportScripts.ps1; helpers inlined: $(@($seen) -join ', ')$(if ($carriedPaths.Count) { "; files carried, each checked by SHA-256 and unpacked to a private temp folder at run time: $($carriedPaths.Count)" }))`r`n`r`n"
     # 12.7: .LINK + the permissions .NOTES from the manifest (in-scope scripts only)
     $docName = Get-PimScriptDocName -Script $name
     $manifest = Read-PimScriptDocManifest -Name $docName
@@ -518,6 +650,14 @@ foreach ($s in $Scripts) {
     # 100.81: a tools\setup script that opted in with "# BUILD-NO-OPTIONAL-LOADS" is held to the strict rule too.
     if ($rel -match '\\' -or $noLoads) {
         $dots = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot }, $true))
+        # HYBRID-DEPLOY-STANDALONE: a carrying script may dot-source a file IT CARRIES (from the folder it unpacks them to,
+        # "(Join-Path $solRoot '<carried file>')") -- nothing else
+        if ($carriedPaths.Count) {
+            $dots = @($dots | Where-Object {
+                $dm = [regex]::Match($_.Extent.Text, "^\.\s*\(Join-Path\s+\`$solRoot\s+'(?<f>[^']+)'\)$")
+                -not ($dm.Success -and $carriedPaths -contains (Resolve-PimCarriedPath -Dir '' -Path $dm.Groups['f'].Value))
+            })
+        }
         if ($dots.Count) { throw "$name still dot-sources after inlining (line $($dots[0].Extent.StartLineNumber): $($dots[0].Extent.Text))" }
     }
     $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $out).Hash.ToLowerInvariant()

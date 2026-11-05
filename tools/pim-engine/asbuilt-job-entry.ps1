@@ -15,9 +15,12 @@
     it is named), which holds exactly:
       * SELECT on pim.vw_AsBuiltSettings -- the settings the document needs, with people and secrets REDUCED to counts in SQL
         (never pim.Settings itself);
+      * EXECUTE on pim.usp_AsBuiltUploadKey -- this install's install key, and nothing else (ASBUILT-UPLOAD);
       * Storage Blob Data Contributor on the container 'asbuilt' only.
-    Exit 0 only when the PDF was written and read back (its size); anything else exits non-zero, so the execution status IS the
-    result Invardia polls.
+    ASBUILT-UPLOAD: with an install key the same PDF is also POSTed to Invardia (<base>/api/uplink/v1/asbuilt) and the answer's
+    byte count and SHA-256 are checked against the PDF. Exit 0 when the blob was written and read back (its size) OR the
+    upload was verified (a private install, whose storage support cannot reach); non-zero only when neither delivered, so the
+    execution status IS the result Invardia polls.
 
 .NOTES
     Inputs (environment variables written by tools/setup/Deploy-PimAsBuiltJob.ps1): PIM_SqlServer, PIM_SqlDatabase,
@@ -71,6 +74,7 @@ $global:PIM_SqlServer = "$SqlServer".Trim(); $global:PIM_SqlDatabase = "$SqlData
 . (Join-Path $shared 'PIM-ScenarioProfile.ps1')   # Get-PimScenario (the scenario's role)
 . (Join-Path $shared 'PIM-Uplink.ps1')            # New-PimUplinkEndpoints (100.56)
 . (Join-Path $shared 'PIM-AccountRest.ps1')       # Send-PimRestBlob (Put Blob, bearer token)
+. (Join-Path $shared 'PIM-InvardiaUpdate.ps1')    # ASBUILT-UPLOAD: Resolve-PimInvardiaInstallKey + Invardia's default address
 . (Join-Path $shared 'PIM-AsBuilt.ps1')
 
 $cs = Get-PimSqlConnectionString -Server "$SqlServer".Trim() -Database "$SqlDatabase".Trim()
@@ -116,21 +120,44 @@ try { $bytes = ConvertTo-PimAsBuiltPdf -Model $model }
 catch { JobLog "the PDF could not be rendered: $($_.Exception.Message)" 'ERROR'; exit 5 }
 if (-not $bytes -or $bytes.Length -lt 500) { JobLog 'the PDF came out empty' 'ERROR'; exit 5 }
 
+$generatedUtc = [datetime]::UtcNow
 $blob = "$ExecutionName.pdf"
+$blobOk = $false
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("asbuilt-" + [guid]::NewGuid().ToString('N') + '.pdf')
+$written = $false
 try {
     [IO.File]::WriteAllBytes($tmp, $bytes)
     Send-PimRestBlob -StorageAccount "$StorageAccount".Trim() -Container "$Container".Trim() -Blob $blob -FilePath $tmp | Out-Null
-} catch { JobLog "the PDF could not be written to https://$StorageAccount.blob.core.windows.net/$Container/$blob : $($_.Exception.Message)" 'ERROR'; exit 6 }
+    $written = $true
+} catch { JobLog "the PDF could not be written to https://$StorageAccount.blob.core.windows.net/$Container/$blob : $($_.Exception.Message)" 'ERROR' }
 finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
 
 # Read back: the blob's size (HEAD, same identity, same token layer).
-try {
-    $tok = Get-PimRestToken -Resource 'https://storage.azure.com'
-    $head = Invoke-WebRequest -Method Head -UseBasicParsing -Uri "https://$StorageAccount.blob.core.windows.net/$Container/$blob" -Headers @{ Authorization = "Bearer $tok"; 'x-ms-version' = '2021-08-06' }
-    $len = 0; [void][int64]::TryParse("$(@($head.Headers['Content-Length'])[0])", [ref]$len)
-    if ($len -ne $bytes.Length) { JobLog "read-back: the blob holds $len bytes, $($bytes.Length) were written" 'ERROR'; exit 6 }
-} catch { JobLog "read-back of the blob failed: $($_.Exception.Message)" 'ERROR'; exit 6 }
+if ($written) {
+    try {
+        $tok = Get-PimRestToken -Resource 'https://storage.azure.com'
+        $head = Invoke-WebRequest -Method Head -UseBasicParsing -Uri "https://$StorageAccount.blob.core.windows.net/$Container/$blob" -Headers @{ Authorization = "Bearer $tok"; 'x-ms-version' = '2021-08-06' }
+        $len = 0; [void][int64]::TryParse("$(@($head.Headers['Content-Length'])[0])", [ref]$len)
+        if ($len -ne $bytes.Length) { JobLog "read-back: the blob holds $len bytes, $($bytes.Length) were written" 'ERROR' }
+        else { $blobOk = $true }
+    } catch { JobLog "read-back of the blob failed: $($_.Exception.Message)" 'ERROR' }
+}
+if ($blobOk) { JobLog ("as-built PDF written: https://{0}.blob.core.windows.net/{1}/{2} ({3} bytes; deleted automatically after 1 day)" -f $StorageAccount, $Container, $blob, $bytes.Length) }
 
-JobLog ("==== as-built PDF written: https://{0}.blob.core.windows.net/{1}/{2} ({3} bytes; deleted automatically after 1 day) ====" -f $StorageAccount, $Container, $blob, $bytes.Length)
-exit 0
+# ASBUILT-UPLOAD: the same bytes are also pushed to Invardia when this install has an install key (a private install's
+# storage cannot be reached from outside -- there the push IS the delivery). The key: the secret PIM_UPLINK_KEY, else the
+# job's ONE narrow procedure pim.usp_AsBuiltUploadKey (the view keeps it reduced to { present }). Never logged.
+$upload = $null
+$keyInfo = Resolve-PimAsBuiltUploadKey -ReadKey { Invoke-PimSqlScalar -ConnectionString $cs -Sql 'EXEC pim.usp_AsBuiltUploadKey' }
+if (-not $keyInfo.key) { JobLog "upload: $($keyInfo.note)" 'INFO' }
+else {
+    $upload = Send-PimAsBuiltUpload -Bytes $bytes -InstallKey $keyInfo.key -BaseUrl "$($env:PIM_INVARDIA_BASE_URL)".Trim() -GeneratedUtc $generatedUtc
+    $upLvl = if ($upload.verified) { 'INFO' } elseif ($blobOk) { 'WARN' } else { 'ERROR' }
+    JobLog ("upload: {0}{1}" -f $upload.reason, $(if (-not $upload.verified -and $blobOk) { ' -- the blob above is the delivery' } else { '' })) $upLvl
+}
+$keyInfo = $null
+
+$exitCode = Get-PimAsBuiltJobExitCode -BlobOk $blobOk -Upload $upload
+if ($exitCode -eq 0) { JobLog ("==== as-built PDF delivered ({0}) ====" -f ((@($(if ($blobOk) { 'blob' }), $(if ($upload -and $upload.verified) { 'Invardia upload' }) | Where-Object { $_ })) -join ' + ')) }
+else { JobLog '==== as-built PDF NOT delivered: neither the blob nor the upload to Invardia succeeded ====' 'ERROR' }
+exit $exitCode

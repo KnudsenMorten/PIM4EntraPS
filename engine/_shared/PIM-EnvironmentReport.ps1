@@ -801,7 +801,9 @@ function Get-PimEnvironmentReport {
             & $add (Compare-PimEnvReportAzure -Declared $azDecl -Held @($azHeld.ToArray()) -Readable $azOk -Reason $azWhy -Context $actx -Undeclared:$undeclared)
         }
         # SQL database roles (the contained user is created from the app id as its SID)
-        $sqlDecl = if ($exp) { @($exp.sql) } else { @() }
+        # @() OUTSIDE the if: an if-expression unrolls a one-element array to the object itself, and a one-row declared set
+        # (the Support app's pim_support_read, OPEN-01) then has no .Count on Windows PowerShell 5.1 -- its rows were lost
+        $sqlDecl = @(if ($exp) { @($exp.sql) })
         if ($null -ne $sqlRows -or $sqlErr) {
             $mine = @(); $found = $false
             if ($null -ne $sqlRows) {
@@ -813,7 +815,13 @@ function Get-PimEnvironmentReport {
             $sqlReadable = ($null -ne $sqlRows) -and ($found -or $sqlFull)
             $sqlWhy = if ($null -eq $sqlRows) { $sqlErr } elseif (-not $sqlReadable) { 'this Manager''s database user sees only its own role memberships (SQL metadata visibility)' } else { '' }
             if ($sqlDecl.Count -or $mine.Count) {
-                $forbSql = @(@($exp.sqlForbidden) | Where-Object { $_ } | ForEach-Object { @{ permission = "$_"; why = 'db_owner can manage users and permissions and drop the database; the runtime identities never hold it' } })
+                # a forbidden SQL role is a name (the runtime identities' db_owner) or { role; why } (OPEN-01: the Support app's
+                # standing db_owner / an earlier db_datareader -- each with its own reason)
+                $forbSql = @(@($exp.sqlForbidden) | Where-Object { $_ } | ForEach-Object {
+                    $fRole = "$(Get-PimEnvReportField $_ 'role')"
+                    if ($fRole) { @{ permission = $fRole; why = "$(Get-PimEnvReportField $_ 'why')" } }
+                    else { @{ permission = "$_"; why = 'db_owner can manage users and permissions and drop the database; the runtime identities never hold it' } }
+                })
                 $rows = @(Compare-PimEnvReportNamedSet -Area 'sql' -Declared $sqlDecl -Held @($mine | Select-Object -Unique) -Readable $sqlReadable -Reason $sqlWhy -Forbidden $forbSql -Scope "$(Get-PimEnvReportField $c 'sqlDatabase')" -Undeclared:(-not $exp))
                 if ($sqlReadable -and -not $found -and $sqlDecl.Count) { foreach ($r in $rows) { if ($r.status -eq 'missing') { $r.why = "$($r.why) -- no database user for this identity" } } }
                 & $add $rows
@@ -974,7 +982,9 @@ function Get-PimEnvironmentReport {
         $fix = switch ($p.area) {
             'graph' { "Remove the application permission $($p.permission) from $($p.identity) (Entra admin center > Enterprise applications > $($p.identity) > Permissions), or record why it is kept" }
             'directoryRole' { "Remove the directory role $($p.permission) from $($p.identity) (Entra admin center > Roles and administrators): PIM needs no directory role" }
-            'sql' { "ALTER ROLE [$($p.permission)] DROP MEMBER [<database user of $($p.identity)>] -- or re-run tools/setup/Initialize-PimTenantStore.ps1, which takes db_owner back" }
+            # OPEN-01 (framework SECAUDIT-1a): the Support app's earlier standing grant is taken back by the owner-approved step
+            'sql' { if ($p.identityRole -eq 'support') { "Invardia support takes this earlier grant back in the owner-approved step that ends the standing access; the Support app keeps its read-only user (pim_support_read)" }
+                    else { "ALTER ROLE [$($p.permission)] DROP MEMBER [<database user of $($p.identity)>] -- or re-run tools/setup/Initialize-PimTenantStore.ps1, which takes db_owner back" } }
             default { "Remove the $($p.permission) assignment$where from $($p.identity) (Azure portal > Access control (IAM)), or record why it is kept" }
         }
         & $addF $sev 'permissions' "$($p.identity): extra $($p.area) permission $($p.permission)$where" "$($p.why)" $fix

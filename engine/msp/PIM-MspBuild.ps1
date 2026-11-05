@@ -597,6 +597,17 @@ WHEN NOT MATCHED THEN INSERT (TenantId, DisplayName, Ring, Enabled, Tags, Notes)
     }
 }
 
+function Get-PimMspBuildReleasesOwnMembership {
+    <#
+      PURE. OPEN-01 item 4 (framework SECAUDIT-1a), owner's item 11 (2026-11-05: ON by default): does a certificate-mode
+      build take its OWN identity out of the SQL admin group at its end? YES unless the config says otherwise in so many
+      words: 'releaseOwnBuildMembership' false / 0 / no keeps the membership. Anything else -- absent, empty, true, a typo --
+      is $true (the safe side: no standing SQL admin for the build's identity).
+    #>
+    param([Parameter(Mandatory)][object]$Config)
+    return -not [bool]("$(Get-PimMspBuildValue -Object $Config -Path 'releaseOwnBuildMembership')".Trim() -match '^(?i)(false|0|no)$')
+}
+
 function Get-PimMspBuildAuthMode {
     <#
       PURE. 71.33 -- WHO the build runs as, decided by the config and nothing else (one source, no second switch to
@@ -1083,9 +1094,12 @@ function Get-PimMspBuildPlan {
         -Why "managed-identity only (no engine app registration, no secret); the smoke gate runs inside; $($updRing.message)"))
 
     # PIM 100.156 B (framework 12.23 P5): the tick and the Manager are NOT members any more -- each reaches the store as its
-    # own contained user in its pim_* role (the hosting step's setup), never as a SQL administrator. The group holds the
-    # Invardia Support app (cert mode: the build's own identity is the Support app).
-    $sqlGroupArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; SqlServerName = $sqlName; TenantId = $tid; ClientId = $cid; CertThumbprint = $thumb; SupportAppId = $cid }
+    # own contained user in its pim_* role (the hosting step's setup), never as a SQL administrator.
+    # OPEN-01 (framework SECAUDIT-1a): the group never takes the Invardia Support app AS the Support app. In cert mode the
+    # build's own identity (which may be the Support app) is named as the SETUP identity -- the same membership as before,
+    # for the build's store steps. Whether the build takes it out again at its end is the owner's item-11 decision:
+    # 'releaseOwnBuildMembership' (Get-PimMspBuildReleasesOwnMembership), OFF by default = it stays a member, as today.
+    $sqlGroupArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; SqlServerName = $sqlName; TenantId = $tid; ClientId = $cid; CertThumbprint = $thumb; SetupIdentityAppId = $cid }
     if ($signedIn) {
         # Initialize-PimSqlAdminGroup with no -ClientId/-CertThumbprint = the signed-in az context (its own convention).
         # The signed-in administrator stays a member: it is who re-runs this build and who the store steps connect as.
@@ -1094,10 +1108,10 @@ function Get-PimMspBuildPlan {
     }
     # PS7-REQ (owner 2026-11-01, framework HOST-2): Initialize-PimSqlAdminGroup.ps1 is a published script and declares
     # '#Requires -Version 7.0' (Graph + ARM only, no SqlClient), so its step runs under pwsh, never Windows PowerShell.
-    $steps.Add((New-PimMspBuildStep -Id 'sqlgroup' -Title 'SQL admin group grp-pim-sql-admins: the Invardia Support app (the tick + Manager use their own least-privilege database users)' `
+    $steps.Add((New-PimMspBuildStep -Id 'sqlgroup' -Title "SQL admin group grp-pim-sql-admins: $(if ($signedIn) { 'the signed-in administrator' } else { "the build's own identity" }) for the build's store steps (the tick + Manager use their own least-privilege database users)" `
         -Script 'tools\setup\Initialize-PimSqlAdminGroup.ps1' -HostExe 'pwsh' `
         -Arguments $sqlGroupArgs `
-        -Why 'framework 12.23 P5: the SQL admin group is the Invardia Support app only; runtime identities get a contained user in their own pim_* role, never admin'))
+        -Why 'framework 12.23 P5: runtime identities get a contained user in their own pim_* role, never admin; OPEN-01: the Invardia Support app is never added as the Support app'))
 
 
     $accessArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; SqlServerFqdn = $sqlFqdn; SqlDatabase = $db; TickJobName = $tick; ManagerApp = $mgr } + $storeArgs
@@ -1381,6 +1395,20 @@ function Get-PimMspBuildPlan {
         $steps.Add((New-PimMspBuildStep -Id 'sqlhostclose' -Title "close this build host's SQL window on $sqlName (remove 'AllowSetupHost' only; read back)" `
             -Script 'tools\setup\Close-PimSqlSetupHostRule.ps1' -HostExe 'powershell' -Arguments $sqlWindowArgs `
             -Why "the hosting step kept this host's firewall rule so the store steps after it could connect; a finished build leaves no standing hole for the machine that built it"))
+    }
+
+    # OPEN-01 item 4 (framework SECAUDIT-1a) -- WAITS FOR THE OWNER'S ITEM-11 DECISION, OFF BY DEFAULT: with
+    # 'releaseOwnBuildMembership' on, a certificate-mode build takes ITS OWN identity out of the SQL admin group as its last
+    # store-related step (after every step that uses the store), like the person installer's end-of-install release. Only
+    # that one membership: Initialize-PimSqlAdminGroup -ReleaseOwnMembership resolves the identity it signs in as and never
+    # touches another member. Off (the default) the plan is exactly as before: no such step. Signed-in mode has no such
+    # step either way (the signed-in administrator stays the member who re-runs the build). A later resume that starts
+    # AFTER this step and needs the store starts at -From sqlgroup.
+    if (-not $signedIn -and (Get-PimMspBuildReleasesOwnMembership -Config $Config)) {
+        $steps.Add((New-PimMspBuildStep -Id 'sqlgrouprelease' -Title "SQL admin group grp-pim-sql-admins: the build's own identity leaves it (its OWN membership only; read back)" `
+            -Script 'tools\setup\Initialize-PimSqlAdminGroup.ps1' -HostExe 'pwsh' `
+            -Arguments @{ SubscriptionId = $sub; ResourceGroup = $rg; SqlServerName = $sqlName; TenantId = $tid; ClientId = $cid; CertThumbprint = $thumb } -Switches @('ReleaseOwnMembership') `
+            -Why "OPEN-01: the build's identity administers the store only while the build runs ('releaseOwnBuildMembership' on; owner item 11)"))
     }
 
     # 100.59 -- THE CROSS-TENANT PRIVATE ENDPOINT BY APPROVAL. LAST in both plans, after the SQL window is closed: each side

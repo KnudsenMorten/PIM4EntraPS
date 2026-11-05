@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-  Gives the Invardia Support app its database user on a PIM Manager installation whose database is private (public network access off), from inside: a one-time job in the installation's own environment creates the user from the application's client id and adds it to the database owner role, the result is read back, and the job is removed. Nothing is opened; -WhatIf shows it first. With -SupportHours the database owner role is given for that many hours only (never above the level you consented to): the job stays, takes the role back at the end by itself, and the read-only access stays.
+  Gives the Invardia Support app its read-only database user on a PIM Manager installation whose database is private (public network access off), from inside: a one-time job in the installation's own environment runs the support access step (the user from the application's client id, in the read role pim_support_read only), the result is read back, and the job is removed. Nothing is opened; -WhatIf shows it first. With -SupportHours the database owner role is given for that many hours only (never above the level you consented to): the job stays, takes the role back at the end by itself, and the read-only access stays.
 
 .DESCRIPTION
   PIM REQUIREMENTS 100.116 (framework 4.1b). On an installation with a public database, Grant-PimSupportSqlAccess.ps1
@@ -21,9 +21,11 @@
        in this tenant.
     3. Creates the one-time job (caj-pim-supportsql) in the same environment, with that identity and a tag that says
        what it is.
-    4. Starts it once. In the database, the job creates the user from the Support app's client id when no user has
-       that id (an existing user of the Support app is reused whatever its name) and adds it to db_owner, then reads
-       both back. When the user is already there with the role, the job sends one read and changes nothing.
+    4. Starts it once. In the database, the job runs the support access step with the consent level (-ConsentLevel
+       troubleshoot | setup; without it the level already recorded, else troubleshoot): the user from the Support app's
+       client id when no user has that id (an existing user of the Support app is reused whatever its name), in
+       pim_support_read only, then reads it back. It never adds the database owner role; one an earlier version gave
+       is shown as a WARNING and left as found.
     5. Waits for the execution, reads its result and its log lines, and prints PASS or FAIL with them.
     6. ALWAYS, also after a failed step: removes the one-time job and reads back that it is gone.
 
@@ -42,12 +44,11 @@
   PIM Manager on their own schedule; each of them reports what it took back. When the access is opened, the script waits
   for the job's result (read from its log lines) and leaves the job running; the next run of this script removes it.
 
-  The statement the job runs is the one Grant-PimSupportSqlAccess.ps1 runs: the job's script is built from the same
-  functions. The membership of the SQL admin group is not part of this script (it is given from outside the network).
+  The step the job runs is the one Grant-PimSupportSqlAccess.ps1 runs: the job's script is built from the same
+  functions. No SQL admin group membership is given by this script.
 
-  Why db_owner: PIM Manager's own setup scripts create database users for the product's identities and add them to
-  fixed database roles, apply the schema and write settings. Adding a member to a fixed database role needs db_owner;
-  no smaller fixed role covers it.
+  Admin rights: consent 'setup' lets a support session (-SupportHours, at most 8) add the database owner role until its
+  end; consent 'troubleshoot' is read-only. Outside a session the Support app reads only.
 
   Sign-in: your own browser sign-in (or the Invardia Support app's session open in this window). No Azure CLI, no
   PowerShell module, no secret on the command line. Every token is pinned to -TenantId.
@@ -102,6 +103,8 @@ param(
     [ValidatePattern('^[A-Za-z0-9._#-]{0,40}$')][string]$TicketNumber = '',
     # once per installation: record the consent level and install the time-limited support access
     [switch]$InstallSupportAccess,
+    # with -InstallSupportAccess: none | troubleshoot | setup; without a step switch (the read-only user): troubleshoot | setup
+    # ('' = the level already recorded, else troubleshoot)
     [ValidateSet('', 'none', 'troubleshoot', 'setup', 'read', 'owner')][string]$ConsentLevel = '',   # v1 read / owner = troubleshoot / setup
     # end every open time-limited support access now
     [switch]$CloseSupportAccess,
@@ -190,7 +193,7 @@ $what = switch ($mode) {
     'install' { "create, run once and remove the job '$JobName', which records the consent level '$ConsentLevel' for the Invardia Support app $app and installs the time-limited support access" }
     'close'   { "create, run once and remove the job '$JobName', which ends every open time-limited support access" }
     'grant'   { "create and start the job '$JobName', which gives the Invardia Support app $app level '$Level' (at most the consented level) for $SupportHours hour(s) and takes it back then" }
-    default   { "create, run once and remove the job '$JobName', which gives the Invardia Support app $app its database user in db_owner from inside the installation" }
+    default   { "create, run once and remove the job '$JobName', which gives the Invardia Support app $app its read-only database user (pim_support_read only) from inside the installation" }
 }
 $whatIfOnly = -not $PSCmdlet.ShouldProcess("resource group $ResourceGroup", $what)
 # OPEN-06: the installation's database job is ca-pim-dbinit (today's name) or caj-pim-dbinit (an installation made with the
@@ -229,7 +232,7 @@ elseif ($r.exit -ne 0) {
     $what = if ($mode -eq 'install') { "the time-limited support access is installed (consent '$($r.result.consented)'), read back by the job" } else { "$($r.result.closed) open time-limited support access grant(s) closed, $($r.result.sessionsEnded) session(s) ended; the read-only access stays" }
     Write-Host "RESULT: PASS$(if (@($r.warnings).Count) { " with $(@($r.warnings).Count) warning(s)" }) -- $what. The one-time job was removed; no firewall rule and no network path was opened." -ForegroundColor Green
 } else {
-    $what = if ($r.result) { "database user [$($r.result.userName)] in db_owner ($(switch ("$($r.result.state)") { 'created' { 'created' } 'role-added' { 'was there, added to db_owner' } 'unchanged' { 'was already there, nothing was changed' } default { 'in place' } })), read back by the job" }
+    $what = if ($r.result) { "database user [$($r.result.userName)] in pim_support_read, read-only ($(switch ("$($r.result.state)") { 'created' { 'created' } 'in-place' { 'was already there' } default { 'in place' } }); consent '$($r.result.consented)'), read back by the job" }
             else { 'the job ended Succeeded, which it does only after reading the user and its role back' }
     Write-Host "RESULT: PASS$(if (@($r.warnings).Count) { " with $(@($r.warnings).Count) warning(s)" }) -- $what. The one-time job was removed; no firewall rule and no network path was opened." -ForegroundColor Green
     Write-Host '  The customer ends this access by switching the Invardia Support app off in Microsoft Entra ID (or Grant-PimSupportAccess.ps1 -Remove).' -ForegroundColor DarkGray

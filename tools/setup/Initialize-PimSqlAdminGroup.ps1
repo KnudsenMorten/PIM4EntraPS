@@ -3,10 +3,11 @@
 <#
 .SYNOPSIS
     Make a role-assignable security group (default grp-pim-sql-admins) the Microsoft Entra admin of a PIM Manager
-    environment's Azure SQL server, with the environment's managed identities, the nightly updater and the Invardia
-    Support app as its members. One command, idempotent, every change read back; -WhatIf shows every change first.
-    Signs in in the browser as the person running it (or, inside an Invardia support session, as the Invardia Support
-    app), or uses a certificate identity from the repository -- never a client secret, no other tools or modules.
+    environment's Azure SQL server, with the environment's managed identities and the nightly updater as its members.
+    The Invardia Support app is never added. One command, idempotent, every change read back; -WhatIf shows every
+    change first. Signs in in the browser as the person running it (or, inside an Invardia support session, as the
+    Invardia Support app), or uses a certificate identity from the repository -- never a client secret, no other tools
+    or modules.
 
 .DESCRIPTION
     Makes a security group (default 'grp-pim-sql-admins') the SQL server's Microsoft Entra admin, with
@@ -14,11 +15,18 @@
       * the environment's user-assigned identity  (id-pim-<token>; found in the resource group, or named)
       * the SQL identity id-pim-sql-<token>, when the environment has one (private SQL)
       * the nightly updater's system-assigned identity (ca-pim-update), when the job exists
-      * the Invardia Support app (-SupportAppId or -SupportObjectId)
+      * the application a build runs as (-SetupIdentityAppId), for the length of that build
       * any -ExtraMemberObjectIds
       * the CURRENT admin, so converging never takes access away from whoever has it now
+    The Invardia Support app is NOT a member: its one standing database right is its read-only database user
+    (Grant-PimSupportAccess.ps1); admin rights only inside an open support session. Named with -SupportAppId or
+    -SupportObjectId, it is not added and the run says so. A membership an earlier version gave is left as found.
     Entra-only authentication is left as it is and verified afterwards. Existing contained database users
     are not touched. Every change is read back; a second run reports no changes.
+
+    -ReleaseOwnMembership takes the APPLICATION this run signs in as (-ClientId with -CertThumbprint, or the Invardia
+    Support session) out of the group again, and reads it back. Only that one membership: no other member is touched.
+    The one-shot MSP build uses it at its end when its setting releaseOwnBuildMembership is on (off by default).
 
     Why: the unattended updater checks the database schema before it rolls a release. It can only do that
     if its managed identity can log in, and a group that holds every identity that must administer the
@@ -27,12 +35,19 @@
     repository's DOCS/REQUIREMENTS.md section 4.5.
 
 .PARAMETER SupportAppId
-    The application (client) id of the Invardia Support app; its service principal is added as a member.
-    The old name -TroubleshootingAppId still works.
+    The application (client) id of the Invardia Support app. It is NOT added as a member (no standing database
+    administrator); the run says so. The old name -TroubleshootingAppId still works.
 
 .PARAMETER SupportObjectId
-    The Invardia Support app's service principal object id, instead of -SupportAppId.
+    The Invardia Support app's service principal object id, instead of -SupportAppId (also not added).
     The old name -TroubleshootingObjectId still works.
+
+.PARAMETER SetupIdentityAppId
+    The application (client) id a build runs as: added as a member for the length of that build.
+
+.PARAMETER ReleaseOwnMembership
+    Take the application this run signs in as out of the group and read it back; nothing else is changed. Needs
+    -ClientId with -CertThumbprint (or the Invardia Support session in this window).
 
 .PARAMETER MembersOnly
     Do not create the group or move the admin: only add the members, and only when the group already IS
@@ -80,13 +95,17 @@ param(
     # The Invardia Support app. The old names (-TroubleshootingAppId / -TroubleshootingObjectId) still bind.
     [Alias('TroubleshootingAppId')][string]$SupportAppId,
     [Alias('TroubleshootingObjectId')][string]$SupportObjectId,
+    # the application a build runs as: a member for the length of that build
+    [string]$SetupIdentityAppId,
     [string[]]$ExtraMemberObjectIds = @(),
     # Certificate auth from the local store. Omit both to sign in in the browser (or use the Invardia support session).
     [string]$ClientId,
     [string]$CertThumbprint,
     [switch]$MembersOnly,
     [switch]$DoNotKeepCurrentAdmin,
-    [switch]$PlanOnly
+    [switch]$PlanOnly,
+    # take the application this run signs in as out of the group again (its OWN membership only), read back
+    [switch]$ReleaseOwnMembership
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Rest.ps1')   # the ONE token client (framework 12.17)
@@ -116,10 +135,28 @@ if (-not "$CertThumbprint".Trim()) {
 $inv = New-PimSqlAdminGroupInvokers -SubscriptionId $SubscriptionId -TenantId $TenantId -ClientId $ClientId -CertThumbprint $CertThumbprint
 Write-Host "    auth: $authLabel in tenant $($inv.TenantId)" -ForegroundColor DarkGray
 
+if ($ReleaseOwnMembership) {
+    # OPEN-01 item 4: the run's OWN application leaves the group -- the identity it signs in as, never a name it is given
+    $ownApp = if ("$CertThumbprint".Trim()) { "$ClientId".Trim() } elseif ("$supportApp".Trim()) { "$supportApp".Trim() } else { '' }
+    if (-not $ownApp) { throw 'Initialize-PimSqlAdminGroup: -ReleaseOwnMembership releases the application this run signs in as (-ClientId with -CertThumbprint, or the Invardia Support session); a person''s membership is released by the installer. Nothing was changed.' }
+    $ownOid = Resolve-PimServicePrincipalObjectId -Graph $inv.Graph -AppId $ownApp
+    $sqlRg = if ("$SqlResourceGroup".Trim()) { "$SqlResourceGroup".Trim() } else { $ResourceGroup }
+    if ($PlanOnly) {
+        Write-Host "What if: take this run's own application (app $ownApp, object $ownOid) out of '$GroupName' and read it back; no other member is touched"
+        Write-Host '==> OK -- plan only, nothing changed' -ForegroundColor Green
+        exit 0
+    }
+    $rel = Invoke-PimSqlAdminGroupSetupRelease -Graph $inv.Graph -Arm $inv.Arm -SubscriptionId $SubscriptionId -SqlResourceGroup $sqlRg -SqlServerName $server `
+               -MemberObjectId $ownOid -OwnObjectId $ownOid -GroupName $GroupName -Label "this run's own application (app $ownApp)"
+    if ($rel.ok) { Write-Host "==> OK -- $($rel.reason)" -ForegroundColor Green; exit 0 }
+    Write-Host "==> NOT RELEASED -- $($rel.reason)" -ForegroundColor Red
+    exit 1
+}
+
 $r = Invoke-PimSqlAdminGroupStep -Graph $inv.Graph -Arm $inv.Arm -TenantId $inv.TenantId -SubscriptionId $SubscriptionId `
         -ResourceGroup $ResourceGroup -SqlResourceGroup $SqlResourceGroup -SqlServerName $server -GroupName $GroupName -GroupObjectId $GroupObjectId `
         -EnvironmentIdentityName $EnvironmentIdentityName -SqlAdminIdentityName $SqlAdminIdentityName -UpdateJobName $UpdateJobName `
-        -SupportAppId $SupportAppId -SupportObjectId $SupportObjectId -ExtraMemberObjectIds $ExtraMemberObjectIds `
+        -SupportAppId $SupportAppId -SupportObjectId $SupportObjectId -SetupIdentityAppId $SetupIdentityAppId -ExtraMemberObjectIds $ExtraMemberObjectIds `
         -Mode $(if ($MembersOnly) { 'membersOnly' } else { 'converge' }) -DoNotKeepCurrentAdmin:$DoNotKeepCurrentAdmin -PlanOnly:$PlanOnly
 Write-PimSqlAdminGroupReport -Result $r
 

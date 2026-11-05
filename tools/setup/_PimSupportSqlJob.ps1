@@ -34,7 +34,9 @@
   that time, records the end on the database user (the marker of engine/_shared/PIM-SupportJit.ps1), keeps running, and
   takes the admin role back at that time ON ITS OWN -- no answer from Invardia, no person and no other job is needed for
   the access to end. Every run of the job first SWEEPS: any grant whose end has passed is taken back before anything is
-  given. In mode standing the job gives the standing access exactly as before (SECAUDIT-1a item 4).
+  given. In mode standing (OPEN-01) the job gives the STANDING READ-ONLY access only: the support access step
+  (Invoke-PimSupportSqlReadOnlyUser) with the user in pim_support_read -- never db_owner, never the SQL admin group; a
+  db_owner an earlier version gave is reported in the result line (legacyOwner), never kept as "in place".
 #>
 . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-SupportJit.ps1')    # the marker, the grant, the revoke and the sweep
 
@@ -51,8 +53,8 @@ function Get-PimSupportSqlJobUntilTagName { return 'pim-support-until' }
 function Get-PimSupportSqlJobFunctionNames {
     # PURE. The functions the job carries, in load order: those of _PimSupportSqlAccess.ps1 (the standing grant) and those
     # of engine/_shared/PIM-SupportJit.ps1 (the time-limited grant, the revoke and the sweep). Nothing else runs inside.
-    return @('Get-PimSupportSqlUserDefaultName', 'Get-PimSupportSqlRoleName', 'ConvertTo-PimSupportSqlSid', 'Test-PimSupportSqlNames',
-             'Get-PimSupportSqlUserSql', 'Get-PimSupportSqlUserReadSql', 'ConvertFrom-PimSupportSqlUserRead', 'Invoke-PimSupportSqlUser',
+    return @('Get-PimSupportSqlUserDefaultName', 'Get-PimSupportSqlRoleName', 'Get-PimSupportSqlLegacyRoleNames', 'ConvertTo-PimSupportSqlSid', 'Test-PimSupportSqlNames',
+             'Get-PimSupportSqlUserSql', 'Get-PimSupportSqlUserReadSql', 'ConvertFrom-PimSupportSqlUserRead', 'Invoke-PimSupportSqlUser', 'Invoke-PimSupportSqlReadOnlyUser',
              'Get-PimSupportJitSchemaName', 'Get-PimSupportJitVersionMark', 'Get-PimSupportJitSignerPrefix', 'Get-PimSupportJitProcedureNames',
              'Get-PimSupportJitAdminRole', 'Get-PimSupportJitReadOnlyRole', 'Get-PimSupportJitReadSchemas', 'Get-PimSupportJitLegacyReadOnlyRole', 'Get-PimSupportJitDefaultHours', 'Get-PimSupportJitMaxHours',
              'Get-PimSupportJitNotSetUpText', 'Get-PimSupportJitLevels', 'ConvertTo-PimSupportJitLevel', 'Get-PimSupportJitLowerLevel', 'Test-PimSupportJitUserName', 'ConvertTo-PimSupportJitText',
@@ -78,9 +80,11 @@ function Get-PimSupportSqlJobScript {
       the SQL client of the image, the grant functions of _PimSupportSqlAccess.ps1 word for word, one call of
       Invoke-PimSupportSqlUser as the identity named in PIM_SUPPORTSQL_MI_CLIENT_ID, and ONE result line
       "[supportsql] RESULT {json}". Exit 0 only when the user and its role were READ BACK.
-      state: created | role-added | unchanged (one read, no statement sent) | failed.
+      state (standing): created | in-place | failed.
       PIM_SUPPORTSQL_MODE (framework SECAUDIT-1a 4b / 4c; engine/_shared/PIM-SupportJit.ps1):
-        standing (default)  the standing access exactly as before
+        standing (default)  OPEN-01: the STANDING READ-ONLY user (Invoke-PimSupportSqlReadOnlyUser; consent
+                            PIM_SUPPORTSQL_CONSENT_LEVEL troubleshoot | setup, '' = as recorded, else troubleshoot) --
+                            never db_owner; an earlier db_owner is reported (legacyOwner), never "in place"
         install             THE SUPPORT-SESSION STEP: consent (PIM_SUPPORTSQL_CONSENT_LEVEL), the read-only user, the
                             signed procedures; read back. Needs an owner-level identity (the database setup job's).
         grant               4b: usp_SupportGrant (PIM_SUPPORTSQL_JIT_LEVEL / _HOURS / _REASON / _TICKET / _OPENED_BY); for an
@@ -257,12 +261,16 @@ try {
             if ($sw1.ok) { $rc = 0 }
         } elseif ($result.ok) { $rc = 0 }
     } else {
-        # ---- the standing access, exactly as before (framework SECAUDIT-1a item 4: today's access stays)
-        $u = Invoke-PimSupportSqlUser -Sql $sql -AppId $appId -DbUserName $userName
+        # ---- OPEN-01: the STANDING READ-ONLY user (the support access step) -- never db_owner, never the SQL admin group.
+        # A db_owner an earlier version gave is REPORTED (legacyOwner), never counted as "in place" and never removed here.
+        $consent = "$($env:PIM_SUPPORTSQL_CONSENT_LEVEL)".Trim().ToLowerInvariant()
+        if ($consent -and $consent -notin @('troubleshoot', 'setup')) { throw "PIM_SUPPORTSQL_CONSENT_LEVEL '$consent' is not troubleshoot or setup -- nothing was changed" }
+        $u = Invoke-PimSupportSqlReadOnlyUser -Sql $sql -AppId $appId -DbUserName $userName -ConsentLevel $consent -SetBy "$($env:PIM_SUPPORTSQL_JIT_OPENED_BY)"
         $state = 'failed'
-        if ($u.ok) { if ($u.created) { $state = 'created' } elseif ($supportSql.calls -gt 1) { $state = 'role-added' } else { $state = 'unchanged' } }
+        if ($u.ok) { if ($u.created) { $state = 'created' } else { $state = 'in-place' } }
         $problem = "$($u.problem)"; if (-not $problem -and $sweepBad) { $problem = "the sweep before the grant: $(@($sw0.problems) -join '; ')" }
         $result = [ordered]@{ ok = [bool]($u.ok -and -not $sweepBad); state = $state; userName = "$($u.userName)"; role = "$($u.role)"; inRole = [bool]$u.inRole
+                              consented = "$($u.consented)"; legacy = @($u.legacy); legacyOwner = [bool]$u.legacyOwner; sessionOpen = [bool]$u.sessionOpen
                               sid = (ConvertTo-PimSupportSqlSid -AppId $appId); statements = [int]$supportSql.calls; problem = $problem; sweep = $sw0Line }
         Write-SupportSqlLine ('RESULT ' + ($result | ConvertTo-Json -Compress -Depth 4))
         if ($result.ok) { $rc = 0 }
@@ -394,6 +402,11 @@ function Get-PimSupportSqlJobPlan {
         }
         if ($Mode -eq 'install' -and -not (ConvertTo-PimSupportJitLevel "$ConsentLevel")) { $p.problem = "the consent level '$ConsentLevel' is not none, troubleshoot or setup"; return [pscustomobject]$p }
         if ($Mode -eq 'install') { $ConsentLevel = ConvertTo-PimSupportJitLevel "$ConsentLevel" }
+        if ($Mode -eq 'standing' -and "$ConsentLevel".Trim()) {
+            # OPEN-01: the read-only user records troubleshoot or setup; 'none' (no user at all) is -InstallSupportAccess -ConsentLevel none
+            $ConsentLevel = ConvertTo-PimSupportJitLevel "$ConsentLevel"
+            if ($ConsentLevel -notin @('troubleshoot', 'setup')) { $p.problem = "the read-only user records the consent level troubleshoot or setup (asked: '$ConsentLevel'); for no user at all run -InstallSupportAccess -ConsentLevel none"; return [pscustomobject]$p }
+        }
         if ($Mode -eq 'consent') {
             if ("$ConsentAction" -notin @('ensure-read-user', 'remove-user', 'open-admin', 'close-admin')) { $p.problem = "the consent action '$ConsentAction' is not ensure-read-user, remove-user, open-admin or close-admin"; return [pscustomobject]$p }
             $ConsentLevel = ConvertTo-PimSupportJitLevel "$ConsentLevel"
@@ -499,6 +512,7 @@ function Get-PimSupportSqlJobPlan {
             )
         }
         if ($Mode -eq 'install') { $envList += @(@{ name = 'PIM_SUPPORTSQL_CONSENT_LEVEL'; value = "$ConsentLevel" }) }
+        if ($Mode -eq 'standing' -and "$ConsentLevel".Trim()) { $envList += @(@{ name = 'PIM_SUPPORTSQL_CONSENT_LEVEL'; value = "$ConsentLevel" }) }
         if ($Mode -eq 'consent') {
             # OPEN-01: one short run -- the action, Invardia's consent level, the end of an admin access; the job ends itself
             $envList += @(
@@ -592,7 +606,8 @@ function Invoke-PimSupportSqlJobGrant {
     )
     $api = Get-PimSupportSqlJobAcaApi
     $jit = ($Mode -eq 'grant')
-    $role = Get-PimSupportSqlRoleName
+    $role = Get-PimSupportJitAdminRole          # the role a time-limited setup session adds (and takes back)
+    $readRole = Get-PimSupportSqlRoleName       # OPEN-01: the Support app's only standing role
     $tagName = Get-PimSupportSqlJobTagName; $tagValue = Get-PimSupportSqlJobTagValue
     $rgPath = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
     $jobPath = "$rgPath/providers/Microsoft.App/jobs/$JobName"
@@ -701,7 +716,7 @@ function Invoke-PimSupportSqlJobGrant {
             Write-Host "What if: read the job's result, then leave the job running: at $($plan.untilUtc) it takes $role back by itself (the read-only access stays) and ends"
         } else {
             Write-Host "What if: start it once. It first takes back any time-limited support access whose end has passed"
-            Write-Host "What if: in the database $($plan.sqlDatabase) it creates the user [$DbUserName] from the Support app's client id (SID $sid) when no user has that id, and adds it to $role; an existing user of the Support app is reused whatever its name, and nothing is sent when it is already in $role"
+            Write-Host "What if: in the database $($plan.sqlDatabase) it runs the support access step (consent '$(if ("$ConsentLevel".Trim()) { (ConvertTo-PimSupportJitLevel "$ConsentLevel") } else { 'as recorded, else troubleshoot' })'): the user [$DbUserName] from the Support app's client id (SID $sid) when no user has that id, in $readRole only (read-only); an existing user of the Support app is reused whatever its name; no database owner role and no SQL admin group membership is given"
             Write-Host "What if: read the execution's result and its log lines, then remove the job '$JobName' and read back that it is gone"
         }
         Write-Host 'What if: the script the job would run (built from the same functions Grant-PimSupportSqlAccess.ps1 uses):'
@@ -806,8 +821,11 @@ function Invoke-PimSupportSqlJobGrant {
                 $problems.Add("the execution $exec ended Succeeded but its result line says it did not put the user in place ($($r.problem)) -- treated as NOT done")
             } elseif ($status -eq 'Succeeded') {
                 if ($r) {
-                    $what = switch ("$($r.state)") { 'created' { 'created' } 'role-added' { "was there, added to $role" } 'unchanged' { 'was already there -- nothing was changed in the database' } default { 'in place' } }
-                    & $say "database user [$($r.userName)] (the Support app's client id, SID $sid): $what; member of $role (read back by the job)" 'Green'
+                    $what = switch ("$($r.state)") { 'created' { 'created' } 'in-place' { 'was already there' } default { 'in place' } }
+                    & $say "database user [$($r.userName)] (the Support app's client id, SID $sid): $what; in $readRole only, consent '$($r.consented)' (read back by the job)" 'Green'
+                    # OPEN-01: what an EARLIER version gave is said (a WARNING), never kept as "in place", never removed here
+                    $lt = Get-PimSupportSqlLegacyText -Legacy @(@($r.legacy) | Where-Object { "$_".Trim() }) -SessionOpen ([bool]$r.sessionOpen)
+                    if ($lt) { $warnings.Add($lt) }
                 } else {
                     $warnings.Add("the execution $exec ended Succeeded, and the job ends that way only after it read the user and its role back; its log lines could not be read here, so the user's name and whether it was created or already there are not shown")
                 }

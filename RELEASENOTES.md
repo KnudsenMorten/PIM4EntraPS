@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.41 -- 2026-11-05
+
+- The as-built document also reaches Invardia support directly from the installation (checked by size and SHA-256), so a private installation's document no longer needs outside access to its storage; Invardia support keeps read-only database access only, with admin rights only inside an open support session; a managing-tenant build removes its own temporary database admin membership when it finishes; the hybrid worker deploy script is one self-contained, hash-checked file; a new script moves each PIM component to its own identity, proving the new identity before any old right is removed.
+
 ## 3.0.40 -- 2026-11-05
 
 - PIM Manager shows the environment name you keep in Invardia (mail subjects, exports, the environment report, the header and the browser tab), and keeps the last name it read when Invardia cannot be reached; a new installation gives Invardia support read-only database access only -- admin rights only during an open support session, never as a standing member of the SQL admin group or an owner of PIM's app registrations.
