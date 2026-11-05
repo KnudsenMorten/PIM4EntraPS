@@ -652,12 +652,22 @@ if ("$AcrAgentPoolName".Trim()) {
         Write-Host "    outbound path for the build pool: $($ob.how)"
         # The pool lives in the registry's region (as `acr agentpool create` placed it).
         $poolLoc = "$($acrObj.location)"; if (-not $poolLoc) { $poolLoc = $Location }
-        try { [void](New-PimArmAcrAgentPool -SubscriptionId $SubscriptionId -ResourceGroup $rg -Registry $acr -Name $AcrAgentPoolName -Location $poolLoc -Tier $AcrAgentPoolTier -Count $AcrAgentPoolCount -SubnetId $poolSubnetId) }
-        catch { Write-PrereqRestNote $_.Exception.Message }
+        # BUILDPOOL-11G-RECREATE (2026-11-05): Azure REFUSES to create a pool with count 0 (400 AgentPoolInvalidCount); a
+        # PATCH of an existing pool to 0 is accepted. New-PimAcrBuildPoolIdle creates it with 1 instance, waits for
+        # Succeeded (up to 30 minutes), then sets it to -AcrAgentPoolCount and reads tier / count / subnet back.
+        if (-not (Get-Command New-PimAcrBuildPoolIdle -ErrorAction SilentlyContinue)) { . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-AcrBuild.ps1') }
+        $poolArmNew = { param($m, $p, $b, $api) if ($null -ne $b) { Invoke-PimSetupArm -Method $m -Path $p -Body $b -ApiVersion $api } else { Invoke-PimSetupArm -Method $m -Path $p -ApiVersion $api -NotFoundOk } }
+        $poolNewPath = Get-PimArmResourceId $SubscriptionId $rg 'Microsoft.ContainerRegistry/registries' $acr "agentPools/$AcrAgentPoolName"
+        $poolMk = New-PimAcrBuildPoolIdle -PoolPath $poolNewPath -Location $poolLoc -Tier $AcrAgentPoolTier -Count $AcrAgentPoolCount -SubnetId $poolSubnetId -Arm $poolArmNew
+        if (-not $poolMk.ok -and $poolMk.stage -in 'put', 'provision') { Write-PrereqRestNote $poolMk.reason }
         $poolState = "$((Get-PimArmAcrAgentPool -SubscriptionId $SubscriptionId -ResourceGroup $rg -Registry $acr -Name $AcrAgentPoolName -ErrorAsNull).properties.provisioningState)"
         if (-not "$poolState".Trim()) { throw "the ACR agent pool '$AcrAgentPoolName' was NOT created -- see the failure above. Without it 'az acr build' cannot reach a private registry." }
-        # rule 15: awaited to Succeeded (New-PimArmAcrAgentPool waits up to 1800 s); anything else is said, and the next run makes it again
+        # rule 15: awaited to Succeeded (New-PimAcrBuildPoolIdle waits up to 1800 s); anything else is said, and the next run makes it again
         if ("$poolState".Trim() -ne 'Succeeded') { throw "the ACR agent pool '$AcrAgentPoolName' ended '$poolState', not Succeeded (waited up to 30 minutes) -- run the install again: a Failed pool is removed and made again." }
+        # the pool is there and usable; one that could not be set back to its idle count (or reads back otherwise) is ONE
+        # warning -- it is billed while it runs, and the updater's converge sets it to 0 on its next run
+        if (-not $poolMk.ok -and $poolMk.stage -eq 'scale') { Write-Warning "    $(Get-PimAcrBuildPoolScaleUpLine -PoolName $AcrAgentPoolName -Reason $poolMk.reason)" }
+        elseif (-not $poolMk.ok) { Write-Warning "    build pool '$AcrAgentPoolName': $($poolMk.reason) -- the updater's converge checks it on its next run" }
     } else {
         # BUILDPOOL-11G: a pool made before rule 11g (S1, always on) is made again at S2 / 0 (same subnet), only while no
         # build is queued or running; one left running is set back to 0 -- the same converge the nightly updater runs

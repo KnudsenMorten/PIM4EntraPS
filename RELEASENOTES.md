@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.44 -- 2026-11-05
+
+- Updates no longer roll back a healthy installation when Azure's revision list times out: the health check reads the app's current revision directly. A private installation's build pool is always made again after a tier change, also when Azure takes longer to remove the old one; a pool is created with one instance and then set to zero (Azure does not allow creating it at zero). Includes the 3.0.43 status-report rounds.
+
+## 3.0.43 -- 2026-11-05
+
+- Status reports to Invardia catch up within one cycle: after the heartbeat the uplink sends up to 5 rounds of 20 reports, at least 65 seconds apart (committed changes are still applied during the wait), and the heartbeat now says how many finished runs are still waiting to be reported.
+
 ## 3.0.42 -- 2026-11-05
 
 - Updates never change the database under a running PIM job: the updater waits up to 20 minutes for running jobs (holding the scheduled tick and pull), and otherwise defers as 'waiting' with nothing rolled; the support consent waits until the database job exists. A private install's build pool sits at 0 instances between builds and is scaled up only for a build (heartbeat reports it). A managing build releases its own build membership by default.

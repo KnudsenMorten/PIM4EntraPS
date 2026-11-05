@@ -48,10 +48,44 @@
 $script:PimUplinkProduct = 'pim-manager'
 # Invardia's limit (2026-10-04): 30 POSTs per MINUTE per client IP -- and several installs behind one NAT share it. So at most
 # 20 reports per cycle, ~2.5 s apart (the job passes -PauseMs 2500), and the cycle STOPS at the first failure (a 429 says
-# wait): what was not sent keeps its per-job watermark and goes next cycle.
+# wait): what was not sent keeps its per-job watermark and goes next cycle. UPLINK-ROUNDS-84: the 20 is ONE ROUND -- the
+# hourly job sends up to Get-PimUplinkMaxRounds rounds, Get-PimUplinkRoundWaitSeconds apart (see below).
 # PIM 100.158 (a): in the 4-hour release window the job runs every 15 minutes instead of hourly -- the SAME per-cycle budget
 # (20 reports, 2.5 s apart, stop at the first failure) applies to every run, so a minute never carries more than before.
 $script:PimUplinkMaxRunsPerCycle = 20
+# UPLINK-ROUNDS-84 (framework 8.4 as clarified by Invardia 2026-11-05: "~20 POSTs per cycle" is the RATE GUARD, not a cap):
+# the hourly job sends in ROUNDS -- the heartbeat first, then up to Get-PimUplinkMaxRounds rounds of at most 20 POSTs, at
+# least Get-PimUplinkRoundWaitSeconds apart, only while something is left; the first failure still stops the whole cycle.
+# Both are LITERALS in functions (child-scope safe, never a $script: variable).
+function Get-PimUplinkMaxRounds { <# PURE. Rounds of <= 20 POSTs per cycle (a literal). #> return 5 }
+function Get-PimUplinkRoundWaitSeconds { <# PURE. The wait between two rounds, seconds (a literal; > 60 s so a minute never holds two rounds). #> return 65 }
+
+function Invoke-PimUplinkRoundWait {
+    <#
+      UPLINK-ROUNDS-84 (coordinator 2026-11-05): the wait between two rounds of the SCHEDULED uplink. The tick runs its jobs one
+      after another, so 4 x 65 s here would hold back every job after the uplink in that tick (committed queue actions
+      included). So the wait first calls -Hook (the tick's $global:PIM_BetweenScopesHook, its queue pickup -- the same hook the
+      engine calls between scopes, §70.22) when it is a scriptblock -- guarded: a throw is one warning, never a broken uplink --
+      and then sleeps only what is LEFT of -Seconds, so the gap between two rounds is never shorter than -Seconds.
+      Seams: -Sleep { param($Milliseconds) } (default Start-Sleep), -Elapsed { param($Stopwatch) } -> seconds since the wait
+      began (default the stopwatch). Returns @{ hookCalled; hookFailed; sleptMs; waitedSec }.
+    #>
+    [CmdletBinding()] param([int]$Seconds, [AllowNull()][object]$Hook = $null, [AllowNull()][scriptblock]$Sleep = $null, [AllowNull()][scriptblock]$Elapsed = $null)
+    $__uwSw = [Diagnostics.Stopwatch]::StartNew()
+    $__uwOut = @{ hookCalled = $false; hookFailed = $false; sleptMs = 0; waitedSec = 0.0 }
+    $__uwNow = { if ($Elapsed) { [double](& $Elapsed $__uwSw) } else { $__uwSw.Elapsed.TotalSeconds } }
+    if ($Hook -is [scriptblock]) {
+        $__uwOut.hookCalled = $true
+        try { $null = @(& $Hook) } catch { $__uwOut.hookFailed = $true; try { Write-Warning "[uplink] the queue pickup between rounds failed (the uplink goes on): $($_.Exception.Message)" } catch { } }
+    }
+    $__uwLeft = [int][Math]::Ceiling(([double]$Seconds - (& $__uwNow)) * 1000.0)
+    if ($__uwLeft -gt 0) {
+        if ($Sleep) { $null = & $Sleep $__uwLeft } else { Start-Sleep -Milliseconds $__uwLeft }
+        $__uwOut.sleptMs = $__uwLeft
+    }
+    $__uwOut.waitedSec = [double](& $__uwNow)
+    return $__uwOut
+}
 # PIM 100.158 (CR3): the release-control library (pure) -- loaded here, at file level, so its functions outlive any one call.
 if (-not (Get-Command Get-PimReleaseModeWindow -ErrorAction SilentlyContinue)) { $__pimRcLib = Join-Path $PSScriptRoot 'PIM-ReleaseControl.ps1'; if (Test-Path -LiteralPath $__pimRcLib) { . $__pimRcLib } }
 # FLEET-SETUPSTEPS (framework contract with Invardia, 2026-11-03): the setupSteps builder (pure) -- loaded at file level too.
@@ -187,6 +221,49 @@ function Get-PimUplinkRunPlan {
     $wm = $null; if ($newest) { $wm = ([datetime]$newest).ToString('o') }
     $arr = $reports.ToArray()
     return @{ reports = $arr; watermarkUtc = $wm }
+}
+
+function Test-PimUplinkBacklogOn {
+    <#
+      PURE. UPLINK-ROUNDS-84: the UplinkBacklog heartbeat field's own switch, PIM_UPLINK_UPLINKBACKLOG. ON by default (Invardia
+      confirmed the field deployed, 2026-11-05, shape { pending; oldestUtc; checkedUtc }): unset / empty / anything else = on;
+      only 0 / false / off / no switches it off (the structured fields' rule).
+    #>
+    param([AllowNull()][string]$Value)
+    return -not [bool]("$Value".Trim() -match '^(?i)(0|false|off|no)$')
+}
+
+function Get-PimUplinkBacklog {
+    <#
+      PURE. UPLINK-ROUNDS-84 / framework 8.4: UplinkBacklog { pending; oldestUtc; checkedUtc } for the heartbeat.
+        pending   = the reportable runs that had FINISHED before the PREVIOUS cycle started (-PreviousCycleUtc) and are still
+                    unsent now, i.e. still beyond their job's watermark (-SinceByJob['pim-<type>'], else the floor -SinceUtc)
+                    -- what the previous cycle should have sent and did not. Counted in RUNS (one report folds a job's runs).
+        oldestUtc = finishedUtc of the oldest of them; $null when pending is 0.
+        checkedUtc = -NowUtc.
+      The same filter as Get-PimUplinkRunPlan: not reportable (skipped / running / cancelled ...) and the uplink job itself
+      never count. No previous cycle (the first one) = 0 / null: nothing was due yet.
+    #>
+    param([object[]]$Runs = @(), [AllowNull()][object]$SinceUtc, [hashtable]$SinceByJob = @{}, [AllowNull()][object]$PreviousCycleUtc, [datetime]$NowUtc = [datetime]::UtcNow)
+    $since = $null; try { if ("$SinceUtc") { $since = ([datetime]"$SinceUtc").ToUniversalTime() } } catch { $since = $null }
+    if ($SinceUtc -is [datetime]) { $since = ([datetime]$SinceUtc).ToUniversalTime() }
+    $prev = $null; try { if ($PreviousCycleUtc -is [datetime]) { $prev = ([datetime]$PreviousCycleUtc).ToUniversalTime() } elseif ("$PreviousCycleUtc".Trim()) { $prev = ([datetime]"$PreviousCycleUtc").ToUniversalTime() } } catch { $prev = $null }
+    $n = 0; $oldest = $null
+    if ($prev) {
+        foreach ($r in @($Runs | Where-Object { $_ })) {
+            $fin = $null; try { if ($r.finishedUtc -is [datetime]) { $fin = ([datetime]$r.finishedUtc).ToUniversalTime() } elseif ("$($r.finishedUtc)".Trim()) { $fin = ([datetime]"$($r.finishedUtc)").ToUniversalTime() } } catch { $fin = $null }
+            if (-not $fin -or $fin -ge $prev) { continue }
+            $job = Get-PimUplinkJobId -Run $r
+            if (-not $job -or $job -eq 'pim-uplink') { continue }
+            $js = $since
+            if ($SinceByJob -and $SinceByJob.ContainsKey($job)) { try { $js = ([datetime]"$($SinceByJob[$job])").ToUniversalTime() } catch { } }
+            if ($js -and $fin -le $js) { continue }
+            if (-not (Get-PimUplinkRunOutcome -Run $r)) { continue }
+            $n++
+            if (-not $oldest -or $fin -lt $oldest) { $oldest = $fin }
+        }
+    }
+    return [pscustomobject][ordered]@{ pending = [int]$n; oldestUtc = $(if ($n -gt 0 -and $oldest) { $oldest.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") } else { $null }); checkedUtc = $NowUtc.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") }
 }
 
 # Owner 2026-10-12, relayed by Invardia (PIM 100.103: "telemetry must include this more frequent"; his choice in Invardia's
@@ -2807,7 +2884,17 @@ function Invoke-PimUplinkCycle {
           # Its own switch (PIM_UPLINK_ENVNAME, ON by default). -EnvironmentTransport: the GET (Get-PimInvardiaEnvironment
           # -Transport); $null = NO read at all (the job passes the real one; an offline test passes a stub or nothing).
           [bool]$EnvironmentName = (Test-PimUplinkEnvironmentNameOn),
-          [AllowNull()][scriptblock]$EnvironmentTransport = $null)
+          [AllowNull()][scriptblock]$EnvironmentTransport = $null,
+          # UPLINK-ROUNDS-84: rounds of at most -MaxPerCycle POSTs (round 1 holds the opt-in / heartbeat / setup report as
+          # before), at most -MaxRounds per cycle, -RoundWaitSec between two rounds (never before the first, never after the
+          # last, never when nothing is left). 1 = one round (the cycle as it was; the default here, so a direct caller never
+          # waits); the hourly job passes Get-PimUplinkMaxRounds / Get-PimUplinkRoundWaitSeconds.
+          [int]$MaxRounds = 1, [int]$RoundWaitSec = (Get-PimUplinkRoundWaitSeconds),
+          # the wait seam: { param($Seconds) } -- $null = Start-Sleep. Tests pass a recorder, so nothing sleeps.
+          [AllowNull()][scriptblock]$RoundSleep = $null,
+          # UPLINK-ROUNDS-84: UplinkBacklog { pending; oldestUtc; checkedUtc } on the IDENTIFIED heartbeat (additive), its own
+          # switch PIM_UPLINK_UPLINKBACKLOG -- ON by default (Invardia deployed the field); 0/false/off/no = off (Test-PimUplinkBacklogOn).
+          [bool]$UplinkBacklog = (Test-PimUplinkBacklogOn -Value "$env:PIM_UPLINK_UPLINKBACKLOG"))
     $NowUtc = $NowUtc.ToUniversalTime()
     $envNameRead = $null
     $endpoint = "$(& $GetSetting 'UplinkEndpoint')".Trim()
@@ -2880,6 +2967,18 @@ function Invoke-PimUplinkCycle {
     $lastingId = ''
     if ($sender.Mode -eq 'identified') { $lastingId = Get-PimUplinkLastingInstallId -GetSetting $GetSetting -SetSetting $SetSetting -CreateSetting $CreateSetting }
     $post = { param($rec) if ($sent -gt 0 -and $PauseMs -gt 0) { Start-Sleep -Milliseconds $PauseMs }; & $Send (Add-PimUplinkInstallId -Record $rec -InstallId $lastingId) $sender.Endpoint $sender.AccessCode $lastingId }
+    # UPLINK-ROUNDS-84: may ONE more record go? Called just before each run / guard record, so a round is only opened for a
+    # record that is really left. Round 1 counts every POST so far (opt-in, heartbeat, setup -- as before); when a round is
+    # full and another may start, it waits -RoundWaitSec (the seam) and opens it. $rounds is a hashtable: the scriptblock
+    # runs in a child scope and changes it by reference.
+    $rounds = @{ n = 1; base = 0; waits = 0; max = [Math]::Max(1, $MaxRounds) }
+    $roomNext = {
+        if (($sent - $rounds.base) -lt $budget) { return $true }
+        if ($rounds.n -ge $rounds.max) { return $false }
+        if ($RoundWaitSec -gt 0) { if ($RoundSleep) { $null = & $RoundSleep $RoundWaitSec } else { Start-Sleep -Seconds $RoundWaitSec } }
+        $rounds.n++; $rounds.waits++; $rounds.base = $sent
+        return $true
+    }
     # Lane repfix: the additive fields. $postAdd sends a record that carries some (-names); when Invardia refuses its CONTENT
     # (400 / 422) the same record goes ONCE more in its old form (-legacy: the old value of a field that existed before; a
     # field that did not exist is removed) and, when that lands, the additive fields are off for the rest of this cycle and
@@ -3002,6 +3101,10 @@ function Invoke-PimUplinkCycle {
     # §11 opt-in: switched back ON after an opt-out -> ONE 'optin' report FIRST. Until it lands nothing else is sent (Invardia
     # still has this environment as opted out), and nothing from the opted-out period is ever sent: the floor restarts NOW.
     $consent = 'on'
+    # UPLINK-ROUNDS-84: what UplinkBacklog counts -- the same runs the plan below sees (the updater's own run included while
+    # the additive fields are on). $null = the field was not built this cycle.
+    $backlogVal = $null
+    $blRuns = @($Runs); if ($addState.on -and $null -ne $UpdateRun) { $blRuns = @($blRuns) + @($UpdateRun) }
     if ((Get-PimUplinkConsentAction -State $state -Enabled $true) -eq 'optin') {
         $oi = New-PimUplinkConsentReport -Kind optin -Mode $sender.Mode -Version $Version -Ring $Ring -InstallId $iid -TenantId $TenantId -Now $NowUtc
         $r = & $post $oi
@@ -3173,6 +3276,18 @@ function Invoke-PimUplinkCycle {
                     if (Add-PimUplinkSetupStepsField -Record $hb -Steps $stSteps) { $hbAdd += 'setupSteps' }
                 } catch { Write-Warning "[uplink] setupSteps could not be built: $($_.Exception.Message)" }
             }
+            # UPLINK-ROUNDS-84 / framework 8.4: UplinkBacklog { pending; oldestUtc; checkedUtc } -- PURE from the run history,
+            # the job watermarks and when the PREVIOUS cycle started (UplinkState.lastCycleStartUtc, else lastCycleUtc: the
+            # same value, the cycle's -NowUtc). Its own switch (ON by default, PIM_UPLINK_UPLINKBACKLOG=0 = off); additive (a refusal naming it holds just it).
+            if ($UplinkBacklog) {
+                try {
+                    $blPrev = $null
+                    if ($state -and $state.PSObject.Properties['lastCycleStartUtc'] -and "$($state.lastCycleStartUtc)") { $blPrev = $state.lastCycleStartUtc }
+                    elseif ($state -and $state.PSObject.Properties['lastCycleUtc'] -and "$($state.lastCycleUtc)") { $blPrev = $state.lastCycleUtc }
+                    $backlogVal = Get-PimUplinkBacklog -Runs $blRuns -SinceUtc $floor -SinceByJob $marks -PreviousCycleUtc $blPrev -NowUtc $NowUtc
+                    $hb | Add-Member -NotePropertyName 'UplinkBacklog' -NotePropertyValue $backlogVal -Force; $hbAdd += 'UplinkBacklog'
+                } catch { $backlogVal = $null; try { $hb.PSObject.Properties.Remove('UplinkBacklog') } catch { }; Write-Warning "[uplink] UplinkBacklog could not be built: $($_.Exception.Message)" }
+            }
         }
         # PIM 100.167 / framework 8.16: Capabilities + Licences -- identified only, the cause switch on, ONE probe per heartbeat.
         # Licences go as a JSON array, PROVEN in the text before it leaves (the ActiveGuards lesson): not an array = left out.
@@ -3259,8 +3374,9 @@ function Invoke-PimUplinkCycle {
     $plan = Get-PimUplinkRunPlan -Runs $planRuns -SinceUtc $floor -SinceByJob $marks
     $left = 0
     foreach ($p in @($plan.reports)) {
-        # STOP at the first failure (a 429 says "wait") and at the per-cycle budget: the rest keep their watermark.
-        if ($stopped -or $sent -ge $budget) { $left++; continue }
+        # STOP at the first failure (a 429 says "wait") and when the last round is full: the rest keep their watermark.
+        # UPLINK-ROUNDS-84: a full round that is not the last waits and opens the next ($roomNext).
+        if ($stopped -or -not (& $roomNext)) { $left++; continue }
         # PIM 100.143: a class the plan already knows (RUN-NO-RESULT) wins; otherwise a failure's text is classified.
         $cls = if ($p.ContainsKey('errorClass') -and "$($p.errorClass)") { "$($p.errorClass)" } elseif ($p.outcome -eq 'failed') { Get-PimUplinkErrorClass -Text $p.errorText } else { '' }
         $rec = New-AitUplinkReport -Kind run @common -Job $p.job -Outcome $p.outcome -DurationMs $p.durationMs -ErrorClass $cls -ErrorText $p.errorText `
@@ -3342,7 +3458,7 @@ function Invoke-PimUplinkCycle {
         foreach ($e in $dueList) { $did = Get-PimUplinkGuardId (Get-PimUplinkField $e 'guardId'); if ($did) { $dueIds[$did] = $true } }
         if (-not $stopped) {
             foreach ($e in $dueList) {
-                if ($stopped -or $sent -ge $budget) { $left++; continue }
+                if ($stopped -or -not (& $roomNext)) { $left++; continue }
                 $rec = New-PimGuardUplinkRecord -Entry $e -Mode $sender.Mode -Product $script:PimUplinkProduct -Version $Version -Ring $Ring -InstallId $iid -TenantId $TenantId -ManagerUrl $mgrBase
                 if (-not $rec) { continue }
                 # Lane repfix (additive): Outcome + ActionBy on the guard record (Get-PimUplinkGuardOutcomeAction); the
@@ -3373,7 +3489,7 @@ function Invoke-PimUplinkCycle {
         foreach ($hid in @($holdIds.Keys)) { if ($reported.ContainsKey("$hid")) { $reported["$hid"].hold = $true } }
         foreach ($cid in @($reported.Keys | Sort-Object)) {
             if ($activeIds.ContainsKey("$cid") -or $dueIds.ContainsKey("$cid")) { continue }
-            if ($stopped -or $sent -ge $budget) { $left++; continue }
+            if ($stopped -or -not (& $roomNext)) { $left++; continue }
             $trip = $null; if ($tripBy.ContainsKey("$cid")) { $trip = $tripBy["$cid"] }
             $since = Get-PimUplinkField $trip 'lastSeenUtc'
             if (-not (ConvertTo-PimUplinkUtc $since)) { $since = $reported["$cid"].sinceUtc }
@@ -3392,7 +3508,7 @@ function Invoke-PimUplinkCycle {
             else { $failed++; $stopped = $true; $left++; $why += "guard $cid cleared: $($r.Reason)" }
         }
     }
-    $msg = "$($sender.Mode): $sent sent$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($clearedSent) { " ($clearedSent guard(s) reported clear)" })$(if ($setupSent) { ' (setup report)' })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })$supNote"
+    $msg = "$($sender.Mode): $sent sent$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($clearedSent) { " ($clearedSent guard(s) reported clear)" })$(if ($setupSent) { ' (setup report)' })$(if ($rounds.n -gt 1) { " in $($rounds.n) rounds" })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })$supNote"
     # §33.0 BUG (2026-10-16): the refusal names its record (kind, job, HTTP status, Invardia's answer), and while a hold lasts
     # every cycle says so, whichever caller set it. A failure to build the text keeps the plain sentence.
     $refText = { param($st, $what) $t = ''; try { if ($null -ne $st.info) { $t = " ($(Format-PimUplinkRefusalLine -What $what -Info $st.info))" } } catch { $t = '' }; $t }
@@ -3414,6 +3530,9 @@ function Invoke-PimUplinkCycle {
     } catch { }
     $newState = [ordered]@{ mode = $sender.Mode; lastHeartbeatUtc = $lastHb; runWatermarkUtc = $floor; jobMarks = [pscustomobject]$marks
                             consent = $consent; lastCycleUtc = $NowUtc.ToString('o'); lastResult = $msg
+                            # UPLINK-ROUNDS-84: when this cycle STARTED (its -NowUtc) -- the next heartbeat's UplinkBacklog
+                            # counts the runs that had finished before it and are still unsent
+                            lastCycleStartUtc = $NowUtc.ToString('o')
                             # PIM 100.75: read by the end-of-install verify (Confirm-PimInstall 'telemetry')
                             lastFailed = $failed }
     # PIM 100.102: the reported set. Left out while it was never started AND the state could not be read (so the first
@@ -3441,6 +3560,7 @@ function Invoke-PimUplinkCycle {
     try { Set-PimUplinkRefusalState -State $newState -Prefix 'releaseControlRefused' -Info $(if ($rcState.refusedNow) { $rcState.info }) -Previous $state -Carry ([bool]$rcHeld) } catch { Write-Warning "[uplink] the release-control refusal record was not saved: $($_.Exception.Message)" }
     & $SetSetting 'UplinkState' ([pscustomobject]$newState)
     return @{ ran = $true; mode = $sender.Mode; sent = $sent; failed = $failed; left = $left; heartbeat = $hbSent; setup = $setupSent; message = $msg; reasons = @($why)
+              rounds = [int]$rounds.n; roundWaits = [int]$rounds.waits; uplinkBacklog = $backlogVal
               additive = [bool]$addState.on; additiveRefused = [bool]$addState.refusedNow; additiveHeldFields = @($addFieldsOut)
               causes = [bool]$causeState.on; causesRefused = [bool]$causeState.refusedNow
               releaseControl = [bool]$rcState.on; releaseControlRefused = [bool]$rcState.refusedNow
@@ -3642,6 +3762,13 @@ function Invoke-PimUplinkJob {
     }
     $cyc = @{}
     if ($MaxPerCycle -gt 0) { $cyc['MaxPerCycle'] = $MaxPerCycle }
+    # UPLINK-ROUNDS-84: the scheduled job sends in rounds (up to 5 x 20 POSTs, 65 s apart: at most ~9 min, inside the 15-minute
+    # release-window cadence and the tick's 7-day run limit). A FLUSH before an alert mail (-MaxPerCycle) and -WhatIf: one round.
+    if ($MaxPerCycle -le 0 -and -not $WhatIf) { $cyc['MaxRounds'] = (Get-PimUplinkMaxRounds); $cyc['RoundWaitSec'] = (Get-PimUplinkRoundWaitSeconds) }
+    # ...and while it waits between rounds it runs the tick's queue pickup ($global:PIM_BetweenScopesHook, set by the tick; the
+    # engine calls it between scopes, §70.22), then sleeps only the rest of the wait. Read AT the wait (a PLAIN scriptblock, no
+    # .GetNewClosure(): the hook resolves the tick's variables through dynamic scope). The cycle itself never reads a global.
+    if ($cyc.ContainsKey('MaxRounds')) { $cyc['RoundSleep'] = { param($Seconds) $null = Invoke-PimUplinkRoundWait -Seconds $Seconds -Hook $global:PIM_BetweenScopesHook } }
     $pause = if ($WhatIf) { 0 } elseif ($PauseMs -ge 0) { $PauseMs } else { 2500 }
     # PIM 100.158 / framework 12.11e CR3: wave (what the updater was served, pim.Settings 'ReleaseWave') + releaseMode (the
     # 4-hour window after an engine-changing release, from the engine's Strict start). PIM_Telemetry_ReleaseControl: ON by

@@ -248,8 +248,25 @@ function Get-PimAcaActiveRevision {
         [Parameter(Mandatory)][string]$ResourceGroup,
         [Parameter(Mandatory)][string]$Name
     )
-    $path = (Get-PimAcaAppId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name) + '/revisions'
-    $revs = @(Invoke-PimArm -Method GET -Path $path -ApiVersion $script:PimAcaApi -All)
+    $appId = Get-PimAcaAppId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name
+    $path = $appId + '/revisions'
+    # ROLL-HEALTH-PAGING (live 2026-11-05, internal, 3.0.43): listing EVERY revision of an app with a long history pages
+    # with a skipToken that Azure expired mid-listing ("HTTP 400 PaginationTokenExpired") -- the health check threw and a
+    # healthy roll was ROLLED BACK. First: the app's own latestReadyRevisionName, read with ONE GET; only when that does not
+    # answer an active revision, the full list (restarted once from the beginning when its paging token expires).
+    try {
+        $appNow = Invoke-PimArm -Method GET -Path $appId -ApiVersion $script:PimAcaApi
+        $latest = "$($appNow.properties.latestReadyRevisionName)".Trim()
+        if ($latest) {
+            $one = Invoke-PimArm -Method GET -Path "$path/$latest" -ApiVersion $script:PimAcaApi
+            if ($one -and $one.properties -and $one.properties.active) { return $one }
+        }
+    } catch { }
+    $revs = $null
+    for ($try = 1; $try -le 2 -and $null -eq $revs; $try++) {
+        try { $revs = @(Invoke-PimArm -Method GET -Path $path -ApiVersion $script:PimAcaApi -All) }
+        catch { if ($try -ge 2 -or "$($_.Exception.Message)" -notmatch '(?i)PaginationTokenExpired|pagination token') { throw } }
+    }
     @($revs | Where-Object { $_.properties.active }) |
         Sort-Object { try { [datetimeoffset]$_.properties.createdTime } catch { [datetimeoffset]::MinValue } } |
         Select-Object -Last 1

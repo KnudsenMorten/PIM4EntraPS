@@ -918,15 +918,29 @@ if ($unKind.kind -eq 'quick') {
 # here and its heartbeat carries no BuildPool. An older S1 pool is made again at S2 only while no run is queued or running;
 # a pool left running with no build on is set back to 0. The state goes into UpdateState for the heartbeat (BuildPool).
 # Never fails or stops the update.
+# BUILDPOOL-11G-RECREATE: a pool the converge DELETES is never left un-made -- the recreate record goes to pim.Settings
+# 'BuildPoolRecreate' BEFORE the delete, and a run that finds the pool missing makes it from that record. No store = no
+# record (the converge then behaves as before).
 $script:PimBuildPoolState = $null
 $script:PimBuildPoolNone = -not "$($env:PIM_ACR_AGENT_POOL)".Trim()
+$bpSeam = @{}
+if (-not $script:PimBuildPoolNone) {
+    $bpCs = $null; try { $bpCs = Get-PimUpdaterStoreCsHealed } catch { $bpCs = $null }
+    if ("$bpCs".Trim() -and (Get-Command Set-PimSqlSetting -ErrorAction SilentlyContinue)) {
+        $bpSeam = @{
+            SaveIntent  = { param($o) Set-PimSqlSetting -ConnectionString $bpCs -Name 'BuildPoolRecreate' -ValueJson (ConvertTo-Json -InputObject $o -Depth 8 -Compress) }
+            ReadIntent  = { Get-PimSqlSetting -ConnectionString $bpCs -Name 'BuildPoolRecreate' }
+            ClearIntent = { Set-PimSqlSetting -ConnectionString $bpCs -Name 'BuildPoolRecreate' -ValueJson '' }
+        }
+    }
+}
 if (-not $script:PimBuildPoolNone) {
     try {
         $bpName = "$($env:PIM_ACR_AGENT_POOL)".Trim()
         $bpReg = $(if ($loginServer) { Split-PimImageReference -Image "$loginServer/x:y" } else { $null })
         if (-not $bpReg -or -not "$($bpReg.registryName)".Trim()) { Say "build pool '$bpName': not checked (this environment's registry is not known)" 'Yellow' }
         else {
-            $bpCv = Invoke-PimAcrBuildPoolConverge -SubscriptionId $sub -ResourceGroup $rg -RegistryName "$($bpReg.registryName)" -PoolName $bpName
+            $bpCv = Invoke-PimAcrBuildPoolConverge -SubscriptionId $sub -ResourceGroup $rg -RegistryName "$($bpReg.registryName)" -PoolName $bpName @bpSeam
             $script:PimBuildPoolState = $bpCv.state
             Say $bpCv.line $(if (-not $bpCv.ok) { 'Yellow' } elseif ($bpCv.action -in 'recreated', 'scaled-down') { 'Cyan' } else { 'DarkGray' })
         }

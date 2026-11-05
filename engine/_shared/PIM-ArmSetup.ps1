@@ -731,6 +731,9 @@ function New-PimArmAcrAgentPool {
     <# az acr agentpool create -r R -n N --tier T --subnet-id S [--count C] ; waits for provisioning. #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Registry,
           [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Location, [string]$Tier = 'S1', [int]$Count = 1, [string]$SubnetId, [int]$TimeoutSeconds = 1800)
+    # BUILDPOOL-11G-RECREATE: Azure refuses a create with count 0 (400 AgentPoolInvalidCount) -- never send one. A pool
+    # that must idle at 0 is made with New-PimAcrBuildPoolIdle (PIM-AcrBuild.ps1): count 1, then a PATCH to 0.
+    if ($Count -lt 1) { throw "New-PimArmAcrAgentPool: a build pool is created with at least 1 instance (Azure refuses $Count) -- use New-PimAcrBuildPoolIdle to make one that idles at 0" }
     $id = Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.ContainerRegistry/registries' $Registry "agentPools/$Name"
     $props = @{ count = $Count; tier = $Tier; os = 'Linux' }
     if ("$SubnetId".Trim()) { $props.virtualNetworkSubnetResourceId = "$SubnetId".Trim() }

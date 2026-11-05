@@ -211,6 +211,13 @@ function Get-PimAcrBuildPoolPolicy {
         MaxTaskTimeoutSeconds = 28800     # ACR's largest task timeout
         ApiVersion            = '2019-06-01-preview'
         ScaleWaitSeconds      = 1200      # a count change is waited for up to 20 minutes
+        # BUILDPOOL-11G-RECREATE (2026-11-05): a pool DELETE took ~14 minutes live. The delete gets its own, longer wait;
+        # one that is still going at the end is not lost -- the recreate intent is in the store and the next run makes it.
+        DeleteWaitSeconds     = 1800      # a delete is waited for up to 30 minutes
+        CreateWaitSeconds     = 1800      # a create is waited for up to 30 minutes (as the installer does)
+        # Azure REFUSES to create a pool with count 0 (400 AgentPoolInvalidCount, "bigger than or equal to 1"); a PATCH of
+        # an existing pool to 0 is accepted. So a pool is CREATED with 1 instance and then set to 0 (read back).
+        CreateCount           = 1
         CostNote              = 'S2 x 2 is billed for every hour it runs'
     }
 }
@@ -350,6 +357,73 @@ function Invoke-PimAcrBuildPoolScope {
     $res
 }
 
+function New-PimAcrBuildPoolIdle {
+    <#
+      CREATE a build pool and leave it at its idle count. Azure refuses a create with count 0 (400 AgentPoolInvalidCount),
+      so the PUT carries max(CreateCount, -Count) instances, waits for Succeeded, and -- when -Count is below that --
+      PATCHes the pool down to -Count (Set-PimAcrBuildPoolCount, read back). Then tier, count and subnet are read back.
+      NEVER throws: @{ ok; stage; pool; body; reason }. stage on a failure:
+        'put'       the PUT (or the read after it) failed            -- no pool, or not known
+        'provision' the pool did not reach Succeeded                 -- the pool is not usable
+        'scale'     the pool is up with CreateCount instance(s) and the set back to -Count failed -- it is BILLED
+        'readback'  the pool reads back other than asked             -- tier / count / subnet differ
+    #>
+    param([Parameter(Mandatory)][string]$PoolPath, [Parameter(Mandatory)][string]$Location, [string]$Tier = '', [int]$Count = -1,
+          [string]$Os = 'Linux', [string]$SubnetId = '', $Tags = $null, [int]$PollSeconds = 10, [int]$WaitSeconds = -1, [scriptblock]$Arm)
+    if (-not $Arm) { $Arm = Get-PimAcrPoolArm }
+    $pol = Get-PimAcrBuildPoolPolicy; $api = $pol.ApiVersion
+    if (-not "$Tier".Trim()) { $Tier = $pol.Tier }
+    if ($Count -lt 0) { $Count = $pol.IdleCount }
+    if ($WaitSeconds -lt 0) { $WaitSeconds = $pol.CreateWaitSeconds }
+    if (-not "$Os".Trim()) { $Os = 'Linux' }
+    $SubnetId = "$SubnetId".Trim()
+    $createCount = [Math]::Max([int]$pol.CreateCount, $Count)
+    $props = [ordered]@{ tier = $Tier; count = $createCount; os = $Os }
+    if ($SubnetId) { $props['virtualNetworkSubnetResourceId'] = $SubnetId }
+    $body = [ordered]@{ location = $Location; properties = $props }
+    if ($null -ne $Tags) { $body['tags'] = $Tags }
+    $made = $null
+    try {
+        try { [void](& $Arm 'PUT' $PoolPath $body $api) }
+        catch {
+            if ("$($_.Exception.Message)" -match '(?i)\b400\b|BadRequest|Invalid') { throw }   # a refusal is not retried
+            [void](& $Arm 'PUT' $PoolPath $body $api)                                           # one more try on a transient fault
+        }
+        $max = [Math]::Max(1, [int]($WaitSeconds / [Math]::Max(1, $PollSeconds)))
+        $made = & $Arm 'GET' $PoolPath $null $api
+        for ($i = 0; $i -lt $max -and "$($made.properties.provisioningState)" -notin 'Succeeded', 'Failed', 'Canceled'; $i++) {
+            if ($PollSeconds -gt 0) { Start-Sleep -Seconds $PollSeconds }
+            $made = & $Arm 'GET' $PoolPath $null $api
+        }
+    } catch {
+        return @{ ok = $false; stage = 'put'; pool = $made; body = $body; reason = "the create was refused or failed ($($_.Exception.Message))" }
+    }
+    if (-not $made) { return @{ ok = $false; stage = 'put'; pool = $null; body = $body; reason = 'the pool does not read back after the create' } }
+    if ("$($made.properties.provisioningState)" -ne 'Succeeded') {
+        return @{ ok = $false; stage = 'provision'; pool = $made; body = $body; reason = "the pool reads back '$($made.properties.provisioningState)', not Succeeded" }
+    }
+    if ($Count -ne $createCount) {
+        $d = Set-PimAcrBuildPoolCount -PoolPath $PoolPath -Count $Count -PollSeconds $PollSeconds -Arm $Arm
+        if (-not $d.ok) { return @{ ok = $false; stage = 'scale'; pool = $made; body = $body; reason = "$($d.reason)" } }
+        $after = $null; try { $after = & $Arm 'GET' $PoolPath $null $api } catch { $after = $null }
+        if ($after) { $made = $after }
+    }
+    $okBack = "$($made.properties.provisioningState)" -eq 'Succeeded' -and "$($made.properties.tier)" -eq $Tier -and
+              (ConvertTo-PimAcrPoolCount $made) -eq $Count -and "$($made.properties.virtualNetworkSubnetResourceId)".Trim() -eq $SubnetId
+    if (-not $okBack) {
+        return @{ ok = $false; stage = 'readback'; pool = $made; body = $body
+                  reason = "it reads back '$($made.properties.provisioningState)', $($made.properties.tier) x $(ConvertTo-PimAcrPoolCount $made) -- not $Tier x $Count in the same subnet" }
+    }
+    return @{ ok = $true; stage = ''; pool = $made; body = $body; reason = '' }
+}
+
+function Get-PimAcrBuildPoolScaleUpLine {
+    <# PURE. The line when a pool was made but could not be set back to 0: it is UP, it is billed, the next run sets it to 0. #>
+    param([string]$PoolName, [string]$Reason)
+    $pol = Get-PimAcrBuildPoolPolicy
+    "build pool '$PoolName': made at $($pol.Tier) but it is UP with $($pol.CreateCount) instance(s) -- the set back to $($pol.IdleCount) failed ($Reason); it is billed while it runs, and the next update run sets it to $($pol.IdleCount)"
+}
+
 function Invoke-PimAcrBuildPoolConverge {
     <#
       The updater's (and a re-run install's) check of an EXISTING pool. Returns @{ ok; action; line; state } where state is
@@ -360,19 +434,72 @@ function Invoke-PimAcrBuildPoolConverge {
         S2 with instances, nothing running   -> set back to 0, read back (a pool left up)        action 'scaled-down'
         S2 with instances while a run is on  -> left alone                                       action 'in-use'
         S2 at 0                              -> nothing                                          action 'ok'
-        no pool                              -> nothing (the install makes it)                  action 'missing'
+        no pool, no recreate intent          -> nothing (the install makes it)                  action 'missing'
+        no pool, a recreate intent for it    -> made from the intent (count 1, then 0), read back,
+                                                the intent cleared                              action 'recreated'
+        a pool that is Deleting              -> nothing written (not scaled, not deleted again)  action 'deleting'
+      BUILDPOOL-11G-RECREATE (2026-11-05): a pool this converge DELETES is never left un-made. Before the DELETE the
+      recreate intent (the pool path, the PUT body at S2 x 0 with the same location / os / subnet / tags, the time) is
+      saved through -SaveIntent; a delete still running at the end of the wait keeps it, and the next run -- which finds
+      the pool missing -- makes it from that intent. The seam is three scriptblocks (the updater: pim.Settings
+      'BuildPoolRecreate'): -SaveIntent { param($intent) }, -ReadIntent { <intent or $null> }, -ClearIntent { }.
+      No -SaveIntent = no intent is kept (the behaviour before); a -SaveIntent that fails = NOTHING is deleted.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup,
           [Parameter(Mandatory)][string]$RegistryName, [Parameter(Mandatory)][string]$PoolName,
-          [int]$PollSeconds = 10, [scriptblock]$Arm, [datetime]$NowUtc = [datetime]::UtcNow)
+          [int]$PollSeconds = 10, [scriptblock]$Arm, [datetime]$NowUtc = [datetime]::UtcNow,
+          [scriptblock]$SaveIntent, [scriptblock]$ReadIntent, [scriptblock]$ClearIntent, [int]$DeleteWaitSeconds = -1)
     if (-not $Arm) { $Arm = Get-PimAcrPoolArm }
     $pol = Get-PimAcrBuildPoolPolicy; $api = $pol.ApiVersion
+    if ($DeleteWaitSeconds -lt 0) { $DeleteWaitSeconds = $pol.DeleteWaitSeconds }
     $regPath  = Get-PimAcrRegistryPath -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -RegistryName $RegistryName
     $poolPath = "$regPath/agentPools/$PoolName"
     $pool = $null
     try { $pool = & $Arm 'GET' $poolPath $null $api }
     catch { return @{ ok = $false; action = 'unreadable'; state = $null; line = "build pool '$PoolName': not read ($($_.Exception.Message)) -- nothing changed" } }
-    if (-not $pool) { return @{ ok = $false; action = 'missing'; state = $null; line = "build pool '$PoolName': not found in registry $RegistryName -- a private registry builds only on it; run the install again to make it" } }
+    # the recreate intent for THIS pool, if the store has one (an intent for another pool path is not ours to act on)
+    $intent = $null; $intentWhy = ''
+    if ($ReadIntent) {
+        try {
+            $ri = & $ReadIntent
+            if ($null -ne $ri -and "$($ri.poolPath)".Trim() -and "$($ri.poolPath)".Trim() -eq $poolPath -and $null -ne $ri.body) { $intent = $ri }
+        } catch { $intentWhy = "$($_.Exception.Message)" }
+    }
+    if (-not $pool) {
+        if (-not $intent) {
+            return @{ ok = $false; action = 'missing'; state = $null
+                      line = "build pool '$PoolName': not found in registry $RegistryName -- a private registry builds only on it; run the install again to make it$(if ($intentWhy) { " (the recreate record could not be read: $intentWhy)" })" }
+        }
+        $ib = $intent.body; $ip = $ib.properties
+        $mk = New-PimAcrBuildPoolIdle -PoolPath $poolPath -Location "$($ib.location)" -Tier $pol.Tier -Count $pol.IdleCount -Os "$($ip.os)" `
+                  -SubnetId "$($ip.virtualNetworkSubnetResourceId)" -Tags $ib.tags -PollSeconds $PollSeconds -Arm $Arm
+        $since = "$($intent.savedUtc)"
+        if (-not $mk.ok) {
+            if ($mk.stage -eq 'scale') {
+                # the pool IS there (up at 1): the intent is done; the next run's converge sets it to 0 (scaled-down)
+                $clr = ''; if ($ClearIntent) { try { [void](& $ClearIntent) } catch { $clr = " (the recreate record could not be cleared: $($_.Exception.Message))" } }
+                return @{ ok = $false; action = 'failed'; state = (New-PimAcrBuildPoolState -Pool $mk.pool -Building $false -NowUtc $NowUtc)
+                          line = (Get-PimAcrBuildPoolScaleUpLine -PoolName $PoolName -Reason $mk.reason) + $clr }
+            }
+            return @{ ok = $false; action = 'failed'; state = $null
+                      line = "build pool '$PoolName': deleted by an earlier update run (recorded $since) and NOT made again yet -- $($mk.reason); the record is kept and the next update run tries again" }
+        }
+        $clr = ''; if ($ClearIntent) { try { [void](& $ClearIntent) } catch { $clr = " (the recreate record could not be cleared: $($_.Exception.Message); the next run clears it)" } }
+        return @{ ok = $true; action = 'recreated'; state = (New-PimAcrBuildPoolState -Pool $mk.pool -Building $false -NowUtc $NowUtc)
+                  line = "build pool '$PoolName': made again at $($pol.Tier) from the record an earlier update run kept when it deleted the pool ($since), $($pol.IdleCount) instances between builds, same subnet -- read back$clr" }
+    }
+    $pstate = "$($pool.properties.provisioningState)"
+    if ($pstate -eq 'Deleting') {
+        # never scaled, never deleted again: the delete is Azure's to finish; the intent (if any) makes it on a later run
+        return @{ ok = $false; action = 'deleting'; state = $null
+                  line = "build pool '$PoolName': still being deleted by Azure -- nothing changed; $(if ($intent) { 'the next update run makes it again at ' + $pol.Tier + ' (the record is kept)' } else { 'no recreate record is kept for it: run the install again once it is gone' })" }
+    }
+    if ($intent -and $ClearIntent -and $pstate -eq 'Succeeded' -and "$($pool.properties.tier)" -eq $pol.Tier -and
+        "$($pool.properties.virtualNetworkSubnetResourceId)".Trim() -eq "$($intent.body.properties.virtualNetworkSubnetResourceId)".Trim()) {
+        # the pool is there again as the record asks (made by hand, or by the install): the record has nothing left to do.
+        # One that differs keeps the record (it is only ever used when the pool is missing).
+        try { [void](& $ClearIntent) } catch { }
+    }
     $runs = Get-PimAcrActiveRuns -RegistryPath $regPath -Arm $Arm
     $building = (-not $runs.ok) -or (@($runs.active).Count -gt 0)
     $busyWhy = $(if (-not $runs.ok) { "the registry's runs could not be read ($($runs.reason))" } else { "$(@($runs.active).Count) build run(s) queued or running" })
@@ -384,37 +511,50 @@ function Invoke-PimAcrBuildPoolConverge {
         }
         $subnet = "$($pool.properties.virtualNetworkSubnetResourceId)".Trim()
         $os = "$($pool.properties.os)".Trim(); if (-not $os) { $os = 'Linux' }
+        # the pool as it must be made again (S2 x 0, same location / os / subnet / tags) -- saved BEFORE the delete
         $props = [ordered]@{ tier = $pol.Tier; count = $pol.IdleCount; os = $os }
         if ($subnet) { $props['virtualNetworkSubnetResourceId'] = $subnet }
         $body = [ordered]@{ location = "$($pool.location)"; properties = $props }
         if ($null -ne $pool.tags) { $body['tags'] = $pool.tags }
-        $gone = $false; $made = $null
+        $kept = $false
+        if ($SaveIntent) {
+            $rec = [ordered]@{ poolPath = $poolPath; body = $body; fromTier = $tier; savedUtc = $NowUtc.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") }
+            try { [void](& $SaveIntent $rec); $kept = $true }
+            catch {
+                return @{ ok = $false; action = 'failed'; state = (New-PimAcrBuildPoolState -Pool $pool -Building $false -NowUtc $NowUtc)
+                          line = "build pool '$PoolName' is $tier, not $($pol.Tier): NOT deleted -- the record to make it again could not be saved ($($_.Exception.Message)); the next update run tries again" }
+            }
+        }
+        $gone = $false
         try {
             [void](& $Arm 'DELETE' $poolPath $null $api)
-            $max = [Math]::Max(1, [int]($pol.ScaleWaitSeconds / [Math]::Max(1, $PollSeconds)))
+            $max = [Math]::Max(1, [int]($DeleteWaitSeconds / [Math]::Max(1, $PollSeconds)))
             for ($i = 0; $i -lt $max; $i++) {
                 if (-not (& $Arm 'GET' $poolPath $null $api)) { $gone = $true; break }
                 if ($PollSeconds -gt 0) { Start-Sleep -Seconds $PollSeconds }
             }
-            if (-not $gone) { return @{ ok = $false; action = 'failed'; state = $null; line = "build pool '$PoolName': the $tier pool was asked to go and is still there -- the next update run tries again" } }
-            try { [void](& $Arm 'PUT' $poolPath $body $api) } catch { [void](& $Arm 'PUT' $poolPath $body $api) }   # one more try: the pool is gone now
-            $made = & $Arm 'GET' $poolPath $null $api
-            for ($i = 0; $i -lt $max -and "$($made.properties.provisioningState)" -notin 'Succeeded', 'Failed', 'Canceled'; $i++) {
-                if ($PollSeconds -gt 0) { Start-Sleep -Seconds $PollSeconds }
-                $made = & $Arm 'GET' $poolPath $null $api
-            }
         } catch {
             return @{ ok = $false; action = 'failed'; state = $null
-                      line = "build pool '$PoolName': moving it from $tier to $($pol.Tier) failed ($($_.Exception.Message))$(if ($gone) { ' -- the old pool is removed; run the install again to make it' })" }
+                      line = "build pool '$PoolName': moving it from $tier to $($pol.Tier) failed while deleting it ($($_.Exception.Message))$(if ($kept) { ' -- the record is kept: the next update run makes it again if it is gone' } else { ' -- run the install again if it is gone' })" }
         }
-        $okBack = $made -and "$($made.properties.provisioningState)" -eq 'Succeeded' -and "$($made.properties.tier)" -eq $pol.Tier -and
-                  (ConvertTo-PimAcrPoolCount $made) -eq $pol.IdleCount -and "$($made.properties.virtualNetworkSubnetResourceId)".Trim() -eq $subnet
-        if (-not $okBack) {
-            return @{ ok = $false; action = 'failed'; state = (New-PimAcrBuildPoolState -Pool $made -Building $false -NowUtc $NowUtc)
-                      line = "build pool '$PoolName': made again but reads back '$($made.properties.provisioningState)', $($made.properties.tier) x $(ConvertTo-PimAcrPoolCount $made) -- not $($pol.Tier) x $($pol.IdleCount) in the same subnet" }
+        if (-not $gone) {
+            return @{ ok = $false; action = 'failed'; state = $null
+                      line = "build pool '$PoolName': the $tier pool is still being deleted after $([int]($DeleteWaitSeconds / 60)) minutes -- $(if ($kept) { "the record is kept: the next update run makes it again at $($pol.Tier)" } else { 'the next update run tries again' })" }
         }
-        return @{ ok = $true; action = 'recreated'; state = (New-PimAcrBuildPoolState -Pool $made -Building $false -NowUtc $NowUtc)
-                  line = "build pool '$PoolName': made again at $($pol.Tier) (was $tier), 0 instances between builds, same subnet -- read back" }
+        $mk = New-PimAcrBuildPoolIdle -PoolPath $poolPath -Location "$($pool.location)" -Tier $pol.Tier -Count $pol.IdleCount -Os $os `
+                  -SubnetId $subnet -Tags $pool.tags -PollSeconds $PollSeconds -Arm $Arm
+        if (-not $mk.ok) {
+            if ($mk.stage -eq 'scale') {
+                if ($kept -and $ClearIntent) { try { [void](& $ClearIntent) } catch { } }
+                return @{ ok = $false; action = 'failed'; state = (New-PimAcrBuildPoolState -Pool $mk.pool -Building $false -NowUtc $NowUtc)
+                          line = (Get-PimAcrBuildPoolScaleUpLine -PoolName $PoolName -Reason $mk.reason) }
+            }
+            return @{ ok = $false; action = 'failed'; state = $(if ($mk.pool) { New-PimAcrBuildPoolState -Pool $mk.pool -Building $false -NowUtc $NowUtc } else { $null })
+                      line = "build pool '$PoolName': the $tier pool is removed but the $($pol.Tier) pool was not made: $($mk.reason)$(if ($kept) { ' -- the record is kept: the next update run makes it again' } else { ' -- run the install again to make it' })" }
+        }
+        $clr = ''; if ($kept -and $ClearIntent) { try { [void](& $ClearIntent) } catch { $clr = " (the recreate record could not be cleared: $($_.Exception.Message); the next run clears it)" } }
+        return @{ ok = $true; action = 'recreated'; state = (New-PimAcrBuildPoolState -Pool $mk.pool -Building $false -NowUtc $NowUtc)
+                  line = "build pool '$PoolName': made again at $($pol.Tier) (was $tier), 0 instances between builds, same subnet -- read back$clr" }
     }
     if ($null -ne $count -and $count -ne $pol.IdleCount) {
         if ($building) {
