@@ -51,7 +51,7 @@
             [
               "ca-pim-update (updater)",
               "System-assigned managed identity of the update job",
-              "Builds the new version in your registry and rolls the apps; applies schema",
+              "Builds the new version in your registry and rolls the apps; applies schema; keeps the database job identity in the SQL admin group (PIM for Groups)",
               "None (managed identity)",
               "Lives as long as the job"
             ],
@@ -161,7 +161,7 @@
       "id": "permissions",
       "number": 3,
       "title": "Permissions with justification",
-      "body": "Every permission the product grants or requires, per identity, read from the install and grant code of this version. **Optional** means the grant is made only when you choose that feature or switch. The engine needs broad write rights because managing privileged access is its job; chapter 8 explains the controls around that.\n\n> The engine identity's Graph permissions are tier-0 equivalent: RoleManagement.ReadWrite.Directory can assign any directory role and AppRoleAssignment.ReadWrite.All can grant any application permission. The engine identity is monitored as a tier-0 asset, and the most privileged directory roles (Global Administrator, Privileged Role Administrator) are refused as engine targets.\n\n### Least-privilege choices made in code\n- The Manager's Graph rights are **read-only**; writes are queued and applied by the engine.\n- **Mail.Send is never granted tenant-wide** to the engine or Manager; mail uses Exchange RBAC for Applications scoped to ONE mailbox, and the mail setup removes a tenant-wide Mail.Send if it finds one.\n- Exchange Administrator for mail setup is **activated time-bound through PIM** (default 4 hours), not assigned permanently.\n- User Access Administrator at the tenant root is **opt-in**; the default is Reader.\n- Workload identities may only be given Reader, User Access Administrator or Role Based Access Control Administrator by the reachability planner; Owner and Contributor are refused there.\n- The baseline-publish job has no fixed SQL role: SELECT on named objects only, and db_owner / db_datawriter / db_ddladmin / db_datareader are revoked.\n- Storage keys are disabled where the product creates storage; access is Azure RBAC.\n- **One identity per job in SQL:** every component that uses the database has its own contained database user, mapped from its own managed identity. The image-pull identity has no database access, and the web app holds no db_ddladmin (from 2.4.631): it cannot change the schema.\n- **SQL admin group = Invardia Support app:** no runtime identity of the web app or the engine is a member.\n- **One custom database role per component** (pim_web, pim_engine, pim_updater, pim_asbuilt, pim_publish, pim_downlink, pim_hybrid), object- or schema-level, never db_owner. Grants change after a release ONLY through one **certificate-signed procedure** (pim.usp_ApplyAccess) under fixed rules: a pim_ role, SELECT / INSERT / UPDATE / DELETE / EXECUTE, PIMs own schemas, never itself, never a fixed role. Its certificate lives in the database, expires 2099-12-31 and has **no private key** (removed after signing); altering the procedure drops the signature. The updater may only EXECUTE it and is refused when it grants directly; the engine cannot run it (proven on a live installation). Every update applies schema and grants with the updaters own database user alone, so the SQL admin group may stay empty for years.\n- **The web app cannot change the engine:** start-only rights on the named engine job (Jobs Operator), no registry push, no SQL admin.\n\n### Least privilege by component\n- Access reviews use AccessReview.ReadWrite.All, the narrowest Graph permission that creates and completes reviews.\n- Every component holds only its own custom database role (pim_web, pim_engine, pim_updater, pim_asbuilt, pim_publish, pim_downlink, pim_hybrid); per-component views separate the generic settings and rows tables. Rights change only through the certificate-signed access procedure.\n- The updater holds Contributor on its own resource group only, and is a contained database user with schema rights only; it is never in the SQL admin group.\n- The optional deploy app registration holds its rights only for the length of an install.\n- The standalone Grant-PimEnginePermissions script grants only the roles and scopes on the product's allow-list.",
+      "body": "Every permission the product grants or requires, per identity, read from the install and grant code of this version. **Optional** means the grant is made only when you choose that feature or switch. The engine needs broad write rights because managing privileged access is its job; chapter 8 explains the controls around that.\n\n> The engine identity's Graph permissions are tier-0 equivalent: RoleManagement.ReadWrite.Directory can assign any directory role and AppRoleAssignment.ReadWrite.All can grant any application permission. The engine identity is monitored as a tier-0 asset, and the most privileged directory roles (Global Administrator, Privileged Role Administrator) are refused as engine targets.\n\n### Least-privilege choices made in code\n- The Manager's Graph rights are **read-only**; writes are queued and applied by the engine.\n- **Mail.Send is never granted tenant-wide** to the engine or Manager; mail uses Exchange RBAC for Applications scoped to ONE mailbox, and the mail setup removes a tenant-wide Mail.Send if it finds one.\n- Exchange Administrator for mail setup is **activated time-bound through PIM** (default 4 hours), not assigned permanently.\n- User Access Administrator at the tenant root is **opt-in**; the default is Reader.\n- Workload identities may only be given Reader, User Access Administrator or Role Based Access Control Administrator by the reachability planner; Owner and Contributor are refused there.\n- The baseline-publish job has no fixed SQL role: SELECT on named objects only, and db_owner / db_datawriter / db_ddladmin / db_datareader are revoked.\n- Storage keys are disabled where the product creates storage; access is Azure RBAC.\n- **One identity per job in SQL:** every component that uses the database has its own contained database user, mapped from its own managed identity. The image-pull identity has no database access, and the web app holds no db_ddladmin (from 2.4.631): it cannot change the schema.\n- **SQL admin group = Invardia Support app:** no runtime identity of the web app or the engine is a member.\n- **One custom database role per component** (pim_web, pim_engine, pim_updater, pim_asbuilt, pim_publish, pim_downlink, pim_hybrid), object- or schema-level, never db_owner. Grants change after a release ONLY through one **certificate-signed procedure** (pim.usp_ApplyAccess) under fixed rules: a pim_ role, SELECT / INSERT / UPDATE / DELETE / EXECUTE, PIMs own schemas, never itself, never a fixed role. Its certificate lives in the database, expires 2099-12-31 and has **no private key** (removed after signing); altering the procedure drops the signature. The updater may only EXECUTE it and is refused when it grants directly; the engine cannot run it (proven on a live installation). Every update applies schema and grants with the updaters own database user alone, so the SQL admin group may stay empty for years.\n- **The web app cannot change the engine:** start-only rights on the named engine job (Jobs Operator), no registry push, no SQL admin.\n\n### Least privilege by component\n- Access reviews use AccessReview.ReadWrite.All, the narrowest Graph permission that creates and completes reviews.\n- Every component holds only its own custom database role (pim_web, pim_engine, pim_updater, pim_asbuilt, pim_publish, pim_downlink, pim_hybrid); per-component views separate the generic settings and rows tables. Rights change only through the certificate-signed access procedure.\n- The updater holds Contributor on its own resource group only, and is a contained database user with schema rights only; it is never in the SQL admin group. In Microsoft Graph it holds three PIM-for-Groups permissions, GroupMember.Read.All and Application.Read.All (both read only), and nothing else (owner decision 2026-11-05): it makes the database job identity an active member of the SQL admin group -- a role-assignable group, through PIM for Groups, permanent where the group policy allows -- reads that membership back before the database job or the support job starts, and renews a time-limited membership before it ends. It holds no directory role; the permissions are tenant-wide in Microsoft Graph, and the updater's code uses them on the SQL admin group only.\n- The optional deploy app registration holds its rights only for the length of an install.\n- The standalone Grant-PimEnginePermissions script grants only the roles and scopes on the product's allow-list.",
       "tables": [
         {
           "id": "permissions",
@@ -606,6 +606,48 @@
               "Your container registry",
               "Pull built images",
               "Updates",
+              "No"
+            ],            [
+              "Updater (ca-pim-update)",
+              "Graph application",
+              "PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup",
+              "Tenant (used on the SQL admin group only)",
+              "Make the database job identity an active member of the SQL admin group (PIM for Groups, permanent where the group policy allows) and renew a time-limited membership before it ends (owner decision 2026-11-05)",
+              "Database job membership",
+              "No"
+            ],            [
+              "Updater (ca-pim-update)",
+              "Graph application",
+              "PrivilegedAssignmentSchedule.Read.AzureADGroup",
+              "Tenant (used on the SQL admin group only)",
+              "Read the membership back before the database job or the support job starts",
+              "Database job membership",
+              "No"
+            ],            [
+              "Updater (ca-pim-update)",
+              "Graph application",
+              "RoleManagementPolicy.Read.AzureADGroup",
+              "Tenant (used on the SQL admin group only)",
+              "Read the SQL admin group's PIM policy maximum, so a time-limited membership asks for exactly that length",
+              "Database job membership",
+              "No"
+            ],
+            [
+              "Updater (ca-pim-update)",
+              "Graph application",
+              "GroupMember.Read.All",
+              "Tenant (used on the SQL admin group only)",
+              "Read the SQL admin group and the database job identity's group memberships (read only), so the membership is read back and the setup step reports it",
+              "Database job membership",
+              "No"
+            ],
+            [
+              "Updater (ca-pim-update)",
+              "Graph application",
+              "Application.Read.All",
+              "Tenant (used on the database job identity only)",
+              "Read the database job identity's own group memberships (read only; reading a service principal's memberships needs it besides GroupMember.Read.All), so the membership is read back",
+              "Database job membership",
               "No"
             ],
             [

@@ -617,6 +617,26 @@ if (-not $SkipRoleAssignment -and -not $WhatIfPreference) {
     }
 }
 
+# ---- 2-bis. DBINIT-MEMBERSHIP (framework 4.5 point 5; owner 2026-11-05 "Grant updater the right") -- the updater's ----
+# Graph application permissions, so its membership step puts the database job's identity into the (role-assignable, SEC-32)
+# SQL admin group and renews it by itself. THE ONE LIST: Get-PimUpdaterGraphAppRoles (engine/_shared/PIM-UpdaterGraphRoles.ps1),
+# granted through the same idempotent, tenant-pinned grant as the engine set (Grant-PimMiGraph -RoleSet Updater). A refusal
+# is said with what is missing -- the updater then reports it on every run (it never grants itself).
+if (-not $SkipRoleAssignment -and -not $WhatIfPreference) {
+    $updGraphOid = Get-PimUpdJobPrincipal -Name $JobName
+    if (-not $updGraphOid) { Warn 'could not read the job managed identity -- its Graph permissions (Get-PimUpdaterGraphAppRoles) are not granted; the updater reports them as missing' }
+    else {
+        try {
+            . (Join-Path $here '_PimSetupShared.ps1')                  # Grant-PimMiGraph / Get-PimGraphAppRoleMap -RoleSet Updater
+            Step "grant the job identity its Graph permissions ($(@((Get-PimUpdaterGraphAppRoles).Keys) -join ', '))"
+            Grant-PimMiGraph -MiObjectId $updGraphOid -SubscriptionId $SubscriptionId -ExpectedTenantId $TenantId -RoleSet Updater
+            Note 'updater Graph permissions granted + read back'
+        } catch {
+            Warn "the updater's Graph permissions were NOT granted ($($_.Exception.Message)) -- the database job identity's SQL admin group membership is then not kept by the updater (it names what is missing on every run); a Privileged Role Administrator grants: $(try { @((Get-PimUpdaterGraphAppRoles).Keys) -join ', ' } catch { 'the list in engine/_shared/PIM-UpdaterGraphRoles.ps1' })"
+        }
+    }
+}
+
 # ---- 2c. the updater's DATABASE USER -- the tick's grant path, not a new one ---------------------
 # 🔴 Copying PIM_SqlServer is half of it: the schema step connects as THIS job's managed identity, and an
 # identity with no contained user gets "Login failed for user <token-identified principal>" -- which the

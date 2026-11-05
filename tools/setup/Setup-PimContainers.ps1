@@ -352,6 +352,7 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\PIM4EntraPS
 . "$solRoot\engine\_shared\PIM-SqlStore.ps1"
 . "$solRoot\engine\_shared\PIM-TenantSizing.ps1"   # 100.31 the tick's size for this tenant (pure; Get-PimContainerJobResources)
 . "$solRoot\engine\_shared\PIM-DbInitJob.ps1"      # OPEN-06 the database job's ONE definition (Get-PimDbInitJobSpec), shared with the updater
+. "$solRoot\engine\_shared\PIM-DbInitMembership.ps1" # framework 4.5 point 5: the job identity in the SQL admin group + read back before the first start (same as the updater)
 # §84 P1: the cron check is Test-PimJobCron (_PimSetupShared.ps1) -- this used to dot-source PIM-DownlinkJob.ps1, an MSP
 # (Pro) file, for one 5-field check, so a Community copy without the MSP code could not run setup.
 
@@ -965,6 +966,19 @@ function Invoke-PimDbInitJob {
         throw "the bootstrap job '$DbInitJobName' was NOT created -- see the failure above. Without it no database user can be created, because this host has no route to a private SQL server."
     }
 
+    # DBINIT-MEMBERSHIP (framework 4.5 point 5; owner 2026-11-05 "both setup and upd"): the SAME membership convergence the
+    # updater runs (engine/_shared/PIM-DbInitMembership.ps1) -- the job's identity into the SQL admin group by (a) a direct add,
+    # else (b) an ACTIVE PIM-for-Groups assignment, permanent first -- and READ BACK before this first start. Not read back =
+    # NOT started (the reason names both refusals and what the identity running setup is missing). The group is only read,
+    # never changed (SEC-32).
+    $dbmRg = "/subscriptions/$SubscriptionId/resourceGroups/$(if ($SqlResourceGroup) { $SqlResourceGroup } else { $ResourceGroup })"
+    $dbmArm = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
+    $dbmGraph = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimGraph -Method $m -Path $p -Body $b } else { Invoke-PimGraph -Method $m -Path $p } }
+    $dbmPre = Invoke-PimDbInitMembershipBeforeStart -Arm $dbmArm -Graph $dbmGraph -ResourceGroupId $dbmRg -SqlServer $SqlServerFqdn -IdentityResourceId "$SqlAdminIdentityResourceId".Trim()
+    foreach ($l in @(if ($dbmPre.membership) { @($dbmPre.membership.lines) })) { Note $l.text }
+    if (-not $dbmPre.start) { throw "'$DbInitJobName' NOT started: $($dbmPre.reason)" }
+    Note "database job identity: $($dbmPre.reason)"
+
     $exec = "$(Start-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName)".Trim()
     if (-not $exec) { throw "could not start '$DbInitJobName'." }
     Note "execution $exec -- waiting"
@@ -976,6 +990,11 @@ function Invoke-PimDbInitJob {
     }
     if ($status -ne 'Succeeded') {
         $logTail = @(Get-PimArmAcaJobLogs -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName -Execution $exec -Tail 100 -EnvironmentName $EnvName)
+        # framework 4.5 G3a: the membership was added by THIS run -- the identity's token can keep the old group claims up to
+        # 24 h, so a refused sign-in now is 'waiting for the token to refresh', not a failed install (a membership that
+        # existed before is never 'waiting').
+        $dbmTw = Get-PimDbInitTokenWait -AddedUtc $(if ($dbmPre.membership) { "$($dbmPre.membership.addedUtc)" } else { '' }) -Problems @($logTail + @("$status"))
+        if ($dbmTw.wait) { throw "WAITING FOR THE TOKEN TO REFRESH -- '$exec' could not sign in yet: $($dbmTw.reason). Nothing failed; run setup again after $($dbmTw.untilUtc) (or earlier: the sign-in usually works within minutes)." }
         throw ("the database bootstrap '$exec' ended '$status'. " +
                $(if ($logTail.Count) { "Its log (from the environment's Log Analytics workspace):`n  " + ($logTail -join "`n  ") + "`n" }
                  else { "Its log is in the environment's Log Analytics workspace (ContainerAppConsoleLogs_CL, ContainerGroupName_s startswith '$exec'; it arrives a few minutes after the run).`n" }) +

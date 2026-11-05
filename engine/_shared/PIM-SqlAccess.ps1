@@ -810,10 +810,20 @@ function New-PimSqlAccessVerdict {
                               known; absent / not determined = $null, never a guess
         updaterInAdminGroup   the converge ran as dbo / db_owner (the updater is still in the SQL admin group)
         checkedUtc            when
+        run2Source            SQLACCESS-STORED (2026-11-05): 'live' = run2 was read in THIS run; 'stored' = the live read was
+                              not possible (an updater that left the SQL admin group, no readable facts procedure) and run2
+                              is the STORED cut-over record: -Previous (the last UpdateState.sqlAccess) said run 2 done;
+                              '' = not determined (run2 $null)
+        run2CheckedUtc        when run 2 was last READ live (a stored record keeps the time of the read it carries)
+        run2Reason            why the live read was not possible (-Run2Reason), '' when it was read
       -Converge: what Invoke-PimSqlAccessConverge returned; -ErrorText: what it threw instead. Anything else = $null (no verdict).
+      -Previous: the stored verdict (UpdateState.sqlAccess of the last run). ONLY a stored run2 = $true is carried, ONLY when
+      the model is still least-privilege and this run could not read run 2 -- a live answer ($true / $false) always wins, a
+      stored $false or $null is never carried (not done / not known stays unknown, never a guess).
     #>
     [CmdletBinding()] param([AllowNull()][object]$Converge = $null, [AllowEmptyString()][string]$ErrorText = '', [AllowNull()][object]$BroadUsers = $null,
-                            [AllowNull()][object]$FactsRun2 = $null, [datetime]$NowUtc = [datetime]::UtcNow)
+                            [AllowNull()][object]$FactsRun2 = $null, [AllowNull()][object]$Previous = $null, [AllowEmptyString()][string]$Run2Reason = '',
+                            [datetime]$NowUtc = [datetime]::UtcNow)
     $model = $null; $admin = $null
     if ($null -ne $Converge -and $Converge.PSObject.Properties['applied']) {
         $model = if ([bool]$Converge.applied) { 'least-privilege' } else { 'broad' }
@@ -828,7 +838,22 @@ function New-PimSqlAccessVerdict {
     $run2 = $null; $bn = 0
     if ($null -ne $BroadUsers -and [int]::TryParse("$BroadUsers", [ref]$bn)) { $run2 = ($bn -eq 0) }
     elseif ($FactsRun2 -is [bool]) { $run2 = [bool]$FactsRun2 }
-    return [ordered]@{ model = $model; run1 = ($model -eq 'least-privilege'); run2 = $run2; updaterInAdminGroup = $admin; checkedUtc = $NowUtc.ToUniversalTime().ToString('o') }
+    $now = $NowUtc.ToUniversalTime().ToString('o')
+    $src = ''; $r2At = ''; $why = ''
+    if ($null -ne $run2) { $src = 'live'; $r2At = $now }
+    elseif ($model -eq 'least-privilege' -and $null -ne $Previous) {
+        $pf = { param($k) if ($Previous -is [System.Collections.IDictionary]) { if ($Previous.Contains($k)) { return $Previous[$k] }; return $null }
+                if ($Previous.PSObject.Properties[$k]) { return $Previous.$k }; return $null }
+        $pr2 = & $pf 'run2'
+        $prDone = ($pr2 -is [bool] -and $pr2) -or ("$pr2" -match '^(?i:true|1)$')
+        if ("$(& $pf 'model')" -eq 'least-privilege' -and $prDone) {
+            $run2 = $true; $src = 'stored'
+            $r2At = "$(& $pf 'run2CheckedUtc')".Trim(); if (-not $r2At) { $r2At = "$(& $pf 'checkedUtc')".Trim() }
+        }
+    }
+    if ($src -ne 'live') { $why = "$Run2Reason".Trim(); if (-not $why) { $why = 'run 2 could not be read in this run' } }
+    return [ordered]@{ model = $model; run1 = ($model -eq 'least-privilege'); run2 = $run2; updaterInAdminGroup = $admin; checkedUtc = $now
+                       run2Source = $src; run2CheckedUtc = $r2At; run2Reason = $why }
 }
 
 function Test-PimSqlAccessInstalledState {
@@ -916,6 +941,7 @@ function Get-PimSqlAccessState {
 
 $script:PimSqlAccessBroadRoles = @('db_datareader', 'db_datawriter', 'db_ddladmin')
 $script:PimSqlAccessRun2MinHours = 12
+$script:PimSqlAccessFactsAskHours = 24
 
 function Get-PimSqlAccessSignerUtc {
     <# PURE. The UTC time run 1 signed the procedure, from the signer's name (pim_access_signer_yyyyMMddHHmmss); $null when unreadable. #>
@@ -959,14 +985,33 @@ function Get-PimSqlAccessCutoverStep {
         -HasProc           the signed access procedure exists (run 1 done)
         -BroadUsers        how many runtime users (web / engine) still hold db_datareader / db_datawriter
         -SignerUtc         when run 1 signed the procedure; -RunsGreen: Test-PimSqlAccessRunsGreenSince since then
-      Returns { step = 'run1' | 'run2' | 'none'; reason }. run 2 never in the same update as run 1: at least
-      $script:PimSqlAccessRun2MinHours after the signing, and only on green runs since.
+        SQLACCESS-STORED (2026-11-05) -- the access FACTS procedure on a private install already past the cut-over:
+        -FactsPresent      Read-PimAccessFacts .present as the updater ($true / $false = not installed / $null = not read)
+        -FactsVisible      it answered SIGNED (facts.visible); an unsigned one is re-signed by the same admin run
+        -FactsAskedUtc     when the updater last asked the admin job for it (PIM_DBINIT_SQL_ACCESS factsAskedUtc), or $null
+      Returns { step = 'run1' | 'run2' | 'facts' | 'none'; reason }. run 2 never in the same update as run 1: at least
+      $script:PimSqlAccessRun2MinHours after the signing, and only on green runs since. 'facts': the updater has LEFT the SQL
+      admin group, run 1 is done, and the read-only facts procedure is NOT installed (or unsigned) -- installs cut over before
+      it existed lack it, so run 2 could no longer be read once the updater left the admin group (setupSteps
+      sql-least-privilege 'unknown'). The admin job's run 1 again (Invoke-PimSqlAccessInstall: ADDITIVE, idempotent, installs
+      the facts procedure; run2 false = nothing is dropped); at most once a day ($script:PimSqlAccessFactsAskHours).
     #>
     [CmdletBinding()]
     param([bool]$PrivateSql, [bool]$AdminJobOk, [bool]$UpdaterIsAdmin, [bool]$HasProc, [AllowNull()][object]$BroadUsers,
-          [AllowNull()][object]$SignerUtc, [AllowNull()][object]$RunsGreen, [datetime]$NowUtc = [datetime]::UtcNow)
+          [AllowNull()][object]$SignerUtc, [AllowNull()][object]$RunsGreen, [AllowNull()][object]$FactsPresent = $null,
+          [bool]$FactsVisible = $false, [AllowNull()][object]$FactsAskedUtc = $null, [datetime]$NowUtc = [datetime]::UtcNow)
     $no = { param($why) [pscustomobject]@{ step = 'none'; reason = $why } }
     if (-not $PrivateSql) { return (& $no 'public SQL: an existing install moves by the Support-app cut-over (framework 12.23 P8)') }
+    if (-not $UpdaterIsAdmin -and $HasProc -and ($FactsPresent -eq $false -or ($FactsPresent -eq $true -and -not $FactsVisible))) {
+        $what = $(if ($FactsPresent -eq $false) { 'not installed' } else { 'not signed' })
+        if (-not $AdminJobOk) { return (& $no "the access facts procedure is $what, but the in-network admin job is missing or not on this release yet") }
+        if ($null -ne $FactsAskedUtc) {
+            $askH = [int]$script:PimSqlAccessFactsAskHours; if ($askH -lt 1) { $askH = 24 }   # literal floor: a $script: default can read $null in a child scope
+            $ago = ($NowUtc.ToUniversalTime() - ([datetime]$FactsAskedUtc).ToUniversalTime()).TotalHours
+            if ($ago -ge 0 -and $ago -lt $askH) { return (& $no ("the access facts procedure is $what; the admin job was asked {0:N1} h ago (at most once in {1} h)" -f $ago, $askH)) }
+        }
+        return [pscustomobject]@{ step = 'facts'; reason = "private SQL past the cut-over, the access facts procedure is $what (run 2 cannot be read without it): the admin run (run 1 again -- additive, nothing dropped) installs it through the in-network admin job" }
+    }
     if (-not $UpdaterIsAdmin) { return (& $no 'the updater is not in the SQL admin group -- nothing to decide (the install is past the cut-over, or it cannot see the model)') }
     $bn = 0
     $broadKnown = ($null -ne $BroadUsers -and [int]::TryParse("$BroadUsers", [ref]$bn))

@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.48 -- 2026-11-05
+
+- Right after new permissions are granted, the database job and the support access no longer show as missing or stay blocked while the sign-in token refreshes: a membership that cannot be read yet is shown as not yet known, and a membership proven before keeps the support access working. The database least-privilege check keeps its result after the updater leaves the SQL admin group.
+
+## 3.0.47 -- 2026-11-05
+
+- Setup and every update now add PIM's database job identity to the SQL admin group themselves (through an active PIM-for-Groups assignment, permanent where the group's policy allows it), read the membership back before the database job starts, and renew a time-limited assignment before it ends. Right after a new membership, a refused database sign-in is shown as waiting for the sign-in token to refresh, not as a failure.
+
 ## 3.0.46 -- 2026-11-05
 
 - Updates are checked every 15 minutes on every ring by default, so an approved version reaches an installation within minutes instead of at the next nightly window. The database's statistics are kept fresh: asynchronous statistics updates are switched on and the tables PIM changes in bulk get a sampled statistics refresh, so pages stay fast after large writes. The identity move starts the database job without overriding its definition.

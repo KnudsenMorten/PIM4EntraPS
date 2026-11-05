@@ -94,8 +94,20 @@ function Invoke-PimSqlAccessCutoverStep {
             $jobOk = ($jt -and $st -and $jt -eq $st)
             if (-not $jobOk) { [void]$lines.Add("admin job $AdminJob runs '$jt', this updater '$st' -- it must be on this release first") }
         }
+        # ---- SQLACCESS-STORED (2026-11-05): past the cut-over, is the read-only facts procedure there for this updater? ------
+        $fPresent = $null; $fVisible = $false; $fAsked = $null
+        if (-not $isAdmin -and $hasProc -and $private -and (Get-Command Read-PimAccessFacts -ErrorAction SilentlyContinue)) {
+            $fr = Read-PimAccessFacts -Scalar { param($q) $r = @(& $Query $ConnectionString $q)[0]; if ($null -eq $r) { $null } elseif ($r.PSObject.Properties['facts']) { $r.facts } else { @($r.PSObject.Properties)[0].Value } } `
+                      -RuntimeUsers (@($nm['pim_web']) + @($nm['pim_engine']))
+            $fPresent = $fr.present; $fVisible = [bool]($fr.facts -and $fr.facts.visible)
+            if ($fPresent -ne $true -or -not $fVisible) { [void]$lines.Add("access facts procedure: $(if ($fr.reason) { $fr.reason } else { 'not read' })") }
+            try {
+                $ev = @(@(@($job.properties.template.containers)[0].env) | Where-Object { "$($_.name)" -eq 'PIM_DBINIT_SQL_ACCESS' })[0]
+                if ($ev -and "$($ev.value)".Trim()) { $ej = "$($ev.value)" | ConvertFrom-Json; if ($ej.PSObject.Properties['factsAskedUtc'] -and "$($ej.factsAskedUtc)".Trim()) { $fAsked = [datetime]::Parse("$($ej.factsAskedUtc)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) } }
+            } catch { $fAsked = $null }
+        }
         $d = Get-PimSqlAccessCutoverStep -PrivateSql $private -AdminJobOk $jobOk -UpdaterIsAdmin ([bool]$isAdmin) -HasProc $hasProc -BroadUsers $broad `
-                 -SignerUtc $signerUtc -RunsGreen $green -NowUtc $NowUtc
+                 -SignerUtc $signerUtc -RunsGreen $green -FactsPresent $fPresent -FactsVisible $fVisible -FactsAskedUtc $fAsked -NowUtc $NowUtc
         $out.step = $d.step; $out.reason = $d.reason
         if ($d.step -eq 'none') { return (& $fin) }
         if ("$UpdaterAppId" -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
@@ -103,7 +115,10 @@ function Invoke-PimSqlAccessCutoverStep {
             return (& $fin)
         }
         # ---- set the admin run's setting (one write, read back) and start ONE execution ----------------------------------
-        $want = ConvertTo-Json -Compress -InputObject ([ordered]@{ updaterUserName = $UpdaterJob; updaterAppId = "$UpdaterAppId".ToLowerInvariant(); run2 = ($d.step -eq 'run2') })
+        $wantO = [ordered]@{ updaterUserName = $UpdaterJob; updaterAppId = "$UpdaterAppId".ToLowerInvariant(); run2 = ($d.step -eq 'run2') }
+        # 'facts': run 1 again (additive) -- the time it was asked rides along, so the next update does not ask again within a day
+        if ($d.step -eq 'facts') { $wantO['factsAskedUtc'] = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture) }
+        $want = ConvertTo-Json -Compress -InputObject $wantO
         if (-not $SetEnv) { $SetEnv = { param($s, $r, $j, $v) Set-PimAcaJobEnvValues -SubscriptionId $s -ResourceGroup $r -JobName $j -Values $v } }
         [void](& $SetEnv $SubscriptionId $ResourceGroup $AdminJob ([ordered]@{ PIM_DBINIT_SQL_ACCESS = $want }))
         [void]$lines.Add("$AdminJob PIM_DBINIT_SQL_ACCESS = $want (read back)")

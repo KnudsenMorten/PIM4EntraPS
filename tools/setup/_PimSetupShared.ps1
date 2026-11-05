@@ -486,12 +486,27 @@ $script:PimGraphAppRolesManager = @{
     'PrivilegedAssignmentSchedule.Read.AzureADGroup'  = 'cd4161cb-f098-48f8-a884-1eda9a42434c'
 }
 
+# DBINIT-MEMBERSHIP (owner 2026-11-05 "Grant updater the right"): the updater's Graph set lives in ONE engine file, read by
+# this install path (RoleSet Updater), the ops / Support-app grant and the updater's own check.
+# Guarded (live 2026-11-05: Test-PimEnvironmentReport HUNG under 5.1 -- this file is dot-sourced where $PSScriptRoot is
+# empty, and 'Split-Path -Parent $null' PROMPTS for the mandatory parameter, which waits forever without a console). Only
+# when the function is not loaded yet, only from a known root, and never fatal: without it RoleSet Updater says so.
+if (-not (Get-Command Get-PimUpdaterGraphAppRoles -ErrorAction SilentlyContinue)) {
+    $__pimUgrRoot = "$PSScriptRoot".Trim()
+    if (-not $__pimUgrRoot -and "$($MyInvocation.MyCommand.Path)".Trim()) { $__pimUgrRoot = Split-Path -Parent "$($MyInvocation.MyCommand.Path)" }
+    if ($__pimUgrRoot) {
+        $__pimUgr = Join-Path (Split-Path -Parent (Split-Path -Parent $__pimUgrRoot)) 'engine\_shared\PIM-UpdaterGraphRoles.ps1'
+        if (Test-Path -LiteralPath $__pimUgr) { . $__pimUgr }
+    }
+}
+
 function Get-PimGraphAppRoleMap {
     # -RoleSet Engine (default) = the full set the tick job needs to reconcile the directory.
     #          Manager          = the read-only set (§65.4).
+    #          Updater          = DBINIT-MEMBERSHIP (owner 2026-11-05): Get-PimUpdaterGraphAppRoles, the one list.
     # The default is Engine so every existing caller keeps its current behaviour untouched.
-    [CmdletBinding()] param([ValidateSet('Engine','Manager')][string]$RoleSet = 'Engine')
-    $src = if ($RoleSet -eq 'Manager') { $script:PimGraphAppRolesManager } else { $script:PimGraphAppRoles }
+    [CmdletBinding()] param([ValidateSet('Engine','Manager','Updater')][string]$RoleSet = 'Engine')
+    $src = if ($RoleSet -eq 'Manager') { $script:PimGraphAppRolesManager } elseif ($RoleSet -eq 'Updater') { Get-PimUpdaterGraphAppRoles } else { $script:PimGraphAppRoles }
     $h = @{}; foreach ($k in $src.Keys) { $h[$k] = $src[$k] }
     return $h
 }
@@ -719,7 +734,7 @@ function Grant-PimMiGraph {
         [string]$ExpectedTenantId,
         # §65.4 -- WHICH SET this identity gets. Engine (default) = the full reconciling set; Manager =
         # the read-only set. Defaulting to Engine keeps every pre-§65 caller behaving exactly as before.
-        [ValidateSet('Engine','Manager')][string]$RoleSet = 'Engine'
+        [ValidateSet('Engine','Manager','Updater')][string]$RoleSet = 'Engine'
     )
     # 🔴 BUG-150 -- THIS MINTED A GRAPH TOKEN WITH NO TENANT PINNING, AND THEN GRANTED WITH IT.
     # `az account get-access-token` with no --subscription uses the CLI's DEFAULT context. On a host

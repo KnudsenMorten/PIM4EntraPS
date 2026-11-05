@@ -3004,6 +3004,29 @@ See §17.7 for the full template/approval mechanics.
     (`Get-PimRestToken`) takes the managed-identity branch when `IDENTITY_ENDPOINT` is present
     **and no client id is configured**; a hosted job therefore carries no `PIM_ClientId` (a client
     id with no usable credential would suppress the MI and authenticate as nothing).
+  - **The updater's Graph permissions (owner decision 2026-11-05).** The updater holds exactly five
+    Microsoft Graph application permissions -- `PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup`,
+    `PrivilegedAssignmentSchedule.Read.AzureADGroup`, `RoleManagementPolicy.Read.AzureADGroup`,
+    `GroupMember.Read.All` and `Application.Read.All` (both read only; the member-side read of the database job
+    identity's memberships, `GET /servicePrincipals/{id}/memberOf`, reads a service principal and needs both) -- and no directory role and no group write right. With them, setup and every update keep the database job's own identity an
+    **active member of the SQL admin group**: a direct add first; on the role-assignable group that
+    is refused by design, so an active PIM-for-Groups assignment follows, permanent where the group's
+    policy allows, otherwise for the policy's maximum (said, with the end date) and renewed from 30
+    days before it ends. The membership is **read back before** the database job or the support job
+    starts; without the read-back the job is not started. The list lives in one place
+    (`Get-PimUpdaterGraphAppRoles`): setup grants it, and the updater checks its own token on every
+    run and reports a missing permission -- it never grants itself.
+    **When the membership cannot be read (3.0.48).** Right after a grant, a managed identity's token
+    can lack its new Graph roles for up to about 24 hours, so both reads (the identity's memberships
+    and the group's PIM assignments) can be refused. Such a membership is **unknown**, never missing:
+    the setup step `db-job` says "the updater's Graph token does not carry <permission> yet; it
+    refreshes within 24 h". Only a read that succeeds and shows no membership is `missing`. Every
+    read-back is stored in `pim.Settings` (`DbInitMembershipProof`: identity, group, how, end, when).
+    When a later read is refused, the database job and the support job may still start if the
+    membership was **proven before**: by that stored read-back (same identity and group, and a
+    time-limited membership not yet ended), or by the database job's last successful run (its identity
+    has no database user of its own, so it signed in through the group). A read that says "not a
+    member" always blocks, and so does a refused read with no earlier proof.
   - **Server / VM / community.** The engine signs in app-only as the **engine application**
     (service principal) with a **certificate** (`$global:PIM_CertThumbprint` /
     `PIM_CERT_THUMBPRINT`) resolved from the machine certificate store. Reuse the one engine
@@ -10991,6 +11014,23 @@ right:
   access catalog lists that grant, so the updater's access converge keeps it. An admin run installs it (setup, the
   Support-app cut-over, or the in-network admin job), in the same run as the signed grant procedure. Where it is not
   installed, or has lost its signature, the readers keep the read they had before and the step stays `unknown`.
+- **A done cut-over stays green after the updater leaves the SQL admin group (2026-11-05).** While the updater is in
+  the SQL admin group it reads run 2 directly; once it has left, it can read run 2 only through `pim.usp_AccessFacts`,
+  and installs cut over before that procedure existed do not have it. Two things now keep the step from turning
+  `unknown` there:
+  1. **The stored cut-over record.** The updater's verdict in `UpdateState.sqlAccess` carries `run2Source` (`live` /
+     `stored`), `run2CheckedUtc` and `run2Reason`. When this run cannot read run 2 but the model is still least privilege
+     and the last recorded verdict said run 2 was done, that record is carried forward with the time of the read it came
+     from. The setup step then reads `ok` and says so: "run 2 from the stored cut-over record of <time>; not read live:
+     <reason>". A live answer always wins; a stored `not done` or `not known` is never carried; without a record the step
+     is `unknown` and names the reason ("run 1 is done; run 2 could not be read and no stored cut-over record says it is
+     done -- <why>").
+  2. **The facts procedure is put in place on a private install.** A private-SQL install cannot be reached by the
+     Support app. When the updater is no longer an admin, run 1 is done and the facts procedure is missing or unsigned,
+     the updater starts the in-network admin job once (the same `PIM_DBINIT_SQL_ACCESS` setting as run 1, `run2` false,
+     plus `factsAskedUtc`). That run is additive: it installs the procedure and drops nothing. It is asked at most once a
+     day, and only when the admin job runs this release and (for a dedicated identity) its SQL admin group membership was
+     read back in this run. From the next update on, run 2 is read live again.
 - **The engine's Graph permissions.** The permission snapshot was written only when someone opened Verify permissions in
   the Manager, so on an install nobody looks at it went stale. The engine now refreshes it when it is older than 24 hours:
   it reads its own Graph app-role assignments (three Graph reads) and records them with the Manager's own snapshot

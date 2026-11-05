@@ -80,6 +80,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAccessCutover.ps1')  # framework 12.23 P8 exception: a private-SQL install starts its own in-network cut-over
 . (Join-Path $solRoot 'engine\_shared\PIM-AsBuilt.ps1')          # 100.61 the as-built job + store + view an EXISTING install converges to
 . (Join-Path $solRoot 'engine\_shared\PIM-DbInitJob.ps1')        # OPEN-06 the in-network database job on every install (created, NEVER started)
+. (Join-Path $solRoot 'engine\_shared\PIM-DbInitMembership.ps1') # framework 4.5 point 5: the database job identity in the SQL admin group, (a)-(d) + renewal
+. (Join-Path $solRoot 'engine\_shared\PIM-UpdaterGraphRoles.ps1') # owner 2026-11-05: the updater's Graph permissions, ONE list; checked (never self-granted)
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAudit.ps1')         # SECPACK-SQL-AUDIT the SQL server's audit -> the install's workspace
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateNow.ps1')        # framework 8.18 UPDATE-NOW: the 15-minute signal check + the run kind + own cron
 . (Join-Path $solRoot 'engine\_shared\PIM-SetupSteps.ps1')        # FLEET-SETUPSTEPS the one-time install steps' facts (read only) for the heartbeat
@@ -347,6 +349,73 @@ function Invoke-PimUpdaterConvergeStep {
         Say ("database job ($When): $($db.state) -- $($db.detail)") $(if ($db.state -eq 'ok') { 'DarkGray' } else { 'Yellow' })
         if ([int]$db.warnings) { Say ("converge ($When): $fixByHand to fix by hand in all (database job: $([int]$db.warnings))") 'Yellow' }
     } catch { Say "  db job converge skipped: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2e-quater. DBINIT-MEMBERSHIP (framework 4.5 point 5, owner via Invardia 2026-11-05) -- THE DATABASE JOB IDENTITY IN ----
+    # THE SQL ADMIN GROUP, BY THE PRODUCT'S OWN UPDATE CODE (never a hand-made Graph call): (a) a direct add, else (b) an ACTIVE
+    # PIM-for-Groups member assignment, PERMANENT first, TIME-LIMITED only when the group's policy refuses permanent (said, with
+    # the end date); (c) READ BACK; (d) both refused = both errors named and the database job is not started on it. A
+    # time-limited membership ending within 30 days is renewed (adminExtend) and read back; a failed renewal is a WARNING with
+    # the end date (this line + the heartbeat's db-job detail), never a failed update. REST through this updater's own identity;
+    # a refusal NAMES the missing permission and changes nothing -- nothing is granted here (engine/_shared/PIM-DbInitMembership.ps1).
+    $dbm = $null; $dbProof = $null; $dbProofGroup = ''
+    # the updater's OWN Graph permissions (owner 2026-11-05 "Grant updater the right"; ONE list: Get-PimUpdaterGraphAppRoles):
+    # read from the roles in its own Graph token and REPORTED when one is missing -- setup / the Support app grants them, the
+    # updater never grants itself.
+    $ugMissing = @()
+    try {
+        $ugTok = "$(Get-PimRestToken -Resource 'graph')"
+        $ug = Get-PimUpdaterGraphRoleCheck -Token $ugTok
+        if ($ug.known -and @($ug.missing).Count) { $ugMissing = @($ug.missing); $fixByHand += 1; Say "updater permissions: $($ug.reason)" 'Yellow' }
+        elseif ($ug.known) { Say "updater permissions: $($ug.reason)" 'DarkGray' }
+        else { Say "updater permissions: not checked ($($ug.reason))" 'DarkGray' }
+    } catch { Say "  updater permissions not checked: $($_.Exception.Message)" 'DarkGray' }
+    try {
+        if ($db -and [bool]$db.present -and "$($db.identityPrincipalId)".Trim() -and $db.adminIsGroup -ne $false) {
+            $dmSrv = $(if ("$($env:PIM_SqlServer)".Trim()) { "$($env:PIM_SqlServer)".Trim() } else { "$($global:PIM_SqlServer)".Trim() })
+            $dmAdm = Get-PimDbInitAdminGroup -Arm $armSeam -ResourceGroupId "/subscriptions/$sub/resourceGroups/$rg" -SqlServer $dmSrv
+            if ($dmAdm.isGroup -eq $false) { Say "database job identity: $($dmAdm.reason) -- not put into a group" 'Yellow' }
+            elseif (-not $dmAdm.groupId) { Say "database job identity: the SQL admin group is not known ($($dmAdm.reason)) -- nothing written" 'Yellow' }
+            else {
+                $dmGraph = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimGraph -Method $m -Path $p -Body $b } else { Invoke-PimGraph -Method $m -Path $p } }
+                $dbm = Invoke-PimDbInitMembershipEnsure -Graph $dmGraph -GroupId $dmAdm.groupId -GroupName $dmAdm.name -PrincipalId "$($db.identityPrincipalId)" -IdentityName "$($db.identityName)"
+                foreach ($l in @($dbm.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+                $fixByHand += [int]$dbm.warnings
+                # the READ-BACK is the fact the heartbeat reports (a hand-read or an earlier run's proof is replaced by it)
+                if ($dbm.readBack) { $db.inAdminGroup = $true; $db.adminIsGroup = $true; $db.membershipReason = "read back by the update: $($dbm.reason)" }
+                elseif ($dbm.member -eq $false) { $db.inAdminGroup = $false; $db.adminIsGroup = $true; $db.membershipReason = "$($dbm.reason)" }
+                elseif ($db.inAdminGroup -ne $true) {
+                    # 3.0.48 (C): NOT READABLE (memberOf and the PIM assignments refused) = unknown, never missing -- right after a
+                    # grant the updater's managed-identity token does not carry its new Graph roles yet (token cache, up to ~24 h)
+                    $db.inAdminGroup = $null; $db.adminIsGroup = $true
+                    $dmLag = @(@($ugMissing) | Where-Object { "$_".Trim() }); if (-not $dmLag.Count) { $dmLag = @(@($dbm.missing) | Where-Object { "$_".Trim() }) }
+                    $db.membershipReason = $(if ($dmLag.Count) { "the updater's Graph token does not carry $($dmLag -join ', ') yet; it refreshes within 24 h" } else { "not readable: $($dbm.reason)" })
+                }
+                # 3.0.48 (D): a READ-BACK is stored as the proof a later run falls back on when its read is refused (pim.Settings)
+                $dbProofNew = New-PimDbInitMembershipProof -Membership $dbm -PrincipalId "$($db.identityPrincipalId)" -GroupId "$($dmAdm.groupId)"
+                if ($dbProofNew -and "$csSize".Trim()) {
+                    try { Set-PimSqlSetting -ConnectionString $csSize -Name (Get-PimDbInitProofSetting) -ValueJson (ConvertTo-Json -Compress -InputObject $dbProofNew) }
+                    catch { Say "  database job identity: the read-back could not be stored as a proof ($($_.Exception.Message))" 'DarkGray' }
+                } elseif (-not $dbm.readBack -and $dbm.member -ne $false) {
+                    if ("$csSize".Trim()) { try { $dbProof = Get-PimDbInitStoredProof (Get-PimSqlSetting -ConnectionString $csSize -Name (Get-PimDbInitProofSetting)) } catch { $dbProof = $null } }
+                    $dbProofGroup = "$($dmAdm.groupId)"
+                }
+                # framework 4.5 G3a: a FRESH add is recorded (when + who + which group) -- for up to 24 h the identity's token can
+                # keep the old group claims, so a job that signs in as it is 'waiting for the token to refresh', not failed. A
+                # membership that already existed records nothing (it is never 'waiting').
+                if ("$($dbm.addedUtc)".Trim() -and "$csSize".Trim()) {
+                    try {
+                        Set-PimSqlSetting -ConnectionString $csSize -Name (Get-PimDbInitAddedSetting) -ValueJson (ConvertTo-Json -Compress -InputObject ([ordered]@{ addedUtc = "$($dbm.addedUtc)"; identity = "$($db.identityName)"; principalId = "$($db.identityPrincipalId)"; group = "$($dmAdm.name)"; via = "$($dbm.via)" }))
+                        Say "database job identity: fresh membership recorded ($($dbm.addedUtc)) -- its token may keep the old group claims up to $(Get-PimDbInitTokenWaitHours) h (framework 4.5 G3a)" 'DarkGray'
+                    } catch { Say "  database job identity: the fresh membership could not be recorded ($($_.Exception.Message))" 'Yellow' }
+                }
+                $dmNote = "$($dbm.note)"
+                if ($ugMissing.Count) { $dmNote = (@($dmNote, "the updater is missing Graph $($ugMissing -join ', ')") | Where-Object { "$_".Trim() }) -join '; ' }
+                $db | Add-Member -NotePropertyName membershipNote -NotePropertyValue $dmNote -Force
+                $dmS = Get-PimDbInitSetupState -Result $db; $db.state = $dmS.dbJob; $db.detail = $dmS.dbJobDetail
+                $script:PimDbInitResult = $db
+                Say ("database job identity ($When): $(if ($dbm.ok) { 'member, read back' } else { 'NOT read back as a member -- the database job is not started on it' })$(if ($dbm.note) { " -- $($dbm.note)" })$(if (@($dbm.missing).Count) { " -- the updater's identity is missing: $(@($dbm.missing) -join '; ')" })") $(if ($dbm.ok -and -not $dbm.renewFailed) { 'DarkGray' } else { 'Yellow' })
+            }
+        }
+    } catch { Say "  database job identity membership not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2f. framework 12.23 P8 EXCEPTION (owner 2026-10-18) -- A PRIVATE-SQL INSTALL NEVER CUT OVER MOVES BY ITSELF -----------
     # The Support app has no route to a private database. This updater reads (as dbo, still in the SQL admin group), decides
     # (run 1, later run 2) and STARTS the in-network admin job; the job does the admin SQL and reads it back. No admin SQL
@@ -355,8 +424,18 @@ function Invoke-PimUpdaterConvergeStep {
         # OPEN-06: a database job on its OWN new identity (id-pim-dbinit) whose SQL admin group membership is not READ as
         # true cannot run the admin cut-over -- it is not started on it (before OPEN-06 such an install had no job at all,
         # and this step did nothing either). A job with its existing identity (e.g. id-pim-sql) is unchanged.
-        if ($db -and [bool]$db.dedicated -and $db.inAdminGroup -ne $true) {
-            Say "database access cut-over: not started -- the database job's identity $($db.identityName) is not read as a member of the SQL admin group yet" 'DarkGray'
+        # DBINIT-MEMBERSHIP (framework 4.5 point 5 (c)): for the dedicated identity the membership must be READ BACK by step
+        # 2e-quater of THIS run (Get-PimDbInitJobStartGate). 3.0.48 (D): when that read was REFUSED (not 'not a member'), an
+        # EARLIER proof opens it -- the stored read-back of a prior run, else the database job's last successful run (3.0.46
+        # proof-by-run). Known absent, or never proven + unreadable = not started.
+        if ($db -and [bool]$db.dedicated -and $null -eq $dbProof -and -not ($dbm -and ($dbm.readBack -or $dbm.member -eq $false)) -and "$($db.jobName)".Trim()) {
+            $dbProof = Get-PimDbInitJobRunProof -Arm $armSeam -JobPath "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs/$($db.jobName)" -PrincipalId "$($db.identityPrincipalId)"
+        }
+        $dbGate = if ($db -and [bool]$db.dedicated) { Get-PimDbInitJobStartGate -Membership $dbm -Proof $dbProof -PrincipalId "$($db.identityPrincipalId)" -GroupId $dbProofGroup } else { $null }
+        # framework 4.5 G3a: added in THIS run -> the identity's token still carries the old group claims; not started now
+        if ($dbGate -and $dbGate.start -and "$($dbm.addedUtc)".Trim()) { $dbGate = @{ start = $false; reason = (Get-PimDbInitTokenWait -AddedUtc "$($dbm.addedUtc)").reason + ' -- the cut-over waits for a later run' } }
+        if ($dbGate -and -not $dbGate.start) {
+            Say "database access cut-over: not started -- $($dbGate.reason)" 'DarkGray'
         } elseif ("$csSize".Trim()) {
             $coCs = "$csSize"
             $coApp = "$((Get-PimJwtPrincipal -Token $global:PIM_SqlAccessToken).appid)".Trim()
@@ -834,7 +913,39 @@ try {
         # install); when it does not exist YET (the converge creates it later in this run) the job starter says 'not ready'.
         $scTpl = 'ca-pim-dbinit'
         try { $scRec = $null; if ("$scCs".Trim()) { $scRec = Get-PimSqlSetting -ConnectionString $scCs -Name 'InstallNames' }; $scTpl = Get-PimDbInitJobName -ManagerApp $managerApp -Record $scRec } catch { $scTpl = 'ca-pim-dbinit' }
-        Invoke-PimSupportConsentJob -Decision $Decision -Answer $Answer -Arm $scArm -SubscriptionId $sub -ResourceGroup $rg -TemplateJobName $scTpl
+        # DBINIT-MEMBERSHIP (framework 4.5 point 5 (c)/(d)): the consent job runs as the database job's identity -- it is started
+        # ONLY when that identity's SQL admin group membership is READ BACK now (Graph, read only; the converge of the full run
+        # puts it there). Not read back = NOT started, with the reason. No database job yet = the job starter's own 'not ready'.
+        $scGraph = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimGraph -Method $m -Path $p -Body $b } else { Invoke-PimGraph -Method $m -Path $p } }
+        # 3.0.48 (D): a REFUSED read (not 'not a member') falls back on an earlier proof -- the stored read-back (pim.Settings),
+        # else the database job's last successful run (inside the gate). Known absent / never proven = not started.
+        $scProof = $null
+        if ("$scCs".Trim()) { try { $scProof = Get-PimDbInitStoredProof (Get-PimSqlSetting -ConnectionString $scCs -Name (Get-PimDbInitProofSetting)) } catch { $scProof = $null } }
+        $scGate = Invoke-PimDbInitMembershipGate -Arm $scArm -Graph $scGraph -SubscriptionId $sub -ResourceGroup $rg -JobName $scTpl -Proof $scProof
+        if (-not $scGate.absent -and -not $scGate.start) { return @{ ok = $false; skipped = $false; reason = ''; status = ''; problems = @("not started: $($scGate.reason)") } }
+        # framework 4.5 G3a: within 24 h of a FRESH add (recorded by the converge) the identity's token can keep the old group
+        # claims -- a refused sign-in is 'waiting for the token to refresh' (not failed), tried again at most once an hour. A
+        # membership that existed before has no record and is never 'waiting'.
+        $scAdded = $null; $scLastWait = $null
+        if ("$scCs".Trim()) {
+            try { $scA = Get-PimSqlSetting -ConnectionString $scCs -Name (Get-PimDbInitAddedSetting); if ($scA -is [string] -and "$scA".Trim().StartsWith('{')) { $scA = "$scA" | ConvertFrom-Json }; if ($scA) { $scAdded = $scA.addedUtc } } catch { $scAdded = $null }
+            try { $scW = Get-PimSqlSetting -ConnectionString $scCs -Name (Get-PimDbInitTokenWaitSetting); if ($scW -is [string] -and "$scW".Trim().StartsWith('{')) { $scW = "$scW" | ConvertFrom-Json }; if ($scW) { $scLastWait = $scW.atUtc } } catch { $scLastWait = $null }
+        }
+        $scTw = Get-PimDbInitTokenWait -AddedUtc $scAdded -LastWaitUtc $scLastWait
+        if ($scTw.hold) { return @{ ok = $true; skipped = $true; reason = $scTw.reason; status = ''; problems = @() } }
+        $scJob = Invoke-PimSupportConsentJob -Decision $Decision -Answer $Answer -Arm $scArm -SubscriptionId $sub -ResourceGroup $rg -TemplateJobName $scTpl
+        if ($scJob -and -not $scJob.ok -and -not $scJob.skipped) {
+            $scTw2 = Get-PimDbInitTokenWait -AddedUtc $scAdded -Problems @($scJob.problems)
+            if ($scTw2.wait) {
+                $scTwNote = ''
+                if ("$scCs".Trim()) {
+                    try { Set-PimSqlSetting -ConnectionString $scCs -Name (Get-PimDbInitTokenWaitSetting) -ValueJson (ConvertTo-Json -Compress -InputObject ([ordered]@{ atUtc = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture); addedUtc = "$scAdded" })) }
+                    catch { $scTwNote = " (the wait could not be recorded: $((("$($_.Exception.Message)") -split "`n")[0]) -- the next run may start the job again)" }
+                }
+                return @{ ok = $true; skipped = $true; reason = "$($scTw2.reason)$scTwNote"; status = "$($scJob.status)"; problems = @() }
+            }
+        }
+        $scJob
     }
     $scRun = Invoke-PimSupportConsentStep -BaseUrl $scBase -InstallKey $scKey -Sql $scSql -StartJob $scStart -GetLast $scGet -SetLast $scSet
     # merge review 2026-11-04 (Test-PimUpdateNow I4: the 15-minute check is ONE line): a 'nothing' decision is recorded for the
@@ -1474,7 +1585,7 @@ try {
             # §33.0 MORE TELEMETRY (SqlAccess): the verdict goes into UpdateState, so the heartbeat only reads it. run 2 (the
             # runtime users lost their broad roles) is visible only to an updater that is still db_owner -- else unknown.
             try {
-                $accBroad = $null; $accFactsRun2 = $null
+                $accBroad = $null; $accFactsRun2 = $null; $accRun2Why = ''
                 if ($acc.dbOwner -and (Get-Command Get-PimSqlAccessSetupGateSql -ErrorAction SilentlyContinue)) {
                     $accNm = Get-PimSqlAccessInstallNameMap
                     $accRow = @(Invoke-PimSqlQuery -ConnectionString $csUpd -Sql (Get-PimSqlAccessSetupGateSql -UserNames (@($accNm['pim_web']) + @($accNm['pim_engine']))))[0]
@@ -1487,8 +1598,15 @@ try {
                     $accFacts = Read-PimAccessFacts -Scalar { param($q) Invoke-PimSqlScalar -ConnectionString $accCs -Sql $q } -RuntimeUsers (@($accNm['pim_web']) + @($accNm['pim_engine']))
                     $accFactsRun2 = Get-PimAccessFactsRun2 -Read $accFacts
                     Say ("  database access run 2: $(if ($accFactsRun2 -eq $true) { 'done' } elseif ($accFactsRun2 -eq $false) { 'NOT done (a runtime user still holds a broad role)' } else { "not determined -- $(if ($accFacts.reason) { $accFacts.reason } else { 'none of the runtime users was found' })" }) (through the signed access facts procedure)") 'DarkGray'
+                    if ($null -eq $accFactsRun2) { $accRun2Why = "the updater is not a SQL admin; $(if ($accFacts.reason) { $accFacts.reason } else { 'none of the runtime users was found through the access facts procedure' })" }
                 }
-                $script:PimSqlAccessVerdict = New-PimSqlAccessVerdict -Converge $acc -BroadUsers $accBroad -FactsRun2 $accFactsRun2
+                # SQLACCESS-STORED (2026-11-05): an updater that left the SQL admin group may not see the other users' roles. When
+                # run 2 cannot be read live, the STORED cut-over record (the last UpdateState.sqlAccess that said run 2 done) is
+                # carried -- said as stored, with the time of the read it carries and why the live read was not possible.
+                $accPrev = $null
+                try { $accPrev = Get-PimUpdateStateField -Object (Read-PimUpdateState -ConnectionString $csUpd) -Key 'sqlAccess' } catch { $accPrev = $null }
+                $script:PimSqlAccessVerdict = New-PimSqlAccessVerdict -Converge $acc -BroadUsers $accBroad -FactsRun2 $accFactsRun2 -Previous $accPrev -Run2Reason $accRun2Why
+                if ("$($script:PimSqlAccessVerdict.run2Source)" -eq 'stored') { Say "  database access run 2: done (the stored cut-over record of $($script:PimSqlAccessVerdict.run2CheckedUtc); not read live: $($script:PimSqlAccessVerdict.run2Reason))" 'DarkGray' }
             } catch { Say "  database access verdict not recorded (telemetry only; the update is unaffected): $($_.Exception.Message)" 'DarkGray' }
         } catch {
             Say "  database access NOT converged (the update continues; the broad roles still apply): $($_.Exception.Message)" 'Yellow'

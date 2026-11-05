@@ -239,10 +239,14 @@ function Get-PimDbInitSetupState {
     if ($aig -eq $false) { [void]$miss.Add('the SQL Entra admin is not a group') }
     elseif ($iag -eq $false) { [void]$miss.Add("identity $(if ($idn) { $idn } else { '(none named)' }) is not a member of the SQL admin group$(if ($grp) { " $grp" })") }
     $note = if ([bool](& $f 'managerAccessOnDefinition')) { "; $job still carries PIM_DBINIT_MANAGER_ACCESS on its definition (report only)" } else { '' }
+    # DBINIT-MEMBERSHIP (framework 4.5 point 5): the updater's membership step says a TIME-LIMITED membership / a failed renewal
+    # with its end date here, so the heartbeat carries it (engine/_shared/PIM-DbInitMembership.ps1 sets membershipNote).
+    $mnote = "$(& $f 'membershipNote')".Trim(); if ($mnote) { $note = "; $mnote$note" }
     if ($miss.Count) { return [ordered]@{ dbJob = 'missing'; dbJobDetail = (& $cut ("missing: $($miss -join '; ')$note")) } }
     if ($null -eq $aig -or $null -eq $iag) {
         $why = "$(& $f 'membershipReason')".Trim()
-        return [ordered]@{ dbJob = 'unknown'; dbJobDetail = (& $cut ("$job is there; the SQL admin group membership of $(if ($idn) { $idn } else { 'its identity' }) could not be read$(if ($why) { " ($why)" })$note")) }
+        # 3.0.48 (C): short, so the reason (e.g. the token-lag line) fits the 200-character detail
+        return [ordered]@{ dbJob = 'unknown'; dbJobDetail = (& $cut ("membership of $(if ($idn) { $idn } else { 'its identity' }) could not be read$(if ($why) { ": $why" })$note")) }
     }
     return [ordered]@{ dbJob = $state; dbJobDetail = (& $cut ("$job on $(& $f 'imageTag'), identity $idn in the SQL admin group$(if ($grp) { " $grp" })$note")) }
 }

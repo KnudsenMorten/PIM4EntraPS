@@ -473,8 +473,17 @@ function New-PimSetupSteps {
     if ($null -eq $sa) { & $set 'sql-least-privilege' 'unknown' 'not read: the updater has not recorded the database access model' $null; & $set 'updater-not-sql-admin' 'unknown' 'not read: the updater has not recorded the database access model' $null }
     else {
         $model = "$(Get-PimSetupStepField $sa 'model')"; $r1 = ConvertTo-PimSetupStepBool (Get-PimSetupStepField $sa 'run1'); $r2 = ConvertTo-PimSetupStepBool (Get-PimSetupStepField $sa 'run2')
-        if ($model -eq 'least-privilege' -and $r1 -eq $true -and $r2 -eq $true) { & $set 'sql-least-privilege' 'ok' 'least privilege: run 1 and run 2 are done' $saAt }
+        # SQLACCESS-STORED (2026-11-05): run2Source 'stored' = the updater could not read run 2 live (it left the SQL admin group
+        # and no readable facts procedure) and carried its STORED cut-over record -- ok, said as stored, with the record's time
+        # and why the live read was not possible. No record and no read = unknown WITH the reason (never a bare "could not be read").
+        $r2Src = "$(Get-PimSetupStepField $sa 'run2Source')".Trim(); $r2Why = "$(Get-PimSetupStepField $sa 'run2Reason')".Trim()
+        $r2At = "$(Get-PimSetupStepField $sa 'run2CheckedUtc')".Trim()
+        if ($model -eq 'least-privilege' -and $r1 -eq $true -and $r2 -eq $true) {
+            if ($r2Src -eq 'stored') { & $set 'sql-least-privilege' 'ok' ("run 1 and run 2 done (run 2: stored cut-over record$(if ($r2At) { " of $r2At" }); not read live: $(if ($r2Why) { $r2Why } else { 'the live read is not permitted' }))") $saAt }
+            else { & $set 'sql-least-privilege' 'ok' 'least privilege: run 1 and run 2 are done' $saAt }
+        }
         elseif ($model -eq 'broad' -or $r1 -eq $false -or $r2 -eq $false) { & $set 'sql-least-privilege' 'missing' ("not done: " + ((@($(if ($r1 -ne $true) { 'run 1' }), $(if ($r2 -ne $true) { 'run 2' })) | Where-Object { $_ }) -join ', ')) $saAt }
+        elseif ($model -eq 'least-privilege' -and $r1 -eq $true) { & $set 'sql-least-privilege' 'unknown' ("not determined: run 1 done; run 2 not read, no stored cut-over record: $(if ($r2Why) { $r2Why } else { 'the updater did not say why' })") $saAt }
         else { & $set 'sql-least-privilege' 'unknown' 'not determined: the access model could not be read' $saAt }
         $ia = ConvertTo-PimSetupStepBool (Get-PimSetupStepField $sa 'updaterInAdminGroup')
         if ($ia -eq $false) { & $set 'updater-not-sql-admin' 'ok' 'the updater is not in the SQL admin group' $saAt }
