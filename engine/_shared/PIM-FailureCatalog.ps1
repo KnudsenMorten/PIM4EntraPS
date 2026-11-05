@@ -142,6 +142,26 @@ $script:PimFailureRules = @(
        retryable = $true; severity = 'transient'
        fixes = @() }
 
+    # SUP-2026-00424 (2026-11-05, internal, 3.0.43): the roll's health check could not READ the app (Azure answered
+    # "PaginationTokenExpired" while the revisions were listed), so a healthy roll was rolled back and went up UNCLASSIFIED.
+    # Ahead of UPDATE-ROLLED-BACK: a check that threw is not evidence that the new version is unhealthy.
+    @{ code = 'UPDATE-HEALTH-UNREAD'
+       match = { param($m, $row) $m -match '(?i)unhealthy after the roll.*health check threw' }
+       title = 'The update was undone because its health check could not be read'
+       cause = 'The update rolled the new version, then asked Azure whether it was running. Azure did not answer that question properly this time, so the updater could not confirm the new version was healthy and, to be safe, put the previous version back. PIM Manager keeps running on its previous version.'
+       remedy = 'Nothing to do at first: the next update run rolls the new version again. If it is undone again on the next runs, contact Invardia support.'
+       retryable = $true; severity = 'transient'
+       fixes = @() }
+
+    # The roll's health check READ the app and found the new version not running (Failed / Degraded) -- it was rolled back.
+    @{ code = 'UPDATE-ROLLED-BACK'
+       match = { param($m, $row) $m -match '(?i)unhealthy after the roll' }
+       title = 'The new version did not start and the update was undone'
+       cause = 'The update rolled the new version of PIM Manager, but Azure reported it as not running (failed or degraded). The updater put the previous version back at once. PIM Manager keeps running on its previous version.'
+       remedy = 'Nothing to do for you: Invardia support is told and looks at the new version. The next update run tries again.'
+       retryable = $true; severity = 'transient'
+       fixes = @() }
+
     @{ code = 'UPDATE-NO-LICENCE'
        match = { param($m, $row) $m -match '(?i)no licence is installed -- Pro updates need' }
        title = 'No Pro licence is installed, so the Pro update was not fetched'
@@ -790,6 +810,8 @@ function Get-PimFailureCodeTable {
         ,@('UPDATE-NO-LICENCE',                'pim-upd-0102',   'customer-config',   'support',  '',      '2.4.652')
         ,@('UPDATE-REGISTRY-PUSH-FAILED',      'pim-upd-0103',   'upstream-error',    'nobody',   '',      '2.4.671')
         ,@('UPDATE-INVARDIA-UNREACHABLE',      'pim-upd-0104',   'upstream-error',    'nobody',   '',      '3.0.35')
+        ,@('UPDATE-HEALTH-UNREAD',             'pim-upd-0105',   'upstream-error',    'nobody',   '',      '3.0.45')
+        ,@('UPDATE-ROLLED-BACK',               'pim-upd-0106',   'unclassified',      'product',  '',      '3.0.45')
         # the generic code of each CauseClass (framework 8.16: "an unknown failure gets the generic code of its CauseClass")
         ,@('UNCLASSIFIED',                     'pim-gen-0001',   'unclassified',      'product',  '',      '2.4.638')
         ,@('GENERIC:customer-config',          'pim-gen-0002',   'customer-config',   'customer', '',      '2.4.638')

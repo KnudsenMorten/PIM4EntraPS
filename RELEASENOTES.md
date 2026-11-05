@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.45 -- 2026-11-05
+
+- An update that is undone after its health check now says why (the check could not read the app, or the new version did not start) instead of an unclassified error. The tenant's enabled-user count is read a second time when it cannot be right against the total (for example while an on-premises sync is still writing).
+
 ## 3.0.44 -- 2026-11-05
 
 - Updates no longer roll back a healthy installation when Azure's revision list times out: the health check reads the app's current revision directly. A private installation's build pool is always made again after a tier change, also when Azure takes longer to remove the old one; a pool is created with one instance and then set to zero (Azure does not allow creating it at zero). Includes the 3.0.43 status-report rounds.

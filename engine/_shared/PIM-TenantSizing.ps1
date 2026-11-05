@@ -607,6 +607,29 @@ function Get-PimTenantObjectCounts {
     return [pscustomobject]$out
 }
 
+function Get-PimMemberCountRead {
+    <#
+      PURE (the Graph read is a seam). COUNT-ANOMALY-98edba45 (2026-11-05): the enabled-MEMBER count is an advanced query
+      on Graph's eventually consistent index. On a tenant whose on-prem sync was still writing (day one: 6981 users, 668
+      enabled members; the next day 6182, right) it read far too low, and Invardia flagged a 3x jump. Rule:
+        - read once (-Read returns a number or $null);
+        - SUSPECT when it is above the unfiltered -Total (impossible), or the total is >= 100 and >= 3x the members:
+          read ONCE more and keep the second answer (a true low value simply reads the same again);
+        - a member count above the total after the re-read is left out ($null), never recorded.
+      Returns @{ value; reread; note }.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Read, [AllowNull()][object]$Total)
+    $t = $null; $tt = 0L; if ($null -ne $Total -and [long]::TryParse("$Total", [ref]$tt)) { $t = $tt }
+    $suspect = { param($m) $null -ne $m -and $null -ne $t -and ($m -gt $t -or ($t -ge 100 -and $t -ge (3 * [long]$m))) }
+    $v = & $Read
+    if (-not (& $suspect $v)) { return [pscustomobject]@{ value = $v; reread = $false; note = '' } }
+    $first = $v
+    $v = & $Read
+    $note = "enabled members read $first against $t users -- read again: $v"
+    if ($null -ne $v -and $null -ne $t -and $v -gt $t) { return [pscustomobject]@{ value = $null; reread = $true; note = "$note (above the total: left out)" } }
+    return [pscustomobject]@{ value = $v; reread = $true; note = $note }
+}
+
 function Resolve-PimSqlServiceObjective {
     <#
       PURE. A database's REAL service objective from an ARM GET. TRAP (measured live 2026-10-09): for a DTU database

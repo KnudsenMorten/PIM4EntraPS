@@ -873,7 +873,13 @@ function Invoke-PimTenantListRefresh {
                     # framework 8.11 ASSET-COUNTS: enabled MEMBER users and guests too (two more $count calls); a count that
                     # cannot be read is left out (null), never 0.
                     $cnt1 = { param($p) $n = 0L; try { $raw = Invoke-PimGraph -Path $p -Headers @{ ConsistencyLevel = 'eventual' }; if ([long]::TryParse(("$raw".Trim().Trim([char]0xFEFF)), [ref]$n)) { return $n } } catch { }; return $null }
-                    $members = & $cnt1 "/users/`$count?`$filter=userType eq 'Member' and accountEnabled eq true"
+                    # COUNT-ANOMALY-98edba45: a member count far below (or above) the unfiltered total is read once more.
+                    $mPath = "/users/`$count?`$filter=userType eq 'Member' and accountEnabled eq true"
+                    if (Get-Command Get-PimMemberCountRead -ErrorAction SilentlyContinue) {
+                        $mr = Get-PimMemberCountRead -Total $oc.Users -Read { & $cnt1 $mPath }
+                        $members = $mr.value
+                        if ($mr.reread -and -not $Quiet) { Write-Host "    tenant object counts: $($mr.note)" -ForegroundColor DarkGray }
+                    } else { $members = & $cnt1 $mPath }
                     $guests = & $cnt1 "/users/`$count?`$filter=userType eq 'Guest'"
                     Set-PimSqlSetting -ConnectionString $csC -Name 'TenantObjectCounts' -Value ([ordered]@{ Users = $oc.Users; Groups = $oc.Groups; ServicePrincipals = $oc.ServicePrincipals; Members = $members; Guests = $guests; recordedUtc = (Get-Date).ToUniversalTime().ToString('o') }) | Out-Null
                 }

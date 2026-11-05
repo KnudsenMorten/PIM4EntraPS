@@ -1630,7 +1630,9 @@ if ($roll.resized) {
 }
 if ($roll.rolled -and $roll.healthy -eq $false) {
     Say "  UNHEALTHY after the roll -- rolled back: $($roll.rolledBack)" 'Red'
-    Send-PimUpdateOutcome -Action 'rolled' -Outcome 'failed' -ToVersion "$($plan.version)" -ErrorText "unhealthy after the roll; rolledBack=$($roll.rolledBack)"
+    # SUP-2026-00424 (2026-11-05): the reason rides along, so the failure catalog tells a health check that could not READ
+    # the app (UPDATE-HEALTH-UNREAD) from a version that really was unhealthy (UPDATE-ROLLED-BACK) -- never UNCLASSIFIED.
+    Send-PimUpdateOutcome -Action 'rolled' -Outcome 'failed' -ToVersion "$($plan.version)" -ErrorText ("unhealthy after the roll; rolledBack=$($roll.rolledBack)" + $(if ("$($roll.reason)".Trim()) { "; $((("$($roll.reason)") -split "`n")[0])" }))
     exit 1
 }
 if (-not $roll.rolled -and $roll.reason -notmatch 'already on this image') {
