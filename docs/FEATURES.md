@@ -183,16 +183,17 @@ deployment is a supported choice) and no credentials lying around.
   and the plan, and changes nothing. A copy with local changes is left alone. Proven by updating a running community
   installation from GitHub and re-running the full end-to-end test against it.
 - **Give your Invardia support access, and take it back.** ✅ 2026-10-04 — One command gives your Invardia Support
-  app either read-only access to the PIM database (troubleshoot) or setup access (it may repair and upgrade: database
-  administration and ownership of PIM's own app registrations and groups). The same command with a remove switch
-  takes everything back. Nothing is granted twice, and every change is read back.
+  app its own read-only user in the PIM database. At the troubleshoot level that is all; at the setup level (it may
+  repair and upgrade), database administration exists only inside an open support session, for at most 8 hours
+  (*changed 2026-11-05, 3.0.40: the app is never a standing member of the database admin group, nor an owner of
+  PIM's own app registrations or groups*). The same command with a remove switch takes everything back. Nothing is granted twice, and every change is read back.
 - **Your as-built document reaches support directly, also from a private installation.** ✅ 2026-11-05 — When support
   asks for the as-built document, the installation creates it and sends it straight to Invardia. It counts as delivered
   only when Invardia's answer matches the document's size and SHA-256 checksum. Your storage stays closed to the
   outside: no network opening or access key is needed. The copy in your own storage is kept for one day, as before.
 - **Support's database access is time-limited and needs your consent.** ✅ 2026-11-02 — You decide, once, how far
   Invardia support may go in the PIM database (none, read, or owner); only you can change that setting. When support
-  needs more than read access, it asks for a number of hours (at most 24) with a ticket and a reason, within your
+  needs more than read access, it asks for a number of hours (at most 8) with a ticket and a reason, within your
   consent. The access ends at that time by itself: the job that gave it takes it back, and the PIM heartbeat, the job
   and PIM Manager each also remove any access whose end has passed, so it never outlives its window. Access that was
   already there before is recorded and left alone. Every grant, extension and removal is recorded. Proven on a real

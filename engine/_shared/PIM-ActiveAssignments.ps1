@@ -922,7 +922,7 @@ function Invoke-PimActiveAssignmentsSnapshot {
         # re-runs a throttled (429) or 5xx request on its own instead of counting it as a failed group.
         $gFail = 0
         $gFirstErr = $null
-        $gRes = Invoke-PimGraphBatchGet -Paths @($pimGroupsToRead | ForEach-Object { "/identityGovernance/privilegedAccess/group/assignmentSchedules?`$filter=groupId eq '$($_.Id)'" })
+        $gRes = Invoke-PimGraphBatchGet -Paths @($pimGroupsToRead | ForEach-Object { "/identityGovernance/privilegedAccess/group/assignmentSchedules?`$filter=groupId eq '$($_.Id)'" }) -ProgressLabel '[revoke] pim-for-groups'   # SCHEMA-QUIESCE-LONG-SNAPSHOT: alive every 5 min
         if ($null -ne $gRes -and $gRes -isnot [System.Collections.IList]) { $gRes = @($gRes) }   # 100.31: one answer can arrive unrolled; the release below assigns by index
         for ($i = 0; $i -lt $pimGroupsToRead.Count; $i++) {
             $gr = $gRes[$i]; $gRes[$i] = $null   # 100.31: released as it is consumed

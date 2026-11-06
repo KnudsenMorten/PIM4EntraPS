@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.49 -- 2026-11-06
+
+- An update no longer waits only 20 minutes for a long active-assignments snapshot on a very large tenant: it waits up to that job's usual length (at most 3 hours); the snapshot shows progress every 5 minutes; a run is called hung only when it is far past its usual length and silent, and it is never stopped.
+
 ## 3.0.48 -- 2026-11-05
 
 - Right after new permissions are granted, the database job and the support access no longer show as missing or stay blocked while the sign-in token refreshes: a membership that cannot be read yet is shown as not yet known, and a membership proven before keeps the support access working. The database least-privilege check keeps its result after the updater leaves the SQL admin group.

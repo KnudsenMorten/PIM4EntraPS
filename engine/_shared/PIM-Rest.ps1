@@ -1310,7 +1310,11 @@ function Invoke-PimGraphBatchGet {
     A $batch response without `responses` (a proxy, a stub, a host that does not batch) falls back to
     the sequential path for that slice.
   #>
-  param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Paths, [ValidateRange(1, 20)][int]$BatchSize = 20)
+  param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Paths, [ValidateRange(1, 20)][int]$BatchSize = 20,
+        # SCHEMA-QUIESCE-LONG-SNAPSHOT (2): a long read (the snapshot's ~36k group reads on a big tenant) says it is alive.
+        # With a label, one "[graph-batch] <label>: progress ..." line at least every $script:PimBatchProgressSeconds (default
+        # 300 s). No label = no line (every other caller stays as it was).
+        [AllowEmptyString()][string]$ProgressLabel = '')
   $n = @($Paths).Count
   $results = New-Object object[] $n
   if ($n -eq 0) { return ,$results }
@@ -1340,7 +1344,18 @@ function Invoke-PimGraphBatchGet {
   # send them again AS A BATCH (up to 3 rounds), and only then fall back to the single-request path. Every call that
   # was throttled or slow says so in one [graph-batch] line.
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
-  $script:PimBatchStats = @{ roundTrips = 0; throttled = 0; serverErrors = 0; retryRounds = 0; waitedSeconds = 0; singles = 0; pacedSeconds = 0; batchSize = $BatchSize }
+  $script:PimBatchStats = @{ roundTrips = 0; throttled = 0; serverErrors = 0; retryRounds = 0; waitedSeconds = 0; singles = 0; pacedSeconds = 0; batchSize = $BatchSize; progressLines = 0 }
+  $progEvery = if ($null -ne $script:PimBatchProgressSeconds -and "$($script:PimBatchProgressSeconds)" -match '^\d+$') { [int]$script:PimBatchProgressSeconds } else { 300 }
+  $progLast = 0.0
+  $progress = {
+    if (-not "$ProgressLabel".Trim()) { return }
+    $el = $sw.Elapsed.TotalSeconds
+    if (($el - $progLast) -lt $progEvery) { return }
+    Set-Variable -Name progLast -Value $el -Scope 1
+    $answered = 0; foreach ($x in $results) { if ($null -ne $x) { $answered++ } }
+    $script:PimBatchStats.progressLines++
+    Write-Host ("  [graph-batch] {0}: progress -- {1} of {2} reads answered, {3} round-trips, {4} throttled, {5:N1} min so far" -f $ProgressLabel, $answered, $n, $script:PimBatchStats.roundTrips, $script:PimBatchStats.throttled, ($el / 60.0)) -ForegroundColor DarkGray
+  }
   # 🔴 PACING (2026-09-27, internal, measured in Log Analytics): the first pass fired every round-trip back to back, so once
   # Graph started throttling, almost every later round-trip came back 429 too -- two 712-path reads per drift snapshot
   # (group memberships, group policies) each drew ~1,240 throttled answers, ~190 single fallbacks and ~225 s. Now a
@@ -1422,6 +1437,7 @@ function Invoke-PimGraphBatchGet {
     $last = [Math]::Min($ofs + $curSize, $n) - 1
     $r = & $sendBatch -Indexes @($ofs..$last)
     $ofs = $last + 1
+    & $progress
     foreach ($p in @($r.pending)) { $retryQueue.Add([int]$p) }
     if ($r.maxRetryAfter -gt $maxRa) { $maxRa = $r.maxRetryAfter }
     if (@($r.pending).Count) {
@@ -1445,6 +1461,7 @@ function Invoke-PimGraphBatchGet {
       $slice = @($queue[$o..([Math]::Min($o + $curSize, $queue.Count) - 1)])
       $o += $slice.Count
       $r = & $sendBatch -Indexes $slice
+      & $progress
       foreach ($p in @($r.pending)) { $retryQueue.Add([int]$p) }
       if ($r.maxRetryAfter -gt $maxRa) { $maxRa = $r.maxRetryAfter }
       if (@($r.pending).Count) {

@@ -258,7 +258,7 @@ function Get-PimUpdateNowSelfCronPlan {
 
 # ---- which kind of execution is this ---------------------------------------------------------------------------------
 function ConvertTo-PimUpdateNowExecutions {
-    # PURE. ARM executions (value[] or a list) -> @{ name; status; startUtc } objects.
+    # PURE. ARM executions (value[] or a list) -> @{ name; status; startUtc; endUtc } objects.
     param([AllowNull()][object]$Items)
     if ($null -eq $Items) { return $null }
     $list = @(if ($Items.PSObject.Properties['value']) { $Items.value } else { $Items })
@@ -267,7 +267,8 @@ function ConvertTo-PimUpdateNowExecutions {
         $props = Get-PimUpdateNowField $x 'properties'
         $st = if ($null -ne $props) { Get-PimUpdateNowField $props 'status' } else { Get-PimUpdateNowField $x 'status' }
         $t  = if ($null -ne $props) { Get-PimUpdateNowField $props 'startTime' } else { Get-PimUpdateNowField $x 'startTime' }
-        $out.Add([pscustomobject]@{ name = "$(Get-PimUpdateNowField $x 'name')".Trim(); status = "$st".Trim(); startUtc = (ConvertTo-PimUpdateNowUtc $t) }) | Out-Null
+        $te = if ($null -ne $props) { Get-PimUpdateNowField $props 'endTime' } else { Get-PimUpdateNowField $x 'endTime' }   # SCHEMA-QUIESCE-LONG-SNAPSHOT: a job's usual length
+        $out.Add([pscustomobject]@{ name = "$(Get-PimUpdateNowField $x 'name')".Trim(); status = "$st".Trim(); startUtc = (ConvertTo-PimUpdateNowUtc $t); endUtc = (ConvertTo-PimUpdateNowUtc $te) }) | Out-Null
     }
     return @($out.ToArray())
 }

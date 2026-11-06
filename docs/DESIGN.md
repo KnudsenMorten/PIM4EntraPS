@@ -3027,6 +3027,15 @@ See §17.7 for the full template/approval mechanics.
     time-limited membership not yet ended), or by the database job's last successful run (its identity
     has no database user of its own, so it signed in through the group). A read that says "not a
     member" always blocks, and so does a refused read with no earlier proof.
+    **The SQL admin group stays role-assignable.** PIM's database holds the desired state the engine
+    applies with directory-role rights, so its SQL admin group is a role-assignable group: only a
+    Privileged Role Administrator (or higher) can change who is in it. Setup and the updater follow the
+    same design (one list of rights, one membership routine).
+    **Moving the SQL admin to a new group waits 24 hours.** A new member's database sign-in carries the
+    group only once its token is renewed (up to about 24 hours). So the SQL admin of a database moves to a
+    new group only after the database job's membership in that group has been recorded for at least 24
+    hours; the database job then runs at once, and a failed run moves the admin back. Before that, the
+    step is shown as *waiting*, never as failed.
   - **Server / VM / community.** The engine signs in app-only as the **engine application**
     (service principal) with a **certificate** (`$global:PIM_CertThumbprint` /
     `PIM_CERT_THUMBPRINT`) resolved from the machine certificate store. Reuse the one engine
@@ -4999,10 +5008,31 @@ read calls; nothing is ever stopped or cancelled.
   minutes; if a job is still running then, the run is deferred -- no schema step, no roll, outcome *waiting*, the reason
   naming the job and its execution -- and the next full updater run tries again. Executions that cannot be read count as
   running. A run older than 24 hours is treated as hung and does not block.
+- *A known long job (built 2026-11-06, release pending).* On a very large tenant the active-assignments snapshot in the
+  tick runs well over an hour, so a 20-minute bound would defer every update there. When exactly one job is running and
+  its usual length is known (the longest of its last five successful runs) and longer than 20 minutes, the updater waits
+  for it up to that job's start + usual length + 10 minutes, at most 3 hours, and says so in one line; the hold is renewed
+  to cover the longer wait. Two jobs running, an unknown or short usual length, or a run already past its usual end keep
+  the 20-minute bound. The snapshot's group read writes a progress line at least every 5 minutes, so a working run is
+  visibly alive. A run counts as hung only when it is past three times its usual length **and** its log has been silent
+  for more than 30 minutes; it is reported once and never stopped. When its log cannot be read, it is not called hung.
 - *Which jobs are held.* The main tick and the managed-tenant pull read the hold. The publish and as-built jobs read views
   only, so the updater protects the change from them by waiting for their running executions. Where the requests broker
   runs as an app rather than a job, it has no executions to wait for.
 - The Manager shows a deferred run as "waiting for a running PIM job".
+- *A known long job (planned, not built).* A full active-assignments snapshot in a very large tenant can run for over an
+  hour and is working, not hung. The updater keeps deferring while it runs and never stops it.
+
+**The update check runs every 15 minutes on every ring (3.0.46).** Every installation looks for an approved version every
+15 minutes by default, so an approved version reaches it within minutes rather than at the nightly window. The update
+itself still goes through the schema quiesce above.
+
+**Database statistics (3.0.46).** The database updates its statistics asynchronously (`AUTO_UPDATE_STATISTICS_ASYNC` on),
+so a read after a large write never waits for a statistics rebuild. After a bulk write the job refreshes the statistics
+that changed most (sampled, bounded per call and by a time budget, never inside a transaction) through one procedure that
+the job identities may only execute. Switching the setting on and creating the procedure need the database admin, so
+setup and the database job do it; the least-privilege updater does it only when it holds the right, and otherwise leaves
+it to them without a warning. A refusal is a warning, never a failed install or update.
 
 **The health check reads the latest ready revision (3.0.44).** After a roll, the health check reads the app's
 `latestReadyRevisionName` with one GET. Listing every revision is only a fallback, and an expired paging token restarts

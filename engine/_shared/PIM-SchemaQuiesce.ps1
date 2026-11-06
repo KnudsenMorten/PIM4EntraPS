@@ -120,6 +120,89 @@ function Get-PimSchemaQuiesceDecision {
     return [pscustomobject]@{ action = 'wait'; reason = ($what -join '; '); line = "schema quiesce: waiting ($mins of $([math]::Round($MaxWaitSeconds / 60.0, 1)) min) -- $($what -join '; ')" }
 }
 
+# ---- SCHEMA-QUIESCE-LONG-SNAPSHOT (live 2026-11-05, a ~124k-group tenant) ------------------------------------------------
+# The active-assignments snapshot in the tick runs well over an hour on a big tenant and logs little while it reads, so a
+# 20-minute bound deferred EVERY update there, and a working run looked hung (ops stopped one; never again). Now:
+#   (1) when ONE long job is all that runs, the updater waits for it up to that job's usual length (its last successful
+#       runs), at most Get-PimSchemaQuiesceLongCapMinutes, saying so; the hold is renewed to cover the longer wait;
+#   (2) the snapshot's group read logs a progress line at least every 5 minutes (PIM-Rest.ps1 Invoke-PimGraphBatchGet
+#       -ProgressLabel), so a working run is visibly alive;
+#   (3) only a run with NO log line for > 30 min AND past 3x its usual length counts as hung -- reported once, never
+#       stopped. When its log cannot be read, it is NOT called hung (said so).
+function Get-PimSchemaQuiesceLongCapMinutes   { <# PURE. LITERAL. The longest the updater waits for ONE known long job. #> return 180 }
+function Get-PimSchemaQuiesceLongMarginMinutes { <# PURE. LITERAL. Added to a long job's usual end before the updater defers. #> return 10 }
+function Get-PimSchemaQuiesceUsualRuns        { <# PURE. LITERAL. How many of a job's last successful runs set its usual length. #> return 5 }
+function Get-PimSchemaQuiesceHungSilentMinutes { <# PURE. LITERAL. No log line for longer than this (and past 3x usual) = hung. #> return 30 }
+function Get-PimSchemaQuiesceHungFactor       { <# PURE. LITERAL. Past this many times its usual length (and silent) = hung. #> return 3 }
+
+function Get-PimSchemaQuiesceUsualSeconds {
+    <#
+      PURE. A job's usual length in seconds: the LONGEST of its last Get-PimSchemaQuiesceUsualRuns successful runs (newest
+      first by start; conservative -- the updater would rather wait a little longer than defer again). $null when the job
+      has no finished successful run with both times.
+    #>
+    param([AllowNull()][object[]]$Executions, [int]$Runs = (Get-PimSchemaQuiesceUsualRuns))
+    $done = @(@($Executions | Where-Object { $null -ne $_ -and "$($_.status)" -match '^(?i)Succeeded$' }) | ForEach-Object {
+        $s = ConvertTo-PimSchemaQuiesceUtc $_.startUtc; $e = ConvertTo-PimSchemaQuiesceUtc $_.endUtc
+        if ($null -ne $s -and $null -ne $e -and $e -gt $s) { [pscustomobject]@{ start = $s; seconds = [int]($e - $s).TotalSeconds } }
+    } | Sort-Object start -Descending | Select-Object -First ([math]::Max(1, $Runs)))
+    if (-not $done.Count) { return $null }
+    return [int](@($done | Measure-Object seconds -Maximum).Maximum)
+}
+
+function Get-PimSchemaQuiesceLongWait {
+    <#
+      PURE. When ONE job runs (one execution, nothing unreadable) and its usual length is known and longer than the normal
+      bound, the bound becomes: (its start + usual length + margin) - the updater's start, never below -BaseSeconds, never
+      above -CapSeconds. @{ extend; seconds; job; execution; usualSeconds; line }. Anything else: extend = $false (the
+      normal 20-minute bound applies).
+    #>
+    param([Parameter(Mandatory)]$State, [AllowNull()][object[]]$Reads, [Parameter(Mandatory)][datetime]$StartUtc,
+          [int]$BaseSeconds = ((Get-PimSchemaQuiesceWaitMinutes) * 60), [int]$CapSeconds = ((Get-PimSchemaQuiesceLongCapMinutes) * 60),
+          [int]$MarginSeconds = ((Get-PimSchemaQuiesceLongMarginMinutes) * 60))
+    $no = [pscustomobject]@{ extend = $false; seconds = $BaseSeconds; job = ''; execution = ''; usualSeconds = $null; line = '' }
+    $run = @($State.running); if ($run.Count -ne 1 -or @($State.unreadable).Count) { return $no }
+    $r = $run[0]; if ($null -eq $r.startUtc) { return $no }
+    $rd = @($Reads | Where-Object { $null -ne $_ -and "$($_.job)" -ieq "$($r.job)" } | Select-Object -First 1)
+    if (-not $rd.Count) { return $no }
+    $usual = Get-PimSchemaQuiesceUsualSeconds -Executions @($rd[0].executions)
+    if ($null -eq $usual -or $usual -le $BaseSeconds) { return $no }
+    $want = [int](($r.startUtc.ToUniversalTime().AddSeconds($usual + $MarginSeconds)) - $StartUtc.ToUniversalTime()).TotalSeconds
+    $sec = [math]::Min($CapSeconds, [math]::Max($BaseSeconds, $want))
+    if ($sec -le $BaseSeconds) { return $no }
+    $line = "schema quiesce: {0} ({1}) is a long job -- its usual length is {2} min (its last successful runs), so the update waits for it up to {3} min (at most {4} min) instead of {5}; nothing is stopped" -f $r.job, $r.execution, [math]::Round($usual / 60.0), [math]::Round($sec / 60.0), [math]::Round($CapSeconds / 60.0), [math]::Round($BaseSeconds / 60.0)
+    return [pscustomobject]@{ extend = $true; seconds = [int]$sec; job = "$($r.job)"; execution = "$($r.execution)"; usualSeconds = $usual; line = $line }
+}
+
+function Get-PimSchemaQuiesceHung {
+    <#
+      PURE. Is a running execution hung? Only when BOTH: it has run longer than -Factor x its usual length, AND its last log
+      line is older than -SilentMinutes. -LastLogUtc $null = the log could not be read -> NOT hung (said so). No usual
+      length = NOT hung. @{ hung; past; line }. 'past' = it is past Factor x usual (whatever the log says). Never stops it.
+    #>
+    param([Parameter(Mandatory)]$Run, [AllowNull()][object]$UsualSeconds, [AllowNull()][object]$LastLogUtc, [datetime]$NowUtc = [datetime]::UtcNow,
+          [int]$Factor = (Get-PimSchemaQuiesceHungFactor), [int]$SilentMinutes = (Get-PimSchemaQuiesceHungSilentMinutes))
+    $now = $NowUtc.ToUniversalTime(); $st = ConvertTo-PimSchemaQuiesceUtc $Run.startUtc
+    $out = [ordered]@{ hung = $false; past = $false; line = '' }
+    if ($null -eq $st -or $null -eq $UsualSeconds -or [int]$UsualSeconds -le 0) { return [pscustomobject]$out }
+    $ranMin = ($now - $st).TotalMinutes; $usualMin = [int]$UsualSeconds / 60.0
+    if ($ranMin -le $Factor * $usualMin) { return [pscustomobject]$out }
+    $out.past = $true
+    $ll = ConvertTo-PimSchemaQuiesceUtc $LastLogUtc
+    if ($null -eq $ll) {
+        $out.line = "schema quiesce: {0} ({1}) has run {2} min, past {3}x its usual {4} min; its log could not be read, so it is NOT called hung -- it is not stopped" -f $Run.job, $Run.execution, [math]::Round($ranMin), $Factor, [math]::Round($usualMin)
+        return [pscustomobject]$out
+    }
+    $silent = ($now - $ll).TotalMinutes
+    if ($silent -gt $SilentMinutes) {
+        $out.hung = $true
+        $out.line = "schema quiesce: {0} ({1}) looks HUNG -- {2} min running (usual {3} min) and no log line for {4} min; it is NOT stopped by the updater (an operator decides)" -f $Run.job, $Run.execution, [math]::Round($ranMin), [math]::Round($usualMin), [math]::Round($silent)
+    } else {
+        $out.line = "schema quiesce: {0} ({1}) runs long ({2} min, usual {3} min) but is alive -- last log line {4} min ago; it is not stopped" -f $Run.job, $Run.execution, [math]::Round($ranMin), [math]::Round($usualMin), [math]::Round($silent)
+    }
+    return [pscustomobject]$out
+}
+
 function New-PimSchemaHoldRecord {
     # PURE. The hold row: set now, expires by itself after -Minutes.
     param([datetime]$NowUtc = [datetime]::UtcNow, [AllowEmptyString()][string]$By = '', [AllowEmptyString()][string]$Reason = '', [int]$Minutes = (Get-PimSchemaQuiesceHoldMinutes))
@@ -156,17 +239,23 @@ function Invoke-PimSchemaQuiesce {
         -ReadExecutions { param($Job) } -> ARM executions (value[]) | throws (a 404 = the job is not here = not running)
         -SetHold { param($Record) }    -> writes pim.Settings UpdateSchemaHold ($null seam = no store: waits without a hold)
         -Sleep { param($Seconds) }     -Now { } -> [datetime] UTC   -Log { param($Line) }
-      Returns @{ go; action (go|defer); line; waitedSeconds; reads; held; holdNote }. The hold is SET before the first read
+      Returns @{ go; action (go|defer); line; waitedSeconds; reads; held; holdNote; longWait; maxWaitSeconds; hung (job|execution
+      keys); notes (the long-wait / hung lines) }. The hold is SET before the first read
       and stays set on 'go' (the caller lifts it when its run ends); on 'defer' or a throw it is lifted here.
       NEVER stops, cancels or writes to any execution.
     #>
     param([AllowNull()][string[]]$Jobs, [Parameter(Mandatory)][scriptblock]$ReadExecutions, [AllowNull()][scriptblock]$SetHold = $null,
           [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }, [scriptblock]$Now = { [datetime]::UtcNow }, [scriptblock]$Log = $null,
           [int]$MaxWaitSeconds = ((Get-PimSchemaQuiesceWaitMinutes) * 60), [int]$PollSeconds = (Get-PimSchemaQuiescePollSeconds),
-          [AllowEmptyString()][string]$By = '', [switch]$NoHold)
+          [AllowEmptyString()][string]$By = '', [switch]$NoHold,
+          # SCHEMA-QUIESCE-LONG-SNAPSHOT: -LastLog { param($Job, $Execution) } -> the UTC time of that execution's last log line,
+          # $null = not readable ($null seam = never readable: nothing is called hung). -NoLongWait keeps the plain bound.
+          [AllowNull()][scriptblock]$LastLog = $null, [switch]$NoLongWait)
     $t0 = ([datetime](& $Now)).ToUniversalTime()
-    $out = [ordered]@{ go = $false; action = 'defer'; line = ''; waitedSeconds = 0; reads = 0; held = $false; holdNote = '' }
+    $out = [ordered]@{ go = $false; action = 'defer'; line = ''; waitedSeconds = 0; reads = 0; held = $false; holdNote = ''
+                       longWait = $false; maxWaitSeconds = $MaxWaitSeconds; hung = @(); notes = @() }
     $keep = $false
+    $reported = @{}
     try {
         if (-not $NoHold) {
             if ($SetHold) {
@@ -189,6 +278,32 @@ function Invoke-PimSchemaQuiesce {
             $tNow = ([datetime](& $Now)).ToUniversalTime()
             $waited = [int][math]::Max(0, ($tNow - $t0).TotalSeconds)
             $st = Get-PimSchemaQuiesceState -Reads $reads -NowUtc $tNow
+            # (1) ONE known long job is all that runs: wait for it up to its usual length (once per run), renewing the hold.
+            if (-not $NoLongWait -and -not $out.longWait -and $MaxWaitSeconds -gt 0 -and @($st.running).Count) {
+                $lw = Get-PimSchemaQuiesceLongWait -State $st -Reads $reads -StartUtc $t0 -BaseSeconds $MaxWaitSeconds
+                if ($lw.extend) {
+                    $MaxWaitSeconds = [int]$lw.seconds; $out.longWait = $true; $out.maxWaitSeconds = $MaxWaitSeconds
+                    $out.notes += $lw.line; if ($Log) { & $Log $lw.line }
+                    if ($out.held -and $SetHold) {
+                        $holdMin = [math]::Max((Get-PimSchemaQuiesceHoldMinutes), [int][math]::Ceiling(($MaxWaitSeconds - $waited) / 60.0) + 30)
+                        try { & $SetHold (New-PimSchemaHoldRecord -NowUtc $tNow -By $By -Reason "database update (waiting for $($lw.job), a long job)" -Minutes $holdMin) | Out-Null }
+                        catch { $n = "the hold could not be renewed for the longer wait ($((("$($_.Exception.Message)") -split "`n")[0])) -- it expires at its first time"; $out.notes += $n; if ($Log) { & $Log "schema quiesce: $n" } }
+                    }
+                }
+            }
+            # (3) hung = past 3x its usual length AND silent > 30 min in its log -- reported once per execution, never stopped.
+            foreach ($rr in @($st.running)) {
+                $key = "$($rr.job)|$($rr.execution)"; if ($reported.ContainsKey($key)) { continue }
+                $rdh = @($reads | Where-Object { "$($_.job)" -ieq "$($rr.job)" } | Select-Object -First 1)
+                $us = $(if ($rdh.Count) { Get-PimSchemaQuiesceUsualSeconds -Executions @($rdh[0].executions) } else { $null })
+                if ($null -eq $us) { continue }
+                if (-not (Get-PimSchemaQuiesceHung -Run $rr -UsualSeconds $us -LastLogUtc $null -NowUtc $tNow).past) { continue }   # the log is read only for a run already past 3x
+                $ll = $null; if ($LastLog) { try { $ll = & $LastLog "$($rr.job)" "$($rr.execution)" } catch { $ll = $null } }
+                $h = Get-PimSchemaQuiesceHung -Run $rr -UsualSeconds $us -LastLogUtc $ll -NowUtc $tNow
+                if (-not $h.past) { continue }
+                $reported[$key] = $true; $out.notes += $h.line; if ($h.hung) { $out.hung += $key }
+                if ($Log) { & $Log $h.line }
+            }
             $d = Get-PimSchemaQuiesceDecision -State $st -WaitedSeconds $waited -MaxWaitSeconds $MaxWaitSeconds
             $out.waitedSeconds = $waited; $out.line = $d.line; $out.action = $d.action
             if ($d.action -eq 'go') { $out.go = $true; $keep = $true; break }

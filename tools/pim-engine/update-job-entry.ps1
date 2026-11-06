@@ -659,6 +659,25 @@ function Clear-PimUpdaterSchemaHold {
         Say 'schema quiesce: the hold on the scheduled jobs is lifted' 'DarkGray'
     } catch { Say "schema quiesce: the hold could not be lifted ($((("$($_.Exception.Message)") -split "`n")[0])) -- it expires by itself" 'Yellow' }
 }
+# SCHEMA-QUIESCE-LONG-SNAPSHOT (3): the last log line of a run already past 3x its usual length, from the job's environment
+# workspace. READ ONLY (two ARM GETs + one Log Analytics query -- a POST that only reads). Best effort: no right / no workspace /
+# no row = $null = the run is NOT called hung. Never stops anything.
+$script:PimSqLogCid = ''
+function Get-PimUpdaterRunLastLogUtc {
+    param([string]$Job, [string]$Execution)
+    try {
+        if (-not $script:PimSqLogCid) {
+            $sqJ = Invoke-PimArm -Method GET -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs/$Job" -ApiVersion $script:PimAcaApi
+            $sqE = Invoke-PimArm -Method GET -Path "$($sqJ.properties.environmentId)" -ApiVersion $script:PimAcaApi
+            $script:PimSqLogCid = "$($sqE.properties.appLogsConfiguration.logAnalyticsConfiguration.customerId)".Trim()
+        }
+        if (-not $script:PimSqLogCid) { return $null }
+        $sqQ = "ContainerAppConsoleLogs_CL | where ContainerGroupName_s startswith '$("$Execution".Replace("'", "''"))' | summarize last = max(TimeGenerated)"
+        $sqR = Invoke-PimRest -Method POST -Url "https://api.loganalytics.io/v1/workspaces/$($script:PimSqLogCid)/query" -Resource 'https://api.loganalytics.io' -Body @{ query = $sqQ; timespan = 'P1D' }
+        $v = @(@(@($sqR.tables)[0].rows)[0])[0]
+        if ("$v".Trim()) { return (ConvertTo-PimSchemaQuiesceUtc $v) } else { return $null }
+    } catch { return $null }
+}
 function Invoke-PimUpdaterSchemaQuiesce {
     <# -Once: ONE read, no wait, no hold (the as-built converge on a run that did not quiesce): go only when nothing runs. #>
     param([AllowEmptyString()][string]$Cs = '', [switch]$Once)
@@ -670,7 +689,8 @@ function Invoke-PimUpdaterSchemaQuiesce {
     $sqHold = $null
     if (-not $Once -and "$Cs".Trim()) { $sqHoldCs = "$Cs"; $sqHold = { param($r) Set-PimSqlSetting -ConnectionString $sqHoldCs -Name (Get-PimSchemaHoldSettingName) -ValueJson (ConvertTo-Json -InputObject $r -Compress) } }
     $sqMax = $(if ($Once) { 0 } else { (Get-PimSchemaQuiesceWaitMinutes) * 60 })
-    $q = Invoke-PimSchemaQuiesce -Jobs $sqJobs -ReadExecutions $sqRead -SetHold $sqHold -By $selfJob -NoHold:$Once -MaxWaitSeconds $sqMax -Log { param($l) Say $l 'DarkGray' }
+    $sqLastLog = { param($j, $x) Get-PimUpdaterRunLastLogUtc -Job $j -Execution $x }   # SCHEMA-QUIESCE-LONG-SNAPSHOT (3): read only
+    $q = Invoke-PimSchemaQuiesce -Jobs $sqJobs -ReadExecutions $sqRead -SetHold $sqHold -By $selfJob -NoHold:$Once -MaxWaitSeconds $sqMax -NoLongWait:$Once -LastLog $sqLastLog -Log { param($l) Say $l 'DarkGray' }
     if ($q.held) { $script:PimSchemaHoldCs = "$Cs" }
     if ($q.go -and -not $Once) { $script:PimSchemaQuiet = $true }
     if (-not $Once) { Say "$($q.line) [$($sqJobs.Count) job(s) read$(if ($null -eq $sqExisting) { ', the job list was not readable: every resolved name read' })]" $(if ($q.go) { 'DarkGray' } else { 'Yellow' }) }
