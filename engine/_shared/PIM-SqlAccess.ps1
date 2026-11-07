@@ -734,7 +734,9 @@ function Invoke-PimSqlAccessConverge {
     [CmdletBinding()]
     # -ConnectionString may be EMPTY when -Query / -Exec carry the caller's own open connection (the admin run, the
     # Support-app cut-over): a Mandatory [string] refused '' and the admin run threw before converging (VM gate4, 2026-10-15).
-    param([AllowEmptyString()][string]$ConnectionString = '', [scriptblock]$Query, [scriptblock]$Exec, [System.Collections.IDictionary]$NameMap)
+    # -NoRevoke (DBINIT-STEP-FILTER, framework 8.18): ADD only -- no grant is taken away (the grants-only database job beside a
+    # running PIM job: a grant the running job still uses is never revoked under it). Default: unchanged.
+    param([AllowEmptyString()][string]$ConnectionString = '', [scriptblock]$Query, [scriptblock]$Exec, [System.Collections.IDictionary]$NameMap, [switch]$NoRevoke)
     if (-not "$ConnectionString" -and (-not $Query -or -not $Exec)) { throw 'Invoke-PimSqlAccessConverge: no connection string and no -Query/-Exec -- nothing to run against.' }
     if (-not $Query) { $Query = { param($cs, $sql) Invoke-PimSqlQuery -ConnectionString $cs -Sql $sql } }
     if (-not $Exec) { $Exec = { param($cs, $sql) [void](Invoke-PimSqlNonQuery -ConnectionString $cs -Sql $sql) } }
@@ -763,7 +765,7 @@ function Invoke-PimSqlAccessConverge {
     # into its role, and a user the UPDATER makes (the as-built reader) is passed with its app id. Reported as visibleUsers.
     $principals = @(& $Query $ConnectionString "SELECT name, CONVERT(VARCHAR(40), sid, 1) AS sid FROM sys.database_principals WHERE type = 'E';")
     $users = @(Get-PimSqlAccessComponentUsers -Principals $principals -NameMap $NameMap)
-    $revoke = @(Get-PimSqlAccessRevokeList -Held $held)
+    $revoke = @(if (-not $NoRevoke) { Get-PimSqlAccessRevokeList -Held $held })
     $all = @(Get-PimSqlAccessApplyBatches -Users $users -Revoke $revoke)
     # 2.4.644 (live 2026-10-16): a catalog grant the role ALREADY holds is converged -- it is not sent again, so it can never
     # be reported as refused (internal: 4 grants on SCHEMA::pimdemo were held -- an admin had applied them -- and still
@@ -911,6 +913,75 @@ function Invoke-PimSqlAccessInstall {
     }
     $conv = Invoke-PimSqlAccessConverge -ConnectionString $ConnectionString -Query $Query -Exec $Exec -NameMap $NameMap
     return [pscustomobject]@{ ok = $true; skipped = $false; reason = ''; signer = "$($facts.signer)"; signerExpiry = $facts.signerExpiry; converge = $conv; accessFacts = $af; statistics = $stats }
+}
+
+# ---- DBINIT-STEP-FILTER (framework 8.18 amended; PIM 3.0.51): THE GRANTS-ONLY ADMIN RUN, beside a running PIM job ------------
+function Get-PimSqlAccessGrantsOnlySchemaSql {
+    <# READ-ONLY. One row: the product schemas that are NOT there (a comma list; '' = all three exist). #>
+    [CmdletBinding()] param()
+    return "SELECT ISNULL((SELECT STRING_AGG(s.n, N',') FROM (VALUES (N'pim'), (N'platform'), (N'pimdemo')) AS s(n) WHERE SCHEMA_ID(s.n) IS NULL), N'') AS missing;"
+}
+
+function Test-PimSqlAccessResignNeeded {
+    <#
+      PURE. Would the admin batches re-create or re-sign pim.usp_ApplyAccess? Exactly their own conditions: batch 2 (missing, or
+      not this version) and batch 3 (not signed by a pim_access_signer certificate). $null facts = not known ($null).
+    #>
+    [CmdletBinding()] param([AllowNull()][object]$Facts)
+    if ($null -eq $Facts) { return $null }
+    return (-not ("$($Facts.procExists)" -eq '1' -and "$($Facts.procCurrent)" -eq '1' -and "$($Facts.signer)" -like 'pim_access_signer*'))
+}
+
+function Invoke-PimSqlAccessGrantsOnly {
+    <#
+      The ADMIN run of the access model reduced to the part that may run BESIDE a running PIM job (framework 8.18, PIM
+      DBINIT-STEP-FILTER): roles, grants and users only. Compared with Invoke-PimSqlAccessInstall it
+        * NEVER creates an object: the three product schemas must already be there (batch 1 is create-if-missing -- allowed
+          only because they exist); a missing one -> skipped, nothing changed (the full run, between runs, creates it);
+        * never touches a procedure the pipeline CALLS: no statistics procedure, no access facts procedure, no prerequisites
+          (demo tables);
+        * re-creates / re-signs pim.usp_ApplyAccess (only the updater and this job call it) ONLY when
+          Get-PimSchemaQuiesceDbInitResign allows it: no Support session open (-SupportState, Get-PimSupportJitState). Held ->
+          the admin batches do not run at all; the roles and grants still converge through the procedure that is there;
+        * ADDS only (converge -NoRevoke): a grant a running job still uses is never taken away under it.
+      -Query / -Exec: scriptblocks (cs, sql) on the caller's admin connection. Never a role removal (run 2 is not here).
+      Returns { ok; skipped; reason; resign (none | done | held); resignReason; signer; signerExpiry; converge }.
+    #>
+    [CmdletBinding()]
+    param([string]$ConnectionString = '', [Parameter(Mandatory)][scriptblock]$Query, [Parameter(Mandatory)][scriptblock]$Exec,
+          [string]$UpdaterUserName = '', [string]$UpdaterAppId = '', [System.Collections.IDictionary]$NameMap,
+          [AllowNull()][object]$SupportState = $null, [switch]$SetupGate)
+    $o = [ordered]@{ ok = $true; skipped = $false; reason = ''; resign = 'none'; resignReason = ''; signer = ''; signerExpiry = $null; converge = $null }
+    if ($SetupGate) {
+        $gm = if ($NameMap) { $NameMap } else { Get-PimSqlAccessInstallNameMap -NoRecord }
+        $g = Test-PimSqlAccessSetupGate -Row (@(& $Query $ConnectionString (Get-PimSqlAccessSetupGateSql -UserNames (@($gm['pim_web']) + @($gm['pim_engine']))))[0])
+        if (-not $g.install) { $o.skipped = $true; $o.reason = $g.reason; return [pscustomobject]$o }
+    }
+    $sm = @(& $Query $ConnectionString (Get-PimSqlAccessGrantsOnlySchemaSql))[0]
+    if ($null -eq $sm) { $o.skipped = $true; $o.reason = 'which product schemas exist could not be read -- nothing changed beside the run'; return [pscustomobject]$o }
+    $miss = "$($sm.missing)".Trim()
+    if ($miss) { $o.skipped = $true; $o.reason = "product schema(s) $miss not there yet -- creating them waits for the run end (the full run between runs); nothing changed"; return [pscustomobject]$o }
+    $facts = (Get-PimSqlAccessState -ConnectionString $ConnectionString -Query $Query).facts
+    $need = Test-PimSqlAccessResignNeeded -Facts $facts
+    $rs = [pscustomobject]@{ allow = $false; reason = 'the re-sign rule (PIM-SchemaQuiesce.ps1) is not loaded -- no re-sign' }
+    if (Get-Command Get-PimSchemaQuiesceDbInitResign -ErrorAction SilentlyContinue) { $rs = Get-PimSchemaQuiesceDbInitResign -Needed $need -SupportState $SupportState }
+    $o.resignReason = "$($rs.reason)"
+    if (-not $rs.allow) {
+        # the admin batches would re-create / re-sign: none of them runs. The grants converge through what is there (an
+        # unsigned / missing procedure -> the converge changes nothing and says so).
+        $o.resign = 'held'
+        $o.converge = Invoke-PimSqlAccessConverge -ConnectionString $ConnectionString -Query $Query -Exec $Exec -NameMap $NameMap -NoRevoke
+        $o.signer = "$(if ($facts) { $facts.signer })"; $o.signerExpiry = $(if ($facts) { $facts.signerExpiry } else { $null })
+        return [pscustomobject]$o
+    }
+    $o.resign = $(if ($need) { 'done' } else { 'none' })
+    foreach ($b in @(Get-PimSqlAccessAdminBatches -UpdaterUserName $UpdaterUserName -UpdaterAppId $UpdaterAppId)) { & $Exec $ConnectionString $b }
+    $facts2 = (Get-PimSqlAccessState -ConnectionString $ConnectionString -Query $Query).facts
+    $v = Test-PimSqlAccessInstalledState -Facts $facts2
+    if (-not $v.ok) { throw "the access model did not install: $($v.problems -join '; ')" }
+    $o.signer = "$($facts2.signer)"; $o.signerExpiry = $facts2.signerExpiry
+    $o.converge = Invoke-PimSqlAccessConverge -ConnectionString $ConnectionString -Query $Query -Exec $Exec -NameMap $NameMap -NoRevoke
+    return [pscustomobject]$o
 }
 
 function Get-PimSqlAccessState {

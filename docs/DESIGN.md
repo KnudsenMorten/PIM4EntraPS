@@ -5036,10 +5036,22 @@ read calls; nothing is ever stopped or cancelled.
   only, so the updater protects the change from them by waiting for their running executions. Where the requests broker
   runs as an app rather than a job, it has no executions to wait for.
 - The Manager shows a deferred run as "waiting for a running PIM job".
-- *The database job beside a run (planned for 3.0.51, not built).* The database setup job will be allowed to run while a
-  PIM job runs only for the part that changes no table or column that job uses: grants and role membership, objects
-  created only when missing that already exist, and re-signing procedures the running job does not call -- and a re-sign
-  only while no support session is open. Every other database step keeps waiting for the run to end, as above.
+- *The database job beside a run (3.0.51, built; not yet proven on a live install).* The database setup job takes a step
+  filter per execution, `PIM_DBINIT_STEPS`. Not set (or `all`), it runs every step exactly as before. Set to `grants`, it
+  runs only the part that changes no table or column a running PIM job uses, so it may run while one does:
+  - the database users of the components and their role membership, and the component roles and grants, applied through
+    the signed access procedure, adding only (a grant the running job may still use is never taken away under it);
+  - objects created only when missing, and only when they already exist: if one of the product schemas is missing, the
+    access step changes nothing and says so;
+  - re-creating and re-signing the access procedure, which only the updater and the database job call, and only when no
+    support session is open. The job reads the support session state from the database first. If a session is open, or
+    the state cannot be read, nothing is re-signed and the grants converge through the procedure already there.
+  Every other step is not run beside a run and says so in one line: the base schema, the statistics setting and its
+  procedure, the access facts procedure and the demo tables (procedures the pipeline calls, or tables), and the policy and
+  mail templates (rows the running jobs read). A run that asks on purpose for something that is not a grant (feature gates,
+  the Manager access list, the update ring record, or the second cut-over run that takes roles away) is refused before the
+  job connects, and nothing is changed. Those steps keep waiting for the run to end, as above. An unknown filter value is
+  refused too. The filter is never written on the job's definition: a starter passes it for one execution.
 
 **The update check runs every 15 minutes on every ring (3.0.46).** Every installation looks for an approved version every
 15 minutes by default, so an approved version reaches it within minutes rather than at the nightly window. The update

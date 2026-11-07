@@ -13,9 +13,13 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.51 -- 2026-11-07
+
+- The database setup job can now run only its safe part (database users, role membership and grants, added only) while a PIM job is running; every other step still waits for the run to end, and the access procedure is re-signed only while no support session is open; an update no longer starts the full database setup job while a PIM job is running, it waits for a later run
+
 ## 3.0.50 -- 2026-11-06
 
-- Security findings PIM Manager already mails you (live access that differs from your definitions, new privileged roles or groups nobody manages, and the guard alert) now also reach Invardia support as alerts, so support sees them without waiting for you; each update run reports its stages to Invardia, and every status report says which PIM jobs are running and for how long, so support can tell a long job from a stuck one; a new installation starts at the sizes the fleet has learned (2 CPU / 4 GiB, 4 CPU / 8 GiB from 15,000 users) instead of starting small and being raised later; a resumed install never reuses the package of another version; settings pages store only the values you set yourself
+- Three security findings (live access that differs from your definitions, new privileged roles or groups nobody manages, and the break-glass emergency override being switched on) now also reach Invardia support as alerts, so support sees them without waiting for you; each update run reports its stages to Invardia, and every status report says which PIM jobs are running and for how long, so support can tell a long job from a stuck one; a new installation starts at the sizes the fleet has learned (2 CPU / 4 GiB, 4 CPU / 8 GiB from 15,000 users) instead of starting small and being raised later; a resumed install never reuses the package of another version; settings pages store only the values you set yourself
 
 ## 3.0.49 -- 2026-11-06
 

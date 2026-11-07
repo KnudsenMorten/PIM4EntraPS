@@ -439,8 +439,15 @@ function Invoke-PimUpdaterConvergeStep {
         $dbGate = if ($db -and [bool]$db.dedicated) { Get-PimDbInitJobStartGate -Membership $dbm -Proof $dbProof -PrincipalId "$($db.identityPrincipalId)" -GroupId $dbProofGroup } else { $null }
         # framework 4.5 G3a: added in THIS run -> the identity's token still carries the old group claims; not started now
         if ($dbGate -and $dbGate.start -and "$($dbm.addedUtc)".Trim()) { $dbGate = @{ start = $false; reason = (Get-PimDbInitTokenWait -AddedUtc "$($dbm.addedUtc)").reason + ' -- the cut-over waits for a later run' } }
+        # SCHEMA-QUIESCE-818 (3.0.51, found by the DBINIT-STEP-FILTER build): the cut-over starts the FULL database job (schema,
+        # access run 1 / run 2). A run that waited for quiet and holds the scheduled jobs goes on; any other run reads the
+        # executions ONCE first and does not start the job while a PIM job runs -- the next update starts it.
+        $coQ = $null
+        if (-not ($dbGate -and -not $dbGate.start) -and "$csSize".Trim() -and -not $script:PimSchemaQuiet) { $coQ = Invoke-PimUpdaterSchemaQuiesce -Cs "$csSize" -Once }
         if ($dbGate -and -not $dbGate.start) {
             Say "database access cut-over: not started -- $($dbGate.reason)" 'DarkGray'
+        } elseif ($coQ -and -not $coQ.go) {
+            Say "database access cut-over: not started -- $($coQ.line -replace '^schema quiesce: ', '') -- the cut-over waits for a later run" 'DarkGray'
         } elseif ("$csSize".Trim()) {
             $coCs = "$csSize"
             $coApp = "$((Get-PimJwtPrincipal -Token $global:PIM_SqlAccessToken).appid)".Trim()

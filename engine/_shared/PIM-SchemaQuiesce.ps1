@@ -321,3 +321,113 @@ function Invoke-PimSchemaQuiesce {
     }
     return [pscustomobject]$out
 }
+
+# ---- DBINIT-STEP-FILTER (framework 8.18 amended, Invardia 2026-11-06; PIM 3.0.51) -------------------------------------------
+# The database setup job (dbinit-job-entry.ps1) MAY run BESIDE a running PIM pipeline job -- but only the part that changes no
+# table or column the run uses: grants and role membership, create-if-missing objects that already exist, and (re)signing a
+# procedure the pipeline does not call, the re-sign only while NO Support session is open. Everything else keeps waiting for
+# the run end, exactly as above (the updater's quiesce + hold). The job asks for that part with the step filter
+#     PIM_DBINIT_STEPS = grants      (per execution; unset or 'all' = every step, today's behaviour, unchanged)
+# The rules live HERE, next to the quiesce they extend: which step is which kind (Get-PimDbInitStepClass), what a filter lets
+# through (Get-PimSchemaQuiesceDbInitPlan) and whether a re-sign may run now (Get-PimSchemaQuiesceDbInitResign). PURE.
+# A grants-only run assumes a run IS going (it never has to read the executions to be safe): it is the part that is safe beside one.
+function Get-PimDbInitStepsSettingName { <# PURE. LITERAL. The per-execution setting of the step filter. #> return 'PIM_DBINIT_STEPS' }
+function Get-PimDbInitStepIds {
+    <# PURE. LITERAL. Every step of the database job, in the order the job runs them. #>
+    return @('users', 'schema', 'statistics', 'access-prerequisites', 'access', 'access-facts', 'access-run2', 'policy-templates', 'mail-templates', 'feature-gates', 'manager-access', 'update-seed')
+}
+function Get-PimDbInitStepClass {
+    <#
+      PURE. LITERAL. What kind of change a step makes:
+        grants   principals, role membership and grants only (users; access = the roles + grants through the signed procedure,
+                 which may also re-create / re-sign pim.usp_ApplyAccess -- a procedure only the updater and this job call; that
+                 half is decided by Get-PimSchemaQuiesceDbInitResign at run time)
+        schema   creates / changes tables, columns, a database setting, or a procedure the pipeline CALLS (base schema, demo
+                 tables, statistics = pim.usp_RefreshStatistics, the access facts procedure the engine executes)
+        removal  takes roles away from the users the running jobs sign in as (run 2 of the cut-over)
+        data     writes rows the running jobs read (templates, feature gates, Manager access, the update ring record)
+      An unknown step is 'schema' (the conservative kind: it waits for the run end).
+    #>
+    param([AllowEmptyString()][string]$Step)
+    switch ("$Step".Trim().ToLowerInvariant()) {
+        'users'                { return 'grants' }
+        'access'               { return 'grants' }
+        'access-run2'          { return 'removal' }
+        'policy-templates'     { return 'data' }
+        'mail-templates'       { return 'data' }
+        'feature-gates'        { return 'data' }
+        'manager-access'       { return 'data' }
+        'update-seed'          { return 'data' }
+        default                { return 'schema' }
+    }
+}
+function ConvertTo-PimDbInitStepFilter {
+    <# PURE. The step filter from its setting: '' / 'all' -> all (today's behaviour); 'grants' -> grants. Anything else is REFUSED. @{ ok; filter; reason } #>
+    param([AllowNull()][AllowEmptyString()][string]$Value)
+    $v = "$Value".Trim().ToLowerInvariant()
+    if ($v -eq '' -or $v -eq 'all') { return [pscustomobject]@{ ok = $true; filter = 'all'; reason = 'every step (no step filter)' } }
+    if ($v -eq 'grants') { return [pscustomobject]@{ ok = $true; filter = 'grants'; reason = 'grants only: the part that may run beside a running PIM job (framework 8.18)' } }
+    return [pscustomobject]@{ ok = $false; filter = ''; reason = "$(Get-PimDbInitStepsSettingName) is '$("$Value".Trim())' -- it is 'all' or 'grants' (or not set)" }
+}
+function Get-PimSchemaQuiesceDbInitPlan {
+    <#
+      PURE. What the database job runs under its step filter.
+        -Filter   'all' | 'grants' (ConvertTo-PimDbInitStepFilter)
+        -Asked    the steps this execution would run without a filter (Get-PimDbInitStepIds names them)
+        -Explicit the steps a STARTER asked for on purpose (a setting given for this run: feature gates, Manager access, the
+                  update ring record, run 2). Under 'grants' an explicit ask of any step that is not 'grants' REFUSES the whole
+                  run -- nothing is connected to or changed: the starter is told it waits for the run end, never silently
+                  dropped. A default step the job's definition carries (the base schema, statistics, templates) is held: not
+                  run, said in one line each.
+      Returns @{ filter; run[]; held[] (@{ step; class; line }); refused; reason; lines[] }.
+    #>
+    param([Parameter(Mandatory)][string]$Filter, [AllowNull()][string[]]$Asked = @(), [AllowNull()][string[]]$Explicit = @())
+    $ask = @(@($Asked) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Select-Object -Unique)
+    $exp = @(@($Explicit) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+    $out = [ordered]@{ filter = $Filter; run = @(); held = @(); refused = $false; reason = ''; lines = @() }
+    if ($Filter -ne 'grants') { $out.run = $ask; $out.reason = 'every step (no step filter)'; return [pscustomobject]$out }
+    $run = New-Object System.Collections.Generic.List[string]; $held = New-Object System.Collections.Generic.List[object]; $bad = New-Object System.Collections.Generic.List[string]
+    foreach ($s in $ask) {
+        $c = Get-PimDbInitStepClass -Step $s
+        if ($c -eq 'grants') { [void]$run.Add($s); continue }
+        $why = switch ($c) { 'removal' { 'it takes roles away from the users the running jobs sign in as' } 'data' { 'it writes rows the running jobs read' } default { 'it changes a table, a column, a database setting or a procedure the pipeline calls' } }
+        if ($exp -contains $s) { [void]$bad.Add("$s ($why)"); continue }
+        [void]$held.Add([pscustomobject]@{ step = $s; class = $c; line = "beside a run: $s REFUSED -- $why; it waits for the run end (SCHEMA-QUIESCE-818: start the job without $(Get-PimDbInitStepsSettingName) between runs)" })
+    }
+    $out.run = @($run.ToArray()); $out.held = @($held.ToArray())
+    if ($bad.Count) {
+        $out.refused = $true; $out.run = @()
+        $out.reason = "$(Get-PimDbInitStepsSettingName) = grants, but this run also asks for $($bad -join '; ') -- that waits for the run end (SCHEMA-QUIESCE-818); nothing was connected to or changed"
+        $out.lines = @("REFUSED: $($out.reason)")
+        return [pscustomobject]$out
+    }
+    $out.reason = "grants only ($(if ($run.Count) { $run -join ', ' } else { 'no grants step asked' })) -- the part that may run beside a running PIM job"
+    $out.lines = @(@("step filter: $($out.reason)") + @($held | ForEach-Object { $_.line }))
+    return [pscustomobject]$out
+}
+function Get-PimSchemaQuiesceDbInitResign {
+    <#
+      PURE. May the grants-only run re-create / re-sign the access procedure NOW? (framework 8.18: a re-sign only while NO
+      Support session is open.)
+        -Needed        $false = the procedure is current and signed (nothing is re-signed) -> yes
+                       $true  = the admin batches would re-create / re-sign it
+                       $null  = not known -> no
+        -SupportState  Get-PimSupportJitState (engine/_shared/PIM-SupportJit.ps1): installed $false = no session can be open;
+                       jitOpen $false = none open; jitOpen $true = open; not read = NOT known -> no re-sign (conservative)
+      @{ allow; reason }. Never a guess: anything unreadable keeps the re-sign behind.
+    #>
+    param([AllowNull()][object]$Needed, [AllowNull()][object]$SupportState)
+    if ($Needed -is [bool] -and -not $Needed) { return [pscustomobject]@{ allow = $true; reason = 'nothing to re-sign: the access procedure is current and signed' } }
+    if ($null -eq $Needed) { return [pscustomobject]@{ allow = $false; reason = 'whether the access procedure needs a re-sign could not be read -- no re-sign beside a run' } }
+    if ($null -eq $SupportState) { return [pscustomobject]@{ allow = $false; reason = 'the Support session state was not read -- the re-sign waits (a re-sign runs only while no Support session is open)' } }
+    $g = { param($k) if ($SupportState -is [System.Collections.IDictionary]) { if ($SupportState.Contains($k)) { $SupportState[$k] } else { $null } } elseif ($SupportState.PSObject.Properties[$k]) { $SupportState.$k } else { $null } }
+    if ((& $g 'installed') -eq $false) { return [pscustomobject]@{ allow = $true; reason = 'no Support session can be open (time-limited support access is not set up here) -- the access procedure is re-signed' } }
+    $open = & $g 'jitOpen'
+    if ($open -eq $true) {
+        $u = "$(& $g 'jitUntil')".Trim()
+        return [pscustomobject]@{ allow = $false; reason = "a Support session is open$(if ($u) { " (until $u)" }) -- the re-sign of the access procedure waits until it is closed; the grants run without it" }
+    }
+    if ($open -eq $false -and (& $g 'read') -ne $false) { return [pscustomobject]@{ allow = $true; reason = 'no Support session is open -- the access procedure is re-signed' } }
+    $p = "$(& $g 'problem')".Trim()
+    return [pscustomobject]@{ allow = $false; reason = "the Support session state could not be read$(if ($p) { " ($p)" }) -- the re-sign waits (a re-sign runs only while no Support session is open)" }
+}

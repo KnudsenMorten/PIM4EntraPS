@@ -43,6 +43,17 @@ Step 'start'
 # PIM 100.156 B: the access catalog decides each principal's roles (Get-PimSqlComponentAccess) -- loaded BEFORE the plan.
 . (Join-Path $solRoot 'engine/_shared/PIM-InstallNames.ps1')
 . (Join-Path $solRoot 'engine/_shared/PIM-SqlAccess.ps1')
+# DBINIT-STEP-FILTER (framework 8.18 amended; PIM 3.0.51): the step filter's rules live beside the schema quiesce they extend,
+# and the "no open Support session before a re-sign" read is the support-access module's own state read.
+. (Join-Path $solRoot 'engine/_shared/PIM-SchemaQuiesce.ps1')
+. (Join-Path $solRoot 'engine/_shared/PIM-SupportJit.ps1')
+
+# PIM_DBINIT_STEPS (per execution): unset / 'all' = every step, as before; 'grants' = ONLY the part that may run BESIDE a running
+# PIM job (users, role membership, the access roles + grants; a re-sign of the access procedure only while no Support session is
+# open). Every other step keeps waiting for the run end (SCHEMA-QUIESCE-818). Anything else is refused before anything is read.
+$stepF = ConvertTo-PimDbInitStepFilter -Value "$($env:PIM_DBINIT_STEPS)"
+if (-not $stepF.ok) { Say "REFUSED: $($stepF.reason)" 'Red'; exit 2 }
+$grantsOnly = ($stepF.filter -eq 'grants')
 
 $sqlServer = "$($env:PIM_SqlServer)".Trim()
 $sqlDb     = "$($env:PIM_SqlDatabase)".Trim(); if (-not $sqlDb) { $sqlDb = 'PimPlatform' }
@@ -85,6 +96,33 @@ if (-not @($plan.users).Count) {
     Say "no principals to create -- the user step is skipped; continuing with: $(@($otherWork) -join ', ')" 'DarkGray'
 }
 
+# ---- DBINIT-STEP-FILTER: which steps this execution runs -------------------------------------------------------------------
+# The steps it would run without a filter (the SAME conditions as the blocks below), and the ones a starter asked for on
+# purpose. Without a filter every asked step runs ($runStep is always true -- today's behaviour). With 'grants' only the grants
+# kind runs; a default step of the job's definition (base schema, statistics, templates) is held with one line, and an explicit
+# ask that is not a grant (feature gates, Manager access, the update ring record, run 2) refuses the whole run, before connecting.
+$djTrue = @('1', 'true', 'yes', 'TRUE', 'Yes')
+$askedSteps = New-Object System.Collections.Generic.List[string]; $explicitSteps = New-Object System.Collections.Generic.List[string]
+if (@($plan.users).Count) { [void]$askedSteps.Add('users') }
+if ("$($env:PIM_DBINIT_SCHEMA)".Trim() -in $djTrue) { [void]$askedSteps.Add('schema') }
+[void]$askedSteps.Add('statistics')
+if ("$($env:PIM_DBINIT_SQL_ACCESS)".Trim()) {
+    foreach ($s in @('access-prerequisites', 'access', 'access-facts')) { [void]$askedSteps.Add($s) }
+    $djR2 = $false; try { $djSa = "$($env:PIM_DBINIT_SQL_ACCESS)".Trim() | ConvertFrom-Json; $djR2 = [bool]($djSa.PSObject.Properties['run2'] -and [bool]$djSa.run2) } catch { $djR2 = $false }
+    if ($djR2) { [void]$askedSteps.Add('access-run2'); [void]$explicitSteps.Add('access-run2') }
+}
+[void]$askedSteps.Add('policy-templates'); [void]$askedSteps.Add('mail-templates')
+if ("$($env:PIM_DBINIT_FEATURE_GATES)$($env:PIM_DBINIT_FEATURE_DISABLE)".Trim()) { [void]$askedSteps.Add('feature-gates'); [void]$explicitSteps.Add('feature-gates') }
+if ("$($env:PIM_DBINIT_MANAGER_ACCESS)".Trim()) { [void]$askedSteps.Add('manager-access'); [void]$explicitSteps.Add('manager-access') }
+if ("$($env:PIM_DBINIT_UPDATE_SEED)".Trim()) { [void]$askedSteps.Add('update-seed'); [void]$explicitSteps.Add('update-seed') }
+$stepPlan = Get-PimSchemaQuiesceDbInitPlan -Filter $stepF.filter -Asked @($askedSteps.ToArray()) -Explicit @($explicitSteps.ToArray())
+$runStep = { param($id) (-not $grantsOnly) -or (@($stepPlan.run) -contains "$id") }
+if ($grantsOnly) {
+    foreach ($l in @($stepPlan.lines)) { Say $l $(if ($stepPlan.refused) { 'Red' } else { 'DarkGray' }) }
+    if ($stepPlan.refused) { exit 2 }
+    if (-not @($stepPlan.run).Count) { Say 'grants only: no grants step is asked for this run -- nothing connected to or changed.' 'Yellow'; exit 0 }
+}
+
 Step ("plan: " + $(if (@($plan.users).Count) { (@($plan.users) | ForEach-Object { $_.name }) -join ', ' } else { '(no users)' }))
 
 # 🔴 BLAST-RADIUS GUARD, BEFORE ANY CONNECTION IS OPENED.
@@ -111,7 +149,7 @@ Say "blast-radius check: $(@($plan.users).Count) statement set(s), none touch ta
 # 🪤 ORDER MATTERS: users FIRST, schema SECOND. The apps authenticate as the contained users, and
 # the conformance work the nightly in-cloud updater does later runs as them.
 $schemaFiles = @()
-if ("$($env:PIM_DBINIT_SCHEMA)".Trim() -in @('1','true','yes','TRUE','Yes')) {
+if ("$($env:PIM_DBINIT_SCHEMA)".Trim() -in @('1','true','yes','TRUE','Yes') -and (& $runStep 'schema')) {   # DBINIT-STEP-FILTER: never under 'grants'
     # 2026-09-18 (IMP-46): sql/local-schema.sql (only the dead pim.LocalAdmins / pim.LocalResources)
     # was retired. The one shipped base-schema file is platform-schema.sql; the verify below still
     # requires tables in 'pim' after it runs (it creates pim.CentralAdmins + pim.TenantRoleProjection).
@@ -270,7 +308,7 @@ try {
     # same idempotent call). BEFORE the access block, so its converge grants the job roles EXECUTE on the procedure. Own
     # statements on this connection, no transaction; the async setting is read back. A refusal is a WARNING, never a failed
     # job ($failed is not touched).
-    if (-not $failed) {
+    if (-not $failed -and (& $runStep 'statistics')) {   # DBINIT-STEP-FILTER: a procedure the pipeline calls -- never under 'grants'
         Step 'statistics'
         $sq = { param($csx, $sql) $c3 = $conn.CreateCommand(); $c3.CommandText = $sql; $c3.CommandTimeout = 60
                 $rd3 = $c3.ExecuteReader(); $rows3 = New-Object System.Collections.Generic.List[object]
@@ -298,6 +336,20 @@ try {
                    while ($rd.Read()) { $o = [ordered]@{}; for ($i = 0; $i -lt $rd.FieldCount; $i++) { $o[$rd.GetName($i)] = $(if ($rd.IsDBNull($i)) { $null } else { $rd.GetValue($i) }) }; $rows.Add([pscustomobject]$o) }
                    $rd.Close(); $rows.ToArray() }
             $x = { param($csx, $sql) $c2 = $conn.CreateCommand(); $c2.CommandText = $sql; $c2.CommandTimeout = 120; [void]$c2.ExecuteNonQuery() }
+            if ($grantsOnly) {
+                # DBINIT-STEP-FILTER (framework 8.18): beside a running PIM job -- roles, grants and users only, ADD only; no
+                # prerequisites, no statistics or facts procedure (the pipeline calls those); the access procedure is re-signed
+                # only when no Support session is open (read here, through the support module's own state procedure).
+                $ss = { param($sqlText) $c4 = $conn.CreateCommand(); $c4.CommandText = $sqlText; $c4.CommandTimeout = 60; $c4.ExecuteScalar() }
+                $sup = Get-PimSupportJitState -Sql $ss
+                $ag = Invoke-PimSqlAccessGrantsOnly -Query $q -Exec $x -UpdaterUserName "$($sa.updaterUserName)" -UpdaterAppId "$($sa.updaterAppId)" -SupportState $sup -SetupGate:("$($sa.mode)" -eq 'setup')
+                if ($ag.skipped) { Say "grants only: least-privilege access NOT converged: $($ag.reason)" 'Yellow' }
+                else {
+                    Say "grants only: re-sign $($ag.resign) -- $($ag.resignReason)" $(if ($ag.resign -eq 'held') { 'Yellow' } else { 'DarkGray' })
+                    if ($ag.converge -and $ag.converge.applied) { Say ("grants only: $($ag.converge.statements) statement(s) converged (added only); users $(@($ag.converge.users) -join ', ')") 'Green' }
+                    elseif ($ag.converge) { Say "grants only: nothing converged: $($ag.converge.reason)" 'Yellow' }
+                }
+            } else {
             $ar = Invoke-PimSqlAccessInstall -Query $q -Exec $x -UpdaterUserName "$($sa.updaterUserName)" -UpdaterAppId "$($sa.updaterAppId)" -WithPrerequisites -SetupGate:("$($sa.mode)" -eq 'setup')
             if ($ar.skipped) { Say "least-privilege access NOT installed: $($ar.reason)" 'Yellow' }
             else {
@@ -316,6 +368,7 @@ try {
                 }
             }
             }
+            }   # DBINIT-STEP-FILTER: end of the full (no filter) admin run
         } catch {
             Say "FAILED least-privilege access: $($_.Exception.Message)" 'Red'; $failed++
         }
@@ -326,7 +379,7 @@ try {
     # shipped version they came from are upgraded to the new shipped content (audited), CUSTOMISED ones are
     # kept and flagged TEMPLATE-UPGRADE-AVAILABLE, new shipped templates are seeded (BUG-55 semantics,
     # Update-PimPolicyTemplateStore). Verified by read-back.
-    if (-not $failed) {
+    if (-not $failed -and (& $runStep 'policy-templates')) {   # DBINIT-STEP-FILTER: rows the running jobs read -- never under 'grants'
         Step 'policy templates'
         try {
             . (Join-Path $solRoot 'engine/_shared/PIM-PolicyBaseline.ps1')
@@ -342,7 +395,7 @@ try {
     # pim.Settings 'MailTemplates' is seeded from the shipped templates/mail here; unedited entries follow a
     # newer shipped body, edited ones are kept, and the retired MailTemplateOverrides setting is merged in
     # ONCE (additive, audited). The engine and the Manager both read only this store.
-    if (-not $failed) {
+    if (-not $failed -and (& $runStep 'mail-templates')) {   # DBINIT-STEP-FILTER: rows the running jobs read -- never under 'grants'
         Step 'mail templates'
         try {
             . (Join-Path $solRoot 'engine/_shared/PIM-MailTemplateStore.ps1')
@@ -489,5 +542,6 @@ try {
 }
 
 if ($failed) { Step "FAILED ($failed problem(s))"; exit 1 }
+if ($grantsOnly) { Step "grants only: done ($(@($stepPlan.run) -join ', ')); every other step waits for the run end" }
 Step 'done -- every principal created and verified'
 exit 0
