@@ -41,7 +41,10 @@ $routes = Get-PimApiReferenceRoutes -SolutionRoot $sol
 $desc = Get-PimApiRefDescriptions -SolutionRoot $sol
 
 # ---------------------------------------------------------------------------------------------------------- the MCP tools
-$mgrSrc = [IO.File]::ReadAllText((Join-Path $sol 'tools\pim-manager\Open-PimManager.ps1'))
+# §84 P3: the MCP tool list lives in the Manager's Pro route module (_proroutes.ps1) since 3.0.56 -- read it there.
+$mgrFile = Join-Path $sol 'tools\pim-manager\_proroutes.ps1'
+if (-not (Test-Path -LiteralPath $mgrFile)) { $mgrFile = Join-Path $sol 'tools\pim-manager\Open-PimManager.ps1' }
+$mgrSrc = [IO.File]::ReadAllText($mgrFile)
 $ast = [System.Management.Automation.Language.Parser]::ParseInput($mgrSrc, [ref]$null, [ref]$null)
 # The MCP library is a Pro file (absent from the community payload): guarded, and without it there are no MCP tools to list.
 $mcpLib = Join-Path $sol 'engine\mcp\PIM-Mcp.ps1'

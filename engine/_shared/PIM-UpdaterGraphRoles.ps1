@@ -14,7 +14,9 @@
         token and REPORTS a missing one (Get-PimUpdaterGraphRoleCheck) -- it can never grant itself.
     Why each: the updater puts the database job's identity (id-pim-dbinit) into the SQL admin group and renews it
     (engine/_shared/PIM-DbInitMembership.ps1). The group is ROLE-ASSIGNABLE on purpose (SEC-32), so its membership through PIM
-    for Groups needs only the PIM-for-Groups rights (framework 4.5 G5).
+    for Groups needs only the PIM-for-Groups rights (framework 4.5 G5). APP-REG-OWNER (framework SECAUDIT-1a item 2): the updater
+    proves, as an OWNER, that it can change PIM's product app registrations (engine/_shared/PIM-AppRegOwner.ps1) --
+    Application.ReadWrite.OwnedBy.
     PURE: no network. ASCII only; PS 5.1 + 7; no modules.
 #>
 Set-StrictMode -Off
@@ -22,7 +24,8 @@ Set-StrictMode -Off
 function Get-PimUpdaterGraphAppRoles {
     <#
       PURE. The updater's Graph application permissions, name -> appRoleId (ordered) -- EXACTLY framework 4.5 G5 (Invardia,
-      binding 2026-11-05, updated the same day with GroupMember.Read.All and Application.Read.All (FIVE rights); SI proved at a customer that the PIM-for-Groups rights alone add and read back a member of a
+      binding 2026-11-05, updated the same day with GroupMember.Read.All and Application.Read.All (FIVE rights), and on 2026-11-07
+      with Application.ReadWrite.OwnedBy (SIX, SECAUDIT-1a item 2); SI proved at a customer that the PIM-for-Groups rights alone add and read back a member of a
       role-assignable group). Ids from the live Microsoft Graph service principal (the same ids as the maps in
       tools/setup/_PimSetupShared.ps1).
         PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup  the ACTIVE member assignment (adminAssign / adminExtend / adminRenew)
@@ -36,8 +39,15 @@ function Get-PimUpdaterGraphAppRoles {
                                                              -- reading a SERVICE PRINCIPAL (the database job identity) needs it
                                                              besides GroupMember.Read.All (framework 4.5 G5, Invardia
                                                              2026-11-05, cea85308)
+        Application.ReadWrite.OwnedBy                        APP-REG-OWNER (framework SECAUDIT-1a item 2, Invardia ruling
+                                                             2026-11-07; 3.0.54): writes ONLY to the app registrations the
+                                                             updater OWNS -- PIM's product registrations, after a recorded
+                                                             support step made it an owner (tools/setup/_PimAppRegOwner.ps1).
+                                                             The updater's one write with it is the proof PATCH
+                                                             (engine/_shared/PIM-AppRegOwner.ps1); it never adds itself as an
+                                                             owner and never grants itself a role.
       NEVER a directory-role right and no group WRITE right: the direct add (a) is refused on a role-assignable group (SEC-32)
-      -- expected; (b) follows.
+      -- expected; (b) follows. Never Application.ReadWrite.All (tenant-wide).
     #>
     return [ordered]@{
         'PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup' = '41202f2c-f7ab-45be-b001-85c9728b9d69'
@@ -45,6 +55,7 @@ function Get-PimUpdaterGraphAppRoles {
         'RoleManagementPolicy.Read.AzureADGroup'              = '69e67828-780e-47fd-b28c-7b27d14864e6'
         'GroupMember.Read.All'                                = '98830695-27a2-44f7-8c18-0c3ebc9698f6'
         'Application.Read.All'                                = '9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30'
+        'Application.ReadWrite.OwnedBy'                       = '18a4783c-866b-4cc7-a460-3d5e5662c884'
     }
 }
 function Get-PimUpdaterGraphRoleCheck {

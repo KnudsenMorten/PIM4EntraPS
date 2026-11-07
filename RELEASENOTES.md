@@ -13,6 +13,18 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.56 -- 2026-11-07
+
+- Pro-only pages and calls on a Community installation now answer one plain line (This is part of PIM Manager Pro. Your installation is Community.) with a link to invardia.com; the Pro page and route code has left the shared files, so the public Community release carries none of it; the Community edition is now licensed under the PolyForm Shield License 1.0.0, and the Pro terms ship only in the Pro package
+
+## 3.0.55 -- 2026-11-07
+
+- On a Community installation the updater owns only its own sign-in app registration, never a Pro registration in the same tenant
+
+## 3.0.54 -- 2026-11-07
+
+- PIM Manager app registrations are owned by the installation updater: every update checks and reports whether the updater owns them and proves it once with a harmless change it reads back, never adding itself or removing anyone; support adds the updater as owner and removes its own ownership only after that proof
+
 ## 3.0.53 -- 2026-11-07
 
 - Taking a job identity out of the SQL admin group now reads the membership from the side of that identity, so a role-assignable group that hides its member list is never reported as already empty, and the removal uses a privileged-group removal on such a group, read back from both sides

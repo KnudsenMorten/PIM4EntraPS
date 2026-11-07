@@ -83,6 +83,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-DbInitMembership.ps1') # framework 4.5 point 5: the database job identity in the SQL admin group, (a)-(d) + renewal
 . (Join-Path $solRoot 'engine\_shared\PIM-DownlinkSqlUser.ps1')  # G3A-COPY-LEFTOVER: the pull job's OWN database user (100.156 B); its admin group membership READ only
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdaterGraphRoles.ps1') # owner 2026-11-05: the updater's Graph permissions, ONE list; checked (never self-granted)
+. (Join-Path $solRoot 'engine\_shared\PIM-AppRegOwner.ps1')      # APP-REG-OWNER (SECAUDIT-1a item 2): the updater owns PIM's app registrations -- READ + one proof PATCH (step 2f-bis)
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAudit.ps1')         # SECPACK-SQL-AUDIT the SQL server's audit -> the install's workspace
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateNow.ps1')        # framework 8.18 UPDATE-NOW: the 15-minute signal check + the run kind + own cron
 . (Join-Path $solRoot 'engine\_shared\PIM-SetupSteps.ps1')        # FLEET-SETUPSTEPS the one-time install steps' facts (read only) for the heartbeat
@@ -392,7 +393,7 @@ function Invoke-PimUpdaterConvergeStep {
                     # 3.0.48 (C): NOT READABLE (memberOf and the PIM assignments refused) = unknown, never missing -- right after a
                     # grant the updater's managed-identity token does not carry its new Graph roles yet (token cache, up to ~24 h)
                     $db.inAdminGroup = $null; $db.adminIsGroup = $true
-                    $dmLag = @(@($ugMissing) | Where-Object { "$_".Trim() }); if (-not $dmLag.Count) { $dmLag = @(@($dbm.missing) | Where-Object { "$_".Trim() }) }
+                    $dmLag = @(@($ugMissing) | Where-Object { "$_".Trim() -and "$_" -ne 'Application.ReadWrite.OwnedBy' }); if (-not $dmLag.Count) { $dmLag = @(@($dbm.missing) | Where-Object { "$_".Trim() }) }
                     $db.membershipReason = $(if ($dmLag.Count) { "the updater's Graph token does not carry $($dmLag -join ', ') yet; it refreshes within 24 h" } else { "not readable: $($dbm.reason)" })
                 }
                 # 3.0.48 (D): a READ-BACK is stored as the proof a later run falls back on when its read is refused (pim.Settings)
@@ -481,6 +482,34 @@ function Invoke-PimUpdaterConvergeStep {
             Say ("database access cut-over: $($co.step) -- $($co.reason)$(if ($co.started) { " -> $($co.status)" })") $(if ($co.started -and "$($co.status)" -ne 'Succeeded') { 'Yellow' } elseif ($co.started) { 'Cyan' } else { 'DarkGray' })
         }
     } catch { Say "  database access cut-over not checked: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2f-bis. APP-REG-OWNER (framework SECAUDIT-1a item 2, Invardia ruling 2026-11-07) -- THE UPDATER OWNS PIM'S APP -----
+    # REGISTRATIONS. Per product registration present (engine/_shared/PIM-AppRegOwner.ps1: "PIM Manager" -- the sign-in client id
+    # this install recorded first --, "PIM Manager Engine", "PIM Activator", "PIM Manager Deploy", "PIM access request API";
+    # never any other): READ whether this updater's identity is an owner and REPORT it (setupFacts appRegOwner). Where it IS and
+    # its token carries Application.ReadWrite.OwnedBy, it proves the ownership ONCE by a harmless PATCH it reads back (the notes
+    # set to the marker -- only empty or marker notes; a customer's text is never overwritten) and records the proof
+    # (pim.Settings AppRegOwnerProof; setupFacts appRegOwnerProof). It NEVER adds itself as an owner, never grants itself a
+    # role, never removes an owner: recorded Support-app steps do (tools/setup/_PimAppRegOwner.ps1). Never fails the update.
+    $aoR = $null
+    try {
+        $aoMe = "$((Get-PimJwtPrincipal -Token $ugTok).oid)".Trim()
+        $aoFacts = Resolve-PimAppRegOwnerInstallFacts -Arm $armSeam -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -TickJob $tickJob -UpdateJob $selfJob
+        if (-not (Test-PimAppRegOwnerGuid $aoMe)) { $aoMe = "$($aoFacts.updaterObjectId)" }
+        $aoHolds = $null; if ($ug -and $ug.known) { $aoHolds = [bool](@($ug.held) -contains (Get-PimAppRegOwnerOwnedByRole)) }
+        $aoStored = $null
+        if ("$csSize".Trim()) { try { $aoStored = Get-PimSqlSetting -ConnectionString $csSize -Name (Get-PimAppRegOwnerProofSetting) } catch { $aoStored = $null } }
+        $aoGraph = { param($Method, $Path, $Body) if ($null -ne $Body) { Invoke-PimGraph -Method $Method -Path $Path -Body $Body } else { Invoke-PimGraph -Method $Method -Path $Path } }
+        # Invardia 2026-11-07 (option 1): a COMMUNITY install's updater owns only its own sign-in registration, never a Pro one sharing the tenant
+        $aoRoles = @(Get-PimAppRegOwnerInstallRoles -Edition (Get-PimAppRegOwnerUpdaterEdition -Source "$($env:PIM_UPDATE_SOURCE)" -SourceUrl "$($env:PIM_UPDATE_SOURCE_URL)"))
+        $aoR = Invoke-PimAppRegOwnerUpdaterCheck -Graph $aoGraph -UpdaterObjectId $aoMe -HoldsOwnedBy $aoHolds -Recorded $aoFacts.recorded -StoredProof $aoStored -Roles $aoRoles
+        foreach ($l in @($aoR.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+        if ($aoR.proofChanged -and "$csSize".Trim()) {
+            try { Set-PimSqlSetting -ConnectionString $csSize -Name (Get-PimAppRegOwnerProofSetting) -ValueJson (ConvertTo-Json -Compress -Depth 6 -InputObject $aoR.proof) }
+            catch { Say "  app registration owner: the proof could not be stored ($($_.Exception.Message)) -- the next run proves it again" 'Yellow'; $aoR.proofState = 'pending'; $aoR.proofDetail = "the proof could not be stored this run; $($aoR.proofDetail)" }
+        }
+        $fixByHand += [int]$aoR.warnings
+        if ("$($aoR.state)" -ne 'n/a') { Say ("app registration owner ($When): $($aoR.state), proof $($aoR.proofState) -- $($aoR.detail)") $(if ($aoR.state -eq 'ok' -and $aoR.proofState -eq 'ok') { 'DarkGray' } else { 'Yellow' }) }
+    } catch { Say "  app registration owner not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2g. FLEET-SETUPSTEPS (framework contract with Invardia, 2026-11-03) -- THE ONE-TIME STEPS, CHECKED ON EVERY RUN ----
     # READ ONLY (ARM GET + one SQL scalar): private network, the Jobs Operator role + SchedulerTickJobId, CR8 (registry admin
     # user, Key Vault purge protection, no SAS in the update source, SQL auditing), the front's key + schema + private vault,
@@ -499,8 +528,12 @@ function Invoke-PimUpdaterConvergeStep {
         # run record (downlinkDbUser = ok | missing | n/a | unknown; downlinkInAdminGroup = yes | no | n/a | unknown) -- support
         # reads it before the membership is removed; the agreed setupSteps list is unchanged (a new step key is Invardia's to agree).
         try { $dlF = Get-PimDownlinkSqlUserSetupFact -Result $dlu; foreach ($k in @($dlF.Keys)) { $ssF[$k] = $dlF[$k] } } catch { }
+        # APP-REG-OWNER: whether the updater owns PIM's product app registrations and has proven it (appRegOwner = ok | missing |
+        # n/a | unknown; appRegOwnerProof = ok | pending | n/a | unknown + utc) -- support reads it before the Support app leaves
+        # as an owner; the agreed setupSteps list is unchanged (a new step key is Invardia's to agree).
+        try { $aoF = Get-PimAppRegOwnerSetupFact -Result $aoR; foreach ($k in @($aoF.Keys)) { $ssF[$k] = $aoF[$k] } } catch { }
         $script:PimSetupFacts = $ssF
-        $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail', 'dbJobDetail', 'sqlTierDetail', 'sqlTierCurrent', 'downlinkDbUserDetail') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
+        $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail', 'dbJobDetail', 'appRegOwnerDetail', 'appRegOwnerProofUtc', 'appRegOwnerProofDetail', 'sqlTierDetail', 'sqlTierCurrent', 'downlinkDbUserDetail') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
         Say ("setup steps: facts recorded for the heartbeat$(if ($ssUnk.Count) { " (not readable: $($ssUnk -join ', '))" })") 'DarkGray'
     } catch { Say "  setup steps not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2g-bis. KV-POLICY-DENIED-PRIVATE / framework installer rule 11 -- A PRIVATE INSTALL'S KEY VAULT IS PRIVATE ------------

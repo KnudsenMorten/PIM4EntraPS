@@ -264,7 +264,9 @@ Community questions and bugs: [GitHub issues](https://github.com/KnudsenMorten/P
 
 ## License
 
-Open core: the Community features are free under the terms in [LICENSE](LICENSE); Pro features need a license from
-Invardia.
+The Community edition is licensed under the PolyForm Shield License 1.0.0 ([LICENSE](LICENSE)). You may use, change
+and run it, also commercially for your own organisation, but not to provide a product that competes with it. Pro is
+delivered in the Pro package from Invardia under a commercial licence. Versions before 3.0.56 keep the licence they were
+published with.
 
 Invardia is a brand of 2LINKIT, founded and owned by Morten Knudsen.

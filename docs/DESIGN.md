@@ -3018,11 +3018,13 @@ See §17.7 for the full template/approval mechanics.
     (`Get-PimRestToken`) takes the managed-identity branch when `IDENTITY_ENDPOINT` is present
     **and no client id is configured**; a hosted job therefore carries no `PIM_ClientId` (a client
     id with no usable credential would suppress the MI and authenticate as nothing).
-  - **The updater's Graph permissions (owner decision 2026-11-05).** The updater holds exactly five
+  - **The updater's Graph permissions (owner decision 2026-11-05; 3.0.54 adds the sixth).** The updater holds exactly six
     Microsoft Graph application permissions -- `PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup`,
     `PrivilegedAssignmentSchedule.Read.AzureADGroup`, `RoleManagementPolicy.Read.AzureADGroup`,
     `GroupMember.Read.All` and `Application.Read.All` (both read only; the member-side read of the database job
-    identity's memberships, `GET /servicePrincipals/{id}/memberOf`, reads a service principal and needs both) -- and no directory role and no group write right. With them, setup and every update keep the database job's own identity an
+    identity's memberships, `GET /servicePrincipals/{id}/memberOf`, reads a service principal and needs both), and
+    `Application.ReadWrite.OwnedBy` (writes only to app registrations the updater OWNS -- see "The updater owns PIM's app
+    registrations" below) -- and no directory role, no group write right and no tenant-wide application write right. With them, setup and every update keep the database job's own identity an
     **active member of the SQL admin group**: a direct add first; on the role-assignable group that
     is refused by design, so an active PIM-for-Groups assignment follows, permanent where the group's
     policy allows, otherwise for the policy's maximum (said, with the end date) and renewed from 30
@@ -3050,6 +3052,33 @@ See §17.7 for the full template/approval mechanics.
     new group only after the database job's membership in that group has been recorded for at least 24
     hours; the database job then runs at once, and a failed run moves the admin back. Before that, the
     step is shown as *waiting*, never as failed.
+  - **The updater owns PIM's app registrations (3.0.54).** PIM's own app registrations -- the Manager's
+    sign-in registration ("PIM Manager", found first by the client id the installation records for its
+    sign-in), "PIM Manager Engine", "PIM Activator", "PIM Manager Deploy" and "PIM access request API",
+    where present -- are owned by the installation's **updater identity**, so a later change to them is
+    made by the product itself with the narrow `Application.ReadWrite.OwnedBy` right instead of a
+    tenant-wide one. Any other registration in the tenant is never read for owners and never changed.
+    The order is fixed, and each step is read back:
+    1. a recorded support step adds the updater identity as an owner (a registration with no owner at
+       all simply gets it; the owners it already has stay);
+    2. `Application.ReadWrite.OwnedBy` is in the updater's one permission list: setup grants it, and the
+       updater only reports it when its token does not carry it yet;
+    3. on every run the updater reads whether it is an owner of each registration and reports it in the run
+       record (`appRegOwner` = ok / missing / n/a / unknown). Where it is an owner and holds the right, it
+       proves the ownership **once** with one harmless write it reads back: the registration's notes are set
+       to a fixed marker text -- only when they are empty or already that marker; notes someone wrote are
+       never overwritten, and that registration then stays "not proven", said. The proof (which
+       registration, when) is kept in `pim.Settings` (`AppRegOwnerProof`) and in the run record
+       (`appRegOwnerProof` + time). The updater never adds itself as an owner, never removes an owner and
+       never grants itself a permission;
+    4. a recorded support step removes the support application as an owner -- only for a registration with
+       the updater's recorded proof, and only while the updater is read as an owner at that moment. Any other
+       owner (a person, another application) stays. Both support steps have a plan-only first run.
+    **Edition limit (3.0.55).** On a **Community** installation the updater owns, checks and proves only
+    its own Manager sign-in registration. A Pro installation in the same tenant shares the Engine,
+    Activator and access request API registrations, and a Community updater never becomes an owner of
+    those. A Pro installation covers all five. The edition comes from the installation's update source
+    (Community = the public release), and the same limit applies to the support steps (1) and (4).
   - **Server / VM / community.** The engine signs in app-only as the **engine application**
     (service principal) with a **certificate** (`$global:PIM_CertThumbprint` /
     `PIM_CERT_THUMBPRINT`) resolved from the machine certificate store. Reuse the one engine
@@ -10337,10 +10366,28 @@ and hybrid-worker setup scripts, the Manager's PIM for Active Directory route mo
 workload connectors are left out of the public GitHub release; a Pro installation receives the full
 package, signed, from Invardia (the installer and the in-cloud updater both verify that signature
 before anything is used). The Community copy runs on its own: the Manager starts, its free pages and
-routes answer, a Pro route is refused with the licence line or says it is not installed (never an internal error), the scheduler
+routes answer, a Pro route answers the one plain Pro line (never an internal error), the scheduler
 runs its free jobs, and the v1 CSV import check runs (it reports that replication to managed tenants
 is not computed in a single-tenant copy). The payload gate builds the public release the way the
 publish does and fails if any Pro file is in it.
+
+**The Manager's Pro routes are their own files (3.0.56).** The PIM Manager's Pro API routes -- coverage
+and gaps, access reviews and review campaigns, discovery, the multi-tenant registry, replication and
+downlink, access requests and company reviews, API applications, the API and MCP reference, the
+tier-impact report, revoking current delegations, the hybrid Active Directory settings -- and the
+assistant (MCP) tool list live in Pro route modules next to the Manager (`tools/pim-manager/_proroutes.ps1`,
+and `_adclean.ps1` for the Active Directory clean-up). The Manager loads a module only when it is
+present and keeps, where those routes used to be, one guarded hook per group of routes. On a Pro
+installation the hook runs the module's routes unchanged (the same role checks, licence checks and
+answers). Without the module -- the Community release does not carry it -- or without a Pro licence,
+every one of those routes answers the same plain line, with HTTP 403 (no Pro licence) or 503 (the Pro
+code is not installed): *"This is part of PIM Manager Pro. Your installation is Community."* and a link
+to https://invardia.com. No file, library or path name is ever part of that answer. A Pro licence that
+is stored but does not cover a feature (expired, issued for another tenant) keeps its own sentence,
+since that installation is Pro. The pages themselves stay in the one Manager page, so a Community
+user still sees the Pro pages in the menu marked PRO and the Free vs Pro comparison; the server
+decides. The payload gate fails when a free file holds one of those routes or their functions again,
+and checks the plain line on every Pro route of the staged Community copy.
 
 #### 19a.3 Pro Business and Pro Enterprise (licence dimension, 2026-10-08 -- built, not yet released)
 
