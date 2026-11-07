@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.53 -- 2026-11-07
+
+- Taking a job identity out of the SQL admin group now reads the membership from the side of that identity, so a role-assignable group that hides its member list is never reported as already empty, and the removal uses a privileged-group removal on such a group, read back from both sides
+
 ## 3.0.52 -- 2026-11-07
 
 - The public Community release no longer contains any Pro code, and a Community installation still installs, updates and runs as before; tenant preparation works in the Community edition; the downloadable v1 import script carries no Pro code; on a managed tenant, every update now gives the pull job its own least-privilege database user and reports whether it still uses the database admin group

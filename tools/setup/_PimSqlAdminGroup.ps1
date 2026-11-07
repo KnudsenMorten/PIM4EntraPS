@@ -661,6 +661,18 @@ function Test-PimSqlAdminMemberIsSupportApp {
     }
 }
 
+function Test-PimSqlAdminMemberSide {
+    <#
+      3.0.53: is -ObjectId a member of -GroupId, read from the MEMBER's side (POST /directoryObjects/{id}/checkMemberGroups,
+      transitive) -- the read a role-assignable group's own member list cannot hide. $true / $false; $null = not readable.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Graph, [Parameter(Mandatory)][string]$ObjectId, [Parameter(Mandatory)][string]$GroupId)
+    try {
+        $r = & $Graph -Method POST -Path "/directoryObjects/$ObjectId/checkMemberGroups" -Body @{ groupIds = @($GroupId) }
+        return [bool](@(@($r.value) | ForEach-Object { "$_".ToLowerInvariant() }) -contains "$GroupId".ToLowerInvariant())
+    } catch { return $null }
+}
+
 function Remove-PimSqlAdminGroupMember {
     <#
       SEC-39 -- take ONE identity OUT of the SQL admin group, and read it back. Used when an identity that only needs a
@@ -688,17 +700,21 @@ function Remove-PimSqlAdminGroupMember {
     $oid = "$MemberObjectId".Trim()
     if (-not (Test-PimSqlAdminGuid $oid)) { $out.problem = "'$MemberObjectId' is not an object id"; return [pscustomobject]$out }
     try {
-        if ("$GroupObjectId".Trim()) { $grp = & $Graph -Method GET -Path ("/groups/$("$GroupObjectId".Trim())" + '?$select=id,displayName') }
+        if ("$GroupObjectId".Trim()) { $grp = & $Graph -Method GET -Path ("/groups/$("$GroupObjectId".Trim())" + '?$select=id,displayName,isAssignableToRole') }
         else {
             $flt = [uri]::EscapeDataString("displayName eq '$($GroupName.Replace("'", "''"))'")
-            $found = @((& $Graph -Method GET -Path ('/groups?$filter=' + $flt + '&$select=id,displayName')).value | Where-Object { $_ })
+            $found = @((& $Graph -Method GET -Path ('/groups?$filter=' + $flt + '&$select=id,displayName,isAssignableToRole')).value | Where-Object { $_ })
             if ($found.Count -gt 1) { $out.problem = "$($found.Count) groups are named '$GroupName' -- ambiguous; pass -GroupObjectId"; return [pscustomobject]$out }
             $grp = if ($found.Count) { $found[0] } else { $null }
         }
         if (-not $grp -or -not "$($grp.id)".Trim()) { $out.ok = $true; return [pscustomobject]$out }
         $gid = "$($grp.id)".Trim(); $out.groupId = $gid
         $ids = @(Get-PimGraphGroupMemberIds -Graph $Graph -GroupId $gid | ForEach-Object { "$_".ToLowerInvariant() })
-        if ($ids -notcontains $oid.ToLowerInvariant()) { $out.ok = $true; return [pscustomobject]$out }
+        # 3.0.53 (G3A-COPY-LEFTOVER, Invardia 2026-11-07): a ROLE-ASSIGNABLE group's own member list can come back EMPTY to the
+        # caller (the Invardia Support app read 0 members at two test installs while the member side showed them) -- so the
+        # MEMBER side (checkMemberGroups) is asked too, and "not a member" needs both to say so ($null = not readable).
+        $side = Test-PimSqlAdminMemberSide -Graph $Graph -ObjectId $oid -GroupId $gid
+        if ($ids -notcontains $oid.ToLowerInvariant() -and $side -ne $true) { $out.ok = $true; return [pscustomobject]$out }
         $out.wasMember = $true
         # PIM 100.116 / framework 4.1b (owner 2026-10-18): the Invardia Support app is the group's STANDING member -- PIM never
         # removes it (only the customer's Grant-PimSupportAccess.ps1 -Remove does). A member that is not a service principal
@@ -710,11 +726,24 @@ function Remove-PimSqlAdminGroupMember {
                              else { "$Label ($oid) could not be proven NOT to be the Invardia Support app -- it was not removed from '$GroupName'" })
             return [pscustomobject]$out
         }
-        try { [void](& $Graph -Method DELETE -Path "/groups/$gid/members/$oid/`$ref") }
-        catch { if ("$($_.Exception.Message)" -notmatch '(?i)HTTP 404\b|Request_ResourceNotFound|does not exist') { throw } }
+        # 3.0.53: on a ROLE-ASSIGNABLE (PIM-managed) group the membership is a PIM-for-Groups assignment -- removed with
+        # adminRemove (members/$ref is refused there without RoleManagement.ReadWrite.Directory). A direct member (adminRemove
+        # refused / not an assignment) falls back to members/$ref as before.
+        $viaPim = $false
+        if ($grp.PSObject.Properties['isAssignableToRole'] -and $grp.isAssignableToRole -eq $true) {
+            try {
+                [void](& $Graph -Method POST -Path '/identityGovernance/privilegedAccess/group/assignmentScheduleRequests' -Body @{ accessId = 'member'; principalId = $oid; groupId = $gid; action = 'adminRemove'; justification = "PIM: $Label out of the SQL admin group (its own least-privilege database user is in place)" })
+                $viaPim = $true
+            } catch { $viaPim = $false }
+        }
+        if (-not $viaPim) {
+            try { [void](& $Graph -Method DELETE -Path "/groups/$gid/members/$oid/`$ref") }
+            catch { if ("$($_.Exception.Message)" -notmatch '(?i)HTTP 404\b|Request_ResourceNotFound|does not exist') { throw } }
+        }
         for ($i = 0; $i -lt [Math]::Max(1, $PollCount); $i++) {
             $ids = @(Get-PimGraphGroupMemberIds -Graph $Graph -GroupId $gid | ForEach-Object { "$_".ToLowerInvariant() })
-            if ($ids -notcontains $oid.ToLowerInvariant()) { $out.removed = $true; $out.ok = $true; return [pscustomobject]$out }
+            $side = Test-PimSqlAdminMemberSide -Graph $Graph -ObjectId $oid -GroupId $gid
+            if ($ids -notcontains $oid.ToLowerInvariant() -and $side -ne $true) { $out.removed = $true; $out.ok = $true; return [pscustomobject]$out }
             & $Sleep $PollSeconds
         }
         $out.problem = "read-back: $Label ($oid) is STILL a member of '$GroupName' after the removal"
