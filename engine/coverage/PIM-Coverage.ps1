@@ -1182,6 +1182,17 @@ function Invoke-PimCoverageJob {
                 [void](Send-PimJobAlertViaNotify -Event $script:PimCoverageAlertEvent -Title $title -Detail $detail -LinkTab 'coverage' @am)
             }
         } catch { Write-Warning "[$type] the coverage alert could not be raised: $($_.Exception.Message)" }
+        # OPEN-17 / framework 8.19: the same finding for Invardia (pim.coverage.uncovered, warning) -- COUNTS only, never a
+        # name; recorded for the next uplink cycle, best effort (never throws, the mail above is the customer's alarm).
+        try {
+            if (Get-Command Register-PimUplinkAlert -ErrorAction SilentlyContinue) {
+                $byStatus = { param($s) [long]@($new | Where-Object { "$($_.status)" -eq $s }).Count }
+                [void](Register-PimUplinkAlert -Event 'coverage' -NowUtc $NowUtc -Measured @{
+                    findings = [long]$new.Count; gaps = (& $byStatus 'Gap'); orphans = (& $byStatus 'Orphan group')
+                    unmanagedBindings = (& $byStatus 'Unmanaged binding'); wrongPermissions = (& $byStatus 'Wrong permissions')
+                    unmanagedGroups = (& $byStatus 'Unmanaged privileged group') })
+            }
+        } catch { }
     }
     $defFail = @($script:PimCoverageDefinitionEntities | Where-Object { $Inputs['rowsErrors'] -is [hashtable] -and $Inputs['rowsErrors'].ContainsKey($_) })
     if ($defFail.Count) {

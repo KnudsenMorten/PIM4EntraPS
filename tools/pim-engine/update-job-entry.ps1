@@ -87,6 +87,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-SetupSteps.ps1')        # FLEET-SETUPSTEPS the one-time install steps' facts (read only) for the heartbeat
 . (Join-Path $solRoot 'engine\_shared\PIM-GuardLimits.ps1')      # framework 8.18: an update-now waits while guard Strict mode is on
 . (Join-Path $solRoot 'engine\_shared\PIM-SchemaQuiesce.ps1')    # SCHEMA-QUIESCE-818 (framework 8.18): no database change under a running PIM job
+. (Join-Path $solRoot 'engine\_shared\PIM-UpdateTrack.ps1')      # OPEN-13 / framework 8.8 UPDATE-TRACK: the run's stages to Invardia (best effort)
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
 # 100.61: the image the as-built converge (2e) left caj-pim-asbuilt on THIS run ('' = it did not converge the job) -- the job
@@ -105,6 +106,7 @@ function Invoke-PimUpdaterConvergeStep {
     param([string]$When = 'update')
     # FLEET-SETUPSTEPS: the results the setup-step facts (2g) are read from; $null = that step did not run this time.
     $cv = $null; $si = $null; $ab = $null; $sa = $null; $db = $null
+    $script:PimSqlTierResult = $null     # OPEN-27: this run's database tier result ($null = not read -> setupSteps 'sql-tier' unknown)
     $csSize = $null; try { $csSize = Get-PimSqlConnectionString } catch { $csSize = $null }
     if (-not "$csSize".Trim()) {
         # the test-tenant shape (no PIM_SqlServer on this job): the Manager names the store -- same self-heal as the schema step.
@@ -170,9 +172,12 @@ function Invoke-PimUpdaterConvergeStep {
         $sqlSrv =$(if ("$($env:PIM_SqlServer)".Trim()) { "$($env:PIM_SqlServer)".Trim() } else { "$($global:PIM_SqlServer)".Trim() })
         $sqlDb = $(if ("$($env:PIM_SqlDatabase)".Trim()) { "$($env:PIM_SqlDatabase)".Trim() } elseif ("$($global:PIM_SqlDatabase)".Trim()) { "$($global:PIM_SqlDatabase)".Trim() } else { 'PimPlatform' })
         $sqlSz = Invoke-PimSqlTierUpdate -SubscriptionId $sub -Server $sqlSrv -Database $sqlDb -Arm $armSeam
+        $script:PimSqlTierResult = $sqlSz     # OPEN-27: read by step 2g (setupSteps 'sql-tier')
         # A database pinned below the product tier is NOT changed (the pin tag cannot say who pinned it) -- it is said in
         # yellow, every update, so support can act: "database is pinned at <tier>, the new default is S3 - not changed".
-        Say ("sizing: $($sqlSz.detail)") $(if (-not $sqlSz.ok -or $sqlSz.pinnedBelowDefault) { 'Yellow' } elseif ($sqlSz.changed) { 'Cyan' } else { 'DarkGray' })
+        # OPEN-27 (3.0.50): the raise above is unchanged (owner 2026-10-12) and behind PimSqlTierUpdaterRaiseEnabled (on); where
+        # support switched it off, a database below S3 is said in yellow too ("... below the product tier S3 -- not raised by the updater").
+        Say ("sizing: $($sqlSz.detail)") $(if (-not $sqlSz.ok -or $sqlSz.pinnedBelowDefault -or $sqlSz.belowDefault) { 'Yellow' } elseif ($sqlSz.changed) { 'Cyan' } else { 'DarkGray' })
     } catch { Say "  sizing skipped: $($_.Exception.Message)" 'Yellow' }
     # ---- 2d. 100.40 -- THE OTHER INSTALL DEFAULTS (alert recipients, immediate engine start, the install's role checks) ----
     try {
@@ -455,8 +460,12 @@ function Invoke-PimUpdaterConvergeStep {
         if ("$csSize".Trim()) { $ssCs = "$csSize"; $ssSql = { param($q) Invoke-PimSqlScalar -ConnectionString $ssCs -Sql $q } }
         $ssF = Get-PimSetupStepUpdaterFacts -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -Arm $armSeam -SqlScalar $ssSql `
                    -ConvergeLines @(if ($cv) { @($cv.lines) }) -JobSelfId $si -SqlAudit $sa -AsBuilt $ab -DbInit $db -SourceUrl "$($env:PIM_UPDATE_SOURCE_URL)"
+        # OPEN-27: the database tier against the product tier, kept in the run record (UpdateState.setupFacts: sqlTier =
+        # ok | raised | below | pinned-below | n/a | unknown, sqlTierCurrent, sqlTierDetail) -- support reads it; the agreed setupSteps
+        # list is unchanged (a new step key is Invardia's to agree).
+        try { $stF = Get-PimSqlTierFact -Result $script:PimSqlTierResult; foreach ($k in @($stF.Keys)) { $ssF[$k] = $stF[$k] } } catch { }
         $script:PimSetupFacts = $ssF
-        $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail', 'dbJobDetail') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
+        $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail', 'dbJobDetail', 'sqlTierDetail', 'sqlTierCurrent') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
         Say ("setup steps: facts recorded for the heartbeat$(if ($ssUnk.Count) { " (not readable: $($ssUnk -join ', '))" })") 'DarkGray'
     } catch { Say "  setup steps not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2g-bis. KV-POLICY-DENIED-PRIVATE / framework installer rule 11 -- A PRIVATE INSTALL'S KEY VAULT IS PRIVATE ------------
@@ -542,6 +551,24 @@ $script:PimSetupFacts = $null           # FLEET-SETUPSTEPS: the one-time steps' 
 $script:PimEnginePermissionCheck = $null # 95.2i: the engine's rights for this version (converge step 2d-perm); $null = carry the last one
 $script:PimBuildPoolState = $null        # BUILDPOOL-11G: the build pool as read this run; $null = carry the last one
 $script:PimBuildPoolNone  = -not "$($env:PIM_ACR_AGENT_POOL)".Trim()   # no pool (a public install): no BuildPool recorded at all
+# OPEN-13 / framework 8.8 UPDATE-TRACK: this run's stage tracker ($null until the update decision starts -- the earlier exits
+# report no run) and whether the Manager roll rolled back (the run then ends rollback -> done "rolled back").
+$script:PimUpdTrack           = $null
+$script:PimUpdTrackRolledBack = $false
+function Set-PimUpdTrackStage {
+    # BEST EFFORT: a stage report never fails, delays or changes the update (PIM-UpdateTrack.ps1 never throws; this guards it too).
+    param([string]$Stage, [string]$Message = '', [ValidateSet('', 'ok', 'warning', 'skipped')][string]$Close = '')
+    if (-not $script:PimUpdTrack) { return }
+    try {
+        if ($Close) { [void](Close-PimUpdateTrackStage -Track $script:PimUpdTrack -State $Close -Message $Message) }
+        else { [void](Start-PimUpdateTrackStage -Track $script:PimUpdTrack -Stage $Stage -Message $Message) }
+    } catch { }
+}
+function Get-PimUpdTrackFromVersion {
+    # the version the run starts from: what the Manager runs, else what this job last built ('' = the run is not reported)
+    $v = "$($script:PimRunningVersion)".Trim(); if (-not $v) { $v = "$($env:PIM_UPDATE_LAST_BUILT)".Trim() }
+    return $v
+}
 function Send-PimUpdateOutcome {
     param(
         [ValidateSet('none','built','rolled','schema','failed')][string]$Action = 'none',
@@ -560,6 +587,14 @@ function Send-PimUpdateOutcome {
     Clear-PimUpdaterSchemaHold
     if ($script:PimTelemetrySent) { return }        # one record per run, never two
     $script:PimTelemetrySent = $true
+    # OPEN-13 / framework 8.8: the run's last stage event (done | failed | rollback | waiting) -- every exit path comes here.
+    # Best effort: never throws, never changes the outcome below.
+    if ($script:PimUpdTrack) {
+        try {
+            $utTo = "$ToVersion".Trim(); if (-not $utTo) { $utTo = "$($script:PimRingApproved)".Trim() }
+            [void](Complete-PimUpdateTrack -Track $script:PimUpdTrack -Outcome $Outcome -ErrorText $ErrorText -FromVersion (Get-PimUpdTrackFromVersion) -ToVersion $utTo -RolledBack:([bool]$script:PimUpdTrackRolledBack))
+        } catch { }
+    }
     # The vendor telemetry keeps its closed vocabulary: ahead = a good run with nothing to do ('ok'); attention is still
     # something an operator has to act on, so Invardia sees it ('failed', with the actionable text).
     $telOutcome = switch ($Outcome) { 'ahead' { 'ok' } 'attention' { 'failed' } 'waiting' { 'skipped' } default { $Outcome } }
@@ -1078,6 +1113,25 @@ if (-not $script:PimBuildPoolNone) {
     } catch { Say "build pool: not checked ($($_.Exception.Message)) -- the update continues" 'Yellow' }
 }
 
+# ---- OPEN-13 / framework 8.8 UPDATE-TRACK -- THIS RUN'S STAGES TO INVARDIA, LIKE A TRACKED INSTALL -------------------------
+# A Pro install (it holds an install key) opens an update run at Invardia (POST /api/install/runs, the install key -- the same
+# key as the uplink and the update pull) and reports check -> download -> verify -> build -> migrate -> apply -> health ->
+# done | failed | rollback. 'check' starts HERE; the run is opened ONLY when the plan moves a version (Test-PimUpdateTrackDue); a run with nothing to do / ahead / held reports NOTHING. BEST
+# EFFORT: a failed report stops the tracking with one line and never touches the update. PIM_UPDATE_TRACK=0 = off.
+try {
+    $utCs = $null; try { $utCs = Get-PimUpdaterStoreCsHealed } catch { $utCs = $null }
+    $utGet = $null; if ("$utCs".Trim()) { $utGet = { param($n) Get-PimSqlSetting -ConnectionString $utCs -Name $n } }
+    if (-not (Get-Command Resolve-PimInvardiaInstallKey -ErrorAction SilentlyContinue)) {
+        . (Join-Path $solRoot 'engine\_shared\PIM-LicenceRequest.ps1')
+        . (Join-Path $solRoot 'engine\_shared\PIM-InvardiaUpdate.ps1')
+    }
+    $utKey = Resolve-PimInvardiaInstallKey -GetSetting $utGet
+    $utBase = ''; if ($utGet) { try { $utBase = "$(& $utGet 'LicenceRequestBaseUrl')".Trim() } catch { $utBase = '' } }
+    $script:PimUpdTrack = New-PimUpdateTrack -Enabled (Test-PimUpdateTrackOn -Value "$($env:PIM_UPDATE_TRACK)") -InstallKey $utKey -BaseUrl $utBase -Ring $ring -Log { param($l) Say $l 'DarkGray' }
+    if ($script:PimUpdTrack.enabled) { Set-PimUpdTrackStage -Stage 'check' }
+    else { Say "update track: not reported -- $($script:PimUpdTrack.why)" 'DarkGray'; $script:PimUpdTrack = $null }
+} catch { $script:PimUpdTrack = $null; Say "update track: not started ($((("$($_.Exception.Message)") -split "`n")[0])) -- the update continues" 'DarkGray' }
+
 if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     Say "PIM_UPDATE_HOLD=1 -- this environment is frozen; the ring channel is not consulted." 'Yellow'
     # §71.43 -- a held environment has NO approved version to show, and saying so is the point: the
@@ -1315,6 +1369,9 @@ if ($dg.overridden) {
     Say "  $($dg.detail)" 'Yellow'
 }
 Say "plan: $($plan.action) -- $($plan.reason)" 'DarkGray'
+# OPEN-13: the target is known. The run is opened at Invardia ONLY when this run moves a version (build / roll to a target
+# that is not the running one); nothing to do / ahead / held / the same version reports NOTHING (Complete never opens).
+if ($script:PimUpdTrack) { try { if (Test-PimUpdateTrackDue -PlanAction "$($plan.action)" -TargetVersion "$($plan.version)" -RunningVersion (Get-PimUpdTrackFromVersion)) { [void](Open-PimUpdateTrack -Track $script:PimUpdTrack -FromVersion (Get-PimUpdTrackFromVersion) -ToVersion "$($plan.version)") } } catch { } }
 
 if ($plan.action -eq 'build') {
     $ctx    = Join-Path ([IO.Path]::GetTempPath()) ("pim-src-{0}.tar.gz" -f $plan.version)
@@ -1323,10 +1380,18 @@ if ($plan.action -eq 'build') {
         $ctx = $script:PimInvardiaContext
         $got = @{ ok = (Test-Path -LiteralPath $ctx); bytes = $(if (Test-Path -LiteralPath $ctx) { (Get-Item -LiteralPath $ctx).Length } else { 0 }); reason = 'the verified Invardia archive is gone' }
         Say "source for $($plan.version): the verified Invardia release archive"
+        # OPEN-13: the Invardia pull fetched the archive and checked it against the signed manifest during 'check'.
+        Set-PimUpdTrackStage -Stage 'download' -Message 'the release archive named by the signed manifest'
+        Set-PimUpdTrackStage -Stage 'verify' -Message 'manifest signature + archive SHA-256'
     } else {
         $srcUrl = Resolve-PimUpdateSourceUrl -Template $srcUrlTpl -Version $plan.version
         Say "fetching source for $($plan.version)$(if ($srcMode.unsigned) { ' from the storage container -- UNSIGNED (only its gzip header is checked)' })" $(if ($srcMode.unsigned) { 'Red' } else { 'Gray' })
+        Set-PimUpdTrackStage -Stage 'download'
         $got = Get-PimUpdateSourceArchive -Url $srcUrl -OutFile $ctx
+        if ($got.ok) {
+            Set-PimUpdTrackStage -Stage 'verify'
+            if ($srcMode.unsigned) { Set-PimUpdTrackStage -Close warning -Message 'unsigned source: only its gzip header is checked' }
+        }
     }
     if (-not $got.ok) {
         Say "  source NOT fetched: $($got.reason)" 'Red'
@@ -1350,6 +1415,7 @@ if ($plan.action -eq 'build') {
         # host-side Invoke-PimUpdate. The in-cloud build ignored it, so a registry with public access Disabled
         # refused every nightly build ("client with IP ... is not allowed access") -- measured 2026-09-23.
         $pool = "$($env:PIM_ACR_AGENT_POOL)".Trim()
+        Set-PimUpdTrackStage -Stage 'build'
         Say ("building $imageRepo`:$($plan.version) in $($reg.registryName) (the registry builds; this job only asks)" + $(if ($pool) { " on agent pool '$pool'" } else { '' }))
         # UPDATER-ACR-PUSH-RETRY (owner 2026-10-23): a push that failed on the network / a registry 5xx is retried once.
         $b = Invoke-PimAcrRestBuildWithRetry -SubscriptionId $sub -ResourceGroup $rg -RegistryName $reg.registryName `
@@ -1500,6 +1566,7 @@ if ($storeHeal.source -eq 'manager') {
     Set-Variable -Name 'PIM_SqlDatabase' -Scope Global -Value "$($storeHeal.database)"
 }
 
+Set-PimUpdTrackStage -Stage 'migrate'   # OPEN-13: the schema goes BEFORE any container moves (additive-only)
 $schemaOk = $true
 $schemaRefused = $null
 $schemaLoginRefusal = $null
@@ -1697,6 +1764,7 @@ if (-not $schemaOk) {
 # unreadable archive BOTH mean "cannot tell" -- they warn and PROCEED. Blocking on "cannot tell"
 # would freeze a fleet at 03:00 over a failed download, and would make the gate impossible to roll
 # out in the first place.
+Set-PimUpdTrackStage -Stage 'apply'     # OPEN-13: the roll -- its desired-state gate, the Manager, then every job
 $blAccept = ("$($env:PIM_UPDATE_ACCEPT_BASELINE_CHANGE)".Trim() -eq '1')
 try {
     $tgtBaseline = $null
@@ -1768,6 +1836,8 @@ if ($roll.resized) {
 }
 if ($roll.rolled -and $roll.healthy -eq $false) {
     Say "  UNHEALTHY after the roll -- rolled back: $($roll.rolledBack)" 'Red'
+    # OPEN-13: the health check failed; a roll back ends the run rollback -> done "rolled back"
+    Set-PimUpdTrackStage -Stage 'health'; $script:PimUpdTrackRolledBack = [bool]$roll.rolledBack
     # SUP-2026-00424 (2026-11-05): the reason rides along, so the failure catalog tells a health check that could not READ
     # the app (UPDATE-HEALTH-UNREAD) from a version that really was unhealthy (UPDATE-ROLLED-BACK) -- never UNCLASSIFIED.
     Send-PimUpdateOutcome -Action 'rolled' -Outcome 'failed' -ToVersion "$($plan.version)" -ErrorText ("unhealthy after the roll; rolledBack=$($roll.rolledBack)" + $(if ("$($roll.reason)".Trim()) { "; $((("$($roll.reason)") -split "`n")[0])" }))
@@ -2052,6 +2122,8 @@ if ("$selfStampDeferred".Trim()) {
 # stopped running altogether -- both are simply absent from it. The last SUCCESS timestamp is the
 # signal; that is why 'ok' is reported as loudly as 'failed'.
 # 📌 A deferred self-stamp (B8) is still an OK outcome: the environment rolled and is healthy.
+# OPEN-13: health = the Manager reached a healthy running revision (checked by the roll) and every job is on the new build.
+Set-PimUpdTrackStage -Stage 'health' -Message 'the Manager runs a healthy revision; every job is on the new build'
 Send-PimUpdateOutcome -Action 'rolled' -Outcome 'ok' -ToVersion "$($roll.to)"
 
 # ---- 4. §71.44 -- ONE FOLLOW-UP RUN ON THE NEW UPDATER -------------------------------------------

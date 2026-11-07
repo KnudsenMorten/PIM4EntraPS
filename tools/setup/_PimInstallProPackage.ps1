@@ -151,19 +151,80 @@ function Get-PimInstallSignInToken {
     return @{ token = $tok; expiresOn = $exp }
 }
 
+function Get-PimInstallEditionName {
+    # PURE. 'pro' -> 'Pro', 'community' -> 'Community', anything else (a note of an older launcher) -> 'edition not recorded'
+    param([string]$Channel)
+    switch ("$Channel".Trim().ToLowerInvariant()) { 'pro' { 'Pro' } 'community' { 'Community' } default { '(edition not recorded)' } }
+}
+
+function Get-PimInstallResumeLine {
+    <# PURE. Framework installer rule 12's ONE line when -Resume does NOT reuse the release downloaded before. #>
+    param([string]$BeforeVersion, [string]$BeforeEdition, [string]$NowVersion, [string]$NowEdition)
+    $bv = if ("$BeforeVersion".Trim()) { "$BeforeVersion".Trim().TrimStart('v') } else { '(version not recorded)' }
+    $nv = if ("$NowVersion".Trim()) { "$NowVersion".Trim().TrimStart('v') } else { 'the current release' }
+    return "Resume: the release downloaded before is $bv $(Get-PimInstallEditionName $BeforeEdition); this launcher installs $nv $(Get-PimInstallEditionName $NowEdition) - downloading it. The installation keeps its own progress, so it continues where it stopped."
+}
+
+function Get-PimInstallResumeChoice {
+    <#
+      FRAMEWORK INSTALLER RULE 12 (2026-11-04, "-Resume never reuses a different package"; PIM REQUIREMENTS OPEN-24). PURE.
+      On -Resume the launcher reuses the release folder it downloaded before ONLY when that folder is still there, really
+      holds the version its note says, was downloaded by the SAME edition (the note's 'edition' = this copy's
+      $script:PimInstallChannel; a note without one -- an older launcher -- is never trusted), and -- when the version this
+      launcher installs now is known (-WantVersion: -Version, or the release GitHub / the ring serves now) -- is that
+      version. Anything else: download afresh, say so in ONE line, and the installation continues from its OWN saved
+      progress (its state folder), which the download never touches.
+        -Note        the folder note (path, version, edition) or $null      -Tree        the release tree found in note.path, or ''
+        -TreeVersion that tree's VERSION file ('' = none)                   -Channel     'community' | 'pro' (this copy)
+        -WantVersion the version this launcher installs now ('' = not known yet: folderOk tells whether the folder is still a
+                     candidate, and the caller asks again with the version once GitHub / the ring has named it)
+      Returns @{ reuse; folderOk; tree; version; edition; line } (line '' = nothing to say yet).
+    #>
+    param([AllowNull()][object]$Note, [string]$Tree = '', [string]$TreeVersion = '', [Parameter(Mandatory)][string]$Channel, [string]$WantVersion = '')
+    $norm = { param($v) "$v".Trim().TrimStart('v') }
+    $ch = "$Channel".Trim().ToLowerInvariant()
+    $prop = { param($o, $n) if ($null -eq $o) { return '' }; if ($o -is [System.Collections.IDictionary]) { return "$($o[$n])" }; $pp = $o.PSObject.Properties[$n]; if ($pp) { "$($pp.Value)" } else { '' } }
+    $nVer = & $norm (& $prop $Note 'version')
+    $nEd = (& $prop $Note 'edition').Trim().ToLowerInvariant()
+    $res = @{ reuse = $false; folderOk = $false; tree = "$Tree"; version = $nVer; edition = $nEd; line = '' }
+    if (-not $Note -or -not "$Tree".Trim()) {
+        $res.line = 'Resume: the release folder of the first run is not there any more, so the release is downloaded again. The installation keeps its own progress, so it still continues where it stopped.'
+        return $res
+    }
+    if ((& $norm $TreeVersion) -and $nVer -and (& $norm $TreeVersion) -ne $nVer) {
+        $res.line = "Resume: the release folder of the first run holds $(& $norm $TreeVersion), not the $nVer it was downloaded as, so the release is downloaded again. The installation keeps its own progress, so it continues where it stopped."
+        return $res
+    }
+    $res.folderOk = $true
+    $want = & $norm $WantVersion
+    if (-not $want) { return $res }   # the caller resolves the version this launcher installs now, then asks again
+    if ($nEd -ne $ch -or -not $nVer -or $want -ne $nVer) {
+        $res.line = Get-PimInstallResumeLine -BeforeVersion $nVer -BeforeEdition $nEd -NowVersion $want -NowEdition $ch
+        return $res
+    }
+    $res.reuse = $true
+    $res.line = "Resume: using the release downloaded before ($nVer $(Get-PimInstallEditionName $nEd)) in $Tree -- nothing is downloaded."
+    return $res
+}
+
 function Get-PimInstallProPackage {
     <#
       The Pro copy's whole download, every outside call a seam:
         -GetToken { param($TenantId) } -> @{ token; expiresOn } (or a token string)   default: Get-PimInstallSignInToken
         -Http     { param($Url, $Token) } -> @{ status; body; error }                 default: Invoke-PimInstallProHttp
         -Download { param($Url, $OutFile) }                                         the launcher's own download
-      Returns @{ ok; reason; dir; zip; version; sha256; size; token; expiresOn }. ok=$false -> reason is ONE calm sentence
-      (never a token, never a link); the new folder is removed. Nothing is ever asked of GitHub.
+      -ResumeFrom (framework installer rule 12, -Resume): @{ version; edition; tree } of the release downloaded before (the
+      launcher's Get-PimInstallResumeChoice with folderOk). When it is the Pro package of exactly the version the ring serves
+      now, nothing is downloaded (reused = $true); otherwise its ONE line is printed and the package the ring serves now is
+      downloaded.
+      Returns @{ ok; reused; line (the reuse line); reason; dir; zip; version; sha256; size; token; expiresOn }. ok=$false -> reason is ONE calm
+      sentence (never a token, never a link); the new folder is removed. Nothing is ever asked of GitHub.
     #>
     param([Parameter(Mandatory)][AllowEmptyString()][string]$TenantId, [ValidateRange(0, 3)][int]$Ring = 3, [string]$Version = '',
           [scriptblock]$GetToken, [scriptblock]$Http, [Parameter(Mandatory)][scriptblock]$Download,
-          [object[]]$TrustedKeys = $script:InvardiaUpdateTrustedKeys, [string]$BaseUrl = '', [string]$TempRoot = ([IO.Path]::GetTempPath()))
-    $res = @{ ok = $false; reason = ''; dir = ''; zip = ''; version = ''; sha256 = ''; size = 0; token = ''; expiresOn = 0 }
+          [object[]]$TrustedKeys = $script:InvardiaUpdateTrustedKeys, [string]$BaseUrl = '', [string]$TempRoot = ([IO.Path]::GetTempPath()),
+          [hashtable]$ResumeFrom)
+    $res = @{ ok = $false; reused = $false; line = ''; reason = ''; dir = ''; zip = ''; version = ''; sha256 = ''; size = 0; token = ''; expiresOn = 0 }
     $tid = "$TenantId".Trim().ToLowerInvariant()
     if ($tid -notmatch $script:PimInstallGuidRx) { $res.reason = 'PIM Manager Pro is downloaded for a tenant: give -TenantId (the tenant id, a GUID)'; return $res }
     if (-not $GetToken) { $GetToken = { param($t) Get-PimInstallSignInToken -TenantId $t } }
@@ -184,6 +245,12 @@ function Get-PimInstallProPackage {
     if (-not $v.ok) { $res.reason = "the package Invardia sent did not verify ($($v.reason)) -- refused"; return $res }
     if ($v.hold) { $res.reason = "the release Invardia holds for ring $Ring cannot be installed by this command ($($v.reason))"; return $res }
     if ("$Version".Trim() -and "$($v.version)" -ne "$Version".Trim().TrimStart('v')) { $res.reason = "ring $Ring holds PIM Manager $($v.version), not $Version"; return $res }
+    # 3b. framework installer rule 12: -Resume reuses the package downloaded before only when the ring serves that version now
+    if ($ResumeFrom) {
+        $rc = Get-PimInstallResumeChoice -Note $ResumeFrom -Tree "$($ResumeFrom.tree)" -Channel 'pro' -WantVersion "$($v.version)"
+        if ($rc.reuse) { $res.ok = $true; $res.reused = $true; $res.version = "$($v.version)"; $res.line = $rc.line; return $res }
+        Write-Host $rc.line -ForegroundColor Yellow
+    }
     # 4. download into a NEW folder; size + SHA-256 must be the signed ones
     $dir = Join-Path $TempRoot ("pim-manager-release-{0}-{1}" -f $v.version, [guid]::NewGuid().ToString('N').Substring(0, 6))
     [void][IO.Directory]::CreateDirectory($dir)

@@ -121,6 +121,7 @@ trap { if (Get-Command Complete-PimStartupLog -ErrorAction SilentlyContinue) { t
 . "$shared\PIM-SignedRequests.ps1"    # framework 12.11f item 2 / PIM 100.144a: the signed-request check + its run-log lines (inert while the mode is off)
 . "$shared\PIM-DisableGuard.ps1"      # account-disable circuit breaker (incident 2026-06-15)
 . "$shared\PIM-Guard.ps1"             # GUARD-1: a guard trip -> state + audit + mail + telemetry
+. "$shared\PIM-UplinkAlert.ps1"       # OPEN-17 / framework 8.19 ALERT: drift + coverage findings -> 'UplinkAlerts' -> Kind 'alert' records
 . "$shared\PIM-LastPrivileged.ps1"    # PIM 100.72 (7): never remove the last Global Administrator (BLOCK + release)
 if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAd.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAd.ps1" }   # §84 Pro: loaded only when present          # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
 if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1" }   # §84 Pro: loaded only when present    # §80.2 PIM-for-AD replacement: AD group mirror + JIT membership (hybrid worker only)

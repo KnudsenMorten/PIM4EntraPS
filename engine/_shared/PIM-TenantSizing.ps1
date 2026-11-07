@@ -11,9 +11,12 @@
     "Exception of type 'System.OutOfMemoryException' was thrown." The job had the size every tenant got.
 
     THE RULE (per job, on that job's object count; Azure Container Apps Consumption pairs only):
-        <  5,000 objects  -> the job's default        (tick: 0.5 CPU / 1.0Gi)
-        5,000 - 14,999    -> 2.0 CPU / 4.0Gi
-        >= 15,000         -> 4.0 CPU / 8.0Gi   (the largest Consumption pair -- the cap)
+        any size (0 - 14,999) -> 2.0 CPU / 4.0Gi   (the FLOOR -- OPEN-27, framework section 0 "SIZING: NEW INSTALLS START AT
+                                                   THE LEARNED SIZES", owner 2026-11-04: the tick at 0.5 / 1 on 6 installs,
+                                                   one ran out of memory at that size; a new install never starts small)
+        >= 15,000             -> 4.0 CPU / 8.0Gi   (the largest Consumption pair -- the cap)
+      (Before 3.0.50: < 5,000 objects kept the tick at 0.5 CPU / 1.0Gi, and 2 / 4 started at 5,000.)
+      Other PIM jobs (pull / publish, db-init, support SQL, as-built, the updater) are not sized here: 0.5 CPU / 1.0Gi.
       * THE RUN LIMIT IS NOT SIZED (framework 12.24 JOB-RUN-LIMIT, owner 2026-10-15: *"job limit must be ... 7 days ... we
         can not limit cap session runtime"*): every job's replicaTimeout is Azure's maximum, $script:PimJobRunLimitSeconds
         (604,800 s = 7 days), at every band, on every update, whatever was set before. PIM_Bootstrap_ReplicaTimeout_<Job> is
@@ -35,6 +38,8 @@
         the main database                     S3, 250 GB max    ($script:PimSqlTierDefault / $script:PimSqlMaxSizeBytesDefault)
       * RAISE ONLY: a Manager below 4 / 8 is raised, one at or above it is untouched; a database below S3 is raised to S3,
         one at or above it is untouched. Automation never lowers either.
+      * OPEN-27 (3.0.50): the UPDATER's database tier raise is unchanged (owner 2026-10-12) and now behind one named switch,
+        $script:PimSqlTierUpdaterRaiseEnabled ($true); support may set it $false -- a database below S3 is then REPORTED only.
       * A size the customer set wins: PIM_Bootstrap_Cpu_Manager / PIM_Bootstrap_Memory_Manager (the installer's or the
         update job's environment; recorded on the app as its pim-sizing-override tag so a later update keeps it).
       * A database tagged pim-sql-tier-pin keeps its tier. The tag holds only a tier name -- it cannot tell "the customer
@@ -51,7 +56,8 @@ Set-StrictMode -Off
 # No product-chosen cap -- the installer, every job definition and the updater (Invoke-PimJobRunLimitUpdate) use this one value.
 $script:PimJobRunLimitSeconds = 604800
 $script:PimJobSizeDefaults = @{
-    Tick = @{ Cpu = '0.5'; Memory = '1.0Gi'; ReplicaTimeout = $script:PimJobRunLimitSeconds }
+    # OPEN-27 (owner 2026-11-04, framework section 0 SIZING): the tick starts at 2 CPU / 4 GiB at ANY tenant size (was 0.5 / 1).
+    Tick = @{ Cpu = '2.0'; Memory = '4.0Gi'; ReplicaTimeout = $script:PimJobRunLimitSeconds }
 }
 # THE MANAGER WEB APP'S DEFAULT SIZE. Owner 2026-10-12: "4 CPU / 8 GB at all ring 1+2 installs" -- "lets give everyone a
 # good experience for now" -- "we can always lower it". Why: at 0.5 CPU / 1 GiB the Manager ran out of memory reading a
@@ -62,9 +68,15 @@ $script:PimManagerSizeSuffix = 'Manager'     # the <Job> part of PIM_Bootstrap_C
 # Standard, with the 250 GB max size of every Standard database (100.37). Raise only; a pinned database keeps its tier.
 $script:PimSqlTierDefault = 'S3'
 $script:PimSqlMaxSizeBytesDefault = [int64]268435456000     # 250 GB
-# The bands, in order. Band 0 = the job's default.
+# THE UPDATER RAISES AN EXISTING DATABASE BELOW S3 TO S3 (owner 2026-10-12 "S3 at every ring 1+2 install"; unchanged by
+# OPEN-27, 3.0.50): raise only, a pim-sql-tier-pin tag wins and is reported. OPEN-27 made it ONE named switch so support can
+# turn it off where needed: $false = an existing database below S3 is only REPORTED on every update (the sizing line in
+# yellow + the run record UpdateState.setupFacts sqlTier), its 250 GB max size still set (included in every Standard tier).
+# New installs are created at S3 / 250 GB either way (New-PimHostingPrerequisites).
+$script:PimSqlTierUpdaterRaiseEnabled = $true
+# The bands, in order. Band 0 = the job's default. Band 1 starts at 0 objects: the floor for every tenant (OPEN-27).
 $script:PimJobSizeBands = @(
-    [pscustomobject]@{ Band = 1; MinObjects = 5000;  Cpu = '2.0'; Memory = '4.0Gi'; ReplicaTimeout = $script:PimJobRunLimitSeconds }
+    [pscustomobject]@{ Band = 1; MinObjects = 0;     Cpu = '2.0'; Memory = '4.0Gi'; ReplicaTimeout = $script:PimJobRunLimitSeconds }
     [pscustomobject]@{ Band = 2; MinObjects = 15000; Cpu = '4.0'; Memory = '8.0Gi'; ReplicaTimeout = $script:PimJobRunLimitSeconds }
 )
 $script:PimJobSizeMaxCpu = 4.0
@@ -125,8 +137,9 @@ function Get-PimTenantObjectTotal {
 function Get-PimTenantSizedJobResources {
     <#
       PURE. A PIM engine job's size for THIS tenant -- the framework 12.15 rule (SI: Get-SITenantSizedJobResources).
-      -Counts: Users, Groups, ServicePrincipals ($count). Returns $null below 5,000 objects (the job's default stands),
-      else @{ Cpu; Memory; ReplicaTimeout; Band; Objects }.
+      -Counts: Users, Groups, ServicePrincipals ($count). Returns @{ Cpu; Memory; ReplicaTimeout; Band; Objects } --
+      since OPEN-27 (3.0.50) band 1 (2.0 / 4.0Gi) is the floor at ANY size (no counts = 0 objects = the floor), band 2 from
+      15,000. $null only if no band is defined.
     #>
     param([string]$Job = 'ca-pim-tick', [AllowNull()]$Counts)
     $n = Get-PimTenantObjectTotal -Counts $Counts
@@ -173,6 +186,13 @@ function Get-PimSqlDefaultTier {
     $t = "$($script:PimSqlTierDefault)".Trim()
     if ($t -notmatch '^(?i)S\d+$') { $t = 'S3' }
     return $t.ToUpperInvariant()
+}
+
+function Test-PimSqlTierUpdaterRaiseEnabled {
+    <# PURE. OPEN-27: may the UPDATER raise an existing database's tier? $true (owner 2026-10-12) unless
+       $script:PimSqlTierUpdaterRaiseEnabled is exactly $false. A $null read in another scope (BUG-79-6b) keeps the product
+       behaviour: on. #>
+    return (-not ($script:PimSqlTierUpdaterRaiseEnabled -is [bool] -and -not $script:PimSqlTierUpdaterRaiseEnabled))
 }
 
 function Get-PimSqlDefaultMaxSizeBytes {
@@ -375,8 +395,42 @@ function Test-PimSqlTierBelowDefault {
     $reason = $(if ($plan.pinnedBelowDefault) { "$($plan.pinNote)" } else { "database $Database`: $($plan.reason)" })
     $fix = ''
     if ($plan.pinnedBelowDefault) { $fix = "Set-PimSqlTier.ps1 -Tier $($plan.defaultTier) -Pin moves a pinned database (https://invardia.com/support/pim/Set-PimSqlTier.ps1); leave it when the pin is the customer's choice" }
+    elseif ($below -and $plan.action -eq 'raise' -and -not (Test-PimSqlTierUpdaterRaiseEnabled)) { $fix = 'Set-PimSqlTier.ps1 applies it (https://invardia.com/support/pim/Set-PimSqlTier.ps1); the updater''s tier raise is switched off here' }
     elseif ($below) { $fix = 'Set-PimSqlTier.ps1 applies it now (https://invardia.com/support/pim/Set-PimSqlTier.ps1); the next update does it by itself' }
     return [pscustomobject]@{ readable = $true; below = [bool]$below; pinned = [bool]$plan.pinned; current = $c; want = $plan.defaultTier; fix = $fix; reason = $reason }
+}
+
+function Get-PimSqlTierFact {
+    <#
+      PURE. OPEN-27: the run-record fact for the database tier, from Invoke-PimSqlTierUpdate's result (-Result; $null = not
+      read this run). Returns [ordered]@{ sqlTier; sqlTierCurrent; sqlTierDetail }:
+        sqlTier  ok            at or above the product tier
+                 raised        raised to the product tier by this run (owner 2026-10-12)
+                 below         below the product tier, NOT raised (support switched the updater's raise off)
+                 pinned-below  pinned (pim-sql-tier-pin) below the product tier -- never changed
+                 n/a           not a Standard DTU database the rule judges (Premium, vCore, an elastic pool)
+                 unknown       not read (no result, a failed read, an unreadable tier) -- never a guessed ok
+      sqlTierDetail is the update's own line, one line, at most 200 characters.
+    #>
+    param([AllowNull()][object]$Result)
+    $f = [ordered]@{ sqlTier = 'unknown'; sqlTierCurrent = ''; sqlTierDetail = 'not read: the database tier was not checked this run' }
+    if ($null -eq $Result) { return $f }
+    $gp = { param($n) if ($Result -is [System.Collections.IDictionary]) { if ($Result.Contains($n)) { $Result[$n] } } elseif ($Result.PSObject.Properties[$n]) { $Result.$n } }
+    $d = (("$(& $gp 'detail')") -replace '\s+', ' ').Trim()
+    if ($d.Length -gt 200) { $d = $d.Substring(0, 197) + '...' }
+    $cur = "$(& $gp 'tierBefore')".Trim(); $aft = "$(& $gp 'tierAfter')".Trim()
+    $f.sqlTierCurrent = $(if ($aft) { $aft } else { $cur })
+    if ($d) { $f.sqlTierDetail = $d }
+    if ([bool](& $gp 'pinnedBelowDefault')) { $f.sqlTier = 'pinned-below'; return $f }
+    if ([bool](& $gp 'tierRaiseHeld') -or [bool](& $gp 'belowDefault')) { $f.sqlTier = 'below'; return $f }
+    if ([bool](& $gp 'tierRaised')) { $f.sqlTier = 'raised'; return $f }
+    if (-not $cur) { $f.sqlTier = 'unknown'; return $f }
+    if ($cur -notmatch '^(?i)(basic|S\d+)$' -or $d -match '(?i)elastic pool') { $f.sqlTier = 'n/a'; return $f }
+    $rank = { param($s) if ($s -match '^(?i)basic$') { 0 } elseif ($s -match '^(?i)S(\d+)$') { 1 + [int]$Matches[1] } else { -1 } }
+    $want = "$(& $gp 'defaultTier')".Trim(); if (-not $want) { $want = Get-PimSqlDefaultTier }
+    $end = $(if ($aft) { $aft } else { $cur })
+    $f.sqlTier = $(if ((& $rank $end) -ge (& $rank $want)) { 'ok' } elseif ((& $rank $end) -ge 0) { 'below' } else { 'unknown' })
+    return $f
 }
 
 function Test-PimJobRunOutOfResources {
@@ -460,9 +514,8 @@ function Get-PimContainerJobResources {
         $sc = [double](ConvertTo-PimJobCpu $sized.Cpu); $sm = [double](ConvertTo-PimJobMemoryGi $sized.Memory)
         if ($sm -gt $mem -or $sc -gt $cpu) { $cpu = [Math]::Max($cpu, $sc); $mem = [Math]::Max($mem, $sm); $source = 'tenant-size' }
         if ([int]$sized.ReplicaTimeout -gt $to) { $to = [int]$sized.ReplicaTimeout }
-        $notes.Add(('sized for this tenant: {0:N0} objects (users + groups + service principals) -> {1} CPU / {2}, replicaTimeout {3} s' -f $objects, (Format-PimJobCpu $sc), (Format-PimJobMemory $sm), $sized.ReplicaTimeout))
-    } elseif ($null -ne $Counts) {
-        $notes.Add(('{0:N0} objects (under 5,000) -> the job default {1} CPU / {2}' -f $objects, $d.Cpu, $d.Memory))
+        if ($null -eq $Counts) { $notes.Add(('no tenant count -> the floor for every tenant: {0} CPU / {1}, replicaTimeout {2} s' -f (Format-PimJobCpu $sc), (Format-PimJobMemory $sm), $sized.ReplicaTimeout)) }
+        else { $notes.Add(('sized for this tenant: {0:N0} objects (users + groups + service principals) -> {1} CPU / {2}, replicaTimeout {3} s' -f $objects, (Format-PimJobCpu $sc), (Format-PimJobMemory $sm), $sized.ReplicaTimeout)) }
     }
     if ($null -ne $Current) {
         $gc = { param($n) if ($Current -is [System.Collections.IDictionary]) { if ($Current.Contains($n)) { $Current[$n] } } elseif ($Current.PSObject.Properties[$n]) { $Current.$n } }
@@ -533,20 +586,34 @@ function Test-PimJobUndersized {
     <#
       PURE. Is the job below the tier for its RECORDED object count? @{ undersized; objects; want; have; command; reason }.
       want = the tier (Get-PimTenantSizedJobResources); a job at or above it in CPU, memory AND replicaTimeout is sized.
-      A tenant under 5,000 objects, or no recorded count, is never undersized (nothing to compare with).
+      OPEN-27 (3.0.50): the floor (2.0 CPU / 4.0Gi) holds at ANY size -- a small tenant, or no recorded count, at 0.5 / 1 IS
+      undersized. A customer's own smaller size (PIM_Bootstrap_*_Tick, recorded on the job: -Settings) is NOT flagged.
     #>
     param([AllowNull()]$Counts, [AllowNull()][object]$Cpu, [AllowNull()][object]$Memory, [int]$ReplicaTimeout = 0,
-          [string]$SubscriptionId, [string]$ResourceGroup, [string]$JobName = 'ca-pim-tick')
+          [string]$SubscriptionId, [string]$ResourceGroup, [string]$JobName = 'ca-pim-tick', [hashtable]$Settings = @{})
     $objects = Get-PimTenantObjectTotal -Counts $Counts
     $tier = Get-PimTenantSizedJobResources -Job $JobName -Counts $Counts
     $hc = ConvertTo-PimJobCpu $Cpu; $hm = ConvertTo-PimJobMemoryGi $Memory
     $have = ('{0} CPU / {1}, replicaTimeout {2} s' -f $(if ($null -ne $hc) { Format-PimJobCpu $hc } else { '?' }), $(if ($null -ne $hm) { Format-PimJobMemory $hm } else { '?' }), $ReplicaTimeout)
-    if (-not $tier) { return [pscustomobject]@{ undersized = $false; objects = $objects; want = $null; have = $have; command = ''; reason = $(if ($objects -gt 0) { ('{0:N0} objects -- under 5,000, the default size is right' -f $objects) } else { 'no recorded tenant size' }) } }
+    $who = $(if ($null -eq $Counts) { 'no recorded tenant size -- the floor for every tenant' } else { ('{0:N0} objects' -f $objects) })
+    if (-not $tier) { return [pscustomobject]@{ undersized = $false; objects = $objects; want = $null; have = $have; command = ''; reason = $(if ($objects -gt 0) { ('{0:N0} objects -- the default size is right' -f $objects) } else { 'no recorded tenant size' }) } }
+    # the customer's own size wins (framework 12.16): a job at the size the customer set is never called undersized
+    # (CPU / memory only: the run limit is always the 7-day maximum, framework 12.24 -- a short one is still flagged)
+    $sfx = Get-PimJobSettingSuffix -Job $JobName
+    if ($Settings -and ($Settings.ContainsKey("PIM_Bootstrap_Cpu_$sfx") -or $Settings.ContainsKey("PIM_Bootstrap_Memory_$sfx"))) {
+        $cs = Get-PimContainerJobResources -Job $JobName -Counts $Counts -Settings $Settings
+        if ($cs.Source -eq 'customer') {
+            $shortTo = ($ReplicaTimeout -gt 0 -and $ReplicaTimeout -lt [int]$cs.ReplicaTimeout)
+            $cmdC = $(if ($shortTo) { Get-PimJobSizeCommand -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -JobName $JobName -Cpu $cs.Cpu -Memory $cs.Memory -ReplicaTimeout $cs.ReplicaTimeout } else { '' })
+            return [pscustomobject]@{ undersized = [bool]$shortTo; objects = $objects; want = ('{0} CPU / {1}, replicaTimeout {2} s (the customer''s size)' -f $cs.Cpu, $cs.Memory, $cs.ReplicaTimeout); have = $have; command = $cmdC
+                reason = ('{0}; the job runs {1} -- the size the customer set (PIM_Bootstrap_*_{2}) wins{3}' -f $who, $have, $sfx, $(if ($shortTo) { "; its run limit is below the 7-day maximum ($($cs.ReplicaTimeout) s)" } else { '' })) }
+        }
+    }
     $want = ('{0} CPU / {1}, replicaTimeout {2} s' -f $tier.Cpu, $tier.Memory, $tier.ReplicaTimeout)
     $low = ($null -eq $hc -or $null -eq $hm -or $hc -lt [double](ConvertTo-PimJobCpu $tier.Cpu) -or $hm -lt [double](ConvertTo-PimJobMemoryGi $tier.Memory) -or ($ReplicaTimeout -gt 0 -and $ReplicaTimeout -lt [int]$tier.ReplicaTimeout))
     $cmd = Get-PimJobSizeCommand -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -JobName $JobName -Cpu $tier.Cpu -Memory $tier.Memory -ReplicaTimeout $tier.ReplicaTimeout
     return [pscustomobject]@{ undersized = [bool]$low; objects = $objects; want = $want; have = $have; command = $(if ($low) { $cmd } else { '' })
-        reason = $(if ($low) { ('{0:N0} objects needs {1}; the job runs {2}' -f $objects, $want, $have) } else { ('{0:N0} objects; the job runs {1} (tier {2})' -f $objects, $have, $want) }) }
+        reason = $(if ($low) { ('{0} needs {1}; the job runs {2}' -f $who, $want, $have) } else { ('{0}; the job runs {1} (tier {2})' -f $who, $have, $want) }) }
 }
 
 function Get-PimTenantSizingTags {
@@ -936,10 +1003,17 @@ function Invoke-PimSqlTierUpdate {
       back and the max size before/after logged. A database PINNED below the default is not changed and is REPORTED:
       pinnedBelowDefault = $true and the detail starts "database is pinned at <tier>, the new default is S3 - not changed".
       -Server is the FQDN or name (searched in the subscription). -Pro is ignored. Never throws.
-      Returns @{ ok; changed; detail; maxSizeBefore; maxSizeAfter; pinnedBelowDefault; tierBefore; tierAfter }.
+      OPEN-27 (3.0.50): the TIER raise follows -AllowTierRaise (default: Test-PimSqlTierUpdaterRaiseEnabled, ON -- owner
+      2026-10-12, unchanged). Switched off by support, a database the plan would raise is NOT raised: belowDefault = $true,
+      tierRaiseHeld = $true, and the detail says "database <db> is <tier>, below the product tier S3 -- not raised by the
+      updater ...". Its 250 GB max size is still set (every Standard tier includes 250 GB).
+      Returns @{ ok; changed; detail; maxSizeBefore; maxSizeAfter; pinnedBelowDefault; belowDefault; tierRaiseHeld; tierRaised;
+                 tierBefore; tierAfter; defaultTier }.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][AllowEmptyString()][string]$Server, [string]$Database = 'PimPlatform',
-          [bool]$Pro, [Parameter(Mandatory)][scriptblock]$Arm, [int]$ReadBackAttempts = 6, [int]$ReadBackDelaySec = 10)
+          [bool]$Pro, [Parameter(Mandatory)][scriptblock]$Arm, [int]$ReadBackAttempts = 6, [int]$ReadBackDelaySec = 10,
+          [AllowNull()][object]$AllowTierRaise = $null)
+    $raiseOn = $(if ($AllowTierRaise -is [bool]) { [bool]$AllowTierRaise } else { [bool](Test-PimSqlTierUpdaterRaiseEnabled) })
     $name =("$Server".Trim() -replace '^tcp:', '' -replace ',\d+$', '').Split('.')[0].ToLowerInvariant()
     if (-not $name) { return [pscustomobject]@{ ok = $false; changed = $false; detail = 'no SQL server name -- database size not checked' } }
     try {
@@ -956,10 +1030,20 @@ function Invoke-PimSqlTierUpdate {
         # A pin below the default: never overridden, said in the owner's words so support can act (the tag cannot say who pinned it).
         $pinLow = [bool]$plan.pinnedBelowDefault
         $what = $(if ($pinLow) { "$($plan.pinNote) (database $Database, tag pim-sql-tier-pin = '$pin'; to move it: Set-PimSqlTier.ps1 -Tier $($plan.defaultTier) -Pin)" } else { "database $Database`: $($plan.reason)" })
-        if ($plan.action -ne 'raise' -and $plan.maxSizeAction -ne 'set') { return [pscustomobject]@{ ok = $true; changed = $false; detail = $what; maxSizeBefore = $before; maxSizeAfter = $before; pinnedBelowDefault = $pinLow; tierBefore = $curSo; tierAfter = $curSo } }
+        # OPEN-27: the tier raise is held (OFF until the owner decides) -- REPORTED, never applied. The max size still follows.
+        $held = ($plan.action -eq 'raise' -and -not $raiseOn)
+        $raise = ($plan.action -eq 'raise' -and $raiseOn)
+        # a held raise leaves the tier as it is: the 250 GB max size only on a Standard S-tier (Basic stays at its 2 GB limit)
+        $setMax = ($plan.maxSizeAction -eq 'set' -and (-not $held -or $curSo -match '^(?i)S\d+$'))
+        if ($held) {
+            $what = "database $Database is $curSo, below the product tier $($plan.defaultTier) -- not raised by the updater (its tier raise is switched off here; Set-PimSqlTier.ps1 -Tier $($plan.defaultTier) raises it)"
+            if ($setMax) { $what += '; max size -> 250 GB' }
+        }
+        $belowDefault = [bool]($pinLow -or $plan.action -eq 'raise')
+        if (-not $raise -and -not $setMax) { return [pscustomobject]@{ ok = $true; changed = $false; detail = $what; maxSizeBefore = $before; maxSizeAfter = $before; pinnedBelowDefault = $pinLow; belowDefault = $belowDefault; tierRaiseHeld = [bool]$held; tierBefore = $curSo; tierAfter = $curSo; defaultTier = $plan.defaultTier } }
         $body = @{}
-        if ($plan.action -eq 'raise') { $body['sku'] = @{ name = $plan.target; tier = 'Standard' } }
-        if ($plan.maxSizeAction -eq 'set') { $body['properties'] = @{ maxSizeBytes = [int64]$plan.maxSizeBytes } }
+        if ($raise) { $body['sku'] = @{ name = $plan.target; tier = 'Standard' } }
+        if ($setMax) { $body['properties'] = @{ maxSizeBytes = [int64]$plan.maxSizeBytes } }
         [void](& $Arm 'PATCH' "$dbPath`?api-version=$($script:PimTenantSizingSqlApi)" $body)
         # read back: the max size before -> after (a tier change is online and can take minutes; the max size is immediate).
         # A GET right after a tier PATCH can answer 404 ResourceNotFound for a few seconds while the scale runs (measured
@@ -978,9 +1062,9 @@ function Invoke-PimSqlTierUpdate {
         }
         $fmt = { param($b) if ($null -eq $b) { 'unknown' } else { '{0:N0} GB' -f ($b / 1GB) } }
         $ms = " (max size {0} -> {1}, read back)" -f (& $fmt $before), (& $fmt $after)
-        $okMax = ($plan.maxSizeAction -ne 'set' -or ($null -ne $after -and $after -ge [int64]$plan.maxSizeBytes))
-        return [pscustomobject]@{ ok = $okMax; changed = $true; maxSizeBefore = $before; maxSizeAfter = $after; pinnedBelowDefault = $pinLow; tierBefore = $curSo; tierAfter = $tierAfter
-            detail = "$what$ms$(if ($plan.action -eq 'raise') { " (tier change online; takes effect in minutes$(if ($tierAfter) { "; the database reads $tierAfter now" }))" })$(if (-not $okMax) { ' -- the max size did NOT read back as 250 GB; the next update tries again' })" }
+        $okMax = (-not $setMax -or ($null -ne $after -and $after -ge [int64]$plan.maxSizeBytes))
+        return [pscustomobject]@{ ok = $okMax; changed = $true; maxSizeBefore = $before; maxSizeAfter = $after; pinnedBelowDefault = $pinLow; belowDefault = [bool]($pinLow -or $held); tierRaiseHeld = [bool]$held; tierRaised = [bool]$raise; tierBefore = $curSo; tierAfter = $tierAfter; defaultTier = $plan.defaultTier
+            detail = "$what$ms$(if ($raise) { " (tier change online; takes effect in minutes$(if ($tierAfter) { "; the database reads $tierAfter now" }))" })$(if (-not $okMax) { ' -- the max size did NOT read back as 250 GB; the next update tries again' })" }
     } catch {
         return [pscustomobject]@{ ok = $false; changed = $false; detail = "database size not checked: $((("$($_.Exception.Message)") -split "`n")[0])" }
     }

@@ -15,9 +15,11 @@
     3. checks the download against the release -- a difference stops here, the folder is removed and nothing is installed;
     4. unpacks it and runs tools/setup/Install-PimManager.ps1 FROM that folder with exactly the parameters you gave (the
        same parameters as Install-PimManager; its help has the details), and ends with its exit code;
-    5. prints where the files are. -Resume uses that folder again (no new download); the folder is remembered per tenant
-       and subscription in the temp folder. When it is gone (a new Cloud Shell session), -Resume downloads the release
-       again -- the installation's own progress is kept in its state folder, so it still continues where it stopped.
+    5. prints where the files are. -Resume uses that folder again (no new download) only when it holds the SAME edition
+       and the same version this copy installs now; the folder is remembered per tenant and subscription in the temp
+       folder. When it is gone (a new Cloud Shell session), or holds another edition or version, -Resume says so in one
+       line and downloads the release again -- the installation's own progress is kept in its state folder, so it still
+       continues where it stopped.
   -ReleasePath <folder> runs the installer from a release you already have (nothing is downloaded).
   The copy Invardia gives Pro and trial customers does steps 2-3 with Invardia instead of GitHub: you sign in in the browser
   (an administrator of -TenantId), it asks Invardia for the PIM Manager Pro package of your update ring for that tenant, checks
@@ -224,17 +226,26 @@ try {
 
     # ---------------------------------------------------------------- 1. the release folder: given, remembered, or new
     $tree = ''
+    $resumeChoice = $null
     if ("$ReleasePath".Trim()) {
         $tree = & $findTree ([IO.Path]::GetFullPath("$ReleasePath".Trim()))
         if (-not $tree) { Write-Host "The folder '$ReleasePath' does not hold a PIM Manager release (tools/setup/Install-PimManager.ps1 is not there)." -ForegroundColor Red; $launchCode = 3; break }
         Write-Host "Using the release in $tree (nothing is downloaded)."
     } elseif ($Resume -and (Test-Path -LiteralPath $notePath)) {
+        # FRAMEWORK INSTALLER RULE 12 (OPEN-24): the folder of the first run is reused ONLY for the SAME edition AND the
+        # version this launcher installs now (Get-PimInstallResumeChoice decides; the version is compared again below once
+        # GitHub / the ring has named it). Otherwise: ONE line, a fresh download -- the install's own progress is in its
+        # state folder, never in this release folder, so it still continues where it stopped.
         $note = $null; try { $note = [IO.File]::ReadAllText($notePath) | ConvertFrom-Json } catch { $note = $null }
+        $rTree = ''; $rTreeVer = ''
         if ($note -and "$($note.path)".Trim() -and (Test-Path -LiteralPath "$($note.path)")) {
-            $tree = & $findTree "$($note.path)"
-            if ($tree) { Write-Host "Resume: using the release downloaded before ($($note.version)) in $tree -- nothing is downloaded." }
+            $rTree = & $findTree "$($note.path)"
+            if ($rTree) { $rTreeVer = $(try { "$([IO.File]::ReadAllText((Join-Path $rTree 'VERSION')))".Trim() } catch { '' }) }
         }
-        if (-not $tree) { Write-Host 'Resume: the release folder of the first run is not there any more, so the release is downloaded again. The installation keeps its own progress, so it still continues where it stopped.' -ForegroundColor Yellow }
+        $resumeChoice = Get-PimInstallResumeChoice -Note $note -Tree $rTree -TreeVersion $rTreeVer -Channel "$script:PimInstallChannel" -WantVersion "$Version"
+        if ($resumeChoice.reuse) { $tree = $resumeChoice.tree; Write-Host $resumeChoice.line }   # -Version names the release downloaded before
+        elseif ("$($resumeChoice.line)".Trim()) { Write-Host $resumeChoice.line -ForegroundColor Yellow; $resumeChoice = $null }
+        # else: the folder is still a candidate -- decided below once GitHub / the ring names the version it serves now
     }
     $proHandoff = $null
     if (-not $tree -and "$script:PimInstallChannel" -eq 'pro') {
@@ -246,18 +257,25 @@ try {
             $GetInstallToken = if ($ViaSupportApp -and (Get-Command Get-InvardiaSupportToken -ErrorAction SilentlyContinue)) { { param($t) Get-InvardiaSupportToken -Resource 'https://management.azure.com' } }
                                else { { param($t) Get-PimInstallSignInToken -TenantId $t } }
         }
-        $pro = Get-PimInstallProPackage -TenantId "$TenantId" -Ring $proRing -Version "$Version" -GetToken $GetInstallToken -Http $InvardiaHttp -Download $Download -TempRoot $tempRoot
+        # -Resume (rule 12): the ring is asked which version it serves now; the package of the first run is reused only when
+        # it is that version (one sign-in either way, handed to the installer below)
+        $pro = Get-PimInstallProPackage -TenantId "$TenantId" -Ring $proRing -Version "$Version" -GetToken $GetInstallToken -Http $InvardiaHttp -Download $Download -TempRoot $tempRoot -ResumeFrom $(if ($resumeChoice) { @{ version = $resumeChoice.version; edition = $resumeChoice.edition; tree = $resumeChoice.tree } } else { $null })
         if (-not $pro.ok) { Write-Host "PIM Manager Pro could not be downloaded from Invardia: $($pro.reason). Nothing was installed." -ForegroundColor Red; $launchCode = 3; break }
-        Write-Host "SHA-256 $($pro.sha256) -- matches the SHA-256 Invardia signed"
-        $unpack = Join-Path $pro.dir 'release'
-        if (-not ('System.IO.Compression.ZipFile' -as [type])) { Add-Type -AssemblyName System.IO.Compression.FileSystem }
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($pro.zip, $unpack)
-        $tree = & $findTree $unpack
-        if (-not $tree) { Write-Host "The PIM Manager Pro package $($pro.version) does not hold tools/setup/Install-PimManager.ps1. Nothing was installed." -ForegroundColor Red; $launchCode = 3; break }
-        $treeVer = $(try { "$([IO.File]::ReadAllText((Join-Path $tree 'VERSION')))".Trim() } catch { '' })
-        if ($treeVer -and $treeVer -ne $pro.version) { Write-Host "The package holds version $treeVer, not the signed $($pro.version). Nothing was installed." -ForegroundColor Red; $launchCode = 3; break }
-        if (-not $WhatIfPreference) {
-            try { [IO.File]::WriteAllText($notePath, ([ordered]@{ path = $tree; version = $pro.version; savedUtc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json), (New-Object Text.UTF8Encoding($false))) } catch { Write-Verbose "$($_.Exception.Message)" }
+        if ($pro.reused) {
+            $tree = $resumeChoice.tree
+            Write-Host $pro.line
+        } else {
+            Write-Host "SHA-256 $($pro.sha256) -- matches the SHA-256 Invardia signed"
+            $unpack = Join-Path $pro.dir 'release'
+            if (-not ('System.IO.Compression.ZipFile' -as [type])) { Add-Type -AssemblyName System.IO.Compression.FileSystem }
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($pro.zip, $unpack)
+            $tree = & $findTree $unpack
+            if (-not $tree) { Write-Host "The PIM Manager Pro package $($pro.version) does not hold tools/setup/Install-PimManager.ps1. Nothing was installed." -ForegroundColor Red; $launchCode = 3; break }
+            $treeVer = $(try { "$([IO.File]::ReadAllText((Join-Path $tree 'VERSION')))".Trim() } catch { '' })
+            if ($treeVer -and $treeVer -ne $pro.version) { Write-Host "The package holds version $treeVer, not the signed $($pro.version). Nothing was installed." -ForegroundColor Red; $launchCode = 3; break }
+            if (-not $WhatIfPreference) {
+                try { [IO.File]::WriteAllText($notePath, ([ordered]@{ path = $tree; version = $pro.version; edition = 'pro'; savedUtc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json), (New-Object Text.UTF8Encoding($false))) } catch { Write-Verbose "$($_.Exception.Message)" }
+            }
         }
         # framework 8.13 INSTALL-HANDOFF: the person signed in once here -- the installer (same process) takes that ARM ACCESS
         # token from PIM_HANDOFF_TOKENS (checked on its own claims there, removed from the environment at once). Never with
@@ -272,33 +290,39 @@ try {
         try { $rel = & $GetRelease $relUrl } catch { $rel = $null; Write-Verbose "$($_.Exception.Message)" }
         if (-not $rel) { Write-Host "The PIM Manager release could not be read from GitHub ($relUrl). Check the network and run the command again." -ForegroundColor Red; $launchCode = 3; break }
         $relVer = "$($rel.tag_name)".Trim().TrimStart('v')
-        $asset = @(@($rel.assets) | Where-Object { "$($_.name)" -match '^PIM4EntraPS-v[0-9][0-9A-Za-z.+-]*\.zip$' }) | Select-Object -First 1
-        if (-not $asset -or -not "$($asset.browser_download_url)".Trim()) { Write-Host "The release $relVer has no PIM Manager zip to download." -ForegroundColor Red; $launchCode = 3; break }
-        $published = & $publishedSha $asset
-        if (-not $published) { Write-Host "The release $relVer does not publish the checksum of its zip, so it cannot be checked. Nothing was installed." -ForegroundColor Red; $launchCode = 3; break }
-        $dir = Join-Path $tempRoot ("pim-manager-release-{0}-{1}" -f $relVer, [guid]::NewGuid().ToString('N').Substring(0, 6))
-        [void][IO.Directory]::CreateDirectory($dir)
-        $zip = Join-Path $dir 'release.zip'
-        Write-Host "PIM Manager release $relVer -- downloading $($asset.name) into $dir"
-        try { & $Download "$($asset.browser_download_url)" $zip } catch { Write-Verbose "$($_.Exception.Message)" }
-        if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { Write-Host 'The download did not complete. Check the network and run the command again.' -ForegroundColor Red; try { [IO.Directory]::Delete($dir, $true) } catch { }; $launchCode = 3; break }
-        $got = & $sha256Hex $zip
-        if ($got -ne $published) {
-            Write-Host "The download does not match the SHA-256 the release publishes ($published; the download has $got). Nothing was installed; the folder is removed. Run the command again." -ForegroundColor Red
-            try { [IO.Directory]::Delete($dir, $true) } catch { }
-            $launchCode = 3; break
-        }
-        Write-Host "SHA-256 $got -- matches the SHA-256 the release publishes"
-        $unpack = Join-Path $dir 'release'
-        if (-not ('System.IO.Compression.ZipFile' -as [type])) { Add-Type -AssemblyName System.IO.Compression.FileSystem }
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $unpack)
-        $tree = & $findTree $unpack
-        if (-not $tree) { Write-Host "The release $relVer does not hold tools/setup/Install-PimManager.ps1." -ForegroundColor Red; $launchCode = 3; break }
-        $treeVer = $(try { "$([IO.File]::ReadAllText((Join-Path $tree 'VERSION')))".Trim() } catch { '' })
-        if ("$Version".Trim() -and $treeVer -and $treeVer -ne "$Version".Trim().TrimStart('v')) { Write-Host "The release holds version $treeVer, not $Version." -ForegroundColor Red; $launchCode = 3; break }
-        # -WhatIf writes nothing outside this new temp folder: the note is written by a real run only
-        if (-not $WhatIfPreference) {
-            try { [IO.File]::WriteAllText($notePath, ([ordered]@{ path = $tree; version = $(if ($treeVer) { $treeVer } else { $relVer }); savedUtc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json), (New-Object Text.UTF8Encoding($false))) } catch { Write-Verbose "$($_.Exception.Message)" }
+        # -Resume (rule 12): the release of the first run is reused only when it IS the release GitHub serves now
+        $rc2 = if ($resumeChoice) { Get-PimInstallResumeChoice -Note @{ version = $resumeChoice.version; edition = $resumeChoice.edition } -Tree $resumeChoice.tree -Channel "$script:PimInstallChannel" -WantVersion $relVer } else { $null }
+        if ($rc2 -and $rc2.reuse) { $tree = $rc2.tree; Write-Host $rc2.line }
+        elseif ($rc2) { Write-Host $rc2.line -ForegroundColor Yellow }
+        if (-not $tree) {
+            $asset = @(@($rel.assets) | Where-Object { "$($_.name)" -match '^PIM4EntraPS-v[0-9][0-9A-Za-z.+-]*\.zip$' }) | Select-Object -First 1
+            if (-not $asset -or -not "$($asset.browser_download_url)".Trim()) { Write-Host "The release $relVer has no PIM Manager zip to download." -ForegroundColor Red; $launchCode = 3; break }
+            $published = & $publishedSha $asset
+            if (-not $published) { Write-Host "The release $relVer does not publish the checksum of its zip, so it cannot be checked. Nothing was installed." -ForegroundColor Red; $launchCode = 3; break }
+            $dir = Join-Path $tempRoot ("pim-manager-release-{0}-{1}" -f $relVer, [guid]::NewGuid().ToString('N').Substring(0, 6))
+            [void][IO.Directory]::CreateDirectory($dir)
+            $zip = Join-Path $dir 'release.zip'
+            Write-Host "PIM Manager release $relVer -- downloading $($asset.name) into $dir"
+            try { & $Download "$($asset.browser_download_url)" $zip } catch { Write-Verbose "$($_.Exception.Message)" }
+            if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { Write-Host 'The download did not complete. Check the network and run the command again.' -ForegroundColor Red; try { [IO.Directory]::Delete($dir, $true) } catch { }; $launchCode = 3; break }
+            $got = & $sha256Hex $zip
+            if ($got -ne $published) {
+                Write-Host "The download does not match the SHA-256 the release publishes ($published; the download has $got). Nothing was installed; the folder is removed. Run the command again." -ForegroundColor Red
+                try { [IO.Directory]::Delete($dir, $true) } catch { }
+                $launchCode = 3; break
+            }
+            Write-Host "SHA-256 $got -- matches the SHA-256 the release publishes"
+            $unpack = Join-Path $dir 'release'
+            if (-not ('System.IO.Compression.ZipFile' -as [type])) { Add-Type -AssemblyName System.IO.Compression.FileSystem }
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $unpack)
+            $tree = & $findTree $unpack
+            if (-not $tree) { Write-Host "The release $relVer does not hold tools/setup/Install-PimManager.ps1." -ForegroundColor Red; $launchCode = 3; break }
+            $treeVer = $(try { "$([IO.File]::ReadAllText((Join-Path $tree 'VERSION')))".Trim() } catch { '' })
+            if ("$Version".Trim() -and $treeVer -and $treeVer -ne "$Version".Trim().TrimStart('v')) { Write-Host "The release holds version $treeVer, not $Version." -ForegroundColor Red; $launchCode = 3; break }
+            # -WhatIf writes nothing outside this new temp folder: the note is written by a real run only
+            if (-not $WhatIfPreference) {
+                try { [IO.File]::WriteAllText($notePath, ([ordered]@{ path = $tree; version = $(if ($treeVer) { $treeVer } else { $relVer }); edition = 'community'; savedUtc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json), (New-Object Text.UTF8Encoding($false))) } catch { Write-Verbose "$($_.Exception.Message)" }
+            }
         }
     }
     Write-Host "Release files: $tree"

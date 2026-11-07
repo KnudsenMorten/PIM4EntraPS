@@ -406,7 +406,7 @@ function Get-CvFact([string]$Id) {
                     $counts = @{ Users = $cnt.Users; Groups = $cnt.Groups; ServicePrincipals = $cnt.ServicePrincipals }; $from = 'counted now'
                 }
                 $u = Test-PimJobUndersized -Counts $counts -Cpu "$($res.cpu)" -Memory "$($res.memory)" -ReplicaTimeout ([int]"0$($jo.properties.configuration.replicaTimeout)") `
-                        -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -JobName $TickJobName
+                        -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -JobName $TickJobName -Settings $rec.settings
                 $sizeFact = @{ readable = $true; undersized = [bool]$u.undersized; reason = "$($u.reason) ($from)"; command = "$($u.command)" }
                 # PIM 100.114 (owner 2026-10-12): the Manager web app against the product size (4 CPU / 8 GiB, or the size the
                 # customer set) and the database against the product tier (S3; a pin below it is said, never changed). Each

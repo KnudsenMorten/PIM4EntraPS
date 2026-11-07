@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.50 -- 2026-11-06
+
+- Security findings PIM Manager already mails you (live access that differs from your definitions, new privileged roles or groups nobody manages, and the guard alert) now also reach Invardia support as alerts, so support sees them without waiting for you; each update run reports its stages to Invardia, and every status report says which PIM jobs are running and for how long, so support can tell a long job from a stuck one; a new installation starts at the sizes the fleet has learned (2 CPU / 4 GiB, 4 CPU / 8 GiB from 15,000 users) instead of starting small and being raised later; a resumed install never reuses the package of another version; settings pages store only the values you set yourself
+
 ## 3.0.49 -- 2026-11-06
 
 - An update no longer waits only 20 minutes for a long active-assignments snapshot on a very large tenant: it waits up to that job's usual length (at most 3 hours); the snapshot shows progress every 5 minutes; a run is called hung only when it is far past its usual length and silent, and it is never stopped.

@@ -577,7 +577,9 @@ function Start-PimIdentityMoveJob {
     if (-not $idm.Success) { return @{ ok = $false; execution = ''; reason = "not a Container Apps job id: $JobId" } }
     $mvApiVer = (Get-PimIdentityMoveApi).aca
     $mvArm = $Arm
-    $inv = { param($p) & $mvArm 'POST' "$p`?api-version=$mvApiVer" @{} }.GetNewClosure()
+    # No .GetNewClosure() (Test-PimHybridWorker L19: a closure cannot see dot-sourced functions): the block runs inside
+    # Start-PimAcaJobExecution, called from here, so $mvArm / $mvApiVer resolve through this function's scope.
+    $inv = { param($p) & $mvArm 'POST' "$p`?api-version=$mvApiVer" @{} }
     return (Start-PimAcaJobExecution -SubscriptionId $idm.Groups['s'].Value -ResourceGroup $idm.Groups['g'].Value -Name $idm.Groups['n'].Value -Invoke $inv -Sleep $Sleep)
 }
 

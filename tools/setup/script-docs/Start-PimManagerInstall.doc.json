@@ -52,7 +52,7 @@
     { "name": "SupportAccess", "required": false, "default": "troubleshoot", "help": "The Support app's level: troubleshoot, setup or asbuilt, used only with -SupportAppId (passed through)." },
     { "name": "Reporter", "required": false, "default": null, "help": "Callback that receives every step event (passed through)." },
     { "name": "StatePath", "required": false, "default": "clouddrive/invardia/<install id> (Cloud Shell) or ~/invardia/<install id>", "help": "The installer's resume state folder (passed through)." },
-    { "name": "Resume", "required": false, "default": false, "help": "Continue a stopped installation: the release downloaded before is used again (passed through)." },
+    { "name": "Resume", "required": false, "default": false, "help": "Continue a stopped installation: the release downloaded before is used again when it is the same edition and version this copy installs now; otherwise it is downloaded afresh (one line says so). The installation continues from its own saved progress (passed through)." },
     { "name": "PreflightOnly", "required": false, "default": false, "help": "Run only the installer's checks (passed through)." },
     { "name": "ViaSupportApp", "required": false, "default": false, "help": "Run the installation as the Invardia Support app (passed through). It needs a Connect-InvardiaSupport session for the same tenant in this PowerShell window; without one it stops before anything is downloaded." },
     { "name": "Version", "required": false, "default": "the latest public release", "help": "The PIM Manager release to install, for example 3.0.5." },

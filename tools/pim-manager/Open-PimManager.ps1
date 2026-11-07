@@ -535,6 +535,9 @@ if (Test-Path -LiteralPath $_notifyLib) { . $_notifyLib }
 # commit delta guard is a same-person confirm and uplink-readonly / the replication gate are form validation -- not guards.
 $_guardLib = Join-Path $solutionRoot 'engine\_shared\PIM-Guard.ps1'
 if (Test-Path -LiteralPath $_guardLib) { . $_guardLib }
+# OPEN-17 / framework 8.19 ALERT: the break-glass switch records its uplink alert (pim.Settings 'UplinkAlerts'); the uplink job sends it.
+$_uplinkAlertLib = Join-Path $solutionRoot 'engine\_shared\PIM-UplinkAlert.ps1'
+if (Test-Path -LiteralPath $_uplinkAlertLib) { . $_uplinkAlertLib }
 $_lastPrivLib = Join-Path $solutionRoot 'engine\_shared\PIM-LastPrivileged.ps1'
 if (Test-Path -LiteralPath $_lastPrivLib) { . $_lastPrivLib }
 # SEC-90: a ManagerAccess entry bound to an Entra object id matches that person only (Get-PimManagerRole). Loaded
@@ -550,6 +553,10 @@ if (Test-Path -LiteralPath $_guardRelLib) { . $_guardRelLib }
 # card and the Reports overview; the tick sends it.
 $_pendRemLib = Join-Path $solutionRoot 'engine\_shared\PIM-PendingReminders.ps1'
 if (Test-Path -LiteralPath $_pendRemLib) { . $_pendRemLib }
+# OPEN-19 (framework §12.16 CONVERGE-DEFAULTS): a settings page stores only the customer's own values, never a copy of a
+# default (Get-PimSettingCustomerDelta) -- so a later change of a shipped default reaches this install. Loaded
+# UNCONDITIONALLY: the page saves below call it.
+. (Join-Path $solutionRoot 'engine\_shared\PIM-SettingDelta.ps1')
 
 # Classified engine item failures (engine/_shared/PIM-FailureCatalog.ps1) -- the SAME catalog the engine
 # writes with, so the Manager shows exactly the cause/remedy/fixes the engine recorded.
@@ -6803,9 +6810,11 @@ function Set-PimOperationalPolicy {
     # Persist a (possibly partial) policy object. Normalize+clamp FIRST, then
     # store the normalized value -- the store never holds garbage. Returns the
     # same shape as Get-PimOperationalPolicy.
+    # OPEN-19 (framework §12.16): only the values that differ from the shipped default are stored -- a value left at
+    # its default follows the default, also when a later release changes it. The reader fills in the defaults.
     param([object]$Policy)
     $norm = ConvertTo-PimNormalizedOperationalPolicy -Raw $Policy
-    Set-PimManagerSetting -Name 'OperationalPolicy' -Value $norm.value
+    Set-PimManagerSetting -Name 'OperationalPolicy' -Value (Get-PimSettingCustomerDelta -Value $norm.value -Defaults (Get-PimOperationalPolicyDefaults))
     return (Get-PimOperationalPolicy)
 }
 
@@ -17942,9 +17951,11 @@ function Handle-Request {
                 $val[$k] = [int]$v
             }
             $val['by'] = "$((Get-PimManagerRole).identity)"; $val['atUtc'] = [datetime]::UtcNow.ToString('o')
-            try { Set-PimManagerSettingObject -Name 'PendingReminders' -Value $val }
+            # OPEN-19 (framework §12.16): store only the values that differ from the shipped default (+ who / when)
+            $store = Get-PimSettingCustomerDelta -Value $val -Defaults (Get-PimPendingReminderDefaults) -Keep 'by', 'atUtc'
+            try { Set-PimManagerSettingObject -Name 'PendingReminders' -Value $store }
             catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the setting was NOT saved: $($_.Exception.Message)" }; return 500 }
-            Write-PimManagerAuditEvent -Action 'settings.pending-reminders' -Target 'PendingReminders' -Before $before -After $val -Result 'ok'
+            Write-PimManagerAuditEvent -Action 'settings.pending-reminders' -Target 'PendingReminders' -Before $before -After $store -Result 'ok'
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; enabled = [bool]$val.enabled; approvalsAfterHours = $val.approvalsAfterHours; getStartedAfterHours = $val.getStartedAfterHours; repeatHours = $val.repeatHours })
             return 200
         }
@@ -20939,7 +20950,10 @@ function Handle-Request {
             $on = [bool]("$($body.defaultOn)" -match '^(?i)(true|1|yes|on)$')
             $before = ConvertTo-PimAutoExtendPolicy $(try { Get-PimManagerSettingObject -Name 'AutoExtendPolicy' } catch { $null })
             $val = [ordered]@{ leadDays = [int]$ld; defaultOn = $on }
-            try { Set-PimManagerSettingObject -Name 'AutoExtendPolicy' -Value ([pscustomobject]$val) | Out-Null }
+            # OPEN-19 (framework §12.16): store only the values that differ from the shipped default (ConvertTo-PimAutoExtendPolicy
+            # of nothing = the defaults); a value left at its default follows a later default change
+            $aeStore = Get-PimSettingCustomerDelta -Value $val -Defaults ([ordered]@{ leadDays = [int](ConvertTo-PimAutoExtendPolicy $null).leadDays; defaultOn = [bool](ConvertTo-PimAutoExtendPolicy $null).defaultOn })
+            try { Set-PimManagerSettingObject -Name 'AutoExtendPolicy' -Value ([pscustomobject]$aeStore) | Out-Null }
             catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the policy was not saved: $($_.Exception.Message)" }; return 500 }
             [void](Get-PimAutoExtendContext -Refresh)
             Write-PimManagerAuditEvent -Action 'settings.autoextend.save' -Target 'settings:autoextend' -Before ([ordered]@{ leadDays = $before.leadDays; defaultOn = $before.defaultOn }) -After $val -Result 'ok'
@@ -21794,6 +21808,9 @@ function Handle-Request {
             # fire the break-glass alert through the existing notify path.
             try { Send-PimManagerAlert -Event 'break-glass' -Title 'Break-glass (emergency override) ACTIVATED' -Detail ("Activated by $who; scope=$((@($ov.scopeGroupTags) -join ', ')); expires $($ov.expiresAtUtc); reason: $($body.reason)") -LinkTab 'settings' `
                 -Who 'Customer' -Status "Needs customer's action" -Problem "The break-glass emergency override was switched on by $who" -Todo 'Check that this was intended, and switch the override off in Settings when the emergency is over' | Out-Null } catch {}
+            # OPEN-17 / framework 8.19: the same finding for Invardia (pim.breakglass.used, critical) -- COUNTS only (how many
+            # scopes, how many hours), never who or which group; recorded for the next uplink cycle, never throws.
+            try { if (Get-Command Register-PimUplinkAlert -ErrorAction SilentlyContinue) { [void](Register-PimUplinkAlert -Event 'break-glass' -Measured @{ scopes = [long]@($ov.scopeGroupTags).Count; hours = [long]$hours }) } } catch {}
             # 🔴 BUG-185: say what is TRUE. The Manager only RECORDS the override (§65: it never writes the
             # directory); the ENGINE applies it -- approval off on the scoped groups -- and restores normal
             # policy at expiry (DESIGN §17.9). Nothing is in effect until that run, so the reply says QUEUED

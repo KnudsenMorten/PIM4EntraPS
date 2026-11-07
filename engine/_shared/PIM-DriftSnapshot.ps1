@@ -610,7 +610,16 @@ function Invoke-PimDriftSnapshotJob {
                 [void](Send-PimJobAlertViaNotify -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift' -DebounceMinutes 0 @am)
             }
             if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { Set-PimSetting -Name 'DriftAlertState' -Value ([pscustomobject]@{ lastMailUtc = $NowUtc.ToUniversalTime().ToString('o'); cadence = $__cad; total = [int]$doc.total }) }
-        } catch { Write-Warning "[$type] the drift alert could not be raised: $($_.Exception.Message)" } }
+        } catch { Write-Warning "[$type] the drift alert could not be raised: $($_.Exception.Message)" }
+            # OPEN-17 / framework 8.19: the same finding for Invardia (pim.drift.found, warning), at the same point and cadence as
+            # the mail -- COUNTS only, never an item; recorded for the next uplink cycle, best effort (never throws).
+            try {
+                if (Get-Command Register-PimUplinkAlert -ErrorAction SilentlyContinue) {
+                    [void](Register-PimUplinkAlert -Event 'drift' -NowUtc $NowUtc -Measured @{ total = [long]$doc.total
+                        missing = [long]$doc.counts.missing; changed = [long]$doc.counts.changed; extra = [long]$doc.counts.extra })
+                }
+            } catch { }
+        }
     }
 
     if ($scopeDocs.Count -gt 0 -and $failedNames.Count -eq $scopeDocs.Count) {

@@ -480,7 +480,7 @@ function Get-PimEnvironmentReport {
                         if ($szRec.recorded) {
                             $e.details['sizedForObjects'] = "$($szRec.objects)"
                             $e.details['sizedFrom'] = ("{0} users + {1} groups + {2} service principals ({3}, {4}; {5})" -f $szRec.counts.Users, $szRec.counts.Groups, $szRec.counts.ServicePrincipals, $szRec.counted, $szRec.sizedUtc, $szRec.source)
-                            $szU = Test-PimJobUndersized -Counts $szRec.counts -Cpu $e.details['cpu'] -Memory $e.details['memory'] -ReplicaTimeout ([int]"0$($e.details['replicaTimeout'])") -SubscriptionId $sub -ResourceGroup $rgN -JobName $cd.name
+                            $szU = Test-PimJobUndersized -Counts $szRec.counts -Cpu $e.details['cpu'] -Memory $e.details['memory'] -ReplicaTimeout ([int]"0$($e.details['replicaTimeout'])") -SubscriptionId $sub -ResourceGroup $rgN -JobName $cd.name -Settings $szRec.settings
                             $e.details['sizing'] = "$($szU.reason)"
                             if ($szU.undersized) { $e.details['sizingFix'] = "$($szU.command)" }
                         } elseif ("$($cd.name)" -match '(?i)-tick$' -or ((Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) -and "$($cd.name)" -ieq (Get-PimInstallName -Role engine))) { $e.details['sizing'] = 'no tenant size recorded on this job (installed before 2.4.539) -- the next update records it' }

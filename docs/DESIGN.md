@@ -987,11 +987,25 @@ persisted *before* the trigger fires, so a crash mid-trigger can't loop forever 
 is safe (the engine is idempotent), a missed one is not; if the entity map cannot be advanced, the
 next change arms `All`.
 
-**SQL tier (2.4.554, framework §12.15).** The installer creates the database on the **Standard tier, S0 at
-minimum** — never Basic (a `-SqlServiceObjective Basic` is created as S0, with a warning) and never serverless — with a
-**250 GB maximum size** (`New-PimHostingPrerequisites.ps1`). The installer, the updater and `Set-PimSqlTier.ps1` apply the
-same plan to an existing database (`Get-PimSqlTierPlan`): Basic is raised to S0, a Standard database gets the 250 GB
-maximum, a tier is never lowered, and a database tagged `pim-sql-tier-pin` keeps its tier.
+**SQL tier (2.4.554, framework §12.15; product tier S3 since October 2026).** The installer creates the database on the
+**Standard tier at S3** (the product tier, every edition) — never Basic (a `-SqlServiceObjective Basic` is created at the
+product tier, with a warning) and never serverless — with a **250 GB maximum size** (`New-PimHostingPrerequisites.ps1`).
+The installer, the updater and `Set-PimSqlTier.ps1` apply the same plan to an existing database (`Get-PimSqlTierPlan`):
+below S3 is raised to S3, a Standard database gets the 250 GB maximum, a tier is never lowered, and a database tagged
+`pim-sql-tier-pin` keeps its tier (a pin below S3 is reported). The updater's raise is unchanged; since 3.0.50 it sits
+behind one named switch (on) that support can turn off for an install — then a database below S3 is only reported, and
+the 250 GB maximum size is still set. Every update records the outcome in its run record (`sqlTier` = ok / raised /
+below / pinned-below / n/a / unknown). A pin below S3 is a deliberate choice for a low-traffic database: an internal
+Community test installation runs pinned at S0 since 2026-11-06; its updates report `pinned-below` and never raise it.
+
+**Starting sizes (framework §0 "SIZING: NEW INSTALLS START AT THE LEARNED SIZES", 3.0.50).** A new install does not start
+small and wait to be raised. The engine job starts at **2 CPU / 4 GiB at any tenant size** and **4 CPU / 8 GiB from 15,000
+objects** (users + groups + service principals, counted with Microsoft Graph `$count`); the PIM Manager runs at **4 CPU /
+8 GiB** in both editions; the other jobs (pull / publish, database job, support, as-built, updater) at 0.5 CPU / 1 GiB.
+The installer applies these; every update converges an existing install **raise-only** (`Get-PimContainerJobResources`,
+`Get-PimManagerAppResources`) — a bigger size is never lowered, and a size the customer set
+(`PIM_Bootstrap_Cpu_<Job>` / `PIM_Bootstrap_Memory_<Job>`, recorded on the job / app so a later update keeps it) always
+wins and is never called undersized by the end-of-install check or the environment report.
 
 **Persistent SQL compute + resilient `/health`.** The hosted SQL compute MUST run persistent
 (serverless **auto-pause disabled** / provisioned) so neither the health probe nor the first
@@ -3548,7 +3562,9 @@ new deployments; §11.4):
   *assignment required*. The container registry defaults to Basic.
 - **Internal (private-only)** — the Manager is reachable only from the VNet and peered/GSA clients;
   SQL gets a private endpoint by default and the registry defaults to Premium (Basic has no network
-  controls). Sign-in is still required. The private registry builds its images on its own build pool inside the network
+  controls). The registry is private from the moment it is created (framework installer rule 11b): Premium, public
+  network access off and the admin user off at creation, reached through its private endpoint; images are pulled with
+  the managed identity, never a registry password. Sign-in is still required. The private registry builds its images on its own build pool inside the network
   (framework rule 11g): tier S2 with no instances between builds -- each build scales it to two instances, and sets it back
   to none afterwards (also after a failed build), read back; the nightly update moves an older S1 pool to S2 only while no
   build is running, and the heartbeat reports the pool's tier, instance count and whether it is building.
@@ -5020,8 +5036,10 @@ read calls; nothing is ever stopped or cancelled.
   only, so the updater protects the change from them by waiting for their running executions. Where the requests broker
   runs as an app rather than a job, it has no executions to wait for.
 - The Manager shows a deferred run as "waiting for a running PIM job".
-- *A known long job (planned, not built).* A full active-assignments snapshot in a very large tenant can run for over an
-  hour and is working, not hung. The updater keeps deferring while it runs and never stops it.
+- *The database job beside a run (planned for 3.0.51, not built).* The database setup job will be allowed to run while a
+  PIM job runs only for the part that changes no table or column that job uses: grants and role membership, objects
+  created only when missing that already exist, and re-signing procedures the running job does not call -- and a re-sign
+  only while no support session is open. Every other database step keeps waiting for the run to end, as above.
 
 **The update check runs every 15 minutes on every ring (3.0.46).** Every installation looks for an approved version every
 15 minutes by default, so an approved version reaches it within minutes rather than at the nightly window. The update
@@ -9712,6 +9730,14 @@ admin word ("Admin", "adm", …), which does not loosen name validation. The cor
   defaults in `config/PIM4EntraPS.Filters.locked.ps1` remain the code fallback;
   the editable representation here is what an admin maintains.
 
+**A settings page stores only what the customer changed (built, not yet released).** A card that holds several values
+(the operational policy, the reminders of what waits on you, the auto-extend policy) posts all of them when it is saved.
+The store keeps only the values that differ from the shipped default, plus who saved it and when; a value left at its
+default is not written, and the reader fills it in from the default. So a later release that changes a default reaches
+every installation that did not change that value, and a value the customer set stays as set. Cards that change one
+value at a time already worked this way ("back to the default" removes the value; feature switches store only the
+switches turned away from their default). A value stored before this change stays as it is until its card is saved again.
+
 **Departments & owners is its own page under Access (2026-09-19).** A department decides who
 approves and who is mailed for every delegation it sponsors (the owner chain Owners → SponsorUpn →
 the department), so it moved out of Settings to **Access → Departments & owners** (tab
@@ -11250,6 +11276,35 @@ previous cycle started and are still beyond their job's watermark, counted befor
 oldest of them (null when there are none). It is computed from the run history only, carries no job content, and has its
 own switch (`PIM_UPLINK_UPLINKBACKLOG`, on by default). The anonymous heartbeat never carries it.
 
+**Security findings as alert records (`Kind = 'alert'`, 3.0.50).** Three findings also reach Invardia, beside the mail that
+stays the customer's own alarm:
+
+| Finding | AlertId | Severity | Measured (numbers only) | Raised where |
+|---|---|---|---|---|
+| The break-glass emergency override was switched on | `pim.breakglass.used` | critical | `scopes`, `hours` | the Manager, when the override is switched on |
+| Live access differs from the definitions (drift) | `pim.drift.found` | warning | `total`, `missing`, `changed`, `extra` | the drift job, when it sends the drift mail (same cadence) |
+| New privileged roles or groups nobody manages | `pim.coverage.uncovered` | warning | `findings`, `gaps`, `orphans`, `unmanagedBindings`, `wrongPermissions`, `unmanagedGroups` | the discovery job, when it mails new findings |
+
+Invardia keeps one list of alert ids per product (framework §8.19); these three are PIM's list, and the platform takes
+an alert only when its id is on the product's list.
+
+At that point the finding is only recorded in the settings store (`UplinkAlerts`); the hourly telemetry job sends it. The
+recording never throws and never sends, so it cannot hold up or fail the run or the mail. The list above is fixed in the
+code: a caller can only name one of the three findings and hand it numbers. A value that is not a number (also a number
+written as text), a fraction, a negative value or a key that is not on that finding's list is dropped, so a person's name,
+a sign-in name, a group name or an object id can never reach the record. The record carries `AlertId`, `Severity`,
+`Measured`, `FirstSeenUtc`, `Count`, `Area` (`breakglass`, `drift`, `coverage`), `Job` (a fixed value per finding:
+`manager`, `drift-snapshot`, `coverage`), `Version`, `Ring`, the tenant, a fixed action sentence (with secrets removed, at
+most 500 characters) and a link to the Manager page where the person acts (Settings, Drift or Discovery and gaps; no link
+without a usable https Manager address). **Alert records are sent only with an install key (identified).** An installation
+without a key sends no alert record at all -- no post, no hold, no refusal; its findings are kept only in its own settings
+store, and a finding last seen more than 48 hours ago is never sent, so a key added later does not send old findings.
+*Count* is the number of times the finding was seen in the 24 hours from `FirstSeenUtc`; a finding after that starts a new
+24-hour window. A finding is sent when a window starts, and after that at most once a day with the window's count, like the
+mail. A refusal of the record's content (400 / 422) holds the alert records for 24 hours and never stops the other
+reports of the cycle; a transport failure (429, 5xx, no network) stops the cycle like any other report. The switch
+`PIM_UPLINK_ALERTS` (on by default; `0` / `false` / `off` / `no` = off) turns the alert records off.
+
 **Telemetry that is not delivered is visible (2026-10-11).** The `uplink` run is a *warning* -- its own run status, amber
 on the Jobs page, never *failed* (a telemetry problem is not an engine failure) and never a green *ok* -- when telemetry is
 on and:
@@ -11377,6 +11432,16 @@ with the pull. PIM also keeps HOW: build in its own registry, schema, roll, heal
   from the same place as in a source tree). The same sign-in is handed to the installer, so there is no second sign-in for
   Azure. If Invardia cannot be reached or refuses, the command says so in one line and installs nothing. The exact shape of
   Invardia's answer is read in one place, so a change on Invardia's side is a one-place change.
+- **Resuming never reuses a different package (built, not yet released).** The installer remembers, per tenant and
+  subscription, the folder it downloaded, with the version and the edition (Community or Pro) of the package in it. Run
+  again with `-Resume`, it uses that folder only when the folder still holds that version, the package is this copy's
+  edition, and it is the version this copy installs now: the one the command names, or the release GitHub serves now
+  (Community copy), or the version the update ring serves now (Pro copy -- one sign-in asks Invardia, and that sign-in is
+  handed to the installer as on a first run). In every other case -- a Pro copy resuming after a Community run, a newer
+  release in the meantime, a folder that no longer holds what it was downloaded as, or a note written by an older
+  installer that did not record the edition -- it says in one line which package was downloaded before and which one it
+  installs now, downloads that one, and the installation continues where it stopped, because its progress is kept in its
+  own state folder, never in the release folder.
 - **What a release package carries (built, not yet released).** The package PIM publishes to Invardia, and the source
   archive for self-building installs, are packed without anything internal: the same files the public publish strips
   (internal notes, the backlog, the test document, the test suite and its fixtures, the agent instructions) are left out
@@ -11432,6 +11497,33 @@ with the pull. PIM also keeps HOW: build in its own registry, schema, roll, heal
   an installation that kept the sequence of the ring it left would refuse the next release as a replay, or refuse to
   step back to the version its new ring carries.
 
+**Every update run reports its stages (Pro).** An installation that holds an install key opens an update run at Invardia
+when its updater starts deciding (the same install key as the heartbeat and the update pull; the run is opened once the
+target version is known, so the first stage waits in memory until then) and reports each stage as it starts and ends:
+`check` (manifest read, ring, target decided) -> `download` -> `verify` (signature and SHA-256) -> `build` (the registry
+builds the image) -> `migrate` (the database schema, always before any container moves) -> `apply` (the desired-state
+check, the Manager, then every job) -> `health` (the Manager runs a healthy revision and every job is on the new build) ->
+`done`. A run that ends early says where: a failed stage is the last event (with a short error class and one scrubbed
+line); a roll that failed its health check and rolled back reports `rollback`, then `done` with "rolled back"; a schema
+step deferred because a PIM job is running ends with that stage `waiting`; only a run that moves a version is
+reported: a run with nothing to do, an installation current or ahead of its ring, a held one, or a run that stops before an update is known to be due opens no run at Invardia and sends nothing. Each event carries its time and, when it ends a stage, how long the stage took.
+**Reporting is best effort:** a report that fails stops the reporting for that run with one log line; the update never
+waits for it, fails on it or changes because of it. A Community installation (no install key) reports nothing. The
+updater job setting `PIM_UPDATE_TRACK=0` switches it off.
+
+**A run going long is reported, never stopped.** Every hourly identified heartbeat carries `Pipeline`, in the same shape
+the vendor's platform takes from every product. While an engine run goes it says so: state `running`, the run's id (the
+container execution's name when known), its start, its job type as the step, when the last engine run ended, and the
+product's own judgement of the run's length -- its usual length (the longest of the job's last five completed runs), its
+age, the ratio between them, a state (`ok` under 1.5x, `long` from 1.5x, `stuck` only when it is past 3x AND has written no
+progress mark for more than 30 minutes), whether a newer approved version waits behind it, and the action, which is always
+`none`: nothing in PIM stops or cancels a running run because it is long. When nothing runs, `Pipeline` carries the last
+finished engine run's outcome (`succeeded`, `failed` or `stopped`) and the time it really ended, read from the run history,
+so Invardia can tell when no run has ended for two days; with no finished engine run in the history it says `idle` and no
+end time. A value PIM does not know (the next start, steps done and total) is left out, never estimated. It is built from
+the engine's own run history and its lock progress marks -- no new right, no Azure read. Its own switch
+`PIM_UPLINK_PIPELINE` (on by default on rings 0-3; 0 / false / off / no switches it off; a refusal naming it holds just
+that field for 24 hours).
 ### 29.4 Get support: a ticket opened from PIM Manager
 
 A **Get support** button opens a support ticket at Invardia. It is the third kind of call an installation can make, and

@@ -35,6 +35,9 @@
       left out when the state could not be read) -- and a guard that was reported and is no longer held gets ONE Kind
       'guard' record with GuardOutcome 'cleared' (ClearedUtc, ClearedBy only where the stored state proves it).
       The set of reported guards is UplinkState.guardsReported.
+    * alerts (OPEN-17, framework 8.19 ALERT, owner 2026-11-04): break-glass used (critical), drift found + new uncovered roles /
+      groups (warning) as Kind 'alert' -- numeric Measured only, no names; IDENTIFIED installs only. Registered where
+      the finding is mailed, sent here (PIM-UplinkAlert.ps1). PIM_UPLINK_ALERTS=0 = off; a 400 / 422 holds them 24 h.
     * every record carries Ring: PIM_UPDATE_RING, else the ring recorded in pim.Settings['UpdateState'] (Resolve-PimUplinkRing).
   🔒 Gated by the feature 'telemetry.uplink', which is ON by default (defaultEnabled=$true in PIM-FeatureCatalog.ps1;
      owner decision 2026-10-04, framework UPDATE-1.4) and depends on 'scheduler.jobs'. Switching it off sends ONE opt-out.
@@ -90,6 +93,8 @@ function Invoke-PimUplinkRoundWait {
 if (-not (Get-Command Get-PimReleaseModeWindow -ErrorAction SilentlyContinue)) { $__pimRcLib = Join-Path $PSScriptRoot 'PIM-ReleaseControl.ps1'; if (Test-Path -LiteralPath $__pimRcLib) { . $__pimRcLib } }
 # FLEET-SETUPSTEPS (framework contract with Invardia, 2026-11-03): the setupSteps builder (pure) -- loaded at file level too.
 if (-not (Get-Command New-PimSetupSteps -ErrorAction SilentlyContinue)) { $__pimSsLib = Join-Path $PSScriptRoot 'PIM-SetupSteps.ps1'; if (Test-Path -LiteralPath $__pimSsLib) { . $__pimSsLib } }
+# OPEN-13 (framework "Pipeline.longRun on the heartbeat"): the Pipeline builder (pure) -- loaded at file level too.
+if (-not (Get-Command New-PimUplinkPipelineField -ErrorAction SilentlyContinue)) { $__pimPlLib2 = Join-Path $PSScriptRoot 'PIM-PipelineLongRun.ps1'; if (Test-Path -LiteralPath $__pimPlLib2) { . $__pimPlLib2 } }
 
 function Get-PimUplinkJobId {
     <# PURE. The stable Job id Invardia stores: 'pim-' + the job TYPE (one-off trigger names collapse onto their type). #>
@@ -2863,13 +2868,17 @@ function Invoke-PimUplinkCycle {
           [AllowNull()][object]$HybridAd = $null,
           # PIM 100.158 / framework 12.11e CR3: wave + releaseMode on the IDENTIFIED heartbeat (PIM-ReleaseControl.ps1,
           # Get-PimReleaseControlHeartbeatFields: only the keys that are known). Its own switch (PIM_Telemetry_ReleaseControl,
-          # AUTO = ring 0 only) and its own 24-hour hold after a refusal (UplinkState.releaseControlRefusedUtc).
+          # AUTO = rings 0-3) and its own 24-hour hold after a refusal (UplinkState.releaseControlRefusedUtc).
           [bool]$ReleaseControl = $false,
           [AllowNull()][System.Collections.IDictionary]$ReleaseControlFields = $null,
           # PIM 100.158 (c): Testing / Stable per engine scope (ConvertTo-PimScopeStabilityField: [ { id; state; sinceUtc;
           # version; goodDays } ]) -> the IDENTIFIED heartbeat's `scopeStability`, an ADDITIVE field (a refusal naming it holds
           # just it for 24 h). $null = left out -- the job passes it only while PIM_Telemetry_ScopeStability is on (OFF by default).
           [AllowNull()][object[]]$ScopeStability = $null,
+          # OPEN-13 / framework "Pipeline.longRun on the heartbeat": Pipeline (New-PimUplinkPipelineField) on EVERY identified
+          # heartbeat -- running + longRun, or the last run's outcome + lastEndedUtc, or idle -> ADDITIVE (a refusal naming it
+          # holds just it for 24 h). $null = left out (the run history was not read, or PIM_UPLINK_PIPELINE is off -- AUTO = rings 0-3).
+          [AllowNull()][object]$Pipeline = $null,
           # PIM 100.116 / framework 4.1b: { } -> the supportSqlAccess value (New-PimUplinkSupportSqlAccessField). INVOKED ONLY
           # when the IDENTIFIED heartbeat is due and the additive fields are on; $null = left out.
           [AllowNull()][scriptblock]$SupportSqlAccess = $null,
@@ -2894,7 +2903,11 @@ function Invoke-PimUplinkCycle {
           [AllowNull()][scriptblock]$RoundSleep = $null,
           # UPLINK-ROUNDS-84: UplinkBacklog { pending; oldestUtc; checkedUtc } on the IDENTIFIED heartbeat (additive), its own
           # switch PIM_UPLINK_UPLINKBACKLOG -- ON by default (Invardia deployed the field); 0/false/off/no = off (Test-PimUplinkBacklogOn).
-          [bool]$UplinkBacklog = (Test-PimUplinkBacklogOn -Value "$env:PIM_UPLINK_UPLINKBACKLOG"))
+          [bool]$UplinkBacklog = (Test-PimUplinkBacklogOn -Value "$env:PIM_UPLINK_UPLINKBACKLOG"),
+          # OPEN-17 / framework 8.19 ALERT: the security findings in pim.Settings 'UplinkAlerts' (PIM-UplinkAlert.ps1) go as Kind
+          # 'alert' records. $null = Test-PimUplinkAlertsOn (PIM_UPLINK_ALERTS, ON by default) when PIM-UplinkAlert.ps1 is
+          # loaded, else off. A content refusal holds them 24 h (UplinkState.alertsRefusedUtc) and never stops the cycle.
+          [AllowNull()][object]$Alerts = $null)
     $NowUtc = $NowUtc.ToUniversalTime()
     $envNameRead = $null
     $endpoint = "$(& $GetSetting 'UplinkEndpoint')".Trim()
@@ -3288,6 +3301,18 @@ function Invoke-PimUplinkCycle {
                     $hb | Add-Member -NotePropertyName 'UplinkBacklog' -NotePropertyValue $backlogVal -Force; $hbAdd += 'UplinkBacklog'
                 } catch { $backlogVal = $null; try { $hb.PSObject.Properties.Remove('UplinkBacklog') } catch { }; Write-Warning "[uplink] UplinkBacklog could not be built: $($_.Exception.Message)" }
             }
+            # OPEN-13 / framework "Pipeline.longRun on the heartbeat": the run going now (+ the product's own judgement of its
+            # length, REPORT ONLY: action is always 'none'), or the last run's outcome + when it ended. Additive (a refusal naming
+            # it holds just it 24 h); an object with a state from Invardia's closed list, PROVEN in the text -- else left out.
+            if ($null -ne $Pipeline) {
+                try {
+                    $hb | Add-Member -NotePropertyName 'Pipeline' -NotePropertyValue $Pipeline -Force
+                    $plText = ''; try { $plText = "$($hb | ConvertTo-Json -Depth 6 -Compress)" } catch { $plText = '' }
+                    $plState = "$(if ($Pipeline.PSObject.Properties['state']) { $Pipeline.state })"
+                    if ($plText.Contains('"Pipeline":{') -and $plState -in @('running', 'idle', 'failed', 'succeeded', 'stopped')) { $hbAdd += 'Pipeline' }
+                    else { $hb.PSObject.Properties.Remove('Pipeline'); Write-Warning '[uplink] Pipeline could not be written as the agreed JSON -- the heartbeat goes without it.' }
+                } catch { try { $hb.PSObject.Properties.Remove('Pipeline') } catch { } }
+            }
         }
         # PIM 100.167 / framework 8.16: Capabilities + Licences -- identified only, the cause switch on, ONE probe per heartbeat.
         # Licences go as a JSON array, PROVEN in the text before it leaves (the ActiveGuards lesson): not an array = left out.
@@ -3508,7 +3533,43 @@ function Invoke-PimUplinkCycle {
             else { $failed++; $stopped = $true; $left++; $why += "guard $cid cleared: $($r.Reason)" }
         }
     }
-    $msg = "$($sender.Mode): $sent sent$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($clearedSent) { " ($clearedSent guard(s) reported clear)" })$(if ($setupSent) { ' (setup report)' })$(if ($rounds.n -gt 1) { " in $($rounds.n) rounds" })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })$supNote"
+    # OPEN-17 / framework 8.19 ALERT (identified installs only): every DUE security finding (PIM-UplinkAlert.ps1: break-glass used, drift found, new
+    # uncovered roles / groups) goes as ONE Kind 'alert' record -- numbers only, never a name. AFTER the runs and guards, same
+    # budget. A transport failure (429 / 5xx / no network) stops the cycle like any record; a CONTENT refusal (400 / 422 --
+    # e.g. an Invardia that does not take PIM's alerts yet) holds the alerts 24 h and the rest of the cycle goes on.
+    $alertsSent = 0; $alRefusedNow = $false; $alNote = ''
+    $alPrev = $null; if ($state -and $state.PSObject.Properties['alertsRefusedUtc']) { $alPrev = $state.alertsRefusedUtc }
+    $alHeld = Test-PimUplinkAdditiveHeld -RefusedUtc $alPrev -NowUtc $NowUtc
+    $alOn = $false
+    try {
+        if ($null -ne $Alerts) { $alOn = [bool]$Alerts } elseif (Get-Command Test-PimUplinkAlertsOn -ErrorAction SilentlyContinue) { $alOn = [bool](Test-PimUplinkAlertsOn) }
+        if ($alOn -and -not (Get-Command New-PimUplinkAlertRecord -ErrorAction SilentlyContinue)) { $alOn = $false }
+    } catch { $alOn = $false }
+    # IDENTIFIED ONLY (owner 2026-11-01; Invardia refuses Kind 'alert' from an anonymous sender): an anonymous install sends
+    # no alert record at all -- no POST, no hold, no refusal.
+    if ($sender.Mode -ne 'identified') { $alOn = $false }
+    if ($alOn -and -not $alHeld -and -not $stopped) {
+        $alDue = @()
+        try { $alDue = @(Select-PimUplinkAlertsDue -State (& $GetSetting 'UplinkAlerts') -NowUtc $NowUtc) } catch { $alDue = @(); $alNote = "alerts not read: $($_.Exception.Message)" }
+        $alSentIds = @()
+        foreach ($ae in $alDue) {
+            if ($stopped -or $alRefusedNow) { break }
+            if (-not (& $roomNext)) { $left++; continue }
+            $arec = $null
+            try { $arec = New-PimUplinkAlertRecord -Entry $ae -Mode 'identified' -Product $script:PimUplinkProduct -Version $Version -Ring $Ring -TenantId $TenantId -ManagerUrl $mgrBase } catch { $arec = $null }
+            if (-not $arec) { continue }
+            $r = & $post $arec
+            if ("$($r.Status)" -eq 'ok') { $sent++; $alertsSent++; $alSentIds += "$($arec.AlertId)" }
+            elseif (Test-PimUplinkValidationRefusal "$($r.Reason)") {
+                $alRefusedNow = $true
+                $alNote = "Invardia refused the alert record $($arec.AlertId) ($($r.Reason)) -- alerts held 24 h"
+                try { Write-Warning "[uplink] $alNote" } catch { }
+            }
+            else { $failed++; $stopped = $true; $left++; $why += "alert $($arec.AlertId): $($r.Reason)" }
+        }
+        if ($alSentIds.Count) { $mk = Save-PimUplinkAlertMarks -GetSetting $GetSetting -SetSetting $SetSetting -AlertIds $alSentIds -SentUtc $NowUtc; if ($mk) { $why += $mk } }
+    }
+    $msg = "$($sender.Mode): $sent sent$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($clearedSent) { " ($clearedSent guard(s) reported clear)" })$(if ($alertsSent) { " ($alertsSent alert record(s))" })$(if ($alRefusedNow -or $alNote) { "; $alNote" } elseif ($alOn -and $alHeld) { '; alert records held (Invardia refused them less than 24 h ago)' })$(if ($setupSent) { ' (setup report)' })$(if ($rounds.n -gt 1) { " in $($rounds.n) rounds" })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })$supNote"
     # §33.0 BUG (2026-10-16): the refusal names its record (kind, job, HTTP status, Invardia's answer), and while a hold lasts
     # every cycle says so, whichever caller set it. A failure to build the text keeps the plain sentence.
     $refText = { param($st, $what) $t = ''; try { if ($null -ne $st.info) { $t = " ($(Format-PimUplinkRefusalLine -What $what -Info $st.info))" } } catch { $t = '' }; $t }
@@ -3550,6 +3611,9 @@ function Invoke-PimUplinkCycle {
     # PIM 100.167: the cause fields' own hold (left out entirely while the switch was never refused -- the state stays as before)
     if ($causeState.refusedNow) { $newState['causesRefusedUtc'] = $NowUtc.ToString('o') }
     elseif ($causeHeld) { $cpu = ConvertTo-PimUplinkUtc $causePrev; if ($cpu) { $newState['causesRefusedUtc'] = $cpu.ToString('o') } }
+    # OPEN-17: the alert records' own hold (left out while never refused)
+    if ($alRefusedNow) { $newState['alertsRefusedUtc'] = $NowUtc.ToString('o') }
+    elseif ($alHeld) { $alpu = ConvertTo-PimUplinkUtc $alPrev; if ($alpu) { $newState['alertsRefusedUtc'] = $alpu.ToString('o') } }
     # PIM 100.158: the release-control fields' own hold (left out while never refused)
     if ($rcState.refusedNow) { $newState['releaseControlRefusedUtc'] = $NowUtc.ToString('o') }
     elseif ($rcHeld) { $rpu = ConvertTo-PimUplinkUtc $rcPrev; if ($rpu) { $newState['releaseControlRefusedUtc'] = $rpu.ToString('o') } }
@@ -3565,6 +3629,7 @@ function Invoke-PimUplinkCycle {
               causes = [bool]$causeState.on; causesRefused = [bool]$causeState.refusedNow
               releaseControl = [bool]$rcState.on; releaseControlRefused = [bool]$rcState.refusedNow
               guardsCleared = $clearedSent; activeGuards = $(if ($guardsKnown) { $activeNow.Count } else { -1 })
+              alertsSent = $alertsSent; alertsRefused = [bool]$alRefusedNow
               environmentName = $envNameRead }
 }
 
@@ -3661,6 +3726,9 @@ function Invoke-PimUplinkJob {
     # INV-S16: the install's lasting id (Resolve-PimInvardiaInstallId lives in PIM-LicenceRequest.ps1), created with an insert
     # that never replaces a value, so the uplink and the licence-request job can never keep two different ids.
     if (-not (Get-Command Resolve-PimInvardiaInstallId -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-LicenceRequest.ps1') }
+    # OPEN-17 / framework 8.19: the alert records (pim.Settings 'UplinkAlerts') -- loaded here too, so the cycle sends them
+    # whichever process runs the job. Missing file = no alert records, nothing else changes.
+    if (-not (Get-Command Select-PimUplinkAlertsDue -ErrorAction SilentlyContinue)) { $alLib = Join-Path $PSScriptRoot 'PIM-UplinkAlert.ps1'; if (Test-Path -LiteralPath $alLib) { . $alLib } }
     $create = { param($n, $v) if (-not $WhatIf) { if (Get-Command Invoke-PimSqlNonQuery -ErrorAction SilentlyContinue) { [void](Add-PimSqlSettingIfAbsent -ConnectionString $cs -Name $n -Value $v) } else { Set-PimSqlSetting -ConnectionString $cs -Name $n -Value $v } } }
     # §100.39: Send-PimUplinkRecord = the framework's Send-AitUplink, unchanged, plus the response body (supersededBy).
     $send = { param($rec, $ep, $code, $iid = '') if ($WhatIf) { @{ Status = 'ok'; Reason = 'what-if' } } else { Send-PimUplinkRecord -Record $rec -Endpoint $ep -AccessCode $code -InstallId "$iid" } }
@@ -3875,11 +3943,26 @@ function Invoke-PimUplinkJob {
     # 15 s, no retry); -WhatIf = no read at all.
     $envNameXport = $null
     if (-not $WhatIf) { $envNameXport = { param($Uri, $Headers, $TimeoutSec) Invoke-PimInvardiaEnvironmentHttp -Uri $Uri -Headers $Headers -TimeoutSec $TimeoutSec } }
+    # OPEN-13 / framework "Pipeline.longRun on the heartbeat": the engine run going now and its length against its usual one,
+    # else the last run's outcome + when it ended, else idle (PIM-PipelineLongRun.ps1) -- on EVERY identified heartbeat, from
+    # the run history this job already read (not read = no field) + the scheduler locks' progress marks (one
+    # pim.Settings read). REPORT ONLY: nothing is stopped. PIM_UPLINK_PIPELINE (AUTO = rings 0-3); identified only.
+    $plField = $null
+    if ($on -and "$key".Trim() -and $runsRead -and (Get-Command New-PimUplinkPipelineField -ErrorAction SilentlyContinue) -and (Test-PimUplinkPipelineOn -Value "$env:PIM_UPLINK_PIPELINE" -Ring $ring)) {
+        try {
+            $plProg = $null
+            if (Get-Command Get-PimSchedulerLocksRaw -ErrorAction SilentlyContinue) { try { $plProg = Get-PimLongRunProgressMap -Map (Get-PimSchedulerLocksRaw).Map } catch { $plProg = $null } }
+            $plField = New-PimUplinkPipelineField -Runs $runs -UpdateState $us -Progress $plProg -NowUtc $NowUtc
+            if ($plField -and $plField.PSObject.Properties['longRun'] -and "$($plField.longRun.state)" -ne 'ok') {
+                Write-Host ("  [uplink] long run: {0} has run {1} min, usual {2} min ({3}x) -- {4}; reported, not stopped" -f $plField.step, $plField.longRun.ageMin, $plField.longRun.usualMin, $plField.longRun.ratio, $plField.longRun.state) -ForegroundColor Yellow
+            }
+        } catch { $plField = $null; Write-Warning "[uplink] Pipeline could not be built: $($_.Exception.Message)" }
+    }
     $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -CreateSetting $create -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
             -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $pause @cyc `
             -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints -AdoptionCounts $adoption `
             -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun -Causes $causesOn -LicenceProbe $licProbe -HybridAd $hyAd `
-            -ReleaseControl $rcOn -ReleaseControlFields $rcFields -ScopeStability $ssField -StateFields $stateSb -SupportSqlAccess $ssaSb `
+            -ReleaseControl $rcOn -ReleaseControlFields $rcFields -ScopeStability $ssField -StateFields $stateSb -SupportSqlAccess $ssaSb -Pipeline $plField `
             -EnvironmentName (Test-PimUplinkEnvironmentNameOn) -EnvironmentTransport $envNameXport
     # PIM 100.75: a failed send / an install that should be identified but is anonymous = a WARNING run (never a failure).
     $rawKey = ''; try { $rawKey = "$(& $get 'InvardiaInstallKey')".Trim() } catch { $rawKey = '' }
