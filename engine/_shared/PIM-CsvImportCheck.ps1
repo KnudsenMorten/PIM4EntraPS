@@ -46,6 +46,22 @@ Set-StrictMode -Off
 
 $script:PimCsvImportSchemaCache = $null
 
+# §84 P6 (OPEN-23): the free row reader the import check uses, for a copy WITHOUT the MSP library (the public Community
+# release) -- byte-for-byte the behaviour of engine/msp/PIM-Downlink.ps1's Get-PimDownlinkValue, which wins where it loads.
+if (-not (Get-Command Get-PimDownlinkValue -ErrorAction SilentlyContinue)) {
+    function Get-PimDownlinkValue {
+        param([object]$Object, [Parameter(Mandatory)][string]$Key)
+        if ($null -eq $Object) { return $null }
+        if ($Object -is [System.Collections.IDictionary]) {
+            if ($Object.Contains($Key)) { return $Object[$Key] }
+            return $null
+        }
+        $p = $Object.PSObject.Properties[$Key]
+        if ($p) { return $p.Value }
+        return $null
+    }
+}
+
 function Get-PimCsvImportSolutionRoot {
     # engine/_shared -> solution root
     return (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
@@ -374,7 +390,9 @@ function Get-PimCsvImportForceLocalPlan {
       A value the file sets explicitly is never changed. Returns @{ rows = transformed copies; changes = @( @{ index; column; from; to } ) }.
     #>
     param([Parameter(Mandatory)][string]$Entity, [AllowEmptyCollection()][object[]]$Rows = @())
-    $kind = Get-PimReplicationKindForEntity -Entity $Entity
+    # §84 P6 (OPEN-23): without the managing-tenant (MSP) code -- the public Community release -- nothing is replicable, so the
+    # import-side rule changes nothing.
+    $kind = if (Get-Command Get-PimReplicationKindForEntity -ErrorAction SilentlyContinue) { Get-PimReplicationKindForEntity -Entity $Entity } else { '' }
     $outRows = New-Object System.Collections.Generic.List[object]
     $changes = New-Object System.Collections.Generic.List[object]
     for ($i = 0; $i -lt @($Rows).Count; $i++) {
@@ -468,6 +486,11 @@ function Get-PimCsvImportReplication {
       Computed over the given rows ALONE: rows already in the target store can make a Follow row travel too.
     #>
     param([Parameter(Mandatory)][hashtable]$EntityRows)
+    # §84 P6 (OPEN-23): the producer's rules are Pro code (engine/msp, not in the public Community release) -- without them
+    # nothing is published, and the check says so (CSVIMP-REP-000) instead of failing to run.
+    if (-not (Get-Command Select-PimBaselineBundleContent -ErrorAction SilentlyContinue)) {
+        return @{ rows = @(); bundle = [ordered]@{ admins = 0; memberships = 0; groups = 0; nestings = 0; roleBindings = 0; resourceBindings = 0; aus = 0 }; notPublished = @(); dependencyIncluded = @(); notInstalled = $true }
+    }
     $lc = { param($s) "$s".Trim().ToLowerInvariant() }
     $ents = @{}
     foreach ($e in @(Get-PimReplicationEntities)) {
@@ -587,8 +610,12 @@ function Invoke-PimCsvImportCheck {
     if (Test-Path -LiteralPath (Join-Path $shared '..\msp\PIM-Downlink.ps1')) { . (Join-Path $shared '..\msp\PIM-Downlink.ps1') }   # §84 Pro: loaded only when present
     . (Join-Path $shared 'PIM-PolicyTemplateStore.ps1')
     . (Join-Path $solRoot 'tools\pim-manager\_validator.ps1')
-    foreach ($need in 'Invoke-PimPreflightValidation','Get-PimReplicateMode','Get-PimReplicationKindForEntity','Get-PimReplicationEntities',
-                      'Select-PimBaselineBundleContent','Get-PimStoreRowKey','Get-PimDuplicateStoreKeys','Test-PimReplicationRowFields','Test-PimGroupName') {
+    # §84 P6 (OPEN-23): the replication predicates come from the MSP library (Pro). Where it ships (the private tree, the Pro
+    # package) they are REQUIRED as before; in the public Community copy it is absent and only the free predicates are.
+    $__needMsp = Test-Path -LiteralPath (Join-Path $shared '..\msp\PIM-Downlink.ps1')
+    $__need = @('Invoke-PimPreflightValidation','Get-PimStoreRowKey','Get-PimDuplicateStoreKeys','Test-PimGroupName')
+    if ($__needMsp) { $__need += @('Get-PimReplicateMode','Get-PimReplicationKindForEntity','Get-PimReplicationEntities','Select-PimBaselineBundleContent','Test-PimReplicationRowFields') }
+    foreach ($need in $__need) {
         if (-not (Get-Command $need -ErrorAction SilentlyContinue)) { throw "Invoke-PimCsvImportCheck: '$need' did not load -- the check cannot run, and a check that did not run is not a pass." }
     }
 
@@ -757,8 +784,13 @@ function Invoke-PimCsvImportCheck {
                 -Suggestion 'If it must reach managed tenants, set ManagementMode=msp and a Ring in the file. To state that it stays on the managing tenant, set ManagementMode=local or import with -ForceLocal.')) | Out-Null
         }
     }
+    if ($repFiles.notInstalled) {
+        $findings.Add((New-PimCsvImportFinding -Severity info -Code 'CSVIMP-REP-000' -Source 'replication' `
+            -Message 'Replication to managed tenants was not computed: this copy has no managing-tenant (MSP) code (Community edition). Nothing is replicated from a single-tenant installation.')) | Out-Null
+    } else {
     $findings.Add((New-PimCsvImportFinding -Severity info -Code 'CSVIMP-REP-000' -Source 'replication' `
         -Message 'Replication is computed over the files alone with the producer''s own rules. Rows already in the target store can still pull a Follow row (or a Replicate=No group that a replicated row depends on -- carried as a dependency, warned) into the bundle.')) | Out-Null
+    }
 
     # --- summary -----------------------------------------------------------------------------------------
     $all = @($findings.ToArray())

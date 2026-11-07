@@ -81,6 +81,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-AsBuilt.ps1')          # 100.61 the as-built job + store + view an EXISTING install converges to
 . (Join-Path $solRoot 'engine\_shared\PIM-DbInitJob.ps1')        # OPEN-06 the in-network database job on every install (created, NEVER started)
 . (Join-Path $solRoot 'engine\_shared\PIM-DbInitMembership.ps1') # framework 4.5 point 5: the database job identity in the SQL admin group, (a)-(d) + renewal
+. (Join-Path $solRoot 'engine\_shared\PIM-DownlinkSqlUser.ps1')  # G3A-COPY-LEFTOVER: the pull job's OWN database user (100.156 B); its admin group membership READ only
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdaterGraphRoles.ps1') # owner 2026-11-05: the updater's Graph permissions, ONE list; checked (never self-granted)
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAudit.ps1')         # SECPACK-SQL-AUDIT the SQL server's audit -> the install's workspace
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateNow.ps1')        # framework 8.18 UPDATE-NOW: the 15-minute signal check + the run kind + own cron
@@ -105,7 +106,7 @@ $script:PimDbInitResult = $null
 function Invoke-PimUpdaterConvergeStep {
     param([string]$When = 'update')
     # FLEET-SETUPSTEPS: the results the setup-step facts (2g) are read from; $null = that step did not run this time.
-    $cv = $null; $si = $null; $ab = $null; $sa = $null; $db = $null
+    $cv = $null; $si = $null; $ab = $null; $sa = $null; $db = $null; $dlu = $null
     $script:PimSqlTierResult = $null     # OPEN-27: this run's database tier result ($null = not read -> setupSteps 'sql-tier' unknown)
     $csSize = $null; try { $csSize = Get-PimSqlConnectionString } catch { $csSize = $null }
     if (-not "$csSize".Trim()) {
@@ -421,6 +422,29 @@ function Invoke-PimUpdaterConvergeStep {
             }
         }
     } catch { Say "  database job identity membership not checked: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2e-quinquies. G3A-COPY-LEFTOVER (PIM 100.156 B, framework 12.23 P5; Invardia 2026-11-07) -- THE PULL JOB'S OWN USER ----
+    # A managed-tenant pull job deployed before 100.156 B signs in to SQL as its managed identity with NO database user of its
+    # own (it reaches the store only through the SQL admin group). Its own user -- the access catalog's downlink roles, from
+    # its app id as SID -- is created THROUGH the signed access procedure (the as-built reader's path) and READ BACK
+    # (engine/_shared/PIM-DownlinkSqlUser.ps1). Users / role membership / grants only: the 'grants' kind, safe beside a
+    # running PIM job (SCHEMA-QUIESCE-818). The admin group membership is READ and REPORTED (run record setupFacts
+    # downlinkDbUser / downlinkInAdminGroup), NEVER removed here -- a support step removes it after one pull ran green on
+    # its own user. No pull job = one ARM list read, nothing else. Never fails the update.
+    try {
+        $dlQ = $null; $dlX = $null; $dlS = $null; $dlSkip = ''
+        if ("$csSize".Trim()) {
+            $dlCs = "$csSize"
+            $dlQ = { param($q) Invoke-PimSqlQuery -ConnectionString $dlCs -Sql $q }
+            $dlX = { param($q) [void](Invoke-PimSqlNonQuery -ConnectionString $dlCs -Sql $q) }
+            $dlS = { param($q) Invoke-PimSqlScalar -ConnectionString $dlCs -Sql $q }
+        } else { $dlSkip = 'no store connection in this run' }
+        $dlSrv = $(if ("$($env:PIM_SqlServer)".Trim()) { "$($env:PIM_SqlServer)".Trim() } else { "$($global:PIM_SqlServer)".Trim() })
+        $dlG = { param($p) Invoke-PimGraph -Path $p }
+        $dlu = Invoke-PimDownlinkSqlUserConverge -SubscriptionId $sub -ResourceGroup $rg -Arm $armSeam -Graph $dlG -Query $dlQ -Exec $dlX -Scalar $dlS -SqlServer $dlSrv -SqlSkipReason $dlSkip
+        foreach ($l in @($dlu.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+        $fixByHand += [int]$dlu.warnings
+        if ("$($dlu.state)" -ne 'n/a') { Say ("pull job database user ($When): $($dlu.state) -- $($dlu.detail)") $(if ($dlu.state -eq 'ok') { 'DarkGray' } else { 'Yellow' }) }
+    } catch { Say "  pull job database user not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2f. framework 12.23 P8 EXCEPTION (owner 2026-10-18) -- A PRIVATE-SQL INSTALL NEVER CUT OVER MOVES BY ITSELF -----------
     # The Support app has no route to a private database. This updater reads (as dbo, still in the SQL admin group), decides
     # (run 1, later run 2) and STARTS the in-network admin job; the job does the admin SQL and reads it back. No admin SQL
@@ -471,8 +495,12 @@ function Invoke-PimUpdaterConvergeStep {
         # ok | raised | below | pinned-below | n/a | unknown, sqlTierCurrent, sqlTierDetail) -- support reads it; the agreed setupSteps
         # list is unchanged (a new step key is Invardia's to agree).
         try { $stF = Get-PimSqlTierFact -Result $script:PimSqlTierResult; foreach ($k in @($stF.Keys)) { $ssF[$k] = $stF[$k] } } catch { }
+        # G3A-COPY-LEFTOVER: the pull job's own database user + whether its identity is still in the SQL admin group, kept in the
+        # run record (downlinkDbUser = ok | missing | n/a | unknown; downlinkInAdminGroup = yes | no | n/a | unknown) -- support
+        # reads it before the membership is removed; the agreed setupSteps list is unchanged (a new step key is Invardia's to agree).
+        try { $dlF = Get-PimDownlinkSqlUserSetupFact -Result $dlu; foreach ($k in @($dlF.Keys)) { $ssF[$k] = $dlF[$k] } } catch { }
         $script:PimSetupFacts = $ssF
-        $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail', 'dbJobDetail', 'sqlTierDetail', 'sqlTierCurrent') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
+        $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail', 'dbJobDetail', 'sqlTierDetail', 'sqlTierCurrent', 'downlinkDbUserDetail') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
         Say ("setup steps: facts recorded for the heartbeat$(if ($ssUnk.Count) { " (not readable: $($ssUnk -join ', '))" })") 'DarkGray'
     } catch { Say "  setup steps not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2g-bis. KV-POLICY-DENIED-PRIVATE / framework installer rule 11 -- A PRIVATE INSTALL'S KEY VAULT IS PRIVATE ------------

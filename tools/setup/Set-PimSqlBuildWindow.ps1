@@ -36,7 +36,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-. (Join-Path $solRoot 'engine\msp\PIM-MspBuild.ps1')
+. (Join-Path $solRoot 'engine\_shared\PIM-SqlBuildWindow.ps1')   # FREE (owner 2026-11-07): the one check this script uses, no Pro code
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 # 100.41 (framework 12.17 NO-AZ): ARM REST through PIM-Rest's one token client (engine/_shared/PIM-ArmSetup.ps1). A calling
 # build's REST session is used as it is; standalone, the Invardia Support app's session or the person signed in. No az.

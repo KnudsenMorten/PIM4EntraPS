@@ -14421,6 +14421,11 @@ function Invoke-PimManagerGetRouteTierImpact {
             $script:lastHeartbeat = Get-Date
             # REQ-Y: Pro (hard) -- 403 with the licence line when this environment has no Pro licence.
             if (-not (Test-PimManagerProFeature -Key 'reports.tier' -Response $resp)) { return 403 }
+            # §84 P6: a Pro licence on a copy without the Pro code (before the Pro package arrives) -- say so, never a 500.
+            if (-not (Get-Command Get-PimTierImpactReport -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'the tier-impact report is part of the Pro edition and is not installed in this Manager yet.'; pro = $true }
+                return 503
+            }
             $hiMax = 1
             if ($req.Url.Query -match '(\?|&)tier=([0-5])') { $hiMax = [int]$Matches[2] }
             try {
@@ -21935,6 +21940,11 @@ function Handle-Request {
         if ($path -eq '/api/discovery-inbox' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             # REQ-DISC-2: the ONE list -- new items with Create / Ignore, the ignored ones with Re-add.
+            # §84 P6: the inbox builder is Pro code (engine/discovery) -- without it say so instead of calling what is not there.
+            if (-not (Get-Command ConvertTo-PimDiscoveryItems -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'the discovery inbox is part of the Pro edition and is not installed in this Manager.'; pro = $true }
+                return 503
+            }
             $d = $null
             try { $d = Get-PimManagerDiscoveryInbox } catch {
                 Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "the discovery inbox could not be read: $($_.Exception.Message)" }

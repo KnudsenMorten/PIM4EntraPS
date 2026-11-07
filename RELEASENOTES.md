@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.52 -- 2026-11-07
+
+- The public Community release no longer contains any Pro code, and a Community installation still installs, updates and runs as before; tenant preparation works in the Community edition; the downloadable v1 import script carries no Pro code; on a managed tenant, every update now gives the pull job its own least-privilege database user and reports whether it still uses the database admin group
+
 ## 3.0.51 -- 2026-11-07
 
 - The database setup job can now run only its safe part (database users, role membership and grants, added only) while a PIM job is running; every other step still waits for the run to end, and the access procedure is re-signed only while no support session is open; an update no longer starts the full database setup job while a PIM job is running, it waits for a later run

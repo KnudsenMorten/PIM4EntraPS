@@ -801,6 +801,10 @@ Write-PimStartupLine -Message "[scheduler] REST engine wired (scopes: $((Get-Pim
 # knows the desired store) when present; absent -> empty (a fresh tenant just sees
 # all-create, still gated by the per-type auto-import rules). The discovered items use
 # the REST enumerators. The queue is SQL pim.ChangeQueue only (IMP-40).
+# §84 P6 (OPEN-23): the sweep is Pro code (engine/discovery, not in the public Community release). Without it the three
+# discovery jobs keep the stub handler ("unimplemented", ran = false) and the tick runs every free job -- this call threw
+# "Invoke-PimDiscoveryJobSweep not loaded" at file scope and stopped the whole Community tick.
+if (Get-Command Invoke-PimDiscoveryJobSweep -ErrorAction SilentlyContinue) {
 Register-PimDiscoveryHandler `
     -GetDiscovered {
         param($scope)
@@ -859,6 +863,7 @@ Register-PimDiscoveryHandler `
     -AutoImportPowerBI:([bool]$(if (Get-Command Get-PimFeatureSetting -ErrorAction SilentlyContinue) { Get-PimFeatureSetting -Name 'DiscoveryAutoImportPowerBi' } else { ($global:PIM_DiscoveryAutoImportPowerBi -is [bool]) -and $global:PIM_DiscoveryAutoImportPowerBi }))
 $script:__discoDupes = 0
 Write-PimStartupLine -Message "[scheduler] discovery handler wired (Azure/PowerBI scope-discovery + Entra role-catalog -> change queue: SQL pim.ChangeQueue, de-duplicated)" -ForegroundColor Cyan
+}
 
 # Worker-container scoping: $env:PIM_SCHED_JOBS (comma list of job types) makes this
 # container run only those jobs -- so the SAME image is deployed N times as

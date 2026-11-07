@@ -5963,8 +5963,21 @@ membership as "would remove" and removed nothing from the directory.
 
 **The pull job's identity.** On a locally hosted managed tenant the scheduled pull job runs its work as its own
 system-assigned managed identity — the scheduler job's shape. The deploy grants that identity the engine's directory
-permissions and membership of the SQL admin group; the user-assigned identity stays attached only to pull the first
-container image. No client secret is needed.
+permissions and its **own least-privilege database user** (the access catalog's pull-job roles: its own settings rows
+plus the engine's role, because the pull runs the engine apply); it is not a member of the SQL admin group. The
+user-assigned identity stays attached only to pull the first container image. No client secret is needed.
+
+*Pull jobs deployed before that change (3.0.52, built; not yet proven on a live install).* An older pull job reaches the
+store only through the SQL admin group and has no database user of its own. The in-cloud updater converges it on every
+update: it reads the identity the job signs in to SQL with and its application id, and creates the job's own database
+user from that application id, in exactly the catalog's pull-job roles, through the signed access procedure — the same
+path it uses for the as-built reader. It reads the user back (directly where it may see other users, otherwise through
+the read-only access facts procedure, which proves the user and its SID but not its roles). A user that is already
+there with its roles is left unchanged; a name held by another principal, or an install whose access procedure is not
+installed yet, is reported and nothing is sent. This is a users-and-grants change, so it may run beside a running PIM
+job. The updater also reads whether the job's identity is still a member of the SQL admin group and records both facts
+in its run record. It never removes that membership: a separate support step removes it after one pull has run green on
+the job's own user.
 
 ### 13.5b Cadence of the pull and the publish — set in the Manager, decided by the job
 
@@ -10318,6 +10331,16 @@ stay in `engine/_shared`; each Pro feature has its own folder next to it:
 A Community copy without those folders still loads the engine, the scheduler and the module; a
 queued Pro action there ends as "part of the Pro edition, not installed" instead of failing. The
 offline payload gate builds exactly that copy on every test run.
+
+**The public release is the Community edition (2026-11-07).** The Pro folders above, the multi-tenant
+and hybrid-worker setup scripts, the Manager's PIM for Active Directory route module and the Pro
+workload connectors are left out of the public GitHub release; a Pro installation receives the full
+package, signed, from Invardia (the installer and the in-cloud updater both verify that signature
+before anything is used). The Community copy runs on its own: the Manager starts, its free pages and
+routes answer, a Pro route is refused with the licence line or says it is not installed (never an internal error), the scheduler
+runs its free jobs, and the v1 CSV import check runs (it reports that replication to managed tenants
+is not computed in a single-tenant copy). The payload gate builds the public release the way the
+publish does and fails if any Pro file is in it.
 
 #### 19a.3 Pro Business and Pro Enterprise (licence dimension, 2026-10-08 -- built, not yet released)
 
