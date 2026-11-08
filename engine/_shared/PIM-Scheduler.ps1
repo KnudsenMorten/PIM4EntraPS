@@ -192,6 +192,10 @@ function Save-PimHybridWorkerHeartbeat {
         }
         foreach ($t in @($Scope)) { if ("$t".Trim()) { $k = "$t".Trim().ToLowerInvariant(); $seen[$k] = $NowUtc.ToUniversalTime().ToString('o'); $plan[$k] = [bool]$PlanOnly } }
         $payload = [ordered]@{ owner = (Resolve-PimSchedulerOwner); host = "$env:COMPUTERNAME"; seen = $seen; planOnly = $plan; updatedUtc = $NowUtc.ToUniversalTime().ToString('o') }
+        # HW-SELFTEST (framework rule 2026-11-08): the last self-update result of this worker (ok / rolled-back / failed, the
+        # version running, the failed version), written by the SYSTEM update task to bin\update-result.json
+        $upr = "$env:PIM_HybridWorkerUpdateResultPath".Trim()
+        if ($upr -and (Test-Path -LiteralPath $upr)) { try { $u = Get-Content -LiteralPath $upr -Raw | ConvertFrom-Json; $payload['update'] = [ordered]@{ state = "$($u.state)"; version = "$($u.version)"; failedVersion = "$($u.failedVersion)"; detail = "$($u.detail)"; utc = $(if ($u.utc -is [datetime]) { $u.utc.ToUniversalTime().ToString('o') } else { "$($u.utc)" }) } } catch { } }
         Set-PimSetting -Name 'HybridWorkerHeartbeat' -Value ($payload | ConvertTo-Json -Depth 4 -Compress)
     } catch { Write-Warning "[scheduler] hybrid worker heartbeat did not persist: $($_.Exception.Message)" }
 }

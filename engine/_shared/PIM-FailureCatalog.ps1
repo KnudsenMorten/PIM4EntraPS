@@ -91,6 +91,16 @@ $script:PimFailureRules = @(
     # the platform scheduled the first replica, it never started, a second one did and ran; the execution hit its backoff limit
     # and the job cleanup stopped the running replica. Azure's side, not the job's: transient, nobody acts. Ahead of
     # ENGINE-OUT-OF-MEMORY, which deliberately does not read this text's "out of memory or a crash" guess.
+    # fix request 17865efb (2026-11-08): a Community install (no Pro library since 3.0.56) ran a job whose handler calls a Pro
+    # function -- "The term 'Invoke-Pim...' is not recognized". PIM's own defect (fixed in 3.0.59: Pro handlers are registered
+    # only when their library is present); nothing for the customer to do.
+    @{ code = 'COMMUNITY-PRO-HANDLER'
+       match = { param($m, $row) $m -match "(?i)The term 'Invoke-Pim[A-Za-z]+' is not recognized as (a|the) name of a cmdlet" }
+       title = 'A job called a part of PIM Manager that this edition does not include'
+       cause = 'A scheduled job tried to run a Pro feature that the Community edition does not carry, so the run stopped. Nothing was changed; the feature is simply not part of this edition.'
+       remedy = 'Nothing to do -- PIM Manager 3.0.59 no longer starts that part in the Community edition; the job then reports "not part of this edition" instead of failing.'
+       retryable = $false; severity = 'info'
+       fixes = @() }
     @{ code = 'RUN-EXECUTION-FAILED'
        match = { param($m, $row) $m -match '(?i)ended in Failed while this run' }
        title = 'The scheduled execution stopped while the job was running'
@@ -758,6 +768,7 @@ function Get-PimFailureCodeTable {
         ,@('SERVICE-ERROR',                    'pim-eng-0105',   'upstream-error',    'nobody',   '',      '2.4.638')
         ,@('RUN-EXECUTION-FAILED',             'pim-eng-0106',   'platform-timeout',  'nobody',   '',      '2.4.653')
         ,@('MI-TOKEN-UNAVAILABLE',             'pim-eng-0107',   'upstream-error',    'nobody',   '',      '2.4.674')
+        ,@('COMMUNITY-PRO-HANDLER',            'pim-eng-0108',   'missing-licence',   'product',  '3.0.59', '3.0.59')
         ,@('CONVERGENCE',                      'pim-eng-0201',   'not-converged',     'product',  '',      '2.4.638')
         ,@('AZ-POLICY-MASS-HOLD',              'pim-grd-0101',   'held-for-approval', 'customer', '',      '2.4.638')
         ,@('GROUP-POLICY-MASS-HOLD',           'pim-grd-0102',   'held-for-approval', 'customer', '',      '2.4.638')

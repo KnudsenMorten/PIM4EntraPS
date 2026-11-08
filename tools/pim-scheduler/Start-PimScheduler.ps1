@@ -466,11 +466,17 @@ Register-PimJobHandler -Type 'owner-review' -Handler {
 }
 Write-PimStartupLine -Message "[scheduler] pending check wired (uncommitted staged changes + queued actions older than a day are mailed)" -ForegroundColor Cyan
 # REQ-AR-2: the REAL 'access-review-cycle' handler. A review that could not be started FAILS the run (it is retried next time).
-Register-PimJobHandler -Type 'access-review-cycle' -Handler {
-    param($job, $now, $whatIf)
-    Invoke-PimAccessReviewCycleJob -Job $job -NowUtc $now -WhatIf:$whatIf
+# §84 Pro: ONLY when the Pro library is present, like rfa-sync / company-review below. The Community payload has no
+# engine\access-reviews since 3.0.56 -- registering the call anyway FAILED every run there ("Invoke-PimAccessReviewCycleJob is
+# not recognized", fix request 17865efb, gp185 + internal Community 2026-11-08); without it the default handler answers
+# 'unimplemented' (not a failure), as for company-review.
+if (Get-Command Invoke-PimAccessReviewCycleJob -ErrorAction SilentlyContinue) {
+    Register-PimJobHandler -Type 'access-review-cycle' -Handler {
+        param($job, $now, $whatIf)
+        Invoke-PimAccessReviewCycleJob -Job $job -NowUtc $now -WhatIf:$whatIf
+    }
+    Write-PimStartupLine -Message "[scheduler] access review cycle wired (per-department campaigns from Settings > Access reviews)" -ForegroundColor Cyan
 }
-Write-PimStartupLine -Message "[scheduler] access review cycle wired (per-department campaigns from Settings > Access reviews)" -ForegroundColor Cyan
 # §82: the REAL 'rfa-sync' / 'company-review' handlers -- only when the Pro libraries are present (Community has neither).
 # A run with errors (a row or a mail that failed) FAILS, so status = latest run shows it and the next run retries.
 if (Get-Command Invoke-PimRfaSyncJob -ErrorAction SilentlyContinue) {

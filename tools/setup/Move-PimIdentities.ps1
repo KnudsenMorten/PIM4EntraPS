@@ -46,6 +46,10 @@
   The roles whose job the script starts once for the proof. Default: engine (one tick).
 .PARAMETER NoCleanup
   Stop after the proof; the old rights stay (a later run without it removes them).
+.PARAMETER NeedOnly
+  From a SHARED identity (user-assigned, worn by several apps / jobs) copy only the rights the role needs (the product's
+  rights map per role); every right left behind is listed as "not copied". The SQL admin group is never copied to a role
+  other than the database job. A shared identity nothing uses any more loses all its rights at its last clean-up.
 .PARAMETER LogDir
   Where the plan and the per-role records are written as JSON.
 
@@ -76,6 +80,8 @@ param(
     [string[]]$StartJobRoles = @('engine'),
     [switch]$NoCleanup,
     [string]$LogDir = '',
+    # framework 12.11c x 4.3 (Invardia 2026-11-08): from a SHARED identity copy only what the role needs; the rest is listed
+    [switch]$NeedOnly,
     # TEST seams (tests\Test-PimIdentityMove.ps1): replace ARM / Graph / the database job / the proof / the wait
     [scriptblock]$Arm,
     [scriptblock]$Graph,
@@ -109,7 +115,7 @@ try {
     if ($Apply -and -not @($Role).Count) { throw '-Apply needs -Role (one role at a time is the agreed way: web, engine, updater, ...)' }
 
     $plan = Get-PimIdentityMovePlan -Arm $Arm -Graph $Graph -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -TenantId $tid `
-                -SupportHasRootAccess:$SupportHasRootAccess -ExtraScopes $ExtraScopes -PimGroupNames $PimGroupNames
+                -SupportHasRootAccess:$SupportHasRootAccess -ExtraScopes $ExtraScopes -PimGroupNames $PimGroupNames -NeedOnly:$NeedOnly
     foreach ($mvRp in @($plan.roles)) {
         Say ''
         Say ("[{0}] {1} -> {2}{3}" -f $mvRp.state, $mvRp.role, $mvRp.target, $(if ($mvRp.targetExists) { ' (exists)' } else { ' (to create)' })) $(if ($mvRp.state -eq 'ok') { 'Green' } else { 'White' })
@@ -123,13 +129,14 @@ try {
         Say ("    to copy: {0} app role(s), {1} PIM group(s), {2} directory role(s), {3} Azure role(s), {4} Key Vault access polic(ies){5}" -f @($mvTc.graph).Count, @($mvTc.groups).Count, @($mvTc.dirRoles).Count, @($mvTc.azure).Count, @($mvTc.kv).Count, $(if ($mvRp.sql.needed) { ", database user $($mvRp.sql.user) ($(@($mvRp.sql.roles) -join ', ')) via $(if ($mvRp.sql.job) { $mvRp.sql.job } else { 'the database job -- NOT ON THIS INSTALL' })" } else { '' })) 'Gray'
         foreach ($mvAz in @($mvTc.azure)) { Say "      Azure: $(@("$($mvAz.roleDefinitionId)" -split '/')[-1]) at $($mvAz.scope)" 'DarkGray' }
         foreach ($mvGr in @($mvTc.graph)) { Say "      app role: $($mvGr.appRoleId) of $(if ($mvGr.resourceDisplayName) { $mvGr.resourceDisplayName } else { $mvGr.resourceId })" 'DarkGray' }
+        foreach ($mvNc in @($mvRp.notCopied)) { Say "      not copied (the role does not need it): $mvNc" 'DarkGray' }
         foreach ($mvCs in @($mvRp.customerSteps)) { Say "    CUSTOMER STEP ($($mvCs.when)): $($mvCs.what)" 'Yellow'; Say "      $($mvCs.command)" 'Yellow' }
     }
     $planOut = Join-Path $LogDir "identity-move-plan-$stamp.json"
     $planJson = [pscustomobject]@{ subscriptionId = $plan.subscriptionId; resourceGroup = $plan.resourceGroup; tenantId = $plan.tenantId; supportHasRootAccess = $plan.supportHasRootAccess
         roles = @($plan.roles | ForEach-Object { [pscustomobject]@{ role = $_.role; target = $_.target; targetExists = $_.targetExists; state = $_.state
             resources = @($_.resources | ForEach-Object { [pscustomobject]@{ resource = $_.resource; kind = $_.kind; signsInAsTarget = $_.signsInAsTarget; sources = @($_.sources | ForEach-Object { $_.name }); ignored = @($_.ignored); settings = @($_.settings) } })
-            toCopy = $_.toCopy; customerSteps = $_.customerSteps; sql = $_.sql } }) }
+            toCopy = $_.toCopy; customerSteps = $_.customerSteps; notCopied = $_.notCopied; sql = $_.sql } }) }
     Set-Content -LiteralPath $planOut -Value ($planJson | ConvertTo-Json -Depth 12) -Encoding UTF8
     Say "`n  plan written: $planOut" 'DarkGray'
 

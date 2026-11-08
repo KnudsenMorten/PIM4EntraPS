@@ -150,6 +150,17 @@ function Resolve-PimAppRegOwnerInstallFacts {
     $get = { param($p) try { & $Arm 'GET' $p $null } catch { [void]$why.Add(((("$($_.Exception.Message)") -split "`n")[0]).Trim()); $null } }
     $upd = & $get "$rg/jobs/$UpdateJob`?api-version=2024-03-01"
     $oid = "$(Get-PimAppRegOwnerField (Get-PimAppRegOwnerField $upd 'identity') 'principalId')".Trim()
+    # NAM-03 identity move (2026-11-08): an updater that signs in as its own user-assigned id-pim-updater (PIM_ManagedIdentityClientId
+    # names it) IS that identity -- its system-assigned one stays enabled but is no longer the updater
+    $updCid = ''
+    foreach ($c in @(Get-PimAppRegOwnerField (Get-PimAppRegOwnerField (Get-PimAppRegOwnerField $upd 'properties') 'template') 'containers')) {
+        foreach ($e in @(Get-PimAppRegOwnerField $c 'env')) { if ("$(Get-PimAppRegOwnerField $e 'name')" -eq 'PIM_ManagedIdentityClientId' -and "$(Get-PimAppRegOwnerField $e 'value')".Trim()) { $updCid = "$(Get-PimAppRegOwnerField $e 'value')".Trim() } }
+    }
+    if ($updCid) {
+        $uai = Get-PimAppRegOwnerField (Get-PimAppRegOwnerField $upd 'identity') 'userAssignedIdentities'
+        $pairs = if ($uai -is [System.Collections.IDictionary]) { @($uai.Keys | ForEach-Object { $uai[$_] }) } elseif ($uai) { @($uai.PSObject.Properties | ForEach-Object { $_.Value }) } else { @() }
+        foreach ($v in $pairs) { if ("$(Get-PimAppRegOwnerField $v 'clientId')" -ieq $updCid -and (Test-PimAppRegOwnerGuid "$(Get-PimAppRegOwnerField $v 'principalId')")) { $oid = "$(Get-PimAppRegOwnerField $v 'principalId')".Trim() } }
+    }
     if (Test-PimAppRegOwnerGuid $oid) { $o.updaterObjectId = ([guid]$oid).ToString() } else { [void]$why.Add("the update job $UpdateJob has no system identity readable") }
     $mgr = & $get "$rg/containerApps/$ManagerApp`?api-version=2024-03-01"
     $auth = $null; if ($mgr) { $auth = & $get "$rg/containerApps/$ManagerApp/authConfigs/current?api-version=2024-03-01" }

@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.59 -- 2026-11-08
+
+- Community installations no longer fail the access review job every run: the scheduler starts that Pro job only when the edition carries it; the hybrid worker tests itself after each self-update and goes back to the previous version on its own when the test fails, recorded and shown on its heartbeat; the identity move copies only the rights each role needs, carries the updater app registration ownership and the sign-in front credential, and waits for directory and platform delays before it reads back; the engine User Access Administrator can be trimmed to the scopes PIM manages
+
 ## 3.0.58 -- 2026-11-08
 
 - The updater now reads back its app registration ownership proof up to six times before saying it is not proven, so a slow directory answer no longer leaves the proof pending; an opted-in installation always builds the sign-in front at the version this release pins, never a newer shared version

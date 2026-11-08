@@ -140,6 +140,42 @@ function Invoke-PimIdentityMoveGet {
     }
 }
 
+function ConvertTo-PimIdentityMoveUtc {
+    <#
+      PURE. An ARM time as UTC, or $null. PowerShell 7's ConvertFrom-Json turns '...Z' into a [datetime] of kind Utc and
+      '...+00:00' into one of kind LOCAL -- re-parsing its TEXT drops the kind (internal 2026-11-08: a 08:15Z run read as
+      09:15Z and was taken as the proof of an 08:16Z switch). A [datetime] is converted by its kind (Unspecified = UTC); a
+      string is parsed with its offset, a string without one taken as UTC.
+    #>
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { if ($Value.Kind -eq [DateTimeKind]::Unspecified) { return [datetime]::SpecifyKind($Value, [DateTimeKind]::Utc) }; return $Value.ToUniversalTime() }
+    if ($Value -is [DateTimeOffset]) { return $Value.UtcDateTime }
+    $s = "$Value".Trim(); if (-not $s) { return $null }
+    try { return [DateTimeOffset]::Parse($s, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime } catch { return $null }
+}
+
+function Invoke-PimIdentityMoveGraphAdd {
+    <# A Graph POST that ADDS a right; "already exists" (a re-run, or a read that lagged behind an earlier add) counts as done. #>
+    param([Parameter(Mandatory)][scriptblock]$Graph, [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Body)
+    try { return (& $Graph 'POST' $Path $Body) } catch {
+        if ("$($_.Exception.Message)" -match '(?i)\b409\b|already exist|One or more added object references already exist|Permission being assigned already exists|RoleAssignmentExists|conflicting object') { return $null }
+        throw
+    }
+}
+
+function Wait-PimIdentityMoveGraphBack {
+    <# Directory replication: a grant Graph accepted may not show in a read straight after it (internal id-pim-engine
+       2026-11-08 07:33Z). Runs -Read up to -Tries times, -WaitSeconds apart, until it returns something. #>
+    param([Parameter(Mandatory)][scriptblock]$Read, [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }, [int]$Tries = 8, [int]$WaitSeconds = 5)
+    for ($i = 1; $i -le [Math]::Max(1, $Tries); $i++) {
+        if ($i -gt 1) { & $Sleep $WaitSeconds }
+        $b = @(& $Read)
+        if ($b.Count) { return ,$b }
+    }
+    return ,@()
+}
+
 function Get-PimIdentityMoveList {
     <# A list GET through a seam: .value unwrapped, nextLink / @odata.nextLink followed. Absent -> empty. #>
     param([Parameter(Mandatory)][scriptblock]$Seam, [Parameter(Mandatory)][string]$Path)
@@ -167,6 +203,9 @@ function Read-PimIdentityMoveInstall {
     $api = Get-PimIdentityMoveApi
     $rg = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
     $rgObj = Invoke-PimIdentityMoveGet -Seam $Arm -Path "$rg`?api-version=$($api.rg)"
+    # an absent resource group is a wrong subscription / name, NEVER "nothing to move" (internal 2026-11-08: the plan of a
+    # resource group in another subscription listed no roles and said nothing)
+    if (-not $rgObj) { throw "resource group $ResourceGroup was not found in subscription $SubscriptionId (wrong subscription or name?) -- nothing planned" }
     return @{
         rgId       = $rg
         location   = "$(Get-PimIdentityMoveField $rgObj 'location')"
@@ -248,7 +287,46 @@ function Read-PimIdentityMoveRights {
         }
     }
     $out.kv = @($kv.ToArray())
+    # APP-REG-OWNER (framework SECAUDIT-1a item 2): ownership of PIM's OWN product registrations is a right too (the updater
+    # owns them). Only registrations whose display name is a PIM product name; a read failure leaves the list empty.
+    $out.owned = @()
+    try {
+        $out.owned = @(Get-PimIdentityMoveList -Seam $Graph -Path "/servicePrincipals/$p/ownedObjects/microsoft.graph.application?`$select=id,appId,displayName" |
+            Where-Object { Test-PimIdentityMovePimApp -DisplayName "$(Get-PimIdentityMoveField $_ 'displayName')" } |
+            ForEach-Object { [pscustomobject]@{ id = "$(Get-PimIdentityMoveField $_ 'id')"; appId = "$(Get-PimIdentityMoveField $_ 'appId')"; displayName = "$(Get-PimIdentityMoveField $_ 'displayName')" } })
+    } catch { $out.owned = @() }
     return $out
+}
+
+function Read-PimIdentityMoveFics {
+    <#
+      READ. The federated identity credentials on PIM's own product registrations whose SUBJECT is one of -PrincipalIds (the
+      sign-in front signs in as the web identity through one: Set-PimManagerSigninFront.ps1 Get-PimSigninFrontFicSpec).
+      Returns @(@{ appObjectId; appName; id; name; issuer; subject; audiences }). A read failure returns what was read.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Graph, [AllowEmptyCollection()][string[]]$PrincipalIds = @())
+    $want = @($PrincipalIds | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+    $out = New-Object System.Collections.Generic.List[object]
+    if (-not $want.Count) { return @() }
+    $apps = @()
+    try { $apps = @(Get-PimIdentityMoveList -Seam $Graph -Path "/applications?`$filter=startswith(displayName,'PIM')&`$select=id,displayName" | Where-Object { Test-PimIdentityMovePimApp -DisplayName "$(Get-PimIdentityMoveField $_ 'displayName')" }) } catch { $apps = @() }
+    foreach ($a in $apps) {
+        $aid = "$(Get-PimIdentityMoveField $a 'id')"
+        $f = @(); try { $f = @(Get-PimIdentityMoveList -Seam $Graph -Path "/applications/$aid/federatedIdentityCredentials") } catch { $f = @() }
+        foreach ($c in $f) {
+            if ($want -contains "$(Get-PimIdentityMoveField $c 'subject')".Trim().ToLowerInvariant()) {
+                $out.Add([pscustomobject]@{ appObjectId = $aid; appName = "$(Get-PimIdentityMoveField $a 'displayName')"; id = "$(Get-PimIdentityMoveField $c 'id')"; name = "$(Get-PimIdentityMoveField $c 'name')"
+                                            issuer = "$(Get-PimIdentityMoveField $c 'issuer')"; subject = "$(Get-PimIdentityMoveField $c 'subject')"; audiences = @(Get-PimIdentityMoveField $c 'audiences') })
+            }
+        }
+    }
+    return @($out.ToArray())
+}
+
+function Test-PimIdentityMovePimApp {
+    <# PURE. A PIM product registration by its display name (the product names, optionally with an install label in brackets). #>
+    param([AllowEmptyString()][string]$DisplayName)
+    return ("$DisplayName".Trim() -match '^(?i)(PIM Manager|PIM Manager Engine|PIM Activator|PIM Manager Deploy|PIM access request API|PIM4EntraPS Manager|PIM4EntraPS Engine)( \(.+\))?$')
 }
 
 function Get-PimIdentityMoveKvMissing {
@@ -292,6 +370,41 @@ function Get-PimIdentityMoveCustomerCommand {
 }
 
 # ---------------------------------------------------------------------------------------------------------- the plan
+function Get-PimIdentityMoveRoleNeeds {
+    <#
+      PURE. -NeedOnly (Invardia ruling 2026-11-08, framework 12.11c x 4.3): what a role may take over from a SHARED
+      (user-assigned, several roles) identity. From the 4.3 rights map (2026-11-08, code-read): Azure role definition guids,
+      PIM group names and directory role ids per role. Graph app roles and Key Vault access policies are never taken from a
+      shared identity (each role's own system identity carries its real Graph set; access policies are legacy). A role not
+      listed takes AcrPull only.
+    #>
+    param([Parameter(Mandatory)][string]$Role)
+    $acr = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
+    $n = switch ("$Role".ToLowerInvariant()) {
+        'web'      { @{ azure = @('acdd72a7-3385-48ef-bd42-f606fba81ae7', 'b9a307c4-5aa3-4b52-ba60-2b17c136cd7b', 'e147488a-f6f5-4113-8e2d-b22465e65bf6', $acr); groups = @(); dirRoles = @() } }
+        'engine'   { @{ azure = @('acdd72a7-3385-48ef-bd42-f606fba81ae7', '18d7d88d-d35e-4fb5-a5c3-7773c20a72d9', '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3', $acr); groups = @('grp-pim-powerbi-admin-api'); dirRoles = @('a9ea8996-122f-4c74-9520-8edcd192826c') } }
+        'updater'  { @{ azure = @('b24988ac-6180-42a0-ab88-20f7382dd24c', $acr); groups = @(); dirRoles = @() } }
+        'dbinit'   { @{ azure = @($acr); groups = @('grp-pim-sql-admins'); dirRoles = @() } }
+        'requests' { @{ azure = @('0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3', $acr); groups = @(); dirRoles = @() } }
+        'asbuilt'  { @{ azure = @('ba92f5b4-2d11-453d-a403-e96b0029c9fe', $acr); groups = @(); dirRoles = @() } }
+        default    { @{ azure = @($acr); groups = @(); dirRoles = @() } }
+    }
+    return $n
+}
+
+function Select-PimIdentityMoveNeeded {
+    <# PURE. Splits ONE shared source's rights into what -Role needs (kept) and what it does not (notCopied, named). #>
+    param([Parameter(Mandatory)][string]$Role, [Parameter(Mandatory)][hashtable]$Rights, [string]$SourceName = 'the shared identity')
+    $need = Get-PimIdentityMoveRoleNeeds -Role $Role
+    $keep = @{ azure = @(); graph = @(); groups = @(); dirRoles = @(); kv = @() }; $not = New-Object System.Collections.Generic.List[string]
+    foreach ($a in @($Rights.azure)) { if (-not $a) { continue }; $g = @("$($a.roleDefinitionId)" -split '/')[-1].ToLowerInvariant(); if ($need.azure -contains $g) { $keep.azure += $a } else { $not.Add("Azure role $g at $($a.scope) (from $SourceName)") } }
+    foreach ($m in @($Rights.groups)) { if (-not $m) { continue }; if (@($need.groups | Where-Object { $_ -ieq "$($m.displayName)" }).Count) { $keep.groups += $m } else { $not.Add("PIM group $($m.displayName) (from $SourceName)") } }
+    foreach ($d in @($Rights.dirRoles)) { if (-not $d) { continue }; if ($need.dirRoles -contains "$($d.roleDefinitionId)".ToLowerInvariant()) { $keep.dirRoles += $d } else { $not.Add("directory role $($d.roleDefinitionId) (from $SourceName)") } }
+    foreach ($g in @($Rights.graph)) { if ($g) { $not.Add("Graph app role $($g.appRoleId) (from $SourceName)") } }
+    foreach ($k in @($Rights.kv)) { if ($k) { $not.Add("Key Vault access policy on $($k.vaultName) (from $SourceName)") } }
+    return @{ keep = $keep; notCopied = @($not.ToArray()) }
+}
+
 function Get-PimIdentityMovePlan {
     <#
       READ-ONLY. The plan of ONE install: one entry per role (the resources of the role, their sources, the target, the rights
@@ -302,7 +415,7 @@ function Get-PimIdentityMovePlan {
     param([Parameter(Mandatory)][scriptblock]$Arm, [Parameter(Mandatory)][scriptblock]$Graph,
           [Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [AllowEmptyString()][string]$TenantId = '',
           [switch]$SupportHasRootAccess, [AllowEmptyCollection()][string[]]$ExtraScopes = @(), [AllowEmptyCollection()][string[]]$PimGroupNames = @(),
-          [hashtable]$SqlRoles = @{}, [AllowNull()][object]$Install = $null)
+          [hashtable]$SqlRoles = @{}, [AllowNull()][object]$Install = $null, [switch]$NeedOnly)
     $inst = if ($Install) { $Install } else { Read-PimIdentityMoveInstall -Arm $Arm -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup }
     $byName = @{}; foreach ($u in @($inst.identities | Where-Object { $_ })) { $byName["$(Get-PimIdentityMoveField $u 'name')".ToLowerInvariant()] = $u }
     $all = @(@($inst.apps | Where-Object { $_ } | ForEach-Object { @{ o = $_; kind = 'app' } }) + @($inst.jobs | Where-Object { $_ } | ForEach-Object { @{ o = $_; kind = 'job' } }))
@@ -336,14 +449,33 @@ function Get-PimIdentityMovePlan {
         $rr = @($g.Group); $role = "$($g.Name)"; $first = $rr[0]; $target = "$($first.target)"
         $srcU = @{}; foreach ($r in $rr) { foreach ($s in @($r.sources)) { if ($s.principalId) { $srcU["$($s.principalId)".ToLowerInvariant()] = $s } } }
         $sources = @($srcU.Values)
-        $sr = @{ azure = @(); graph = @(); groups = @(); dirRoles = @(); kv = @() }
-        $perSource = @{}
+        $sr = @{ azure = @(); graph = @(); groups = @(); dirRoles = @(); kv = @(); owned = @() }
+        $perSource = @{}; $notCopied = New-Object System.Collections.Generic.List[string]
         foreach ($s in $sources) {
             $r = Read-PimIdentityMoveRights -Arm $Arm -Graph $Graph -SubscriptionId $SubscriptionId -PrincipalId $s.principalId -TenantId $TenantId -Vaults $inst.vaults -ExtraScopes $ExtraScopes -PimGroupNames $PimGroupNames
             $perSource["$($s.principalId)".ToLowerInvariant()] = $r
-            foreach ($k in @('azure', 'graph', 'groups', 'dirRoles', 'kv')) { $sr[$k] = @(@($sr[$k]) + @($r[$k])) }
+            # -NeedOnly: a SHARED (user-assigned) source gives only what this role needs; the role's own system identity gives all
+            $use = $r
+            if ($NeedOnly -and "$($s.kind)" -eq 'user') { $sel = Select-PimIdentityMoveNeeded -Role $role -Rights $r -SourceName "$($s.name)"; $use = $sel.keep; foreach ($x in @($sel.notCopied)) { $notCopied.Add($x) } }
+            # SEC-09 (framework 4.5): the SQL admin group's ONLY standing member is the database job -- never copied to another
+            # role, not even from the role's own system identity (Invardia 2026-11-08: the updater leaves it in its move)
+            if ($NeedOnly -and $role -ne 'dbinit' -and @($use.groups | Where-Object { "$($_.displayName)" -ieq 'grp-pim-sql-admins' }).Count) {
+                $use = @{ azure = @($use.azure); graph = @($use.graph); groups = @($use.groups | Where-Object { "$($_.displayName)" -ine 'grp-pim-sql-admins' }); dirRoles = @($use.dirRoles); kv = @($use.kv) }
+                $notCopied.Add("PIM group grp-pim-sql-admins (from $($s.name); SEC-09: only the database job is a standing member)")
+            }
+            foreach ($k in @('azure', 'graph', 'groups', 'dirRoles', 'kv')) { $sr[$k] = @(@($sr[$k]) + @($use[$k])) }
+            # app registration ownership moves with the UPDATER role only (it is the updater's right; framework SECAUDIT-1a)
+            if ($role -eq 'updater') { $sr.owned = @(@($sr.owned) + @($r.owned)) }
+            elseif (@($r.owned).Count) { foreach ($ow in @($r.owned)) { $notCopied.Add("owner of the app registration $($ow.displayName) (from $($s.name); only the updater owns them)") } }
         }
         $tr = Read-PimIdentityMoveRights -Arm $Arm -Graph $Graph -SubscriptionId $SubscriptionId -PrincipalId $first.targetPrincipalId -TenantId $TenantId -Vaults $inst.vaults -ExtraScopes $ExtraScopes -PimGroupNames $PimGroupNames
+        # the sign-in front's federated credential trusts the WEB identity by its object id -> it moves with the web role
+        $ficSrc = @(); $ficTo = @()
+        if ($role -eq 'web') {
+            $ficSrc = @(Read-PimIdentityMoveFics -Graph $Graph -PrincipalIds @($sources | ForEach-Object { "$($_.principalId)" }))
+            $ficTgt = @(if ("$($first.targetPrincipalId)".Trim()) { Read-PimIdentityMoveFics -Graph $Graph -PrincipalIds @("$($first.targetPrincipalId)") })
+            $ficTo = @($ficSrc | Where-Object { $fs = $_; -not @($ficTgt | Where-Object { $_.appObjectId -ieq $fs.appObjectId -and $_.issuer -ieq $fs.issuer }).Count } | Sort-Object appObjectId -Unique)
+        }
         $c = Get-PimIdentityRightsToCopy -SourceAzure $sr.azure -TargetAzure $tr.azure -SourceGraph $sr.graph -TargetGraph $tr.graph `
                 -SourceGroups @($sr.groups | ForEach-Object { "$($_.id)" }) -TargetGroups @($tr.groups | ForEach-Object { "$($_.id)" })
         $azRoot = @(@($c.azure) | Where-Object { $_.root }); $azNorm = @(@($c.azure) | Where-Object { -not $_.root })
@@ -365,7 +497,8 @@ function Get-PimIdentityMovePlan {
                 $heldG = @($ps.graph).Count - @($left.graph).Count; $heldM = @($ps.groups).Count - @($left.groups).Count
                 $heldD = @($ps.dirRoles).Count - @(Get-PimIdentityMoveDirRolesMissing -Source $ps.dirRoles -Target $tr.dirRoles).Count
                 $heldK = @($ps.kv | Where-Object { -not @(Get-PimIdentityMoveKvMissing -Source @($_) -Target $tr.kv).Count }).Count
-                if (($heldA + $heldG + $heldM + $heldD + $heldK) -gt 0) { $removable = $true }
+                $heldO = @(@($ps.owned) | Where-Object { $o2 = $_; @(@($tr.owned) | Where-Object { "$($_.id)" -ieq "$($o2.id)" }).Count }).Count
+                if (($heldA + $heldG + $heldM + $heldD + $heldK + $heldO) -gt 0) { $removable = $true }
             }
         }
         $state = if (@($rr | Where-Object { -not $_.signsInAsTarget }).Count) { 'move' } elseif ($removable) { 'cleanup' } else { 'ok' }
@@ -374,8 +507,11 @@ function Get-PimIdentityMovePlan {
             resources = $rr; sources = $sources; state = $state
             sourceRights = $sr; perSource = $perSource; targetRights = $tr
             toCopy = @{ graph = @($c.graph); groups = @(@($c.groups) | ForEach-Object { [pscustomobject]@{ id = "$_"; displayName = $grpNames["$_".ToLowerInvariant()] } }); dirRoles = @(Get-PimIdentityMoveDirRolesMissing -Source $sr.dirRoles -Target $tr.dirRoles)
-                        azure = $(if ($SupportHasRootAccess) { @($c.azure) } else { $azNorm }); azureRootCustomer = $(if ($SupportHasRootAccess) { @() } else { $azRoot }); kv = @(Get-PimIdentityMoveKvMissing -Source $sr.kv -Target $tr.kv) }
-            customerSteps = @($cust.ToArray())
+                        azure = $(if ($SupportHasRootAccess) { @($c.azure) } else { $azNorm }); azureRootCustomer = $(if ($SupportHasRootAccess) { @() } else { $azRoot }); kv = @(Get-PimIdentityMoveKvMissing -Source $sr.kv -Target $tr.kv)
+                        owned = @(@($sr.owned) | Where-Object { $o1 = $_; -not @(@($tr.owned) | Where-Object { "$($_.id)" -ieq "$($o1.id)" }).Count } | Sort-Object id -Unique)
+                        fic = @($ficTo) }
+            ficSources = @($ficSrc)
+            customerSteps = @($cust.ToArray()); notCopied = @($notCopied.ToArray())
             sql = [pscustomobject]@{ needed = $needsSql; user = $target; roles = $sqlRolesR; job = $(if ($dbJob) { "$(Get-PimIdentityMoveField $dbJob 'name')" } else { '' }); jobId = $(if ($dbJob) { "$(Get-PimIdentityMoveField $dbJob 'id')" } else { '' }) }
         })
     }
@@ -414,7 +550,11 @@ function Set-PimIdentityMoveSwitch {
     param([Parameter(Mandatory)][scriptblock]$Arm, [Parameter(Mandatory)][string]$ResourceId,
           [AllowEmptyCollection()][string[]]$FromIds = @(), [AllowEmptyCollection()][string[]]$FromClientIds = @(),
           [AllowEmptyString()][string]$ToId = '', [AllowEmptyString()][string]$ToClientId = '', [switch]$ToSystem,
-          [AllowEmptyCollection()][string[]]$Detach = @(), [string[]]$ClientIdEnvNames = @('PIM_ManagedIdentityClientId'), [switch]$DryRun)
+          [AllowEmptyCollection()][string[]]$Detach = @(), [string[]]$ClientIdEnvNames = @('PIM_ManagedIdentityClientId'), [switch]$DryRun,
+          # a container app / job PATCH is long-running: the GET straight after it can still show the OLD state (internal
+          # ca-pim-rfa 2026-11-08 07:11Z: switched, read back as not). Read back until the resource is no longer in progress and
+          # matches, up to -ReadBackTries reads, -ReadBackWaitSeconds apart.
+          [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }, [int]$ReadBackTries = 12, [int]$ReadBackWaitSeconds = 10)
     $api = Get-PimIdentityMoveApi
     $path = "$ResourceId`?api-version=$($api.aca)"
     $o = Invoke-PimIdentityMoveGet -Seam $Arm -Path $path
@@ -510,8 +650,12 @@ function Set-PimIdentityMoveSwitch {
     if ($props.Count) { $body['properties'] = $props }
     if (-not $identChanged -and -not $props.Count) { return @{ changed = $false; detail = 'already as asked' } }
     [void](& $Arm 'PATCH' $path $body)
-    # READ BACK
+    # READ BACK (until no longer in progress and matching; see -ReadBackTries)
+    $tries = [Math]::Max(1, $ReadBackTries)
+    for ($try = 1; $try -le $tries; $try++) {
+    if ($try -gt 1) { & $Sleep $ReadBackWaitSeconds }
     $b = Invoke-PimIdentityMoveGet -Seam $Arm -Path $path
+    $bps = "$(Get-PimIdentityMoveField (Get-PimIdentityMoveField $b 'properties') 'provisioningState')"
     $bi = @(Get-PimIdentityMoveMapPairs (Get-PimIdentityMoveField (Get-PimIdentityMoveField $b 'identity') 'userAssignedIdentities') | ForEach-Object { "$($_.key)".ToLowerInvariant() })
     $bad = New-Object System.Collections.Generic.List[string]
     if ("$ToId".Trim() -and -not ($bi -contains "$ToId".ToLowerInvariant())) { $bad.Add("$(@($ToId -split '/')[-1]) is not attached") }
@@ -528,7 +672,12 @@ function Set-PimIdentityMoveSwitch {
             }
         }
     }
-    if ($bad.Count) { throw "read-back of $(@($ResourceId -split '/')[-1]): $($bad -join '; ')" }
+    $inProgress = $bps -match '^(?i)(InProgress|Updating|Pending|Accepted|Provisioning|Creating)$'
+    if (-not $bad.Count -and -not $inProgress) { break }
+    }
+    if ($bps -match '^(?i)Failed$') { $bad.Add("its update ended in provisioning state Failed") }
+    if ($bad.Count) { throw "read-back of $(@($ResourceId -split '/')[-1]) ($tries read(s), last state '$bps'): $($bad -join '; ')" }
+    if ($inProgress) { throw "read-back of $(@($ResourceId -split '/')[-1]): still '$bps' after $tries read(s) -- NOT confirmed" }
     return @{ changed = $true; detail = ($changes -join '; ') }
 }
 
@@ -699,11 +848,14 @@ function Invoke-PimIdentityMoveDefaultProve {
         return @{ ok = $r.ok; pending = $false; detail = "execution $exe $($r.status)" }
     }
     $since = $null
-    try { $since = [datetime]::Parse("$(Get-PimIdentityMoveField (Get-PimIdentityMoveField $job 'systemData') 'lastModifiedAt')", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) } catch { $since = $null }
+    $since = ConvertTo-PimIdentityMoveUtc (Get-PimIdentityMoveField (Get-PimIdentityMoveField $job 'systemData') 'lastModifiedAt')
+    # the mover's OWN switch time wins when it is later: the job's lastModifiedAt can still show an EARLIER change right after
+    # the switch (internal ca-pim-dbinit 2026-11-08 07:59Z: a 07:41Z run was taken as "after the switch")
+    if ($script:PimIdentityMoveSwitchUtc -is [datetime] -and (-not $since -or $script:PimIdentityMoveSwitchUtc -gt $since)) { $since = $script:PimIdentityMoveSwitchUtc }
     $exes = @(Get-PimIdentityMoveList -Seam $Arm -Path "$($Row.resourceId)/executions?api-version=$($api.aca)")
     $after = @($exes | Where-Object {
-        $t = $null; try { $t = [datetime]::Parse("$(Get-PimIdentityMoveField (Get-PimIdentityMoveField $_ 'properties') 'startTime')", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) } catch { }
-        $t -and $since -and $t -gt $since } | Sort-Object { "$(Get-PimIdentityMoveField (Get-PimIdentityMoveField $_ 'properties') 'startTime')" } -Descending)
+        $t = ConvertTo-PimIdentityMoveUtc (Get-PimIdentityMoveField (Get-PimIdentityMoveField $_ 'properties') 'startTime')
+        $t -and $since -and $t -gt $since } | Sort-Object { ConvertTo-PimIdentityMoveUtc (Get-PimIdentityMoveField (Get-PimIdentityMoveField $_ 'properties') 'startTime') } -Descending)
     $done = @($after | Where-Object { "$(Get-PimIdentityMoveField (Get-PimIdentityMoveField $_ 'properties') 'status')" -in @('Succeeded', 'Failed', 'Stopped', 'Degraded') })
     if (-not $done.Count) { return @{ ok = $false; pending = $true; detail = 'no run of the job since the switch yet -- re-run the mover after its next run' } }
     $s0 = "$(Get-PimIdentityMoveField (Get-PimIdentityMoveField $done[0] 'properties') 'status')"
@@ -763,6 +915,16 @@ function Invoke-PimIdentityMoveRole {
             if ($idObj) { $ip = Get-PimIdentityMoveField $idObj 'properties'; $tgtPid = "$(Get-PimIdentityMoveField $ip 'principalId')"; $tgtCid = "$(Get-PimIdentityMoveField $ip 'clientId')" }
         }
         if ($DryRun -and -not $tgtPid) { $tgtPid = "<object id of $tgtName>"; $tgtCid = "<client id of $tgtName>" }
+        # a NEW managed identity's service principal reaches the directory seconds to minutes after ARM returns it (internal
+        # id-pim-engine 2026-11-08 07:28Z: the first app-role grant got 404 Request_ResourceNotFound) -- wait until Graph sees it
+        if (-not $DryRun -and $tgtPid -and (@($rp.toCopy.graph).Count + @($rp.toCopy.groups).Count + @($rp.toCopy.dirRoles).Count)) {
+            $spSeen = $false
+            for ($spTry = 1; $spTry -le 18; $spTry++) {
+                if ($spTry -gt 1) { & $Sleep 10 }
+                if (Invoke-PimIdentityMoveGet -Seam $Graph -Path "/servicePrincipals/$tgtPid`?`$select=id") { $spSeen = $true; break }
+            }
+            if (-not $spSeen) { throw "the service principal of $tgtName ($tgtPid) is not visible in the directory after 18 reads (~3 min) -- re-run this role later" }
+        }
         # root rights the Support app cannot write: a customer step, now with the real object id
         foreach ($a in @($rp.toCopy.azureRootCustomer)) {
             $rec.customerSteps.Add([pscustomobject]@{ when = 'before the switch'; what = "grant $tgtName the role $(@("$($a.roleDefinitionId)" -split '/')[-1]) at the tenant root (the Support app has no User Access Administrator there)"; command = (Get-PimIdentityMoveCustomerCommand -Action add -PrincipalId $tgtPid -PrincipalName $tgtName -RoleDefinitionId $a.roleDefinitionId -Scope $a.scope) })
@@ -773,8 +935,8 @@ function Invoke-PimIdentityMoveRole {
             foreach ($g in @($rp.toCopy.graph)) {
                 $what = "app role $($g.appRoleId) of $(if ($g.resourceDisplayName) { $g.resourceDisplayName } else { $g.resourceId })"
                 if ($DryRun) { & $step 'graph' "would grant $tgtName $what" '' ''; continue }
-                $r = & $Graph 'POST' "/servicePrincipals/$tgtPid/appRoleAssignments" @{ principalId = $tgtPid; resourceId = $g.resourceId; appRoleId = $g.appRoleId }
-                $back = @(Get-PimIdentityMoveList -Seam $Graph -Path "/servicePrincipals/$tgtPid/appRoleAssignments" | Where-Object { "$(Get-PimIdentityMoveField $_ 'resourceId')" -ieq $g.resourceId -and "$(Get-PimIdentityMoveField $_ 'appRoleId')" -ieq $g.appRoleId })
+                $r = Invoke-PimIdentityMoveGraphAdd -Graph $Graph -Path "/servicePrincipals/$tgtPid/appRoleAssignments" -Body @{ principalId = $tgtPid; resourceId = $g.resourceId; appRoleId = $g.appRoleId }
+                $back = Wait-PimIdentityMoveGraphBack -Sleep $Sleep -Read { @(Get-PimIdentityMoveList -Seam $Graph -Path "/servicePrincipals/$tgtPid/appRoleAssignments" | Where-Object { "$(Get-PimIdentityMoveField $_ 'resourceId')" -ieq $g.resourceId -and "$(Get-PimIdentityMoveField $_ 'appRoleId')" -ieq $g.appRoleId }) }
                 if (-not $back.Count) { throw "$what was granted to $tgtName but does not read back" }
                 $aid = "$(Get-PimIdentityMoveField $back[0] 'id')"
                 & $step 'graph' "granted $tgtName $what" 'read back' "Invoke-PimGraph -Method DELETE -Path '/servicePrincipals/$tgtPid/appRoleAssignments/$aid'"
@@ -782,19 +944,36 @@ function Invoke-PimIdentityMoveRole {
             }
             foreach ($g in @($rp.toCopy.groups)) {
                 if ($DryRun) { & $step 'graph' "would add $tgtName to the PIM group $($g.displayName)" '' ''; continue }
-                [void](& $Graph 'POST' "/groups/$($g.id)/members/`$ref" @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$tgtPid" })
-                $back = @(Get-PimIdentityMoveList -Seam $Graph -Path "/servicePrincipals/$tgtPid/memberOf/microsoft.graph.group?`$select=id,displayName" | Where-Object { "$(Get-PimIdentityMoveField $_ 'id')" -ieq $g.id })
+                [void](Invoke-PimIdentityMoveGraphAdd -Graph $Graph -Path "/groups/$($g.id)/members/`$ref" -Body @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$tgtPid" })
+                $back = Wait-PimIdentityMoveGraphBack -Sleep $Sleep -Read { @(Get-PimIdentityMoveList -Seam $Graph -Path "/servicePrincipals/$tgtPid/memberOf/microsoft.graph.group?`$select=id,displayName" | Where-Object { "$(Get-PimIdentityMoveField $_ 'id')" -ieq $g.id }) }
                 if (-not $back.Count) { throw "$tgtName was added to $($g.displayName) but the membership does not read back" }
                 & $step 'graph' "added $tgtName to the PIM group $($g.displayName)" 'read back' "Invoke-PimGraph -Method DELETE -Path '/groups/$($g.id)/members/$tgtPid/`$ref'"
                 $rec.copied.Add("group: $($g.displayName)")
             }
             foreach ($d in @($rp.toCopy.dirRoles)) {
                 if ($DryRun) { & $step 'graph' "would assign $tgtName the directory role $($d.roleDefinitionId) at $($d.directoryScopeId)" '' ''; continue }
-                $r = & $Graph 'POST' '/roleManagement/directory/roleAssignments' @{ principalId = $tgtPid; roleDefinitionId = $d.roleDefinitionId; directoryScopeId = $(if ($d.directoryScopeId) { $d.directoryScopeId } else { '/' }) }
-                $back = @(Get-PimIdentityMoveList -Seam $Graph -Path "/roleManagement/directory/roleAssignments?`$filter=principalId eq '$tgtPid'" | Where-Object { "$(Get-PimIdentityMoveField $_ 'roleDefinitionId')" -ieq $d.roleDefinitionId })
+                $r = Invoke-PimIdentityMoveGraphAdd -Graph $Graph -Path '/roleManagement/directory/roleAssignments' -Body @{ principalId = $tgtPid; roleDefinitionId = $d.roleDefinitionId; directoryScopeId = $(if ($d.directoryScopeId) { $d.directoryScopeId } else { '/' }) }
+                $back = Wait-PimIdentityMoveGraphBack -Sleep $Sleep -Read { @(Get-PimIdentityMoveList -Seam $Graph -Path "/roleManagement/directory/roleAssignments?`$filter=principalId eq '$tgtPid'" | Where-Object { "$(Get-PimIdentityMoveField $_ 'roleDefinitionId')" -ieq $d.roleDefinitionId }) }
                 if (-not $back.Count) { throw "the directory role $($d.roleDefinitionId) does not read back on $tgtName" }
                 & $step 'graph' "assigned $tgtName the directory role $($d.roleDefinitionId)" 'read back' "Invoke-PimGraph -Method DELETE -Path '/roleManagement/directory/roleAssignments/$(Get-PimIdentityMoveField $back[0] 'id')'"
                 $rec.copied.Add("directory role: $($d.roleDefinitionId)")
+            }
+            foreach ($ow in @($rp.toCopy.owned)) {
+                if ($DryRun) { & $step 'graph' "would add $tgtName as owner of the app registration $($ow.displayName)" '' ''; continue }
+                [void](Invoke-PimIdentityMoveGraphAdd -Graph $Graph -Path "/applications/$($ow.id)/owners/`$ref" -Body @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$tgtPid" })
+                $back = Wait-PimIdentityMoveGraphBack -Sleep $Sleep -Read { @(Get-PimIdentityMoveList -Seam $Graph -Path "/applications/$($ow.id)/owners?`$select=id" | Where-Object { "$(Get-PimIdentityMoveField $_ 'id')" -ieq $tgtPid }) }
+                if (-not $back.Count) { throw "$tgtName was added as owner of $($ow.displayName) but does not read back as one" }
+                & $step 'graph' "added $tgtName as owner of the app registration $($ow.displayName)" 'read back' "Invoke-PimGraph -Method DELETE -Path '/applications/$($ow.id)/owners/$tgtPid/`$ref'"
+                $rec.copied.Add("owner: $($ow.displayName)")
+            }
+            foreach ($fc in @($rp.toCopy.fic)) {
+                $fn = ("signin-front-$tgtName" -replace '[^A-Za-z0-9-]', '-')
+                if ($DryRun) { & $step 'graph' "would add the federated credential $fn for $tgtName on $($fc.appName) (the sign-in front signs in as it)" '' ''; continue }
+                [void](Invoke-PimIdentityMoveGraphAdd -Graph $Graph -Path "/applications/$($fc.appObjectId)/federatedIdentityCredentials" -Body @{ name = $fn; issuer = $fc.issuer; subject = $tgtPid; audiences = @($fc.audiences); description = "PIM Manager sign-in front: the web identity $tgtName is the client credential -- no secret (NAM-03 move)." })
+                $back = Wait-PimIdentityMoveGraphBack -Sleep $Sleep -Read { @(Get-PimIdentityMoveList -Seam $Graph -Path "/applications/$($fc.appObjectId)/federatedIdentityCredentials" | Where-Object { "$(Get-PimIdentityMoveField $_ 'subject')" -ieq $tgtPid -and "$(Get-PimIdentityMoveField $_ 'issuer')" -ieq $fc.issuer }) }
+                if (-not $back.Count) { throw "the federated credential for $tgtName on $($fc.appName) does not read back" }
+                & $step 'graph' "added the federated credential $fn for $tgtName on $($fc.appName)" 'read back' "Invoke-PimGraph -Method DELETE -Path '/applications/$($fc.appObjectId)/federatedIdentityCredentials/$(Get-PimIdentityMoveField $back[0] 'id')'"
+                $rec.copied.Add("federated credential: $($fc.appName)")
             }
             # ------------------------------------------------------------------ 3 azure
             $cur = 'azure'
@@ -860,7 +1039,8 @@ function Invoke-PimIdentityMoveRole {
             $fromIds = @($row.sources | ForEach-Object { "$($_.id)" })
             $fromCids = @($row.sources | Where-Object { "$($_.clientId)".Trim() } | ForEach-Object { "$($_.clientId)" })
             if (-not $row.signsInAsTarget -or @($row.settings).Count) {
-                $sw = Set-PimIdentityMoveSwitch -Arm $Arm -ResourceId $row.resourceId -FromIds $fromIds -FromClientIds $fromCids -ToId $tgtId -ToClientId $tgtCid -ClientIdEnvNames $envNames -DryRun:$DryRun
+                if (-not $DryRun) { $script:PimIdentityMoveSwitchUtc = [datetime]::UtcNow }
+                $sw = Set-PimIdentityMoveSwitch -Arm $Arm -ResourceId $row.resourceId -FromIds $fromIds -FromClientIds $fromCids -ToId $tgtId -ToClientId $tgtCid -ClientIdEnvNames $envNames -DryRun:$DryRun -Sleep $Sleep
                 $prevSys = -not @($row.sources | Where-Object { $_.kind -eq 'user' }).Count
                 $undoSw = if ($prevSys) { "Set-PimIdentityMoveSwitch -Arm `$arm -ResourceId '$($row.resourceId)' -FromIds @('$tgtId') -ToSystem -ClientIdEnvNames $envNamesTxt" }
                           else { $u0 = @($row.sources | Where-Object { $_.kind -eq 'user' })[0]; "Set-PimIdentityMoveSwitch -Arm `$arm -ResourceId '$($row.resourceId)' -FromIds @('$tgtId') -FromClientIds @('$tgtCid') -ToId '$($u0.id)' -ToClientId '$($u0.clientId)' -ClientIdEnvNames $envNamesTxt" }
@@ -918,16 +1098,31 @@ function Invoke-PimIdentityMoveCleanup {
         }
     }
     foreach ($s in @($RolePlan.sources)) {
+        # the sign-in front's federated credential of the OLD identity goes only where the target's reads back on the same app
+        foreach ($fc in @($RolePlan.ficSources | Where-Object { "$($_.subject)" -ieq "$($s.principalId)" })) {
+            $have = @(Get-PimIdentityMoveList -Seam $Graph -Path "/applications/$($fc.appObjectId)/federatedIdentityCredentials" | Where-Object { "$(Get-PimIdentityMoveField $_ 'subject')" -ieq "$TargetPrincipalId" -and "$(Get-PimIdentityMoveField $_ 'issuer')" -ieq $fc.issuer })
+            if (-not $have.Count) { $rec.kept.Add("$($s.name): federated credential $($fc.name) on $($fc.appName) kept -- $($RolePlan.target) has none there"); continue }
+            [void](& $Graph 'DELETE' "/applications/$($fc.appObjectId)/federatedIdentityCredentials/$($fc.id)" $null)
+            & $Step 'cleanup' "removed the federated credential $($fc.name) of $($s.name) on $($fc.appName)" 'removed' "Invoke-PimGraph -Method POST -Path '/applications/$($fc.appObjectId)/federatedIdentityCredentials' -Body @{ name = '$($fc.name)'; issuer = '$($fc.issuer)'; subject = '$($s.principalId)'; audiences = @('api://AzureADTokenExchange') }"
+            $rec.removed.Add("$($s.name): federated credential on $($fc.appName)")
+        }
+
         if ($s.kind -eq 'user') {
             $still = @($users["$($s.id)".ToLowerInvariant()] | Where-Object { $_ })
             if ($still.Count) { $rec.kept.Add("$($s.name): rights kept -- still used by $($still -join ', ')"); continue }
         }
         $sr = $RolePlan.perSource["$($s.principalId)".ToLowerInvariant()]
         if (-not $sr) { continue }
+        # An old identity loses ALL its rights after the proof (framework 12.11c ruling (b): names 'ok' only when no old
+        # identity holds rights; Invardia 2026-11-08): a SHARED id-pim-* identity once nothing uses it (also what no role took
+        # over, -NeedOnly), and the role's own system identity (it signs in for nothing once switched). Root rights without
+        # root access stay a customer step; non-PIM groups are never read, so never touched.
+        $orphan = $true
+        $rec.removed.Add("$($s.name): no longer used by the role -- every right it holds is removed")
         $haveA = @{}; foreach ($a in @($now.azure)) { $haveA[(("$($a.roleDefinitionId)" -replace '^.*/roleDefinitions/', '').ToLowerInvariant() + '|' + "$($a.scope)".TrimEnd('/').ToLowerInvariant())] = $true }
         foreach ($a in @($sr.azure)) {
             $k = ("$($a.roleDefinitionId)" -replace '^.*/roleDefinitions/', '').ToLowerInvariant() + '|' + "$($a.scope)".TrimEnd('/').ToLowerInvariant()
-            if (-not $haveA.ContainsKey($k)) { $rec.kept.Add("$($s.name): Azure role $(@("$($a.roleDefinitionId)" -split '/')[-1]) at $($a.scope) kept -- $($RolePlan.target) does not hold it"); continue }
+            if (-not $orphan -and -not $haveA.ContainsKey($k)) { $rec.kept.Add("$($s.name): Azure role $(@("$($a.roleDefinitionId)" -split '/')[-1]) at $($a.scope) kept -- $($RolePlan.target) does not hold it"); continue }
             if ($a.root -and -not $Plan.supportHasRootAccess) { $rec.customerSteps.Add([pscustomobject]@{ when = 'after the proof'; what = "remove the old identity's role at the tenant root"; command = (Get-PimIdentityMoveCustomerCommand -Action remove -PrincipalId $s.principalId -RoleDefinitionId $a.roleDefinitionId -Scope $a.scope) }); continue }
             [void](& $Arm 'DELETE' "$($a.id)?api-version=$($api.auth)" $null)
             if (Invoke-PimIdentityMoveGet -Seam $Arm -Path "$($a.id)?api-version=$($api.auth)") { throw "$($s.name): the Azure role $($a.id) is still there after the delete" }
@@ -936,31 +1131,39 @@ function Invoke-PimIdentityMoveCleanup {
         }
         $haveG = @{}; foreach ($g in @($now.graph)) { $haveG["$($g.resourceId)|$($g.appRoleId)".ToLowerInvariant()] = $true }
         foreach ($g in @($sr.graph)) {
-            if (-not $haveG.ContainsKey("$($g.resourceId)|$($g.appRoleId)".ToLowerInvariant())) { $rec.kept.Add("$($s.name): app role $($g.appRoleId) kept -- the target does not hold it"); continue }
+            if (-not $orphan -and -not $haveG.ContainsKey("$($g.resourceId)|$($g.appRoleId)".ToLowerInvariant())) { $rec.kept.Add("$($s.name): app role $($g.appRoleId) kept -- the target does not hold it"); continue }
             [void](& $Graph 'DELETE' "/servicePrincipals/$($s.principalId)/appRoleAssignments/$($g.id)" $null)
             & $Step 'cleanup' "removed from $($s.name): app role $($g.appRoleId)" 'removed' "Invoke-PimGraph -Method POST -Path '/servicePrincipals/$($s.principalId)/appRoleAssignments' -Body @{ principalId = '$($s.principalId)'; resourceId = '$($g.resourceId)'; appRoleId = '$($g.appRoleId)' }"
             $rec.removed.Add("$($s.name): graph $($g.appRoleId)")
         }
         $haveM = @{}; foreach ($g in @($now.groups)) { $haveM["$($g.id)".ToLowerInvariant()] = $true }
         foreach ($g in @($sr.groups)) {
-            if (-not $haveM.ContainsKey("$($g.id)".ToLowerInvariant())) { $rec.kept.Add("$($s.name): $($g.displayName) membership kept -- the target is not a member"); continue }
+            if (-not $orphan -and -not $haveM.ContainsKey("$($g.id)".ToLowerInvariant())) { $rec.kept.Add("$($s.name): $($g.displayName) membership kept -- the target is not a member"); continue }
             [void](& $Graph 'DELETE' "/groups/$($g.id)/members/$($s.principalId)/`$ref" $null)
             & $Step 'cleanup' "removed $($s.name) from the PIM group $($g.displayName)" 'removed' "Invoke-PimGraph -Method POST -Path '/groups/$($g.id)/members/`$ref' -Body @{ '@odata.id' = 'https://graph.microsoft.com/v1.0/directoryObjects/$($s.principalId)' }"
             $rec.removed.Add("$($s.name): group $($g.displayName)")
         }
         $haveD = @{}; foreach ($d in @($now.dirRoles)) { $haveD["$($d.roleDefinitionId)".ToLowerInvariant()] = $true }
         foreach ($d in @($sr.dirRoles)) {
-            if (-not $haveD.ContainsKey("$($d.roleDefinitionId)".ToLowerInvariant())) { $rec.kept.Add("$($s.name): directory role $($d.roleDefinitionId) kept"); continue }
+            if (-not $orphan -and -not $haveD.ContainsKey("$($d.roleDefinitionId)".ToLowerInvariant())) { $rec.kept.Add("$($s.name): directory role $($d.roleDefinitionId) kept"); continue }
             [void](& $Graph 'DELETE' "/roleManagement/directory/roleAssignments/$($d.id)" $null)
             & $Step 'cleanup' "removed from $($s.name): directory role $($d.roleDefinitionId)" 'removed' "Invoke-PimGraph -Method POST -Path '/roleManagement/directory/roleAssignments' -Body @{ principalId = '$($s.principalId)'; roleDefinitionId = '$($d.roleDefinitionId)'; directoryScopeId = '$($d.directoryScopeId)' }"
             $rec.removed.Add("$($s.name): directory role $($d.roleDefinitionId)")
         }
         foreach ($k in @($sr.kv)) {
             $tk = @(@($now.kv) | Where-Object { "$($_.vaultId)" -ieq "$($k.vaultId)" })
-            if (@(Get-PimIdentityMoveKvMissing -Source @($k) -Target $tk).Count) { $rec.kept.Add("$($s.name): access policy on $($k.vaultName) kept -- the target does not hold it all"); continue }
+            if (-not $orphan -and @(Get-PimIdentityMoveKvMissing -Source @($k) -Target $tk).Count) { $rec.kept.Add("$($s.name): access policy on $($k.vaultName) kept -- the target does not hold it all"); continue }
             [void](& $Arm 'PUT' "$($k.vaultId)/accessPolicies/remove?api-version=$($api.kv)" @{ properties = @{ accessPolicies = @(@{ tenantId = $(if ($k.tenantId) { $k.tenantId } else { $Plan.tenantId }); objectId = $s.principalId; permissions = $k.permissions }) } })
             & $Step 'cleanup' "removed $($s.name) from the access policy on $($k.vaultName)" 'removed' "Invoke-PimArm -Method PUT -Path '$($k.vaultId)/accessPolicies/add?api-version=$($api.kv)' -Body <the policy in this record>"
             $rec.removed.Add("$($s.name): kv $($k.vaultName)")
+        }
+        # app registration ownership: the old identity leaves as owner ONLY where the target reads back as an owner
+        foreach ($ow in @($sr.owned)) {
+            $own = @(Get-PimIdentityMoveList -Seam $Graph -Path "/applications/$($ow.id)/owners?`$select=id" | ForEach-Object { "$(Get-PimIdentityMoveField $_ 'id')".ToLowerInvariant() })
+            if (-not ($own -contains "$TargetPrincipalId".ToLowerInvariant())) { $rec.kept.Add("$($s.name): owner of $($ow.displayName) kept -- $($RolePlan.target) is not an owner"); continue }
+            [void](& $Graph 'DELETE' "/applications/$($ow.id)/owners/$($s.principalId)/`$ref" $null)
+            & $Step 'cleanup' "removed $($s.name) as owner of the app registration $($ow.displayName)" 'removed' "Invoke-PimGraph -Method POST -Path '/applications/$($ow.id)/owners/`$ref' -Body @{ '@odata.id' = 'https://graph.microsoft.com/v1.0/directoryObjects/$($s.principalId)' }"
+            $rec.removed.Add("$($s.name): owner of $($ow.displayName)")
         }
         if ($RolePlan.sql.needed) { $rec.kept.Add("$($s.name): its database user is kept (removing it is a database-job step, not done by the mover)") }
     }
