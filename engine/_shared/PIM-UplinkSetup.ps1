@@ -624,7 +624,10 @@ function Get-PimSetupFacts {
     $readOk = $readOk -and -not $script:PimSetupReadFailed
     # OPEN-01: the UPDATER's last consent decision (information only here -- the engine never applies consent)
     $sc = $null; try { $sc = & $GetSetting 'SupportConsentState'; if ($sc -is [string] -and "$sc".Trim().StartsWith('{')) { $sc = "$sc" | ConvertFrom-Json } } catch { $sc = $null }
+    # WAITING-CUSTOMER (framework, Invardia 2026-11-08): { "<step key>": "SUP-yyyy-nnnnn" } -- the customer ticket a step waits on
+    $stk = $null; try { $stk = & $GetSetting 'SetupStepTickets'; if ($stk -is [string] -and "$stk".Trim().StartsWith('{')) { $stk = "$stk" | ConvertFrom-Json } } catch { $stk = $null }
     return [pscustomobject]@{
+        SetupStepTickets = $stk
         NowUtc = $NowUtc.ToUniversalTime(); StoreReadable = $readOk; UpdateState = $us; EnvRing = "$EnvRing"; EnvHold = "$EnvHold"
         KeyPresent = [bool]("$InstallKey".Trim()); License = $License; ProHere = $ProHere; Mail = $mail; AlertRecipients = $recips
         Permissions = $perm; Runs = @($Runs); GetStarted = $gs

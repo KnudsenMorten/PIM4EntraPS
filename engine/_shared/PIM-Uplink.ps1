@@ -3285,7 +3285,8 @@ function Invoke-PimUplinkCycle {
                     $stSsa = $(if ($SupportSqlAccess) { $ssaVal } else { $null })
                     $stSteps = @(New-PimSetupSteps -Facts @{ Updater = (Get-PimUplinkField $stUs 'setupFacts'); UpdateState = $stUs; Controls = $stCtl
                                                              SupportSqlAccess = $stSsa; Permissions = (Get-PimUplinkField $SetupFacts 'Permissions'); NowUtc = $NowUtc
-                                                             SupportConsent = (Get-PimUplinkField $SetupFacts 'SupportConsentState') })
+                                                             SupportConsent = (Get-PimUplinkField $SetupFacts 'SupportConsentState')
+                                                             Tickets = (Get-PimUplinkField $SetupFacts 'SetupStepTickets') })
                     if (Add-PimUplinkSetupStepsField -Record $hb -Steps $stSteps) { $hbAdd += 'setupSteps' }
                 } catch { Write-Warning "[uplink] setupSteps could not be built: $($_.Exception.Message)" }
             }

@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.62 -- 2026-11-08
+
+- The release scan found two code comments naming test installs; they are now generic (3.0.61 was tagged but never published -- its changes ship in this version)
+
+## 3.0.61 -- 2026-11-08
+
+- The identity move proves a job that updates itself (the updater) by the change it made as its new identity; the web front check follows no redirect and accepts the sign-in redirect as the API's refusal of an anonymous call; a setup step that waits on a customer support ticket reports "waiting for the customer" with the ticket number instead of a gap; an owner-approved exception lets one job keep its old identity, named in the identity check
+
 ## 3.0.60 -- 2026-11-08
 
 - The update check now reads the permissions of the engine's own user-assigned identity when the job runs as one (no false "missing permission" after the identity move); the database job makes the web front's identity the owner of the sign-in tables and, only when asked, removes old database users that own nothing and hold no rights; the identity move of the web front now proves the hosted sign-in page answers and the API still refuses an anonymous call; the Manager finds the engine identity by its new name

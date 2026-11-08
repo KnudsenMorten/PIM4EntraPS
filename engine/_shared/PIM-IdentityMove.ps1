@@ -859,7 +859,10 @@ function Invoke-PimIdentityMoveDefaultProve {
                     if (-not $Http) { return @{ ok = $false; pending = $true; detail = "revision $latest Healthy; no HTTP seam to check the front https://$fq -- run the hosted smoke (Test-PimManagerHostedSmoke) to prove it" } }
                     $r1 = & $Http "https://$fq/"; $r2 = & $Http "https://$fq/api/active-assignments"
                     if (-not $r1.status -or -not $r2.status) { return @{ ok = $false; pending = $true; detail = "revision $latest Healthy; the front https://$fq is not reachable from here ($(@($r1.error, $r2.error) | Where-Object { $_ } | Select-Object -First 1)) -- run the hosted smoke there" } }
-                    if ($r1.status -ge 500 -or $r2.status -ge 500 -or $r1.status -notin @(200, 302, 303) -or $r2.status -notin @(401, 403)) { return @{ ok = $false; pending = $false; detail = "revision $latest Healthy BUT the front answers / -> $($r1.status), /api/active-assignments -> $($r2.status) (wanted 200/302/303 and 401/403) -- e.g. the sign-in front's SQL state (schema signin)" } }
+                    # the API refuses an anonymous call with 401 / 403, OR (the hosted sign-in front, 2026-11-08 internal) by
+                    # sending it to the Entra sign-in: 302 / 303 whose Location is https://login.microsoftonline.<cloud>/ only
+                    $apiRefused = ($r2.status -in @(401, 403)) -or ($r2.status -in @(302, 303) -and "$($r2.location)" -match '^https://login\.microsoftonline\.[a-z.]+/')
+                    if ($r1.status -ge 500 -or $r2.status -ge 500 -or $r1.status -notin @(200, 302, 303) -or -not $apiRefused) { return @{ ok = $false; pending = $false; detail = "revision $latest Healthy BUT the front answers / -> $($r1.status), /api/active-assignments -> $($r2.status)$(if ($r2.location) { ' to ' + ("$($r2.location)" -replace '\?.*$', '') }) (wanted 200/302/303 and 401/403 or a redirect to the Entra sign-in) -- e.g. the sign-in front's SQL state (schema signin)" } }
                     return @{ ok = $true; pending = $false; detail = "revision $latest Healthy ($rs), signs in as $ClientId; front / -> $($r1.status), /api -> $($r2.status)" }
                 }
                 if ($h -eq 'Healthy') { return @{ ok = $true; pending = $false; detail = "revision $latest Healthy ($rs), signs in as $ClientId" } }
@@ -879,6 +882,20 @@ function Invoke-PimIdentityMoveDefaultProve {
     }
     $since = $null
     $since = ConvertTo-PimIdentityMoveUtc (Get-PimIdentityMoveField (Get-PimIdentityMoveField $job 'systemData') 'lastModifiedAt')
+    # !! a job that MODIFIES ITSELF (the updater writes its own job each run; a ring-1 test install's ca-pim-update 2026-11-08: three good runs
+    # after the switch, each followed by its own change, so "a run since the last change" never came): when the last change
+    # was made BY THE NEW IDENTITY (systemData.lastModifiedBy = its client id), the job has signed in as it and used its
+    # Azure rights -- the run that made the change is the proof (the newest run that started before it, Succeeded).
+    $modBy = "$(Get-PimIdentityMoveField (Get-PimIdentityMoveField $job 'systemData') 'lastModifiedBy')".Trim()
+    if ($since -and $modBy -and $modBy -ieq "$ClientId".Trim()) {
+        $exes0 = @(Get-PimIdentityMoveList -Seam $Arm -Path "$($Row.resourceId)/executions?api-version=$($api.aca)")
+        $before = @($exes0 | Where-Object { $t = ConvertTo-PimIdentityMoveUtc (Get-PimIdentityMoveField (Get-PimIdentityMoveField $_ 'properties') 'startTime'); $t -and $t -le $since } |
+                    Sort-Object { ConvertTo-PimIdentityMoveUtc (Get-PimIdentityMoveField (Get-PimIdentityMoveField $_ 'properties') 'startTime') } -Descending)
+        $by = @($before | Where-Object { "$(Get-PimIdentityMoveField (Get-PimIdentityMoveField $_ 'properties') 'status')" -in @('Succeeded', 'Failed', 'Stopped', 'Degraded') })
+        if ($by.Count -and "$(Get-PimIdentityMoveField (Get-PimIdentityMoveField $by[0] 'properties') 'status')" -eq 'Succeeded') {
+            return @{ ok = $true; pending = $false; detail = "execution $(Get-PimIdentityMoveField $by[0] 'name') Succeeded and then changed the job AS $ClientId (it signs in as the new identity)" }
+        }
+    }
     # the mover's OWN switch time wins when it is later: the job's lastModifiedAt can still show an EARLIER change right after
     # the switch (internal ca-pim-dbinit 2026-11-08 07:59Z: a 07:41Z run was taken as "after the switch")
     if ($script:PimIdentityMoveSwitchUtc -is [datetime] -and (-not $since -or $script:PimIdentityMoveSwitchUtc -gt $since)) { $since = $script:PimIdentityMoveSwitchUtc }

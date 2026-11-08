@@ -151,7 +151,10 @@ try {
         Say "`n--- $ro ---" 'Cyan'
         if ($dry) { Say "What if: Performing the operation `"move to id-pim-$ro`" on target `"$ResourceGroup`" -- every step below is what WOULD happen; nothing is written." 'Yellow' }
         # item 21 (c): the WEB proof checks the hosted front itself (/ -> the sign-in, /api -> 401) -- the library takes it as a seam
-        $mvHttp = if ($Http) { $Http } else { { param($url) try { $w = Invoke-WebRequest -Uri $url -Method GET -MaximumRedirection 0 -SkipHttpErrorCheck -TimeoutSec 30 -UseBasicParsing -ErrorAction Stop; @{ status = [int]$w.StatusCode; error = '' } } catch { @{ status = 0; error = "$($_.Exception.Message)" } } } }
+        # one GET, redirects NOT followed (Invoke-WebRequest -MaximumRedirection 0 threw "Operation is not valid due to the
+        # current state of the object" on the front's 302, internal 2026-11-08): .NET HttpClient, status + Location back
+        $mvHttp = if ($Http) { $Http } else { { param($url) $hh = [System.Net.Http.HttpClientHandler]::new(); $hh.AllowAutoRedirect = $false; $hc = [System.Net.Http.HttpClient]::new($hh); $hc.Timeout = [TimeSpan]::FromSeconds(30)
+                try { $rsp = $hc.GetAsync($url).GetAwaiter().GetResult(); @{ status = [int]$rsp.StatusCode; location = "$($rsp.Headers.Location)"; error = '' } } catch { @{ status = 0; location = ''; error = "$($_.Exception.Message)" } } finally { $hc.Dispose() } } }
         $mvRec = Invoke-PimIdentityMoveRole -Plan $plan -Role $ro -Arm $Arm -Graph $Graph -DbInit $DbInit -Prove $Prove -Sleep $Sleep -StartJobRoles $StartJobRoles -DryRun:$dry -NoCleanup:$NoCleanup -Http $mvHttp
         $records.Add($mvRec)
         foreach ($mvStep in @($mvRec.steps.ToArray())) {

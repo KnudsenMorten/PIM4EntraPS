@@ -72,7 +72,8 @@ function Get-PimSetupStepCatalog {
 }
 function Get-PimSetupStepMax { return 50 }
 function Get-PimSetupStepDetailMax { return 200 }
-function Get-PimSetupStepStateList { return @('ok', 'missing', 'n/a', 'unknown') }
+function Get-PimSetupStepStateList { return @('ok', 'missing', 'n/a', 'unknown', 'waiting-customer') }
+function Test-PimSetupStepTicketId { <# PURE. A customer ticket id SUP-yyyy-nnnnn (framework WAITING-CUSTOMER, 2026-11-08). #> param([AllowNull()][string]$Id) return [bool]("$Id" -cmatch '^SUP-\d{4}-\d{5}$') }
 function Get-PimSetupStepHowList { return @('updater', 'support-app', 'customer') }
 function Get-PimSetupStepFreshDays { return 7 }
 
@@ -146,6 +147,10 @@ function Test-PimSetupStepEntry {
     $k = "$(Get-PimSetupStepField $Entry 'key')"
     if ($k -notmatch '^[a-z0-9]+(-[a-z0-9]+)*$' -or $k.Length -gt 60) { return $false }
     if ("$(Get-PimSetupStepField $Entry 'state')" -cnotin (Get-PimSetupStepStateList)) { return $false }
+    # 'waiting-customer' carries its ticket (SUP-yyyy-nnnnn); a ticket on any other state is not the agreed shape
+    $tk = Get-PimSetupStepField $Entry 'ticket'
+    if ("$(Get-PimSetupStepField $Entry 'state')" -ceq 'waiting-customer') { if (-not (Test-PimSetupStepTicketId -Id "$tk")) { return $false } }
+    elseif ($null -ne $tk) { return $false }
     if ("$(Get-PimSetupStepField $Entry 'how')" -cnotin (Get-PimSetupStepHowList)) { return $false }
     if ("$(Get-PimSetupStepField $Entry 'since')" -notmatch '^\d{1,4}\.\d{1,6}\.\d{1,6}$') { return $false }
     if ("$(Get-PimSetupStepField $Entry 'checkedAt')" -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$') { return $false }
@@ -606,12 +611,21 @@ function New-PimSetupSteps {
     }
 
     # ---- assemble, in the catalog's order; validate; cap -------------------------------------------------------------
+    # WAITING-CUSTOMER (framework, Invardia 2026-11-08): a step that is still MISSING and has a customer ticket recorded
+    # (pim.Settings 'SetupStepTickets' { "<key>": "SUP-yyyy-nnnnn" }) reports 'waiting-customer' + ticket -- counted apart from
+    # the gaps. Only while it is missing: once the live read says ok, the ticket no longer matters. A malformed id is ignored.
+    $tkt = ConvertTo-PimSetupStepObject (Get-PimSetupStepField $Facts 'Tickets')
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($c in (Get-PimSetupStepCatalog)) {
         $r = $res[$c.key]
         if (-not $r) { $r = @{ state = 'unknown'; detail = 'not read'; at = $null } }
         $e = [ordered]@{ key = $c.key; title = $c.title; state = "$($r.state)"; since = $c.since; how = $c.how
                          checkedAt = (& $iso $r.at); detail = (ConvertTo-PimSetupStepDetail -Text $r.detail) }
+        $tid = "$(Get-PimSetupStepField $tkt $c.key)".Trim()
+        if ($e.state -eq 'missing' -and (Test-PimSetupStepTicketId -Id $tid)) {
+            $e.state = 'waiting-customer'; $e['ticket'] = $tid
+            $e.detail = ConvertTo-PimSetupStepDetail -Text "waiting for the customer ($tid): $($r.detail)"
+        }
         if (Test-PimSetupStepEntry -Entry $e) { $out.Add($e) }
         if ($out.Count -ge (Get-PimSetupStepMax)) { break }
     }

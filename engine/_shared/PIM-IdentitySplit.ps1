@@ -251,8 +251,30 @@ function Get-PimIdentityNamesFact {
     $bad = New-Object System.Collections.Generic.List[string]; $seenBad = @{}
     $addBad = { param($t) $k = "$t".ToLowerInvariant(); if (-not $seenBad.ContainsKey($k)) { $seenBad[$k] = $true; $bad.Add("$t") } }
     $roles = 0
+    # OWNER-APPROVED EXCEPTION (owner 2026-11-08 via Invardia: "you must fix. otherwise leave old identity as exception" /
+    # "approved"; for a tenant where the Support app cannot copy the engine's root User Access Administrator). An app / job
+    # whose container env PIM_IdentityNamesException reads "owner-approved exception <yyyy-mm-dd> (<why>)" keeps its old
+    # identity: that resource and the old identities it uses are not counted against the step, and the ok detail SAYS so
+    # ("<role> on the old identity: <text>") -- never a silent skip. Any other text there is NOT an exception (said as missing).
+    $excRes = @{}; $excPid = @{}; $excSaid = New-Object System.Collections.Generic.List[string]
     foreach ($o in $all) {
         $res = "$(Get-PimIdentityNamesField $o 'name')".Trim(); if (-not $res) { $res = Get-PimIdentityNamesLastSegment "$(Get-PimIdentityNamesField $o 'id')" }
+        $mark = ''
+        foreach ($ct in @(Get-PimIdentityNamesField (Get-PimIdentityNamesField (Get-PimIdentityNamesField $o 'properties') 'template') 'containers')) {
+            foreach ($e in @(Get-PimIdentityNamesField $ct 'env')) { if ($null -ne $e -and "$(Get-PimIdentityNamesField $e 'name')" -eq 'PIM_IdentityNamesException' -and "$(Get-PimIdentityNamesField $e 'value')".Trim()) { $mark = "$(Get-PimIdentityNamesField $e 'value')".Trim() } }
+        }
+        if (-not $mark) { continue }
+        if ($mark -notmatch '^owner-approved exception \d{4}-\d{2}-\d{2}\b') { & $addBad "${res}: PIM_IdentityNamesException is not an owner-approved exception <date>"; continue }
+        $excRes[$res.ToLowerInvariant()] = $true
+        $rw = "$(Get-PimIdentityRoleOf -Name $res)"; if (-not $rw) { $rw = $res }
+        $excSaid.Add("$rw on the old identity: $mark")
+        $idnX = Get-PimIdentityNamesField $o 'identity'
+        $sp = "$(Get-PimIdentityNamesField $idnX 'principalId')".Trim().ToLowerInvariant(); if ($sp) { $excPid[$sp] = $true }
+        foreach ($pr in @(Get-PimIdentityNamesMapPairs (Get-PimIdentityNamesField $idnX 'userAssignedIdentities'))) { $up = "$(Get-PimIdentityNamesField $pr.value 'principalId')".Trim().ToLowerInvariant(); if ($up) { $excPid[$up] = $true } }
+    }
+    foreach ($o in $all) {
+        $res = "$(Get-PimIdentityNamesField $o 'name')".Trim(); if (-not $res) { $res = Get-PimIdentityNamesLastSegment "$(Get-PimIdentityNamesField $o 'id')" }
+        if ($excRes.ContainsKey($res.ToLowerInvariant())) { $roles++; continue }
         $idn = Get-PimIdentityNamesField $o 'identity'
         $hasSystem = Test-PimIdentityNamesHasSystem $o
         $mine = @{}
@@ -288,6 +310,7 @@ function Get-PimIdentityNamesFact {
     # the old identities: any right left = the clean-up is pending
     $notRead = New-Object System.Collections.Generic.List[string]; $decided = 0
     foreach ($x in $old) {
+        if ($x.principalId -and $excPid.ContainsKey($x.principalId)) { $decided++; continue }   # used by an owner-approved exception (said in the detail)
         $r = $null; if ($x.principalId -and $Rights.ContainsKey($x.principalId)) { $r = $Rights[$x.principalId] }
         if ($null -eq $r) { $notRead.Add($x.label); continue }
         $az = Get-PimIdentityNamesField $r 'azure'; $gr = Get-PimIdentityNamesField $r 'graph'
@@ -304,6 +327,7 @@ function Get-PimIdentityNamesFact {
         return [ordered]@{ identityNames = 'n/a'; identityNamesDetail = 'no container app or job uses a managed identity' }
     }
     $okHead = $head0 + "every role runs as id-pim-<role> and no old identity holds rights ($($all.Count) apps / jobs read; $decided old identities hold none)"
+    if ($excSaid.Count) { $okHead = (@($excSaid) -join '; ') + '; every other role runs as id-pim-<role>, no other old identity holds rights' }
     # every role is standard, but an old identity's rights could not be read: NOT proven clean -> unknown (never ok on a gap)
     if ($nr.Count) { return [ordered]@{ identityNames = 'unknown'; identityNamesDetail = (& $fit ($head0 + 'every role runs as id-pim-<role>; old identities not proven clean: ') $nr) } }
     return [ordered]@{ identityNames = 'ok'; identityNamesDetail = (& $cut $okHead) }
