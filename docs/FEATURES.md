@@ -241,6 +241,27 @@ deployment is a supported choice) and no credentials lying around.
 - **No leftover sign-in secret.** ✅ 2026-11-04 — Once the sign-in front is live, the installation removes the old Easy
   Auth client secret from the PIM Manager app registration and reads the result back. An installation still on Easy
   Auth keeps its secret until it moves.
+- **Support hears about the findings that matter at once.** ✅ 2026-11-06 — Live access that differs from your
+  definitions, new privileged roles or groups that nobody manages, and the break-glass emergency override being switched
+  on also reach Invardia support as alerts. Each update reports its stages, and every status report says which PIM jobs
+  are running and for how long, so support can tell a long job from a stuck one.
+- **A new installation starts at the right size.** ✅ 2026-11-06 — New installations start at the sizes the fleet has
+  learned (2 CPU / 4 GiB, and 4 CPU / 8 GiB from 15,000 users) instead of starting small and being raised later.
+- **Database users and grants are kept up to date, even while a job runs.** ✅ 2026-11-07 — The database setup job can run
+  its safe part (database users, role membership and grants, only ever added) while a PIM job is running. Every other step
+  waits for the run to end.
+- **The updater owns PIM's own app registrations.** ✅ 2026-11-07 — Each installation's updater is an owner of PIM's own
+  app registrations. It proves this once with a harmless change it reads back, and from then on changes only the
+  registrations it owns. Support adds the updater as an owner, and removes its own ownership only after that proof. On a
+  Community installation the updater owns only its own sign-in registration.
+- **A pull job with its own database user.** ✅ 2026-11-07 — On a managed tenant, every update gives the pull job its own
+  least-privilege database user and reports whether it still uses the database admin group.
+- **Identity names are checked on every update.** ✅ 2026-11-07 — Every update reports whether each part of the
+  installation runs as its own identity named id-pim-<role>, and whether an identity it used before still holds rights.
+  The answer is ok only when both are true; otherwise it names what is left to move or clean up.
+- **The mail relay password vault is protected against purge.** ✅ 2026-11-07 — A Key Vault created by the SMTP relay
+  password script has purge protection on: a deleted vault and its secret cannot be permanently removed before the
+  retention period ends.
 
 ## 4. MSP
 - **Support sees where your environment lives.** ✅ 2026-10-10 — With an install key, the heartbeat names the
@@ -2148,6 +2169,15 @@ deployment is a supported choice) and no credentials lying around.
   one that is not yet valid is reported as such rather than silently accepted.
 
 ### Licensing — what is free and what is paid
+
+- **The public Community release holds no Pro code.** ✅ 2026-11-07 — The Community edition you download from GitHub
+  contains only the free product; Pro is delivered in the Pro package from Invardia. A Pro-only page or action on a
+  Community installation answers with one plain line ("This is part of PIM Manager Pro. Your installation is
+  Community.") and a link to invardia.com.
+- **Licence.** ✅ 2026-11-07 — From 3.0.56 the Community edition is licensed under the PolyForm Shield License 1.0.0: you
+  may use, change and run it, also commercially for your own organisation, but not to provide a product that competes
+  with it. Pro components are licensed only under a commercial agreement. Earlier versions keep the licence they were
+  published with.
 
 ✅ 2026-09-19. The line: **the community edition is free for a single tenant**; a **Pro licence** adds
 advanced single-tenant capabilities and the whole multi-tenant half. The product **enforces** it — in the engine,

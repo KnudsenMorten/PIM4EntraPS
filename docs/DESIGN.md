@@ -11182,6 +11182,20 @@ right:
 - **The pull and publish jobs' Reader on themselves** is granted through the Support app (the updater may not assign
   roles), and the step says so.
 
+**Identity names follow the standard (3.0.57).** The setup step `identity-names` checks two things. First, every app and
+job runs as a user-assigned identity named `id-pim-<role>`, where the role is one of `engine`, `web`, `updater`, `mcp`,
+`downlink`, `publish`, `requests`, `dbinit` or `asbuilt`. "Runs as" covers the identity the app signs in with and the
+identities its image pull and Key Vault secret references use. Second, no old identity still holds rights. An old
+identity is a system-assigned identity, or a user-assigned identity with any other name, whether or not it is still
+attached to anything. On each run the updater reads, read only, the container apps, jobs and user-assigned identities in
+the install's resource group. For each old identity it also reads the Azure role assignments at the resource group and
+the subscription, and its Microsoft Graph application roles. The step is `ok` only when every app and job runs as its
+standard identity and no old identity holds a right. It is `missing` otherwise. The detail then lists each app that runs
+as another identity ("app: identity") and each old identity that still holds rights ("clean-up pending: <identity> still
+holds rights"). An old identity whose rights could not be read is named as not read, and then the step is `unknown`, never `ok`: it is not proven clean. The step is `n/a` when there is
+nothing to read, and `unknown` when nothing could be decided. The Support app makes the move to the standard identities
+and removes the old rights. The step turns `ok` on the next updater run after that clean-up.
+
 ---
 
 ## 28. Change control, ownership and daily checks (2026-09)

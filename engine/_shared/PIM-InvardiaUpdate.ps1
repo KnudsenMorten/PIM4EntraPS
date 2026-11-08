@@ -208,6 +208,16 @@ function ConvertTo-PimBuildContextFromZip {
         $items = @('SOLUTIONS'); if (Test-Path -LiteralPath (Join-Path $top '.dockerignore')) { $items = @('.dockerignore') + $items }
         # CR7 (PIM 100.168): a release that carries the shared sign-in front's source keeps it in the context, so an opted-in
         # install builds signin-front from it. The Manager build never sees it (.dockerignore keeps SOLUTIONS/PIM4EntraPS only).
+        # 3.0.58: a release packed while the framework was past PIM's pin carries no FRAMEWORK/ -- the vendored copy (at the
+        # pin) is placed there instead, exactly as the Community context does it (the front step prefers vendor/ anyway).
+        $vsfPro = Join-Path $top 'SOLUTIONS/PIM4EntraPS/vendor/signin-front'
+        if (-not (Test-Path -LiteralPath (Join-Path $top 'FRAMEWORK/signin-front/src/Dockerfile')) -and
+            (Test-Path -LiteralPath (Join-Path $vsfPro 'src/Dockerfile')) -and (Test-Path -LiteralPath (Join-Path $vsfPro 'VERSION'))) {
+            $fwPro = Join-Path $top 'FRAMEWORK/signin-front'
+            New-Item -ItemType Directory -Force -Path $fwPro | Out-Null
+            Copy-Item -LiteralPath (Join-Path $vsfPro 'src') -Destination $fwPro -Recurse -Force
+            Copy-Item -LiteralPath (Join-Path $vsfPro 'VERSION') -Destination $fwPro -Force
+        }
         if (Test-Path -LiteralPath (Join-Path $top 'FRAMEWORK/signin-front/src/Dockerfile')) { $items += 'FRAMEWORK' }
         Push-Location -LiteralPath $top
         try {

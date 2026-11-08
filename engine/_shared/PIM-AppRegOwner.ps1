@@ -286,7 +286,8 @@ function Invoke-PimAppRegOwnerUpdaterCheck {
     #>
     param([Parameter(Mandatory)][scriptblock]$Graph, [AllowEmptyString()][string]$UpdaterObjectId, [AllowNull()][object]$HoldsOwnedBy = $null,
           [AllowNull()][object]$Recorded = $null, [AllowNull()][object]$StoredProof = $null, [AllowEmptyString()][string]$Label = '',
-          [datetime]$NowUtc = [datetime]::UtcNow, [string[]]$Roles = @())
+          [datetime]$NowUtc = [datetime]::UtcNow, [string[]]$Roles = @(),
+          [scriptblock]$Sleep = { param([int]$Seconds) Start-Sleep -Seconds $Seconds }, [int]$ReadBackTries = 6, [int]$ReadBackWaitSeconds = 5)
     $lines = New-Object System.Collections.Generic.List[object]
     $add = { param($level, $text) $lines.Add([pscustomobject]@{ id = 'app-reg-owner'; level = $level; text = "app registration owner: $text" }) }
     $first = { param($e) ((("$($e.Exception.Message)") -split "`n")[0]).Trim() }
@@ -335,8 +336,16 @@ function Invoke-PimAppRegOwnerUpdaterCheck {
         try {
             [void](& $Graph 'PATCH' "/applications/$($tg.objectId)" @{ notes = $marker })
             $r.patched = $true
-            $back = & $Graph 'GET' ("/applications/$($tg.objectId)?" + '$select=id,notes') $null
-            if ("$(Get-PimAppRegOwnerField $back 'notes')" -ceq $marker) {
+            # 3.0.58 (gp185 2026-11-08 03:10Z): Graph may answer the read right after the write from a replica the write has
+            # not reached yet -- read back up to -ReadBackTries times, -ReadBackWaitSeconds apart, before saying NOT proven.
+            $backNotes = ''
+            for ($try = 1; $try -le [Math]::Max(1, $ReadBackTries); $try++) {
+                if ($try -gt 1) { & $Sleep $ReadBackWaitSeconds }
+                $back = & $Graph 'GET' ("/applications/$($tg.objectId)?" + '$select=id,notes') $null
+                $backNotes = "$(Get-PimAppRegOwnerField $back 'notes')"
+                if ($backNotes -ceq $marker) { break }
+            }
+            if ($backNotes -ceq $marker) {
                 $r.proven = $true; $r.provenUtc = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
                 # a stored entry for this registration (another app id, a stale one) is replaced
                 $kept = @($keep.ToArray() | Where-Object { -not ((Test-PimAppRegOwnerGuid "$(Get-PimAppRegOwnerField $_ 'objectId')") -and ([guid]"$(Get-PimAppRegOwnerField $_ 'objectId')".Trim()) -eq ([guid]$tg.objectId)) })
@@ -345,7 +354,7 @@ function Invoke-PimAppRegOwnerUpdaterCheck {
                 $o.proofChanged = $true
                 & $add 'changed' "'$($tg.displayName)' -- ownership PROVEN by the updater's own write (notes = the marker, read back) at $($r.provenUtc)"
             } else {
-                $r.reason = 'the write was accepted but its notes read back as something else -- NOT proven'
+                $r.reason = "the write was accepted but its notes read back as something else ($(if ($backNotes.Trim()) { 'other text' } else { 'empty' }), $([Math]::Max(1, $ReadBackTries)) reads) -- NOT proven"
                 & $add 'warn' "'$($tg.displayName)' -- $($r.reason)"
             }
         } catch {

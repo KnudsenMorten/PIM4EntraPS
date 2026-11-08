@@ -225,7 +225,17 @@ if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 $zipPaths = @('.dockerignore', 'SOLUTIONS/PIM4EntraPS')
 # ls-tree, not an existence probe with cat-file: a missing path prints NOTHING (cat-file writes "fatal: ..." to stderr, which PS 5.1 with
 # ErrorActionPreference Stop turns into a terminating error -- measured on the test VM, 2026-10-18).
-foreach ($sfp in @('FRAMEWORK/signin-front/src', 'FRAMEWORK/signin-front/VERSION')) { if (@(& git -C $repo ls-tree --name-only $tag -- $sfp).Count) { $zipPaths += $sfp } }
+# 3.0.58 (framework signin-front 1.5.0, Invardia 2026-11-08): FRAMEWORK/signin-front only while the TAG's framework VERSION is
+# PIM's pin. Past the pin it is left out: SOLUTIONS/PIM4EntraPS/vendor/signin-front (at the pin) is what the updater builds,
+# and an older updater that reads only FRAMEWORK/ answers "nothing to build" -- never another version.
+$sfVerAt = { param($rev, $path) if (@(& git -C $repo ls-tree --name-only $rev -- $path).Count) { "$(& git -C $repo show "${rev}:$path")".Trim([char]0xFEFF).Trim() } else { '' } }
+$fwVer = & $sfVerAt $tag 'FRAMEWORK/signin-front/VERSION'
+$pinVer = & $sfVerAt $tag 'SOLUTIONS/PIM4EntraPS/tools/pim-manager/signin-front.version'
+if ($fwVer -and $pinVer -and $fwVer -ne $pinVer) {
+    Write-Host "  sign-in front: FRAMEWORK is at $fwVer, PIM pins $pinVer -- FRAMEWORK/signin-front left out, vendor/signin-front ($pinVer) carries it"
+} else {
+    foreach ($sfp in @('FRAMEWORK/signin-front/src', 'FRAMEWORK/signin-front/VERSION')) { if (@(& git -C $repo ls-tree --name-only $tag -- $sfp).Count) { $zipPaths += $sfp } }
+}
 # SEC-PKG-INTERNAL: the zip reaches every install's updater (and, with PRO-PACKAGE-FROM-INVARDIA, a customer admin's PC) --
 # internal/, CLAUDE.md, docs/REQUIREMENTS.md, docs/TESTS.md, tests/ ... are packed OUT here (_PimReleasePackage.ps1) and the
 # check below refuses a zip that still carries any of them. The images never had them (the Dockerfile deletes them).

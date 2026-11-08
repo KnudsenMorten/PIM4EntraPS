@@ -38,6 +38,8 @@ $script:PimSigninFrontContainerName = 'signin-front'
 $script:PimSigninFrontSrcPrefix = 'FRAMEWORK/signin-front/src/'
 $script:PimSigninFrontVersionEntry = 'FRAMEWORK/signin-front/VERSION'
 $script:PimSigninFrontPinEntry = 'SOLUTIONS/PIM4EntraPS/tools/pim-manager/signin-front.version'
+$script:PimSigninFrontVendorSrcPrefix = 'SOLUTIONS/PIM4EntraPS/vendor/signin-front/src/'
+$script:PimSigninFrontVendorVersionEntry = 'SOLUTIONS/PIM4EntraPS/vendor/signin-front/VERSION'
 
 function Test-PimSigninFrontVersionText {
     <# PURE. A component version is three dotted numbers -- nothing else is ever used as an image tag. #>
@@ -347,15 +349,21 @@ function New-PimSigninFrontBuildContext {
       @{ ok; path; version; pinned; component; files; reason }.
     #>
     param([Parameter(Mandatory)][string]$ArchivePath, [Parameter(Mandatory)][string]$OutFile)
-    $res = @{ ok = $false; path = ''; version = ''; pinned = ''; component = ''; files = 0; reason = '' }
-    $rd = Read-PimTarGzFiles -Path $ArchivePath -Prefixes @($script:PimSigninFrontSrcPrefix, $script:PimSigninFrontVersionEntry, $script:PimSigninFrontPinEntry)
+    $res = @{ ok = $false; path = ''; version = ''; pinned = ''; component = ''; files = 0; reason = ''; source = '' }
+    # 3.0.58 (framework signin-front 1.5.0, Invardia 2026-11-08): the solution's OWN vendored copy in the archive
+    # (SOLUTIONS/PIM4EntraPS/vendor/signin-front, byte-equal at the pin) is used FIRST -- FRAMEWORK/ in the archive follows
+    # the framework's current version, which may be past PIM's pin. FRAMEWORK/signin-front is the fallback (older archives).
+    $rd = Read-PimTarGzFiles -Path $ArchivePath -Prefixes @($script:PimSigninFrontVendorSrcPrefix, $script:PimSigninFrontVendorVersionEntry, $script:PimSigninFrontSrcPrefix, $script:PimSigninFrontVersionEntry, $script:PimSigninFrontPinEntry)
     if (-not $rd.ok) { $res.reason = $rd.reason; return $res }
     $f = $rd.files
-    if (-not $f.Contains($script:PimSigninFrontSrcPrefix + 'Dockerfile')) {
+    $srcPrefix = $script:PimSigninFrontVendorSrcPrefix; $verEntry = $script:PimSigninFrontVendorVersionEntry; $res.source = 'vendor'
+    if (-not ($f.Contains($srcPrefix + 'Dockerfile') -and $f.Contains($verEntry))) { $srcPrefix = $script:PimSigninFrontSrcPrefix; $verEntry = $script:PimSigninFrontVersionEntry; $res.source = 'framework' }
+    if (-not $f.Contains($srcPrefix + 'Dockerfile')) {
+        $res.source = ''
         $res.reason = 'the source archive carries no FRAMEWORK/signin-front/src (a release packed before the sign-in front was carried) -- nothing to build'
         return $res
     }
-    $comp = if ($f.Contains($script:PimSigninFrontVersionEntry)) { [System.Text.Encoding]::UTF8.GetString($f[$script:PimSigninFrontVersionEntry]).Trim([char]0xFEFF).Trim() } else { '' }
+    $comp = if ($f.Contains($verEntry)) { [System.Text.Encoding]::UTF8.GetString($f[$verEntry]).Trim([char]0xFEFF).Trim() } else { '' }
     $pin = if ($f.Contains($script:PimSigninFrontPinEntry)) { [System.Text.Encoding]::UTF8.GetString($f[$script:PimSigninFrontPinEntry]).Trim([char]0xFEFF).Trim() } else { '' }
     $res.component = $comp; $res.pinned = $pin
     if (-not (Test-PimSigninFrontVersionText $comp)) { $res.reason = 'the source archive carries no readable FRAMEWORK/signin-front/VERSION'; return $res }
@@ -363,8 +371,8 @@ function New-PimSigninFrontBuildContext {
     if ($comp -ne $pin) { $res.reason = "the source archive carries component $comp, but this release pins $pin -- not built (only the pinned version is ever built)"; return $res }
     $ctx = [ordered]@{}
     foreach ($k in @($f.Keys)) {
-        if (-not "$k".StartsWith($script:PimSigninFrontSrcPrefix, [StringComparison]::Ordinal)) { continue }
-        $rel = "$k".Substring($script:PimSigninFrontSrcPrefix.Length)
+        if (-not "$k".StartsWith($srcPrefix, [StringComparison]::Ordinal)) { continue }
+        $rel = "$k".Substring($srcPrefix.Length)
         if (-not $rel -or $rel -match '(^|/)\.\.(/|$)' -or $rel.StartsWith('/')) { continue }
         if ($rel -match '^(bin|obj)/') { continue }
         $ctx[$rel] = $f[$k]

@@ -20,7 +20,8 @@
                                         protection, no SAS in PIM_UPDATE_SOURCE_URL, SQL auditing), the front state (Key Vault
                                         key 'signin-front' + SQL schema 'signin'), the front's private Key Vault, the pull /
                                         publish jobs' Reader on themselves, the as-built storage + rights, the database
-                                        job (OPEN-06: present, on version, its identity in the SQL admin group)
+                                        job (OPEN-06: present, on version, its identity in the SQL admin group), the
+                                        identity names (NAM-03: every role runs as id-pim-<role>, no old identity holds rights)
       updater (UpdateState, own keys)   sqlAccess (run 1 / run 2 / updater in the admin group), signIn (the layer),
                                         enginePermissions (the 95.2i check: Graph + the Reader at the tenant root)
       heartbeat                         Controls (mail-sender, licence-valid, uplink-key, update-ring, identity-permissions),
@@ -63,6 +64,10 @@ function Get-PimSetupStepCatalog {
         # OPEN-06 / NO-PERSON-DB-ADMIN: the in-network database job, its version and its identity in the SQL admin group (the
         # updater creates the job; the Support app adds the identity to the group -- the updater never writes a membership).
         [ordered]@{ key = 'db-job';                   title = 'Database job (no person needs database admin)';       since = '3.0.36';  how = 'support-app' }
+        # NAM-03 / framework 12.11c item 3 + ruling (b) (key agreed by Invardia 2026-11-07): every role runs as id-pim-<role> and
+        # no old identity still holds rights (the updater reads the apps / jobs / identities and the old ones' rights:
+        # Read-PimIdentityNamesFact, PIM-IdentitySplit.ps1; the Support app moves an identity -- Move-PimIdentities.ps1).
+        [ordered]@{ key = 'identity-names';           title = 'Identity names follow the standard (id-pim-<role>)';  since = '3.0.57';  how = 'support-app' }
     )
 }
 function Get-PimSetupStepMax { return 50 }
@@ -581,6 +586,22 @@ function New-PimSetupSteps {
             'ok'      { & $set 'db-job' 'ok' $(if ($djd) { $djd } else { 'the database job is in place, on this version, its identity in the SQL admin group' }) $upAt }
             'missing' { & $set 'db-job' 'missing' $(if ($djd) { $djd } else { 'the database job, its version or its identity in the SQL admin group is missing' }) $upAt }
             default   { & $set 'db-job' 'unknown' $(if ($djd) { "not determined: $djd" } else { 'not checked by this version' }) $upAt }
+        }
+    }
+
+    # ---- S18 identity-names (updater: Read-PimIdentityNamesFact, PIM-IdentitySplit.ps1) --------------------------------
+    # Framework 12.11c ruling (b), 2026-11-07: ok only when the updater READ every role running as id-pim-<role> AND no old
+    # identity (shared id-pim-<token>, a named variant, a system-assigned one) still holding a right; otherwise missing (the
+    # detail names them: "app: identity", "clean-up pending: <identity> still holds rights"); nothing to read = n/a; nothing
+    # decided / an older updater = unknown.
+    if ($null -eq $up) { & $set 'identity-names' 'unknown' $noUp $null }
+    else {
+        $inm = "$(& $uf 'identityNames')".Trim().ToLowerInvariant(); $inmd = "$(& $uf 'identityNamesDetail')".Trim()
+        switch ($inm) {
+            'ok'      { & $set 'identity-names' 'ok' $(if ($inmd) { $inmd } else { 'every role runs as id-pim-<role> and no old identity holds rights' }) $upAt }
+            'missing' { & $set 'identity-names' 'missing' $(if ($inmd) { $inmd } else { 'a role does not run as id-pim-<role>, or an old identity still holds rights' }) $upAt }
+            'n/a'     { & $set 'identity-names' 'n/a' $(if ($inmd) { $inmd } else { 'no container app or job uses a managed identity' }) $upAt }
+            default   { & $set 'identity-names' 'unknown' $(if ($inmd) { "not determined: $inmd" } else { 'not checked by this version' }) $upAt }
         }
     }
 

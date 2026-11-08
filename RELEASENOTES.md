@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.58 -- 2026-11-08
+
+- The updater now reads back its app registration ownership proof up to six times before saying it is not proven, so a slow directory answer no longer leaves the proof pending; an opted-in installation always builds the sign-in front at the version this release pins, never a newer shared version
+
+## 3.0.57 -- 2026-11-07
+
+- Every update now reports whether each identity the installation uses follows the standard name (id-pim-<role>) and whether an old identity still holds rights; a Key Vault created by the SMTP relay password script now has purge protection; the security pack lists the updater right to change only its own app registrations and describes the SQL admin group the same way throughout
+
 ## 3.0.56 -- 2026-11-07
 
 - Pro-only pages and calls on a Community installation now answer one plain line (This is part of PIM Manager Pro. Your installation is Community.) with a link to invardia.com; the Pro page and route code has left the shared files, so the public Community release carries none of it; the Community edition is now licensed under the PolyForm Shield License 1.0.0, and the Pro terms ship only in the Pro package

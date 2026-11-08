@@ -87,6 +87,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAudit.ps1')         # SECPACK-SQL-AUDIT the SQL server's audit -> the install's workspace
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateNow.ps1')        # framework 8.18 UPDATE-NOW: the 15-minute signal check + the run kind + own cron
 . (Join-Path $solRoot 'engine\_shared\PIM-SetupSteps.ps1')        # FLEET-SETUPSTEPS the one-time install steps' facts (read only) for the heartbeat
+. (Join-Path $solRoot 'engine\_shared\PIM-IdentitySplit.ps1')     # NAM-03 the identity standard id-pim-<role>: the setup fact identityNames (read only, step 2g)
 . (Join-Path $solRoot 'engine\_shared\PIM-GuardLimits.ps1')      # framework 8.18: an update-now waits while guard Strict mode is on
 . (Join-Path $solRoot 'engine\_shared\PIM-SchemaQuiesce.ps1')    # SCHEMA-QUIESCE-818 (framework 8.18): no database change under a running PIM job
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateTrack.ps1')      # OPEN-13 / framework 8.8 UPDATE-TRACK: the run's stages to Invardia (best effort)
@@ -532,8 +533,14 @@ function Invoke-PimUpdaterConvergeStep {
         # n/a | unknown; appRegOwnerProof = ok | pending | n/a | unknown + utc) -- support reads it before the Support app leaves
         # as an owner; the agreed setupSteps list is unchanged (a new step key is Invardia's to agree).
         try { $aoF = Get-PimAppRegOwnerSetupFact -Result $aoR; foreach ($k in @($aoF.Keys)) { $ssF[$k] = $aoF[$k] } } catch { }
+        # NAM-03 / framework 12.11c item 3 + ruling (b) (step key 'identity-names', Invardia 2026-11-07): every role runs as
+        # id-pim-<role> AND no OLD identity (a shared id-pim-<token>, a named variant, a system-assigned one) still holds an Azure
+        # or Graph right (identityNames = ok | missing | n/a | unknown, identityNamesDetail = "app: identity" pairs + "clean-up
+        # pending: <identity> still holds rights"). ARM + Graph GET only; a failed read = not read, never fails the update.
+        $inGraph = { param($m, $p, $b) Invoke-PimGraph -Method $m -Path $p }
+        try { $inF = Read-PimIdentityNamesFact -Arm $armSeam -Graph $inGraph -SubscriptionId $sub -ResourceGroup $rg; foreach ($k in @($inF.Keys)) { $ssF[$k] = $inF[$k] } } catch { $ssF['identityNames'] = 'unknown'; $ssF['identityNamesDetail'] = 'the identity names were not checked this run' }
         $script:PimSetupFacts = $ssF
-        $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail', 'dbJobDetail', 'appRegOwnerDetail', 'appRegOwnerProofUtc', 'appRegOwnerProofDetail', 'sqlTierDetail', 'sqlTierCurrent', 'downlinkDbUserDetail') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
+        $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail', 'dbJobDetail', 'appRegOwnerDetail', 'appRegOwnerProofUtc', 'appRegOwnerProofDetail', 'sqlTierDetail', 'sqlTierCurrent', 'downlinkDbUserDetail', 'identityNamesDetail') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
         Say ("setup steps: facts recorded for the heartbeat$(if ($ssUnk.Count) { " (not readable: $($ssUnk -join ', '))" })") 'DarkGray'
     } catch { Say "  setup steps not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2g-bis. KV-POLICY-DENIED-PRIVATE / framework installer rule 11 -- A PRIVATE INSTALL'S KEY VAULT IS PRIVATE ------------

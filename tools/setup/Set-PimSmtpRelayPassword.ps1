@@ -127,7 +127,8 @@ if (-not $vault) {
     if (-not "$ResourceGroup".Trim()) { Fail '-CreateVault needs -ResourceGroup (where the vault is created).' }
     try { $rg = Arm -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup`?api-version=2021-04-01" } catch { Fail "resource group $ResourceGroup not found: $(ErrText $_)" }
     if ($PSCmdlet.ShouldProcess($VaultName, "create Key Vault in $ResourceGroup ($($rg.location))")) {
-        $body = @{ location = "$($rg.location)"; properties = @{ tenantId = $TenantId; sku = @{ family = 'A'; name = 'standard' }; enableRbacAuthorization = $true; enableSoftDelete = $true; softDeleteRetentionInDays = 90 } }
+        # SEC-03 (Invardia 2026-11-07): purge protection like every PIM vault; a PRIVATE install's updater gives it the private shape on its next run (rule 11, step 2g-bis)
+        $body = @{ location = "$($rg.location)"; properties = @{ tenantId = $TenantId; sku = @{ family = 'A'; name = 'standard' }; enableRbacAuthorization = $true; enableSoftDelete = $true; softDeleteRetentionInDays = 90; enablePurgeProtection = $true } }
         try { [void](Arm -Method PUT -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.KeyVault/vaults/$VaultName`?api-version=2023-07-01" -Body $body) }
         catch { Fail "could not create Key Vault $VaultName : $(ErrText $_)" }
         $deadline = (Get-Date).AddMinutes(3)
