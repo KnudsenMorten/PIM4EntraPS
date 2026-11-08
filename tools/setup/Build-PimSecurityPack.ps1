@@ -55,7 +55,7 @@ $solRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 if (-not $SourceDir) { $SourceDir = Join-Path $solRoot 'docs\security-pack' }
 if (-not $Version)   { $Version = "$(Get-Content -Raw -LiteralPath (Join-Path $solRoot 'VERSION'))".Trim() }
 if (-not $Date)      { $Date = [DateTime]::UtcNow.ToString('yyyy-MM-dd') }
-if (-not $OutDir)    { $OutDir = Join-Path $env:ProgramData ("Invardia\handover\docs\pim-manager\" + $Version) }
+if (-not $OutDir -and -not $NoHandover) { $OutDir = Join-Path $env:ProgramData ("Invardia\handover\docs\pim-manager\" + $Version) }   # only when handing over (no ProgramData off Windows)
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 
 function ConvertTo-PimSpHtmlText([string]$s) {

@@ -334,7 +334,7 @@ function Invoke-PimSchemaQuiesce {
 function Get-PimDbInitStepsSettingName { <# PURE. LITERAL. The per-execution setting of the step filter. #> return 'PIM_DBINIT_STEPS' }
 function Get-PimDbInitStepIds {
     <# PURE. LITERAL. Every step of the database job, in the order the job runs them. #>
-    return @('users', 'schema', 'statistics', 'access-prerequisites', 'access', 'access-facts', 'access-run2', 'policy-templates', 'mail-templates', 'feature-gates', 'manager-access', 'update-seed')
+    return @('users', 'signin-owner', 'schema', 'statistics', 'access-prerequisites', 'access', 'access-facts', 'access-run2', 'policy-templates', 'mail-templates', 'feature-gates', 'manager-access', 'update-seed', 'drop-old-users')
 }
 function Get-PimDbInitStepClass {
     <#
@@ -351,8 +351,10 @@ function Get-PimDbInitStepClass {
     param([AllowEmptyString()][string]$Step)
     switch ("$Step".Trim().ToLowerInvariant()) {
         'users'                { return 'grants' }
+        'signin-owner'         { return 'grants' }   # PIM item 21: schema signin's OWNER + CREATE TABLE for the web identity
         'access'               { return 'grants' }
         'access-run2'          { return 'removal' }
+        'drop-old-users'       { return 'removal' }   # PIM item 21 (b): the old database users of moved roles
         'policy-templates'     { return 'data' }
         'mail-templates'       { return 'data' }
         'feature-gates'        { return 'data' }

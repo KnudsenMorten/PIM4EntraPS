@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.60 -- 2026-11-08
+
+- The update check now reads the permissions of the engine's own user-assigned identity when the job runs as one (no false "missing permission" after the identity move); the database job makes the web front's identity the owner of the sign-in tables and, only when asked, removes old database users that own nothing and hold no rights; the identity move of the web front now proves the hosted sign-in page answers and the API still refuses an anonymous call; the Manager finds the engine identity by its new name
+
 ## 3.0.59 -- 2026-11-08
 
 - Community installations no longer fail the access review job every run: the scheduler starts that Pro job only when the edition carries it; the hybrid worker tests itself after each self-update and goes back to the previous version on its own when the test fails, recorded and shown on its heartbeat; the identity move copies only the rights each role needs, carries the updater app registration ownership and the sign-in front credential, and waits for directory and platform delays before it reads back; the engine User Access Administrator can be trimmed to the scopes PIM manages

@@ -112,9 +112,94 @@ function Get-PimSqlBootstrapPlan {
         }
         $ddl = $null
         try { $ddl = New-PimSqlUserDdl -DbUserName $name -Sid $sid -Roles $roles } catch { $plan.problems += "$name : $($_.Exception.Message)"; continue }
-        $plan.users += @{ name = $name; appId = $app; sid = $sid; roles = $roles; ddl = $ddl }
+        $plan.users += @{ name = $name; appId = $app; sid = $sid; roles = $roles; ddl = $ddl
+                          # PIM item 21 (2026-11-08): this user OWNS schema 'signin' + may CREATE TABLE (the sign-in front's state)
+                          signinOwner = [bool]$(if ($p -is [System.Collections.IDictionary]) { $p['signinOwner'] } elseif ($p.PSObject.Properties['signinOwner']) { $p.signinOwner } else { $false }) }
     }
     return $plan
+}
+
+# ---- PIM item 21 (incident 2026-11-08 08:46Z): THE SIGN-IN FRONT'S SQL STATE, as a database-job step ('signin-owner') ------
+# The sign-in front signs in to SQL as the WEB identity and keeps its key ring in schema 'signin', which that identity must OWN
+# (+ CREATE TABLE). The install makes it so once (tools/setup/_PimInstallSigninFront.ps1 Get-PimInstallSigninFrontSqlPlan); an
+# identity move to id-pim-web gave the new user only pim_web -> SQL 262, no key ring, every page 500. So the database job
+# converges it on every run for the principal its list marks signinOwner = true. The same three statements as the install,
+# duplicated here (the engine library does not load setup code); the guard below allows exactly these and nothing else.
+function Get-PimSigninOwnerSqlPlan {
+    <# PURE. The statements that make -User own schema signin and hold CREATE TABLE, from what was read: -Owner (the schema's
+       owner now, '' = no schema), -CreateTableGranted. The user itself is made by the users step. Never a role, never data. #>
+    param([Parameter(Mandatory)][string]$User, [AllowEmptyString()][string]$Owner = '', [bool]$CreateTableGranted = $false)
+    if ($User -notmatch '^[A-Za-z0-9_.-]{1,128}$') { throw "not a database user name: $User" }
+    $plan = New-Object System.Collections.Generic.List[string]
+    if (-not "$Owner".Trim()) { $plan.Add("EXEC(N'CREATE SCHEMA signin AUTHORIZATION [$User]')") }
+    elseif ("$Owner".Trim() -ne $User) { $plan.Add("ALTER AUTHORIZATION ON SCHEMA::signin TO [$User]") }
+    if (-not $CreateTableGranted) { $plan.Add("GRANT CREATE TABLE TO [$User]") }
+    return @($plan)
+}
+
+function Test-PimSigninOwnerSqlSafe {
+    <# PURE. Every statement is one of the three shapes Get-PimSigninOwnerSqlPlan makes -- anything else refuses the step.
+       @{ ok; violations } #>
+    param([string[]]$Statements = @())
+    $allowed = @(
+        '^EXEC\(N''CREATE SCHEMA signin AUTHORIZATION \[[A-Za-z0-9_.-]{1,128}\]''\)$',
+        '^ALTER AUTHORIZATION ON SCHEMA::signin TO \[[A-Za-z0-9_.-]{1,128}\]$',
+        '^GRANT CREATE TABLE TO \[[A-Za-z0-9_.-]{1,128}\]$')
+    $bad = @(foreach ($s in @($Statements)) { $t = "$s".Trim(); if (-not @($allowed | Where-Object { $t -cmatch $_ }).Count) { $t } })
+    return [pscustomobject]@{ ok = (-not $bad.Count); violations = $bad }
+}
+
+function Get-PimSigninOwnerReadQuery {
+    <# PURE. One row: owner (schema signin's owner, NULL = no schema), createTable (1 when -User holds CREATE TABLE). #>
+    param([Parameter(Mandatory)][string]$User)
+    if ($User -notmatch '^[A-Za-z0-9_.-]{1,128}$') { throw "not a database user name: $User" }
+    return ("SELECT (SELECT USER_NAME(principal_id) FROM sys.schemas WHERE name = N'signin') AS owner, " +
+            "(SELECT COUNT(*) FROM sys.database_permissions WHERE grantee_principal_id = DATABASE_PRINCIPAL_ID(N'$User') AND permission_name = N'CREATE TABLE' AND state IN ('G', 'W')) AS createTable")
+}
+
+# ---- PIM item 21 (b) / framework 12.11c ruling (b): the OLD database users of moved roles are DROPPED by the database job -------
+# ('drop-old-users', a REMOVAL step). Asked by app id (PIM_DBINIT_DROP_USERS = '["<app id>", ...]'), found by SID. REFUSED, never
+# dropped: a SID a principal of this job's own list uses, a standard id-pim-* user, the Invardia Support app's user, a built-in user,
+# an Entra GROUP (type X: the SQL admin group), a user that is not an Entra
+# (external) user, a user that OWNS a schema, a user holding an explicit permission. The only statement: DROP USER [name].
+function Get-PimDropUsersPlan {
+    <# PURE. -AppIds asked; -Existing rows { name; sid ('0x..'); type ('E'/'X'/...); ownsSchema (int); explicitPerms (int) };
+       -KeepSids the SIDs of this job's own principals. Returns @{ drop = @(names); refused = @('name: why'); absent = @(app ids) }. #>
+    param([string[]]$AppIds = @(), [object[]]$Existing = @(), [string[]]$KeepSids = @())
+    $out = [ordered]@{ drop = New-Object System.Collections.Generic.List[string]; refused = New-Object System.Collections.Generic.List[string]; absent = New-Object System.Collections.Generic.List[string] }
+    $keep = @($KeepSids | ForEach-Object { "$_".ToUpperInvariant() })
+    foreach ($a in @($AppIds | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)) {
+        $sid = $null; try { $sid = (ConvertTo-PimSqlSid -AppId $a).ToUpperInvariant() } catch { $out.refused.Add("${a}: not an app id"); continue }
+        $row = @($Existing | Where-Object { "$($_.sid)".ToUpperInvariant() -eq $sid }) | Select-Object -First 1
+        if (-not $row) { $out.absent.Add($a); continue }
+        $n = "$($row.name)"
+        if ($keep -contains $sid)                                      { $out.refused.Add("${n}: a principal of this job's own list uses it"); continue }
+        if ($n -match '^(?i)id-pim-')                                  { $out.refused.Add("${n}: a standard id-pim-* user is never dropped here"); continue }
+        if ($n -in @('dbo', 'guest', 'sys', 'INFORMATION_SCHEMA'))     { $out.refused.Add("${n}: a built-in user"); continue }
+        if ($n -match '(?i)invardia-support')                         { $out.refused.Add("${n}: the Invardia Support app's user is never dropped here"); continue }
+        if ("$($row.type)" -ne 'E')                                 { $out.refused.Add("${n}: not an Entra app / user (a group or a SQL user is never dropped here)"); continue }
+        if ([int]$row.ownsSchema -gt 0)                                { $out.refused.Add("${n}: owns a schema -- move the schema first (signin-owner)"); continue }
+        if ([int]$row.explicitPerms -gt 0)                             { $out.refused.Add("${n}: holds an explicit permission -- not dropped blindly"); continue }
+        if ($n -notmatch '^[A-Za-z0-9_.-]{1,128}$')                    { $out.refused.Add("${n}: not a plain user name"); continue }
+        $out.drop.Add($n)
+    }
+    return [pscustomobject]@{ drop = @($out.drop); refused = @($out.refused); absent = @($out.absent) }
+}
+
+function Get-PimDropUsersReadQuery {
+    <# PURE. Every database user with its SID, type, whether it owns a schema and how many explicit permissions it holds (CONNECT
+       excluded -- every user holds it). #>
+    return ("SELECT dp.name, CONVERT(VARCHAR(100), dp.sid, 1) AS sid, dp.type, " +
+            "(SELECT COUNT(*) FROM sys.schemas s WHERE s.principal_id = dp.principal_id) AS ownsSchema, " +
+            "(SELECT COUNT(*) FROM sys.database_permissions p WHERE p.grantee_principal_id = dp.principal_id AND p.permission_name <> 'CONNECT') AS explicitPerms " +
+            "FROM sys.database_principals dp WHERE dp.type IN ('E', 'X', 'S', 'U', 'G')")
+}
+
+function Test-PimDropUsersSqlSafe {
+    <# PURE. Every statement is exactly DROP USER [plain name]. @{ ok; violations } #>
+    param([string[]]$Statements = @())
+    $bad = @(foreach ($s in @($Statements)) { $t = "$s".Trim(); if ($t -cnotmatch '^DROP USER \[[A-Za-z0-9_.-]{1,128}\]$') { $t } })
+    return [pscustomobject]@{ ok = (-not $bad.Count); violations = $bad }
 }
 
 function Test-PimSqlBootstrapDdlSafe {

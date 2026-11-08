@@ -475,8 +475,9 @@ switch ($Target) {
             return
         }
 
-        # owner exception 2026-10-09, framework 12.17 -- GroupPolicy module (GPO create/link) on the hybrid worker only
-        # (GroupPolicy has no .NET API). -Target DomainGpo writes registry policy
+        # framework 12.17 SECOND exception (owner 2026-11-08, SEC-07: "A: second exception" -- GroupPolicy for -Target DomainGpo ONLY,
+        # run by the customer's own admin on a domain-joined admin host; same reason as the hybrid worker: GPO create / link has no
+        # module-free API). -Target LocalGpo and -Target Json stay module-free. -Target DomainGpo writes registry policy
         # INTO a domain GPO (Registry.pol in SYSVOL + the GPC version/CSE bookkeeping); hand-writing Registry.pol is fragile,
         # so this target alone keeps the RSAT GroupPolicy module. -Target LocalGpo and -Target Json need no module.
         Import-Module GroupPolicy -ErrorAction Stop

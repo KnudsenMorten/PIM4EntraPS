@@ -89,7 +89,7 @@ if (@($plan.problems).Count) {
 # OPEN-06: the updater writes this job on EVERY install with PIM_DBINIT_PRINCIPALS = [] (no user to create). An EMPTY list
 # skips only the user step; the schema, the access model, the feature gates, the Manager access and the update record still
 # run when they are asked for. Nothing at all asked for = exit 0. (An UNSET list is still a configuration error, exit 2.)
-$otherWork = @('PIM_DBINIT_SCHEMA', 'PIM_DBINIT_SQL_ACCESS', 'PIM_DBINIT_FEATURE_GATES', 'PIM_DBINIT_FEATURE_DISABLE', 'PIM_DBINIT_MANAGER_ACCESS', 'PIM_DBINIT_UPDATE_SEED') |
+$otherWork = @('PIM_DBINIT_SCHEMA', 'PIM_DBINIT_DROP_USERS', 'PIM_DBINIT_SQL_ACCESS', 'PIM_DBINIT_FEATURE_GATES', 'PIM_DBINIT_FEATURE_DISABLE', 'PIM_DBINIT_MANAGER_ACCESS', 'PIM_DBINIT_UPDATE_SEED') |
              Where-Object { $v = "$([Environment]::GetEnvironmentVariable($_))".Trim(); $v -and ($_ -ne 'PIM_DBINIT_SCHEMA' -or $v -in @('1', 'true', 'yes', 'TRUE', 'Yes')) }
 if (-not @($plan.users).Count) {
     if (-not @($otherWork).Count) { Say 'no principals to create and nothing else asked for.' 'Yellow'; exit 0 }
@@ -104,6 +104,9 @@ if (-not @($plan.users).Count) {
 $djTrue = @('1', 'true', 'yes', 'TRUE', 'Yes')
 $askedSteps = New-Object System.Collections.Generic.List[string]; $explicitSteps = New-Object System.Collections.Generic.List[string]
 if (@($plan.users).Count) { [void]$askedSteps.Add('users') }
+if (@($plan.users | Where-Object { $_.signinOwner }).Count) { [void]$askedSteps.Add('signin-owner') }
+if ("$($env:PIM_DBINIT_DROP_USERS)".Trim()) { [void]$askedSteps.Add('drop-old-users'); [void]$explicitSteps.Add('drop-old-users') }
+
 if ("$($env:PIM_DBINIT_SCHEMA)".Trim() -in $djTrue) { [void]$askedSteps.Add('schema') }
 [void]$askedSteps.Add('statistics')
 if ("$($env:PIM_DBINIT_SQL_ACCESS)".Trim()) {
@@ -244,6 +247,62 @@ try {
         $extra = @($heldR | Where-Object { @($u.roles) -notcontains "$_" })
         if ($extra.Count) { Say "  $($u.name) also holds $($extra -join ', ') (left as it is -- this job never takes a role away)" 'Yellow' }
         Say "verified $($u.name) -> $($got.sid) [$have]" 'Green'
+    }
+
+    # ---- SIGNIN-OWNER (PIM item 21, incident 2026-11-08 08:46Z) -----------------------------------------------------------
+    # The principal the list marks signinOwner = true (the web identity: the sign-in front keeps its key ring in schema
+    # 'signin') OWNS that schema and holds CREATE TABLE. Converged on every run, read back; the guard allows exactly the three
+    # statements Get-PimSigninOwnerSqlPlan makes. A grants-kind step (it may run beside a running job).
+    $soUsers = @($plan.users | Where-Object { $_.signinOwner })
+    if (-not $failed -and $soUsers.Count -gt 1) { Say "REFUSED signin-owner: $($soUsers.Count) principals are marked signinOwner ($(@($soUsers | ForEach-Object { $_.name }) -join ', ')) -- a schema has ONE owner" 'Red'; $failed++ }
+    elseif (-not $failed -and $soUsers.Count -eq 1 -and (& $runStep 'signin-owner')) {
+        Step 'signin-owner'
+        $so = $soUsers[0].name
+        $readSo = {
+            $c2 = $conn.CreateCommand(); $c2.CommandText = (Get-PimSigninOwnerReadQuery -User $so); $rd = $c2.ExecuteReader(); [void]$rd.Read()
+            $o = if ($rd.IsDBNull(0)) { '' } else { "$($rd['owner'])" }; $ct = ([int]$rd['createTable'] -gt 0); $rd.Close()
+            [pscustomobject]@{ owner = $o; createTable = $ct }
+        }
+        try {
+            $now = & $readSo
+            $soPlan = @(Get-PimSigninOwnerSqlPlan -User $so -Owner $now.owner -CreateTableGranted $now.createTable)
+            $soSafe = Test-PimSigninOwnerSqlSafe -Statements $soPlan
+            if (-not $soSafe.ok) { Say "REFUSING signin-owner: unexpected statement(s) $(@($soSafe.violations) -join ' | ')" 'Red'; $failed++ }
+            else {
+                foreach ($s in $soPlan) { $c3 = $conn.CreateCommand(); $c3.CommandText = $s; $c3.CommandTimeout = 120; [void]$c3.ExecuteNonQuery(); Say "applied: $s" 'Green' }
+                $back = & $readSo
+                if ($back.owner -eq $so -and $back.createTable) { Say "verified: schema signin owned by $so, CREATE TABLE held$(if (-not $soPlan.Count) { ' (nothing to change)' }) (was owner '$($now.owner)')" 'Green' }
+                else { Say "signin-owner NOT verified: owner '$($back.owner)', CREATE TABLE $($back.createTable) (wanted $so + True)" 'Red'; $failed++ }
+            }
+        } catch { Say "FAILED signin-owner for ${so}: $($_.Exception.Message)" 'Red'; $failed++ }
+    }
+
+    # ---- DROP-OLD-USERS (PIM item 21 (b), framework 12.11c ruling (b)) ---------------------------------------------------
+    # The OLD database users of moved roles (their system identities), asked by app id in PIM_DBINIT_DROP_USERS. A REMOVAL step
+    # (never under 'grants'), AFTER signin-owner (a schema is moved before its old owner could be dropped). Get-PimDropUsersPlan
+    # refuses anything this job's own list uses, any id-pim-* user, a built-in or non-Entra user, a schema owner, a user with an
+    # explicit permission; the only statement is DROP USER [name]; each is read back as gone. A refusal is reported, the rest go.
+    $duRaw = "$($env:PIM_DBINIT_DROP_USERS)".Trim()
+    if (-not $failed -and $duRaw -and (& $runStep 'drop-old-users')) {
+        Step 'drop-old-users'
+        try {
+            $duIds = @($duRaw | ConvertFrom-Json | ForEach-Object { "$_" })
+            $readUsers = { $c4 = $conn.CreateCommand(); $c4.CommandText = (Get-PimDropUsersReadQuery); $rd = $c4.ExecuteReader(); $rows = New-Object System.Collections.Generic.List[object]
+                while ($rd.Read()) { $rows.Add([pscustomobject]@{ name = "$($rd['name'])"; sid = "$($rd['sid'])"; type = "$($rd['type'])"; ownsSchema = [int]$rd['ownsSchema']; explicitPerms = [int]$rd['explicitPerms'] }) }; $rd.Close(); $rows.ToArray() }
+            $duPlan = Get-PimDropUsersPlan -AppIds $duIds -Existing @(& $readUsers) -KeepSids @($plan.users | ForEach-Object { $_.sid })
+            foreach ($r in @($duPlan.refused)) { Say "kept (refused): $r" 'Yellow' }
+            foreach ($a in @($duPlan.absent)) { Say "already gone: the user of app $a" 'DarkGray' }
+            $duSql = @($duPlan.drop | ForEach-Object { "DROP USER [$_]" })
+            $duSafe = Test-PimDropUsersSqlSafe -Statements $duSql
+            if (-not $duSafe.ok) { Say "REFUSING drop-old-users: unexpected statement(s) $(@($duSafe.violations) -join ' | ')" 'Red'; $failed++ }
+            else {
+                foreach ($s in $duSql) { $c5 = $conn.CreateCommand(); $c5.CommandText = $s; $c5.CommandTimeout = 120; [void]$c5.ExecuteNonQuery(); Say "applied: $s" 'Green' }
+                $left = @(& $readUsers | ForEach-Object { $_.name })
+                $still = @($duPlan.drop | Where-Object { $left -contains $_ })
+                if ($still.Count) { Say "drop-old-users NOT verified: still there: $($still -join ', ')" 'Red'; $failed++ }
+                elseif ($duPlan.drop.Count) { Say "verified: dropped $($duPlan.drop -join ', ')" 'Green' }
+            }
+        } catch { Say "FAILED drop-old-users: $($_.Exception.Message)" 'Red'; $failed++ }
     }
 
     # ---- THE BASE SCHEMA, on the same connection, as the server's Entra admin -------------------

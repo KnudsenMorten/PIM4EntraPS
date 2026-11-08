@@ -1075,6 +1075,7 @@ function Merge-PimDbInitPrincipals {
                 $e = [ordered]@{ name = "$($p.name)"; appId = "$($p.appId)" }
                 $pr = @($p.roles | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
                 if ($pr.Count) { $e['roles'] = $pr }
+                if ($p.PSObject.Properties['signinOwner'] -and [bool]$p.signinOwner) { $e['signinOwner'] = $true }   # PIM item 21: KEPT (the sign-in front's schema owner)
                 [void]$list.Add($e)
             }
         }

@@ -95,7 +95,9 @@ function New-PimSqlConnection {
     # §97.1: every connection is counted, so a commit can say how many it opened ([commit-timing]) and a test can prove a
     # bulk write does not open one per row.
     $global:PIM_SqlConnectionCount = 1 + [int]$global:PIM_SqlConnectionCount
-    if ($ConnectionString -notmatch '(?i)Integrated\s*Security') {
+    # A connection string that carries its own PASSWORD (a SQL login -- the shared Linux test runner's sidecar, framework 12.1)
+    # never gets a token either: SqlClient refuses AccessToken together with a password, and the product never builds one.
+    if ($ConnectionString -notmatch '(?i)Integrated\s*Security' -and $ConnectionString -notmatch '(?i)(^|;)\s*(Password|Pwd)\s*=') {
         # Acquire a FRESH token on EVERY connection. Get-PimRestToken caches per
         # resource with an expiry and auto-refreshes when near expiry, so this is
         # cheap (returns the still-valid cached token) AND it never hands SQL an

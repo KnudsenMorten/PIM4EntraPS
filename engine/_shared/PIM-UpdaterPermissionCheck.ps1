@@ -245,6 +245,30 @@ function Resolve-PimUpdaterTenantId {
     return ''
 }
 
+function Resolve-PimUpdPermEngineObjectId {
+    # PURE. The object id of the identity the ENGINE signs in with -- the same choice PIM-Rest makes at run time: the job's
+    # container carries PIM_ManagedIdentityClientId -> the USER-ASSIGNED identity with that client id (the identity move,
+    # id-pim-engine, 2026-11-08); otherwise the job's system-assigned identity. !! Reading only identity.principalId after a
+    # move reported the OLD identity -- whose rights the move had removed, correctly -- as "missing Graph permissions / no root
+    # Reader" (internal, 2026-11-08). A client id that matches no attached identity returns '' (the caller says "could not be
+    # read"), never the system identity.
+    param($Job)
+    if (-not $Job) { return '' }
+    $cid = ''
+    foreach ($c in @($Job.properties.template.containers | Where-Object { $_ })) {
+        $v = @($c.env | Where-Object { "$($_.name)" -eq 'PIM_ManagedIdentityClientId' })[0]
+        if ($v -and "$($v.value)".Trim()) { $cid = "$($v.value)".Trim(); break }
+    }
+    if (-not $cid) { return "$($Job.identity.principalId)".Trim() }
+    $ua = $Job.identity.userAssignedIdentities
+    if ($ua) {
+        foreach ($p in @($ua.PSObject.Properties)) {
+            if ("$($p.Value.clientId)".Trim() -ieq $cid) { return "$($p.Value.principalId)".Trim() }
+        }
+    }
+    return ''
+}
+
 function Invoke-PimUpdaterEnginePermissionCheck {
     <#
       The updater's step (update-job-entry, after the roll and on the 'ahead' exit). READ ONLY. NEVER throws.
@@ -268,7 +292,7 @@ function Invoke-PimUpdaterEnginePermissionCheck {
         if (-not "$TenantId".Trim()) { $TenantId = Resolve-PimUpdaterTenantId -SubscriptionId $SubscriptionId -Arm $Arm }
         # ---- who is the engine -------------------------------------------------------------------------------------
         $oid = ''; $oidWhy = ''
-        try { $j = & $Arm 'GET' "$rgScope/providers/Microsoft.App/jobs/$TickJob`?api-version=$($script:PimUpdPermAcaApi)" $null; $oid = "$($j.identity.principalId)".Trim() }
+        try { $j = & $Arm 'GET' "$rgScope/providers/Microsoft.App/jobs/$TickJob`?api-version=$($script:PimUpdPermAcaApi)" $null; $oid = Resolve-PimUpdPermEngineObjectId -Job $j }
         catch { $oidWhy = Get-PimUpdPermFirstLine $_.Exception.Message }
         if (-not $oid) {
             $why = "the engine job $TickJob's identity could not be read$(if ($oidWhy) { ": $oidWhy" })"

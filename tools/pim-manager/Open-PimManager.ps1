@@ -11914,8 +11914,15 @@ function Get-PimManagerPermissionHealthBody {
             # CR5 step 1 (PIM 100.149): the install record (incl. PIM_ENGINE_JOB_NAME); today's name is the default
             $engineJob = if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { Get-PimInstallName -Role engine } elseif ("$($env:PIM_ENGINE_JOB_NAME)".Trim()) { "$($env:PIM_ENGINE_JOB_NAME)".Trim() } else { 'ca-pim-tick' }
             $rgPrefix = ("$selfRid" -replace '(?i)^(/subscriptions/[^/]+/resourcegroups/[^/]+/).*$', '$1').ToLowerInvariant()
-            $cands = Invoke-PimGraph -Path ("/servicePrincipals?`$filter=displayName eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $engineJob)
-            $eng = @(@($cands.value) | Where-Object { @($_.alternativeNames) | Where-Object { "$_".ToLowerInvariant().StartsWith($rgPrefix) } }) | Select-Object -First 1
+            # NAM-03 identity move (2026-11-08): the engine runs as the USER-ASSIGNED id-pim-engine once moved -- the job's own
+            # system identity then holds no rights (the move removed them), and checking IT reported every permission missing.
+            # id-pim-engine in THIS resource group first (the mover copies its rights before it switches the job), else the job.
+            $eng = $null
+            foreach ($nm in @('id-pim-engine', $engineJob)) {
+                $cands = Invoke-PimGraph -Path ("/servicePrincipals?`$filter=displayName eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $nm)
+                $eng = @(@($cands.value) | Where-Object { @($_.alternativeNames) | Where-Object { "$_".ToLowerInvariant().StartsWith($rgPrefix) } }) | Select-Object -First 1
+                if ($eng) { break }
+            }
             if (-not $eng) { throw "the engine job's managed identity '$engineJob' was not found in this Manager's resource group ($rgPrefix) -- is the engine job deployed with a system-assigned identity?" }
             $oid = "$($eng.id)"; $identityName = "$($eng.displayName) (engine job)"
         } else {

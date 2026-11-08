@@ -689,7 +689,9 @@ function Merge-PimIdentityMoveDbInitPrincipals {
       Same name + same appId + same roles = unchanged; same name otherwise = replaced (a rebuilt identity). Always an ARRAY.
       Returns @{ json; changed }.
     #>
-    param([AllowEmptyString()][AllowNull()][string]$Json, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$AppId, [string[]]$Roles = @())
+    # -SigninOwner (PIM item 21): the merged principal OWNS schema signin (the web identity -- the sign-in front's key ring); the
+    # flag moves to it: no other principal in the list keeps it (a schema has one owner; the job refuses two)
+    param([AllowEmptyString()][AllowNull()][string]$Json, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$AppId, [string[]]$Roles = @(), [switch]$SigninOwner)
     $list = New-Object System.Collections.Generic.List[object]
     if ("$Json".Trim()) {
         $parsed = $null
@@ -699,6 +701,7 @@ function Merge-PimIdentityMoveDbInitPrincipals {
                 $e = [ordered]@{ name = "$($p.name)"; appId = "$($p.appId)" }
                 $pr = @($p.roles | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
                 if ($pr.Count) { $e['roles'] = $pr }
+                if ($p.PSObject.Properties['signinOwner'] -and [bool]$p.signinOwner) { $e['signinOwner'] = $true }   # PIM item 21: KEPT (the sign-in front's schema owner)
                 [void]$list.Add($e)
             }
         }
@@ -707,9 +710,20 @@ function Merge-PimIdentityMoveDbInitPrincipals {
     $changed = $true
     $hit = @($list | Where-Object { "$($_.name)" -ieq $Name })
     $sameRoles = { param($e) $have = @(if ($e.Contains('roles')) { $e['roles'] }); (@($have | Sort-Object) -join ',') -eq (@($want | Sort-Object) -join ',') }
-    if ($hit.Count -and "$($hit[0].appId)" -ieq $AppId -and (& $sameRoles $hit[0])) { $changed = $false }
+    $soSame = (-not $SigninOwner) -or ($hit.Count -and $hit[0].Contains('signinOwner') -and -not @($list | Where-Object { "$($_.name)" -ine $Name -and $_.Contains('signinOwner') }).Count)
+    if ($hit.Count -and "$($hit[0].appId)" -ieq $AppId -and (& $sameRoles $hit[0]) -and $soSame) { $changed = $false }
     elseif ($hit.Count) { $hit[0].appId = $AppId; if ($want.Count) { $hit[0]['roles'] = $want } elseif ($hit[0].Contains('roles')) { $hit[0].Remove('roles') } }
     else { $e = [ordered]@{ name = $Name; appId = $AppId }; if ($want.Count) { $e['roles'] = $want }; [void]$list.Add($e) }
+    if ($SigninOwner) {
+        # rebuilt, never edited in place: the flag on the merged principal only (a schema has one owner)
+        $re = New-Object System.Collections.Generic.List[object]
+        foreach ($x in $list.ToArray()) {
+            $n2 = [ordered]@{}; foreach ($k in @($x.Keys)) { if ("$k" -ne 'signinOwner') { $n2["$k"] = $x["$k"] } }
+            if ("$($x['name'])" -ieq $Name) { $n2['signinOwner'] = $true }
+            [void]$re.Add($n2)
+        }
+        $list = $re
+    }
     $out = ConvertTo-Json -Compress -Depth 5 -InputObject @($list.ToArray())
     if ($out -notmatch '^\s*\[') { $out = "[$out]" }
     return @{ json = $out; changed = $changed }
@@ -742,7 +756,7 @@ function Invoke-PimIdentityMoveDefaultDbInit {
       SID and roles. Returns @{ ok; detail; execution }.
     #>
     param([Parameter(Mandatory)][scriptblock]$Arm, [Parameter(Mandatory)][string]$JobId, [Parameter(Mandatory)][string]$UserName,
-          [Parameter(Mandatory)][string]$AppId, [string[]]$Roles = @(), [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }, [int]$MaxPolls = 60)
+          [Parameter(Mandatory)][string]$AppId, [string[]]$Roles = @(), [switch]$SigninOwner, [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }, [int]$MaxPolls = 60)
     $api = Get-PimIdentityMoveApi
     $jobPath = "$JobId`?api-version=$($api.aca)"
     $jobName = @($JobId -split '/')[-1]
@@ -757,11 +771,11 @@ function Invoke-PimIdentityMoveDefaultDbInit {
             if (-not $e) { continue }
             if ("$(Get-PimIdentityMoveField $e 'name')" -ne 'PIM_DBINIT_PRINCIPALS') { $envL.Add($e); continue }
             $had = $true
-            $m = Merge-PimIdentityMoveDbInitPrincipals -Json "$(Get-PimIdentityMoveField $e 'value')" -Name $UserName -AppId $AppId -Roles $Roles
+            $m = Merge-PimIdentityMoveDbInitPrincipals -Json "$(Get-PimIdentityMoveField $e 'value')" -Name $UserName -AppId $AppId -Roles $Roles -SigninOwner:$SigninOwner
             if ($m.changed) { $changed = $true }
             $envL.Add([pscustomobject]@{ name = 'PIM_DBINIT_PRINCIPALS'; value = $m.json })
         }
-        if (-not $had) { $changed = $true; $envL.Add([pscustomobject]@{ name = 'PIM_DBINIT_PRINCIPALS'; value = (Merge-PimIdentityMoveDbInitPrincipals -Json '' -Name $UserName -AppId $AppId -Roles $Roles).json }) }
+        if (-not $had) { $changed = $true; $envL.Add([pscustomobject]@{ name = 'PIM_DBINIT_PRINCIPALS'; value = (Merge-PimIdentityMoveDbInitPrincipals -Json '' -Name $UserName -AppId $AppId -Roles $Roles -SigninOwner:$SigninOwner).json }) }
         $h = [ordered]@{}
         if ($c -is [System.Collections.IDictionary]) { foreach ($k in $c.Keys) { $h[$k] = $c[$k] } } else { foreach ($pp in $c.PSObject.Properties) { $h[$pp.Name] = $pp.Value } }
         $h['env'] = @($envL.ToArray())
@@ -784,7 +798,7 @@ function Invoke-PimIdentityMoveDefaultDbInit {
         if ($v.Count) {
             try {
                 $listed = ($v[0] | ConvertFrom-Json)   # PS 5.1 emits a JSON array as ONE object: assign, then enumerate
-                foreach ($x in @($listed)) { if ($x -and "$($x.name)" -ieq $UserName -and "$($x.appId)" -ieq $AppId) { $okList = $true } }
+                foreach ($x in @($listed)) { if ($x -and "$($x.name)" -ieq $UserName -and "$($x.appId)" -ieq $AppId -and (-not $SigninOwner -or ($x.PSObject.Properties['signinOwner'] -and [bool]$x.signinOwner))) { $okList = $true } }
             } catch { $okList = $false }
         }
         if (-not $okList) { return @{ ok = $false; detail = "the database job $jobName does not list $UserName ($AppId) in PIM_DBINIT_PRINCIPALS on read-back -- not started" } }
@@ -818,7 +832,10 @@ function Invoke-PimIdentityMoveDefaultProve {
       -StartJobRoles; else the next scheduled run -- none yet = pending, a re-run continues). Returns @{ ok; pending; detail }.
     #>
     param([Parameter(Mandatory)][scriptblock]$Arm, [Parameter(Mandatory)][object]$Row, [Parameter(Mandatory)][string]$ClientId,
-          [string[]]$StartJobRoles = @('engine'), [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }, [int]$MaxPolls = 40)
+          [string[]]$StartJobRoles = @('engine'), [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }, [int]$MaxPolls = 40,
+          # item 21 (c): the WEB proof is the hosted front itself -- seam: param($url) -> @{ status; error }
+          # (no direct HTTP in this library -- H2: every call through a seam; the CALLER passes it. No seam = pending)
+          [scriptblock]$Http)
     $api = Get-PimIdentityMoveApi
     $envOk = { param($tpl) $hit = $false; foreach ($c in @(Get-PimIdentityMoveField $tpl 'containers')) { if ($c -and "$(Get-PimIdentityMoveField $c 'name')" -ne 'signin-front') { foreach ($e in @(Get-PimIdentityMoveField $c 'env')) { if ($e -and "$(Get-PimIdentityMoveField $e 'name')" -eq 'PIM_ManagedIdentityClientId' -and "$(Get-PimIdentityMoveField $e 'value')" -ieq $ClientId) { $hit = $true } } } }; $hit }
     if ($Row.kind -eq 'app') {
@@ -832,6 +849,19 @@ function Invoke-PimIdentityMoveDefaultProve {
                 $h = "$(Get-PimIdentityMoveField $rp 'healthState')"; $rs = "$(Get-PimIdentityMoveField $rp 'runningState')"
                 if ($h -eq 'Unhealthy' -or $rs -in @('Failed', 'Degraded')) { return @{ ok = $false; pending = $false; detail = "revision $latest $h / $rs" } }
                 if ($h -eq 'Healthy' -and -not (& $envOk (Get-PimIdentityMoveField $rp 'template'))) { return @{ ok = $false; pending = $false; detail = "revision $latest is healthy but does not sign in as $ClientId" } }
+                if ($h -eq 'Healthy' -and $Row.role -eq 'web') {
+                    # !! item 21 (incident 2026-11-08 08:46Z): Healthy is NOT the web proof -- /healthz needs no SQL, and the moved
+                    # Manager answered 500 on every page while its revision was Healthy. The proof is the front itself: / answers
+                    # the sign-in (200 / 302 / 303, never 5xx) and /api/active-assignments without a session answers 401 / 403
+                    # (never 500). Not reachable from here (a private install) = PENDING, never ok (the hosted smoke proves it).
+                    $fq = "$(Get-PimIdentityMoveField (Get-PimIdentityMoveField (Get-PimIdentityMoveField $ap 'configuration') 'ingress') 'fqdn')".Trim()
+                    if (-not $fq) { return @{ ok = $false; pending = $true; detail = "revision $latest Healthy, but the app has no ingress name -- run the hosted smoke (Test-PimManagerHostedSmoke) to prove it" } }
+                    if (-not $Http) { return @{ ok = $false; pending = $true; detail = "revision $latest Healthy; no HTTP seam to check the front https://$fq -- run the hosted smoke (Test-PimManagerHostedSmoke) to prove it" } }
+                    $r1 = & $Http "https://$fq/"; $r2 = & $Http "https://$fq/api/active-assignments"
+                    if (-not $r1.status -or -not $r2.status) { return @{ ok = $false; pending = $true; detail = "revision $latest Healthy; the front https://$fq is not reachable from here ($(@($r1.error, $r2.error) | Where-Object { $_ } | Select-Object -First 1)) -- run the hosted smoke there" } }
+                    if ($r1.status -ge 500 -or $r2.status -ge 500 -or $r1.status -notin @(200, 302, 303) -or $r2.status -notin @(401, 403)) { return @{ ok = $false; pending = $false; detail = "revision $latest Healthy BUT the front answers / -> $($r1.status), /api/active-assignments -> $($r2.status) (wanted 200/302/303 and 401/403) -- e.g. the sign-in front's SQL state (schema signin)" } }
+                    return @{ ok = $true; pending = $false; detail = "revision $latest Healthy ($rs), signs in as $ClientId; front / -> $($r1.status), /api -> $($r2.status)" }
+                }
                 if ($h -eq 'Healthy') { return @{ ok = $true; pending = $false; detail = "revision $latest Healthy ($rs), signs in as $ClientId" } }
             }
             & $Sleep 15
@@ -875,7 +905,8 @@ function Invoke-PimIdentityMoveRole {
     param([Parameter(Mandatory)][object]$Plan, [Parameter(Mandatory)][string]$Role,
           [Parameter(Mandatory)][scriptblock]$Arm, [Parameter(Mandatory)][scriptblock]$Graph,
           [scriptblock]$DbInit, [scriptblock]$Prove, [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s },
-          [string[]]$StartJobRoles = @('engine'), [switch]$DryRun, [switch]$NoCleanup)
+          [string[]]$StartJobRoles = @('engine'), [switch]$DryRun, [switch]$NoCleanup,
+          [scriptblock]$Http)   # item 21 (c): the web proof's HTTP seam -- passed by the caller (Move-PimIdentities.ps1); none = the web proof stays pending
     $api = Get-PimIdentityMoveApi
     $rp = @($Plan.roles | Where-Object { $_.role -eq $Role }) | Select-Object -First 1
     $rec = [ordered]@{ role = $Role; target = "id-pim-$Role"; state = ''; steps = New-Object System.Collections.Generic.List[object]; copied = New-Object System.Collections.Generic.List[string]
@@ -892,8 +923,8 @@ function Invoke-PimIdentityMoveRole {
         $rec.rollback = @(@($rec.steps.ToArray()) | Where-Object { "$($_.undo)".Trim() } | ForEach-Object { $_ })
         $rb = @($rec.rollback); $rev = New-Object System.Collections.Generic.List[object]; for ($i = $rb.Count - 1; $i -ge 0; $i--) { $rev.Add($rb[$i]) }; $rec.rollback = @($rev.ToArray())
     }
-    $dbJobFn = if ($DbInit) { $DbInit } else { { param($jobId, $userName, $appId, $roles) Invoke-PimIdentityMoveDefaultDbInit -Arm $Arm -JobId $jobId -UserName $userName -AppId $appId -Roles $roles -Sleep $Sleep } }
-    $proveFn = if ($Prove) { $Prove } else { { param($row, $clientId) Invoke-PimIdentityMoveDefaultProve -Arm $Arm -Row $row -ClientId $clientId -StartJobRoles $StartJobRoles -Sleep $Sleep } }
+    $dbJobFn = if ($DbInit) { $DbInit } else { { param($jobId, $userName, $appId, $roles, $signinOwner) Invoke-PimIdentityMoveDefaultDbInit -Arm $Arm -JobId $jobId -UserName $userName -AppId $appId -Roles $roles -SigninOwner:([bool]$signinOwner) -Sleep $Sleep } }
+    $proveFn = if ($Prove) { $Prove } else { { param($row, $clientId) $pa = @{ Arm = $Arm; Row = $row; ClientId = $clientId; StartJobRoles = $StartJobRoles; Sleep = $Sleep }; if ($Http) { $pa['Http'] = $Http }; Invoke-PimIdentityMoveDefaultProve @pa } }
     $tgtName = $rp.target; $tgtId = "$rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/$tgtName"
     $tgtPid = "$($rp.targetPrincipalId)"; $tgtCid = "$($rp.targetClientId)"
     $cur = ''
@@ -1023,7 +1054,7 @@ function Invoke-PimIdentityMoveRole {
                 }
                 if ($DryRun) { & $step 'sql' "would run $($rp.sql.job) once to create the database user $tgtName ($(@($rp.sql.roles) -join ', '))" '' '' }
                 else {
-                    $r = & $dbJobFn $rp.sql.jobId $tgtName $tgtCid @($rp.sql.roles)
+                    $r = & $dbJobFn $rp.sql.jobId $tgtName $tgtCid @($rp.sql.roles) ($Role -eq 'web')   # item 21: the web identity OWNS schema signin (the sign-in front)
                     if (-not $r -or -not $r.ok) { throw "the database job did not make the user $tgtName : $(if ($r) { $r.detail })" }
                     & $step 'sql' "database user $tgtName ($(@($rp.sql.roles) -join ', ')) through $($rp.sql.job)" "read back by the job: $($r.detail)" "the user stays harmless until the switch; remove it with the database job if wanted"
                     $rec.copied.Add("sql: $tgtName ($(@($rp.sql.roles) -join ', '))")

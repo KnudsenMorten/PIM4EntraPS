@@ -52,6 +52,9 @@
   other than the database job. A shared identity nothing uses any more loses all its rights at its last clean-up.
 .PARAMETER LogDir
   Where the plan and the per-role records are written as JSON.
+.PARAMETER Http
+  How the web role's proof reads the hosted front (/ and /api without a session). Default: a plain HTTPS GET from where the
+  script runs. A front that cannot be reached from there leaves the web proof pending (run the hosted smoke), never passed.
 
 .EXAMPLE
   .\Move-PimIdentities.ps1 -SubscriptionId <sub> -ResourceGroup <rg>
@@ -85,7 +88,7 @@ param(
     # TEST seams (tests\Test-PimIdentityMove.ps1): replace ARM / Graph / the database job / the proof / the wait
     [scriptblock]$Arm,
     [scriptblock]$Graph,
-    [scriptblock]$DbInit,
+    [scriptblock]$DbInit, [scriptblock]$Http,
     [scriptblock]$Prove,
     [scriptblock]$Sleep
 )
@@ -147,7 +150,9 @@ try {
     foreach ($ro in @($Role)) {
         Say "`n--- $ro ---" 'Cyan'
         if ($dry) { Say "What if: Performing the operation `"move to id-pim-$ro`" on target `"$ResourceGroup`" -- every step below is what WOULD happen; nothing is written." 'Yellow' }
-        $mvRec = Invoke-PimIdentityMoveRole -Plan $plan -Role $ro -Arm $Arm -Graph $Graph -DbInit $DbInit -Prove $Prove -Sleep $Sleep -StartJobRoles $StartJobRoles -DryRun:$dry -NoCleanup:$NoCleanup
+        # item 21 (c): the WEB proof checks the hosted front itself (/ -> the sign-in, /api -> 401) -- the library takes it as a seam
+        $mvHttp = if ($Http) { $Http } else { { param($url) try { $w = Invoke-WebRequest -Uri $url -Method GET -MaximumRedirection 0 -SkipHttpErrorCheck -TimeoutSec 30 -UseBasicParsing -ErrorAction Stop; @{ status = [int]$w.StatusCode; error = '' } } catch { @{ status = 0; error = "$($_.Exception.Message)" } } } }
+        $mvRec = Invoke-PimIdentityMoveRole -Plan $plan -Role $ro -Arm $Arm -Graph $Graph -DbInit $DbInit -Prove $Prove -Sleep $Sleep -StartJobRoles $StartJobRoles -DryRun:$dry -NoCleanup:$NoCleanup -Http $mvHttp
         $records.Add($mvRec)
         foreach ($mvStep in @($mvRec.steps.ToArray())) {
             $mvLine = '  [' + [string]$mvStep.step + '] ' + [string]$mvStep.what
