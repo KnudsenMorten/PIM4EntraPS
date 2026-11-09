@@ -438,7 +438,22 @@ function Get-PimEnvironmentReport {
                 $d = & $a ("{0}?api-version={1}" -f $cd.id, $apiFor[$t])
                 $p = Get-PimEnvReportField $d 'properties'
                 if (-not $e.location) { $e.location = "$(Get-PimEnvReportField $d 'location')" }
-                $idt = Get-PimEnvReportField $d 'identity'; if ($idt) { $e.details['identity'] = "$(Get-PimEnvReportField $idt 'type')"; $e.details['identityObjectId'] = "$(Get-PimEnvReportField $idt 'principalId')" }
+                $idt = Get-PimEnvReportField $d 'identity'
+                if ($idt) {
+                    $e.details['identity'] = "$(Get-PimEnvReportField $idt 'type')"
+                    # IDENTITY-MOVE-1 (3.0.67): show the identity the app / job SIGNS IN AS (PIM_ManagedIdentityClientId -> the attached
+                    # user-assigned identity, id-pim-<role> after the move), not its unused system identity
+                    $sinCid = ''
+                    foreach ($c0 in @(Get-PimEnvReportField (Get-PimEnvReportField $p 'template') 'containers')) { foreach ($e0 in @(Get-PimEnvReportField $c0 'env')) { if ("$(Get-PimEnvReportField $e0 'name')" -eq 'PIM_ManagedIdentityClientId' -and "$(Get-PimEnvReportField $e0 'value')".Trim()) { $sinCid = "$(Get-PimEnvReportField $e0 'value')".Trim() } } }
+                    $sinOid = ''; $sinName = ''
+                    if ($sinCid) {
+                        $uaX = Get-PimEnvReportField $idt 'userAssignedIdentities'
+                        $prs = if ($uaX -is [System.Collections.IDictionary]) { @($uaX.Keys | ForEach-Object { @{ k = "$_"; v = $uaX[$_] } }) } elseif ($uaX) { @($uaX.PSObject.Properties | ForEach-Object { @{ k = $_.Name; v = $_.Value } }) } else { @() }
+                        foreach ($pr in $prs) { if ("$(Get-PimEnvReportField $pr.v 'clientId')".Trim() -ieq $sinCid) { $sinOid = "$(Get-PimEnvReportField $pr.v 'principalId')".Trim(); $sinName = @("$($pr.k)" -split '/')[-1] } }
+                    } else { $sinOid = "$(Get-PimEnvReportField $idt 'principalId')"; $sinName = 'system-assigned' }
+                    $e.details['identityObjectId'] = $sinOid
+                    if ($sinName) { $e.details['signsInAs'] = $sinName }
+                }
                 switch ($t) {
                     'microsoft.app/containerapps' {
                         $ing = Get-PimEnvReportField (Get-PimEnvReportField $p 'configuration') 'ingress'

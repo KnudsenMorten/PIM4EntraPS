@@ -380,16 +380,29 @@ function Get-PimIdentityMoveRoleNeeds {
     #>
     param([Parameter(Mandatory)][string]$Role)
     $acr = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
+    $rdr = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'   # Reader (a job's Reader on ITSELF reads its own runs, 100.166 (a))
+    $kvf = 'e147488a-f6f5-4113-8e2d-b22465e65bf6'   # Key Vault Crypto Service Encryption User on the sign-in front key -- web only
     $n = switch ("$Role".ToLowerInvariant()) {
-        'web'      { @{ azure = @('acdd72a7-3385-48ef-bd42-f606fba81ae7', 'b9a307c4-5aa3-4b52-ba60-2b17c136cd7b', 'e147488a-f6f5-4113-8e2d-b22465e65bf6', $acr); groups = @(); dirRoles = @() } }
-        'engine'   { @{ azure = @('acdd72a7-3385-48ef-bd42-f606fba81ae7', '18d7d88d-d35e-4fb5-a5c3-7773c20a72d9', '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3', $acr); groups = @('grp-pim-powerbi-admin-api'); dirRoles = @('a9ea8996-122f-4c74-9520-8edcd192826c') } }
+        'web'      { @{ azure = @($rdr, 'b9a307c4-5aa3-4b52-ba60-2b17c136cd7b', $kvf, $acr); groups = @(); dirRoles = @() } }
+        'engine'   { @{ azure = @(@($rdr) + @(Get-PimIdentityMoveRootRoleIds) + @('0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3', $acr)); groups = @('grp-pim-powerbi-admin-api'); dirRoles = @('a9ea8996-122f-4c74-9520-8edcd192826c') } }
         'updater'  { @{ azure = @('b24988ac-6180-42a0-ab88-20f7382dd24c', $acr); groups = @(); dirRoles = @() } }
         'dbinit'   { @{ azure = @($acr); groups = @('grp-pim-sql-admins'); dirRoles = @() } }
         'requests' { @{ azure = @('0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3', $acr); groups = @(); dirRoles = @() } }
         'asbuilt'  { @{ azure = @('ba92f5b4-2d11-453d-a403-e96b0029c9fe', $acr); groups = @(); dirRoles = @() } }
+        'publish'  { @{ azure = @('ba92f5b4-2d11-453d-a403-e96b0029c9fe', '12338af0-0e69-4776-bea7-57ae8d297424', $rdr, $acr); groups = @(); dirRoles = @() } }
+        'downlink' { @{ azure = @($rdr, $acr); groups = @(); dirRoles = @() } }
         default    { @{ azure = @($acr); groups = @(); dirRoles = @() } }
     }
+    # SEC-108 (owner 2026-11-09: "it is only the engine"): User Access Administrator / Owner are the ENGINE's only. Every other
+    # role lists them as NEVER -- the move refuses to copy them from ANY source (its own system identity too).
+    $n['never'] = if ("$Role".ToLowerInvariant() -eq 'engine') { @() } else { @(Get-PimIdentityMoveRootRoleIds) }
     return $n
+}
+
+function Get-PimIdentityMoveRootRoleIds {
+    <# PURE. The Azure roles that can grant any role (Microsoft.Authorization/*): User Access Administrator + Owner. Only the
+       engine holds them (it writes Azure PIM assignments + policies at every defined scope, PIM-EngineAzureAccess.ps1). #>
+    @('18d7d88d-d35e-4fb5-a5c3-7773c20a72d9', '8e3af657-a8ff-443c-a75c-2fe8c4bcb635')
 }
 
 function Select-PimIdentityMoveNeeded {
@@ -464,6 +477,17 @@ function Get-PimIdentityMovePlan {
             if ($role -ne 'dbinit' -and @($use.groups | Where-Object { "$($_.displayName)" -ieq 'grp-pim-sql-admins' }).Count) {
                 $use = @{ azure = @($use.azure); graph = @($use.graph); groups = @($use.groups | Where-Object { "$($_.displayName)" -ine 'grp-pim-sql-admins' }); dirRoles = @($use.dirRoles); kv = @($use.kv) }
                 $notCopied.Add("PIM group grp-pim-sql-admins (from $($s.name); SEC-09: only the database job is a standing member)")
+            }
+            # SEC-108 (owner 2026-11-09: "the web, updater etc does not need user admin ... it is only the engine"): User Access
+            # Administrator / Owner are NEVER copied to a role but the engine -- ALWAYS, from ANY source (a customer install's
+            # web / updater / dbinit / asbuilt took UAA at the tenant root from their own old system identities, 2026-11-08).
+            $never = @((Get-PimIdentityMoveRoleNeeds -Role $role).never)
+            if ($never.Count) {
+                $drop = @($use.azure | Where-Object { $_ -and $never -contains (@("$($_.roleDefinitionId)" -split '/')[-1].ToLowerInvariant()) })
+                if ($drop.Count) {
+                    $use = @{ azure = @($use.azure | Where-Object { $_ -and $never -notcontains (@("$($_.roleDefinitionId)" -split '/')[-1].ToLowerInvariant()) }); graph = @($use.graph); groups = @($use.groups); dirRoles = @($use.dirRoles); kv = @($use.kv) }
+                    foreach ($d in $drop) { $notCopied.Add("Azure role $(@("$($d.roleDefinitionId)" -split '/')[-1].ToLowerInvariant()) at $($d.scope) (from $($s.name); SEC-108: User Access Administrator / Owner are the engine's only)") }
+                }
             }
             foreach ($k in @('azure', 'graph', 'groups', 'dirRoles', 'kv')) { $sr[$k] = @(@($sr[$k]) + @($use[$k])) }
             # app registration ownership moves with the UPDATER role only (it is the updater's right; framework SECAUDIT-1a)

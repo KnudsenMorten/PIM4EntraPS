@@ -157,11 +157,13 @@ function Resolve-PimAppRegOwnerInstallFacts {
         foreach ($e in @(Get-PimAppRegOwnerField $c 'env')) { if ("$(Get-PimAppRegOwnerField $e 'name')" -eq 'PIM_ManagedIdentityClientId' -and "$(Get-PimAppRegOwnerField $e 'value')".Trim()) { $updCid = "$(Get-PimAppRegOwnerField $e 'value')".Trim() } }
     }
     if ($updCid) {
+        # IDENTITY-MOVE-1 (3.0.67): a named client id with no matching attached identity is NOT the system identity -- '' (reported)
+        $oid = ''
         $uai = Get-PimAppRegOwnerField (Get-PimAppRegOwnerField $upd 'identity') 'userAssignedIdentities'
         $pairs = if ($uai -is [System.Collections.IDictionary]) { @($uai.Keys | ForEach-Object { $uai[$_] }) } elseif ($uai) { @($uai.PSObject.Properties | ForEach-Object { $_.Value }) } else { @() }
         foreach ($v in $pairs) { if ("$(Get-PimAppRegOwnerField $v 'clientId')" -ieq $updCid -and (Test-PimAppRegOwnerGuid "$(Get-PimAppRegOwnerField $v 'principalId')")) { $oid = "$(Get-PimAppRegOwnerField $v 'principalId')".Trim() } }
     }
-    if (Test-PimAppRegOwnerGuid $oid) { $o.updaterObjectId = ([guid]$oid).ToString() } else { [void]$why.Add("the update job $UpdateJob has no system identity readable") }
+    if (Test-PimAppRegOwnerGuid $oid) { $o.updaterObjectId = ([guid]$oid).ToString() } else { [void]$why.Add($(if ($updCid) { "the update job $UpdateJob signs in with client id $updCid, but no attached identity has it" } else { "the update job $UpdateJob has no system identity readable" })) }
     $mgr = & $get "$rg/containerApps/$ManagerApp`?api-version=2024-03-01"
     $auth = $null; if ($mgr) { $auth = & $get "$rg/containerApps/$ManagerApp/authConfigs/current?api-version=2024-03-01" }
     $tick = & $get "$rg/jobs/$TickJob`?api-version=2024-03-01"

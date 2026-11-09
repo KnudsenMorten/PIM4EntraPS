@@ -108,6 +108,7 @@ if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join
 if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRootR 'engine\_shared\PIM-ArmSetup.ps1') }
 . (Join-Path $here '_PimUpdateRing.ps1')                # ring + source enforcement, ARM-safe env writes
 . (Join-Path $here '_PimSqlAdminGroup.ps1')             # the SQL admin group: membership for the updater identity
+. (Join-Path $PSScriptRoot '_PimSignInIdentity.ps1')   # IDENTITY-MOVE-1: the identity an app / job signs in as
 . (Join-Path $solRootR 'engine\_shared\PIM-UpdateNow.ps1')   # framework 8.18 UPDATE-NOW: the 15-minute cron + PIM_UPDATE_NIGHTLY_UTC
 
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
@@ -323,6 +324,10 @@ if ($UpdateSource) {
 # 'M H * * *' keeps its own cron and the marker 'none' = every execution a full run, as before.
 $unCronPlan = Get-PimUpdateNowCronPlan -NightlyCron $Cron
 $envVars += "PIM_UPDATE_NIGHTLY_UTC=$(if ($unCronPlan.ok) { $unCronPlan.nightlyUtc } else { 'none' })"
+# IDENTITY-MOVE-1 line 7 (2026-11-09): a re-run KEEPS the identity the job signs in as. The env list above is built from
+# scratch, so without this a re-run dropped PIM_ManagedIdentityClientId and put a moved updater back on its retired
+# system identity (no rights left -> every update fails). The job's identities themselves are never changed by an update.
+if ("$($existingEnv['PIM_ManagedIdentityClientId'])".Trim()) { $envVars += "PIM_ManagedIdentityClientId=$("$($existingEnv['PIM_ManagedIdentityClientId'])".Trim())" }
 $yamlNames = @($envVars | ForEach-Object { ("$_" -split '=', 2)[0] })
 # Throws -- before any create/update -- when no source can be resolved, or when the job carries a ring
 # value that is not a ring and -UpdateRing was not passed.
@@ -504,8 +509,10 @@ if (-not $WhatIfPreference) {
 function Get-PimUpdJobPrincipal {
     param([string]$Name)
     $j = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -ErrorAsNull
+    # IDENTITY-MOVE-1 (2026-11-09): the identity the updater SIGNS IN AS (id-pim-updater after the move) -- a re-run (the
+    # advised fix) granted Contributor, the Graph updater set and SQL to the retired system identity before
     $oid = ''
-    if ($j -and $j.identity) { $oid = "$($j.identity.principalId)".Trim() }
+    if ($j) { $oid = Get-PimSignInPrincipalId -Resource $j }
     $oid
 }
 function Get-PimUpdJobRoleNames {

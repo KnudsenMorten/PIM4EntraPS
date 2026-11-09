@@ -69,8 +69,10 @@ function Invoke-PimJobSelfIdUpdate {
         if ($miCid -and $j.identity.userAssignedIdentities) {
             foreach ($p in @($j.identity.userAssignedIdentities.PSObject.Properties)) { if ("$($p.Value.clientId)" -ieq $miCid) { $oid = "$($p.Value.principalId)".Trim() } }
         }
-        if (-not $oid) { $oid = "$($j.identity.principalId)".Trim() }
-        if (-not $oid) { $notes.Add("${name}: no identity to grant 'Reader' on itself"); continue }
+        # IDENTITY-MOVE-1 (3.0.67): the system identity ONLY when no client id is named -- a named client id that matches no
+        # attached identity is never "the system identity" (it holds nothing after the move); report it instead
+        if (-not $oid -and -not $miCid) { $oid = "$($j.identity.principalId)".Trim() }
+        if (-not $oid) { $notes.Add("${name}: $(if ($miCid) { "it signs in with client id $miCid but no attached identity has it" } else { 'no identity' }) to grant 'Reader' on itself"); continue }
         # ALIGN 2026-11-04 (Invardia code check, job-self-reader "missing" at 12 installs where the Support app HAD granted it):
         # READ first. A grant made by the Support app (another assignment name) or inherited from the group / subscription makes
         # our PUT a 403 (the updater may not assign roles), which used to be reported as "not assigned". Any Reader, Contributor

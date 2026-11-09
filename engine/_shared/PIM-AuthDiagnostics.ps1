@@ -81,7 +81,6 @@ $script:PimRoleHintByPath = @(
     @{ match = 'appRoleAssignedTo';                                           appRoles = @('AppRoleAssignment.ReadWrite.All'); pimRoles = @('Cloud Application Administrator','Application Administrator') }
     @{ match = 'servicePrincipals/';                                          appRoles = @('Application.ReadWrite.All'); pimRoles = @('Cloud Application Administrator','Application Administrator') }
     @{ match = 'applications';                                                appRoles = @('Application.ReadWrite.All'); pimRoles = @('Application Administrator') }
-    @{ match = '/sendMail';                                                   appRoles = @('Mail.Send'); pimRoles = @() }
     @{ match = '/groups';                                                     appRoles = @('Group.ReadWrite.All'); pimRoles = @('Groups Administrator') }
     @{ match = '/users';                                                      appRoles = @('User.ReadWrite.All'); pimRoles = @('User Administrator') }
     @{ match = '/directory';                                                  appRoles = @('Directory.Read.All'); pimRoles = @() }
@@ -130,6 +129,10 @@ function Get-PimMissingRoleHint {
         return $null
     }
 
+    # 2026-11-09 (owner at internal): a refused /sendMail is NEVER a missing Graph app role -- the send right is the mailbox-
+    # scoped Exchange 'Application Mail.Send' (Get-PimMailSendDenialMessage says so with the fix). The generic hint here told
+    # the reader to grant tenant-wide Graph Mail.Send, contradicting that message. No hint for it.
+    if ("$Path" -match '(?i)/sendMail\b') { return $null }
     $entry = $null
     foreach ($e in $script:PimRoleHintByPath) {
         if ("$Path" -match [regex]::Escape($e.match)) { $entry = $e; break }

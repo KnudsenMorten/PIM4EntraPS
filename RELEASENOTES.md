@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.67 -- 2026-11-09
+
+- Identity move follow-up: every setup check, fix command and grant uses the identity each app or job signs in as; a re-run of a setup or repair script keeps that identity; screens show a job as its role, its real name and the identity it runs as; no right is removed
+
+## 3.0.66 -- 2026-11-09
+
+- Mail after the identity move: the Manager names the identity the engine signs in as, a refused send prints one fix (the published Invardia command with the real identity, tenant and mailbox) and never a tenant-wide Mail.Send hint; the identity move never copies User Access Administrator or Owner to any role but the engine
+
 ## 3.0.65 -- 2026-11-09
 
 - The identity move never copies the SQL admin group to any role but the database job, also without -NeedOnly; a new identity is created in the location its app or job already runs in, so a customer's "allowed locations" policy no longer refuses it (3.0.64 was tagged but never published -- its changes ship in this version)

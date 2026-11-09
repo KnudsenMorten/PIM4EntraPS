@@ -720,7 +720,7 @@ function Get-PimUpdateSchemaLoginRefusal {
     $g = if ("$GroupName".Trim()) { "$GroupName".Trim() } else { 'grp-pim-sql-admins' }
     $oid = "$PrincipalObjectId".Trim()
     $who = if ($oid) { "$UpdateJobName's managed identity (object id $oid$(if ("$PrincipalAppId".Trim()) { ", app id $("$PrincipalAppId".Trim())" }))" }
-           else { "$UpdateJobName's managed identity (object id not readable here -- az containerapp job show -n $UpdateJobName --query identity.principalId)" }
+           else { "$UpdateJobName's managed identity (the identity it signs in as -- id-pim-updater after the identity move; object id not readable here, see the Environment report)" }
     $srv = if ("$SqlServer".Trim()) { "$SqlServer".Trim() } else { 'the SQL server' }
     $msg = "the updater's identity cannot log in to $srv -- schema NOT checked"
     $detail = ("$who was refused by $srv. Add it to the SQL admin group '$g' (tools/setup/Initialize-PimSqlAdminGroup.ps1, " +

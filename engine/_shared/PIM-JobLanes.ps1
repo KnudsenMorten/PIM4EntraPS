@@ -809,7 +809,7 @@ function Get-PimJobCancelTarget {
     }
     $jn = $Matches[1]
     if ($exec -notmatch ('^(?i)' + [regex]::Escape($jn) + '-[a-z0-9]+$')) {
-        $out.code = 'other-job'; $out.message = "This run of $Name runs in '$exec', not in the engine job $jn, so it cannot be stopped from here."
+        $out.code = 'other-job'; $out.message = "This run of $Name runs in '$exec', not in the engine job, so it cannot be stopped from here."
         return [pscustomobject]$out
     }
     $out.ok = $true; $out.code = 'ok'; $out.jobId = "$TickJobId"; $out.jobName = $jn
@@ -863,7 +863,7 @@ function Invoke-PimJobCancel {
             if ($m -match '(?i)\b403\b|AuthorizationFailed|forbidden') {
                 $res.code = 'not-allowed'
                 $res.message = 'PIM Manager is not allowed to stop the engine run. Nothing was changed.'
-                $res.moreInfo = ("The Manager's identity needs the action Microsoft.App/jobs/stop/action on the engine job {0} (scope: that job only). Without it the run keeps going and finishes by itself. Platform answer: {1}" -f $t.jobName, $m.Substring(0, [Math]::Min(200, $m.Length)))
+                $res.moreInfo = ("The Manager's identity needs the action Microsoft.App/jobs/stop/action on the engine job (scope: that job only). Without it the run keeps going and finishes by itself. Platform answer: {1}" -f $t.jobName, $m.Substring(0, [Math]::Min(200, $m.Length)))
                 return [pscustomobject]$res
             }
             if ($m -match '(?i)\b404\b|NotFound') { $note = 'Its execution had already ended' }

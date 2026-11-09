@@ -49,6 +49,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_PimSetupShared.ps1')
 . (Join-Path $PSScriptRoot '_PimSetupSql.ps1')
+. (Join-Path $PSScriptRoot '_PimSignInIdentity.ps1')   # IDENTITY-MOVE-1: the identity an app / job signs in as
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-ConvergeDefaults.ps1')   # 100.40 Set-PimTickJobIdSetting
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
@@ -61,10 +62,16 @@ if (-not $global:PIM_SetupRestMode -and -not "$($global:PIM_ClientId)".Trim()) {
 $tickJob = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull
 $mgrObj  = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
 $tickId  = if ($tickJob) { "$($tickJob.id)" } else { '' }
-$tickOid = if ($tickJob -and $tickJob.identity) { "$($tickJob.identity.principalId)" } else { '' }
-$mgrOid  = if ($mgrObj -and $mgrObj.identity) { "$($mgrObj.identity.principalId)" } else { '' }
-if (-not "$tickId".Trim() -or -not "$tickOid".Trim()) { throw "tick job '$TickJobName' (or its system identity) not found in $ResourceGroup -- run the hosting step first." }
-if (-not "$mgrOid".Trim()) { throw "Manager app '$ManagerApp' (or its system identity) not found in $ResourceGroup -- run the hosting step first." }
+# IDENTITY-MOVE-1 (2026-11-09): the identity each one SIGNS IN AS (id-pim-engine / id-pim-web after the move) -- the grants
+# below went to the retired system identities before, so this printed fix fixed nothing at a moved install
+$tickSi  = Get-PimSignInIdentity -Resource $tickJob
+$mgrSi   = Get-PimSignInIdentity -Resource $mgrObj
+$tickOid = "$($tickSi.principalId)"
+$mgrOid  = "$($mgrSi.principalId)"
+if (-not "$tickId".Trim()) { throw "engine job '$TickJobName' not found in $ResourceGroup -- run the hosting step first." }
+if (-not "$tickOid".Trim()) { throw "engine job '$TickJobName': the identity it signs in as could not be read ($($tickSi.reason))." }
+if (-not "$mgrOid".Trim()) { throw "Manager app '$ManagerApp' not found in $ResourceGroup, or the identity it signs in as could not be read ($($mgrSi.reason)) -- run the hosting step first." }
+Note "engine job signs in as $($tickSi.name) ($tickOid); the Manager as $($mgrSi.name) ($mgrOid)"
 $tickId = "$tickId".Trim(); $tickOid = "$tickOid".Trim(); $mgrOid = "$mgrOid".Trim()
 
 if (-not $SkipGraph) {

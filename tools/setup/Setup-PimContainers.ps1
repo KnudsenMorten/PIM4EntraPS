@@ -346,6 +346,7 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\PIM4EntraPS
 # Shared setup helpers (banner, region guard, Grant-PimMiSql/Graph, DNS, GSA guidance,
 # Set-PimSqlNoAutoPause) + the engine REST/SQL cores the SQL grant needs.
 . "$here\_PimSetupShared.ps1"
+. (Join-Path $PSScriptRoot '_PimSignInIdentity.ps1')   # IDENTITY-MOVE-1: the identity an app / job signs in as
 . "$solRoot\engine\_shared\PIM-Rest.ps1"
 . "$solRoot\engine\_shared\PIM-ArmSetup.ps1"          # §100.41 NO-AZ: ARM / Graph REST for every Azure call (one connect path)
 . "$solRoot\engine\_shared\PIM-ArmContainerApps.ps1"
@@ -1314,7 +1315,16 @@ foreach ($w in $Workers) {
     # identity.principalId is the SYSTEM-assigned principal even when a user-assigned identity
     # is also attached (those live under identity.userAssignedIdentities), so SQL + Graph keep
     # targeting the app's own identity in both auth modes.
-    $oid = "$((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $w.name -ErrorAsNull).identity.principalId)".Trim()
+    # IDENTITY-MOVE-1 (2026-11-09): the identity the app SIGNS IN AS. A moved app (id-pim-web, user-assigned) got its SQL user,
+    # Graph roles and Azure rights from the identity move -- nothing below is re-granted to it under the app's old database
+    # user name, and nothing goes to its retired system identity.
+    $wSi = Get-PimSignInIdentity -Resource (Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $w.name -ErrorAsNull)
+    if ("$($wSi.kind)" -eq 'user') {
+        Note "$($w.name) signs in as $($wSi.name) ($($wSi.principalId)): its SQL user, Graph roles and Azure rights are the identity move's -- not re-granted here"
+        if ($w.name -eq $ManagerApp) { try { $global:PIM_ManagerMiAppId = Resolve-PimMiAppId -ObjectId "$($wSi.principalId)" -What $w.name } catch { } }
+        continue
+    }
+    $oid = "$($wSi.principalId)".Trim()
     if (-not $oid) {
         # A failed create shows up HERE as an empty identity. Left unchecked it flowed into
         # Grant-PimMiSql and surfaced as "Cannot bind argument to parameter 'MiAppId' because it
@@ -1472,6 +1482,22 @@ if ($WorkerMode -eq 'cron') {
             }) }
         }
     }
+    # IDENTITY-MOVE-1 line 7 (2026-11-09): an UPDATE keeps the identity the job signs in as. The env list and the identity block
+    # above are built from scratch, so an update used to send identity = SystemAssigned[+registry] and an env without
+    # PIM_ManagedIdentityClientId -- at a moved install that DETACHED id-pim-engine and put the engine back on its retired
+    # system identity (no rights left). Now: an existing job's identities are never sent (an update keeps them), and its
+    # PIM_ManagedIdentityClientId is carried over.
+    if ($jobExists) {
+        $jobResource.Remove('identity')
+        # ...and the registry pull it has now (the identity it pulls with may be one the move attached)
+        try { if (@($jo.properties.configuration.registries).Count) { $jobResource.properties.configuration.registries = @($jo.properties.configuration.registries) } } catch { }
+        $tickKeepCid = ''
+        try { foreach ($c0 in @($jo.properties.template.containers)) { foreach ($e0 in @($c0.env)) { if ("$($e0.name)" -eq 'PIM_ManagedIdentityClientId' -and "$($e0.value)".Trim()) { $tickKeepCid = "$($e0.value)".Trim() } } } } catch { }
+        if ($tickKeepCid) {
+            $jobResource.properties.template.containers[0].env = @(@($jobEnvList | Where-Object { "$($_.name)" -ne 'PIM_ManagedIdentityClientId' }) + @(@{ name = 'PIM_ManagedIdentityClientId'; value = $tickKeepCid }))
+            Note "the engine job keeps the identity it signs in as (PIM_ManagedIdentityClientId $tickKeepCid)"
+        }
+    }
     $jobAction = $(if ($jobExists) { 'update' } else { 'create' })
     Note "job definition: triggerType=Schedule cron='$TickCron' timeout=${TickReplicaTimeout}s parallelism=1"
     if ($PSCmdlet.ShouldProcess($TickJobName, "$jobAction scheduled job")) {
@@ -1507,10 +1533,17 @@ if ($WorkerMode -eq 'cron') {
         # The Job's SYSTEM identity needs exactly what a worker app needed: a contained DB user
         # and the directory app-roles. Without these the tick starts and then 403s/`Login failed`,
         # which looks like a scheduling problem and is not.
-        $jobOid = "$((Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull).identity.principalId)"
+        # IDENTITY-MOVE-1 (2026-11-09): the identity the job SIGNS IN AS. A moved job (id-pim-engine, user-assigned) got its SQL
+        # user, Graph roles and Azure rights from the identity move (NAM-03) -- they are NOT re-granted here under the job's
+        # old database user name; only a job that signs in as its system identity (a fresh deploy) is granted below.
+        $jobSi = Get-PimSignInIdentity -Resource (Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull)
+        $jobOid = "$($jobSi.principalId)"
         if (-not "$jobOid".Trim()) {
-            throw "Job '$TickJobName' has no system identity -- it was not created as expected; refusing to leave it unable to reach SQL/Graph."
+            throw "Job '$TickJobName': the identity it signs in as could not be read ($($jobSi.reason)) -- refusing to leave it unable to reach SQL/Graph."
         }
+        if ("$($jobSi.kind)" -eq 'user') {
+            Note "$TickJobName signs in as $($jobSi.name) ($jobOid): its SQL user, Graph roles and Azure rights are the identity move's -- not re-granted here"
+        } else {
         # BUG-44 was MEASURED here: `az containerapp job create` returns as soon as ARM accepts it,
         # so the identity's SP is typically NOT in the directory yet when this runs. The deploy
         # threw, and everything below -- the SQL user and the Graph app-roles -- never happened.
@@ -1533,6 +1566,7 @@ if ($WorkerMode -eq 'cron') {
             }
         }
         Note "MI $jobAppId granted SQL (db user [$TickJobName]) + Graph app-roles + Azure RBAC"
+        }
         Note "fire one now: az containerapp job start --subscription $SubscriptionId -g $ResourceGroup -n $TickJobName"
     }
 }
@@ -1570,9 +1604,13 @@ if ("$SupportDbAppId".Trim()) {
 # is installed AFTER this step on a first deploy (Deploy-PimUpdateJob grants it then); every later INFRA
 # run keeps it granted here. LIST, not show: "not installed yet" is a normal answer.
 $updJobs = $null
-try { $updJobs = @(Get-PimArmAcaJobList -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -ErrorAsNull | ForEach-Object { [pscustomobject]@{ name = "$($_.name)"; oid = "$($_.identity.principalId)" } }) } catch { $updJobs = $null }
+# IDENTITY-MOVE-1 (2026-11-09): the identity the updater SIGNS IN AS -- a moved updater (id-pim-updater) has its database user
+# from the identity move and is not re-granted here; its retired system identity never gets one again.
+try { $updJobs = @(Get-PimArmAcaJobList -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -ErrorAsNull | ForEach-Object { $si0 = Get-PimSignInIdentity -Resource $_; [pscustomobject]@{ name = "$($_.name)"; oid = "$($si0.principalId)"; kind = "$($si0.kind)"; idName = "$($si0.name)" } }) } catch { $updJobs = $null }
 $updJob = @($updJobs | Where-Object { $_ -and "$($_.name)" -eq $UpdateJobName }) | Select-Object -First 1
-if ($updJob -and "$($updJob.oid)".Trim()) {
+if ($updJob -and "$($updJob.kind)" -eq 'user') {
+    Note "'$UpdateJobName' signs in as $($updJob.idName) ($($updJob.oid)): its database user is the identity move's -- not re-granted here"
+} elseif ($updJob -and "$($updJob.oid)".Trim()) {
     $updAppId = Resolve-PimMiAppId -ObjectId "$($updJob.oid)".Trim() -What $UpdateJobName
     # 100.156 B: the updater = a contained user with db_ddladmin (the one schema right a runtime identity keeps) + its
     # pim_updater role (EXECUTE on the signed procedure, given by the access model below).

@@ -1,4 +1,4 @@
-﻿<#
+<#
   PIM4EntraPS -- notifications (REST-only, no modules). Renders the shipped mail
   templates (the SQL template store pim.Settings['MailTemplates'], seeded from templates/mail/*.mailtemplate.html) and sends via
   Microsoft Graph /users/<sender>/sendMail (app-only, Mail.Send). Ported from
@@ -237,17 +237,30 @@ function Get-PimMailSendDenialMessage {
       reported as a missing grant). Mail.Send here is the SCOPED Exchange RBAC assignment, never a
       tenant-wide Graph consent -- the remedy says so, so nobody "fixes" it by granting the wide one.
     #>
-    [CmdletBinding()] param([object]$Identity, [string]$Sender, [string]$ErrorText, [string]$ObservedAppId = '')
+    # -ObjectId / -TenantId (2026-11-09, owner at internal after the identity move: the message named a placeholder and an
+    # internal path): the REAL object id of the identity that was refused (the one it SIGNS IN AS) and the tenant -- the fix
+    # is then the PUBLISHED two-line command (Get-PimSupportScriptCommand) with those values filled in.
+    [CmdletBinding()] param([object]$Identity, [string]$Sender, [string]$ErrorText, [string]$ObservedAppId = '', [string]$ObjectId = '', [string]$TenantId = '')
     $e = "$ErrorText"
     if ($e -notmatch '(?i)ErrorAccessDenied|Authorization_RequestDenied|AccessDenied|Access is denied|\b403\b|Forbidden|MailboxNotEnabledForRESTAPI') { return '' }
     $who = if ($Identity -and "$($Identity.label)".Trim()) { "$($Identity.label)" } else { 'the current identity' }
     if ("$ObservedAppId".Trim()) { $who = "$who, token appId $ObservedAppId" }
-    $fix = switch ("$($Identity.kind)") {
-        'managed-identity' { "Run tools/setup/Initialize-PimMailSender.ps1 with -ManagedIdentityObjectId <the tick job's managed identity principalId> so Exchange grants that identity 'Application Mail.Send' scoped to '$Sender'." }
-        'engine-spn'       { "Run tools/setup/Initialize-PimMailSender.ps1 with -EngineAppId <engine appId> so Exchange grants the engine SPN 'Application Mail.Send' scoped to '$Sender'." }
-        default            { 'Configure the engine identity (managed identity when hosted, engine SPN certificate otherwise) and give it the scoped Exchange assignment.' }
+    $box = "$Sender".Trim(); $local = ($box -split '@')[0]; $dom = if ($box -match '@') { ($box -split '@')[1] } else { '' }
+    $tid = if ("$TenantId".Trim()) { "$TenantId".Trim() } else { '<tenant id>' }
+    $oid = if ("$ObjectId".Trim()) { "$ObjectId".Trim() } else { '<object id of this identity>' }
+    $run = switch ("$($Identity.kind)") {
+        'managed-identity' { ".\Initialize-PimMailSender.ps1 -TenantId $tid -ManagedIdentityObjectId $oid" + $(if ($local) { " -MailboxName $local" } else { '' }) + $(if ($dom) { " -MailDomain $dom" } else { '' }) }
+        'engine-spn'       { ".\Initialize-PimMailSender.ps1 -TenantId $tid -EngineAppId $(if ("$($Identity.clientId)".Trim()) { "$($Identity.clientId)".Trim() } else { '<engine app id>' })" + $(if ($local) { " -MailboxName $local" } else { '' }) + $(if ($dom) { " -MailDomain $dom" } else { '' }) }
+        default            { '' }
     }
-    return ("mail send DENIED as {0}: this identity has no Exchange 'Application Mail.Send' assignment for the sender mailbox '{1}' (sending is granted per mailbox by Exchange RBAC for Applications -- do NOT grant tenant-wide Graph Mail.Send). {2} Error: {3}" -f $who, $Sender, $fix, (($e -split "`n")[0]))
+    $fix = if ($run -and (Get-Command Get-PimSupportScriptCommand -ErrorAction SilentlyContinue)) {
+        "Fix (an Exchange or Global Administrator, browser sign-in) -- gives this identity the send right scoped to '$Sender' only: " + ((Get-PimSupportScriptCommand -Script 'Initialize-PimMailSender' -Run @($run)) -join ' ; ')
+    } elseif ($run) { "Fix (an Exchange or Global Administrator): download Initialize-PimMailSender.ps1 from Invardia and run: $run" }
+    else { 'Configure the engine identity (managed identity when hosted, engine SPN certificate otherwise) and give it the scoped Exchange assignment.' }
+    # The raw error's first line only when it is not PIM's own generic Graph hint (that hint named a tenant-wide Mail.Send,
+    # which contradicts this message -- PIM-AuthDiagnostics no longer hints on /sendMail, this is the second guard).
+    $first = (($e -split "`n")[0]) -replace "(?i)\s*The engine app \(SPN\) is missing the Graph application role\(s\):.*$", ''
+    return ("mail send DENIED as {0}: this identity has no Exchange 'Application Mail.Send' assignment for the sender mailbox '{1}' (sending is granted per mailbox by Exchange RBAC for Applications -- do NOT grant tenant-wide Graph Mail.Send). {2} Error: {3}" -f $who, $Sender, $fix, $first)
 }
 
 function Get-PimMailEnvironmentInfo {
@@ -618,7 +631,13 @@ function Send-PimNotifyMail {
                 $obs = Get-PimTokenAppId -Token (Get-PimRestToken -Resource 'graph' -UseManagedIdentity)
             }
         } catch { $obs = '' }
-        $denied = Get-PimMailSendDenialMessage -Identity $sendAs -Sender $sender -ErrorText $em -ObservedAppId $obs
+        # the refused identity's REAL object id (its service principal, by the client id it signed in with) for the fix command
+        $denOid = ''
+        try {
+            $denCid = if ("$obs".Trim()) { "$obs".Trim() } else { "$($sendAs.clientId)".Trim() }
+            if ($denCid) { $denOid = "$(@((Invoke-PimGraph -Path ("/servicePrincipals?`$filter=appId eq '{0}'&`$select=id" -f $denCid)).value)[0].id)".Trim() }
+        } catch { $denOid = '' }
+        $denied = Get-PimMailSendDenialMessage -Identity $sendAs -Sender $sender -ErrorText $em -ObservedAppId $obs -ObjectId $denOid -TenantId "$($global:PIM_TenantId)"
         $why = if ($denied) { $denied } else { $em }
         Write-Warning "  [Mail] send failed ($Type -> $rcpt) as $($sendAs.label): $why"
         Save-PimMailSendProof -Ok $false -Reason "$why" -Mode 'sharedMailbox' -Sender $sender

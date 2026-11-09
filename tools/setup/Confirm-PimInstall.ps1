@@ -139,6 +139,7 @@ $here = $PSScriptRoot
 # 100.31: the engine job's size for the tenant (Test-PimJobUndersized / ConvertFrom-PimTenantSizingTags), pure
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-TenantSizing.ps1')
 # SCRIPT-DOC-1 (framework 12.7): every fix command this check prints carries the script's doc page + the checksum check
+. (Join-Path $PSScriptRoot '_PimSignInIdentity.ps1')   # IDENTITY-MOVE-1: the identity an app / job signs in as
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
 # PIM 100.116: the Support app's database user -- the read (by SID), pure
 . (Join-Path $PSScriptRoot '_PimSupportSqlAccess.ps1')
@@ -249,7 +250,8 @@ function Get-CvSetting([string]$Name) {
 function Get-CvMiOid([string]$Kind, [string]$Name) {
     $k = "mi:${Kind}:${Name}"; if ($script:cv.ContainsKey($k)) { return $script:cv[$k] }
     $res = Get-CvArm (Get-CvResId $(if ($Kind -eq 'job') { 'Microsoft.App/jobs' } else { 'Microsoft.App/containerApps' }) $Name)
-    $script:cv[$k] = "$($res.identity.principalId)".Trim(); return $script:cv[$k]
+    # IDENTITY-MOVE-1 (2026-11-09): the identity it SIGNS IN AS (id-pim-<role> after the move), never the retired system one
+    $script:cv[$k] = Get-PimSignInPrincipalId -Resource $res; return $script:cv[$k]
 }
 
 function Get-CvFact([string]$Id) {

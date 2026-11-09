@@ -188,8 +188,8 @@ $script:PimFailureRules = @(
     @{ code = 'ENGINE-OUT-OF-MEMORY'
        match = { param($m, $row) $m -match '(?i)System\.OutOfMemoryException|OutOfMemoryException|Insufficient memory to continue|\bOOMKilled\b|exit code 137\b' }
        title = 'The engine job ran out of memory'
-       cause = 'The scheduled engine job (ca-pim-tick) ran out of memory while it ran, so it was stopped and its work is not done. A tenant of 5,000 or more users, groups and service principals needs more than the 0.5 CPU / 1 GiB a small tenant''s job gets. The next update raises the job one size by itself (it reads this failure); the command below does it now.'
-       remedy = 'the engine job ran out of memory -- raise ca-pim-tick to the next size (2 CPU / 4 GiB; 4 CPU / 8 GiB from 15,000 objects; the run limit stays 7 days): az containerapp job update -g <resource group> -n ca-pim-tick --cpu 2.0 --memory 4Gi --replica-timeout 604800'
+       cause = 'The scheduled engine job ran out of memory while it ran, so it was stopped and its work is not done. A tenant of 5,000 or more users, groups and service principals needs more than the 0.5 CPU / 1 GiB a small tenant''s job gets. The next update raises the job one size by itself (it reads this failure).'
+       remedy = 'the engine job ran out of memory -- the next update raises it to the next size by itself (2 CPU / 4 GiB; 4 CPU / 8 GiB from 15,000 objects; the run limit stays 7 days); to do it now, Invardia support raises it with you'
        retryable = $false; severity = 'environment'
        fixes = @() }
 
@@ -953,7 +953,7 @@ function Get-PimFailureSolutionCatalog {
             what = 'The engine job ran out of memory, so its work is not done: {item}.'
             affected = 'Committed changes are not applied until the job has more memory. Nothing was changed wrongly.'
             steps = @('Nothing to do when updates are on: the next update gives the job more memory by itself.',
-                      'To do it now: your Azure administrator raises the job ca-pim-tick to 2 CPU / 4 GiB in the resource group of PIM Manager (Invardia support can do it with you).')
+                      'To do it now: your Azure administrator raises the engine job to 2 CPU / 4 GiB in the resource group of PIM Manager (Invardia support can do it with you).')
             after = $next }
         'AZ-POLICY-RULE-FAILED' = @{ short = 'Azure refused one or more settings of a PIM policy'
             what = 'Azure refused one or more settings of a PIM policy: {item}.'

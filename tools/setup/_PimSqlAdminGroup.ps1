@@ -68,6 +68,7 @@
 #>
 
 Set-StrictMode -Off
+. (Join-Path $PSScriptRoot '_PimSignInIdentity.ps1')   # IDENTITY-MOVE-1: the identity an app / job signs in as
 
 $script:PimSqlAdminGroupDefaultName = 'grp-pim-sql-admins'
 $script:PimSqlApi  = '2021-11-01'
@@ -602,9 +603,12 @@ function Invoke-PimSqlAdminGroupStep {
             $UpdateJobName = $updNames[$ui]
             try {
                 $job = & $Arm -Method GET -Path "$rgPath/providers/Microsoft.App/jobs/$("$UpdateJobName".Trim())?api-version=$($script:PimJobApi)"
-                $jp = "$($job.identity.principalId)".Trim()
-                if ($jp) { [void]$members.Add([pscustomobject]@{ objectId = $jp; label = "updater identity $UpdateJobName" }) }
-                else { [void]$resolveProblems.Add("$UpdateJobName has no system-assigned identity") }
+                # IDENTITY-MOVE-1 (3.0.67): a MOVED updater (signs in as id-pim-updater) is NEVER put in the SQL admin group --
+                # SEC-09: the database job is the only standing member; its retired system identity is not re-added either.
+                $updSi = Get-PimSignInIdentity -Resource $job
+                if ("$($updSi.kind)" -eq 'user') { Write-Verbose "$UpdateJobName signs in as $($updSi.name): not a SQL admin group member (SEC-09)" }
+                elseif ("$($updSi.principalId)".Trim()) { [void]$members.Add([pscustomobject]@{ objectId = "$($updSi.principalId)".Trim(); label = "updater identity $UpdateJobName" }) }
+                else { [void]$resolveProblems.Add("$UpdateJobName has no identity it signs in as ($($updSi.reason))") }
                 break
             } catch {
                 $m = "$($_.Exception.Message)"

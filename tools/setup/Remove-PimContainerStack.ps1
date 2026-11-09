@@ -36,6 +36,7 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+. (Join-Path $PSScriptRoot '_PimSignInIdentity.ps1')   # IDENTITY-MOVE-1: the identity an app / job signs in as
 $null = Start-PimScriptRun -Script 'Remove-PimContainerStack'
 try {
 # 12.7: -WhatIf is the plan -- it wins over -Apply, nothing is deleted.
@@ -68,9 +69,16 @@ $res = @(Get-StackResources)
 $jobs = @($res | Where-Object { $_.t -eq 'Microsoft.App/jobs' }); $apps = @($res | Where-Object { $_.t -eq 'Microsoft.App/containerApps' }); $envs = @($res | Where-Object { $_.t -eq 'Microsoft.App/managedEnvironments' })
 $pids = @()
 foreach ($x in @($jobs) + @($apps)) {
-    $p = "$((Get-PimArmResource -ResourceId $x.id -Kind aca -ErrorAsNull).identity.principalId)".Trim()
+    $xr = Get-PimArmResource -ResourceId $x.id -Kind aca -ErrorAsNull
+    $p = "$($xr.identity.principalId)".Trim()
     if ($p) { $pids += $p }
     Note ("{0,-32} {1,-30} system identity {2}" -f $x.n, $x.t, $(if ($p) { $p } else { '(none)' }))
+    # IDENTITY-MOVE-1 (3.0.67): the user-assigned identity it SIGNS IN AS (id-pim-<role> after the move) holds the rights now --
+    # list it too, so a teardown never leaves its role assignments (incl. the engine's tenant-root rights) standing
+    $si = Get-PimSignInIdentity -Resource $xr
+    if ("$($si.kind)" -eq 'user' -and "$($si.principalId)".Trim() -and $pids -notcontains "$($si.principalId)".Trim()) {
+        $pids += "$($si.principalId)".Trim(); Note ("{0,-32} {1,-30} signs in as {2} {3}" -f '', '', $si.name, $si.principalId)
+    }
 }
 foreach ($e in $envs) { Note ("{0,-32} {1}" -f $e.n, $e.t) }
 $ras = @()

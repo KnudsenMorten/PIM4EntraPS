@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 
 <#
 .SYNOPSIS
@@ -583,6 +583,7 @@ $ErrorActionPreference = 'Stop'
 # of this script on every exit (the plan-only return, the refused enrollment, the trap's rethrow, the final exit), and by
 # the PowerShell.Exiting event on an interrupt.
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+. (Join-Path $PSScriptRoot '_PimSignInIdentity.ps1')   # IDENTITY-MOVE-1: the identity an app / job signs in as
 $null = Start-PimScriptRun -Script 'Invoke-PimDeployAll'
 try {
 
@@ -1513,8 +1514,10 @@ function Test-AcaEnvPresent {
         # Manager otherwise. Zero role assignments = PIM's Azure half is blind (BUG-51).
         if (-not $SkipAzureRbac -and "$SubscriptionId".Trim()) {
             # BUG-215: the subscription is named on both -- a bare call read whatever subscription was the default.
-            $rbacOid = $(if ($WorkerMode -eq 'cron') { "$((Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull).identity.principalId)" }
-                         else { "$($mApp.identity.principalId)" })
+            # IDENTITY-MOVE-1 (3.0.67): the identity it SIGNS IN AS -- the retired system identity of a moved install holds nothing,
+            # so this probe said "re-running INFRA" on every run
+            $rbacOid = $(if ($WorkerMode -eq 'cron') { Get-PimSignInPrincipalId -Resource (Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull) }
+                         else { Get-PimSignInPrincipalId -Resource $mApp })
             if ("$rbacOid".Trim()) {
                 $armRoles = @()
                 try { $armRoles = @(Get-PimArmRoleAssignments -Scope "/subscriptions/$SubscriptionId" -PrincipalId "$rbacOid".Trim() -SubscriptionId $SubscriptionId | ForEach-Object { "$($_.id)" } | Where-Object { "$_".Trim() }) } catch { $armRoles = @() }
@@ -1529,7 +1532,7 @@ function Test-AcaEnvPresent {
         # always-on mode: the worker apps are the workload and the Manager standing means the loop
         # ran. cron mode: the tick Job is the workload, so keep going.
         if ($WorkerMode -ne 'cron') { return $true }
-        $jobOid = "$((Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull).identity.principalId)"
+        $jobOid = Get-PimSignInPrincipalId -Resource (Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull)   # IDENTITY-MOVE-1 (3.0.67)
         if (-not "$jobOid".Trim()) {
             Write-Host "  infra: tick Job '$TickJobName' is missing (or has no identity) -- half-built; re-running INFRA." -ForegroundColor Yellow
             return $false
@@ -2401,7 +2404,7 @@ function Invoke-DefaultStepRunner {
                 $engineForMail = "$EngineClientId".Trim()
                 if (-not $engineForMail) { $engineForMail = "$($global:PIM_ManagerMiAppId)".Trim() }
                 if (-not $engineForMail -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim() -and (Test-PimDeployRest)) {
-                    $mgrOid = "$((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).identity.principalId)"
+                    $mgrOid = Get-PimSignInPrincipalId -Resource (Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull)   # IDENTITY-MOVE-1 (3.0.67): the identity it signs in as
                     if ("$mgrOid".Trim()) {
                         # BUG-215: tenant-pinned (az ad reads the DEFAULT account's directory).
                         $mgrApp = "$((Invoke-PimTenantGraphGet -Path "/servicePrincipals/$("$mgrOid".Trim())").appId)"

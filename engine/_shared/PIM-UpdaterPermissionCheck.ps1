@@ -245,6 +245,29 @@ function Resolve-PimUpdaterTenantId {
     return ''
 }
 
+function Get-PimUpdPermEngineLabel {
+    # PURE. The engine as screens show it -- framework NAMING-CONVENTIONS (owner 2026-11-09): "<Role> job: <its real job name> -
+    # runs as <its identity>", the TRUE current names read from the job: "Engine job: ca-pim-tick - runs as id-pim-engine";
+    # "... - runs as its system-assigned identity" when no identity is named; no job -> "Engine job".
+    param($Job)
+    if (-not $Job) { return 'Engine job' }
+    $jn = "$($Job.name)".Trim()
+    $cid = ''
+    foreach ($c in @($Job.properties.template.containers | Where-Object { $_ })) {
+        $v = @($c.env | Where-Object { "$($_.name)" -eq 'PIM_ManagedIdentityClientId' })[0]
+        if ($v -and "$($v.value)".Trim()) { $cid = "$($v.value)".Trim(); break }
+    }
+    $who = 'its system-assigned identity'
+    if ($cid) {
+        $who = ''
+        $ua = $Job.identity.userAssignedIdentities
+        if ($ua) { foreach ($p in @($ua.PSObject.Properties)) { if ("$($p.Value.clientId)".Trim() -ieq $cid) { $who = @("$($p.Name)" -split '/')[-1] } } }
+    }
+    $lbl = if ($jn) { "Engine job: $jn" } else { 'Engine job' }
+    if ($who) { $lbl = "$lbl - runs as $who" }
+    return $lbl
+}
+
 function Resolve-PimUpdPermEngineObjectId {
     # PURE. The object id of the identity the ENGINE signs in with -- the same choice PIM-Rest makes at run time: the job's
     # container carries PIM_ManagedIdentityClientId -> the USER-ASSIGNED identity with that client id (the identity move,
@@ -295,8 +318,8 @@ function Invoke-PimUpdaterEnginePermissionCheck {
         try { $j = & $Arm 'GET' "$rgScope/providers/Microsoft.App/jobs/$TickJob`?api-version=$($script:PimUpdPermAcaApi)" $null; $oid = Resolve-PimUpdPermEngineObjectId -Job $j }
         catch { $oidWhy = Get-PimUpdPermFirstLine $_.Exception.Message }
         if (-not $oid) {
-            $why = "the engine job $TickJob's identity could not be read$(if ($oidWhy) { ": $oidWhy" })"
-            return (Get-PimUpdaterEnginePermissionVerdict -GraphReason $why -AzureReason $why -TenantId $TenantId -EngineName $TickJob -Version $Version -NowUtc $NowUtc)
+            $why = "the engine job's identity could not be read$(if ($oidWhy) { ": $oidWhy" })"
+            return (Get-PimUpdaterEnginePermissionVerdict -GraphReason $why -AzureReason $why -TenantId $TenantId -EngineName 'Engine job' -Version $Version -NowUtc $NowUtc)
         }
 
         # ---- Graph: live, else the Manager's last real check ---------------------------------------------------------
@@ -355,7 +378,7 @@ function Invoke-PimUpdaterEnginePermissionCheck {
         return (Get-PimUpdaterEnginePermissionVerdict -GraphReadable $graphOk -GrantedGraphRoles $granted -GraphSource $src -GraphCheckedUtc $at `
                     -SnapshotMissingIds $oldMissing -GraphReason $(if ($graphOk) { '' } else { $gWhy.TrimStart('; ') }) `
                     -AzureAssignments $azList -AzureReason $aWhy -AzureDelegationCount $AzureDelegationCount `
-                    -TenantId $TenantId -EngineObjectId $oid -EngineName "$TickJob (engine job)" -Version $Version -NowUtc $NowUtc)
+                    -TenantId $TenantId -EngineObjectId $oid -EngineName (Get-PimUpdPermEngineLabel -Job $j) -Version $Version -NowUtc $NowUtc)
     } catch {
         $why = "the check itself failed: $(Get-PimUpdPermFirstLine $_.Exception.Message)"
         return (Get-PimUpdaterEnginePermissionVerdict -GraphReason $why -AzureReason $why -TenantId $TenantId -EngineName $TickJob -Version $Version -NowUtc $NowUtc)

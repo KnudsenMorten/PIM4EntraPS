@@ -5969,6 +5969,39 @@ function Get-PimAdminTapState {
 # (pim.Settings MailMode / MailSender / SmtpRelay -- never a password), the relay password into the environment's Key
 # Vault (as the Manager's own managed identity, when it may), and the test mail that proves a mode.
 # ===================================================================================================================
+function Resolve-PimManagerJobSignInObjectId {
+    <# PURE. The object id of the identity a job SIGNS IN AS: a container's PIM_ManagedIdentityClientId -> the attached
+       user-assigned identity with that client id; none named -> the system identity; a client id no attached identity has
+       -> '' (never the system identity). Same rule as PIM-ConvergeDefaults' Resolve-PimConvergeSignInOid. #>
+    param($Job)
+    if (-not $Job) { return '' }
+    $cid = ''
+    foreach ($c in @($Job.properties.template.containers | Where-Object { $_ })) {
+        $v = @($c.env | Where-Object { "$($_.name)" -eq 'PIM_ManagedIdentityClientId' })[0]
+        if ($v -and "$($v.value)".Trim()) { $cid = "$($v.value)".Trim(); break }
+    }
+    if (-not $cid) { return "$($Job.identity.principalId)".Trim() }
+    $ua = $Job.identity.userAssignedIdentities
+    if ($ua) { foreach ($p in @($ua.PSObject.Properties)) { if ("$($p.Value.clientId)".Trim() -ieq $cid) { return "$($p.Value.principalId)".Trim() } } }
+    return ''
+}
+
+function Resolve-PimManagerJobSignInName {
+    <# PURE. The NAME of the identity a job signs in as (id-pim-engine after the move; 'its system-assigned identity' when none is
+       named; '' when the named client id matches no attached identity). Same rule as Resolve-PimManagerJobSignInObjectId. #>
+    param($Job)
+    if (-not $Job) { return '' }
+    $cid = ''
+    foreach ($c in @($Job.properties.template.containers | Where-Object { $_ })) {
+        $v = @($c.env | Where-Object { "$($_.name)" -eq 'PIM_ManagedIdentityClientId' })[0]
+        if ($v -and "$($v.value)".Trim()) { $cid = "$($v.value)".Trim(); break }
+    }
+    if (-not $cid) { return 'its system-assigned identity' }
+    $ua = $Job.identity.userAssignedIdentities
+    if ($ua) { foreach ($p in @($ua.PSObject.Properties)) { if ("$($p.Value.clientId)".Trim() -ieq $cid) { return @("$($p.Name)" -split '/')[-1] } } }
+    return ''
+}
+
 function Get-PimManagerMailIdentities {
     <#
       The managed identities that SEND (the Manager's own and the engine job's), plus the subscription / resource group
@@ -5976,7 +6009,7 @@ function Get-PimManagerMailIdentities {
       be read stays '' and the page prints a placeholder for it).
     #>
     if ($script:PimMailIdCache -and ((Get-Date) - $script:PimMailIdCache.at).TotalMinutes -lt 10) { return $script:PimMailIdCache.value }
-    $o = [ordered]@{ managerObjectId = ''; tickObjectId = ''; subscriptionId = ''; resourceGroup = ''; tickJobName = ''; reason = '' }
+    $o = [ordered]@{ managerObjectId = ''; managerIdentityName = ''; managerAppName = ''; tickObjectId = ''; tickIdentityName = ''; subscriptionId = ''; resourceGroup = ''; tickJobName = ''; reason = '' }
     try {
         $appId = "$($global:PIM_RuntimeAppId)"
         if (-not $appId) { $appId = "$($env:AZURE_CLIENT_ID)" }
@@ -5984,7 +6017,7 @@ function Get-PimManagerMailIdentities {
         if ($appId) {
             $self = @((Invoke-PimGraph -Path ("/servicePrincipals?`$filter=appId eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $appId)).value) | Select-Object -First 1
             if ($self -and "$($self.servicePrincipalType)" -eq 'ManagedIdentity') {
-                $o.managerObjectId = "$($self.id)"
+                $o.managerObjectId = "$($self.id)"; $o.managerIdentityName = "$($self.displayName)"
                 $rid = @(@($self.alternativeNames) | Where-Object { "$_" -match '^/subscriptions/' }) | Select-Object -First 1
                 if ("$rid" -match '(?i)^/subscriptions/([^/]+)/resourcegroups/([^/]+)/') { $o.subscriptionId = $Matches[1]; $o.resourceGroup = $Matches[2] }
                 # CR5 step 1 (PIM 100.149): the install record (incl. PIM_ENGINE_JOB_NAME); today's name is the default
@@ -5992,10 +6025,28 @@ function Get-PimManagerMailIdentities {
                 $tj = Get-PimManagerTickJobId
                 if ($tj -match '(?i)/jobs/([^/]+)$') { $job = $Matches[1] }
                 $o.tickJobName = $job
-                $rgPrefix = ("$rid" -replace '(?i)^(/subscriptions/[^/]+/resourcegroups/[^/]+/).*$', '$1').ToLowerInvariant()
-                $cands = Invoke-PimGraph -Path ("/servicePrincipals?`$filter=displayName eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $job)
-                $eng = @(@($cands.value) | Where-Object { @($_.alternativeNames) | Where-Object { "$_".ToLowerInvariant().StartsWith($rgPrefix) } }) | Select-Object -First 1
-                if ($eng) { $o.tickObjectId = "$($eng.id)" }
+                # NAM-03 (2026-11-09, owner at internal: "we have chg to other identity, but it still reference -tick"): the
+                # engine SENDS as the identity it SIGNS IN AS -- the job's PIM_ManagedIdentityClientId names a user-assigned
+                # identity (id-pim-engine after the identity move); none named = its system identity. Read the job by ARM (the
+                # Manager holds Reader on its resource group); the old lookup by the JOB's name found the system identity only.
+                if ($tj -and (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)) {
+                    try {
+                        $tjObj = Invoke-PimArm -Path $tj -ApiVersion '2024-03-01'
+                        $o.tickObjectId = Resolve-PimManagerJobSignInObjectId -Job $tjObj
+                        $o.tickIdentityName = Resolve-PimManagerJobSignInName -Job $tjObj
+                    } catch { }
+                }
+                if (-not $o.tickObjectId) {
+                    # IDENTITY-MOVE-1 (3.0.67): the job could not be read -- look for the STANDARD engine identity (id-pim-engine)
+                    # in this resource group FIRST; the job's own name (= its system identity) only when there is none (an
+                    # install not moved). Never print an old identity when the moved one exists.
+                    $rgPrefix = ("$rid" -replace '(?i)^(/subscriptions/[^/]+/resourcegroups/[^/]+/).*$', '$1').ToLowerInvariant()
+                    foreach ($spName in @('id-pim-engine', $job)) {
+                        $cands = Invoke-PimGraph -Path ("/servicePrincipals?`$filter=displayName eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $spName)
+                        $eng = @(@($cands.value) | Where-Object { @($_.alternativeNames) | Where-Object { "$_".ToLowerInvariant().StartsWith($rgPrefix) } }) | Select-Object -First 1
+                        if ($eng) { $o.tickObjectId = "$($eng.id)"; $o.tickIdentityName = "$($eng.displayName)"; break }
+                    }
+                }
             } elseif ($self) { $o.reason = 'this Manager does not run as a managed identity (a local run): the identities are named by the deploy' }
         } else { $o.reason = 'the identity this Manager runs as could not be resolved' }
     } catch { $o.reason = "$(($_.Exception.Message -split "`n")[0])" }
@@ -6051,7 +6102,12 @@ function Get-PimManagerMailChecks {
         $graphSpId = ''
         try { $graphSpId = "$((@((Invoke-PimGraph -Path "/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'&`$select=id").value) | Select-Object -First 1).id)" } catch { $graphSpId = '' }
         $idList = @()
-        foreach ($x in @(@{ role = 'engine'; oid = "$($ids.tickObjectId)"; label = "engine job $(if ("$($ids.tickJobName)".Trim()) { $ids.tickJobName } else { 'ca-pim-tick' })" }, @{ role = 'manager'; oid = "$($ids.managerObjectId)"; label = 'PIM Manager' })) {
+        # framework NAMING-CONVENTIONS (owner 2026-11-09): "<Role> job: <its real job name> - runs as <its identity>" -- the TRUE
+        # current names, read live, never one mixed name: "Engine job: ca-pim-tick - runs as id-pim-engine", "Web app: ca-pim-manager - runs as id-pim-web"
+        $engLbl = "Engine job$(if ("$($ids.tickJobName)".Trim()) { ": $($ids.tickJobName)" })$(if ("$($ids.tickIdentityName)".Trim()) { " - runs as $($ids.tickIdentityName)" })"
+        $webApp = if ("$($env:CONTAINER_APP_NAME)".Trim()) { "$($env:CONTAINER_APP_NAME)".Trim() } else { 'ca-pim-manager' }
+        $webLbl = "Web app: $webApp$(if ("$($ids.managerIdentityName)".Trim()) { " - runs as $($ids.managerIdentityName)" })"
+        foreach ($x in @(@{ role = 'engine'; oid = "$($ids.tickObjectId)"; label = $engLbl }, @{ role = 'manager'; oid = "$($ids.managerObjectId)"; label = $webLbl })) {
             $tw = $null
             if ($x.oid -and $graphSpId) { try { $tw = Test-PimTenantWideMailSend -Assignments @(Invoke-PimGraph -All -Path "/servicePrincipals/$($x.oid)/appRoleAssignments") -GraphSpId $graphSpId } catch { $tw = $null } }
             $idList += @{ role = $x.role; label = $x.label; proof = (& $pget $x.role); tenantWideMailSend = $tw }
@@ -11918,13 +11974,22 @@ function Get-PimManagerPermissionHealthBody {
             # system identity then holds no rights (the move removed them), and checking IT reported every permission missing.
             # id-pim-engine in THIS resource group first (the mover copies its rights before it switches the job), else the job.
             $eng = $null
-            foreach ($nm in @('id-pim-engine', $engineJob)) {
+            # IDENTITY-MOVE-1 (3.0.67): FIRST the identity the engine job SIGNS IN AS, read from the job itself (PIM_ManagedIdentityClientId
+            # -> its attached user-assigned identity) -- a name search only when the job cannot be read.
+            $tjP = Get-PimManagerTickJobId
+            if ($tjP -and (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)) {
+                try {
+                    $sinOid = Resolve-PimManagerJobSignInObjectId -Job (Invoke-PimArm -Path $tjP -ApiVersion '2024-03-01')
+                    if ($sinOid) { $eng = Invoke-PimGraph -Path ("/servicePrincipals/{0}?`$select=id,displayName,servicePrincipalType,alternativeNames" -f $sinOid) }
+                } catch { $eng = $null }
+            }
+            if (-not $eng) { foreach ($nm in @('id-pim-engine', $engineJob)) {
                 $cands = Invoke-PimGraph -Path ("/servicePrincipals?`$filter=displayName eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $nm)
                 $eng = @(@($cands.value) | Where-Object { @($_.alternativeNames) | Where-Object { "$_".ToLowerInvariant().StartsWith($rgPrefix) } }) | Select-Object -First 1
                 if ($eng) { break }
-            }
+            } }
             if (-not $eng) { throw "the engine job's managed identity '$engineJob' was not found in this Manager's resource group ($rgPrefix) -- is the engine job deployed with a system-assigned identity?" }
-            $oid = "$($eng.id)"; $identityName = "$($eng.displayName) (engine job)"
+            $oid = "$($eng.id)"; $identityName = "Engine job: $engineJob - runs as $($eng.displayName)"   # framework NAMING-CONVENTIONS (owner 2026-11-09)
         } else {
             $oid = "$($self.id)"; $identityName = "$($self.displayName)"
         }
