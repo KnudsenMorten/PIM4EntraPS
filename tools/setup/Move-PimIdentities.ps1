@@ -46,6 +46,10 @@
   The roles whose job the script starts once for the proof. Default: engine (one tick).
 .PARAMETER NoCleanup
   Stop after the proof; the old rights stay (a later run without it removes them).
+.PARAMETER RootLater
+  When a right at the tenant root cannot be granted here (only the customer can grant it), the move still goes ahead
+  with every other right. The root right stays an open customer step, printed with its command. Without this switch
+  the move stops before anything is switched.
 .PARAMETER NeedOnly
   From a SHARED identity (user-assigned, worn by several apps / jobs) copy only the rights the role needs (the product's
   rights map per role); every right left behind is listed as "not copied". The SQL admin group is never copied to a role
@@ -82,6 +86,8 @@ param(
     [string[]]$PimGroupNames = @(),
     [string[]]$StartJobRoles = @('engine'),
     [switch]$NoCleanup,
+    # a right at the tenant root the customer has not granted yet: move anyway; it stays an OPEN customer step
+    [switch]$RootLater,
     [string]$LogDir = '',
     # framework 12.11c x 4.3 (Invardia 2026-11-08): from a SHARED identity copy only what the role needs; the rest is listed
     [switch]$NeedOnly,
@@ -155,7 +161,7 @@ try {
         # current state of the object" on the front's 302, internal 2026-11-08): .NET HttpClient, status + Location back
         $mvHttp = if ($Http) { $Http } else { { param($url) $hh = [System.Net.Http.HttpClientHandler]::new(); $hh.AllowAutoRedirect = $false; $hc = [System.Net.Http.HttpClient]::new($hh); $hc.Timeout = [TimeSpan]::FromSeconds(30)
                 try { $rsp = $hc.GetAsync($url).GetAwaiter().GetResult(); @{ status = [int]$rsp.StatusCode; location = "$($rsp.Headers.Location)"; error = '' } } catch { @{ status = 0; location = ''; error = "$($_.Exception.Message)" } } finally { $hc.Dispose() } } }
-        $mvRec = Invoke-PimIdentityMoveRole -Plan $plan -Role $ro -Arm $Arm -Graph $Graph -DbInit $DbInit -Prove $Prove -Sleep $Sleep -StartJobRoles $StartJobRoles -DryRun:$dry -NoCleanup:$NoCleanup -Http $mvHttp
+        $mvRec = Invoke-PimIdentityMoveRole -Plan $plan -Role $ro -Arm $Arm -Graph $Graph -DbInit $DbInit -Prove $Prove -Sleep $Sleep -StartJobRoles $StartJobRoles -DryRun:$dry -NoCleanup:$NoCleanup -RootLater:$RootLater -Http $mvHttp
         $records.Add($mvRec)
         foreach ($mvStep in @($mvRec.steps.ToArray())) {
             $mvLine = '  [' + [string]$mvStep.step + '] ' + [string]$mvStep.what

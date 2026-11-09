@@ -1199,9 +1199,9 @@ function Limit-PimManagerRoleByLicence {
 # ---------------------------------------------------------------------------
 # §98 DEMO MODE (owner 2026-10-07). The pure rules live in engine/_shared/PIM-DemoMode.ps1; these are the live
 # halves: the setting (pim.Settings DemoMode + DemoGuestGroup, read through a 15 s cache like ManagerAccess), the
-# group membership (the sign-in token's group claim, else the group's member list from Graph, cached 5 min), and the
-# request gate in Handle-Request. With DemoMode OFF -- the default -- Get-PimManagerDemoConfig answers off and NOTHING
-# else here runs: no Graph call, no role change, no gate.
+# group membership (the sign-in token's group claim, else the group's member list the ENGINE recorded -- 3.0.69, cache kind
+# 'demo-group' -- cached 5 min), and the request gate in Handle-Request. With DemoMode OFF -- the default --
+# Get-PimManagerDemoConfig answers off and NOTHING else here runs: no role change, no gate. The web app never calls Graph here.
 # ---------------------------------------------------------------------------
 function Get-PimManagerDemoConfig {
     # @{ on; group }. Fail direction: a store that cannot be read = OFF (the store being down already stops every write).
@@ -1229,27 +1229,24 @@ function Get-PimManagerDemoConfig {
 
 function Get-PimManagerDemoGroup {
     <#
-      The demo guest group's object id + its (transitive) user members, from Graph through the Manager's own identity
-      (the same Invoke-PimGraphGetAll every tenant read uses). Cached 5 minutes per group name. A group named by its
-      object id is read by id. Returns @{ ok; id; members; error } -- ok=$false when it could not be read.
+      The demo guest group's object id + its (transitive) user members, as the ENGINE recorded them (3.0.69). Cached 5
+      minutes per group name. Returns @{ ok; id; members; error } -- ok=$false when it is not recorded / not readable.
     #>
     param([Parameter(Mandatory)][string]$Group)
     $nowUtc = [datetime]::UtcNow
     $c = $script:PimDemoGroupCache
     if ($c -and $c.group -eq $Group -and ($nowUtc - $c.at).TotalSeconds -le 300) { return $c.value }
     $out = @{ ok = $false; id = ''; members = @(); error = '' }
+    # WEB-GRAPH-MIN-1 (3.0.69): the members come from the ENGINE's record (cache kind 'demo-group', written by its tenant-cache
+    # job while demo mode is on) -- the web app does not read group members from Graph. Not recorded yet, or recorded for
+    # another group name = not readable (ACC-1: nobody is a demo viewer then; a token group claim still counts).
     try {
-        if (-not (Get-Command Invoke-PimGraphGetAll -ErrorAction SilentlyContinue)) { throw 'no Graph reader in this Manager' }
-        $gid = ''
-        if ($Group -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') { $gid = $Group.ToLowerInvariant() }
-        else {
-            $flt = [uri]::EscapeDataString("displayName eq '$($Group.Replace("'", "''"))'")
-            $hits = @(foreach ($x in @(Invoke-PimGraphGetAll -Uri "https://graph.microsoft.com/v1.0/groups?`$filter=$flt&`$select=id,displayName")) { $x })   # flattens the comma-return
-            if ($hits.Count -ne 1) { throw ("the demo guest group was found {0} time(s) by its name (expected exactly once)" -f $hits.Count) }
-            $gid = "$($hits[0].id)".ToLowerInvariant()
-        }
-        $mem = @(foreach ($x in @(Invoke-PimGraphGetAll -Uri "https://graph.microsoft.com/v1.0/groups/$gid/transitiveMembers/microsoft.graph.user?`$select=id,userPrincipalName,mail,otherMails&`$top=999")) { $x })   # flattens the comma-return of Invoke-PimGraphGetAll
-        $out = @{ ok = $true; id = $gid; members = $mem; error = '' }
+        $f = Read-PimEngineFact -Kind 'demo-group'
+        if (-not $f.ok) { throw "$($f.reason)" }
+        $d = $f.value
+        if ("$($d.group)".Trim() -ine "$Group".Trim()) { throw (Get-PimEngineFactPendingText) }
+        if (-not $d.ok) { throw $(if ("$($d.error)".Trim()) { "$($d.error)" } else { Get-PimEngineFactPendingText }) }
+        $out = @{ ok = $true; id = "$($d.id)".ToLowerInvariant(); members = @($d.members); error = ''; refreshedUtc = "$($d.refreshedUtc)" }
     } catch { $out.error = "$($_.Exception.Message)" }
     $script:PimDemoGroupCache = @{ at = $nowUtc; group = $Group; value = $out }
     return $out
@@ -5355,8 +5352,11 @@ function Resolve-PimManagerRecipientUpns {
     if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { return $out }
     foreach ($a in @($Addresses | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^[^@\s;,'']+@[^@\s;,'']+\.[^@\s;,'']+$' } | Select-Object -Unique)) {
         try {
-            $f = [uri]::EscapeDataString("mail eq '$a' or userPrincipalName eq '$a' or proxyAddresses/any(p:p eq 'smtp:$a')")
-            $hits = @((Invoke-PimGraph -Path "/users?`$filter=$f&`$select=id,userPrincipalName,mail&`$count=true" -Headers @{ ConsistencyLevel = 'eventual' }).value | Where-Object { $_ })
+            # WEB-GRAPH-MIN-1 (3.0.69): basic profile only (User.ReadBasic.All) -- mail or userPrincipalName; proxyAddresses is
+            # NOT in the basic profile, so an alias-only address is left out (the caller then uses the address as before).
+            $al = $a.Replace("'", "''")
+            $f = [uri]::EscapeDataString("mail eq '$al' or userPrincipalName eq '$al'")
+            $hits = @((Invoke-PimGraph -Path "/users?`$filter=$f&`$select=id,userPrincipalName,mail").value | Where-Object { $_ })
             if ($hits.Count -eq 1 -and "$($hits[0].userPrincipalName)".Trim()) { $out[$a.ToLowerInvariant()] = @{ upn = "$($hits[0].userPrincipalName)".Trim() } }
         } catch { Write-Verbose "recipient UPN lookup for ${a}: $($_.Exception.Message)" }
     }
@@ -5883,7 +5883,10 @@ function Get-PimAdminTapState {
         $wanted = @($wanted | Where-Object { "$($_.UserPrincipalName)".Trim() -ieq "$Upn".Trim() })
     }
 
-    $canGraph = [bool](Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)
+    # WEB-GRAPH-MIN-1 (3.0.69): the pass state is the ENGINE's record (cache kind 'admin-tap-state', written by its tenant-cache
+    # job with UserAuthenticationMethod rights the web app does not hold). The web app reads no authentication method.
+    $tapFact = $null
+    if ($liveCheck) { $tapFact = Read-PimEngineFact -Kind 'admin-tap-state' }
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($r in $wanted) {
         $upn = "$($r.UserPrincipalName)".Trim()
@@ -5908,37 +5911,20 @@ function Get-PimAdminTapState {
             # The LIST: no Graph at all. 'unchecked' is its own state -- it is neither 'none' nor
             # 'usable', and the GUI refuses a write on it until the operator checks that one row.
             $status = 'unchecked'; $detail = ''
-        } elseif ($canGraph) {
-            try {
-                $uid = (Invoke-PimGraph -Path "/users/$upn`?`$select=id").id
-                if (-not "$uid".Trim()) {
-                    $status = 'unknown'; $detail = 'account not found in the directory (not yet created?)'
-                } else {
-                    # -All is LOAD-BEARING here for the same reason as in the engine
-                    # provider (BUG-51): without it this returns the response WRAPPER,
-                    # and @(wrapper).Count is 1 even when the user has NO TAP.
-                    $taps = @(Invoke-PimGraph -All -Path "/users/$uid/authentication/temporaryAccessPassMethods")
-                    if (-not $taps.Count) {
-                        $status = 'none'; $detail = 'no TAP -- the engine mints one on its next run'
-                    } else {
-                        $t = $taps[0]
-                        $created = "$($t.createdDateTime)"
-                        # isUsable is the field BUG-66 turned on: an EXISTING TAP is not
-                        # the same as a USABLE one, and the engine cannot tell them apart.
-                        if ("$($t.isUsable)" -match '(?i)true') {
-                            $status = 'usable'; $detail = 'active'
-                        } else {
-                            $status = 'expired'
-                            $detail = "$($t.methodUsabilityReason)"
-                            if (-not $detail) { $detail = 'not usable' }
-                        }
-                    }
-                }
-            } catch {
-                $status = 'unknown'; $detail = "Graph read failed: $($_.Exception.Message)"
+        } elseif ($tapFact -and $tapFact.ok) {
+            # usable | expired | none | unknown, exactly as the engine read it (isUsable decides usable vs expired, BUG-66)
+            $e = $null
+            $accs = $tapFact.value.accounts
+            if ($accs) { $p = $accs.PSObject.Properties[$upn.ToLowerInvariant()]; if ($p) { $e = $p.Value } }
+            if ($e) {
+                $status = "$($e.status)"; if (-not $status) { $status = 'unknown' }
+                $detail = "$($e.detail)"; $created = "$($e.createdDateTime)"
+                if ("$($tapFact.refreshedUtc)".Trim()) { $detail = ("$detail (as the engine read it at $($tapFact.refreshedUtc))").Trim() }
+            } else {
+                $status = 'unknown'; $detail = Get-PimEngineFactPendingText
             }
         } else {
-            $detail = 'no Graph client in this runtime'
+            $status = 'unknown'; $detail = $(if ($tapFact -and "$($tapFact.reason)".Trim()) { "$($tapFact.reason)" } else { Get-PimEngineFactPendingText })
         }
 
         [void]$out.Add([ordered]@{
@@ -6011,11 +5997,14 @@ function Get-PimManagerMailIdentities {
     if ($script:PimMailIdCache -and ((Get-Date) - $script:PimMailIdCache.at).TotalMinutes -lt 10) { return $script:PimMailIdCache.value }
     $o = [ordered]@{ managerObjectId = ''; managerIdentityName = ''; managerAppName = ''; tickObjectId = ''; tickIdentityName = ''; subscriptionId = ''; resourceGroup = ''; tickJobName = ''; reason = '' }
     try {
-        $appId = "$($global:PIM_RuntimeAppId)"
-        if (-not $appId) { $appId = "$($env:AZURE_CLIENT_ID)" }
-        if (-not $appId -and (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { $t = $null; try { $t = Get-PimRestToken -Resource graph } catch { }; $appId = Get-PimTokenAppId -Token "$t" }
+        # WEB-GRAPH-MIN-1 (3.0.69): WHO the web app is comes from its OWN token (oid / appid / xms_mirid) -- no Graph call;
+        # the engine's identity from the engine job (an ARM read in this resource group) or the engine's own record.
+        $me = Get-PimManagerSelfIdentity
+        $appId = "$($me.appId)"
         if ($appId) {
-            $self = @((Invoke-PimGraph -Path ("/servicePrincipals?`$filter=appId eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $appId)).value) | Select-Object -First 1
+            $self = $null
+            if ("$($me.objectId)" -and "$($me.resourceId)") { $self = [pscustomobject]@{ id = "$($me.objectId)"; displayName = "$($me.name)"; servicePrincipalType = 'ManagedIdentity'; alternativeNames = @("$($me.resourceId)") } }
+            elseif ("$($me.objectId)") { $self = [pscustomobject]@{ id = "$($me.objectId)"; displayName = ''; servicePrincipalType = 'Application'; alternativeNames = @() } }
             if ($self -and "$($self.servicePrincipalType)" -eq 'ManagedIdentity') {
                 $o.managerObjectId = "$($self.id)"; $o.managerIdentityName = "$($self.displayName)"
                 $rid = @(@($self.alternativeNames) | Where-Object { "$_" -match '^/subscriptions/' }) | Select-Object -First 1
@@ -6042,12 +6031,22 @@ function Get-PimManagerMailIdentities {
                     # install not moved). Never print an old identity when the moved one exists.
                     $rgPrefix = ("$rid" -replace '(?i)^(/subscriptions/[^/]+/resourcegroups/[^/]+/).*$', '$1').ToLowerInvariant()
                     foreach ($spName in @('id-pim-engine', $job)) {
-                        $cands = Invoke-PimGraph -Path ("/servicePrincipals?`$filter=displayName eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $spName)
+                        $cands = $null; try { $cands = Invoke-PimEngineRecordedGraph -Path ("/servicePrincipals?`$filter=displayName eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $spName) } catch { $cands = $null }
                         $eng = @(@($cands.value) | Where-Object { @($_.alternativeNames) | Where-Object { "$_".ToLowerInvariant().StartsWith($rgPrefix) } }) | Select-Object -First 1
                         if ($eng) { $o.tickObjectId = "$($eng.id)"; $o.tickIdentityName = "$($eng.displayName)"; break }
                     }
                 }
+                if (-not $o.tickObjectId) {
+                    # the identity the engine recorded its own reads as (cache 'pim-identities')
+                    $bk = Get-PimEngineRecordedBook
+                    if ($bk -and "$($bk.engineObjectId)".Trim()) {
+                        $o.tickObjectId = "$($bk.engineObjectId)".Trim()
+                        $eo = $null; try { $eo = Invoke-PimEngineRecordedGraph -Path "/servicePrincipals/$($o.tickObjectId)" } catch { $eo = $null }
+                        if ($eo) { $o.tickIdentityName = "$($eo.displayName)" }
+                    }
+                }
             } elseif ($self) { $o.reason = 'this Manager does not run as a managed identity (a local run): the identities are named by the deploy' }
+            else { $o.reason = 'the identity this Manager runs as could not be read from its own sign-in token' }
         } else { $o.reason = 'the identity this Manager runs as could not be resolved' }
     } catch { $o.reason = "$(($_.Exception.Message -split "`n")[0])" }
     $script:PimMailIdCache = @{ at = (Get-Date); value = $o }
@@ -6088,8 +6087,9 @@ function Get-PimManagerMailChecks {
                              sqlServer = $(if ("$($global:PIM_SqlServer)".Trim()) { "$($global:PIM_SqlServer)".Trim() } else { "$($env:PIM_SqlServer)".Trim() }); vaultHint = "$($global:PIM_EmergencyVault)".Trim() }
         $mode = if ($facts['mode']) { $facts['mode'] } elseif ($sender) { 'sharedMailbox' } else { '' }
         if ($mode -eq 'sharedMailbox' -and $sender) {
+            # WEB-GRAPH-MIN-1 (3.0.69): the sender as the ENGINE read it (recorded answers, cache 'pim-identities')
             try {
-                $u = Invoke-PimGraph -Path ("/users/{0}?`$select=id,userPrincipalName,mail" -f [uri]::EscapeDataString($sender))
+                $u = Invoke-PimEngineRecordedGraph -Path ("/users/{0}?`$select=id,userPrincipalName,mail" -f [uri]::EscapeDataString($sender))
                 $facts['senderLookup'] = @{ found = [bool]"$($u.id)"; upn = "$($u.userPrincipalName)"; mail = "$($u.mail)" }
             } catch {
                 $m = "$($_.Exception.Message) $($_.ErrorDetails.Message)"
@@ -6100,7 +6100,7 @@ function Get-PimManagerMailChecks {
         if ($proof -is [string]) { try { $proof = $proof | ConvertFrom-Json } catch { $proof = $null } }
         $pget = { param($n) if ($null -eq $proof) { $null } elseif ($proof -is [System.Collections.IDictionary]) { $proof[$n] } elseif ($proof.PSObject.Properties[$n]) { $proof.$n } else { $null } }
         $graphSpId = ''
-        try { $graphSpId = "$((@((Invoke-PimGraph -Path "/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'&`$select=id").value) | Select-Object -First 1).id)" } catch { $graphSpId = '' }
+        try { $graphSpId = "$((@((Invoke-PimEngineRecordedGraph -Path "/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'&`$select=id").value) | Select-Object -First 1).id)" } catch { $graphSpId = '' }
         $idList = @()
         # framework NAMING-CONVENTIONS (owner 2026-11-09): "<Role> job: <its real job name> - runs as <its identity>" -- the TRUE
         # current names, read live, never one mixed name: "Engine job: ca-pim-tick - runs as id-pim-engine", "Web app: ca-pim-manager - runs as id-pim-web"
@@ -6109,7 +6109,7 @@ function Get-PimManagerMailChecks {
         $webLbl = "Web app: $webApp$(if ("$($ids.managerIdentityName)".Trim()) { " - runs as $($ids.managerIdentityName)" })"
         foreach ($x in @(@{ role = 'engine'; oid = "$($ids.tickObjectId)"; label = $engLbl }, @{ role = 'manager'; oid = "$($ids.managerObjectId)"; label = $webLbl })) {
             $tw = $null
-            if ($x.oid -and $graphSpId) { try { $tw = Test-PimTenantWideMailSend -Assignments @(Invoke-PimGraph -All -Path "/servicePrincipals/$($x.oid)/appRoleAssignments") -GraphSpId $graphSpId } catch { $tw = $null } }
+            if ($x.oid -and $graphSpId) { try { $tw = Test-PimTenantWideMailSend -Assignments @(Invoke-PimEngineRecordedGraph -All -Path "/servicePrincipals/$($x.oid)/appRoleAssignments") -GraphSpId $graphSpId } catch { $tw = $null } }
             $idList += @{ role = $x.role; label = $x.label; proof = (& $pget $x.role); tenantWideMailSend = $tw }
         }
         $facts['identities'] = $idList
@@ -8653,30 +8653,8 @@ function Get-PimManagerTenantContext {
         } catch { $cachedName = $null }
     }
 
-    # 2. When a live tenant connection is available, ask Graph for the org name
-    #    and refresh the cache. Best-effort: any failure leaves $cachedName.
-    $canQuery = $script:PimManagerTenantConnected -or
-                ((Get-Command Test-PimRestTenantAuthAvailable -ErrorAction SilentlyContinue) -and (Test-PimRestTenantAuthAvailable))
-    if ($canQuery -and (Get-Command Invoke-PimGraphGetAll -ErrorAction SilentlyContinue)) {
-        try {
-            $orgs = @(Invoke-PimGraphGetAll -Uri 'https://graph.microsoft.com/v1.0/organization?$select=id,displayName')
-            $org  = $orgs | Select-Object -First 1
-            $name = if ($org) { "$($org.displayName)" } else { $null }
-            if ($name) {
-                $cachedName = $name
-                if ($haveCache -and $name -ne "$($c.tenantName)") {
-                    try {
-                        [void](Set-PimTenantCacheEntry -Kind 'tenant-org' -Value ([ordered]@{
-                            tenantId     = $tenantId
-                            tenantName   = $name
-                            refreshedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-                        }))
-                    } catch { Write-Verbose "tenant-name cache write skipped: $($_.Exception.Message)" }
-                }
-            }
-        } catch { Write-Verbose "tenant-name resolve skipped: $($_.Exception.Message)" }
-    }
-
+    # 2. WEB-GRAPH-MIN-1 (3.0.69): no live read here any more -- the ENGINE's tenant-cache job writes 'tenant-org' (the
+    #    organisation's name + domains). Until it has, the name is $null and the GUI shows the tenant id.
     return [ordered]@{ tenantId = $tenantId; tenantName = $cachedName }
 }
 
@@ -8744,40 +8722,18 @@ function Get-PimTenantDefaultDomain {
 }
 
 function Get-PimManagerTenantDomains {
+    # WEB-GRAPH-MIN-1 (3.0.69): the ENGINE's record only -- its tenant-cache job writes 'tenant-domains' (and the same list
+    # inside 'tenant-org') from organization.verifiedDomains. The web app no longer reads /domains or /organization; with
+    # no record yet the caller still REFUSES to save a domain it cannot verify (known = $false), never guesses one.
     $haveCache = [bool](Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue)
     $reason = ''
-    $canQuery = $script:PimManagerTenantConnected -or
-                ((Get-Command Test-PimRestTenantAuthAvailable -ErrorAction SilentlyContinue) -and (Test-PimRestTenantAuthAvailable))
-    if (-not $canQuery) { $reason = 'this Manager process has no tenant connection' }
-    elseif (-not (Get-Command Invoke-PimGraphGetAll -ErrorAction SilentlyContinue)) { $reason = 'the Graph client is not loaded in this process' }
-    if ($canQuery -and (Get-Command Invoke-PimGraphGetAll -ErrorAction SilentlyContinue)) {
-        $list = @()
-        # (a) /domains -- the whole list, but it needs Domain.Read.All.
+    if ($haveCache) {
         try {
-            $rows = @(Invoke-PimGraphGetAll -Uri 'https://graph.microsoft.com/v1.0/domains?$select=id,isDefault,isInitial,isVerified')
-            $list = @(ConvertTo-PimTenantDomainList -Rows $rows -NameProperty 'id')
-            if (-not $list.Count) { $reason = 'Graph /domains returned no verified domain' }
-        } catch { $reason = "Graph /domains: $($_.Exception.Message)"; Write-Verbose "tenant-domains /domains read skipped: $($_.Exception.Message)" }
-        # (b) THE SAME LIST off the organization object -- verifiedDomains[] -- which the Manager already
-        #     reads for the tenant name, so it works on the permissions we know this process has
-        #     (Organization.Read.All / Directory.Read.All) rather than needing Domain.Read.All as well.
-        #     🔴 Operator 2026-09-20 ("i must be able to select it ... from a list"): with only source (a),
-        #     a tenant whose app is not consented Domain.Read.All got an EMPTY dropdown -- one option,
-        #     "Tenant default domain", nothing to choose. A second source is the difference between a
-        #     list and no list, and it costs one call that already succeeds elsewhere on this page.
-        if (-not $list.Count) {
-            try {
-                $orgs = @(Invoke-PimGraphGetAll -Uri 'https://graph.microsoft.com/v1.0/organization?$select=verifiedDomains')
-                $vd   = @(@($orgs) | ForEach-Object { $_.verifiedDomains } | Where-Object { $_ })
-                $list = @(ConvertTo-PimTenantDomainList -Rows $vd -NameProperty 'name')
-                if ($list.Count) { $reason = '' } elseif (-not $reason) { $reason = 'Graph /organization carried no verifiedDomains' }
-            } catch { if (-not $reason) { $reason = "Graph /organization: $($_.Exception.Message)" } }
-        }
-        if ($list.Count) {
-            $val = [ordered]@{ domains = @($list); refreshedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
-            if ($haveCache) { try { [void](Set-PimTenantCacheEntry -Kind 'tenant-domains' -Value $val) } catch { Write-Verbose "tenant-domains cache write skipped: $($_.Exception.Message)" } }
-            return [ordered]@{ known = $true; source = 'live'; domains = @($list); refreshedUtc = $val.refreshedUtc; reason = '' }
-        }
+            $o = Get-PimTenantCacheEntry -Kind 'tenant-org'
+            if ($o -and @($o.domains).Count) {
+                return [ordered]@{ known = $true; source = 'engine'; domains = @(ConvertTo-PimTenantDomainList -Rows @($o.domains) -NameProperty 'id'); refreshedUtc = "$($o.refreshedUtc)"; reason = '' }
+            }
+        } catch { $reason = "the engine's tenant record could not be read: $($_.Exception.Message)" }
     }
     if ($haveCache) {
         try {
@@ -8788,7 +8744,7 @@ function Get-PimManagerTenantDomains {
             }
         } catch { if (-not $reason) { $reason = "the cached domain list could not be read: $($_.Exception.Message)" } }
     }
-    return [ordered]@{ known = $false; source = 'none'; domains = @(); refreshedUtc = ''; reason = $(if ($reason) { $reason } else { 'no source returned a verified domain' }) }
+    return [ordered]@{ known = $false; source = 'none'; domains = @(); refreshedUtc = ''; reason = $(if ($reason) { $reason } else { "the tenant's domains: $(Get-PimEngineFactPendingText)" }) }
 }
 
 function Test-PimGraphRowLive {
@@ -10297,20 +10253,12 @@ function Get-PimSupportDiagnostics {
         $checks.Add((Get-PimConnectivityCheck -Surface 'sql' -Configured $false))
     }
 
-    # Graph: a tiny org read proves reachability + the engine SPN's directory read.
-    $graphReach = $false; $graphStatus = 0; $graphErr = ''; $graphPath = '/v1.0/organization'
-    try {
-        Initialize-PimManagerTenantConnection
-        if (Get-Command Invoke-PimGraphGetAll -ErrorAction SilentlyContinue) {
-            $null = @(Invoke-PimGraphGetAll -Uri 'https://graph.microsoft.com/v1.0/organization?$select=id')
-            $graphReach = $true; $graphStatus = 200
-        } else {
-            $graphErr = 'Graph client (Invoke-PimGraphGetAll) not available in this runtime.'
-        }
-    } catch {
-        $graphErr = "$($_.Exception.Message)"
-        if ($graphErr -match '(?i)\b(401|403)\b' -or (Test-PimIsAuthForbidden -ErrorBody $graphErr)) { $graphStatus = 403; $graphReach = $true } else { $graphReach = $false }
-    }
+    # Graph: WEB-GRAPH-MIN-1 (3.0.69) -- the ENGINE checks Graph, the web app does not. The verdict is the engine's last
+    # tenant-cache run: its organisation read (kind 'tenant-org') and its recorded directory answers ('pim-identities').
+    $graphReach = $false; $graphStatus = 0; $graphErr = ''; $graphPath = 'the engine (tenant cache)'
+    $orgF = Read-PimEngineFact -Kind 'tenant-org'
+    if ($orgF.ok -and "$($orgF.value.id)".Trim()) { $graphReach = $true; $graphStatus = 200 }
+    else { $graphErr = "the engine checks Microsoft Graph: $($orgF.reason)" }
     $checks.Add((Get-PimConnectivityCheck -Surface 'graph' -Reachable $graphReach -StatusCode $graphStatus -ErrorMessage $graphErr -ProbePath $graphPath -Configured $true))
 
     # ARM: only when an Azure scope is in play for this instance.
@@ -10322,19 +10270,17 @@ function Get-PimSupportDiagnostics {
         }
     } catch {}
     if ($armConfigured) {
+        # WEB-GRAPH-MIN-1 (3.0.69): the web app reads nothing above its resource group -- the subscription list is the
+        # ENGINE's read (recorded answers); "not recorded yet" is reported as such, never as unreachable.
         $armReach = $false; $armStatus = 0; $armErr = ''
         try {
-            if (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue) {
-                # BUG-273 (found by the BUG-271 parameter check): was `-Uri`, which Invoke-PimArm does not have -- the
-                # probe never ran and ARM always read "unreachable: parameter cannot be found". -Path takes a full URL.
-                $null = Invoke-PimArm -Method GET -Path 'https://management.azure.com/subscriptions?api-version=2020-01-01'
-                $armReach = $true; $armStatus = 200
-            } else { $armErr = 'ARM client (Invoke-PimArm) not available in this runtime.' }
+            $null = Invoke-PimEngineRecordedArm -Path '/subscriptions'
+            $armReach = $true; $armStatus = 200
         } catch {
-            $armErr = "$($_.Exception.Message)"
-            if (Test-PimIsAuthForbidden -ErrorBody $armErr) { $armStatus = 403; $armReach = $true }
+            $armErr = "the engine checks Azure Resource Manager: $($_.Exception.Message)"
+            if (Test-PimIsAuthForbidden -ErrorBody "$($_.Exception.Message)") { $armStatus = 403; $armReach = $true }
         }
-        $checks.Add((Get-PimConnectivityCheck -Surface 'arm' -Reachable $armReach -StatusCode $armStatus -ErrorMessage $armErr -ProbePath '/subscriptions' -Configured $true))
+        $checks.Add((Get-PimConnectivityCheck -Surface 'arm' -Reachable $armReach -StatusCode $armStatus -ErrorMessage $armErr -ProbePath 'the engine (tenant cache)' -Configured $true))
     } else {
         $checks.Add((Get-PimConnectivityCheck -Surface 'arm' -Configured $false))
     }
@@ -11184,18 +11130,32 @@ function ConvertTo-OrderedRow {
 # job 'active-assignments-snapshot'; this process reads the stored snapshot (Get-PimActiveAssignmentsCached).
 # ---------------------------------------------------------------------------
 
+function Request-PimManagerEngineTenantCache {
+    <#
+      WEB-GRAPH-MIN-1 (3.0.69, owner 2026-11-09: "i thought it runs through the engine"): ask the ENGINE to read the tenant
+      lists / directory facts -- a trigger for its 'tenant-cache' job (the same queue Run now uses), then the engine job is
+      started now (Start-PimManagerTickNow). The web app never reads them itself. -Scope 'admin-import' = only the accounts
+      an "Import" asked for. Returns @{ queued; started; detail }. Never throws.
+      Seams (tests): -AddTrigger / -KickTick.
+    #>
+    param([string]$Scope = 'All', [string]$Reason = 'manager', [scriptblock]$AddTrigger, [scriptblock]$KickTick)
+    if (-not $AddTrigger) { $AddTrigger = { param($s, $r) if (-not (Get-Command Add-PimJobTrigger -ErrorAction SilentlyContinue)) { throw 'the scheduler trigger queue is not loaded' }; [void](Add-PimJobTrigger -Type 'tenant-cache' -Scope $s -Reason $r -JobName 'tenant-cache') } }
+    if (-not $KickTick) { $KickTick = { param($r) if (Get-Command Start-PimManagerTickNow -ErrorAction SilentlyContinue) { Start-PimManagerTickNow -Reason $r } else { $null } } }
+    try { & $AddTrigger $Scope $Reason }
+    catch { return [pscustomobject]@{ queued = $false; started = $false; detail = "the engine could not be asked to read the tenant: $($_.Exception.Message)" } }
+    $k = $null; try { $k = & $KickTick $Reason } catch { $k = $null }
+    $started = [bool]($k -and $k.started)
+    return [pscustomobject]@{ queued = $true; started = $started
+        detail = $(if ($started) { 'queued -- the engine reads the tenant now; done in about a minute' } else { "queued -- the engine reads the tenant on its next run$(if ($k -and "$($k.detail)".Trim()) { " ($($k.detail))" })" }) }
+}
+
 function Initialize-PimManagerTenantCache {
-    # Auto-populate the per-instance tenant-list cache (entra-roles, AUs,
-    # PIM groups, azure scopes, azure RBAC roles) when it is empty/stale, so the
-    # role-name freshness badge + the autocomplete pickers work in HOSTED mode
-    # WITHOUT a manual -RefreshTenantLists run (the container has no operator to
-    # run that). Best-effort + non-fatal: if there is no usable tenant auth, or
-    # Graph/ARM is unreachable, the Manager still serves the SQL data; the badge
-    # just shows "skipped" until auth/permissions are fixed. Driven from startup
-    # (hosted) and lazily on first /api/tenant-lists when the cache is missing.
+    # Make sure the tenant-list cache (entra-roles, AUs, PIM groups, azure scopes, azure RBAC roles + the directory facts)
+    # exists in HOSTED mode. WEB-GRAPH-MIN-1 (3.0.69): when it is empty / stale the web app QUEUES the engine's
+    # 'tenant-cache' job (Request-PimManagerEngineTenantCache) -- it never reads Graph / Azure itself any more (it ran
+    # Invoke-PimTenantListRefresh here, with the web app's own identity). At most one request per 30 minutes per process.
+    # Returns $true when the cache is fresh, $false when a refresh was asked for (or could not be). Never throws.
     param([switch]$Force, [int]$MaxAgeHours = 24)
-    if (-not (Get-Command Invoke-PimTenantListRefresh -ErrorAction SilentlyContinue)) { return $false }
-    if (-not (Get-Command Assert-PimTenantConnectionContext -ErrorAction SilentlyContinue)) { return $false }
 
     if (-not $Force) {
         # Skip when entra-roles is present AND fresh (the canonical freshness signal).
@@ -11209,23 +11169,12 @@ function Initialize-PimManagerTenantCache {
         } catch { }
     }
 
-    # Verify auth context is even possible before attempting -- avoids a noisy
-    # throw on every startup when the container has no SPN/MI configured yet.
-    try { [void](Assert-PimTenantConnectionContext) }
-    catch {
-        Write-Host ("  [tenant-cache] not populated -- no tenant auth context: {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow
-        return $false
-    }
-    try {
-        Write-Host "  [tenant-cache] populating (hosted auto-refresh) ..." -ForegroundColor Cyan
-        $r = Invoke-PimTenantListRefresh -Quiet
-        if ($r.ok) { Write-Host "  [tenant-cache] populated." -ForegroundColor Green; return $true }
-        Write-Host ("  [tenant-cache] refresh did not complete: {0}" -f ($r.reason | Out-String).Trim()) -ForegroundColor DarkYellow
-        return $false
-    } catch {
-        Write-Host ("  [tenant-cache] refresh failed (non-fatal): {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow
-        return $false
-    }
+    $now = [datetime]::UtcNow
+    if (-not $Force -and $script:PimTenantCacheAskedAt -and ($now - $script:PimTenantCacheAskedAt).TotalMinutes -lt 30) { return $false }
+    $script:PimTenantCacheAskedAt = $now
+    $q = Request-PimManagerEngineTenantCache -Scope 'All' -Reason 'tenant-cache-stale'
+    Write-Host ("  [tenant-cache] the lists are missing or stale -- {0}" -f $q.detail) -ForegroundColor DarkYellow
+    return $false
 }
 
 function Get-PimActiveAssignmentsSnapshotCadenceMinutes {
@@ -11954,17 +11903,18 @@ function Get-PimManagerPermissionHealthBody {
         #      would report every write permission missing. So: find the engine job's identity in the SAME
         #      resource group as this Manager (a managed identity's alternativeNames carry its resource id)
         #      and check THAT. Run locally, the Manager and the engine share one app identity -> check itself.
-        $appId = "$($global:PIM_RuntimeAppId)"
-        if (-not $appId) { $appId = "$($env:AZURE_CLIENT_ID)" }
-        if (-not $appId -and (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) {
-            $tok = $null
-            try { $tok = Get-PimRestToken -Resource graph } catch { $tok = $null }
-            $appId = Get-PimTokenAppId -Token "$tok"
+        # WEB-GRAPH-MIN-1 (3.0.69, owner 2026-11-09): this check makes NO Graph call and NO Azure read above this resource
+        # group. Who the web app is: its own token. Who the engine is: the engine job (an ARM read in this resource group)
+        # or the engine's own record. What the engine holds: the answers the ENGINE recorded (cache 'pim-identities').
+        $me = Get-PimManagerSelfIdentity
+        $appId = "$($me.appId)"
+        if (-not $appId -and -not "$($me.objectId)") { throw 'the identity this Manager runs as could not be resolved (no client id configured, and no app id in its Graph token)' }
+        $self = [pscustomobject]@{ id = "$($me.objectId)"; displayName = "$($me.name)"; servicePrincipalType = $(if ("$($me.resourceId)") { 'ManagedIdentity' } else { 'Application' }); alternativeNames = @(@("$($me.resourceId)") | Where-Object { $_ }) }
+        if (-not "$($self.id)") {
+            $sv = $null; try { $sv = Invoke-PimEngineRecordedGraph -Path ("/servicePrincipals?`$filter=appId eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $appId) } catch { $sv = $null }
+            if (-not $sv -or -not $sv.value) { throw "this Manager's own identity (app id $appId) -- $(Get-PimEngineFactPendingText)" }
+            $self = $sv.value[0]
         }
-        if (-not $appId) { throw 'the identity this Manager runs as could not be resolved (no client id configured, and no app id in its Graph token)' }
-        $self = Invoke-PimGraph -Path ("/servicePrincipals?`$filter=appId eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $appId)
-        if (-not $self.value) { throw "no service principal found for this Manager's app id $appId" }
-        $self = $self.value[0]
         $selfRid = @(@($self.alternativeNames) | Where-Object { "$_" -match '^/subscriptions/' }) | Select-Object -First 1
         if ("$($self.servicePrincipalType)" -eq 'ManagedIdentity' -and $selfRid) {
             # CR5 step 1 (PIM 100.149): the install record (incl. PIM_ENGINE_JOB_NAME); today's name is the default
@@ -11979,25 +11929,34 @@ function Get-PimManagerPermissionHealthBody {
             $tjP = Get-PimManagerTickJobId
             if ($tjP -and (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)) {
                 try {
-                    $sinOid = Resolve-PimManagerJobSignInObjectId -Job (Invoke-PimArm -Path $tjP -ApiVersion '2024-03-01')
-                    if ($sinOid) { $eng = Invoke-PimGraph -Path ("/servicePrincipals/{0}?`$select=id,displayName,servicePrincipalType,alternativeNames" -f $sinOid) }
+                    # the engine job is in THIS resource group (the web app's Reader there) -- the one Azure read this check makes
+                    $tjObj = Invoke-PimArm -Path $tjP -ApiVersion '2024-03-01'
+                    $sinOid = Resolve-PimManagerJobSignInObjectId -Job $tjObj
+                    if ($sinOid) {
+                        $eng = $null; try { $eng = Invoke-PimEngineRecordedGraph -Path ("/servicePrincipals/{0}?`$select=id,displayName,servicePrincipalType,alternativeNames" -f $sinOid) } catch { $eng = $null }
+                        if (-not $eng) { $sinNm = Resolve-PimManagerJobSignInName -Job $tjObj; $eng = [pscustomobject]@{ id = $sinOid; displayName = $(if ("$sinNm".Trim()) { "$sinNm" } else { 'the engine identity' }); servicePrincipalType = 'ManagedIdentity'; alternativeNames = @() } }
+                    }
                 } catch { $eng = $null }
             }
             if (-not $eng) { foreach ($nm in @('id-pim-engine', $engineJob)) {
-                $cands = Invoke-PimGraph -Path ("/servicePrincipals?`$filter=displayName eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $nm)
+                $cands = $null; try { $cands = Invoke-PimEngineRecordedGraph -Path ("/servicePrincipals?`$filter=displayName eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $nm) } catch { $cands = $null }
                 $eng = @(@($cands.value) | Where-Object { @($_.alternativeNames) | Where-Object { "$_".ToLowerInvariant().StartsWith($rgPrefix) } }) | Select-Object -First 1
                 if ($eng) { break }
             } }
+            if (-not $eng) {
+                $bkE = Get-PimEngineRecordedBook
+                if ($bkE -and "$($bkE.engineObjectId)".Trim()) { $eng = $null; try { $eng = Invoke-PimEngineRecordedGraph -Path "/servicePrincipals/$($bkE.engineObjectId)" } catch { $eng = [pscustomobject]@{ id = "$($bkE.engineObjectId)"; displayName = 'the engine identity' } } }
+            }
             if (-not $eng) { throw "the engine job's managed identity '$engineJob' was not found in this Manager's resource group ($rgPrefix) -- is the engine job deployed with a system-assigned identity?" }
             $oid = "$($eng.id)"; $identityName = "Engine job: $engineJob - runs as $($eng.displayName)"   # framework NAMING-CONVENTIONS (owner 2026-11-09)
         } else {
             $oid = "$($self.id)"; $identityName = "$($self.displayName)"
         }
         if ($oid) {
-            $graphSp = Invoke-PimGraph -Path "/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'&`$select=id,appRoles"
+            $graphSp = Invoke-PimEngineRecordedGraph -Path "/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'&`$select=id,appRoles"
             $gid = "$($graphSp.value[0].id)"
             $roleById = @{}; foreach ($r in $graphSp.value[0].appRoles) { $roleById["$($r.id)"] = "$($r.value)" }
-            $asg = @(Invoke-PimGraph -All -Path "/servicePrincipals/$oid/appRoleAssignments")
+            $asg = @(Invoke-PimEngineRecordedGraph -All -Path "/servicePrincipals/$oid/appRoleAssignments")
             $granted = @($asg | Where-Object { "$($_.resourceId)" -eq $gid } | ForEach-Object { $roleById["$($_.appRoleId)"] } | Where-Object { $_ })
             $readable = $true
         }
@@ -12017,14 +11976,16 @@ function Get-PimManagerPermissionHealthBody {
     try {
         if ($global:PIM_AzureScopes) { $azScopes = @($global:PIM_AzureScopes) }
     } catch { }
-    if (-not @($azScopes).Count -and $oid -and (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)) {
+    if (-not @($azScopes).Count -and $oid) {
         # Owner, User Access Administrator, Role Based Access Control Administrator -- the roles that can write role assignments.
+        # WEB-GRAPH-MIN-1 (3.0.69): the subscription list and the assignments are the ENGINE's reads (recorded answers);
+        # the web app reads nothing above its resource group.
         $rbacWriters = @('8e3af657-a8ff-443c-a75c-2fe8c4bcb635', '18d7d88d-d35e-4fb5-a5c3-7773c20a72d9', 'f58310d9-a9f6-439a-9e8d-f62e7b41a168')
         try {
-            $subs = @((Invoke-PimArm -Path '/subscriptions' -ApiVersion '2022-12-01').value | Select-Object -First 10)
+            $subs = @((Invoke-PimEngineRecordedArm -Path '/subscriptions').value | Select-Object -First 10)
             $found = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
             foreach ($s in $subs) {
-                $ra = Invoke-PimArm -Path ("/subscriptions/{0}/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{1}')" -f $s.subscriptionId, $oid)
+                $ra = $null; try { $ra = Invoke-PimEngineRecordedArm -Path ("/subscriptions/{0}/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{1}')" -f $s.subscriptionId, $oid) } catch { $ra = $null }
                 foreach ($a in @($ra.value)) {
                     $rd = "$($a.properties.roleDefinitionId)".ToLowerInvariant()
                     if ($rbacWriters | Where-Object { $rd.EndsWith($_) }) { [void]$found.Add("$($a.properties.scope)") }
@@ -12068,13 +12029,14 @@ function Get-PimManagerPermissionHealthBody {
     # which carries the ones INHERITED from the root. Unreadable = $null = "not checked", never "missing".
     $permTid = $(if ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)".Trim() } else { "$($env:PIM_TenantId)".Trim() })
     $rootReader = $null; $rootUaa = $null
-    if ($oid -and $permTid -and (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue) -and (Get-Command Get-PimRootAzureHoldings -ErrorAction SilentlyContinue)) {
+    if ($oid -and $permTid -and (Get-Command Get-PimRootAzureHoldings -ErrorAction SilentlyContinue)) {
         $rootAsg = $null
-        try { $rootAsg = @((Invoke-PimArm -Path ("/providers/Microsoft.Management/managementGroups/{0}/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{1}')" -f $permTid, $oid)).value) } catch { $rootAsg = $null }
+        # WEB-GRAPH-MIN-1 (3.0.69): the ENGINE's recorded reads of the tenant root / a subscription -- never the web app's
+        try { $rootAsg = @((Invoke-PimEngineRecordedArm -Path ("/providers/Microsoft.Management/managementGroups/{0}/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{1}')" -f $permTid, $oid)).value) } catch { $rootAsg = $null }
         if ($null -eq $rootAsg) {
             try {
-                $s1 = @((Invoke-PimArm -Path '/subscriptions' -ApiVersion '2022-12-01').value | Select-Object -First 1)
-                if ($s1.Count) { $rootAsg = @((Invoke-PimArm -Path ("/subscriptions/{0}/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{1}')" -f $s1[0].subscriptionId, $oid)).value) }
+                $s1 = @((Invoke-PimEngineRecordedArm -Path '/subscriptions').value | Select-Object -First 1)
+                if ($s1.Count) { $rootAsg = @((Invoke-PimEngineRecordedArm -Path ("/subscriptions/{0}/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{1}')" -f $s1[0].subscriptionId, $oid)).value) }
             } catch { $rootAsg = $null }
         }
         if ($null -ne $rootAsg) {
@@ -12206,8 +12168,13 @@ function Get-PimManagerEnvironmentReport {
     }
     $envRepCs = ''; try { $envRepCs = "$(Get-PimManagerStoreCs)".Trim() } catch { $envRepCs = '' }
     $envRepRefresh = [bool]$Refresh
-    $envRepGraph = { param($Method, $Path, $Body) if ($null -ne $Body) { Invoke-PimGraph -Method $Method -Path $Path -Body $Body } else { Invoke-PimGraph -Method $Method -Path $Path } }
-    $envRepArm = { param($Path) Invoke-PimArm -Path $Path }
+    # WEB-GRAPH-MIN-1 (3.0.69, owner 2026-11-09): the report's directory reads are the ENGINE's recorded answers (cache
+    # 'pim-identities') -- the web app calls no Graph here. Azure: this install's OWN resource group is read live (the web
+    # app's Reader there); anything above it (subscription / tenant-root role assignments) is the engine's recorded read.
+    $envRepGraph = { param($Method, $Path, $Body) Invoke-PimEngineRecordedGraph -Method $Method -Path $Path -Body $Body }
+    $envRepRg = ''
+    try { $envRepMe = Get-PimManagerSelfIdentity; if ("$($envRepMe.subscriptionId)" -and "$($envRepMe.resourceGroup)") { $envRepRg = "/subscriptions/$($envRepMe.subscriptionId)/resourceGroups/$($envRepMe.resourceGroup)" } } catch { $envRepRg = '' }
+    $envRepArm = { param($Path) if (Test-PimArmPathInResourceGroup -Path $Path -ResourceGroupId $envRepRg) { Invoke-PimArm -Path $Path } else { Invoke-PimEngineRecordedArm -Path $Path } }   # $envRepRg: this function's variable, seen through the call stack (no GetNewClosure -- a closure module would not see this script's functions)
     $envRepSql = $null
     if ($envRepCs -and (Get-Command Invoke-PimSqlQuery -ErrorAction SilentlyContinue)) { $envRepSql = { param($Query) Invoke-PimSqlQuery -ConnectionString $envRepCs -Sql $Query } }
     $envRepSources = @{
@@ -12301,6 +12268,45 @@ function Get-PimManagerSelfAppId {
     }
     return "$a".Trim()
 }
+
+function Get-PimManagerSelfIdentity {
+    <# WEB-GRAPH-MIN-1 (3.0.69): the web app's OWN identity { appId; objectId; resourceId; name; subscriptionId; resourceGroup;
+       tenantId } from the claims of its OWN Graph token (oid, appid, xms_mirid) -- no Graph call. Cached 10 minutes.
+       Seam (tests): $script:PimManagerSelfTokenProvider { -> a JWT }. #>
+    if ($script:PimSelfIdCache -and ((Get-Date) - $script:PimSelfIdCache.at).TotalMinutes -lt 10) { return $script:PimSelfIdCache.value }
+    $tok = $null
+    try {
+        if ($script:PimManagerSelfTokenProvider -is [scriptblock]) { $tok = & $script:PimManagerSelfTokenProvider }
+        elseif (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue) { $tok = Get-PimRestToken -Resource graph }
+    } catch { $tok = $null }
+    $id = Get-PimIdentityFromClaims -Claims (ConvertFrom-PimEngineFactJwt -Token "$tok")
+    if (-not $id.appId) { $a = "$($global:PIM_RuntimeAppId)"; if (-not $a) { $a = "$($env:AZURE_CLIENT_ID)" }; $id.appId = "$a".Trim().ToLowerInvariant() }
+    if ($tok -or $id.appId) { $script:PimSelfIdCache = @{ at = (Get-Date); value = $id } }
+    return $id
+}
+
+function Save-PimManagerRuntimeIdentityRecord {
+    <# WEB-GRAPH-MIN-1 (3.0.69): tell the ENGINE who the web app is and what its panels ask about, so the engine's
+       tenant-cache job records those answers (pim.Settings 'ManagerRuntimeIdentity'): the web app's own app id / object id
+       / resource id (from its own token), the product app ids this install configured, the SQL admin group, the PIM
+       Activator app names and the break-glass account names. No secret, no Graph call. Hosted + SQL only; never throws. #>
+    if (-not $script:PimHosted -or -not "$($script:PimSqlCs)".Trim() -or -not (Get-Command Set-PimSqlSetting -ErrorAction SilentlyContinue)) { return $false }
+    try {
+        $me = Get-PimManagerSelfIdentity
+        $prod = @(@($global:PIM_ClientId, $global:PIM_EngineClientId, $global:PIM_ManagedIdentityClientId, $global:PIM_ManagerMiAppId,
+                    $global:PIM_SqlClientId, $global:PIM_SqlAdminIdentityClientId, $env:AZURE_CLIENT_ID) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Select-Object -Unique)
+        $actNames = @(); if (Get-Command Get-PimActivatorChannel -ErrorAction SilentlyContinue) { try { $actNames = @('Released', 'Test' | ForEach-Object { "$((Get-PimActivatorChannel -Channel $_).appName)" } | Where-Object { $_.Trim() } | Select-Object -Unique) } catch { } }
+        $bg = @(); try { $bg = @(Get-PimBreakGlassIdentifiers | Where-Object { "$_" -match '@' -and "$_" -notmatch '^<' }) } catch { }
+        $grpName = if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { Get-PimInstallName -Role sqlAdminGroup } elseif ("$($env:PIM_SQL_ADMIN_GROUP)".Trim()) { "$($env:PIM_SQL_ADMIN_GROUP)".Trim() } else { 'grp-pim-sql-admins' }
+        $grpId = "$(if ("$($env:PIM_SQL_ADMIN_GROUP_ID)".Trim()) { $env:PIM_SQL_ADMIN_GROUP_ID } else { $global:PIM_SqlAdminGroupId })".Trim()
+        $rec = [ordered]@{ appId = "$($me.appId)"; objectId = "$($me.objectId)"; resourceId = "$($me.resourceId)"; name = "$($me.name)"
+                           containerAppName = "$($env:CONTAINER_APP_NAME)".Trim(); productAppIds = @($prod); sqlAdminGroupName = "$grpName"; sqlAdminGroupId = $grpId
+                           activatorAppNames = @($actNames); breakGlassAccounts = @($bg | Select-Object -First 25); recordedUtc = (Get-Date).ToUniversalTime().ToString('o') }
+        Set-PimSqlSetting -ConnectionString $script:PimSqlCs -Name (Get-PimManagerRuntimeIdentitySettingName) -ValueJson ($rec | ConvertTo-Json -Depth 4 -Compress) | Out-Null
+        return $true
+    } catch { Write-Verbose "  [identity] the web app's identity record was not saved: $($_.Exception.Message)"; return $false }
+}
+
 function Get-PimManagerReviewOwnPrincipals {
     param([string[]]$ServicePrincipalIds = @())
     if (-not (Get-Command Get-PimReviewOwnPrincipals -ErrorAction SilentlyContinue)) { return $null }
@@ -12309,7 +12315,9 @@ function Get-PimManagerReviewOwnPrincipals {
     if ($c -and "$($c.key)" -eq $key -and ((Get-Date) - $c.at).TotalMinutes -lt 10) { return $c.result }
     $productApps = @(@($global:PIM_ClientId, $global:PIM_EngineClientId, $global:PIM_ManagedIdentityClientId, $global:PIM_ManagerMiAppId,
                        $global:PIM_SqlClientId, $global:PIM_SqlAdminIdentityClientId, $env:AZURE_CLIENT_ID) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
-    $graph = { param($Method, $Path, $Body) if ($null -ne $Body) { Invoke-PimGraph -Method $Method -Path $Path -Body $Body } else { Invoke-PimGraph -Method $Method -Path $Path } }
+    # WEB-GRAPH-MIN-1 (3.0.69): the ENGINE's recorded directory answers (cache 'pim-identities'), never a live Graph call.
+    # A service principal the engine did not record (one only this list names) is "not readable" -- never guessed.
+    $graph = { param($Method, $Path, $Body) Invoke-PimEngineRecordedGraph -Method $Method -Path $Path -Body $Body }
     $sqlSid = $null
     if ("$($script:PimSqlCs)".Trim() -and (Get-Command Invoke-PimSqlScalar -ErrorAction SilentlyContinue)) {
         $cs = "$($script:PimSqlCs)"
@@ -12396,9 +12404,9 @@ function Get-PimRevokeGuardPlan {
 # Entries queued before names were stored carry only ids. /api/queue resolves those ids here:
 #   1. a short per-process cache (10 min), then the Manager's tenant lookup caches
 #      (users / groups / Entra role definitions / BUG-98's by-id resolver);
-#   2. whatever is still unknown goes to Graph in ONE $batch request for the WHOLE queue read --
-#      /directoryObjects/getByIds for principals + groups, and the role-definition list for
-#      Entra roles. Never one call per row (section 67 N+1).
+#   2. whatever is still unknown is looked up ONCE for the WHOLE queue read in what the ENGINE recorded
+#      (3.0.69 WEB-GRAPH-MIN-1: role catalog, PIM groups, recorded directory objects -- no Graph call from
+#      the web app). Never one lookup per row (section 67 N+1).
 #   3. a failed lookup is remembered for 60 s so a broken Graph path cannot slow every queue read,
 #      and the entry says "(name not found)" instead of pretending.
 # $script:PimQueueGraphBatch is the single seam to Graph, so a test can inject a fake.
@@ -12406,8 +12414,25 @@ function Get-PimRevokeGuardPlan {
 $script:PimQueueNameCache = @{}
 $script:PimQueueNameLookupFailedUtc = $null
 $script:PimQueueGraphBatch = {
+    # WEB-GRAPH-MIN-1 (3.0.69): the names come from what the ENGINE recorded -- the role catalog ('entra-roles'), PIM's
+    # groups ('pim-groups') and the directory objects it recorded ('pim-identities') -- answered in the $batch shape the
+    # caller reads. The web app no longer posts a Graph $batch (/directoryObjects/getByIds needs directory-wide read).
     param([object[]]$Requests)
-    Invoke-PimGraph -Method POST -Path 'https://graph.microsoft.com/v1.0/$batch' -Body @{ requests = @($Requests) }
+    $responses = New-Object System.Collections.Generic.List[object]
+    foreach ($rq in @($Requests)) {
+        $vals = New-Object System.Collections.Generic.List[object]
+        if ("$($rq.id)" -eq 'roles') {
+            $er = $null; try { $er = Get-PimTenantCacheEntry -Kind 'entra-roles' } catch { $er = $null }
+            foreach ($x in @($er.items)) { if ($x -and "$($x.id)") { $vals.Add([pscustomobject]@{ id = "$($x.id)"; displayName = "$($x.displayName)" }) } }
+        } else {
+            $want = @{}; foreach ($i in @($rq.body.ids)) { $want["$i".ToLowerInvariant()] = $true }
+            $pg = $null; try { $pg = Get-PimTenantCacheEntry -Kind 'pim-groups' } catch { $pg = $null }
+            foreach ($x in @($pg.items)) { if ($x -and $want.ContainsKey("$($x.id)".ToLowerInvariant())) { $vals.Add([pscustomobject]@{ id = "$($x.id)"; displayName = "$($x.displayName)" }) } }
+            try { foreach ($o in @((Invoke-PimEngineRecordedGraph -Method POST -Path '/directoryObjects/getByIds' -Body @{ ids = @($want.Keys) }).value)) { if ($o) { $vals.Add($o) } } } catch { }
+        }
+        $responses.Add([pscustomobject]@{ id = "$($rq.id)"; status = 200; body = [pscustomobject]@{ value = @($vals.ToArray()) } })
+    }
+    [pscustomobject]@{ responses = @($responses.ToArray()) }
 }
 
 function Get-PimQueueDisplayNameMap {
@@ -12785,12 +12810,13 @@ function Resolve-PimManagerAdminObjectId {
     if (-not $u -or $u -notmatch '@') { $o.error = "'$u' is not a user principal name"; return [pscustomobject]$o }
     try {
         if ($script:PimAdminObjectIdResolver -is [scriptblock]) { $o.id = "$(& $script:PimAdminObjectIdResolver $u)".Trim().ToLowerInvariant() }
-        elseif (Get-Command Invoke-PimGraphGetAll -ErrorAction SilentlyContinue) {
+        elseif (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) {
             $q = [uri]::EscapeDataString("userPrincipalName eq '$($u.Replace("'", "''"))'")
             # 2026-10-27 (owner, internal: "NOT deleted -- the account to delete could not be pinned: --" with no reason):
-            # Invoke-PimGraphGetAll returns its list WRAPPED (return ,@(...)), so @(...) held ONE item -- the list -- and an
-            # empty answer read as one hit with no id and no error. Unrolled here: 0 / 1 / many are counted for real.
-            $hits = @(@(Invoke-PimGraphGetAll -Uri "https://graph.microsoft.com/v1.0/users?`$filter=$q&`$select=id,userPrincipalName") | ForEach-Object { $_ } | Where-Object { $null -ne $_ })
+            # the list used to come WRAPPED (Invoke-PimGraphGetAll's return ,@(...)), so an empty answer read as one hit with
+            # no id and no error. Unrolled here: 0 / 1 / many are counted for real. 3.0.69: a relative path (the web app's
+            # allowed user lookup, basic profile only -- tests/Test-PimWebGraphMinimal.ps1).
+            $hits = @(@(Invoke-PimGraph -Path "/users?`$filter=$q&`$select=id,userPrincipalName" -All) | ForEach-Object { $_ } | Where-Object { $null -ne $_ })
             if ($hits.Count -eq 1) { $o.id = "$($hits[0].id)".Trim().ToLowerInvariant() }
             elseif ($hits.Count -gt 1) { $o.error = "$($hits.Count) accounts answer to '$u'" }
             else { $o.error = "no account '$u' was found in Microsoft Entra ID" }
@@ -13143,8 +13169,11 @@ function Invoke-Server {
     # bound + listening, so a slow/failed Graph call only delays the first cache,
     # never the server. (Local emergency edition skips this -- the operator can
     # refresh from the UI.)
+    # WEB-GRAPH-MIN-1 (3.0.69): first tell the engine who this web app is (its own token's claims) so the engine's next
+    # tenant-cache run records the answers its panels read; then a stale / missing cache QUEUES the engine job.
+    if ($script:PimHosted) { try { [void](Save-PimManagerRuntimeIdentityRecord) } catch { } }
     if ($script:PimHosted -and (Get-Command Initialize-PimManagerTenantCache -ErrorAction SilentlyContinue)) {
-        try { [void](Initialize-PimManagerTenantCache) } catch { Write-Host ("  [tenant-cache] startup populate skipped: {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow }
+        try { [void](Initialize-PimManagerTenantCache) } catch { Write-Host ("  [tenant-cache] startup check skipped: {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow }
     }
 
     # Begin first async accept; we process synchronously then re-arm.
@@ -13786,7 +13815,11 @@ function Invoke-PimManagerGetRouteConformance {
                 try {
                     $dir = Join-Path $solutionRoot 'workloads\connectors'
                     $conn = @(Read-PimWorkloadConnectors -ConnectorsDir $dir) | Where-Object { "$($_.id)" -ieq "$($tpl.workload)" } | Select-Object -First 1
-                    if ($conn) { Initialize-PimManagerTenantConnection; $liveCat = @(Get-PimWorkloadConnectorRoles -Connector $conn | ForEach-Object { "$($_.name)" }) }
+                    # WEB-GRAPH-MIN-1 (3.0.69): the connector's catalog as the ENGINE read it (cache 'workload-roles')
+                    if ($conn) {
+                        $wrF = Read-PimEngineFact -Kind 'workload-roles'
+                        if ($wrF.ok -and $wrF.value.connectors) { $p = $wrF.value.connectors.PSObject.Properties["$($conn.id)".ToLowerInvariant()]; if ($p -and $p.Value.read) { $liveCat = @(@($p.Value.roles) | ForEach-Object { "$($_.name)" }) } }
+                    }
                 } catch { $liveCat = @() }
                 $c = Get-PimConformance -Template $tpl -TenantRing $confRing -TenantId $confTenant -ActiveExemptionKeys $exKeys -LiveCatalog $liveCat -AppliedVersion $applied
                 $statusMap = [ordered]@{}
@@ -13962,6 +13995,8 @@ function Invoke-PimManagerGetRoutePermissionsHealth {
             # prerequisite check (job workload-prereqs, read-only), so a held Intune / Defender assignment follows the grant.
             if ($permRefresh -and (Test-PimManagerRoleAtLeast -Minimum 'Admin') -and (Get-Command Add-PimJobTrigger -ErrorAction SilentlyContinue)) {
                 try { [void](Add-PimJobTrigger -Type 'workload-prereqs' -Scope 'All' -Reason 'verify-permissions' -JobName 'workload-prereqs') } catch { Write-Verbose "workload-prereqs not queued: $($_.Exception.Message)" }
+                # WEB-GRAPH-MIN-1 (3.0.69): the rights shown are what the ENGINE recorded -- ask it to read them again now
+                try { [void](Request-PimManagerEngineTenantCache -Scope 'All' -Reason 'verify-permissions') } catch { }
             }
             $permBody = Get-PimManagerPermissionHealthBody -Refresh:$permRefresh
             if ($null -eq $permBody) {
@@ -13985,13 +14020,10 @@ function Invoke-PimManagerGetRouteRolePermissions {
                 # ran ONLY through the Graph PowerShell SDK (Invoke-MgGraphRequest), which the hosted container does not
                 # ship (REST-only) -- so on every hosted Manager the live read was skipped and every role "did not match".
                 # REST only (Invoke-PimGraph, the Manager's own app-only token) -- §100.42 removed the SDK fallback.
-                $esc = [uri]::EscapeDataString($roleName.Replace("'", "''"))
-                $u = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$filter=displayName eq '$esc'"
-                if (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) {
-                    Initialize-PimManagerTenantConnection
-                    $r = Invoke-PimGraph -Method GET -Path $u
-                    if ($r.value -and @($r.value).Count -gt 0) { $def = @($r.value)[0] }
-                }   # §100.42: REST only (no Invoke-MgGraphRequest fallback)
+                # WEB-GRAPH-MIN-1 (3.0.69): the role definition (with its rolePermissions) from the ENGINE's role catalog
+                # (cache 'entra-roles', written by its tenant-cache job) -- no Graph call from the web app.
+                $erc = $null; try { $erc = Get-PimTenantCacheEntry -Kind 'entra-roles' } catch { $erc = $null }
+                $def = @(@($erc.items) | Where-Object { $_ -and "$($_.displayName)" -ieq $roleName }) | Select-Object -First 1
                 if ($def) {
                     $fmt = Format-PimRolePermissions -RoleDefinition $def
                     Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; matched = $true; role = $roleName; permissions = $fmt }); return 200
@@ -14000,11 +14032,11 @@ function Invoke-PimManagerGetRouteRolePermissions {
                 # against the known role catalog and offer ranked candidates. 200, never 503.
                 $catalog = @(Get-PimRoleCatalogNames)
                 $res = Resolve-PimRoleQuery -Query $roleName -RoleNames $catalog
-                $hasGraph = [bool](Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)
+                $hasGraph = [bool]($erc -and @($erc.items).Count)   # "the engine's role catalog is there" (the field name is kept for the page)
                 $hint = if (@($res.candidates).Count -gt 0) {
                     "No directory role is named exactly '$roleName'. Pick one of the suggestions, or correct the spelling."
                 } elseif (-not $hasGraph -and @($catalog).Count -eq 0) {
-                    "Role names aren't available yet -- connect the Manager to the tenant (or refresh tenant lists), then retry."
+                    "Role names aren't available yet -- $(Get-PimEngineFactPendingText) (or press Refresh lists)."
                 } else {
                     "No role matches '$roleName'."
                 }
@@ -14027,26 +14059,16 @@ function Invoke-PimManagerGetRouteRolePermissionsByAction {
             if (-not $action) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "action query parameter is required" }; return 400 }
             try {
                 $defs = New-Object System.Collections.ArrayList
-                # §70.20: REST first -- the SDK-only read never ran on the hosted Manager (see /api/role-permissions).
-                $hasRest = [bool](Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)
-                $hasGraph = $hasRest   # §100.42: REST only
-                if ($hasGraph) {
-                    # Page through every directory role definition WITH its permissions.
-                    $u = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$select=id,displayName,isBuiltIn,rolePermissions&`$top=200"
-                    if ($hasRest) { Initialize-PimManagerTenantConnection }
-                    $guard = 0
-                    while ($u -and $guard -lt 50) {
-                        $guard++
-                        $r = Invoke-PimGraph -Method GET -Path $u
-                        foreach ($d in @($r.value)) { [void]$defs.Add($d) }
-                        $u = if ($r.'@odata.nextLink') { "$($r.'@odata.nextLink')" } else { $null }
-                    }
-                }
+                # WEB-GRAPH-MIN-1 (3.0.69): every directory role definition WITH its permissions, from the ENGINE's role
+                # catalog (cache 'entra-roles' stores rolePermissions) -- no Graph call from the web app.
+                $erc = $null; try { $erc = Get-PimTenantCacheEntry -Kind 'entra-roles' } catch { $erc = $null }
+                foreach ($d in @($erc.items)) { if ($d) { [void]$defs.Add($d) } }
+                $hasGraph = [bool]($defs.Count)   # "the engine's role catalog is there" (the field name is kept for the page)
                 $res = Find-PimRolesByAction -Action $action -RoleDefinitions @($defs.ToArray())
                 $hint = if (@($res.matches).Count -gt 0) {
                     "{0} role(s) grant '{1}'. The list is ranked least-privilege first -- prefer the narrowest role." -f @($res.matches).Count, $action
                 } elseif (-not $hasGraph -or $defs.Count -eq 0) {
-                    "Role permissions aren't available yet -- connect the Manager to the tenant (the engine SPN needs RoleManagement.Read.Directory), then retry."
+                    "Role permissions aren't available yet -- $(Get-PimEngineFactPendingText) (or press Refresh lists)."
                 } else {
                     "No directory role grants '$action'. Check the action spelling (e.g. microsoft.directory/users/basic/update), or try a 'namespace/*' wildcard."
                 }
@@ -15203,7 +15225,21 @@ function Handle-Request {
                 $script:PimDemoGroupCache = $null
                 $gChk = Get-PimManagerDemoGroup -Group $wantGroup
                 if (-not $gChk.ok) {
-                    Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; gate = 'demo-group'; error = "The demo guest group '$wantGroup' could not be read ($($gChk.error)). Nothing was saved -- with demo mode on, everyone would then be treated as a demo viewer." }
+                    # WEB-GRAPH-MIN-1 (3.0.69): the ENGINE reads the group. Not recorded yet (a new name) -> ask it to read this
+                    # name now (pim.Settings 'DemoGuestGroupCheck' + the tenant-cache job) and say when to try again.
+                    $gPend = ("$($gChk.error)" -eq (Get-PimEngineFactPendingText))
+                    if ($gPend) {
+                        $gReqErr = ''
+                        try { Set-PimManagerSettingObject -Name 'DemoGuestGroupCheck' -Value $wantGroup } catch { $gReqErr = "$($_.Exception.Message)" }
+                        if ($gReqErr) {
+                            # the request could not be stored: say so -- the engine would only read the configured group
+                            Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; gate = 'demo-group'; error = "The demo guest group '$wantGroup' is not known to the engine yet, and the request to read it could not be saved ($gReqErr). Nothing was saved." }
+                            return 503
+                        }
+                        $gq = Request-PimManagerEngineTenantCache -Scope 'All' -Reason 'demo-group-check'
+                    }
+                    Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; gate = 'demo-group'; pending = [bool]$gPend
+                        error = $(if ($gPend) { "The engine reads the demo guest group '$wantGroup' first ($($gq.detail)). Nothing was saved -- turn demo mode on again in a minute." } else { "The demo guest group '$wantGroup' could not be read ($($gChk.error)). Nothing was saved -- with demo mode on, everyone would then be treated as a demo viewer." }) }
                     return 409
                 }
                 $meWho = "$((Get-PimManagerRole).identity)"
@@ -15495,24 +15531,26 @@ function Handle-Request {
                 return 403
             }
             $script:lastHeartbeat = Get-Date
-            if (-not (Get-Command Invoke-PimTenantListRefresh -ErrorAction SilentlyContinue)) {
-                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = '_tenantSync.ps1 was not loaded -- file missing next to Open-PimManager.ps1' }
-                return 500
-            }
-            try {
-                $result = Invoke-PimTenantListRefresh
-                $tenantLists = Read-PimTenantListCache
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
-                    ok      = $result.ok
-                    reason  = $result.reason
-                    results = $result.results
-                    lists   = $tenantLists
-                })
-                return 200
-            } catch {
-                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
-                return 500
-            }
+            # WEB-GRAPH-MIN-1 (3.0.69, owner 2026-11-09: "i thought it runs through the engine"): this button QUEUES the
+            # engine's 'tenant-cache' job -- the engine reads the tenant with its own identity and writes pim.TenantCache. It
+            # used to run Invoke-PimTenantListRefresh HERE, as the web app, which needed the web app to hold directory-wide
+            # read rights. The answer says it is queued and when the lists were last refreshed.
+            $q = Request-PimManagerEngineTenantCache -Scope 'All' -Reason "refresh-lists:$(Get-PimManagerActorName)"
+            $tenantLists = $null; try { $tenantLists = Read-PimTenantListCache } catch { $tenantLists = $null }
+            $ru = ''; try { if ($tenantLists -and $tenantLists.entraRoles) { $ru = "$($tenantLists.entraRoles.refreshedUtc)" } } catch { }
+            try { Write-PimManagerAuditEvent -Action 'tenant-lists.refresh.queued' -Target 'job:tenant-cache' -After @{ queued = [bool]$q.queued; started = [bool]$q.started } -Result $(if ($q.queued) { 'ok' } else { 'error' }) } catch { }
+            $st = if ($q.queued) { 202 } else { 503 }
+            Write-JsonResponse -Response $resp -Status $st -Body ([ordered]@{
+                ok           = [bool]$q.queued
+                queued       = [bool]$q.queued
+                started      = [bool]$q.started
+                status       = $(if ($q.queued) { 'queued' } else { 'not-queued' })
+                reason       = "$($q.detail)"
+                detail       = "$($q.detail)"
+                refreshedUtc = $ru
+                lists        = $tenantLists
+            })
+            return $st
         }
 
         if ($path -eq '/api/naming-conventions' -and $method -eq 'GET') {
@@ -17321,18 +17359,23 @@ function Handle-Request {
             try { $targets = ConvertTo-PimActivatorTargets (Get-PimSetting -Name 'ActivatorTargets') } catch { $targetsError = "$($_.Exception.Message)" }
             $xtText = ''; try { $xtText = "$(Get-PimSetting -Name 'ActivatorAdditionalTenants')".Trim() } catch { $targetsError = "$($_.Exception.Message)" }
             $apps = [ordered]@{}
+            # WEB-GRAPH-MIN-1 (3.0.69): the app registrations as the ENGINE read them (cache 'pim-app-registrations'; the
+            # names come from this web app's identity record) -- no Graph call from the web app.
+            $regF = Read-PimEngineFact -Kind 'pim-app-registrations'
             foreach ($c in 'Released', 'Test') {
                 $ch = Get-PimActivatorChannel -Channel $c
-                $a = [ordered]@{ channel = $c; label = $ch.label; name = $ch.appName; extensionId = $ch.id; found = $false; appId = ''; redirectOk = $false; readError = ''; sharedWith = ''; uris = @() }
-                try {
-                    $esc = $ch.appName -replace "'", "''"
-                    $r = @((Invoke-PimGraph -Path "/applications?`$filter=displayName eq '$esc'&`$select=appId,displayName,spa").value)
-                    if ($r.Count) {
-                        $a.found = $true; $a.appId = "$($r[0].appId)"
-                        $uris = @($r[0].spa.redirectUris); $a.uris = $uris
+                $a = [ordered]@{ channel = $c; label = $ch.label; name = $ch.appName; extensionId = $ch.id; found = $false; appId = ''; redirectOk = $false; readError = ''; sharedWith = ''; uris = @(); checkedUtc = '' }
+                $e = $null
+                if ($regF.ok -and $regF.value.apps) { $p = $regF.value.apps.PSObject.Properties["$($ch.appName)".ToLowerInvariant()]; if ($p) { $e = $p.Value } }
+                if ($e) {
+                    $a.checkedUtc = "$($regF.refreshedUtc)"
+                    if ("$($e.error)".Trim()) { $a.readError = "$($e.error)" }
+                    elseif ($e.found) {
+                        $a.found = $true; $a.appId = "$($e.appId)"
+                        $uris = @($e.redirectUris); $a.uris = $uris
                         $a.redirectOk = [bool](@($uris | Where-Object { "$_" -like "*$($ch.id)*" }).Count)
                     }
-                } catch { $a.readError = "$($_.Exception.Message)" }
+                } else { $a.readError = Get-PimEngineFactPendingText }
                 $apps[$c] = $a
             }
             # One app for both channels (Deploy-PimActivatorBackend -Channel Both): no separate TEST app, but the PROD app
@@ -17967,7 +18010,8 @@ function Handle-Request {
             if (-not $st0.mailbox.saved -and -not $addr) { Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'Save step 1 (the mailbox name) first.' }; return 400 }
             $key = $addr; $why = ''
             try {
-                $f = [uri]::EscapeDataString("mail eq '$addr' or userPrincipalName eq '$addr' or proxyAddresses/any(p:p eq 'smtp:$addr')")
+                # WEB-GRAPH-MIN-1 (3.0.69): basic profile only -- mail or userPrincipalName (proxyAddresses is not in it)
+                $f = [uri]::EscapeDataString("mail eq '$($addr.Replace("'", "''"))' or userPrincipalName eq '$($addr.Replace("'", "''"))'")
                 $hits = @((Invoke-PimGraph -Path "/users?`$filter=$f&`$select=id,userPrincipalName,mail").value | Where-Object { $_ })
                 if ($hits.Count -eq 1) { $key = "$($hits[0].userPrincipalName)".Trim() }
                 elseif ($hits.Count -gt 1) { $why = "more than one directory object carries $addr" }
@@ -19825,13 +19869,30 @@ function Handle-Request {
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to import an admin account.' }; return 403 }
             $iu = ''; try { foreach ($pair in ("$($req.Url.Query)".TrimStart('?') -split '&')) { if ($pair -match '^upn=(.*)$') { $iu = [uri]::UnescapeDataString($Matches[1]).Trim() } } } catch { }
             if ($iu -notmatch '^[^@\s]+@[^@\s]+$') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'upn=<user principal name> is required' }; return 400 }
-            if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no Graph client in this runtime -- the account could not be read' }; return 503 }
-            $user = $null
-            try { $user = Invoke-PimGraph -Path ("/users/{0}?`$select=id,userPrincipalName,givenName,surname,displayName,department,companyName,usageLocation,userType,accountEnabled" -f [uri]::EscapeDataString($iu)) }
-            catch {
-                $st = if ("$($_.Exception.Message)" -match 'Request_ResourceNotFound|404') { 404 } else { 502 }
-                Write-JsonResponse -Response $resp -Status $st -Body @{ error = $(if ($st -eq 404) { "no account '$iu' in the directory" } else { "the account could not be read: $($_.Exception.Message)" }) }; return $st
+            # WEB-GRAPH-MIN-1 (3.0.69, owner 2026-11-09): the account and its PIM-group schedules are read by the ENGINE. The
+            # first press QUEUES the reads (pim.Settings 'AdminImportRequests' + the engine's tenant-cache job, scope
+            # 'admin-import') and answers 202 "queued"; the page asks again and gets the preview from the engine's record
+            # (cache 'admin-import-reads'). A record older than ?fresh minutes (default 60) is read again.
+            $iuL = $iu.ToLowerInvariant()
+            $freshMin = 60; try { foreach ($pair in ("$($req.Url.Query)".TrimStart('?') -split '&')) { if ($pair -match '^fresh=(\d+)$') { $freshMin = [int]$Matches[1] } } } catch { }
+            $impF = Read-PimEngineFact -Kind 'admin-import-reads'
+            $impE = $null
+            if ($impF.ok -and $impF.value.accounts) { $p = $impF.value.accounts.PSObject.Properties[$iuL]; if ($p) { $impE = $p.Value } }
+            $impAge = 1e9; if ($impE) { try { $impAge = ([datetime]::UtcNow - ([datetime]"$($impE.readUtc)").ToUniversalTime()).TotalMinutes } catch { $impAge = 1e9 } }
+            if (-not $impE -or $impAge -gt $freshMin) {
+                try {
+                    $cur = @(@(Get-PimSqlSetting -ConnectionString $script:PimSqlCs -Name (Get-PimAdminImportRequestSettingName)) | Where-Object { $_ } | ForEach-Object { "$(if ($_ -is [string]) { $_ } else { $_.upn })".Trim().ToLowerInvariant() })
+                    if ($cur -notcontains $iuL) { $cur = @($cur) + @($iuL) }
+                    Set-PimSqlSetting -ConnectionString $script:PimSqlCs -Name (Get-PimAdminImportRequestSettingName) -ValueJson (ConvertTo-Json -InputObject @($cur | Select-Object -Unique) -Compress) | Out-Null
+                } catch { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "the read could not be queued for the engine: $($_.Exception.Message)" }; return 503 }
+                $q = Request-PimManagerEngineTenantCache -Scope 'admin-import' -Reason "admin-import:$iuL"
+                Write-JsonResponse -Response $resp -Status 202 -Body ([ordered]@{ ok = $true; queued = [bool]$q.queued; started = [bool]$q.started; upn = $iu
+                    note = "The engine reads this account now -- $($q.detail). Open Import again in a minute." })
+                return 202
             }
+            if ("$($impE.error)" -eq 'not-found') { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "no account '$iu' in the directory (as the engine read it at $($impE.readUtc))" }; return 404 }
+            if (-not $impE.found) { Write-JsonResponse -Response $resp -Status 502 -Body @{ error = "the engine could not read the account: $($impE.error)" }; return 502 }
+            $user = $impE.user
             $row = ConvertTo-PimAdminImportRow -User $user
             $drift = $null; try { if (Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue) { $drift = Get-PimTenantCacheEntry -Kind 'drift' } } catch { $drift = $null }
             $mem = @(Get-PimAdminImportMemberships -DriftDoc $drift -Upn "$($row.UserPrincipalName)")
@@ -19841,9 +19902,9 @@ function Handle-Request {
             # principal filter can omit a schedule; this is an OFFER to keep access, so a miss never removes anything.
             $liveNote = ''
             try {
-                $uid = "$($user.id)"
-                $el = @(Invoke-PimGraph -All -Path ("/identityGovernance/privilegedAccess/group/eligibilitySchedules?`$filter=principalId eq '{0}'" -f $uid))
-                $as = @(Invoke-PimGraph -All -Path ("/identityGovernance/privilegedAccess/group/assignmentSchedules?`$filter=principalId eq '{0}'" -f $uid))
+                if ("$($impE.membershipError)".Trim()) { throw "$($impE.membershipError)" }
+                $el = @($impE.eligible | Where-Object { $_ })
+                $as = @($impE.active | Where-Object { $_ })
                 $tagByName = @{}
                 foreach ($e in @('PIM-Definitions-Roles', 'PIM-Definitions-Organization', 'PIM-Definitions-Departments', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg', 'PIM-Definitions-Processes', 'PIM-Definitions-Tasks', 'PIM-Definitions-Services', 'PIM-Definitions-Resources')) {
                     foreach ($dr in @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $e)) { $gn = "$($dr.GroupName)".Trim(); $gt = "$($dr.GroupTag)".Trim(); if ($gn -and $gt) { $tagByName[$gn.ToLowerInvariant()] = $gt } }
@@ -19852,7 +19913,7 @@ function Handle-Request {
                 foreach ($gid in @(@($el) + @($as) | ForEach-Object { "$($_.groupId)".Trim().ToLowerInvariant() } | Where-Object { $_ } | Select-Object -Unique)) {
                     $gname = ''
                     $hit = @($script:PimManager_Groups | Where-Object { $_ -and "$($_.Id)".ToLowerInvariant() -eq $gid }) | Select-Object -First 1
-                    if ($hit) { $gname = "$($hit.DisplayName)" } else { try { $gname = "$((Invoke-PimGraph -Path "/groups/$gid`?`$select=displayName").displayName)" } catch { $gname = '' } }
+                    if ($hit) { $gname = "$($hit.DisplayName)" } elseif ($impE.groupNames -and $impE.groupNames.PSObject.Properties[$gid]) { $gname = "$($impE.groupNames.$gid)" } else { $gname = '' }
                     if ($gname -and $tagByName.ContainsKey($gname.ToLowerInvariant())) { $tagById[$gid] = $tagByName[$gname.ToLowerInvariant()] }
                 }
                 $liveRows = @(ConvertTo-PimAdminImportMembershipRows -Eligible $el -Active $as -TagByGroupId $tagById -Upn "$($row.UserPrincipalName)")
@@ -21127,16 +21188,18 @@ function Handle-Request {
                     return 502
                 }
             }
-            try {
-                # Live tenant call through the REST connector runtime (PIM-Rest.ps1 token; §100.42 no modules).
-                Initialize-PimManagerTenantConnection
-                $roles = @(Get-PimWorkloadConnectorRoles -Connector $conn)
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ id = $wid; roles = $roles })
+            # WEB-GRAPH-MIN-1 (3.0.69): the role catalog as the ENGINE read it (cache 'workload-roles', its tenant-cache job; the
+            # Defender / Intune RBAC reads need rights only the engine holds). Not recorded yet = an empty list that SAYS so.
+            $wrF = Read-PimEngineFact -Kind 'workload-roles'
+            $wr = $null
+            if ($wrF.ok -and $wrF.value.connectors) { $p = $wrF.value.connectors.PSObject.Properties["$wid".ToLowerInvariant()]; if ($p) { $wr = $p.Value } }
+            if ($wr -and $wr.read) {
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ id = $wid; roles = @($wr.roles); source = 'engine'; readUtc = "$($wr.readUtc)" })
                 return 200
-            } catch {
-                Write-JsonResponse -Response $resp -Status 502 -Body @{ error = "$($_.Exception.Message)" }
-                return 502
             }
+            $why = if ($wr -and "$($wr.reason)".Trim()) { "The engine could not read this workload's roles: $($wr.reason)" } else { "This workload's roles: $(Get-PimEngineFactPendingText)." }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ id = $wid; roles = @(); source = 'engine'; pending = $true; note = $why })
+            return 200
         }
 
         # -------------------------------------------------------------------
@@ -22915,6 +22978,9 @@ function Handle-Request {
 switch ($PSCmdlet.ParameterSetName) {
 
     'Refresh' {
+        # WEB-GRAPH-MIN-1 (3.0.69): the ONE place this file still runs the refresh itself -- an OPERATOR's local run
+        # (Open-PimManager.ps1 -Refresh, signed in as the engine identity), never the hosted web app, whose button queues
+        # the engine's 'tenant-cache' job (Request-PimManagerEngineTenantCache). tests/Test-PimWebGraphMinimal.ps1 allows it here only.
         Write-Host "PIM4EntraPS Mapper -- refreshing tenant lists ..." -ForegroundColor Cyan
         if (-not (Get-Command Invoke-PimTenantListRefresh -ErrorAction SilentlyContinue)) {
             throw "_tenantSync.ps1 was not loaded -- expected next to Open-PimManager.ps1 at: $tenantSync"

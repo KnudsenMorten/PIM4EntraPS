@@ -218,6 +218,17 @@ function Read-PimIdentityMoveInstall {
     }
 }
 
+function Get-PimIdentityMoveTargetName {
+    <#
+      PURE. The standard identity of a role (framework naming-standard.json): id-pim-<role>, except the docs role (its internal
+      role key is 'asbuilt'), whose identity is id-pim-docs (owner 2026-11-09: "we agreed upon another name"). id-pim-asbuilt is
+      therefore a SOURCE the docs move takes the job off, never a target.
+    #>
+    param([Parameter(Mandatory)][string]$Role)
+    if ($Role -in @('asbuilt', 'docs')) { return 'id-pim-docs' }
+    return "id-pim-$Role"
+}
+
 function Get-PimIdentityMoveSources {
     <#
       PURE. The identities an app / job holds today that the move takes it OFF: its system-assigned identity (when enabled) and
@@ -233,7 +244,7 @@ function Get-PimIdentityMoveSources {
     if ($sysPid -and "$(Get-PimIdentityMoveField $ident 'type')" -match '(?i)SystemAssigned') {
         $src.Add(@{ kind = 'system'; name = "$(Get-PimIdentityMoveField $Resource 'name') (system-assigned)"; id = 'system'; principalId = $sysPid; clientId = '' })
     }
-    $stdTargets = @('web', 'engine', 'updater', 'downlink', 'publish', 'requests', 'mcp', 'dbinit', 'asbuilt') | ForEach-Object { "id-pim-$_" }
+    $stdTargets = @('web', 'engine', 'updater', 'downlink', 'publish', 'requests', 'mcp', 'dbinit', 'asbuilt') | ForEach-Object { Get-PimIdentityMoveTargetName -Role $_ }
     foreach ($pair in @(Get-PimIdentityMoveMapPairs (Get-PimIdentityMoveField $ident 'userAssignedIdentities'))) {
         $id = "$($pair.key)"; $leaf = @($id -split '/' | Where-Object { $_ })[-1]
         $u = $byId[$id.ToLowerInvariant()]
@@ -437,7 +448,7 @@ function Get-PimIdentityMovePlan {
     foreach ($x in $all) {
         $o = $x.o; $name = "$(Get-PimIdentityMoveField $o 'name')"; $role = Get-PimIdentityRoleOf -Name $name
         if (-not $role) { continue }
-        $target = "id-pim-$role"
+        $target = Get-PimIdentityMoveTargetName -Role $role
         $s = Get-PimIdentityMoveSources -Resource $o -Target $target -Identities $inst.identities
         $tgt = $byName[$target]; $tp = Get-PimIdentityMoveField $tgt 'properties'
         $tid = if ($tgt) { "$(Get-PimIdentityMoveField $tgt 'id')" } else { '' }
@@ -949,10 +960,11 @@ function Invoke-PimIdentityMoveRole {
           [Parameter(Mandatory)][scriptblock]$Arm, [Parameter(Mandatory)][scriptblock]$Graph,
           [scriptblock]$DbInit, [scriptblock]$Prove, [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s },
           [string[]]$StartJobRoles = @('engine'), [switch]$DryRun, [switch]$NoCleanup,
+          [switch]$RootLater,   # a root right the customer has not granted yet: move anyway, keep it an OPEN customer step
           [scriptblock]$Http)   # item 21 (c): the web proof's HTTP seam -- passed by the caller (Move-PimIdentities.ps1); none = the web proof stays pending
     $api = Get-PimIdentityMoveApi
     $rp = @($Plan.roles | Where-Object { $_.role -eq $Role }) | Select-Object -First 1
-    $rec = [ordered]@{ role = $Role; target = "id-pim-$Role"; state = ''; steps = New-Object System.Collections.Generic.List[object]; copied = New-Object System.Collections.Generic.List[string]
+    $rec = [ordered]@{ role = $Role; target = (Get-PimIdentityMoveTargetName -Role $Role); state = ''; steps = New-Object System.Collections.Generic.List[object]; copied = New-Object System.Collections.Generic.List[string]
                        proof = New-Object System.Collections.Generic.List[string]; removed = New-Object System.Collections.Generic.List[string]; kept = New-Object System.Collections.Generic.List[string]
                        customerSteps = New-Object System.Collections.Generic.List[object]; error = ''; failedStep = ''; rollback = @(); startedUtc = [datetime]::UtcNow.ToString('o') }
     if (-not $rp) { $rec.state = 'nothing-to-do'; $rec.error = "no app / job of role '$Role' at this install"; return $rec }
@@ -1071,11 +1083,20 @@ function Invoke-PimIdentityMoveRole {
             if (@($rp.toCopy.azureRootCustomer).Count -and -not $DryRun) {
                 $now = Read-PimIdentityMoveRights -Arm $Arm -Graph $Graph -SubscriptionId $Plan.subscriptionId -PrincipalId $tgtPid -TenantId $Plan.tenantId -ExtraScopes $Plan.extraScopes -PimGroupNames $Plan.pimGroupNames
                 $missing = @(Get-PimIdentityRightsToCopy -SourceAzure @($rp.toCopy.azureRootCustomer) -TargetAzure @($now.azure)).azure
-                if (@($missing).Count) {
+                if (@($missing).Count -and -not $RootLater) {
                     $rec.state = 'customer-step'; $rec.error = "the customer grants $(@($missing).Count) right(s) at the tenant root first (the Support app has no root access); then run again -- nothing switched, nothing removed"
                     return $rec
                 }
-                foreach ($a in @($rp.toCopy.azureRootCustomer)) { $rec.copied.Add("azure (customer): $(@("$($a.roleDefinitionId)" -split '/')[-1]) at the tenant root, read back") }
+                $missKeys = @(@($missing) | ForEach-Object { "$($_.roleDefinitionId)|$($_.scope)".ToLowerInvariant() })
+                foreach ($a in @($rp.toCopy.azureRootCustomer)) {
+                    $rn = @("$($a.roleDefinitionId)" -split '/')[-1]
+                    if ("$($a.roleDefinitionId)|$($a.scope)".ToLowerInvariant() -in $missKeys) {
+                        # -RootLater (Invardia decision A, 2026-11-09): the move goes on with everything the Support app can
+                        # grant; the root right stays an OPEN customer step (ROOT-RIGHTS-1: the customer's grant)
+                        foreach ($cs in @($rec.customerSteps | Where-Object { "$($_.command)" -match [regex]::Escape($rn) })) { $cs.when = 'open -- waiting for the customer (the move went on without it)' }
+                        $rec.kept.Add("root right $rn not yet on $tgtName -- open customer step (-RootLater)")
+                    } else { $rec.copied.Add("azure (customer): $rn at the tenant root, read back") }
+                }
             }
             # ------------------------------------------------------------------ 4 kv (access policies; RBAC + AcrPull were step 3)
             $cur = 'kv'

@@ -1396,8 +1396,13 @@ foreach ($w in $Workers) {
         if ($isMgr -and @($AzureRbacRoles) -join ',' -ne 'Reader') {
             Note "  $($w.name): Azure RBAC narrowed to Reader -- the GUI only reads Azure; revokes are queued and applied by the engine"
         }
-        Grant-PimMiAzureRbac -MiObjectId $oid -Name $w.name -SubscriptionId $SubscriptionId `
-            -Roles $wRoles -ManagementGroupId $AzureRbacManagementGroupId -Required:$RequireAzureRbac
+        # RIGHTS-1 B (owner 2026-11-09): the web app is Reader on its OWN resource group only -- every subscription /
+        # tenant-root Azure read comes from what the engine recorded (3.0.69), so no subscription or management-group grant
+        if ($isMgr) { Note "  $($w.name): no subscription / management-group Azure role (RIGHTS-1 B: Reader on its resource group only)" }
+        else {
+            Grant-PimMiAzureRbac -MiObjectId $oid -Name $w.name -SubscriptionId $SubscriptionId `
+                -Roles $wRoles -ManagementGroupId $AzureRbacManagementGroupId -Required:$RequireAzureRbac
+        }
         # PIM 100.22 (b) (owner 2026-10-09): the Manager ALSO gets Reader on the PIM resource group ONLY, so the Environment
         # report reads the installation's own architecture. Idempotent + read back; Confirm-PimInstall verifies / repairs it.
         if ($isMgr) {

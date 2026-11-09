@@ -521,9 +521,9 @@
             [
               "Manager (ca-pim-manager)",
               "Graph application (read-only)",
-              "Directory.Read.All, Domain.Read.All, User.Read.All, Group.Read.All, AdministrativeUnit.Read.All, Application.Read.All, AccessReview.Read.All, RoleManagement.Read.All, RoleManagementPolicy.Read.Directory, RoleManagementPolicy.Read.AzureADGroup, RoleEligibilitySchedule.Read.Directory, RoleAssignmentSchedule.Read.Directory, PrivilegedAccess.Read.AzureADGroup, PrivilegedEligibilitySchedule.Read.AzureADGroup, PrivilegedAssignmentSchedule.Read.AzureADGroup",
+              "User.ReadBasic.All, GroupMember.Read.All",
               "Tenant",
-              "Show the tenant in the GUI (pickers, reports, live state)",
+              "The people and group pickers; every other directory fact is read by the engine",
               "GUI views and pickers",
               "No"
             ],

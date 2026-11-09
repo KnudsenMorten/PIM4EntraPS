@@ -2034,6 +2034,16 @@ deployment is a supported choice) and no credentials lying around.
   pattern produces before you save it, and the word used for admin accounts ("Admin", "adm", …) is
   configurable without loosening name validation. Group tags are checked as the group name they
   produce, so a short tag is not reported as badly named.
+- **Every job and identity has its standard name.** ✅ 2026-11-09 Each background job is named for what it does
+  (caj-pim-engine, caj-pim-updater, caj-pim-dbinit, caj-pim-docs, caj-pim-publish, caj-pim-downlink) and runs as its
+  own identity named for its role (id-pim-engine, id-pim-updater, id-pim-dbinit, id-pim-docs, …). The web apps keep
+  their names (ca-pim-manager, ca-pim-rfa). The Installation documentation job runs as id-pim-docs, and an update
+  never switches it back to an older name.
+- **Existing installations move to the standard names safely.** ✅ 2026-11-09 A supported step renames each job one
+  at a time: the new job is created with the same settings and identity, its rights are copied, and one real run must
+  succeed before anything switches to it. The old job is deleted only after that proof, with a record kept first, and
+  an old identity is removed only when nothing uses it any more. It also works when the database has no public access:
+  the settings are read and written by a one-time job inside the installation's own network, removed after each run.
 
 ## 18. Launchers / Structure
 - (Delivered items in this area are internal structure/release-engineering; see DESIGN.md.)

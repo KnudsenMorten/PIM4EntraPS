@@ -96,7 +96,9 @@ function Get-PimJobRenameNotCovered {
 
 function Get-PimJobRenameStandardIdentityNames {
     <# PURE. The standard per-role identities (never an orphan, never deleted by this step). #>
-    return @('web', 'engine', 'updater', 'downlink', 'publish', 'requests', 'mcp', 'dbinit', 'asbuilt', 'docs') | ForEach-Object { "id-pim-$_" }
+    # id-pim-asbuilt is NOT standard (owner 2026-11-09: the docs identity is id-pim-docs) -- once nothing attaches it, it is an
+    # orphan like any old identity (record first, re-checked unattached at delete time)
+    return @('web', 'engine', 'updater', 'downlink', 'publish', 'requests', 'mcp', 'dbinit', 'docs') | ForEach-Object { "id-pim-$_" }
 }
 
 function Get-PimJobRenameOrphanIdentities {
@@ -185,7 +187,14 @@ function Copy-PimJobRenameObject {
     <# PURE. A deep copy as plain objects (ConvertTo-Json round trip); $null stays $null. #>
     param([AllowNull()][object]$Object)
     if ($null -eq $Object) { return $null }
-    return ((ConvertTo-Json -InputObject $Object -Depth 40 -Compress) | ConvertFrom-Json)
+    # A LIST stays a list, also with ONE item: ConvertFrom-Json (PS 7) unrolls an array in the pipeline and a function's
+    # return unrolls it again -- a job with ONE registry went out as an object (internal 2026-11-09: PUT caj-pim-docs ->
+    # 400 "could not be converted to ContainerAppRegistryCredentialsCollection")
+    $isList = ($Object -is [System.Collections.IList] -or ($Object -is [System.Collections.IEnumerable] -and $Object -isnot [string] -and $Object -isnot [System.Collections.IDictionary] -and $Object -isnot [pscustomobject]))
+    $json = ConvertTo-Json -InputObject $Object -Depth 40 -Compress
+    $copy = if ($PSVersionTable.PSVersion.Major -ge 7) { ConvertFrom-Json -InputObject $json -NoEnumerate } else { ConvertFrom-Json -InputObject $json }
+    if ($isList) { return , @($copy) }
+    return $copy
 }
 
 function Get-PimJobRenameTrigger {
@@ -515,7 +524,7 @@ function Set-PimJobRenameTrigger {
     $out['triggerType'] = $Type
     if ($Type -eq 'Schedule') { $out['scheduleTriggerConfig'] = [ordered]@{ cronExpression = $Cron; parallelism = $Parallelism; replicaCompletionCount = $ReplicaCompletionCount } }
     else { $out['manualTriggerConfig'] = [ordered]@{ parallelism = $Parallelism; replicaCompletionCount = $ReplicaCompletionCount } }
-    [void](& $Arm 'PATCH' $path @{ properties = @{ configuration = $out } })
+    [void](Invoke-PimJobRenamePatch -Arm $Arm -Path $path -Body @{ properties = @{ configuration = $out } } -Sleep $Sleep)
     $b = $null
     for ($i = 1; $i -le [Math]::Max(1, $ReadBackTries); $i++) {
         if ($i -gt 1) { & $Sleep $ReadBackWaitSeconds }
@@ -524,6 +533,23 @@ function Set-PimJobRenameTrigger {
         if ($bt.type -eq $Type -and ($Type -eq 'Manual' -or $bt.cron -eq $Cron)) { return @{ changed = $true; detail = $what } }
     }
     throw "read-back of $(@($JobId -split '/')[-1]): the trigger is not $Type$(if ($Type -eq 'Schedule') { " ($Cron)" }) after $ReadBackTries read(s)"
+}
+
+function Invoke-PimJobRenamePatch {
+    <#
+      A PATCH that waits out "operation in progress": a job ARM is still finishing a change on (a create, a trigger switch, a
+      run starting) answers 409 ContainerAppsJobOperationInProgress (internal + a test install 2026-11-09, the updater's
+      switch). Retries every -WaitSeconds up to -Tries times; any other error is thrown at once.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Arm, [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][object]$Body,
+          [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }, [int]$Tries = 18, [int]$WaitSeconds = 10)
+    for ($i = 1; ; $i++) {
+        try { return (& $Arm 'PATCH' $Path $Body) }
+        catch {
+            if ($i -ge $Tries -or "$($_.Exception.Message)" -notmatch '(?i)OperationInProgress') { throw }
+            & $Sleep $WaitSeconds
+        }
+    }
 }
 
 function Set-PimJobRenameEnv {
@@ -549,7 +575,7 @@ function Set-PimJobRenameEnv {
     }
     if (-not $done.Count) { return @{ changed = $false; detail = 'already as asked' } }
     if ($DryRun) { return @{ changed = $true; dryRun = $true; detail = ($done -join '; ') } }
-    [void](& $Arm 'PATCH' $path @{ properties = @{ template = $tpl } })
+    [void](Invoke-PimJobRenamePatch -Arm $Arm -Path $path -Body @{ properties = @{ template = $tpl } } -Sleep $Sleep)
     for ($i = 1; $i -le [Math]::Max(1, $ReadBackTries); $i++) {
         if ($i -gt 1) { & $Sleep $ReadBackWaitSeconds }
         $b = Invoke-PimIdentityMoveGet -Seam $Arm -Path $path

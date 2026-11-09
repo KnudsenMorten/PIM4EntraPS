@@ -1816,7 +1816,10 @@ function Initialize-PimDefaultJobHandlers {
         }
         # WhatIf = intent only; the live refresh writes the per-instance cache files.
         if ($whatIf) { return [pscustomobject]@{ ran=$true; detail='tenant-cache refresh (whatif: no write)'; whatIf=$true } }
-        $r = Invoke-PimTenantListRefresh -Quiet
+        # WEB-GRAPH-MIN-1 (3.0.69): the web app queues this job (Refresh lists, an admin "Import"); a trigger scoped
+        # 'admin-import' reads only the accounts asked for. Any other scope = every list.
+        $tcScope = if ($job -and $job.PSObject.Properties['scope'] -and "$($job.scope)".Trim()) { "$($job.scope)".Trim() } else { 'All' }
+        $r = if ((Get-Command Invoke-PimTenantListRefresh).Parameters.ContainsKey('Scope')) { Invoke-PimTenantListRefresh -Quiet -Scope $tcScope } else { Invoke-PimTenantListRefresh -Quiet }
         $counts = @()
         if ($r.results) { foreach ($k in $r.results.Keys) { $counts += ("{0}={1}" -f $k, $(if (-not $r.results[$k].ok) { 'ERR' } elseif ($r.results[$k].skipped) { 'skipped' } else { $r.results[$k].count })) } }
         if ($r.ok) {

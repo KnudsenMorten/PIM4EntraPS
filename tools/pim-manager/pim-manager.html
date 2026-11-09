@@ -4797,7 +4797,17 @@
     { const m = msgOf(); if (m) { m.textContent = 'reading the account and its PIM memberships…'; m.style.color = '#57606a'; } }
     try {
     let r = null;
-    try { r = await api('GET', '/api/unmanaged-admins/import?upn=' + encodeURIComponent(upn)); }
+    try {
+      // 3.0.69: the ENGINE reads the account (the web app does not). The first answer is "queued"; ask again until the
+      // engine has read it (about a minute), at most ~4 minutes.
+      r = await api('GET', '/api/unmanaged-admins/import?upn=' + encodeURIComponent(upn));
+      for (let i = 0; r && r.queued && !r.adminRow && i < 24; i++) {
+        { const m = msgOf(); if (m) { m.textContent = 'the engine is reading the account and its PIM memberships...'; m.style.color = '#57606a'; } }
+        await new Promise(res => setTimeout(res, 10000));
+        r = await api('GET', '/api/unmanaged-admins/import?upn=' + encodeURIComponent(upn));
+      }
+      if (r && r.queued && !r.adminRow) { say('Not imported yet: the engine has not read the account yet -- press Import again in a minute.', true); if (btn) { btn.disabled = false; btn.textContent = 'Import'; } return; }
+    }
     catch (e) { say('Not imported: ' + ((e && e.body && e.body.error) || e.message), true); if (btn) { btn.disabled = false; btn.textContent = 'Import'; } return; }
     let staged = 0;
     if (!r.alreadyDefined && r.adminRow) {
@@ -21722,17 +21732,22 @@
     _tenantRefreshInFlight = true;
     renderCacheBadges();
     try {
+      // 3.0.69: the button QUEUES the engine's tenant-cache job (the engine reads the tenant, not the web app). The answer
+      // carries the lists as they are now; the new ones arrive when the engine has run (about a minute).
       const r = await api('POST', '/api/refresh-tenant-lists');
       if (r && r.lists) {
         TENANT_LISTS = r.lists;
       } else {
-        // Fall back to GET if the POST didn't return lists.
         TENANT_LISTS = await api('GET', '/api/tenant-lists');
+      }
+      if (!silent && r && r.queued) {
+        const when = r.refreshedUtc ? (' The lists shown were refreshed ' + fmtTime(r.refreshedUtc) + '.') : '';
+        alert('Queued -- the engine refreshes the tenant lists' + (r.started ? ' now; done in about a minute.' : ' on its next run.') + when);
       }
     } catch (e) {
       console.warn('refreshTenantLists failed:', e.message);
       if (!silent) {
-        alert('Tenant refresh failed: ' + e.message + '\n\nThe engine SPN globals ($global:HighPriv_Modern_* / $global:AzureTenantID) must be set in the server\'s PowerShell session before this works. Launch with -ConnectPlatform (or declare the tenant connection on the instance), then retry.');
+        alert('The refresh could not be queued: ' + e.message + '\n\nThe engine refreshes the tenant lists on its own every 12 hours.');
       }
     } finally {
       _tenantRefreshInFlight = false;

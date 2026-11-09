@@ -55,8 +55,8 @@ function Get-PimInstallNameNewDefaults {
         web             = 'ca-pim-manager'
         engine          = 'caj-pim-engine'
         updater         = 'caj-pim-updater'
-        asbuilt         = 'caj-pim-docs'       # "Installation documentation"; its identity id-pim-asbuilt -> id-pim-docs is a later step
-        asbuiltIdentity = 'id-pim-asbuilt'
+        asbuilt         = 'caj-pim-docs'       # "Installation documentation" (framework naming-standard.json, docs role)
+        asbuiltIdentity = 'id-pim-docs'        # owner 2026-11-09: the docs job runs as id-pim-docs (id-pim-asbuilt = today's name)
         sqlAdminGroup   = 'grp-pim-sql-admins'
         publish         = 'caj-pim-publish'
         downlink        = 'caj-pim-downlink'

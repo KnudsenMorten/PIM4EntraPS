@@ -88,7 +88,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateNow.ps1')        # framework 8.18 UPDATE-NOW: the 15-minute signal check + the run kind + own cron
 . (Join-Path $solRoot 'engine\_shared\PIM-SetupSteps.ps1')        # FLEET-SETUPSTEPS the one-time install steps' facts (read only) for the heartbeat
 . (Join-Path $solRoot 'engine\_shared\PIM-IdentitySplit.ps1')     # NAM-03 the identity standard id-pim-<role>: the setup fact identityNames (read only, step 2g)
-. (Join-Path $solRoot 'engine\_shared\PIM-GuardLimits.ps1')      # framework 8.18: an update-now waits while guard Strict mode is on
+. (Join-Path $solRoot 'engine\_shared\PIM-GuardLimits.ps1')      # guard limits (owner 2026-11-09: Strict mode never blocks an update)
 . (Join-Path $solRoot 'engine\_shared\PIM-SchemaQuiesce.ps1')    # SCHEMA-QUIESCE-818 (framework 8.18): no database change under a running PIM job
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateTrack.ps1')      # OPEN-13 / framework 8.8 UPDATE-TRACK: the run's stages to Invardia (best effort)
 
@@ -1035,7 +1035,7 @@ try {
         try { $scBase = "$(Get-PimSqlSetting -ConnectionString $scCs -Name 'LicenceRequestBaseUrl')".Trim() } catch { $scBase = '' }
         $scSql = { param($q) Invoke-PimSqlScalar -ConnectionString $scCs -Sql $q }
         $scGet = { Get-PimSqlSetting -ConnectionString $scCs -Name (Get-PimSupportConsentStateSetting) }
-        $scSet = { param($o) Set-PimSqlSetting -ConnectionString $scCs -Name (Get-PimSupportConsentStateSetting) -ValueJson (ConvertTo-Json -InputObject $o -Depth 5 -Compress) }
+        $scSet = { param($o) Set-PimSqlSetting -ConnectionString $scCs -Name (Get-PimSupportConsentStateSetting) -ValueJson (ConvertTo-Json -InputObject $o -Depth 8 -Compress) }
     } else { $scKey = Resolve-PimInvardiaInstallKey -GetSetting $null }
     $scStart = {
         param($Decision, $Answer)
@@ -1086,6 +1086,38 @@ try {
     if (-not $scRun.ok -or "$($scRun.action)" -ne 'nothing') { Say $scRun.line $(if (-not $scRun.ok) { 'Yellow' } else { 'Cyan' }) }
 } catch { Say "support consent: not checked ($($_.Exception.Message)) -- the update continues" 'Yellow' }
 
+# ---- SUPPORT-SQL-JIT-1 (framework rule, owner-approved 2026-11-09) -- THE SUPPORT APP IN THE SQL ADMIN GROUP, TIME-LIMITED ----
+# Right after the consent decision, on EVERY run: while Invardia's answer says the support session is open (setup), the
+# updater asks a TIME-LIMITED ACTIVE PIM-for-Groups MEMBER assignment of the Support app on the SQL admin group (the SQL
+# server's Entra admin), ending at min(maxUntil, now + 24 h) -- never owner, never permanent -- reads it back and records it
+# (pim.Settings SupportConsentState.sqlGroup, the support state of this run). Closed: THIS code's grant is removed and read
+# back gone. No answer: nothing changes (the assignment ends by itself). IDENTITY-MOVE-1 13 (the product finishes the move):
+# in an OPEN setup session, until sqlGroup.swapDone, the Support app's PERMANENT member / owner assignments are recorded
+# FIRST (sqlGroup.permanentRemoved), then removed and swapped for the time-limited member -- never put back, ownership never
+# given (engine/_shared/PIM-SupportSqlGroupJit.ps1). Never fails the update.
+try {
+    if ($scRun -and $scRun.record -and $scSet) {
+        . (Join-Path $solRoot 'engine\_shared\PIM-SupportSqlGroupJit.ps1')
+        $sgArm = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
+        $sgGraph = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimGraph -Method $m -Path $p -Body $b } else { Invoke-PimGraph -Method $m -Path $p } }
+        $sgResolve = {
+            $sgSrv = $(if ("$($env:PIM_SqlServer)".Trim()) { "$($env:PIM_SqlServer)".Trim() } else { "$($global:PIM_SqlServer)".Trim() })
+            $sgAdm = Get-PimDbInitAdminGroup -Arm $sgArm -ResourceGroupId "/subscriptions/$sub/resourceGroups/$rg" -SqlServer $sgSrv
+            if ($sgAdm.isGroup -eq $false) { @{ groupId = ''; name = "$($sgAdm.name)"; reason = "$($sgAdm.reason)" } } else { $sgAdm }
+        }
+        $sgPrev = $null; if ($scRun.record.PSObject.Properties['sqlGroup']) { $sgPrev = $scRun.record.sqlGroup }
+        # IDENTITY-MOVE-1 13: the swap writes the permanent assignments it removes BEFORE the first remove (throws = not started)
+        $sgSave = { param($r) $scRun.record | Add-Member -NotePropertyName 'sqlGroup' -NotePropertyValue $r -Force; & $scSet $scRun.record }
+        $sgRun = Invoke-PimSupportSqlGroupJitStep -Answer $scRun.answer -AppId "$($scRun.appId)" -Previous $sgPrev -Graph $sgGraph -ResolveGroup $sgResolve -SaveRecord $sgSave
+        if ($sgRun.changed -and $null -ne $sgRun.record) {
+            $scRun.record | Add-Member -NotePropertyName 'sqlGroup' -NotePropertyValue $sgRun.record -Force
+            try { & $scSet $scRun.record } catch { $sgRun.say = $true; $sgRun.line += " -- NOT recorded ($((("$($_.Exception.Message)") -split "`n")[0])); a time-limited membership ends by itself" }
+        }
+        # the 15-minute check stays ONE line: only an action taken, a failure or a NEW finding is printed
+        if ($sgRun.say) { Say $sgRun.line $(if (-not $sgRun.ok -or "$($sgRun.finding)") { 'Yellow' } else { 'Cyan' }) }
+    }
+} catch { Say "support SQL group: not checked ($($_.Exception.Message)) -- the update continues" 'Yellow' }
+
 $script:PimUpdateNowSignal = $null
 $unEnabled = Test-PimUpdateNowEnabled -Ring $ring -Value "$($env:PIM_UPDATE_NOW)"
 $unNightly = "$($env:PIM_UPDATE_NIGHTLY_UTC)".Trim()
@@ -1110,7 +1142,9 @@ if ($unKind.kind -eq 'quick') {
     $unKey = ''; $unStrict = $false; $unStrictUntil = ''
     if ("$unCs".Trim()) {
         $unKey = Resolve-PimInvardiaInstallKey -GetSetting { param($n) Get-PimSqlSetting -ConnectionString $unCs -Name $n }
-        try { $unSt = ConvertFrom-PimGuardStrictText -Text (Get-PimSqlSettingRaw -ConnectionString $unCs -Name (Get-PimGuardStrictSettingName)); $unStrict = [bool](Test-PimGuardStrictActive -State $unSt); if ($unSt.untilUtc) { $unStrictUntil = $unSt.untilUtc.ToString('u') } } catch { $unStrict = $false }
+        # OWNER 2026-11-09: "strict mode can never block an update" / "we have no guards anywhere that blocks updates.
+        # strict mode lowers guards in the solution". Guard Strict mode is NOT read here and never holds an update; it only
+        # halves the solution's change guards (PIM-GuardLimits.ps1). (Was: framework 8.18 "an update-now waits while Strict".)
     } else { $unKey = Resolve-PimInvardiaInstallKey -GetSetting $null }
     $unBase = ''; if ("$unCs".Trim()) { try { $unBase = "$(Get-PimSqlSetting -ConnectionString $unCs -Name 'LicenceRequestBaseUrl')".Trim() } catch { } }
     $unRingN = -1; [void][int]::TryParse($ring, [ref]$unRingN)

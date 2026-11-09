@@ -468,22 +468,16 @@ $script:PimGraphAppRoles = @{
 # Every id resolved from the LIVE Microsoft Graph service principal 2026-09-12 (SEC-18: a
 # hardcoded id is never validated, so a wrong one is authoritative forever).
 # ---------------------------------------------------------------------------
+# WEB-GRAPH-MIN-1 (3.0.69, owner 2026-11-09: "i have never approved that the web app had full AD permissions ... i thought
+# it runs through the engine"). The web app keeps ONLY what its people / group PICKERS and the UPN -> object id lookups an
+# admin triggers need. Every other directory read is the ENGINE's (its tenant-cache job records it in pim.TenantCache; the
+# web app reads the cache). The 15 read roles this set held until 3.0.68 (Directory.Read.All, User.Read.All, Group.Read.All,
+# RoleManagement.Read.All, ...) are GONE. tests/Test-PimWebGraphMinimal.ps1 asserts this set is EXACTLY these two.
+# NOTE: Grant-PimMiGraph only ADDS: an install that already holds the old 15 keeps them until they are removed (a live change).
+# Ids from the Microsoft Graph permissions reference (application column), 2026-11-09.
 $script:PimGraphAppRolesManager = @{
-    'Directory.Read.All'                              = '7ab1d382-f21e-4acd-a863-ba3e13f7da61'
-    'Domain.Read.All'                                 = 'dbb9058a-0e50-45d7-ae91-66909b5d4664'
-    'User.Read.All'                                   = 'df021288-bdef-4463-88db-98f22de89214'
-    'Group.Read.All'                                  = '5b567255-7703-4780-807c-7be8301ae99b'
-    'AdministrativeUnit.Read.All'                     = '134fd756-38ce-4afd-ba33-e9623dbe66c2'
-    'Application.Read.All'                            = '9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30'
-    'AccessReview.Read.All'                           = 'd07a8cc0-3d51-4b77-b3b0-32704d1f69fa'
-    'RoleManagement.Read.All'                         = 'c7fbd983-d9aa-4fa7-84b8-17382c103bc4'
-    'RoleManagementPolicy.Read.Directory'             = 'fdc4c997-9942-4479-bfcb-75a36d1138df'
-    'RoleManagementPolicy.Read.AzureADGroup'          = '69e67828-780e-47fd-b28c-7b27d14864e6'
-    'RoleEligibilitySchedule.Read.Directory'          = 'ff278e11-4a33-4d0c-83d2-d01dc58929a5'
-    'RoleAssignmentSchedule.Read.Directory'           = 'd5fe8ce8-684c-4c83-a52c-46e882ce4be1'
-    'PrivilegedAccess.Read.AzureADGroup'              = '01e37dc9-c035-40bd-b438-b2879c4870a6'
-    'PrivilegedEligibilitySchedule.Read.AzureADGroup' = 'edb419d6-7edc-42a3-9345-509bfdf5d87c'
-    'PrivilegedAssignmentSchedule.Read.AzureADGroup'  = 'cd4161cb-f098-48f8-a884-1eda9a42434c'
+    'User.ReadBasic.All'                              = '97235f07-e226-4f63-ace3-39588e11d3a1'   # people picker + UPN -> id lookups (basic profile)
+    'GroupMember.Read.All'                            = '98830695-27a2-44f7-8c18-0c3ebc9698f6'   # group picker + group id -> name (basic group properties)
 }
 
 # DBINIT-MEMBERSHIP (owner 2026-11-05 "Grant updater the right"): the updater's Graph set lives in ONE engine file, read by

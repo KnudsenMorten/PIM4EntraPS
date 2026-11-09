@@ -46,17 +46,31 @@
   The install's SQL server (for pim.Settings). Default: PIM_SqlServer of the Manager app.
 .PARAMETER SqlDatabase
   The install's database. Default: PIM_SqlDatabase of the Manager app, else PimPlatform.
+.PARAMETER SqlViaJob
+  For an install whose database is PRIVATE (public network access off), where the Support app's audited SQL cannot reach
+  it: pim.Settings 'SchedulerTickJobId' and 'InstallNames' are read and written by a ONE-TIME job (caj-pim-renamesql)
+  inside the install's own environment, with the identity the install's database job (caj-pim-dbinit, else ca-pim-dbinit)
+  signs in to SQL with. Each run is created, started once, its result read from its log lines (Log Analytics), and the
+  job is ALWAYS removed and read back gone. One run reads both settings; each write is one run that reads them back. The
+  value is passed to the job base64-encoded in an environment value and written with a parameterised UPDATE (INSERT only
+  when the row is missing). A plan without -Apply runs read jobs only; -WhatIf creates no job (pim.Settings not read).
+  -SqlServer / -SqlDatabase, when given, must be the database the database job names.
 
 .EXAMPLE
   .\Rename-PimJobs.ps1 -SubscriptionId <sub> -ResourceGroup <rg>
 .EXAMPLE
   .\Rename-PimJobs.ps1 -SubscriptionId <sub> -ResourceGroup <rg> -Apply -Role engine -LogDir C:\temp\rename
+.EXAMPLE
+  .\Rename-PimJobs.ps1 -SubscriptionId <sub> -ResourceGroup <rg> -Apply -Role engine -LogDir C:\temp\rename -SqlViaJob
+  A private database: pim.Settings through one-time jobs inside the install's network.
 
 .NOTES
   Requirements:
     PowerShell: 5.1 or 7.
     Role: the Invardia Support app (Contributor + User Access Administrator at the PIM resource group; the database role that writes pim.Settings).
     Hosts: management.azure.com, login.microsoftonline.com, <server>.database.windows.net
+    With -SqlViaJob: nothing to the database from this computer; api.loganalytics.io for the one-time job's result lines
+    (Log Analytics Reader on the install's workspace).
 
 .LINK
   https://invardia.com/docs/pim/scripts/Rename-PimJobs/
@@ -72,11 +86,15 @@ param(
     [switch]$DeleteOld,
     [string]$SqlServer = '',
     [string]$SqlDatabase = '',
-    # TEST seams (tests\Test-PimJobRename.ps1): replace ARM / pim.Settings / the proof / the wait
+    # a PRIVATE database: pim.Settings through a one-time job inside the install's network (tools\setup\_PimJobRenameSqlJob.ps1)
+    [switch]$SqlViaJob,
+    # TEST seams (tests\Test-PimJobRename.ps1, tests\Test-PimJobRenameSqlJob.ps1): replace ARM / pim.Settings / the proof / the
+    # wait / the one-time job's log lines
     [scriptblock]$Arm,
     [scriptblock]$Sql,
     [scriptblock]$Prove,
-    [scriptblock]$Sleep
+    [scriptblock]$Sleep,
+    [scriptblock]$SqlJobLogs
 )
 $ErrorActionPreference = 'Stop'
 $here    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
@@ -97,10 +115,22 @@ try {
     if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
     $stamp = [datetime]::UtcNow.ToString('yyyyMMdd-HHmmss')
     if ($Apply -and -not "$Role".Trim()) { throw '-Apply needs -Role (one role at a time: engine, updater, dbinit, publish, downlink, docs)' }
+    if ($SqlViaJob -and $Sql) { throw '-SqlViaJob and -Sql are two ways to reach pim.Settings -- pass one' }
 
     Say "=== JOB-RENAME: $ResourceGroup ($(if ($Apply) { if ($dry) { 'APPLY, What if' } else { "APPLY $Role" } } else { 'PLAN, read-only' })) ===" 'Cyan'
     # pim.Settings through the Support app's AUDITED SQL (Invoke-InvardiaSupportSql), when this session has it
     $jrInst = Read-PimJobRenameInstall -Arm $Arm -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup
+    if ($SqlViaJob) {
+        # a PRIVATE database: each read / write of pim.Settings is a one-time job inside the install's network (created,
+        # started once, its result line read, ALWAYS removed and read back gone)
+        . (Join-Path $PSScriptRoot '_PimSupportSqlJob.ps1')      # the one-time job's pure helpers (api, tag, command, log query)
+        . (Join-Path $PSScriptRoot '_PimJobRenameSqlJob.ps1')    # the job-rename read / write through it
+        $jrSqlLogs = if ($SqlJobLogs) { $SqlJobLogs } else { { param($w, $e) Get-PimJobRenameSqlJobLogLines -WorkspaceId $w -Execution $e } }
+        $jrSqlJobState = New-PimJobRenameSqlJobState -Arm $Arm -Logs $jrSqlLogs -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -SqlServer $SqlServer -SqlDatabase $SqlDatabase -Sleep $Sleep -WhatIfOnly:$dry
+        # a PLAIN scriptblock (never a bound closure): it finds $jrSqlJobState and the dot-sourced functions in this script's scope
+        $Sql = { param($a, $n, $v) Invoke-PimJobRenameSqlJobSeam -State $jrSqlJobState -Action $a -Name $n -Value $v }
+        Say "  pim.Settings through a one-time job inside the install's network ($(Get-PimJobRenameSqlJobName), the database job's identity)$(if ($dry) { ' -- What if: no job is created, pim.Settings is not read' })" 'DarkGray'
+    }
     if (-not $Sql -and (Get-Command Invoke-InvardiaSupportSql -ErrorAction SilentlyContinue)) {
         $jrMgr = @($jrInst.apps | Where-Object { $_ -and (Test-PimInstallNameIsRole -Role web -Name "$($_.name)") }) | Select-Object -First 1
         $jrEnv = @{}
@@ -118,7 +148,10 @@ try {
                     try { return ($raw | ConvertFrom-Json) } catch { return $raw }
                 }
                 $j = (ConvertTo-Json -InputObject $v -Compress -Depth 8) -replace "'", "''"
-                [void](Invoke-InvardiaSupportSql -Server $jrSrv -Database $jrDb -Reason "PIM job rename: switch pim.Settings $n" -Query "MERGE pim.Settings AS t USING (SELECT N'$n' AS Name) AS s ON t.Name = s.Name WHEN MATCHED THEN UPDATE SET ValueJson = N'$j', UpdatedUtc = SYSUTCDATETIME() WHEN NOT MATCHED THEN INSERT (Name, ValueJson, UpdatedUtc) VALUES (N'$n', N'$j', SYSUTCDATETIME());")
+                [void](Invoke-InvardiaSupportSql -Server $jrSrv -Database $jrDb -Reason "PIM job rename: switch pim.Settings $n" -Query "UPDATE pim.Settings SET ValueJson = N'$j', UpdatedUtc = SYSUTCDATETIME() WHERE Name = N'$n'; IF @@ROWCOUNT = 0 INSERT INTO pim.Settings (Name, ValueJson, UpdatedUtc) VALUES (N'$n', N'$j', SYSUTCDATETIME());")
+                # UPDATE first, INSERT only when the row is missing: a MERGE needs the INSERT permission even when the row
+                # exists, and the Support app's SQL access may update pim.Settings without inserting (internal 2026-11-09:
+                # "The INSERT permission was denied on the object 'Settings'")
             }
             Say "  pim.Settings through the Support app's audited SQL: $jrSrv / $jrDb" 'DarkGray'
         }

@@ -4,7 +4,10 @@
     Tenant-list cache builder for PIM Manager.
 
 .DESCRIPTION
-    Dot-sourced from Open-PimManager.ps1. Provides:
+    Dot-sourced from Open-PimManager.ps1 (the READERS only) and by the scheduler (tools/pim-scheduler/Start-PimScheduler.ps1),
+    which runs the refresh as the ENGINE's 'tenant-cache' job. WEB-GRAPH-MIN-1 (3.0.69, owner 2026-11-09): the web app never
+    runs Invoke-PimTenantListRefresh -- its "Refresh lists" button QUEUES the engine job; only the operator's local
+    'Open-PimManager.ps1 -Refresh' run still calls it. Provides:
 
       Invoke-PimTenantListRefresh   -> connects to the tenant via the engine
                                        SPN, queries Graph + Resource Graph,
@@ -82,9 +85,17 @@
 #    best-effort try/catch, because a cache is a convenience. Measured 2026-09-20: 'tenant-domains' was never
 #    added when REQ-T shipped, so the domain cache was dead in both directions and the Settings dropdown had
 #    nothing to offer whenever the live Graph read was unavailable. ADD THE KIND IN THE SAME EDIT AS THE CACHE CALL.
-$script:PimTenantCacheKinds = @('entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity','tenant-org','active-assignments','drift','coverage-report','target-check','workload-roles:defender','workload-roles:intune','workload-actions:defender','tenant-domains','powerbi-workspaces','ad-servers','managed-live','mgmt-report')   # mgmt-report: MGMT-REPORT, the latest monthly management report (.pptx) + the figure history its trends use; managed-live: the live assignments the engine matched to a definition (drift read; Review current delegations, 2026-10-07); powerbi-workspaces: REQ-DISC-2 (the discovery-powerbi job); ad-servers: §80.2 server onboarding (written by the hybrid worker)
+# WEB-GRAPH-MIN-1 (3.0.69, owner 2026-11-09): 'admin-tap-state', 'demo-group', 'pim-app-registrations', 'workload-roles',
+# 'pim-identities' (the recorded directory answers) and 'admin-import-reads' are written by the ENGINE's tenant-cache job
+# (engine/_shared/PIM-EngineDirectoryFacts.ps1) and only READ by the web app, which makes no Graph call of its own beyond the
+# pickers. 'tenant-org' + 'tenant-domains' are written by the same job now (the web app no longer reads Graph for them).
+$script:PimTenantCacheKinds = @('admin-tap-state','demo-group','pim-app-registrations','workload-roles','pim-identities','admin-import-reads','entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity','tenant-org','active-assignments','drift','coverage-report','target-check','workload-roles:defender','workload-roles:intune','workload-actions:defender','tenant-domains','powerbi-workspaces','ad-servers','managed-live','mgmt-report')   # mgmt-report: MGMT-REPORT, the latest monthly management report (.pptx) + the figure history its trends use; managed-live: the live assignments the engine matched to a definition (drift read; Review current delegations, 2026-10-07); powerbi-workspaces: REQ-DISC-2 (the discovery-powerbi job); ad-servers: §80.2 server onboarding (written by the hybrid worker)
 $script:PimTenantCacheMem   = @{}
 $script:PimTenantCacheReadErrors = @{}   # REQ 100.112: kind -> why its last read failed (Get-PimTenantCacheReadError)
+
+# WEB-GRAPH-MIN-1: the engine's directory-fact readers + the web app's cache-only replay (one file, both halves).
+$__pimEdfLib = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-EngineDirectoryFacts.ps1'
+if (Test-Path -LiteralPath $__pimEdfLib) { . $__pimEdfLib }
 
 function Get-PimTenantCacheStoreCs {
     # The store connection string, or $null when this process has no store.
@@ -764,7 +775,10 @@ $script:PimTenantRefreshInProgress = $false
 function Invoke-PimTenantListRefresh {
     [CmdletBinding()]
     param(
-        [switch]$Quiet
+        [switch]$Quiet,
+        # WEB-GRAPH-MIN-1: 'admin-import' = only the account reads an "Import" asked for (the queued request; a minute,
+        # not a whole refresh). Anything else = every list.
+        [string]$Scope = 'All'
     )
 
     if ($script:PimTenantRefreshInProgress) {
@@ -783,7 +797,27 @@ function Invoke-PimTenantListRefresh {
 
         $results = [ordered]@{}
 
-        foreach ($step in @(
+        # WEB-GRAPH-MIN-1 (3.0.69): the directory facts the web app reads instead of calling Graph itself. All OPTIONAL
+        # (a missing permission skips that one, a transient failure keeps the last record) and document-shaped (map).
+        $hasFacts = [bool](Get-Command Get-PimEngineDirectoryAnswers -ErrorAction SilentlyContinue)
+        $factSteps = @()
+        if ($hasFacts) {
+            $factSteps = @(
+                @{ kind = 'admin-import-reads';    label = 'Admin import reads';    fn = { Invoke-PimEngineAdminImportReads };    map = $true; optional = $true; fact = $true }
+            )
+            if ("$Scope" -ne 'admin-import') {
+                $factSteps += @(
+                    @{ kind = 'tenant-org';            label = 'Tenant name + domains'; fn = { Get-PimEngineTenantOrgFact };          map = $true; optional = $true; fact = $true },
+                    @{ kind = 'admin-tap-state';       label = 'Admin TAP state';       fn = { Get-PimEngineAdminTapFact };           map = $true; optional = $true; fact = $true },
+                    @{ kind = 'demo-group';            label = 'Demo guest group';      fn = { Get-PimEngineDemoGroupFact };          map = $true; optional = $true; fact = $true },
+                    @{ kind = 'pim-app-registrations'; label = 'PIM app registrations'; fn = { Get-PimEngineAppRegistrationsFact };   map = $true; optional = $true; fact = $true },
+                    @{ kind = 'workload-roles';        label = 'Workload role catalogs'; fn = { Get-PimEngineWorkloadRolesFact };     map = $true; optional = $true; fact = $true },
+                    @{ kind = 'pim-identities';        label = 'PIM identities + rights'; fn = { Get-PimEngineDirectoryAnswers };     map = $true; optional = $true; fact = $true }
+                )
+            }
+        }
+        $listSteps = @()
+        if ("$Scope" -ne 'admin-import') { $listSteps = @(
             @{ kind = 'entra-roles';      label = 'Entra ID roles';        fn = { Get-PimEntraRolesFromTenant } },
             @{ kind = 'aus';              label = 'Administrative Units';  fn = { Get-PimAdministrativeUnitsFromTenant } },
             @{ kind = 'pim-groups';       label = 'PIM-* groups';          fn = { Get-PimGroupsFromTenant } },
@@ -792,7 +826,8 @@ function Invoke-PimTenantListRefresh {
             # BUG-192: the two validator caches nothing wrote. MAP-shaped, OPTIONAL (a missing permission skips).
             @{ kind = 'auth-methods';     label = 'Admin auth methods';    fn = { Get-PimAdminAuthMethodsFromTenant }; map = $true; optional = $true },
             @{ kind = 'pim-activity';     label = 'PIM group activity';    fn = { Get-PimGroupActivityFromTenant };    map = $true; optional = $true }
-        )) {
+        ) }
+        foreach ($step in @(@($listSteps) + @($factSteps))) {
             $kind  = $step.kind
             $label = $step.label
             # §100.45: the group-activity read (one request per owned group, ~366 on internal) runs at most once per
@@ -850,6 +885,13 @@ function Invoke-PimTenantListRefresh {
                     $results[$kind] = @{ ok = $true; stale = $true; count = 0; reason = "$($_.Exception.Message)" }
                     continue
                 }
+                # WEB-GRAPH-MIN-1: a directory FACT that could not be read keeps its last record (the web app shows its age, or
+                # "the engine has not recorded this yet") -- it never fails the lists the delegation pages depend on.
+                if ($step.fact) {
+                    if (-not $Quiet) { Write-Host ("    {0,-22} NOT RECORDED -- kept the last record: {1}" -f $label, $_.Exception.Message) -ForegroundColor DarkYellow }
+                    $results[$kind] = @{ ok = $true; stale = $true; count = 0; reason = "$($_.Exception.Message)" }
+                    continue
+                }
                 if (-not $Quiet) {
                     Write-Warning ("    {0} FAILED: {1}" -f $label, $_.Exception.Message)
                 }
@@ -861,7 +903,7 @@ function Invoke-PimTenantListRefresh {
         # objects (Graph 403 on every environment, 2026-10-09), so the tick -- which holds the Graph read rights -- records
         # users / groups / service principals here; the updater's sizing reads pim.Settings 'TenantObjectCounts' on a 403.
         # Best effort: never fails or slows the refresh beyond three $count calls.
-        try {
+        if ("$Scope" -ne 'admin-import') { try {
             $csC = Get-PimTenantCacheStoreCs
             if (-not (Get-Command Get-PimTenantObjectCounts -ErrorAction SilentlyContinue)) {
                 $tsz = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-TenantSizing.ps1'   # the tick does not load it otherwise
@@ -884,7 +926,7 @@ function Invoke-PimTenantListRefresh {
                     Set-PimSqlSetting -ConnectionString $csC -Name 'TenantObjectCounts' -Value ([ordered]@{ Users = $oc.Users; Groups = $oc.Groups; ServicePrincipals = $oc.ServicePrincipals; Members = $members; Guests = $guests; recordedUtc = (Get-Date).ToUniversalTime().ToString('o') }) | Out-Null
                 }
             }
-        } catch { if (-not $Quiet) { Write-Host "    tenant object counts not recorded: $($_.Exception.Message)" -ForegroundColor DarkYellow } }
+        } catch { if (-not $Quiet) { Write-Host "    tenant object counts not recorded: $($_.Exception.Message)" -ForegroundColor DarkYellow } } }
 
         # Framework 12.27 SQL-STATS: the refresh rewrote pim.TenantCache rows -> refresh the stale pim.* statistics. Only when a
         # list was really written (not all kept / skipped); best effort -- never throws, one warning line.

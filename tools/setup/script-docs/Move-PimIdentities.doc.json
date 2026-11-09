@@ -194,6 +194,12 @@
       "help": "Stop after the proof; the old rights stay."
     },
     {
+      "name": "RootLater",
+      "required": false,
+      "default": false,
+      "help": "A right at the tenant root that only the customer can grant does not stop the move: every other right is copied and the switch goes ahead, and the root right stays an open customer step with its command."
+    },
+    {
       "name": "NeedOnly",
       "required": false,
       "default": null,

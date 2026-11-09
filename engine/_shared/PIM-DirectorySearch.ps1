@@ -1,4 +1,4 @@
-﻿<#
+<#
   PIM-DirectorySearch.ps1 -- REQUIREMENTS §35.8
 
   PURE core for the directory-people lookup that every people-picker in the
@@ -121,7 +121,7 @@ function Get-PimDirectoryPeopleSearchPath {
     $phrase = '"displayName:' + $t + '" OR "userPrincipalName:' + $t + '" OR "mail:' + $t + '" OR "surname:' + $t + '" OR "givenName:' + $t + '"'
     # +1 so the caller can tell "there are more" from "that is all of them".
     $take = $Top + 1
-    return "/users?`$search=$([uri]::EscapeDataString($phrase))&`$top=$take&`$select=id,displayName,userPrincipalName,mail,accountEnabled&`$orderby=displayName"
+    return "/users?`$search=$([uri]::EscapeDataString($phrase))&`$top=$take&`$select=id,displayName,userPrincipalName,mail,givenName,surname&`$orderby=displayName"
 }
 
 function Get-PimDirectoryPeopleFilterPath {
@@ -136,7 +136,7 @@ function Get-PimDirectoryPeopleFilterPath {
     $t = ConvertTo-PimODataStringLiteral -Term $Term
     $f = "startswith(displayName,'$t') or startswith(userPrincipalName,'$t') or startswith(mail,'$t')"
     $take = $Top + 1
-    return "/users?`$filter=$([uri]::EscapeDataString($f))&`$top=$take&`$select=id,displayName,userPrincipalName,mail,accountEnabled"
+    return "/users?`$filter=$([uri]::EscapeDataString($f))&`$top=$take&`$select=id,displayName,userPrincipalName,mail,givenName,surname"
 }
 
 function Get-PimDirectorySearchHeaders {
@@ -162,7 +162,8 @@ function ConvertTo-PimDirectoryPerson {
         displayName       = $dn
         userPrincipalName = $upn
         mail              = "$($User.mail)".Trim()
-        accountEnabled    = [bool]$User.accountEnabled
+        # 3.0.69 WEB-GRAPH-MIN-1: accountEnabled is not in the basic profile (User.ReadBasic.All) -- $null = not read, never "disabled"
+        accountEnabled    = $(if ($User.PSObject.Properties['accountEnabled'] -and $null -ne $User.accountEnabled) { [bool]$User.accountEnabled } else { $null })
         # What a picker should put in the field. UPN is the identity every one of
         # the §35.8 fields actually stores; displayName is only the label.
         value             = $(if ($upn) { $upn } else { $dn })

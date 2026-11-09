@@ -429,6 +429,22 @@ function New-PimSetupSteps {
         elseif ($jo -eq $false) { & $set 'support-sql' 'missing' ("the just-in-time grant path is not set up on this install$(if ($standing) { " (standing access meanwhile: $standing)" })") $at }
         else { & $set 'support-sql' 'unknown' 'not determined: the just-in-time access state could not be read' $at }
     }
+    # SUPPORT-SQL-JIT-1 (framework rule, owner 2026-11-09): the Support app is SQL admin only through a TIME-LIMITED membership
+    # of the SQL admin group made by the updater while a support session is open. A PERMANENT member / owner assignment of the
+    # Support app there (read by the updater, pim.Settings SupportConsentState.sqlGroup.permanent) is a FINDING, said first in
+    # plain words -- the state stays what the database read says; its removal is a separate recorded step, never this code.
+    $sgRec = Get-PimSetupStepField (ConvertTo-PimSetupStepObject (Get-PimSetupStepField $Facts 'SupportConsent')) 'sqlGroup'
+    $sgPerm = @(@(Get-PimSetupStepField $sgRec 'permanent') | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Sort-Object -Unique)
+    # IDENTITY-MOVE-1 13: once the updater's swap is done (sqlGroup.swapDone, no permanent read back) the step says
+    # "time-limited (swapped <utc>)" first. Its state stays what the database read says (ok when the read-only user + the
+    # just-in-time path are in place) -- the swap never makes a missing database part look done.
+    $sgSwap = ConvertTo-PimSetupStepUtc (Get-PimSetupStepField $sgRec 'swapDone')
+    if ($sgPerm.Count -and $res.ContainsKey('support-sql')) {
+        $sgWarn = "WARNING: the Support app holds a PERMANENT $($sgPerm -join ' + ') assignment on the SQL admin group (SQL admin with no support session open)"
+        $res['support-sql'].detail = "$sgWarn; $($res['support-sql'].detail)"
+    } elseif ($sgSwap -and $res.ContainsKey('support-sql')) {
+        $res['support-sql'].detail = "time-limited (swapped $($sgSwap.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture))); $($res['support-sql'].detail)"
+    }
 
     # ---- S4a / S4b as-built (updater, Get-PimAsBuiltSetupState) ------------------------------------------------------
     if ($null -eq $up) { & $set 'asbuilt-storage' 'unknown' $noUp $null; & $set 'asbuilt-rights' 'unknown' $noUp $null }

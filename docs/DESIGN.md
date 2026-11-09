@@ -12069,7 +12069,8 @@ removal check, the removal budget, the mass-disable breaker, bulk revoke, accoun
 hybrid server batch. Only the engine job starts it (`pim.Settings` `GuardStrict`, from `EngineFingerprint`); the first
 version on an installation only records the fingerprint. The Guards page shows configured and effective limits and the
 end time; the header badge "Guard mode: Strict" is shown to SuperAdmins; a SuperAdmin ends it early with a reason
-(audited `guard.strict.end`). The heartbeat carries the guard mode.
+(audited `guard.strict.end`). The heartbeat carries the guard mode. Strict mode only lowers these guard limits: it is
+never a gate on an update, and no guard of any kind holds an update back (2026-11-09).
 
 ### 32.3 Install names
 
@@ -12077,6 +12078,23 @@ Every resource name an installation uses (portal, engine, updater, as-built job 
 and downlink jobs) is resolved by one function, `Get-PimInstallName`: the installation's record in `pim.Settings`
 `InstallNames`, else its environment variables, else today's name. The updater writes the record; every script and job
 reads through the resolver, so an installation with its own names keeps working.
+
+**The standard names (2026-11-09).** Jobs are `caj-pim-<purpose>` (engine, updater, dbinit, docs, publish, downlink) and
+each runs as its own user-assigned identity `id-pim-<role>`; the Installation documentation job runs as `id-pim-docs`.
+The web apps keep `ca-pim-manager` and `ca-pim-rfa`. Because the updater's as-built step creates the documentation
+identity named by the record and attaches the job to it on every update, the record's `asbuiltIdentity` is set to
+`id-pim-docs` in the same step that moves the job, and the product default is `id-pim-docs`, so no update moves it back.
+
+**The job rename step** (`Rename-PimJobs.ps1`, library `PIM-JobRename.ps1`). Azure cannot rename a job, so each one is
+re-created: plan first (read-only), then per role: create the new job with the same specification and identity (manual
+trigger), copy its job-scoped role assignments, start it once and require that run to succeed, switch the schedule and
+every setting that names the job (the other jobs' environment and `pim.Settings` `SchedulerTickJobId` / `InstallNames`),
+set the old job to manual, and only then delete it, after recording its full specification. Old user-assigned identities
+that nothing attaches any more are deleted the same way. A failed proof switches nothing; a re-run continues where it
+stopped. Where the database has no public network access, the settings are read and written by a one-time job created
+inside the installation's environment with the database job's own identity (`_PimJobRenameSqlJob.ps1`): fixed script
+text, the value passed base64-encoded in an environment variable, parameterised statements, the result returned in one
+marked log line, and the one-time job always removed and read back gone.
 
 ### 32.4 Mail subjects
 

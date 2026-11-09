@@ -460,7 +460,8 @@ function Invoke-PimUpdateNowQuickCheck {
       Gates, in order (the cheap ones first; the network only when it can matter):
         off for this ring -> no install key (community / Invardia-less: NO call) -> no ring -> the signal (404 / 0 / 5xx =
         no signal, quietly; 304 = the stored one) -> updateNow false -> older than 24 h -> already acted on (raisedAt) ->
-        not newer than the installed version -> PIM_UPDATE_HOLD -> Strict -> another updater execution running
+        not newer than the installed version -> PIM_UPDATE_HOLD -> another updater execution running (guard Strict mode is
+        NEVER a gate: owner 2026-11-09 "strict mode can never block an update")
         (unreadable = not started).
       Seams: -Head { } -> @{ status; body; error }  (UPDATE-NOW-HEAD: POST /head; the seam holds the key + licence, this
                                                        function never sees the licence)
@@ -570,7 +571,8 @@ function Invoke-PimUpdateNowQuickCheck {
             }
         }
         if ($Hold) { & $save "update now: signal for $who ($($sig.version)), but this environment is HELD (PIM_UPDATE_HOLD=1) -- not started"; return $res }
-        if ($StrictActive) { & $save "update now: signal for $who ($($sig.version)), but guard Strict mode is on until $StrictUntil -- not started (the nightly run, or a SuperAdmin ending Strict, lets it through)"; return $res }
+        # OWNER 2026-11-09: "we have no guards anywhere that blocks updates. strict mode lowers guards in the solution" --
+        # -StrictActive is accepted for older callers and IGNORED: guard Strict mode never holds an update.
         $running = $null; if ($IsRunning) { try { $running = & $IsRunning } catch { $running = $null } }
         if ($running -is [bool] -and $running) { & $save "update now: signal for $who ($($sig.version)), but another updater execution is running -- not started"; return $res }
         if (-not ($running -is [bool])) { & $save "update now: signal for $who ($($sig.version)), but the updater's executions could not be read -- not started"; return $res }

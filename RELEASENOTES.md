@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.70 -- 2026-11-09
+
+- Support access to the database is time-limited: while a support session is open, the Invardia Support app is a member of the database administrator group only until the session ends (at most 24 hours), and a standing membership is replaced by the time-limited one. A guard never holds back an update: Strict mode only lowers the solution's own change limits.
+
+## 3.0.69 -- 2026-11-09
+
+- The Manager reads the directory with the narrowest rights: it keeps only basic user and group-membership reads and Reader on its own resource group; every other directory fact it shows is read by the engine and shown as of the last engine run. The Installation documentation job runs as its own standard identity. The job rename step works at installations with a private database
+
 ## 3.0.68 -- 2026-11-09
 
 - The job rename step: each PIM job can be re-created under its standard name, running as the same identity, proven by one run before the schedule switches to it; nothing is switched or removed before that proof

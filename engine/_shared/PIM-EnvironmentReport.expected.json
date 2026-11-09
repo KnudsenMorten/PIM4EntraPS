@@ -69,25 +69,18 @@
       "role": "manager",
       "label": "PIM Manager (web app managed identity)",
       "match": { "managedIdentityName": "ca-pim-manager", "self": true },
-      "purpose": "Serves the PIM Manager pages. Read-only in the directory: every change it takes is queued and applied by the engine.",
+      "purpose": "Serves the PIM Manager pages. It reads the directory only for the people and group pickers; every other directory fact is read by the engine and stored for the pages, and every change is queued and applied by the engine.",
       "graph": [
-        { "permission": "Directory.Read.All", "why": "Read users, groups and roles for the pages" },
-        { "permission": "Domain.Read.All", "why": "Resolve the tenant default domain for admin account names" },
-        { "permission": "User.Read.All", "why": "Read users" },
-        { "permission": "Group.Read.All", "why": "Read groups" },
-        { "permission": "AdministrativeUnit.Read.All", "why": "Read administrative units" },
-        { "permission": "Application.Read.All", "why": "Read applications (enterprise-application roles, PIM Activator apps)" },
-        { "permission": "AccessReview.Read.All", "why": "Show access reviews" },
-        { "permission": "RoleManagement.Read.All", "why": "Read role definitions and assignments" },
-        { "permission": "RoleManagementPolicy.Read.Directory", "why": "Show the Entra role activation policies" },
-        { "permission": "RoleManagementPolicy.Read.AzureADGroup", "why": "Show the PIM for Groups activation policies" },
-        { "permission": "RoleEligibilitySchedule.Read.Directory", "why": "Show eligible Entra role assignments" },
-        { "permission": "RoleAssignmentSchedule.Read.Directory", "why": "Show active Entra role assignments" },
-        { "permission": "PrivilegedAccess.Read.AzureADGroup", "why": "Show PIM for Groups memberships" },
-        { "permission": "PrivilegedEligibilitySchedule.Read.AzureADGroup", "why": "Show eligible group assignments" },
-        { "permission": "PrivilegedAssignmentSchedule.Read.AzureADGroup", "why": "Show active group assignments" }
+        { "permission": "User.ReadBasic.All", "why": "The people picker, and finding the account an admin types by its user name (basic profile only)" },
+        { "permission": "GroupMember.Read.All", "why": "The group picker, and confirming the group an admin picks (basic group properties)" }
       ],
-      "graphForbidden": [ { "permission": "Mail.Send", "why": "Tenant-wide Mail.Send could send as ANY mailbox; sending is scoped to one mailbox with Exchange RBAC for Applications" } ],
+      "graphForbidden": [
+        { "permission": "Mail.Send", "why": "Tenant-wide Mail.Send could send as ANY mailbox; sending is scoped to one mailbox with Exchange RBAC for Applications" },
+        { "permission": "Directory.Read.All", "why": "The web app does not read the whole directory: the engine reads it and stores what the pages show" },
+        { "permission": "User.Read.All", "why": "The web app reads only the basic profile the pickers need" },
+        { "permission": "Group.Read.All", "why": "The web app reads only the basic group properties the group picker needs" },
+        { "permission": "RoleManagement.Read.All", "why": "Role definitions and assignments are read by the engine and stored for the pages" }
+      ],
       "directoryRoles": [],
       "azure": [
         { "role": "Container Apps Jobs Operator", "scope": "engineJob", "required": true, "coveredBy": [ "Contributor", "Owner" ], "why": "Commit and Run now start the engine job" },

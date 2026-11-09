@@ -18,6 +18,12 @@
       "name": "The Invardia Support app's audited SQL access (Invoke-InvardiaSupportSql) to the PIM database",
       "scope": "pim.Settings of the install",
       "why": "Switches pim.Settings 'SchedulerTickJobId' and 'InstallNames' to the new job."
+    },
+    {
+      "kind": "azureRbac",
+      "name": "Log Analytics Reader",
+      "scope": "the Log Analytics workspace of the install's Container Apps environment (only with -SqlViaJob)",
+      "why": "Reads the one-time job's result line (its console log) when the database is private and pim.Settings is reached through that job."
     }
   ],
   "changes": [
@@ -85,6 +91,14 @@
       "scope": "the PIM resource group",
       "why": "No unused old identity left behind; its role assignments are not deleted.",
       "undo": "Re-create the identity from the record (it gets a new principal: grant its recorded roles to it)."
+    },
+    {
+      "target": "Azure Container Apps",
+      "action": "create",
+      "object": "ONLY with -SqlViaJob (a private database): a one-time job caj-pim-renamesql in the install's own environment, with the identity, image and image-pull identity of the install's database job (caj-pim-dbinit, else ca-pim-dbinit), tagged pim-one-time-job=job-rename-sql; started once per read or write of pim.Settings, then removed and read back gone -- also after a failed step. No identity gets a new right",
+      "scope": "the PIM resource group",
+      "why": "A private database cannot be reached from outside; the job reaches it over the install's own network, as its database job does.",
+      "undo": "Nothing to undo: the job is removed at the end of each run. A job a killed run left behind carries the tag and is removed by the next run (or delete caj-pim-renamesql in the Azure portal)."
     }
   ],
   "parameters": [
@@ -135,6 +149,12 @@
       "required": false,
       "default": "PIM_SqlDatabase of the Manager app, else PimPlatform",
       "help": "The install's database."
+    },
+    {
+      "name": "SqlViaJob",
+      "required": false,
+      "default": false,
+      "help": "For an install whose database is private: read and write pim.Settings through a one-time job inside the install's network (the database job's identity), created, run once and removed each time; the result is read from its log lines. -WhatIf creates no job."
     }
   ],
   "readsOnly": [
@@ -146,7 +166,8 @@
   "network": [
     "login.microsoftonline.com (token)",
     "management.azure.com",
-    "<server>.database.windows.net"
+    "<server>.database.windows.net",
+    "api.loganalytics.io (only with -SqlViaJob: the one-time job's result lines)"
   ],
   "whatIf": "Without -Apply the script is read-only either way. With -Apply -WhatIf it reads everything, prints the plan and, for the role, one line for each step it would take (create, copy, prove, switch, disable) -- nothing is written.",
   "undo": "Every run writes a record to -LogDir with each change in order and its exact undo command; a failed run prints them newest first. Without -DeleteOld nothing is deleted (the old job is kept, Manual); with it every delete is recorded before it happens. A failed proof leaves the old job untouched.",

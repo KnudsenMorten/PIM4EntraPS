@@ -333,17 +333,20 @@ function Invoke-PimSupportConsentStep {
         -StartJob  { param($Decision, $Answer) } -> @{ ok; status; problems[] }: ONE run of the support SQL job with that
                    action, waited for (the updater builds it from tools/setup/_PimSupportSqlJob.ps1, mode consent)
         -GetLast / -SetLast  the previous record / record this one (pim.Settings SupportConsentState) -- for the heartbeat
-      Returns { ok; action; started; jobOk; line; record }. ok = $false only when a due action could not be applied.
+      Returns { ok; action; started; jobOk; line; record; answer; appId }. ok = $false only when a due action could not be applied.
     #>
     param([scriptblock]$Http, [string]$BaseUrl = '', [AllowEmptyString()][AllowNull()][string]$InstallKey = '', [AllowNull()][scriptblock]$Sql,
           [AllowNull()][scriptblock]$StartJob, [AllowNull()][scriptblock]$GetLast, [AllowNull()][scriptblock]$SetLast,
           [datetime]$NowUtc = [datetime]::UtcNow, [int]$RetryDelaySec = 5, [scriptblock]$Sleep)
-    $out = [ordered]@{ ok = $true; action = 'nothing'; started = $false; jobOk = $null; line = ''; record = $null }
+    # SUPPORT-SQL-JIT-1: answer + appId are handed on to the updater's SQL admin group step (PIM-SupportSqlGroupJit.ps1), and
+    # the record carries that step's last record (sqlGroup) forward unchanged -- this step never reads or changes it.
+    $out = [ordered]@{ ok = $true; action = 'nothing'; started = $false; jobOk = $null; line = ''; record = $null; answer = $null; appId = '' }
     try {
         $last = $null; if ($GetLast) { try { $last = & $GetLast; if ($last -is [string] -and "$last".Trim().StartsWith('{')) { $last = "$last" | ConvertFrom-Json } } catch { $last = $null } }
         $rd = Invoke-PimSupportConsentRead -Http $Http -BaseUrl $BaseUrl -InstallKey $InstallKey -RetryDelaySec $RetryDelaySec -Sleep $Sleep
         $st = Get-PimSupportConsentDbState -Sql $Sql
         $dec = Get-PimSupportConsentDecision -Answer $rd.answer -State $st -NowUtc $NowUtc -Last $last
+        $out.answer = $rd.answer; $out.appId = "$($dec.appId)"
         $out.action = "$($dec.action)"
         $res = 'ok'; $detail = ''
         $after = $st
@@ -380,6 +383,10 @@ function Invoke-PimSupportConsentStep {
             consent = "$($dec.consent)"; session = "$($dec.session)"; untilUtc = "$($dec.untilUtc)"; invardiaStatus = [int]$rd.status
             readOnly = $(if ($after -and $after.read) { $after.readOnly } else { $null }); jitOpen = $(if ($after -and $after.read) { $after.jitOpen } else { $null }); jitUntil = $(if ($after -and $after.read) { "$($after.jitUntil)" } else { '' })
         }
+        $sgPrev = $null
+        if ($last -is [System.Collections.IDictionary]) { if ($last.Contains('sqlGroup')) { $sgPrev = $last['sqlGroup'] } }
+        elseif ($last -and $last -isnot [string] -and $last.PSObject.Properties['sqlGroup']) { $sgPrev = $last.sqlGroup }
+        if ($null -ne $sgPrev) { $out.record | Add-Member -NotePropertyName 'sqlGroup' -NotePropertyValue $sgPrev -Force }
         if ($SetLast) { try { & $SetLast $out.record } catch { $out.line += " (not recorded: $((("$($_.Exception.Message)") -split "`n")[0]))" } }
     } catch {
         $out.ok = $false
