@@ -1787,7 +1787,8 @@ try {
         try {
             $selfIdObj = Invoke-PimArm -Method GET -ApiVersion $script:PimAcaApi `
                             -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs/$selfJob"
-            $whoOid = "$($selfIdObj.identity.principalId)"
+            # the identity this job SIGNS IN AS (id-pim-updater after the identity move), not only its system identity
+            $whoOid = $(if (Get-Command Resolve-PimUpdPermEngineObjectId -ErrorAction SilentlyContinue) { Resolve-PimUpdPermEngineObjectId -Job $selfIdObj } else { "$($selfIdObj.identity.principalId)" })
         } catch { }
     }
     $schemaLoginRefusal = Get-PimUpdateSchemaLoginRefusal -ErrorText $schemaErr -PrincipalObjectId $whoOid -PrincipalAppId "$($who.appid)" `

@@ -38,6 +38,25 @@ $script:PimConvergeRoleIds = @{
 }
 $script:PimConvergeAuthzApi = '2022-04-01'
 
+function Resolve-PimConvergeSignInOid {
+    # PURE. The object id of the identity a container app / job SIGNS IN AS: a container's PIM_ManagedIdentityClientId -> the
+    # user-assigned identity with that client id (the identity move, id-pim-<role>, 2026-11-08); none named -> the
+    # system-assigned identity. A client id that matches no attached identity -> '' (the caller reports "could not be
+    # read"), never the system identity. (Same rule as PIM-UpdaterPermissionCheck's Resolve-PimUpdPermEngineObjectId; a copy
+    # here so this library stays standalone.)
+    param($Resource)
+    if (-not $Resource) { return '' }
+    $cid = ''
+    foreach ($c in @($Resource.properties.template.containers | Where-Object { $_ })) {
+        $v = @($c.env | Where-Object { "$($_.name)" -eq 'PIM_ManagedIdentityClientId' })[0]
+        if ($v -and "$($v.value)".Trim()) { $cid = "$($v.value)".Trim(); break }
+    }
+    if (-not $cid) { return "$($Resource.identity.principalId)".Trim() }
+    $ua = $Resource.identity.userAssignedIdentities
+    if ($ua) { foreach ($p in @($ua.PSObject.Properties)) { if ("$($p.Value.clientId)".Trim() -ieq $cid) { return "$($p.Value.principalId)".Trim() } } }
+    return ''
+}
+
 function Get-PimConvergeRoleGuid {
     # '/subscriptions/../providers/Microsoft.Authorization/roleDefinitions/<guid>' or a bare guid -> the lower-case guid.
     param([AllowNull()][string]$RoleDefinitionId)
@@ -179,9 +198,11 @@ function Invoke-PimUpdateConvergeDefaults {
     $rgReaderFix = "run tools/setup/Confirm-PimInstall.ps1 (or Initialize-PimHostingAccess.ps1) as an Owner / User Access Administrator of $ResourceGroup"
 
     # ---- the identities (principal ids), read once -------------------------------------------------------------------
+    # the identity each SIGNS IN AS (NAM-03, 2026-11-08): reading only identity.principalId after the identity move reported
+    # the OLD system identity -- whose rights the move removed, correctly -- as "jobs-operator missing" (internal / ring 1)
     $mgrOid = ''; $tickOid = ''
-    try { $m = & $Arm 'GET' "$rgScope/providers/Microsoft.App/containerApps/$ManagerApp`?api-version=2024-03-01" $null; $mgrOid = "$($m.identity.principalId)".Trim() } catch { }
-    try { $t = & $Arm 'GET' "$tickScope`?api-version=2024-03-01" $null; $tickOid = "$($t.identity.principalId)".Trim() } catch { }
+    try { $m = & $Arm 'GET' "$rgScope/providers/Microsoft.App/containerApps/$ManagerApp`?api-version=2024-03-01" $null; $mgrOid = Resolve-PimConvergeSignInOid -Resource $m } catch { }
+    try { $t = & $Arm 'GET' "$tickScope`?api-version=2024-03-01" $null; $tickOid = Resolve-PimConvergeSignInOid -Resource $t } catch { }
     $readAssignments = {
         param($scope, $oid)
         if (-not $oid) { return @{ list = $null; error = 'the identity could not be read' } }

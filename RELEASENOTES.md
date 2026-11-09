@@ -13,6 +13,18 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.65 -- 2026-11-09
+
+- The identity move never copies the SQL admin group to any role but the database job, also without -NeedOnly; a new identity is created in the location its app or job already runs in, so a customer's "allowed locations" policy no longer refuses it (3.0.64 was tagged but never published -- its changes ship in this version)
+
+## 3.0.64 -- 2026-11-09
+
+- The identity move never copies the SQL admin group to any role but the database job, also without -NeedOnly; a new identity is created in the location its app or job already runs in, so a customer's "allowed locations" policy no longer refuses it
+
+## 3.0.63 -- 2026-11-08
+
+- The setup checks "Manager may start the engine after a change" and the engine job's self-reader read the identity each one signs in as (after the identity move) instead of the old system identity, so a moved install no longer shows them as missing
+
 ## 3.0.62 -- 2026-11-08
 
 - The release scan found two code comments naming test installs; they are now generic (3.0.61 was tagged but never published -- its changes ship in this version)

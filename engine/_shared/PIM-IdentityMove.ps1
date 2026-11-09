@@ -458,8 +458,10 @@ function Get-PimIdentityMovePlan {
             $use = $r
             if ($NeedOnly -and "$($s.kind)" -eq 'user') { $sel = Select-PimIdentityMoveNeeded -Role $role -Rights $r -SourceName "$($s.name)"; $use = $sel.keep; foreach ($x in @($sel.notCopied)) { $notCopied.Add($x) } }
             # SEC-09 (framework 4.5): the SQL admin group's ONLY standing member is the database job -- never copied to another
-            # role, not even from the role's own system identity (Invardia 2026-11-08: the updater leaves it in its move)
-            if ($NeedOnly -and $role -ne 'dbinit' -and @($use.groups | Where-Object { "$($_.displayName)" -ieq 'grp-pim-sql-admins' }).Count) {
+            # role, not even from the role's own system identity (Invardia 2026-11-08: the updater leaves it in its move).
+            # ALWAYS, with or without -NeedOnly: without it the customer moves copied the old updater's membership to
+            # id-pim-updater ("updater-not-sql-admin" missing after the move, a customer test install 2026-11-08 23:03Z).
+            if ($role -ne 'dbinit' -and @($use.groups | Where-Object { "$($_.displayName)" -ieq 'grp-pim-sql-admins' }).Count) {
                 $use = @{ azure = @($use.azure); graph = @($use.graph); groups = @($use.groups | Where-Object { "$($_.displayName)" -ine 'grp-pim-sql-admins' }); dirRoles = @($use.dirRoles); kv = @($use.kv) }
                 $notCopied.Add("PIM group grp-pim-sql-admins (from $($s.name); SEC-09: only the database job is a standing member)")
             }
@@ -951,7 +953,11 @@ function Invoke-PimIdentityMoveRole {
         if ($rp.state -eq 'move') {
             $idObj = Invoke-PimIdentityMoveGet -Seam $Arm -Path "$tgtId`?api-version=$($api.msi)"
             if (-not $idObj) {
-                $loc = if ($Plan.location) { $Plan.location } else { "$(@($rp.resources)[0].location)" }
+                # the ROLE'S OWN resource location first (an app / job that exists there is allowed there): the resource
+                # group's location can be one a customer's "Allowed locations" policy refuses (a customer install
+                # 2026-11-08: PUT id-pim-web -> 403 RequestDisallowedByPolicy "IAC: Allowed locations")
+                $resLoc = "$(@($rp.resources | Where-Object { "$($_.location)".Trim() })[0].location)".Trim()
+                $loc = if ($resLoc) { $resLoc } elseif ($Plan.location) { $Plan.location } else { '' }
                 if ($DryRun) { & $step 'identity' "would create $tgtName in $($Plan.resourceGroup) ($loc), tag pim-component=$Role" '' ''; $rec.state = 'dry-run' }
                 else {
                     [void](& $Arm 'PUT' "$tgtId`?api-version=$($api.msi)" @{ location = $loc; tags = @{ 'pim-component' = $Role } })
