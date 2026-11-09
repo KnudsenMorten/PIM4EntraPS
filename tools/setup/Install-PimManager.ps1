@@ -770,17 +770,18 @@ if (-not $summary -or "$($summary.status)" -notin 'success', 'unverified') {
 
 # Framework §5.5 THE AGREED LIST (owner 2026-11-04, the new names ON by default): the deploy decided the names from what the
 # resource group already holds (Resolve-PimSetupInstallNameChoice) -- an install made before keeps today's names. Every
-# later step here follows what the deploy really used: read back; ca-pim-web absent but ca-pim-manager there = today's names.
+# later step here follows what the deploy really used: read back; the new ENGINE job absent but today's there = today's names.
+# JOB-RENAME 3.0.68: the web app is never renamed (ca-pim-manager either way), so the ENGINE JOB tells the two apart.
 if ($names.newNames -and -not $azSeam) {
-    $nnBase = "/subscriptions/$($cfg.subscriptionId)/resourceGroups/$($names.resourceGroup)/providers/Microsoft.App/containerApps"
+    $nnBase = "/subscriptions/$($cfg.subscriptionId)/resourceGroups/$($names.resourceGroup)/providers/Microsoft.App/jobs"
     $nnWeb = $null; $nnOld = $null
-    try { $nnWeb = Invoke-PimSetupArm -Path "$nnBase/$($names.managerApp)" -ApiVersion '2024-03-01' -NotFoundOk -ErrorAsNull } catch { $nnWeb = $null }
+    try { $nnWeb = Invoke-PimSetupArm -Path "$nnBase/$($names.tickJob)" -ApiVersion '2024-03-01' -NotFoundOk -ErrorAsNull } catch { $nnWeb = $null }
     if (-not $nnWeb) {
         $nnDef = Get-PimInstallNameDefaults
-        try { $nnOld = Invoke-PimSetupArm -Path "$nnBase/$($nnDef.web)" -ApiVersion '2024-03-01' -NotFoundOk -ErrorAsNull } catch { $nnOld = $null }
+        try { $nnOld = Invoke-PimSetupArm -Path "$nnBase/$($nnDef.engine)" -ApiVersion '2024-03-01' -NotFoundOk -ErrorAsNull } catch { $nnOld = $null }
         if ($nnOld) {
             $names.managerApp = $nnDef.web; $names.tickJob = $nnDef.engine; $names.updateJob = $nnDef.updater; $names.newNames = $false
-            Write-Host "    names: this resource group already runs PIM Manager as $($nnDef.web) -- today's names kept (Azure cannot rename)" -ForegroundColor DarkGray
+            Write-Host "    names: this resource group already runs PIM Manager's engine as $($nnDef.engine) -- today's names kept (Rename-PimJobs.ps1 moves the jobs)" -ForegroundColor DarkGray
         }
     }
 }

@@ -1,0 +1,154 @@
+{
+  "script": "Rename-PimJobs.ps1",
+  "product": "pim",
+  "title": "Rename each PIM Manager job to its standard name",
+  "purpose": "Renames each PIM Manager job of one install to its standard name caj-pim-<purpose> by creating the new job with the same spec, proving it, switching to it and disabling the old job -- the old job is deleted only with -DeleteOld, after the proof and the switch.",
+  "whenToRun": "Once per install for the naming standard (jobs named caj-pim-<purpose>), after the identity move (every job runs as its own id-pim-<role>). First without -Apply (the plan, read-only, for the approval), then -Apply -Role <role> one role at a time. A role that reports 'waiting' (its old job was running) is finished by running the same command again.",
+  "standalone": false,
+  "sourcePath": "tools/setup/Rename-PimJobs.ps1",
+  "runAs": [
+    {
+      "kind": "azureRbac",
+      "name": "Contributor + User Access Administrator",
+      "scope": "the PIM resource group",
+      "why": "Creates the new job, reads the old job's secrets (listSecrets) to copy them, copies the job-scoped role assignments to the new job, starts the proof run, switches the settings and sets the old job's trigger to Manual."
+    },
+    {
+      "kind": "other",
+      "name": "The Invardia Support app's audited SQL access (Invoke-InvardiaSupportSql) to the PIM database",
+      "scope": "pim.Settings of the install",
+      "why": "Switches pim.Settings 'SchedulerTickJobId' and 'InstallNames' to the new job."
+    }
+  ],
+  "changes": [
+    {
+      "target": "Azure Container Apps",
+      "action": "create",
+      "object": "the new job caj-pim-<purpose>: the old job's spec (image, command, variables, resources, registries, secrets, identity id-pim-<role>, environment, workload profile, timeouts), trigger Manual until the switch, tagged pim-renamed-from=<old job>",
+      "scope": "the PIM resource group",
+      "why": "Azure cannot rename a job; the standard name needs a new one.",
+      "undo": "Delete the NEW job only (the command is in the run record); the old job is untouched until the switch."
+    },
+    {
+      "target": "Azure",
+      "action": "grant",
+      "object": "each role assignment made on the old job itself (for example the Manager's Container Apps Jobs Operator on the engine job, a job's Reader on itself), given on the new job",
+      "permission": "the same Azure role for the same principal",
+      "scope": "the new job",
+      "why": "The same rights on the new job before anything switches; nothing is removed from the old job.",
+      "undo": "Kept: harmless on the new job; no role assignment is ever deleted by this script."
+    },
+    {
+      "target": "Azure Container Apps",
+      "action": "update",
+      "object": "one run of the new job for the proof",
+      "scope": "the new job",
+      "why": "Proves the new job works before anything switches; a failed proof switches nothing.",
+      "undo": "Nothing to undo: a normal run."
+    },
+    {
+      "target": "Azure Container Apps",
+      "action": "update",
+      "object": "the new job gets the old job's schedule (same cron); every variable of the Manager app and of the other jobs that names the old job (PIM_TickJobId, PIM_TickJobName, PIM_ENGINE_JOB_NAME, PIM_UpdateJobName, PIM_JobId, ...) names the new one",
+      "scope": "the PIM apps and jobs of the resource group",
+      "why": "Everything that starts, reads or records the job uses the new one.",
+      "undo": "The reverse switch per app / job (the command is in the run record)."
+    },
+    {
+      "target": "The PIM database",
+      "action": "update",
+      "object": "pim.Settings 'SchedulerTickJobId' (the engine) and 'InstallNames' (the install record)",
+      "scope": "the PIM database",
+      "why": "The Manager and every reader find the job by its new name.",
+      "undo": "The previous value is in the run record with the command that writes it back."
+    },
+    {
+      "target": "Azure Container Apps",
+      "action": "update",
+      "object": "the OLD job's trigger set to Manual (its schedule off); the job, its identity and its rights are kept",
+      "scope": "the old job",
+      "why": "The old job no longer runs.",
+      "undo": "Set the old job's trigger back to its schedule (the command is in the run record)."
+    },
+    {
+      "target": "Azure Container Apps",
+      "action": "remove",
+      "object": "ONLY with -DeleteOld, after the proof and the switch read back: the OLD job (its system-assigned identity goes with it); its full spec and job-scoped role assignments are written to the rollback record first, then the delete is read back (404)",
+      "scope": "the old job",
+      "why": "Owner decision 2026-11-09: the renamed install keeps no old job.",
+      "undo": "Re-create the job from the rollback record (PUT with the recorded spec and trigger, then its role assignments); secret values are re-entered, and a re-created job has a new system identity."
+    },
+    {
+      "target": "Azure (the install's resource group)",
+      "action": "remove",
+      "object": "ONLY with -DeleteOld: old id-pim-* user-assigned identities that no container app, job, SQL server or storage account attaches any more and that are not a standard id-pim-<role> (re-checked at delete time; an attached identity is never deleted); each recorded first (name, client id, principal id, role assignments), read back 404",
+      "scope": "the PIM resource group",
+      "why": "No unused old identity left behind; its role assignments are not deleted.",
+      "undo": "Re-create the identity from the record (it gets a new principal: grant its recorded roles to it)."
+    }
+  ],
+  "parameters": [
+    {
+      "name": "SubscriptionId",
+      "required": true,
+      "default": null,
+      "help": "The subscription of the PIM install."
+    },
+    {
+      "name": "ResourceGroup",
+      "required": true,
+      "default": null,
+      "help": "The resource group of the PIM install."
+    },
+    {
+      "name": "Apply",
+      "required": false,
+      "default": false,
+      "help": "Rename the role in -Role. Without it the script only plans."
+    },
+    {
+      "name": "Role",
+      "required": false,
+      "default": null,
+      "help": "The ONE role to rename with -Apply: engine, updater, dbinit, publish, downlink, docs."
+    },
+    {
+      "name": "LogDir",
+      "required": false,
+      "default": "the temp folder\\pim-job-rename",
+      "help": "Where the plan, the plan text and the per-role record are written."
+    },
+    {
+      "name": "DeleteOld",
+      "required": false,
+      "default": false,
+      "help": "After the proof and the switch read back, delete the old job and the old id-pim-* identities nothing attaches any more (rollback record first, 404 read back). Without it the old job is disabled and kept."
+    },
+    {
+      "name": "SqlServer",
+      "required": false,
+      "default": "PIM_SqlServer of the Manager app",
+      "help": "The install's SQL server (for pim.Settings)."
+    },
+    {
+      "name": "SqlDatabase",
+      "required": false,
+      "default": "PIM_SqlDatabase of the Manager app, else PimPlatform",
+      "help": "The install's database."
+    }
+  ],
+  "readsOnly": [
+    "the container apps and jobs of the resource group (their spec, identity, trigger and variables)",
+    "the role assignments made on each job (atScope)",
+    "the executions of each job (a running one is waited for, never stopped)",
+    "pim.Settings 'SchedulerTickJobId' and 'InstallNames'"
+  ],
+  "network": [
+    "login.microsoftonline.com (token)",
+    "management.azure.com",
+    "<server>.database.windows.net"
+  ],
+  "whatIf": "Without -Apply the script is read-only either way. With -Apply -WhatIf it reads everything, prints the plan and, for the role, one line for each step it would take (create, copy, prove, switch, disable) -- nothing is written.",
+  "undo": "Every run writes a record to -LogDir with each change in order and its exact undo command; a failed run prints them newest first. Without -DeleteOld nothing is deleted (the old job is kept, Manual); with it every delete is recorded before it happens. A failed proof leaves the old job untouched.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Rename-PimJobs/"
+}

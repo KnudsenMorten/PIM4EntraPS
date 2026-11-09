@@ -89,6 +89,9 @@ function Get-PimJobSettingSuffix {
     # CR5 step 1 (PIM 100.149): THIS install's engine job is 'Tick' whatever it is named (ca-pim-tick today, ca-pim-engine
     # at a new install) -- its stored size settings keep their keys
     if ((Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) -and "$Job".Trim() -ieq (Get-PimInstallName -Role engine)) { return 'Tick' }
+    # JOB-RENAME 3.0.68: any name the ENGINE role carries (ca-pim-tick, caj-pim-engine, ca-pim-engine) is 'Tick' too -- a
+    # renamed engine keeps its stored size settings even where the record is not read yet
+    if ((Get-Command Test-PimInstallNameIsRole -ErrorAction SilentlyContinue) -and (Test-PimInstallNameIsRole -Role engine -Name "$Job")) { return 'Tick' }
     # CR5 step 2: THIS install's managed-tenant pull job keeps its DownlinkS6 keys whatever it is named (caj-pim-downlink at
     # a new install); a caj-pim-<purpose> job loses its prefix like a ca-pim-<purpose> one
     if ((Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) -and "$Job".Trim() -ieq (Get-PimInstallName -Role downlink)) { return 'DownlinkS6' }

@@ -1191,6 +1191,9 @@ if ($hosted -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim()) {
     $script:PimUseNewNames = [bool]$nnChoice.useNew
     if ($script:PimUseNewNames) {
         $nnSet = Get-PimInstallNameSet -New
+        # JOB-RENAME 3.0.68: the names the group REALLY holds win (a legacy CR5 install's ca-pim-web / ca-pim-engine, a renamed
+        # install's caj-pim-engine) -- a re-run never makes a second Manager or engine next to them
+        if ($nnChoice.existing) { foreach ($nnK in @($nnChoice.existing.Keys)) { if ("$($nnChoice.existing[$nnK])".Trim()) { $nnSet[$nnK] = "$($nnChoice.existing[$nnK])".Trim() } } }
         if (-not $PSBoundParameters.ContainsKey('ManagerApp'))    { $ManagerApp    = $nnSet.web }
         if (-not $PSBoundParameters.ContainsKey('TickJobName'))   { $TickJobName   = $nnSet.engine }
         if (-not $PSBoundParameters.ContainsKey('UpdateJobName')) { $UpdateJobName = $nnSet.updater }

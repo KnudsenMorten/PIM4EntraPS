@@ -2,8 +2,8 @@
 <#
   PIM-InstallNames.ps1 -- framework DOCS/REQUIREMENTS.md §12.11c NAMING (CR5) item 6, PIM REQUIREMENTS 100.149:
   EVERY resource / identity name of THIS installation is read from ONE place, never from a literal in code, so the old
-  names (every install today) and the new ones (ca-pim-web, ca-pim-engine, ... for NEW installs, a later step) work side
-  by side.
+  names (every install today) and the standard ones (caj-pim-engine, caj-pim-updater, ... for NEW installs, and for an
+  existing install after JOB-RENAME 3.0.68 -- web apps are never renamed) work side by side.
 
   🔒 Owner 2026-10-14: "but remember it must work for existing customers". TODAY'S NAME IS THE DEFAULT: an install with no
   record and no variable resolves exactly the names it runs with now -- no migration, no rename, nothing to set.
@@ -46,21 +46,31 @@ function Get-PimInstallNameRoles { return @((Get-PimInstallNameDefaults).Keys) }
 # tells every reader which names it runs with. A NEW install takes these only when setup's switch is on
 # (-NewInstallNames / PIM_Setup_NewInstallNames, OFF by default -- with it off setup creates exactly today's names).
 function Get-PimInstallNameNewDefaults {
-    # PURE. The CR5 names (short code in Azure: ca-pim-<purpose> apps, caj-pim-<purpose> jobs, id-pim-<role> identities,
-    # grp-pim-<purpose> groups). The as-built job + identity and the SQL admin group already carry them.
+    # PURE. The CR5 / NAMING-PROGRAMME-1 names (framework naming-standard.json, owner 2026-11-09): caj-pim-<purpose> JOBS,
+    # id-pim-<role> identities, grp-pim-<purpose> groups. WEB APPS ARE NEVER RENAMED (owner 2026-11-09): the Manager stays
+    # ca-pim-manager and the access request broker ca-pim-rfa -- at a new install too. The names an earlier step gave a new
+    # install (ca-pim-web, ca-pim-engine, ca-pim-requests) stay RECOGNISED (Get-PimInstallNameLegacyNames). JOB-RENAME
+    # (3.0.68, tools/setup/Rename-PimJobs.ps1) moves an existing install's jobs to these names.
     return [ordered]@{
-        web             = 'ca-pim-web'
-        engine          = 'ca-pim-engine'
+        web             = 'ca-pim-manager'
+        engine          = 'caj-pim-engine'
         updater         = 'caj-pim-updater'
-        asbuilt         = 'caj-pim-asbuilt'
+        asbuilt         = 'caj-pim-docs'       # "Installation documentation"; its identity id-pim-asbuilt -> id-pim-docs is a later step
         asbuiltIdentity = 'id-pim-asbuilt'
         sqlAdminGroup   = 'grp-pim-sql-admins'
         publish         = 'caj-pim-publish'
         downlink        = 'caj-pim-downlink'
-        requests        = 'ca-pim-requests'
+        requests        = 'ca-pim-rfa'
         dbinit          = 'caj-pim-dbinit'
         dbinitIdentity  = 'id-pim-dbinit'
     }
+}
+
+function Get-PimInstallNameLegacyNames {
+    # PURE. Names a role carried at SOME install that are neither today's nor the standard one: the CR5 step-2 names new
+    # installs got 2026-11-04 .. 3.0.67 (ca-pim-web / ca-pim-engine / ca-pim-requests). A reader that FINDS a resource still
+    # answers to them (an install made with them keeps working); setup never gives them to a new install.
+    return @{ web = @('ca-pim-web'); engine = @('ca-pim-engine'); requests = @('ca-pim-requests') }
 }
 
 function Get-PimInstallNameSet {
@@ -72,16 +82,19 @@ function Get-PimInstallNameSet {
 
 function Get-PimInstallNameCandidates {
     <#
-      PURE. Every name -Role can carry at ANY install (today's first, then the CR5 name) -- for a reader that has no record
-      and must FIND the resource (ops / support scripts, name-pattern discovery): an old install answers to the first, a
-      new one to the second. -Preferred (a name the caller already knows) goes first.
+      PURE. Every name -Role can carry at ANY install (today's first, then the standard name, then the legacy CR5 names) --
+      for a reader that has no record and must FIND the resource (ops / support scripts, name-pattern discovery): an old
+      install answers to the first, a renamed / new one to the second, an install made 2026-11-04 .. 3.0.67 to the third.
+      -Preferred (a name the caller already knows) goes first.
     #>
     param([Parameter(Mandatory)][string]$Role, [AllowEmptyString()][string]$Preferred = '')
     $d = Get-PimInstallNameDefaults
     if (-not $d.Contains($Role)) { throw "Get-PimInstallNameCandidates: unknown role '$Role' (known: $((Get-PimInstallNameRoles) -join ', '))" }
     $n = Get-PimInstallNameNewDefaults
+    $lg = Get-PimInstallNameLegacyNames
+    $legacy = @(if ($lg.ContainsKey($Role)) { $lg[$Role] })
     $out = New-Object System.Collections.Generic.List[string]
-    foreach ($x in @("$Preferred".Trim(), "$($d[$Role])", "$($n[$Role])")) { if ((Test-PimInstallNameValue $x) -and -not $out.Contains($x)) { [void]$out.Add($x) } }
+    foreach ($x in @(@("$Preferred".Trim(), "$($d[$Role])", "$($n[$Role])") + $legacy)) { if ((Test-PimInstallNameValue $x) -and -not $out.Contains($x)) { [void]$out.Add($x) } }
     return @($out.ToArray())
 }
 
@@ -105,7 +118,8 @@ function Get-PimInstallIdentityNames {
 function Test-PimNewInstallNamesSwitch {
     <#
       The setup switch for CR5 step 2 -- ON BY DEFAULT since 2026-11-04 (framework §5.5 "THE AGREED LIST", owner: "fx tick ...
-      we dont use that"; wizard "On now"): a NEW install gets ca-pim-web / ca-pim-engine / caj-pim-updater. An EXISTING install
+      we dont use that"; wizard "On now"): a NEW install gets ca-pim-manager / caj-pim-engine / caj-pim-updater (3.0.68: the
+      web app is never renamed; jobs are caj-pim-<purpose>; before 3.0.68 ca-pim-web / ca-pim-engine). An EXISTING install
       keeps its names whatever this says (Resolve-PimSetupInstallNameChoice reads the resource group). -Explicit (a bound
       -NewInstallNames / a config value) wins; else $env:PIM_Setup_NewInstallNames, else $global:PIM_Setup_NewInstallNames:
       1 / true / yes / on = on, anything else given = off. Nothing given = ON.
@@ -125,19 +139,31 @@ function Resolve-PimSetupInstallNameChoice {
         a CR5 web app / engine or updater job present    -> the CR5 names (an install made with them, re-run without the switch)
         nothing of PIM present                           -> what was requested (-RequestNew)
         the resource group could not be read (-ReadOk:$false) and new names requested -> today's names (never guess "new")
-      -ExistingApps / -ExistingJobs: the container app / job names in the group. Returns @{ useNew; reason; refused }.
+      -ExistingApps / -ExistingJobs: the container app / job names in the group. Returns @{ useNew; reason; refused; existing }.
+      JOB-RENAME (3.0.68): the web app is never renamed (ca-pim-manager at every install), so the JOBS decide: a standard /
+      legacy-CR5 engine or updater job (caj-pim-engine, caj-pim-updater, ca-pim-engine) or the legacy web ca-pim-web = an
+      install on the new names -- also a RENAMED install, whose old jobs are kept (disabled) beside the new ones. -existing
+      carries the names the group really holds per role (web / engine / updater), so a re-run never makes a second one.
     #>
     param([bool]$RequestNew = $false, [string[]]$ExistingApps = @(), [string[]]$ExistingJobs = @(), [bool]$ReadOk = $true)
-    $d = Get-PimInstallNameDefaults; $n = Get-PimInstallNameNewDefaults
+    $d = Get-PimInstallNameDefaults; $n = Get-PimInstallNameNewDefaults; $lg = Get-PimInstallNameLegacyNames
     $apps = @(@($ExistingApps) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
     $jobs = @(@($ExistingJobs) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
-    $hasToday = ($apps -contains $d.web) -or ($jobs -contains $d.engine) -or ($jobs -contains $d.updater)
-    $hasNew   = ($apps -contains $n.web) -or ($jobs -contains $n.engine) -or ($jobs -contains $n.updater)
+    $newEngine = @(@($n.engine) + @($lg.engine)); $newWeb = @($lg.web)
+    $hasNewJobs = [bool](@($jobs | Where-Object { $newEngine -contains $_ -or $_ -eq $n.updater }).Count)
+    $hasNewWeb  = [bool](@($apps | Where-Object { $newWeb -contains $_ }).Count)
+    $hasToday   = ($apps -contains $d.web) -or ($jobs -contains $d.engine) -or ($jobs -contains $d.updater)
+    $first = { param($have, $want) foreach ($w in @($want)) { if ($have -contains "$w".ToLowerInvariant()) { return "$w" } }; return '' }
+    if ($hasNewJobs -or $hasNewWeb) {
+        $ex = @{ web = (& $first $apps (@($newWeb) + @($n.web))); engine = (& $first $jobs $newEngine); updater = (& $first $jobs @($n.updater)) }
+        $renamed = ($jobs -contains $d.engine) -or ($jobs -contains $d.updater)
+        return @{ useNew = $true; refused = $false; existing = $ex
+                  reason = $(if ($renamed) { "this install's jobs were renamed to the standard names ($($ex.engine) / $($ex.updater); the old jobs are kept, disabled) -- kept" } else { "this install already runs with the new names ($(@($ex.web, $ex.engine) | Where-Object { $_ }) -join ' / ')) -- kept" }) }
+    }
     if ($hasToday) {
-        if ($RequestNew) { return @{ useNew = $false; refused = $true; reason = "this resource group already runs PIM Manager under today's names ($($d.web) / $($d.engine)) -- Azure cannot rename a container app or job, so the install keeps them" } }
+        if ($RequestNew) { return @{ useNew = $false; refused = $true; reason = "this resource group already runs PIM Manager under today's names ($($d.web) / $($d.engine)) -- Azure cannot rename a container app or job, so the install keeps them (Rename-PimJobs.ps1 moves its jobs)" } }
         return @{ useNew = $false; refused = $false; reason = "today's names (an existing install)" }
     }
-    if ($hasNew) { return @{ useNew = $true; refused = $false; reason = "this install already runs with the new names ($($n.web) / $($n.engine)) -- kept" } }
     if ($RequestNew -and -not $ReadOk) { return @{ useNew = $false; refused = $true; reason = 'the resource group could not be read, so a new install cannot be proven -- today''s names are used' } }
     if ($RequestNew) { return @{ useNew = $true; refused = $false; reason = 'a new install with the new names (PIM_Setup_NewInstallNames)' } }
     return @{ useNew = $false; refused = $false; reason = "today's names (PIM_Setup_NewInstallNames is off)" }
@@ -225,7 +251,7 @@ function Get-PimInstallNameFromEnvironment {
     param([Parameter(Mandatory)][string]$Role)
     $vars = switch ($Role) {
         'web'           { @('PIM_ManagerApp') }
-        'engine'        { @('PIM_TickJobName', 'PIM_ENGINE_JOB_NAME') }
+        'engine'        { @('PIM_TickJobName', 'PIM_ENGINE_JOB_NAME') }   # JOB-RENAME switches these (Rename-PimJobs.ps1)
         'updater'       { @('PIM_UpdateJobName') }
         'sqlAdminGroup' { @('PIM_SqlAdminGroupName', 'PIM_SQL_ADMIN_GROUP') }
         default         { @() }

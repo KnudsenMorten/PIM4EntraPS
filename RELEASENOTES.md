@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.68 -- 2026-11-09
+
+- The job rename step: each PIM job can be re-created under its standard name, running as the same identity, proven by one run before the schedule switches to it; nothing is switched or removed before that proof
+
 ## 3.0.67 -- 2026-11-09
 
 - Identity move follow-up: every setup check, fix command and grant uses the identity each app or job signs in as; a re-run of a setup or repair script keeps that identity; screens show a job as its role, its real name and the identity it runs as; no right is removed

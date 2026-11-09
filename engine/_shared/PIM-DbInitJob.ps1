@@ -32,18 +32,24 @@ function Get-PimDbInitJobName {
       new-name install (its web app is the CR5 name) -> the CR5 job name; else today's name.
     #>
     param([AllowEmptyString()][string]$ManagerApp = '', [AllowNull()][object]$Record = $null)
-    $today = 'ca-pim-dbinit'; $new = 'caj-pim-dbinit'; $newWeb = 'ca-pim-web'
+    # JOB-RENAME 3.0.68: the web app is never renamed (ca-pim-manager at a new install too), so the web name only tells the
+    # legacy CR5 install (ca-pim-web) apart; a new install is told by its ENGINE job's standard name (the record's engine,
+    # else PIM_TickJobName / PIM_ENGINE_JOB_NAME = caj-pim-engine -- setup puts it on the updater at a new-name install).
+    $today = 'ca-pim-dbinit'; $new = 'caj-pim-dbinit'; $newWeb = 'ca-pim-web'; $newEngine = 'caj-pim-engine'
     if (Get-Command Get-PimInstallNameDefaults -ErrorAction SilentlyContinue) {
         $d = Get-PimInstallNameDefaults; $n = Get-PimInstallNameNewDefaults
-        if ($d.Contains('dbinit')) { $today = "$($d['dbinit'])" }; if ($n.Contains('dbinit')) { $new = "$($n['dbinit'])" }; $newWeb = "$($n['web'])"
+        if ($d.Contains('dbinit')) { $today = "$($d['dbinit'])" }; if ($n.Contains('dbinit')) { $new = "$($n['dbinit'])" }; if ($n.Contains('engine')) { $newEngine = "$($n['engine'])" }
     }
+    $eng = ''
     if ($null -ne $Record) {
         $v = ''
-        if ($Record -is [System.Collections.IDictionary]) { if ($Record.Contains('dbinit')) { $v = "$($Record['dbinit'])".Trim() } }
-        elseif ($Record.PSObject.Properties['dbinit']) { $v = "$($Record.dbinit)".Trim() }
+        if ($Record -is [System.Collections.IDictionary]) { if ($Record.Contains('dbinit')) { $v = "$($Record['dbinit'])".Trim() }; if ($Record.Contains('engine')) { $eng = "$($Record['engine'])".Trim() } }
+        else { if ($Record.PSObject.Properties['dbinit']) { $v = "$($Record.dbinit)".Trim() }; if ($Record.PSObject.Properties['engine']) { $eng = "$($Record.engine)".Trim() } }
         if ($v -match '^[A-Za-z0-9][A-Za-z0-9._-]{1,89}$') { return $v }
     }
     if ("$ManagerApp".Trim() -ieq $newWeb) { return $new }
+    if (-not $eng) { $eng = "$($env:PIM_TickJobName)".Trim(); if (-not $eng) { $eng = "$($env:PIM_ENGINE_JOB_NAME)".Trim() } }
+    if ($eng -and $eng -ieq $newEngine) { return $new }
     return $today
 }
 

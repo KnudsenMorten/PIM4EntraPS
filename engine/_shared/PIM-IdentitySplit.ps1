@@ -60,7 +60,7 @@ function Get-PimIdentityRoleOf {
         '^ca-pim-rfa$|^ca-pim-requests$'          { return 'requests' }
         '^ca(j)?-pim-mcp$'                        { return 'mcp' }
         '^ca(j)?-pim-dbinit$'                     { return 'dbinit' }
-        '^caj-pim-asbuilt$'                       { return 'asbuilt' }
+        '^caj-pim-(asbuilt|docs)$'                { return 'asbuilt' }   # JOB-RENAME 3.0.68: caj-pim-docs ("Installation documentation")
         default                                   { return '' }
     }
 }

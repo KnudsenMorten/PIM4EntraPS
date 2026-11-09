@@ -592,8 +592,11 @@ function Invoke-PimUpdaterConvergeStep {
 $sub        = "$($env:PIM_SubscriptionId)".Trim()
 $rg         = "$($env:PIM_ResourceGroup)".Trim()
 $managerApp = $(if ("$($env:PIM_ManagerApp)".Trim()) { "$($env:PIM_ManagerApp)".Trim() } else { 'ca-pim-manager' })
-$tickJob    = $(if ("$($env:PIM_TickJobName)".Trim()) { "$($env:PIM_TickJobName)".Trim() } else { 'ca-pim-tick' })
-$selfJob    = $(if ("$($env:PIM_UpdateJobName)".Trim()) { "$($env:PIM_UpdateJobName)".Trim() } else { 'ca-pim-update' })
+# JOB-RENAME (3.0.68): the variable first (Rename-PimJobs.ps1 switches it), then -- for the updater ITSELF -- the name Azure
+# gives the running job (CONTAINER_APP_JOB_NAME), then the install resolver (the record, else today's name). Never a bare
+# literal: an install whose jobs were renamed must not have the updater roll / record the old, disabled job.
+$tickJob    = $(if ("$($env:PIM_TickJobName)".Trim()) { "$($env:PIM_TickJobName)".Trim() } else { try { Get-PimInstallName -Role engine } catch { 'ca-pim-tick' } })
+$selfJob    = $(if ("$($env:PIM_UpdateJobName)".Trim()) { "$($env:PIM_UpdateJobName)".Trim() } elseif ("$($env:CONTAINER_APP_JOB_NAME)".Trim() -and (Test-PimInstallNameIsRole -Role updater -Name "$($env:CONTAINER_APP_JOB_NAME)".Trim())) { "$($env:CONTAINER_APP_JOB_NAME)".Trim() } else { try { Get-PimInstallName -Role updater } catch { 'ca-pim-update' } })
 $targetImg  = "$($env:PIM_UPDATE_TARGET_IMAGE)".Trim()   # e.g. acr.azurecr.io/pim-manager:2.4.295
 $container  = $(if ("$($env:PIM_ManagerContainerName)".Trim()) { "$($env:PIM_ManagerContainerName)".Trim() } else { '' })
 # CR7 (PIM 100.168): the JOBS keep the configured container name exactly as before; $container (the MANAGER's container) is
