@@ -287,6 +287,9 @@ function Get-PimPermissionHealth {
         # touches only what is defined, and asking for User Access Administrator at the root for nothing is standing Tier-0
         # privilege. -1 (the default) = unknown -> the old rule (needed), so a store that cannot be counted never hides a gap.
         [int]$AzureDelegationCount   = -1,
+        # Entra Access Packages (RIGHTS-1.7, owner 2026-11-09): how many packages the store defines. 0 (the default, and every caller
+        # that does not pass it) = the right is not asked for at all, so an update can never add it or report it as missing.
+        [int]$AccessPackageDefinedCount = 0,
         # §97 (owner 2026-10-08): what the engine holds AT THE TENANT ROOT management group ($null = not checked).
         # Reader there is REQUIRED (Discovery cannot see Azure without it) -- amber when no Azure delegation is defined,
         # red when one is. User Access Administrator there is OPTIONAL and only reported (the any-scope rule above
@@ -298,6 +301,7 @@ function Get-PimPermissionHealth {
     )
 
     $required = @(Get-PimRequiredGraphCapabilities)
+    if ($AccessPackageDefinedCount -gt 0 -and (Get-Command Get-PimAccessPackageRightDemand -ErrorAction SilentlyContinue)) { $required = @($required + @(Get-PimAccessPackageRightDemand -DefinedCount $AccessPackageDefinedCount)) }
     if (-not $GraphReadable) {
         return [pscustomobject]@{
             ok = $false; severity = 'warning'; indeterminate = $true

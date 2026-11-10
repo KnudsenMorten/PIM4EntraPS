@@ -168,7 +168,7 @@ PIM Manager, the engine and the database run in your subscription on managed ide
 | Access map, Reports, Role Lookup, drift detection | ✅ | ✅ |
 | Admin accounts with Temporary Access Passes and auto-disable | ✅ | ✅ |
 | PIM Activator browser extension | ✅ | ✅ |
-| Updates | From the public release | Approved releases through Invardia |
+| Updates | Nightly, by the updater, from Invardia's signed Community channel (the package is the public release) | Approved releases through Invardia |
 | Second approver (four-eyes) and the evidence / audit export | ✅ | ✅ |
 | Access reviews enforced by the engine | | ✅ |
 | Delegated administration | | ✅ |

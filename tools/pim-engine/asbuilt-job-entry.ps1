@@ -68,6 +68,9 @@ $global:PIM_SqlServer = "$SqlServer".Trim(); $global:PIM_SqlDatabase = "$SqlData
 
 . (Join-Path $shared 'PIM-Rest.ps1')
 . (Join-Path $shared 'PIM-InstallNames.ps1')      # CR5 step 1 (PIM 100.149): every resource name from one resolver
+# QUIESCE-DIED-1 (1): a process liveness line every 5 min (never fails the job)
+. (Join-Path $shared 'PIM-Beat.ps1')
+$pimBeat = Start-PimBeat; if ($pimBeat.started -or $pimBeat.reason -match 'could not') { Write-Host "[beat] $($pimBeat.reason)" }
 . (Join-Path $shared 'PIM-SqlStore.ps1')          # Get-PimSqlConnectionString / Invoke-PimSqlScalar (managed identity)
 . (Join-Path $shared 'PIM-FeatureCatalog.ps1')    # Resolve-PimFeatureGate / Get-PimFeatureCatalogEntry (pure)
 . (Join-Path $shared 'PIM-License.ps1')           # Get-PimLicense -LicenseText / Test-PimLicenseIsProForTenant

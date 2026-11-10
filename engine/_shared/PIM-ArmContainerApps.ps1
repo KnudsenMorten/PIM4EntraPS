@@ -9,7 +9,7 @@
   Apps scheduled JOB (cron), NOT a Windows scheduled task ... all run in cloud only compute").
 
   🪤 AND THAT IS WHY IT CANNOT REUSE Update-PimContainers.ps1. That roller drives everything
-  through the `az` CLI, and the Manager image is mcr.microsoft.com/powershell:7.4-ubuntu-22.04
+  through the `az` CLI, and the Manager image is mcr.microsoft.com/dotnet/sdk:10.0-noble (pwsh 7.6)
   with a pinned SQL driver and nothing else -- no az, no modules. Putting the Azure CLI into every
   customer's container to roll a container is a large dependency added to the one place this
   codebase has kept deliberately thin. ARM is a REST API and this solution already speaks it:

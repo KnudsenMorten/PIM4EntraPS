@@ -147,9 +147,8 @@ deployment is a supported choice) and no credentials lying around.
   long it took, any error — so you can see whether one site is stuck or one release is failing
   everywhere. If it cannot read what its ring approves, it stays where it is. Tools run by
   hand obey the same ring and refuse an unapproved version unless an override is given with a
-  logged reason. *(The self-updating job needs a published source feed to pull from. A
-  community installation from the public repository updates with one command, which pulls the
-  new version and re-runs the same idempotent deploy with the parameters it was installed with.)*
+  logged reason. *(Since 3.0.2 a community installation has the same self-updating job, on
+  Invardia's signed Community channel — see "The community edition updates itself each night" below.)*
 - **Updates never go backward by themselves.** ✅ 2026-09-18 Before it builds or rolls anything, the
   nightly update compares the version its ring approves with the highest version the environment is
   known to have reached, and **refuses** to move backward — naming both versions, the ring that
@@ -181,7 +180,17 @@ deployment is a supported choice) and no credentials lying around.
   GitHub and re-runs your installation with the parameters it was installed with, which the installation keeps on the
   machine that ran it (never a secret). Run it without the apply switch first: it shows the version it would move to
   and the plan, and changes nothing. A copy with local changes is left alone. Proven by updating a running community
-  installation from GitHub and re-running the full end-to-end test against it.
+  installation from GitHub and re-running the full end-to-end test against it. (*changed 2026-10-28, 3.0.2: the command
+  no longer trusts a plain download; it checks the signed release first, as below.*)
+- **The community edition updates itself each night, to signed releases.** ✅ 2026-10-28 (3.0.2) — A community
+  installation gets the same updater as Pro. Each night it asks Invardia's Community channel which version is released
+  for its ring (ring 3 unless you choose ring 2), without a key or a licence. It checks the signed release against a key
+  built into PIM Manager, refuses a replayed or older release, fetches the archive the release names from the public
+  GitHub release, checks its SHA-256 and size, builds it in your own registry, updates the database first and rolls back
+  when the health check fails. A version reaches the Community channel only when the release owner has approved it. To
+  update by hand instead, install without the updater and run the update command, which checks the same signed release
+  before it deploys anything. Proven on a community test installation: the updater was installed on its nightly schedule,
+  read the Community channel and verified the signed release with the built-in key.
 - **Give your Invardia support access, and take it back.** ✅ 2026-10-04 — One command gives your Invardia Support
   app its own read-only user in the PIM database. At the troubleshoot level that is all; at the setup level (it may
   repair and upgrade), database administration exists only inside an open support session, for at most 8 hours
@@ -192,12 +201,21 @@ deployment is a supported choice) and no credentials lying around.
   only when Invardia's answer matches the document's size and SHA-256 checksum. Your storage stays closed to the
   outside: no network opening or access key is needed. The copy in your own storage is kept for one day, as before.
 - **Support's database access is time-limited and needs your consent.** ✅ 2026-11-02 — You decide, once, how far
-  Invardia support may go in the PIM database (none, read, or owner); only you can change that setting. When support
+  Invardia support may go in the PIM database (none, Troubleshoot or Setup — *named read and owner before 2026-11-04*);
+  only you can change that setting. When support
   needs more than read access, it asks for a number of hours (at most 8) with a ticket and a reason, within your
   consent. The access ends at that time by itself: the job that gave it takes it back, and the PIM heartbeat, the job
   and PIM Manager each also remove any access whose end has passed, so it never outlives its window. Access that was
   already there before is recorded and left alone. Every grant, extension and removal is recorded. Proven on a real
   SQL Server and on the internal environment (PIM Manager 3.0.17).
+- **The Support app is in the database admin group only while a support session is open.** ✅ 2026-11-09 (3.0.70) —
+  At the Setup level, while Invardia's support session is open with your Setup consent, PIM Manager's updater makes the
+  Invardia Support app a member of the database admin group through a time-limited PIM for Groups membership — never a
+  permanent one and never an owner. The membership is set to end when the session is due to end, never more than 24 hours
+  ahead; the updater moves the end on while the session stays open, reads each change back, and takes the membership away
+  when the session is closed. If the updater cannot reach Invardia, nothing changes and the membership ends by itself. A
+  standing membership or ownership left from an earlier version is recorded first and then replaced by the time-limited
+  membership in the next Setup session. Outside a session the Support app keeps only its read-only database user.
 - **Pro updates arrive signed, through Invardia.** ✅ 2026-10-06 — A Pro installation claims its install key with its
   licence, then takes each new version from Invardia for its own update ring: the release is signed, checked against a
   key built into PIM, checked for its sequence (no replay, no step back) and its archive fingerprint, built in your own
@@ -2195,18 +2213,19 @@ the scheduled jobs and the portal, which always says why a capability is off. Fr
 licence state.
 
 **Free — the community edition, for a single tenant.** The full portal; eligible, time-boxed access with approval
-and a complete audit trail; Entra ID roles, PIM for Groups, administrative units and Azure RBAC; Intune and
+and a complete audit trail; a second approver for sensitive changes and the evidence export (*changed 2026-11-04,
+3.0.29: core security is the same in both editions*); Entra ID roles, PIM for Groups, administrative units and Azure RBAC; Intune and
 Defender XDR role delegation, including Defender custom roles; delegation by group; policy templates (a Standard and
 a RequireApproval template per kind, renameable, with a default per kind); drift detection; reports (standing and expiring access)
 and the current delegations list; administrator accounts and first-time access passes; permission templates imported in the portal or by script and tenant
-preparation from one configuration file; self-updating from the public release; and community support.
+preparation from one configuration file; nightly self-updating to signed releases from Invardia's Community channel; and community support.
 
 **Pro — licensed capabilities for a single tenant.** Discovery and gaps across every workload; the
 Power BI, enterprise-app role, Azure DevOps, Dataverse, Business Central and Power Platform
 connectors; revoking current delegations (the list itself is free); access reviews (campaigns with decisions recorded and
-enforced); a second approver for sensitive changes;
-delegated administration (portal users limited to a tier, level, service or scope); the tier-impact report; the
-access request API for ticketing systems; and the evidence export. Without a licence the second approver is off too, so install the licence before relying on it.
+enforced); delegated administration (portal users limited to a tier, level, service or scope); the tier-impact report;
+the management report (a PowerPoint for management); the access request API for ticketing systems; the AI assistant
+(MCP), API applications and the API and MCP reference; and PIM for on-premises Active Directory.
 
 **Pro — the multi-tenant half.** Define once and target tenants by tag and by rollout wave; signed definition sets
 verified on arrival; a clear view of what reaches each tenant and what is held back; per-customer rules; a read-only
@@ -2270,7 +2289,8 @@ Everything an organisation needs to govern its own tenant:
 - **reports**, including standing access and expiring access, and the **current delegations** list;
 - **administrator accounts and first-time access passes**, issued and tracked;
 - **permission templates imported in the portal** (Templates > Workload templates);
-- **updated with one command from the public release**;
+- **updates itself each night** to signed releases from Invardia's Community channel, checked and built in your own
+  registry — or by one command you run, with the same checks;
 - **community support** (GitHub issues on the public repository).
 
 ### Pro — licensed capabilities for a single tenant
@@ -2285,6 +2305,9 @@ On top of the free edition, a Pro licence adds:
 - **access reviews** — campaigns with decisions recorded and enforced;
 - **delegated administration** — portal users limited to a tier, level, service or scope;
 - the **tier-impact report** — everyone who can reach tier 0, including through nested groups;
+- the **management report** — a PowerPoint for management under **Reports > Management report**: key figures with
+  trends, risk and exceptions, changes and audit, and compliance evidence, on demand or every month by mail (the monthly
+  report is off until you switch it on);
 - the **access request API** — a ticketing system such as ServiceNow switches a disabled admin account on for a set
   time, reads the request's status or cancels it, and PIM switches the account off again when the time is up;
 - the **AI assistant (MCP)** — an assistant reads every view of the portal and does routine work under the person's own role;
@@ -2294,8 +2317,8 @@ On top of the free edition, a Pro licence adds:
 - **PIM for on-premises Active Directory** — admin accounts in on-premises AD, PIM groups mirrored to AD groups and
   just-in-time AD membership for activated PIM groups, applied by a small hybrid worker.
 
-> ⚠️ Without a licence, the second approver is switched off too — sensitive changes then need one administrator,
-> not two. Install the licence before you rely on it.
+The second approver and the evidence export are not on this list: they are part of both editions and do not depend on
+a licence.
 
 ### Pro — the multi-tenant half
 
@@ -2447,7 +2470,7 @@ command. What you end up with:
 | **PIM Manager** | an Azure Container App behind Microsoft Entra sign-in | scales to **zero** when nobody is using it |
 | **Engine** | one scheduled Container Apps job (every 5 minutes) | runs for seconds, then stops |
 | **Database** | Azure SQL (S0), passwordless (managed identities only) | the one always-on part |
-| **Registry + logs** | Azure Container Registry (Basic) and a Log Analytics workspace | builds the image from your clone |
+| **Registry + logs** | Azure Container Registry (Basic) and a Log Analytics workspace | builds the image from the downloaded release |
 
 Everything is created in **one resource group** you name. To remove the
 installation, first run `.\tools\setup\Remove-PimContainerStack.ps1 -SubscriptionId
@@ -2458,80 +2481,26 @@ finally the two app registrations (the Manager sign-in and the deploy identity).
 
 ### What you need
 
-- A **Windows** machine with **PowerShell 7**, run **as Administrator** (the deploy
-  identity's certificate is placed in the machine certificate store), plus
-  **git**. No Azure CLI and no PowerShell modules are needed: the scripts talk to
-  Azure and Microsoft Graph directly and sign you in through the browser.
+- **PowerShell 7** -- Azure Cloud Shell has it, or PowerShell 7 on Windows, macOS or Linux. No Azure CLI, no PowerShell
+  modules, no git: the installer talks to Azure and Microsoft Graph directly and signs you in through the browser.
 - An Azure **subscription** in the tenant you want to govern.
-- A sign-in that is **Global Administrator** (or Privileged Role Administrator +
-  Application Administrator) in the tenant **and Owner** of the subscription. It is
-  used once, in step 2, to create the deploy identity; everything after that runs
-  as that identity with a certificate.
-- The UPN of the person who should administer the Manager.
+- A sign-in that is **Owner** of the subscription and **Privileged Role Administrator** and **Application
+  Administrator** in Microsoft Entra ID (Exchange Administrator only for the optional mail sender).
 
-### 1. Get the code
+### Install: two lines
 
-```powershell
-git clone https://github.com/KnudsenMorten/PIM4EntraPS.git
-cd PIM4EntraPS
-```
-
-### 2. Create the deploy identity
+The first line downloads the installer from the public release; the second runs it with your tenant and subscription.
 
 ```powershell
-# A browser sign-in opens for the tenant; no Azure CLI login is needed.
-$id = .\tools\setup\New-PimDeployIdentity.ps1 -TenantId <tenant-id> -SubscriptionId <subscription-id> -GrantGraph -Apply
+Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/download/Start-PimManagerInstall.ps1 -OutFile Start-PimManagerInstall.ps1
+.\Start-PimManagerInstall.ps1 -TenantId '<tenant id>' -SubscriptionId '<subscription id>'
 ```
 
-This creates an app registration with a **certificate** (never a secret), gives it
-Owner on the subscription, and — with `-GrantGraph` — the seven Microsoft Graph
-application permissions the deploy needs: to grant the Manager and engine their own
-permissions (`Directory.Read.All`, `AppRoleAssignment.ReadWrite.All`,
-`Application.Read.All`), to create the database administrators group
-(`Group.Create`, `GroupMember.ReadWrite.All`) and to consent the Manager's
-sign-in (`DelegatedPermissionGrant.ReadWrite.All`), and to give itself a short,
-time-bound Exchange Administrator role while it creates the notification mailbox
-(`RoleManagement.ReadWrite.Directory`). It proves the identity can sign in and read the directory
-before it returns. It is safe to run again.
-
-### 3. Deploy everything with one command
-
-```powershell
-.\tools\setup\Invoke-PimDeployAll.ps1 -Scenario S2 -Apply `
-    -TenantId <tenant-id> -SubscriptionId <subscription-id> -Location swedencentral `
-    -AdminAppId $id.AppId -AdminCertPem $id.PemPath `
-    -SqlAdminClientId $id.AppId -SqlAdminCertThumbprint $id.Thumbprint `
-    -PrereqToken <short-name> -PrereqVnetAddressPrefix 10.231.0.0/22 -PrereqSubnetAddressPrefix 10.231.0.0/23 `
-    -ResourceGroup rg-pim -VnetName vnet-pim -VnetResourceGroup rg-pim `
-    -AcrName <globally-unique-acr-name> -EnvName cae-pim -LogAnalyticsWorkspaceName law-pim `
-    -SqlServerFqdn <globally-unique-sql-name>.database.windows.net -SqlDatabase PimPlatform `
-    -SqlConnectionString 'Server=tcp:<globally-unique-sql-name>.database.windows.net,1433;Initial Catalog=PimPlatform;Encrypt=True;TrustServerCertificate=False;Connection Timeout=60;' `
-    -Exposure external -WorkerMode cron -ManagerMinReplicas 0 -AcrSku Basic `
-    -ManagerSuperAdmins <your-upn> -EasyAuthAllowedPrincipals <your-upn> -SkipAppReg
-```
-
-Run it **without `-Apply`** first to see the plan — nothing is changed. With
-`-Apply` it runs, in order and idempotently: hosting prerequisites (resource group,
-network, registry, logs, SQL server), the Manager image build from your clone, the
-Container Apps environment with the Manager and the engine job, database access
-and schema, the feature baseline, Entra sign-in in front of the Manager, and the
-Manager administrators. Any Azure region can be used; before anything is created
-the deploy checks that every service PIM Manager needs is available there and
-suggests the nearest region that has them.
-
-**Who may sign in is required.** `-EasyAuthAllowedPrincipals <upn-or-group>[,...]`
-admits exactly those accounts or groups (assignment required). A new Manager is
-never deployed open to the whole tenant: without this parameter (or
-`-EasyAuthAllowAllTenantUsers`, which admits every member account, never guests)
-the deploy refuses before it builds anything, and the plan says so.
-
-Optional additions:
-- `-Exposure internal` builds a **private-only** environment instead; decide this on
-  day one, because an environment's exposure cannot be changed after creation.
-- `-AzureRbacRoles 'User Access Administrator'` lets the engine manage Azure
-  resource PIM, not just read it.
-- `-MailSender <shared-mailbox-upn>` sends notification mail and access passes
-  (requires an Exchange Online plan).
+The installer checks that it is the file published with its release, downloads the release into a new, empty folder,
+checks the download against the release (a difference stops it and nothing is installed), and runs the guided
+installation from that folder. It creates everything in your subscription, including the updater job that keeps the
+installation up to date (see *Keeping it up to date*). If it stops, run the same second line with `-Resume`: finished
+steps are skipped.
 
 ### 4. Sign in and verify
 
@@ -2547,18 +2516,21 @@ engine applies it on its next run.
 
 ### Keeping it up to date
 
-One command brings the installation to the latest release:
+The installation updates itself: it also creates the updater job, which runs each night (03:00 UTC by default),
+asks Invardia's Community channel which version is released for its ring (ring 3 unless you choose ring 2), checks the
+signed release, builds it in your own registry and rolls it. Nothing else is needed.
+
+You can also update by hand, at any time; one command brings the installation to the released version:
 
 ```powershell
 .\tools\setup\Update-PimCommunity.ps1            # shows which version it would move to, and the plan
 .\tools\setup\Update-PimCommunity.ps1 -Apply     # updates
 ```
 
-A successful step 3 saves the parameters it ran with (never a secret) on the machine
-that ran it, and prints where. The updater pulls the latest release from GitHub
-(fast-forward only; a clone with local changes is left alone and the update stops),
-then re-runs the deploy with those parameters. A re-run **is** the updater: every
-step that is already current is skipped, and only what changed is rebuilt and rolled.
+A successful installation saves the parameters it ran with (never a secret) on the machine
+that ran it, and prints where. The command reads the same signed release as the updater, checks its signature, its
+sequence and the archive's SHA-256 and size, then re-runs the deploy from that verified archive with those parameters.
+A re-run **is** the update: every step that is already current is skipped, and only what changed is rebuilt and rolled.
 
 The database schema is upgraded additively before the new version rolls, and a
 failed health check rolls the Manager back to the previous version.
@@ -2570,9 +2542,7 @@ schema), so they never create or alter tables themselves. Every schema change of
 applied by the update's schema step, signed in as the deploy identity you set up in step 2.
 That identity is made a database administrator for the length of the run only and is
 removed again at the end. Until you run the update, a new version's objects are simply not
-there yet; nothing breaks, and the Manager says that the next update creates them. (The unattended
-in-cloud updater used by subscription environments needs a published release feed,
-so the community edition updates on your schedule, from GitHub.)
+there yet; nothing breaks, and the Manager says that the next update creates them.
 
 ### Upgrading to Pro
 

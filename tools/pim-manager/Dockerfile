@@ -13,18 +13,28 @@
 # DLLs into the runtime image and PIM-SqlStore Add-Types them ($env:PIM_SQLCLIENT_DLL).
 # No Install-Module, no gallery, no auto-update -- the version is frozen in the image.
 #
-# 🔒 IMP-49 k (§33.28, 2.4.373) -- BASE IMAGES ARE PINNED BY DIGEST. A tag (`sdk:8.0`, `powershell:7.4-...`) is a
-# mutable pointer: Microsoft re-points it on every patch, so the same Dockerfile built a DIFFERENT image from one day
-# to the next, and a release could not be rebuilt byte-for-byte. `image:tag@sha256:...` keeps the tag for humans and
-# builds exactly the digest. The digest is the one the registry answers for that tag (the manifest LIST for the
-# multi-arch SDK, the amd64 manifest for the single-arch PowerShell image; Container Apps runs linux/amd64).
-# 🔁 REFRESH (deliberately, e.g. for an OS/.NET security patch) -- read the current digest, replace it here, rebuild:
-#     curl -sI https://mcr.microsoft.com/v2/<repo>/manifests/<tag> \
+# 🔒 IMP-49 k (§33.28, 2.4.373) -- BASE IMAGES ARE PINNED BY DIGEST. A tag (`sdk:10.0-noble`) is a mutable pointer:
+# Microsoft re-points it on every patch, so the same Dockerfile built a DIFFERENT image from one day to the next, and a
+# release could not be rebuilt byte-for-byte. `image:tag@sha256:...` keeps the tag for humans and builds exactly the
+# digest. The digest is the one the registry answers for that tag (the manifest LIST of the multi-arch SDK; Container
+# Apps runs linux/amd64).
+# 🔁 REFRESH (deliberately, e.g. for an OS/.NET/PowerShell security patch) -- read the current digest, replace it in EVERY
+# FROM below (one base image, one digest), rebuild:
+#     curl -sI https://mcr.microsoft.com/v2/dotnet/sdk/manifests/10.0-noble \
 #       -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json" \
 #       | grep -i docker-content-digest
-#   (<repo> = dotnet/sdk tag 8.0; powershell tag 7.4-ubuntu-22.04), or `docker buildx imagetools inspect <image>:<tag>`.
+#   or `docker buildx imagetools inspect mcr.microsoft.com/dotnet/sdk:10.0-noble`.
 #   tests/Test-PimContainerImage.ps1 fails on any FROM that is not pinned this way.
-#   Pinned 2026-09-18.
+#   History: pinned 2026-09-18 on sdk:8.0 + powershell:7.4-ubuntu-22.04; 2026-11-10 (IMAGE-PATCH-1) the frozen
+#   powershell:7.4 runtime got a GitHub PowerShell 7.4.22 .deb at build.
+# 🔒 NET10-PS76 (framework IMAGE-PATCH-1 point 0 + 1b, owner 2026-11-10) -- ONE BASE IMAGE: mcr.microsoft.com/dotnet/sdk:
+#   10.0-noble, for every stage. .NET 8 and PowerShell 7.4 reach end of support 2026-11-10 (owner: "each solution must move
+#   to .net 10 + latest ps"). The PowerShell images are no longer rebuilt by Microsoft (the 7.4 tag was frozen on a 2024
+#   Ubuntu layer); the .NET SDK image IS rebuilt on every .NET / OS security update and it SHIPS PowerShell (7.6, installed
+#   as a .NET global tool under /usr/share/powershell, /usr/bin/pwsh links to it, running on the image's own .NET 10
+#   runtime). So a digest refresh patches the OS, .NET AND PowerShell together -- nothing is downloaded from GitHub or
+#   packages.microsoft.com (owner: "i dont understand why we download ps from ms if it is included in image").
+#   Digest read 2026-11-10 from the MCR v2 API: sdk 10.0.403 / runtime 10.0.14 / PowerShell 7.6.9 on Ubuntu 24.04.
 
 # 🔒 SEC-106 (as the sign-in front 1.4.3) -- EVERY NuGet RESTORE IS LOCKED. Each .NET stage restores a committed carrier
 # project (tools/pim-manager/nuget/<x>/*.csproj: one pinned PackageReference, RestorePackagesWithLockFile=true) against
@@ -36,20 +46,27 @@
 # tests/Test-PimContainerImage.ps1 fails on an unlocked restore or a lock file that disagrees with the .csproj.
 
 # ---- stage 1: fetch the pinned SQL driver assembly (no PS module) ----
-# PINNED: Microsoft.Data.SqlClient 5.2.2 (tools/pim-manager/nuget/sqlclient/shim.csproj + its packages.lock.json)
-FROM mcr.microsoft.com/dotnet/sdk:8.0@sha256:5ef85cc12cb25be6ec319a7392d1e9efd53c3bc8abb971c53d8058a473f09053 AS sqldriver
+# PINNED: Microsoft.Data.SqlClient 6.1.8 (tools/pim-manager/nuget/sqlclient/shim.csproj + its packages.lock.json)
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e AS sqldriver
 WORKDIR /drv/shim
 COPY SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/sqlclient/shim.csproj SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/sqlclient/packages.lock.json ./
+# NET10-PS76: a RID-less publish puts the PLATFORM-NEUTRAL Microsoft.Data.SqlClient.dll at the root -- a stub that throws
+# "Microsoft.Data.SqlClient is not supported on this platform" -- and the working Linux driver under
+# runtimes/unix/lib/<tfm>/. Only the root *.dll files reach the image, so the unix driver is copied over the stub here and
+# the build FAILS unless the root file is that driver. (Measured 2026-11-10 on the runner: root 104 types, no TdsParser;
+# runtimes/unix 656 types. Until now pwsh's own System.Data.SqlClient was always found first, so the stub was never loaded.)
 RUN dotnet restore shim.csproj --locked-mode \
  && dotnet publish shim.csproj -c Release -o /drv/out --no-restore \
- && test -f /drv/out/Microsoft.Data.SqlClient.dll
+ && test -f /drv/out/Microsoft.Data.SqlClient.dll \
+ && cp /drv/out/runtimes/unix/lib/net*/Microsoft.Data.SqlClient.dll /drv/out/Microsoft.Data.SqlClient.dll \
+ && cmp -s /drv/out/runtimes/unix/lib/net*/Microsoft.Data.SqlClient.dll /drv/out/Microsoft.Data.SqlClient.dll
 
 # ---- stage 1b: the pinned PDF library for the as-built document (PIM §100.61, owner 2026-10-10) ----
 # PDFsharp + MigraDoc (MIT, empira; NOT QuestPDF) -- .NET ASSEMBLIES, no PowerShell module, version frozen here. The same
 # SDK image as stage 1 (no new base image). engine/_shared/PIM-AsBuilt.ps1 Add-Types them from $env:PIM_PDF_DLL_DIR.
 # The build FAILS if an assembly the renderer loads is missing. Licence: tools/pim-manager/third-party/ (copied below).
 # PINNED: PDFsharp-MigraDoc 6.2.4 (tools/pim-manager/nuget/pdf/pdfshim.csproj + its packages.lock.json)
-FROM mcr.microsoft.com/dotnet/sdk:8.0@sha256:5ef85cc12cb25be6ec319a7392d1e9efd53c3bc8abb971c53d8058a473f09053 AS pdflib
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e AS pdflib
 WORKDIR /pdf/pdfshim
 COPY SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/pdf/pdfshim.csproj SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/pdf/packages.lock.json ./
 RUN dotnet restore pdfshim.csproj --locked-mode \
@@ -70,11 +87,11 @@ RUN dotnet restore pdfshim.csproj --locked-mode \
 # Manager, the jobs, tools/setup (the updater's converge step runs Set-PimAlertRecipients.ps1; the scheduler and the
 # Manager load _PimScriptDoc / _PimWorkloadPrereqRunner), setup/ (the downlink runs Invoke-PimScenarioRun.ps1 /
 # Invoke-PimMspFanout.ps1), engine/, sql/, templates/, config*/.
-# The same pinned PowerShell image as the runtime (already pulled for stage 3: no new base image, no new digest).
+# The same pinned base image as every other stage (NET10-PS76: one base image, one digest).
 # tests/Test-PimImageNoAzNoModules.ps1 proves no in-container code path reads a pruned folder, and the last RUN
 # below fails the BUILD (never a running container) if a file the runtime needs went missing.
 # tools/pim-manager/nuget (SEC-106: the carrier projects stages 1 / 1b restore) is build input only -- pruned as well.
-FROM mcr.microsoft.com/powershell:7.4-ubuntu-22.04@sha256:62300a213a9293916333df2b014cd3a8f22fb0b0b65f2bb446aaf436bcf8c868 AS src
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e AS src
 COPY SOLUTIONS/PIM4EntraPS /src/PIM4EntraPS
 WORKDIR /src/PIM4EntraPS
 RUN rm -rf tests internal legacy launcher diagnostics output tools/pim-manager/nuget \
@@ -93,7 +110,24 @@ RUN rm -rf tests internal legacy launcher diagnostics output tools/pim-manager/n
 #   in third-party/NOTICE.txt) -- no package manager and no extra network at build time; a changed file fails the build.
 
 # ---- stage 3: runtime ----
-FROM mcr.microsoft.com/powershell:7.4-ubuntu-22.04@sha256:62300a213a9293916333df2b014cd3a8f22fb0b0b65f2bb446aaf436bcf8c868
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e
+
+# 🔒 IMAGE-PATCH-1 (framework, owner 2026-11-10: "we immediately patch images when this happens") -- PATCH THE BASE AT BUILD.
+# A customer's Defender scan of 3.0.70 listed ~70 fixable High/Critical findings in the base layer. This one RUN, before
+# anything else in the stage, upgrades every Ubuntu package to the current noble-updates / noble-security level
+# (non-interactive) and removes the apt lists in the same RUN (nothing of it stays in a layer).
+# NET10-PS76: PowerShell is NOT installed or replaced here any more -- it is the SDK image's own (see the REFRESH note at
+# the top: a digest refresh moves .NET and PowerShell together). The build FAILS unless the pwsh the image runs is 7.6.x on
+# a .NET 10 runtime: a base whose PowerShell moved to another minor, or lost it, is a red build, never a running container.
+# The module strip below runs on this PowerShell.
+RUN export DEBIAN_FRONTEND=noninteractive \
+ && apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/* \
+ && v="$(pwsh -NoLogo -NoProfile -NonInteractive -Command '"$($PSVersionTable.PSVersion)|$([Environment]::Version.Major)"')" \
+ && echo "pwsh|runtime major: $v" \
+ && case "$v" in 7.6.*"|10") ;; *) echo "expected PowerShell 7.6.x on .NET 10, found $v" >&2; exit 1 ;; esac
 
 # 🔒 PIM §100.52 (owner 2026-10-10) -- NO GALLERY / SDK POWERSHELL MODULE AND NO AZURE CLI IN THE IMAGE.
 # The base image has never carried the az CLI or Az / Microsoft.Graph / ExchangeOnlineManagement (and nothing here
@@ -132,6 +166,8 @@ RUN pwsh -NoLogo -NoProfile -NonInteractive -Command '$ErrorActionPreference = "
 # Nothing needs root: no az CLI, no apt, no Install-Module at runtime (REST only; the updater rolls over ARM and the
 # registry builds the image), the listener is on 8080 (> 1024), and the managed-identity endpoint is plain HTTP.
 # If an operator points PIM_LogDir or a sync root somewhere else, that path must be writable by uid 10001.
+# NET10-PS76: the noble SDK base already has two users -- 'ubuntu' (1000) and the .NET images' 'app' ($APP_UID 1654) --
+# neither collides with 10001, and neither is used: the image still runs as its own 'pim' user.
 RUN groupadd --system --gid 10001 pim \
  && useradd --system --uid 10001 --gid 10001 --create-home --home-dir /home/pim --shell /usr/sbin/nologin pim \
  && mkdir -p /sync/central /sync/local /app \

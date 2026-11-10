@@ -5814,7 +5814,7 @@
       const arEl = document.getElementById('homeReviewsTile');
       if (arEl) {
         // BUG-195: a read that failed ('unavailable') is never shown as "none pending".
-        if (ar.ok === false || (ar.source && ar.source !== 'live')) {
+        if (ar.ok === false || (ar.source && ar.source !== 'live' && ar.source !== 'engine')) {
           arEl.innerHTML = homeTile({ title: 'Pending access reviews', value: 'n/a', tone: 'neutral', tab: 'accessreview', sub: 'unavailable: ' + esc(ar.error || ar.note || 'could not be read') });
         } else {
           const n = ar.pending || 0;
@@ -7706,7 +7706,7 @@
     "reports, including standing access and expiring access, and the current delegations list",
     "administrator accounts and first-time access passes, issued and tracked",
     "permission templates imported in the portal (Templates > Workload templates)",
-    "updated with one command from the public release",
+    "updates itself each night to signed releases from Invardia's Community channel, checked and built in your own registry — or by one command you run, with the same checks",
     "community support (GitHub issues on the public repository)"];
   var PIM_EDITION_PRO_SINGLE = ["Discovery and gaps — what is and is not delegated through PIM across every workload, and the scheduled jobs that find new roles, groups and resources",
     "the other workload connectors — Power BI, enterprise-app roles, Azure DevOps, Dataverse, Business Central and Power Platform",
@@ -7714,6 +7714,7 @@
     "access reviews — campaigns with decisions recorded and enforced",
     "delegated administration — portal users limited to a tier, level, service or scope",
     "the tier-impact report — everyone who can reach tier 0, including through nested groups",
+    "the management report — a PowerPoint for management under Reports > Management report: key figures with trends, risk and exceptions, changes and audit, and compliance evidence, on demand or every month by mail (the monthly report is off until you switch it on)",
     "the access request API — a ticketing system such as ServiceNow switches a disabled admin account on for a set time, reads the request's status or cancels it, and PIM switches the account off again when the time is up",
     "the AI assistant (MCP) — an assistant reads every view of the portal and does routine work under the person's own role",
     "API applications — scripts and services use the PIM Manager API with their own application, as Reader or Admin, and a person saves every change they prepare",
@@ -11384,8 +11385,11 @@
   // POST /api/access-reviews/decision), and reminders / reviewers can be changed.
   // ===================================================================
   let _arRows = [];          // last fetched/normalized rows
-  let _arSource = '';        // 'live' | 'unavailable' (BUG-195: the server never serves seed rows now)
+  let _arSource = '';        // 'engine' | 'unavailable' (BUG-195: the server never serves seed rows now)
   let _arNote = '';          // the server's reason when source = 'unavailable'
+  let _arAt = '';            // AR-ENGINE-1 (3.0.71): when the ENGINE recorded the reviews (the web app reads no Graph)
+  // AR-ENGINE-1: the access reviews come from the engine's record ('engine'); 'live' is accepted from an older server.
+  const arRecorded = s => s === 'engine' || s === 'live';
   let _arOverdue = { rows: [], overdueCount: 0, dueSoonCount: 0, source: '' };
   const _arEvidence = {};     // definitionId -> evidence package (lazy-loaded for attestation)
 
@@ -12082,17 +12086,20 @@
     if (fr) try { fr.scrollIntoView({ block: 'center' }); } catch (_) { }
   }
 
-  async function renderAccessReviews() {
+  async function renderAccessReviews(askEngine) {
     const body = document.getElementById('arBody');
     if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- access reviews need the server.</div>'; return; }
-    body.innerHTML = stateLoading('Loading access reviews… please wait', 'Reading review campaigns and their decisions from Entra.');
+    body.innerHTML = stateLoading('Loading access reviews… please wait', 'Reading the review campaigns and decisions the engine recorded.');
     let data = { rows: [], source: 'unavailable', note: '', total: 0 };
-    try { data = await api('GET', '/api/access-reviews'); }
+    // AR-ENGINE-1: Refresh (askEngine === true) asks the engine to read the reviews again; the page shows its last record meanwhile.
+    try { data = await api('GET', '/api/access-reviews' + (askEngine === true ? '?refresh=1' : '')); }
     catch (e) { body.innerHTML = stateError('Could not load access reviews', e.message); return; }
     _arRows = (data && data.rows) || [];
     // BUG-195: 'unavailable' is a FAILED READ, not an empty tenant -- it is shown as such, never as "nothing due".
     _arSource = (data && data.source) || 'unavailable';
     _arNote = String((data && data.note) || '');
+    _arAt = String((data && data.refreshedUtc) || '');
+    if (askEngine === true && data && data.refresh && data.refresh.detail) { _arNote = (_arNote ? _arNote + ' ' : '') + 'Refresh: ' + String(data.refresh.detail); }
 
     // Overdue / due-soon "needs attention" surfacing (Get-PimAccessReviewOverdue).
     try { _arOverdue = await api('GET', '/api/access-reviews/overdue'); }
@@ -12290,7 +12297,7 @@
     catch (e) { window.alert('Could not compute reminders: ' + e.message); if (btn) { btn.disabled = false; btn.textContent = 'Send reminders'; } return; }
     const due = (pv && pv.dueCount) || 0;
     // BUG-195: a failed read must not read as "none due".
-    if (pv && pv.source && pv.source !== 'live') {
+    if (pv && pv.source && !arRecorded(pv.source)) {
       window.alert('Reminders are unavailable: ' + (pv.note || 'the access reviews could not be read') + '\n\nThis does NOT mean no review is due.');
       if (btn) { btn.disabled = false; btn.textContent = 'Send reminders'; }
       return;
@@ -12309,7 +12316,7 @@
     let r;
     try { r = await api('POST', '/api/access-reviews/reminders', { pimManagedOnly: pimOnly ? 1 : 0 }); }
     catch (e) { window.alert('Reminder send failed: ' + e.message); if (btn) { btn.disabled = false; btn.textContent = 'Send reminders'; } return; }
-    window.alert((r && r.source && r.source !== 'live' ? 'Reminders NOT sent -- unavailable.' : ('Reminders: ' + ((r && r.sentCount) || 0) + ' sent.')) + (r && r.note ? ('\n\n' + r.note) : ''));
+    window.alert((r && r.source && !arRecorded(r.source) ? 'Reminders NOT sent -- unavailable.' : ('Reminders: ' + ((r && r.sentCount) || 0) + ' sent.')) + (r && r.note ? ('\n\n' + r.note) : ''));
     if (btn) { btn.disabled = false; btn.textContent = 'Send reminders'; }
     renderAccessReviews();
   }
@@ -12344,7 +12351,7 @@
     let pkg = _arEvidence[defId];
     if (!pkg) {
       try { const d = await api('GET', '/api/access-reviews/evidence?definitionId=' + encodeURIComponent(defId)); pkg = d && d.evidence; _arEvidence[defId] = pkg;
-            if (d && d.source && d.source !== 'live' && !pkg) { if (host) host.innerHTML = '<div style="color:#cf222e;font-size:12px;">Review items unavailable: ' + escapeHtml(d.note || 'no reason given') + '</div>'; return; } }
+            if (d && d.source && !arRecorded(d.source) && !pkg) { if (host) host.innerHTML = '<div style="color:#cf222e;font-size:12px;">Review items unavailable: ' + escapeHtml(d.note || 'no reason given') + '</div>'; return; } }
       catch (e) { if (host) host.innerHTML = '<div style="color:#cf222e;font-size:12px;">Review items unavailable: ' + escapeHtml((e.body && (e.body.note || e.body.error)) || e.message) + '</div>'; return; }
     }
     drawReviewEvidence(defId);
@@ -12443,14 +12450,14 @@
     const h = [];
     h.push('<div style="margin-bottom:12px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Access Reviews</span>');
     h.push(`<div style="color:#57606a;font-size:12px;margin-top:3px;">Entra Access Reviews for the PIM estate. A decision recorded on a review item here is written to that review in Entra.` +
-      (_arSource !== 'live' ? ` <span class="arUnavailable" style="margin-left:6px;background:#ffebe9;border:1px solid #ffcecb;color:#cf222e;border-radius:10px;padding:1px 8px;font-size:11px;">unavailable: ${esc(_arNote || 'the access reviews could not be read')}</span>` : ` <span style="margin-left:6px;background:#dafbe1;border:1px solid #aceebb;color:#1a7f37;border-radius:10px;padding:1px 8px;font-size:11px;">live tenant data</span>`) +
+      (!arRecorded(_arSource) ? ` <span class="arUnavailable" style="margin-left:6px;background:#ffebe9;border:1px solid #ffcecb;color:#cf222e;border-radius:10px;padding:1px 8px;font-size:11px;">unavailable: ${esc(_arNote || 'the access reviews could not be read')}</span>` : ` <span class="arRecordedAt" style="margin-left:6px;background:#dafbe1;border:1px solid #aceebb;color:#1a7f37;border-radius:10px;padding:1px 8px;font-size:11px;">read by the engine${_arAt ? ' ' + esc(fmtTime(_arAt)) : ''}</span>`) +
       `</div></div>`);
 
     // Overdue / due-soon "needs attention" banner (Get-PimAccessReviewOverdue).
     const odN = (_arOverdue && _arOverdue.overdueCount) || 0;
     const dsN = (_arOverdue && _arOverdue.dueSoonCount) || 0;
     // BUG-195: an unreadable overdue check is NOT "nothing overdue" -- say it could not be checked.
-    if (_arOverdue && _arOverdue.source && _arOverdue.source !== 'live') {
+    if (_arOverdue && _arOverdue.source && !arRecorded(_arOverdue.source)) {
       h.push('<div class="arOverdueUnavailable" style="margin-bottom:12px;background:#fff8c5;border:1px solid #d4a72c;border-radius:8px;padding:8px 12px;font-size:12.5px;">' +
         '<b>Overdue / due-soon reviews could not be checked</b> &mdash; unavailable: ' + esc(_arOverdue.note || 'no reason given') + '</div>');
     }
@@ -12485,8 +12492,8 @@
     const _arExportRows = rows;
 
     // Table.
-    if (!rows.length && _arSource !== 'live') {
-      h.push('<div class="arEmptyUnavailable" style="color:#cf222e;font-size:13px;padding:20px;text-align:center;border:1px dashed #cf222e;border-radius:8px;">Access reviews are <b>unavailable</b>: ' + esc(_arNote || 'the live read failed') + '. This is NOT &ldquo;nothing due&rdquo; &mdash; nothing could be read.</div>');
+    if (!rows.length && !arRecorded(_arSource)) {
+      h.push('<div class="arEmptyUnavailable" style="color:#cf222e;font-size:13px;padding:20px;text-align:center;border:1px dashed #cf222e;border-radius:8px;">Access reviews are <b>unavailable</b>: ' + esc(_arNote || 'the engine has not recorded them') + '. This is NOT &ldquo;nothing due&rdquo; &mdash; nothing could be read.</div>');
     } else if (!rows.length) {
       h.push('<div style="color:#57606a;font-size:13px;padding:20px;text-align:center;border:1px dashed #d0d7de;border-radius:8px;">' + (_arNote ? esc(_arNote) : 'No access reviews match the current filters.') + '</div>');
     } else {
@@ -12526,11 +12533,11 @@
     const s = document.getElementById('arSearch'); if (s) { s.oninput = drawAccessReviews; }
     const sf = document.getElementById('arStatusFilter'); if (sf) { sf.onchange = drawAccessReviews; }
     const po = document.getElementById('arPimOnly'); if (po) { po.onchange = drawAccessReviews; }
-    const rf = document.getElementById('arRefresh'); if (rf) { rf.onclick = renderAccessReviews; }
+    const rf = document.getElementById('arRefresh'); if (rf) { rf.onclick = () => renderAccessReviews(true); }
     const rb = document.getElementById('arRemindersBtn'); if (rb) { rb.onclick = () => sendAccessReviewReminders(rb); }
     // Export the filtered access-review list (REQUIREMENTS §26a -- export everywhere).
     wireExportBar('ar', () => ({
-      filename: 'access-reviews.csv', title: 'Access Reviews', subtitle: (_arSource === 'live' ? 'live tenant data' : ('unavailable: ' + _arNote)),
+      filename: 'access-reviews.csv', title: 'Access Reviews', subtitle: (arRecorded(_arSource) ? ('read by the engine' + (_arAt ? ' ' + fmtTime(_arAt) : '')) : ('unavailable: ' + _arNote)),
       headers: ['Review', 'Scope / target', 'Reviewers', 'Recurrence', 'Status', 'Due', 'Pending', 'Approved', 'Denied'],
       rows: _arExportRows.map(r => [r.DisplayName || '(unnamed)', r.ScopeTarget || '', asList(r.Reviewers).filter(Boolean).join('; '), r.Recurrence || 'One-time', r.Status || '', r.DueDate || '', r.DecisionsPending || 0, r.DecisionsApproved || 0, r.DecisionsDenied || 0])
     }));

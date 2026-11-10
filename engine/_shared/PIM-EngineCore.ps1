@@ -894,6 +894,42 @@ function Invoke-PimEngineScope {
                 warnings=@($Context['__pimScopeWarnings']) }
         }
     }
+    # --- ENTRA ACCESS PACKAGES (owner 2026-11-09): A GROUP BOUND TO A DEFINED PACKAGE GETS ITS MEMBERS FROM THE PACKAGE ----------
+    # A group is set aside if and only if it has a DURABLE BINDING in the store (Split-PimAccessPackageOwnedMembers): written after
+    # a package delivering it was read back, cleared only when that package's retirement was read back. Not the licence, the
+    # switch or the definition rows. No binding = this block changes nothing. An UNREADABLE binding record = the scope is NOT
+    # CHECKED and applies nothing, the one option that can neither grant nor remove anything for a group that may be bound.
+    # Before the diff, so the diff, the prune, the reconcile removal plan and the budget all see the same sets. Items set aside
+    # are named exactly ($__pkgHeldKeys) so the ledger keeps them, without marking the rest of the scope's read incomplete.
+    $__pkg = $null; $__pkgHeldKeys = @(); $__pkgDesiredDropped = 0
+    if ($Scope -in @('AdminMembers', 'GroupMembers') -and (Get-Command Split-PimAccessPackageOwnedMembers -ErrorAction SilentlyContinue)) {
+        $__pkg = Split-PimAccessPackageOwnedMembers -Scope $Scope -Desired $desired -Live $live -KeyOf $p.KeyOf
+        if ($__pkg.failed) {
+            $__pkgErr = "the access package bindings could not be read: $($__pkg.reason)"
+            Write-Warning ("[engine] {0}: {1} -- nothing was compared and nothing applied (NOT CHECKED)." -f $Scope, $__pkgErr)
+            # A transient read failure with no binding known must not turn a customer's job red: the pass is skipped, nothing is applied, and it says so.
+            if ($__pkg.soft) {
+                return [pscustomobject]@{ scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf; create=0; update=0; remove=0; nochange=0; applied=0; skipped=0; errors=0; plan=@(); ok=$true
+                    notChecked=$true; skippedReason="$__pkgErr (skipped this pass, nothing applied)"; warnings=@(@($Context['__pimScopeWarnings']) + @("$__pkgErr; this pass was skipped and nothing was applied [ACCESS-PACKAGE-BINDING-UNREADABLE]")) }
+            }
+            return [pscustomobject]@{ scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf; create=0; update=0; remove=0; nochange=0; applied=0; skipped=0; errors=0; plan=@()
+                ok=$false; notChecked=$true; error=$__pkgErr; detail="${Scope}: $__pkgErr -- not checked, nothing applied"
+                warnings=@($Context['__pimScopeWarnings']) }
+        }
+        if ($__pkg.active) {
+            $desired = @($__pkg.desired); $live = @($__pkg.live); $__pkgDesiredDropped = [int]$__pkg.droppedDesired
+            try { $__pkgHeldKeys = @(@($__pkg.heldLive) | ForEach-Object { "$(& $p.KeyOf $_)" } | Where-Object { $_ }) } catch { $__pkgHeldKeys = @() }
+            if ([int]$__pkg.droppedDesired -gt 0 -or [int]$__pkg.droppedLive -gt 0) {
+                try { [void]$Context['__pimScopeWarnings'].Add(("{0} row(s) and {1} live member(s) of package-delivered group(s) {2} left to the access package; the engine does not manage these members [ACCESS-PACKAGE-OWNED]" -f (@($__pkg.heldDesired).Count), [int]$__pkg.droppedLive, (@($__pkg.groups) -join ', '))) } catch { }
+            }
+            if ([int]$__pkg.unresolved -gt 0) {
+                try { [void]$Context['__pimScopeWarnings'].Add(("{0} row(s) name a group that cannot be resolved ({1}); it could be a package-delivered or released group, so they are not created. Fix the row or the group definition. [ACCESS-PACKAGE-ROW-UNRESOLVED]" -f [int]$__pkg.unresolved, (@($__pkg.unresolvedTags) -join ', '))) } catch { }
+            }
+            if ([int]$__pkg.suppressed -gt 0) {
+                try { [void]$Context['__pimScopeWarnings'].Add(("{0} row(s) would create a member of group(s) {1}, released from an access package; not created until the rows are reviewed. Delete those rows, or add an AccessPackage row with Action=ReturnToEngine naming the group. [ACCESS-PACKAGE-RELEASED]" -f [int]$__pkg.suppressed, (@($__pkg.suppressedGroups) -join ', '))) } catch { }
+            }
+        }
+    }
     # Destructive prune (remove live items not in desired) is gated TWICE:
     #   1. -Mode Full AND -Prune must BOTH be set (Full alone reconciles create/update only).
     #      A partial/non-authoritative desired set must never silently disable real admins.
@@ -918,11 +954,12 @@ function Invoke-PimEngineScope {
     # (-WhatIf) and the remove-only scopes (allowEmptyDesiredPrune) are not counted. Never throws.
     $__edT = $null
     if ($doPrune -and -not $WhatIf -and -not $p.allowEmptyDesiredPrune -and (Get-Command Invoke-PimEmptyDesiredGuard -ErrorAction SilentlyContinue)) {
-        $__edT = Invoke-PimEmptyDesiredGuard -Scope $Scope -DesiredCount @($desired).Count -LiveCount @($live).Count
+        # Rows set aside for an access package are still definitions: "desired = 0" because every row is package-bound is not "the definitions are gone".
+        $__edT = Invoke-PimEmptyDesiredGuard -Scope $Scope -DesiredCount (@($desired).Count + $__pkgDesiredDropped) -LiveCount @($live).Count
     }
-    if ($doPrune -and -not $WhatIf -and $__canRelease -and @($desired).Count -gt 0) { [void](Clear-PimGuardHold -GuardId 'engine.empty-desired' -Scope $Scope -RunKind $__runKind) }
+    if ($doPrune -and -not $WhatIf -and $__canRelease -and (@($desired).Count + $__pkgDesiredDropped) -gt 0) { [void](Clear-PimGuardHold -GuardId 'engine.empty-desired' -Scope $Scope -RunKind $__runKind) }
     $__emptyDesiredRead = $false
-    if ($doPrune -and @($desired).Count -eq 0 -and -not $p.allowEmptyDesiredPrune) {
+    if ($doPrune -and (@($desired).Count + $__pkgDesiredDropped) -eq 0 -and -not $p.allowEmptyDesiredPrune) {
         # REQ-AU-DRIFT-1 (operator 2026-09-30: "List extras, read-only"): the DRIFT SNAPSHOT may still LIST what is live in a
         # scope that has no rows -- hand-made AU-scoped roles were invisible until the first Roles-AUs row existed. Only a
         # plan (-WhatIf) that the drift snapshot asked for ($global:PIM_DriftReadPlan); every other run -- above all
@@ -961,6 +998,20 @@ function Invoke-PimEngineScope {
         if ($__dnR.active -and @($__dnR.held).Count) {
             $removeRows = @($__dnR.desired)
             foreach ($__dh in @($__dnR.held)) { $__dupHeld.Add([pscustomobject]@{ held = $__dh; op = 'Remove' }) }
+        }
+    }
+    # ENTRA ACCESS PACKAGES: an explicit Remove row for a package-delivered group is not carried out here, and never disappears
+    # unseen: it stays in the store and is recorded as a failure item that says to do it through the package.
+    if ($__pkg -and $__pkg.active -and $removeRows.Count) {
+        $__pkgR = Split-PimAccessPackageOwnedMembers -Scope $Scope -Desired $removeRows -Live @()
+        if ($__pkgR.failed) {
+            $__pkgErr = "the access package bindings could not be read: $($__pkgR.reason)"
+            return [pscustomobject]@{ scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf; create=0; update=0; remove=0; nochange=0; applied=0; skipped=0; errors=0; plan=@()
+                ok=$false; notChecked=$true; error=$__pkgErr; detail="${Scope}: $__pkgErr -- not checked, nothing applied"; warnings=@($Context['__pimScopeWarnings']) }
+        }
+        if ($__pkgR.active) {
+            $removeRows = @($__pkgR.desired)
+            foreach ($__h in @($__pkgR.heldDesired)) { $__dupHeld.Add([pscustomobject]@{ held = (New-PimAccessPackageRemoveHeld -Scope $Scope -Row $__h); op = 'Remove' }) }
         }
     }
     $cmp = @{ Desired = $desired; Live = $live; KeyOf = $p.KeyOf; Equal = $p.Equal; Prune = $doPrune }
@@ -1053,7 +1104,7 @@ function Invoke-PimEngineScope {
             if (-not $__rrCs -and -not ($global:PIM_ManagedKeysStore -is [hashtable]) -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue)) { try { $__rrCs = Get-PimSqlSettingsConnectionString } catch { $__rrCs = $null } }
             $__rrLabel = $null
             if (Get-Command Get-PimFailureItemLabel -ErrorAction SilentlyContinue) { $__rrLabel = { param($c) Get-PimFailureItemLabel -Key "$($c.key)" -Row $c.live } }
-            $__rrPlan = Get-PimReconcileRemovalPlan -Scope $Scope -Provider $p -Desired @($desired) -Live @($live) -KeyOf $p.KeyOf -HasTypes:([bool]$p.TypeKeyOf) `
+            $__rrPlan = Get-PimReconcileRemovalPlan -Scope $Scope -Provider $p -Desired @($desired) -SetAsideDesiredCount $__pkgDesiredDropped -Live @($live) -KeyOf $p.KeyOf -HasTypes:([bool]$p.TypeKeyOf) `
                 -ClaimedKeys @(@($diff.remove) | Where-Object { $_ } | ForEach-Object { "$($_.key)" }) -LedgerConnectionString "$__rrCs" -Mode $__rrMode `
                 -Budget $__rrBudget -AlreadyRemoving @($diff.remove).Count -LabelOf $__rrLabel
             $__rrHeld = @($__rrPlan.items | Where-Object { -not $_.eligible }).Count
@@ -1088,6 +1139,19 @@ function Invoke-PimEngineScope {
         # NB: re-wrap each result in @() at the call site -- `& $sel` unwraps a single-element
         # array back to a scalar, and `.Count` on a lone PSCustomObject is $null under StrictMode -Off.
         $diff = [pscustomobject]@{ create = @(& $sel $diff.create); update = @(& $sel $diff.update); remove = @(& $sel $diff.remove); nochange = @($diff.nochange) }
+    }
+
+    # ENTRA ACCESS PACKAGES: a provider whose one removal really ends many people's access says so here, BEFORE the budget, the last
+    # Global Administrator guard and the audit, so each person's access counts, can be held and is audited on its own. A plan
+    # that cannot be made applies nothing.
+    if ($p.ExpandRemovals -and (@($diff.remove).Count -gt 0 -or @($diff.update).Count -gt 0)) {
+        try { $diff = & $p.ExpandRemovals $diff $Context }
+        catch {
+            $__xpErr = "the removal plan could not be made: $($_.Exception.Message)"
+            Write-Warning ("[engine] {0}: {1} -- nothing was compared and nothing applied (NOT CHECKED)." -f $Scope, $__xpErr)
+            return [pscustomobject]@{ scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf; create=0; update=0; remove=0; nochange=0; applied=0; skipped=0; errors=0; plan=@()
+                ok=$false; notChecked=$true; error=$__xpErr; detail="${Scope}: $__xpErr -- not checked, nothing applied"; warnings=@($Context['__pimScopeWarnings']) }
+        }
     }
 
     # --- ACCOUNT-DISABLE CIRCUIT BREAKER (incident 2026-06-15) -----------------------
@@ -1251,7 +1315,7 @@ function Invoke-PimEngineScope {
     # it). The Global Administrator assignments (EntraRoles / EntraRolesDirect) and the memberships of the groups that hold
     # it (AdminMembers) are checked against who holds the role NOW; the held items are dropped from this run, the rest goes
     # ahead. Releasable for exactly that plan, one run (Operations > Guards). The drift read lists, it never writes: skipped.
-    if (@($diff.remove).Count -gt 0 -and -not $__driftRead -and $Scope -in @('EntraRoles', 'EntraRolesDirect', 'AdminMembers') -and (Get-Command Invoke-PimLastGlobalAdminGuard -ErrorAction SilentlyContinue)) {
+    if (@($diff.remove).Count -gt 0 -and -not $__driftRead -and $Scope -in @('EntraRoles', 'EntraRolesDirect', 'AdminMembers', 'AccessPackages') -and (Get-Command Invoke-PimLastGlobalAdminGuard -ErrorAction SilentlyContinue)) {
         $__lga = Invoke-PimLastGlobalAdminGuard -Scope $Scope -Remove @($diff.remove) -RunKind $__runKind -WhatIf:([bool]$WhatIf) -CanRelease $__canRelease
         if ($__lga.released -and $__lga.used) { $__guardReleases.Add($__lga.used) }
         elseif ($__lga.blocked) {
@@ -1260,6 +1324,14 @@ function Invoke-PimEngineScope {
             if (-not ($Context['__pimScopeWarnings'] -is [System.Collections.IList])) { $Context['__pimScopeWarnings'] = New-Object System.Collections.Generic.List[string] }
             try { [void]$Context['__pimScopeWarnings'].Add(("{0} removal(s) HELD by the last-Global-Administrator guard: {1} [LAST-GLOBAL-ADMIN]" -f @($__lga.heldKeys).Count, $__lga.reason)) } catch { }
         }
+    }
+
+    # ENTRA ACCESS PACKAGES: what the budget and the last-GA guard above cannot express (all-or-nothing group removals; a chain reaching Global Administrator is always held for release).
+    if ($p.ExpandRemovals -and @($diff.remove).Count -gt 0 -and (Get-Command Select-PimAccessPackageHeldRemovals -ErrorAction SilentlyContinue)) {
+        $__apHr = Select-PimAccessPackageHeldRemovals -Remove @($diff.remove) -Scope $Scope -RunKind $__runKind -WhatIf:([bool]$WhatIf) -DriftRead:([bool]$__driftRead) -CanRelease $__canRelease
+        $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @($__apHr.remove); nochange = @($diff.nochange) }
+        if ($__apHr.used) { $__guardReleases.Add($__apHr.used) }
+        foreach ($__w in @($__apHr.warnings)) { try { [void]$Context['__pimScopeWarnings'].Add("$__w") } catch { } }
     }
 
     # Progress logging (the old engine logged every step; customers expect to see it).
@@ -1567,7 +1639,8 @@ function Invoke-PimEngineScope {
     if (-not $WhatIf -and $p.ApplyRemove -and $null -ne $__ledger -and (Get-Command Update-PimManagedKeys -ErrorAction SilentlyContinue)) {
         try {
             $__liveComplete = (-not "$($Context['__pimLiveIncomplete'])".Trim()) -and (-not $Context['__pimLiveNarrowed'])
-            $__liveKeys = if ($__liveComplete) { @($live | Where-Object { $null -ne $_ } | ForEach-Object { "$(& $p.KeyOf $_)" }) } else { @() }
+            # Members set aside for an access package are still live: named here so the ledger keeps exactly those.
+            $__liveKeys = if ($__liveComplete) { @(@($live | Where-Object { $null -ne $_ } | ForEach-Object { "$(& $p.KeyOf $_)" }) + @($__pkgHeldKeys)) } else { @() }
             $__ld = Get-PimManagedKeysDelta -Ledger $__ledger -Matched @(@(@($diff.nochange) + @($diff.update)) | Where-Object { $_ } | ForEach-Object { "$($_.key)" }) `
                 -Created @($script:__createdKeys.ToArray()) -Removed @($script:__removedKeys.ToArray()) -LiveKeys $__liveKeys -LiveComplete:$__liveComplete
             if (@($__ld.add).Count -or @($__ld.remove).Count) {
@@ -1646,6 +1719,8 @@ function Invoke-PimEngineScope {
             $__id = Get-PimManagedLiveIdentity -Live $__m.live
             if ($__id) { $__ml.Add($__id) }
         }
+        # Members a package delivers are managed, just not by a row: never shown as unmanaged on the cleanup page.
+        if ($__pkg -and $__pkg.active) { foreach ($__h in @($__pkg.heldLive)) { $__id = Get-PimManagedLiveIdentity -Live $__h; if ($__id) { $__ml.Add($__id) } } }
         $__managedLive = $__ml.ToArray()
     }
 

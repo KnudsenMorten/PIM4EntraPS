@@ -88,6 +88,9 @@ if ($UseManagedIdentity -or "$env:PIM_UseManagedIdentity".Trim() -eq '1') { $glo
 # quiet line stays in the job's own run log. Loaded FIRST so the lines PIM-Rest / PIM-SqlStore print are covered too.
 . "$shared\PIM-LogOnce.ps1"
 $global:PIM_LogQuiet = $true
+# QUIESCE-DIED-1 (1): a process liveness line every 5 min, whatever this run is blocked on (never fails the run)
+. "$shared\PIM-Beat.ps1"
+$pimBeat = Start-PimBeat; if ($pimBeat.started -or $pimBeat.reason -match 'could not') { Write-Host "[beat] $($pimBeat.reason)" }
 $global:PIM_StartupLogMode = $null; $global:PIM_StartupLogBuffer = $null
 if ($PSBoundParameters.ContainsKey('Verbose') -and $PSBoundParameters['Verbose']) { $global:PIM_LogVerbose = $true }
 # A start that FAILS shows its whole start-up block (the lines it buffered are the diagnosis).

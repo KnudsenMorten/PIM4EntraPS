@@ -3098,11 +3098,11 @@ See §17.7 for the full template/approval mechanics.
     groups and manage their members/owners), the schedule roles
     `RoleEligibilitySchedule.ReadWrite.Directory` / `RoleAssignmentSchedule.ReadWrite.Directory`
     and their `.Remove.Directory` counterparts, `RoleManagement.Read.All`,
-    `PrivilegedAccess.ReadWrite.AzureADGroup`, `PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup`
+    `PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup`
     / `PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup` and their `.Remove.AzureADGroup`
     counterparts (Graph app-roles do not imply one another, and revoke is a separate permission),
     `RoleManagementPolicy.ReadWrite.Directory` + `RoleManagementPolicy.ReadWrite.AzureADGroup`
-    (+ the matching `.Read.` roles), `AdministrativeUnit.ReadWrite.All`,
+    (they also read the policies), `AdministrativeUnit.ReadWrite.All`,
     `UserAuthenticationMethod.ReadWrite.All`, `AccessReview.Read.All`, `AppRoleAssignment.ReadWrite.All`
     + `Application.Read.All` (EntraAppRole), `RoleManagement.ReadWrite.Defender` (Defender XDR),
     `DeviceManagementRBAC.ReadWrite.All` (Intune), `Domain.Read.All` (the downlink's default domain)
@@ -4308,7 +4308,7 @@ sign-in front uses its managed identity's federated credential). The mode only c
    creates/updates the app + service principal with the engine Graph app-roles
    (`RoleEligibilitySchedule.ReadWrite.Directory`, `RoleAssignmentSchedule.ReadWrite.Directory`,
    `Group.ReadWrite.All`, `User.ReadWrite.All`, `Directory.Read.All`,
-   `AdministrativeUnit.ReadWrite.All`, `PrivilegedAccess.ReadWrite.AzureADGroup`,
+   `AdministrativeUnit.ReadWrite.All`, `PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup`,
    `RoleManagementPolicy.ReadWrite.Directory`, `UserAuthenticationMethod.ReadWrite.All`,
    `Policy.Read.All`, `Domain.Read.All` — no Graph `Mail.Send`; sending is a scoped Exchange
    assignment, §7), and writes the resolved tenant id / client id / cert thumbprint into the
@@ -5520,12 +5520,25 @@ bundle publisher and on a managed tenant the scheduled pull (§13.5a). The job e
 and hold no secret (§27).
 
 **The image (`tools/pim-manager/Dockerfile`, v2.4.373).**
-- **Base images are pinned by digest.** Both base images are written as `image:tag@sha256:…`: the
-  .NET SDK stage that fetches the SQL driver assembly, and the PowerShell 7.4 Ubuntu 22.04 runtime.
+- **Base images are pinned by digest.** Every base image is written as `image:tag@sha256:…`.
   The tag stays for readability; the build takes exactly the digest. A tag is re-pointed by its
   publisher on every patch, so an unpinned file built a different image from one day to the next.
   The digest is refreshed on purpose, for example for an OS or .NET security patch: read the
   registry's `Docker-Content-Digest` for the tag, replace it in the Dockerfile and rebuild.
+- **One base image: the .NET 10 SDK on Ubuntu 24.04 (`mcr.microsoft.com/dotnet/sdk:10.0-noble`), since
+  2026-11-10.** .NET 8 and PowerShell 7.4 reached end of support on 2026-11-10. The image used to run
+  on the PowerShell 7.4 Ubuntu 22.04 image, which its publisher no longer rebuilds, so it had to be
+  patched by hand at build time (a separate PowerShell package fetched and installed). The .NET SDK
+  image is rebuilt by its publisher on every .NET and operating-system security update and already
+  contains PowerShell 7.6 (installed as a .NET tool, on the image's own .NET 10 runtime, `pwsh` on the
+  path). So one digest refresh now patches the operating system, .NET and PowerShell together, and
+  nothing is downloaded for PowerShell at build time. Every stage (the two .NET restore stages, the
+  pruning stage and the runtime) uses the same digest. The runtime stage still upgrades every
+  operating-system package at build, and the build fails unless the image's `pwsh` is 7.6.x on a
+  .NET 10 runtime. The SQL driver and the PDF library are built for .NET 10 (Microsoft.Data.SqlClient
+  6.1; PDFsharp-MigraDoc stays on 6.2, the last release without a licence check), restored from committed lock files; the SQL driver copied into the image
+  is the Linux build of the driver, not the platform-neutral placeholder a plain publish leaves at the
+  top of its output.
 - **The image runs as a non-root user (uid/gid 10001).** Until v2.4.373 it ran as root. Every entry
   point the image runs was checked for what it writes at runtime. All of it lands in three places,
   and all three belong to that user:

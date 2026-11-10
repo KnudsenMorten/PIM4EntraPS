@@ -8707,6 +8707,7 @@ function Remove-PimAdminGroupMemberships {
     param([Parameter(Mandatory)][string]$PrincipalId, [object]$Owned = $null)
     $removed = 0
     $errors = New-Object System.Collections.Generic.List[string]
+    $packageErrors = New-Object System.Collections.Generic.List[string]
     $skipped = New-Object System.Collections.Generic.List[string]
     $gone = '(?i)NotFound|does not exist|ResourceNotFound|404'
     if ($null -eq $Owned) { try { $Owned = Get-PimSolutionOwnedGroups } catch { [void]$errors.Add("the groups PIM manages could not be resolved: $($_.Exception.Message)"); return [pscustomobject]@{ removed = 0; errors = $errors.ToArray(); skippedUnmanaged = @() } } }
@@ -8735,10 +8736,16 @@ function Remove-PimAdminGroupMemberships {
             catch { if ("$($_.Exception.Message)" -notmatch $gone) { [void]$errors.Add("member of $($g.displayName) ($($g.id)): $($_.Exception.Message)") } }
         }
     } catch { [void]$errors.Add("read memberOf: $($_.Exception.Message)") }
+    # A package assignment would give the person their access back: it ends with the rest. No package recorded = no call.
+    if (Get-Command Remove-PimAccessPackageAssignmentsOfPrincipal -ErrorAction SilentlyContinue) {
+        $__apOff = Remove-PimAccessPackageAssignmentsOfPrincipal -PrincipalId $PrincipalId
+        $removed += [int]$__apOff.ended
+        foreach ($__e in @($__apOff.errors)) { [void]$errors.Add("$__e"); [void]$packageErrors.Add("$__e") }
+    }
     if ($skipped.Count) {
         Write-Host ("    [Offboard] {0}: {1} group membership(s) outside PIM Manager left as they are (report only): {2}" -f $PrincipalId, $skipped.Count, (@($skipped | Select-Object -First 5) -join ', ')) -ForegroundColor DarkYellow
     }
-    return [pscustomobject]@{ removed = $removed; errors = $errors.ToArray(); skippedUnmanaged = $skipped.ToArray() }
+    return [pscustomobject]@{ removed = $removed; errors = $errors.ToArray(); skippedUnmanaged = $skipped.ToArray(); packageErrors = $packageErrors.ToArray() }
 }
 
 function Invoke-PimAdminOffboardSteps {
@@ -8781,11 +8788,13 @@ function Invoke-PimAdminOffboardSteps {
             $tries = 0; [void][int]::TryParse("$($st['membershipAttempts'])", [ref]$tries); $tries++
             $st['membershipAttempts'] = $tries
             Write-Warning ("  [Offboard] {0} -- {1} membership removal(s) FAILED (attempt {2}): {3}" -f $upn, @($m.errors).Count, $tries, (@($m.errors) -join ' | '))
-            if ($tries -ge 3) {
+            # A package assignment that did not end would give the access back: this step is not done while one is left, however many tries it takes.
+            if ($tries -ge 3 -and -not @($m.packageErrors).Count) {
                 # Stop retrying for ever; the account is disabled and the failures are recorded.
                 $st['membershipsRemovedUtc'] = & $now; $st['membershipErrors'] = (@($m.errors) -join ' | ')
                 Write-Warning "  [Offboard] $upn -- giving up on the remaining memberships after 3 attempts; review them by hand."
             }
+            elseif ($tries -ge 3) { Write-Warning "  [Offboard] $upn -- an access package assignment could not be ended; this step stays open and is retried: $(@($m.packageErrors) -join ' | ')" }
             if ($m.removed -gt 0) { [void]$done.Add("memberships removed ($($m.removed), with errors)") }
         }
     }
@@ -10075,6 +10084,8 @@ function New-PimEntraAppRoleProvider {
 foreach ($__pimWlFile in @('PIM-WorkloadConnectors.ps1', 'PIM-WorkloadMap.ps1', 'PIM-WorkloadRoles.ps1', 'PIM-WorkloadPrereqs.ps1', 'PIM-CustomWorkloads.ps1')) {   # 100.17: + custom (group-only) workloads
     if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot $__pimWlFile))) { . (Join-Path $PSScriptRoot $__pimWlFile) }
 }
+# Entra Access Package support (docs/REQUIREMENTS.md): the provider and the member-reconciliation guard. Inert until a package is defined.
+if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-AccessPackages.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-AccessPackages.ps1') }
 
 function Get-PimWorkloadDesiredBindings {
     # Desired rows -> normalised bindings, split by Action: 'assign' (the desired set) and 'remove'
@@ -10335,6 +10346,7 @@ function Register-PimDefaultEngineProviders {
     Register-PimEngineProvider -Provider (New-PimEntraAppRoleProvider)          # order 66 (generic enterprise-app app-role)
     Register-PimEngineProvider -Provider (New-PimWorkloadConnectorsProvider)    # order 67 (PIM-Assignments-Workloads, v1 connector dispatch)
     Register-PimEngineProvider -Provider (New-PimGroupsPoliciesProvider)        # order 70
+    if (Get-Command New-PimAccessPackagesProvider -ErrorAction SilentlyContinue) { Register-PimEngineProvider -Provider (New-PimAccessPackagesProvider) }   # order 72 (Entra Access Packages; touches nothing until a package is defined)
     Register-PimEngineProvider -Provider (New-PimAccessReviewsProvider)         # order 80
     Register-PimEngineProvider -Provider (New-PimOffboardingProvider)           # order 90 (per-admin offboarding: disable, sessions, memberships, notice -- gated; job admin-offboarding. 71.21: PIM never deletes an account)
     Register-PimEngineProvider -Provider (New-PimGroupRetirementProvider)       # order 92 (Lifecycle=Retire groups -- gated OFF in protected tenants, as v1)

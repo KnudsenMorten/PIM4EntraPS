@@ -2518,6 +2518,8 @@ function Get-PimStoreRowKey {
             if (-not "$d".Trim()) { $d = (& $g 'GroupTag') }
             $d; break
         }
+        # Entra Access Packages (PIM-AccessPackages.ps1): the package name is the key; without this case the row has a blank key and is dropped.
+        'AccessPackage'                  { (& $g 'AccessPackageName') }
         'PIM-Assignments-Admins'         { ((& $g 'Username') + '|' + (& $g 'GroupTag')) }
         'PIM-Assignments-Groups'         { ((& $g 'TargetGroupTag') + '|' + (& $g 'SourceGroupTag')) }
         # 2026-09-21 (operator: "assign permanent ga to ..."): a DIRECT Entra role row names a user, not a group, so it

@@ -44,7 +44,9 @@ function Test-PimIdentityStandardName {
     param([AllowEmptyString()][string]$Name)
     $n = "$Name".Trim()
     if ($n -notmatch '^(?i)id-pim-([a-z0-9]+)$') { return $false }
-    return ($Matches[1].ToLowerInvariant() -in @(Get-PimIdentityRoleWords))
+    # 'docs': the docs job's identity is id-pim-docs (owner 2026-11-09) while its ROLE key stays 'asbuilt' -- the identity move's
+    # rights switch reads that key, so it is added to the NAME test only, never to the role map.
+    return ($Matches[1].ToLowerInvariant() -in @(@(Get-PimIdentityRoleWords) + 'docs'))
 }
 
 function Get-PimIdentityRoleOf {

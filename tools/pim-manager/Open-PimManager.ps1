@@ -8054,17 +8054,46 @@ function Test-PimManagerProRoutePath {
     return $false
 }
 
+function Get-PimManagerAccessReviewRecord {
+    <#
+      AR-ENGINE-1 (3.0.71, owner rule RIGHTS-1 B): the access reviews as the ENGINE recorded them (pim.TenantCache kind
+      'access-reviews', written by its tenant-cache job). The web app holds no AccessReview right and never reads
+      /identityGovernance/accessReviews itself -- no live fallback. Returns { ok; record; refreshedUtc; reason; refresh }.
+      Not recorded yet -> ok=$false, reason = "the engine has not recorded this yet -- it does on its next run", and the
+      engine is asked to read them (scope 'access-reviews'; at most once per 30 minutes per process). -AskEngine (the
+      page's Refresh) asks every time. Never throws. Seam (tests): -Request { param($reason) ... }.
+    #>
+    param([switch]$AskEngine, [scriptblock]$Request)
+    $f = $null
+    try { $f = Read-PimEngineFact -Kind 'access-reviews' } catch { $f = [pscustomobject]@{ ok = $false; value = $null; refreshedUtc = ''; reason = "the engine's record could not be read: $($_.Exception.Message)" } }
+    $pendingText = 'the engine has not recorded this yet -- it does on its next run'   # = Read-PimEngineFact's pending reason
+    $refresh = $null
+    $missing = (-not $f.ok -and "$($f.reason)" -eq $pendingText)
+    if ($AskEngine -or $missing) {
+        $now = [datetime]::UtcNow
+        $last = $script:PimArRecordAskedUtc
+        if ($AskEngine -or $null -eq $last -or ($now - [datetime]$last).TotalMinutes -ge 30) {
+            $script:PimArRecordAskedUtc = $now
+            if (-not $Request) { $Request = { param($why) Request-PimManagerEngineTenantCache -Scope 'access-reviews' -Reason $why } }
+            try { $refresh = & $Request $(if ($AskEngine) { 'access-reviews-refresh' } else { 'access-reviews-missing' }) } catch { $refresh = [pscustomobject]@{ queued = $false; started = $false; detail = "$($_.Exception.Message)" } }
+        }
+    }
+    return [pscustomobject]@{ ok = [bool]$f.ok; record = $f.value; refreshedUtc = "$($f.refreshedUtc)"; reason = "$($f.reason)"; refresh = $refresh }
+}
+
 function Get-PimManagerMgmtReportReaders {
     <#
       MGMT-REPORT: the report's non-SQL sources in THIS process -- the shared readers (engine/_shared/PIM-MgmtReport.ps1), with
-      the access-review read made the Manager's way (its tenant connection first, like GET /api/access-reviews/overdue).
+      the access-review figures taken from the ENGINE's record (AR-ENGINE-1, 3.0.71: the web app reads no access review
+      from Graph; a missing record is the pending text, never a live read).
     #>
     $r = Get-PimMgmtReportDefaultReaders
     $r['reviewsOverdue'] = {
         param($period)
-        if (-not (Get-Command Get-PimAccessReviewOverdue -ErrorAction SilentlyContinue)) { throw 'the access review reader is not loaded in this Manager' }
-        Initialize-PimManagerTenantConnection
-        $rows = @(Get-PimAccessReviewOverdue)
+        if (-not (Get-Command ConvertFrom-PimAccessReviewRecordOverdue -ErrorAction SilentlyContinue)) { throw 'the access review reader is not loaded in this Manager' }
+        $arRec = Get-PimManagerAccessReviewRecord
+        if (-not $arRec.ok) { throw "$($arRec.reason)" }
+        $rows = @(ConvertFrom-PimAccessReviewRecordOverdue -Record $arRec.record)
         [pscustomobject]@{ overdue = [long]@($rows | Where-Object { $_.IsOverdue }).Count; dueSoon = [long]@($rows | Where-Object { $_.IsDueSoon }).Count }
     }
     # Tier 0 exposure: the Manager's own tier-impact report (the Reports page's Tier impact -- nested groups included)
@@ -9267,7 +9296,7 @@ function Build-PimGraphData {
 #   - engine & jobs health               <- Get-PimJobsStatus (scheduler)
 #   - validation errors/warnings         <- Invoke-PimPreflightValidation
 #   - break-glass                        <- pim.Settings['EmergencyOverride'] (file only local/dev; §36.3 phase 3)
-#   - access reviews                      <- Get-PimAccessReviewOverview/seed
+#   - access reviews                      <- the engine's record (Get-PimManagerAccessReviewRecord, AR-ENGINE-1)
 #   - expiring active assignments         <- Get-PimActiveAssignmentsCached (the scheduler's SQL snapshot, §70.1b)
 # Heavy/live sources (active-assignments, access-reviews) only run when the
 # caller asks for them (?include=heavy) so the default Home load stays fast.
@@ -10148,13 +10177,18 @@ function Get-PimHomeOverview {
             # 🔴 BUG-195: no SEEDED sample rows on a live environment. This tile used to count the seed's
             # "pending" reviews whenever the live read returned nothing, so a tenant with no reviews showed pending
             # work that did not exist. A failed read is now reported as a failed read; an empty tenant is zero.
-            $rows = @(); $arSource = 'unavailable'; $arErr = ''
-            if (Get-Command Get-PimAccessReviewOverview -ErrorAction SilentlyContinue) {
-                try { Initialize-PimManagerTenantConnection; $rows = @(Get-PimAccessReviewOverview -IncludeDecisionCounts); $arSource = 'live' } catch { $arErr = "$($_.Exception.Message)" }
+            # AR-ENGINE-1 (3.0.71): from the ENGINE's record -- the web app reads no access review from Graph.
+            $rows = @(); $arSource = 'unavailable'; $arErr = ''; $arAt = ''
+            if (Get-Command ConvertFrom-PimAccessReviewRecordOverview -ErrorAction SilentlyContinue) {
+                try {
+                    $arRec = Get-PimManagerAccessReviewRecord
+                    if ($arRec.ok) { $rows = @(ConvertFrom-PimAccessReviewRecordOverview -Record $arRec.record -IncludeDecisionCounts); $arSource = 'engine'; $arAt = "$($arRec.refreshedUtc)" }
+                    else { $arErr = "$($arRec.reason)" }
+                } catch { $arErr = "$($_.Exception.Message)" }
             } else { $arErr = 'access-review library not loaded' }
             $pending = @($rows | Where-Object { "$($_.Status)" -match '(?i)progress|pending|active|inprogress' })
-            if ($arSource -eq 'live') { $tiles.accessReviews = [ordered]@{ ok = $true; source = 'live'; total = $rows.Count; pending = $pending.Count } }
-            else { $tiles.accessReviews = [ordered]@{ ok = $false; source = 'unavailable'; total = 0; pending = 0; error = "access reviews could not be read: $arErr" } }
+            if ($arSource -eq 'engine') { $tiles.accessReviews = [ordered]@{ ok = $true; source = 'engine'; refreshedUtc = $arAt; total = $rows.Count; pending = $pending.Count } }
+            else { $tiles.accessReviews = [ordered]@{ ok = $false; source = 'unavailable'; total = 0; pending = 0; error = "access reviews: $arErr" } }
         } catch {
             $tiles.accessReviews = [ordered]@{ ok = $false; error = "$($_.Exception.Message)"; pending = 0 }
         }
@@ -11950,7 +11984,10 @@ function Get-PimManagerPermissionHealthBody {
             if (-not $eng) { throw "the engine job's managed identity '$engineJob' was not found in this Manager's resource group ($rgPrefix) -- is the engine job deployed with a system-assigned identity?" }
             $oid = "$($eng.id)"; $identityName = "Engine job: $engineJob - runs as $($eng.displayName)"   # framework NAMING-CONVENTIONS (owner 2026-11-09)
         } else {
-            $oid = "$($self.id)"; $identityName = "$($self.displayName)"
+            # 2026-11-10 (two installations on 3.0.70: GET /api/permissions-health -> 500 "Cannot bind argument to parameter 'Name'
+            # because it is an empty string"): a web token with an oid but no xms_mirid gives no name (WEB-GRAPH-MIN-1 reads the
+            # name from the token only) -- never an empty name downstream (New-PimIdentityRecord -Name is mandatory).
+            $oid = "$($self.id)"; $identityName = $(if ("$($self.displayName)".Trim()) { "$($self.displayName)" } else { "this PIM Manager's identity (object id $oid)" })
         }
         if ($oid) {
             $graphSp = Invoke-PimEngineRecordedGraph -Path "/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'&`$select=id,appRoles"
@@ -12051,6 +12088,7 @@ function Get-PimManagerPermissionHealthBody {
     if (-not $readable -and $permReadErr -and $health.PSObject.Properties['detail']) { $health.detail = "$($health.detail) Cause: $permReadErr" }
     $identities = @()
     if ($oid) {
+        if (-not "$identityName".Trim()) { $identityName = "the engine identity (object id $oid)" }   # never an empty -Name (2026-11-10, see above)
         $identities += (New-PimIdentityRecord -Name $identityName -Kind ManagedIdentity -ObjectId $oid `
                           -Purpose 'Runs the engine: applies every committed change to the tenant' -IsRuntime $true -Health $health)
     }

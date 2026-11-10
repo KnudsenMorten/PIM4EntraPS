@@ -13,6 +13,38 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.78 -- 2026-11-10
+
+- PIM Manager now runs on .NET 10 LTS and PowerShell 7.6 LTS (supported to November 2028): the PIM Manager image is built on the current .NET 10 base and patched at every build, and the sign-in front (2.1.0) runs on a minimal, current .NET 10 runtime image. .NET 8 and PowerShell 7.4 reached end of support on 10 November 2026. Also: the permission check on the Home page no longer fails with an error at some installations. (3.0.77 was not published.)
+
+## 3.0.77 -- 2026-11-10
+
+- PIM Manager now runs on .NET 10 LTS and PowerShell 7.6 LTS (supported to November 2028): the PIM Manager image is built on the current .NET 10 base and patched at every build, and the sign-in front (2.1.0) runs on a minimal, current .NET 10 runtime image. .NET 8 and PowerShell 7.4 reached end of support on 10 November 2026. Also: the permission check on the Home page no longer fails with an error at some installations.
+
+## 3.0.76 -- 2026-11-10
+
+- PIM Manager now ships its approved list of rights for every identity it creates, generated from the rights the code grants, so Invardia can check the live rights every day. New installations no longer grant the engine three Microsoft Graph permissions it never needs on their own. The documentation now describes the two-line install, the Community nightly updater, the free second approver and evidence export, and the time-limited support database access exactly as the code does.
+
+## 3.0.75 -- 2026-11-10
+
+- Microsoft Entra access packages: PIM Manager can let an access package decide who gets onto a delegation group, while PIM keeps deciding how that access is activated. It acts only when a package is defined; switching the feature off hands the groups back to PIM.
+
+## 3.0.74 -- 2026-11-10
+
+- Every PIM job now writes a short liveness line every 5 minutes while it runs, naming what it is doing, so a run that is still working can be told apart from one that has died.
+
+## 3.0.73 -- 2026-11-10
+
+- The Support SQL access step no longer asks Graph for an extension of less than 5 minutes, which Graph refuses and which showed as a failed step. A test of the AI assistant commit tool reads the file the code moved to.
+
+## 3.0.72 -- 2026-11-09
+
+- The installation report no longer marks the documentation job identity as non-standard
+
+## 3.0.71 -- 2026-11-09
+
+- Access reviews are read by the engine; the web app no longer needs an access-review right (AR-ENGINE-1)
+
 ## 3.0.70 -- 2026-11-09
 
 - Support access to the database is time-limited: while a support session is open, the Invardia Support app is a member of the database administrator group only until the session ends (at most 24 hours), and a standing membership is replaced by the time-limited one. A guard never holds back an update: Strict mode only lowers the solution's own change limits.

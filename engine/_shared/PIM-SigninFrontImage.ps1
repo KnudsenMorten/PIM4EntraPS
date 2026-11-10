@@ -411,7 +411,9 @@ function New-PimSigninFrontBuildContextFromFolder {
         if ($comp -ne $pin) { $res.reason = "the source carries component $comp, but this release pins $pin -- not built (only the pinned version is ever built)"; return $res }
         $root = (Resolve-Path -LiteralPath $src).Path.TrimEnd('\', '/')
         $ctx = [ordered]@{}
-        foreach ($f in @(Get-ChildItem -LiteralPath $root -Recurse -File)) {
+        # -Force (2026-11-10): on Linux -- where the in-cloud updater runs -- Get-ChildItem hides dot-files, so the front's
+        # .dockerignore was silently left out of the build context (Test-PimVendorSigninFront V5a / IMG-F6 on the Linux runner).
+        foreach ($f in @(Get-ChildItem -LiteralPath $root -Recurse -File -Force)) {
             $rel = $f.FullName.Substring($root.Length + 1).Replace('\', '/')
             if ($rel -match '^(bin|obj)/' -or $rel -match '(^|/)\.\.(/|$)') { continue }
             $ctx[$rel] = [IO.File]::ReadAllBytes($f.FullName)

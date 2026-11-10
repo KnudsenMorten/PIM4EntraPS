@@ -33,7 +33,7 @@ Set-StrictMode -Off
 # ---------------------------------------------------------------------------------------------------------------------
 # What is configuration (PURE)
 # ---------------------------------------------------------------------------------------------------------------------
-function Get-PimConfigBackupEntityPatterns { @('^Account-Definitions-', '^PIM-Definitions-', '^PIM-Assignments-') }
+function Get-PimConfigBackupEntityPatterns { @('^Account-Definitions-', '^PIM-Definitions-', '^PIM-Assignments-', '^AccessPackage$') }
 
 function Test-PimConfigBackupEntityIncluded {
     <# PURE. True for a pim.Rows entity that is configuration (Account-Definitions-*, PIM-Definitions-*, PIM-Assignments-*). #>
@@ -69,7 +69,7 @@ function Get-PimConfigBackupSettingDenyList {
                      'ApprovalRequests', 'GuardTrips', 'AccessReviewCampaigns', 'AccessReviewCycleState', 'AccessReviewReminders',
                      'AutoExtendDecisions', 'AutoExtendOutlook', 'CompanyReviewCampaigns', 'OwnerReviews', 'RfaRequests',
                      'DiscoveryBaseline', 'DiscoveryRoleBaseline', 'DownlinkIntents', 'DownlinkIntentsApplied', 'DownlinkApplied',
-                     'EngineDesiredCounts', 'AdminOffboardState', 'ConformanceTemplateState',
+                     'EngineDesiredCounts', 'AdminOffboardState', 'ConformanceTemplateState', 'AccessPackageBindings',
                      'DefenderRoleCreatePending', 'IntakeRequests', 'LifecycleEscalationLog', 'ChangeQueue', 'DesiredState',
                      'DockerBuildRequest', 'SchedulerState', 'SchedulerLease',
                      # PIM 100.119 B1: the guards' own records. An old copy written over the live one would make a consumed or

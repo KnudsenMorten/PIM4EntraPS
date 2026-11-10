@@ -302,6 +302,16 @@ $script:PimFailureRules = @(
        retryable = $true; severity = 'environment'
        fixes = @() }
 
+    # Entra Access Packages: a group a package delivers gets its members only from the package, so a Remove row for one of its
+    # members is not carried out by the engine -- and must not disappear unseen (Split-PimAccessPackageOwnedMembers).
+    @{ code = 'ACCESS-PACKAGE-REMOVE-HELD'
+       match = { param($m, $row) "$m" -match '(?i)(^|[^A-Za-z0-9-])ACCESS-PACKAGE-REMOVE-HELD([^A-Za-z0-9-]|$)' }
+       title = 'A Remove row names a member of a group that an access package delivers -- it was not applied'
+       cause = 'The members of this group come only from its access package, so PIM Manager does not remove them directly. The row stays until the removal has been done through the package.'
+       remedy = 'End the person''s assignment in the access package (Microsoft Entra admin center, Identity Governance, Access packages), then delete this row.'
+       retryable = $false; severity = 'environment'
+       fixes = @() }
+
     # ADOPT-BY-NAME-SQUAT (owner 2026-10-23 "Hold for approval"): a group of a defined name that PIM Manager did not create
     # and no administrator adopted is held -- never used, never given a role (PIM-EngineProviders Test-PimGroupAdoption).
     @{ code = 'GROUP-ADOPT-HELD'
@@ -798,6 +808,7 @@ function Get-PimFailureCodeTable {
         ,@('GROUP-NOT-CREATED-YET',            'pim-grp-0103',   'replication-delay', 'nobody',   '',      '2.4.638')
         ,@('GROUP-POLICY-UNREADABLE',          'pim-grp-0104',   'upstream-error',    'product',  '',      '2.4.638')
         ,@('GROUP-ADOPT-HELD',                 'pim-grp-0105',   'customer-config',   'customer', '',      '2.4.672')
+        ,@('ACCESS-PACKAGE-REMOVE-HELD',       'pim-grp-0106',   'customer-config',   'customer', '',      '3.0.71')
         ,@('DEFENDER-ROLE-CREATE-PENDING',     'pim-def-0101',   'replication-delay', 'nobody',   '',      '2.4.638')
         ,@('DEFENDER-PERMISSION-PREREQUISITE', 'pim-def-0102',   'customer-config',   'customer', '',      '2.4.638')
         ,@('DEFENDER-ROLE-AMBIGUOUS',          'pim-def-0103',   'customer-config',   'customer', '',      '2.4.638')
@@ -1116,6 +1127,11 @@ function Get-PimFailureSolutionCatalog {
             affected = 'Nothing was changed on either group. Every item that names the group waits; everything else is applied.'
             steps = @('In the Microsoft Entra admin center, rename or delete the group that is not the one PIM Manager should manage (Jobs > Engine logs & errors names both object ids).')
             after = 'The next run finds the group that is left, applies the waiting items, and the status turns OK by itself.' }
+        'ACCESS-PACKAGE-REMOVE-HELD' = @{ short = 'a Remove row names a member of a group that an access package delivers'
+            what = 'A Remove row names a member of a group whose members come only from an access package, so it was not applied: {item}.'
+            affected = 'The member keeps the access until the removal is done through the package. Everything else is applied.'
+            steps = @('In the Microsoft Entra admin center, under Identity Governance, Access packages, end the assignment of the person.', 'Then delete this row in Advanced View (grid) and commit in Pending changes.')
+            after = 'Once the row is deleted this item is gone by itself.' }
         'GROUP-ADOPT-HELD' = @{ short = 'a group with a defined name exists that PIM Manager did not create'
             what = 'A group with a name PIM Manager defines exists in Entra ID, but PIM Manager did not create it and no administrator has adopted it, so PIM Manager does not use it: {item}.'
             affected = 'Nothing was given to that group and nothing was changed on it. Every item that names the group waits; everything else is applied.'

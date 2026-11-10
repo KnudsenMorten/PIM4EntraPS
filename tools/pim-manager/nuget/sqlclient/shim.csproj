@@ -6,14 +6,14 @@
        `dotnet new classlib` + `dotnet add package` it replaces, so the published DLLs are the same versions.
        Change the version on purpose only: edit it here, re-run `dotnet restore` (the lock file is rewritten), commit both. -->
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.8" />
   </ItemGroup>
 
 </Project>

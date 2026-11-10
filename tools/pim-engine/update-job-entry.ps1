@@ -48,6 +48,9 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 }
 . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $solRoot 'engine\_shared\PIM-InstallNames.ps1')   # CR5 step 1 (PIM 100.149): every resource name from one resolver
+# QUIESCE-DIED-1 (1): a process liveness line every 5 min, whatever this run is blocked on (never fails the update)
+. (Join-Path $solRoot 'engine\_shared\PIM-Beat.ps1')
+$pimBeat = Start-PimBeat; if ($pimBeat.started -or $pimBeat.reason -match 'could not') { Write-Host "[beat] $($pimBeat.reason)" }
 . (Join-Path $solRoot 'engine\_shared\PIM-DisplayNameRename.ps1')   # CR5 item 5: the display names people read (switch, OFF)
 . (Join-Path $solRoot 'engine\_shared\PIM-ArmContainerApps.ps1')
 . (Join-Path $solRoot 'engine\_shared\PIM-SyncAutomateIT.ps1')   # the decision core (semver + pin gate)

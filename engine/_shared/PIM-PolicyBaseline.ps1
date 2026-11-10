@@ -266,7 +266,7 @@ function Get-PimPolicyBaselineFromArchive {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("pim-bl-{0}" -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
     # 🪤 READ THE TAR WITH .NET, NOT THE `tar` BINARY. Two independent things bite the obvious
     # implementation, and both were measured 2026-09-20:
-    #   1. GNU tar (the container image, powershell:7.4-ubuntu-22.04) needs `--wildcards` to match a
+    #   1. GNU tar (the container image, Ubuntu; sdk:10.0-noble since NET10-PS76) needs `--wildcards` to match a
     #      pattern; bsdtar (Windows, the build host) matches by default and REFUSES the flag. One code path
     #      cannot satisfy both without probing.
     #   2. PowerShell 7.3+ turns a NON-ZERO NATIVE EXIT into a TERMINATING error when

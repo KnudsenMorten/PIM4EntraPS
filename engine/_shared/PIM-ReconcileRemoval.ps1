@@ -156,7 +156,9 @@ function Get-PimReconcileRemovalPlan {
     #>
     param([Parameter(Mandatory)][string]$Scope, [AllowNull()][object]$Provider, [object[]]$Desired = @(), [object[]]$Live = @(),
           [Parameter(Mandatory)][scriptblock]$KeyOf, [switch]$HasTypes, [string[]]$ClaimedKeys = @(), [string]$LedgerConnectionString = '',
-          [string]$Mode = 'report', [int]$Budget = -1, [int]$AlreadyRemoving = 0, [scriptblock]$LabelOf = $null)
+          [string]$Mode = 'report', [int]$Budget = -1, [int]$AlreadyRemoving = 0, [scriptblock]$LabelOf = $null,
+          # Rows the engine set aside because an access package delivers their group: still definitions, so rule 5 counts them.
+          [int]$SetAsideDesiredCount = 0)
     $cls = Get-PimReconcileScopeClass -Scope $Scope -Provider $Provider
     $desKeys = @{}; $desNeutral = if ($HasTypes) { @{} } else { $null }
     foreach ($d in @($Desired)) { if ($null -eq $d) { continue }; $k = "$(& $KeyOf $d)".Trim().ToLowerInvariant(); if ($k) { $desKeys[$k] = $true; if ($HasTypes) { $desNeutral[(Get-PimReconcileNeutralKey -Key $k)] = $true } } }
@@ -201,7 +203,7 @@ function Get-PimReconcileRemovalPlan {
     }
     # rule 5 -- the guards: an empty desired set is never authoritative; the removal budget covers the whole pass.
     $hold5 = ''
-    if (@($Desired | Where-Object { $null -ne $_ }).Count -eq 0 -and $elig.Count) { $hold5 = 'rule 5: the desired set of this scope is EMPTY -- never authoritative, nothing is removed' }
+    if ((@($Desired | Where-Object { $null -ne $_ }).Count + $SetAsideDesiredCount) -eq 0 -and $elig.Count) { $hold5 = 'rule 5: the desired set of this scope is EMPTY -- never authoritative, nothing is removed' }
     elseif ($elig.Count -and $Budget -ge 0 -and ($elig.Count + [int]$AlreadyRemoving) -gt $Budget) {
         $hold5 = ("rule 5: {0} removal(s) in this scope (plus {1} already planned) are over the removal budget of {2} -- none is removed (never a partial mass removal)" -f $elig.Count, [int]$AlreadyRemoving, $Budget)
     }

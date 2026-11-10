@@ -89,13 +89,17 @@
 # 'pim-identities' (the recorded directory answers) and 'admin-import-reads' are written by the ENGINE's tenant-cache job
 # (engine/_shared/PIM-EngineDirectoryFacts.ps1) and only READ by the web app, which makes no Graph call of its own beyond the
 # pickers. 'tenant-org' + 'tenant-domains' are written by the same job now (the web app no longer reads Graph for them).
-$script:PimTenantCacheKinds = @('admin-tap-state','demo-group','pim-app-registrations','workload-roles','pim-identities','admin-import-reads','entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity','tenant-org','active-assignments','drift','coverage-report','target-check','workload-roles:defender','workload-roles:intune','workload-actions:defender','tenant-domains','powerbi-workspaces','ad-servers','managed-live','mgmt-report')   # mgmt-report: MGMT-REPORT, the latest monthly management report (.pptx) + the figure history its trends use; managed-live: the live assignments the engine matched to a definition (drift read; Review current delegations, 2026-10-07); powerbi-workspaces: REQ-DISC-2 (the discovery-powerbi job); ad-servers: §80.2 server onboarding (written by the hybrid worker)
+$script:PimTenantCacheKinds = @('admin-tap-state','demo-group','pim-app-registrations','workload-roles','pim-identities','admin-import-reads','access-reviews','entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity','tenant-org','active-assignments','drift','coverage-report','target-check','workload-roles:defender','workload-roles:intune','workload-actions:defender','tenant-domains','powerbi-workspaces','ad-servers','managed-live','mgmt-report')   # access-reviews: AR-ENGINE-1 (3.0.71), the access reviews the ENGINE read (Get-PimEngineAccessReviewsFact, Pro); mgmt-report: MGMT-REPORT, the latest monthly management report (.pptx) + the figure history its trends use; managed-live: the live assignments the engine matched to a definition (drift read; Review current delegations, 2026-10-07); powerbi-workspaces: REQ-DISC-2 (the discovery-powerbi job); ad-servers: §80.2 server onboarding (written by the hybrid worker)
 $script:PimTenantCacheMem   = @{}
 $script:PimTenantCacheReadErrors = @{}   # REQ 100.112: kind -> why its last read failed (Get-PimTenantCacheReadError)
 
 # WEB-GRAPH-MIN-1: the engine's directory-fact readers + the web app's cache-only replay (one file, both halves).
 $__pimEdfLib = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-EngineDirectoryFacts.ps1'
 if (Test-Path -LiteralPath $__pimEdfLib) { . $__pimEdfLib }
+# AR-ENGINE-1 (3.0.71, RIGHTS-1 B): the access-review reader (Pro -- loaded only when present). The engine records the
+# reviews (kind 'access-reviews'); the web app builds its views from that record and holds no AccessReview right.
+$__pimArLib = Join-Path $PSScriptRoot '..\..\engine\access-reviews\PIM-AccessReviews.ps1'
+if (-not (Get-Command Get-PimEngineAccessReviewsFact -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $__pimArLib)) { . $__pimArLib }
 
 function Get-PimTenantCacheStoreCs {
     # The store connection string, or $null when this process has no store.
@@ -777,7 +781,8 @@ function Invoke-PimTenantListRefresh {
     param(
         [switch]$Quiet,
         # WEB-GRAPH-MIN-1: 'admin-import' = only the account reads an "Import" asked for (the queued request; a minute,
-        # not a whole refresh). Anything else = every list.
+        # not a whole refresh). AR-ENGINE-1: 'access-reviews' = only the access-review record (after an applied decision /
+        # reviewer change, or the page's Refresh). Anything else = every list.
         [string]$Scope = 'All'
     )
 
@@ -801,7 +806,7 @@ function Invoke-PimTenantListRefresh {
         # (a missing permission skips that one, a transient failure keeps the last record) and document-shaped (map).
         $hasFacts = [bool](Get-Command Get-PimEngineDirectoryAnswers -ErrorAction SilentlyContinue)
         $factSteps = @()
-        if ($hasFacts) {
+        if ($hasFacts -and "$Scope" -ne 'access-reviews') {
             $factSteps = @(
                 @{ kind = 'admin-import-reads';    label = 'Admin import reads';    fn = { Invoke-PimEngineAdminImportReads };    map = $true; optional = $true; fact = $true }
             )
@@ -816,8 +821,13 @@ function Invoke-PimTenantListRefresh {
                 )
             }
         }
+        # AR-ENGINE-1 (3.0.71): the access reviews (Pro; only when the reader is installed). A FACT: a failed read keeps the
+        # last record (a 403 is 'PERMISSION:' = skipped), it never fails the refresh.
+        if ("$Scope" -ne 'admin-import' -and (Get-Command Get-PimEngineAccessReviewsFact -ErrorAction SilentlyContinue)) {
+            $factSteps += @(@{ kind = 'access-reviews'; label = 'Access reviews'; fn = { Get-PimEngineAccessReviewsFact }; map = $true; optional = $true; fact = $true })
+        }
         $listSteps = @()
-        if ("$Scope" -ne 'admin-import') { $listSteps = @(
+        if ("$Scope" -notin @('admin-import', 'access-reviews')) { $listSteps = @(
             @{ kind = 'entra-roles';      label = 'Entra ID roles';        fn = { Get-PimEntraRolesFromTenant } },
             @{ kind = 'aus';              label = 'Administrative Units';  fn = { Get-PimAdministrativeUnitsFromTenant } },
             @{ kind = 'pim-groups';       label = 'PIM-* groups';          fn = { Get-PimGroupsFromTenant } },
@@ -903,7 +913,7 @@ function Invoke-PimTenantListRefresh {
         # objects (Graph 403 on every environment, 2026-10-09), so the tick -- which holds the Graph read rights -- records
         # users / groups / service principals here; the updater's sizing reads pim.Settings 'TenantObjectCounts' on a 403.
         # Best effort: never fails or slows the refresh beyond three $count calls.
-        if ("$Scope" -ne 'admin-import') { try {
+        if ("$Scope" -notin @('admin-import', 'access-reviews')) { try {
             $csC = Get-PimTenantCacheStoreCs
             if (-not (Get-Command Get-PimTenantObjectCounts -ErrorAction SilentlyContinue)) {
                 $tsz = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-TenantSizing.ps1'   # the tick does not load it otherwise

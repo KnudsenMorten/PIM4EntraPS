@@ -38,6 +38,9 @@ Set-StrictMode -Off
 
 function Get-PimSupportSqlGroupJitMaxHours { <# PURE. The longest a time-limited SQL admin membership may run (a literal). #> return 24 }
 function Get-PimSupportSqlGroupJitRetryMinutes { <# PURE. A refused GIVE is not asked again within this many minutes (a literal). #> return 60 }
+function Get-PimSupportSqlGroupJitMinExtendSeconds { <# PURE. An extend that moves the end by no more than this is not asked (a literal). Graph refuses
+    a tiny adminExtend with 400 ActiveDurationTooShort ("Minimum Required is 5 minutes") -- seen live 2026-11-09/10 at 68 s and
+    ~2 min moves, right after the grant; every 15-minute move went through. #> return 300 }
 function Get-PimSupportSqlGroupJitCheckMinutes { <# PURE. With nothing to do, the group's assignments are read (for the finding) at most this often (a literal). #> return 60 }
 function Get-PimSupportSqlGroupJitSlackSeconds { <# PURE. Two end times this close are the same end (Graph rounds; a literal). #> return 120 }
 function Get-PimSupportSqlGroupJitReadBackWaits { <# PURE. Seconds waited before each read-back try (a literal). #> return @(0, 5, 10, 20) }
@@ -211,8 +214,9 @@ function Get-PimSupportSqlGroupJitDecision {
     if ($Wanted.open) {
         $until = [datetime]$Wanted.untilUtc
         if ($ours) {
-            # capped at 24 h, the end moves on with every run: extended only when it is at least an hour short (not every 15 min)
-            $short = $(if ($Wanted['capped']) { -3600 } else { -60 })
+            # capped at 24 h, the end moves on with every run: extended only when it is at least an hour short (not every 15 min).
+            # Otherwise only a move of MORE than 5 min is asked: Graph refuses a shorter one (ActiveDurationTooShort) -- no red.
+            $short = $(if ($Wanted['capped']) { -3600 } else { -(Get-PimSupportSqlGroupJitMinExtendSeconds) })
             if ($ours.endUtc -lt $until.AddSeconds($short)) { $d.action = 'extend'; $d.reason = "$($Wanted.reason): this code's membership ends $(Format-PimSupportSqlGroupJitUtc $ours.endUtc) -- extended to $(Format-PimSupportSqlGroupJitUtc $until)" }
             else { $d.reason = "$($Wanted.reason): the time-limited membership is in place until $(Format-PimSupportSqlGroupJitUtc $ours.endUtc)" }
         } elseif ($foreignTimed.Count) {

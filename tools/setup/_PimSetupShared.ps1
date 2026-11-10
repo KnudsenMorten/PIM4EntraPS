@@ -346,8 +346,11 @@ $script:PimGraphAppRoles = @{
     'RoleAssignmentSchedule.ReadWrite.Directory'   = 'dd199f4a-f148-40a4-a2ec-f0069cc799ec'
     'RoleAssignmentSchedule.Remove.Directory'      = 'd3495511-98b7-4df3-b317-4e35c19f6129'
     'RoleManagement.Read.All'                      = 'c7fbd983-d9aa-4fa7-84b8-17382c103bc4'
-    'RoleManagementPolicy.Read.Directory'          = 'fdc4c997-9942-4479-bfcb-75a36d1138df'
-    'RoleManagementPolicy.Read.AzureADGroup'       = '69e67828-780e-47fd-b28c-7b27d14864e6'
+    # RIGHTS-LIVE-1 (2026-11-10): RoleManagementPolicy.Read.Directory, RoleManagementPolicy.Read.AzureADGroup and
+    # PrivilegedAccess.ReadWrite.AzureADGroup are NO LONGER GRANTED (28 -> 25): no code path needs them on its own -- the
+    # .ReadWrite. policy roles below read the policies, and the PrivilegedEligibility/AssignmentSchedule roles carry PIM for
+    # Groups. The approved rights list (engine\_shared\PIM-RightsList.ps1) is generated from this map; tests\Test-PimRightsList.ps1
+    # fails if one comes back. Grant-PimMiGraph only ADDS: an install that holds them keeps them until a clean-up decision.
     'PrivilegedEligibilitySchedule.Remove.AzureADGroup' = '55745561-7572-4314-a737-a2c2a1b0dd2e'
     'PrivilegedAssignmentSchedule.Remove.AzureADGroup'  = '55d1104b-3821-413d-b3ca-e2393d333cd3'
     # 🔴 BUG-148 -- THIS ENTRY WAS MISLABELLED: id 618b6020-… is
@@ -364,7 +367,6 @@ $script:PimGraphAppRoles = @{
     # Operator: *"in my opininn you are lacking many pemissions ... i have 20+ permissions in pim v1"*
     # -- correct: the runtime identity held 9 and the code needs ~16. Without these the provider
     # named against each one is a permanent, swallowed 403:
-    'PrivilegedAccess.ReadWrite.AzureADGroup'  = '2f6817f8-7b12-4f0f-bc18-eeaf60705a9e'   # group PIM (v1 parity; the SPN list already requires it)
     'PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup' = '41202f2c-f7ab-45be-b001-85c9728b9d69' # ACTIVE group assignments (/assignmentScheduleRequests)
     'AppRoleAssignment.ReadWrite.All'          = '06b708a9-e830-4db3-a914-8e69da51d44f'   # EntraAppRole provider -> /servicePrincipals/{id}/appRoleAssignedTo
     'Application.Read.All'                     = '9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30'   # ...and reading the target servicePrincipal first

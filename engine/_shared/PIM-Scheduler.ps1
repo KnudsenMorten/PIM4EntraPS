@@ -1681,6 +1681,14 @@ function Initialize-PimDefaultJobHandlers {
             try { [void](Add-PimJobTrigger -Type 'active-assignments-snapshot' -Scope 'All' -Reason "queue-apply:revokes-applied=$revokesApplied") }
             catch { Write-Warning "[scheduler] could not queue an active-assignments refresh after $revokesApplied applied revoke(s): $($_.Exception.Message)" }
         }
+        # AR-ENGINE-1 (3.0.71): the Manager shows access reviews from the engine's record (tenant-cache kind 'access-reviews'),
+        # so an APPLIED decision / reviewer change queues one refresh of that record only (scope 'access-reviews', deduped)
+        # -- the page shows the decision on a following tick instead of after the 12-hour tenant-cache cadence.
+        $arApplied = @(@($act.results) | Where-Object { $_ -and "$($_.outcome)" -eq 'applied' -and "$($_.type)" -in @('access-review-decision','access-review-reviewers') }).Count
+        if ($arApplied -gt 0) {
+            try { [void](Add-PimJobTrigger -Type 'tenant-cache' -Scope 'access-reviews' -Reason "queue-apply:access-review-actions-applied=$arApplied" -JobName 'tenant-cache') }
+            catch { Write-Warning "[scheduler] could not queue an access-review record refresh after $arApplied applied access-review action(s): $($_.Exception.Message)" }
+        }
         # 🔑 A FAILED ENTRY IS REPORTED, NOT SWALLOWED. The whole point of §65.8 is that a queued
         # action whose failure nobody sees is worse than a synchronous one that throws.
         [pscustomobject]@{ ran=$true; applied=$applied; failed=$failed; retrying=$retrying
@@ -4272,6 +4280,7 @@ function Invoke-PimTickJobRun {
         }
     }
     $runId = [guid]::NewGuid().ToString('N')
+    if (Get-Command Set-PimBeatStep -ErrorAction SilentlyContinue) { Set-PimBeatStep $name }   # QUIESCE-DIED-1: the beat names the job
     $al = Get-PimJobAreas -Job $Job
     $lockOn = ($UseLocks -and -not $WhatIf)
     if ($lockOn) {

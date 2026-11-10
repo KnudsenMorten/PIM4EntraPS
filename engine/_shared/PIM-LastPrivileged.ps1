@@ -143,6 +143,9 @@ function Get-PimLastGaCandidates {
             if ((Test-PimIsGlobalAdminRole -Live $l) -and "$($l.principalId)".Trim()) { $out.Add([pscustomobject]@{ key = "$($i.key)"; kind = 'path'; userId = ''; pathId = "$($l.principalId)".Trim() }) }
         } elseif ($sc -eq 'AdminMembers') {
             if ("$($l.principalId)".Trim() -and "$($l.groupId)".Trim()) { $out.Add([pscustomobject]@{ key = "$($i.key)"; kind = 'membership'; userId = "$($l.principalId)".Trim(); pathId = "$($l.groupId)".Trim() }) }
+        } elseif ($sc -eq 'AccessPackages') {
+            # One person's assignment ending (Expand-PimAccessPackageRemovals) takes every group of the package from them.
+            if ("$($l.principalId)".Trim()) { foreach ($g in @($l.groupIds)) { if ("$g".Trim()) { $out.Add([pscustomobject]@{ key = "$($i.key)"; kind = 'membership'; userId = "$($l.principalId)".Trim(); pathId = "$g".Trim() }) } } }
         }
     }
     foreach ($d in @($DisableUsers)) { if ($d -and "$($d.userId)".Trim()) { $out.Add([pscustomobject]@{ key = "$($d.key)"; kind = 'user'; userId = "$($d.userId)".Trim(); pathId = '' }) } }

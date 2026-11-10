@@ -27,11 +27,8 @@
         { "permission": "RoleAssignmentSchedule.ReadWrite.Directory", "why": "Assign Entra directory roles (active)" },
         { "permission": "RoleAssignmentSchedule.Remove.Directory", "why": "Remove active Entra role assignments PIM manages" },
         { "permission": "RoleManagement.Read.All", "why": "Read role definitions and assignments" },
-        { "permission": "RoleManagementPolicy.Read.Directory", "why": "Read the Entra role activation policies" },
         { "permission": "RoleManagementPolicy.ReadWrite.Directory", "why": "Set the Entra role activation policies (duration, MFA, approval)" },
-        { "permission": "RoleManagementPolicy.Read.AzureADGroup", "why": "Read the PIM for Groups activation policies" },
         { "permission": "RoleManagementPolicy.ReadWrite.AzureADGroup", "why": "Set the PIM for Groups activation policies (duration, MFA, approval)" },
-        { "permission": "PrivilegedAccess.ReadWrite.AzureADGroup", "why": "PIM for Groups (eligible and active memberships)" },
         { "permission": "PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup", "why": "Eligible group assignments" },
         { "permission": "PrivilegedEligibilitySchedule.Remove.AzureADGroup", "why": "Remove eligible group assignments PIM manages" },
         { "permission": "PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup", "why": "Active group assignments" },
@@ -79,7 +76,8 @@
         { "permission": "Directory.Read.All", "why": "The web app does not read the whole directory: the engine reads it and stores what the pages show" },
         { "permission": "User.Read.All", "why": "The web app reads only the basic profile the pickers need" },
         { "permission": "Group.Read.All", "why": "The web app reads only the basic group properties the group picker needs" },
-        { "permission": "RoleManagement.Read.All", "why": "Role definitions and assignments are read by the engine and stored for the pages" }
+        { "permission": "RoleManagement.Read.All", "why": "Role definitions and assignments are read by the engine and stored for the pages" },
+        { "permission": "AccessReview.Read.All", "why": "Access reviews are read by the engine and stored for the pages; decisions and reviewer changes are queued and made by the engine" }
       ],
       "directoryRoles": [],
       "azure": [

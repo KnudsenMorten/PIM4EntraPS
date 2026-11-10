@@ -38,6 +38,9 @@ Step 'start'
 # point never LOADS is the inert-capability class: the step reports "skipped" truthfully and
 # forever, and reads as covered.
 . (Join-Path $solRoot 'engine/_shared/PIM-Rest.ps1')
+# QUIESCE-DIED-1 (1): a process liveness line every 5 min (never fails the job)
+. (Join-Path $solRoot 'engine/_shared/PIM-Beat.ps1')
+$pimBeat = Start-PimBeat; if ($pimBeat.started -or $pimBeat.reason -match 'could not') { Write-Host "[beat] $($pimBeat.reason)" }
 . (Join-Path $solRoot 'engine/_shared/PIM-SqlStore.ps1')
 . (Join-Path $solRoot 'engine/_shared/PIM-SqlBootstrap.ps1')
 # PIM 100.156 B: the access catalog decides each principal's roles (Get-PimSqlComponentAccess) -- loaded BEFORE the plan.

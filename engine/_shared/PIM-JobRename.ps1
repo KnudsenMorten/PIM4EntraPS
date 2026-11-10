@@ -37,7 +37,7 @@
       properties.configuration.triggerType  'Schedule' | 'Manual' | 'Event'
       properties.configuration.scheduleTriggerConfig  { cronExpression; parallelism; replicaCompletionCount }
       properties.configuration.manualTriggerConfig    { parallelism; replicaCompletionCount }
-      POST {jobId}/start (empty body) -> { name = <execution> }   (Start-PimAcaJobExecution, override-free)
+      the job's start action, empty body -> { name = <execution> }   (Start-PimAcaJobExecution, override-free)
       GET  {jobId}/executions -> value[].properties.status  Running | Processing | Succeeded | Failed | Stopped | Degraded
       POST {jobId}/listSecrets -> value[] { name; value | keyVaultUrl + identity }
       A configuration PATCH WITHOUT 'secrets' keeps the job's secrets (the proven PIM-UpdateNow / PIM-JobSelfId pattern).
