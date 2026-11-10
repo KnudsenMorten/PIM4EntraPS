@@ -2295,6 +2295,9 @@ function Invoke-PimEngine {
                 continue
             }
         }
+        # STALL-1: the scope this run starts now, on its locks -- a stall report then names the step exactly as this job's
+        # OK report lists it in StepsOk (PIM-JobLanes.ps1 Set-PimRunCurrentScope; a no-op outside a tick, never a stop)
+        if (-not $WhatIf -and (Get-Command Set-PimRunCurrentScope -ErrorAction SilentlyContinue)) { [void](Set-PimRunCurrentScope -Scope "$s") }
         $out.Add((Invoke-PimEngineScope -Scope $s @common))
         $__iScope++
         if ($__adDefer -and "$s" -ieq 'AdminMembers' -and (Get-Command Invoke-PimAdminDeferredDeletes -ErrorAction SilentlyContinue)) {

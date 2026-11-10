@@ -228,6 +228,72 @@ function Get-PimUplinkRunPlan {
     return @{ reports = $arr; watermarkUtc = $wm }
 }
 
+function Select-PimStallReportsDue {
+    <#
+      PURE. STALL-1: the stall run reports to send now (pim.Settings 'UplinkStallReports', registered by the tick's check):
+      not sent yet, registered in the last 48 h, a known trigger and a pim-<...> job id; oldest first.
+    #>
+    param([AllowNull()][object]$State, [datetime]$NowUtc = [datetime]::UtcNow)
+    $st = $State
+    if ($st -is [string]) { $st = $(if ("$st".Trim()) { try { $st | ConvertFrom-Json } catch { $null } } else { $null }) }
+    if ($null -eq $st) { return @() }
+    $vals = if ($st -is [System.Collections.IDictionary]) { @($st.Values) } else { @($st.PSObject.Properties | ForEach-Object { $_.Value }) }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($e in $vals) {
+        if ($null -eq $e) { continue }
+        if ("$(Get-PimUplinkField $e 'sentUtc')".Trim()) { continue }
+        if ("$(Get-PimUplinkField $e 'trigger')" -notin @('no-progress', 'over-2x-usual')) { continue }
+        if ("$(Get-PimUplinkField $e 'job')" -notmatch '^pim-[a-z0-9-]{1,56}$') { continue }
+        $at = ConvertTo-PimUplinkUtc (Get-PimUplinkField $e 'registeredUtc')
+        if (-not $at -or ($NowUtc.ToUniversalTime() - $at).TotalHours -gt 48) { continue }
+        $out.Add($e)
+    }
+    return @($out.ToArray() | Sort-Object { "$(Get-PimUplinkField $_ 'registeredUtc')" })
+}
+
+function New-PimStallRunReportRecord {
+    <#
+      PURE. STALL-1: one stall entry -> a Kind 'run' record (New-AitUplinkReport, -Common = the cycle's Mode / Product /
+      Version / Ring / InstallId / TenantId / Now): Job the entry's pim-<type>, Outcome warning, ErrorClass run-stalled,
+      FailedStep the engine scope's StepsOk id (the name the job's next OK run lists, so Invardia's runOkProves resolves
+      it; none when no scope is known), Counts { stalledMinutes }, and ErrorText one line with the
+      job, the trigger and the minutes -- nothing a customer typed (the job is a shipped name or pim-<type>).
+    #>
+    param([Parameter(Mandatory)][object]$Entry, [Parameter(Mandatory)][hashtable]$Common)
+    $job = "$(Get-PimUplinkField $Entry 'job')"; $jn = "$(Get-PimUplinkField $Entry 'jobName')"; $step = "$(Get-PimUplinkField $Entry 'step')"
+    $trig = "$(Get-PimUplinkField $Entry 'trigger')"; $min = 0; [void][int]::TryParse("$(Get-PimUplinkField $Entry 'minutes')", [ref]$min)
+    if ($trig -notin @('no-progress', 'over-2x-usual') -or $job -notmatch '^pim-[a-z0-9-]{1,56}$') { return $null }
+    if ($jn -notmatch '^[a-z0-9-]{1,60}$') { $jn = $job }
+    # the engine scope's StepsOk id (ConvertTo-PimRunStepId shape) or none -- set by New-PimStallReportEntry, never an area
+    if ($step -notmatch '^[a-z0-9][a-z0-9.-]{0,59}$') { $step = '' }
+    $what = if ($trig -eq 'no-progress') { "$min min without progress" } else { "running $min min, more than twice its usual length" }
+    $txt = "run stalled ($trig): job $jn$(if ($step) { ", step $step" }), $what. The run keeps going; nothing was stopped."
+    return (New-AitUplinkReport -Kind run @Common -Job $job -Outcome 'warning' -ErrorClass 'run-stalled' -ErrorText $txt -FailedStep $step -Counts @{ stalledMinutes = $min })
+}
+
+function Save-PimStallReportMarks {
+    <# STALL-1: sentUtc on each -Ids entry, on a FRESH read (a stall registered during the cycle is kept). '' or the reason. Never throws. #>
+    param([Parameter(Mandatory)][scriptblock]$GetSetting, [Parameter(Mandatory)][scriptblock]$SetSetting, [string[]]$Ids = @(), [datetime]$SentUtc = [datetime]::UtcNow)
+    try {
+        if (-not @($Ids).Count) { return '' }
+        $st = & $GetSetting 'UplinkStallReports'
+        if ($st -is [string]) { $st = $(if ("$st".Trim()) { $st | ConvertFrom-Json } else { $null }) }
+        if ($null -eq $st) { return '' }
+        $map = [ordered]@{}
+        $keys = if ($st -is [System.Collections.IDictionary]) { @($st.Keys) } else { @($st.PSObject.Properties | ForEach-Object { $_.Name }) }
+        foreach ($k in $keys) {
+            $v = if ($st -is [System.Collections.IDictionary]) { $st[$k] } else { $st.$k }
+            if (@($Ids) -contains "$k" -and $null -ne $v) {
+                $c = [ordered]@{}; if ($v -is [System.Collections.IDictionary]) { foreach ($x in $v.Keys) { $c["$x"] = $v[$x] } } else { foreach ($p in $v.PSObject.Properties) { $c[$p.Name] = $p.Value } }
+                $c['sentUtc'] = $SentUtc.ToUniversalTime().ToString('o'); $v = [pscustomobject]$c
+            }
+            $map["$k"] = $v
+        }
+        & $SetSetting 'UplinkStallReports' ([pscustomobject]$map)
+        return ''
+    } catch { return "stall report marks not saved: $($_.Exception.Message)" }
+}
+
 function Test-PimUplinkBacklogOn {
     <#
       PURE. UPLINK-ROUNDS-84: the UplinkBacklog heartbeat field's own switch, PIM_UPLINK_UPLINKBACKLOG. ON by default (Invardia
@@ -3309,6 +3375,12 @@ function Invoke-PimUplinkCycle {
                 try {
                     $hb | Add-Member -NotePropertyName 'Pipeline' -NotePropertyValue $Pipeline -Force
                     $plText = ''; try { $plText = "$($hb | ConvertTo-Json -Depth 6 -Compress)" } catch { $plText = '' }
+                    # STALL-1: the stall lists must read as JSON arrays (the ActiveGuards lesson) -- else they alone are left out
+                    if ($Pipeline.PSObject.Properties['stalledSteps'] -and -not $plText.Contains('"stalledSteps":[')) {
+                        try { $Pipeline.PSObject.Properties.Remove('stalledSteps') } catch { }
+                        Write-Warning '[uplink] Pipeline.stalledSteps could not be written as a JSON list -- the heartbeat goes without it.'
+                        $plText = ''; try { $plText = "$($hb | ConvertTo-Json -Depth 6 -Compress)" } catch { $plText = '' }
+                    }
                     $plState = "$(if ($Pipeline.PSObject.Properties['state']) { $Pipeline.state })"
                     if ($plText.Contains('"Pipeline":{') -and $plState -in @('running', 'idle', 'failed', 'succeeded', 'stopped')) { $hbAdd += 'Pipeline' }
                     else { $hb.PSObject.Properties.Remove('Pipeline'); Write-Warning '[uplink] Pipeline could not be written as the agreed JSON -- the heartbeat goes without it.' }
@@ -3473,6 +3545,24 @@ function Invoke-PimUplinkCycle {
         if ("$($r.Status)" -eq 'ok') { $sent++; $marks[$p.job] = $p.finishedUtc }
         else { $failed++; $stopped = $true; $left++; $why += "$($p.job): $($r.Reason)" }
     }
+    # STALL-1 (Invardia decision 2026-11-10): ONE run report per stall (registered by the tick's check, PIM-JobLanes.ps1
+    # Register-PimStallRunReport) -- Outcome warning, ErrorClass run-stalled, FailedStep the step; Invardia's run monitor
+    # opens the ticket from it and resolves it on the next OK run of the same job + step. IDENTIFIED only (an anonymous
+    # record opens no ticket and carries no text). Same budget and stop-at-first-failure as the runs; sent = marked.
+    $stallSent = 0
+    if (-not $stopped -and $sender.Mode -eq 'identified' -and (Get-Command Select-PimStallReportsDue -ErrorAction SilentlyContinue)) {
+        $sdue = @(); try { $sdue = @(Select-PimStallReportsDue -State (& $GetSetting 'UplinkStallReports') -NowUtc $NowUtc) } catch { $sdue = @() }
+        $sIds = @()
+        foreach ($se in $sdue) {
+            if ($stopped -or -not (& $roomNext)) { $left++; continue }
+            $srec = $null; try { $srec = New-PimStallRunReportRecord -Entry $se -Common $common } catch { $srec = $null }
+            if (-not $srec) { continue }
+            $r = & $post $srec
+            if ("$($r.Status)" -eq 'ok') { $sent++; $stallSent++; $sIds += "$($se.id)" }
+            else { $failed++; $stopped = $true; $left++; $why += "stall report $($se.job): $($r.Reason)" }
+        }
+        if ($sIds.Count) { $mk = Save-PimStallReportMarks -GetSetting $GetSetting -SetSetting $SetSetting -Ids $sIds -SentUtc $NowUtc; if ($mk) { $why += $mk } }
+    }
     # GUARD-1 (framework, 2026-10-04): every guard whose last trip is newer than its last send goes as a Kind 'guard' record
     # (PIM-Guard.ps1). Invardia opens / updates the support ticket from it. Same budget and stop-at-first-failure as the runs.
     $guardsSent = 0
@@ -3570,7 +3660,7 @@ function Invoke-PimUplinkCycle {
         }
         if ($alSentIds.Count) { $mk = Save-PimUplinkAlertMarks -GetSetting $GetSetting -SetSetting $SetSetting -AlertIds $alSentIds -SentUtc $NowUtc; if ($mk) { $why += $mk } }
     }
-    $msg = "$($sender.Mode): $sent sent$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($clearedSent) { " ($clearedSent guard(s) reported clear)" })$(if ($alertsSent) { " ($alertsSent alert record(s))" })$(if ($alRefusedNow -or $alNote) { "; $alNote" } elseif ($alOn -and $alHeld) { '; alert records held (Invardia refused them less than 24 h ago)' })$(if ($setupSent) { ' (setup report)' })$(if ($rounds.n -gt 1) { " in $($rounds.n) rounds" })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })$supNote"
+    $msg = "$($sender.Mode): $sent sent$(if ($stallSent) { " ($stallSent stall report(s))" })$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($clearedSent) { " ($clearedSent guard(s) reported clear)" })$(if ($alertsSent) { " ($alertsSent alert record(s))" })$(if ($alRefusedNow -or $alNote) { "; $alNote" } elseif ($alOn -and $alHeld) { '; alert records held (Invardia refused them less than 24 h ago)' })$(if ($setupSent) { ' (setup report)' })$(if ($rounds.n -gt 1) { " in $($rounds.n) rounds" })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })$supNote"
     # §33.0 BUG (2026-10-16): the refusal names its record (kind, job, HTTP status, Invardia's answer), and while a hold lasts
     # every cycle says so, whichever caller set it. A failure to build the text keeps the plain sentence.
     $refText = { param($st, $what) $t = ''; try { if ($null -ne $st.info) { $t = " ($(Format-PimUplinkRefusalLine -What $what -Info $st.info))" } } catch { $t = '' }; $t }
@@ -3951,9 +4041,23 @@ function Invoke-PimUplinkJob {
     $plField = $null
     if ($on -and "$key".Trim() -and $runsRead -and (Get-Command New-PimUplinkPipelineField -ErrorAction SilentlyContinue) -and (Test-PimUplinkPipelineOn -Value "$env:PIM_UPLINK_PIPELINE" -Ring $ring)) {
         try {
-            $plProg = $null
-            if (Get-Command Get-PimSchedulerLocksRaw -ErrorAction SilentlyContinue) { try { $plProg = Get-PimLongRunProgressMap -Map (Get-PimSchedulerLocksRaw).Map } catch { $plProg = $null } }
-            $plField = New-PimUplinkPipelineField -Runs $runs -UpdateState $us -Progress $plProg -NowUtc $NowUtc
+            $plProg = $null; $plLocks = $null
+            if (Get-Command Get-PimSchedulerLocksRaw -ErrorAction SilentlyContinue) { try { $plLocks = (Get-PimSchedulerLocksRaw).Map; $plProg = Get-PimLongRunProgressMap -Map $plLocks } catch { $plProg = $null; $plLocks = $null } }
+            # STALL-1 (framework 8.18 "STALLED is not died"): every live run that is stalled NOW (no progress for 60 min, or
+            # more than twice its usual length) -> Pipeline.stalledSteps (Invardia's Fleet display; its contract is closed, so
+            # only { step; sinceUtc; lastProgressUtc }). A state, not an event: on every heartbeat while the stall lasts, gone
+            # once the run moves on or ends. The TICKET comes from the stall's one run report (the tick's check registers it,
+            # the cycle sends it). REPORT ONLY -- nothing is stopped.
+            $plStall = $null
+            if ($null -ne $plLocks -and (Get-Command Get-PimStalledRuns -ErrorAction SilentlyContinue)) {
+                try {
+                    $plAlive = @{}; try { $plAlive = Get-PimAliveExpiredExecutions -Map $plLocks -NowUtc $NowUtc } catch { $plAlive = @{} }
+                    $plNames = @(); try { if (Get-Command Get-PimDefaultJobSchedule -ErrorAction SilentlyContinue) { $plNames = [string[]]@(Get-PimDefaultJobSchedule | ForEach-Object { "$($_.name)" }) } } catch { $plNames = @() }
+                    $plStall = New-PimUplinkStalledFields -Stalled @(Get-PimStalledRuns -Map $plLocks -NowUtc $NowUtc -Runs $runs -AliveExecutions $plAlive) -ProductJobNames $plNames
+                    if ($null -ne $plStall) { foreach ($sr in @($plStall.stalledSteps)) { Write-Host ("  [uplink] stalled: {0} since {1}; reported, not stopped" -f $sr.step, $sr.sinceUtc) -ForegroundColor Yellow } }
+                } catch { $plStall = $null; Write-Warning "[uplink] the stalled runs could not be read: $($_.Exception.Message)" }
+            }
+            $plField = New-PimUplinkPipelineField -Runs $runs -UpdateState $us -Progress $plProg -NowUtc $NowUtc -Stalled $plStall
             if ($plField -and $plField.PSObject.Properties['longRun'] -and "$($plField.longRun.state)" -ne 'ok') {
                 Write-Host ("  [uplink] long run: {0} has run {1} min, usual {2} min ({3}x) -- {4}; reported, not stopped" -f $plField.step, $plField.longRun.ageMin, $plField.longRun.usualMin, $plField.longRun.ratio, $plField.longRun.state) -ForegroundColor Yellow
             }

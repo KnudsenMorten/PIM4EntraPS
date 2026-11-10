@@ -187,7 +187,50 @@ function Get-PimPipelineFieldNames {
     <# PURE. LITERAL. The Pipeline keys PIM sends -- a subset of Invardia's spec (runId, state, startedUtc, step, stepSinceUtc,
        lastEndedUtc, nextStartUtc, stepsDone, stepsTotal, longRun, ...). nextStartUtc / stepsDone / stepsTotal are NOT sent:
        PIM does not know them truthfully for an engine run, and a key is never invented. #>
-    return @('runId', 'state', 'startedUtc', 'step', 'stepSinceUtc', 'lastEndedUtc', 'longRun')
+    return @('runId', 'state', 'startedUtc', 'step', 'stepSinceUtc', 'lastEndedUtc', 'longRun', 'stalledSteps')
+}
+
+function Get-PimStallTriggers { <# PURE. LITERAL. STALL-1: the closed list of stall triggers. #> return @('no-progress', 'over-2x-usual') }
+
+function ConvertTo-PimStallSlug {
+    <# PURE. A lower-case [a-z0-9-] word of at most 60 characters ('' = none) -- Invardia's step / job shape. #>
+    param([AllowNull()][object]$Value)
+    $s = ("$Value".Trim().ToLowerInvariant() -replace '[^a-z0-9-]', '-') -replace '-{2,}', '-'
+    $s = $s.Trim('-'); if ($s.Length -gt 60) { $s = $s.Substring(0, 60).Trim('-') }
+    return $s
+}
+
+function New-PimUplinkStalledFields {
+    <#
+      PURE. STALL-1 (framework 8.18 "STALLED is not died"; Invardia decision 2026-11-10: the Pipeline contract is CLOSED) --
+      the stalled runs (Get-PimStalledRuns, PIM-JobLanes.ps1) -> { stalledSteps } for Invardia's Fleet display, exactly
+      Invardia's agreed item [{ step; sinceUtc; lastProgressUtc }] (lastProgressUtc null = no progress since the run
+      started), or $null when none is stalled (the key is then LEFT OUT: the stall cleared itself). The ticket comes from
+      the stall's RUN REPORT (Register-PimStallRunReport), not from here.
+      Privacy: step is the engine scope the run is on (its StepsOk name) when recorded, else the area word it works on
+      (groups, entra-roles, ...), else a SHIPPED job name
+      (-ProductJobNames) or 'pim-<type>' -- never a name a customer typed. At most 12, longest stall first.
+      REPORT ONLY: nothing here, or anywhere in the heartbeat, stops or cancels a run (PIM 100.166 (c)).
+    #>
+    param([AllowNull()][object[]]$Stalled, [AllowNull()][string[]]$ProductJobNames = @())
+    $prod = @{}; foreach ($n in @($ProductJobNames)) { if ("$n".Trim()) { $prod["$n".Trim().ToLowerInvariant()] = $true } }
+    $iso = { param($v) $d = ConvertTo-PimLongRunUtc $v; if ($null -eq $d) { $null } else { $d.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") } }
+    $rows = @(@($Stalled) | Where-Object { $null -ne $_ -and "$($_.trigger)" -in (Get-PimStallTriggers) -and $null -ne (ConvertTo-PimLongRunUtc $_.sinceUtc) } |
+              Sort-Object @{ Expression = { [int]$(if ("$($_.trigger)" -eq 'no-progress') { $_.minutes } else { $_.runMinutes }) }; Descending = $true } |
+              Select-Object -First 12)   # Invardia: stalledSteps max 12 (a literal: this file does not need PIM-JobLanes.ps1)
+    if (-not $rows.Count) { return $null }
+    $steps = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $rows) {
+        # the engine scope it is on (the StepsOk name) when recorded, else the area it works on
+        $step = ConvertTo-PimStallSlug $(if ($r.PSObject.Properties['scope'] -and "$($r.scope)".Trim()) { $r.scope } else { $r.step })
+        if (-not $step) {
+            $jn = "$($r.job)".Trim()
+            if ($jn -and $prod.ContainsKey($jn.ToLowerInvariant())) { $step = ConvertTo-PimStallSlug $jn }
+            else { $t = ConvertTo-PimStallSlug $r.type; $step = $(if ($t) { "pim-$t" } else { 'pim-job' }) }
+        }
+        $steps.Add([pscustomobject][ordered]@{ step = $step; sinceUtc = (& $iso $r.sinceUtc); lastProgressUtc = (& $iso $r.lastProgressUtc) })
+    }
+    return [pscustomobject][ordered]@{ stalledSteps = [object[]]$steps.ToArray() }
 }
 
 function Get-PimPipelineLastEnded {
@@ -239,18 +282,25 @@ function New-PimUplinkPipelineField {
       -Runs        the run history (Get-PimJobRunHistory); the caller passes it only when it was READ ($null here = no field)
       -UpdateState the environment's UpdateState (approvedVersion / runningVersion) -- object, JSON text or $null
       -Progress    @{ runId = [datetime] last progress } (Get-PimLongRunProgressMap); $null = not readable
+      -Stalled     STALL-1: New-PimUplinkStalledFields' object ({ stalledSteps }) -- the key is added, in any state, while
+                   a run is stalled; $null = none stalled = left out
       'state' is always present; only Get-PimPipelineFieldNames keys are ever sent; times ISO-8601 UTC to the second.
     #>
     param([AllowNull()][object[]]$Runs, [AllowNull()][object]$UpdateState = $null, [AllowNull()][hashtable]$Progress = $null,
-          [datetime]$NowUtc = [datetime]::UtcNow)
+          [datetime]$NowUtc = [datetime]::UtcNow, [AllowNull()][object]$Stalled = $null)
     $now = $NowUtc.ToUniversalTime()
     $iso = { param($d) $d.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") }
+    $addStall = { param($o)
+        if ($null -ne $Stalled -and $Stalled.PSObject.Properties['stalledSteps'] -and @($Stalled.stalledSteps).Count) {
+            $o['stalledSteps'] = [object[]]@($Stalled.stalledSteps)
+        }
+        [pscustomobject]$o }
     $types = Get-PimLongRunEngineTypes
     $last = Get-PimPipelineLastEnded -Runs $Runs
     $running = @(@($Runs) | Where-Object { (Test-PimLongRunRunning -Run $_) -and ("$($_.type)".Trim() -in $types -or -not "$($_.type)".Trim()) })
     if (-not $running.Count) {
-        if ($null -eq $last) { return [pscustomobject][ordered]@{ state = 'idle' } }
-        return [pscustomobject][ordered]@{ state = $last.state; lastEndedUtc = (& $iso $last.endUtc) }
+        if ($null -eq $last) { return (& $addStall ([ordered]@{ state = 'idle' })) }
+        return (& $addStall ([ordered]@{ state = $last.state; lastEndedUtc = (& $iso $last.endUtc) }))
     }
     $us = $UpdateState
     try { if ($us -is [string]) { $us = $(if ("$us".Trim().StartsWith('{')) { "$us" | ConvertFrom-Json } else { $null }) } } catch { $us = $null }
@@ -274,5 +324,5 @@ function New-PimUplinkPipelineField {
     if ($step) { $out['step'] = $step; $out['stepSinceUtc'] = (& $iso $st) }
     if ($null -ne $last) { $out['lastEndedUtc'] = (& $iso $last.endUtc) }
     if ($null -ne $best.longRun) { $out['longRun'] = $best.longRun }
-    return [pscustomobject]$out
+    return (& $addStall $out)
 }

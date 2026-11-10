@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.83 -- 2026-11-10
+
+- A run that stops making progress, or takes far longer than usual, is now reported to Invardia support as well as on the Jobs page: support gets one ticket per stall, closed by itself after the next good run. Nothing is ever stopped or restarted because of it.
+
 ## 3.0.82 -- 2026-11-10
 
 - Get Started has two new optional steps: Azure resources (the scopes PIM manages and, per scope, the command that gives the engine identity User Access Administrator) and Workloads (Defender XDR, Intune, Power BI: what is missing, Confirm or Not used). Engine permissions opens with a Who needs what table: each identity by name and object id with its rights. Settings: a category click goes to the top; the leftover card is now Remove access when its definition is deleted; the Emergency override card says what it does in two sentences, gives the setup command when no passphrase is set and keeps its inputs off until then.

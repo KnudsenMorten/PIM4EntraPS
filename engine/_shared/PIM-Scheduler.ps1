@@ -3128,6 +3128,13 @@ function Get-PimJobsStatus {
             $lk = @(@($lockMap.Values) | Where-Object { $_ -and "$($_.runId)".Trim() -and "$($_.runId)" -eq "$($inProg.runId)" }) | Select-Object -First 1
             if ($lk) { try { $np = Get-PimRunProgressState -Lock $lk -NowUtc $now } catch { $np = $null } }
         }
+        # STALL-1 (b): the same running run, going more than twice its usual length (median of its last successful runs,
+        # 10-min floor) -- reported, never stopped; clears itself when it ends.
+        $ou = $null
+        if ($inProg -and $null -ne $lockMap -and "$($inProg.runId)".Trim()) {
+            $sub = [ordered]@{}; foreach ($lkk in @($lockMap.Keys)) { $lv = $lockMap[$lkk]; if ($lv -and "$($lv.runId)" -eq "$($inProg.runId)") { $sub[$lkk] = $lv } }
+            if ($sub.Count) { try { $ou = @(Get-PimStalledRuns -Map $sub -NowUtc $now -Runs $history | Where-Object { $_.overUsual }) | Select-Object -First 1 } catch { $ou = $null } }
+        }
         $rows.Add([pscustomobject]@{
             name            = $name
             type            = "$($j.type)"
@@ -3160,6 +3167,10 @@ function Get-PimJobsStatus {
             noProgressSinceUtc = $(if ($np -and $np.noProgress) { "$($np.sinceUtc)" } else { '' })
             noProgressMinutes = $(if ($np -and $np.noProgress) { [int]$np.minutes } else { 0 })
             noProgressText    = $(if ($np -and $np.noProgress) { "$($np.text)" } else { '' })
+            overUsual         = [bool]$ou
+            overUsualMinutes  = $(if ($ou) { [int]$ou.runMinutes } else { 0 })
+            usualMinutes      = $(if ($ou) { $ou.usualMinutes } else { $null })
+            overUsualText     = $(if ($ou) { "Running for $($ou.runMinutes) min, over twice its usual $($ou.usualMinutes) min -- the run keeps going; this clears itself when it ends." } else { '' })
             hybridWorker    = $(if ($featOff) { $null } elseif ("$($j.type)".Trim().ToLowerInvariant() -in $script:PimHybridWorkerJobTypes) { Get-PimHybridWorkerJobStatus -Type "$($j.type)" -NowUtc $now -Heartbeat $hwHeartbeat } else { $null })
             lastRan         = $(if ($last) { [bool]$last.ran } else { $null })
             lastDurationMs  = $(if ($last) { [int64]$last.durationMs } else { $null })   # [int64] -- see BUG-04

@@ -117,7 +117,8 @@ function New-PimErrorsCatalogue {
     $rules = @{}; foreach ($r in $script:PimFailureRules) { $rules["$($r.code)"] = $r }
     $sol = Get-PimFailureSolutionCatalog
     $capsByArea = @{ az = @('azureRbac'); def = @('defenderXdr'); pbi = @('powerBi'); ad = @('hybridAd'); tap = @('tapPolicy'); entra = @('entraP2Pim'); grp = @('entraP2Pim') }
-    $titleOf = @{ 'CONVERGENCE' = 'A committed change is not in place in the tenant'; 'UNCLASSIFIED' = 'An engine problem PIM Manager has not classified yet' }
+    $titleOf = @{ 'CONVERGENCE' = 'A committed change is not in place in the tenant'; 'UNCLASSIFIED' = 'An engine problem PIM Manager has not classified yet'
+                  'RUN-STALLED' = 'A run has made no progress for a while, or runs far longer than usual' }
     $genericTitle = @{ 'customer-config' = 'A row or setting cannot be applied as written'; 'target-missing' = 'A row names something that does not exist in the tenant'
         'replication-delay' = 'An object is not visible at Microsoft yet'; 'throttled' = 'Microsoft asked PIM Manager to slow down'; 'upstream-error' = 'A Microsoft service error'
         'held-for-approval' = 'A large change is held for approval'; 'not-converged' = 'A committed change is not in place in the tenant'; 'permission' = 'A permission is missing'
@@ -136,10 +137,13 @@ function New-PimErrorsCatalogue {
             foreach ($st in @($s.steps)) { if ("$st".Trim()) { $steps.Add([ordered]@{ who = 'customer'; text = "$st".Trim() }) } }
             if ("$($s.after)".Trim()) { $steps.Add([ordered]@{ who = 'nobody'; text = "$($s.after)".Trim() }) }
         } else {
-            $steps.Add([ordered]@{ who = $(if ("$($row.whoActs)" -eq 'customer') { 'customer' } elseif ("$($row.whoActs)" -in @('support', 'product')) { 'support' } else { 'nobody' }); text = "$($def[1])" })
+            $own = Get-PimFailureClassOwnText -Class "$($row.class)"
+            $stepText = if ($own) { "$($own[1])" } else { "$($def[1])" }
+            $steps.Add([ordered]@{ who = $(if ("$($row.whoActs)" -eq 'customer') { 'customer' } elseif ("$($row.whoActs)" -in @('support', 'product')) { 'support' } else { 'nobody' }); text = $stepText })
         }
         $note = "Class $($row.class)."
         if ($rule) { $note += " Cause: $("$($rule.cause)".Trim()) Remedy: $("$($rule.remedy)".Trim())" }
+        elseif ("$($row.class)" -eq 'RUN-STALLED') { $note += ' STALL-1 (framework 8.18): the tick found a live run with no progress mark for 60 min, or running longer than max(2 x the median of its job''s last 10 successful runs, 10 min). ONE warning run report per stall (FailedStep = the area it works on; the text names the trigger and the minutes). PIM never stops it (100.166 (c)); the ticket resolves on the next OK run of the same job + step.' }
         elseif ("$($row.class)" -eq 'CONVERGENCE') { $note += ' The convergence check (pim-verify-convergence) found definitions in the Manager that are not in the tenant past the grace window; the engine item failures name the cause per item.' }
         elseif ("$($row.class)" -eq 'UNCLASSIFIED') { $note += ' No catalog rule matched the error text: give it its own class and code (framework 8.16: a failure without a cause is a PIM defect).' }
         else { $note += " The generic code of cause class $($row.causeClass): a failure of this kind that has no own code yet." }

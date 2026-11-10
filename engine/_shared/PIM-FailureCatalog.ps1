@@ -779,6 +779,10 @@ function Get-PimFailureCodeTable {
         ,@('RUN-EXECUTION-FAILED',             'pim-eng-0106',   'platform-timeout',  'nobody',   '',      '2.4.653')
         ,@('MI-TOKEN-UNAVAILABLE',             'pim-eng-0107',   'upstream-error',    'nobody',   '',      '2.4.674')
         ,@('COMMUNITY-PRO-HANDLER',            'pim-eng-0108',   'missing-licence',   'product',  '3.0.59', '3.0.59')
+        # STALL-1 (framework 8.18, Invardia decision 2026-11-10): a run that made no progress for 60 min or runs more than
+        # twice its usual length -- ONE run report per stall (ErrorClass run-stalled), opens a ticket (support acts); the
+        # run keeps going (PIM 100.166 (c)). No engine rule matches it: only the stall check sends this class.
+        ,@('RUN-STALLED',                      'pim-eng-0109',   'platform-timeout',  'support',  '',      '3.0.82')
         ,@('CONVERGENCE',                      'pim-eng-0201',   'not-converged',     'product',  '',      '2.4.638')
         ,@('AZ-POLICY-MASS-HOLD',              'pim-grd-0101',   'held-for-approval', 'customer', '',      '2.4.638')
         ,@('GROUP-POLICY-MASS-HOLD',           'pim-grd-0102',   'held-for-approval', 'customer', '',      '2.4.638')
@@ -898,6 +902,19 @@ function Get-PimErrorDefaultText {
     return @('PIM Manager met a problem. Invardia support looks at it.', 'Nothing to do for you: Invardia support looks at it.')
 }
 
+function Get-PimFailureClassOwnText {
+    <#
+      PURE. LITERAL. A class whose words are its OWN (neither a customer-ready solution nor its cause class's default fits):
+      class -> @( customerText, stepText ), else $null. ONE source for errors.json and the customer alert mail.
+    #>
+    param([string]$Class)
+    switch ("$Class".Trim().ToUpperInvariant()) {
+        'RUN-STALLED' { return @('A PIM Manager run has made no progress for a while, or is running far longer than usual. It keeps running and nothing was stopped; Invardia support has been told.',
+                                 'Nothing to do for you: Invardia support looks at it. This clears by itself when the job runs normally again.') }
+    }
+    return $null
+}
+
 function Get-PimFailureCustomerText {
     <#
       PURE. framework 8.16: a catalog class -> its stable code (Get-PimFailureCodeInfo) and the ONE customer sentence of that
@@ -909,6 +926,8 @@ function Get-PimFailureCustomerText {
     $info = Get-PimFailureCodeInfo -Class $Class -CauseClass $CauseClass
     $def = Get-PimErrorDefaultText -CauseClass "$($info.causeClass)" -WhoActs "$($info.whoActs)"
     $customer = "$($def[0])"
+    $own = Get-PimFailureClassOwnText -Class "$($info.class)"
+    if ($own) { $customer = "$($own[0])" }
     $sol = Get-PimFailureSolutionCatalog
     if ("$($info.class)" -and $sol.ContainsKey("$($info.class)")) {
         $s = $sol["$($info.class)"]

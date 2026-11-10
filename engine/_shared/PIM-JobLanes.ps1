@@ -461,26 +461,318 @@ function Get-PimNoProgressRuns {
     return @($out.ToArray())
 }
 
+# ---- STALL-1 (framework 8.18 "STALLED is not died", Invardia 2026-11-10) ---------------------------------------------
+# Two triggers, one report: (a) no progress for 60 min (above), (b) a run going MORE THAN TWICE its usual length, where
+# usual = the MEDIAN of its job's last 10 SUCCESSFUL runs (fewer than 3 = this trigger is off for that job), never below a
+# 10-minute floor so a 1-minute job does not flap. Either is reported ONCE per stall (log line + one warning mail, marked on
+# the run's locks) and is on the heartbeat (Pipeline.stalledSteps, the Fleet display) while it lasts; the ticket comes from ONE run report per stall. PIM 100.166 (c) (owner
+# 2026-10-15 "report on no progress, keep running"): NOTHING here stops, cancels, restarts, fails or releases a run.
+# Literals as functions (a $script: value read from another script scope is $null, and -gt $null is TRUE).
+function Get-PimNoProgressThresholdMinutes { <# PURE. LITERAL. #> return 60 }
+function Get-PimOverUsualFactor            { <# PURE. LITERAL. Over this many times the usual length = stalled. #> return 2 }
+function Get-PimOverUsualFloorMinutes      { <# PURE. LITERAL. The over-usual limit is never below this. #> return 10 }
+function Get-PimOverUsualHistoryRuns       { <# PURE. LITERAL. The usual length = the median of this many newest successful runs. #> return 10 }
+function Get-PimOverUsualMinRuns           { <# PURE. LITERAL. Fewer successful runs than this = no usual = the trigger is off. #> return 3 }
+function Get-PimStalledRunsMax             { <# PURE. LITERAL. At most this many stalled runs on one heartbeat (Invardia: stalledSteps max 12). #> return 12 }
+
+function Test-PimRunSucceeded {
+    <# PURE. A FINISHED run record that SUCCEEDED: status completed (or succeeded / success / ok), ok not false, not held,
+       a finish time. A warning, a failure, a skip, an interruption or a running record is not. #>
+    param([AllowNull()][object]$Run)
+    if ($null -eq $Run) { return $false }
+    if ("$($Run.status)".Trim().ToLowerInvariant() -notin @('completed', 'succeeded', 'success', 'ok')) { return $false }
+    if ($Run.PSObject.Properties['ok'] -and $null -ne $Run.ok -and -not [bool]$Run.ok) { return $false }
+    if ($Run.PSObject.Properties['held'] -and [bool]$Run.held) { return $false }
+    return ($null -ne (Get-PimNoProgressStamp $(if ($Run.PSObject.Properties['finishedUtc']) { $Run.finishedUtc })))
+}
+
+function Get-PimRunDurationMinutes {
+    <# PURE. A finished run's length in minutes: durationMs when > 0, else finishedUtc - startedUtc; $null when neither. #>
+    param([AllowNull()][object]$Run)
+    if ($null -eq $Run) { return $null }
+    $ms = 0.0
+    if ($Run.PSObject.Properties['durationMs'] -and [double]::TryParse("$($Run.durationMs)", [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$ms) -and $ms -gt 0) { return [double]$ms / 60000.0 }
+    $s = Get-PimNoProgressStamp $(if ($Run.PSObject.Properties['startedUtc']) { $Run.startedUtc })
+    $f = Get-PimNoProgressStamp $(if ($Run.PSObject.Properties['finishedUtc']) { $Run.finishedUtc })
+    if ($null -ne $s -and $null -ne $f -and $f -gt $s) { return [double]($f - $s).TotalMinutes }
+    return $null
+}
+
+function Get-PimUsualRunMinutes {
+    <# PURE. The usual length of a job: the MEDIAN (minutes) of its newest -Last (10) SUCCESSFUL runs in -Runs (the run
+       history the scheduler keeps); $null when it has fewer than -MinRuns (3) -- no usual, the over-usual trigger is off. #>
+    param([AllowNull()][object[]]$Runs, [Parameter(Mandatory)][AllowEmptyString()][string]$Job, [int]$Last = 0, [int]$MinRuns = 0)
+    $n = if ($Last -gt 0) { $Last } else { Get-PimOverUsualHistoryRuns }
+    $least = if ($MinRuns -gt 0) { $MinRuns } else { Get-PimOverUsualMinRuns }
+    $j = "$Job".Trim(); if (-not $j) { return $null }
+    $ok = @(@($Runs) | Where-Object { $null -ne $_ -and "$($_.name)".Trim() -eq $j -and (Test-PimRunSucceeded -Run $_) } |
+            Sort-Object { $t = Get-PimNoProgressStamp $_.startedUtc; if ($t) { $t } else { [datetime]::MinValue } } -Descending)
+    $d = New-Object System.Collections.Generic.List[double]
+    foreach ($r in $ok) {
+        if ($d.Count -ge $n) { break }
+        $m = Get-PimRunDurationMinutes -Run $r
+        if ($null -ne $m -and $m -gt 0) { $d.Add([double]$m) }
+    }
+    if ($d.Count -lt $least) { return $null }
+    $s = [double[]]@($d.ToArray() | Sort-Object)
+    $c = $s.Count
+    if ($c % 2 -eq 1) { return $s[[int](($c - 1) / 2)] }
+    return ($s[[int]($c / 2) - 1] + $s[[int]($c / 2)]) / 2.0
+}
+
+function Get-PimStalledRuns {
+    <#
+      PURE. The live runs in a lock map (one entry per owner + runId, over ALL its locks) that are STALLED by either trigger:
+        no-progress    its newest progress mark (progressUtc / acquiredUtc over its locks) is -ThresholdMinutes (60) old
+        over-2x-usual  it has run longer than max(2 x usual, 10 min), usual = Get-PimUsualRunMinutes of its job from -Runs
+      Each: { owner; runId; job; type; step (the lock AREA); scope (the engine scope's StepsOk id, '' = none recorded);
+      state 'stalled'; trigger; minutes (without progress); runMinutes; usualMinutes;
+      limitMinutes; sinceUtc (when it stalled); lastProgressUtc ($null = none since it started); startedUtc; noProgress;
+      overUsual; reportDue; markNoProgress; markOverUsual; text }. A run that is not stalled is not listed; a lock that is not
+      held (ended / expired, unless -AliveExecutions says its execution still runs) is never stalled -- it clears itself.
+      step = the area the run works on now (its newest non-'job:' lock), else its job. -ExceptOwner: leave this process's
+      own runs out. -Runs: the run history (a 'running' record of the run gives its type and start).
+      reportDue: no-progress -> 'noProgressReportedUtc' (max over its locks) missing or older than the progress mark;
+                 over-2x-usual (only when it is NOT also no-progress) -> 'overUsualReportedUtc' missing or older than its start.
+    #>
+    param([System.Collections.IDictionary]$Map, [Parameter(Mandatory)][datetime]$NowUtc, [AllowNull()][object[]]$Runs = @(),
+          [string]$ExceptOwner = '', [hashtable]$AliveExecutions = @{}, [int]$ThresholdMinutes = 0)
+    if ($null -eq $Map) { return @() }
+    $now = $NowUtc.ToUniversalTime()
+    $th = if ($ThresholdMinutes -gt 0) { $ThresholdMinutes } else { Get-PimNoProgressThresholdMinutes }
+    $iso = { param($d) if ($null -eq $d) { $null } else { $d.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") } }
+    $prop = { param($o, $k) if ($null -ne $o -and $o.PSObject.Properties[$k]) { $o.$k } else { $null } }
+    $byRun = [ordered]@{}
+    foreach ($k in @($Map.Keys | Sort-Object)) {
+        $l = $Map[$k]
+        if (-not $l -or -not (Test-PimAreaLockHeld -Lock $l -NowUtc $now -AliveExecutions $AliveExecutions)) { continue }
+        if ("$ExceptOwner".Trim() -and "$($l.owner)" -eq "$ExceptOwner") { continue }
+        $key = "$($l.owner)|$($l.runId)"
+        if (-not $byRun.Contains($key)) { $byRun[$key] = New-Object System.Collections.Generic.List[object] }
+        $byRun[$key].Add([pscustomobject]@{ area = "$k"; lock = $l })
+    }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($key in @($byRun.Keys)) {
+        $items = @($byRun[$key].ToArray())
+        $first = $items[0].lock
+        $job = ("$($first.job)" -replace '^job:', '').Trim()
+        $runId = "$($first.runId)"
+        $start = $null; $mark = $null; $prog = $null; $npRep = $null; $ouRep = $null; $stepArea = ''; $stepAcq = $null
+        foreach ($it in $items) {
+            $a = Get-PimNoProgressStamp (& $prop $it.lock 'acquiredUtc')
+            $p = Get-PimNoProgressStamp (& $prop $it.lock 'progressUtc')
+            $nr = Get-PimNoProgressStamp (& $prop $it.lock 'noProgressReportedUtc')
+            $orp = Get-PimNoProgressStamp (& $prop $it.lock 'overUsualReportedUtc')
+            if ($null -ne $a -and ($null -eq $start -or $a -lt $start)) { $start = $a }
+            foreach ($t in @($a, $p)) { if ($null -ne $t -and ($null -eq $mark -or $t -gt $mark)) { $mark = $t } }
+            if ($null -ne $p -and ($null -eq $prog -or $p -gt $prog)) { $prog = $p }
+            if ($null -ne $nr -and ($null -eq $npRep -or $nr -gt $npRep)) { $npRep = $nr }
+            if ($null -ne $orp -and ($null -eq $ouRep -or $orp -gt $ouRep)) { $ouRep = $orp }
+            if ($it.area -notlike 'job:*' -and ($null -eq $stepAcq -or ($null -ne $a -and $a -gt $stepAcq))) { $stepArea = $it.area; $stepAcq = $a }
+        }
+        # the engine scope the run is on (Set-PimRunCurrentScope writes it on every lock of the owner; any one names it)
+        $scope = ''
+        foreach ($it in $items) { $sv = "$(& $prop $it.lock 'scope')".Trim(); if ($sv) { $scope = ConvertTo-PimStallScopeId $sv; break } }
+        if ($null -eq $mark) { continue }
+        # the run's own 'running' record (engine types write one): its type and its real start
+        $rec = $null
+        foreach ($r in @($Runs)) { if ($null -ne $r -and "$runId".Trim() -and "$($r.runId)" -eq $runId) { $rec = $r; break } }
+        $type = "$(& $prop $rec 'type')".Trim()
+        if (-not $type) { foreach ($r in @($Runs)) { if ($null -ne $r -and "$($r.name)".Trim() -eq $job -and "$($r.type)".Trim()) { $type = "$($r.type)".Trim(); break } } }
+        $rs = Get-PimNoProgressStamp (& $prop $rec 'startedUtc'); if ($null -ne $rs -and ($null -eq $start -or $rs -lt $start)) { $start = $rs }
+        if ($null -eq $start) { $start = $mark }
+        $minNp = [int][Math]::Max(0, [Math]::Floor(($now - $mark).TotalMinutes))
+        $runMin = [int][Math]::Max(0, [Math]::Floor(($now - $start).TotalMinutes))
+        $noProg = [bool]($minNp -ge $th)
+        $usual = Get-PimUsualRunMinutes -Runs $Runs -Job $job
+        $limit = $null; $over = $false
+        if ($null -ne $usual) {
+            $limit = [Math]::Max([double](Get-PimOverUsualFloorMinutes), [double](Get-PimOverUsualFactor) * [double]$usual)
+            $over = [bool](($now - $start).TotalMinutes -gt $limit)
+        }
+        if (-not $noProg -and -not $over) { continue }
+        $npDue = [bool]($noProg -and ($null -eq $npRep -or $npRep -lt $mark))
+        $ouDue = [bool]($over -and ($null -eq $ouRep -or $ouRep -lt $start))
+        $trigger = if ($noProg) { 'no-progress' } else { 'over-2x-usual' }
+        $usualR = if ($null -ne $usual) { [Math]::Round([double]$usual, 1) } else { $null }
+        $text = if ($noProg) { "No progress for $minNp min -- the run keeps going; this clears itself when it moves on or ends." }
+                else { "Running for $runMin min, over twice its usual $usualR min -- the run keeps going; this clears itself when it ends." }
+        $step = ("$stepArea".ToLowerInvariant() -replace '[^a-z0-9-]', '-').Trim('-')
+        $out.Add([pscustomobject][ordered]@{
+            owner = "$($first.owner)"; runId = $runId; job = $job; type = $type; step = $step; scope = $scope; state = 'stalled'; trigger = $trigger
+            minutes = $minNp; runMinutes = $runMin; usualMinutes = $usualR; limitMinutes = $(if ($null -ne $limit) { [Math]::Round([double]$limit, 1) } else { $null })
+            sinceUtc = $(if ($noProg) { & $iso $mark } else { & $iso $start.AddMinutes([double]$limit) })
+            lastProgressUtc = (& $iso $prog); startedUtc = (& $iso $start)
+            noProgress = $noProg; overUsual = $over
+            reportDue = [bool]($(if ($noProg) { $npDue } else { $ouDue }))
+            markNoProgress = [bool]($noProg -and $npDue); markOverUsual = [bool]($over -and ($ouDue -or ($noProg -and $npDue)))
+            text = $text
+        })
+    }
+    return @($out.ToArray())
+}
+
+# ---- STALL-1 run report (Invardia decision 2026-11-10): Invardia's run monitor opens tickets from RUN REPORTS ------------
+# When a stall STARTS (the once-per-stall point of the check below, both triggers) ONE run report is registered in
+# pim.Settings 'UplinkStallReports'; the uplink cycle (PIM-Uplink.ps1) sends it as Kind 'run': Outcome warning, ErrorClass
+# run-stalled (catalogue RUN-STALLED, opens a ticket), FailedStep = the step, the message = job + trigger + minutes. Invardia
+# resolves the ticket itself on the next OK run of the same job + step. Report only -- nothing is stopped.
+function Get-PimStallReportSettingName { <# PURE. LITERAL. #> return 'UplinkStallReports' }
+
+# STALL-1 (coordinator decision 2026-11-10: "fix it on PIM's side"): the FailedStep of a stall report is the SAME name the
+# job's later OK run lists in StepsOk -- the engine SCOPE id (ConvertTo-PimRunStepId: groups, entraroles, azres, ...), never
+# a lock AREA (entra-roles, azure, ...). The engine records the scope it starts on the run's locks ('scope'); only the job
+# types whose OK report carries StepsOk (Get-PimEngineRunStepTypes) send it; any other run sends no FailedStep (the job's
+# ticket, resolved by its next OK run).
+function Get-PimEngineRunStepTypes { <# PURE. LITERAL. The run types whose OK report carries StepsOk (Add-PimRunStepFields / Get-PimEngineJobOkSteps). #> return @('engine-delta', 'engine-full') }
+
+function ConvertTo-PimStallScopeId {
+    <# PURE. An engine scope -> its StepsOk id: EXACTLY ConvertTo-PimRunStepId (PIM-Scheduler.ps1), kept here so the lanes
+       file stands alone ('' when nothing is left). #>
+    param([AllowNull()][string]$Scope)
+    $s = ("$Scope".Trim().ToLowerInvariant() -replace '[^a-z0-9.-]', '-') -replace '^[^a-z0-9]+', ''
+    if ($s.Length -gt 60) { $s = $s.Substring(0, 60) }
+    return $s
+}
+
+function Set-PimRunCurrentScope {
+    <#
+      Called by the engine as it STARTS a scope (Invoke-PimEngine, after the scope gate). Records the scope's StepsOk id on
+      this tick's locks ('scope') and in the in-memory heartbeat state -- written at once (one compare-and-set per scope
+      change, not at the next renewal: a run that hangs right after a scope start must still name it). Not progress, not a
+      renewal, never a stop. A no-op outside a guarded tick (no heartbeat state). Never throws.
+    #>
+    param([AllowNull()][string]$Scope)
+    try {
+        $hb = $global:PIM_LeaseHeartbeat
+        if ($null -eq $hb -or -not ($hb.PSObject.Properties['locks'] -and $hb.locks) -or -not "$($hb.owner)".Trim()) { return $false }
+        $id = ConvertTo-PimStallScopeId $Scope
+        if (-not $id) { return $false }
+        # always written (one compare-and-set per scope start, a handful per run): a remembered "unchanged" would leave the
+        # NEXT job of the same tick without its scope when it starts on the same one
+        $owner = "$($hb.owner)"
+        $ok = Update-PimSchedulerLocks -Mutate {
+            param($m, $c)
+            $ch = $false
+            foreach ($k in @($m.Keys)) {
+                $l = $m[$k]
+                if ("$($l.owner)" -ne $owner) { continue }
+                $n = [ordered]@{}; foreach ($p in $l.PSObject.Properties) { $n[$p.Name] = $p.Value }
+                $n['scope'] = $id
+                $m[$k] = [pscustomobject]$n; $ch = $true
+            }
+            return $ch
+        }
+        # the in-memory heartbeat state names it too (once it is on the locks)
+        if ($ok) { $hb | Add-Member -NotePropertyName scope -NotePropertyValue $id -Force }
+        return [bool]$ok
+    } catch { return $false }
+}
+function Get-PimStallReportClass       { <# PURE. LITERAL. The ErrorClass of a stall report (catalogue RUN-STALLED). #> return 'run-stalled' }
+
+function ConvertTo-PimStallWord {
+    <# PURE. A lower-case [a-z0-9-] word of at most 60 characters ('' = none). #>
+    param([AllowNull()][object]$Value)
+    $s = (("$Value".Trim().ToLowerInvariant() -replace '[^a-z0-9-]', '-') -replace '-{2,}', '-').Trim('-')
+    if ($s.Length -gt 60) { $s = $s.Substring(0, 60).Trim('-') }
+    return $s
+}
+
+function New-PimStallReportEntry {
+    <#
+      PURE. One stalled run (Get-PimStalledRuns) -> the entry the uplink sends as a run report:
+        { id; job; jobName; step; trigger; minutes; sinceUtc; registeredUtc; sentUtc }
+      job      the uplink Job id 'pim-<type>' (the id every run report of that job carries, so its next OK run resolves the
+               ticket); the type from the run's record, else the run history, else -Schedule; none = 'pim-job'
+      jobName  a SHIPPED job name (-ProductJobNames), else 'pim-<type>' -- never a name a customer typed
+      step     the ENGINE SCOPE id the run is on (its StepsOk name, e.g. entraroles), for an engine-delta / engine-full run
+               only; '' when none is known (no FailedStep: the ticket is then the job's). NEVER a lock area.
+      minutes  without progress (no-progress) or the run's length (over-2x-usual)
+      id       runId + trigger + when it stalled: one entry per stall
+    #>
+    param([Parameter(Mandatory)][object]$Stall, [AllowNull()][object[]]$Runs = @(), [AllowNull()][object[]]$Schedule = @(),
+          [AllowNull()][string[]]$ProductJobNames = @(), [datetime]$NowUtc = [datetime]::UtcNow)
+    $name = "$($Stall.job)".Trim()
+    $type = "$($Stall.type)".Trim()
+    if (-not $type) { foreach ($s in @($Schedule)) { if ($null -ne $s -and "$($s.name)".Trim() -eq $name -and "$($s.type)".Trim()) { $type = "$($s.type)".Trim(); break } } }
+    $tw = ConvertTo-PimStallWord $type
+    $job = if ($tw) { "pim-$tw" } else { 'pim-job' }
+    $prod = @{}; foreach ($n in @($ProductJobNames)) { if ("$n".Trim()) { $prod["$n".Trim().ToLowerInvariant()] = $true } }
+    $jobName = if ($name -and $prod.ContainsKey($name.ToLowerInvariant())) { ConvertTo-PimStallWord $name } else { $job }
+    $min = if ("$($Stall.trigger)" -eq 'no-progress') { [int]$Stall.minutes } else { [int]$Stall.runMinutes }
+    $since = "$($Stall.sinceUtc)"
+    # the step = the engine SCOPE id the run is on (what its OK report lists in StepsOk), only for a run type whose OK
+    # report carries StepsOk -- never the lock AREA; none known = '' (no FailedStep: the job's ticket)
+    $step = ''
+    $sc = if ($Stall.PSObject.Properties['scope']) { ConvertTo-PimStallScopeId "$($Stall.scope)" } else { '' }
+    if ($sc -and $sc -match '^[a-z0-9][a-z0-9.-]{0,59}$' -and $type.ToLowerInvariant() -in (Get-PimEngineRunStepTypes)) { $step = $sc }
+    return [pscustomobject][ordered]@{
+        id = ("{0}|{1}|{2}" -f "$($Stall.runId)", "$($Stall.trigger)", $since); job = $job; jobName = $jobName
+        step = $step; trigger = "$($Stall.trigger)"; minutes = [Math]::Max(0, $min); sinceUtc = $since
+        registeredUtc = $NowUtc.ToUniversalTime().ToString('o'); sentUtc = ''
+    }
+}
+
+function Register-PimStallRunReport {
+    <#
+      Records ONE stall run report (New-PimStallReportEntry) in pim.Settings 'UplinkStallReports' for the uplink cycle; an
+      entry with the same id is kept as it is (never sent twice); entries older than 48 h are dropped. NEVER throws, never
+      sends. -GetSetting / -SetSetting: seams (default Get-PimSetting / Set-PimSetting). Returns @{ registered; id; reason }.
+    #>
+    param([Parameter(Mandatory)][object]$Stall, [AllowNull()][object[]]$Runs = @(), [datetime]$NowUtc = [datetime]::UtcNow,
+          [scriptblock]$GetSetting = $null, [scriptblock]$SetSetting = $null)
+    $res = [ordered]@{ registered = $false; id = ''; reason = '' }
+    try {
+        if (-not $GetSetting) { $GetSetting = { param($n) if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { Get-PimSetting -Name $n } } }
+        if (-not $SetSetting) { $SetSetting = { param($n, $v) if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { [void](Set-PimSetting -Name $n -Value $v) } else { throw 'no settings store is loaded in this process' } } }
+        $sched = @(); $names = @()
+        if (Get-Command Get-PimDefaultJobSchedule -ErrorAction SilentlyContinue) { try { $sched = @(Get-PimDefaultJobSchedule); $names = [string[]]@($sched | ForEach-Object { "$($_.name)" }) } catch { $sched = @(); $names = @() } }
+        $e = New-PimStallReportEntry -Stall $Stall -Runs $Runs -Schedule $sched -ProductJobNames $names -NowUtc $NowUtc
+        $res.id = $e.id
+        $st = & $GetSetting (Get-PimStallReportSettingName)
+        if ($st -is [string]) { $st = $(if ("$st".Trim()) { $st | ConvertFrom-Json } else { $null }) }
+        $map = [ordered]@{}
+        if ($null -ne $st) {
+            $names2 = if ($st -is [System.Collections.IDictionary]) { @($st.Keys) } else { @($st.PSObject.Properties | ForEach-Object { $_.Name }) }
+            foreach ($k in $names2) {
+                $v = if ($st -is [System.Collections.IDictionary]) { $st[$k] } else { $st.$k }
+                $at = Get-PimNoProgressStamp $(if ($null -ne $v -and $v.PSObject.Properties['registeredUtc']) { $v.registeredUtc })
+                if ($null -ne $at -and ($NowUtc.ToUniversalTime() - $at).TotalHours -le 48) { $map["$k"] = $v }
+            }
+        }
+        if ($map.Contains($e.id)) { $res.reason = 'already registered'; return [pscustomobject]$res }
+        $map[$e.id] = $e
+        & $SetSetting (Get-PimStallReportSettingName) ([pscustomobject]$map)
+        $res.registered = $true
+    } catch { $res.registered = $false; $res.reason = "$($_.Exception.Message)" }
+    return [pscustomobject]$res
+}
+
 function Invoke-PimNoProgressCheck {
     <#
-      Once per tick: every OTHER live run whose progress has not moved for the threshold is REPORTED -- one log line and
-      one warning mail (the job alert's warning class, Invoke-PimJobRunAlert: identical-alert debounce, a day) -- and the
-      report is MARKED on that run's locks ('noProgressReportedUtc'), so the next ticks stay quiet until the run moves
-      again (a new stall is a new report) or ends (its locks go, the report goes with them). NOTHING is stopped, failed,
-      released or retried here. Never throws. Returns the runs it reported.
-      -Alert: test seam, param($run) -- default Invoke-PimJobRunAlert.
+      Once per tick: every OTHER live run that is STALLED (Get-PimStalledRuns: no progress for 60 min, or -- STALL-1 (b) --
+      running more than twice its usual length) is REPORTED -- one log line and one warning mail (the job alert's warning
+      class, Invoke-PimJobRunAlert: identical-alert debounce, a day) -- and the report is MARKED on that run's locks
+      ('noProgressReportedUtc' / 'overUsualReportedUtc'), so the next ticks stay quiet until the run moves again (a new
+      stall is a new report) or ends (its locks go, the report goes with them). NOTHING is stopped, cancelled, restarted,
+      failed, released or retried here (PIM 100.166 (c)). Never throws. Returns the runs it reported.
+      -Alert: test seam, param($run) -- default Invoke-PimJobRunAlert. -Runs: test seam for the run history (default
+      Get-PimJobRunHistory; unreadable = no history = only the no-progress trigger). -GetSetting / -SetSetting: test seams
+      for the stall run report's store (default pim.Settings through Get-PimSetting / Set-PimSetting).
     #>
     param([string]$Owner = '', [datetime]$NowUtc = [datetime]::UtcNow, [scriptblock]$Alert,
           # PIM 100.166 (c3): a run past its lock TTL whose execution is still Running is reported too (test seam: -AliveStatus)
-          [scriptblock]$AliveStatus)
+          [scriptblock]$AliveStatus, [AllowNull()][object[]]$Runs = $null, [scriptblock]$GetSetting = $null, [scriptblock]$SetSetting = $null)
     $reported = New-Object System.Collections.Generic.List[object]
     try {
         $map = (Get-PimSchedulerLocksRaw).Map
         $alive = Get-PimAliveExpiredExecutions -Map $map -NowUtc $NowUtc -Status $AliveStatus
-        $due = @(Get-PimNoProgressRuns -Map $map -NowUtc $NowUtc -ExceptOwner $Owner -AliveExecutions $alive | Where-Object { $_.state.reportDue })
+        $hist = $Runs
+        if ($null -eq $hist) { $hist = @(); if (Get-Command Get-PimJobRunHistory -ErrorAction SilentlyContinue) { try { $hist = @(Get-PimJobRunHistory) } catch { $hist = @() } } }
+        $due = @(Get-PimStalledRuns -Map $map -NowUtc $NowUtc -Runs $hist -ExceptOwner $Owner -AliveExecutions $alive | Where-Object { $_.reportDue })
         foreach ($r in $due) {
             # Mark first: a mark that cannot be written means another tick is reporting it (or the store is busy) -- no mail.
-            $runKey = "$($r.owner)|$($r.runId)"
+            $runKey = "$($r.owner)|$($r.runId)"; $markNp = [bool]$r.markNoProgress; $markOu = [bool]$r.markOverUsual
             $marked = Update-PimSchedulerLocks -Mutate {
                 param($m, $c)
                 $ch = $false
@@ -488,22 +780,34 @@ function Invoke-PimNoProgressCheck {
                     $l = $m[$k]
                     if ("$($l.owner)|$($l.runId)" -ne $runKey) { continue }
                     $n = [ordered]@{}; foreach ($p in $l.PSObject.Properties) { $n[$p.Name] = $p.Value }
-                    $n['noProgressReportedUtc'] = $NowUtc.ToUniversalTime().ToString('o')
+                    if ($markNp) { $n['noProgressReportedUtc'] = $NowUtc.ToUniversalTime().ToString('o') }
+                    if ($markOu) { $n['overUsualReportedUtc'] = $NowUtc.ToUniversalTime().ToString('o') }
                     $m[$k] = [pscustomobject]$n; $ch = $true
                 }
                 return $ch
             }
             if (-not $marked) { continue }
-            Write-Host ("[scheduler] job '{0}' (run {1}): {2}" -f $r.job, $r.runId, $r.state.text) -ForegroundColor DarkYellow
+            Write-Host ("[scheduler] job '{0}' (run {1}): {2}" -f $r.job, $r.runId, $r.text) -ForegroundColor DarkYellow
+            # STALL-1 (Invardia decision 2026-11-10): ONE uplink RUN REPORT per stall (warning, ErrorClass run-stalled) --
+            # registered HERE, before the mail, so the mail's uplink flush (Invoke-PimJobAlertUplinkFirst) sends it at once;
+            # else the hourly uplink cycle does. Best effort: a failed registration never holds the mail.
+            $reg = Register-PimStallRunReport -Stall $r -Runs $hist -NowUtc $NowUtc -GetSetting $GetSetting -SetSetting $SetSetting
+            if (-not $reg.registered) { Write-Verbose "[scheduler] stall run report not registered: $($reg.reason)" }
             # The alert's summary is STABLE (no minutes, no times) so the day-long identical-alert debounce holds every repeat.
-            $run = [pscustomobject]@{ name = $r.job; type = 'no-progress'; status = 'warning'; runId = $r.runId
-                warningSummary = 'a run has made no progress for over an hour; it keeps running and nothing was stopped'
-                detail = $r.state.text }
+            $run = if ($r.trigger -eq 'no-progress') {
+                [pscustomobject]@{ name = $r.job; type = 'no-progress'; status = 'warning'; runId = $r.runId
+                    warningSummary = 'a run has made no progress for over an hour; it keeps running and nothing was stopped'
+                    detail = $r.text }
+            } else {
+                [pscustomobject]@{ name = $r.job; type = 'over-usual'; status = 'warning'; runId = $r.runId
+                    warningSummary = 'a run has taken more than twice its usual time; it keeps running and nothing was stopped'
+                    detail = $r.text }
+            }
             try { if ($Alert) { [void](& $Alert $run) } elseif (Get-Command Invoke-PimJobRunAlert -ErrorAction SilentlyContinue) { [void](Invoke-PimJobRunAlert -Run $run) } }
-            catch { Write-Verbose "[scheduler] no-progress alert: $($_.Exception.Message)" }
+            catch { Write-Verbose "[scheduler] stall alert: $($_.Exception.Message)" }
             $reported.Add($r)
         }
-    } catch { Write-Verbose "[scheduler] no-progress check skipped: $($_.Exception.Message)" }
+    } catch { Write-Verbose "[scheduler] stall check skipped: $($_.Exception.Message)" }
     return @($reported.ToArray())
 }
 
