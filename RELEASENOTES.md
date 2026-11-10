@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.80 -- 2026-11-10
+
+- Admin accounts whose name ends with the admin marker (for example jdoe-a-id) are now found: 'Recognised admin names' accepts * at the start or end (Admin-* = starts with, *-a-id = ends with). The drift page and mail list only PIM-named objects in an area with no definitions, a failed definitions read shows as not checked, and administrative units carry their own label. The commit watcher says queued and on hold instead of saved and waiting.
+
 ## 3.0.79 -- 2026-11-10
 
 - The Engine permissions check on the Get Started and Home pages now always checks the engine identity. At some installations it checked the PIM Manager web app instead and listed rights as missing that the engine already holds.

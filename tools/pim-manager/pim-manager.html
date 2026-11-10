@@ -9353,7 +9353,7 @@
       AdminAccountPattern: 'Name of a normal (day-to-day) admin account. The engine creates admin accounts with this name.',
       AdminAccountPatternHighPriv: 'Name of a high-privilege (L0 / T0) admin account.',
       AdminAccountDisplayNameSuffix: 'Added after the person’s name in an admin account’s display name, e.g. “Jane Doe (Admin)”.',
-      AdminAccountPatterns: 'How PIM RECOGNISES admin accounts: names starting with these are treated as admin accounts (offboarding and disable checks). Blank = the start of the two admin patterns above.',
+      AdminAccountPatterns: 'Recognised admin names: Admin-* (starts with) or *-a-id (ends with). How PIM RECOGNISES existing admin accounts (offboarding and disable checks). An entry without * is a start. One * only, at the start or the end; * alone is refused, because it would list every user. Blank = the start of the two admin patterns above.',
       AdminTypeDefault: 'The admin type used when a row does not name one — it picks the prefix from the “Admin name prefixes” card.',
       EnvironmentDefault: 'The environment used when a row does not name one — it picks the suffix from the “Admin name prefixes” card.',
       PimGroupPattern: 'Name of a PIM group, built around its tag ({Role}). The engine and the Manager translate tag ↔ group name with it.',
@@ -9666,6 +9666,8 @@
       const obj = {};
       document.querySelectorAll('#setNamingTbl tr').forEach((tr,i) => { if (i===0) return; const k = tr.querySelector('.setNamingKey'); const v = tr.querySelector('.setNamingVal'); if (k && k.value.trim()) obj[k.value.trim()] = v ? v.value : ''; });
       if (!Object.keys(obj).length) { const m=document.getElementById('setNamingMsg'); m.textContent='Naming cannot be empty.'; m.style.color='#cf222e'; return; }
+      // ADMIN-NAME-MATCH-1 (owner 2026-11-10): the same refusal the server applies (Test-PimAdminNameMatchEntries), said before the save.
+      if ('AdminAccountPatterns' in obj) { const bad = pimAdminNameEntryProblems(obj.AdminAccountPatterns); if (bad.length) { const m=document.getElementById('setNamingMsg'); m.textContent='Recognised admin names: ' + bad.join('; ') + '. Use Admin-* (starts with) or *-a-id (ends with). Nothing was saved.'; m.style.color='#cf222e'; return; } }
       // Preserve the prefix/suffix maps (edited in their own card) so a flat-table
       // save doesn't drop them.
       obj.AdminTypePrefixes   = collectMap('setAdminTypeTbl', 'setAtKey', 'setAtVal');
@@ -12698,7 +12700,7 @@
         const its = asList(s.items);
         // REQ-AU-DRIFT-1 (operator 2026-09-30): an area with NO definitions still lists what is live there, read-only
         if (s.noDefinitions) det.push('<div class="driftNoDefs" style="color:#9a6700;font-size:11.5px;padding:4px 0;">This area has no definitions yet &mdash; ' +
-          'everything live here is listed as extra so you can see it. PIM removes nothing from an area it has no definitions for; ' +
+          'only objects named with the PIM naming prefix (for example older PIM groups) are listed as extra, so you can import them; nothing else in the tenant is listed. PIM removes nothing from an area it has no definitions for; ' +
           'use <b>Import into PIM</b> to take an item under management, or Delete to remove it on purpose.</div>');
         // BUG-269: more extras than the removal budget -- all are listed; the engine would hold them, not remove them
         if (s.overRemoveBudget) det.push('<div class="driftOverBudget" style="color:#9a6700;font-size:11.5px;padding:4px 0;">' +
@@ -26094,7 +26096,9 @@
   let cwTimer = null, cwIds = [], cwStarted = 0, cwOpen = false, cwNextAt = 0, cwTick = null;
   // operator 2026-10-02: "make a timer that refreshes every 10 sec" -- a visible countdown to the next check
   function cwCountdown() { const el = document.getElementById("cwNext"); if (!el) return; const s = Math.max(0, Math.ceil((cwNextAt - Date.now()) / 1000)); el.textContent = cwNextAt ? (s ? "next check in " + s + " s" : "checking ...") : ""; }
-  const CW_LABEL = { saved: 'saved', applied: 'applied', live: 'live', waiting: 'waiting', failed: 'failed', stored: 'saved (no platform object)' };
+  // Labels: 'saved' shows as "queued" (the engine has not run on it yet) and 'waiting' as "on hold" (the engine ran
+  // and held it back, reason in Details) -- two different things the old words "saved = waiting for the engine" mixed up.
+  const CW_LABEL = { saved: 'queued', applied: 'applied', live: 'live', waiting: 'on hold', failed: 'failed', stored: 'stored (no platform object)' };
   const CW_COLOR = { saved: '#9a6700', applied: '#0969da', live: '#1a7f37', waiting: '#9a6700', failed: '#cf222e', stored: '#1a7f37' };
   // A committed row key in plain words: who / what was added, removed or changed (the store key's parts per entity).
   function cwChangeText(entity, k) {
@@ -26180,7 +26184,7 @@
       '<a href="#" id="cwToggle" style="font-size:12px;">' + (cwOpen ? 'Hide details' : 'Details') + '</a>' +
       '<a href="#" id="cwClose" title="Close the watcher" style="font-size:15px;text-decoration:none;color:#57606a;">&times;</a></div>' +
       (chips ? '<div style="margin-top:4px;">' + chips + '</div>' : '') +
-      (busy ? '<div style="color:#57606a;font-size:11px;margin-top:2px;">saved = waiting for the engine &middot; applied = written, read-back next &middot; live = confirmed in Entra / Azure. Checks every 10 s -- <b id="cwNext"></b> <a href="#" id="cwNow">check now</a></div>' : '') +
+      (busy ? '<div style="color:#57606a;font-size:11px;margin-top:2px;">queued = the engine has not run on it yet &middot; applied = written, being confirmed &middot; live = confirmed in Entra / Azure &middot; on hold = the engine held it back, Details shows why. Checks every 10 s -- <b id="cwNext"></b> <a href="#" id="cwNow">check now</a></div>' : '') +
       (note ? '<div style="color:#9a6700;margin-top:4px;">' + escapeHtml(note) + '</div>' : '') +
       '<div style="max-height:320px;overflow:auto;">' + body + '</div></div>';
     const t = document.getElementById('cwToggle'); if (t) t.onclick = function (ev) { ev.preventDefault(); cwOpen = !cwOpen; commitWatchRender(commits, note); };
@@ -29682,6 +29686,31 @@
       ? word + '-' + initials + '-L' + level + '-T' + tier
       : word + '-' + initials;
     return (prefix + core + suffix).replace(/--+/g, '-');
+  }
+  // ADMIN-NAME-MATCH-1 (owner 2026-11-10) -- PURE. 'Recognised admin names' entries -> the plain reason each refused one is
+  // refused for (empty list = fine). Same rules as the engine's ConvertTo-PimAdminNameMatchEntry (PIM-Naming.ps1):
+  // 'Admin-*' / 'Admin-' = starts with, '*-a-id' = ends with; '*', '**', a * in the middle or at both ends, or no text = refused.
+  function pimAdminNameEntryProblems(value) {
+    let list = value;
+    if (typeof list === 'string') {
+      const t = list.trim();
+      if (t.charAt(0) === '[') { try { list = JSON.parse(t); } catch (_) { list = t.split(','); } } else { list = t.split(','); }
+    } else if (list && typeof list === 'object' && !Array.isArray(list)) { list = Object.keys(list).map(k => list[k]); }
+    const out = [];
+    (Array.isArray(list) ? list : []).forEach(raw => {
+      const s = String(raw == null ? '' : raw).trim();
+      if (!s) return;
+      const stars = (s.match(/\*/g) || []).length;
+      if (!stars) return;
+      if (/^\*+$/.test(s)) { out.push("'" + s + "' alone would list every user"); return; }
+      if (stars === 2 && s.charAt(0) === '*' && s.charAt(s.length - 1) === '*') { out.push("'" + s + "' has a * at both ends -- that would search every name containing it"); return; }
+      if (stars > 1) { out.push("'" + s + "' has more than one *"); return; }
+      if (s.charAt(0) !== '*' && s.charAt(s.length - 1) !== '*') { out.push("'" + s + "' has a * in the middle"); return; }
+      const lit = (s.charAt(0) === '*' ? s.substring(1) : s.substring(0, s.length - 1)).trim();
+      if (!lit) { out.push("'" + s + "' leaves no text to match"); return; }
+      if (s.charAt(0) === '*' && lit.indexOf('{') >= 0) { out.push("'" + s + "' -- an ending is plain text, e.g. *-a-id"); }
+    });
+    return out;
   }
   // PURE. A naming pattern with its tokens filled in, for display (Settings > Naming conventions).
   // {AdminWord}, {AdminTypePrefix} (internal admin) and {Platform}/{EnvironmentSuffix} (Entra) come

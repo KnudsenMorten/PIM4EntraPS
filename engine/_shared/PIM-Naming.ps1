@@ -130,10 +130,91 @@ function Test-PimNamingSaveAllowed {
         if ($n.ContainsKey($k)) { if (-not "$($n[$k])".Trim()) { $k } }
         elseif ($c.ContainsKey($k) -and "$($c[$k])".Trim()) { $k }
     })
-    if (-not $refused.Count) { return @{ ok = $true; refused = @(); message = '' } }
-    return @{ ok = $false; refused = @($refused)
-              message = ("These naming patterns cannot be empty: " + ($refused -join ', ') + ". Every admin account and group name is built from them. " +
-                         "Nothing was saved -- give each a pattern (the shipped default is shown under More info).") }
+    # ADMIN-NAME-MATCH-1 (owner 2026-11-10): a 'Recognised admin names' entry that would list every user is refused here too.
+    $anm = $null
+    if ($n.ContainsKey('AdminAccountPatterns')) { $anm = Test-PimAdminNameMatchEntries -Entries $n['AdminAccountPatterns'] }
+    if (-not $refused.Count -and (-not $anm -or $anm.ok)) { return @{ ok = $true; refused = @(); message = '' } }
+    $msg = ''
+    if ($refused.Count) {
+        $msg = ("These naming patterns cannot be empty: " + ($refused -join ', ') + ". Every admin account and group name is built from them. " +
+                "Nothing was saved -- give each a pattern (the shipped default is shown under More info).")
+    }
+    if ($anm -and -not $anm.ok) {
+        $refused = @($refused) + @('AdminAccountPatterns')
+        $msg = ("$msg " + $anm.message + ' Nothing was saved.').Trim()
+    }
+    return @{ ok = $false; refused = @($refused); message = $msg }
+}
+
+# ---------------------------------------------------------------------------
+# ADMIN-NAME-MATCH-1 (owner 2026-11-10). 'Recognised admin names' (NamingConventions.AdminAccountPatterns) entries with an
+# explicit * so the customer SEES what is searched:
+#   'Admin-*' or 'Admin-' (no *, today's form)  = name STARTS with 'Admin-'  -> startswith(userPrincipalName, ...)
+#   '*-a-id'                                    = name ENDS with '-a-id'     -> endswith(userPrincipalName, '-a-id@<domain>')
+# Refused: '*' alone, '**', a * in the middle ('a*b'), a * at both ends ('*-a-*'), an empty literal, a token in an ending.
+# Each of those would mean listing every user (BUG-12: a whole-population read once disabled 53 users).
+# An entry starting with '-' (e.g. '-a-') is a START no account name can have: kept as it is, never converted, but warned.
+# ---------------------------------------------------------------------------
+function ConvertTo-PimAdminNameMatchEntry {
+    # PURE. One entry -> @{ entry; ok; kind = 'start'|'end'|''; literal; reason; warning }.
+    [CmdletBinding()] param([AllowNull()][AllowEmptyString()][string]$Entry)
+    $s = "$Entry".Trim()
+    $o = [ordered]@{ entry = $s; ok = $false; kind = ''; literal = ''; reason = ''; warning = '' }
+    if (-not $s) { $o.reason = 'an empty entry names nothing'; return [pscustomobject]$o }
+    $stars = ([regex]::Matches($s, '\*')).Count
+    if ($stars -eq 0) { $o.kind = 'start'; $o.literal = $s }
+    elseif ($s -match '^\*+$') { $o.reason = "'$s' alone would list every user"; return [pscustomobject]$o }
+    elseif ($stars -eq 2 -and $s.StartsWith('*') -and $s.EndsWith('*')) { $o.reason = "'$s' has a * at both ends -- that would search every name containing it"; return [pscustomobject]$o }
+    elseif ($stars -gt 1) { $o.reason = "'$s' has more than one * -- use one, at the start (ends with) or at the end (starts with)"; return [pscustomobject]$o }
+    elseif ($s.StartsWith('*')) { $o.kind = 'end'; $o.literal = $s.Substring(1) }
+    elseif ($s.EndsWith('*')) { $o.kind = 'start'; $o.literal = $s.Substring(0, $s.Length - 1) }
+    else { $o.reason = "'$s' has a * in the middle -- a * goes at the start (ends with) or at the end (starts with)"; return [pscustomobject]$o }
+    $o.literal = "$($o.literal)".Trim()
+    if (-not $o.literal) { $o.kind = ''; $o.reason = "'$s' leaves no text to match -- that would list every user"; return [pscustomobject]$o }
+    if ($o.kind -eq 'end' -and $o.literal.Contains('{')) { $o.kind = ''; $o.literal = ''; $o.reason = "'$s' -- an ending is plain text; type the ending itself, e.g. *-a-id"; return [pscustomobject]$o }
+    $o.ok = $true
+    if ($o.kind -eq 'start' -and $o.literal.StartsWith('-')) {
+        $sug = if ($o.literal.EndsWith('-')) { "*$($o.literal)id" } else { "*$($o.literal)" }
+        $o.warning = "'$s' matches no account: no name starts with '-'. For names that END with it, use an ending such as '$sug'."
+    }
+    return [pscustomobject]$o
+}
+
+function ConvertTo-PimAdminNameMatchList {
+    # PURE. The stored setting -> string[]: a list, a map (its values), a JSON array text (what the Settings table sends) or a
+    # comma list. Blank items dropped.
+    [CmdletBinding()] param([AllowNull()][object]$Entries)
+    $vals = @()
+    if ($null -eq $Entries) { $vals = @() }
+    elseif ($Entries -is [string]) {
+        $t = $Entries.Trim()
+        # foreach, not @(...): Windows PowerShell emits a JSON array as ONE object, which @() would wrap instead of unroll.
+        if ($t.StartsWith('[')) { try { $j = ConvertFrom-Json -InputObject $t; $vals = @(foreach ($x in $j) { $x }) } catch { $vals = @($t -split ',') } } else { $vals = @($t -split ',') }
+    }
+    elseif ($Entries -is [System.Collections.IDictionary]) { $vals = @($Entries.Values) }
+    elseif ($Entries -is [System.Management.Automation.PSCustomObject]) { $vals = @($Entries.PSObject.Properties | ForEach-Object { $_.Value }) }
+    elseif ($Entries -is [System.Collections.IEnumerable]) { $vals = @($Entries) }
+    else { $vals = @("$Entries") }
+    return @($vals | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+}
+
+function Test-PimAdminNameMatchEntries {
+    # PURE. The whole setting (string | string[] | map) -> @{ ok; refused = @(@{entry;reason}); warnings = @(); message }.
+    [CmdletBinding()] param([AllowNull()][object]$Entries)
+    $vals = @(ConvertTo-PimAdminNameMatchList -Entries $Entries)
+    $bad = New-Object System.Collections.Generic.List[object]; $warn = New-Object System.Collections.Generic.List[string]
+    foreach ($v in $vals) {
+        if (-not "$v".Trim()) { continue }        # a blank list item is dropped, not refused
+        $r = ConvertTo-PimAdminNameMatchEntry -Entry "$v"
+        if (-not $r.ok) { [void]$bad.Add([pscustomobject]@{ entry = $r.entry; reason = $r.reason }) }
+        elseif ($r.warning) { [void]$warn.Add($r.warning) }
+    }
+    $msg = ''
+    if ($bad.Count) {
+        $msg = 'Recognised admin names: ' + ((@($bad | ForEach-Object { $_.reason })) -join '; ') +
+               '. Use Admin-* (names that start with Admin-) or *-a-id (names that end with -a-id).'
+    }
+    return @{ ok = ($bad.Count -eq 0); refused = @($bad.ToArray()); warnings = @($warn.ToArray()); message = $msg }
 }
 
 function Get-PimShippedNamingConventions {
@@ -297,8 +378,8 @@ function Get-PimNamingSettingCatalog {
             help = 'The verified domain new admin accounts are created in. Blank = the tenant''s default domain.'; example = '{=AdminAccountPattern}@{value}' }
         [ordered]@{ key = 'AdminAccountDisplayNameSuffix'; label = 'Admin display name suffix'; group = 'admin'; kind = 'text'; store = 'naming'; keepSpaces = $true; optional = $true
             help = 'Added after the person''s name in an admin account''s display name, e.g. "Jane Doe (Admin)".'; example = 'Jane Doe{value}' }
-        [ordered]@{ key = 'AdminAccountPatterns'; label = 'Recognised admin name starts'; group = 'admin'; kind = 'list'; store = 'naming'; optional = $true
-            help = 'How PIM RECOGNISES admin accounts: names starting with these are treated as admin accounts (offboarding and disable checks). Comma-separated. Blank = the start of the two admin patterns.' }
+        [ordered]@{ key = 'AdminAccountPatterns'; label = 'Recognised admin names: Admin-* (starts with) or *-a-id (ends with)'; group = 'admin'; kind = 'list'; store = 'naming'; optional = $true
+            help = 'How PIM RECOGNISES existing admin accounts. Admin-* = names that start with Admin-. *-a-id = names that end with -a-id (searched at each verified domain). An entry without * is a start. One * only, at the start or the end; * alone is refused, because it would list every user. Comma-separated. Blank = the start of the two admin patterns.' }
         [ordered]@{ key = 'AdminTypePrefixes'; label = 'Admin name prefixes per admin type -- {AdminTypePrefix}'; group = 'admin'; kind = 'map'; store = 'naming'
             help = 'The start of an admin account name per admin type (internal, external, guest). Blank = no prefix.'; example = '{value}{AdminWord}-{Initial}{Platform}' }
         [ordered]@{ key = 'AdminTypeDefault'; label = 'Default admin type'; group = 'admin'; kind = 'pick'; pickFrom = 'AdminTypePrefixes'; store = 'naming'

@@ -533,6 +533,89 @@ function Select-PimDisableRemovals {
 # one there changed its offboard gate). Loaded here so every engine path that has the guard has the report too.
 . (Join-Path $PSScriptRoot 'PIM-UnmanagedAdmins.ps1')
 
+# ADMIN-NAME-MATCH-1: the entry parser (ConvertTo-PimAdminNameMatchEntry) lives in PIM-Naming.ps1, which the Manager loads for
+# its Settings save check. Loaded here when the host has not, so the engine and the Manager judge an entry the same way.
+if (-not (Get-Command ConvertTo-PimAdminNameMatchEntry -ErrorAction SilentlyContinue)) {
+    $__pimNamingLibDg = Join-Path $PSScriptRoot 'PIM-Naming.ps1'
+    if (Test-Path -LiteralPath $__pimNamingLibDg) { . $__pimNamingLibDg }
+}
+
+function Get-PimAdminNameMatchLiterals {
+    <#
+      ADMIN-NAME-MATCH-1 (owner 2026-11-10) -- PURE. The literals of the 'Recognised admin names' entries of one kind:
+        -Kind start : 'Admin-*' and 'Admin-' (no *) -> 'Admin-'   (an entry starting with '-' is left out: no name starts so)
+        -Kind end   : '*-a-id'                       -> '-a-id'
+      A refused entry ('*', '**', 'a*b', '*-a-*', no text) is never returned -- it would mean listing every user (BUG-12).
+    #>
+    [CmdletBinding()] param([AllowNull()][object]$Entries, [Parameter(Mandatory)][ValidateSet('start', 'end')][string]$Kind)
+    $list = if (Get-Command ConvertTo-PimAdminNameMatchList -ErrorAction SilentlyContinue) { @(ConvertTo-PimAdminNameMatchList -Entries $Entries) }
+            elseif ($Entries -is [System.Collections.IDictionary]) { @($Entries.Values | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
+            else { @(@($Entries) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($s in $list) {
+        if (Get-Command ConvertTo-PimAdminNameMatchEntry -ErrorAction SilentlyContinue) {
+            $r = ConvertTo-PimAdminNameMatchEntry -Entry $s
+            if (-not $r.ok -or $r.kind -ne $Kind) { continue }
+            $lit = "$($r.literal)"
+        } else {
+            # PIM-Naming.ps1 absent: only today's plain starts are understood; anything with a * is left out (fail closed).
+            if ($Kind -ne 'start' -or $s.Contains('*')) { continue }
+            $lit = $s
+        }
+        if ($Kind -eq 'start' -and $lit.StartsWith('-')) { continue }
+        if (-not $out.Contains($lit)) { [void]$out.Add($lit) }
+    }
+    return @($out.ToArray())
+}
+
+function Get-PimAdminAccountSuffixes {
+    <#
+      ADMIN-NAME-MATCH-1 -- PURE. The name ENDINGS that identify an admin account: the '*<ending>' entries of
+      NamingConventions.AdminAccountPatterns, lower-cased, de-duplicated. These are the ONLY source of endings: nothing is
+      derived from AdminAccountPattern (owner 2026-11-10). Empty when none is configured.
+    #>
+    [CmdletBinding()] param([object]$NamingConventions = $null)
+    $nc = $NamingConventions; if (-not $nc) { $nc = $global:PIM_NamingConventions }
+    if (-not $nc) { return @() }
+    $pats = $null; try { $pats = $nc.AdminAccountPatterns } catch { $pats = $null }
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($l in @(Get-PimAdminNameMatchLiterals -Entries $pats -Kind 'end')) { $lc = "$l".ToLowerInvariant(); if (-not $out.Contains($lc)) { [void]$out.Add($lc) } }
+    return @($out.ToArray())
+}
+
+function Get-PimAdminNameMatchIssues {
+    # ADMIN-NAME-MATCH-1 -- PURE. What the engine ignores in the stored entries, and why: @{ refused = @(@{entry;reason}); warnings = @() }.
+    [CmdletBinding()] param([object]$NamingConventions = $null)
+    $nc = $NamingConventions; if (-not $nc) { $nc = $global:PIM_NamingConventions }
+    if (-not $nc -or -not (Get-Command Test-PimAdminNameMatchEntries -ErrorAction SilentlyContinue)) { return @{ refused = @(); warnings = @() } }
+    $pats = $null; try { $pats = $nc.AdminAccountPatterns } catch { $pats = $null }
+    $t = Test-PimAdminNameMatchEntries -Entries $pats
+    return @{ refused = @($t.refused); warnings = @($t.warnings) }
+}
+
+function Get-PimAdminSuffixUserQueries {
+    <#
+      ADMIN-NAME-MATCH-1 -- PURE. The Graph reads for the name ENDINGS: one endswith(userPrincipalName,'<ending>@<domain>')
+      per ending x domain. endswith is an ADVANCED query, so each carries ConsistencyLevel: eventual and $count=true.
+      No ending or no domain -> NO query (never a read without a filter: BUG-12 / the LEAN context).
+      Returns @( @{ path; headers; suffix; domain } ).
+    #>
+    [CmdletBinding()] param([string[]]$Suffixes = @(), [string[]]$Domains = @(), [string]$Select = 'id,userPrincipalName')
+    $out = New-Object System.Collections.Generic.List[object]
+    $doms = @(@($Domains) | ForEach-Object { "$_".Trim().TrimStart('@').ToLowerInvariant() } | Where-Object { $_ } | Select-Object -Unique)
+    $sufs = @(@($Suffixes) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ -and -not $_.Contains('*') } | Select-Object -Unique)
+    foreach ($s in $sufs) {
+        foreach ($d in $doms) {
+            $lit = ("$s@$d").Replace("'", "''")
+            [void]$out.Add([pscustomobject]@{
+                path    = "/users?`$select=$Select&`$filter=endswith(userPrincipalName,'$lit')&`$count=true"
+                headers = @{ ConsistencyLevel = 'eventual' }
+                suffix  = $s; domain = $d })
+        }
+    }
+    return @($out.ToArray())
+}
+
 function Get-PimAdminAccountPrefixes {
     <#
       PURE. The UPN prefixes that identify an ADMIN account, from
@@ -599,9 +682,10 @@ function Get-PimAdminAccountPrefixes {
     if ($nc) {
         $pats = $null
         try { $pats = $nc.AdminAccountPatterns } catch { $pats = $null }
-        if ($pats -is [System.Collections.IDictionary]) { foreach ($v in $pats.Values) { foreach ($e in (& $expand $v)) { & $add $e } } }
-        elseif ($pats -is [string]) { foreach ($e in (& $expand $pats)) { & $add $e } }
-        elseif ($pats -is [System.Collections.IEnumerable]) { foreach ($v in $pats) { foreach ($e in (& $expand $v)) { & $add $e } } }
+        # ADMIN-NAME-MATCH-1 (owner 2026-11-10): only the START entries ('Admin-*', or 'Admin-' without a *) are prefixes.
+        # An ENDING ('*-a-id') is Get-PimAdminAccountSuffixes'; a refused entry ('*', 'a*b', '*-a-*') and a start that
+        # begins with '-' (no account name can) contribute nothing here -- Get-PimAdminNameMatchIssues says why.
+        foreach ($v in @(Get-PimAdminNameMatchLiterals -Entries $pats -Kind 'start')) { foreach ($e in (& $expand $v)) { & $add $e } }
         foreach ($k in 'AdminAccountPattern','AdminAccountPatternHighPriv') {
             try { if ("$($nc.$k)".Trim()) { foreach ($e in (& $expand $nc.$k)) { & $add $e } } } catch { }
         }
@@ -612,12 +696,28 @@ function Get-PimAdminAccountPrefixes {
 function Test-PimIsAdminAccountName {
     # PURE. Does this UPN/name look like an ADMIN account under the configured
     # prefixes? Empty prefix list => $false (fail closed), never $true.
-    [CmdletBinding()] param([string]$Name, [string[]]$Prefixes = @())
+    # ADMIN-NAME-MATCH-1 (owner 2026-11-10): -Suffixes = the '*<ending>' entries; the LOCAL part (before '@') must END with
+    # one. -UseNamePatterns: a local part matching the admin name patterns (Test-PimAdminName) also counts. Each rule is a
+    # literal starts-with / ends-with or a full-pattern regex match -- never a contains.
+    [CmdletBinding()] param([string]$Name, [string[]]$Prefixes = @(), [string[]]$Suffixes = @(), [switch]$UseNamePatterns)
     $n = "$Name".Trim().ToLowerInvariant()
     if (-not $n) { return $false }
     foreach ($p in @($Prefixes)) {
         $pp = "$p".Trim().ToLowerInvariant()
         if ($pp -and $n.StartsWith($pp)) { return $true }
+    }
+    $local = $n; $at = $local.IndexOf('@'); if ($at -ge 0) { $local = $local.Substring(0, $at) }
+    foreach ($s in @($Suffixes)) {
+        $ss = "$s".Trim().ToLowerInvariant()
+        # strictly longer than the ending: the ending alone is not a person's admin account.
+        if ($ss -and $local.Length -gt $ss.Length -and $local.EndsWith($ss)) { return $true }
+    }
+    if ($UseNamePatterns -and $local -and (Get-Command Test-PimAdminName -ErrorAction SilentlyContinue) -and (Get-Command Get-PimNamingConvention -ErrorAction SilentlyContinue)) {
+        # Test-PimAdminName answers TRUE when no pattern is configured ("nothing to enforce") -- that must not admit anyone here.
+        $c = $null; try { $c = Get-PimNamingConvention } catch { $c = $null }
+        if ($c -and ("$($c.AdminAccountPattern)".Trim() -or "$($c.AdminAccountPatternHighPriv)".Trim())) {
+            try { if (Test-PimAdminName -Name $local) { return $true } } catch { }
+        }
     }
     return $false
 }
@@ -637,8 +737,11 @@ function Assert-PimAdminPopulationComparable {
           # the managing tenant and carry ITS naming, so without this the assertion would reject the very rows
           # the tenant was told to hold. It does NOT widen discovery: the caller passes only the UPNs
           # its desired set actually names, so an account no row asks for still cannot get in here.
-          [string[]]$AlsoAllowed = @())
-    if (@($Prefixes).Count -eq 0) {
+          [string[]]$AlsoAllowed = @(),
+          # ADMIN-NAME-MATCH-1 (owner 2026-11-10): accounts admitted by a '*<ending>' entry, and (with -UseNamePatterns) a
+          # local part matching the admin name patterns. Same strictness: a literal end / full-pattern match, never a contains.
+          [string[]]$Suffixes = @(), [switch]$UseNamePatterns)
+    if (@($Prefixes | Where-Object { "$_".Trim() }).Count -eq 0 -and @($Suffixes | Where-Object { "$_".Trim() }).Count -eq 0) {
         return [pscustomobject]@{ ok=$false; offenders=@()
             reason='no admin naming prefix is configured -- refusing to treat the whole user population as admin candidates (set $global:PIM_NamingConventions.AdminAccountPatterns)' }
     }
@@ -649,7 +752,7 @@ function Assert-PimAdminPopulationComparable {
         if ($null -eq $l) { continue }
         $upn = "$($l.$UpnProperty)"
         if ($allow.Contains("$upn".Trim())) { continue }
-        if (-not (Test-PimIsAdminAccountName -Name $upn -Prefixes $Prefixes)) { [void]$bad.Add($upn) }
+        if (-not (Test-PimIsAdminAccountName -Name $upn -Prefixes $Prefixes -Suffixes $Suffixes -UseNamePatterns:$UseNamePatterns)) { [void]$bad.Add($upn) }
     }
     if ($bad.Count -gt 0) {
         return [pscustomobject]@{ ok=$false; offenders=$bad.ToArray()

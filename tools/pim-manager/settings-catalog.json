@@ -1337,7 +1337,7 @@
     },
     {
       "key": "NamingConventions.AdminAccountPatterns",
-      "label": "AdminAccountPatterns (how admin accounts are recognised)",
+      "label": "Recognised admin names: Admin-* (starts with) or *-a-id (ends with)",
       "where": "Settings > Naming conventions",
       "route": "/api/settings/naming",
       "type": "list",
@@ -1346,7 +1346,7 @@
       "confirmOn": false,
       "confirmOff": false,
       "info": {
-        "what": "The name starts that identify an admin account. The engine reads admin accounts from your tenant only where the user name starts with one of these, so ordinary users are never in scope. Tokens are allowed; only the part before the first unknown token is used.",
+        "what": "The names that identify an admin account. Admin-* means names that start with Admin-; *-a-id means names that end with -a-id (searched at each verified domain, or at the admin account domain when it is set). An entry without * is a start. The engine reads admin accounts from your tenant only where the user name matches one of these, so ordinary users are never in scope. One * only, at the start or the end: * alone, ** , a * in the middle or at both ends is refused, because it would list every user. Tokens are allowed in a start; only the part before the first unknown token is used.",
         "enabled": "When set: on the next engine run every account starting with a listed prefix is treated as an admin account. The engine always ALSO adds the starts of the two admin patterns and the shipped prefixes (Admin-, x-Admin, g-Admin), so you can widen recognition but not narrow it below those. Admin accounts with no row are reported as unmanaged, never disabled. On a managed tenant these prefixes are compared with incoming admins and a mismatch is reported.",
         "disabled": "When blank: the starts of the two admin patterns plus the shipped prefixes are used. If no prefix can be found at all, the engine refuses to read admins rather than scan every user.",
         "risk": "A too-broad prefix (e.g. a-) pulls ordinary users into the admin set; the engine then stops the run instead of acting on them. Accounts your rows name are always managed, whatever their name. Reversible: restore the old list; the next run uses it.",

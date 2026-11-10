@@ -82,6 +82,24 @@ function Get-PimDriftExcludedNames {
     }
     return , @($out.ToArray())
 }
+function Get-PimDriftItemLabel {
+    <#
+      The readable label of one drift item. DRIFT-PIM-NAMED (owner 2026-11-10): an item of the AdministrativeUnits area is
+      an ADMINISTRATIVE UNIT -- "administrative unit <name>". Get-PimFailureItemLabel read an AU named PIM-... from its key
+      ('pim-x') as "PIM for Groups policy of group pim-x". Done here, by scope, so no other area's label changes.
+      Every other area: Get-PimFailureItemLabel, as before ('' when it is not loaded or throws).
+    #>
+    param([string]$Scope, [string]$Key, [AllowNull()][object]$Row, [switch]$LabelFn)
+    if ("$Scope" -eq 'AdministrativeUnits') {
+        $nm = ''
+        foreach ($n in @('AUDisplayName', 'displayName')) { $v = "$(Get-PimDriftSnapshotField $Row $n)".Trim(); if ($v) { $nm = $v; break } }
+        if (-not $nm) { $nm = "$Key".Trim() }
+        if ($nm) { return "administrative unit $nm" }
+    }
+    if (-not $LabelFn) { return '' }
+    try { return "$(Get-PimFailureItemLabel -Key "$Key" -Row $Row)" } catch { return '' }
+}
+
 function Get-PimDriftExcludedIds {
     <# 33.0 item 5 (2026-10-20): the SQL admin group's OBJECT ID(s) when the install sets one ($env:PIM_SQL_ADMIN_GROUP_ID,
        else $global:PIM_SqlAdminGroupId; -SqlAdminGroupId: the caller's / test seam). Optional: none = by name only, as
@@ -241,7 +259,7 @@ function ConvertTo-PimDriftSnapshotDocument {
             $keep = New-Object System.Collections.Generic.List[object]
             foreach ($it in $list) {
                 $lbl = ''
-                if ($labelFn) { try { $lbl = "$(Get-PimFailureItemLabel -Key "$($it.key)" -Row $payloads["$($sd.scope)|$($it.key)"])" } catch { $lbl = '' } }
+                $lbl = Get-PimDriftItemLabel -Scope "$($sd.scope)" -Key "$($it.key)" -Row $payloads["$($sd.scope)|$($it.key)"] -LabelFn:$labelFn
                 $pl = $payloads["$($sd.scope)|$($it.key)"]
                 $plGid = "$(Get-PimDriftSnapshotField $pl 'groupId')"; if (-not $plGid.Trim()) { $plGid = "$(Get-PimDriftSnapshotField $pl 'GroupId')" }
                 $probe = [pscustomobject]@{ key = "$($it.key)"; label = $lbl; groupId = $plGid }
@@ -256,7 +274,7 @@ function ConvertTo-PimDriftSnapshotDocument {
         foreach ($it in $list) {
             if ($items.Count -ge $ItemCap) { break }
             $label = ''
-            if ($labelFn) { try { $label = "$(Get-PimFailureItemLabel -Key "$($it.key)" -Row $payloads["$($sd.scope)|$($it.key)"])" } catch { $label = '' } }
+            $label = Get-PimDriftItemLabel -Scope "$($sd.scope)" -Key "$($it.key)" -Row $payloads["$($sd.scope)|$($it.key)"] -LabelFn:$labelFn
             if (-not $label.Trim()) { $label = "$($it.key)" }
             # §79.3: a changed item says WHAT differs (live -> desired); missing / extra say where the item is.
             $det = switch ("$($it.type)") { 'changed' { "$($diffOf["$($sd.scope)|$($it.key)"])" } 'missing' { 'in PIM, not in the tenant' } 'extra' { 'in the tenant, not in PIM' } default { '' } }

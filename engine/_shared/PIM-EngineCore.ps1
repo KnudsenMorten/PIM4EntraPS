@@ -417,6 +417,85 @@ function Get-PimDesiredRows {
     return $out.ToArray()
 }
 
+# ---- DRIFT-PIM-NAMED (owner 2026-11-10, wizard pick "Only PIM-named") ------------------------------------------------
+# In an area with NO definitions, the drift page and the drift mail list as 'extra' ONLY objects carrying the tenant's
+# PIM naming prefix (old PIM groups, so they can be imported) -- never anything else in the tenant (administrative units,
+# groups and assignments PIM does not name). The prefix is the TENANT's (Get-PimManagedGroupPrefixes: the GroupPrefix
+# setting, else the literal head of its PimGroupPattern); none known = nothing is listed (fail closed).
+function Get-PimDriftNamePrefixes {
+    <# @{ prefixes = string[]; reason = '' }. reason says why no prefix is known (empty when there is one). Never throws. #>
+    $pf = @(); $why = ''
+    if (Get-Command Get-PimManagedGroupPrefixes -ErrorAction SilentlyContinue) {
+        try { $pf = @(@(Get-PimManagedGroupPrefixes) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
+        catch { $pf = @(); $why = "the naming prefix could not be read: $($_.Exception.Message)" }
+    } else { $why = 'the naming prefix reader is not loaded' }
+    if (-not $pf.Count -and -not $why) { $why = 'the naming pattern has no fixed prefix' }
+    return [pscustomobject]@{ prefixes = @($pf); reason = $why }
+}
+
+function Get-PimDriftLiveItemName {
+    <#
+      The NAME of the object a live item is about, for the prefix test. Generic over every scope's live shape:
+        1. a name the row carries: GroupName, GroupDisplayName, AUDisplayName, displayName;
+        2. else the group the row names by id (groupId, else principalId), from -IdNames (id -> display name);
+           an id that is not in the map = no name (a user, a service principal, a group PIM does not know);
+        3. else the item's key when it is a single part (a scope keyed by the object's name).
+      '' when none -- such an item is not listed.
+    #>
+    param([AllowNull()][object]$Item, [string]$Key = '', [hashtable]$IdNames = @{})
+    if ($null -ne $Item) {
+        $g = { param($n) $v = if ($Item -is [System.Collections.IDictionary]) { $Item[$n] } else { $pp = $Item.PSObject.Properties[$n]; if ($pp) { $pp.Value } else { $null } }; "$v".Trim() }
+        foreach ($n in @('GroupName', 'GroupDisplayName', 'AUDisplayName', 'displayName')) { $v = & $g $n; if ($v) { return $v } }
+        foreach ($n in @('groupId', 'principalId')) {
+            $id = (& $g $n).ToLowerInvariant()
+            if ($id) { if ($IdNames.ContainsKey($id)) { return "$($IdNames[$id])" }; return '' }   # named by id, id unknown = no name
+        }
+    }
+    $k = "$Key".Trim()
+    if ($k -and $k -notmatch '\|') { return $k }
+    return ''
+}
+
+function Get-PimDriftGroupIdNames {
+    <# id (lower-case) -> display name, from the groups PIM defines (Get-PimSolutionOwnedGroups) and the directory cache. Never throws. #>
+    $m = @{}
+    try { foreach ($gr in @($Global:Groups_All_ID | Where-Object { $_ })) { $i = "$($gr.id)".Trim().ToLowerInvariant(); if ($i -and "$($gr.displayName)".Trim()) { $m[$i] = "$($gr.displayName)".Trim() } } } catch { }
+    if (Get-Command Get-PimSolutionOwnedGroups -ErrorAction SilentlyContinue) {
+        try { $o = Get-PimSolutionOwnedGroups; if ($o -and $o.byId) { foreach ($i in @($o.byId.Keys)) { $nm = "$($o.byId[$i].name)".Trim(); if ($nm) { $m["$i".ToLowerInvariant()] = $nm } } } } catch { }
+    }
+    return $m
+}
+
+function Select-PimDriftPrefixedRemovals {
+    <#
+      The remove items of a drift read in a scope with NO definitions, cut to the PIM-named ones. A targeted removal (an
+      Action=Remove row -- a definition) always stays. Every other item stays only when its name (Get-PimDriftLiveItemName)
+      starts with one of -Prefixes (case-insensitive). No prefix = none of them stays.
+      Returns @{ keep; listed; leftOut }.
+    #>
+    param([object[]]$Remove = @(), [string[]]$Prefixes = @(), [hashtable]$IdNames = $null)
+    $pf = @(@($Prefixes) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $keep = New-Object System.Collections.Generic.List[object]
+    $listed = 0; $out = 0
+    foreach ($x in @($Remove)) {
+        if ($null -eq $x) { continue }
+        if ($x.PSObject.Properties['targeted'] -and $x.targeted) { $keep.Add($x); continue }
+        $hit = $false
+        if ($pf.Count) {
+            $lv = if ($x.PSObject.Properties['live']) { $x.live } else { $null }
+            $nm = Get-PimDriftLiveItemName -Item $lv -Key "$($x.key)" -IdNames $(if ($null -ne $IdNames) { $IdNames } else { @{} })
+            if (-not $nm -and $null -eq $IdNames -and $null -ne $lv) {
+                # only an item that names its group by id needs the id -> name map (read once, on first need)
+                $IdNames = Get-PimDriftGroupIdNames
+                $nm = Get-PimDriftLiveItemName -Item $lv -Key "$($x.key)" -IdNames $IdNames
+            }
+            if ($nm) { foreach ($p0 in $pf) { if ($nm.StartsWith($p0, [StringComparison]::OrdinalIgnoreCase)) { $hit = $true; break } } }
+        }
+        if ($hit) { $keep.Add($x); $listed++ } else { $out++ }
+    }
+    return [pscustomobject]@{ keep = $keep.ToArray(); listed = $listed; leftOut = $out }
+}
+
 function Get-PimDesiredRowsFromStore {
     # DESIRED comes from SQL (pim.Rows) when the SQL store is active, else in-memory
     # ($global:PIM_DesiredRows[$entity]) for tests/offline.
@@ -439,8 +518,20 @@ function Get-PimDesiredRowsFromStore {
               elseif ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and ($global:PIM_SqlServer -or $global:PIM_SqlConnStringVault)) { Get-PimSqlConnectionString }
               else { $null }
         if ($cs) {
-            try { $rows = @(Get-PimSqlRows -ConnectionString $cs -Entity $Entity); $global:PIM_DesiredResolved[$Entity] = $true; return $rows }
-            catch { Write-Warning "  [engine] SQL desired read failed for '$Entity': $($_.Exception.Message)"; $global:PIM_DesiredResolved[$Entity] = $false; return @() }
+            # DRIFT-PIM-NAMED (owner 2026-11-10): a read that FAILED is also recorded in $global:PIM_DesiredReadErrors[<entity>]
+            # -- a signal only a failed store read sets ($false in PIM_DesiredResolved also means "no store / no rows in memory").
+            # Invoke-PimEngineScope reads it after GetDesired: the scope is NOT CHECKED, never "no definitions" with extras.
+            try {
+                $rows = @(Get-PimSqlRows -ConnectionString $cs -Entity $Entity); $global:PIM_DesiredResolved[$Entity] = $true
+                if ($global:PIM_DesiredReadErrors -is [hashtable]) { [void]$global:PIM_DesiredReadErrors.Remove($Entity) }
+                return $rows
+            }
+            catch {
+                Write-Warning "  [engine] SQL desired read failed for '$Entity': $($_.Exception.Message)"; $global:PIM_DesiredResolved[$Entity] = $false
+                if (-not ($global:PIM_DesiredReadErrors -is [hashtable])) { $global:PIM_DesiredReadErrors = @{} }
+                $global:PIM_DesiredReadErrors[$Entity] = "$($_.Exception.Message)"
+                return @()
+            }
         }
     }
     if ($global:PIM_DesiredRows -and $global:PIM_DesiredRows.ContainsKey($Entity)) { $global:PIM_DesiredResolved[$Entity] = $true; return @($global:PIM_DesiredRows[$Entity]) }
@@ -848,7 +939,20 @@ function Invoke-PimEngineScope {
     $Context['__pimLiveNarrow'] = $__narrow
     $Context['__pimLiveNarrowReason'] = "$Mode, no prune"
 
+    # DRIFT-PIM-NAMED (owner 2026-11-10): a definitions read that FAILED is not "no definitions". Get-PimDesiredRowsFromStore
+    # records each failed store read in $global:PIM_DesiredReadErrors; reset for this scope, read after GetDesired. Any entry
+    # = the scope is NOT CHECKED and applies nothing -- before, an empty desired set from a failed read made the drift read
+    # list every live item as an extra (and a writing run take an unreadable store for an empty one). Every scope, every run.
+    $global:PIM_DesiredReadErrors = @{}
     $desired = @(& $p.GetDesired $Context)
+    $__dre = @(@($global:PIM_DesiredReadErrors.Keys) | Sort-Object)
+    if ($__dre.Count) {
+        $__dreErr = "the definitions could not be read ($($__dre -join ', '))"
+        Write-Warning ("[engine] {0}: {1} -- nothing was compared and nothing applied (NOT CHECKED)." -f $Scope, $__dreErr)
+        return [pscustomobject]@{ scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf; create=0; update=0; remove=0; nochange=0; applied=0; skipped=0; errors=0; plan=@()
+            ok=$false; notChecked=$true; error=$__dreErr; detail="${Scope}: $__dreErr -- not checked, nothing applied"
+            warnings=@($Context['__pimScopeWarnings']) }
+    }
     $live    = @(& $p.GetLive    $Context)
     # REQ-U (2026-09-19): a provider whose LIVE read failed (a 403, a missing permission, an API that answered an
     # error) says so in $Context['__pimLiveReadError'] instead of handing back an empty live set. An empty live set
@@ -965,8 +1069,10 @@ function Invoke-PimEngineScope {
         # plan (-WhatIf) that the drift snapshot asked for ($global:PIM_DriftReadPlan); every other run -- above all
         # every run that WRITES -- still never prunes an empty scope.
         if ($WhatIf -and $global:PIM_DriftReadPlan) {
+            # DRIFT-PIM-NAMED (owner 2026-11-10, "Only PIM-named"): only live items carrying the tenant's PIM naming prefix are
+            # listed (old PIM groups, so they can be imported) -- never objects PIM does not name. Filtered after the diff
+            # below (Select-PimDriftPrefixedRemovals), where the log line with the counts is written.
             $__emptyDesiredRead = $true
-            Write-Host ("[engine] {0,-20} no definitions -- drift read lists {1} live item(s) as extras (plan only, nothing is removed)" -f $Scope, @($live).Count) -ForegroundColor DarkYellow
         } else {
             # §96.6: the empty-desired gate is releasable for ONE run, bound to the plan (the live keys it would prune). A hold
             # is recorded only once the gate has tripped for this scope (the transition), so a scope nobody defines stays
@@ -1024,6 +1130,23 @@ function Invoke-PimEngineScope {
         if ("$__lo".Trim() -match '^(?i)(true|1|yes|on)$') { $cmp['RemoveTypeLeftovers'] = $true }
     }
     $diff = Compare-PimDesiredVsLive @cmp
+    $__noDefsLeftOut = 0
+    if ($__emptyDesiredRead) {
+        # DRIFT-PIM-NAMED: a scope with no definitions lists ONLY live items whose name carries the tenant's PIM naming prefix.
+        # No prefix known = nothing listed (fail closed). Targeted Remove rows are definitions and pass unchanged.
+        $__pfx = Get-PimDriftNamePrefixes
+        $__sel = Select-PimDriftPrefixedRemovals -Remove @($diff.remove) -Prefixes @($__pfx.prefixes)
+        $__noDefsLeftOut = [int]$__sel.leftOut
+        $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @($__sel.keep); nochange = @($diff.nochange)
+                                   absent = @($diff.absent); conflicts = @($diff.conflicts) }
+        if (@($__pfx.prefixes).Count) {
+            Write-Host ("[engine] {0,-20} no definitions -- drift read lists {1} live item(s) named with the PIM prefix ({2}) as extras, {3} left out (not PIM-named) (plan only, nothing is removed)" -f `
+                $Scope, [int]$__sel.listed, (@($__pfx.prefixes) -join ', '), $__noDefsLeftOut) -ForegroundColor DarkYellow
+        } else {
+            Write-Host ("[engine] {0,-20} no definitions -- the PIM naming prefix is not known ({1}): drift read lists NOTHING, {2} live item(s) left out (plan only, nothing is removed)" -f `
+                $Scope, "$($__pfx.reason)", $__noDefsLeftOut) -ForegroundColor DarkYellow
+        }
+    }
     # How many live items each Remove row revokes (both types). Its row is deleted only when ALL applied.
     $__rowTotal = @{}
     foreach ($__x in @($diff.remove)) { if ($__x -and $__x.PSObject.Properties['rowKey'] -and $__x.rowKey) { $__rowTotal[$__x.rowKey] = 1 + [int]$__rowTotal[$__x.rowKey] } }
@@ -1742,6 +1865,7 @@ function Invoke-PimEngineScope {
         reconcileRemoved=[int]$script:__rrRemoved # 96.5: how many of them an ENFORCE pass really removed
         appliedOutcomes=$script:__outcomes.Count  # 96.1: rows recorded in pim.CommitApplied by this pass
         noDefinitions=[bool]$__emptyDesiredRead   # REQ-AU-DRIFT-1: extras listed from a scope with no rows (drift read only)
+        noDefinitionsLeftOut=[int]$__noDefsLeftOut   # DRIFT-PIM-NAMED: live items of that scope NOT listed (not PIM-named, or no prefix known)
         overRemoveBudget=$__overBudget            # BUG-269: drift read only -- { toRemove; budget } when an apply would hold
         policyChoices=$Context["$Scope.choiceSummary"]   # PIM 100.93: a policy scope's { waiting; review; decided; keep; changes; held }; $null for other scopes
         ownerMigration=$Context["$Scope.ownerMigration"] # 95.2l: GroupOwners' migration plan { eligibleOn; migrateOn; count; moves; held; moved; kept }; $null otherwise

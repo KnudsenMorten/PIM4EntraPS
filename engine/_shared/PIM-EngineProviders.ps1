@@ -747,7 +747,24 @@ function New-PimAdminsProvider {
                 } catch { }
                 $prefixes = $acc.ToArray()
             }
-            if ($prefixes.Count -eq 0) {
+            # 🔴 ADMIN-NAME-MATCH-1 (owner 2026-11-10). Admin accounts recognised ONLY by a name START missed every
+            # convention that puts the admin word AFTER the person ('jdoe-a-id'): the live set was empty, the Admin
+            # accounts page and the unmanaged report showed nothing. A 'Recognised admin names' entry '*-a-id' is a name
+            # END: read with endswith(userPrincipalName,'-a-id@<domain>') per verified domain (or the admin account
+            # domain when set), and every hit is checked again client-side. Endings come ONLY from '*' entries -- nothing
+            # is derived from the admin name patterns. A refused entry ('*', 'a*b', '*-a-*') is ignored and said here.
+            $suffixes = @()
+            if (Get-Command Get-PimAdminAccountSuffixes -ErrorAction SilentlyContinue) { try { $suffixes = @(Get-PimAdminAccountSuffixes) } catch { $suffixes = @() } }
+            if (Get-Command Get-PimAdminNameMatchIssues -ErrorAction SilentlyContinue) {
+                $__anIss = $null; try { $__anIss = Get-PimAdminNameMatchIssues } catch { $__anIss = $null }
+                if ($__anIss) {
+                    foreach ($__r in @($__anIss.refused)) { Write-Warning ("    [admins] Recognised admin names: '{0}' is IGNORED -- {1}. Use Admin-* (starts with) or *-a-id (ends with)." -f $__r.entry, $__r.reason) }
+                    foreach ($__w in @($__anIss.warnings)) { Write-Warning ("    [admins] Recognised admin names: {0}" -f $__w) }
+                }
+            }
+            # A start no account name can have ('-a-') is never sent as a query.
+            $prefixes = @(@($prefixes) | Where-Object { "$_".Trim() -and -not "$_".Trim().StartsWith('-') })
+            if ($prefixes.Count -eq 0 -and $suffixes.Count -eq 0) {
                 throw ("Admins scope: no admin naming prefix is configured (`$global:PIM_NamingConventions.AdminAccountPatterns), " +
                        "so the live set cannot be limited to admin accounts. REFUSING to scan the whole user population -- " +
                        "that is what disabled 53 production users on 2026-06-15 (REQUIREMENTS s33 BUG-12).")
@@ -756,15 +773,51 @@ function New-PimAdminsProvider {
             # by id. Also keeps the LEAN-context promise: never bulk-list a big tenant.
             $seen = @{}
             $rows = New-Object System.Collections.Generic.List[object]
+            $__adminSelect = 'id,userPrincipalName,displayName,accountEnabled,givenName,surname,jobTitle,usageLocation,companyName,passwordPolicies,onPremisesSyncEnabled'
             foreach ($p in $prefixes) {
                 $esc = "$p".Replace("'", "''")
                 # #11: the attributes the provider reconciles are read here, or drift is invisible.
-                $q = "/users?`$select=id,userPrincipalName,displayName,accountEnabled,givenName,surname,jobTitle,usageLocation,companyName,passwordPolicies,onPremisesSyncEnabled&`$filter=startswith(userPrincipalName,'$esc')"
+                $q = "/users?`$select=$__adminSelect&`$filter=startswith(userPrincipalName,'$esc')"
                 foreach ($u in @(Invoke-PimGraph -Path $q -All)) {
                     if ($null -eq $u) { continue }
                     $k = "$($u.id)"
                     if ($k -and -not $seen.ContainsKey($k)) { $seen[$k] = $true; [void]$rows.Add($u) }
                 }
+            }
+            # Name ENDINGS: one endswith read per ending x domain. The domains: the admin account domain (+ the ones used
+            # before it) when set, else every VERIFIED domain of the tenant. No domain known = no endswith read, said.
+            $__sufNote = ''
+            if ($suffixes.Count -gt 0) {
+                $__doms = New-Object System.Collections.Generic.List[string]
+                $__upnSuf = ''
+                if (Get-Command Get-PimNamingConvention -ErrorAction SilentlyContinue) { try { $__upnSuf = "$(Get-PimNamingConvention -Key 'AdminAccountUpnSuffix')".Trim().TrimStart('@') } catch { $__upnSuf = '' } }
+                if ($__upnSuf) {
+                    [void]$__doms.Add($__upnSuf)
+                    if (Get-Command Get-PimAdminDomainHistory -ErrorAction SilentlyContinue) { try { foreach ($__h in @(Get-PimAdminDomainHistory)) { $__hv = "$__h".Trim().TrimStart('@'); if ($__hv -and -not $__doms.Contains($__hv)) { [void]$__doms.Add($__hv) } } } catch { } }
+                } else {
+                    try {
+                        foreach ($__d in @(Invoke-PimGraph -Path '/domains?$select=id,isVerified' -All)) {
+                            if ($null -eq $__d -or "$($__d.isVerified)" -ine 'True') { continue }
+                            $__dv = "$($__d.id)".Trim(); if ($__dv -and -not $__doms.Contains($__dv)) { [void]$__doms.Add($__dv) }
+                        }
+                    } catch { Write-Warning ("    [admins] could not read the tenant's verified domains ({0}) -- the name endings ({1}) are not searched this run." -f $_.Exception.Message, ($suffixes -join ', ')) }
+                }
+                $__sq = @(Get-PimAdminSuffixUserQueries -Suffixes $suffixes -Domains @($__doms.ToArray()) -Select $__adminSelect)
+                if ($__sq.Count -eq 0) {
+                    Write-Warning ("    [admins] no verified domain is known -- the name endings ({0}) are not searched this run (never a read of every user)." -f ($suffixes -join ', '))
+                }
+                $__sufDropped = 0
+                foreach ($__q in $__sq) {
+                    foreach ($u in @(Invoke-PimGraph -Path $__q.path -Headers $__q.headers -All)) {
+                        if ($null -eq $u) { continue }
+                        # Client-side again, strictly: the local part must END with a configured ending.
+                        if (-not (Test-PimIsAdminAccountName -Name "$($u.userPrincipalName)" -Prefixes @() -Suffixes $suffixes)) { $__sufDropped++; continue }
+                        $k = "$($u.id)"
+                        if ($k -and -not $seen.ContainsKey($k)) { $seen[$k] = $true; [void]$rows.Add($u) }
+                    }
+                }
+                $__sufNote = ("; name end: {0} at {1} domain(s)" -f ($suffixes -join ', '), $__doms.Count)
+                if ($__sufDropped) { $__sufNote += (" ({0} returned account(s) did not end with an ending and were left out)" -f $__sufDropped) }
             }
             # 🔴 AN ADMIN THIS TENANT ALREADY HAS A ROW FOR IS PART OF THE POPULATION, WHATEVER IT IS
             # CALLED (operator, 2026-09-22: "you can not block admins due to different name pattern").
@@ -813,10 +866,10 @@ function New-PimAdminsProvider {
             # are passed as allowed: without this the assertion would reject the very rows the store
             # asks for (a centrally-managed admin on a tenant with different naming).
             if (Get-Command Assert-PimAdminPopulationComparable -ErrorAction SilentlyContinue) {
-                $chk = Assert-PimAdminPopulationComparable -Live $live -Prefixes $prefixes -AlsoAllowed @($desiredUpns)
+                $chk = Assert-PimAdminPopulationComparable -Live $live -Prefixes $prefixes -AlsoAllowed @($desiredUpns) -Suffixes $suffixes
                 if (-not $chk.ok) { throw ("Admins scope: " + $chk.reason) }
             }
-            Write-Host ("    [admins] live set limited to {0} admin account(s) by prefix: {1}" -f $live.Count, ($prefixes -join ', ')) -ForegroundColor DarkGray
+            Write-Host ("    [admins] live set limited to {0} admin account(s) by prefix: {1}{2}" -f $live.Count, ($prefixes -join ', '), $__sufNote) -ForegroundColor DarkGray
             if ($addedByRow.Count) {
                 Write-Host ("    [admins] + {0} account(s) named by a desired row whose name matches no prefix (managed by their row, not by naming): {1}" -f $addedByRow.Count, (($addedByRow | Select-Object -First 8) -join ', ')) -ForegroundColor DarkGray
             }
