@@ -403,7 +403,8 @@ function Get-PimPermissionHealth {
 
     $detail = if ($ok) {
         $d = "$IdentityName holds every REQUIRED permission; core PIM works."
-        if ($azureNotNeeded -and -not $azureHeld) { $d += "  No Azure resource delegation is defined, so no Azure role-management right is needed (grant User Access Administrator at the scopes only when you define one)." }
+        # UAA-QUIET (owner 2026-11-10 "why mention user access admin when we dont use it"): no Azure resource delegation
+        # defined = User Access Administrator is not mentioned at all (it appears the moment one is defined and it is missing).
         if ($offConnectors.Count) { $d += "  These optional workloads are unavailable until their permission is granted: " + ($offConnectors -join ', ') + "." }
         $d
     } else {
@@ -425,9 +426,9 @@ function Get-PimPermissionHealth {
     # REQUIREMENTS 100.77 + framework 12.10 item 11: the command stays its own two lines (never joined into a ' ; '
     # one-liner) and its doc page is ONE plain line under them -- this detail also leaves the page as plain text (the
     # environment report, a copied banner).
-    if ($rootUaaMissing) {
-        $detail += $(if ($azureNotNeeded) { "  User Access Administrator at the tenant root: not granted -- needed only to assign Azure resource roles (none are defined, so nothing is blocked)." }
-                     else { "  User Access Administrator at the tenant root: not granted -- needed to assign the Azure resource roles you have defined. Grant it with:`n" + (Add-PimSupportScriptDocLines -Text $azureRoot.userAccessAdminFix) + "`n" })
+    if ($rootUaaMissing -and -not $azureNotNeeded) {
+        # UAA-QUIET (owner 2026-11-10): said only when Azure resource delegations are defined and need it.
+        $detail += "  User Access Administrator at the tenant root: not granted -- needed to assign the Azure resource roles you have defined. Grant it with:`n" + (Add-PimSupportScriptDocLines -Text $azureRoot.userAccessAdminFix) + "`n"
     }
 
     $shape = { param($x) [pscustomobject]@{ role = $x.role; capability = $x.capability; tier = "$($x.tier)"; connector = "$($x.connector)" } }

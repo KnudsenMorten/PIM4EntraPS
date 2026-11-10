@@ -5377,11 +5377,13 @@
     let h = '<div class="permRootLines" style="margin-top:6px;font-size:11.5px;">' +
       '<div class="permRootReader">Reader at the tenant root management group: ' + st(r.reader) +
         (r.reader === 'missing' ? ' -- <b>required</b>: Discovery cannot see Azure (management groups, subscriptions) without it. Grant it with the command below.' : r.reader === 'held' ? ' -- Discovery can see Azure.' : ' -- the role assignments could not be read.') + '</div>' +
+      // UAA-QUIET (owner 2026-11-10 "why mention user access admin when we dont use it"): not granted AND no Azure
+      // resource delegation defined = no line at all; it appears once a delegation needs it, or when it is held.
+      ((r.userAccessAdmin === 'missing' && !r.userAccessAdminNeeded) ? '' :
       '<div class="permRootUaa">User Access Administrator at the tenant root management group: ' +
         (r.userAccessAdmin === 'missing'
-          ? (r.userAccessAdminNeeded ? '<b style="color:#cf222e;">not granted</b> -- <b>required</b>: you have defined Azure resource delegations, and assigning their roles needs it. Grant it with the command below.'
-                                     : '<b>not granted</b> -- needed only to assign Azure resource roles (none are defined, so nothing is blocked). Optional; grant it with: <code>' + escapeHtml(String(r.userAccessAdminFix || '').split('\n').pop()) + '</code> ' + pimScriptDocLink('Grant-PimEnginePermissions'))
-          : st(r.userAccessAdmin) + (r.userAccessAdmin === 'held' ? ' -- Azure resource roles can be assigned.' : ' -- the role assignments could not be read.')) + '</div>' +
+          ? '<b style="color:#cf222e;">not granted</b> -- <b>required</b>: you have defined Azure resource delegations, and assigning their roles needs it. Grant it with the command below.'
+          : st(r.userAccessAdmin) + (r.userAccessAdmin === 'held' ? ' -- Azure resource roles can be assigned.' : ' -- the role assignments could not be read.')) + '</div>') +
       '</div>';
     return h;
   }

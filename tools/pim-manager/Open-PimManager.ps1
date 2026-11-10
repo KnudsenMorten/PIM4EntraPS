@@ -6004,6 +6004,15 @@ function Get-PimManagerMailIdentities {
         if ($appId) {
             $self = $null
             if ("$($me.objectId)" -and "$($me.resourceId)") { $self = [pscustomobject]@{ id = "$($me.objectId)"; displayName = "$($me.name)"; servicePrincipalType = 'ManagedIdentity'; alternativeNames = @("$($me.resourceId)") } }
+            elseif ("$($me.objectId)" -and $script:PimHosted) {
+                # MAIL-TENANTWIDE-UNKNOWN (owner screenshot 2026-11-10): some hosted installs get a token WITHOUT xms_mirid, so no
+                # resourceId -- the Manager was taken for a local run, neither sending identity was resolved and the tenant-wide
+                # Mail.Send line stayed "not checked". Hosted = a managed identity; its resource group is the engine job's (same
+                # fallback as the 3.0.79 permission-health fix), its name the one the engine recorded for this object id.
+                $tj0 = ''; try { $tj0 = "$(Get-PimManagerTickJobId)" } catch { $tj0 = '' }
+                $nm0 = ''; try { $nm0 = "$((Invoke-PimEngineRecordedGraph -Path "/servicePrincipals/$($me.objectId)").displayName)" } catch { $nm0 = '' }
+                $self = [pscustomobject]@{ id = "$($me.objectId)"; displayName = $nm0; servicePrincipalType = 'ManagedIdentity'; alternativeNames = @($(if ($tj0 -match '(?i)^/subscriptions/[^/]+/resourcegroups/[^/]+/') { $tj0 })) }
+            }
             elseif ("$($me.objectId)") { $self = [pscustomobject]@{ id = "$($me.objectId)"; displayName = ''; servicePrincipalType = 'Application'; alternativeNames = @() } }
             if ($self -and "$($self.servicePrincipalType)" -eq 'ManagedIdentity') {
                 $o.managerObjectId = "$($self.id)"; $o.managerIdentityName = "$($self.displayName)"

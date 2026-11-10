@@ -413,7 +413,10 @@ function Get-PimMailCheck {
     else { & $add 'mail-alerts' 'Alert recipients' 'missing' 'nobody receives the alerts' 'PIM Manager > Settings > Alerting > Recipients (Get Started > Alert recipients)' }
     # MAIL-STEP-PROOF: 'waiting' (the engine job's first send has not happened yet) is information, not an open item --
     # complete = every line ok OR waiting; proven = every line ok.
-    $notOk = @($lines | Where-Object { $_.state -ne 'ok' -and $_.state -ne 'waiting' })
+    # MAIL-TENANTWIDE-UNKNOWN (owner 2026-11-10 "this will also not complete even though mail is working"): the tenant-wide
+    # Mail.Send line NOT CHECKED (the permissions could not be read) is information -- it never holds the step open. Only a
+    # tenant-wide Mail.Send that IS found ('failed') does.
+    $notOk = @($lines | Where-Object { $_.state -ne 'ok' -and $_.state -ne 'waiting' -and -not ($_.id -eq 'mail-no-tenantwide' -and $_.state -eq 'unknown') })
     $waiting = @($lines | Where-Object { $_.state -eq 'waiting' })
     $summary = if (-not $notOk.Count -and -not $waiting.Count) { 'mail: every prerequisite is in place and proven' }
                elseif (-not $notOk.Count) { "mail: every prerequisite is in place -- waiting for the engine's first send to prove its send right (not a problem)" }
