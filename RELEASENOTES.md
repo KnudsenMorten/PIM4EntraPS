@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.85 -- 2026-11-10
+
+- Everywhere you see it, the link that sends PIM Manager's health and run results to Invardia support is now called Invardia support link: the on/off setting (turning it off stops all reports to Invardia support), the end-of-install check, the environment drawing and the security pack.
+
 ## 3.0.84 -- 2026-11-10
 
 - The job that sends PIM Manager's health and run results to Invardia support is now shown as Invardia support link; a report that could not be delivered is retried and never mailed to you, and the job turns amber only after three failed rounds in a row. The approved rights list now matches the code: the updater keeps reading the SuperAdmins' mail addresses for the alert recipients.

@@ -3817,16 +3817,16 @@ function Get-PimUplinkDeliveryWarning {
             if ($raw) {
                 $kinds.Add('key-malformed')
                 $out.note = "an install key is stored but it is not a valid Invardia install key -- telemetry is anonymous; the engine claims one every 6 h$claim"
-                $sums.Add('Telemetry to Invardia is anonymous: the stored install key is not valid.')
+                $sums.Add('The Invardia support link is anonymous: the stored install key is not valid.')
             } elseif ($LicenceRegistered) {
                 $kinds.Add('key-missing')
                 $out.note = "no install key stored -- telemetry is anonymous; the engine claims one every 6 h$claim"
-                $sums.Add('Telemetry to Invardia is anonymous: no install key is stored for this licensed install.')
+                $sums.Add('The Invardia support link is anonymous: no install key is stored for this licensed install.')
             }
         } elseif ($mode -and $mode -ne 'identified') {
             $kinds.Add('not-identified')
             $out.note = "an install key is stored but telemetry ran '$mode' -- Invardia cannot tell which environment sent it"
-            $sums.Add('Telemetry to Invardia is not identified although an install key is stored.')
+            $sums.Add('The Invardia support link is not identified although an install key is stored.')
         }
         if ($out.note) { $texts.Add($out.note) }
         if ($kinds.Count) {
@@ -3853,7 +3853,7 @@ function Invoke-PimUplinkJob {
     $on = [bool]((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and (Test-PimFeatureAvailable -Key 'telemetry.uplink' -Quiet))
     # §11: OFF still runs ONE check -- an install that was on and is now off reports its opt-out once (Invoke-PimUplinkCycle).
     # Never on = nothing is sent and nothing is called; no SQL store while off = nothing to check, quietly.
-    $offDetail = "uplink: off (feature 'telemetry.uplink')"
+    $offDetail = "Invardia support link: off (feature 'telemetry.uplink')"  # SUPPORT-LINK-1 point 1: the shown name; the job stays 'uplink'
     if (-not (Get-Command New-AitUplinkReport -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'AitUplink.framework.ps1') }
     $cs = $null
     if (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) { try { $cs = Get-PimSqlSettingsConnectionString } catch { $cs = $null } }
@@ -4122,7 +4122,7 @@ function Invoke-PimUplinkJob {
     $licReg = [bool]$proHere
     if (-not $licReg -and $lic) { try { $licReg = [bool]("$($lic.Status)" -in @('Valid', 'Grace')) } catch { } }
     $w = Get-PimUplinkDeliveryWarning -Enabled $on -Cycle $r -StoredKeyRaw $rawKey -ResolvedKey "$key" -LicenceRegistered $licReg -ClaimState $claimSt
-    $detail = "uplink: $($r.message)"
+    $detail = "Invardia support link: $($r.message)"  # SUPPORT-LINK-1 point 1 (the Jobs page detail a customer reads)
     if ($w.warning) { $detail += " -- WARNING: $($w.reason)" }
     # UPLINK-QUIET: fewer than 3 failed cycles in a row = an ok run; the detail says it is retried
     if ("$($w.info)".Trim()) { $detail += " -- $($w.info)" }

@@ -363,7 +363,7 @@
       },
       "info": {
         "what": "Runs the install-key job every 6 hours. When this install has a Pro licence for this tenant and no Invardia install key yet, it claims one by sending Invardia the licence file and this tenant's id. The key lets the nightly update take signed Pro releases from Invardia, for the ring Invardia has set, when the update job is deployed with Invardia as its source.",
-        "enabled": "On the next 6-hour run, if no key is held, PIM Manager claims one and shows the result under Settings > Licence. Each update is installed only after its signature, release number and archive checksum are checked. A release that asks for a manual step is held. Status telemetry then also travels with this key.",
+        "enabled": "On the next 6-hour run, if no key is held, PIM Manager claims one and shows the result under Settings > Licence. Each update is installed only after its signature, release number and archive checksum are checked. A release that asks for a manual step is held. The Invardia support link then also travels with this key.",
         "disabled": "No install key is claimed. This switch does not stop updates for an install that already holds a key and whose update job uses Invardia. That is decided when the update job is deployed.",
         "risk": "When on, it sends your licence file and tenant id to invardia.com. A refused claim (key already exists, licence refused) is not retried until the licence changes. Reversible: switching it off stops new claims. A key already claimed stays and keeps working.",
         "requires": "A Pro licence for this tenant (without one nothing is sent). SuperAdmin to change it. 'Scheduled jobs' on. The update job deployed with Invardia as its update source. Outbound HTTPS to invardia.com.",
@@ -373,7 +373,7 @@
     },
     {
       "key": "FeatureGates.telemetry.uplink",
-      "label": "Send status telemetry to Invardia",
+      "label": "Invardia support link",
       "where": "Settings > Features & edition > Feature customization",
       "route": "/api/settings/feature-gates",
       "type": "boolean",
@@ -384,13 +384,13 @@
       "confirm": {
         "on": {
           "tone": "neutral",
-          "title": "Send status reports to Invardia?",
-          "body": "When on, PIM Manager tells Invardia how its jobs are doing, so support can help sooner.",
+          "title": "Turn on the Invardia support link?",
+          "body": "When on, PIM Manager sends its health and run results to Invardia support, so support can see problems and updates can roll out.",
           "note": "Note: this sends job status, with secrets removed, out of your environment to invardia.com."
         }
       },
       "info": {
-        "what": "Runs the Invardia support link job every hour (job name 'uplink' in schedules and run history). It reports to Invardia which jobs ran and whether they succeeded (one report per job, never one per run), and every hour a heartbeat with version, edition and licence state. Without an install key it is anonymous: no tenant, no server name, no error text, only an error class and rounded counts. With a Pro install key, reports carry the error text with secrets removed.",
+        "what": "Sends PIM Manager's health and run results to Invardia support, so support can see problems and updates can roll out. Turning it off stops all reports to Invardia support. The Invardia support link job runs every hour (job name 'uplink' in schedules and run history). It reports to Invardia which jobs ran and whether they succeeded (one report per job, never one per run), and every hour a heartbeat with version, edition and licence state. Without an install key it is anonymous: no tenant, no server name, no error text, only an error class and rounded counts. With a Pro install key, reports carry the error text with secrets removed.",
         "enabled": "From the next hourly run, the job reports at most 20 job results per cycle and the heartbeat every hour. A failed send never fails anything else and is retried on the next cycle; the job turns amber on the Jobs page only after 3 failed cycles in a row, and a delivery failure is never mailed to you (Invardia sees the missing report on its side).",
         "disabled": "Nothing is sent. If it was on before, one opt-out notice is sent once, then nothing more.",
         "risk": "When on, it sends status data out of your environment to invardia.com. With a Pro install key that includes shortened, redacted error messages. Reversible: switch it off and the next run sends only the one-time opt-out notice.",
@@ -422,7 +422,7 @@
         "enabled": "With a Pro install key, the next Invardia support link run sends the setup report, then one a day and one on every change. Invardia support sees what is missing and can help before you call. Without an install key nothing of this is sent.",
         "disabled": "No setup report is sent. The hourly job reports and the 4-hourly heartbeat are not affected (they have their own switch).",
         "risk": "When on, it sends the state of your settings (ids, ok / missing / wrong / unknown, counts and the names of missing Graph permissions) to invardia.com. Never names of people or groups, tenant data, error text or secrets. Reversible: switch it off and nothing more is sent.",
-        "requires": "A Pro install key (identified telemetry). 'Send status telemetry to Invardia' on. SuperAdmin to change it. Outbound HTTPS to Invardia support.",
+        "requires": "A Pro install key (an identified Invardia support link). 'Invardia support link' on. SuperAdmin to change it. Outbound HTTPS to Invardia support.",
         "recommended": "On, so Invardia support can see an unfinished setup or a broken updater before it becomes an incident.",
         "docUrl": "https://invardia.com/docs/pim/settings/FeatureGates.telemetry.setup/"
       }
@@ -448,9 +448,9 @@
       "info": {
         "what": "Adds the cause of every problem to the hourly job reports: a stable error code (for example pim-entra-0104), the kind of cause, who acts and one short technical line, and adds the Microsoft services the tenant is licensed for to the hourly status. The same code is shown in mails and on Invardia's error pages.",
         "enabled": "With a Pro install key, the next Invardia support link run sends the codes with the job reports, and the next hourly status names the licensed services. Without an install key nothing of this is sent.",
-        "disabled": "Job reports go as before, without codes and licences. The other telemetry switches are not affected.",
+        "disabled": "Job reports go as before, without codes and licences. The other Invardia support link switches are not affected.",
         "risk": "When on, it sends error codes, cause kinds, the tenant's licence names (for example the product ids of its Microsoft 365 plans) and one short technical line per cause, with secrets removed, to invardia.com. Reversible: switch it off and nothing more is sent.",
-        "requires": "A Pro install key (identified telemetry). 'Send status telemetry to Invardia' on. SuperAdmin to change it. Outbound HTTPS to Invardia support.",
+        "requires": "A Pro install key (an identified Invardia support link). 'Invardia support link' on. SuperAdmin to change it. Outbound HTTPS to Invardia support.",
         "recommended": "On. Invardia support receives the codes (since 2026-10-15).",
         "docUrl": "https://invardia.com/docs/pim/settings/FeatureGates.telemetry.causes/"
       }
@@ -479,11 +479,11 @@
         }
       },
       "info": {
-        "what": "The master switch for the scheduler. Every scheduled job checks it before it runs: engine reconcile runs, the change queue, discovery, digests and reminders, access-request handling, licence checks and requests, telemetry, hybrid AD jobs and the rest. It applies from the next scheduler tick.",
+        "what": "The master switch for the scheduler. Every scheduled job checks it before it runs: engine reconcile runs, the change queue, discovery, digests and reminders, access-request handling, licence checks and requests, the Invardia support link, hybrid AD jobs and the rest. It applies from the next scheduler tick.",
         "enabled": "Jobs run on the cadence shown on the Job schedule page. The engine reconciles your definitions into the tenant, which creates, updates and removes accounts, groups and assignments.",
         "disabled": "Every scheduled job is recorded as 'skipped' with status ok, and nothing runs. The engine does not reconcile, no reminders or digests are sent, access windows are not ended, and licence requests stop.",
         "risk": "Switching it on lets the engine write to your tenant on a schedule. Switching it off makes the environment inert while every job still looks green, so missing work (an account not created, an access window not closed) goes unnoticed. Reversible: switch it on and the next tick resumes. Work skipped in between is caught up by the next reconcile.",
-        "requires": "Free (Community) and Pro. SuperAdmin to change it. 'Request the licence from Invardia automatically', 'Pro updates from Invardia' and 'Send status telemetry to Invardia' all depend on it.",
+        "requires": "Free (Community) and Pro. SuperAdmin to change it. 'Request the licence from Invardia automatically', 'Pro updates from Invardia' and 'Invardia support link' all depend on it.",
         "recommended": "On. Switch it off only for a short, deliberate pause, such as while restoring a configuration backup.",
         "docUrl": "https://invardia.com/docs/pim/settings/FeatureGates.scheduler.jobs/"
       }

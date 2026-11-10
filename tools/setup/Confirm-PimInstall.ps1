@@ -26,8 +26,8 @@
                           the database against the product tier (S3; a pinned database is said, never changed) -- PIM 100.114
       scheduler           'scheduler.jobs' is ON and the tick has run since the install (SchedulerState / the tick's last
                           execution) -- a WARNING otherwise, never a stop (PIM 100.75)
-      telemetry           'telemetry.uplink' is ON and the uplink job reported (UplinkState): identified with a clean last
-                          result = ok; not run yet = WARNING "first report due within 60 min"; failing / anonymous on a
+      telemetry           the Invardia support link ('telemetry.uplink') is ON and its job ('uplink') reported
+                          (UplinkState): identified with a clean last result = ok; not run yet = WARNING "first report due within 60 min"; failing / anonymous on a
                           licensed install = WARNING with the reason; never a stop (PIM 100.75)
       easyauth            Easy Auth is on and every SuperAdmin may sign in
       support-sql         the Invardia Support app's read-only database access (PIM 100.116, OPEN-01): "in place" only on
@@ -611,7 +611,7 @@ $fix['engine-size'] = "Azure portal > Container Apps job $TickJobName > Containe
 $fix['engine-first-run'] = 'PIM Manager > Home (the engine status and its last run), or Settings > Job schedule > Run now'
 # PIM 100.75
 $fix['scheduler'] = 'PIM Manager > Settings > Features & edition: Scheduled jobs ON; then Home shows the tick (it runs every 5 minutes)'
-$fix['telemetry'] = 'PIM Manager > Jobs > uplink (its result names the reason; Run now sends at once) -- Settings > Features & edition: Send status telemetry to Invardia ON; Settings > Licence shows the install key'
+$fix['telemetry'] = 'PIM Manager > Jobs > Invardia support link (its result names the reason; Run now sends at once) -- Settings > Features & edition: Invardia support link ON; Settings > Licence shows the install key'
 
 # ============================================================================ run
 Write-Host "`n==> END-OF-INSTALL VERIFY ($Role) -- $ResourceGroup / $SqlServerFqdn" -ForegroundColor Cyan

@@ -9960,7 +9960,7 @@
     // the cloud services on top
     s += erBox(xL, 10, bw, 40, 'Microsoft Entra ID / Graph', 'directory, PIM, sign-in', 'ext');
     s += erBox(xC, 10, bw, 40, 'Azure Resource Manager', 'Azure roles, discovery, jobs', 'ext');
-    s += erBox(xR, 10, bw, 40, 'Invardia', (flowsOn('uplink') ? 'telemetry' : 'no telemetry') + (flowsOn('update-invardia') ? ', updates' : '') + (flowsOn('licence') ? ', licence' : ''), flowsOn('uplink') || flowsOn('update-invardia') || flowsOn('licence') ? 'ext' : 'dim');
+    s += erBox(xR, 10, bw, 40, 'Invardia', (flowsOn('uplink') ? 'support link' : 'no support link') + (flowsOn('update-invardia') ? ', updates' : '') + (flowsOn('licence') ? ', licence' : ''), flowsOn('uplink') || flowsOn('update-invardia') || flowsOn('licence') ? 'ext' : 'dim');
     // the people
     s += erBox(xL, top, bw, bh, 'Admins (browser)', 'Entra sign-in + PIM Manager role', 'ext');
     if (ids.some(i => i.role === 'activator')) s += erBox(xL, top + rowH, bw, bh, 'PIM Activator', 'browser extension, delegated', 'ext');
@@ -20585,7 +20585,7 @@
     Engine: 'applies your configuration to the tenant',
     Maintenance: 'checks, snapshots, discovery and housekeeping',
     Reports: 'mails and reports',
-    Updates: 'licence, telemetry and the update service'
+    Updates: 'licence, the Invardia support link and the update service'
   };
   function jobAttnRank(j) {
     if (!j) return 9;

@@ -33,7 +33,7 @@ $script:PimInstallVerifyLines = [ordered]@{
     'manager-rg-reader'  = 'Manager Reader on the PIM resource group'
     'engine-first-run'   = 'Engine first run'
     'scheduler'          = 'Scheduled jobs on + the tick has run'
-    'telemetry'          = 'Telemetry to Invardia delivered'
+    'telemetry'          = 'Invardia support link delivered'
     'engine-size'        = 'Engine job sized for the tenant'
     'easyauth'           = 'Sign-in (sign-in front or Easy Auth) + SuperAdmins allowed'
     'support-sql'        = 'Invardia support: database access'
@@ -334,7 +334,7 @@ function Get-PimInstallVerifyRows {
                 # and does nothing. Never a stop: a WARNING with the next step (right after an install the tick may not have run).
                 # Fact: { readable; schedulerOn; lastTickUtc; tickStatus; tickAt }.
                 if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'warning' $unread (& $fx $id) $false)); break }
-                if ((Get-PimFactValue $f 'schedulerOn') -eq $false) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "the feature 'scheduler.jobs' is OFF -- no job runs here (no engine run, no telemetry, no licence request)" (& $fx $id) $false)); break }
+                if ((Get-PimFactValue $f 'schedulerOn') -eq $false) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "the feature 'scheduler.jobs' is OFF -- no job runs here (no engine run, no Invardia support link, no licence request)" (& $fx $id) $false)); break }
                 $lt = "$(Get-PimFactValue $f 'lastTickUtc')".Trim(); $ts = "$(Get-PimFactValue $f 'tickStatus')".Trim(); $ta = "$(Get-PimFactValue $f 'tickAt')".Trim()
                 if ($lt) { $rows.Add((New-PimInstallVerifyRow $id 'ok' "scheduled jobs on; the tick last ran a job at $lt" '' $false)); break }
                 if ($ts -eq 'Succeeded') { $rows.Add((New-PimInstallVerifyRow $id 'ok' "scheduled jobs on; the tick's latest execution succeeded$(if ($ta) { " ($ta)" })" '' $false)); break }
@@ -347,19 +347,19 @@ function Get-PimInstallVerifyRows {
                 # 12.18 / 12.21): every problem is a WARNING with its reason; "not run yet" is a warning naming when it is due.
                 # Fact: { readable; uplinkOn; schedulerOn; mode; lastResult; lastCycleUtc; lastFailed; keyStored; keyValid }.
                 if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'warning' $unread (& $fx $id) $false)); break }
-                if ((Get-PimFactValue $f 'uplinkOn') -eq $false) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "telemetry is switched OFF (feature 'telemetry.uplink') -- Invardia support cannot see this environment" (& $fx $id) $false)); break }
-                if ((Get-PimFactValue $f 'schedulerOn') -eq $false) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "telemetry cannot run: the feature 'scheduler.jobs' is off" (& $fx $id) $false)); break }
+                if ((Get-PimFactValue $f 'uplinkOn') -eq $false) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "the Invardia support link is switched OFF (feature 'telemetry.uplink') -- Invardia support cannot see this environment" (& $fx $id) $false)); break }
+                if ((Get-PimFactValue $f 'schedulerOn') -eq $false) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "the Invardia support link cannot run: the feature 'scheduler.jobs' is off" (& $fx $id) $false)); break }
                 $mode = "$(Get-PimFactValue $f 'mode')".Trim().ToLowerInvariant(); $last = "$(Get-PimFactValue $f 'lastResult')".Trim(); $at = "$(Get-PimFactValue $f 'lastCycleUtc')".Trim()
-                if (-not $at -or -not $mode) { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'telemetry not confirmed yet (first report due within 60 min)' (& $fx $id) $false)); break }
+                if (-not $at -or -not $mode) { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'Invardia support link not confirmed yet (first report due within 60 min)' (& $fx $id) $false)); break }
                 $lf = Get-PimFactValue $f 'lastFailed'; $nf = 0
                 if ($null -ne $lf -and "$lf" -ne '') { [void][int]::TryParse("$lf", [ref]$nf) } elseif ($last -match ',\s*(\d+)\s+failed\b') { $nf = [int]$Matches[1] }
-                if ($mode -eq 'disabled') { $rows.Add((New-PimInstallVerifyRow $id 'warning' "telemetry is switched OFF ($last)" (& $fx $id) $false)); break }
-                if ($nf -gt 0) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "telemetry not delivered: $last (last report $at)" (& $fx $id) $false)); break }
+                if ($mode -eq 'disabled') { $rows.Add((New-PimInstallVerifyRow $id 'warning' "the Invardia support link is switched OFF ($last)" (& $fx $id) $false)); break }
+                if ($nf -gt 0) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "Invardia support link not delivered: $last (last report $at)" (& $fx $id) $false)); break }
                 $kStored = [bool](Get-PimFactValue $f 'keyStored'); $kValid = [bool](Get-PimFactValue $f 'keyValid')
                 if ($mode -ne 'identified') {
-                    if ($kStored -and -not $kValid) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "an install key is stored but it is not a valid Invardia install key -- telemetry is anonymous (last report $at)" (& $fx $id) $false)); break }
+                    if ($kStored -and -not $kValid) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "an install key is stored but it is not a valid Invardia install key -- the Invardia support link is anonymous (last report $at)" (& $fx $id) $false)); break }
                     if ($kValid) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "an install key is stored, but the last report ($at) went anonymous -- the next hourly report is identified; if it stays anonymous the key is not read" (& $fx $id) $false)); break }
-                    if ($LicenceExpected) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "no install key stored -- telemetry is anonymous; the engine claims one every 6 h (last report $at)" (& $fx $id) $false)); break }
+                    if ($LicenceExpected) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "no install key stored -- the Invardia support link is anonymous; the engine claims one every 6 h (last report $at)" (& $fx $id) $false)); break }
                     $rows.Add((New-PimInstallVerifyRow $id 'ok' "anonymous (no licence -- the community report); last report $at" '' $false)); break
                 }
                 $rows.Add((New-PimInstallVerifyRow $id 'ok' "identified; last report $at$(if ($last) { ": $last" })" '' $false))

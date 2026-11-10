@@ -35,7 +35,7 @@ PIM Manager keeps privileged access in Microsoft Entra ID and Azure in line with
 - MSP installs add a managing-tenant side (a signed baseline bundle published to storage, pulled by each managed tenant).
 
 ### What Invardia hosts
-- invardia.com: the download of standalone setup scripts, licences, the optional update channel for Pro, and the receiver for the telemetry uplink (chapter 4). None of these is needed for the product to keep running; the engine runs without any call to Invardia.
+- invardia.com: the download of standalone setup scripts, licences, the optional update channel for Pro, and the receiver for the Invardia support link (chapter 4). None of these is needed for the product to keep running; the engine runs without any call to Invardia.
 - Invardia never hosts your directory data, your SQL database or your runtime.
 
 ### Network exposure options
@@ -48,7 +48,7 @@ PIM Manager keeps privileged access in Microsoft Entra ID and Azure in line with
 - Engine and Manager -> Microsoft Graph / Azure Resource Manager / Defender / Power BI / Exchange Online REST: HTTPS, managed identity tokens.
 - Engine and Manager -> Azure SQL: TLS (Encrypt=True, certificate validated), managed identity.
 - Administrators' browsers -> Manager: HTTPS, Entra sign-in.
-- Product -> invardia.com: HTTPS, outbound only (telemetry, licence, optional updates). Nothing from Invardia connects in to your environment.
+- Product -> invardia.com: HTTPS, outbound only (the Invardia support link, licence, optional updates). Nothing from Invardia connects in to your environment.
 
 <a id="identities"></a>
 ## 2. Identities
@@ -220,7 +220,7 @@ Every permission the product grants or requires, per identity, read from the ins
 
 ### Data sent to Invardia
 All outbound, HTTPS, to invardia.com. Nothing is sent about users, groups or roles by design; the exact fields are below.
-- **Telemetry uplink** (run reports hourly, a heartbeat every 4 hours; feature gate `telemetry.uplink`, **on by default**, switch off in Settings > Features; switching off sends one final opt-out record and then nothing). Two modes: **anonymous** (no licence install key: a random install id, bucketed counts, no tenant, host or text) and **identified** (with an install key: adds tenant id, host name and redacted error text). The redaction removes tokens, keys, SAS signatures and PEM blocks; it also removes e-mail addresses, UPNs and object names from error text. The identified heartbeat also carries the environment name your administrators gave the installation (the name shown in the Manager header) and the guard mode (`normal`, or `strict` with its end time).
+- **Invardia support link** (sends PIM Manager's health and run results to Invardia support, so support can see problems and updates can roll out; job name `uplink`; run reports hourly, a heartbeat every 4 hours; feature gate `telemetry.uplink`, **on by default**, switch off in Settings > Features; switching off sends one final opt-out record and then nothing). Two modes: **anonymous** (no licence install key: a random install id, bucketed counts, no tenant, host or text) and **identified** (with an install key: adds tenant id, host name and redacted error text). The redaction removes tokens, keys, SAS signatures and PEM blocks; it also removes e-mail addresses, UPNs and object names from error text. The identified heartbeat also carries the environment name your administrators gave the installation (the name shown in the Manager header) and the guard mode (`normal`, or `strict` with its end time).
 - **Licence request** (every 30 minutes until a licence is installed; gate `licence.autoRequest`, on by default): product, version, tenant id, install id, current licence id and expiry. No contact details. When a licence is installed, the request also proves it: it sends the SHA-256 of the installed licence file and, with an install key, the key in a request header, so only the installation that holds the licence can ask for its renewal.
 - **Install-key claim and update manifest** (gate `updates.invardia`): Pro sends product, tenant id, licence, ring; Community asks the public release channel for its ring and sends nothing else.
 - **Install tracking** (only when an install is started from an Invardia install token): the step names and outcomes.
@@ -229,12 +229,12 @@ All outbound, HTTPS, to invardia.com. Nothing is sent about users, groups or rol
 ### Encryption and residency
 - **At rest:** Azure SQL Transparent Data Encryption with service-managed keys, or customer-managed keys as an option. Key Vault for secrets.
 - **In transit:** HTTPS to every API; SQL connections with Encrypt=True and certificate validation. Setup sets the SQL server's minimum TLS version to 1.2.
-- **Residency:** every resource is created in your subscription in the region you choose. The installer's region list is West Europe, Sweden Central and Denmark East. Invardia receives only the uplink fields above.
+- **Residency:** every resource is created in your subscription in the region you choose. The installer's region list is West Europe, Sweden Central and Denmark East. Invardia receives only the Invardia support link fields above.
 
 ### Deletion on uninstall
 See chapter 10. Your SQL database (and so all stored data) remains until you delete the resource group or the database.
 
-**Telemetry uplink -- exact fields**
+**Invardia support link -- exact fields**
 
 | Record | Fields | Mode |
 |---|---|---|
@@ -364,7 +364,7 @@ The top risks for a privileged-access product and the controls that answer each 
 | Vendor (Invardia) access misuse or compromise | No access without the Support app, which is yours to create, lower, switch off and remove; secret expiry; tenant/app/production checks in Invardia's sign-in tool | Support levels are scoped and the Conditional Access lock is on; every Support app action is in PIM Manager's own audit trail |
 | Tampering with the audit trail | Append-only triggers on the audit log and journal; retention minimum 13 months | Only the updater holds a schema right; every schema change is in the SQL audit, outside the database |
 | Lateral movement between product identities | Separate identities per component; one database user per component; the image-pull identity has no database access; the SQL admin group holds only the database job identity (people just-in-time); the web app has no db_ddladmin and only start rights on the engine job; publish job without fixed SQL roles | Each component holds only its own custom role; the updater is never in the SQL admin group; no engine secret reaches the Manager |
-| Data leaving the tenant | No directory data in telemetry by design; anonymous mode without an install key; opt-out | Names and UPNs are removed from error text before it leaves; the licence request sends only what licensing needs |
+| Data leaving the tenant | No directory data in the Invardia support link by design; anonymous mode without an install key; opt-out | Names and UPNs are removed from error text before it leaves; the licence request sends only what licensing needs |
 | Network exposure | Manager created closed until Entra sign-in is verified; workers have no ingress; Entra-only SQL; private options | Private networking is a setup option; setup sets SQL minimum TLS 1.2 and keeps the install in the regions you choose |
 | Secrets at rest | Managed identities everywhere at runtime; no sign-in secret (federated credential); no storage SAS in the updater; registry admin user off; Key Vault for secrets with purge protection on the product's own vaults; API keys hashed | The install key and licence token are held as secrets; the emergency passphrase hash is salted |
 
@@ -382,7 +382,7 @@ The top risks for a privileged-access product and the controls that answer each 
 | 8 | Grant the Invardia Support app only when needed, at troubleshoot level, and remove it afterwards; enable its Conditional Access lock | Vendor access only on demand |
 | 9 | Monitor the engine and Manager managed identities with Entra workload identity alerts; treat them as tier 0 | They hold tier-0-equivalent rights |
 | 10 | Set AuditRetentionMonths to your policy and Log Analytics retention to match | Defaults keep the audit forever and logs 30 days |
-| 11 | Decide on telemetry: keep anonymous, use identified for Pro support, or switch telemetry.uplink off | Data leaving the tenant |
+| 11 | Decide on the Invardia support link: keep it anonymous, use identified for Pro support, or switch it off (setting telemetry.uplink) | Data leaving the tenant |
 | 12 | Before running any setup script (optional, for whoever verifies): compare Get-FileHash with SHA256SUMS.txt and read it; the command PIM Manager shows stays two lines, download then run | The hash shows that the script is the published one |
 | 13 | Use the update hold for change windows; review release notes before lifting it | You control when code changes |
 

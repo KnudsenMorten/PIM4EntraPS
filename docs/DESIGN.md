@@ -57,7 +57,7 @@ the alternative was found to fail in practice.
 26. [Where to read next](#26-where-to-read-next)
 27. [Identity, credentials and self-healing](#27-identity-credentials-and-self-healing)
 28. [Change control, ownership and daily checks (2026-09)](#28-change-control-ownership-and-daily-checks-2026-09)
-29. [Talking to Invardia: the licence request and status telemetry](#29-talking-to-invardia-the-licence-request-and-status-telemetry)
+29. [Talking to Invardia: the licence request and the Invardia support link](#29-talking-to-invardia-the-licence-request-and-the-invardia-support-link)
 30. [Finishing an install: the end-of-install check, alert recipients and install tracking](#30-finishing-an-install-the-end-of-install-check-alert-recipients-and-install-tracking)
 32. [The 2026-10 security redesign: database access, Strict guards, names, mail, sign-in, releases, the manual](#32-the-2026-10-security-redesign-database-access-strict-guards-names-mail-sign-in-releases-the-manual)
 
@@ -11332,7 +11332,7 @@ When the safety brake holds a large or weakening batch of activation-policy chan
 every rule that would change, current value and new value side by side, so the batch can go to a change advisory board
 before anyone approves it.
 
-## 29. Talking to Invardia: the licence request and status telemetry
+## 29. Talking to Invardia: the licence request and the Invardia support link
 
 PIM makes exactly two kinds of call to Invardia, the vendor site. **Both are scheduled jobs, and both are on by default in a new
 installation** (feature defaults `defaultEnabled` in the catalog); an administrator switches either off under Settings > Features. Neither ever receives an instruction from Invardia: one fetches a
@@ -11356,7 +11356,7 @@ through exactly the same checks as any other, so the heartbeat answer alone can 
 note is removed once the new licence is installed. A missing or malformed answer changes nothing, and a rejection still
 stops further requests until the administrator asks again.
 
-### 29.2 Status telemetry (job `uplink`, feature `telemetry.uplink`)
+### 29.2 The Invardia support link (job `uplink`, feature `telemetry.uplink`)
 Every hour PIM sends one report per job that ran since the last send, and every hour a heartbeat. A job that ran many times
 sends one report: *failed* if any of its runs failed (with that run's failure), *warning* if one was held for approval,
 otherwise *ok*. Skipped and unimplemented runs are not reported, because nothing ran. The heartbeat carries the version, the
@@ -11415,7 +11415,7 @@ stays the customer's own alarm:
 Invardia keeps one list of alert ids per product (framework §8.19); these three are PIM's list, and the platform takes
 an alert only when its id is on the product's list.
 
-At that point the finding is only recorded in the settings store (`UplinkAlerts`); the hourly telemetry job sends it. The
+At that point the finding is only recorded in the settings store (`UplinkAlerts`); the hourly Invardia support link job sends it. The
 recording never throws and never sends, so it cannot hold up or fail the run or the mail. The list above is fixed in the
 code: a caller can only name one of the three findings and hand it numbers. A value that is not a number (also a number
 written as text), a fraction, a negative value or a key that is not on that finding's list is dropped, so a person's name,
@@ -11432,8 +11432,8 @@ mail. A refusal of the record's content (400 / 422) holds the alert records for 
 reports of the cycle; a transport failure (429, 5xx, no network) stops the cycle like any other report. The switch
 `PIM_UPLINK_ALERTS` (on by default; `0` / `false` / `off` / `no` = off) turns the alert records off.
 
-**Telemetry that is not delivered is visible (2026-10-11).** The `uplink` run is a *warning* -- its own run status, amber
-on the Jobs page, never *failed* (a telemetry problem is not an engine failure) and never a green *ok* -- when telemetry is
+**An Invardia support link that does not deliver is visible (2026-10-11).** The `uplink` run is a *warning* -- its own run status, amber
+on the Jobs page, never *failed* (a support link problem is not an engine failure) and never a green *ok* -- when the support link is
 on and:
 - a report was refused or could not be sent: the run's result says "telemetry not delivered:" with Invardia's answer (the
   refused field list) or the transport error;
@@ -11443,7 +11443,7 @@ on and:
 
 The warning raises the job alert at most once a day while it lasts: the alert text is a fixed sentence per kind of problem,
 so the identical-alert pause of one day holds every repeat; the specifics are in the mail's headline. A clean run ends it by
-itself. The telemetry state keeps the last result and the number of reports that failed, which the end-of-install check
+itself. The support link state keeps the last result and the number of reports that failed, which the end-of-install check
 reads (30.1). The scheduler loads the deployment-scenario profile when it starts, so the setup report names the tenant's
 role (managing / managed) instead of an empty one.
 
@@ -11698,7 +11698,7 @@ table and does not call the install done while a required line fails.
 | Engine Reader at the tenant root | no -- a warning with the exact command for a Global Administrator | one grant attempt |
 | Engine first run | no (a follow-up) | no |
 | Scheduled jobs on + the tick has run (the scheduler feature switch, the tick's recorded job stamps or its last execution) | no -- a warning with the next step | no |
-| Telemetry to Invardia delivered (the telemetry switch, then what the `uplink` job recorded: identified and clean = ok; no report yet = "telemetry not confirmed yet (first report due within 60 min)"; failing, or anonymous although an install key is stored or expected = a warning with the reason) | no -- telemetry never fails an install | no |
+| Invardia support link delivered (the Invardia support link switch, then what the `uplink` job recorded: identified and clean = ok; no report yet = "Invardia support link not confirmed yet (first report due within 60 min)"; failing, or anonymous although an install key is stored or expected = a warning with the reason) | no -- the support link never fails an install | no |
 | Sign-in: Easy Auth on, every SuperAdmin allowed | yes | no |
 | Invardia support: database access (27.11) -- "in place" only when the check read, from the database, a user with the Support app's id in the database owner role; otherwise "could not be checked" or "NOT in place" with the one-time script; "not checked" when no Support app was named | no -- a warning at most, never a stop | no |
 | SQL setup-host firewall rule removed | yes | yes, when this run opened it |

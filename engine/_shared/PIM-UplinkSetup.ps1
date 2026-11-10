@@ -37,8 +37,9 @@ $script:PimSetupControlsMinimum = @(
     [ordered]@{ id = 'update-ring'; title = 'Update ring set'; enum = @('1', '2', '3')
         why = 'The ring decides which approved version this environment receives; without it the updater cannot choose a version.'
         fix = 'Set the ring with Deploy-PimUpdateJob.ps1 -Ring <1|2|3>; the deployment records it in the environment.' }
-    [ordered]@{ id = 'uplink-key'; title = 'Uplink key present'
-        why = 'The Invardia install key lets this environment report its health to Invardia support and take Pro updates.'
+    # SUPPORT-LINK-1 point 1: the title a customer reads says "Invardia ..."; the id 'uplink-key' is Invardia's and stays.
+    [ordered]@{ id = 'uplink-key'; title = 'Invardia install key present'
+        why = 'The Invardia install key identifies this environment on the Invardia support link and lets it take Pro updates.'
         fix = 'Keep "Pro updates from Invardia" on (it claims the key with the licence), or store the key from the customer portal as the PIM_UPLINK_KEY secret.' }
     [ordered]@{ id = 'licence-valid'; title = 'Licence valid'
         why = 'Pro features and Pro updates need a valid licence for this tenant.'

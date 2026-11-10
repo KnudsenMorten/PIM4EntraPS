@@ -568,8 +568,8 @@ deployment is a supported choice) and no credentials lying around.
   **many removals or account disables in one run**, a change that would remove the tenant's **last Global
   Administrator** (held until a SuperAdmin releases exactly that change), and the **last PIM Manager SuperAdmin**
   (refused: add another one first). Everything else is a warning, shown on its own page (for example access that is
-  not yet in line with your definitions). Form mistakes are plain form errors, and platform problems (database, licence) are reported to support as
-  telemetry — none of these appear on the Guards page.
+  not yet in line with your definitions). Form mistakes are plain form errors, and platform problems (database, licence) are reported to support over
+  the Invardia support link — none of these appear on the Guards page.
 - **A hold that is no longer needed clears itself.** ✅ 2026-10-12 — When the plan a guard held is no longer wanted
   (for example the removals were taken back, or the change was applied), the next run finds nothing to hold and
   clears the hold by itself. Nobody has to acknowledge it. A held policy change set reads the same on every page that
@@ -2447,10 +2447,12 @@ Two jobs talk to Invardia. Both are **on by default** in a new installation, and
 - **Request the licence automatically** -- asks Invardia for this installation's licence when none is valid or yours ends
   within 30 days, then installs the signed file only after checking it here. It sends the tenant, the version and an
   installation id.
-- **Send status telemetry** (the **Invardia support link** job on the Jobs page) -- every hour, which jobs ran and whether they succeeded, and every hour the version, edition
-  and licence state. Without a Pro install key it is **anonymous**: no tenant, no server name, no error text -- only a
+- **Invardia support link** (the setting and the job on the Jobs page share the name) -- sends PIM Manager's health
+  and run results to Invardia support, so support can see problems and updates can roll out. Every hour it sends which
+  jobs ran and whether they succeeded, and the version, edition and licence state. Without a Pro install key it is **anonymous**: no tenant, no server name, no error text -- only a
   failure class and rounded counts, under a random id of its own. With a Pro install key the reports also carry the error
-  text, with secrets removed, so support can see a failure before you call. Switch it off at any time.
+  text, with secrets removed, so support can see a failure before you call. Switch it off at any time: turning it off
+  stops all reports to Invardia support.
   With an install key the report also lists which guards hold something right now, and says when a
   guard is clear again, so the status support sees follows your installation. It names the guard, its outcome, its
   severity and since when — not the accounts, groups or policies that are held.

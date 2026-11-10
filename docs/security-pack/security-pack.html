@@ -81,7 +81,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 </ul>
 <h3>What Invardia hosts</h3>
 <ul>
-<li>invardia.com: the download of standalone setup scripts, licences, the optional update channel for Pro, and the receiver for the telemetry uplink (chapter 4). None of these is needed for the product to keep running; the engine runs without any call to Invardia.</li>
+<li>invardia.com: the download of standalone setup scripts, licences, the optional update channel for Pro, and the receiver for the Invardia support link (chapter 4). None of these is needed for the product to keep running; the engine runs without any call to Invardia.</li>
 <li>Invardia never hosts your directory data, your SQL database or your runtime.</li>
 </ul>
 <h3>Network exposure options</h3>
@@ -96,7 +96,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <li>Engine and Manager -&gt; Microsoft Graph / Azure Resource Manager / Defender / Power BI / Exchange Online REST: HTTPS, managed identity tokens.</li>
 <li>Engine and Manager -&gt; Azure SQL: TLS (Encrypt=True, certificate validated), managed identity.</li>
 <li>Administrators&#39; browsers -&gt; Manager: HTTPS, Entra sign-in.</li>
-<li>Product -&gt; invardia.com: HTTPS, outbound only (telemetry, licence, optional updates). Nothing from Invardia connects in to your environment.</li>
+<li>Product -&gt; invardia.com: HTTPS, outbound only (the Invardia support link, licence, optional updates). Nothing from Invardia connects in to your environment.</li>
 </ul>
 </section>
 <section id="identities">
@@ -265,7 +265,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <h3>Data sent to Invardia</h3>
 <p>All outbound, HTTPS, to invardia.com. Nothing is sent about users, groups or roles by design; the exact fields are below.</p>
 <ul>
-<li><strong>Telemetry uplink</strong> (run reports hourly, a heartbeat every 4 hours; feature gate <code>telemetry.uplink</code>, <strong>on by default</strong>, switch off in Settings &gt; Features; switching off sends one final opt-out record and then nothing). Two modes: <strong>anonymous</strong> (no licence install key: a random install id, bucketed counts, no tenant, host or text) and <strong>identified</strong> (with an install key: adds tenant id, host name and redacted error text). The redaction removes tokens, keys, SAS signatures and PEM blocks; it also removes e-mail addresses, UPNs and object names from error text. The identified heartbeat also carries the environment name your administrators gave the installation (the name shown in the Manager header) and the guard mode (<code>normal</code>, or <code>strict</code> with its end time).</li>
+<li><strong>Invardia support link</strong> (sends PIM Manager&#39;s health and run results to Invardia support, so support can see problems and updates can roll out; job name <code>uplink</code>; run reports hourly, a heartbeat every 4 hours; feature gate <code>telemetry.uplink</code>, <strong>on by default</strong>, switch off in Settings &gt; Features; switching off sends one final opt-out record and then nothing). Two modes: <strong>anonymous</strong> (no licence install key: a random install id, bucketed counts, no tenant, host or text) and <strong>identified</strong> (with an install key: adds tenant id, host name and redacted error text). The redaction removes tokens, keys, SAS signatures and PEM blocks; it also removes e-mail addresses, UPNs and object names from error text. The identified heartbeat also carries the environment name your administrators gave the installation (the name shown in the Manager header) and the guard mode (<code>normal</code>, or <code>strict</code> with its end time).</li>
 <li><strong>Licence request</strong> (every 30 minutes until a licence is installed; gate <code>licence.autoRequest</code>, on by default): product, version, tenant id, install id, current licence id and expiry. No contact details. When a licence is installed, the request also proves it: it sends the SHA-256 of the installed licence file and, with an install key, the key in a request header, so only the installation that holds the licence can ask for its renewal.</li>
 <li><strong>Install-key claim and update manifest</strong> (gate <code>updates.invardia</code>): Pro sends product, tenant id, licence, ring; Community asks the public release channel for its ring and sends nothing else.</li>
 <li><strong>Install tracking</strong> (only when an install is started from an Invardia install token): the step names and outcomes.</li>
@@ -275,11 +275,11 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <ul>
 <li><strong>At rest:</strong> Azure SQL Transparent Data Encryption with service-managed keys, or customer-managed keys as an option. Key Vault for secrets.</li>
 <li><strong>In transit:</strong> HTTPS to every API; SQL connections with Encrypt=True and certificate validation. Setup sets the SQL server&#39;s minimum TLS version to 1.2.</li>
-<li><strong>Residency:</strong> every resource is created in your subscription in the region you choose. The installer&#39;s region list is West Europe, Sweden Central and Denmark East. Invardia receives only the uplink fields above.</li>
+<li><strong>Residency:</strong> every resource is created in your subscription in the region you choose. The installer&#39;s region list is West Europe, Sweden Central and Denmark East. Invardia receives only the Invardia support link fields above.</li>
 </ul>
 <h3>Deletion on uninstall</h3>
 <p>See chapter 10. Your SQL database (and so all stored data) remains until you delete the resource group or the database.</p>
-<div class="tablewrap"><table><caption>Telemetry uplink -- exact fields</caption><thead><tr><th>Record</th><th>Fields</th><th>Mode</th></tr></thead><tbody>
+<div class="tablewrap"><table><caption>Invardia support link -- exact fields</caption><thead><tr><th>Record</th><th>Fields</th><th>Mode</th></tr></thead><tbody>
 <tr><td>Every record</td><td>Schema, Kind, Product (pim-manager), Version, Ring, LastSeenUtc</td><td>Both</td></tr>
 <tr><td>Heartbeat (every hour)</td><td>Edition (community / pro / trial), Hosting (container), RuntimeIdentity (managed identity / certificate), LicenceState</td><td>Both</td></tr>
 <tr><td>Run report (per job, per cycle)</td><td>Job name, Outcome, DurationMs, ErrorClass, run count</td><td>Both</td></tr>
@@ -416,7 +416,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <tr><td>Vendor (Invardia) access misuse or compromise</td><td>No access without the Support app, which is yours to create, lower, switch off and remove; secret expiry; tenant/app/production checks in Invardia&#39;s sign-in tool</td><td>Support levels are scoped and the Conditional Access lock is on; every Support app action is in PIM Manager&#39;s own audit trail</td></tr>
 <tr><td>Tampering with the audit trail</td><td>Append-only triggers on the audit log and journal; retention minimum 13 months</td><td>Only the updater holds a schema right; every schema change is in the SQL audit, outside the database</td></tr>
 <tr><td>Lateral movement between product identities</td><td>Separate identities per component; one database user per component; the image-pull identity has no database access; the SQL admin group holds only the database job identity (people just-in-time); the web app has no db_ddladmin and only start rights on the engine job; publish job without fixed SQL roles</td><td>Each component holds only its own custom role; the updater is never in the SQL admin group; no engine secret reaches the Manager</td></tr>
-<tr><td>Data leaving the tenant</td><td>No directory data in telemetry by design; anonymous mode without an install key; opt-out</td><td>Names and UPNs are removed from error text before it leaves; the licence request sends only what licensing needs</td></tr>
+<tr><td>Data leaving the tenant</td><td>No directory data in the Invardia support link by design; anonymous mode without an install key; opt-out</td><td>Names and UPNs are removed from error text before it leaves; the licence request sends only what licensing needs</td></tr>
 <tr><td>Network exposure</td><td>Manager created closed until Entra sign-in is verified; workers have no ingress; Entra-only SQL; private options</td><td>Private networking is a setup option; setup sets SQL minimum TLS 1.2 and keeps the install in the regions you choose</td></tr>
 <tr><td>Secrets at rest</td><td>Managed identities everywhere at runtime; no sign-in secret (federated credential); no storage SAS in the updater; registry admin user off; Key Vault for secrets with purge protection on the product&#39;s own vaults; API keys hashed</td><td>The install key and licence token are held as secrets; the emergency passphrase hash is salted</td></tr>
 </tbody></table></div>
@@ -431,7 +431,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <tr><td>8</td><td>Grant the Invardia Support app only when needed, at troubleshoot level, and remove it afterwards; enable its Conditional Access lock</td><td>Vendor access only on demand</td></tr>
 <tr><td>9</td><td>Monitor the engine and Manager managed identities with Entra workload identity alerts; treat them as tier 0</td><td>They hold tier-0-equivalent rights</td></tr>
 <tr><td>10</td><td>Set AuditRetentionMonths to your policy and Log Analytics retention to match</td><td>Defaults keep the audit forever and logs 30 days</td></tr>
-<tr><td>11</td><td>Decide on telemetry: keep anonymous, use identified for Pro support, or switch telemetry.uplink off</td><td>Data leaving the tenant</td></tr>
+<tr><td>11</td><td>Decide on the Invardia support link: keep it anonymous, use identified for Pro support, or switch it off (setting telemetry.uplink)</td><td>Data leaving the tenant</td></tr>
 <tr><td>12</td><td>Before running any setup script (optional, for whoever verifies): compare Get-FileHash with SHA256SUMS.txt and read it; the command PIM Manager shows stays two lines, download then run</td><td>The hash shows that the script is the published one</td></tr>
 <tr><td>13</td><td>Use the update hold for change windows; review release notes before lifting it</td><td>You control when code changes</td></tr>
 </tbody></table></div>
