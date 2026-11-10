@@ -395,7 +395,10 @@ function Get-PimIdentityMoveRoleNeeds {
     $kvf = 'e147488a-f6f5-4113-8e2d-b22465e65bf6'   # Key Vault Crypto Service Encryption User on the sign-in front key -- web only
     $n = switch ("$Role".ToLowerInvariant()) {
         'web'      { @{ azure = @($rdr, 'b9a307c4-5aa3-4b52-ba60-2b17c136cd7b', $kvf, $acr); groups = @(); dirRoles = @() } }
-        'engine'   { @{ azure = @(@($rdr) + @(Get-PimIdentityMoveRootRoleIds) + @('0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3', $acr)); groups = @('grp-pim-powerbi-admin-api'); dirRoles = @('a9ea8996-122f-4c74-9520-8edcd192826c') } }
+        # RIGHTS-LIVE-1 (owner rights decision 2026-11-09 "approved with A"): + Container Apps Jobs Operator and Contributor, held
+        # on the UPDATER job only -- the engine starts the updater (update-expedite) and the watchdog restores its image
+        # (tools\setup\_PimSetupShared.ps1 Grant-PimEngineUpdaterJobAccess grants them, scope = that job)
+        'engine'   { @{ azure = @(@($rdr) + @(Get-PimIdentityMoveRootRoleIds) + @('0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3', $acr, 'b9a307c4-5aa3-4b52-ba60-2b17c136cd7b', 'b24988ac-6180-42a0-ab88-20f7382dd24c')); groups = @('grp-pim-powerbi-admin-api'); dirRoles = @('a9ea8996-122f-4c74-9520-8edcd192826c') } }
         'updater'  { @{ azure = @('b24988ac-6180-42a0-ab88-20f7382dd24c', $acr); groups = @(); dirRoles = @() } }
         'dbinit'   { @{ azure = @($acr); groups = @('grp-pim-sql-admins'); dirRoles = @() } }
         'requests' { @{ azure = @('0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3', $acr); groups = @(); dirRoles = @() } }
@@ -407,6 +410,9 @@ function Get-PimIdentityMoveRoleNeeds {
     # SEC-108 (owner 2026-11-09: "it is only the engine"): User Access Administrator / Owner are the ENGINE's only. Every other
     # role lists them as NEVER -- the move refuses to copy them from ANY source (its own system identity too).
     $n['never'] = if ("$Role".ToLowerInvariant() -eq 'engine') { @() } else { @(Get-PimIdentityMoveRootRoleIds) }
+    # RIGHTS-LIVE-1: the engine's Jobs Operator + Contributor are taken over ONLY at a Container Apps job scope (the updater job),
+    # never at the resource group or wider -- Select-PimIdentityMoveNeeded lists any other as not copied
+    $n['azureJobOnly'] = if ("$Role".ToLowerInvariant() -eq 'engine') { @('b9a307c4-5aa3-4b52-ba60-2b17c136cd7b', 'b24988ac-6180-42a0-ab88-20f7382dd24c') } else { @() }
     return $n
 }
 
@@ -421,7 +427,12 @@ function Select-PimIdentityMoveNeeded {
     param([Parameter(Mandatory)][string]$Role, [Parameter(Mandatory)][hashtable]$Rights, [string]$SourceName = 'the shared identity')
     $need = Get-PimIdentityMoveRoleNeeds -Role $Role
     $keep = @{ azure = @(); graph = @(); groups = @(); dirRoles = @(); kv = @() }; $not = New-Object System.Collections.Generic.List[string]
-    foreach ($a in @($Rights.azure)) { if (-not $a) { continue }; $g = @("$($a.roleDefinitionId)" -split '/')[-1].ToLowerInvariant(); if ($need.azure -contains $g) { $keep.azure += $a } else { $not.Add("Azure role $g at $($a.scope) (from $SourceName)") } }
+    foreach ($a in @($Rights.azure)) {
+        if (-not $a) { continue }; $g = @("$($a.roleDefinitionId)" -split '/')[-1].ToLowerInvariant()
+        # a role the map allows on a Container Apps JOB only (the engine's two on the updater job) is never taken at a wider scope
+        $jobOk = (@($need.azureJobOnly) -notcontains $g) -or ("$($a.scope)".TrimEnd('/') -match '(?i)/providers/Microsoft\.App/jobs/[^/]+$')
+        if ($need.azure -contains $g -and $jobOk) { $keep.azure += $a } else { $not.Add("Azure role $g at $($a.scope) (from $SourceName)") }
+    }
     foreach ($m in @($Rights.groups)) { if (-not $m) { continue }; if (@($need.groups | Where-Object { $_ -ieq "$($m.displayName)" }).Count) { $keep.groups += $m } else { $not.Add("PIM group $($m.displayName) (from $SourceName)") } }
     foreach ($d in @($Rights.dirRoles)) { if (-not $d) { continue }; if ($need.dirRoles -contains "$($d.roleDefinitionId)".ToLowerInvariant()) { $keep.dirRoles += $d } else { $not.Add("directory role $($d.roleDefinitionId) (from $SourceName)") } }
     foreach ($g in @($Rights.graph)) { if ($g) { $not.Add("Graph app role $($g.appRoleId) (from $SourceName)") } }

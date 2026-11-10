@@ -211,7 +211,7 @@ function Invoke-PimUpdaterConvergeStep {
             try { $eaRows = @{ assignments = @(Get-PimSqlRows -ConnectionString $csSize -Entity 'PIM-Assignments-Azure-Resources'); definitions = @(Get-PimSqlRows -ConnectionString $csSize -Entity 'PIM-Definitions-Resources') } }
             catch { $eaRows = @{ error = ((("$($_.Exception.Message)") -split "`n")[0]).Trim() } }
         }
-        $cv = Invoke-PimUpdateConvergeDefaults -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -TickJob $tickJob `
+        $cv = Invoke-PimUpdateConvergeDefaults -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -TickJob $tickJob -UpdaterJob "$selfJob" `
                   -Arm $armSeam -Store $storeSeam -Graph $graphGet -SqlServer "$($global:PIM_SqlServer)" -TenantId "$($env:PIM_TenantId)" `
                   -AlertRecipientsScript (Join-Path $solRoot 'tools/setup/Set-PimAlertRecipients.ps1') -EngineAzureRows $eaRows
         foreach ($l in @($cv.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }

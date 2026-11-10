@@ -2973,7 +2973,11 @@ function Invoke-PimUplinkCycle {
           # OPEN-17 / framework 8.19 ALERT: the security findings in pim.Settings 'UplinkAlerts' (PIM-UplinkAlert.ps1) go as Kind
           # 'alert' records. $null = Test-PimUplinkAlertsOn (PIM_UPLINK_ALERTS, ON by default) when PIM-UplinkAlert.ps1 is
           # loaded, else off. A content refusal holds them 24 h (UplinkState.alertsRefusedUtc) and never stops the cycle.
-          [AllowNull()][object]$Alerts = $null)
+          [AllowNull()][object]$Alerts = $null,
+          # UPLINK-QUIET (owner 2026-11-10): count this cycle in UplinkState.failedCycles (cycles in a row with a report that
+          # was not delivered; a fully delivered cycle resets it to 0). $false = carry the stored count unchanged -- a FLUSH
+          # before an alert mail is not one of the job's cycles.
+          [bool]$CountFailedCycle = $true)
     $NowUtc = $NowUtc.ToUniversalTime()
     $envNameRead = $null
     $endpoint = "$(& $GetSetting 'UplinkEndpoint')".Trim()
@@ -3687,6 +3691,9 @@ function Invoke-PimUplinkCycle {
                             lastCycleStartUtc = $NowUtc.ToString('o')
                             # PIM 100.75: read by the end-of-install verify (Confirm-PimInstall 'telemetry')
                             lastFailed = $failed }
+    # UPLINK-QUIET: cycles in a row with a report that was not delivered (Get-PimUplinkDeliveryWarning turns the job amber
+    # only from the third). Kept beside lastFailed; a fully delivered cycle resets it.
+    $newState['failedCycles'] = Get-PimUplinkFailedCycles -State $state -Failed $failed -Count $CountFailedCycle
     # PIM 100.102: the reported set. Left out while it was never started AND the state could not be read (so the first
     # readable cycle still starts it from the sent trip records).
     if ($hadReported -or $guardsKnown) {
@@ -3721,7 +3728,28 @@ function Invoke-PimUplinkCycle {
               releaseControl = [bool]$rcState.on; releaseControlRefused = [bool]$rcState.refusedNow
               guardsCleared = $clearedSent; activeGuards = $(if ($guardsKnown) { $activeNow.Count } else { -1 })
               alertsSent = $alertsSent; alertsRefused = [bool]$alRefusedNow
-              environmentName = $envNameRead }
+              environmentName = $envNameRead; failedCycles = [int]$newState['failedCycles'] }
+}
+
+function Get-PimUplinkFailedCycles {
+    <#
+      PURE. UPLINK-QUIET (owner 2026-11-10): the number of uplink cycles IN A ROW with a report that was not delivered.
+        -State   the previous UplinkState (its failedCycles; missing / unreadable = 0)
+        -Failed  this cycle's failed count
+        -Count   $false = this is not one of the job's cycles (a flush before an alert mail): the stored count, unchanged
+      A failed cycle = previous + 1; a fully delivered cycle (failed 0) = 0. Never throws.
+    #>
+    param([AllowNull()][object]$State, [int]$Failed = 0, [bool]$Count = $true)
+    $prev = 0
+    try {
+        $v = $null
+        if ($State -is [System.Collections.IDictionary]) { if ($State.Contains('failedCycles')) { $v = $State['failedCycles'] } }
+        elseif ($null -ne $State -and $State.PSObject.Properties['failedCycles']) { $v = $State.failedCycles }
+        $n = 0; if ($null -ne $v -and [int]::TryParse("$v", [ref]$n) -and $n -gt 0) { $prev = $n }
+    } catch { $prev = 0 }
+    if (-not $Count) { return [int]$prev }
+    if ($Failed -gt 0) { return [int]($prev + 1) }
+    return 0
 }
 
 function Get-PimUplinkDeliveryWarning {
@@ -3741,10 +3769,21 @@ function Get-PimUplinkDeliveryWarning {
         summary  a STABLE sentence per kind (no counts, no times) -- the alert's text, so the alert path's identical-alert
                  debounce (1440 min) sends it at most once a day while it lasts
       A telemetry problem is never a failed run (framework 12.18 / 12.21). Never throws.
+      UPLINK-QUIET (owner 2026-11-10: a single-tenant customer got a WARNING mail for ONE refused cycle while Invardia was
+      deploying; the next cycle delivered everything):
+        * a cycle with undelivered reports is a WARNING (kind send-failed) only from -WarnAfterFailedCycles cycles IN A ROW
+          (the cycle's failedCycles, UplinkState; a fully delivered cycle resets it). Fewer = no warning, only
+          info "1 report could not be delivered; it is retried next cycle" for the run detail. A cycle without failedCycles
+          (an older caller) is judged as before.
+        * send-failed NEVER adds a sentence to the summary, so it never mails the customer (Get-PimJobFailureAlert mails a
+          warning only through its summary). Invardia sees the missing heartbeat on its own side. key-malformed /
+          key-missing / not-identified keep their summary and their once-a-day mail.
     #>
     param([bool]$Enabled, [AllowNull()][object]$Cycle, [string]$StoredKeyRaw = '', [string]$ResolvedKey = '',
-          [bool]$LicenceRegistered = $false, [AllowNull()][object]$ClaimState = $null)
-    $out = [ordered]@{ warning = $false; kind = ''; reason = ''; note = ''; summary = '' }
+          [bool]$LicenceRegistered = $false, [AllowNull()][object]$ClaimState = $null,
+          # literal default, never a $script: value (a $script: default is $null in a child scope)
+          [int]$WarnAfterFailedCycles = 3)
+    $out = [ordered]@{ warning = $false; kind = ''; reason = ''; note = ''; summary = ''; info = ''; failedCycles = 0 }
     try {
         if (-not $Enabled -or $null -eq $Cycle) { return [pscustomobject]$out }
         $mode = "$(Get-PimUplinkField $Cycle 'mode')".Trim()
@@ -3756,10 +3795,18 @@ function Get-PimUplinkDeliveryWarning {
         $texts = New-Object System.Collections.Generic.List[string]
         $sums  = New-Object System.Collections.Generic.List[string]
         if ($failed -gt 0) {
-            $kinds.Add('send-failed')
+            $fcRaw = Get-PimUplinkField $Cycle 'failedCycles'
+            $fc = -1; $fcN = 0; if ($null -ne $fcRaw -and [int]::TryParse("$fcRaw", [ref]$fcN)) { $fc = [Math]::Max(1, $fcN) }
+            $out.failedCycles = [Math]::Max(0, $fc)
             $why = if ($reasons.Count) { @($reasons | Select-Object -First 3) -join '; ' } else { "$failed report(s) were refused or could not be sent" }
-            $texts.Add("telemetry not delivered: $why")
-            $sums.Add('Telemetry to Invardia is not being delivered: the uplink refused the reports or could not be reached.')
+            if ($fc -ge 0 -and $fc -lt [Math]::Max(1, $WarnAfterFailedCycles)) {
+                # UPLINK-QUIET: a passing failure -- the run is ok; the detail says what happens next
+                $out.info = $(if ($failed -eq 1) { '1 report could not be delivered; it is retried next cycle' } else { "$failed reports could not be delivered; they are retried next cycle" })
+            } else {
+                $kinds.Add('send-failed')
+                $texts.Add($(if ($fc -ge 0) { "telemetry not delivered ($fc cycles in a row): $why" } else { "telemetry not delivered: $why" }))
+                # no summary sentence: a delivery failure is never mailed to the customer (UPLINK-QUIET)
+            }
         }
         $claim = ''
         if ($ClaimState) {
@@ -4068,7 +4115,7 @@ function Invoke-PimUplinkJob {
             -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints -AdoptionCounts $adoption `
             -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun -Causes $causesOn -LicenceProbe $licProbe -HybridAd $hyAd `
             -ReleaseControl $rcOn -ReleaseControlFields $rcFields -ScopeStability $ssField -StateFields $stateSb -SupportSqlAccess $ssaSb -Pipeline $plField `
-            -EnvironmentName (Test-PimUplinkEnvironmentNameOn) -EnvironmentTransport $envNameXport
+            -EnvironmentName (Test-PimUplinkEnvironmentNameOn) -EnvironmentTransport $envNameXport -CountFailedCycle ($MaxPerCycle -le 0)
     # PIM 100.75: a failed send / an install that should be identified but is anonymous = a WARNING run (never a failure).
     $rawKey = ''; try { $rawKey = "$(& $get 'InvardiaInstallKey')".Trim() } catch { $rawKey = '' }
     $claimSt = $null; try { $claimSt = & $get 'InstallKeyClaimState'; if ($claimSt -is [string]) { $claimSt = $claimSt | ConvertFrom-Json } } catch { $claimSt = $null }
@@ -4077,11 +4124,13 @@ function Invoke-PimUplinkJob {
     $w = Get-PimUplinkDeliveryWarning -Enabled $on -Cycle $r -StoredKeyRaw $rawKey -ResolvedKey "$key" -LicenceRegistered $licReg -ClaimState $claimSt
     $detail = "uplink: $($r.message)"
     if ($w.warning) { $detail += " -- WARNING: $($w.reason)" }
+    # UPLINK-QUIET: fewer than 3 failed cycles in a row = an ok run; the detail says it is retried
+    if ("$($w.info)".Trim()) { $detail += " -- $($w.info)" }
     # SEC-92 ALIGN: every open / close / sweep reaches Invardia in this run's report; one that needs a look is a WARNING run
     if ($jitSweep -or $jitState) {
         $detail += " -- $(Get-PimSupportJitStateSummary -Sweep $jitSweep -State $jitState)"
         if (Test-PimSupportJitNeedsLook -Sweep $jitSweep -State $jitState) {
-            $w = [pscustomobject]@{ warning = $true; kind = $(if ($w.warning) { "$($w.kind)+support-access" } else { 'support-access' }); summary = $(if ($w.warning) { "$($w.summary); support access needs a look" } else { 'support access needs a look' }); reason = "$($w.reason)" }
+            $w = [pscustomobject]@{ warning = $true; kind = $(if ($w.warning) { "$($w.kind)+support-access" } else { 'support-access' }); summary = $(if ($w.warning -and "$($w.summary)".Trim()) { "$($w.summary); support access needs a look" } else { 'support access needs a look' }); reason = "$($w.reason)" }
             $detail += ' -- WARNING: support access needs a look'
         }
     }

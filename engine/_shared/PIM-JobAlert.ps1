@@ -54,6 +54,8 @@ function Get-PimJobFailureAlert {
     $type   = "$(Get-PimJobAlertField -Item $Run -Name 'type')".Trim()
     $detail = "$(Get-PimJobAlertField -Item $Run -Name 'detail')".Trim()
     $scope  = "$(Get-PimJobAlertField -Item $Run -Name 'scope')".Trim()
+    # UPLINK-QUIET: the label a person reads ('uplink' -> 'Invardia support link'); the job's own name decides everything else
+    $label  = Get-PimJobAlertDisplayName -Run $Run
 
     # §100.45: THROTTLED (Microsoft rate-limited / was unavailable, nothing applied) is NORMAL and retried by the next run --
     # never mailed, EXCEPT the one run where the streak crossed the "PIM cannot handle it" line (throttleAlert, set by
@@ -67,7 +69,7 @@ function Get-PimJobFailureAlert {
         $n = 0; try { $n = [int](Get-PimJobAlertField -Item $Run -Name 'throttleCount') } catch { $n = 0 }
         $since = "$(Get-PimJobAlertField -Item $Run -Name 'throttleSinceUtc')".Trim()
         $out.fire  = $true
-        $out.title = "Job '$name' is STUCK: Microsoft has throttled it for $n run(s) in a row"
+        $out.title = "Job '$label' is STUCK: Microsoft has throttled it for $n run(s) in a row"
         $bits = New-Object System.Collections.Generic.List[string]
         $bits.Add("Every run since $since was throttled (or Microsoft was unavailable), so the job has not completed for that long. PIM retries it on every run; this mail is sent once per streak.")
         if ($detail) { $bits.Add("Last answer: $detail") }
@@ -82,9 +84,14 @@ function Get-PimJobFailureAlert {
     # every repeat for a day; the changing specifics (Invardia's field list, the transport error) go in the mail's headline.
     if ($status -eq 'warning') {
         $sum = "$(Get-PimJobAlertField -Item $Run -Name 'warningSummary')".Trim()
+        # UPLINK-QUIET (owner 2026-11-10): telemetry to Invardia not delivered is NEVER mailed to the customer -- Invardia sees
+        # the missing heartbeat on its own side. Only a warning whose every kind is 'send-failed'; another kind beside it
+        # (key-missing ...) still mails through its own summary sentence.
+        $wk = @("$(Get-PimJobAlertField -Item $Run -Name 'warningKind')".Split('+') | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+        if ($wk.Count -and -not @($wk | Where-Object { $_ -ne 'send-failed' }).Count) { $out.reason = 'telemetry to Invardia not delivered -- shown on the Jobs page, never mailed to the customer'; return $out }
         if (-not $name -or -not $sum) { $out.reason = 'warning without a summary -- shown on the Jobs page, not mailed'; return $out }
         $out.fire  = $true
-        $out.title = "Job '$name' WARNING"
+        $out.title = "Job '$label' WARNING"
         $out.detail = "$sum$(if ($type) { " type=$type" })"
         return $out
     }
@@ -101,7 +108,7 @@ function Get-PimJobFailureAlert {
     }
 
     $out.fire  = $true
-    $out.title = if ($status -eq 'held') { "Job '$name' HELD -- needs approval" } else { "Job '$name' FAILED" }
+    $out.title = if ($status -eq 'held') { "Job '$label' HELD -- needs approval" } else { "Job '$label' FAILED" }
     $bits = New-Object System.Collections.Generic.List[string]
     if ($detail) { $bits.Add($detail) }
     if ($type)   { $bits.Add("type=$type") }
@@ -128,7 +135,8 @@ function Get-PimJobAlertMailParts {
     param([Parameter(Mandatory)][object]$Alert, [object]$Run)
     $enc = { param($t) [System.Net.WebUtility]::HtmlEncode("$t") }
     $status = "$(Get-PimJobAlertField -Item $Run -Name 'status')".Trim().ToLowerInvariant()
-    $name   = "$(Get-PimJobAlertField -Item $Run -Name 'name')".Trim()
+    # UPLINK-QUIET: every sentence below names the job by its label ('uplink' -> 'Invardia support link')
+    $name   = Get-PimJobAlertDisplayName -Run $Run
     # PIM 100.105: who / status / problem / todo are the alert table's own rows (plain text, one line each). "Held back" only
     # for a change a safety check paused on purpose, "Error" only for a job that could not do its work.
     $out = [ordered]@{ title = "$($Alert.title)"; headline = ''; detailHtml = (& $enc "$($Alert.detail)"); actionHtml = ''; skip = $false
@@ -190,6 +198,16 @@ function Get-PimJobAlertMailParts {
     $out.headline = "The job '$name' is held: a change set needs your approval before it is applied."
     $out.actionHtml = 'Open the PIM Manager, <b>Jobs &rsaquo; Engine logs &amp; errors</b>: the held change is shown there setting by setting, with the button to approve it.'
     return [pscustomobject]$out
+}
+
+function Get-PimJobAlertDisplayName {
+    <# The job's label for a person (Get-PimJobDisplayName, PIM-JobLanes.ps1: 'uplink' -> 'Invardia support link'); the
+       run's own name when that is not loaded or has no label. Never throws. #>
+    param([object]$Run)
+    $n = "$(Get-PimJobAlertField -Item $Run -Name 'name')".Trim()
+    $t = "$(Get-PimJobAlertField -Item $Run -Name 'type')".Trim()
+    try { if (Get-Command Get-PimJobDisplayName -ErrorAction SilentlyContinue) { $l = "$(Get-PimJobDisplayName -Name $n -Type $t)".Trim(); if ($l) { return $l } } } catch { }
+    return $n
 }
 
 function Get-PimJobAlertField {

@@ -390,11 +390,11 @@
         }
       },
       "info": {
-        "what": "Runs the uplink job every hour. It reports to Invardia which jobs ran and whether they succeeded (one report per job, never one per run), and every hour a heartbeat with version, edition and licence state. Without an install key it is anonymous: no tenant, no server name, no error text, only an error class and rounded counts. With a Pro install key, reports carry the error text with secrets removed.",
-        "enabled": "From the next hourly run, the job reports at most 20 job results per cycle and the heartbeat every hour. A failed send never fails anything else and is retried on the next cycle.",
+        "what": "Runs the Invardia support link job every hour (job name 'uplink' in schedules and run history). It reports to Invardia which jobs ran and whether they succeeded (one report per job, never one per run), and every hour a heartbeat with version, edition and licence state. Without an install key it is anonymous: no tenant, no server name, no error text, only an error class and rounded counts. With a Pro install key, reports carry the error text with secrets removed.",
+        "enabled": "From the next hourly run, the job reports at most 20 job results per cycle and the heartbeat every hour. A failed send never fails anything else and is retried on the next cycle; the job turns amber on the Jobs page only after 3 failed cycles in a row, and a delivery failure is never mailed to you (Invardia sees the missing report on its side).",
         "disabled": "Nothing is sent. If it was on before, one opt-out notice is sent once, then nothing more.",
         "risk": "When on, it sends status data out of your environment to invardia.com. With a Pro install key that includes shortened, redacted error messages. Reversible: switch it off and the next run sends only the one-time opt-out notice.",
-        "requires": "Free (Community) and Pro. SuperAdmin to change it. 'Scheduled jobs' must be on. Outbound HTTPS to Invardia's uplink.",
+        "requires": "Free (Community) and Pro. SuperAdmin to change it. 'Scheduled jobs' must be on. Outbound HTTPS to Invardia support.",
         "recommended": "On, so Invardia support can see a failing job before you call. Switch it off if your policy forbids sending operational data out.",
         "docUrl": "https://invardia.com/docs/pim/settings/FeatureGates.telemetry.uplink/"
       }
@@ -418,11 +418,11 @@
         }
       },
       "info": {
-        "what": "Adds a setup report to the hourly uplink run: once a day and whenever something changes, the state of the critical settings (updater deployed and scheduled, update ring, install key, licence, mail sender, alert recipients, engine permissions, last successful run, backup, update pinned) as ok, missing, wrong or unknown, plus how many engine permissions are expected, missing and extra. The same list drives the health lines on Home.",
-        "enabled": "With a Pro install key, the next uplink run sends the setup report, then one a day and one on every change. Invardia support sees what is missing and can help before you call. Without an install key nothing of this is sent.",
+        "what": "Adds a setup report to the hourly Invardia support link run: once a day and whenever something changes, the state of the critical settings (updater deployed and scheduled, update ring, install key, licence, mail sender, alert recipients, engine permissions, last successful run, backup, update pinned) as ok, missing, wrong or unknown, plus how many engine permissions are expected, missing and extra. The same list drives the health lines on Home.",
+        "enabled": "With a Pro install key, the next Invardia support link run sends the setup report, then one a day and one on every change. Invardia support sees what is missing and can help before you call. Without an install key nothing of this is sent.",
         "disabled": "No setup report is sent. The hourly job reports and the 4-hourly heartbeat are not affected (they have their own switch).",
         "risk": "When on, it sends the state of your settings (ids, ok / missing / wrong / unknown, counts and the names of missing Graph permissions) to invardia.com. Never names of people or groups, tenant data, error text or secrets. Reversible: switch it off and nothing more is sent.",
-        "requires": "A Pro install key (identified telemetry). 'Send status telemetry to Invardia' on. SuperAdmin to change it. Outbound HTTPS to Invardia's uplink.",
+        "requires": "A Pro install key (identified telemetry). 'Send status telemetry to Invardia' on. SuperAdmin to change it. Outbound HTTPS to Invardia support.",
         "recommended": "On, so Invardia support can see an unfinished setup or a broken updater before it becomes an incident.",
         "docUrl": "https://invardia.com/docs/pim/settings/FeatureGates.telemetry.setup/"
       }
@@ -447,10 +447,10 @@
       },
       "info": {
         "what": "Adds the cause of every problem to the hourly job reports: a stable error code (for example pim-entra-0104), the kind of cause, who acts and one short technical line, and adds the Microsoft services the tenant is licensed for to the hourly status. The same code is shown in mails and on Invardia's error pages.",
-        "enabled": "With a Pro install key, the next uplink run sends the codes with the job reports, and the next hourly status names the licensed services. Without an install key nothing of this is sent.",
+        "enabled": "With a Pro install key, the next Invardia support link run sends the codes with the job reports, and the next hourly status names the licensed services. Without an install key nothing of this is sent.",
         "disabled": "Job reports go as before, without codes and licences. The other telemetry switches are not affected.",
         "risk": "When on, it sends error codes, cause kinds, the tenant's licence names (for example the product ids of its Microsoft 365 plans) and one short technical line per cause, with secrets removed, to invardia.com. Reversible: switch it off and nothing more is sent.",
-        "requires": "A Pro install key (identified telemetry). 'Send status telemetry to Invardia' on. SuperAdmin to change it. Outbound HTTPS to Invardia's uplink.",
+        "requires": "A Pro install key (identified telemetry). 'Send status telemetry to Invardia' on. SuperAdmin to change it. Outbound HTTPS to Invardia support.",
         "recommended": "On. Invardia support receives the codes (since 2026-10-15).",
         "docUrl": "https://invardia.com/docs/pim/settings/FeatureGates.telemetry.causes/"
       }

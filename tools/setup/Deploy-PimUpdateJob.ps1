@@ -644,6 +644,23 @@ if (-not $SkipRoleAssignment -and -not $WhatIfPreference) {
     }
 }
 
+# ---- 2-ter. RIGHTS-LIVE-1 (owner rights decision 2026-11-09 "approved with A") -- the ENGINE's rights on THIS job ----------
+# The engine starts the updater (update-expedite: POST .../start, Container Apps Jobs Operator) and its watchdog puts the
+# updater back on its last good image (PATCH, Contributor) -- on this job ONLY. Add only, read back; a refusal warns with the
+# exact command (Grant-PimEngineUpdaterJobAccess). Skipped when the engine job does not exist yet.
+if (-not $SkipRoleAssignment -and -not $WhatIfPreference) {
+    try {
+        . (Join-Path $here '_PimSetupShared.ps1')                  # Grant-PimEngineUpdaterJobAccess
+        $engJob = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull
+        $engOid = if ($engJob) { "$(Get-PimSignInPrincipalId -Resource $engJob)".Trim() } else { '' }
+        if (-not $engOid) { Note "engine job '$TickJobName' (or the identity it signs in as) not found -- its rights on $JobName are granted by Initialize-PimHostingAccess.ps1 once it exists" }
+        else {
+            Step "grant the engine identity its rights on $JobName only ($(@(Get-PimEngineUpdaterJobRoles) -join ' + '))"
+            [void](Grant-PimEngineUpdaterJobAccess -EngineObjectId $engOid -UpdaterJobId "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$JobName" -SubscriptionId $SubscriptionId -Name $TickJobName)
+        }
+    } catch { Warn "the engine's rights on $JobName were not checked ($($_.Exception.Message)) -- run Initialize-PimHostingAccess.ps1 as an Owner of the resource group" }
+}
+
 # ---- 2c. the updater's DATABASE USER -- the tick's grant path, not a new one ---------------------
 # 🔴 Copying PIM_SqlServer is half of it: the schema step connects as THIS job's managed identity, and an
 # identity with no contained user gets "Login failed for user <token-identified principal>" -- which the

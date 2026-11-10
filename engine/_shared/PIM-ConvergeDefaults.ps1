@@ -183,6 +183,8 @@ function Invoke-PimUpdateConvergeDefaults {
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup,
           [string]$ManagerApp = 'ca-pim-manager', [string]$TickJob = 'ca-pim-tick',
+          # RIGHTS-LIVE-1: the updater's own job -- the engine's Jobs Operator + Contributor on it are checked ('' = not checked)
+          [string]$UpdaterJob = '',
           [Parameter(Mandatory)][scriptblock]$Arm, [scriptblock]$Store, [scriptblock]$Graph,
           [string]$AlertRecipientsScript = '', [string]$SqlServer = '', [string]$TenantId = '',
           # PIM 95.2k: the Azure rows the store defines -- @{ assignments = <PIM-Assignments-Azure-Resources rows>; definitions =
@@ -227,6 +229,18 @@ function Invoke-PimUpdateConvergeDefaults {
     $d = Get-PimRbacConvergeDecision -Id 'tick-self-reader' -What "Reader for $TickJob on itself (a stale engine lease is taken over at once)" -Assignments $tickSelf.list -ReadError $tickSelf.error `
             -Scope $tickScope -RoleIds @($ids.Reader, $ids.Contributor, $ids.Owner) -Fix $hostingFix
     & $add $d.id $(if ($d.action -eq 'noop') { 'info' } else { 'warn' }) $d.line
+    # RIGHTS-LIVE-1 (owner rights decision 2026-11-09 "approved with A"): the ENGINE on the UPDATER job only -- update-expedite
+    # starts it (Jobs Operator), the watchdog restores its image (Contributor). Report only: the updater may not grant roles.
+    if ("$UpdaterJob".Trim()) {
+        $updScope = "$rgScope/providers/Microsoft.App/jobs/$("$UpdaterJob".Trim())"
+        $engUpd = & $readAssignments $updScope $tickOid
+        $d = Get-PimRbacConvergeDecision -Id 'engine-updater-operator' -What "'Container Apps Jobs Operator' for $TickJob on $UpdaterJob (update-expedite starts the updater)" -Assignments $engUpd.list -ReadError $engUpd.error `
+                -Scope $updScope -RoleIds @($ids.JobsOperator, $ids.Contributor, $ids.Owner) -Fix $hostingFix
+        & $add $d.id $(if ($d.action -eq 'noop') { 'info' } else { 'warn' }) $d.line
+        $d = Get-PimRbacConvergeDecision -Id 'engine-updater-contributor' -What "'Contributor' for $TickJob on $UpdaterJob (the watchdog restores the updater's image)" -Assignments $engUpd.list -ReadError $engUpd.error `
+                -Scope $updScope -RoleIds @($ids.Contributor, $ids.Owner) -Fix $hostingFix
+        & $add $d.id $(if ($d.action -eq 'noop') { 'info' } else { 'warn' }) $d.line
+    }
 
     # ---- PIM 95.2k: the engine's Azure rights vs the DEFINED Azure scopes (report only) ------------------------------
     if ($null -ne $EngineAzureRows) {

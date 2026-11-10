@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.84 -- 2026-11-10
+
+- The job that sends PIM Manager's health and run results to Invardia support is now shown as Invardia support link; a report that could not be delivered is retried and never mailed to you, and the job turns amber only after three failed rounds in a row. The approved rights list now matches the code: the updater keeps reading the SuperAdmins' mail addresses for the alert recipients.
+
 ## 3.0.83 -- 2026-11-10
 
 - A run that stops making progress, or takes far longer than usual, is now reported to Invardia support as well as on the Jobs page: support gets one ticket per stall, closed by itself after the next good run. Nothing is ever stopped or restarted because of it.

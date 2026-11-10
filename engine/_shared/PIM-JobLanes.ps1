@@ -90,6 +90,21 @@ function Get-PimJobGroup {
     return 'Maintenance'
 }
 
+# UPLINK-QUIET (owner 2026-11-10, wizard "Rename + no customer mail"): the name a PERSON sees for a job type, where it differs
+# from the job's own name. Customers read "uplink" as the MSP tenant link; the job is PIM Manager's link to Invardia support.
+# The job's name and type stay 'uplink' everywhere else (schedules, SQL keys, run records, Invardia's job ids).
+$script:PimJobDisplayNameByType = @{
+    'uplink' = 'Invardia support link'
+}
+
+function Get-PimJobDisplayName {
+    # PURE. The label shown for a job (Jobs page, alert mails): its type's display name, else the job's own name.
+    param([string]$Name, [string]$Type)
+    $t = "$Type".Trim().ToLowerInvariant(); if (-not $t) { $t = "$Name".Trim().ToLowerInvariant() }
+    if ($t -and $script:PimJobDisplayNameByType.ContainsKey($t)) { return $script:PimJobDisplayNameByType[$t] }
+    return "$Name"
+}
+
 function Get-PimEngineScopeArea {
     # PURE. The area one engine scope writes.
     param([string]$Scope)

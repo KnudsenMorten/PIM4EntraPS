@@ -3211,6 +3211,8 @@ function Get-PimJobsStatus {
             heldDetail         = $(if ($standingHeld.Count) { "$(@($standingHeld)[0].detail)" } else { '' })
             # §95.2o lanes: the Jobs page section, what the job writes, and what a queued / due run waits for
             group              = (Get-PimJobGroup -Type "$($j.type)")
+            # UPLINK-QUIET: the label a person sees ('uplink' -> 'Invardia support link'); name / type are unchanged
+            displayName        = (Get-PimJobDisplayName -Name "$($j.name)" -Type "$($j.type)")
             areas              = @($jobAreas)
             queued             = [bool]$queued
             queuedSinceUtc     = "$queuedSince"

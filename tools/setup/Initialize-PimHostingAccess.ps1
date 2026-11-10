@@ -44,7 +44,10 @@ param(
     [switch]$SkipAzureRootAccess,
     [switch]$SkipTickStart,
     # PIM 100.22 (b): skip the Manager's Reader on the resource group (the Environment report then cannot read the architecture)
-    [switch]$SkipManagerRgReader
+    [switch]$SkipManagerRgReader,
+    # RIGHTS-LIVE-1: the updater job the engine gets its two job-scoped rights on ('' = caj-pim-updater, else ca-pim-update)
+    [string]$UpdaterJobName = '',
+    [switch]$SkipEngineUpdaterJobAccess
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_PimSetupShared.ps1')
@@ -131,6 +134,24 @@ if (-not $SkipTickStart) {
         $r = Set-PimTickJobIdSetting -TickJobId $tickId -Store $tickStore -Overwrite
         if ($r.action -eq 'set' -and $r.after -ne $tickId) { throw "read-back FAILED: SchedulerTickJobId is '$($r.after)'" }
         Note 'set and read back (the Manager starts the tick immediately after a commit)'
+    }
+}
+
+# RIGHTS-LIVE-1 (owner rights decision 2026-11-09 "approved with A"): the ENGINE's 'Container Apps Jobs Operator' + 'Contributor'
+# on the UPDATER job only (update-expedite starts it, the watchdog restores its image). Add only, read back; skipped when no
+# updater job exists (the updater is optional).
+if (-not $SkipEngineUpdaterJobAccess) {
+    $updJob = $null
+    foreach ($n in @($(if ("$UpdaterJobName".Trim()) { "$UpdaterJobName".Trim() } else { @('caj-pim-updater', 'ca-pim-update') }))) {
+        if (-not $updJob) { $updJob = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $n -ErrorAsNull }
+    }
+    if (-not $updJob) { Note 'no updater job in this resource group -- the engine needs no right on it' }
+    else {
+        Step "'$(@(Get-PimEngineUpdaterJobRoles) -join ''' + ''')' for $TickJobName on $($updJob.name) only (update-expedite + the updater watchdog)"
+        if ($PSCmdlet.ShouldProcess("$($updJob.id)", 'role assignments for the engine (the updater job only)')) {
+            $eu = Grant-PimEngineUpdaterJobAccess -EngineObjectId $tickOid -UpdaterJobId "$($updJob.id)" -SubscriptionId $SubscriptionId -Name $TickJobName
+            if ($eu.ok) { Note "$($eu.reason)" } else { throw "$($eu.reason)" }
+        }
     }
 }
 

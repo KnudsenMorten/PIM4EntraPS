@@ -112,6 +112,7 @@ function Get-PimRightsGraphPurpose {
         'updater|GroupMember.Read.All'                                = 'Reads the SQL admin group and the database job identity''s memberships (read only)'
         'updater|Application.Read.All'                                = 'Reads the database job identity''s service principal memberships (read only)'
         'updater|Application.ReadWrite.OwnedBy'                       = 'Changes only the PIM app registrations it owns'
+        'updater|User.ReadBasic.All'                                  = 'Reads the SuperAdmins'' mail addresses for the alert recipients (basic profile only)'
         'web|User.ReadBasic.All'                                      = 'The people picker and the user name to object id lookups an admin triggers (basic profile only)'
         'web|GroupMember.Read.All'                                    = 'The group picker and the group id to name lookups (basic group properties)'
     }
@@ -191,7 +192,9 @@ function Get-PimRightsAzureTable {
         # ---- engine (the engine job's identity)
         (& $r 'engine' 'reader@subscription' 'azure-rbac' 'Reader' $reader 'subscription' 'the hosting subscription' 'always' '' 'Reads Azure in the hosting subscription (Discovery, the Azure half of the tenant cache)' 'tools\setup\Setup-PimContainers.ps1 Grant-PimMiAzureRbac (-AzureRbacRoles default Reader; Get-PimAzureRbacPlan scope /subscriptions/<sub>)')
         (& $r 'engine' 'reader@tenant-root' 'azure-rbac' 'Reader' $reader 'tenant-root' 'the Tenant Root Group (its id is the tenant id)' 'always' '' 'Discovery lists management groups and subscriptions (read only)' 'tools\setup\_PimSetupShared.ps1 Get-PimEngineRootAzurePlan / Grant-PimEngineRootAzureAccess (PIM 97)')
-        (& $r 'engine' 'reader@engine-job' 'azure-rbac' 'Reader' $reader 'resource' 'the engine job itself (caj-pim-engine / ca-pim-tick)' 'always' '' 'Reads its own job executions (one engine run at a time, BUG-268)' 'tools\setup\Initialize-PimHostingAccess.ps1 (Reader on the tick job)')
+        (& $r 'engine' 'reader@engine-job' 'azure-rbac' 'Reader' $reader 'resource' 'the engine job itself (caj-pim-engine / ca-pim-tick)' 'always' '' 'Reads its own job executions (one engine run at a time)' 'tools\setup\Initialize-PimHostingAccess.ps1 (Reader on the tick job)')
+        (& $r 'engine' 'container-apps-jobs-operator@updater-job' 'azure-rbac' 'Container Apps Jobs Operator' $jobsOp 'resource' 'the updater job only' 'always' '' 'The engine starts the updater for "update now" (update-expedite) and reads its executions' 'tools\setup\_PimSetupShared.ps1 Grant-PimEngineUpdaterJobAccess (Deploy-PimUpdateJob.ps1, Initialize-PimHostingAccess.ps1); owner rights decision 2026-11-09 "approved with A"')
+        (& $r 'engine' 'contributor@updater-job' 'azure-rbac' 'Contributor' $contrib 'resource' 'the updater job only' 'always' '' 'The watchdog restores the updater job to its last good image' 'tools\setup\_PimSetupShared.ps1 Grant-PimEngineUpdaterJobAccess (Deploy-PimUpdateJob.ps1, Initialize-PimHostingAccess.ps1); owner rights decision 2026-11-09 "approved with A"')
         (& $r 'engine' 'user-access-administrator@defined-scopes' 'azure-rbac' 'User Access Administrator' $uaa 'subscription' 'each top Azure scope the store defines (subscription, management group or resource group of PIM-Assignments-Azure-Resources / PIM-Definitions-Resources) -- never Owner' 'feature' 'azure-rbac' 'Assigns Azure resource roles (eligible / active) and sets their PIM policies where Azure delegations are defined' 'engine\_shared\PIM-EngineAzureAccess.ps1 (95.2k) + engine\_shared\PIM-EngineAzureScopeTrim.ps1 (4.3); tools\setup\_PimWorkloadPrereqRunner.ps1 Invoke-PimPrereqAzureRbac')
         (& $r 'engine' 'user-access-administrator@tenant-root' 'azure-rbac' 'User Access Administrator' $uaa 'tenant-root' 'only with the install opt-in -EngineAzureRootUserAccessAdmin; then it replaces the per-scope grants' 'feature' 'azure-rbac' 'Assigns Azure resource roles at every subscription (opt-in)' 'tools\setup\_PimSetupShared.ps1 Get-PimEngineRootAzurePlan -IncludeUserAccessAdministrator')
         (& $r 'engine' 'storage-table-data-contributor@rfa-store' 'azure-rbac' 'Storage Table Data Contributor' $stdc 'resource' 'the RFA broker''s storage account' 'feature' 'rfa.portal' 'Pulls the requests and answers of the RFA portal / access request API' 'tools\setup\_PimRfaBrokerPlan.ps1 (role-engine-<id>), tools\setup\Deploy-PimRfaBroker.ps1')
@@ -221,6 +224,19 @@ function Get-PimRightsAzureTable {
         # ---- docs (the installation documentation job's identity; internal role key 'asbuilt')
         (& $r 'docs' 'storage-blob-data-contributor@asbuilt-container' 'azure-rbac' 'Storage Blob Data Contributor' $sbdc 'resource' 'the asbuilt container only' 'always' '' 'Writes the installation documentation PDF' 'tools\setup\Deploy-PimAsBuiltJob.ps1 (step 4), tools\setup\Initialize-PimHostingAccess.ps1')
         (& $r 'docs' 'acrpull@registry' 'azure-rbac' 'AcrPull' $acr 'resource' 'the install''s container registry' 'feature' 'own-registry-pull' 'Pulls its own image' 'tools\setup\Deploy-PimAsBuiltJob.ps1 (step 2)')
+    )
+}
+
+function Get-PimRightsKeptGraphRows {
+    <#
+      PURE. Graph application permissions the code NO LONGER GRANTS but an install keeps until it runs the version that stops
+      using them (when = 'kept': never MISSING, never EXTRA -- framework RIGHTS-LIVE-1 point 2). The only rows of the list that
+      are not in a code grant set; tests\Test-PimRightsList.ps1 allows nothing else beyond the grant sets.
+    #>
+    return @(
+        # AR-ENGINE-1 (3.0.71): access reviews are read by the engine and replayed by the web app; before 3.0.71 the web app read them itself
+        [ordered]@{ identity = 'web'; role = 'AccessReview.Read.All'; roleId = 'd07a8cc0-3d51-4b77-b3b0-32704d1f69fa'
+                    scopeNote = 'until the install runs 3.0.71 or later; then removed'; feature = 'Reads access reviews in the web app (versions before 3.0.71; from 3.0.71 the engine reads them)' }
     )
 }
 
@@ -274,6 +290,12 @@ function Get-PimApprovedRightsList {
                 $o['feature'] = (Get-PimRightsGraphPurpose -Role "$name" -Identity $id.role)
                 $rights[$rid] = $o
             }
+        }
+        foreach ($k in @(Get-PimRightsKeptGraphRows | Where-Object { $_.identity -eq $id.role })) {
+            $rid = "$($id.role).graph.$($k.role)"
+            if ($rights.ContainsKey($rid)) { throw "Get-PimApprovedRightsList: kept row $rid is also in the code grant set -- it is then not 'kept'" }
+            $rights[$rid] = [ordered]@{ id = $rid; kind = 'graph-app-role'; role = $k.role; roleId = $k.roleId; resource = $gres.name; resourceAppId = $gres.appId
+                                        scope = 'tenant'; scopeNote = $k.scopeNote; when = 'kept'; feature = $k.feature }
         }
         foreach ($a in @($azure | Where-Object { $_.identity -eq $id.role })) {
             $tag = $(if ($a.kind -eq 'entra-directory-role') { 'directory' } else { 'azure' })

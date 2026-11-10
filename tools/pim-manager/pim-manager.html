@@ -13714,7 +13714,9 @@
     'mgmt-report':                 'Pro: builds the monthly management report (PowerPoint) for the last month once, keeps it for download (Reports > Management report) and mails it to its recipients. Does nothing until the monthly report is switched on there.',
     // REQ-U wave 2: per-NAME entries (looked up before the type) -- two discovery jobs read the workload role catalogs.
     'discovery-defender':          'Reads the Defender XDR roles and their permissions, and reports roles and permission groups no template knows yet.',
-    'discovery-intune':            'Reads the Intune roles (built-in and custom), and reports roles no template knows yet.'
+    'discovery-intune':            'Reads the Intune roles (built-in and custom), and reports roles no template knows yet.',
+    // UPLINK-QUIET (owner 2026-11-10): shown as "Invardia support link" (JOB_DISPLAY_NAME); the job's name stays 'uplink'.
+    'uplink':                      'Sends PIM Manager\'s health and run results to Invardia support, so support can see problems and updates can roll out.'
   };
   function jobSchedulePlainScope(scope) {
     const s = String(scope || '').trim();
@@ -13780,7 +13782,7 @@
       // master's publish) goes FIRST: it is the one row here that is its own job, with its own status.
       const ordered = schedJobs.slice().sort((a,b) => ((b.selfGated?2:0) + (b.isMail?1:0)) - ((a.selfGated?2:0) + (a.isMail?1:0)));
       { const shownJobs = ordered.filter(j => !(j.type === 'servicenow-intake' && !j.enabled) && !(j.type === 'msp-pull' && !j.selfGated));   // 100.67: the rows the table shows
-        pimExportSet('jobschedule', 'Job schedule', () => [pimExportRows('Job schedule', [['Job', j => j.label || j.name], ['Type', 'type'], ['What it does', j => JOB_SCHEDULE_PLAIN[j.name] || JOB_SCHEDULE_PLAIN[j.type] || ''],
+        pimExportSet('jobschedule', 'Job schedule', () => [pimExportRows('Job schedule', [['Job', j => jobDisplayName(j)], ['Type', 'type'], ['What it does', j => JOB_SCHEDULE_PLAIN[j.name] || JOB_SCHEDULE_PLAIN[j.type] || ''],
           ['Area', j => j.selfGated ? 'this tenant' : jobSchedulePlainScope(j.scope)], ['Enabled', j => j.enabled ? 'on' : 'off'], ['Every (min) after it finishes', 'intervalMinutes']], shownJobs)]); }
       h.push('<table class="grid" style="font-size:12px;"><thead><tr><th>Job</th><th>Area</th><th>Enabled</th><th title="The next run starts this long after the previous run FINISHED">Every (min) after it finishes</th></tr></thead><tbody>');
       for (const j of ordered) {
@@ -13798,7 +13800,7 @@
         const iv = canSchedEdit ? `<input type="number" class="govSchedIv" data-name="${esc(j.name)}" value="${esc(String(j.intervalMinutes))}" min="${ivMin}" max="${ivMax}" style="width:90px;">` : esc(String(j.intervalMinutes));
         if (j.selfGated) { h.push(jobScheduleCadenceRow(j, en, iv, canSchedEdit)); continue; }
         const plain = JOB_SCHEDULE_PLAIN[j.name] || JOB_SCHEDULE_PLAIN[j.type] || '';   // REQ-U wave 2: a job's own entry first
-        h.push(`<tr${j.isMail?' style="background:#f6f8fa;"':''}><td>${j.isMail?'&#9993; ':''}<b>${esc(j.name)}</b> <span style="color:#8c959f;font-size:11px;">${esc(j.type)}</span>` +
+        h.push(`<tr${j.isMail?' style="background:#f6f8fa;"':''}><td>${j.isMail?'&#9993; ':''}<b>${esc(jobDisplayName(j))}</b> <span style="color:#8c959f;font-size:11px;">${esc(jobDisplayName(j) !== String(j.name || '') ? (j.name + ' · ' + j.type) : j.type)}</span>` +
           (plain ? `<div style="color:#57606a;font-size:11px;">${esc(plain)}</div>` : '') + `</td>` +
           `<td>${esc(jobSchedulePlainScope(j.scope))}</td><td>${en}</td><td>${iv}</td></tr>`);
       }
@@ -19501,6 +19503,16 @@
     else if (w.lastSeenUtc) { tip = 'The hybrid worker ' + (w.host || '') + ' was last seen ' + w.minutesAgo + ' min ago -- it has stopped or lost its network.'; }
     return ' <span class="hybrid-worker-badge" data-state="' + esc0(w.state) + '" title="' + esc0(tip) + '" style="display:inline-block;margin-top:3px;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:' + bg + ';color:' + fg + ';">' + esc0(label) + '</span>';
   }
+  // UPLINK-QUIET (owner 2026-11-10): the label a person sees for a job, where it differs from the job's own name. Customers
+  // read "uplink" as the MSP tenant link; the job is PIM Manager's link to Invardia support. Its name and type stay 'uplink'
+  // (schedules, run records, Run now / History all key on the name). The server sends the same label as j.displayName.
+  const JOB_DISPLAY_NAME = {
+    'uplink': 'Invardia support link'
+  };
+  function jobDisplayName(j) {
+    if (!j) return '';
+    return String(j.displayName || JOB_DISPLAY_NAME[j.type] || JOB_DISPLAY_NAME[j.name] || j.label || j.name || '');
+  }
   function jobStatusPill(j) {
     // 🔴 BUG-112. A job this deployment does not run is reported as such -- FIRST, before any
     // last-run status is considered. Nine jobs sat showing `failed / no-handler-registered`
@@ -20787,7 +20799,8 @@
         const pullNote = unusedNote;
         const rowKey = 'jd-' + String(j.name || '').replace(/[^A-Za-z0-9_-]/g, '_');
         rowH.push('<tr class="jobRow" data-job="' + esc0(j.name) + '" style="border-bottom:1px solid #eaeef2;' + (neverUsed ? 'opacity:.55;' : '') + rowBg + (j.unackedFailureCount > 0 ? 'box-shadow:inset 3px 0 0 #cf222e;' : (j.stuck ? 'box-shadow:inset 3px 0 0 #d4a72c;' : (j.needsApproval ? 'box-shadow:inset 3px 0 0 #d4a72c;' : ''))) + '">' +
-          '<td style="padding:6px 8px;white-space:nowrap;"><button class="ghost jobExpand" data-target="' + esc0(rowKey) + '" aria-expanded="false" title="Show the cadence, what this job works on and its recent history" style="font-size:11px;padding:0 4px;">&#9656;</button> <b>' + esc0(j.name) + '</b>' + scope + pullNote + '</td>' +
+          '<td style="padding:6px 8px;white-space:nowrap;"><button class="ghost jobExpand" data-target="' + esc0(rowKey) + '" aria-expanded="false" title="Show the cadence, what this job works on and its recent history" style="font-size:11px;padding:0 4px;">&#9656;</button> <b>' + esc0(jobDisplayName(j)) + '</b>' +
+            (jobDisplayName(j) !== String(j.name || '') ? ' <span class="jobInternalName" style="color:#8c959f;font-size:11px;" title="The job\'s name in schedules and run history">' + esc0(j.name) + '</span>' : '') + scope + pullNote + '</td>' +
           '<td style="padding:6px 8px;">' + jobStatusPill(j) + jobLaneBadge(j) + jobNoProgressBadge(j) + hybridWorkerBadge(j) + '</td>' +
           '<td style="padding:6px 8px;white-space:nowrap;" title="' + esc0(fmtTime(j.lastRunUtc, { seconds: true })) + '">' + lastCell + '</td>' +
           '<td style="padding:6px 8px;max-width:280px;">' + result + '</td>' +
@@ -20798,6 +20811,7 @@
         // the details panel: everything that used to widen the line
         const areasTxt = asList(j.areas).length ? asList(j.areas).join(', ') : 'its own state only';
         rowH.push('<tr class="jobDetailRow" id="' + esc0(rowKey) + '" style="display:none;background:#f6f8fa;"><td colspan="6" style="padding:8px 12px 10px 34px;font-size:12px;">' +
+          ((JOB_SCHEDULE_PLAIN[j.name] || JOB_SCHEDULE_PLAIN[j.type]) ? '<div class="jobPlain" style="color:#57606a;margin-bottom:6px;">' + esc0(JOB_SCHEDULE_PLAIN[j.name] || JOB_SCHEDULE_PLAIN[j.type]) + '</div>' : '') +
           '<div class="jobDetail" style="display:flex;flex-wrap:wrap;gap:6px 22px;">' +
             '<div><span style="color:#57606a;">Cadence</span> ' + cadenceCell + '</div>' +
             '<div><span style="color:#57606a;">Enabled</span> ' + enabledCell + '</div>' +

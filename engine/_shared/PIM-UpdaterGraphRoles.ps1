@@ -56,6 +56,10 @@ function Get-PimUpdaterGraphAppRoles {
         'GroupMember.Read.All'                                = '98830695-27a2-44f7-8c18-0c3ebc9698f6'
         'Application.Read.All'                                = '9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30'
         'Application.ReadWrite.OwnedBy'                       = '18a4783c-866b-4cc7-a460-3d5e5662c884'
+        # RIGHTS-LIVE-1 (owner rights decision 2026-11-09 "approved with A"; SEVEN): READ ONLY, basic profile -- the converge
+        # step's alert recipients read each SuperAdmin's mail address (tools/setup/Set-PimAlertRecipients.ps1:
+        # GET users/<upn>?$select=mail,userPrincipalName, run by engine/_shared/PIM-ConvergeDefaults.ps1 from the updater)
+        'User.ReadBasic.All'                                  = '97235f07-e226-4f63-ace3-39588e11d3a1'
     }
 }
 function Get-PimUpdaterGraphRoleCheck {

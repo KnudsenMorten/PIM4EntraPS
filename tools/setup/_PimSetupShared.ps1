@@ -1440,6 +1440,61 @@ function Grant-PimManagerRgReader {
     return @{ ok = $false; present = $false; created = $false; scope = $scope; reason = $msg }
 }
 
+function Get-PimEngineUpdaterJobRoles {
+    <#
+      PURE. RIGHTS-LIVE-1 (owner rights decision 2026-11-09 "approved with A"; Invardia's live read 2026-11-10): the Azure roles
+      the ENGINE identity holds on the UPDATER job -- and nowhere else.
+        Container Apps Jobs Operator  the engine starts the updater: update-expedite (engine\_shared\PIM-UpdateExpedite.ps1,
+                                      Start-PimAcaJobExecution = POST .../jobs/<updater>/start) and reads its executions
+        Contributor                   the watchdog in the engine tick puts the updater back on its last good image
+                                      (engine\_shared\PIM-UpdateWatchdog.ps1 -> Set-PimAcaJobImage = PATCH .../jobs/<updater>)
+      A literal (child-scope safe). Never User Access Administrator / Owner here.
+    #>
+    return @('Container Apps Jobs Operator', 'Contributor')
+}
+
+function Grant-PimEngineUpdaterJobAccess {
+    <#
+      RIGHTS-LIVE-1: grant the engine identity Get-PimEngineUpdaterJobRoles on the updater job ONLY. ADD only (a role already
+      held AT the job, or inherited from above it, is left alone), every grant READ BACK. Never removes anything.
+      Returns @{ ok; rows = @(@{ role; state = 'already there' | 'granted' | 'refused' | 'would grant' }); scope; reason }.
+      -Required makes a refusal fatal (throws); otherwise it WARNS with the exact fix (update-expedite and the watchdog then
+      fail on 403 at that install, nothing else does).
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][string]$EngineObjectId,
+        [Parameter(Mandatory)][string]$UpdaterJobId,
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [string]$Name = 'the engine',
+        [switch]$Required
+    )
+    $oid = "$EngineObjectId".Trim(); $scope = "$UpdaterJobId".Trim().TrimEnd('/')
+    if ($scope -notmatch '^(?i)/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.App/jobs/[^/]+$') { throw "Grant-PimEngineUpdaterJobAccess: '$UpdaterJobId' is not a Container Apps job id -- refusing a broader scope." }
+    $held = {
+        param($role)
+        try { return [bool](@(Get-PimArmRoleAssignments -SubscriptionId $SubscriptionId -PrincipalId $oid -Scope $scope -Role $role -IncludeInherited).Count) } catch { return $false }
+    }
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($role in @(Get-PimEngineUpdaterJobRoles)) {
+        if (& $held $role) { $rows.Add([pscustomobject]@{ role = $role; state = 'already there' }) | Out-Null; continue }
+        if (-not $PSCmdlet.ShouldProcess("$Name @ $scope", "grant $role (the updater job only)")) { $rows.Add([pscustomobject]@{ role = $role; state = 'would grant' }) | Out-Null; continue }
+        try { [void](New-PimArmRoleAssignment -SubscriptionId $SubscriptionId -PrincipalId $oid -PrincipalType ServicePrincipal -Role $role -Scope $scope) }
+        catch { Write-Verbose "role assignment create: $($_.Exception.Message)" }
+        $rows.Add([pscustomobject]@{ role = $role; state = $(if (& $held $role) { 'granted' } else { 'refused' }) }) | Out-Null
+    }
+    $refused = @($rows | Where-Object { $_.state -eq 'refused' } | ForEach-Object { $_.role })
+    foreach ($r in $rows) { Write-Host ("    {0} for {1} on the updater job: {2}" -f $r.role, $Name, $r.state) -ForegroundColor DarkGray }
+    if ($refused.Count) {
+        $msg = "$Name ($oid) was NOT granted $($refused -join ' + ') on the updater job $scope (the deploying identity needs Owner or User Access Administrator on the resource group). Update-expedite and the updater watchdog fail until it is. Grant it with: " +
+               (@($refused | ForEach-Object { "az role assignment create --assignee-object-id $oid --assignee-principal-type ServicePrincipal --role '$_' --scope $scope" }) -join ' ; ')
+        if ($Required) { throw $msg }
+        Write-Warning "  $msg"
+        return [pscustomobject]@{ ok = $false; rows = @($rows.ToArray()); scope = $scope; reason = $msg }
+    }
+    return [pscustomobject]@{ ok = $true; rows = @($rows.ToArray()); scope = $scope; reason = 'present and read back' }
+}
+
 function Get-PimEngineRootAzurePlan {
     <#
       PURE. §97 (owner 2026-10-08) -- what the install grants the ENGINE identity at the tenant root management group.

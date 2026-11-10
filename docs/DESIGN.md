@@ -11380,6 +11380,14 @@ The record format and the sending rules are the framework's uplink client (one s
 ships a byte-identical copy of it, checked by a test. A report that fails to send is sent again on the next cycle, and a
 failure to send never affects any other job. An endpoint other than Invardia's can be configured, but it must be https.
 
+**Name and delivery failures.** People see the job as **Invardia support link** ("Sends PIM Manager's health and run
+results to Invardia support, so support can see problems and updates can roll out."); its name in schedules and run
+history stays `uplink`. A cycle with a report that was not delivered is counted in the stored state (cycles in a row, back
+to 0 after a fully delivered cycle; a send ahead of an alert mail does not count). The first and second such cycle are an
+ok run whose result says "1 report could not be delivered; it is retried next cycle"; from the third in a row the job is
+shown amber on the Jobs page. A delivery failure is never mailed: Invardia sees a missing heartbeat on its own side. A
+missing or invalid install key is still a warning with its once-a-day alert mail.
+
 **Rounds (3.0.43).** The framework's "about 20 posts per cycle" is a rate guard, not a cap. The hourly job therefore sends
 in rounds: round 1 carries the opt-in, the heartbeat, the setup report and run reports up to 20 posts. When reports are
 really left, the job waits 65 seconds and opens the next round, at most 5 rounds per cycle (both are fixed values). The
