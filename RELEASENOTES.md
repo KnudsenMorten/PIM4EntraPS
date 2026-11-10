@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.82 -- 2026-11-10
+
+- Get Started has two new optional steps: Azure resources (the scopes PIM manages and, per scope, the command that gives the engine identity User Access Administrator) and Workloads (Defender XDR, Intune, Power BI: what is missing, Confirm or Not used). Engine permissions opens with a Who needs what table: each identity by name and object id with its rights. Settings: a category click goes to the top; the leftover card is now Remove access when its definition is deleted; the Emergency override card says what it does in two sentences, gives the setup command when no passphrase is set and keeps its inputs off until then.
+
 ## 3.0.81 -- 2026-11-10
 
 - The mail check now reads both sending identities at every installation, so the line about tenant-wide Graph Mail.Send is checked instead of shown as not checked; when it cannot be read it no longer keeps the Mail sender step open. User Access Administrator is no longer mentioned when no Azure resource delegation is defined.

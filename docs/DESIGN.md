@@ -1524,11 +1524,13 @@ way the group-deletion card does. On: the offboarding job disables an admin acco
 memberships and eligibilities and sends the notice; the account is never deleted and the
 account-disable guard still applies.
 
-**Daily reconcile: removal of leftovers** (`GET` / `PUT /api/settings/reconcile-removal`) writes
-`ReconcileRemovalMode`. A leftover is a live item PIM Manager put in the tenant, whose definition a
-commit removed, with nothing similar configured. *Remove leftovers* (the default when nothing is
-stored) hands the qualifying ones to the normal remove path; *Report only* removes none and lists
-them on Jobs. The engine reads the stored value first: a stored row decides whatever the engine
+**Remove access when its definition is deleted** (`GET` / `PUT /api/settings/reconcile-removal`,
+until 2026-11-10 titled "Daily reconcile: removal of leftovers") writes `ReconcileRemovalMode`. It
+decides what the daily check does with a live item PIM Manager put in the tenant, whose definition a
+commit removed, with nothing similar configured. *Remove it* (recommended; the default when nothing
+is stored) hands the qualifying ones to the normal remove path; *Only report it* removes none and
+lists them on Jobs. The card says this first in plain words; how a value set directly on the engine
+job applies is behind its *More info*, and no environment-variable name is shown on the card. The engine reads the stored value first: a stored row decides whatever the engine
 job's environment says, and a row with an empty value reads as the default. Therefore the route can
 store **only one of the two words** -- never a blank, never "not set" -- and the card shows a row
 with an empty value, or a word that is neither mode (which the engine reads as report only), as
@@ -1538,7 +1540,7 @@ Both are **protection switches**: only a SuperAdmin may change them (the role is
 server before anything is read; an Admin gets `403` with the reason), **every change in either
 direction needs a confirmation** whose sentence comes from the server and says what switching does,
 and every change is audited (`settings.auto-offboarding`, `settings.reconcile-removal-mode`).
-Choosing *Remove leftovers* also carries the number the confirmation showed -- how many items the
+Choosing *Remove it* also carries the number the confirmation showed -- how many items the
 last daily run counted -- and is refused when that number is no longer current, so the question is
 asked again with the new number; an unknown count is said as unknown, never as 0. Nothing in these
 routes changes a guard, and reading a state never writes.
@@ -7656,9 +7658,17 @@ For GA / PRA / tenant-root-owner groups protected by `Groups_RequireApproval` (f
   Az module is absent (the hosted containers ship none).
 - **Status on the card.** `GET /api/emergency-status` (Reader+) carries `passphrase` =
   `Get-PimEmergencyPassphraseStatus` (configured / source / vault / secret name / reason — **never
-  the passphrase or its hash**). The Settings card shows *"Passphrase: configured in key vault …"* or
-  *"NOT configured — activation will be refused"* with the setup script, and disables the activate
-  button in the second case. The card's text states the steps above in operator language.
+  the passphrase or its hash**). The Settings card shows *"Passphrase: configured (kept in key vault …)"*
+  or, when none is set up, one calm line *"Not set up yet — set an emergency passphrase first (once)."*,
+  who runs the setup and where, and the published two-line command (download from the support site,
+  then the run line with the tenant, subscription, resource group and web app name this installation
+  knows; a placeholder for what it cannot read, such as the key vault). Every input and the activate
+  button are disabled until then, with the reason as their tooltip.
+- **Card text (2026-11-10).** The top of the card says what it does in two sentences (approval off for
+  chosen groups for 1–24 hours, eligible people activate at once; nobody gets new access). The steps
+  above, the lockout and what is never touched are behind the card's *More info* (settings catalog
+  entry `EmergencyOverride`). The setup script is published as one self-contained file, like the
+  other support scripts.
 - **Shared verify (pure, KV-backed).** The verify is extracted into
   `engine/_shared/PIM-Governance.ps1` so the Manager *and* any client-PC
   break-glass path use the identical logic. `Resolve-PimEmergencyExpectedHash`

@@ -54,7 +54,7 @@ $script:PimScriptDocScripts = @(
     @{ Path = 'setup/Import-PimSettings.ps1';                      Standalone = $false }
     @{ Path = 'setup/Set-PimManagerAccess.ps1';                    Standalone = $false }
     @{ Path = 'setup/Set-PimBreakGlassAccounts.ps1';               Standalone = $false }
-    @{ Path = 'setup/Set-PimEmergencyPassphrase.ps1';              Standalone = $false }
+    @{ Path = 'setup/Set-PimEmergencyPassphrase.ps1';              Standalone = $true }    # SETTINGS-CLARITY 2026-11-10: the command Settings > Emergency access shows
     @{ Path = 'setup/Find-PimStrayTestObjects.ps1';                Standalone = $false }
     @{ Path = 'setup/Move-PimIdentities.ps1';                      Standalone = $false }   # NAM-03 identity mover
     @{ Path = 'setup/Rename-PimJobs.ps1';                          Standalone = $false }   # JOB-RENAME 3.0.68 job rename (create, prove, switch, disable)

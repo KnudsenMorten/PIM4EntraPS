@@ -283,6 +283,13 @@ function Get-PimManagerAutoOffboardingSettingName { 'EnableAutomaticOffboarding'
 function Get-PimManagerAutoOffboardingEnvName     { 'PIM_EnableAutomaticOffboarding' }
 function Get-PimManagerAutoOffboardingJobId       { 'admin-offboarding' }
 function Get-PimManagerAutoOffboardingPlace       { 'Settings > Approvals & policy > Automatic offboarding' }
+# SETTINGS-CLARITY (owner 2026-11-10: "unclear to many including me"): what a card says, behind its More info, when PIM Manager
+# cannot read the engine job's own settings. Plain words -- never the variable's name.
+function Get-PimManagerEngineJobOverrideNote {
+    param([switch]$WhileUnset)
+    if ($WhileUnset) { return 'A value set directly on the engine job applies while nothing is chosen here. PIM Manager cannot read the engine job''s own settings from here.' }
+    return 'A value set directly on the engine job overrides this setting. PIM Manager cannot read the engine job''s own settings from here.'
+}
 function ConvertTo-PimManagerSwitchFlag {
     <# PURE. One value -> $true / $false / $null (not set), in the engine's own vocabulary when it is loaded (Test-PimExplicitFlagValue). #>
     param([AllowNull()][object]$Value)
@@ -335,7 +342,8 @@ function Get-PimManagerAutoOffboardingState {
     if ($envKnown -and $envSet) {
         $ef = ConvertTo-PimManagerSwitchFlag -Value $ev
         $eff = if ($ef) { 'on' } else { 'off' }; $src = 'environment'
-        $text = "$eff -- set by the engine's environment ($envName = $("$ev".Trim())), which wins over this setting"
+        # SETTINGS-CLARITY (owner 2026-11-10): the main text names no environment variable -- env.value / envName carry it
+        $text = "$eff -- set directly on the engine job, which overrides this setting"
     } elseif ($stored -eq 'unknown') {
         $text = "not known -- the setting could not be read: $storedErr"
     } elseif ($stored -in @('on', 'off')) {
@@ -347,8 +355,9 @@ function Get-PimManagerAutoOffboardingState {
     } else {
         $text = 'not known -- not set, and whether this is a test or a production tenant could not be read'
     }
+    # SETTINGS-CLARITY: plain words, shown behind the card's More info (never in the main text)
     $envNote = ''
-    if (-not $envKnown) { $envNote = "PIM Manager cannot read the environment of the engine job from here. If $envName is set on that job, it wins over this setting." }
+    if (-not $envKnown) { $envNote = Get-PimManagerEngineJobOverrideNote }
     return [ordered]@{
         setting = $name; envName = $envName; place = (Get-PimManagerAutoOffboardingPlace); job = (Get-PimManagerAutoOffboardingJobId)
         stored = $stored; storedError = $storedErr; tenantClass = $cls
@@ -395,7 +404,7 @@ function Invoke-PimManagerAutoOffboardingChange {
         -After ([ordered]@{ stored = "$($after.stored)"; effective = "$($after.effective)" }) -Result 'ok'
     $note = if ($en) { "Automatic offboarding is ON: the job '$(Get-PimManagerAutoOffboardingJobId)' acts on offboarded admin accounts from its next run." }
             else { 'Automatic offboarding is OFF: an offboarded admin account keeps its memberships and eligibilities until this is switched on.' }
-    if ("$($after.source)" -eq 'environment') { $note += " The engine's environment ($($after.envName)) still decides: $($after.text)." }
+    if ("$($after.source)" -eq 'environment') { $note += " A value set directly on the engine job still decides: $($after.text)." }
     return @{ status = 200; body = [ordered]@{ ok = $true; enabled = [bool]$en; note = $note; state = $after } }
 }
 
@@ -405,7 +414,7 @@ function Invoke-PimManagerAutoOffboardingChange {
 function Get-PimManagerReconcileRemovalSettingName { 'ReconcileRemovalMode' }
 function Get-PimManagerReconcileRemovalEnvName     { 'PIM_ReconcileRemovalMode' }
 function Get-PimManagerReconcileRemovalJobId       { 'full-reconcile' }
-function Get-PimManagerReconcileRemovalPlace       { 'Settings > Approvals & policy > Daily reconcile: removal of leftovers' }
+function Get-PimManagerReconcileRemovalPlace       { 'Settings > Approvals & policy > Remove access when its definition is deleted' }
 function ConvertTo-PimManagerReconcileMode {
     <# PURE. A stored / environment word -> the mode the ENGINE takes from it (its own ConvertTo-PimReconcileRemovalMode when loaded): blank or the word that enforces = 'enforce'; ANY other word = 'report'. #>
     param([AllowNull()][object]$Value)
@@ -434,17 +443,17 @@ function Get-PimManagerReconcileRemovalLastReport {
 function Get-PimManagerReconcileRemovalConfirmText {
     <# PURE. What a SuperAdmin agrees to, per mode -- with the last daily run's own count when it is known. #>
     param([Parameter(Mandatory)][string]$Mode, [AllowNull()][object]$LastReport)
-    $job = Get-PimManagerReconcileRemovalJobId
+    # SETTINGS-CLARITY (owner 2026-11-10): the same plain words as the card ("Remove it" / "Only report it")
     if ("$Mode" -eq 'enforce') {
         $cnt = if ($LastReport -and $LastReport.known) {
-            if ([int]$LastReport.wouldRemove -eq 1) { 'The last daily run counted 1 item it would remove.' } else { "The last daily run counted $([int]$LastReport.wouldRemove) items it would remove." }
-        } else { "How many items the next run would remove is NOT known ($(if ($LastReport) { "$($LastReport.error)" } else { 'no report' }))." }
-        return ("Let the daily reconcile REMOVE leftovers? On its next daily run (the job '$job') the engine removes, in your tenant, every live assignment or membership that PIM Manager put there " +
-                "and whose definition was removed by a PIM Manager commit, when nothing similar is configured any more. It never disables or deletes an admin account, never removes a shared Defender XDR or Intune assignment, " +
-                "and never removes anything that existed before PIM Manager recorded its changes. The removal guard still applies and cannot be switched off here. A removal cannot be undone from this page. $cnt")
+            if ([int]$LastReport.wouldRemove -eq 1) { 'The last daily check counted 1 item it would remove.' } else { "The last daily check counted $([int]$LastReport.wouldRemove) items it would remove." }
+        } else { "How many items the next check would remove is not known ($(if ($LastReport) { "$($LastReport.error)" } else { 'no report' }))." }
+        return ("Remove access when its definition is deleted? From the next daily check, PIM Manager removes from your tenant the access it set up for a definition " +
+                "that was later deleted in PIM Manager, when nothing similar is still configured. It never disables or deletes an admin account, never removes a shared Defender XDR or Intune assignment, " +
+                "and never removes anything that was there before PIM Manager. The removal limit still applies and cannot be switched off here. A removal cannot be undone from this page. $cnt")
     }
-    return ("Let the daily reconcile only REPORT leftovers? The engine then removes none of them: an assignment or membership that PIM Manager put in your tenant and whose definition was removed " +
-            "STAYS live there until this is set back or somebody removes it by hand. The Jobs page keeps listing what the run would remove.")
+    return ("Only report access whose definition is deleted? The daily check then removes none of it: access that PIM Manager set up for a deleted definition " +
+            "stays in your tenant until this is set back or somebody removes it by hand. Jobs keeps listing what the check would remove.")
 }
 function Get-PimManagerReconcileRemovalState {
     <#
@@ -482,16 +491,18 @@ function Get-PimManagerReconcileRemovalState {
         $text = "not known -- the setting could not be read: $storedErr"
     } elseif ($stored -in @('enforce', 'report')) {
         $eff = $stored; $src = 'setting'
-        $text = if ($word) { "report only -- the stored word '$word' is not one of the two modes, and the engine reads any other word as report only" }
-                elseif ($stored -eq 'enforce') { 'leftovers are removed (set here)' } else { 'report only (set here)' }
+        # SETTINGS-CLARITY (owner 2026-11-10): the card's two choices are "Remove it" / "Only report it"; the text says which
+        # applies in those words, and never names an environment variable (env.value / envName carry it for a caller)
+        $text = if ($word) { "only reported -- the stored value '$word' is not one of the two choices, so it counts as Only report it" }
+                elseif ($stored -eq 'enforce') { 'removed (set here)' } else { 'only reported (set here)' }
     } elseif ($stored -eq 'blank') {
-        $eff = 'enforce'; $src = 'setting'; $text = 'leftovers are removed -- the stored value is empty, which the engine reads as the default'
+        $eff = 'enforce'; $src = 'setting'; $text = 'removed -- the default (the stored value is empty)'
     } elseif ($envKnown -and $envSet) {
         $eff = ConvertTo-PimManagerReconcileMode -Value $ev; $src = 'environment'
-        $text = "$(if ($eff -eq 'enforce') { 'leftovers are removed' } else { 'report only' }) -- not set here; the engine's environment says $envName = $("$ev".Trim())"
+        $text = "$(if ($eff -eq 'enforce') { 'removed' } else { 'only reported' }) -- not set here; set directly on the engine job"
     } else {
-        $eff = 'enforce'; $src = 'default'; $text = 'leftovers are removed -- not set; this is the default'
-        if (-not $envKnown) { $envNote = "PIM Manager cannot read the environment of the engine job from here. While nothing is set here, a value of $envName on that job decides." }
+        $eff = 'enforce'; $src = 'default'; $text = 'removed -- the default'
+        if (-not $envKnown) { $envNote = Get-PimManagerEngineJobOverrideNote -WhileUnset }
     }
     $rep = Get-PimManagerReconcileRemovalLastReport -ReadReport $ReadReport
     return [ordered]@{
@@ -555,8 +566,8 @@ function Invoke-PimManagerReconcileRemovalChange {
     Write-PimManagerAuditEvent -Action 'settings.reconcile-removal-mode' -Target $name `
         -Before ([ordered]@{ stored = "$($before.stored)"; effective = "$($before.effective)" }) `
         -After ([ordered]@{ stored = "$($after.stored)"; effective = "$($after.effective)"; lastRunWouldRemove = $(if ($after.lastReport.known) { [int]$after.lastReport.wouldRemove } else { $null }) }) -Result 'ok'
-    $note = if ($mode -eq 'enforce') { "The daily reconcile REMOVES leftovers from its next run (the job '$(Get-PimManagerReconcileRemovalJobId)'), within the removal guard." }
-            else { 'The daily reconcile only REPORTS leftovers: nothing is removed by it until this is changed.' }
+    $note = if ($mode -eq 'enforce') { 'Saved: from the next daily check, access whose definition was deleted is removed (within the removal limit).' }
+            else { 'Saved: the daily check only lists access whose definition was deleted (under Jobs); it removes none of it until this is changed.' }
     return @{ status = 200; body = [ordered]@{ ok = $true; mode = $mode; note = $note; state = $after } }
 }
 

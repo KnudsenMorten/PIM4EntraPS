@@ -3154,6 +3154,26 @@
       }
     },
     {
+      "key": "EmergencyOverride",
+      "label": "Emergency override (break-glass)",
+      "where": "Settings > Emergency access (break-glass) > Emergency override",
+      "route": "/api/emergency",
+      "type": "boolean",
+      "default": "Off",
+      "feature": "break-glass-override",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "In an incident, switches off the approval step on group member activation for the groups you choose, for 1 to 24 hours, so people who are already eligible can activate at once without waiting for an approver. Use it when the normal approvers cannot be reached and access is needed now. It grants nothing: nobody gets access they are not already eligible for, and people still activate through PIM.",
+        "enabled": "When you press Disable approval: 1) your passphrase is checked against the hash kept in this installation's key vault; 5 wrong attempts lock activation for 15 minutes, and every attempt is audited. 2) The override (groups, who, why, until when) is recorded and the engine starts at once. 3) Within about a minute the engine switches approval off on the member activation policy of each chosen group, mails each group's owners and audits every change.",
+        "disabled": "At the end time, or when a SuperAdmin presses Restore now, the engine applies each group's policy template in full again, so approval is back on. The restore is audited.",
+        "risk": "While it is on, an eligible member of a chosen group activates without an approver, so choose as few groups as the incident needs and as few hours as possible. Microsoft Entra role policies and Azure resource policies are not touched. Without a passphrase set up, activation is refused.",
+        "requires": "SuperAdmin and the emergency passphrase. The passphrase is set up once per installation by an Azure administrator (Owner of the resource group and Key Vault Secrets Officer on its key vault) with the command the card shows.",
+        "recommended": "Set up the passphrase now, before an incident, and keep it with your emergency access instructions. Leave the override off except in an incident.",
+        "docUrl": "https://invardia.com/docs/pim/settings/EmergencyOverride/"
+      }
+    },
+    {
       "key": "ManagerApiApps",
       "label": "API applications",
       "where": "Manager access & roles > API applications",
@@ -3327,21 +3347,21 @@
     },
     {
       "key": "ReconcileRemovalMode",
-      "label": "Daily reconcile: removal of leftovers",
-      "where": "Settings > Approvals & policy > Daily reconcile: removal of leftovers",
+      "label": "Remove access when its definition is deleted",
+      "where": "Settings > Approvals & policy > Remove access when its definition is deleted",
       "route": "/api/settings/reconcile-removal",
       "type": "choice",
-      "default": "Not set: leftovers are removed",
+      "default": "Remove it",
       "feature": "",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
-        "what": "Decides what the daily full run (the job full-reconcile) does with a leftover: a live assignment or membership that PIM Manager put in your tenant, whose definition was later removed by a PIM Manager commit, and for which nothing similar is configured. The card shows the mode in effect, where it comes from and what the last daily run counted. PIM Manager asks for confirmation before the mode is changed.",
-        "enabled": "When set to 'Remove leftovers': the daily run removes the leftovers that qualify. It never disables or deletes an admin account, never removes a shared Defender XDR or Intune assignment, and never removes anything that existed before PIM Manager recorded its changes.",
-        "disabled": "When set to 'Report only': the daily run removes none of them and lists on Jobs what it would remove. Not set at all means 'Remove leftovers'.",
-        "risk": "Remove leftovers: a removal cannot be undone from this page; the removal guard still applies and cannot be switched off here, and when more items qualify than the guard allows in one run, none is removed in that run. Report only: access whose definition was removed stays live in your tenant until somebody removes it by hand.",
-        "requires": "SuperAdmin to change it, with a confirmation. While nothing is set here, a value in the engine job's own environment decides; the card says so where PIM Manager can read it.",
-        "recommended": "Remove leftovers, so that removing a definition also removes the access. Use Report only while you investigate what a run would remove, then set it back.",
+        "what": "Once a day PIM Manager compares your tenant with its definitions. When you have deleted a definition, the access PIM Manager set up for it (an assignment or a group membership) is still in your tenant; this decides whether the daily check removes that access or only lists it. Access is removed only when nothing similar is still configured. The card shows the choice in effect and what the last daily check counted.",
+        "enabled": "Remove it: the daily check removes that access. It removes only access PIM Manager itself set up for a definition that was deleted in PIM Manager. It never disables or deletes an admin account, never removes a shared Defender XDR or Intune assignment, and never removes anything that was there before PIM Manager.",
+        "disabled": "Only report it: the daily check removes nothing and lists under Jobs what it would remove. When nothing is chosen, Remove it applies.",
+        "risk": "Remove it: a removal cannot be undone from this page. The removal limit still applies and cannot be switched off here: when more items qualify than the limit allows in one check, none is removed in that check. Only report it: access whose definition was deleted stays in your tenant until somebody removes it by hand.",
+        "requires": "SuperAdmin to change it, with a confirmation. A value set directly on the engine job applies while nothing is chosen here.",
+        "recommended": "Remove it, so that deleting a definition also removes the access. Choose Only report it while you look at the list under Jobs first, then set it back.",
         "docUrl": "https://invardia.com/docs/pim/settings/ReconcileRemovalMode/"
       }
     },

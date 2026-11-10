@@ -74,6 +74,11 @@
                                           <file> -> <sha256>:<base64>, each vetted like a published script); the script checks
                                           every hash before it starts and, with -Apply, runs them from a private temp folder.
                                           A child it calls but does not carry FAILS the build.
+      Set-PimEmergencyPassphrase.ps1   -- SETTINGS-CLARITY (owner 2026-11-10: "what to do where?"): set up the emergency override
+                                          passphrase once (its hash into the installation's key vault, read access on that one
+                                          secret for the web app, the web app pointed at the vault). The two lines Settings >
+                                          Emergency access shows while no passphrase is set up. Built with NO dot-source left
+                                          (BUILD-NO-OPTIONAL-LOADS); published for PowerShell 7 (BUILD-PUBLISH-REQUIRES-7).
 
     SCRIPT-DOC-1 (framework 12.7) + framework 12.10 item 11 ("scripts are big concern"), 2026-10-09:
       * every script in $script:PimScriptDocScripts (tools\setup\_PimScriptDoc.ps1) must have its manifest
@@ -94,7 +99,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$OutDir,
-    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1', 'Set-PimSqlTier.ps1', 'New-PimHubPrepareScript.ps1', 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1', 'pim-hybrid-worker/Install-PimHybridWorker.ps1', 'pim-hybrid-worker/Deploy-PimHybridWorker.ps1', 'Set-PimLicense.ps1', 'Grant-PimSupportSqlAccess.ps1', 'Invoke-PimSupportSqlAccessJob.ps1', 'Set-PimSigninFrontSqlState.ps1', 'Start-PimManagerInstall.ps1', 'Import-PimV1Data.ps1'),
+    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1', 'Set-PimSqlTier.ps1', 'New-PimHubPrepareScript.ps1', 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1', 'pim-hybrid-worker/Install-PimHybridWorker.ps1', 'pim-hybrid-worker/Deploy-PimHybridWorker.ps1', 'Set-PimLicense.ps1', 'Grant-PimSupportSqlAccess.ps1', 'Invoke-PimSupportSqlAccessJob.ps1', 'Set-PimSigninFrontSqlState.ps1', 'Start-PimManagerInstall.ps1', 'Import-PimV1Data.ps1', 'Set-PimEmergencyPassphrase.ps1'),
     # Also hand over the manifests of the in-scope package scripts (default: only when -Scripts is the default list).
     [switch]$IncludePackageManifests,
     # PACKAGE-CLEAN-WORDLIST (Invardia 2026-11-03): Invardia's machine-local word list (never in the repository). Every word

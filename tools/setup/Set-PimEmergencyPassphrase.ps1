@@ -23,10 +23,13 @@
 
   The passphrase comes from -Passphrase (a SecureString) or an interactive prompt (typed twice). It is never
   accepted as plain text on the command line.
-  Everything goes through ARM / Key Vault REST (PIM-Rest.ps1): no az CLI call carries a value. Authentication is the
-  admin app's CERTIFICATE (-TenantId -AdminAppId -AdminCertThumbprint) or the signed-in az user (-UseSignedInAccount,
-  asserted to be a user in the named tenant + subscription) -- like the other setup scripts. -WhatIf reads and plans,
-  and writes nothing. Run it once per environment, ring 1 first. The key vault must use Azure RBAC authorization.
+  Everything goes through ARM / Key Vault REST: no command-line tool, no PowerShell module. Authentication is the
+  signed-in person (-UseSignedInAccount: the browser sign-in, or the Invardia Support session open in this window;
+  asserted to be a user in the named tenant + subscription) or, for automation, an admin app's certificate
+  (-TenantId -AdminAppId -AdminCertThumbprint). -WhatIf reads and plans, and writes nothing. Run it once per
+  environment. The key vault must use Azure RBAC authorization.
+  SETTINGS-CLARITY (owner 2026-11-10): published standalone at https://invardia.com/support/pim/Set-PimEmergencyPassphrase.ps1
+  (Build-PimSupportScripts.ps1); Settings > Emergency access prints the two-line command with the installation's values.
 
 .PARAMETER SubscriptionId      The environment's subscription (explicit, always).
 .PARAMETER ResourceGroup       The resource group of the Manager container app.
@@ -40,8 +43,16 @@
   change it would make (the secret, the grant, the app setting) and writes nothing.
 
 .EXAMPLE
-  pwsh -File Set-PimEmergencyPassphrase.ps1 -SubscriptionId <sub> -ResourceGroup rg-pim -VaultName kv-pim-x `
-       -TenantId <t> -UseSignedInAccount -WhatIf
+  .\Set-PimEmergencyPassphrase.ps1 -TenantId <tenant id> -SubscriptionId <subscription id> -ResourceGroup <resource group> `
+       -VaultName <key vault name> -UseSignedInAccount -WhatIf
+  Preview; then the same command without -WhatIf (it asks for the passphrase twice).
+
+.NOTES
+  Requirements:
+    PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
+    Role: Owner (or Contributor and User Access Administrator) on the PIM Manager's resource group and Key Vault Secrets
+          Officer on its key vault (Azure).
+    Hosts: login.microsoftonline.com, management.azure.com, *.vault.azure.net
 
 .LINK
   https://invardia.com/docs/pim/scripts/Set-PimEmergencyPassphrase/
@@ -64,11 +75,15 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$here = Split-Path -Parent $PSCommandPath
-$sol  = Split-Path -Parent (Split-Path -Parent $here)
-. (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
-. (Join-Path $sol 'engine\_shared\PIM-ArmContainerApps.ps1')
+# SETTINGS-CLARITY (2026-11-10): published as ONE file (Build-PimSupportScripts.ps1 inlines every helper loaded below,
+# and with the next line leaves no dot-source at all); the published copy's line 1 becomes the PowerShell 7 requirement
+# (PS7-REQ) while the repository copy keeps 5.1 for the offline tests.
+# BUILD-NO-OPTIONAL-LOADS
+# BUILD-PUBLISH-REQUIRES-7
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Rest.ps1')
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-ArmContainerApps.ps1')
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+. (Join-Path $PSScriptRoot '_PimSignedIn.ps1')                # -UseSignedInAccount: the Support session, else the browser
 
 # Key Vault Secrets User (built-in role, read secret values).
 $script:PimKvSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
@@ -226,7 +241,6 @@ foreach ($p in @(@{ n = 'SubscriptionId'; v = $SubscriptionId }, @{ n = 'Resourc
 # --- identity ------------------------------------------------------------------------------
 if ($UseSignedInAccount) {
     if ("$AdminAppId".Trim() -or "$AdminCertThumbprint".Trim()) { Fail '-UseSignedInAccount cannot be combined with -AdminAppId/-AdminCertThumbprint' }
-    . (Join-Path $here '_PimSignedIn.ps1')
     $who = Get-PimSignedInIdentity -TenantId $TenantId -SubscriptionId $SubscriptionId
     if (-not $who.ok) { Fail "$($who.reason)" }
     Set-PimSignedInGlobals -TenantId $TenantId

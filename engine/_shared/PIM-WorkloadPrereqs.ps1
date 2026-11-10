@@ -1215,6 +1215,70 @@ function Set-PimWorkloadPrereqAttestation {
     return $res
 }
 
+function Get-PimAzureScopeStates {
+    <#
+      PURE. GS-AZURE-WORKLOADS (owner 2026-11-10, Get Started "Azure resources (optional)": "i am missing the onboarding for
+      azure in the get started"). Per Azure scope PIM manages (-Scopes = Get-PimAzureManagedScopes over the
+      PIM-Assignments-Azure-Resources rows), what the LAST azure.uaa check (the same check Discovery & gaps shows under
+      "Azure RBAC (resource roles)" -- no second check) says about the ENGINE identity there:
+        held       -- covered by User Access Administrator / Owner (the check listed it as covered, or assigned + read back)
+        missing    -- the check listed it in missingScopes (the scope gets the two-line grant command)
+        notChecked -- the check has not looked at this scope (never run, added after the last check, could not be read)
+      -Record = the stored AzureRbac record (pim.Settings 'WorkloadPrereqs'.AzureRbac) or $null.
+      Returns @( [ordered]@{ scope; state; detail } ), in -Scopes order.
+    #>
+    param([string[]]$Scopes = @(), [object]$Record)
+    $norm = { param($s) "$s".Trim().TrimEnd('/').ToLowerInvariant() }
+    $chk = $null
+    foreach ($c in @(Get-PimWorkloadPrereqRecordField -Object $Record -Name 'checks')) { if ($c -and "$($c.id)" -eq 'azure.uaa') { $chk = $c } }
+    $missing = @{}; $covered = @{}
+    $st = ''; $detail = ''
+    if ($chk) {
+        $st = "$($chk.status)"; $detail = "$($chk.detail)"
+        foreach ($m in @(Get-PimWorkloadPrereqRecordField -Object $chk -Name 'missingScopes')) { if ("$m".Trim()) { $missing[(& $norm $m)] = $true } }
+        # The check's own detail (tools\setup\_PimWorkloadPrereqRunner.ps1 Invoke-PimPrereqAzureRbac): "covered: a, b | assigned +
+        # read back: c | MISSING: d (...)" -- the covered and assigned lists name the scopes the engine holds the right at.
+        foreach ($part in @($detail -split '\s\|\s')) {
+            if ($part -match '^\s*(covered|assigned \+ read back):\s*(.+)$') {
+                foreach ($s in @($Matches[2] -split ',\s*')) { if ("$s".Trim()) { $covered[(& $norm $s)] = $true } }
+            }
+        }
+    }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($s in @($Scopes)) {
+        $v = "$s".Trim(); if (-not $v) { continue }
+        $k = & $norm $v
+        $state = 'notChecked'; $why = $(if (-not $chk) { 'PIM has not checked the Azure scopes yet' } else { 'the last check did not look at this scope' })
+        if ($missing.ContainsKey($k)) { $state = 'missing'; $why = 'the engine identity holds neither User Access Administrator nor Owner here' }
+        elseif ($covered.ContainsKey($k)) { $state = 'held'; $why = 'the engine identity holds User Access Administrator or Owner here (or above)' }
+        elseif ($chk -and $st -eq 'confirmed') { $state = 'held'; $why = 'confirmed by a person' }
+        $out.Add([ordered]@{ scope = $v; state = $state; detail = $why })
+    }
+    return $out.ToArray()
+}
+
+function Get-PimWorkloadPrereqUsage {
+    <#
+      PURE. GS-AZURE-WORKLOADS: how many delegation rows NEED each prerequisite workload (the same map the assignment gate
+      uses, Get-PimWorkloadPrereqForBinding) -- "in use" for Get Started's Azure and Workloads steps: amber only for a
+      workload that is in use and not ready. -RowsByEntity = @{ '<entity>' = @(rows) } (PIM-Assignments-Intune / -Defender /
+      -Workloads / -Azure-Resources). A row whose Action is Remove is not counted (it takes a delegation away).
+      Returns [ordered]@{ DefenderXdr = n; Intune = n; PowerBI = n; AzureRbac = n }.
+    #>
+    param([hashtable]$RowsByEntity = @{})
+    $o = [ordered]@{ DefenderXdr = 0; Intune = 0; PowerBI = 0; AzureRbac = 0 }
+    foreach ($e in @($RowsByEntity.Keys)) {
+        foreach ($r in @($RowsByEntity[$e])) {
+            if (-not $r) { continue }
+            $act = "$(Get-PimWorkloadPrereqRecordField -Object $r -Name 'Action')".Trim()
+            if ($act -ieq 'Remove') { continue }
+            $w = Get-PimWorkloadPrereqForBinding -Entity "$e" -Row $r
+            if ($w -and $o.Contains($w)) { $o[$w] = [int]$o[$w] + 1 }
+        }
+    }
+    return $o
+}
+
 function Get-PimWorkloadPrereqView {
     <#
       What the Manager shows (GET /api/workload-prereqs): per workload the stored result judged against NOW.

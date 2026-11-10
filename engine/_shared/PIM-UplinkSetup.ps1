@@ -85,6 +85,9 @@ $script:PimSetupSteps = @(
     [ordered]@{ id = 'envname'; title = 'Environment name'; required = $true; why = 'Tells several open PIM Managers apart (header and browser tab).' }
     [ordered]@{ id = 'licence'; title = 'Licence'; required = $true; why = 'Pro features and the updates from Invardia depend on it.' }
     [ordered]@{ id = 'permissions'; title = 'Engine permissions'; required = $true; why = 'The engine needs its Microsoft Graph and Azure rights for the workloads in use.' }
+    # GS-AZURE-WORKLOADS (owner 2026-11-10): two optional onboarding steps after the engine's rights.
+    [ordered]@{ id = 'azure'; title = 'Azure resources'; required = $false; why = 'The Azure scopes PIM manages and the engine identity''s User Access Administrator on each of them.' }
+    [ordered]@{ id = 'workloads'; title = 'Workloads'; required = $false; why = 'Defender XDR, Intune and Power BI: what each needs before PIM can delegate it, or Not used.' }
     [ordered]@{ id = 'mail'; title = 'Mail sender'; required = $true; why = 'TAP codes, approvals and alerts are sent by mail.' }
     [ordered]@{ id = 'departments'; title = 'Departments & owners'; required = $true; why = 'Departments sponsor access; their owners approve and receive the mail.' }
     [ordered]@{ id = 'roles'; title = 'Roles & templates'; required = $true; why = 'The roles people activate.' }

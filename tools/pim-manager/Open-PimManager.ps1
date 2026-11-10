@@ -289,6 +289,12 @@ if (Test-Path -LiteralPath $_govLib) { . $_govLib }
 # needs, so the portal can say so out loud. (REQUIREMENTS §63.6.)
 $_permLib = Join-Path $solutionRoot 'engine\_shared\PIM-PermissionHealth.ps1'
 if (Test-Path -LiteralPath $_permLib) { . $_permLib }
+# GS-WHO-NEEDS-WHAT (owner 2026-11-10: "i cannot see which id to give what permissions"): which identity gets which right, by
+# name and object id (Get Started's "Who needs what"), from the code's own grant sets (PIM-RightsList.ps1, pure).
+$_whoLib = Join-Path $solutionRoot 'engine\_shared\PIM-WhoNeedsWhat.ps1'
+if (Test-Path -LiteralPath $_whoLib) { . $_whoLib }
+$_rightsLib = Join-Path $solutionRoot 'engine\_shared\PIM-RightsList.ps1'
+if (Test-Path -LiteralPath $_rightsLib) { try { . $_rightsLib } catch { Write-Verbose "rights list not loaded: $($_.Exception.Message)" } }
 # REQUIREMENTS 95.2i: the update run's check of the engine identity after a roll -- the banner shows what it recorded when this
 # Manager cannot read the engine identity itself (Merge-PimUpdaterPermissionRecord).
 $_updPermLib = Join-Path $solutionRoot 'engine\_shared\PIM-UpdaterPermissionCheck.ps1'
@@ -2396,7 +2402,8 @@ function Get-PimManagerGroupRetirementState {
     if ($envKnown -and $envSet) {
         $f = ConvertTo-PimManagerGroupRetirementFlag -Value $ev
         $eff = if ($f) { 'on' } else { 'off' }; $src = 'environment'
-        $text = "$eff -- set by the engine's environment ($envName = $("$ev".Trim())), which wins over this setting"
+        # SETTINGS-CLARITY (owner 2026-11-10): the main text names no environment variable -- env.value / envName carry it
+        $text = "$eff -- set directly on the engine job, which overrides this setting"
     } elseif ($stored -eq 'unknown') {
         $text = "not known -- the setting could not be read: $storedErr"
     } elseif ($stored -in @('on', 'off')) {
@@ -2408,9 +2415,10 @@ function Get-PimManagerGroupRetirementState {
     } else {
         $text = 'not known -- not set, and whether this is a test or a production tenant could not be read'
     }
+    # SETTINGS-CLARITY: plain words, shown behind the card's More info (never in the main text)
     $envNote = ''
     if (-not $envKnown) {
-        $envNote = "PIM Manager cannot read the environment of the engine job from here. If $envName is set on that job, it wins over this setting."
+        $envNote = 'A value set directly on the engine job overrides this setting. PIM Manager cannot read the engine job''s own settings from here.'
     }
     $marked = Get-PimManagerRetireGroupCount -ReadRows $ReadRows
     $limits = Get-PimManagerGroupRetirementLimits
@@ -2701,9 +2709,20 @@ function Get-PimManagerEmergencyPassphraseStatus {
         if (Get-Command Get-PimEmergencyPassphraseStatus -ErrorAction SilentlyContinue) { $st = Get-PimEmergencyPassphraseStatus }
         else { $st = [pscustomobject]@{ configured = $false; source = 'none'; vault = "$($global:PIM_EmergencyVault)"; secretName = 'PIM-EmergencyPasscode'; reason = 'the governance library (PIM-Governance.ps1) is not loaded' } }
     } catch { $st = [pscustomobject]@{ configured = $false; source = 'none'; vault = "$($global:PIM_EmergencyVault)"; secretName = 'PIM-EmergencyPasscode'; reason = "$($_.Exception.Message)" } }
+    # SETTINGS-CLARITY (owner 2026-11-10: "what to do where?"): the card prints the published two-line command
+    # (Set-PimEmergencyPassphrase.ps1 from invardia.com/support/pim) with what this installation knows filled in --
+    # setupValues; a part that cannot be read stays '' and the page prints a placeholder for it. Read only while NOT
+    # configured (Get-PimManagerMailIdentities is cached 10 minutes and never throws).
+    $sv = [ordered]@{ tenantId = ''; subscriptionId = ''; resourceGroup = ''; managerApp = ''; vaultName = "$($st.vault)".Trim() }
+    if (-not [bool]$st.configured) {
+        try { $sv.tenantId = if ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)".Trim() } else { "$($env:PIM_TenantId)".Trim() } } catch { }
+        try { $ids = Get-PimManagerMailIdentities; $sv.subscriptionId = "$($ids.subscriptionId)"; $sv.resourceGroup = "$($ids.resourceGroup)" } catch { }
+        try { $sv.managerApp = if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { "$(Get-PimInstallName -Role web)" } else { '' } } catch { }
+    }
     $v = [ordered]@{
         configured = [bool]$st.configured; source = "$($st.source)"; vault = "$($st.vault)"; secretName = "$($st.secretName)"; reason = "$($st.reason)"
-        setup = 'tools/setup/Set-PimEmergencyPassphrase.ps1 stores the passphrase (as its SHA-256) in this environment''s key vault as PIM-EmergencyPasscode, sets PIM_EmergencyVault on the Manager and grants the Manager''s identity read access to that secret.'
+        setup = 'Set-PimEmergencyPassphrase.ps1 stores the passphrase (only its hash) in this installation''s key vault and lets PIM Manager read it.'
+        setupValues = $sv
     }
     $script:PimEmergencyPpCache = @{ at = $now; value = $v }
     return $v
@@ -5118,6 +5137,9 @@ $script:PimAlertEventCatalog += 'pending-uncommitted'
 # SuperAdmin is reminded on sign-in until an account is protected). The ones that decide tenant-wide configuration need
 # SuperAdmin (PimGetStartedConfirmMinRole); the rest need Admin.
 $script:PimGetStartedConfirmSteps = @('activator', 'naming', 'policies', 'breakglass-later', 'mail-later')   # 'mail-later': Mail sender skipped for now (owner 2026-10-08: mail is optional)
+# GS-AZURE-WORKLOADS (owner 2026-11-10, "Azure + workloads"): Get Started > Workloads (optional) -- "Not used" for a workload this
+# organisation does not use (a choice, recorded like the other confirmations; withdrawn by unticking). Admin.
+$script:PimGetStartedConfirmSteps += @('workload-notused-defenderxdr', 'workload-notused-intune', 'workload-notused-powerbi')
 $script:PimGetStartedConfirmMinRole = @{ 'naming' = 'SuperAdmin'; 'breakglass-later' = 'SuperAdmin' }
 
 function Get-PimAlertingConfig {
@@ -9421,6 +9443,41 @@ function Get-PimManagerWorkloadPrereqState {
     if ($storeErr) { foreach ($v in $view) { $v.state = 'unreadable'; $v.chip = 'amber'; $v.command = ''; $v.next = (Get-PimWorkloadPrereqNextStep -State 'unreadable') } }
     return @{ view = $view; storeErr = $storeErr; stored = $stored; env = $envVals }
 }
+function Get-PimManagerGetStartedAzureWorkloads {
+    <#
+      GS-AZURE-WORKLOADS (owner 2026-11-10, at a customer: "i am missing the onboarding for azure in the get started"). What Get
+      Started's two optional steps need beyond the workload view, from the SAME data Discovery & gaps reads (no second check):
+        azure = { scopes = @( { scope; state held|missing|notChecked; detail; command } ); engineObjectId; tenantId; readError }
+                -- the scopes = the store's PIM-Assignments-Azure-Resources rows (Get-PimAzureManagedScopes), each judged by the
+                last azure.uaa check (Get-PimAzureScopeStates); a missing scope carries the two-line Grant-PimEnginePermissions
+                command for exactly that scope (Get-PimWorkloadPrereqGrantCommand -- the command Discovery & gaps shows).
+        usage = { DefenderXdr; Intune; PowerBI; AzureRbac } -- delegation rows that need each workload (Get-PimWorkloadPrereqUsage).
+      A read that fails says so (readError / usageError) -- never "nothing delegated". Read-only; never throws.
+    #>
+    param([hashtable]$State, [scriptblock]$Rows)
+    if (-not $Rows) { $Rows = { param($e) @((Read-PimRows $e -NoScope).rows) } }
+    $az = [ordered]@{ scopes = @(); engineObjectId = ''; tenantId = ''; readError = '' }
+    $usage = $null; $usageErr = ''
+    $byEnt = @{}
+    foreach ($e in @('PIM-Assignments-Azure-Resources', 'PIM-Assignments-Intune', 'PIM-Assignments-Defender', 'PIM-Assignments-Workloads')) {
+        try { $byEnt[$e] = @(& $Rows $e) } catch { $usageErr = "$e could not be read: $(($_.Exception.Message -split "`n")[0])"; if ($e -eq 'PIM-Assignments-Azure-Resources') { $az.readError = $usageErr } }
+    }
+    if (-not $usageErr) { try { $usage = Get-PimWorkloadPrereqUsage -RowsByEntity $byEnt } catch { $usageErr = "$($_.Exception.Message)" } }
+    $rec = $null
+    try { $rec = Get-PimWorkloadPrereqStoredRecord -Stored $State.stored -Workload 'AzureRbac' } catch { $rec = $null }
+    $envH = @{}; if ($State -and $State.env -is [hashtable]) { $envH = $State.env }
+    $tid = "$($envH['tenantId'])".Trim()
+    $oid = "$(Get-PimWorkloadPrereqRecordField -Object $rec -Name 'engineObjectId')".Trim()
+    if (-not $oid) { try { $bk = Get-PimEngineRecordedBook; if ($bk -and "$($bk.engineObjectId)".Trim()) { $oid = "$($bk.engineObjectId)".Trim() } } catch { } }
+    $az.engineObjectId = $oid; $az.tenantId = $tid
+    if (-not $az.readError -and $byEnt.ContainsKey('PIM-Assignments-Azure-Resources')) {
+        $scopes = @(Get-PimAzureManagedScopes -Rows @($byEnt['PIM-Assignments-Azure-Resources'] | Where-Object { $_ -and "$(Get-PimWorkloadPrereqRecordField -Object $_ -Name 'Action')".Trim() -ine 'Remove' }))
+        $az.scopes = @(@(Get-PimAzureScopeStates -Scopes $scopes -Record $rec) | ForEach-Object {
+            $_['command'] = $(if ($_.state -eq 'missing') { Get-PimWorkloadPrereqGrantCommand -TenantId $tid -EngineObjectId $oid -AzureScopes @($_.scope) } else { '' })
+            $_ })
+    }
+    return @{ azure = $az; usage = $usage; usageError = $usageErr }
+}
 function Get-PimManagerPowerBiAdminNotice {
     <#
       PIM 100.142 (4). The calm line + the two-line command the page shows where a Power BI workload row or a discovered
@@ -11922,6 +11979,35 @@ function Get-PimBreakGlassIdentifiers {
 # §12.8 ENV-REPORT-1: the /api/permissions-health body as a function, so the environment report reuses the SAME check (one
 # implementation: the identity resolution, the Graph app-role read, the Azure / tenant-root reads and the engine's own refusals).
 # Returns the body (cached 5 minutes unless -Refresh), or $null when engine/_shared/PIM-PermissionHealth.ps1 is not loaded.
+function Get-PimManagerWhoNeedsWhat {
+    <#
+      GS-WHO-NEEDS-WHAT (owner 2026-11-10, at a customer: "i cannot see which id to give what permissions"). Get Started's
+      "Who needs what": each identity by display name + object id and its rights. The ids come from what this Manager already
+      knows -- the engine identity the permission check resolved, the web app's own identity (its token, read by
+      Get-PimManagerMailIdentities, which the mail check reads anyway) -- never a new Graph call (WEB-GRAPH-MIN-1). The
+      rights: the code's own grant sets (PIM-RightsList.ps1). Never throws: a part that cannot be read stays empty, and the
+      page says "not known yet".
+    #>
+    param([string]$EngineName = '', [string]$EngineObjectId = '', [object[]]$AzureRows = @(), [string]$MailSender = '',
+          [scriptblock]$WebIdentity, [scriptblock]$MailMode)
+    if (-not (Get-Command Get-PimWhoNeedsWhat -ErrorAction SilentlyContinue)) { return @() }
+    if (-not $WebIdentity) { $WebIdentity = { $m = Get-PimManagerMailIdentities; $me = $null; try { $me = Get-PimManagerSelfIdentity } catch { }
+        @{ name = $(if ("$($m.managerIdentityName)".Trim()) { "$($m.managerIdentityName)" } else { "$($me.name)" }); objectId = $(if ("$($m.managerObjectId)".Trim()) { "$($m.managerObjectId)" } else { "$($me.objectId)" }) } } }
+    if (-not $MailMode) { $MailMode = { $mm = ''; try { $mm = ConvertTo-PimMailMode -Value (Get-PimManagerSetting -Name 'MailMode') } catch { $mm = '' }; if (-not $mm -and "$($global:PIM_MailSender)".Trim()) { $mm = 'sharedMailbox' }; $mm } }
+    $web = @{ name = ''; objectId = '' }; try { $w = & $WebIdentity; if ($w) { $web = $w } } catch { }
+    $mode = ''; try { $mode = "$(& $MailMode)" } catch { $mode = '' }
+    $sets = $null; try { if (Get-Command Get-PimRightsCodeGraphSets -ErrorAction SilentlyContinue) { $sets = Get-PimRightsCodeGraphSets } } catch { $sets = $null }
+    if (-not $sets -and (Get-Command Get-PimRequiredGraphCapabilities -ErrorAction SilentlyContinue)) {
+        # the code's grant file could not be parsed here: the engine's REQUIRED set (the permission check's own list) at least
+        $sets = @{ engine = @(@(Get-PimRequiredGraphCapabilities) | ForEach-Object { "$($_.role)" } | Where-Object { $_ } | Select-Object -Unique) }
+    }
+    $table = @(); try { if (Get-Command Get-PimRightsAzureTable -ErrorAction SilentlyContinue) { $table = @(Get-PimRightsAzureTable) } } catch { $table = @() }
+    $scopes = @(); try { $scopes = @(Get-PimAzureManagedScopes -Rows @($AzureRows | Where-Object { $_ -and "$($_.Action)".Trim() -ine 'Remove' })) } catch { $scopes = @() }
+    try {
+        return @(Get-PimWhoNeedsWhat -EngineName $EngineName -EngineObjectId $EngineObjectId -WebName "$($web.name)" -WebObjectId "$($web.objectId)" `
+                    -GraphSets $sets -AzureTable $table -AzureScopes $scopes -MailMode $mode -MailSender $MailSender)
+    } catch { return @() }
+}
 function Get-PimManagerPermissionHealthBody {
     param([switch]$Refresh)
     $permRefresh = [bool]$Refresh
@@ -11932,7 +12018,7 @@ function Get-PimManagerPermissionHealthBody {
     if (-not (Get-Command Get-PimPermissionHealth -ErrorAction SilentlyContinue)) {
         return $null
     }
-    $identityName = 'the engine identity'; $granted = @(); $readable = $false; $azScopes = @(); $oid = ''; $permReadErr = ''
+    $identityName = 'the engine identity'; $granted = @(); $readable = $false; $azScopes = @(); $oid = ''; $permReadErr = ''; $engDisplayName = ''
     try {
         # WHO AM I, AND WHO IS THE ENGINE. 🔴 Operator 2026-09-25 on 2.4.423 (internal): "it doesnt show
         # permissions and have option to fix". Two defects:
@@ -12002,11 +12088,13 @@ function Get-PimManagerPermissionHealthBody {
             }
             if (-not $eng) { throw "the engine job's managed identity '$engineJob' was not found in this Manager's resource group ($rgPrefix) -- is the engine job deployed with a system-assigned identity?" }
             $oid = "$($eng.id)"; $identityName = "Engine job: $engineJob - runs as $($eng.displayName)"   # framework NAMING-CONVENTIONS (owner 2026-11-09)
+            $engDisplayName = $(if ("$($eng.displayName)" -ne 'the engine identity') { "$($eng.displayName)".Trim() } else { '' })   # GS-WHO-NEEDS-WHAT
         } else {
             # 2026-11-10 (two installations on 3.0.70: GET /api/permissions-health -> 500 "Cannot bind argument to parameter 'Name'
             # because it is an empty string"): a web token with an oid but no xms_mirid gives no name (WEB-GRAPH-MIN-1 reads the
             # name from the token only) -- never an empty name downstream (New-PimIdentityRecord -Name is mandatory).
             $oid = "$($self.id)"; $identityName = $(if ("$($self.displayName)".Trim()) { "$($self.displayName)" } else { "this PIM Manager's identity (object id $oid)" })
+            $engDisplayName = "$($self.displayName)".Trim()   # GS-WHO-NEEDS-WHAT: a local run -- the Manager and the engine share one identity
         }
         if ($oid) {
             $graphSp = Invoke-PimEngineRecordedGraph -Path "/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'&`$select=id,appRoles"
@@ -12075,9 +12163,9 @@ function Get-PimManagerPermissionHealthBody {
     }
     # Operator 2026-10-04 (a test tenant): Azure rights are needed only when Azure resource delegations are DEFINED. -1 = the
     # store could not be counted -> the strict rule stays (a gap is never hidden by a failed read).
-    $azDefs = -1
+    $azDefs = -1; $azDefRows = @()
     if ($script:PimSqlCs -and (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue)) {
-        try { $azDefs = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity 'PIM-Assignments-Azure-Resources').Count } catch { $azDefs = -1 }
+        try { $azDefRows = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity 'PIM-Assignments-Azure-Resources'); $azDefs = $azDefRows.Count } catch { $azDefs = -1; $azDefRows = @() }
     }
     # §97 (owner 2026-10-08): what the engine holds AT THE TENANT ROOT management group -- Reader (required: Discovery
     # cannot see Azure without it) and User Access Administrator (optional; needed only to assign Azure resource roles).
@@ -12188,6 +12276,9 @@ function Get-PimManagerPermissionHealthBody {
         # MAIL CHECK: every mail prerequisite as its own line (amber, never red -- mail is optional); Verify permissions re-reads it
         mailChecks = $(try { Get-PimManagerMailChecks -Refresh:$permRefresh } catch { $null })
         identities = @($identities)
+        # GS-WHO-NEEDS-WHAT (owner 2026-11-10): the engine identity's display name, and which identity gets which right (Get Started)
+        engineName = "$engDisplayName"
+        whoNeedsWhat = @(Get-PimManagerWhoNeedsWhat -EngineName $engDisplayName -EngineObjectId $oid -AzureRows @($azDefRows) -MailSender $mailSender)
         connectors = @(Get-PimWorkloadConnectorRequirements | ForEach-Object { [ordered]@{ connector="$($_.connector)"; surface="$($_.surface)"; model="$($_.model)"; tier="$($_.tier)"; grant="$($_.grant)" } })
         checkedUtc = (Get-Date).ToUniversalTime().ToString('o')
         cached     = $false
@@ -20257,7 +20348,8 @@ function Handle-Request {
                     Write-PimManagerAuditEvent -Action 'emergency.activate.refused' -Target 'emergency-override' -After @{ error = "$($check.error)" } -Result 'denied'
                 }
                 $ppErr = "$($check.error)"
-                if ($ppErr -match '(?i)no emergency passcode configured') { $ppErr = 'no emergency passphrase is configured for this environment -- run tools/setup/Set-PimEmergencyPassphrase.ps1 (it stores PIM-EmergencyPasscode in the key vault and sets PIM_EmergencyVault on the Manager)' }
+                # SETTINGS-CLARITY (2026-11-10): plain words; the card prints the two-line command with this installation's values
+                if ($ppErr -match '(?i)no emergency passcode configured') { $ppErr = 'no emergency passphrase is set up for this installation yet -- run Set-PimEmergencyPassphrase.ps1 once; Settings > Emergency access shows the command' }
                 Write-JsonResponse -Response $resp -Status 403 -Body @{ error = $ppErr }
                 return 403
             }
@@ -20824,7 +20916,13 @@ function Handle-Request {
             $view = @($__ps.view); $storeErr = "$($__ps.storeErr)"
             # BUG-WORKLOAD-OFF-STILL-CHECKED: Power BI not in use (dropped from the view) -> no Power BI notices either
             $__pbInUse = [bool](@($view | Where-Object { "$($_.workload)" -eq 'PowerBI' }).Count)
+            # GS-AZURE-WORKLOADS (owner 2026-11-10): Get Started's Azure resources + Workloads steps -- the scopes PIM manages
+            # with the engine's state at each (from the SAME azure.uaa check) and how many delegations need each workload.
+            $__gsAw = Get-PimManagerGetStartedAzureWorkloads -State $__ps
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                azure = $__gsAw.azure
+                usage = $__gsAw.usage
+                usageError = $__gsAw.usageError
                 ok = (-not $storeErr); storeError = $storeErr; staleDays = (Get-PimWorkloadPrereqStaleDays)
                 script = 'Initialize-PimWorkloadPrereqs.ps1'
                 # 97.1: PIM checks the prerequisites itself; "Check again" = Run now on this job (POST /api/jobs/run).

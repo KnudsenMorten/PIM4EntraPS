@@ -9130,7 +9130,11 @@
       bar.querySelectorAll('.settingsCatBtn').forEach(b => { const on = b.dataset.cat === k; b.style.fontWeight = on ? '700' : ''; b.style.borderColor = on ? '#0969da' : ''; });
       try { localStorage.setItem('pimSettingsCat', k); } catch (_) { }
     };
-    bar.querySelectorAll('.settingsCatBtn').forEach(b => { b.onclick = function () { show(b.dataset.cat); }; });
+    // SETTINGS-CAT-SCROLL (owner 2026-11-10): a click on a category or Show all goes to the TOP of Settings (the intro line and
+    // the category bar in view) -- the page used to keep its scroll position, deep inside the previous category. A deep link
+    // (showSettingsSection) clicks first and then scrolls to its own section, so it still ends there.
+    const toTop = function () { try { if (intro.scrollIntoView) intro.scrollIntoView({ block: 'start' }); } catch (_) { } };
+    bar.querySelectorAll('.settingsCatBtn').forEach(b => { b.onclick = function () { show(b.dataset.cat); toTop(); }; });
     show(cur || '*');
   }
   // open Settings on the category that holds a section (deep links from other pages, e.g. "Settings > RFA broker & API")
@@ -11711,7 +11715,7 @@
     if (st.effective === 'off') { kind = 'off'; t = 'Group deletion is switched off (' + String(st.text || 'off') + '), so nothing is deleted. A SuperAdmin switches it on under ' + place + '.'; }
     else if (st.effective === 'on') { kind = 'on'; t = 'Group deletion is on (' + String(st.text || 'on') + '). The groups wait for the next full engine run: the job ' + job + ', which runs daily.'; }
     else t = 'Whether group deletion is on is not known (' + String(st.text || 'not read') + '). The switch is under ' + place + '.';
-    if (st.envNote) t += ' ' + String(st.envNote);
+    // SETTINGS-CLARITY (2026-11-10): the engine-job note (st.envNote) is behind the card's More info, not in this sentence
     const gs = st.lastGuardStop;
     if (kind === 'on' && gs && gs.atUtc) t += ' The removal guard stopped a group-deletion run on ' + fmtTime(gs.atUtc) + ' (' + (Number(gs.held) || 0) + ' deletion(s) held back; that run deleted no group).';
     return { kind: kind, text: t };
@@ -11830,7 +11834,8 @@
     host.innerHTML = head +
       '<label style="font-weight:normal;"><input type="checkbox" id="groupRetireOn"' + (boxOn ? ' checked' : '') + (canFlip ? '' : ' disabled') + '> Delete the groups marked Retire in Microsoft Entra ID</label>' + settingInfoBtn('EnableGroupRetirement') +
       '<div id="groupRetireState" data-effective="' + esc(String(st.effective)) + '" data-source="' + esc(String(st.source)) + '" style="font-size:12px;margin-top:4px;">In effect: <b>' + esc(String(st.text || '')) + '</b></div>' +
-      (st.envNote ? '<div id="groupRetireEnvNote" style="color:#57606a;font-size:11.5px;margin-top:2px;">' + esc(String(st.envNote)) + '</div>' : '') +
+      // SETTINGS-CLARITY: what PIM Manager cannot read here is said behind More info, not in the main text
+      settingInfoExtra('EnableGroupRetirement', st.envNote) +
       '<div id="groupRetireMarked" style="font-size:12px;margin-top:6px;">' + (total === null
         ? 'Marked Retire right now: <b>not counted</b> -- the store could not be read (' + esc(String(m.error || '')) + ').'
         : 'Marked Retire and still in Microsoft Entra ID: <b>' + total + '</b> group' + (total === 1 ? '' : 's') + '.' +
@@ -14243,6 +14248,17 @@
     };
   }
 
+  // SETTINGS-CLARITY (owner 2026-11-10): the published two-line command that sets up the emergency passphrase -- download from
+  // invardia.com/support/pim, then run with what this installation knows (sv = the server's passphrase.setupValues); a part it
+  // could not read is a <placeholder>. -ManagerApp only when the web app has another name than the default.
+  function pimEmergencySetupCmd(sv) {
+    sv = sv || {};
+    const v = (x, ph) => (String(x || '').trim() ? mailPsArg(x) : ph);
+    let run = '.\\Set-PimEmergencyPassphrase.ps1 -TenantId ' + v(sv.tenantId, '<tenant id>') + ' -SubscriptionId ' + v(sv.subscriptionId, '<subscription id>') +
+      ' -ResourceGroup ' + v(sv.resourceGroup, '<resource group>') + ' -VaultName ' + v(sv.vaultName, '<key vault name>');
+    if (String(sv.managerApp || '').trim() && String(sv.managerApp).trim() !== 'ca-pim-manager') run += ' -ManagerApp ' + mailPsArg(sv.managerApp);
+    return pimSupportCmd('Set-PimEmergencyPassphrase', [run + ' -UseSignedInAccount']);
+  }
   var _emLastNote = '';   // the last activate/restore outcome, in the server's words (kept across the re-render)
   async function renderSettingsEmergencySection(host) {
     if (!host) return;
@@ -14252,33 +14268,33 @@
     const emNoteHtml = _emLastNote ? '<div class="govEmNote" style="margin-top:6px;padding:6px 10px;border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;font-size:12px;">' + esc(_emLastNote) + '</div>' : '';
     pimEmergencyBadge(!!emergency.active);
     const h = [];
-    h.push('<div class="set-card" style="border-color:' + (emergency.active ? '#cf222e' : '#d0d7de') + ';"><h3 style="margin:0 0 4px;font-size:14px;color:#cf222e;">Emergency override (break-glass)</h3>');
-    // REQ-F (2026-09-19, operator: "explain the actual functionality what will happen here"). Each sentence is what the
-    // code does: /api/emergency (passphrase check, record, engine started now), PIM-Governance.ps1 (SHA-256, constant
-    // time, 5 failures / 15 min), PIM-EngineProviders.ps1 Invoke-PimEmergencyOverrideStep (approval rule off on the
-    // PIM-for-Groups MEMBER policy of each scoped group, owners mailed, audited; restore = the linked template in full).
-    h.push('<div class="govEmExplain" style="margin-top:6px;padding:8px 10px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;font-size:11.5px;color:#54470f;">' +
-      '<b>What it does:</b> switches <b>off the approval requirement</b> on PIM-for-Groups <b>member activation</b> for the groups you scope, for 1&ndash;24 hours, ' +
-      'so a responder who is <b>already eligible</b> can activate without waiting for an approver. <b>When to use:</b> a genuine incident where the normal approvers are unavailable and access is needed now.' +
-      '<ol style="margin:6px 0 4px 18px;padding:0;">' +
-      '<li>Your passphrase is checked against the secret <code>PIM-EmergencyPasscode</code> in this environment&rsquo;s key vault (SHA-256, constant-time). ' +
-      '5 wrong attempts lock activation for 15 minutes. Every attempt is audited.</li>' +
-      '<li>The override (scope, who, why, expiry) is recorded in the PIM database and the engine is started at once.</li>' +
-      '<li>Within about a minute the engine switches the approval rule <b>off</b> on the member policy of each scoped group, e-mails each group&rsquo;s owners, and audits every change.</li>' +
-      '<li>At expiry &mdash; or when a SuperAdmin presses <b>Restore now</b> &mdash; the engine re-applies each group&rsquo;s linked policy template in full, so approval is back on. The restore is audited.</li>' +
-      '</ol>' +
-      '<b>What it does NOT do:</b> it grants nothing. Nobody gets access they are not already eligible for &mdash; responders still activate their membership through PIM. ' +
-      'Entra role policies and Azure resource policies are not touched.</div>');
-    // REQ-F: is a passphrase configured at all? Said BEFORE an incident, never discovered during one.
+    h.push('<div class="set-card" id="setEmergencyOverride" style="border-color:' + (emergency.active ? '#cf222e' : '#d0d7de') + ';"><h3 style="margin:0 0 4px;font-size:14px;color:#cf222e;">Emergency override (break-glass)</h3>');
+    // SETTINGS-CLARITY (owner 2026-11-10: "unclear to many including me" / "what to do where?"): two sentences on top --
+    // what it does and that nobody gets new access. How it works inside (the passphrase check and its lockout, the record,
+    // the engine switching approval off on each scoped group's MEMBER policy and mailing the owners, the restore at expiry,
+    // what is never touched) is behind More info (settings-catalog.json 'EmergencyOverride', true to /api/emergency,
+    // PIM-Governance.ps1 and PIM-EngineProviders.ps1 Invoke-PimEmergencyOverrideStep).
+    h.push('<div class="govEmWhat" style="color:#57606a;font-size:12px;margin:2px 0 6px;">In an incident, switch off the approval step for chosen groups for 1&ndash;24 hours, so people who are already eligible can activate at once. ' +
+      'Nobody gets new access.' + settingInfoBtn('EmergencyOverride') + '</div>');
+    // REQ-F: is a passphrase configured at all? Said BEFORE an incident, never discovered during one -- in one calm line,
+    // then WHO runs WHAT, WHERE: the published two-line command with what this installation knows filled in.
     const pp = emergency && emergency.passphrase;
     const ppMissing = !!(pp && pp.configured === false);
+    const ppWhy = 'Set up the emergency passphrase first (see above) -- until then an activation would be refused.';
     if (pp) {
-      h.push('<div id="govEmPassphraseStatus" class="' + (ppMissing ? 'govEmPpMissing' : 'govEmPpOk') + '" style="margin-top:6px;font-size:12px;padding:6px 10px;border-radius:6px;border:1px solid ' + (ppMissing ? '#cf222e;background:#fff5f5;' : '#d0d7de;background:#f6f8fa;') + '">' +
-        (ppMissing
-          ? '<b style="color:#cf222e;">Passphrase: NOT configured &mdash; activation will be refused.</b> ' + esc(String(pp.reason || '')) +
-            '<div style="margin-top:4px;color:#57606a;">Set it up (an operator, once per environment): ' + esc(String(pp.setup || 'tools/setup/Set-PimEmergencyPassphrase.ps1')) + ' ' + pimScriptDocLink('Set-PimEmergencyPassphrase') + '</div>'
-          : '<b style="color:#1a7f37;">Passphrase: configured</b> ' + (pp.source === 'keyvault' ? 'in key vault <code>' + esc(String(pp.vault || '')) + '</code> (secret <code>' + esc(String(pp.secretName || '')) + '</code>).' : '(' + esc(String(pp.reason || pp.source || '')) + ').')) +
-        '</div>');
+      if (ppMissing) {
+        h.push(settingInfoExtra('EmergencyOverride', pp.reason ? 'Why it is not set up: ' + String(pp.reason) : ''));
+        h.push('<div id="govEmPassphraseStatus" class="govEmPpMissing" style="margin-top:6px;font-size:12px;padding:8px 10px;border-radius:6px;border:1px solid #d4a72c;background:#fff8c5;">' +
+          '<b>Not set up yet</b> &mdash; set an emergency passphrase first (once).' +
+          '<div id="govEmSetupWho" style="margin-top:4px;color:#57606a;">Who and where: an Azure administrator with <b>Owner</b> on this PIM Manager&rsquo;s resource group and <b>Key Vault Secrets Officer</b> on its key vault, ' +
+          'in a PowerShell 7 window on a computer with a browser (you sign in in the browser). The script asks for the passphrase twice; only its hash is stored.</div>' +
+          '<div class="act-code" style="margin-top:4px;"><pre id="govEmSetupCmd" style="white-space:pre-wrap;overflow-wrap:anywhere;">' + esc(pimEmergencySetupCmd(pp.setupValues)) + '</pre>' +
+          '<button type="button" class="btn-sec" id="govEmSetupCopy">Copy</button></div>' + pimScriptDocLinksFor('Set-PimEmergencyPassphrase.ps1') + '</div>');
+      } else {
+        h.push('<div id="govEmPassphraseStatus" class="govEmPpOk" style="margin-top:6px;font-size:12px;padding:6px 10px;border-radius:6px;border:1px solid #d0d7de;background:#f6f8fa;">' +
+          '<b style="color:#1a7f37;">Passphrase: configured</b> ' + (pp.source === 'keyvault' ? '(kept in key vault <code>' + esc(String(pp.vault || '')) + '</code>).' : '(' + esc(String(pp.reason || pp.source || '')) + ').') +
+          '</div>');
+      }
     }
     if (emNoteHtml) h.push(emNoteHtml);
     if (emergency.active) {
@@ -14288,16 +14304,18 @@
         `Engine-applied so far: ${esc(((emergency.appliedGroups || []).filter(Boolean).join(', ')) || '(pending next engine run)')}` +
         `${PIM_ROLE === 'SuperAdmin' ? ' <button id="govEmRestore" style="margin-left:8px;">Restore now</button>' : ''}</div>`);
     } else if (PIM_ROLE === 'SuperAdmin') {
-      // Per-field help: each input carries a label + one-line "what this is".
-      const emField = (label, help, inner) =>
-        `<label style="display:flex;flex-direction:column;gap:2px;font-size:11px;color:#57606a;flex:1 1 220px;min-width:0;">` +
-        `<span><b>${esc(label)}</b> &mdash; ${esc(help)}</span>${inner}</label>`;
-      h.push(`<div style="margin-top:8px;font-size:12.5px;display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">` +
-        emField('Passphrase', 'the emergency passphrase kept in the key vault; checked, never stored', `<input type="password" id="govEmPass" placeholder="emergency passphrase" style="min-width:200px;">`) +
-        emField('Hours', 'how long approval stays off (1-24); the engine switches it back on at the end', `<input type="number" id="govEmHours" value="4" min="1" max="24" style="width:80px;">`) +
-        emField('Groups that lose their approval requirement', 'GroupTags or group names, separated by ";" -- blank = EVERY approval-protected group', `<input type="text" id="govEmScope" placeholder="e.g. PIM-GA; PIM-PRA  (blank = all)" style="min-width:300px;">`) +
-        emField('Reason', 'why -- written to the audit trail and to the e-mail the group owners get', `<input type="text" id="govEmReason" placeholder="e.g. SEV1 incident #1234" style="min-width:220px;">`) +
-        `<button id="govEmActivate"${ppMissing ? ' disabled title="No emergency passphrase is configured -- activation would be refused"' : ''} style="background:#cf222e;color:#fff;border:1px solid #cf222e;border-radius:5px;padding:6px 12px;cursor:pointer;${ppMissing ? 'opacity:.5;cursor:not-allowed;' : ''}">Disable approval</button>` +
+      // Short labels (SETTINGS-CLARITY). While no passphrase is set up every input and the button are DISABLED (greyed),
+      // with the reason as their tooltip -- they must not look usable when an activation would be refused.
+      const off = ppMissing ? ` disabled title="${esc(ppWhy)}"` : '';
+      const emField = (label, inner) =>
+        `<label style="display:flex;flex-direction:column;gap:2px;font-size:11px;color:#57606a;flex:1 1 220px;min-width:0;${ppMissing ? 'opacity:.55;' : ''}">` +
+        `<span><b>${esc(label)}</b></span>${inner}</label>`;
+      h.push(`<div class="govEmForm" style="margin-top:8px;font-size:12.5px;display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">` +
+        emField('Passphrase', `<input type="password" id="govEmPass" placeholder="emergency passphrase" style="min-width:200px;"${off}>`) +
+        emField('Hours (1-24)', `<input type="number" id="govEmHours" value="4" min="1" max="24" style="width:80px;"${off}>`) +
+        emField('Groups (blank = all approval-protected groups)', `<input type="text" id="govEmScope" placeholder="e.g. PIM-GA; PIM-PRA" style="min-width:300px;"${off}>`) +
+        emField('Reason (goes to the audit trail and the owners’ mail)', `<input type="text" id="govEmReason" placeholder="e.g. SEV1 incident #1234" style="min-width:220px;"${off}>`) +
+        `<button id="govEmActivate"${off} style="background:#cf222e;color:#fff;border:1px solid #cf222e;border-radius:5px;padding:6px 12px;cursor:pointer;${ppMissing ? 'opacity:.5;cursor:not-allowed;' : ''}">Disable approval</button>` +
         `<span id="govEmStatus" style="color:#57606a;font-size:11.5px;"></span></div>` +
         `<div style="color:#57606a;font-size:11px;margin-top:4px;">Nothing is in effect when you press the button: the engine applies it within about a minute. Watch "Engine-applied so far" fill in above.</div>`);
     } else {
@@ -14306,8 +14324,10 @@
     h.push('</div>');
     host.innerHTML = h.join('');
 
+    const cpy = document.getElementById('govEmSetupCopy');
+    if (cpy) cpy.onclick = () => { const el = document.getElementById('govEmSetupCmd'); try { navigator.clipboard.writeText(el ? el.textContent : ''); sharedToast('Copied'); } catch (_) { } };
     const act = document.getElementById('govEmActivate');
-    if (act) act.onclick = async () => {
+    if (act && !act.disabled) act.onclick = async () => {
       const status = document.getElementById('govEmStatus');
       status.textContent = 'activating...';
       try {
@@ -15586,8 +15606,23 @@
       anchor.parentNode.insertBefore(panel, anchor.nextSibling);
     }
     btn._pimInfoHolder = holder; btn.setAttribute('aria-expanded', 'true');
-    pimSettingInfoLoad().then(() => { panel.innerHTML = pimSettingInfoPanelHtml(pimSettingInfoEntry(key), key); })
+    pimSettingInfoLoad().then(() => { panel.innerHTML = pimSettingInfoPanelHtml(pimSettingInfoEntry(key), key) + pimSettingInfoExtraHtml(btn, key); })
       .catch(e => { panel.innerHTML = pimSettingInfoPanelHtml(null, key).replace('No explanation is recorded for this setting yet.', 'The explanation could not be loaded: ' + escapeHtml(String((e && e.message) || e))); });
+  }
+  // SETTINGS-CLARITY (owner 2026-11-10: "unclear to many including me" / "what to do where?"): a card keeps a detail of THIS
+  // installation that is not for its main text (e.g. "a value set directly on the engine job overrides this setting") in a
+  // hidden settingInfoExtra(key, text); More info for that key shows it under the catalog text, in the same card only.
+  function settingInfoExtra(key, text) {
+    const t = String(text || '').trim();
+    if (!t) return '';
+    return '<span class="pim-info-extra" data-info-key="' + escapeHtml(String(key || '')) + '" hidden>' + escapeHtml(t) + '</span>';
+  }
+  function pimSettingInfoExtraHtml(btn, key) {
+    const root = (btn && btn.closest && btn.closest('.set-card')) || null;
+    if (!root) return '';
+    const out = [];
+    root.querySelectorAll('.pim-info-extra').forEach(el => { if (el.getAttribute('data-info-key') === String(key || '') && String(el.textContent || '').trim()) out.push(escapeHtml(String(el.textContent).trim())); });
+    return out.length ? '<div class="pim-info-extra-shown" style="margin-top:6px;"><b>On this installation:</b> ' + out.join(' ') + '</div>' : '';
   }
   // Capture phase: runs BEFORE the card's own change handler, so a cancelled switch never reaches it.
   function pimSettingInfoOnChange(ev) {
@@ -16121,6 +16156,16 @@
         const rdr = !permRootReaderMissing(p), uaa = !permRootUaaNeededMissing(p);
         return { done: !!p.objectId && miss === 0 && az && rdr && uaa, note: p.objectId ? (miss ? miss + ' permission(s) missing' : !az ? 'no Azure role-management right' : !rdr ? 'no Reader at the tenant root -- Discovery cannot see Azure' : !uaa ? 'no User Access Administrator at the tenant root (Azure delegations are defined)' : 'all required permissions held') : 'not checked yet' };
       } },
+    // GS-AZURE-WORKLOADS (owner 2026-11-10, at a customer: "i am missing the onboarding for azure in the get started"): two
+    // OPTIONAL steps over the SAME checks Discovery & gaps > Workload prerequisites shows (no second check). Grey while nothing
+    // needs them; AMBER (attention) only for something that is in use and not ready -- an Azure delegation whose scope lacks
+    // User Access Administrator for the engine, a workload with delegations whose prerequisites are not green.
+    { id: 'azure', title: 'Azure resources', required: false, need: 'Admin',
+      what: 'When PIM delegates Azure resource roles, the engine identity needs User Access Administrator (or Owner) at each Azure scope it manages. This step shows each scope and the exact grant for one that lacks it.',
+      check: c => gsAzureCheck(c) },
+    { id: 'workloads', title: 'Workloads', required: false, need: 'Admin',
+      what: 'Defender XDR, Intune and Power BI each need their own preparation before PIM can give their roles. See what each one still needs -- or mark the ones you do not use as Not used.',
+      check: c => gsWorkloadsCheck(c) },
     { id: 'mail', title: 'Mail sender', required: true,
       what: 'How PIM sends its mail (TAP codes, approvals, alerts): a shared mailbox, its send right scoped to that one mailbox -- or your SMTP relay.',
       check: c => {
@@ -16200,6 +16245,9 @@
       safe(() => api('GET', '/api/alerting')), safe(() => api('GET', '/api/settings/breakglass-accounts')),
       safe(() => api('GET', '/api/get-started')), safe(() => api('GET', '/api/jobs')), safe(() => api('GET', '/api/settings/mail'))]);
     c.envName = await safe(() => api('GET', '/api/settings/environment-name'));
+    // GS-AZURE-WORKLOADS: the workload prerequisite view (+ the Azure scopes and the delegations per workload) -- the SAME read
+    // as Discovery & gaps > Workload prerequisites; a fresh read here, and the chips' short cache follows it.
+    c.prereqs = await safe(() => pimWorkloadPrereqsLoad(!!force));
     c.licence = lic; c.perm = perm; c.mail = mail; c.jobs = home && home.tiles && home.tiles.jobs; c.alerting = alerting; c.breakglass = bg;
     c.confirm = (gs && gs.confirmations) || {};
     c.policyChoices = (gs && gs.policyChoices && typeof gs.policyChoices === 'object') ? gs.policyChoices : null;   // PIM 100.93: { known, waiting, needsReview }
@@ -16214,6 +16262,95 @@
   // PIM 100.84 (owner 2026-10-11: "there is inconsistence among things"): how many policy change sets wait for a SuperAdmin
   // NOW -- the hold RECORDS' count (tiles.jobs.policyHoldCount, the same records the Approvals page lists), never the number
   // of jobs whose last run was held. Only a server that does not send it yet falls back to the jobs' count.
+  // ---- GS-AZURE-WORKLOADS (owner 2026-11-10, "Azure + workloads") + GS-WHO-NEEDS-WHAT ("i cannot see which id to give what
+  //      permissions"). The Azure step and the Workloads step read the SAME data as Discovery & gaps > Workload prerequisites
+  //      (GET /api/workload-prereqs: the view, azure.scopes judged by the last azure.uaa check, usage = delegations per workload).
+  const GS_AZURE_PAGE = 'Who gets what > Azure roles on resources';
+  const GS_WL_SKIP = ['AzureRbac', 'EntraRoles'];   // Azure has its own step; Entra roles are the Engine permissions step
+  const GS_WL_NAMES = { DefenderXdr: 'Defender XDR', Intune: 'Intune', PowerBI: 'Power BI' };
+  function gsWlName(w) { return GS_WL_NAMES[w] || String(w || ''); }
+  function gsAzureCheck(c) {
+    const p = c && c.prereqs;
+    if (!p || p.loadError) return { done: false, note: 'the Azure check could not be read' + (p && p.loadError ? ': ' + p.loadError : '') };
+    const az = p.azure || null;
+    if (!az) return { done: false, note: 'not checked yet' };
+    if (az.readError) return { done: false, note: 'the Azure delegations could not be read' };
+    const sc = Array.isArray(az.scopes) ? az.scopes : [];
+    if (!sc.length) return { done: false, note: 'no Azure resource is delegated yet' };
+    const miss = sc.filter(s => s && s.state === 'missing').length, unk = sc.filter(s => s && s.state !== 'missing' && s.state !== 'held').length;
+    if (miss) return { done: false, attention: true, note: miss + ' of ' + sc.length + ' Azure scope(s) lack User Access Administrator for the engine identity' };
+    if (unk) return { done: false, note: unk + ' of ' + sc.length + ' Azure scope(s) not checked yet -- press Check again' };
+    return { done: true, note: 'the engine identity can give roles at every Azure scope PIM manages (' + sc.length + ')' };
+  }
+  // The workloads this step lists: every workload of the prerequisite view but Azure and Entra (their own steps), in its order.
+  function gsWorkloadRows(c) {
+    const p = (c && c.prereqs) || {};
+    const usage = (p.usage && typeof p.usage === 'object') ? p.usage : null;
+    return (Array.isArray(p.workloads) ? p.workloads : []).filter(w => w && GS_WL_SKIP.indexOf(String(w.workload)) < 0).map(w => {
+      const id = String(w.workload);
+      const notUsed = !!(c.confirm && c.confirm['workload-notused-' + id.toLowerCase()]);
+      const used = usage ? Number(usage[id] || 0) : null;   // null = the delegations could not be counted
+      const ready = !p.loadError && pimWorkloadPrereqIsReady(w);
+      return { id, w, name: gsWlName(id), notUsed, notUsedBy: notUsed ? String((c.confirm['workload-notused-' + id.toLowerCase()] || {}).by || '') : '', used, ready,
+               // amber only for a workload that IS in use (delegations need it) and is not ready -- "Not used" never hides that
+               attention: !ready && (used || 0) > 0 };
+    });
+  }
+  function gsWorkloadsCheck(c) {
+    const p = c && c.prereqs;
+    if (!p || p.loadError) return { done: false, note: 'the workload prerequisites could not be read' + (p && p.loadError ? ': ' + p.loadError : '') };
+    const rows = gsWorkloadRows(c);
+    if (!rows.length) return { done: false, note: 'not checked yet' };
+    const att = rows.filter(r => r.attention);
+    if (att.length) return { done: false, attention: true, note: att.map(r => r.name + ': in use (' + r.used + ' delegation(s)), not ready').join('; ') };
+    const left = rows.filter(r => !r.ready && !r.notUsed);
+    if (!left.length) return { done: true, note: rows.map(r => r.name + ' ' + (r.ready ? 'ready' : 'not used')).join(', ') };
+    return { done: false, note: (rows.length - left.length) + ' of ' + rows.length + ' ready or not used -- ' + left.map(r => r.name).join(', ') + ' still to prepare or mark as Not used' };
+  }
+  // WHO NEEDS WHAT: each identity by display name + object id (GET /api/permissions-health -> whoNeedsWhat, from the engine
+  // identity the permission check resolved and the web app's own identity -- never a new Graph call from the page).
+  const GS_WHO_UNKNOWN = 'not known yet -- the engine records it on its next run';
+  function gsWhoList(c) {
+    const p = (c && c.perm) || {};
+    if (Array.isArray(p.whoNeedsWhat) && p.whoNeedsWhat.length) return p.whoNeedsWhat;
+    // an older server: the engine as the permission check names it; the web app not known yet
+    return [{ role: 'engine', label: 'Engine identity', name: String(p.engineName || ''), objectId: String(p.objectId || ''), known: !!p.objectId, graph: { count: null, roles: [] }, azure: [], exchange: '' },
+            { role: 'web', label: 'Web app identity', name: '', objectId: '', known: false, graph: { count: null, roles: [] }, azure: [], exchange: '' }];
+  }
+  function gsIdentityText(c, role) {
+    const i = gsWhoList(c).find(x => x && x.role === role);
+    const label = role === 'web' ? 'Web app identity' : 'Engine identity';
+    if (!i) return label + ' -- ' + GS_WHO_UNKNOWN;
+    const n = String(i.name || '').trim(), o = String(i.objectId || '').trim();
+    if (!n && !o) return label + ' -- ' + GS_WHO_UNKNOWN;
+    return label + (n ? ' ' + n : '') + ' (object id ' + (o || GS_WHO_UNKNOWN) + ')';
+  }
+  function gsWhoNeedsWhatHtml(c) {
+    const list = gsWhoList(c);
+    const esc = escapeHtml;
+    const rows = list.map(i => {
+      const role = String(i.role || ''), n = String(i.name || '').trim(), o = String(i.objectId || '').trim();
+      const g = i.graph || {};
+      const gCount = (g.count === null || g.count === undefined) ? null : Number(g.count);
+      const gRoles = Array.isArray(g.roles) ? g.roles : [];
+      const graphLine = gCount === null ? 'Microsoft Graph: the list could not be read here'
+        : gCount === 0 ? 'Microsoft Graph: none'
+        : 'Microsoft Graph: ' + gCount + ' application permission' + (gCount === 1 ? '' : 's') +
+          (gRoles.length ? ' <details class="gsWhoGraph" style="display:inline-block;vertical-align:top;"><summary style="cursor:pointer;color:#0969da;">More info</summary><ul style="margin:2px 0 0 16px;padding:0;">' + gRoles.map(r => '<li><code>' + esc(String(r)) + '</code></li>').join('') + '</ul></details>' : '');
+      const azl = (Array.isArray(i.azure) ? i.azure : []).filter(a => a && a.role);
+      const azLine = azl.length ? 'Azure: ' + azl.map(a => esc(String(a.role)) + ' at ' + esc(String(a.scope || ''))).join('; ') : 'Azure: none';
+      const exLine = String(i.exchange || '').trim() ? 'Exchange: ' + esc(String(i.exchange)) : '';
+      const oidId = 'gsWhoOid-' + esc(role);
+      return '<tr class="gsWhoRow" data-who-role="' + esc(role) + '" data-who-known="' + (o ? '1' : '0') + '">' +
+        '<td><b>' + esc(String(i.label || (role === 'web' ? 'Web app identity' : 'Engine identity'))) + '</b><div class="gsWhoName">' + (n ? esc(n) : '<i>name ' + esc(GS_WHO_UNKNOWN) + '</i>') + '</div></td>' +
+        '<td>' + (o ? '<code id="' + oidId + '" class="gsWhoOid">' + esc(o) + '</code> <button type="button" class="gsCopy btn-sec" data-src="' + oidId + '" style="font-size:11px;padding:1px 6px;">Copy</button>'
+                    : '<span class="gsWhoOid gsWhoUnknown" style="color:#57606a;">' + esc(GS_WHO_UNKNOWN) + '</span>') + '</td>' +
+        '<td style="font-size:12px;"><div>' + graphLine + '</div><div>' + azLine + '</div>' + (exLine ? '<div>' + exLine + '</div>' : '') + '</td></tr>';
+    }).join('');
+    return '<div class="gsWho" style="margin:0 0 10px;"><div class="gs-sub">Who needs what</div>' +
+      '<div class="gs-hint" style="margin:0 0 4px;">Every right below is given to one of these identities -- grant it to that object id, never to a person.</div>' +
+      '<table class="set-table gsWhoTable"><tr><th>Identity</th><th>Object id</th><th>Its rights</th></tr>' + rows + '</table></div>';
+  }
   function gsPolicyHoldCount(c) {
     const j = (c && c.jobs) || {};
     if (typeof j.policyHoldCount === 'number') return j.policyHoldCount;
@@ -16284,7 +16421,9 @@
   async function evaluateGetStarted(force) {
     if (!force && GET_STARTED_LAST && (Date.now() - GS_CACHE_AT) < GS_CACHE_MS) { gsPaintBadge(GET_STARTED_LAST); return GET_STARTED_LAST; }
     const c = await gsFacts(force);
-    const steps = GET_STARTED_STEPS.map(s => { let r = { done: false, note: '' }; try { r = s.check(c) || r; } catch (_) { } return Object.assign({}, s, { done: !!r.done, deferred: !r.done && !!r.deferred, note: r.note || '' }); });
+    // GS-AZURE-WORKLOADS: attention = an OPTIONAL step whose subject is in use and not ready -- amber like an open step, but
+    // still optional (not counted as an open required step, no menu count).
+    const steps = GET_STARTED_STEPS.map(s => { let r = { done: false, note: '' }; try { r = s.check(c) || r; } catch (_) { } return Object.assign({}, s, { done: !!r.done, deferred: !r.done && !!r.deferred, attention: !r.done && !s.required && !!r.attention, note: r.note || '' }); });
     GET_STARTED_LAST = steps; GS_FACTS = c; GS_CACHE_AT = Date.now();
     gsPaintBadge(steps);
     try { gsRecordStatus(steps); } catch (_) { }
@@ -17518,7 +17657,7 @@
       body: (c) => {
         const d = c.perm || {};
         const miss = (d.missingRequired || []).filter(m => m && typeof m === 'object');
-        let h = '';
+        let h = gsWhoNeedsWhatHtml(c);   // GS-WHO-NEEDS-WHAT: which identity gets which right, by name + object id
         if (!d.objectId) h += '<div class="gs-facts">The engine identity could not be read yet' + (d.detail ? ': ' + escapeHtml(String(d.detail)) : '.') + '</div>';
         else h += '<div class="gs-facts">Engine identity: <b>' + escapeHtml(String(d.identity || d.objectId)) + '</b> -- ' + (miss.length ? '<b style="color:#cf222e;">' + miss.length + ' permission(s) missing</b>' : 'every required permission is held') + '.</div>';
         if (miss.length) {
@@ -17527,12 +17666,114 @@
         }
         if (d.objectId && d.azureOk === false) h += '<div class="gs-facts">Azure resource roles cannot be assigned yet: the engine identity needs <b>User Access Administrator</b> at the tenant root management group.</div>';
         if (d.objectId) h += permRootLines(d);   // §97: both tenant-root lines, always shown
-        if (permFixNeeded(d, miss)) h += '<div class="gs-hint">This page cannot grant permissions itself (on purpose: an identity that can grant permissions could give itself anything). A Global Administrator downloads the script from Invardia and runs it once (no PowerShell modules needed, sign-in in the browser):</div>' + gsCode('gsPermScript', permFixScript(d, miss)) + '<div class="gs-hint">' + escapeHtml(permFixHint(d)) + '</div>';
+        if (permFixNeeded(d, miss)) h += '<div class="gs-hint">This page cannot grant permissions itself (on purpose: an identity that can grant permissions could give itself anything). A Global Administrator downloads the script from Invardia and runs it once (no PowerShell modules needed, sign-in in the browser):</div>' +
+          '<div class="gs-hint gsPermFor">These rights are for: <b>' + escapeHtml(gsIdentityText(c, 'engine')) + '</b></div>' + gsCode('gsPermScript', permFixScript(d, miss)) + '<div class="gs-hint">' + escapeHtml(permFixHint(d)) + '</div>';
         return h + '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="recheck">Check again</button> <span class="gsActMsg"></span></div>';
       },
       actions: {
         recheck: async (x) => { x.say('Checking the engine identity...'); try { await api('GET', '/api/permissions-health?refresh=1'); } catch (_) { } GET_STARTED_LAST = null; await x.rerender(); }
       }
+    },
+    // GS-AZURE-WORKLOADS (owner 2026-11-10): the Azure scopes PIM manages and, per scope, whether the ENGINE identity holds User
+    // Access Administrator (or Owner) there -- the azure.uaa check Discovery & gaps shows. A scope without it gets the two-line
+    // Grant-PimEnginePermissions command for exactly that scope, with who runs it and where. Check again = the same job run.
+    azure: {
+      body: (c) => {
+        const p = (c && c.prereqs) || {}, az = p.azure || {};
+        const sc = Array.isArray(az.scopes) ? az.scopes : [];
+        const forWho = '<div class="gs-facts gsAzFor">For: <b>' + escapeHtml(gsIdentityText(c, 'engine')) + '</b></div>';
+        let h = '';
+        if (p.loadError) h += '<div class="gs-facts">The Azure check could not be read: ' + escapeHtml(String(p.loadError)) + '</div>';
+        else if (az.readError) h += '<div class="gs-facts">The Azure delegations could not be read: ' + escapeHtml(String(az.readError)) + '</div>';
+        else if (!sc.length) h += '<div class="gs-facts gsAzNone">No Azure resource is delegated yet -- add one under <b>' + escapeHtml(GS_AZURE_PAGE) + '</b> when you need it.</div>';
+        else {
+          const oid = String(((c.perm || {}).objectId) || az.engineObjectId || '').replace(/[^0-9A-Za-z-]/g, '');
+          const word = { held: ['&#10003; held', '#1a7f37'], missing: ['! not granted', pimSevColour('amber', 'fg')], notChecked: ['? not checked yet', '#57606a'] };
+          h += forWho + '<div class="gs-facts">' + sc.length + ' Azure scope(s) PIM manages. At each, the engine identity needs <b>User Access Administrator</b> (or Owner):</div>' +
+            '<table class="set-table gsAzScopes"><tr><th>Azure scope</th><th>Engine identity</th></tr>' +
+            sc.map(s => { const wd = word[s.state] || word.notChecked; return '<tr class="gsAzScope" data-scope="' + escapeHtml(String(s.scope || '')) + '" data-state="' + escapeHtml(String(s.state || 'notChecked')) + '"><td><code>' + escapeHtml(String(s.scope || '')) + '</code></td><td style="color:' + wd[1] + ';"><b>' + wd[0] + '</b></td></tr>'; }).join('') + '</table>';
+          sc.filter(s => s && s.state === 'missing').forEach((s, i) => {
+            let cmd = String(s.command || '');
+            // the server knows the engine id from the check's record; the permission check's id fills it when the record had none
+            if (oid) cmd = cmd.replace("'<engine-object-id>'", "'" + oid + "'");
+            if (!cmd) return;
+            h += '<div class="gsAzFix" data-scope="' + escapeHtml(String(s.scope || '')) + '" style="margin-top:10px;">' +
+              '<div class="gs-hint" style="color:#24292f;">Give the engine identity User Access Administrator at <code>' + escapeHtml(String(s.scope || '')) + '</code>. ' +
+              '<b>Who:</b> an Owner or User Access Administrator of that scope. <b>Where:</b> Azure Cloud Shell (PowerShell) or a PC with PowerShell 7 -- you sign in in the browser, no PowerShell modules.</div>' +
+              gsCode('gsAzCmd' + i, cmd) + '</div>';
+          });
+          if (sc.some(s => s && s.state === 'notChecked')) h += '<div class="gs-hint">A scope that is not checked yet is checked by PIM itself every day -- or press Check again.</div>';
+        }
+        // More info: the check behind it (the same as Discovery & gaps > Workload prerequisites > Azure RBAC)
+        const wv = (Array.isArray(p.workloads) ? p.workloads : []).find(w => w && w.workload === 'AzureRbac');
+        const uaa = wv && (wv.checks || []).find(k => k && k.id === 'azure.uaa');
+        h += '<details class="gsAzMore" style="margin-top:8px;font-size:12px;"><summary style="cursor:pointer;color:#0969da;">More info</summary>' +
+          '<div style="color:#57606a;margin-top:4px;">This is the same check Discovery &amp; gaps shows under Workload prerequisites &gt; Azure RBAC (resource roles). PIM runs it itself every day, as the engine identity. ' +
+          'Role Based Access Control Administrator is not enough: PIM writes eligible assignments and their policies, which that role cannot.' +
+          (wv && wv.ranUtc ? ' Last checked ' + escapeHtml(fmtTime(wv.ranUtc)) + '.' : ' Not checked yet.') + (uaa && uaa.detail ? '<div style="overflow-wrap:anywhere;margin-top:2px;">' + escapeHtml(String(uaa.detail)) + '</div>' : '') + '</div></details>';
+        return h + '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="recheck">Check again</button> <span class="gsActMsg"></span></div>';
+      },
+      actions: {
+        // the endpoint Discovery & gaps' Check again uses: Run now on the prerequisite self-check job
+        recheck: async (x) => {
+          x.say('Queueing a check...');
+          try {
+            const p = (x.c && x.c.prereqs) || {};
+            const r = await api('POST', '/api/jobs/run', { name: p.selfCheckJob || 'workload-prereqs' });
+            try { _pimPrereqCache = null; } catch (_) { }
+            GET_STARTED_LAST = null;
+            x.say('Check queued -- ' + ((r && r.detail) || 'the result appears here within a few minutes') + '.');
+          } catch (e) { x.say('Could not queue a check: ' + gsErrText(e), true); }
+        }
+      }
+    },
+    // GS-AZURE-WORKLOADS: per workload the SAME lines as Discovery & gaps > Workload prerequisites (renderWorkloadPrereqChips:
+    // state, what is missing, the portal steps / command, Confirm, Check again) plus "Not used" for a workload this organisation
+    // does not use (a Get Started confirmation; amber stays while delegations need the workload).
+    workloads: {
+      body: (c) => {
+        const p = (c && c.prereqs) || {};
+        if (p.loadError) return '<div class="gs-facts">The workload prerequisites could not be read: ' + escapeHtml(String(p.loadError)) + '</div>';
+        const rows = gsWorkloadRows(c);
+        let h = '<div class="gs-facts gsWlFor">The rights below are for: <b>' + escapeHtml(gsIdentityText(c, 'engine')) + '</b></div>';
+        if (!rows.length) h += '<div class="gs-facts">PIM has not checked the workloads yet. It checks them itself every day.</div>';
+        if (p.usageError) h += '<div class="gs-hint">The delegations could not be counted: ' + escapeHtml(String(p.usageError)) + '</div>';
+        const pbiOff = !(Array.isArray(p.workloads) ? p.workloads : []).some(w => w && w.workload === 'PowerBI');
+        h += rows.map(r => {
+          const state = r.ready ? 'ready' : r.notUsed ? 'notused' : r.attention ? 'attention' : 'todo';
+          const usedTxt = r.used === null ? '' : r.used ? r.used + ' delegation(s) use it' : 'no delegation uses it yet';
+          const head = r.ready ? '&#10003; ready' : r.notUsed ? 'not used' + (r.notUsedBy ? ' (marked by ' + escapeHtml(r.notUsedBy) + ')' : '') : r.attention ? '! in use and not ready' : 'not prepared yet';
+          const col = r.ready ? '#1a7f37' : r.attention ? pimSevColour('amber', 'fg') : '#57606a';
+          return '<div class="gsWl" data-wl="' + escapeHtml(r.id) + '" data-wl-state="' + state + '" style="border:1px solid #d0d7de;border-radius:6px;padding:6px 10px;margin:6px 0;">' +
+            '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><b>' + escapeHtml(r.name) + '</b><span class="gsWlState" style="color:' + col + ';font-size:12px;">' + head + '</span>' +
+              (usedTxt ? '<span style="color:#57606a;font-size:12px;">-- ' + escapeHtml(usedTxt) + '</span>' : '') + '<span style="flex:1 1 auto;"></span>' +
+              (r.ready ? '' : r.notUsed ? '<button type="button" class="gsAction btn-sec gsWlUsed" data-act="used-' + escapeHtml(r.id) + '" style="font-size:11.5px;">We use it after all</button>'
+                                        : '<button type="button" class="gsAction btn-sec gsWlNotUsed" data-act="notused-' + escapeHtml(r.id) + '" style="font-size:11.5px;">Not used</button>') + '</div>' +
+            (r.notUsed && r.attention ? '<div class="gs-hint" style="color:' + pimSevColour('amber', 'fg') + ';">Marked as not used, but ' + r.used + ' delegation(s) still need it -- prepare it, or remove those delegations.</div>' : '') +
+            (r.notUsed && !r.attention ? '' : '<div class="gsWlChips" data-wl="' + escapeHtml(r.id) + '"></div>') + '</div>';
+        }).join('');
+        if (pbiOff) h += '<div class="gs-hint gsWlPbiOff">Power BI: the integration is off and no delegation uses it -- nothing to prepare.</div>';
+        return h + '<div class="gs-actions"><span class="gsActMsg"></span></div>';
+      },
+      mount: async (extra, c) => {
+        const card = extra && extra.closest ? extra.closest('.gsStep') : null;
+        if (!card) return;
+        for (const host of Array.from(card.querySelectorAll('.gsWlChips'))) {
+          try { await renderWorkloadPrereqChips(host, host.getAttribute('data-wl')); } catch (_) { }
+        }
+      },
+      actions: (() => {
+        const a = {};
+        Object.keys(GS_WL_NAMES).forEach(w => {
+          const set = (on) => async (x) => {
+            x.say('Saving...');
+            try { await api('PUT', '/api/get-started/confirm', { step: 'workload-notused-' + w.toLowerCase(), confirmed: on }); GET_STARTED_LAST = null; await x.rerender(); }
+            catch (e) { x.say('Not saved: ' + gsErrText(e), true); }
+          };
+          a['notused-' + w] = set(true); a['used-' + w] = set(false);
+        });
+        return a;
+      })()
     },
     mail: {
       // MAIL-1: the TWO modes (shared mailbox: create via the published script, or use an existing one; SMTP relay: the
@@ -17976,9 +18217,10 @@
     const staged = gsStagedCount();
     const openReq = steps.filter(s => s.required && !s.done && !s.deferred);
     // a step skipped for now (break-glass) is grey like an optional one: not open, not done
-    const pill = (s, i) => '<button type="button" class="gsPill" data-step="' + escapeHtml(s.id) + '" data-gs-kind="' + (s.done ? 'done' : s.deferred ? 'deferred' : s.required ? 'open' : 'optional') + '" style="border-radius:16px;padding:4px 12px;margin:0 6px 6px 0;font-size:12.5px;cursor:pointer;border:1px solid ' +
-      (i === idx ? '#0969da;background:#0969da;color:#fff;' : s.done ? '#4ac26b;background:#dafbe1;color:#1a7f37;' : (s.required && !s.deferred) ? (pimSevColour('amber', 'line') + ';background:' + pimSevColour('amber', 'soft') + ';color:' + pimSevColour('amber', 'fg') + ';') : '#d0d7de;background:#f6f8fa;color:#57606a;') + '">' +
-      (s.done ? '&#10003; ' : (s.required && !s.deferred) ? '<b>!</b> ' : '') + escapeHtml(s.title) + (s.deferred ? ' <span style="font-size:11px;opacity:.8;">(skipped for now)</span>' : s.required ? '' : ' <span style="font-size:11px;opacity:.8;">(optional)</span>') + '</button>';
+    const amberOf = (s) => (s.required && !s.deferred) || !!s.attention;   // GS-AZURE-WORKLOADS: an optional step in use and not ready is amber too
+    const pill = (s, i) => '<button type="button" class="gsPill" data-step="' + escapeHtml(s.id) + '" data-gs-kind="' + (s.done ? 'done' : s.deferred ? 'deferred' : s.required ? 'open' : s.attention ? 'attention' : 'optional') + '" style="border-radius:16px;padding:4px 12px;margin:0 6px 6px 0;font-size:12.5px;cursor:pointer;border:1px solid ' +
+      (i === idx ? '#0969da;background:#0969da;color:#fff;' : s.done ? '#4ac26b;background:#dafbe1;color:#1a7f37;' : amberOf(s) ? (pimSevColour('amber', 'line') + ';background:' + pimSevColour('amber', 'soft') + ';color:' + pimSevColour('amber', 'fg') + ';') : '#d0d7de;background:#f6f8fa;color:#57606a;') + '">' +
+      (s.done ? '&#10003; ' : amberOf(s) ? '<b>!</b> ' : '') + escapeHtml(s.title) + (s.deferred ? ' <span style="font-size:11px;opacity:.8;">(skipped for now)</span>' : s.required ? '' : ' <span style="font-size:11px;opacity:.8;">(optional)</span>') + '</button>';
     let fields = '';
     if (blocked) fields = '<div class="gs-hint gsNeeds">Only ' + (cur.need === 'SuperAdmin' ? 'a SuperAdmin' : 'an Admin') + ' can do this step -- ask one of them. Save &amp; next moves on.</div>';
     else if (loadErr) fields = '<div class="gsProblem" style="display:block;">This step could not read what it needs: ' + escapeHtml(loadErr) + '</div>';
@@ -17997,8 +18239,8 @@
         '<div style="font-size:11px;letter-spacing:.6px;color:#0969da;font-weight:600;">STEP ' + (idx + 1) + ' OF ' + total + (cur.required ? '' : ' &middot; OPTIONAL') + '</div>' +
         '<h3 class="gsTitle" style="margin:4px 0 6px;">' + escapeHtml(cur.title) + '</h3>' +
         '<div class="gsWhat" style="font-size:13px;color:#24292f;margin-bottom:8px;">' + escapeHtml(cur.what) + '</div>' +
-        '<div class="gsState" data-gs-state="' + (cur.done ? 'done' : cur.deferred ? 'deferred' : cur.required ? 'open' : 'optional') + '" style="font-size:12.5px;margin-bottom:12px;color:' + (cur.done ? '#1a7f37' : (cur.required && !cur.deferred) ? pimSevColour('amber', 'fg') : '#57606a') + ';">' +
-          (cur.done ? '&#10003; Done' : cur.deferred ? 'Skipped for now' : cur.required ? '! Not done yet' : 'Optional -- not done yet') + (cur.note ? ' -- ' + escapeHtml(cur.note) : '') + '</div>' +
+        '<div class="gsState" data-gs-state="' + (cur.done ? 'done' : cur.deferred ? 'deferred' : cur.required ? 'open' : cur.attention ? 'attention' : 'optional') + '" style="font-size:12.5px;margin-bottom:12px;color:' + (cur.done ? '#1a7f37' : amberOf(cur) ? pimSevColour('amber', 'fg') : '#57606a') + ';">' +
+          (cur.done ? '&#10003; Done' : cur.deferred ? 'Skipped for now' : cur.required ? '! Not done yet' : cur.attention ? '! Optional -- needs a look' : 'Optional -- not done yet') + (cur.note ? ' -- ' + escapeHtml(cur.note) : '') + '</div>' +
         '<div class="gsExtra"></div>' +
         '<form class="gsForm" novalidate autocomplete="off">' +
           // Enter = Save & next: the FIRST submit button of a form is the one Enter presses. Previous is a plain button.
@@ -39468,7 +39710,8 @@
     host.innerHTML = head +
       '<label style="font-weight:normal;"><input type="checkbox" id="autoOffboardOn"' + (boxOn ? ' checked' : '') + (canFlip ? '' : ' disabled') + '> Offboard these admin accounts automatically</label>' + settingInfoBtn('EnableAutomaticOffboarding') +
       '<div id="autoOffboardState" data-effective="' + esc(String(st.effective)) + '" data-source="' + esc(String(st.source)) + '" style="font-size:12px;margin-top:4px;">In effect: <b>' + esc(String(st.text || '')) + '</b></div>' +
-      (st.envNote ? '<div id="autoOffboardEnvNote" style="color:#57606a;font-size:11.5px;margin-top:2px;">' + esc(String(st.envNote)) + '</div>' : '') +
+      // SETTINGS-CLARITY: what PIM Manager cannot read here is said behind More info, not in the main text
+      settingInfoExtra('EnableAutomaticOffboarding', st.envNote) +
       (st.canWrite ? '' : '<div style="color:#8c959f;font-size:11px;margin-top:4px;">Only a SuperAdmin can change this.</div>') +
       '<div id="autoOffboardMsg" style="font-size:12px;margin-top:4px;"></div></div>';
     const cb = document.getElementById('autoOffboardOn');
@@ -39488,9 +39731,15 @@
     if (!host || !isServer) return;
     const esc = escapeHtml;
     let st = null; try { st = await api('GET', '/api/settings/reconcile-removal'); } catch (e) { st = null; }
-    const head = '<div class="set-card" id="setReconcileRemoval"><h3 style="margin:0 0 4px;font-size:14px;">Daily reconcile: removal of leftovers</h3>' +
-      '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">A leftover is a live assignment or membership that PIM Manager put in your tenant, whose definition a later commit removed, and for which nothing similar is configured. ' +
-      'The daily full run (the job <code>full-reconcile</code>) either removes the leftovers that qualify or only reports them. It never disables or deletes an admin account.</div>';
+    // SETTINGS-CLARITY (owner 2026-11-10: "unclear to many including me" / "what to do where?"): first what it does for the
+    // reader and what to choose, in plain words; how the check decides (the rules, the limit, the engine job) is behind More info.
+    // True to engine/_shared/PIM-ReconcileRemoval.ps1: only access a PIM Manager commit defined and confirmed live, whose
+    // definition a later commit removed, with nothing similar configured; admin-account scopes are never touched; items from
+    // before the change journal and shared Defender XDR / Intune role assignments are never removed.
+    const head = '<div class="set-card" id="setReconcileRemoval"><h3 style="margin:0 0 4px;font-size:14px;">Remove access when its definition is deleted</h3>' +
+      '<div id="reconcileRemovalWhat" style="color:#57606a;font-size:12px;margin-bottom:6px;">When you delete a definition in PIM Manager, the daily check takes away again the access PIM Manager gave for it. ' +
+      'Choose <b>Only report it</b> if you want to see the list first. ' +
+      'Only access PIM Manager itself set up is removed; admin accounts are never disabled or deleted.</div>';
     if (!st) {
       host.innerHTML = head + '<div id="reconcileRemovalState" style="color:#cf222e;font-size:12px;">The mode could not be read, so it is not shown and cannot be changed from here right now.</div>' + settingInfoBtn('ReconcileRemovalMode') + '</div>';
       return;
@@ -39502,12 +39751,15 @@
     const radio = function (mode, label) {
       return '<label style="font-weight:normal;display:block;margin-top:2px;"><input type="radio" name="reconcileRemovalMode" class="reconcileRemovalPick" value="' + mode + '"' + (cur === mode ? ' checked' : '') + (canFlip ? '' : ' disabled') + '> ' + label + '</label>';
     };
-    host.innerHTML = head + radio('enforce', 'Remove leftovers') + radio('report', 'Report only (remove nothing)') + settingInfoBtn('ReconcileRemovalMode') +
+    host.innerHTML = head + radio('enforce', 'Remove it (recommended)') + radio('report', 'Only report it') + settingInfoBtn('ReconcileRemovalMode') +
+      settingInfoExtra('ReconcileRemovalMode', st.envNote) +
       '<div id="reconcileRemovalState" data-effective="' + esc(String(st.effective)) + '" data-source="' + esc(String(st.source)) + '" style="font-size:12px;margin-top:4px;">In effect: <b>' + esc(String(st.text || '')) + '</b></div>' +
-      (st.envNote ? '<div id="reconcileRemovalEnvNote" style="color:#57606a;font-size:11.5px;margin-top:2px;">' + esc(String(st.envNote)) + '</div>' : '') +
       '<div id="reconcileRemovalLast" style="font-size:12px;margin-top:6px;">' + (rep.known
-        ? 'The last daily run' + (rep.atUtc ? ' (' + esc(fmtTime(rep.atUtc)) + ')' : '') + ' counted <b>' + (Number(rep.wouldRemove) || 0) + '</b> item' + ((Number(rep.wouldRemove) || 0) === 1 ? '' : 's') + ' it would remove.'
-        : 'What the daily run would remove is <b>not known</b> (' + esc(String(rep.error || 'no report')) + ').') + ' <a href="#" id="reconcileRemovalJobs">Open Jobs</a> for the list.</div>' +
+        ? 'The last daily check' + (rep.atUtc ? ' (' + esc(fmtTime(rep.atUtc)) + ')' : '') + ' counted <b>' + (Number(rep.wouldRemove) || 0) + '</b> item' + ((Number(rep.wouldRemove) || 0) === 1 ? '' : 's') + ' to remove. <a href="#" id="reconcileRemovalJobs">Open Jobs</a> for the list.'
+        // no report yet (a new install): one calm line; a report that could not be read says so, the reason behind its title
+        : (/no daily run has reported yet/.test(String(rep.error || '')) || !rep.error
+          ? 'No daily check has run yet &mdash; the list appears under <a href="#" id="reconcileRemovalJobs">Jobs</a> after the first one.'
+          : '<span title="' + esc(String(rep.error)) + '">The last daily check could not be read here &mdash; <a href="#" id="reconcileRemovalJobs">Open Jobs</a> for the list.</span>')) + '</div>' +
       (st.canWrite ? '' : '<div style="color:#8c959f;font-size:11px;margin-top:4px;">Only a SuperAdmin can change this.</div>') +
       '<div id="reconcileRemovalMsg" style="font-size:12px;margin-top:4px;"></div></div>';
     const jl = document.getElementById('reconcileRemovalJobs'); if (jl) jl.onclick = function (ev) { ev.preventDefault(); switchTab('jobs'); };
@@ -39522,7 +39774,7 @@
           // "remove" whose count is no longer the one the person saw (409) and hands back the current sentence
           let text = String(mode === 'enforce' ? st.confirmEnforce : st.confirmReport), seen = rep.known ? rep.wouldRemove : -1, r = null;
           for (let round = 0; ; round++) {
-            if (!(await pimConfirm({ title: mode === 'enforce' ? 'Remove leftovers in the daily reconcile?' : 'Only report leftovers in the daily reconcile?', body: text, okLabel: mode === 'enforce' ? 'Remove leftovers' : 'Report only', danger: true }))) { back(); return; }
+            if (!(await pimConfirm({ title: mode === 'enforce' ? 'Remove access when its definition is deleted?' : 'Only report access whose definition is deleted?', body: text, okLabel: mode === 'enforce' ? 'Remove it' : 'Only report it', danger: true }))) { back(); return; }
             try { r = await api('PUT', '/api/settings/reconcile-removal', { mode: mode, confirm: true, wouldRemove: seen }); break; }
             catch (e) {
               if (round < 2 && e && e.status === 409 && e.body && e.body.needsConfirm) { text = String(e.body.confirmText || text); seen = e.body.wouldRemove; continue; }

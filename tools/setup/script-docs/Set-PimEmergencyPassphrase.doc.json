@@ -3,8 +3,8 @@
   "product": "pim",
   "title": "Set up the emergency override passphrase",
   "purpose": "Sets up the emergency override (break-glass) passphrase of one PIM Manager environment: stores its SHA-256 hash as a secret in the environment's key vault, gives the Manager's managed identity read access to that one secret, and points the Manager at the vault.",
-  "whenToRun": "Once per environment, before the emergency override is needed (Settings > Emergency override shows 'no emergency passcode configured' until it has run), and again to change the passphrase. Ring 1 first.",
-  "standalone": false,
+  "whenToRun": "Once per installation, before the emergency override is needed (Settings > Emergency access shows 'Not set up yet' and the two-line command with this installation's values until it has run), and again to change the passphrase.",
+  "standalone": true,
   "sourcePath": "tools/setup/Set-PimEmergencyPassphrase.ps1",
   "runAs": [
     { "kind": "azureRbac", "name": "Key Vault Secrets Officer (or Key Vault Administrator)", "scope": "the environment's key vault", "why": "Writes the secret PIM-EmergencyPasscode and reads it back." },
@@ -27,7 +27,7 @@
     { "name": "SecretName", "required": false, "default": "PIM-EmergencyPasscode", "help": "The secret name the Manager reads." },
     { "name": "Passphrase", "required": false, "default": null, "help": "The passphrase as a SecureString (at least 12 characters). Omit it to be prompted twice. Never plain text." },
     { "name": "TenantId", "required": true, "default": null, "help": "The tenant id." },
-    { "name": "UseSignedInAccount", "required": false, "default": false, "help": "Sign in as the az user (asserted to be a user in -TenantId and -SubscriptionId). The recommended way." },
+    { "name": "UseSignedInAccount", "required": false, "default": false, "help": "Sign in as yourself in the browser (or use the Invardia Support session open in this window); asserted to be a user in -TenantId with -SubscriptionId visible. No command-line tool, no module. The recommended way." },
     { "name": "AdminAppId", "required": false, "default": null, "help": "Automation: the admin application's client id (with -AdminCertThumbprint)." },
     { "name": "AdminCertThumbprint", "required": false, "default": null, "help": "Automation: the thumbprint of the admin application's certificate in the local machine store." },
     { "name": "OutFile", "required": false, "default": null, "help": "Write the outcome as JSON to this file." }
