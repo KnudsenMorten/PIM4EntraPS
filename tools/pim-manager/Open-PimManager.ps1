@@ -11950,6 +11950,16 @@ function Get-PimManagerPermissionHealthBody {
             $self = $sv.value[0]
         }
         $selfRid = @(@($self.alternativeNames) | Where-Object { "$_" -match '^/subscriptions/' }) | Select-Object -First 1
+        # 2026-11-10 (live, 3.0.78): a HOSTED Manager whose Graph token carries no xms_mirid fell to the "run locally: the Manager
+        # IS the engine" branch below and checked the WEB identity (id-pim-web, 3 read rights since RIGHTS-1 B) -- 19 rights
+        # "missing" and a Grant command that would give the web app the engine's write rights. A hosted Manager is NEVER the
+        # engine: find the resource group from the engine job's ARM path (the one Azure read this check makes) and check the
+        # engine there; if even that cannot be read, say so -- never check the web app as if it were the engine.
+        if (-not $selfRid -and $script:PimHosted) {
+            $tj0 = $null; try { $tj0 = Get-PimManagerTickJobId } catch { $tj0 = $null }
+            if ("$tj0" -match '^/subscriptions/[^/]+/resourcegroups/[^/]+/' ) { $selfRid = "$tj0"; $self | Add-Member -NotePropertyName servicePrincipalType -NotePropertyValue 'ManagedIdentity' -Force }
+            else { throw "the engine identity could not be determined (this hosted PIM Manager's own resource is not named in its token, and the engine job's path is not known) -- the web app is never checked as the engine" }
+        }
         if ("$($self.servicePrincipalType)" -eq 'ManagedIdentity' -and $selfRid) {
             # CR5 step 1 (PIM 100.149): the install record (incl. PIM_ENGINE_JOB_NAME); today's name is the default
             $engineJob = if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { Get-PimInstallName -Role engine } elseif ("$($env:PIM_ENGINE_JOB_NAME)".Trim()) { "$($env:PIM_ENGINE_JOB_NAME)".Trim() } else { 'ca-pim-tick' }

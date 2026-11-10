@@ -13,13 +13,17 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.0.79 -- 2026-11-10
+
+- The Engine permissions check on the Get Started and Home pages now always checks the engine identity. At some installations it checked the PIM Manager web app instead and listed rights as missing that the engine already holds.
+
 ## 3.0.78 -- 2026-11-10
 
 - PIM Manager now runs on .NET 10 LTS and PowerShell 7.6 LTS (supported to November 2028): the PIM Manager image is built on the current .NET 10 base and patched at every build, and the sign-in front (2.1.0) runs on a minimal, current .NET 10 runtime image. .NET 8 and PowerShell 7.4 reached end of support on 10 November 2026. Also: the permission check on the Home page no longer fails with an error at some installations. (3.0.77 was not published.)
 
 ## 3.0.77 -- 2026-11-10
 
-- PIM Manager now runs on .NET 10 LTS and PowerShell 7.6 LTS (supported to November 2028): the PIM Manager image is built on the current .NET 10 base and patched at every build, and the sign-in front (2.1.0) runs on a minimal, current .NET 10 runtime image. .NET 8 and PowerShell 7.4 reached end of support on 10 November 2026. Also: the permission check on the Home page no longer fails with an error at some installations.
+- Not published: this version was stopped before it was released; everything in it ships in 3.0.78.
 
 ## 3.0.76 -- 2026-11-10
 
