@@ -3684,7 +3684,7 @@
     { id: 'status',   label: 'Status',     tip: 'The account status the engine enforces.' }
   ];
   const ACCT_FILTER_LABELS = {
-    type: { internal: 'internal', external: 'external', guest: 'guest' },
+    type: { internal: 'internal', external: 'external', guest: 'guest', existing: 'existing account' },
     priv: { 'high-priv': 'high-priv', 'day-to-day': 'day-to-day', unknown: 'not classified' },
     platform: { cloud: 'cloud (Entra)', ad: 'AD (hybrid)' },
     dept: { '': 'none' }
@@ -3692,7 +3692,7 @@
   function acctFacets(a) {
     a = a || {};
     const t = String(a.adminType || '').toLowerCase();
-    const type = /guest/.test(t) ? 'guest' : (/extern/.test(t) ? 'external' : 'internal');
+    const type = (a.existingAccount || /^existing/.test(t)) ? 'existing' : (/guest/.test(t) ? 'guest' : (/extern/.test(t) ? 'external' : 'internal'));
     const pc = String(a.privilegeClass || '').toLowerCase();
     const priv = (pc === 'high-priv' || pc === 'day-to-day') ? pc : 'unknown';
     const pl = String(a.platform || '').toLowerCase();
@@ -3863,7 +3863,12 @@
           (a.upnMissing
             ? '<div class="acct-upn-missing" style="color:#cf222e;font-size:11px;font-weight:600;" title="' + escapeHtml(a.upnMissingWhy || '') + '">⚠ no UPN (' + escapeHtml(a.userName || '') + ') — not a valid admin</div></td>'
             : '<div style="color:#57606a;font-size:11px;font-family:ui-monospace,monospace;">' + escapeHtml(a.userPrincipalName) + '</div></td>') +
-        '<td style="font-size:11.5px;">' + escapeHtml(a.adminType || '') +
+        // ADMIN-EXISTING-ACCOUNT (5) + (6): labelled "Existing account"; a delegation above L4-L5 is an amber WARNING line
+        // (no number, no dot -- the menu rule: only errors / actions get numbers).
+        '<td style="font-size:11.5px;">' + (a.existingAccount
+            ? '<span class="acctExistingBadge" title="The person&rsquo;s own office account. PIM manages its delegations only -- never the account (no create, rename, disable, delete or TAP).">' + escapeHtml(a.adminTypeLabel || 'Existing account') + '</span>' +
+              ((a.levelWarnings || []).length ? '<div class="acctLevelWarn" style="color:#9a6700;font-size:10.5px;margin-top:2px;" title="' + escapeHtml((a.levelWarnings || []).join('\n')) + '">&#9888; delegation above L4-L5 (allowed)</div>' : '')
+            : escapeHtml(a.adminType || '')) +
           (a.environment ? '<div style="color:#57606a;font-size:10.5px;">' + escapeHtml(a.environment) + '</div>' : '') + '</td>' +
         '<td style="font-size:11.5px;" class="acctDeptCell">' + acctSponsorDeptCell(a) + '</td>' +
         '<td style="font-size:11.5px;color:' + stColor + ';font-weight:600;">' + (a.deletePending
@@ -3872,7 +3877,8 @@
           // 71.21: never the word "deletion" -- PIM keeps the account, disabled, for ever.
           (flagged ? '<div style="color:#bc4c00;font-size:10.5px;font-weight:400;" title="Offboarding disables the account, revokes its sessions and removes its PIM access. Offboarding never deletes the account itself.">marked for manual removal</div>' : '') + '</td>' +
         '<td style="font-size:11.5px;" class="acctAutoDisableCell">' + acctAutoDisableCell(a) + '</td>' +
-        '<td style="font-size:11.5px;">' + (a.createTAP ? 'enforced' : '<span style="color:#8c959f;" title="TargetPlatform=AD: a TAP is Entra-only">n/a (AD only)</span>') + '</td>' +
+        '<td style="font-size:11.5px;">' + (a.existingAccount ? '<span style="color:#8c959f;" title="An existing office account signs in with its own credentials -- PIM issues it no TAP.">n/a (existing account)</span>'
+          : (a.createTAP ? 'enforced' : '<span style="color:#8c959f;" title="TargetPlatform=AD: a TAP is Entra-only">n/a (AD only)</span>')) + '</td>' +
         // Operator, 2026-09-12: "mail forward must be shown above in the list" -- where this admin's
         // mail goes should be readable in the grid, not only inside Edit.
         '<td style="font-size:11.5px;">' + acctMailForwardCell(a) + '</td>' +
@@ -3889,6 +3895,7 @@
           '<button class="btn-sec acctTap"    data-upn="' + escapeHtml(a.userPrincipalName) + '"' + dis(a.canResetTap) +
             (a.resetTapWhy ? ' title="' + escapeHtml(a.resetTapWhy) + '"' : '') + ' style="font-size:11px;">Reset TAP</button> ' +
           '<button class="btn-sec acctRevoke" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + dis(a.canRevokeSessions) +
+            (a.revokeSessionsWhy ? ' data-why="' + escapeHtml(a.revokeSessionsWhy) + '"' : '') +
             ' title="Invalidate every refresh token. The account is NOT disabled; the user simply signs in again." style="font-size:11px;">Revoke sessions</button> ' +
           // 🔴 71.21 -- THE BUTTON NO LONGER SAYS "DELETION" (operator, 2026-09-16: "we will newer delete an
           // accounnt"). It stages the RETIRE/OFFBOARD path only: disable, revoke sessions, strip PIM access.
@@ -3905,8 +3912,8 @@
           // account (disabled) and takes all its delegations away. All three STAGE into Pending changes -- a disable is
           // held for the offboard approval on commit like every disable (BUG-190), unless self-approval is on.
           (/^(disabled|removed)$/.test(String(a.accountStatus || 'Enabled').toLowerCase())
-            ? '<button class="btn-sec acctEnable" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) + ' title="Enable the account again (staged in Pending changes)." style="font-size:11px;">Enable</button> '
-            : '<button class="btn-sec acctDisable" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) + ' title="Disable the account; its delegations stay (staged in Pending changes; a disable needs the offboard approval)." style="font-size:11px;">Disable</button> ') +
+            ? '<button class="btn-sec acctEnable" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly && !a.accountVerbsLocked) + ' title="' + (a.accountVerbsLocked ? 'Existing account (office user): PIM never enables or disables the account itself.' : 'Enable the account again (staged in Pending changes).') + '" style="font-size:11px;">Enable</button> '
+            : '<button class="btn-sec acctDisable" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly && !a.accountVerbsLocked) + ' title="' + (a.accountVerbsLocked ? 'Existing account (office user): PIM never enables or disables the account itself -- remove its delegations instead.' : 'Disable the account; its delegations stay (staged in Pending changes; a disable needs the offboard approval).') + '" style="font-size:11px;">Disable</button> ') +
           '<button class="btn-sec acctDisableStrip" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
             ' title="Disable the account AND remove every delegation it has. The account stays in PIM, disabled (staged in Pending changes)." style="font-size:11px;">Disable &amp; remove delegations</button> ' +
           // §96.5 D1 (b): Remove from PIM -- every delegation removed, the account DISABLED and KEPT, the admin out of the active list.
@@ -3915,8 +3922,9 @@
             ' title="REMOVE this admin FROM PIM: every delegation is removed and the account is DISABLED and KEPT in Entra ID (not deleted). The admin leaves this list; PIM keeps the account disabled. Staged in Pending changes; a second administrator approves only for a high-privilege or break-glass admin, or with maker-checker on." style="font-size:11px;color:#bc4c00;">Remove from PIM</button> ') +
           // §96.5 D1 (operator 2026-10-06: "i allow operators to delete an admin"): SuperAdmin only, typed confirmation.
           // 2026-10-27: not for an on-premises AD admin -- it has no Entra ID account to delete, and PIM never deletes an AD account.
-          ((roleAtLeast('Admin') || PIM_ROLE === 'Delegated') && !a.readOnly && acctFacets(a).platform !== 'ad' ? '<button class="btn-sec acctDelete" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' +
-            ' title="DELETE the account in Entra ID and remove every delegation it has (SuperAdmin, Admin, or a delegated operator for admins at or below its level; you type DELETE to confirm -- your delete IS the approval; Entra keeps it restorable for 30 days)." style="font-size:11px;color:#cf222e;border-color:#cf222e;">Delete account</button> ' : '') +
+          // ADMIN-EXISTING-ACCOUNT: never for an existing office account -- PIM never deletes the person's own account.
+          (a.accountVerbsLocked ? '' : ((roleAtLeast('Admin') || PIM_ROLE === 'Delegated') && !a.readOnly && acctFacets(a).platform !== 'ad' ? '<button class="btn-sec acctDelete" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' +
+            ' title="DELETE the account in Entra ID and remove every delegation it has (SuperAdmin, Admin, or a delegated operator for admins at or below its level; you type DELETE to confirm -- your delete IS the approval; Entra keeps it restorable for 30 days)." style="font-size:11px;color:#cf222e;border-color:#cf222e;">Delete account</button> ' : '')) +
           // REQ-ADM-UNMANAGE-1: out of PIM, Entra untouched (the account and its access stay; Import brings it back).
           '<button class="btn-sec acctUnmanage" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
             ' title="Take this admin out of PIM: every row that names it leaves the desired state. Nothing changes in Entra -- the account and the access it holds stay (listed as unmanaged / drift; Import brings it back)." style="font-size:11px;">Stop managing</button> ' +
@@ -4488,7 +4496,9 @@
     let colour = '#57606a', note = '';
     if (a.autoDisablePast) { colour = '#cf222e'; note = 'in the past &mdash; the engine should have disabled this account'; }
     else if (a.autoDisableSoon) { colour = '#bc4c00'; note = 'due within 14 days'; }
-    let h = '<span style="color:' + colour + ';font-weight:600;" title="On this date the engine disables the account, revokes its sessions and removes its PIM access. Auto-disable never deletes the account.">' + esc(short) + '</span>';
+    if (a.autoDisablePast && a.existingAccount) note = 'in the past &mdash; its PIM access should have been removed';
+    // ADMIN-EXISTING-ACCOUNT: for an existing office account the date removes its PIM memberships ONLY.
+    let h = '<span style="color:' + colour + ';font-weight:600;" title="' + (a.existingAccount ? 'Existing account (office user): on this date the engine removes its PIM memberships only. The account itself is never disabled or deleted.' : 'On this date the engine disables the account, revokes its sessions and removes its PIM access. Auto-disable never deletes the account.') + '">' + esc(short) + '</span>';
     if (note) h += '<div style="color:' + colour + ';font-size:10.5px;font-weight:400;">' + note + '</div>';
     if (a.autoDisableLegacy) h += '<div style="color:#bc4c00;font-size:10.5px;" title="' + esc(a.autoDisableWhy || '') + '">from the old column OffboardDate &mdash; rename it</div>';
     return h;
@@ -22234,7 +22244,9 @@
         options: [
           { value: 'internal-adminuser', label: 'internal-adminuser — no prefix' },
           { value: 'external-adminuser', label: 'external-adminuser — x- prefix' },
-          { value: 'external-guest',     label: 'external-guest — g- prefix' }
+          { value: 'external-guest',     label: 'external-guest — g- prefix' },
+          // ADMIN-EXISTING-ACCOUNT: the person's own office account (UserPrincipalName = its exact UPN); delegations only.
+          { value: 'existing-account',   label: 'existing-account — Existing account (office user), no generated name' }
         ]
       };
     }
@@ -29855,6 +29867,8 @@
     if (t === 'internal') return 'internal-adminuser';
     if (t === 'external') return 'external-adminuser';
     if (t === 'guest') return 'external-guest';
+    // ADMIN-EXISTING-ACCOUNT: an existing office account (no prefix, no generated name -- its name is its own UPN)
+    if (t === 'existing' || t === 'office-user' || t === 'existing-account') return 'existing-account';
     // blank = the tenant's AdminTypeDefault (Settings > Naming), as the engine's Get-PimAdminTypePrefix does (2026-09-21)
     if (!t) { const d = (typeof PIM_NAMING !== 'undefined' && PIM_NAMING && PIM_NAMING.AdminTypeDefault) ? String(PIM_NAMING.AdminTypeDefault).trim().toLowerCase() : ''; return (d && d !== '') ? d : 'internal-adminuser'; }
     return t;
@@ -29891,7 +29905,11 @@
     Object.keys(n.AdminTypePrefixes || {}).forEach(k => { const kk = String(k).trim().toLowerCase(); if (kk && keys.indexOf(kk) < 0) keys.push(kk); });
     // Operator 2026-10-05: two kinds of consultant -- a local account in this tenant, or a B2B guest who keeps their own identity.
     const nice = { 'internal-adminuser': 'Internal admin', 'external-adminuser': 'Consultant -- local account in this tenant', 'external-guest': 'Consultant -- B2B guest (their own identity)' };
-    return keys.map(k => { const p = adminTypePrefix(k); return { value: k, label: (nice[k] || k) + ' -- ' + (p ? 'prefix ' + p : 'no prefix') }; });
+    // ADMIN-EXISTING-ACCOUNT (owner 2026-11-11): the person's own office account, picked by its exact UPN -- PIM gives it
+    // delegations only and never creates, names or manages the account. No prefix: the name is the existing UPN.
+    const opts = keys.filter(k => k !== 'existing-account').map(k => { const p = adminTypePrefix(k); return { value: k, label: (nice[k] || k) + ' -- ' + (p ? 'prefix ' + p : 'no prefix') }; });
+    opts.push({ value: 'existing-account', label: 'Existing account (office user) -- uses the account’s own name' });
+    return opts;
   }
   function environmentOptions() {
     const n = (typeof PIM_NAMING !== 'undefined' && PIM_NAMING) || {};
@@ -31285,8 +31303,13 @@
     if (v === 'external-guest') { s.environment = 'entra'; s.usage = 'Cloud'; s.platform = 'ID'; s.userType = 'Consultant'; }
     // an internal admin has no consultant company
     if (/^internal/i.test(String(v))) s.company = '';
+    // ADMIN-EXISTING-ACCOUNT: the person's own office account -- Entra, no TAP, no generated name, no company.
+    if (v === 'existing-account') { s.userType = 'Internal'; s.environment = 'entra'; s.usage = 'Cloud'; s.platform = 'ID'; s.createTap = 'FALSE'; s.company = ''; s.purpose = 'Day2Day'; s.useLongForm = false; }
+    else if (s.createTap === 'FALSE') s.createTap = 'TRUE';
     s._engineUserName = null;
   }
+  // PURE. Does this text look like a UPN (name@domain.tld)? -- the existing-account picker's check.
+  function pimLooksLikeUpn(v) { return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(v || '').trim()); }
   function applyAdminTemplate(s, tpl) {
     if (!tpl) return;
     // Operator 2026-10-05 ("if i already defined consultant, it should preselect external"): a template that names the
@@ -32583,7 +32606,26 @@
                 onInput:(v)=>{ s.guestEmail = String(v || '').trim(); }
               }));
             }
-            if (adminTemplates.length) {
+            // ADMIN-EXISTING-ACCOUNT (owner 2026-11-11): pick or enter the EXISTING user by its exact UPN -- no generated
+            // name, no new account, no TAP, no welcome mail. Finish looks it up first and refuses it when it is not there.
+            const exAcc = (s.adminType === 'existing-account');
+            if (exAcc) {
+              const ei = document.createElement('div');
+              ei.className = 'wf-existing-note';
+              ei.style.cssText = 'background:#ddf4ff; border:1px solid #54aeff; border-radius:6px; padding:8px 10px; font-size:11.5px; margin:2px 0 10px;';
+              ei.innerHTML = '<b>Existing account (office user).</b> PIM gives this person&rsquo;s own account delegations and manages <b>only the delegations</b>: it never creates, renames, disables or deletes the account, and issues it no Temporary Access Pass. Meant for low (L4-L5) delegations &mdash; a higher one is allowed but shown as a warning.';
+              f.appendChild(ei);
+              const exFld = wuxField({ id:'wf-exupn', label:'Existing user (exact UPN)', required:true, type:'email', value:s.existingUpn || '',
+                example:'e.g. jdoe@contoso.example',
+                hint:'Pick the person, or type their exact sign-in name. It is looked up by this exact name when you finish; PIM never creates it.',
+                sub:'Account-Definitions-Admins.UserPrincipalName (and UserName)',
+                onInput:(v)=>{ s.existingUpn = String(v || '').trim(); s.existingFound = null; }
+              });
+              f.appendChild(exFld);
+              const exIn = exFld.querySelector('input');
+              if (exIn && typeof pimAttachPeopleCombo === 'function') pimAttachPeopleCombo(exIn);
+            }
+            if (adminTemplates.length && !exAcc) {
               f.appendChild(wuxField({ id:'wf-tpl', label:'Start from template', type:'select', value:s.templateId,
                 sub:'templates/admin/*.admintemplate.json -- prestages tier, scheduling, TAP and forwarding; everything stays editable',
                 options:[{ value:'', label:'(none -- start blank)' }].concat(adminTemplates.map(t => ({ value:t.id, label:t.name }))),
@@ -32597,8 +32639,10 @@
                 f.appendChild(d);
               }
             }
+            if (!exAcc) {
             f.appendChild(wuxField({ id:'wf-fn', label:'First name', required:true, value:s.first, example:'e.g. Anna', sub:'Account-Definitions-Admins.FirstName', onInput:(v)=>{ s.first=v; rerender(); } }));
             f.appendChild(wuxField({ id:'wf-ln', label:'Last name',  required:true, value:s.last,  example:'e.g. Hansen', sub:'Account-Definitions-Admins.LastName', onInput:(v)=>{ s.last=v; rerender(); } }));
+            }
             // Auto-derive initials from first+last and KEEP following name
             // edits while the value is still auto-derived ("M" must become
             // "MK" when the last name arrives). A manual edit of the
@@ -32607,14 +32651,14 @@
               s.initials = ((s.first[0]||'') + (s.last[0]||'')).toUpperCase();
               s.initialsAuto = true;
             }
-            f.appendChild(wuxField({ id:'wf-ini', label:'Initials (short code)', required:true, value:s.initials, example:'e.g. AHA',
+            if (!exAcc) f.appendChild(wuxField({ id:'wf-ini', label:'Initials (short code)', required:true, value:s.initials, example:'e.g. AHA',
               hint:'2-4 letters used inside the login name. Auto-fills from first+last; type your own to override.',
               sub:'Account-Definitions-Admins.Initials',
               onInput:(v)=>{ s.initials=v; s.initialsAuto = !v.trim(); rerender(); }
             }));
             // 2026-09-21 (operator: "we need to have the {Company} as a variable ... KONS-{Company}-{Initial}-{Tier}-c"):
             // the admin's own company. Fills {Company} in the name and is written to the account (companyName).
-            if (!/^internal/i.test(String(s.adminType))) {
+            if (!exAcc && !/^internal/i.test(String(s.adminType))) {
               // ADMIN-CREATE-LINKS: a consultant is linked to an EXTERNAL company (an internal one is not a consultancy).
               const cos = pimExternalCompanyOptions(companyOptions(function () { try { rerender(); } catch (_) { } }));
               if (cos.length) {
@@ -32653,6 +32697,8 @@
               nd.innerHTML = '<b>Department (internal):</b> no department is defined yet. Add it under <b>Access &rsaquo; Departments &amp; owners</b>, then pick it here -- or create the admin now and link the department later (Admin accounts &rsaquo; Edit).';
               f.appendChild(nd);
             }
+            // ADMIN-EXISTING-ACCOUNT: no UPN suffix and no name preview -- the account keeps its own name.
+            if (exAcc) return f;
             // R1: browse the suffixes this tenant's admins already use, instead of typing one.
             // Still an INPUT (a combo), not a <select>: a genuinely new domain must remain typeable
             // -- narrowing to nothing would be worse than the text box it replaces.
@@ -32687,6 +32733,11 @@
             return f;
           },
           validate: (s) => {
+            // ADMIN-EXISTING-ACCOUNT: only the exact UPN is asked (the naming check does not apply to this type).
+            if (s.adminType === 'existing-account') {
+              if (!pimLooksLikeUpn(s.existingUpn)) return 'Enter the existing user’s exact sign-in name (UPN), e.g. jdoe@contoso.example.';
+              return true;
+            }
             if (!s.first.trim()) return 'First name is required.';
             if (!s.last.trim())  return 'Last name is required.';
             if (!s.initials.trim()) return 'Initials are required.';
@@ -32957,12 +33008,25 @@
             // Show the client-side name immediately, then refine with the engine
             // derivation (the authoritative source used by onFinish) so Review
             // and what-gets-saved match.
-            const clientName = buildAdminUserName(s.initials, s.level.replace(/^L/,''), s.tier.replace(/^T/,''), s.useLongForm, s.adminType, s.environment);
-            const userName = s._engineUserName || clientName;
-            const upn = userName + (s.upnSuffix || '');
+            const exAccR = (s.adminType === 'existing-account');
+            const clientName = exAccR ? String(s.existingUpn || '').trim() : buildAdminUserName(s.initials, s.level.replace(/^L/,''), s.tier.replace(/^T/,''), s.useLongForm, s.adminType, s.environment);
+            const userName = exAccR ? clientName : (s._engineUserName || clientName);
+            const upn = exAccR ? clientName : userName + (s.upnSuffix || '');
             const n = s.roleGroupSel.size;
             const guest = (s.adminType === 'external-guest');
             const wrap = document.createElement('div');
+            if (exAccR) {
+              // ADMIN-EXISTING-ACCOUNT: nothing is created -- one definition row naming the existing account + its delegations.
+              const impact = [{ csv:'Account-Definitions-Admins', adds:1, what:'Existing account: ' + upn }];
+              if (n > 0) impact.push({ csv:'PIM-Assignments-Admins', adds:n, what:[...s.roleGroupSel].join(', ') });
+              wrap.appendChild(wuxSummary(
+                'This gives the <b>existing account ' + escapeHtml(upn) + '</b> (the person&rsquo;s own office account) PIM delegations' +
+                (n>0 ? ': <b>' + escapeHtml(s.assignmentType) + '</b> access to <b>' + n + '</b> ' + dimNounPlural() : '') +
+                '. <b>No account is created</b>, no name is generated, no Temporary Access Pass is issued and no welcome mail is sent. ' +
+                'PIM manages the delegations only. Finish looks the account up by this exact name first and refuses it when it is not in this tenant.',
+                impact));
+              return wrap;
+            }
             if (guest) {
               // BUG-203: the guest is identified by the address the invitation goes to.
               const gmail = String(s.guestEmail || '').trim() || '(guest email missing -- go back to Person)';
@@ -33015,6 +33079,8 @@
   // The admin wizard's Finish -- also Get Started's "Admin accounts" Save (97.1): the same name derivation, the same
   // duplicate-name refusal, the same rows.
   async function wizardAdminStage(s) {
+        // ADMIN-EXISTING-ACCOUNT: its own path -- no generated name, no new account, no TAP, no welcome mail.
+        if (s.adminType === 'existing-account') return await wizardAdminStageExisting(s);
         // Resolve the admin UserName from the ENGINE (Resolve-PimAdminName via
         // /api/wizard/derive) so GUI + engine never drift; fall back to the
         // client composer in static mode / on error.
@@ -33074,6 +33140,44 @@
           });
         }
         return { upn: upn, userName: userName };
+  }
+  // ADMIN-EXISTING-ACCOUNT (owner 2026-11-11) -- Create admin for an EXISTING office account. (a) the account is looked up
+  // by its EXACT UPN first (GET /api/admin-accounts/existing-lookup -> one GET /users/<upn>); not found = refused with one
+  // plain line and nothing is staged. (b) no generated name, no TAP (CreateTAP FALSE), no welcome mail: the row names the
+  // account by its UPN, and only its delegations are staged. The naming check does not apply to this type.
+  async function wizardAdminStageExisting(s) {
+    const upn = String(s.existingUpn || '').trim();
+    if (!pimLooksLikeUpn(upn)) throw new Error('Enter the existing user’s exact sign-in name (UPN), e.g. jdoe@contoso.example.');
+    let found = null;
+    if (isServer) {
+      try { found = await api('GET', '/api/admin-accounts/existing-lookup?upn=' + encodeURIComponent(upn), undefined, { timeoutMs: 20000 }); }
+      catch (e) { throw new Error(String(e && e.message ? e.message : e) || ("'" + upn + "': no user with that name in this tenant -- an existing account must already exist; PIM never creates it.")); }
+      if (!found || !found.found) throw new Error((found && found.error) || ("'" + upn + "': no user with that name in this tenant -- an existing account must already exist; PIM never creates it."));
+    }
+    const taken = await adminNameTakenBy(upn, upn);
+    if (taken) throw new Error(upn + ' is already an admin in PIM (' + taken + ').');
+    const disp = (found && found.displayName) ? String(found.displayName) : upn;
+    await wuxStage('Account-Definitions-Admins', Object.assign({
+      FirstName: '', LastName: '', Initials: '', Company: '',
+      Purpose: 'Day2Day', TargetUsage: 'Cloud', TargetPlatform: 'ID',
+      AdminType: 'existing-account', Environment: 'entra',
+      ManagementMode: 'local', UserType: 'Internal',
+      UserName: upn, DisplayName: disp, UserPrincipalName: upn,
+      UsageLocation: '', ProvisionDate: '',
+      CreateTAP: 'FALSE', TAPStartDate: '', TAPLifetimeHours: '',
+      AccountStatus: 'Enabled', StatusChangeCode: '', Ring: '', Target: '', Template: '',
+      ForwardMailsToContact: 'FALSE', MailForwardAddress: ''
+    }, s.department ? { Department: String(s.department).trim() } : {}));
+    for (const tag of s.roleGroupSel) {
+      await wuxStage('PIM-Assignments-Admins', {
+        Username: upn, GroupTag: tag,
+        AssignmentType: s.assignmentType, Action: 'Assign',
+        UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
+        NumOfDaysWhenExpire: String(s.lifetimeDays), Permanent: 'FALSE',
+        CPPlatform:'', Plane:'', TierLevel:'', PermissionScope:'', SyncPlatform:''
+      });
+    }
+    return { upn: upn, userName: upn, existing: true };
   }
   // Who already holds this admin name? Stored rows plus anything staged (an admin staged earlier in this session counts too).
   // Returns a short description of the holder, or '' when the name is free.

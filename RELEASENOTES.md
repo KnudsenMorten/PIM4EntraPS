@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.7 -- 2026-11-11
+
+- New admin type Existing account (office user): a person can hold PIM delegations on their own existing account; PIM finds it by its exact name, manages only its delegations and never creates, changes, disables or deletes the account, and warns when it gets more than level 4-5
+
 ## 3.1.6 -- 2026-11-11
 
 - Security update: PIM Manager and its sign-in front now run on .NET 10.0.15, which fixes one critical and three high security issues in the .NET 10.0.14 runtime; no change in behaviour

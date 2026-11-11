@@ -141,6 +141,10 @@ function New-PimRestAdminAccount {
   $jobTitle     = $display      # legacy engine sets JobTitle = DisplayName for ID rows
 
   if (-not $upn) { throw "New-PimRestAdminAccount: row has no UserPrincipalName." }
+  # ADMIN-EXISTING-ACCOUNT: never create or patch an existing office account (defence in depth for direct callers).
+  if ("$(Get-PimRowValue $Row 'AdminType')".Trim() -match '^(?i)existing|^office-user$') {
+    return [pscustomobject]@{ Upn = $upn; Action = 'skipped: existing account'; Password = '' }
+  }
 
   # Does the user already exist? (404 -> create). Use GET by UPN.
   $existing = $null
@@ -275,6 +279,12 @@ function Invoke-PimRestAccountApply {
     $platform = Get-PimRowValue $r 'TargetPlatform'
     $rowUpn   = Get-PimRowValue $r 'UserPrincipalName'
     if (-not $rowUpn) { $rowUpn = '<row>' }
+    # ADMIN-EXISTING-ACCOUNT (owner 2026-11-11): an existing office account is never created or updated by PIM.
+    if ("$(Get-PimRowValue $r 'AdminType')".Trim() -match '^(?i)existing|^office-user$' -or ((Get-Command Test-PimAdminIsExistingAccount -ErrorAction SilentlyContinue) -and (Test-PimAdminIsExistingAccount -Row $r))) {
+      Write-Host "  [skip] $rowUpn AdminType=existing-account -- PIM never creates or updates an existing account (delegations only)." -ForegroundColor DarkGray
+      $results.Add([pscustomobject]@{ Upn = $rowUpn; Action = 'skipped: existing account'; Password = '' })
+      continue
+    }
     if ($platform -and $platform -ne 'ID') {
       # AD / other platforms are out of REST scope (hybrid path) -- skip here.
       Write-Host "  [skip] $rowUpn TargetPlatform='$platform' -- not an ID row (AD/hybrid uses the SDK engine path)." -ForegroundColor DarkGray

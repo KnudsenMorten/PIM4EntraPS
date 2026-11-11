@@ -147,11 +147,12 @@ $script:PimV1ImportLayout = [ordered]@{
     'PIM-RoleAssignable.ps1'      = 'engine\_shared'
     'PIM-DateExpression.ps1'      = 'engine\_shared'
     'PIM-WarningOverrides.ps1'    = 'engine\_shared'
+    'PIM-AdminExistingAccount.ps1' = 'engine\_shared'
     '_validator.ps1'              = 'tools\pim-manager'
 }
 # OWNER 2026-11-07 (OPEN-23, §84): the published single file carries NO Pro code -- the managing-tenant (MSP) library
 # engine\msp\PIM-Downlink.ps1 is not in this list or embedded. The check then reports replication as "not computed".
-$script:PimV1ImportPayload = @{}   # BUILD-EMBED: Migrate-PimToSql.ps1, _PimSignedIn.ps1, ../../engine/_shared/PIM-ChangeQueue.ps1, ../../engine/_shared/PIM-Rest.ps1, ../../engine/_shared/PIM-LoopbackAnswer.ps1, ../../engine/_shared/PIM-SqlStore.ps1, ../../engine/_shared/PIM-CsvImportCheck.ps1, ../../engine/_shared/PIM-DateSafe.ps1, ../../engine/_shared/PIM-Naming.ps1, ../../engine/_shared/PIM-PolicyTemplateStore.ps1, ../../engine/_shared/PIM-PolicyBaseline.ps1, ../../engine/_shared/PIM-WorkloadMap.ps1, ../../engine/_shared/PIM-Rings.ps1, ../../engine/_shared/PIM-RoleAssignable.ps1, ../../engine/_shared/PIM-DateExpression.ps1, ../../engine/_shared/PIM-WarningOverrides.ps1, ../pim-manager/_validator.ps1
+$script:PimV1ImportPayload = @{}   # BUILD-EMBED: Migrate-PimToSql.ps1, _PimSignedIn.ps1, ../../engine/_shared/PIM-ChangeQueue.ps1, ../../engine/_shared/PIM-Rest.ps1, ../../engine/_shared/PIM-LoopbackAnswer.ps1, ../../engine/_shared/PIM-SqlStore.ps1, ../../engine/_shared/PIM-CsvImportCheck.ps1, ../../engine/_shared/PIM-DateSafe.ps1, ../../engine/_shared/PIM-Naming.ps1, ../../engine/_shared/PIM-PolicyTemplateStore.ps1, ../../engine/_shared/PIM-PolicyBaseline.ps1, ../../engine/_shared/PIM-WorkloadMap.ps1, ../../engine/_shared/PIM-Rings.ps1, ../../engine/_shared/PIM-RoleAssignable.ps1, ../../engine/_shared/PIM-DateExpression.ps1, ../../engine/_shared/PIM-WarningOverrides.ps1, ../../engine/_shared/PIM-AdminExistingAccount.ps1, ../pim-manager/_validator.ps1
 # The entity schema the check reads (PIM Manager's own $script:PimCsvBases): only that one statement travels, not the Manager.
 $script:PimV1ImportSchema = ''   # BUILD-EMBED-ASSIGNMENT: ../pim-manager/Open-PimManager.ps1 $script:PimCsvBases
 $script:PimV1SqlApi = '2021-11-01'

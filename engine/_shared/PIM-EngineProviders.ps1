@@ -25,6 +25,13 @@ if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue) -or
 
 Set-StrictMode -Off
 
+# ADMIN-EXISTING-ACCOUNT (owner 2026-11-11): the ONE predicate every account-lifecycle write path below asks
+# (Test-PimAdminIsExistingAccount). Probed for every name this file uses (a one-name probe is a fail-open).
+if (-not (Get-Command Test-PimAdminIsExistingAccount -ErrorAction SilentlyContinue) -or
+    -not (Get-Command Find-PimExistingAccount -ErrorAction SilentlyContinue)) {
+    . (Join-Path $PSScriptRoot 'PIM-AdminExistingAccount.ps1')
+}
+
 function Get-PimRowProp {
     param([object]$Row, [string[]]$Names)
     foreach ($n in $Names) {
@@ -265,6 +272,8 @@ function Remove-PimAdminAccountApproved {
     $uid = "$($l.id)".Trim()
     $upn = "$($l.userPrincipalName)".Trim()
     $refuse = { param($why) Write-Host ("    [!] {0}: NOT deleted -- {1}" -f $Item.key, $why) -ForegroundColor Yellow; return [pscustomobject]@{ pimApplied = $false; reason = "NOT deleted -- $why" } }
+    # ADMIN-EXISTING-ACCOUNT: an existing office account is NEVER deleted by PIM -- first, before any pin or call.
+    if ($Item.PSObject.Properties['desired'] -and (Test-PimAdminIsExistingAccount -Row $Item.desired)) { return (& $refuse 'existing account (office user) -- PIM manages its delegations only, never the account') }
     if (-not (Get-Command Get-PimAdminDeletePinDecision -ErrorAction SilentlyContinue)) { return (& $refuse 'the delete pins library (PIM-AdminDeletePins.ps1) is not loaded -- nothing is deleted (fail closed)') }
     $pinsNow = if ($PinsGiven) { $Pins } else { Get-PimAdminDeletePins }
     $pd = Get-PimAdminDeletePinDecision -Pins $pinsNow -Key $key -LiveObjectId $uid -Source $Source
@@ -520,6 +529,9 @@ function Update-PimAdminsDisableDecision {
     $bg = @(); if (Get-Command Get-PimBreakGlassIdentifiers -ErrorAction SilentlyContinue) { $bg = @(Get-PimBreakGlassIdentifiers) }
     $cand = @{}; $unauth = @{}; $bgHit = New-Object System.Collections.Generic.List[string]; $leftOff = New-Object System.Collections.Generic.List[string]
     foreach ($d in $all) {
+        # ADMIN-EXISTING-ACCOUNT: an existing office account is never a disable candidate (its status / end date removes
+        # the PIM memberships only -- AdminMembers + AdminOffboarding).
+        if (Test-PimAdminIsExistingAccount -Row $d) { continue }
         if (-not (Test-PimAdminProvisionDue -Row $d -NowUtc $NowUtc).due) { continue }
         $k = Get-PimAdminRowKey -Row $d
         if (-not $k -or -not $liveByKey.ContainsKey($k)) { continue }
@@ -847,8 +859,34 @@ function New-PimAdminsProvider {
             # failed nine times with "user not found". Index the UPNs once instead -- correct AND O(1).
             $liveUpnSeen = @{}
             foreach ($lr in $rows) { $lu = "$($lr.userPrincipalName)".Trim().ToLowerInvariant(); if ($lu) { $liveUpnSeen[$lu] = $true } }
+            # 🔒 ADMIN-EXISTING-ACCOUNT (owner 2026-11-11): an EXISTING office account ('existing-account' rows) never matches
+            # the admin name patterns, and widening them is forbidden (BUG-12). Each such row's account is read by its EXACT
+            # UPN -- GET /users/<upn>, one read each (Get-PimExistingAccountLookupPath) -- never a startswith / endswith on
+            # its domain and never a population read. Not found = reported; PIM never creates it (ApplyCreate refuses).
+            $__exFound = New-Object System.Collections.Generic.List[string]; $__exMissing = New-Object System.Collections.Generic.List[string]
+            $__exKeys = @{}
+            foreach ($d in @($ctx['adminsDesiredAll'])) {
+                if (-not (Test-PimAdminIsExistingAccount -Row $d)) { continue }
+                $__xu = Get-PimExistingAccountRowUpn -Row $d
+                if (-not $__xu) { continue }
+                $__exKeys[(Get-PimAdminRowKey -Row ([pscustomobject]@{ UserPrincipalName = $__xu }))] = $true
+                if ($liveUpnSeen.ContainsKey($__xu.ToLowerInvariant())) { [void]$__exFound.Add($__xu); continue }
+                $one = $null
+                try { $one = Invoke-PimGraph -Path (Get-PimExistingAccountLookupPath -Upn $__xu -Select $__adminSelect) } catch { $one = $null }
+                if ($null -eq $one -or -not "$($one.id)".Trim()) { [void]$__exMissing.Add($__xu); continue }
+                $k = "$($one.id)"
+                if ($k -and -not $seen.ContainsKey($k)) { $seen[$k] = $true; [void]$rows.Add($one) }
+                $nu = "$($one.userPrincipalName)".Trim().ToLowerInvariant(); if ($nu) { $liveUpnSeen[$nu] = $true }
+                [void]$__exFound.Add($__xu)
+            }
+            $ctx['adminsExistingKeys'] = $__exKeys
+            if ($__exFound.Count -or $__exMissing.Count) {
+                Write-Host ("    [admins] existing account(s) (office user) read by exact UPN: {0} found{1} -- PIM manages their delegations only" -f $__exFound.Count, $(if ($__exMissing.Count) { "; NOT found (never created by PIM): " + (($__exMissing | Select-Object -First 8) -join ', ') } else { '' })) -ForegroundColor DarkGray
+            }
+            $__exRead = @{}; foreach ($__x in $__exFound) { $__exRead[$__x.ToLowerInvariant()] = $true }; foreach ($__x in $__exMissing) { $__exRead[$__x.ToLowerInvariant()] = $true }
             foreach ($u in $desiredUpns) {
                 if ($liveUpnSeen.ContainsKey($u.ToLowerInvariant())) { continue }
+                if ($__exRead.ContainsKey($u.ToLowerInvariant())) { continue }   # an existing account: read once above, by its exact UPN
                 $one = $null
                 try { $one = Invoke-PimGraph -Path ("/users/{0}?`$select=id,userPrincipalName,displayName,accountEnabled,givenName,surname,jobTitle,usageLocation,companyName,passwordPolicies,onPremisesSyncEnabled" -f [uri]::EscapeDataString($u)) } catch { $one = $null }
                 if ($null -eq $one -or -not "$($one.id)".Trim()) { continue }   # not created yet -- the create path owns that
@@ -882,9 +920,12 @@ function New-PimAdminsProvider {
             # admins this scope manages: out of LIVE too, so they are never updated, disabled or pruned here.
             # Measured 2026-09-13: 2.4.338 PATCHed givenName/surname/jobTitle/passwordPolicies on three -AD accounts.
             $adKeys = if ($ctx['adminsAdOnly'] -is [hashtable]) { $ctx['adminsAdOnly'] } else { @{} }
-            $adSkipped = @($live | Where-Object { $adKeys.ContainsKey((Get-PimAdminRowKey -Row $_)) -or "$($_.onPremisesSyncEnabled)" -ieq 'True' })
+            # ADMIN-EXISTING-ACCOUNT: an existing office account is often synced from on-premises AD. It stays in the live set
+            # (so its row is matched and never "created") -- PIM writes nothing to it either way (Equal / ApplyUpdate below).
+            $__exK = if ($ctx['adminsExistingKeys'] -is [hashtable]) { $ctx['adminsExistingKeys'] } else { @{} }
+            $adSkipped = @($live | Where-Object { -not $__exK.ContainsKey((Get-PimAdminRowKey -Row $_)) -and ($adKeys.ContainsKey((Get-PimAdminRowKey -Row $_)) -or "$($_.onPremisesSyncEnabled)" -ieq 'True') })
             if ($adSkipped.Count -gt 0) {
-                $live = @($live | Where-Object { -not ($adKeys.ContainsKey((Get-PimAdminRowKey -Row $_)) -or "$($_.onPremisesSyncEnabled)" -ieq 'True') })
+                $live = @($live | Where-Object { $__exK.ContainsKey((Get-PimAdminRowKey -Row $_)) -or -not ($adKeys.ContainsKey((Get-PimAdminRowKey -Row $_)) -or "$($_.onPremisesSyncEnabled)" -ieq 'True') })
                 Write-Host ("    [admins] {0} AD-only / on-premises-synced account(s) left to hybrid-ad-apply, not managed in Entra: {1}" -f $adSkipped.Count, (@($adSkipped | ForEach-Object { "$($_.userPrincipalName)" }) -join ', ')) -ForegroundColor DarkGray
             }
             # #1: the explicit disables of this pass, decided once through the circuit breaker.
@@ -925,6 +966,9 @@ function New-PimAdminsProvider {
         # re-ENABLED every admin an operator had disabled or revoked, on a 5-minute job.
         Equal = {
             param($d,$l)
+            # ADMIN-EXISTING-ACCOUNT: an existing office account is ALWAYS equal here -- PIM never patches, renames, enables,
+            # disables or deletes it (its delegations are AdminMembers' business, its end date AdminOffboarding's).
+            if (Test-PimAdminIsExistingAccount -Row $d) { return $true }
             $dec = Get-PimAdminStatusDecision -Row $d
             $on = Test-PimAdminValueTrue $l.accountEnabled
             # the account still exists: delete it (ApplyUpdate) -- a LOCAL row only; a central Deleted is a disable (see ApplyUpdate)
@@ -946,6 +990,13 @@ function New-PimAdminsProvider {
             # #1: a Disabled / Revoked / offboarded (or unknown-status) admin is never provisioned (v1
             # skipped the row entirely, 5594-5619). #8: nor is one whose ProvisionDate is ahead --
             # GetDesired already holds those back; this is the handler refusing on its own too.
+            # ADMIN-EXISTING-ACCOUNT (a): PIM NEVER creates an existing office account. Its account was not found by its
+            # exact UPN in this pass's read -- reported, nothing is POSTed, no welcome mail, no TAP.
+            if (Test-PimAdminIsExistingAccount -Row $item.desired) {
+                $__xu = Get-PimExistingAccountRowUpn -Row $item.desired
+                Write-Host ("    [skip] {0}: NOT created -- {1}" -f $item.key, (Get-PimExistingAccountNotFoundText -Upn $__xu)) -ForegroundColor DarkYellow
+                return [pscustomobject]@{ pimApplied = $false; reason = (Get-PimExistingAccountNotFoundText -Upn $__xu) }
+            }
             $__dec = Get-PimAdminStatusDecision -Row $item.desired
             if ($__dec.blocksCreate) {
                 Write-Host ("    [skip] {0}: NOT created -- {1}" -f $item.key, $__dec.reason) -ForegroundColor DarkYellow
@@ -1028,6 +1079,11 @@ function New-PimAdminsProvider {
             #                 whose StatusChangeCode did not verify; Revoked also revokes sessions.
             #   * enable   -> only when AccountStatus is explicitly 'Enabled'.
             $d = $item.desired; $l = $item.live
+            # ADMIN-EXISTING-ACCOUNT: defence in depth (Equal already says equal) -- no PATCH, no disable / enable, no session
+            # revoke, no delete of an existing office account, whatever its row says.
+            if (Test-PimAdminIsExistingAccount -Row $d) {
+                return [pscustomobject]@{ pimApplied = $false; reason = 'existing account (office user) -- PIM manages its delegations only, never the account' }
+            }
             $dec = Get-PimAdminStatusDecision -Row $d
             $on = Test-PimAdminValueTrue $l.accountEnabled
             # §96.5 D1: AccountStatus=Deleted -> the ONE operator-controlled delete path (its own guards inside).
@@ -7906,6 +7962,9 @@ function Test-PimAdminIsAdOnly {
     # Entra provider (Admins, AdminMembers, AdminTap) and never warned about as if it were an Entra admin.
     param([object]$Row)
     if ($null -eq $Row) { return $false }
+    # ADMIN-EXISTING-ACCOUNT: an existing office account is found in Entra by its exact UPN (even one synced from AD), so
+    # its delegations apply in Entra; the hybrid worker never provisions it.
+    if (Test-PimAdminIsExistingAccount -Row $Row) { return $false }
     return ("$(Get-PimRowProp -Row $Row -Names @('TargetPlatform','Platform'))".Trim() -ieq 'AD')
 }
 
@@ -7916,6 +7975,8 @@ function Test-PimAdminTapWanted {
     # (tests/Test-PimAdminLifecycle.ps1 keeps the two identical).
     param([object]$Row)
     if ($null -eq $Row) { return $false }
+    # ADMIN-EXISTING-ACCOUNT (b): an existing office account is the person's own -- PIM never issues it a TAP.
+    if (Test-PimAdminIsExistingAccount -Row $Row) { return $false }
     return -not (Test-PimAdminIsAdOnly -Row $Row)
 }
 
@@ -8217,6 +8278,8 @@ function New-PimAdminTapProvider {
         Equal = { param($d,$l) $true }   # has a TAP already -> nochange
         ApplyCreate = {
             param($item,$ctx)
+            # ADMIN-EXISTING-ACCOUNT (b): never a TAP for an existing office account (defence in depth -- GetDesired drops it).
+            if (Test-PimAdminIsExistingAccount -Row $item.desired) { return [pscustomobject]@{ pimApplied = $false; reason = 'existing account (office user) -- PIM never issues it a TAP' } }
             $d=$item.desired; $upn=Get-PimRowProp -Row $d -Names @('UserPrincipalName'); $uid=Resolve-PimPrincipalId $upn
             if (-not $uid) { throw "AdminTap: user '$upn' not found" }
             # 2026-09-21: no TAPLifetimeHours on the row = as long as the tenant's TAP policy allows (New-PimTapRequestBody -1).
@@ -8731,11 +8794,17 @@ function Get-PimAdminOffboardSteps {
     # parameter, no column and no warning. A stored row that still carries the value is ignored in
     # silence. tests/Test-PimNoAccountDelete.ps1 fails the suite if either comes back.
     param([Parameter(Mandatory)][string]$Kind, [hashtable]$State = @{}, [bool]$Found = $true, [bool]$AccountEnabled = $false,
-          [datetime]$NowUtc = [datetime]::UtcNow)
+          [datetime]$NowUtc = [datetime]::UtcNow, [switch]$ExistingAccount)
     $steps = New-Object System.Collections.Generic.List[string]
     $note = ''; $dueUtc = $null
     if (-not $Found) { return [pscustomobject]@{ steps = @(); note = 'the account is not in the tenant'; deleteDueUtc = $null } }
     $has = { param($k) [bool]("$($State[$k])".Trim()) }
+    # 🔒 ADMIN-EXISTING-ACCOUNT (owner 2026-11-11): for an existing office account an end date / Retire / Revoked removes the
+    # PIM MEMBERSHIPS ONLY -- no disable, no session revoke, no offboarding notice ("account disabled" would be untrue).
+    if ($ExistingAccount -or $Kind -eq 'revoke') {
+        if (-not (& $has 'membershipsRemovedUtc')) { [void]$steps.Add('memberships') }
+        return [pscustomobject]@{ steps = $steps.ToArray(); note = $(if ($ExistingAccount) { 'existing account (office user): memberships only' } else { '' }); deleteDueUtc = $null }
+    }
     if ($Kind -eq 'revoke') {
         if (-not (& $has 'membershipsRemovedUtc')) { [void]$steps.Add('memberships') }
         return [pscustomobject]@{ steps = $steps.ToArray(); note = ''; deleteDueUtc = $null }
@@ -8823,6 +8892,9 @@ function Invoke-PimAdminOffboardSteps {
         }
     }
     $steps = @($Live.steps)
+    # ADMIN-EXISTING-ACCOUNT: defence in depth -- whatever the plan says, an existing office account gets its PIM memberships
+    # removed and nothing else (no disable, no session revoke, no notice).
+    if ($null -ne $Desired -and (Test-PimAdminIsExistingAccount -Row $Desired)) { $steps = @($steps | Where-Object { $_ -eq 'memberships' }) }
     $done = New-Object System.Collections.Generic.List[string]
     if ($steps -contains 'disable') {
         Invoke-PimGraph -Method PATCH -Path "/users/$uid" -Body @{ accountEnabled = $false } | Out-Null   # a failure THROWS: nothing else runs
@@ -9022,7 +9094,7 @@ function New-PimOffboardingProvider {
                 $stRec = @{}
                 if ($store.ok -and $store.map.ContainsKey($c.upn.ToLowerInvariant())) { $stRec = $store.map[$c.upn.ToLowerInvariant()] }
                 $row = $rowByKey[$c.key]
-                $s = Get-PimAdminOffboardSteps -Kind $c.kind -State $stRec -Found $found -AccountEnabled (Test-PimAdminValueTrue $u.accountEnabled) -NowUtc $now
+                $s = Get-PimAdminOffboardSteps -Kind $c.kind -State $stRec -Found $found -AccountEnabled (Test-PimAdminValueTrue $u.accountEnabled) -NowUtc $now -ExistingAccount:([bool](Test-PimAdminIsExistingAccount -Row $row))
                 if ($s.note) { Write-Host "    [AdminOffboarding] $($c.upn): $($s.note)" -ForegroundColor DarkYellow }
                 $r | Add-Member -NotePropertyName principalId -NotePropertyValue "$($u.id)" -Force
                 $r | Add-Member -NotePropertyName deleteDueUtc -NotePropertyValue $s.deleteDueUtc -Force

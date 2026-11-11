@@ -122,6 +122,9 @@ function Resolve-PimInactivityThreshold {
 function Test-PimAdminSweepProtected {
     [CmdletBinding()]
     param([object]$Row)
+    # ADMIN-EXISTING-ACCOUNT (owner 2026-11-11): an existing office account is never auto-disabled by PIM -- flagged at most.
+    if ((Get-Command Test-PimAdminIsExistingAccount -ErrorAction SilentlyContinue) -and (Test-PimAdminIsExistingAccount -Row $Row)) { return $true }
+    if ("$(Get-PimIaField -Row $Row -Names @('AdminType'))".Trim() -match '^(?i)existing') { return $true }   # the same rule when the predicate is not loaded
     foreach ($f in 'Protected','BreakGlass','Emergency','IsBreakGlass','NoAutoDisable','SuperAdmin','IsSuperAdmin') {
         if (Test-PimIaTruthy (Get-PimIaField -Row $Row -Names @($f))) { return $true }
     }

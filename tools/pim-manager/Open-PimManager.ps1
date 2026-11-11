@@ -5806,7 +5806,53 @@ function Test-PimManagerAdminTapWanted {
     # load at boot. Operator 2026-09-13: TAP is enforced for every admin; AD-only admins cannot hold one.
     param([object]$Row)
     if ($null -eq $Row) { return $false }
+    # ADMIN-EXISTING-ACCOUNT (b): an existing office account is the person's own -- PIM never issues it a TAP.
+    # (self-contained: suites lift this function alone -- the same literal rule as Test-PimManagerAdminIsExistingAccount)
+    $__at = if ($Row -is [System.Collections.IDictionary]) { "$($Row['AdminType'])" } elseif ($Row.PSObject.Properties['AdminType']) { "$($Row.AdminType)" } else { '' }
+    if ($__at.Trim() -match '^(?i)existing|^office-user$') { return $false }
     return -not ("$($Row.TargetPlatform)".Trim() -ieq 'AD')
+}
+function Test-PimManagerAdminIsExistingAccount {
+    # ADMIN-EXISTING-ACCOUNT: the engine's predicate (PIM-AdminExistingAccount.ps1, loaded with PIM-Naming.ps1); the same
+    # literal rule when it is not loaded, so a missing library can never turn an office account into a managed one.
+    param([object]$Row)
+    if ($null -eq $Row) { return $false }
+    if (Get-Command Test-PimAdminIsExistingAccount -ErrorAction SilentlyContinue) { return [bool](Test-PimAdminIsExistingAccount -Row $Row) }
+    $v = if ($Row -is [System.Collections.IDictionary]) { "$($Row['AdminType'])" } elseif ($Row.PSObject.Properties['AdminType']) { "$($Row.AdminType)" } else { '' }
+    return ($v.Trim() -match '^(?i)existing|^office-user$')
+}
+function Invoke-PimManagerExistingAccountLookup {
+    # ADMIN-EXISTING-ACCOUNT (a): ONE exact-UPN read (Find-PimExistingAccount -> GET /users/<upn>). Never creates. Seam:
+    # $script:PimExistingAccountLookupGraph { param($path) -> user object or throw }.
+    param([AllowEmptyString()][string]$Upn)
+    if (-not (Get-Command Find-PimExistingAccount -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ found = $false; upn = $Upn; displayName = ''; error = 'the existing-account library is not loaded' } }
+    # Basic profile only (WEB-GRAPH-MIN-1: the web app holds User.ReadBasic.All) -- the read itself is GET /users/<upn>.
+    $g = if ($script:PimExistingAccountLookupGraph -is [scriptblock]) { $script:PimExistingAccountLookupGraph } else { { param($p) Invoke-PimGraph -Path $p } }
+    if (-not ($script:PimExistingAccountLookupGraph -is [scriptblock]) -and -not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ found = $false; upn = $Upn; displayName = ''; error = 'this Manager has no connection to Microsoft Entra ID to read the account' } }
+    return (Find-PimExistingAccount -Upn $Upn -Graph $g -Select 'id,userPrincipalName,displayName')
+}
+function Get-PimManagerExistingAccountWarnings {
+    <#
+      ADMIN-EXISTING-ACCOUNT (6) -- LEVEL GUARD = WARN ONLY: upn (lower-case) -> the warnings of that existing account's
+      delegations above L4-L5 (Get-PimExistingAccountLevelWarnings). Never throws, never blocks: an unreadable source = no
+      warning. -AdminRows / -AssignmentRows / -NestingRows are seams; by default read from the store.
+    #>
+    param([object[]]$AdminRows, [object[]]$AssignmentRows, [object[]]$NestingRows)
+    $out = @{}
+    if (-not (Get-Command Get-PimExistingAccountLevelWarnings -ErrorAction SilentlyContinue)) { return $out }
+    try {
+        if (-not $PSBoundParameters.ContainsKey('AdminRows')) { $AdminRows = @((Read-PimRows 'Account-Definitions-Admins').rows) }
+        if (-not @($AdminRows | Where-Object { Test-PimManagerAdminIsExistingAccount -Row $_ }).Count) { return $out }
+        if (-not $PSBoundParameters.ContainsKey('AssignmentRows')) { $AssignmentRows = @((Read-PimRows 'PIM-Assignments-Admins').rows) }
+        if (-not $PSBoundParameters.ContainsKey('NestingRows')) { try { $NestingRows = @((Read-PimRows 'PIM-Assignments-Groups').rows) } catch { $NestingRows = @() } }
+        foreach ($w in @(Get-PimExistingAccountLevelWarnings -AdminRows @($AdminRows) -AssignmentRows @($AssignmentRows) -NestingRows @($NestingRows))) {
+            $k = "$($w.upn)".Trim().ToLowerInvariant(); if (-not $k) { continue }
+            # plain arrays, never a generic List: @() over a List throws "Argument types do not match" (BUG-138)
+            if (-not $out.ContainsKey($k)) { $out[$k] = @() }
+            $out[$k] = @($out[$k]) + @($w)
+        }
+    } catch { }
+    return $out
 }
 function Get-PimManagerCentralAdminRows {
     # 68.6 row 35: on a managed tenant, the central admins the downlink imported live in their own entity
@@ -9925,6 +9971,17 @@ function Get-PimManagerHealthNotices {
             }
         }
     } catch { }
+    # ADMIN-EXISTING-ACCOUNT (6): an existing office account with a delegation above L4-L5 -- ONE amber line (a WARNING:
+    # no number, no dot -- the menu rule; only red lines reach the badge), allowed, never blocked.
+    try {
+        $__exw = Get-PimManagerExistingAccountWarnings
+        if ($__exw.Count) {
+            $__n = 0; foreach ($k in @($__exw.Keys)) { $__n += @($__exw[$k]).Count }
+            $__who = (@($__exw.Keys | Sort-Object | Select-Object -First 3) -join ', ')
+            $out.Add([ordered]@{ id = 'existing-account-above-l4'; sev = 'amber'; tab = 'accounts'; blocking = $false
+                text = ("{0} existing (office) account{1} hold{2} {3} delegation{4} above L4-L5 ({5}{6}) -- allowed; consider a dedicated admin account for that level (Admin accounts)." -f $__exw.Count, $(if ($__exw.Count -eq 1) { '' } else { 's' }), $(if ($__exw.Count -eq 1) { 's' } else { '' }), $__n, $(if ($__n -eq 1) { '' } else { 's' }), $__who, $(if ($__exw.Count -gt 3) { ', ...' } else { '' })) })
+        }
+    } catch { }
     # PIM 100.10: the CONTROL LIST (critical parameters) -- the same evaluation the uplink setup report sends to Invardia.
     try { foreach ($n in @(Get-PimManagerSetupControlNotices)) { if ($n) { $out.Add($n) } } } catch { }
     return @($out.ToArray())
@@ -12999,6 +13056,14 @@ function Get-PimManagerAdminDeletePlan {
     # 2026-10-27 (owner, internal: Delete account on Admin-PimTest-AD): an on-premises AD admin has no Microsoft Entra ID
     # object to pin, and PIM Manager never deletes an AD account (the hybrid worker creates and disables, never deletes). Said
     # at once, with what to do, instead of a failed pin.
+    # ADMIN-EXISTING-ACCOUNT: an existing office account is the person's own -- PIM Manager never deletes it.
+    # (self-contained -- suites lift this function alone: the same literal rule as Test-PimManagerAdminIsExistingAccount)
+    $__dpAt = if ($row -is [System.Collections.IDictionary]) { "$($row['AdminType'])" } elseif ($row.PSObject.Properties['AdminType']) { "$($row.AdminType)" } else { '' }
+    if ($__dpAt.Trim() -match '^(?i)existing|^office-user$') {
+        $res.status = 409; $res.code = 'existing-account'
+        $res.error = "'$($res.upn)' is an existing account (office user). PIM manages its delegations only and never deletes the account. Use Remove from PIM to take its delegations away."
+        return [pscustomobject]$res
+    }
     if (Test-PimManagerAdminIsAdOnly -Row $row) {
         $res.status = 409; $res.code = 'ad-account'
         $res.error = "'$($res.upn)' is an on-premises Active Directory account. PIM Manager does not delete AD accounts. Use Remove from PIM (its delegations are removed and the account is disabled), then delete it in Active Directory."
@@ -19176,6 +19241,12 @@ function Handle-Request {
             # "mail a credential for any admin to any address I name".
             # 2026-09-21 (operator): a CENTRAL admin's account in this tenant is this tenant's -- its TAP is reset here too
             # (it used to be refused as "governed by the managing tenant"; only its DEFINITION is the managing tenant's).
+            # ADMIN-EXISTING-ACCOUNT (b): never a TAP for an existing office account -- said plainly, before anything else.
+            $__exTapRows = @(); try { $__exTapRows = @((Read-PimRows 'Account-Definitions-Admins').rows) } catch { $__exTapRows = @() }
+            if (@($__exTapRows | Where-Object { "$($_.UserPrincipalName)".Trim() -ieq $upn -and (Test-PimManagerAdminIsExistingAccount -Row $_) }).Count) {
+                Write-JsonResponse -Response $resp -Status 409 -Body @{ error = "'$upn' is an existing account (office user) -- PIM issues it no Temporary Access Pass; it signs in with its own credentials."; code = 'existing-account' }
+                return 409
+            }
             $row = @(Get-PimAdminTapState | Where-Object { $_.userPrincipalName -eq $upn })
             if (-not $row.Count) {
                 Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "'$upn' is not a managed Entra admin row (unknown account, or TargetPlatform=AD, which cannot hold a TAP) -- refusing to issue a TAP" }
@@ -19819,6 +19890,8 @@ function Handle-Request {
             if (Get-Command Get-PimNamingConventions -ErrorAction SilentlyContinue) {
                 try { $__namingConv = Get-PimNamingConventions } catch { $__namingConv = $null }
             }
+            # ADMIN-EXISTING-ACCOUNT (6): the level guard is WARN ONLY -- one list for the page, read once.
+            $__exWarn = Get-PimManagerExistingAccountWarnings -AdminRows @($rows)
             foreach ($r in $rows) {
                 $upn = "$($r.UserPrincipalName)".Trim()
                 # 🔴 An admin row WITHOUT a UPN is not a valid admin (operator 2026-09-21: "we can not have a admin
@@ -19837,6 +19910,8 @@ function Handle-Request {
                 if (-not $mayManage) { $hidden++; continue }
 
                 $status = "$($r.AccountStatus)".Trim()
+                $__isEx = Test-PimManagerAdminIsExistingAccount -Row $r
+                $__exW = @(); if ($__isEx -and $upn -and $__exWarn.ContainsKey($upn.ToLowerInvariant())) { $__exW = @($__exWarn[$upn.ToLowerInvariant()]) }
                 $tapWanted = Test-PimManagerAdminTapWanted -Row $r
                 # DOC-17 g: the TAP recipient is the per-admin forwarding override, else the sponsor DEPARTMENT's owners, else legacy ManagerEmail (§71.19, Get-PimAdminTapRecipient).
         $mgr = Get-PimAdminTapRecipient -Row $r
@@ -19882,6 +19957,10 @@ function Handle-Request {
                     # for externs"): rows created before AdminType was written carry no value. The UPN prefix is what
                     # the type decides (internal = none, x- = external-adminuser, g- = external-guest), so derive it.
                     adminType         = $(if ("$($r.AdminType)".Trim()) { "$($r.AdminType)".Trim() } else { Get-PimManagerAdminTypeFromName -Name $(if ("$($r.UserName)".Trim()) { "$($r.UserName)" } else { $upn }) })
+                    # ADMIN-EXISTING-ACCOUNT (5) + (6): the label the page shows, and the level warnings (amber, no number).
+                    existingAccount   = [bool]$__isEx
+                    adminTypeLabel    = $(if ($__isEx) { 'Existing account' } else { '' })
+                    levelWarnings     = @($__exW | ForEach-Object { "$($_.text)" })
                     environment       = "$($r.Environment)".Trim()
                     # 100.29: cloud (Entra) | ad (hybrid), and high-priv | day-to-day with the rule that decided it.
                     platform          = (Get-PimManagerAdminPlatform -Row $r)
@@ -19944,8 +20023,11 @@ function Handle-Request {
                     upnMissingWhy     = $(if ($upnMissing) { "no UserPrincipalName in the store -- not a valid admin: it cannot sign in, get a TAP or be managed. Set its UPN ($__un@<domain>)." } else { '' })
                     # 2026-09-21: TAP reset, session revoke and access work on a CENTRAL admin too -- it is this tenant's account.
                     canResetTap       = [bool]($isAdmin -and $tapWanted -and $mgr -and -not $upnMissing -and $__tapSender)
-                    resetTapWhy       = $(if ($upnMissing) { 'no UserPrincipalName' } elseif (-not $isAdmin) { 'Admin role required' } elseif (-not $tapWanted) { 'TargetPlatform=AD -- a TAP is an Entra credential and cannot exist for an AD-only admin' } elseif (-not $__tapSender) { 'no mail sender is configured -- a TAP is only ever MAILED, never shown, so a reset would create a pass nobody receives. Configure the sender mailbox first (Initialize-PimMailSender).' } elseif (-not $mgr) { 'no TAP recipient -- set the admin''s Department to one whose owners are defined (or a forwarding override); a TAP is only ever mailed to those people' } else { '' })
-                    canRevokeSessions = [bool]($isAdmin -and -not $upnMissing)
+                    resetTapWhy       = $(if ($upnMissing) { 'no UserPrincipalName' } elseif (-not $isAdmin) { 'Admin role required' } elseif ($__isEx) { 'existing account (office user) -- PIM issues it no TAP; it signs in with its own credentials' } elseif (-not $tapWanted) { 'TargetPlatform=AD -- a TAP is an Entra credential and cannot exist for an AD-only admin' } elseif (-not $__tapSender) { 'no mail sender is configured -- a TAP is only ever MAILED, never shown, so a reset would create a pass nobody receives. Configure the sender mailbox first (Initialize-PimMailSender).' } elseif (-not $mgr) { 'no TAP recipient -- set the admin''s Department to one whose owners are defined (or a forwarding override); a TAP is only ever mailed to those people' } else { '' })
+                    canRevokeSessions = [bool]($isAdmin -and -not $upnMissing -and -not $__isEx)
+                    revokeSessionsWhy = $(if ($__isEx) { 'existing account (office user) -- PIM never revokes its sign-in sessions' } else { '' })
+                    # ADMIN-EXISTING-ACCOUNT (4): no account verbs (enable / disable / delete) for an existing office account.
+                    accountVerbsLocked = [bool]$__isEx
                     accessLocked      = [bool]$upnMissing
                     alreadyFlagged    = [bool]$offboard
                 })
@@ -19981,6 +20063,19 @@ function Handle-Request {
             return 200
         }
 
+        # ADMIN-EXISTING-ACCOUNT (a) (owner 2026-11-11): Create admin with the type "Existing account (office user)" looks the
+        # account up by its EXACT UPN first (GET /users/<upn>, one read, never a pattern or domain search). Not found = the
+        # row is refused with one plain line; PIM never creates the account. Read-only; Admin role.
+        if ($path -eq '/api/admin-accounts/existing-lookup' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required.' }; return 403 }
+            $__lu = "$($req.QueryString['upn'])".Trim()
+            $__f = Invoke-PimManagerExistingAccountLookup -Upn $__lu
+            $__st = if ($__f.found) { 200 } elseif ("$($__f.error)".Trim()) { 400 } else { 404 }
+            Write-JsonResponse -Response $resp -Status $__st -Body ([ordered]@{ found = [bool]$__f.found; upn = "$($__f.upn)"; displayName = "$($__f.displayName)"
+                error = $(if ($__f.found) { '' } elseif ("$($__f.error)".Trim()) { "$($__f.error)" } else { Get-PimExistingAccountNotFoundText -Upn $__lu }) })
+            return $__st
+        }
         # REQ-ADM-REIMPORT-1 (operator 2026-09-27): the unmanaged admin accounts (the engine's report) and, per account, what
         # IMPORT would stage -- its definition row read from the account itself + the rows that keep its live memberships
         # (the latest drift check's Keep rows). Read-only: the page stages them; Review & commit writes them.

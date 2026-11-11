@@ -1699,6 +1699,40 @@ daily prune. Gates, decided for the whole pass before anything is written:
 
 In a protected environment with the opt-in unset the job processes nothing and says so.
 
+### 6.2a Existing account (office user) — delegations only, never the account (built 2026-11-11, not released)
+
+An admin row with **AdminType = `existing-account`** ("Existing account (office user)") gives a person's own, existing
+office account PIM delegations — typically low (L4-L5) ones — without PIM managing the account itself. The account never
+matches the recognised admin names, and those are not widened for it (the population rule of the Admins scope stays).
+
+- **One predicate.** `engine/_shared/PIM-AdminExistingAccount.ps1` (no dependencies) holds `Test-PimAdminIsExistingAccount`
+  (reads the row's AdminType; `existing`, `office-user` and the label are accepted spellings), the exact-UPN lookup
+  (`Get-PimExistingAccountLookupPath` → `GET /users/<upn>`, `Find-PimExistingAccount`), the import selection and the level
+  warnings. The naming library, the engine providers, the queue actions, the session-revoke guard, the inactivity sweep,
+  the REST account writer, the hybrid AD planner, the validator, the importer and the Manager all ask it.
+- **Finding the account.** The Admins scope reads each such row's account by its exact UPN — one read each — beside the
+  name-pattern reads; never a `startswith`/`endswith` on its domain and never a population read. An account synced from
+  on-premises AD stays in the live set (it is never handed to the hybrid worker). Not found = reported; never created.
+- **No account write, on any path.** Admins: `Equal` is always true for the type and `ApplyCreate` / `ApplyUpdate` refuse it
+  (no create, password, rename / attribute patch, enable, disable, session revoke or new-admin mail); the disable decision
+  never takes it as a candidate; the one delete function refuses it before any pin or call. AdminTap: no TAP is wanted
+  (`Test-PimAdminTapWanted`), and its create refuses it. Queue: a committed `tap-reset` or `session-revoke` of such an
+  account is refused at execution, terminal, with no directory call. Inactivity sweep: protected (flagged, never disabled).
+  REST account writer (MSP fan-out) and hybrid AD planner: skipped.
+- **End date = memberships only.** `AutoDisableDate` / `Lifecycle=Retire` / `AccountStatus` Revoked or Disabled on such a
+  row: AdminOffboarding's plan is `memberships` only (no disable, no session revoke, no offboarding notice — it would say
+  "account disabled"), and AdminMembers treats the admin as out, so the memberships are not re-created.
+- **Create and import.** The Manager's Create admin offers the type: the person is picked (people picker) or typed by exact
+  UPN; Finish asks `GET /api/admin-accounts/existing-lookup` (Admin role, basic profile read) and stages nothing when the
+  account is not there — one plain line. The row is `UserName = UserPrincipalName = <UPN>`, `CreateTAP = FALSE`, no
+  generated name (`Resolve-PimAdminName` refuses the type). The importer (`Migrate-PimToSql.ps1`) looks each such row up
+  the same way and refuses only that row when it is not found. The validator skips the naming check (PIM-NAME-002) for this
+  type only, and raises PIM-EXIST-001 when its UPN is not `name@domain`.
+- **Level guard = warn only.** A delegation above L4-L5 — a group with L0-L3, or T0/T1 when it has no L marker, also
+  reached through a nested role group — is allowed and shown as an amber warning on the admin row ("Existing account"
+  label + the warning) and as one amber Home line (no number, no dot: only red lines reach the menu badge).
+- The delegation chain is unchanged (user → group); no framework contract changes.
+
 ### 6.3 Per-scope conformance versioning
 
 Beyond the per-template version stamp (§ workload conformance), the engine tracks

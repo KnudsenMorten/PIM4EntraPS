@@ -34,6 +34,13 @@
 
 Set-StrictMode -Off
 
+# ADMIN-EXISTING-ACCOUNT (owner 2026-11-11): the admin type 'existing-account' (an office account PIM gives delegations to
+# but never creates, names or manages). Its predicate + exact-UPN lookup live in their own dependency-free file.
+if (-not (Get-Command Test-PimAdminIsExistingAccount -ErrorAction SilentlyContinue)) {
+    $__pimExAccLibN = Join-Path $PSScriptRoot 'PIM-AdminExistingAccount.ps1'
+    if (Test-Path -LiteralPath $__pimExAccLibN) { . $__pimExAccLibN }
+}
+
 # ---------------------------------------------------------------------------
 # Convention lookup. Reads $global:PIM_NamingConventions if present, else the
 # shipped defaults (kept in 1:1 sync with the .locked.ps1). Never mutates global.
@@ -442,6 +449,10 @@ function Resolve-PimAdminTypeKey {
         'internal'           { return 'internal-adminuser' }
         'external'           { return 'external-adminuser' }
         'guest'              { return 'external-guest' }
+        # ADMIN-EXISTING-ACCOUNT: an existing office account -- no prefix, no generated name (its name is its UPN).
+        'existing-account'   { return 'existing-account' }
+        'existing'           { return 'existing-account' }
+        'office-user'        { return 'existing-account' }
         ''                   { return $null }
         default              { return $t }   # unknown -> pass through (looked up as-is)
     }
@@ -574,6 +585,10 @@ function Resolve-PimAdminName {
         [string]$Tier,
         [string]$Level
     )
+    # ADMIN-EXISTING-ACCOUNT (b): an existing office account has NO generated name -- its name is its own UPN.
+    if ((Resolve-PimAdminTypeKey $AdminType) -eq 'existing-account') {
+        throw "Resolve-PimAdminName: AdminType 'existing-account' has no generated name -- the admin is the existing account, named by its exact UPN."
+    }
     $conv = Get-PimNamingConvention
     $pat  = if ($HighPriv) { "$($conv.AdminAccountPatternHighPriv)" } else { "$($conv.AdminAccountPattern)" }
     if (-not $pat) { $pat = if ($HighPriv) { '{AdminWord}-{Initial}-L0-T0{Platform}' } else { '{AdminTypePrefix}{AdminWord}-{Initial}{Platform}' } }

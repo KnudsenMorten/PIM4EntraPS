@@ -580,7 +580,8 @@
               "Pull built images",
               "Updates",
               "No"
-            ],            [
+            ],
+            [
               "Updater (ca-pim-update)",
               "Graph application",
               "PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup",
@@ -588,7 +589,8 @@
               "Make the database job identity an active member of the SQL admin group (PIM for Groups, permanent where the group policy allows) and renew a time-limited membership before it ends (owner decision 2026-11-05)",
               "Database job membership",
               "No"
-            ],            [
+            ],
+            [
               "Updater (ca-pim-update)",
               "Graph application",
               "PrivilegedAssignmentSchedule.Read.AzureADGroup",
@@ -596,7 +598,8 @@
               "Read the membership back before the database job or the support job starts",
               "Database job membership",
               "No"
-            ],            [
+            ],
+            [
               "Updater (ca-pim-update)",
               "Graph application",
               "RoleManagementPolicy.Read.AzureADGroup",
@@ -903,7 +906,7 @@
               "Yes (your choice)"
             ],
             [
-                            "Invardia Support app (tenant rights)",
+              "Invardia Support app (tenant rights)",
               "Graph + Azure RBAC",
               "Granted by Invardia's own setup script, not by PIM Manager -- see chapter 5",
               "As listed there",
@@ -1301,6 +1304,13 @@
               "-WhatIf (honoured)"
             ],
             [
+              "Set-PimEmergencyPassphrase.ps1",
+              "Set the emergency passphrase that unlocks the Manager's emergency override: only its SHA-256 hash is stored, in the environment's Key Vault",
+              "Key Vault secret write on that vault; Owner or User Access Administrator on it for the role grant; Contributor on the Manager container app",
+              "Secret PIM-EmergencyPasscode (the hash; a new version when it exists); Key Vault Secrets User on that one secret for the Manager identity; the setting PIM_EmergencyVault on the Manager container app (every other setting kept); an optional result file (never the passphrase or its hash)",
+              "-WhatIf (honoured; asks for no passphrase)"
+            ],
+            [
               "Set-PimSqlTier.ps1",
               "Set the product SQL database to its Standard tier (S0 minimum, never Basic) with a 250 GB maximum size; optionally pin the tier",
               "SQL DB Contributor (or Contributor) on the SQL server",
@@ -1440,7 +1450,7 @@
               "Plan by default; -Apply"
             ],
             [
-              "Set-PimManagerAccess.ps1, Set-PimBreakGlassAccounts.ps1, Set-PimEmergencyPassphrase.ps1, Copy-PimSettings.ps1, Import-PimPermissionTemplate.ps1, Register-PimManagedTenant.ps1, Deploy-PimUpdateJob.ps1",
+              "Set-PimManagerAccess.ps1, Set-PimBreakGlassAccounts.ps1, Copy-PimSettings.ps1, Import-PimPermissionTemplate.ps1, Register-PimManagedTenant.ps1, Deploy-PimUpdateJob.ps1",
               "Settings and component scripts the GUI names",
               "SQL admin / Owner on the resource as each states",
               "Product settings; the named component",
@@ -1472,6 +1482,6 @@
       ]
     }
   ],
-  "version": "3.0.3",
-  "date": "2026-10-28"
+  "version": "3.1.6",
+  "date": "2026-11-11"
 }

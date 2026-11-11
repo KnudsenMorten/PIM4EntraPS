@@ -58,6 +58,21 @@ if (Test-Path -LiteralPath $_dateExprLib) { . $_dateExprLib }
 $_warnOverrideLib = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-WarningOverrides.ps1'
 if (Test-Path -LiteralPath $_warnOverrideLib) { . $_warnOverrideLib }
 
+# ADMIN-EXISTING-ACCOUNT (owner 2026-11-11): the admin type 'existing-account' (an office account PIM gives delegations to
+# but never creates or names). Its predicate lives in engine\_shared\PIM-AdminExistingAccount.ps1 (embedded with the
+# importer); the same literal rule below when it is not loaded, so the naming skip can never widen to another type.
+if (-not (Get-Command Test-PimAdminIsExistingAccount -ErrorAction SilentlyContinue)) {
+    $_exAccLibV = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-AdminExistingAccount.ps1'
+    if (Test-Path -LiteralPath $_exAccLibV) { . $_exAccLibV }
+}
+function Test-PimValidatorRowIsExistingAccount {
+    param([object]$Row)
+    if ($null -eq $Row) { return $false }
+    if (Get-Command Test-PimAdminIsExistingAccount -ErrorAction SilentlyContinue) { return [bool](Test-PimAdminIsExistingAccount -Row $Row) }
+    $v = if ($Row -is [System.Collections.IDictionary]) { "$($Row['AdminType'])" } elseif ($Row.PSObject.Properties['AdminType']) { "$($Row.AdminType)" } else { '' }
+    return ("$v".Trim() -match '^(?i)(existing(-account)?|office-user)$')
+}
+
 # ---------------------------------------------------------------------------
 # Levenshtein (for the "did you mean" suggestion in PIM-FK-001)
 # ---------------------------------------------------------------------------
@@ -1146,6 +1161,8 @@ function Invoke-PimPreflightValidation {
             if (Test-PimRowIsBlank -Row $r) { continue }
             $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
             if (-not $upn) { continue }
+            # ADMIN-EXISTING-ACCOUNT (4): the naming check is skipped for this type ONLY -- its name is the existing UPN.
+            if (Test-PimValidatorRowIsExistingAccount -Row $r) { continue }
             $purpose = "$(Get-PimRowValue -Row $r -Column 'Purpose')".Trim()
             $applicable = if ($purpose -ieq 'HighPriv' -and $adminPatternHighPrivRegex) { @($adminPatternHighPrivRegex) }
                           elseif ($purpose -ieq 'Day2Day' -and $adminPatternRegex)      { @($adminPatternRegex) }
@@ -1592,6 +1609,24 @@ function Invoke-PimPreflightValidation {
             [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-UPN-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'UserPrincipalName' `
                 -Message "admin '$un' has no UserPrincipalName -- an admin without a UPN is not a valid admin: it cannot sign in, get a TAP or be managed." `
                 -Suggestion "Set UserPrincipalName to '$un@<the tenant's domain>'."))
+        }
+    }
+
+    # ------------------------------------------------------------------
+    # PIM-EXIST-001 -- ADMIN-EXISTING-ACCOUNT: an "Existing account (office user)" row names its account by its EXACT UPN.
+    # Without a name@domain UPN it cannot be found (PIM never creates or names one), so the row is an error.
+    # ------------------------------------------------------------------
+    if ($loaded.ContainsKey('Account-Definitions-Admins')) {
+        $rows = $loaded['Account-Definitions-Admins'].rows
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            if (-not (Test-PimValidatorRowIsExistingAccount -Row $r)) { continue }
+            $xu = "$(Get-PimRowValue -Row $r -Column 'UserPrincipalName')".Trim()
+            if (-not $xu -or $xu -match '^[^@\s]+@[^@\s]+\.[^@\s]+$') { continue }   # blank = PIM-UPN-001 already says it
+            [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-EXIST-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'UserPrincipalName' `
+                -Message "an existing account (office user) row needs the exact UPN of the account; '$xu' is not one." `
+                -Suggestion "Set UserPrincipalName (and UserName) to the account's own UPN, e.g. 'jdoe@contoso.example'. PIM never creates or names this account."))
         }
     }
 

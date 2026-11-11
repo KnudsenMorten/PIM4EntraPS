@@ -304,6 +304,8 @@ function Read-PimMigrateStoreRows {
 . (Join-Path $shared 'PIM-Rest.ps1')
 . (Join-Path $shared 'PIM-SqlStore.ps1')
 . (Join-Path $shared 'PIM-CsvImportCheck.ps1')
+# ADMIN-EXISTING-ACCOUNT (a): the exact-UPN check of "Existing account (office user)" rows (Select-PimExistingAccountImportRows).
+if (Test-Path -LiteralPath (Join-Path $shared 'PIM-AdminExistingAccount.ps1')) { . (Join-Path $shared 'PIM-AdminExistingAccount.ps1') }
 # 🧪 TEST SEAM ONLY. The dot-sources above (re)define the store functions in THIS script's scope, so a stub
 # a test defines beforehand would be shadowed. $global:PIM_MigrateStoreStub = @{ <function name> = <scriptblock> }
 # replaces those functions for this run (tests/Test-PimCsvImportCheck.ps1 drives the refuse / validate-only /
@@ -445,6 +447,36 @@ foreach ($base in $byBase.Keys) {
         if ($OnKeyConflict -eq 'Overwrite') { $plan.update.Add(@{ key = "$($byKey[$lk].key)"; row = $im.rows[$i] }) | Out-Null }
     }
     $plans[$base] = $plan
+}
+# 🔒 ADMIN-EXISTING-ACCOUNT (a) (owner 2026-11-11): an "Existing account (office user)" admin row is imported only when
+# its account is found by its EXACT UPN (GET /users/<upn>, one read each). Not found = THAT ROW is refused with one plain
+# line and the rest of the import goes on; PIM never creates the account. The lookup: $global:PIM_ExistingAccountLookup
+# (scriptblock param($upn) -> Find-PimExistingAccount result; the test seam), else Graph when this process is signed in,
+# else not checked (said) -- the engine still never creates the account (Admins.ApplyCreate refuses this type).
+$script:PimMigrateExistingRefused = @()
+if ($plans.Contains('Account-Definitions-Admins') -and (Get-Command Select-PimExistingAccountImportRows -ErrorAction SilentlyContinue)) {
+    $__exP = $plans['Account-Definitions-Admins']
+    $__exLookup = if ($global:PIM_ExistingAccountLookup -is [scriptblock]) { $global:PIM_ExistingAccountLookup }
+                  elseif (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) { { param($u) Find-PimExistingAccount -Upn $u } }
+                  else { $null }
+    $__exRef = New-Object System.Collections.Generic.List[object]
+    foreach ($__bucket in @('add', 'update')) {
+        $__keep = New-Object System.Collections.Generic.List[object]
+        # enumerated directly: @() over the generic List throws "Argument types do not match" (BUG-138)
+        foreach ($__it in $__exP[$__bucket]) {
+            if ($null -eq $__it) { continue }
+            $__sel = Select-PimExistingAccountImportRows -Rows @($__it.row) -Lookup $__exLookup
+            if (@($__sel.keep).Count) { [void]$__keep.Add($__it) } else { foreach ($__r in @($__sel.refused)) { [void]$__exRef.Add($__r) } }
+            foreach ($__nc in @($__sel.notChecked)) { Write-Warning "  [migrate] existing account '$__nc': not looked up (no directory connection in this run) -- imported; PIM never creates it, the engine reports it when it is not found." }
+        }
+        $__exP[$__bucket] = $__keep
+    }
+    # the full-set path (-ReplaceExistingEntityRows) takes the refused rows out too
+    $__refUpn = @{}; foreach ($__r in $__exRef) { if ("$($__r.upn)") { $__refUpn["$($__r.upn)".ToLowerInvariant()] = $true } }
+    $__exP.rows = @(@($__exP.rows) | Where-Object { -not ((Test-PimAdminIsExistingAccount -Row $_) -and (-not (Get-PimExistingAccountRowUpn -Row $_) -or $__refUpn.ContainsKey((Get-PimExistingAccountRowUpn -Row $_).ToLowerInvariant()))) })
+    foreach ($__r in $__exRef) { Write-Warning "  [migrate] Account-Definitions-Admins row REFUSED -- $($__r.reason)" }
+    $script:PimMigrateExistingRefused = @($__exRef.ToArray())
+    if ($__sink) { $__sink['existingAccountRefused'] = @($__exRef.ToArray()) }
 }
 # 🔒 THE IMPORTER NEVER FLUSHES A SUPER ADMIN (operator 2026-09-21: "the importer can never flush super admins ...
 # otherwise noone can login"). The Manager SuperAdmins and the break-glass accounts keep the row the store holds:

@@ -286,6 +286,47 @@ function Get-PimQueueActionSupportAppRefusal {
     return $null
 }
 
+if (-not (Get-Command Test-PimAdminIsExistingAccount -ErrorAction SilentlyContinue)) {
+    $__pimExAccLibQ = Join-Path $PSScriptRoot 'PIM-AdminExistingAccount.ps1'
+    if (Test-Path -LiteralPath $__pimExAccLibQ) { . $__pimExAccLibQ }
+}
+function Get-PimQueueActionExistingAccountRefusal {
+    <#
+      ADMIN-EXISTING-ACCOUNT (owner 2026-11-11): a queued TAP reset or session revoke of an EXISTING office account
+      ('existing-account' admin row) is REFUSED at execution, terminal, nothing changed -- PIM manages that admin's
+      delegations only, never its credentials or sessions. The Manager refuses to queue one; this covers an entry queued
+      any other way. -AdminRows (test seam) = the Account-Definitions-Admins rows; default: the engine's desired rows, else
+      the store at -ConnectionString. No row source in this process = $null (the Manager's queue-time check stands).
+      A row source that fails = refused, NOT terminal (retried). Returns $null when the action may proceed.
+    #>
+    param([Parameter(Mandatory)][object]$Payload, [string]$ConnectionString = '', [object[]]$AdminRows, [switch]$AdminRowsGiven, [scriptblock]$Graph)
+    $type = "$($Payload.type)".Trim()
+    if ($type -notin @('tap-reset', 'session-revoke')) { return $null }
+    $rows = $null
+    try {
+        if ($AdminRowsGiven -or $PSBoundParameters.ContainsKey('AdminRows')) { $rows = @($AdminRows) }
+        elseif ("$ConnectionString".Trim() -and (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue)) { $rows = @(Get-PimSqlRows -ConnectionString $ConnectionString -Entity 'Account-Definitions-Admins') }
+        elseif ($global:PIM_DesiredRows -is [System.Collections.IDictionary] -and $global:PIM_DesiredRows.Contains('Account-Definitions-Admins')) { $rows = @($global:PIM_DesiredRows['Account-Definitions-Admins']) }
+    } catch {
+        return [pscustomobject]@{ ok = $false; terminal = $false; verification = 'none'; existingAccount = $true; detail = "$type REFUSED at execution -- nothing was changed: the admin rows could not be read to rule out an existing account ($($_.Exception.Message)). It will be retried." }
+    }
+    if ($null -eq $rows) { return $null }
+    $ex = @{}
+    foreach ($r in $rows) { if (Test-PimAdminIsExistingAccount -Row $r) { $u = Get-PimExistingAccountRowUpn -Row $r; if ($u) { $ex[$u.ToLowerInvariant()] = $true } } }
+    if ($ex.Count -eq 0) { return $null }
+    $upn = "$($Payload.userPrincipalName)".Trim()
+    if (-not $upn -and "$($Payload.userId)".Trim() -and $Graph) {
+        try { $uo = & $Graph 'GET' ("/users/$("$($Payload.userId)".Trim())?`$select=id,userPrincipalName") $null; $upn = "$($uo.userPrincipalName)".Trim() } catch { $upn = '' }
+        if (-not $upn) { return [pscustomobject]@{ ok = $false; terminal = $false; verification = 'none'; existingAccount = $true; detail = "$type REFUSED at execution -- nothing was changed: the account could not be read to rule out an existing account. It will be retried." } }
+    }
+    if ($upn -and $ex.ContainsKey($upn.ToLowerInvariant())) {
+        $what = if ($type -eq 'tap-reset') { 'issues it no Temporary Access Pass' } else { 'never revokes its sign-in sessions' }
+        return [pscustomobject]@{ ok = $false; terminal = $true; verification = 'none'; existingAccount = $true
+            detail = "$type REFUSED -- nothing was changed: '$upn' is an existing account (office user). PIM manages its delegations only and $what." }
+    }
+    return $null
+}
+
 function Get-PimQueueActionBreakGlassRefusal {
     <#
       🔴 §33.28 (integration): the Manager checked break-glass only when the item was QUEUED. The engine
@@ -641,6 +682,11 @@ function Invoke-PimQueueAction {
     try { $supRefusal = Get-PimQueueActionSupportAppRefusal -Payload $p -Graph $graph }
     catch { $supRefusal = [pscustomobject]@{ ok=$false; terminal=$false; verification='none'; supportApp=$true; detail="$type REFUSED at execution -- nothing was changed: the Support-app check failed ($($_.Exception.Message)). It will be retried." } }
     if ($supRefusal) { return $supRefusal }
+    # ADMIN-EXISTING-ACCOUNT: no TAP / session revoke for an existing office account (before any directory call).
+    $exRefusal = $null
+    try { $exRefusal = Get-PimQueueActionExistingAccountRefusal -Payload $p -ConnectionString $ConnectionString -Graph $graph }
+    catch { $exRefusal = [pscustomobject]@{ ok=$false; terminal=$false; verification='none'; existingAccount=$true; detail="$type REFUSED at execution -- nothing was changed: the existing-account check failed ($($_.Exception.Message)). It will be retried." } }
+    if ($exRefusal) { return $exRefusal }
 
     # 68.6 row 27 (a): v1's revoker removed ELIGIBLE and ACTIVE assignments for Entra roles, Azure
     # resources and PIM for Groups (engine/PIM-Assignment-Revoker/PIM-Assignment-Revoker.ps1:623-781).

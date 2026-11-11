@@ -40,6 +40,10 @@
 
 # IMP-39 (§33.28): the ONE break-glass reader + matcher (pim.Settings['BreakGlassAccounts'] unioned
 # with the legacy global/env). Loaded only when no host has loaded it yet.
+if (-not (Get-Command Test-PimAdminIsExistingAccount -ErrorAction SilentlyContinue)) {
+    $__exLibS = Join-Path $PSScriptRoot 'PIM-AdminExistingAccount.ps1'
+    if (Test-Path -LiteralPath $__exLibS) { . $__exLibS }
+}
 if (-not (Get-Command Get-PimBreakGlassAccountList -ErrorAction SilentlyContinue)) {
     $__bgLib = Join-Path $PSScriptRoot 'PIM-BreakGlassAccounts.ps1'
     if (Test-Path -LiteralPath $__bgLib) { . $__bgLib }
@@ -101,6 +105,17 @@ function Get-PimSessionRevokeDecision {
             $upn $null)
     }
 
+    # 1b. ADMIN-EXISTING-ACCOUNT (owner 2026-11-11): an existing office account is the person's own -- PIM manages its
+    #     delegations only and never revokes its sign-in sessions.
+    $exT = ''
+    $exP = $row.PSObject.Properties['AdminType']; if ($exP) { $exT = "$($exP.Value)" }
+    $isEx = if (Get-Command Test-PimAdminIsExistingAccount -ErrorAction SilentlyContinue) { [bool](Test-PimAdminIsExistingAccount -Row $row) } else { $exT.Trim() -match '^(?i)existing' }
+    if ($isEx) {
+        return (& $verdict $false 'existing-account' `
+            "'$upn' is an existing account (office user) -- PIM manages its delegations only and never revokes its sign-in sessions" `
+            $upn $row)
+    }
+
     # 2. Break-glass. FAIL CLOSED if we cannot evaluate it: an unverifiable guard
     #    is not a passed guard, and this is the exact account whose sessions must
     #    survive the incident you are responding to.
@@ -147,6 +162,7 @@ function Get-PimSessionRevokeHttpStatus {
         'no-upn'            { return 400 }
         'not-managed'       { return 404 }
         'break-glass'       { return 403 }
+        'existing-account'  { return 409 }
         'guard-unavailable' { return 503 }
         default             { return 500 }
     }
