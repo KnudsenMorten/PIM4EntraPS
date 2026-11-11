@@ -15,9 +15,12 @@
        -TenantId and -SubscriptionId.
     2. Finds the PIM store over Azure Resource Manager: the SQL server in the subscription (or in -ResourceGroup) that
        holds the database -Database (PimPlatform). More than one: it lists them and asks for -ResourceGroup.
-    3. Network: a server with public access off stops the run (run it from a machine inside the installation's network,
-       or ask Invardia support). A server with public access but no firewall rule for this machine gets a TEMPORARY rule
-       for this machine's address, removed again at the end of the run -- also when the run fails.
+    3. Network: a machine that reaches the SQL server over the private network (its name resolves to a private address
+       that answers on port 1433 -- inside the installation's network, a VPN or a peered network) goes straight on, with
+       no firewall rule. Otherwise: a server with public access off stops the run (run it from a machine inside the
+       installation's network, or ask Invardia support), and a server with public access but no firewall rule for this
+       machine gets a TEMPORARY rule for this machine's address, removed again at the end of the run -- also when the
+       run fails.
     4. Signs in to the database as you and checks your access first (a member of the installation's SQL admin group, or
        a database user; -Apply needs the database owner role, which the SQL admin group gives).
     5. Checks the files and previews the import: per file the rows to add, the rows already there (same), the
@@ -115,7 +118,8 @@ param(
     # --- test seams (tests/Test-PimV1Import.ps1); omit them for a real run ---
     [scriptblock]$Arm,
     [scriptblock]$Sql,
-    [scriptblock]$Sleep
+    [scriptblock]$Sleep,
+    [scriptblock]$Probe
 )
 $ErrorActionPreference = 'Stop'
 # Published as ONE file (https://invardia.com/support/pim/Import-PimV1Data.ps1). The doc helper is inlined by
@@ -221,6 +225,29 @@ function Test-PimV1IpInRange {
     param([string]$Ip, [string]$Start, [string]$End)
     $n = { param($s) $b = [System.Net.IPAddress]::Parse("$s").GetAddressBytes(); [uint32](([uint32]$b[0] -shl 24) -bor ([uint32]$b[1] -shl 16) -bor ([uint32]$b[2] -shl 8) -bor [uint32]$b[3]) }
     try { $x = & $n $Ip; return ($x -ge (& $n $Start) -and $x -le (& $n $End)) } catch { return $false }
+}
+
+function Test-PimV1PrivateAddress {
+    # PURE. Is -Ip an IPv4 private address (10/8, 172.16/12, 192.168/16)?
+    param([string]$Ip)
+    return ((Test-PimV1IpInRange -Ip $Ip -Start '10.0.0.0' -End '10.255.255.255') -or
+            (Test-PimV1IpInRange -Ip $Ip -Start '172.16.0.0' -End '172.31.255.255') -or
+            (Test-PimV1IpInRange -Ip $Ip -Start '192.168.0.0' -End '192.168.255.255'))
+}
+
+function Test-PimV1PrivatePath {
+    # V1-IMPORT-PRIVATE (a customer, 2026-11-11): does THIS machine reach the SQL server over the private network -- the server name
+    # resolves to a private address (the private endpoint) and port 1433 answers there? Then no firewall rule is needed,
+    # also when public network access is off. Returns @{ private; address; resolved }.
+    param([string]$Fqdn, [int]$TimeoutMs = 5000)
+    $addrs = @()
+    try { $addrs = @([System.Net.Dns]::GetHostAddresses($Fqdn) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | ForEach-Object { "$_" }) } catch { $addrs = @() }
+    foreach ($a in @($addrs | Where-Object { Test-PimV1PrivateAddress -Ip $_ })) {
+        $c = [System.Net.Sockets.TcpClient]::new()
+        try { if ($c.ConnectAsync($a, 1433).Wait($TimeoutMs) -and $c.Connected) { return @{ private = $true; address = $a; resolved = ($addrs -join ', ') } } }
+        catch { } finally { $c.Dispose() }
+    }
+    return @{ private = $false; address = ''; resolved = ($addrs -join ', ') }
 }
 
 function Get-PimV1SqlFailureText {
@@ -350,9 +377,21 @@ $adm = $inst.server.properties.administrators
 $group = if ($adm -and "$($adm.principalType)" -eq 'Group' -and "$($adm.login)".Trim()) { "$($adm.login)".Trim() } else { 'grp-pim-sql-admins' }
 
 # ---- network ---------------------------------------------------------------------------------------------------------
-if ("$($inst.server.properties.publicNetworkAccess)" -ieq 'Disabled') {
+# V1-IMPORT-PRIVATE (a customer, 2026-11-11): first ask whether this machine reaches the server over the private network (a machine
+# inside the installation's network, a VPN, a peered network). It did stop on "public access off" without looking, also
+# from inside the network.
+$pp = $null
+try { $pp = if ($Probe) { & $Probe $fqdn } else { Test-PimV1PrivatePath -Fqdn $fqdn } } catch { $pp = $null }
+$viaPrivate = [bool]($pp -and $pp.private)
+$reachable = $true
+if ($viaPrivate) {
+    Say "network: this machine reaches $srv over the private network ($($pp.address)); no firewall rule is needed" 'DarkGray'
+}
+elseif ("$($inst.server.properties.publicNetworkAccess)" -ieq 'Disabled') {
+    if ($pp -and "$($pp.resolved)") { Say "network: from this machine $fqdn resolves to $($pp.resolved) -- not a private address that answers on port 1433" 'DarkGray' }
     Stop-V1 "the PIM database is private (public network access is off). Run this from a machine inside the installation's network, or ask Invardia support."
 }
+if (-not $viaPrivate) {
 $ip = "$ClientIp".Trim()
 if (-not $ip) {
     try { $ip = "$(Invoke-RestMethod -Uri 'https://api.ipify.org' -TimeoutSec 20)".Trim() } catch { $ip = '' }
@@ -361,7 +400,6 @@ if (-not $ip) {
 $rules = @()
 try { $rules = @((& $Arm -Method GET -Path "$($inst.id)/firewallRules?api-version=$($script:PimV1SqlApi)").value) } catch { Stop-V1 "the firewall rules of $srv could not be read ($($_.Exception.Message))." }
 $covered = @($rules | Where-Object { $_ -and (Test-PimV1IpInRange -Ip $ip -Start "$($_.properties.startIpAddress)" -End "$($_.properties.endIpAddress)") })
-$reachable = $true
 if ($covered.Count) { Say "network: this machine ($ip) is allowed by the firewall rule '$($covered[0].name)'" 'DarkGray' }
 else {
     $ruleName = 'PimV1Import-' + [DateTime]::UtcNow.ToString('yyyyMMddHHmmss')
@@ -377,6 +415,7 @@ else {
         $reachable = $false
         Say "What if: would add the temporary firewall rule '$ruleName' for this machine ($ip) and remove it at the end. Without it the database cannot be read, so -WhatIf stops here; run it without -WhatIf for the preview (the preview writes no data)." 'Yellow'
     }
+}
 }
 
 if ($reachable) {

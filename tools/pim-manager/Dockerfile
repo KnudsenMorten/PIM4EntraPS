@@ -34,7 +34,9 @@
 #   as a .NET global tool under /usr/share/powershell, /usr/bin/pwsh links to it, running on the image's own .NET 10
 #   runtime). So a digest refresh patches the OS, .NET AND PowerShell together -- nothing is downloaded from GitHub or
 #   packages.microsoft.com (owner: "i dont understand why we download ps from ms if it is included in image").
-#   Digest read 2026-11-10 from the MCR v2 API: sdk 10.0.403 / runtime 10.0.14 / PowerShell 7.6.9 on Ubuntu 24.04.
+#   Digest read 2026-11-11 from the MCR v2 API: sdk 10.0.404 / runtime 10.0.15 (ASP.NET Core 10.0.15) on Ubuntu 24.04
+#   (DOTNET-10015, Invardia 2026-11-11: 10.0.14's runtime packs carried CVE-2026-114146 Critical, -114147 / -114149 /
+#   -109475 High; all fixed in 10.0.15). Was 2026-11-10: sdk 10.0.403 / runtime 10.0.14 / PowerShell 7.6.9.
 
 # 🔒 SEC-106 (as the sign-in front 1.4.3) -- EVERY NuGet RESTORE IS LOCKED. Each .NET stage restores a committed carrier
 # project (tools/pim-manager/nuget/<x>/*.csproj: one pinned PackageReference, RestorePackagesWithLockFile=true) against
@@ -47,7 +49,7 @@
 
 # ---- stage 1: fetch the pinned SQL driver assembly (no PS module) ----
 # PINNED: Microsoft.Data.SqlClient 6.1.8 (tools/pim-manager/nuget/sqlclient/shim.csproj + its packages.lock.json)
-FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e AS sqldriver
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:fe0fd4e93bd2fbb47c883b7a6369e5c8d3db8bf01cdc5981f6ee35fbdf3ff4fb AS sqldriver
 WORKDIR /drv/shim
 COPY SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/sqlclient/shim.csproj SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/sqlclient/packages.lock.json ./
 # NET10-PS76: a RID-less publish puts the PLATFORM-NEUTRAL Microsoft.Data.SqlClient.dll at the root -- a stub that throws
@@ -66,7 +68,7 @@ RUN dotnet restore shim.csproj --locked-mode \
 # SDK image as stage 1 (no new base image). engine/_shared/PIM-AsBuilt.ps1 Add-Types them from $env:PIM_PDF_DLL_DIR.
 # The build FAILS if an assembly the renderer loads is missing. Licence: tools/pim-manager/third-party/ (copied below).
 # PINNED: PDFsharp-MigraDoc 6.2.4 (tools/pim-manager/nuget/pdf/pdfshim.csproj + its packages.lock.json)
-FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e AS pdflib
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:fe0fd4e93bd2fbb47c883b7a6369e5c8d3db8bf01cdc5981f6ee35fbdf3ff4fb AS pdflib
 WORKDIR /pdf/pdfshim
 COPY SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/pdf/pdfshim.csproj SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/pdf/packages.lock.json ./
 RUN dotnet restore pdfshim.csproj --locked-mode \
@@ -91,7 +93,7 @@ RUN dotnet restore pdfshim.csproj --locked-mode \
 # tests/Test-PimImageNoAzNoModules.ps1 proves no in-container code path reads a pruned folder, and the last RUN
 # below fails the BUILD (never a running container) if a file the runtime needs went missing.
 # tools/pim-manager/nuget (SEC-106: the carrier projects stages 1 / 1b restore) is build input only -- pruned as well.
-FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e AS src
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:fe0fd4e93bd2fbb47c883b7a6369e5c8d3db8bf01cdc5981f6ee35fbdf3ff4fb AS src
 COPY SOLUTIONS/PIM4EntraPS /src/PIM4EntraPS
 WORKDIR /src/PIM4EntraPS
 RUN rm -rf tests internal legacy launcher diagnostics output tools/pim-manager/nuget \
@@ -110,7 +112,7 @@ RUN rm -rf tests internal legacy launcher diagnostics output tools/pim-manager/n
 #   in third-party/NOTICE.txt) -- no package manager and no extra network at build time; a changed file fails the build.
 
 # ---- stage 3: runtime ----
-FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:fe0fd4e93bd2fbb47c883b7a6369e5c8d3db8bf01cdc5981f6ee35fbdf3ff4fb
 
 # 🔒 IMAGE-PATCH-1 (framework, owner 2026-11-10: "we immediately patch images when this happens") -- PATCH THE BASE AT BUILD.
 # A customer's Defender scan of 3.0.70 listed ~70 fixable High/Critical findings in the base layer. This one RUN, before

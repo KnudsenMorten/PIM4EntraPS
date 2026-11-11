@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.6 -- 2026-11-11
+
+- Security update: PIM Manager and its sign-in front now run on .NET 10.0.15, which fixes one critical and three high security issues in the .NET 10.0.14 runtime; no change in behaviour
+
 ## 3.1.5 -- 2026-11-11
 
 - The mail sender setup now builds its send scope from the mailbox's real primary address, reuses a scope that already covers that mailbox, and only reports ready once Exchange itself confirms each sending identity is in scope (a right Exchange has not applied yet ends as pending: re-run later). Converting to private from a Linux shell (such as Azure Cloud Shell) refuses the Rebuild route up front instead of failing halfway. Releases now carry the proof that the exact released build passed its tests.
