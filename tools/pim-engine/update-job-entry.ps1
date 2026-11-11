@@ -93,6 +93,7 @@ $pimBeat = Start-PimBeat; if ($pimBeat.started -or $pimBeat.reason -match 'could
 . (Join-Path $solRoot 'engine\_shared\PIM-IdentitySplit.ps1')     # NAM-03 the identity standard id-pim-<role>: the setup fact identityNames (read only, step 2g)
 . (Join-Path $solRoot 'engine\_shared\PIM-GuardLimits.ps1')      # guard limits (owner 2026-11-09: Strict mode never blocks an update)
 . (Join-Path $solRoot 'engine\_shared\PIM-SchemaQuiesce.ps1')    # SCHEMA-QUIESCE-818 (framework 8.18): no database change under a running PIM job
+. (Join-Path $solRoot 'engine\_shared\PIM-SecretsToKeyVault.ps1') # the secrets into the install's own Key Vault (step 2f-ter; writes secrets, never a role)
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateTrack.ps1')      # OPEN-13 / framework 8.8 UPDATE-TRACK: the run's stages to Invardia (best effort)
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
@@ -514,6 +515,25 @@ function Invoke-PimUpdaterConvergeStep {
         $fixByHand += [int]$aoR.warnings
         if ("$($aoR.state)" -ne 'n/a') { Say ("app registration owner ($When): $($aoR.state), proof $($aoR.proofState) -- $($aoR.detail)") $(if ($aoR.state -eq 'ok' -and $aoR.proofState -eq 'ok') { 'DarkGray' } else { 'Yellow' }) }
     } catch { Say "  app registration owner not checked: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2f-ter. SEC-10 (framework 4 "secrets in Key Vault only"; Invardia decision 2026-11-11) -- THE SECRETS INTO THE VAULT ----
+    # The install's own updater (id-pim-updater) moves every Container Apps secret that is not a Key Vault reference, and every
+    # plain setting holding a secret, into the install's own vault and switches the app / job to a Key Vault reference: ONE app /
+    # job at a time, the vault value read back by SHA-256, a job only between its runs (never its own: that change applies to its
+    # next execution), the switch read back, the previous definitions put back on a failed read-back
+    # (engine/_shared/PIM-SecretsToKeyVault.ps1 Invoke-PimSkvUpdaterStep). It WRITES secrets and definitions only -- it never
+    # assigns a role (P9): its own Key Vault Secrets Officer and the readers' Key Vault Secrets User come from the Support app
+    # (Move-PimSecretsToKeyVault.ps1 -GrantOnly); without them it moves nothing and says so (setupFacts secretsToKeyVault =
+    # missing, how support-app). PIM_UPDATE_SECRETS_TO_KV=0 on this job switches it off (ON by default). Never fails the update.
+    $script:PimSkvResult = $null
+    try {
+        $skvKv = { param($m, $u, $b)
+            if ("$m".ToUpperInvariant() -eq 'PUT') { Invoke-PimRest -Method PUT -Url $u -Body $b -Resource 'https://vault.azure.net' -MaxRetry 2 }
+            else { Invoke-PimRest -Method GET -Url $u -Resource 'https://vault.azure.net' -MaxRetry 2 } }
+        $script:PimSkvResult = Invoke-PimSkvUpdaterStep -Arm $armSeam -Kv $skvKv -SubscriptionId $sub -ResourceGroup $rg -SelfJob "$selfJob" `
+                                   -TenantId ("$(if ("$($env:PIM_TenantId)".Trim()) { $env:PIM_TenantId } else { $global:PIM_TenantId })".Trim()) -Switch "$($env:PIM_UPDATE_SECRETS_TO_KV)"
+        foreach ($l in @($script:PimSkvResult.lines)) { Say ("secrets to Key Vault: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+        foreach ($rb in @($script:PimSkvResult.rollback)) { Say ("secrets to Key Vault: rollback record (no values) " + ($rb | ConvertTo-Json -Depth 6 -Compress)) 'DarkGray' }
+    } catch { Say "  secrets to Key Vault not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2g. FLEET-SETUPSTEPS (framework contract with Invardia, 2026-11-03) -- THE ONE-TIME STEPS, CHECKED ON EVERY RUN ----
     # READ ONLY (ARM GET + one SQL scalar): private network, the Jobs Operator role + SchedulerTickJobId, CR8 (registry admin
     # user, Key Vault purge protection, no SAS in the update source, SQL auditing), the front's key + schema + private vault,
@@ -542,6 +562,9 @@ function Invoke-PimUpdaterConvergeStep {
         # pending: <identity> still holds rights"). ARM + Graph GET only; a failed read = not read, never fails the update.
         $inGraph = { param($m, $p, $b) Invoke-PimGraph -Method $m -Path $p }
         try { $inF = Read-PimIdentityNamesFact -Arm $armSeam -Graph $inGraph -SubscriptionId $sub -ResourceGroup $rg; foreach ($k in @($inF.Keys)) { $ssF[$k] = $inF[$k] } } catch { $ssF['identityNames'] = 'unknown'; $ssF['identityNamesDetail'] = 'the identity names were not checked this run' }
+        # SEC-10 (step 2f-ter): the move's own fact (secretsToKeyVault = ok | missing | n/a | unknown | off + how + detail) -- the
+        # setup step keyvault-secrets-only takes WHO fixes it from here (Get-PimSkvSetupStepState: rights missing = support-app)
+        try { $skF = Get-PimSkvSetupFact -Result $script:PimSkvResult; foreach ($k in @($skF.Keys)) { $ssF[$k] = $skF[$k] } } catch { }
         $script:PimSetupFacts = $ssF
         $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail', 'dbJobDetail', 'appRegOwnerDetail', 'appRegOwnerProofUtc', 'appRegOwnerProofDetail', 'sqlTierDetail', 'sqlTierCurrent', 'downlinkDbUserDetail', 'identityNamesDetail') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
         Say ("setup steps: facts recorded for the heartbeat$(if ($ssUnk.Count) { " (not readable: $($ssUnk -join ', '))" })") 'DarkGray'
@@ -804,9 +827,13 @@ function Invoke-PimUpdaterSchemaQuiesce {
     $sqRead = { param($j) Invoke-PimArm -Method GET -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs/$j/executions" -ApiVersion $script:PimAcaApi }
     $sqHold = $null
     if (-not $Once -and "$Cs".Trim()) { $sqHoldCs = "$Cs"; $sqHold = { param($r) Set-PimSqlSetting -ConnectionString $sqHoldCs -Name (Get-PimSchemaHoldSettingName) -ValueJson (ConvertTo-Json -InputObject $r -Compress) } }
-    $sqMax = $(if ($Once) { 0 } else { (Get-PimSchemaQuiesceWaitMinutes) * 60 })
+    # ROLL-RETRY-1: a 15-minute RETRY of a held roll waits at most Get-PimUpdateRetryQuiesceWaitMinutes and never takes the
+    # long-job extension -- the next 15-minute run is the next retry, so runs do not pile up (and never overlap: the retry
+    # decision refuses while another updater execution runs).
+    $sqRetry = [bool]($null -ne $script:PimUpdateRollRetry -and $script:PimUpdateRollRetry.retry)
+    $sqMax = $(if ($Once) { 0 } elseif ($sqRetry) { (Get-PimUpdateRetryQuiesceWaitMinutes) * 60 } else { (Get-PimSchemaQuiesceWaitMinutes) * 60 })
     $sqLastLog = { param($j, $x) Get-PimUpdaterRunLastLogUtc -Job $j -Execution $x }   # SCHEMA-QUIESCE-LONG-SNAPSHOT (3): read only
-    $q = Invoke-PimSchemaQuiesce -Jobs $sqJobs -ReadExecutions $sqRead -SetHold $sqHold -By $selfJob -NoHold:$Once -MaxWaitSeconds $sqMax -NoLongWait:$Once -LastLog $sqLastLog -Log { param($l) Say $l 'DarkGray' }
+    $q = Invoke-PimSchemaQuiesce -Jobs $sqJobs -ReadExecutions $sqRead -SetHold $sqHold -By $selfJob -NoHold:$Once -MaxWaitSeconds $sqMax -NoLongWait:($Once -or $sqRetry) -LastLog $sqLastLog -Log { param($l) Say $l 'DarkGray' }
     if ($q.held) { $script:PimSchemaHoldCs = "$Cs" }
     if ($q.go -and -not $Once) { $script:PimSchemaQuiet = $true }
     if (-not $Once) { Say "$($q.line) [$($sqJobs.Count) job(s) read$(if ($null -eq $sqExisting) { ', the job list was not readable: every resolved name read' })]" $(if ($q.go) { 'DarkGray' } else { 'Yellow' }) }
@@ -1122,6 +1149,7 @@ try {
 } catch { Say "support SQL group: not checked ($($_.Exception.Message)) -- the update continues" 'Yellow' }
 
 $script:PimUpdateNowSignal = $null
+$script:PimUpdateRollRetry = $null   # ROLL-RETRY-1: the retry decision when THIS quick run retries a roll the quiesce held
 $unEnabled = Test-PimUpdateNowEnabled -Ring $ring -Value "$($env:PIM_UPDATE_NOW)"
 $unNightly = "$($env:PIM_UPDATE_NIGHTLY_UTC)".Trim()
 $unOwnExec = "$([Environment]::GetEnvironmentVariable('CONTAINER_APP_JOB_EXECUTION_NAME'))".Trim()
@@ -1168,16 +1196,54 @@ if ($unKind.kind -eq 'quick') {
                -UpdateWindow "$($env:PIM_UPDATE_WINDOW)" -NightlyUtc $unNightly `
                -GetState $unGet -SetState $unSet `
                -IsRunning { Get-PimUpdateNowOtherRunning -Executions $unExecs -OwnExecution $unOwnExec }
-    if (-not $unQ.run) { Say $unQ.line 'DarkGray'; exit 0 }
-    if (-not $unSet) { Say 'update now: a signal, but there is no store to record it in (at most one update per signal) -- not started' 'Yellow'; exit 0 }
-    $unAp = Get-PimUpdateNowRingApproval -Cs $unCs
-    $unAd = Get-PimUpdateNowApprovalDecision -SignalVersion "$($unQ.signal.version)" -ApprovedVersion "$($unAp.version)" -RunningVersion "$($script:PimRunningVersion)" -Ring $ring
-    if (-not $unAd.ok) { Say "$($unAd.line) ($($unAp.reason))" 'DarkGray'; exit 0 }
-    # Mark FIRST, update second: at most ONE update per raisedAt, whatever happens next (a failed one is the nightly's to retry).
-    if (-not (Set-PimUpdateNowHandled -GetState $unGet -SetState $unSet -Signal $unQ.signal)) { Say 'update now: the start could not be recorded -- not started (the nightly run takes it)' 'Yellow'; exit 0 }
-    Say $unQ.line 'Cyan'
-    Say $unAd.line 'Cyan'
-    $script:PimUpdateNowSignal = $unQ.signal
+    if (-not $unQ.run) {
+        # ROLL-RETRY-1: a roll the schema quiesce HELD (UpdateState 'schema' / 'waiting') is retried HERE, on the next
+        # 15-minute run, when the ring's head is ahead of the running version -- the same path as the nightly (no exit below),
+        # the same quiesce rule with a shorter wait (Invoke-PimUpdaterSchemaQuiesce reads $script:PimUpdateRollRetry), never
+        # a major jump, never while another updater execution runs. An expedite keeps its own path (the line above).
+        $unRt = $null
+        if ("$unCs".Trim()) {
+            try {
+                $unRtState = Read-PimUpdateState -ConnectionString $unCs
+                $unRtHead = $(if ($null -ne $unQ.signal -and "$($unQ.signal.source)" -eq 'head') { "$($unQ.signal.version)" } else { '' })
+                $unRtExp = [bool]($null -ne $unQ.signal -and $unQ.signal.updateNow)
+                $unRtArgs = @{ State = $unRtState; RunningVersion = "$($script:PimRunningVersion)"; Expedite = $unRtExp
+                               Hold = ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1'); OtherRunning = (Get-PimUpdateNowOtherRunning -Executions $unExecs -OwnExecution $unOwnExec) }
+                $unRt = Get-PimUpdateRetryDecision @unRtArgs -HeadVersion $unRtHead
+                $unRtAp = $null
+                if ($unRt.reason -eq 'no-head') {
+                    # /head gave no version (an older Invardia, or no answer): the ring's signed manifest names the head
+                    $unRtAp = Get-PimUpdateNowRingApproval -Cs $unCs
+                    $unRt = Get-PimUpdateRetryDecision @unRtArgs -HeadVersion "$($unRtAp.version)"
+                }
+                if ($unRt.retry) {
+                    # the RING stays the authority: the version it approves now must itself be ahead and not a major jump
+                    if ($null -eq $unRtAp) { $unRtAp = Get-PimUpdateNowRingApproval -Cs $unCs }
+                    $unRt2 = Get-PimUpdateRetryDecision @unRtArgs -HeadVersion "$($unRtAp.version)"
+                    if (-not $unRt2.retry) { $unRt = $unRt2; $unRt.line = "$($unRt2.line) (the ring's approval: $($unRtAp.reason))" }
+                }
+            } catch { $unRt = $null }
+        }
+        if ($unRt -and $unRt.retry) {
+            Say $unRt.line 'Cyan'
+            $script:PimUpdateRollRetry = $unRt
+        } else {
+            Say $(if ($unRt -and "$($unRt.line)") { "$($unRt.line)" } else { $unQ.line }) 'DarkGray'
+            exit 0
+        }
+    }
+    # ROLL-RETRY-1: a retry runs the normal update below -- no signal is consumed, nothing is marked handled.
+    if (-not $script:PimUpdateRollRetry) {
+        if (-not $unSet) { Say 'update now: a signal, but there is no store to record it in (at most one update per signal) -- not started' 'Yellow'; exit 0 }
+        $unAp = Get-PimUpdateNowRingApproval -Cs $unCs
+        $unAd = Get-PimUpdateNowApprovalDecision -SignalVersion "$($unQ.signal.version)" -ApprovedVersion "$($unAp.version)" -RunningVersion "$($script:PimRunningVersion)" -Ring $ring
+        if (-not $unAd.ok) { Say "$($unAd.line) ($($unAp.reason))" 'DarkGray'; exit 0 }
+        # Mark FIRST, update second: at most ONE update per raisedAt, whatever happens next (a failed one is the nightly's to retry).
+        if (-not (Set-PimUpdateNowHandled -GetState $unGet -SetState $unSet -Signal $unQ.signal)) { Say 'update now: the start could not be recorded -- not started (the nightly run takes it)' 'Yellow'; exit 0 }
+        Say $unQ.line 'Cyan'
+        Say $unAd.line 'Cyan'
+        $script:PimUpdateNowSignal = $unQ.signal
+    }
 } else {
     Say "execution: $($unKind.kind) -- $($unKind.reason)" 'DarkGray'
     if ($unKind.kind -eq 'nightly' -and (Get-PimUpdateNowOtherRunning -Executions $unExecs -OwnExecution $unOwnExec) -eq $true) {
@@ -1839,7 +1905,8 @@ try {
     }
 }
 if ($schemaOk -and $script:PimSchemaDeferred -and -not $script:PimSchemaDeferred.go) {
-    # SCHEMA-QUIESCE-818: WAITING, not failed -- PIM keeps running its current version; the next update run tries again.
+    # SCHEMA-QUIESCE-818: WAITING, not failed -- PIM keeps running its current version. ROLL-RETRY-1: this 'schema' / 'waiting'
+    # record is what the next 15-minute run reads (Get-PimUpdateRetryDecision) to retry the roll.
     Say 'NOT ROLLING: a PIM job is still running, and the database is never changed under a run (framework 8.18).' 'Yellow'
     Send-PimUpdateOutcome -Action 'schema' -Outcome 'waiting' -ToVersion "$($plan.version)" -ErrorText "$($script:PimSchemaDeferred.line)"
     exit 0

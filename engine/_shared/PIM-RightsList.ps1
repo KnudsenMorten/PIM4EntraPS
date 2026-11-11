@@ -39,6 +39,11 @@ if (-not (Get-Command Get-PimUpdaterGraphAppRoles -ErrorAction SilentlyContinue)
     $__pimRlUgr = Join-Path $PSScriptRoot 'PIM-UpdaterGraphRoles.ps1'
     if (Test-Path -LiteralPath $__pimRlUgr) { . $__pimRlUgr }
 }
+# SEC-10 mover: the identities that read a secret moved to Key Vault (Get-PimSkvReaderRoles) -- the rows below are built from it
+if (-not (Get-Command Get-PimSkvReaderRoles -ErrorAction SilentlyContinue)) {
+    $__pimRlSkv = Join-Path $PSScriptRoot 'PIM-SecretsToKeyVault.ps1'
+    if (Test-Path -LiteralPath $__pimRlSkv) { . $__pimRlSkv }
+}
 
 function Get-PimRightsListRoot {
     <# The solution root (engine\_shared -> ..\..). A function: a dot-sourced file's $PSScriptRoot is valid only at load. #>
@@ -169,6 +174,11 @@ function Get-PimRightsListExtraFeatureKeys {
         # identities no AcrPull of their own -- 'always' made that a false MISSING. The heartbeat reports this key (RIGHTS-1.8,
         # optionalComponents): on = the identity pulls with its own AcrPull. Downlink / publish / requests keep their own feature.
         'own-registry-pull' = 'The identity pulls its image from the install''s registry with its OWN AcrPull (not a shared registry identity); reported on the heartbeat as an optional component (RIGHTS-1.8).'
+        # SEC-10 (framework 4 "secrets in Key Vault only"; Invardia ruling 2026-11-11): on once the install's secrets were moved to
+        # Key Vault references (tools\setup\Move-PimSecretsToKeyVault.ps1) -- before that no identity holds the right.
+        'secrets-in-keyvault' = 'The install''s secrets were moved into its own Key Vault (Move-PimSecretsToKeyVault.ps1): the apps and jobs read them as Key Vault references with their own identity. Not a catalog gate -- the setup step keyvault-secrets-only reports it.'
+        # REQ-F: on once the emergency override passphrase was set up (Set-PimEmergencyPassphrase.ps1); before that no grant exists.
+        'emergency-override' = 'The emergency override (break-glass) passphrase is set up (Set-PimEmergencyPassphrase.ps1): the web app reads its hash from the one secret PIM-EmergencyPasscode. Not a catalog gate -- Settings > Emergency access shows it.'
         'azure-rbac' ='Azure resource role delegations (the workload connector id, engine\_shared\PIM-PermissionHealth.ps1 Get-PimWorkloadConnectorRequirements). Free and not a catalog gate: the engine needs User Access Administrator only where the store defines Azure scopes (engine\_shared\PIM-EngineAzureAccess.ps1, 95.2k)'
     }
 }
@@ -188,7 +198,7 @@ function Get-PimRightsAzureTable {
     $r = { param($identity, $key, $kind, $role, $roleId, $scope, $scopeNote, $when, $featureKey, $feature, $source)
         [ordered]@{ identity = $identity; key = $key; kind = $kind; role = $role; roleId = $roleId; scope = $scope; scopeNote = $scopeNote
                     when = $when; featureKey = $featureKey; feature = $feature; source = $source } }
-    return @(
+    $rows = @(
         # ---- engine (the engine job's identity)
         (& $r 'engine' 'reader@subscription' 'azure-rbac' 'Reader' $reader 'subscription' 'the hosting subscription' 'always' '' 'Reads Azure in the hosting subscription (Discovery, the Azure half of the tenant cache)' 'tools\setup\Setup-PimContainers.ps1 Grant-PimMiAzureRbac (-AzureRbacRoles default Reader; Get-PimAzureRbacPlan scope /subscriptions/<sub>)')
         (& $r 'engine' 'reader@tenant-root' 'azure-rbac' 'Reader' $reader 'tenant-root' 'the Tenant Root Group (its id is the tenant id)' 'always' '' 'Discovery lists management groups and subscriptions (read only)' 'tools\setup\_PimSetupShared.ps1 Get-PimEngineRootAzurePlan / Grant-PimEngineRootAzureAccess (PIM 97)')
@@ -225,6 +235,26 @@ function Get-PimRightsAzureTable {
         (& $r 'docs' 'storage-blob-data-contributor@asbuilt-container' 'azure-rbac' 'Storage Blob Data Contributor' $sbdc 'resource' 'the asbuilt container only' 'always' '' 'Writes the installation documentation PDF' 'tools\setup\Deploy-PimAsBuiltJob.ps1 (step 4), tools\setup\Initialize-PimHostingAccess.ps1')
         (& $r 'docs' 'acrpull@registry' 'azure-rbac' 'AcrPull' $acr 'resource' 'the install''s container registry' 'feature' 'own-registry-pull' 'Pulls its own image' 'tools\setup\Deploy-PimAsBuiltJob.ps1 (step 2)')
     )
+    # ---- SEC-10 (framework 4 "secrets in Key Vault only"; Invardia ruling 2026-11-11): Key Vault Secrets User at the install's
+    # own vault (resource scope) for EXACTLY the identities that read a moved secret -- GENERATED from the mover's own reader
+    # set (engine\_shared\PIM-SecretsToKeyVault.ps1 Get-PimSkvReaderRoles, code role keys; asbuilt is the docs identity)
+    if (-not (Get-Command Get-PimSkvReaderRoles -ErrorAction SilentlyContinue)) { throw 'Get-PimSkvReaderRoles is not loaded (engine\_shared\PIM-SecretsToKeyVault.ps1)' }
+    $cat = @(Get-PimRightsIdentityCatalog)
+    foreach ($cr in @(Get-PimSkvReaderRoles)) {
+        $id = @($cat | Where-Object { $_.codeRole -eq $cr })[0]
+        if (-not $id) { throw "Get-PimSkvReaderRoles names '$cr', which is no identity of the rights list" }
+        $rows += (& $r $id.role 'key-vault-secrets-user@install-vault' 'azure-rbac' (Get-PimSkvRoleName) (Get-PimSkvRoleId) 'resource' 'the install''s own Key Vault' 'feature' (Get-PimSkvFeatureKey) 'Reads its own secrets as Key Vault references (once they were moved into the install''s Key Vault)' 'tools\setup\Move-PimSecretsToKeyVault.ps1 (engine\_shared\PIM-SecretsToKeyVault.ps1 Invoke-PimSkvGrant; Get-PimSkvReaderRoles)')
+    }
+    # SEC-10 (Invardia decision 2026-11-11): the WRITER -- the install's own updater writes the moved secrets inside its update run
+    # (Invoke-PimSkvUpdaterStep); granted once by the Support-app step (Move-PimSecretsToKeyVault.ps1 -GrantOnly), never by itself
+    $wr = @($cat | Where-Object { $_.codeRole -eq (Get-PimSkvWriterRole) })[0]
+    if (-not $wr) { throw "Get-PimSkvWriterRole names '$(Get-PimSkvWriterRole)', which is no identity of the rights list" }
+    $rows += (& $r $wr.role 'key-vault-secrets-officer@install-vault' 'azure-rbac' (Get-PimSkvOfficerRoleName) (Get-PimSkvOfficerRoleId) 'resource' 'the install''s own Key Vault' 'feature' (Get-PimSkvFeatureKey) 'Writes the install''s secrets into its own Key Vault and switches the apps and jobs to Key Vault references (the update run''s secrets step); granted once by the Support app' 'engine\_shared\PIM-SecretsToKeyVault.ps1 Invoke-PimSkvUpdaterStep (tools\pim-engine\update-job-entry.ps1 step 2f-ter); granted by tools\setup\Move-PimSecretsToKeyVault.ps1 -GrantOnly')
+    # REQ-F (Invardia decision 2026-11-11: document the grant that already exists): the web identity reads the ONE secret
+    # PIM-EmergencyPasscode (the hash of the break-glass passphrase) -- tools\setup\Set-PimEmergencyPassphrase.ps1 grants it on
+    # that secret, not the vault. The format has no 'secret' scope value: scope resource, the secret named in scopeNote.
+    $rows += (& $r 'web' 'key-vault-secrets-user@emergency-passcode' 'azure-rbac' (Get-PimSkvRoleName) (Get-PimSkvRoleId) 'resource' 'the one secret PIM-EmergencyPasscode in the install''s own Key Vault (not the vault)' 'feature' 'emergency-override' 'Checks the emergency override (break-glass) passphrase against its stored hash' 'tools\setup\Set-PimEmergencyPassphrase.ps1 (step 2: Key Vault Secrets User on the secret PIM-EmergencyPasscode)')
+    return $rows
 }
 
 function Get-PimRightsKeptGraphRows {

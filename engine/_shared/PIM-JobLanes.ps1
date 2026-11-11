@@ -1,4 +1,4 @@
-﻿<#
+<#
   PIM4EntraPS -- job LANES: per-area locks instead of one tick-wide lease (REQUIREMENTS §95.2o, operator 2026-10-07).
 
   Measured on a customer environment 2026-10-07: the whole tick ran under ONE lease, so a 30-minute full reconcile made
@@ -478,15 +478,19 @@ function Get-PimNoProgressRuns {
 
 # ---- STALL-1 (framework 8.18 "STALLED is not died", Invardia 2026-11-10) ---------------------------------------------
 # Two triggers, one report: (a) no progress for 60 min (above), (b) a run going MORE THAN TWICE its usual length, where
-# usual = the MEDIAN of its job's last 10 SUCCESSFUL runs (fewer than 3 = this trigger is off for that job), never below a
-# 10-minute floor so a 1-minute job does not flap. Either is reported ONCE per stall (log line + one warning mail, marked on
+# usual = the LONGEST of its job's last 10 SUCCESSFUL runs (fewer than 3 = this trigger is off for that job), never below a
+# 30-minute floor so a short job does not flap (STALL-TUNE-1). Either is reported ONCE per stall (log line + one warning mail, marked on
 # the run's locks) and is on the heartbeat (Pipeline.stalledSteps, the Fleet display) while it lasts; the ticket comes from ONE run report per stall. PIM 100.166 (c) (owner
 # 2026-10-15 "report on no progress, keep running"): NOTHING here stops, cancels, restarts, fails or releases a run.
 # Literals as functions (a $script: value read from another script scope is $null, and -gt $null is TRUE).
 function Get-PimNoProgressThresholdMinutes { <# PURE. LITERAL. #> return 60 }
 function Get-PimOverUsualFactor            { <# PURE. LITERAL. Over this many times the usual length = stalled. #> return 2 }
-function Get-PimOverUsualFloorMinutes      { <# PURE. LITERAL. The over-usual limit is never below this. #> return 10 }
-function Get-PimOverUsualHistoryRuns       { <# PURE. LITERAL. The usual length = the median of this many newest successful runs. #> return 10 }
+# STALL-TUNE-1 (2026-11-11, first live report SUP-2026-00483 at internal: delta-policies ran 18 min, reported at 13 min as
+# "over twice its usual" -- the MEDIAN was pulled down by the many quick delta runs that skip their work when nothing changed):
+# usual = the LONGEST of the last successful runs, and the floor is 30 min. A run is reported only when it takes over twice
+# as long as ANY recent good run and at least 30 min.
+function Get-PimOverUsualFloorMinutes      { <# PURE. LITERAL. The over-usual limit is never below this. #> return 30 }
+function Get-PimOverUsualHistoryRuns       { <# PURE. LITERAL. The usual length = the longest of this many newest successful runs. #> return 10 }
 function Get-PimOverUsualMinRuns           { <# PURE. LITERAL. Fewer successful runs than this = no usual = the trigger is off. #> return 3 }
 function Get-PimStalledRunsMax             { <# PURE. LITERAL. At most this many stalled runs on one heartbeat (Invardia: stalledSteps max 12). #> return 12 }
 
@@ -514,7 +518,7 @@ function Get-PimRunDurationMinutes {
 }
 
 function Get-PimUsualRunMinutes {
-    <# PURE. The usual length of a job: the MEDIAN (minutes) of its newest -Last (10) SUCCESSFUL runs in -Runs (the run
+    <# PURE. The usual length of a job: the LONGEST (minutes) of its newest -Last (10) SUCCESSFUL runs in -Runs (the run
        history the scheduler keeps); $null when it has fewer than -MinRuns (3) -- no usual, the over-usual trigger is off. #>
     param([AllowNull()][object[]]$Runs, [Parameter(Mandatory)][AllowEmptyString()][string]$Job, [int]$Last = 0, [int]$MinRuns = 0)
     $n = if ($Last -gt 0) { $Last } else { Get-PimOverUsualHistoryRuns }
@@ -529,10 +533,8 @@ function Get-PimUsualRunMinutes {
         if ($null -ne $m -and $m -gt 0) { $d.Add([double]$m) }
     }
     if ($d.Count -lt $least) { return $null }
-    $s = [double[]]@($d.ToArray() | Sort-Object)
-    $c = $s.Count
-    if ($c % 2 -eq 1) { return $s[[int](($c - 1) / 2)] }
-    return ($s[[int]($c / 2) - 1] + $s[[int]($c / 2)]) / 2.0
+    # STALL-TUNE-1: the LONGEST recent good run, not the median (quick skip runs pulled the median down -> false reports)
+    return [double](@($d.ToArray() | Measure-Object -Maximum).Maximum)
 }
 
 function Get-PimStalledRuns {

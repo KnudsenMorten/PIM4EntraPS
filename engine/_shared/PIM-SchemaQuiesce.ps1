@@ -12,7 +12,8 @@
     nothing running            -> go
     something running          -> wait: poll every Get-PimSchemaQuiescePollSeconds, at most Get-PimSchemaQuiesceWaitMinutes
     still running at the bound -> defer: no schema step, no roll; the run ends 'waiting' (not failed), naming the job;
-                                  the next updater run tries again
+                                  the next 15-minute updater run retries the roll (ROLL-RETRY-1,
+                                  PIM-UpdateNow.ps1 Get-PimUpdateRetryDecision; a retry waits at most 5 min)
     executions NOT READABLE    -> CONSERVATIVE: counted as running (waited for, then deferred) and said so in the line
 
   While the updater waits it holds the scheduled jobs: pim.Settings 'UpdateSchemaHold' { setUtc; untilUtc; by; reason }.
@@ -115,7 +116,7 @@ function Get-PimSchemaQuiesceDecision {
     }
     if ($WaitedSeconds -ge $MaxWaitSeconds) {
         $r = "still busy after $mins min -- $($what -join '; ')"
-        return [pscustomobject]@{ action = 'defer'; reason = $r; line = "schema quiesce: $r -- the database is NOT changed and nothing is rolled; the next update run tries again (nothing was stopped)" }
+        return [pscustomobject]@{ action = 'defer'; reason = $r; line = "schema quiesce: $r -- the database is NOT changed and nothing is rolled; the next 15-minute update run retries the roll (nothing was stopped)" }
     }
     return [pscustomobject]@{ action = 'wait'; reason = ($what -join '; '); line = "schema quiesce: waiting ($mins of $([math]::Round($MaxWaitSeconds / 60.0, 1)) min) -- $($what -join '; ')" }
 }
@@ -313,7 +314,7 @@ function Invoke-PimSchemaQuiesce {
         }
     } catch {
         $out.go = $false; $out.action = 'defer'
-        $out.line = "schema quiesce: the check stopped ($((("$($_.Exception.Message)") -split "`n")[0])) -- decided conservatively: the database is NOT changed and nothing is rolled; the next update run tries again"
+        $out.line = "schema quiesce: the check stopped ($((("$($_.Exception.Message)") -split "`n")[0])) -- decided conservatively: the database is NOT changed and nothing is rolled; the next 15-minute update run retries the roll"
     } finally {
         if (-not $keep -and $out.held -and $SetHold) {
             try { & $SetHold (New-PimSchemaHoldClearRecord -NowUtc ([datetime](& $Now)) -By $By) | Out-Null; $out.held = $false } catch { $out.holdNote = "the hold could not be lifted ($((("$($_.Exception.Message)") -split "`n")[0])) -- it expires by itself" }

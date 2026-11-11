@@ -83,7 +83,7 @@
     {
       "target": "Azure",
       "action": "grant",
-      "object": "every Azure role assignment held directly by the old identity (Key Vault RBAC, AcrPull, Storage Blob Data Contributor for the as-built report, the resource group, the tenant root with -SupportHasRootAccess)",
+      "object": "every Azure role assignment held directly by the old identity (Key Vault RBAC -- Key Vault Secrets User only at a vault or a secret in it, and the updater's Key Vault Secrets Officer only at a vault (SEC-10) --, AcrPull, Storage Blob Data Contributor for the as-built report, the resource group, the tenant root with -SupportHasRootAccess)",
       "permission": "the same Azure role",
       "scope": "the same scope",
       "why": "The same rights on the new identity before anything switches.",

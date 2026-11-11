@@ -21,7 +21,9 @@
                                         key 'signin-front' + SQL schema 'signin'), the front's private Key Vault, the pull /
                                         publish jobs' Reader on themselves, the as-built storage + rights, the database
                                         job (OPEN-06: present, on version, its identity in the SQL admin group), the
-                                        identity names (NAM-03: every role runs as id-pim-<role>, no old identity holds rights)
+                                        identity names (NAM-03: every role runs as id-pim-<role>, no old identity holds rights),
+                                        SEC-10: the vaults' purge protection + soft delete, and the secrets of the container
+                                        apps + jobs (Key Vault references or plain -- counts only; ARM GET, no new right)
       updater (UpdateState, own keys)   sqlAccess (run 1 / run 2 / updater in the admin group), signIn (the layer),
                                         enginePermissions (the 95.2i check: Graph + the Reader at the tenant root)
       heartbeat                         Controls (mail-sender, licence-valid, uplink-key, update-ring, identity-permissions),
@@ -34,6 +36,8 @@
     PS 5.1 + 7, no modules, no az, ASCII only.
 #>
 Set-StrictMode -Off
+# SEC-10: keyvault-secrets-only takes WHO fixes it from the updater's move (Get-PimSkvSetupStepState) -- loaded when present.
+if (-not (Get-Command Get-PimSkvSetupStepState -ErrorAction SilentlyContinue)) { $__pimSkvLib = Join-Path $PSScriptRoot 'PIM-SecretsToKeyVault.ps1'; if (Test-Path -LiteralPath $__pimSkvLib) { . $__pimSkvLib } }
 
 # ---------------------------------------------------------------------------------------------------------------------
 # THE STEP LIST (install-steps S1-S16). Literal-returning function: child-scope safe ($script: defaults are $null there).
@@ -67,6 +71,11 @@ function Get-PimSetupStepCatalog {
         # NAM-03 / framework 12.11c item 3 + ruling (b) (key agreed by Invardia 2026-11-07): every role runs as id-pim-<role> and
         # no old identity still holds rights (the updater reads the apps / jobs / identities and the old ones' rights:
         # Read-PimIdentityNamesFact, PIM-IdentitySplit.ps1; the Support app moves an identity -- Move-PimIdentities.ps1).
+        # SEC-10 (framework ALIGN-AUTO-ALL item 1; key names are Invardia's, how 'updater' as the framework says): the install's
+        # Key Vault has purge protection (and soft delete) on; every secret PIM uses is a Key Vault secret or reference -- none
+        # in plain app settings / container env / job definitions (Get-PimSetupSecretPlainCount; the detail names counts only).
+        [ordered]@{ key = 'keyvault-purge-protection'; title = 'Key Vault purge protection on';                      since = '3.1.1';   how = 'updater' }
+        [ordered]@{ key = 'keyvault-secrets-only';    title = 'Secrets only in Key Vault';                          since = '3.1.1';   how = 'updater' }
         [ordered]@{ key = 'identity-names';           title = 'Identity names follow the standard (id-pim-<role>)';  since = '3.0.57';  how = 'support-app' }
     )
 }
@@ -263,6 +272,79 @@ function Get-PimSetupStepDbJobFacts {
     } catch {
         return [ordered]@{ dbJob = 'unknown'; dbJobDetail = "the database job state could not be read: $(((("$($_.Exception.Message)") -split "`n")[0]).Trim())" }
     }
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# SEC-10: THE KEY VAULT FACTS (PURE) -- the updater reads ARM (GET only), these judge what it read
+# ---------------------------------------------------------------------------------------------------------------------
+function ConvertTo-PimSetupStepCount {
+    # PURE. A whole number >= 0 (int / long / its text) -> [int]; anything else (incl. $null) -> $null (= not read).
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value -or $Value -is [bool]) { return $null }
+    $n = 0L
+    if ([long]::TryParse("$Value".Trim(), [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$n) -and $n -le [int]::MaxValue) { return [int]$n }
+    return $null
+}
+
+function Get-PimSetupKeyVaultPurgeFacts {
+    <#
+      PURE. The vaults of the resource group (ARM GET .../providers/Microsoft.KeyVault/vaults, its value[]) ->
+        kvVaultCount    how many vaults
+        kvPurgeProtection  $true = every vault has enablePurgeProtection true; $false = at least one has not; $null = no vault
+        kvNoPurgeCount  how many have not
+        kvSoftDelete    $false = at least one vault says enableSoftDelete false; else $true (Azure keeps soft delete on for
+                        every vault and refuses purge protection without it -- an absent value is on); $null = no vault
+    #>
+    param([object[]]$Vaults = @())
+    $kvs = @(@($Vaults) | Where-Object { $null -ne $_ })
+    $o = [ordered]@{ kvVaultCount = $kvs.Count; kvPurgeProtection = $null; kvNoPurgeCount = 0; kvSoftDelete = $null }
+    if (-not $kvs.Count) { return $o }
+    $noPurge = @($kvs | Where-Object { (ConvertTo-PimSetupStepBool (Get-PimSetupStepField (Get-PimSetupStepField $_ 'properties') 'enablePurgeProtection')) -ne $true })
+    $o.kvNoPurgeCount = $noPurge.Count
+    $o.kvPurgeProtection = ($noPurge.Count -eq 0)
+    $o.kvSoftDelete = -not [bool](@($kvs | Where-Object { (ConvertTo-PimSetupStepBool (Get-PimSetupStepField (Get-PimSetupStepField $_ 'properties') 'enableSoftDelete')) -eq $false }).Count)
+    return $o
+}
+
+function Test-PimSetupSecretEnvName {
+    # PURE. Does a container environment variable NAME say it carries a secret? (a password, a client secret, an API / account /
+    # install / private key, a connection string, a SAS). Names like ..._URL / ..._NAME / ..._ID / ..._RING never match.
+    param([AllowNull()][string]$Name)
+    return [bool]("$Name".Trim() -match '(?i)(SECRET|PASSWORD|PASSWD|(^|_)PWD($|_)|API_?KEY|ACCOUNT_?KEY|CONNECTION_?STRING|(^|_)SAS($|_)|PRIVATE_?KEY|INSTALL_?KEY|UPLINK_?KEY|SIGNING_?KEY)')
+}
+
+function Get-PimSetupSecretPlainCount {
+    <#
+      PURE. SEC-10 keyvault-secrets-only: the container apps and jobs of the resource group (ARM GET of their lists; ARM never
+      returns a secret's value, only its name and, for a Key Vault reference, its keyVaultUrl) ->
+        scanned   how many apps + jobs were looked at
+        values    secrets stored IN the app / job definition (configuration.secrets[] without a keyVaultUrl)
+        env       container env entries with a plain value that is a secret (a secret-named variable with a value, or a
+                  value that looks like a secret -- Test-PimSetupStepSecretText); a secretRef is never counted here (its
+                  secret is judged in 'values')
+      Counts ONLY -- no name and no value leaves this function.
+    #>
+    param([object[]]$Resources = @())
+    $res = @(@($Resources) | Where-Object { $null -ne $_ })
+    $values = 0; $envN = 0
+    foreach ($r in $res) {
+        $p = Get-PimSetupStepField $r 'properties'
+        foreach ($s in @(Get-PimSetupStepField (Get-PimSetupStepField $p 'configuration') 'secrets')) {
+            if ($null -eq $s) { continue }
+            if (-not "$(Get-PimSetupStepField $s 'keyVaultUrl')".Trim()) { $values++ }
+        }
+        $tpl = Get-PimSetupStepField $p 'template'
+        foreach ($c in @(@(Get-PimSetupStepField $tpl 'containers') + @(Get-PimSetupStepField $tpl 'initContainers'))) {
+            if ($null -eq $c) { continue }
+            foreach ($e in @(Get-PimSetupStepField $c 'env')) {
+                if ($null -eq $e -or "$(Get-PimSetupStepField $e 'secretRef')".Trim()) { continue }
+                $v = "$(Get-PimSetupStepField $e 'value')"
+                if (-not $v.Trim()) { continue }
+                if ((Test-PimSetupSecretEnvName -Name "$(Get-PimSetupStepField $e 'name')") -or (Test-PimSetupStepSecretText -Text $v)) { $envN++ }
+            }
+        }
+    }
+    return [ordered]@{ scanned = $res.Count; values = $values; env = $envN }
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -626,6 +708,46 @@ function New-PimSetupSteps {
         }
     }
 
+    # ---- SEC-10 keyvault-purge-protection (updater: the vaults of the resource group, ARM GET) ---------------------------
+    # ok only when the updater READ every vault with purge protection on (soft delete is implied: Azure refuses purge
+    # protection without it; a vault that says enableSoftDelete false is missing). No vault = n/a. Not read = unknown.
+    if ($null -eq $up) { & $set 'keyvault-purge-protection' 'unknown' $noUp $null }
+    else {
+        $kvn = ConvertTo-PimSetupStepCount (& $uf 'kvVaultCount'); $kpp = & $ub 'kvPurgeProtection'; $ksd = & $ub 'kvSoftDelete'
+        $knp = ConvertTo-PimSetupStepCount (& $uf 'kvNoPurgeCount')
+        if ($kvn -eq 0 -or ($null -eq $kvn -and "$(& $uf 'frontKvPrivate')" -eq 'none')) { & $set 'keyvault-purge-protection' 'n/a' 'no Key Vault in the resource group' $upAt }
+        elseif ($kpp -eq $false -or $ksd -eq $false) {
+            $kw = @($(if ($kpp -eq $false) { "purge protection off on $(if ($null -ne $knp -and $null -ne $kvn) { "$knp of $kvn" } else { 'a' }) Key Vault(s)" }), $(if ($ksd -eq $false) { 'soft delete off' }) | Where-Object { $_ })
+            & $set 'keyvault-purge-protection' 'missing' ("not done: $($kw -join ', ')") $upAt
+        }
+        elseif ($kpp -eq $true) { & $set 'keyvault-purge-protection' 'ok' ("purge protection and soft delete are on for $(if ($null -ne $kvn) { "all $kvn" } else { 'every' }) Key Vault(s) in the resource group") $upAt }
+        else { & $set 'keyvault-purge-protection' 'unknown' 'not read: the Key Vaults could not be read' $upAt }
+    }
+
+    # ---- SEC-10 keyvault-secrets-only (updater: the container apps + jobs, ARM GET; Get-PimSetupSecretPlainCount) -------
+    # ok = every secret of every app / job is a Key Vault reference and no plain container setting carries one; the detail
+    # names COUNTS only -- never a secret, never its name. No app or job = n/a. Not read (an older updater, a refused list) = unknown.
+    if ($null -eq $up) { & $set 'keyvault-secrets-only' 'unknown' $noUp $null }
+    else {
+        $ssn = ConvertTo-PimSetupStepCount (& $uf 'secretsScanned'); $spv = ConvertTo-PimSetupStepCount (& $uf 'plainSecretValues'); $spe = ConvertTo-PimSetupStepCount (& $uf 'plainSecretEnv')
+        if ($null -eq $ssn -or $null -eq $spv -or $null -eq $spe) { & $set 'keyvault-secrets-only' 'unknown' 'not read: the container apps and jobs could not be read' $upAt }
+        elseif ($ssn -eq 0) { & $set 'keyvault-secrets-only' 'n/a' 'no container app or job in the resource group' $upAt }
+        elseif (($spv + $spe) -eq 0) { & $set 'keyvault-secrets-only' 'ok' "every secret of the $ssn container apps and jobs is a Key Vault reference; none in plain settings" $upAt }
+        else {
+            $sw = @($(if ($spv) { "$spv stored as a Container Apps secret value" }), $(if ($spe) { "$spe in plain container settings" }) | Where-Object { $_ })
+            & $set 'keyvault-secrets-only' 'missing' ("$($spv + $spe) secret(s) outside Key Vault: $($sw -join ', ') (names not sent)") $upAt
+            # SEC-10 mover (Invardia 2026-11-11): the updater moves them itself once its vault rights are in place; while the
+            # one-time grant is missing, the Support app fixes it (how = support-app) and the updater's reason is appended.
+            if (Get-Command Get-PimSkvSetupStepState -ErrorAction SilentlyContinue) {
+                $skv = Get-PimSkvSetupStepState -Facts $up
+                if ($skv.state -eq 'missing' -and $skv.how -eq 'support-app') {
+                    $res['keyvault-secrets-only'].how = 'support-app'
+                    if ("$($skv.detail)".Trim()) { $res['keyvault-secrets-only'].detail = "$($res['keyvault-secrets-only'].detail); $($skv.detail)" }
+                }
+            }
+        }
+    }
+
     # ---- assemble, in the catalog's order; validate; cap -------------------------------------------------------------
     # WAITING-CUSTOMER (framework, Invardia 2026-11-08): a step that is still MISSING and has a customer ticket recorded
     # (pim.Settings 'SetupStepTickets' { "<key>": "SUP-yyyy-nnnnn" }) reports 'waiting-customer' + ticket -- counted apart from
@@ -635,7 +757,10 @@ function New-PimSetupSteps {
     foreach ($c in (Get-PimSetupStepCatalog)) {
         $r = $res[$c.key]
         if (-not $r) { $r = @{ state = 'unknown'; detail = 'not read'; at = $null } }
-        $e = [ordered]@{ key = $c.key; title = $c.title; state = "$($r.state)"; since = $c.since; how = $c.how
+        # SEC-10 (Invardia 2026-11-11): a step may say WHO fixes it from the live facts (keyvault-secrets-only: support-app while
+        # the one-time vault grant is missing -- the updater may not assign roles, P9); otherwise the catalog's 'how'.
+        $howE = if ($r.ContainsKey('how') -and "$($r.how)" -in (Get-PimSetupStepHowList)) { "$($r.how)" } else { $c.how }
+        $e = [ordered]@{ key = $c.key; title = $c.title; state = "$($r.state)"; since = $c.since; how = $howE
                          checkedAt = (& $iso $r.at); detail = (ConvertTo-PimSetupStepDetail -Text $r.detail) }
         $tid = "$(Get-PimSetupStepField $tkt $c.key)".Trim()
         if ($e.state -eq 'missing' -and (Test-PimSetupStepTicketId -Id $tid)) {
@@ -703,7 +828,10 @@ function Get-PimSetupStepUpdaterFacts {
                      acrAdminOff = $null; kvPurgeProtection = $null; sourceUrlNoSas = $null; sqlAudit = $null
                      frontKey = $null; frontSqlSchema = $null; frontKvPrivate = $null; jobSelfReader = $null
                      asBuiltStorage = 'unknown'; asBuiltRights = 'unknown'; asBuiltDetail = ''
-                     dbJob = 'unknown'; dbJobDetail = '' }
+                     dbJob = 'unknown'; dbJobDetail = ''
+                     # SEC-10: $null = not read (unknown), never a guess
+                     kvVaultCount = $null; kvNoPurgeCount = $null; kvSoftDelete = $null
+                     secretsScanned = $null; plainSecretValues = $null; plainSecretEnv = $null }
     try { $dj = Get-PimSetupStepDbJobFacts -DbInitResult $DbInit; $f.dbJob = $dj.dbJob; $f.dbJobDetail = (ConvertTo-PimSetupStepDetail -Text $dj.dbJobDetail) } catch { }
     $rg = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
     $items = { param($a) if ($null -eq $a) { @() } elseif ($a.PSObject.Properties['value']) { @(@($a.value) | Where-Object { $_ }) } else { @($a) } }
@@ -730,9 +858,12 @@ function Get-PimSetupStepUpdaterFacts {
     # CR8 purge protection, the front's private vault, the front key: the vaults in the resource group
     try {
         $kvs = @(& $items (& $Arm 'GET' "$rg/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01" $null))
+        # SEC-10 keyvault-purge-protection: how many vaults, purge protection on every one, soft delete (Get-PimSetupKeyVaultPurgeFacts)
+        $kp = Get-PimSetupKeyVaultPurgeFacts -Vaults $kvs
+        $f.kvVaultCount = $kp.kvVaultCount; $f.kvNoPurgeCount = $kp.kvNoPurgeCount; $f.kvSoftDelete = $kp.kvSoftDelete
         if (-not $kvs.Count) { $f.frontKvPrivate = 'none' }
         else {
-            $f.kvPurgeProtection = -not [bool](@($kvs | Where-Object { (ConvertTo-PimSetupStepBool $_.properties.enablePurgeProtection) -ne $true }).Count)
+            $f.kvPurgeProtection = $kp.kvPurgeProtection
             $priv = @($kvs | Where-Object { "$($_.properties.publicNetworkAccess)" -ieq 'Disabled' })
             if (-not $priv.Count) { $f.frontKvPrivate = 'public' }
             elseif (@($priv | Where-Object { @($_.properties.privateEndpointConnections | Where-Object { $_ }).Count -eq 0 }).Count) { $f.frontKvPrivate = 'private-no-endpoint' }
@@ -744,6 +875,14 @@ function Get-PimSetupStepUpdaterFacts {
             }
             $f.frontKey = $(if ($found) { $true } elseif ($unread) { $null } else { $false })
         }
+    } catch { }
+    # SEC-10 keyvault-secrets-only: the container apps AND jobs of the resource group (ARM GET of the two lists; ARM returns a
+    # secret's name and Key Vault reference, never its value). Both lists read = counts; either refused = not read ($null).
+    try {
+        $apps = @(& $items (& $Arm 'GET' "$rg/providers/Microsoft.App/containerApps?api-version=2024-03-01" $null))
+        $jobs = @(& $items (& $Arm 'GET' "$rg/providers/Microsoft.App/jobs?api-version=2024-03-01" $null))
+        $pc = Get-PimSetupSecretPlainCount -Resources (@($apps) + @($jobs))
+        $f.secretsScanned = $pc.scanned; $f.plainSecretValues = $pc.values; $f.plainSecretEnv = $pc.env
     } catch { }
     # the front's database schema
     if ($SqlScalar) {

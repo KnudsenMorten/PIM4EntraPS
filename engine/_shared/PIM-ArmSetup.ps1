@@ -1214,10 +1214,60 @@ function Get-PimArmAcaAppSecrets {
     return @(@($r.value) | Where-Object { $_ })
 }
 
+function ConvertFrom-PimKeyVaultSecretUrl {
+    <# PURE. A Key Vault secret URL -> @{ vault (https://host); name; version; versionless } -- $null when it is not one. #>
+    param([AllowEmptyString()][string]$Url)
+    if ("$Url".Trim() -notmatch '^(?i)(?<v>https://[^/]+)/secrets/(?<n>[^/?]+)(/(?<ver>[^/?]+))?/?(\?.*)?$') { return $null }
+    return @{ vault = $Matches['v']; name = $Matches['n']; version = "$($Matches['ver'])"; versionless = "$($Matches['v'])/secrets/$($Matches['n'])" }
+}
+
+function Set-PimKeyVaultSecretByUrl {
+    <#
+      SEC-10 rotation (Invardia decision 2026-11-11): write -Value as the NEW version of the vault secret a Container Apps Key
+      Vault reference names, then READ IT BACK and compare by SHA-256. Throws when the URL is no secret URL, the write is refused
+      or the read-back differs. The value is never printed or returned. Needs Key Vault Secrets Officer on that vault.
+    #>
+    param([Parameter(Mandatory)][string]$Url, [Parameter(Mandatory)][string]$Value)
+    $u = ConvertFrom-PimKeyVaultSecretUrl -Url $Url
+    if (-not $u) { throw "'$Url' is not a Key Vault secret URL -- refusing to write the rotated secret anywhere else" }
+    $api = Get-PimSetupApiVersion keyVaultData
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $want = ''; $got = ''
+    try {
+        $want = [System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Value)))
+        [void](Invoke-PimSetupRest -Method PUT -Url "$($u.versionless)?api-version=$api" -Resource 'https://vault.azure.net' -Body @{ value = $Value; contentType = 'PIM Manager secret (rotated)' })
+        $back = Invoke-PimSetupRest -Url "$($u.versionless)?api-version=$api" -Resource 'https://vault.azure.net'
+        $got = [System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($back.value)")))
+        $back = $null
+    } finally { $sha.Dispose() }
+    if ($got -ne $want) { throw "read-back of the vault secret $($u.name): it does not hold the rotated value (compared by SHA-256)" }
+    return $u
+}
+
 function Set-PimArmAcaAppSecret {
-    <# az containerapp secret set --secrets NAME=VALUE : every other secret is kept (with its value). #>
+    <#
+      az containerapp secret set --secrets NAME=VALUE : every other secret is kept (with its value).
+      SEC-10 ROTATION (Invardia decision 2026-11-11): when NAME is already a Key Vault REFERENCE, the new value goes into THAT
+      vault secret (a new version, read back by SHA-256) and the app KEEPS the reference -- no plain value comes back. A reference
+      pinned to a version is switched to the versionless URL (same identity), so the app reads the new value. A secret that is
+      still a value is set as before (the updater's secrets step moves it into the vault).
+    #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name,
           [Parameter(Mandatory)][string]$SecretName, [Parameter(Mandatory)][string]$Value)
+    $cur = @(@(Get-PimArmAcaAppSecrets -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name) | Where-Object { "$($_.name)" -eq $SecretName })[0]
+    $curKv = if ($cur) { "$($cur.keyVaultUrl)".Trim() } else { '' }
+    if ($curKv) {
+        $kvU = Set-PimKeyVaultSecretByUrl -Url $curKv -Value $Value
+        if ("$($kvU.version)".Trim()) {
+            $script:PimSetupKvVersionless = "$($kvU.versionless)"
+            Set-PimArmAcaAppConfiguration -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -Mutate {
+                param($cfg)
+                # $SecretName resolves dynamically from this function's scope (no bound closure -- see below)
+                $cfg.secrets = @(@($cfg.secrets) | Where-Object { $_ } | ForEach-Object { if ("$($_.name)" -eq $SecretName) { [pscustomobject]@{ name = "$($_.name)"; keyVaultUrl = $script:PimSetupKvVersionless; identity = "$($_.identity)" } } else { $_ } })
+            }
+        }
+        return [pscustomobject]@{ name = $SecretName; keyVaultUrl = $(if ("$($kvU.version)".Trim()) { "$($kvU.versionless)" } else { $curKv }); rotatedIn = 'keyvault' }
+    }
     Set-PimArmAcaAppConfiguration -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -Mutate {
         param($cfg)
         $keep = @(@($cfg.secrets) | Where-Object { $_ -and "$($_.name)" -ne $SecretName })

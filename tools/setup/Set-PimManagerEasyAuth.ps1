@@ -574,8 +574,13 @@ if ($PSCmdlet.ShouldProcess($App, 'ensure the Easy Auth client secret')) {
             Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
         }
         $stored = $true
-        try { [void](Set-PimArmAcaAppSecret -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -SecretName $SecretName -Value "$new".Trim()) }
+        # SEC-10 rotation (Invardia decision 2026-11-11): where '$SecretName' is a Key Vault reference (the updater's secrets step
+        # moved it), Set-PimArmAcaAppSecret writes the new credential into THAT vault secret (read back by SHA-256) and the app
+        # keeps the reference -- no plain value comes back into the app definition. Writing it needs Key Vault Secrets Officer.
+        $eaRot = $null
+        try { $eaRot = Set-PimArmAcaAppSecret -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -SecretName $SecretName -Value "$new".Trim() }
         catch { $stored = $false; Write-Host "    $($_.Exception.Message)" -ForegroundColor DarkYellow }
+        if ($stored -and $eaRot -and "$($eaRot.rotatedIn)" -eq 'keyvault') { Note "the new credential is in the install's Key Vault ($($eaRot.keyVaultUrl)); the app keeps its Key Vault reference" }
         if (-not $stored) {
             $result.reason = 'minted a new secret but could not store it on the container app -- the OLD secret is still in place, so sign-in still works'
             Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"

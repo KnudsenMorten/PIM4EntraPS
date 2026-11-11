@@ -13,6 +13,26 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.4 -- 2026-11-11
+
+- An update held at night because a PIM job was still running is now tried again by the next 15-minute updater runs until it succeeds, instead of waiting a full day for the next night; it still never changes anything while a job runs.
+
+## 3.1.3 -- 2026-11-11
+
+- Secrets move into the installation's own Key Vault: the updater moves each secret that is still a plain value into the vault and switches the app or job to a Key Vault reference, one at a time with a read-back and an automatic restore, once support has given it access to its own vault (the Setup steps say so). A rotated secret is now written to the vault too. FIX: moving a PIM identity to its own id-pim-<role> identity now carries that role's Key Vault access to the new identity -- before, a moved web identity lost its read access to the emergency override passphrase, so break-glass activation was refused until the passphrase script was run again.
+
+## 3.1.2 -- 2026-11-11
+
+- A run is reported as taking far longer than usual only when it takes more than twice as long as the longest recent good run of the same job, and at least 30 minutes -- quick runs that had nothing to do no longer lower the bar and cause false reports.
+
+## 3.1.1 -- 2026-11-11
+
+- PIM Manager now tells Invardia support when its updater last ran and how that run ended, and reports whether the installation's Key Vault has purge protection on and whether every secret is kept in Key Vault -- read only, nothing is changed.
+
+## 3.1.0 -- 2026-11-10
+
+- PIM Manager 3.1 brings together the large updates of the 3.0 series: it runs on .NET 10 LTS and PowerShell 7.6 LTS on Microsoft's current image (supported to November 2028); the Invardia support link sends its health and run results to Invardia support, retries a report that could not be delivered without mailing you, and turns amber only after three failed rounds in a row; every error code has its own page in the error catalogue on invardia.com; the approved rights list for every identity matches the code and is published with each release. Since 3.0.0 also: Get Started steps for Azure resources and Workloads and a Who needs what table; Recognised admin names with * at the start or end; drift lists only PIM-named objects; stalled or unusually long runs are shown on the Jobs page (new: Running far longer than usual) and reported to Invardia support, never stopped; Microsoft Entra access packages; install in two lines; four-eyes approval and the evidence export in both editions. No breaking change and nothing for you to do.
+
 ## 3.0.85 -- 2026-11-10
 
 - Everywhere you see it, the link that sends PIM Manager's health and run results to Invardia support is now called Invardia support link: the on/off setting (turning it off stops all reports to Invardia support), the end-of-install check, the environment drawing and the security pack.

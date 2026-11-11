@@ -407,6 +407,15 @@ function Get-PimIdentityMoveRoleNeeds {
         'downlink' { @{ azure = @($rdr, $acr); groups = @(); dirRoles = @() } }
         default    { @{ azure = @($acr); groups = @(); dirRoles = @() } }
     }
+    # SEC-10 (Invardia ruling 2026-11-11): Key Vault Secrets User, ONLY at a Key Vault (or one secret in it), for the roles that
+    # read a secret moved to Key Vault -- the literal reader set of engine\_shared\PIM-SecretsToKeyVault.ps1 Get-PimSkvReaderRoles
+    # (tests\Test-PimSecretsToKeyVault.ps1 holds the two equal; tests\Test-PimRightsList.ps1 D1 holds this map == the rights list)
+    $kvsu = '4633458b-17de-408a-b874-0445c86b69e6'
+    $n['azureVaultOnly'] = @()
+    if ("$Role".ToLowerInvariant() -in @('engine', 'web', 'updater', 'asbuilt', 'downlink')) { $n.azure = @(@($n.azure) + $kvsu); $n['azureVaultOnly'] = @($kvsu) }
+    # SEC-10 (Invardia decision 2026-11-11): the UPDATER writes the moved secrets -- Key Vault Secrets Officer, at a vault only
+    # (PIM-SecretsToKeyVault.ps1 Get-PimSkvWriterRole / Get-PimSkvOfficerRoleId)
+    if ("$Role".ToLowerInvariant() -eq 'updater') { $kvso = 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7'; $n.azure = @(@($n.azure) + $kvso); $n['azureVaultOnly'] = @(@($n['azureVaultOnly']) + $kvso) }
     # SEC-108 (owner 2026-11-09: "it is only the engine"): User Access Administrator / Owner are the ENGINE's only. Every other
     # role lists them as NEVER -- the move refuses to copy them from ANY source (its own system identity too).
     $n['never'] = if ("$Role".ToLowerInvariant() -eq 'engine') { @() } else { @(Get-PimIdentityMoveRootRoleIds) }
@@ -431,6 +440,8 @@ function Select-PimIdentityMoveNeeded {
         if (-not $a) { continue }; $g = @("$($a.roleDefinitionId)" -split '/')[-1].ToLowerInvariant()
         # a role the map allows on a Container Apps JOB only (the engine's two on the updater job) is never taken at a wider scope
         $jobOk = (@($need.azureJobOnly) -notcontains $g) -or ("$($a.scope)".TrimEnd('/') -match '(?i)/providers/Microsoft\.App/jobs/[^/]+$')
+        # SEC-10: Key Vault Secrets User is taken over only at a vault (or a secret in it), never at a resource group or wider
+        if (@($need.azureVaultOnly) -contains $g -and "$($a.scope)".TrimEnd('/') -notmatch '(?i)/providers/Microsoft\.KeyVault/vaults/[^/]+(/secrets/[^/]+)?$') { $jobOk = $false }
         if ($need.azure -contains $g -and $jobOk) { $keep.azure += $a } else { $not.Add("Azure role $g at $($a.scope) (from $SourceName)") }
     }
     foreach ($m in @($Rights.groups)) { if (-not $m) { continue }; if (@($need.groups | Where-Object { $_ -ieq "$($m.displayName)" }).Count) { $keep.groups += $m } else { $not.Add("PIM group $($m.displayName) (from $SourceName)") } }

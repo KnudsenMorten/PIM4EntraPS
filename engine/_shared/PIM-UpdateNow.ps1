@@ -585,6 +585,64 @@ function Invoke-PimUpdateNowQuickCheck {
     }
 }
 
+# ---- ROLL-RETRY-1 (found 2026-11-11): a roll HELD by the schema quiesce is retried by the next 15-minute run ----------------
+# A nightly roll that the quiesce deferred (a PIM job still running at the bound) records UpdateState { action 'schema';
+# outcome 'waiting' }. Before this, every following 15-minute check said "nothing to do (the nightly run covers it)" and the
+# install waited 24 h. Now a quick run whose recorded state is that hold, and whose ring head is AHEAD of the running version,
+# runs the normal update in this execution -- the same path as the nightly, the same quiesce rule (waits for no PIM job
+# running, never stops anything; a SHORTER wait, Get-PimUpdateRetryQuiesceWaitMinutes, and no long-job extension, so runs do
+# not pile up), never a major jump, the same health check / rollback. At most one attempt per 15-minute run; never while
+# another updater execution runs. An expedite (Update now) keeps its own path.
+function Get-PimUpdateRetryQuiesceWaitMinutes { <# PURE. LITERAL. The quiesce bound of a RETRY run (the nightly's is 20 min). #> return 5 }
+function Get-PimUpdateRetryMaxAgeHours        { <# PURE. LITERAL. A hold recorded longer ago than this is not retried (the nightly run takes it). #> return 26 }
+
+function Get-PimUpdateRetryDecision {
+    <#
+      PURE. Should THIS 15-minute (quick) run retry a roll the schema quiesce held?
+        -State          the recorded UpdateState (pim.Settings 'UpdateState': object, hashtable or JSON text; $null = none)
+        -RunningVersion the Manager version running now
+        -HeadVersion    Invardia's head for this install's ring ('' = not known this run)
+        -Expedite       an expedite / update-now signal is set (its own path decides; never a retry here)
+        -Hold           PIM_UPDATE_HOLD=1
+        -OtherRunning   another updater execution is running: $true / $false / $null (not readable)
+      Returns @{ retry; reason; line; heldUtc; headVersion; waitMinutes }:
+        reason  expedite | not-held | stale | no-head | unreadable | not-ahead | major | hold | busy | unreadable-runs | retry
+        line    '' when the recorded state is NOT a quiesce hold (the caller says its usual line); else the one line to say.
+    #>
+    param([AllowNull()][object]$State, [AllowEmptyString()][string]$RunningVersion = '', [AllowEmptyString()][string]$HeadVersion = '',
+          [bool]$Expedite = $false, [bool]$Hold = $false, [AllowNull()][object]$OtherRunning = $false, [datetime]$NowUtc = [datetime]::UtcNow)
+    $res = @{ retry = $false; reason = 'not-held'; line = ''; heldUtc = $null; headVersion = "$HeadVersion".Trim(); waitMinutes = (Get-PimUpdateRetryQuiesceWaitMinutes) }
+    if ($Expedite) { $res.reason = 'expedite'; return $res }
+    $st = ConvertFrom-PimUpdateNowStored $State
+    if ($null -eq $st) { return $res }
+    $kind = "$(Get-PimUpdateNowField $st 'kind')".Trim()
+    if ($kind -and $kind -ne 'run') { return $res }
+    if ("$(Get-PimUpdateNowField $st 'outcome')".Trim() -ne 'waiting' -or "$(Get-PimUpdateNowField $st 'action')".Trim() -ne 'schema') { return $res }
+    $held = ConvertTo-PimUpdateNowUtc (Get-PimUpdateNowField $st 'tsUtc')
+    $res.heldUtc = $held
+    $now = $NowUtc.ToUniversalTime()
+    $at = $(if ($null -ne $held) { $held.ToString('yyyy-MM-dd HH:mm:ss') + 'Z' } else { 'an unknown time' })
+    $pre = "update retry: the roll held at $at by a running job"
+    if ($null -eq $held -or ($now - $held).TotalHours -ge (Get-PimUpdateRetryMaxAgeHours)) {
+        $res.reason = 'stale'; $res.line = "$pre is older than $(Get-PimUpdateRetryMaxAgeHours) h -- not retried here (the nightly run takes it)"; return $res
+    }
+    $hv = "$HeadVersion".Trim()
+    if (-not $hv) { $res.reason = 'no-head'; $res.line = "$pre -- the ring's head is not known this run, so it is not retried now (the next 15-minute run asks again)"; return $res }
+    $cmp = Compare-PimUpdateNowVersion -A $hv -B $RunningVersion
+    if ($null -eq $cmp) { $res.reason = 'unreadable'; $res.line = "$pre -- the head ('$hv') or the running version ('$RunningVersion') cannot be read; not retried"; return $res }
+    if ($cmp -le 0) { $res.reason = 'not-ahead'; $res.line = "$pre -- the ring's head $hv is not ahead of the running $RunningVersion; nothing to do"; return $res }
+    $rm = -1; $tm = -1
+    if ("$RunningVersion".Trim().TrimStart('v', 'V') -match '^(\d+)\.') { $rm = [int]$Matches[1] }
+    if ($hv.TrimStart('v', 'V') -match '^(\d+)\.') { $tm = [int]$Matches[1] }
+    if ($rm -ge 0 -and $tm -gt $rm) { $res.reason = 'major'; $res.line = "$pre -- $RunningVersion -> $hv is a MAJOR jump; a retry never takes one (the nightly run decides)"; return $res }
+    if ($Hold) { $res.reason = 'hold'; $res.line = "$pre -- this environment is HELD (PIM_UPDATE_HOLD=1); not retried"; return $res }
+    if ($OtherRunning -is [bool] -and $OtherRunning) { $res.reason = 'busy'; $res.line = "$pre -- another updater execution is running; not retried now (never two at once)"; return $res }
+    if (-not ($OtherRunning -is [bool])) { $res.reason = 'unreadable-runs'; $res.line = "$pre -- the updater's executions could not be read; not retried now (never two at once)"; return $res }
+    $res.retry = $true; $res.reason = 'retry'
+    $res.line = "update retry: retrying the roll held at $at by a running job -- ring head $hv, running $RunningVersion (the same quiesce rule: waits up to $($res.waitMinutes) min for no PIM job running, nothing is stopped)"
+    return $res
+}
+
 function Get-PimUpdateNowApprovalDecision {
     <#
       PURE. The ring stays the authority: the signal says NOW, never WHICH version. @{ ok; line }:

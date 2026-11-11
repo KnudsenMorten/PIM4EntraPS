@@ -666,7 +666,7 @@ function Get-PimUpdateStateVerdict {
         $bits.Add("Last update check needs a look -- $keeps. The details below name the one setting to change.")
     } elseif ($out.waiting -and $out.lastAction -eq 'schema') {
         # SCHEMA-QUIESCE-818: the update waited for a running PIM job and deferred -- the database is never changed under a run.
-        $bits.Add("Waiting for a running PIM job to finish -- the database is never changed under a run, and the next update run tries again; $keeps.")
+        $bits.Add("Waiting for a running PIM job to finish -- the database is never changed under a run, and the update is tried again within 15 minutes; $keeps.")
     } elseif ($out.waiting) {
         $bits.Add("Waiting for the install key -- the engine claims it within about 5 minutes of install, and the next update run proceeds; $keeps.")
     }

@@ -20622,6 +20622,16 @@
     const tip = (j.noProgressText || 'No progress for a while -- the run keeps going.') + ' Some reads are silent for a long time on a large tenant; if it lasts, open Engine logs & errors.';
     return ' <span class="jobNoProgressBadge" title="' + esc0(tip) + '" style="display:inline-block;margin-top:3px;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#fff8c5;color:#9a6700;">no progress for ' + esc0(String(Number(j.noProgressMinutes) || 0)) + ' min -- still running</span>';
   }
+  // STALL-1 (b): a RUNNING run going more than twice its usual length -- one calm amber line, the detail in its tooltip.
+  // Not counted in the menu (jobNeedsAttention ignores it), nothing is stopped, and it clears itself when the run ends
+  // (the server sends overUsual only while the run is in progress; the guard on inProgress keeps it off a finished row).
+  function jobOverUsualBadge(j) {
+    if (!j || !j.inProgress || !j.overUsual) return '';
+    const run = Number(j.overUsualMinutes) || 0;
+    const usual = (j.usualMinutes === null || j.usualMinutes === undefined || j.usualMinutes === '') ? null : Number(j.usualMinutes);
+    const detail = j.overUsualText || ((usual !== null && isFinite(usual) ? 'Usually ~' + usual + ' min, ' : '') + 'running ' + run + ' min -- the run keeps going; this clears itself when it ends.');
+    return ' <span class="jobOverUsualBadge" title="' + esc0(detail) + '" style="display:inline-block;margin-top:3px;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#fff8c5;color:#9a6700;">Running far longer than usual</span>';
+  }
 
   async function renderJobs() {
     const body = document.getElementById('jobsBody');
@@ -20801,7 +20811,7 @@
         rowH.push('<tr class="jobRow" data-job="' + esc0(j.name) + '" style="border-bottom:1px solid #eaeef2;' + (neverUsed ? 'opacity:.55;' : '') + rowBg + (j.unackedFailureCount > 0 ? 'box-shadow:inset 3px 0 0 #cf222e;' : (j.stuck ? 'box-shadow:inset 3px 0 0 #d4a72c;' : (j.needsApproval ? 'box-shadow:inset 3px 0 0 #d4a72c;' : ''))) + '">' +
           '<td style="padding:6px 8px;white-space:nowrap;"><button class="ghost jobExpand" data-target="' + esc0(rowKey) + '" aria-expanded="false" title="Show the cadence, what this job works on and its recent history" style="font-size:11px;padding:0 4px;">&#9656;</button> <b>' + esc0(jobDisplayName(j)) + '</b>' +
             (jobDisplayName(j) !== String(j.name || '') ? ' <span class="jobInternalName" style="color:#8c959f;font-size:11px;" title="The job\'s name in schedules and run history">' + esc0(j.name) + '</span>' : '') + scope + pullNote + '</td>' +
-          '<td style="padding:6px 8px;">' + jobStatusPill(j) + jobLaneBadge(j) + jobNoProgressBadge(j) + hybridWorkerBadge(j) + '</td>' +
+          '<td style="padding:6px 8px;">' + jobStatusPill(j) + jobLaneBadge(j) + jobOverUsualBadge(j) + jobNoProgressBadge(j) + hybridWorkerBadge(j) + '</td>' +
           '<td style="padding:6px 8px;white-space:nowrap;" title="' + esc0(fmtTime(j.lastRunUtc, { seconds: true })) + '">' + lastCell + '</td>' +
           '<td style="padding:6px 8px;max-width:280px;">' + result + '</td>' +
           '<td style="padding:6px 8px;white-space:nowrap;" title="' + esc0(fmtTime(j.nextRunUtc)) + (j.nextRunSynthesized ? ' (computed from cadence)' : '') +
@@ -22756,7 +22766,7 @@
             'Grant-PimEnginePermissions', 'Initialize-PimWorkloadPrereqs', 'Initialize-PimMailSender', 'Set-PimSmtpRelayPassword', 'Set-PimSqlTier',
             'New-PimHubPrepareScript',
             'Install-PimManager', 'Invoke-PimDeployAll', 'Invoke-PimMspBuild', 'Copy-PimSettings', 'Export-PimSettings', 'Import-PimSettings', 'Set-PimManagerAccess',
-            'Set-PimBreakGlassAccounts', 'Set-PimEmergencyPassphrase', 'Find-PimStrayTestObjects', 'Move-PimIdentities', 'Rename-PimJobs', 'Set-PimLicense', 'Deploy-PimActivatorHybrid',
+            'Set-PimBreakGlassAccounts', 'Set-PimEmergencyPassphrase', 'Find-PimStrayTestObjects', 'Move-PimIdentities', 'Rename-PimJobs', 'Move-PimSecretsToKeyVault', 'Set-PimLicense', 'Deploy-PimActivatorHybrid',
             'Update-PimCommunity', 'Grant-PimSupportAccess', 'Confirm-PimInstall', 'Set-PimManagerCustomHost', 'Deploy-PimRfaBroker',
             'Rebuild-PimEnvInternal', 'Rebuild-PimEnvExternal', 'Remove-PimContainerStack', 'New-PimHostingPrerequisites',
             'Convert-PimToPrivate', 'Set-PimSqlPublicAccess', 'Grant-PimSupportSqlAccess', 'Invoke-PimSupportSqlAccessJob', 'Set-PimSigninFrontSqlState',

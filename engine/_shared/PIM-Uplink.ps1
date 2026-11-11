@@ -2004,6 +2004,9 @@ function Get-PimUplinkTenantCapabilities {
 #   FeaturesChanged [ '<area>.<name>:<on|off>' ]  -- at most 40, only features that differ from their catalog default
 #   BuildPool       { tier; count; building; checkedUtc }  -- BUILDPOOL-11G, the updater's read in UpdateState; left out
 #                   entirely on an install with no build pool (a public install)
+#   Update          { lastUpdaterRunUtc; lastUpdaterResult }  -- UPD-07 (framework ALIGN-AUTO-ALL item 2): the updater's last
+#                   run from UpdateState, EXACTLY these two keys of Invardia's closed Update shape; left out when no run is
+#                   recorded. Until Invardia adds Update to PIM's contract it is dropped there alone (soft, named in Dropped).
 # ONE switch per field, ON by default (2.4.644): PIM_UPLINK_<FIELD> (PIM_UPLINK_SECURITY, ..._COLLECTIONS, ..._JOBS,
 # ..._CONVERGENCE, ..._MAIL, ..._UPDATEPENDING, ..._SQLACCESS, ..._FEATURESCHANGED) = 0 / false / off / no switches it off.
 # IDENTIFIED heartbeat only; additive (Invardia refuses its content -> the heartbeat goes once more without the field(s)
@@ -2014,7 +2017,7 @@ function Get-PimUplinkTenantCapabilities {
 # =====================================================================================================================
 function Get-PimUplinkStateFieldNames {
     <# PURE. The structured fields, in the order the heartbeat adds them (a literal: child-scope safe). #>
-    return @('Security', 'Collections', 'Jobs', 'Convergence', 'Mail', 'UpdatePending', 'SqlAccess', 'FeaturesChanged', 'SignIn', 'BuildPool')
+    return @('Security', 'Collections', 'Jobs', 'Convergence', 'Mail', 'UpdatePending', 'SqlAccess', 'FeaturesChanged', 'SignIn', 'BuildPool', 'Update')
 }
 
 function Get-PimUplinkStateFieldSwitch {
@@ -2417,6 +2420,50 @@ function New-PimUplinkUpdatePendingField {
     }
 }
 
+function Get-PimUplinkUpdaterResultList { <# PURE. The closed list of lastUpdaterResult (Invardia heartbeatstate.ts, SI_HEARTBEAT_CONTRACT.Update). #> return @('succeeded', 'failed', 'nothing-to-do') }
+
+function ConvertTo-PimUplinkUpdaterResult {
+    <#
+      PURE. UPD-07: one update run's recorded outcome + action (pim.Settings 'UpdateState', New-PimUpdateStateRecord) -> the
+      closed lastUpdaterResult, or $null when the run says nothing that maps (never a guess):
+        failed                   outcome failed, or attention (the run stopped and cannot go on alone -- the vendor telemetry
+                                 maps it to failed too), or action failed
+        succeeded                outcome ok and the run CHANGED something (action built / rolled / schema)
+        nothing-to-do            outcome ok with action none, ahead (newer than the ring approves), waiting (the install key
+                                 not claimed yet, or a running job deferred the schema step), skipped
+    #>
+    param([AllowNull()][string]$Outcome, [AllowNull()][string]$Action)
+    $o = "$Outcome".Trim().ToLowerInvariant(); $a = "$Action".Trim().ToLowerInvariant()
+    if ($o -in @('failed', 'attention') -or $a -eq 'failed') { return 'failed' }
+    if ($o -eq 'ok' -and $a -in @('built', 'rolled', 'schema')) { return 'succeeded' }
+    if ($o -eq 'ok' -and $a -in @('', 'none')) { return 'nothing-to-do' }
+    if ($o -in @('ahead', 'waiting', 'skipped')) { return 'nothing-to-do' }
+    return $null
+}
+
+function New-PimUplinkUpdateField {
+    <#
+      PURE. UPD-07 (framework ALIGN-AUTO-ALL item 2, "the updater reaches every install"): Update { lastUpdaterRunUtc;
+      lastUpdaterResult } -- EXACTLY these two keys of Invardia's Update shape (heartbeatstate.ts SI_HEARTBEAT_CONTRACT.Update,
+      the shape SI and EPS send; the contract is CLOSED, so no other key ever goes). The source is the updater's own run record
+      (pim.Settings 'UpdateState', written by every exit path of the update run -- Send-PimUpdateOutcome). The heartbeat only
+      reads it (no ARM, no Graph).
+        lastUpdaterRunUtc  the run's tsUtc, ISO-8601 UTC 'yyyy-MM-ddTHH:mm:ssZ'
+        lastUpdaterResult  succeeded | failed | nothing-to-do (ConvertTo-PimUplinkUpdaterResult); $null (JSON null) when the
+                           record's outcome maps to none of them
+      No record, the deployment's record (kind 'deploy': no update run yet) or a record without a readable run time = $null:
+      the field is LEFT OUT, never a guessed run.
+    #>
+    param([AllowNull()][object]$UpdateState)
+    $us = ConvertFrom-PimUplinkStoredValue $UpdateState
+    if ($null -eq $us) { return $null }
+    if ("$(Get-PimUplinkField $us 'kind')".Trim() -ieq 'deploy') { return $null }
+    $at = ConvertTo-PimUplinkUtc (Get-PimUplinkField $us 'tsUtc')
+    if (-not $at) { return $null }
+    $res = ConvertTo-PimUplinkUpdaterResult -Outcome "$(Get-PimUplinkField $us 'outcome')" -Action "$(Get-PimUplinkField $us 'action')"
+    return [pscustomobject][ordered]@{ lastUpdaterRunUtc = $at.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture); lastUpdaterResult = $res }
+}
+
 function New-PimUplinkSqlAccessField {
     <#
       PURE. SqlAccess from UpdateState.sqlAccess -- the verdict the UPDATER records after its access converge
@@ -2567,6 +2614,10 @@ function Get-PimUplinkStateFields {
     if ((& $__sfOn 'SignIn') -and $UpdateStateRead) {
         # framework 8.17 (Invardia validator live 2026-10-20 22:30Z, soft); PIM_UPLINK_SIGNIN=0 switches it off
         try { $__sfV = New-PimUplinkSignInField -UpdateState $UpdateState; if ($null -ne $__sfV) { $out['SignIn'] = $__sfV } } catch { Write-Warning "[uplink] SignIn could not be built: $($_.Exception.Message)" }
+    }
+    if ((& $__sfOn 'Update') -and $UpdateStateRead) {
+        # UPD-07 (framework ALIGN-AUTO-ALL item 2); PIM_UPLINK_UPDATE=0 switches it off; no update run recorded = left out
+        try { $__sfV = New-PimUplinkUpdateField -UpdateState $UpdateState; if ($null -ne $__sfV) { $out['Update'] = $__sfV } } catch { Write-Warning "[uplink] Update could not be built: $($_.Exception.Message)" }
     }
     if ((& $__sfOn 'BuildPool') -and $UpdateStateRead) {
         # BUILDPOOL-11G (framework rule 11g); PIM_UPLINK_BUILDPOOL=0 switches it off; no pool recorded = left out
