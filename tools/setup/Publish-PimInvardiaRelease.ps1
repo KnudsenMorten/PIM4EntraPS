@@ -54,10 +54,25 @@ param(
     # PIM_PUBLISH_RELEASENOTES = 0 / off / false / no turns the header off without a release (framework 12.22 3(b)).
     [string[]]$ReleaseNotes = @(),
     # PACKAGE-CLEAN-WORDLIST: Invardia's machine-local word list the content scan reads too (unreadable = REFUSED)
-    [string]$WordListPath = 'C:\ProgramData\Invardia\package-clean\words.txt'
+    [string]$WordListPath = 'C:\ProgramData\Invardia\package-clean\words.txt',
+    # EXACT-COMMIT GATE (Invardia 2026-11-11, from 3.1.5): the ring call carries the test-gate proof
+    # "testGate": { commit (7-40 hex), run (runner run id or lane), result green|red, at (ISO UTC) }. Given as JSON text;
+    # a malformed one is refused HERE (nothing sent) -- Invardia would answer 422. Not given = not sent (flagged by Invardia).
+    [string]$TestGateJson = ''
 )
 $ErrorActionPreference = 'Stop'
 function Step([string]$m) { Write-Host "==> $m" -ForegroundColor Cyan }
+function ConvertTo-PimTestGateBody {
+    <# PURE (EXACT-COMMIT GATE, Invardia 2026-11-11). -TestGateJson -> the ring call's "testGate" { commit; run; result; at }.
+       Throws (nothing is sent) on a malformed proof: commit 7-40 hex, run non-empty, result green|red, at ISO UTC.
+       ConvertFrom-Json turns an ISO "at" into a [datetime] ("$x" is then the LOCAL format -- 3.1.4's ring 2/3 calls were
+       refused locally by exactly that): a [datetime] is re-made as ISO UTC, never refused for it. #>
+    param([Parameter(Mandatory)][string]$Json)
+    $tg = $null; try { $tg = $Json | ConvertFrom-Json } catch { throw "-TestGateJson is not JSON; nothing was sent" }
+    $at = if ($tg.at -is [datetime]) { $tg.at.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") } else { "$($tg.at)".Trim() }
+    if ("$($tg.commit)" -notmatch '^[0-9a-f]{7,40}$' -or -not "$($tg.run)".Trim() -or "$($tg.result)" -notin @('green', 'red') -or $at -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}') { throw "-TestGateJson malformed (commit 7-40 hex, run, result green|red, at ISO UTC): $Json; nothing was sent" }
+    return [ordered]@{ commit = "$($tg.commit)"; run = "$($tg.run)"; result = "$($tg.result)"; at = $at }
+}
 # PIM 100.158 / framework 12.11e CR3 -- changedScopes on the publish call (&changedScopes=a,b | *) and the ring call
 # ("changedScopes": [..] | ["*"]), from the files this release changed since the previous release tag (PIM-ReleaseControl.ps1
 # maps files to scopes). Switch PIM_PUBLISH_CHANGEDSCOPES: ON for every ring by default since Invardia confirmed the field
@@ -165,6 +180,10 @@ if ($Promote) {
     if ($pScopesOn) { $pScopes = @(Get-PimReleaseScopes -RepoRoot $repo -Tag $tag -PrevTag (Get-PimPreviousReleaseTag -RepoRoot $repo -Version $Version)) }
     Write-Host ("    changedScopes: {0}" -f $(if ($pScopes.Count) { $pScopes -join ',' } elseif ($pScopesOn) { '(none -- docs / tests only; not sent)' } else { '(not sent: PIM_PUBLISH_CHANGEDSCOPES off, or held after a refusal)' }))
     $pBody = [ordered]@{ version = $Version }; if ($pScopes.Count) { $pBody['changedScopes'] = @($pScopes) }
+    if ("$TestGateJson".Trim()) {
+        $pBody['testGate'] = ConvertTo-PimTestGateBody -Json $TestGateJson
+        Write-Host ("    testGate: commit {0} run {1} result {2} at {3}" -f $pBody.testGate.commit, $pBody.testGate.run, $pBody.testGate.result, $pBody.testGate.at)
+    }
     if (-not $Apply) { Write-Host "`nPLAN ONLY -- nothing was sent. With -Apply: POST $purl $($pBody | ConvertTo-Json -Compress)." -ForegroundColor Yellow; return [pscustomobject]@{ promoted = $false; version = $Version; ring = $Ring; url = $purl; changedScopes = @($pScopes) } }
     if (-not $ClientId -or -not $CertThumbprint) {
         if (-not $KeyVault -or -not $KeyVaultSubscription) { throw "pass -ClientId and -CertThumbprint, or -KeyVault and -KeyVaultSubscription to read them" }

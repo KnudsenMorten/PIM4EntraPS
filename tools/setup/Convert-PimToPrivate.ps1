@@ -20,7 +20,9 @@
                          that writes the hub owner's script. Resume with -HubSideDone once the hub owner has run it.
       safety-copy   [2]  ALWAYS, and the run refuses to continue if it fails: a capture of the live PIM Manager, jobs and
                          keep-list (Rebuild-PimEnvInternal.ps1 in plan mode; Windows) and the SQL point-in-time restore
-                         point (read over ARM).
+                         point (read over ARM). On Linux (e.g. Azure Cloud Shell) the app capture is skipped -- it keeps
+                         the app secrets DPAPI-protected, which only Windows has -- and the restore point is the safety
+                         copy; route Rebuild needs that capture too, so it is refused there before anything changes.
       registry      [3]  New-PimHostingPrerequisites.ps1 with the existing names: Premium registry, private endpoint,
                          privatelink zone, build pool. No SQL private endpoint yet.
       remove-stack  [4B] (Route Redeploy) Remove-PimContainerStack.ps1 -Apply. Skipped when the environment is already
@@ -157,6 +159,15 @@ function Get-PimConvertStatePath {
     $base = if ("$env:LOCALAPPDATA".Trim()) { $env:LOCALAPPDATA } else { [IO.Path]::GetTempPath() }
     $safe = ("$TenantId-$ResourceGroup".ToLowerInvariant() -replace '[^A-Za-z0-9._-]', '_')
     return (Join-Path (Join-Path (Join-Path $base 'pim') 'convert') "$safe.json")
+}
+
+function Test-PimConvertCanCapture {
+    # PURE. Can THIS host take the app capture (Rebuild-PimEnvInternal.ps1 in plan mode)? It keeps the captured secrets
+    # DPAPI-protected, and DPAPI exists only on Windows. Asked of the runtime, never of $env:OS (an environment value a
+    # Linux shell -- Azure Cloud Shell -- does not set and anyone can set): Windows PowerShell 5.1 is always Windows,
+    # PowerShell 7 says so in $IsWindows.
+    if ("$($PSVersionTable.PSEdition)" -ne 'Core') { return $true }
+    return [bool]$IsWindows
 }
 
 function Format-PimConvertValue($v) {
@@ -386,6 +397,7 @@ if ("$($cvR.VnetResourceGroup)" -ine $cvRg) { $cvProblems.Add("the PIM VNet is i
 foreach ($h in $cvHubIds) { if (-not (ConvertFrom-PimHubVnetId -Id $h)) { $cvProblems.Add("-HubVnetId '$h' is not a virtual network resource id") } }
 if ($SkipPeering -and -not $cvHubIds.Count) { $cvProblems.Add('-SkipPeering needs -HubVnetId (the hub the hub owner peers to)') }
 if ($Route -eq 'Redeploy' -and $cvHubIds.Count -gt 1) { $cvProblems.Add('route Redeploy peers to ONE hub: pass one -HubVnetId (the private DNS zone links to more hubs on route Rebuild)') }
+if ($Route -eq 'Rebuild' -and -not (Test-PimConvertCanCapture)) { $cvProblems.Add('route Rebuild needs Windows: the rebuild keeps its capture of the app secrets DPAPI-protected, which this host (Linux, e.g. Azure Cloud Shell) does not have -- use the default route Redeploy here, or run route Rebuild from a Windows machine') }
 if ("$HostName".Trim() -and -not ("$KeyVaultName".Trim() -and "$KeyVaultCertName".Trim()) -and -not "$PfxPath".Trim()) { $cvProblems.Add('-HostName on a private environment needs your certificate: -KeyVaultName + -KeyVaultCertName, or -PfxPath') }
 if ($Route -eq 'Rebuild' -and -not $EasyAuthAllowAllTenantUsers -and -not @($EasyAuthAllowedPrincipals | Where-Object { "$_".Trim() }).Count) {
     Say 'route Rebuild without -EasyAuthAllowedPrincipals / -EasyAuthAllowAllTenantUsers: the rebuild keeps the existing sign-in restriction when the app is assignment-required.' 'Yellow'
@@ -629,7 +641,7 @@ foreach ($cvS in $cvSteps) {
             $cvRp = Get-PimConvertRestorePoint -SubscriptionId $cvSub -SqlServerName "$($cvR.SqlServerName)" -SqlDatabase "$($cvR.SqlDatabase)"
             if (-not $cvRp.ok) { $cvResult = 'failed'; $cvDetail = "no SQL restore point: $($cvRp.reason)"; break }
             $cvState.restorePointUtc = $cvRp.restorePointUtc
-            $cvOnWindows = ($env:OS -eq 'Windows_NT')
+            $cvOnWindows = Test-PimConvertCanCapture
             if ($cvOnWindows) {
                 $cvCode = Invoke-PimConvertChild -Script $cvS.child -Arguments $cvS.args
                 $cvEnvCap = Join-Path $captureDir "$($cvR.Tag)-env.json"

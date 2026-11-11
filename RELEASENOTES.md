@@ -13,9 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.5 -- 2026-11-11
+
+- The mail sender setup now builds its send scope from the mailbox's real primary address, reuses a scope that already covers that mailbox, and only reports ready once Exchange itself confirms each sending identity is in scope (a right Exchange has not applied yet ends as pending: re-run later). Converting to private from a Linux shell (such as Azure Cloud Shell) refuses the Rebuild route up front instead of failing halfway. Releases now carry the proof that the exact released build passed its tests.
+
 ## 3.1.4 -- 2026-11-11
 
 - An update held at night because a PIM job was still running is now tried again by the next 15-minute updater runs until it succeeds, instead of waiting a full day for the next night; it still never changes anything while a job runs.
+- Release note: this version reached the first two test rings before its full test run had passed on the exact released build; that run was completed afterwards, before it was offered to customers.
 
 ## 3.1.3 -- 2026-11-11
 

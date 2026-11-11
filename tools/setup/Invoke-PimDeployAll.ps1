@@ -2445,7 +2445,14 @@ function Invoke-DefaultStepRunner {
                 # "not ready" wait. Inside the deploy the mail sender never waits for Exchange: not ready = DEFERRED with a
                 # warning, the install goes on, and Get Started > Mail sender (or a re-run) finishes it.
                 if (-not $mailArgs.ContainsKey('ExchangeReadyMinutes')) { $mailArgs['ExchangeReadyMinutes'] = 0 }
+                # MAIL-SCOPE-SMTP: the in-scope read-back is non-blocking here too (owner 2026-10-10) -- one read; a run that just
+                # created the send right and is not in scope yet ends PENDING (exit 3): Exchange applies it within ~2 h.
+                if (-not $mailArgs.ContainsKey('InScopeWaitMinutes')) { $mailArgs['InScopeWaitMinutes'] = 0 }
                 & $init @mailArgs | Out-Host
+                if ($LASTEXITCODE -eq 3) {
+                    Warn 'mail sender: PENDING -- the mailbox and its scoped send right are set up; Exchange has not applied the send right yet (it can take up to 2 hours). Re-run Initialize-PimMailSender later to confirm it; nothing more to change.'
+                    return @{ ok=$true; ran=$true; detail='DEGRADED: mail sender PENDING -- Exchange has not applied the send right yet (up to 2 hours); re-run Initialize-PimMailSender later to confirm' }
+                }
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
                 # 🪤 Not fatal to the deploy, and deliberately so: a tenant whose Exchange org is
                 # still provisioning (the measured 'Substrate Only Agent' case) would otherwise

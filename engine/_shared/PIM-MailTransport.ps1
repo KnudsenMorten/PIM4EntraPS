@@ -440,6 +440,9 @@ function Get-PimMailSetupCheckVerdict {
     if ($SetupCheck -is [string]) { try { $SetupCheck = $SetupCheck | ConvertFrom-Json } catch { $SetupCheck = $null } }
     if ($null -eq $SetupCheck -or -not ("$(& $g $SetupCheck 'ok')" -match '(?i)^true$')) { return (& $no 'no confirmed setup check') }
     if ("$(& $g $SetupCheck 'sender')".Trim() -ine "$Sender".Trim()) { return (& $no 'the setup check was for another mailbox') }
+    # MAIL-SCOPE-SMTP (2026-11-11): only Exchange's Test-ServicePrincipalAuthorization InScope = True proves the scope covers the
+    # mailbox. A record from before (objects existed) is not that proof -- a customer's scope matched NO mailbox while it said "confirmed".
+    if ("$(& $g $SetupCheck 'inScope')".Trim() -ne 'confirmed') { return (& $no 'the setup check has no in-scope proof (Test-ServicePrincipalAuthorization) -- re-run the mail-sender script') }
     $scope = "$(& $g $SetupCheck 'scope')".Trim()
     if (-not $scope) { return (& $no 'the setup check names no scope') }
     $oids = @(@(& $g $SetupCheck 'identities') | ForEach-Object { "$(& $g $_ 'objectId')".Trim().ToLowerInvariant() } | Where-Object { $_ })

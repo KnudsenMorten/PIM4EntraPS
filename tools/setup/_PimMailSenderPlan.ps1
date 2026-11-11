@@ -216,6 +216,193 @@ function Resolve-PimMailSenderScope {
     return [pscustomobject]@{ name = (Get-PimMailSenderScopeName -Sender $Sender); adopted = $false; note = '' }
 }
 
+# =============================================================================================
+# MAIL-SCOPE-SMTP (2026-11-11, found live at a customer). The scope filtered on PrimarySmtpAddress = the address the script was
+# GIVEN; that mailbox's UPN was the custom domain but its PRIMARY SMTP the initial (onmicrosoft) one, so the scope matched NO
+# mailbox and every scoped send was DENIED for days -- while the read-back said "verified" because the objects existed.
+# The filter is now built from the mailbox's REAL primary SMTP (Get-Mailbox), an existing scope with exactly that filter is
+# reused (Exchange refuses a second one), a scope of ours that pins another address of this mailbox is repaired, and the
+# read-back is Exchange's own Test-ServicePrincipalAuthorization: InScope = True for every sending identity, or FAILED.
+# =============================================================================================
+
+function Get-PimMailSenderScopeFilter {
+    # PURE. The one filter a sender scope carries: the mailbox's PRIMARY SMTP address (never the UPN, never an alias).
+    param([Parameter(Mandatory)][string]$PrimarySmtp)
+    return "PrimarySmtpAddress -eq '$("$PrimarySmtp".Trim())'"
+}
+
+function Get-PimExoScopeFilterText {
+    # PURE. A management scope's filter as Exchange's REST API answers it (RecipientRestrictionFilter or RecipientFilter).
+    param([AllowNull()]$Scope)
+    if ($null -eq $Scope) { return '' }
+    foreach ($n in 'RecipientRestrictionFilter', 'RecipientFilter') {
+        $v = if ($Scope -is [System.Collections.IDictionary]) { $Scope[$n] } elseif ($Scope.PSObject.Properties[$n]) { $Scope.$n } else { $null }
+        if ("$v".Trim()) { return "$v".Trim() }
+    }
+    return ''
+}
+
+function Get-PimExoScopeFilterAddress {
+    # PURE. The ONE address a "PrimarySmtpAddress -eq '<a>'" filter pins (lower case), '' for any other filter.
+    param([AllowEmptyString()][AllowNull()][string]$Filter)
+    $m = [regex]::Match("$Filter", '^\s*\(?\s*PrimarySmtpAddress\s+-eq\s+[''"](?<a>[^''"]+)[''"]\s*\)?\s*$', 'IgnoreCase')
+    if ($m.Success) { return $m.Groups['a'].Value.Trim().ToLowerInvariant() }
+    return ''
+}
+
+function Get-PimMailboxAddressSet {
+    # PURE. Every address that names this mailbox (lower case): primary SMTP, UPN, WindowsEmailAddress, each smtp: proxy, plus -Extra.
+    param([AllowNull()]$Mailbox, [string[]]$Extra = @())
+    $out = New-Object System.Collections.Generic.List[string]
+    $add = { param($v) $t = "$v".Trim().ToLowerInvariant(); if ($t -and $t -match '@' -and -not $out.Contains($t)) { $out.Add($t) } }
+    if ($Mailbox) {
+        foreach ($n in 'PrimarySmtpAddress', 'UserPrincipalName', 'WindowsEmailAddress') { if ($Mailbox.PSObject.Properties[$n]) { & $add $Mailbox.$n } }
+        if ($Mailbox.PSObject.Properties['EmailAddresses']) {
+            foreach ($e in @($Mailbox.EmailAddresses)) { $s = "$e".Trim(); if ($s -match '^(?i)smtp:(.+)$') { & $add $Matches[1] } elseif ($s -notmatch ':') { & $add $s } }
+        }
+    }
+    foreach ($x in @($Extra)) { & $add $x }
+    return @($out.ToArray())
+}
+
+function Resolve-PimMailSenderScopeRepair {
+    <#
+      PURE (MAIL-SCOPE-SMTP). Given the mailbox's REAL primary SMTP, the other addresses of the same mailbox and what exists:
+        * twin   -- a scope whose filter is exactly PrimarySmtpAddress -eq '<primary>' exists (any name): it is REUSED (Exchange
+                    refuses a second scope with the same filter). Our scopes that pin ANOTHER address of this mailbox (they
+                    match no mailbox at all) have their 'Application Mail.Send' assignments MOVED to it
+                    (Set-ManagementRoleAssignment -CustomResourceScope);
+        * repair -- no twin, but our scope pins another address of this mailbox: its filter is CORRECTED to the primary SMTP
+                    (Set-ManagementScope -RecipientRestrictionFilter) -- still exactly one mailbox, widens nothing. Refused when
+                    that scope also carries a role other than 'Application Mail.Send' (correcting it would widen that role);
+        * none   -- nothing to repair; the normal plan creates or adopts the scope.
+      "Ours" = named -ScopeName / -OwnNames, a legacy 'PIM4EntraPS-Sender*', '*-SendScope', or carrying an Application Mail.Send.
+      Returns { kind; scopeName; filter; actions = @({ cmdlet; parameters; what }); scopes; assignments; note; reason } --
+      scopes / assignments are the inputs AS THEY WILL BE after the actions, for New-PimMailSenderExoPlan.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$PrimarySmtp, [string[]]$MailboxAddresses = @(), [object[]]$Scopes = @(), [object[]]$Assignments = @(),
+          [string]$ScopeName = '', [string[]]$OwnNames = @())
+    $p = "$PrimarySmtp".Trim().ToLowerInvariant()
+    $want = Get-PimMailSenderScopeFilter -PrimarySmtp "$PrimarySmtp".Trim()
+    $others = @(@($MailboxAddresses) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ -and $_ -ne $p })
+    $names = @(@($ScopeName) + @($OwnNames) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+    $sc = @(@($Scopes) | Where-Object { $null -ne $_ -and "$($_.Name)".Trim() })
+    $asg = @(@($Assignments) | Where-Object { $null -ne $_ })
+    $onScope = { param($n) @($asg | Where-Object { "$($_.CustomResourceScope)" -eq "$n" }) }
+    $isMailSend = { param($a) "$($a.Role)" -eq 'Application Mail.Send' }
+    $ours = { param($s) $n = "$($s.Name)".Trim()
+        ($names -contains $n.ToLowerInvariant()) -or (Test-PimLegacyMailSenderScopeName -Name $n) -or $n -like '*-SendScope' -or
+        @(& $onScope $n | Where-Object { & $isMailSend $_ }).Count }
+    $rank = { param($list) @($list | Where-Object { $names -contains "$($_.Name)".Trim().ToLowerInvariant() }) + @($list | Where-Object { $names -notcontains "$($_.Name)".Trim().ToLowerInvariant() -and (Test-PimLegacyMailSenderScopeName -Name $_.Name) }) +
+                                    @($list | Where-Object { $names -notcontains "$($_.Name)".Trim().ToLowerInvariant() -and -not (Test-PimLegacyMailSenderScopeName -Name $_.Name) }) }
+    $twins = @(& $rank @($sc | Where-Object { (Get-PimExoScopeFilterAddress -Filter (Get-PimExoScopeFilterText $_)) -eq $p }))
+    $broken = @(& $rank @($sc | Where-Object { $a = Get-PimExoScopeFilterAddress -Filter (Get-PimExoScopeFilterText $_); $a -and $others -contains $a -and (& $ours $_) }))
+    $out = [ordered]@{ kind = 'none'; scopeName = ''; filter = $want; actions = @(); scopes = $sc; assignments = $asg; note = ''; reason = '' }
+    if (-not $twins.Count -and -not $broken.Count) { return [pscustomobject]$out }
+    $actions = New-Object System.Collections.Generic.List[object]
+    $moveTo = { param($fromNames, $target)
+        foreach ($a in @($asg | Where-Object { $fromNames -contains "$($_.CustomResourceScope)" -and (& $isMailSend $_) })) {
+            $idn = if ("$($a.Identity)".Trim()) { "$($a.Identity)".Trim() } else { "$($a.Name)".Trim() }
+            $actions.Add([pscustomobject]@{ cmdlet = 'Set-ManagementRoleAssignment'; what = "move send right $idn from scope $($a.CustomResourceScope) (it matches no mailbox) to $target"
+                                            parameters = @{ Identity = $idn; CustomResourceScope = $target } })
+        }
+        # the inputs as they will be: the moved assignments now live in $target
+        @($asg | ForEach-Object { if ($fromNames -contains "$($_.CustomResourceScope)" -and (& $isMailSend $_)) { $c = $_.PSObject.Copy(); $c.CustomResourceScope = $target; $c } else { $_ } })
+    }
+    if ($twins.Count) {
+        $t = "$($twins[0].Name)".Trim()
+        $from = @($broken | ForEach-Object { "$($_.Name)".Trim() } | Where-Object { $_ -ne $t })
+        $out.kind = 'twin'; $out.scopeName = $t
+        $out.assignments = @(& $moveTo $from $t)
+        $out.actions = $actions.ToArray()
+        $out.note = "the existing scope '$t' already restricts to the mailbox's primary SMTP address $PrimarySmtp -- reused (Exchange refuses a second scope with the same filter)" +
+                    $(if ($from.Count) { "; send rights in $($from -join ', ') (they match no mailbox) are moved to it" } else { '' })
+        return [pscustomobject]$out
+    }
+    $b = $broken[0]; $bn = "$($b.Name)".Trim()
+    $foreign = @(& $onScope $bn | Where-Object { -not (& $isMailSend $_) })
+    if ($foreign.Count) {
+        $out.kind = 'refuse'; $out.scopeName = $bn
+        $out.reason = "the scope '$bn' filters on $(Get-PimExoScopeFilterAddress -Filter (Get-PimExoScopeFilterText $b)) (not the mailbox's primary SMTP address $PrimarySmtp, so it matches no mailbox) and also carries other roles ($(@($foreign | ForEach-Object { "$($_.Role)" } | Sort-Object -Unique) -join ', ')) -- correcting its filter would widen them. Give this sender its own scope (-ScopeName)."
+        return [pscustomobject]$out
+    }
+    $actions.Add([pscustomobject]@{ cmdlet = 'Set-ManagementScope'; what = "correct scope $bn to the mailbox's primary SMTP address $PrimarySmtp (it filtered on $(Get-PimExoScopeFilterAddress -Filter (Get-PimExoScopeFilterText $b)) and matched no mailbox)"
+                                    parameters = @{ Identity = $bn; RecipientRestrictionFilter = $want } })
+    $from = @($broken | Select-Object -Skip 1 | ForEach-Object { "$($_.Name)".Trim() })
+    $out.kind = 'repair'; $out.scopeName = $bn
+    $out.assignments = @(& $moveTo $from $bn)
+    $out.actions = $actions.ToArray()
+    $out.scopes = @($sc | ForEach-Object { if ("$($_.Name)".Trim() -eq $bn) { [pscustomobject]@{ Name = $bn; RecipientRestrictionFilter = $want } } else { $_ } })
+    $out.note = "the scope '$bn' filtered on another address of this mailbox and matched no mailbox -- its filter is corrected to the primary SMTP address $PrimarySmtp"
+    return [pscustomobject]$out
+}
+
+function Get-PimMailSendAuthVerdict {
+    <#
+      PURE (MAIL-SCOPE-SMTP). Exchange's Test-ServicePrincipalAuthorization answer (rows: RoleName, GrantedPermissions, InScope,
+      ScopeName) for ONE identity and the mailbox -> @{ inScope; detail }. Only an 'Application Mail.Send' row with
+      InScope = True proves the identity may send as that mailbox; an assignment that merely EXISTS proves nothing.
+    #>
+    param([object[]]$Rows = @(), [string]$Resource = '')
+    $ms = @(@($Rows) | Where-Object { $null -ne $_ -and "$($_.RoleName)" -eq 'Application Mail.Send' })
+    if (-not $ms.Count) { return @{ inScope = $false; detail = "no 'Application Mail.Send' role assignment answers for $Resource" } }
+    $in = @($ms | Where-Object { "$($_.InScope)" -match '^(?i)true$' })
+    if ($in.Count) { return @{ inScope = $true; detail = "InScope=True for $Resource (scope $(@($in | ForEach-Object { "$($_.ScopeName)" } | Where-Object { $_ } | Sort-Object -Unique) -join ', '))" } }
+    return @{ inScope = $false; detail = "'Application Mail.Send' is assigned (scope $(@($ms | ForEach-Object { "$($_.ScopeName)" } | Where-Object { $_ } | Sort-Object -Unique) -join ', ')) but InScope=False for $Resource -- the scope does not cover this mailbox" }
+}
+
+function Confirm-PimMailSendInScope {
+    <#
+      MAIL-SCOPE-SMTP read-back: Test-ServicePrincipalAuthorization -Identity <appId> -Resource <primary SMTP> for EVERY sending
+      identity, retried while Exchange replicates (default 120 s, every 15 s). -Invoke param($appId, $resource) -> rows
+      (injected: the script passes its Exchange call, the tests a stub); -Sleep param($s) injectable.
+      Returns @{ ok; attempts; identities = @({ kind; appId; objectId; inScope; detail }); reason }.
+    #>
+    [CmdletBinding()]
+    param([object[]]$Principals = @(), [Parameter(Mandatory)][string]$Resource, [Parameter(Mandatory)][scriptblock]$Invoke,
+          [int]$Seconds = 120, [int]$IntervalSeconds = 15, [scriptblock]$Sleep)
+    $ids = @(@($Principals) | Where-Object { $_ -and "$($_.appId)".Trim() } | ForEach-Object {
+        [pscustomobject]@{ kind = "$($_.kind)"; appId = "$($_.appId)".Trim(); objectId = "$($_.objectId)".Trim(); inScope = $false; detail = 'not checked' } })
+    if (-not $ids.Count) { return @{ ok = $false; attempts = 0; identities = @(); reason = 'no sending identity to check' } }
+    $max = 1 + [Math]::Max(0, [int][Math]::Floor($Seconds / [Math]::Max(1, $IntervalSeconds)))
+    $n = 0
+    while ($true) {
+        $n++
+        foreach ($i in @($ids | Where-Object { -not $_.inScope })) {
+            try { $v = Get-PimMailSendAuthVerdict -Rows @(& $Invoke $i.appId $Resource) -Resource $Resource; $i.inScope = [bool]$v.inScope; $i.detail = $v.detail }
+            catch { $i.inScope = $false; $i.detail = "Test-ServicePrincipalAuthorization failed: $((("$($_.Exception.Message) $($_.ErrorDetails.Message)") -replace '\s+', ' ').Trim())" }
+        }
+        $bad = @($ids | Where-Object { -not $_.inScope })
+        if (-not $bad.Count) { return @{ ok = $true; attempts = $n; identities = $ids; reason = '' } }
+        if ($n -ge $max) {
+            return @{ ok = $false; attempts = $n; identities = $ids
+                      reason = (@($bad | ForEach-Object { "$($_.kind) $($_.appId): $($_.detail)" }) -join '; ') }
+        }
+        if ($Sleep) { & $Sleep $IntervalSeconds } else { Start-Sleep -Seconds $IntervalSeconds }
+    }
+}
+
+function Resolve-PimMailInScopeOutcome {
+    <#
+      PURE (MAIL-SCOPE-SMTP, coordinator decision 2026-11-11). What the in-scope read-back means for the run:
+        'verified' -- Exchange said InScope=True for every sending identity;
+        'pending'  -- not in scope after the wait, but THIS run created or changed the Exchange objects: Exchange app RBAC can
+                      take up to ~2 h on a new tenant, so the run ends PENDING (exit 3), the setup check stays NOT confirmed;
+        'failed'   -- not in scope and nothing was changed in this run (the objects already existed): the configuration is
+                      wrong (the customer's state of 2026-11-11), so FAILED -- waiting would not help.
+    #>
+    param([bool]$InScope, [bool]$ChangedThisRun)
+    if ($InScope) { return 'verified' }
+    if ($ChangedThisRun) { return 'pending' }
+    return 'failed'
+}
+
+function Get-PimMailInScopePendingText {
+    # PURE. The one sentence a PENDING run ends with (coordinator decision 2026-11-11).
+    return 'Exchange has not applied the send right yet (it can take up to 2 hours) -- re-run this script later; nothing more to change'
+}
+
 function New-PimMailSenderExoPlan {
     <#
       WHAT to create in Exchange, given what already exists. Returns an ordered list of
@@ -506,11 +693,14 @@ function New-PimMailSenderSetupCheck {
       reads it: with its own successful test mail on the same mailbox the engine job's row is "granted -- confirmed by the
       setup check and the test mail". -Confirmed $false (not read back) or no identity -> $null: nothing is stored, never a guess.
     #>
-    param([bool]$Confirmed, [string]$Sender, [string]$ScopeName, [object[]]$Principals = @(), [string]$By = '', [datetime]$NowUtc = [datetime]::UtcNow)
-    if (-not $Confirmed -or -not "$Sender".Trim() -or -not "$ScopeName".Trim()) { return $null }
+    # MAIL-SCOPE-SMTP (2026-11-11): -Confirmed means Exchange's Test-ServicePrincipalAuthorization answered InScope = True for
+    # every sending identity on -InScopeResource (the mailbox's primary SMTP). No -InScopeResource -> $null: an assignment
+    # that merely exists is not a proof (a customer's scope matched NO mailbox while every object existed).
+    param([bool]$Confirmed, [string]$Sender, [string]$ScopeName, [object[]]$Principals = @(), [string]$By = '', [string]$InScopeResource = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    if (-not $Confirmed -or -not "$Sender".Trim() -or -not "$ScopeName".Trim() -or -not "$InScopeResource".Trim()) { return $null }
     $ids = @(@($Principals) | Where-Object { $_ -and ("$($_.objectId)".Trim() -or "$($_.appId)".Trim()) } | ForEach-Object { [ordered]@{ kind = "$($_.kind)"; appId = "$($_.appId)".Trim(); objectId = "$($_.objectId)".Trim() } })
     if (-not $ids.Count) { return $null }
-    return [ordered]@{ ok = $true; scopedMailSend = 'confirmed'; sender = "$Sender".Trim(); scope = "$ScopeName".Trim(); identities = $ids
+    return [ordered]@{ ok = $true; scopedMailSend = 'confirmed'; inScope = 'confirmed'; inScopeResource = "$InScopeResource".Trim(); sender = "$Sender".Trim(); scope = "$ScopeName".Trim(); identities = $ids
                        at = $NowUtc.ToUniversalTime().ToString('o'); by = "$By".Trim(); source = 'Initialize-PimMailSender' }
 }
 

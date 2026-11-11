@@ -142,7 +142,9 @@
     AppRoleAssignment.ReadWrite.All + RoleManagement.ReadWrite.Directory to give itself the transient grants below.
     It creates / grants: the shared mailbox (New-Mailbox -Shared); per sending identity New-ServicePrincipal (Exchange
     registration) and New-ManagementRoleAssignment 'Application Mail.Send' on a New-ManagementScope that matches ONLY
-    the sender mailbox; it REMOVES a tenant-wide Graph Mail.Send (application) from the sending identities and the
+    the sender mailbox (filtered on the mailbox's real primary SMTP address; an existing scope with that filter is reused,
+    and a scope of ours pinned to another address of the mailbox is repaired), and proves it with Exchange's
+    Test-ServicePrincipalAuthorization (InScope = True for every sending identity, else the run FAILS); it REMOVES a tenant-wide Graph Mail.Send (application) from the sending identities and the
     engine identity; it writes MailSender + MailMode to pim.Settings. App sign-in only: Exchange.ManageAsApp (app role)
     and a time-bound Exchange Administrator (through PIM) on the setup app itself, and RoleManagement.ReadWrite.Directory
     (self-heal) when the setup app lacks it.
@@ -231,6 +233,10 @@ param(
     # ("you must be assigned a delegating role assignment"; measured ~40-60 min), and how often to try again.
     [ValidateRange(0, 240)][int]$ExchangeReadyMinutes = 75,   # 0 = do not wait (the install defers the mail sender instead, 2026-10-10)
     [ValidateRange(10, 900)][int]$ExchangeReadyIntervalSeconds = 150,
+    # MAIL-SCOPE-SMTP (coordinator decision 2026-11-11): how long the read-back waits for Exchange to answer
+    # Test-ServicePrincipalAuthorization InScope=True (every 20 s). Exchange app RBAC can take up to ~2 h on a new tenant: a
+    # run that CHANGED the objects and is still not in scope ends PENDING (exit 3), one that changed nothing ends FAILED.
+    [ValidateRange(0, 180)][int]$InScopeWaitMinutes = 10,
     # one plain progress line per wait (the deploy forwards it to the install's reporter as a 'waiting' event)
     [scriptblock]$OnProgress
 )
@@ -906,8 +912,20 @@ if ($existingMbx) {
     Note "mailbox created (verified by read-back): $($seen.PrimarySmtpAddress)" 'Green'
     $result.mailboxCreated = $true
     Add-Result 'mailbox' 'created' "$($seen.PrimarySmtpAddress)"
+    $existingMbx = $seen
 }
 }   # end: $exoPreviewable (step [1])
+# MAIL-SCOPE-SMTP (2026-11-11, found live at a customer): the scope filters on the mailbox's REAL primary SMTP address, never on
+# the address this script was given. There the given address was the mailbox's UPN on a custom domain while its primary SMTP
+# was the initial domain -- a scope on the given address matched NO mailbox and every scoped send was denied for days.
+$scopeSmtp = $sender; $mbxAddrs = @("$sender".ToLowerInvariant()); $script:PimScopedSendConfirmed = $false; $script:PimInScopePending = $false
+if ($exoPreviewable -and $existingMbx) {
+    $realSmtp = "$($existingMbx.PrimarySmtpAddress)".Trim()
+    if ($realSmtp) { $scopeSmtp = $realSmtp }
+    $mbxAddrs = Get-PimMailboxAddressSet -Mailbox $existingMbx -Extra @($sender)
+    if ($scopeSmtp -ine $sender) { Note "the mailbox's primary SMTP address is $scopeSmtp (not $sender) -- the send scope filters on $scopeSmtp" 'Yellow' }
+}
+$result.scopeSmtp = $scopeSmtp
 
 # --- 1b. THE KEY GRAPH SENDS AS (BUG-296) -----------------------------------------
 # The engine calls /users/<MailSender>/sendMail. Graph resolves an id or a userPrincipalName, never a bare mail address,
@@ -1061,20 +1079,32 @@ foreach ($c in $pre.Keys) {
     $preRead[$c] = @($rr.value.value)
 }
 $exoSpList = $preRead['Get-ServicePrincipal']; $scopes = $preRead['Get-ManagementScope']; $assigns = $preRead['Get-ManagementRoleAssignment']
-$scopePick = Resolve-PimMailSenderScope -Sender $sender -ScopeName $ScopeName -Scopes $scopes
-$scopeName = $scopePick.name
-if ($scopePick.note) { Note $scopePick.note 'DarkGray' }
+# MAIL-SCOPE-SMTP: a scope that already filters on the primary SMTP is REUSED (any name -- Exchange refuses a twin); a scope
+# of ours pinned to another address of this mailbox (it matches no mailbox) is repaired: its send rights moved to the twin,
+# or its filter corrected when there is no twin. The repair steps run first, then the normal plan on the repaired picture.
+$defaultScopeName = Get-PimMailSenderScopeName -Sender $sender
+$repair = Resolve-PimMailSenderScopeRepair -PrimarySmtp $scopeSmtp -MailboxAddresses $mbxAddrs -Scopes $scopes -Assignments $assigns `
+    -ScopeName $ScopeName -OwnNames @($defaultScopeName, (Get-PimMailSenderScopeName -Sender $scopeSmtp))
+if ($repair.kind -eq 'refuse') { Add-Result 'exo-scope' 'FAILED' $repair.reason; Fail $repair.reason }
+if ($repair.note) { Note $repair.note 'Yellow' }
+if ($repair.kind -ne 'none') { $scopeName = $repair.scopeName }
+else {
+    $scopePick = Resolve-PimMailSenderScope -Sender $scopeSmtp -ScopeName $ScopeName -Scopes $scopes
+    $scopeName = if ($scopePick.adopted -or "$ScopeName".Trim()) { $scopePick.name } else { $defaultScopeName }
+    if ($scopePick.note) { Note $scopePick.note 'DarkGray' }
+}
 $result.scopeName = $scopeName
 $engineOid = if ($engineSp) { "$($engineSp.id)" } else { '' }
-$exoPlan = @(New-PimMailSenderExoPlan -ExoServicePrincipals $exoSpList -Scopes $scopes -Assignments $assigns `
-    -Principals $sendPrincipals -Sender $sender -ScopeName $scopeName -EngineAppId $EngineAppId -EngineObjectId $engineOid `
-    -RemoveEngineSpnAssignment:$RemoveEngineSpnAssignment)
+$exoPlan = @(@($repair.actions) + @(New-PimMailSenderExoPlan -ExoServicePrincipals $exoSpList -Scopes @($repair.scopes) -Assignments @($repair.assignments) `
+    -Principals $sendPrincipals -Sender $scopeSmtp -ScopeName $scopeName -EngineAppId $EngineAppId -EngineObjectId $engineOid `
+    -RemoveEngineSpnAssignment:$RemoveEngineSpnAssignment) | Where-Object { $null -ne $_ })
+$scopedObjectsPresent = $false
 if (-not $exoPlan.Count) {
     Note 'Exchange registration, scope and scoped Application Mail.Send assignment(s) already present' 'DarkGray'
     $result.accessPolicyCreated = $true; Add-Result 'exo-scoped-send' 'already' "$scopeName"
-    $script:PimScopedSendConfirmed = $true   # MAIL-STEP-PROOF: read cleanly above, every sending identity holds its assignment
+    $scopedObjectsPresent = $true   # the objects exist -- NOT yet a proof that the scope covers the mailbox (see the in-scope read-back)
 }
-$exoDone = 0
+$exoDone = 0; $exoChanged = 0   # $exoChanged: Exchange objects this run really created / changed (not "already present")
 foreach ($item in $exoPlan) {
     if (-not $PSCmdlet.ShouldProcess("Exchange Online ($sender)", "$($item.cmdlet): $($item.what)")) {
         if (-not $whatIfRun) { Fail "Exchange change declined ($($item.cmdlet): $($item.what)) -- the scoped send right is incomplete; re-run to finish" }
@@ -1105,7 +1135,7 @@ foreach ($item in $exoPlan) {
         Fail ("could not $($item.what): $($r.error)" + $(if ($exoSaid) { " -- Exchange said: $exoSaid" } else { '' }))
     }
     if ($r.existed) { Note "$($item.cmdlet): $($item.what) -- already present, nothing changed" 'DarkGray' }
-    else { Note "$($item.cmdlet): $($item.what)" 'Green' }
+    else { Note "$($item.cmdlet): $($item.what)" 'Green'; $exoChanged++ }
     $exoDone++
 }
 if ($exoDone) {
@@ -1122,7 +1152,36 @@ if ($exoDone) {
     if (-not $confirmedScope) { Add-Result 'exo-scoped-send' 'FAILED' 'not present on read-back'; Fail 'the scoped Mail.Send assignment was created but is not present on read-back for every sending identity' }
     Note "scoped Application Mail.Send assignment(s) verified for: $((@($sendPrincipals | ForEach-Object { $_.appId })) -join ', ') -> $scopeName" 'Green'
     $result.accessPolicyCreated = $true; Add-Result 'exo-scoped-send' 'created' "$($exoPlan.Count) change(s) -> $scopeName"
-    $script:PimScopedSendConfirmed = $true   # MAIL-STEP-PROOF: verified on read-back for EVERY sending identity
+    $scopedObjectsPresent = $true   # the objects exist -- NOT yet a proof that the scope covers the mailbox (see below)
+}
+# MAIL-SCOPE-SMTP (2026-11-11): the objects existing is NOT the proof -- at a customer every object existed while the scope matched
+# no mailbox, and this run said "verified". The proof is Exchange's own answer: Test-ServicePrincipalAuthorization -Identity
+# <appId> -Resource <primary SMTP> must say InScope = True for 'Application Mail.Send', for EVERY sending identity (retried up
+# to 2 minutes while Exchange replicates). Anything else FAILS the run with Exchange's answer. Not in -WhatIf (nothing changed).
+if ($scopedObjectsPresent -and -not $whatIfRun) {
+    # coordinator decision 2026-11-11: -InScopeWaitMinutes (default 10), every 20 s; Exchange app RBAC can take up to ~2 h
+    $auth = Confirm-PimMailSendInScope -Principals $sendPrincipals -Resource $scopeSmtp -Seconds ($InScopeWaitMinutes * 60) -IntervalSeconds 20 -Invoke {
+        param($appId, $res) @((Invoke-Exo -Cmdlet 'Test-ServicePrincipalAuthorization' -Parameters @{ Identity = $appId; Resource = $res }).value)
+    }
+    $result.inScope = @($auth.identities | ForEach-Object { [ordered]@{ appId = $_.appId; inScope = [bool]$_.inScope; detail = $_.detail } })
+    $inScopeOutcome = Resolve-PimMailInScopeOutcome -InScope ([bool]$auth.ok) -ChangedThisRun (($exoChanged -gt 0) -or [bool]$result.mailboxCreated)
+    $result.inScopeOutcome = $inScopeOutcome
+    if ($inScopeOutcome -eq 'failed') {
+        # nothing was changed in this run and Exchange still says the right does not cover the mailbox: waiting will not fix it
+        Add-Result 'exo-in-scope' 'FAILED' $auth.reason
+        Fail "the scoped send right does NOT cover $scopeSmtp (Exchange Test-ServicePrincipalAuthorization, $($auth.attempts) read(s) over $InScopeWaitMinutes minute(s); nothing was changed in this run): $($auth.reason). Scope '$scopeName' filter: $(Get-PimMailSenderScopeFilter -PrimarySmtp $scopeSmtp). Check the scope's filter names the mailbox's primary SMTP address."
+    }
+    if ($inScopeOutcome -eq 'pending') {
+        # this run created / changed the objects: Exchange may still be applying them. The rest of the run goes on (nothing
+        # more to change), the setup check is NOT stored as confirmed, and the run ends PENDING (exit 3).
+        Add-Result 'exo-in-scope' 'PENDING' $auth.reason
+        $script:PimInScopePending = $true
+        Note "$(Get-PimMailInScopePendingText) ($($auth.reason))" 'Yellow'
+    } else {
+        foreach ($i in @($auth.identities)) { Note "in scope: $($i.kind) $($i.appId) -> $($i.detail)" 'Green' }
+        Add-Result 'exo-in-scope' 'ok' "Test-ServicePrincipalAuthorization InScope=True for $(@($auth.identities).Count) identit$(if (@($auth.identities).Count -eq 1) { 'y' } else { 'ies' }) on $scopeSmtp"
+        $script:PimScopedSendConfirmed = $true   # MAIL-STEP-PROOF + MAIL-SCOPE-SMTP: Exchange says InScope=True for EVERY sending identity
+    }
 }
 if ($EngineAppId -and -not $RemoveEngineSpnAssignment -and @($sendPrincipals | Where-Object { $_.kind -eq 'managed-identity' }).Count) {
     Note "the engine SPN's older scoped assignment (if any) is LEFT in place -- pass -RemoveEngineSpnAssignment to remove it" 'DarkGray'
@@ -1254,7 +1313,7 @@ if (-not "$SqlServerFqdn".Trim()) {
         # ONE scope on THIS mailbox -- so PIM Manager can show the engine job's send right as granted (with the Manager's
         # own test mail) without waiting for an engine send. Only a confirmed read-back is stored; never a guess. Written
         # here, inside the write, so a temporary firewall rule (-AllowThisIpTemporarily) covers it too.
-        $chk = New-PimMailSenderSetupCheck -Confirmed ([bool]$script:PimScopedSendConfirmed) -Sender $storeSender -ScopeName "$scopeName" -Principals $sendPrincipals -By "$($global:PIM_SetupActor)"
+        $chk = New-PimMailSenderSetupCheck -Confirmed ([bool]$script:PimScopedSendConfirmed) -Sender $storeSender -ScopeName "$scopeName" -Principals $sendPrincipals -By "$($global:PIM_SetupActor)" -InScopeResource "$scopeSmtp"
         if ($chk) {
             try { Set-PimSqlSetting -ConnectionString $cs -Name 'MailSenderSetupCheck' -Value $chk; Note "stored the setup check for PIM Manager: scoped Mail.Send confirmed for $(@($chk.identities).Count) sending identit$(if (@($chk.identities).Count -eq 1) { 'y' } else { 'ies' }) in $scopeName" 'Green' }
             catch { Note "the setup check could not be stored ($(($_.Exception.Message -split "`n")[0])) -- PIM Manager proves the engine at its first send instead" 'Yellow' }
@@ -1342,13 +1401,23 @@ if ($whatIfRun) {
     Write-ResultFile
     exit 0
 }
+# MAIL-SCOPE-SMTP: never "READY" / "VERIFIED" without Exchange's in-scope answer for every sending identity.
+# PENDING (this run changed the objects, Exchange has not applied them yet): its own result and exit code 3 -- not FAILED.
+if ($script:PimInScopePending) {
+    $result.pending = $true
+    $result.reason = Get-PimMailInScopePendingText
+    Write-ResultFile
+    Write-Host "`nRESULT: PENDING -- $(Get-PimMailInScopePendingText)" -ForegroundColor Yellow
+    exit 3
+}
+if (-not $script:PimScopedSendConfirmed) { Add-Result 'exo-in-scope' 'FAILED' 'not proven'; Fail "the scoped send right on $scopeSmtp was not proven in scope (Test-ServicePrincipalAuthorization) -- not reporting it as verified" }
 $result.ok = $true
 Write-Host ""
 Write-Host ("=" * 78) -ForegroundColor Cyan
 Write-Host " MAIL SENDER READY" -ForegroundColor Green
 Write-Host ("=" * 78) -ForegroundColor Cyan
 Write-Host "  sender        : $sender"
-Write-Host "  send right    : Exchange RBAC 'Application Mail.Send' -> scope '$scopeName' -> $sender ONLY"
+Write-Host "  send right    : Exchange RBAC 'Application Mail.Send' -> scope '$scopeName' -> $scopeSmtp ONLY (InScope=True per identity)"
 foreach ($p in $sendPrincipals) {
     # the name the assignment really has: an existing (adopted) one keeps its name, a new one got the planned name
     $held = @(Select-PimExoMailSendAssignment -Assignments $assigns -ScopeName $scopeName -AssigneeIds (Get-PimExoAssigneeIds -ExoServicePrincipals $exoSpList -AppId $p.appId -ObjectId $p.objectId) -AssignmentName $p.assignmentName -AlternateNames @($p.legacyAssignmentNames)) | Select-Object -First 1
@@ -1392,8 +1461,10 @@ Write-Host ""
 # Say only what was verified BY READ-BACK. An earlier summary asserted "Mail.Send, RESTRICTED to
 # that mailbox" while the app was in fact unscoped -- an unverified security claim is worse than
 # none, because it stops anyone from checking.
-Write-Host "  VERIFIED BY READ-BACK: mailbox exists; scoped RBAC assignment exists; no tenant-wide" -ForegroundColor Green
-Write-Host "  Graph Mail.Send is present on any sending identity." -ForegroundColor Green
+# MAIL-SCOPE-SMTP: "verified" names Exchange's own in-scope answer, never merely that the objects exist.
+Write-Host "  VERIFIED BY READ-BACK: mailbox exists; Exchange Test-ServicePrincipalAuthorization says InScope=True" -ForegroundColor Green
+Write-Host "  for 'Application Mail.Send' on $scopeSmtp for every sending identity; no tenant-wide Graph Mail.Send" -ForegroundColor Green
+Write-Host "  is present on any sending identity." -ForegroundColor Green
 Write-Host "  The restriction was proven in a test tenant with a second out-of-scope mailbox (in-scope send" -ForegroundColor DarkGray
 Write-Host "  accepted, out-of-scope send ErrorAccessDenied). This script does NOT re-prove it in your" -ForegroundColor DarkGray
 Write-Host "  tenant -- that would mean creating a decoy mailbox. If you need that assurance here, do it" -ForegroundColor DarkGray
