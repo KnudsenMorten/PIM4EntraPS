@@ -1074,6 +1074,46 @@ function Invoke-PimActiveAssignmentsSnapshot {
         $entraOk = $false
         if ($rows.Count -gt $entraEligStart) { $rows.RemoveRange($entraEligStart, $rows.Count - $entraEligStart) }
     }
+    # ENTRA-DIRECT-1 (2026-11-11): roleAssignmentSchedules lists only what PIM's schedule API knows -- a role assigned OUTSIDE
+    # PIM (a partner's GDAP group, a Microsoft first-party service principal, a direct roleAssignments POST, AU-scoped ones
+    # among them) is missing from it, measured live. /roleManagement/directory/roleAssignments is the ground truth of who
+    # holds an Entra role NOW: every one of its rows the schedules did not already give becomes an ACTIVE row (key: principal
+    # + role + directory scope, Get-PimActiveRowIdentity). The schedule row wins when both have it (start / end, activation).
+    # Eligible rows never enter the key set: roleAssignments holds no eligibility, so nothing eligible becomes active here.
+    $entraActiveKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    for ($ki = $entraStart; $ki -lt $entraEligStart; $ki++) { $k = Get-PimActiveRowIdentity -Row $rows[$ki]; if ($k) { [void]$entraActiveKeys.Add($k) } }
+    $entraDirectStart = $rows.Count
+    try {
+        Get-PimActiveAssignmentsGraphItems -Path '/roleManagement/directory/roleAssignments?$expand=principal' | ForEach-Object {
+            $ra = $_
+            if (-not $ra) { return }
+            $k = ConvertTo-PimManagedIdentity -Kind 'r' -PrincipalId "$($ra.principalId)" -RoleDefinitionId "$($ra.roleDefinitionId)" -Scope "$($ra.directoryScopeId)"
+            if (-not $k -or -not $entraActiveKeys.Add($k)) { return }   # already a schedule row (or a repeat): once only
+            # the expanded principal names the holder and its kind -- a partner's GDAP group is not always resolvable by id
+            $pr = $ra.principal; $prId = "$($ra.principalId)"
+            if ($pr -and $prId -and $script:PimManager_ResolvedById -is [hashtable] -and -not $script:PimManager_ResolvedById.ContainsKey($prId) -and
+                -not ($script:PimManager_UserById -and $script:PimManager_UserById.ContainsKey($prId)) -and -not ($script:PimManager_GroupById -and $script:PimManager_GroupById.ContainsKey($prId))) {
+                $pk = ("$($pr.'@odata.type')" -replace '#microsoft\.graph\.', '')
+                if ($pk) {
+                    $pupn = "$($pr.userPrincipalName)"; $pdn = "$($pr.displayName)"
+                    $pl = if ($pupn) { $pupn } elseif ($pdn) { $pdn } else { $prId }
+                    $script:PimManager_ResolvedById[$prId] = [pscustomobject]@{ label = $pl; kind = $pk; displayName = $pdn; userPrincipalName = $pupn }
+                    if ($pk -eq 'user') { Add-PimManagerUserIndexEntry -Id $prId -DisplayName $pdn -UserPrincipalName $pupn }
+                }
+            }
+            & $addEntraRow ([pscustomobject]@{ Id = "$($ra.id)"; PrincipalId = $prId; RoleDefinitionId = "$($ra.roleDefinitionId)"; DirectoryScopeId = "$($ra.directoryScopeId)" }) 'active'
+            $kind = Get-PimManagerPrincipalKind -PrincipalId $prId
+            if ($kind) { $rows[$rows.Count - 1]['principalKind'] = $kind }   # a role-holding group counts for DELEGATION-SCOPE-1 (c)
+        }
+        Write-Host ("  [revoke] entra-role: {0} active role assignment(s) outside PIM's schedules (roleAssignments)" -f ($rows.Count - $entraDirectStart)) -ForegroundColor DarkGray
+    } catch {
+        $em = "$($_.Exception.Message)"
+        Write-Warning "  [revoke] entra-role roleAssignments load failed: $em"
+        if ($entraOk) { & $addErr 'entra-role' $em '' }
+        $entraOk = $false
+        if ($rows.Count -gt $entraDirectStart) { $rows.RemoveRange($entraDirectStart, $rows.Count - $entraDirectStart) }
+    }
+    $entraActiveKeys = $null
 
     # ---- 2. Azure roles, ACTIVE + ELIGIBLE (or carried forward) -------------
     # REQUIREMENTS 67.3: ONE Azure Resource Graph query over REST returns every active role assignment the engine identity can

@@ -3790,6 +3790,10 @@ admins, and shows ONE read-only tenant-wide view of everything else that grants 
 The snapshot reads only what that view needs -- never every group:
 
 1. **Entra roles, active AND eligible**, tenant-wide: role assignment schedules and role eligibility schedules (paged).
+   Every ACTIVE directory role assignment (all scopes, administrative units included) is also read from the role
+   assignments list itself, so a role assigned outside PIM -- a partner's GDAP group, a Microsoft first-party app, a
+   direct assignment -- is a row too; an assignment both lists hold is one row (the schedule's, keyed on principal +
+   role + directory scope), and nothing eligible ever becomes active this way.
 2. **Azure roles, active AND eligible**: one Azure Resource Graph query for the active role assignments, and the role
    eligibility schedules of every subscription the engine identity sees (de-duplicated by schedule).
 3. **PIM-for-Groups schedules, active AND eligible (members and owners), only for these groups**, chosen AFTER 1 + 2:
