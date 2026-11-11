@@ -1677,6 +1677,19 @@ function Initialize-PimDefaultJobHandlers {
         # snapshot stale -- queue one refresh (deduped) so the Revoke tab catches up on a following tick instead of
         # waiting out the 2-hour cadence. Only revokes: a TAP reset or a session revoke changes no assignment.
         $revokesApplied = @(@($act.results) | Where-Object { $_ -and "$($_.outcome)" -eq 'applied' -and "$($_.type)" -in @('entra-role-revoke','group-assignment-revoke','azure-rbac-revoke') }).Count
+        # DELEGATION-SCOPE-1 split cadence (owner 2026-11-11): the snapshot reads Azure only nightly -- PIM changing an Azure
+        # assignment (a committed PIM-Assignments-Azure-Resources row, an applied Azure revoke) sets the 'refresh Azure' mark
+        # so the next runs read Azure again (Request-PimActiveAssignmentsAzureRefresh), and queues one snapshot run.
+        $azChanged = @(@($ds.results) | Where-Object { $_ -and "$($_.outcome)" -eq 'applied' -and "$($_.entity)" -eq 'PIM-Assignments-Azure-Resources' }).Count +
+                     @(@($act.results) | Where-Object { $_ -and "$($_.outcome)" -eq 'applied' -and "$($_.type)" -eq 'azure-rbac-revoke' }).Count
+        if ($azChanged -gt 0 -and (Get-Command Request-PimActiveAssignmentsAzureRefresh -ErrorAction SilentlyContinue)) {
+            $azm = Request-PimActiveAssignmentsAzureRefresh -ConnectionString $cs -Reason "queue-apply:azure-changes-applied=$azChanged"
+            if (-not $azm.ok) { Write-Warning "[scheduler] could not set the 'refresh Azure' mark after $azChanged Azure change(s): $($azm.error)" }
+            if ($revokesApplied -eq 0) {
+                try { [void](Add-PimJobTrigger -Type 'active-assignments-snapshot' -Scope 'All' -Reason "queue-apply:azure-changes-applied=$azChanged") }
+                catch { Write-Warning "[scheduler] could not queue an active-assignments refresh after $azChanged Azure change(s): $($_.Exception.Message)" }
+            }
+        }
         if ($revokesApplied -gt 0) {
             try { [void](Add-PimJobTrigger -Type 'active-assignments-snapshot' -Scope 'All' -Reason "queue-apply:revokes-applied=$revokesApplied") }
             catch { Write-Warning "[scheduler] could not queue an active-assignments refresh after $revokesApplied applied revoke(s): $($_.Exception.Message)" }

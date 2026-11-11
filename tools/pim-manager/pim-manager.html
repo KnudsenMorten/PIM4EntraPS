@@ -819,6 +819,15 @@
   #revTopBar .rev-type-chip.rev-type-azure   { background:#ddf4ff; color:#0969da; border-color:#0969da; }
   #revTopBar .rev-type-chip.rev-type-p4g     { background:#dafbe1; color:#1a7f37; border-color:#1a7f37; }
   #revTopBar .rev-type-chip.rev-type-deleted { background:#ffebe9; color:#cf222e; border-color:#cf222e; }
+  #revTopBar .rev-type-chip.rev-type-app     { background:#fbefff; color:#8250df; border-color:#c297ff; }
+  /* DELEGATION-SCOPE-1: Active / Eligible / All, and the per-part "as of" (calm, small, no badges) */
+  #revTopBar .rev-state-filter { display:inline-flex; border:1px solid #d0d7de; border-radius:6px; overflow:hidden; font-size:11px; }
+  #revTopBar .rev-state-filter button { border:0; border-right:1px solid #d0d7de; background:#fff; color:#57606a; padding:2px 8px; font-size:11px; cursor:pointer; }
+  #revTopBar .rev-state-filter button:last-child { border-right:0; }
+  #revTopBar .rev-state-filter button[aria-pressed="true"] { background:#eaeef2; color:#1a1a1a; font-weight:600; }
+  .rev-parts-asof { font-size:11px; color:#6e7681; }
+  .rev-state-elig { display:inline-block; margin-left:6px; padding:0 6px; border-radius:10px; font-size:10.5px; border:1px dashed #8c959f; color:#57606a; background:#f6f8fa; }
+  .rev-app-hint { display:block; font-size:10.5px; color:#6e7681; margin-top:2px; }
   #revTopBar .rev-deleted-toggle { font-size:11.5px; color:#57606a; display:inline-flex; align-items:center; gap:4px; cursor:pointer; }
   #revTopBar .rev-type-chip.active { box-shadow:0 0 0 2px #0969da; }
   #revTopBar .rev-type-chip .n { font-weight:600; }
@@ -2125,7 +2134,7 @@
         <button type="button" id="revViewGraph" data-view="graph" aria-pressed="true" title="Draw the live delegations like the Access map: people, the groups they are in, what those include, and the roles they reach">Graph view</button>
         <button type="button" id="revViewList" data-view="list" aria-pressed="false" title="Show the live delegations as a table">List view</button>
       </span>
-      <button id="revBtnRefresh" class="primary" title="Asks the scheduler for a new read of every active assignment (within ~5 min). The page shows the stored read; it never waits for the tenant. Disabled while a read is already queued or running.">Refresh</button>
+      <button id="revBtnRefresh" class="primary" title="Queues the engine's active-assignments-snapshot job (it starts within ~5 min). PIM Manager itself never reads the tenant here: the page shows the stored read and never waits. Disabled while a read is already queued or running.">Refresh now</button>
       <!-- §100.47 (a): said next to the button while a read is already queued / running, so Refresh is never pressed twice. -->
       <span id="revRefreshNote" class="rev-refresh-note" role="status" aria-live="polite" style="display:none;"></span>
       <!-- BUG-97: the counts start as an EM DASH, never 0. This load takes 5-10s, and a
@@ -2133,9 +2142,17 @@
            this screen that reads as "nobody holds standing privileged access". A zero that
            means UNKNOWN is a lie the user acts on. setRevChips() owns these from here on. -->
       <span class="rev-type-chip rev-type-all"      data-type="all"             title="Show all assignment types">all <span class="n" id="revChipAll">&mdash;</span></span>
-      <span class="rev-type-chip rev-type-entra"    data-type="entra-role"      title="Entra-role active assignments">entra-role <span class="n" id="revChipEntra">&mdash;</span></span>
-      <span class="rev-type-chip rev-type-azure"    data-type="azure-rbac"      title="Azure-RBAC active assignments">azure-rbac <span class="n" id="revChipAzure">&mdash;</span></span>
-      <span class="rev-type-chip rev-type-p4g"      data-type="pim-for-groups"  title="PIM-for-Groups active assignments">pim-for-groups <span class="n" id="revChipP4g">&mdash;</span></span>
+      <span class="rev-type-chip rev-type-entra"    data-type="entra-role"      title="People, apps, deleted principals and role-assignable groups holding an Entra role (active and eligible)">entra-role <span class="n" id="revChipEntra">&mdash;</span></span>
+      <span class="rev-type-chip rev-type-azure"    data-type="azure-rbac"      title="People, apps, deleted principals and groups holding an Azure role (active and eligible)">azure-rbac <span class="n" id="revChipAzure">&mdash;</span></span>
+      <span class="rev-type-chip rev-type-p4g"      data-type="pim-for-groups"  title="Members of role-holding groups (active and eligible): the people and apps who get a role through a group that holds an Entra or Azure role. Members of other groups are not listed.">pim-for-groups <span class="n" id="revChipP4g">&mdash;</span></span>
+      <!-- DELEGATION-SCOPE-1 (owner 2026-11-11): apps holding high-privilege API permissions -- read-only on this page. -->
+      <span class="rev-type-chip rev-type-app"      data-type="app-permission"  title="Apps holding high-privilege API permissions (for example Microsoft Graph application permissions). Shown read-only: they are removed in Entra ID &gt; Enterprise applications.">API permissions <span class="n" id="revChipApp">&mdash;</span></span>
+      <!-- DELEGATION-SCOPE-1: active and eligible are both listed; this narrows the list (default All). -->
+      <span id="revStateFilter" class="rev-state-filter" role="group" aria-label="Active or eligible">
+        <button type="button" id="revStateAll" data-state="all" aria-pressed="true" title="Active and eligible assignments">All</button>
+        <button type="button" id="revStateActive" data-state="active" aria-pressed="false" title="Only assignments in effect now">Active</button>
+        <button type="button" id="revStateEligible" data-state="eligible" aria-pressed="false" title="Only eligible assignments: the holder can activate them when needed">Eligible</button>
+      </span>
       <!-- §70.22 (operator 2026-09-14: "a deleted objects [filter], so i can delete them quickly ... hidden by default with option
            to show them (tick on)"): assignments still held by principals that no longer exist are hidden unless ticked; the
            "deleted" chip then lists only them, so they can be selected all at once and revoked. -->
@@ -2157,6 +2174,9 @@
         <button id="revExpPrint" class="ghost" title="Open a printable view of the active assignments shown">Print</button>
       </span>
       <span class="rev-loaded-at" id="revLoadedAt"></span>
+      <!-- DELEGATION-SCOPE-1 (owner 2026-11-11): the engine reads in parts (Entra, apps and group members about every 2 h;
+           Azure nightly and after PIM changes an Azure assignment) -- one small "as of" per part, from the stored header. -->
+      <span class="rev-parts-asof" id="revPartsAsOf" style="display:none;"></span>
     </div>
     <!-- §70.1b option 2: what the table is (a scheduler snapshot, as of when) and whether a new read is queued. -->
     <div id="revSnapshotNote" role="status" aria-live="polite"></div>
@@ -29463,6 +29483,19 @@
     document.addEventListener('keydown', _wizKey);
   }
   function _wizKey(e) { if (e.key === 'Escape') _wizClose(true); }
+  // A step may carry skip(state) -> true: it is then not shown, not numbered and never stopped at (Next / Back pass it).
+  // PURE given the context. (ADMIN-EXISTING-ACCOUNT, owner 2026-11-11: an existing office account has no Purpose &
+  // platform and no Activation step.)
+  function _wizSkipped(ctx, i) {
+    const st = ctx && ctx.steps && ctx.steps[i];
+    if (!st || typeof st.skip !== 'function') return false;
+    try { return !!st.skip(ctx.state); } catch (_) { return false; }
+  }
+  // The next shown step from `from` in direction dir (+1 / -1); -1 when there is none.
+  function _wizShownFrom(ctx, from, dir) {
+    for (let i = from; i >= 0 && i < ctx.steps.length; i += dir) { if (!_wizSkipped(ctx, i)) return i; }
+    return -1;
+  }
   let _wizRendering = false;
   function _wizRenderStep() {
     if (!_wizCtx) return;
@@ -29495,13 +29528,19 @@
     body.innerHTML = '';
     const node = steps[step].render(state, _wizRenderStep);
     if (node instanceof Node) body.appendChild(node); else body.innerHTML = String(node || '');
+    let shownNo = 0;
     document.querySelectorAll('#wizSteps .wiz-step').forEach((el, i) => {
+      const hide = _wizSkipped(_wizCtx, i);
+      el.style.display = hide ? 'none' : '';
+      if (!hide) { shownNo++; el.textContent = shownNo + '. ' + steps[i].label; }
       el.classList.toggle('active', i === step);
       el.classList.toggle('done',   i <  step);
     });
-    document.getElementById('wizBack').style.display   = step > 0 ? '' : 'none';
-    document.getElementById('wizNext').style.display   = step < steps.length - 1 ? '' : 'none';
-    document.getElementById('wizFinish').style.display = step === steps.length - 1 ? '' : 'none';
+    const hasPrev = _wizShownFrom(_wizCtx, step - 1, -1) >= 0;
+    const hasNext = _wizShownFrom(_wizCtx, step + 1, 1) >= 0;
+    document.getElementById('wizBack').style.display   = hasPrev ? '' : 'none';
+    document.getElementById('wizNext').style.display   = hasNext ? '' : 'none';
+    document.getElementById('wizFinish').style.display = !hasNext ? '' : 'none';
 
     // Restore focus + caret on the newly-rendered element with the same id.
     if (activeId) {
@@ -29556,7 +29595,7 @@
   }
   // Re-wire wiz Cancel + Back + Next + Finish to drive the step controller.
   (document.getElementById('wizCancel') || {}).onclick = () => _wizClose(true);
-  (document.getElementById('wizBack') || {}).onclick = () => { if (_wizCtx && _wizCtx.step > 0) { _wizCtx.step--; _wizRenderStep(); } };
+  (document.getElementById('wizBack') || {}).onclick = () => { if (_wizCtx && _wizCtx.step > 0) { const p = _wizShownFrom(_wizCtx, _wizCtx.step - 1, -1); if (p >= 0) { _wizCtx.step = p; _wizRenderStep(); } } };
   (document.getElementById('wizNext') || {}).onclick = () => {
     if (!_wizCtx) return;
     const s = _wizCtx.steps[_wizCtx.step];
@@ -29565,7 +29604,8 @@
       if (r === false) return;
       if (typeof r === 'string' && r.length) { _wizErr(r); return; }
     }
-    if (_wizCtx.step < _wizCtx.steps.length - 1) { _wizCtx.step++; _wizRenderStep(); }
+    const nx = _wizShownFrom(_wizCtx, _wizCtx.step + 1, 1);   // a skipped step is passed, never stopped at
+    if (nx >= 0) { _wizCtx.step = nx; _wizRenderStep(); }
   };
   (document.getElementById('wizFinish') || {}).onclick = async () => {
     if (!_wizCtx) return;
@@ -32753,6 +32793,9 @@
         },
         {
           label: 'Purpose & platform',
+          // ADMIN-EXISTING-ACCOUNT (owner 2026-11-11): an existing office account has no purpose / platform to choose (its
+          // name is its own) -- the step is not shown for that type; every other type still has it.
+          skip: (s) => s.adminType === 'existing-account',
           render: (s, rerender) => {
             const f = document.createElement('div');
             f.appendChild(wuxWhy(
@@ -32822,6 +32865,9 @@
         },
         {
           label: 'Activation',
+          // ADMIN-EXISTING-ACCOUNT (owner 2026-11-11): nothing is created and no TAP is issued (CreateTAP stays FALSE), so
+          // there is no activation to schedule -- the step is not shown for that type; every other type still has it.
+          skip: (s) => s.adminType === 'existing-account',
           render: (s, rerender) => {
             const f = document.createElement('div');
             f.appendChild(wuxWhy(
@@ -32931,6 +32977,9 @@
         },
         {
           label: 'Lifecycle',
+          // ADMIN-EXISTING-ACCOUNT (owner 2026-11-11, approved follow-up): the flow for an existing office account is exactly
+          // type -> pick the existing user -> delegations -> commit; the step is not shown for that type, every other type has it.
+          skip: (s) => s.adminType === 'existing-account',
           render: (s, rerender) => {
             const f = document.createElement('div');
             f.appendChild(wuxWhy(
@@ -34886,7 +34935,9 @@
   const REV = {
     rows: [],              // full row set from /api/active-assignments
     selected: new Set(),   // row ids the operator has ticked
-    typeFilter: 'all',     // all | entra-role | azure-rbac | pim-for-groups | deleted
+    typeFilter: 'all',     // all | entra-role | azure-rbac | pim-for-groups | app-permission | deleted
+    stateFilter: 'all',    // DELEGATION-SCOPE-1: all | active | eligible (a row without "state" is active)
+    partsReadUtc: null,    // DELEGATION-SCOPE-1: { perPart, entra, azure, groups } from the stored header (perPart false = one "as of")
     showDeleted: false,    // §70.22: rows held by DELETED principals are hidden unless ticked
     showManaged: false,    // 2026-10-07: rows PIM Manager manages are hidden unless ticked (this page is for cleanup)
     managedKnown: false,   // ...only once the engine's drift read has said which rows those are
@@ -35070,7 +35121,7 @@
       b.disabled = busy;
       b.title = REV.refreshPending
         ? 'A read of the tenant is already ' + (REV.refreshState === 'running' ? 'running' : 'queued') + ' -- the page updates by itself when it is ready. Refresh asks for a new read only when none is under way.'
-        : 'Asks the scheduler for a new read of every active assignment (within ~5 min). The page shows the stored read; it never waits for the tenant. Disabled while a read is already queued or running.';
+        : 'Queues the engine\'s active-assignments-snapshot job (it starts within ~5 min). PIM Manager itself never reads the tenant here: the page shows the stored read and never waits. Disabled while a read is already queued or running.';
     }
     if (n) {
       if (REV.refreshPending) {
@@ -35175,6 +35226,21 @@
                   title: 'An emergency (break-glass) account set in PIM Manager. A revoke never touches it: it is skipped and reported.' }
   };
   function revOwnKind(r) { const k = String((r && r.ownKind) || ''); return REV_OWN[k] ? k : ''; }
+  // DELEGATION-SCOPE-1 (owner 2026-11-11): active AND eligible rows; apps' API permissions are read-only here.
+  function revStateNorm(s) { s = String(s || '').toLowerCase(); return (s === 'active' || s === 'eligible') ? s : 'all'; }
+  function revRowState(r) { return String((r && r.state) || '').toLowerCase() === 'eligible' ? 'eligible' : 'active'; }
+  function revIsApiPermission(r) { return String((r && r.type) || '') === 'app-permission'; }
+  const REV_API_PERM_HINT = 'Read-only here: remove it in Entra ID > Enterprise applications.';
+  function revStateChip(r) {
+    return revRowState(r) === 'eligible'
+      ? '<span class="rev-state-elig" title="Eligible: the holder can activate this when needed; it is not in effect now.">eligible</span>' : '';
+  }
+  // "Entra 10:02 · Azure 03:00 · group members 10:02" -- only when the stored header carries per-part times.
+  function revPartsAsOfText(p) {
+    if (!p || !p.perPart) return '';
+    const t = (v) => { if (!v) return '-'; const loc = fmtTime(v); const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})$/.exec(loc); const today = fmtTime(new Date(), { dateOnly: true }); return m ? (m[2] + (m[1] !== today ? ' ' + m[1] : '')) : String(loc); };
+    return 'as of: Entra and apps ' + t(p.entra) + ' · Azure ' + t(p.azure) + ' · group members ' + t(p.groups);
+  }
   function revOwnBadge(r) {
     const k = revOwnKind(r);
     if (!k) return '';
@@ -35198,7 +35264,7 @@
     const kindChip = (kind && kind !== 'user'
       ? '<span class="rev-kind rev-kind-' + escapeHtml(kind) + '">' + escapeHtml(kind === 'servicePrincipal' ? 'app' : kind) + '</span>' : '') +
       // 2026-10-07 (operator: "a clear marking MANAGED"): shown only when "show managed by PIM Manager" is ticked.
-      (r.managed === true ? '<span class="rev-managed" title="PIM Manager manages this assignment: its engine keeps it as your configuration says. Removing it here does not stick -- change the configuration instead." style="display:inline-block;margin-left:6px;padding:0 6px;border-radius:10px;font-size:10.5px;font-weight:700;letter-spacing:.4px;color:#fff;background:#1a7f37;">MANAGED</span>' : '') +
+      (r.managed === true && !revIsApiPermission(r) ? '<span class="rev-managed" title="PIM Manager manages this assignment: its engine keeps it as your configuration says. Removing it here does not stick -- change the configuration instead." style="display:inline-block;margin-left:6px;padding:0 6px;border-radius:10px;font-size:10.5px;font-weight:700;letter-spacing:.4px;color:#fff;background:#1a7f37;">MANAGED</span>' : '') +
       // Owner 2026-10-08: shown only when that group's tick is on (hidden by default).
       revOwnBadge(r);
     if (!name || name === id) {
@@ -35210,10 +35276,10 @@
   }
 
   function setRevChips(counts) {
-    const ids = { revChipAll: 'all', revChipEntra: 'entra-role', revChipAzure: 'azure-rbac', revChipP4g: 'pim-for-groups' };
+    const ids = { revChipAll: 'all', revChipEntra: 'entra-role', revChipAzure: 'azure-rbac', revChipP4g: 'pim-for-groups', revChipApp: 'app-permission' };
     for (const id in ids) {
       const el = document.getElementById(id);
-      if (el) el.textContent = counts ? counts[ids[id]] : '—';
+      if (el) el.textContent = counts ? (counts[ids[id]] != null ? counts[ids[id]] : 0) : '—';
     }
   }
   // BUG-97. The busy state must sit where the user's eye already is -- next to the control they
@@ -35267,6 +35333,7 @@
       // which stored snapshot this answer is, for the state poll.
       REV.snapshotReadError = String((data && data.snapshotReadError) || '');
       REV.snapStamp = String((data && data.snapshotStamp) || '');
+      REV.partsReadUtc = (data && data.partsReadUtc) || null;   // DELEGATION-SCOPE-1: per-part "as of" (absent on an older server)
       REV.rows = Array.isArray(data && data.rows) ? data.rows : [];
       REV.managedKnown = !!(data && data.managedKnown);
       REV.managedComputedUtc = (data && data.managedComputedUtc) || '';
@@ -35357,6 +35424,8 @@
     const add = (k, v) => p.push(k + '=' + encodeURIComponent(v));
     const tf = (REV.typeFilter === 'deleted' && !REV.showDeleted) ? 'all' : (REV.typeFilter || 'all');
     add('type', tf);
+    // DELEGATION-SCOPE-1: sent only when it narrows (an older request stays exactly what it was). Never the value 1 (?state=1 is the poll).
+    if (revStateNorm(REV.stateFilter) !== 'all') add('state', revStateNorm(REV.stateFilter));
     const q = String(REV.textFilter || '').toLowerCase().trim();
     if (q) { add('q', q); for (const a of revAliasKeysFor(q)) add('alias', a); } else REV.aliasCapped = false;
     add('sort', REV.sortKey || 'principal');
@@ -35420,6 +35489,7 @@
         REV.snapStamp = stamp; REV.fullForStamp = stamp;
         REV.loadedUtc = data.refreshedUtc || data.loadedUtc || REV.loadedUtc;
         REV.stale = !!data.stale; REV.snapshotHint = data.hint || '';
+        REV.partsReadUtc = data.partsReadUtc || REV.partsReadUtc;
         REV.surfaceErrors = Array.isArray(data.surfaceErrors) ? data.surfaceErrors : [];
       }
       if (REV.all && REV.all.key !== (REV.snapStamp + '|' + filterKey)) REV.all = null;
@@ -35560,6 +35630,9 @@
     rows = rows.filter(r => !revHiddenReason(r));
     if (tf === 'deleted') rows = rows.filter(r => String(r.principalKind || '') === 'deleted');
     else if (tf && tf !== 'all') rows = rows.filter(r => r.type === tf);
+    // DELEGATION-SCOPE-1: Active / Eligible (a row without "state" is active)
+    const sf = revStateNorm(REV.stateFilter);
+    if (sf !== 'all') rows = rows.filter(r => revRowState(r) === sf);
     if (q) {
       rows = rows.filter(r => {
         // BUG-98: search matches the NAME and the object id, so both vocabularies work.
@@ -35632,12 +35705,27 @@
         ? ' show managed by PIM Manager (' + managedN + ')'
         : ' show managed by PIM Manager (not known yet: the drift check has not run on this version -- Jobs > drift-snapshot > Run now)';
     }
-    const counts = { all: countable.length, 'entra-role': 0, 'azure-rbac': 0, 'pim-for-groups': 0 };
-    for (const r of countable) {
+    // DELEGATION-SCOPE-1: the type chips count what the Active / Eligible filter lists; the state buttons count every type.
+    const sfC = revStateNorm(REV.stateFilter);
+    const stateN = { active: 0, eligible: 0 };
+    for (const r of countable) stateN[revRowState(r)]++;
+    const countableS = sfC === 'all' ? countable : countable.filter(r => revRowState(r) === sfC);
+    const counts = { all: countableS.length, 'entra-role': 0, 'azure-rbac': 0, 'pim-for-groups': 0, 'app-permission': 0 };
+    for (const r of countableS) {
       if (counts.hasOwnProperty(r.type)) counts[r.type]++;
     }
-    if (pv) { for (const k in counts) counts[k] = Number((pv.visible || {})[k]) || 0; }
-    setRevChips(counts);   // BUG-97: single writer; renders real numbers only once data has landed
+    if (pv) {
+      for (const k in counts) counts[k] = Number((pv.visible || {})[k]) || 0;
+      if (pv.states) { stateN.active = Number(pv.states.active) || 0; stateN.eligible = Number(pv.states.eligible) || 0; }
+      else { stateN.active = counts.all; stateN.eligible = 0; }   // an older server: every row is active
+    }
+    setRevChips(counts);
+    { const lab = { all: 'All', active: 'Active', eligible: 'Eligible' };
+      document.querySelectorAll('#revStateFilter button[data-state]').forEach(b => {
+        const k = b.dataset.state;
+        b.setAttribute('aria-pressed', String(k === sfC));
+        b.textContent = lab[k] + ' (' + (k === 'all' ? stateN.active + stateN.eligible : stateN[k]) + ')';
+      }); }   // BUG-97: single writer; renders real numbers only once data has landed
     const delToggle = document.getElementById('revDeletedToggle');
     if (delToggle) {
       const cb = document.getElementById('revShowDeleted');
@@ -35761,16 +35849,17 @@
       // §70.1b option 2: a row whose revoke was queued from this page stays in the snapshot until the next read.
       const queuedAt = REV.revokeQueued.get(r.id);
       out.push('<tr class="rev-row' + (sel ? ' rev-row-sel' : '') + (queuedAt ? ' rev-row-queued' : '') + '" data-id="' + escapeHtml(r.id) + '">');
-      out.push('<td class="rev-sel-col"><input type="checkbox" class="rev-row-check"' + (sel ? ' checked' : '') + (queuedAt ? ' disabled title="Revoke already queued"' : (revCentralOf(r).readOnly ? ' disabled title="From the managing tenant (central): read-only here. It is changed on the managing tenant."' : '')) + '></td>');
+      out.push('<td class="rev-sel-col"><input type="checkbox" class="rev-row-check"' + (sel ? ' checked' : '') + (queuedAt ? ' disabled title="Revoke already queued"' : revIsApiPermission(r) ? ' disabled title="' + escapeHtml(REV_API_PERM_HINT) + '"' : (revCentralOf(r).readOnly ? ' disabled title="From the managing tenant (central): read-only here. It is changed on the managing tenant."' : '')) + '></td>');
       // BUG-98: identity first, technical key second -- the same rule as the findings list and
       // IMP-15. A reviewer cannot approve or revoke what they cannot identify, and this column
       // was 689 rows of bare objectIds.
       // §100.47 (d): Principal / Role capped (ellipsis + tooltip), Scope floored at 22ch and broken only after '/'.
       out.push('<td class="rev-principal-cell" title="' + escapeHtml(String(r.principal || r.principalId || '')) + '"><div class="rev-p-wrap">' + revPrincipalCell(r) + revCentralChip(r) +
         (queuedAt ? '<span class="rev-queued-chip" title="Queued at ' + escapeHtml(formatRevWhen(queuedAt)) + '. The table is a snapshot, so this row stays until the engine applies the revoke and the next snapshot is read.">revoke queued</span>' : '') + '</div></td>');
-      out.push('<td class="rev-role-cell" title="' + escapeHtml(r.role || '') + '"><span class="rev-ell">' + escapeHtml(r.role || '') + '</span></td>');
+      out.push('<td class="rev-role-cell" title="' + escapeHtml(r.role || '') + '"><span class="rev-ell">' + escapeHtml(r.role || '') + '</span>' +
+        (revIsApiPermission(r) ? '<span class="rev-app-hint">' + escapeHtml(REV_API_PERM_HINT) + '</span>' : '') + '</td>');
       out.push('<td class="rev-scope-cell" title="' + escapeHtml(r.scope || '') + '"><span class="rev-scope-wrap">' + revScopeHtml(r.scope) + '</span></td>');
-      out.push('<td class="rev-type-cell type-' + escapeHtml(r.type || '') + '">' + escapeHtml(r.type || '') + '</td>');
+      out.push('<td class="rev-type-cell type-' + escapeHtml(r.type || '') + '">' + escapeHtml(revIsApiPermission(r) ? 'API permission' : (r.type || '')) + revStateChip(r) + '</td>');
       out.push('<td class="rev-when-cell">' + escapeHtml(formatRevWhen(r.start)) + '</td>');
       out.push('<td class="rev-when-cell">' + escapeHtml(r.end ? formatRevWhen(r.end) : 'no expiration') + '</td>');
       out.push('<td class="rev-just-cell"><span class="rev-just">' + escapeHtml(r.justification || '') + '</span></td>');
@@ -35803,8 +35892,8 @@
           filename: 'pim-active-assignments-' + new Date().toISOString().slice(0, 10) + '.csv',
           title: 'Active PIM assignments (who has what)',
           subtitle: f.length + ' active assignment(s)' + (REV.typeFilter && REV.typeFilter !== 'all' ? ' — ' + REV.typeFilter : ''),
-          headers: ['Principal', 'Role / Group', 'Scope', 'Type', 'Activated', 'Expires', 'Justification'],
-          rows: f.map(r => [r.principal || '', r.role || '', r.scope || '', r.type || '', formatRevWhen(r.start), r.end ? formatRevWhen(r.end) : 'no expiration', r.justification || ''])
+          headers: ['Principal', 'Role / Group', 'Scope', 'Type', 'State', 'Activated', 'Expires', 'Justification'],
+          rows: f.map(r => [r.principal || '', r.role || '', r.scope || '', r.type || '', revRowState(r), formatRevWhen(r.start), r.end ? formatRevWhen(r.end) : 'no expiration', r.justification || ''])
         };
       };
       const expFail = (e) => setRevStatus('Could not prepare the export: ' + String((e && e.message) || e), 'err');
@@ -35914,7 +36003,8 @@
     if (r.type === 'pim-for-groups') type = ix.pairs.has(a + '|' + String(r.scope || '').toLowerCase()) ? ix.pairs.get(a + '|' + String(r.scope || '').toLowerCase()) : null;
     return { admin: true, central: type !== null, readOnly: type === 'active', type: type };
   }
-  function revSelectable(r) { return !REV.revokeQueued.has(r.id) && !revCentralOf(r).readOnly; }
+  // DELEGATION-SCOPE-1: an app's API permission is read-only on this page (never selectable)
+  function revSelectable(r) { return !REV.revokeQueued.has(r.id) && !revCentralOf(r).readOnly && String((r && r.type) || '') !== 'app-permission'; }
   function revCentralChip(r) {
     const c = revCentralOf(r);
     if (!c.admin) return '';
@@ -35984,11 +36074,13 @@
     'id', 'type', 'principal', 'principalId', 'principalKind',
     'role', 'roleDefinitionId', 'roleAssignmentId', 'roleAssignmentName',
     'scope', 'directoryScopeId', 'groupId', 'accessId',
-    'assignmentType', 'memberType', 'start', 'end'
+    'assignmentType', 'memberType', 'start', 'end', 'state'
   ];
   function revRowPayload(r) {
     const o = {};
     for (const k of REV_PAYLOAD_FIELDS) { if (r[k] !== undefined && r[k] !== null) o[k] = r[k]; }
+    // DELEGATION-SCOPE-1: an ELIGIBLE row is removed by the existing eligible path (the server reads assignmentType)
+    if (revRowState(r) === 'eligible' && !o.assignmentType) o.assignmentType = 'Eligible';
     return o;
   }
   // One assignment, in the words the APPROVER needs (operator, 2026-09-22: "i dont know what i
@@ -36007,8 +36099,9 @@
   // '' when the row CAN be addressed; otherwise the reason it cannot, in the operator's words.
   function revRowBlockReason(r) {
     { const rvWhy = pimRevauditRowBlock(r); if (rvWhy) return rvWhy; }   // lane revaudit, decision (15): not managed = a SuperAdmin only
+    if (revIsApiPermission(r)) return 'an app\'s API permission is read-only here -- remove it in Entra ID > Enterprise applications';   // DELEGATION-SCOPE-1: never staged (a SuperAdmin too)
     const s = (v) => String(v == null ? '' : v).trim();
-    const eligible = /^elig/i.test(s(r.assignmentType) || s(r.memberType));
+    const eligible = /^elig/i.test(s(r.assignmentType) || s(r.memberType)) || revRowState(r) === 'eligible';
     switch (s(r.type)) {
       case 'entra-role':
         if (!s(r.principalId))      return 'this row carries no principal id';
@@ -36358,6 +36451,13 @@
       } else at.textContent = '';
       at.title = REV.snapshotHint || '';
     }
+    // DELEGATION-SCOPE-1 (owner 2026-11-11): the engine reads in parts -- one small "as of" per part when the header has them
+    const pa = document.getElementById('revPartsAsOf');
+    if (pa) {
+      const pt = (REV.snapshotMissing || REV.snapshotReadError) ? '' : revPartsAsOfText(REV.partsReadUtc);
+      pa.textContent = pt; pa.style.display = pt ? '' : 'none';
+      pa.title = pt ? 'Entra roles and apps, and group members, are read about every 2 hours; Azure roles once a night and after PIM Manager changes an Azure assignment.' : '';
+    }
     if (!note) return;
     const bits = [];
     // §100.47 (a): the stored read is shown at once with its age; a read under way says so, and the page polls for it.
@@ -36408,6 +36508,10 @@
 
     document.querySelectorAll('#revTopBar .rev-type-chip').forEach(chip => {
       chip.onclick = () => { REV.typeFilter = chip.dataset.type; revRefilter(); };
+    });
+    // DELEGATION-SCOPE-1: Active / Eligible / All (the server filters in paged mode; the page filters the whole set)
+    document.querySelectorAll('#revStateFilter button[data-state]').forEach(b => {
+      b.onclick = () => { REV.stateFilter = revStateNorm(b.dataset.state); revRefilter(); };
     });
     const showMg = document.getElementById('revShowManaged');
     if (showMg) showMg.onchange = () => {
@@ -36746,10 +36850,10 @@
   function dgvRowLine(r) {
     const queued = REV.revokeQueued.has(r.id);
     const can = revSelectable(r);
-    const why = queued ? 'A revoke of this assignment is already queued' : (revCentralOf(r).readOnly ? 'From the managing tenant (central): read-only here' : '');
+    const why = queued ? 'A revoke of this assignment is already queued' : (revIsApiPermission(r) ? REV_API_PERM_HINT : (revCentralOf(r).readOnly ? 'From the managing tenant (central): read-only here' : ''));
     return '<label class="dgv-row' + (can ? '' : ' dis') + '" data-id="' + escapeHtml(r.id) + '"' + (why ? ' title="' + escapeHtml(why) + '"' : '') + '>' +
       '<input type="checkbox" class="dgv-check" data-id="' + escapeHtml(r.id) + '"' + (REV.selected.has(r.id) && can ? ' checked' : '') + (can && dgvCanRevoke() ? '' : ' disabled') + '>' +
-      '<span class="dgv-what">' + escapeHtml(revApprovalItemText(r)) + revOwnBadge(r) + revCentralChip(r) +
+      '<span class="dgv-what">' + escapeHtml(revApprovalItemText(r)) + revStateChip(r) + revOwnBadge(r) + revCentralChip(r) +
       (queued ? '<span class="rev-queued-chip">revoke queued</span>' : '') + '</span></label>';
   }
   function dgvRenderDetail(sel) {

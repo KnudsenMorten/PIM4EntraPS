@@ -1,0 +1,356 @@
+{
+  "schema": "pim-privilege-tier-api-permissions/1",
+  "note": "DELEGATION-SCOPE-1 (2026-11-11). The HIGH-PRIVILEGE application permissions (Tier 0 + Tier 1) of the privilege tier catalog: SecurityInsight privilege-tier-catalog.locked.json (EntraID_APIPermissions_Tier0/Tier1, PermissionType Application) raised to the TIER-CATALOG-1 tier floors (framework 12.29, Invardia data/tier-catalog/floors.json); an entry in both takes the more privileged tier. Generated, never hand-tiered. Replaced by the downloaded daily catalog when PIM reads TIER-CATALOG-1 (framework 12.29, PIM not yet).",
+  "catalogGeneratedAt": "2026-05-03 00:08:22",
+  "floorsSource": "SI classifier prompt lists (Invoke-PrivilegeTierClassifier.ps1 lines 212 / 222)",
+  "entries": [
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Application.ReadWrite.All",
+      "tier": "Tier0"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "AppRoleAssignment.ReadWrite.All",
+      "tier": "Tier0"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Directory.ReadWrite.All",
+      "tier": "Tier0"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Domain.ReadWrite.All",
+      "tier": "Tier0"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "OnPremDirectorySynchronization.ReadWrite.All",
+      "tier": "Tier0"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Organization.ReadWrite.All",
+      "tier": "Tier0"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Policy.ReadWrite.AuthenticationMethod",
+      "tier": "Tier0"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "PrivilegedAccess.ReadWrite.AzureAD",
+      "tier": "Tier0"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "PrivilegedAccess.ReadWrite.AzureADGroup",
+      "tier": "Tier0"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "RoleManagement.ReadWrite.CloudPC",
+      "tier": "Tier0"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "RoleManagement.ReadWrite.Directory",
+      "tier": "Tier0"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "AccessReview.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Agreement.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "AppCatalog.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "AppCertTrustConfiguration.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "AppFederatedCredentialIssuers.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Application.ReadUpdate.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Application.ReadWrite.OwnedBy",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "AuthenticationContext.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "CrossTenantIdentityMapping.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "DelegatedAdminRelationship.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "DeviceManagementApps.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "DeviceManagementCloudCA.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "DeviceManagementManagedDevices.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "DeviceManagementServiceConfig.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "EntitlementManagement.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "EventListener.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Group.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "IdentityProvider.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "OnPremisesPublishingProfiles.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "OrgSettings-AppsAndServices.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Policy.ReadWrite.AccessReview",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Policy.ReadWrite.AuthenticationFlows",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Policy.ReadWrite.B2BManagementPolicy",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Policy.ReadWrite.ConditionalAccess",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Policy.ReadWrite.ConsentRequest",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Policy.ReadWrite.PermissionGrant",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Policy.ReadWrite.Recovery",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "PublicKeyInfrastructure.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "RoleAssignmentSchedule.ReadWrite.Directory",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "RoleAssignmentSchedule.Remove.Directory",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "RoleEligibilitySchedule.ReadWrite.Directory",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "RoleManagementPolicy.ReadWrite.AzureADGroup",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "RoleManagementPolicy.ReadWrite.Directory",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "RoleManagementPolicy.ReadWrite.EntraAppRole",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "ServicePrincipalEndpoint.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "SharePointTenantSettings.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Sites.FullControl.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "SpiffeTrustDomain.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "Synchronization.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "TrustFrameworkKeySet.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "User.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Microsoft Graph",
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "value": "UserAuthenticationMethod.ReadWrite.All",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Office 365 Exchange Online",
+      "appId": "00000002-0000-0ff1-ce00-000000000000",
+      "value": "Exchange.ManageAsApp",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Office 365 Exchange Online",
+      "appId": "00000002-0000-0ff1-ce00-000000000000",
+      "value": "Exchange.ManageAsAppV2",
+      "tier": "Tier1"
+    },
+    {
+      "api": "Office 365 Information Protection",
+      "appId": "2f3f02c9-5679-4a5c-a605-0de55b07d135",
+      "value": "RoleGroupMember.tenant.write",
+      "tier": "Tier1"
+    }
+  ]
+}

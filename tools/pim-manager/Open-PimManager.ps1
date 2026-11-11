@@ -11393,9 +11393,48 @@ function Get-PimActiveAssignmentsCached {
         $q = Request-PimActiveAssignmentsSnapshotRefresh -Reason $why
         $queued = [bool]$q.queued; $qErr = "$($q.error)"
     }
-    return (ConvertTo-PimActiveAssignmentsSnapshotView -Entry $entry -NowUtc $NowUtc `
+    $view = ConvertTo-PimActiveAssignmentsSnapshotView -Entry $entry -NowUtc $NowUtc `
                 -CadenceMinutes (Get-PimActiveAssignmentsSnapshotCadenceMinutes) -RefreshQueued $queued -QueueError $qErr `
-                -RefreshState $rs -RefreshAlreadyQueued ([bool]($QueueRefresh -and $already)) -ReadError $readErr -SnapshotStamp $stamp)
+                -RefreshState $rs -RefreshAlreadyQueued ([bool]($QueueRefresh -and $already)) -ReadError $readErr -SnapshotStamp $stamp
+    # DELEGATION-SCOPE-1 (owner 2026-11-11): the engine refreshes in parts -- "as of" per part, from the stored header
+    try { if ($view -is [System.Collections.IDictionary]) { $view['partsReadUtc'] = ConvertTo-PimAaPartReadTimes -Entry $entry -RefreshedUtc "$($view['refreshedUtc'])" } } catch { }
+    return $view
+}
+
+function ConvertTo-PimAaPartReadTimes {
+    <#
+      PURE. DELEGATION-SCOPE-1 (owner 2026-11-11: Entra, apps and group members every ~2 h; Azure once a night and after
+      PIM changes an Azure assignment). The stored header's per-part read times -> @{ perPart; entra; azure; groups }.
+      An OLD header (none of entraReadUtc / azureReadUtc / groupsReadUtc) = perPart false and each part = the single
+      refreshedUtc, exactly the one "as of" shown before. A part that one header lacks takes refreshedUtc too.
+      Values are passed through as text (ISO) -- never parsed into local time here.
+    #>
+    param([AllowNull()][object]$Entry, [AllowNull()][string]$RefreshedUtc = '')
+    $get = {
+        param($n)
+        if ($null -eq $Entry) { return '' }
+        $v = $null
+        if ($Entry -is [System.Collections.IDictionary]) { if ($Entry.Contains($n)) { $v = $Entry[$n] } }
+        elseif ($Entry.PSObject.Properties[$n]) { $v = $Entry.$n }
+        if ($null -eq $v) { return '' }
+        # pwsh 7 hands an ISO text back as [datetime]: the same 'yyyy-MM-ddTHH:mm:ssZ' as refreshedUtc, never the culture's form
+        if ($v -is [DateTimeOffset]) { return $v.UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture) }
+        if ($v -is [datetime]) {
+            $d = if ($v.Kind -eq [DateTimeKind]::Unspecified) { [datetime]::SpecifyKind($v, [DateTimeKind]::Utc) } else { $v.ToUniversalTime() }
+            return $d.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        return "$v".Trim()
+    }
+    $e = & $get 'entraReadUtc'; $a = & $get 'azureReadUtc'; $g = & $get 'groupsReadUtc'
+    $fb = "$RefreshedUtc".Trim()
+    if (-not $fb) { $fb = & $get 'refreshedUtc' }
+    $per = [bool]($e -or $a -or $g)
+    return [ordered]@{
+        perPart = $per
+        entra   = $(if ($e) { $e } else { $fb })
+        azure   = $(if ($a) { $a } else { $fb })
+        groups  = $(if ($g) { $g } else { $fb })
+    }
 }
 
 function Get-PimActiveAssignmentsState {
@@ -11489,8 +11528,14 @@ function ConvertTo-PimActiveAssignmentsPageRequest {
         showDeleted = (& $on 'showDeleted'); showManaged = (& $on 'showManaged'); showProduct = (& $on 'showProduct')
         showSupport = (& $on 'showSupport'); showBreakGlass = (& $on 'showBreakGlass')
         lm = $lm
+        # DELEGATION-SCOPE-1: active | eligible | all (default all). ('state=1' alone is the poll, answered before this.)
+        # (normalised again by the engine's ConvertTo-PimActiveAssignmentsStateFilter in the query)
+        state = $(if ((& $one 'state').Trim().ToLowerInvariant() -in @('active', 'eligible')) { (& $one 'state').Trim().ToLowerInvariant() } else { 'all' })
     }
 }
+# DELEGATION-SCOPE-1: the paged query of "Review all delegations" (app-permission, active / eligible, a store without the
+# State column) is the ENGINE's -- Invoke-PimSqlActiveAssignmentsQuery + Get-PimActiveAssignmentsViewCounts in
+# engine/_shared/PIM-SqlStore.ps1. This file defines no copy of its own (Test-PimActiveAssignmentsTable F23 guards it).
 
 function Get-PimActiveAssignmentsMarksContext {
     <#
@@ -11551,7 +11596,10 @@ function ConvertTo-PimActiveAssignmentsPagedJson {
         if ($j.Length -lt 2 -or $j[0] -ne '{' -or $j[$j.Length - 1] -ne '}') { continue }
         if (-not $first) { [void]$sb.Append(',') }
         $first = $false
-        $marks = '"managed":' + $(if ([bool]$r.managed) { 'true' } else { 'false' }) + ',"ownKind":"' + $(if ("$($r.ownKind)" -in @('product', 'support', 'breakglass')) { "$($r.ownKind)" } else { '' }) + '"}'
+        $marks = '"managed":' + $(if ([bool]$r.managed) { 'true' } else { 'false' }) + ',"ownKind":"' + $(if ("$($r.ownKind)" -in @('product', 'support', 'breakglass')) { "$($r.ownKind)" } else { '' }) + '"'
+        # DELEGATION-SCOPE-1: a row of an old store carries no "state" -- it is active; a row that has one keeps its own
+        if ($r.PSObject.Properties['state'] -and $j.IndexOf('"state":') -lt 0) { $marks += ',"state":"' + $(if ("$($r.state)" -eq 'eligible') { 'eligible' } else { 'active' }) + '"' }
+        $marks += '}'
         if ($j.Length -eq 2) { [void]$sb.Append('{').Append($marks) }
         else { [void]$sb.Append($j, 0, $j.Length - 1).Append(',').Append($marks) }
     }
@@ -11647,12 +11695,17 @@ function Get-PimActiveAssignmentsPagedAnswer {
         $body['listQuery'] = [ordered]@{ applied = $true; conditions = $lmCond.Count; search = [bool]$lmSearch }
     }
     try {
-        $res = Invoke-PimSqlActiveAssignmentsQuery -ConnectionString $cs -SnapshotId $sid -Type "$($PageRequest.type)" -Search "$($PageRequest.q)" `
+        # DELEGATION-SCOPE-1: the engine's ONE query (the app-permission type, the active / eligible filter, a store without
+        # the State column = every row active)
+        $prState = 'all'; if ($PageRequest.PSObject.Properties['state']) { $prState = ConvertTo-PimActiveAssignmentsStateFilter -State "$($PageRequest.state)" }
+        $res = Invoke-PimSqlActiveAssignmentsQuery -ConnectionString $cs -SnapshotId $sid -Type "$($PageRequest.type)" -State $prState -Search "$($PageRequest.q)" `
                   -Aliases @($PageRequest.aliases) -ScopeIs @($PageRequest.scopeIs) -Sort "$($PageRequest.sort)" -Descending:([bool]$PageRequest.descending) `
                   -Page ([int]$PageRequest.page) -PageSize $size -ShowDeleted ([bool]$PageRequest.showDeleted) -ShowManaged ([bool]$PageRequest.showManaged) `
                   -ShowProduct ([bool]$PageRequest.showProduct) -ShowSupport ([bool]$PageRequest.showSupport) -ShowBreakGlass ([bool]$PageRequest.showBreakGlass) @lmArgs
-        $view = Get-PimActiveAssignmentsViewCounts -Groups @($res.groups) -ShowDeleted ([bool]$PageRequest.showDeleted) -ShowManaged ([bool]$PageRequest.showManaged) `
+        $view = Get-PimActiveAssignmentsViewCounts -Groups @($res.groups) -State $prState -ShowDeleted ([bool]$PageRequest.showDeleted) -ShowManaged ([bool]$PageRequest.showManaged) `
                   -ShowProduct ([bool]$PageRequest.showProduct) -ShowSupport ([bool]$PageRequest.showSupport) -ShowBreakGlass ([bool]$PageRequest.showBreakGlass)
+        $body['stateFilter'] = "$($res.state)"
+        $body['stateKnown'] = [bool]$res.hasState
         $expected = -1
         if ("$($body['rowCount'])".Trim() -match '^\d+$') { $expected = [long]"$($body['rowCount'])" }
         if ($expected -ge 0 -and [long]$view.total -ne $expected) { $loadErr = "the stored rows are incomplete ($([long]$view.total) of $expected)" }
@@ -12775,7 +12828,11 @@ function Invoke-PimActiveAssignmentRevokeBatch {
             # absent = active, exactly as before. The value comes from the row being revoked.
             $rowAssignType = "$($r.assignmentType)".Trim()
             if (-not $rowAssignType -and "$($r.memberType)".Trim()) { $rowAssignType = "$($r.memberType)".Trim() }
+            # DELEGATION-SCOPE-1: a snapshot row says active / eligible in "state" -- the same eligible removal path
+            if (-not $rowAssignType -and "$($r.state)".Trim() -ieq 'eligible') { $rowAssignType = 'Eligible' }
             $isEligible = ($rowAssignType -ieq 'Eligible' -or $rowAssignType -ieq 'Eligibility')
+            # DELEGATION-SCOPE-1 (NEGATIVE): an app's API permission is shown read-only on Review all delegations -- never queued
+            if ($type -eq 'app-permission') { throw "an app's API permission is not revoked from PIM Manager -- remove it in Entra ID > Enterprise applications" }
             switch ($type) {
                 'entra-role' {
                     # Trim a possible roleDefinitions/<guid> prefix that the original schedule

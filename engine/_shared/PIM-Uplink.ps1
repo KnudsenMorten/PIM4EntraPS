@@ -1112,8 +1112,8 @@ function Get-PimUplinkAdoptionQueries {
         # wizard "Roles only + groups separate"): PIM-for-Groups memberships are NOT role assignments -- at schools they are ~98%
         # of the rows (one install 514k), so the fleet showed 837k "active assignments" for ~17k real ones. The group
         # memberships stay visible per kind in the Security record (domains: pim-for-groups).
-        activeAssignments    = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND Kind IN (N'entra-role', N'azure-rbac')) END AS n"
-        azureRoleAssignments = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND Kind = N'azure-rbac') END AS n"
+        activeAssignments    = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND State = N'active' AND Kind IN (N'entra-role', N'azure-rbac')) END AS n"
+        azureRoleAssignments = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND State = N'active' AND Kind = N'azure-rbac') END AS n"
         # the activation ledger (pim.ImpactActivations: every time-bound active assignment the snapshot job saw, once) -- by start
         activations30d       = "SELECT COUNT_BIG(*) AS n FROM pim.ImpactActivations WHERE StartUtc >= DATEADD(day, -30, SYSUTCDATETIME())"
         # approval decisions in the audit trail (approved / denied requests, approved mass-change holds) -- the Dashboard's rule
@@ -1127,18 +1127,18 @@ function Get-PimUplinkAdoptionQueries {
         # queue (Get-PimApprovalRequests reads it the same way); a value that is not JSON = left out.
         approvalsPending     = "$(Get-PimUplinkSettingJsonSql -Name 'ApprovalRequests') SELECT CASE WHEN @v IS NULL THEN CAST(0 AS bigint) WHEN ISJSON(@v) = 0 THEN NULL ELSE (SELECT COUNT_BIG(*) FROM OPENJSON(@v) j WHERE j.[type] = 5 AND UPPER(ISNULL(CASE WHEN j.[type] = 5 THEN JSON_VALUE(j.[value], '$.status') END, N'')) = N'PENDING') END AS n"
         # standing access from the last COMPLETE active-assignments snapshot: Entra role assignments with no end date
-        permanentPrivilegedAssignments = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND Kind = N'entra-role' AND EndUtc IS NULL) END AS n"
+        permanentPrivilegedAssignments = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND State = N'active' AND Kind = N'entra-role' AND EndUtc IS NULL) END AS n"
         # ... of the Global Administrator role (template id 62e90394-...): the row's managed identity r|<principal>|<role>|<scope>
-        permanentGlobalAdmins = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND Kind = N'entra-role' AND EndUtc IS NULL AND IdentityKey LIKE N'r|%|62e90394-69f5-4237-9190-012177145e10|%') END AS n"
+        permanentGlobalAdmins = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND State = N'active' AND Kind = N'entra-role' AND EndUtc IS NULL AND IdentityKey LIKE N'r|%|62e90394-69f5-4237-9190-012177145e10|%') END AS n"
         # distinct guests (#EXT# in the UPN -- counted IN SQL, no UPN leaves) / service principals holding any active assignment
-        privilegedGuests     = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(DISTINCT LOWER(PrincipalId)) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND PrincipalUpn LIKE N'%#EXT#%' AND ISNULL(PrincipalId, N'') <> N'') END AS n"
-        privilegedSpns       = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(DISTINCT LOWER(PrincipalId)) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND PrincipalKind = N'servicePrincipal' AND ISNULL(PrincipalId, N'') <> N'') END AS n"
+        privilegedGuests     = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(DISTINCT LOWER(PrincipalId)) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND State = N'active' AND Kind <> N'app-permission' AND PrincipalUpn LIKE N'%#EXT#%' AND ISNULL(PrincipalId, N'') <> N'') END AS n"
+        privilegedSpns       = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(DISTINCT LOWER(PrincipalId)) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND State = N'active' AND Kind <> N'app-permission' AND PrincipalKind = N'servicePrincipal' AND ISNULL(PrincipalId, N'') <> N'') END AS n"
         # rows not managed by PIM (Managed = 0) -- only once the snapshot's marks were computed (MarksKey set), else unknown
         # §33.0 round 2: only while the marks are CURRENT (Get-PimUplinkMarksCurrentSql: computed, from a COMPLETE managed
         # list, after that list was last written) -- marks from no list / an older list would count managed rows as outside
         # 2.4.650: ROLE assignments only (Entra roles + Azure RBAC), as the key says -- not group memberships (see activeAssignments)
-        roleAssignmentsOutsidePim = "SELECT CASE WHEN $snap IS NULL OR NOT $(Get-PimUplinkMarksCurrentSql -SnapshotExpr $snap) THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND Managed = 0 AND Kind IN (N'entra-role', N'azure-rbac')) END AS n"
-        assignmentsExpiring7d = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND EndUtc >= SYSUTCDATETIME() AND EndUtc < DATEADD(day, 7, SYSUTCDATETIME())) END AS n"
+        roleAssignmentsOutsidePim = "SELECT CASE WHEN $snap IS NULL OR NOT $(Get-PimUplinkMarksCurrentSql -SnapshotExpr $snap) THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND State = N'active' AND Managed = 0 AND Kind IN (N'entra-role', N'azure-rbac')) END AS n"
+        assignmentsExpiring7d = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND State = N'active' AND EndUtc >= SYSUTCDATETIME() AND EndUtc < DATEADD(day, 7, SYSUTCDATETIME())) END AS n"
         # the drift document's own total (pim.TenantCache kind 'drift'); no document = left out
         driftItems           = "SELECT CASE WHEN ISJSON(ValueJson) = 1 THEN TRY_CAST(JSON_VALUE(ValueJson, '$.total') AS bigint) END AS n FROM pim.TenantCache WHERE Kind = N'drift'"
         # items verify-convergence holds as not yet converged (pim.Settings 'ConvergenceState' firstSeen map); never ran = left out
@@ -2130,7 +2130,7 @@ function Get-PimUplinkSecuritySql {
     $sub = ''
     foreach ($sk in @(Get-PimUplinkSecuritySubKinds)) {
         $sel = (@($sk.scopes) | ForEach-Object { "N'$_'" }) -join ', '
-        $w = "a.SnapshotId = @s AND a.Kind = N'$($sk.parent)' AND a.IdentityKey LIKE N'$($sk.identityLike)'"
+        $w = "a.SnapshotId = @s AND a.State = N'active' AND a.Kind = N'$($sk.parent)' AND a.IdentityKey LIKE N'$($sk.identityLike)'"
         $sub += @"
 
 UNION ALL
@@ -2164,7 +2164,7 @@ SELECT k.Kind AS kind, @c AS collectionUtc, @mk AS marksKnown,
   SUM(CASE WHEN a.EndUtc >= SYSUTCDATETIME() AND a.EndUtc < DATEADD(day, 7, SYSUTCDATETIME()) THEN 1 ELSE 0 END) AS assignmentsExpiring7d,
   (SELECT COUNT_BIG(*) FROM pim.ImpactActivations i WHERE i.Kind = k.Kind AND i.StartUtc >= DATEADD(day, -30, SYSUTCDATETIME())) AS activations30d
 FROM (VALUES $vals) k(Kind)
-LEFT JOIN pim.ActiveAssignmentRows a ON a.SnapshotId = @s AND a.Kind = k.Kind
+LEFT JOIN pim.ActiveAssignmentRows a ON a.SnapshotId = @s AND a.State = N'active' AND a.Kind = k.Kind
 GROUP BY k.Kind
 $sub;
 "@

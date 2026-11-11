@@ -3785,6 +3785,71 @@ the key of what its marks were last computed from).
   it always was. The readers that work on the whole set (the Discovery and gaps report, the Home expiring-access
   tile, a caller with a portal profile) get the header with every row attached -- the same shape as before.
 
+**What the snapshot reads -- delegation scope (2026-11-11).** PIM Manager manages two things, PIM groups and PIM
+admins, and shows ONE read-only tenant-wide view of everything else that grants access ("Review all delegations").
+The snapshot reads only what that view needs -- never every group:
+
+1. **Entra roles, active AND eligible**, tenant-wide: role assignment schedules and role eligibility schedules (paged).
+2. **Azure roles, active AND eligible**: one Azure Resource Graph query for the active role assignments, and the role
+   eligibility schedules of every subscription the engine identity sees (de-duplicated by schedule).
+3. **PIM-for-Groups schedules, active AND eligible (members and owners), only for these groups**, chosen AFTER 1 + 2:
+   (a) PIM's own groups -- defined in PIM (the engine's managed list) or named by the tenant's PIM group naming
+   convention; (b) role-assignable groups; (c) groups that hold an Entra role or an Azure role, active or eligible.
+   An ordinary group that is none of these is never read, whatever members it has; a mail-only distribution list is
+   never read; a dynamic group is skipped (Microsoft does not support PIM for Groups on it). Every chosen group is read
+   in full on every run (assignment and eligibility schedule, 20 requests per `$batch`).
+4. **Apps holding a high-privilege API permission**: for each API of the privilege tier list (Tier 0 + Tier 1
+   application permissions of the privilege tier catalog, shipped with the engine) ONE lookup of that API's service
+   principal and ONE paged read of the app role assignments made TO it. Only a catalogued permission held by a service
+   principal becomes a row; nothing is read per app in the tenant.
+
+Deleted principals and service principals that hold an Entra or Azure role stay rows (principal kind `deleted` /
+`servicePrincipal`).
+
+**Split cadence.** Entra roles, the chosen groups and the app permissions are read on every run of the job (every
+120 minutes by default). **Azure** (active + eligible) is read at most once a night, at the first run between 00:00
+and 05:00 UTC, plus right after PIM itself changed an Azure assignment: a committed change to an Azure resource
+assignment, or an applied Azure revoke, sets a "refresh Azure" mark (`pim.Settings` `ActiveAssignmentsAzureRefresh`
+`{ requestedUtc; reason }`) and queues one run; Azure is then read on every run for 3 hours, because the engine applies
+the change after the commit. A stored Azure read older than 26 hours is read again whatever the clock. Between those
+reads the Azure rows are **carried forward** from the stored generation; when they cannot be read back, or their number
+is not the one the header states, Azure is read (a part of a snapshot is never presented as complete). A store without
+the table form reads Azure on every run, as before. **The Manager never reads the tenant**: Refresh only queues the job
+(`Request-PimActiveAssignmentsSnapshotRefresh` -> a scheduler trigger of type `active-assignments-snapshot`).
+
+**Data contract (the stored rows; the page is built to exactly this).**
+- `pim.ActiveAssignmentRows` has a column `State NVARCHAR(10) NOT NULL DEFAULT N'active'`, values `'active'` |
+  `'eligible'`. The DDL is ADDITIVE and guarded (`IF COL_LENGTH('pim.ActiveAssignmentRows', 'State') IS NULL ALTER
+  TABLE ... ADD`), applied by the schema step; rows stored before it read as `'active'`. The same value is in
+  `RowJson` as `"state"`. No index on it. Until the schema step has run, the job writes the rows without the column
+  (they read `'active'` there; `RowJson` still carries `"state"`) -- there is no schema change at run time.
+- `Kind` values: `'entra-role'` | `'azure-rbac'` | `'pim-for-groups'` | `'app-permission'` (new).
+- `'pim-for-groups'` rows exist ONLY for the groups in point 3 above. `GroupId` = the group, `Role` = member | owner
+  as today, `State` = active | eligible.
+- `'app-permission'` rows: `Principal` = the app's display name, `PrincipalId` = the service principal id,
+  `PrincipalKind` = `'servicePrincipal'`, `Role` = the permission value (e.g. `RoleManagement.ReadWrite.Directory`),
+  `Scope` = the resource API's display name (e.g. `'Microsoft Graph'`), `State` = `'active'`. `Managed` = true only when
+  it is one of PIM's own identities (the product's identities or the support app, the same lists as `OwnKind`).
+  `RowJson` also carries `"tier"` (the catalog's tier name, `Tier0` | `Tier1`), `"resourceId"` (the API's service
+  principal) and `roleDefinitionId` = the app role id.
+- Row ids: active rows keep `entra-role:<id>`, `azure-rbac:<id>`, `pim-for-groups:<id>`; eligible rows are
+  `entra-role-eligible:<id>`, `azure-rbac-eligible:<id>`, `pim-for-groups-eligible:<id>`; app rows
+  `app-permission:<assignment id>`. An eligible Azure row carries no `roleAssignmentId` (it cannot be revoked as an
+  active assignment).
+- Everything else keeps its current fields and meaning.
+- **The header** (`pim.TenantCache` kind `active-assignments`) adds when each part was read: `entraReadUtc`,
+  `azureReadUtc`, `groupsReadUtc`, `appPermissionsReadUtc` (ISO UTC; `''` = that part was not read completely in this
+  generation), `azureMode` (`read` | `carried`), `azureReason`, `azureRows` (the Azure rows the generation holds -- what
+  the next run carries forward) and `groupsRead`. `counts` adds `app-permission` and `eligible` (per-kind counts include
+  both states). A surface error may carry `state = 'eligible'` when only the eligible half failed; a failed app read is
+  surface `app-permission`. The Manager's view hands the four stamps and `azureMode` / `azureReason` on unchanged.
+
+**Discovery and gaps (coverage) speaks only about PIM groups and PIM admins.** A group in PIM for Groups that is named
+in the tenant's PIM group pattern but that no definition covers is an **Orphan group** (members and owners counted
+active and eligible). A group outside the pattern is never judged there -- the earlier "Unmanaged privileged group"
+finding and its mails are gone (the status stays in the status list with a count of 0, so a stored report and the page
+still read).
+
 **Active PIM assignments — a scheduled snapshot, read across three surfaces, with honest error
 surfacing.** The live read takes minutes in a large tenant, so it never runs in the Manager's
 request loop. Scheduler job `active-assignments-snapshot` (default every **120 min**, editable on the
@@ -3799,8 +3864,8 @@ it. Rows held by principals the directory no longer knows are hidden by default 
 request (with a filter for bulk revoke). The snapshot enumerates *active* PIM assignments from three
 independent surfaces: **entra-role** (Graph `roleManagement/directory`
 assignment schedules), **pim-for-groups** (Graph
-`identityGovernance/privilegedAccess/group` assignment schedules, queried one
-filtered request per PIM-prefixed group via `$batch`), and **azure-rbac** (ARM
+`identityGovernance/privilegedAccess/group` assignment and eligibility schedules, queried one
+filtered request per chosen group via `$batch` -- see "What the snapshot reads" above), and **azure-rbac** (ARM
 `Microsoft.Authorization/roleAssignmentScheduleInstances` per visible
 subscription). Each surface is read independently so one failing surface never
 blanks the others. Crucially, a surface that **fails** (a 403 missing Graph

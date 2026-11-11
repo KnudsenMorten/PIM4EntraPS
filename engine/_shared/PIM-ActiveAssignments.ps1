@@ -38,13 +38,16 @@ $script:PimActiveAssignmentsSnapshotDefaultCadenceMinutes = 120
 # §70.1b option 2: the read is a SCHEDULER job now (see the header). The Manager serves the stored
 # snapshot; Refresh queues a trigger. Three sources are combined into a single row set:
 #
-#   * Entra-role active assignments:  GET /roleManagement/directory/roleAssignmentSchedules (REST, paged)
-#   * Azure-RBAC active assignments:  one Azure Resource Graph query (Get-PimArmActiveRoleAssignmentsViaArg)
-#   * PIM-for-Groups active assignments: one filtered assignmentSchedules read per group, 20 per $batch
+#   * Entra roles, active + eligible: roleAssignmentSchedules + roleEligibilitySchedules (REST, paged)
+#   * Azure roles, active + eligible: one Azure Resource Graph query + roleEligibilitySchedules per subscription
+#     (owner split cadence 2026-11-11: read nightly / after PIM changed Azure, carried forward between)
+#   * PIM-for-Groups, active + eligible: assignmentSchedules + eligibilitySchedules, 20 per $batch, ONLY for the groups of
+#     DELEGATION-SCOPE-1 (PIM's own, role-assignable, role-holding -- never every group)
+#   * app-permission: apps holding a high-privilege API permission (the privilege tier catalog)
 # All REST through PIM-Rest.ps1 (§100.42: no Graph / Az PowerShell module, no SDK fallback).
 #
-# The Revoke tab in the Manager only acts on ACTIVE (Assigned) rows -- not
-# Eligible -- because eligibility removal is a different operator workflow.
+# Every row carries state = 'active' | 'eligible'. The Revoke tab acts on ACTIVE rows only -- eligibility removal is a
+# different operator workflow.
 # ---------------------------------------------------------------------------
 
 function Initialize-PimManagerTenantConnection {
@@ -242,7 +245,7 @@ function ConvertTo-PimActiveAssignmentsStoreValues {
     #>
     param([Parameter(Mandatory)][object]$Row, [hashtable]$KeyCache = $null)
     # (written without helper script blocks: this runs once per row of a snapshot of tens of thousands)
-    $names = @('id', 'type', 'principal', 'principalId', 'principalKind', 'principalUpn', 'role', 'scope', 'groupId', 'start', 'end', 'justification', 'accessId', 'roleDefinitionId', 'directoryScopeId')
+    $names = @('id', 'type', 'principal', 'principalId', 'principalKind', 'principalUpn', 'role', 'scope', 'groupId', 'start', 'end', 'justification', 'accessId', 'roleDefinitionId', 'directoryScopeId', 'state')
     $val = @{}
     if ($Row -is [System.Collections.IDictionary]) { foreach ($n in $names) { if ($Row.Contains($n)) { $val[$n] = $Row[$n] } } }
     else { foreach ($n in $names) { $p = $Row.PSObject.Properties[$n]; if ($p) { $val[$n] = $p.Value } } }
@@ -276,6 +279,8 @@ function ConvertTo-PimActiveAssignmentsStoreValues {
         'azure-rbac'     { $idKey = ConvertTo-PimManagedIdentity -Kind 'a' -PrincipalId ([string]$val['principalId']) -RoleDefinitionId ([string]$val['roleDefinitionId']) -Scope ([string]$val['scope']) }
     }
     if ($idKey.Length -gt 450) { $idKey = $idKey.Substring(0, 450) }
+    # DELEGATION-SCOPE-1: 'active' | 'eligible'; a row without one (built before the change, or by an app-permission read) is active
+    $state = ([string]$val['state']).Trim().ToLowerInvariant(); if ($state -ne 'eligible') { $state = 'active' }
     return [ordered]@{
         RowId         = $cut['id']
         Kind          = $kind
@@ -290,6 +295,7 @@ function ConvertTo-PimActiveAssignmentsStoreValues {
         EndUtc        = $dates['end']
         Justification = $cut['justification']
         IdentityKey   = $idKey
+        State         = $state
         SearchText    = $search
         RowJson       = (ConvertTo-PimActiveAssignmentsRowJson -Row $Row -KeyCache $KeyCache)
     }
@@ -342,6 +348,9 @@ function Save-PimActiveAssignmentsSnapshotRows {
     $size = Get-PimActiveAssignmentRowsBatchSize
     $batches = 0; $retries = 0; $seq = 0; $written = 0
     $table = New-PimSqlActiveAssignmentRowTable
+    # DELEGATION-SCOPE-1: a table that has no State column yet (the schema step has not run, and this identity may not ALTER)
+    # is written without it -- every row then reads as 'active' there; RowJson still carries "state".
+    if ($ddl.PSObject.Properties['stateColumn'] -and -not [bool]$ddl.stateColumn -and $table.Columns.Contains('State')) { $table.Columns.Remove('State') }
     $keyCache = @{}
     # 2.4.645 (E3 regression, measured): the MANAGED mark goes in with the row when the engine's managed list is stored, so
     # the set-based marks pass after this write (the job's Update-PimActiveAssignmentsSnapshotMarks, the Manager's page)
@@ -363,7 +372,7 @@ function Save-PimActiveAssignmentsSnapshotRows {
                     $v = ConvertTo-PimActiveAssignmentsStoreValues -Row $row -KeyCache $keyCache
                     $dr = $table.NewRow()
                     $dr['SnapshotId'] = $sid; $dr['Seq'] = $seq
-                    foreach ($k in @($v.Keys)) { if ($null -eq $v[$k]) { $dr[$k] = [System.DBNull]::Value } else { $dr[$k] = $v[$k] } }
+                    foreach ($k in @($v.Keys)) { if (-not $table.Columns.Contains($k)) { continue }; if ($null -eq $v[$k]) { $dr[$k] = [System.DBNull]::Value } else { $dr[$k] = $v[$k] } }
                     if ($hasManagedCol) { $ik = "$($v['IdentityKey'])"; $dr['Managed'] = [bool]($null -ne $mlSet -and $ik -ne '' -and $mlSet.Contains($ik.ToLowerInvariant())) }
                     $table.Rows.Add($dr)
                     $seq++
@@ -386,22 +395,6 @@ function Save-PimActiveAssignmentsSnapshotRows {
     $sw.Stop()
     return [pscustomobject]@{ stored = $true; reason = ''; said = $false; where = "sql:pim.ActiveAssignmentRows/$sid + pim.TenantCache/active-assignments"
         rows = $written; batches = $batches; retries = $retries; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 2); snapshotId = $sid }
-}
-
-function Select-PimActiveAssignmentsPimGroupCandidates {
-    # BUG-217 (§33.28). PURE. The groups whose PIM-for-Groups assignments the Revoke snapshot reads: EVERY group that
-    # can carry one -- security-enabled or Microsoft 365 -- whatever it is called. A mail-only distribution list is
-    # skipped (it cannot be onboarded to PIM); a group whose securityEnabled is UNKNOWN (an older cache shape) is kept,
-    # so nothing is dropped on a guess. Dynamic groups are skipped by the caller, which counts them.
-    param([object[]]$Groups = @())
-    @(@($Groups) | Where-Object {
-        if (-not $_ -or -not $_.Id) { return $false }
-        $types = @($_.GroupTypes)
-        $sec = $null
-        if ($_.PSObject.Properties['SecurityEnabled']) { $sec = $_.SecurityEnabled }
-        if ($null -eq $sec -or "$sec" -eq '') { return $true }
-        return ([bool]$sec -or ($types -contains 'Unified'))
-    })
 }
 
 function Test-PimGroupNotPimOnboardedError {
@@ -447,15 +440,14 @@ function Get-PimManagerLookupCaches {
     }
     # Groups (PIM-prefix filter if naming-conventions present, else full set).
     try {
-            # 🔴 BUG-217 (§33.28, operator decision 2026-09-18): the Revoke snapshot covers EVERY PIM-for-Groups group,
-            # not only the ones named by our convention -- a legacy or hand-made PIM group's active grants are exactly
-            # what the revoke screen must show. So the cache is no longer prefix-filtered: ALL groups, paged 999 at a
-            # time (a 30k-group tenant is ~30 list calls), with the two fields the snapshot needs to skip groups that
-            # can never carry a PIM-for-Groups assignment (dynamic membership, mail-only distribution lists).
+            # The group LIST is not prefix-filtered: ALL groups, paged 999 at a time (a 125k-group tenant is ~126 list calls),
+            # because it names principals and finds the groups the snapshot reads (Select-PimActiveAssignmentsPimGroupCandidates:
+            # PIM's own, role-assignable, role-holding). 🔴 DELEGATION-SCOPE-1 (owner 2026-11-11) replaced BUG-217's "read the
+            # schedules of EVERY group": listing a group here never means its members are read.
             # 🔴 100.31 SNAPSHOT-OOM (2026-10-09): page by page, each group projected at once to the five fields (SDK casing;
             # PowerShell property names are case-insensitive, so .id / .displayName still answer). The old
             # `-All | ConvertTo-PimSdkShape` held every raw page AND a doubled-property copy of the whole group list.
-            # SNAP-INC (owner 2026-10-20): + isAssignableToRole -- a role-assignable group is re-read on every incremental run.
+            # + isAssignableToRole: a role-assignable group is always read (DELEGATION-SCOPE-1 (b)).
             $script:PimManager_Groups = @(Get-PimActiveAssignmentsGraphItems -Path "/groups?`$select=id,displayName,description,groupTypes,securityEnabled,isAssignableToRole&`$top=999" | ForEach-Object {
                 $sec = $null; if ($_.PSObject.Properties['securityEnabled']) { $sec = $_.securityEnabled }
                 $gt = @(); if ($null -ne $_.groupTypes) { $gt = @($_.groupTypes) }
@@ -647,7 +639,7 @@ function Get-PimActiveAssignmentSurfaceHint {
     # tools/setup/Grant-PimGraphAppRoles.ps1 invocation. Returns '' when the failure is
     # not a recognised auth/permission failure (transport/transient -> retry).
     param(
-        [Parameter(Mandatory)][ValidateSet('entra-role','azure-rbac','pim-for-groups')][string]$Surface,
+        [Parameter(Mandatory)][ValidateSet('entra-role','azure-rbac','pim-for-groups','app-permission')][string]$Surface,
         [string]$ErrorMessage = ''
     )
     $em = "$ErrorMessage"
@@ -667,6 +659,11 @@ function Get-PimActiveAssignmentSurfaceHint {
                     "(identityGovernance/privilegedAccess/group). Grant PrivilegedAccess.Read.AzureADGroup " +
                     "(or PrivilegedAccess.ReadWrite.AzureADGroup) with the published Grant-PimEnginePermissions.ps1 (browser sign-in) -- Overview > Verify permissions shows the exact command.")
         }
+        'app-permission' {
+            if (-not $isAuth) { return '' }
+            return ("Engine SPN is missing the Graph app-role to read which apps hold API permissions " +
+                    "(servicePrincipals/appRoleAssignedTo). Grant Application.Read.All with the published Grant-PimEnginePermissions.ps1 (browser sign-in) -- Overview > Verify permissions shows the exact command.")
+        }
         'azure-rbac' {
             return ("Engine SPN cannot read Azure-RBAC active assignments. Grant it at least Reader on the " +
                     "target subscription(s) (Azure RBAC, not a Graph app-role) so " +
@@ -676,58 +673,360 @@ function Get-PimActiveAssignmentSurfaceHint {
     return ''
 }
 
+# ===========================================================================
+# DELEGATION-SCOPE-1 (owner 2026-11-11) -- WHAT THE SNAPSHOT READS
+# ===========================================================================
+# The owner REPLACED BUG-217's "every group" rule (2026-09-18) with DELEGATION-SCOPE-1 on 2026-11-11: PIM-for-Groups
+# schedules are read ONLY for the groups that matter to delegation -- never for every group. Microsoft answers
+# assignmentSchedules with the PLAIN MEMBERS of any group, so "every group" turned ordinary groups and their members into
+# 'pim-for-groups' rows (one school tenant: 125,004 groups, 529,050 rows, 5-15 h per run, Graph throttled).
+# Read, in this order:
+#   1. Entra roles, ACTIVE + ELIGIBLE (roleAssignmentSchedules + roleEligibilitySchedules, tenant-wide, paged)
+#   2. Azure roles, ACTIVE + ELIGIBLE (one Resource Graph query + roleEligibilitySchedules per subscription) -- at most
+#      once a night plus after PIM changed an Azure assignment; carried forward from the last complete read otherwise
+#      (owner, split cadence 2026-11-11: Test-PimSnapshotAzureReadDue)
+#   3. PIM-for-Groups assignmentSchedules AND eligibilitySchedules (members AND owners) for the groups of
+#      Select-PimActiveAssignmentsPimGroupCandidates, chosen AFTER 1 + 2 (a group that holds a role is one of them)
+#   4. apps / service principals holding a HIGH-PRIVILEGE API permission (the privilege tier catalog, Tier 0 + Tier 1
+#      application permissions): appRoleAssignedTo of each catalogued RESOURCE service principal, never per app
+# Every row carries 'state' = 'active' | 'eligible' (app-permission rows: 'active').
+
+function Get-PimSnapshotAzureNightStartHourUtc { return 0 }   # the nightly Azure read: the first run at or after this hour (UTC) ...
+function Get-PimSnapshotAzureNightEndHourUtc   { return 5 }   # ... and before this one
+function Get-PimSnapshotAzureMarkWindowHours   { return 3 }   # after PIM changed an Azure assignment, Azure is re-read on every run this long (the engine applies the change after the commit)
+function Get-PimSnapshotAzureMaxAgeHours       { return 26 }  # a carried Azure read older than this is read again, whatever the clock (a missed night)
+function Get-PimSnapshotAzureRefreshSettingName { return 'ActiveAssignmentsAzureRefresh' }
+function Get-PimPrivilegeTierApiPermissionsPath { return (Join-Path $PSScriptRoot 'PIM-PrivilegeTierApiPermissions.json') }
+
+function Get-PimPrivilegeTierApiPermissions {
+    <#
+      The HIGH-PRIVILEGE application permissions (Tier 0 + Tier 1) of the privilege tier catalog, as shipped in
+      engine/_shared/PIM-PrivilegeTierApiPermissions.json (generated from SecurityInsight's privilege tier catalog raised to
+      the TIER-CATALOG-1 tier floors -- never hand-tiered). Returns [{ api; appId; value; tier }]. Throws when the file
+      cannot be read: the app-permission section is then a failed surface, never an empty "nothing found".
+    #>
+    param([string]$Path = '')
+    if (-not "$Path".Trim()) { $Path = Get-PimPrivilegeTierApiPermissionsPath }
+    $doc = [System.IO.File]::ReadAllText($Path) | ConvertFrom-Json
+    $out = @(foreach ($e in @($doc.entries)) {
+        if ($null -eq $e -or -not "$($e.appId)".Trim() -or -not "$($e.value)".Trim() -or "$($e.tier)" -notmatch '^Tier[01]$') { continue }
+        [pscustomobject]@{ api = "$($e.api)"; appId = "$($e.appId)".Trim().ToLowerInvariant(); value = "$($e.value)".Trim(); tier = "$($e.tier)" }
+    })
+    if ($out.Count -eq 0) { throw "the privilege tier list '$Path' has no Tier 0 / Tier 1 entry" }
+    return $out
+}
+
+function Select-PimActiveAssignmentsRoleHolderGroupIds {
+    <#
+      PURE. DELEGATION-SCOPE-1 (c). The ids (lower-case) of the GROUPS that are the principal of an Entra-role or Azure-role row,
+      active or eligible. A principal is a group when the group lookup has it (-GroupIds), the by-id resolver called it a group
+      (-ResolvedKinds: id -> kind), or the row says so (Azure: principalType 'Group').
+    #>
+    param([object[]]$Rows = @(), [string[]]$GroupIds = @(), [hashtable]$ResolvedKinds = @{})
+    $known = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($g in @($GroupIds)) { $s = "$g".Trim().ToLowerInvariant(); if ($s) { [void]$known.Add($s) } }
+    if ($ResolvedKinds) { foreach ($k in @($ResolvedKinds.Keys)) { if ("$($ResolvedKinds[$k])" -ieq 'group') { $s = "$k".Trim().ToLowerInvariant(); if ($s) { [void]$known.Add($s) } } } }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        $f = { param($n) if ($r -is [System.Collections.IDictionary]) { if ($r.Contains($n)) { $r[$n] } } elseif ($r.PSObject.Properties[$n]) { $r.$n } }
+        $t = "$(& $f 'type')"
+        if ($t -ne 'entra-role' -and $t -ne 'azure-rbac') { continue }
+        $p = "$(& $f 'principalId')".Trim().ToLowerInvariant(); if (-not $p) { continue }
+        $isGroup = $known.Contains($p) -or ("$(& $f 'principalType')" -ieq 'Group') -or ("$(& $f 'principalKind')" -ieq 'group')
+        if ($isGroup -and $seen.Add($p)) { $out.Add($p) }
+    }
+    return @($out.ToArray())
+}
+
+function Select-PimActiveAssignmentsPimGroupCandidates {
+    <#
+      PURE. DELEGATION-SCOPE-1 (owner 2026-11-11, REPLACES BUG-217's "every group" rule of 2026-09-18). The groups whose
+      PIM-for-Groups schedules (assignment AND eligibility) the snapshot reads -- ONLY:
+        (a) PIM's own groups: defined in PIM (-ManagedGroupIds, the engine's managed list) or named by PIM's group naming
+            convention (-Prefix, the literal before the first {Token}; at least 3 characters) -- so a leftover named like
+            ours is still read and coverage can call it an 'Orphan group';
+        (b) role-assignable groups (IsAssignableToRole);
+        (c) groups that hold an Entra role or an Azure role, active or eligible (-RoleHolderIds,
+            Select-PimActiveAssignmentsRoleHolderGroupIds) -- a role holder the group lookup does not know is added by id.
+      NEVER every group: an ordinary group that is none of these is not read, whatever members it has. A mail-only
+      distribution list is never read. Dynamic groups are skipped by the caller, which counts them.
+    #>
+    param([object[]]$Groups = @(), [string[]]$ManagedGroupIds = @(), [string[]]$RoleHolderIds = @(), [string]$Prefix = '')
+    $managed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($m in @($ManagedGroupIds)) { $s = "$m".Trim().ToLowerInvariant(); if ($s) { [void]$managed.Add($s) } }
+    $holders = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($h in @($RoleHolderIds)) { $s = "$h".Trim().ToLowerInvariant(); if ($s) { [void]$holders.Add($s) } }
+    $pfx = "$Prefix".Trim(); if ($pfx.Length -lt 3) { $pfx = '' }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($g in @($Groups)) {
+        if (-not $g -or -not "$($g.Id)".Trim()) { continue }
+        $id = "$($g.Id)".Trim().ToLowerInvariant()
+        $types = @($g.GroupTypes)
+        $sec = $null; if ($g.PSObject.Properties['SecurityEnabled']) { $sec = $g.SecurityEnabled }
+        $mailOnly = ($null -ne $sec -and "$sec" -ne '' -and -not [bool]$sec -and -not ($types -contains 'Unified'))
+        $rag = ($g.PSObject.Properties['IsAssignableToRole'] -and $g.IsAssignableToRole -eq $true)
+        $named = ($pfx -and "$($g.DisplayName)".StartsWith($pfx, [System.StringComparison]::OrdinalIgnoreCase))
+        $take = $managed.Contains($id) -or $holders.Contains($id) -or $rag -or $named
+        if ($take -and $mailOnly -and -not $holders.Contains($id) -and -not $rag) { $take = $false }
+        if ($take -and $seen.Add($id)) { $out.Add($g) }
+    }
+    # a role-holding group the lookup does not know (a failed or partial group list): read it by id all the same
+    foreach ($h in $holders) { if ($seen.Add($h)) { $out.Add([pscustomobject]@{ Id = $h; DisplayName = ''; Description = ''; GroupTypes = @(); SecurityEnabled = $null; IsAssignableToRole = $false }) } }
+    return @($out.ToArray())
+}
+
+function Test-PimSnapshotAzureReadDue {
+    <#
+      PURE. Owner split cadence (2026-11-11): the Azure part (active + eligible role schedules) is read at most ONCE A NIGHT,
+      off-peak, plus right after PIM changed an Azure assignment; between those its rows are CARRIED FORWARD. Returns
+      { read; reason }. -LastReadUtc: when the stored generation's Azure rows were read ($null / '' = none usable).
+      -MarkUtc: the 'refresh Azure' mark (pim.Settings ActiveAssignmentsAzureRefresh), $null = none.
+    #>
+    param([AllowNull()][object]$LastReadUtc, [AllowNull()][object]$MarkUtc = $null, [datetime]$NowUtc = [datetime]::UtcNow)
+    $now = $NowUtc.ToUniversalTime()
+    $last = ConvertTo-PimSnapshotStampUtc -Value $LastReadUtc
+    $mark = ConvertTo-PimSnapshotStampUtc -Value $MarkUtc
+    $r = { param($read, $why) [pscustomobject]@{ read = [bool]$read; reason = "$why" } }
+    if ($null -eq $last) { return (& $r $true 'no usable earlier Azure read') }
+    if ($null -ne $mark -and ($mark -gt $last -or ($now - $mark).TotalHours -lt (Get-PimSnapshotAzureMarkWindowHours))) {
+        return (& $r $true ("PIM changed an Azure assignment ({0})" -f $mark.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)))
+    }
+    $nightStart = [datetime]::SpecifyKind($now.Date.AddHours((Get-PimSnapshotAzureNightStartHourUtc)), [DateTimeKind]::Utc)
+    $nightEnd   = [datetime]::SpecifyKind($now.Date.AddHours((Get-PimSnapshotAzureNightEndHourUtc)), [DateTimeKind]::Utc)
+    if ($now -ge $nightStart -and $now -lt $nightEnd -and $last -lt $nightStart) { return (& $r $true 'nightly Azure read') }
+    if (($now - $last).TotalHours -ge (Get-PimSnapshotAzureMaxAgeHours)) { return (& $r $true ("the last Azure read is older than {0} h" -f (Get-PimSnapshotAzureMaxAgeHours))) }
+    return (& $r $false ("carried forward from the Azure read of {0}" -f $last.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)))
+}
+
+function ConvertTo-PimSnapshotStampUtc {
+    # PURE. A stored stamp (ISO text, or the [datetime] pwsh 7's ConvertFrom-Json makes of it) -> UTC [datetime], or $null.
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { if ($Value.Kind -eq [DateTimeKind]::Unspecified) { return [datetime]::SpecifyKind($Value, [DateTimeKind]::Utc) }; return $Value.ToUniversalTime() }
+    $s = "$Value".Trim(); if (-not $s) { return $null }
+    $d = [datetime]::MinValue
+    $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+    if ([datetime]::TryParse($s, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$d)) { return $d }
+    return $null
+}
+
+function ConvertFrom-PimActiveAssignmentsStoredRow {
+    # PURE. One stored row (parsed RowJson) -> the ordered row the snapshot builds, field for field. pwsh 7's
+    # ConvertFrom-Json turns the ISO start / end into [datetime]; they go back to the round-trip text the builder wrote.
+    param([AllowNull()][object]$Row)
+    if ($null -eq $Row) { return $null }
+    $o = [ordered]@{}
+    foreach ($p in $Row.PSObject.Properties) {
+        $v = $p.Value
+        if ($v -is [datetime]) {
+            $d = if ($v.Kind -eq [DateTimeKind]::Unspecified) { [datetime]::SpecifyKind($v, [DateTimeKind]::Utc) } else { $v.ToUniversalTime() }
+            $v = $d.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        $o[$p.Name] = $v
+    }
+    if (-not $o.Contains('state')) { $o['state'] = 'active' }   # a row stored before DELEGATION-SCOPE-1 is an active one
+    return $o
+}
+
+function New-PimSnapshotAzureContext {
+    <#
+      What the split cadence needs from the store, or $null when this process cannot carry Azure rows forward (no SQL
+      store, no table form, a helper not loaded) -- Azure is then read on every run, as before. The scriptblocks are the
+      test seams; nothing is read here.
+    #>
+    param([string]$ConnectionString = '')
+    foreach ($fn in 'Invoke-PimSqlScalar', 'Get-PimSqlActiveAssignmentRowsJson', 'Confirm-PimSqlActiveAssignmentRowsReady') {
+        if (-not (Get-Command $fn -ErrorAction SilentlyContinue)) { return $null }
+    }
+    if (-not "$ConnectionString".Trim() -and (Get-Command Get-PimTenantCacheStoreCs -ErrorAction SilentlyContinue)) { $ConnectionString = "$(Get-PimTenantCacheStoreCs)" }
+    if (-not "$ConnectionString".Trim()) { return $null }
+    $ddl = $null; try { $ddl = Confirm-PimSqlActiveAssignmentRowsReady -ConnectionString $ConnectionString } catch { $ddl = $null }
+    if ($null -eq $ddl -or -not [bool]$ddl.ok) { return $null }
+    return @{
+        cs          = $ConnectionString
+        # the stored header -- only the table form (a few hundred characters); the one-document form is never parsed here
+        ReadHeader  = { param($ctx)
+            $v = Invoke-PimSqlScalar -ConnectionString $ctx.cs -Sql 'SELECT ValueJson FROM pim.TenantCache WHERE Kind = @k' -Parameters @{ k = 'active-assignments' }
+            if ($null -eq $v -or $v -is [System.DBNull]) { return $null }
+            $t = "$v"; if ($t -notmatch '^\s*\{\s*"rowStore"\s*:\s*"table"') { return $null }
+            return ($t | ConvertFrom-Json) }
+        ReadMark    = { param($ctx)
+            $v = Invoke-PimSqlScalar -ConnectionString $ctx.cs -Sql 'SELECT ValueJson FROM pim.Settings WHERE Name = @n' -Parameters @{ n = (Get-PimSnapshotAzureRefreshSettingName) }
+            if ($null -eq $v -or $v -is [System.DBNull] -or -not "$v".Trim()) { return $null }
+            try { return ("$v" | ConvertFrom-Json).requestedUtc } catch { return $null } }
+        ReadAzure   = { param($ctx, $sid) Get-PimSqlActiveAssignmentRowsJson -ConnectionString $ctx.cs -SnapshotId $sid -Kind 'azure-rbac' }
+    }
+}
+
+function Get-PimSnapshotAzurePlan {
+    <#
+      The Azure part of one run: read it, or carry the previous generation's Azure rows forward. Never throws:
+        { read; reason; carried (rows, only when read = $false); previousReadUtc }
+      Fail-safe: no context, no stored header, no Azure read stamp in it, rows that cannot be read or do not add up to the
+      header's count = READ (never a partial snapshot presented as complete).
+    #>
+    param([AllowNull()][hashtable]$Context, [datetime]$NowUtc = [datetime]::UtcNow)
+    $readIt = { param($why, $prev) [pscustomobject]@{ read = $true; reason = "$why"; carried = $null; previousReadUtc = "$prev" } }
+    if ($null -eq $Context) { return (& $readIt 'no table store to carry Azure rows from' '') }
+    $head = $null
+    try { $head = & $Context.ReadHeader $Context } catch { return (& $readIt "the stored header could not be read: $($_.Exception.Message)" '') }
+    if ($null -eq $head) { return (& $readIt 'no stored table-form snapshot' '') }
+    $prev = ''; if ($head.PSObject.Properties['azureReadUtc']) { $prev = "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value $head.azureReadUtc)" }
+    $mark = $null; try { $mark = & $Context.ReadMark $Context } catch { $mark = $null }
+    $due = Test-PimSnapshotAzureReadDue -LastReadUtc $prev -MarkUtc $mark -NowUtc $NowUtc
+    if ($due.read) { return (& $readIt $due.reason $prev) }
+    $sid = [long]0; [void][long]::TryParse("$($head.snapshotId)", [ref]$sid)
+    $want = [long]-1; if ($head.PSObject.Properties['azureRows']) { [void][long]::TryParse("$($head.azureRows)", [ref]$want) }
+    if ($sid -le 0 -or $want -lt 0) { return (& $readIt 'the stored header does not say how many Azure rows it holds' $prev) }
+    try {
+        $json = & $Context.ReadAzure $Context $sid
+        $carried = New-Object System.Collections.Generic.List[object]
+        if ("$json".Length -gt 2) {
+            $parsed = ConvertFrom-Json -InputObject "$json"   # assigned first: PS 5.1 emits the array as ONE object
+            foreach ($x in @($parsed)) { foreach ($y in @($x)) { if ($null -ne $y) { $carried.Add((ConvertFrom-PimActiveAssignmentsStoredRow -Row $y)) } } }
+        }
+        if ([long]$carried.Count -ne $want) { throw ("{0} of {1} Azure rows came back" -f $carried.Count, $want) }
+        return [pscustomobject]@{ read = $false; reason = $due.reason; carried = $carried; previousReadUtc = $prev }
+    } catch {
+        return (& $readIt "the previous Azure rows could not be carried forward: $($_.Exception.Message)" $prev)
+    }
+}
+
+function Request-PimActiveAssignmentsAzureRefresh {
+    <#
+      The 'refresh Azure next run' mark: PIM changed an Azure assignment (a committed PIM-Assignments-Azure-Resources row, an
+      applied Azure revoke). Written by the scheduler's queue-apply; the snapshot reads Azure on every run for
+      Get-PimSnapshotAzureMarkWindowHours after it. Never throws: { ok; error }. -Writer: test seam.
+    #>
+    param([string]$ConnectionString = '', [string]$Reason = '', [datetime]$NowUtc = [datetime]::UtcNow, [scriptblock]$Writer = $null)
+    try {
+        $json = ConvertTo-Json -Compress -InputObject ([ordered]@{ requestedUtc = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture); reason = "$Reason" })
+        if (-not $Writer) {
+            if (-not "$ConnectionString".Trim() -and (Get-Command Get-PimTenantCacheStoreCs -ErrorAction SilentlyContinue)) { $ConnectionString = "$(Get-PimTenantCacheStoreCs)" }
+            if (-not "$ConnectionString".Trim()) { return [pscustomobject]@{ ok = $false; error = 'no SQL store' } }
+            $Writer = { param($cs, $j) Set-PimSqlSetting -ConnectionString $cs -Name (Get-PimSnapshotAzureRefreshSettingName) -ValueJson $j }
+        }
+        [void](& $Writer $ConnectionString $json)
+        return [pscustomobject]@{ ok = $true; error = '' }
+    } catch { return [pscustomobject]@{ ok = $false; error = "$($_.Exception.Message)" } }
+}
+
+function Get-PimActiveAssignmentsManagedGroupIds {
+    # The groups defined in PIM: the group part of the engine's managed list ('g|<principal>|<group>|<access>'). Best effort:
+    # none stored / no store / a failed read = none (the naming-convention rule still finds PIM's own groups).
+    param([string]$ConnectionString = '')
+    try {
+        if (-not (Get-Command Get-PimSqlManagedLiveIdentitySet -ErrorAction SilentlyContinue)) { return @() }
+        if (-not "$ConnectionString".Trim() -and (Get-Command Get-PimTenantCacheStoreCs -ErrorAction SilentlyContinue)) { $ConnectionString = "$(Get-PimTenantCacheStoreCs)" }
+        if (-not "$ConnectionString".Trim()) { return @() }
+        $set = Get-PimSqlManagedLiveIdentitySet -ConnectionString $ConnectionString
+        if ($null -eq $set) { return @() }
+        return @(foreach ($k in $set) { $p = "$k".Split('|'); if ($p.Count -ge 4 -and $p[0] -eq 'g' -and $p[2]) { $p[2] } })
+    } catch { return @() }
+}
+
+function Get-PimActiveAssignmentsAppPermissionRows {
+    <#
+      DELEGATION-SCOPE-1 (2). Apps / service principals holding a HIGH-PRIVILEGE API permission: for each RESOURCE in the
+      privilege tier list (Microsoft Graph, Exchange Online, ...) ONE lookup of its service principal (appRoles) and ONE paged
+      read of /servicePrincipals/{id}/appRoleAssignedTo -- never a read per app in the tenant. Only assignments of a catalogued
+      Tier 0 / Tier 1 app role to a service principal become rows. Returns { rows; reads; error } -- error = '' or the first
+      failure (the caller records the surface; rows read before a failure are dropped: all of the surface or none).
+      -Catalog: Get-PimPrivilegeTierApiPermissions (a test passes its own).
+    #>
+    param([AllowNull()][object[]]$Catalog = $null)
+    $rows = New-Object System.Collections.Generic.List[object]
+    $reads = 0
+    try {
+        if ($null -eq $Catalog) { $Catalog = @(Get-PimPrivilegeTierApiPermissions) }
+        $byApp = [ordered]@{}
+        foreach ($c in @($Catalog)) { if ($null -eq $c) { continue }; $a = "$($c.appId)".Trim().ToLowerInvariant(); if (-not $a) { continue }; if (-not $byApp.Contains($a)) { $byApp[$a] = @{} }; $byApp[$a]["$($c.value)".Trim().ToLowerInvariant()] = $c }
+        foreach ($appId in @($byApp.Keys)) {
+            $spResp = Invoke-PimGraph -Path ("/servicePrincipals?`$filter=appId eq '{0}'&`$select=id,displayName,appRoles" -f $appId)
+            $reads++
+            $sps = if ($null -ne $spResp -and ($spResp -isnot [array]) -and $spResp.PSObject.Properties['value']) { @($spResp.value) } else { @($spResp) }
+            $sp = @($sps | Where-Object { $_ -and "$($_.id)" })[0]
+            if (-not $sp) { continue }   # the API is not in this tenant: nothing can hold its permissions
+            $roleById = @{}
+            foreach ($ar in @($sp.appRoles)) { if ($ar -and "$($ar.id)" -and $byApp[$appId].ContainsKey("$($ar.value)".Trim().ToLowerInvariant())) { $roleById["$($ar.id)".ToLowerInvariant()] = $byApp[$appId]["$($ar.value)".Trim().ToLowerInvariant()] } }
+            if ($roleById.Count -eq 0) { continue }
+            $resName = "$($sp.displayName)"; if (-not $resName) { $resName = "$(@($byApp[$appId].Values)[0].api)" }
+            $reads++
+            Get-PimActiveAssignmentsGraphItems -Path ("/servicePrincipals/{0}/appRoleAssignedTo?`$top=999" -f $sp.id) | ForEach-Object {
+                $a = $_
+                if (-not $a -or "$($a.principalType)" -ine 'ServicePrincipal') { return }
+                $hit = $roleById["$($a.appRoleId)".ToLowerInvariant()]
+                if (-not $hit) { return }   # not a high-privilege permission (User.Read, ...): not listed
+                $rows.Add([ordered]@{
+                    id               = "app-permission:$($a.id)"
+                    type             = 'app-permission'
+                    principal        = "$($a.principalDisplayName)"
+                    principalId      = "$($a.principalId)"
+                    principalKind    = 'servicePrincipal'
+                    role             = "$($hit.value)"
+                    roleDefinitionId = "$($a.appRoleId)"
+                    scope            = $resName
+                    directoryScopeId = ''
+                    start            = ''
+                    end              = ''
+                    justification    = ''
+                    state            = 'active'
+                    tier             = "$($hit.tier)"
+                    resourceId       = "$($sp.id)"
+                })
+            }
+        }
+        return [pscustomobject]@{ rows = $rows; reads = $reads; error = '' }
+    } catch {
+        $rows.Clear()
+        return [pscustomobject]@{ rows = $rows; reads = $reads; error = "$($_.Exception.Message)" }
+    }
+}
+
 function Invoke-PimActiveAssignmentsSnapshot {
     # THE LIVE READ -- scheduler only (§70.1b option 2). Returns an ordered hashtable:
     #   @{ ok; rows = [...]; counts = @{...}; surfaceErrors; partial; loadedUtc; refreshedUtc; cacheHit=$false;
-    #      elapsedSec; durationMs; error? }
-    # This was the compute half of the Manager's Get-PimActiveAssignmentsCached, moved here unchanged in
-    # behaviour (row shape, counts, surfaceErrors, hints). What is GONE is the in-process 5-minute cache and
-    # the lazy PIM-Functions.psm1 import: the result is persisted to SQL by the job, and every reader in the
-    # REST path lives in PIM-Rest.ps1 (the psm1 only fed the SDK branches, and Get-PimNamePrefix is inlined as
-    # Get-PimActiveAssignmentsGroupPrefix).
-    # 🔒 Never call this from the Manager: one run is 140-170 s of Graph reads, and the Manager's single request
-    # loop would freeze every user for that long. Test-PimActiveAssignmentsSnapshot asserts it.
-    # -Fresh: reload the group/role/AU lookups AND forget principal names resolved earlier in this process, so a
-    # long-running scheduler loop does not keep a renamed or deleted principal's old label for ever.
-    # -GroupDelta: SNAP-INC (owner 2026-10-20) -- the incremental PIM-for-Groups read's context (New-PimSnapshotGroupDeltaContext);
-    # $null = every group is read, exactly as before. The result then carries 'groupDelta' (the state the job stores).
+    #      elapsedSec; durationMs; parts; error? }
+    # 🔒 Never call this from the Manager: one run is minutes of Graph reads, and the Manager's single request loop would
+    # freeze every user for that long. Test-PimActiveAssignmentsSnapshot asserts it.
+    # -Fresh: reload the group/role/AU lookups AND forget principal names resolved earlier in this process.
+    # -AzurePlan: the owner's split cadence (Get-PimSnapshotAzurePlan) -- read = $false carries the previous generation's Azure
+    #   rows forward instead of reading Azure. $null = Azure is read (a caller without a store).
+    # -ManagedGroupIds: the groups defined in PIM; $null = read from the store's managed list (best effort).
+    # DELEGATION-SCOPE-1: SNAP-INC's incremental group read (owner 2026-10-20) is GONE -- it existed only because EVERY group was
+    # read; the candidate set is now small, an eligible schedule is not announced by a membership delta, and its delta round
+    # itself walked every group and its members. Every candidate group is read in full on every run.
     [CmdletBinding()]
-    param([switch]$Fresh, [AllowNull()][hashtable]$GroupDelta = $null)
+    param([switch]$Fresh, [AllowNull()][object]$AzurePlan = $null, [AllowNull()][string[]]$ManagedGroupIds = $null)
 
     if ($Fresh) { $script:PimManager_ResolvedById = @{} }
-    # Initial connect + lookup caches (idempotent).
     Initialize-PimManagerTenantConnection
     Get-PimManagerLookupCaches -Force:$Fresh
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $runUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     $rows = New-Object System.Collections.ArrayList
-
-    # Per-surface failure ledger. Each entry: @{ surface; error; hint }.
-    # When a surface FETCH fails (auth/permission/transport) we record it here
-    # instead of silently swallowing to @(). This is what lets the endpoint and
-    # GUI tell "genuinely no active assignments" apart from "we could not read
-    # them" -- the old code returned ok=$true,total=0 for BOTH, which surfaced as
-    # the misleading "Cache may be empty -- click Refresh." (root cause).
+    # Per-surface failure ledger. Each entry: @{ surface; error; hint; state? }. A failed fetch is recorded, never an empty list:
+    # it lets the page tell "genuinely none" from "we could not read them". state = 'eligible' when only the eligible half failed.
     $surfaceErrors = New-Object System.Collections.ArrayList
+    $addErr = { param($surface, $em, $state)
+        $e = [ordered]@{ surface = $surface; error = "$em"; hint = (Get-PimActiveAssignmentSurfaceHint -Surface $surface -ErrorMessage "$em") }
+        if ($state) { $e['state'] = $state }
+        [void]$surfaceErrors.Add($e) }
+    $restArm = [bool](Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)
 
-    # REST only (§100.42): mint tokens + read Graph/ARM via PIM-Rest.ps1 -- no Graph/Az PowerShell SDK anywhere.
-    $restArm   = [bool](Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)
-
-    # ---- Entra-role active assignments -------------------------------------
-    # 🔴 100.31 SNAPSHOT-OOM (2026-10-09, a ~10.8k-object tenant at 0.5 CPU / 1 GiB: System.OutOfMemoryException). Every
-    # surface is now PROJECTED AS IT IS READ: a raw Graph / Resource Graph page becomes rows and is released before the
-    # next page is fetched (Get-PimActiveAssignmentsGraphItems / Get-PimArmActiveRoleAssignmentsViaArg -Stream piped into
-    # the row builder), the PIM-for-Groups items are released as they are built, and the stored document is written as
-    # ONE compact string (ConvertTo-PimActiveAssignmentsSnapshotJson) instead of ConvertTo-Json over every row. A surface
-    # that fails part-way drops the rows it had added, so the stored result is what it always was: all of a surface or none.
+    # ---- 1. Entra roles, ACTIVE + ELIGIBLE ----------------------------------
+    # 🔴 100.31 SNAPSHOT-OOM: every surface is PROJECTED AS IT IS READ (a raw page becomes rows and is released before the next
+    # page). A surface that fails part-way drops the rows it had added: all of a surface (half) or none.
     $addEntraRow = {
-        param($e)
+        param($e, $state)
         if (-not $e) { return }
         $principalLabel = Resolve-PimManagerPrincipalLabel -PrincipalId ([string]$e.PrincipalId)
         $roleLabel      = Resolve-PimManagerEntraRoleName -RoleDefinitionId ([string]$e.RoleDefinitionId)
         $scopeLabel     = Resolve-PimManagerDirectoryScope -DirectoryScopeId ([string]$e.DirectoryScopeId)
-        # SDK objects expose PascalCase; REST returns camelCase nested objects
-        # (ConvertTo-PimSdkShape only aliases the top level). Tolerate both.
         $si = if ($e.ScheduleInfo) { $e.ScheduleInfo } else { $e.scheduleInfo }
         $start = $null; $end = $null
         if ($si) {
@@ -740,7 +1039,7 @@ function Invoke-PimActiveAssignmentsSnapshot {
             }
         }
         [void]$rows.Add([ordered]@{
-            id               = "entra-role:$($e.Id)"
+            id               = $(if ($state -eq 'eligible') { "entra-role-eligible:$($e.Id)" } else { "entra-role:$($e.Id)" })
             type             = 'entra-role'
             principal        = $principalLabel
             principalId      = [string]$e.PrincipalId
@@ -750,39 +1049,43 @@ function Invoke-PimActiveAssignmentsSnapshot {
             directoryScopeId = [string]$e.DirectoryScopeId
             start            = $start
             end              = $end
-            justification    = ''  # Entra role assignment schedules don't carry the original activation justification on the assignment object.
+            justification    = ''  # Entra role schedules don't carry the original activation justification on the assignment object.
+            state            = $state
         })
     }
     $entraStart = $rows.Count
+    $entraOk = $true
     try {
-        # REST, page by page: each schedule becomes a row as its page arrives (property names are case-insensitive,
-        # so the PascalCase reads in the builder resolve on the camelCase REST objects; nested ones are tolerated).
-        Get-PimActiveAssignmentsGraphItems -Path '/roleManagement/directory/roleAssignmentSchedules' | ForEach-Object { & $addEntraRow $_ }
+        Get-PimActiveAssignmentsGraphItems -Path '/roleManagement/directory/roleAssignmentSchedules' | ForEach-Object { & $addEntraRow $_ 'active' }
     } catch {
         $em = "$($_.Exception.Message)"
         Write-Warning "  [revoke] entra-role assignment-schedules load failed: $em"
-        [void]$surfaceErrors.Add([ordered]@{
-            surface = 'entra-role'
-            error   = $em
-            hint    = (Get-PimActiveAssignmentSurfaceHint -Surface 'entra-role' -ErrorMessage $em)
-        })
-        if ($rows.Count -gt $entraStart) { $rows.RemoveRange($entraStart, $rows.Count - $entraStart) }   # all of a surface or none
+        [void]$surfaceErrors.Add([ordered]@{ surface = 'entra-role'; error = $em; hint = (Get-PimActiveAssignmentSurfaceHint -Surface 'entra-role' -ErrorMessage $em) })
+        $entraOk = $false
+        if ($rows.Count -gt $entraStart) { $rows.RemoveRange($entraStart, $rows.Count - $entraStart) }
+    }
+    $entraEligStart = $rows.Count
+    try {
+        Get-PimActiveAssignmentsGraphItems -Path '/roleManagement/directory/roleEligibilitySchedules' | ForEach-Object { & $addEntraRow $_ 'eligible' }
+    } catch {
+        $em = "$($_.Exception.Message)"
+        Write-Warning "  [revoke] entra-role eligibility-schedules load failed: $em"
+        if ($entraOk) { & $addErr 'entra-role' $em 'eligible' }   # one ledger entry per surface
+        $entraOk = $false
+        if ($rows.Count -gt $entraEligStart) { $rows.RemoveRange($entraEligStart, $rows.Count - $entraEligStart) }
     }
 
-    # ---- Azure-RBAC active assignments -------------------------------------
-    # REQUIREMENTS 67.3: ONE Azure Resource Graph query over REST (Get-PimArmActiveRoleAssignmentsViaArg,
-    # PIM-Rest.ps1) returns every role assignment the engine identity can see -- management groups,
-    # subscriptions, resource groups, resources -- with the role name joined in. It replaces a
-    # subscriptions list plus one instances read per subscription, which also never saw a management group
-    # without a subscription under it. Each row carries its roleAssignmentId, which an ACTIVE revoke needs
-    # (the per-subscription rows had none, so queueing one threw). If the query fails the old walk still runs.
+    # ---- 2. Azure roles, ACTIVE + ELIGIBLE (or carried forward) -------------
+    # REQUIREMENTS 67.3: ONE Azure Resource Graph query over REST returns every active role assignment the engine identity can
+    # see (management groups, subscriptions, resource groups, resources) with the role name joined in; the per-subscription
+    # walk is only its fallback. Eligible: roleEligibilitySchedules per subscription (ARM has no tenant-wide list for them).
     $addAzRow = {
-        param($a)
+        param($a, $state)
         if (-not $a) { return }
         $principalLabel = Resolve-PimManagerPrincipalLabel -PrincipalId ([string]$a.PrincipalId)
         $roleName       = if ($a.RoleDefinitionName) { [string]$a.RoleDefinitionName } else { [string]$a.RoleDefinitionId }
         $azRow = [ordered]@{
-            id               = "azure-rbac:$($a.Id)"
+            id               = $(if ($state -eq 'eligible') { "azure-rbac-eligible:$($a.Id)" } else { "azure-rbac:$($a.Id)" })
             type             = 'azure-rbac'
             principal        = $principalLabel
             principalId      = [string]$a.PrincipalId
@@ -790,9 +1093,10 @@ function Invoke-PimActiveAssignmentsSnapshot {
             roleDefinitionId = [string]$a.RoleDefinitionId
             scope            = [string]$a.Scope
             directoryScopeId = ''
-            start            = ''  # ARG row doesn't carry start/end for the assignment record.
-            end              = ''
+            start            = $(if ($a.PSObject.Properties['Start']) { [string]$a.Start } else { '' })
+            end              = $(if ($a.PSObject.Properties['End']) { [string]$a.End } else { '' })
             justification    = ''
+            state            = $state
         }
         if ($a.PSObject.Properties['RoleAssignmentId'] -and "$($a.RoleAssignmentId)".Trim()) {
             $azRow['roleAssignmentId']   = [string]$a.RoleAssignmentId
@@ -800,287 +1104,281 @@ function Invoke-PimActiveAssignmentsSnapshot {
         }
         [void]$rows.Add($azRow)
     }
-    $azRows = @()
-    $argDone = $false
-    if ((Get-Command Get-PimArmActiveRoleAssignmentsViaArg -ErrorAction SilentlyContinue) -and (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)) {
-        $azStart = $rows.Count
-        try {
-            # 100.31: streamed -- each Resource Graph row becomes a snapshot row as its page arrives.
-            Get-PimArmActiveRoleAssignmentsViaArg -Stream | ForEach-Object {
-                & $addAzRow ([pscustomobject]@{ Id = $_.Id; PrincipalId = $_.PrincipalId; RoleDefinitionId = $_.RoleDefinitionId; RoleDefinitionName = $_.RoleDefinitionName
-                                                Scope = $_.Scope; RoleAssignmentId = $_.Id; RoleAssignmentName = $_.Name; PrincipalType = $_.PrincipalType })
-            }
-            $argDone = $true
-            Write-Host ("  [revoke] azure-rbac: {0} role assignment(s) from one Resource Graph query" -f ($rows.Count - $azStart)) -ForegroundColor DarkGray
-        } catch {
-            Write-Warning ("  [revoke] Resource Graph role-assignment query failed ({0}) -- falling back to the per-subscription read." -f $_.Exception.Message)
-            if ($rows.Count -gt $azStart) { $rows.RemoveRange($azStart, $rows.Count - $azStart) }
-            $azRows = @()
-            $restArm = [bool](Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)
-        }
-    }
-    if ($argDone) { }
-    elseif ($restArm) {
-        # REST: enumerate active role-assignment-schedule-instances at each
-        # subscription scope (ARM has no tenant-wide list). PrincipalNotFound /
-        # auth errors per-sub are tolerated so one bad sub doesn't blank the tab.
-        try {
-            $subs = @(Invoke-PimArm -Path '/subscriptions' -ApiVersion '2020-01-01' -All)
-            if ($subs.Count -eq 0) {
-                Write-Warning "  [revoke] ARM returned 0 subscriptions for this identity -- Azure RBAC rows will be empty (engine SPN has no subscription scope / no Reader)."
-                [void]$surfaceErrors.Add([ordered]@{
-                    surface = 'azure-rbac'
-                    error   = 'ARM returned 0 subscriptions visible to the engine identity.'
-                    hint    = 'Grant the engine SPN at least Reader on the target subscription(s) so Azure-RBAC active assignments can be enumerated.'
-                })
-            }
-            foreach ($s in $subs) {
-                $scope = "/subscriptions/$($s.subscriptionId)"
-                try {
-                    foreach ($ri in @(Invoke-PimArm -Path "$scope/providers/Microsoft.Authorization/roleAssignmentScheduleInstances" -ApiVersion '2020-10-01-preview' -All)) {
-                        $p = $ri.properties
-                        $rdId = "$($p.roleDefinitionId)"
-                        $azRows += [pscustomobject]@{
-                            Id                 = "$($ri.id)"
-                            PrincipalId        = "$($p.principalId)"
-                            RoleDefinitionId   = $rdId
-                            RoleDefinitionName = ($rdId -split '/' | Select-Object -Last 1)
-                            Scope              = "$($p.scope)"
-                        }
-                    }
-                } catch { Write-Warning ("  [revoke] ARM role-assignment instances for {0} failed: {1}" -f $scope, $_.Exception.Message) }
-            }
-        } catch {
-            $em = "$($_.Exception.Message)"
-            Write-Warning "  [revoke] ARM subscriptions enumeration failed: $em. Azure RBAC rows will be empty."
-            [void]$surfaceErrors.Add([ordered]@{
-                surface = 'azure-rbac'
-                error   = $em
-                hint    = (Get-PimActiveAssignmentSurfaceHint -Surface 'azure-rbac' -ErrorMessage $em)
-            })
-            $azRows = @()
-        }
+    $azRead = $true; $azReason = ''; $azPrevUtc = ''
+    if ($null -ne $AzurePlan) { $azRead = [bool]$AzurePlan.read; $azReason = "$($AzurePlan.reason)"; $azPrevUtc = "$($AzurePlan.previousReadUtc)" }
+    $azOk = $true
+    if (-not $azRead) {
+        # 🪤 never @() around the carried List[object] of ordered rows: pwsh 7.6 throws "Argument types do not match" (measured on
+        # the runner, Test-PimDelegationScope C12) -- enumerate it directly
+        $carriedN = 0
+        if ($null -ne $AzurePlan.carried) { foreach ($cr in $AzurePlan.carried) { if ($null -ne $cr) { [void]$rows.Add($cr); $carriedN++ } } }
+        Write-Host ("  [revoke] azure-rbac: {0} row(s) carried forward ({1})" -f $carriedN, $azReason) -ForegroundColor DarkGray
     } else {
-        $em = 'Azure-RBAC reader not available (the ARM REST helper Invoke-PimArm is not loaded).'
-        Write-Warning "  [revoke] $em Azure RBAC rows will be empty."
-        [void]$surfaceErrors.Add([ordered]@{
-            surface = 'azure-rbac'
-            error   = $em
-            hint    = 'Ensure engine/_shared/PIM-Rest.ps1 is dot-sourced (hosted) so Invoke-PimArm is available.'
-        })
-    }
-    foreach ($a in $azRows) { & $addAzRow $a }
-    $azRows = $null
-
-    # ---- PIM-for-Groups active assignments ---------------------------------
-    # Graph REFUSES an unfiltered list on assignmentSchedules ('MissingParameters:
-    # The required parameters GroupId or PrincipalId is missing') -- both the
-    # engine's bulk preload and a naive -All call get BadRequest. The supported
-    # shape is one filtered query per group. Two scale guards:
-    #   1. Only PIM-convention groups qualify (the lookup cache can contain the
-    #      whole tenant when the naming filter is broad; dynamic groups fail
-    #      with ResourceTypeNotSupported anyway).
-    #   2. Queries go through /v1.0/$batch, 20 per round-trip -- a per-group
-    #      sequential loop took >4 minutes on a real tenant.
-    $pimGroupRows = New-Object System.Collections.Generic.List[object]   # 100.31: .Add, never += (each += copied the whole array)
-    # 🔴 BUG-217 (§33.28): EVERY group that can be a PIM-for-Groups group -- not only the '<prefix>' ones. A group
-    # qualifies unless it is a mail-only distribution list (not security-enabled and not a Microsoft 365 group);
-    # dynamic groups are dropped just below. Cost stays bounded: one filtered read per group, 20 per $batch
-    # round-trip, run by the tick's snapshot job (never on the Manager's request loop). A group that is simply not
-    # onboarded to PIM answers with no schedules and is not a failure (Test-PimGroupNotPimOnboardedError).
-    $pimGroupsToQuery = @(Select-PimActiveAssignmentsPimGroupCandidates -Groups @($script:PimManager_Groups))
-    # A DYNAMIC-membership group cannot carry a PIM-for-Groups assignment (Graph answers
-    # ResourceTypeNotSupported), so its request can only fail. The lookup cache now selects groupTypes,
-    # which lets the read skip them instead of spending a batch slot to collect a known error.
-    $pimDynamicSkipped = @($pimGroupsToQuery | Where-Object { @($_.GroupTypes) -contains 'DynamicMembership' }).Count
-    if ($pimDynamicSkipped) { $pimGroupsToQuery = @($pimGroupsToQuery | Where-Object { -not (@($_.GroupTypes) -contains 'DynamicMembership') }) }
-    # SNAP-INC (owner 2026-10-20): EVERY group above stays covered (BUG-217) -- an incremental run re-reads the changed and the
-    # always-re-read groups and carries the rows of the others forward from the previous complete generation. No context, or a
-    # plan that cannot be made = every group is read, as before (and no delta state is stored, so the next run is full too).
-    $pimGroupsToRead = $pimGroupsToQuery
-    $gdRun = $null; $gdPlan = $null; $gdCarried = $null; $gdText = ''
-    $gFailedIds = New-Object System.Collections.Generic.List[string]
-    if ($null -ne $GroupDelta -and $pimGroupsToQuery.Count -gt 0) {
-        try { $gdRun = Invoke-PimSnapshotGroupIncrementalPlan -Context $GroupDelta -Candidates $pimGroupsToQuery -NowUtc ([datetime]::UtcNow) }
-        catch { $gdRun = $null; Write-Warning ("  [revoke] pim-for-groups: the incremental plan failed ({0}) -- every group is read" -f $_.Exception.Message) }
-        if ($null -ne $gdRun) {
-            $gdPlan = $gdRun.plan
-            if ("$($gdPlan.mode)" -eq 'incremental') {
-                $gdCarried = $gdRun.carried
-                $pimGroupsToRead = @($pimGroupsToQuery | Where-Object { $gdPlan.reread.Contains("$($_.Id)".Trim().ToLowerInvariant()) })
-                $gdText = "incremental -- {0} changed + {1} always re-read of {2} groups, {3} carried forward ({4} rows){5}" -f $gdPlan.changed, $gdPlan.always, $pimGroupsToQuery.Count, $gdPlan.carry.Count, $gdPlan.carryRows, $(if ($gdPlan.removed -or $gdPlan.dropped) { "; $($gdPlan.removed) removed in the delta, $($gdPlan.dropped) group(s) dropped" } else { '' })
-            } else {
-                $gdText = "full read (reason: $($gdPlan.reason))"
-            }
-            if ($gdRun.deltaError) { $gdText += "; no delta link for the next run ($($gdRun.deltaError))" }
-            Write-Host ("  [revoke] pim-for-groups: {0}" -f $gdText) -ForegroundColor DarkGray
-        }
-    }
-    if ($pimGroupsToRead.Count -gt 0 -and (Get-Command Invoke-PimGraphBatchGet -ErrorAction SilentlyContinue)) {
-        # REQUIREMENTS 67.1: the SAME one-filtered-query-per-group reads, through the engine's shared batch
-        # reader -- which also follows @odata.nextLink (the inline loop below kept only the first page) and
-        # re-runs a throttled (429) or 5xx request on its own instead of counting it as a failed group.
-        $gFail = 0
-        $gFirstErr = $null
-        $gRes = Invoke-PimGraphBatchGet -Paths @($pimGroupsToRead | ForEach-Object { "/identityGovernance/privilegedAccess/group/assignmentSchedules?`$filter=groupId eq '$($_.Id)'" }) -ProgressLabel '[revoke] pim-for-groups'   # SCHEMA-QUIESCE-LONG-SNAPSHOT: alive every 5 min
-        if ($null -ne $gRes -and $gRes -isnot [System.Collections.IList]) { $gRes = @($gRes) }   # 100.31: one answer can arrive unrolled; the release below assigns by index
-        for ($i = 0; $i -lt $pimGroupsToRead.Count; $i++) {
-            $gr = $gRes[$i]; $gRes[$i] = $null   # 100.31: released as it is consumed
-            if ($gr -and $gr.ok) { foreach ($v in @($gr.items)) { if ($null -ne $v) { $pimGroupRows.Add($v) } }; continue }
-            if ($gr -and (Test-PimGroupNotPimOnboardedError -Message "$($gr.error)")) { continue }   # BUG-217: not a PIM group -- nothing to list, not a failure
-            $gFail++
-            $gFailedIds.Add("$($pimGroupsToRead[$i].Id)")   # SNAP-INC: re-read on the next run
-            $errText = if ($gr) { "$($gr.error)" } else { 'no response' }
-            if (-not $gFirstErr -and $gr -and ($gr.status -eq 401 -or $gr.status -eq 403 -or $errText -match 'HTTP (401|403)\b')) { $gFirstErr = $errText }
-            if ($gFail -le 3) { Write-Warning ("  [revoke] assignmentSchedules for group '{0}' failed: {1}" -f $pimGroupsToRead[$i].DisplayName, $errText) }
-        }
-        $gRes = $null
-        if ($gFail -gt 3) { Write-Warning ("  [revoke] assignmentSchedules failed for {0} group(s) total (first 3 shown)." -f $gFail) }
-        if ($pimGroupRows.Count -eq 0 -and $gFail -ge $pimGroupsToRead.Count -and $gFirstErr) {
-            [void]$surfaceErrors.Add([ordered]@{
-                surface = 'pim-for-groups'
-                error   = $gFirstErr
-                hint    = (Get-PimActiveAssignmentSurfaceHint -Surface 'pim-for-groups' -ErrorMessage $gFirstErr)
-            })
-        }
-        Write-Host ("  [revoke] pim-for-groups: {0} active assignment(s) across {1} PIM group(s) ({2} batch round-trips; {3} dynamic group(s) skipped)" -f $pimGroupRows.Count, $pimGroupsToRead.Count, [Math]::Ceiling($pimGroupsToRead.Count / 20), $pimDynamicSkipped) -ForegroundColor DarkGray
-    } elseif ($pimGroupsToRead.Count -gt 0) {
-        $gFail = 0
-        $gFirstErr = $null
-        for ($ofs = 0; $ofs -lt $pimGroupsToRead.Count; $ofs += 20) {
-            $slice = @($pimGroupsToRead[$ofs..([Math]::Min($ofs + 19, $pimGroupsToRead.Count - 1))])
-            $requests = New-Object System.Collections.ArrayList
-            for ($i = 0; $i -lt $slice.Count; $i++) {
-                [void]$requests.Add(@{
-                    id     = "$i"
-                    method = 'GET'
-                    url    = "/identityGovernance/privilegedAccess/group/assignmentSchedules?`$filter=groupId eq '$($slice[$i].Id)'"
-                })
-            }
+        $azRows = @()
+        $argDone = $false
+        if ((Get-Command Get-PimArmActiveRoleAssignmentsViaArg -ErrorAction SilentlyContinue) -and (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)) {
+            $azStart = $rows.Count
             try {
-                # REST: Invoke-PimGraph posts the JSON batch with its own app-only token.
-                $resp = Invoke-PimGraph -Method POST -Path 'https://graph.microsoft.com/v1.0/$batch' -Body @{ requests = $requests.ToArray() }
-                foreach ($br in @($resp.responses)) {
-                    if ($br.status -ge 200 -and $br.status -lt 300 -and $br.body -and $br.body.value) {
-                        foreach ($v in @($br.body.value)) { $pimGroupRows.Add($v) }
-                    } elseif ($br.status -ge 400 -and -not (Test-PimGroupNotPimOnboardedError -Message "$(if ($br.body -and $br.body.error) { "$($br.body.error.code) $($br.body.error.message)" })")) {
-                        $gFail++
-                        if ("$($br.id)" -match '^\d+$' -and [int]$br.id -lt $slice.Count) { $gFailedIds.Add("$($slice[[int]$br.id].Id)") }   # SNAP-INC: re-read next run
-                        $errCode = if ($br.body -and $br.body.error) { $br.body.error.code } else { $br.status }
-                        $errMsg  = if ($br.body -and $br.body.error -and $br.body.error.message) { $br.body.error.message } else { "$errCode" }
-                        if (-not $gFirstErr -and ($br.status -eq 401 -or $br.status -eq 403)) { $gFirstErr = "HTTP $($br.status) $errCode : $errMsg" }
-                        if ($gFail -le 3) { Write-Warning ("  [revoke] assignmentSchedules for group '{0}' failed: {1}" -f $slice[[int]$br.id].DisplayName, $errCode) }
-                    }
+                # 100.31: streamed -- each Resource Graph row becomes a snapshot row as its page arrives.
+                Get-PimArmActiveRoleAssignmentsViaArg -Stream | ForEach-Object {
+                    & $addAzRow ([pscustomobject]@{ Id = $_.Id; PrincipalId = $_.PrincipalId; RoleDefinitionId = $_.RoleDefinitionId; RoleDefinitionName = $_.RoleDefinitionName
+                                                    Scope = $_.Scope; RoleAssignmentId = $_.Id; RoleAssignmentName = $_.Name; PrincipalType = $_.PrincipalType }) 'active'
+                }
+                $argDone = $true
+                Write-Host ("  [revoke] azure-rbac: {0} role assignment(s) from one Resource Graph query" -f ($rows.Count - $azStart)) -ForegroundColor DarkGray
+            } catch {
+                Write-Warning ("  [revoke] Resource Graph role-assignment query failed ({0}) -- falling back to the per-subscription read." -f $_.Exception.Message)
+                if ($rows.Count -gt $azStart) { $rows.RemoveRange($azStart, $rows.Count - $azStart) }
+                $azRows = @()
+                $restArm = [bool](Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)
+            }
+        }
+        if ($argDone) { }
+        elseif ($restArm) {
+            # REST: active role-assignment-schedule-instances at each subscription scope (ARM has no tenant-wide list).
+            try {
+                $subs = @(Invoke-PimArm -Path '/subscriptions' -ApiVersion '2020-01-01' -All)
+                if ($subs.Count -eq 0) {
+                    Write-Warning "  [revoke] ARM returned 0 subscriptions for this identity -- Azure RBAC rows will be empty (engine SPN has no subscription scope / no Reader)."
+                    [void]$surfaceErrors.Add([ordered]@{ surface = 'azure-rbac'; error = 'ARM returned 0 subscriptions visible to the engine identity.'
+                        hint = 'Grant the engine SPN at least Reader on the target subscription(s) so Azure-RBAC active assignments can be enumerated.' })
+                    $azOk = $false
+                }
+                foreach ($s in $subs) {
+                    $scope = "/subscriptions/$($s.subscriptionId)"
+                    try {
+                        foreach ($ri in @(Invoke-PimArm -Path "$scope/providers/Microsoft.Authorization/roleAssignmentScheduleInstances" -ApiVersion '2020-10-01-preview' -All)) {
+                            $p = $ri.properties
+                            $rdId = "$($p.roleDefinitionId)"
+                            $azRows += [pscustomobject]@{ Id = "$($ri.id)"; PrincipalId = "$($p.principalId)"; RoleDefinitionId = $rdId
+                                RoleDefinitionName = ($rdId -split '/' | Select-Object -Last 1); Scope = "$($p.scope)"; PrincipalType = "$($p.principalType)" }
+                        }
+                    } catch { Write-Warning ("  [revoke] ARM role-assignment instances for {0} failed: {1}" -f $scope, $_.Exception.Message) }
                 }
             } catch {
-                $gFail += $slice.Count
-                foreach ($sg in $slice) { $gFailedIds.Add("$($sg.Id)") }   # SNAP-INC: re-read next run
-                if (-not $gFirstErr) { $gFirstErr = "$($_.Exception.Message)" }
-                if ($gFail -le 25) { Write-Warning "  [revoke] `$batch round-trip failed: $($_.Exception.Message)" }
+                $em = "$($_.Exception.Message)"
+                Write-Warning "  [revoke] ARM subscriptions enumeration failed: $em. Azure RBAC rows will be empty."
+                & $addErr 'azure-rbac' $em ''
+                $azOk = $false
+                $azRows = @()
+            }
+        } else {
+            $em = 'Azure-RBAC reader not available (the ARM REST helper Invoke-PimArm is not loaded).'
+            Write-Warning "  [revoke] $em Azure RBAC rows will be empty."
+            [void]$surfaceErrors.Add([ordered]@{ surface = 'azure-rbac'; error = $em; hint = 'Ensure engine/_shared/PIM-Rest.ps1 is dot-sourced (hosted) so Invoke-PimArm is available.' })
+            $azOk = $false
+        }
+        foreach ($a in $azRows) { & $addAzRow $a 'active' }
+        $azRows = $null
+
+        # ELIGIBLE Azure roles: roleEligibilitySchedules at every subscription the identity sees (the list at a subscription
+        # also returns what sits below it and what it inherits from above; de-duplicated by schedule id).
+        if ($restArm) {
+            $azEligStart = $rows.Count
+            $eligErr = ''; $eligFailedSubs = 0
+            try {
+                $eSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+                $eSubs = @(Invoke-PimArm -Path '/subscriptions' -ApiVersion '2020-01-01' -All)
+                foreach ($s in $eSubs) {
+                    $scope = "/subscriptions/$($s.subscriptionId)"
+                    try {
+                        foreach ($es in @(Invoke-PimArm -Path "$scope/providers/Microsoft.Authorization/roleEligibilitySchedules" -ApiVersion '2020-10-01' -All)) {
+                            if (-not $es -or -not "$($es.id)") { continue }
+                            $p = $es.properties
+                            if ("$($p.memberType)" -ieq 'Group') { continue }   # reached through a group: the group's own schedule is the row
+                            if (-not $eSeen.Add("$($es.id)".ToLowerInvariant())) { continue }
+                            $rdId = "$($p.roleDefinitionId)"
+                            $rdName = $null
+                            if ($p.expandedProperties -and $p.expandedProperties.roleDefinition -and "$($p.expandedProperties.roleDefinition.displayName)") { $rdName = "$($p.expandedProperties.roleDefinition.displayName)" }
+                            if (-not $rdName) { $rdName = ($rdId -split '/' | Select-Object -Last 1) }
+                            $st = ''; $en = ''
+                            if ("$($p.startDateTime)") { try { $st = ([DateTime]$p.startDateTime).ToUniversalTime().ToString('o') } catch {} }
+                            if ("$($p.endDateTime)")   { try { $en = ([DateTime]$p.endDateTime).ToUniversalTime().ToString('o') } catch {} }
+                            & $addAzRow ([pscustomobject]@{ Id = "$($es.id)"; PrincipalId = "$($p.principalId)"; RoleDefinitionId = $rdId; RoleDefinitionName = $rdName
+                                                            Scope = "$($p.scope)"; PrincipalType = "$($p.principalType)"; Start = $st; End = $en }) 'eligible'
+                        }
+                    } catch {
+                        $eligFailedSubs++
+                        if (-not $eligErr) { $eligErr = "$($_.Exception.Message)" }
+                        Write-Warning ("  [revoke] ARM role-eligibility schedules for {0} failed: {1}" -f $scope, $_.Exception.Message)
+                    }
+                }
+                if ($eligFailedSubs -gt 0) { throw ("{0} of {1} subscription(s) could not be read: {2}" -f $eligFailedSubs, $eSubs.Count, $eligErr) }
+                Write-Host ("  [revoke] azure-rbac: {0} eligible role schedule(s) across {1} subscription(s)" -f ($rows.Count - $azEligStart), $eSubs.Count) -ForegroundColor DarkGray
+            } catch {
+                $em = "$($_.Exception.Message)"
+                Write-Warning "  [revoke] azure-rbac eligibility read failed: $em"
+                if ($azOk) { & $addErr 'azure-rbac' $em 'eligible' }
+                $azOk = $false
+                if ($rows.Count -gt $azEligStart) { $rows.RemoveRange($azEligStart, $rows.Count - $azEligStart) }
             }
         }
-        if ($gFail -gt 3) { Write-Warning ("  [revoke] assignmentSchedules failed for {0} group(s) total (first 3 shown)." -f $gFail) }
-        # Only a surface-level error when EVERY queried group failed AND we got
-        # nothing back -- a few per-group failures (e.g. dynamic groups) are
-        # tolerated and must not mask a partially-successful read.
-        if ($pimGroupRows.Count -eq 0 -and $gFail -ge $pimGroupsToRead.Count -and $gFirstErr) {
-            [void]$surfaceErrors.Add([ordered]@{
-                surface = 'pim-for-groups'
-                error   = $gFirstErr
-                hint    = (Get-PimActiveAssignmentSurfaceHint -Surface 'pim-for-groups' -ErrorMessage $gFirstErr)
-            })
+    }
+    # the Azure read stamp of THIS generation: now when Azure was read completely, the carried read's stamp when carried, none
+    # when the read failed (the next run then reads Azure again)
+    $azureReadUtc = if (-not $azRead) { $azPrevUtc } elseif ($azOk) { $runUtc } else { '' }
+
+    # ---- 3. the groups to read: chosen AFTER the role rows ------------------
+    # The group list holds EVERY group of the tenant, so a group that holds a role is known by it. Only when that list could not
+    # be read are the role rows' principals resolved FIRST (one getByIds call per 1000) to recognise the groups among them --
+    # not otherwise: resolving every user here would hold them through the group reads (Test-PimSnapshotMemory M1, 384 MB cap).
+    $groupListKnown = ($script:PimManager_GroupById -is [hashtable] -and $script:PimManager_GroupById.Count -gt 0)
+    if (-not $groupListKnown) { try {
+        $preSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+        $preList = New-Object System.Collections.Generic.List[string]
+        foreach ($row in $rows) {
+            $rpid = [string]$row.principalId
+            if (-not $rpid) { continue }
+            if (($script:PimManager_UserById -and $script:PimManager_UserById.ContainsKey($rpid)) -or ($script:PimManager_GroupById -and $script:PimManager_GroupById.ContainsKey($rpid))) { continue }
+            if ($preSet.Add($rpid)) { $preList.Add($rpid) }
         }
-        Write-Host ("  [revoke] pim-for-groups: {0} active assignment(s) across {1} PIM group(s) ({2} batch round-trips)" -f $pimGroupRows.Count, $pimGroupsToRead.Count, [Math]::Ceiling($pimGroupsToRead.Count / 20)) -ForegroundColor DarkGray
-    } elseif ($pimGroupsToQuery.Count -eq 0) {
-        Write-Warning "  [revoke] no groups in the lookup cache that can carry a PIM-for-Groups assignment. PIM-for-Groups rows will be empty."
-    }   # (else: an incremental run with nothing to re-read -- every group's rows are carried forward)
-    # Casing-tolerant property read: SDK objects are PascalCase, REST/$batch
-    # bodies are camelCase. Returns the first present alias (or '').
+        if ($preList.Count -gt 0) { Resolve-PimManagerPrincipalIdBatch -Ids $preList.ToArray() }
+    } catch { Write-Warning "  [revoke] role principal resolve failed: $($_.Exception.Message)" } }
+    $resolvedKinds = @{}
+    if (-not $groupListKnown -and $script:PimManager_ResolvedById -is [hashtable]) { foreach ($k in @($script:PimManager_ResolvedById.Keys)) { $resolvedKinds["$k"] = "$($script:PimManager_ResolvedById[$k].kind)" } }
+    $roleHolders = @(Select-PimActiveAssignmentsRoleHolderGroupIds -Rows @($rows.ToArray()) -GroupIds @(if ($script:PimManager_GroupById) { $script:PimManager_GroupById.Keys }) -ResolvedKinds $resolvedKinds)
+    if ($null -eq $ManagedGroupIds) { $ManagedGroupIds = @(Get-PimActiveAssignmentsManagedGroupIds) }
+    $pimGroupsToQuery = @(Select-PimActiveAssignmentsPimGroupCandidates -Groups @($script:PimManager_Groups) -ManagedGroupIds @($ManagedGroupIds) -RoleHolderIds $roleHolders -Prefix (Get-PimActiveAssignmentsGroupPrefix))
+    # A DYNAMIC-membership group cannot carry a PIM-for-Groups schedule (Graph answers ResourceTypeNotSupported), so its
+    # request can only fail: skipped and counted.
+    $pimDynamicSkipped = @($pimGroupsToQuery | Where-Object { @($_.GroupTypes) -contains 'DynamicMembership' }).Count
+    if ($pimDynamicSkipped) { $pimGroupsToQuery = @($pimGroupsToQuery | Where-Object { -not (@($_.GroupTypes) -contains 'DynamicMembership') }) }
+    $pimGroupsToRead = $pimGroupsToQuery
+    Write-Host ("  [revoke] pim-for-groups: {0} group(s) to read ({1} hold a role; {2} dynamic skipped) -- DELEGATION-SCOPE-1, never every group" -f $pimGroupsToRead.Count, $roleHolders.Count, $pimDynamicSkipped) -ForegroundColor DarkGray
+
+    # ---- 4. PIM-for-Groups schedules of those groups: ACTIVE + ELIGIBLE ------
+    # Graph refuses an unfiltered list ('MissingParameters: GroupId or PrincipalId'): one filtered read per group and kind,
+    # 20 per $batch round-trip. Paths: [2i] = assignmentSchedules, [2i+1] = eligibilitySchedules of group i.
+    $pimGroupRows = New-Object System.Collections.Generic.List[object]       # active (100.31: .Add, never +=)
+    $pimGroupEligRows = New-Object System.Collections.Generic.List[object]   # eligible
+    $gPaths = New-Object System.Collections.Generic.List[string]
+    foreach ($g in $pimGroupsToRead) {
+        $gPaths.Add("/identityGovernance/privilegedAccess/group/assignmentSchedules?`$filter=groupId eq '$($g.Id)'")
+        $gPaths.Add("/identityGovernance/privilegedAccess/group/eligibilitySchedules?`$filter=groupId eq '$($g.Id)'")
+    }
+    $gFail = 0; $gFirstErr = $null
+    $takeAnswer = {
+        param([int]$pi, [bool]$ok, [object[]]$items, [int]$status, [string]$errText)
+        if ($ok) { foreach ($v in @($items)) { if ($null -ne $v) { if ($pi % 2 -eq 0) { $pimGroupRows.Add($v) } else { $pimGroupEligRows.Add($v) } } }; return }
+        if (Test-PimGroupNotPimOnboardedError -Message $errText) { return }   # not a PIM group -- nothing to list, not a failure
+        $script:__gFail++
+        if (-not $script:__gFirstErr -and ($status -eq 401 -or $status -eq 403 -or $errText -match 'HTTP (401|403)\b')) { $script:__gFirstErr = $errText }
+        if ($script:__gFail -le 3) { Write-Warning ("  [revoke] {0} for group '{1}' failed: {2}" -f $(if ($pi % 2 -eq 0) { 'assignmentSchedules' } else { 'eligibilitySchedules' }), $pimGroupsToRead[[int][Math]::Floor($pi / 2)].DisplayName, $errText) }
+    }
+    $script:__gFail = 0; $script:__gFirstErr = $null
+    if ($gPaths.Count -gt 0 -and (Get-Command Invoke-PimGraphBatchGet -ErrorAction SilentlyContinue)) {
+        # REQUIREMENTS 67.1: through the engine's shared batch reader (follows @odata.nextLink, re-runs a 429 / 5xx itself).
+        $gRes = Invoke-PimGraphBatchGet -Paths @($gPaths.ToArray()) -ProgressLabel '[revoke] pim-for-groups'   # SCHEMA-QUIESCE-LONG-SNAPSHOT: alive every 5 min
+        if ($null -ne $gRes -and $gRes -isnot [System.Collections.IList]) { $gRes = @($gRes) }   # 100.31: one answer can arrive unrolled
+        for ($i = 0; $i -lt $gPaths.Count; $i++) {
+            $gr = $gRes[$i]; $gRes[$i] = $null   # 100.31: released as it is consumed
+            if ($gr -and $gr.ok) { & $takeAnswer $i $true @($gr.items) 200 ''; continue }
+            & $takeAnswer $i $false @() $(if ($gr) { [int]$gr.status } else { 0 }) $(if ($gr) { "$($gr.error)" } else { 'no response' })
+        }
+        $gRes = $null
+    } elseif ($gPaths.Count -gt 0) {
+        for ($ofs = 0; $ofs -lt $gPaths.Count; $ofs += 20) {
+            $last = [Math]::Min($ofs + 19, $gPaths.Count - 1)
+            $requests = New-Object System.Collections.ArrayList
+            for ($i = $ofs; $i -le $last; $i++) { [void]$requests.Add(@{ id = "$i"; method = 'GET'; url = $gPaths[$i] }) }
+            try {
+                $resp = Invoke-PimGraph -Method POST -Path 'https://graph.microsoft.com/v1.0/$batch' -Body @{ requests = $requests.ToArray() }
+                foreach ($br in @($resp.responses)) {
+                    if ("$($br.id)" -notmatch '^\d+$') { continue }
+                    $pi = [int]$br.id
+                    if ($br.status -ge 200 -and $br.status -lt 300) { & $takeAnswer $pi $true @(if ($br.body) { @($br.body.value) }) ([int]$br.status) ''; continue }
+                    $errText = if ($br.body -and $br.body.error) { "HTTP $($br.status) $($br.body.error.code) : $($br.body.error.message)" } else { "HTTP $($br.status)" }
+                    & $takeAnswer $pi $false @() ([int]$br.status) $errText
+                }
+            } catch {
+                for ($i = $ofs; $i -le $last; $i++) { & $takeAnswer $i $false @() 0 "$($_.Exception.Message)" }
+            }
+        }
+    }
+    $gFail = $script:__gFail; $gFirstErr = $script:__gFirstErr
+    if ($gFail -gt 3) { Write-Warning ("  [revoke] PIM-for-Groups schedules failed for {0} read(s) total (first 3 shown)." -f $gFail) }
+    # A surface-level error only when EVERY read failed AND nothing came back -- a few per-group failures are tolerated.
+    if (($pimGroupRows.Count + $pimGroupEligRows.Count) -eq 0 -and $gPaths.Count -gt 0 -and $gFail -ge $gPaths.Count -and $gFirstErr) {
+        [void]$surfaceErrors.Add([ordered]@{ surface = 'pim-for-groups'; error = $gFirstErr; hint = (Get-PimActiveAssignmentSurfaceHint -Surface 'pim-for-groups' -ErrorMessage $gFirstErr) })
+    }
+    Write-Host ("  [revoke] pim-for-groups: {0} active + {1} eligible schedule(s) across {2} group(s) ({3} batch round-trips)" -f $pimGroupRows.Count, $pimGroupEligRows.Count, $pimGroupsToRead.Count, [Math]::Ceiling($gPaths.Count / 20)) -ForegroundColor DarkGray
+    # Casing-tolerant property read: SDK objects are PascalCase, REST/$batch bodies are camelCase.
     $pf = {
         param($Obj, [string[]]$Names)
         foreach ($n in $Names) { $pr = $Obj.PSObject.Properties[$n]; if ($pr -and $null -ne $pr.Value) { return $pr.Value } }
         return $null
     }
-    for ($pgi = 0; $pgi -lt $pimGroupRows.Count; $pgi++) {
-        $p = $pimGroupRows[$pgi]; $pimGroupRows[$pgi] = $null   # 100.31: the raw schedule goes once its row exists
-        if (-not $p) { continue }
-        $principalId = "$(& $pf $p @('PrincipalId','principalId'))"
-        $groupId     = "$(& $pf $p @('GroupId','groupId'))"
-        $itemId      = "$(& $pf $p @('Id','id'))"
-        $principalLabel = Resolve-PimManagerPrincipalLabel -PrincipalId $principalId
-        # Group display name from cache, fall back to embedded Group.DisplayName.
-        $groupLabel = ''
-        # Id-keyed lookup (built with the caches) -- the old linear scan was O(rows x groups).
-        if ($script:PimManager_GroupById -and $script:PimManager_GroupById.ContainsKey($groupId)) {
-            $groupLabel = [string]$script:PimManager_GroupById[$groupId].DisplayName
-        } elseif ($script:PimManager_Groups -and -not $script:PimManager_GroupById) {
-            foreach ($g in $script:PimManager_Groups) {
-                if ($g -and "$($g.Id)" -eq $groupId) { $groupLabel = [string]$g.DisplayName; break }
+    foreach ($set in @(@{ list = $pimGroupRows; state = 'active' }, @{ list = $pimGroupEligRows; state = 'eligible' })) {
+        $lst = $set.list; $gState = $set.state
+        for ($pgi = 0; $pgi -lt $lst.Count; $pgi++) {
+            $p = $lst[$pgi]; $lst[$pgi] = $null   # 100.31: the raw schedule goes once its row exists
+            if (-not $p) { continue }
+            $principalId = "$(& $pf $p @('PrincipalId','principalId'))"
+            $groupId     = "$(& $pf $p @('GroupId','groupId'))"
+            $itemId      = "$(& $pf $p @('Id','id'))"
+            $principalLabel = Resolve-PimManagerPrincipalLabel -PrincipalId $principalId
+            $groupLabel = ''
+            # Id-keyed lookup (built with the caches) -- the old linear scan was O(rows x groups).
+            if ($script:PimManager_GroupById -and $script:PimManager_GroupById.ContainsKey($groupId)) {
+                $groupLabel = [string]$script:PimManager_GroupById[$groupId].DisplayName
+            } elseif ($script:PimManager_ResolvedById -and $script:PimManager_ResolvedById.ContainsKey($groupId)) {
+                $groupLabel = [string]$script:PimManager_ResolvedById[$groupId].displayName
             }
-        }
-        $grp = & $pf $p @('Group','group')
-        if (-not $groupLabel -and $grp) { $gdn = & $pf $grp @('DisplayName','displayName'); if ($gdn) { $groupLabel = [string]$gdn } }
-        if (-not $groupLabel) { $groupLabel = $groupId }
-        $si = & $pf $p @('ScheduleInfo','scheduleInfo')
-        $start = $null; $end = $null
-        if ($si) {
-            $sdt = & $pf $si @('StartDateTime','startDateTime')
-            if ($sdt) { try { $start = ([DateTime]$sdt).ToUniversalTime().ToString('o') } catch {} }
-            $exp = & $pf $si @('Expiration','expiration')
-            if ($exp) { $edt = & $pf $exp @('EndDateTime','endDateTime'); if ($edt) { try { $end = ([DateTime]$edt).ToUniversalTime().ToString('o') } catch {} } }
-        }
-        $access = "$(& $pf $p @('AccessId','accessId'))"; if (-not $access) { $access = 'member' }
-        $just   = "$(& $pf $p @('Justification','justification'))"
-        # 95.2l: an owner says WHICH kind -- an eligible owner who activated, or a permanent (no end date) owner assignment.
-        $__expT = ''; if ($si) { $__ex = & $pf $si @('Expiration','expiration'); if ($__ex) { $__expT = "$(& $pf $__ex @('Type','type'))" } }
-        $__accLbl = Get-PimActiveGroupAccessLabel -AccessId $access -AssignmentType "$(& $pf $p @('AssignmentType','assignmentType'))" -ExpirationType $__expT -End $end
-        [void]$rows.Add([ordered]@{
-            id               = "pim-for-groups:$itemId"
-            type             = 'pim-for-groups'
-            principal        = $principalLabel
-            principalId      = $principalId
-            role             = "$groupLabel ($__accLbl)"
-            roleDefinitionId = ''
-            scope            = $groupLabel
-            directoryScopeId = ''
-            groupId          = $groupId
-            accessId         = $access
-            start            = $start
-            end              = $end
-            justification    = $just
-        })
-    }
-    $pimGroupRows.Clear()
-    # SNAP-INC: the rows of the groups that did not change, carried forward from the previous complete generation -- with the
-    # group's CURRENT name (the lookup cache was just read). NOT when the group read itself failed as a surface: that run is
-    # stored as the failed read it is (and no delta state is written, so the next run reads every group).
-    $pfgFailed = $false
-    foreach ($se in $surfaceErrors) { if ("$($se.surface)" -eq 'pim-for-groups') { $pfgFailed = $true } }
-    if ($null -ne $gdCarried) {
-        if (-not $pfgFailed) {
-            foreach ($cr in $gdCarried) {
-                if ($null -eq $cr) { continue }
-                $cgid = "$($cr['groupId'])"
-                if ($script:PimManager_GroupById -and $script:PimManager_GroupById.ContainsKey($cgid) -and "$($script:PimManager_GroupById[$cgid].DisplayName)") {
-                    $cgl = [string]$script:PimManager_GroupById[$cgid].DisplayName
-                    $cacc = "$($cr['accessId'])"; if (-not $cacc) { $cacc = 'member' }
-                    # 95.2l: a carried row keeps the owner kind it was stored with (the raw schedule is not carried)
-                    if ("$($cr['role'])" -match '\((eligible owner, activated|permanent owner)\)$') { $cacc = $Matches[1] }
-                    $cr['role'] = "$cgl ($cacc)"; $cr['scope'] = $cgl
-                }
-                [void]$rows.Add($cr)
+            $grp = & $pf $p @('Group','group')
+            if (-not $groupLabel -and $grp) { $gdn = & $pf $grp @('DisplayName','displayName'); if ($gdn) { $groupLabel = [string]$gdn } }
+            if (-not $groupLabel) { $groupLabel = $groupId }
+            $si = & $pf $p @('ScheduleInfo','scheduleInfo')
+            $start = $null; $end = $null
+            if ($si) {
+                $sdt = & $pf $si @('StartDateTime','startDateTime')
+                if ($sdt) { try { $start = ([DateTime]$sdt).ToUniversalTime().ToString('o') } catch {} }
+                $exp = & $pf $si @('Expiration','expiration')
+                if ($exp) { $edt = & $pf $exp @('EndDateTime','endDateTime'); if ($edt) { try { $end = ([DateTime]$edt).ToUniversalTime().ToString('o') } catch {} } }
             }
+            $access = "$(& $pf $p @('AccessId','accessId'))"; if (-not $access) { $access = 'member' }
+            $just   = "$(& $pf $p @('Justification','justification'))"
+            # 95.2l: an ACTIVE owner says WHICH kind -- an eligible owner who activated, or a permanent (no end date) owner assignment.
+            $__accLbl = $access
+            if ($gState -eq 'active') {
+                $__expT = ''; if ($si) { $__ex = & $pf $si @('Expiration','expiration'); if ($__ex) { $__expT = "$(& $pf $__ex @('Type','type'))" } }
+                $__accLbl = Get-PimActiveGroupAccessLabel -AccessId $access -AssignmentType "$(& $pf $p @('AssignmentType','assignmentType'))" -ExpirationType $__expT -End $end
+            }
+            [void]$rows.Add([ordered]@{
+                id               = $(if ($gState -eq 'eligible') { "pim-for-groups-eligible:$itemId" } else { "pim-for-groups:$itemId" })
+                type             = 'pim-for-groups'
+                principal        = $principalLabel
+                principalId      = $principalId
+                role             = "$groupLabel ($__accLbl)"
+                roleDefinitionId = ''
+                scope            = $groupLabel
+                directoryScopeId = ''
+                groupId          = $groupId
+                accessId         = $access
+                start            = $start
+                end              = $end
+                justification    = $just
+                state            = $gState
+            })
         }
-        $gdCarried.Clear(); $gdCarried = $null
+        $lst.Clear()
     }
 
+    # ---- 5. apps holding a HIGH-PRIVILEGE API permission -----------------------
+    $appRes = Get-PimActiveAssignmentsAppPermissionRows
+    if ("$($appRes.error)".Trim()) {
+        Write-Warning "  [revoke] app-permission read failed: $($appRes.error)"
+        & $addErr 'app-permission' "$($appRes.error)" ''
+    } else {
+        foreach ($ar in $appRes.rows) { [void]$rows.Add($ar) }
+        Write-Host ("  [revoke] app-permission: {0} high-privilege API permission(s) held by apps ({1} read(s))" -f $appRes.rows.Count, $appRes.reads) -ForegroundColor DarkGray
+    }
+    $appOk = -not "$($appRes.error)".Trim()
+    $appRes = $null
+
     # ---- BUG-98: second pass -- resolve every principal that the filtered caches missed ----
-    # Done ONCE here rather than per surface: all three row builders have run, so the distinct
-    # id set is complete and ~700 rows collapse into a single /directoryObjects/getByIds call.
-    # Every row also gains principalKind so the GUI can tell a person from a group or an app on
-    # a screen whose whole job is deciding whose access to revoke.
+    # Done ONCE here: the distinct id set is complete, ~700 rows collapse into a single /directoryObjects/getByIds call.
+    # Every row also gains principalKind so the GUI can tell a person from a group or an app (or a DELETED principal).
     try {
-        # 100.31: one pass over the rows into a set (the pipeline + Select-Object -Unique was O(n^2) on ~20k rows).
         $unresolvedSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
         $unresolvedList = New-Object System.Collections.Generic.List[string]
         foreach ($row in $rows) {
@@ -1098,8 +1396,7 @@ function Invoke-PimActiveAssignmentsSnapshot {
             if (-not $row.principal -or "$($row.principal)" -eq "$($row.principalId)") {
                 $row.principal = Resolve-PimManagerPrincipalLabel -PrincipalId ([string]$row.principalId)
             }
-            # SNAP-INC: a carried row keeps the kind it was stored with when this run has no answer for it (users are resolved
-            # only for the rows that need a name, so an unchanged user row would otherwise lose its 'user' chip)
+            # a carried / app row keeps the kind it was built with when this run has no answer for it
             $pk = Get-PimManagerPrincipalKind -PrincipalId ([string]$row.principalId)
             if ($pk -or -not $row.Contains('principalKind')) { $row['principalKind'] = $pk }
         }
@@ -1109,25 +1406,25 @@ function Invoke-PimActiveAssignmentsSnapshot {
 
     $sw.Stop()
     $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 2)
-    $byType = @{ 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0 }
-    foreach ($row in $rows) { $t = "$($row.type)"; if ($byType.ContainsKey($t)) { $byType[$t]++ } }   # 100.31: one pass, no pipeline copies
+    $byType = @{ 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0; 'app-permission' = 0 }
+    $eligibleN = 0
+    foreach ($row in $rows) { $t = "$($row.type)"; if ($byType.ContainsKey($t)) { $byType[$t]++ }; if ("$($row.state)" -eq 'eligible') { $eligibleN++ } }
     $counts = [ordered]@{
-        total           = $rows.Count
-        'entra-role'    = $byType['entra-role']
-        'azure-rbac'    = $byType['azure-rbac']
+        total            = $rows.Count
+        'entra-role'     = $byType['entra-role']
+        'azure-rbac'     = $byType['azure-rbac']
         'pim-for-groups' = $byType['pim-for-groups']
+        'app-permission' = $byType['app-permission']
+        eligible         = $eligibleN
     }
-    Write-Host ("  [revoke] active-assignments loaded: {0} total ({1}e + {2}a + {3}g) in {4}s" -f $counts.total, $counts['entra-role'], $counts['azure-rbac'], $counts['pim-for-groups'], $elapsed) -ForegroundColor DarkGray
+    Write-Host ("  [revoke] delegations loaded: {0} total ({1}e + {2}a + {3}g + {4}p; {5} eligible) in {6}s" -f $counts.total, $counts['entra-role'], $counts['azure-rbac'], $counts['pim-for-groups'], $counts['app-permission'], $eligibleN, $elapsed) -ForegroundColor DarkGray
 
     $errArr = $surfaceErrors.ToArray()
     if ($errArr.Count -gt 0) {
         Write-Warning ("  [revoke] {0} surface(s) could NOT be read: {1}" -f $errArr.Count, (($errArr | ForEach-Object { $_.surface }) -join ', '))
     }
-    # A read is FULLY-FAILED (not "empty") when nothing came back AND at least one
-    # surface raised an auth/permission/transport error. The endpoint flags that
-    # so the GUI shows an actionable error instead of "Cache may be empty".
     $allFailedEmpty = ($rows.Count -eq 0 -and $errArr.Count -gt 0)
-
+    $pfgFailed = $false; foreach ($se in $errArr) { if ("$($se.surface)" -eq 'pim-for-groups') { $pfgFailed = $true } }
     $loadedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     $payload = [ordered]@{
         ok            = (-not $allFailedEmpty)
@@ -1140,15 +1437,17 @@ function Invoke-PimActiveAssignmentsSnapshot {
         cacheHit      = $false
         elapsedSec    = $elapsed
         durationMs    = [int64][math]::Round($sw.Elapsed.TotalMilliseconds, 0)
-    }
-    # SNAP-INC: how the group part was read, and the delta state the JOB stores once the rows are saved (never stored here).
-    # No state when the group read failed as a surface: the next run then reads every group.
-    if ($null -ne $gdPlan) {
-        $gdState = $null
-        if (-not $pfgFailed) {
-            $gdState = New-PimSnapshotGroupDeltaState -Plan $gdPlan -PreviousState $gdRun.state -NowUtc $gdRun.nowUtc -DeltaLink "$($gdRun.deltaLink)" -PimGroupRows ([long]$counts['pim-for-groups']) -FailedGroupIds $gFailedIds.ToArray()
+        # when each part was read (owner, split cadence): '' = not read completely in this generation
+        parts         = [ordered]@{
+            entraReadUtc          = $(if ($entraOk) { $runUtc } else { '' })
+            azureReadUtc          = $azureReadUtc
+            azureMode             = $(if ($azRead) { 'read' } else { 'carried' })
+            azureReason           = $azReason
+            azureRows             = [long]$counts['azure-rbac']
+            groupsReadUtc         = $(if (-not $pfgFailed) { $runUtc } else { '' })
+            groupsRead            = [long]$pimGroupsToRead.Count
+            appPermissionsReadUtc = $(if ($appOk) { $runUtc } else { '' })
         }
-        $payload['groupDelta'] = [ordered]@{ mode = "$($gdPlan.mode)"; reason = "$($gdPlan.reason)"; text = $gdText; state = $gdState }
     }
     if ($allFailedEmpty) {
         $payload.error = "Active PIM assignments could not be read from any surface. " + (($errArr | ForEach-Object {
@@ -1157,341 +1456,6 @@ function Invoke-PimActiveAssignmentsSnapshot {
         }) -join '  |  ')
     }
     return $payload
-}
-
-# ===========================================================================
-# SNAP-INC (owner 2026-10-20) -- THE PIM-FOR-GROUPS READ IS INCREMENTAL
-# ===========================================================================
-# Measured live: one assignmentSchedules read per group for EVERY group (BUG-217) is 125,004 groups / 514,472 rows / 15.3 h /
-# 132,504 Graph 429s per run at a school tenant, back to back every 2 h. Owner decision: keep every group, but re-read only
-# the groups that CHANGED since the last run (Graph groups delta, members@delta), carry the rows of the others forward from
-# the previous complete generation (pim.ActiveAssignmentRows), and read every group in full once a week.
-#   * always re-read, every run: groups whose rows a membership delta cannot announce -- any row with an end date, a start
-#     still ahead, an owner row (Get-PimSqlActiveAssignmentGroupSummary) -- role-assignable groups, the groups in the
-#     engine's managed list (defined in PIM), and the groups whose read failed last time
-#   * FULL read when: no stored state / no delta link / the previous snapshot was not complete or is not the stored one /
-#     the last full read is Get-PimSnapshotGroupFullReadDays old / the delta read fails (410 = resync) / the previous rows
-#     cannot be read or do not add up. A full read takes its delta link BEFORE the group reads (the stored link advanced to
-#     now, or a fresh round when there is none / it is refused), so a change made during the long read is caught next time.
-#   * state in pim.Settings 'ActiveAssignmentsGroupDelta', written by the job ONLY after the rows were stored (a failed run
-#     never advances the delta link).
-function Get-PimSnapshotGroupDeltaSettingName { return 'ActiveAssignmentsGroupDelta' }
-function Get-PimSnapshotGroupFullReadDays     { return 7 }        # a full read of every group at least this often
-function Get-PimSnapshotGroupRetryMax         { return 2000 }     # failed group reads kept for the next run; more = not complete
-function Get-PimSnapshotGroupDeltaMaxPages    { return 200000 }   # a delta round that does not end is a failed read
-function Get-PimSnapshotGroupDeltaPath        { return '/groups/delta?$select=id,members' }
-
-function ConvertFrom-PimGroupDeltaPage {
-    # SNAP-INC. PURE. One page of GET /groups/delta -> { changed; removed; nextLink; deltaLink } (group ids lower-case). A group
-    # carrying '@removed' is deleted; any other group in the page changed (members@delta, created, or a selected property).
-    param([AllowNull()][object]$Page)
-    $changed = New-Object System.Collections.Generic.List[string]
-    $removed = New-Object System.Collections.Generic.List[string]
-    $next = ''; $delta = ''
-    if ($null -ne $Page -and $Page.PSObject) {
-        $vp = $Page.PSObject.Properties['value']
-        if ($vp -and $null -ne $vp.Value) {
-            foreach ($g in @($vp.Value)) {
-                if ($null -eq $g) { continue }
-                $id = "$($g.id)".Trim().ToLowerInvariant(); if (-not $id) { continue }
-                if ($g.PSObject.Properties['@removed']) { $removed.Add($id) } else { $changed.Add($id) }
-            }
-        }
-        $nl = $Page.PSObject.Properties['@odata.nextLink'];  if ($nl -and "$($nl.Value)".Trim()) { $next = "$($nl.Value)".Trim() }
-        $dl = $Page.PSObject.Properties['@odata.deltaLink']; if ($dl -and "$($dl.Value)".Trim()) { $delta = "$($dl.Value)".Trim() }
-    }
-    return [pscustomobject]@{ changed = $changed.ToArray(); removed = $removed.ToArray(); nextLink = $next; deltaLink = $delta }
-}
-
-function Read-PimGroupDeltaRound {
-    <#
-      SNAP-INC. Follow one delta round from -Link (the initial '/groups/delta?...' or a stored deltaLink) through every
-      @odata.nextLink to its @odata.deltaLink, one page at a time. -CollectIds keeps the changed / removed group ids (an
-      initial round only needs the link). NEVER throws: { ok; error; resync; changed; removed; deltaLink; pages }.
-      resync = Graph refused the link (HTTP 410 / resync required) -- the caller reads every group.
-      -Graph: param($path) -> one page (default Invoke-PimGraph -Path).
-    #>
-    param([Parameter(Mandatory)][string]$Link, [scriptblock]$Graph = $null, [switch]$CollectIds)
-    if (-not $Graph) { $Graph = { param($p) Invoke-PimGraph -Path $p } }
-    $changed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-    $removed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-    $next = $Link; $pages = 0; $max = Get-PimSnapshotGroupDeltaMaxPages
-    try {
-        while ($next) {
-            if ($pages -ge $max) { throw "the delta round did not end within $max pages" }
-            $resp = & $Graph $next
-            $pages++
-            $pg = ConvertFrom-PimGroupDeltaPage -Page $resp
-            $resp = $null
-            if ($CollectIds) { foreach ($i in $pg.changed) { [void]$changed.Add($i) }; foreach ($i in $pg.removed) { [void]$removed.Add($i) } }
-            if ($pg.deltaLink) {
-                return [pscustomobject]@{ ok = $true; error = ''; resync = $false; changed = $changed; removed = $removed; deltaLink = $pg.deltaLink; pages = $pages }
-            }
-            if (-not $pg.nextLink) { throw 'the delta round ended without a deltaLink' }
-            $next = $pg.nextLink
-        }
-        throw 'the delta round had no link to start from'
-    } catch {
-        $em = "$($_.Exception.Message)"
-        return [pscustomobject]@{ ok = $false; error = $em; resync = [bool]($em -match '(?i)HTTP 410\b|resyncRequired|syncStateNotFound|SyncStateInvalid|resync')
-            changed = $changed; removed = $removed; deltaLink = ''; pages = $pages }
-    }
-}
-
-function ConvertTo-PimSnapshotGroupUtc {
-    # SNAP-INC. PURE. A stored stamp (ISO text, or the [datetime] pwsh 7's ConvertFrom-Json makes of it) -> UTC [datetime], or $null.
-    param([AllowNull()][object]$Value)
-    if ($null -eq $Value) { return $null }
-    if ($Value -is [datetime]) { if ($Value.Kind -eq [DateTimeKind]::Unspecified) { return [datetime]::SpecifyKind($Value, [DateTimeKind]::Utc) }; return $Value.ToUniversalTime() }
-    $s = "$Value".Trim(); if (-not $s) { return $null }
-    $d = [datetime]::MinValue
-    $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
-    if ([datetime]::TryParse($s, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$d)) { return $d }
-    return $null
-}
-
-function ConvertFrom-PimSnapshotGroupDeltaState {
-    <#
-      SNAP-INC. PURE. The stored pim.Settings 'ActiveAssignmentsGroupDelta' (raw JSON text, or an already parsed object) -> the
-      normalised state { deltaLink; lastFullUtc; lastRunUtc; mode; snapshotId; pimGroupRows; complete; retryGroupIds }, $null
-      when nothing is stored, or { unreadable = $true } for a value that is not the state's shape.
-    #>
-    param([AllowNull()][object]$Value)
-    if ($null -eq $Value) { return $null }
-    $o = $Value
-    if ($Value -is [string]) {
-        if (-not $Value.Trim()) { return $null }
-        try { $o = $Value | ConvertFrom-Json } catch { return [pscustomobject]@{ unreadable = $true } }
-    }
-    if ($null -eq $o -or -not $o.PSObject -or -not $o.PSObject.Properties['deltaLink']) { return [pscustomobject]@{ unreadable = $true } }
-    $sid = [long]0; [void][long]::TryParse("$($o.snapshotId)", [ref]$sid)
-    $pgr = [long]-1; if (-not [long]::TryParse("$($o.pimGroupRows)", [ref]$pgr)) { $pgr = -1 }
-    $retry = @(); if ($o.PSObject.Properties['retryGroupIds'] -and $null -ne $o.retryGroupIds) { $retry = @(@($o.retryGroupIds) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ }) }
-    return [pscustomobject]@{
-        unreadable    = $false
-        deltaLink     = "$($o.deltaLink)".Trim()
-        lastFullUtc   = (ConvertTo-PimSnapshotGroupUtc -Value $o.lastFullUtc)
-        lastRunUtc    = (ConvertTo-PimSnapshotGroupUtc -Value $o.lastRunUtc)
-        mode          = "$($o.mode)"
-        snapshotId    = $sid
-        pimGroupRows  = $pgr
-        complete      = ($o.PSObject.Properties['complete'] -and [bool]$o.complete)
-        retryGroupIds = $retry
-    }
-}
-
-function Get-PimSnapshotGroupFullReason {
-    # SNAP-INC. PURE. Why THIS run must read every group ('' = an incremental run may be tried). -State: normalised
-    # (ConvertFrom-PimSnapshotGroupDeltaState). -CurrentSnapshotId: the generation the stored header names (0 = none).
-    param([AllowNull()][object]$State, [long]$CurrentSnapshotId = 0, [datetime]$NowUtc = [datetime]::UtcNow)
-    if ($null -eq $State) { return 'first run (no stored delta state)' }
-    if ([bool]$State.unreadable) { return 'the stored delta state could not be read' }
-    if (-not "$($State.deltaLink)".Trim()) { return 'no stored delta link' }
-    if (-not [bool]$State.complete) { return 'the previous snapshot was not complete' }
-    if ($CurrentSnapshotId -le 0 -or [long]$State.snapshotId -ne $CurrentSnapshotId) { return 'the stored snapshot is not the one the delta state belongs to' }
-    if ($null -eq $State.lastFullUtc) { return 'no full read recorded' }
-    $now = $NowUtc.ToUniversalTime()
-    if (($now - $State.lastFullUtc).TotalDays -ge (Get-PimSnapshotGroupFullReadDays)) {
-        return ("weekly full read (last full read {0})" -f $State.lastFullUtc.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture))
-    }
-    return ''
-}
-
-function Get-PimSnapshotGroupReadPlan {
-    <#
-      SNAP-INC. PURE. THE DECISION. Which groups this run reads and which carry their rows forward:
-        { mode = 'full' | 'incremental'; reason; reread (HashSet of group ids, $null = every group); carry (HashSet); carryRows;
-          changed; always; removed; dropped; candidates }
-      -State / -CurrentSnapshotId / -NowUtc   see Get-PimSnapshotGroupFullReason
-      -Delta        Read-PimGroupDeltaRound -CollectIds from the stored deltaLink ($null = not read)
-      -Summary      Get-PimSqlActiveAssignmentGroupSummary of the current generation ($null = not read; -SummaryError says why)
-      -CandidateIds the groups a full read would read (BUG-217 candidates, dynamic groups already out)
-      -AlwaysIds    groups re-read every run on top of the summary's (role-assignable, managed in PIM)
-      Fail-safe: anything that does not add up is a FULL read with its reason, never a partial snapshot.
-    #>
-    param([AllowNull()][object]$State, [long]$CurrentSnapshotId = 0, [datetime]$NowUtc = [datetime]::UtcNow,
-          [AllowNull()][object]$Delta = $null, [AllowNull()][object]$Summary = $null, [string]$SummaryError = '',
-          [string[]]$CandidateIds = @(), [string[]]$AlwaysIds = @())
-    $cand = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-    foreach ($c in @($CandidateIds)) { $s = "$c".Trim().ToLowerInvariant(); if ($s) { [void]$cand.Add($s) } }
-    $full = { param($why) [pscustomobject]@{ mode = 'full'; reason = "$why"; reread = $null; carry = $null; carryRows = [long]0; changed = 0; always = 0; removed = 0; dropped = 0; candidates = $cand.Count } }
-    $why = Get-PimSnapshotGroupFullReason -State $State -CurrentSnapshotId $CurrentSnapshotId -NowUtc $NowUtc
-    if ($why) { return (& $full $why) }
-    if ($null -eq $Delta) { return (& $full 'the group delta was not read') }
-    if (-not [bool]$Delta.ok) {
-        if ([bool]$Delta.resync) { return (& $full "the delta link was refused (resync): $($Delta.error)") }
-        return (& $full "the group delta read failed: $($Delta.error)")
-    }
-    if ($null -eq $Summary) { return (& $full "the previous rows could not be read: $SummaryError") }
-    if ([long]$Summary.noGroup -gt 0) { return (& $full "$($Summary.noGroup) previous row(s) have no group id") }
-    if ([long]$Summary.total -ne [long]$State.pimGroupRows) { return (& $full ("the previous rows do not add up ({0} stored, {1} expected)" -f [long]$Summary.total, [long]$State.pimGroupRows)) }
-    $removed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-    foreach ($r in @($Delta.removed)) { $s = "$r".Trim().ToLowerInvariant(); if ($s) { [void]$removed.Add($s) } }
-    $reread = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-    $nChanged = 0; $nAlways = 0
-    foreach ($id in @($Delta.changed)) { $s = "$id".Trim().ToLowerInvariant(); if ($s -and $cand.Contains($s) -and -not $removed.Contains($s) -and $reread.Add($s)) { $nChanged++ } }
-    foreach ($g in @($Summary.groups)) { if ($null -eq $g -or -not [bool]$g.alwaysRead) { continue }; $s = "$($g.groupId)".Trim().ToLowerInvariant(); if ($s -and $cand.Contains($s) -and -not $removed.Contains($s) -and $reread.Add($s)) { $nAlways++ } }
-    foreach ($id in (@($AlwaysIds) + @($State.retryGroupIds))) { $s = "$id".Trim().ToLowerInvariant(); if ($s -and $cand.Contains($s) -and -not $removed.Contains($s) -and $reread.Add($s)) { $nAlways++ } }
-    $carry = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-    $carryRows = [long]0; $dropped = 0
-    foreach ($g in @($Summary.groups)) {
-        if ($null -eq $g) { continue }
-        $s = "$($g.groupId)".Trim().ToLowerInvariant()
-        if (-not $cand.Contains($s) -or $removed.Contains($s)) { $dropped++; continue }   # deleted, or no longer a group a full read would read
-        if ($reread.Contains($s)) { continue }
-        if ($carry.Add($s)) { $carryRows += [long]$g.rows }
-    }
-    return [pscustomobject]@{ mode = 'incremental'; reason = ''; reread = $reread; carry = $carry; carryRows = $carryRows
-        changed = $nChanged; always = $nAlways; removed = $removed.Count; dropped = $dropped; candidates = $cand.Count }
-}
-
-function ConvertFrom-PimActiveAssignmentsStoredRow {
-    # SNAP-INC. PURE. One stored row (parsed RowJson) -> the ordered row the snapshot builds, field for field. pwsh 7's
-    # ConvertFrom-Json turns the ISO start / end into [datetime]; they go back to the round-trip text the builder wrote.
-    param([AllowNull()][object]$Row)
-    if ($null -eq $Row) { return $null }
-    $o = [ordered]@{}
-    foreach ($p in $Row.PSObject.Properties) {
-        $v = $p.Value
-        if ($v -is [datetime]) {
-            $d = if ($v.Kind -eq [DateTimeKind]::Unspecified) { [datetime]::SpecifyKind($v, [DateTimeKind]::Utc) } else { $v.ToUniversalTime() }
-            $v = $d.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
-        }
-        $o[$p.Name] = $v
-    }
-    return $o
-}
-
-function New-PimSnapshotGroupDeltaContext {
-    <#
-      SNAP-INC. What the incremental read needs from the store, as a context the snapshot takes (-GroupDelta), or $null when
-      this process cannot run it (no SQL store, the row table is not there, a helper is not loaded) -- the read is then the
-      full read it always was. Nothing is read here: every read happens in Invoke-PimSnapshotGroupIncrementalPlan.
-      The scriptblocks are the test seams.
-    #>
-    param([string]$ConnectionString = '')
-    foreach ($fn in 'Get-PimSqlSettingRaw', 'Set-PimSqlSetting', 'Get-PimSqlActiveAssignmentsCurrentSnapshotId', 'Get-PimSqlActiveAssignmentGroupSummary', 'Read-PimSqlActiveAssignmentGroupRows', 'Confirm-PimSqlActiveAssignmentRowsReady', 'Invoke-PimGraph') {
-        if (-not (Get-Command $fn -ErrorAction SilentlyContinue)) { return $null }
-    }
-    if (-not "$ConnectionString".Trim() -and (Get-Command Get-PimTenantCacheStoreCs -ErrorAction SilentlyContinue)) { $ConnectionString = "$(Get-PimTenantCacheStoreCs)" }
-    if (-not "$ConnectionString".Trim()) { return $null }
-    $ddl = $null; try { $ddl = Confirm-PimSqlActiveAssignmentRowsReady -ConnectionString $ConnectionString } catch { $ddl = $null }
-    if ($null -eq $ddl -or -not [bool]$ddl.ok) { return $null }   # carried rows come from the table form only
-    return @{
-        cs                = $ConnectionString
-        settingName       = (Get-PimSnapshotGroupDeltaSettingName)
-        ReadState         = { param($ctx) Get-PimSqlSettingRaw -ConnectionString $ctx.cs -Name $ctx.settingName }
-        WriteState        = { param($ctx, $json) Set-PimSqlSetting -ConnectionString $ctx.cs -Name $ctx.settingName -ValueJson $json }
-        CurrentSnapshotId = { param($ctx) Get-PimSqlActiveAssignmentsCurrentSnapshotId -ConnectionString $ctx.cs }
-        ReadSummary       = { param($ctx, $sid, $now) Get-PimSqlActiveAssignmentGroupSummary -ConnectionString $ctx.cs -SnapshotId $sid -NowUtc $now }
-        ReadRows          = { param($ctx, $sid, $groupIds, $onChunk) Read-PimSqlActiveAssignmentGroupRows -ConnectionString $ctx.cs -SnapshotId $sid -GroupIds $groupIds -OnChunk $onChunk }
-        # the groups defined in PIM: the group part of the engine's managed list ('g|<principal>|<group>|<access>'); none stored = none
-        ManagedGroupIds   = { param($ctx)
-            if (-not (Get-Command Get-PimSqlManagedLiveIdentitySet -ErrorAction SilentlyContinue)) { return @() }
-            $set = Get-PimSqlManagedLiveIdentitySet -ConnectionString $ctx.cs
-            if ($null -eq $set) { return @() }
-            @(foreach ($k in $set) { $p = "$k".Split('|'); if ($p.Count -ge 4 -and $p[0] -eq 'g' -and $p[2]) { $p[2] } }) }
-        Graph             = { param($p) Invoke-PimGraph -Path $p }
-    }
-}
-
-function Invoke-PimSnapshotGroupIncrementalPlan {
-    <#
-      SNAP-INC. Run the decision for one snapshot: read the stored state + the generation it belongs to, then (when an
-      incremental run is allowed) the delta since the stored deltaLink, the previous generation's per-group summary and the
-      always-re-read groups, and decide (Get-PimSnapshotGroupReadPlan). An incremental plan reads its carried rows here, and a
-      carry that fails or does not add up turns the plan into a FULL read. A full read takes its delta link HERE, before any
-      group is read: the stored link advanced to now, else a fresh round from Get-PimSnapshotGroupDeltaPath. Returns { plan; state (the stored one, normalised); deltaLink; deltaError; carried (rows); nowUtc }.
-      -Context: New-PimSnapshotGroupDeltaContext (or a test's). -Candidates: the group objects a full read would read.
-    #>
-    param([Parameter(Mandatory)][hashtable]$Context, [object[]]$Candidates = @(), [datetime]$NowUtc = [datetime]::UtcNow)
-    $now = $NowUtc.ToUniversalTime()
-    $candIds = @(foreach ($g in @($Candidates)) { if ($g -and "$($g.Id)".Trim()) { "$($g.Id)".Trim().ToLowerInvariant() } })
-    $state = $null
-    try { $state = ConvertFrom-PimSnapshotGroupDeltaState -Value (& $Context.ReadState $Context) } catch { $state = [pscustomobject]@{ unreadable = $true } }
-    $curId = [long]0
-    try { $v = & $Context.CurrentSnapshotId $Context; if ($null -ne $v) { $curId = [long]$v } } catch { $curId = 0 }
-    $delta = $null; $summary = $null; $sumErr = ''; $always = @()
-    if (-not (Get-PimSnapshotGroupFullReason -State $state -CurrentSnapshotId $curId -NowUtc $now)) {
-        $delta = Read-PimGroupDeltaRound -Link "$($state.deltaLink)" -Graph $Context.Graph -CollectIds
-        if ($delta.ok) {
-            try {
-                $summary = & $Context.ReadSummary $Context $curId $now
-                $always = @(@($Candidates | Where-Object { $_ -and $_.PSObject.Properties['IsAssignableToRole'] -and $_.IsAssignableToRole -eq $true } | ForEach-Object { "$($_.Id)" }) + @(& $Context.ManagedGroupIds $Context))
-            } catch { $summary = $null; $sumErr = "$($_.Exception.Message)" }
-        }
-    } elseif ($null -ne $state -and -not [bool]$state.unreadable -and "$($state.deltaLink)".Trim()) {
-        # a full read (weekly, or the previous snapshot not usable) with a stored link: advancing THAT link to now is far
-        # cheaper than a fresh round over every group and its members, and positions the next run just the same
-        $delta = Read-PimGroupDeltaRound -Link "$($state.deltaLink)" -Graph $Context.Graph
-    }
-    $plan = Get-PimSnapshotGroupReadPlan -State $state -CurrentSnapshotId $curId -NowUtc $now -Delta $delta -Summary $summary -SummaryError $sumErr -CandidateIds $candIds -AlwaysIds @($always)
-    $carried = New-Object System.Collections.Generic.List[object]
-    if ($plan.mode -eq 'incremental' -and $plan.carry.Count -gt 0) {
-        $onChunk = {
-            param([string[]]$chunk)
-            $parsed = ConvertFrom-Json -InputObject ('[' + ($chunk -join ',') + ']')   # assigned first: PS 5.1 emits the array as ONE object
-            foreach ($x in @($parsed)) { if ($null -ne $x) { $carried.Add((ConvertFrom-PimActiveAssignmentsStoredRow -Row $x)) } }
-        }   # (no GetNewClosure: a closure's module scope would not see the script-scope helpers; $carried resolves up the call stack)
-        try {
-            [void](& $Context.ReadRows $Context $curId $plan.carry $onChunk)
-            if ([long]$carried.Count -ne [long]$plan.carryRows) { throw ("{0} of {1} rows came back" -f $carried.Count, $plan.carryRows) }
-        } catch {
-            $carried.Clear()
-            $plan = [pscustomobject]@{ mode = 'full'; reason = "the previous rows could not be carried forward: $($_.Exception.Message)"; reread = $null; carry = $null; carryRows = [long]0
-                changed = 0; always = 0; removed = 0; dropped = 0; candidates = $plan.candidates }
-        }
-    }
-    $deltaLink = ''; $deltaError = ''
-    if ($null -ne $delta -and [bool]$delta.ok) { $deltaLink = "$($delta.deltaLink)" }   # the round already runs up to now -- before any group read
-    else {
-        # a FULL read starts a fresh round to its deltaLink BEFORE reading the groups: what changes during the read is caught next time
-        $round = Read-PimGroupDeltaRound -Link (Get-PimSnapshotGroupDeltaPath) -Graph $Context.Graph
-        if ($round.ok) { $deltaLink = "$($round.deltaLink)" } else { $deltaError = "$($round.error)" }
-    }
-    return [pscustomobject]@{ plan = $plan; state = $state; deltaLink = $deltaLink; deltaError = $deltaError; carried = $carried; nowUtc = $now }
-}
-
-function New-PimSnapshotGroupDeltaState {
-    <#
-      SNAP-INC. PURE. The pim.Settings 'ActiveAssignmentsGroupDelta' value after a run (the job stamps snapshotId once the rows are
-      stored). complete = the next run may be incremental: a delta link is held and the failed group reads fit in the retry list.
-    #>
-    param([Parameter(Mandatory)][object]$Plan, [AllowNull()][object]$PreviousState = $null, [datetime]$NowUtc = [datetime]::UtcNow,
-          [string]$DeltaLink = '', [long]$PimGroupRows = 0, [string[]]$FailedGroupIds = @())
-    $inv = [System.Globalization.CultureInfo]::InvariantCulture
-    $now = $NowUtc.ToUniversalTime()
-    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-    $failed = @(foreach ($f in @($FailedGroupIds)) { $s = "$f".Trim().ToLowerInvariant(); if ($s -and $seen.Add($s)) { $s } })
-    $complete = ("$DeltaLink".Trim() -ne '' -and $failed.Count -le (Get-PimSnapshotGroupRetryMax))
-    $lastFull = $null
-    if ("$($Plan.mode)" -eq 'full') { $lastFull = $now }
-    elseif ($null -ne $PreviousState -and $null -ne $PreviousState.lastFullUtc) { $lastFull = $PreviousState.lastFullUtc }
-    $retry = [string[]]@(); if ($complete -and $failed.Count -gt 0) { $retry = [string[]]$failed }   # a variable, not $(...): that would unroll a 0/1-item list
-    return [ordered]@{
-        version       = 1
-        mode          = "$($Plan.mode)"
-        reason        = "$($Plan.reason)"
-        deltaLink     = "$DeltaLink".Trim()
-        lastFullUtc   = $(if ($null -ne $lastFull) { $lastFull.ToString('yyyy-MM-ddTHH:mm:ssZ', $inv) } else { '' })
-        lastRunUtc    = $now.ToString('yyyy-MM-ddTHH:mm:ssZ', $inv)
-        snapshotId    = [long]0
-        pimGroupRows  = [long]$PimGroupRows
-        complete      = [bool]$complete
-        retryGroupIds = $retry
-    }
-}
-
-function Save-PimSnapshotGroupDeltaState {
-    # SNAP-INC. Write the state for the generation that was just stored (-SnapshotId). Called by the job ONLY after the rows
-    # were saved. Never throws: { ok; error }.
-    param([Parameter(Mandatory)][hashtable]$Context, [Parameter(Mandatory)][System.Collections.IDictionary]$State, [Parameter(Mandatory)][long]$SnapshotId)
-    try {
-        $State['snapshotId'] = $SnapshotId
-        $json = ConvertTo-Json -InputObject $State -Depth 6 -Compress
-        [void](& $Context.WriteState $Context $json)
-        return [pscustomobject]@{ ok = $true; error = '' }
-    } catch { return [pscustomobject]@{ ok = $false; error = "$($_.Exception.Message)" } }
 }
 
 # ===========================================================================
@@ -1529,15 +1493,19 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
             detail = "unimplemented:$type -- no SQL store in this process, so the snapshot could only live in memory where the Manager can never read it (this is 'cannot answer', not 'nothing to do')" }
     }
 
-    # SNAP-INC (owner 2026-10-20): the PIM-for-Groups part is read INCREMENTALLY when this store can carry rows forward (the
-    # context reads nothing itself). Passed only to a snapshot that takes it -- a stand-in without -GroupDelta still runs.
-    $gdCtx = $null
-    try { $gdCtx = New-PimSnapshotGroupDeltaContext } catch { $gdCtx = $null }
-    # Named switches, never a hashtable splat: @{ Fresh = $true } reaches a wrapper as '-Fresh:', $true and the bare $true then
-    # binds BY POSITION to -GroupDelta (VM gate 2026-10-20, Test-PimActiveAssignmentsSnapshot B6).
-    $useGd = $false
-    if ($null -ne $gdCtx) { $sc = Get-Command Invoke-PimActiveAssignmentsSnapshot -ErrorAction SilentlyContinue; $useGd = [bool]($sc -and $sc.Parameters.ContainsKey('GroupDelta')) }
-    $snap = if ($useGd) { Invoke-PimActiveAssignmentsSnapshot -Fresh -GroupDelta $gdCtx } else { Invoke-PimActiveAssignmentsSnapshot -Fresh }
+    # Owner split cadence (2026-11-11): Azure (active + eligible) is read at most once a night and after PIM changed an Azure
+    # assignment; between those its rows are carried forward from the stored generation (Get-PimSnapshotAzurePlan; no table
+    # store = Azure is read). Passed only to a snapshot that takes it -- a stand-in without -AzurePlan still runs.
+    $azCtx = $null
+    try { $azCtx = New-PimSnapshotAzureContext } catch { $azCtx = $null }
+    $azPlan = Get-PimSnapshotAzurePlan -Context $azCtx -NowUtc $NowUtc
+    # Named parameters, never a hashtable splat: @{ Fresh = $true } reaches a wrapper as '-Fresh:', $true and the bare $true
+    # then binds BY POSITION to the next parameter (VM gate 2026-10-20, Test-PimActiveAssignmentsSnapshot B6).
+    $sc = Get-Command Invoke-PimActiveAssignmentsSnapshot -ErrorAction SilentlyContinue
+    $useAz = [bool]($sc -and $sc.Parameters.ContainsKey('AzurePlan'))
+    # the groups defined in PIM (the managed list) -- read only where the row store answers; else the naming rule alone finds PIM's own
+    $mgIds = @(); if ($null -ne $azCtx) { $mgIds = @(Get-PimActiveAssignmentsManagedGroupIds -ConnectionString "$($azCtx.cs)") }
+    $snap = if ($useAz) { Invoke-PimActiveAssignmentsSnapshot -Fresh -AzurePlan $azPlan -ManagedGroupIds $mgIds } else { Invoke-PimActiveAssignmentsSnapshot -Fresh }
     $errs = @($snap.surfaceErrors)
     $entry = [ordered]@{
         refreshedUtc  = "$($snap.refreshedUtc)"
@@ -1550,6 +1518,13 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
         durationMs    = [int64]$snap.durationMs
         source        = 'scheduler'
         correlationId = "$($global:PIM_JobCorrelationId)"
+    }
+    # Owner split cadence: when each part was read (header fields, so the page can say "as of" per part). azureReadUtc + azureRows
+    # are also what the next run carries Azure forward from.
+    if ($snap.Contains('parts') -and $null -ne $snap['parts']) {
+        foreach ($pk in 'entraReadUtc', 'azureReadUtc', 'azureMode', 'azureReason', 'azureRows', 'groupsReadUtc', 'groupsRead', 'appPermissionsReadUtc') {
+            if ($snap['parts'].Contains($pk)) { $entry[$pk] = $snap['parts'][$pk] }
+        }
     }
     # 100.68: the Dashboard's "Activations handled" ledger -- every time-bound active assignment seen, recorded once
     # (insert-only, engine/_shared/PIM-ImpactCounters.ps1). Never fails the snapshot: a ledger error is said in the detail.
@@ -1583,21 +1558,9 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
         $json = $null
         if ("$($tbl.reason)".Trim() -and [bool]$tbl.said) { $formTxt = "; stored as one document ($($tbl.reason))" }
     }
-    # SNAP-INC: the delta state moves ONLY now -- the rows of this run are stored in the table form (a failed write threw
-    # above and left the previous state, which still names the previous generation). Not for a read that failed everywhere.
-    if ($snap.Contains('groupDelta') -and $null -ne $snap['groupDelta']) {
-        $gdr = $snap['groupDelta']
-        $formTxt += "; pim-for-groups $($gdr.text)"
-        if ($null -eq $gdr.state) { $formTxt += '; group delta state not advanced (the group read failed)' }
-        elseif (-not $tbl.stored) { $formTxt += '; group delta state not advanced (the rows are not in the table form)' }
-        elseif (-not [bool]$snap.ok) { $formTxt += '; group delta state not advanced (the read failed)' }
-        elseif ($null -ne $gdCtx) {
-            $gdw = Save-PimSnapshotGroupDeltaState -Context $gdCtx -State $gdr.state -SnapshotId ([long]$tbl.snapshotId)
-            if (-not $gdw.ok) { $formTxt += "; group delta state NOT saved ($($gdw.error)) -- the next run reads every group" }
-        }
-    }
+    if ($useAz) { $formTxt += "; azure $(if ($azPlan.read) { 'read' } else { 'carried forward' }) ($($azPlan.reason))" }
     $c = $snap.counts
-    $sum = "{0} total ({1} entra-role, {2} azure-rbac, {3} pim-for-groups) in {4}s -> {5}{6}" -f $c.total, $c['entra-role'], $c['azure-rbac'], $c['pim-for-groups'], $snap.elapsedSec, $where, $formTxt
+    $sum = "{0} total ({1} entra-role, {2} azure-rbac, {3} pim-for-groups, {4} app-permission; {5} eligible) in {6}s -> {7}{8}" -f $c.total, $c['entra-role'], $c['azure-rbac'], $c['pim-for-groups'], [int]$c['app-permission'], [int]$c['eligible'], $snap.elapsedSec, $where, $formTxt
     if (-not $snap.ok) {
         throw ("[$type] active assignments could not be read from any surface; the failure was stored so the Revoke tab shows it. " + "$($entry.error)")
     }
@@ -1778,7 +1741,7 @@ function ConvertTo-PimActiveAssignmentsSnapshotView {
             ok              = $false
             error           = $msg
             rows            = @()
-            counts          = [ordered]@{ total = 0; 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0 }
+            counts          = [ordered]@{ total = 0; 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0; 'app-permission' = 0; eligible = 0 }
             surfaceErrors   = @()
             partial         = $false
             loadedUtc       = $null
@@ -1807,7 +1770,7 @@ function ConvertTo-PimActiveAssignmentsSnapshotView {
         return [ordered]@{
             ok              = $true
             rows            = @()
-            counts          = [ordered]@{ total = 0; 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0 }
+            counts          = [ordered]@{ total = 0; 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0; 'app-permission' = 0; eligible = 0 }
             surfaceErrors   = @()
             partial         = $false
             loadedUtc       = $null
@@ -1886,6 +1849,13 @@ function ConvertTo-PimActiveAssignmentsSnapshotView {
     if ($Entry -is [System.Collections.IDictionary]) { if ($Entry.Contains('rowStore')) { $rs = "$($Entry['rowStore'])" } }
     elseif ($Entry.PSObject.Properties['rowStore']) { $rs = "$($Entry.rowStore)" }
     if ($rs -eq 'table') { $view['rowStore'] = 'table'; $view['snapshotId'] = "$($Entry.snapshotId)"; $view['rowCount'] = $Entry.rowCount }
+    # DELEGATION-SCOPE-1 split cadence: when each part was read ('' = not read completely in this generation; absent in a
+    # snapshot stored before the change)
+    foreach ($pk in 'entraReadUtc', 'azureReadUtc', 'azureMode', 'azureReason', 'groupsReadUtc', 'appPermissionsReadUtc') {
+        $pv = $null
+        if ($Entry -is [System.Collections.IDictionary]) { if ($Entry.Contains($pk)) { $pv = $Entry[$pk] } } elseif ($Entry.PSObject.Properties[$pk]) { $pv = $Entry.$pk }
+        if ($null -ne $pv) { $view[$pk] = $(if ($pk -like '*Utc') { "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value $pv)" } else { "$pv" }) }
+    }
     return $view
 }
 

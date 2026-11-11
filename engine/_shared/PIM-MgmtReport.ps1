@@ -249,7 +249,8 @@ function Get-PimMgmtReportDefaultReaders {
             $e = Read-PimMgmtReportCacheEntry -Kind 'active-assignments' -What "active-assignments snapshot (job 'active-assignments-snapshot')"
             $ok = Get-PimMgmtReportField $e 'ok'
             if ($null -ne $ok -and -not [bool]$ok) { throw "the last active-assignments snapshot failed: $(Get-PimMgmtReportField $e 'error')" }
-            $rows = @(Get-PimMgmtReportField $e 'rows')
+            # DELEGATION-SCOPE-1: ACTIVE role / group rows only (eligible schedules and app permissions are not standing access here)
+            $rows = @(@(Get-PimMgmtReportField $e 'rows') | Where-Object { $null -ne $_ -and "$(Get-PimMgmtReportField $_ 'state')" -ne 'eligible' -and "$(Get-PimMgmtReportField $_ 'type')" -ne 'app-permission' })
             $standing = @($rows | Where-Object { $null -ne $_ -and -not "$(Get-PimMgmtReportField $_ 'end')".Trim() }).Count
             [pscustomobject]@{ standing = [long]$standing; total = [long]$rows.Count; asOfUtc = "$(Get-PimMgmtReportField $e 'refreshedUtc')" }
         }

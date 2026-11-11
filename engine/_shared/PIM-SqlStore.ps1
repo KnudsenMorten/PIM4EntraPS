@@ -1204,6 +1204,7 @@ CREATE TABLE pim.ActiveAssignmentRows (
     IdentityKey   NVARCHAR(450)  NULL,
     Managed       BIT            NOT NULL CONSTRAINT DF_pim_AaRows_Managed DEFAULT 0,
     OwnKind       NVARCHAR(20)   NOT NULL CONSTRAINT DF_pim_AaRows_OwnKind DEFAULT N'',
+    State         NVARCHAR(10)   NOT NULL CONSTRAINT DF_pim_AaRows_State DEFAULT N'active',
     SearchText    NVARCHAR(4000) NULL,
     RowJson       NVARCHAR(MAX)  NOT NULL,
     CONSTRAINT PK_pim_ActiveAssignmentRows PRIMARY KEY CLUSTERED (SnapshotId, Seq)
@@ -1222,6 +1223,9 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_pim_AaRows_PrincipalId
 CREATE INDEX IX_pim_AaRows_PrincipalId ON pim.ActiveAssignmentRows (SnapshotId, PrincipalId);
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_pim_AaRows_GroupId' AND object_id = OBJECT_ID('pim.ActiveAssignmentRows'))
 CREATE INDEX IX_pim_AaRows_GroupId ON pim.ActiveAssignmentRows (SnapshotId, GroupId);
+-- DELEGATION-SCOPE-1 (2026-11-11): active | eligible. ADDITIVE: a table made before it gets the column, and its rows read 'active'.
+IF COL_LENGTH('pim.ActiveAssignmentRows', 'State') IS NULL
+    ALTER TABLE pim.ActiveAssignmentRows ADD State NVARCHAR(10) NOT NULL CONSTRAINT DF_pim_AaRows_State DEFAULT N'active';
 '@
 }
 
@@ -1244,7 +1248,17 @@ function Confirm-PimSqlActiveAssignmentRowsReady {
     param([Parameter(Mandatory)][string]$ConnectionString)
     $r = Confirm-PimSqlSchemaObject -ConnectionString $ConnectionString -Objects @('pim.ActiveAssignmentSnapshots', 'pim.ActiveAssignmentRows') `
             -Fallback { $i = Initialize-PimSqlActiveAssignmentRows -ConnectionString $ConnectionString; if (-not $i.ok) { throw "$($i.error)" } }
-    return [pscustomobject]@{ ok = [bool]$r.ok; error = "$($r.message)" }
+    # DELEGATION-SCOPE-1: the State column (additive, added by the SCHEMA STEP -- no runtime DDL, G7). A read-only look: not
+    # there yet = the writer stores the rows without it (stateColumn = $false: they read 'active' in the table, RowJson keeps
+    # "state") until the schema step has run.
+    $stateCol = $true
+    if ([bool]$r.ok) {
+        try {
+            $cl = Invoke-PimSqlScalar -ConnectionString $ConnectionString -Sql "SELECT COL_LENGTH('pim.ActiveAssignmentRows', 'State')"
+            if ($null -eq $cl -or $cl -is [System.DBNull]) { $stateCol = $false }
+        } catch { $stateCol = $false }
+    }
+    return [pscustomobject]@{ ok = [bool]$r.ok; error = "$($r.message)"; stateColumn = $stateCol }
 }
 
 function Test-PimSqlTransientError {
@@ -1282,6 +1296,8 @@ function New-PimSqlActiveAssignmentRowTable {
     [void]$t.Columns.Add('EndUtc', [datetime])
     foreach ($c in 'Justification', 'IdentityKey', 'SearchText', 'RowJson') { [void]$t.Columns.Add($c, [string]) }
     $m = $t.Columns.Add('Managed', [bool]); $m.AllowDBNull = $false; $m.DefaultValue = $false
+    # DELEGATION-SCOPE-1: active | eligible (the writer drops the column for a table that does not have it yet)
+    $st = $t.Columns.Add('State', [string]); $st.AllowDBNull = $false; $st.DefaultValue = 'active'
     return ,$t
 }
 
@@ -1546,72 +1562,9 @@ function Get-PimSqlActiveAssignmentServicePrincipalIds {
     return @($rows | ForEach-Object { "$($_.PrincipalId)" } | Where-Object { $_ })
 }
 
-# SNAP-INC (owner 2026-10-20): the snapshot's PIM-for-Groups read is INCREMENTAL -- groups whose membership did not change
-# carry their rows forward from the previous complete generation. These two read that generation back (the decision is in
-# engine/_shared/PIM-ActiveAssignments.ps1, Get-PimSnapshotGroupReadPlan). Both throw on a failed read: the caller then reads
-# every group in full, never a partial snapshot presented as complete.
-function Get-PimActiveAssignmentsCarryReadTimeoutSec { return 600 }   # per statement; a 500k-row generation is read back in one pass
-
-function Get-PimSqlActiveAssignmentGroupSummary {
-    <#
-      SNAP-INC. One line per group of one generation's PIM-for-Groups rows: { groupId; rows; alwaysRead }. alwaysRead = the group
-      holds a row that a MEMBERSHIP change cannot announce -- a row with an end date, a start still in the future, or an
-      owner (or unidentifiable) row: IdentityKey is 'g|<principal>|<group>|member' only for a plain member row. Index columns
-      only (no RowJson). Returns { groups; total; noGroup } (noGroup = rows without a group id: they cannot be carried).
-    #>
-    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][long]$SnapshotId, [datetime]$NowUtc = [datetime]::UtcNow)
-    $sql = @'
-SELECT GroupId, COUNT_BIG(*) AS N,
-       MAX(CASE WHEN EndUtc IS NOT NULL OR (StartUtc IS NOT NULL AND StartUtc > @now) OR IdentityKey IS NULL OR IdentityKey NOT LIKE N'%|member' THEN 1 ELSE 0 END) AS AlwaysRead
-FROM pim.ActiveAssignmentRows WHERE SnapshotId = @s AND Kind = N'pim-for-groups'
-GROUP BY GroupId
-'@
-    $groups = New-Object System.Collections.Generic.List[object]
-    $total = [long]0; $noGroup = [long]0
-    $c = New-PimSqlConnection -ConnectionString $ConnectionString
-    try {
-        $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $sql; $cmd.CommandTimeout = Get-PimActiveAssignmentsCarryReadTimeoutSec
-        [void]$cmd.Parameters.AddWithValue('@s', $SnapshotId); [void]$cmd.Parameters.AddWithValue('@now', $NowUtc.ToUniversalTime())
-        $rd = $cmd.ExecuteReader()
-        try {
-            while ($rd.Read()) {
-                $n = [long]$rd.GetValue(1); $total += $n
-                if ($rd.IsDBNull(0) -or -not "$($rd.GetValue(0))".Trim()) { $noGroup += $n; continue }
-                $groups.Add([pscustomobject]@{ groupId = "$($rd.GetValue(0))".Trim().ToLowerInvariant(); rows = $n; alwaysRead = ([int]$rd.GetValue(2) -eq 1) })
-            }
-        } finally { $rd.Close() }
-    } finally { if ($c) { $c.Close(); $c.Dispose() } }
-    return [pscustomobject]@{ groups = $groups.ToArray(); total = $total; noGroup = $noGroup }
-}
-
-function Read-PimSqlActiveAssignmentGroupRows {
-    <#
-      SNAP-INC. The stored RowJson of one generation's PIM-for-Groups rows whose GroupId is in -GroupIds (lower-case ids),
-      handed to -OnChunk in chunks of up to 500 strings (the caller parses each chunk and drops the text: a 500k-row
-      generation is never held as text). Returns the number of rows handed over. Throws on a failed read.
-    #>
-    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][long]$SnapshotId,
-          [Parameter(Mandatory)][System.Collections.Generic.HashSet[string]]$GroupIds, [Parameter(Mandatory)][scriptblock]$OnChunk)
-    $n = 0
-    $chunk = New-Object System.Collections.Generic.List[string]
-    $c = New-PimSqlConnection -ConnectionString $ConnectionString
-    try {
-        $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandTimeout = Get-PimActiveAssignmentsCarryReadTimeoutSec
-        $cmd.CommandText = "SELECT GroupId, RowJson FROM pim.ActiveAssignmentRows WHERE SnapshotId = @s AND Kind = N'pim-for-groups' ORDER BY Seq"
-        [void]$cmd.Parameters.AddWithValue('@s', $SnapshotId)
-        $rd = $cmd.ExecuteReader()
-        try {
-            while ($rd.Read()) {
-                if ($rd.IsDBNull(0)) { continue }
-                if (-not $GroupIds.Contains("$($rd.GetValue(0))".Trim().ToLowerInvariant())) { continue }
-                $chunk.Add($rd.GetString(1)); $n++
-                if ($chunk.Count -ge 500) { & $OnChunk $chunk.ToArray(); $chunk.Clear() }
-            }
-        } finally { $rd.Close() }
-    } finally { if ($c) { $c.Close(); $c.Dispose() } }
-    if ($chunk.Count -gt 0) { & $OnChunk $chunk.ToArray(); $chunk.Clear() }
-    return $n
-}
+# SNAP-INC's carry-forward readers (Get-PimSqlActiveAssignmentGroupSummary / Read-PimSqlActiveAssignmentGroupRows) were removed
+# with the incremental group read (DELEGATION-SCOPE-1, owner 2026-11-11). The Azure carry-forward of the split cadence reads the
+# previous generation with Get-PimSqlActiveAssignmentRowsJson -Kind 'azure-rbac'.
 
 function ConvertTo-PimSqlJsonStringArray {
     <# PURE. A string list -> a compact JSON array of strings ('[]' for none); trimmed, empty values dropped, lower-cased. #>
@@ -1652,7 +1605,8 @@ function Sync-PimSqlActiveAssignmentMarks {
       Bring the stored marks of one generation up to date, in SQL, set-based, ONLY when what they are computed from changed
       (-MarksKey differs from the one recorded for the generation):
         Managed  = the row's identity is in the engine's 'managed-live' list (pim.TenantCache, read inside SQL -- the list
-                   never travels to this process)
+                   never travels to this process); an 'app-permission' row (DELEGATION-SCOPE-1) is Managed only when its
+                   app is one of PIM's own identities (product / support)
         OwnKind  = breakglass | support | product | '' (that order of precedence) from the three small lists
       Returns @{ updated; changed }. Throws on failure (the caller reports it; rows are then served with the marks they have).
     #>
@@ -1687,7 +1641,9 @@ BEGIN TRAN;
 UPDATE a SET Managed = n.Managed, OwnKind = n.OwnKind
 FROM pim.ActiveAssignmentRows a
 CROSS APPLY (SELECT
-    CAST(CASE WHEN a.IdentityKey IS NOT NULL AND a.IdentityKey <> N'' AND EXISTS (SELECT 1 FROM @m m WHERE m.v = LOWER(a.IdentityKey)) THEN 1 ELSE 0 END AS BIT) AS Managed,
+    CAST(CASE WHEN a.IdentityKey IS NOT NULL AND a.IdentityKey <> N'' AND EXISTS (SELECT 1 FROM @m m WHERE m.v = LOWER(a.IdentityKey)) THEN 1
+              WHEN a.Kind = N'app-permission' AND (EXISTS (SELECT 1 FROM @sup s WHERE s.v = LOWER(a.PrincipalId)) OR EXISTS (SELECT 1 FROM @prod p WHERE p.v = LOWER(a.PrincipalId))) THEN 1
+              ELSE 0 END AS BIT) AS Managed,
     CASE WHEN EXISTS (SELECT 1 FROM @bg b WHERE b.v IN (LOWER(a.PrincipalId), LOWER(LTRIM(RTRIM(a.Principal))), LOWER(LTRIM(RTRIM(a.PrincipalUpn))))) THEN N'breakglass'
          WHEN EXISTS (SELECT 1 FROM @sup s WHERE s.v = LOWER(a.PrincipalId)) THEN N'support'
          WHEN EXISTS (SELECT 1 FROM @prod p WHERE p.v = LOWER(a.PrincipalId)) THEN N'product'
@@ -1830,25 +1786,79 @@ function Get-PimActiveAssignmentsConditionSql {
     return @{ sql = $sb.ToString(); parameters = $p; count = $n }
 }
 
+# ---------------------------------------------------------------------------
+# DELEGATION-SCOPE-1 (owner 2026-11-11): the ONE paged query of "Review all delegations" (the Manager calls these; it has no
+# copy of its own -- tests/Test-PimActiveAssignmentsTable.ps1 F23 guards that). Active AND eligible rows (State) and a fourth
+# kind, 'app-permission'. A store whose table has no State column yet (the schema step has not run) answers every row as
+# 'active': checked once per process and store with COL_LENGTH; an "Invalid column name 'State'" answer is retried once as
+# such a store.
+# ---------------------------------------------------------------------------
+function Get-PimActiveAssignmentsTypeNames {
+    # PURE. The page's type chips, a CLOSED list ('deleted' = held by a deleted principal, any type).
+    return @('all', 'entra-role', 'azure-rbac', 'pim-for-groups', 'app-permission', 'deleted')
+}
+
+function ConvertTo-PimActiveAssignmentsStateFilter {
+    # PURE. A state filter value -> 'active' | 'eligible' | 'all'. Anything else (also missing, also '1') = 'all'.
+    param([AllowNull()][string]$State)
+    $s = "$State".Trim().ToLowerInvariant()
+    if ($s -in @('active', 'eligible')) { return $s }
+    return 'all'
+}
+
+function Test-PimSqlActiveAssignmentsStateColumn {
+    <#
+      Does this store's pim.ActiveAssignmentRows carry the State column? Asked ONCE per process and connection string
+      (COL_LENGTH; cheap). A store that cannot answer is treated as one without it (every row active) and asked again next
+      time. -Forget records "not there" for this store (after an "Invalid column name 'State'" answer).
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [switch]$Forget)
+    if ($null -eq $script:PimAaStateColumnKnown) { $script:PimAaStateColumnKnown = @{} }
+    if ($Forget) { $script:PimAaStateColumnKnown[$ConnectionString] = $false; return $false }
+    if ($script:PimAaStateColumnKnown.ContainsKey($ConnectionString)) { return [bool]$script:PimAaStateColumnKnown[$ConnectionString] }
+    try {
+        $v = Invoke-PimSqlScalar -ConnectionString $ConnectionString -Sql "SELECT COL_LENGTH('pim.ActiveAssignmentRows', 'State')"
+        $has = ($null -ne $v -and $v -isnot [System.DBNull] -and [int]$v -gt 0)
+        $script:PimAaStateColumnKnown[$ConnectionString] = $has
+        return $has
+    } catch { return $false }
+}
+
+function Get-PimActiveAssignmentsStateWhereSql {
+    # PURE. The state predicate (closed text; the value is the @state parameter). No State column: every row is active.
+    param([bool]$HasStateColumn)
+    if ($HasStateColumn) { return "`n  AND (@state = N'all' OR ISNULL(NULLIF(a.State, N''), N'active') = @state)" }
+    return "`n  AND (@state <> N'eligible')"
+}
+
 function Get-PimActiveAssignmentsViewCounts {
     <#
       PURE. The page's counters from the grouped counts of a whole generation (-Groups: Kind, IsDeleted, Managed, OwnKind,
-      N) and the five "show" ticks -- the SAME rule the page applies to a row (deleted first, then its own kind, then
+      [State,] N) and the five "show" ticks -- the SAME rule the page applies to a row (deleted first, then its own kind, then
       managed): total, deleted, managed, own{product,support,breakglass}, hidden, hiddenBy{...}, and the per-type counts of
-      what is not hidden.
+      what is not hidden. DELEGATION-SCOPE-1: the 'app-permission' type, and the active / eligible split:
+        visible.<type> / visible.all      = not hidden by a tick AND in the -State filter (what each type chip lists)
+        states.active / states.eligible   = not hidden by a tick, every type (what each state button lists)
+        byState.active / byState.eligible = every stored row
+      A group without State (a store without the column, an older caller) counts as active. -State all (the default) =
+      the counters as they always were.
     #>
-    param([AllowNull()][object[]]$Groups, [bool]$ShowDeleted = $false, [bool]$ShowManaged = $false, [bool]$ShowProduct = $false, [bool]$ShowSupport = $false, [bool]$ShowBreakGlass = $false)
+    param([AllowNull()][object[]]$Groups, [string]$State = 'all', [bool]$ShowDeleted = $false, [bool]$ShowManaged = $false, [bool]$ShowProduct = $false, [bool]$ShowSupport = $false, [bool]$ShowBreakGlass = $false)
+    $stateV = ConvertTo-PimActiveAssignmentsStateFilter -State $State
     $own = [ordered]@{ product = 0; support = 0; breakglass = 0 }
     $hiddenBy = [ordered]@{ product = 0; support = 0; breakglass = 0; managed = 0; deleted = 0 }
-    $visible = [ordered]@{ all = 0; 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0 }
-    $byType = [ordered]@{ total = 0; 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0 }
+    $visible = [ordered]@{ all = 0; 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0; 'app-permission' = 0 }
+    $byType = [ordered]@{ total = 0; 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0; 'app-permission' = 0 }
+    $states = [ordered]@{ active = 0; eligible = 0 }
+    $byState = [ordered]@{ active = 0; eligible = 0 }
     $total = [long]0; $deleted = [long]0; $managed = [long]0; $hidden = [long]0
     $showOwn = @{ product = $ShowProduct; support = $ShowSupport; breakglass = $ShowBreakGlass }
     foreach ($g in @($Groups)) {
         if ($null -eq $g) { continue }
         $n = [long]$g.N; $kind = "$($g.Kind)"; $ok = "$($g.OwnKind)"
+        $st = 'active'; if ($g.PSObject.Properties['State'] -and "$($g.State)" -eq 'eligible') { $st = 'eligible' }
         $isDel = ([int]$g.IsDeleted -eq 1); $isMan = [bool]$g.Managed
-        $total += $n; $byType['total'] += $n
+        $total += $n; $byType['total'] += $n; $byState[$st] += $n
         if ($byType.Contains($kind)) { $byType[$kind] += $n }
         if ($isDel) { $deleted += $n }
         if ($isMan) { $managed += $n }
@@ -1858,10 +1868,12 @@ function Get-PimActiveAssignmentsViewCounts {
         elseif ($own.Contains($ok) -and -not $showOwn[$ok]) { $why = $ok }
         elseif (-not $ShowManaged -and $isMan) { $why = 'managed' }
         if ($why) { $hidden += $n; $hiddenBy[$why] += $n; continue }
+        $states[$st] += $n
+        if ($stateV -ne 'all' -and $st -ne $stateV) { continue }
         $visible['all'] += $n
         if ($visible.Contains($kind)) { $visible[$kind] += $n }
     }
-    return [ordered]@{ total = $total; deleted = $deleted; managed = $managed; own = $own; hidden = $hidden; hiddenBy = $hiddenBy; visible = $visible; byType = $byType }
+    return [ordered]@{ total = $total; deleted = $deleted; managed = $managed; own = $own; hidden = $hidden; hiddenBy = $hiddenBy; visible = $visible; byType = $byType; states = $states; byState = $byState; state = $stateV }
 }
 
 function Invoke-PimSqlActiveAssignmentsQuery {
@@ -1871,11 +1883,13 @@ function Invoke-PimSqlActiveAssignmentsQuery {
       (Get-PimActiveAssignmentsSortColumn). Returns:
         @{ groups   = the grouped counts of the whole generation (for Get-PimActiveAssignmentsViewCounts)
            filtered = how many rows match the filter (all pages)
-           rows     = this page: @{ seq; json (the stored row, as written); managed; ownKind }
-           page; pageSize }
-      -Type all | entra-role | azure-rbac | pim-for-groups | deleted. -Search = "contains", over principal id, principal,
+           rows     = this page: @{ seq; json (the stored row, as written); managed; ownKind; state }
+           page; pageSize; hasState (false = no State column: every row active); state (the filter applied) }
+      -Type all | entra-role | azure-rbac | pim-for-groups | app-permission | deleted. -State all (default) | active |
+      eligible (DELEGATION-SCOPE-1). -Search = "contains", over principal id, principal,
       role, scope and justification (lower-cased both sides). -Aliases = exact names (principal / role / scope) that also
       match the search (the page's tag <-> display-name pairs). -ScopeIs = exact scope names (the group-delete check).
+      The grouped counts carry State ('active' when the table has no State column).
     #>
     param(
         [Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][long]$SnapshotId,
@@ -1884,14 +1898,17 @@ function Invoke-PimSqlActiveAssignmentsQuery {
         [bool]$ShowDeleted = $false, [bool]$ShowManaged = $false, [bool]$ShowProduct = $false, [bool]$ShowSupport = $false, [bool]$ShowBreakGlass = $false,
         # PIM 100.120: the list menu's conditions and search (checked by the caller), added to the filter of the COUNT and
         # of the page -- so "filtered" is the number of matching rows of the whole list. None = the statement as it was.
-        [AllowNull()][object[]]$Conditions = @(), [AllowNull()][string]$ListSearch = ''
+        [AllowNull()][object[]]$Conditions = @(), [AllowNull()][string]$ListSearch = '',
+        # DELEGATION-SCOPE-1: active | eligible | all (last, so every existing positional / named call is unchanged)
+        [string]$State = 'all'
     )
     $max = Get-PimActiveAssignmentsPageSizeMax
     if ($PageSize -le 0) { $PageSize = Get-PimActiveAssignmentsPageSizeDefault }
     if ($PageSize -gt $max) { $PageSize = $max }
     if ($Page -lt 1) { $Page = 1 }
     $typeV = "$Type".Trim().ToLowerInvariant()
-    if (@('all', 'entra-role', 'azure-rbac', 'pim-for-groups', 'deleted') -notcontains $typeV) { $typeV = 'all' }
+    if ((Get-PimActiveAssignmentsTypeNames) -notcontains $typeV) { $typeV = 'all' }
+    $stateV = ConvertTo-PimActiveAssignmentsStateFilter -State $State
     $q = "$Search".Trim().ToLowerInvariant()
     if ($q.Length -gt 200) { $q = $q.Substring(0, 200) }
     $aliasMax = Get-PimActiveAssignmentsAliasMax
@@ -1899,7 +1916,16 @@ function Invoke-PimSqlActiveAssignmentsQuery {
     $sc = @(@($ScopeIs) | Where-Object { "$_".Trim() } | Select-Object -First $aliasMax)
     $col = Get-PimActiveAssignmentsSortColumn -Key $Sort
     $dir = if ($Descending) { 'DESC' } else { 'ASC' }
-    $where = @'
+    $lmSql = Get-PimActiveAssignmentsConditionSql -Conditions $Conditions -Search $ListSearch
+    $p = @{ sid = $SnapshotId; type = $typeV; state = $stateV; q = $q; qLike = (ConvertTo-PimSqlLikeContains -Text $q)
+            aliasJson = (ConvertTo-PimSqlJsonStringArray -Values $al); scopeJson = (ConvertTo-PimSqlJsonStringArray -Values $sc)
+            showDeleted = [bool]$ShowDeleted; showManaged = [bool]$ShowManaged; showProduct = [bool]$ShowProduct; showSupport = [bool]$ShowSupport; showBreakGlass = [bool]$ShowBreakGlass
+            off = [int](($Page - 1) * $PageSize); take = [int]$PageSize }
+    foreach ($lmKey in @($lmSql.parameters.Keys)) { $p["$lmKey"] = $lmSql.parameters[$lmKey] }
+    $hasState = Test-PimSqlActiveAssignmentsStateColumn -ConnectionString $ConnectionString
+    $sets = $null
+    for ($try = 0; $try -lt 2; $try++) {
+        $where = @'
 a.SnapshotId = @sid
   AND (@showDeleted = 1 OR a.PrincipalKind IS NULL OR a.PrincipalKind <> N'deleted')
   AND (a.OwnKind = N'' OR (a.OwnKind = N'product' AND @showProduct = 1) OR (a.OwnKind = N'support' AND @showSupport = 1) OR (a.OwnKind = N'breakglass' AND @showBreakGlass = 1))
@@ -1908,9 +1934,12 @@ a.SnapshotId = @sid
   AND (@q = N'' OR a.SearchText LIKE @qLike ESCAPE N'\' OR (@hasAl = 1 AND EXISTS (SELECT 1 FROM @al x WHERE x.v IN (LOWER(LTRIM(RTRIM(a.Scope))), LOWER(LTRIM(RTRIM(a.Role))), LOWER(LTRIM(RTRIM(a.Principal)))))))
   AND (@hasSc = 0 OR EXISTS (SELECT 1 FROM @sc y WHERE y.v = LOWER(LTRIM(RTRIM(a.Scope)))))
 '@
-    $lmSql = Get-PimActiveAssignmentsConditionSql -Conditions $Conditions -Search $ListSearch
-    if ("$($lmSql.sql)") { $where = $where + "$($lmSql.sql)" }
-    $sql = @"
+        $where = $where + (Get-PimActiveAssignmentsStateWhereSql -HasStateColumn $hasState)
+        if ("$($lmSql.sql)") { $where = $where + "$($lmSql.sql)" }
+        $stateCol = if ($hasState) { "ISNULL(NULLIF(a.State, N''), N'active')" } else { "N'active'" }
+        # (a constant cannot be a GROUP BY expression: a table without State groups without it)
+        $stateGroup = if ($hasState) { ", $stateCol" } else { '' }
+        $sql = @"
 SET NOCOUNT ON;
 DECLARE @al TABLE (v NVARCHAR(400) NOT NULL PRIMARY KEY);
 DECLARE @sc TABLE (v NVARCHAR(400) NOT NULL PRIMARY KEY);
@@ -1918,28 +1947,34 @@ INSERT @al (v) SELECT DISTINCT LOWER(LEFT(CAST(j.[value] AS NVARCHAR(MAX)), 400)
 INSERT @sc (v) SELECT DISTINCT LOWER(LEFT(CAST(j.[value] AS NVARCHAR(MAX)), 400)) FROM OPENJSON(@scopeJson) j WHERE j.[value] IS NOT NULL AND j.[value] <> N'';
 DECLARE @hasAl BIT = CASE WHEN EXISTS (SELECT 1 FROM @al) THEN 1 ELSE 0 END;
 DECLARE @hasSc BIT = CASE WHEN EXISTS (SELECT 1 FROM @sc) THEN 1 ELSE 0 END;
-SELECT a.Kind, CASE WHEN a.PrincipalKind = N'deleted' THEN 1 ELSE 0 END AS IsDeleted, a.Managed, a.OwnKind, COUNT_BIG(*) AS N
+SELECT a.Kind, CASE WHEN a.PrincipalKind = N'deleted' THEN 1 ELSE 0 END AS IsDeleted, a.Managed, a.OwnKind, $stateCol AS State, COUNT_BIG(*) AS N
 FROM pim.ActiveAssignmentRows a WHERE a.SnapshotId = @sid
-GROUP BY a.Kind, CASE WHEN a.PrincipalKind = N'deleted' THEN 1 ELSE 0 END, a.Managed, a.OwnKind;
+GROUP BY a.Kind, CASE WHEN a.PrincipalKind = N'deleted' THEN 1 ELSE 0 END, a.Managed, a.OwnKind$stateGroup;
 SELECT COUNT_BIG(*) AS N FROM pim.ActiveAssignmentRows a WHERE $where OPTION (RECOMPILE);
-SELECT a.Seq, a.RowJson, a.Managed, a.OwnKind FROM pim.ActiveAssignmentRows a WHERE $where
+SELECT a.Seq, a.RowJson, a.Managed, a.OwnKind, $stateCol AS State FROM pim.ActiveAssignmentRows a WHERE $where
 ORDER BY $col $dir, a.Seq ASC OFFSET @off ROWS FETCH NEXT @take ROWS ONLY OPTION (RECOMPILE);
 "@
-    $p = @{ sid = $SnapshotId; type = $typeV; q = $q; qLike = (ConvertTo-PimSqlLikeContains -Text $q)
-            aliasJson = (ConvertTo-PimSqlJsonStringArray -Values $al); scopeJson = (ConvertTo-PimSqlJsonStringArray -Values $sc)
-            showDeleted = [bool]$ShowDeleted; showManaged = [bool]$ShowManaged; showProduct = [bool]$ShowProduct; showSupport = [bool]$ShowSupport; showBreakGlass = [bool]$ShowBreakGlass
-            off = [int](($Page - 1) * $PageSize); take = [int]$PageSize }
-    foreach ($lmKey in @($lmSql.parameters.Keys)) { $p["$lmKey"] = $lmSql.parameters[$lmKey] }
-    $sets = Invoke-PimSqlQuerySets -ConnectionString $ConnectionString -Sql $sql -Parameters $p -CommandTimeoutSec (Get-PimActiveAssignmentsQueryTimeoutSec)
-    if ($sets.Count -lt 3) { throw "the active-assignments query answered $($sets.Count) of 3 result sets" }
+        try {
+            $sets = Invoke-PimSqlQuerySets -ConnectionString $ConnectionString -Sql $sql -Parameters $p -CommandTimeoutSec (Get-PimActiveAssignmentsQueryTimeoutSec)
+            break
+        } catch {
+            # the column was there when asked and is not now (or the kept answer is wrong): read it as a store without it, once
+            if ($hasState -and $try -eq 0 -and "$($_.Exception.Message)" -match "(?i)invalid column name 'State'") {
+                $hasState = Test-PimSqlActiveAssignmentsStateColumn -ConnectionString $ConnectionString -Forget
+                continue
+            }
+            throw
+        }
+    }
+    if ($null -eq $sets -or $sets.Count -lt 3) { throw "the active-assignments query answered $(if ($sets) { $sets.Count } else { 0 }) of 3 result sets" }
     $filtered = [long]0
     foreach ($r in $sets[1]) { if ($null -ne $r) { $filtered = [long]$r.N } }
     $rows = New-Object System.Collections.Generic.List[object]
     foreach ($r in $sets[2]) {
         if ($null -eq $r) { continue }
-        $rows.Add([pscustomobject]@{ seq = [int]$r.Seq; json = "$($r.RowJson)"; managed = [bool]$r.Managed; ownKind = "$($r.OwnKind)" })
+        $rows.Add([pscustomobject]@{ seq = [int]$r.Seq; json = "$($r.RowJson)"; managed = [bool]$r.Managed; ownKind = "$($r.OwnKind)"; state = $(if ("$($r.State)" -eq 'eligible') { 'eligible' } else { 'active' }) })
     }
-    return [pscustomobject]@{ groups = @($sets[0]); filtered = $filtered; rows = $rows.ToArray(); page = $Page; pageSize = $PageSize; sort = $col; descending = [bool]$Descending }
+    return [pscustomobject]@{ groups = @($sets[0]); filtered = $filtered; rows = $rows.ToArray(); page = $Page; pageSize = $PageSize; sort = $col; descending = [bool]$Descending; hasState = [bool]$hasState; state = $stateV }
 }
 
 # --- row CRUD -------------------------------------------------------------------

@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.8 -- 2026-11-11
+
+- Review all delegations now shows exactly what grants access outside PIM Manager -- people, apps and deleted accounts with an Entra or Azure role (active and eligible), groups that hold a role and their members, and apps with high-privilege API permissions -- and no longer lists ordinary groups or their members; the Discovery and gaps report speaks only about PIM groups and PIM admins; the delegation overview reads far less (the Azure part once a night) and the page shows when each part was read; office accounts skip the steps that do not apply when you create them; updates accept the four-part version numbers of automatic image patches
+
 ## 3.1.7 -- 2026-11-11
 
 - New admin type Existing account (office user): a person can hold PIM delegations on their own existing account; PIM finds it by its exact name, manages only its delegations and never creates, changes, disables or deletes the account, and warns when it gets more than level 4-5

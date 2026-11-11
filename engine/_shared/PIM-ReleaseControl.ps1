@@ -244,7 +244,7 @@ function ConvertTo-PimReleaseWaveRecord {
     if ($name.Length -gt 100) { $name = $name.Substring(0, 100).Trim() }
     $r = -1; [void][int]::TryParse("$Ring".Trim(), [ref]$r)
     $w = $null
-    if ($name -and "$Version".Trim() -match '^\d+\.\d+\.\d+$' -and $r -ge 0 -and $r -le 3) {
+    if ($name -and "$Version".Trim() -match '^\d+\.\d+\.\d+(\.\d+)?$' -and $r -ge 0 -and $r -le 3) {
         $w = [ordered]@{ name = $name; version = "$Version".Trim(); ring = $r }
     }
     return [ordered]@{ wave = $w; recordedUtc = $NowUtc.ToUniversalTime().ToString('o') }
@@ -270,7 +270,7 @@ function Get-PimReleaseControlHeartbeatFields {
         if ($null -ne $wv) {
             $r = -1; [void][int]::TryParse("$(& $g $wv 'ring')", [ref]$r)
             $wn = "$(& $g $wv 'name')".Trim(); $wver = "$(& $g $wv 'version')".Trim()
-            if ($wn -and $wver -match '^\d+\.\d+\.\d+$' -and $r -ge 0 -and $r -le 3) {
+            if ($wn -and $wver -match '^\d+\.\d+\.\d+(\.\d+)?$' -and $r -ge 0 -and $r -le 3) {
                 $w = [pscustomobject][ordered]@{ name = $wn; version = $wver; ring = $r }
             }
         }

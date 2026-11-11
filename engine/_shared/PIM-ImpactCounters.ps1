@@ -82,6 +82,8 @@ function Select-PimImpactActivationRows {
     foreach ($r in @($Rows)) {
         if ($null -eq $r) { continue }
         $g = { param($n) if ($r -is [System.Collections.IDictionary]) { $r[$n] } elseif ($r.PSObject.Properties[$n]) { $r.$n } else { $null } }
+        # DELEGATION-SCOPE-1: an ELIGIBLE schedule (and an app permission) is not an activation
+        if ("$(& $g 'state')".Trim() -ieq 'eligible' -or "$(& $g 'type')".Trim() -eq 'app-permission') { continue }
         $s = ConvertTo-PimImpactUtc (& $g 'start'); $e = ConvertTo-PimImpactUtc (& $g 'end')
         if (-not $s -or -not $e) { continue }
         $pid0 = "$(& $g 'principalId')".Trim(); if (-not $pid0) { $pid0 = "$(& $g 'principal')".Trim() }

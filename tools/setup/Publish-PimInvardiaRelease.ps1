@@ -58,7 +58,12 @@ param(
     # EXACT-COMMIT GATE (Invardia 2026-11-11, from 3.1.5): the ring call carries the test-gate proof
     # "testGate": { commit (7-40 hex), run (runner run id or lane), result green|red, at (ISO UTC) }. Given as JSON text;
     # a malformed one is refused HERE (nothing sent) -- Invardia would answer 422. Not given = not sent (flagged by Invardia).
-    [string]$TestGateJson = ''
+    [string]$TestGateJson = '',
+    # IMAGE-ONLY-SEND (owner 2026-11-11, framework IMAGE-PATCH-1 point 8 / IMAGE-ONLY-AUTO-1): the ring call claims
+    # "imageOnly": true with "imageDiff" { fromVersion = the version that ring runs now; files[{ path, removed, added }] }.
+    # Refused HERE (nothing sent) when a changed file is product code; Invardia answering 422 imageOnly/imageDiff = the call is
+    # sent once more WITHOUT the claim (it then needs the owner's per-version yes, as before).
+    [switch]$ImageOnly
 )
 $ErrorActionPreference = 'Stop'
 function Step([string]$m) { Write-Host "==> $m" -ForegroundColor Cyan }
@@ -72,6 +77,46 @@ function ConvertTo-PimTestGateBody {
     $at = if ($tg.at -is [datetime]) { $tg.at.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") } else { "$($tg.at)".Trim() }
     if ("$($tg.commit)" -notmatch '^[0-9a-f]{7,40}$' -or -not "$($tg.run)".Trim() -or "$($tg.result)" -notin @('green', 'red') -or $at -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}') { throw "-TestGateJson malformed (commit 7-40 hex, run, result green|red, at ISO UTC): $Json; nothing was sent" }
     return [ordered]@{ commit = "$($tg.commit)"; run = "$($tg.run)"; result = "$($tg.result)"; at = $at }
+}
+function Test-PimImageOnlyPath {
+    <# PURE (IMAGE-ONLY-SEND). Is a changed file one an image-only release may touch? 'image' = a Dockerfile / lock file /
+       project file (Invardia judges its LINES); 'bookkeeping' = PIM's own release records (VERSION, RELEASENOTES, the
+       release map, the install contract's version, the sign-in front pin) -- sent too, Invardia decides; '' = product code. #>
+    param([Parameter(Mandatory)][string]$Path)
+    $p = "$Path".Replace('\', '/')
+    $leaf = ($p -split '/')[-1]
+    if ($leaf -match '(?i)^(Dockerfile|Containerfile)(\..+)?$|\.dockerfile$') { return 'image' }
+    if ($leaf -match '(?i)^(packages\.lock\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|Directory\.Packages\.props|Directory\.Build\.props)$|\.(csproj|fsproj|vbproj)$') { return 'image' }
+    if ($p -match '(?i)(^|/)SOLUTIONS/PIM4EntraPS/(VERSION|RELEASENOTES\.md|tools/setup/install-parameters\.json|tools/pim-manager/signin-front\.version|vendor/signin-front/VERSION)$' -or $p -match '(?i)(^|/)sync/release-map\.json$') { return 'bookkeeping' }
+    # Invardia 2026-11-11 (868a703f, kind "version-string"): the sign-in front's version constant and VERSION file may move
+    # too -- Invardia accepts ONLY lines that differ in their version numbers (any other change refuses the claim there).
+    if ($p -match '(?i)(^|/)signin-front/(src/SecurityHeaders\.cs|VERSION)$' -or $leaf -match '(?i)\.version$') { return 'bookkeeping' }
+    return ''
+}
+function Get-PimImageOnlyDiff {
+    <# IMAGE-ONLY-SEND. The imageDiff of -FromTag..-ToTag (repo-wide: the sign-in front and the release map live outside
+       the solution) -> @{ ok; reason; files = @( [ordered]@{ path; removed = @(); added = @() } ) }. ok=$false when a changed
+       file is product code (nothing is claimed then). Limits per framework: 300 files, 20,000 lines, 1,000 chars a line. #>
+    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$FromTag, [Parameter(Mandatory)][string]$ToTag)
+    $names = @(& git -C $RepoRoot diff --name-only $FromTag $ToTag 2>$null | Where-Object { "$_".Trim() })
+    if ($LASTEXITCODE -ne 0) { return @{ ok = $false; reason = "git diff $FromTag..$ToTag failed"; files = @() } }
+    $code = @($names | Where-Object { -not (Test-PimImageOnlyPath -Path $_) })
+    if ($code.Count) { return @{ ok = $false; reason = ("not image-only: product code changed ({0}{1})" -f (($code | Select-Object -First 5) -join ', '), $(if ($code.Count -gt 5) { ", +$($code.Count - 5) more" } else { '' })); files = @() } }
+    if ($names.Count -gt 300) { return @{ ok = $false; reason = "more than 300 files changed ($($names.Count))"; files = @() } }
+    $files = New-Object System.Collections.Generic.List[object]; $lines = 0
+    foreach ($n in $names) {
+        $rem = New-Object System.Collections.Generic.List[string]; $add = New-Object System.Collections.Generic.List[string]
+        if ("$n" -notmatch '(?i)(lock\.json|shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml)$') {   # a lock file may come with no lines
+            foreach ($l in @(& git -C $RepoRoot diff -U0 $FromTag $ToTag -- $n 2>$null)) {
+                if ($l -match '^(\+\+\+|---) ') { continue }
+                $t = "$l"; if ($t.Length -gt 1001) { $t = $t.Substring(0, 1001) }
+                if ($t.StartsWith('-')) { $rem.Add($t.Substring(1)); $lines++ } elseif ($t.StartsWith('+')) { $add.Add($t.Substring(1)); $lines++ }
+            }
+        }
+        $files.Add([ordered]@{ path = "$n"; removed = @($rem.ToArray()); added = @($add.ToArray()) })
+    }
+    if ($lines -gt 20000) { return @{ ok = $false; reason = "more than 20,000 changed lines ($lines)"; files = @() } }
+    return @{ ok = $true; reason = ''; files = @($files.ToArray()) }
 }
 # PIM 100.158 / framework 12.11e CR3 -- changedScopes on the publish call (&changedScopes=a,b | *) and the ring call
 # ("changedScopes": [..] | ["*"]), from the files this release changed since the previous release tag (PIM-ReleaseControl.ps1
@@ -208,8 +253,26 @@ if ($Promote) {
             }
         }
     }
+    # IMAGE-ONLY-SEND: the claim + its diff from the version THIS ring runs now (read back from Invardia's state)
+    if ($ImageOnly) {
+        $ioBase = Get-PimRingBaseVersion -State (Invoke-PimInvardiaReadBack -Endpoint $Endpoint -Token $token -Kind $Kind -Version $Version) -Ring $Ring -Target $Version
+        if (-not $ioBase) { throw "-ImageOnly: the version ring $Ring runs now could not be read from Invardia -- nothing was sent" }
+        & git -C $repo rev-parse --verify --quiet "refs/tags/PIM4EntraPS-v$ioBase" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "-ImageOnly: the tag PIM4EntraPS-v$ioBase (ring $Ring's version) is not in this repository -- nothing was sent" }
+        $io = Get-PimImageOnlyDiff -RepoRoot $repo -FromTag "PIM4EntraPS-v$ioBase" -ToTag $tag
+        if (-not $io.ok) { throw "-ImageOnly refused: $($io.reason) -- release it with the owner's per-version yes instead; nothing was sent" }
+        $pBody['imageOnly'] = $true
+        $pBody['imageDiff'] = [ordered]@{ fromVersion = $ioBase; files = @($io.files) }
+        Write-Host ("    imageOnly: {0} -> {1}, {2} file(s): {3}" -f $ioBase, $Version, @($io.files).Count, ((@($io.files) | ForEach-Object { $_.path }) -join ', '))
+    }
     Step "POST $purl"
-    $pr = Invoke-PimInvardiaCall -Method POST -Url $purl -Token $token -Body ($pBody | ConvertTo-Json -Compress) -ContentType 'application/json'
+    $pr = Invoke-PimInvardiaCall -Method POST -Url $purl -Token $token -Body ($pBody | ConvertTo-Json -Compress -Depth 8) -ContentType 'application/json'
+    if ($ImageOnly -and [int]$pr.status -eq 422 -and "$($pr.content)" -match '(?i)imageOnly|imageDiff') {
+        # framework IMAGE-PATCH-1 point 8 / 12.22 3b: a claim Invardia does not accept -> once more WITHOUT it (a normal ring call)
+        Write-Host ("    Invardia did not accept the image-only claim (HTTP 422: {0}) -- sent once more as a normal ring call" -f ("$($pr.content)" -replace '\s+', ' ').Substring(0, [Math]::Min(200, ("$($pr.content)").Length))) -ForegroundColor Yellow
+        $pBody.Remove('imageOnly'); $pBody.Remove('imageDiff')
+        $pr = Invoke-PimInvardiaCall -Method POST -Url $purl -Token $token -Body ($pBody | ConvertTo-Json -Compress -Depth 8) -ContentType 'application/json'
+    }
     if ($pBody.Contains('changedScopes') -and (Test-PimChangedScopesRefusal -Status $pr.status -Content $pr.content)) {
         # Invardia refused the FIELD: once more without it, and the field is held for 24 h
         Write-Host ("    Invardia refused changedScopes (HTTP {0}) -- sent once more without it; held for 24 h" -f $pr.status) -ForegroundColor Yellow
