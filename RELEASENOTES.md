@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.16 -- 2026-11-12
+
+- Saving policy choices plans the change at once and shows the whole flow on the same page (planning, waiting for your approval with Approve all, approved, applied); Approvals always shows its policy part; the Overview gap tile uses the coverage check and waiting policy choices are an info line; the save message no longer sounds like the second-approver setting; the updater no longer logs an error for an existing as-built database user.
+
 ## 3.1.15 -- 2026-11-12
 
 - The registry clean-up keeps only the current and previous image plus images a running app or job really uses (untagged build leftovers go), says why any extra image is kept, and reports the counts read back.

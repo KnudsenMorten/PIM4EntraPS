@@ -205,7 +205,9 @@ function Get-PimDemoHomeTiles {
         breakGlassChange = [ordered]@{ open = $false }
         approvals        = [ordered]@{ ok = $true; pending = 0; offboards = 0; revokes = 0 }
         tiers            = [ordered]@{ ok = $true; totalGroups = [int]$Summary.groups; admins = [int]$Summary.admins; byLevel = $Summary.byLevel }
-        gaps             = [ordered]@{ ok = $true; orphanGroups = 0; gapAdmins = 0; unmanagedTargets = 0 }
+        # HOME-GAPS-COVERAGE: the coverage report's numbers (same shape as ConvertTo-PimHomeCoverageTile), all clear.
+        gaps             = [ordered]@{ ok = $true; source = 'coverage'; available = $true; checked = $true; computedUtc = (& $iso $t.AddHours(-2)); stale = $false
+                                       counts = [ordered]@{ gap = 0; orphanGroup = 0; unmanagedBinding = 0; wrongPermissions = 0; unmanagedPrivilegedGroup = 0 }; total = 0; notRead = @() }
         unmanagedAdmins  = [ordered]@{ ok = $true; reported = $true; count = 0; accounts = @(); observedUtc = (& $iso $t.AddHours(-1)) }
     }
 }

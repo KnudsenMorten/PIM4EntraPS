@@ -3033,6 +3033,24 @@ tenant** approves it under Approvals. The approval covers exactly that plan. The
 may approve; it is a second, deliberate step. No count, no percentage and no "this policy was never
 changed before" exemption lets a policy write through without that approval.
 
+**The saved change is visible at every step.** A save does not wait for the policy jobs' next turn:
+right after it is stored, PIM Manager queues the policy jobs and starts the engine, the same way
+**Run now** on the Jobs page does (the engine still does the planning; PIM Manager never writes a
+policy itself). When it may not start the engine, the jobs are queued for its next start and the page
+says by when they plan it; the save never fails over this. PIM Manager records when and by whom the
+choices were saved and, later, when and by whom the change was approved. From that record, the hold
+and the policy jobs' runs, one state says where the change is, and three places show it:
+
+- **Policy settings**, a card on top of the page: *Saved HH:MM -- planning your change* while the
+  policy jobs plan it; then the held change sets themselves, with **Approve all**, on the same page;
+  then *Approved HH:MM by ... -- applied at the next policy run*, and *applied HH:MM* once the jobs have
+  made it. When the plan changes nothing, or the policy run failed, the card says so. With nothing
+  saved and nothing held there is no card. The card is drawn from stored state, so a reload shows it.
+- **Approvals**: the policy section always opens with its state -- planning, *N waiting for your
+  approval*, or none waiting -- whether or not the approval queue below it is switched on.
+- **Overview**: a held change is an action line, *N policy changes wait for your approval -- Approve*;
+  a change that is still being planned is an information line, without a number in the menu.
+
 **Moving from version 1: the import sets the imported policies to Keep current.** While a customer
 moves from version 1, both versions run side by side, and version 2 must never move an Entra role or
 PIM for Groups policy away from what version 1 set. So the version 1 import (with `-Apply`) records a
@@ -8705,7 +8723,7 @@ already read:
 | Tile | Source (function / file) |
 |---|---|
 | Delegation by tier (L0–L9) + admin count | `Build-PimGraphData` nodes; level via `Get-PimDelegationTierLevel` (explicit `Level`/`tier`, else `-L#-`/`-T#-` parsed from the GroupTag/label) |
-| Gaps / orphans / unmanaged | `Build-PimGraphData` nodes+edges: groups/admins/targets whose id is in no edge endpoint |
+| Coverage gaps | The **stored coverage report** (`pim.TenantCache` kind `coverage-report`), read through the same reader as `GET /api/coverage` (`Get-PimCoverageCached`, ignored gaps taken out) and shaped by `ConvertTo-PimHomeCoverageTile`: the counts Gap, Orphan group, Unmanaged binding, Wrong permissions and Unmanaged privileged group, their total and the report's time. The tile and its attention line link to **Discovery & gaps**, so both pages show the same numbers. No report yet = "Coverage not checked yet" (no count); an edition without the coverage check shows no count. A definition with no line drawn in the delegation map is not a gap and is not shown on the Overview. |
 | Engine & jobs health + **FAILED jobs** + running + last/next run + **drift** | `Get-PimJobsStatus` over `Get-PimManagerEffectiveSchedule` (a job with `lastOk -eq $false` = failed); red when any failed. **Drift** (`tiles.jobs.drift`) = the most-recent **engine** reconcile run (type `^engine`) that *applied* changes (`lastRan = $true`) ⇒ the live estate had drifted from desired and was corrected; a clean delta = no drift; a failed reconcile can't assert "no drift" (`knownOk`). Non-engine jobs never carry a drift signal. |
 | Validation errors/warnings | `Invoke-PimPreflightValidation` `.summary` (re-uses the cached report when present) |
 | Break-glass active | `pim.Settings['EmergencyOverride']` (active && not expired) |
@@ -8726,11 +8744,14 @@ attention items.
 `homeCalloutHtml()`). As each tile is computed it pushes any attention-worthy signal
 via `homeAddAttn(sev, text, tab)` into a single list drawn from the SAME tile data
 (so the call-out can never disagree with the tiles): FAILED jobs + drift (engine/jobs
-tile), validation errors, gaps/orphans/unmanaged, active break-glass, pending
+tile), validation errors, coverage gaps (the coverage report's counts), active break-glass, pending
 approvals, and — folded in after the heavy load — expiring access + pending access
 reviews. The list renders red items first, then amber, each row a `.home-attn-link`
 that deep-links to its tab; when nothing needs attention it renders an honest
-all-clear state (never blank). `homeWireLinks()` wires both `.home-tile-link` and
+all-clear state (never blank). **Information lines** (severity `info`: a fact, nothing is wrong —
+policy settings that wait for a choice, jobs not scheduled on this deployment) are not part of that
+list: they sit in a calm "For your information" box below it, with their link but no dot, no amber
+and no place in the "(N)" count. `homeWireLinks()` wires both `.home-tile-link` and
 `.home-attn-link` on first paint and again after the heavy tiles + call-out refresh.
 
 **Tier / plane legend.** A collapsible legend (`homeLegendHtml()`,
@@ -9113,7 +9134,8 @@ a group's dot.
 - **The number counts lines to act on**, never the findings inside a line: "1 line with 168 gaps" used
   to add 168 to the Home number and is now 0, because a gap is a warning.
 - **On the pages**, a warning is amber and an error is red. Each attention item the server
-  returns says whether it is an action or a warning, and every badge has a plain tooltip.
+  returns says whether it is an action, a warning or information (policy settings that wait for a
+  choice are information: by design, never amber), and every badge has a plain tooltip.
 
 This replaces the earlier wording in this section where it says a group shows a dot "when any child
 carries a visible badge" and that the pending-changes queue keeps "its own indicator" in the menu.

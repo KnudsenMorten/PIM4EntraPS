@@ -9818,6 +9818,200 @@ function Get-PimManagerPolicyChoiceCounts {
     } catch { $r.known = $false; $r.waiting = 0; $r.needsReview = 0 }
     return $r
 }
+
+# ---------------------------------------------------------------------------------------------------------------------
+# POLICY-FLOW-1 (owner 2026-11-12: "where do i see it, this needs refinement as it is unclear to people the flow and they
+# see nothing"). After Save choices the change used to be invisible for up to 30 minutes, until the next policy run planned
+# it and its hold appeared on Approvals. Now:
+#   * the save QUEUES the policy jobs at once (the same trigger + tick start as Jobs > Run now) -- never fails the save;
+#   * pim.Settings 'PolicyPlanRequest' records the save (when, by whom, which jobs, started or not) and a later approval;
+#   * ONE state (Get-PimPolicyFlowState, PURE) says where the change is -- planning / held / approved / applied / nochange /
+#     failed / none -- and the Policy settings card, the Approvals header and the Overview lines all read it (GET
+#     /api/policy-flow and /api/home tiles.policyFlow).
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimPolicyFlowSettingName { 'PolicyPlanRequest' }
+function Get-PimPolicyFlowJobNames {
+    # The scheduled jobs that run the policy providers: delta-policies = GroupsPolicies + EntraRolePolicies (scope
+    # PimPolicies), delta-pim-azure-policies = AzResPolicies. full-reconcile (scope All) plans them too.
+    @('delta-policies', 'delta-pim-azure-policies')
+}
+function ConvertTo-PimPolicyFlowUtc {
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { return $Value.ToUniversalTime() }
+    $s = "$Value".Trim(); if (-not $s) { return $null }
+    $d = [datetime]::MinValue
+    if ([datetime]::TryParse($s, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal', [ref]$d)) { return $d }
+    return $null
+}
+function Start-PimManagerPolicyPlanNow {
+    <#
+      POLICY-FLOW-1. Queue the policy jobs for the scheduler NOW and start the tick job -- the same path as POST /api/jobs/run
+      (Add-PimJobTrigger with -JobName, then Start-PimManagerTickNow; the Manager never runs the engine itself). Only the
+      ENABLED policy jobs of the effective schedule are queued. NEVER throws: a save must not fail because the plan could not
+      be started -- the answer then says when the next policy run plans it.
+      Returns { jobs; queued; started; byUtc; detail }:  started = the tick job was started now; byUtc = when the plan is due
+      at the latest (now + 5 min when queued but not started: the next tick drains it; now + 30 min when nothing could be
+      queued: the policy jobs' own cadence).
+      Seams: -Schedule (the effective schedule), -AddTrigger { param($type, $scope, $job) }, -Kick { -> Start-PimManagerTickNow shape }.
+    #>
+    param([object[]]$Schedule, [scriptblock]$AddTrigger, [scriptblock]$Kick, [datetime]$NowUtc = [datetime]::UtcNow, [string]$Reason = 'policy-choices-save')
+    $now = $NowUtc.ToUniversalTime()
+    $r = [ordered]@{ jobs = @(); queued = $false; started = $false; byUtc = $now.AddMinutes(30).ToString('o'); detail = '' }
+    try {
+        if ($null -eq $Schedule) { $Schedule = @(Get-PimManagerEffectiveSchedule) }
+        $want = @(Get-PimPolicyFlowJobNames)
+        $jobs = @(@($Schedule) | Where-Object { $_ -and $want -contains "$($_.name)" -and -not ($_.PSObject.Properties['enabled'] -and $_.enabled -eq $false) })
+        if (-not $AddTrigger) {
+            if (-not (Get-Command Add-PimJobTrigger -ErrorAction SilentlyContinue)) { $r.detail = 'the scheduler trigger queue is not loaded in this Manager'; return [pscustomobject]$r }
+            $AddTrigger = { param($t, $s, $j) [void](Add-PimJobTrigger -Type $t -Scope $s -Reason "run-now:$j" -JobName $j) }
+        }
+        $done = New-Object System.Collections.Generic.List[string]; $errs = New-Object System.Collections.Generic.List[string]
+        foreach ($j in $jobs) {
+            $sc = if ($j.PSObject.Properties['scope'] -and "$($j.scope)".Trim()) { "$($j.scope)" } else { 'All' }
+            try { & $AddTrigger "$($j.type)" $sc "$($j.name)"; $done.Add("$($j.name)") } catch { $errs.Add("$($j.name): $($_.Exception.Message)") }
+        }
+        $r.jobs = @($done.ToArray()); $r.queued = [bool]$done.Count
+        if (-not $done.Count) { $r.detail = $(if ($errs.Count) { "could not queue the policy jobs ($($errs -join '; '))" } else { 'no policy job is switched on in the job schedule' }); return [pscustomobject]$r }
+        $k = $null
+        try { $k = if ($Kick) { & $Kick } else { Start-PimManagerTickNow -Reason $Reason -NowUtc $now } } catch { $k = [pscustomobject]@{ started = $false; detail = "$($_.Exception.Message)" } }
+        $r.started = [bool]($k -and $k.started)
+        $r.byUtc = $(if ($r.started) { $now.AddMinutes(2).ToString('o') } else { $now.AddMinutes(5).ToString('o') })
+        $r.detail = "$(if ($k) { $k.detail })"
+    } catch { $r.detail = "$($_.Exception.Message)" }
+    return [pscustomobject]$r
+}
+function Get-PimPolicyFlowState {
+    <#
+      PURE (POLICY-FLOW-1). Where a saved policy change is, from three reads:
+        -Request  pim.Settings 'PolicyPlanRequest' { savedUtc; savedBy; policies; jobs; started; byUtc; approvedUtc; approvedBy }
+        -Hold     Get-PimManagerPolicyHoldState  { known; waiting; policies; holds[ { approved; approvedBy; changes } ] }
+        -Runs     the job run history (newest first or not): { name; status; startedUtc; finishedUtc }
+      state:  held      a change set waits for a SuperAdmin (always wins: it is what a person must act on)
+              approved  approved, the next policy run makes it
+              applied   approved, and every policy run that was due has finished since (shown for 24 hours)
+              planning  saved, the policy run(s) have not finished since the save
+              nochange  saved, the policy run(s) finished and nothing waits (shown for 24 hours)
+              failed    saved, a policy run finished FAILED since the save and nothing waits
+              none      nothing to show
+      'late' = planning and past byUtc + 15 minutes (the run has not come: Jobs says why).
+    #>
+    param([object]$Request, [object]$Hold, [object[]]$Runs = @(), [datetime]$NowUtc = [datetime]::UtcNow)
+    $now = $NowUtc.ToUniversalTime()
+    $o = [ordered]@{ state = 'none'; savedUtc = ''; savedBy = ''; policies = 0; started = $false; byUtc = ''; late = $false; waiting = 0; heldPolicies = 0
+                     approvedUtc = ''; approvedBy = ''; plannedUtc = ''; appliedUtc = ''; failedJob = ''; jobs = @() }
+    $g = { param($obj, $n) if ($null -ne $obj -and $obj.PSObject.Properties[$n]) { $obj.$n } else { $null } }
+    $saved = ConvertTo-PimPolicyFlowUtc (& $g $Request 'savedUtc')
+    if ($saved) {
+        $o.savedUtc = $saved.ToString('o'); $o.savedBy = "$(& $g $Request 'savedBy')"
+        $pn = 0; [void][int]::TryParse("$(& $g $Request 'policies')", [ref]$pn); $o.policies = $pn
+        $o.started = [bool](& $g $Request 'started'); $b = ConvertTo-PimPolicyFlowUtc (& $g $Request 'byUtc'); if ($b) { $o.byUtc = $b.ToString('o') }
+        $o.jobs = @(@(& $g $Request 'jobs') | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
+    }
+    $apprAt = ConvertTo-PimPolicyFlowUtc (& $g $Request 'approvedUtc')
+    if ($apprAt) { $o.approvedUtc = $apprAt.ToString('o'); $o.approvedBy = "$(& $g $Request 'approvedBy')" }
+    # 1. a change set waits for a person
+    $holds = @(if ($Hold -and [bool](& $g $Hold 'known')) { @(& $g $Hold 'holds') | Where-Object { $_ } })
+    $wait = @($holds | Where-Object { -not [bool](& $g $_ 'approved') })
+    if ($wait.Count) {
+        $o.state = 'held'; $o.waiting = $wait.Count; $p = 0; foreach ($w in $wait) { $p += [int](& $g $w 'changes') }; $o.heldPolicies = $p
+        return [pscustomobject]$o
+    }
+    # 2. approved, not made yet (the hold record stays until the run that applies it)
+    $apprHold = @($holds | Where-Object { [bool](& $g $_ 'approved') })
+    if ($apprHold.Count) {
+        $o.state = 'approved'
+        if (-not $o.approvedBy) { $o.approvedBy = "$(& $g $apprHold[0] 'approvedBy')" }
+        return [pscustomobject]$o
+    }
+    # the policy runs finished after a point in time: all due jobs (the queued ones, else any policy job)
+    $names = if (@($o.jobs).Count) { @($o.jobs) } else { @(Get-PimPolicyFlowJobNames) + @('full-reconcile') }
+    $finAfter = {
+        param([datetime]$t)
+        $fin = @(@($Runs) | Where-Object { $_ -and ($names -contains "$(& $g $_ 'name')") } | ForEach-Object {
+                $f = ConvertTo-PimPolicyFlowUtc (& $g $_ 'finishedUtc'); $s0 = ConvertTo-PimPolicyFlowUtc (& $g $_ 'startedUtc')
+                if ($f -and $s0 -and $s0 -ge $t.AddSeconds(-5)) { [pscustomobject]@{ name = "$(& $g $_ 'name')"; status = "$(& $g $_ 'status')".ToLowerInvariant(); fin = $f } } })
+        $need = if (@($o.jobs).Count) { @($o.jobs) } else { @() }
+        $complete = if ($need.Count) { -not @($need | Where-Object { $n = $_; -not @($fin | Where-Object { $_.name -eq $n }).Count }).Count } else { [bool]$fin.Count }
+        [pscustomobject]@{ complete = $complete; runs = $fin; last = $(if ($fin.Count) { ($fin | Sort-Object fin -Descending | Select-Object -First 1).fin } else { $null }) }
+    }
+    # 3. approved earlier, the hold is gone: applied once the policy runs finished after the approval
+    #    (a save AFTER the approval is a new change: step 4)
+    if ($apprAt -and (-not $saved -or $apprAt -ge $saved)) {
+        $a = & $finAfter $apprAt
+        if ($a.complete) {
+            if (($now - $a.last).TotalHours -lt 24) { $o.state = 'applied'; $o.appliedUtc = $a.last.ToString('o') }
+            return [pscustomobject]$o
+        }
+        if (($now - $apprAt).TotalHours -lt 24) { $o.state = 'approved' }
+        return [pscustomobject]$o
+    }
+    # 4. saved: planning until the due runs finished
+    if ($saved) {
+        $p = & $finAfter $saved
+        $bad = @($p.runs | Where-Object { $_.status -in @('failed', 'error') })
+        if ($bad.Count) {
+            if (($now - $bad[0].fin).TotalHours -lt 24) { $o.state = 'failed'; $o.failedJob = "$($bad[0].name)"; $o.plannedUtc = $bad[0].fin.ToString('o') }
+            return [pscustomobject]$o
+        }
+        if ($p.complete) {
+            if (($now - $p.last).TotalHours -lt 24) { $o.state = 'nochange'; $o.plannedUtc = $p.last.ToString('o') }
+            return [pscustomobject]$o
+        }
+        if (($now - $saved).TotalHours -lt 24) {
+            $o.state = 'planning'
+            $by = ConvertTo-PimPolicyFlowUtc $o.byUtc
+            $o.late = [bool]($by -and $now -gt $by.AddMinutes(15))
+        }
+    }
+    return [pscustomobject]$o
+}
+function Get-PimManagerPolicyFlowRequest {
+    try { return (Get-PimManagerSettingObject -Name (Get-PimPolicyFlowSettingName)) } catch { return $null }
+}
+function Save-PimManagerPolicyFlowRequest {
+    # Best effort: the record only feeds the status lines; a write that fails is warned, never fails the save or the approval.
+    param([Parameter(Mandatory)][object]$Value)
+    try { Set-PimManagerSettingObject -Name (Get-PimPolicyFlowSettingName) -Value $Value; return $true }
+    catch { Write-Warning "  [manager] the policy plan status could not be recorded: $($_.Exception.Message)"; return $false }
+}
+function Invoke-PimManagerPolicyFlowOnSave {
+    # POLICY-FLOW-1: after a successful PUT /api/policy-choices -- start the plan, record the save. Returns the 'plan' block
+    # of the answer { queued; started; jobs; savedUtc; byUtc; detail }. Never throws.
+    param([string]$By, [int]$Policies = 0, [datetime]$NowUtc = [datetime]::UtcNow, [object[]]$Schedule, [scriptblock]$AddTrigger, [scriptblock]$Kick)
+    $now = $NowUtc.ToUniversalTime()
+    $sp = @{ NowUtc = $now }; if ($PSBoundParameters.ContainsKey('Schedule')) { $sp.Schedule = $Schedule }; if ($AddTrigger) { $sp.AddTrigger = $AddTrigger }; if ($Kick) { $sp.Kick = $Kick }
+    $st = $null
+    try { $st = Start-PimManagerPolicyPlanNow @sp } catch { $st = [pscustomobject]@{ jobs = @(); queued = $false; started = $false; byUtc = $now.AddMinutes(30).ToString('o'); detail = "$($_.Exception.Message)" } }
+    [void](Save-PimManagerPolicyFlowRequest -Value ([ordered]@{ savedUtc = $now.ToString('o'); savedBy = "$By"; policies = $Policies; jobs = @($st.jobs); queued = [bool]$st.queued; started = [bool]$st.started; byUtc = "$($st.byUtc)"; detail = "$($st.detail)" }))
+    try { $script:PimPolicyHoldStateCache = $null } catch { }
+    return [ordered]@{ queued = [bool]$st.queued; started = [bool]$st.started; jobs = @($st.jobs); savedUtc = $now.ToString('o'); byUtc = "$($st.byUtc)"; detail = "$($st.detail)" }
+}
+function Invoke-PimManagerPolicyFlowOnApprove {
+    # POLICY-FLOW-1: a policy change set was approved -- remember when and by whom, so the card can say "Approved HH:MM by X
+    # -- applied" after the run that makes it has cleared the hold and the approval record. Never throws.
+    param([string]$By, [datetime]$NowUtc = [datetime]::UtcNow)
+    try {
+        $cur = Get-PimManagerPolicyFlowRequest
+        $rec = [ordered]@{}
+        if ($cur) { foreach ($p in $cur.PSObject.Properties) { $rec[$p.Name] = $p.Value } }
+        $rec['approvedUtc'] = $NowUtc.ToUniversalTime().ToString('o'); $rec['approvedBy'] = "$By"
+        [void](Save-PimManagerPolicyFlowRequest -Value $rec)
+    } catch { }
+}
+function Get-PimManagerPolicyFlow {
+    # The state for this Manager (GET /api/policy-flow, /api/home tiles.policyFlow). Never throws: an unreadable source is
+    # state 'none' with the error named.
+    param([switch]$Fresh)
+    try {
+        $req = Get-PimManagerPolicyFlowRequest
+        $hold = $null; try { $hold = Get-PimManagerPolicyHoldState -Fresh:$Fresh } catch { $hold = $null }
+        $runs = @(); if ($req -and (Get-Command Get-PimJobRunHistory -ErrorAction SilentlyContinue)) { try { $runs = @(Get-PimJobRunHistory) } catch { $runs = @() } }
+        $s = Get-PimPolicyFlowState -Request $req -Hold $hold -Runs $runs
+        $s | Add-Member -NotePropertyName canApprove -NotePropertyValue ([bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) -Force
+        return $s
+    } catch { return [pscustomobject]@{ state = 'none'; error = "$($_.Exception.Message)" } }
+}
 function Get-PimManagerAttentionSources {
     $src = [ordered]@{ policyHolds = @(); approvals = @(); offboardApproved = @(); rfa = @(); guardHolds = @(); guardReleases = @(); secondApprover = $null; workloadHolds = @(); policyChoices = $null; errors = @() }
     $errs = New-Object System.Collections.Generic.List[string]
@@ -10036,7 +10230,9 @@ function Get-PimManagerAttention {
     $pc = $s.policyChoices
     if ($pc) {
         if ([int]$pc.waiting -gt 0) {
-            $items.Add([ordered]@{ id = 'policy-choices-waiting'; tab = 'policysettings'; count = [int]$pc.waiting; blocking = $false; sev = 'amber'
+            # HOME-POLICY-INFO (owner "yes" 2026-11-12): waiting for a choice is BY DESIGN (nothing is wrong) -- an INFO line
+            # (sev 'info', kind 'info'): never amber, never in "What needs your attention", never a number anywhere.
+            $items.Add([ordered]@{ id = 'policy-choices-waiting'; tab = 'policysettings'; count = [int]$pc.waiting; blocking = $false; sev = 'info'
                 text = ("{0} for your choice -- PIM Manager changes no policy setting until you choose" -f (& $plural ([int]$pc.waiting) 'policy setting waits' 'policy settings wait'))
                 canAct = $isSuper; who = 'a SuperAdmin chooses (Templates > Policy settings)' })
         }
@@ -10052,6 +10248,7 @@ function Get-PimManagerAttention {
     # the findings inside them (46 waiting settings are one line).
     $total = 0; $warnLines = 0
     foreach ($i in $items) {
+        if ($i.Contains('blocking') -and -not $i.blocking -and "$($i['sev'])" -eq 'info') { $i['kind'] = 'info'; continue }   # HOME-POLICY-INFO: neither action nor warning
         if ($i.Contains('blocking') -and -not $i.blocking) { $i['kind'] = 'warning'; $warnLines++; continue }
         $i['kind'] = 'action'; $total += [int]$i.count
     }
@@ -10162,6 +10359,44 @@ function Get-PimManagerSetupControlNotices {
     return @($notices.ToArray())
 }
 
+function ConvertTo-PimHomeCoverageTile {
+    <#
+      PURE. HOME-GAPS-COVERAGE (owner "yes" 2026-11-12): the Overview's gaps tile from the coverage view that GET /api/coverage
+      answers (Get-PimCoverageCached: the stored report, ignored gaps already taken out). Same numbers as Discovery & gaps.
+        { ok; source = 'coverage'; available; checked; computedUtc; stale; hint; counts = { gap; orphanGroup; unmanagedBinding;
+          wrongPermissions; unmanagedPrivilegedGroup }; total; notRead[] }
+      No report yet -> checked = $false and NO count (never "0 gaps"). -Available:$false (the edition has no coverage reader)
+      -> available = $false, checked = $false. The map-wiring count is never part of this tile.
+    #>
+    param([AllowNull()][object]$View, [switch]$Available)
+    $field = { param($o, $n) if ($null -eq $o) { return $null }; if ($o -is [System.Collections.IDictionary]) { if ($o.Contains($n)) { return $o[$n] }; return $null }; $p = $o.PSObject.Properties[$n]; if ($p) { return $p.Value }; return $null }
+    if (-not $Available) {
+        return [ordered]@{ ok = $true; source = 'coverage'; available = $false; checked = $false; computedUtc = $null; total = $null
+            note = 'The coverage check (Discovery & gaps) is not part of this edition.' }
+    }
+    $computed = "$(& $field $View 'computedUtc')".Trim()
+    if ($null -eq $View -or [bool](& $field $View 'snapshotMissing') -or -not $computed) {
+        return [ordered]@{ ok = $true; source = 'coverage'; available = $true; checked = $false; computedUtc = $null; total = $null
+            note = 'Coverage not checked yet'; hint = "$(& $field $View 'hint')" }
+    }
+    $c = & $field $View 'counts'
+    $n = { param($k) $v = & $field $c $k; if ($null -eq $v) { return 0 }; try { return [int]$v } catch { return 0 } }
+    $counts = [ordered]@{
+        gap                      = & $n 'Gap'
+        orphanGroup              = & $n 'Orphan group'
+        unmanagedBinding         = & $n 'Unmanaged binding'
+        wrongPermissions         = & $n 'Wrong permissions'
+        unmanagedPrivilegedGroup = & $n 'Unmanaged privileged group'
+    }
+    $total = 0; foreach ($k in @($counts.Keys)) { $total += [int]$counts[$k] }
+    return [ordered]@{
+        ok = $true; source = 'coverage'; available = $true; checked = $true
+        computedUtc = $computed; stale = [bool](& $field $View 'stale'); hint = "$(& $field $View 'hint')"
+        counts = $counts; total = $total
+        notRead = @(@(& $field $View 'notRead') | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
+    }
+}
+
 function Get-PimHomeOverview {
     [CmdletBinding()]
     param([switch]$IncludeHeavy)
@@ -10171,12 +10406,10 @@ function Get-PimHomeOverview {
     # BUG-264: time each tile -- /api/home holds the ONE request loop, and a slow load must name its slow tile.
     $hsw = [System.Diagnostics.Stopwatch]::StartNew(); $hT = [ordered]@{}
 
-    # ---- 1. Delegation estate: per-level (L0-L9) + gaps/orphans/unmanaged -----
+    # ---- 1. Delegation estate: per-level (L0-L9) -----
     # Sourced from the live graph model the Delegation Map renders (Build-PimGraphData):
     #   - tiers   = delegation groups (role/permission) bucketed by their level
-    #   - orphans = groups with NO inbound/outbound edge (defined but unwired)
-    #   - gaps    = admins with NO group membership edge (a person who reaches nothing)
-    #   - unmanaged = synthetic targets (Entra role / AU / Azure scope) reached by NO group
+    # The gaps tile (1a) is the coverage report's, never this model's wiring (HOME-GAPS-COVERAGE).
     # BUG-264: one store stamp for this load -- the map model below and the validation tile share it.
     $homeStamp = Get-PimManagerPreflightStamp
     try {
@@ -10188,19 +10421,7 @@ function Get-PimHomeOverview {
             $lvl = Get-PimDelegationTierLevel -Node $n
             if ($null -ne $lvl) { $byLevel["L$lvl"] = [int]$byLevel["L$lvl"] + 1 } else { $byLevel['untiered'] = [int]$byLevel['untiered'] + 1 }
         }
-        # Edge endpoints (source + target) -> the set of wired node ids. Nodes/edges
-        # are [ordered] dictionaries (from Build-PimGraphData) -- dot-access reads the
-        # entries; PSObject.Properties does NOT see dictionary keys, so use dot/Contains.
-        $wired = New-Object System.Collections.Generic.HashSet[string]
-        foreach ($e in $edges) {
-            if ("$($e.source)".Trim()) { [void]$wired.Add("$($e.source)") }
-            if ("$($e.target)".Trim()) { [void]$wired.Add("$($e.target)") }
-        }
-        $orphanGroups = @($delegationGroups | Where-Object { -not $wired.Contains("$($_.id)") })
-        $admins       = @($nodes | Where-Object { $_.kind -eq 'admin' })
-        $gapAdmins    = @($admins | Where-Object { -not $wired.Contains("$($_.id)") })
-        $targets      = @($nodes | Where-Object { $_.kind -eq 'entra-role' -or $_.kind -eq 'au-role' -or $_.kind -eq 'az-resource' })
-        $unmanaged    = @($targets | Where-Object { -not $wired.Contains("$($_.id)") })
+        $admins      = @($nodes | Where-Object { $_.kind -eq 'admin' })
         $tiles.tiers = [ordered]@{
             ok            = $true
             byLevel       = $byLevel
@@ -10208,19 +10429,21 @@ function Get-PimHomeOverview {
             admins        = $admins.Count
             generatedUtc  = "$($g.generatedUtc)"
         }
-        $tiles.gaps = [ordered]@{
-            ok               = $true
-            orphanGroups     = $orphanGroups.Count       # groups defined but reach/are-reached-by nothing
-            gapAdmins        = $gapAdmins.Count           # admins with no group membership (reach nothing)
-            unmanagedTargets = $unmanaged.Count           # roles/AUs/azure scopes no group reaches
-            orphanGroupTags  = @($orphanGroups | ForEach-Object { "$($_.label)" } | Select-Object -First 12)
-            gapAdminNames    = @($gapAdmins   | ForEach-Object { "$($_.label)" } | Select-Object -First 12)
-        }
     } catch {
         $tiles.tiers = [ordered]@{ ok = $false; error = "$($_.Exception.Message)" }
-        $tiles.gaps  = [ordered]@{ ok = $false; error = "$($_.Exception.Message)" }
     }
     $hT['tiers'] = $hsw.ElapsedMilliseconds; $hsw.Reset(); $hsw.Start()
+
+    # ---- 1a. HOME-GAPS-COVERAGE (owner "yes" 2026-11-12): the gaps tile takes its numbers from the STORED coverage report --
+    # the SAME reader as Discovery & gaps (Get-PimCoverageCached: pim.TenantCache 'coverage-report' + the Ignore list), so
+    # "orphan group" means one thing on every page. The old map-wiring count (a definition with no line drawn in the
+    # delegation map: 163 "orphans" against the coverage check's 18) is NOT a gap and is never shown here.
+    try {
+        $covView = $null; $covAvail = [bool](Get-Command Get-PimCoverageCached -ErrorAction SilentlyContinue)
+        if ($covAvail) { $covView = Get-PimCoverageCached }
+        $tiles.gaps = ConvertTo-PimHomeCoverageTile -View $covView -Available:$covAvail
+    } catch { $tiles.gaps = [ordered]@{ ok = $false; source = 'coverage'; error = "the stored coverage report could not be read: $($_.Exception.Message)" } }
+    $hT['gaps'] = $hsw.ElapsedMilliseconds; $hsw.Reset(); $hsw.Start()
 
     # ---- 1b. 🔴 IMP-33 -- privileged accounts in the directory with NO desired-state row --------
     # Measured on a test tenant 2026-09-18: six real admin accounts were unmanaged (no TAP healing, reminders or review)
@@ -17616,6 +17839,7 @@ function Handle-Request {
             Write-PimManagerAuditEvent -Action 'azres.policy.masschange.approve' -Target 'AzResPolicies' -Result 'ok' `
                 -Before ([ordered]@{ planHash = "$($holdBefore.planHash)"; changes = $holdBefore.changes; checked = $holdBefore.checked; weakening = $holdBefore.weakening; tripped = @($holdBefore.tripped) }) `
                 -After $out.record
+            Invoke-PimManagerPolicyFlowOnApprove -By $who   # POLICY-FLOW-1
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; approval = $out.record })
             return 200
         }
@@ -17709,6 +17933,7 @@ function Handle-Request {
             Write-PimManagerAuditEvent -Action $auditAction -Target $prov -Result 'ok' `
                 -Before ([ordered]@{ planHash = "$($holdBefore.planHash)"; changes = $holdBefore.changes; checked = $holdBefore.checked; weakening = $holdBefore.weakening; tripped = @($holdBefore.tripped) }) `
                 -After $out.record
+            Invoke-PimManagerPolicyFlowOnApprove -By $who   # POLICY-FLOW-1
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; approval = $out.record })
             return 200
         }
@@ -17734,6 +17959,7 @@ function Handle-Request {
             $okRows = @($rows | Where-Object { $_.approved }); $badRows = @($rows | Where-Object { -not $_.approved })
             Write-PimManagerAuditEvent -Action 'policy.masschange.approve-all' -Target 'all' -Result $(if ($badRows.Count) { 'partial' } else { 'ok' }) -After @{ approved = @($okRows | ForEach-Object { "$($_.provider) $($_.planHash)" }); failed = @($badRows | ForEach-Object { "$($_.provider): $($_.error)" }) }
             $pol = 0; foreach ($r in $okRows) { $pol += [int]$r.changes }
+            if ($okRows.Count) { Invoke-PimManagerPolicyFlowOnApprove -By $who }   # POLICY-FLOW-1
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                 ok = ($badRows.Count -eq 0); approved = @($okRows); failed = @($badRows)
                 note = $(if (-not @($rows).Count) { 'Nothing is waiting for approval.' } else { "Approved $($okRows.Count) change set(s), $pol polic$(if ($pol -eq 1) { 'y' } else { 'ies' }). Each policy job makes them on its next run -- use Run now in Jobs to do it straight away." + $(if ($badRows.Count) { " NOT approved: " + (@($badRows | ForEach-Object { "$($_.provider) ($($_.error))" }) -join '; ') } else { '' }) })
@@ -17988,7 +18214,9 @@ function Handle-Request {
                 } catch { Write-Host ("  [demo] demo tiles could not be read, showing the real ones: {0}" -f $_.Exception.Message) -ForegroundColor Yellow }
             }
             try {
-                Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimHomeOverview -IncludeHeavy:$heavy)
+                $homeOut = Get-PimHomeOverview -IncludeHeavy:$heavy
+                try { if ($homeOut.tiles -is [System.Collections.IDictionary]) { $homeOut.tiles['policyFlow'] = Get-PimManagerPolicyFlow } } catch { }   # POLICY-FLOW-1
+                Write-JsonResponse -Response $resp -Status 200 -Body $homeOut
                 return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }
@@ -18818,6 +19046,13 @@ function Handle-Request {
         #                                           'PolicyChoices', audited per choice in plain words. NOTHING is written to
         #                                           the tenant here: the next policy run plans the change and HOLDS it until a
         #                                           SuperAdmin approves it (the same person may approve -- a second step).
+        # POLICY-FLOW-1 (owner 2026-11-12): where a saved policy change is -- planning / held / approved / applied / nochange /
+        # failed / none (Get-PimPolicyFlowState). Every signed-in role reads it (state and counts only); canApprove = SuperAdmin.
+        if ($path -eq '/api/policy-flow' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerPolicyFlow -Fresh)
+            return 200
+        }
         if ($path -eq '/api/policy-choices' -and ($method -eq 'GET' -or $method -eq 'PUT')) {
             $script:lastHeartbeat = Get-Date
             if (-not (Get-Command Get-PimPolicyChoicesView -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = 'The policy choices library is not part of this installation.' }; return 500 }
@@ -18842,6 +19077,8 @@ function Handle-Request {
                                 -Before ([ordered]@{ choice = "$($sv.before)" }) -After ([ordered]@{ choice = "$($sv.choice)"; advisory = [int]$sv.advisory; text = "$($sv.text)"; policiesThatWouldChange = [int]$sv.wouldChange.count })
                         } catch { Write-Warning "  [manager] policy choice saved but NOT written to the audit trail: $($_.Exception.Message)" }
                     }
+                    # POLICY-FLOW-1: plan it NOW (queue the policy jobs + start the tick), never fail the save over it
+                    $pcPlan = $null; try { $pcPlan = Invoke-PimManagerPolicyFlowOnSave -By $pcBy -Policies ([int]$pcSaved.changes) } catch { $pcPlan = $null }
                     $pcState = Get-PimManagerPolicyChoiceState
                 }
                 $pcView = Get-PimPolicyChoicesView -Choices $pcState.choices -Advisories $pcState.advisories -Defaults $pcState.defaults -Snapshots $pcState.snapshots -TenantRead $pcState.tenantRead -Templates $pcState.templates
@@ -18854,10 +19091,12 @@ function Handle-Request {
                     $pcView['saved'] = @($pcSaved.saved)
                     $pcView['approval'] = [ordered]@{
                         needed = [bool]($pcN -gt 0); policies = $pcN
-                        text = $(if ($pcN -gt 0) { "Saved. Nothing has changed in your tenant yet: $pcN polic$(if ($pcN -eq 1) { 'y' } else { 'ies' }) would change, and the change waits for a SuperAdmin to approve it on Reviews & controls > Approvals after the next policy run (within 30 minutes) has planned it." }
+                        text = $(if ($pcN -gt 0) { "Saved. Nothing has changed in your tenant yet: $pcN polic$(if ($pcN -eq 1) { 'y' } else { 'ies' }) would change. The next policy run (within 30 minutes) plans it and holds it for your approval -- PIM's policy safety check, not the second-approver setting; you can approve it yourself as SuperAdmin on Reviews & controls > Approvals." }   # POLICY-SAVE-WORDS (owner 2026-11-12)
                                  else { 'Saved. As far as the last policy run read your tenant, this changes no policy. If a later run finds a change, it waits for a SuperAdmin to approve it.' })
                     }
                 }
+
+                if ($pcSaved -and $pcPlan) { $pcView['plan'] = $pcPlan }   # POLICY-FLOW-1
                 Write-JsonResponse -Response $resp -Status 200 -Body $pcView
                 return 200
             } catch {

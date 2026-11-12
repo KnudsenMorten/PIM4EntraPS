@@ -1819,6 +1819,7 @@
   <div id="approvalsTab" class="tab-panel">
     <!-- REQ-Y: the Pro-feature notice (renderMspLicenceBanners) -- hidden unless this Pro feature is unlicensed / in grace. -->
     <div class="pro-lic-banner" data-feature="makerchecker" style="display:none; flex:0 0 auto; margin:10px 18px 0;"></div>
+    <div id="apprPolicyFlowHead" style="flex:0 0 auto; padding:10px 18px 0;"></div>   <!-- POLICY-FLOW-1: the policy section's state, always shown -->
     <div id="apprPolicyHolds" style="flex:0 0 auto; padding:0 18px; max-height:60vh; overflow:auto;"></div>   <!-- held policy changes, 2026-09-21 -->
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="apprBody">
       <div style="color:#57606a; font-size:12px;">Loading approval queue&hellip;</div>
@@ -3357,7 +3358,7 @@
   // blocking: false (policy settings that wait for a choice / are asked again) holds nothing -- it is an amber line under
   // Overview's "What needs your attention" (attentionNotices), never a red count.
   // PIM 100.94: the server names each item's kind ('action' | 'warning'); a warning is never a menu count, whatever else it says.
-  function attentionIsWarning(i) { return !!i && (i.blocking === false || i.kind === 'warning'); }
+  function attentionIsWarning(i) { return !!i && (i.blocking === false || i.kind === 'warning' || i.kind === 'info'); }   // HOME-POLICY-INFO: an info item is never a count either
   function attentionItems() { return (PIM_ATTENTION && Array.isArray(PIM_ATTENTION.items)) ? PIM_ATTENTION.items.filter(i => i && i.tab && !attentionIsWarning(i) && (Number(i.count) || 0) > 0) : []; }
   function attentionNotices() { return (PIM_ATTENTION && Array.isArray(PIM_ATTENTION.items)) ? PIM_ATTENTION.items.filter(i => i && i.tab && attentionIsWarning(i) && (Number(i.count) || 0) > 0) : []; }
   // "Reviews & controls > Approvals" -- where the item is, in the words of the menu.
@@ -5332,7 +5333,7 @@
     const bar = toneBar[opts.tone] || toneBar.neutral;
     const clickable = opts.tab ? ' home-tile-link" data-tab="' + esc(opts.tab) + '" role="button" tabindex="0' : '';
     const lines = (opts.lines || []).map(l => '<div style="font-size:11.5px;color:#57606a;margin-top:2px;">' + l + '</div>').join('');
-    const linkHint = opts.tab ? '<div style="font-size:11px;color:#0969da;margin-top:8px;">Open ' + esc(opts.tab === 'map' ? 'Delegation Map' : opts.tab.charAt(0).toUpperCase() + opts.tab.slice(1)) + ' &rarr;</div>' : '';
+    const linkHint = opts.tab ? '<div style="font-size:11px;color:#0969da;margin-top:8px;">Open ' + esc(opts.tab === 'map' ? 'Delegation Map' : opts.tab === 'coverage' ? 'Discovery & gaps' : opts.tab.charAt(0).toUpperCase() + opts.tab.slice(1)) + ' &rarr;</div>' : '';
     return '<div class="home-tile' + clickable + '" style="border:1px solid #d0d7de;border-left:4px solid ' + bar + ';border-radius:8px;padding:12px 14px;background:#fff;min-width:210px;">' +
       '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#57606a;font-weight:600;">' + esc(opts.title) + '</div>' +
       '<div style="font-size:26px;font-weight:700;line-height:1.1;margin-top:4px;color:' + bar + ';">' + (opts.value != null ? (typeof opts.value === 'number' ? fmtNum(opts.value) : opts.value) : '&mdash;') + '</div>' +
@@ -5347,28 +5348,39 @@
   // (never a blank or dead panel).
   function homeCalloutHtml(items) {
     const esc = escapeHtml;
-    if (!items || !items.length) {
+    // HOME-POLICY-INFO (owner "yes" 2026-11-12): 'info' lines (a statement of fact, e.g. policy settings that wait for a
+    // choice by design, jobs not scheduled here) are NOT in "What needs your attention": they are a calm "For your
+    // information" list below it -- no dot, no amber, not in the (N) count (menu numbers: errors or actions only).
+    const all = items || [];
+    const infos = all.filter(i => i && i.sev === 'info');
+    const attn = all.filter(i => i && i.sev !== 'info');
+    const infoHtml = infos.length ? ('<div class="home-info-lines" style="border:1px solid #d0d7de;border-radius:8px;padding:8px 14px;background:#f6f8fa;margin-bottom:14px;">' +
+      '<div style="font-size:12px;font-weight:600;color:#57606a;margin-bottom:2px;">For your information</div><ul style="margin:0;padding:0;">' +
+      infos.map(i => {
+        const attrs = i.tab ? ('class="home-attn-link home-info-line" data-tab="' + esc(i.tab) + '" role="button" tabindex="0"') : 'class="home-info-line"';
+        const arrow = i.tab ? ' <span style="color:#0969da;">&rarr;</span>' : '';
+        return '<li ' + attrs + ' style="margin:3px 0;cursor:' + (i.tab ? 'pointer' : 'default') + ';list-style:none;"><span style="font-size:12.5px;color:#57606a;">' + i.text + '</span>' + arrow + '</li>';
+      }).join('') + '</ul></div>') : '';
+    if (!attn.length) {
       return '<div style="border:1px solid #d0d7de;border-left:4px solid #1f883d;border-radius:8px;padding:10px 14px;background:#f6fff8;margin-bottom:14px;">' +
         '<b style="color:#1f883d;">All clear &mdash; nothing needs your attention.</b>' +
-        '<span style="color:#57606a;font-size:12px;"> No failed jobs, validation errors, gaps, pending approvals, drift or active break-glass.</span></div>';
+        '<span style="color:#57606a;font-size:12px;"> No failed jobs, validation errors, gaps, pending approvals, drift or active break-glass.</span></div>' + infoHtml;
     }
-    // BUG-92: 'info' is a THIRD severity -- a statement of fact about this deployment, not
-    // something that needs attention. It sorts last and never gets a red or amber dot.
-    const order = { red: 0, amber: 1, info: 2 };
-    const sorted = items.slice().sort((a, b) => (order[a.sev] || 9) - (order[b.sev] || 9));
+    const order = { red: 0, amber: 1 };
+    const sorted = attn.slice().sort((a, b) => (order[a.sev] != null ? order[a.sev] : 9) - (order[b.sev] != null ? order[b.sev] : 9));
     const reds = sorted.filter(i => i.sev === 'red').length;
     const rows = sorted.map(i => {
-      const dot = i.sev === 'red' ? '#cf222e' : (i.sev === 'info' ? '#57606a' : '#bf8700');
+      const dot = i.sev === 'red' ? '#cf222e' : '#bf8700';
       const attrs = i.tab ? ('class="home-attn-link" data-tab="' + esc(i.tab) + '" role="button" tabindex="0"') : '';
       const arrow = i.tab ? ' <span style="color:#0969da;">&rarr;</span>' : '';
       return '<li ' + attrs + ' style="margin:3px 0;cursor:' + (i.tab ? 'pointer' : 'default') + ';list-style:none;">' +
         '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + dot + ';margin-right:8px;vertical-align:middle;"></span>' +
         '<span style="font-size:12.5px;color:#24292f;">' + i.text + '</span>' + arrow + '</li>';
     }).join('');
-    const headTone = pimSevColour(pimSev(reds, sorted.filter(i => i.sev === 'amber').length));   // PIM 100.85: facts only = grey, never amber or red
+    const headTone = pimSevColour(pimSev(reds, sorted.filter(i => i.sev === 'amber').length));   // PIM 100.85
     return '<div style="border:1px solid #d0d7de;border-left:4px solid ' + headTone + ';border-radius:8px;padding:10px 14px;background:#fff;margin-bottom:14px;">' +
       '<div style="font-size:13px;font-weight:700;color:' + headTone + ';margin-bottom:4px;">What needs your attention (' + sorted.length + ')</div>' +
-      '<ul style="margin:0;padding:0;">' + rows + '</ul>' + homeGetSupportHtml(sorted) + '</div>';
+      '<ul style="margin:0;padding:0;">' + rows + '</ul>' + homeGetSupportHtml(sorted) + '</div>' + infoHtml;
   }
   // 100.91 GET SUPPORT on the Overview: one line under the attention list (Admin / SuperAdmin, never for facts only). It
   // hands over the lines as plain text and the ids of the setup-health lines -- those ids are the ticket's reference.
@@ -5574,6 +5586,17 @@
     try {
       ((t.health && t.health.notices) || []).forEach(n => { if (n && n.text) { homeAddAttn(n.sev === 'red' ? 'red' : 'amber', esc(n.text), n.tab || 'settings', n.id); } });
     } catch (_) { }
+    // POLICY-FLOW-1 (owner 2026-11-12): a held policy change = an ACTION line to the change sets on Approvals; a saved choice
+    // that is still being planned = an INFO line (grey, no number anywhere -- the menu counts errors and actions only).
+    try {
+      const pf = t.policyFlow;
+      if (pf && pf.state === 'held') {
+        const n = Number(pf.heldPolicies) || 0;
+        homeAddAttn('amber', '<span class="pfHomeHeld">' + esc(n ? pfPlural(n, 'policy change waits', 'policy changes wait') : pfPlural(pf.waiting, 'policy change set waits', 'policy change sets wait')) + ' for your approval &mdash; <b>Approve</b></span>', 'approvals');
+      } else if (pf && pf.state === 'planning') {
+        homeAddAttn('info', '<span class="pfHomePlanning">Policy choices saved ' + esc(pfHm(pf.savedUtc)) + ' &mdash; planning under way</span>', 'policysettings');
+      }
+    } catch (_) { }
 
     // --- header ---
     let h = '<div style="display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px;">' +
@@ -5716,24 +5739,31 @@
       });
     }
 
-    // --- Gaps / orphans / unmanaged ---
+    // --- Gaps: the coverage report's numbers (HOME-GAPS-COVERAGE, owner "yes" 2026-11-12) ---
+    // The SAME counts as Discovery & gaps (the stored coverage report, ignored gaps taken out); the line and the tile link
+    // there. No report yet = "Coverage not checked yet", never a count. The delegation map's wiring is not a gap.
     const gp = t.gaps || {};
     if (gp.ok === false) {
-      h += homeTile({ title: 'Gaps & orphans', value: 'n/a', tone: 'neutral', tab: 'map', sub: esc(gp.error || 'unavailable') });
+      h += homeTile({ title: 'Coverage gaps', value: 'n/a', tone: 'neutral', tab: 'coverage', sub: esc(gp.error || 'unavailable') });
+    } else if (gp.available === false) {
+      h += homeTile({ title: 'Coverage gaps', value: '&mdash;', tone: 'neutral', sub: esc(gp.note || 'not part of this edition') });
+    } else if (!gp.checked) {
+      h += homeTile({ title: 'Coverage gaps', value: '&mdash;', tone: 'neutral', tab: 'coverage', sub: 'Coverage not checked yet',
+        lines: ['the scheduler job coverage checks it; see Discovery &amp; gaps'] });
     } else {
-      const totalGaps = (gp.orphanGroups || 0) + (gp.gapAdmins || 0) + (gp.unmanagedTargets || 0);
-      if (totalGaps > 0) { homeAddAttn('amber', totalGaps + ' gap(s): ' + (gp.orphanGroups || 0) + ' orphan group(s), ' + (gp.gapAdmins || 0) + ' admin(s) reach nothing, ' + (gp.unmanagedTargets || 0) + ' unmanaged target(s)', 'map'); }
+      const gc = gp.counts || {};
+      const totalGaps = Number(gp.total) || 0;
+      const parts = [[gc.gap, 'gap(s)'], [gc.orphanGroup, 'orphan group(s)'], [gc.unmanagedBinding, 'unmanaged binding(s)'],
+                     [gc.wrongPermissions, 'wrong permission(s)'], [gc.unmanagedPrivilegedGroup, 'unmanaged privileged group(s)']];
+      const partStr = parts.filter(p => (Number(p[0]) || 0) > 0).map(p => (Number(p[0]) || 0) + ' ' + p[1]).join(', ');
+      if (totalGaps > 0) { homeAddAttn('amber', 'Coverage check: ' + partStr + ' &mdash; see Discovery &amp; gaps', 'coverage'); }
       h += homeTile({
-        title: 'Gaps, orphans & unmanaged',
+        title: 'Coverage gaps',
         value: totalGaps,
         tone: totalGaps > 0 ? 'amber' : 'green',
-        sub: totalGaps > 0 ? 'review on the map' : 'fully wired',
-        tab: 'map',
-        lines: [
-          (gp.orphanGroups || 0) + ' orphan group(s)',
-          (gp.gapAdmins || 0) + ' admin(s) reach nothing',
-          (gp.unmanagedTargets || 0) + ' unmanaged target(s)'
-        ]
+        sub: (totalGaps > 0 ? 'review on Discovery &amp; gaps' : 'nothing found') + (gp.stale ? ' &middot; stale' : ''),
+        tab: 'coverage',
+        lines: parts.map(p => (Number(p[0]) || 0) + ' ' + p[1]).concat(gp.computedUtc ? ['checked ' + esc(homeFmtWhen(gp.computedUtc))] : [])
       });
     }
 
@@ -5803,7 +5833,9 @@
     // (gaps, drift corrected, unmanaged accounts, expiring access, policy settings waiting) stay in the list below and
     // put NOTHING on the menu.
     const homePaintAttn = () => {
-      const notices = attentionNotices().map(i => ({ sev: 'amber', text: esc(String(i.text || '')), tab: i.tab, id: i.id || '' }));
+      // HOME-POLICY-INFO (owner "yes" 2026-11-12): a notice the server marks sev 'info' (policy settings that wait for a
+      // choice -- by design, nothing is wrong) stays an info line: no amber, no number, not counted in the attention total.
+      const notices = attentionNotices().map(i => ({ sev: i.sev === 'info' ? 'info' : 'amber', text: esc(String(i.text || '')), tab: i.tab, id: i.id || '' }));
       const all = attnItems.concat(notices);
       const co = document.getElementById('homeAttnCallout');
       if (co) co.innerHTML = homeCalloutHtml(all);
@@ -11149,7 +11181,13 @@
       try { hold = await api('GET', POLICY_HOLD_PROVIDERS[code].holdUrl); } catch (_) { hold = null; }
       if (hold && hold.planHash) held.push({ code, hold });
     }
-    if (!held.length) return;
+    // APPR-POLICY-ALWAYS-ON (owner 2026-11-12): with no hold yet the Approvals page must still say that policy approvals are
+    // ALWAYS on here (they are not the governance preview) -- otherwise only the preview banner shows and reads as "off".
+    if (!held.length) {
+      if (!hostArg) host.innerHTML = '<div id="apprPolicyNone" style="margin:12px 0 2px;padding:8px 12px;border:1px solid #d0d7de;border-radius:6px;background:#f6f8fa;font-size:12.5px;color:#57606a;">' +
+        'Policy changes waiting for your approval appear here (this part is always on). None yet &mdash; after you save policy choices, the next policy run plans them within 30 minutes.</div>';
+      return;
+    }
     const pol = held.reduce((a, x) => a + (Number(x.hold.changes) || 0), 0);
     const weak = held.reduce((a, x) => a + (Number(x.hold.weakening) || 0), 0);
     const nouns = held.map(x => POLICY_HOLD_PROVIDERS[x.code].noun + ' (' + x.hold.changes + ')').join(', ');
@@ -11190,6 +11228,7 @@
         msg.textContent = 'Approved ' + (r.approved || []).length + ' change set(s).' + (started.length ? ' Started: ' + started.join(', ') + ' -- the changes are made within a few minutes (see Jobs).' : ' Use Run now in Jobs to make them straight away.') +
           ((r.failed || []).length ? ' NOT approved: ' + r.failed.map(f => f.provider + ' (' + f.error + ')').join('; ') : '');
         msg.style.color = (r.failed || []).length ? '#cf222e' : '#1a7f37';
+        try { document.dispatchEvent(new CustomEvent('pim-policy-approved')); } catch (_) { }   // POLICY-FLOW-1: the status card + header repaint
       } catch (e) {
         btn.disabled = false; msg.textContent = 'Not approved: ' + ((e && e.body && e.body.error) || (e && e.message) || String(e)); msg.style.color = '#cf222e';
       }
@@ -11199,13 +11238,15 @@
     const body = document.getElementById('apprBody');
     if (!body) return;
     renderApprovalsPolicyHolds();   // not awaited: the holds and the queue load side by side
+    pfRenderApprovalsHead();        // POLICY-FLOW-1: the policy section's state, independent of the governance preview gate
     const esc = escapeHtml;
     // Governance preview gate: OFF by default. Show the surface, but inert -- render
     // the preview banner and load NOTHING (the /api/approvals* endpoints also short-
     // circuit while disabled). Hides the pending badge so it can't imply live state.
     if (isGovernancePreviewDisabled('approvals')) {
       pimMenuBadge('apprPendBadge', { actions: 0 });
-      body.innerHTML = governancePreviewBanner('Approval-gated offboarding & revoke: the maker/checker queue where a destructive identity action is requested, approved by a different admin, then executed once.');
+      // APPR-POLICY-ALWAYS-ON: the banner is scoped to the offboarding & revoke queue -- policy approvals above stay on.
+      body.innerHTML = governancePreviewBanner('The offboarding & revoke queue below is a preview, off: the maker/checker queue where a destructive identity action is requested, approved by a different admin, then executed once. Policy change approvals (above) are not part of this preview and are always on.');
       return;
     }
     if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- the approval queue needs the server.</div>'; return; }
@@ -17415,6 +17456,7 @@
     S.saved = { text: String((r && r.approval && r.approval.text) || 'Saved. A change that comes from these choices waits for a SuperAdmin to approve it.'), needed: !!(r && r.approval && r.approval.needed) };
     GET_STARTED_LAST = null;                       // the Get Started step counts the settings that wait
     try { refreshAttention(true); } catch (_) { }  // ...and so does Overview
+    try { pfAfterSave(r); } catch (_) { }          // POLICY-FLOW-1: the status card on top of Policy settings
     return pcNormalizeView(r);
   }
   // QUICK SELECTION: every setting the choice can be given to, and the ones it cannot -- with the reason the button shows.
@@ -17557,10 +17599,12 @@
         '<div style="font-size:16px;font-weight:600;margin-bottom:2px;">Policy settings</div>' +
         '<div class="pcIntro">PIM Manager never changes a policy on its own. For every setting you choose between <b>Microsoft default</b>, <b>PIM Manager recommendation</b> (what the bound <a href="#" class="pcGoTemplates">policy template</a> says) and <b>Keep current</b>. ' +
           'A setting without a choice is left exactly as it is. A change that comes from a choice is held until a SuperAdmin approves it on <a href="#" class="pcGoApprovalsTop">' + escapeHtml(attentionPageName('approvals')) + '</a>.</div>' +
+        '<div id="pfCardPage" class="pfCard"></div>' +
         '<div class="pcHost"></div>' +
       '</div>';
     const go = (cls, tab) => { const a = body.querySelector('.' + cls); if (a) a.onclick = (ev) => { ev.preventDefault(); switchTab(tab); }; };
     go('pcGoTemplates', 'policytemplates'); go('pcGoApprovalsTop', 'approvals');
+    pfRenderCard(body.querySelector('#pfCardPage'));   // POLICY-FLOW-1: not awaited
     pcMount(body.querySelector('.pcHost'), PC_PAGE);
     try {
       pimExportSet('policysettings', 'Policy settings', () => {
@@ -17571,6 +17615,94 @@
       });
     } catch (_) { }
   }
+  // ===================================================================
+  // POLICY-FLOW-1 (owner 2026-11-12: "where do i see it, this needs refinement as it is unclear to people the flow and they
+  // see nothing"). ONE server state (GET /api/policy-flow: planning / held / approved / applied / nochange / failed / none)
+  // drawn in three places: the STATUS CARD on top of Policy settings (with the held change sets and Approve all right
+  // there), the always-shown header of the policy section on Approvals, and the Overview lines (renderHome).
+  // ===================================================================
+  const PF_POLL_MS = 30000;
+  function pfHm(iso) { const s = fmtTime(iso); return s.length >= 16 ? s.slice(11, 16) : s; }
+  function pfPlural(n, one, many) { n = Number(n) || 0; return fmtNum(n) + ' ' + (n === 1 ? one : many); }
+  // The state from the save answer's plan block, for when the record could not be read back (the save itself succeeded).
+  function pfFromPlan(plan) {
+    if (!plan || !plan.savedUtc) return null;
+    return { state: 'planning', savedUtc: plan.savedUtc, started: !!plan.started, byUtc: plan.byUtc || '', late: false };
+  }
+  // The planning words: started now, or when the next policy run plans it at the latest.
+  function pfPlanningText(s) {
+    return s.started ? 'the policy run plans it now' : 'planned at the next policy run (by ' + pfHm(s.byUtc) + ')';
+  }
+  function pfApprovedWho(s) { return (s.approvedUtc ? ' ' + pfHm(s.approvedUtc) : '') + (s.approvedBy ? ' by ' + s.approvedBy : ''); }
+  async function pfFetch() { try { return await api('GET', '/api/policy-flow'); } catch (_) { return null; } }
+  async function pfRenderCard(host, plan) {
+    if (!host) return;
+    if (!isServer) { host.innerHTML = ''; return; }
+    if (host.__pfPoll) { clearTimeout(host.__pfPoll); host.__pfPoll = null; }
+    let s = await pfFetch();
+    if ((!s || s.state === 'none') && plan) s = pfFromPlan(plan);
+    const esc = escapeHtml;
+    const st = (s && s.state) || 'none';
+    host.setAttribute('data-pf-state', st);
+    const col = (tone, part) => tone === 'green' ? (part === 'line' ? '#4ac26b' : '#1a7f37') : pimSevColour(tone, part);
+    const box = (tone, html) => '<div class="pfCardBox" data-pf-tone="' + tone + '" role="status" style="margin:8px 0 12px;padding:10px 12px;border:1px solid ' + col(tone, 'line') + ';border-left:4px solid ' + col(tone, 'fg') + ';border-radius:6px;background:#fff;font-size:12.5px;line-height:1.5;">' + html + '</div>';
+    if (st === 'none') { host.innerHTML = ''; return; }
+    if (st === 'planning') {
+      host.innerHTML = box('info', '<b class="pfTitle">Saved ' + esc(pfHm(s.savedUtc)) + ' &mdash; planning your change (' + esc(pfPlanningText(s)) + ')</b>' +
+        '<div class="pfSub" style="color:#57606a;">Nothing has changed in your tenant yet. When the plan is ready, the policies that would change are shown here to approve.' +
+        (s.late ? ' The policy run has not finished yet &mdash; <a href="#" class="pfGoJobs">see Jobs</a>.' : '') + '</div>');
+    } else if (st === 'held') {
+      const n = Number(s.heldPolicies) || 0;
+      host.innerHTML = box('amber', '<b class="pfTitle">' + esc(n ? pfPlural(n, 'policy change waits', 'policy changes wait') : pfPlural(s.waiting, 'change set waits', 'change sets wait')) + ' for your approval</b>' +
+        '<div class="pfSub" style="color:#57606a;">Your saved choices are planned. Nothing is written to your tenant until ' + (s.canApprove ? 'you approve' : 'a SuperAdmin approves') + ' below.</div>' +
+        '<div class="pfHolds"></div>');
+      try { await renderApprovalsPolicyHolds(host.querySelector('.pfHolds')); } catch (_) { }
+    } else if (st === 'approved') {
+      host.innerHTML = box('info', '<b class="pfTitle">Approved' + esc(pfApprovedWho(s)) + ' &mdash; applied at the next policy run</b>' +
+        '<div class="pfSub" style="color:#57606a;">The policy jobs make the change within a few minutes; this card says when it is done.</div>');
+    } else if (st === 'applied') {
+      host.innerHTML = box('green', '<b class="pfTitle">Approved' + esc(pfApprovedWho(s)) + ' &mdash; applied ' + esc(pfHm(s.appliedUtc)) + '</b>');
+    } else if (st === 'nochange') {
+      host.innerHTML = box('green', '<b class="pfTitle">Saved ' + esc(pfHm(s.savedUtc)) + ' &mdash; planned ' + esc(pfHm(s.plannedUtc)) + ': no policy needs to change, so nothing waits for approval</b>');
+    } else if (st === 'failed') {
+      host.innerHTML = box('red', '<b class="pfTitle">Saved ' + esc(pfHm(s.savedUtc)) + ' &mdash; the policy run (' + esc(s.failedJob || 'policy job') + ') failed at ' + esc(pfHm(s.plannedUtc)) + '</b>' +
+        '<div class="pfSub" style="color:#57606a;">Nothing was changed in your tenant. <a href="#" class="pfGoJobs">See Jobs</a> for why; the next run plans it again.</div>');
+    }
+    const gj = host.querySelector('.pfGoJobs'); if (gj) gj.onclick = (ev) => { ev.preventDefault(); switchTab('jobs'); };
+    // planning / approved: look again until it moves on (only while the card is on the page)
+    if (st === 'planning' || st === 'approved') {
+      host.__pfPoll = setTimeout(() => { host.__pfPoll = null; if (host.isConnected) pfRenderCard(host); }, PF_POLL_MS);
+    }
+  }
+  function pfAfterSave(r) {
+    const host = document.getElementById('pfCardPage');
+    if (host) pfRenderCard(host, r && r.plan);
+  }
+  async function pfRenderApprovalsHead() {
+    const host = document.getElementById('apprPolicyFlowHead');
+    if (!host) return;
+    if (!isServer) { host.innerHTML = ''; return; }
+    const s = (await pfFetch()) || { state: 'none' };
+    const esc = escapeHtml, st = s.state || 'none';
+    let what;
+    if (st === 'planning') what = '<span class="pfHeadState" style="color:#57606a;">planning&hellip;</span> (choices saved ' + esc(pfHm(s.savedUtc)) + '; ' + esc(pfPlanningText(s)) + ')';
+    else if (st === 'held') {
+      const n = Number(s.heldPolicies) || 0;
+      what = '<span class="pfHeadState" style="color:' + pimSevColour('amber', 'fg') + ';font-weight:600;">' + esc(n ? pfPlural(n, 'policy change', 'policy changes') : pfPlural(s.waiting, 'change set', 'change sets')) + ' waiting for your approval</span>';
+    }
+    else if (st === 'approved') what = '<span class="pfHeadState">approved' + esc(pfApprovedWho(s)) + '</span> &mdash; applied at the next policy run';
+    else if (st === 'applied') what = '<span class="pfHeadState">none waiting</span> &mdash; the last approved change was applied ' + esc(pfHm(s.appliedUtc));
+    else if (st === 'failed') what = '<span class="pfHeadState">none waiting</span> &mdash; the last policy run failed, see Jobs';
+    else what = '<span class="pfHeadState">none waiting</span>';
+    host.setAttribute('data-pf-state', st);
+    host.innerHTML = '<div class="pfHead" style="font-size:12.5px;"><b>Policy changes:</b> ' + what + '</div>';
+  }
+  document.addEventListener('pim-policy-approved', () => {
+    setTimeout(() => {
+      try { const c = document.getElementById('pfCardPage'); if (c && c.isConnected) pfRenderCard(c); } catch (_) { }
+      try { pfRenderApprovalsHead(); } catch (_) { }
+    }, 500);
+  });
   const GS_FORMS = {
     naming: {
       load: async () => {

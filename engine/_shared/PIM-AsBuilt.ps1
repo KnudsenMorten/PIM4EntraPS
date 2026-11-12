@@ -1030,6 +1030,17 @@ function Get-PimAsBuiltReaderUserSql {
     $sid = '0x' + (($g.ToByteArray() | ForEach-Object { $_.ToString('X2') }) -join '')
     $n = $DbUserName; $q = "[$DbUserName]"
     return (@(
+        # ASBUILT-USER-IDEMPOTENT (owner "yes" 2026-11-12): a user that already carries the identity's SID under ANOTHER name
+        # (e.g. the identity's own name) keeps its name and only gets the reader grants -- no second CREATE USER (it fails:
+        # "The login already has an account with the user name ..."), no DROP.
+        "IF EXISTS (SELECT 1 FROM sys.database_principals WHERE sid = $sid AND type = 'E' AND name <> N'$n')",
+        'BEGIN',
+        "    DECLARE @asbD SYSNAME = (SELECT TOP 1 name FROM sys.database_principals WHERE sid = $sid AND type = 'E'), @asbS NVARCHAR(MAX);",
+        "    IF OBJECT_ID(N'pim.vw_AsBuiltSettings') IS NOT NULL BEGIN SET @asbS = N'GRANT SELECT ON OBJECT::[pim].[vw_AsBuiltSettings] TO ' + QUOTENAME(@asbD) + N';'; EXEC sys.sp_executesql @asbS; END",
+        "    IF OBJECT_ID(N'pim.usp_AsBuiltUploadKey') IS NOT NULL BEGIN SET @asbS = N'GRANT EXECUTE ON OBJECT::[pim].[usp_AsBuiltUploadKey] TO ' + QUOTENAME(@asbD) + N';'; EXEC sys.sp_executesql @asbS; END",
+        'END',
+        'ELSE',
+        'BEGIN',
         "IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$n' AND sid = $sid)",
         'BEGIN',
         "    IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$n') DROP USER $q;",
@@ -1040,7 +1051,8 @@ function Get-PimAsBuiltReaderUserSql {
         "IF IS_ROLEMEMBER('db_ddladmin', N'$n') = 1 ALTER ROLE [db_ddladmin] DROP MEMBER $q;",
         "IF IS_ROLEMEMBER('db_owner', N'$n') = 1 ALTER ROLE [db_owner] DROP MEMBER $q;",
         "IF OBJECT_ID(N'pim.vw_AsBuiltSettings') IS NOT NULL GRANT SELECT ON OBJECT::[pim].[vw_AsBuiltSettings] TO $q;",
-        "IF OBJECT_ID(N'pim.usp_AsBuiltUploadKey') IS NOT NULL GRANT EXECUTE ON OBJECT::[pim].[usp_AsBuiltUploadKey] TO $q;"
+        "IF OBJECT_ID(N'pim.usp_AsBuiltUploadKey') IS NOT NULL GRANT EXECUTE ON OBJECT::[pim].[usp_AsBuiltUploadKey] TO $q;",
+        'END'
     ) -join "`n")
 }
 
@@ -1084,7 +1096,22 @@ function Get-PimAsBuiltReaderAccessSql {
         if ("$($gr.perm)" -notmatch '^(SELECT|INSERT|UPDATE|DELETE|EXECUTE)$' -or "$($gr.on)" -notmatch '^(SCHEMA::[A-Za-z_]+|[A-Za-z_]+\.[A-Za-z_][A-Za-z0-9_]*)$') { throw "Get-PimAsBuiltReaderAccessSql: '$($gr.perm) $($gr.on)' is not a catalog grant" }
         [void]$lines.Add("    EXEC [pim].[usp_ApplyAccess] @Action = N'grant', @Role = N'pim_asbuilt', @Permission = N'$($gr.perm)', @Target = N'$($gr.on)';")
     }
+    # ASBUILT-USER-IDEMPOTENT (owner "yes" 2026-11-12): the job's identity may ALREADY have its database user under another
+    # name (e.g. the identity's own name, made by setup) -- then CREATE USER fails with "The login already has an account with
+    # the user name '<name>'" (measured: every update, ~20 a day). The updater cannot SEE other users (no ALTER ANY USER), so
+    # the batch takes the name from that refusal and ensures ONLY the role membership of the EXISTING user through the same
+    # procedure (same SID, so the procedure accepts it). No second user, never a DROP; any other refusal is re-thrown.
+    $g = [guid]$AppId
+    [void]$lines.Add("    DECLARE @asbErr NVARCHAR(4000), @asbHave NVARCHAR(256), @asbA INT, @asbB INT;")
+    [void]$lines.Add("    BEGIN TRY")
     [void]$lines.Add("    $userLine")
+    [void]$lines.Add("    END TRY")
+    [void]$lines.Add("    BEGIN CATCH")
+    [void]$lines.Add("        SET @asbErr = ERROR_MESSAGE(); SET @asbA = CHARINDEX(N'''', @asbErr); SET @asbB = CASE WHEN @asbA > 0 THEN CHARINDEX(N'''', @asbErr, @asbA + 1) ELSE 0 END;")
+    [void]$lines.Add("        IF @asbErr NOT LIKE N'%already has an account%' OR @asbB <= @asbA + 1 THROW;")
+    [void]$lines.Add("        SET @asbHave = SUBSTRING(@asbErr, @asbA + 1, @asbB - @asbA - 1);")
+    [void]$lines.Add("        EXEC [pim].[usp_ApplyAccess] @Action = N'user', @Role = N'pim_asbuilt', @UserName = @asbHave, @AppId = '$g';")
+    [void]$lines.Add("    END CATCH")
     return (@(
         "IF OBJECT_ID(N'pim.usp_ApplyAccess') IS NOT NULL",
         'BEGIN'
