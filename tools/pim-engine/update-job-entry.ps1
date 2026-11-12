@@ -1034,6 +1034,13 @@ function Get-PimUpdateNowRingApproval {
             if ([int]$seq.unprovenLegacy -gt 0 -and $v.sequence -lt [int]$seq.unprovenLegacy) { return @{ version = ''; reason = 'the replay watermark needs a decision (see the nightly run)' } }
             return @{ version = "$($v.version)"; reason = "the signed manifest for ring $ringN" }
         }
+        if ($updSource -eq 'invardia-community') {
+            # COMMUNITY-CLAIM-ON-YES: a Community install with an install key takes Update now like Pro -- the ring's approval
+            # is the SIGNED Community manifest (anonymous channel, kind community, its own watermark), read without a download.
+            $b = ''; try { $b = "$(Get-PimSqlSetting -ConnectionString $Cs -Name 'LicenceRequestBaseUrl')".Trim() } catch { }
+            $seq = Resolve-PimInvardiaAppliedSequence -JobEnv ([Environment]::GetEnvironmentVariables()) -Ring $ring -Kind 'community'
+            return (Get-PimInvardiaCommunityApproval -BaseUrl $b -Ring $ring -AppliedSequence ([int]$seq.applied) -RunningVersion "$($script:PimRunningVersion)")
+        }
         if ($ring -and $srcUrlTpl -and $srcMode.mode -eq 'pim-src') {   # SEC-95: only the CHOSEN (unsigned) container source
             $chUrl = Get-PimUpdateChannelUrl -SourceTemplate $srcUrlTpl
             $chFile = Join-Path ([IO.Path]::GetTempPath()) ("pim-channel-un-{0}.json" -f ([guid]::NewGuid().ToString('N').Substring(0, 6)))
@@ -1189,9 +1196,14 @@ if ($unKind.kind -eq 'quick') {
     # 🔒 No store = no state = "at most once per raisedAt" cannot be promised: the signal is not acted on (said in the line).
     $unGet = $(if ("$unCs".Trim()) { { Get-PimSqlSetting -ConnectionString $unCs -Name (Get-PimUpdateNowStateName) } } else { $null })
     $unSet = $(if ("$unCs".Trim()) { { param($o) Set-PimSqlSetting -ConnectionString $unCs -Name (Get-PimUpdateNowStateName) -ValueJson (ConvertTo-Json -InputObject $o -Depth 5 -Compress) } } else { $null })
+    # COMMUNITY-CLAIM-ON-YES (Invardia 2026-11-11): the SAME POST /head for both editions -- Pro sends kind code + its licence
+    # (unchanged); a Community install with its key sends kind community and no licence (Get-PimUpdateNowHeadKind), and
+    # Invardia answers the "Update now" mark. No key = no call (Invoke-PimUpdateNowQuickCheck's own gate).
+    $unHeadKind = Get-PimUpdateNowHeadKind -UpdateSource $updSource
+    $unHead = { if ($unRingN -lt 0 -or $unRingN -gt 3) { @{ status = 0 } } else { Invoke-PimInvardiaUpdateHead -BaseUrl $unBase -InstallKey $unKey -LicenceText $unLic -Ring $unRingN -InstallId $unIid -Kind $unHeadKind } }
     $unQ = Invoke-PimUpdateNowQuickCheck -Enabled $unEnabled -InstallKey $unKey -Ring $ring -RunningVersion "$($script:PimRunningVersion)" `
                -Hold ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') -StrictActive $unStrict -StrictUntil $unStrictUntil `
-               -Head { if ($unRingN -lt 0 -or $unRingN -gt 3) { @{ status = 0 } } else { Invoke-PimInvardiaUpdateHead -BaseUrl $unBase -InstallKey $unKey -LicenceText $unLic -Ring $unRingN -InstallId $unIid } } `
+               -Head $unHead `
                -Signal { param($et) if ($unRingN -lt 0 -or $unRingN -gt 3) { @{ status = 0 } } else { Invoke-PimInvardiaUpdateSignal -BaseUrl $unBase -InstallKey $unKey -Ring $unRingN -ETag $et } } `
                -UpdateWindow "$($env:PIM_UPDATE_WINDOW)" -NightlyUtc $unNightly `
                -GetState $unGet -SetState $unSet `

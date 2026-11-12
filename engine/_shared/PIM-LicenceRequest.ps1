@@ -47,7 +47,10 @@ function Get-PimLicenceRequestDecision {
       clearHint = $true when -SupersededBy names the licence that IS installed (the successor arrived): the job clears it.
     #>
     param([bool]$Enabled, $License, [bool]$ProHere, $State, [bool]$HasToken, [datetime]$NowUtc, [string]$SupersededBy = '',
-          [bool]$ProIntended = $true)
+          [bool]$ProIntended = $true,
+          # COMMUNITY-CLAIM-ON-YES: the user said yes to 'Connect this install to Invardia' (pim.Settings 'InvardiaConnect').
+          # Only then does a Community install ask -- once, with edition 'community' (action 'community').
+          [bool]$CommunityConnected = $false)
     $NowUtc = $NowUtc.ToUniversalTime()   # .NET compares DateTimes WITHOUT their kind -- everything here is UTC
     $hint = "$SupersededBy".Trim()
     $curId = if ($License) { "$($License.LicenseId)".Trim() } else { '' }
@@ -63,7 +66,19 @@ function Get-PimLicenceRequestDecision {
     # never asks for a Pro licence. Only an install meant to be Pro knocks -- one that holds a licence file (any status), an
     # Invardia install key, or a superseded-licence hint (-ProIntended, from Invoke-PimLicenceRequestCycle). A request that
     # is already pending is still pulled above, so an enrollment / trial in flight completes.
-    if (-not $ProIntended) { return @{ action = 'none'; reason = 'community edition: no licence is requested (a Pro install holds a licence file or an Invardia install key)'; clearHint = $clear } }
+    # COMMUNITY-CLAIM-ON-YES (owner 2026-11-11): a Community install asks the SAME way as Pro (edition 'community'; Invardia
+    # answers 200 { status: 'Community' }, no row, no mail) -- but ONLY when its user said yes to 'Connect this install to
+    # Invardia' (owner rule: no / no answer = nothing that identifies the install is sent). Asked once: state 'Community' =
+    # never again by itself; an answer that is not Community is asked again after 24 h at the earliest (no retry storm).
+    if (-not $ProIntended) {
+        if (-not $CommunityConnected) { return @{ action = 'none'; reason = 'community edition: no licence is requested and nothing is sent (not connected to Invardia; a Pro install holds a licence file or an Invardia install key)'; clearHint = $clear } }
+        if ($st -eq 'Community') { return @{ action = 'none'; reason = 'community edition: Invardia confirmed Community -- nothing more to ask'; clearHint = $clear } }
+        if ($st -eq 'CommunityError') {
+            $next = $null; try { if ("$($State.nextPollUtc)") { $next = ([datetime]"$($State.nextPollUtc)").ToUniversalTime() } } catch { }
+            if ($next -and $NowUtc -lt $next) { return @{ action = 'none'; reason = "community edition: asked again after $($next.ToString('u'))"; clearHint = $clear } }
+        }
+        return @{ action = 'community'; reason = 'community edition, connected to Invardia: the licence ask with edition community'; clearHint = $clear }
+    }
     # Invardia's contract (2026-10-04): a rejection is shown to the admin and NEVER re-requested automatically -- the
     # admin clears it (Settings > Licence: "request again", which removes LicenceRequestState) after talking to Invardia.
     # Checked BEFORE the superseded hint: a refused successor (e.g. the old licence was revoked) must not knock every 30 min.
@@ -247,8 +262,12 @@ function Invoke-PimLicenceRequestCycle {
     # its first tick (Invardia auto-approves a tenant on the 60-day trial). Community writes none -> never knocks. The knock
     # body is unchanged: no edition field (Invardia accepts only its paid edition ids there; a trial is known by its licence).
     $instEd = ''; try { $ie = & $GetSetting 'InstallEdition'; if ($ie -is [string]) { $instEd = $ie.Trim().ToLowerInvariant() } } catch { $instEd = '' }
-    $proIntended = [bool]($hasLicFile -or $hasKey -or $hint -or ($instEd -in @('trial', 'pro')))
-    $d = Get-PimLicenceRequestDecision -Enabled $Enabled -License $lic -ProHere $proHere -State $state -HasToken ([bool]$token) -NowUtc $NowUtc -SupersededBy $hint -ProIntended $proIntended
+    # COMMUNITY-CLAIM-ON-YES: a key a COMMUNITY install claimed on its user's yes (a choice is recorded) is not a Pro sign --
+    # that install asks with edition 'community'. A key with NO choice recorded is a Pro install's, exactly as before.
+    $ccChoice = ''; if (Get-Command Get-PimCommunityConnectChoice -ErrorAction SilentlyContinue) { $ccChoice = Get-PimCommunityConnectChoice -GetSetting $GetSetting }
+    $proIntended = [bool]($hasLicFile -or ($hasKey -and -not $ccChoice) -or $hint -or ($instEd -in @('trial', 'pro')))
+    $d = Get-PimLicenceRequestDecision -Enabled $Enabled -License $lic -ProHere $proHere -State $state -HasToken ([bool]$token) -NowUtc $NowUtc -SupersededBy $hint -ProIntended $proIntended `
+            -CommunityConnected ($ccChoice -eq 'yes')
     if ($d.clearHint) { & $SetSetting 'LicenceSupersededBy' ''; $hint = '' }   # the successor IS installed
     $save = { param($Status, $Msg, $Extra) $o = [ordered]@{ status = $Status; message = $Msg; updatedUtc = $NowUtc.ToString('o') }
               if ($state) { foreach ($k in 'requestId', 'requestedUtc', 'nextPollUtc') { if ($state.PSObject.Properties[$k] -and -not ($Extra -and $Extra.Contains($k))) { $o[$k] = $state.$k } } }
@@ -256,6 +275,22 @@ function Invoke-PimLicenceRequestCycle {
               & $SetSetting 'LicenceRequestState' ([pscustomobject]$o); [pscustomobject]$o }
     if ($d.action -eq 'none') { return @{ action = 'none'; ok = $true; state = $state; message = $d.reason } }
     if (-not $tid) { return @{ action = $d.action; ok = $false; state = $state; message = "this environment's tenant is not known -- no request is sent" } }
+
+    if ($d.action -eq 'community') {
+        # The SAME call as Pro (POST /api/licence-requests), edition 'community'. 200 { status: 'Community' } = Community: no
+        # token, no pull, no error. Anything else = 'CommunityError', asked again after 24 h -- never every 30 minutes.
+        $cId = Resolve-PimInvardiaInstallId -GetSetting $GetSetting -SetSetting $SetSetting -CreateSetting $CreateSetting
+        $cBodyId = if ($cId) { $cId } else { [guid]::NewGuid().ToString() }
+        $cBody = New-PimLicenceKnockBody -Version $Version -TenantId $tid -InstallId $cBodyId -Edition 'community'
+        $cKey = if (Get-Command Resolve-PimInvardiaInstallKey -ErrorAction SilentlyContinue) { Resolve-PimInvardiaInstallKey -GetSetting $GetSetting } else { '' }
+        $cr = $null; try { $cr = & $Http 'POST' "$base/api/licence-requests" $cBody (New-PimLicenceKnockHeaders -InstallKey $cKey -InstallId $cId) } catch { $cr = @{ status = 0; body = $null; error = $_.Exception.Message } }
+        if ("$($cr.status)" -in '200', '201', '202' -and "$($cr.body.status)" -eq 'Community') {
+            $st = & $save 'Community' 'Community edition -- Invardia confirmed it (no licence is needed)' ([ordered]@{ nextPollUtc = '' })
+            return @{ action = 'community'; ok = $true; state = $st; message = $st.message }
+        }
+        $st = & $save 'CommunityError' "Invardia did not confirm the Community edition ($($cr.status)$(if ("$($cr.error)") { " $((("$($cr.error)") -split "`n")[0])" })) -- asked again in 24 hours" ([ordered]@{ nextPollUtc = $NowUtc.AddHours(24).ToString('o') })
+        return @{ action = 'community'; ok = $false; state = $st; message = $st.message }
+    }
 
     if ($d.action -eq 'knock') {
         # INV-S16: the install's lasting id (created once, kept) -- the body's installId AND the X-Invardia-Install-Id header.

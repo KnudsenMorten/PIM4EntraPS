@@ -207,7 +207,8 @@ function Get-PimReleaseNotesHeaderValue {
 $sol = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $repo = Split-Path (Split-Path $sol -Parent) -Parent
 if (-not "$Version".Trim()) { $Version = (Get-Content -LiteralPath (Join-Path $sol 'VERSION') -Raw).Trim() }
-if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "not a release version: '$Version'" }
+# IMAGE-PATCH-FROM-TAG: 3.1.9.1 = an image patch of 3.1.9 (patch branch from the release tag); the updater accepts 4 parts since 3.1.8
+if ($Version -notmatch '^\d+\.\d+\.\d+(?:\.\d+)?$') { throw "not a release version: '$Version'" }
 $tag = "PIM4EntraPS-v$Version"
 
 Step "release $Version (tag $tag)"

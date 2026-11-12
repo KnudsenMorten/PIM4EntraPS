@@ -164,6 +164,7 @@
   "PUT /api/settings/activator-targets": "Set the group the PIM Activator is deployed to.",
   "GET /api/settings/admin-domain": "The domain administrator accounts are created in.",
   "PUT /api/settings/admin-domain": "Set the domain administrator accounts are created in.",
+  "PUT /api/settings/invardia-connect": "Community: connect this install to Invardia (health reports and updates on request), or stop it.",
   "PUT /api/settings/approvers": "Retired: the approvers list is no longer used.",
   "POST /api/settings/approvers/import": "Import department approvers and owners from a CSV file.",
   "GET /api/settings/audit-retention": "How long the audit trail is kept.",

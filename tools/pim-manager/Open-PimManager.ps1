@@ -310,6 +310,10 @@ if (Test-Path -LiteralPath $_envReportLib) { . $_envReportLib }
 # SAME controls (Get-PimSetupControlStates), and the permission check records its snapshot for the uplink job.
 $_setupLib = Join-Path $solutionRoot 'engine\_shared\PIM-UplinkSetup.ps1'
 if (Test-Path -LiteralPath $_setupLib) { . $_setupLib }
+# COMMUNITY-CLAIM-ON-YES: the Community switch "Connect this install to Invardia" (Settings > Licence) and the install-key
+# rule it shares with the engine (Resolve-PimInvardiaInstallKey, Get-PimCommunityConnectView).
+$_invUpdLib = Join-Path $solutionRoot 'engine\_shared\PIM-InvardiaUpdate.ps1'
+if (Test-Path -LiteralPath $_invUpdLib) { . $_invUpdLib }
 # §79.13 SHARED PENDING CHANGES (engine/_shared/PIM-SharedPending.ps1): staged changes live in SQL
 # (pim.Settings['PendingChanges']), one per row key (the lock), visible to every Manager user.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-SharedPending.ps1')
@@ -7034,6 +7038,56 @@ function Request-PimManagerInstallKeyClaim {
     return [ordered]@{ queued = $true; detail = $(if ($kick -and $kick.started) { 'the install key is being claimed now (within a few minutes)' } else { 'the install key is claimed at the engine''s next run (within about 5 minutes)' }) }
 }
 
+function Get-PimManagerInvardiaConnectView {
+    <#
+      COMMUNITY-CLAIM-ON-YES: the Settings > Licence view of "Connect this install to Invardia" (Get-PimCommunityConnectView,
+      engine/_shared/PIM-InvardiaUpdate.ps1). Community = no Pro licence for this tenant, no licence file, not installed as
+      trial / pro, and no install key that predates the choice (Get-PimCommunityContactGate). Seams (tests): -GetSetting
+      { param($Name) }, -ProHere. Never returns the key.
+    #>
+    param([scriptblock]$GetSetting, [object]$ProHere = $null)
+    if (-not $GetSetting) { $GetSetting = { param($n) Get-PimSetting -Name $n } }
+    $pro = $false
+    if ($null -ne $ProHere) { $pro = [bool]$ProHere }
+    else { try { $l = Get-PimLicense; if ($l -and (Get-Command Test-PimLicenseIsProForTenant -ErrorAction SilentlyContinue)) { $pro = [bool](Test-PimLicenseIsProForTenant -License $l -TenantId "$($global:PIM_TenantId)".Trim()).pro } } catch { $pro = $false } }
+    $raw = ''; try { $raw = "$(& $GetSetting 'InvardiaInstallKey')".Trim() } catch { $raw = '' }
+    $hasKey = [bool]($raw -match '^inv-[A-Za-z0-9_-]{20,100}$')
+    $lic = $false; try { $lic = [bool]("$(& $GetSetting 'License')".Trim()) } catch { $lic = $false }
+    $ed = ''; try { $e = & $GetSetting 'InstallEdition'; if ($e -is [string]) { $ed = $e } } catch { $ed = '' }
+    $choice = Get-PimCommunityConnectChoice -GetSetting $GetSetting
+    $gate = Get-PimCommunityContactGate -HasKey $hasKey -ProHere $pro -HasLicenceFile $lic -InstallEdition $ed -Choice $choice
+    $st = $null; try { $st = & $GetSetting 'CommunityConnectState' } catch { $st = $null }
+    return (Get-PimCommunityConnectView -Community ([bool]$gate.community) -Choice $choice -HasStoredKey $hasKey -State $st)
+}
+
+function Set-PimManagerInvardiaConnect {
+    <#
+      COMMUNITY-CLAIM-ON-YES: PUT /api/settings/invardia-connect { connect = true|false } (SuperAdmin). Community only -- a Pro
+      install is licensed and always connected (409, nothing written). ON: records { connect true; source manager } and, with
+      no key yet, queues the engine's install-key job (Request-PimManagerInstallKeyClaim) -- the engine claims through the
+      Community claim route. OFF: records { connect false }; the key claimed earlier is KEPT BUT NOT USED (Resolve-
+      PimInvardiaInstallKey answers '' while the choice is no), so nothing that identifies the install is sent; there is no
+      release route at Invardia. Returns @{ status; body }. Seams (tests): -GetSetting, -SetSetting, -ProHere, -RequestClaim.
+    #>
+    param([AllowNull()][object]$Connect, [scriptblock]$GetSetting, [scriptblock]$SetSetting, [object]$ProHere = $null, [scriptblock]$RequestClaim, [datetime]$NowUtc = [datetime]::UtcNow)
+    if (-not $GetSetting) { $GetSetting = { param($n) Get-PimSetting -Name $n } }
+    if (-not $SetSetting) { $SetSetting = { param($n, $v) Set-PimManagerSettingObject -Name $n -Value $v } }
+    if (-not $RequestClaim) { $RequestClaim = { Request-PimManagerInstallKeyClaim } }
+    if ($Connect -isnot [bool]) { return @{ status = 400; body = [ordered]@{ ok = $false; error = 'connect must be true or false.' } } }
+    $view = Get-PimManagerInvardiaConnectView -GetSetting $GetSetting -ProHere $ProHere
+    if (-not $view.shown) { return @{ status = 409; body = [ordered]@{ ok = $false; error = 'This is a Pro install: it is licensed and always connected to Invardia. Nothing was changed.'; invardiaConnect = $view } } }
+    & $SetSetting (Get-PimCommunityConnectSettingName) (New-PimCommunityConnectRecord -Connect ([bool]$Connect) -Source 'manager' -NowUtc $NowUtc)
+    $detail = ''
+    if ($Connect) {
+        $c = $null; try { $c = & $RequestClaim } catch { $c = $null }
+        $detail = if ($view.hasKey) { 'Connected: the install key claimed earlier is used again.' } elseif ($c) { "Connecting: $($c.detail)." } else { 'Connecting: the engine claims the install key at its next install-key run.' }
+    } else {
+        $detail = if ($view.hasKey) { 'Not connected: reports are anonymous and Update now is off. The install key is kept but not used.' } else { 'Not connected: nothing that identifies this install is sent to Invardia.' }
+    }
+    $after = Get-PimManagerInvardiaConnectView -GetSetting $GetSetting -ProHere $ProHere
+    return @{ status = 200; body = [ordered]@{ ok = $true; connect = [bool]$Connect; detail = $detail; invardiaConnect = $after } }
+}
+
 function Get-PimManagerLicenseBody {
     # REQ-Y. The GET /api/license body (Get-PimLicenseApiBody, engine/_shared/PIM-License.ps1) for this environment: its
     # tenant ($global:PIM_TenantId) and store server fill the register command. Never throws: a failure is a body with
@@ -7055,6 +7109,8 @@ function Get-PimManagerLicenseBody {
         $lrState = $null; try { $lrState = Get-PimSetting -Name 'LicenceRequestState' } catch { $lrState = $null }
         $lrOn = $false; try { $lrOn = [bool](Test-PimFeatureEnabled -Key 'licence.autoRequest') } catch { $lrOn = $false }
         $b['licenceRequest'] = [ordered]@{ enabled = $lrOn; status = "$($lrState.status)"; message = "$($lrState.message)"; updatedUtc = "$($lrState.updatedUtc)" }
+        # COMMUNITY-CLAIM-ON-YES: the Community switch "Connect this install to Invardia" (shown for Community only). Never the key.
+        try { $b['invardiaConnect'] = Get-PimManagerInvardiaConnectView } catch { }
         return $b
     }
     catch {
@@ -16438,6 +16494,24 @@ function Handle-Request {
                 license = $after
             })
             return 200
+        }
+
+        # COMMUNITY-CLAIM-ON-YES (owner 2026-11-11): the Community switch "Connect this install to Invardia" (Settings > Licence).
+        if ($path -eq '/api/settings/invardia-connect' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = 'SuperAdmin role required to change the connection to Invardia.' }
+                return 403
+            }
+            $body = Read-RequestJson -Request $req
+            $want = $null; if ($body -and $body.PSObject.Properties['connect']) { $want = $body.connect }
+            $before = ''; try { $before = Get-PimCommunityConnectChoice -GetSetting { param($n) Get-PimSetting -Name $n } } catch { $before = '' }
+            $r = Set-PimManagerInvardiaConnect -Connect $want
+            if ([int]$r.status -eq 200) {
+                Write-PimManagerAuditEvent -Action 'settings.invardia-connect.save' -Target 'InvardiaConnect' -Result 'ok' -Before @{ value = $before } -After @{ value = $(if ($want) { 'yes' } else { 'no' }) }
+            }
+            Write-JsonResponse -Response $resp -Status ([int]$r.status) -Body $r.body
+            return [int]$r.status
         }
 
         if ($path -eq '/api/audit' -and $method -eq 'GET') {

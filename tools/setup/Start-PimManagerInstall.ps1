@@ -131,6 +131,10 @@ param(
     [switch]$PreflightOnly,
     # run as the Invardia Support app: requires a Connect-InvardiaSupport session for -TenantId in this PowerShell window
     [switch]$ViaSupportApp,
+    # COMMUNITY-CLAIM-ON-YES: answer the Community question "Connect this install to Invardia: health reports + updates on
+    # request" for a scripted install (passed through); neither = the installer asks (no answer = no)
+    [switch]$ConnectToInvardia,
+    [switch]$NoConnectToInvardia,
     # --- this launcher's own ---
     # the release to install (e.g. 3.0.5); default: the latest public release
     [string]$Version = '',
@@ -330,7 +334,7 @@ try {
 
     # ---------------------------------------------------------------- 2. run the installer from the release, same parameters
     $pass = @{}
-    foreach ($k in @('TenantId', 'SubscriptionId', 'Location', 'ResourceGroup', 'SuperAdmins', 'AlertRecipients', 'MailSender', 'PortalUsers', 'AllowAllMembers', 'VnetAddressPrefix', 'SubnetAddressPrefix', 'Exposure', 'Edition', 'UpdateRing', 'KeyVaultName', 'EngineAzureRootUserAccessAdmin', 'InstallId', 'SupportAppId', 'SupportAccess', 'Reporter', 'StatePath', 'Resume', 'PreflightOnly', 'ViaSupportApp')) {
+    foreach ($k in @('TenantId', 'SubscriptionId', 'Location', 'ResourceGroup', 'SuperAdmins', 'AlertRecipients', 'MailSender', 'PortalUsers', 'AllowAllMembers', 'VnetAddressPrefix', 'SubnetAddressPrefix', 'Exposure', 'Edition', 'UpdateRing', 'KeyVaultName', 'EngineAzureRootUserAccessAdmin', 'InstallId', 'SupportAppId', 'SupportAccess', 'Reporter', 'StatePath', 'Resume', 'PreflightOnly', 'ViaSupportApp', 'ConnectToInvardia', 'NoConnectToInvardia')) {
         if ($PSBoundParameters.ContainsKey($k)) { $pass[$k] = $PSBoundParameters[$k] }
     }
     # PRIVATE NETWORK (INSTALL-1 item 5): the network parameters, passed through unchanged

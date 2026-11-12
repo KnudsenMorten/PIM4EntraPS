@@ -8005,12 +8005,48 @@
       }
     };
   }
+  // COMMUNITY-CLAIM-ON-YES (owner 2026-11-11): the Community switch "Connect this install to Invardia: health reports +
+  // updates on request" (d.invardiaConnect from GET /api/license; shown for Community only -- Pro is always connected).
+  // PURE (the harness renders it). On = the engine claims the install key; off = nothing that identifies the install is sent
+  // (a key claimed earlier is kept but not used).
+  function invardiaConnectHtml(d) {
+    const esc = escapeHtml;
+    const c = d && d.invardiaConnect;
+    if (!c || !c.shown) return '';
+    const dis = (d && d.canWrite) ? '' : ' disabled';
+    return '<div id="invConnect" style="margin-top:12px;padding-top:10px;border-top:1px solid #d0d7de;font-size:12px;">' +
+      '<label style="display:flex;gap:6px;align-items:center;"><input type="checkbox" id="invConnectBox"' + (c.connect ? ' checked' : '') + dis + '> <b>' + esc(c.question || 'Connect this install to Invardia: health reports + updates on request') + '</b></label>' +
+      '<div id="invConnectText" style="color:#57606a;margin-top:4px;">' + esc(c.text || '') + '</div>' +
+      (dis ? '<div style="font-size:11px;color:#57606a;margin-top:3px;">(SuperAdmin role required to change it)</div>' : '') +
+      '<span id="invConnectMsg" style="font-size:12px;"></span></div>';
+  }
+  function wireInvardiaConnect(host) {
+    const box = host && host.querySelector('#invConnectBox');
+    if (!box || box.disabled) return;
+    box.onchange = async () => {
+      const msg = host.querySelector('#invConnectMsg');
+      const want = !!box.checked;
+      box.disabled = true;
+      if (msg) { msg.style.color = '#57606a'; msg.textContent = 'Saving…'; }
+      try {
+        const r = await api('PUT', '/api/settings/invardia-connect', { connect: want });
+        if (msg) { msg.style.color = '#1a7f37'; msg.textContent = (r && r.detail) || 'Saved.'; }
+        const t = host.querySelector('#invConnectText');
+        if (t && r && r.invardiaConnect) t.textContent = r.invardiaConnect.text || '';
+      } catch (e) {
+        box.checked = !want;
+        if (msg) { msg.style.color = '#cf222e'; msg.textContent = 'Not saved: ' + String((e && e.message) || e); }
+      }
+      box.disabled = false;
+    };
+  }
   async function renderLicenceCard() {
     const body = document.getElementById('setLicenceBody');
     if (!body) return;
     if (!isServer) { body.innerHTML = '<div style="color:#57606a;font-size:12px;">Static mode -- the licence needs the server.</div>'; return; }
     const d = await fetchLicence(true);
-    body.innerHTML = licenceSectionHtml(d) + pimSecurityPackLinkHtml();
+    body.innerHTML = licenceSectionHtml(d) + pimSecurityPackLinkHtml() + invardiaConnectHtml(d);
+    wireInvardiaConnect(body);
     // The prereq chip Copy pattern (renderWorkloadPrereqChips): clipboard API, else a textarea + execCommand.
     body.querySelectorAll('.lic-copy').forEach(b => b.onclick = () => {
       const code = b.parentNode && b.parentNode.querySelector('.lic-cmd');

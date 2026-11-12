@@ -186,6 +186,15 @@ param(
     [switch]$PreflightOnly,
     # INSTALL-1 ALIGN (6): run as the Invardia Support app -- requires a Connect-InvardiaSupport session for -TenantId
     [switch]$ViaSupportApp,
+    # COMMUNITY-CLAIM-ON-YES (owner 2026-11-11): a Community install asks "Connect this install to Invardia: health reports +
+    # updates on request". -ConnectToInvardia answers yes, -NoConnectToInvardia answers no (scripted installs); neither = asked
+    # (no answer = no). Pro / Trial are licensed and always connected: neither switch changes them.
+    [switch]$ConnectToInvardia,
+    [switch]$NoConnectToInvardia,
+    # --- test seams (offline tests/Test-PimCommunityConnect.ps1): param([string]$Question) -> the typed answer; and the claim's
+    # HTTP param($Method, $Url, $Body, $Headers) -> @{ status; body; error }. Omit them for a real install. ---
+    [scriptblock]$ReadConnectAnswer,
+    [scriptblock]$ConnectHttp,
     # --- test seams (offline tests/Test-PimGuidedInstall.ps1); omit them for a real install ---
     [scriptblock]$Az,
     [scriptblock]$Deploy,
@@ -224,6 +233,8 @@ $sol = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $here '_PimGuidedInstall.ps1')
 . (Join-Path $here '_PimSignedIn.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-License.ps1')
+# COMMUNITY-CLAIM-ON-YES: the question, the answer rules and the Community claim (the same functions the engine uses)
+. (Join-Path $sol 'engine\_shared\PIM-InvardiaUpdate.ps1')
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')     # framework 12.7: the Documentation line + the transcript
 # §100.41 (NO-AZ, framework 12.17): the installer's reads go over ARM / Graph REST with PIM-Rest's ONE token client (the
 # Invardia Support-app session, else the person's browser sign-in -- Get-PimSignedInIdentity). Loaded at FILE scope (71.32).
@@ -433,6 +444,21 @@ $community = ("$($cfg.edition)" -eq 'community')
 $licenceLater = -not $community
 $licenceHint = 'sign in to PIM Manager and add your licence in Settings > Licence -- the Pro features switch on with it'
 if ($autoCommunity) { Write-Host '    This installs PIM Manager Community (free). For Pro, run the same command with -Edition Pro; you can also add a licence later in PIM Manager > Settings > Licence.' -ForegroundColor Cyan }
+# COMMUNITY-CLAIM-ON-YES (owner 2026-11-11): ONE question for a Community install, asked here (before anything is created),
+# acted on at the licence step. Both switches = a contradiction (exit 3). Pro / Trial: never asked, nothing recorded.
+if ($ConnectToInvardia -and $NoConnectToInvardia) { Emit 'config' 'failed' 'give -ConnectToInvardia or -NoConnectToInvardia, not both' 'Run the command again with one of them.'; Finish 3 }
+$pimConnect = $null
+if ($community) {
+    $ccMode = if ($ConnectToInvardia) { 'yes' } elseif ($NoConnectToInvardia) { 'no' } else { 'ask' }
+    $ccInteractive = $false
+    if ($ReadConnectAnswer) { $ccInteractive = $true }
+    elseif (-not $WhatIfPreference -and -not $PreflightOnly -and -not $azSeam) {   # an offline test run (-Az seam) never prompts
+        try { $ccInteractive = [bool]([Environment]::UserInteractive -and $Host.Name -eq 'ConsoleHost' -and -not [Console]::IsInputRedirected -and -not (@([Environment]::GetCommandLineArgs()) -match '^-(?i)noni')) } catch { $ccInteractive = $false }
+    }
+    $ccRead = if ($ReadConnectAnswer) { $ReadConnectAnswer } else { { param($Question) Read-Host "$Question [y/N]" } }
+    $pimConnect = Resolve-PimCommunityConnectAnswer -Mode $ccMode -Interactive $ccInteractive -ReadAnswer $ccRead
+    Write-Host "    $($pimConnect.line)" -ForegroundColor $(if ($pimConnect.connect) { 'Cyan' } else { 'DarkGray' })
+}
 $defaultStatePath = Get-PimInstallDefaultStatePath -InstallId $installId
 if (-not "$StatePath".Trim()) { $StatePath = $defaultStatePath }
 $state = Read-PimInstallState -StatePath $StatePath
@@ -697,6 +723,7 @@ if ($WhatIfPreference) {
     try { $null = @(& $Deploy $wiArgs { param($ev) }) }
     catch { Write-Host "    the deploy plan could not be read: $($_.Exception.Message)" -ForegroundColor Yellow }
     if ($community) { Write-Host '  What if: no licence step -- the Community edition (the Core features, updates from the Community channel); a licence can be added later in PIM Manager > Settings > Licence' -ForegroundColor Yellow }
+    if ($community) { Write-Host "  What if: '$(Get-PimCommunityConnectQuestion)' -- $(if ($pimConnect -and $pimConnect.connect) { 'yes: the choice is recorded and the install key is claimed from Invardia' } else { 'no (or not answered): the choice is recorded, nothing is sent to Invardia' }) (asked for real without -WhatIf)" -ForegroundColor Yellow }
     else { Write-Host "  What if: no licence step -- the $($cfg.edition) installation is deployed without a licence (the Pro updater included); afterwards $licenceHint" -ForegroundColor Yellow }
     if ("$($cfg.supportAppId)".Trim()) {
         Write-Host "  What if: give the Invardia Support app $($cfg.supportAppId) '$($cfg.supportAccess)' access (Grant-PimSupportAccess.ps1: at EVERY level its own read-only database user in the read role pim_support_read and the time-limited support access module, with the level as the consent; 'troubleshoot' and 'asbuilt' read only, 'setup' admin rights only inside an open support session of at most 8 hours; every level also lets it start the as-built job and read its PDF container. It is not made a member of the SQL admin group, a database owner or an owner of PIM's app registrations or groups)" -ForegroundColor Yellow
@@ -811,20 +838,31 @@ if (-not $azSeam) {
 # it is meant to be Pro and asks Invardia for its licence on its first tick (Invardia auto-approves a tenant on the 60-day
 # trial). Community records nothing and never asks. Every run, -Resume too (idempotent, read back); never a failed install.
 $editionNote = ''
+if (-not $StoreSql -and -not $azSeam) {
+    $StoreSql = { param([string]$Sql)
+        $Io = New-PimInstallSigninFrontIo -SubscriptionId $cfg.subscriptionId -ResourceGroup $names.resourceGroup -TenantId $cfg.tenantId -AcrName $names.acr `
+                -SqlServerFqdn $names.sqlFqdn -SqlDatabase $names.sqlDatabase -SetupDir $here
+        & $Io.Sql $Sql }
+}
+$connectNote = ''
+if ($community -and $pimConnect) {
+    # COMMUNITY-CLAIM-ON-YES: record the answer (pim.Settings 'InvardiaConnect') and, on yes, claim the install key through the
+    # Community claim route -- stored where Pro keeps its key. A route that is not live yet (404) = anonymous + one plain line;
+    # the engine's install-key job asks again every 6 hours. NEVER fails the install. On no: NOTHING is sent to Invardia.
+    $ccHttp = if ($ConnectHttp) { $ConnectHttp } else { { param($m, $u, $b, $h) Invoke-PimCommunityConnectHttp -Method $m -Url $u -Body $b -Headers $h } }
+    $ccR = if ($StoreSql) { Invoke-PimInstallCommunityConnect -Connect ([bool]$pimConnect.connect) -Sql $StoreSql -Http $ccHttp -TenantId "$($cfg.tenantId)" }
+           else { @{ ok = $false; claim = $null; line = 'the connect choice was not recorded (no database access from this run) -- set it in PIM Manager > Settings > Licence' } }
+    Write-Host "    connect to Invardia: $($ccR.line)" -ForegroundColor $(if ($ccR.ok) { 'DarkGray' } else { 'Yellow' })
+    $connectNote = "; $(Get-PimCommunityConnectQuestion): $($ccR.line)"
+}
 if (-not $community) {
-    if (-not $StoreSql -and -not $azSeam) {
-        $StoreSql = { param([string]$Sql)
-            $Io = New-PimInstallSigninFrontIo -SubscriptionId $cfg.subscriptionId -ResourceGroup $names.resourceGroup -TenantId $cfg.tenantId -AcrName $names.acr `
-                    -SqlServerFqdn $names.sqlFqdn -SqlDatabase $names.sqlDatabase -SetupDir $here
-            & $Io.Sql $Sql }
-    }
     if ($StoreSql) {
         $edR = Set-PimInstallEditionSetting -Edition "$($cfg.edition)" -Sql $StoreSql
         Write-Host "    install edition: $($edR.reason)" -ForegroundColor $(if ($edR.ok) { 'DarkGray' } else { 'Yellow' })
         if (-not $edR.ok) { $editionNote = " (the install edition was not recorded, so the licence is not requested by itself: $($edR.reason) -- run the installation again with -Resume)" }
     }
 }
-if ($community) { Emit 'licence' 'skipped' 'the Community edition has no licence -- a licence can be added later in PIM Manager > Settings > Licence' }
+if ($community) { Emit 'licence' 'skipped' "the Community edition has no licence -- a licence can be added later in PIM Manager > Settings > Licence$connectNote" }
 else { Emit 'licence' 'warning' "no licence yet: $licenceHint$editionNote" 'After the installation:' 'PIM Manager > Settings > Licence' }
 
 # OPEN-01 (framework SECAUDIT-1a, Invardia audit item 3): a named Support app gets its READ-ONLY database access here --

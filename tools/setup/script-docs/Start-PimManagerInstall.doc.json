@@ -55,6 +55,8 @@
     { "name": "Resume", "required": false, "default": false, "help": "Continue a stopped installation: the release downloaded before is used again when it is the same edition and version this copy installs now; otherwise it is downloaded afresh (one line says so). The installation continues from its own saved progress (passed through)." },
     { "name": "PreflightOnly", "required": false, "default": false, "help": "Run only the installer's checks (passed through)." },
     { "name": "ViaSupportApp", "required": false, "default": false, "help": "Run the installation as the Invardia Support app (passed through). It needs a Connect-InvardiaSupport session for the same tenant in this PowerShell window; without one it stops before anything is downloaded." },
+    { "name": "ConnectToInvardia", "required": false, "default": false, "help": "Community only: answer yes to 'Connect this install to Invardia: health reports + updates on request' without being asked (passed through)." },
+    { "name": "NoConnectToInvardia", "required": false, "default": false, "help": "Community only: answer no to the same question without being asked (passed through). Without either switch the installer asks, and no answer counts as no." },
     { "name": "Version", "required": false, "default": "the latest public release", "help": "The PIM Manager release to install, for example 3.0.5." },
     { "name": "ReleasePath", "required": false, "default": null, "help": "A folder that already holds the unpacked release: nothing is downloaded." }
   ],

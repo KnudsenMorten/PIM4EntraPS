@@ -158,15 +158,18 @@ function Invoke-PimInvardiaUpdateHead {
     #>
     param([scriptblock]$Http, [string]$BaseUrl = '', [AllowEmptyString()][string]$InstallKey = '', [AllowEmptyString()][AllowNull()][string]$LicenceText = '',
           [Parameter(Mandatory)][ValidateRange(0, 3)][int]$Ring, [AllowEmptyString()][AllowNull()][string]$InstallId = '', [string]$Kind = 'code')
+    # COMMUNITY-CLAIM-ON-YES (Invardia 2026-11-11): -Kind community = a Community install with its key -- NO licence is needed
+    # or sent; Invardia answers the "Update now" mark the same way. Kind code (Pro) is unchanged: no licence = no call.
+    $community = ("$Kind" -eq 'community')
     if (-not "$InstallKey".Trim()) { return @{ status = 0; body = $null; error = 'no install key' } }
-    if (-not "$LicenceText".Trim()) { return @{ status = 0; body = $null; error = 'no licence' } }
+    if (-not $community -and -not "$LicenceText".Trim()) { return @{ status = 0; body = $null; error = 'no licence' } }
     $base = if ("$BaseUrl".Trim()) { "$BaseUrl".Trim().TrimEnd('/') } else { $script:PimInvardiaDefaultBase }
     if ($base -notmatch '^(?i)https://') { return @{ status = 0; body = $null; error = 'the update address is not https' } }
     $url = "$base/api/updates/$($script:PimInvardiaProduct)/head"
     $h = @{ 'X-Invardia-Install-Key' = "$InstallKey".Trim() }
     $iid = "$InstallId".Trim().ToLowerInvariant()
     if ($iid -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { $h['X-Invardia-Install-Id'] = $iid }
-    $body = [ordered]@{ kind = $Kind; licence = "$LicenceText"; ring = $Ring }
+    $body = if ($community) { [ordered]@{ kind = 'community'; ring = $Ring } } else { [ordered]@{ kind = $Kind; licence = "$LicenceText"; ring = $Ring } }
     $r = $null
     try {
         if ($Http) { $r = & $Http 'POST' $url $body $h }
@@ -175,7 +178,7 @@ function Invoke-PimInvardiaUpdateHead {
     $code = 0; try { $code = [int]$r.status } catch { $code = 0 }
     # the error text is a transport message; scrub anything that could carry the key or the licence before it goes anywhere
     $err = ((("$($r.error)") -split "`n")[0])
-    if ($err -and ($err.Contains("$InstallKey".Trim()) -or $err.Contains("$LicenceText"))) { $err = 'the request failed' }
+    if ($err -and ($err.Contains("$InstallKey".Trim()) -or ("$LicenceText" -and $err.Contains("$LicenceText")))) { $err = 'the request failed' }
     return @{ status = $code; body = $r.body; error = $err }
 }
 
@@ -241,13 +244,246 @@ function ConvertTo-PimInvardiaLicenceText {
 }
 
 function Resolve-PimInvardiaInstallKey {
-    <# The install key: the Container Apps secret PIM_UPLINK_KEY wins; else the claimed one in pim.Settings. '' = none. #>
+    <# The install key: the Container Apps secret PIM_UPLINK_KEY wins; else the claimed one in pim.Settings. '' = none.
+       COMMUNITY-CLAIM-ON-YES: a Community install whose choice 'Connect this install to Invardia' is OFF (pim.Settings
+       'InvardiaConnect' { connect = false }) keeps a key it claimed earlier but does not USE it: '' here, so the heartbeat,
+       the update track, Update now and every other Invardia call stay anonymous / off. Only that explicit 'no' counts (a
+       Pro install never has the record). #>
     param([scriptblock]$GetSetting)
     $k = "$env:PIM_UPLINK_KEY".Trim()
     if ($k) { return $k }
-    if ($GetSetting) { try { $k = "$(& $GetSetting 'InvardiaInstallKey')".Trim() } catch { $k = '' } }
+    if ($GetSetting) {
+        if ((Get-PimCommunityConnectChoice -GetSetting $GetSetting) -eq 'no') { return '' }
+        try { $k = "$(& $GetSetting 'InvardiaInstallKey')".Trim() } catch { $k = '' }
+    }
     if ($k -match '^inv-[A-Za-z0-9_-]{20,100}$') { return $k }
     return ''
+}
+
+# ---- COMMUNITY-CLAIM-ON-YES (owner decisions 2026-11-11, framework PRO-COMMUNITY-SAME) ------------------------------------
+# Pro and Community install and run the same way. A Community install claims an Invardia install key ONLY on the user's
+# yes to ONE question, the same words in every product (Get-PimCommunityConnectQuestion). Yes = the key is claimed through
+# Invardia's Community claim route and stored exactly where Pro keeps its key (pim.Settings 'InvardiaInstallKey'); from
+# then on the heartbeat, the update track and Update now run as for Pro (they look only at the key). No = anonymous: no
+# key, no Update now; everything else the same. The choice is pim.Settings 'InvardiaConnect' { connect; source; atUtc }.
+# 🔌 THE CLAIM (Invardia's contract, LIVE 2026-11-11): the SAME route as the Pro claim, POST <base>/api/install-keys/claim,
+#    body { product; tenantId; edition = 'community' } and NO licence; the answer has the Pro claim's shape. Get-PimCommunityClaimRoute
+#    names it (the one place to change it). An older Invardia without it (404 / 405 / 501) = anonymous + one plain line.
+function Get-PimCommunityConnectQuestion { <# PURE. LITERAL. The question, exactly, in every product. #> return 'Connect this install to Invardia: health reports + updates on request' }
+function Get-PimCommunityConnectSettingName { <# PURE. LITERAL. #> return 'InvardiaConnect' }
+function Get-PimCommunityClaimRoute { <# PURE. LITERAL. THE claim route: POST <base><route> (the Pro claim's route; edition community, no licence). #> return '/api/install-keys/claim' }
+
+function ConvertFrom-PimCommunityConnectValue {
+    <# PURE. The stored choice -> 'yes' | 'no' | '' (none recorded / not readable). Only a real boolean counts: { connect =
+       $true|$false } (object, dictionary or its JSON text) or a bare boolean. Any other value (a key text, a word) = ''. #>
+    param([AllowNull()][object]$Value)
+    $v = $Value
+    if ($v -is [string]) { $t = $v.Trim(); if (-not $t.StartsWith('{')) { return '' }; try { $v = $t | ConvertFrom-Json -ErrorAction Stop } catch { return '' } }
+    if ($v -is [bool]) { return $(if ($v) { 'yes' } else { 'no' }) }
+    $c = $null
+    if ($v -is [System.Collections.IDictionary]) { if ($v.Contains('connect')) { $c = $v['connect'] } }
+    elseif ($null -ne $v -and $v.PSObject.Properties['connect']) { $c = $v.connect }
+    if ($c -is [bool]) { return $(if ($c) { 'yes' } else { 'no' }) }
+    return ''
+}
+
+function Get-PimCommunityConnectChoice {
+    <# The recorded choice through -GetSetting { param($Name) }: 'yes' | 'no' | ''. Never throws. #>
+    param([scriptblock]$GetSetting)
+    if (-not $GetSetting) { return '' }
+    $v = $null; try { $v = & $GetSetting (Get-PimCommunityConnectSettingName) } catch { return '' }
+    return (ConvertFrom-PimCommunityConnectValue -Value $v)
+}
+
+function New-PimCommunityConnectRecord {
+    <# PURE. The stored choice: { connect; source = installer|manager; atUtc }. #>
+    param([Parameter(Mandatory)][bool]$Connect, [ValidateSet('installer', 'manager')][string]$Source = 'installer', [datetime]$NowUtc = [datetime]::UtcNow)
+    return [pscustomobject][ordered]@{ connect = $Connect; source = $Source; atUtc = $NowUtc.ToUniversalTime().ToString('o') }
+}
+
+function Resolve-PimCommunityConnectAnswer {
+    <#
+      PURE (the prompt is a seam). The installer's answer for a COMMUNITY install. Returns @{ connect; source; asked; line }.
+        -Mode yes  (-ConnectToInvardia)    -> connect, not asked
+        -Mode no   (-NoConnectToInvardia)  -> anonymous, not asked
+        -Mode ask  (the default)           -> the question, exactly, through -ReadAnswer { param($Question) } when the run is
+                                              -Interactive; y / yes = connect; anything else, no answer, or a run nobody
+                                              can answer (not interactive, no reader, the reader throws) = NO.
+    #>
+    param([ValidateSet('ask', 'yes', 'no')][string]$Mode = 'ask', [bool]$Interactive = $false, [scriptblock]$ReadAnswer)
+    $q = Get-PimCommunityConnectQuestion
+    $yes = "$q -- yes: the install key is claimed; health reports, the update track and Update now work as for Pro"
+    $no = "$q -- no: this install stays anonymous (no install key, no Update now); everything else is the same. Change it later in PIM Manager > Settings > Licence"
+    if ($Mode -eq 'yes') { return @{ connect = $true; source = 'parameter'; asked = $false; line = "$yes (-ConnectToInvardia)" } }
+    if ($Mode -eq 'no') { return @{ connect = $false; source = 'parameter'; asked = $false; line = "$no (-NoConnectToInvardia)" } }
+    if (-not $Interactive -or -not $ReadAnswer) { return @{ connect = $false; source = 'no-answer'; asked = $false; line = "$no (nobody could answer here; -ConnectToInvardia answers yes)" } }
+    $a = ''; try { $a = "$(& $ReadAnswer $q)".Trim() } catch { $a = '' }
+    if ($a -match '^(?i)(y|yes|j|ja)$') { return @{ connect = $true; source = 'answer'; asked = $true; line = $yes } }
+    return @{ connect = $false; source = 'answer'; asked = $true; line = $no }
+}
+
+function Invoke-PimCommunityConnectHttp {
+    <# The real seam: one JSON POST, 30 s, @{ status; body; error }. A non-2xx is a status (its JSON body read), never a throw. #>
+    param([string]$Method = 'POST', [Parameter(Mandatory)][string]$Url, $Body, [hashtable]$Headers = @{})
+    $a = @{ Method = $Method; Uri = $Url; Headers = $(if ($Headers) { $Headers } else { @{} }); ContentType = 'application/json'; TimeoutSec = 30; UseBasicParsing = $true }
+    if ($null -ne $Body) { $a['Body'] = ($Body | ConvertTo-Json -Depth 6 -Compress) }
+    try {
+        $r = Invoke-WebRequest @a -ErrorAction Stop
+        $b = $null; if ("$($r.Content)".Trim()) { try { $b = "$($r.Content)" | ConvertFrom-Json } catch { $b = $null } }
+        return @{ status = [int]$r.StatusCode; body = $b; error = '' }
+    } catch {
+        $code = 0; try { if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode } } catch { $code = 0 }
+        $b = $null; try { $t = "$($_.ErrorDetails.Message)".Trim(); if ($t.StartsWith('{')) { $b = $t | ConvertFrom-Json } } catch { $b = $null }
+        return @{ status = $code; body = $b; error = ((("$($_.Exception.Message)") -split "`n")[0]) }
+    }
+}
+
+function Invoke-PimCommunityInstallKeyClaim {
+    <#
+      One Community claim decision, every seam injected; NEVER throws, never fails an install. Returns @{ action; message }:
+        a usable key already here                -> none
+        the choice is not 'yes'                  -> none (anonymous by choice: NO call)
+        the real tenant id is not known          -> none
+        a refusal / keyExists recorded AFTER the latest yes -> none (asked again only when the user says yes again)
+        POST <base>/api/install-keys/claim { product = 'pim-manager'; tenantId; edition = 'community' } -- NO licence
+             header X-Invardia-Install-Id (when the install has its lasting id; never in the body)
+          201 / 200 + { key = inv-... }          -> stored as 'InvardiaInstallKey' (where Pro keeps it), 'claimed'
+          409 tenantKnown                        -> 'refused': the tenant belongs to a company with a licence -- "claim with
+                                                    your licence" (Settings > Licence); NOT retried
+          409 keyExists                          -> 'exists': a repeat -- already connected at Invardia; not a failure, NOT
+                                                    retried (no key arrives with it)
+          429                                    -> 'later': "try again later" (5 per IP per hour, or the daily cap); the
+                                                    install continues without a key; the install-key job asks again (6 h)
+          404 / 405 / 501                        -> 'anonymous': an Invardia without the Community claim -- one plain line;
+                                                    asked again every 6 hours
+          403 / another 409                      -> 'refused' (Invardia's reason); not asked again until a new yes
+          anything else (no answer, 5xx)         -> 'failed', asked again on the next run
+      The state for the admin: pim.Settings 'CommunityConnectState' { action; message; atUtc }. The key is never in it.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Http, [Parameter(Mandatory)][scriptblock]$GetSetting, [Parameter(Mandatory)][scriptblock]$SetSetting,
+          [string]$TenantId = '', [AllowEmptyString()][AllowNull()][string]$InstallId = '', [string]$BaseUrl = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    try {
+        $now = $NowUtc.ToUniversalTime()
+        $save = { param($a, $m) try { & $SetSetting 'CommunityConnectState' ([pscustomobject][ordered]@{ action = $a; message = $m; atUtc = $now.ToString('o') }) } catch { }; @{ action = $a; message = $m } }
+        if (Resolve-PimInvardiaInstallKey -GetSetting $GetSetting) { return @{ action = 'none'; message = 'this install has its install key' } }
+        if ((Get-PimCommunityConnectChoice -GetSetting $GetSetting) -ne 'yes') { return @{ action = 'none'; message = 'not connected to Invardia (the choice is no, or not made) -- anonymous, nothing is sent' } }
+        if ("$TenantId" -notmatch '^[0-9a-fA-F-]{36}$') { return @{ action = 'none'; message = 'the real tenant id is not known -- nothing is sent' } }
+        $prev = $null; try { $prev = & $GetSetting 'CommunityConnectState' } catch { $prev = $null }
+        if ($prev -is [string] -and "$prev".Trim().StartsWith('{')) { try { $prev = "$prev" | ConvertFrom-Json } catch { $prev = $null } }
+        if ($prev -and "$($prev.action)" -in @('refused', 'exists')) {
+            $choiceAt = $null; $refusedAt = $null
+            try { $cv = & $GetSetting (Get-PimCommunityConnectSettingName); if ($cv -is [string]) { $cv = $cv | ConvertFrom-Json }; $choiceAt = ([datetime]"$($cv.atUtc)").ToUniversalTime() } catch { $choiceAt = $null }
+            try { $refusedAt = ([datetime]"$($prev.atUtc)").ToUniversalTime() } catch { $refusedAt = $null }
+            if ($refusedAt -and (-not $choiceAt -or $choiceAt -le $refusedAt)) { return @{ action = 'none'; message = "not asked again: $($prev.message)" } }
+        }
+        $base = if ("$BaseUrl".Trim()) { "$BaseUrl".Trim().TrimEnd('/') } else { $script:PimInvardiaDefaultBase }
+        if ($base -notmatch '^(?i)https://') { return (& $save 'failed' 'the Invardia address is not https -- nothing is sent') }
+        $body = [ordered]@{ product = $script:PimInvardiaProduct; tenantId = "$TenantId".ToLowerInvariant(); edition = 'community' }
+        $h = @{}
+        $iid = "$InstallId".Trim().ToLowerInvariant()
+        if ($iid -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { $h['X-Invardia-Install-Id'] = $iid }
+        $r = $null; try { $r = & $Http 'POST' "$base$(Get-PimCommunityClaimRoute)" $body $h } catch { $r = @{ status = 0; body = $null; error = ((("$($_.Exception.Message)") -split "`n")[0]) } }
+        $st = 0; try { $st = [int]$r.status } catch { $st = 0 }
+        if (($st -eq 201 -or $st -eq 200) -and "$($r.body.key)" -match '^inv-[A-Za-z0-9_-]{20,100}$') {
+            & $SetSetting 'InvardiaInstallKey' "$($r.body.key)"
+            try { $eid = "$($r.body.environmentId)".Trim().ToLowerInvariant(); if ($eid -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { & $SetSetting 'InvardiaEnvironmentId' $eid } } catch { }
+            return (& $save 'claimed' 'connected to Invardia: the install key is claimed -- health reports, the update track and Update now work as for Pro')
+        }
+        $code = "$($r.body.error)$(if (-not "$($r.body.error)") { "$($r.body.code)" })".Trim()
+        if ($st -eq 409 -and $code -eq 'tenantKnown') {
+            return (& $save 'refused' 'this tenant belongs to a company that holds a licence at Invardia -- claim with your licence (PIM Manager > Settings > Licence); not asked again')
+        }
+        if ($st -eq 409 -and $code -eq 'keyExists') {
+            return (& $save 'exists' 'already connected: Invardia already holds an install key for this install (a repeat) -- nothing more to claim; not asked again')
+        }
+        if ($st -eq 429) {
+            return (& $save 'later' 'Invardia is busy (too many claims from this address, or the daily limit) -- try again later; the install continues without a key and the engine asks again within 6 hours')
+        }
+        if ($st -in @(404, 405, 501)) {
+            return (& $save 'anonymous' "Invardia does not take Community connections yet -- this install stays anonymous for now and connects by itself once Invardia does (asked again every 6 hours)")
+        }
+        if ($st -eq 409 -or $st -eq 403) {
+            $why = "$($r.body.error)$(if ("$($r.body.reason)") { " $($r.body.reason)" })".Trim()
+            return (& $save 'refused' "Invardia refused the Community connection$(if ($why) { " ($why)" }) -- this install stays anonymous; switch 'Connect this install to Invardia' off and on in Settings > Licence to ask again")
+        }
+        $err = ((("$($r.error)") -split "`n")[0])
+        return (& $save 'failed' "the Community connection did not complete ($(if ($st) { "HTTP $st" } else { "no answer$(if ($err) { ": $err" })" })) -- asked again on the next run; this install stays anonymous until then")
+    } catch {
+        return @{ action = 'failed'; message = "the Community connection was not tried ($((("$($_.Exception.Message)") -split "`n")[0])) -- asked again on the next run" }
+    }
+}
+
+function Get-PimUpdateNowHeadKind {
+    <# PURE. The kind the 15-minute quick check sends on POST /head (UPDATE-NOW for both editions, Invardia 2026-11-11): Pro
+       (source 'invardia' / anything not Community) = 'code' with its licence, exactly as before; a Community install (source
+       'invardia-community') = 'community' and NO licence -- with its install key Invardia answers the "Update now" mark.
+       Without a key nothing is asked (the quick check's own gate, Invoke-PimUpdateNowQuickCheck). #>
+    param([AllowEmptyString()][AllowNull()][string]$UpdateSource = '')
+    if ("$UpdateSource".Trim() -ieq 'invardia-community') { return 'community' }
+    return 'code'
+}
+
+function Get-PimInvardiaCommunityApproval {
+    <#
+      The version a Community ring approves right now, read the way the nightly Community run reads it (the anonymous channel,
+      the SAME verifier, kind community, this ring) WITHOUT downloading anything: @{ version; reason }. '' = nothing approved
+      / not readable (an Update now signal then starts nothing). Seam -Http { param($Url) }. Never throws.
+    #>
+    param([scriptblock]$Http, [string]$BaseUrl = '', [AllowEmptyString()][string]$Ring = '', [int]$AppliedSequence = 0,
+          [string]$RunningVersion = '', [object[]]$TrustedKeys = $script:PimInvardiaUpdateTrustedKeys)
+    try {
+        $ringN = -1
+        if (-not [int]::TryParse("$Ring".Trim(), [ref]$ringN) -or $ringN -notin (Get-PimCommunityChannelRings)) { return @{ version = ''; reason = "no Community ring ('$Ring')" } }
+        $p = Invoke-PimInvardiaCommunityPull -Http $Http -BaseUrl $BaseUrl -Ring $ringN
+        if ($p.status -eq 204) { return @{ version = ''; reason = 'nothing is released to the Community channel for this ring' } }
+        if ($p.status -ne 200) { return @{ version = ''; reason = "the ring's Community manifest could not be read ($($p.reason))" } }
+        $v = Test-PimInvardiaManifest -Response $p.body -TrustedKeys $TrustedKeys -Kind 'community' -AppliedSequence $AppliedSequence -RunningVersion $RunningVersion -Ring $ringN
+        if (-not $v.ok) { return @{ version = ''; reason = "the ring's Community manifest was refused ($($v.reason))" } }
+        if ($v.hold) { return @{ version = ''; reason = "the ring's Community manifest is held ($($v.reason))" } }
+        return @{ version = "$($v.version)"; reason = "the signed Community manifest for ring $ringN" }
+    } catch { return @{ version = ''; reason = "the ring's Community approval could not be read ($((("$($_.Exception.Message)") -split "`n")[0]))" } }
+}
+
+function Get-PimCommunityContactGate {
+    <#
+      PURE. Owner rule (2026-11-11, relayed by Invardia): a COMMUNITY install sends NOTHING that identifies it to Invardia -- no
+      licence ask, no heartbeat, no key claim, no update track -- UNLESS its user said yes to the question. The anonymous signed
+      Community update channel is not behind this gate (it carries nothing of the install). Returns @{ community; allowed;
+      reason }:
+        community = no Pro licence for this tenant (-ProHere), no licence file held (-HasLicenceFile), not installed as trial /
+                    pro (-InstallEdition), and no usable install key that predates the choice (-HasKey with no choice
+                    recorded = an older Pro-intended install) -- i.e. the free edition
+        allowed   = not community, or the choice is 'yes', or a usable key is here (a usable key is only ever there after a
+                    yes, or on a Pro-intended install: a 'no' hides the key, Resolve-PimInvardiaInstallKey)
+      Pro (any of the Pro signs) is never gated: allowed, exactly as before.
+    #>
+    param([bool]$HasKey = $false, [bool]$ProHere = $false, [bool]$HasLicenceFile = $false, [AllowEmptyString()][AllowNull()][string]$InstallEdition = '',
+          [AllowEmptyString()][AllowNull()][string]$Choice = '')
+    $ed = "$InstallEdition".Trim().ToLowerInvariant()
+    $c = "$Choice".Trim().ToLowerInvariant()
+    $proSign = ($ProHere -or $HasLicenceFile -or $ed -in @('trial', 'pro') -or ($HasKey -and -not $c))
+    if ($proSign) { return @{ community = $false; allowed = $true; reason = 'a Pro install (licence, install edition or install key) -- unchanged' } }
+    if ($c -eq 'yes') { return @{ community = $true; allowed = $true; reason = 'a Community install connected to Invardia (the user said yes)' } }
+    return @{ community = $true; allowed = $false
+              reason = "a Community install that is not connected to Invardia ($(if ($c -eq 'no') { 'the user said no' } else { 'no answer' })) -- nothing that identifies it is sent; Settings > Licence > 'Connect this install to Invardia' switches it on" }
+}
+
+function Get-PimCommunityConnectView {
+    <#
+      PURE. What the Manager's Settings > Licence shows about the Community switch. -Community = this install is Community (no
+      Pro licence for this tenant, not installed as trial / Pro). Returns @{ shown; connect; hasKey; keyUsed; question; state;
+      text }. A Pro install: shown = $false (it is licensed and always connected; the switch is not offered).
+    #>
+    param([bool]$Community, [AllowEmptyString()][string]$Choice = '', [bool]$HasStoredKey = $false, [AllowNull()][object]$State)
+    $st = $State; if ($st -is [string] -and "$st".Trim().StartsWith('{')) { try { $st = "$st" | ConvertFrom-Json } catch { $st = $null } }
+    $o = [ordered]@{ shown = [bool]$Community; connect = ($Choice -eq 'yes'); hasKey = $HasStoredKey; keyUsed = ($HasStoredKey -and $Choice -ne 'no')
+                     question = (Get-PimCommunityConnectQuestion); state = "$(if ($st) { $st.action })"; text = '' }
+    if (-not $Community) { $o.text = 'Pro installs are always connected to Invardia (licensed).'; return $o }
+    if ($Choice -eq 'yes' -and $HasStoredKey) { $o.text = 'Connected: health reports, the update track and Update now work as for Pro.' }
+    elseif ($Choice -eq 'yes') { $o.text = "Connecting: $(if ($st -and "$($st.message)") { "$($st.message)" } else { 'the install key is claimed by the engine within a few minutes.' })" }
+    elseif ($Choice -eq 'no' -and $HasStoredKey) { $o.text = 'Not connected: reports are anonymous and Update now is off. The install key claimed earlier is kept but not used; switch on to use it again.' }
+    else { $o.text = 'Not connected: reports are anonymous and Update now is off. New versions still arrive with the nightly update.' }
+    return $o
 }
 
 function Invoke-PimInstallKeyClaimCycle {
@@ -311,6 +547,14 @@ function Invoke-PimInstallKeyJob {
     $base = "$(& $get 'LicenceRequestBaseUrl')".Trim()
     $http = { param($m, $u, $b, $h) if ($WhatIf) { @{ status = 0; body = $null; error = 'what-if: not sent' } } else { Invoke-PimLicenceHttp -Method $m -Url $u -Body $b -Headers $h } }
     $r = Invoke-PimInstallKeyClaimCycle -Http $http -GetSetting $get -SetSetting $set -LicenceText $licText -ProHere $proHere -TenantId $tid -BaseUrl $base -NowUtc $NowUtc
+    # COMMUNITY-CLAIM-ON-YES: no Pro licence here -> the Community claim, ONLY when the user said yes (inert otherwise). A
+    # route that is not live yet (404) is 'anonymous', asked again on this job's next run -- the claim switches on by itself.
+    if (-not $proHere -and $r.action -eq 'none') {
+        $iid = ''; if (Get-Command Resolve-PimInvardiaInstallId -ErrorAction SilentlyContinue) { try { $iid = Resolve-PimInvardiaInstallId -GetSetting $get } catch { $iid = '' } }
+        $chttp = { param($m, $u, $b, $h) if ($WhatIf) { @{ status = 0; body = $null; error = 'what-if: not sent' } } else { Invoke-PimCommunityConnectHttp -Method $m -Url $u -Body $b -Headers $h } }
+        $c = Invoke-PimCommunityInstallKeyClaim -Http $chttp -GetSetting $get -SetSetting $set -TenantId $tid -InstallId $iid -BaseUrl $base -NowUtc $NowUtc
+        if ($c.action -ne 'none') { $r = $c }
+    }
     [pscustomobject]@{ ran = ($r.action -ne 'none'); whatIf = [bool]$WhatIf; detail = "install-key: $($r.action) -- $($r.message)" }
 }
 

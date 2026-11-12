@@ -364,7 +364,7 @@ function Get-PimInstallLineArgs {
     # the Invardia Support app: its level only with the app, and only when it is not troubleshoot
     & $one 'SupportAppId' $supportApp
     $lvl = & $str 'SupportAccess'; if ($supportApp -and $lvl -and -not (& $isDef 'SupportAccess' $lvl)) { & $one 'SupportAccess' $lvl }
-    foreach ($n in 'AllowAllMembers', 'EngineAzureRootUserAccessAdmin', 'ViaSupportApp') { if (& $on $n) { & $sw $n } }
+    foreach ($n in 'AllowAllMembers', 'EngineAzureRootUserAccessAdmin', 'ViaSupportApp', 'ConnectToInvardia', 'NoConnectToInvardia') { if (& $on $n) { & $sw $n } }
     # PRIVATE NETWORK: only the values of a private install that differ from their defaults
     if ($private) { & $one 'VnetId' $vnetId }
     if (-not $vnetId) { $v = & $str 'VnetName'; if ($v -and -not (& $isDef 'VnetName' $v)) { & $one 'VnetName' $v } }
@@ -874,6 +874,59 @@ function Set-PimInstallEditionSetting {
     } catch { return @{ ok = $false; written = $false; value = $e; reason = "the install edition could not be recorded: $((("$($_.Exception.Message)") -split "`n")[0])" } }
     if ($back -ne $json) { return @{ ok = $false; written = $false; value = $e; reason = "the install edition was not read back (found '$back')" } }
     return @{ ok = $true; written = $true; value = $e; reason = "recorded as a $e installation -- it asks Invardia for its licence by itself" }
+}
+
+function New-PimInstallSqlSettingSeams {
+    <#
+      COMMUNITY-CLAIM-ON-YES: pim.Settings get / set / create-if-absent over the installer's ONE-scalar SQL seam (-Sql =
+      param([string]$Sql) -> one scalar). Names are fixed identifiers (letters only, refused otherwise); a value is JSON with
+      every ' doubled -- never caller text unquoted in the statement. Returns @{ get; set; create }.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Sql)
+    $chk = { param($n) if ("$n" -notmatch '^[A-Za-z]{1,64}$') { throw "not a setting name: $n" } }
+    $lit = { param($v) "N'" + ((ConvertTo-Json -InputObject $v -Depth 8 -Compress) -replace "'", "''") + "'" }
+    $get = { param($n) & $chk $n; $t = "$(& $Sql "SELECT ValueJson FROM pim.Settings WHERE Name = N'$n'")".Trim(); if (-not $t) { return $null }; try { return ($t | ConvertFrom-Json) } catch { return $t } }.GetNewClosure()
+    $set = { param($n, $v) & $chk $n
+        [void](& $Sql ("MERGE pim.Settings WITH (HOLDLOCK) AS t USING (SELECT N'$n' AS Name, $(& $lit $v) AS V) AS s ON t.Name = s.Name " +
+                       "WHEN MATCHED THEN UPDATE SET ValueJson = s.V, UpdatedUtc = SYSUTCDATETIME() " +
+                       "WHEN NOT MATCHED THEN INSERT (Name, ValueJson, UpdatedUtc) VALUES (s.Name, s.V, SYSUTCDATETIME());")) }.GetNewClosure()
+    $create = { param($n, $v) & $chk $n
+        [void](& $Sql ("MERGE pim.Settings WITH (HOLDLOCK) AS t USING (SELECT N'$n' AS Name, $(& $lit $v) AS V) AS s ON t.Name = s.Name " +
+                       "WHEN MATCHED AND (t.ValueJson IS NULL OR LTRIM(RTRIM(t.ValueJson)) IN (N'', N'""', N'null')) THEN UPDATE SET ValueJson = s.V, UpdatedUtc = SYSUTCDATETIME() " +
+                       "WHEN NOT MATCHED THEN INSERT (Name, ValueJson, UpdatedUtc) VALUES (s.Name, s.V, SYSUTCDATETIME());")) }.GetNewClosure()
+    return @{ get = $get; set = $set; create = $create }
+}
+
+function Invoke-PimInstallCommunityConnect {
+    <#
+      COMMUNITY-CLAIM-ON-YES (owner 2026-11-11): the installer's half for a COMMUNITY install. Records the answer (pim.Settings
+      'InvardiaConnect' { connect; source installer; atUtc }, read back) and, ONLY on yes, claims the install key through the
+      Community claim route (Invoke-PimCommunityInstallKeyClaim, PIM-InvardiaUpdate.ps1 -- the same function the engine's
+      install-key job runs). On no: NOTHING is sent (no claim, no id). Returns @{ ok; recorded; claim; line }. Never throws:
+      a failed record or claim is a line, never a failed install.
+    #>
+    param([Parameter(Mandatory)][bool]$Connect, [Parameter(Mandatory)][scriptblock]$Sql, [Parameter(Mandatory)][scriptblock]$Http,
+          [string]$TenantId = '', [string]$BaseUrl = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    try {
+        $io = New-PimInstallSqlSettingSeams -Sql $Sql
+        & $io.set (Get-PimCommunityConnectSettingName) (New-PimCommunityConnectRecord -Connect $Connect -Source 'installer' -NowUtc $NowUtc)
+        $back = Get-PimCommunityConnectChoice -GetSetting $io.get
+        $want = if ($Connect) { 'yes' } else { 'no' }
+        if ($back -ne $want) { return @{ ok = $false; recorded = $false; claim = $null; line = "the choice was not read back (found '$back') -- set it in PIM Manager > Settings > Licence" } }
+        if (-not $Connect) { return @{ ok = $true; recorded = $true; claim = $null; line = 'no -- recorded; this install stays anonymous and sends nothing to Invardia (switch it on later in PIM Manager > Settings > Licence)' } }
+        # the install's lasting id (INV-S16): kept if there, else created ONCE (an insert that never replaces a value), read back
+        $iid = ''
+        try {
+            $cur = & $io.get 'InstallId'
+            if (-not "$cur".Trim()) { & $io.create 'InstallId' ([guid]::NewGuid().ToString('D')); $cur = & $io.get 'InstallId' }
+            $iid = "$cur".Trim().ToLowerInvariant()
+        } catch { $iid = '' }
+        $base = $BaseUrl; if (-not "$base".Trim()) { try { $base = "$(& $io.get 'LicenceRequestBaseUrl')".Trim() } catch { $base = '' } }
+        $c = Invoke-PimCommunityInstallKeyClaim -Http $Http -GetSetting $io.get -SetSetting $io.set -TenantId $TenantId -InstallId $iid -BaseUrl $base -NowUtc $NowUtc
+        return @{ ok = ($c.action -ne 'failed'); recorded = $true; claim = $c; line = "yes -- recorded; $($c.message)" }
+    } catch {
+        return @{ ok = $false; recorded = $false; claim = $null; line = "not recorded ($((("$($_.Exception.Message)") -split "`n")[0])) -- set it in PIM Manager > Settings > Licence; the installation goes on" }
+    }
 }
 
 function ConvertTo-PimInstallStepEvent {

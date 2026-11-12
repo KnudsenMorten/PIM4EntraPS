@@ -3935,6 +3935,17 @@ function Invoke-PimUplinkJob {
     $rid = if ($env:IDENTITY_ENDPOINT -or $env:MSI_ENDPOINT) { 'mi-container' } else { 'spn-certificate' }
     $runs = @(); $runsRead = $false; if (Get-Command Get-PimJobRunHistory -ErrorAction SilentlyContinue) { try { $runs = @(Get-PimJobRunHistory); $runsRead = $true } catch { $runs = @() } }
     $key = if (Get-Command Resolve-PimInvardiaInstallKey -ErrorAction SilentlyContinue) { Resolve-PimInvardiaInstallKey -GetSetting $get } else { "$env:PIM_UPLINK_KEY" }
+    # COMMUNITY-CLAIM-ON-YES (owner rule 2026-11-11): a Community install that is not connected to Invardia sends NOTHING --
+    # no heartbeat, no run report, not even the anonymous one or an opt-out. Pro (licence / install edition / key) unchanged.
+    if (-not (Get-Command Get-PimCommunityContactGate -ErrorAction SilentlyContinue)) { $ccLib = Join-Path $PSScriptRoot 'PIM-InvardiaUpdate.ps1'; if (Test-Path -LiteralPath $ccLib) { . $ccLib } }
+    if (Get-Command Get-PimCommunityContactGate -ErrorAction SilentlyContinue) {
+        # a licence held = a Pro sign: the stored file, or the licence this host reads (any status but Missing)
+        $ccLic = $false; try { $ccLic = [bool]("$(& $get 'License')".Trim()) } catch { $ccLic = $false }
+        if (-not $ccLic -and $lic -and "$($lic.Status)".Trim() -and "$($lic.Status)" -ne 'Missing') { $ccLic = $true }
+        $ccEd = ''; try { $ccEdV = & $get 'InstallEdition'; if ($ccEdV -is [string]) { $ccEd = $ccEdV } } catch { $ccEd = '' }
+        $ccGate = Get-PimCommunityContactGate -HasKey ([bool]"$key".Trim()) -ProHere $proHere -HasLicenceFile $ccLic -InstallEdition $ccEd -Choice (Get-PimCommunityConnectChoice -GetSetting $get)
+        if (-not $ccGate.allowed) { return [pscustomobject]@{ ran = $false; whatIf = [bool]$WhatIf; detail = $(if ($on) { "Invardia support link: nothing sent -- $($ccGate.reason)" } else { $offDetail }) } }
+    }
     # 100.10: the setup report -- its own switch (feature 'telemetry.setup', ON by default; it only ever sends with an install key).
     $setupOn = [bool]((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and (Test-PimFeatureAvailable -Key 'telemetry.setup' -Quiet))
     # SETUPSTEPS-TRUTH (b): the ENGINE refreshes pim.Settings 'PermissionSnapshot' when it is older than 24 h (Microsoft Graph

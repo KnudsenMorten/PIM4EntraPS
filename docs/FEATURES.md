@@ -1298,6 +1298,21 @@ deployment is a supported choice) and no credentials lying around.
   re-arms the button, so it is never present, enabled and inert. The confirmation says the rows are
   **staged as pending changes**, not that access is being removed: nothing is revoked until you commit,
   and the queued entries carry your justification and the real names of what they target.
+- **Review all delegations shows exactly what grants access outside PIM Manager.** ✅ 2026-11-11 (3.1.8, 3.1.9) The
+  tenant-wide view lists everything that gives someone access and that PIM Manager does not manage:
+  - people, apps and deleted accounts that hold an Entra ID role or an Azure role — **active and eligible**, each row
+    marked with its state (filter Active, Eligible or All);
+  - roles assigned outside PIM, for example partner (GDAP) groups, Microsoft apps and roles scoped to an administrative
+    unit;
+  - groups that hold an Entra ID or Azure role, and the **members of those groups** — so a group with Owner on a
+    subscription also shows who can act as Owner;
+  - a separate **API permissions** list: apps that hold high-privilege permissions (for example one that could make
+    itself Global Administrator). These rows are read-only here; you remove them in Entra ID > Enterprise applications.
+  Membership of ordinary groups is not listed — a class or team group is not a delegation. The view is read from a
+  snapshot, so it opens at once: Entra roles, apps and group members are refreshed every 2 hours, Azure once a night and
+  right after PIM Manager changes an Azure assignment, and the page shows when each part was read. **Refresh now** asks
+  for a new snapshot; it never makes the page wait. Checked against a direct read of Entra ID and Azure on a live
+  tenant before release.
 - **Delegation overview (All privileged permissions) — a graph of who holds what, right now.** ✅ 2026-10-10
   The page that lists every privileged permission held in the tenant (Entra roles, Azure roles, PIM for Groups) is
   renamed and opens in a **Graph view**: the live assignments drawn exactly like the Access map — people, the groups
@@ -1620,7 +1635,10 @@ deployment is a supported choice) and no credentials lying around.
   groups without their role, roles held outside PIM, and privileged groups nobody defined. Each gap comes with a
   ready proposal named by your own convention, and you pick which to stage. A scheduled check keeps it current
   and mails new gaps. Since 2026-10-12 this page is called **Discovery and gaps**, sits under the **Access** menu and
-  also does what the separate Discovery page did — see chapter 8.
+  also does what the separate Discovery page did — see chapter 8. Since 2026-11-11 (3.1.8) the page speaks only about
+  what PIM Manager manages — its own groups and administrators: gaps, groups named like yours that nothing defines any
+  more, and wrong permissions. Access granted outside PIM Manager is shown on **Review all delegations** instead, and
+  ordinary groups are never reported.
 - **Defender XDR custom roles, managed end to end.** ✅ 2026-09-19 PIM creates each Defender custom role with
   the permissions and data sources you specify, keeps it that way, and flags a role whose live permissions
   drifted. The Defender template covers Security operations, Security posture, Authorization & settings and

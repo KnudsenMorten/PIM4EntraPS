@@ -502,6 +502,13 @@ if ($reg) {
 }
 # ---- PIM 100.168: THE FRONT IMAGE -- built by this install's own updater, in its own registry, at the pinned version -------
 $sfPinned = "$(Get-Content -LiteralPath (Join-Path $solRootSf 'tools\pim-manager\signin-front.version') -Raw -ErrorAction SilentlyContinue)".Trim()
+# 2026-11-11: the updater job was renamed to its standard name (caj-pim-updater, 3.0.70 naming) -- the old default
+# 'ca-pim-update' no longer exists at a moved install. Not given = the standard name when that job exists, else the old one.
+if (-not $PSBoundParameters.ContainsKey('UpdateJob')) {
+    foreach ($__uj in @('caj-pim-updater', 'ca-pim-update')) {
+        if (Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $__uj -ErrorAsNull) { $UpdateJob = $__uj; break }
+    }
+}
 $sfDefault = $null; $frontReady = $true; $sfExec = ''
 $sfProbe = { param($execName) @{ Digest = ''; Recorded = ''; RunStatus = '' } }
 if (-not "$FrontImage".Trim() -and -not (Test-PimSigninFrontLive -App $ca -Auth $auth)) {

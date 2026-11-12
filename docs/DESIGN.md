@@ -4380,12 +4380,13 @@ sign-in front uses its managed identity's federated credential). The mode only c
 | | Community mode (S2, this edition) | Subscription mode |
 |---|---|---|
 | Audience | Running it for your own tenant, installed and updated from GitHub | A hosted platform delivered and kept current by the maintainer (single-tenant or MSP) |
-| Code source | Your clone of the public repository, updated with `git pull` | The maintainer's release channel |
-| Host | Azure Container Apps in **your** subscription: a scale-to-zero Manager + one scheduled engine job | The same shape, plus the in-cloud nightly updater (§11.6.0) |
-| Identity | Container **managed identities** for the engine and Manager; a certificate-based **deploy identity** for installs and updates | The same; an engine application only where a tenant must be crossed (S5) |
-| Store | Azure SQL, managed-identity contained users only | Azure SQL, managed-identity contained users only |
-| Manager auth | Easy Auth (Entra) sign-in, always on; external ingress by default, private-only optional | The same |
-| Updates | One command, `Update-PimCommunity.ps1 -Apply`: `git pull` + re-run the one-shot deploy with its saved parameters (a re-run **is** the updater) | Release rings + in-cloud updater (§11.6.0) |
+| Code source | The signed **Community** release channel (public packages) | The maintainer's signed **Pro** release channel |
+| Host | Azure Container Apps in **your** subscription: a scale-to-zero Manager, the scheduled engine job and the in-cloud nightly updater (§11.6.0) | The same |
+| Identity | Container **managed identities** for the engine, Manager and updater | The same; an engine application only where a tenant must be crossed (S5) |
+| Store | Azure SQL, managed-identity contained users only; secrets only in the installation's Key Vault | The same |
+| Manager auth | The **sign-in front** (Entra sign-in, no client secret), always on; external ingress by default, private-only optional | The same |
+| Updates | Release rings + the in-cloud updater: a new ring version at the **nightly** run; "Update now" only for an installation that said yes to connecting to Invardia (it then holds an install key) | Release rings + the in-cloud updater: nightly, or "Update now" |
+| What differs | Only the licensed **features** (Pro features are listed in chapter 17) and the package source above. Every other difference between a Community and a Pro installation is a defect (2026-11-11). | |
 > **Real environment values never live in the published docs.** This guide uses
 > **placeholders** (`<tenant-id>`, `<sub-id>`, `<rg>`, `<acr>`, `<server>`,
 > `<kv>`, …) throughout. The actual tenant / subscription / resource-group / Key
@@ -4558,7 +4559,7 @@ direct re-run never reshapes an environment by itself.
 
 What it wires:
 - **`--ingress external`** → on an **external** environment (the default) the Manager is
-  internet-reachable behind Easy Auth sign-in; on an **internal-only** environment it gets a
+  internet-reachable behind Entra sign-in through the sign-in front; on an **internal-only** environment it gets a
   **private static IP** — the one ingress reachable from peered/hub/GSA clients.
   (`--ingress internal` is app-to-app only and would be unreachable from VNet clients — a
   multi-hour lesson baked into the script.)
@@ -10496,6 +10497,22 @@ routes answer, a Pro route answers the one plain Pro line (never an internal err
 runs its free jobs, and the v1 CSV import check runs (it reports that replication to managed tenants
 is not computed in a single-tenant copy). The payload gate builds the public release the way the
 publish does and fails if any Pro file is in it.
+
+**A Community installation connects to Invardia only when its administrator says yes (2026-11-11).**
+The installer asks one question, in the same words in every product: "Connect this install to
+Invardia: health reports + updates on request" (`-ConnectToInvardia` / `-NoConnectToInvardia` answer it
+for a scripted install; no answer counts as no). The answer is a setting, and PIM Manager > Settings >
+Licence has a switch that changes it later. Yes: the installation claims its install key from Invardia
+the way Pro does, as a Community installation and without a licence, and keeps it where a Pro
+installation keeps its key; from then on the health reports, the update progress reports and "Update
+now" work exactly as for Pro (they look only at the key, never at the edition); a Community "Update now"
+asks the same quick check as Pro, as a Community installation, and takes the version its ring's signed
+Community release approves. A tenant that already belongs to a licensed company is told to connect with
+its licence; a repeated claim counts as already connected; a busy service means "try again later" and
+the installation goes on without a key until the engine asks again. No: nothing that identifies the installation is
+sent to Invardia -- no health report, no licence request, no key claim, no update progress -- and new
+versions still arrive with the nightly update from the anonymous signed Community channel. Switching it
+off later keeps a claimed key but no longer uses it. Pro installations are licensed and always connected; nothing about them changes.
 
 **The Manager's Pro routes are their own files (3.0.56).** The PIM Manager's Pro API routes -- coverage
 and gaps, access reviews and review campaigns, discovery, the multi-tenant registry, replication and

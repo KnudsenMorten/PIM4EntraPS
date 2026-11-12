@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.10 -- 2026-11-11
+
+- Community installs connect to Invardia only on their user's yes (Connect this install to Invardia: health reports + updates on request); a yes claims an install key and Update now works as for Pro; no or no answer sends nothing that identifies the install. Release tools accept 4-part image-patch versions.
+
 ## 3.1.9 -- 2026-11-11
 
 - Review all delegations now also lists Entra role holders that were assigned outside PIM -- for example partner (GDAP) groups, Microsoft apps and roles scoped to an administrative unit
