@@ -19060,7 +19060,10 @@ function Handle-Request {
             if ($method -eq 'GET' -and -not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to read the policy settings.' }; return 403 }
             if ($method -eq 'PUT' -and -not $pcWrite) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to choose a policy setting.' }; return 403 }
             try {
+                # POLICY-PAGE-PERF-1 (2026-11-12: GET/PUT measured 11-17 s): one log line with the time of each part
+                $pcSw = [System.Diagnostics.Stopwatch]::StartNew(); $pcMs = [ordered]@{}
                 $pcState = Get-PimManagerPolicyChoiceState
+                $pcMs['state'] = $pcSw.ElapsedMilliseconds
                 $pcSaved = $null
                 if ($method -eq 'PUT') {
                     $pb = Read-RequestJson -Request $req
@@ -19078,13 +19081,18 @@ function Handle-Request {
                         } catch { Write-Warning "  [manager] policy choice saved but NOT written to the audit trail: $($_.Exception.Message)" }
                     }
                     # POLICY-FLOW-1: plan it NOW (queue the policy jobs + start the tick), never fail the save over it
+                    $pcMs['save'] = $pcSw.ElapsedMilliseconds
                     $pcPlan = $null; try { $pcPlan = Invoke-PimManagerPolicyFlowOnSave -By $pcBy -Policies ([int]$pcSaved.changes) } catch { $pcPlan = $null }
+                    $pcMs['plan'] = $pcSw.ElapsedMilliseconds
                     $pcState = Get-PimManagerPolicyChoiceState
+                    $pcMs['state2'] = $pcSw.ElapsedMilliseconds
                 }
                 $pcView = Get-PimPolicyChoicesView -Choices $pcState.choices -Advisories $pcState.advisories -Defaults $pcState.defaults -Snapshots $pcState.snapshots -TenantRead $pcState.tenantRead -Templates $pcState.templates
+                $pcMs['view'] = $pcSw.ElapsedMilliseconds
                 $pcView['ok'] = $true; $pcView['canWrite'] = $pcWrite
                 # ONE truth for what waits for approval (PIM 100.84): the same hold state every other page reads.
                 $pcHold = $null; try { $pcHold = Get-PimManagerPolicyHoldState -Fresh } catch { $pcHold = $null }
+                $pcMs['holds'] = $pcSw.ElapsedMilliseconds
                 $pcView['holds'] = $(if ($pcHold) { [ordered]@{ known = [bool]$pcHold.known; waiting = [int]$pcHold.waiting; policies = [int]$pcHold.policies; holds = @($pcHold.holds) } } else { [ordered]@{ known = $false; waiting = 0; policies = 0; holds = @() } })
                 if ($pcSaved) {
                     $pcN = [int]$pcSaved.changes
@@ -19098,6 +19106,8 @@ function Handle-Request {
 
                 if ($pcSaved -and $pcPlan) { $pcView['plan'] = $pcPlan }   # POLICY-FLOW-1
                 Write-JsonResponse -Response $resp -Status 200 -Body $pcView
+                $pcMs['sent'] = $pcSw.ElapsedMilliseconds
+                Write-Host ("  [manager] policy-choices {0} timing (ms, cumulative): {1}" -f $method, (@($pcMs.Keys | ForEach-Object { "$_=$($pcMs[$_])" }) -join ' '))
                 return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }

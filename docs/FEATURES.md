@@ -23,6 +23,8 @@ deployment is a supported choice) and no credentials lying around.
 ---
 
 ## 1. Hosting / Runtime
+- **Health reports include the database.** ✅ 2026-11-12 — A connected installation's health report says how its database is doing: its size and limit, how hard it worked in the last hour, and whether its statistics are kept fresh. Problems show up before anyone notices a slow page.
+- **Old images are cleaned up after every update.** ✅ 2026-11-12 — After an update has finished and reads back healthy, your installation's own container registry keeps only the current and the previous version (plus anything still running) and removes the rest. Old images no longer show old vulnerabilities in your security reports, and you can still roll back one version.
 - **Six supported setups, and you are never locked into the one you start with.** ✅ 2026-09-18
   A deployment is described by who runs it, where the platform runs and where its updates come
   from — and the supported combinations are a fixed, named set rather than something improvised
@@ -78,6 +80,8 @@ deployment is a supported choice) and no credentials lying around.
   browser session or web process therefore cannot write to Entra directly.
 
 ## 3. Setup / Deploy
+- **Import from version 1 keeps your PIM policies as they are.** ✅ 2026-11-12 — When you import your version 1 files, every imported group and Entra role is set to "Keep current" for its PIM policy settings, so version 1 and PIM Manager can run side by side without changing each other's policies. Choose other policy settings yourself on the Policy settings page when you are ready.
+- **Office users can be imported as administrators.** ✅ 2026-11-12 — Mark an existing user (cloud-only or synced from on-premises Active Directory) with the admin type "existing-account" in your import file. The import keeps the type, gives the person their delegations and never creates, renames or changes the account.
 - **Setup never touches your DNS, and checks the region first.** ✅ 2026-10-10 — With a custom host name, setup prints
   the one DNS record to add (name, zone, address) with paste-ready lines and a check command; it never writes Active
   Directory DNS, never adds a wildcard and never creates a zone named after your domain (an Azure private zone is only
@@ -676,6 +680,7 @@ deployment is a supported choice) and no credentials lying around.
   The one place PIM-enabled groups outside PIM Manager show is the tenant-wide delegations view.
 
 ## 8. Discovery
+- **No orphan warnings before you have imported.** ✅ 2026-11-12 — An installation that has no definitions yet does not mail "left over" warnings for the groups already in your tenant; they show as "not imported yet" on the Discovery & gaps page. Warnings start after your first import.
 - **New Power BI workspaces become ready-to-delegate access groups.** As workspaces appear,
   the solution proposes a correctly-named, tier- and plane-classified access group for each
   one — so a new workspace is delegable minutes after it exists, with the same naming and
@@ -830,6 +835,7 @@ deployment is a supported choice) and no credentials lying around.
   grant access are never open to an application. Setup: `Set-PimManagerApiAuth.ps1` (it shows its plan first).
 
 ## 10. Delegation model
+- **Existing accounts get delegations only.** ✅ 2026-11-12 — An administrator of the type "Existing account (office user)" receives PIM delegations, and nothing else: PIM Manager never creates, renames, changes, disables or deletes the account, and the hybrid worker never touches it in Active Directory. PIM Manager also never changes any account it did not create itself.
 - **Two-tier group nesting at the core.** Admins are added to direct groups (by role, task,
   process, cross-org or department) which nest into permission groups that hold the actual
   roles and scopes. This delivers least-privilege access across many apps by reusing group
@@ -897,6 +903,9 @@ deployment is a supported choice) and no credentials lying around.
 
 ## 11. GUI / Manager
 
+- **Access packages.** ✅ 2026-11-12 — Create access packages from the Create menu, see them in a list with their state, pause and resume them, and find them in the access map. Each package gets new groups of its own (their names end in -AP); existing groups are never used or renamed. When anything is in doubt, the package pauses and says why.
+- **Saving policy settings shows the whole way to the result.** ✅ 2026-11-12 — After you save your policy choices, the page shows the change being planned, then waiting for your approval (with Approve all on the same page), then approved and applied. Every policy change still waits for a SuperAdmin's approval of the exact plan; you can approve your own change.
+- **The overview counts gaps the same way as Discovery & gaps.** ✅ 2026-11-12 — The overview's gap figures come from the coverage check and open the Discovery & gaps page. Policy settings you have not chosen yet show as information, not as something wrong.
 ![PIM Manager — Home / Overview dashboard](img/manager-home.png)
 *The Manager opens on Home: red/amber/green attention tiles for engine health, validation findings, break-glass, delegation by tier, gaps, expiring access and pending reviews. (Synthetic demo data.)*
 
@@ -1788,6 +1797,7 @@ deployment is a supported choice) and no credentials lying around.
   revocations, deletions and settings changes stay in the Manager.
 
 ## 12. Notifications / Email
+- **Every mail names the installation that sent it.** ✅ 2026-11-12 — The subject and the first line of every mail name the installation (for example "[PROD] example-prod: Warning: ..."), and the body names your tenant, so you always know which environment a mail is about.
 - **One reminder when something waits on you.** ✅ 2026-10-10 — PIM Manager mails your SuperAdmins a single reminder
   listing everything waiting on them: open Get Started steps, policy change sets held by the circuit breaker, approval and
   access requests, guard holds, a break-glass change and staged changes a second administrator must commit, each with a

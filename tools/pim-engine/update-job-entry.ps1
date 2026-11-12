@@ -2003,6 +2003,17 @@ try {
     Say "  desired-state check could not run ($($_.Exception.Message)) -- proceeding; a check that failed is not a refusal." 'Yellow'
 }
 
+# ---- 0c. IMAGE-PRUNE CONTRACT point 2 (framework IMAGE-PATCH-1, Invardia 2026-11-12) -- WHAT RUNS BEFORE THE ROLL ----------
+# Every image the apps and jobs of this install run NOW, read BEFORE anything rolls: after a healthy update the registry
+# clean-up (3b) keeps them as the previous release. A failed read = $null = the clean-up deletes nothing. Never fails the update.
+$prPreRoll = $null
+try {
+    $prPreLs = "$((Split-PimImageReference -Image $targetImg).loginServer)"
+    $prPreRes = @(Get-PimRegistryPruneResources -SubscriptionId $sub -ResourceGroup $rg -ApiVersion $script:PimAcaApi)   # apps + jobs + active revisions (multi mode)
+    $prPreRoll = @(Get-PimRegistryLiveImages -Resources $prPreRes -LoginServer $prPreLs -WithSource | ForEach-Object { @{ image = "$($_.image)"; by = "$($_.by), before the roll" } })
+    Say "registry: $(@($prPreRoll).Count) image reference(s) run before the roll (kept by the clean-up after it)" 'DarkGray'
+} catch { $prPreRoll = $null; Say "registry: what runs before the roll could not be read ($((("$($_.Exception.Message)") -split "`n")[0])) -- the clean-up after it deletes nothing" 'DarkGray' }
+
 # ---- 1. the Manager ---------------------------------------------------------------------------
 Say "rolling $managerApp -> $targetImg"
 # PIM 100.114 (framework 12.16 CONVERGE-DEFAULTS): the roll is a read-modify-write of the WHOLE template -- whatever size
@@ -2331,26 +2342,75 @@ try {
     $prMgrImg = ''
     try { $prApp = Get-PimAcaApp -SubscriptionId $sub -ResourceGroup $rg -Name $managerApp; $prMgrImg = "$(Get-PimAcaAppImage -App $prApp -ContainerName $container)" } catch { $prMgrImg = '' }
     $prDue = Test-PimRegistryPruneDue -Outcome 'ok' -Healthy $roll.healthy -Held ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') `
-                -ManagerImage $prMgrImg -TargetImage $targetImg -JobsNotRolled $jobFailed -Disable "$($env:PIM_UPDATE_NO_PRUNE)"
+                -ManagerImage $prMgrImg -TargetImage $targetImg -JobsNotRolled $jobFailed -Disable "$($env:PIM_UPDATE_NO_PRUNE)" -Switch (Get-PimRegistryPruneSwitchValue)
     if (-not $prDue.due) { Say "registry: not pruned -- $($prDue.reason)" 'DarkGray' }
     else {
         $prRef = Split-PimImageReference -Image $targetImg
+        $prLs = "$($prRef.loginServer)"
         # The image this run started on (it is still running). PIM_UPDATE_LAST_GOOD is read from the job's CURRENT setting by
         # Get-PimRegistryLiveImages -- this process's copy is the value from before this run re-recorded it (3.1.15).
         $prKeepExtra = @(@{ image = "$selfImageBefore"; by = "$selfJob (the image this update run started on)" }) | Where-Object { "$($_.image)".Trim() }
-        $prune = Invoke-PimRegistryPrune -LoginServer "$($prRef.loginServer)" -ManagerRepository "$($prRef.repository)" -TargetVersion "$($prRef.tag)" `
-                    -Repositories @($script:PimSigninFrontRepository) -PlanOnly:("$($env:PIM_UPDATE_PRUNE_PLAN)".Trim() -eq '1') -ReadLiveImages {
-            $prRes = @(Get-PimAcaApps -SubscriptionId $sub -ResourceGroup $rg) + @(Get-PimAcaJobs -SubscriptionId $sub -ResourceGroup $rg)
-            @(Get-PimRegistryLiveImages -Resources $prRes -LoginServer "$($prRef.loginServer)" -WithSource) + @($prKeepExtra)
+        # IMAGE-PRUNE CONTRACT point 2: the previous release = what ran before the roll (0c) + the durable release record of
+        # the last update (pim.Settings 'ImageReleaseRecord'), both kept. The pre-roll read is REQUIRED: it failed (or found
+        # nothing) = $null = nothing deleted, whatever the stored record holds (stability first, owner 2026-11-12).
+        $prStored = $null
+        if ("$csUpd".Trim()) { try { $prRaw = Get-PimSqlSettingRaw -ConnectionString $csUpd -Name 'ImageReleaseRecord'; if ("$prRaw".Trim()) { $prStored = "$prRaw" | ConvertFrom-Json; if ($prStored -is [string]) { $prStored = $prStored | ConvertFrom-Json } } } catch { $prStored = $null } }
+        $prPrev = $null
+        if ($null -ne $prPreRoll -and @($prPreRoll).Count) {
+            $prPrev = @($prPreRoll)
+            if ($prStored -and @($prStored.images).Count) { $prPrev += @(@($prStored.images) | ForEach-Object { @{ image = "$_"; by = "release record $($prStored.version)" } }) }
+            $prPrev = @(@($prPrev) + @($prKeepExtra))
         }
-        foreach ($l in @($prune.lines)) { Say "  $l" 'DarkGray' }
-        Say $prune.line $(if ($prune.skipped) { 'Yellow' } else { 'Cyan' })
+        $prNowImgs = @()
+        $prLive = {
+            # every app + job (Get-PimAcaApps / Get-PimAcaJobs shape) + the active revisions of a multi-revision app
+            $prRes = @(Get-PimRegistryPruneResources -SubscriptionId $sub -ResourceGroup $rg -ApiVersion $script:PimAcaApi)
+            @(Get-PimRegistryLiveImages -Resources $prRes -LoginServer $prLs -WithSource) + @($prKeepExtra)
+        }
+        # point 4: beat at least once a minute while the clean-up runs (the process beat every 45 s + a line at registry calls)
+        Set-PimBeatStep 'image-prune'; [void](Set-PimBeatPeriod -Seconds 45)
+        $prBeatExec = "$([Environment]::GetEnvironmentVariable('CONTAINER_APP_JOB_EXECUTION_NAME'))"; $prBeatStart = [datetime]::UtcNow
+        $prArgs = @{
+            LoginServer = $prLs; ManagerRepository = "$($prRef.repository)"; TargetVersion = "$($prRef.tag)"
+            Repositories = @($script:PimSigninFrontRepository); PlanOnly = ("$($env:PIM_UPDATE_PRUNE_PLAN)".Trim() -eq '1')
+            ReadLiveImages = $prLive; PreviousImages = $prPrev; RequirePreviousRecord = $true
+            # point 3: the registry must sit in THIS install's own resource group (ARM read by login server)
+            OwnRegistry = { param($ls) [bool](@(Invoke-PimArm -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.ContainerRegistry/registries" -ApiVersion '2023-07-01' -All) | Where-Object { "$($_.properties.loginServer)" -ieq "$ls" }) }
+            # point 5: the release record BEFORE the first delete (the previous release of the NEXT update)
+            ReleaseRecord = {
+                if (-not "$csUpd".Trim()) { throw 'no database connection for the release record' }
+                $prNowImgs = @(& $prLive | ForEach-Object { if ($_ -is [hashtable]) { "$($_.image)" } else { "$_" } } | Where-Object { "$_".Trim() } | Select-Object -Unique)
+                $rel = [ordered]@{ schema = 1; version = "$($prRef.tag)"; atUtc = [datetime]::UtcNow.ToString('o'); images = @($prNowImgs)
+                                   previous = [ordered]@{ version = "$($script:PimRunningVersion)"; images = @(@($prPreRoll) | ForEach-Object { "$($_.image)" } | Where-Object { "$_".Trim() } | Select-Object -Unique) } }
+                Set-PimSqlSetting -ConnectionString $csUpd -Name 'ImageReleaseRecord' -ValueJson (ConvertTo-Json -InputObject $rel -Depth 5 -Compress)
+            }
+            # point 5: every line at once, and the running totals into the update record
+            Log = { param($l) Say "  $l" $(if ("$l" -like 'WARNING*') { 'Yellow' } else { 'DarkGray' }) }
+            Progress = { param($st) if ("$csUpd".Trim()) { try { $st['atUtc'] = [datetime]::UtcNow.ToString('o'); $st['version'] = "$($prRef.tag)"; Set-PimSqlSetting -ConnectionString $csUpd -Name 'RegistryPrune' -ValueJson (ConvertTo-Json -InputObject $st -Depth 4 -Compress) } catch { } } }
+            Beat = { Write-Host (Format-PimBeatLine -Execution $prBeatExec -Step 'image-prune' -UpMinutes ([int][Math]::Floor(([datetime]::UtcNow - $prBeatStart).TotalMinutes))) }
+        }
+        try { $prune = Invoke-PimRegistryPrune @prArgs }
+        finally { Set-PimBeatStep '-'; [void](Set-PimBeatPeriod -Seconds 0) }
+        Say $prune.line $(if ($prune.skipped) { 'Yellow' } elseif ($prune.warnings) { 'Yellow' } else { 'Cyan' })
         if ("$csUpd".Trim()) {
             try {
-                $prRec = [ordered]@{ atUtc = [datetime]::UtcNow.ToString('o'); version = "$($prRef.tag)"; planOnly = [bool]$prune.planOnly; skipped = [bool]$prune.skipped
-                                     kept = [int]$prune.kept; total = [int]$prune.total; deleted = [int]$prune.deleted; failed = [int]$prune.failed; line = "$($prune.line)"; lines = @($prune.lines) }
-                Set-PimSqlSetting -ConnectionString $csUpd -Name 'RegistryPrune' -ValueJson (ConvertTo-Json -InputObject $prRec -Depth 4 -Compress)
+                $prRec = [ordered]@{ atUtc = [datetime]::UtcNow.ToString('o'); version = "$($prRef.tag)"; inProgress = $false; planOnly = [bool]$prune.planOnly; skipped = [bool]$prune.skipped
+                                     kept = [int]$prune.kept; children = [int]$prune.children; locked = [int]$prune.locked; total = [int]$prune.total; deleted = [int]$prune.deleted
+                                     failed = [int]$prune.failed; backlog = [int]$prune.backlog; warnings = [int]$prune.warnings; line = "$($prune.line)"; lines = @($prune.lines)
+                                     repos = @(@($prune.repos) | ForEach-Object { [ordered]@{ repository = "$($_.repository)"; total = [int]$_.total; kept = [int]$_.kept; children = [int]$_.children; deleted = [int]$_.deleted; left = [int]$_.left; failed = [int]$_.failed; backlog = [int]$_.backlog; missing = @($_.missing).Count; reason = "$($_.reason)" } }) }
+                Set-PimSqlSetting -ConnectionString $csUpd -Name 'RegistryPrune' -ValueJson (ConvertTo-Json -InputObject $prRec -Depth 5 -Compress)
             } catch { Say "  registry: the prune result was not recorded ($((("$($_.Exception.Message)") -split "`n")[0]))" 'DarkGray' }
+            # point 5: the totals to Invardia -- UpdateState.imagePrune, which the heartbeat sends as Update.imagePrune
+            # (ConvertTo-PimUplinkImagePrune maps it to Invardia's keys). This run's own record, read-modify-write, best effort.
+            try {
+                $prUs = Read-PimUpdateState -ConnectionString $csUpd
+                if ($prUs -and $prUs -isnot [string]) {
+                    $prUsH = [ordered]@{}; foreach ($pp in $prUs.PSObject.Properties) { $prUsH[$pp.Name] = $pp.Value }
+                    $prUsH['imagePrune'] = [ordered]@{ done = [bool]($prune.ran -and -not $prune.skipped -and -not $prune.planOnly); deleted = [int]$prune.deleted
+                                                       atUtc = [datetime]::UtcNow.ToString('o'); version = "$($prRef.tag)"; repos = @($prRec.repos) }
+                    [void](Save-PimUpdateState -ConnectionString $csUpd -Record ([pscustomobject]$prUsH))
+                }
+            } catch { }
         }
     }
 } catch { Say "registry: not pruned ($((("$($_.Exception.Message)") -split "`n")[0])) -- the update is not affected" 'Yellow' }

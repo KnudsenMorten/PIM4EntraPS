@@ -13,6 +13,18 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.19 -- 2026-11-12
+
+- Image clean-up reports true numbers: after the deletes it reads the registry back correctly, so the kept images are counted as kept and never named missing (internal only).
+
+## 3.1.18 -- 2026-11-12
+
+- Image clean-up follows the Invardia contract: it reads what is in use before the roll, keeps every image in use plus its signatures and scan attestations, records its decision before the first delete, never deletes when a read fails, and reports per-repository totals in the heartbeat (internal only).
+
+## 3.1.17 -- 2026-11-12
+
+- The delegation overview reads eligible Azure roles in parallel across subscriptions (a tenant with 2,000 subscriptions: about 3 minutes instead of 40), and anything not read the first time is read again one by one; the Policy settings page logs how long each part of loading and saving takes.
+
 ## 3.1.16 -- 2026-11-12
 
 - Saving policy choices plans the change at once and shows the whole flow on the same page (planning, waiting for your approval with Approve all, approved, applied); Approvals always shows its policy part; the Overview gap tile uses the coverage check and waiting policy choices are an info line; the save message no longer sounds like the second-approver setting; the updater no longer logs an error for an existing as-built database user.

@@ -2464,7 +2464,48 @@ function New-PimUplinkUpdateField {
     $at = ConvertTo-PimUplinkUtc (Get-PimUplinkField $us 'tsUtc')
     if (-not $at) { return $null }
     $res = ConvertTo-PimUplinkUpdaterResult -Outcome "$(Get-PimUplinkField $us 'outcome')" -Action "$(Get-PimUplinkField $us 'action')"
-    return [pscustomobject][ordered]@{ lastUpdaterRunUtc = $at.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture); lastUpdaterResult = $res }
+    $o = [ordered]@{ lastUpdaterRunUtc = $at.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture); lastUpdaterResult = $res }
+    # IMAGE-PRUNE CONTRACT point 5 (Invardia e1de70b7, 2026-11-12): Update.imagePrune -- the last clean-up's totals.
+    # PIM_UPLINK_IMAGEPRUNE=0/off leaves it out; no (valid) record = left out.
+    if ("$([Environment]::GetEnvironmentVariable('PIM_UPLINK_IMAGEPRUNE'))".Trim() -notmatch '^(?i)(0|off|false|no)$') {
+        $ip = ConvertTo-PimUplinkImagePrune -Value (Get-PimUplinkField $us 'imagePrune')
+        if ($null -ne $ip) { $o['imagePrune'] = $ip }
+    }
+    return [pscustomobject]$o
+}
+
+function ConvertTo-PimUplinkImagePrune {
+    <#
+      PURE. Invardia's Update.imagePrune shape, EXACTLY these keys (SI + PIM, Invardia e1de70b7):
+        { done: bool; deleted: int; atUtc: ISO UTC; version: string; repos: [ { repo; before; kept; children; deleted; left; failed } ] }
+      repo lower-case a-z0-9._/- (max 80), at most 20 repos, every count a whole number >= 0 ('left' not read back = 0 is NOT
+      sent as a fact: such a repo is left out). The source is UpdateState.imagePrune, written by the updater after its clean-up
+      (update-job-entry step 3b). Anything that does not fit = $null (the field is left out; Invardia's check is soft too).
+    #>
+    param([AllowNull()][object]$Value)
+    try {
+        if ($null -eq $Value) { return $null }
+        $at = ConvertTo-PimUplinkUtc (Get-PimUplinkField $Value 'atUtc')
+        if (-not $at) { return $null }
+        $ver = "$(Get-PimUplinkField $Value 'version')".Trim()
+        if (-not $ver -or $ver.Length -gt 50) { return $null }
+        $n = { param($o, $k) $v = Get-PimUplinkField $o $k; $i = 0L; if ($null -eq $v -or -not [long]::TryParse("$v", [ref]$i) -or $i -lt 0) { return $null }; return [int]$i }
+        $del = & $n $Value 'deleted'; if ($null -eq $del) { return $null }
+        $repos = New-Object System.Collections.Generic.List[object]
+        foreach ($r in @(Get-PimUplinkField $Value 'repos')) {
+            if ($null -eq $r) { continue }
+            $name = "$(Get-PimUplinkField $r 'repository')".Trim().ToLowerInvariant()
+            if (-not $name) { $name = "$(Get-PimUplinkField $r 'repo')".Trim().ToLowerInvariant() }
+            if ($name -notmatch '^[a-z0-9._/-]{1,80}$') { continue }
+            $before = & $n $r 'total'; if ($null -eq $before) { $before = & $n $r 'before' }
+            $vals = @{ kept = (& $n $r 'kept'); children = (& $n $r 'children'); deleted = (& $n $r 'deleted'); left = (& $n $r 'left'); failed = (& $n $r 'failed') }
+            if ($null -eq $before -or @($vals.Values | Where-Object { $null -eq $_ }).Count) { continue }
+            $repos.Add([pscustomobject][ordered]@{ repo = $name; before = $before; kept = $vals.kept; children = $vals.children; deleted = $vals.deleted; left = $vals.left; failed = $vals.failed })
+            if ($repos.Count -ge 20) { break }
+        }
+        $done = [bool]("$(Get-PimUplinkField $Value 'done')" -match '^(?i)(true|1)$')
+        return [pscustomobject][ordered]@{ done = $done; deleted = $del; atUtc = $at.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture); version = $ver; repos = @($repos.ToArray()) }
+    } catch { return $null }
 }
 
 function New-PimUplinkSqlAccessField {

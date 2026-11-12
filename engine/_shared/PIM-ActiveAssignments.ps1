@@ -986,6 +986,79 @@ function Get-PimActiveAssignmentsAppPermissionRows {
     }
 }
 
+function Get-PimAzureEligibilityParallelMinimum { 40 }   # fewer subscriptions than this: read one by one (no runspaces)
+
+function Get-PimAzureEligibilitySchedules {
+    <#
+      ENGINE-LONG-RUN-1 (2026-11-12): the ELIGIBLE Azure role schedules of every subscription in -SubscriptionIds. ARM has no
+      tenant-wide list for them (measured 2026-11-12: the tenant root management group answers only what sits AT or ABOVE it,
+      and Resource Graph carries no eligibility type), so it is one read per subscription -- at ~1.2-1.6 s each, 2,024
+      subscriptions took 39 minutes one by one. With -Parallel > 1 on PowerShell 7 and at least
+      Get-PimAzureEligibilityParallelMinimum subscriptions, the reads run in runspaces (ForEach-Object -Parallel, one ARM
+      token, nextLink paging, 429 / 5xx retried with Retry-After). A subscription a runspace could not read is read again
+      one by one through Invoke-PimArm (its own retries) afterwards; only one that fails THERE counts as failed.
+      Returns { items (List, in subscription order); failed; error (the first failure); parallel (bool) }. Never throws.
+      -ChunkReader: test seam ( { param([string[]]$subIds) } returning @{ sub; ok; items; error } per subscription ).
+    #>
+    param([string[]]$SubscriptionIds = @(), [ValidateRange(1, 64)][int]$Parallel = 16, [scriptblock]$ChunkReader = $null)
+    $subsIn = @($SubscriptionIds | Where-Object { "$_".Trim() })
+    $items = New-Object System.Collections.Generic.List[object]
+    $failed = 0; $firstErr = ''
+    $readOne = { param($sid) @(Invoke-PimArm -Path "/subscriptions/$sid/providers/Microsoft.Authorization/roleEligibilitySchedules" -ApiVersion '2020-10-01' -All) }
+    $usePar = ($Parallel -gt 1 -and $subsIn.Count -ge (Get-PimAzureEligibilityParallelMinimum) -and ($ChunkReader -or $PSVersionTable.PSVersion.Major -ge 7))
+    $answers = @{}
+    if ($usePar) {
+        try {
+            if (-not $ChunkReader) {
+                $tok = "$(Get-PimRestToken -Resource 'arm')"
+                $to = 100; if (Get-Command Get-PimRestTimeoutSec -ErrorAction SilentlyContinue) { $to = [int](Get-PimRestTimeoutSec) }
+                $par = $Parallel
+                $ChunkReader = {
+                    param([string[]]$ids)
+                    $ids | ForEach-Object -ThrottleLimit $par -Parallel {
+                        $sid = "$_"; $tk = $using:tok; $tmo = $using:to
+                        $got = New-Object System.Collections.Generic.List[object]; $err = ''
+                        $next = "https://management.azure.com/subscriptions/$sid/providers/Microsoft.Authorization/roleEligibilitySchedules?api-version=2020-10-01"
+                        while ($next -and -not $err) {
+                            $resp = $null
+                            for ($try = 1; $try -le 4; $try++) {
+                                try { $resp = Invoke-RestMethod -Method GET -Uri $next -Headers @{ Authorization = "Bearer $tk" } -TimeoutSec $tmo; break }
+                                catch {
+                                    $code = 0; try { $code = [int]$_.Exception.Response.StatusCode } catch {}
+                                    if (($code -eq 429 -or $code -ge 500) -and $try -lt 4) {
+                                        $wait = 5 * $try; try { $ra = "$($_.Exception.Response.Headers.RetryAfter.Delta.TotalSeconds)"; if ($ra) { $wait = [Math]::Min(60, [Math]::Max(1, [int][double]$ra)) } } catch {}
+                                        Start-Sleep -Seconds $wait; continue
+                                    }
+                                    $err = "$($_.Exception.Message)"; break
+                                }
+                            }
+                            if ($err) { break }
+                            foreach ($v in @($resp.value)) { if ($null -ne $v) { $got.Add($v) } }
+                            $next = "$($resp.nextLink)"
+                        }
+                        @{ sub = $sid; ok = (-not $err); items = $got; error = $err }
+                    }
+                }
+            }
+            foreach ($a in @(& $ChunkReader $subsIn)) { if ($a -is [hashtable] -and "$($a.sub)") { $answers["$($a.sub)"] = $a } }
+        } catch {
+            Write-Warning ("  [revoke] parallel Azure eligibility read failed ({0}) -- reading the subscriptions one by one." -f $_.Exception.Message)
+            $answers = @{}
+        }
+    }
+    foreach ($sid in $subsIn) {
+        $a = $answers[$sid]
+        if ($a -and $a.ok) { if ($null -ne $a.items) { foreach ($v in $a.items) { if ($null -ne $v) { $items.Add($v) } } }; continue }   # 🪤 no @() around a List[object] (pwsh 7.6)
+        try { foreach ($v in @(& $readOne $sid)) { if ($null -ne $v) { $items.Add($v) } } }
+        catch {
+            $failed++
+            if (-not $firstErr) { $firstErr = "$($_.Exception.Message)" }
+            Write-Warning ("  [revoke] ARM role-eligibility schedules for /subscriptions/{0} failed: {1}" -f $sid, $_.Exception.Message)
+        }
+    }
+    return [pscustomobject]@{ items = $items; failed = $failed; error = $firstErr; parallel = $usePar }
+}
+
 function Invoke-PimActiveAssignmentsSnapshot {
     # THE LIVE READ -- scheduler only (§70.1b option 2). Returns an ordered hashtable:
     #   @{ ok; rows = [...]; counts = @{...}; surfaceErrors; partial; loadedUtc; refreshedUtc; cacheHit=$false;
@@ -1219,29 +1292,25 @@ function Invoke-PimActiveAssignmentsSnapshot {
             try {
                 $eSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
                 $eSubs = @(Invoke-PimArm -Path '/subscriptions' -ApiVersion '2020-01-01' -All)
-                foreach ($s in $eSubs) {
-                    $scope = "/subscriptions/$($s.subscriptionId)"
-                    try {
-                        foreach ($es in @(Invoke-PimArm -Path "$scope/providers/Microsoft.Authorization/roleEligibilitySchedules" -ApiVersion '2020-10-01' -All)) {
-                            if (-not $es -or -not "$($es.id)") { continue }
-                            $p = $es.properties
-                            if ("$($p.memberType)" -ieq 'Group') { continue }   # reached through a group: the group's own schedule is the row
-                            if (-not $eSeen.Add("$($es.id)".ToLowerInvariant())) { continue }
-                            $rdId = "$($p.roleDefinitionId)"
-                            $rdName = $null
-                            if ($p.expandedProperties -and $p.expandedProperties.roleDefinition -and "$($p.expandedProperties.roleDefinition.displayName)") { $rdName = "$($p.expandedProperties.roleDefinition.displayName)" }
-                            if (-not $rdName) { $rdName = ($rdId -split '/' | Select-Object -Last 1) }
-                            $st = ''; $en = ''
-                            if ("$($p.startDateTime)") { try { $st = ([DateTime]$p.startDateTime).ToUniversalTime().ToString('o') } catch {} }
-                            if ("$($p.endDateTime)")   { try { $en = ([DateTime]$p.endDateTime).ToUniversalTime().ToString('o') } catch {} }
-                            & $addAzRow ([pscustomobject]@{ Id = "$($es.id)"; PrincipalId = "$($p.principalId)"; RoleDefinitionId = $rdId; RoleDefinitionName = $rdName
-                                                            Scope = "$($p.scope)"; PrincipalType = "$($p.principalType)"; Start = $st; End = $en }) 'eligible'
-                        }
-                    } catch {
-                        $eligFailedSubs++
-                        if (-not $eligErr) { $eligErr = "$($_.Exception.Message)" }
-                        Write-Warning ("  [revoke] ARM role-eligibility schedules for {0} failed: {1}" -f $scope, $_.Exception.Message)
-                    }
+                # ENGINE-LONG-RUN-1: read in parallel (Get-PimAzureEligibilitySchedules); failures are re-read one by one there
+                $eSw = [System.Diagnostics.Stopwatch]::StartNew()
+                $eRead = Get-PimAzureEligibilitySchedules -SubscriptionIds @($eSubs | ForEach-Object { "$($_.subscriptionId)" })
+                $eligFailedSubs = [int]$eRead.failed; $eligErr = "$($eRead.error)"
+                Write-Host ("  [revoke] azure-rbac eligibility: {0} subscription(s) read {1} in {2:n1}s" -f $eSubs.Count, $(if ($eRead.parallel) { 'in parallel' } else { 'one by one' }), $eSw.Elapsed.TotalSeconds) -ForegroundColor DarkGray
+                foreach ($es in $eRead.items) {   # 🪤 never @() around the List[object]: pwsh 7.6 "Argument types do not match"
+                    if (-not $es -or -not "$($es.id)") { continue }
+                    $p = $es.properties
+                    if ("$($p.memberType)" -ieq 'Group') { continue }   # reached through a group: the group's own schedule is the row
+                    if (-not $eSeen.Add("$($es.id)".ToLowerInvariant())) { continue }
+                    $rdId = "$($p.roleDefinitionId)"
+                    $rdName = $null
+                    if ($p.expandedProperties -and $p.expandedProperties.roleDefinition -and "$($p.expandedProperties.roleDefinition.displayName)") { $rdName = "$($p.expandedProperties.roleDefinition.displayName)" }
+                    if (-not $rdName) { $rdName = ($rdId -split '/' | Select-Object -Last 1) }
+                    $st = ''; $en = ''
+                    if ("$($p.startDateTime)") { try { $st = ([DateTime]$p.startDateTime).ToUniversalTime().ToString('o') } catch {} }
+                    if ("$($p.endDateTime)")   { try { $en = ([DateTime]$p.endDateTime).ToUniversalTime().ToString('o') } catch {} }
+                    & $addAzRow ([pscustomobject]@{ Id = "$($es.id)"; PrincipalId = "$($p.principalId)"; RoleDefinitionId = $rdId; RoleDefinitionName = $rdName
+                                                    Scope = "$($p.scope)"; PrincipalType = "$($p.principalType)"; Start = $st; End = $en }) 'eligible'
                 }
                 if ($eligFailedSubs -gt 0) { throw ("{0} of {1} subscription(s) could not be read: {2}" -f $eligFailedSubs, $eSubs.Count, $eligErr) }
                 Write-Host ("  [revoke] azure-rbac: {0} eligible role schedule(s) across {1} subscription(s)" -f ($rows.Count - $azEligStart), $eSubs.Count) -ForegroundColor DarkGray

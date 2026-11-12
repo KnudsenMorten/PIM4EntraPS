@@ -52,6 +52,7 @@ public static class PimProcessBeat {
         }
     }
     public static void SetStep(string step) { _step = String.IsNullOrWhiteSpace(step) ? "-" : step.Trim(); }
+    public static void SetPeriod(int seconds) { lock (_gate) { if (_timer != null && seconds >= 10) { _timer.Change(seconds * 1000, seconds * 1000); } } }
     public static void Stop() { lock (_gate) { if (_timer != null) { _timer.Dispose(); _timer = null; } } }
 }
 '@
@@ -82,6 +83,23 @@ function Set-PimBeatStep {
     <# Names what the job is doing now, for the next beat line. A no-op when the beat is not running. Never throws. #>
     param([string]$Step)
     try { if (('PimProcessBeat' -as [type]) -and [PimProcessBeat]::Running) { [PimProcessBeat]::SetStep("$Step") } } catch { }
+}
+
+function Set-PimBeatPeriod {
+    <#
+      IMAGE-PRUNE CONTRACT point 4 (2026-11-12): a step that must beat at least once a minute (the registry clean-up) sets a
+      shorter interval for its duration and puts the default back afterwards (-Seconds 0 = Get-PimBeatSeconds of
+      PIM_BEAT_SECONDS). A no-op when the beat is not running, or when the type loaded in this process has no SetPeriod.
+      Never throws. Returns $true when the interval was changed.
+    #>
+    param([int]$Seconds = 0)
+    try {
+        if (-not (('PimProcessBeat' -as [type]) -and [PimProcessBeat]::Running)) { return $false }
+        if (-not ([PimProcessBeat].GetMethod('SetPeriod'))) { return $false }
+        $s = $Seconds; if ($s -le 0) { $s = Get-PimBeatSeconds -Value "$([Environment]::GetEnvironmentVariable('PIM_BEAT_SECONDS'))" }
+        if ($s -lt 10) { return $false }
+        [PimProcessBeat]::SetPeriod($s); return $true
+    } catch { return $false }
 }
 
 function Stop-PimBeat {
