@@ -6,6 +6,25 @@
   "note": "Framework 12.9 SETTING-INFO-1: the ONE source of the More info panels and switch-on confirmations in PIM Manager, and of the per-setting pages on invardia.com. Every entry must carry info.what/enabled/disabled/risk/requires/recommended/docUrl; a key without them fails the product test suite.",
   "settings": [
     {
+      "key": "InvardiaConnect",
+      "label": "Connect this install to Invardia",
+      "where": "Settings > Licence",
+      "route": "/api/settings/invardia-connect",
+      "type": "boolean",
+      "default": "Off (asked at install)",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "Community installations only. The answer to the installer's question \"Connect this install to Invardia: health reports + updates on request\". Pro installations are licensed and always connected, so the switch is not shown there.",
+        "enabled": "The installation claims its own install key from Invardia. It then sends health reports, and \"Update now\" works exactly as on Pro.",
+        "disabled": "The installation sends nothing that identifies your tenant: no heartbeat, no licence request, no failure report. It still updates itself each night from the anonymous, signed Community channel. An install key claimed earlier is kept but not used.",
+        "risk": "Low. Switching it off only stops the reports and Update now; nightly updates continue. Switching it on shares health reports about this installation with Invardia.",
+        "requires": "A Community installation. SuperAdmin to change it.",
+        "recommended": "Switch it on if you want Invardia to see your installation's health and to be able to update it on request; leave it off to stay anonymous.",
+        "docUrl": "https://invardia.com/docs/pim/settings/InvardiaConnect/"
+      }
+    },
+    {
       "key": "FeatureGates.makerchecker",
       "label": "Second-approver on sensitive changes",
       "where": "Settings > Features & edition > Feature customization",
@@ -3443,6 +3462,26 @@
         "requires": "SuperAdmin to change it. The engine reads it at its next run.",
         "recommended": "Off until your group definitions carry owners. Switch it on when you want every new group to have a responsible person from the start.",
         "docUrl": "https://invardia.com/docs/pim/settings/RequireGroupOwners/"
+      }
+    },
+    {
+      "key": "AccessPackagesEnabled",
+      "label": "Access packages",
+      "where": "Settings > Approvals & policy > Groups",
+      "route": "/api/settings/feature-settings",
+      "type": "boolean",
+      "default": "On",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "Access packages let people request membership of a group through Microsoft Entra ID Governance. PIM Manager creates a NEW group for each package (its name ends with -AP), never uses an existing group, and keeps that group locked to its package.",
+        "enabled": "When on (the default): the access packages created under Access > Access packages are built and kept in Entra ID Governance. With no package created nothing happens and no permission is asked for.",
+        "disabled": "When off: nothing is built or changed in Entra ID Governance, and the members of every package group are handed back to the engine: they follow the group's rows again, and removals go through the removal budget and the guards. The packages are kept, so switching it on again gives the groups back to their packages.",
+        "risk": "Off can end access that people got through a package, because the engine then removes members its rows do not name. Reversible: switch it back on.",
+        "requires": "SuperAdmin to change it. A Microsoft Entra ID Governance (or Entra Suite) licence for the packages to be built. The engine reads it at its next run.",
+        "recommended": "On.",
+        "docUrl": "https://invardia.com/docs/pim/settings/AccessPackagesEnabled/"
       }
     },
     {

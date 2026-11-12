@@ -72,6 +72,15 @@ function Test-PimValidatorRowIsExistingAccount {
     $v = if ($Row -is [System.Collections.IDictionary]) { "$($Row['AdminType'])" } elseif ($Row.PSObject.Properties['AdminType']) { "$($Row.AdminType)" } else { '' }
     return ("$v".Trim() -match '^(?i)(existing(-account)?|office-user)$')
 }
+function Test-PimValidatorRowIsAdOnly {
+    # EXISTING-ACCOUNT-NO-HYBRID (owner 2026-11-12): the engine's Test-PimAdminIsAdOnly, mirrored. TargetPlatform=AD is
+    # AD-only -- EXCEPT an existing account, which is used in Entra only (cloud or synced from AD) and is never handled by
+    # the hybrid worker: its Entra checks always run.
+    param([object]$Row)
+    if ($null -eq $Row) { return $false }
+    if (Test-PimValidatorRowIsExistingAccount -Row $Row) { return $false }
+    return ("$(Get-PimRowValue -Row $Row -Column 'TargetPlatform')".Trim() -ieq 'AD')
+}
 
 # ---------------------------------------------------------------------------
 # Levenshtein (for the "did you mean" suggestion in PIM-FK-001)
@@ -547,6 +556,89 @@ function Invoke-PimPreflightValidation {
         }
     }
 
+    # ------------------------------------------------------------------
+    # ACCESS PACKAGES -- THE LOCK (owner 2026-11-12: "we add new groups locked for access packages. we dont touch existing groups.
+    # if in doubt then pause access package." + "-ap group ends with as agreed"). A group CREATED FOR a package carries BOTH markers:
+    # the AccessPackage column (the package) and a name ending '-AP'. Every other path is refused at commit:
+    #   PIM-AP-001  a group definition with ONE marker only (an -AP name without its package, or a package column on another name)
+    #   PIM-AP-002  a group definition whose AccessPackage names no defined package
+    #   PIM-AP-003  an admin row giving membership of a package group (its members come from the package only)
+    #   PIM-AP-004  a nesting INTO a package group (nothing is nested into it; it is nested into the permission groups it grants)
+    #   PIM-AP-005  a package naming a group that was not created for it (an existing group is never used)
+    # A row already SAVED is a warning (never blocks another commit); a NEW / changed row is an error.
+    # ------------------------------------------------------------------
+    $apDefined = @{}
+    if ($loaded.ContainsKey('AccessPackage')) {
+        foreach ($ar in @($loaded['AccessPackage'].rows)) {
+            if ($null -eq $ar) { continue }
+            $apn = "$(Get-PimRowValue -Row $ar -Column 'AccessPackageName')".Trim()
+            if ($apn -and "$(Get-PimRowValue -Row $ar -Column 'Action')".Trim() -notmatch '^(?i)(remove|returntoengine)$') { $apDefined[$apn.ToLowerInvariant()] = $true }
+        }
+    }
+    $apLockedTag = @{}   # tag (lower) -> package (lower) -- locked by the AccessPackage column
+    $apDefByTag = @{}    # tag (lower) -> @{ pkg; name; csv; row }
+    foreach ($db in @('PIM-Definitions-Roles', 'PIM-Definitions-Departments', 'PIM-Definitions-Organization', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg')) {
+        if (-not $loaded.ContainsKey($db)) { continue }
+        $rows = @($loaded[$db].rows)
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]; if ($null -eq $r) { continue }
+            $tag = "$(Get-PimRowValue -Row $r -Column 'GroupTag')".Trim(); if (-not $tag) { continue }
+            $gn = "$(Get-PimRowValue -Row $r -Column 'GroupName')".Trim()
+            $pkg = "$(Get-PimRowValue -Row $r -Column 'AccessPackage')".Trim()
+            $saved = ($savedDefTags.ContainsKey($db) -and $savedDefTags[$db].ContainsKey($tag.ToLowerInvariant()))
+            $sev = if ($saved) { 'warning' } else { 'error' }
+            $apDefByTag[$tag.ToLowerInvariant()] = @{ pkg = $pkg; name = $gn; csv = $db; row = $i }
+            if ($pkg) { $apLockedTag[$tag.ToLowerInvariant()] = $pkg.ToLowerInvariant() }
+            $nameMarked = ($gn -match '(?i)-AP$')
+            if ($pkg -and -not $nameMarked) {
+                [void]$violations.Add((New-PimViolation -Severity $sev -Code 'PIM-AP-001' -Csv $db -Row $i -Column 'GroupName' -Subject $tag `
+                    -Message "Group '$gn' is marked for access package '$pkg' but its name does not end with '-AP'. An access package only uses a NEW group created for it, named with '-AP' at the end." `
+                    -Suggestion 'Create the access package under Access > Access packages: it creates its own -AP group. Clear the AccessPackage column of an existing group.'))
+            } elseif ($nameMarked -and -not $pkg -and -not $saved) {
+                [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-AP-001' -Csv $db -Row $i -Column 'AccessPackage' -Subject $tag `
+                    -Message "Group '$gn' ends with '-AP', the mark of an access package group, but names no access package. Names ending '-AP' are kept for the groups an access package creates." `
+                    -Suggestion 'Create the access package under Access > Access packages, or give this group a name that does not end with -AP.'))
+            }
+            if ($pkg -and -not $apDefined.ContainsKey($pkg.ToLowerInvariant())) {
+                [void]$violations.Add((New-PimViolation -Severity $sev -Code 'PIM-AP-002' -Csv $db -Row $i -Column 'AccessPackage' -Subject $tag `
+                    -Message "Group '$gn' belongs to access package '$pkg', which is not defined." `
+                    -Suggestion 'Create the access package under Access > Access packages, or remove this group definition.'))
+            }
+        }
+    }
+    if ($apLockedTag.Count) {
+        foreach ($pair in @(@{ csv = 'PIM-Assignments-Admins'; col = 'GroupTag'; code = 'PIM-AP-003'; what = 'gives a person membership of' }, @{ csv = 'PIM-Assignments-Groups'; col = 'SourceGroupTag'; code = 'PIM-AP-004'; what = 'nests a group INTO' })) {
+            if (-not $loaded.ContainsKey($pair.csv)) { continue }
+            $rows = @($loaded[$pair.csv].rows)
+            for ($i = 0; $i -lt $rows.Count; $i++) {
+                $r = $rows[$i]; if ($null -eq $r) { continue }
+                if ("$(Get-PimRowValue -Row $r -Column 'Action')".Trim() -ieq 'Remove') { continue }
+                $t = "$(Get-PimRowValue -Row $r -Column $pair.col)".Trim().ToLowerInvariant()
+                if (-not $t -or -not $apLockedTag.ContainsKey($t)) { continue }
+                $sev = if ("$($loaded[$pair.csv].source)" -eq 'pending') { 'error' } else { 'warning' }
+                [void]$violations.Add((New-PimViolation -Severity $sev -Code $pair.code -Csv $pair.csv -Row $i -Column $pair.col -Subject $t `
+                    -Message "This row $($pair.what) '$t', a group locked to access package '$($apLockedTag[$t])'. Its members come from the access package only." `
+                    -Suggestion 'Remove this row. People get the access by requesting the access package.'))
+            }
+        }
+    }
+    if ($loaded.ContainsKey('AccessPackage')) {
+        $apRows = @($loaded['AccessPackage'].rows)
+        for ($i = 0; $i -lt $apRows.Count; $i++) {
+            $ar = $apRows[$i]; if ($null -eq $ar) { continue }
+            if ("$(Get-PimRowValue -Row $ar -Column 'Action')".Trim() -match '^(?i)(remove|returntoengine)$') { continue }
+            $apn = "$(Get-PimRowValue -Row $ar -Column 'AccessPackageName')".Trim(); if (-not $apn) { continue }
+            foreach ($t in @("$(Get-PimRowValue -Row $ar -Column 'DirectGroupTags')" -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+                $d = $apDefByTag[$t.ToLowerInvariant()]
+                if ($d -and $d.pkg -ieq $apn -and "$($d.name)" -match '(?i)-AP$') { continue }
+                $sev = if ("$($loaded['AccessPackage'].source)" -eq 'pending') { 'error' } else { 'warning' }
+                [void]$violations.Add((New-PimViolation -Severity $sev -Code 'PIM-AP-005' -Csv 'AccessPackage' -Row $i -Column 'DirectGroupTags' -Subject $t `
+                    -Message "Access package '$apn' names '$t', which is not a group created for it. An access package never uses an existing group -- the package is paused until this is fixed." `
+                    -Suggestion 'Create the access package under Access > Access packages: it creates its own new -AP groups.'))
+            }
+        }
+    }
+
     # AU tags from PIM-Definitions-AU.
     $auTagIndex = @{}
     if ($loaded.ContainsKey('PIM-Definitions-AU')) {
@@ -590,6 +682,7 @@ function Invoke-PimPreflightValidation {
                     UserName        = Get-PimRowValue -Row $r -Column 'UserName'
                     TierLevel       = Get-PimRowValue -Row $r -Column 'TierLevel'
                     TargetPlatform  = Get-PimRowValue -Row $r -Column 'TargetPlatform'
+                    AdOnly          = [bool](Test-PimValidatorRowIsAdOnly -Row $r)   # an existing account is never AD-only
                     CreateTAP       = (Get-PimRowValue -Row $r -Column 'CreateTAP').ToUpperInvariant()
                     AccountStatus   = Get-PimRowValue -Row $r -Column 'AccountStatus'
                     StatusChangeCode= Get-PimRowValue -Row $r -Column 'StatusChangeCode'
@@ -1190,9 +1283,22 @@ function Invoke-PimPreflightValidation {
                 $patLabel = if ($purpose -ieq 'HighPriv') { "the high-privilege pattern, i.e. '$(& $fill $naming.AdminAccountPatternHighPriv)' ($($naming.AdminAccountPatternHighPriv))" }
                             elseif ($purpose -ieq 'Day2Day') { "the day-to-day pattern, i.e. '$(& $fill $naming.AdminAccountPattern)' ($($naming.AdminAccountPattern))" }
                             else { "either pattern: '$(& $fill $naming.AdminAccountPattern)' or '$(& $fill $naming.AdminAccountPatternHighPriv)'" }
-                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-NAME-002' -Csv 'Account-Definitions-Admins' -Row $i -Column 'UserPrincipalName' `
-                    -Message "UPN '$upn' (Purpose='$purpose') doesn't match $patLabel -- upper and lower case are the same." `
-                    -Suggestion "Either rename to fit the convention, fix the row's Purpose, or change the pattern in Settings > Naming (stored in SQL)."))
+                # NO-OVERWRITE (owner 2026-11-12: "we must not impact overwrite existing"): an ERROR when the name is not an
+                # admin name of this install at all -- not the pattern AND none of the recognised admin names (starts / ends;
+                # Test-PimAdminAccountNameIsPims, the SAME rule the engine refuses by): such a row may name a person's own
+                # account, which PIM must never change, so it takes an admin name or becomes an existing account. A name the
+                # install recognises as an admin's (a v1 'adm-...' admin, say) stays a WARNING -- an error blocks every
+                # Commit, and those accounts are PIM's. The offline CSV pre-import check judges by the SHIPPED names, not
+                # the install's ($global:PIM_ValidatorNameMismatchWarnOnly): a warning there, so a v1 file with its own
+                # admin names still imports; the Manager and the engine's refusal judge by the install's names.
+                $__nm2Sev = 'warning'
+                if (-not $global:PIM_ValidatorNameMismatchWarnOnly -and (Get-Command Test-PimAdminAccountNameIsPims -ErrorAction SilentlyContinue) -and ("$(Get-PimRowValue -Row $r -Column 'AdminSource')".Trim() -ine 'central')) {
+                    $__nm2 = $null; try { $__nm2 = Test-PimAdminAccountNameIsPims -Upn $upn } catch { $__nm2 = $null }
+                    if ($__nm2 -eq $false) { $__nm2Sev = 'error' }
+                }
+                [void]$violations.Add((New-PimViolation -Severity $__nm2Sev -Code 'PIM-NAME-002' -Csv 'Account-Definitions-Admins' -Row $i -Column 'UserPrincipalName' `
+                    -Message "UPN '$upn' (Purpose='$purpose') doesn't match $patLabel -- upper and lower case are the same. If this account already exists and PIM did not create it, PIM will not change it." `
+                    -Suggestion "If '$upn' is a person's existing account, set AdminType=existing-account (PIM then gives it delegations only and never changes the account). Otherwise rename to fit the convention, fix the row's Purpose, or change the pattern in Settings > Naming (stored in SQL)."))
             }
         }
     }
@@ -1208,7 +1314,7 @@ function Invoke-PimPreflightValidation {
             if ($u) { $usedAdmins[$u.ToLowerInvariant()] = $true }
         }
         foreach ($key in $adminIndex.Keys) {
-            if ("$($adminIndex[$key].TargetPlatform)".Trim() -ieq 'AD') { continue }   # AD-only admins get no PIM (Entra) reach by design
+            if ($adminIndex[$key].AdOnly) { continue }   # AD-only admins get no PIM (Entra) reach by design (an existing account is never AD-only)
             # REQ-G (2.4.376): a v1 assignment names the admin by bare UserName (PIM-FK-002 accepts that), so the UPN alone
             # reported every imported admin as orphaned. Either spelling is a reference.
             $un = "$($adminIndex[$key].UserName)".Trim().ToLowerInvariant()
@@ -1575,7 +1681,7 @@ function Invoke-PimPreflightValidation {
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $r = $rows[$i]
             if (Test-PimRowIsBlank -Row $r) { continue }
-            if ((Get-PimRowValue -Row $r -Column 'TargetPlatform').Trim() -ieq 'AD') { continue }   # AD-only: no Entra mailbox forwarding
+            if (Test-PimValidatorRowIsAdOnly -Row $r) { continue }   # AD-only: no Entra mailbox forwarding
             $addr   = Get-PimRowValue -Row $r -Column 'MailForwardAddress'
             $flagOn = ("$(Get-PimRowValue -Row $r -Column 'ForwardMailsToContact')".Trim() -match '(?i)^(true|yes|1)$')
             $real   = (Test-PimMailForwardAddressIsReal -Value $addr) -and ("$addr".Trim() -notmatch '(?i)^(true|yes|1)$')
@@ -1622,6 +1728,15 @@ function Invoke-PimPreflightValidation {
             $r = $rows[$i]
             if (Test-PimRowIsBlank -Row $r) { continue }
             if (-not (Test-PimValidatorRowIsExistingAccount -Row $r)) { continue }
+            # PIM-EXIST-002 -- EXISTING-ACCOUNT-NO-HYBRID (owner 2026-11-12): TargetPlatform=AD on an existing account is
+            # never AD-only (its Entra checks run) and the hybrid worker never handles it -- say so, and how to make it plain.
+            if ((Get-PimRowValue -Row $r -Column 'TargetPlatform').Trim() -ieq 'AD') {
+                $xa = "$(Get-PimRowValue -Row $r -Column 'UserPrincipalName')".Trim()
+                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-EXIST-002' -Csv 'Account-Definitions-Admins' -Row $i -Column 'TargetPlatform' `
+                    -Subject $xa `
+                    -Message "'$xa': an existing account is used in Entra only; set TargetPlatform=ID (the hybrid worker never handles it)." `
+                    -Suggestion 'Set TargetPlatform to ID. The account may be cloud-only or synced from AD -- either way PIM reaches it through Entra only and changes nothing in AD.'))
+            }
             $xu = "$(Get-PimRowValue -Row $r -Column 'UserPrincipalName')".Trim()
             if (-not $xu -or $xu -match '^[^@\s]+@[^@\s]+\.[^@\s]+$') { continue }   # blank = PIM-UPN-001 already says it
             [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-EXIST-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'UserPrincipalName' `
@@ -1660,7 +1775,7 @@ function Invoke-PimPreflightValidation {
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $r = $rows[$i]
             if (Test-PimRowIsBlank -Row $r) { continue }
-            if ((Get-PimRowValue -Row $r -Column 'TargetPlatform').Trim() -ieq 'AD') { continue }
+            if (Test-PimValidatorRowIsAdOnly -Row $r) { continue }
             $who = (Get-PimRowValue -Row $r -Column 'UserPrincipalName').Trim(); if (-not $who) { $who = (Get-PimRowValue -Row $r -Column 'UserName').Trim() }
             $plan = Get-PimAdminMailRecipientPlan -Row $r -DepartmentOwners $deptIdx
             if ("$($plan.source)" -eq 'none') {
@@ -1689,7 +1804,7 @@ function Invoke-PimPreflightValidation {
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $r = $rows[$i]
             if (Test-PimRowIsBlank -Row $r) { continue }
-            if ((Get-PimRowValue -Row $r -Column 'TargetPlatform').Trim() -ieq 'AD') { continue }   # AD-only: no Entra tenant rollout
+            if (Test-PimValidatorRowIsAdOnly -Row $r) { continue }   # AD-only: no Entra tenant rollout
             $ringVal = (Get-PimRowValue -Row $r -Column 'Ring').Trim()
             if (-not $ringVal) { continue }
             if (-not (Test-PimRingValue -Value $ringVal)) {
@@ -1818,6 +1933,7 @@ function Invoke-PimPreflightValidation {
             $r = $tapRows[$i]
             if (Test-PimRowIsBlank -Row $r) { continue }
             if ((Get-PimRowValue -Row $r -Column 'TargetPlatform').Trim() -ieq 'AD') { continue }
+            if (Test-PimValidatorRowIsExistingAccount -Row $r) { continue }   # an existing account gets no TAP by design (CreateTAP FALSE is right)
             $ct = (Get-PimRowValue -Row $r -Column 'CreateTAP').Trim()
             if ($ct -and $ct -notmatch '(?i)^(true|1|yes)$') {
                 $who = (Get-PimRowValue -Row $r -Column 'UserPrincipalName').Trim(); if (-not $who) { $who = (Get-PimRowValue -Row $r -Column 'UserName').Trim() }
@@ -1855,7 +1971,7 @@ function Invoke-PimPreflightValidation {
             }
 
             # AD-only admins hold no TAP (password only): no TAP-schedule findings for them.
-            $adOnlyRow = ((Get-PimRowValue -Row $r -Column 'TargetPlatform').Trim() -ieq 'AD')
+            $adOnlyRow = ((Get-PimRowValue -Row $r -Column 'TargetPlatform').Trim() -ieq 'AD') -or (Test-PimValidatorRowIsExistingAccount -Row $r)   # an existing account holds no TAP either
             $tapRaw = if ($adOnlyRow) { '' } else { (Get-PimRowValue -Row $r -Column 'TAPStartDate').Trim() }
             $tapUtc = $null
             if ($tapRaw) {
@@ -2371,7 +2487,7 @@ function Invoke-PimPreflightValidation {
             }
             foreach ($k in $adminIndex.Keys) {
                 $a = $adminIndex[$k]
-                if ("$($a.TargetPlatform)".Trim() -ieq 'AD') { continue }   # AD-only: no Entra auth methods exist (password only)
+                if ($a.AdOnly) { continue }   # AD-only: no Entra auth methods exist (password only); an existing account is checked
                 $methods = @()
                 if ($methodsByUpn.ContainsKey($k)) { $methods = $methodsByUpn[$k] }
                 $hasStrong = $false

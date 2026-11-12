@@ -104,6 +104,153 @@ function Find-PimExistingAccount {
     return [pscustomobject]$o
 }
 
+function Get-PimExistingAccountSourceText {
+    <#
+      PURE. EXISTING-ACCOUNT-NO-HYBRID (owner 2026-11-12: "they can live both in AD and cloud" / "synced to cloud if AD
+      based"). Where the account lives, in plain words: 'synced from AD' (onPremisesSyncEnabled = true), 'cloud' (false or
+      not set on a readable answer), 'not known' (-Readable $false: the sync flag could not be read). Either way PIM reaches
+      it through its Entra object only and the hybrid worker never touches it.
+    #>
+    param([AllowNull()][object]$OnPremisesSyncEnabled, [bool]$Readable = $true)
+    if (-not $Readable) { return 'not known' }
+    if ("$OnPremisesSyncEnabled".Trim() -ieq 'True') { return 'synced from AD' }
+    return 'cloud'
+}
+
+function Get-PimExistingAccountHybridNote {
+    # The ONE plain line a hybrid AD job writes for an existing account it leaves alone (owner 2026-11-12).
+    param([string]$Upn)
+    return ("existing account {0}: not supported by the hybrid worker -- nothing done in AD" -f "$Upn".Trim())
+}
+
+function Get-PimExistingAccountHybridKeys {
+    <#
+      PURE. EXISTING-ACCOUNT-NO-HYBRID (a): every name the hybrid AD jobs could know an existing account by -> its UPN.
+      Keys (lower-case): the exact UPN, its local part (an office user's sAMAccountName / mailNickname is normally that), the
+      row's UserName and SamAccountName / MailNickname when present (and their local parts). Every existing-account row
+      counts, whatever its TargetPlatform or Action: PIM never does anything in AD for such an account.
+    #>
+    param([object[]]$AdminRows = @())
+    $map = @{}
+    $get = { param($r, $n) if ($r -is [System.Collections.IDictionary]) { if ($r.Contains($n)) { return "$($r[$n])".Trim() } } elseif ($r.PSObject.Properties[$n]) { return "$($r.$n)".Trim() }; '' }
+    foreach ($r in @($AdminRows)) {
+        if ($null -eq $r -or -not (Test-PimAdminIsExistingAccount -Row $r)) { continue }
+        $upn = Get-PimExistingAccountRowUpn -Row $r
+        $names = @($upn) + @(foreach ($n in @('UserName', 'Username', 'SamAccountName', 'sAMAccountName', 'MailNickname', 'mailNickname')) { & $get $r $n })
+        if (-not $upn) { $upn = @($names | Where-Object { $_ })[0] }
+        if (-not $upn) { continue }
+        foreach ($n in $names) {
+            $v = "$n".Trim().ToLowerInvariant()
+            if (-not $v) { continue }
+            $map[$v] = $upn
+            $at = $v.IndexOf('@'); if ($at -gt 0) { $map[$v.Substring(0, $at)] = $upn }
+        }
+    }
+    return $map
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# EXISTING-ACCOUNT-NO-HYBRID + NO-OVERWRITE (b) (owner 2026-11-12: "we must not impact overwrite existing"). A NORMAL admin
+# row (any type but existing-account) whose UPN already names an account PIM did not create must never be PATCHed or
+# otherwise changed. "PIM created it" is decided by, in order: the account is in PIM's own record of the accounts it created
+# (-CreatedByPim, the engine's 'AdminAccountsCreatedByPim' record, written at create since 2026-11-12); the row is a central
+# admin (created in this tenant by PIM from the managing tenant's baseline); the name is an admin name of this install (the
+# recognised admin names -- starts / ends -- or the admin name patterns). Anything else = not PIM's = refused.
+# ---------------------------------------------------------------------------------------------------------------------
+function Test-PimAdminAccountNameIsPims {
+    <#
+      Does this UPN carry an ADMIN name of this install? $true / $false, or $null when no admin naming is known in this
+      process (then the caller cannot decide by name). -Prefixes / -Suffixes with -NamingGiven are the test seam; by default
+      the recognised starts + endings (Get-PimAdminAccountPrefixes / -Suffixes) of the hydrated settings AND the shipped
+      defaults, plus the admin name patterns (Test-PimIsAdminAccountName -UseNamePatterns).
+    #>
+    param([AllowEmptyString()][string]$Upn, [string[]]$Prefixes = @(), [string[]]$Suffixes = @(), [switch]$NamingGiven)
+    $u = "$Upn".Trim().ToLowerInvariant()
+    if (-not $u) { return $null }
+    $pre = New-Object System.Collections.Generic.List[string]; $suf = New-Object System.Collections.Generic.List[string]
+    $addTo = { param($list, $vals) foreach ($x in @($vals)) { $s = "$x".Trim().ToLowerInvariant(); if ($s -and -not $s.StartsWith('-') -and -not $list.Contains($s)) { [void]$list.Add($s) } } }
+    if ($NamingGiven) { & $addTo $pre $Prefixes; foreach ($x in @($Suffixes)) { $s = "$x".Trim().ToLowerInvariant(); if ($s -and -not $suf.Contains($s)) { [void]$suf.Add($s) } } }
+    else {
+        $shipped = $null
+        if (Get-Command Get-PimShippedNamingConventions -ErrorAction SilentlyContinue) { try { $shipped = Get-PimShippedNamingConventions } catch { $shipped = $null } }
+        if (Get-Command Get-PimAdminAccountPrefixes -ErrorAction SilentlyContinue) {
+            try { & $addTo $pre @(Get-PimAdminAccountPrefixes) } catch { }
+            if ($shipped) { try { & $addTo $pre @(Get-PimAdminAccountPrefixes -NamingConventions $shipped) } catch { } }
+        }
+        if (Get-Command Get-PimAdminAccountSuffixes -ErrorAction SilentlyContinue) {
+            foreach ($nc in @($null, $shipped)) {
+                $vals = @(); try { $vals = if ($nc) { @(Get-PimAdminAccountSuffixes -NamingConventions $nc) } else { @(Get-PimAdminAccountSuffixes) } } catch { $vals = @() }
+                foreach ($x in $vals) { $s = "$x".Trim().ToLowerInvariant(); if ($s -and -not $suf.Contains($s)) { [void]$suf.Add($s) } }
+            }
+        }
+        if (-not (Get-Command Get-PimAdminAccountPrefixes -ErrorAction SilentlyContinue)) {
+            # a host without the guard library (the Manager): the literal 'Recognised admin names' entries -- 'Admin-' /
+            # 'Admin-*' = a start, '*-a-id' = an ending; {AdminWord} filled in; anything else is ignored
+            foreach ($nc in @($global:PIM_NamingConventions, $shipped)) {
+                if ($null -eq $nc) { continue }
+                $word = 'Admin'; try { if ("$($nc.AdminWord)".Trim()) { $word = "$($nc.AdminWord)".Trim() } } catch { }
+                $ents = $null; try { $ents = $nc.AdminAccountPatterns } catch { $ents = $null }
+                foreach ($e in @($ents)) {
+                    $s = "$e".Trim().Replace('{AdminWord}', $word).ToLowerInvariant()
+                    if (-not $s -or $s.Contains('{')) { continue }
+                    if ($s.StartsWith('*') -and $s.Length -gt 1 -and -not $s.Substring(1).Contains('*')) { $x = $s.Substring(1); if (-not $suf.Contains($x)) { [void]$suf.Add($x) } }
+                    elseif (-not $s.TrimEnd('*').Contains('*')) { & $addTo $pre @($s.TrimEnd('*')) }
+                }
+            }
+        }
+    }
+    $local = $u; $at = $local.IndexOf('@'); if ($at -ge 0) { $local = $local.Substring(0, $at) }
+    if (Get-Command Test-PimIsAdminAccountName -ErrorAction SilentlyContinue) {
+        if (Test-PimIsAdminAccountName -Name $u -Prefixes $pre.ToArray() -Suffixes $suf.ToArray() -UseNamePatterns:(-not $NamingGiven)) { return $true }
+    } else {
+        foreach ($p in $pre) { if ($u.StartsWith($p)) { return $true } }
+        foreach ($s in $suf) { if ($local.Length -gt $s.Length -and $local.EndsWith($s)) { return $true } }
+    }
+    # the admin name patterns (AdminAccountPattern / -HighPriv) of the naming in effect
+    $patKnown = $false
+    if (-not $NamingGiven -and (Get-Command Test-PimAdminName -ErrorAction SilentlyContinue) -and (Get-Command Get-PimNamingConvention -ErrorAction SilentlyContinue)) {
+        $c = $null; try { $c = Get-PimNamingConvention } catch { $c = $null }
+        if ($c -and ("$($c.AdminAccountPattern)".Trim() -or "$($c.AdminAccountPatternHighPriv)".Trim())) {
+            $patKnown = $true
+            try { if (Test-PimAdminName -Name $local) { return $true } } catch { }
+        }
+    }
+    if ($pre.Count -eq 0 -and $suf.Count -eq 0 -and -not $patKnown) { return $null }
+    return $false
+}
+
+function Test-PimAdminRowAccountIsForeign {
+    <#
+      Is the account this NORMAL admin row names one PIM did NOT create (see the block above)? $true = refuse every write to
+      it. An existing-account row is never "foreign" here (it has its own rule: delegations only). -Upn = the live account's
+      UPN (default: the row's). -CreatedByPim = PIM's record of created accounts (UPN lower-case -> anything). A name that
+      cannot be judged (no naming known) is not foreign: the caller keeps today's behaviour.
+    #>
+    param([AllowNull()][object]$Row, [string]$Upn = '', [hashtable]$CreatedByPim = $null)
+    if ($null -eq $Row) { return $false }
+    if (Test-PimAdminIsExistingAccount -Row $Row) { return $false }
+    $src = ''
+    if ($Row -is [System.Collections.IDictionary]) { if ($Row.Contains('AdminSource')) { $src = "$($Row['AdminSource'])" } } elseif ($Row.PSObject.Properties['AdminSource']) { $src = "$($Row.AdminSource)" }
+    if ($src.Trim() -ieq 'central') { return $false }
+    $u = "$Upn".Trim()
+    if (-not $u) {
+        foreach ($n in @('UserPrincipalName', 'userPrincipalName', 'UPN')) {
+            $v = ''
+            if ($Row -is [System.Collections.IDictionary]) { if ($Row.Contains($n)) { $v = "$($Row[$n])" } } elseif ($Row.PSObject.Properties[$n]) { $v = "$($Row.$n)" }
+            if ($v.Trim()) { $u = $v.Trim(); break }
+        }
+    }
+    if (-not $u) { return $false }
+    if ($CreatedByPim -and $CreatedByPim.ContainsKey($u.ToLowerInvariant())) { return $false }
+    return ((Test-PimAdminAccountNameIsPims -Upn $u) -eq $false)
+}
+
+function Get-PimAdminForeignAccountText {
+    # The ONE plain line for a refused normal admin row whose account exists and is not PIM's (owner 2026-11-12).
+    param([string]$Upn)
+    return ("{0} already exists and was not created by PIM -- not changed; mark it AdminType=existing-account to give it delegations" -f "$Upn".Trim())
+}
+
 function Get-PimExistingAccountNotFoundText {
     # The ONE plain line for a refused existing-account row (owner 2026-11-11).
     param([string]$Upn)
@@ -126,7 +273,10 @@ function Select-PimExistingAccountImportRows {
         if ($null -eq $r) { continue }
         if (-not (Test-PimAdminIsExistingAccount -Row $r)) { [void]$keep.Add($r); continue }
         $upn = Get-PimExistingAccountRowUpn -Row $r
-        if (-not $upn) { [void]$refused.Add([pscustomobject]@{ upn = ''; reason = 'an existing account row needs the exact UPN of the account (UserPrincipalName)' }); continue }
+        if (-not $upn) {
+            $nm = ''; foreach ($n in @('UserPrincipalName', 'UserName', 'Username')) { if ($r -is [System.Collections.IDictionary]) { if ($r.Contains($n) -and "$($r[$n])".Trim()) { $nm = "$($r[$n])".Trim(); break } } elseif ($r.PSObject.Properties[$n] -and "$($r.$n)".Trim()) { $nm = "$($r.$n)".Trim(); break } }
+            [void]$refused.Add([pscustomobject]@{ upn = ''; name = $nm; reason = ("existing account '{0}': no valid UPN (name@domain) -- the row is not imported; an existing account row needs the exact UPN of the account (UserPrincipalName)" -f $nm) }); continue
+        }
         if (-not $Lookup) { [void]$notChecked.Add($upn); [void]$keep.Add($r); continue }
         $f = $null
         try { $f = & $Lookup $upn } catch { $f = [pscustomobject]@{ found = $false; error = "$($_.Exception.Message)" } }

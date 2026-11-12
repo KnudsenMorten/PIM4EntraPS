@@ -13,6 +13,18 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.13 -- 2026-11-12
+
+- Access packages in PIM Manager: Create > Access package, list / detail / pause / resume, and packages in the access map; every package gets NEW groups of its own (name ending -AP), locked to it, and pauses on any doubt -- existing groups are never touched. An install with no definitions yet no longer mails orphan-group warnings (its groups read: not imported yet).
+
+## 3.1.12 -- 2026-11-12
+
+- Existing office accounts (AD-synced or cloud-only) are fully supported by the importer, adopt and the Create-admin wizard and are never touched by the hybrid worker; PIM never changes an existing account it did not create. Database statistics share rounds to a whole number.
+
+## 3.1.11 -- 2026-11-12
+
+- Every PIM mail names its environment in the subject and first line, and the tenant in the body (MAIL-ENV). The heartbeat reports the database: tier, size, load in the last hour and statistics health (SQL-STATS-PROOF).
+
 ## 3.1.10 -- 2026-11-11
 
 - Community installs connect to Invardia only on their user's yes (Connect this install to Invardia: health reports + updates on request); a yes claims an install key and Update now works as for Pro; no or no answer sends nothing that identifies the install. Release tools accept 4-part image-patch versions.

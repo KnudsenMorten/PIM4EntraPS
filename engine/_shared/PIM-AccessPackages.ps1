@@ -4,6 +4,12 @@
   THE MODEL. The access package decides WHO GETS ONTO a delegation; PIM decides HOW IT IS USED (activation, unchanged).
   A package grants ELIGIBLE MEMBERSHIP of one or more DIRECT groups -- never of a permission group, never a role.
 
+  🔒 OWNER 2026-11-12 (supersedes the '-AP rename' plan): "we dont rename anything existing. we add new groups locked for access packages.
+  we dont touch existing groups. if in doubt then pause access package." + "-ap group ends with as agreed". A package only delivers groups
+  CREATED FOR IT (definition column AccessPackage = the package, GroupName ending '-AP'); they are LOCKED to it (Split-PimAccessPackageOwnedMembers,
+  Test-PimAccessPackageGroupStillPackaged, the Manager's adopt / drift-delete refusals, the validator's PIM-AP-* rules); any doubt PAUSES the
+  package (no write, reason in pim.Settings 'AccessPackageStatus'). Nothing here ever renames a group or binds an existing one.
+
   ON BY DEFAULT, ACTS ONLY WHEN DEFINED. Setting AccessPackagesEnabled (default on) can stop the provider. With no 'AccessPackage'
   row and no binding the feature is inert: no Graph call of any kind, no right asked for, member reconciliation unchanged.
 
@@ -227,9 +233,20 @@ function Split-PimAccessPackageOwnedMembers {
     $failure = { param($why, [bool]$soft) [pscustomobject]@{ active = $false; failed = $true; soft = $soft; reason = "$why"; desired = @($Desired); live = @($Live); droppedDesired = 0; droppedLive = 0; heldDesired = @(); heldLive = @(); groups = @(); suppressed = 0; suppressedGroups = @() } }
     if (-not $state.ok) { return (& $failure "$($state.error)" ((-not $state.corrupt) -and -not ([int]$script:PimAccessPackageBindingsKnown -gt 0))) }
     $rec = $state.record
-    if (-not $rec.bindings.Count -and -not $rec.released.Count) { return $none }
+    # THE LOCK (owner 2026-11-12 "new groups locked for access packages"): a group CREATED FOR a package (its definition names the
+    # package in the AccessPackage column -- never the name alone, so an existing '...-AP' group is not touched) gets its members from the package only, also before its binding is written --
+    # admin rows and nestings INTO it are set aside like a bound group's. Switched OFF it is handed back like every bound group.
+    $lockedTags = @{}
+    if (Get-Command Get-PimGroupDefinitionRows -ErrorAction SilentlyContinue) {
+        try { $lockedTags = Get-PimAccessPackageLockedTags -ColumnOnly -GroupDefinitions @(Get-PimGroupDefinitionRows -IncludeRetired) } catch { return (& $failure "the group definitions could not be read: $($_.Exception.Message)" $false) }
+    }
+    if (-not $rec.bindings.Count -and -not $rec.released.Count -and -not $lockedTags.Count) { return $none }
     $owned = $null
     try { $owned = Get-PimSolutionOwnedGroups } catch { return (& $failure "the groups PIM manages could not be resolved: $($_.Exception.Message)" $false) }
+    $lockedIds = @{}
+    foreach ($lt in @($lockedTags.Keys)) {
+        foreach ($k in @($owned.byTag.Keys)) { if ("$k".ToLowerInvariant() -eq $lt -and "$($owned.byTag[$k])".Trim()) { $lockedIds["$($owned.byTag[$k])".ToLowerInvariant()] = $lt } }
+    }
     $names = if ($Scope -eq 'GroupMembers') { @('SourceGroupTag', 'GroupTag') } else { @('GroupTag') }
     # GroupMembers applies a row through the group NAME of its tag (Get-PimTagToGroupName + Resolve-PimLiveGroupIdByName), which can differ from the owned set: both are candidates, so whichever the row would hit is checked.
     $tagToName = $null
@@ -251,8 +268,8 @@ function Split-PimAccessPackageOwnedMembers {
         $resolved[$t] = $found.ToArray()
         return @($found.ToArray())
     }
-    $tagName = { param($g) if ($rec.bindings.ContainsKey($g)) { "$($rec.bindings[$g].tag)" } elseif ($rec.released.ContainsKey($g)) { "$($rec.released[$g].tag)" } else { $g } }
-    $boundOf = { param($ids) foreach ($i in @($ids)) { if ($rec.bindings.ContainsKey("$i")) { return "$i" } }; return '' }
+    $tagName = { param($g) if ($rec.bindings.ContainsKey($g)) { "$($rec.bindings[$g].tag)" } elseif ($lockedIds.ContainsKey($g)) { "$($lockedIds[$g])" } elseif ($rec.released.ContainsKey($g)) { "$($rec.released[$g].tag)" } else { $g } }
+    $boundOf = { param($ids) foreach ($i in @($ids)) { if ($rec.bindings.ContainsKey("$i") -or $lockedIds.ContainsKey("$i")) { return "$i" } }; return '' }
     $liveKeys = @{}
     if ($KeyOf) { foreach ($l in @($Live)) { if ($null -ne $l) { try { $liveKeys["$(& $KeyOf $l)".Trim().ToLowerInvariant()] = $true } catch { } } } }
     $isCreate = { param($d) $k = ''; try { $k = "$(& $KeyOf $d)".Trim().ToLowerInvariant() } catch { $k = '' }; (-not $k -or -not $liveKeys.ContainsKey($k)) }
@@ -353,6 +370,8 @@ function ConvertTo-PimAccessPackageDefinition {
         ReviewCadence      None | Monthly | Quarterly | SemiAnnually | Annually     Reviewers  as approvers
         ReviewNoResponse   KeepAccess (default) | RemoveAccess: what happens when a reviewer does not answer. Removing access on no response must be stated
         Notes, Action      Action=Remove retires the package; Action=ReturnToEngine returns the released groups in DirectGroupTags to the engine
+        State, PauseReason State=Paused: an administrator paused the package -- nothing is written for it (not even a retirement) until it is resumed
+      DirectGroupTags may only name groups CREATED FOR THIS PACKAGE (owner 2026-11-12): see Get-PimAccessPackageGroupProblems.
     #>
     param([Parameter(Mandatory)][object]$Row)
     $g = { param($n) if ($Row -is [System.Collections.IDictionary]) { if ($Row.Contains($n)) { "$($Row[$n])".Trim() } else { '' } } else { $p = $Row.PSObject.Properties[$n]; if ($p -and $null -ne $p.Value) { "$($p.Value)".Trim() } else { '' } } }
@@ -397,7 +416,169 @@ function ConvertTo-PimAccessPackageDefinition {
         requireJustification = [bool](& $flag (& $g 'RequireJustification')); allowExtension = [bool](& $flag (& $g 'AllowExtension'))
         maxDays = $days; reviewCadence = "$cadOk"; reviewers = $reviewers; reviewNoResponse = "$nrOk"; notes = (& $g 'Notes')
         isRemove = ((& $g 'Action') -ieq 'Remove'); isReturn = ((& $g 'Action') -ieq 'ReturnToEngine'); problems = $problems.ToArray()
+        paused = ((& $g 'State') -ieq 'Paused'); pauseReason = (& $g 'PauseReason')
     }
+}
+
+# ---- NEW, DEDICATED, LOCKED GROUPS (owner 2026-11-12) ----------------------------------------------------------------------------
+# "we dont rename anything existing. we add new groups locked for access packages. we dont touch existing groups. if in doubt then
+# pause access package." + the naming pick the same day: "-ap group ends with as agreed".
+#   * A package only ever delivers groups CREATED FOR IT: a group definition whose AccessPackage column names the package AND whose
+#     GroupName ends with '-AP' (the normal PIM name for what it grants, '-AP' appended). An existing group is never bound or renamed.
+#   * Such a group is LOCKED to its package: every other path (admin rows, nesting INTO it, adopt, retire, drift delete) leaves it.
+#   * Any doubt (a group not created for this package, a name taken by a group PIM did not create, an admin pause, an unreadable
+#     state) PAUSES the package: nothing is written for it, the reason is recorded in pim.Settings 'AccessPackageStatus'.
+function Get-PimAccessPackageGroupMarker { return '-AP' }
+function Get-PimAccessPackageStatusSetting { return 'AccessPackageStatus' }
+
+function Test-PimAccessPackageGroupName {
+    <# PURE. Does a group NAME carry the access-package marker (ends with '-AP', any case)? #>
+    param([AllowNull()][string]$Name)
+    $n = "$Name".Trim()
+    return [bool]($n -and $n.EndsWith((Get-PimAccessPackageGroupMarker), [System.StringComparison]::OrdinalIgnoreCase))
+}
+
+function Get-PimAccessPackageDefinitionOwner {
+    <# PURE. The package a group definition row is dedicated to ('' = none). Reads the AccessPackage column of a definition row or projection. #>
+    param([AllowNull()][object]$Definition)
+    if ($null -eq $Definition) { return '' }
+    if ($Definition -is [System.Collections.IDictionary]) { if ($Definition.Contains('AccessPackage')) { return "$($Definition['AccessPackage'])".Trim() }; return '' }
+    $p = $Definition.PSObject.Properties['AccessPackage']
+    if ($p -and $null -ne $p.Value) { return "$($p.Value)".Trim() }
+    return ''
+}
+
+function Test-PimAccessPackageLockedDefinition {
+    <# PURE. Is this group definition LOCKED to an access package? Either marker is enough (a name ending '-AP', or the AccessPackage column): other paths leave it. #>
+    param([AllowNull()][object]$Definition)
+    if ($null -eq $Definition) { return $false }
+    return ([bool](Get-PimAccessPackageDefinitionOwner -Definition $Definition) -or (Test-PimAccessPackageGroupName -Name "$($Definition.GroupName)"))
+}
+
+function Test-PimAccessPackageDedicatedDefinition {
+    <# PURE. Was this definition created FOR this package? BOTH markers: the AccessPackage column names the package and the name ends with '-AP'. #>
+    param([AllowNull()][object]$Definition, [string]$PackageName)
+    if ($null -eq $Definition -or -not "$PackageName".Trim()) { return $false }
+    return ((Get-PimAccessPackageDefinitionOwner -Definition $Definition) -ieq "$PackageName".Trim() -and (Test-PimAccessPackageGroupName -Name "$($Definition.GroupName)"))
+}
+
+function Get-PimAccessPackageLockedTags {
+    <#
+      PURE. tag (lower) -> package name ('' when only the name marker says so) of every LOCKED group definition.
+      -ColumnOnly: only definitions that NAME a package (the AccessPackage column, which exists only since 2026-11-12). The engine's member
+      guard uses it, so an EXISTING group whose name happens to end with '-AP' is never taken from the engine ("we dont touch existing groups").
+    #>
+    param([object[]]$GroupDefinitions = @(), [switch]$ColumnOnly)
+    $h = @{}
+    foreach ($d in @($GroupDefinitions)) {
+        if ($null -eq $d -or -not "$($d.GroupTag)".Trim()) { continue }
+        $locked = if ($ColumnOnly) { [bool](Get-PimAccessPackageDefinitionOwner -Definition $d) } else { Test-PimAccessPackageLockedDefinition -Definition $d }
+        if ($locked) { $h["$($d.GroupTag)".Trim().ToLowerInvariant()] = (Get-PimAccessPackageDefinitionOwner -Definition $d) }
+    }
+    return $h
+}
+
+function Get-PimAccessPackageGroupEntity {
+    <# PURE. The definition entity of a direct-group type (the types the Create access package screen offers). '' = not a direct-group type. #>
+    param([string]$Type)
+    switch ("$Type".Trim().ToLowerInvariant()) {
+        'role' { 'PIM-Definitions-Roles' } 'department' { 'PIM-Definitions-Departments' } 'organisation' { 'PIM-Definitions-Organization' }
+        'organization' { 'PIM-Definitions-Organization' } 'project' { 'PIM-Definitions-Projects' } 'crossorg' { 'PIM-Definitions-CrossOrg' } default { '' }
+    }
+}
+
+function New-PimAccessPackageGroupIdentity {
+    <#
+      The tag and name of a NEW group for a package (owner 2026-11-12 "-ap group ends with as agreed"): the normal direct-group tag
+      ({GroupTypePrefix}{ShortName}) and the tenant's group name around it (PimGroupPattern), each with '-AP' appended at the END.
+      Example: department + Finance -> tag DEPT-Finance-AP, name PIM-DEPT-Finance-AP. Returns @{ ok; tag; name; entity; error }.
+    #>
+    param([Parameter(Mandatory)][string]$Type, [Parameter(Mandatory)][string]$ShortName)
+    $entity = Get-PimAccessPackageGroupEntity -Type $Type
+    if (-not $entity) { return [pscustomobject]@{ ok = $false; tag = ''; name = ''; entity = ''; error = "'$Type' is not a direct-group type (role, department, organisation, project, crossorg)" } }
+    $short = ConvertTo-PimNamePart $ShortName
+    $mk = Get-PimAccessPackageGroupMarker
+    if ($short.EndsWith($mk, [System.StringComparison]::OrdinalIgnoreCase)) { $short = $short.Substring(0, $short.Length - $mk.Length).TrimEnd('-') }
+    if (-not $short) { return [pscustomobject]@{ ok = $false; tag = ''; name = ''; entity = $entity; error = 'the group needs a short name (letters, digits, dot or dash)' } }
+    $key = "$Type".Trim().ToLowerInvariant(); if ($key -eq 'organization') { $key = 'organisation' }
+    $prefix = Get-PimNamingMapValue -Map 'GroupTypePrefixes' -Key $key
+    $baseTag = "$prefix$short"
+    $aff = Get-PimGroupNameAffixes
+    $baseName = ("$($aff.prefix)$baseTag$($aff.suffix)" -replace '-{2,}', '-').Trim('-')
+    return [pscustomobject]@{ ok = $true; tag = "$baseTag$mk"; name = "$baseName$mk"; entity = $entity; error = '' }
+}
+
+function Test-PimAccessPackageRowPaused {
+    <# PURE. Did an administrator pause this package (State = Paused on its row)? #>
+    param([AllowNull()][object]$Row)
+    return ("$(Get-PimRowProp -Row $Row -Names @('State'))".Trim() -ieq 'Paused')
+}
+
+function Get-PimAccessPackageGroupDoubt {
+    <#
+      The doubt about ONE resolved group of a package, or '' when there is none. Read-only (never pins, never holds):
+        * the name is in the run's duplicate / adopt-held register: a group PIM did not create carries it;
+        * the adopted-group record (GroupObjectPins) is readable and does not pin this name to this id: PIM cannot prove it created it.
+      No store, or the one-time pin migration still running = no record to judge by: no doubt from it (the engine's own rule).
+    #>
+    param([string]$Name, [string]$Id)
+    $k = "$Name".Trim().ToLowerInvariant()
+    $reg = $global:PIM_DuplicateLiveNames
+    if ($k -and $reg -is [hashtable] -and $reg['group'] -is [hashtable] -and $reg['group'].ContainsKey($k)) {
+        return "the name '$Name' is already taken by a group PIM Manager did not create for this package"
+    }
+    if ($k -and "$Id".Trim() -and (Get-Command Get-PimGroupPinState -ErrorAction SilentlyContinue)) {
+        $st = $null; try { $st = Get-PimGroupPinState } catch { return "the record of the groups PIM Manager created could not be read ($($_.Exception.Message))" }
+        if ($st -and $st.available -and -not $st.migrating) {
+            $pin = "$($st.pins[$k])"
+            if (-not $pin) { return "PIM Manager has no record that it created the group '$Name' -- a group of that name is not used for a package" }
+            if ($pin -ine "$Id".Trim()) { return "the group '$Name' in Entra ID is not the one PIM Manager created for this package" }
+        }
+    }
+    return ''
+}
+
+function Save-PimAccessPackageStatus {
+    <#
+      Report-only: pim.Settings 'AccessPackageStatus' = @{ updatedUtc; licence = @{ ok; reason }; packages = name(lower) -> @{ name; state; reason } } for the Manager.
+      Written only when it changed (the timestamp is not compared) and never on a plan. A failed write never fails the scope.
+    #>
+    param([hashtable]$Context, [hashtable]$Packages = @{}, [AllowNull()][object]$Licence)
+    if ($Context -and $Context['__pimWhatIf']) { return }
+    if (-not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { return }
+    $pk = [ordered]@{}; foreach ($k in @($Packages.Keys | Sort-Object)) { $pk[$k] = [ordered]@{ name = "$($Packages[$k].name)"; state = "$($Packages[$k].state)"; reason = "$($Packages[$k].reason)" } }
+    $lic = if ($null -ne $Licence) { [ordered]@{ ok = [bool]$Licence.ok; reason = "$($Licence.reason)" } } else { $null }
+    $sig = ConvertTo-Json -InputObject ([ordered]@{ licence = $lic; packages = $pk }) -Depth 6 -Compress
+    if ("$($script:PimAccessPackageStatusSig)" -ceq $sig) { return }
+    try {
+        Set-PimSetting -Name (Get-PimAccessPackageStatusSetting) -Value ([pscustomobject]@{ updatedUtc = (Get-Date).ToUniversalTime().ToString('o'); licence = $lic; packages = [pscustomobject]$pk })
+        $script:PimAccessPackageStatusSig = $sig
+    } catch { Write-Warning "  [AccessPackages] the package status for the Manager could not be saved: $($_.Exception.Message)" }
+}
+
+function Test-PimAccessPackageGroupStillPackaged {
+    <#
+      The LOCK for retirement: is the group of this NAME (a locked one) still delivered by a defined package (a row that is not Action=Remove names its tag)?
+      $true also when that cannot be read (doubt = keep the group). Not a locked name = $false (the lock does not apply).
+    #>
+    param([string]$GroupName)
+    if (-not (Test-PimAccessPackageGroupName -Name $GroupName)) {
+        $lockedByCol = $false
+        try { foreach ($d in @(Get-PimGroupDefinitionRows -IncludeRetired)) { if ("$($d.GroupName)" -ieq "$GroupName" -and (Get-PimAccessPackageDefinitionOwner -Definition $d)) { $lockedByCol = $true } } } catch { return $false }   # not a '-AP' name: the retirement's own checks decide
+        if (-not $lockedByCol) { return $false }
+    }
+    try {
+        $tags = @{}
+        foreach ($d in @(Get-PimGroupDefinitionRows -IncludeRetired)) { if ("$($d.GroupName)" -ieq "$GroupName" -and "$($d.GroupTag)".Trim()) { $tags["$($d.GroupTag)".Trim().ToLowerInvariant()] = $true } }
+        $rows = @(Get-PimAccessPackageRows)
+        $entity = Get-PimAccessPackageEntityName
+        if ($global:PIM_DesiredResolved -is [hashtable] -and $global:PIM_DesiredResolved.ContainsKey($entity) -and -not $global:PIM_DesiredResolved[$entity]) { return $true }
+        foreach ($r in $rows) {
+            if ("$(Get-PimRowProp -Row $r -Names @('Action'))".Trim() -ieq 'Remove') { continue }
+            foreach ($t in @(Split-PimAccessPackageList "$(Get-PimRowProp -Row $r -Names @('DirectGroupTags'))")) { if ($tags.ContainsKey("$t".ToLowerInvariant())) { return $true } }
+        }
+        return $false
+    } catch { return $true }
 }
 
 function Get-PimAccessPackageChainTags {
@@ -465,6 +646,14 @@ function Get-PimAccessPackageGroupProblems {
         if (-not (Test-PimDirectGroupEntity -Entity "$($d.SourceEntity)")) { "'$t' is a permission group -- a package may only grant membership of a direct group"; continue }
         if ("$($d.Lifecycle)".Trim() -match '(?i)^retire') { "'$t' is being retired -- a package may not deliver it"; continue }
         if ("$($d.Owner)".Trim() -ieq 'msp') { "'$t' is owned by the managing tenant -- a managed tenant's package may not deliver it"; continue }
+        # OWNER 2026-11-12: "we dont touch existing groups" -- only a group created FOR this package (AccessPackage column = this package,
+        # name ending '-AP'). An existing group, or one locked to ANOTHER package, pauses the package; it is never bound or renamed.
+        if (-not (Test-PimAccessPackageDedicatedDefinition -Definition $d -PackageName "$($Definition.name)")) {
+            $o = Get-PimAccessPackageDefinitionOwner -Definition $d
+            if ($o -and $o -ine "$($Definition.name)") { "'$t' belongs to access package '$o' -- a group is locked to the one package it was created for" }
+            else { "'$t' is not a group created for this access package (its definition must name the package and its name must end with '$(Get-PimAccessPackageGroupMarker)') -- an access package never uses an existing group" }
+            continue
+        }
         if ("$($Definition.approval)" -ieq 'None') {
             $tiers = @(Get-PimAccessPackageChainTiers -Tag "$t" -GroupDefinitions $GroupDefinitions -Nestings $Nestings)
             if (@($tiers | Where-Object { "$_" -eq 'unknown' -or [int]$_ -le 1 }).Count) { "'$t' sits on a Tier-0 or Tier-1 chain, or on a chain whose tier is not stated -- no approval is refused there" }
@@ -744,17 +933,26 @@ function Get-PimAccessPackageDesired {
         Add-PimAccessPackageWarning -Context $Context -Message ("{0} group(s) were released from an access package and their old rows have not been reviewed ({1}); the engine creates nothing for them. To hand one back: {2}. [ACCESS-PACKAGE-RELEASED]" -f $names.Count, ($names -join ', '), (Get-PimAccessPackageReleasedSteps))
     }
     $bound = [int]$state.record.bindings.Count
+    # The state of every package for the Manager (report-only, pim.Settings 'AccessPackageStatus'): active / waiting / paused / off.
+    $status = @{}
+    $setStatus = { param($n, $s, $why) $nn = "$n".Trim(); if ($nn) { $status[$nn.ToLowerInvariant()] = @{ name = $nn; state = $s; reason = "$why" } } }
+    $rowName = { param($r) "$(Get-PimRowProp -Row $r -Names @('AccessPackageName'))".Trim() }
     if (-not (Test-PimAccessPackagesEnabled)) {
         if ($bound) { Add-PimAccessPackageWarning -Context $Context -Message ("access packages are switched off (AccessPackagesEnabled): the {0} bound group(s) are handed back to the engine -- their members follow the group rows again (removals go through the removal budget and the guards). The bindings are kept: switching it on again gives the groups back to their packages. [ACCESS-PACKAGE-OFF-HANDED-BACK]" -f $bound) }
+        foreach ($r in $rows) { & $setStatus (& $rowName $r) 'off' 'access packages are switched off in Settings' }
+        Save-PimAccessPackageStatus -Context $Context -Packages $status -Licence $null
         return @()
     }
     if (-not $rows.Count) {
         if ($bound) { Add-PimAccessPackageWarning -Context $Context -Message ("{0} group(s) are bound to access packages that have no definition any more; the members stay with the packages. To hand a group back, add an Action=Remove row for its package. [ACCESS-PACKAGE-BINDING-ORPHAN]" -f $bound) }
+        Save-PimAccessPackageStatus -Context $Context -Packages $status -Licence $null
         return @()
     }
     $lic = Get-PimAccessPackageLicence
     $removalOnly = $false
     if (-not $lic.ok) {
+        foreach ($r in $rows) { if (-not (Test-PimRowIsRemove $r)) { & $setStatus (& $rowName $r) 'paused' "nothing is built: $($lic.reason)" } }
+        Save-PimAccessPackageStatus -Context $Context -Packages $status -Licence $lic
         $removes = @($rows | Where-Object { Test-PimRowIsRemove $_ })
         if (-not $removes.Count) {
             Add-PimAccessPackageWarning -Context $Context -Message ("{0} access package(s) are defined but nothing was built: {1}. Existing bindings stand. To hand a group back, add an Action=Remove row for its package: retiring does not wait for the licence. [ACCESS-PACKAGE-LICENCE]" -f $rows.Count, $lic.reason)
@@ -774,11 +972,32 @@ function Get-PimAccessPackageDesired {
     foreach ($r in $rows) {
         $d = ConvertTo-PimAccessPackageDefinition -Row $r
         foreach ($t in @($d.groupTags)) { $g = $ByTag["$t".ToLowerInvariant()]; if ($g) { $Context['apNamedGroupIds']["$g".ToLowerInvariant()] = $true } }
-        if ($d.isRemove) { if ($d.name) { $remove.Add($r); if ($removalOnly) { $Context['apOnlyNames'][$d.name.ToLowerInvariant()] = $true } } else { $Context['apUnnamedInvalid'] = $true }; continue }
+        # PAUSED BY AN ADMINISTRATOR: nothing at all is written for it (not even a retirement) and its live package is left out whole.
+        if ($d.paused) {
+            if ($d.name) { $Context['apHeldNames'][$d.name.ToLowerInvariant()] = $true } else { $Context['apUnnamedInvalid'] = $true }
+            & $setStatus $d.name 'paused' $(if ("$($d.pauseReason)".Trim()) { "paused by an administrator: $($d.pauseReason)" } else { 'paused by an administrator' })
+            Add-PimAccessPackageWarning -Context $Context -Message ("package '{0}' is paused by an administrator; nothing is changed for it until it is resumed. [ACCESS-PACKAGE-PAUSED]" -f $(if ($d.name) { $d.name } else { '(no name)' }))
+            continue
+        }
+        if ($d.isRemove) { if ($d.name) { $remove.Add($r); & $setStatus $d.name 'retiring' 'an Action=Remove row retires it'; if ($removalOnly) { $Context['apOnlyNames'][$d.name.ToLowerInvariant()] = $true } } else { $Context['apUnnamedInvalid'] = $true }; continue }
         if ($removalOnly) { continue }
         $bad = @(@($d.problems) + @(Get-PimAccessPackageGroupProblems -Definition $d -GroupDefinitions $defs -Nestings $nest))
         $gids = New-Object System.Collections.Generic.List[string]
-        foreach ($t in @($d.groupTags)) { $g = $ByTag["$t".ToLowerInvariant()]; if ($g) { $gids.Add($g) } elseif (-not @($bad | Where-Object { "$_" -like "*'$t'*" }).Count) { $bad += "group '$t' does not exist in the tenant yet" } }
+        $waiting = New-Object System.Collections.Generic.List[string]
+        foreach ($t in @($d.groupTags)) {
+            $g = $ByTag["$t".ToLowerInvariant()]
+            if ($g) {
+                # IN DOUBT = PAUSE: a group of that name PIM did not create (or cannot prove it created) is never used for a package.
+                $dn = "$(@($defs | Where-Object { "$($_.GroupTag)" -ieq "$t" } | Select-Object -First 1 | ForEach-Object { $_.GroupName }))"
+                if (-not $dn) { $dn = "$($owned.byId["$g"].name)" }
+                $doubt = Get-PimAccessPackageGroupDoubt -Name $dn -Id "$g"
+                if ($doubt) { $bad += $doubt } else { $gids.Add($g) }
+            } elseif (-not @($bad | Where-Object { "$_" -like "*'$t'*" }).Count) {
+                $nm = "$(@($defs | Where-Object { "$($_.GroupTag)" -ieq "$t" } | Select-Object -First 1 | ForEach-Object { $_.GroupName }))"
+                $doubt = if ($nm) { Get-PimAccessPackageGroupDoubt -Name $nm -Id '' } else { '' }
+                if ($doubt) { $bad += $doubt } else { $bad += "group '$t' does not exist in the tenant yet"; $waiting.Add("$t") }
+            }
+        }
         $reqGroup = ''
         if ($d.requestScope -ieq 'Group') { $reqGroup = "$($ByTag["$($d.requestGroupTag)".ToLowerInvariant()])"; if (-not $reqGroup) { $bad += "RequestGroupTag '$($d.requestGroupTag)' is not a PIM group that exists" } }
         $stageSubjects = New-Object System.Collections.Generic.List[object]
@@ -788,11 +1007,15 @@ function Get-PimAccessPackageDesired {
         }
         $revSubjects = @(foreach ($x in @($d.reviewers)) { $s = Resolve-PimAccessPackageSubject -Token "$x" -ByTag $ByTag; if ($s) { $s } else { $bad += "reviewer '$x' could not be resolved" } })
         if (@($bad).Count) {
-            Add-PimAccessPackageWarning -Context $Context -Message ("package '{0}' is not applied: {1} [ACCESS-PACKAGE-DEFINITION]" -f $(if ($d.name) { $d.name } else { '(no name)' }), (@($bad) -join '; '))
+            # Only "its new group is not created yet" is waiting (the Groups scope creates it first); every other reason is a PAUSE.
+            $onlyWaiting = ($waiting.Count -gt 0 -and @($bad).Count -eq $waiting.Count)
+            Add-PimAccessPackageWarning -Context $Context -Message ("package '{0}' is {1}: {2} [{3}]" -f $(if ($d.name) { $d.name } else { '(no name)' }), $(if ($onlyWaiting) { 'not applied yet' } else { 'PAUSED -- nothing is written for it' }), (@($bad) -join '; '), $(if ($onlyWaiting) { 'ACCESS-PACKAGE-DEFINITION' } else { 'ACCESS-PACKAGE-PAUSED' }))
+            & $setStatus $d.name $(if ($onlyWaiting) { 'waiting' } else { 'paused' }) (@($bad) -join '; ')
             # An invalid definition must never read as "gone": its live package is left out of this run, whole.
             if ($d.name) { $Context['apHeldNames'][$d.name.ToLowerInvariant()] = $true } else { $Context['apUnnamedInvalid'] = $true }
             continue
         }
+        & $setStatus $d.name 'active' ''
         $row = [pscustomobject]@{
             PackageName = $d.name; GroupIds = $gids.ToArray(); RequestScope = $d.requestScope; RequestGroupId = $reqGroup; StageSubjects = $stageSubjects.ToArray()
             RequireJustification = $d.requireJustification; MaxDays = $d.maxDays; AllowExtension = $d.allowExtension; ReviewCadence = $d.reviewCadence; ReviewerSubjects = $revSubjects; ReviewNoResponse = $d.reviewNoResponse; Notes = $d.notes
@@ -804,6 +1027,7 @@ function Get-PimAccessPackageDesired {
     }
     $Context['apRemoveRows'] = $remove.ToArray()
     $Context['apActive'] = $true
+    Save-PimAccessPackageStatus -Context $Context -Packages $status -Licence $lic
     return $out.ToArray()
 }
 
@@ -954,15 +1178,20 @@ function Write-PimAccessPackageBindingsReadBack {
       The ONLY path that writes a binding: this live row is a read-back of a package in PIM's catalog with an eligible member scope on each group, AND a policy. Only groups in -AllowedGroupIds (the direct groups a
       valid definition names) are bound. THROWS when it cannot be saved.
     #>
-    param([Parameter(Mandatory)][object]$LiveRow, [string[]]$AllowedGroupIds = @())
+    param([Parameter(Mandatory)][object]$LiveRow, [string[]]$AllowedGroupIds = @(), [string]$PackageName = '')
     if (-not "$($LiveRow.PolicyId)".Trim()) { return }   # the policy was not read back: no binding yet
     $state = Get-PimAccessPackageBindingRecord
     if (-not $state.ok) { throw "the binding record could not be read: $($state.error)" }
     $allowed = @{}; foreach ($g in @($AllowedGroupIds)) { $allowed["$g".ToLowerInvariant()] = $true }
     $owned = Get-PimSolutionOwnedGroups
+    # OWNER 2026-11-12: a binding is written ONLY for a group created for THIS package (both markers) -- never an existing group.
+    $pkgName = if ("$PackageName".Trim()) { "$PackageName".Trim() } else { "$($LiveRow.PackageName)".Trim() }
+    $dedicated = @{}
+    foreach ($def in @(Get-PimGroupDefinitionRows -IncludeRetired)) { if (Test-PimAccessPackageDedicatedDefinition -Definition $def -PackageName $pkgName) { $dedicated["$($def.GroupTag)".Trim().ToLowerInvariant()] = $true } }
     $changed = $false
     foreach ($gid in @($LiveRow.GroupIds)) {
         if (-not $allowed.ContainsKey("$gid".ToLowerInvariant()) -or -not $owned.byId.ContainsKey("$gid")) { continue }
+        if (-not $dedicated.ContainsKey("$($owned.byId["$gid"].tag)".Trim().ToLowerInvariant())) { Write-Warning "  [AccessPackages] group '$($owned.byId["$gid"].tag)' was not created for package '$pkgName'; it is NOT bound. [ACCESS-PACKAGE-PAUSED]"; continue }
         if (Add-PimAccessPackageBindingEntry -Record $state.record -GroupId "$gid" -Tag "$($owned.byId["$gid"].tag)" -PackageId "$($LiveRow.Id)") { $changed = $true }
     }
     if ($changed) { Save-PimAccessPackageBindingState -State $state }

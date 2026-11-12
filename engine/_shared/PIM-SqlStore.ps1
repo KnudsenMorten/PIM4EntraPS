@@ -587,6 +587,71 @@ END
 "@
 }
 
+function Get-PimSqlDatabaseStatsProcedureSql {
+    <#
+      PURE. SQL-STATS-PROOF (framework 12.27 point 5): pim.usp_DatabaseStats, the heartbeat's Database read. WITH EXECUTE AS
+      OWNER -- sys.dm_db_resource_stats needs VIEW DATABASE STATE, which no runtime identity holds and the frozen access
+      procedure cannot grant (a database-level right); the engine holds EXECUTE on THIS procedure and nothing more. READ-ONLY:
+      no table of data is read, no data change, no dynamic text from a caller (it takes no parameter). ONE row:
+        tier, maxSizeMb, usedMb, statsAsync                     the database's own properties
+        loadIntervals, peakLogWritePct1h, minutesAtLimit1h      the last hour of sys.dm_db_resource_stats; NULL where that view
+                                                               does not exist (SQL Server) -- read through sp_executesql
+                                                               inside TRY, so the procedure compiles everywhere
+        statsTotal, statsReadable, statsStale                   pim user-table statistics; stale = modification_counter > 20 %
+                                                               of rows + 500 (pim.usp_RefreshStatistics' own rule)
+    #>
+    return @"
+CREATE OR ALTER PROCEDURE pim.usp_DatabaseStats
+WITH EXECUTE AS OWNER
+AS
+BEGIN
+    -- pim-dbstats v1 -- framework 12.27 point 5 SQL-STATS-PROOF. Read-only: numbers about this database, never a row of data.
+    SET NOCOUNT ON;
+    DECLARE @since DATETIME = CAST(DATEADD(HOUR, -1, SYSUTCDATETIME()) AS DATETIME);
+    DECLARE @intervals INT = NULL, @peakLog DECIMAL(9,2) = NULL, @atLimit INT = NULL;
+    BEGIN TRY
+        EXEC sys.sp_executesql
+            N'SELECT @n = COUNT(*), @p = MAX(avg_log_write_percent),
+                     @m = COUNT(DISTINCT CASE WHEN avg_cpu_percent >= 99 OR avg_data_io_percent >= 99 OR avg_log_write_percent >= 99 OR avg_memory_usage_percent >= 99
+                                              THEN DATEDIFF(MINUTE, @s, end_time) END)
+              FROM sys.dm_db_resource_stats WHERE end_time > @s;',
+            N'@s DATETIME, @n INT OUTPUT, @p DECIMAL(9,2) OUTPUT, @m INT OUTPUT',
+            @s = @since, @n = @intervals OUTPUT, @p = @peakLog OUTPUT, @m = @atLimit OUTPUT;
+    END TRY
+    BEGIN CATCH
+        SELECT @intervals = NULL, @peakLog = NULL, @atLimit = NULL;
+    END CATCH
+    DECLARE @statsTotal INT = 0, @statsReadable INT = 0, @statsStale INT = 0;
+    SELECT @statsTotal = COUNT(*), @statsReadable = COUNT(sp.object_id),
+           @statsStale = ISNULL(SUM(CASE WHEN sp.modification_counter > (sp.rows * 20 / 100) + 500 THEN 1 ELSE 0 END), 0)
+    FROM sys.stats s
+    JOIN sys.tables t ON t.object_id = s.object_id
+    OUTER APPLY sys.dm_db_stats_properties(s.object_id, s.stats_id) sp
+    WHERE t.schema_id = SCHEMA_ID(N'pim') AND t.is_ms_shipped = 0;
+    SELECT CAST(DATABASEPROPERTYEX(DB_NAME(), 'ServiceObjective') AS NVARCHAR(60)) AS tier,
+           CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS BIGINT) / 1048576 AS maxSizeMb,
+           (SELECT SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS BIGINT)) * 8 / 1024 FROM sys.database_files WHERE type_desc = 'ROWS') AS usedMb,
+           (SELECT CAST(is_auto_update_stats_async_on AS INT) FROM sys.databases WHERE database_id = DB_ID()) AS statsAsync,
+           @intervals AS loadIntervals, @peakLog AS peakLogWritePct1h, @atLimit AS minutesAtLimit1h,
+           @statsTotal AS statsTotal, @statsReadable AS statsReadable, @statsStale AS statsStale;
+END
+"@
+}
+
+function Get-PimSqlStatisticsRefreshedSetting { <# PURE. LITERAL. The pim.Settings name of the last successful refresh (SQL-STATS-PROOF). #> return 'StatisticsRefreshedUtc' }
+
+function Test-PimSqlStatisticsRefreshSucceeded {
+    <#
+      PURE. Did a refresh call SUCCEED (SQL-STATS-PROOF statsRefreshedUtc)? The procedure answered with its row, did not
+      refuse for a caller's transaction, and no statistic failed. Nothing stale (0 refreshed) is a success: the statistics
+      ARE fresh. A deferred remainder is still a success for what was done (the next call continues).
+    #>
+    param([AllowNull()][object]$Row)
+    if ($null -eq $Row) { return $false }
+    $g = { param($n) $p = $Row.PSObject.Properties[$n]; if ($p -and $null -ne $p.Value -and "$($p.Value)" -ne '') { [int]"$($p.Value)" } else { 0 } }
+    return ((& $g 'inTransaction') -eq 0 -and (& $g 'failed') -eq 0)
+}
+
 $script:PimSqlStatsWarned = @{}
 function Invoke-PimSqlStatisticsRefresh {
     <#
@@ -595,8 +660,11 @@ function Invoke-PimSqlStatisticsRefresh {
       not repeat it) and the job carries on. Cheap when nothing is stale: the procedure reads sys.stats and returns.
       Returns @{ ok; skipped; refreshed; stale; failed; deferred; elapsedMs; message }.
       -Query: param($cs, $sql, $timeoutSec) -> rows (test seam; default: its own connection with a timeout above the budget).
+      SQL-STATS-PROOF: a SUCCESSFUL call (Test-PimSqlStatisticsRefreshSucceeded) records its time in pim.Settings
+      'StatisticsRefreshedUtc' (ISO UTC) -- the heartbeat's Database.statsRefreshedUtc. -Record: param($cs, $iso) (test seam;
+      default Set-PimSqlSetting). Best effort: a refused write is one verbose line, never a warning, never a throw.
     #>
-    param([string]$ConnectionString = '', [string]$Reason = '', [scriptblock]$Query)
+    param([string]$ConnectionString = '', [string]$Reason = '', [scriptblock]$Query, [scriptblock]$Record)
     $res = { param($ok, $skip, $msg, $row)
         $g = { param($n) if ($row -and $row.PSObject.Properties[$n] -and $null -ne $row.$n -and "$($row.$n)" -ne '') { [int]"$($row.$n)" } else { 0 } }
         [pscustomobject]@{ ok = [bool]$ok; skipped = [bool]$skip; refreshed = (& $g 'refreshed'); stale = (& $g 'stale'); failed = (& $g 'failed')
@@ -624,6 +692,12 @@ function Invoke-PimSqlStatisticsRefresh {
         $why = if ("$Reason".Trim()) { " after the $("$Reason".Trim())" } else { '' }
         $r.message = "statistics$why`: $($r.refreshed) refreshed of $($r.stale) stale$(if ($r.deferred) { ", $($r.deferred) left for the next call" })$(if ($r.failed) { ", $($r.failed) failed ($($row.lastError))" }) in $($r.elapsedMs) ms"
         if ($r.refreshed -or $r.failed -or $r.deferred) { Write-Host "  $($r.message)" -ForegroundColor DarkGray } else { Write-Verbose "  $($r.message)" }
+        if (Test-PimSqlStatisticsRefreshSucceeded -Row $row) {
+            $iso = [datetime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
+            if (-not $Record) { $Record = { param($c1, $v1) Set-PimSqlSetting -ConnectionString $c1 -Name (Get-PimSqlStatisticsRefreshedSetting) -Value $v1 } }
+            try { [void](& $Record $cs $iso); $r | Add-Member -NotePropertyName recordedUtc -NotePropertyValue $iso -Force }
+            catch { Write-Verbose "[store] statistics: the refresh time was not recorded: $((("$($_.Exception.Message)") -split "`n")[0])" }
+        }
         return $r
     } catch {
         $m = (("$($_.Exception.Message)" -split "`n")[0]).Trim()
@@ -640,14 +714,17 @@ function Invoke-PimSqlStatisticsRefresh {
 function Get-PimSqlStatisticsProbeSql {
     <#
       PURE. READ-ONLY. One row: asyncOn (1/0), canAlterDb (ALTER on this database), canOwner (may impersonate the schema owner
-      dbo -- what CREATE ... WITH EXECUTE AS OWNER needs), procState (0 = no procedure, 1 = another version, 2 = this version).
+      dbo -- what CREATE ... WITH EXECUTE AS OWNER needs), procState (0 = no procedure, 1 = another version, 2 = this version),
+      dbStatsState (the same for pim.usp_DatabaseStats, SQL-STATS-PROOF).
     #>
     return @"
 SELECT CAST(d.is_auto_update_stats_async_on AS int) AS asyncOn,
        ISNULL(HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'ALTER'), 0) AS canAlterDb,
        ISNULL(HAS_PERMS_BY_NAME(N'dbo', N'USER', N'IMPERSONATE'), 0) AS canOwner,
        CASE WHEN OBJECT_ID(N'pim.usp_RefreshStatistics') IS NULL THEN 0
-            WHEN ISNULL(OBJECT_DEFINITION(OBJECT_ID(N'pim.usp_RefreshStatistics')), N'') LIKE N'%pim-stats v1%' THEN 2 ELSE 1 END AS procState
+            WHEN ISNULL(OBJECT_DEFINITION(OBJECT_ID(N'pim.usp_RefreshStatistics')), N'') LIKE N'%pim-stats v1%' THEN 2 ELSE 1 END AS procState,
+       CASE WHEN OBJECT_ID(N'pim.usp_DatabaseStats') IS NULL THEN 0
+            WHEN ISNULL(OBJECT_DEFINITION(OBJECT_ID(N'pim.usp_DatabaseStats')), N'') LIKE N'%pim-dbstats v1%' THEN 2 ELSE 1 END AS dbStatsState
 FROM sys.databases d WHERE d.database_id = DB_ID()
 "@
 }
@@ -669,7 +746,7 @@ function Initialize-PimSqlStatistics {
     $pr = $null
     try { $pr = @(& $Query $ConnectionString (Get-PimSqlStatisticsProbeSql))[0] } catch { $pr = $null; Write-Verbose "[store] statistics: the probe could not be read: $($_.Exception.Message)" }
     $num = { param($n) if ($pr -and $pr.PSObject.Properties[$n] -and $null -ne $pr.$n -and "$($pr.$n)" -ne '') { [int]"$($pr.$n)" } else { -1 } }
-    $asyncOn = & $num 'asyncOn'; $canDb = & $num 'canAlterDb'; $canOwn = & $num 'canOwner'; $pState = & $num 'procState'
+    $asyncOn = & $num 'asyncOn'; $canDb = & $num 'canAlterDb'; $canOwn = & $num 'canOwner'; $pState = & $num 'procState'; $dState = & $num 'dbStatsState'
     $left = New-Object System.Collections.Generic.List[string]
     # (1) async
     $a = $null
@@ -684,8 +761,17 @@ function Initialize-PimSqlStatistics {
             catch { $pErr = (("$($_.Exception.Message)" -split "`n")[0]).Trim(); Write-Warning "[store] pim.usp_RefreshStatistics could not be created: $pErr -- statistics are not refreshed after bulk writes until it is; nothing else is affected" }
         } else { $left.Add('procedure'); $pErr = 'this identity may not create an EXECUTE AS OWNER procedure -- left to the admin run' }
     }
+    # (3) SQL-STATS-PROOF: pim.usp_DatabaseStats, the heartbeat's Database read -- the same rule as (2): an admin, or an
+    # identity that may impersonate the owner; else left to the admin run. Telemetry only: a refusal is one warning.
+    $dOk = ($dState -eq 2); $dErr = ''
+    if (-not $dOk) {
+        if ($Admin -or $canOwn -eq 1) {
+            try { & $Exec $ConnectionString (Get-PimSqlDatabaseStatsProcedureSql); $dOk = $true }
+            catch { $dErr = (("$($_.Exception.Message)" -split "`n")[0]).Trim(); Write-Warning "[store] pim.usp_DatabaseStats could not be created: $dErr -- the heartbeat reads what it may directly until it is; nothing else is affected" }
+        } else { $left.Add('dbstats'); $dErr = 'this identity may not create an EXECUTE AS OWNER procedure -- left to the admin run' }
+    }
     if ($left.Count) { Write-Host "  statistics: $($left -join ' + ') left to the admin run (this identity holds no right for it; framework 12.27)" -ForegroundColor DarkGray }
-    return [pscustomobject]@{ async = $a; procedure = $pOk; procedureError = $pErr; left = @($left.ToArray()) }
+    return [pscustomobject]@{ async = $a; procedure = $pOk; procedureError = $pErr; dbStats = $dOk; dbStatsError = $dErr; left = @($left.ToArray()) }
 }
 
 function Initialize-PimSqlStore {

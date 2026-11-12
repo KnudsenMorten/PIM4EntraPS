@@ -380,6 +380,8 @@ try {
         $st2 = Initialize-PimSqlStatistics -ConnectionString 'dbinit' -Query $sq -Exec $sx -Admin
         Say $st2.async.message $(if ($st2.async.ok) { 'Green' } else { 'Yellow' })
         Say $(if ($st2.procedure) { 'statistics: pim.usp_RefreshStatistics is in place' } else { "statistics: pim.usp_RefreshStatistics NOT in place: $($st2.procedureError)" }) $(if ($st2.procedure) { 'Green' } else { 'Yellow' })
+        # SQL-STATS-PROOF (framework 12.27 point 5): the heartbeat's Database read, created by the same admin call
+        Say $(if ($st2.dbStats) { 'statistics: pim.usp_DatabaseStats is in place' } else { "statistics: pim.usp_DatabaseStats NOT in place: $($st2.dbStatsError)" }) $(if ($st2.dbStats) { 'Green' } else { 'Yellow' })
     }
     # ---- LEAST-PRIVILEGE ACCESS (framework §12.23 P4/P9, PIM 100.156) ------------------------------
     # The ADMIN half of the access model, from inside, as the server's Entra admin: the signed procedure, its 2099

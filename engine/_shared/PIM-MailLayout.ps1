@@ -324,6 +324,57 @@ function Get-PimMailSeverityWord {
     return ''
 }
 
+function Get-PimMailEnvironmentPrefix {
+    <#
+      PURE. MAIL-ENV (framework 12.11a, owner 2026-11-12 "owner mails name environments"): THE ONE place that builds how a
+      PIM mail names the environment that sent it. Every subject (Get-PimMailSubjectLine) and every body's first line
+      (Add-PimMailEnvironmentFirstLine) take it from here. Returns @{ tag; displayName; subject; line }:
+        subject  "[<tag>] <displayName>: "  -- the configured tag ("[PROD]") kept, the display name after it;
+                 "[<displayName>] "         -- when there is no separate tag (or both are the same name);
+                 "[tenant <id>] "           -- neither name, only the tenant id;  '' -- nothing at all
+        line     "<displayName>: "          -- the first line of the body; never a GUID (a tenant-id label or no name at all
+                                               reads "Unnamed environment: "), never empty
+      -EnvironmentName = the tag (Get-PimMailEnvironmentInfo .tag; older callers pass their one name here),
+      -DisplayName = Get-PimMailEnvironmentInfo .displayName.
+    #>
+    param([AllowNull()][string]$EnvironmentName = '', [AllowNull()][string]$DisplayName = '', [AllowNull()][string]$TenantId = '')
+    $tag = ("$EnvironmentName" -replace '\s+', ' ').Trim()
+    $dn = ("$DisplayName" -replace '\s+', ' ').Trim()
+    if (-not $tag) { $tag = $dn; $dn = '' }
+    elseif ($dn -and $dn -ieq $tag) { $dn = '' }
+    if (-not $tag -and "$TenantId".Trim()) { $tag = 'tenant ' + "$TenantId".Trim() }
+    $subject = ''
+    if ($tag) { $subject = '[' + $tag + '] ' }
+    if ($dn) { $subject += $dn + ': ' }
+    $ln = if ($dn) { $dn } else { $tag }
+    if (-not $ln -or (Test-PimMailTenantIdLabel $ln)) { $ln = 'Unnamed environment' }
+    return @{ tag = $tag; displayName = $(if ($dn) { $dn } else { $tag }); subject = $subject; line = $ln + ': ' }
+}
+
+function Add-PimMailEnvironmentFirstLine {
+    <#
+      PURE. MAIL-ENV: puts the environment line FIRST in a mail body -- "<display name>: <severity word: >what happened" and,
+      when known, "Tenant: <tenant display name>" under it (the tenant id stays in the footer / Details for support: a GUID
+      is never in the visible body). HTML: one <p class="pim-env-first"> right after <body> (or at the start); text: the
+      same lines first. Idempotent (a body that already has it is returned unchanged). Returns @{ html; text }.
+    #>
+    param([AllowNull()][string]$BodyHtml = '', [AllowNull()][string]$BodyText = '', [Parameter(Mandatory)][string]$Line, [AllowNull()][string]$TenantName = '')
+    $h = "$BodyHtml"; $t = "$BodyText"
+    $tn = ("$TenantName" -replace '\s+', ' ').Trim()
+    if (Test-PimMailTenantIdLabel $tn) { $tn = '' }
+    if ($h -notmatch 'class="pim-env-first"') {
+        $enc = { param($v) [System.Net.WebUtility]::HtmlEncode("$v") }
+        $ix = $Line.IndexOf(': ')
+        $lineHtml = if ($ix -gt 0) { '<b>' + (& $enc $Line.Substring(0, $ix)) + '</b>: ' + (& $enc $Line.Substring($ix + 2)) } else { & $enc $Line }
+        $p = '<p class="pim-env-first" style="margin:0 0 12px 0;font-family:''Segoe UI'',Helvetica,Arial,sans-serif;font-size:13px;color:#24292f;">' + $lineHtml +
+             $(if ($tn) { '<br>Tenant: ' + (& $enc $tn) } else { '' }) + '</p>'
+        $mb = [regex]::Match($h, '(?i)<body\b[^>]*>')
+        $h = if ($mb.Success) { $h.Substring(0, $mb.Index + $mb.Length) + $p + $h.Substring($mb.Index + $mb.Length) } else { $p + $h }
+        $t = $Line + $(if ($tn) { "`r`nTenant: $tn" } else { '' }) + "`r`n`r`n" + $t
+    }
+    return @{ html = $h; text = $t }
+}
+
 function Get-PimMailSubjectLine {
     <#
       PURE. Framework §12.11a MAIL-3 (CR6, owner + Thomas approved 2026-10-14), the ONE subject format of every PIM mail:
@@ -339,7 +390,12 @@ function Get-PimMailSubjectLine {
       product name are removed; no full stop at the end of "what happened".
     #>
     param([string]$EnvironmentName = '', [string]$TenantId = '', [AllowEmptyString()][string]$What = '',
-          [string]$Severity = '', [string]$Ticket = '', [int]$MaxLength = 120)
+          [string]$Severity = '', [string]$Ticket = '', [int]$MaxLength = 120,
+          # MAIL-ENV (framework 12.11a): the environment's DISPLAY name (Invardia's, else the install's own) -- the subject
+          # becomes "[<EnvironmentName>] <DisplayName>: ..." (Get-PimMailEnvironmentPrefix, the one prefix builder).
+          [string]$DisplayName = '',
+          # 'firstLine' = the body's first line "<DisplayName>: <severity word: >what happened" (never shortened) instead
+          [ValidateSet('subject', 'firstLine')][string]$Part = 'subject')
     $w = ("$What" -replace '\s+', ' ').Trim()
     # take an already formatted subject apart: the product tag, the ticket, the environment tag, the severity word
     $w = [regex]::Replace($w, '(\s*\[(?i:PIM Manager|PIM4EntraPS)\])+$', '')
@@ -347,9 +403,11 @@ function Get-PimMailSubjectLine {
     $tm = [regex]::Match($w, '\s*\[([A-Za-z]{2,12}-\d+)\]$')
     if ($tm.Success) { if (-not $tk) { $tk = $tm.Groups[1].Value }; $w = $w.Substring(0, $tm.Index) }
     $w = [regex]::Replace($w, '^(\[[^\]]*\]\s*)+', '')
-    $n = ("$EnvironmentName" -replace '\s+', ' ').Trim()
-    if (-not $n -and "$TenantId".Trim()) { $n = 'tenant ' + "$TenantId".Trim() }
-    if ($n -and $w.StartsWith($n + ':', [System.StringComparison]::OrdinalIgnoreCase)) { $w = $w.Substring($n.Length + 1).Trim() }
+    $px = Get-PimMailEnvironmentPrefix -EnvironmentName $EnvironmentName -DisplayName $DisplayName -TenantId $TenantId
+    # the old "<environment>: " form and MAIL-ENV's "<display name>: " -- never put first twice
+    foreach ($n in @($px.displayName, $px.tag)) {
+        if ($n -and $w.StartsWith($n + ':', [System.StringComparison]::OrdinalIgnoreCase)) { $w = $w.Substring($n.Length + 1).Trim() }
+    }
     $sev = Get-PimMailSeverityWord $Severity
     $sm = [regex]::Match($w, '^(?i)(Failed|Warning|Action needed)\s*:\s*')
     if ($sm.Success) { if (-not $sev) { $sev = Get-PimMailSeverityWord $sm.Groups[1].Value }; $w = $w.Substring($sm.Length) }
@@ -358,8 +416,12 @@ function Get-PimMailSubjectLine {
     # "Action needed" already says what an action subject's own tail said
     if ($sev -eq 'Action needed') { $w = [regex]::Replace($w, '\s+-\s+it waits for your decision$', '') }
     if (-not $w) { $w = 'Message from PIM Manager' }
-    $pre = ''
-    if ($n) { $pre = '[' + $n + '] ' }
+    if ($Part -eq 'firstLine') {
+        $fl = "$($px.line)"
+        if ($sev) { $fl += $sev + ': ' }
+        return ($fl + $w)
+    }
+    $pre = "$($px.subject)"
     if ($sev) { $pre += $sev + ': ' }
     $post = ''
     if ($tk) { $post = ' [' + $tk + ']' }

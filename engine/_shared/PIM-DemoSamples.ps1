@@ -49,7 +49,7 @@ $script:PimDemoSampleValidatorBases = @(
     'PIM-Definitions-Services', 'PIM-Definitions-Processes', 'PIM-Definitions-Resources', 'PIM-Definitions-Departments',
     'PIM-Definitions-Organization', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg', 'PIM-Definitions-AU',
     'PIM-Assignments-Admins', 'PIM-Assignments-Groups', 'PIM-Assignments-Roles-Groups', 'PIM-Assignments-Roles-AUs',
-    'PIM-Assignments-Azure-Resources', 'PIM-Assignments-Workloads'
+    'PIM-Assignments-Azure-Resources', 'PIM-Assignments-Workloads', 'AccessPackage'   # 3.1.13: the Manager's access-package entity (the sample has no package)
 )
 # Roles a sample must never hold (each can make itself Global Administrator).
 $script:PimDemoSampleForbiddenRoles = @('Global Administrator', 'Company Administrator', 'Privileged Role Administrator', 'Privileged Authentication Administrator')

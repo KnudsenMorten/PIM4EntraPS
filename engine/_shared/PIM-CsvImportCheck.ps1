@@ -434,6 +434,22 @@ function Get-PimCsvImportAdminUpnPlan {
         if ($upn) { $outRows.Add($r) | Out-Null; continue }
         $un = "$(Get-PimDownlinkValue -Object $r -Key 'UserName')".Trim()
         if (-not $un) { $un = "$(Get-PimDownlinkValue -Object $r -Key 'Username')".Trim() }
+        # EXISTING-ACCOUNT (owner 2026-11-12, "make sure importer supports all"): an existing account is named by its EXACT
+        # UPN, never a composed one. A UserName that IS a UPN is that UPN; anything else is NOT composed (no generated name):
+        # reported (existing = $true) and the importer refuses that row.
+        $isEx = (Get-Command Test-PimAdminIsExistingAccount -ErrorAction SilentlyContinue) -and (Test-PimAdminIsExistingAccount -Row $r)
+        if ($isEx) {
+            if ($un -match '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+                $c = Copy-PimCsvImportRow -Row $r
+                $c | Add-Member -NotePropertyName 'UserPrincipalName' -NotePropertyValue $un -Force
+                $outRows.Add($c) | Out-Null
+                $missing.Add([ordered]@{ index = $i; userName = $un; upn = $un; composed = $true; existing = $true }) | Out-Null
+            } else {
+                $outRows.Add($r) | Out-Null
+                $missing.Add([ordered]@{ index = $i; userName = $un; upn = ''; composed = $false; existing = $true }) | Out-Null
+            }
+            continue
+        }
         if ($un -and $dom) {
             $c = Copy-PimCsvImportRow -Row $r
             $c | Add-Member -NotePropertyName 'UserPrincipalName' -NotePropertyValue "$un@$dom" -Force
@@ -689,6 +705,13 @@ function Invoke-PimCsvImportCheck {
         $im.rows = @($up.rows)
         foreach ($m in @($up.missing)) {
             $rowNo = $im.rowNumbers[$m.index]; $line = $im.lines[$m.index]
+            if ($m.Contains('existing') -and $m.existing) {
+                if ($m.composed) {
+                    $findings.Add((New-PimCsvImportFinding -Severity info -Code 'CSVIMP-UPN-002' -File $im.file -Entity 'Account-Definitions-Admins' -Row $rowNo -Line $line -Column 'UserPrincipalName' `
+                        -Message ("existing account '{0}' has no UserPrincipalName -- its UserName is its UPN, so the import writes that (never a composed name)." -f $m.userName))) | Out-Null
+                }
+                continue   # no UPN at all: CSVIMP-EXIST-001 below says it, once
+            }
             if ($m.composed) {
                 $findings.Add((New-PimCsvImportFinding -Severity info -Code 'CSVIMP-UPN-002' -File $im.file -Entity 'Account-Definitions-Admins' -Row $rowNo -Line $line -Column 'UserPrincipalName' `
                     -Message ("admin '{0}' has no UserPrincipalName -- the import writes '{1}'." -f $m.userName, $m.upn))) | Out-Null
@@ -696,6 +719,52 @@ function Invoke-PimCsvImportCheck {
                 $findings.Add((New-PimCsvImportFinding -Severity error -Code 'CSVIMP-UPN-001' -File $im.file -Entity 'Account-Definitions-Admins' -Row $rowNo -Line $line -Column 'UserPrincipalName' `
                     -Message ("admin '{0}' has no UserPrincipalName. An admin without a UPN is not a valid admin: it cannot sign in, get a TAP or be shown on Admin accounts." -f $m.userName) `
                     -Suggestion 'Fill in UserPrincipalName in the file, or run the import with -DefaultDomain <the tenant''s default domain> so it is written as UserName@domain.')) | Out-Null
+            }
+        }
+        # CSVIMP-EXIST-001 -- an existing-account row without a valid exact UPN (name@domain) cannot be found and PIM never
+        # creates or names one: an ERROR, and the importer leaves that row out (Migrate-PimToSql refuses it, the rest goes on).
+        for ($xi = 0; $xi -lt @($im.rows).Count; $xi++) {
+            $xr = $im.rows[$xi]
+            if (-not ((Get-Command Test-PimAdminIsExistingAccount -ErrorAction SilentlyContinue) -and (Test-PimAdminIsExistingAccount -Row $xr))) { continue }
+            if (Get-PimExistingAccountRowUpn -Row $xr) { continue }
+            $xn = "$(Get-PimDownlinkValue -Object $xr -Key 'UserPrincipalName')".Trim(); if (-not $xn) { $xn = "$(Get-PimDownlinkValue -Object $xr -Key 'UserName')".Trim() }
+            $findings.Add((New-PimCsvImportFinding -Severity error -Code 'CSVIMP-EXIST-001' -File $im.file -Entity 'Account-Definitions-Admins' -Row $im.rowNumbers[$xi] -Line $im.lines[$xi] -Column 'UserPrincipalName' `
+                -Message ("existing account '{0}' has no valid UPN (name@domain) -- this row is NOT imported: an existing account is found by its exact UPN, and PIM never creates or names one." -f $xn) `
+                -Suggestion 'Set UserPrincipalName (and UserName) to the account''s own exact UPN, e.g. jdoe@contoso.example.')) | Out-Null
+        }
+    }
+
+    # --- existing accounts: their delegations name them by the EXACT UPN ---------------------------------
+    # EXISTING-ACCOUNT (owner 2026-11-12, "make sure importer supports all"). A v1 membership may name an existing account
+    # by its bare UserName (or its UPN's local part). The engine composes a bare name with PIM's ADMIN domain, which an office
+    # user's own domain need not be -- so such a membership is written with the account's exact UPN (the row and its key;
+    # deterministic, so a second import of the same file finds the same rows). A name two admins share is left as it is.
+    if ($import.Contains('Account-Definitions-Admins') -and $import.Contains('PIM-Assignments-Admins') -and (Get-Command Get-PimExistingAccountRowUpn -ErrorAction SilentlyContinue)) {
+        $exByName = @{}; $taken = @{}
+        foreach ($ar in @($import['Account-Definitions-Admins'].rows)) {
+            $an = "$(Get-PimDownlinkValue -Object $ar -Key 'UserName')".Trim().ToLowerInvariant()
+            $au = "$(Get-PimDownlinkValue -Object $ar -Key 'UserPrincipalName')".Trim().ToLowerInvariant()
+            $isEx = (Get-Command Test-PimAdminIsExistingAccount -ErrorAction SilentlyContinue) -and (Test-PimAdminIsExistingAccount -Row $ar)
+            $xupn = if ($isEx) { Get-PimExistingAccountRowUpn -Row $ar } else { '' }
+            foreach ($nm in @($an, $(if ($au.Contains('@')) { $au.Substring(0, $au.IndexOf('@')) } else { '' }))) {
+                if (-not $nm -or $nm.Contains('@')) { continue }
+                if ($taken.ContainsKey($nm) -and $taken[$nm] -ne $xupn) { $taken[$nm] = '<shared>' } else { $taken[$nm] = $xupn }
+            }
+        }
+        foreach ($nm in @($taken.Keys)) { if ($taken[$nm] -and $taken[$nm] -ne '<shared>') { $exByName[$nm] = $taken[$nm] } }
+        if ($exByName.Count) {
+            $am = $import['PIM-Assignments-Admins']
+            $rewritten = 0
+            for ($ai = 0; $ai -lt @($am.rows).Count; $ai++) {
+                $un = "$(Get-PimDownlinkValue -Object $am.rows[$ai] -Key 'Username')".Trim()
+                if (-not $un -or $un.Contains('@') -or -not $exByName.ContainsKey($un.ToLowerInvariant())) { continue }
+                $to = $exByName[$un.ToLowerInvariant()]
+                $c1 = Copy-PimCsvImportRow -Row $am.rows[$ai]; $c1 | Add-Member -NotePropertyName 'Username' -NotePropertyValue $to -Force; $am.rows[$ai] = $c1
+                $c2 = Copy-PimCsvImportRow -Row $am.rawRows[$ai]; $c2 | Add-Member -NotePropertyName 'Username' -NotePropertyValue $to -Force; $am.rawRows[$ai] = $c2
+                $am.keys[$ai] = "$(Get-PimStoreRowKey -Base 'PIM-Assignments-Admins' -Row $c2)"
+                $rewritten++
+                $findings.Add((New-PimCsvImportFinding -Severity info -Code 'CSVIMP-EXIST-002' -File $am.file -Entity 'PIM-Assignments-Admins' -Row $am.rowNumbers[$ai] -Line $am.lines[$ai] -Column 'Username' `
+                    -Message ("the delegation names the existing account '{0}' by '{1}' -- the import writes its exact UPN." -f $to, $un))) | Out-Null
             }
         }
     }
@@ -736,7 +805,10 @@ function Invoke-PimCsvImportCheck {
         }
         function Get-PimNamingConventions { return $global:PIM_NamingConventions }
         function Read-PimTenantListCache { return [ordered]@{ entraRoles = $null; aus = $null; pimGroups = $null; azureScopes = $null; azureRbacRoles = $null } }
-        $vr = Invoke-PimPreflightValidation
+        # NO-OVERWRITE: names are judged here by the SHIPPED conventions, not the install's -- PIM-NAME-002 stays a warning
+        # (a v1 file with its own admin names imports); the Manager and the engine judge by the install's names.
+        $prevNmWarn = $global:PIM_ValidatorNameMismatchWarnOnly; $global:PIM_ValidatorNameMismatchWarnOnly = $true
+        try { $vr = Invoke-PimPreflightValidation } finally { $global:PIM_ValidatorNameMismatchWarnOnly = $prevNmWarn }
         $valFindings = @($vr.violations)
     } finally {
         $global:PIM_NamingConventions = $prevNc; $global:PIM_ValidatorIsMspMaster = $prevMaster

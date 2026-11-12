@@ -240,7 +240,7 @@
   .tab-panel.active:has(> .tab-guide + [id$="Body"]:last-child) > .tab-guide { flex:0 0 auto; }
   .tab-panel.active:has(> .tab-guide + [id$="Body"]:last-child) > [id$="Body"] { min-height:0; }
   /* REQ-Y: pages that carry a licence banner above their scrolling body stack them vertically. */
-  #homeTab.active, #jobscheduleTab.active, #downlinkTab.active, #msptenantsTab.active, #replicationTab.active, #coverageTab.active, #accessreviewTab.active, #manageraccessTab.active, #approvalsTab.active, #reportsTab.active, #auditTab.active { flex-direction:column; }
+  #homeTab.active, #accesspackagesTab.active, #jobscheduleTab.active, #downlinkTab.active, #msptenantsTab.active, #replicationTab.active, #coverageTab.active, #accessreviewTab.active, #manageraccessTab.active, #approvalsTab.active, #reportsTab.active, #auditTab.active { flex-direction:column; }
 
   /* Graph tab (same layout as v0.1) */
   #graphTab { display:none; }
@@ -1430,6 +1430,8 @@
     <div class="tab" data-tab="apiref" title="API and MCP reference: every API route and MCP tool of this version that your role may call.">API and MCP reference</div>
     <div class="tab" data-tab="impact" title="Counters overview: what PIM Manager has done in this environment, cumulative -- each counter with how it is counted.">Counters overview</div>
     <div class="tab" data-tab="new" title="Create a new admin or delegation with the target-first wizard — pick what to grant and the name, level, tier and plane are derived for you.">Create</div>
+    <!-- ACCESS PACKAGES (owner 2026-11-12): request-based access through Entra ID Governance, each package with its own NEW '-AP' groups. -->
+    <div class="tab" data-tab="accesspackages" title="Access packages: people request a package in Entra ID; each package gets its own new group (its name ends with -AP), locked to it. Create, pause, resume and change them here.">Access packages</div>
     <div class="tab" data-tab="map" title="Visualise who can reach what — the live delegation graph (admins → {{DIMS}} → nested groups → targets), with a risk overlay and per-grant removal.">Delegation Map</div>
     <div class="tab" data-tab="validate" title="Check the desired store for problems (orphans, naming, ownership, stale roles) before you deploy — each finding has a suggested fix.">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#cf222e"></span></div>
     <div class="tab" data-tab="save" title="Review every staged change with a keyed diff, then commit — each save is backed up first, all-or-nothing, and reversible.">Pending changes <span id="saveDirtyBadge" class="badge" style="display:none"></span></div>
@@ -1682,6 +1684,19 @@
     </div>
     <div id="newRoleAuHost" style="padding:0 18px 12px 18px;"></div>
 
+    <!-- ACCESS PACKAGES (owner 2026-11-12): "we add new groups locked for access packages. we dont touch existing groups." -->
+    <div class="wiz-group-hdr" data-step="ap">
+      <span class="wiz-step-num">&#x1F4E6;</span> Access packages &mdash; access people request
+      <span class="wiz-group-sub">People request the package in Entra ID; it gives eligible membership of NEW groups created for it (names end with -AP).</span>
+    </div>
+    <div class="wiz-cards">
+      <div class="wiz-card" data-wiz="access-package">
+        <div class="wiz-icon">&#x1F4E6;</div>
+        <h4>Create access package</h4>
+        <div class="wiz-sub">A name, who may request it, approval and how long access lasts, and what it grants. PIM Manager creates a <b>new</b> group for it and never uses an existing group.</div>
+      </div>
+    </div>
+
     <div class="wiz-group-hdr" data-step="3">
       <span class="wiz-step-num">&#x2398;</span> Utilities
       <span class="wiz-group-sub">Shortcuts over the two layers above.</span>
@@ -1778,6 +1793,13 @@
   <!-- PIM 100.100 (owner 2026-10-12: "these 2 views overlaps ... i like the coverage & gaps better and put it under
        access and rename it"): the separate Discovery page ('discovery' tab: New / Ignored, Create / Ignore) is GONE.
        Discovery & gaps above is the one view; an old link to the 'discovery' tab lands on it (switchTab). -->
+
+  <!-- =========== Access packages (owner 2026-11-12) =========== -->
+  <div id="accesspackagesTab" class="tab-panel">
+    <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="accessPackagesBody">
+      <div style="color:#57606a; font-size:12px;">Loading the access packages&hellip;</div>
+    </div>
+  </div>
 
   <!-- =========== Job schedule (moved out of Governance, 2026-09-14) =========== -->
   <div id="jobscheduleTab" class="tab-panel">
@@ -2937,7 +2959,9 @@
         // 🔑 Operator: "why is this not one place" / "it should be under access". Everything that
         // grants, creates or hands over access now lives under Access, and every label names the
         // screen it actually opens.
-        { tab: 'new',        label: 'Create access',         desc: 'Guided wizards: create an administrator (with a future creation date and TAP start), build a direct group, or delegate a permission' },
+        { tab: 'new',        label: 'Create access',         desc: 'Guided wizards: create an administrator (with a future creation date and TAP start), build a direct group, delegate a permission, or create an access package' },
+        // ACCESS PACKAGES (owner 2026-11-12). 🔒 MENU RULE: no number, no dot -- a paused package is said on the page in one calm line.
+        { tab: 'accesspackages', label: 'Access packages',   desc: 'Access people request in Entra ID: each package gets its own new group (name ends with -AP), locked to it. Create, pause, resume and change them' },
         // PIM 100.100 (owner 2026-10-12: "these 2 views overlaps. i like the coverage & gaps better and put it under access
         // and rename it"): ONE view. The page that was called Coverage and gaps under Reviews & controls sits HERE, where
         // the old Discovery entry was (right under Create access -- operator 2026-10-01), named "Discovery & gaps";
@@ -3488,6 +3512,7 @@
     home:        { title: 'What this is & how to use it', what: 'Your landing overview &mdash; "what needs my attention" aggregated from the engine, validator, scheduler and audit trail.', how: ['Start here each session; red items first, then amber.', 'Click any tile or attention row to jump to the tab that owns the detail.'] },
     map:         { title: 'What this is & how to use it', what: 'The live delegation map &mdash; who can reach what, through which groups and scopes, and where you map them together.', how: ['Pick a person (left) or a permission (right) to collapse the board to their path.', 'To LINK, three ways, all the same change: (1) <b>select the source, then Ctrl+click each target</b> &mdash; a person then the groups they should be in, or a group then the permissions it should have; (2) <b>drag</b> one box onto another (only boxes that can accept it light up); (3) select a box and use the <b>&#x2795; buttons</b> in the toolbar, which open a searchable list to pick from.', 'To REMOVE an existing delegation, do exactly the same on a link that is already there &mdash; Ctrl+click it, drop on it, or click the <b>already linked</b> entry in the list. It asks you to confirm by name, then shows red and struck through; click it again to take the removal back. (Delegation overview (All privileged permissions) is the other thing: it shows and revokes <b>live</b> assignments in the tenant, and does not list delegation rows.)', 'Every link and every removal is a <b>staged change</b> (dashed line, Pending changes badge) &mdash; nothing reaches the tenant until you commit under <b>Pending changes</b>.', 'On a managed tenant, boxes marked <b>CENTRAL</b> and <b>teal</b> wires came from the managing tenant: they are <b>read-only</b> here and change on the next pull. A central admin can still be given <b>local</b> access &mdash; link it to one of this tenant&rsquo;s own groups.', 'Use Risk overlay to flag orphan / stale / over-privileged delegation; export or print for review.'], legend: true },
     new:         { title: 'What this is & how to use it', what: 'Create delegation from approved templates &mdash; the guided way to add admins, groups and scopes.', how: ['Pick a template, fill the wizard, then review the staged rows under Pending changes before committing.'] },
+    accesspackages: { title: 'What this is & how to use it', what: 'Access packages &mdash; access people request in Entra ID. Each package gets its own NEW group (its name ends with -AP), locked to the package; an existing group is never used or renamed.', how: ['Create a package, then commit it under Pending changes; the engine builds it at its next run.', 'Anything in doubt pauses the package: the reason is shown here. Pause and resume are staged like every change.'] },
     validate:    { title: 'What this is & how to use it', what: 'Validates the pending configuration against the delegation rules before you commit.', how: ['Re-run after edits (it also auto-runs after every commit); fix any errors before you commit under Pending changes.'] },
     save:        { title: 'What this is & how to use it', what: 'Pending changes &mdash; the single commit point. Staged changes here are what the engine applies.', how: ['Review every staged row, then commit; nothing reaches the tenant until you do.'] },
     // 🔴 SAY THE THING THAT SURPRISES PEOPLE (operator, 2026-09-22: "how can i remove the delegation
@@ -3601,6 +3626,7 @@
     try { refreshAttention(false); } catch (_) { }   // §97.3: a page change re-reads the blocking counts (at most every 5 s)
     if (name === 'activator') renderActivator();
     if (name === 'map') renderAccessMap();
+    if (name === 'accesspackages') renderAccessPackagesPage();   // owner 2026-11-12
     // (the permission templates moved to Workload templates, operator 2026-10-05)
     if (name === 'grid') renderGridList();
     if (name === 'save') renderSaveTab();
@@ -8015,7 +8041,7 @@
     if (!c || !c.shown) return '';
     const dis = (d && d.canWrite) ? '' : ' disabled';
     return '<div id="invConnect" style="margin-top:12px;padding-top:10px;border-top:1px solid #d0d7de;font-size:12px;">' +
-      '<label style="display:flex;gap:6px;align-items:center;"><input type="checkbox" id="invConnectBox"' + (c.connect ? ' checked' : '') + dis + '> <b>' + esc(c.question || 'Connect this install to Invardia: health reports + updates on request') + '</b></label>' +
+      '<label style="display:flex;gap:6px;align-items:center;"><input type="checkbox" id="invConnectBox"' + (c.connect ? ' checked' : '') + dis + '> <b>' + esc(c.question || 'Connect this install to Invardia: health reports + updates on request') + '</b>' + settingInfoBtn('InvardiaConnect') + '</label>' +
       '<div id="invConnectText" style="color:#57606a;margin-top:4px;">' + esc(c.text || '') + '</div>' +
       (dis ? '<div style="font-size:11px;color:#57606a;margin-top:3px;">(SuperAdmin role required to change it)</div>' : '') +
       '<span id="invConnectMsg" style="font-size:12px;"></span></div>';
@@ -13335,6 +13361,8 @@
     // 100.100: the explanation is under "What this is & how to use it" (TAB_GUIDANCE.coverage), not a paragraph here.
     // One plain block per workload that was NOT READ (what is missing + the steps), filled below.
     h.push('<div id="covNotRead"></div>');
+    // COVERAGE-PREIMPORT-1: an install with no definitions yet (before its import) -- one calm line; no orphan alert is mailed.
+    if (d.noDefinitions && !d.snapshotMissing) h.push('<div id="covNoDefs" style="color:#57606a;font-size:12px;margin-bottom:8px;">' + esc(String(d.noDefinitionsNote || '')) + '</div>');
     // PIM 100.142 (4): Power BI workspaces listed while PIM Manager cannot reach Power BI's admin API yet -> one calm line + command.
     h.push('<div id="covPbiAdmin"></div>');
     // REQ-U (prereqs): the compact "Workload prerequisites" section -- the ready ones folded into one line -- filled below.
@@ -32700,6 +32728,28 @@
               f.appendChild(exFld);
               const exIn = exFld.querySelector('input');
               if (exIn && typeof pimAttachPeopleCombo === 'function') pimAttachPeopleCombo(exIn);
+              // EXISTING-ACCOUNT-NO-HYBRID (owner 2026-11-12): show what was found -- the name, and whether it is synced from
+              // AD or cloud -- and say plainly that PIM changes nothing on it and the hybrid worker never touches it.
+              if (isServer) {
+                const exRes = document.createElement('div');
+                exRes.className = 'wf-existing-found';
+                exRes.style.cssText = 'font-size:11.5px; margin:-4px 0 10px 2px; color:#57606a;';
+                const exBtn = document.createElement('button');
+                exBtn.type = 'button'; exBtn.className = 'btn'; exBtn.textContent = 'Look up account';
+                exBtn.style.cssText = 'margin:0 0 6px 0;';
+                exBtn.onclick = async () => {
+                  const u = String(s.existingUpn || '').trim();
+                  if (!pimLooksLikeUpn(u)) { exRes.textContent = 'Enter the exact sign-in name (UPN) first.'; return; }
+                  exRes.textContent = 'Looking up ' + u + '…';
+                  let r = null;
+                  try { r = await api('GET', '/api/admin-accounts/existing-lookup?upn=' + encodeURIComponent(u), undefined, { timeoutMs: 20000 }); }
+                  catch (e) { exRes.textContent = String(e && e.message ? e.message : e); return; }
+                  if (!r || !r.found) { exRes.textContent = (r && r.error) || ('no account with this UPN -- PIM never creates an existing-account.'); return; }
+                  exRes.textContent = 'Found: ' + (r.displayName || u) + ' (' + (r.source || 'not known') + '). ' + (r.note || 'PIM changes nothing on this account and the hybrid worker never touches it.');
+                };
+                f.appendChild(exBtn);
+                f.appendChild(exRes);
+              }
             }
             if (adminTemplates.length && !exAcc) {
               f.appendChild(wuxField({ id:'wf-tpl', label:'Start from template', type:'select', value:s.templateId,
@@ -33182,6 +33232,21 @@
           const taken = await adminNameTakenBy(userName, upn);
           if (taken) throw new Error('the account name ' + userName + ' is already used by ' + taken + '. Go back to the Person step and use different initials (for example ' + s.initials.toUpperCase() + '2 or a third letter).');
         }
+        // NO-OVERWRITE (owner 2026-11-12: "we must not impact overwrite existing" / "chk for existing"): one exact read of the
+        // UPN before anything is staged. Exists and NOT PIM's = blocked, with the offer to use it as an existing account
+        // (office user: delegations only). Exists and PIM's = said: it is adopted, not created.
+        if (isServer && s.adminType !== 'external-guest') {
+          let chk = null;
+          try { chk = await api('GET', '/api/admin-accounts/upn-check?upn=' + encodeURIComponent(upn), undefined, { timeoutMs: 20000 }); } catch (_) { chk = null; }
+          if (chk && chk.verdict === 'blocked') {
+            if (window.confirm(chk.message + '\n\nUse ' + upn + ' as an existing account (office user) instead?')) {
+              s.adminType = 'existing-account'; s.existingUpn = upn;
+              return await wizardAdminStageExisting(s);
+            }
+            throw new Error(chk.message);
+          }
+          if (chk && chk.verdict === 'adopt' && typeof sharedToast === 'function') { try { sharedToast(chk.message); } catch (_) {} }
+        }
         const display = buildAdminDisplay(s.first, s.last, s.usage, s.level.replace(/^L/,''), s.tier.replace(/^T/,''), s.useLongForm, s.adminType, s.environment, { initial: s.initials, company: s.company });
 
         // external-guest -> invitation path: the server computes the B2B invitation + Consultant
@@ -33236,8 +33301,10 @@
     let found = null;
     if (isServer) {
       try { found = await api('GET', '/api/admin-accounts/existing-lookup?upn=' + encodeURIComponent(upn), undefined, { timeoutMs: 20000 }); }
-      catch (e) { throw new Error(String(e && e.message ? e.message : e) || ("'" + upn + "': no user with that name in this tenant -- an existing account must already exist; PIM never creates it.")); }
-      if (!found || !found.found) throw new Error((found && found.error) || ("'" + upn + "': no user with that name in this tenant -- an existing account must already exist; PIM never creates it."));
+      catch (e) { throw new Error(String(e && e.message ? e.message : e) || ("'" + upn + "': no account with this UPN -- PIM never creates an existing-account.")); }
+      if (!found || !found.found) throw new Error((found && found.error) || ("'" + upn + "': no account with this UPN -- PIM never creates an existing-account."));
+      // say what was found (synced from AD or cloud) -- PIM changes nothing on it, the hybrid worker never touches it
+      if (typeof sharedToast === 'function') { try { sharedToast('Existing account ' + upn + ' (' + (found.displayName || upn) + ', ' + (found.source || 'not known') + '): delegations only -- PIM changes nothing on the account and the hybrid worker never touches it.'); } catch (_) {} }
     }
     const taken = await adminNameTakenBy(upn, upn);
     if (taken) throw new Error(upn + ' is already an admin in PIM (' + taken + ').');
@@ -34916,6 +34983,7 @@
       if (w === 'rolegroup')       return wizardRoleGroup();
       if (w === 'clone')           return wizardClone();
       if (w === 'project')         return wizardProject();
+      if (w === 'access-package')  { switchTab('accesspackages'); return renderAccessPackagesPage({ create: true }); }
     };
   });
 
@@ -37746,6 +37814,226 @@
   }
 
   // ===================================================================
+  // ACCESS PACKAGES -- Access > Access packages (tab 'accesspackages').
+  // 🔒 OWNER 2026-11-12: "we dont rename anything existing. we add new groups locked for access packages. we dont touch existing
+  // groups. if in doubt then pause access package." + "-ap group ends with as agreed".
+  //   * Create access package asks the server for a PLAN (POST /api/access-packages/plan): NEW group definitions only (normal
+  //     name + '-AP'), their nestings into the permission groups they grant, and the package row. A taken name is refused.
+  //   * Every change -- create, pause, resume, a policy change, retire -- is STAGED in Pending changes; the audited commit writes it.
+  //   * Calm: one line per state, the reason behind More info; no number or dot on the menu entry.
+  // ===================================================================
+  const AP_STATE = { data: null, loading: null, open: '', creating: false, editing: '', err: '' };
+  const AP_STATE_TEXT = { active: 'Active', waiting: 'Waiting for its new groups', paused: 'Paused', off: 'Switched off', pending: 'Waiting for the next engine run', retiring: 'Being retired' };
+  const AP_GROUP_TYPES = [['department', 'Department'], ['role', 'Role'], ['organisation', 'Organisation'], ['project', 'Project'], ['crossorg', 'Cross-org']];
+  function apIsLockedGroup(n) {
+    if (!n || (n.kind !== 'role-group' && n.kind !== 'permission-group')) return false;
+    // The package column decides (an existing group whose name merely ends with -AP stays an ordinary group).
+    return !!(n.apLocked || n.accessPackage);
+  }
+  function apCalm(line, more) {
+    return '<div class="ap-calm" style="margin:6px 0;font-size:12.5px;">' + line +
+      (more ? ' <details style="display:inline-block;margin-left:6px;"><summary style="cursor:pointer;color:#0969da;font-size:12px;">More info</summary><div style="color:#57606a;font-size:12px;max-width:760px;">' + escapeHtml(String(more)) + '</div></details>' : '') + '</div>';
+  }
+  async function apLoad(force) {
+    if (!isServer) { AP_STATE.data = { ok: true, packages: [], enabled: true, marker: '-AP', catalog: 'PIM Manager', canWrite: false }; return AP_STATE.data; }
+    if (AP_STATE.data && !force) return AP_STATE.data;
+    if (!AP_STATE.loading) {
+      AP_STATE.loading = api('GET', '/api/access-packages')
+        .then(d => { AP_STATE.data = d; AP_STATE.err = ''; return d; })
+        .catch(e => { AP_STATE.err = e.message; return null; })
+        .finally(() => { AP_STATE.loading = null; });
+    }
+    return AP_STATE.loading;
+  }
+  function apPermissionGroups() {
+    return (PIM_DATA.nodes || []).filter(n => n.kind === 'permission-group' && n.groupTag && !apIsLockedGroup(n))
+      .sort((a, b) => String(a.label || a.id).localeCompare(String(b.label || b.id)));
+  }
+  // A pending row of an existing package changes in place (key AccessPackageName); a new package is a new row (wuxStage).
+  async function apStageRowChange(base, keyCol, key, changes) {
+    const data = await loadCsv(base);
+    ensurePending(base, data.header, data.rows);
+    const p = pendingChanges[base];
+    const row = p.rows.find(r => String(r[keyCol] || '').toLowerCase() === String(key).toLowerCase());
+    if (!row) throw new Error('the access package "' + key + '" was not found -- reload the page');
+    for (const k of Object.keys(changes)) { if (p.header.indexOf(k) < 0) p.header.push(k); row[k] = String(changes[k] == null ? '' : changes[k]); }
+    markBadges();
+  }
+  function apStateLine(p) {
+    const t = AP_STATE_TEXT[p.state] || p.state || 'Unknown';
+    const col = p.state === 'active' ? '#1a7f37' : (p.state === 'paused' ? '#9a6700' : '#57606a');
+    return '<span class="ap-state ap-state-' + escapeHtml(p.state || '') + '" style="color:' + col + ';font-weight:600;">' + escapeHtml(t) + '</span>';
+  }
+  async function renderAccessPackagesPage(opts) {
+    const host = document.getElementById('accessPackagesBody');
+    if (!host) return;
+    if (opts && opts.create) AP_STATE.creating = true;
+    host.innerHTML = '<div style="color:#57606a;font-size:12px;">Loading the access packages&hellip;</div>';
+    const d = await apLoad(true);
+    if (!d) { host.innerHTML = apCalm('The access packages could not be read.', AP_STATE.err); return; }
+    const mk = escapeHtml(d.marker || '-AP');
+    let h = '<h3 style="margin:0 0 4px;">Access packages</h3>' +
+      '<div style="color:#57606a;font-size:12px;margin-bottom:10px;max-width:900px;">People request a package in Entra ID and get eligible membership of its groups; they still activate as usual. ' +
+      'Each package gets its own <b>new</b> group (the name ends with <b>' + mk + '</b>), locked to the package. An existing group is never used or renamed. Anything in doubt pauses the package.</div>';
+    if (d.enabled === false) h += apCalm('Access packages are switched off &mdash; nothing is built.', 'Switch them on under Settings > Approvals & policy > Groups. While they are off, the members of every package group follow the group rows like any other group.');
+    if (d.licence && d.licence.ok === false) h += apCalm('This tenant has no Microsoft Entra ID Governance licence, so the packages are not built yet.', d.licence.reason);
+    if (d.canWrite && !AP_STATE.creating) h += '<button type="button" class="btn" id="apCreateBtn" style="margin:6px 0 10px;">+ Create access package</button>';
+    if (AP_STATE.creating) h += '<div id="apCreateHost" style="border:1px solid #d0d7de;border-radius:6px;padding:10px 12px;margin:6px 0 12px;max-width:980px;"></div>';
+    const pk = (d.packages || []);
+    if (!pk.length) {
+      h += '<div class="empty" style="color:#57606a;font-size:12.5px;">No access package yet.' + (d.canWrite ? ' Create one above.' : '') + '</div>';
+    } else {
+      h += '<table class="set-table" id="apTable" style="width:100%;max-width:1100px;font-size:12.5px;"><thead><tr><th>Package</th><th>Its new groups</th><th>Approval / access ends</th><th>State</th></tr></thead><tbody>';
+      for (const p of pk) {
+        const groups = (p.groups || []).map(g => escapeHtml(g.name || g.tag)).join('<br>');
+        const pol = (String(p.approval || '').toLowerCase() === 'none' ? 'No approval' : 'Approval') + ' &middot; ' + (p.maxDays && p.maxDays !== '0' ? escapeHtml(p.maxDays) + ' days' : 'no end date');
+        h += '<tr class="ap-row" data-ap="' + escapeHtml(p.name) + '" style="cursor:pointer;"><td><b>' + escapeHtml(p.name) + '</b>' + (p.description ? '<div style="color:#57606a;font-size:11.5px;">' + escapeHtml(p.description) + '</div>' : '') + '</td>' +
+          '<td>' + groups + '</td><td>' + pol + '</td><td>' + apStateLine(p) + '</td></tr>';
+        if (AP_STATE.open === p.name) h += '<tr class="ap-detail-row"><td colspan="4">' + apDetailHtml(p, d) + '</td></tr>';
+      }
+      h += '</tbody></table>';
+    }
+    host.innerHTML = h;
+    const cb = document.getElementById('apCreateBtn');
+    if (cb) cb.onclick = () => { AP_STATE.creating = true; renderAccessPackagesPage(); };
+    if (AP_STATE.creating) apRenderCreateForm(document.getElementById('apCreateHost'), d);
+    host.querySelectorAll('.ap-row').forEach(tr => tr.onclick = () => { AP_STATE.open = (AP_STATE.open === tr.dataset.ap ? '' : tr.dataset.ap); AP_STATE.editing = ''; renderAccessPackagesPage(); });
+    host.querySelectorAll('[data-ap-act]').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); apAction(b.dataset.apAct, b.dataset.apName); });
+    const ef = document.getElementById('apEditForm');
+    if (ef) ef.onsubmit = (ev) => { ev.preventDefault(); apSaveEdit(ef); };
+  }
+  function apDetailHtml(p, d) {
+    let h = '<div class="ap-detail" style="padding:6px 4px;">';
+    if (p.state !== 'active') h += apCalm(apStateLine(p) + ' &mdash; ' + escapeHtml(p.state === 'paused' ? 'nothing is changed for this package until it is resumed or the reason is fixed.' : 'the engine builds it at its next run.'), p.reason);
+    h += '<div style="font-size:12px;margin:6px 0;"><b>Its new groups and what they grant</b></div><ul style="margin:0 0 8px 18px;font-size:12px;">';
+    for (const g of (p.groups || [])) {
+      h += '<li>' + escapeHtml(g.name || g.tag) + (g.bound ? ' <span style="color:#1a7f37;">(delivered by the package)</span>' : '') +
+        (g.grants && g.grants.length ? ' &rarr; ' + g.grants.map(escapeHtml).join(', ') : ' &rarr; <i>grants nothing yet</i>') + '</li>';
+    }
+    h += '</ul><div style="font-size:12px;color:#57606a;">Who may request: ' + escapeHtml(String(p.requestScope || '').toLowerCase() === 'group' ? 'members of ' + p.requestGroupTag : 'every member of the tenant') +
+      ' &middot; Approval: ' + escapeHtml(String(p.approval || '').toLowerCase() === 'none' ? 'none' : [p.approvalStage1, p.approvalStage2].filter(Boolean).join(' then ')) +
+      ' &middot; Access ends after: ' + escapeHtml(p.maxDays && p.maxDays !== '0' ? p.maxDays + ' days' : 'no end date') +
+      ' &middot; Review: ' + escapeHtml(p.reviewCadence || 'None') + ' &middot; Catalog: ' + escapeHtml(d.catalog || 'PIM Manager') + '</div>';
+    if (d.canWrite) {
+      h += '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">' +
+        (p.adminPaused ? '<button type="button" class="btn" data-ap-act="resume" data-ap-name="' + escapeHtml(p.name) + '">Resume</button>'
+                       : '<button type="button" class="btn-sec" data-ap-act="pause" data-ap-name="' + escapeHtml(p.name) + '">Pause</button>') +
+        '<button type="button" class="btn-sec" data-ap-act="edit" data-ap-name="' + escapeHtml(p.name) + '">Change approval and expiry</button>' +
+        '<button type="button" class="btn-sec" data-ap-act="retire" data-ap-name="' + escapeHtml(p.name) + '" style="color:#cf222e;">Retire</button></div>';
+      if (AP_STATE.editing === p.name) h += apEditFormHtml(p);
+    }
+    return h + '</div>';
+  }
+  function apPolicyFieldsHtml(p, pre) {
+    const v = k => escapeHtml(p && p[k] != null ? String(p[k]) : '');
+    const sel = (name, opts, cur) => '<select name="' + name + '">' + opts.map(o => '<option value="' + o[0] + '"' + (String(cur || '').toLowerCase() === o[0].toLowerCase() ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select>';
+    return '<div style="display:flex;flex-wrap:wrap;gap:8px;">' +
+      fieldRow('Who may request', sel('requestScope', [['AllMembers', 'Every member of the tenant'], ['Group', 'Members of one PIM group']], p && p.requestScope || 'AllMembers')) +
+      fieldRow('That group (tag), when one group', '<input name="requestGroupTag" value="' + v('requestGroupTag') + '">') +
+      fieldRow('Approval', sel('approval', [['Stages', 'Approval needed'], ['None', 'No approval']], p && p.approval || 'Stages')) +
+      fieldRow('Approvers, stage 1 (UPNs or PIM group tags, ; between)', '<input name="approvalStage1" value="' + v('approvalStage1') + '">') +
+      fieldRow('Approvers, stage 2 (optional)', '<input name="approvalStage2" value="' + v('approvalStage2') + '">') +
+      fieldRow('Access ends after (days, 0 = no end date)', '<input name="maxDays" type="number" min="0" max="3650" value="' + (v('maxDays') || '90') + '">') +
+      fieldRow('Access review', sel('reviewCadence', [['None', 'None'], ['Monthly', 'Monthly'], ['Quarterly', 'Quarterly'], ['SemiAnnually', 'Every 6 months'], ['Annually', 'Yearly']], p && p.reviewCadence || 'None')) +
+      fieldRow('Reviewers (UPNs or PIM group tags)', '<input name="reviewers" value="' + v('reviewers') + '">') +
+      fieldRow('When a reviewer does not answer', sel('reviewNoResponse', [['KeepAccess', 'Keep the access'], ['RemoveAccess', 'Remove the access']], p && p.reviewNoResponse || 'KeepAccess')) +
+      '</div><label style="font-size:12px;margin-right:12px;"><input type="checkbox" name="requireJustification"' + (p && p.requireJustification ? ' checked' : (pre ? ' checked' : '')) + '> A reason is required</label>' +
+      '<label style="font-size:12px;"><input type="checkbox" name="allowExtension"' + (p && p.allowExtension ? ' checked' : '') + '> People may ask to extend</label>';
+  }
+  function apEditFormHtml(p) {
+    return '<form id="apEditForm" data-ap-name="' + escapeHtml(p.name) + '" style="margin-top:8px;border-top:1px solid #d0d7de;padding-top:8px;">' + apPolicyFieldsHtml(p, false) +
+      '<div style="margin-top:8px;"><button type="submit" class="btn">Stage the change</button> <span style="color:#57606a;font-size:11.5px;">Nothing is written until you commit under Pending changes.</span></div></form>';
+  }
+  function apFormPolicy(form) {
+    const f = n => { const el = form.querySelector('[name="' + n + '"]'); return el ? (el.type === 'checkbox' ? el.checked : String(el.value || '').trim()) : ''; };
+    return { requestScope: f('requestScope'), requestGroupTag: f('requestGroupTag'), approval: f('approval'), approvalStage1: f('approvalStage1'), approvalStage2: f('approvalStage2'),
+      maxDays: f('maxDays'), reviewCadence: f('reviewCadence'), reviewers: f('reviewers'), reviewNoResponse: f('reviewNoResponse'), requireJustification: f('requireJustification'), allowExtension: f('allowExtension') };
+  }
+  async function apSaveEdit(form) {
+    const name = form.dataset.apName, pol = apFormPolicy(form);
+    try {
+      await apStageRowChange('AccessPackage', 'AccessPackageName', name, {
+        RequestScope: pol.requestScope, RequestGroupTag: pol.requestGroupTag, Approval: pol.approval, ApprovalStage1: pol.approvalStage1, ApprovalStage2: pol.approvalStage2,
+        MaxDays: pol.maxDays, ReviewCadence: pol.reviewCadence, Reviewers: pol.reviewers, ReviewNoResponse: pol.reviewNoResponse,
+        RequireJustification: pol.requireJustification ? 'true' : 'false', AllowExtension: pol.allowExtension ? 'true' : 'false' });
+      AP_STATE.editing = '';
+      apToast('The change to "' + name + '" is staged. Commit it under Pending changes.');
+    } catch (e) { apToast('Not staged: ' + e.message, true); }
+  }
+  function apToast(text, bad) {
+    const host = document.getElementById('accessPackagesBody'); if (!host) return;
+    host.querySelectorAll('.ap-toast').forEach(n => n.remove());
+    const n = document.createElement('div');
+    n.className = 'ap-toast';
+    n.style.cssText = 'margin:6px 0;font-size:12.5px;color:' + (bad ? '#cf222e' : '#1a7f37') + ';';
+    n.innerHTML = escapeHtml(text) + (bad ? '' : ' <a style="cursor:pointer;color:#0969da;">Pending changes</a>');
+    const a = n.querySelector('a'); if (a) a.onclick = () => switchTab('save');
+    host.insertBefore(n, host.firstChild);
+  }
+  async function apAction(act, name) {
+    if (act === 'edit') { AP_STATE.editing = (AP_STATE.editing === name ? '' : name); return renderAccessPackagesPage(); }
+    try {
+      if (act === 'pause' || act === 'resume') {
+        let reason = '';
+        if (act === 'pause') { reason = prompt('Why is "' + name + '" paused? (shown on this page)', ''); if (reason === null) return; }
+        const r = act === 'pause'
+          ? await api('POST', '/api/access-packages/pause', { name: name, reason: reason })
+          : await api('POST', '/api/access-packages/resume', { name: name });
+        await apStageRowChange(r.base, r.keyColumn, r.key, r.changes);
+        return apToast(r.summary);
+      }
+      if (act === 'retire') {
+        if (!confirm('Retire "' + name + '"?\n\nThe engine ends every assignment of the package (each one counted by the removal budget and the guards), then deletes the package. Its groups are then released.\n\nNothing is written until you commit under Pending changes.')) return;
+        await apStageRowChange('AccessPackage', 'AccessPackageName', name, { Action: 'Remove' });
+        return apToast('Retiring "' + name + '" is staged. Commit it under Pending changes.');
+      }
+    } catch (e) { apToast('Not staged: ' + e.message, true); }
+  }
+  function apRenderCreateForm(host, d) {
+    if (!host) return;
+    const perms = apPermissionGroups();
+    const permOpts = perms.map(n => '<option value="' + escapeHtml(n.groupTag) + '">' + escapeHtml(n.label || n.groupTag) + (n.tier ? ' (' + escapeHtml(n.tier) + ')' : '') + '</option>').join('');
+    const grpRow = i => '<div class="ap-grp" data-i="' + i + '" style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:6px;">' +
+      fieldRow('Type of the new group', '<select name="type">' + AP_GROUP_TYPES.map(t => '<option value="' + t[0] + '">' + t[1] + '</option>').join('') + '</select>') +
+      fieldRow('Short name (the name gets ' + escapeHtml(d.marker || '-AP') + ' at the end)', '<input name="shortName" placeholder="e.g. Finance-Readers">') +
+      fieldRow('What it grants (permission groups; Ctrl+click for several)', '<select name="grants" multiple size="4" style="min-width:280px;">' + permOpts + '</select>') + '</div>';
+    host.innerHTML = '<form id="apCreateForm"><div style="font-weight:600;margin-bottom:6px;">Create access package</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:8px;">' + fieldRow('Name', '<input name="name" required maxlength="200">') + fieldRow('Description', '<input name="description" maxlength="400">') +
+      fieldRow('Catalog', '<input value="' + escapeHtml(d.catalog || 'PIM Manager') + '" disabled title="PIM Manager keeps its packages in its own catalog">') + '</div>' +
+      '<div style="font-size:12px;margin:8px 0 4px;"><b>Its new groups</b> &mdash; created for this package only, never an existing group</div><div id="apGrpHost">' + grpRow(0) + '</div>' +
+      '<button type="button" class="btn-sec" id="apAddGrp" style="margin-bottom:8px;">+ Another group</button>' +
+      '<div style="font-size:12px;margin:8px 0 4px;"><b>Request, approval and expiry</b></div>' + apPolicyFieldsHtml(null, true) +
+      '<div id="apCreateMsg"></div><div style="margin-top:10px;"><button type="submit" class="btn">Check and stage</button> <button type="button" class="btn-sec" id="apCreateCancel">Cancel</button> ' +
+      '<span style="color:#57606a;font-size:11.5px;">Nothing is written until you commit under Pending changes.</span></div></form>';
+    let n = 1;
+    document.getElementById('apAddGrp').onclick = () => { if (n >= 10) return; const w = document.createElement('div'); w.innerHTML = grpRow(n++); document.getElementById('apGrpHost').appendChild(w.firstChild); };
+    document.getElementById('apCreateCancel').onclick = () => { AP_STATE.creating = false; renderAccessPackagesPage(); };
+    const form = document.getElementById('apCreateForm');
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const msg = document.getElementById('apCreateMsg');
+      const body = Object.assign({ name: form.querySelector('[name="name"]').value.trim(), description: form.querySelector('[name="description"]').value.trim() }, apFormPolicy(form));
+      body.groups = Array.from(form.querySelectorAll('.ap-grp')).map(g => ({ type: g.querySelector('[name="type"]').value, shortName: g.querySelector('[name="shortName"]').value.trim(),
+        grants: Array.from(g.querySelector('[name="grants"]').selectedOptions).map(o => o.value) }));
+      msg.innerHTML = '<div style="color:#57606a;font-size:12px;">Checking&hellip;</div>';
+      let plan;
+      try { plan = await api('POST', '/api/access-packages/plan', body); }
+      catch (e) {
+        const probs = (e.body && e.body.problems) || [];
+        msg.innerHTML = apCalm('<span style="color:#cf222e;">Not staged &mdash; ' + escapeHtml(probs.length ? probs[0] : e.message) + '</span>', probs.length > 1 ? probs.slice(1).join(' | ') : '');
+        return;
+      }
+      try {
+        for (const base of Object.keys(plan.rows || {})) { for (const row of (plan.rows[base] || [])) await wuxStage(base, row); }
+        markBadges();
+        AP_STATE.creating = false;
+        await renderAccessPackagesPage();
+        apToast(plan.summary || 'Staged.');
+      } catch (e) { msg.innerHTML = apCalm('<span style="color:#cf222e;">Not staged &mdash; ' + escapeHtml(e.message) + '</span>'); }
+    };
+  }
+
+  // ===================================================================
   // Access Map -- 4-column flow board (admins | role groups | permission
   // groups | targets). Wires render only for the selected node's full
   // path (both directions); everything else dims. Every box is a
@@ -37762,6 +38050,9 @@
     const colOf = n => {
       if (!n) return -1;
       if (n.kind === 'admin') return 0;
+      // ACCESS PACKAGES (owner 2026-11-12): a package is its own node type in the people column -- it decides who gets onto its
+      // NEW '-AP' groups (column 1), which it reaches by a 'package-to-group' edge. Nothing on the board links to it.
+      if (n.kind === 'access-package') return 0;
       if (n.kind === 'role-group') return 1;
       if (n.kind === 'permission-group') return 2;
       if (n.kind === 'entra-role' || n.kind === 'au-role' || n.kind === 'az-resource' || n.kind === 'workload-target') return 3;
@@ -37966,7 +38257,7 @@
     return { threshold, summary: { orphan, stale, overpriv, flagged: Object.keys(byNode).length }, nodes: byNode };
   }
 
-  const MAP_DOT = { 'admin': '#0969da', 'role-group': '#8250df', 'permission-group': '#1a7f37', 'entra-role': '#db6d28', 'au-role': '#9a6700', 'az-resource': '#8250df', 'workload-target': '#1f6feb' };
+  const MAP_DOT = { 'admin': '#0969da', 'access-package': '#bf3989', 'role-group': '#8250df', 'permission-group': '#1a7f37', 'entra-role': '#db6d28', 'au-role': '#9a6700', 'az-resource': '#8250df', 'workload-target': '#1f6feb' };
 
   // Workload reconciliation badge: desired-vs-live-crawl status on a
   // workload-target. mapped (live==desired) / missing (desired, not live ->
@@ -38048,6 +38339,17 @@
         ? 'A central admin, sent by the managing tenant. Its account and its central access are read-only here. You CAN give it LOCAL access: link it to one of this tenant’s own groups.'
         : 'Sent by the managing tenant: read-only here. It is changed on the managing tenant and arrives on the next pull.');
       el.appendChild(cb);
+    }
+    // ACCESS PACKAGES (owner 2026-11-12): a package box, and a group locked to a package, say so in a word.
+    if (n.kind === 'access-package' || apIsLockedGroup(n)) {
+      const ab = document.createElement('span');
+      ab.className = 'map-central-badge map-ap-badge';
+      ab.style.background = '#bf3989';
+      ab.textContent = n.kind === 'access-package' ? (n.paused ? 'package, paused' : 'access package') : 'package group';
+      ab.title = n.kind === 'access-package'
+        ? 'An access package: people request it in Entra ID and get eligible membership of its own new groups. Change it under Access > Access packages.'
+        : 'A group created for an access package (its name ends with -AP). It is locked to the package: its members come from the package only.';
+      el.appendChild(ab);
     }
     // Staged, not committed: same amber as the dashed pending wire, and it says the word -- colour
     // alone is not a message (and the board already spends colour on tier and on risk).
@@ -38962,6 +39264,12 @@
       return { ok: false, reason: '"' + (from.label || from.id) + '" cannot be linked to "' + (to.label || to.id) +
         '" -- link a person to a direct group, or a direct group to a permission group.' };
     }
+    // ACCESS PACKAGES LOCK (owner 2026-11-12 "new groups locked for access packages"): a group created for a package gets its
+    // members from the package and its grants from the package screen -- the board neither links nor unlinks it.
+    if (apIsLockedGroup(from) || apIsLockedGroup(to)) {
+      const g = apIsLockedGroup(from) ? from : to;
+      return { ok: false, reason: '"' + (g.label || g.id) + '" belongs to an access package -- change it under Access > Access packages.' };
+    }
     const spec = MAP_ASSIGN_MODES[mode];
     const fLabel = (from.label || from.id), tLabel = (to.label || to.id);
     // 1. ASK THE ROWS FIRST. A row already staged for this pair is the authoritative answer, and
@@ -39845,6 +40153,7 @@
       case 'AdminMailboxForwarding':    return settingInfoBtn('AdminMailboxForwarding');
       case 'DiscoveryNotifyRecipients': return settingInfoBtn('DiscoveryNotifyRecipients');
       case 'IntakeEnabled':             return settingInfoBtn('IntakeEnabled');
+      case 'AccessPackagesEnabled':     return settingInfoBtn('AccessPackagesEnabled');
     }
     return '';
   }

@@ -2224,6 +2224,12 @@ deployment is a supported choice) and no credentials lying around.
   may use, change and run it, also commercially for your own organisation, but not to provide a product that competes
   with it. Pro components are licensed only under a commercial agreement. Earlier versions keep the licence they were
   published with.
+- **A Community installation contacts Invardia only if you say yes.** ✅ 2026-11-12 — The installer asks one question:
+  "Connect this install to Invardia: health reports + updates on request". Say yes and the installation gets its own
+  install key: it sends health reports, and "Update now" works exactly as on Pro. Say no — or give no answer — and it
+  sends nothing that identifies your tenant: no heartbeat, no licence request, no failure report. It still updates itself
+  each night from the anonymous, signed Community channel. You can change the choice at any time in PIM Manager >
+  Settings > Licence. Scripted installs answer with `-ConnectToInvardia` or `-NoConnectToInvardia`.
 
 ✅ 2026-09-19. The line: **the community edition is free for a single tenant**; a **Pro licence** adds
 advanced single-tenant capabilities and the whole multi-tenant half. The product **enforces** it — in the engine,

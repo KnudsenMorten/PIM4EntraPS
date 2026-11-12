@@ -2007,6 +2007,9 @@ function Get-PimUplinkTenantCapabilities {
 #   Update          { lastUpdaterRunUtc; lastUpdaterResult }  -- UPD-07 (framework ALIGN-AUTO-ALL item 2): the updater's last
 #                   run from UpdateState, EXACTLY these two keys of Invardia's closed Update shape; left out when no run is
 #                   recorded. Until Invardia adds Update to PIM's contract it is dropped there alone (soft, named in Dropped).
+#   Database        { tier; dtu; maxSizeMb; usedMb; peakLogWritePct1h; minutesAtLimit1h; statsAsync; statsStalePct;
+#                   statsRefreshedUtc }  -- SQL-STATS-PROOF (framework 12.27 point 5, the SI / EPS shape): every key SOFT, an
+#                   unreadable one is left out; nothing readable = no Database at all (New-PimUplinkDatabaseField)
 # ONE switch per field, ON by default (2.4.644): PIM_UPLINK_<FIELD> (PIM_UPLINK_SECURITY, ..._COLLECTIONS, ..._JOBS,
 # ..._CONVERGENCE, ..._MAIL, ..._UPDATEPENDING, ..._SQLACCESS, ..._FEATURESCHANGED) = 0 / false / off / no switches it off.
 # IDENTIFIED heartbeat only; additive (Invardia refuses its content -> the heartbeat goes once more without the field(s)
@@ -2017,7 +2020,7 @@ function Get-PimUplinkTenantCapabilities {
 # =====================================================================================================================
 function Get-PimUplinkStateFieldNames {
     <# PURE. The structured fields, in the order the heartbeat adds them (a literal: child-scope safe). #>
-    return @('Security', 'Collections', 'Jobs', 'Convergence', 'Mail', 'UpdatePending', 'SqlAccess', 'FeaturesChanged', 'SignIn', 'BuildPool', 'Update')
+    return @('Security', 'Collections', 'Jobs', 'Convergence', 'Mail', 'UpdatePending', 'SqlAccess', 'FeaturesChanged', 'SignIn', 'BuildPool', 'Update', 'Database')
 }
 
 function Get-PimUplinkStateFieldSwitch {
@@ -2544,6 +2547,182 @@ function New-PimUplinkFeaturesChangedField {
     return @($ids.ToArray() | Sort-Object | Select-Object -First (Get-PimUplinkFeaturesChangedMax))   # callers wrap in @(): nothing changed = []
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# SQL-STATS-PROOF (framework 12.27 point 5; Invardia's contract, owner-approved, the SAME shape SI and EPS send -- one
+# contract, PRO-COMMUNITY-SAME): the IDENTIFIED heartbeat's Database object, so Invardia can SEE that statistics are kept
+# fresh and how close the database runs to its tier's limits. EXACTLY these keys, every one SOFT (unreadable = left out,
+# never a guess, never a failed heartbeat):
+#   tier               DATABASEPROPERTYEX(DB_NAME(), 'ServiceObjective')            e.g. 'Basic', 'S0', 'GP_S_Gen5_1'
+#   dtu                the DTU of a DTU tier (Get-PimUplinkDtuForTier, a literal map); vCore / pool / unknown = left out
+#   maxSizeMb          DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') / 1 MB
+#   usedMb             SUM(FILEPROPERTY(name, 'SpaceUsed')) of the ROWS files, MB
+#   peakLogWritePct1h  MAX(avg_log_write_percent) over the last hour, sys.dm_db_resource_stats (0-100)
+#   minutesAtLimit1h   the minutes of the last hour in which cpu / data io / log write / memory reached >= 99 % (0-60)
+#   statsAsync         sys.databases.is_auto_update_stats_async_on for DB_ID()
+#   statsStalePct      share (0-100) of the pim-schema user-table statistics whose modification_counter > 20 % of rows + 500
+#                      (the SAME rule pim.usp_RefreshStatistics refreshes by), sys.dm_db_stats_properties
+#   statsRefreshedUtc  the last successful post-write refresh (pim.Settings 'StatisticsRefreshedUtc', written by
+#                      Invoke-PimSqlStatisticsRefresh)
+# THE READ: pim.usp_DatabaseStats (WITH EXECUTE AS OWNER, created by the ADMIN run; the engine holds EXECUTE on it and
+# nothing else -- the DMVs need VIEW DATABASE STATE, which no runtime identity holds). Not there yet / EXECUTE not granted
+# yet = the same reads DIRECTLY, each on its own: the base facts always work; the resource and statistics reads only with
+# the right, else those keys are left out.
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimUplinkDatabaseKeys {
+    <# PURE. The closed key list of Database, in order (a literal). Nothing else ever goes. #>
+    return @('tier', 'dtu', 'maxSizeMb', 'usedMb', 'peakLogWritePct1h', 'minutesAtLimit1h', 'statsAsync', 'statsStalePct', 'statsRefreshedUtc')
+}
+
+function Get-PimUplinkDatabaseProcSql { <# PURE. The one statement of the read (a literal). #> return 'EXEC pim.usp_DatabaseStats;' }
+
+function Get-PimUplinkDatabaseBaseSql {
+    <# PURE. READ-ONLY. The direct fallback, base half: needs no right beyond CONNECT (the SQL space read has used it since 100.36). #>
+    return @"
+SELECT CAST(DATABASEPROPERTYEX(DB_NAME(), 'ServiceObjective') AS NVARCHAR(60)) AS tier,
+       CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS BIGINT) / 1048576 AS maxSizeMb,
+       (SELECT SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS BIGINT)) * 8 / 1024 FROM sys.database_files WHERE type_desc = 'ROWS') AS usedMb,
+       (SELECT CAST(is_auto_update_stats_async_on AS INT) FROM sys.databases WHERE database_id = DB_ID()) AS statsAsync
+"@
+}
+
+function Get-PimUplinkDatabaseLoadSql {
+    <# PURE. READ-ONLY. The direct fallback, load half (VIEW DATABASE STATE): the last hour of sys.dm_db_resource_stats (15-second rows). #>
+    return @"
+SELECT COUNT(*) AS loadIntervals, MAX(avg_log_write_percent) AS peakLogWritePct1h,
+       COUNT(DISTINCT CASE WHEN avg_cpu_percent >= 99 OR avg_data_io_percent >= 99 OR avg_log_write_percent >= 99 OR avg_memory_usage_percent >= 99
+                           THEN DATEDIFF(MINUTE, DATEADD(HOUR, -1, SYSUTCDATETIME()), end_time) END) AS minutesAtLimit1h
+FROM sys.dm_db_resource_stats WHERE end_time > DATEADD(HOUR, -1, SYSUTCDATETIME())
+"@
+}
+
+function Get-PimUplinkDatabaseStatsSql {
+    <# PURE. READ-ONLY. The direct fallback, statistics half: one row per pim user-table statistic (rows / modifications NULL = not readable). #>
+    return @"
+SELECT sp.rows AS [rows], sp.modification_counter AS modifications
+FROM sys.stats s
+JOIN sys.tables t ON t.object_id = s.object_id
+OUTER APPLY sys.dm_db_stats_properties(s.object_id, s.stats_id) sp
+WHERE t.schema_id = SCHEMA_ID(N'pim') AND t.is_ms_shipped = 0
+"@
+}
+
+function ConvertTo-PimUplinkDbNumber {
+    <# PURE. A number (int / decimal / double / invariant text) as [double], or $null (null, DBNull, bool, text, NaN). #>
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value -or $Value -is [System.DBNull] -or $Value -is [bool]) { return $null }
+    $d = 0.0
+    if (-not [double]::TryParse("$(if ($Value -is [System.IFormattable]) { $Value.ToString($null, [Globalization.CultureInfo]::InvariantCulture) } else { $Value })", [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$d)) { return $null }
+    if ([double]::IsNaN($d) -or [double]::IsInfinity($d)) { return $null }
+    return $d
+}
+
+function Get-PimUplinkDtuForTier {
+    <# PURE. The DTUs of an Azure SQL DTU service objective (a literal map); a vCore / pool / unknown objective = $null. #>
+    param([AllowNull()][string]$Tier)
+    $map = @{ 'basic' = 5; 's0' = 10; 's1' = 20; 's2' = 50; 's3' = 100; 's4' = 200; 's6' = 400; 's7' = 800; 's9' = 1600; 's12' = 3000
+              'p1' = 125; 'p2' = 250; 'p4' = 500; 'p6' = 1000; 'p11' = 1750; 'p15' = 4000 }
+    $k = "$Tier".Trim().ToLowerInvariant()
+    if ($map.ContainsKey($k)) { return [int]$map[$k] }
+    return $null
+}
+
+function Test-PimUplinkStatisticStale {
+    <#
+      PURE. The stale rule, the SAME as pim.usp_RefreshStatistics: modification_counter > (rows * 20 / 100) + 500, with SQL's
+      integer division. $null when either number is unreadable (the statistic has never been built, or no right to read it).
+    #>
+    param([AllowNull()][object]$Rows, [AllowNull()][object]$Modifications)
+    $r = ConvertTo-PimUplinkDbNumber $Rows; $m = ConvertTo-PimUplinkDbNumber $Modifications
+    if ($null -eq $r -or $null -eq $m -or $r -lt 0 -or $m -lt 0) { return $null }
+    return [bool]([long]$m -gt ([math]::Floor([long]$r * 20 / 100) + 500))
+}
+
+function Get-PimUplinkStatsStaleCounts {
+    <# PURE. Per-statistic rows (rows, modifications) -> @{ statsTotal; statsReadable; statsStale } (Test-PimUplinkStatisticStale). #>
+    param([AllowNull()][object[]]$Rows)
+    $t = 0; $rd = 0; $st = 0
+    foreach ($x in @($Rows)) {
+        if ($null -eq $x) { continue }
+        $t++
+        $s = Test-PimUplinkStatisticStale -Rows (Get-PimUplinkField $x 'rows') -Modifications (Get-PimUplinkField $x 'modifications')
+        if ($null -eq $s) { continue }
+        $rd++; if ($s) { $st++ }
+    }
+    return [ordered]@{ statsTotal = $t; statsReadable = $rd; statsStale = $st }
+}
+
+function ConvertTo-PimUplinkStatsStalePct {
+    <#
+      PURE. statsStalePct = stale / readable * 100 as a WHOLE number 0-100, a half rounded UP (12.5 -> 13, 12.4 -> 12) --
+      the same contract as EPS 2.1.9 (one contract for both products; [math]::Round alone rounds a half to even). Nothing
+      readable (no statistic, or none the identity may read) = $null: left out -- an unreadable database is never reported
+      as "0 % stale".
+    #>
+    param([AllowNull()][object]$Readable, [AllowNull()][object]$Stale)
+    $r = ConvertTo-PimUplinkDbNumber $Readable; $s = ConvertTo-PimUplinkDbNumber $Stale
+    if ($null -eq $r -or $null -eq $s -or $r -le 0 -or $s -lt 0 -or $s -gt $r) { return $null }
+    # decimal arithmetic: 1/8 * 100 is exactly 12.5, never 12.4999... in a double
+    return [int][math]::Round((100 * [decimal]$s) / [decimal]$r, 0, [MidpointRounding]::AwayFromZero)
+}
+
+function New-PimUplinkDatabaseField {
+    <#
+      PURE. The Database object from -Facts (the read: tier, maxSizeMb, usedMb, statsAsync, loadIntervals, peakLogWritePct1h,
+      minutesAtLimit1h, statsReadable, statsStale) and -RefreshedUtc (pim.Settings 'StatisticsRefreshedUtc'). Only the keys of
+      Get-PimUplinkDatabaseKeys, in that order; a key whose value is missing or out of range is LEFT OUT; nothing at all = $null.
+        peakLogWritePct1h / minutesAtLimit1h  only when the hour holds at least one resource row (no rows = not read, never 0)
+        minutesAtLimit1h                      an integer, at most 60 (the minute buckets of an hour can touch 61)
+    #>
+    param([AllowNull()][object]$Facts, [AllowNull()][object]$RefreshedUtc = $null)
+    $o = [ordered]@{}
+    $n = { param($k) ConvertTo-PimUplinkDbNumber (Get-PimUplinkField $Facts $k) }
+    $tier = "$(Get-PimUplinkField $Facts 'tier')".Trim()
+    if ($tier -match '^[A-Za-z0-9._-]{1,40}$') {
+        $o['tier'] = $tier
+        $dtu = Get-PimUplinkDtuForTier -Tier $tier; if ($null -ne $dtu) { $o['dtu'] = $dtu }
+    }
+    $mx = & $n 'maxSizeMb'; if ($null -ne $mx -and $mx -gt 0) { $o['maxSizeMb'] = [long][math]::Floor($mx) }
+    $us = & $n 'usedMb';    if ($null -ne $us -and $us -ge 0) { $o['usedMb'] = [long][math]::Floor($us) }
+    $iv = & $n 'loadIntervals'
+    if ($null -ne $iv -and $iv -gt 0) {
+        $pk = & $n 'peakLogWritePct1h'; if ($null -ne $pk -and $pk -ge 0 -and $pk -le 100) { $o['peakLogWritePct1h'] = [double][math]::Round($pk, 1) }
+        $mi = & $n 'minutesAtLimit1h';  if ($null -ne $mi -and $mi -ge 0) { $o['minutesAtLimit1h'] = [int][math]::Min([double]60, [math]::Floor([double]$mi)) }
+    }
+    $sa = Get-PimUplinkField $Facts 'statsAsync'
+    if ($sa -is [bool]) { $o['statsAsync'] = $sa }
+    elseif ("$sa".Trim() -match '^(1|(?i:true))$') { $o['statsAsync'] = $true }
+    elseif ("$sa".Trim() -match '^(0|(?i:false))$') { $o['statsAsync'] = $false }
+    $pct = ConvertTo-PimUplinkStatsStalePct -Readable (Get-PimUplinkField $Facts 'statsReadable') -Stale (Get-PimUplinkField $Facts 'statsStale')
+    if ($null -ne $pct) { $o['statsStalePct'] = $pct }
+    # the stored value is a JSON string ("..."), already parsed text, or a [datetime] (PowerShell 7's ConvertFrom-Json)
+    $rv = $RefreshedUtc; if ($rv -is [string]) { $rv = "$rv".Trim().Trim('"') }
+    $at = ConvertTo-PimUplinkUtc $rv
+    if ($at) { $o['statsRefreshedUtc'] = $at.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture) }
+    if (-not $o.Count) { return $null }
+    return [pscustomobject]$o
+}
+
+function Get-PimUplinkDatabaseFacts {
+    <#
+      The read behind Database. -Query { param($sql) rows } (read-only; the job binds Invoke-PimSqlQuery on the store's own
+      connection). First pim.usp_DatabaseStats (one row, every value); when that fails (not created yet, EXECUTE not granted
+      yet) the three direct reads, EACH ON ITS OWN, so one refused read leaves only its keys out. Never throws. Returns an
+      ordered map of the facts it could read, plus 'source' = procedure | direct | none.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Query)
+    $f = [ordered]@{}
+    $copy = { param($row, [string[]]$keys) foreach ($k in $keys) { $v = Get-PimUplinkField $row $k; if ($null -ne $v -and $v -isnot [System.DBNull]) { $f[$k] = $v } } }
+    $all = @('tier', 'maxSizeMb', 'usedMb', 'statsAsync', 'loadIntervals', 'peakLogWritePct1h', 'minutesAtLimit1h', 'statsTotal', 'statsReadable', 'statsStale')
+    $row = $null
+    try { $row = @(& $Query (Get-PimUplinkDatabaseProcSql)) | Select-Object -First 1 } catch { $row = $null; Write-Verbose "[uplink] Database: pim.usp_DatabaseStats not read ($((("$($_.Exception.Message)") -split "`n")[0])) -- the direct reads" }
+    if ($null -ne $row) { & $copy $row $all; $f['source'] = 'procedure'; return $f }
+    try { $b = @(& $Query (Get-PimUplinkDatabaseBaseSql)) | Select-Object -First 1; if ($null -ne $b) { & $copy $b @('tier', 'maxSizeMb', 'usedMb', 'statsAsync') } } catch { Write-Verbose "[uplink] Database: the base facts were not read: $($_.Exception.Message)" }
+    try { $l = @(& $Query (Get-PimUplinkDatabaseLoadSql)) | Select-Object -First 1; if ($null -ne $l) { & $copy $l @('loadIntervals', 'peakLogWritePct1h', 'minutesAtLimit1h') } } catch { Write-Verbose "[uplink] Database: the resource stats were not read (no VIEW DATABASE STATE): $($_.Exception.Message)" }
+    try { $c = Get-PimUplinkStatsStaleCounts -Rows ([object[]]@(& $Query (Get-PimUplinkDatabaseStatsSql))); foreach ($k in @($c.Keys)) { $f[$k] = $c[$k] } } catch { Write-Verbose "[uplink] Database: the statistics were not read: $($_.Exception.Message)" }
+    $f['source'] = $(if ($f.Count) { 'direct' } else { 'none' })
+    return $f
+}
+
 function Get-PimUplinkStateFields {
     <#
       The structured fields that are SWITCHED ON and readable: an ordered map field -> value. -Switches: field -> on
@@ -2622,6 +2801,14 @@ function Get-PimUplinkStateFields {
     if ((& $__sfOn 'BuildPool') -and $UpdateStateRead) {
         # BUILDPOOL-11G (framework rule 11g); PIM_UPLINK_BUILDPOOL=0 switches it off; no pool recorded = left out
         try { $__sfV = New-PimUplinkBuildPoolField -UpdateState $UpdateState; if ($null -ne $__sfV) { $out['BuildPool'] = $__sfV } } catch { Write-Warning "[uplink] BuildPool could not be built: $($_.Exception.Message)" }
+    }
+    if ((& $__sfOn 'Database') -and $Query) {
+        # SQL-STATS-PROOF (framework 12.27 point 5); PIM_UPLINK_DATABASE=0 switches it off; every key soft, nothing readable = left out
+        try {
+            $__sfRef = $null; if ($GetSetting) { try { $__sfRef = & $GetSetting 'StatisticsRefreshedUtc' } catch { $__sfRef = $null } }
+            $__sfV = New-PimUplinkDatabaseField -Facts (Get-PimUplinkDatabaseFacts -Query $Query) -RefreshedUtc $__sfRef
+            if ($null -ne $__sfV) { $out['Database'] = $__sfV }
+        } catch { Write-Warning "[uplink] Database could not be built: $($_.Exception.Message)" }
     }
     return $out
 }

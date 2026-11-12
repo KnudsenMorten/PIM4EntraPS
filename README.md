@@ -60,6 +60,11 @@ installer creates and the rights it grants: **[Setup](https://invardia.com/docs/
 **Updates.** Community updates itself at night from the public release. To update by hand instead, run
 `.\tools\setup\Update-PimCommunity.ps1 -Apply` from the install folder whenever you choose.
 
+**Your choice: connect to Invardia or not.** The installer asks "Connect this install to Invardia: health reports +
+updates on request". Yes gives your installation its own install key, health reports and "Update now", as on Pro. No (or
+no answer) means the installation sends nothing that identifies your tenant; it still updates itself each night. Change
+it any time in PIM Manager > Settings > Licence.
+
 ## What it does
 
 ### See who can do what
@@ -169,6 +174,7 @@ PIM Manager, the engine and the database run in your subscription on managed ide
 | Admin accounts with Temporary Access Passes and auto-disable | ✅ | ✅ |
 | PIM Activator browser extension | ✅ | ✅ |
 | Updates | Nightly, by the updater, from Invardia's signed Community channel (the package is the public release) | Approved releases through Invardia |
+| Health reports and "Update now" | Only if you say yes to connecting to Invardia | ✅ |
 | Second approver (four-eyes) and the evidence / audit export | ✅ | ✅ |
 | Access reviews enforced by the engine | | ✅ |
 | Delegated administration | | ✅ |

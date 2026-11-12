@@ -156,6 +156,13 @@ function New-PimRestAdminAccount {
   }
 
   if ($existing -and $existing.id) {
+    # NO-OVERWRITE (owner 2026-11-12: "we must not impact overwrite existing"): an account that already exists and is not
+    # PIM's (no admin name of this install, not a central admin) is NEVER patched -- one plain line, nothing written.
+    if ((Get-Command Test-PimAdminRowAccountIsForeign -ErrorAction SilentlyContinue) -and (Test-PimAdminRowAccountIsForeign -Row $Row -Upn "$(if ($existing.userPrincipalName) { $existing.userPrincipalName } else { $upn })")) {
+      $why = Get-PimAdminForeignAccountText -Upn $upn
+      Write-Host "  [skip] $why" -ForegroundColor DarkYellow
+      return [pscustomobject]@{ Upn = $upn; Action = "refused: $why"; Password = '' }
+    }
     if (-not $PSCmdlet.ShouldProcess($upn, 'Update Entra user (REST)')) {
       return [pscustomobject]@{ Upn = $upn; Action = 'whatif'; Password = '' }
     }

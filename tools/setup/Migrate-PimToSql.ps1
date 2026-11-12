@@ -69,6 +69,18 @@
     Imported rows get Replicate=No (admins: ManagementMode=local) unless the file sets it explicitly,
     so nothing imported onto a managing tenant is published to managed tenants by default.
 
+.PARAMETER PolicyChoiceForImported
+    V1-IMPORT-POLICY-KEEP (owner 2026-11-12). During the v1 -> v2 overlap BOTH engines run, so v2 must never move an
+    Entra role or PIM-for-Groups policy away from what v1 set. With -SeedSettings the importer records a per-OBJECT
+    policy choice (pim.Settings 'PolicyChoices' overrides) for EVERY setting of every policy the imported rows name:
+    groupMember|<group> and groupOwner|<group> for each group a PIM-Definitions-* row names, directoryRole|<role> for each
+    role a PIM-Assignments-Roles-* row names. keep (default) = Keep current; none = record nothing (the old behaviour);
+    recommendation | microsoft need -ConfirmPolicyChange and still only give the engine a HELD plan that a SuperAdmin
+    approves. A choice already stored for that object and setting is never overwritten. Azure role policies: out of scope.
+
+.PARAMETER ConfirmPolicyChange
+    The named confirmation for -PolicyChoiceForImported recommendation | microsoft.
+
 .EXAMPLE
     # dev (Express)
     .\Migrate-PimToSql.ps1 -ConfigDir ..\config -Server .\SQLEXPRESS -Database PimPlatform
@@ -106,10 +118,20 @@ param(
     # REQ-G: the target is a single or managed tenant, not a managing tenant (passed to the check).
     [switch]$NotMspMaster,
     # REQ-G: the target's default UPN domain, for admin rows without a UserPrincipalName (passed to the check).
-    [string]$DefaultDomain
+    [string]$DefaultDomain,
+    # V1-IMPORT-POLICY-KEEP (owner 2026-11-12): the policy choice recorded for every Entra role and PIM-for-Groups policy
+    # the imported rows name (see .PARAMETER). keep = v2 never moves a policy away from what v1 set while both run.
+    [ValidateSet('keep', 'none', 'recommendation', 'microsoft')][string]$PolicyChoiceForImported = 'keep',
+    # V1-IMPORT-POLICY-KEEP: the named confirmation -PolicyChoiceForImported recommendation | microsoft needs.
+    [switch]$ConfirmPolicyChange
 )
 $ErrorActionPreference = 'Stop'
 $shared = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared'
+# V1-IMPORT-POLICY-KEEP: refused before anything is read or written.
+if ($PolicyChoiceForImported -in @('recommendation', 'microsoft') -and -not $ConfirmPolicyChange) {
+    throw ("Migrate-PimToSql: -PolicyChoiceForImported $PolicyChoiceForImported is refused without -ConfirmPolicyChange: while v1 still runs this would make v2 change policies v1 set. " +
+           "Use the default (keep) during the overlap; after v1 is turned off choose on the Policy settings page, or run again with -ConfirmPolicyChange. Nothing was written.")
+}
 
 function Import-PimMigrateWorkloadExemptions {
     # Import a v1 PIM-WorkloadExemptions.custom.json into pim.Settings['WorkloadExemptions'] via
@@ -296,6 +318,65 @@ function Read-PimMigrateStoreRows {
     return @($raw | ForEach-Object { @{ key = "$($_.Key)"; row = $(if ("$($_.DataJson)".Trim()) { $_.DataJson | ConvertFrom-Json } else { [pscustomobject]@{} }) } })
 }
 
+function Get-PimMigrateImportedPolicyObjects {
+    <#
+      V1-IMPORT-POLICY-KEEP. PURE. The Entra role and PIM-for-Groups policies the imported rows name -- the same objects the
+      engine's policy providers manage for them:
+        groups  every GroupName of a PIM-Definitions-* row (Get-PimGroupsPolicyDesiredSet: the member + owner policy)
+        roles   every RoleDefinitionName / RoleName of a PIM-Assignments-Roles-* row that is not Action=Remove
+                (Get-PimManagedRolePolicyTargets)
+      -Plans: entity -> @{ rows }; -Skip: entities that failed. Returns @{ groups; roles } (distinct by lower-case name,
+      the first spelling kept, sorted).
+    #>
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Plans, [string[]]$Skip = @())
+    $prop = {
+        param($r, [string[]]$names)
+        foreach ($n in $names) {
+            $v = if ($r -is [System.Collections.IDictionary]) { if ($r.Contains($n)) { $r[$n] } else { $null } } else { $p = $r.PSObject.Properties[$n]; if ($p) { $p.Value } else { $null } }
+            if ("$v".Trim()) { return "$v".Trim() }
+        }
+        ''
+    }
+    $groups = [ordered]@{}; $roles = [ordered]@{}
+    foreach ($base in @($Plans.Keys)) {
+        if ($Skip -contains $base) { continue }
+        $isGroup = "$base" -like 'PIM-Definitions-*'
+        $isRole = "$base" -like 'PIM-Assignments-Roles-*'
+        if (-not ($isGroup -or $isRole)) { continue }
+        foreach ($r in @($Plans[$base].rows)) {
+            if ($null -eq $r) { continue }
+            if ($isGroup) {
+                $g = & $prop $r @('GroupName'); if ($g -and -not $groups.Contains($g.ToLowerInvariant())) { $groups[$g.ToLowerInvariant()] = $g }
+            } else {
+                if ((& $prop $r @('Action')) -eq 'Remove') { continue }
+                $n = & $prop $r @('RoleDefinitionName', 'RoleName'); if ($n -and -not $roles.Contains($n.ToLowerInvariant())) { $roles[$n.ToLowerInvariant()] = $n }
+            }
+        }
+    }
+    @{ groups = @($groups.Values | Sort-Object); roles = @($roles.Values | Sort-Object) }
+}
+
+function Get-PimMigratePolicyChoicePlan {
+    <#
+      V1-IMPORT-POLICY-KEEP. PURE. The per-object choices to record: for every imported group its groupMember and groupOwner
+      policy, for every imported role its directoryRole policy -- EVERY setting of that policy type. A setting that already
+      carries a LOCAL choice for that object is never overwritten (a re-run never undoes a SuperAdmin's decision): it is
+      counted as kept. Returns @{ items = @( @{ type; field; choice; objectKey } ); kept; groups; roles }.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Store, [string[]]$Groups = @(), [string[]]$Roles = @(), [Parameter(Mandatory)][string]$Choice)
+    $items = New-Object System.Collections.Generic.List[object]; $kept = 0
+    $objs = @(foreach ($g in $Groups) { @{ type = 'groupMember'; key = "$g" }; @{ type = 'groupOwner'; key = "$g" } }) + @(foreach ($r in $Roles) { @{ type = 'directoryRole'; key = "$r" } })
+    foreach ($o in $objs) {
+        $ok = "$($o.key)".Trim().ToLowerInvariant(); if (-not $ok) { continue }
+        $have = $Store.overrides["$($o.type)|$ok"]
+        foreach ($fd in @(Get-PimPolicyFieldsForType -Type $o.type)) {
+            if ($have -and $have.ContainsKey("$($fd.id)")) { $kept++; continue }
+            $items.Add(@{ type = $o.type; field = "$($fd.id)"; choice = $Choice; objectKey = $ok })
+        }
+    }
+    @{ items = @($items.ToArray()); kept = $kept; groups = @($Groups).Count; roles = @($Roles).Count }
+}
+
 # REQ-G: the WRITE (add / update by key, never delete, one transaction per entity) and the row COMPARE are the
 # store's own -- Merge-PimSqlEntityRows and Compare-PimSqlRowContent in engine/_shared/PIM-SqlStore.ps1. This
 # script carried a private MERGE copy (Invoke-PimMigrateUpsertRows) until the store had an upsert-only mode.
@@ -306,6 +387,8 @@ function Read-PimMigrateStoreRows {
 . (Join-Path $shared 'PIM-CsvImportCheck.ps1')
 # ADMIN-EXISTING-ACCOUNT (a): the exact-UPN check of "Existing account (office user)" rows (Select-PimExistingAccountImportRows).
 if (Test-Path -LiteralPath (Join-Path $shared 'PIM-AdminExistingAccount.ps1')) { . (Join-Path $shared 'PIM-AdminExistingAccount.ps1') }
+# V1-IMPORT-POLICY-KEEP: the policy choices library -- the SAME Set-PimPolicyChoices the Manager's PUT /api/policy-choices saves through.
+if ($PolicyChoiceForImported -ne 'none') { . (Join-Path $shared 'PIM-PolicyChoices.ps1') }
 # 🧪 TEST SEAM ONLY. The dot-sources above (re)define the store functions in THIS script's scope, so a stub
 # a test defines beforehand would be shadowed. $global:PIM_MigrateStoreStub = @{ <function name> = <scriptblock> }
 # replaces those functions for this run (tests/Test-PimCsvImportCheck.ps1 drives the refuse / validate-only /
@@ -600,6 +683,60 @@ if ($SeedSettings) {
         $pt = Initialize-PimPolicyTemplateStore -ConnectionString $ConnectionString -TemplateDir (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'templates\policy')
         Write-Host ("  [migrate] policy templates: {0} in SQL -- {1}" -f $pt.count, $pt.reason) -ForegroundColor Green
     }
+    # 🔒 V1-IMPORT-POLICY-KEEP (owner 2026-11-12, wizard "A: importer sets Keep current"; Entra role + PIM for Groups policies
+    # ONLY, Azure out of scope): during the v1 -> v2 overlap BOTH engines run, and v2 must never move a policy away from what
+    # v1 set. So the import records a per-OBJECT choice for EVERY setting of every policy the imported rows name (default
+    # Keep current) -- through Set-PimPolicyChoices, exactly as the Manager's PUT /api/policy-choices saves -- and never over
+    # a choice already stored for that object and setting. One audit row 'policy.choice.save' by 'v1-import'.
+    # recommendation / microsoft were confirmed above (-ConfirmPolicyChange) and still only give the engine a plan that is
+    # HELD until a SuperAdmin approves it (Test-PimPolicyBreaker) -- nothing here writes to the tenant.
+    $script:PimMigratePolicyChoices = $null
+    if ($PolicyChoiceForImported -eq 'none') {
+        Write-Host '  [migrate] policy settings: none recorded for the imported groups and roles (-PolicyChoiceForImported none)' -ForegroundColor DarkGray
+        $script:PimMigratePolicyChoices = [pscustomobject]@{ choice = 'none'; settings = 0; groups = 0; roles = 0; kept = 0; written = $false; text = 'no policy setting recorded (-PolicyChoiceForImported none)'; error = '' }
+    } else {
+        $pcRes = [ordered]@{ choice = $PolicyChoiceForImported; settings = 0; groups = 0; roles = 0; kept = 0; written = $false; text = ''; error = '' }
+        try {
+            $pcObjs = Get-PimMigrateImportedPolicyObjects -Plans $plans -Skip @($failedEntities | ForEach-Object { "$($_.entity)" })
+            $pcStore = ConvertTo-PimPolicyChoicesStore -Value (Get-PimSqlSetting -ConnectionString $ConnectionString -Name (Get-PimPolicyChoicesSettingName))
+            $pcPlan = Get-PimMigratePolicyChoicePlan -Store $pcStore -Groups $pcObjs.groups -Roles $pcObjs.roles -Choice $PolicyChoiceForImported
+            $pcRes.settings = @($pcPlan.items).Count; $pcRes.groups = $pcPlan.groups; $pcRes.roles = $pcPlan.roles; $pcRes.kept = $pcPlan.kept
+            $pcLabel = Get-PimPolicyChoiceLabel $PolicyChoiceForImported
+            $pcRes.text = "{0} policy settings set to {1} for {2} groups / {3} roles (existing choices kept: {4})" -f $pcRes.settings, $pcLabel, $pcRes.groups, $pcRes.roles, $pcRes.kept
+            if (-not $pcRes.settings) {
+                Write-Host ("  [migrate] policy settings: {0}" -f $pcRes.text) -ForegroundColor DarkGray
+            } elseif ($PSCmdlet.ShouldProcess('pim.Settings', "PolicyChoices: $($pcRes.text)")) {
+                $pcCs = $ConnectionString
+                # The last policy run's live read only counts what a changing choice WOULD change; Keep current changes nothing,
+                # so it is not read (and a large import does not scan every policy once per setting).
+                $pcSnaps = $null
+                if ($PolicyChoiceForImported -ne 'keep') {
+                    $pcSnaps = @{}
+                    foreach ($pv in @('GroupsPolicies', 'EntraRolePolicies')) { try { $pcSnaps[$pv] = Get-PimSqlSetting -ConnectionString $pcCs -Name (Get-PimPolicyLiveValuesSettingName -Provider $pv) } catch { $pcSnaps[$pv] = $null } }
+                }
+                $pcSaved = Set-PimPolicyChoices -Items @($pcPlan.items) -By 'v1-import' `
+                    -Advisories (Get-PimSqlSetting -ConnectionString $pcCs -Name (Get-PimPolicyAdvisoriesSettingName)) -Defaults (Get-PimMicrosoftPolicyDefaultsTable) -Snapshots $pcSnaps `
+                    -Read { Get-PimSqlSetting -ConnectionString $pcCs -Name (Get-PimPolicyChoicesSettingName) } `
+                    -Write { param($v) Set-PimSqlSetting -ConnectionString $pcCs -Name (Get-PimPolicyChoicesSettingName) -ValueJson (ConvertTo-Json -InputObject $v -Depth 8 -Compress) }
+                if (-not $pcSaved.ok) { throw ("the policy choices were refused: {0}" -f (@($pcSaved.errors) -join ' ')) }
+                $pcRes.written = $true
+                Write-Host ("  [migrate] policy settings: {0}" -f $pcRes.text) -ForegroundColor Green
+                if ($PolicyChoiceForImported -ne 'keep') { Write-Host ("  [migrate] policy settings: nothing changes in the tenant now -- the next policy run plans the change and HOLDS it until a SuperAdmin approves it ({0} polic(ies) would change as far as the last policy run read them)." -f [int]$pcSaved.changes) -ForegroundColor Yellow }
+                try {
+                    Write-PimSqlAuditEvent -ConnectionString $pcCs -Actor 'v1-import' -ActorSource 'import' -Action 'policy.choice.save' -Target ("policychoice:import/{0}" -f $PolicyChoiceForImported) -Result 'ok' `
+                        -After ([ordered]@{ choice = $PolicyChoiceForImported; settings = $pcRes.settings; groups = $pcRes.groups; roles = $pcRes.roles; keptExisting = $pcRes.kept; text = "v1-import: $($pcRes.text)"; policiesThatWouldChange = [int]$pcSaved.changes })
+                } catch { Write-Warning "  [migrate] policy choices saved but NOT written to the audit trail: $($_.Exception.Message)" }
+            } else {
+                Write-Host ("  [migrate][WhatIf] policy settings: would record -- {0}" -f $pcRes.text) -ForegroundColor Yellow
+            }
+        } catch {
+            $pcRes.error = "policy choices for the imported groups and roles failed: $($_.Exception.Message)"
+            Write-Host ("  [migrate] {0}" -f $pcRes.error) -ForegroundColor Red
+            [void]$failedEntities.Add([pscustomobject]@{ entity = 'PolicyChoices'; error = $pcRes.error })
+        }
+        $script:PimMigratePolicyChoices = [pscustomobject]$pcRes
+    }
+    if ($__sink) { $__sink['policyChoices'] = $script:PimMigratePolicyChoices }
     # Workload exemptions live in pim.Settings['WorkloadExemptions'] (2026-09-12). A v1 folder keeps them
     # in PIM-WorkloadExemptions.custom.json: import it ONCE, through Save-PimWorkloadExemptions so a
     # malformed entry (no reason, no expiry) is refused at the door exactly as the Manager refuses it.

@@ -3025,6 +3025,10 @@ $_coverageLib = Join-Path $solutionRoot 'engine\coverage\PIM-Coverage.ps1'
 if (Test-Path -LiteralPath $_coverageLib) { . $_coverageLib }
 if (Test-Path -LiteralPath $validator)  { . $validator }
 . (Join-Path $PSScriptRoot '_settings.ps1')   # PIM 100.121 (lane settings): the feature settings + the two protection switches (functions only)
+# ACCESS PACKAGES (owner 2026-11-12): the engine's pure helpers (new '-AP' group identity, the definition check, the lock) and the
+# Manager routes (Access > Access packages). Functions only; the routes answer rows that the page stages -- nothing is written here.
+$_apEngineLib = Join-Path $solutionRoot 'engine\_shared\PIM-AccessPackages.ps1'; if (Test-Path -LiteralPath $_apEngineLib) { . $_apEngineLib }
+$_apMgrLib = Join-Path $PSScriptRoot '_accesspackages.ps1'; if (Test-Path -LiteralPath $_apMgrLib) { . $_apMgrLib }
 $_statesLib = Join-Path $PSScriptRoot '_states.ps1'; if (Test-Path -LiteralPath $_statesLib) { . $_statesLib }   # PIM 100.118: the state of every group, in words (GET /api/group-states)
 $_acctStatesLib = Join-Path $PSScriptRoot '_accountStates.ps1'; if ((Test-Path -LiteralPath $_acctStatesLib) -and (Get-Command Get-PimStateRankOf -ErrorAction SilentlyContinue)) { . $_acctStatesLib }   # PIM 100.132: the state of every admin account, in words (GET /api/account-states)
 # PIM 100.120 (lane listmenu): the saved layouts of the list menu (GET / PUT / DELETE /api/list-layouts).
@@ -3134,7 +3138,7 @@ $script:PimCsvBases = @(
     # three counts. The design and the engine were right; only the column was absent.
     # PolicyTemplate + ReviewCycle are read by the same provider block and were missing too;
     # SponsorNotes is the v2 companion field recorded in REQUIREMENTS §1451.
-    [ordered]@{ base = 'PIM-Definitions-Roles';           group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform','IsRoleAssignable','Owners','SponsorUpn','SponsorNotes','Department','Organisation','Project','Team','BusinessUnit','PolicyTemplate','ReviewCycle','Lifecycle','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Definitions-Roles';           group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform','IsRoleAssignable','Owners','SponsorUpn','SponsorNotes','Department','Organisation','Project','Team','BusinessUnit','PolicyTemplate','ReviewCycle','AccessPackage','Lifecycle','Replicate','Ring','Target') },
     [ordered]@{ base = 'PIM-Definitions-Tasks';           group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','PolicyTemplate','Lifecycle','Replicate','Ring','Target') },
     [ordered]@{ base = 'PIM-Definitions-Services';        group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','PolicyTemplate','Lifecycle','Replicate','Ring','Target') },
     [ordered]@{ base = 'PIM-Definitions-Processes';       group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','PolicyTemplate','Lifecycle','Replicate','Ring','Target') },
@@ -3159,12 +3163,16 @@ $script:PimCsvBases = @(
     # 2026-09-19 ("did you add selection in wizards and existing"): Departments / Organization / Projects / CrossOrg gain
     # PolicyTemplate -- the engine already reads it on these definitions (Get-PimGroupPolicyDefinitionRows), but the grid
     # could not show or change it. A header column never rewrites stored rows (Read-PimRows returns them as stored).
-    [ordered]@{ base = 'PIM-Definitions-Departments';     group = 'Definitions';  defaultHeader = @('Department','GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','AzureScopes','PolicyTemplate','RfaMode','RfaDurations','Lifecycle','Replicate','Ring','Target') },
-    [ordered]@{ base = 'PIM-Definitions-Organization';    group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','PolicyTemplate','Lifecycle','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Definitions-Departments';     group = 'Definitions';  defaultHeader = @('Department','GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','AzureScopes','PolicyTemplate','RfaMode','RfaDurations','AccessPackage','Lifecycle','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Definitions-Organization';    group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','PolicyTemplate','AccessPackage','Lifecycle','Replicate','Ring','Target') },
     # Direct-group types Project (PROJ-, AU PIM-PROJECTS) and Cross-org (CORG-, AU PIM-CROSSORG) --
     # operator, 2026-09-12: "where is the project and cross-org direct group".
-    [ordered]@{ base = 'PIM-Definitions-Projects';        group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','PolicyTemplate','Lifecycle','Replicate','Ring','Target') },
-    [ordered]@{ base = 'PIM-Definitions-CrossOrg';        group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','PolicyTemplate','Lifecycle','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Definitions-Projects';        group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','PolicyTemplate','AccessPackage','Lifecycle','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Definitions-CrossOrg';        group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','PolicyTemplate','AccessPackage','Lifecycle','Replicate','Ring','Target') },
+    # ACCESS PACKAGES (owner 2026-11-12): one row per package (key AccessPackageName), written only by staging + the audited commit
+    # (Access > Access packages). DirectGroupTags names the NEW '-AP' groups created for it -- never an existing group. State=Paused
+    # stops every write for it (PIM-AccessPackages.ps1). The engine reads exactly these columns (ConvertTo-PimAccessPackageDefinition).
+    [ordered]@{ base = 'AccessPackage';                   group = 'Definitions';  defaultHeader = @('AccessPackageName','Notes','DirectGroupTags','RequestScope','RequestGroupTag','Approval','ApprovalStage1','ApprovalStage2','RequireJustification','AllowExtension','MaxDays','ReviewCadence','Reviewers','ReviewNoResponse','State','PauseReason','Action') },
     [ordered]@{ base = 'PIM-Definitions-AU';              group = 'Definitions';  defaultHeader = @('AUDisplayName','AUDescription','AdministrativeUnitTag','Workload','Level','TierLevel','Visibility') },
     [ordered]@{ base = 'PIM-Assignments-Admins';          group = 'Assignments';  defaultHeader = @('Username','GroupTag','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform','Replicate','Ring','Target') },
     [ordered]@{ base = 'PIM-Assignments-Groups';          group = 'Assignments';  defaultHeader = @('TargetGroupTag','SourceGroupTag','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform','Replicate','Ring','Target') },
@@ -5833,7 +5841,49 @@ function Invoke-PimManagerExistingAccountLookup {
     # Basic profile only (WEB-GRAPH-MIN-1: the web app holds User.ReadBasic.All) -- the read itself is GET /users/<upn>.
     $g = if ($script:PimExistingAccountLookupGraph -is [scriptblock]) { $script:PimExistingAccountLookupGraph } else { { param($p) Invoke-PimGraph -Path $p } }
     if (-not ($script:PimExistingAccountLookupGraph -is [scriptblock]) -and -not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ found = $false; upn = $Upn; displayName = ''; error = 'this Manager has no connection to Microsoft Entra ID to read the account' } }
-    return (Find-PimExistingAccount -Upn $Upn -Graph $g -Select 'id,userPrincipalName,displayName')
+    $f = Find-PimExistingAccount -Upn $Upn -Graph $g -Select 'id,userPrincipalName,displayName'
+    # EXISTING-ACCOUNT-NO-HYBRID (owner 2026-11-12: "they can live both in AD and cloud"): where the account lives, read
+    # best-effort in a SECOND exact read (onPremisesSyncEnabled is not in the basic profile; a refusal = 'not known').
+    $src = 'not known'
+    if ($f.found) {
+        try {
+            $sy = & $g ("/users/{0}?`$select=id,onPremisesSyncEnabled" -f [uri]::EscapeDataString("$Upn".Trim()))
+            $sy = @($sy) | Select-Object -First 1
+            if ($sy -and $sy.PSObject.Properties['onPremisesSyncEnabled']) { $src = Get-PimExistingAccountSourceText -OnPremisesSyncEnabled $sy.onPremisesSyncEnabled }
+        } catch { $src = 'not known' }
+    }
+    $f | Add-Member -NotePropertyName source -NotePropertyValue $src -Force
+    return $f
+}
+function Get-PimManagerAdminUpnCheck {
+    <#
+      NO-OVERWRITE (owner 2026-11-12, wizard "chk for existing"): Create admin (a normal type) checks the UPN it is about to
+      create with ONE exact read (the same as Find-PimExistingAccount). Returns @{ upn; exists; pims; source; verdict; message }:
+        verdict create   no account with that UPN: PIM creates it
+                adopt    it exists and is PIM's (an admin name of this install): adopted, not created
+                blocked  it exists and is NOT PIM's: PIM must not change it -- use it as an existing account (office user)
+                unknown  it could not be read (said; the engine still refuses to change an account that is not PIM's)
+    #>
+    param([AllowEmptyString()][string]$Upn)
+    $u = "$Upn".Trim()
+    $o = [ordered]@{ upn = $u; exists = $false; pims = $null; source = ''; displayName = ''; verdict = 'unknown'; message = '' }
+    $f = Invoke-PimManagerExistingAccountLookup -Upn $u
+    if (-not $f.found) {
+        if ("$($f.error)".Trim()) { $o.message = "the account could not be checked: $($f.error)"; return [pscustomobject]$o }
+        $o.verdict = 'create'; $o.message = "no account named $u exists -- PIM creates it."; return [pscustomobject]$o
+    }
+    $o.exists = $true; $o.displayName = "$($f.displayName)"; $o.source = "$($f.source)"
+    $isPims = $null
+    if (Get-Command Test-PimAdminAccountNameIsPims -ErrorAction SilentlyContinue) { $isPims = Test-PimAdminAccountNameIsPims -Upn $u }
+    $o.pims = $isPims
+    if ($isPims -eq $false) {
+        $o.verdict = 'blocked'
+        $o.message = "$u already exists ($($o.displayName), $($o.source)) and was not created by PIM -- PIM will not change it. Use it as an existing account (office user): PIM then gives it delegations only."
+    } else {
+        $o.verdict = 'adopt'
+        $o.message = "$u already exists ($($o.displayName)) and carries an admin name of this install -- it will be adopted, not created."
+    }
+    return [pscustomobject]$o
 }
 function Get-PimManagerExistingAccountWarnings {
     <#
@@ -7963,6 +8013,20 @@ function Invoke-PimManagerCsvPut {
         return 409
     }
 
+    # ACCESS PACKAGES -- THE LOCK (owner 2026-11-12 "new groups locked for access packages" / "we dont rename anything existing"):
+    # a package group's members come from the package only, nothing is nested into it, and it is never renamed or re-tagged; an
+    # existing group is never given to a package. Removals always pass. Plain form validation (409 naming the rows), no guard trip.
+    if ((Get-Command Test-PimManagerAccessPackageCommitGate -ErrorAction SilentlyContinue) -and "$base" -match '^(PIM-Assignments-(Admins|Groups)|PIM-Definitions-(Roles|Departments|Organization|Projects|CrossOrg))$') {
+        $apGate = $null
+        try { $apGate = Test-PimManagerAccessPackageCommitGate -Diff $diff -Base $base -LockedTags (Get-PimManagerAccessPackageLockedTags) }
+        catch { $apGate = @{ allowed = $false; refused = @(); reason = "Not committed -- the access package groups could not be read ($($_.Exception.Message)), so the lock cannot be checked. Nothing was saved." } }
+        if (-not $apGate.allowed) {
+            Write-PimManagerAuditEvent -Action 'commit.access-package-locked' -Target $base -Result 'denied' -After ([ordered]@{ refused = @($apGate.refused) })
+            Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{ ok = $false; base = $base; gate = 'access-package-locked'; error = "$($apGate.reason)"; refused = @($apGate.refused) })
+            return 409
+        }
+    }
+
     # 🔒 PIM 100.22 (f) (owner 2026-10-09): a NEW duplicate group tag (an added or re-tagged definition reusing a tag another
     # definition entity holds) is refused whole; an existing duplicate is untouched (last-wins + warning + fix hint).
     $tagDupGate = $null
@@ -9105,7 +9169,24 @@ function Build-PimGraphData {
                 groupTag    = $g.GroupTag
                 # §70.19: the wizards need it -- Entra refuses an ACTIVE group nesting into a role-assignable group.
                 roleAssignable = ("$($g.IsRoleAssignable)".Trim() -ieq 'TRUE')
+                # ACCESS PACKAGES (owner 2026-11-12): a group created for a package is LOCKED to it -- the board links nothing to it.
+                accessPackage = "$($g.AccessPackage)".Trim()
+                apLocked      = [bool]"$($g.AccessPackage)".Trim()   # the column decides; an existing group that ends with -AP is ordinary
             })
+        }
+    }
+    # ACCESS PACKAGES (owner 2026-11-12): each package is its OWN node type ('access-package', the people column: a package
+    # decides who gets onto its groups), with one edge to each NEW group created for it. Retired / returned rows are not drawn.
+    $apRowsG = @(); try { $apRowsG = @((Read-PimRows 'AccessPackage').rows) } catch { $apRowsG = @() }
+    foreach ($ap in $apRowsG) {
+        $apn = "$($ap.AccessPackageName)".Trim(); if (-not $apn) { continue }
+        if ("$($ap.Action)".Trim() -match '^(?i)(remove|returntoengine)$') { continue }
+        [void]$nodes.Add([ordered]@{ id = "accesspackage:$apn"; label = $apn; kind = 'access-package'; description = "$($ap.Notes)"; source = 'AccessPackage'
+            paused = ("$($ap.State)".Trim() -ieq 'Paused') })
+        foreach ($apt in @("$($ap.DirectGroupTags)" -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+            if (& $isRemoved @("group:$apt")) { continue }
+            [void]$edges.Add([ordered]@{ source = "accesspackage:$apn"; target = "group:$apt"; type = 'Eligible'; kind = 'package-to-group'; source_csv = 'AccessPackage'
+                match = [ordered]@{ AccessPackageName = $apn; GroupTag = $apt } })
         }
     }
 
@@ -16794,6 +16875,14 @@ function Handle-Request {
         # PIM 100.121 (lane settings): the feature settings the code read and Settings did not show, and the two protection
         # switches (automatic offboarding, the removal mode of the daily reconcile). GET (any role) = the state; PUT = the
         # change, SuperAdmin only -- the role is checked inside the change function (tools/pim-manager/_settings.ps1).
+        # ACCESS PACKAGES (owner 2026-11-12): list (Reader+), plan / pause / resume (Admin+). Every answer is rows for the page to
+        # STAGE in Pending changes -- the audited commit is the only writer (tools/pim-manager/_accesspackages.ps1).
+        if ((Get-Command Get-PimManagerAccessPackageRoutePaths -ErrorAction SilentlyContinue) -and $path -in @(Get-PimManagerAccessPackageRoutePaths)) {
+            $script:lastHeartbeat = Get-Date
+            $apr = Invoke-PimManagerAccessPackageRoute -Path $path -Method $method -Body $(if ($method -eq 'POST') { Read-RequestJson -Request $req } else { $null })
+            Write-JsonResponse -Response $resp -Status ([int]$apr.status) -Body $apr.body
+            return [int]$apr.status
+        }
         if ($path -in @(Get-PimManagerSettingsRoutePaths) -and $method -in @('GET', 'PUT')) {
             $script:lastHeartbeat = Get-Date
             $lsr = Invoke-PimManagerSettingsRoute -Path $path -Method $method -Body $(if ($method -eq 'PUT') { Read-RequestJson -Request $req } else { $null })
@@ -20204,8 +20293,20 @@ function Handle-Request {
             $__f = Invoke-PimManagerExistingAccountLookup -Upn $__lu
             $__st = if ($__f.found) { 200 } elseif ("$($__f.error)".Trim()) { 400 } else { 404 }
             Write-JsonResponse -Response $resp -Status $__st -Body ([ordered]@{ found = [bool]$__f.found; upn = "$($__f.upn)"; displayName = "$($__f.displayName)"
+                source = "$($__f.source)"   # synced from AD | cloud | not known
+                note = $(if ($__f.found) { 'PIM changes nothing on this account and the hybrid worker never touches it -- it gives the account delegations only.' } else { '' })
                 error = $(if ($__f.found) { '' } elseif ("$($__f.error)".Trim()) { "$($__f.error)" } else { Get-PimExistingAccountNotFoundText -Upn $__lu }) })
             return $__st
+        }
+        # NO-OVERWRITE (owner 2026-11-12): before Create admin (a normal type) commits, the generated UPN is checked with one
+        # exact read -- create / adopt (PIM's) / blocked (exists, not PIM's: offer "existing account"). Read-only; Admin role.
+        if ($path -eq '/api/admin-accounts/upn-check' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required.' }; return 403 }
+            $__cu = "$($req.QueryString['upn'])".Trim()
+            if ($__cu -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'upn (name@domain) is required' }; return 400 }
+            Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerAdminUpnCheck -Upn $__cu)
+            return 200
         }
         # REQ-ADM-REIMPORT-1 (operator 2026-09-27): the unmanaged admin accounts (the engine's report) and, per account, what
         # IMPORT would stage -- its definition row read from the account itself + the rows that keep its live memberships
@@ -23164,6 +23265,12 @@ function Handle-Request {
             }
             $adBody = Read-RequestJson -Request $req
             $adName = "$($adBody.name)".Trim(); $adId = "$($adBody.objectId)".Trim()
+            # ACCESS PACKAGES LOCK (owner 2026-11-12 "new groups locked for access packages"): a name DEFINED FOR an access package
+            # (the AccessPackage column) is only ever the group PIM Manager created for it. Adopting another group under it is refused.
+            if ((Get-Command Test-PimManagerAccessPackageAdoptLocked -ErrorAction SilentlyContinue) -and (Test-PimManagerAccessPackageAdoptLocked -Name $adName)) {
+                Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; locked = $true; error = "'$adName' is the name of an access package group. Only the group PIM Manager created for the package is used; another group is never adopted under that name. Rename or delete the other group in Entra ID." }
+                return 409
+            }
             try {
                 $adLive = ''
                 if ($adId -match '^[0-9a-fA-F-]{36}$') { try { $adLive = "$((Invoke-PimGraph -Path "/groups/$adId`?`$select=id,displayName").displayName)" } catch { $adLive = '' } }
@@ -23216,6 +23323,12 @@ function Handle-Request {
             if (-not $gidIn -or -not $gnIn) {
                 Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'groupId and groupName are required. Nothing was queued.' }
                 return 400
+            }
+            # ACCESS PACKAGES LOCK (owner 2026-11-12): a group named '-AP' is an access package group -- it is retired only with its
+            # package (Access > Access packages), never deleted from the drift page. In doubt: nothing is queued.
+            if ((Get-Command Test-PimManagerAccessPackageLockedName -ErrorAction SilentlyContinue) -and (Test-PimManagerAccessPackageLockedName -Name $gnIn)) {
+                Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; locked = $true; error = "'$gnIn' is an access package group. It is removed only by retiring its access package, never from the drift page. Nothing was queued." }
+                return 409
             }
             $cs = (Get-PimManagerStoreCs)
             if (-not $cs -or -not (Get-Command Add-PimSqlQueueChangeUnlessPending -ErrorAction SilentlyContinue)) {

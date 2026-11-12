@@ -461,6 +461,28 @@ function Get-PimAdminLifecycleStore {
     return [pscustomobject]@{ ok = $ok; map = $map; reason = $why }
 }
 
+function Get-PimAdminCreatedByPimMap {
+    # NO-OVERWRITE (owner 2026-11-12): PIM's own record of the admin accounts it CREATED (pim.Settings
+    # 'AdminAccountsCreatedByPim': UPN lower-case -> { id; createdUtc }), written by Admins.ApplyCreate after its POST /users.
+    # An unreadable record = empty (the name rule then decides alone). Never throws.
+    try { $s = Get-PimAdminLifecycleStore -Name 'AdminAccountsCreatedByPim'; if ($s.ok -and $s.map -is [hashtable]) { return $s.map } } catch { }
+    return @{}
+}
+
+function Add-PimAdminCreatedByPim {
+    # NO-OVERWRITE: remember that THIS install created the account (best-effort; never fails the create).
+    param([string]$Upn, [string]$Id = '')
+    $u = "$Upn".Trim().ToLowerInvariant()
+    if (-not $u) { return }
+    try {
+        $s = Get-PimAdminLifecycleStore -Name 'AdminAccountsCreatedByPim'
+        if (-not $s.ok) { return }
+        $m = $s.map
+        $m[$u] = @{ id = "$Id"; createdUtc = [datetime]::UtcNow.ToString('o') }
+        [void](Save-PimAdminLifecycleStore -Name 'AdminAccountsCreatedByPim' -Map $m)
+    } catch { Write-Verbose "AdminAccountsCreatedByPim not recorded for ${u}: $($_.Exception.Message)" }
+}
+
 function Save-PimAdminLifecycleStore {
     # Returns $true only when the write reached the store.
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][hashtable]$Map)
@@ -896,6 +918,31 @@ function New-PimAdminsProvider {
                     $nu = "$($one.userPrincipalName)".Trim().ToLowerInvariant(); if ($nu) { $liveUpnSeen[$nu] = $true }
                 }
             }
+            # 🔒 NO-OVERWRITE (owner 2026-11-12: "we must not impact overwrite existing"). An account a NORMAL row names that
+            # matches no admin name of this install, is not a central admin and is not in PIM's own record of the accounts
+            # it created is NOT PIM's: it is taken out of LIVE (so it is never PATCHed, enabled, disabled or deleted) and its
+            # row's create is refused with one plain line (ApplyCreate, ctx 'adminsForeign'). To give such a person
+            # delegations, the row is marked AdminType=existing-account.
+            $__foreign = @{}
+            if ($addedByRow.Count -and (Get-Command Test-PimAdminRowAccountIsForeign -ErrorAction SilentlyContinue)) {
+                $__created = Get-PimAdminCreatedByPimMap
+                $__rowByUpn = @{}
+                foreach ($d in @($ctx['adminsDesiredAll'])) { if ($null -eq $d) { continue }; $__du = "$(Get-PimRowProp -Row $d -Names @('UserPrincipalName','userPrincipalName','UPN','upn'))".Trim().ToLowerInvariant(); if ($__du -and -not $__rowByUpn.ContainsKey($__du)) { $__rowByUpn[$__du] = $d } }
+                foreach ($u in $addedByRow) {
+                    $__d = $__rowByUpn["$u".Trim().ToLowerInvariant()]
+                    if ($null -eq $__d) { continue }
+                    if (Test-PimAdminRowAccountIsForeign -Row $__d -Upn $u -CreatedByPim $__created) {
+                        $__foreign[(Get-PimAdminRowKey -Row ([pscustomobject]@{ UserPrincipalName = $u }))] = $u
+                        Write-Host ("    [admins] {0}" -f (Get-PimAdminForeignAccountText -Upn $u)) -ForegroundColor DarkYellow
+                    }
+                }
+            }
+            $ctx['adminsForeign'] = $__foreign
+            if ($__foreign.Count) {
+                $__keep = New-Object System.Collections.Generic.List[object]
+                foreach ($lr in $rows) { if (-not $__foreign.ContainsKey((Get-PimAdminRowKey -Row $lr))) { [void]$__keep.Add($lr) } }
+                $rows = $__keep
+            }
             $live = $rows.ToArray()
             # Structural assertion: both sides of the diff must be the same population.
             # If anything non-admin slipped through (a server-side filter that silently
@@ -997,6 +1044,14 @@ function New-PimAdminsProvider {
                 Write-Host ("    [skip] {0}: NOT created -- {1}" -f $item.key, (Get-PimExistingAccountNotFoundText -Upn $__xu)) -ForegroundColor DarkYellow
                 return [pscustomobject]@{ pimApplied = $false; reason = (Get-PimExistingAccountNotFoundText -Upn $__xu) }
             }
+            # NO-OVERWRITE (owner 2026-11-12): the row names an account that already exists and is not PIM's (GetLive took it
+            # out of the live set) -- nothing is POSTed or PATCHed, one plain line.
+            $__fk = Get-PimAdminRowKey -Row $item.desired
+            if ($ctx -and $ctx['adminsForeign'] -is [hashtable] -and $__fk -and $ctx['adminsForeign'].ContainsKey($__fk)) {
+                $__ft = Get-PimAdminForeignAccountText -Upn "$($ctx['adminsForeign'][$__fk])"
+                Write-Host ("    [skip] {0}: {1}" -f $item.key, $__ft) -ForegroundColor DarkYellow
+                return [pscustomobject]@{ pimApplied = $false; reason = $__ft }
+            }
             $__dec = Get-PimAdminStatusDecision -Row $item.desired
             if ($__dec.blocksCreate) {
                 Write-Host ("    [skip] {0}: NOT created -- {1}" -f $item.key, $__dec.reason) -ForegroundColor DarkYellow
@@ -1046,6 +1101,8 @@ function New-PimAdminsProvider {
             foreach ($__k in @($__attrs.Keys)) { if ($__k -ne 'displayName') { $body[$__k] = $__attrs[$__k] } }
             $u = Invoke-PimGraph -Method POST -Path '/users' -Body $body
             $body = $null
+            # NO-OVERWRITE: PIM's own record of the accounts it created -- the marker that keeps them PIM's whatever the name
+            Add-PimAdminCreatedByPim -Upn $upn -Id "$($u.id)"
             if (Get-Command Add-PimContextObject -ErrorAction SilentlyContinue) { Add-PimContextObject -Kind User -Object $u }   # incremental cache
             Write-PimAdminLifecycleAudit -Action 'account.create' -Target $upn -After @{ displayName = $disp; attributes = @($__attrs.Keys); platform = 'ID'; transport = 'rest' }
             # new-admin notification (best-effort) -> the ONE recipient rule (Get-PimAdminMailRecipient,
@@ -1083,6 +1140,11 @@ function New-PimAdminsProvider {
             # revoke, no delete of an existing office account, whatever its row says.
             if (Test-PimAdminIsExistingAccount -Row $d) {
                 return [pscustomobject]@{ pimApplied = $false; reason = 'existing account (office user) -- PIM manages its delegations only, never the account' }
+            }
+            # NO-OVERWRITE: defence in depth (GetLive already took such an account out of the live set)
+            $__fk2 = Get-PimAdminRowKey -Row $l
+            if ($ctx -and $ctx['adminsForeign'] -is [hashtable] -and $__fk2 -and $ctx['adminsForeign'].ContainsKey($__fk2)) {
+                return [pscustomobject]@{ pimApplied = $false; reason = (Get-PimAdminForeignAccountText -Upn "$($l.userPrincipalName)") }
             }
             $dec = Get-PimAdminStatusDecision -Row $d
             $on = Test-PimAdminValueTrue $l.accountEnabled
@@ -1838,6 +1900,8 @@ function Get-PimGroupDefinitionRows {
                 Lifecycle             = $life
                 # §100.6: provenance (MSP | Local/empty) -- Get-PimTagToGroupName lets the managing tenant's definition win.
                 Owner                 = (Get-PimRowProp -Row $r -Names @('Owner'))
+                # Access packages (owner 2026-11-12): the package a NEW, dedicated group was created for -- the lock (PIM-AccessPackages.ps1).
+                AccessPackage         = (Get-PimRowProp -Row $r -Names @('AccessPackage'))
                 SourceEntity          = $e
             })
         }
@@ -9340,6 +9404,12 @@ function New-PimGroupRetirementProvider {
                         Write-Warning "  [GroupRetirement] '$($r.GroupName)' does not match the engine naming prefix ($($prefixes -join ', ')) -- refusing to retire a group the engine may not own."
                     }
                     $x.complete = $true; $x.note = 'not engine-owned (prefix)'; [void]$live.Add($x); continue
+                }
+                # ACCESS PACKAGES (owner 2026-11-12 "new groups locked for access packages"): a group created for a package is retired only
+                # with its package -- while a defined package (not Action=Remove) still delivers it, or that cannot be read, nothing is deleted.
+                if ((Get-Command Test-PimAccessPackageGroupStillPackaged -ErrorAction SilentlyContinue) -and (Test-PimAccessPackageGroupStillPackaged -GroupName "$($r.GroupName)")) {
+                    $x.blocked = 'the group was created for an access package that still delivers it -- retire the access package first (Access > Access packages); the group is locked to it'
+                    [void]$live.Add($x); continue
                 }
                 $gid = Resolve-PimLiveGroupIdByName $r.GroupName
                 if (-not $gid) {

@@ -313,7 +313,18 @@ function Get-PimQueueActionExistingAccountRefusal {
     if ($null -eq $rows) { return $null }
     $ex = @{}
     foreach ($r in $rows) { if (Test-PimAdminIsExistingAccount -Row $r) { $u = Get-PimExistingAccountRowUpn -Row $r; if ($u) { $ex[$u.ToLowerInvariant()] = $true } } }
-    if ($ex.Count -eq 0) { return $null }
+    # NO-OVERWRITE (owner 2026-11-12): a NORMAL row naming an account PIM did not create (no admin name of this install, not
+    # central, not in PIM's record of created accounts) -- its credentials and sessions are not PIM's to change either.
+    $foreign = @{}
+    if (Get-Command Test-PimAdminRowAccountIsForeign -ErrorAction SilentlyContinue) {
+        $created = $null; if (Get-Command Get-PimAdminCreatedByPimMap -ErrorAction SilentlyContinue) { try { $created = Get-PimAdminCreatedByPimMap } catch { $created = $null } }
+        foreach ($r in $rows) {
+            if ($null -eq $r -or (Test-PimAdminIsExistingAccount -Row $r)) { continue }
+            $fu = ''; foreach ($n in @('UserPrincipalName', 'userPrincipalName')) { if ($r -is [System.Collections.IDictionary]) { if ($r.Contains($n)) { $fu = "$($r[$n])".Trim() } } elseif ($r.PSObject.Properties[$n]) { $fu = "$($r.$n)".Trim() }; if ($fu) { break } }
+            if ($fu -and (Test-PimAdminRowAccountIsForeign -Row $r -Upn $fu -CreatedByPim $created)) { $foreign[$fu.ToLowerInvariant()] = $fu }
+        }
+    }
+    if ($ex.Count -eq 0 -and $foreign.Count -eq 0) { return $null }
     $upn = "$($Payload.userPrincipalName)".Trim()
     if (-not $upn -and "$($Payload.userId)".Trim() -and $Graph) {
         try { $uo = & $Graph 'GET' ("/users/$("$($Payload.userId)".Trim())?`$select=id,userPrincipalName") $null; $upn = "$($uo.userPrincipalName)".Trim() } catch { $upn = '' }
@@ -323,6 +334,10 @@ function Get-PimQueueActionExistingAccountRefusal {
         $what = if ($type -eq 'tap-reset') { 'issues it no Temporary Access Pass' } else { 'never revokes its sign-in sessions' }
         return [pscustomobject]@{ ok = $false; terminal = $true; verification = 'none'; existingAccount = $true
             detail = "$type REFUSED -- nothing was changed: '$upn' is an existing account (office user). PIM manages its delegations only and $what." }
+    }
+    if ($upn -and $foreign.ContainsKey($upn.ToLowerInvariant())) {
+        return [pscustomobject]@{ ok = $false; terminal = $true; verification = 'none'; existingAccount = $true
+            detail = "$type REFUSED -- $(Get-PimAdminForeignAccountText -Upn $upn)" }
     }
     return $null
 }

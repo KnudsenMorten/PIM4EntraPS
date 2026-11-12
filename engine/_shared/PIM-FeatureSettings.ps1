@@ -74,8 +74,9 @@ function Get-PimFeatureSettingCatalog {
         [ordered]@{ name = 'DiscoveryAutoImportPowerBi'; type = 'bool'; default = $false; inMenu = $false; group = 'discovery'; readBy = 'reader'; fromStore = $false; fromEnvironment = $false }
         [ordered]@{ name = 'DiscoveryAutoImportRules';   type = 'json'; default = @();    inMenu = $false; group = 'discovery'; readBy = 'reader'; fromStore = $false; fromEnvironment = $false }
         # Entra Access Packages (owner 2026-11-09: on by default, acts only when a package is defined). Read by
-        # Test-PimAccessPackagesEnabled. inMenu = $false until the Manager screens exist: a store row or the process environment turns it off.
-        [ordered]@{ name = 'AccessPackagesEnabled';      type = 'bool'; default = $true;  inMenu = $false; group = 'groups';    readBy = 'reader' }
+        # Test-PimAccessPackagesEnabled. inMenu = $true since the Manager screens exist (Access > Access packages, 2026-11-12): a SuperAdmin
+        # switches it under Settings > Approvals & policy > Groups. OFF hands every package group's members back to the engine (owner 2026-11-10).
+        [ordered]@{ name = 'AccessPackagesEnabled';      type = 'bool'; default = $true;  inMenu = $true;  group = 'groups';    readBy = 'reader' }
     )
     foreach ($e in $all) {
         foreach ($k in @('readMin', 'readMax', 'min', 'max', 'unit', 'format', 'itemPattern', 'maxItems', 'refuse')) { if (-not $e.Contains($k)) { $e[$k] = $null } }

@@ -53,6 +53,7 @@ function Get-PimSqlAccessCatalog {
             & $g @('SELECT') 'SCHEMA::platform'
             & $g @('EXECUTE') 'pim.usp_AccessFacts'               # SETUPSTEPS-TRUTH (a): the heartbeat's supportSqlAccess dbUser
             & $g @('EXECUTE') 'pim.usp_RefreshStatistics'         # framework 12.27 SQL-STATS: after the engine run / tenant cache / snapshot (EXECUTE only, never ALTER)
+            & $g @('EXECUTE') 'pim.usp_DatabaseStats'             # framework 12.27 point 5 SQL-STATS-PROOF: the heartbeat's Database read (EXECUTE AS OWNER; no VIEW DATABASE STATE on the engine)
         )
         pim_updater = @(
             & $g $crud 'SCHEMA::pim'

@@ -263,36 +263,92 @@ function Get-PimMailSendDenialMessage {
     return ("mail send DENIED as {0}: this identity has no Exchange 'Application Mail.Send' assignment for the sender mailbox '{1}' (sending is granted per mailbox by Exchange RBAC for Applications -- do NOT grant tenant-wide Graph Mail.Send). {2} Error: {3}" -f $who, $Sender, $fix, $first)
 }
 
+function Test-PimMailHasInstallKey {
+    <#
+      MAIL-ENV: does this install HAVE an Invardia install key it may USE? The product's own resolver
+      (Resolve-PimInvardiaInstallKey: the Container Apps secret PIM_UPLINK_KEY, else the claimed key in pim.Settings, '' for a
+      Community install whose user said no) when this process loaded it; else the same rule inline. -GetSetting may be $null
+      (no store): then only PIM_UPLINK_KEY counts. Never throws. The key itself never leaves this function.
+    #>
+    param([AllowNull()][scriptblock]$GetSetting = $null)
+    try {
+        if (Get-Command Resolve-PimInvardiaInstallKey -ErrorAction SilentlyContinue) { return [bool]"$(Resolve-PimInvardiaInstallKey -GetSetting $GetSetting)".Trim() }
+        if ("$env:PIM_UPLINK_KEY".Trim()) { return $true }
+        if (-not $GetSetting) { return $false }
+        $c = $null; try { $c = & $GetSetting 'InvardiaConnect'; if ($c -is [string] -and $c.Trim().StartsWith('{')) { $c = $c | ConvertFrom-Json } } catch { $c = $null }
+        if ($c -and $c -isnot [string] -and $c.PSObject.Properties['connect'] -and $c.connect -eq $false) { return $false }
+        $k = ''; try { $k = "$(& $GetSetting 'InvardiaInstallKey')".Trim() } catch { $k = '' }
+        return [bool]($k -match '^inv-[A-Za-z0-9_-]{20,100}$')
+    } catch { return $false }
+}
+
+function Get-PimMailTenantNameKnown {
+    <# MAIL-ENV: the tenant display name this process knows -- $global:PIM_TenantName, else the engine's tenant cache 'tenant-org'
+       (Graph organization, written by the tenant-cache job). '' when neither. Never throws. #>
+    $tn = "$($global:PIM_TenantName)".Trim()
+    if ($tn) { return $tn }
+    try {
+        if (Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue) {
+            $o = Get-PimTenantCacheEntry -Kind 'tenant-org' -WarningAction SilentlyContinue
+            if ($o) { foreach ($p in 'tenantName', 'displayName') { if ($o.PSObject.Properties[$p] -and "$($o.$p)".Trim()) { return "$($o.$p)".Trim() } } }
+        }
+    } catch { }
+    return ''
+}
+
 function Get-PimMailEnvironmentInfo {
     <#
-      MAIL-1: what names THIS environment in a mail -- @{ name; tenantName; tenantId; version; portal }. name = the
-      environment name ($global:PIM_EnvironmentName, else Get-PimEnvironmentDisplayName: Invardia's cached name, else
-      pim.Settings 'EnvironmentName' -- PIM 100.70), else the
-      tenant name, else the tenant id -- never "this tenant". Read once per process; never throws (a mail is never blocked).
+      MAIL-1 + MAIL-ENV (framework 12.11a, owner 2026-11-12 "owner mails name environments" -- "[PROD]" alone did not say
+      which of ~15 installs sent a mail): what names THIS environment in a mail --
+      @{ name; displayName; tag; tenantName; tenantId; version; portal; source }.
+        displayName (= name)  Resolve-PimMailEnvironmentName: $global:PIM_EnvironmentName, else Invardia's cached displayName
+                              (pim.Settings 'InvardiaEnvironment', written by the uplink job with the install key -- the last
+                              good value is kept when Invardia is unreachable) ONLY when the install has a key, else the
+                              configured 'EnvironmentName', else the tenant name, else "tenant <id>" -- never empty.
+        tag                   the configured 'EnvironmentName' ("PROD") when the display name is something else.
+      NO network call here: with no install key nothing Invardia sent is used and nothing is asked. Re-read at most every
+      10 minutes per process (a long-running Manager sees a rename); never throws (a mail is never blocked).
     #>
     param([string]$PortalBase = '')
-    if (-not $script:PimMailEnvInfo) {
-        $name = "$($global:PIM_EnvironmentName)".Trim()
-        if (-not $name -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) {
-            # PIM 100.70 / framework 8.14: Invardia's cached name (pim.Settings 'InvardiaEnvironment') first, else the configured
-            # 'EnvironmentName' -- Get-PimEnvironmentDisplayName; DISPLAY only (the subject), never a key.
+    $fresh = $false
+    if ($script:PimMailEnvInfo) {
+        $fresh = $true
+        try { if ($script:PimMailEnvInfoAt -and ([datetime]::UtcNow - $script:PimMailEnvInfoAt).TotalMinutes -ge 10) { $fresh = $false } } catch { }
+    }
+    if (-not $fresh) {
+        $inv = $null; $cfg = $null; $getS = $null
+        if ((Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) {
             try {
                 $cs = Get-PimSqlSettingsConnectionString
                 if ($cs) {
-                    $envGet = { param($n) Get-PimSqlSetting -ConnectionString $cs -Name $n }
-                    if (Get-Command Get-PimEnvironmentDisplayName -ErrorAction SilentlyContinue) { $name = "$(Get-PimEnvironmentDisplayName -GetSetting $envGet)".Trim() }
-                    else { $v = & $envGet 'EnvironmentName'; if ($v -is [string]) { $name = $v.Trim() } elseif ($v -and $v.PSObject.Properties['name']) { $name = "$($v.name)".Trim() } }
+                    # a PLAIN scriptblock (Test-PimHybridWorker L19): it reads $cs through dynamic scope; a closure could not see Get-PimSqlSetting
+                    $getS = { param($n) Get-PimSqlSetting -ConnectionString $cs -Name $n }
+                    try { $inv = & $getS 'InvardiaEnvironment' } catch { $inv = $null }
+                    try { $cfg = & $getS 'EnvironmentName' } catch { $cfg = $null }
                 }
-            } catch { }
+            } catch { $getS = $null }
         }
-        $tn = "$($global:PIM_TenantName)".Trim(); $tid = "$($global:PIM_TenantId)".Trim()
+        $hasKey = Test-PimMailHasInstallKey -GetSetting $getS
+        $tn = Get-PimMailTenantNameKnown; $tid = "$($global:PIM_TenantId)".Trim()
         $ver = ''
         try { $vf = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'VERSION'; if (Test-Path -LiteralPath $vf) { $ver = "$(Get-Content -Raw -LiteralPath $vf)".Trim() } } catch { }
-        # owner 2026-10-13 (a mail tagged with a bare tenant GUID: "we cannot use this to anything. must be environment
-        # name"): the environment NAME first; a tenant id is only the last resort, and then SAID to be one.
-        $script:PimMailEnvInfo = @{ name = $(if ($name) { $name } elseif ($tn) { $tn } elseif ($tid) { "tenant $tid" } else { '' }); tenantName = $tn; tenantId = $tid; version = $ver }
+        $res = $null
+        if (Get-Command Resolve-PimMailEnvironmentName -ErrorAction SilentlyContinue) {
+            try { $res = Resolve-PimMailEnvironmentName -Override "$($global:PIM_EnvironmentName)" -Invardia $inv -HasInstallKey $hasKey -Configured $cfg -TenantName $tn -TenantId $tid } catch { $res = $null }
+        }
+        if (-not $res) {
+            # PIM-EnvironmentName.ps1 not loaded: the old order -- the environment NAME first, a tenant id only as the last
+            # resort and then SAID to be one (owner 2026-10-13) -- and never empty
+            $n = "$($global:PIM_EnvironmentName)".Trim(); if (-not $n -and $cfg -is [string]) { $n = $cfg.Trim() }
+            $res = @{ displayName = $(if ($n) { $n } elseif ($tn) { $tn } elseif ($tid) { "tenant $tid" } else { 'Unnamed environment' }); tag = ''; tenantName = $tn; tenantId = $tid; source = 'fallback' }
+        }
+        $script:PimMailEnvInfo = @{ name = "$($res.displayName)"; displayName = "$($res.displayName)"; tag = "$($res.tag)"; tenantName = "$($res.tenantName)"; tenantId = "$($res.tenantId)"; version = $ver; source = "$($res.source)" }
+        $script:PimMailEnvInfoAt = [datetime]::UtcNow
     }
-    $i = @{} + $script:PimMailEnvInfo; $i['portal'] = "$PortalBase".Trim()
+    $i = @{} + $script:PimMailEnvInfo
+    if (-not "$($i['displayName'])".Trim()) { $i['displayName'] = "$($i['name'])" }
+    if (-not $i.ContainsKey('tag')) { $i['tag'] = '' }
+    $i['portal'] = "$PortalBase".Trim()
     return $i
 }
 
@@ -543,12 +599,17 @@ function Send-PimNotifyMail {
     # the footer" -- a hold mail said only "this tenant"): EVERY mail names its environment, at this one chokepoint -- the
     # subject starts with it and the footer carries environment, tenant name + id, PIM Manager version and the link.
     $envInfo = Get-PimMailEnvironmentInfo -PortalBase "$($portal.base)"
+    $envFirstLine = ''
     # Framework §12.11a MAIL-3 (CR6): EVERY subject, here at the one chokepoint -- "[<environment>] <severity word: >what
     # happened [<ticket>] [PIM Manager]", max 120 characters; the old [..] tags ("[PIM Alert]", "[PIM Discovery]") dropped,
     # never prefixed twice. The alert mail's severity comes from its model, a template mail's from its type / MailSeverity.
     if (Get-Command Get-PimMailSubjectLine -ErrorAction SilentlyContinue) {
         $sevS = if ($alertModel) { "$($alertModel.severity)" } elseif (Get-Command Get-PimMailTypeSeverity -ErrorAction SilentlyContinue) { Get-PimMailTypeSeverity -Type $Type -Tokens $Tokens } else { '' }
-        $r.Subject = Get-PimMailSubjectLine -EnvironmentName $envInfo.name -What "$($r.Subject)" -Severity $sevS -Ticket "$($Tokens['Ticket'])"
+        # MAIL-ENV (framework 12.11a): "[<tag>] <display name>: ..." -- the prefix comes from Get-PimMailEnvironmentPrefix, and the
+        # body's FIRST line names the same display name (+ the tenant) -- Add-PimMailEnvironmentFirstLine, below the footer
+        $mailWhat = "$($r.Subject)"
+        $r.Subject = Get-PimMailSubjectLine -EnvironmentName "$($envInfo.tag)" -DisplayName "$($envInfo.displayName)" -TenantId "$($envInfo.tenantId)" -What $mailWhat -Severity $sevS -Ticket "$($Tokens['Ticket'])"
+        $envFirstLine = Get-PimMailSubjectLine -EnvironmentName "$($envInfo.tag)" -DisplayName "$($envInfo.displayName)" -TenantId "$($envInfo.tenantId)" -What $mailWhat -Severity $sevS -Ticket "$($Tokens['Ticket'])" -Part firstLine
     }
     # StartsWith, never -like: '[...]' is a wildcard character SET to -like ("[Contoso]*" matched "CUSTOM ...")
     elseif ($envInfo.name -and -not "$($r.Subject)".StartsWith("[$($envInfo.name)]", [System.StringComparison]::OrdinalIgnoreCase)) { $r.Subject = "[$($envInfo.name)] $($r.Subject)" }
@@ -557,13 +618,21 @@ function Send-PimNotifyMail {
     if ($envInfo.name -and $r.BodyHtml -notmatch 'class="pim-env-footer"') {
         $enc = { param($v) [System.Net.WebUtility]::HtmlEncode("$v") }
         $foot = '<p class="pim-env-footer" style="margin:22px 0 0 0;padding-top:8px;border-top:1px solid #d0d7de;font-family:''Segoe UI'',Helvetica,Arial,sans-serif;font-size:12px;color:#57606a;">' +
-                'Environment: <b>' + (& $enc $envInfo.name) + '</b>' +
+                'Environment: <b>' + (& $enc $envInfo.name) + '</b>' + $(if ("$($envInfo.tag)".Trim()) { ' [' + (& $enc $envInfo.tag) + ']' } else { '' }) +
                 $(if ($envInfo.tenantName -or $envInfo.tenantId) { ' &middot; tenant ' + (& $enc $envInfo.tenantName) + $(if ($envInfo.tenantId) { ' (' + (& $enc $envInfo.tenantId) + ')' } else { '' }) } else { '' }) +
                 $(if ($envInfo.version) { ' &middot; PIM Manager ' + (& $enc $envInfo.version) } else { '' }) +
                 $(if ($envInfo.portal) { ' &middot; <a href="' + (& $enc $envInfo.portal) + '" style="color:#0969da;">' + (& $enc $envInfo.portal) + '</a>' } else { '' }) + '</p>'
         $r.BodyHtml = if ($r.BodyHtml -match '(?i)</body>') { [regex]::Replace($r.BodyHtml, '(?i)</body>', ($foot -replace '\$', '$$$$') + '</body>', 1) } else { $r.BodyHtml + $foot }
-        $r.BodyText = "$($r.BodyText)`r`n`r`n-- Environment: $($envInfo.name)" + $(if ($envInfo.tenantName -or $envInfo.tenantId) { " | tenant $($envInfo.tenantName) ($($envInfo.tenantId))" } else { '' }) +
+        $r.BodyText = "$($r.BodyText)`r`n`r`n-- Environment: $($envInfo.name)" + $(if ("$($envInfo.tag)".Trim()) { " [$($envInfo.tag)]" } else { '' }) + $(if ($envInfo.tenantName -or $envInfo.tenantId) { " | tenant $($envInfo.tenantName) ($($envInfo.tenantId))" } else { '' }) +
                       $(if ($envInfo.version) { " | PIM Manager $($envInfo.version)" } else { '' }) + $(if ($envInfo.portal) { " | $($envInfo.portal)" } else { '' })
+    }
+    # MAIL-ENV (framework 12.11a, owner 2026-11-12): the FIRST line of every body names the environment by its display name
+    # and the tenant by its name ("<display name>: <what happened>" / "Tenant: <name>"); the tenant id is in the footer /
+    # Details for support. Built from the same prefix as the subject (Get-PimMailEnvironmentPrefix).
+    if (-not $envFirstLine -and (Get-Command Get-PimMailSubjectLine -ErrorAction SilentlyContinue)) { $envFirstLine = Get-PimMailSubjectLine -EnvironmentName "$($envInfo.tag)" -DisplayName "$($envInfo.displayName)" -TenantId "$($envInfo.tenantId)" -What "$($r.Subject)" -Part firstLine }
+    if ($envFirstLine -and (Get-Command Add-PimMailEnvironmentFirstLine -ErrorAction SilentlyContinue)) {
+        $efl = Add-PimMailEnvironmentFirstLine -BodyHtml "$($r.BodyHtml)" -BodyText "$($r.BodyText)" -Line $envFirstLine -TenantName "$($envInfo.tenantName)"
+        $r.BodyHtml = $efl.html; $r.BodyText = $efl.text
     }
     # MAIL-2 item 4: the LOGO. A designed mail references it as cid:pim-logo; it travels as an INLINE attachment (the PNG the
     # docs already ship -- SVG is not drawn by Outlook or most webmail). No PNG in this runtime -> the text wordmark takes its

@@ -60,6 +60,7 @@ the alternative was found to fail in practice.
 29. [Talking to Invardia: the licence request and the Invardia support link](#29-talking-to-invardia-the-licence-request-and-the-invardia-support-link)
 30. [Finishing an install: the end-of-install check, alert recipients and install tracking](#30-finishing-an-install-the-end-of-install-check-alert-recipients-and-install-tracking)
 32. [The 2026-10 security redesign: database access, Strict guards, names, mail, sign-in, releases, the manual](#32-the-2026-10-security-redesign-database-access-strict-guards-names-mail-sign-in-releases-the-manual)
+33. [Access packages: new groups, locked to their package](#33-access-packages-new-groups-locked-to-their-package)
 
 ---
 
@@ -891,6 +892,14 @@ what the old Discovery page did and where each part went).
 - **New findings are mailed.** New gaps, orphans, unmanaged bindings, wrong permissions or unmanaged
   privileged groups since the previous report raise the `coverage` alert. The first report is the
   baseline and mails nothing.
+- **Before the import: no orphan mail.** While an install has no group definitions at all (not set up
+  yet, or before its import), every group in the tenant that carries the PIM name pattern is still
+  listed as an orphan group, with the reason "not imported yet (no definitions in this install)"
+  instead of "a leftover of a removed definition?". The page shows one line above the list: "No
+  definitions yet -- these are the tenant's existing PIM-named groups; import or define them". No
+  orphan-group finding is mailed in that state; gaps are mailed as before. The first coverage run after
+  definitions exist is a new baseline and mails nothing; from the next run on only new findings are
+  mailed. A run whose definitions could not be read does not count as that baseline.
 
 **Precondition guard (fail-hard preflight).** Before any provider runs, the entrypoint
 (`Invoke-PimEngineCore.ps1`) verifies the inputs are real and refuses to proceed otherwise —
@@ -948,7 +957,9 @@ file the rows to add, the rows already there, the conflicts (same key, different
 check's problems. `-Apply` adds new rows by key and never deletes; any conflict stops it before the
 first write unless `-OnKeyConflict KeepExisting|Overwrite` is given; afterwards it runs the preview
 again as the read-back. The naming conventions file is parsed first and refused when it contains
-commands, because the importer loads it to read its values. The importer hands its decisions to the
+commands, because the importer loads it to read its values. With `-Apply` it also sets the policies
+of the imported groups and Entra roles to Keep current (see "Moving from version 1" under the policy
+settings). The importer hands its decisions to the
 wrapper through a result hashtable (`$global:PIM_MigrateResultSink`); nothing in how it imports
 depends on it.
 
@@ -1732,6 +1743,36 @@ matches the recognised admin names, and those are not widened for it (the popula
   reached through a nested role group — is allowed and shown as an amber warning on the admin row ("Existing account"
   label + the warning) and as one amber Home line (no number, no dot: only red lines reach the menu badge).
 - The delegation chain is unchanged (user → group); no framework contract changes.
+
+### 6.2b Existing account = Entra only, never the hybrid worker; no overwrite of an account PIM did not create (built 2026-11-12, not released)
+
+- **Entra only.** An existing account may be cloud-only or an on-premises AD user synced to Entra (`onPremisesSyncEnabled`).
+  Both are handled the same way: through the Entra object only, delegations only. The Manager says which it is ("synced
+  from AD" / "cloud" / "not known" when the sync flag cannot be read).
+- **Never the hybrid worker.** No hybrid AD job reads or writes such an account: the account planner (`hybrid-ad-apply`)
+  leaves it out, and the AD group membership sync (`hybrid-ad-sync`, `hybrid-ad-sync-servers`, `hybrid-ad-changes`) never
+  adds, re-adds or removes it in an AD group — not even when someone else put it there. Each pass that meets one writes one
+  plain note: "existing account <upn>: not supported by the hybrid worker -- nothing done in AD". The sync knows them by
+  their UPN, its local part, their UserName and a row's sAMAccountName (`Get-PimExistingAccountHybridKeys`). The other
+  hybrid jobs (`hybrid-ad-groups`, `hybrid-ad-servers`, the AD cleanup) handle groups and servers only, never a user.
+- **Never AD-only.** `TargetPlatform=AD` on an existing account does not make it AD-only: the engine
+  (`Test-PimAdminIsAdOnly`) and the validator run its Entra rules, and the validator warns (PIM-EXIST-002) to set
+  `TargetPlatform=ID`.
+- **No overwrite.** A NORMAL admin row whose UPN names an account that exists and is **not PIM's** is never changed. PIM's
+  = in PIM's own record of the accounts it created (`AdminAccountsCreatedByPim`, written at create), or a central admin
+  (created here by PIM from the managing tenant), or a name the install recognises as an admin's (the recognised starts /
+  endings, or the admin name patterns). Anything else: the Admins scope takes it out of the live set (no PATCH, enable,
+  disable, delete) and refuses the row's create; the REST account writer and a queued TAP reset / session revoke refuse it
+  too — one plain line: "<upn> already exists and was not created by PIM -- not changed; mark it AdminType=existing-account
+  to give it delegations". The validator raises PIM-NAME-002 to an error for such a name, with that fix (a name the install
+  recognises stays a warning; the offline CSV check, which judges by the shipped names, warns).
+- **Create admin checks first.** For a normal type the wizard reads the UPN it is about to create once
+  (`GET /api/admin-accounts/upn-check`): not there = created; there and PIM's = adopted, not created; there and not PIM's =
+  blocked, with the offer to take it as an existing account.
+- **Import.** An existing-account row keeps its AdminType spelling, its exact UPN (a UserName that is a UPN becomes it; a
+  name is never composed for it) and its TargetPlatform; a row without a valid UPN is an error in the pre-import check
+  (CSVIMP-EXIST-001) and is not imported; a delegation that names it by a bare UserName is written with its exact UPN
+  (CSVIMP-EXIST-002). The import writes rows only — never an account, never AD work.
 
 ### 6.3 Per-scope conformance versioning
 
@@ -2991,6 +3032,19 @@ since 2.4.598 **every non-empty change set is held**, whatever its size, until a
 tenant** approves it under Approvals. The approval covers exactly that plan. The same person who chose
 may approve; it is a second, deliberate step. No count, no percentage and no "this policy was never
 changed before" exemption lets a policy write through without that approval.
+
+**Moving from version 1: the import sets the imported policies to Keep current.** While a customer
+moves from version 1, both versions run side by side, and version 2 must never move an Entra role or
+PIM for Groups policy away from what version 1 set. So the version 1 import (with `-Apply`) records a
+choice **per object** for **every setting** of every policy its rows name: the member and the owner
+policy of each group a definition row names, and the policy of each Entra role a role-assignment row
+names. The choice is Keep current by default; it is saved through the same function the Policy
+settings page saves through, and one audit entry records it. A choice already made for that group or
+role and setting is never overwritten, so running the import again never undoes a SuperAdmin's
+decision. `-PolicyChoiceForImported none` records nothing; `recommendation` or `microsoft` needs the
+extra `-ConfirmPolicyChange` and still goes through the approval above. Azure role policies are not
+touched. After version 1 is turned off, the customer chooses the wanted value on the Policy settings
+page (a per-object choice is changed there, or taken back so the type's choice applies).
 
 **MSP.** In a managing tenant, its own choices are published inside the signed set a managed tenant
 already pulls — there is no second transport and no secret. What travels: each choice per type, its
@@ -5197,7 +5251,8 @@ so a read after a large write never waits for a statistics rebuild. After a bulk
 that changed most (sampled, bounded per call and by a time budget, never inside a transaction) through one procedure that
 the job identities may only execute. Switching the setting on and creating the procedure need the database admin, so
 setup and the database job do it; the least-privilege updater does it only when it holds the right, and otherwise leaves
-it to them without a warning. A refusal is a warning, never a failed install or update.
+it to them without a warning. A refusal is a warning, never a failed install or update. A successful refresh records its
+time in the settings store, so the heartbeat's `Database` object can prove statistics are kept fresh (see 29.2).
 
 **The health check reads the latest ready revision (3.0.44).** After a roll, the health check reads the app's
 `latestReadyRevisionName` with one GET. Listing every revision is only a fallback, and an expired paging token restarts
@@ -11523,6 +11578,19 @@ previous cycle started and are still beyond their job's watermark, counted befor
 oldest of them (null when there are none). It is computed from the run history only, carries no job content, and has its
 own switch (`PIM_UPLINK_UPLINKBACKLOG`, on by default). The anonymous heartbeat never carries it.
 
+**Database health on the heartbeat (`Database`, built, not yet released).** With an install key, the heartbeat carries
+`Database { tier, dtu, maxSizeMb, usedMb, peakLogWritePct1h, minutesAtLimit1h, statsAsync, statsStalePct, statsRefreshedUtc }`
+-- the same shape the other products send. It shows the database's service tier (and its DTUs for a DTU tier), its size
+and used space, the highest log-write load and the minutes spent at a resource limit in the last hour, whether statistics
+update asynchronously, the share of the product's statistics that are stale (more changes than 20 % of the rows + 500, the
+same rule the statistics refresh uses) and when statistics were last refreshed successfully after a write. Every key is
+optional: a value the job cannot read is left out, never guessed, and a database that answers nothing sends no `Database`
+at all; the heartbeat itself never fails because of it. The load figures come from a database view that needs a right no
+job identity holds, so the database admin run creates one read-only procedure that returns these numbers (it reads no
+data rows), and the job may only execute it. Until an install's admin run has created it, the job reads what it may
+directly and leaves the load figures out. Its own switch: `PIM_UPLINK_DATABASE` (on by default). The anonymous heartbeat
+never carries it, and a Community install that is not connected to Invardia sends nothing at all.
+
 **Security findings as alert records (`Kind = 'alert'`, 3.0.50).** Three findings also reach Invardia, beside the mail that
 stays the customer's own alarm:
 
@@ -12253,6 +12321,26 @@ One format on every mail, built in one place (`Get-PimMailSubjectLine`): `[<Envi
 needed:> <what> [<ticket>] [PIM Manager]`, at most 120 characters, cut at a word boundary. The severity comes from the
 alert type (a failure: Failed; a guard or an action: Action needed; otherwise Warning).
 
+**Every mail names the environment that sent it** (framework 12.11a MAIL-ENV). One helper builds the environment part of
+every mail (`Get-PimMailEnvironmentPrefix`), and both mail senders -- the notification chokepoint and the access-request
+portal -- use it:
+
+* **Subject:** `[<tag>] <display name>: <what> [PIM Manager]` -- e.g. `[PROD] Example Org - Production: Warning: 4 groups
+  are left over ...`. The tag is the environment name configured in Settings (kept as it always was); the display name
+  follows it. With no separate tag the subject keeps the short form `[<display name>] <what> [PIM Manager]`.
+* **First line of the body:** `<display name>: <what>`, with `Tenant: <tenant name>` under it, in the HTML and the text
+  part. The tenant id is in the footer or the "Details for support" block.
+* **Where the display name comes from** (`Resolve-PimMailEnvironmentName`, first match wins): the install's HANDLE at the
+  vendor portal (e.g. `example-prod`; a display name such as "PROD" alone does not tell installs apart, so the portal's
+  display name follows the handle in brackets only when it says something else -- `[PROD] example-prod: Warning: ...`),
+  read by the hourly uplink job with the install key and cached in the settings
+  store -- when the portal cannot be reached, the last good value is kept; only an install that has an install key uses
+  it. Otherwise the environment name configured in Settings, and when that name is all there is, the tenant's own display
+  name becomes the display name (a bare "PROD" names no install) and the configured name stays the tag. Then the tenant
+  name, then "tenant &lt;id&gt;" (subject only), then "Unnamed environment" -- never empty. A Community install whose
+  user did not connect it makes no call and uses nothing the portal once sent.
+* The mail path itself never calls out: it reads the cache, at most every 10 minutes per process.
+
 ### 32.5 The portal's sign-in and headers
 
 Every response carries Content-Security-Policy (own origin only, `frame-ancestors 'none'`), Strict-Transport-Security
@@ -12271,3 +12359,34 @@ APPROVED, inside named waves, with evidence collected after an engine change **(
 The product's own manual (`tools/pim-manager/manual/`: one page per topic plus `index.json`) ships in every release and
 is the single source of the Pro docs on invardia.com, so the portal and the website show the same text for the
 installed version. The portal's Documentation menu renders it, also on private-network installations **(in build)**.
+
+## 33. Access packages: new groups, locked to their package
+
+People request an access package in Microsoft Entra ID Governance and get **eligible** membership of the package's groups;
+they still activate through PIM as usual. The package decides *who gets onto* the access, PIM decides *how it is used*.
+Both editions **(in build)**.
+
+**New groups only.** A package never uses, binds or renames an existing group. Creating a package (Access > Access packages,
+or the *Create access package* card on Create access) creates **new** group definitions for it: the normal PIM name for the
+group type with `-AP` at the end (a department group *Finance* becomes tag `DEPT-Finance-AP`, name `PIM-DEPT-Finance-AP`),
+and the package's name in the definition's `AccessPackage` column. Each new group is nested into the permission groups it
+grants. A tag or name that is already defined is refused at planning; both markers (the `-AP` name and the package column)
+must be present for the engine to deliver the group.
+
+**Locked to the package.** A package group's members come from the package only: the engine leaves its members to the package
+even before the package is built, an administrator row giving membership of it or a nesting into it is refused at commit and
+flagged by the validation, the access map does not link it, it is never adopted under its name, never queued for deletion from
+the drift page, never renamed or re-tagged, and the group-retirement path leaves it while a defined package still delivers it.
+Switching access packages off hands the members of every package group back to the engine (removals then go through the
+removal budget and the guards). The package column on the definition decides what is locked, never the name alone: an existing
+group whose name happens to end with `-AP` stays an ordinary group.
+
+**Pause on doubt.** A package is paused, with nothing written for it, when an administrator pauses it (even a retirement
+waits), when it names a group that was not created for it, when its `-AP` name is already taken by a group PIM Manager did not
+create, when PIM Manager's record of the groups it created does not name the group, or when the tenant lacks the Entra ID
+Governance licence. The engine records each package's state and reason (active, waiting for its new groups, paused, switched
+off, being retired) and the Access packages page shows it in one line, with the reason behind *More info*.
+
+**Every change is staged.** Create, pause, resume, a policy change (who may request, approval stages, justification, how long
+access lasts, extension, access review) and retire are staged in Pending changes and written only by the normal audited
+commit. On the access map a package is its own box in the people column, linked to its new groups.

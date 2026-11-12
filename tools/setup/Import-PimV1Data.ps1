@@ -30,6 +30,9 @@
        given. The importer also brings over the naming conventions file (the values you changed from the defaults; a
        value already changed in PIM Manager is kept) and, only into a setting that is still empty, the warning
        overrides, exemptions and workload exemptions files of the folder.
+    7. With -Apply, also the policy settings: during the move both versions run, so the policies of the imported groups
+       and Entra roles are set to Keep current, per group / role and setting (-PolicyChoiceForImported). A choice already
+       made in PIM Manager is kept.
 
   Files read from -SourcePath: the PIM entity files (<name>.custom.csv first, else <name>.csv) and
   PIM4EntraPS.NamingConventions.custom.ps1. The engine's state files (*_Delta.csv, *_LastApplied.csv) and files that are
@@ -78,6 +81,14 @@
   Import even though the check found errors in the files (they are listed). Without it -Apply refuses such files.
 .PARAMETER ClientIp
   This machine's public address for the temporary firewall rule. Without it the address is read from api.ipify.org.
+.PARAMETER PolicyChoiceForImported
+  The policy setting choice -Apply records for the policies of the imported groups (member and owner) and Entra roles,
+  every setting, per group / role. keep (default) = Keep current: while PIM version 1 still runs, PIM Manager never
+  changes these policies -- choose on the Policy settings page after version 1 is turned off. none = record nothing.
+  recommendation / microsoft need -ConfirmPolicyChange, and the change still waits for a SuperAdmin to approve it. A
+  choice already made for a group or role is never overwritten. Azure role policies are not touched.
+.PARAMETER ConfirmPolicyChange
+  The confirmation -PolicyChoiceForImported recommendation or microsoft needs.
 
 .EXAMPLE
   .\Import-PimV1Data.ps1 -SourcePath C:\PIM\config -TenantId <tenant id> -SubscriptionId <subscription id>
@@ -115,6 +126,9 @@ param(
     [string]$DefaultDomain = '',
     [switch]$AllowValidationErrors,
     [ValidatePattern('^$|^\d{1,3}(\.\d{1,3}){3}$')][string]$ClientIp = '',
+    # V1-IMPORT-POLICY-KEEP (owner 2026-11-12): the policy choice recorded for the imported groups' and roles' policies.
+    [ValidateSet('keep', 'none', 'recommendation', 'microsoft')][string]$PolicyChoiceForImported = 'keep',
+    [switch]$ConfirmPolicyChange,
     # --- test seams (tests/Test-PimV1Import.ps1); omit them for a real run ---
     [scriptblock]$Arm,
     [scriptblock]$Sql,
@@ -133,6 +147,8 @@ $ErrorActionPreference = 'Stop'
 $script:PimV1ImportLayout = [ordered]@{
     'Migrate-PimToSql.ps1'        = 'tools\setup'
     '_PimSignedIn.ps1'            = 'tools\setup'
+    'PIM-PolicyChoices.ps1'       = 'engine\_shared'
+    'microsoft-defaults.json'     = 'templates\policy'
     'PIM-ChangeQueue.ps1'         = 'engine\_shared'
     'PIM-Rest.ps1'                = 'engine\_shared'
     'PIM-LoopbackAnswer.ps1'      = 'engine\_shared'
@@ -152,7 +168,7 @@ $script:PimV1ImportLayout = [ordered]@{
 }
 # OWNER 2026-11-07 (OPEN-23, §84): the published single file carries NO Pro code -- the managing-tenant (MSP) library
 # engine\msp\PIM-Downlink.ps1 is not in this list or embedded. The check then reports replication as "not computed".
-$script:PimV1ImportPayload = @{}   # BUILD-EMBED: Migrate-PimToSql.ps1, _PimSignedIn.ps1, ../../engine/_shared/PIM-ChangeQueue.ps1, ../../engine/_shared/PIM-Rest.ps1, ../../engine/_shared/PIM-LoopbackAnswer.ps1, ../../engine/_shared/PIM-SqlStore.ps1, ../../engine/_shared/PIM-CsvImportCheck.ps1, ../../engine/_shared/PIM-DateSafe.ps1, ../../engine/_shared/PIM-Naming.ps1, ../../engine/_shared/PIM-PolicyTemplateStore.ps1, ../../engine/_shared/PIM-PolicyBaseline.ps1, ../../engine/_shared/PIM-WorkloadMap.ps1, ../../engine/_shared/PIM-Rings.ps1, ../../engine/_shared/PIM-RoleAssignable.ps1, ../../engine/_shared/PIM-DateExpression.ps1, ../../engine/_shared/PIM-WarningOverrides.ps1, ../../engine/_shared/PIM-AdminExistingAccount.ps1, ../pim-manager/_validator.ps1
+$script:PimV1ImportPayload = @{}   # BUILD-EMBED: Migrate-PimToSql.ps1, _PimSignedIn.ps1, ../../engine/_shared/PIM-PolicyChoices.ps1, ../../templates/policy/microsoft-defaults.json,../../engine/_shared/PIM-ChangeQueue.ps1, ../../engine/_shared/PIM-Rest.ps1, ../../engine/_shared/PIM-LoopbackAnswer.ps1, ../../engine/_shared/PIM-SqlStore.ps1, ../../engine/_shared/PIM-CsvImportCheck.ps1, ../../engine/_shared/PIM-DateSafe.ps1, ../../engine/_shared/PIM-Naming.ps1, ../../engine/_shared/PIM-PolicyTemplateStore.ps1, ../../engine/_shared/PIM-PolicyBaseline.ps1, ../../engine/_shared/PIM-WorkloadMap.ps1, ../../engine/_shared/PIM-Rings.ps1, ../../engine/_shared/PIM-RoleAssignable.ps1, ../../engine/_shared/PIM-DateExpression.ps1, ../../engine/_shared/PIM-WarningOverrides.ps1, ../../engine/_shared/PIM-AdminExistingAccount.ps1, ../pim-manager/_validator.ps1
 # The entity schema the check reads (PIM Manager's own $script:PimCsvBases): only that one statement travels, not the Manager.
 $script:PimV1ImportSchema = ''   # BUILD-EMBED-ASSIGNMENT: ../pim-manager/Open-PimManager.ps1 $script:PimCsvBases
 $script:PimV1SqlApi = '2021-11-01'
@@ -295,6 +311,10 @@ Write-Host ('=' * 78) -ForegroundColor Cyan
 
 # ---- the folder ------------------------------------------------------------------------------------------------------
 if (-not (Test-Path -LiteralPath $SourcePath -PathType Container)) { Stop-V1 "the folder '$SourcePath' does not exist." }
+# V1-IMPORT-POLICY-KEEP (owner 2026-11-12): during the overlap v1 still sets the policies; a changing choice needs its named confirmation.
+if ($PolicyChoiceForImported -in @('recommendation', 'microsoft') -and -not $ConfirmPolicyChange) {
+    Stop-V1 "-PolicyChoiceForImported $PolicyChoiceForImported needs -ConfirmPolicyChange: while v1 still runs this would make v2 change policies v1 set. Leave it out (Keep current) during the overlap, and choose on the Policy settings page after v1 is turned off."
+}
 $src = (Resolve-Path -LiteralPath $SourcePath).Path
 Say "folder: $src"
 foreach ($nf in 'PIM4EntraPS.NamingConventions.custom.ps1', 'PIM4EntraPS.NamingConventions.locked.ps1') {
@@ -446,7 +466,8 @@ if ($reachable) {
 
     # ---- the importer: check + preview (writes nothing) ---------------------------------------------------------------------
     $common = @{ ConfigDir = $src; ConnectionString = $cs; OutputDir = (Join-Path $script:v1Stage 'empty'); MailTemplateDir = (Join-Path $script:v1Stage 'empty')
-                 ForceLocal = [bool]$ForceLocal; NotMspMaster = (-not $script:v1IsMaster) }
+                 ForceLocal = [bool]$ForceLocal; NotMspMaster = (-not $script:v1IsMaster)
+                 PolicyChoiceForImported = $PolicyChoiceForImported; ConfirmPolicyChange = [bool]$ConfirmPolicyChange }
     if ("$DefaultDomain".Trim()) { $common['DefaultDomain'] = "$DefaultDomain".Trim() }
     function Invoke-V1Migrate([hashtable]$Extra, [string]$Title) {
         $global:PIM_MigrateResultSink = @{}
@@ -486,6 +507,8 @@ if ($reachable) {
     $state = @($skipped | Where-Object { $_.status -eq 'state' })
     if ($skipped.Count) { Say ("skipped {0} file(s): {1} engine state file(s) (_Delta / _LastApplied), {2} not PIM data or replaced by a .custom file -- names in the details" -f $skipped.Count, $state.Count, ($skipped.Count - $state.Count)) 'DarkGray' }
     Add-More 'SKIPPED FILES' @($skipped | ForEach-Object { "$($_.file) ($($_.status))" })
+    $pvPc = $pv.sink['policyChoices']
+    if ($pvPc -and "$($pvPc.text)") { Say "policy settings (with -Apply): $($pvPc.text)$(if ("$($pvPc.choice)" -eq 'keep') { ' -- while v1 still runs, PIM Manager never changes these policies; choose on the Policy settings page after v1 is turned off' })" 'DarkGray' }
     if (Test-Path -LiteralPath (Join-Path $src 'PIM4EntraPS.NamingConventions.custom.ps1')) { Say 'naming conventions: PIM4EntraPS.NamingConventions.custom.ps1 -- the values you changed are imported with -Apply (a value already changed in PIM Manager is kept)' 'DarkGray' }
     $errs = @($check.findings | Where-Object { $_.severity -eq 'error' })
     if ($errs.Count) {
@@ -520,6 +543,8 @@ if ($reachable) {
         if ($conf.Count -and -not $PSBoundParameters.ContainsKey('OnKeyConflict')) { Stop-V1 "$($conf.Count) row(s) conflict with what PIM Manager has (listed above). Run again with -OnKeyConflict KeepExisting (PIM Manager's rows stay) or -OnKeyConflict Overwrite (the file's rows replace them)." }
         $ap = Invoke-V1Migrate @{ WhatIf = $false; OnKeyConflict = $OnKeyConflict; AllowValidationErrors = [bool]$AllowValidationErrors } 'IMPORT (the importer)'
         if ($ap.error) { Stop-V1 "the import did not complete: $(("$($ap.error)" -replace '\s+', ' ').Trim()). Each entity is written in one transaction, so a failed one wrote nothing; running it again is safe." }
+        $apPc = $ap.sink['policyChoices']
+        if ($apPc -and "$($apPc.text)") { Say "policy settings: $($apPc.text)" $(if ($apPc.written) { 'Green' } else { 'DarkGray' }) }
         $added = 0; $updated = 0
         foreach ($r in @($ap.sink['report'])) { if ($null -ne $r.added) { $added += [int]$r.added }; if ($null -ne $r.updated) { $updated += [int]$r.updated } }
         # Framework 12.27 SQL-STATS: a bulk import -> refresh the stale pim.* statistics (pim.usp_RefreshStatistics: sampled,
