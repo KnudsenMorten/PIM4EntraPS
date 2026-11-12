@@ -4806,6 +4806,8 @@ function Invoke-PimManagerSafeCommit {
     } catch { Write-Warning "  [commit-watch] $Base committed, but the watcher could not record it: $($_.Exception.Message)" }
     try {
         $__w = if ($txResult -and $txResult.PSObject.Properties['written']) { "$($txResult.written) row(s) written, $($txResult.removed) removed, of $($txResult.rowsAffected)" } else { "$(if ($txResult) { $txResult.rowsAffected }) row(s)" }
+        # §97.1: the apply's SQL work as COUNTS (statements / batches / driver round trips) -- what the bulk-commit test asserts.
+        if ($txResult -and $txResult.PSObject.Properties['commands']) { $__w += "; $($txResult.commands) statement(s) in $($txResult.batches) batch(es), $($txResult.roundTrips) driver round trip(s)" }
         Write-Host ("  [commit] {0}: backup + transactional apply + retention {1} ms ({2})" -f $Base, $__sw.ElapsedMilliseconds, $__w) -ForegroundColor DarkGray
     } catch { }
     # On a MASTER, a committed change to what the publisher ships requests a publish (Request-PimManagerPublishAfterCommit).

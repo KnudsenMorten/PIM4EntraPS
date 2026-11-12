@@ -174,6 +174,8 @@ function Invoke-PimCommitTransaction {
             # §88: what the commit really wrote (only changed rows are written now) and removed.
             if ($null -ne (& $get 'written')) { $result['written'] = [int](& $get 'written') }
             if ($null -ne (& $get 'removed')) { $result['removed'] = [int](& $get 'removed') }
+            # §97.1: how the write went to SQL -- statements / batches / driver round trips (a count, not a clock).
+            foreach ($__n in 'commands', 'batches', 'roundTrips') { if ($null -ne (& $get $__n)) { $result[$__n] = [int](& $get $__n) } }
         }
     } catch {
         $applyErr = "$($_.Exception.Message)"

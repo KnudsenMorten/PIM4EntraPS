@@ -95,6 +95,7 @@ $pimBeat = Start-PimBeat; if ($pimBeat.started -or $pimBeat.reason -match 'could
 . (Join-Path $solRoot 'engine\_shared\PIM-SchemaQuiesce.ps1')    # SCHEMA-QUIESCE-818 (framework 8.18): no database change under a running PIM job
 . (Join-Path $solRoot 'engine\_shared\PIM-SecretsToKeyVault.ps1') # the secrets into the install's own Key Vault (step 2f-ter; writes secrets, never a role)
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateTrack.ps1')      # OPEN-13 / framework 8.8 UPDATE-TRACK: the run's stages to Invardia (best effort)
+. (Join-Path $solRoot 'engine\_shared\PIM-RegistryPrune.ps1')    # IMAGE-PRUNE (framework IMAGE-PATCH-1): the own registry keeps current + previous (step 3b)
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
 # 100.61: the image the as-built converge (2e) left caj-pim-asbuilt on THIS run ('' = it did not converge the job) -- the job
@@ -2320,6 +2321,39 @@ if ("$selfStampDeferred".Trim()) {
 # OPEN-13: health = the Manager reached a healthy running revision (checked by the roll) and every job is on the new build.
 Set-PimUpdTrackStage -Stage 'health' -Message 'the Manager runs a healthy revision; every job is on the new build'
 Send-PimUpdateOutcome -Action 'rolled' -Outcome 'ok' -ToVersion "$($roll.to)"
+
+# ---- 3b. IMAGE-PRUNE (framework IMAGE-PATCH-1, owner 2026-11-12) -- THE INSTALL'S OWN REGISTRY KEEPS CURRENT + PREVIOUS -----
+# Only HERE: after the ok outcome of a roll whose every job is on the new build (the failure paths above exit first), and
+# only when the Manager READS BACK on the target image now. Only the install's own registry (the Manager image's login
+# server), only PIM's repositories; the live images of every app and job are re-read right before anything is deleted.
+# engine/_shared/PIM-RegistryPrune.ps1 has the rules. NEVER changes the outcome or the exit code.
+try {
+    $prMgrImg = ''
+    try { $prApp = Get-PimAcaApp -SubscriptionId $sub -ResourceGroup $rg -Name $managerApp; $prMgrImg = "$(Get-PimAcaAppImage -App $prApp -ContainerName $container)" } catch { $prMgrImg = '' }
+    $prDue = Test-PimRegistryPruneDue -Outcome 'ok' -Healthy $roll.healthy -Held ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') `
+                -ManagerImage $prMgrImg -TargetImage $targetImg -JobsNotRolled $jobFailed -Disable "$($env:PIM_UPDATE_NO_PRUNE)"
+    if (-not $prDue.due) { Say "registry: not pruned -- $($prDue.reason)" 'DarkGray' }
+    else {
+        $prRef = Split-PimImageReference -Image $targetImg
+        # The image this run started on (it is still running). PIM_UPDATE_LAST_GOOD is read from the job's CURRENT setting by
+        # Get-PimRegistryLiveImages -- this process's copy is the value from before this run re-recorded it (3.1.15).
+        $prKeepExtra = @(@{ image = "$selfImageBefore"; by = "$selfJob (the image this update run started on)" }) | Where-Object { "$($_.image)".Trim() }
+        $prune = Invoke-PimRegistryPrune -LoginServer "$($prRef.loginServer)" -ManagerRepository "$($prRef.repository)" -TargetVersion "$($prRef.tag)" `
+                    -Repositories @($script:PimSigninFrontRepository) -PlanOnly:("$($env:PIM_UPDATE_PRUNE_PLAN)".Trim() -eq '1') -ReadLiveImages {
+            $prRes = @(Get-PimAcaApps -SubscriptionId $sub -ResourceGroup $rg) + @(Get-PimAcaJobs -SubscriptionId $sub -ResourceGroup $rg)
+            @(Get-PimRegistryLiveImages -Resources $prRes -LoginServer "$($prRef.loginServer)" -WithSource) + @($prKeepExtra)
+        }
+        foreach ($l in @($prune.lines)) { Say "  $l" 'DarkGray' }
+        Say $prune.line $(if ($prune.skipped) { 'Yellow' } else { 'Cyan' })
+        if ("$csUpd".Trim()) {
+            try {
+                $prRec = [ordered]@{ atUtc = [datetime]::UtcNow.ToString('o'); version = "$($prRef.tag)"; planOnly = [bool]$prune.planOnly; skipped = [bool]$prune.skipped
+                                     kept = [int]$prune.kept; total = [int]$prune.total; deleted = [int]$prune.deleted; failed = [int]$prune.failed; line = "$($prune.line)"; lines = @($prune.lines) }
+                Set-PimSqlSetting -ConnectionString $csUpd -Name 'RegistryPrune' -ValueJson (ConvertTo-Json -InputObject $prRec -Depth 4 -Compress)
+            } catch { Say "  registry: the prune result was not recorded ($((("$($_.Exception.Message)") -split "`n")[0]))" 'DarkGray' }
+        }
+    }
+} catch { Say "registry: not pruned ($((("$($_.Exception.Message)") -split "`n")[0])) -- the update is not affected" 'Yellow' }
 
 # ---- 4. §71.44 -- ONE FOLLOW-UP RUN ON THE NEW UPDATER -------------------------------------------
 # 🔴 This run was executed by the PREVIOUS updater image, so whatever the new release changed in the

@@ -5268,6 +5268,32 @@ the failure catalog tells the two cases apart:
 
 Before 3.0.45 both reached Invardia as an unclassified failure.
 
+**Old images leave the installation's registry (IMAGE-PRUNE, built 2026-11-12, release pending).** The registry's
+vulnerability scan reads every image stored in it, so the images of old releases kept reporting old findings long after
+the installation stopped running them. After a successful update, the updater keeps only the current release's image
+and the one previous release's image in the installation's own registry, per PIM repository (the Manager image and the
+sign-in front image). Rolling back one version uses the previous image; an older rollback builds its image again.
+- *When.* Only after the update succeeded: the Manager passed its health check, every job is on the new build, the
+  installation is not held, and the Manager's image read again at that moment is the new one. A failed, held or
+  rolled-back update prunes nothing.
+- *What stays.* Every image tagged with the current version or a newer one, every image tagged with the previous version
+  (the highest version below the current one, compared as versions: 3.1.10 is newer than 3.1.9), and only what is really
+  in use: an image a container app or job of the installation runs at that moment, or the updater's recorded
+  last-known-good image (read again right before anything is deleted), the platform images of a kept multi-platform
+  image, and images locked against deletion (reported as locked, never unlocked). A setting that only asks for a version
+  does not count as use. Every other image goes, tagged or untagged, whatever its age (3.1.15). Each image kept beyond
+  the current and previous release is listed with its reason: the app or job that uses it, locked, or the kept image it
+  belongs to.
+- *What it never touches.* Any other registry or resource, any repository other than PIM's, and a repository whose current
+  version tag is not there. The sign-in front repository is pruned only when a running container names its version.
+- *Rights.* Deleting uses the updater's existing Contributor right on the registry (it already builds images there). When
+  the identity has no delete right on the registry, the step is skipped with one line and nothing is deleted.
+- *Output.* One line per repository and a total ("registry: kept 2 of 31 images; deleted 29"). Kept and deleted are the
+  count read back after the deletes, so the platform images that leave with a deleted multi-platform image are counted
+  once. The result is stored in the installation's settings (`RegistryPrune`). `PIM_UPDATE_PRUNE_PLAN=1` on the update
+  job reports what would be deleted without deleting; `PIM_UPDATE_NO_PRUNE=1` switches the step off. The step never
+  changes the outcome of the update.
+
 ### 11.7 One-shot "deploy everything" + validation
 
 Standing up — or updating — a whole environment is a SINGLE entry,

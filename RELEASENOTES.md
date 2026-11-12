@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.15 -- 2026-11-12
+
+- The registry clean-up keeps only the current and previous image plus images a running app or job really uses (untagged build leftovers go), says why any extra image is kept, and reports the counts read back.
+
+## 3.1.14 -- 2026-11-12
+
+- After a successful, read-back update the updater keeps only the current and the previous image in the install's own registry (plus every image in use) and deletes the rest, so old images no longer show old vulnerabilities. Two timing-dependent tests now check a fixed condition.
+
 ## 3.1.13 -- 2026-11-12
 
 - Access packages in PIM Manager: Create > Access package, list / detail / pause / resume, and packages in the access map; every package gets NEW groups of its own (name ending -AP), locked to it, and pauses on any doubt -- existing groups are never touched. An install with no definitions yet no longer mails orphan-group warnings (its groups read: not imported yet).
